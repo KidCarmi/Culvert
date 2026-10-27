@@ -77,6 +77,27 @@ everything else is triaged below with a suggested PR and required tests for foll
 > claim its id in a committed placeholder row in this file as its FIRST commit,
 > before any code is written — that is the whole remedy, and it costs one line.
 >
+> **AMENDED 2026-09-25 — the placeholder is NECESSARY BUT NOT SUFFICIENT, and
+> the CHAOS-87 sweep (§49) is the proof.** It did exactly what the paragraph
+> above prescribes: claimed `CHAOS-66` in a committed placeholder row as commit
+> one, before any code. It collided anyway. The reason is the part the remedy
+> never stated: **a placeholder reserves an id only against sweeps that branch
+> AFTER it merges.** The SOCKS5-bind sweep had claimed `CHAOS-66` on 2026-09-12
+> in *its* placeholder, on *its* branch, and merged to main after §49's branch
+> point — so at claim time §49 grepped its own working tree, found the id free,
+> and was correct about the tree and wrong about the world. Two correct
+> placeholders, mutually invisible, because a branch is not a registry.
+>
+> So the rule gains a second half, and it is the half that does the work:
+> **check `origin/main`, not the working tree.** `git fetch origin main && git
+> show origin/main:roadmap/CHAOS-ENGINEERING-REVIEW.md | grep CHAOS-<n>` is the
+> claim-time test; a `grep -rn` over the checkout is not, and neither is a
+> placeholder that will sit unmerged for days. This does not make the
+> placeholder pointless — it is still what lets a colliding sweep prove it
+> claimed first, and it is still what the renumber convention below keys on —
+> it means the placeholder is the RECORD and the origin/main check is the
+> RESERVATION. Doing only the first is what happened here.
+>
 > Both sweeps independently arrived at the same rule, which is the one to
 > follow until the durable fix exists: **an id is rewritable for free right up
 > until its first merge, and needs owner sign-off the moment after — so the
@@ -102,6 +123,28 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-26 — `CHAOS-93` CLAIMED (placeholder, commit one). Domain: the retry
+plane — every loop in the tree that re-attempts a failed operation, asked three
+questions the SIMULATE list puts next to each other: does it WAIT between
+attempts, can it be INTERRUPTED, and does the work survive the attempt?** Id
+claimed in this committed row before any code was written, per the convention
+above. `CHAOS-92` is the highest id merged on `main`; 68, 72, 76, 79/80, 81, 87
+and 88 are still claimed by sweeps open when this one started (68 = PR #1437,
+72 = #1564, 76 = #1633, 79/80 = #1626, 81 = #1494, 87 = #1485, 88 = #1711) and
+89–91 remain held by [the 2026-10-13 round](CHAOS-REVIEW-2026-10-13.md), so this
+sweep took 93 and will not move.
+
+Scope is the three retry/cancellation rows the
+[2026-10-18 sweep](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-18.md)
+verified and deliberately left open as its suggested improvements 4–6 — the
+zero-delay `applyWithRetry`, the feed rounds that discard the scheduler's
+context, and the serial uncancellable alert-retry pass — plus what asking the
+third question (*does the work survive?*) of the alert queue turned up, which
+outranks all three: a pass REMOVES its ready entries from the durable queue
+before delivering any of them, so an ordinary restart discards every
+not-yet-attempted entry in silence. Findings, measurements and gates are
+written up in §57 below.
+
 **2026-10-25 — `CHAOS-92` CLAIMED (placeholder, commit one). Domain: the
 client-supplied request PATH on the unauthenticated data path — the last
 unbounded client-chosen string sitting in front of sinks that retain it.** Id
@@ -119,6 +162,85 @@ tracing headers and `CHAOS-69` bounded the client's authority, but nothing
 bounds `r.URL.Path`, which reaches the process log, a buffered HTML response
 body and the policy decision lines on a stock install. Findings, measurements
 and gates are written up in §53 below.
+
+**2026-10-24 — `CHAOS-101` CLAIMED (placeholder, commit one; renumbered from
+`CHAOS-88`).** Id allocated in this committed line before any code was written,
+per the convention the header above reaches twice independently. It was first
+claimed as `CHAOS-88` (`CHAOS-86` was the highest id written up in this
+register and `CHAOS-87` was held by an open sweep, PR #1485), but `CHAOS-88` was
+also allocated to the open sweep in PR #1564 and `CHAOS-89`–`CHAOS-100` were
+taken or allocated before this merged, so it was renumbered to `CHAOS-101`.
+Only the id moved; the finding, fix and tests are unchanged. Scope: the
+**scan sidecar's own buffer window** (`scan_svc.go` `handleScan`) — the
+process-isolated deployment that the CHAOS-52 runbook recommends as the remedy
+for the in-process scanner's failure modes. Findings, risk matrix and
+verification are written up in [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-24.md).
+
+- **`CHAOS-101` — the scan sidecar answered `clean: true` for a body it had only
+  partially read.** `handleScan` read `LimitReader(body, maxBytes+1)` — the
+  classic overflow probe — and then never looked at the probe byte, so the
+  prefix's verdict was reported as the whole object's. The two scan windows are
+  independent by construction (each process derives `maxScanBufferBytes()` from
+  its own `security.max_scan_mb`), so no code bug is needed: a 20 MiB proxy
+  fleet in front of a sidecar left at the 5 MiB default had scanning silently
+  off past 5 MiB, with no counter, no log and no alert — and the caller's own
+  overflow signal correctly did not fire, because the body fit the CALLER's
+  window. The in-process path has had the signal for this exact event since
+  Finding 4.2 (`logScanLimitExceeded`); the deployment recommended as the
+  *remedy* for the local path's weaknesses was the one without it.
+
+  **The load-bearing lesson is about the fix.** Refusing oversize reads before
+  scanning — the obvious shape, and the first draft — makes the system LESS
+  safe: a body whose malware sits INSIDE the window becomes a 413, which the
+  client (correctly) classifies as a size limit and therefore forwards
+  fail-open, so the one case where the sidecar holds a real block verdict is the
+  case the "safe" check throws away. It would have admitted content the unfixed
+  code blocked. The negative control written before the fix caught it; the
+  verdict now wins and truncation is not reported at all on a block, the same
+  asymmetry `readScanPrefix` documents. Same shape as CHAOS-75, where adding
+  `runGuarded` and nothing else resolved a race the wrong way 10 times out of 10.
+
+  Client side, 413 lands on the LOCAL path's vocabulary (`statScanSkipped`,
+  `scan_skipped`, `Source: "size_limit"`) for the same reason
+  `remoteScanRefused` reuses the timeout vocabulary: it is the same decision.
+  Posture unchanged (fail-open, counted and alerted); refusing the object
+  outright is the safer answer but a posture change for large downloads, left to
+  the owner as the **open half of CHAOS-101**.
+
+This sweep also leaves rows OPEN by attribution rather than fixing them, each
+with file:line evidence in the dated review. Three of the four actively report
+HEALTHY while failing, which is the common thread worth carrying forward:
+
+- **The cluster audit trail is not durable, and the ack claims it is.**
+  `PushAuditEvents` returns `{"ok":true}` for events that land in a 5000-entry
+  in-memory ring (`controlplane.go:279-299`) whose trim is uncounted and which
+  has no file writer anywhere; the DP then clears `audit.pending` permanently
+  (`controlplane_client.go:724`). A CP restart evaporates the centralized trail.
+  The durability was BELIEVED to exist: `controlplane_server.go`'s hang analysis
+  named this handler as one that "appends to a `fileutil.RotatingFile`" — **that
+  false premise is corrected in this PR**, and the sweep's hang conclusion for
+  that handler does not hold. The durable sink is an owner decision (location,
+  retention, backup, cluster sync), the same shape as the open **WK-22**.
+- **A logstore batch-flush failure is log-only, and the gauge keeps claiming it
+  is saving.** `wb.Flush()` discards up to 256 entries with no counter, and the
+  `json.Marshal` branch is a bare `continue` — the branch the audit sibling
+  charges deliberately. `culvert_logstore_available` stays 1 while its own HELP
+  string reads "open **and saving history**"; the record is set once at open and
+  never revisited. Same **ST-8** shape, with the added twist that the metric
+  documents a guarantee the code does not implement.
+- **The flush-phase post-mortem is written into an already-closed sink.** The
+  phase error is logged after `RunAll` returns, and the log closer is the LAST
+  flush hook, so the line naming which durable close failed is accepted by a
+  dead sink and charged to neither `writeErrors` nor `backpressure`. The
+  codebase is half-aware — the completion line was already moved ahead of the
+  flush phase for this reason; the error path was not.
+- **A UT1 tarball yielding zero entries is recorded as a fully successful
+  sync**, and the SaaS feed's **backoff can loosen the cadence ~6×**. Both are
+  asymmetries against siblings that decided the opposite way WITH the reasoning
+  written down and attributed to a prior review — `threatfeed`'s `n == 0` gate
+  (PR #587) and `feedsched.backoffBounds`' floor-and-ceiling clamp (PR #1305).
+  Neither main-side path received the sibling's fix, and neither has a test that
+  could catch it.
 
 **2026-10-23 — `CHAOS-82` sweep (the backup plane: archive publication mode and
 the restore-side encryption trust boundary). Id claimed in this placeholder row
@@ -196,6 +318,26 @@ are claimed by open sweeps. Findings and gates are written up in §47 below.** T
 committed before any code is written — the remedy the header above reaches
 independently after ten collisions, and which §35, §39 and §40 each applied
 first.
+
+**2026-10-15 — `CHAOS-76` CLAIMED (placeholder, commit one). Domain: the
+identity-backend RESULT CACHES (`auth_oidc_flow.go` registry introspection,
+`auth_oidc.go` legacy introspection, `auth_ldap.go` directory bind) as a
+displacement surface — all three evict ONE ARBITRARY LIVE ENTRY at the cap on a
+key space derived entirely from caller-supplied credentials, which is register
+row **AU-3c** exactly, closed by CHAOS-57 in the LOCAL auth cache and never
+ported to its three siblings. Ids 71–75 are held by open or merged sweeps
+(71/72/73 across the DP↔CP and logout sweeps, 74 the category store, 75 the
+release dispatcher), so this sweep takes 76. Claimed in a committed line BEFORE
+any code is written — the remedy the header above reaches twice independently
+after ten collisions, and which §35, §39 and §40 applied before it. Findings and
+gates are written up in §54 below** — written as §41 and renumbered in merge
+order when main was brought in, because `CHAOS-74` (§41/§42), `CHAOS-75` (§43)
+and `CHAOS-71` (§44) had merged first; renumbered again from §45 to §54 when
+main's `CHAOS-78` merged as §45 (§46–§53 are held by open sweeps). Its register
+rows were renumbered from AU-20/AU-21 to AU-30/AU-31 at the same time, and
+again to **AU-67/AU-68** on 2026-10-27, because the identity-revocation sweep
+still open as #1437 holds AU-18…AU-62 and #1564 holds AU-63…AU-66. The id
+`CHAOS-76` did not move: it was still free on main.
 
 **2026-10-11 — `CHAOS-75` sweep (the release-dispatch plane's detached executor
 goroutines). Id claimed in a committed placeholder row as commit one**, per the
@@ -301,6 +443,127 @@ and it is the next free id on main. Findings and gates are written up in §44
 below** — written as §41 and renumbered in merge order when main was brought
 in again, because `CHAOS-74` had merged as §41/§42 and the open `CHAOS-75`
 sweep (#1605) holds §43.
+
+**2026-10-05 — `CHAOS-88` (claimed as `CHAOS-71`, placeholder, commit one; then `CHAOS-72`).
+Domain: the identity-revocation plane on the proxy data path — what deleting or
+disabling an IdP actually revokes (register row **AU-2**, open since the first
+sweep and scored **H**).** Claimed as CHAOS-71 / §41 in a committed placeholder,
+but the interactive-IdP compile-path sweep (#1485, the 2026-09-23 row below)
+held the same id on an unmerged branch and merges first, so this sweep was
+renumbered **CHAOS-72 / §42** at the 2026-10-16 open-PR cleanup — the
+"placeholder is necessary but not sufficient" amendment above, again — and to
+**CHAOS-88 / §50** on 2026-10-24, when main was brought in: `CHAOS-72` had
+merged as the CDR breaker-wedge finding (#1611), §42 as the CHAOS-74 adjacent
+domains, and #1485 itself moved to CHAOS-87 / §49. Findings and gates are
+written up in §50 below.
+
+**2026-09-24 — CHAOS-81 sweep (the SIEM/syslog forwarding path under a
+collector outage). ID CLAIMED IN THIS PLACEHOLDER ROW AS COMMIT ONE, BEFORE ANY
+CODE WAS WRITTEN — AND IT STILL MOVED.** It was claimed as `CHAOS-66`, which was
+free in the merged tree that morning; the SOCKS5-bind sweep (the row below)
+claimed the same id from the same tree on the same day and merged first, so per
+the rule this header already states — *an id is rewritable for free right up
+until its first merge, so the sweep that is still an open PR renumbers ITSELF* —
+this one moved to `CHAOS-72` / §42 (the coordinator's allocation; §37–§41 are reserved for other open sweeps) while still unmerged, and a third open sweep
+was concurrently titled `chaos-66` as well. **It moved a second time, to `CHAOS-81` / §45, when main was brought in
+on 2026-10-23:** #1611 (the CDR breaker) had merged holding `CHAOS-72`, §41–§44
+had merged (`CHAOS-74`, its adjacent-domain sweep, `CHAOS-75`, `CHAOS-71`), and
+open sweeps held `CHAOS-73` and `CHAOS-76`–`80`, so it took the next id above
+every visible claim, the rule this row states below. Its section moved once more,
+to §53, on 2026-10-25, when `CHAOS-78` (#1675) merged as §45, and to §56, on
+2026-10-27, when `CHAOS-92` merged as §53; the id did not move.
+
+**That is the sharpest evidence yet about what the placeholder row does and does
+not buy, and it refines the remedy rather than refuting it.** A committed
+placeholder row prevents a collision only against a sweep that READS it, i.e.
+against sweeps that start later and from a tree that already carries the claim.
+It cannot arbitrate two sweeps that claim from the same merged tree within the
+same window, which is exactly the case §32's entry already identified when it
+recorded that "take the next free id" cannot be the tie-break. Nothing short of
+an allocator that is WRITTEN TO before the branch exists — one durable
+append-only list, the `TECHNICAL-RISK-REGISTER.md` recommendation of 2026-07-11
+— can, and this is now at least the eleventh occurrence. The row still earned
+its keep in the only way available to it: because the claim was committed, the
+collision was found by a conflict in THIS file rather than by two merged
+sections silently sharing an id, which is how the `CHAOS-50` triple survived.
+The id chosen is deliberately NOT the next free one (`67`): three other open PRs
+hold `CHAOS-68`, `-69` and `-70` in their own claim rows, and picking the lowest
+free number is what produced this collision in the first place, so this sweep
+took the next id above every claim visible on an open PR.
+
+Ten defects, all closed — seven from the sweep, three from the Codex review
+round; four residual rows recorded (SL-1 UDP cannot prove delivery and is the
+default, SL-2 the flat reconnect backoff, SL-3 no durable spool, SL-4 the
+unsynchronised window between a write completing and the failure-count read —
+round 9, reachable only by a queue-full drop, whose *resolved* verdict is the
+correct one; see the round-9 section). The finding:
+the only health surface covering the SIEM feed decides on state fixed at INIT
+time, so a collector that goes away during ordinary uptime left the node
+reporting *"remote syslog/SIEM forwarding is active"* while every audit and
+request event it produced was discarded — measured at 49 of 49 dropped with the
+row still `ok`. Alongside it: delivery loss reached no Prometheus series, no
+`/healthz` field, no alert and no log line, so no rule could be written for it;
+the one counter that existed was cumulative with no time axis; `InitSyslog`
+leaked the Writer it replaced (one goroutine and one ESTABLISHED collector
+socket per re-init, on EVERY boot of an appliance carrying both a YAML and a
+persisted target); and `POST /api/syslog/test` — the probe the diagnostics row
+itself tells operators to use to "confirm connectivity" — answered `ok: true`
+unconditionally, a second-order casualty of WK-9's otherwise-correct async fix.
+The seventh was found while wiring the plane and is a plain concurrency defect:
+`globalSyslog` was a bare package-level pointer mutated by the admin plane and
+read on the REQUEST PATH (`recordRequest`'s `WriteRequest`, the audit fan-out's
+`WriteAudit`), confirmed under `-race` — nothing in the suite exercised both at
+once, and this sweep would have added two more readers to it. Written up in
+§56.
+
+**2026-09-23 — CHAOS-87 sweep (the interactive IdP compile path).** Claimed
+`CHAOS-66` in a committed placeholder before writing code, but main's SOCKS5-bind
+sweep (the 2026-09-12 row below) had already merged under that id, so the
+placeholder never reached main and this sweep was renumbered CHAOS-87 / §49 at
+merge time by the review coordinator. The
+finding: three previous identity sweeps (CHAOS-47, 49, 58) each asked what
+happens when an IdP fails to answer a REQUEST, and none asked what an enabled
+SAML/OIDC profile needs to be reachable in order to EXIST. `compileIdPProfile`
+performs a synchronous outbound fetch at the customer's IdP with no cache, no
+fallback and no retry, on three paths: boot, admin write, and **every CP→DP
+config sync**. Five defects, three closed. The sharpest is that **a third party
+could veto the operator's config push** — a failed IdP metadata fetch aborted
+the whole ConfigSnapshot without advancing `lastVersion`, so an ordinary IdP
+maintenance window stopped policy, blocklist and threat-feed distribution to
+every data plane in the fleet, and because the version could not advance every
+DP retried the fetch every 30 s for the duration (measured 1:1), aiming the
+fleet's full poll rate at the IdP that was already down — the WK-13 herd
+pointed at the customer's identity provider. Alongside it: a boot-time compile
+failure was PERMANENT for the process lifetime (an IdP unreachable for seconds
+during a host reboot left browser SSO dark until a restart), and the
+enabled-but-not-live state it produces had NO surface at all — not a metric,
+not a contract row, not an alert — so *"no IdP configured"* and *"an IdP is
+configured, enabled and dead"* were indistinguishable from outside. The rule:
+**a third party's availability decides whether an IdP's metadata is FRESH,
+never whether the IdP EXISTS** — `internal/idpmeta` keeps the last
+successfully-fetched document, bounded by a 7-day staleness ceiling on the
+SEC-JWKS-1 reasoning (withdrawing a key from published metadata is the IdP's
+revocation lever). Two are REPORTED, NOT FIXED: a node that has never compiled
+a profile still has no fallback (IDP-5), and the SAML SP key pair is still
+ephemeral per process and per node (IDP-6). Governance note: construction-time
+dependencies are invisible to request-path chaos testing by definition — the
+component either exists or the test does not run. **A review round found three
+more, one of them this sweep's own headline defect left open on the OIDC half**:
+`fetchOIDCDiscovery` gated on `validateExternalURL`, which RESOLVES, so a DNS
+outage returned a *configuration* error before the cache could be consulted —
+the SAML half fixed, the OIDC half not, and the operator pointed at their config
+for a fault in their resolver. A guard that answers two different questions with
+one verdict will be placed correctly for one of them; the configuration question
+is now `validateExternalURLStructure` (resolver-free, fail-fast) and the
+resolution question stays inline on the fetch (fail-back). The second: the SAML
+pre-flight `isPrivateHost` added for the CodeQL convention resolved under
+`context.Background()` — an unbounded step immediately AHEAD of a bounded
+operation, the CHAOS-60/64 shape reintroduced inside a fix for something else.
+The third: an `idpMetaInline` early return left an episode nothing could ever
+clear, so a profile switched to inline `metadataXml` warned forever about a
+remote fetch that no longer existed — the observed-evidence rule forbids clearing
+on elapsed TIME, not on evidence the dependency is GONE. See §49, rows
+IDP-1…IDP-20, and `docs/operator/idp-metadata-availability.md`.
 
 **2026-09-22 — CHAOS-70 sweep (the admin roster as a durability surface).**
 Written up as `CHAOS-66` and renumbered to `CHAOS-70` (§40) when main was merged
@@ -1334,11 +1597,16 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 
 | # | Scenario | Verdict | Sev | Evidence |
 |---|----------|---------|-----|----------|
-| AU-1 | Registry OIDC introspection has **no result cache** → one IdP round-trip per request, ×N providers, each 10s timeout. The legacy `OIDCAuth` *does* cache (2-min TTL); the newer registry path dropped it. | GAP | H | `auth_oidc_flow.go:344-363,608-627` (no cache field); loop `proxy.go:209-220`; contrast `auth_oidc.go:210-238` |
-| AU-2 | In-flight SSO sessions **survive IdP deletion** — no `RevokeProvider`; cookies are self-contained and keep full access up to TTL (default 8h). User-delete *does* revoke. | GAP | H | `auth_idp.go:319-330`, `ui_auth.go:517-529` vs `ui_auth.go:245` |
+| AU-1 | Registry OIDC introspection has **no result cache** → one IdP round-trip per request, ×N providers, each 10s timeout. The legacy `OIDCAuth` *does* cache (2-min TTL); the newer registry path dropped it. | GAP → **CLOSED** (CHAOS-49: `introspectCacheGet`/`introspectCacheSet`, 2-min TTL clamped to token expiry, plus `authProbeGate`). **Row was stale until CHAOS-76 §54.8 — it read as a live High gap for two months after the fix and is what drew that sweep into the domain.** Eviction fairness on this cache is a SEPARATE defect, AU-67 | ~~H~~ — | `auth_oidc_flow.go` `resolveByIntrospection`; gates `TestOIDCFlow_IntrospectionResultIsCached`, `..._UnreachableIdPIsGatedAndReported` |
+| AU-2 | In-flight SSO sessions **survive IdP deletion** — no `RevokeProvider`; cookies are self-contained and keep full access up to TTL (default 8h). User-delete *does* revoke. **§50 re-measured this and found it lands harder than recorded: the cookie carries the GROUPS the deleted provider asserted, and those go straight into `policyStore.Evaluate`, so group-scoped ALLOW rules kept matching for a removed federation — while arm 2 of the SAME function consults the live provider set on every request.** | GAP → **CLOSED** (CHAOS-88, §50: `sessionProviderLive` probes the live set per request in `resolveRequestAuth` arm 1; a refusal degrades to exactly "no cookie" and re-challenges through the existing no-credential dispatch; `culvert_session_provider_revoked_total`). Fixed as DERIVED STATE, not a `RevokeProvider` event — the admin handler is only one writer of the registry (`ReplaceAll` is also reached from config import, config-version rollback and the CP→DP snapshot), and the absence is already durable and already synced. **The "already synced" half was itself false for the LAST profile removed and is closed by AU-64/§50.6d — the row is CLOSED only with that fix.** | **H** | was: `auth_idp.go:319-330`, `ui_auth.go:517-529` vs `ui_auth.go:245`; now `session_provider_bounds.go` `sessionProviderLive`, gate `proxy.go` arm 1, tests `session_provider_bounds_chaos_test.go` + `session_provider_cluster_test.go` |
+| AU-63 | **There is no "revoke one federated subject" lever at all.** `RevokeUser` has exactly one caller — the LOCAL account-delete handler — so for an SSO subject the only options are cutting the whole federation (now effective, AU-2) or waiting out the session TTL. An operator responding to one compromised SSO account must therefore either terminate the federation for everyone or accept up to 8 h (7 d at a raised TTL) of continued access. | **NEW** (recorded, needs a product surface — a revocation primitive with no admin route is not a control) | M | `internal/session/session.go:155` `RevokeUser` (sole caller `ui_auth.go` user DELETE); no route in `uiRoutes`; see §50.7 |
+| AU-65 | **Re-enabling an IdP under the SAME id revived the sessions it minted, and so did re-creating it under that id.** AU-2's lever was pure derived state with no durable record that a cut happened, and §50.7 deliberately does not clear the cookie on refusal, so a cookie refused throughout the disabled window authenticated again, with the subject and groups asserted BEFORE the incident, as soon as the profile returned. Confirmed against the real resolver (live → disabled → re-enabled restored identity and groups). Reached by the ordinary incident sequence: disable a compromised IdP, investigate, re-enable within the 8 h default TTL. | NEW → **CLOSED** (`1a1e752b1`, §50.6f: a server-owned `IdPProfile.SessionsNotBefore` cutoff, stamped by `Upsert` on create and on a disabled→enabled transition, compared per request with the cookie's new `iat` in `ProfileAdmitsSession`. Zero means no cutoff, so no deploy-time logout. Reachability never moves it (§50.6c), and `ReplaceAll` carries it verbatim to every node. Residuals recorded in §50.6f: an older binary ignores the field and the old behaviour returns; second granularity; the cutoff is the CP's wall clock; a pre-incident backup restores the pre-incident cutoff. Gates `TestChaos88_SameIDReEnableRevivesNoSession`, `..._SameIDRecreateRevivesNoSession`, `..._ControlCutoffMovesOnlyOnCreateAndReEnable`, `..._SessionsNotBeforeIsServerOwned`, `..._SessionCutoffReachesTheDataPlaneVerbatim`.) | M | `session_provider_bounds.go` `sessionProviderLive` / `stampSessionsNotBefore`, `auth_idp.go` `ProfileAdmitsSession`, `session.go` `setSessionCookie`; tests `session_provider_cluster_test.go`; §50.6f; raised as P1 by Codex on PR #1564 |
+| AU-64 | **Deleting the LAST IdP profile on the CP reached no Data Plane node.** `idpRegistry.All()` returns a non-nil EMPTY slice for an empty registry; `ConfigSnapshot.IdPProfiles` carried `omitempty`, so the key never reached the wire; the DP decoded nil and `syncSnapshotIdPProfiles` skipped. The removed federation stayed stored, enabled and LIVE on every DP — AU-2's lever answered "enabled", its sessions kept their asserted groups for the full TTL, and NEW logins through it kept working; with `-idp-profiles-file` it survived restarts. All three DP intake paths (full snapshot, delta, last-known-good replay) share the one nil-skip. Removing a non-last profile always propagated, which is why it was invisible. **`TestConfigSurfaces_SnapshotWireWipe` exists for exactly this bug class and never looked: it iterates only `semNilSkipEmptyWipe` bindings, and the row was labelled `semValidatedSkip`.** | GAP → **CLOSED** (§50.6d: drop `omitempty`, relabel the row `semNilSkipEmptyWipe` + `WireWipeCapable`; the apply side was already nil-skip/empty-wipe, so no logic changed. `nil` still means ABSENT — redaction nils the field and a DP polls `GetConfig` before enrollment, so reading `null` as a clear would let an unauthenticated caller wipe every enrolling node's registry; pinned by two controls.) | **H** | `controlplane_snapshot.go` `IdPProfiles`, `config_surfaces.go` row `idp_profiles`, `syncSnapshotIdPProfiles`; tests `session_provider_cluster_test.go` (4) |
+| AU-66 | **A SAML-only deployment stopped reading its session cookies entirely when the provider went dark.** AU-2's fix keys arm 1 on `ProfileEnabled` (§50.6c: an unreachable IdP is degraded availability, not revocation) — but the gate ABOVE arm 1, `authRequired`, keys on `HasEnabledInteractiveProvider`, which is enabled AND **live**. With no local account, no legacy provider and no credential-capable profile, a CHAOS-87 staleness retirement darkens an ENABLED profile, `authRequired` goes false and the whole Stage-1 block is skipped: the session this appliance had decided to KEEP is never read. Measured `proceed=true identity="" groups=[]` — no revocation counter, no log, and identity/group-scoped ALLOW rules silently stop matching. Worse than the revocation §50.6c forbids, because a revocation is decided and counted and this is skipped. Every §50 gate missed it: `c72Setup` installs a local admin, which holds `credCapable` true. | GAP → **CLOSED** (§50.6g: a SECOND predicate, `HasEnabledInteractiveProfile` — enabled, not live — opens arm 1 only, via `sessionCapable`; arms 2 and 3 stay on `authRequired`, so the live-gated `ssoCapable` and the no-backend inert guard are untouched and no unfulfillable challenge or hot-path log becomes reachable. Both wrong fixes measured failing.) | **H** | `proxy.go` `sessionCapable`, `auth_idp.go` `HasEnabledInteractiveProfile`; tests `session_provider_availability_test.go` (4); raised as P2 by Codex on PR #1564 |
+| AU-70 | **A session from a DELETED or DISABLED profile survived through an unrelated profile whose id was its prefix-stripped spelling.** `sessionProviderLive` fell back to `ProfileEnabled(stripIdPPrefix(pvd))`, and profile ids are free-form, so a cookie from `saml:corp` resolved through `corp` after `saml:corp` was removed: its identity and groups outlived the revocation. Found by Codex (§50.6h) | H | `session_provider_bounds.go` `sessionProviderLive` | **CLOSED.** Exact `ProfileEnabled(pvd)` only. The minter wall pins that legitimate cookies carry the bare id or `"local"`, so this costs no availability. Gates `TestChaos88_APrefixedProfileIDCannotRideAnotherProfile` and `TestChaos88_OnlyTheExactProfileIDResolves` fail with the fallback restored |
 | AU-3 | Proxy-path Basic-auth bcrypt is **not rate-limited** — correct-username + N wrong-passwords is a cache miss every time → full ~100ms bcrypt per request → CPU starvation. The `loginLimiter` guards only the admin UI. **Understated: the WRONG-username branch is worse (AU-3a) and needs no valid username at all.** | GAP → **CLOSED** (CHAOS-57, §25: `internal/authcost` bounds concurrency globally + per client, fail-closed) | M → **C** | `store.go` `verifyAuthFrom`, `internal/authcost`, `auth_cost_health.go` |
 | AU-3a | The wrong-username branch runs an unconditional bcrypt against the dummy hash (RISK-008 timing equaliser), is reached BEFORE the result cache, and never populates it — so a flood of DISTINCT usernames is a guaranteed miss every time. Measured **79.6 ms of exclusive CPU per ~200-byte request (51,631x a cached auth)**; **66 req/s (~13 KB/s) consumed 100% of a 4-core box** and degraded other CPU work **15.6x**. Unauthenticated, remotely triggerable, and in the DEFAULT posture nothing stands in front of it — the connection limiter, rate limiter and IP filter all ship disabled. | GAP → **CLOSED** (CHAOS-57) | **C** | `store.go:521` (pre-fix), gates `TestChaos57_WrongUsernamePathIsGoverned`, `..._ConcurrentVerificationsAreBounded` |
-| AU-3c | The auth result cache evicted **one arbitrary LIVE entry** at capacity (a Go map range stopping at the first key), so a flood of distinct passwords under a known username displaced OTHER clients' cached positives. Measured: an honest client's cached credential survived a 1x-capacity flood and was reliably gone by 2x — after which that user paid a full ~80 ms bcrypt on EVERY request. The attacker's amplification lands on legitimate traffic. Same class as the `internal/authstate` finding. | GAP → **CLOSED** (CHAOS-57: `internal/authstate`'s fair-eviction policy ported — oldest entry of the largest holder, deterministic) | H | `store.go` `evictOneLocked`, gate `TestChaos57_FloodCannotDisplaceAnHonestClientsCachedResult` |
+| AU-3c | **The LOCAL auth cache** evicted **one arbitrary LIVE entry** at capacity (a Go map range stopping at the first key), so a flood of distinct passwords under a known username displaced OTHER clients' cached positives. Measured: an honest client's cached credential survived a 1x-capacity flood and was reliably gone by 2x — after which that user paid a full ~80 ms bcrypt on EVERY request. The attacker's amplification lands on legitimate traffic. Same class as the `internal/authstate` finding. | GAP → **CLOSED for this cache** (CHAOS-57: `internal/authstate`'s fair-eviction policy ported — oldest entry of the largest holder, deterministic). **The three SIBLING caches kept the defect for another seven weeks — see AU-67** | H | `store.go` `evictOneLocked`, gate `TestChaos57_FloodCannotDisplaceAnHonestClientsCachedResult` |
 | AU-3d | The at-capacity expired-entry scan is O(cache) whenever nothing has expired — precisely the state a flood keeps it in — and runs holding the process-wide auth mutex. Measured **64 µs per insertion** at the 5,000-entry cap. | GAP → **CLOSED** (CHAOS-57: bucket-indexed eviction, no full scan) | L/M | `store.go` `set` (pre-fix) |
 | AU-3e | **Username-enumeration timing oracle, PRE-EXISTING and deliberately NOT closed by CHAOS-57.** A negative result for the CORRECT username is cached; one for a wrong username is not (the branch returns before the cache). So repeating the SAME wrong (user, pass) pair twice is ~1.5 µs the second time for a valid username and ~80 ms for an invalid one — which is the oracle RISK-008's dummy-compare equalisation exists to prevent, reachable by repetition rather than by a single request. Closing it means caching wrong-username negatives, a behaviour change to a security control that deserves its own review. CHAOS-57 verifies only that it does not WIDEN it (`TestChaos57_AdmissionDecisionIsUsernameIndependent`). | GAP | M | `store.go` `verifyAuthFrom` — cache write is on the username-match branch only |
 | AU-4 | Lockout store is bounded + fail-closed, and TOTP failures now feed it. But it is **not persisted** (resets on restart) and **per-node** (attacker gets MaxAttempts per node in a cluster). | ✓ (+2 gaps) | M | `lockout.go:111-126,102-110`; per-node note `roadmap/edge-case-audit.md:138` |
@@ -1351,9 +1619,11 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-10 | TOTP: 30s step, ±1 window (~90s skew tolerance), replay closed via `counter <= lastCounter`, empty-secret fails closed. | ✓ | — | `totp.go:47-88` |
 | AU-11 | Multi-IdP registry: compile is isolated (all-or-nothing staging swap; bad profile dropped, not fatal). But the **request-time provider loop is sequential and unguarded** — one slow IdP adds latency to every request that reaches it. | ✓ compile / GAP request | M | `auth_idp.go:159-165,354-376` vs loop `proxy.go:209-220` |
 | AU-12 | All admin-configured IdP URLs dial through `ssrfSafeDialContext`; HTTPS+non-private pre-validated; response bodies `io.LimitReader`-capped. | ✓ | — | `auth_oidc_flow.go:64,300`, `auth_idp.go:556-565` |
-| AU-13 | Registry introspection also lacks **negative caching / circuit breaker** — a permanently-invalid token amplifies one IdP call per provider per request forever. | GAP | M | `auth_oidc_flow.go:623-636`; breaker exists unused `internal/upstream/upstream.go:89-96` |
+| AU-13 | Registry introspection also lacks **negative caching / circuit breaker** — a permanently-invalid token amplifies one IdP call per provider per request forever. | GAP → **CLOSED** (CHAOS-49: an AUTHORITATIVE `active:false` is cached; `authProbeGate` is the breaker. An infrastructure failure is still deliberately NOT cached — see AU-7). Row was stale until CHAOS-76 §54.8 | ~~M~~ — | `auth_oidc_flow.go` `resolveByIntrospection`; gate `TestOIDCFlow_InactiveTokenVerdictIsCached` |
 | AU-15 | **The public admin-login endpoint accepted an UNBOUNDED username and copied it verbatim into durable state.** `apiAuthLogin` is on `uiAuthMiddleware`'s public allowlist; nothing between the 1 MiB body cap and the handler limited `body.User`, and every failed attempt wrote it into the two lockout maps (retained ≥ `lockout.Window`), the 500-entry audit ring, and the **durable audit JSONL** — a 50 MB rotating file keeping exactly ONE archive. At the endpoint's own rate limit (60 mutating POSTs/min/IP) one unauthenticated client commits ~60 MiB/min of chosen bytes, rotating the entire 100 MB retained compliance record away in **under two minutes**, with no disk fault and every write SUCCEEDING (so `writeErrors`/`storage_write_failed` never fire). Measured by the gate: **4,195,672 bytes into the audit file from 8 requests.** | NEW → **CLOSED** (CHAOS-63: bounded at the handler; `lockout.MaxUsernameKeyLen` is the structural half; `culvert_login_oversize_rejected_total`) | **H** | was: `ui_auth.go` `apiAuthLogin`; `internal/audit/audit.go:213` (`NewRotatingFile(path, 50)`); see §32 |
 | AU-16 | **`internal/lockout` bounded its maps by ENTRY COUNT but not by KEY SIZE.** `Cleanup`'s own doc claims the maps are bounded "against an unbounded-memory DoS" — true on the count axis, and the janitor cannot sweep an entry before its `Window` elapses, so the SIZE axis was the whole exposure: one caller retained (rate × Window × username size) bytes in a leaf package whose stated contract is to be bounded. | NEW → **CLOSED** (CHAOS-63: `boundUsername` applied at every public entry point; consistency pinned so `Check` and `RecordFailure` cannot disagree on the key) | M/H | was: `internal/lockout/lockout.go`; see §32 |
+| AU-67 | **The three identity-backend result caches evicted one arbitrary LIVE entry at the cap** — `auth_oidc_flow.go` (registry introspection, token-keyed), `auth_oidc.go` (legacy introspection, token-keyed) and `auth_ldap.go` (directory bind, user+pass-keyed). AU-3c exactly, on a key space derived entirely from caller-supplied credentials, never ported from CHAOS-57. All three are populated by UNAUTHENTICATED requests and an authoritative denial is cacheable by design (RFC 7662 §2.2 answers an unknown token `200 {"active":false}`; a directory answering "no such user" is authoritative), so the flood needs no fault and no VALID credential, only bogus ones: the headline gate measures a 3x-cap flood from one source reliably displacing a specific honest entry (a uniform draw would model ~37% survival at one cap-worth and ~5% at three, but Go's map iteration guarantees no uniformity, so the gate is the evidence and the model only the shape). Compounding it, **nothing reclaimed an expired entry**, so the steady state under a flood was a map full of DEAD verdicts while eviction destroyed the few live ones. Sharp end: displacing a cached positive while the backend sits in its CHAOS-47/CHAOS-49 cooldown turns a cache HIT into a **DENIAL**, inverting the cache's stated purpose for the users it serves. Fail-closed throughout (no bypass), but authentication becomes remotely deniable by an anonymous client. | NEW → **CLOSED** (CHAOS-76: one shared `identityResultCache` carrying `internal/authstate`'s policy via the shared `betterAuthCacheVictim`; expired-preferred victims; lookup-time reclaim; O(active clients), never the AU-3d full scan) | **H** | was: `auth_oidc_flow.go` `introspectCacheSet`, `auth_oidc.go` `oidcCacheSetIdentityWithExp`, `auth_ldap.go` `cacheSet`; now `auth_identity_cache.go`; see §54 |
+| AU-68 | **The CHAOS-57 client fairness key was computed on both data-plane paths and DISCARDED at every provider dispatch point** — `proxy.go` (`authStateClientKey`) and `socks5.go` (`clientFairnessKey`) both derive it, then `store.go` called `provider.Verify(user, pass)` and `resolver.ResolveIdentity(user, pass)`, **and the IdP-REGISTRY loop in `proxy.go` called the bare `prov.ResolveIdentity(u, p)`** — three sites, not two. The registry loop is the one that matters most: it is tried BEFORE the legacy fallback, so in a registry deployment it IS the credential path, and this row named only the other two until §54.9 finding (1) corrected it. So no per-client eviction policy was expressible inside a provider's cache at all. `authProbeGate` governs REACHABILITY and is the right answer about COST (the dispatch comment says so); it says nothing about who may displace whose entry, so the displacement axis had **no owner**. The structural half of AU-67: the primitive that would have prevented the defect existed, ran on every request, and was dropped one call short of the code that needed it. | NEW → **CLOSED** (CHAOS-76: additive `clientAttributedVerifier` / `clientAttributedResolver`, reached through the single `resolveIdentityAttributed` helper that ALL THREE dispatch sites go through, with the historical signature as fallback — additive rather than widening `IdentityProvider`, because SAML is browser-mediated and keeps no result cache) | **H** | was: `store.go` `verifyAuthFrom`, `resolveAuthIdentityFromSnapshot`, and the registry loop in `proxy.go`; now `identity.go`; gates `TestChaos76_ClientFairnessKeyReachesTheIdentityProviders`, `..._RegistryDispatchIsClientAttributed`; see §54.3 and §54.9 |
 
 ### 2.6 Background Workers / Feeds / Scanning / Alerting
 
@@ -7142,13 +7412,43 @@ status, or read the unfiltered output, before claiming a gate is green.
   owner decision on each, not a drive-by change inside this one.
 - **`startUI`'s sibling faults** are already closed by §33; the CP gRPC bind
   (`cluster_startup.go`) remains fatal and is the closest unexamined analogue —
-  recorded, not changed here (one concern per change).
+  recorded, not changed here (one concern per change). **It has since been
+  EXAMINED — see register row CP-1**, which establishes that it is worse than
+  this note assumed: it is fatal at `cluster_startup.go:96`, `initCluster` runs
+  at `main.go:228` (earlier than the SOCKS5 fault this section closed, and
+  earlier than the admin UI and the proxy), a CP node also proxies, the mTLS
+  material is read at call time so §33's rotation trigger applies unchanged,
+  and the same function returns its error properly to both of its other two
+  callers including the live admin API.
 - **SOCKS5 still never consults the policy engine** (no category/GeoIP/schedule
   rules, no default-deny) — §22's residual, unchanged.
 - A listener that binds successfully and whose socket dies instantly on every
   accept will cycle at the 30 s ceiling indefinitely. It is rate-bounded, loudly
   reported (`down`, alert, gauge at zero) and strictly better than the previous
   terminal state, but it is a cycle rather than a convergence.
+- **The bind is RECORDED before the listener is ADOPTED** (found by §49's full-suite
+  run, reported here, not changed — one concern per change). `socks5_bind.go`
+  calls `noteSOCKS5Bound()` and then `markFirstAttempt()` at lines 374–375,
+  before `newSOCKS5Server` / `adopt` / `srv.Start()` at 383–386, so there is a
+  window in which `Binds`, `everBound`, `/healthz socks5 = ready` and
+  `culvert_socks5_listener_up 1` all say bound and serving while `s.cur` is
+  still nil, `Addr()` returns nil, and the accept loop has not started.
+  `markFirstAttempt`'s own comment states the rule it breaks — it exists so
+  `startSOCKS5` "cannot return while every SOCKS5 surface still describes a
+  listener that does not exist yet". The customer-visible cost is small and this
+  is not the §33 defect: the SOCKET really is bound at that point, so a client
+  completes its handshake and waits in the kernel backlog for the microseconds
+  until `Start()` runs. What is briefly untrue is that the supervisor has
+  adopted it. It is nonetheless the same inversion this sweep names as its rule
+  — *keep the announcement strictly downstream of the evidence* — applied to the
+  log line and not to the health record, and it makes
+  `TestChaos66_ListenerRebindsOnceThePortIsFree` flaky under load: it waits on
+  `Binds > 0` and then asserts `srv.Addr() != nil`, which is precisely the
+  window (observed once in a full `go test ./...` run, passes in isolation).
+  Moving `noteSOCKS5Bound`/`markFirstAttempt` to after a successful `adopt`
+  closes both, but it also changes what a failed adopt reports, which is an
+  owner decision on this sweep's own state machine.
+
 
 ---
 
@@ -12008,6 +12308,2479 @@ tree at once.
 
 ---
 
+## 49. CHAOS-87 — The interactive IdP compile path
+
+**Sweep date:** 2026-09-23. **Originally claimed as CHAOS-66 / §36 in a committed
+placeholder row before any code was written**; that id was taken on main by the
+SOCKS5-bind sweep before this branch merged, so it was renumbered CHAOS-71 / §41
+at merge time — and renumbered again, to CHAOS-87 / §49, when main was brought
+in on 2026-10-24: `CHAOS-71` had merged as the Control Plane gRPC listener sweep
+(§44), `CHAOS-74` as §41, and ids up to `CHAOS-86` / sections up to §48 were held
+by other open sweeps. Its gates are renamed `TestChaos87_` with it. A placeholder
+on an unmerged branch reserves nothing — only a claim that reaches main does.
+
+### The question
+
+Every previous identity sweep asked what happens when an IdP does not answer a
+*request*: CHAOS-47 (LDAP/OIDC outcome caching and the `authProbeGate`),
+CHAOS-49 (the IdP registry, JWKS integrity and stale-key ceiling), CHAOS-58 (a
+directory that accepts and then stalls). All three govern the moment a user
+authenticates. This sweep asked the question one layer up and one moment
+earlier: **what does an enabled SAML or OIDC profile need to be reachable
+before it can EXIST at all, and what else breaks when it is not?**
+
+### The finding
+
+`compileIdPProfile` performs a synchronous outbound fetch against the
+customer's identity provider — `fetchSAMLMetadata` for a `metadataUrl`,
+`fetchOIDCDiscovery` for an issuer — with **no cache, no fallback and no
+retry**. That fetch sits on three paths, and on each of them a third party's
+availability decided something it had no business deciding.
+
+**(1) There was no last-known-good.** A provider that compiled successfully
+seconds earlier could not be compiled at all once its endpoint stopped
+answering, although nothing about the IdP's published document had changed.
+
+**(2) A boot-time failure was PERMANENT.** `IdPRegistry.Load` logs a compile
+error and moves on, leaving the profile `Enabled` in `r.profiles` and absent
+from `r.live`. Every accessor — `EnabledProviders`, `HasEnabledProviders`,
+`EnabledInteractiveProviders`, `LiveProvider` — keys on `r.live`, so the
+profile becomes operationally invisible while remaining enabled, stored and
+listed in the admin UI. **Nothing in the process ever retried**, so an IdP that
+came back thirty seconds later stayed dark until a restart or an admin re-save.
+The trigger is ordinary rather than exotic: on a host reboot the container and
+the network come up concurrently, and a few seconds of unresolvable DNS is
+enough. Note the asymmetry that hid it — the admin write path (`Upsert`) and
+the CP→DP path (`ReplaceAll`) both run `validateExternalURL` first, so the
+config an operator types is checked; `Load` does not, so the config an
+appliance boots with is not.
+
+**(3) It was INVISIBLE.** No metric, no contract row, no alert and no
+`/health` or `/ready` field distinguished *"no IdP configured"* from *"an IdP
+is configured, enabled, and dead"*. One `logger.Printf` at boot, into a
+rotating file. That is the register's §1 silent-failure theme reached through
+the identity plane. Downstream, a scoped `SSORequired` rule correctly fails
+CLOSED (403, `proxy.go` arm 3c — the posture is right and is pinned as a
+control), so the symptom customers see is *every browser user denied*, with a
+green dashboard and a rule hit-counter that reads exactly like *"no traffic
+matched"*.
+
+**(4) A third party could veto the operator's config push — the sharpest one.**
+`ReplaceAll` compiles every enabled profile and is all-or-nothing, and
+`syncSnapshotIdPProfiles` returns its error into `fetchAndApply`
+(`controlplane_client.go:343`), which abandons the snapshot **without advancing
+`lastVersion` and without persisting last-good**. So an IdP maintenance window
+— Okta, Entra or ADFS patching, an ordinary scheduled event — **stopped policy,
+blocklist, threat-feed and session-HMAC distribution to every data plane in the
+fleet.** A failure in the identity plane taking out the config plane. Measured:
+an inline-`metadataXml` profile that needs no network at all was rejected
+because a *sibling* profile's remote endpoint was unreachable.
+
+**(5) It amplified into the IdP.** Because the version never advanced, the
+pending snapshot stayed pending, so every DP retried the whole apply — fetch
+included — on its next 30 s poll, indefinitely. Measured 1:1: ten applies, ten
+outbound connections. A 200-node fleet with two remote IdPs aims roughly 800
+requests/minute at the metadata endpoint for the duration of the outage,
+starting the moment an operator pushes a config change, and **it never stops on
+its own** because the thing that would stop it is the config version advancing.
+That is the WK-13 herd, pointed at the customer's identity provider at the
+moment it is least able to answer, and it is the same shape CHAOS-64 found
+pointed at the customer's DNS and CHAOS-49 found pointed at the customer's JWKS
+endpoint.
+
+### The rule
+
+> **A third party's availability decides whether an IdP's metadata is FRESH.
+> It never decides whether the IdP EXISTS.**
+
+`internal/idpmeta` keeps the raw bytes of the last document each profile
+successfully fetched, and the compile degrades to it. That closes (1), and with
+it the compile failure that drives (4) and (5) for any node that has ever
+compiled the profile — which is every node in steady state. `idp_recovery.go`
+closes (2). `idp_metadata_health.go` closes (3).
+
+### Why the cache is bounded, and why that is the security half
+
+Serving a cached document forever would keep trusting an IdP signing key the
+IdP may have withdrawn — **withdrawing a key from published metadata is the
+IdP's revocation lever**, exactly as it is for a JWKS document. SEC-JWKS-1
+reached the identical conclusion one layer down (`jwksStaleMaxAge`) and the
+answer is the same: stale is a BOUNDED degradation. Past `idpmeta.StaleMaxAge`
+(7 days) the entry is refused and the caller fails exactly as it did before this
+package existed. It is a CONSTANT with no config surface — the only thing a
+knob here could do is widen the window in which a withdrawn key stays trusted,
+which is the one direction this value must not move.
+
+Four further rules the design carries, each with its own gate:
+
+* **The network always WINS when it answers.** The cache is a fallback, never a
+  first choice, so an IdP-side key rotation is picked up at the first compile
+  after it happens. This is the CONTROL, not a nicety: *"always serve the
+  cache"* passes every single defect gate above while silently stopping the
+  appliance from ever noticing a key rotation — strictly worse than the outage
+  being fixed. Verified: the control is the only gate that fails against that
+  shape.
+* **The key binds the document to its SOURCE** (profile id + a digest of the
+  URL), so re-pointing a profile at a different IdP has no cache. Otherwise a
+  deliberate migration could be answered by the provider being migrated away
+  from, which is a trust decision, not a caching one.
+* **Cached bytes go through the IDENTICAL parser and validator as network
+  bytes.** The store returns raw bytes and never parses. For OIDC this is
+  load-bearing: the discovery document names the authorization and token
+  endpoints this appliance sends users and credentials to, so
+  `parseAndValidateOIDCDiscovery` — now the single parser for both origins —
+  puts every discovered endpoint back through `validateExternalURLStructure`,
+  and additionally puts the AUTHORIZATION endpoint through an address check
+  (`refuseDefinitelyPrivateRedirect`). The asymmetry is the point: the token
+  and JWKS endpoints are ones this appliance DIALS, so `ssrfSafeDialContext`
+  refuses a private resolved address at connect time and is rebinding-proof;
+  the authorization endpoint is handed to the user's BROWSER, so no dialer of
+  ours is consulted. Round 1 of this sweep claimed `isSafeCaptiveRedirect`
+  re-checked it — FALSE, it checks only shape — so dropping the resolving
+  validator opened a redirect-to-internal path. The restored check refuses only
+  a DEFINITE private verdict, because a resolution failure is *unknown*, not
+  *private*. A cache
+  file edited by anything that got write access to `dataDir` cannot widen a
+  trust decision.
+* **A NEGATIVE age is STALE, not fresh.** A document stamped in the future,
+  which a clock rollback produces, is refused rather than read as maximally
+  fresh — the rule CHAOS-61 established for cluster rate-limit broadcast
+  freshness, for the same reason: a future stamp otherwise extends the trust
+  window by however far the clock moved.
+
+The store is also INERT rather than fatal when it has no writable directory:
+the cache is an availability aid, never a correctness dependency, so its
+absence degrades to exactly the pre-CHAOS-87 behaviour instead of failing a
+compile that would otherwise have worked.
+
+### The way back (idp_recovery.go)
+
+Same shape as CHAOS-55 (the fencing lease) and CHAOS-57 (the admin UI
+listener), and for the same reasons. Retry is **RATE-bounded, never
+COUNT-bounded** — the terminal state of "give up" is an appliance whose SSO
+never returns without an operator, which is the outcome being fixed — and
+"avoid infinite retries" is satisfied the CHAOS-54/55/57 way, by the retry
+never being SILENT. Waits are **jittered**, because a fleet restarts together
+and a fleet's IdP outage ends for everyone at once, so a fixed cadence would
+aim a synchronised herd at a recovering IdP: this sweep's own finding (5),
+which must not be reintroduced inside its own fix. Waits are
+**interruptible**, so shutdown never sits one out. Recovery is declared on
+**OBSERVED evidence only** — a provider that actually compiled. And the loop
+exits the moment nothing is dark, so a healthy appliance pays one goroutine
+that returns immediately.
+
+`publishRecompiled` re-checks **everything** under the lock — still present,
+still enabled, still the same generation, still not live — because the compile
+ran without it. Publishing blind would resurrect a profile deleted while we
+were fetching, or overwrite a newer provider with one built from older config.
+The compile itself deliberately runs OUTSIDE `r.mu`: it reaches the network,
+and `HasEnabledInteractiveProvider` runs on the proxy request path, so holding
+the lock across an IdP timeout would stall every proxied request — the CHAOS-50
+cluster-CA rule (never hold a lock across a call that reaches the network).
+
+### Surfaces
+
+All reuse existing operator vocabulary. `/api/diagnostics` gains the
+`idp_metadata` row; `/metrics` gains `culvert_idp_enabled_not_live` and
+`culvert_idp_metadata_*`, **emitted only on a node that has an enabled
+interactive IdP profile or has acquired a remote document** (the
+socks5/cluster_ca/dns rule: a flat `0` from every appliance that never
+configured SSO is indistinguishable from one whose IdP is dead, and the paging
+rule is `> 0`). The alert is the **existing `identity_backend_unreachable`
+event** with source `idp_metadata` — a new name would be silently unsubscribed
+on every already-configured webhook (the cluster-CA `cert_expiry` precedent),
+and "the IdP cannot be reached" is one operator action whether the unreachable
+thing is an LDAP bind endpoint, an OIDC introspection endpoint or a metadata
+document. Its Detail is a **BOUNDED reason class**: `Dispatch` dedups on
+`event + ":" + Detail`, and the raw error embeds the configured IdP URL.
+
+**Deliberately NOT on `/readyz`.** An IdP outage is fleet-wide by construction,
+so failing readiness would eject the entire fleet from the load balancer
+simultaneously over a dependency none of them can fix by restarting — turning
+an SSO degradation into the total traffic outage the change exists to prevent.
+The `ca`, `cluster_ca` and `dns_resolution` rows already follow this rule.
+
+The admin "test this issuer" endpoint (`POST /api/idp/oidc/discover`) was split
+onto its own cache-free path (`probeOIDCDiscovery`) in both directions: it must
+never READ the cache, because a diagnostic answered from cache reports a dead
+IdP as healthy (the `ocspCoverage` *"found nothing wrong" vs "never consulted"*
+mistake), and it must never WRITE it, because the issuer is caller-supplied and
+a cache keyed on one would be a seeding surface.
+
+### Gates
+
+`internal/idpmeta/idpmeta_test.go` (12) and `idp_metadata_chaos_test.go` (34
+functions). Eleven DEFECT gates were verified failing against the reintroduced
+pre-fix shape and the four security gates plus three controls pass against it —
+the correct signature, since the security properties are new rather than
+regressions. The CONTROL `FreshDocumentAlwaysBeatsTheCache` was separately
+verified as **the only** gate that fails against the always-prefer-cache wrong
+fix, which is what makes the defect gates worth trusting.
+
+One defect was introduced by this change and caught by its own gates:
+`resetIdPMetadataHealthForTest` assigned a zero struct **while holding the
+struct's own mutex**, so the deferred `Unlock` released a fresh mutex and the
+runtime killed the process with `sync: unlock of unlocked mutex`. Fields are
+now cleared individually, with the reason recorded at the site.
+
+### Owner decision (2026-10-13, #1485 + #1564) — stale-if-error, not stale-on-anything
+
+The open-PR cleanup ruled on the interaction with #1564 (proxy-session provider
+bounds): **an unreachable IdP is degraded availability, not revocation**; only
+an explicit delete or disable revokes sessions. Three changes followed on this
+branch, each gated in `idp_metadata_staleness_policy_test.go`:
+
+1. **Only an outage is answered from the cache** (RFC 5861 stale-if-error).
+   `resolveIdPDocument` consulted the cache on ANY fetch error — a 4xx, an
+   empty body and a document the validator refused included — so an IdP that
+   withdrew its metadata (404/410) or refused the appliance (401/403) was
+   papered over for up to seven days. Fetch errors are now POSITIVELY
+   classified at the fetcher (`idpFetchUnavailable` / `idpFetchStatusError`):
+   transport failures and 5xx are stale-eligible; every other status, an
+   empty/invalid document, a configuration error and an SSRF policy refusal
+   (`errSSRFBlocked`) are not, and fail the compile without touching the
+   cached copy. An unclassified error is NOT eligible, so a new failure path
+   fails closed until someone decides it is an outage. This reverses the
+   round-1 choice to treat an invalid 200 as an availability failure; the
+   invariant that it never REPLACES the last-known-good copy is kept.
+2. **The ceiling is `min(StaleMaxAge, validUntil)`.** SAML metadata's own
+   `validUntil` (on the `EntityDescriptor`, or the enclosing
+   `EntitiesDescriptor` that `samlsp.ParseMetadata` discards) was ignored. A
+   cached document past it is refused on the compile path, and the live
+   ceiling sweep retires a provider at the earlier of the two bounds — carried
+   on `idpServedDoc.validUntil` through the SAME `idpServedDocumentAger`
+   interface, so the compile-time pair binds it as it binds the fetch time.
+   `cacheDuration` is a refresh hint, not a stale-if-error bound, and is not
+   applied.
+3. **The recovery loop revalidates providers serving from cache**, not only
+   dark ones. Before, a provider built from cache during an outage was never
+   recompiled after the IdP recovered, so a withdrawn SAML signing certificate
+   stayed trusted until the seven-day ceiling. `revalidateCacheServingProviders`
+   recompiles each one at the loop's bounded rate and `publishRevalidated`
+   swaps the result in only when it was built from a NEWER document (fresh, or
+   a later cached copy — which also closes IDP-4's round-18 route for a
+   cache-serving provider), under the generation + live-identity re-check
+   `publishRecompiled` uses. The watchdog and the boot arm both treat
+   "serving from cache" as work for the loop. The cached fetch time is now
+   rounded to the store's one-second stamp, so two compiles from the same
+   document agree on it.
+
+Ceiling retirement leaves the profile enabled and stored and is NOT a
+revocation; #1564's session-validity predicate keys on "profile exists and is
+enabled" so the seven-day retirement cannot become a mass logout.
+
+**The round shipped a CRITICAL CodeQL alert, and it is the FIFTH instance of
+one asymmetry.** `CodeQL` failed on the head with *"1 new alert including 1
+critical severity security vulnerability"* — `go/request-forgery`,
+*"uncontrolled data used in network request"*, at the `client.Do(req)` in
+`fetchOIDCDiscoveryOverNetwork`. The guard was not missing: `url.Parse`, the
+scheme check and `isPrivateHostContext` were all present, inline, in the same
+function as the request, exactly as the repo convention requires. **The defect
+was that the request was built from the RAW `wellKnown` string while the guard
+had validated the PARSED `u`** — so CodeQL's dataflow saw the tainted value
+reach the sink with no barrier on *it*, and, separately, the function was
+validating one URL and fetching another.
+
+The SAML sibling had already been fixed for this exact alert **earlier in this
+same PR**, and its own comment records the evidence that settles the diagnosis:
+CodeQL recognises `Regexp.MatchString` on the tainted value as a sanitiser,
+*"whereas whether it models the `isPrivateHostContext` wrapper is not
+established — the PR's CodeQL run flagged this request with that wrapper in
+place."* The OIDC half kept the wrapper alone, which is precisely the state
+that had been observed to be flagged. So the fix is the sibling's, mirrored:
+`oidcDiscoveryURLShape` — the SAME minimal regexp, pinned equal to
+`samlMetadataURLShape` by test — gating the raw value ahead of `url.Parse`, and
+the request built from `u.String()`. Neither narrows what is fetched: the
+regexp admits exactly what the scheme check admits, and the one shape it
+refuses that the check would have passed is an empty authority (`http:///x`),
+which could never be fetched and would have reached `isPrivateHostContext` with
+an empty host — fail-closed, earlier. The bound is untouched; the guard is not
+un-bounded for CodeQL.
+
+**The wall that should have caught it was scoped to the bound, not to the
+barrier.** Round 5 had already made this a TABLE over both fetchers for exactly
+this reason, with the lesson written on it — *"a wall scoped to one of two
+symmetric paths is how that asymmetry keeps surviving, so wall the PAIR"* — and
+it asserted the ctx-bounded pre-flight, the single deadline and the absence of
+`validateExternalURL`. It said nothing about where the request's URL comes
+from, so the pair was walled for one property and not for the one that was
+broken: **the wall's claim was narrower than the property that mattered**, the
+same shape as a note broader than its wall (round 7) and a register row broader
+than the code (IDP-7, this round). The table now carries both halves —
+barrier-before-parse and request-from-the-parsed-URL — per fetcher, with
+`TestChaos87_OIDCDiscoveryURLShapeBarrier` mirroring the SAML gate and
+additionally pinning the two barriers EQUAL, so a future narrowing of one
+cannot silently diverge from the other.
+
+Five mutations were each verified failing the gate they target (barrier
+removed, request rebuilt from the raw string, barrier refusing everything,
+barriers diverged, and a table row pointed at a missing function to prove the
+slicer's non-vacuity guard fires). The refuse-everything CONTROL earns its
+keep: the cheapest way to pass *"nothing unvalidated is fetched"* is a barrier
+that admits nothing, which would take every OIDC discovery fetch down. **And
+the complexity gate found a stronger property, as it did in round 7**: the
+additions pushed the table past `gocognit`'s 30, so the slicing and the two
+assertion groups were extracted into helpers — and every mutation was re-run
+against the refactor, which is what round 7 recorded to do.
+
+*The standing rule, now earned five times on one pair of functions: when a
+finding is fixed on one of two symmetric paths, fix BOTH in the same change and
+wall the PAIR on the property that was actually broken — not on the one that
+was convenient to assert.*
+
+### Review round on the owner decision — a speculative write is not a commit, and a rule stopped one layer short
+
+Two reviewers, independently, found the same defect in **round 19's own
+supersession**, and they were right.
+
+**P1/major — supersession ran on the SPECULATIVE path and deleted the
+in-service profile's fallback.** Round 19 retired a profile's other cached
+documents inside `idpmeta.Store.Put`. `Put` is reached from
+`compileIdPProfile`, i.e. from the half of a registry write that has decided
+nothing yet, and **both** writers can abandon that candidate afterwards —
+`Upsert` when `r.persist` fails, `ReplaceAll` when any later profile fails to
+validate, compile or persist. So a repoint from S1 to S2 that was then REFUSED
+left S1 authoritative with its last-known-good already deleted, and the next S1
+outage took a healthy profile dark: the pre-CHAOS-87 failure this package
+exists to prevent, reintroduced by the round that bounded the cache. Reproduced
+against the real store before anything was changed — seed S1, speculatively
+`Put` S2, and S1 answers *"no usable cached document"* — and then end to end
+through the real `Upsert` with its persist forced to fail.
+
+**COMPILING IS NOT COMMITTING.** That is this section's own rule, written in
+rounds 4 and 6 and applied there to EPISODE state; round 19 broke it for
+DURABLE CACHE state. The registry states the same contract in three places a
+few lines from the call — *"the published slice/map must not be touched until
+persistence succeeds"*, *"old profiles + old live providers stay
+authoritative"*, *"the generation is PUBLISHED only here, after the save
+landed"* — and a durable store write is a publication like any other. The fix
+moves the retirement to `Store.RetireSuperseded`, called from the SAME two
+commit sites as `retireEpisodeAfterCommit`, immediately after persistence: one
+seam, both stores, so the two halves of one rule cannot drift apart. Round 19's
+property survives the move for every repoint that actually commits — the case
+that accumulates in practice — and only a refused candidate's own entry is left
+behind, which `evictLocked` bounds. `keepSource == ""` retires NOTHING, because
+sweeping a profile with no remote source left is IDP-11's `Forget`.
+
+*The transferable form: when a change bounds a resource by DELETING something,
+ask which phase the deletion runs in, not merely whether the arithmetic is
+right. Round 19's reasoning — "a superseded entry is UNREACHABLE" — was true of
+a COMMITTED repoint and false of a speculative one, and nothing in the
+arithmetic distinguished them.*
+
+**P1 — the stale-if-error rule stopped one layer short of the live provider.**
+The owner decision separates an OUTAGE from an ANSWER: a transport failure or a
+5xx may be served from the last-known-good copy, a 404/410/401/403 or an
+unusable 200 may not. That was enforced where a document is ACQUIRED and not
+where a provider is REVALIDATED — `revalidateCacheServingProviders` took its
+compile-error branch for EVERY error class and left the provider live, so a
+provider already serving from cache kept trusting **withdrawn SAML signing
+material** until the seven-day ceiling while the IdP was answering and saying
+it was gone. That is precisely the seven-day exposure the decision's first item
+describes, surviving in the one place the decision did not reach. **A rule
+enforced at one layer and not carried to the next is this review's most
+repeated defect shape** — the OCSP sweep hit it three times in a single round.
+
+The fix needed a POSITIVE classifier, and the reason is the sharp part:
+`idpUnavailableError` is a positive mark for availability, so *"not
+stale-eligible"* is **also** true of an error nobody classified — a parse bug,
+an SP key-pair failure, an SSRF refusal. Retiring on the ABSENCE of the
+availability mark would let an internal fault take down a provider serving
+browser SSO perfectly. So `idpDefinitiveError` mirrors it: retirement requires
+positive evidence that **the IdP spoke**, and anything unclassified leaves the
+provider alone. An SSRF refusal is marked by NEITHER — it is a verdict about
+the DESTINATION, not the IdP speaking about its document, and marking it either
+way would let a DNS change poison the cache or take SSO dark. Retirement reuses
+`retireStaleProvider`, so there is ONE retirement path with one identity rule
+(the under-lock re-check and the atomic stale-serve CLAIM that rounds 9 and 10
+arrived at after two comparison-based attempts raced an admin write); the
+profile stays ENABLED and STORED, so this is a withdrawal of a stale document,
+not a revocation, and the recovery loop republishes as soon as a usable
+document is served.
+
+**One of this round's own gates was VACUOUS, and mutation testing is the only
+reason it is known.** `TestChaos87_DefinitiveClassifierIsDisjointFromStaleEligible`
+claimed to pin that an SSRF refusal is refused by both marks, and it PASSED
+against a mutation deleting the predicate's SSRF guard — because constructing
+through `idpFetchDefinitive` leaves the error unmarked, so `errors.As` fails
+first and the guard is never reached. The case now builds the marked struct
+DIRECTLY, the way a future caller might, and each predicate's guard fails its
+own mutation. *A two-layer defence needs a gate per layer; a gate that enters
+through the outer layer proves nothing about the inner one.*
+
+**Two runbook statements asserted the opposite of what the code does**, both
+the same drift class as the register rows above. The degradation watchdog's
+start was made UNCONDITIONAL in round 5, for the recorded reason that a DP
+receives profiles by snapshot and a node that gains a profile later must still
+be watched — and the runbook said it *"does not run at all on a node with no
+enabled remote-metadata profile"*. And `IDP_AUTHZ_ENDPOINT_UNVERIFIED` is rate
+limited by ONE process-global atomic at `idpMetadataLogInterval` (5 minutes),
+not once per minute per profile as documented, so an operator would have
+misread both the lifecycle and the volume. Both corrected.
+
+**One finding was verified and SKIPPED, with the reason recorded**: a review
+comment asked that `internal/threatfeed`'s `pkgSourceDir` tolerate
+`runtime.Caller` under `-trimpath`. `-trimpath` is used in this repo only for
+release `go build`, never for `go test`, and `qa-race-shards.yml` carries an
+explicit comment that the test build omits it *because* compiled-in source
+paths must resolve. A working-directory fallback would make a wall that is
+reading the WRONG directory pass quietly rather than fail loudly, which is the
+opposite of what every structural wall here is for.
+
+**A follow-up round closed IDP-11 and corrected one of my own regressions.**
+
+**`--new-from-rev` HID A COMPLEXITY REGRESSION THE FULL-TREE RUN SEES.** The
+retirement loop added to `ReplaceAll` took it from 15 to 16 against `cyclop`'s
+max, and `golangci-lint run --new-from-rev origin/main` — the exact command the
+Fast PR Gate runs — reported **0 issues**, because a function's complexity is
+attributed to its DECLARATION line and that line is not new. `reviewdog` on the
+advisory lane reported it. This is round 7's lesson arriving by a second road:
+that round recorded *"measure the functions your diff TOUCHES, not the ones it
+introduces"* after a pre-push `gocyclo` check missed the same thing, and the
+diff-scoped linter misses it for a different reason — not the wrong set of
+functions, but the wrong set of LINES. **So the check to run before pushing is
+the diff-scoped gate AND a full-tree complexity run filtered to the files the
+diff touches**; the first tells you whether CI's Lane A will pass and the second
+tells you whether you made something worse. The remedy is round 7's as well:
+extract (`retireAfterSnapshotCommit`), which also collapsed the duplication
+between the two retirement loops so both stores are now swept from one place.
+
+**THE REFACTOR THEN BROKE MY OWN WALL, WHICH IS THE WALL WORKING.** Moving the
+call out of `ReplaceAll` made the structural gate fail, because it required
+`retireSupersededDocuments` inside that function's body. The fix follows the
+code without weakening the claim: a commit site may satisfy the wall directly
+**or** by delegating to `retireAfterSnapshotCommit`, and **the allowance is
+SELF-CHECKING** — the helper is re-read and must itself carry both retirements,
+so delegating to something that does not retire still fails. That is the
+`draftTestSetup` precedent in this tree, whose allowance re-reads the helper and
+fails if it stops restoring. Both halves were mutation-proven: stripping the
+documents half and stripping the episodes half from the HELPER each fail the
+wall, so the allowance is demonstrably not a hole.
+
+**AND ONE MUTATION PASSED WITHOUT THE GATE BEING VACUOUS — the distinction is
+worth keeping.** Removing `Forget`'s early `profileID == ""` return did not fail
+the control, because the loop's own `e.ProfileID != profileID` comparison
+protects the same property independently; removing BOTH layers does fail it.
+That is a vacuous MUTATION, not a vacuous test: the behaviour really is defended
+twice. Contrast the SSRF case in the round before, where the mutation passed
+because the gate could not REACH the layer it claimed to pin. *When a mutation
+survives, establish which of the two it is before changing anything — one calls
+for a better gate, the other for leaving a deliberate belt-and-braces alone.*
+
+### Codex review round (2026-09-25) — three findings, one of them the sweep's own headline defect left half-closed
+
+**P1 — a RESOLUTION failure was still reported as a CONFIGURATION error on the
+OIDC half.** `fetchOIDCDiscovery` gated on `validateExternalURL`, which
+**resolves the host**, so a DNS outage returned early with "URL must be https://
+and must not point to a private address" *before* `resolveIdPDocument` could be
+reached. The SAML half had been fixed and the OIDC half had not, so the sweep
+shipped with its own primary defect open on one of the two interactive
+protocols — and the error text pointed the operator at their configuration for a
+fault in their resolver. The fix splits the two questions that
+`validateExternalURL` had conflated: `validateExternalURLStructure`
+(`auth_idp.go`) answers the *configuration* question with no resolver at all
+(absolute, http/https, host present, and — for an IP literal, where no
+resolution is needed — not private), and the DNS-backed check stays INLINE in
+`fetchOIDCDiscoveryOverNetwork`, where its failure is a failed FETCH and
+therefore routes to the cache. Round 1 argued that nothing was lost on the
+trust side because *"the authorization endpoint is re-checked by
+`isSafeCaptiveRedirect` at the instant the redirect is issued"*. **That claim
+is FALSE and was corrected in round 2 below** — `isSafeCaptiveRedirect` checks
+shape only, and the endpoint this appliance never dials is the one that needed
+the address check restoring (`refuseDefinitelyPrivateRedirect`). What round 1
+got right is the other half: everything this appliance DIALS from the document
+goes out through `ssrfSafeDialContext`, so a structural check is sufficient
+there. The lesson is the one this file keeps relearning in a new
+costume: **a guard that answers two different questions with one verdict will be
+placed correctly for one of them.** "Is this string a legal configuration?" and
+"does this name resolve to somewhere I may talk to?" have different answers,
+different remedies and different *failure postures* — the first must fail fast,
+the second must fall back.
+
+**P2 — the pre-flight outlived the operation it guarded.** The SAML fix added an
+inline `isPrivateHost(metaURL.Host)` to satisfy the repo's CodeQL convention,
+and `isPrivateHost` resolves under `context.Background()`: an unbounded resolver
+call placed immediately *ahead* of a 15 s request context, i.e. exactly the
+CHAOS-60/64 shape this same file documents, reintroduced by this sweep inside a
+fix for a different fault. Guard and request now share ONE deadline
+(`samlMetadataFetchBudget`, via `isPrivateHostContext`). **A bounded operation
+is only as bounded as its first step**, and a guard added for a static-analysis
+convention is still a step.
+
+**P2 — an episode nothing could ever clear.** `noteIdPMetadataOutcome` returned
+early for `idpMetaInline`, so a profile switched from a remote `metadataUrl` to
+inline `metadataXml` kept its open failure episode forever: `culvert_idp_metadata_degraded`
+pinned at 1 and the `idp_metadata` contract row warning about a remote fetch
+that no longer exists. An inline transition *is* the resolution of a
+remote-fetch episode — the only one available, since with no remote fetch left
+nothing else can produce the evidence — so it now clears that profile's episode
+(only that profile's) and logs `IDP_METADATA_RECOVERED`, while still counting no
+attempt. This is the recovery-on-observed-evidence rule read the right way
+round: **the rule forbids clearing on elapsed time, not clearing on evidence
+that the dependency is gone.**
+
+All three were confirmed by direct inspection, not taken on the reviewer's word,
+and each is pinned by a gate verified failing against its reintroduced pre-fix
+shape (`OIDCDNSOutageIsAnsweredFromCache`,
+`SAMLPreflightIsBoundedByTheRequestBudget`,
+`InlineTransitionClearsAStaleEpisode`), with
+`StructuralValidatorDecidesWithoutAResolver` as the wall that keeps the
+structural validator from being "fixed" back into a resolver.
+
+**A fourth round was pure tooling, and it is worth recording because it is why
+the first three shipped.** The review round's fixes introduced four lint
+regressions — `goimports` twice (an import appended to the wrong group in
+`security.go` and `auth_idp.go`), `funlen` (the inline branch pushed
+`noteIdPMetadataOutcome` to 52 statements against a limit of 50) and `gocritic`
+`offBy1` twice (the SAML pre-flight wall sliced its target function out with
+bare `strings.Index` calls, which return -1 when the anchor is absent and would
+have left every assertion in that gate **vacuously true** — a wall that passes
+because it stopped looking). None was visible locally and `gofmt` sees none of
+them, because **the repo's pinned `golangci-lint` cannot be run against this
+module at all**: v2.5.0's own `go.mod` pins `toolchain go1.24.7`, so every local
+build of it — including with `GOTOOLCHAIN=local`, a cleared `GOCACHE` and
+`GOFLAGS=-a` — gets a Go 1.24 type checker, which either refuses the config's
+`go: "1.25"` outright or panics inside `go/types` on Go 1.26 source. The local
+lint gate is therefore structurally unavailable, and the only signal is a CI
+round trip.
+
+**THAT LAST CLAIM EXPIRED, AND IT IS RECORDED HERE BECAUSE IT COST ROUNDS.** The
+paragraph above says the pinned linter cannot be run locally at all. That was
+true of v2.5.0 — the version installed in the container — and it is NOT true of
+the version the gate actually runs: `pr-fast-gate.yml` installs
+`golangci-lint@v2.15.0`, and `GOTOOLCHAIN=go1.27.3 go install
+github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0` produces a
+binary that type-checks this module and runs the gate's exact command — `run
+--new-from-rev origin/main` — clean. The rounds that accepted a CI round trip as
+the only signal were reading the version on `PATH` instead of the version in the
+workflow. *Take the tool version from the gate that blocks you, the same way the
+toolchain is taken from `go.mod` rather than from whatever `go` resolves to.*
+Two findings came back on the first local run of the right version, and neither
+was reachable from the diff-scoped command alone:
+
+- **`gosec` G703** (taint-analysis path traversal) on three test sites this
+  sweep adds. The gate runs `--new-from-rev`, which is why the many pre-existing
+  G703 sites in `cleanup.go`, `ui_support.go`, `restore.go` and
+  `release_autoseed.go` are grandfathered and these were not — `.golangci.yml`'s
+  `gosec` excludes omit G703 although every standalone `gosec` invocation in
+  `.github/workflows` excludes it *"for parity"*, so the config drifted from the
+  thing it says it mirrors. **Widening the config would weaken a gate outside
+  this sweep's scope**, so the suppressions are at-site and explained; each path
+  is `filepath.Join` of the test's own `t.TempDir()` with a name enumerated from
+  that same directory.
+- **`handleMetrics`' cognitive complexity, 43 on main and 49 with this sweep's
+  metrics block inline.** Both are over the limit, so the violation is
+  pre-existing and `--new-from-rev` cannot see a function GROW: `gocognit` and
+  `cyclop` attribute to the DECLARATION line, which is not new. This is round
+  7's lesson and the `ReplaceAll` 15→16 lesson arriving a third time, now in the
+  one direction that is invisible to BOTH the diff-scoped gate and a full-tree
+  run read without a baseline — *the only honest check is the same measurement
+  on `origin/main` and on the branch.* The block is lifted into
+  `writeIdPMetadataMetrics` verbatim, which returns the function to exactly
+  main's 43.
+
+**A fifth round fixed three P2 defects Codex found, and two of them are the same
+shape as defects this sweep had already fixed one layer away** (register rows
+IDP-14, IDP-15, IDP-16). IDP-14 is the sharpest: round 17 had closed a race
+around the superseded-episode cleanup and written down, in that function's own
+comment, exactly what the harm would be if a republish landed in the window — and
+the predicate *inside* the window still asked whether the compile's GENERATION
+was still current rather than whether anything in service still fetched the
+DOCUMENT, so a republish landing before the lock was even taken produced that
+documented harm with no race at all. **Closing a race around a predicate does
+not make the predicate right**, and the structural wall built to pin the lock
+discipline could not see it; the gate is behavioural where round 17's had to be
+structural, and the wall was extended to reject any re-admission of the
+generation comparison. IDP-15 is the `Delete`/`ReplaceAll` asymmetry again, on
+the CACHE this time: `Delete` has forgotten a removed profile's documents since
+IDP-11 closed, and `ReplaceAll` — the CP→DP snapshot path, i.e. how a cluster
+removes a profile at all — swept the episode and kept the documents, so a
+removal was a no-op for trust material the moment that id and source were
+reintroduced. IDP-16 is the third instance in this sweep of one rule enforced at
+one layer and not the next: the revalidation FAILURE path discarded a superseded
+episode and the SUCCESS-WITHOUT-ADOPTION path did not, although a cache fallback
+succeeds and still opens an episode.
+
+**A sixth round found the same rule missed at a FOURTH layer, and the reason is
+worth more than the fix.** Codex's next review of the round-20 head reported
+that the DARK recovery loop's refused-publication branch still leaked an
+episode (row IDP-17) — and round 20 had *looked at that branch and declined it*,
+reasoning that a compile which succeeded cannot have an open episode. **"The
+compile SUCCEEDED" does not mean the FETCH did**, which is the entire mechanism
+this sweep exists to handle: a dark profile with a usable cached document
+compiles from it while the IdP is down, and the 5xx behind that fallback opens
+an episode. *A rule can be held at three layers and still missed at the fourth,
+and the miss is likeliest when the reasoning that skipped it sounds like the
+rule itself.* So this round added a COUNT WALL over the non-publishing branches
+of both loops rather than one more behavioural gate: four rounds have each
+missed a NEW branch instead of regressing an old one, and a per-branch gate can
+only defend branches that already exist. The wall's first draft asserted the
+wrong count — the author miscounted the branches of the function being fixed —
+and the wall is what said so, which is the clearest case for counting that this
+register has. The round's control was wrong first too, in a way this document
+already records: it drove the competing publication through `Upsert`, which
+holds `r.mu` across its own network compile (row IDP-10), so it parked behind
+the very endpoint the recovery compile was holding and hung until the fetch
+budget expired. *Reading the register's own near-miss would have been faster
+than rediscovering it.*
+
+**The round's own lesson is about the CONTROLS, not the fixes.** Two independent
+sessions fixed these three defects from the same review, and the implementations
+agreed; what differed was what the gates refuse. The cheapest wrong fix for
+IDP-16 — discard UNCONDITIONALLY on that branch — was measured to pass the
+ENTIRE suite with every defect gate in place, and it erases the degradation
+episode on every watchdog tick while an IdP is down, which is a silent failure
+strictly worse than the leaked episode it fixes. **A defect gate proves the
+defect is gone; only a control proves the fix is the right one**, and a fix
+landed without one leaves the next round free to "simplify" it back. The same
+measurement is why IDP-15's disable control is non-negotiable: absence from the
+snapshot, not absence of a remote source, is what makes a profile gone, so a
+DISABLED profile keeps its last-known-good and a re-enable during an outage
+still works (IDP-13).
+
+**The CodeQL stand-down was reversed, correctly, by a later session.** This
+sweep argued at length that no amount of guarding at the SAML metadata call
+site would clear `go/request-forgery`, having tried three reshapings, and
+recommended the owner simply accept the alert. That reasoning had a hole: it
+concluded *"CodeQL's Go SSRF query treats neither a scheme comparison nor an
+error-returning host check as a sanitiser"* and stopped there, without asking
+what this repository's OTHER outbound-request sites do about the same query.
+Two of them — `internal/otlp` and `internal/alerts` — already carry a
+`regexp.MustCompile("^https?://[^/]")` + `MatchString` barrier with a comment
+naming it as exactly that, for exactly this query, on exactly this kind of
+operator-configured endpoint. The fix was one in-repo precedent away the whole
+time (`22197c9`, adding `samlMetadataURLShape` with `(?i)` so an uppercase
+scheme — which `url.Parse` lowercases and the scheme check accepts — is not
+refused, a correct refinement of the precedent rather than drift).
+
+The lesson is not "try harder before standing down"; three attempts was
+reasonable. It is that **the attempts were all reshapings of the same call
+site, and none was a search for how the codebase already answers this**. A
+stand-down argued from the tool's behaviour should not be written before
+grepping for the tool's name in the tree: the barrier the query wants may
+already be a documented convention two packages over. The regexp admits
+strictly less than the scheme check that follows it, so nothing is traded for
+the static-analysis result — which is the one condition under which this
+sweep's own objection ("a static-analysis result is not worth an unbounded
+resolver call") does not apply.
+
+The workable substitute is to run the individual linters, which build against
+the current toolchain without complaint: `goimports -l` over the changed files,
+and `gocritic check -enable=offBy1,rangeValCopy,httpNoBody` over the package
+(filtering to the diff, since the CI gate is `--new-from-rev` and the tree
+carries ~137 legacy findings). That covers every class that bit this sweep.
+The general point is the one this file keeps making about gates: *a check that
+cannot be run before the push is not a gate, it is a notification* — and a
+sweep that adds walls should be most suspicious of the walls it cannot test.
+
+**A sibling tooling finding, recorded because it cost this sweep five
+misreadings in a row: on this repository a red required gate is more often a
+CANCELLATION CASCADE than a verdict, and the two are indistinguishable at
+check-run level.** The cause is GENERIC, not specific to any one job: a push
+that supersedes a head cancels that run's jobs, and every required aggregate
+verifies its dependencies — `cancelled` is not `success`, so the aggregate's
+own `needs-verdict` step refuses and the check run reports
+`conclusion: failure` with no failing test anywhere in it. The sharded
+race+coverage suite (`.github/workflows/qa-race-shards.yml`) adds a second
+instance of the same shape one level down, since its verdict job FAILS CLOSED
+on a missing shard input — correct, and the whole point of the completeness
+proof — so a Fast Gate cascade usually shows TWO failures (the shard verdict
+and the aggregate) while a Deep Gate cascade shows ONE (the aggregate alone,
+with no shard verdict anywhere in it). **Do not go looking for the shard
+verdict when diagnosing this** — that was this note's own first formulation,
+and the Deep Gate falsified it: run 36198970055 on a superseded head measured
+5 cancelled / 4 skipped / 1 success / 1 failure, the failure being
+`Run ./.github/actions/needs-verdict` on the aggregate itself.
+Seven runs on this PR carried this shape: 36187288439 (12 cancelled),
+36187288351 (5), 36196777545 (11 cancelled + the verdict failing closed),
+36197161409 (13 cancelled / 1 failure / 1 success / 4 skipped), 36198050751
+(9), 36198306761 (13 cancelled / 2 failures — verdict AND aggregate) and
+36198306759 / 36198970055 (the Deep Gate pair, aggregate only). The first five
+were each MISREAD as a verdict before the rule was written down.
+
+The operational rule, which applies to anyone driving a PR here to green:
+**read the JOBS of the run, not the aggregate's conclusion, and check the head
+SHA the run belongs to before believing either.** A run whose jobs are
+overwhelmingly `cancelled` is reporting that it was superseded; the only
+signal it carries is about a head that no longer exists. Concretely: fetch
+`/actions/runs?head_sha=<sha>` to confirm the run belongs to the CURRENT head,
+then `/actions/runs/<id>/jobs` and count conclusions — a lone `failure` sitting
+on top of a wall of `cancelled` is the cascade, not a defect. The same
+mechanism also makes a docs-only push mid-run costly, since it cancels the run
+it is trying not to disturb; the honest trade is to take the extra CI cycle
+rather than hold a durable commit for it, because the container is ephemeral
+and the run is not.
+
+### Codex review round 21 — a late Put undoes a committed retirement (IDP-18, closed)
+
+Codex's review of the round-20 head found that a recovery or revalidation fetch
+already on the wire when `Delete` (or a removing snapshot) commits finishes
+afterwards and `Put`s its document back, undoing the `Forget` the commit had just
+run; recreating the same id and source while the IdP is down then compiles from
+the deleted generation's signing material. It was recorded open first, with the
+three candidate fixes and the recommendation, and is now closed with that
+recommendation: a per-profile retirement epoch that `Forget` advances and that
+both acquisition sites capture BEFORE dialling and pass in to
+`Store.PutIfCurrent`. *Compiling is not committing* has two orderings — a
+speculative write must not retire what is in service (round 19), and it must not
+resurrect what a commit retired (this round) — and the fence is checked where the
+write happens, under the store's own lock, never by asking the registry. See row
+IDP-18 for the gates and controls.
+
+### Codex review round 22 — the fence was captured per fetch, the queue was frozen per pass (IDP-19, closed)
+
+Codex's review of the round-21 head found the fence's capture point one step too
+late. The recovery and revalidation loops select their candidates under `r.mu`
+and then compile them serially, so a profile deleted while it waited behind
+another candidate's slow fetch took the already-advanced epoch when its own
+fetch began, and the fence accepted the write. It was recorded open first (row
+IDP-19, with the cheaper per-pass alternative and its cost), and is now closed
+with the recommended option: the epoch is taken at SELECTION, under the same
+lock hold, and carried into the compile. *A token taken "before the fetch" means
+before anything that can be invalidated has been decided, not before the dial*:
+the loop decided at selection. The same push removes a gosec G704 false positive
+that main's newly enforced gate reported on both fetchers. Their signature had
+been `func(string) ([]byte, error)`, the shape of package main's injected
+file-read seams, and a class-hierarchy call graph resolves a call through such a
+seam to every function of that signature. The fetchers now take an
+`idpRemoteURL`, which removes the impossible edge; nothing is suppressed, and the
+inline parse, scheme check and private-host check are unchanged.
+
+### Codex review round 23 — the third queue (IDP-20, closed)
+
+Codex's review of the round-22 head, on #1564 which carries this branch, found
+the same rule at a third site. `ReplaceAll` also compiles a queue of candidates
+outside `r.mu`, and round 22 had left it on capture-at-fetch, reasoning that it
+compiles what it is about to commit. That holds only when the snapshot commits:
+an aborted snapshot publishes nothing, so a candidate deleted while it waited
+stayed deleted with its document re-cached. Every candidate's epoch is now taken
+before the queue starts. *Every queue of speculative compiles is a selection
+point, not only the ones called "recovery".* See row IDP-20.
+
+Captured PER CANDIDATE, and that is now pinned rather than merely intended: one
+epoch shared across the pass passes the defect gate above and gives up the
+per-profile fence, so deleting one profile would stop every other queued
+candidate refreshing its own document. The control that kills that shape only
+works because it deletes and recreates its surviving profile first — otherwise
+every epoch in the test reads 0, both shapes agree, and the control proves
+nothing. Its first draft did exactly that and the mutation passed it, which is
+the reminder that a CONTROL needs its own negative measurement as much as a
+defect gate does.
+
+### Codex review round 19 — identity is (profile, KIND, source), and a superseded entry is unreachable rather than merely old
+
+**AN EPISODE KEY THAT OMITS THE DOCUMENT KIND DISAGREES WITH THE CACHE ABOUT
+WHAT A DOCUMENT IS (P2).** `internal/idpmeta` has keyed its cache
+`kind|profileID|source` since it was written, and `Kind`'s own comment records
+why — *"so one profile that somehow carries both cannot have them collide"*. The
+failure-episode key re-derived a NARROWER identity of `(profile, source)` alone,
+so a profile id reused across a SAML/OIDC type flip whose SAML `metadata_url`
+equals the OIDC well-known URL shared ONE episode between two genuinely
+different documents: the candidate's successful fetch cleared the LIVE profile's
+real outage episode, and a failed persist then left that profile authoritative
+and stale with its degradation clock restarted and its fire-once alert latch
+erased.
+
+**The trigger is contrived and saying so is part of the finding** —
+`/.well-known/openid-configuration` is an OIDC-specific path that no real SAML
+metadata URL ends in — so this is a defect of IDENTITY CONSISTENCY rather than a
+reachable outage. It is fixed anyway for the reason this sweep keeps
+re-learning: *when one layer decides what a value MEANS, every other layer asks
+that layer instead of re-deriving a rule of its own* (SEC-TOTP-1; rounds 6 and 7
+here).
+
+**The ARITY change is the safety argument, not incidental.** Rounds 6 and 7 each
+changed this key's VALUE and a writer that did not consult it drifted silently —
+twice. Carrying the identity as a new `idpDocRef` field in the SIGNATURE makes
+the COMPILER enumerate every call site instead of leaving the enumeration to
+whoever remembers, which is the protection those rounds lacked. The kind and
+source travel as ONE value for the same reason: they cannot be passed
+separately, and `idpRemoteDocumentRef` is the single derivation with
+`idpRemoteDocumentSource` a thin accessor over it, so the pair cannot drift.
+
+**A SUPERSEDED CACHE ENTRY IS UNREACHABLE, AND LEAVING IT BEHIND EVICTED LIVE
+PROFILES' FALLBACKS (P2).** `Put` only ever ADDED keys and the Store had no
+delete API at all, so every repoint leaked a key that `Get` can never read again
+— `Get` is keyed by the profile's CURRENT source. Those dead keys then drove
+`evictLocked`, which is global oldest-first and liveness-blind, so a profile that
+was still live and still serving could lose its ONLY fallback because a
+DIFFERENT profile had been repointed past the cap. That is the cache failing at
+precisely the job it exists for. `supersedeLocked` retires the other entries for
+the same `(profile, kind)` after the replacement is already on disk, which needs
+no liveness knowledge and bounds occupancy to one entry per live
+`(profile, kind)`.
+
+**The review's OTHER suggested remedy — teach eviction which keys belong to
+published profiles — is unsafe here and that is worth recording.** `Upsert` holds
+`r.mu.Lock()` across `compileIdPProfile` (register row IDP-10), which reaches
+`store.Put`, so a liveness callback from inside eviction into the registry would
+take `r.mu.RLock()` while the write lock is held: `sync.RWMutex` is not
+reentrant, so it self-deadlocks — the CHAOS-50 cluster-CA defect exactly. Of the
+two remedies offered, only one is available while IDP-10 stands.
+
+**THE FIX MADE AN EXISTING FIXTURE'S PREMISE UNREPRESENTABLE, WHICH IS THE
+INTERESTING PART.** `chaos87OverlapSetup` built its state by Upserting B then A
+on the recorded reasoning that *"B's cache entry survives — it is keyed by
+(profile, source)"*. That sentence described the accumulation being removed, so
+after the fix a profile holds at most one document per kind and the two-Upsert
+shape leaves A's entry and no B — three round-16 ownership gates then failed in
+their SETUP rather than on their claim. The gates are about episode OWNERSHIP,
+not about caching, so the fixture now writes B's document DIRECTLY through the
+store and every claim is preserved. *When a fix makes a fixture's premise
+unreachable, re-express the premise; do not weaken the gate that rests on it,
+and do not conclude the fix is wrong because a test encoded the old behaviour.*
+
+**AND ONE OF THIS ROUND'S OWN GATES WAS VACUOUS, CAUGHT BY ITS OWN MUTATION
+RUN.** The injectivity gate claimed the length-framing was load-bearing and
+PASSED against a key that left the kind UNFRAMED, because the corpus contained no
+pair that collides under concatenation — `("a","b:c")` and `("a:b","c")` both
+render `a:b:c`. The corpus now carries that pair and the mutation fails. *A gate
+whose claim is broader than its corpus is the same defect as a wall scoped to one
+of two symmetric paths, and the only thing that finds it is running the mutation
+you think is impossible.*
+
+A test-side error is recorded for the same reason: the mechanical transform that
+threaded the new identity through 45 call sites stamped SAML on every bare
+source, and three gates build OIDC profiles, so they seeded episodes production
+never touched. `chaos87Ref` now INFERS the kind from the source — sound rather
+than a guess, because an OIDC source is only ever produced by
+`oidcWellKnownURL` and always carries that suffix — while any gate needing a
+specific kind constructs its ref literally.
+
+Gates: `internal/idpmeta/idpmeta_test.go` (24) + `idp_metadata_chaos_test.go`
+(86). Four mutations verified failing the gate they target: supersession removed
+(the pre-fix shape), supersession unscoped from `(profile, kind)` (the control),
+the episode key reverted to `(profile, source)`, and the kind moved ahead of the
+profile id (which breaks the profile-sweep prefix `forgetIdPMetadataEpisode`
+depends on). RESIDUAL, recorded not closed: a DELETED profile's last entry still
+lingers, since closing it needs a `Forget(profileID)` the registry calls on
+delete — a new cross-layer mutation path into the commit code rounds 6-10
+repeatedly got wrong, so it is its own change.
+
+### Codex review round 18 — a count and a serve are one question, and a lost race is an outcome
+
+**THE FALLBACK COUNT DID NOT ANSWER THE QUESTION ITS OWN HELP TEXT ASKS (P2).**
+`Store.Len` returned `len(s.entries)` while `Get` refuses an entry for five
+conditions the index alone cannot see: a NEGATIVE age (a clock rollback — the
+CHAOS-61 rule), an age past `StaleMaxAge`, `Bytes` outside
+`(0, MaxDocumentBytes]`, a document file that is missing, and a file whose length
+disagrees with the index. The last three are not hypothetical — rounds 11 and 13
+added them precisely because a truncated or over-long document is the reachable
+shape on a volume that filled or was restored from a partial copy. So
+`culvert_idp_metadata_cached_documents`, whose help reads *"Remote IdP documents
+held as last-known-good on this node"*, could report a healthy fallback count on a
+node with NO usable fallback at all — and that gauge is the one reading an
+operator uses to decide whether an IdP outage is survivable. **The failure mode is
+the one this sweep exists to remove: a green surface over a dependency that is
+gone**, the `ocspCoverage` *"found nothing wrong" vs "never consulted"* mistake
+reached by a different road.
+
+Counting and serving are now ONE predicate (`checkServableLocked`) that both
+callers share. A second copy is how five conditions rot apart, and the copy that
+rots is always the one nobody is looking at — the same reasoning that moved the
+badger recovery engine into `internal/storeguard` rather than letting `catdb` and
+`logstore` each keep a copy of an empirical error table. **The wall carries an
+INDEPENDENT expectation column** (`TestServable_AgreesWithGet`, 8 shapes with a
+hand-written `wantGet` for each) rather than comparing the predicate with itself:
+a gate that asks one implementation about itself passes whatever that
+implementation becomes, which is the vacuity this sweep has now hit three times
+(rounds 7, 16 and 17).
+
+**A LOST RECOVERY RACE IS A REAL OUTCOME, SO IT IS COUNTED (P2).** A recovery
+compile can succeed with FRESH metadata — writing it to the cache — while an admin
+`Upsert` publishes the same profile from the STALE cache. `publishRecompiled` then
+correctly refuses, because the generation moved, and the fresh document sits in
+the cache unread while the live provider keeps serving the older one, with nothing
+saying so and nothing scheduled to recompile.
+
+**Publishing the discarded provider is NOT the fix, and that is worth recording
+rather than leaving as an obvious-looking follow-up.** That provider belongs to a
+SUPERSEDED generation: it was compiled outside `r.mu` against a profile the
+registry has since replaced, so adopting it is exactly the write
+`publishRecompiled`'s live-guard exists to refuse — the guard rounds 9, 10, 16 and
+17 all rest on. Round 10 is the direct precedent, where three rounds of patching a
+comparison ended in the conclusion that the STATE had to be keyed differently, not
+that the guard should yield. What is actually missing is a periodic refresh that
+recompiles into the LIVE registry, which is already **IDP-4** and touches the P1-3
+transactional mutation model, so it is its own piece of work and not something to
+bolt onto a loop whose contract is *dark profiles only*. IDP-4's row now names
+this route explicitly.
+
+So round 18 closes the VISIBILITY half alone:
+`culvert_idp_recovery_superseded_total` plus a rate-limited `IDP_RECOVERY_SUPERSEDED`
+line, magnitude in the counter (the standing rule for a line an event can drive —
+a mitigation for an invisibility defect must not become a write-amplification
+one). **Splitting a finding into the half that can ship now and the half that
+needs its own change is the right shape here**, because the alternative is either
+a silent state left standing or an unreviewed write into the registry's
+publication path.
+
+Mutation proofs, each verified failing against the shape it targets: `Len` back to
+`len(s.entries)` ⇒ `TestLen_CountsOnlyServableEntries`; the negative-age check
+dropped from the shared predicate ⇒ `TestServable_AgreesWithGet/negative_age`; the
+silent-discard pre-fix shape ⇒ `TestChaos87_SupersededSuccessfulRecoveryIsCounted`;
+counting EVERY recovery ⇒ `TestChaos87_OrdinaryRecoveryIsNotCountedAsSuperseded`.
+The last is the CONTROL: the cheapest way to pass the defect gate is to count
+every recovery, which makes the counter unreadable rather than absent, and *a
+counter an operator is told to act on is charged only from evidence supporting the
+specific claim its runbook makes* (the CHAOS-65 rule, twice).
+
+The superseded gate uses a SEPARATE gating profile from the one the intervening
+`Upsert` touches, and that is not incidental. Round 16's first attempt held the
+very source the `Upsert` also needed, so both parked on one channel and fell
+through on the same 15 s fetch budget — it passed against the defect. Runtime here
+is ~1.5 s, which is itself the evidence that no timeout is doing the scheduling.
+
+### Codex review round 17 — a self-locking check makes every caller a check-then-act
+
+**THE SUPERSEDED-EPISODE CLEANUP RELEASED THE LOCK BETWEEN DECIDING AND ACTING
+(P2).** Round 12 asked *"does this generation still fetch this source?"* and
+then, on "no", forgot that episode — but `stillFetchesSource` took and RELEASED
+`r.mu` before the answer was used. A concurrent `Upsert` or `ReplaceAll` can
+republish the SAME profile and source from stale cache in that window, opening a
+LEGITIMATE episode under the identical key, which the superseded attempt then
+deletes. The published provider is left serving cached metadata with its
+degradation signal erased, and nothing restores it until the next fetch, so the
+alert an operator depends on never fires. It is the class round 16 fixed in
+`ReplaceAll`, on the path round 12 added, so the answer is the same: the check
+and the act move into ONE hold of `r.mu` (`forgetEpisodeIfSuperseded`), and the
+probe becomes `stillFetchesSourceLocked`, which no longer takes the lock itself.
+**A self-locking check is precisely what makes every caller a check-then-act** —
+that is the transferable form. A READ lock is sufficient and a write lock would
+be wrong: every republisher takes `r.mu.Lock()`, so `RLock` excludes exactly the
+writers that can invalidate the answer while leaving the proxy request path's own
+`RLock` unblocked; lock order stays `r.mu` → `idpMetadata.mu`.
+
+**THE BEHAVIOURAL GATE WAS BUILT FIRST AND PASSED AGAINST THE DEFECT.** Holding
+the write lock and requiring the cleanup not to complete proves nothing here: the
+pre-fix shape blocks behind a held writer too, because its check takes the read
+lock as well. The difference is only WHERE the lock is released, which no
+observer outside the function can see, and the window is microseconds wide and
+cannot be scheduled — the CHAOS-66 adopt/Stop situation. So the mechanism is
+asserted structurally, with a CONTROL that runs the identical predicate over a
+VERBATIM pre-fix body and requires it to be rejected (the `sanitizeLog`
+scan-count precedent), and the behavioural half is RELABELLED as the control it
+actually is: it is still the only thing that would catch a "fix" that dropped the
+lock entirely, or one that deadlocked, neither of which the wall alone rejects.
+
+### Codex review round 16 — episode ownership is read under the lock, not from a pre-compile snapshot
+
+**A SNAPSHOT TAKEN BEFORE A NETWORK FETCH DECIDED WHO OWNED AN EPISODE (P2).**
+`ReplaceAll` snapshotted the registered set at ENTRY — before the compile loop,
+which reaches the network — and then decided episode ownership against that
+reading. `Upsert` cannot drift this way because it holds `r.mu` across its whole
+body; `ReplaceAll` deliberately does not, because the compile reaches the network
+and `HasEnabledInteractiveProvider` is on the proxy request path. **That
+asymmetry is the window, and it is as wide as a metadata fetch.** Both directions
+were wrong against a stale reading: an ABORT read `B != A`, concluded the episode
+was the candidate's and DELETED the episode the LIVE provider owned (suppressing
+a genuine degradation page); a COMMIT compared `A == A` and retired NOTHING,
+leaving the superseded source's episode to age into a page for a configuration
+out of service — round 7's own leak, reopened by reading the wrong generation.
+
+There is no pre-lock snapshot any more, which is the structural half:
+`registeredProfiles()` is replaced by `liveRemoteSourceLocked`, so the stale
+reading cannot be reintroduced by a new caller rather than merely being avoided
+by the current ones. The two aborts that run before the lock acquire
+`r.mu.RLock` themselves; the persist-failure abort already holds the write lock
+and calls the `…Locked` variant directly (`sync.RWMutex` is not reentrant, and
+re-acquiring there is the deadlock CHAOS-50 records for the cluster CA); and the
+commit reads the previous sources UNDER THE LOCK immediately before the swap,
+the last point at which *"what was in service"* can still be answered correctly.
+
+**THE FIRST DRAFT OF THESE GATES WAS VACUOUS AND PASSED AGAINST THE DEFECT.** It
+held the very source the intervening `Upsert` also needed, so both calls parked
+on one channel, both fell through on the same 15 s fetch budget, and the abort ran
+BEFORE the `Upsert` had published anything — the assertion was true for the wrong
+reason. The window is now opened by a HELD GATING PROFILE the `Upsert` never
+touches, so the `Upsert` completes fast while the snapshot is genuinely parked.
+The run time is the tell: 1.5 s instead of 16 s. **A gate whose scheduling depends
+on a timeout is not scheduling anything: if two operations in a race gate can
+block on the same resource, they will serialise and the gate will pass for the
+wrong reason.**
+
+### Codex review round 15 (self-found) — the ceiling was bound to its providers by nothing at all
+
+**AN UNEXPORTED INTERFACE SATISFIED IMPLICITLY IS A COUPLING WITH NO
+COMPILE-TIME LINK (P2).** Found while reviewing round 14, in round 14's own
+code. `idpServedDocumentAger` is unexported and satisfied implicitly, so nothing
+connected it to either provider, and the failure is silent and FAIL-OPEN: rename
+or delete `servedDocumentCachedAt`, `idpServedEntry`'s type assertion returns
+`!ok`, `idpNotePublishedGeneration` DELETES the profile's served-generation
+record, and every profile of that type is exempt from `idpmeta.StaleMaxAge`
+FOREVER — a possibly-withdrawn signing key trusted indefinitely, with no metric,
+log or counter separating *"built fresh, no ceiling needed"* from *"built from
+cache and we cannot tell"*.
+
+**Measured, not reasoned about:** renaming `OIDCFlowProvider.servedDocumentCachedAt`
+left `go build ./...` clean AND THE WHOLE ROOT SUITE GREEN (428 s, every test)
+while every OIDC profile stopped being retired. The SAML rename was caught only
+incidentally, by one gate's `setup:` assertion — so the two halves were not
+equally exposed, the FIFTH instance in this sweep of a rule held on one of two
+symmetric paths. Two layers, and the first makes today's case unreachable rather
+than merely observable: compile-time assertions for both concrete providers
+beside the interface they bind, so a rename is a BUILD failure; and a structural
+wall over the PAIR, derived from `IdPType.Interactive()` and from
+`compileIdPProfile`'s own dispatch rather than a hand-list of two names, because
+a hand-list is exactly how the four earlier one-of-two-paths findings survived.
+Deliberately NOT a runtime counter: the assertions make the
+`!ok`-with-a-remote-source case unreachable, and a gate that cannot fire is the
+dead-code mistake CHAOS-69 records. The LDAP control is not optional — the
+cheapest way to pass the wall is to assert the interface on EVERY provider, which
+would be wrong, since LDAP resolves no remote document and *having no source*,
+not *lacking a method*, is what makes it exempt.
+
+### Codex review round 14 — a fetch is not a publication
+
+**A FAILED SAVE ERASED THE CEILING OF THE GENERATION STILL IN SERVICE (P1).**
+Rounds 8–10 carried the stale-serve evidence (`servedFetchedAt`) on the
+fetch-health EPISODE, and a successful fetch deletes the episode. So a SAML
+`Upsert` that fetched fresh metadata and then failed to persist deleted the
+evidence while the OLD, cache-built generation stayed live and published — it
+was never retired at `idpmeta.StaleMaxAge`, and its (possibly withdrawn) signing
+certificate stayed trusted indefinitely. Reproduced before the fix:
+`TestChaos87_FailedSaveKeepsTheServedGenerationsCeiling` — cache-built
+generation published, fresh fetch + failed save, sweep at `StaleMaxAge+1h`
+returned nothing.
+
+**The two records describe different things and are now kept apart.** An
+episode describes FETCHES; the ceiling describes the PUBLISHED generation.
+`resolveIdPDocument` now RETURNS the cached document's fetch time instead of
+recording it; it travels on the compiled provider (`servedDocumentCachedAt`), and
+`idpNotePublishedGeneration` writes the per-profile `idpServed` record ONLY where
+a generation is published — `Load`'s compile, `Upsert` after persist, `ReplaceAll`
+after persist (`idpReplacePublishedGenerations`, one swap), the recovery loop's
+`publishRecompiled` — and clears it on `Delete`. A fresh or inline generation
+carries no entry. A fetch, successful or not, and a failed save never touch it,
+so a failed update leaves the old generation aging toward the ceiling and
+retiring on schedule. `idpClaimStaleServe` now claims against this record; every
+writer holds `r.mu`, so the lock edge is `r.mu` → `idpServedMu` and round 10's
+claim stays linearizable with publication. The round-8 control
+(`AHealthyLiveProviderIsNeverRetired`) encoded the old coupling — a fresh FETCH
+cleared the evidence — and now requires a fresh PUBLICATION; its companion
+control `SuccessfulFreshPublishClearsTheCeiling` pins that a committed fresh
+generation is never retired.
+
+### Codex review round 13 — two bounds held in one place and not in their twin
+
+**A NEGATIVE CACHE AGE WAS READ AS COMFORTABLY FRESH (P2-A).**
+`idpStaleCeilingSweep` read `age < idpmeta.StaleMaxAge`, so a wall clock stepping
+backwards after a provider began serving cache put the age under the seven-day
+ceiling and the provider kept trusting possibly-withdrawn SAML signing material
+until the clock caught up. `idpmeta.Get` ALREADY refuses a negative age for
+exactly this reason (CHAOS-61: *a negative age is stale, never maximally fresh*),
+so the store's own rule was enforced on the COMPILE path and not on the path that
+decides whether a LIVE provider may keep serving — the half round 8 added
+precisely because a steady-state node never recompiles. Now
+`age >= 0 && age < StaleMaxAge`. The control matters: retiring on EVERY age
+passes the defect gate while taking SSO down each time the clock is nudged.
+
+**THE INDEX READ WAS UNBOUNDED (P2-B).** `loadLocked` used `os.ReadFile` +
+`json.Unmarshal` into a map, so `MaxEntries` bounded WRITES and bounded nothing
+on the boot/compile READ path — the twin of the document-read gap round 11
+closed, left open on the index beside it. `MaxIndexBytes` is DERIVED
+(`MaxEntries × 4 KiB`) rather than picked, and the read is
+`io.ReadAll(io.LimitReader(f, MaxIndexBytes+1))` so one byte past the cap
+distinguishes *at the limit* from *over it*; an over-cap index is treated exactly
+as a corrupt one — start empty, never fail a boot over a cache of a remote
+resource. A file can also carry more RECORDS than the cap, which the byte bound
+cannot see, so `evictLocked` runs after the load loop: the ONE existing retention
+policy is reused rather than a second rule written beside it.
+
+### Codex review round 10 — one finding, and it retires the comparison round 9 added
+
+**A SAME-SOURCE REFRESH HAS THE SAME SOURCE AND A DIFFERENT GENERATION (P2).**
+Round 9 closed the repoint case by comparing the profile's current remote source
+against the victim's. That comparison cannot see the other shape of the same
+race: an `Upsert` or `ReplaceAll` that re-fetches **fresh** metadata from the
+**same** endpoint inside the sweep→lock window publishes a newly compiled,
+healthy provider whose source is unchanged. The comparison passes, and the
+retirement deletes a provider that had just been refreshed — SSO dark for that
+profile until the recovery loop runs.
+
+Reproduced against the round-9 tree before anything was changed: two successive
+`Upsert`s on one source, then `retireStaleProvider(id, source)` returns true and
+`HasEnabledInteractiveProvider` reports false.
+
+**The instrument was wrong, and three rounds on one function is what says so.**
+Round 9 compared the source; round 10 shows a comparison cannot distinguish a
+generation. This review's own rule applies — *three rounds of patching a
+heuristic is evidence the state was keyed wrongly* — so the fix is not a second
+comparison bolted beside the first.
+
+The stale-serve stamp already **is** the generation token: a fresh compile for a
+`(profile, source)` deletes the episode that carries it (`noteIdPMetadataOutcome`,
+`idpMetaFresh`). So the retirement stops comparing and starts **claiming**:
+
+- `idpStaleCeilingSweep` no longer zeroes `servedFetchedAt` on selection.
+  *Selection is not adjudication* — and zeroing there is precisely what left the
+  retirement with nothing but the source to reason about.
+- `retireStaleProvider` calls `idpClaimStaleServe(profile, source, servedAt)`,
+  which under `idpMetadata.mu` requires the episode to still carry that exact
+  stamp, consumes it, and reports whether it was current.
+
+> **One document, one adjudication — moved from SELECTION time to CLAIM time.**
+
+That also closes a residual round 8 left: a victim selected but never retired
+(the profile was deleted mid-sweep) had its evidence consumed by the selection
+and could never be swept again. Now only an adjudication consumes it.
+
+**The new lock edge is `r.mu` → `idpMetadata.mu`**, and it is sound because
+nothing in the tree holds `idpMetadata.mu` across a call into the registry — the
+sweep releases it first, deliberately, which is what round 8 did to avoid an
+inversion. Recorded at the call site so nobody adds the opposite edge.
+
+Two test-authoring notes worth keeping, both found by the gates failing:
+
+- `noteIdPStaleDocumentServed` only stamps an episode that **already exists**;
+  production calls it immediately after the stale outcome opens one. A helper
+  that seeds only the stamp records nothing, so the gate would have asserted
+  against a retirement that can never claim anything — green for the wrong
+  reason. `chaos87SeedStaleServe` mirrors the production pair.
+- The round-8 "reported ONCE" assertion was pinning selection-time consumption,
+  which is the behaviour this round deliberately changes. It now pins the real
+  contract: an unclaimed document stays selectable, a **claimed** one never is,
+  and a stamp cannot be claimed twice.
+
+Mutations: reverting to round 9's source-only check fails the new defect gate
+*and* the control's consume assertion; a never-retire body fails rounds 8, 9 and
+10's controls together.
+
+### Codex review round 9 — one finding, a TOCTOU in round 8's own retirement path
+
+**THE SOURCE IS PART OF THE RETIREMENT VERDICT, NOT DECORATION (P2).**
+`idpStaleCeilingSweep` selects its victims under `idpMetadata.mu` and RELEASES
+that lock before `retireStaleProvider` takes `r.mu`. That release is deliberate
+and correct — retiring reaches into the registry, and no subsystem may hold its
+own lock across a call into another's (the CHAOS-50 cluster-CA rule this sweep
+follows everywhere else) — but it opens a window, and round 8 shipped a
+retirement that could not see into it.
+
+An admin `Upsert` or `ReplaceAll` lands in that window: it repoints the profile
+and publishes a **healthy** provider compiled from a NEW source. The retirement
+then checked only the profile ID and the enabled bit, both of which the
+replacement satisfies, so it deleted a provider that was serving correctly.
+Browser SSO for that profile goes dark until the recovery loop recompiles it —
+an availability fault introduced by the change whose entire purpose is to make
+the *security* posture of the cache enforceable.
+
+The expired document belonged to a `(profile, SOURCE)` pair — the keying round 6
+established — so the retirement is valid only while the profile is still serving
+THAT source. `retireStaleProvider(profileID, source)` re-derives the profile's
+current source under `r.mu` through `effectiveRemoteSource` (round 7's
+one-derivation rule: re-deriving it inline here is exactly how two layers drift
+apart) and refuses on a mismatch.
+
+**Skipping on a mismatch under-enforces nothing, and that is what makes the fix
+a fix rather than a trade.** A repointed profile is no longer serving the expired
+document at all, so there is nothing left for the ceiling to retire; and if the
+new source also falls back to cache, it records its own `servedFetchedAt` and is
+swept on its own terms.
+
+> **This is `publishRecompiled`'s rule — re-check identity under the lock,
+> because the decision was made without it — and round 8 applied it to the
+> PUBLISH path and not to its twin.** The fourth instance in this sweep of a rule
+> held correctly on one of two symmetric paths, after the SAML/OIDC fetchers, the
+> admission gates and the endpoint validator. The remedy each time has been the
+> same: wall the PAIR, not the instance.
+
+The gate carries its own CONTROL, because the cheapest way to pass a
+"must not delete the replacement" assertion is to stop retiring at all, which
+would silently delete round 8's enforcement of the staleness ceiling entirely. A
+victim naming the source ACTUALLY IN SERVICE must still retire exactly as before.
+Both were verified by mutation: removing the source check fails the defect gate,
+and a never-retire body fails the control and round 8's own gate.
+
+### Codex review round 8 — two findings, and the first is this sweep's own security claim
+
+**THE STALENESS CEILING MUST BE ENFORCED ON A LIVE PROVIDER, NOT ONLY AT COMPILE
+TIME (P1).** `idpmeta.StaleMaxAge` is the answer this sweep gives to *"what if the
+IdP withdraws a signing key?"* — the reason a last-known-good cache is a BOUNDED
+degradation rather than an open-ended one. It lives inside `Store.Get`, which is
+reached only from a compile. And a steady-state node never recompiles: an
+unchanged CP snapshot skips `ReplaceAll`, the recovery loop considers only DARK
+profiles, and the watchdog round 5 made unconditional merely ALERTED. So a
+provider compiled from cache stayed live INDEFINITELY on a document the runbook
+states "stops being usable 7 days after it was fetched, after which browser SSO
+stops". For SAML that is continuing to trust a withdrawn certificate; the second
+half is that recovery was never noticed either, because nothing re-fetched after
+the endpoint returned.
+
+*The documentation was right and the code did not implement it* — which is this
+sweep's recurring shape (a documented property enforced on one path) turned on
+its own central claim.
+
+The watchdog now ENFORCES rather than reports: `idpStaleCeilingSweep` finds
+providers whose served document passed the ceiling and `retireStaleProvider`
+stops serving them — removed from `r.live`, left ENABLED and STORED, i.e. DARK,
+exactly the state a fresh boot past the ceiling produces. The profile is
+deliberately not disabled and not deleted: the operator's configuration is
+correct, it is the DOCUMENT that expired, and leaving it enabled-but-dark is both
+the fail-closed posture and what hands it to the recovery loop. The fetch time is
+carried in memory (`servedFetchedAt`) so the ceiling's VALUE stays the store's and
+the watchdog needs no disk read, and `idpMetadata.mu` is released before retiring
+because retiring takes the registry write lock — CHAOS-50's rule against holding
+one subsystem's lock across another's call.
+
+**A provider live from a FRESH fetch is never retired, however old the cached copy
+beside it is.** Retiring on cache age alone would take SSO down every seven days
+on a completely healthy fleet: a self-inflicted outage far worse than the defect,
+and the cheapest wrong fix here, so it is pinned as a control.
+
+**RETIRING IS ONLY SAFE BECAUSE RECOVERY IS RE-ARMED, and the two must ship
+together.** `runIdPRecoveryLoop` RETURNS once nothing is dark, and it was started
+exactly once from the startup slice — so a retirement would have left the profile
+dark with nothing retrying it, SSO down until a restart or a config change. That
+is strictly worse than the expired document the retirement exists to stop serving.
+`armIdPRecoveryLoop` single-flights the loop on an `atomic.Bool`, the startup
+slice routes through it, and the watchdog re-arms on every tick while anything is
+dark — so a CAS that loses to a loop about to exit costs at most one
+`idpMetadataWatchdogInterval` and the window closes by REPETITION rather than by
+holding a lock across a goroutine's lifetime.
+
+> **A fix that takes capacity away is only safe once the way back is wired in the
+> same change.** Detection, enforcement and recovery are one mechanism; shipping
+> two of the three is how a hardening change becomes an outage.
+
+**EVERY ABORT ROLLS BACK EVERY CANDIDATE'S EPISODE (P2).** `ReplaceAll` is
+all-or-nothing, but its two in-loop abort paths discarded only the profile that
+failed. A snapshot that stale-compiled an earlier CHANGED-SOURCE candidate —
+opening a speculative episode for a source about to be rejected with the rest of
+the snapshot — then left that episode to age into a degradation page for a
+configuration nobody ever ran. The rule was already written on the persist branch
+(*"the WHOLE snapshot is rejected, so every candidate's speculative episode
+describes a configuration that is not in service"*) and applied to one of three
+paths; the partial-progress case needs it precisely because the loop makes
+progress before it fails.
+
+**The reproduction is the subtle part and the first draft got it wrong.** An
+episode for the source ALREADY IN SERVICE is a genuine outage signal that must
+SURVIVE a refusal (rounds 6 and 7 established exactly that), so only a
+*repointed* candidate's episode is speculative. The first gate gave the earlier
+candidate the same source it was already live on and therefore failed against the
+fix rather than against the defect — *a gate that fails for the wrong reason is
+still telling you something, and here it was that the scenario, not the code, was
+wrong.*
+
+### Codex review round 7 — three findings, and two of them are round 6's own fixes
+
+**A GATE THAT ADMITS WHAT THE COMPILE REFUSES IS A CACHE-POISONING PATH (P1).**
+Round 6 wired the document gate `resolveIdPDocument` applies to
+`parseOIDCDiscoveryStructural` — the half without the address check — so the gate
+became WEAKER than the verdict that decides whether a provider goes live, and
+`resolveIdPDocument` caches whatever its gate accepts. A 200 discovery document
+that parses, whose endpoints are structurally legal, and whose
+`authorization_endpoint` resolves into a private range therefore passed the gate:
+`Store.Put` OVERWROTE the last-known-good copy, a FRESH acquisition was recorded
+— clearing the episode, advancing `LastSuccess` — and only then did the
+authoritative parse refuse the provider. The document that could be compiled was
+gone, so the next outage found only the refused one. Recovery defeated by the
+acquisition that reported success, and the surface said healthy while the
+provider was dark.
+
+This is round 1's P1 (*defer caching until validation succeeds*) re-opened for
+exactly the one check round 6 moved out of the gate, which is why the fix is not
+a revert: the gate is now the AUTHORITATIVE parse, and
+`fetchOIDCDiscovery` CARRIES OUT the result the gate produced instead of
+recomputing it. That keeps round 6's property — the address lookup and its
+counter still run exactly ONCE per document — while making the gate and the
+verdict the same question. Two lookups remain possible in one case, and it is not
+waste: when a FETCHED document is refused and a CACHED one is then vetted before
+being served, those are two different documents and each must be judged.
+
+> **Bound the cost by not doing the work twice, never by asking a cheaper
+> question.** Round 6 reached for the second when the first was available, and
+> paid for it with a weaker gate in front of a cache.
+
+The gate for it is deliberately BOTH halves, and saying which matters because
+they are usually separate tests:
+`TestChaos87_PrivateAuthzEndpointStillFailsClosedWithNoCache` is a DEFECT gate
+for the mis-reporting (pre-fix, with nothing cached, the refused document was
+recorded `fresh` with `LastSuccess` advanced and no episode, so the only
+operator signal said healthy while the provider was dark) AND a CONTROL that
+the refusal still happens at all, since the cheapest way to pass the primary
+gate is to stop refusing the document and reopen the redirect path round 3
+closed.
+
+**A COMMITTED REPOINT MUST RETIRE THE SUPERSEDED SOURCE'S EPISODE (P2).** Round
+6 keyed episodes by `(profile, source)`, which closed the REFUSAL path and left
+the COMMIT path leaking. A live profile serving cached metadata from source A
+carries an open episode for A; a successful edit to a healthy source B clears
+only B's key, and nothing in the process fetches A any more — so A's episode can
+never be cleared by evidence, ages past `idpMetadataDegradedAfter`, and the
+watchdog round 5 made unconditional pages indefinitely for a configuration that
+is no longer in service. `ReplaceAll` had the identical retention behaviour.
+Retiring it is not *clearing on elapsed time*: the evidence is that the
+dependency is GONE, which is the same rule the disabled and inline arms beside it
+already apply. The controls carry the other half — a refused compile and a failed
+persist both leave the OLD configuration authoritative, so A is still the source
+in service and its episode is a live outage signal; both were verified failing
+against a retire-unconditionally shape.
+
+> **Re-keying state fixes every reader that consults the key and no reader that
+> does not.** When a key changes, enumerate the WRITERS of that state as well —
+> the commit path never asked the question the refusal path was rewritten around.
+
+**ONE DERIVATION MEANS ONE STRING, NORMALISATION INCLUDED (P2).** Round 6 made
+`oidcWellKnownURL` the single derivation of the discovery URL — fetch target,
+cache key, episode source — and left the trailing-slash normalisation OUTSIDE it,
+in `fetchOIDCDiscovery`. Neither admission gate normalises an issuer, so one
+ending in `/` is ordinary stored configuration: the acquisition recorded its
+episode under the trimmed key while `idpRemoteDocumentSource` derived the
+untrimmed one, and a refused edit's cleanup again looked up a key that never
+existed. Round 6's own finding, one layer down, in the helper it created to
+prevent it. The trim now lives inside the helper and both call sites lost theirs.
+
+> **A single derivation that excludes the normalisation is two derivations.**
+
+**THE ROUND-7 FIX THEN FAILED THE COMPLEXITY GATE, AND THE REFACTOR FOUND A
+STRONGER PROPERTY THAN THE ORIGINAL SHAPE HAD.** `Gate · golangci-lint` went red
+on the first round-7 commit: `cyclop` put `ReplaceAll` at 16 against a max of 15,
+and `gocognit` put the new repoint gate at 34 against 30 — both because the fix
+wrote the episode-retirement rule out TWICE and the gate nested its assertions
+two closures deep. Local `golangci-lint` cannot run on this module (a Go 1.25
+binary against a Go 1.26 module), and the pre-push `gocyclo` check measured the
+functions the change ADDED rather than the existing ones the change pushed over
+the line — *measure the functions your diff touches, not the ones it introduces.*
+
+The remedy is the shape the finding argued for anyway: one
+`retireEpisodeAfterCommit` helper called once from each publication site, which
+is how the two paths are kept from drifting — the very defect round 7 fixed.
+`Upsert` drops 18 → 13 and `ReplaceAll` 16 → 11. Re-running the mutation proofs
+against the refactored shape produced a result the original did not: dropping the
+`prevSource != newSource` guard fails ALL FIVE subtests rather than the two
+controls, because the commonest state of all is a profile recompiling against the
+SAME still-broken source. Without that guard the write retires the episode the
+stale compile just opened, so an ongoing outage's degradation signal is erased by
+every recompile and `culvert_idp_metadata_degraded` can never reach its
+threshold — strictly worse than the leak the change exists to fix. *A refactor
+forced by a lint gate is worth re-running every mutation proof through: the
+guard's most important consequence was one the first shape's gates could not
+see.*
+
+**AND A GATE OF MINE WAS VACUOUS FOR A REASON WORTH RECORDING.** The behavioural
+half of the trailing-slash gate drove `Upsert` with an OIDC profile carrying no
+`ClientID` — and `NewOIDCFlowProvider` refuses on a missing client id BEFORE it
+calls `fetchOIDCDiscovery`, so no episode was ever recorded and the assertion
+passed against the exact divergence it exists to catch. It was caught only by
+running it against the true pre-fix shape (the trim in the caller, absent from the
+helper) rather than against a plausible mutation of the helper alone. *A mutation
+that removes a fix is not the same as the defect: reproduce the DIVERGENCE, not
+one side of it — and a gate must be shown to reach the code under test, because a
+precondition failing earlier looks exactly like the invariant holding.*
+
+### Codex review round 6 — two findings, and the first one retires a heuristic three rounds had been patching
+
+**AN EPISODE IS KEYED BY (PROFILE, SOURCE).** `Upsert`/`ReplaceAll` compile a
+candidate SPECULATIVELY, before deciding whether to publish it. With one episode
+entry per PROFILE, a candidate that reused an id shared that entry with the live
+profile, and the sharp case — the fresh evidence beyond the round-3 thread — is
+the live source ALREADY FAILING when a repoint arrives: the refusal path then
+DELETED a genuine, ongoing outage episode for the source still in service,
+losing its fire-once page and restarting its degradation clock. Symmetrically, a
+candidate that stale-compiled and then failed to PERSIST left its own episode
+attached to a profile whose configuration had not changed, reporting an outage
+against an edit that was rejected. What an episode describes is a failed fetch
+against a SOURCE, so that is now the key.
+
+**Rounds 3, 5 and 6 were all ONE distinction, and it belonged in the key rather
+than in a predicate.** Round 3 added `idpEpisodeBelongsToLive` to decide whether
+a refusal may forget; round 5 found it answered wrongly for a candidate with no
+source at all; round 6 found it could not express the case where both sources
+exist and one is already failing, and that it was never consulted on the PERSIST
+path at all. The predicate is DELETED. A refusal now discards the candidate's own
+`(profile, source)` episode unless that is the source already in service — one
+comparison, on both refusal paths. *Three rounds of patching a heuristic is
+evidence the state was keyed wrongly.*
+
+**The source string must have exactly ONE derivation, and it did not.** The
+episode was recorded under the OIDC WELL-KNOWN URL — what `resolveIdPDocument`
+receives, and also the cache key — while the cleanup computed its key from the
+raw ISSUER, so the lookup named a key that never existed. This was caught by a
+round-3 gate that began failing the instant the key changed, which is the
+argument for keeping behavioural gates around old findings. `oidcWellKnownURL` is
+now the single derivation and `idpRemoteDocumentSource` returns the DOCUMENT url.
+
+> **When one layer decides what a value MEANS, every other layer must ask that
+> layer rather than re-derive the rule** — the SEC-TOTP-1 lesson, one subsystem
+> over, where a key-identity comparison that canonicalised differently from its
+> verifier was a silent security failure.
+
+**A VALIDATOR `resolveIdPDocument` MAY RUN TWICE MUST BE DETERMINISTIC AND
+FREE.** It runs on fetched bytes to decide whether to cache them, and again on
+cached bytes to decide whether they are still usable. Routing the
+side-effecting, DNS-resolving parse through it made every acquisition whose
+authorization host could not be resolved pay the authorization-host budget
+TWICE and increment `culvert_idp_authz_endpoint_unverified_total` by two — on
+boot and on every CP→DP snapshot apply, i.e. in exactly the outage the counter
+exists to report. `parseOIDCDiscoveryStructural` is the validator's half;
+`parseAndValidateOIDCDiscovery` adds the address check. That split is
+principled rather than a concession: whether a document parses and whether its
+endpoints are structurally legal are properties OF THE BYTES — deterministic,
+free, identical on every call — while whether a hostname currently resolves into
+a private range is a property of the NETWORK at one instant, which two calls may
+legitimately disagree about. A validator that may be invoked more than once per
+input must not carry either a side effect or a network dependency.
+
+### Codex review round 5 — four findings, and three of them are one rule applied to only one of two places
+
+**COMPILING IS NOT COMMITTING.** Round 4 closed the inline-transition episode
+by clearing it inside `compileIdPProfile` — which runs BEFORE the inline
+document is parsed and before the registry mutation persists. So a REJECTED
+inline edit (unparseable XML, or a failed write) erased a still-live remote
+profile's genuine outage episode and suppressed its alert, while that profile
+stayed authoritative. The clear moved to the publication sites, after `persist`
+lands, under the rule the DISABLED case already used one line away: *a profile
+with no remote source left can never have its episode cleared by evidence
+again.* One condition now covers disabled and inline in both `Upsert` and
+`ReplaceAll`, and the `idpMetaInline` outcome plumbing is deleted rather than
+relocated — the fix removes a special case instead of adding one.
+
+**The gate found a different defect from the one it was written for, and that
+is the entry worth keeping.** Written to prove that a refused inline edit
+preserves the episode, it failed on the REFUSAL path rather than the clear
+path: round 3's `idpEpisodeBelongsToLive` compares the two profiles' remote
+sources for EQUALITY, and an inline candidate has NO source — so it answered
+*"the episode belongs to the candidate"* for a candidate that performs no fetch
+and therefore cannot have opened one. **Episode ownership is about which
+profile performed the FETCH, not about the two sources matching**; a
+source-free candidate leaves the episode with the live profile. Round 3's rule
+was right about the case it was written for (an id reused against a DIFFERENT
+unreachable source) and silently wrong about the case where the candidate
+fetches nothing at all.
+
+**A BOUNDED OPERATION IS ONLY AS BOUNDED AS ITS FIRST STEP — on the OIDC half,
+after round 2 fixed it on the SAML half.** `fetchOIDCDiscoveryOverNetwork`
+still gated on `validateExternalURL`, which resolves under
+`context.Background()`, so the guard ran to the OS resolver's full budget
+before the request context existed, on boot and on every CP→DP snapshot apply,
+and delayed reaching the cached document this sweep exists to serve. The fix is
+mechanical; the finding is not. **This is the THIRD finding this sweep produced
+from the same SAML/OIDC asymmetry** — the admission gates (round 2) and the
+endpoint validator (round 3) were the other two — and in each case one half was
+fixed and its twin was left. The wall that should have caught this one was
+scoped to `fetchSAMLMetadataOverNetwork` alone. It is now a TABLE over the
+pair, which also refuses `validateExternalURL` in either fetcher; the mutation
+proof is that reintroducing the old call fails the OIDC arm while the SAML arm
+still passes, which is precisely the shape that kept slipping through.
+
+> **A wall scoped to one of two symmetric paths is how an asymmetry survives.
+> Wall the PAIR, not the instance.**
+
+**A START THAT NEVER HAPPENS CANNOT BE OBSERVED BEHAVIOURALLY.** Round 4's
+degradation watchdog was gated on `hasEnabledRemoteMetadataProfile()` evaluated
+ONCE at boot, and additionally sat inside the `-idp-profiles-file` block — so an
+appliance that later gained a remote profile had no goroutine left to notice
+its outage, and a DP that receives its profiles ONLY through the CP→DP snapshot
+never had one at all. The documented alert could therefore never fire for
+exactly the profile an operator had just added, on exactly the fleet nodes
+whose configuration is pushed to them. The gate's own justification was that it
+saves one sleeping goroutine, which is not a correctness gap's price, so the
+start is unconditional and at function-body depth. **Its gate keys on
+INDENTATION rather than on the condition's spelling**: the first wall looked for
+a condition mentioning "Profile" and would have sailed past the enclosing
+`IdPProfilesFile` block the start also had to escape — a wall that pins one
+spelling of one gate pins nothing.
+
+**The fourth finding is REPORTED, NOT FIXED, and the reason is that every
+available fix trades something this sweep exists to protect (register row
+IDP-9).** An OIDC `authorization_endpoint` whose address cannot be DETERMINED —
+resolver outage, or the check's own budget spent — is admitted unverified, and
+it is the one discovered endpoint this appliance never dials, so the
+SSRF-guarded dialer does not cover it and `isSafeCaptiveRedirect` checks only
+shape. Refusing on an unknown verdict takes SSO down whenever THIS node's
+resolver cannot resolve the authorization host, even though the user's browser
+can, and hands a resolver outage the power to reject a cached document — this
+sweep's headline defect. Re-checking at redirect issuance puts a synchronous
+resolve on the PROXY REQUEST PATH (`CaptiveLoginURL` is reached from
+`proxy_portal.go`), which is the CHAOS-60/64 defect this file documents at
+length. Both closing designs are recorded with the row rather than half-built.
+What changed is that it is no longer SILENT:
+`culvert_idp_authz_endpoint_unverified_total` plus a rate-limited line naming
+the profile, and a runbook entry pointing at the actual cause.
+
+**Two SUITE-LEVEL findings fell out of driving this PR, and both are the
+sweep's own subject matter applied to the tests rather than to the appliance:
+a gate that depends on state it does not establish, and a gate that asserts a
+property its environment cannot measure.** Neither is CHAOS-87 code; both are
+recorded here rather than fixed, because fixing them means editing packages
+this change does not touch (register rows **SUITE-1** and **SUITE-2**).
+
+**SUITE-1 — `Deep · determinism (shuffle, count=2)`, an unestablished
+precondition.** `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound/bound_makes_the_bare_append_safe`
+(`request_tracing_bounds_test.go`) asserts that the per-request decision line
+carries exactly one ` identity=` and one ` action=` token. But `handleRequest`
+AUTHENTICATES BEFORE IT EVALUATES POLICY, and the test establishes no auth
+posture — it calls only `resetTracingBoundsStateForTest()`, which resets the
+tracing counters. So when the shuffled order happens to place a test that
+configures a credential in the process-global `cfg` ahead of it, the request is
+refused with `AUTH_FAIL (no-credentials)` and **no decision line is emitted at
+all**; the token count is 0 and the gate fails. Reproduced deterministically
+against the exact tree CI ran (`9c7673a`) with CI's own seed, failing in both
+passes of `-count=2` while `-count=1` without shuffle passes.
+
+Two things about it generalise. **Its own vacuity guard cannot see this**:
+`if !strings.Contains(line, "req_id=")` exists precisely to catch *"no decision
+line was emitted; this gate is testing nothing"*, and `AUTH_FAIL … {req_id=…}`
+satisfies it — so the guard reports health while the gate tests nothing about a
+policy decision. That is the same shape as the vacuous walls this file records
+on the SOCKS5 log-injection path and in CHAOS-87 round 2, in a guard written to
+prevent exactly it. **And reproducing it required the EXACT tree**: `-shuffle`
+permutes the actual test list, so the same seed against a list with more tests
+in it yields a different order — a repro on the branch tip could neither
+confirm nor exonerate, and the first attempt here was invalid for that reason.
+**The order does not have to be hunted, and the fix already exists in-repo.**
+Re-verified against the merged tree, the repro is DETERMINISTIC rather than
+seed-dependent: add one test that leaves a credential on the global `cfg`
+exactly as its siblings do, let source order put it first, and the gate fails
+with `AUTH_FAIL (no-credentials) … {req_id=…}` every run. **And it is not a rare
+draw** — 44 tests in the root package mutate the process-global auth credentials
+with no snapshot or restore, across `proxy_test.go`, `ui_test.go`,
+`socks5_test.go`, `final_coverage_test.go` and fourteen more files; any one of
+them landing first poisons it. The fix is ONE line, `setupProxyTest(t)`
+(`proxy_test.go`), which replaces `cfg` wholesale and resets the blocklist, IP
+filter, rate limiter and policy — every global the request path reads, not just
+auth — and whose own comment already records this exact flake class (*"without
+resetting here, the flake only shows up under -count>1 / -shuffle=on"*). The
+`POLICY_` guard is still worth tightening in the same change, but it is
+belt-and-braces rather than the fix.
+
+**The fix is MUTATION-PROVEN not to be vacuous**, which matters because
+silencing a gate is worse than the flake it silences: with the bound it pins
+reintroduced as a defect (`acceptableTracingHeaderValue` returning `true`), the
+FIXED gate still catches it, and catches it more strongly than before — it now
+reliably reaches a real `POLICY_DEFAULT_DENY` line and reports the ESC byte and
+both doubled tokens, where previously it could only reach that line by luck of
+ordering. A test-isolation fix that makes a gate deterministic must be shown to
+leave its detection power intact; this one increases it.
+
+**SUITE-2 — `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy`,
+a zero-margin timing ratio under `-race`.** The assertion is a bare
+`if fast.NsPerOp() >= legacy.NsPerOp()`. This file documents that path at
+**376 ns/op against 887 ns/op**; in the race lane both arms measured ~6-14x
+slower AND inverted (**5881 against 5141**), so the gate failed with no
+regression present. This is the standing conclusion of this file — *a gate that
+can flake gets muted* — and the package has ALREADY applied it once:
+`TestBenchGate_LookupsTakeNoFeedLock` is deliberately structural because "the
+scaling-ratio gate was built first and rejected because its margin narrows to
+1.35x under `-race`, too thin for a per-PR runner." This is the sibling that
+kept the ratio. The principled fix is the same replacement, not a wider bound:
+loosening it enough to tolerate a 1.14x inversion also admits a real 1.4x
+regression, and the allocation gate beside it (bound 2, hardware-independent)
+already carries the substance of the optimisation.
+
+The transferable rule, which is this file's own discipline turned on its test
+suite: **a gate must establish every precondition its assertion depends on, and
+must not assert a property the environment it runs in cannot measure.** The
+first makes a gate order-dependent; the second makes it environment-dependent.
+Both present as flakes, and neither is one.
+
+The new validator's one security-relevant job is classifying an IP LITERAL with
+no resolver, and the direction it must not get wrong is admitting a private one,
+so `StructuralValidatorClassifiesOnlyLiterals` pins the IPv4-mapped IPv6 forms
+explicitly — the same fail-open reading that `security.go`'s shared `prefixSet`
+normaliser carries a differential test for, verified failing here against the
+naive "16 bytes means IPv6" shape. It also pins what the function deliberately
+does NOT decide: a decimal, octal or abbreviated host (`2130706433`,
+`0177.0.0.1`, `127.1`) is passed on, because the guards downstream refuse on the
+RESOLVED address and are therefore robust to spelling in a way no string check
+is. Verified in both directions rather than assumed: Go's pure resolver rejects
+all three outright, cgo's `getaddrinfo` accepts them and the pre-flight then
+refuses them by resolved address (`localhost` measured as *"resolves to private
+address 127.0.0.1"*). Both closed.
+
+### Codex review round 2 — the headline defect was still open on the path it was about
+
+Three findings, all confirmed by reading the code rather than taken on the
+reviewer's word, and the first is the sweep's own primary defect surviving a
+round that claimed to have closed it.
+
+**P1 — the fix was applied below the gate that refuses.** Round 1 moved
+`fetchOIDCDiscovery` off the resolving validator, and a gate
+(`OIDCDNSOutageIsAnsweredFromCache`) proved a cached document answers a DNS
+outage. Both were true and neither was sufficient: `validateUpsertProfile` and
+`validateIdPProfile` still called the RESOLVING `validateExternalURL` on the
+OIDC issuer, and **admission runs before compilation while the cache lives
+behind compilation** — so during a resolver outage the admin write was still
+refused and `ReplaceAll` still aborted the entire CP→DP snapshot, which is
+finding (4), the fleet-wide config veto, unchanged. The gate could not see it
+because it called `fetchOIDCDiscovery` DIRECTLY, i.e. below both real admission
+gates. **This is the third instance in this one sweep of a wall proving less
+than it looks** (the SOCKS5 log-injection note states it twice: *sanitising one
+argument of a call does not sanitise the call*, and *walling one call shape does
+not wall the path*), and the transferable form is sharper: **a gate that enters
+the system below the layer that refuses cannot observe a refusal.** Drive the
+outermost caller — here `ReplaceAll`, the fleet-wide path — or the gate is
+describing a code path no operator reaches.
+
+**P2 — a security REGRESSION this sweep introduced, documented as its own
+mitigation.** Round 1 replaced the discovery parser's `validateExternalURL`
+with the structural form and justified it in three places (PR, review, CLAUDE.md)
+with *"the authorization endpoint is a browser redirect re-checked by
+`isSafeCaptiveRedirect` at the instant it is issued"*. That function checks
+`raw != ""`, absolute, `http`/`https`, `u.Host != ""` — **shape only, no address
+check whatsoever**. So a discovery document, or a cache file edited by anything
+with `dataDir` write access, could name `authorization_endpoint:
+https://internal.corp/…` and the appliance would redirect a user's browser
+there. The distinction that makes the rest of the argument sound is exactly the
+one that was missed: the token and JWKS endpoints are DIALLED (so
+`ssrfSafeDialContext` genuinely covers them), the authorization endpoint is
+NOT — nothing of ours ever connects to it. `refuseDefinitelyPrivateRedirect`
+restores the check for that one endpoint, refusing only on `ssrf.ErrBlocked`
+(definite) and allowing *could-not-determine*, so a resolver outage cannot
+reject a cached document. **The lesson: a claim that one guard covers what
+another used to do is a claim about code, and it has to be READ, not inferred
+from the name.** "Re-checked by isSafeCaptiveRedirect" sounded right and was
+never opened.
+
+**P2 — an episode recorded for a profile that never existed.** Compilation
+records a failure episode before the transactional Upsert/ReplaceAll decides
+whether to publish, so a REJECTED candidate left an episode behind for a
+profile not in the registry; degradation is derived from elapsed time and only
+a fetch or an inline transition cleared one, so nothing ever would — an
+indefinite degraded gauge, contract row and eventual alert for a dependency
+nobody configured. `forgetIdPMetadataEpisode` generalises the inline rule
+(clearing on evidence the dependency is GONE is not clearing on elapsed time)
+and is wired to rejection, delete and disable. The rejection case carries the
+one subtlety worth keeping: it forgets only when the id is **not already
+registered**, because a refused EDIT of a live profile leaves that profile
+authoritative and still down, and deleting its episode would hide a real
+outage.
+
+### Found while verifying this sweep's own claim — recorded, NOT fixed (IDP-8)
+
+Round 2's fix rests on the assertion that the token and JWKS endpoints need
+only a structural check because this appliance DIALS them through
+`ssrfSafeDialContext`. Having just been wrong twice about exactly this kind of
+claim, that one was read rather than inferred, and it holds:
+`NewOIDCFlowProvider` sets `transport.DialContext = ssrfSafeDialContext` and the
+`jwksCache` is handed that same client.
+
+Reading the loop closely surfaced something else. It validates
+`AuthorizationEndpoint`, `TokenEndpoint` and `JWKsURI` — **three of the five
+endpoints the discovery document names.** `IntrospectionEndpoint` and
+`UserinfoEndpoint` are persisted into the profile config
+(`NewOIDCFlowProvider`), used for outbound requests, and validated **nowhere**:
+not by this loop, not for scheme, not before or after this sweep (the
+pre-CHAOS-87 loop covered the same three).
+
+What they carry is the finding. `enrichFromUserinfo` sends
+`Authorization: Bearer <accessToken>` to `p.disc.UserinfoEndpoint`, and
+`introspect` sends `req.SetBasicAuth(p.cfg.ClientID, p.cfg.ClientSecret)` —
+**this appliance's own client secret** — to `p.disc.IntrospectionEndpoint`, on
+every cache-missing authentication. `ssrfSafeDialContext` refuses a PRIVATE
+resolved address, so the SSRF direction is covered; a **public cleartext**
+endpoint is not, because nothing checks the scheme. So an IdP's published
+document (or a cache file edited by anything with `dataDir` write access) can
+direct this appliance's client secret and its users' bearer tokens onto a
+plaintext channel, and the appliance will comply.
+
+**Recorded rather than fixed, deliberately.** Adding the two endpoints to the
+existing structural loop would be nearly free but buys almost nothing — the
+dialer already covers SSRF and `validateExternalURLStructure` permits `http`
+either way, so it is close to cosmetic. The change that would matter is
+REFUSING a non-`https` credential endpoint from discovery, and that is a
+POSTURE decision an owner should make: it would break self-signed/dev
+deployments that today rely on `TLSSkipVerify`, and it belongs in its own
+change with its own gates rather than folded into a third review round of a
+resilience sweep. The honest summary is that this sweep made the discovery
+document's endpoints no less safe than it found them, and found that three of
+five were the only ones anybody had ever checked.
+
+### Register rows
+
+| Row | Finding | Status |
+|---|---|---|
+| **IDP-1** | Interactive IdP compile depends on a live third-party fetch; no last-known-good | **CLOSED** — `internal/idpmeta`, bounded by `StaleMaxAge` |
+| **IDP-2** | A boot-time compile failure is permanent for the process lifetime | **CLOSED** — `idp_recovery.go`, rate-bounded + jittered + evidence-gated |
+| **IDP-3** | Enabled-but-not-live is invisible: no metric, row, alert or health field | **CLOSED** — `idp_metadata_health.go`, `culvert_idp_enabled_not_live` |
+| **IDP-4** | Metadata is refreshed only on compile, so a long-lived process can hold a document indefinitely and miss an IdP key rotation. Round 18 found a SECOND route to the same latency, arriving sooner than the ceiling: the recovery loop compiles without `r.mu`, so an admin `Upsert` publishing that profile from the STALE cache can win the race against a recovery fetch that has just retrieved a FRESH document, leaving the fresh document in the cache, unread, while the live provider serves the older one | **NARROWED to a HEALTHY IdP by the owner-decision round; both routes named above are CLOSED.** `revalidateCacheServingProviders` recompiles every live provider that is serving a cached document at the recovery loop's bounded rate, and `publishRevalidated` installs the result only when `idpRevalidationAdopts` says it was built from a NEWER document — fetched live (zero `cachedAt`), or a cached copy stamped after the served one, which is exactly the round-18 superseded route. It is published under `publishRecompiled`'s re-check (still present, still enabled, same generation, and the live provider still the exact one revalidated), so this is NOT the "publish the discarded provider" fix the earlier status line warned against and must still not be attempted: the adopted provider is compiled fresh inside the revalidation, never resurrected from a superseded compile. **What remains is narrower and is the opposite case**: `idpServedEntry` returns no served record when `servedDocumentCachedAt` is zero, so a provider built from a LIVE fetch is never a revalidation candidate and `runIdPRecoveryLoop` exits once nothing is dark and nothing is cache-serving — a signing-key rotation at a REACHABLE IdP is therefore still noticed only when something recompiles (boot, an admin save, a CP→DP snapshot). Closing that is the periodic refresh on `internal/feedsched` this row has always named, and it is also `cacheDuration`'s home (IDP-7): a refresh cadence is what that hint actually governs |
+| **IDP-5** | `ReplaceAll` is all-or-nothing, so on a node with **no** cached document (first enrollment, newly added profile) an unreachable IdP still rejects the whole IdP set and aborts the snapshot | **OPEN** — steady-state nodes are covered by IDP-1; closing it properly means classifying reachability failures separately from validation failures inside the config-sync path, which deserves its own review |
+| **IDP-6** | The SAML SP key pair is EPHEMERAL (`ensureSPKeyPair`, regenerated per process) and therefore differs on every node and after every restart — SP metadata is node- and restart-dependent, and encrypted assertions cannot be decrypted by a node that did not issue the AuthnRequest | **OPEN, REPORTED NOT FIXED** — persisting it is a key-management decision with cluster-distribution consequences, not a resilience patch |
+| **IDP-7** | A fetch does not honour the metadata document's own `cacheDuration` | **NARROWED by the owner-decision round — `validUntil` is CLOSED.** `samlValidUntilOf` reads `validUntil` from the `EntityDescriptor` AND from the enclosing `EntitiesDescriptor` that `samlsp.ParseMetadata` discards, takes the earlier of the two, and the stale ceiling is now `min(StaleMaxAge, validUntil)` on the compile path and in the live ceiling sweep alike — carried on `idpServedDoc.validUntil` through the same `idpServedDocumentAger` interface the fetch time rides, so the compile-time assertions bind it the same way. `cacheDuration` remains, and it is a DELIBERATE decision rather than an oversight: it is a refresh HINT — how often a relying party should re-fetch — not a statement that the document has expired, so enforcing it as a stale-if-error ceiling would retire a document the IdP never said was invalid, taking SSO down mid-outage on the strength of the IdP's own advice about polling. Its correct home is the periodic refresh in IDP-4. **This row was left asserting a bound that had just been built, which is the lesson worth carrying**: the round that implemented `min(7d, validUntil)` recorded it in the §49 narrative and in the operator runbook and did not narrow the row, so the register — the one artifact a reader consults to learn what is still open — went on claiming the cap did not exist, and the next reader would either rebuild it or trust "the 7-day ceiling bounds the exposure" as the only bound. It is the same shape as the runbook naming an endpoint that was never registered (CHAOS-70 round 2) and as a note whose claim was broader than its wall (round 7), one artifact over: **a register row is a contract about what is open, so a change that closes half a row narrows the row in the SAME change.** |
+| **IDP-9** | An OIDC `authorization_endpoint` whose address CANNOT BE DETERMINED (resolver outage, or the check's own budget spent) is admitted UNVERIFIED. That endpoint is handed to the user's BROWSER, so no dialer of ours ever re-checks it and `isSafeCaptiveRedirect` validates only shape; nothing re-compiles a LIVE provider, so a host unresolvable at compile time that later resolves private is a browser redirect into the internal network | **OPEN, REPORTED NOT FIXED — POSTURE.** Refusing on an unknown verdict is not free: it takes SSO down whenever THIS node's resolver cannot resolve the authorization host, even though the user's browser could, and it hands a resolver outage the power to reject a cached document — this sweep's own headline defect. So the trade is an owner's, not a sweep's. It is no longer SILENT: `culvert_idp_authz_endpoint_unverified_total` plus a rate-limited log line naming the profile. Two closing designs were considered and are recorded rather than half-built: (a) resolve the verdict when the document is ADMITTED to the cache — the network path, where DNS is by definition working — and carry it with the document, which needs a cache-schema change; (b) memoise the verdict on the provider and resolve it OFF the request path, failing closed until it answers. A synchronous re-check at redirect issuance was REJECTED: `CaptiveLoginURL` is on the proxy request path (`proxy_portal.go`), and a blocking resolve there is exactly the CHAOS-60/64 defect this review documents at length |
+| **IDP-10** | **`Upsert` holds `r.mu.Lock()` ACROSS `compileIdPProfile`, which reaches the network** — so an admin saving an IdP profile whose metadata endpoint is slow or blackholed stalls the PROXY DATA PLANE. `proxy.go:350` calls `idpRegistry.HasEnabledInteractiveProvider()` on the request path and that takes `r.mu.RLock()`, so every proxied request blocks for the whole fetch: up to `samlMetadataFetchBudget` (15 s) or `oidcDiscoveryFetchBudget` (10 s), from ONE click on Save. **Measured against the real registry**, not reasoned about: with the metadata response held, the request-path probe was still blocked after 3 s and returned only when the fetch completed. **The rule is already written down TWICE in this tree and applied to two of its three writers** — `idp_recovery.go`'s `publishRecompiled` compiles outside the lock with the reason in its comment, and `ReplaceAll` does the same (round 16 restates it) — so this is the SIXTH instance in this sweep of a rule held on one of two (here, two of three) symmetric paths, and the one it was not applied to is the one reachable from the LIVE admin API. It is CHAOS-57's theme (*the admin plane may never take down the data plane*) in the STALL form rather than the exit form. | **OPEN, REPORTED NOT FIXED — one concern per change.** Pre-existing: the network fetch inside the compile is defect (1) of this sweep and the lock scope predates it, so nothing here introduced it and CHAOS-87 does not widen it. Closing it means giving `Upsert` the `publishRecompiled` shape — compile outside `r.mu`, then re-check still-present / still-enabled / same-generation under the lock before publishing — which is a structural change to the one registry writer whose current correctness argument is *"it never releases the lock"*: rounds 6, 7, 9, 10 and 16 all lean on that, so it needs its own gates for each, not a round appended to this PR |
+| **IDP-11** | **A DELETED profile's cached documents were never removed.** Round 19 bounded cache occupancy to one entry per live `(profile, kind)` by retiring superseded sources, and the review round after it moved that retirement onto the registry's commit sites. What remained was the DELETE case: the Store had no `Forget`, so a profile removed from the registry left its entries behind — feeding the global, oldest-first, liveness-blind `evictLocked` on behalf of a profile that no longer exists, so with more than `MaxEntries` (64) profiles having ever existed a LIVE profile's only fallback could be evicted for a dead one | **CLOSED.** `Store.Forget(profileID)` removes every entry for the profile whatever its kind or source, called from `Delete` AFTER its persist lands — beside `forgetIdPMetadataEpisode`, on the position that was already the commit site. **CodeRabbit added the reachability this row had missed, and it is the sharper half**: `Get` is keyed by `(profile, kind, source)`, so a profile RECREATED under the same id pointed at the same source was served the PRE-DELETION document during an outage — metadata an operator had deliberately deleted, including whatever signing material it carried, for up to `StaleMaxAge`. **The deferral rationale this row carried had expired and saying so is the point**: it read *"a NEW cross-layer mutation path into the commit code rounds 6, 7, 9, 10 and 16 each got wrong in turn, so it needs its own gates"* — true when written, and no longer true once the round before this one BUILT that path and gated it, which made `Forget` a small sibling rather than a new mechanism. *A recorded deferral is a judgement about the state of the tree at the time, not a standing permission: re-read its reason before relying on it.* The lock order is safe in the one direction that matters — `Delete` holds `r.mu` and `Forget` takes only the store's own mutex, never calling back into the registry, which is the IDP-10 self-deadlock this row warned about and still warns about for any eviction-side alternative. Gates: `TestForget_RemovesEveryDocumentForTheProfile` (both kinds, index AND disk), `TestForget_IsScopedToTheProfile` (another profile survives; an empty id is not a wildcard), `TestChaos87_DeleteRetiresTheProfilesCachedDocuments` (end to end, including that a recreate during an outage cannot compile from the deleted document) and `TestChaos87_RefusedDeleteKeepsTheCachedDocuments` as its CONTROL — a delete whose persist fails leaves the profile stored AND live, so retiring its fallback would take a serving profile dark at the next outage |
+| **IDP-12** | **The cached document's fetch time is RECONSTRUCTED from a delta, not read from the store, and the reconstruction is only correct while a parse and a log write stay under half a second.** `Store.Get` holds the stamp (`time.Unix(e.FetchedAt, 0)`, a whole second written by `s.now().Unix()`) and returns an AGE against its own clock read; `serveCachedIdPDocument` then rebuilds the stamp as `time.Now().Add(-age).Round(time.Second)`. That reproduces the store's second exactly only while the gap between the two clock reads is under 500 ms — and the owner-decision round's own comment states the purpose as making two compiles of ONE document agree. Between those two reads the function runs **two full XML parses of a remote-supplied document up to 1 MiB** (`validateSAMLMetadataDocument` → `samlsp.ParseMetadata`, then `samlValidUntilOf` → a second `xml.Unmarshal`), a mutex-taking `noteIdPMetadataOutcome`, and a `logger.Printf` that `internal/logsink` documents as **BLOCKING the caller on a full queue**. Past 500 ms the rebuilt stamp is `F+1`: one second AHEAD of the store's own. Two consequences, and the first is the one that bites. (1) `idpRevalidationAdopts` adopts on `cachedAt.After(servedAt)`, and BOTH values are independent reconstructions of the same `F` — so a revalidation that fell back to the IDENTICAL cached document reads "a newer document", `publishRevalidated` swaps the live provider and re-stamps `idpServed`, and because the replacement is still cache-serving it stays a revalidation candidate and `runIdPRecoveryLoop` never settles: pointless provider swaps on a live browser-SSO path, each moving the recovery counters, for a document that never changed. (2) `Round` moves the stamp FORWARD, so the stale window's start moves later and the ceiling is extended — by at most a second, immaterial in itself, but it is the UNSAFE direction in a file that adopts CHAOS-61's *a negative age is STALE, not fresh* explicitly | **OPEN, REPORTED NOT FIXED — LOW severity, and the fix is to stop reconstructing rather than to re-tune the rounding.** Reaching it needs a large document or a saturated log sink, and the cost is churn plus a ≤1 s window, never a trust failure — which is why it is reported rather than folded into the round that found it. `Store.Get` already has the stamp in hand at the line that computes the age, so returning it removes the delta, the 500 ms dependency and the two-clock problem together; **truncating instead of rounding is the lesser fix** (it matches the store's own `Unix()` truncation and fails toward the safe side) but still leaves the stamp derived twice. This is this sweep's own standing rule arriving once more: *when one layer decides what a value MEANS, every other layer asks that layer rather than re-deriving it* (SEC-TOTP-1; rounds 6 and 7 of this section, where a value derived in two places drifted and a writer was reconciled against a key that never existed). Closing it changes `internal/idpmeta`'s read signature and every caller of `resolveIdPDocument`, so it needs its own gates — including one that holds the two clock reads apart deliberately, since the defect is invisible at microsecond δ and no existing gate can observe it **The class was enumerated from the PRIMITIVE rather than from the file, and it came back a single instance**: `idpmeta.Store.Get` is the ONLY accessor in the tree that returns an age for a caller to invert into a timestamp, and every other `time.Now().Add(-...)` site is a self-contained constant (certificate `NotBefore` backdating, a pruning cutoff derived from a window). So the blast radius of the proper fix is exactly one signature, and there is no second copy to keep in step |
+| **IDP-13** | **A profile a committed `Upsert` DISABLES, or switches to inline SAML metadata, keeps its cached document indexed** — `retireSupersededDocuments` returns early on an empty source, by design, so the entry occupies a slot and adds pressure to the global, oldest-first `evictLocked`. Raised by CodeRabbit after IDP-11 closed the `Delete` half | **OPEN, REPORTED NOT FIXED — a POSTURE between two failure modes, and the eviction hazard it cites has a DIFFERENT root.** The early return is deliberate and `TestRetireSuperseded_KeepSourceEmptyRetiresNothing` pins it: a DELETE is terminal, which is why `Forget` on delete is unambiguously right, but a DISABLE is REVERSIBLE, so forgetting there means an operator who disables a profile and re-enables it DURING an outage gets a dark profile instead of one that compiles from cache — an immediate, deterministic SSO outage caused by a cleanup, against an accumulation hazard that needs more than `MaxEntries` (64) profiles to have ever existed. **The hazard as stated — "oldest-first eviction can remove a LIVE profile's fallback" — is real but is NOT caused by these entries**: a profile live and serving from cache has an OLD `FetchedAt` PRECISELY BECAUSE IT CANNOT REFRESH, so during a long outage it is often the oldest entry in the store and a prime eviction candidate whether or not any disabled profile's entry is present. Forgetting on disable reduces pressure and closes nothing. **Servability-aware eviction does not close it either** (considered, since round 18 already built `checkServableLocked`): a disabled profile's entry inside the ceiling is still servable by that predicate, so preferring unservable entries would only reclaim ones already past `StaleMaxAge`. **The root is that `evictLocked` is LIVENESS-blind**, and IDP-11 records the constraint on fixing that — liveness must be passed IN, never called OUT, because `Upsert` holds `r.mu.Lock()` across `compileIdPProfile` (row IDP-10) which reaches `store.Put`, so querying the registry from inside eviction takes `r.mu.RLock()` under the write lock and self-deadlocks (the CHAOS-50 cluster-CA defect). *Aim a fix at the liveness-blindness, not at the entry count.* Taking the availability trade the other way is a one-line change plus inverting that gate, and belongs to an owner as an explicit decision rather than arriving as a side effect of a cleanup |
+| **IDP-14** | **The superseded-episode cleanup confused GENERATION ownership with DOCUMENT-SOURCE ownership, so a superseded compile deleted the episode of the provider that is live.** An episode is keyed by `(profileID, kind, source)` and by nothing else, but `stillFetchesSourceLocked` also required `p == generation`. A recovery or revalidation compile runs outside `r.mu` because it reaches the network, so a re-save — or a snapshot reasserting the identical configuration — can commit a NEW generation for the SAME source while that compile is out; the cleanup then saw a different pointer, read "superseded", and deleted the episode that now belongs to the live provider, one that is legitimately degraded on that very document. Its degradation clock restarts and the alert latch is dropped, so the page the operator depends on never fires. **This is verbatim the outcome round 17's own comment describes, and it SURVIVED round 17**: that round closed the window between the check and the act, while the check inside the window still asked the wrong question — a republish landing BEFORE the lock is taken needs no race at all. *Closing a race around a predicate does not make the predicate right*, and the structural wall built to pin the lock discipline could not see it. Found by Codex | **CLOSED.** The predicate now asks only whether the profile currently registered under this id — whatever generation it is — is enabled and still depends on this document ref. Generation identity still decides PUBLICATION, inline in `publishRecompiled` under the write lock, where installing a provider compiled for a retired generation would put superseded operator configuration back into service; that was already its only other home, so the parameter was pure harm where it stood. Gates: `TestChaos87_SameSourceRepublishKeepsTheEpisode` (behavioural, where round 17's had to be structural), the pre-existing `TestChaos87_SupersededRecoveryFailureLeavesNoEpisode` as the opposite-direction control — mutation-proven to fail against the cheapest wrong fix, a cleanup that forgets nothing — and the round-17 wall extended to reject any re-admission of a generation comparison |
+| **IDP-15** | **A snapshot that REMOVES a profile never forgot its cached documents, so a removal was a no-op for the trust material.** IDP-11 closed this for `Delete`; `ReplaceAll` — the CP→DP snapshot-apply path, and therefore how a clustered fleet removes a profile at all — swept the episode and kept the documents indefinitely. `Store.Get` keys on exactly `(kind, profileID, source)`, so an id and source the fleet has used before is served its PRE-REMOVAL document when it is reintroduced, signing material included; during an outage that is the only thing it is served. The same hazard IDP-11 recorded, one writer over, and the writer a cluster actually uses. **The asymmetry hid behind a correct-looking comment**: `retireAfterSnapshotCommit`'s cache sweep is documented as running over the COMMITTED set rather than over `prevSources`, with a sound reason (an id new to this snapshot can carry documents for a source it no longer fetches) — which covers reuse with a DIFFERENT source and silently excludes removal and reuse with the SAME source. Found by Codex, with an end-to-end reproducer | **CLOSED.** `retireAfterSnapshotCommit` forgets the documents of every id in the previous set that is absent from the committed one, through `forgetDeletedProfileDocuments` — the advisory helper `Delete` was already using inline, factored so the two writers cannot drift again. Absence from the snapshot, not absence of a remote source, is the test, which is what keeps IDP-13's posture intact: a DISABLED profile is still configured and keeps its last-known-good. Gates: `TestChaos87_SnapshotRemovalRetiresTheProfilesCachedDocuments` (including end to end, that reintroducing the id+source during an outage cannot compile) with `TestChaos87_SnapshotDisableKeepsTheCachedDocuments` as its CONTROL — the cheapest wrong fix is to sweep every id the snapshot leaves without a remote source, which would trade a bounded accumulation hazard for a deterministic SSO failure on re-enable |
+| **IDP-16** | **A revalidation that SUCCEEDED but adopted nothing left behind an episode nothing would ever clear.** A revalidation compile that falls back to the cache succeeds, and the failed fetch behind that fallback opens an episode exactly as a stale acquisition does. The failure branch of `revalidateCacheServingProviders` has discarded a superseded episode since round 12; the success-without-adoption branch reached `continue` without asking the question. So a profile disabled, deleted or repointed while the fetch was in flight had its episodes swept at the commit, and then this late fallback opened a FRESH one for a configuration no longer in service: nothing fetches that source again, no evidence can ever clear it, the diagnostics stay degraded for a profile the operator has already turned off, and the watchdog pages once it ages past `idpMetadataDegradedAfter`. Found by Codex | **CLOSED.** The branch runs the same guarded discard the failure branch runs, which is a no-op while the profile is still in service on that source — the ordinary case on every watchdog tick during an outage, and the reason the discard must stay conditional. **The guard is only trustworthy because IDP-14 fixed what "still in service" means, and the control is the part worth keeping**: `TestChaos87_StaleRevalidationAfterADisableLeavesNoEpisode` is the defect gate, and `TestChaos87_NonAdoptingRevalidationKeepsALiveEpisode` was added after the cheapest wrong fix — forgetting UNCONDITIONALLY on that branch — was measured to pass the ENTIRE suite. That mutation erases the degradation signal on every tick during an outage: a silent failure, strictly worse than the leaked episode it fixes, and nothing in the tree objected. **Third instance in this sweep of one rule enforced at one layer and not the next** — the shape the narrative already calls this review's most repeated defect |
+| **IDP-17** | **The DARK RECOVERY loop's refused-publication branch left an episode nothing would ever clear — the FOURTH instance of this one rule missed at a NEW layer.** A dark profile holding a usable cached document compiles FROM it while the IdP is down, so the 5xx behind that fallback opens an episode exactly as a stale acquisition does. When the operator disables the profile mid-fetch, `publishRecompiled` correctly refuses, the disable's own cleanup has already run — before this episode existed — and the branch only logged `noteIdPRecoverySuperseded`: the episode is left for a configuration no longer in service, unclearable by evidence, ageing past `idpMetadataDegradedAfter` into a page for a provider the operator turned off. Found by Codex, whose report named the decisive evidence precisely — *"the live-revalidation branch now performs guarded cleanup, while this dark-recovery success branch still does not"* | **CLOSED, and the reason it was missed is the part worth keeping.** The round that fixed IDP-16 looked at this exact branch and declined it, reasoning that a successful compile cannot have an open episode. **"The compile SUCCEEDED" does not mean the FETCH did** — that is the whole mechanism of this sweep, applied everywhere except to the branch that reports a superseded publication. A rule can be held at three layers and still missed at the fourth, and the miss is likelier when the reasoning that skipped it *sounds* like the rule. Both `noteIdPRecoverySuperseded` sites now carry the guarded discard: the dark-recovery one is reproduced end to end, and the revalidation one closes the CLASS on a narrower path that was NOT reproduced (reachable only when a concurrent compile wrote a newer document while this fetch fell back) and is recorded as such rather than claimed. Gates: `TestChaos87_DarkRecoveryLostRaceLeavesNoEpisode` with `TestChaos87_DarkRecoveryLostRaceToALiveProviderKeepsTheEpisode` as its CONTROL — the other way to lose the race is to go LIVE on the same source, where the episode is the new provider's live outage signal, so the cheapest wrong fix (a bare unconditional forget) erases the alert for a provider serving stale metadata right now. **And a COUNT WALL, `TestChaos87_WallEveryUnpublishedCompileBranchDiscardsItsEpisode`**, because four rounds each missed a NEW branch rather than regressing an old one, and a per-branch behavioural gate can only cover branches that exist: the revalidation loop must carry three guarded discards and the dark loop two, so adding a branch fails the wall and forces a decision instead of silence. **The wall's first draft asserted four and was wrong**, and that is the strongest argument for it — the author miscounted the branches of the function being fixed, and the wall is what said so. Its control is the mutation that deletes a discard. **The control's first draft was also wrong, in the way this register already records**: it published the competing generation through `Upsert`, which holds `r.mu` across its own `compileIdPProfile` (row IDP-10) and therefore parked behind the held endpoint the recovery compile was using — hanging 46 s until the fetch budget expired, the identical vacuity round 16 hit (*"it held the very source the intervening Upsert also needed, so both calls parked on one channel"*). The live entry is now installed directly, because what the branch reads is only `publishRecompiled`'s live-guard |
+| **IDP-18** | **A fetch already on the wire when a deletion commits writes the document back AFTERWARDS, undoing the committed retirement — so a profile recreated under the same id and source during an outage compiles from the DELETED generation's signing material.** `store.Put` is called from `resolveIdPDocument`, i.e. during the COMPILE, before any writer has decided to publish; `Forget` is called at the COMMIT. A compile that started before `Delete` (or a removing snapshot) commits therefore finishes after it and recreates exactly the entries the retirement removed. Publication correctly refuses the deleted profile, which is why this is invisible in the registry — the damage is durable and in the cache. **This is the precise MIRROR of the defect round 19 introduced and the round after it fixed**: that round retired superseded documents inside `Put` and was wrong because *compiling is not committing*; here the retirement is correctly at the commit and is undone by a `Put` that is correctly speculative. One rule, both orderings, and fixing one direction left the other open. Found by Codex, which also distinguished it from IDP-15 exactly right — *"Unlike the earlier snapshot-removal finding, `Forget` does run successfully here — the late fetch writes the document back afterward"* | **CLOSED** — option (1), the retirement epoch passed IN. `idpmeta.Store.Forget` advances a per-profile in-memory epoch unconditionally (also with nothing cached, so a brand-new profile deleted during its FIRST fetch is fenced too); both acquisition sites take `Store.Generation(profileID)` BEFORE dialling and hand it through `resolveIdPDocument` to `Store.PutIfCurrent`, which checks the epoch and writes under one hold of the store lock and returns `ErrRetired` otherwise. The registry is never consulted from inside the store, so the IDP-10/IDP-11 constraint holds. Gates: `TestChaos87_LateFetchCannotUndoACommittedDelete` (the recorded end-to-end reproduction; fails with the epoch check disabled), `TestPutIfCurrent_RefusesAWriteThatStraddlesAForget`, `TestPutIfCurrent_FencesTheFirstFetchToo`; controls: `TestChaos87_RecreateAfterDeleteStillCaches` and `TestPutIfCurrent_ARecreateStillCaches` (the fence is not a tombstone), `TestPutIfCurrent_AnUnrelatedDeleteDoesNotFence` (not a store-wide counter), `TestPutIfCurrent_RefusesAForeignGeneration`. A false refusal costs one missed cache refresh, never trust: the fence fails toward no fallback |
+| **IDP-19** | **The IDP-18 fence is captured PER FETCH, but candidates are compiled SERIALLY from a snapshot — so a delete that lands while an EARLIER candidate is still on the wire happens BEFORE the later candidate reads its epoch, and its write is accepted.** `revalidateCacheServingProviders` and `runIdPRecoveryLoop` each take one candidate list under `r.mu` and then compile its entries one at a time, while `Store.Generation` is read inside the fetch path ([auth_saml.go](../auth_saml.go), [auth_oidc_flow.go](../auth_oidc_flow.go)) — i.e. once per compile, not once per pass. For the Nth candidate the epoch is therefore read after candidates 1…N−1 have each completed a NETWORK fetch, so an admin delete inside that span is already reflected in the epoch the Nth candidate carries: `PutIfCurrent` sees a match and writes the deleted profile's document back. Publication still correctly refuses the profile, so again nothing shows in the registry and the damage is durable and in the cache. Found by Codex, which drew the boundary exactly — *"deletion happens before a queued candidate starts fetching, whereas the current fence covers deletion after epoch capture"* | **CLOSED (round 22) with the recommended option — reproduced end to end first.** The recorded reproduction: two dark profiles A and B with cached documents, A's endpoint HELD so B queues behind it, `Delete` of B committed while A is on the wire (the commit's `Forget` is observed removing B's document), then A released: B compiled, captured the POST-delete epoch, and `Store.Get` found B's document back. **SEVENTH instance in this sweep of one rule enforced at one layer and not the next**, and the most instructive because the previous round's fix was CORRECT at the layer it addressed: *before dialling* is the right boundary for a single fetch and the wrong one for a serial queue, where the only sound boundary is *when the candidate was selected*. A token is only as fresh as the moment it is taken, and that moment belongs to the caller that froze the work list. **The fix**: `darkCandidate.cacheGen` carries the epoch read in `darkEnabledProfiles`/`cacheServingProfiles` under the same `r.mu` hold that selects the candidate (`Delete` runs `Forget` under the `r.mu` write lock, so the two are ordered), and both loops compile through `compileIdPProfileAt(candidate, &cacheGen)`, which threads it through `newSAMLProviderAt`/`newOIDCFlowProviderAt` to `resolveIdPDocument` via `idpFetchGeneration`. `Upsert` and the boot compile run under `r.mu`, so they keep the capture-at-fetch default (`compileIdPProfile` = `compileIdPProfileAt(p, nil)`), which is exact at their own write boundary. *This row first said the same of `ReplaceAll` — "it compiles the profiles it is about to commit" — and that was wrong for an ABORTED snapshot; see IDP-20.* **The cheaper per-pass alternative was NOT taken**: it would make an unrelated profile's delete fence this one, the property `TestPutIfCurrent_AnUnrelatedDeleteDoesNotFence` pins at the store. Gates: `TestChaos87_QueuedDarkRecoveryCandidateCannotRecacheADeletedProfile` (Codex's reproducer through the real `runIdPRecoveryLoop`) and `TestChaos87_QueuedRevalidationCandidateCannotRecacheADeletedProfile` — both fail with their loop's compile reverted to capture-at-fetch; wall `TestChaos87_RecoveryLoopsCompileWithTheSelectionEpoch` pins both loops; CONTROL `TestChaos87_QueuedCandidateStillCachesAfterAnUnrelatedDelete` (a queued candidate still caches its fresh document when an UNRELATED profile is deleted during the wait) |
+| **IDP-20** | **`ReplaceAll` is the THIRD serial compile queue outside `r.mu`, and IDP-19's fix left it on capture-at-fetch.** A snapshot compiles its candidates one after another without the lock, so a candidate can wait behind another's slow fetch while an admin `Delete` commits; with the epoch read when its own fetch began, `PutIfCurrent` accepted the write after the delete's `Forget`. If the snapshot then ABORTS — a later candidate fails validation or compile, or persistence fails — nothing is published, the profile stays deleted, and its document is back in the cache: recreating it during an outage compiles from the deleted generation's signing material. IDP-19's row had excused this site on the reasoning that `ReplaceAll` *compiles the profiles it is about to commit*, which holds only for a snapshot that commits. Found by Codex (round 23), with a reproducer | **CLOSED.** `ReplaceAll` captures every candidate's epoch in one pass under `r.mu.RLock` BEFORE the compile queue starts and compiles through `compileIdPProfileAt(p, &gen)`, as the recovery loops do; a refused write still compiles (one missed cache refresh, never trust), so a snapshot that commits is unaffected. `compileIdPProfileAt`'s contract now says which callers may pass nil: only those compiling under `r.mu`. Gate `TestChaos87_QueuedSnapshotCandidateCannotRecacheADeletedProfile` — snapshot `[first (held), gone, invalid]`, `gone` deleted while queued, the invalid candidate aborts — fails with the `ReplaceAll` site reverted to capture-at-fetch (`Get` finds the document). CONTROL `TestChaos87_QueuedSnapshotCandidateStillCachesAfterAnUnrelatedDelete` pins the capture as PER CANDIDATE: a single epoch shared across the pass passes the defect gate and silently gives the per-profile fence up, and fails this one. It discriminates only because it deletes and recreates its surviving profile first, so that profile's epoch is non-zero while the others' are 0 — the first draft read 0 everywhere and the per-pass mutation passed it |
+| **IDP-8** | Two OIDC discovery endpoints — `userinfo_endpoint` and `introspection_endpoint` — are dialled with a bearer token and the client secret respectively without ever being validated, so a document that downgraded one to plain `http` would send credentials in cleartext (the SSRF-guarded dialer still bounds the destination, so this is a confidentiality issue, not an SSRF one) | **OPEN, REPORTED NOT FIXED** — found while verifying this sweep's own claim that the discovery endpoints were covered; refusing non-`https` for credential-bearing endpoints is a POSTURE change that breaks dev/self-signed deployments relying on `TLSSkipVerify` and belongs in its own change with its own gates, not folded into a resilience sweep's third review round |
+| **SUITE-1** | `TestSecReqID1_BareReqIDInDecisionLineIsSafeOnlyBecauseOfTheBound` asserts on a `POLICY_*` decision line but establishes no AUTH posture, and `handleRequest` authenticates before policy — so an order that configures a credential first refuses the request and emits no decision line. Its own vacuity guard (`Contains(line, "req_id=")`) is satisfied by the refusal line, so it reports health while testing nothing. 44 root tests mutate the global auth credentials with no restore, so the poisoning order is common, not a rare draw | **CLOSED on main by CHAOS-69 (#1446)**, with the same one-line fix this row proposed — `setupProxyTest(t)`, the repo's own helper for this flake class — reached independently. **It also corrects this row**: CHAOS-69 applied the fix to the SIBLING gate `TestSecReqID1_EndToEndLogAmplificationIsBounded` as well, which this row had assessed as unaffected on the reasoning that it asserts on byte VOLUME rather than on tokens. That reasoning was wrong — leaked credentials change which PATH the request takes, so the byte bound was being measured against a challenge rather than a proxied request. *A gate that drives the real `handleRequest` depends on every global that path reads, not only on the ones its assertion names.* |
+| **SUITE-2** | `internal/threatfeed`'s `TestBenchGate_CheckRequestURLBeatsLegacy` is a bare `fast >= legacy` timing ratio with no margin; under `-race` both arms ran ~6-14x slower and INVERTED (5881 vs 5141 ns/op against a documented 376 vs 887), failing with no regression present | **OPEN, REPORTED NOT FIXED** — the package already replaced its other ratio gate with a structural one for this exact reason; widening the bound enough to tolerate a 1.14x inversion would also admit a real 1.4x regression |
+| **RB-1** | CHAOS-70's two new log rate gates (`noteRosterPersistBestEffort`, `noteRosterNotDurable`, `roster_persist_durability.go`) compare `now.Sub(time.Unix(0, last)) < rosterPersistLogInterval` with no `>= 0` guard, so a clock that steps BACKWARDS takes the suppress branch for however far back it went. The reachable trigger is ordinary — an appliance booting with a bad RTC and stepping back when NTP first syncs, which is exactly when the first roster mutation after boot would warn. Diverges from this file's own CHAOS-61 rule (*a negative age is STALE, not fresh — fail toward reporting*), which the neighbouring gate `noteTracingBoundsLog` follows explicitly and documents | **OPEN, REPORTED NOT FIXED.** The two gates are NOT equally exposed, and that is the point: `noteRosterPersistBestEffort` has `culvert_admin_roster_persist_degraded_total` behind it, so a rollback DELAYS its warning rather than losing it — but `noteRosterNotDurable` has no metric at all (RB-2), so its rate-gated line is the ONLY signal and a rollback suppresses it outright. The fix is the `d >= 0 &&` the sibling gate already carries. `roster_persist_durability.go` is a file this change does not touch |
+| **RB-2** | `rosterNotDurable` — CHAOS-70's counter for a roster mutation that applied in memory with NO roster file configured, so it is lost on restart — is incremented and then never read. Both of its siblings are exported (`culvert_admin_roster_persist_failures_total`, `culvert_admin_roster_persist_degraded_total`, `events.go`); this one reaches no `/metrics` series, no `/healthz` field and no API surface, so the only operator-visible signal that admin password rotations are reverting on every restart is one rate-limited log line. The file's own comment argues the state is distinct from its siblings *because the operator action differs*, which is the argument for exporting it | **OPEN, REPORTED NOT FIXED.** Looks like an oversight rather than a posture: the emission-discipline objection does not apply, since `events.go` already records that these roster counters are emitted UNCONDITIONALLY because a flat zero is the healthy steady state here rather than an ambiguous "not configured". Compounds RB-1, which suppresses the one surface it does have. `roster_persist_durability.go` / `events.go` are files this change does not touch |
+| **CP-1** | **The CP gRPC bind is fatal and runs BEFORE the proxy, the admin UI and the health endpoints exist.** `startControlPlaneWithHAResume` `logFatalf`s on any `enableControlPlane` error (`cluster_startup.go:96`), and `initCluster` is `main.go:228` — EARLIER than `initSOCKS5` (:254), `startAdminUI` (:269) and `buildAndStartProxyServer` (:271), so this kills the appliance earlier than the SOCKS5 fault §36 just closed. A CP node ALSO proxies: nothing branches on cluster role before the proxy starts, so this is a DATA-plane outage, not a management-plane one. TWO fault classes, both routine — the bind (`lc.Listen`: port in use, `permission_denied`, address unavailable) and the mTLS material, which `buildServerTLS` reads at call time via `tls.LoadX509KeyPair`, i.e. §33's exact certbot/cert-manager rotation trigger. Under `restart: unless-stopped` each is an unattended crash loop recoverable only with shell access | **OPEN, REPORTED NOT FIXED — EXAMINED, upgrading §36's "closest unexamined analogue" note.** Three things the earlier record did not have. (1) The site is ABSENT from the F-23/R-F fatal inventory above, which lists `cluster_startup.go:44` (the HA lease) and never `:96`. (2) That table's stated reason for leaving port-binds out of R-F — *"a port-bind failure has a strong case for staying fatal"* — has since been OVERTURNED for both sibling listeners, by §33 (admin UI) and §36 (SOCKS5); the remaining one inherits an argument its siblings no longer carry. (3) The asymmetry is inside ONE function: `enableControlPlane` has three callers, and `ui_cluster.go:98` (the LIVE admin API) and `cluster_startup.go:75` (HA promotion) both return the error properly — only the boot path exits, which is the shape §31 found for `enableLogStore`. Not changed here: one concern per change, and this is a different subsystem from the one this PR touches |
+
+### Governance note
+
+Rows IDP-1…IDP-3 describe a subsystem no previous sweep looked at, despite
+three separate identity-plane sweeps (CHAOS-47, 49, 58) that each stopped at
+the *request* boundary. The pattern worth carrying forward: **every one of
+those sweeps asked "what happens when this dependency fails while serving a
+request?" and none asked "what does this component need in order to be
+constructed?"** Construction-time dependencies are invisible to request-path
+chaos testing by definition — the component either exists or the test does not
+run — and on this appliance construction happens on the boot path, the admin
+path and the config-sync path, which is a strictly larger blast radius than the
+request path it was compared against.
+
+---
+
+## 50. CHAOS-88 — The identity-revocation plane: what deleting an IdP actually revokes
+
+> **Id allocated in a committed placeholder row as this sweep's FIRST commit**
+> (see the 2026-10-05 revision-log entry), which is the remedy the header
+> reaches twice independently after ten collisions across six concurrent
+> sweeps, and which §§35/39/40 each applied in turn. Ids 67–68 are allocated
+> to other open sweeps; 69 and 70 are merged as §39/§40. **Renumbered from
+> CHAOS-71 / §41 to CHAOS-72 / §42** at the 2026-10-16 open-PR cleanup: #1485
+> (the interactive IdP compile path) held 71 on an unmerged branch and merges
+> first. This PR merges after #1485 and carries #1485's head. **Renumbered again to
+> CHAOS-88 / §50** on 2026-10-24 when main was brought in (`CHAOS-72` merged as
+> #1611's CDR breaker-wedge finding; #1485 moved to CHAOS-87 / §49); gates are
+> `TestChaos88_`.
+> **Register rows renumbered AU-20…AU-23 → AU-63…AU-66** on 2026-10-27: the
+> identity-revocation sweep still open as #1437 holds AU-18…AU-62, so this
+> PR's four rows moved to the next free ids rather than colliding with it.
+> **The exact-provider-id row (§50.6h) renumbered AU-69 → AU-70** on
+> 2026-10-27: #1437 claimed AU-69 for its CHAOS-73 reconciliation row first.
+
+**Domain:** register row **AU-2**, open and scored **H** since the first sweep:
+*"In-flight SSO sessions survive IdP deletion — no `RevokeProvider`; cookies
+are self-contained and keep full access up to TTL (default 8h). User-delete
+does revoke."* Re-measured against the live tree, the row was right about the
+mechanism and understated where it lands.
+
+### 50.1 The finding
+
+A `ps_session` cookie is minted in exactly two places — `authOIDCCallback` and
+`authSAMLCallback`, both via `setSessionCookie` — and it carries three things
+the appliance later trusts: the subject, the asserting profile's id in `pvd`,
+and **the groups that provider asserted**. `resolveRequestAuth`'s arm 1 read
+all three straight out of the verified cookie and consulted **nothing** about
+the provider:
+
+```go
+// ── 1. Session cookie (browser SSO) ──────────────────────────────────
+if sess, err := readSessionCookie(r); err == nil && sess != nil {
+        id := sessionIdentity(sess)
+        authenticatedIdentity = id.Sub
+        ...
+        authenticatedGroups = id.Groups
+        authenticatedSource = identityAuthSource(id, "local")
+```
+
+So deleting or disabling an identity provider — the one lever an operator has
+for *"cut this federation off"*, the thing you press when an IdP is compromised
+or a partner's federation is being terminated — revoked nothing already minted.
+`idpRegistry.Delete(id)` returned `204`, the change was audited as
+`idp.delete`, and every browser holding such a cookie kept its subject and its
+groups for the rest of the session lifetime: **8 hours by default, up to 7 days
+if the TTL was raised** (`session.SetTTL` clamps at `7*24h`).
+
+**The groups are the severity, not the subject.** `authenticatedGroups` is
+handed to `policyStore.Evaluate(clientIP, identity, source, host, groups)`
+(`proxy.go:1570`), so a group-scoped **allow** rule kept matching on groups
+asserted by a federation the operator had just removed. The security control
+the operator believed they had turned off was still open, and the audit trail
+recorded the revocation as successful — the CHAOS-70 **mis-reporting** class one
+plane over (there a `204` over a failed write, here a `204` over a revocation
+that reached nothing already issued).
+
+Reproduced against the real `resolveRequestAuth`:
+
+```
+proceed=true identity="alice@corp.example" source="corp" groups=[engineering] status=200
+DEFECT REPRODUCED: deleted provider "corp" still authenticated "alice@corp.example"
+```
+
+### 50.2 The asymmetry is INSIDE ONE FUNCTION, and that is the whole finding
+
+Arm 2 of the same function — `Proxy-Authorization: Basic` — iterates
+`idpRegistry.EnabledCredentialProviders()` on **every request**, so a deleted
+provider stops validating credentials immediately. That posture is not
+incidental: `TestResolveRequestAuthRejectsEnabledOIDCWithoutLiveBackend`
+already pins it, fail-closed, for a provider that is enabled but has no live
+backend. Every *other* consumer of the registry consults the live set per
+request too — `resolveSSOPortalURL`, `authSelectProvider`
+(`EnabledInteractiveProviders`), `RouteByDomain`, `LiveProvider` in both
+callbacks.
+
+**Arm 1 was the single outlier.** One revocation action, two postures, decided
+only by which arm the client happens to be on — the "one fault, two postures"
+shape §16 (CA-1/CA-3b), §22 and §25 each recorded, here with the two postures
+twenty lines apart in one function.
+
+### 50.3 Reachability
+
+It survives every plausible narrowing:
+
+- **A local admin account exists** — the overwhelmingly common case — so
+  `credCapable` is true, `authRequired` stays true, and arm 1 is still entered
+  after the last IdP is deleted.
+- **More than one IdP is configured** — the realistic *"this federation is
+  compromised"* shape — so `ssoCapable` stays true and the surviving providers
+  keep arm 1 armed for the deleted one's cookies.
+- **`defaultAuthOutcome == Exempt`** keeps `authRequired` true unconditionally.
+
+The only shape that closes it by accident is deleting the *only* provider on an
+appliance with *no* local account and a `Default` posture, where `authRequired`
+goes false and the cookie is never read — i.e. the configuration nobody runs.
+
+### 50.4 The fix is DERIVED STATE, not a revocation event
+
+`sessionProviderLive` (`session_provider_bounds.go`) answers, per request, *"is
+the provider this session names still a live identity source?"*; a refusal
+charges a counter and sets `sess = nil`, so the request degrades to **exactly**
+"no cookie" and is re-challenged through the **existing** no-credential
+dispatch. No new posture, no second path to keep in step with arm 3.
+
+The obvious alternative — a `RevocationList.RevokeProvider` entry emitted from
+the DELETE handler, mirroring the `RevokeUser` that sits twenty lines away in
+the same package — was built out on paper and **rejected**, and the four
+reasons are the load-bearing part of this sweep:
+
+1. **The admin handler is not the only writer of the registry.**
+   `IdPRegistry.ReplaceAll` is also reached from config import, config-version
+   rollback and the CP→DP `syncSnapshotIdPProfiles` path, none of which run
+   that handler. An event emitted there would cover none of them. (Pinned by
+   `TestChaos88_DefectProviderRemovedByReplaceAllIsAlsoRevoked`.)
+2. **It needs no persistence.** The provider set is already durable
+   (`idp_profiles.json`), so the revocation survives a restart because the
+   *absence* does — whereas `RevokeUser`'s own `users` map is **neither
+   persisted nor gossiped** while the sibling `tokens` map in the same struct
+   is both (row **AU-19**, recorded by §40). Building the new mechanism in that
+   mould would have inherited exactly the volatility that makes the old one
+   unreliable.
+3. **It needs no gossip.** `ConfigSnapshot.IdPProfiles` already carries the set
+   fleet-wide, so a CP deletion reaches every DP on the next sync. **This
+   reason was true for every deletion except the one that mattered most** —
+   removing the LAST profile was wire-dead, and the claim is what sent the
+   search; see §50.6d, which closes it.
+4. **It cannot go stale or be evicted.** Freshness is **evaluated** per
+   request, never latched at the instant of an admin action — the
+   `ca_health.go` / CHAOS-61 discipline, which also means there is no clearing
+   path to get wrong and no cap whose eviction policy becomes a security
+   control (the CHAOS-57 auth-cache lesson).
+
+A second mechanism answering one question is the defect this review keeps
+recording, so **`RevokeProvider` is deliberately not added.** The operational
+consequence is recorded in the runbook rather than left implicit: because the
+revocation *is* the absence, **restoring a backup that still contains the
+provider restores its ability to authenticate.**
+
+### 50.5 Rules the predicate holds, and why each exclusion exists
+
+A fail-closed predicate on an identity path is an availability regression the
+moment it refuses something legitimate, so each admitted shape is argued:
+
+- **`""` — exactly the empty string.** A cookie minted before the `pvd` field
+  existed. Refusing these logs out every pre-upgrade session on the deploy that
+  adds the check, for no security gain: such a cookie names no federation, so
+  there is no federation to have been cut off.
+- **`"local"`.** `setUISessionCookie`'s value. It names no registry profile and
+  the admin UI owns its own backstop (`uiAuthMiddleware`'s `cfg.UIUserExists`).
+  Refusing it would lock every administrator out of an appliance with no IdP
+  configured — the default posture.
+- **A profile id in `r.live`,** i.e. enabled **and** compiled. Delete, disable
+  and a failed compile all remove it, and in all three the operator's intent is
+  that this federation authenticates nobody.
+
+**~~BOTH representations are probed~~ — superseded by §50.6h (AU-70): the id is
+matched EXACTLY.** This paragraph first argued that the interactive providers
+stamp the **bare** profile id into `Identity.Provider` while `Name()` returns
+`oidc:<id>` / `saml:<id>`, so the predicate should also accept the stripped
+spelling, and that *"probing both cannot widen anything: each form must still
+resolve to a live provider"*. The last clause was wrong. Profile ids are
+free-form, so a stripped spelling can resolve to a DIFFERENT live profile. The
+minter wall below already pins that no legitimate cookie carries a prefixed
+spelling, so the fallback bought no availability and cost a revocation bypass.
+
+**A SELF-REVIEW CONTROL CAUGHT THE FIX'S OWN DEFECT, and it is the sharpest
+lesson here.** The first shape opened with `p := strings.TrimSpace(provider)`
+before the emptiness test, so a `pvd` of `"  "` was admitted as *"legacy, names
+no federation"*. `ControlPrefixAloneIsNotAProvider` — written to prove the
+prefix probe could not widen — enumerated whitespace and failed. Trimming first
+is the mistake `initSessionSecret` (session.go) documents at length and
+deliberately avoids (*"trimming before the emptiness check would make a
+whitespace-only value indistinguishable from unset"*), and **here it is also a
+DIVERGENCE, which is the worse half**: `identityAuthSource` tests
+`id.Provider != ""` on the **raw** value, so such a session would be exempt
+from revocation by this predicate while still being stamped into
+`authenticatedSource` and carried into the policy decision **as a federation
+name** — a value exempt from revocation that is nevertheless used for
+authorization. Two layers disagreeing about which values mean "no provider" is
+the defect; the rule is that this predicate asks the question
+`identityAuthSource` asks and never a re-derived one, and
+`TestChaos88_ProviderEmptinessAgreesWithIdentityAuthSource` pins the
+**agreement** from both sides rather than either spelling of the rule — the
+`TestTOTPSameKey_AgreesWithTheVerifier` (§40) and
+`TestChaos63_LoginNameConfiguredMatchesVerifyUIUser` (§32) precedent.
+
+**Standing rule from that round:** *when a value's meaning is decided by one
+layer, every other layer that tests it must ask that layer, never re-derive the
+rule — and a canonicalisation added for tidiness is a semantic change when the
+layer beside you does not perform it.*
+
+### 50.6 Visibility
+
+The refusal is deliberately indistinguishable from an absent cookie, which is
+what makes the degradation safe **and** is exactly why it needs its own
+counter: without one, an operator cannot tell whether the revocation reached
+live traffic at all.
+
+- `culvert_session_provider_revoked_total` — **always emitted**, since there is
+  no configuration to gate it on, so a flat `0` means "nothing has carried such
+  a session" and can never mean "the check is off" (the inverse of the
+  socks5/cluster_ca emission rule, for the same one-reading-per-series reason).
+- `sessionProviderRevoked` on `GET /api/stats`, and a banner on the **Identity
+  Providers** panel — the panel the admin is standing on when they press
+  Delete.
+- One `AUTH_SESSION_PROVIDER_REVOKED` process-log line per minute, carrying the
+  provider, the subject and the **cumulative** count, so the line is suppressed
+  and the magnitude never is. The gate **claims** its window with a
+  compare-and-swap rather than read-compare-store (§40 round 1 P2: concurrent
+  requests would otherwise all observe the same expired stamp and all emit,
+  making a mitigation into a log-volume problem), and a clock rollback **re-arms**
+  it rather than silencing the line until wall-clock catches up (CHAOS-61: a
+  negative age is STALE, not fresh).
+
+**It counts REQUESTS, not distinct sessions,** and the metric help and runbook
+both say so: a browser re-sends a dead cookie until it re-authenticates, so the
+rate is set by traffic. A step that settles is the expected shape; a count that
+keeps climbing means clients are not completing re-authentication.
+
+The accounting lands **before** anything observable, which is the one place the
+sequence is hand-written rather than inherited from a shared helper — CHAOS-69
+round 3 found exactly one of four entry points with the accounting after the
+reply, and it was the one written inline.
+
+### 50.6b The one availability interaction, and why it is not a regression
+
+A fail-closed check on an identity path earns its keep only if every shape it
+refuses is one the operator meant to refuse, so the awkward case is named here
+rather than discovered later.
+
+**A deployment with no `-idp-profiles-file` loses its registry on restart** —
+the IdP panel carries a standing banner saying exactly that — so after a
+restart every live SSO session names a provider that is not in the live set and
+is now refused. That reads like a new way to log a fleet out, and it is not,
+for a reason that holds independently of this change: **the session signing key
+is random per restart by default** (`initSessionSecret` →
+`session.InitRandomKey()` when `CULVERT_SESSION_SECRET` is unset and no
+`session_secret` is configured — register row **CA-8**), so on that same
+deployment every cookie already fails its HMAC check after a restart and never
+reaches this predicate at all.
+
+For a session to survive a restart the operator must have set a shared signing
+key, and an operator who has done that has a persisted or cluster-synced
+configuration — which persists the IdP registry too. The remaining combination
+(shared signing key, non-persisted IdP profiles) is a misconfiguration whose
+symptom under this change is *"re-authenticate"* and whose symptom without it
+is *"groups honoured from a provider this appliance has no record of"*. The
+refusal is the better of the two, and the runbook says what to look at.
+
+**And the three test fixtures this change broke are the same shape, which is
+worth recording because it is evidence rather than inconvenience.** Four
+existing tests minted a session naming a provider absent from their own
+registry — `"saml:corp"`, `"oidc:corp-oidc"`, `"test-idp"` against a helper that
+installed no registry at all — and all four passed before. That is not evidence
+that real deployments carry such sessions; it is evidence that the field was
+**never validated**, so fixtures were free to invent an id. A real `pvd` comes
+from a live provider's own callback at login time. Each fixture was pointed at
+the live profile its own helper installs, in the spelling it was written to
+cover, so each keeps pinning the property it states (verbatim auth-source
+attribution; OIDC-shaped parity across both arms; a valid session winning over
+an Exempt or CredentialRequired rule) instead of silently becoming a
+removed-provider test. The removed-provider case is owned by `TestChaos88_*`,
+where it is asserted deliberately. **A fixture that only passes because nothing
+validated the field it chose is not a contract — but it is a good detector of
+which fields nothing validates.**
+
+**Repairing them produced a fifth failure and a transferable rule.** The first
+repair put the live profile into the SHARED `setupAuthGateTest` helper, which
+looked obviously right and broke `TestS3_DefaultMode_Parity`: that test's
+second half calls `setupProxyTest` **again**, mid-test, to reach a NO-BACKEND
+appliance and assert Stage-1 stays inert — and a registry the helper installs
+is restored only by `t.Cleanup`, so it survived that reset, made `ssoCapable`
+true, and turned the inert case into a `407`. This is CLAUDE.md's own
+`setupProxyTest` pitfall from the other direction: the documented hazard is
+that it clears globals at test START and never at cleanup, so a leaked rule
+flows IN from a previous test — the same asymmetry means state a shared fixture
+INSTALLS leaks **forward within one test** past any later re-reset. The
+registry install is therefore per-test (`installAuthGateTestIdP`, called by the
+two tests that mint such a session) with the reason recorded on the helper, not
+folded into a fixture other tests re-reset underneath. **Rule: a shared setup
+helper may reset state; adding state to one is only safe once you know no test
+on it re-resets the globals mid-run.**
+
+### 50.6c Owner decision (2026-10-13) — the predicate is "stored and enabled", not "compiled"
+
+The first shape keyed `sessionProviderLive` on `IdPRegistry.LiveProvider`
+(enabled AND compiled). That was wider than the operator's intent: a profile
+also leaves `r.live` when its metadata/discovery fetch fails at compile time
+(`auth_oidc_flow.go` / `auth_saml.go`, on boot, admin save and every CP→DP
+sync) and, with #1485 (CHAOS-87) merged first, when its cached document is
+retired at the `min(7 days, validUntil)` staleness ceiling. So restarting a
+node while an IdP was unreachable logged out every session of that IdP and sent
+those users to an IdP that was down — contradicting the registry's own rule
+that a compile failure must not silently flip the operator's configuration.
+
+The decision: **an unreachable IdP is degraded availability, not revocation;
+only an explicit delete, disable or `ReplaceAll` removal revokes.** The
+predicate is now `IdPRegistry.ProfileEnabled(id)` (the profile is stored and
+`Enabled`, allocation-free on the request path). Gates in
+`session_provider_availability_test.go`: a dark enabled profile, a real boot
+compile failure (`Load` with the IdP returning 503 and nothing cached) and a
+real staleness-ceiling retirement do NOT revoke; delete, disable and
+`ReplaceAll(nil)` on that same dark provider DO. All four were verified failing
+against the `LiveProvider` shape.
+
+### 50.6d SELF-FOUND — the lever did not reach the fleet when the profile removed was the LAST one, and the wall that exists for this bug class never looked
+
+§50.4 reason 3 justified building the revocation as DERIVED STATE rather than a
+`RevokeProvider` event partly on this claim: *"`ConfigSnapshot.IdPProfiles`
+already carries the set fleet-wide, so a CP deletion reaches every DP on the
+next sync."* **The claim was false in exactly the case an operator reaches
+for**, and the runbook asserted it twice (§2's table, §5's reason 3) — so an
+operator cutting a federation off mid-incident was told the job was done when
+it was not. The CHAOS-70 round-2 class: *a runbook that names something the
+code does not do is a defect, not a typo.*
+
+`idpRegistry.All()` is `cloneIdPProfiles(r.profiles)`, which returns
+`make([]*IdPProfile, 0, 0)` — **non-nil but EMPTY** — for an empty registry.
+`ConfigSnapshot.IdPProfiles` carried `json:"idp_profiles,omitempty"`, and
+`omitempty` drops an empty slice, so the key never reached the wire.
+`syncSnapshotIdPProfiles` opens `if snap.IdPProfiles == nil { return nil }`, so
+the DP **skipped**. Measured through the real encoder/decoder pair: `All()` on
+an empty registry → `nil=false len=0`; on the wire → `idp_profiles present:
+false`; decoded on the DP → `nil=true`. The control, with one profile
+surviving, decodes `len=1` and applies normally.
+
+So deleting the **only** IdP on the Control Plane left it **stored, enabled and
+LIVE on every Data Plane node**: `ProfileEnabled` answered true, every session
+it minted kept authenticating with its asserted groups for the full TTL (8h
+default, up to 7d), and — this is wider than the session plane — **new logins
+through the removed federation kept working**, since the DP still offered it on
+the captive portal. With `-idp-profiles-file` configured the DP persists the
+synced registry, so it survived restarts too. All three DP intake paths funnel
+through the one nil-skip: the full snapshot (`fetchAndApply`), the delta
+(`controlplane_delta.go`) and the last-known-good replay.
+
+**Removing a NON-last profile always propagated correctly, and that is why
+nothing noticed** — the surviving list is non-empty, so `omitempty` keeps it.
+The gap is reachable only by the single-provider deployment, which is the
+common case and precisely the one where "cut this federation off" means
+deleting the only profile.
+
+**The apply side was already correct.** `syncSnapshotIdPProfiles` is
+nil-skip / empty-wipe by construction: nil skips, and any non-nil value
+(including `[]`) reaches `ReplaceAll`, which clears. Only the struct tag erased
+the distinction before the DP could see it. So the production fix is two lines:
+drop `omitempty`, and relabel the binding.
+
+**The relabel is the governance half, and it is the sharper lesson.**
+`TestConfigSurfaces_SnapshotWireWipe` exists for *precisely* this bug class —
+its own comment calls it "the RateLimitExempt bug class" and spells out that
+`omitempty` makes a `[]`-wipe unreachable. It never looked at this field,
+because it iterates only bindings whose `Apply == semNilSkipEmptyWipe`, and the
+`idp_profiles` row was labelled `semValidatedSkip`. Both labels describe
+something true of `ReplaceAll` (it *is* validation-rejecting), but a binding
+carries one, and the one it carried excluded it from the wall. The directly
+adjacent `threat_domain_allowlist` row had already been made `WireWipeCapable`
+on the identical argument — *"a DP left holding a stale allowlist would keep
+masking domains the CP no longer exempts (fail-open)"* — as had
+`decryption_profiles`, whose comment reads *"deleting the last profile clears
+stale copies on data-plane nodes."* The same call simply was never made for the
+registry, because nothing asked.
+
+**Standing rule: a wall scoped by a CLASSIFICATION only covers the rows that
+carry it, so a mislabelled row is an unexamined row, and the label is the thing
+to audit — not the wall.** This is CHAOS-70's *"the claim was broader than the
+wall"* and CHAOS-69's *"enumerate every branch"* arriving from a third
+direction: here the wall and the claim were both right, and the row was filed
+under the wrong heading.
+
+**`nil` must keep meaning ABSENT, and that is a security property, not a
+nicety.** `redactUnenrolledSnapshot` sets `IdPProfiles = nil` for an unenrolled
+caller, and `GetConfig` is polled by a DP **before enrollment completes** — so
+a redacted snapshot reaches a real node that applies it. Without `omitempty`
+that nil now serialises as `null`; if `null` were ever read as an explicit
+clear, every enrolling node would wipe its own IdP registry, drivable by an
+unauthenticated caller. The cheapest wrong fix (delete the nil early-return) is
+therefore strictly worse than the defect, and is pinned by two controls.
+
+**Compatibility, both directions.** New CP → old DP: the CP now sends
+`"idp_profiles": []`, the old DP decodes a non-nil empty slice and wipes — the
+desired behaviour, with no DP upgrade needed. Old CP → new DP: the field is
+still omitted when empty, the new DP reads nil and skips — unchanged, never
+worse.
+
+**Gates** (`session_provider_cluster_test.go`, 4), every one driving the REAL
+`json.Marshal`/`json.Unmarshal` pair, because the defect lives in the tag and a
+test that hands a struct straight to the sync cannot see it:
+
+- `DefectLastProfileRemovalReachesTheDataPlane` — CP registry emptied via the
+  real `All()`, round-tripped, synced; the DP must no longer report the profile
+  enabled and the session must be revoked. **Verified failing** against the
+  reintroduced `omitempty`. It asserts the `All()` precondition explicitly, so
+  if that accessor ever returns nil for an empty registry the gate says it
+  proves nothing rather than passing vacuously.
+- `ControlAbsentProfileSetDoesNotWipe` — a snapshot with no `idp_profiles` key
+  must leave the registry intact. **Verified failing** against the nil-wipes
+  mutation.
+- `ControlRedactedSnapshotDoesNotWipeAnEnrollingNode` — the unenrolled
+  redaction path, end to end. **Verified failing** against the same mutation.
+- `ControlNonLastRemovalStillPropagates` — the case that already worked must
+  keep working; its survivor is a valid-but-DISABLED profile, since `ReplaceAll`
+  validates every profile and skips compilation only for disabled ones, which is
+  what keeps the gate off the network.
+
+Both controls pass against the pre-fix tree as well as the fixed one, which is
+what makes them controls. The reclassification also brings the field under
+`TestConfigSurfaces_SnapshotWireWipe`, so re-adding `omitempty` now fails the
+build with a message naming the consequence — verified.
+
+### 50.6e The OIDC discovery fetch raised a CRITICAL go/request-forgery, and it is the SAML/OIDC asymmetry a FOURTH time
+
+CodeQL failed on this PR's head with one **critical** alert —
+*"uncontrolled data used in network request"*, `auth_oidc_flow.go`,
+`fetchOIDCDiscoveryOverNetwork`. Nothing was exploitable: `u` is parsed FROM
+`wellKnown`, so the scheme and `isPrivateHostContext` checks did govern the URL
+actually fetched. What was wrong is that **the value handed to
+`http.NewRequestWithContext` was the raw parameter, not the parsed url every
+check had just measured** — CHAOS-69 round 5's measure-vs-use rule, in a
+function whose guard is otherwise exemplary.
+
+The sibling had already been fixed. `fetchSAMLMetadataOverNetwork` carries BOTH
+halves: a `samlMetadataURLShape` regexp barrier (`Regexp.MatchString` is a
+sanitiser CodeQL recognises, which `isPrivateHostContext` is not established to
+be) and `metaURL.String()` at the request. Neither half was carried across.
+`fetchOIDCDiscoveryOverNetwork` now mirrors both.
+
+**This is the fourth finding produced by fixing one of these two fetchers and
+not the other** — the function's own comment already counts three (the inline
+guard, the fetch-result adjudication, the bounded private-host check) and says
+so in the comment immediately above the line that then shipped the fourth.
+Writing the lesson down next to the code did not prevent the recurrence, so the
+property is now pinned mechanically instead:
+`TestWall_IdPMetadataFetchersCarryTheRequestForgeryBarrier`
+(`idp_fetch_barrier_test.go`) walks the AST of **both** fetchers and requires
+each to apply a `MatchString` barrier to its raw parameter, to do so BEFORE
+building the request, and never to pass that raw parameter to
+`http.NewRequestWithContext`. A fetcher it cannot find is a FAILURE, not a
+skip, so renaming one does not quietly drop it from the wall. Both mutations
+were verified failing: the raw string restored at the request, and the barrier
+removed.
+
+**Why structural and not behavioural:** the pre-fix OIDC shape was functionally
+sound, so no behavioural test could ever have failed on it. The defect lived in
+which value flowed where — visible to static analysis and to the shape of the
+code, and to nothing else. *A guard that is correct and a guard that is
+VERIFIABLE are different properties, and on this path the repo's convention
+requires both.*
+
+### 50.6f Re-enabling a provider under the SAME id revived the sessions it minted (AU-65, CLOSED)
+
+Raised as a **P1** by the Codex reviewer on this PR and **confirmed against the
+real resolver** before being acted on:
+
+```
+1. live:        proceed=true  identity="alice@corp.example" groups=[engineering vpn-users]
+2. disabled:    proceed=false identity=""                   groups=[]
+3. re-enabled:  proceed=true  identity="alice@corp.example" groups=[engineering vpn-users]
+```
+
+The same pre-incident cookie authenticates again, carrying the groups the
+provider asserted **before** the incident. The cause is the very property
+§50.4 chose the design for: the check is pure derived state, re-evaluated per
+request, with nothing durable recording that a cut ever happened. Combined
+with §50.7's deliberate decision not to clear the cookie on refusal, a session
+refused throughout the disabled window is revived the moment the profile
+returns. Only an expired cookie (8 h default) or a holder who completed a fresh
+login in the meantime is really gone.
+
+**It matters because of exactly when an operator uses the lever.** Disable a
+compromised IdP, investigate, fix, re-enable — a plausible same-working-day
+sequence, well inside the default TTL — and every session minted through the
+compromised provider, including an attacker's, becomes valid again.
+
+**The runbook asserted the opposite** ("Sessions cut in the meantime are **not**
+restored"), which is the CHAOS-70 round-2 class: a recovery step that misleads
+mid-incident. The sentence was first corrected to describe the residual and
+name three workarounds. With the fix below it is TRUE again, and §4 of
+`docs/operator/identity-provider-revocation.md` says so and no longer needs
+the workarounds.
+
+**Fixed in `1a1e752b1`: a session cutoff on the profile, a mint second on the cookie.**
+
+- `IdPProfile.SessionsNotBefore` (Unix seconds, `omitempty`) is **server-owned**.
+  `Upsert` derives it from the STORED profile under the registry lock
+  (`stampSessionsNotBefore`). It is set to now on a create (which includes a
+  re-create under a deleted id through `PUT /api/idp/{id}`) and on a
+  disabled→enabled transition. Every other write keeps the stored value. A
+  request body cannot set it, because "send 0" would otherwise be a
+  one-request undo of a revocation, and the GET projection echoes it back on
+  every edit.
+- `Session.Iat` (Unix seconds, `omitempty`) is stamped by `setSessionCookie`.
+- `sessionProviderLive(pvd, iat)` asks `IdPRegistry.ProfileAdmitsSession`:
+  is the profile stored, enabled, AND was the cookie minted at or after the
+  cutoff? That is one allocation-free pass under the read lock, per request.
+
+**It keeps §50.4's four properties.** It needs no new persistence, because the
+registry file already holds the profile. It needs no new gossip, because
+`ConfigSnapshot.IdPProfiles` already carries the profile and `ReplaceAll`
+stores it verbatim, so a Data Plane never restamps its own clock (and a fresh
+node's first sync cannot log everyone out). It cannot be evicted. And it is
+evaluated rather than latched, since both halves are read from the stored
+profile on every request.
+
+**It keeps §50.6c.** Reachability never runs `Upsert`. A compile failure or a
+CHAOS-87 staleness retirement darkens a provider without moving its cutoff,
+and `TestChaos88_ControlCutoffMovesOnlyOnCreateAndReEnable` asserts that the
+pre-upgrade cookie survives a retirement with the counter at zero.
+
+**No deploy-time logout and no breaking schema change.** Zero means no cutoff,
+and every profile stored before this change carries zero. Both new keys are
+`omitempty` and additive. Old cookies decode with `Iat == 0`, and the MAC
+covers the encoded payload, not the struct. A cookie with no `iat` is admitted
+only by a zero-cutoff profile. Under a non-zero cutoff it is refused, because
+a cookie that cannot say when it was minted cannot prove it postdates the cut.
+That costs one re-login, and only for a provider an operator has re-enabled or
+re-created since the upgrade.
+
+**Why not the provider GENERATION this section first proposed.** A counter
+stamped into the cookie would also close the hole. But it needs a monotonic
+per-id counter that survives delete and re-create, which means durable state
+outside the profile, because the profile itself is what gets deleted. A
+timestamp gets the same ordering from the clock the cookie already uses for
+`exp`, and needs nothing that outlives the profile.
+
+**Residuals, recorded rather than closed:**
+
+- **Downgrade / mixed versions.** An older binary ignores both keys, so on
+  that node the old residual returns: a re-enabled profile revives
+  pre-incident sessions. An older Control Plane rewriting the registry drops
+  the cutoff entirely (it persists only the fields it knows). A cookie minted
+  by an older node carries no `iat`, so after a cut it is refused by an
+  upgraded node until its holder logs in again. Finish the rolling upgrade
+  before relying on the lever.
+- **One-second granularity**, the cookie's own (`exp` is seconds too). A
+  cookie minted in the same second as the cutoff is admitted. While disabled
+  a profile has no live provider and mints nothing, so the only pre-cut
+  cookie that can share the cutoff's second is one minted in the same second
+  as a disable→re-enable (or delete→re-create) cycle completed inside that
+  second.
+- **Wall clock across nodes.** The cutoff is the Control Plane's wall clock.
+  The `iat` is the wall clock of whichever node served the login. A node
+  running behind the CP refuses fresh logins through that provider until its
+  clock passes the cutoff (fail-closed, an availability cost). Disabling and
+  re-enabling restamps the cutoff from the current clock.
+- **Restoring a pre-incident registry file** (backup restore) restores the
+  pre-incident cutoff. This is the same class as the runbook's existing §5
+  note that a restore restores a deleted provider, and it is now stated
+  there.
+- **Repointing an enabled profile at a different IdP** (an issuer or metadata
+  edit) keeps its cutoff and therefore its sessions. That is unchanged
+  behaviour, outside this finding.
+
+**Gates** (`session_provider_cluster_test.go`). They drive the operator's real
+lever, `apiIdPItem` PUT/DELETE, because the stamp lives on that write path and
+assigning registry fields would skip it. The replaced residual pin,
+`TestChaos88_DocumentedResidual_SameIDRestoration`, promised to fail "when a
+provider generation is stamped". It assigned `idpRegistry.profiles` directly,
+and when measured it STAYED GREEN with this fix in place. It could never have
+caught the change it existed to catch.
+
+| Gate | Pins |
+|---|---|
+| `TestChaos88_SameIDReEnableRevivesNoSession` | disable → re-enable through the handler: the pre-incident cookie stays refused, groups included, and is counted. A legacy no-`iat` cookie is refused. A body that tries to lower the cutoff is ignored. A login minted by the real `setSessionCookie` after the re-enable authenticates with its groups |
+| `TestChaos88_SameIDRecreateRevivesNoSession` | delete → PUT re-create under the same id refuses the old incarnation's cookie. A fresh login works |
+| `TestChaos88_ControlCutoffMovesOnlyOnCreateAndReEnable` | the negative control: an untouched zero-cutoff profile keeps admitting old and no-`iat` cookies while another profile is cycled. An edit does not move the cutoff. A staleness retirement does not move it and revokes nothing |
+| `TestChaos88_SessionsNotBeforeIsServerOwned` | the stamp table: create (enabled or not) and re-enable stamp, while edit, disable and disabled-edit keep the stored value whatever the body carried |
+| `TestChaos88_SessionCutoffReachesTheDataPlaneVerbatim` | the CP's stamp survives the real snapshot encode/decode and is stored verbatim by the DP, which refuses an older cookie and admits a newer one |
+
+**Mutations verified**, each caught by at least one gate: no stamp at all
+(re-enable, re-create, table); cutoff ignored at admission (re-enable,
+re-create, DP wire); body value honoured on a non-transition write (control,
+table); minter stamps no `iat` (re-enable); no stamp on create (re-create,
+table).
+
+### 50.6g The SAML-only deployment never read the cookie at all — the fix's own predicate disagreed with the gate above it (AU-66)
+
+§50.6c settled what "the provider is still there" means for arm 1:
+**stored and enabled**, not compiled. It did not check that the gate which
+decides whether arm 1 RUNS asks the same question. It does not.
+
+```go
+credCapable := hasCredentialCapableProvider()                 // local acct | legacy | enabled OIDC/LDAP profile
+ssoCapable  := idpRegistry.HasEnabledInteractiveProvider()    // enabled AND **LIVE**
+authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
+```
+
+`sessionProviderLive` asks `ProfileEnabled`. `ssoCapable` asks enabled AND
+live. In every deployment that has a local admin account the disagreement is
+invisible, because `credCapable` holds `authRequired` true on its own — and
+`c72Setup` installs one, deliberately, in every gate written for §50. Strip it
+and the deployment is **SAML-only**: no local account, no legacy provider, no
+credential-capable profile. `cfg.user` empty is not a hypothetical shape; arm 2
+names it ("when no user is set") and `authRequired` exists precisely so a
+no-backend deployment goes inert.
+
+In that deployment a CHAOS-87 staleness retirement darkens an ENABLED profile.
+Arm 1 would have KEPT its cookies — that is the §50.6c decision, and
+`TestChaos88_StaleExpiryRetirementDoesNotRevokeSessions` asserts it. But
+`ssoCapable` went false, `authRequired` went false, and the whole block was
+skipped, so **arm 1 never ran**. Measured: `proceed=true identity="" groups=[]`.
+
+That is worse than the revocation §50.6c forbids, and the difference is the
+whole reason this is a finding rather than a variant:
+
+- A revocation is *decided*. It increments `culvert_session_provider_revoked_total`,
+  it logs, and the operator can see it in the runbook's terms.
+- This was *skipped*. No counter, no log, and identity- and group-scoped ALLOW
+  rules silently stopped matching for every user of a federation the appliance
+  had decided to keep serving — the exact "found nothing wrong vs never
+  consulted" confusion CHAOS-65 named.
+
+**The fix is a second predicate, not a wider one.** `HasEnabledInteractiveProfile`
+is `HasEnabledInteractiveProvider` without the live gate, and the split is
+load-bearing in both directions. "Can this deployment start an SSO flow right
+now?" must stay live-gated — a captive redirect at a provider that failed to
+compile sends the user to a login that cannot answer, and the no-backend inert
+guard (`!credCapable && !ssoCapable`) depends on it. "Does this deployment
+federate identity at all?" must not be, because the cookies in flight were
+minted by that profile and arm 1 honours them on `Enabled`.
+
+So `sessionCapable := authRequired || HasEnabledInteractiveProfile()` opens the
+outer block, and arms 2 and 3 move onto `else if authRequired`. Wherever
+`authRequired` is true every branch is byte-identical to before. Where it is
+false, exactly one thing changes: the cookie is read. In particular a
+SAML-only dark deployment with NO cookie still falls through untouched — no
+407, no redirect, and no per-request `AUTH_NO_BACKEND_INERT` line added to the
+proxy hot path, which a one-word fix (`authRequired := ... || sessionCapable`)
+would have introduced.
+
+**Gates** (`session_provider_availability_test.go`):
+
+| Gate | Pins |
+|---|---|
+| `TestChaos88_DefectSAMLOnlyDarkProfileStillReadsItsSessions` | the finding; verified failing pre-fix with `identity=""` |
+| `TestChaos88_ControlSAMLOnlyRemovalStillRevokes` (delete, disable) | widening the predicate must not blunt the operator's lever |
+| `TestChaos88_ControlNoIdentityBackendStaysInert` | an appliance that federates nothing must not read the cookie at all — asserted on the refusal COUNTER, which is what separates the fix from opening arm 1 unconditionally |
+| `TestChaos88_ControlSAMLOnlyDarkWithoutACookieIsUnchanged` | no new challenge and no new hot-path log |
+
+Both wrong fixes were measured, not argued: live-gating the new probe fails the
+defect gate, and `sessionCapable := true` fails the inert control.
+
+**Found by Codex (P2) on PR #1564**, reading the interaction between the
+retirement this PR adds and a gate neither §50 nor §50.6c had re-read. The
+retirement is what makes the state reachable at RUNTIME — before it, an
+enabled-but-dark interactive profile only came from a compile failure at boot
+or at an admin write, so nothing darkened a healthy provider hours later
+without anyone touching it.
+
+### 50.6h A stripped spelling named a DIFFERENT profile (AU-70, Codex)
+
+Codex, on the round-23 head: profile ids are free-form, so `corp` and
+`saml:corp` can both be configured, and the SAML callback stamps the actual id
+`saml:corp` into its cookies. After `saml:corp` was deleted or disabled, those
+cookies failed the exact `ProfileEnabled` probe and then passed the
+`stripIdPPrefix` fallback through the unrelated, enabled `corp`. Their subject
+and asserted groups survived the revocation with no re-authentication, which
+defeats the operator's lever for exactly the compromised-provider case it exists
+for.
+
+**Fix: exact match only.** `sessionProviderLive` asks `ProfileEnabled(pvd)` and
+nothing else. This is the fail-closed shape, and it costs no availability. The
+minter wall (`setSessionCookie`'s two interactive callers stamp the bare id,
+`setUISessionCookie` stamps `"local"`) is what made the fallback unnecessary,
+and it was already in the tree. Two test fixtures had pinned a prefixed
+spelling of a live id (`TestAuthSource_SessionCookieProvider`,
+`TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC`). Both now use
+the bare id the providers actually stamp, because no minter produces the other
+spelling. Gates: `TestChaos88_APrefixedProfileIDCannotRideAnotherProfile`
+(Codex's scenario, disabled and deleted, with a control that `corp` keeps its
+own sessions) and `TestChaos88_OnlyTheExactProfileIDResolves`, which replaces
+`…BothProviderRepresentationsResolve`. Both fail with the stripped fallback
+restored. *A probe that "cannot widen" must be checked against every value the
+other side can hold, not only the values the authors meant.*
+
+### 50.7 Deliberately NOT done
+
+- **No `/readyz` or `/healthz` row, and no alert.** A node re-challenging
+  sessions from a removed provider is a fully serving gateway doing precisely
+  what it was told; failing readiness would eject it over an administrator's own
+  deliberate action, and a new alert event name is silently unsubscribed on
+  every configured webhook (the §27/§36 rule).
+- **No cookie clear on the refusal.** `clearSessionCookie` exists, and setting
+  it would stop the browser re-sending a dead cookie (and so flatten the
+  counter). It is not done because arm 3 owns the terminal response on this path
+  and may redirect a browser to a captive portal whose own successful login
+  overwrites the cookie anyway, while a non-browser client gets a `407` it will
+  retry. Adding a `Set-Cookie` to a response shape shared with every other
+  no-credential outcome is a behaviour change outside this finding; the
+  rate-limited log and the counter carry the volume instead.
+- **`RevokeUser` is still neither persisted nor gossiped** (row **AU-19**).
+  Unreachable from the proxy cookie — no local login mints one
+  (`setSessionCookie` has two callers, both SSO) — and bounded for the admin UI
+  by the roster backstop. Recorded, not fixed: closing it means deciding whether
+  a user revocation should be replicated, which is a cluster-semantics decision.
+- **There is no "revoke one federated subject" lever at all.** You can cut a
+  whole federation or wait out the TTL. Recorded as a new row **AU-63**; it
+  needs a product surface, not a resilience fix.
+- **`CA-8`/`AU-9` (random per-restart session HMAC) is untouched.** It is the
+  blunt instrument that happens to revoke everything, and relying on it is not
+  a revocation design.
+
+### 50.8 Gates
+
+`session_provider_bounds_chaos_test.go` (17 functions):
+
+**Six defect gates**, each verified failing against the reintroduced pre-fix
+shape: deleted provider, disabled provider, the **groups** half across both
+postures (asserting on the identity alone would leave the severity reachable
+through any future change that cleared the subject and kept the groups),
+removal via `ReplaceAll` (the config-import / rollback / CP→DP path, which is
+what proves the state-based choice), the refusal being counted, and the refusal
+being byte-indistinguishable from an absent cookie.
+
+**Six controls**, each verified failing against a wrong fix and passing against
+**both** the pre-fix and the fixed tree — which is what makes them controls
+rather than second defect gates: a live provider still authenticates **with its
+groups** (the cheapest way to pass every defect gate is to stop honouring
+session cookies, which deletes browser SSO through the gateway), `"local"` is
+never refused, a legacy empty `pvd` is never refused, anonymous traffic charges
+nothing, a prefix alone is not a provider, and the log is suppressed while the
+count never is.
+
+Plus the representation gate, the emptiness-agreement gate, two structural
+walls (the `setSessionCookie` minter inventory — enumerated from the
+**primitive**, not from the file being edited, per §40's own lesson that its
+wall AST-walked one file while the escaping mutator lived in another — and the
+CAS claim, asserted structurally because a TOCTOU on an atomic is invisible to
+`-race` and was measured unreachable behaviourally), the clock-rollback gate,
+and a `-race` concurrency gate requiring exact accounting under 400 concurrent
+refusals.
+
+**Eight mutations verified:** pre-fix (no gate) → 6 defect gates + the
+concurrency gate red, every control green; no local/legacy exemption → 2
+controls red; trim-before-emptiness → the control and the agreement gate red;
+predicate always false → 1 defect gate + 4 controls red; refusal uncharged → 3
+gates red; terminal `403` instead of re-challenge → the indistinguishability
+gate red; read-compare-store rate gate → the CAS wall red; bare representation
+only → the representation gate red.
+
+Runbook: `docs/operator/identity-provider-revocation.md`.
+
+---
+
 ## 51. CHAOS-82 — The backup plane: who may read the archive, and what the restore will accept
 
 **Id claim.** `CHAOS-82` was claimed in a committed placeholder row as commit
@@ -12739,7 +15512,8 @@ its own finding."*
 ### 53.1 Executive summary
 
 `r.URL.Path` is copied, unbounded, into three retaining sinks — the process
-log (5 sites), a **buffered HTML response body** (5 sites) and the request-log
+log (6 sites; the sixth was missed by this sweep and closed as **CHAOS-92e**,
+§53.11), a **buffered HTML response body** (5 sites) and the request-log
 `URI` field (4 sites). On a **stock install**, with no authentication and no
 operator opt-in, one request chooses both how many bytes land in the rotating
 process log and, through `html/template` escaping, a **5x multiplier** on a
@@ -12839,7 +15613,9 @@ retention:
    pipeline.
 3. **The five log sites** clamp **inside** the `sanitizeLog` argument, so the
    scan and its possible 1 MiB copy are bounded too. Pinned by a source gate
-   that fails on any `sanitizeLog(…URL.Path)` without the clamp.
+   that fails on any `sanitizeLog(…URL.Path)` without the clamp — and that gate
+   matches on the `sanitizeLog(` token, so it could not see a sink that
+   sanitizes in the CALLEE. There was one, and §53.11 closes it.
 
 `maxRetainedRequestPath` is **2048** — above the historical 2083-byte Internet
 Explorer URL limit that web applications were built against for two decades,
@@ -12888,6 +15664,7 @@ make the mitigation for a write-amplification defect into one — the rule
 | CHAOS-92b | Same path → a 5 245 706-byte block page buffered in memory and written back; multiplier chosen by the client via `html/template` escaping | **HIGH** | **FIXED** | measured, 53.3 |
 | CHAOS-92c | `policyLogURI` retains the unbounded path into the ring, the JSONL, the SIEM feed and the redaction pipeline (opt-in per rule via `LogFullURI`) | **MEDIUM** | **FIXED** | measured, 53.2 |
 | CHAOS-92d | No counter, metric or health row on any of the above | **MEDIUM** | **FIXED** | source-verified |
+| CHAOS-92e | `fileblock.LogBlock` (`FILE_BLOCKED (tunnel %s)`) retains the DECRYPTED inner path, unbounded, from six `emitFileBlock` call sites — the sixth log sink, missed by this sweep's own enumeration and invisible to its source gate. Fed by `http.ReadRequest`, which caps nothing, so the value is unbounded on the wire rather than ~1 MiB | **MEDIUM** | **FIXED** | measured, 53.11 |
 
 ### 53.8 Rows left OPEN by attribution rather than fixed
 
@@ -12973,8 +15750,3250 @@ measured numbers (1 048 631 log bytes; 5 245 706 body bytes), and seven
   meaningless for the `LogFullURI` case; the byte-budget question for the ring
   as a whole is X-3's and is not closed here.
 - **The source gates are textual.** They fail on a new unbounded
-  `sanitizeLog(…URL.Path)` site and on a direct `blockpage.Serve` call, which
-  are the two shapes that reintroduce the defect, but a new sink that retains
-  the path by some other route — a new `logstore` field, a new egress header —
-  would not trip them. CDR-PATH-1 is exactly that shape, found by reading
-  rather than by a gate.
+  `sanitizeLog(…URL.Path)` site, on a direct `blockpage.Serve` call and (§53.11)
+  on a direct `fileblock.LogBlock`/`BlockConn` call, which are the three shapes
+  that reintroduce the defect, but a new sink that retains the path by some
+  other route — a new `logstore` field, a new egress header — would not trip
+  them. CDR-PATH-1 is exactly that shape, found by reading rather than by a
+  gate. **So was CHAOS-92e**, which was not a NEW sink but an existing one this
+  sweep's enumeration missed: the lesson recorded in §53.11 is that a
+  token-matching gate certifies the sinks the author already found, and the
+  enumeration — not the gate — is the load-bearing step.
+
+### 53.11 CHAOS-92e — the sixth log sink, found by re-reading the claim
+
+**Date:** 2026-10-26. **Scope:** the sink §53.1 did not enumerate.
+
+`emitFileBlock` ([proxy_tunnel.go](../proxy_tunnel.go)) calls
+`fileblock.LogBlock` ([internal/fileblock](../internal/fileblock/fileblock.go)),
+which writes `FILE_BLOCKED (tunnel %s) -> %q%q (ext=%q)` with the client-chosen
+path as the second `%q`. Six call sites reach it: four pass `req.URL.Path` from
+the decrypted inner request (global extension, policy profile, content type,
+content disposition), one passes an origin-supplied `Content-Disposition`
+filename, and `inspectMagicBlock` forwards the path for the magic-byte and
+polyglot blocks.
+
+**Why the sweep's gate did not catch it.**
+`DefectEveryRetainingSinkGoesThroughTheClamp` matches lines carrying **both**
+`sanitizeLog(` and `URL.Path`. This sink sanitizes in the callee — `obs.Sanitize`,
+the deliberately independent internal twin of `sanitizeLog` (ADR-0003) — so its
+call sites carry no `sanitizeLog(` token at all and the gate never examined them.
+The structural claim "one edit bounds all present and future sinks" was true of
+the sinks §53.1 had enumerated, and the enumeration was short by one.
+
+**Why it is worse per request than the five that were fixed.** The plain-HTTP
+sinks are fed by a path net/http caps at `MaxHeaderBytes + 4096` (§53.3). This
+one is fed by `http.ReadRequest` on the decrypted stream, which is
+`readRequestLimit(b, math.MaxInt64)` over a `textproto.ReadLine()` with
+`lim = -1` — **no bound on the inner request line at all**. Measured through
+`emitFileBlock` (gates below, verified to FAIL against the pre-fix tree):
+
+| path bytes | fill | process log | log ÷ path |
+|-----------:|:----:|------------:|-----------:|
+| 1 048 576 | `A` | 1 048 646 | 1.0x |
+| 1 048 576 | `\x00` | 1 048 647 | 1.0x |
+| 1 048 576 | `\xff` | **4 194 375** | **4.0x** |
+
+`obs.Sanitize` folds bytes `< 0x20` and `0x7F` to `_`, so a control-byte fill
+costs 1x — but `0xFF` is not a control byte, and `%q` renders each one as the
+4-character `\xff`. The multiplier is the client's to choose, as it is for the
+block page. Severity is **MEDIUM**, not HIGH: the precondition is the one
+CHAOS-69 named for the inner path (an allowed destination with SSL inspection
+enabled), not §53.2's stock-install reachability.
+
+**The fix** is the clamp this sweep already built, applied at the chokepoint:
+`emitFileBlock` wraps `urlPath` in `boundRetainedPath` **inside** the
+`fileblock.LogBlock` argument, so the sanitiser's scan and its copy are bounded
+too. It is package main's only route into `LogBlock`, so one edit bounds all six
+call sites. Enforcement is untouched — `fileBlocker.CheckPath`,
+`FileProfileBlocked` and every matcher ran on the whole value at the call site
+before reaching the emitter, and `BlockMessage` derives the 403 body from `ext`
+and `source` only, so **no client-visible byte depends on the path**.
+
+Gates, in [proxy_path_bounds_test.go](../proxy_path_bounds_test.go):
+
+| Gate | Proves |
+|------|--------|
+| `DefectTunnelFileBlockLogStaysBounded` | one inspected request cannot choose the log volume; the line says it was truncated and the counter moves |
+| `DefectTunnelFileBlockClampIsTheChokepointNotTheCallSites` | **source gate**: `fileblock.LogBlock`/`BlockConn` are reachable from package main only through `emitFileBlock`, which clamps inside the argument |
+| `ControlTunnelFileBlockEnforcementStillSeesTheWholePath` | the load-bearing control — a 1 MiB `.exe` path still matches with `ext=".exe"` |
+| `ControlTunnelFileBlockResponseIsUnchanged` | the 403 bytes are byte-identical at 16 B and 1 MiB: retention-only |
+| `ControlTunnelFileBlockRetainsOrdinaryValuesVerbatim` | ordinary traffic is verbatim, unmarked, and does not move the counter |
+| `ControlTunnelFileBlockBoundIsInclusive` | the boundary through the emitter, not only through the helper |
+| `ControlTunnelFileBlockHandlesMalformedValues` | 2/3/4-byte runes straddling the cut at four offsets each, plus `\xff`/`\x00`/`\n`/`\x7f` fills: no panic, no manufactured invalid UTF-8, the CWE-117 barrier intact |
+| `ControlTunnelFileBlockIsConcurrencySafe` | 32 concurrent emissions, exact counter, clean under `-race` |
+
+**Residual risk.** `cdrFilenameFromURL` (CDR-PATH-1, §53.8) is still the open
+egress sink and is unaffected by this clamp. The inner request line remains
+unbounded **on the wire** — bounding it is the `MaxHeaderBytes`-shaped product
+decision recorded as PATH-REFUSAL-1, and for the inspect loop it would be a
+`LimitReader`/`ReadRequest` replacement rather than a server option.
+
+---
+
+## 54. CHAOS-76 — The identity-backend result caches as a displacement surface
+
+**Date:** 2026-10-15
+**Scope:** The three result caches on the proxy credential path — the LDAP
+directory bind (`auth_ldap.go`), the legacy RFC 7662 introspection backend
+(`auth_oidc.go`) and the IdP-registry introspection provider
+(`auth_oidc_flow.go`) — plus the two dispatch points in `store.go` that reach
+them.
+**Verdict:** One **High** finding with two halves, both closed. Nothing else in
+the domain was found wanting; the surrounding contracts (CHAOS-47's probe gate,
+CHAOS-49's result cache, the "an infrastructure failure is never cached as a
+verdict" rule) all hold and are cited below where they carry the weight.
+
+### 54.1 Why this domain
+
+CHAOS-57 closed register row **AU-3c** in the LOCAL auth cache: the cache
+`store.go` keeps for local bcrypt verification evicted *one arbitrary entry*
+at capacity, so a credential flood displaced other clients' cached positives
+and the attacker's amplification landed on legitimate traffic.
+
+That sweep fixed one cache. Culvert has four. The three others sit behind the
+same `Config` dispatch, are reached by the same unauthenticated proxy
+credential path, and were written before the policy existed. This sweep asked
+whether the AU-3c reasoning had been ported, and it had not.
+
+### 54.2 The defect: AU-3c, three more times
+
+All three caches ended `set` with the same six lines — a Go map range that
+stops at the first key:
+
+```go
+if len(a.cache) >= maxAuthCacheSize {
+	for k := range a.cache {
+		delete(a.cache, k)
+		break
+	}
+}
+```
+
+A map range is randomised, so the victim is whichever entry the iteration
+happens to yield — and nothing in that code asks whether it is still LIVE.
+(Go randomises where a range STARTS; it promises no uniform draw over keys. The
+property that matters here is weaker and sufficient: the victim is unrelated to
+age, ownership or liveness.)
+
+The key space is caller-controlled, and the flood is free:
+
+- The proxy credential path hands whatever username/password or bearer token
+  the client supplied to the configured backend
+  (`store.go` `verifyAuthFrom` → `provider.Verify`,
+  `resolveAuthIdentityFromSnapshot` → `resolver.ResolveIdentity`).
+- An **authoritative denial is cacheable by design**, and correctly so — not
+  caching it would make every wrong credential a fresh round trip. RFC 7662
+  §2.2 answers an unknown or expired token with `200 {"active":false}`, which
+  is authoritative, so a flood of distinct bogus tokens is the IdP's *normal*
+  behaviour, not an edge case. On the directory leg the equivalent is
+  `auth_ldap.go` `verify`'s own comment: *"The directory answered: no such
+  user … That is an authoritative deny and stays cacheable."*
+
+So each bogus credential writes an entry, and at the 5,000 cap each further
+insertion takes one out. What this rests on is measured, not derived: the
+headline gate floods 3x the cap from one source and the honest entry is
+reliably gone (it survives a 1x flood about a third of the time, which is why
+that gate was reformulated to 3x before being accepted — see §54.6).
+
+As a first-order MODEL, a uniform draw would give survival `(1 - 1/N)^k`, about
+**37%** at one cap-worth and **5%** at three. Go's map iteration is randomised
+but guarantees no uniformity, so those numbers illustrate the shape rather than
+state a property of the code; the gate is the evidence. Either way the cost to
+the attacker is the same order: fifteen thousand requests bearing nothing but
+bogus credentials.
+
+Two things made this worse than the local-cache case:
+
+1. **Nothing reclaimed an expired entry.** `introspectCacheGet`, the legacy
+   `oidcIdentityCacheGet` and `cacheGet` all reported a miss and left the dead
+   entry in the map. So the steady state under a flood is a map full of DEAD
+   verdicts while eviction destroys the few live ones — and an expired entry is
+   *free* to drop, because it would have been a miss anyway. Evicting a live
+   entry in preference to a dead one is pure loss, and it was the default.
+
+2. **The registry cache is per provider.** `maxAuthCacheSize` bounds
+   `p.cache`, so an estate with N enabled OIDC profiles has N independent
+   5,000-entry maps, each independently floodable, and the dispatch loop asks
+   every enabled provider about every credential.
+
+### 54.3 The structural half: the fairness key had nowhere to go
+
+CHAOS-57 did not only fix a policy — it introduced the **client fairness key**,
+and both data-plane paths already compute it:
+
+- `proxy.go` → `cfg.resolveAuthIdentityFrom(authStateClientKey(r), u, p)`
+- `socks5.go` → `cfg.VerifyAuthFrom(clientFairnessKey(clientIP), …)`
+
+Both dispatch points in `store.go` then **discarded it** before reaching the
+provider:
+
+```go
+return snapshot.provider.Verify(user, pass)        // verifyAuthFrom
+return resolver.ResolveIdentity(user, pass)        // resolveAuthIdentityFromSnapshot
+```
+
+`verifyAuthFrom`'s comment explains why external providers are not charged a
+verification slot — *"their cost and their failure modes are governed by
+CHAOS-47's authProbeGate instead"* — and that is right about COST. It is not
+an answer about displacement. `authProbeGate` governs **reachability**: it
+decides whether to attempt a round trip. It says nothing about who may evict
+whose entry. So the displacement axis had **no owner**, and no per-client
+policy was even expressible inside these caches.
+
+This is the more interesting half of the finding: the primitive that would have
+prevented the defect existed, was computed on every request, and was dropped
+one call short of the code that needed it.
+
+### 54.4 The sharp end: a cached positive becomes a denial
+
+Displacement alone costs the victim a full backend round trip. The real
+consequence is the interaction with the CHAOS-47 / CHAOS-49 cooldown.
+
+When the backend is unreachable the gate denies **without** a round trip:
+
+```go
+if !p.gate.allow() {
+	noteAuthBackendGatedDenial()
+	return nil, false
+}
+```
+
+That is the correct fail-closed posture, and the cache is what makes it
+survivable: a client whose verdict is already cached is served from the cache
+and never reaches the gate. The cache's stated purpose, in CHAOS-49's own
+words, is that *"a one-second IdP blip cannot keep denying valid tokens."*
+
+Evict that client's entry and the next request falls through to the gate and is
+**denied** — for the whole cooldown, while the IdP is down, for a credential
+that was valid a moment ago. A flood therefore inverts the cache's purpose for
+exactly the users it exists to serve.
+
+Failure stays **CLOSED** throughout: there is no bypass, no credential is
+accepted that should not be, and the denial is logged and counted. What an
+anonymous client gains is the ability to make the gateway's authentication
+fail for other people — which is precisely the failure shape
+`internal/authstate`'s package doc was written for: *"Failure was closed (no
+bypass), but the whole gateway's authentication was remotely deniable by an
+anonymous client."*
+
+### 54.5 What shipped
+
+**One policy, not a fourth variant.** `identcache.Cache[T]`
+(`internal/identcache`, bound in package main as `identityResultCache[T]` by
+`auth_identity_cache.go`; §54.10) is `internal/authstate`'s policy — the same
+one CHAOS-57 put in `store.go` — with one "better victim" ordering,
+`identcache.BetterVictim`, which `store.go`'s `betterAuthCacheVictim` delegates
+to:
+
+- Entries are attributed to a client fairness key; eviction takes the **oldest
+  entry of the client holding the most**, ties broken by oldest entry then by
+  client key. The victim never depends on Go's map order. A flooding source
+  evicts **itself** until it is no longer the largest holder, and a client
+  holding one entry cannot be displaced until every other client is down to one
+  too — so displacing one honest verdict costs an attacker as many distinct
+  source addresses as the cap, not a for-loop.
+- An **expired entry is always the better victim** and is taken wherever a
+  bucket front holds one. A lookup now reclaims an expired entry in place, so
+  dead verdicts stop occupying capacity as soon as anybody looks at them.
+- Work per insertion stays **O(active clients)** — bucket fronts only, never a
+  scan of the whole map. That restraint is deliberate: the O(cache) scan under
+  a process-wide mutex is register row **AU-3d**, measured at 64 µs per
+  insertion, and re-introducing it here would have traded one measured defect
+  for another.
+
+**The key now has a route.** Two additive optional interfaces in `identity.go`
+— `clientAttributedVerifier` and `clientAttributedResolver` — reached through
+`resolveIdentityAttributed`, which both the `store.go` dispatch and the
+REGISTRY dispatch loop in `proxy.go` go through. They are additive rather than
+a widening of `IdentityProvider` because SAML is browser-mediated, keeps no
+result cache, and has nothing to do with a proxy-credential fairness key;
+forcing the parameter on it would be a contract change bought for nothing.
+The single helper is the point: the first version of this fix converted
+`store.go` and left the registry loop on the bare call, which is §54.9's first
+finding.
+
+**Per-entry expiry, not a store-wide TTL.** A positive introspection verdict is
+clamped to the token's own declared lifetime
+(`clampCacheTTLToTokenExpiry`), so it can be shorter-lived than the backend's
+configured TTL. The consequence is recorded on the type: a bucket front is the
+client's oldest entry by INSERTION, which is not necessarily its first to
+expire, so a deeper expired entry waits until it reaches the front. That costs
+nothing the fairness property depends on.
+
+**Displacement is now visible.** `CacheEvictions()` per backend, summed by
+`identityCacheEvictionsTotal` over BOTH the legacy provider on `Config` and the
+live registry credential providers, and exposed as
+`culvert_identity_cache_evictions_total`, beside the
+`culvert_auth_cache_evictions_total` that CHAOS-57 added for the local cache.
+The counter is the operator's only signal that cached verdicts are being thrown
+away, and each one costs somebody a round trip — or a denial, during a
+cooldown. It was wired in deliberately rather than left as an accessor: an
+eviction counter nobody can read is not observability, and this sweep's own
+write-up claimed the signal before it existed.
+
+### 54.6 Gates
+
+`auth_identity_cache_chaos_test.go`, seventeen gates (the last six from
+§54.9). **One gate = one top-level `TestChaos76_` function**; a subtest is not
+counted separately, so the per-backend runs of the headline gate are three
+subtests of one gate, not three gates. The table below lists all seventeen. **Every gate that pins a
+defect was verified to FAIL against the pre-fix behaviour**, by restoring it (arbitrary map-range victim, a lookup
+that leaves expired entries, and a dispatch that drops the key) and re-running:
+
+| Gate | Pins |
+|---|---|
+| `TestChaos76_FloodCannotDisplaceAnHonestClientsCachedVerdict` | The headline property, once per backend (registry OIDC / legacy OIDC / LDAP): a 3×-cap flood from one source leaves an honest client's verdict cached |
+| `TestChaos76_FloodCannotTurnACachedPositiveIntoADenialDuringAnOutage` | §54.4 end to end: flood, then take the IdP down, and the honest client is still served from cache rather than gate-denied |
+| `TestChaos76_ExpiredEntriesAreEvictedBeforeLiveOnes` | One expired front in an otherwise-live cache, so an arbitrary victim is a live entry with probability (cap−1)/cap |
+| `TestChaos76_LookupReclaimsAnExpiredEntry` | A dead verdict stops occupying capacity when looked at |
+| `TestChaos76_EvictionVictimIsDeterministic` | The victim is the oldest entry of the largest holder, identical across nine runs — not read from map order |
+| `TestChaos76_ASingleEntryHolderOutlivesEveryLargerHolder` | The fairness property, against a 6×-cap flood (pre-fix survival e⁻⁶) |
+| `TestChaos76_BucketBackingSliceDoesNotGrowWithRequestCount` | The compaction trap: a window-based test never fires under a sustained flood |
+| `TestChaos76_ClientFairnessKeyReachesTheIdentityProviders` | Both `store.go` dispatch points pass the key and do not fall back to the bare form |
+| `TestChaos76_EveryCachingIdentityBackendIsClientAttributed` | Anti-drift wall: a backend added later that forgets the client-attributed form is caught, because the dispatcher's fallback is silent |
+| `TestChaos76_EvictionsAreCounted` | The store counts what it displaces |
+| `TestChaos76_ConcurrentUseKeepsTheCapAndTheBucketIndexConsistent` | The cap and the bucket index under 32-goroutine contention; `bucketDriftForTest` catches live-count drift, which corrupts the victim choice rather than merely leaking memory |
+| `TestChaos76_RefreshingACredentialDoesNotGrowItsBucketForever` | §54.9 (2): a re-verified credential appends a second slot, so the bucket's key slice grew with request count behind a bounded map. Measured pre-fix: 2,020 slots for 20 live credentials after 2,000 refreshes |
+| `TestChaos76_RefreshDoesNotMakeAnEntryLookLikeItsClientsOldest` | §54.9 (4): the stale slot made `frontLocked` return the just-refreshed entry as the client's oldest, so eviction preferred a verdict written moments ago. Pre-fix `keys=[A B A]`, front `A` |
+| `TestChaos76_RegistryDispatchIsClientAttributed` | §54.9 (1): the `resolveIdentityAttributed` helper every data-plane caller goes through — the attributed provider receives the key, a bare-only provider still resolves, and every shipped registry credential provider implements the attributed form |
+| `TestChaos76_EvictionCounterCoversEveryCacheAndNeverFalls` | §54.9 (3) and (5): the exported total covers a REGISTRY-only deployment, and does not fall when the registry replaces a live provider with a freshly compiled one |
+| `TestChaos76_AClampedVerdictExpiresWithItsTokenNotLater` | §54.9 (6): a positive clamped to the token's `exp` is recorded with that exact deadline, for both introspection backends — not the clamped duration restarted against a later clock sample. Pre-fix drift measured at 1.1 µs (legacy) and 553 ns (registry) on the first insertion |
+| `TestChaos76_LegacyProviderEvictionsAreReportedOnConfig` | `Config.IdentityCacheEvictions` keeps its narrower meaning — the legacy provider's displacement only, never the local bcrypt cache's. The only gate on that accessor once §54.9 (5) moved the metric to a process-owned total; renamed from `..._IdentityCacheEvictionsReachTheActiveBackend`, which named the pre-(5) design |
+
+Two of these started life as probabilistic oracles — a flood against one honest
+entry passes pre-fix about a third of the time — and were reformulated to be
+deterministic before being accepted. A gate that only usually fails against the
+defect is not a gate. The two observability gates pin surfaces that did not
+exist before this sweep rather than a pre-fix defect, and the concurrency gate
+was verified against a deliberately broken overwrite path (de-indexing removed:
+drift of 2,000 on one bucket) rather than against `main`, since the store it
+guards is new.
+
+### 54.7 What is deliberately left
+
+- **The per-provider cap multiplies.** N enabled OIDC profiles still mean N
+  independent 5,000-entry caches. Fairness now bounds who can displace whom
+  WITHIN each, which is the security property; the aggregate memory ceiling
+  (N × 5,000 entries) is a sizing decision for an operator-configurable cap,
+  not a defect, and `maxAuthCacheSize` is shared with `store.go` so changing it
+  is a cross-cache decision.
+- **This is the THIRD implementation of one engine, and the triplication is
+  left standing.** `internal/authstate.Store[T]` (interactive-login callback
+  state), `store.go`'s `authCacheStore` (the local bcrypt cache, CHAOS-57) and
+  this sweep's `identcache.Cache[T]` all carry per-client buckets, lazy
+  stale-position skipping from the front, amortised compaction keyed on total
+  slice length, and the same three-term victim ordering. Codex's narrower
+  finding on PR #1633 — the engine and its white-box tests sat in
+  `package main` against the internal-owner rule in [AGENTS.md](../AGENTS.md) —
+  is now closed by the move in §54.10, which also makes `store.go`'s
+  `betterAuthCacheVictim` delegate to `identcache.BetterVictim`, so the
+  ordering has two definitions in the tree (that one and `internal/authstate`'s
+  `better`) rather than three. Merging the three ENGINES is still left: it
+  reaches into CHAOS-57's `authCacheStore`, and the next bullet is why folding
+  this cache into `internal/authstate` would be wrong.
+- **`internal/authstate` carries this sweep's findings (2) and (4) latently,
+  and that is why folding this cache into it would be wrong.** Its `Set`
+  removes and re-appends, and its `frontLocked`/`compactLocked` presence test
+  (`entries[k]` present && `rec.client == client`) cannot tell a stale bucket
+  position from the live one, because the NEW record answers "present" for
+  every historical position of the same key. So a re-`Set` key would both
+  survive compaction twice and present as its client's OLDEST entry. Neither
+  bites there: its keys are unguessable single-use state tokens that are never
+  re-`Set`. This cache's keys ARE re-`Set`, every TTL, on credential
+  re-verification — which is exactly how (2) and (4) were reachable here, and
+  what the per-record `pos` generation marker fixes. `authstate` has no
+  equivalent, so moving a re-`Set`-heavy workload into it would make both
+  reachable. Recorded rather than relied upon.
+- **`AU-3e`, the username-enumeration timing oracle, is untouched** and stays
+  as CHAOS-57 recorded it: closing it means caching wrong-username negatives,
+  a behaviour change to a security control that deserves its own review. This
+  sweep does not widen it — the caches it changed are keyed by the same
+  `cacheKey` as before.
+- **`AU-11`, the sequential provider loop**, remains open: the gate collapses
+  an OUTAGE to a constant, but a merely SLOW IdP still adds its latency to
+  every request that reaches it. Different axis, different fix.
+
+### 54.8 Register hygiene: two rows were stale, and they misdirect
+
+While locating the domain, this sweep read `AU-1` and `AU-13` as live **High**
+and **Medium** gaps:
+
+> AU-1 — Registry OIDC introspection has **no result cache** → one IdP
+> round-trip per request, ×N providers, each 10 s timeout.
+> AU-13 — Registry introspection also lacks **negative caching / circuit
+> breaker**.
+
+Both were closed by **CHAOS-49** in August and neither row was updated. The
+revision-log entry for that sweep records the fixes explicitly (its items (5)
+and (6)), and the code has carried `introspectCacheGet`/`introspectCacheSet`,
+the 2-minute TTL and `authProbeGate` since. Verified at this revision in
+`auth_oidc_flow.go` and by the existing gates
+`TestOIDCFlow_IntrospectionResultIsCached`,
+`TestOIDCFlow_InactiveTokenVerdictIsCached` and
+`TestOIDCFlow_UnreachableIdPIsGatedAndReported`.
+
+Both rows are corrected below. This is the same governance failure the header
+documents for IDs, in a different column: a sweep closes a defect, writes its
+own section, and does not walk back to the summary table the next sweep
+actually reads first. An open High row is not free — it is the most expensive
+kind of stale, because it is exactly what draws the next sweep in.
+
+### 54.9 Review follow-up — six defects in the fix itself
+
+Codex review on PR #1633 raised three findings against this sweep's own change,
+a second, manually requested pass on the corrected head raised two more, and a
+third pass on the head after that raised (6). All six were traced to a real
+path and confirmed; all six are fixed, each with a gate verified failing
+against the state the finding described.
+
+That each pass found more is worth recording plainly: findings (4) and (5) are
+both consequences of the fix for (2), and (6) is a consequence of the
+generalisation itself — none was visible from the code the previous pass
+changed. A review round is not a filter you pass once.
+
+**(1) P1 — the fix reached the wrong dispatch.** `proxy.go`'s credential path
+tries the IdP-REGISTRY providers first and only then the legacy fallback:
+
+```go
+for _, prov := range idpRegistry.EnabledCredentialProviders() {
+	id, resolved := prov.ResolveIdentity(u, p)   // the bare form
+```
+
+The conversion had covered `store.go`'s two dispatch points and left this loop
+untouched. In a registry deployment — the modern path, and the one whose caches
+this sweep is about — the fairness key therefore never arrived, every entry
+landed in the empty-client bucket, and the defect persisted unchanged. The
+sweep's own structural gate asserted the two converted points and did not
+assert the loop that matters most, which is the lesson worth keeping: a gate
+written from the fix rather than from the call graph confirms the fix.
+
+Fixed by routing every data-plane caller through one
+`resolveIdentityAttributed` helper, so the preference lives in a single place
+and a new caller inherits it instead of re-deciding.
+
+**(2) P1 — the compaction leak, by a second route.** `set` on a key the bucket
+already lists removes the old record and appends the key, so the slice holds it
+twice while `live` counts it once — and a presence test cannot tell the stale
+slot from the live one, because the NEW record answers "present" for every
+historical position of that key. The filter kept them all, so `b.keys` grew
+with request count behind a bounded map.
+
+This is the trap `compactLocked`'s own comment warns about, reached from the
+other side, in code written to avoid it. The shape is ordinary rather than
+adversarial: the fairness key is a client address, so one NAT'd office is ONE
+bucket holding many live credentials, each re-verified every TTL. Measured by
+the gate before the fix: **2,020 key slots for 20 live credentials** after
+2,000 refreshes. Compaction now keeps each key's LAST position — the one whose
+record `set` most recently wrote — so bucket order still tracks entry age and
+`frontLocked` still yields the client's oldest entry.
+
+**(3) P2 — the new metric was blind where it mattered.** The counter read only
+`Config.provider`, but a registry deployment's caches live in `idpRegistry`,
+and an LDAP registry cutover unwires the legacy provider — so
+`culvert_identity_cache_evictions_total` would have reported zero while the
+caches actually serving the credential path evicted. The same root as (1):
+`Config.provider` is not where the caches are. `identityCacheEvictionsTotal`
+now sums both sources.
+
+Findings (1) and (3) share one cause, and it is worth naming plainly: this
+sweep read the register and the cache implementations closely, and did not
+trace the production call graph that reaches them. Two of the three findings
+follow from that single omission.
+
+**(4) P2 — a refresh made an entry look like its client's OLDEST.** The fix for
+(2) deduplicated during compaction and left the ORDERING wrong between
+compactions. `set` on a key the bucket already lists removes the old record and
+appends a new slot, so a bucket reads `[A, B, A]` while `live` counts two — and
+`frontLocked`'s presence test cannot reject the leading `A`, because the new
+record answers "present" for every historical position of that key. So the
+front, which the policy defines as the client's OLDEST entry, was the one just
+refreshed. Eviction then took a verdict written moments earlier in preference
+to a genuinely older one; with the backend in its cooldown, that client is
+denied despite having just been verified.
+
+Compaction deduplicates, but it is skipped for buckets of eight keys or fewer,
+so a small bucket — the ordinary case for one client — stayed wrong
+indefinitely. Measured by probe before the fix: `keys=[A B A]`, `front=A`, with
+`A.added` newer than `B.added`. The fix gives each record a generation marker
+(`pos`, the index of the slot it was written for) that `frontLocked` checks, so
+a stale slot is skipped in O(1) and compaction rewrites the markers it moves.
+
+Note what this says about §54.6's claim that the compaction fix was gated: it
+was — against GROWTH, which was the finding. The gate measured the bucket's
+LENGTH and never asserted its ORDER, so it could not see this. A gate written
+from the finding tests the finding.
+
+**(5) P2 — the eviction counter could fall.** Summing the LIVE registry
+instances, which is exactly what finding (3) asked for, made
+`culvert_identity_cache_evictions_total` **decrease** whenever an operator
+edited, disabled, deleted or reloaded an IdP profile: `IdPRegistry.Upsert` and
+`ReplaceAll` both compile a NEW provider with a fresh, zero cache and swap
+`r.live`, so the accumulated count simply vanishes — to zero if every provider
+is replaced. A Prometheus counter that decreases reads as a process restart,
+which erases the flood evidence the counter exists to carry and corrupts every
+`rate()` over the window.
+
+The fix accumulates at the point of eviction into a process-owned total, so it
+covers both deployment shapes, survives any number of provider swaps, and
+cannot regress. It also removes the registry walk (3) introduced — the right
+answer to (3) turned out not to be "read more places" but "count once, where
+the event happens". Verified by reverting: the gate reports the total falling
+from 48 to 0 on a provider replacement.
+
+**(6) P2 — a clamped verdict outlived its token.** The whole point of
+`clampCacheTTLToTokenExpiry` is that a cached "yes" can never outlive the
+credential it was derived from: an RFC 7662 positive is bounded by the token's
+own declared `exp`, not by the backend's configured TTL. Both pre-CHAOS-76
+stores held that deadline exactly, because they wrote `expiry: now.Add(ttl)`
+with the **same** `now` the clamp had measured against.
+
+Generalising them onto a shared store broke it. `identityResultCache.set` takes
+a DURATION and samples its own clock, so the absolute deadline became
+`now₂ + (exp − now₁)` = `exp + (now₂ − now₁)`: everything the caller spent in
+between — cloning the identity, contending for the store mutex on a busy
+credential path, waiting out a GC pause — was added back to the entry's life,
+and requests in that interval authenticate on a token that has already expired.
+
+The interval is small in the ordinary case and measured at 1.1 µs and 553 ns
+for the two backends, so this is a contract defect rather than an exploitable
+window: it is not attacker-controlled, and widening it means lengthening a path
+that holds no lock the attacker can reach. It is fixed because the invariant is
+stated in the clamp's own doc comment and in §54.5, and an invariant that holds
+only to within a scheduling delay is not the one the code claims.
+
+The store now distinguishes the two cases instead of making every caller
+express its deadline as a duration: `setUntil` takes an ABSOLUTE instant, which
+is what a token-clamped verdict has, and `set` keeps the duration form for a
+caller whose only bound is a configured TTL (the LDAP bind). Both share one
+`store` helper, so the cap, the fairness policy and the bucket index have a
+single implementation. The gate asserts exact equality with `time.Unix(exp, 0)`
+rather than a tolerance, so any re-derivation fails it however small the
+interval; pre-fix it fails on the first insertion for both backends.
+
+What this one says about the sweep: findings (1) and (3) came from not tracing
+the call graph, and (4), (5) and (6) all come from the same place — moving three
+implementations onto one abstraction silently re-decides the details each of
+them had got right locally. The duration-versus-deadline choice was never
+examined; it was inherited from whichever of the three stores the shared
+signature happened to be modelled on.
+
+### 54.10 Codex P1 closed: the engine moves to `internal/identcache` (ADR-0041)
+
+Codex's P1 on PR #1633 was right: the cache owns synchronisation, entry and
+bucket state, expiry, compaction and the eviction policy, which is domain logic,
+and both it and its pure white-box gates had been introduced in `package main`.
+They now live in `internal/identcache`, recorded in
+[ADR-0041](../docs/adr/0041-identity-result-cache-package.md) and
+[package isolation](PACKAGE-ISOLATION.md). This is a move, not a redesign:
+
+- **Engine** (`internal/identcache`): `Cache[T]` with `Get`, `Set`, `SetUntil`,
+  `Evictions`, `Len` and a read-only `Expiry`, plus `BetterVictim`. The policy
+  code is byte-for-byte the code that left `auth_identity_cache.go`, renamed.
+  It imports only `sync` and `time`.
+- **Injected dependencies, not package state.** The cap and the eviction sink
+  are `Options` passed to `New`. The process-wide eviction total that
+  `/metrics` exports used to be a package-level atomic next to the engine; it
+  stays in package main (`identityCacheEvictions`) and is reached through
+  `OnEvict`, so two caches, or two tests, never share a count.
+- **Binding** (`auth_identity_cache.go`, main): `identityResultCache[T]`
+  supplies `maxAuthCacheSize` and the sink. Its zero value is still usable,
+  because every backend embeds one by value and many tests build backends as
+  literals, so it constructs the engine on first use under a `sync.Once`. The
+  call sites in `auth_ldap.go`, `auth_oidc.go` and `auth_oidc_flow.go` are
+  unchanged.
+- **Gates split by behaviour, names unchanged.** The nine engine-only gates
+  moved: `ExpiredEntriesAreEvictedBeforeLiveOnes`, `LookupReclaimsAnExpiredEntry`,
+  `EvictionVictimIsDeterministic`, `ASingleEntryHolderOutlivesEveryLargerHolder`,
+  `BucketBackingSliceDoesNotGrowWithRequestCount`, `EvictionsAreCounted`,
+  `ConcurrentUseKeepsTheCapAndTheBucketIndexConsistent`,
+  `RefreshingACredentialDoesNotGrowItsBucketForever` and
+  `RefreshDoesNotMakeAnEntryLookLikeItsClientsOldest`. They are sized against
+  the production cap and run with `go test ./internal/identcache` and no
+  application globals. The eight integration gates stay in main.
+  `TestChaos76_TheBindingSuppliesTheApplicationCapAndSink` is new: it fails if
+  the binding passes a different cap or drops the sink, which no engine gate can
+  notice.
+- **Boundary.** `TestIdentcacheBoundary_NoApplicationDependenciesOrSharedState`
+  rejects non-stdlib imports, package-level variables and `init`. Its negative
+  controls include the exact regression this move removed, a process-wide
+  eviction total in the package. Ownership tests pin per-cache sinks, the cap as
+  a construction dependency, and `BetterVictim`'s total order.
+
+The register rows were renumbered AU-30/AU-31 → AU-67/AU-68 in the same round,
+because #1437 holds AU-18…AU-62 (see the dated header entry).
+
+---
+
+## 56. CHAOS-81 — The SIEM forwarding path under a collector outage
+
+**Id note.** Written as `CHAOS-72` / §42 and renumbered to `CHAOS-81` / §45 in
+merge order when main was brought in (see this sweep's revision-log row), then
+to §53 when `CHAOS-78` (#1675) merged as §45, and to §56 when `CHAOS-92`
+merged as §53 (§54 and §55 are held by open sweeps). Gates and source comments
+carry the new id.
+
+**Overlap with §45 (`CHAOS-78`).** Both sweeps converted the package-main
+syslog handle to an `atomic.Pointer`. §45 merged first, so its declaration and
+accessors (`globalSyslogHandle`, `syslogHandle`, `setSyslogHandle`) and its
+AST wall are the ones in the tree; this sweep's own names (`globalSyslog`,
+`activeSyslog`, `setActiveSyslog`), where they appear below, now mean those.
+What this section adds on top is the publication transaction
+(`syslogPublishMu`), the successor handoff, the sealed-totals accounting and
+the delivery health plane. The engine keeps both exclusions against the
+close-versus-enqueue window: this sweep's `sendMu`, which the sealed-totals
+accounting depends on, and §45's `inFlight` registration, which `Close`'s
+bounded `waitForSenders` still reads.
+
+**Sweep date:** 2026-09-24. **Scope:** `internal/syslog`, `syslog.go`,
+`checkSyslogFeed` (diagnostics.go), the `/api/syslog` + `/api/syslog/test`
+admin surface, and the new `syslog_health.go` plane.
+
+### The one-sentence finding
+
+The only health surface that reports on the SIEM feed decides on state fixed at
+**init time**, so a collector that goes away during ordinary uptime — the common
+case, not the narrow one — leaves the node reporting **"remote syslog/SIEM
+forwarding is active"** while every audit and request event it produces is
+discarded, uncounted by any series a monitoring system can read.
+
+### Why this path
+
+`internal/syslog` carries the customer's security record OFF the box. Both
+`globalSyslog.WriteAudit` (store.go:416 — every `auditEvent`) and
+`globalSyslog.WriteRequest` (store.go:1873 — every request-log entry) go
+through it. For a great many enterprises the SIEM *is* the record of record:
+the node-local audit JSONL is a `fileutil.RotatingFile` capped at 50 MB with
+one archive and is frequently never collected. A collector that stops receiving
+is therefore a hole in the compliance trail, which is the CWE-778 / A09:2021
+class `internal/audit`'s own header names by number.
+
+This tree has closed that class twice already — ST-8 (§13) for local audit
+write loss, and CHAOS-61 (§30) for the DP→CP audit push queue, whose write-up
+records the reasoning verbatim: the queue *"dropped with no counter, metric or
+log line — three hundred lines below this package's own documented contract for
+the durable path."* The syslog feed is the third member of the family and was
+the one still below that contract.
+
+### The defects
+
+**D1 — the contract row answers a different question than the one it prints.**
+`checkSyslogFeed` is `globalSyslog == nil || syslogConfigured !=
+syslogConfiguredAddr` and nothing else. Both operands are strings assigned once
+during startup. The row was written for a **boot-time** connect failure, which
+is real (its own comment carefully works through the YAML-then-admin double-init
+case) but requires the collector to be down in the exact window the proxy
+starts. The runtime case — the collector dying at any point across weeks of
+uptime — was not merely uncovered: it took the `else` branch and returned
+`diagOK` with the message *"remote syslog/SIEM forwarding is active"*.
+Reproduced against the real handler and the real engine on the pre-fix tree:
+**49 of 49 audit events dropped, row `ok`, message "active"**. A health surface
+that asserts a false statement is worse than no surface, because it is the one
+an auditor is shown.
+
+**D2 — loss was invisible to every machine-readable surface.** `Drops()` had
+exactly **one** consumer in the entire tree: the `drops` field of `GET
+/api/syslog`, an admin-only JSON blob. No Prometheus series, so no alerting
+rule *could* be written. No `/healthz` field, where both of its siblings
+(`auditLogWriteErrors`, `auditClusterPushDrops`) report. No alert event. No log
+line — the drain goroutine drops silently by construction, which is correct for
+the hot path and left the operator with nothing at all.
+
+**D3 — the one counter that existed could not answer the question.** `Drops()`
+is cumulative with no time axis. `drops: 40213` cannot distinguish a feed that
+is dark right now from one that healed last Tuesday. CHAOS-59 settled this
+shape for the threat feed: freshness needs a last-success timestamp and
+staleness needs a duration. Neither existed here.
+
+**D4 — `InitSyslog` leaked the Writer it replaced.** `globalSyslog = sw` was
+the whole handover. The previous Writer's drain goroutine stays parked on
+`select { case <-s.queue; case <-s.stop }` — nobody holds the queue, nobody
+closes `stop` — **holding its collector socket open forever**. Measured on the
+pre-fix tree: `+1` goroutine and a connection to the abandoned collector still
+`ESTABLISHED` at the far end (a read there timed out rather than seeing EOF);
+many SIEMs count such a phantom session against a per-source connection
+licence. This is **not only an admin action**: `main.go:206` runs
+`initObservability` (YAML/flags) and `main.go:240` runs
+`initPersistentAdminState` → `LoadAdminSettings` → `applyAdminServices`, and
+`snapshotAdminEndpoints` persists `syslogConfigured` into
+`admin_settings.json` — so once an operator saves any admin setting, **every
+subsequent boot** calls `InitSyslog` twice and leaks one Writer. Descriptor
+exhaustion is the recorded terminal state of WK-11/PX-6 and the entry point to
+CHAOS-54's findings.
+
+**D5 — the remediation instruction pointed at a probe that cannot fail.**
+`POST /api/syslog/test` called `Write` and answered `{"ok": true, "message":
+"test message sent"}` unconditionally. That was true when delivery was
+synchronous. Once WK-9's fix made it asynchronous, `Write` became a channel
+send and the endpoint confirmed only that the channel had room — it returned
+`ok` for a collector that had been dead for a week. `checkSyslogFeed`'s own
+`OperatorAction` told operators to *"use POST /api/syslog/test to confirm
+connectivity"*. **A probe that cannot fail is worse than no probe**, and this
+one is a second-order casualty of an otherwise-correct fix: the async change
+did not consider which callers depended on `Write` being a delivery.
+
+**D6 — the writer handle is mutated at runtime and read on the request path,
+with no synchronisation.** `globalSyslog` was a bare package-level
+`*syslogWriter`. It is written by the admin plane (`apiSyslogConfig` re-points
+or disables forwarding) and read on the REQUEST PATH — `store.go:1873`
+(`WriteRequest`, once per proxied request) and `store.go:416` (`WriteAudit`,
+once per admin action) — plus the diagnostics row, the `/metrics` scrape and
+the `/healthz` probe, each from its own handler goroutine. Confirmed under
+`-race` against the real `apiSyslogConfig` and `recordRequest` shapes. Nothing
+in the suite happened to exercise both at once, which is the only reason it had
+never been reported — and this sweep would have made it worse by adding two
+more readers. Found while wiring the plane, fixed rather than recorded, because
+a sweep may not leave a known data race on the request path in the subsystem it
+just rewrote.
+
+### What shipped
+
+`internal/syslog` gains the delivery axis while staying the stdlib-only leaf
+its header contract requires: every drop site routes through one `noteDrop`
+chokepoint that moves the counter, the timestamp **and** a bounded reason class
+together, successes route through `noteDelivered`, and `Stats()` is a lock-free
+snapshot. The chokepoint matters more than the fields: a future drop site that
+moves `Drops()` alone would rebuild exactly the unreadable counter this sweep
+came to fix.
+
+`syslog_health.go` is the plane, shaped like `threatfeed_health.go` and
+`socks5_health.go` with no new operator vocabulary beyond one event name:
+`culvert_syslog_{up,degraded,delivered_total,drops_total,panics_total,last_success_timestamp_seconds,stale_seconds,queue_depth}`
+(emitted **only when a collector is configured** — the CHAOS-54 rule), the
+`syslog_feed` row extended with a delivery verdict, `syslogDrops` on `/healthz`
+when non-zero, a fire-once `syslog_feed_down` alert, and a rate-limited log
+pair.
+
+Four decisions are load-bearing.
+
+**Degradation requires BOTH halves — drops observed AND nothing delivered for
+five minutes.** Drops alone is a blip the reconnect machine absorbs; age alone
+is an idle gateway with nothing to forward. Requiring both is what makes the
+predicate unable to fire on silence, and inventing a fault from silence is how
+a health plane loses its audience. Five minutes is chosen against the engine's
+own state machine: `deliverLine` retries at most every 5 s, so by the time this
+fires the writer has failed roughly sixty bounded attempts.
+
+**Recovery is on OBSERVED evidence only** — one event that actually reached the
+collector. Elapsed time never clears it (the `ca_health.go` / `storage_health.go`
+discipline). The cost is stated rather than hidden: a node whose collector was
+fixed while the node was quiet stays reported as down until it delivers
+something, which is what `POST /api/syslog/test` is for and what the row's
+`OperatorAction` says.
+
+**A dark SIEM feed FAILS the diagnostics row where a stale threat feed only
+WARNS**, and the asymmetry is deliberate. Stale intelligence still has a
+degraded-but-useful state — the gateway keeps enforcing last-known-good
+entries. A dark SIEM feed has none: the events are destroyed as they are
+produced and are never replayed.
+
+**No `/readyz` row and no `/healthz` failure.** A node whose SIEM feed is down
+is proxying perfectly — policy, category, DPI, AV, CDR and the local audit JSONL
+are untouched. Failing readiness would eject a healthy gateway over its logging
+plane, converting a compliance gap into a traffic outage. That is the trade §19
+refused for the category store, §25 for the admin UI listener and §27 for the
+threat feed, and the answer is the same here.
+
+`globalSyslog` is now an `atomic.Pointer[syslogWriter]` behind
+`activeSyslog()` / `setActiveSyslog()`, and every call site loads ONCE into a
+local. The mechanical conversion produced `if activeSyslog() != nil {
+activeSyslog().X() }` at seven sites — a check-then-act against a handle the
+admin plane can clear in between, i.e. the same defect in a new costume — so
+each one was rewritten as `if sw := activeSyslog(); sw != nil`. The publication
+in `InitSyslog` is a `Swap`, not a load-then-store: two concurrent re-points
+would otherwise both read the same predecessor, one closing a writer the other
+was about to leak.
+
+Two further races surfaced only once the gate existed, both created by this
+sweep's own observer running `syslogFeedState` on the DRAIN goroutine: the
+clock seams (`syslogHealthNow` and the engine's `now`) were bare function
+values a test replaces, and the snapshot read the `syslogConfigured` /
+`syslogConfiguredAddr` intent strings the admin handler mutates. The clock
+seams are now atomic; the intent comparison was simply removed from the
+snapshot, since nothing consumed it — `checkSyslogFeed`'s own init branch
+already answers that question on the handler goroutine. **A new observer is a
+new concurrency context**: every global the observed function touches has to be
+re-examined against the goroutine it is now reached from, and a plain package
+var that was safe under "written at startup, read by handlers" stops being safe
+the moment a worker goroutine joins the readers.
+
+The replaced-Writer close is **asynchronous**, which is a decision and not an
+oversight: `Writer.Close` is self-bounded but that bound is ~7 s against a
+wedged collector, and the collector being replaced is — by the nature of the
+operation — the one the operator has decided is broken. Paying it synchronously
+would let a dead SIEM stall the boot (before the proxy listener is up, the
+CHAOS-57 lesson) or the admin request that is fixing it.
+
+### Deliberately NOT done, and recorded
+
+**UDP cannot prove delivery, and `udp://` is the DEFAULT** when the operator
+omits a scheme. A write to a connected UDP socket almost always succeeds
+regardless of whether anything is listening; an ICMP port-unreachable surfaces,
+at best, on a *later* write, and a collector silently discarding datagrams
+surfaces nothing. So on UDP `Delivered` means "this kernel accepted the
+datagram", not "the SIEM received it", and `culvert_syslog_up 1` is not
+evidence the SIEM has the events. This is a property of the protocol, not a
+defect to fix in the gateway. It is made explicit instead: the row appends a
+caveat sentence, `GET /api/syslog` reports `deliveryProvable: false`, the probe
+answers `sent` rather than `delivered`, and the runbook says to use `tcp://`
+when delivery evidence is required. **Register row SL-1** — an operator-visible
+default that produces a weaker guarantee than the surface appears to give is a
+posture decision, not a bug, and the owner may prefer to change the default.
+
+**The reconnect backoff stays a flat 5 s with no jitter.** CHAOS-59's rule
+(bounded exponential backoff plus stable per-node jitter, because a fleet
+reconnecting in lockstep against a recovering origin is a herd) applies in
+spirit, but the rate here is already bounded at 0.2 dials/s per node and
+reconnection is driven by line arrival rather than a ticker, so an idle node
+generates none at all. Changing it is a behaviour change in a sweep about
+visibility, and this tree's own rule is one concern per change. **Register row
+SL-2.**
+
+**Events lost during an outage are not replayed and no spool is added.** A
+durable on-disk spool is the obvious ask and is deliberately refused here: it
+would put the compliance feed's queue on the same volume whose failure §13 and
+§31 exist to survive, and a spool that can itself be corrupted or filled trades
+one loss mode for two. The honest answer is that the node-local audit JSONL
+already holds the audit half and is the recovery path the runbook names.
+**Register row SL-3.**
+
+**`GET /api/syslog` remains admin-only.** The delivery fields say nothing a
+viewer could act on without the ability to re-point the target, and the
+diagnostics row (viewer-visible, counts only) already carries the posture.
+
+### Gates
+
+`internal/syslog/syslog_stats_test.go` (7) and `syslog_health_chaos_test.go`
+(17).
+
+Every defect gate was **verified failing against its reintroduced pre-fix
+shape**: the contract row reported `ok`/"forwarding is active" with a dead
+collector and 5 drops; `/healthz` carried no `syslogDrops`; the replaced Writer
+held its collector connection `ESTABLISHED`; and `POST /api/syslog/test`
+answered `ok: true` against a dead collector.
+
+Two gates exist because of a lesson this document already records one subsystem
+over. `TestChaos81_ProbeReportsTheRealOutcome` exercises `syslogDeliveryProbe`
+directly and **passed unchanged against the reverted handler** — walling the
+function is not walling the path, exactly as the SOCKS5 log-injection note
+found for `pluginDecision`. `TestChaos81_TestEndpointReportsFailureAgainstADeadCollector`
+drives the real handler, and
+`TestChaos81_MetricsExpositionCallsTheSyslogWriter` pins the exposition wiring
+structurally (a source scan, with its own not-vacuous control) because a metrics
+writer nobody calls satisfies a test that calls it directly.
+
+`TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic` is the D6 gate
+and carries no assertion beyond "the race detector saw nothing" — a torn handle
+is the defect, and `-race` is the only instrument that observes it. Verified
+failing against the reintroduced bare-pointer shape. It is also the gate that
+found the two clock-seam races above, which is the argument for writing it at
+all: a concurrency gate earns its keep by finding what its author did not know
+to look for.
+
+One gate was demoted to a control after being written as a defect gate.
+`ReplacedWriterDoesNotCorruptTheSuccessorsState` was meant to prove that
+detaching the delivery observer before closing a displaced writer stops that
+writer charging its final-flush drops against its replacement. It passes
+against the tree WITHOUT the detach, because the isolation holds by
+construction: `syslogFeedState` reads its counters from whichever writer is
+live. The detach stays as hygiene and is documented as hygiene; the test stays
+as a control on the property an operator depends on. **A gate that cannot fail
+is worth less than no gate**, so labelling it is not a formality — an
+unlabelled vacuous gate is read by the next person as proof of something it
+never tested.
+
+Five controls, because the cheapest ways to pass the defect gates are all worse
+than the defect: a plane that reported every feed as degraded would satisfy
+"sees a runtime outage" (`HealthyFeedStillReportsActive`); one that never
+reported degraded would satisfy "does not page an idle node"
+(`IdleNodeIsNeverDegraded` pins the other direction); a healthy feed must still
+deliver exactly what it delivered before and pay no observer cost on the happy
+path (`HealthyFeedIsUnchangedAndSilent`); and a panicking observer must never
+take the drain goroutine down (`PanickingObserverCannotKillDelivery` — CHAOS-24's
+rule, already applied to `SetPanicObserver` in the same file).
+
+### The Codex P1 round, and what it says about the sweep's own blind spots
+
+Three P1 findings, all correct, all closed. Each is the same shape: a rule this
+sweep applied correctly in one place and failed to carry to the next — the
+pattern §35 named after finding it four times in one sweep, arriving here on a
+different subsystem.
+
+**P1-B is the one that would have cost a customer a false page, and it is
+the sharpest.** `snap.Drops > 0 && snap.Age >= syslogDegradedAfter` reads as
+"something is failing and nothing is getting through", and it is not what it
+says: `Drops` is CUMULATIVE and never resets, so one transient loss — a queue
+overflow during a collector GC pause, weeks ago — armed the first half
+PERMANENTLY. The node then only had to go quiet for five minutes for `Age` to
+cross the threshold, and every surface reported a **perfectly healthy feed as
+DOWN**: the `fail` row, the alert, `culvert_syslog_up 0`. Reproduced: 101
+historical drops, `ConsecutiveFailures == 0`, one idle month, row `fail`. The
+predicate now keys on `ConsecutiveFailures`, which the engine resets on every
+delivery and which therefore means what the predicate needs it to mean —
+something is failing NOW.
+
+The reason this survived self-review is worth more than the fix. This file's own
+header argues at length that the predicate "cannot fire on an idle node", and
+there is a control test named `IdleNodeIsNeverDegraded` asserting exactly that —
+**but it uses a feed with ZERO drops.** It tested the half of the claim that was
+already true. A control written from the same mental model as the code inherits
+the model's blind spot; this one needed a feed that had dropped AND recovered,
+which is the state the author was not thinking about because the author was
+thinking about outages, not about their aftermath. *When a control exists for a
+claim and the claim is still wrong, suspect the control's inputs before the
+control's logic.*
+
+**P1-A: the observer is driven by drops, and drops are driven by traffic, which
+stops.** A collector that dies, produces two minutes of losses and is then
+followed by a quiet period crosses the threshold with nothing left to call the
+evaluator. The metrics and the diagnostics row compute the truth on READ, so a
+Prometheus deployment still sees it — but the `syslog_feed_down` alert and the
+warning log, which this very document advertises as the paging surfaces, never
+fire. The sibling planes do not have this hole because their drivers cannot
+stop: `threatfeed_health.go` is evaluated from a periodic feed loop,
+`socks5_health.go` from an accept loop that retries at 1/s. This one borrowed
+their shape without noticing that its driver is customer traffic. Closed with
+`startSyslogHealthWatchdog` — the CHAOS-23 answer, a detection-only ticker at a
+tenth of the window — and the wiring is pinned structurally, because a watchdog
+nobody starts satisfies a test that calls its body directly.
+
+**P1-C: the probe inferred its verdict instead of observing it.** It compared
+writer-wide `Delivered`/`Drops` around its own write, so on a gateway with
+concurrent traffic another line's delivery landed between the snapshot and the
+read and the probe answered "the collector accepted the test event" while its
+own message was still queued behind a collector about to drop it. That is the
+defect this whole sweep is about — claiming more than the evidence supports —
+committed by the endpoint written to fix it. `Writer.WriteProbe` now returns a
+per-message acknowledgement signalled by the drain goroutine, where the
+delivered-counter delta around one `deliverGuarded` call IS exact because that
+goroutine is the counter's sole writer. **Honest limitation: the P1-C gate
+proves the new primitive answers correctly in both directions; it cannot be
+made to fail deterministically against the old shape, because that defect is a
+race.** Recorded rather than dressed up as a verified-failing gate.
+
+### A note on how the recovery gate was nearly wrong
+
+`TestChaos81_RecoveryRequiresADeliveredEvent` first waited for `Delivered > 0`
+and failed. The cause is worth recording: **the first TCP write after the peer
+closes still succeeds** — the RST arrives later — so a collector that had
+already gone away left `Delivered` at 1, and the gate would have observed that
+stale success and concluded the feed had recovered without a byte reaching
+anything. It now captures a baseline and waits for an increase. The same
+property is why the engine's own `noteDelivered` is an honest name only on TCP
+and only for the *socket*, which is the same limitation the UDP caveat above
+states in its strong form.
+
+### Codex round 4 — the feed monitoring could not see, and the page that latched the wrong record
+
+Two more, both of the family this section already names.
+
+**P1-F — a configured-but-never-connected feed exported nothing.** Every
+surface in `syslog_health.go` gated on `configured`, which is set only once a
+Writer is installed. The boot path *tolerates* a failed dial by design —
+`loadObservability` logs `Syslog: connect failed … continuing without syslog`
+and carries on, which is the right posture for a gateway — so a node whose
+collector was unreachable at boot exported **no `culvert_syslog_*` series at
+all**. The documented paging rule is `culvert_syslog_up == 0`, and an absent
+series cannot satisfy it: the one node whose SIEM feed never came up was also
+the one node monitoring could not see, while a node that connected and then
+died was fully visible. This is the emission rule of this very file (never
+export a zero for a feature nobody asked for) applied to the *wrong question* —
+"is there a Writer" instead of "did an operator ask for one". It survived
+because the plane disagreed with itself: the `syslog_feed` contract row has
+always reported this case as `fail` ("configured but failed to connect"), so
+the surface an operator reads by hand was right and the surface a rule reads
+was silent.
+
+The health record now carries the operator INTENT (`intendedTarget`/`intentAt`)
+under its own mutex, set at the two startup paths that tolerate a failed
+connect. Three decisions worth keeping. **The intent is duplicated** —
+`syslogConfiguredAddr` already records it — and deliberately: that variable is
+a plain string, and `syslogFeedState` is reached from the DRAIN goroutine, so
+reading it there would reintroduce D6 in a new place. (It also means that
+variable's own unsynchronised read/write pair — `checkSyslogFeed` reads it from
+one handler goroutine while `apiSyslogConfig` writes it from another — is still
+open; repointing the row at the record would close both, and is recorded as a
+follow-up rather than folded into a fix for something else.) **An unmet intent
+is reported DOWN IMMEDIATELY**, not after the degradation window, which is the
+one place this sweep departs from "degradation is a DURATION": nothing retries
+a failed `InitSyslog`, so there is no transient to wait out, and the contract
+row has always answered this condition without a grace. **The displaced
+writer's counters are left untouched** in the re-point-failed shape — a Writer
+still serving a target the operator has moved away from has real drops on it,
+and zeroing them would make `culvert_syslog_drops_total` go BACKWARDS, breaking
+`rate()` on the one series that measures compliance loss. The alert gets its
+own bounded sentence: the general one dates the outage from a delivery that
+never happened and names a drop count that is structurally zero, which would
+send an operator hunting a collector that is discarding events when the remedy
+is that no connection was ever made.
+
+**P1-G — a stale degradation snapshot paged about the old target and latched
+the new one.** `evaluateSyslogDegradation` SNAPSHOTS and then takes the lock to
+COMMIT. An admin re-point landing between the two installs a fresh record
+(`noteSyslogWriterInstalled` resets the latch for the new writer), and the
+stale callback then fired a page describing the OLD collector **and set the NEW
+record's `alerted` flag** — which nothing clears, because ordinary deliveries
+do not invoke the observer and only a further re-point resets it. The
+replacement's first real outage would have been silent. The snapshot now
+carries the Writer it describes and the commit half refuses a record that has
+been replaced.
+
+The window is microseconds wide and cannot be scheduled through the public
+entry point, so the commit is its OWN function (`commitSyslogDegradation`) and
+the gate drives it directly — the same answer CHAOS-66 reached for `adopt`'s
+Stop race, and for the same reason: *a gate that cannot fail for the defect it
+names is worse than no gate*. It carries a CONTROL requiring the live writer's
+own snapshot to still page, because a commit half that refused everything would
+satisfy every other assertion in that test while deleting the alert.
+
+Both defect gates were verified failing against their reintroduced pre-fix
+shapes (P1-F: the metrics gate restored to `!snap.Configured`, which exports
+nothing; P1-G: the writer-identity check removed, which pages *and* latches).
+
+### Codex round 5 — the counter that went backwards, and the episode with no birthday
+
+**P2 — a runtime re-point reset every exported counter.** `InitSyslog`
+installs a brand-new Writer and the plane read its counters directly, so
+`culvert_syslog_drops_total` DECREASED with no process restart. That is the one
+thing a Prometheus counter may not do: `rate()` reads a decrease as a counter
+reset and discards the interval. The same reset removed `syslogDrops` from
+`/healthz` and turned the `syslog_feed` row's "N dropped since startup" back to
+clean — at exactly the moment an operator re-points the collector to REMEDIATE
+the outage that produced the losses, i.e. the evidence disappears when it is
+most wanted.
+
+What makes this one worth recording beyond the fix: the P1-F change committed
+minutes earlier carries a comment arguing that a displaced Writer's counters
+must be left alone *because zeroing them would make the counter go backwards
+and break `rate()`* — and the re-point path was doing precisely that, one
+function away. Getting a rule right at the surface you are editing says nothing
+about the other surfaces that already violate it; the reviewer's value here was
+reading the rule and then looking for where it was already broken.
+
+Displaced Writers' finals are folded into `retired{Delivered,Drops,Panics}`.
+Labelling the series by target was the alternative and is rejected: the label
+value would be an operator-supplied address, which is the unbounded-label-set
+defect this register records as WK-12/RS-5. The residual is documented rather
+than hidden — a displaced Writer is closed ASYNCHRONOUSLY, so anything it
+records after the fold (its final flush) is not carried, which can only
+UNDER-count at a generation boundary and can never make a counter decrease.
+The per-episode fields stay strictly per-Writer, pinned by a CONTROL: carrying
+the whole predecessor's state forward is the cheapest way to make the counters
+monotonic, and it would report a healthy replacement as broken from its first
+byte.
+
+**P1 — an episode whose start had not been published yet was dated from the
+previous episode's end.** `noteDrop` runs on the CALLER's goroutine for a
+queue-full drop, so several request goroutines reach it at once. The one whose
+`consecutiveFail.Add(1)` returns 1 can be descheduled between that and
+`failSinceNano.Store(t)` while another increments to 2 and invokes the
+observer. `Stats` then saw a non-zero failure count beside a `failSince` left
+over from an episode a delivery had already ended — and CLAMPED it up to
+`lastSuccess`. On a node quiet since its last delivery that dates a brand-new
+episode from that delivery, so past the degradation window it is an immediate
+false DOWN page on the episode's FIRST drop.
+
+`ConsecutiveFailures > 0 && failSince < lastSuccess` is provably an unpublished
+start, because a delivery resets the count. So the fail-SAFE reading of the
+same evidence is to refuse to date the episode at all: the consumer's predicate
+requires a known start and therefore declines to page, the real start lands
+microseconds later, and the 30 s watchdog re-evaluates regardless. Nothing is
+suppressed beyond that window. The clamp was reaching for the same invariant
+and chose the direction that guesses rather than the one that abstains —
+*when two facts disagree, the safe answer is "unknown", not the more alarming
+of the two.*
+
+The window is a couple of instructions wide and cannot be scheduled from a
+test, so the gate drives `Stats`'s inputs directly (it is a pure function of
+them) and reproduces exactly the state the race produces. It carries two
+controls: a published start must still be dated, and a genuinely long episode
+that began after the last delivery must keep its own start rather than be
+truncated.
+
+### Codex round 6 — the callers that still bypassed the snapshot
+
+Three more, and all three are the same shape: the previous round made the
+delivery SNAPSHOT the single source of truth, and three callers were still
+answering from somewhere else.
+
+**P1 — a failure recorded while a delivery was in flight was erased by it.**
+Queue-full drops run `noteDrop` on the CALLER's goroutine (`tryEnqueue` holds
+only `sendMu`), so one can land between a successful write and the clear that
+follows. `noteDelivered`'s unconditional `consecutiveFail.Swap(0)` discarded
+that loss and emitted a recovery notification for an episode that had not
+ended; if traffic then stopped, the watchdog saw zero consecutive failures
+forever and the lost event could never degrade the feed. `deliverLine` now
+captures the count BEFORE any write and `noteDelivered` clears exactly that
+count by COMPARE-AND-SWAP, so a concurrent drop makes the clear fail and the
+failure survives. That is the fail-safe direction and it costs nothing:
+degradation also requires no delivery for the window, and we just delivered,
+so a retained failure cannot page on its own.
+
+**The naive CAS on its own is strictly worse than the defect, and finding that
+before shipping is the transferable part.** A failure that survives a delivery
+has a recorded start that predates the last success — and `Stats` refuses to
+date such an episode (that is round 4's P1-H rule, which exists to stop a
+brand-new episode being dated from an old fact). No later drop takes the 0→1
+edge, so the start would never be corrected: a real outage beginning at that
+instant would be undatable, and therefore un-degradable, FOREVER. `noteDrop`
+therefore RE-STAMPS whenever the recorded start is not after the last success.
+The write side is the only place with enough information to tell "this start
+belongs to an episode a delivery already ended" from "this start is simply
+old", which is exactly why the read side abstains. *A read-side rule that
+declines to guess needs a write-side counterpart that can eventually supply the
+answer — otherwise abstention becomes silence.*
+
+**P2 ×2 — `GET /api/syslog` was still answering from the live Writer.** It read
+`drops`/`panics` straight off `activeSyslog()`, so a runtime re-point reset
+them on that endpoint while `/metrics` and the response's own adjacent
+`delivered` field kept the process-lifetime totals — reloading the admin UI
+erased the loss history at exactly the moment an operator re-points the
+collector to remediate, and contradicted the contract's own "cumulative and
+monotonic" wording. And it gated `neverDelivered`/`deliveryProvable` on
+`Configured`, which is set only once a Writer exists, so a target whose boot
+dial failed answered `degraded:true, neverDelivered:false` — the response
+denying the single fact its own verdict rests on. Both now read from the
+snapshot, gated on `Configured || Intended`: the same predicate the metrics
+plane uses, because the question is whether an operator ASKED for a collector.
+
+These two are round 5's P2-4 and round 4's P1-F arriving at a surface neither
+fix visited. The rule each of them established was correct; what neither did
+was enumerate the OTHER readers of the same facts. The gate therefore drives
+the REAL handler rather than `syslogFeedState` — walling the function is not
+walling the path, which this section has now recorded three times.
+
+Every defect gate was verified failing against the shape it targets: the
+restored `Swap(0)`, the removed re-stamp branch (which fails on the
+undatable-episode assertion rather than the count one — the two halves of the
+P1 are pinned separately), and the handler's live-Writer reads. Controls: an
+ordinary delivery must still clear a real episode and report recovery exactly
+once, and a node that forwards nowhere must still claim nothing.
+
+### Round 7 — the surviving failure had to stay DATABLE, a walk limit was redirecting events backwards, and the loss nobody could count
+
+**P1 — a retained failure whose episode start is unusable is a number nobody
+can act on.** Round 6 stopped a racing delivery from ERASING a queue-full
+drop. It did not keep that survivor *actionable*. `noteDelivered` stamped
+`lastSuccessNano` when the BOOKKEEPING ran rather than when the write was
+attempted, so a drop landing between the two carried a timestamp EARLIER than
+the success it raced — and `Stats` refuses a start older than the last
+success, which is P1-H's rule and is right. Only a drop taking the 0→1 edge
+re-stamps, so nothing corrected it. A node that went quiet at that instant
+therefore carried an unresolved failure that could **never** reach the
+degradation window, while the contract row printed `FAILING NOW … failing for
+0s` for as long as the silence lasted — a self-contradictory sentence on an
+operator surface, permanently, which is this section's own thesis.
+
+The same shape reaches a second interleaving with no 0→1 edge at all: an
+episode is running, a delivery succeeds (ending it), a concurrent drop makes
+the compare-and-swap fail, and the survivor inherits the *ended* episode's
+start.
+
+Two halves, both required:
+
+- `deliverLine` captures `successAt` immediately BEFORE each write attempt.
+  Under-stating a success by the duration of one write is the fail-SAFE
+  direction — it can only make the feed look staler than it is.
+- `noteDelivered` RE-DATES a surviving failure whose start does not follow
+  that success, to the success itself. The loss is known to have happened
+  after that write, so this is the honest value, not a guess.
+
+**The early stamp is what makes the re-date race-free, and is not
+belt-and-braces.** It guarantees a concurrent drop's own timestamp EXCEEDS the
+success, so whichever of the two stores lands last leaves a datable start.
+Without it, a drop whose `Add` is already visible but whose `Store` has not
+landed lets the re-date be overwritten by an older value, and the episode is
+undatable again. That interleaving cannot be scheduled from a test, so rather
+than claim coverage the property it rests on is pinned instead:
+`noteDelivered` records the instant its CALLER supplies and never invents one
+(verified failing against a restored late stamp).
+
+> **The transferable rule: a retained signal is worth nothing if the value that
+> makes it actionable is left unusable.** When a fix decides to KEEP state,
+> enumerate every field a consumer needs in order to act on it — not just the
+> one the finding named. Round 6 kept the count and left the clock behind.
+
+**P2 — an internal walk limit may not redirect events BACKWARDS.**
+`handOffQueued` reported `false` for two different things: *this writer names
+no successor* (the caller still owns the line) and *the hop bound was
+exhausted*. Both `drainLoop` callers read `false` as the first and fell
+through to `deliverTracked`, which writes through THIS writer's own
+connection — the collector the operator has already replaced. So a queue
+surviving more than `maxHandoffHops` rapid re-points sent security events to
+the displaced collector, while the bound's stated contract was to drop and
+count them: P1-E's defect re-entering through the bound added for it.
+
+Exhaustion is now a LOSS — counted on this writer, the prober acked
+not-delivered, and reported as handled so no caller can fall back. It is
+charged under the existing `closed` class rather than a new one: the outcome
+and the operator's remedy are identical to the end-of-chain branch above it,
+and the reason vocabulary is a CLOSED SET on a published API enum that should
+not grow to name an internal walk limit. The gate builds a chain of closed
+writers longer than the bound with a LIVE writer beyond it, and asserts the
+far end received nothing — otherwise the bound was never reached and the gate
+would prove nothing.
+
+**P2 — a loss that happens because there is no Writer is still a loss.** P1-F
+made a configured-but-never-connected collector VISIBLE
+(`culvert_syslog_up 0`, a degraded row) and left it UNCOUNTABLE. Both fan-outs
+skip at `if sw := activeSyslog(); sw != nil` in `store.go`, charging the
+skipped event to nothing — so `culvert_syslog_drops_total` read **0** and
+`/healthz` carried no `syslogDrops` throughout the worst outage this plane can
+report. An operator asking *how much did I lose?* was answered *nothing* while
+the answer was *everything*.
+
+A Writer's counters structurally cannot hold this: the loss happens *because
+there is no Writer*. `noteSyslogEventSkipped` folds it into the
+process-lifetime total — the one series meaning "events that did not reach the
+SIEM" — and the `configured but failed to connect` row now names the
+magnitude, which is the surface an operator actually reads.
+
+It is ARMED only while an operator has asked for a collector and none is
+installed. That gate is not an optimisation but the same emission rule the
+metrics plane already applies: a node that was never asked to forward anywhere
+is not losing anything by not forwarding, and counting there would accrue a
+large, permanent and meaningless "loss" on every appliance that does not use
+the feature. It also keeps the request path to one relaxed atomic load on the
+no-collector branch, which is the common case.
+
+Its gate drives the REAL `auditEvent` and `recordRequest` paths. The skip
+lives in `store.go`, so a gate on the counter alone would have proved the
+counter works and said nothing about either fan-out — *walling the function is
+not walling the path*, now recorded four times in this section. Each fan-out
+was unwired in turn and the gate fails for each.
+
+**A published number was wrong and is corrected here — twice.** Earlier rounds
+of this write-up and its PR description gave the root gate count as
+`syslog_health_chaos_test.go (22)`. The file held **28** at that point. The
+correction paragraph then stated **32**, which was also wrong: the file held
+**34** when it was written. The engine counts (9 → 11 in
+`syslog_stats_test.go`, 3 → 4 in `syslog_handoff_format_test.go`) were right.
+
+Counts move every round, so the authoritative figure is the one in the round's
+own `Gates:` line and nowhere else. As of round 11: **44** root gates, **13**
+engine stats gates, **6** handoff gates, **23** declared controls. Recording
+the same total in a second place is what produced both errors; this paragraph
+survives as the record of that, not as a second source of truth.
+
+### Round 8 — a delivery resolves what preceded it, and two edits that were never really there
+
+**P1 — the clearest case in this sweep of a later change invalidating an
+earlier one's stated rationale.** `deliverLine` read the failure count at
+function ENTRY. Round 6 chose that deliberately and wrote down why:
+
+> a drop that happened during a reconnect is a real loss, and retaining it
+> costs nothing (the delivery resets the age half of the degradation
+> predicate either way).
+
+That was true when written. Round 7 made it false — it gave a surviving
+failure a usable episode start, and a *datable* failure can outlast the
+degradation window on its own. So a queue-full drop landing while `writeLine`
+was blocked, at a moment the collector was demonstrably still accepting bytes
+because the write then SUCCEEDED, was excluded from the clear and left behind;
+a node that went idle afterwards reported DOWN five minutes later off the back
+of a delivery that had worked.
+
+The count is now read AFTER the write completes, which states the rule at the
+boundary:
+
+- a drop recorded **before** completion is a real compliance loss, stays in
+  `Drops`, and is **resolved** — it is not evidence the feed is down;
+- a drop recorded **after** completion still fails the compare-and-swap and
+  still survives, which is round 6's property, untouched.
+
+That split also explains why this cannot weaken real-outage detection: a dark
+collector produces `write_failed`/`connect_failed` drops on the drain
+goroutine, serialized with `noteDelivered`, with no success to resolve them.
+
+> **When a change makes previously inert state load-bearing, every decision
+> that was justified by that state being inert has to be re-read, not
+> inherited.** Round 7 did not go back and re-read round 6's rationale, and
+> the rationale was sitting in a comment four lines above the code it no
+> longer justified.
+
+**The gate for it had to drive the real `deliverLine`.** The existing
+`noteDelivered`-level gate supplies the count itself, so it pins the CONTRACT
+("clear exactly this count") and is structurally blind to which count
+`deliverLine` chooses to pass — which is the entire defect. Verified: it stays
+green against the reintroduced entry capture. The new gate injects the drop
+through the clock seam, which the happy path calls exactly once to stamp
+`successAt` immediately before the write, placing the loss in precisely the
+window an entry capture excludes. *Walling the function is not walling the
+path* — fifth time in this section.
+
+**P2 — an edit that silently applied nowhere, behind a gate that could not
+fail.** `noteSyslogForwardingDisabled` cleared the health record but not
+`syslogIntentArmedWithoutWriter`, so an operator who disables a collector that
+never connected keeps accruing SIEM "losses" on every audit and request event
+for the life of the process — the disable's own audit entry first — and they
+surface the moment forwarding is enabled again.
+
+Two process failures produced it, and both are worth recording:
+
+1. The round-7 patch applied three replacements and asserted on two of them.
+   The third matched nothing and was a silent no-op. It is now placed and the
+   placement is **verified by function**, not assumed from the patch
+   succeeding.
+2. Its gate installed a Writer before disabling — which already disarms the
+   counter — so the disable assertion passed whether or not the code existed.
+   *A gate that exercises the transition through a state where the property
+   already holds is not a gate.* Replaced with the reachable shape: intent
+   recorded, no writer ever installed, then disable.
+
+**P2 — `/healthz` omitted the loss `/metrics` reported.** `syslogDropCount`
+gated on `Configured`, which is set only once a Writer exists, so it withheld
+`syslogDrops` for exactly the outage where every event is being lost, while
+`/metrics` reported the identical number. It now uses the metrics plane's own
+`Configured || Intended` predicate.
+
+This is the **third** time in this sweep that a correct rule was established
+and the other readers of the same fact were not enumerated — P2-5/P2-6 on the
+admin API, P2-8 on the fan-outs, and now the health accessor. The habit to
+adopt is mechanical: *when a predicate changes, grep for every consumer of the
+value it governs before calling the change done.*
+
+### Round 9 — a snapshot that read a later generation, an alert that asserted the wrong half of a two-shape state, and one window that stays open
+
+**P2 — a reader outside the publication transition made the counter go
+backwards.** `syslogFeedState` copies the health record's retired totals and
+the Writer they belong to together under `syslogHealth.mu`, then released that
+lock and re-loaded `activeSyslog()`. A re-point landing in the gap retires the
+displaced Writer's finals into a `retiredDrops` this snapshot has already
+copied, so the snapshot pairs a NEW generation's live counters with retired
+totals that already absorbed the OLD one — the displaced generation vanishes
+from the sum and `culvert_syslog_drops_total` **decreases** for that scrape.
+
+Prometheus reads a decrease as a counter reset and discards the interval, and
+that is precisely the defect **P2-4** was opened for. P2-4 fixed the WRITE side
+(a fresh Writer's zeroed counters no longer erase the history) and left a
+READER that does not participate in the publication transition free to
+reproduce the same symptom. The snapshot now reads the writer it captured, so
+it is internally consistent by construction rather than by timing.
+
+> A serialized transition only buys consistency for the readers that take part
+> in it. After fixing a publication race, enumerate the readers — not just the
+> writers.
+
+The window is a few instructions wide and cannot be scheduled through the
+public entry point, so the mechanism is pinned by source scan, which is this
+file's existing convention for wiring. Two things keep that gate honest: it
+strips `//` lines before scanning (the rationale comment names the very
+accessor being banned, so scanning prose would make the gate assert the
+absence of an explanation — caught as a false positive while writing it), and
+a control requires `activeSyslog()` to survive elsewhere in the file, because
+the rule is about THIS reader and not a ban on the accessor.
+
+**P2 — the unmet-intent alert asserted a false statement for half the states
+that reach it.** A boot that connects target A and then fails to connect the
+persisted target B leaves a live Writer serving A while the record's intent is
+B. That is an unmet intent and is correctly reported degraded — but the page
+said *"no connection was ever established"* and *"NOTHING is serving it"*. Both
+are false there: a connection was established, something is serving, and events
+are reaching a collector, just not the configured one. A false statement on an
+operator surface, inside the alert this sweep added because the contract row
+was asserting a false statement.
+
+The two shapes are distinguished by `Configured`, which is true only once a
+Writer is installed, so no new field was needed. The superseded-target sentence
+says events are still reaching the PREVIOUS collector — the fact that decides
+whether the operator is hunting a dial failure or a stale configuration.
+Neither sentence names an address: `Detail` is the alert dedup key, and an
+operator-supplied target there is the WK-12/RS-5 unbounded-key defect.
+
+The review that produced this finding asked for those events to be **counted as
+drops**, and that half is declined with reasoning. They reached a collector.
+`culvert_syslog_drops_total` means *did not reach the SIEM*; widening it to
+*did not reach the currently intended SIEM* would conflate delivery-elsewhere
+with destruction on the one series that measures compliance loss. The state is
+already reported degraded (both `syslogFeedState` exits route through
+`finishUnmetSyslogIntent`, which sets `Degraded`), so the gap was never
+visibility — it was the sentence.
+
+**Self-review — the fix for that was one `configured` away from committing
+the same error in the other direction.** Its first shape branched on
+`snap.Configured`. That is equivalent today: the record sets `configured` and
+`writer` together, in one critical section, at every install and every clear.
+But it is a PROXY for what the sentence claims, and the move that breaks it is
+one this repo has already made — **CHAOS-66 records `configured` for the SOCKS5
+listener BEFORE its first bind attempt**, deliberately, so a listener that has
+never come up is not reported as "not configured".
+
+Adopting that shape here was measured rather than argued, by mutating
+`noteSyslogIntent` to set `configured` and running both branch forms against a
+feed with no writer at all:
+
+| branch | Detail produced |
+| --- | --- |
+| `snap.Configured` | *"events are still being delivered to the PREVIOUS target"* — **false**, nothing is serving |
+| `snap.writer != nil` | *"no connection was ever established"* — correct |
+
+So the branch now reads `snap.writer`, the field this function already trusts
+for its P1-G staleness check, and the pairing is a stated rule rather than an
+unstated assumption: `TestChaos81_RecordWriterPairingIsAnInvariant` walks every
+transition that touches either field and fails against the CHAOS-66 shape. The
+wall is behavioural, not a source scan, because the shape that actually breaks
+the invariant is an install path that sets the two fields in two separate
+critical sections, which reads perfectly well.
+
+The wall is separate from the branch on purpose: three other consumers read
+`Configured` as *a writer exists* — the metrics emission gate, `/healthz`'s
+drop field, and the admin API — so the rule has to hold for them whatever this
+one branch does.
+
+> When a sentence makes a claim, branch on the field that IS the claim. An
+> equivalent proxy is only equivalent until someone changes what it means, and
+> the change that does it will be defensible in its own file.
+
+**P1 — recorded as residual SL-4 rather than closed.** Round 8 moved the
+failure-count read to after the write completes. The few instructions between
+`writeLine` returning and that read are unsynchronised, so a drop landing there
+is counted in `failuresBefore` and resolved, although by round 8's own rule it
+arrived after completion and should survive. Three facts make that acceptable
+and none of them is timing luck:
+
+- **Only one drop class can reach it.** `deliverLine` holds `s.mu` for its
+  whole body, so every drain-goroutine drop (`connect_failed`, `write_failed`,
+  `backoff`) is serialised with the read. Only a queue-full drop from a caller
+  goroutine can race it, because `tryEnqueue` holds `sendMu` alone.
+- **"Resolved" is the correct verdict for that drop.** A queue-full drop
+  microseconds after a successful write is local backpressure, not a dark
+  collector — the same verdict this boundary deliberately assigns to a drop
+  landing *during* the write.
+- **Closing it would cost more than it buys.** The queue-full path would have
+  to take `s.mu`, which parks request goroutines behind the drain goroutine's
+  blocking write. That is the latency coupling the whole async design exists to
+  prevent: a slow SIEM must cost drops, not proxy latency.
+
+A genuine outage is unaffected — its drops come from FAILED writes on the drain
+goroutine, there is no success to resolve them, and degradation proceeds
+normally. The residual is written into the code at the boundary it governs, not
+only here.
+
+### Round 10 — a stale-commit guard blind to the one transition it most needed to see, and a probe that re-derived its own transport
+
+**P2-13 — the round-9 fix failing in the shape its instrument cannot
+distinguish.** Round 9's P1-G guard refused a stale degradation commit with
+`syslogHealth.writer != snap.writer`. That answers "is this still the record I
+described" on every path where a Writer exists, and collapses where none does:
+a boot dial that FAILED leaves `writer == nil`, and
+`noteSyslogForwardingDisabled` ALSO sets `writer = nil`, so the comparison is
+`nil != nil` — false — and the stale callback commits.
+
+The reachable sequence is the ordinary remediation one. An operator configures
+a collector; the dial fails; the plane records the intent, installs no Writer
+and reports the feed degraded immediately (correctly — nothing retries a failed
+`InitSyslog`, so there is no transient to wait out). A snapshot of that verdict
+goes in flight. The operator gives up and disables forwarding. The commit then
+lands in the FRESH record and does two things, the second worse than the first:
+
+- it fires `syslog_feed_down` for a feature the operator has just switched off,
+  with a Detail that describes a collector nobody is asking for any more; and
+- it sets `alerted` on that record. Nothing clears that latch but an install —
+  ordinary deliveries do not invoke the observer — so the next time forwarding
+  is enabled, its **first real outage is silent**.
+
+The record now carries a monotonic `gen`, bumped by every transition that
+REPLACES what it describes (install, disable, test reset), captured into the
+snapshot and compared at commit. The pointer check is removed, not supplemented:
+a counter IS "the record changed", where the pointer was a proxy for it, and one
+predicate cannot drift against a second that is not there.
+
+`noteSyslogIntent` deliberately does not bump it. Recording an intent changes
+what the operator ASKED for, not what the record DESCRIBES, and a pending
+unmet-and-degraded verdict stays true across it; suppressing there would only
+delay a legitimate page to the next 30 s watchdog tick.
+
+**The transferable rule is round 9b's arriving from the opposite side.** There
+the lesson was to stop branching on an equivalent proxy for a claim. Here it is
+that a proxy which is equivalent on every path you tested can be silently
+non-equivalent on the one you did not: a pointer identity collapses whenever the
+pointer is nil. When a check means *this is still the same thing*, give the
+thing an identity that cannot collide with another thing's.
+
+**P2-14 — the probe inferred its transport.** `syslogDeliveryProbe` took the
+Writer as a parameter and then read `syslogHealth.target` in its own separate
+critical section, classifying a delivered ack by
+`strings.HasPrefix(target, "tcp://")`. Two reads of two different things, so a
+re-point landing between them made the endpoint describe a UDP datagram with
+the TCP sentence — "the collector accepted the test event" — for a send nothing
+may have received.
+
+UDP's inability to prove delivery is register row SL-1 and is stated on every
+other surface in this plane (`deliveryProvable:false`, the contract row's
+caveat, the "sent" rather than "delivered" wording). The one endpoint an
+operator is told to use to CONFIRM connectivity was the one that could
+contradict all of them. It is round 7's P1-C repeating on the transport instead
+of the outcome: *an endpoint whose whole job is to be believed may not infer its
+answer.*
+
+`Writer.DeliveryProvable()` reads the transport off the Writer it was
+constructed with, so the answer belongs to the generation that served the line
+by construction rather than by timing. The snapshot's own UDP caveat needed no
+change — round 9 already made `target` and `described` a single locked read,
+which is why the same defect did not reach the contract row.
+
+**Gates.** `TestChaos81_DisabledFeedDoesNotInheritAnInFlightDegradation` and
+`TestChaos81_ProbeClassifiesTransportFromTheWriterThatServedIt`, each with its
+own control, the round-9 P1-G gate updated to carry generations, and
+`TestChaos81_EveryRecordTransitionAdvancesTheGeneration` as a structural wall.
+
+Mutations, each verified failing the gate that targets it: the reverted pointer
+comparison (both halves — it pages AND latches), the reverted target-string
+classification, `DeliveryProvable` hardwired false (which fails BOTH the new
+control and the pre-existing `ProbeReportsTheRealOutcome`), a commit half that
+refuses every snapshot (which fails both stale-commit gates' controls), and
+each of the three generation bumps dropped in turn.
+
+**The wall needed the wall.** The stale-commit guard now rests on the
+generation, so a future transition that swaps `writer` without bumping `gen`
+reopens the defect — and no behavioural gate can reach that, because the three
+sites are correct today and a fourth would simply not be exercised by any
+existing test. Hence the structural wall. Its FIRST shape was vacuous, in the
+way this file keeps recording: it drove its install step through
+`armSyslogFeed`, which resets the record first, so the reset's own bump masked
+a missing bump at the install site and the wall passed against a tree that had
+dropped it. That was found by mutating the code, not by reading the wall. The
+same masking then appeared one step over — the reset was stepped AFTER the
+disable, where no writer change occurs at all, so its own bump was unwalled
+too. It now drives `noteSyslogWriterInstalled`, `noteSyslogForwardingDisabled`
+and `resetSyslogHealthForTest` directly, and steps the reset while a writer is
+installed.
+
+*A wall that runs its subject through a convenience helper inherits that
+helper's side effects, and a side effect that performs the very thing you are
+pinning makes the wall unfalsifiable. Step the transition itself, and mutate
+each site to prove the wall can see it — including the sites that look too
+obvious to check.*
+
+**Self-review, same round: the last place the fact was derived twice.** Fixing
+P2-14 left the snapshot's `UDP` caveat — the one the contract row, `/healthz`
+and `GET /api/syslog` read — still derived from
+`strings.HasPrefix(target, "tcp://")` while the probe now asked the Writer.
+
+The two agree today. `InitSyslog` is the only installer and hands the record
+the very address it parsed the network from, so the string and the writer's
+`network` cannot currently disagree. That is what makes it a latent trap and
+not a live defect — and it is also exactly the state P2-14 was in until a
+re-point pulled the two apart. A second answer to a question that already has
+one is the defect (§30's rule), whether or not it has diverged yet.
+
+The snapshot now asks `described.DeliveryProvable()` whenever a Writer exists.
+The string survives only as the fallback for a feed that has none, which is not
+a second answer: there is no transport to ask, and the operator's intended
+address is the only thing that can describe what they asked for.
+
+`TestChaos81_TransportClaimHasOneSource` walls the agreement — for an installed
+writer the snapshot's claim must equal the writer's, and a `tcp://` string
+written onto the record must not override a UDP writer. Verified failing
+against the reverted string-only derivation. Its control runs both ways, because
+hardwiring the caveat on passes every agreement assertion while telling an
+operator with an evidence-capable TCP collector that it cannot give evidence.
+
+**A note on the lint gate, recorded because it cost a red CI round.** The
+structural wall's control was first written as
+`if !(beforeW != afterW && afterG <= beforeG)`, which golangci-lint's
+staticcheck flags (QF1001). `golangci-lint` cannot be run locally against this
+repo: v2.5.0's own module declares `go 1.24` and the config targets 1.25, so it
+refuses to load; rebuilding it with the repo's toolchain does not help (the
+guard reads the tool's module language version, not its build compiler), and
+forcing past the guard crashes its go1.24-built analyzer on go1.26 source.
+Standalone `staticcheck` at 2025.1.1 with `-checks=all` does NOT reproduce the
+finding, so it is not a substitute. The control now applies a NAMED predicate
+shared with the check it vouches for — better than the negation on its own
+terms, since a control that re-derives the rule can pass while the rule it
+vouches for has drifted.
+
+### Round 11 — two round-10 fixes landing one hop short, and a transition that left its metadata behind
+
+**P2-16 — the acknowledgement must carry the transport, because only the
+sender knows it.** Round 10 bound the probe's `delivered`-vs-`sent` wording to
+the Writer the CALLER held. That is correct against a re-point and still
+wrong, because `handOffQueued` moves a queued line — its ack channel included
+— to a successor that may speak a different transport. A probe queued on a TCP
+writer and handed to a UDP one was reported as *"the collector accepted the
+test event"* for a datagram nothing may have received.
+
+It is round 10's own defect surviving one hop along, in the endpoint whose
+whole job is to be believed, and it is the third time this plane has been
+caught inferring an answer instead of carrying it (round 7 on the outcome,
+round 10 on the transport, now on the transport again after a handoff).
+`WriteProbe` returns a `ProbeOutcome{Delivered, Provable}` stamped by the
+Writer that actually performed the send; `ackQueued` takes that Writer as an
+argument, and the flush-timeout branch — where nothing sent the line — passes
+nil.
+
+> When a value can be handed on, bind the claim to the thing that will finally
+> act on it, not to the thing you were given.
+
+**P2-17 — a loss at the end of a bounded walk must be countable, and the walk
+must not charge a writer it never asked.** The exported drop total is each
+displaced Writer's finals, folded at the moment it is displaced, plus the LIVE
+Writer's own counters. A drop charged to an intermediate after its fold
+therefore lands nowhere: real compliance loss, absent from
+`culvert_syslog_drops_total` and `/healthz`, on the one series this plane
+exists to keep honest.
+
+`send` also checked its hop bound at the TOP of its loop, so on exhaustion `w`
+held a writer that had been assigned and never asked. With the live writer
+sitting at the exhaustion point that charged a drop to a healthy collector
+which never saw the line, and stamped `closed` on its `LastFailureReason` —
+which is an input to the health plane. Neither shape delivers the line; the
+bound is spent either way. What changes is whether the evidence names the
+writer that actually refused.
+
+The bound is now spent before advancing, and the exhausted terminal charges a
+process-lifetime `lateDrops` IN ADDITION to the Writer's own counter — the
+`syslogSkippedNoWriter` precedent. It cannot double-count: both terminal sites
+are reached only through `enqClosed`, and a closed Writer's finals were folded
+strictly before it could be walked past. The end-of-chain branch is
+deliberately not charged, because that writer is the live one and its drop is
+already read.
+
+**P2-15 — the config metadata was not part of the transition it describes.**
+`syslogConfigured` / `syslogConfiguredAddr` decide what `GET /api/syslog`
+reports, what `checkSyslogFeed` compares and what `admin_settings.json`
+persists. The admin handler assigned them AFTER `InitSyslog` returned, outside
+`syslogPublishMu`, so a concurrent disable clearing the writer and the strings
+in between left the process with no active writer while every config surface
+said forwarding was on — and the next restart re-enabled a target the operator
+had switched off. They are now set inside the same critical section that
+publishes the writer, and cleared inside the disable's; callers record only the
+INTENT beforehand, which is what survives a dial that produces no writer.
+
+**That fix made a deferred follow-up load-bearing, and it had to be closed in
+the same change.** This section had recorded the pair as an unsynchronised
+read/write to be repointed at the health record later. That was tolerable
+while the writes sat on the admin handler. Moving them into `InitSyslog` puts
+the write on a CONCURRENT path, and the concurrent-repoint gate caught the
+read as a real race under `-race` within minutes — *a new writer is a new
+concurrency context*, this sweep's own lesson arriving for the third time.
+Every access now goes through `syslogConfiguredTargets()` /
+`noteSyslogConfiguredIntent()`, and a structural wall forbids naming either
+variable outside its owning files: a direct read is correct on a quiet node
+and racy only under a re-point, which is the case no ordinary test drives.
+
+> Deferring a known hazard is a judgement about REACHABILITY, not about the
+> hazard. When a change moves code onto a path that reaches it, the deferral
+> expires with that change — it does not carry over on the strength of having
+> been written down.
+
+**Gates.** `TestProbeAckCarriesTheSendingTransport` and
+`TestSendExhaustedWalkIsCountableAndTriesItsLastWriter` in the engine;
+`TestChaos81_ConfigMetadataIsPublishedWithTheWriter` and
+`TestChaos81_ConfigMetadataIsReadOnlyThroughItsAccessors` in the root. Each has
+its own control. Four mutations verified failing the gate that targets them:
+an ack that ignores its sender, the late-drop charge removed, the bound
+restored to the top of the loop, and the metadata assignment moved back
+outside the transaction.
+
+**One gate was VACUOUS on its first shape and mutation is what found it**, as
+in round 10. The off-by-one assertion was written against a chain longer than
+the bound, where the exhaustion point lands on an intermediate — so the
+pre-fix and fixed shapes both charge a closed writer and the gate could not
+tell them apart (verified: it passed against the reverted loop). It now places
+the LIVE writer exactly at the exhaustion point, which is the only arrangement
+where the two shapes differ observably.
+
+**Self-review, same round: the late-drop counter was counted into a void.**
+The first shape of P2-17 added `lateDrops`, charged it at both terminal sites,
+exported `LateDrops()` and gated it — and never folded it into `snap.Drops`.
+The loss therefore moved a counter that no surface reads, which is precisely
+the defect the counter was added to close, committed inside its own fix.
+
+The engine gate could not see it, and that is the whole lesson rather than an
+excuse: it asserts the COUNTER moves, and the counter did. Measured, not
+recalled — with the fold removed,
+`TestSendExhaustedWalkIsCountableAndTriesItsLastWriter` stays GREEN while
+`TestChaos81_LateDropsReachTheExportedTotal` fails on all three surfaces it
+reads (`syslogFeedState`, `/healthz`'s `syslogDropCount`, and the real
+`culvert_syslog_drops_total` exposition body).
+
+> When a fix adds a counter, the deliverable is the SURFACE, never the
+> counter. Gate the surface — *walling the function is not walling the path*,
+> which this section has now recorded four times and demonstrated once against
+> its own work.
+
+**And the late-drop counter had to be handed back.** `lateDrops` is
+process-lifetime by design — its whole purpose is to outlive the Writer the
+loss was charged against — which makes it exactly the kind of global a test
+must RESTORE rather than merely stop looking at. The new gate produces one
+late drop, which shifted the exported drop total for every gate that ran
+after it; seven unrelated CHAOS-81 gates turned red, all asserting exact
+counts. `ResetLateDropsForTest` joins `resetSyslogHealthForTest`, beside the
+`syslogSkippedNoWriter` reset that is there for the same reason.
+
+That is the `swapAutoExclude` fence-pollution rule, and this section has now
+hit it twice in its own work (`armSyslogFeed` leaking live writers was the
+first). *A global a test installs — or increments — is a global the test must
+take back.*
+
+**And a shuffled run over a `-run` filter is NOT the determinism gate.** The
+local `-count=2 -shuffle=on -run 'TestChaos81_'` run passed, and the change
+was pushed on the strength of it. CI's `Deep · determinism (shuffle, count=2)`
+and `Race · root shard 1` both failed, because they shuffle the WHOLE package:
+the gates that assert absolute drop counts and the gate that produces one only
+interleave once the unfiltered set is in play. A filter narrows the
+permutation space to the tests you already suspected, which is the opposite of
+what shuffling is for. Reproduce a suspected isolation failure with a filter;
+never clear one with it.
+
+**A note on `funlen`, recorded because it cost two red rounds.**
+`syslogFeedState` crossed the 50-statement bound twice as this round added to
+it. It is now split at the seam the code already had: the caller assembles the
+history that outlives any one Writer, and `applyLiveWriterStats` folds in the
+episode IN PROGRESS. The linter found a real structural point, but it found it
+in CI both times, because `golangci-lint` cannot run locally against this repo
+(v2.5.0's module declares `go 1.24` against a 1.25 target, rebuilding does not
+help since the guard reads the tool's module language version, and forcing
+past it crashes its go1.24-built analyzer on go1.26 source). Standalone
+`staticcheck` does not carry the same check set. Anyone extending this file
+should expect the length bound to be enforced only by CI.
+
+### Round 12 — the fold was taken before the writer was final, and two readers still spanned a transition
+
+Three findings. The first was found by MEASURING a residual this note had
+already written down and dismissed; the other two are Codex P2s, and both are
+earlier rules in this sweep arriving at a reader that had not been updated.
+
+**(a) The fold must be taken when the writer is FINAL, not when it is
+displaced.** P2-4 made the exported counters process-lifetime by folding each
+displaced Writer's totals into `retired*` — and took that fold at the moment
+of displacement, while the Writer's drain was still flushing. Every loss the
+final flush recorded after that landed on counters nothing reads. The note
+recorded the gap honestly but estimated it wrongly:
+
+> Residual, documented rather than hidden: a displaced Writer is closed
+> ASYNCHRONOUSLY, so anything it records after this snapshot (its final flush)
+> is not carried. That can only UNDER-count at a generation boundary; it can
+> never make a counter decrease, which is the property that matters.
+
+Measured against the real `disableActiveSyslog` path with a collector that
+dies mid-flight, 2000 events at a time:
+
+```
+trial 0: writer own drops=1999 delivered=1 (2000) | EXPORTED 1949 + 1  -> 50 lost
+trial 1: writer own drops=1999 delivered=1 (2000) | EXPORTED 1967 + 1  -> 32 lost
+trial 2: writer own drops=1999 delivered=1 (2000) | EXPORTED    0 + 0  -> 2000 lost
+trial 3: writer own drops=1999 delivered=1 (2000) | EXPORTED 1837 + 1  -> 162 lost
+trial 4: writer own drops=1999 delivered=1 (2000) | EXPORTED 1946 + 1  -> 53 lost
+```
+
+Every unaccounted event was attributable to the fold ordering — the Writer
+itself counted all 2000 in every trial, and none were lost to the
+documented "abrupt death loses the in-flight batch" class. Trial 2 is the one
+that matters: `culvert_syslog_drops_total` read **zero** for a feed that had
+just destroyed everything, because the drain had barely started when the fold
+ran. That is the loss-history erasure P2-4 exists to prevent, arriving from
+the WRITE side after P2-4 closed the READ side.
+
+The boundary is now SEALING. The drain publishes its cumulative finals
+(`finalStats`) under `sendMu` held exclusively, as the last thing it does
+before closing `done`. A displaced-but-unsealed Writer is TRACKED
+(`syslogHealth.retiring`) and its delta folded on every read of the retired
+totals — there is exactly one such read, `syslogFeedState`, and it settles
+first. The settle that observes the seal takes a genuinely final value and
+untracks the Writer.
+
+**A loss is charged to `lateDrops` only when the Writer is RETIRED *and*
+SEALED, and needing both is the whole of the correctness argument.** Keyed on
+the seal alone it double-counts every loss recorded against a Writer that is
+still installed — those counters are read live and folded nowhere else — and
+moves the loss into the "lost to an earlier target" bucket while that target
+is still the current one. Keyed on retirement alone it double-counts
+everything still inside the fold to come. `MarkRetired` therefore has to run
+BEFORE anything closes the Writer, since a loss landing after the seal but
+before the mark is in neither accounting; both owners mark first and release
+second.
+
+**The Writer's own counters deliberately keep moving after sealing.**
+Freezing them was the first shape, and it was wrong in a way worth recording:
+a Writer that is sealed but still INSTALLED stops reporting that it is failing
+at all, so the degradation predicate — which reads `ConsecutiveFailures` and
+`FailingSince` off the live Writer — goes blind on exactly the feed that has
+just lost its drain. Two existing gates caught this immediately, which is the
+argument for keeping fixtures that reach a state production is not supposed to
+reach. Cumulative totals need one home because they are folded elsewhere;
+episode state has one reader and must stay live.
+
+**(b) A superseded writer's delivery is not evidence the intended collector is
+back** (Codex P2). Round 9b fixed the alert WORDING for the shape where target
+A is serving while a persisted target B never connected, and left the RECOVERY
+side of the same shape untouched. A keeps its delivery observer, so one of A's
+own transient episodes ending reached `noteSyslogDeliveryRecovered`, cleared
+B's fire-once latch and logged "SIEM feed delivering again" — both false for B
+— after which the 30 s watchdog re-fired the DOWN page, and again, for as long
+as the mixed state lasted. Recovery now refuses to clear while the intent is
+unmet, through `syslogIntentUnmet`: ONE predicate, shared with the snapshot,
+because writing it twice is how the two came to disagree. The latch is not
+stranded — every transition that RESOLVES the intent already clears it.
+
+**(c) A reader that pairs a target with a separately-loaded writer is reading
+two generations** (Codex P2). Round 11c published the config metadata inside
+the publication transaction; `syslogConfiguredTargets()` then released
+`syslogPublishMu` before its callers loaded `activeSyslog()`. A disable landing
+in between yields the old address beside no writer; a re-point yields target A
+beside writer B. `snapshotAdminEndpoints` PERSISTS that pair, so the mismatch
+outlives the process: a restart can re-enable a target the operator has just
+switched off, or restart one speaking the previous collector's wire format.
+This is round 9a's rule — *a snapshot must read the generation it describes* —
+arriving at a third reader, so the two-value accessor was REPLACED rather than
+supplemented. `syslogConfiguredSnapshot()` returns target, intent and writer
+in one critical section and is the only way to obtain any pair of them; a
+structural wall pins the three readers against a second load.
+
+**Two residuals, recorded rather than hidden.** The tracking list is capped
+at 64; every retire settles the list first, so an evicted entry has already
+had its delta folded and loses only what it records afterwards — i.e. overflow
+degrades to exactly the pre-fix behaviour for that one Writer, and only under
+a burst of re-points faster than any read. And the mark-before-close ordering
+is a CONTRACT, not an enforced invariant: an owner that closed a Writer before
+marking it retired would lose whatever the drain recorded between the seal and
+the mark, because the fold then reads the sealed snapshot. Both owners mark
+first, and it is stated on `MarkRetired`, but it cannot be made exact by
+locking — the retire runs under `syslogHealth.mu` and `chargeTerminalDrop`
+holds `sendMu` while its `noteDrop` reaches the observer, so taking `sendMu`
+under the health mutex would invert the lock order and deadlock.
+
+**A note on the control that nearly proved nothing.** The exactly-once control
+for (a) has to observe a Writer that is sealed AND still tracked for folding.
+Its first version sealed the writer and then read the baseline — but the read
+is what settles, and settling a sealed writer untracks it, so the control
+closed the very window it existed for and passed against the double-counting
+shape it was written to reject. It now reads the baseline while the writer is
+still unsealed. *A control that reads the state it is about to test can close
+the window it exists for.*
+
+### Round 13 — round 12's own rule, not carried to two consumers
+
+Both findings are Codex P2s, and both are the same shape: round 12 changed
+what a value means, and a consumer of that value still assumed the old
+meaning.
+
+**(a) An install must not erase a loss that already happened.**
+`noteSyslogEventSkipped` re-read `syslogIntentArmedWithoutWriter` at CHARGE
+time. A fan-out goroutine can observe no Writer, be descheduled, and resume
+after a successful install has cleared the flag: its event reached no
+collector, but the fresh read says "not armed" and the loss never appears in
+`culvert_syslog_drops_total` or `/healthz`. The arming state is now sampled by
+the CALLER (`syslogSkipArmed`) immediately before it looks for a Writer, and
+handed to the charge — so "there was a configured collector" is observed no
+later than "there was no Writer", which is the pair the charge is a statement
+about. The interleaving is a few instructions wide and cannot be scheduled
+through the fan-outs, so the gate drives the boundary the fix introduced
+rather than pretending to schedule the race.
+
+**(b) The process-lifetime counters have exactly one source, and the UI was
+reading a second.** P2-4 made the totals survive a re-point. The admin panel
+still assumed the opposite in three places: `renderSyslogDrops`' own header
+said *"a new collector starts a fresh writer at Drops()==0; disabling clears
+it"*, and `saveSyslog` rendered `res.drops` from the POST response — which
+does not carry the counters at all. An absent field is `undefined`, `|| 0`
+makes it zero, and the panel reported **"no delivery drops" for a feed that
+had just lost events**, until the operator reloaded the page. That is the
+loss-history erasure P2-4 exists to prevent, surviving one layer up, in the
+surface an admin actually looks at while re-pointing a collector to remediate
+the outage that produced those drops.
+
+Codex offered two fixes: return the totals from the mutation, or have the UI
+re-read the GET. The second was taken. Returning them from POST would create a
+second answer to a question that already has one — the defect this sweep
+records under CHAOS-61's rule — and would change a published response shape,
+which in this repo means regenerating the OpenAPI bundle and the TypeScript
+client as well. A failed re-read deliberately leaves the existing row: a stale
+real number beats a fabricated zero.
+
+The UI half is walled structurally, because no Go test can drive a browser
+handler and the failure is a wrong NUMBER rather than an error. The wall
+carries a control rejecting the cheapest wrong fix — rendering nothing at all,
+which would leave the previous collector's count on screen indefinitely — and
+both mutations (the pre-fix `renderSyslogDrops(res.drops)` and the
+render-nothing shape) were verified failing against it.
+
+**The transferable rule: when a change makes a value survive something it used
+to be reset by, every surface that renders it inherited an assumption that is
+now false. Enumerate the CONSUMERS of the fact, not the producers.** Round 12
+enumerated the producers (both retire paths) and stopped there.
+
+#### Round 13 postscript — the wall that already existed, and two self-inflicted detours
+
+The UI gate above read the admin SPA with a CWD-relative `os.ReadFile`. The
+repo already walls that class (`TestTestFileReadsAreCWDIndependent`), because
+a concurrent `os.Chdir` in another test makes a relative read pick up the
+wrong file; the wall's own doc comment records that the class "cost real
+debugging time to track down". It was walked back into the same day, and it
+is deterministic — it accounted for every red on that head: race shard 3, the
+race verdict, the Fast Gate, determinism and the Deep Gate. (The QA and
+Security gate NAMES passed, because on PRs they are pass-through shells — a
+green there proves nothing about the sharded engine.)
+
+Two process lessons cost more time than the fix:
+
+**Do not truncate a failing run's output.** The identity of the failing test
+was lost TWICE to `| tail -20`, once here and once in the unattributed
+failure this sweep recorded earlier. `go test` prints `--- FAIL:` where the
+failure happens, and the root package's buffered logger output can push it
+tens of thousands of lines from the end. Write the whole run to a file and
+grep it. Note also that GitHub's job-log API returns only the tail (capped
+around 630 KB) and the full artifact lives on blob storage, so on a package
+this verbose CI cannot tell you WHICH test failed — only that one did. The
+local capture is the instrument.
+
+**Do not mutate the working tree while a background probe is reading it.** A
+mutation experiment (reverting `static/index.html` to its pre-fix shape to
+confirm a gate was not vacuous) ran while a background reproduction loop was
+live against the same tree. The loop caught the mutation and reported a
+failure that looked like the bug being hunted. Mutation testing and
+background probes need the tree to themselves.
+
+**And the diagnostic one:** the leading hypothesis before the reproduction was
+the heaviest new fixture (12,000 events through dead sockets under
+`-count=2`). It was wrong, and acting on it would have right-sized a fixture
+that was never the problem while leaving the real defect in place. An
+intermittent-looking failure is not evidence of a timing bug: here it was a
+deterministic source-scan violation that only LOOKED intermittent because
+different CI jobs sample different shards and some gate names are shells.
+
+### Round 14 — the observer's own cost, on the goroutine it said it never ran on
+
+**The finding (Codex P2).** A queue-full drop is charged by `tryEnqueue` on
+the CALLER's goroutine — the audit or request-log fan-out, i.e. a proxy
+request goroutine. `noteDrop` then invokes the delivery observer
+synchronously, and the observer ran the entire health plane inline:
+`syslogFeedState` takes the process-wide `syslogHealth.mu`, settles the
+retired writers under it (work **round 12 added**), and
+`commitSyslogDegradation` takes the same mutex a second time — all while the
+caller still holds `sendMu.RLock`. So during a sustained SIEM outage,
+concurrent proxy requests serialized in the health plane instead of recording
+an atomic drop and moving on.
+
+**Measured** (4-core Xeon @2.10GHz, medians of n=5, `noteSyslogDelivery(false)`
+against an armed feed):
+
+| | GOMAXPROCS=1 | GOMAXPROCS=4 |
+|---|---|---|
+| pre-fix | 149.0 ns/op | **267.6 ns/op** |
+| fixed | 169.2 ns/op | **73.6 ns/op** |
+
+Pre-fix, four cores delivered **0.56x** the throughput of one — adding cores
+SUBTRACTED throughput. That is the same signature `internal/connlimit`,
+`internal/threatfeed`, the IP filter and the latency histogram each record,
+arriving here on the request path at exactly the load the asynchronous writer
+exists to absorb. It was also self-reinforcing: the same per-line cost on the
+drain goroutine slows the drain, which fills the queue, which puts *more*
+request goroutines on this path.
+
+**Why this is this note's own argument failing at its edge.** The observer is
+deliberately asymmetric — called on every drop, never on an ordinary success
+— on the recorded reasoning that a success is a gateway's steady state and a
+callback there would tax the happy path to observe a fault that is not
+happening. That reasoning is correct about the steady state and silent about
+the OUTAGE, where drops become the steady state at the full request rate.
+
+**The fix is a CLAIM, not a lock.** `syslogEvalInFlight.CompareAndSwap`
+collapses concurrent evaluations to one; a caller that loses does **not**
+wait, it returns having done nothing, so there is no queue to serialize on.
+
+What makes a dropped evaluation safe is that `noteDrop` has already recorded
+everything durable about the loss — the counter, the timestamp and the reason,
+all atomics — *before* it notifies. The evaluation is a pure READER asking
+"should I page now?", and the answer is a function of that recorded state plus
+the clock. Skipping a read therefore loses nothing, and two independent
+drivers ask again regardless: every later drop, and the 30s watchdog. This is
+the plane's own *freshness is EVALUATED, never latched* property, used here to
+make the read **droppable**.
+
+Two properties keep it behaviour-preserving:
+
+- **A sequential caller is unaffected** — the previous call released the claim
+  — which is why all 54 existing gates hold with no change. Only CONCURRENT
+  drops collapse, and they ask a question whose answer cannot differ between
+  them: degradation needs a non-zero consecutive-failure count (the first drop
+  already established it) and an age threshold (a property of the clock).
+- **The release is DEFERRED, not trailing.** `notifyDelivery` contains a
+  panicking observer, so a trailing store would leave the claim held forever
+  and the feed could never page again.
+
+**Rejected: a rate floor on top of the claim.** The evaluation rate is already
+bounded by the DROP rate rather than by a spin loop, so at a realistic 10k
+losses/s the surviving work is ~0.16% of a core. A time floor would also have
+changed sequential semantics, which every existing gate rests on.
+
+**Recorded, not rounded away:** one core is at parity to ~13% for the added
+CAS pair (measured across runs, so partly box drift). A single-core gateway
+with one drop source is the shape a forward proxy is never in — the
+`internal/connlimit` `maphash` precedent.
+
+**The transferable lesson is the comment.** `noteSyslogDelivery`'s doc said
+*"It runs on the drain goroutine and must never call back into the Writer"*.
+The second clause is right; the first is **false for one of its two callers**,
+and is contradicted by this very section three hundred lines up, where the
+caller-goroutine charge is spelled out to explain a different defect. That
+false sentence is why the cost survived thirteen rounds of review of this same
+file: every reader who checked "is this expensive?" was told it ran on a
+goroutine where the answer did not matter.
+
+> **A comment asserting a goroutine context is a load-bearing claim. When a
+> second caller is added, the comment is part of the diff.**
+
+**Gates** (4, `syslog_health_chaos_test.go`):
+
+- `ADropEvaluatesOnlyWhenNoEvaluationIsInFlight` — the DEFECT gate, verified
+  failing against the reintroduced pre-fix shape. The rule is *evaluate if and
+  only if no evaluation is already in flight*, pinned as a UNIT against the
+  real entry point. The injected clock is the instrument: `syslogFeedState`
+  reads it exactly once per evaluation on a feed that is not degraded, so the
+  call count IS the evaluation count.
+- `ConcurrentDropsAreRaceFree` — drives 64 concurrent drops under `-race` and
+  deliberately asserts **no count**: which goroutine wins the claim is a
+  scheduling outcome. It proves the plane is race-free under the real shape
+  and that the claim is left FREE afterwards, which is what catches a leaked
+  claim.
+- `ASequentialDropStillEvaluates` — CONTROL. The cheapest way to pass the
+  defect gate is to stop evaluating on a drop at all, which would delete the
+  "immediate on a busy node" driver and leave the 30s watchdog as the only
+  one.
+- `ADegradedFeedStillPagesFromADropUnderConcurrency` — CONTROL, driven by a
+  real killed collector: coalescing must drop redundant evaluations, never the
+  one that crosses the threshold.
+
+All three controls PASS against the pre-fix tree, which is what makes them
+controls rather than second defect gates. The three mutations (pre-fix shape,
+never-evaluate, never-release) are each caught by a **different subset** of the
+four, which is what proves none of them is redundant.
+
+#### Round 14 postscript — the gate that would have hung
+
+The first shape of the defect gate raced concurrent goroutines through a clock
+that **blocked the winner**, so the losers' non-arrival was the observable. It
+was withdrawn before it shipped, for two reasons this file has already
+recorded in other words:
+
+- **Spurious under `-shuffle`.** A stray goroutine from another test reaching
+  the clock first consumes the blocking call, and the winner's own read then
+  returns immediately — the count assertion fails for a reason that has
+  nothing to do with the property.
+- **The defect would present as a HANG.** Against the pre-fix shape the losers
+  reach the clock too, and block there. A gate that can flake gets muted; a
+  gate that hangs is worse than no gate, because a 10-minute package timeout
+  says nothing about which assertion failed.
+
+It surfaced as a 600.119s timeout on the local `-count=2 -shuffle=on` run —
+which is also how the harness learned that CI gives that job `-timeout=20m`
+while `go test` defaults to 10, so the local run had been reporting a budget
+overrun as a failure. The property is now pinned deterministically as a unit,
+and the concurrency exercise keeps `-race` coverage without asserting anything
+a scheduler decides.
+
+### Round 15 — an all-or-nothing resolve, and a reason one hop short
+
+Two P2s, both of them an earlier round's rule implemented at the wrong
+granularity.
+
+#### (a) A delivery resolves exactly the failures it observed
+
+Round 8 established the boundary: `deliverLine` reads the failure count **after
+the write completes**, so a drop recorded before completion is resolved by the
+delivery and one recorded after survives. `noteDelivered` implemented that with
+`CompareAndSwap(failuresBefore, 0)` — which resolves the episode only when
+*nothing raced it*.
+
+When a queue-full drop landed between the read and the swap, the swap failed
+and kept **every** failure, including the prefix the delivery had just proved
+resolved. An episode of N losses, followed by a successful write and one racing
+drop, reported **N+1 losses "since that delivery"** instead of 1 — on the
+contract row and on `GET /api/syslog`. An operator asking *how much have I lost
+since the feed last worked?* was handed the whole backlog.
+
+The degradation predicate is a **boolean** over this count, so the page was
+never wrong. Only the number an operator acts on was — which is why this is a
+P2.
+
+Subtracting the observed prefix states round 6's property precisely instead of
+all-or-nothing: the racing drop still survives, and now it survives **alone**.
+
+**It is a CAS loop, not a bare `Add(-failuresBefore)`.** An underflow here is
+not a smaller error but a catastrophic one: a wrapped `uint64` is a permanently
+non-zero failure count, i.e. a feed reported as failing for the life of the
+process. It cannot happen today — only this function decreases the counter, and
+its sole production caller is `deliverLine` on the single drain goroutine under
+`s.mu` — but that is an argument about a **caller**, and the standing lesson of
+this section is that such arguments get invalidated by later changes without
+anyone noticing. The clamp makes the invariant local.
+
+**An existing gate had to be inverted**, and it is the clearest self-documented
+case in the sweep. `TestNoteDelivered_ReDatesAnEpisodeThatOutlivedTheDeliveryItRacedWith`
+asserted `ConsecutiveFailures == 3` with the message *"the raced drop must
+survive the failed CAS"* — while its own prose four lines above says *"the
+survivor belongs to a NEW episode beginning at the delivery"*, singular. The
+test documented the correct model and pinned the defect's arithmetic.
+
+#### (b) The acknowledgement carries the sender's reason
+
+Round 11 bound the probe's `delivered`-vs-`sent` wording to the Writer that
+performed the send, because `handOffQueued` moves a queued line **and its ack**
+to a successor. It left the failure class reading
+`sw.Stats().LastFailureReason` — the writer the probe was *handed*, which never
+attempted the send and reports `unknown` on a fresh chain or an unrelated stale
+class on a busy one. Round 10's defect surviving one hop along, one field later,
+in the endpoint whose whole job is to be believed.
+
+**Reading that field at ack time would also have repeated round 7's P1-C**: it
+is writer-*wide*, and a concurrent line's failure can overwrite it between the
+drop and the read. So the reason is not derived at all. `deliverLine` **returns**
+the bounded class it charged (nil on success), `deliverGuarded` returns
+`&reasonPanic` from its recover path, and each handoff/flush terminal passes its
+own literal — `ProbeOutcome.Reason` is per-**line** by construction rather than
+by timing.
+
+The `!queued` branch deliberately still reads `sw`, and is correct: `enqueue`
+fails only on `sw` itself, so `sw` *is* the writer that charged it.
+
+> **When a value can be handed on, bind every claim to the thing that will
+> finally act.** Round 11 bound one of two, and the other waited a round.
+
+#### Gates (5)
+
+- `TestNoteDelivered_ResolvesOnlyTheFailuresItObserved` — a four-case table,
+  verified failing against the reintroduced CAS on exactly the two cases where
+  something races. The two where nothing races **pass** against the defect,
+  which makes them controls inside the table.
+- `TestNoteDelivered_CannotUnderflowTheFailureCount` — pins the clamp.
+- `TestAckCarriesTheSendersFailureReason` — drives a probe handed to a successor
+  whose queue is **full** and requires `queue_full` from that successor, while
+  asserting as a **precondition** that the handed writer carries no reason at
+  all. Without that precondition the gate could not distinguish the two writers.
+- `TestAckReasonIsEmptyOnDelivery` — CONTROL against stamping a class
+  unconditionally, which would report a failure reason alongside a success.
+- `TestChaos81_TheProbeReportsTheSendersReasonNotItsOwnWriters` — the PATH half:
+  an AST wall on the handler's ack branch, because *walling the function is not
+  walling the path*, and `ProbeReportsTheRealOutcome` passed unchanged against a
+  reverted handler once already in this sweep.
+
+### Round 16 — one chain, two walks
+
+Two P2s with **one root cause**: `enqueue`, a single-writer caller-side helper,
+had exactly one caller left — `WriteProbe`. `send` outgrew it in round 11 when
+it gained the successor walk, and the probe was left on the old path. One chain
+with two walks over it produced exactly the two defects that shape produces.
+
+#### (a) A probe must follow the chain its ordinary lines follow
+
+`POST /api/syslog/test` captures a Writer, and a concurrent re-point can close
+it before the enqueue. The probe was then dropped against the **displaced**
+Writer: the healthy replacement never saw the test event and the endpoint
+answered `dropped` for a collector that was working — in the one endpoint whose
+whole job is to be believed. The refusal also went through a bare `noteDrop`
+rather than `chargeTerminalDrop`, so whenever the old Writer had already sealed
+the loss landed on counters no surface reads: *counting into a void*, recorded
+for the third time in this sweep.
+
+`WriteProbe` now routes an `enqClosed` through `handOffQueued`, the same walk a
+queued line takes. That walk already charges and acknowledges every in-chain
+terminal itself, so the surviving `(nil, false)` return is reached only when
+there is no successor at all — the one case where the captured Writer really is
+the terminal, and therefore the one case where the handler may still read the
+reason from it. The attribution round 15 established is preserved rather than
+re-derived.
+
+#### (b) The hop bound counts successor links, and `send` stopped one short
+
+`handOffQueued` offers the line to `maxHandoffHops` successors. `send` compared
+`hop+1` against the bound **before** advancing, so it followed only
+`maxHandoffHops-1` links and charged the line to the second-to-last. At exactly
+that depth the Writer it skipped is the **live** one, so a security event was
+lost to a collector that would have accepted it.
+
+**That off-by-one was introduced by round 11's own fix for the opposite error.**
+The bound used to be checked at the *top* of the loop, which charged a Writer
+that had been assigned and never asked; moving it below the attempt corrected
+the attribution and over-corrected the depth by one.
+
+> **A fix that moves a bound corrects one end and must be re-counted at the
+> other.**
+
+#### Provenance, and what this round adds
+
+The code fix for both findings was written and pushed independently as
+`f31bded` while this session was preparing its own. That fix is correct and
+smaller: it leaves `send`'s per-attempt formatting alone, where the competing
+version unified the two walks into one and changed the event-timestamp
+semantics on the hot path — a refactor the findings did not require. It was
+therefore discarded in favour of the landed fix. What survives from it is
+evidence, documentation, and one deletion:
+
+- `TestSendAndHandOffAgreeOnChainDepth` pins the **property** rather than the
+  depth. The landed exhaustion gate asserts the writer at exactly
+  `maxHandoffHops` links receives the line, which catches this instance; the
+  parity gate asserts the two walks reach the same writer at depths 1,
+  bound-1, bound and bound+1, so it also catches a future divergence in either
+  direction — including one introduced by changing the constant or by touching
+  only one walk.
+- `TestProbeRefusalOnASealedWriterReachesTheExportedTotal` closes the
+  accounting half at the **surface**. The landed no-successor control asserts
+  `Stats().Drops` on a Writer that was never retired or sealed — the case where
+  that counter IS still read — so it cannot see a loss charged to a sealed one.
+  Verified: a mutation that keeps the handoff but charges the terminal with a
+  bare `noteDrop` passes every landed gate and fails only this one.
+- `TestProbeOnAnOpenWriterWithASuccessorStaysPut` is the control against
+  walking unconditionally, which would hand a probe past a perfectly healthy
+  collector. Verified: that mutation passes every landed gate and fails only
+  this one.
+- The dead `enqueue` helper is **deleted** rather than left unused. It was a
+  second caller-side enqueue path with different semantics from the one `send`
+  walks, and `WriteProbe` picking the wrong one is how this defect arose. A
+  dead duplicate of a path that must not be chosen is an invitation to choose
+  it.
+
+> **Two independent fixes for one finding is a merge, not a race. Evaluate the
+> landed one on its merits, keep the gates it does not have, and record whose
+> code shipped.**
+
+#### Note on this round's documentation
+
+`main` has since decomposed `CLAUDE.md` into `AGENTS.md` plus
+`docs/agent-context/`, with a hash-verified preserved archive and an enforced
+eager-load budget. Architecture prose no longer belongs in `CLAUDE.md`, so this
+record is the canonical one. The preserved archive was checked for statements
+this round falsifies and contains none — its baseline predates the probe
+acknowledgement and the hop bound entirely — so no `errata.md` entry is
+required.
+
+### Round 17 — a verdict in flight, a replaced writer, and one response per target
+
+Three P2s. Two of them are the same shape from opposite directions — **a
+statement attached to the wrong moment, and a statement attached to the wrong
+target** — and the third is this file's own asymmetry argument reaching one
+more caller.
+
+#### (a) A displaced writer's full queue is not a loss
+
+`releaseReplacedSyslogWriter` names the successor **before** it closes the
+predecessor, and that close is `go old.Close()` — asynchronous. So
+`successor != nil && !closed` is not a narrow window: it is the ordinary state
+of a just-displaced writer. And its queue being full is the ordinary *reason*
+for the re-point.
+
+`send` advanced along the successor chain only on `enqClosed`. A full queue
+answered `enqDropped`, which `send` treated as terminal: the event was
+destroyed on the collector the operator had already moved off, **charged as a
+compliance drop**, with the healthy replacement sitting idle. Measured against
+the pre-fix tree: the successor's queue empty, `old.Drops() == 1`.
+
+`handOffQueued` was right to treat `enqDropped` as terminal, and that is not
+an inconsistency — it starts at `s.successor`, so the writer it is enqueueing
+to is a *live* one, whose full queue is genuine backpressure. The two cases
+are **one rule**: a loss is only a loss once nobody better is available.
+
+So `tryEnqueue` now distinguishes them. `enqDisplaced` is uncounted and both
+walkers advance on it, exactly as they do for a closed writer. Three details
+are load-bearing:
+
+- **The enqueue is attempted first, and only a REFUSAL consults the
+  successor.** A displaced writer with room keeps taking the line — its own
+  drain hands it on — so skipping a displaced writer wholesale would change
+  the ordinary re-point path and make the drain's handoff unreachable from
+  `send`. Pinned as a control; that mutation fails it and nothing else.
+- **Nothing is charged when the replacement accepts.** Following the successor
+  without this is still a false accusation on the one series that means
+  *events that did not reach the SIEM*, so it has its own gate.
+- **A full queue on the live writer is still a counted `queue_full` drop.**
+  The control for that asserted only the COUNT at first and was **vacuous**:
+  reporting every full queue as displaced still charges one drop, at the end
+  of the walk, under `closed` — so an operator chasing a collector that cannot
+  keep up is told the writer was replaced instead. It now asserts the class.
+
+`handOffQueued` gets the same rule for free, and it is reachable there too: a
+run of rapid re-points can leave an *intermediate* writer both replaced and
+backed up.
+
+Four mutations, each caught by a different subset: revert `tryEnqueue` (3
+gates), never charge a queue-full drop (the strengthened control), `send`
+ignores `enqDisplaced` (1 gate), skip displaced writers wholesale (2 gates).
+
+#### (b) A dial that has not returned is not a verdict
+
+Both boot paths record the intent and *then* dial, synchronously, for up to
+`syslog.DialTimeout` (5s). `initBackgroundServices` starts the 30s watchdog one
+init slice **before** `initPersistentAdminState` reaches `applyAdminServices`,
+and the webhook store is already loaded — so a tick landing inside that dial
+dispatched `syslog_feed_down` and logged that the collector *"could not be
+connected 0s ago and nothing retries"*. Both claims were false; nothing had
+failed yet. Installing the writer clears the fire-once latch but cannot retract
+a delivered webhook.
+
+That log line is this sweep's headline defect in miniature: **a health surface
+asserting a false statement.**
+
+An intent is now PENDING for the length of one dial. Four decisions:
+
+- **A deadline, not a flag.** A flag a caller forgets to clear is a latch that
+  makes the feed permanently unpageable — the fail-OPEN failure this plane
+  keeps recording. A deadline expires on its own, so a missed resolver costs
+  bounded delay, and freshness stays EVALUATED rather than latched (CHAOS-61's
+  rule, which this file applies everywhere else). Pinned by a gate that
+  advances the clock past the grace **without anything clearing it**.
+- **Folded into the ONE definition.** `syslogIntentUnmet` is deliberately the
+  single definition shared by the snapshot and the recovery path; spelling the
+  conjunction at each consumer is how one answer becomes two.
+- **Derived, not chosen.** The grace is `syslog.DialTimeout + 1s`, with the
+  engine's budget newly exported so there is one source for it, and a gate
+  requiring the grace to cover the dial AND stay below the watchdog tick — a
+  grace at or above the tick would postpone a *real* page by a whole tick.
+- **A resolved failure is immediate.** `noteSyslogDialResolved` closes the
+  grace early on the failure branch, because the read surfaces are exactly
+  what an operator looks at after a boot that failed.
+
+Two findings about my own work are recorded rather than smoothed over:
+
+- **The deadline clear in `noteSyslogWriterInstalled` is HYGIENE, not a fix.**
+  An install forces `intendedTarget == target`, so `syslogIntentUnmet`
+  short-circuits before ever consulting the deadline. Removing the line changes
+  no surface today — measured, not reasoned — and the call site now says so.
+  The control that appeared to pin it was vacuous twice over: first because
+  `armSyslogFeed` resets the record *before* it dials (so the grace was cleared
+  by the reset), and then because of the short-circuit. It is kept, rewritten
+  to pin the production ORDER, which no other gate exercises, and explicitly
+  labelled with what it does not pin.
+- **19 existing gates called `noteSyslogIntent` to mean "the dial failed".**
+  That is now only half of the boot sequence, so they went red. They were not
+  loosened: a `noteSyslogFailedDial` helper names the *whole* failed-boot
+  sequence once, every one of them uses it, and all 19 pass unchanged — so the
+  semantics each pinned before this round is the semantics it pins now. The
+  gates that are about the pending window call the two halves themselves and
+  drive the injected clock.
+
+> **When a change makes a previously-instantaneous transition take time, every
+> gate that treated it as instantaneous was encoding a sequence, not a state.
+> Name the sequence once and let them all say it.**
+
+#### (c) One response, one target per field
+
+`GET /api/syslog` read the serving address through `syslogConfiguredSnapshot`
+— a *different lock*, therefore a different generation — and the verdict
+through `syslogFeedState`, and reported the serving address as `addr`. Two
+shapes followed:
+
+- A failed boot dial answered `addr:""` beside `degraded:true`. The legacy
+  panel keys its **whole** syslog section off `addr`, so it cleared the
+  operator's own address out of the form, hid the status line and ran
+  `hideSyslogDrops()` — on the one feed that is losing every event. Measured:
+  `{"addr":"","degraded":true,...}`.
+- A boot that connected A and then failed to connect the persisted B answered A
+  beside B's degraded verdict, while `format`, `lastSuccessUnix` and
+  `deliveryProvable` all described A.
+
+The health record already held both strings, read under one lock — it simply
+did not expose them. So the fix **removes** a read rather than adding one:
+`Target` and `IntendedTarget` go on the snapshot, the handler drops
+`syslogConfiguredSnapshot` entirely, and `addr`/`servingAddr`/`targetMet` name
+the two collectors separately. Every field now comes from one critical section,
+so the response is one generation by construction rather than by timing —
+round 9a's rule at a fourth reader.
+
+`syslogConfiguredSnapshot` keeps two real callers (the persistence path and
+diagnostics), so round 16's dead-duplicate rule does not bite; the
+config-metadata wall's claim was widened to name both acceptable one-generation
+sources, because it no longer describes this reader.
+
+The product half is where the harm was, so it is gated too:
+`renderSyslogTarget` claims a green tick only on `targetMet` and otherwise
+names the configured collector and the previous one still receiving events.
+Both mutations — green unconditionally, warn unconditionally — fail it. The
+save path now renders the target through the same renderer on its re-read,
+removing a second copy of the sentence.
+
+Adding two response fields regenerated **both** artifacts, which is the lesson
+`conventions.md` records from this very PR: `make api-bundle` for
+`openapi.json`, then `npm run generate` under the pinned Node for
+`types.gen.ts`. The pinned toolchain was not installed in this environment and
+was obtained rather than bypassed — forcing past a toolchain gate is how
+generated output stops being reproducible.
+
+#### Gates and mutations
+
+Added: 6 in `internal/syslog/syslog_handoff_format_test.go` (A), 7 in
+`syslog_health_chaos_test.go` (B), 5 more (C). Mutation evidence is recorded
+per finding above; every defect gate was verified failing against the shape it
+targets, and every control was verified failing against the cheapest wrong fix
+it is named for — with the two vacuous controls found by measurement, not by
+review, and fixed or relabelled.
+
+#### Environment note
+
+Nine root-package tests fail in this sandbox and are unrelated to this PR:
+`example.com` does not resolve here (only hosts the agent proxy needs do), and
+`validateExternalURL`'s DNS check is fail-closed, so every IdP-registry fixture
+using the IANA-reserved domain is refused. CI resolves it normally. The
+determinism verdict for this round is read with those nine excluded.
+
+#### Round 17 addendum — the CodeRabbit batch
+
+Three findings arrived on the same head, all labelled Minor; one of them is in
+this plane's headline class and the label understates it.
+
+**(d) The probe confirmed a collector the operator had replaced.**
+`apiSyslogTest` loaded the writer on its own, so in the superseded state
+(writer A live, intended B's dial failed) it reached A and answered
+`delivered` — *"the collector accepted the test event"*, `ok: true`. Meanwhile
+`syslog_feed_down` is firing, and the `syslog_feed` row's own OperatorAction
+points the operator **at this endpoint** to confirm the fix; round 12b's
+recovery rule correctly refuses to clear that episode for A's delivery, so the
+alert stays up while the test says it worked. Two contradictory statements on
+one operator surface — the superseded-target finding at a **third** surface,
+after the alert wording (9b) and the recovery clear (12b).
+
+The verdict is asked through `snap.IntentUnmet`, **not** by comparing the two
+target strings at the call site. A string comparison would be a second
+definition of a question that already has one — and it would also miss round
+17(b)'s pending-dial grace, reporting `superseded` for an intent a boot dial is
+still deciding. The writer probed is `snap.writer`, from the same snapshot, so
+the writer and the verdict are one generation (round 10b's rule: the probe may
+not infer its transport or its outcome from separately-read state, and that now
+extends to *which collector it is even testing*).
+
+**That fix consumed the control sample of two structural walls**, which is
+worth recording because it is the second time this round that a control turned
+out to rest on something that could move. Both walls used `apiSyslogTest` as
+their positive sample — "it reads only the writer, it pairs it with nothing" —
+and it is now a config-metadata reader itself, so it JOINED the list it used to
+be the counterexample to. The sample is now `persistLogEntry`: the request-path
+fan-out, chosen because loading the live writer and handing it a line is the
+whole of its job, so it cannot stop doing so the way an admin handler did.
+
+> **A control's positive sample must be something that cannot stop having the
+> property. Pick the function whose job IS the property, not the one that
+> happens to have it today.**
+
+**(e) The observability snapshot did not restore the health plane.**
+`snapshotObservabilityGlobals` restores the writer pointer and the config
+strings; the health record is not part of it, and `loadObservability` writes it
+on both paths. A test driving a collector that cannot be connected therefore
+left `intendedTarget` set and the skipped-event counter ARMED, so every later
+test's audit and request events were charged to `culvert_syslog_drops_total` as
+SIEM losses. Verified by a throwaway gate before fixing. That is the
+`swapAutoExclude` fence-pollution rule — a global a test installs is a global
+the test must take back, not merely stop pointing at — and round 17(b) made it
+sharper by adding `dialVerdictBy` to the same unrestored record.
+
+**(f) A paragraph split the probe-outcome table.** Round 16's explanation
+landed *inside* the Markdown table, so `unknown` and `unconfigured` rendered as
+literal text with pipes: two of five probe outcomes were invisible to anyone
+reading the runbook. My own defect, from the round that added the paragraph.
+Fixed by moving the paragraph below the table, which also made room for the new
+`superseded` row.
+
+Mutations: probe loads the writer on its own (2 gates, including the repointed
+config-metadata wall now live for `apiSyslogTest`); refuse every probe (the
+control); snapshot stops restoring the health plane (the fixture gate).
+
+**(g) And one of round 17(a)'s own gates read an absolute process-lifetime
+counter.** `TestSend_FollowingTheSuccessorChargesNoDrop` asserted
+`LateDrops() == 0` where every other gate in that file takes a delta. It passed
+only because another test resets the counter a hundred lines above it in source
+order; under `-shuffle=on` it fails the moment the exhausted-walk gate lands in
+between (reproduced deterministically with a two-test `-run`, which is the
+inverse of this file's other lesson — there a filter *hid* an ordering fault,
+here a filter *exposed* one the full run hid).
+
+This is round 11's postscript verbatim — *the counter had to be handed back,
+because it is process-lifetime by design and one gate's late drop shifted the
+total for every gate after it* — committed in a gate added one round later.
+
+> **When a counter survives what used to reset it, every assertion about it is
+> relative. A gate that reads it absolutely passes on the ordering it happened
+> to be written under.**
+
+#### Round 17 — recorded residual
+
+During the pending-dial grace the API reports `targetMet:false` with an empty
+`servingAddr`, so the panel's warning sentence — which ends *"Nothing retries;
+re-save to try again"* — is not strictly true for those few seconds: a dial
+*is* in flight. It is recorded rather than fixed because the window is
+unreachable in practice: both callers run inside `initObservability` /
+`initPersistentAdminState`, before `startAdminUI` has a listener, so no
+operator can load the Settings panel during it. Closing it would mean a third
+state on the response for a boot condition nobody can observe. If a future
+change makes an intent pending on a path the admin UI is already serving — a
+re-point that dials asynchronously, say — this becomes reachable and the
+response needs a `dialPending` field.
+
+#### Round 17 — process: a round lands as ONE push
+
+Four of this round's required-check failures were not failures. `Fast PR Gate`
+and `Deep PR Gate` reported `failure` on `b48812f`, `f31bded`, `6f4ba92`,
+`4eab29a`, `ce57bbd` and `43faff6`; every one of those workflow runs has
+conclusion **`cancelled`**, and the aggregate's own message says why:
+
+```
+##[error]required job 'test-race' result=cancelled — cannot trust the gate
+```
+
+The gate is right to refuse — a cancelled race job is not evidence — and the
+cause was mine: six pushes in about twenty-five minutes, each cancelling the
+in-flight run for the ref. Three of them were polish (a tightened doc sentence,
+a recorded residual, this note's predecessor), and each cost a full CI cycle and
+manufactured a pair of red required checks indistinguishable from real ones
+until the logs were read. Two of those reds arrived as wake events whose
+handling instructions are "this ends in a pushed fix or a comment on the PR" —
+so a self-inflicted cancellation also generates work that looks mandatory.
+
+> **A review round lands as one push. Polish that arrives separately is not
+> free: it costs a CI cycle, it replaces a green verdict with a pending one,
+> and it produces red required checks that cannot be distinguished from genuine
+> failures without opening the job log.**
+
+Verified on the uncancelled head: both required gates green, plus API Contract,
+API Governance, CI, Code Review, CodeQL, Edge-Case Validation Lab, Proxy UI E2E,
+QA Gate and Security Release Gate. Module-wide `-count=2 -shuffle=on` (seed
+1792156379732326309): 111 packages pass; the root package's 9 failures are all
+`validateExternalURL` failing closed because `example.com` does not resolve in
+that sandbox, each appearing exactly twice — deterministic environment, not
+ordering. Nothing this round touched failed.
+
+### Round 18 — a verdict that outlived its episode, and two answers to "how much did this writer lose"
+
+Two P2s, and they are the same mistake at two different altitudes: **a value
+read as though there were only one of it.** One is a staleness generation keyed
+on the wrong event; the other is a cumulative counter read as a pair.
+
+#### (a) A recovery that invalidates nothing
+
+`syslogHealthRecord.gen` is the staleness identity the watchdog's
+snapshot/commit split relies on: the snapshot half captures `gen`, the commit
+half refuses to act if it has moved. It was documented, and implemented, as
+*"the identity of the RECORD"* — bumped by an install, a disable and the test
+reset, the three transitions that replace what the record describes.
+
+`noteSyslogDeliveryRecovered` replaces nothing. It clears `alerted`, `logAt`
+and `suppressed` and leaves the writer, the target and the intent exactly as
+they were. So a snapshot taken while the feed was down, committing a moment
+after the recovery, passed the staleness check and **paged a feed that was
+already delivering again** — and, because the commit half sets `alerted`, it
+also re-latched it.
+
+That re-latch is the serious half, and its failure mode is **silence**. The
+delivery observer is edge-triggered: `noteSyslogDeliveryRecovered` runs on the
+transition out of an episode, never on an ordinary success. With the episode
+already over, nothing will clear `alerted` again. The next genuine outage
+reaches `alertNow = !alerted` as false and **pages nobody**. Reproduced in all
+three steps against the pre-fix tree; the third printed
+
+```
+DEFECT(3): a genuine outage after the stale commit fired 0 alerts, want 1 — the latch suppressed the page
+```
+
+The fix is one line — `syslogHealth.gen++` on the clearing path — but the
+line is not the deliverable. The **definition** is:
+
+> **Define a staleness generation by what it PROTECTS, not by what changed. The
+> only consumer of `gen` is the check that asks "is this degraded verdict still
+> true?", so every transition that can falsify a degraded verdict has to move
+> it — including one that replaces nothing at all.**
+
+Under the old rule, three of the four bumps were correct by coincidence: an
+install, a disable and a reset all happen to falsify a degraded verdict *and*
+replace the record. Recovery is the case where the two rules disagree, and the
+old rule gave the wrong answer. The doc comment now states the rule, names
+recovery as the case that distinguishes them, and — the other direction of the
+same test — explains why `noteSyslogIntent` still does **not** bump: recording
+a new intent leaves a pending unmet-degraded verdict TRUE, so there is nothing
+to invalidate.
+
+The bump sits after the early return, not before it. `noteSyslogDeliveryRecovered`
+returns early when the intent is unmet, because a delivery by the writer being
+*served* is not evidence about the collector the operator *asked* for — round
+12(b). Bumping on that path would clear a verdict that is still true, and
+round 12(b)'s own note already says what keeps the latch from being stranded:
+every transition that RESOLVES the intent clears it.
+
+Two gates. The defect gate drives a degraded snapshot of the CURRENT
+generation across a recovery and asserts three things, not one: no page fires,
+the record is **not left latched**, and — the half that matters — a genuine
+outage after it still pages. A gate asserting only "the commit is refused"
+would have passed a fix that silenced the alert path altogether, and would have
+said nothing about the stranded latch, which is the part an operator actually
+pays for. The control comes at it from the other side: a snapshot taken AFTER a
+recovery, describing a fresh outage, must still page — because the cheapest way
+to pass the defect gate is to stop committing degraded snapshots at all.
+
+#### (b) Two cumulative values, read as a pair
+
+A retired `Writer` has **two** cumulative totals, on purpose: the live counters
+and the sealed `finalStats` the drain publishes on its way out. The live ones
+deliberately keep moving after the seal — `chargeTerminalDrop` keeps counting,
+and reports that the loss belongs to the process-lifetime `lateDrops` counter
+instead of to the writer's fold.
+
+Both folding call sites read them as a pair:
+
+```go
+st, sealed := old.FinalStats()
+if !sealed {
+    st = old.Stats()
+}
+```
+
+Two unsynchronised loads, and the Writer can seal between them. The fallback
+then folds a live value that already includes a post-seal loss — **already
+charged to `lateDrops`**, so it is counted twice — and the next
+`settleRetiredSyslogWritersLocked` reads the *sealed* snapshot, which is
+**smaller** than what was folded. The delta goes negative and
+`culvert_syslog_drops_total` **decreases**: the one thing a Prometheus counter
+may not do, and precisely the contract the sealing boundary was introduced to
+keep.
+
+`settleRetiredSyslogWritersLocked`'s own doc comment asserted the opposite —
+*"a settle can never make `culvert_syslog_drops_total` decrease"* — and
+attributed it to a Writer's counters being monotonic. They are monotonic. That
+was never the reason: with two cumulative values per Writer, monotonicity of
+each says nothing about a fold that reads one and a settle that reads the
+other. The comment is corrected rather than deleted, because the claim it makes
+is the contract — it just has to rest on the right thing.
+
+`CumulativeStats()` answers with one of the two, so a folded value is never
+succeeded by a smaller one. What makes the pair safe is the **order**: the live
+counters are read **first**, and only then is the seal loaded. If the seal is
+present the finals are the answer exactly; if it is absent, the Writer had not
+sealed at the *later* of the two reads and therefore not at the earlier one
+either, so the live value predates the seal and cannot exceed the finals that
+follow. The original code had exactly these two reads in the opposite order,
+which is the whole defect.
+
+**The first shape of that fix deadlocked the appliance.** It is worth recording
+in full, because the fix was wrong in a way the finding was not.
+
+The first `CumulativeStats` read the seal flag and the counters under one
+acquisition of `sendMu` — exact, obviously correct in isolation, and a
+**three-way deadlock**:
+
+- Both folding consumers run with `syslogHealth.mu` **held** (their names say
+  so: `…Locked`).
+- A line this Writer refuses charges its drop from `tryEnqueue`, which holds
+  `sendMu.RLock`, and `noteDrop` notifies the delivery observer from inside
+  that — and the observer takes `syslogHealth.mu`.
+
+So the two lock orders are opposite. Two read locks coexist, which is why this
+looks survivable — until a `Close()` is parked on `sendMu.Lock()`. Go's
+`RWMutex` then stops new readers from barging ahead of the waiting writer, and
+the cycle closes. Not a window; a cycle.
+
+`TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic` — an existing
+gate from an earlier round, written for a different defect — **hung to the test
+timeout**, and `SIGQUIT` named all three edges on one Writer (`0x…b1a140`):
+
+```
+goroutine 61  tryEnqueue (holds sendMu.R) → noteDrop → notifyDelivery
+              → noteSyslogDelivery → syslog_health.go:1080  [waiting: syslogHealth.mu]
+goroutine 65  syslogFeedState (holds syslogHealth.mu) → settleRetiredSyslogWritersLocked
+              → CumulativeStats → syslog.go:253            [waiting: sendMu.R]
+goroutine 12  releaseReplacedSyslogWriter → Writer.Close → syslog.go:1362
+                                                            [waiting: sendMu.W]
+```
+
+Three things about this are worth keeping:
+
+- **It is CA-17 again** (§17.2, CHAOS-50): a lock held across a call that
+  re-enters the same domain through a callback. That one was a self-deadlock
+  under `ca.mu`; this one is an inversion between two domains' mutexes. The
+  repository had already paid for this failure class once, which is an argument
+  for the wall below rather than for a comment.
+- **The ordering argument makes the lock unnecessary**, so the fix is not a
+  lock reordering or a copy under a third mutex — it is deleting the lock and
+  proving the pair safe without it. A fix that needs *less* synchronisation
+  than the defect is usually the right one.
+- **The gate that caught it was a hang**, which is the most expensive failure
+  shape a suite has: it burns the whole package timeout and names no test
+  without a stack dump. So the property is pinned **structurally** instead —
+  `CumulativeStats` may take no lock, however briefly, and must read the live
+  counters before the seal. Both halves are mutation-verified, and the wall has
+  a positive control (`tryEnqueue`, whose job *is* to hold `sendMu`) so a
+  broken AST walk cannot pass silently.
+
+> **A function called with a foreign mutex held may take no lock of its own —
+> including a read lock, including briefly. If the domain it reaches into can
+> call back into yours, the two read locks are not harmless; they are one
+> parked writer away from a cycle.**
+
+> **A folding consumer must read ONE cumulative value, and the ORDER of the two
+> reads is the proof. A check-then-read pair is not a snapshot of either value;
+> reversing it makes it one.**
+
+Five engine gates pin it: that the sealed and live values do diverge at all
+(the negative control — without divergence the whole defect is unreachable and
+every gate below is vacuous), that `CumulativeStats` prefers the finals once
+sealed, that it reports the live counters before sealing, the no-lock /
+live-read-first wall above, and that wall's own positive control.
+The consumer side is walled **structurally** — the window is a few instructions
+wide and cannot be scheduled through either caller, the same reason round 9's
+snapshot wall and round 17's config-metadata wall are structural. The wall
+requires each folding function to call `CumulativeStats` and forbids
+`FinalStats`/`Stats` inside it, with a control asserting the plane still calls
+`.Stats()` somewhere, so a broken AST walk cannot pass silently.
+
+#### Round 18 — the rest of the lock graph, swept and clean
+
+Finding a lock-order inversion in my own fix is a reason to ask whether the
+plane has others, so the whole graph was walked rather than just the edge that
+hung. Three locks are involved: `syslogHealth.mu`, `syslogPublishMu` and each
+Writer's `sendMu`.
+
+- **Health plane → Writer.** Every call the health plane makes to a Writer
+  while holding `syslogHealth.mu` is lock-free: `Stats()` and `FinalStats()`
+  are pure atomic loads, `MarkRetired()` is an atomic store, and
+  `CumulativeStats()` is now lock-free by construction and walled. `Close()`,
+  the one Writer method that takes `sendMu` exclusively, is never called from
+  under `syslogHealth.mu` — `releaseReplacedSyslogWriter` spawns it
+  (`go old.Close()`) and `disableActiveSyslog` calls it with
+  `syslogPublishMu` already released.
+- **Publish → health.** `syslogPublishMu` is always taken *outside*
+  `syslogHealth.mu` (`InitSyslog` → `noteSyslogWriterInstalled`,
+  `disableActiveSyslog` → `noteSyslogForwardingDisabled`), and nothing takes it
+  while holding `syslogHealth.mu`. `syslogFeedState` deliberately reads the
+  published pair through a reader that does not participate in it (round 17).
+  One direction only, so no cycle.
+- **Writer → health.** This is the callback edge, `notifyDelivery` →
+  `noteSyslogDelivery`, and it runs with `sendMu.RLock` held by `tryEnqueue` or
+  `chargeTerminalDrop`. It is the edge that makes the first rule above a
+  requirement rather than a preference.
+
+Nothing else to fix. Recorded because "I checked the rest of the graph" is the
+part of a deadlock fix that usually goes unwritten, and because the *shape* of
+the rule — an observer callback that re-enters the caller's domain — is
+reusable: this is the second time it has cost this repository a hang (CA-17,
+§17.2).
+
+#### Round 18 — a gate that mirrors the caller, not the API
+
+The first engine gate asserted `LateDrops() == 1` after calling
+`chargeTerminalDrop` directly, and it was wrong: `chargeTerminalDrop` only
+*reports* that the loss belongs to the late counter — the production caller is
+the one that acts on it (`if late := ...; late { noteLateDrop() }`). Asserting
+on the counter while skipping the half of the contract the caller owns tests a
+sequence nothing executes.
+
+> **When a function returns a verdict for its caller to act on, a gate that
+> asserts the effect must perform the caller's half too — or it is asserting
+> against a code path that does not exist.**
+
+#### Round 18 — verification
+
+Mutation-verified, each fix by a distinct gate subset:
+
+| Mutation | Caught by |
+| --- | --- |
+| remove `syslogHealth.gen++` from `noteSyslogDeliveryRecovered` | `TestChaos81_RecoveredEpisodeRejectsItsPreRecoverySnapshot`, on all three assertions; the control stays green |
+| `CumulativeStats` takes `sendMu.RLock` again | `TestCumulativeStatsTakesNoLockAndReadsLiveFirst` |
+| `CumulativeStats` loads the seal before the live read | `TestCumulativeStatsTakesNoLockAndReadsLiveFirst` |
+| `CumulativeStats` returns live counters even when sealed | `TestCumulativeStatsPrefersTheSealedFinals` |
+| `CumulativeStats` drops the live fallback | `TestCumulativeStatsReportsLiveCountersBeforeSealing` |
+| either folding consumer reverts to `FinalStats`-then-`Stats` | `TestChaos81_FoldingReadsOneCumulativeValue` |
+
+Checks run on the final tree, `go1.26.10` per `go.mod`'s `toolchain`:
+
+- `go vet ./...` — clean.
+- `go test -race -count=2 -shuffle=on ./internal/syslog/` — pass.
+- `go test -race -run 'TestChaos81_|TestSyslog|TestCumulative' .` — 78 gates
+  pass in 16.8s, 77 of them `TestChaos81_` (74 carried forward, 3 new). The one
+  that hung to the test timeout against the first fix,
+  `TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic`, completes in
+  0.33s.
+- `go test .` (the whole root package, 416.8s) — exactly nine failures, all
+  `validateExternalURL` failing closed because `example.com` does not resolve
+  in this sandbox (`URL must be https:// and must not point to a private
+  address`, from the IdP persistence and admin-IdP tests). The same nine as
+  round 17; nothing this round touched failed.
+- `python3 docs/agent-context/check.py` — pass (no guidance path changed; run
+  because the round edits instruction-adjacent prose).
+
+Not run locally: `golangci-lint`, which cannot execute against this repository
+here, and the hosted gates. A passing local check is not a passing merge gate.
+
+#### Round 18 — the CodeRabbit batch, and one residual
+
+Four Minor findings, every one correct, and every one the same class as the
+headline defects: **an operator surface claiming more than its evidence
+supports.** By label they do not start a push of their own, so they rode a
+single follow-up commit rather than cancelling the in-flight gate run (round
+17's lesson).
+
+- **Degradation is not only the loss-based rule.** `finishUnmetSyslogIntent`
+  overlays `Degraded = true` on an unmet intent with zero losses and no window
+  to wait out, so both the CHANGELOG entry and the runbook section titled "How
+  degradation is decided" gave one of two conditions as *the* definition. Both
+  now name the loss-based rule as the loss-based rule.
+
+  **My first pass fixed the wrong place.** The finding anchors on the runbook's
+  **metrics and diagnostics tables** — `culvert_syslog_up` ("`0` once it is
+  degraded") and the `fail` row ("events are being lost and nothing has been
+  delivered for 5 minutes") — and says so explicitly; I read it as being about
+  the prose section and corrected that instead. A reader who takes the row
+  literally writes an alert rule for a condition that is one of two. Both rows
+  now name both conditions, and the `fail` status has the second as its own
+  line. Recorded because the error is instructive: the prose was *also* wrong,
+  so the first fix looked like it had addressed the finding, and nothing would
+  have caught that it had not.
+- **`delivered` on TCP is a successful local write.** Stronger than the finding
+  put it: `Write` returning without error means the bytes reached the LOCAL
+  socket buffer, so a connection breaking before it drains loses a line already
+  counted as delivered — the remote kernel need never have seen it. The engine's
+  own `noteDelivered` comment says "the collector's kernel accepted the bytes";
+  the runbook had flattened that to "the collector accepted this event", and the
+  `tcp://` recommendation presented TCP as delivery evidence outright.
+- **The probe remediation step was transport-blind.** It told every operator to
+  look for `outcome: "delivered"`. UDP is the default when the address omits a
+  scheme and can only ever answer `sent`, so the step directed the majority of
+  deployments to wait for an outcome their transport cannot produce.
+
+- **Package-source scans must be anchored** (🔵 Trivial, and the one that
+  mattered to CI). The round-18 wall read `os.ReadFile("syslog_health.go")`,
+  and `syslogFuncDecl` passed a bare relative name to `parser.ParseFile`. A
+  CWD-relative read in the test binary races any concurrent `os.Chdir` — a
+  flake class this repository has already paid for, which is why
+  `pkgSourceDir()` exists and why
+  `TestTestFileReadsAreCWDIndependent` forbids it. That wall matches the
+  LITERAL pattern `os.ReadFile("x.go")`, so a variable-derived read and a
+  `filepath.Glob("*.go")` both slip past it: **the wall guards the spelling,
+  not the property.** Four sites anchored (the new wall, `syslogFuncDecl`, and
+  two earlier globs of mine).
+
+  Proven rather than reasoned: built with `go test -c` and run from an empty
+  directory, the anchored walls all pass; with the anchors reverted the same
+  binary reports `open syslog_health.go: no such file or directory` and
+  `parse admin_settings.go: ... no such file or directory`. So the flake was
+  reachable, and the anchor is what removes it.
+
+  > **A wall that matches a spelling catches the shape it was written against.
+  > `os.ReadFile("x.go")` and `os.ReadFile(f)` have the same defect and only
+  > one of them is forbidden.** Recorded as a limitation of
+  > `TestTestFileReadsAreCWDIndependent` rather than fixed here: widening it to
+  > variable-derived reads touches every source-scanning wall in the package and
+  > is not this PR's to do.
+
+**Residual, recorded not fixed:** the probe's own response `message` for
+`delivered` is the string *"the collector accepted the test event"*
+(`syslog_health.go`), which carries the same overstatement the runbook row just
+lost. It is a wire string with three test references and nobody raised it;
+changing it would widen this PR past what the findings asked for. The runbook
+now says explicitly that the row, not the message, is the accurate statement. If
+a later round touches that response, the message should become a claim about the
+write rather than about the collector.
+
+### Round 19 — the third reader, and a claim that was true of a state and false of an instant
+
+One P2, and it is round 18(b) arriving at the reader I had explicitly argued was
+safe.
+
+Round 18(b) fixed the two **folding** consumers to take a retired Writer's
+cumulative totals as one value. `syslogFeedState` has a third reader of a
+Writer's counters — the **installed** one — and it kept `sw.Stats()`, with this
+comment of mine beside it:
+
+> The engine only charges a loss to LateDrops once the owner has RETIRED the
+> Writer, so the two can never overlap.
+
+That sentence is true of a **state** and false of an **instant.** The Writer
+does not have to be retired when it is captured, only by the time it is read,
+and `syslogFeedState` captures under `syslogHealth.mu`, releases it, and reads
+the counters afterwards. A disable landing in that window:
+
+1. retires and seals the captured Writer and folds its finals into a
+   `retiredDrops` this snapshot has **already copied** (so the fold is not the
+   problem);
+2. leaves a request holding the old handle, whose next loss
+   `chargeTerminalDrop` charges to `lateDrops` **and** to the Writer's own live
+   counters — correctly, because those two are read by different consumers;
+3. and this snapshot adds **both**.
+
+Reproduced deterministically through the real `syslogFeedState`, no goroutine
+racing: the whole transition is landed inside the clock seam the function calls
+after unlocking. One lost event, `lateDrops == 1`:
+
+```
+lateDrops=1 first.Drops=2 second.Drops=1
+```
+
+`Drops=2` for one event, then `Drops=1` off the smaller sealed finals — the
+exported counter DECREASING, which is the one thing it may not do, reached for
+the third time in this sweep by a third route.
+
+**The fix removes the window rather than detecting it.** The Writer's counters,
+`syslogLateDrops()` and `syslogSkippedNoWriter` are now read under the same
+`syslogHealth.mu` acquisition as the retired totals, and `applyLiveWriterStats`
+folds what its caller captured instead of re-reading. That lock is the one every
+retirement holds — a retirement marks the Writer, seals it, folds its finals and
+clears `syslogHealth.writer` in one critical section — so a non-nil `described`
+captured under it is provably **not yet retired**, and none of its losses can be
+in `lateDrops`. The terms cannot describe the same loss twice because they all
+describe one instant.
+
+Reading the counters under that lock is only safe because of round 18's lock
+sweep: `Stats()` is pure atomic loads and takes no Writer lock, which is exactly
+the property the no-lock wall on `CumulativeStats` pins. The two rounds are one
+rule from opposite ends.
+
+The counters stay **live** rather than sealed, and that is still deliberate: the
+installed Writer's totals are folded nowhere else, so switching to its seal
+would move its losses into the "lost to an earlier target" bucket while it is
+still the current one. The episode fields need the same thing for a different
+reason — a Writer can be sealed while still installed, and the degradation
+predicate has to keep seeing it fail.
+
+#### Round 19 — the gate that could not pin its own defect
+
+Worth recording in full, because the first gate looked sufficient and was not.
+
+The behavioural gate reproduces the defect through the production function and
+fails against the pre-fix file on both consequences (counted twice; total
+decreased). Then the obvious mutation — move the capture from before the unlock
+to the line **after** it, which is still broken — **passed it.** The injection
+point is `syslogHealthNow()`, called some lines after the unlock, so a read
+placed between the two is never seen by the seam the gate drives.
+
+> **A behavioural gate on an interleaving pins the window it was written
+> against. When the fix is a PLACEMENT, the window's own boundary is what
+> moves, so the placement needs a structural wall.**
+
+So the property is walled structurally as well: in `syslogFeedState` the
+Writer's counters and `syslogLateDrops()` must both be read at a position
+**before** the `Unlock()` call, and `applyLiveWriterStats` may not call
+`Stats()` or `CumulativeStats()` at all. Measured: the wall fails on both
+placement mutations (capture after the unlock; a re-read inside the consumer)
+and on the pre-fix file, naming the file and line of each.
+
+The live-term control is **not** duplicated. The cheapest way to pass the
+behavioural gate is to stop counting the installed Writer's drops at all, and
+that mutation fails `TestChaos81_DropsReachMetricsAndHealthz`, which kills a
+collector under a live feed and requires the losses to reach `/metrics` and
+`/healthz`. Verified by applying it rather than asserted: the control goes red
+(`/healthz carries no syslogDrops field`) while the new gate stays green. Naming
+an existing control beats writing a second one, but only once you have run the
+mutation that proves it is the control.
+
+#### Round 19 — the lint gate caught what my pre-push check did not
+
+The wall above landed at cognitive complexity **32** against `gocognit`'s 30,
+and `Gate · golangci-lint` said so within a minute of the push. The miss is
+worth recording precisely: before pushing I checked `funlen` and `cyclop` for
+the production function and `funlen` for the test file, read the `_test.go`
+exclusion list — `funlen`, `dupl`, `cyclop` — and did not notice that
+**`gocognit` is not on it.** Test files are held to the full bar for that one.
+
+> **An exclusion list is a claim about the linters it names, not about "tests
+> are exempt". Read which ones.**
+
+Fixed by extracting three flat helpers (`syslogCallNamed`,
+`syslogFirstCallPos`, `syslogForbidCounterReads`) so the wall reads as four
+assertions rather than two nested AST walks. Measured with the tool rather
+than estimated: `gocognit` now puts the wall below 20 and the file's worst
+function at 23.
+
+The same pass tightened a control that was wrong in a quiet way. The first
+draft fatally failed with *"control: no Stats() call found in
+syslogFeedState"* on the pre-fix file — which is the DEFECT, not a broken
+matcher, so the wall would have reported its most important case as a
+self-test failure. The control now covers only the lock release, where a
+broken walk really does return NoPos for everything, and the required reads
+report their own absence in the terms of the defect.
+
+#### Round 19 — on the branch moving underneath this sweep
+
+`main` landed CHAOS-78 (#1675) while this branch was green and idle, converting
+the same package-main syslog handle to an `atomic.Pointer` under different
+names. Another session reconciled it in `c0329c07`: main's
+`globalSyslogHandle` / `syslogHandle` / `setSyslogHandle` won, this branch's
+CHAOS-81 delta stayed on top, and the chaos register renumbered §45 → §53.
+
+Recorded because the reconciliation is the risk, not the rename. Two
+concurrency designs for the same window now coexist: this branch's `sendMu`
+and main's `inFlight` registration with `Close`'s bounded `waitForSenders`.
+They compose — `Close` takes `sendMu`, stores `closed`, **releases it**, and
+only then spins in a bounded `waitForSenders`, so there is no wait under the
+lock, and round 18(b)'s cycle cannot re-form through a lock-free
+`CumulativeStats`. Checked on the merged head rather than assumed, together
+with all six round-18 gates and the round-18 contracts in the source.
+
+#### Round 19 — process, carried from round 18
+
+Round 17 recorded the rule *a review round lands as one push*, and round 18
+broke it twice: `d256201` and `d23efe8` each landed over an in-flight run,
+producing four red required checks on superseded heads whose workflow runs all
+read `cancelled` and whose upstream jobs had not run a single test. The second
+push was weighed and accepted — it changed no `.go` file, so the cancelled race
+shards re-ran against byte-identical sources — and the first was not. Held out
+of its own commit for exactly the reason it records, and carried here on the
+first push that changes files anyway.
+
+### Round 20 — the writer half of a window whose reader was already hardened
+
+One P2, and it is the mirror of an earlier P1 in this same sweep.
+
+`noteDrop` runs on the CALLER's goroutine for a queue-full drop, so many
+request goroutines reach it at once and its two halves can be split by the
+scheduler: one records the failure and takes the 0->1 edge, then publishes the
+episode's start. The reader was hardened for that window earlier (Codex P1):
+`Stats` refuses a start that predates the last delivery rather than clamping it
+up, because clamping dated a brand-new episode from an old delivery and paged
+immediately.
+
+The writer half was still open, in the opposite order:
+
+1. A takes the edge at `t0` and is descheduled before publishing.
+2. A delivery at `t1` ENDS A's episode.
+3. A new outage at `t2` takes its own edge and dates itself correctly.
+4. A resumes and publishes `t0` over it.
+
+`Stats` then refuses `t0` (`fs >= ls` fails), so the node reports
+`ConsecutiveFailures > 0` with **no datable start**. And the re-dating branch
+that exists for exactly this hazard only runs on a SUBSEQUENT drop — so on a
+node that goes quiet, nothing ever recovers the date. `FailingFor` stays 0, the
+five-minute window can never elapse, and **that outage is never paged.**
+
+Reproduced deterministically, no goroutine racing: every step is a production
+operation, and A's deschedule is reproduced by splitting its two halves, which
+is what a deschedule is. Measured against the pre-fix tree:
+`ConsecutiveFailures=1 FailingSince.IsZero()=true`.
+
+> **Hardening the reader of a window does not close it. The reader can refuse
+> bad data; it cannot restore good data the writer destroyed.**
+
+The fix publishes the start only while no delivery has intervened since the
+edge was claimed. The witness is the last-success stamp, captured BEFORE the
+window and passed into the second half — an episode is delimited by
+deliveries, so a delivery is exactly the event that invalidates an unpublished
+start. Keyed on the delivery rather than on a timestamp comparison, so it stays
+correct if the wall clock steps backwards (see the residual below, which it
+therefore does not depend on).
+
+Refusing to publish is exactly right rather than merely safe: the reader would
+reject the value anyway, and the episode that IS current has already been dated
+by whoever took its own edge.
+
+#### Round 20 — two gates I nearly got wrong, and one wall I did not write
+
+**The first guard was a tautology.** It read the witness and compared it to
+another load of the same field, both on the far side of the window — so it was
+`x == x`. The fix is not the comparison but WHERE the witness comes from: before
+the window, passed in. That is why the two halves are now named methods rather
+than one function with a comment about a race.
+
+**The first reproduction could not see the fix.** It simulated A's resumption
+with a direct `failSinceNano.Store`, bypassing the guarded path entirely, so
+the guard could not possibly affect it — it passed the broken code and the
+fixed code alike. Extracting the halves fixed the gate and the production
+clarity in one move.
+
+**The control I nearly cited does not cover this.** The reader-side controls in
+`TestStats_UnpublishedEpisodeStartIsNotDatedFromTheLastDelivery` store
+`failSinceNano` directly, so they never reach `noteDrop`. Measured rather than
+assumed: with publication removed entirely, every reader-side gate stayed green
+and only the new gate went red. Two writer-side controls were therefore
+written — an unraced edge must date its episode, and a drop after a delivery
+must date the NEW one, which catches a witness keyed so broadly it never
+matches.
+
+**The increment comes before the witness read, and that ordering is reasoned,
+not gated.** Reading the witness first opens the mirror-image hole: a delivery
+landing between that read and the increment leaves a legitimately NEW episode
+holding a pre-delivery witness, so its publication is refused and the episode
+is undatable — the same silent outage, from the other side. Found on an
+adversarial re-read of my own fix, after I had explicitly reasoned that the
+order inside `claimEpisodeStart` "does not matter"; it does.
+
+What is NOT claimed is a gate for it. The window is two adjacent atomic
+operations, so a single-threaded test cannot interleave a delivery into it —
+measured: with the order reversed, every gate here still passes. A test
+asserting otherwise was written, found vacuous by that mutation, and
+**deleted** rather than kept with a docstring claiming more than it verifies.
+Gating it would mean splitting the claim itself into two publishable halves,
+which is a seam nobody needs for a correctness argument this short. The
+ordering is stated at the call site with its reason.
+
+**And no structural wall, deliberately.** Round 19's fix was a PLACEMENT, which
+its behavioural gate provably could not pin, so it needed a wall. This fix is a
+VALUE the interleaving reads, so the gate catches every way of getting it
+wrong — verified by mutation: ignoring the witness, never publishing, a witness
+that never matches, and loading the witness inside the second half each turn it
+red.
+
+> **Add the wall when the property is a placement the gate cannot reach, not as
+> a reflex. Run the mutation that would need it first.**
+
+#### Round 20 — recorded residual: this plane dates its episodes on the wall clock
+
+Found while reconciling main, not reported by a reviewer, and **recorded rather
+than fixed** — the owner's call, because the fix is a round of its own.
+
+`internal/syslog` holds its stamps as bare `int64` nanos and rebuilds them with
+`time.Unix(0, n)`, which carries no monotonic reading. Every interval the health
+plane measures from them — `Age` from `LastSuccess`, `FailingFor` from
+`FailingSince` — is therefore a WALL-CLOCK interval, which is exactly the class
+§47 (`CHAOS-83`) and §48 (`CHAOS-84`) established repo-wide. Neither sweep
+claims this site: neither mentions `internal/syslog` or `syslog_health`
+anywhere, and §48 explicitly left the ids held by open branches — 81 among
+them — out of scope.
+
+Measured, driving both clock seams:
+
+```
+after 20m outage:           Degraded=true  Age=19m59s FailingFor=19m59s CF=3
+after a 50m backward step:  Degraded=false Age=0s     FailingFor=0s     CF=3
+```
+
+A backward step clears a genuine degraded verdict while `ConsecutiveFailures`
+still reports 3 — the feed reads healthy while events are being lost. If the
+step lands before the window elapses, no page fires at all until the clock
+catches up. The triggers are ordinary: an NTP correction after a wrong RTC, a
+resumed hypervisor snapshot, an operator fixing the date. The plane already
+clamps a negative age to zero with a comment calling a page on a clock
+correction "noise", which is a deliberate trade-off — made before `CHAOS-83`
+established the repo rule that a bound of this kind must not be wall-clock at
+all.
+
+Why it is not fixed here, in two parts:
+
+- **The shape is settled but not small.** `monotime.go` (added by §47) already
+  provides the pattern, so nothing has to be invented. But `LastSuccess` is
+  ALSO exported as a unix timestamp — `culvert_syslog_last_success_timestamp_seconds`
+  and `lastSuccessUnix` on `GET /api/syslog` — where the wall clock is the
+  correct answer. So the fix is not "replace the stamps": it is a SECOND,
+  monotonic stamp used only for the elapsed comparisons, plus a wall forbidding
+  elapsed measurement off the display one, or the next change quietly
+  reintroduces this. `monotime.go` is `package main`, so the engine needs its
+  own equivalent.
+- **A plane-side mirror would be the wrong fix.** The plane reads episode state
+  live from the writer by design (round 12: one reader, no second source of
+  truth), so stamping the plane's own monotonic view would be the "two answers
+  to one question" shape this sweep has rejected repeatedly. The stamp belongs
+  in the engine.
+
+Round 20's own fix is keyed on a delivery rather than on a timestamp
+comparison, so it does not depend on this being fixed first.
+
+---
+
+## 57. CHAOS-93 — The retry plane: does it wait, can it be interrupted, does the work survive?
+
+**Scope.** Every loop in the tree that re-attempts a failed operation, asked the
+three questions the SIMULATE list puts next to each other — *broken retries*,
+*broken backoff*, *SIGTERM*, *unexpected restart*. The subject is the retry
+*mechanism*, not a subsystem, so the sweep crosses three owners: release
+delivery, the intelligence feeds and observability.
+
+**Origin.** The three retry/cancellation rows the
+[2026-10-18 sweep](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-18.md)
+verified and left open as its suggested improvements 4–6, each deferred because
+it needed "its own regression test and a judgment call about deployment-visible
+timing". This sweep is that follow-up. Asking the third question (*does the work
+survive the attempt?*) of the alert queue then turned up a defect that was not
+in the inherited scope and outranks all three.
+
+Findings, measurements, risk matrix and gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-26.md).
+
+### 57.1 The finding the inherited scope did not contain
+
+**`processRetryQueue` took the work out of the durability mechanism in order to
+do the work.** It moved EVERY due entry out of `retryQueue`, persisted the
+truncated queue, and only then delivered them one at a time at up to 5s each.
+For the length of that pass the not-yet-attempted entries existed solely in a
+local slice — absent from memory's queue and absent from the file — so an
+ordinary restart discarded all of them: `SIGTERM` on a config reload, the
+lifecycle ctx cancelled at shutdown order 40 while the pass runs on (nothing
+joins the goroutine, and the late phase has a 30s budget), OOM, a node reboot.
+
+And it discarded them in SILENCE. The plane has two counters built precisely so
+an admin can see alerting degradation on the delivery-history API —
+`retryExhaustedTotal` and `retryDroppedTotal` — and neither covers this path; no
+delivery is recorded and nothing is logged. The queue depth simply drops, which
+reads as *drained* rather than *discarded*. Against a blackholing webhook the
+window is `retryQueueMax` × `deliveryTimeout` = 500 × 5s ≈ **42 minutes** and the
+loss up to **499** alerts. The gate measures it: `persisted 0 of 10 entries`.
+
+This is the **ST-8** shape (§13) relocated into the alert queue, and worse in one
+respect: losing alerts quietly is the worst available failure for the plane whose
+whole job is to report that something *else* broke. The register already applies
+that reasoning to §13 and to the SIEM-feed row CHAOS-81 holds (a feed must report
+whether it is DELIVERING, not whether it once connected).
+
+The fix is the shape the tree already uses one directory over:
+`support_upload_queue.go` holds an `uploading` state IN the durable queue rather
+than lifting the entry out of it. An entry now stays queued across its own
+attempt; a claim re-arms `NextRetry` to `now+retryLease` (60s) and persists that,
+so a crash mid-attempt leaves the entry queued and it is retried after the lease
+with its attempt count intact — an attempt that did not complete is not charged.
+
+### 57.2 The three inherited rows
+
+- **RT-3, `applyWithRetry` retried with zero delay** (`release_dispatch_exec.go`).
+  Three attempts, no sleep, no backoff, no jitter. The budget exists for exactly
+  one fault — a maintenance agent that is briefly unreachable, nearly always
+  because it is restarting — and that fault refuses the connection in
+  microseconds, so the whole budget burned in well under a millisecond and the
+  dispatch landed `TerminalFailedNeedsAttn`, needing a manual re-dispatch, for an
+  agent that was serving again a second later. Now bounded exponential (2s, 4s)
+  through an interruptible wait. `WaitOp`, 170 lines down the same file, already
+  had this shape.
+- **RT-4, both feed rounds discarded the scheduler's context**
+  (`internal/threatfeed`, `internal/feedsync`). `feedsched.Config.Run` is
+  documented "It must respect ctx" and the package promises "prompt
+  cancellation"; both feeds declared `Run: func(context.Context) bool` and
+  dropped the parameter, fetching on `context.Background()`. A stalled origin
+  therefore held the round for up to 60s past `SIGTERM`, and the UT1 round went
+  on to a 50+ MB `BulkWrite` into a BadgerDB that shutdown order 120 is closing.
+  The propagation gate shows the pre-fix round dialling the real third-party
+  origins under an already-cancelled context.
+- **RT-2, the alert retry pass was unbounded and uncancellable.** It took no
+  context and each delivery built its own from `context.Background()`, so the
+  loop's `ctx.Done()` select was only reached BETWEEN passes. Now ctx-threaded
+  and bounded by `retryPassBudget`; the bound caps a pass's LENGTH, not recovery,
+  because the next tick resumes from the durable queue.
+
+### 57.2a Review follow-up — the shutdown that still charged an attempt
+
+Codex rejected the first version of the RT-1 fix on PR #1734 and was right. The
+claim/resolve split made a CRASH mid-attempt safe, but a clean CANCELLATION
+still charged the interrupted attempt: once RT-2 gave the delivery the lifecycle
+context, a cancelled POST returned exactly the `false` a badly-answering webhook
+returns, and `resolveRetry` could not tell them apart — so a shutdown during an
+entry's LAST attempt removed it and counted `retryExhaustedTotal`, "exhausted
+after 3 attempts", with the third attempt never having reached the webhook.
+The RT-1 loss shape again, one entry wide, and a contradiction of this sweep's
+own claim that an attempt which did not complete is not charged.
+
+The two fixes interact, which is why neither row found it alone. Fixed by
+distinguishing interrupted from failed, with the check AFTER the attempt (which
+also closes the cancellation landing between the pass's ctx check and the
+request). Gate: `TestProcessRetryQueue_CancelledDeliveryDoesNotConsumeAnAttempt`,
+verified to fail against the first version with `0 entries persisted, want 1`.
+See §9a of [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-26.md).
+
+### 57.3 What the sweep did NOT change, and why
+
+**Neither new backoff is jittered.** `feedsched` and `saas_feed_scheduler.go`
+jitter because their origins are SHARED — a fleet in lockstep is a thundering
+herd against a third-party provider. Neither new site has a shared origin: a
+`DispatchExecutor` is single-flight against ONE agent, and the alert retry queue
+is per-node and serial. That is the reasoning `uploadRetryBackoff` already
+records for the same decision, and determinism keeps both schedules exactly
+testable. A generic "add jitter to every backoff" review note would be wrong
+here.
+
+**The feed clients still dial without `ssrf.SafeDialContext`.** Left exactly as
+the 2026-10-18 sweep left it and for its reason: an on-prem or air-gapped feed
+mirror on an RFC1918 address is a normal enterprise topology the guard would
+reject, and whether these two feeds are deliberately exempt is recorded at
+neither site. Still an owner decision. This sweep edited the same two functions
+and deliberately did not resolve it — threading a context is not the occasion to
+move a destination-trust boundary.
+
+**Nothing joins the alert retry goroutine at shutdown.** The pass is cancellable
+now, so it stops promptly, but the registry does not WAIT for it. Adding a join
+is a shutdown-ownership decision for that owner, and the durability fix makes it
+unnecessary for correctness: whatever the pass had not finished is in the file.
+
+**Retries here remain unbounded in COUNT where they were** (the feeds) **and
+bounded where they were** (`retryMax = 3`, `applyRetries = 2`). The sweep's
+subject is rate, interruptibility and durability, not the budgets — and
+`feedsched`'s own doc records why its unbounded-but-rate-bounded retry is
+correct: "avoid infinite retries" forbids a silent hot loop, not a rate-bounded
+loop whose state an operator can read.

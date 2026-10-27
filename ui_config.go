@@ -232,6 +232,14 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// metrics scraper or shell access to the log. Enforcement still sees the
 		// whole path; only the retained copy is bounded.
 		"retainedPathTruncated": retainedPathTruncated.Load(),
+		// CHAOS-88: proxied requests whose signed session named an identity
+		// provider that is no longer enabled. Deleting or disabling an IdP is
+		// the operator's revocation lever, and the refusal it now causes looks
+		// exactly like a user with no cookie — so without this count the
+		// operator cannot tell whether the revocation reached live traffic at
+		// all. Expected to rise once after the change and settle as clients
+		// re-authenticate.
+		"sessionProviderRevoked": sessionProviderRevokedCount(),
 	})
 }
 
@@ -1847,20 +1855,76 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleAdmin) {
 			return
 		}
-		format := "rfc3164"
-		var drops, panics uint64
-		if sw := syslogHandle(); sw != nil {
-			format = sw.Format()
-			// Read panics before drops: deliverGuarded's recover branch always
-			// increments panics first, then drops (independent atomics, no
-			// combined snapshot). Reading in the same order means a report can
-			// only ever lag panics behind drops, never the reverse — so the
-			// UI's `drops > 0` gate can never hide a real panic behind a
-			// stale-looking drops==0.
-			panics = sw.Panics()
-			drops = sw.Drops()
+		// CHAOS-81: drops alone is cumulative and unreadable — it cannot
+		// distinguish a feed that is dark now from one that healed last week.
+		// The delivery snapshot carries the time axis the counter lacks.
+		//
+		// EVERY counter comes from the snapshot, never from the live Writer.
+		// Reading sw.Drops()/sw.Panics() directly meant this endpoint dropped
+		// back to the CURRENT writer's totals, so a runtime re-point reset
+		// them here while /metrics and the adjacent `delivered` field kept the
+		// process-lifetime ones — reloading the admin UI erased the loss
+		// history at exactly the moment an operator re-points to remediate,
+		// and contradicted the contract's own "cumulative and monotonic"
+		// wording (Codex P2, PR #1494). The snapshot also removes the ordering
+		// note the old pair needed: it reads panics and drops from one
+		// lock-free Stats() snapshot, so they cannot skew against each other.
+		snap := syslogFeedState()
+		// A feed is PRESENT when an operator asked for a collector, not when a
+		// Writer happens to exist — the same predicate the metrics plane uses.
+		// Gating on Configured alone reported `neverDelivered:false` beside
+		// `degraded:true` for a target whose boot dial failed, i.e. it denied
+		// the one fact that verdict rests on (Codex P2, PR #1494).
+		present := snap.Configured || snap.Intended
+		// EVERY field comes from the one snapshot, so every one of them
+		// belongs to the same generation. The previous shape read the serving
+		// address (and its format) through syslogConfiguredSnapshot — a
+		// DIFFERENT lock, therefore a different generation — and the verdict
+		// from the delivery snapshot, so the two could describe different
+		// targets; and because `addr` carried the SERVING address, a failed
+		// boot dial answered `addr:""` beside `degraded:true`, which the
+		// legacy panel reads as "not configured": it cleared the operator's
+		// own address out of the form and hid the loss row on the one feed
+		// that is losing everything (Codex P2, PR #1494).
+		//
+		// The two targets are now named separately and never conflated:
+		//   addr        — what the operator ASKED for (the intent; the serving
+		//                 address when there is no separate intent on record).
+		//                 This is the field the form and admin_settings.json
+		//                 are about, so it must not vanish when a dial fails.
+		//   servingAddr — what is actually being served, "" when nothing is.
+		//   targetMet   — whether those two are the same collector, i.e.
+		//                 whether `format`, `lastSuccessUnix`,
+		//                 `deliveryProvable` and the queue fields (all
+		//                 properties of the SERVING writer) describe `addr`.
+		// `degraded`/`neverDelivered`/`secondsSinceEvent` are the verdict on
+		// the INTENT, which is what makes naming both mandatory rather than
+		// cosmetic.
+		configuredAddr := snap.IntendedTarget
+		if configuredAddr == "" {
+			configuredAddr = snap.Target
 		}
-		jsonOK(w, map[string]any{"addr": syslogConfigured, "format": format, "drops": drops, "panics": panics})
+		// snap.writer was captured under the health record's lock, so reading
+		// the format off it is both one-generation AND free of the
+		// check-then-act nil-deref a concurrent disable used to allow here.
+		format := "rfc3164"
+		if snap.writer != nil {
+			format = snap.writer.Format()
+		}
+		jsonOK(w, map[string]any{
+			"addr": configuredAddr, "format": format, "drops": snap.Drops, "panics": snap.Panics,
+			"servingAddr":       snap.Target,
+			"targetMet":         snap.Target != "" && snap.Target == configuredAddr,
+			"delivered":         snap.Delivered,
+			"degraded":          snap.Degraded,
+			"neverDelivered":    present && snap.NeverDelivered,
+			"lastSuccessUnix":   unixOrZero(snap.LastSuccess),
+			"secondsSinceEvent": int64(snap.Age.Seconds()),
+			"lastFailureReason": snap.Reason,
+			"queueDepth":        snap.QueueDepth,
+			"queueCap":          snap.QueueCap,
+			"deliveryProvable":  present && !snap.UDP,
+		})
 	case http.MethodPost:
 		handleSyslogConfigPost(w, r)
 	default:
@@ -1872,7 +1936,7 @@ func apiSyslogConfig(w http.ResponseWriter, r *http.Request) {
 // then either disable forwarding or (re)point it at a new collector. Split out
 // of apiSyslogConfig, behaviour unchanged, to keep that handler inside the
 // repository's configured complexity/length bars (cyclop 15, funlen 80/50)
-// after CHAOS-78 added the one-load format resolution below. Named for the
+// after CHAOS-78 tightened its handle discipline. Named for the
 // method it serves, not apiXxx, because it is NOT a routed handler — the route
 // table and the mux still name apiSyslogConfig (mirrors
 // handleSupportDebugLevelPost).
@@ -1895,15 +1959,13 @@ func handleSyslogConfigPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Addr == "" {
-		// Disable syslog. Swap to nil FIRST, then close what we displaced: a
-		// request goroutine that already loaded the old handle delivers into a
-		// closed writer, which the engine drops and counts, whereas closing
-		// before the swap widens that window for no gain (CHAOS-78).
-		if displaced := setSyslogHandle(nil); displaced != nil {
-			_ = displaced.Close()
-		}
-		syslogConfigured = ""
-		syslogConfiguredAddr = ""
+		// Disable syslog.
+		// CHAOS-81: clear the writer AND tell the plane the feature is gone
+		// as one serialized transition, or a switched-off feed keeps
+		// exporting culvert_syslog_up 1 (and a concurrent re-point could
+		// interleave with the two halves). disableActiveSyslog swaps the
+		// handle to nil before closing what it displaced (CHAOS-78).
+		disableActiveSyslog()
 		auditEvent(r, "settings.syslog", "disabled", "")
 		adminSettingsSave()
 		jsonOK(w, map[string]any{"ok": true, "addr": "", "format": "rfc3164"})
@@ -1913,17 +1975,17 @@ func handleSyslogConfigPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "syslog connect error: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	syslogConfigured = body.Addr
-	syslogConfiguredAddr = body.Addr
-	// Resolve the format from ONE load, and fall back to the requested value
-	// rather than dereferencing: these two reads were separate unguarded derefs
-	// of the global, so a second admin's concurrent disable between InitSyslog
-	// and here nil-panicked the admin handler (CHAOS-78). The fallback mirrors
-	// the engine's own normalisation.
+	// InitSyslog published syslogConfigured/syslogConfiguredAddr inside the
+	// same critical section as the writer; assigning them here would
+	// reopen the enable/disable interleave they were moved to close.
+	//
+	// The effective format is derived, not read back off the handle. It is
+	// the same normalisation NewWriter applies ("" => rfc3164) and the
+	// value was already validated above, so the two cannot disagree — and
+	// deriving it avoids reading a handle a concurrent disable or re-point
+	// can replace between the publish and the read-back (CHAOS-78).
 	format := body.Format
-	if sw := syslogHandle(); sw != nil {
-		format = sw.Format()
-	} else if format == "" {
+	if format == "" {
 		format = "rfc3164"
 	}
 	auditEvent(r, "settings.syslog", body.Addr, "syslog forwarding enabled (format="+format+")")
@@ -1940,15 +2002,51 @@ func apiSyslogTest(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	sw := syslogHandle()
-	if sw == nil {
+	// The verdict and the writer to probe come from ONE snapshot. Loading the
+	// writer on its own and probing it meant that, after a re-point whose dial
+	// failed, this endpoint probed the PREVIOUS collector and answered
+	// `delivered` — "the collector accepted the test event", ok:true — while
+	// `syslog_feed_down` was firing and the `syslog_feed` row's own
+	// OperatorAction was pointing the operator at this very endpoint to
+	// confirm the fix. noteSyslogDeliveryRecovered correctly refuses to clear
+	// that episode for a superseded writer's delivery, so the alert stayed up
+	// while the test said it had worked: two contradictory statements on one
+	// operator surface, which is the defect this plane exists to remove
+	// (CodeRabbit, PR #1494). It is the superseded-target finding at a THIRD
+	// surface, after the alert wording and the recovery clear.
+	//
+	// The question is asked through snap.IntentUnmet — the ONE definition,
+	// shared with the snapshot and the recovery path — and never by comparing
+	// the two target strings here. A second definition would also miss the
+	// pending-dial grace and report `superseded` for an intent a boot dial is
+	// still deciding.
+	snap := syslogFeedState()
+	if snap.writer == nil {
 		http.Error(w, "syslog not configured", http.StatusServiceUnavailable)
 		return
 	}
-	// Write sends a single PRI=14 message — same path as the old writeMsg(14, …),
-	// now via the exported io.Writer surface (writeMsg is package-internal).
-	_, _ = sw.Write([]byte("Culvert syslog test message — connectivity verified"))
-	jsonOK(w, map[string]any{"ok": true, "message": "test message sent"})
+	if snap.IntentUnmet {
+		jsonOK(w, map[string]any{
+			"ok":      false,
+			"outcome": "superseded",
+			"message": "the configured collector has no connection; forwarding is still serving the previous target, so a test would exercise the wrong collector and nothing was sent",
+		})
+		return
+	}
+	sw := snap.writer
+	// CHAOS-66: this used to Write and answer {"ok": true} unconditionally.
+	// Once delivery became asynchronous that confirmed only that a channel
+	// send succeeded — it returned ok for a collector that had been dead for a
+	// week, while checkSyslogFeed's own OperatorAction pointed operators here
+	// to "confirm connectivity". A probe that cannot fail is worse than no
+	// probe. syslogDeliveryProbe waits, bounded, for the drain goroutine to
+	// report an actual outcome for this line.
+	outcome, detail := syslogDeliveryProbe(sw)
+	jsonOK(w, map[string]any{
+		"ok":      outcome == "delivered" || outcome == "sent",
+		"outcome": outcome,
+		"message": detail,
+	})
 }
 
 // GET/POST /api/security — IP filter + rate limiter config

@@ -9,14 +9,205 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the upstream mTLS client certificate failed to
+  load, has expired, or expires within 30 days.** That state was visible only in
+  the OCSP panel API; the one-page report read as healthy while upstream servers
+  requiring mutual TLS rejected the node. A new `upstream_mtls_client_cert` WARN
+  row (additive, report-only, no row when unconfigured or healthy) carries no
+  file path or error text. No certificate-loading behavior changes.
+
+- **The on-demand backup audit action stays `backup.trigger`; `backup.create`
+  is recorded as its alias (T-71).** A terminology review proposed renaming it
+  to match the `<noun>.create` convention, but `backup.trigger` has shipped in
+  every release since v1.0.254 and SIEM rules and saved audit searches match it
+  verbatim, so it is kept as the stable identifier on every surface (audit trail,
+  SIEM/syslog JSON, `/api/audit` JSON and CSV export, OpenAPI
+  `x-culvert-audit-event`). Each backup still records exactly one entry, so no
+  per-action count or alert double-counts. Deprecation note: `.trigger` is
+  deprecated for **new** audit actions, which use `<noun>.create`;
+  `backup.trigger` itself is grandfathered and will not be renamed. No action is
+  needed by operators. Gate: `backup_audit_action_compat_test.go`; glossary:
+  `docs/design/PRODUCT-TERMINOLOGY.md` ("Backup").
+
 - **Diagnostics now warns when OCSP checking is enabled but does not cover
   inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
   on the OCSP panel and in a one-time log line; the one-page diagnostics report
   read as healthy. A new `ocsp_coverage` WARN row (additive, report-only, no row
   while OCSP is off) names the unchecked paths. No handshake behavior changes.
 
+### Deprecated
+
+- **Session-revocation refusal metrics renamed; the released names stay as
+  deprecated aliases until v1.1.0 (T-70).** `culvert_session_revoke_refused_total`
+  (unlabeled) and `culvert_session_revoke_rejected_total{reason}` shipped in
+  v1.0.340 and used two near-synonyms for one plane with different scopes. The
+  canonical names are now `culvert_session_revoke_unverifiable_total` (logout
+  cookies this appliance could not verify) and
+  `culvert_session_revoke_refusals_total{reason}` (every refused entry, same six
+  reasons). Both released names keep emitting with the same name, labels and
+  value from the same snapshot, so existing dashboards and alerts are
+  unaffected. **They are removed in v1.1.0**; move queries to the new names
+  before that upgrade. `culvert_session_revoke_refused_total` is never
+  reassigned to another meaning. Gate: `session_revoke_metric_alias_test.go`.
+  Runbook: `docs/operator/session-revocation-plane.md`.
+
 ### Security
 
+- **The scan sidecar reported a truncated read as `clean: true`, so content past
+  its own window was admitted with an affirmative clean verdict (CHAOS-101).**
+  `scan_svc.go` `handleScan` read `io.LimitReader(body, maxBytes+1)` — the
+  classic overflow probe — and then never compared `len(data)` against
+  `maxBytes`, so it paid for the probe byte and discarded what it proved. The
+  reply then carried the PREFIX's verdict as the whole object's, and
+  `secscan.ScanResponse` has no truncation field to say otherwise.
+
+  No code bug is needed to reach this, only configuration: each process derives
+  `maxScanBufferBytes()` from its OWN `security.max_scan_mb`, and nothing
+  reconciles the caller's window with the sidecar's — which is precisely the
+  topology the handler's own doc comment recommends ("multiple proxy instances
+  sharing one scanner"). A fleet of 20 MiB proxies in front of a sidecar left at
+  the 5 MiB default had scanning silently off for every byte past 5 MiB, with no
+  counter, no log line and no alert anywhere, and the caller's own overflow
+  signal correctly did not fire because the body fit the CALLER's window. The
+  in-process path has had a signal for this exact event since Finding 4.2
+  (`logScanLimitExceeded`: counter, one log line, `scan_skipped` alert); the
+  process-isolated deployment recommended as the *remedy* for the local path's
+  failure modes was the one without it.
+
+  `handleScan` now uses the probe byte and refuses with 413 rather than
+  answering for a prefix. The probe byte is still scanned, so a signature that
+  ends on it blocks exactly as before the fix rather than drawing a fail-open
+  413. It also publishes `oversize_refused` and
+  `scan_window_bytes` on `/health` — it is the only process that knows its
+  window, and an operator needs it to compare against the caller's.
+
+  **Ordering is the correctness argument.** Refusing on size FIRST — the obvious
+  shape — turns a body whose malware sits inside the window into a 413, which
+  the client classifies as a size limit and therefore forwards fail-open: the
+  one case where the sidecar holds a real block verdict is the case the refusal
+  would throw away, so the "safe" check would have admitted content the unfixed
+  code blocked. The verdict therefore wins and truncation is not reported at all
+  on a block, the same asymmetry `readScanPrefix` documents for the local path.
+  A negative control pins it, and failed against the first draft of this fix.
+
+  Client side, 413 is classified as the size limit it is and charges the LOCAL
+  path's vocabulary — `statScanSkipped`, hence `culvert_scan_skipped_total`, and
+  the `scan_skipped` alert with `Source: "size_limit"` — for the same reason
+  `remoteScanRefused` reuses the timeout vocabulary: it is the same decision, so
+  one phenomenon keeps one counter and one alert class whichever window clipped
+  the object, and an operator already alerting on `scan_skipped` needs no second
+  name. A load balancer in front of the sidecar enforcing its own smaller body
+  limit returns 413 for the same reason, so the classification is right there
+  too; every other status keeps its fault classification.
+
+  Operators running a mismatched fleet will see NEW `scan_skipped` volume on
+  upgrade. That volume is the defect becoming visible, not a regression; the
+  remedy is named in the log line and measurable from `/health`. The posture for
+  oversize bodies is the local path's, unchanged: fail-open, counted and
+  alerted. Refusing the object outright is the safer answer and a real option,
+  but it is a posture change for large downloads that no operator asked for, and
+  is left to the owner as the open half of CHAOS-101.
+- **The Basic-auth SSE re-check no longer counts as a login attempt
+  (SEC-BASICAUTH-5, RISK-032).** A live dashboard stream re-checks its HTTP
+  Basic credential about once a minute, through the same chokepoint as a real
+  submission, so each re-check drew on the per-IP Basic failure budget and was
+  recorded against the two-tier lockout. Streams still carrying a
+  rotated-away password locked their administrator out of the new, correct
+  password, and a legitimate stream on a shared egress reset a co-located
+  attacker's failure count once per interval. `checkUIBasicAuth` is now the
+  single `cfg.VerifyUIUser` call site behind `verifyUIBasicAuth` (submission,
+  unchanged: atomic `Reserve`/`Refund` budget, lockout, per-attempt
+  `auth.basic.fail` audit) and `revalidateUIBasicAuth` (re-check: every refusal
+  still applies, so a rotated, deleted, TOTP-enrolled or locked credential still
+  ends the stream, but nothing is reserved or recorded). Responses are
+  unchanged: refused Basic requests get `401`, `/api/auth/status` answers
+  `200 {"loggedIn":false}`, and only `POST /api/auth/login` returns `429`.
+- **The admin public allowlist no longer pre-authorises `/api/auth/totp*`
+  (SEC-PUBLICPATH-1, RISK-033).** The prefix matched no registered route, so
+  the first TOTP enrol/disable handler would have been served without
+  authentication. Removed (no behaviour change today), and every allowlist
+  entry must now match a registered route
+  (`TestPublicAllowlist_EveryEntryMatchesARegisteredRoute`).
+- **New `culvert_login_limiter_entries` gauge** reports the live size of the
+  admin credential lockout state, whose keys an unauthenticated caller chooses.
+  New runbook `docs/operator/admin-api-credential-lockout.md`: clear a stuck
+  lock with the admin-only `GET`/`POST /api/auth/lockouts` instead of a restart.
+
+- **Diagnostics reported "session revocation healthy … no drops" while a
+  legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
+  CHAOS-73 bounds what an untrusted origin — cluster gossip, or the on-disk
+  revocations file — may insert into the revocation list, and charges a reason
+  for each refusal. `checkSessionRevocation` summed two of the three:
+  `RevokeOversize` and `RevokeCapacity`, but not `RevokeFarFuture`. A node that
+  dropped only far-future entries took the `diagOK` branch and printed "no
+  refusals, no drops" — on the one authenticated surface whose own contract is
+  that a dropped entry "means a session an operator deliberately killed may
+  still authenticate, here or on another node" (CWE-778; the underlying drop is
+  CWE-613).
+
+  `RevokeFarFuture` is the reason with a benign trigger, which is what made the
+  omission matter. `admitUntrustedLocked` refuses a gossiped entry whose expiry
+  exceeds `now + MaxSessionLifetime + revocationExpirySkew`; that is exactly 7
+  days plus 1 hour, and `POST /api/session-timeout` admits `hours` up to 168 —
+  so at the maximum *supported* session TTL the entire inter-node clock-skew
+  budget is one hour. In a cluster at `session_timeout: 168h` with a peer whose
+  clock runs more than an hour ahead, that peer's legitimate revocations are
+  dropped on the receiving node, the revoked cookie keeps authenticating there
+  for the remainder of its life, and Diagnostics affirmatively said revocation
+  was healthy. The count is now summed, the row names the expiry bound among the
+  causes, and the operator action names clock skew as the benign cause to check
+  FIRST — this file's own rule that a refusal surface must not assert an attack.
+  The bound itself is unchanged: widening `revocationExpirySkew` is a security
+  behavior change and is recorded as an owner decision instead.
+- **Peer-supplied Control Plane addresses reached the Data Plane's process log
+  unsanitized (CWE-117).** `applyAddressesLocked` adopts the CP config
+  snapshot's `cp_addresses` verbatim into the client's address list and states
+  that both lists "are peer-supplied … so they are untrusted log values under
+  the CWE-117 rule" — but four older sinks in the same file printed an address
+  from that same list with a bare `%s`: both of `connect`'s lines and both of
+  `failover`'s. `validateConfigSnapshot` count-caps `cp_addresses` at 100 and
+  never validates an entry as `host:port`, so a newline inside one forged
+  records in the DP's process log and in every downstream syslog/OTLP consumer.
+  All four now use `sanitizeLog` with `%q`, and the failover line sanitizes the
+  wrapped error too, since it carries the same address. Pinned by a source gate
+  so a fifth sink cannot reintroduce it. A hostile Control Plane already
+  dictates the Data Plane's policy, so the marginal impact is log integrity —
+  but the convention is the convention, and the inconsistency sat inside one
+  file.
+- **A sixth log sink retained the decrypted inner request path, unbounded, after
+  CHAOS-92 bounded the other five (CHAOS-92e).** The CHAOS-92 sweep enumerated
+  three retaining sink families and clamped each at a chokepoint, with a source
+  gate to keep future sinks bounded. The gate matches call sites carrying both
+  `sanitizeLog(` and `URL.Path` — so it never examined
+  `fileblock.LogBlock`, which sanitizes in the callee (`obs.Sanitize`, the
+  independent internal twin, ADR-0003) and writes the client-chosen path into the
+  50 MB/one-archive rotating process log as `FILE_BLOCKED (tunnel %s)`. Six
+  `emitFileBlock` call sites reach it, four of them passing `req.URL.Path`
+  straight from the decrypted inner request.
+
+  It is worse per request than the five that were fixed: those are fed by a path
+  net/http caps at `MaxHeaderBytes + 4096`, while this one is fed by
+  `http.ReadRequest` on the decrypted stream — `readRequestLimit(b,
+  math.MaxInt64)` over a `textproto.ReadLine()` with no limit — so the inner
+  request line is unbounded on the wire. Measured through the emitter: a 1 MiB
+  path wrote 1 048 646 log bytes, and a 1 MiB path of `0xFF` wrote 4 194 375,
+  because `obs.Sanitize` folds control bytes but `0xFF` is not one and `%q`
+  renders each as the 4-character `\xff`. Every write succeeds, so the logsink
+  backpressure counter and every storage-health surface stay green while the
+  retained record rotates away (CWE-778, OWASP A09:2021). Reachability is the one
+  CHAOS-69 named for the inner path — an allowed destination with SSL inspection
+  enabled — not CHAOS-92's stock-install reachability.
+
+  `emitFileBlock` now clamps with the sweep's own `boundRetainedPath`, inside the
+  `fileblock.LogBlock` argument so the sanitiser's scan and its copy are bounded
+  too. It is package main's only route into `LogBlock`, so one edit bounds all
+  six call sites, and a source gate now fails on a direct
+  `fileblock.LogBlock`/`BlockConn` call from package main. **Enforcement and the
+  client-visible response are untouched**: every matcher ran on the whole value
+  at the call site before the emitter, and the 403 body derives from the
+  extension and source only — pinned by a control that asserts the emitted bytes
+  are identical at 16 B and 1 MiB. Recorded with its measurements in
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53.11.
 - **The `file_profile_resolution` diagnostics row went blind to the very rules
   SEC-POLICYACTION-1 taught the request path to honour.** That change made
   `applyPolicyDecision` (`proxy.go`) dispatch on `canonicalPolicyAction`, which
@@ -170,6 +361,69 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- A SIEM outage could become permanently unpageable if a delivery landed at the
+  wrong instant. A queue-full drop is charged on the request goroutine that
+  suffered it, and the goroutine that begins an outage records the failure and
+  then publishes the outage's start time. Descheduled between the two, it
+  resumed after a delivery had ended its outage and a later drop had correctly
+  dated a new one — and overwrote that good start with its own, now
+  pre-delivery, timestamp. The health plane refuses a start that predates the
+  last delivery, so the node then reported an unresolved outage with no start
+  time: the five-minute degradation window could never elapse, and on a node
+  that went quiet nothing ever re-dated it, so `syslog_feed_down` never fired
+  for that outage. The start is now published only while no delivery has
+  intervened, keyed on the delivery itself rather than on a timestamp
+  comparison so it holds if the wall clock steps backwards.
+
+- **The alert webhook retry queue lost its unattempted entries on an ordinary
+  restart, and lost them silently (CHAOS-93 RT-1).** A retry pass moved every due
+  entry out of the queue, persisted the truncated queue, and only then delivered
+  them one at a time at up to 5s each — so for the length of that pass the
+  not-yet-attempted alerts existed only in memory, absent from both the queue and
+  the file. A `SIGTERM` on a config reload, the lifecycle context cancelled at
+  shutdown while the pass ran on, an OOM or a node reboot therefore discarded all
+  of them, and neither `retryExhaustedTotal` nor `retryDroppedTotal` nor the
+  delivery history nor the log recorded it: the queue depth simply dropped, which
+  reads as *drained* rather than *discarded*. Against a blackholing webhook the
+  window was the whole pass — up to 500 × 5s ≈ 42 minutes — and the loss up to
+  499 alerts, security events among them. An entry now stays in the durable queue
+  across its own attempt and leaves only once that attempt has resolved; a crash
+  mid-attempt leaves it queued, retried after a 60s lease with its attempt count
+  intact, because an attempt that did not complete is not charged.
+  A delivery interrupted by shutdown is not charged as an attempt: a cancelled
+  POST returns the same failure a badly-answering webhook does, so without that
+  distinction a shutdown during an entry's last attempt removed the alert and
+  counted it "exhausted after 3 attempts" though the webhook was never reached.
+- **A retry pass could not be interrupted or bounded (CHAOS-93 RT-2).** The pass
+  took no context and each delivery built its own from `context.Background()`, so
+  the loop only checked for shutdown *between* passes and a full queue against a
+  blackholing webhook occupied it for ~42 minutes. The pass is now cancellable
+  and bounded; the bound caps a pass's length, not recovery, since the next tick
+  resumes from the durable queue. Delivery throughput is unchanged.
+- **Every webhook re-delivery was recorded as attempt 1 (CHAOS-93 RT-5).** The
+  retry pass delivered through the first-attempt entry point, so the delivery
+  history the admin surface renders could not distinguish a third attempt from a
+  first. It now records the entry's real attempt number.
+- **A release dispatch's Apply retries ran back to back with no delay
+  (CHAOS-93 RT-3).** The three attempts existed for one fault — a maintenance
+  agent that is briefly unreachable, nearly always because it is restarting — and
+  that fault refuses the connection in microseconds, so the whole retry budget
+  burned in well under a millisecond and the dispatch terminated
+  `FAILED_NEEDS_ATTN`, needing a manual re-dispatch, for an agent that was
+  serving again a second later. The attempts are now spaced by bounded
+  exponential backoff (2s then 4s), interruptible so a shutdown does not sit out
+  the backoff of a doomed dispatch, and a cancellation is reported as such rather
+  than as an agent fault.
+- **The threat-feed and category-feed rounds ignored the scheduler's shutdown
+  context (CHAOS-93 RT-4).** Both declared a context-taking round function and
+  dropped the parameter, fetching on `context.Background()` instead, so a stalled
+  feed origin could not be interrupted by `SIGTERM` and the round ran on for up
+  to its 60s HTTP timeout past the point where the process was told to stop. The
+  UT1 category round then went on to issue a 50+ MB bulk write into a store that
+  shutdown was closing; it now checks for cancellation immediately before that
+  write, is charged as a failed round so the health plane sees it, and leaves the
+  last-good category data untouched. The admin "sync now" action deliberately
+  still runs to completion rather than being bound to the request.
 - **`README.md` documented the opposite of CDR's fail-closed guarantee.** The
   `-cdr-fail-mode` row still said that when no Sluice instance is available at
   all "CDR is skipped and the file passes through in either mode" — the exact
@@ -262,6 +516,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   export data, and v2.30.0 regressed package loading.
 
 ### Fixed
+
+- `culvert_syslog_drops_total` could count one lost event twice, then go
+  backwards, when forwarding was disabled while a scrape was in flight. The
+  snapshot captured the serving collector and the process-lifetime totals under
+  one lock, released it, and only then read that collector's own counters. A
+  disable landing in between retires and seals the captured collector, so a
+  request still holding it charges its loss to both the collector's counters and
+  the process-lifetime late-drop total — and the snapshot added each of them.
+  One lost event was reported as `2`, which the next scrape reversed to `1`, so
+  `rate()` on the series that measures compliance loss saw a counter reset. The
+  collector's counters are now read under the same lock as the totals beside
+  them — the lock every retirement holds — so a snapshot's terms all describe
+  one instant.
 
 - **The backup archive was published world-readable, and a restore accepted an
   archive that was never encrypted (CHAOS-82).** Four defects on the two paths
@@ -524,6 +791,87 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   now tracks `ErrorMalformedPacket`, so classification is unchanged across the
   bump; `TestLDAPClientErrorCeil_TracksLibrary` caught the drift.
 
+- The SIEM outage alert could go permanently silent after a recovery. The
+  health watchdog samples the feed and then commits the verdict, refusing to
+  act if the record changed in between — but a *recovery* changes nothing the
+  record describes, so a sample taken during an outage that committed just
+  after the feed came back was still accepted. It paged a collector that was
+  already delivering again and re-armed the fire-once latch; since the latch is
+  cleared only on the transition out of an outage, and that transition had
+  already happened, nothing cleared it again and the **next** genuine outage
+  fired no alert at all. A delivery that ends an outage now invalidates every
+  verdict sampled before it.
+
+- `culvert_syslog_drops_total` could decrease while a replaced collector was
+  being retired. A retired writer carries two totals — its live counters, which
+  keep moving, and the final snapshot its drain publishes on the way out — and
+  the fold read them as two separate loads. A writer that published its
+  snapshot between the two loads had a post-seal loss folded in twice (it is
+  already counted in the process-lifetime late-drop total), and the next settle
+  reversed the difference with the smaller final snapshot, so the exported drop
+  counter went down. The two are now read in the one order that makes the pair
+  safe — the live counters first, so an absent snapshot proves the value
+  predates it — which is what the no-decrease guarantee actually rests on.
+
+- A SIEM event is no longer destroyed on the collector a re-point just replaced.
+  The replacement is named before the displaced writer is closed, and that close
+  is asynchronous, so a request goroutine holding the old handle could find a
+  writer that was already superseded but still open. If its queue had backed up
+  — the ordinary *reason* for re-pointing — the event was dropped there and
+  charged as a compliance loss while the healthy replacement sat idle. A full
+  queue is now terminal only on the writer still in service; a replaced one
+  passes the line along the successor chain, and nothing is charged when the
+  replacement accepts it. A full queue on the live writer is still a counted
+  `queue_full` drop.
+
+- `syslog_feed_down` is no longer paged for a collector that is about to
+  connect. Both startup paths record the configured collector and then dial it
+  synchronously for up to 5 seconds, by which time the 30-second health
+  watchdog is already running — so a tick landing inside that dial dispatched
+  the outage webhook, and logged that the collector "could not be connected 0s
+  ago and nothing retries", for a dial that had not returned. A recorded intent
+  is now *pending* for the length of one dial; the window is a deadline that
+  expires on its own, so it can never leave a feed unpageable, and a dial that
+  returns without a writer is still reported immediately.
+
+- `GET /api/syslog` now describes one collector per field. `addr` was the
+  *serving* address while `degraded` was the verdict on the *configured* one,
+  so a boot dial that failed answered an empty `addr` beside `degraded: true` —
+  which the admin panel reads as "not configured", clearing the operator's own
+  address out of the form and hiding the drop row on the one feed losing every
+  event. `addr` is now the collector you configured, `servingAddr` the one
+  actually being served and `targetMet` whether they are the same; the panel
+  shows a green tick only when the configured collector really is the one
+  receiving events, and names the previous collector when it is still
+  delivering. The whole response is assembled from one snapshot, so no two
+  fields can describe different generations.
+
+- `POST /api/syslog/test` no longer confirms a collector you have replaced. It
+  probed whichever writer was live, so after a re-point whose dial failed it
+  reached the **previous** collector and answered `delivered` / `ok: true` —
+  while `syslog_feed_down` was active and the diagnostics row was pointing you
+  at that very endpoint to confirm the fix. The endpoint now answers a distinct
+  `superseded` outcome with `ok: false` and sends nothing, and it takes the
+  verdict from the same definition the alert and the recovery path use rather
+  than comparing target strings of its own.
+
+- `POST /api/syslog/test` no longer reports `dropped` for a collector that is
+  working. The probe used a single-writer enqueue path that the ordinary send
+  path had outgrown, so a probe submitted at the instant an admin re-points the
+  collector was dropped against the **displaced** writer: the healthy
+  replacement never saw the test event, and because the refusal went through a
+  bare drop rather than the shared terminal charge, the loss also escaped
+  `culvert_syslog_drops_total` and `/healthz` whenever the old writer had
+  already sealed. The probe now follows the same successor chain an ordinary
+  audit line follows.
+
+- A SIEM line could be lost to a live collector that would have accepted it. The
+  successor-chain walk in the send path followed one fewer link than the walk
+  used for already-queued lines, so at exactly the bound's depth the final (and
+  live) writer was never offered the line. Both walks now follow the same number
+  of links, pinned by a parity gate that asserts they reach the same writer at
+  several depths rather than asserting any one depth.
+
 - **A Control Plane gRPC listener fault terminated the whole appliance, and a
   listener that died after binding was silent and terminal (CHAOS-71).** The CP
   boot path had exactly one error branch — `logFatalf("ControlPlane gRPC: %v",
@@ -716,6 +1064,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   not the class.
 
 ### Performance
+
+- **The Stage-2 policy scan no longer streams a 568-byte rule definition to
+  reject a destination.** Every proxied request on every protocol runs
+  `PolicyStore.Evaluate`, a priority-ordered first-match scan over the whole
+  rulebase, and that scan was the largest Culvert-owned CPU cost on the request
+  path (7.4% of an end-to-end HTTP forward at 500 rules, where the rest is
+  kernel and `net/http`). Its cost was the WORKING SET, not the comparisons:
+  `PolicyRule` is 568 bytes spread over nine cache lines, the scan reads fields
+  on five or six of them per rule, and at 10 000 rules the ~5.7 MB of
+  definitions leaves L2 — which is why the engine scaled superlinearly,
+  7.6 ns/rule at 1 000 rising to 29.3 ns/rule at 10 000. `sortLocked`'s own note
+  diagnosed exactly this ("shrinking what the scan streams per rule is the only
+  thing that can address it") and declined to attempt it. This is that change.
+
+  A rule's destination FQDN is the first thing `matchDestNorm` tests and the
+  most common access-rule scope in a gateway rulebase, so it is the
+  discriminator worth packing. Publication now also emits a **16-byte row per
+  rule** in one contiguous array — four rows per cache line, hardware
+  prefetchable — holding the two facts a mismatch is provable from without
+  touching the definition: the shortest host that can match, and the pattern's
+  trailing bytes packed into one word. `hostutil.MatchFQDNNorm` is
+  suffix-anchored in every branch, so a host that is too short, or whose packed
+  trailing bytes differ, cannot match.
+
+  Measured with benchstat over 10 runs per side, back to back on one host
+  (go1.27.3, 4-core Xeon @2.10GHz):
+
+  | benchmark | before | after | delta |
+  | --- | --- | --- | --- |
+  | `PolicyEvaluate_NoMatch/rules=1000` | 10.06 µs | 1.20 µs | **−88.0%** |
+  | `PolicyEvaluate_NoMatch/rules=10000` | 233.9 µs | 12.96 µs | **−94.5%** |
+  | `PolicyEvaluate_MatchLast/rules=10001` | 236.8 µs | 12.76 µs | **−94.6%** |
+  | `PolicyEvaluate_CIDRRules/rules=1000` | 15.51 µs | 1.24 µs | −92.0% |
+  | `PolicyEvaluate_ScheduledRules/rules=1000` | 24.19 µs | 1.23 µs | −94.9% |
+  | `PerfQual_Evaluate/rules=500/nomatch` | 5.08 µs | 638 ns | −87.4% |
+
+  The superlinear knee is gone with it: 29.3 ns/rule at 10 000 rules becomes
+  1.3 ns/rule. Allocations on the scan are unchanged (0 per evaluation on a
+  miss, 1 for the returned `PolicyMatch` on a hit).
+
+  **The index is one-directional and never authoritative.** A row can only make
+  the scan reject a rule the full predicate would also have rejected; nothing is
+  admitted, matched or skipped on a row's word, and every rule that survives the
+  prefilter runs the complete unmodified check sequence. It is paired with its
+  revision by SLICE IDENTITY, so an index published for another revision is
+  discarded rather than applied, and a revision that never reached publication
+  simply gets no prefilter and the pre-change scan. `TestPolicyScanIndex_`
+  `DifferentialOracle` drives the real evaluator twice over randomized
+  rulebases — with the index and without — and requires the selected rule to be
+  identical; `TestPolicyScanIndex_NegativeControl` proves that oracle can fail
+  by feeding it an over-eager row. The Policy Tester's trace path keeps the
+  prefilter off, because it must reach the real predicate behind every reported
+  skip reason.
+
+  **Costs, measured rather than assumed.** Publication grows by one array and
+  one struct — +2 allocations and +2.4% bytes per revision, ~+3–5% of
+  `sortLocked`'s wall time — which matters because publication holds the writer
+  lock that evaluation's RLock waits on. A rulebase no row can prefilter (
+  category-, country- or source-only) publishes **no** index at all and stays on
+  exactly the pre-change path; charging it was measured at +26% on
+  `PolicyEvaluate_CategoryRules/rules=200` and is the reason that case is
+  special-cased rather than tolerated. Two further shapes of the change were
+  measured and backed out for the same reason — a per-width host-tail
+  `[9]uint64` carried in the per-scan struct (+22% on the same benchmark,
+  because the inlined comparison takes its address and the 72 bytes displace the
+  scan's other per-rule state), and folding the scan's two eligibility checks
+  into a helper returning the skip reason (+26%, ~9 ns/rule, because it
+  materializes a string header per rule). Both rejections are recorded beside
+  the code. Rules scoped only by category, category group or country get no
+  prefilter by design; their predicates are not suffix-anchored and are already
+  amortized to O(1) per rule by their own per-scan scratch.
 
 - **A policy publication now allocates one array per revision instead of one
   object per rule.** `sortLocked` cloned every definition with its own
@@ -1911,6 +2330,104 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `TestIPFilterReplace_*` and the `Replace` republish case in the IPFilter
   mutator inventory.
 
+- Deleting or disabling an identity provider revoked nothing it had already
+  minted (**CHAOS-88**, register row **AU-2**). A `ps_session` cookie carries
+  the asserting profile's id and **the groups that provider asserted**, and
+  `resolveRequestAuth`'s session arm read all of it straight out of the
+  verified cookie without consulting the provider — so a browser holding such a
+  cookie kept its subject and groups for the rest of the session lifetime
+  (8 hours by default, up to 7 days at a raised TTL) after the operator removed
+  the federation. Those groups feed `policyStore.Evaluate` directly, so
+  group-scoped **allow** rules kept matching for a provider that was gone, while
+  `idpRegistry.Delete` answered `204` and the change was audited as a successful
+  `idp.delete`.
+
+  The asymmetry was inside one function: the `Proxy-Authorization: Basic` arm
+  twenty lines below consults `EnabledCredentialProviders()` on every request,
+  as does every other registry consumer — the session arm was the single
+  outlier.
+
+  Fixed as **derived state, not a revocation event**: `sessionProviderLive`
+  (`session_provider_bounds.go`) asks the registry per request whether the
+  session's profile still EXISTS and is ENABLED (`IdPRegistry.ProfileEnabled`),
+  and a refusal degrades to exactly "no cookie" — the client is re-challenged
+  through the existing no-credential dispatch. Only an explicit delete,
+  disable, or removal by a registry replacement revokes: an IdP that is
+  unreachable — a provider that failed to compile, or one retired at the
+  metadata staleness ceiling — is degraded availability, not revocation, so a
+  node restarted during an IdP outage does not log out that IdP's sessions. A `RevokeProvider` entry was deliberately
+  not added: the admin handler is only one writer of the registry
+  (`ReplaceAll` is also reached from config import, config-version rollback and
+  the CP→DP snapshot), whereas the provider set is already durable and already
+  synced fleet-wide, so the absence *is* the revocation and needs no
+  persistence, no gossip, and no expiry.
+
+  **That "already synced fleet-wide" claim was itself false for the one case an
+  operator reaches for, and is fixed here too** (register row **AU-64**,
+  §50.6d). `ConfigSnapshot.IdPProfiles` carried `omitempty`, so a Control Plane
+  whose registry had just become empty serialised no `idp_profiles` key at all;
+  the Data Plane read that as "absent — keep what I have" and skipped. Deleting
+  the **last** identity provider therefore left it stored, enabled and live on
+  every Data Plane node: its sessions kept authenticating with their asserted
+  groups for the full TTL, **and new logins through the removed federation kept
+  working**. Removing a provider while another remained always propagated, which
+  is why it was invisible outside a single-provider deployment. The field now
+  omits `omitempty` and its `config_surfaces` row is `semNilSkipEmptyWipe` +
+  `WireWipeCapable`, which also brings it under
+  `TestConfigSurfaces_SnapshotWireWipe` — the wall that exists for exactly this
+  bug class and had skipped it because the row was labelled `semValidatedSkip`.
+  The apply path already distinguished the two cases, so no logic changed: an
+  empty list is an explicit clear, while a **missing** `idp_profiles` key still
+  means "absent, keep what I have" — which is what an older Control Plane sends
+  and what an unenrolled caller receives, since the field is redacted to nothing
+  and a node polls `GetConfig` before enrollment completes.
+
+  Sessions naming `"local"` (the admin-UI cookie, which has its own roster
+  backstop) and pre-`pvd` legacy sessions are never refused. A session's
+  provider must match an enabled profile id EXACTLY, the bare id every
+  interactive provider stamps. An earlier shape also accepted the
+  prefix-stripped spelling, which let a cookie from a removed `saml:corp`
+  profile ride an unrelated enabled `corp` profile (AU-70).
+
+  **Re-enabling or re-creating a provider under the same id no longer revives
+  the sessions it minted** (register row **AU-65**, §50.6f). With the check
+  being pure "is this profile enabled right now", disabling a compromised IdP
+  and re-enabling it within the session TTL brought every pre-incident cookie
+  back, with the groups it carried. A profile now holds a server-owned session
+  cutoff, `sessionsNotBefore`, stamped when the profile is created (including
+  a re-create under a deleted id) and when it goes from disabled to enabled.
+  Session cookies now carry their mint time (`iat`), and a cookie minted
+  before the cutoff is refused. Nothing else moves the cutoff: not an edit,
+  not a disable, and not an unreachable or retired IdP. Existing profiles
+  carry no cutoff, so the upgrade logs nobody out. The cutoff reaches every
+  node through the existing configuration snapshot. It is visible read-only
+  on `GET /api/idp/{id}` and in the `idp.update` / `idp.create` audit diff.
+  An older release ignores it.
+
+  **Operator-visible:** `culvert_session_provider_revoked_total` (always
+  emitted; counts *requests*, not sessions), `sessionProviderRevoked` on
+  `GET /api/stats`, a banner on the Identity Providers panel, and a
+  rate-limited `AUTH_SESSION_PROVIDER_REVOKED` log line carrying the cumulative
+  count. A step that settles after removing a provider is expected; a count
+  that keeps climbing means clients are not re-authenticating. Runbook:
+  `docs/operator/identity-provider-revocation.md`.
+
+  **Request-forgery barrier on the OIDC discovery fetch.**
+  `fetchOIDCDiscoveryOverNetwork` passed its raw, caller-supplied URL to
+  `http.NewRequestWithContext` while every check in the function measured the
+  *parsed* url beside it — functionally equivalent, since the parsed value came
+  from that same string, but it left the fetched value outside the checks and
+  raised a critical CodeQL `go/request-forgery` alert. It now mirrors the SAML
+  fetcher exactly: a `MatchString` shape barrier on the raw value, and the
+  request built from the parsed url. A structural wall
+  (`idp_fetch_barrier_test.go`) now pins both properties on *both* fetchers, so
+  the SAML/OIDC pair cannot drift apart again — it had produced four findings
+  that way.
+
+  **Recorded, not fixed:** there is still no lever to revoke a single federated
+  subject — `RevokeUser` has one caller, the local account-delete handler, and
+  no admin route (new register row **AU-63**).
+
 - A read-only **viewer** could read the HA join token and from it obtain the
   **cluster CA private key** (SEC-HATOKEN-1). `GET /api/cluster/ha` is gated at
   `RoleViewer` — correctly, it is a dashboard — and on a leader it
@@ -2614,6 +3131,93 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
+- A flood of bogus credentials from a single unauthenticated client could
+  evict another client's cached authentication verdict, and during an identity
+  backend outage that turned a cache hit into a denial (CHAOS-76, register rows
+  AU-67/AU-68). All three identity-backend result caches on the proxy
+  credential path — the LDAP directory bind, the legacy RFC 7662 introspection
+  backend and the IdP-registry introspection provider — evicted "an arbitrary
+  entry" at their 5,000-entry cap: a Go map range that stops at the first key,
+  so whichever entry Go's randomised map iteration yielded — **live or already
+  expired**, and in either case unrelated to age, ownership or liveness. That
+  is the same defect CHAOS-57 closed in the local credential cache, on three
+  caches it was never ported to.
+
+  The flood costs nothing to mount. The proxy credential path hands whatever
+  username, password or bearer token the client supplied to the configured
+  backend, and an authoritative denial is cached deliberately — RFC 7662 §2.2
+  answers an unknown or expired token with `200 {"active":false}`, and a
+  directory that answers "no such user" is authoritative — because not caching
+  those would make every wrong credential a fresh round trip. So each bogus
+  credential writes an entry, so a sustained flood displaces the honest
+  verdicts: the gate measures a 3x-cap flood reliably removing a specific
+  honest entry, which is the evidence this rests on. (As a first-order model,
+  if each insertion past the cap took a uniform draw the survival probability
+  would be `(1 - 1/N)^k`, about 37% at one cap-worth and 5% at three; Go's map
+  iteration is randomised but gives no uniformity guarantee, so treat those
+  figures as an illustration of the shape, not a measurement.) Fifteen
+  thousand requests bearing nothing but bogus credentials is the whole
+  cost. Nothing
+  reclaimed an expired entry either — a lookup reported a miss and left it in
+  the map — so the steady state under a flood was a cache full of dead
+  verdicts while eviction destroyed the few live ones.
+
+  Displacement alone costs the victim a full directory bind or introspection
+  round trip on every subsequent request, which lands the attacker's
+  amplification on legitimate traffic and on the customer's own IdP. The sharper
+  consequence is the interaction with the unreachable-backend cooldown: when the
+  backend is down the gate denies **without** a round trip, and a client whose
+  verdict is cached is served from the cache and never reaches it. Evicting that
+  entry means the next request falls through and is denied, for the whole
+  cooldown, for a credential that was valid a moment earlier — inverting the
+  cache's purpose for exactly the users it exists to serve. Authentication
+  remained fail-closed throughout and no credential was ever wrongly accepted;
+  what an anonymous client gained was the ability to make authentication fail
+  for other people.
+
+  The three caches now share one policy, the one `internal/authstate` defines
+  and CHAOS-57 put in the local cache, in a new internal owner,
+  `internal/identcache` (ADR-0041). The cap and the eviction sink are injected
+  by package main, which keeps only a binding and the integration gates. The
+  victim ordering moved with it as `identcache.BetterVictim`, and `store.go`'s
+  `betterAuthCacheVictim` now delegates to it rather than keeping a copy. The
+  tree still holds two definitions of that ordering, that one and the
+  identical `better` in `internal/authstate`; consolidating the engines is
+  recorded as follow-up, not done here. Entries are attributed to a client
+  fairness key and eviction takes the oldest entry of the client holding the
+  most, so a flooding source evicts itself and a client holding one entry cannot
+  be displaced until every other client is down to one too. An expired entry is
+  always the better victim, and a lookup now reclaims one in place. Work per
+  insertion stays proportional to the number of active clients rather than to
+  the cache size, which is what keeps the fix clear of the separate
+  full-scan-under-the-mutex defect CHAOS-57 also closed. The fairness key was
+  already computed on both data-plane paths and was being discarded at every
+  provider dispatch point — the two in `store.go` and the IdP-registry loop in
+  `proxy.go`, which is the one tried first in a registry deployment. All three
+  now go through a single helper that prefers the client-attributed form, so a
+  backend keeping no result cache (SAML, which is browser-mediated) is
+  unaffected and a new call site inherits the behaviour instead of re-deciding
+  it. Displacement is counted per backend and exposed as
+  `culvert_identity_cache_evictions_total`, accumulated at the point of
+  eviction into a process-owned total so it covers both the legacy provider and
+  the registry providers and cannot fall when an operator edits an IdP profile
+  (editing one has the registry compile a fresh provider, and a Prometheus
+  counter that decreases reads as a restart). It sits beside the existing
+  `culvert_auth_cache_evictions_total` for the local cache.
+
+  One detail of the generalisation had to be unpicked again: a positive
+  introspection verdict is bounded by the token's own declared `exp` rather
+  than by the backend's configured TTL, and both original stores held that
+  deadline exactly because they recorded it against the same clock sample the
+  clamp had measured. Expressing it as a duration for the shared store
+  restarted that clock on insertion, so an entry outlived its token by whatever
+  elapsed in between (measured at 1.1 us and 553 ns for the two backends). The
+  store now takes an absolute deadline where the caller has one and keeps the
+  duration form only where the bound is a configured TTL. Gates: seventeen
+  (nine of them now in `internal/identcache`), with every gate that pins a
+  defect verified failing against the behaviour that defect describes, plus a
+  root gate on the binding's cap and sink and the package's boundary and
+  ownership tests.
 
 - Two security-regression gates added for the memoized IDNA slow path
   (`internal/hostutil/idnamemo.go`), each run against **both** retention tiers
@@ -2682,6 +3286,67 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   round trip. Only deployments using category groups in policy rules are
   affected; no configuration, API or metric surface changes.
 
+- An enabled SAML or OIDC identity provider no longer depends on being able to
+  reach the identity provider in order to EXIST. Compiling a profile performs a
+  synchronous outbound fetch — SAML metadata, OIDC discovery — and it had no
+  cache, no fallback and no retry, on three paths: appliance boot, the admin
+  save, and every Control Plane → Data Plane config sync. Three consequences.
+  An IdP that was briefly unreachable at boot left the profile enabled, stored
+  and listed in the admin UI but with **no live provider**, permanently for the
+  life of the process and with no metric, health row or alert to say so —
+  browser SSO simply stopped, and a scoped `SSORequired` rule returned 403 for
+  every user, against a green dashboard. An ordinary IdP maintenance window
+  **aborted the whole config snapshot**, stopping policy, blocklist and
+  threat-feed distribution to every data plane in the fleet. And because the
+  config version could not advance, every data plane retried the fetch every
+  30 seconds for the duration of the outage, aiming the fleet's full poll rate
+  at the identity provider that was already down.
+
+  The appliance now keeps the last document it successfully fetched and
+  degrades to it, bounded by a 7-day staleness ceiling — withdrawing a key from
+  published metadata is your IdP's revocation lever, so the fallback is a
+  bounded degradation rather than an open-ended one. The network always wins
+  when it answers, so an IdP-side key rotation is still picked up at the next
+  compile; cached bytes are parsed and validated by exactly the same code as
+  network bytes; and a cached document is bound to its source URL, so
+  re-pointing a profile gets no cache. A profile that still cannot be compiled
+  now retries on its own at a bounded, jittered rate and goes live on the first
+  successful fetch — no restart. New: the `idp_metadata` diagnostics row,
+  `culvert_idp_enabled_not_live` (page on `> 0`) and `culvert_idp_metadata_*`,
+  and the existing `identity_backend_unreachable` alert with source
+  `idp_metadata`. Nothing is added to `/readyz`: an IdP outage is fleet-wide,
+  and failing readiness would eject a fleet that is still proxying fine. An
+  unresolvable IdP hostname now falls back to the cached document instead of
+  being reported as a configuration error (an OIDC discovery URL is admitted on
+  structure; the DNS-backed check runs on the fetch, where its failure routes to
+  the cache), the SAML pre-flight host check shares the fetch's deadline instead
+  of resolving unbounded ahead of it, and switching a profile to inline
+  `metadataXml` clears its now-unresolvable remote-fetch failure episode. The
+  fallback is **stale-if-error** (RFC 5861): only a transport failure or an
+  HTTP 5xx is answered from the cache. A 4xx, any other non-200, an empty body,
+  or a document the appliance cannot accept (malformed metadata, or a discovery
+  document naming an `authorization_endpoint` that resolves into a private
+  range) fails the compile as before and never replaces the cached copy.
+  Re-pointing a profile from one remote source to another retires the old
+  source's failure episode on commit, so a repoint away from a broken IdP stops
+  alerting instead of paging indefinitely for a URL that is no longer
+  configured. The staleness ceiling is the EARLIER of 7 days and the SAML
+  metadata's own `validUntil`, and it is enforced on a **running** appliance
+  rather than only when a profile is next compiled: a provider whose cached
+  document has expired is retired (logged as `IDP_METADATA_EXPIRED`), so new
+  browser SSO through it fails closed instead of continuing to trust a signing
+  certificate your IdP may have withdrawn, and the retry loop brings it back
+  automatically on the first successful fetch. A provider that is live but
+  serving from cache is also revalidated by the retry loop and replaced the
+  moment the IdP answers again (`IDP_METADATA_REVALIDATED`), so a key rotated
+  during the outage is adopted within minutes of recovery. None of this revokes
+  sessions: the profile stays enabled and stored throughout, and a provider
+  serving a freshly fetched document is never retired however old the cached
+  copy beside it is. Deleting a profile discards its cached documents, and a
+  metadata fetch still in flight when the deletion is saved can no longer write
+  the deleted profile's document back, so a profile recreated under the same id
+  and source during an outage cannot compile from the deleted profile's signing
+  material. See `docs/operator/idp-metadata-availability.md`.
 ### Fixed
 
 - Six support-domain durable writes bypassed `fileutil.AtomicWrite`, the
@@ -3117,6 +3782,59 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   against the reverted implementation. The admit/reject boundary, the
   unconditional-accounting contract and the delete-when-last behaviour are
   unchanged.
+
+- The SIEM feed's current-episode loss count is no longer inflated when a drop
+  races a successful delivery. A delivery resolves every loss that preceded its
+  completion, but `noteDelivered` implemented that with an all-or-nothing
+  compare-and-swap: when a queue-full drop landed between the count being read
+  and the swap, the swap failed and kept **every** failure, including the
+  prefix the delivery had just proved resolved. An episode of N losses followed
+  by a successful write and one racing drop reported N+1 losses *since that
+  delivery* instead of 1, on the `syslog_feed` contract row and
+  `GET /api/syslog` — so an operator asking "how much have I lost since the
+  feed last worked?" was handed the whole backlog. The degradation predicate is
+  a boolean over this count, so no page was ever wrong; the number an operator
+  acts on was. The resolve now subtracts exactly the observed prefix, leaving
+  exactly the failures recorded after it, under a clamp so the count can never
+  wrap.
+
+- `POST /api/syslog/test` now reports the failure class of the collector that
+  actually processed the probe. A queued probe handed to a successor writer and
+  dropped there was described using the failure reason of the writer the probe
+  was *called* on, which never attempted the send — so the endpoint reported
+  `unknown` on a fresh chain, or an unrelated stale class on a busy one. The
+  bounded reason now travels on the per-line acknowledgement, stamped by the
+  writer that performed or refused the send, alongside the transport it already
+  carried.
+
+- A SIEM outage no longer serializes proxy requests in the syslog health
+  plane. A queue-full drop is charged on the CALLER's goroutine — the audit or
+  request-log fan-out, i.e. a proxy request goroutine — and the delivery
+  observer ran the whole health-plane evaluation inline from there: the
+  process-wide `syslogHealth.mu` taken, the retired writers settled under it,
+  and the commit half taking the same mutex again, all while the caller still
+  held `sendMu.RLock`. So precisely during the overload the asynchronous
+  writer exists to absorb ("a slow SIEM must cost drops, not proxy latency"),
+  every proxied request paid for it. Measured on a 4-core Xeon (medians of
+  n=5): **149 ns/op at GOMAXPROCS=1 rising to 268 at 4 — four cores delivering
+  0.56x the throughput of one**, the throughput-ceiling shape `internal/connlimit`,
+  `internal/threatfeed` and the IP filter each record. It was self-reinforcing
+  too: the same per-line cost on the drain goroutine slows the drain, which
+  fills the queue, which puts more request goroutines on the path.
+
+  Concurrent evaluations now collapse to one through a compare-and-swap claim.
+  A caller that loses does **not** wait — it returns having done nothing — which
+  is safe because `noteDrop` has already recorded everything durable about the
+  loss (counter, timestamp, reason, all atomics) before it notifies; the
+  evaluation is a pure reader whose answer is a function of that recorded state
+  plus the clock, and two independent drivers ask again regardless (every later
+  drop, and the 30s watchdog). A sequential caller is unaffected, so every
+  existing gate holds unchanged. Post-fix: **268 → 74 ns/op at four cores
+  (3.6x), with the curve direction flipped from degrading to improving**; one
+  core is at parity to ~13% for the added CAS pair. The watchdog's own
+  evaluation is deliberately not claimed — it is the driver that exists so a
+  node which went quiet mid-outage still pages, and a burst of drops must not
+  starve it.
 
 - The request log's JSONL persistence gate no longer takes a process-wide
   mutex on every logged request. `reqlog.Add` runs once per logged request on
@@ -3737,6 +4455,202 @@ endpoints for credentialed parents.
   password is now a fatal startup error instead of silently reaching
   `cfg.SetAuth("", pass)`, which disabled local authentication entirely
   and discarded the configured password.
+- **The SIEM/syslog feed reported that it was forwarding when it had stopped
+  (CHAOS-81).** The `syslog_feed` operator-contract row decided on two strings
+  fixed at startup, so a collector that went away during ordinary uptime left
+  the node reporting `ok` — *"remote syslog/SIEM forwarding is active"* — while
+  every audit and request event was discarded. Measured against the pre-fix
+  tree: 49 of 49 audit events dropped, row still `ok`. Delivery loss reached no
+  Prometheus series (so no alerting rule could be written), no `/healthz`
+  field, no alert and no log line; the one counter that existed was cumulative
+  with no time axis, so it could not distinguish a feed that is dark now from
+  one that healed last week. `internal/syslog` now records delivery with a
+  timestamp and a bounded failure reason, and `syslog_health.go` exposes
+  `culvert_syslog_*` (emitted only when a collector is configured),
+  `syslogDrops` on `/healthz` when non-zero, a delivery verdict on the
+  diagnostics row and a fire-once `syslog_feed_down` alert. LOSS-BASED
+  degradation requires an UNRESOLVED loss (losses since the last delivery, not
+  the cumulative count) plus five minutes without a delivery, so it cannot fire
+  on an idle node and a healed blip cannot mark a working feed as down; the
+  transition is evaluated both on loss and on an independent 30-second timer, so
+  a collector that dies and is then followed by a quiet period still pages. An
+  UNMET INTENT — a configured collector with no writer, or one superseded by a
+  re-point whose dial failed — degrades on its own, with no loss required and
+  without waiting out that window, because nothing retries it.
+  Recovery is declared only on an event that actually reaches the collector. `GET /api/syslog` gains `delivered`, `degraded`,
+  `neverDelivered`, `lastSuccessUnix`, `secondsSinceEvent`,
+  `lastFailureReason`, `queueDepth`, `queueCap` and `deliveryProvable`
+  (contract `SyslogConfig`). Note that `udp://` — the default when the address
+  omits a scheme — cannot prove delivery at all; every surface now says so.
+
+- **`culvert_syslog_drops_total` could go BACKWARDS when the collector was
+  re-pointed (CHAOS-81).** The health snapshot copied the record's retired
+  totals and the writer they belong to under one lock, then re-read the
+  *currently active* writer after releasing it — so a re-point landing in that
+  gap paired a new writer's counters with retired totals that had already
+  absorbed the old one's finals, and a whole generation's losses vanished from
+  the scrape. Prometheus reads a decreasing counter as a reset and discards the
+  interval. The snapshot now reads the writer it captured.
+- **The SIEM alert said nothing had ever connected when something was still
+  delivering (CHAOS-81).** A node that connects one collector and then fails to
+  connect a newly configured one keeps delivering to the first. That is
+  correctly reported degraded, but the page read *"no connection was ever
+  established"* and *"NOTHING is serving it"* — both false, and both send an
+  operator to debug a dial that succeeded. The alert and log line now
+  distinguish a superseded target from a feed that never came up, and say that
+  events are still reaching the previous collector. Those events are
+  deliberately not counted as drops: they reached a collector, and
+  `culvert_syslog_drops_total` measures events that reached no SIEM at all.
+
+- **`POST /api/syslog/test` could still report a UDP datagram as accepted
+  (CHAOS-81).** The previous fix asked the writer the probe was handed, but a
+  collector re-pointed while the test event is queued hands that event — and
+  its acknowledgement — to a successor which may use a different transport, so
+  a probe queued on TCP and sent over UDP was still reported as accepted by
+  the collector. The acknowledgement now carries the transport of the writer
+  that actually sent it.
+- **Events lost at the end of a long re-point chain were counted nowhere, and
+  a healthy collector could be blamed for them (CHAOS-81).** A queued line
+  follows a bounded chain of replaced collectors; past that bound the loss was
+  charged to a collector whose totals had already been folded into the
+  exported counters, so it appeared in neither `culvert_syslog_drops_total`
+  nor `/healthz`. The same walk also checked its bound one step too early, so
+  it could charge the loss to a collector it had never offered the line to —
+  recording a failure reason against a collector that is working. Both fixed;
+  the loss is now counted for the process even when no live writer can hold it.
+- **Turning the SIEM collector off while another request was turning it on
+  could leave the two disagreeing (CHAOS-81).** The address the admin API
+  reports and `admin_settings.json` persists was written after the collector
+  was published rather than with it, so an interleaved disable could leave the
+  process forwarding nowhere while every config surface said forwarding was
+  on — and the next restart re-enabled a collector the operator had switched
+  off. The address is now published and cleared in the same step as the
+  collector itself, and every reader goes through an accessor that takes the
+  same lock.
+
+- **Disabling an unreachable SIEM collector could page about it and silence
+  the NEXT one (CHAOS-81).** The guard that refuses a stale degradation commit
+  compared the writer pointer the snapshot was taken from against the one the
+  record now holds. A collector whose dial failed leaves no writer, and
+  disabling forwarding also leaves no writer, so `nil != nil` was false and the
+  stale commit landed anyway: it fired `syslog_feed_down` for a feature the
+  operator had just switched off, and set that record's fire-once latch, so the
+  first real outage after forwarding was next enabled would have been silent.
+  The health record now carries a generation bumped by every install, disable
+  and reset, and the commit compares that instead — an identity rather than a
+  pointer that can collide with another absent writer's.
+- **`POST /api/syslog/test` could report a UDP datagram as accepted by the
+  collector (CHAOS-81).** The probe took the writer it sent through as an
+  argument but then read the configured target address separately to decide
+  whether the transport can prove delivery, so a collector re-pointed between
+  the two reads made it answer *"the collector accepted the test event"* for a
+  datagram nothing may have received. UDP cannot confirm receipt, which every
+  other surface says; the probe now asks the writer that served the line.
+
+- **A SIEM event lost while a write was in flight could report the feed DOWN
+  even though that write succeeded (CHAOS-81).** The failure count was read
+  when the delivery began rather than when its write completed, so a
+  queue-full drop landing in between was never resolved by the success; once
+  such a loss became datable it could outlast the degradation window on its
+  own, and a node that then went idle paged DOWN off a delivery that had
+  worked. A delivery now resolves every loss recorded before it completed; the
+  loss itself is still counted.
+- **Disabling a SIEM collector that never connected kept counting losses
+  (CHAOS-81).** Turning forwarding off cleared the health record but left
+  skipped-event accounting armed, so every later audit and request event was
+  charged as a SIEM loss for the life of the process and the bogus totals
+  reappeared when forwarding was switched back on.
+- **`/healthz` omitted the SIEM losses `/metrics` reported (CHAOS-81).** The
+  `syslogDrops` field was gated on a writer having been installed, so it was
+  withheld for precisely the outage — a configured collector whose dial never
+  succeeded — in which every event is being lost.
+- **Events lost to a SIEM collector that never connected were counted nowhere
+  (CHAOS-81).** A configured-but-unreachable collector was reported down
+  (`culvert_syslog_up 0`, a failing `syslog_feed` row), but both the audit and
+  request fan-outs skip when no writer exists, so every lost event was charged
+  to nothing: `culvert_syslog_drops_total` read `0` and `/healthz` carried no
+  `syslogDrops` throughout the worst outage the plane can report. The loss is
+  now folded into the process-lifetime total and named on the contract row.
+  Counting is armed only while an operator has asked for a collector and none
+  is installed, so a node that forwards nowhere still reports nothing.
+- **The Settings panel reported "no delivery drops" right after a SIEM
+  collector was re-pointed (CHAOS-81).** The drop counters are
+  process-lifetime and survive a re-point, but the save handler rendered them
+  from the save response, which does not carry them — an absent field reads as
+  zero in the browser, so the panel showed a clean feed for one that had just
+  lost events, until the page was reloaded. The panel now re-reads the
+  authoritative `GET /api/syslog`, which is the one source for those numbers;
+  a failed re-read leaves the existing count rather than showing a zero.
+- **A SIEM event lost while no collector was connected could be uncounted if a
+  collector connected immediately afterwards (CHAOS-81).** The check for
+  "is a configured collector currently unmet" was made when the loss was
+  charged rather than when the event failed to find a collector, so a
+  successful reconnection landing in between erased a loss that had already
+  happened.
+- **Re-pointing or disabling a SIEM collector discarded most of the loss
+  history it had just recorded (CHAOS-81).** A displaced collector's totals
+  were folded into the exported counters at the moment it was displaced,
+  while its queue was still being flushed, so every loss recorded during that
+  final flush was held by nothing. Measured against the real disable path with
+  a dead collector, of 2000 lost events between 32 and 1999 were missing from
+  `culvert_syslog_drops_total` and `/healthz` — in one run the exported total
+  read **zero** for a feed that had just lost everything. A displaced
+  collector is now tracked until its queue has drained and its final totals
+  are published, and only then folded; losses recorded after that point are
+  counted for the process instead, so each one is counted exactly once.
+- **A SIEM feed serving a superseded collector paged repeatedly (CHAOS-81).**
+  When a node connects one collector and then fails to connect a newly
+  configured one, it keeps delivering to the first and is correctly reported
+  down. But a successful delivery to that first collector cleared the
+  fire-once latch for the configured one and logged "SIEM feed delivering
+  again", so the watchdog re-fired the DOWN alert on its next tick — a page
+  every half minute, and a log line asserting a recovery that had not
+  happened. A delivery no longer resolves an episode while the configured
+  collector is still unreachable.
+- **An omnibus settings save could persist a SIEM address paired with the
+  wrong collector (CHAOS-81).** The configured address and the collector
+  serving it were read in two separate steps, so a disable in between
+  persisted an address the operator had just switched off — re-enabled at the
+  next restart — and a re-point persisted one collector's address with the
+  previous one's wire format. Address, intent and collector are now read
+  together, in the same step that publishes them.
+- **A queued event could be sent to a collector the operator had already
+  replaced (CHAOS-81).** The handoff walk reported "no successor" both when
+  there genuinely was none and when its hop bound was exhausted; the drain loop
+  read the second as the first and delivered through the displaced writer's own
+  connection. Exhausting the bound is now a counted loss, never a fall-back.
+- **A dropped event that raced a successful delivery left its outage undatable
+  (CHAOS-81).** The delivery was dated when its bookkeeping ran rather than when
+  the write was attempted, so a concurrent queue-full drop looked older than the
+  success it raced; the health plane refuses to date such an episode, so the
+  feed could never reach the degradation threshold and the diagnostics row read
+  "FAILING NOW … failing for 0s" for as long as the node stayed quiet.
+- **`POST /api/syslog/test` could not fail (CHAOS-81).** It answered
+  `{"ok": true}` unconditionally, which was correct while delivery was
+  synchronous and became a channel-send acknowledgement once it was not: it
+  returned `ok` for a collector that had been dead for a week, while the
+  diagnostics row pointed operators at it to "confirm connectivity". It now
+  waits, bounded, for a real outcome and reports `delivered`, `sent`
+  (UDP — unprovable), `dropped` with the reason, or `unknown`. The outcome is
+  that of the probe's own message, acknowledged by the delivery goroutine,
+  rather than an inference from node-wide counters that another request's
+  success could satisfy.
+
+- **Re-pointing the syslog collector leaked a goroutine and a descriptor
+  (CHAOS-81).** `InitSyslog` overwrote the active writer without closing it,
+  stranding the previous one's delivery goroutine on an unreachable queue while
+  holding its collector socket open — the abandoned collector saw an
+  `ESTABLISHED` connection that never closed. Reached on every boot of an
+  appliance configured from both YAML and persisted admin settings, not only on
+  an admin re-point.
+
+- **The syslog writer handle was read on the request path while the admin plane
+  mutated it (CHAOS-81).** `globalSyslog` was a bare package-level pointer
+  written by `POST /api/syslog` and read by `recordRequest`, the audit fan-out
+  and three health surfaces — a data race confirmed under `-race`. It is now an
+  atomic pointer published by a single swap, with every call site loading once
+  into a local.
+
 - The root-CA recovery record (CHAOS-50) could report a recovery with the
   wrong attempt count. A successful attempt set `recovered` from inside the
   attempt while the campaign loop counted it only after the attempt returned,

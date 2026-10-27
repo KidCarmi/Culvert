@@ -2780,7 +2780,7 @@ func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, hos
 		normHost:   normalizeHost(host),
 		groups:     groups,
 	}
-	matched := evalAccessRules(ptrs, &in, time.Now, func(rule *PolicyRule, skip string) {
+	matched := evalAccessRules(ptrs, nil, &in, time.Now, func(rule *PolicyRule, skip string) {
 		trace = append(trace, policyTestTrace{Priority: rule.Priority, Name: rule.Name, SkipReason: skip})
 	})
 	return trace, matched

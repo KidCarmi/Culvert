@@ -267,7 +267,7 @@ func TestDownloadAndParse_OK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, err := downloadAndParse(srv.URL)
+	entries, err := downloadAndParse(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("downloadAndParse: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestDownloadAndParse_HTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := downloadAndParse(srv.URL)
+	_, err := downloadAndParse(context.Background(), srv.URL)
 	if err == nil {
 		t.Error("downloadAndParse should return error on HTTP 500")
 	}
@@ -297,7 +297,7 @@ func TestDownloadAndParse_BadBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := downloadAndParse(srv.URL)
+	_, err := downloadAndParse(context.Background(), srv.URL)
 	if err == nil {
 		t.Error("downloadAndParse should return error on non-gzip body")
 	}

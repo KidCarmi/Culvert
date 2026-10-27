@@ -172,14 +172,18 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 // setSessionCookie writes a new signed session cookie to the response.
 // The Secure flag is set dynamically based on whether the request is HTTPS.
 func setSessionCookie(w http.ResponseWriter, r *http.Request, id *Identity) error {
+	now := time.Now()
 	s := &Session{
 		Sub:      id.Sub,
 		Email:    id.Email,
 		Name:     id.Name,
 		Groups:   id.Groups,
 		Provider: id.Provider,
-		Exp:      time.Now().Add(getSessionTTL()).Unix(),
+		Exp:      now.Add(getSessionTTL()).Unix(),
 		Jti:      newSessionJti(),
+		// AU-65: the mint instant, compared per request with the asserting
+		// profile's SessionsNotBefore (sessionProviderLive).
+		Iat: now.Unix(),
 	}
 	value, err := encodeSession(s)
 	if err != nil {

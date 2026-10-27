@@ -84,7 +84,7 @@ func fillProjectionSentinels(t *testing.T, v reflect.Value, path string, ctr *in
 			f.SetString(fmt.Sprintf("sentinel-%d", *ctr))
 		case reflect.Bool:
 			f.SetBool(true)
-		case reflect.Int:
+		case reflect.Int, reflect.Int64:
 			f.SetInt(int64(*ctr))
 		case reflect.Slice:
 			if f.Type().Elem().Kind() != reflect.String {
@@ -453,7 +453,7 @@ func TestLegacyLDAP_RegistryRejects_NeverLegacyFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy.cacheSet(cacheKey("eve", "eve-pass"), true, nil)
+	legacy.cacheSet(cacheKey("eve", "eve-pass"), "", true, nil)
 	cfg.SetProvider(legacy)
 
 	// Registry LDAP that REJECTS eve.
