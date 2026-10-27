@@ -280,9 +280,14 @@ func (fs *Syncer) schedulerConfig() feedsched.Config {
 		// stays readable throughout, so degradation is already graceful. A
 		// panicked round is charged as a failure, so a systematically hostile
 		// archive backs off rather than being re-fetched at speed.
-		Run: func(context.Context) bool {
+		Run: func(ctx context.Context) bool {
 			var ok bool
-			if obs.SafeCall("feedsync", func() { ok = fs.syncRound() }) {
+			// CHAOS-93 RT-4: the scheduler's ctx reaches the round. It used to
+			// be dropped here, so the 50+ MB tarball fetch ran on
+			// context.Background(): a stalled origin could not be interrupted
+			// by SIGTERM, and the round went on to a BulkWrite that raced the
+			// store close at shutdown order 120.
+			if obs.SafeCall("feedsync", func() { ok = fs.syncRound(ctx) }) {
 				return false
 			}
 			return ok
@@ -293,11 +298,13 @@ func (fs *Syncer) schedulerConfig() feedsched.Config {
 // Sync downloads the UT1 tarball, parses all mapped categories, and performs a
 // bulk write into CommunityDB. The previous DB contents remain readable during
 // the import; BadgerDB's WriteBatch overwrites keys as they arrive.
-func (fs *Syncer) Sync() { fs.syncRound() }
+// Deliberately NOT bound to an admin request's context (see threatfeed's Sync):
+// a manual "sync now" should survive the operator closing the tab.
+func (fs *Syncer) Sync() { fs.syncRound(context.Background()) }
 
 // syncRound performs one sync and reports success, so the scheduler can pick
 // the retry cadence and the health surfaces can report the failure.
-func (fs *Syncer) syncRound() bool {
+func (fs *Syncer) syncRound(ctx context.Context) bool {
 	obs.Printf("FeedSync: starting UT1 sync from %s", fs.feedURL)
 	start := time.Now()
 	fs.lastAttempt.Store(start)
@@ -314,13 +321,29 @@ func (fs *Syncer) syncRound() bool {
 		return false
 	}
 
-	entries, err := downloadAndParse(fs.feedURL)
+	entries, err := downloadAndParse(ctx, fs.feedURL)
 	if err != nil {
 		fs.noteFailure(failDownload)
 		obs.Printf("FeedSync: download/parse failed: %v", err)
 		return false
 	}
 	obs.Printf("FeedSync: parsed %d domain entries, writing to BadgerDB…", len(entries))
+
+	// CHAOS-93 RT-4: the last checkpoint before the durable write. The round is
+	// started by the scheduler and the store is closed by shutdown hook order
+	// 120, with the lifecycle ctx cancelled at order 40 — so a round that was
+	// still downloading when SIGTERM arrived used to arrive here anyway and
+	// issue a 50+ MB BulkWrite into a store that is about to close. Cancelled
+	// means do not start the write; it is charged as a failed round, and the
+	// last-good DB stays exactly as it was.
+	// Charged as failWrite, the existing bounded reason class: the write is what
+	// did not happen. No new reason is introduced, so the health snapshot and
+	// the metrics surface are unchanged.
+	if ctx.Err() != nil {
+		fs.noteFailure(failWrite)
+		obs.Printf("FeedSync: cancelled before the bulk write; the previous category data is unchanged")
+		return false
+	}
 
 	if err := fs.db.BulkWrite(entries); err != nil {
 		fs.noteFailure(failWrite)
@@ -371,9 +394,9 @@ func (fs *Syncer) Stats() (int64, time.Time, time.Duration) {
 
 // downloadAndParse fetches the UT1 tarball from url and returns a
 // domain → mappedCategory map ready for BulkWrite.
-func downloadAndParse(url string) (map[string]string, error) {
+func downloadAndParse(ctx context.Context, url string) (map[string]string, error) {
 	client := &http.Client{Timeout: feedSyncHTTPTimeout}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}

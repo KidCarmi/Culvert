@@ -69,7 +69,7 @@ func TestSyncRound_FailureIsCountedAndClassified(t *testing.T) {
 	before := SyncFailures()
 	fs := New(nil, srv.URL, time.Hour)
 
-	if ok := fs.syncRound(); ok {
+	if ok := fs.syncRound(context.Background()); ok {
 		t.Fatal("syncRound reported success against a 503 origin")
 	}
 	h := fs.Health()
@@ -90,7 +90,7 @@ func TestSyncRound_FailureIsCountedAndClassified(t *testing.T) {
 	}
 
 	// A second failure accumulates rather than resetting.
-	fs.syncRound()
+	fs.syncRound(context.Background())
 	if got := fs.Health().ConsecutiveFailures; got != 2 {
 		t.Fatalf("ConsecutiveFailures = %d after two failed rounds, want 2", got)
 	}
@@ -107,7 +107,7 @@ func TestLastFailureIsBounded(t *testing.T) {
 	defer srv.Close()
 
 	fs := New(nil, srv.URL, time.Hour)
-	fs.syncRound()
+	fs.syncRound(context.Background())
 	if got := fs.Health().LastFailure; !allowed[got] {
 		t.Fatalf("LastFailure = %q, which is outside the bounded value set", got)
 	}
