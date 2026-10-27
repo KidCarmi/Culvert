@@ -13,6 +13,7 @@ package main
 //   - All upstream URLs are validated as HTTPS + non-private (SSRF guard).
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -26,13 +27,18 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	jwtv5 "github.com/golang-jwt/jwt/v5"
 
+	"github.com/KidCarmi/Culvert/internal/ssrf"
+
 	"github.com/KidCarmi/Culvert/internal/authstate"
+
+	"github.com/KidCarmi/Culvert/internal/idpmeta"
 )
 
 // ---------------------------------------------------------------------------
@@ -50,39 +56,240 @@ type oidcDiscoveryDoc struct {
 	JWKsURI               string `json:"jwks_uri"`
 }
 
-// fetchOIDCDiscovery fetches and validates the provider's well-known metadata.
-// The caller is responsible for ensuring issuer is a valid HTTPS URL.
-func fetchOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
-	// Normalise: strip trailing slash.
+// oidcWellKnownURL is the ONE derivation of an issuer's discovery-document URL.
+//
+// It is a function rather than two inline concatenations because that string is
+// not only fetched: it is the cache key the last-known-good store is written
+// under AND the source a metadata failure episode is keyed by. Deriving it in
+// more than one place is how those three stopped agreeing — the episode key was
+// computed from the raw ISSUER while the episode itself was recorded under the
+// well-known URL, so a refused edit's cleanup looked up a key that never
+// existed (Codex review round 6). When one layer decides what a value MEANS,
+// every other layer must ask that layer rather than re-derive the rule.
+//
+// THE TRAILING-SLASH NORMALISATION BELONGS HERE, and leaving it outside was
+// round 6's own defect one layer down (Codex review round 7). Neither admission
+// gate normalises the issuer, so an issuer ending in "/" is ordinary stored
+// configuration; the fetch path trimmed it locally before calling this helper
+// while idpRemoteDocumentSource passed the stored string through untouched, so
+// acquisition and cleanup derived DIFFERENT keys for one profile and a refused
+// edit left its speculative episode behind to degrade and alert for a
+// configuration that was never published. One derivation means one string,
+// normalisation included: do not re-add a trim at a call site.
+func oidcWellKnownURL(issuer string) string {
 	issuer = strings.TrimRight(issuer, "/")
-	wellKnown := issuer + "/.well-known/openid-configuration"
-
-	// Security: ensure the discovery URL is safe (non-private HTTPS).
-	if err := validateExternalURL(wellKnown); err != nil {
-		return nil, fmt.Errorf("oidc discovery: %w", err)
+	if issuer == "" {
+		return ""
 	}
+	return issuer + "/.well-known/openid-configuration"
+}
 
+// oidcDiscoveryURLShape is the go/request-forgery barrier for
+// fetchOIDCDiscoveryOverNetwork, and it is the SAME regexp as
+// samlMetadataURLShape on purpose: CodeQL recognises Regexp.MatchString on the
+// tainted value as a sanitiser, whereas whether it models the
+// isPrivateHostContext wrapper is NOT established.
+//
+// That is not a guess. The SAML half carried the wrapper and no regexp and was
+// flagged critical by this PR's own CodeQL run; the barrier was added there and
+// cleared it. This half kept the wrapper alone and was flagged identically on
+// the owner-decision round — the FIFTH finding this sweep has produced from the
+// same SAML/OIDC asymmetry (the admission gates, the endpoint validator, the
+// pre-flight bound and the fetcher wall were the others). A fix applied to one
+// of two symmetric paths is how that asymmetry keeps surviving.
+//
+// It admits only what the scheme check below admits anyway (case-insensitive
+// http/https followed by an authority), so it narrows nothing a valid discovery
+// URL uses. The one shape it refuses that the check below would have admitted
+// is an EMPTY authority ("http:///x"), which could never be fetched and would
+// have reached isPrivateHostContext with an empty host — fail-closed, earlier.
+var oidcDiscoveryURLShape = regexp.MustCompile(`(?i)^https?://[^/]`)
+
+// fetchOIDCDiscoveryOverNetwork performs exactly the request the
+// pre-CHAOS-87 code performed: same 10 s budget, same SSRF-safe dialer, same
+// 64 KiB read limit, same HTTP-status rule. Split out only so
+// acquireIdPDocument can own the cache/fallback decision around it.
+//
+// THE GUARD IS REPEATED HERE ON PURPOSE — see the matching note on
+// fetchSAMLMetadataOverNetwork. The convention is that the check sits in the
+// same function as the outbound request so CodeQL can verify it; a check in a
+// calling function is what raised a critical go/request-forgery alert when
+// this helper was first split out.
+func fetchOIDCDiscoveryOverNetwork(src idpRemoteURL) ([]byte, error) {
+	wellKnown := string(src)
+	// Inline url.Parse + scheme check + private-host check, in the SAME
+	// function as the request, per the repo's SSRF convention.
+	//
+	// This replaces a validateExternalURL call, and the replacement is NOT a
+	// widening: that helper is isSafeRedirectURL, i.e. exactly an absolute
+	// http/https check plus isPrivateHost, and isPrivateHost's failure mode is
+	// fail-CLOSED (an unresolvable host is refused). All three properties are
+	// preserved below, so the set of URLs this function will fetch is
+	// unchanged. A resolution FAILURE still reaches resolveIdPDocument as a
+	// failed fetch and falls back to the last-known-good cache; a definite
+	// private verdict is a policy refusal and does not (idpFetchUnavailable).
+	//
+	// What changes is the BOUND. isPrivateHost resolves under
+	// context.Background(), so the guard ran to the OS resolver's full budget
+	// BEFORE the request context existed — an unbounded step introduced into a
+	// bounded operation by the guard itself, on boot and on every CP->DP
+	// snapshot apply, and one that also delays reaching the cached document
+	// this sweep exists to serve. That is the CHAOS-60/64 shape, and it is the
+	// SAME defect this sweep already fixed on the SAML half
+	// (fetchSAMLMetadataOverNetwork) and did not carry across — the third time
+	// the SAML/OIDC asymmetry has produced a finding here. A bounded operation
+	// is only as bounded as its first step. Do not un-bound this for CodeQL.
+	if !oidcDiscoveryURLShape.MatchString(wellKnown) {
+		return nil, fmt.Errorf("oidc discovery: URL must be an absolute http:// or https:// URL")
+	}
+	u, err := url.Parse(wellKnown)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil, fmt.Errorf("oidc discovery: URL must be an absolute http:// or https:// URL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), oidcDiscoveryFetchBudget)
+	defer cancel()
+	if err := isPrivateHostContext(ctx, u.Host); err != nil {
+		// A resolution failure is an outage (stale-eligible); a definite
+		// private verdict is a policy refusal and is not (idpFetchUnavailable).
+		return nil, idpFetchUnavailable(fmt.Errorf("oidc discovery: host refused: %w", err))
+	}
 	client := &http.Client{
-		Timeout:   10 * time.Second,
+		Timeout:   oidcDiscoveryFetchBudget,
 		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, nil)
+	// The request is built from the PARSED url, as the SAML sibling is: the
+	// guard above checked u, so fetching the raw string would be validating
+	// one URL and requesting another. For a URL this shape it round-trips.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery request: %w", err)
 	}
+	// Every failure below is CLASSIFIED for resolveIdPDocument's
+	// stale-if-error rule: transport and 5xx may be answered from the
+	// last-known-good cache, a 4xx/other status may not.
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("oidc discovery fetch: %w", err)
+		return nil, idpFetchUnavailable(fmt.Errorf("oidc discovery fetch: %w", err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("oidc discovery: HTTP %d", resp.StatusCode)
+		return nil, idpFetchStatusError(resp.StatusCode, fmt.Errorf("oidc discovery: HTTP %d", resp.StatusCode))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return nil, idpFetchUnavailable(fmt.Errorf("oidc discovery read: %w", err))
+	}
+	return body, nil
+}
+
+// fetchOIDCDiscovery fetches and validates the provider's well-known metadata
+// for a configured profile. The caller is responsible for ensuring issuer is a
+// valid HTTPS URL.
+func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time, error) {
+	return fetchOIDCDiscoveryAt(profileID, issuer, nil)
+}
+
+// fetchOIDCDiscoveryAt is fetchOIDCDiscovery with the caller's captured cache
+// retirement epoch (nil: capture it now, before the fetch). See
+// idpFetchGeneration.
+func fetchOIDCDiscoveryAt(profileID, issuer string, captured *idpmeta.Generation) (*oidcDiscoveryDoc, time.Time, error) {
+	// The trailing-slash normalisation lives INSIDE oidcWellKnownURL — see the
+	// note there. Trimming again here is what made two layers disagree.
+	wellKnown := oidcWellKnownURL(issuer)
+
+	// CONFIGURATION errors fail fast and are never answered from cache; a
+	// RESOLUTION failure is not one. validateExternalURL resolves the host, so
+	// using it here made "DNS is down" indistinguishable from "this issuer is
+	// misconfigured" and returned BEFORE the last-known-good document could be
+	// consulted — the OIDC half of this sweep's own headline defect, left in
+	// place by the fix that closed the SAML half. The DNS-backed check still
+	// runs, inline in fetchOIDCDiscoveryOverNetwork, where its failure is a
+	// failed FETCH and routes to the cache.
+	if err := validateExternalURLStructure(wellKnown); err != nil {
+		return nil, time.Time{}, fmt.Errorf("oidc discovery: %w", err)
 	}
 
+	// CHAOS-87: a discovery endpoint that is momentarily unreachable must not
+	// destroy the provider. acquireIdPDocument prefers the network and falls
+	// back to the last successfully fetched document within
+	// idpmeta.StaleMaxAge. The bytes are decoded and RE-VALIDATED below by the
+	// same code either way — every discovered endpoint is put back through
+	// validateExternalURLStructure, so a cached document cannot name an
+	// endpoint the network path would have accepted on structure.
+	//
+	// THE GATE IS THE AUTHORITATIVE VERDICT, AND ITS RESULT IS CARRIED OUT
+	// RATHER THAN RECOMPUTED (Codex review round 7). Round 6 wired this
+	// validator to the STRUCTURAL half of the parser so the one check that
+	// resolves DNS would not run twice — but that made the gate WEAKER than the
+	// verdict that decides whether the provider goes live, and
+	// resolveIdPDocument caches whatever the gate accepts. A 200 document that
+	// parses and whose endpoints are structurally legal but whose
+	// authorization_endpoint resolves into a private range therefore REPLACED
+	// the last-known-good copy and recorded a FRESH acquisition, and was only
+	// then refused: the document that could be compiled was gone, so the next
+	// outage had nothing to fall back to, and the surface said success.
+	//
+	// Carrying the parse result out of the closure fixes both halves at once.
+	// The gate is the full parse, so nothing the compile refuses can enter the
+	// cache; and because the caller reuses what the gate produced, the
+	// authoritative parse — address lookup and counter included — still runs
+	// exactly ONCE per document, which is the property round 6 was protecting.
+	// Two lookups remain possible in one case only, and it is not waste: when a
+	// FETCHED document is refused and a CACHED one is then vetted before being
+	// served, those are two different documents and each must be judged.
+	//
+	// Do not narrow this validator again. A gate that admits what the compile
+	// rejects is a cache-poisoning path, not an optimisation.
+	// The retirement epoch is taken BEFORE the fetch — or earlier, when the
+	// profile was selected for recovery — so a deletion committed in between
+	// can refuse this fetch's cache write (IDP-18).
+	gen := idpFetchGeneration(profileID, captured)
+	fetched, fetchErr := fetchOIDCDiscoveryOverNetwork(idpRemoteURL(wellKnown))
+	var parsed *oidcDiscoveryDoc
+	_, cachedAt, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, gen, fetched, fetchErr, func(b []byte) error {
+		doc, vErr := parseAndValidateOIDCDiscovery(profileID, b)
+		if vErr != nil {
+			return vErr
+		}
+		parsed = doc
+		return nil
+	}, nil) // a discovery document declares no expiry; idpmeta.StaleMaxAge alone bounds it
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if parsed == nil {
+		// Unreachable while resolveIdPDocument returns a nil error only for
+		// bytes the validator it was handed accepted. Fail CLOSED rather than
+		// hand back a nil document if that contract ever changes.
+		return nil, time.Time{}, fmt.Errorf("oidc discovery: document accepted without a parse result")
+	}
+	return parsed, cachedAt, nil
+}
+
+// parseAndValidateOIDCDiscovery decodes and validates a discovery document.
+//
+// CHAOS-87 makes this the SINGLE parser for the document, reached identically
+// whether the bytes came off the network or out of the last-known-good cache.
+// That is the load-bearing half of the cache's safety argument: the discovery
+// document names the authorization and token endpoints this appliance sends
+// users and credentials to, so every one of them is re-validated here and a
+// cached document cannot widen anything the network path would have refused —
+// including one edited on disk by something that got write access to dataDir.
+//
+// The endpoints are NOT all guarded the same way, and the difference is the
+// point (CHAOS-87 round 3). The token and JWKS endpoints are ones this
+// appliance DIALS, so ssrfSafeDialContext refuses a private resolved address
+// at connect time and is rebinding-proof — a structural check is enough for
+// them. The AUTHORIZATION endpoint is not dialled by us at all: it is handed
+// to the user's BROWSER as a redirect, so no dialer of ours is ever consulted
+// and isSafeCaptiveRedirect checks only the shape (absolute, http/https,
+// non-empty host). An earlier round of this sweep claimed that function
+// re-checked the address and it does not; dropping the resolving validator
+// here therefore opened a path for a discovery document — or an edited cache
+// file — to redirect a browser at an internal address. It gets its own guard.
+func parseOIDCDiscoveryStructural(raw []byte) (*oidcDiscoveryDoc, error) {
 	var doc oidcDiscoveryDoc
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&doc); err != nil {
+	if err := json.NewDecoder(io.LimitReader(bytes.NewReader(raw), 64<<10)).Decode(&doc); err != nil {
 		return nil, fmt.Errorf("oidc discovery parse: %w", err)
 	}
 	if doc.AuthorizationEndpoint == "" || doc.TokenEndpoint == "" {
@@ -97,11 +304,133 @@ func fetchOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
 		if u == "" {
 			continue
 		}
-		if err := validateExternalURL(u); err != nil {
+		// STRUCTURAL, and deliberately: this parser runs on the cached
+		// document too, so a DNS-backed REFUSAL-ON-FAILURE here would make the
+		// fallback unusable during exactly the outage it exists for.
+		if err := validateExternalURLStructure(u); err != nil {
 			return nil, fmt.Errorf("oidc discovery endpoint %q: %w", u, err)
 		}
 	}
 	return &doc, nil
+}
+
+// parseAndValidateOIDCDiscovery is parseOIDCDiscoveryStructural plus the ONE
+// check that is not a property of the document bytes at all: the
+// browser-redirect target's ADDRESS.
+//
+// THIS is the verdict every consumer must use — the compile AND the gate
+// resolveIdPDocument applies before a document may replace the last-known-good
+// copy. Round 6 handed the gate the structural half alone, to keep the DNS
+// lookup and its counter from running twice, and that made the gate admit
+// documents the compile refuses; what actually keeps the work single is that
+// fetchOIDCDiscovery CARRIES OUT the result this function produced instead of
+// recomputing it (Codex review round 7). Cost is bounded by not doing the work
+// twice, never by asking a cheaper question.
+//
+// The two-function split survives as a decomposition, and it is a principled
+// one: whether a document parses and whether its endpoints are structurally
+// legal are properties OF THE BYTES, deterministic and free, so they are
+// reusable by anything that only needs to know the shape; whether a hostname
+// currently resolves into a private range is a property of the NETWORK at this
+// instant, which two calls can legitimately disagree about. Nothing outside
+// this function may use the structural half as a substitute for the verdict.
+func parseAndValidateOIDCDiscovery(profileID string, raw []byte) (*oidcDiscoveryDoc, error) {
+	doc, err := parseOIDCDiscoveryStructural(raw)
+	if err != nil {
+		return nil, err
+	}
+	// The browser-redirect target gets the address check the dialer would have
+	// given it if we dialled it. Refused ONLY on a DEFINITE private verdict:
+	// ssrf.PrivateHostContext has three outcomes and a resolution FAILURE is
+	// not "private", it is "unknown" — treating it as a refusal would hand a
+	// resolver outage the power to reject a cached document, which is this
+	// sweep's own headline defect in miniature (the CHAOS-65 (6e) rule: a
+	// guard that can fail for more than one reason must say which).
+	if err := refuseDefinitelyPrivateRedirect(profileID, doc.AuthorizationEndpoint); err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+// oidcRedirectHostCheckBudget bounds the one address lookup the authorization
+// endpoint gets. This runs at COMPILE time (boot, admin write, config sync) —
+// never on the proxy request path — so it is bounded for the same reason the
+// fetch beside it is, not because a request is waiting on it.
+const oidcRedirectHostCheckBudget = 5 * time.Second
+
+// oidcDiscoveryFetchBudget bounds ONE discovery acquisition end to end — the
+// pre-flight host check AND the HTTP request share it, from one context, so
+// the guard can never outlive the operation it guards. It is the value the
+// request already used; only the guard was outside it.
+const oidcDiscoveryFetchBudget = 10 * time.Second
+
+// refuseDefinitelyPrivateRedirect refuses an authorization endpoint that
+// RESOLVES into a private range. A host that cannot be resolved right now is
+// ALLOWED: the document was validated against a resolving check when it was
+// first fetched and cached, so "unknown" during an outage is the fallback
+// working as designed, while "definitely private" is the case no outage
+// excuses.
+func refuseDefinitelyPrivateRedirect(profileID, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("oidc discovery authorization_endpoint %q: unusable", raw)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), oidcRedirectHostCheckBudget)
+	defer cancel()
+	if err := isPrivateHostContext(ctx, u.Host); err != nil {
+		if errors.Is(err, ssrf.ErrBlocked) {
+			return fmt.Errorf("oidc discovery authorization_endpoint %q resolves to a private address", raw)
+		}
+		// COULD NOT DETERMINE (resolver outage, or this budget spent). Not a
+		// refusal — treating it as one would hand a resolver outage the power
+		// to reject a cached document, which is this sweep's headline defect.
+		//
+		// It is therefore ADMITTED UNVERIFIED, and that is a real residual
+		// (register row IDP-9), not a closed case: this endpoint is handed to
+		// the user's BROWSER, so no dialer of ours is ever consulted, and
+		// isSafeCaptiveRedirect checks only shape. A host unresolvable now that
+		// later resolves private would be a browser redirect into the internal
+		// network, and nothing re-checks a LIVE provider.
+		//
+		// Closing it is a POSTURE decision with an availability price — failing
+		// closed here takes SSO down whenever OUR resolver cannot resolve the
+		// authorization host, even though the user's browser could — so it is
+		// left to an owner rather than changed inside this sweep. What is NOT
+		// acceptable is that it was SILENT: the admission is now counted, so an
+		// operator can see that a provider is serving redirects to an endpoint
+		// this appliance never verified.
+		noteIdPAuthzEndpointUnverified(profileID)
+	}
+	return nil
+}
+
+// probeOIDCDiscovery is the ADMIN "test this issuer" path (POST
+// /api/idp/oidc/discover). It deliberately does NOT go through the
+// last-known-good cache, in either direction:
+//
+//   - it must never READ the cache, because its whole job is to report
+//     whether the issuer is reachable RIGHT NOW; answering a diagnostic from
+//     cache would report a dead IdP as healthy, which is the
+//     `ocspCoverage`/"found nothing wrong vs never consulted" mistake;
+//   - it must never WRITE the cache, because the issuer is CALLER-SUPPLIED.
+//     A cache keyed on an arbitrary admin-supplied issuer would let the test
+//     endpoint pre-seed documents for profiles that do not exist yet.
+func probeOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
+	wellKnown := oidcWellKnownURL(issuer)
+	if err := validateExternalURL(wellKnown); err != nil {
+		return nil, fmt.Errorf("oidc discovery: %w", err)
+	}
+	raw, err := fetchOIDCDiscoveryOverNetwork(idpRemoteURL(wellKnown))
+	if err != nil {
+		return nil, err
+	}
+	// "" profile id: this is the admin diagnostic, which produces no live
+	// provider, so an unverified authorization endpoint here is not counted
+	// against a profile that does not exist.
+	return parseAndValidateOIDCDiscovery("", raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -496,6 +825,10 @@ type OIDCFlowProvider struct {
 	disc    *oidcDiscoveryDoc
 	jwks    *jwksCache
 	client  *http.Client
+	// cachedAt is when the discovery document this provider was built from was
+	// fetched, if it came from the last-known-good cache; zero when fetched
+	// live. Read only by the publish sites (idpNotePublishedGeneration).
+	cachedAt time.Time
 
 	// ── Introspection result cache + availability gate (CHAOS-49) ────────────
 	//
@@ -567,6 +900,13 @@ func (p *OIDCFlowProvider) introspectCacheSet(key string, identity *Identity, ok
 // NewOIDCFlowProvider validates the profile, runs OIDC discovery, and returns
 // a ready-to-use OIDCFlowProvider.
 func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
+	return newOIDCFlowProviderAt(p, nil)
+}
+
+// newOIDCFlowProviderAt is NewOIDCFlowProvider for a compile whose cache
+// retirement epoch was captured when the profile was SELECTED (see
+// idpFetchGeneration); nil captures it immediately before the discovery fetch.
+func newOIDCFlowProviderAt(p *IdPProfile, gen *idpmeta.Generation) (*OIDCFlowProvider, error) {
 	cfg := p.OIDC
 	if cfg.ClientID == "" {
 		return nil, fmt.Errorf("oidc[%s]: client_id required", p.ID)
@@ -579,7 +919,7 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 	}
 	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
-	disc, err := fetchOIDCDiscovery(cfg.Issuer)
+	disc, cachedAt, err := fetchOIDCDiscoveryAt(p.ID, cfg.Issuer, gen)
 	if err != nil {
 		return nil, fmt.Errorf("oidc[%s] discovery: %w", p.ID, err)
 	}
@@ -598,6 +938,8 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 		client:  client,
 		cache:   map[string]*oidcCacheEntry{},
 		ttl:     oidcFlowCacheTTL,
+
+		cachedAt: cachedAt,
 	}
 	if disc.JWKsURI != "" {
 		prov.jwks = &jwksCache{jwksURI: disc.JWKsURI, client: client, keys: make(map[string]interface{})}
@@ -606,6 +948,17 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 }
 
 func (p *OIDCFlowProvider) Name() string { return "oidc:" + p.profile.ID }
+
+func (p *OIDCFlowProvider) servedDocumentCachedAt() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	return p.cachedAt
+}
+
+// servedDocumentValidUntil is always zero: an OIDC discovery document declares
+// no expiry of its own, so idpmeta.StaleMaxAge alone bounds a cached one.
+func (p *OIDCFlowProvider) servedDocumentValidUntil() time.Time { return time.Time{} }
 
 // DisplayName returns the admin-configured label shown to end users (e.g. on
 // the IdP selection screen), falling back to the machine key if unset.
