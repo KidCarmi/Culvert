@@ -1,0 +1,104 @@
+m2-begin boot_id=8cbc29ad-16a0-4be7-aba2-882124474c25
+m2-obs host sysctl rc=0 lines=3
+m2-out host sysctl| 0
+m2-out host sysctl| 2
+m2-out host sysctl| 1
+m2-obs host sysctl-file rc=1 lines=0
+m2-err host sysctl-file| sha256sum: /etc/sysctl.d/99-culvert-hardening.conf: No such file or directory
+m2-obs host io_uring-setup rc=0 lines=1
+m2-out host io_uring-setup| opened
+m2-obs host ordering rc=1 lines=0
+m2-err host ordering| System has not been booted with systemd as init system (PID 1). Can't operate.
+m2-err host ordering| Failed to connect to bus: Host is down
+m2-obs host sysctl-journal rc=0 lines=0
+m2-obs host io_uring-fds rc=0 lines=1
+m2-out host io_uring-fds| summary procs=89 fds=230 rings=0 unreadable_alive=0 exited=0 fd_vanished=21
+m2-obs host modules rc=1 lines=0
+m2-err host modules| cat: /proc/modules: No such file or directory
+m2-obs host nics rc=0 lines=1
+m2-out host nics| /sys/class/net/eth0 virtio_net
+m2-obs host mdb rc=0 lines=0
+m2-obs host netns-census rc=0 lines=3
+m2-out host netns-census| net:[4026531833] 10
+m2-out host netns-census| net:[4026532268] 1351
+m2-out host netns-census| net:[4026532324] 1421
+m2-obs culvert pid rc=0 lines=1
+m2-out culvert pid| 1351
+m2-obs culvert-clamav pid rc=0 lines=1
+m2-out culvert-clamav pid| 1421
+m2-obs host netns rc=0 lines=1
+m2-out host netns| net:[4026531833]
+m2-obs host links rc=1 lines=0
+m2-err host links| Cannot open netlink socket: Permission denied
+m2-obs host routes4 rc=1 lines=0
+m2-err host routes4| Cannot open netlink socket: Permission denied
+m2-obs host routes6 rc=1 lines=0
+m2-err host routes6| Cannot open netlink socket: Permission denied
+m2-obs host qdisc rc=0 lines=6
+m2-out host qdisc| qdisc noqueue 0: dev lo root refcnt 2 
+m2-out host qdisc| qdisc pfifo_fast 0: dev eth0 root refcnt 2 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+m2-out host qdisc| qdisc noqueue 0: dev docker0 root refcnt 2 
+m2-out host qdisc| qdisc noqueue 0: dev br-fe5432ba08f7 root refcnt 2 
+m2-out host qdisc| qdisc noqueue 0: dev veth0c1567d root refcnt 2 
+m2-out host qdisc| qdisc noqueue 0: dev vethe51b436 root refcnt 2 
+m2-obs host nft-json rc=127 lines=0
+m2-err host nft-json| nft: command not found
+m2-obs host nft-text rc=127 lines=0
+m2-err host nft-text| nft: command not found
+m2-obs host ipv6-conf rc=3 lines=0
+m2-obs culvert netns rc=0 lines=1
+m2-out culvert netns| net:[4026532268]
+m2-obs culvert links rc=1 lines=0
+m2-err culvert links| Cannot open netlink socket: Permission denied
+m2-obs culvert routes4 rc=1 lines=0
+m2-err culvert routes4| Cannot open netlink socket: Permission denied
+m2-obs culvert routes6 rc=1 lines=0
+m2-err culvert routes6| Cannot open netlink socket: Permission denied
+m2-obs culvert qdisc rc=0 lines=2
+m2-out culvert qdisc| qdisc noqueue 0: dev lo root refcnt 2 
+m2-out culvert qdisc| qdisc noqueue 0: dev eth0 root refcnt 2 
+m2-obs culvert nft-json rc=127 lines=0
+m2-err culvert nft-json| nft: command not found
+m2-obs culvert nft-text rc=127 lines=0
+m2-err culvert nft-text| nft: command not found
+m2-obs culvert ipv6-conf rc=3 lines=0
+m2-obs culvert-clamav netns rc=0 lines=1
+m2-out culvert-clamav netns| net:[4026532324]
+m2-obs culvert-clamav links rc=1 lines=0
+m2-err culvert-clamav links| Cannot open netlink socket: Permission denied
+m2-obs culvert-clamav routes4 rc=1 lines=0
+m2-err culvert-clamav routes4| Cannot open netlink socket: Permission denied
+m2-obs culvert-clamav routes6 rc=1 lines=0
+m2-err culvert-clamav routes6| Cannot open netlink socket: Permission denied
+m2-obs culvert-clamav qdisc rc=0 lines=2
+m2-out culvert-clamav qdisc| qdisc noqueue 0: dev lo root refcnt 2 
+m2-out culvert-clamav qdisc| qdisc noqueue 0: dev eth0 root refcnt 2 
+m2-obs culvert-clamav nft-json rc=127 lines=0
+m2-err culvert-clamav nft-json| nft: command not found
+m2-obs culvert-clamav nft-text rc=127 lines=0
+m2-err culvert-clamav nft-text| nft: command not found
+m2-obs culvert-clamav ipv6-conf rc=3 lines=0
+m2-probe-sha256 want=8ecf174ab1966c1aa659aaa30a23bc49da0dfdbbf261a34f655f4beb92f724b1 got=8ecf174ab1966c1aa659aaa30a23bc49da0dfdbbf261a34f655f4beb92f724b1
+m2-container culvert id=e33b17d5cd7e started=2026-10-27T16:22:07.337185411Z restarts=0 user=1000 capdrop=[CAP_NET_RAW] capadd=<no value> privileged=false secopt=<no value>
+m2-obs culvert top rc=0 lines=2
+m2-out culvert top| PID
+m2-out culvert top| 1351
+m2-proc culvert 1351 comm=sleep uid=1000 capeff=0000000000000000 capbnd=00000000a80405fb netraw-eff=0 netraw-bnd=0 netadmin-bnd=0 sysadmin-bnd=0 seccomp=2
+m2-probe culvert as=root rc=0 uid=0 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=00000000a80405fb capbnd=00000000a80405fb nonewprivs=0 seccomp=2
+m2-probe culvert as=default rc=0 uid=1000 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=0000000000000000 capbnd=00000000a80405fb nonewprivs=0 seccomp=2
+m2-probe-removed culvert rc=0
+m2-container culvert-clamav id=8cc3fb9752c0 started=2026-10-27T16:22:07.653470114Z restarts=0 user= capdrop=[CAP_NET_RAW] capadd=<no value> privileged=false secopt=<no value>
+m2-obs culvert-clamav top rc=0 lines=2
+m2-out culvert-clamav top| PID
+m2-out culvert-clamav top| 1421
+m2-proc culvert-clamav 1421 comm=sleep uid=0 capeff=00000000a80405fb capbnd=00000000a80405fb netraw-eff=0 netraw-bnd=0 netadmin-bnd=0 sysadmin-bnd=0 seccomp=2
+m2-probe culvert-clamav as=root rc=0 uid=0 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=00000000a80405fb capbnd=00000000a80405fb nonewprivs=0 seccomp=2
+m2-probe culvert-clamav as=default rc=0 uid=0 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=00000000a80405fb capbnd=00000000a80405fb nonewprivs=0 seccomp=2
+m2-probe-removed culvert-clamav rc=0
+m2-obs clamav version rc=127 lines=1
+m2-out clamav version| OCI runtime exec failed: exec failed: unable to start container process: exec: "clamdscan": executable file not found in $PATH
+m2-obs clamav eicar rc=127 lines=1
+m2-out clamav eicar| OCI runtime exec failed: exec failed: unable to start container process: exec: "clamdscan": executable file not found in $PATH
+m2-obs clamav freshclam rc=0 lines=0
+m2-err clamav freshclam| tail: cannot open '/var/log/clamav/freshclam.log' for reading: No such file or directory
+m2-end

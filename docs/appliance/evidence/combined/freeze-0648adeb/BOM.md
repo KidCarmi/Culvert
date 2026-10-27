@@ -69,39 +69,53 @@ It is a **repository file only**. Its `cap_drop: [NET_RAW]` keeps repo-based HA 
 
 ## 5. Test map: what proves each change, and where
 
+> **Revision 3.1 (ASTRA 27 Oct 16:10).** Only the harness and documentation identities change: the lab is now `69fb5f36`, which replaces `9dcbb69d`. The candidate, source identity, epoch and sidecar constants in §1–§4 are unchanged and were not rebuilt.
+
 **Pre-build** (done):
 
 | Change | Evidence |
 |---|---|
 | M1 engine pins, sidecar `culvert.4` | Unchanged from the accepted record (`../freeze-93c83f90/BOM.md` §4) |
 | `cap_drop NET_RAW` | `TestM2Hardening_NoServiceKeepsNetRaw` (fails if the drop is removed). Deep 40523416237 ran the lifecycle, maintenance-agent and real-ClamAV jobs on the new compose files. Probe controls (`../m2-mitigation/probe-control/`): with `NET_RAW` dropped, root in a default-seccomp container gets `EPERM` for AF_PACKET; with default capabilities, root **opens** it. |
-| `io_uring_disabled = 2` | `TestM2Hardening_IoUringDisabledOnTheGuest`, `TestBuildOVA_CopiesEveryProvisionFilePrepareGuestInstalls`, and the build-time value check in `prepare-guest.sh` |
-| Harness | Lab `9dcbb69d`. Every check was exercised against two local containers standing in for the appliance's (`m2_checkpoint` with only the guest transport stubbed). The pass path completes under `set -euo pipefail`, and five mutations each fail the right check: NET_RAW kept, NET_ADMIN added, seccomp unconfined, probe bytes changed, and sandbox values (io_uring on, IPv6 sysctls absent, no clamd). **A real defect was found and fixed:** the earlier E `m2-hardening` check aborted the whole run on a passing guest (`grep -v` selecting nothing under `pipefail`). |
+| `io_uring_disabled = 2` | `TestM2Hardening_IoUringDisabledOnTheGuest`, `TestBuildOVA_CopiesEveryProvisionFilePrepareGuestInstalls`, and the build-time value check in `prepare-guest.sh`. Ordering rationale for applying it before workloads: `../m2-mitigation/RESIDUAL-DISPOSITION.md` §1a. |
+| **Harness, fail-closed** (lab `69fb5f36`) | `m2-guest.sh` records every observation with its exit status, and `m2-verdict.py` refuses anything not acquired and parsed. Receipts (`../m2-mitigation/harness-receipts/`): 51 self-test cases, 0 wrong (passing fixture, valid-empty cases, one case per failure mode). Two evaluator mutations are each caught. A real sandbox run fails closed on every facility the sandbox lacks, and a run with `ip` failing and `nft` absent fails both checks. The self-test runs as the first step of every lab job. |
 
-**Post-build, on the one replacement** (these run after the artifact exists; they are not prerequisites for creating it):
+**Post-build, on the one replacement.** These run after the artifact exists; they are not prerequisites for creating it. Every checkpoint (`M2H <tag>`) records seven checks:
 
-| When (lab `9dcbb69d`, matrix `candidate-0648adeb`) | M2 checks | Regression checks already in the run |
+| Check | What it requires |
+|---|---|
+| `-transcript` | The transport exited 0; the begin and end markers are present |
+| `-hardening` | `io_uring_disabled=2`; host `io_uring_setup` returns `EPERM`; a descriptor census with 0 rings and 0 live-but-unreadable processes (exits and vanished descriptors reported); no `NET_RAW`/`NET_ADMIN`/`SYS_ADMIN` and seccomp 2 for every container process; the probe refused all four requests, as root and as the container user, in both containers |
+| `-ordering` | For this boot, `systemd-sysctl` was active before containerd and dockerd started; the drop-in sha256 is recorded |
+| `-preconditions` | Exactly three network namespaces. In each: no VLAN link, no encap route, allowed qdisc kinds, IPv6 `forwarding`/`seg6_enabled`/`ioam6_enabled` 0 on every interface. None of 32 precondition modules loaded; unprivileged BPF off; NIC e1000 or vmxnet3. |
+| `-ruleset` | Every nftables rule expression in every namespace is a source-checked form, otherwise "review required". The text ruleset is kept verbatim. |
+| `-clamav` | clamd found EICAR on a stream scan (`rc=1` + `FOUND`) |
+| `-clamav-ready` | The proxy's `/ready` reports clamav ok |
+
+Where the checkpoints sit in the run:
+
+| When (lab `69fb5f36`, matrix `candidate-0648adeb`) | Checkpoint | Regression checks already in the run |
 |---|---|---|
 | Build | Identity step (§3) | `build-ova.sh` closure + cold-load + bundled agent = image version |
-| **First boot** (steps 1–5, then `M2H firstboot`) | `firstboot-hardening`: io_uring sysctl + host `EPERM` + **0 io_uring descriptors**; no `NET_RAW`/`NET_ADMIN`/`SYS_ADMIN`; seccomp 2; probe **in both containers, as root and as the container user**: AF_PACKET, io_uring, new netns, new userns all `EPERM`. `firstboot-preconditions` (RESIDUAL-DISPOSITION §5). `firstboot-clamav`: EICAR stream scan + `/ready clamav`. | 5 `clamav-real`, 5 `traffic`, 5 `ready-rows`, 5c category enforcement |
-| **Maintenance** (6 agent install, 6b offline restore `down`/`up`, 6c signed apply + rollback, then `M2H maintenance`) | The same three checks on the **recreated** containers | 6 `agent-backup`/`restore-dry-run`, 6b `restore-commit` (traffic), 6c `signed-apply`/`signed-rollback` (traffic after each swap) |
-| **OS update + reboot** (7, 8, then `M2H reboot`) | The same three checks after the reboot; boot ID recorded | 7 `os-update`/`reboot`/`docker-held`, 8 `enforcement`/`ready`/`image-identity`/`stack-resumed` |
-| Engine surface (E, after step 8) | E `m2-hardening` (fixed) plus the existing kernel-assumption checks | E engine-version, sockets, modules denied |
-| **End of run** (R: 3 power-cycle recoveries; H: history restore; then `M2H final`) | The same three checks | R `clamav-evidence` (a fresh EICAR through the proxy: blocked with clamd up, **not** with clamd stopped, blocked again after restart), R `recovery` per reboot, H `history-enforcement` |
+| **First boot**, steps 1–5 | `M2H firstboot`. It runs **after** the workload and traffic steps, so the first boot's ordering evidence is the same-boot systemd timestamps, not its position. | 5 `clamav-real`, 5 `traffic`, 5 `ready-rows`, 5c category enforcement |
+| **Maintenance**: 6 agent install, 6b offline restore `down`/`up`, 6c signed apply + rollback | `M2H maintenance`, on the **recreated** containers | 6 `agent-backup`/`restore-dry-run`, 6b `restore-commit` (traffic), 6c `signed-apply`/`signed-rollback` (traffic after each swap) |
+| **OS update + reboot** (7, 8) | `M2H reboot`. Ordering and drop-in again on the new boot. | 7 `os-update`/`reboot`/`docker-held`, 8 `enforcement`/`ready`/`image-identity`/`stack-resumed` |
+| Engine surface (E, after step 8) | E `m2-hardening` plus the existing kernel-assumption checks | E engine-version, sockets, modules denied |
+| **End of run**: R, 3 power-cycle recoveries; H, history restore | `M2H final` | R `clamav-evidence` (a fresh EICAR through the proxy: blocked with clamd up, **not** with clamd stopped, blocked again after restart), R `recovery` per reboot, H `history-enforcement` |
 | F-DISK-1 (separate job, same image via `SOURCE_IMAGE_*`) | — | ENOSPC behaviour of this image |
 
 **Not gated, recorded only:** freshclam's last log lines at each checkpoint. A fresh database is not a pass condition, because the guest's mirror access depends on the runner.
 
-**After the qualification** (each still to run): exact-byte rescans of the guest OS and host binaries, the app image and the baked sidecar, at all severities, with a check that the engine binaries equal the M1-scanned DEB contents; then ASTRA's ESXi qualification within RESIDUAL-DISPOSITION §4.
+**After the qualification** (each still to run): exact-byte rescans of the guest OS and host binaries, the app image and the baked sidecar, at all severities, with a check that the engine binaries equal the M1-scanned DEB contents. **No ESXi step is part of this plan.** Any ESXi import or use needs separate authorization, and the existing single VM and its custody stay as they are.
 
 ## 6. M2 conditions incorporated
 
 `../m2-mitigation/RESIDUAL-DISPOSITION.md`, **if ASTRA accepts it**, governs the replacement's use:
 - **Scope:** internal lab only.
 - **Exposure:** the §5 restrictions, enforced by the checkpoints above or as operator obligations.
-- **Lapse:** the §6 STOP/reassess triggers and the §7 30-day time box.
+- **Lapse:** the §6 STOP/reassess triggers and the §7 30-day time box. **Not started:** the clock starts only on final acceptance. A trigger means stop and reassess; it never authorizes an automatic kernel patch or rebuild.
 
 ## 7. What happens next, and what does not
 
-- **Once ASTRA accepts items 1–3:** one `workflow_dispatch` of `appliance-lab.yml` on `test/appliance-lab` at the lab commit named in the handoff. Its matrix holds exactly one entry, `candidate-0648adeb`. This is covered by the owner's existing conditional authorization (6400728126).
+- **Once ASTRA accepts this closeout:** one `workflow_dispatch` of `appliance-lab.yml` on `test/appliance-lab` at the lab commit named in the handoff (now `69fb5f36` or a later lab commit ASTRA reviews). Its matrix holds exactly one entry, `candidate-0648adeb`. This is covered by the owner's existing conditional authorization (6400728126).
 - **Not part of it:** a second build, ESXi action, merge, pilot, release, any copy of the OVA, or any deletion.

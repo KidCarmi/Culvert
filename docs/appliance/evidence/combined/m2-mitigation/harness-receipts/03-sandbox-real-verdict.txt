@@ -1,0 +1,7 @@
+# m2-guest.sh run for REAL in the producer sandbox (no systemd, no IPv6, no /proc/modules, no clamd, virtio NIC): every unavailable observation must fail closed
+pass	sandbox-real-transcript	complete (begin..end, transport rc 0)
+fail	sandbox-real-hardening	kernel.io_uring_disabled=0; host io_uring_setup ['opened']
+fail	sandbox-real-ordering	ordering: host ordering: rc=1 System has not been booted with systemd as init system (PID 1). Can't operate. Failed to connect to bus: Host is down; host sysctl-file: rc=1 sha256sum: /etc/sysctl.d/99-culvert-hardening.conf: No such file or directory
+fail	sandbox-real-preconditions	host ipv6-conf: rc=3 ; culvert ipv6-conf: rc=3 ; culvert-clamav ipv6-conf: rc=3 ; host modules: rc=1 cat: /proc/modules: No such file or directory; NIC driver(s) outside e1000/vmxnet3: virtio_net
+fail	sandbox-real-ruleset	host ruleset lacks the appliance's inet culvert table (not the real ruleset?)
+fail	sandbox-real-clamav	clamav eicar: rc=127 ; clamav version: rc=127 

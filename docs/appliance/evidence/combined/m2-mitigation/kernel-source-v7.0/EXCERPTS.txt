@@ -105,3 +105,29 @@
   1226	
 
 == virtio_net.c: grep -c skb_checksum_setup = 0
+
+== nf_nat_proto.c lines 339-362
+   339	static bool nf_nat_ipv6_manip_pkt(struct sk_buff *skb,
+   340					  unsigned int iphdroff,
+   341					  const struct nf_conntrack_tuple *target,
+   342					  enum nf_nat_manip_type maniptype)
+   343	{
+   344	#if IS_ENABLED(CONFIG_IPV6)
+   345		struct ipv6hdr *ipv6h;
+   346		__be16 frag_off;
+   347		int hdroff;
+   348		u8 nexthdr;
+   349	
+   350		if (skb_ensure_writable(skb, iphdroff + sizeof(*ipv6h)))
+   351			return false;
+   352	
+   353		ipv6h = (void *)skb->data + iphdroff;
+   354		nexthdr = ipv6h->nexthdr;
+   355		hdroff = ipv6_skip_exthdr(skb, iphdroff + sizeof(*ipv6h),
+   356					  &nexthdr, &frag_off);
+   357		if (hdroff < 0)
+   358			goto manip_addr;
+   359	
+   360		if ((frag_off & htons(~0x7)) == 0 &&
+   361		    !l4proto_manip_pkt(skb, iphdroff, hdroff, target, maniptype))
+   362			return false;

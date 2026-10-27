@@ -1,0 +1,6 @@
+# Ubuntu CVE tracker (https://ubuntu.com/security/cves/<id>.json), retrieved 2026-10-27 ~16:20-16:29Z.
+# CVE-2026-98788: two attempts returned HTTP 504; not retrieved.
+CVE-2026-98532	priority=high	updated=2026-10-26T20:05:40.982308+00:00	linux/noble	status=pending	fix=6.8.0-148.148
+CVE-2026-98532	priority=high	updated=2026-10-26T20:05:40.982308+00:00	linux-hwe-7.0/noble	status=pending	fix=7.0.0-42.42~24.04.1
+CVE-2026-98573	priority=high	updated=2026-10-22T18:48:50.841439+00:00	linux/noble	status=pending	fix=6.8.0-148.148
+CVE-2026-98573	priority=high	updated=2026-10-22T18:48:50.841439+00:00	linux-hwe-7.0/noble	status=pending	fix=7.0.0-42.42~24.04.1

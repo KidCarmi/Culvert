@@ -1,0 +1,54 @@
+# python3 -I m2-verdict-selftest.py at lab 69fb5f36
+ok	baseline passes	all pass
+ok	valid empty: container ruleset with no tables	all pass
+ok	valid empty: container IPv6 route table empty	all pass
+ok	transport rc!=0	transcript fails: console transport rc=1
+ok	transcript truncated (no m2-end)	transcript fails: transcript incomplete (no m2-end)
+ok	record truncated (line count mismatch)	preconditions fails: host links: 8 lines recorded, 99 expected
+ok	ip link fails	preconditions fails: host links: rc=1 Cannot open netlink socket
+ok	ip link rc=0 but empty	preconditions fails: host links: no loopback in output
+ok	ip -4 route fails	preconditions fails: culvert routes4: rc=2 
+ok	ip -4 route rc=0 but empty	preconditions fails: host routes4: no loopback local route (not a real read)
+ok	ip -6 route fails	preconditions fails: host routes6: rc=255 RTNETLINK answers: error
+ok	encap route present	preconditions fails: host routes6 encap route(s): 2001:db8::/64  encap seg6 mode encap segs 1 [ 2001:db8::1 ] dev ens4 metric 1024
+ok	VLAN link present	preconditions fails: host VLAN link(s): ens4.10@ens4
+ok	tc fails	preconditions fails: culvert-clamav qdisc: rc=1 
+ok	taprio qdisc present	preconditions fails: host qdisc taprio
+ok	module read fails	preconditions fails: host modules: rc=1 cat: /proc/modules: Permission denied
+ok	module read empty	preconditions fails: module list lacks nf_tables (loaded by design): not a real read
+ok	precondition module loaded	preconditions fails: precondition modules loaded: act_ct
+ok	extra network namespace	preconditions fails: network namespace(s) outside the three contexts: net:[4026599999]
+ok	netns census fails	preconditions fails: host netns-census: rc=1 
+ok	IPv6 forwarding on an interface	preconditions fails: culvert eth0 forwarding=1 seg6=0 ioam6=0 disable=1
+ok	ipv6-conf unreadable	preconditions fails: host ipv6-conf: rc=3 
+ok	ipv6-conf value missing	preconditions fails: host ipv6-conf unparseable: 'all forwarding= seg6=0 ioam6=0 disable=0'
+ok	NIC outside e1000/vmxnet3	preconditions fails: NIC driver(s) outside e1000/vmxnet3: i40e
+ok	nft fails (installed)	ruleset fails: host nft-json: host nft-json: rc=1 netlink: Error: cache initialization failed
+ok	nft absent	ruleset fails: culvert nft-json: culvert nft-json: rc=127 nsenter: failed to execute nft: No such file or directory
+ok	nft error text on stdout	ruleset fails: host nft-json: Expecting value: line 1 column 1 (char 0)
+ok	ruleset is not the host's (no inet culvert)	ruleset fails: host ruleset lacks the appliance's inet culvert table (not the real ruleset?)
+ok	payload write (mangle th)	ruleset fails: host ip6/filter/FORWARD#999: payload write (mangle payload)
+ok	payload write at raw offset	ruleset fails: host ip6/filter/FORWARD#999: payload write (mangle payload)
+ok	NFQUEUE statement	ruleset fails: host ip6/filter/FORWARD#999: unclassified statement queue
+ok	exthdr match	ruleset fails: host ip6/filter/FORWARD#999: match reads exthdr
+ok	socket match	ruleset fails: host ip6/filter/FORWARD#999: match reads socket
+ok	xt TPROXY target	ruleset fails: host ip6/filter/FORWARD#999: xt target TPROXY
+ok	flowtable object	ruleset fails: host flowtable ft
+ok	io_uring_disabled not 2	hardening fails: kernel.io_uring_disabled=1
+ok	sysctl read fails	hardening fails: host sysctl: rc=255 
+ok	host io_uring_setup opens	hardening fails: host io_uring_setup ['opened']
+ok	io_uring ring held	hardening fails: io_uring rings held: ring 1234 dockerd /proc/1234/fd/9
+ok	fd dir unreadable, process alive	hardening fails: processes alive but unreadable: unreadable-alive 777 containerd
+ok	fd census read nothing	hardening fails: io_uring census read nothing (summary procs=0 fds=0 rings=0 unreadable_alive=0 exited=0 fd_vanished=0)
+ok	fd census failed	hardening fails: io_uring census: host io_uring-fds: rc=1 
+ok	probe: AF_PACKET opens as root	hardening fails: probe culvert-clamav as=root: m2-probe culvert-clamav as=root rc=1 uid=0 afpacket=opened io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM cap
+ok	probe not run	hardening fails: probe culvert as=default: not run
+ok	process keeps NET_RAW	hardening fails: m2-proc culvert-clamav 1421 comm=sleep uid=0 capeff=00000000a80405fb capbnd=00000000a80405fb netraw-eff=1 netraw-bnd=1 netadmin-bnd=0 sysadmin-bnd=0 s
+ok	no container process read	hardening fails: no process of culvert read
+ok	ordering: sysctl after containerd	ordering fails: systemd-sysctl active at 9999999us, containerd started 8807412us, dockerd 9204517us
+ok	ordering read fails	ordering fails: ordering: host ordering: rc=1 
+ok	sysctl drop-in missing	ordering fails: host sysctl-file: rc=1 sha256sum: no such file
+ok	EICAR scan error	clamav fails: clamav eicar: rc=2 
+ok	EICAR clean	clamav fails: clamav eicar: rc=0 
+51 cases, 0 wrong
+exit=0

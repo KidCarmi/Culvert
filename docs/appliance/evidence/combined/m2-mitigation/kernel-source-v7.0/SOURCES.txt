@@ -6,3 +6,4 @@ cbfc62c2e503d256631d264a4d999188f385040b9cad87a7c6a9fa252cecc492  nft_chain_nat.
 a1f823e11d1b1ac595fa607142d8c1cd4e34de36b7601eda108484e99ce84962  nft_compat.c  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/net/netfilter/nft_compat.c?h=v7.0
 822964baca1d774efd12918c2095fe544a3c754b7a0305f96864b2785767329b  xen-netfront.c  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/drivers/net/xen-netfront.c?h=v7.0
 c95bac981bbfb26a633de5fe7fe6d49776af3f5a63d17064afdb501ce68e1199  virtio_net.c  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/drivers/net/virtio_net.c?h=v7.0
+57d052520d34ab71e785bc889ef218d370a9b8b93038343240c204f716bd45dd  nf_nat_proto.c  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/net/netfilter/nf_nat_proto.c?h=v7.0
