@@ -87,6 +87,10 @@ type DataPlaneClient struct {
 	// struct-literal client in the tests — means "no jitter", which is exactly
 	// what a cadence assertion wants: see jitterDelay.
 	jitter func(time.Duration) time.Duration
+	// revSyncCursor is where the budgeted SyncRevocations request's rotating
+	// window stopped (AU-50). Read and written only by revocationSyncLoop's
+	// goroutine (syncRevocationsOnce), so it needs no lock.
+	revSyncCursor revSyncCursor
 }
 
 // dpBackoffCeiling caps the post-failure retry delay. A DP that cannot reach
@@ -870,31 +874,44 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			local := sessionRevoked.ExportRevocations()
-			req := struct {
-				NodeID  string            `json:"node_id"`
-				Entries []RevocationEntry `json:"entries"`
-			}{
-				NodeID:  c.nodeID,
-				Entries: local,
-			}
-			b, _ := json.Marshal(req)
-			raw, err := c.call(ctx, methodSyncRevocations, b)
-			if err != nil {
-				logger.Printf("DataPlane: SyncRevocations error: %v", err)
-				continue
-			}
-			var resp struct {
-				Entries []RevocationEntry `json:"entries"`
-			}
-			if err := json.Unmarshal(raw, &resp); err != nil {
-				logger.Printf("DataPlane: SyncRevocations parse error: %v", err)
-				continue
-			}
-			if added := mergeAndPersistRevocations(resp.Entries, "DataPlane"); added > 0 {
-				logger.Printf("DataPlane: merged %d remote session revocations", added)
-			}
+			c.syncRevocationsOnce(ctx)
 		}
+	}
+}
+
+// syncRevocationsOnce is one revocationSyncLoop tick: publish this node's
+// revocations to the CP and merge the fleet's reply.
+//
+// AU-50: the request is BUDGETED below the 16 MiB send/receive limit this leg
+// rides (maxClusterInboundMsgSize). It used to export the whole live list —
+// including every fleet entry merged from earlier replies — so past 16 MiB
+// every sync failed with ResourceExhausted and this node could neither
+// publish a logout nor learn one. When the list does not fit, this node's own
+// logouts go first and the rest rotate through later ticks (see
+// revocation_sync_budget.go); nothing is removed from the local list, which
+// would un-revoke a session.
+func (c *DataPlaneClient) syncRevocationsOnce(ctx context.Context) {
+	local, other := sessionRevoked.ExportRevocationsByOrigin()
+	b, deferred, err := buildRevocationSyncRequest(c.nodeID, local, other, revocationSyncRequestBudget, &c.revSyncCursor)
+	if err != nil {
+		logger.Printf("DataPlane: SyncRevocations request not built: %v", err)
+		return
+	}
+	noteRevocationSyncDeferred(&revocationSyncRequestDeferred, "DataPlane", "request", c.nodeID, deferred, revocationSyncRequestBudget)
+	raw, err := c.call(ctx, methodSyncRevocations, b)
+	if err != nil {
+		logger.Printf("DataPlane: SyncRevocations error: %v", err)
+		return
+	}
+	var resp struct {
+		Entries []RevocationEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		logger.Printf("DataPlane: SyncRevocations parse error: %v", err)
+		return
+	}
+	if added := mergeAndPersistRevocations(resp.Entries, "DataPlane"); added > 0 {
+		logger.Printf("DataPlane: merged %d remote session revocations", added)
 	}
 }
 

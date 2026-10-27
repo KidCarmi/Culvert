@@ -1243,8 +1243,27 @@ background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover
 	fmt.Fprintf(w, `</body></html>`)
 }
 
-// POST /auth/logout — clear session cookie.
+// GET|POST /auth/logout — revoke and clear the portal session cookie.
+//
+// Two admission rules run BEFORE anything is revoked or cleared, and both
+// refuse by doing nothing rather than by doing half (ui_auth_logout_guard.go):
+//
+//   - AU-55: a cross-site request (Sec-Fetch-Site: cross-site) performs no
+//     mutation and is answered with a same-origin confirmation page whose
+//     form POSTs back here through securityMiddleware's same-origin check.
+//   - AU-54: a request that carries a session cookie is charged to the same
+//     per-client limiter the /api/ mutations use; over the limit it is
+//     refused with 429, and the cookie is NOT cleared, because clearing a
+//     cookie whose revocation was skipped would report a logout that never
+//     withdrew the token's authority.
 func authLogout(w http.ResponseWriter, r *http.Request) {
+	if portalLogoutIsCrossSite(r) {
+		writePortalLogoutConfirmation(w)
+		return
+	}
+	if !admitPortalLogout(w, r) {
+		return
+	}
 	// REVOKE, then clear. Clearing a cookie is a request to the browser, not a
 	// withdrawal of authority: the token stays valid until its natural expiry,
 	// so anyone who kept a copy — or stole one — can replay it against this

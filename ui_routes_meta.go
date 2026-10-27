@@ -158,7 +158,8 @@ var uiRoutes = []uiRouteMetadata{
 	{Path: "/auth/select", Handler: "authSelectProvider", Domain: "auth", Public: true,
 		Methods: []uiRouteMethod{{Method: "GET", MinRole: RolePublic}}},
 	{Path: "/auth/logout", Handler: "authLogout", Domain: "auth", Public: true,
-		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic, Note: "session clear; method-agnostic"}}},
+		Methods: []uiRouteMethod{{Method: MethodAny, MinRole: RolePublic, Mutating: true,
+			Note: "durable fleet-wide session revocation + cookie clear (AU-29); GET stays a browser navigation surface, POST is the confirmation form's target and passes securityMiddleware's same-origin check; a Sec-Fetch-Site: cross-site request mutates nothing and gets a same-origin confirmation page (AU-55); a cookie-bearing request is charged to apiLimiter (AU-54)"}}},
 
 	// ── Dashboard / live stats. The dashboard handlers do not gate on
 	// method (no `switch r.Method`); the requireRole(viewer) call is

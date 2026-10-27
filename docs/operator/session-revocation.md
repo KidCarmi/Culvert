@@ -45,6 +45,21 @@ revoked and does not need to be: every consumer already rejects it, and
 accepting unverified values on a public endpoint is how the revocation list
 itself becomes a denial-of-service target (**AU-30**).
 
+Two admission rules sit in front of the portal logout (`/auth/logout`), because
+it performs a durable, fleet-wide write:
+
+* **A cross-site request changes nothing** (**AU-55**). When the browser sends
+  `Sec-Fetch-Site: cross-site` — a link or redirect from another site — the
+  session is neither revoked nor cleared; the user gets a small confirmation
+  page whose **Sign out** button POSTs back to `/auth/logout` from the same
+  origin. Same-origin, same-site, typed/bookmarked (`none`) navigations, and
+  clients that send no `Sec-Fetch-Site` at all, log out immediately as before.
+* **A cookie-bearing logout spends the admin API's per-client mutation
+  budget** (**AU-54**: 60 per client address per minute, shared with
+  `/api/` mutations). Over the budget the request answers `429` and does
+  nothing — the cookie is *not* cleared, so the user is never told they are
+  signed out while the token still carries authority. Retry after a minute.
+
 Propagation reaches three places, and all three matter because each of them
 verifies the same cookies (the session signing key is replicated to all of them):
 

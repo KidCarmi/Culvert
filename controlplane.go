@@ -320,10 +320,37 @@ type revocationAggregator struct {
 	// CP's entries out of that node's merge — regardless of what the node is
 	// called. Collision is structurally absent instead of merely unlikely.
 	cpLocal []RevocationEntry
+	// respCursor is, per requesting node, where the budgeted SyncRevocations
+	// REPLY's rotating window stopped (AU-71). An entry exists only while that
+	// node's reply is over budget, and its key space is perNode's (verified
+	// node ids), so it is bounded by the same thing.
+	respCursor map[string]revSyncCursor
 }
 
 var globalRevAggregator = &revocationAggregator{
 	perNode: map[string][]RevocationEntry{},
+}
+
+// responseCursor returns where nodeID's previous over-budget reply stopped.
+func (a *revocationAggregator) responseCursor(nodeID string) revSyncCursor {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.respCursor[nodeID]
+}
+
+// setResponseCursor records where nodeID's reply stopped; a cleared cursor
+// (the whole set fitted) deletes the entry.
+func (a *revocationAggregator) setResponseCursor(nodeID string, c revSyncCursor) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !c.set {
+		delete(a.respCursor, nodeID)
+		return
+	}
+	if a.respCursor == nil {
+		a.respCursor = map[string]revSyncCursor{}
+	}
+	a.respCursor[nodeID] = c
 }
 
 // maxRevocationsPerNode caps how many revocation entries the Control Plane

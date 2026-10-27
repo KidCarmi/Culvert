@@ -67,12 +67,15 @@ func withChaos68Aggregator(t *testing.T) {
 	t.Helper()
 	globalRevAggregator.mu.Lock()
 	prevPerNode, prevLocal := globalRevAggregator.perNode, globalRevAggregator.cpLocal
+	prevCursor := globalRevAggregator.respCursor // AU-71: every field, same change
 	globalRevAggregator.perNode = map[string][]RevocationEntry{}
 	globalRevAggregator.cpLocal = nil
+	globalRevAggregator.respCursor = nil
 	globalRevAggregator.mu.Unlock()
 	t.Cleanup(func() {
 		globalRevAggregator.mu.Lock()
 		globalRevAggregator.perNode, globalRevAggregator.cpLocal = prevPerNode, prevLocal
+		globalRevAggregator.respCursor = prevCursor
 		globalRevAggregator.mu.Unlock()
 	})
 }

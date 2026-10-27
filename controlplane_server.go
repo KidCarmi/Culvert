@@ -423,11 +423,19 @@ func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMe
 	globalRevAggregator.UpdateLocal(sessionRevoked.ExportRevocations())
 	mergeAndPersistRevocations(req.Entries, "ControlPlane")
 
+	// AU-71: the reply is budgeted against the frame the DP receives with,
+	// exactly as the request is budgeted against the CP's inbound bound
+	// (AU-50). MergedExcluding is the CP's whole list plus every other node's
+	// slot, so it grows with the fleet; an over-budget reply is rotated across
+	// ticks per requesting node rather than failing that node's sync outright.
 	remote := globalRevAggregator.MergedExcluding(req.NodeID)
-	b, err := json.Marshal(map[string]any{"entries": remote})
+	cur := globalRevAggregator.responseCursor(req.NodeID)
+	b, deferred, err := buildRevocationSyncResponse(remote, revocationSyncResponseBudget, &cur)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
+	globalRevAggregator.setResponseCursor(req.NodeID, cur)
+	noteRevocationSyncDeferred(&revocationSyncResponseDeferred, "ControlPlane", "reply", req.NodeID, deferred, revocationSyncResponseBudget)
 	return b, nil
 }
 

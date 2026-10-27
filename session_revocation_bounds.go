@@ -292,6 +292,12 @@ func resetSessionRevokeCountersForTest() {
 	// branch for every later test in the binary, so a gate asserting on the
 	// refusal branch silently examines the wrong row.
 	clusterRevocationDrops.Store(0)
+	// AU-50/AU-71: the gossip-deferral counters and their log window, for the
+	// same reason — a later gate asserting "nothing deferred" must not read an
+	// earlier gate's backlog.
+	revocationSyncRequestDeferred.Store(0)
+	revocationSyncResponseDeferred.Store(0)
+	revocationSyncDeferLogged.Store(0)
 	session.ResetRefusalCountersForTest()
 }
 

@@ -133,6 +133,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   New runbook `docs/operator/admin-api-credential-lockout.md`: clear a stuck
   lock with the admin-only `GET`/`POST /api/auth/lockouts` instead of a restart.
 
+- **Cluster revocation sync no longer stops when the revocation list outgrows
+  one message (AU-50, AU-71).** A Data Plane's `SyncRevocations` request
+  carried its whole list, fleet entries included, inside the 16 MiB inbound
+  limit; past it every sync failed and the node could neither publish nor learn
+  a logout. Both legs are now byte-budgeted under their gRPC limits (15 MiB
+  request, 127 MiB reply): the node's own logouts go first, then account
+  revocations, then the rest rotate through later ticks. Nothing is removed
+  from any revocation list. New counter
+  `culvert_cluster_revocation_sync_deferred_total{leg="request"|"reply"}`.
+- **The portal logout (`/auth/logout`) refuses cross-site requests and is
+  rate-limited (AU-55, AU-54).** A request with `Sec-Fetch-Site: cross-site`
+  no longer revokes or clears anything; it gets a same-origin confirmation page
+  that POSTs back. A cookie-bearing logout now spends the same per-client
+  budget as `/api/` mutations and answers `429` past it, without clearing the
+  cookie. Own-site navigations and clients that send no `Sec-Fetch-Site` log
+  out immediately, as before.
+
 - **A Data Plane that synchronized during a revoked cookie's final second was
   told the session was not revoked, while the Control Plane went on rejecting
   it.** `revocationAggregator.MergedExcluding` is what a DP's

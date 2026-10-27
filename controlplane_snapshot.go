@@ -253,6 +253,14 @@ const maxClusterGRPCMsgSize = 128 << 20 // 128 MiB
 // the 128 MiB frame — shrinking the CP's inbound allocation surface. Only the
 // snapshot-carrying direction (server send / client receive) uses the full
 // maxClusterGRPCMsgSize.
+//
+// AU-50: "all tiny" was false for ONE of them. A SyncRevocations request
+// carries the node's live revocation list, which includes every fleet entry it
+// merged, so it grows with the fleet rather than staying tiny — past this
+// bound every sync failed with ResourceExhausted. That request is now budgeted
+// below this limit (maxRevocationSyncRequestBytes, revocation_sync_budget.go);
+// a new inbound RPC whose body can grow must be budgeted the same way rather
+// than relying on this paragraph.
 const maxClusterInboundMsgSize = 16 << 20 // 16 MiB
 
 // maxSnapshotWireBytes is the commit-time BYTE budget for a published snapshot,

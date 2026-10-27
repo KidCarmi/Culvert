@@ -385,6 +385,43 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 	return entries
 }
 
+// ExportRevocationsByOrigin is ExportRevocations split by provenance, for the
+// cluster gossip request that has to choose what to send first (AU-50).
+//
+// local holds the TOKEN entries this process admitted through RevokeVerified,
+// or reloaded from its own file with a valid provenance MAC: the logouts that
+// happened HERE, which no other node can tell the fleet about. other holds
+// every other live entry — tokens learned from gossip or reloaded without
+// provenance, and every ACCOUNT revocation. Account entries are not split
+// because their origin is not tracked (they reload through the untrusted
+// bounds), and the caller ranks them on their own anyway.
+//
+// The union is exactly what ExportRevocations returns, under the same sweep,
+// so the split decides ORDER and never membership.
+func (r *RevocationList) ExportRevocationsByOrigin() (local, other []RevocationEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sweepLocked(time.Now())
+	local = make([]RevocationEntry, 0, len(r.verified))
+	other = make([]RevocationEntry, 0, len(r.tokens)+len(r.users)-len(r.verified))
+	for tok, exp := range r.tokens {
+		e := RevocationEntry{Token: tok, Expiry: exp.Unix()}
+		if _, ok := r.verified[tok]; ok {
+			local = append(local, e)
+			continue
+		}
+		other = append(other, e)
+	}
+	for user, exp := range r.users {
+		other = append(other, RevocationEntry{
+			Token:  userRevocationTokenPrefix + user,
+			Expiry: exp.Unix(),
+			User:   user,
+		})
+	}
+	return local, other
+}
+
 // exportPersisted is ExportRevocations plus the provenance MAC on every
 // locally verified TOKEN entry; it is what SaveRevocations writes. It carries
 // BOTH kinds (CHAOS-68): a file that held only tokens would make an account
