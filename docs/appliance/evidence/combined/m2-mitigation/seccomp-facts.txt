@@ -1,0 +1,13 @@
+source: github.com/moby/profiles/seccomp v0.2.4 default.json (module zip sha256 a00ac69ea161666cf41a13491f239f98f10f44f951f92eb5e5adc1105cf85cf4, go.sum h1:CNKIR4jNYCGIdstSZ3plN/yF3WCqlupmNLwO1ckLwz4= = sum.golang.org)
+dockerd 29.9.2 (sha256 cc8ad1a14ab54b5b23d14e013d5c7a9c594e586ed299d3533ed712d65939cb10, from docker-ce DEB 95ddf7a2...) buildinfo: dep github.com/moby/profiles/seccomp v0.2.4
+defaultAction SCMP_ACT_ERRNO defaultErrnoRet 1
+allow-listed syscall names: 426
+io_uring_setup: listed=False
+io_uring_enter: listed=False
+io_uring_register: listed=False
+unshare: [('SCMP_ACT_ALLOW', {'caps': ['CAP_SYS_ADMIN']}, None, None)]
+clone: [('SCMP_ACT_ALLOW', {'caps': ['CAP_SYS_ADMIN']}, None, None), ('SCMP_ACT_ALLOW', None, {'caps': ['CAP_SYS_ADMIN'], 'arches': ['s390', 's390x']}, [{'index': 0, 'value': 2114060288, 'op': 'SCMP_CMP_MASKED_EQ'}]), ('SCMP_ACT_ALLOW', {'arches': ['s390', 's390x']}, {'caps': ['CAP_SYS_ADMIN']}, [{'index': 1, 'value': 2114060288, 'op': 'SCMP_CMP_MASKED_EQ'}])]
+clone3: [('SCMP_ACT_ALLOW', {'caps': ['CAP_SYS_ADMIN']}, None, None), ('SCMP_ACT_ERRNO', None, {'caps': ['CAP_SYS_ADMIN']}, None)]
+socket: [('SCMP_ACT_ALLOW', None, None, [{'index': 0, 'value': 38, 'op': 'SCMP_CMP_LT'}]), ('SCMP_ACT_ALLOW', None, None, [{'index': 0, 'value': 39, 'op': 'SCMP_CMP_EQ'}]), ('SCMP_ACT_ALLOW', None, None, [{'index': 0, 'value': 41, 'op': 'SCMP_CMP_EQ'}]), ('SCMP_ACT_ALLOW', None, None, [{'index': 0, 'value': 42, 'op': 'SCMP_CMP_EQ'}]), ('SCMP_ACT_ALLOW', None, None, [{'index': 0, 'value': 43, 'op': 'SCMP_CMP_EQ'}]), ('SCMP_ACT_ALLOW', None, None, [{'index': 0, 'value': 44, 'op': 'SCMP_CMP_EQ'}]), ('SCMP_ACT_ALLOW', None, None, [{'index': 0, 'value': 45, 'op': 'SCMP_CMP_EQ'}])]
+futex family allowed: ['futex', 'futex_requeue', 'futex_time64', 'futex_wait', 'futex_waitv', 'futex_wake']
+prctl allowed: True
