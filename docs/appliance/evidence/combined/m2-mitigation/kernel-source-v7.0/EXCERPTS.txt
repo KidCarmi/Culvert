@@ -1,0 +1,107 @@
+# Excerpts of upstream Linux v7.0 cited by RESIDUAL-DISPOSITION.md §3. Full files: re-fetch the URL in SOURCES.txt and compare the sha256.
+
+== nf_tables_ipv6.h lines 9-25
+     9	static inline void nft_set_pktinfo_ipv6(struct nft_pktinfo *pkt)
+    10	{
+    11		unsigned int flags = IP6_FH_F_AUTH;
+    12		int protohdr, thoff = 0;
+    13		unsigned short frag_off;
+    14	
+    15		protohdr = ipv6_find_hdr(pkt->skb, &thoff, -1, &frag_off, &flags);
+    16		if (protohdr < 0 || thoff > U16_MAX) {
+    17			nft_set_pktinfo_unspec(pkt);
+    18			return;
+    19		}
+    20	
+    21		pkt->flags = NFT_PKTINFO_L4PROTO;
+    22		pkt->tprot = protohdr;
+    23		pkt->thoff = thoff;
+    24		pkt->fragoff = frag_off;
+    25	}
+
+== nft_payload.c lines 186-209
+   186			offset = skb_network_offset(skb);
+   187			break;
+   188		case NFT_PAYLOAD_TRANSPORT_HEADER:
+   189			if (!(pkt->flags & NFT_PKTINFO_L4PROTO) || pkt->fragoff)
+   190				goto err;
+   191			offset = nft_thoff(pkt);
+   192			break;
+   193		case NFT_PAYLOAD_INNER_HEADER:
+   194			offset = nft_payload_inner_offset(pkt);
+   195			if (offset < 0)
+   196				goto err;
+   197			break;
+   198		default:
+   199			WARN_ON_ONCE(1);
+   200			goto err;
+   201		}
+   202		offset += priv->offset;
+   203	
+   204		if (skb_copy_bits(skb, offset, dest, priv->len) < 0)
+   205			goto err;
+   206		return;
+   207	err:
+   208		regs->verdict.code = NFT_BREAK;
+   209	}
+
+== nft_compat.c lines 60-70
+    60	static inline void
+    61	nft_compat_set_par(struct xt_action_param *par,
+    62			   const struct nft_pktinfo *pkt,
+    63			   const void *xt, const void *xt_info)
+    64	{
+    65		par->state	= pkt->state;
+    66		par->thoff	= nft_thoff(pkt);
+    67		par->fragoff	= pkt->fragoff;
+    68		par->target	= xt;
+    69		par->targinfo	= xt_info;
+    70		par->hotdrop	= false;
+
+== xt_tcpudp.c lines 88-95
+    88			/* Must not be a fragment. */
+    89			return false;
+    90		}
+    91	
+    92		th = skb_header_pointer(skb, par->thoff, sizeof(_tcph), &_tcph);
+    93		if (th == NULL) {
+    94			/* We've been asked to examine this packet, and we
+    95			   can't.  Hence, no choice but to drop. */
+
+== xt_tcpudp.c lines 140-147
+   140		/* Must not be a fragment. */
+   141		if (par->fragoff != 0)
+   142			return false;
+   143	
+   144		uh = skb_header_pointer(skb, par->thoff, sizeof(_udph), &_udph);
+   145		if (uh == NULL) {
+   146			/* We've been asked to examine this packet, and we
+   147			   can't.  Hence, no choice but to drop. */
+
+== nft_chain_nat.c lines 18-30
+    18	#ifdef CONFIG_NF_TABLES_IPV4
+    19		case NFPROTO_IPV4:
+    20			nft_set_pktinfo_ipv4(&pkt);
+    21			break;
+    22	#endif
+    23	#ifdef CONFIG_NF_TABLES_IPV6
+    24		case NFPROTO_IPV6:
+    25			nft_set_pktinfo_ipv6(&pkt);
+    26			break;
+    27	#endif
+    28		default:
+    29			break;
+    30		}
+
+== xen-netfront.c lines 1218-1226
+  1218		}
+  1219	
+  1220		/* A non-CHECKSUM_PARTIAL SKB does not require setup. */
+  1221		if (skb->ip_summed != CHECKSUM_PARTIAL)
+  1222			return 0;
+  1223	
+  1224		return skb_checksum_setup(skb, recalculate_partial_csum);
+  1225	}
+  1226	
+
+== virtio_net.c: grep -c skb_checksum_setup = 0

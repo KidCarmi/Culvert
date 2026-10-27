@@ -1,0 +1,25 @@
+# Modules of linux-modules-7.0.0-38-generic 7.0.0-38.38~24.04.4 (snapshot 20261002T120000Z, deb sha256 99536f44ce1802e63ed79a90d386bb1025ec12bf7a2f5af43287dbb4af247202, verified against the signed InRelease -> Packages hash)
+# that import ipv6_find_hdr or skb_checksum_setup (undefined symbols in each .ko). Modules scanned: 6900.
+# Built-in (=y) callers are NOT listed here; see RESIDUAL-DISPOSITION.md (xen-netfront).
+ipv6_find_hdr  drivers/net/ethernet/intel/i40e/i40e.ko.zst
+ipv6_find_hdr  drivers/net/ethernet/intel/ixgbe/ixgbe.ko.zst
+ipv6_find_hdr  drivers/net/ethernet/mellanox/mlx5/core/mlx5_core.ko.zst
+ipv6_find_hdr  net/ipv6/netfilter/ip6_tables.ko.zst
+ipv6_find_hdr  net/ipv6/netfilter/ip6t_ah.ko.zst
+ipv6_find_hdr  net/ipv6/netfilter/ip6t_frag.ko.zst
+ipv6_find_hdr  net/ipv6/netfilter/ip6t_hbh.ko.zst
+ipv6_find_hdr  net/ipv6/netfilter/ip6t_rt.ko.zst
+ipv6_find_hdr  net/ipv6/netfilter/ip6t_srh.ko.zst
+ipv6_find_hdr  net/ipv6/netfilter/nf_socket_ipv6.ko.zst
+ipv6_find_hdr  net/netfilter/ipvs/ip_vs.ko.zst
+ipv6_find_hdr  net/netfilter/ipvs/ip_vs_pe_sip.ko.zst
+ipv6_find_hdr  net/netfilter/nf_tables.ko.zst
+ipv6_find_hdr  net/netfilter/nft_chain_nat.ko.zst
+ipv6_find_hdr  net/netfilter/xt_HMARK.ko.zst
+ipv6_find_hdr  net/netfilter/xt_TPROXY.ko.zst
+ipv6_find_hdr  net/netfilter/xt_ipvs.ko.zst
+ipv6_find_hdr  net/netfilter/xt_l2tp.ko.zst
+ipv6_find_hdr  net/openvswitch/openvswitch.ko.zst
+ipv6_find_hdr  net/sched/act_ct.ko.zst
+ipv6_find_hdr  net/sched/act_pedit.ko.zst
+skb_checksum_setup  drivers/net/xen-netback/xen-netback.ko.zst

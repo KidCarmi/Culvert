@@ -1,0 +1,21 @@
+# m2probe controls, 2026-10-27T15:48:26Z
+# probe source: test/e2e/appliance/lab/m2probe (lab branch); binary sha256 8ecf174ab1966c1aa659aaa30a23bc49da0dfdbbf261a34f655f4beb92f724b1 (go go1.26.8, CGO_ENABLED=0, -trimpath -ldflags='-s -w')
+# docker 29.6.2 security options [name=seccomp,profile=builtin]
+== no policy at all (the sandbox host, root, seccomp 0): every request must OPEN
+uid=0 afpacket=opened io_uring=opened netns=opened userns=opened capeff=000001fffeffffff capbnd=000001fffeffffff nonewprivs=0 seccomp=0
+rc=1
+== docker run --cap-drop NET_RAW -u 0 (default seccomp profile)
+uid=0 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=00000000a80405fb capbnd=00000000a80405fb nonewprivs=0 seccomp=2
+rc=0
+== docker run --cap-drop NET_RAW -u 1000 (default seccomp profile)
+uid=1000 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=0000000000000000 capbnd=00000000a80405fb nonewprivs=0 seccomp=2
+rc=0
+== docker run (default caps) -u 0 (default seccomp profile)
+uid=0 afpacket=opened io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=00000000a80425fb capbnd=00000000a80425fb nonewprivs=0 seccomp=2
+rc=1
+== docker run (default caps) -u 1000 (default seccomp profile)
+uid=1000 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=0000000000000000 capbnd=00000000a80425fb nonewprivs=0 seccomp=2
+rc=0
+== --cap-drop NET_RAW --security-opt seccomp=unconfined -u 0
+uid=0 afpacket=errno:EPERM io_uring=opened netns=errno:EPERM userns=opened capeff=00000000a80405fb capbnd=00000000a80405fb nonewprivs=0 seccomp=0
+rc=1

@@ -1,5 +1,7 @@
 # Freeze revision 2: `93c83f90` → `848c2c2f` (M2 mitigation)
 
+> **Superseded for build source and candidate image by `../freeze-0648adeb/BOM.md` (revision 3).** That revision adopts `0648adeb` (docs-only child of `848c2c2f`, identical runtime tree), the commit the only candidate image is stamped from. **Corrected below:** `docker-compose.ha.yml` is not shipped.
+
 This is a **delta** on the freeze ASTRA accepted at 12:49 (`freeze-93c83f90/BOM.md`, with ASTRA's four provenance corrections). Everything in that record stands except what is listed here. **ASTRA owns acceptance.** The mitigation and residual reasoning are in `m2-mitigation/README.md`.
 
 ## 1. Build source (supersedes §1 of the accepted record)
@@ -22,7 +24,7 @@ This is a **delta** on the freeze ASTRA accepted at 12:49 (`freeze-93c83f90/BOM.
 | File | Blob before → after | Change | Shipped where |
 |---|---|---|---|
 | `docker-compose.yml` | `33141889` → `08494506` | `cap_drop: [NET_RAW]` on clamav, proxy, cli | Deploy bundle in the app image; the running stack |
-| `docker-compose.ha.yml` | `685111e1` → `43f4967c` | `cap_drop: [NET_RAW]` on clamav, proxy, dp | Deploy bundle (HA, not the appliance's default) |
+| `docker-compose.ha.yml` | `685111e1` → `43f4967c` | `cap_drop: [NET_RAW]` on clamav, proxy, dp | **Not shipped** (corrected; was "Deploy bundle (HA…)"): repository only. `Dockerfile:191` copies only `docker-compose.yml` and `docker-compose.maint-agent.yml` into `/app/deploy`, and the OVA build does not add it. |
 | `appliance/provision/sysctl-culvert-hardening.conf` | new | `kernel.io_uring_disabled = 2` | Guest `/etc/sysctl.d/99-culvert-hardening.conf` |
 | `appliance/build/prepare-guest.sh` | → `1740ab98` | Installs the sysctl file; refuses a wrong value | Guest build |
 | `appliance/build/build-ova.sh` | → `936cfea2` | Copies the sysctl file into the overlay | Guest build |

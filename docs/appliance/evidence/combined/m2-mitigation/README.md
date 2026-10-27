@@ -1,5 +1,10 @@
 # M2 kernel HIGH: mitigations + bounded residual (re ASTRA 27 Oct 12:33 HOLD)
 
+> **Corrections (ASTRA closeout, 27 Oct).** Read this file together with `RESIDUAL-DISPOSITION.md`, which supersedes §3 and §4 below.
+> - **§2 overstated io_uring.** `kernel.io_uring_disabled = 2` refuses the creation of **new** io_uring instances. It does **not** revoke a ring that already exists. The "no ring exists" half rests on two facts: the sysctl is applied early in boot, before any service, and every qualification checkpoint counts io_uring descriptors held by any process and must find 0.
+> - **§3 over-generalised.** Subsystem presence (IPv6 enabled; bridge, conntrack, nftables and veth loaded) neither proves nor excludes that a given finding is reachable. Each network finding is now assessed against its own precondition.
+> - **§4 is superseded** by the checkpoint and test map in `../freeze-0648adeb/BOM.md` §5. It adds in-container AF_PACKET, io_uring and namespace probes, and runs every check at first boot, after maintenance, after the OS-update reboot, and at the end of the run.
+
 **Decision (user, in session):** mitigate what can be removed without losing a function, then record the rest as a bounded residual. **ASTRA owns acceptance**; this is the producer's proposal and evidence.
 
 **What this commit changes:**
@@ -53,7 +58,7 @@
 
 **Host:** `kernel.io_uring_disabled = 2` refuses io_uring for **every** process, root included. Nothing on the appliance uses it: Docker/containerd and Go use epoll, and ClamAV does not link liburing.
 
-**Result:** io_uring is unavailable to container and host code alike. This closes the reachability prerequisite for 98858 and any other io_uring-only finding.
+**Result (corrected):** no process can create a new io_uring instance, in a container or on the host. A ring created before the setting took effect would keep working; the qualification shows none exists (0 io_uring descriptors at every checkpoint). On that basis, the reachability prerequisite for 98858 and any other io_uring-only finding is closed for new rings, and there are no old ones.
 
 **Remaining limit:** the running value must be observed on the replacement guest (post-build check 1 below).
 
@@ -62,8 +67,8 @@
 | Finding / group | Why it stays | Bound |
 |---|---|---|
 | **futex private hash, CVE-2026-98788** | `futex*` and `prctl` are on the default seccomp allowlist, which every program needs. No sysctl turns off `FUTEX_PRIVATE_HASH`. Ubuntu's `linux-hwe-7.0/noble` row is still Vulnerable. | Needs local code execution, in a container or on the host. The appliance runs only its own images (the proxy as non-root user `proxy` with CapEff 0, and ClamAV) and no tenant code. **Residual until Ubuntu ships a fixed HWE kernel**; the replacement keeps `7.0.0-38`. |
-| **IPv6/skbuff: 98532, 98570, 98573** | IPv6 is enabled; recorded IPv6 forwarding is 0 and IPv4 forwarding is 1. The specific trigger conditions are not established either way. | Reached from the network. IPv6 is disabled at neither level. Residual. |
-| **bridge, llc, conntrack, nftables, veth** | Docker's networking needs bridge, veth, conntrack and nftables. Generic presence neither proves nor excludes `act_ct`/flowtable/NFQUEUE paths. | Residual; nothing reasonable to remove without breaking container networking. |
+| **IPv6/skbuff: 98532, 98570, 98573** | *(superseded: see `RESIDUAL-DISPOSITION.md` §3, which assesses each finding against its own precondition)* | *("Reached from the network" was a generalisation from IPv6 being enabled. In fact 98532's caller is reached by any inbound IPv6 packet; 98570 and 98573 are not, on this appliance.)* |
+| **bridge, llc, conntrack, nftables, veth** | *(superseded: `RESIDUAL-DISPOSITION.md` §3 lists each finding's precondition and who can create it)* | *(Loaded by design. Most of these findings need configuration that requires `CAP_NET_ADMIN`, which no container has. The exceptions are assessed individually there: 98532 is reached by inbound IPv6, and 98804 is a teardown race.)* |
 | **The rest of the 59 HIGH-present** | Indexed once into seven groups by ASTRA. No claim of 59 completed exclusions is made. | ASTRA's index stands. |
 
 These residuals are the owner's to accept or reject, as is any time-boxed condition such as moving to the next fixed HWE kernel when Ubuntu ships one.
