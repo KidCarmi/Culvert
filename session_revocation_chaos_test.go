@@ -1399,3 +1399,129 @@ func TestChaos73_WallPersistFailureLogIsSanitized(t *testing.T) {
 			"and forge log lines (CWE-117)")
 	}
 }
+
+// ─── SEC-REVDIAG-1 — every untrusted-origin drop must reach the contract row ───
+//
+// checkSessionRevocation's `dropped` sum omitted session.RevokeFarFuture, the
+// third refusal admitUntrustedLocked charges. A node that dropped ONLY
+// far-future entries therefore took the diagOK branch and reported "no
+// refusals, no drops" — on the one authenticated surface whose own doc comment
+// says a dropped entry "means a session an operator deliberately killed may
+// still authenticate, here or on another node" (CWE-778; the underlying drop is
+// CWE-613).
+//
+// It is the one reason here with a BENIGN trigger, which is what makes the
+// omission matter rather than being a hardening detail. admitUntrustedLocked
+// refuses a gossiped entry whose expiry exceeds now + MaxSessionLifetime +
+// revocationExpirySkew; MaxSessionLifetime is exactly 7 days and
+// /api/session-timeout admits hours up to 168, so at the maximum SUPPORTED TTL
+// the whole inter-node clock-skew budget is one hour. A cluster with
+// session_timeout=168h and a peer more than an hour ahead drops that peer's
+// legitimate revocations and, pre-fix, said revocation was healthy.
+
+// TestChaos73_DefectFarFutureDropReachesTheContractRow is the defect gate: it
+// drives the real gossip path, so it measures the sum the row actually
+// computes rather than a counter poked directly.
+func TestChaos73_DefectFarFutureDropReachesTheContractRow(t *testing.T) {
+	chaos73Setup(t)
+
+	far := time.Now().Add(session.MaxSessionLifetime + 2*time.Hour).Unix()
+	if added := session.Revoked.MergeRevocations([]session.RevocationEntry{
+		{Token: "far-future-from-a-skewed-peer", Expiry: far},
+	}); added != 0 {
+		t.Fatalf("gossip admitted %d far-future entries; the premise of this gate is that it drops them", added)
+	}
+	if got := session.Refused(session.RevokeFarFuture); got != 1 {
+		t.Fatalf("far_future refusals = %d, want 1 — the drop did not happen and this gate is vacuous", got)
+	}
+
+	row := checkSessionRevocation()
+	if row.Status != diagWarn {
+		t.Errorf("row status = %v after a dropped remote revocation, want warn — the row reports a "+
+			"revocation that did not take effect as healthy:\n  %s", row.Status, row.Message)
+	}
+	if strings.Contains(row.Message, "no drops") {
+		t.Errorf("the row says %q while an entry was dropped", row.Message)
+	}
+	if !strings.Contains(row.Message, "1 session-revocation entries were dropped") {
+		t.Errorf("the row does not count the drop: %q", row.Message)
+	}
+}
+
+// TestChaos73_DefectEveryUntrustedDropReachesTheContractRow is the structural
+// half: the row's sum must carry EVERY refusal admitUntrustedLocked charges, so
+// a reason added later cannot be silently left out of the operator surface the
+// way RevokeFarFuture was. Charging one of each through the real gossip path
+// also proves the terms are not double-counted.
+func TestChaos73_DefectEveryUntrustedDropReachesTheContractRow(t *testing.T) {
+	chaos73Setup(t)
+
+	// admitUntrustedLocked's three counted refusals, in the order it tests
+	// them. RevokeExpired is deliberately NOT one of them — an already-expired
+	// entry is not a refusal worth counting, and the row must not inflate on it.
+	untrusted := []session.RevokeReason{session.RevokeOversize, session.RevokeFarFuture, session.RevokeCapacity}
+
+	live := time.Now().Add(time.Hour).Unix()
+	if added := session.Revoked.MergeRevocations([]session.RevocationEntry{
+		{Token: strings.Repeat("O", session.MaxRevocationTokenLen+1), Expiry: live},
+		{Token: "far-future", Expiry: time.Now().Add(session.MaxSessionLifetime + 2*time.Hour).Unix()},
+		{Token: "already-expired", Expiry: time.Now().Add(-time.Hour).Unix()},
+	}); added != 0 {
+		t.Fatalf("gossip admitted %d entries; want 0", added)
+	}
+
+	var want int64
+	for _, r := range untrusted {
+		want += session.Refused(r)
+	}
+	want += clusterRevocationDropTotal()
+	if want == 0 {
+		t.Fatal("no refusal was charged — the gate is vacuous")
+	}
+	if got := session.Refused(session.RevokeExpired); got != 0 {
+		t.Errorf("an already-expired gossip entry was charged as a refusal (%d); the row would inflate on ordinary expiry", got)
+	}
+
+	row := checkSessionRevocation()
+	if !strings.Contains(row.Message, fmt.Sprintf("%d session-revocation entries were dropped", want)) {
+		t.Errorf("the row's drop count does not equal the sum of every untrusted-origin refusal (%d):\n  %s\n"+
+			"Every reason admitUntrustedLocked charges must be a term in checkSessionRevocation's sum", want, row.Message)
+	}
+}
+
+// TestChaos73_DropSurfaceNamesTheBenignCause applies this file's own
+// accusation rule (TestChaos73_RefusalSurfaceDoesNotAssertProbing) to the drop
+// branch. The most likely cause of a far-future drop is clock skew inside the
+// operator's own cluster, so the row must not send them hunting a hostile peer.
+func TestChaos73_DropSurfaceNamesTheBenignCause(t *testing.T) {
+	chaos73Setup(t)
+
+	if added := session.Revoked.MergeRevocations([]session.RevocationEntry{
+		{Token: "far-future", Expiry: time.Now().Add(session.MaxSessionLifetime + 2*time.Hour).Unix()},
+	}); added != 0 {
+		t.Fatalf("gossip admitted %d far-future entries; want 0", added)
+	}
+	row := checkSessionRevocation()
+	lower := strings.ToLower(row.Message + " " + row.OperatorAction)
+	if !strings.Contains(lower, "clock") {
+		t.Error("the drop row does not name clock skew, the one benign cause of a far-future drop, so an " +
+			"operator whose cluster lost time sync is sent looking for a hostile peer")
+	}
+	if !strings.Contains(lower, "expiry") && !strings.Contains(lower, "lifetime") {
+		t.Error("the drop row does not name the expiry bound as a cause, so the far-future drop is " +
+			"indistinguishable from an over-long key or a full cap")
+	}
+}
+
+// TestChaos73_ControlCleanStateStillReportsHealthy is the negative control: the
+// widened sum must not make an untouched node warn.
+func TestChaos73_ControlCleanStateStillReportsHealthy(t *testing.T) {
+	chaos73Setup(t)
+	row := checkSessionRevocation()
+	if row.Status != diagOK {
+		t.Errorf("row status = %v on a clean node, want ok: %s", row.Status, row.Message)
+	}
+	if !strings.Contains(row.Message, "no drops") {
+		t.Errorf("clean row = %q, want the healthy text", row.Message)
+	}
+}
