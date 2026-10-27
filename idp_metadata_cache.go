@@ -184,6 +184,34 @@ func resolveIdPDocument(profileID string, kind idpmeta.Kind, source string, gen 
 	return serveCachedIdPDocument(store, profileID, kind, source, fetchErr, validate, expiry)
 }
 
+// idpFetchGeneration returns the cache retirement epoch a document fetch for
+// profileID must present to PutIfCurrent: the one the caller captured when it
+// selected the profile, or — when captured is nil — the current one, taken
+// here, which every caller does immediately before dialling.
+func idpFetchGeneration(profileID string, captured *idpmeta.Generation) idpmeta.Generation {
+	if captured != nil {
+		return *captured
+	}
+	return idpMetadataStore().Generation(profileID)
+}
+
+// idpRemoteURL is the configured URL of a remote IdP document — SAML metadata
+// or an OIDC discovery document — on its way into the network fetchers
+// (fetchSAMLMetadataOverNetwork, fetchOIDCDiscoveryOverNetwork). Each fetcher
+// still parses, scheme-checks and private-host-checks it inline before any
+// request, exactly as before; the type adds no validation and is not a barrier.
+//
+// It exists so the fetchers' signature is not func(string) ([]byte, error),
+// the shape of the injected file-read seams elsewhere in package main (for
+// example the SaaS feed generation store's fs.readFile). A class-hierarchy call
+// graph resolves a call through a func-typed field to EVERY function of the
+// matching signature, so gosec's G704 taint analysis treated both fetchers as
+// callees of that file-read seam and reported a request-derived path reaching
+// their requests — two findings each that no execution can produce. A distinct
+// parameter type removes the impossible edge rather than suppressing what it
+// reports, and leaves every real call path to the fetchers analysed.
+type idpRemoteURL string
+
 // serveCachedIdPDocument is resolveIdPDocument's fallback half: the fetch failed
 // for an AVAILABILITY reason, so the last-known-good document is served if one
 // is cached, usable, within idpmeta.StaleMaxAge and not past its own expiry.

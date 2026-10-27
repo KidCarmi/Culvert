@@ -632,17 +632,28 @@ func validateSAMLProfileConfig(cfg *SAMLProfileConfig) error {
 }
 
 func compileIdPProfile(p *IdPProfile) (IdentityProvider, error) {
+	return compileIdPProfileAt(p, nil)
+}
+
+// compileIdPProfileAt is compileIdPProfile for a compile that does NOT run
+// under r.mu and whose profile was selected earlier under it — the recovery
+// and revalidation loops. gen is the cache retirement epoch captured at that
+// selection, so a deletion committed between selecting the profile and its
+// document fetch still fences the fetch's cache write (IDP-19, Codex round 22).
+// nil captures the epoch immediately before the fetch, which is exact for every
+// caller that compiles under r.mu or for a profile it is about to commit.
+func compileIdPProfileAt(p *IdPProfile, gen *idpmeta.Generation) (IdentityProvider, error) {
 	switch p.Type {
 	case IdPTypeOIDC:
 		if p.OIDC == nil {
 			return nil, fmt.Errorf("oidc profile missing oidc config")
 		}
-		return NewOIDCFlowProvider(p)
+		return newOIDCFlowProviderAt(p, gen)
 	case IdPTypeSAML:
 		if p.SAML == nil {
 			return nil, fmt.Errorf("saml profile missing saml config")
 		}
-		return NewSAMLProvider(p)
+		return newSAMLProviderAt(p, gen)
 	case IdPTypeLDAP:
 		if p.LDAP == nil {
 			return nil, fmt.Errorf("ldap profile missing ldap config")

@@ -254,7 +254,11 @@ func policyLogURI(host, path string) string {
 	if path == "" {
 		return host
 	}
-	return host + path
+	// CHAOS-92: this is the single derivation of every retained request-log URI
+	// (logstore.Entry.URI → the in-memory ring, the persisted JSONL, syslog/SIEM
+	// and the redaction pipeline), so the clamp on the client-supplied path
+	// belongs here. See proxy_path_bounds.go.
+	return host + boundRetainedPath(path)
 }
 
 // recordInspectBlock logs a block decision from the SSL-inspect inner loop,
@@ -676,7 +680,7 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 			atomic.AddInt64(&statFileBlocked, 1)
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuth(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity, authLog)
-			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
+			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(boundRetainedPath(r.URL.Path)), sanitizeLog(ext))
 			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 			return "FILE_BLOCKED", true
 		}
@@ -797,7 +801,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
 					recordRequestAuthURI(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "", ruleURI, authLog)
-					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
+					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(boundRetainedPath(r.URL.Path)), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
 					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
 					return "FILE_BLOCKED", true
 				}

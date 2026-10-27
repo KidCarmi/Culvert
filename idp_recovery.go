@@ -50,6 +50,8 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/idpmeta"
 )
 
 const (
@@ -111,9 +113,18 @@ func (r *IdPRegistry) enabledInteractiveCounts() (enabled, live int) {
 // runs OUTSIDE r.mu — so handing out the live pointer raced those writes
 // against All()'s clone under the read lock, which could also serve a
 // half-updated profile to the admin API (Codex review round 4).
+//
+// cacheGen is the profile's cache retirement epoch, captured under the SAME
+// r.mu hold that selected it. The loops compile their candidates one after
+// another, so a candidate can wait behind another's slow fetch; capturing the
+// epoch only when its own fetch starts would miss a Delete committed in that
+// wait, and the late fetch would cache the deleted generation's document
+// (IDP-19, Codex round 22). Delete runs Forget under the r.mu write lock, so an
+// epoch read under the read lock is ordered against it either way.
 type darkCandidate struct {
 	generation *IdPProfile // registry identity; never compiled, never written here
 	candidate  *IdPProfile // deep copy the compile may mutate freely
+	cacheGen   idpmeta.Generation
 }
 
 func (r *IdPRegistry) darkEnabledProfiles() []darkCandidate {
@@ -129,7 +140,7 @@ func (r *IdPRegistry) darkEnabledProfiles() []darkCandidate {
 			if len(clones) != 1 || clones[0] == nil {
 				continue
 			}
-			out = append(out, darkCandidate{generation: p, candidate: clones[0]})
+			out = append(out, darkCandidate{generation: p, candidate: clones[0], cacheGen: idpMetadataStore().Generation(p.ID)})
 		}
 	}
 	return out
@@ -209,7 +220,7 @@ func (r *IdPRegistry) cacheServingProfiles() []revalidationCandidate {
 			continue
 		}
 		out = append(out, revalidationCandidate{
-			darkCandidate: darkCandidate{generation: p, candidate: clones[0]},
+			darkCandidate: darkCandidate{generation: p, candidate: clones[0], cacheGen: idpMetadataStore().Generation(p.ID)},
 			live:          prov,
 			servedAt:      sd.fetchedAt,
 		})
@@ -498,7 +509,7 @@ func (r *IdPRegistry) forgetEpisodeIfSuperseded(id string, ref idpDocRef) {
 func revalidateCacheServingProviders() int {
 	replaced := 0
 	for _, rc := range idpRegistry.cacheServingProfiles() {
-		prov, err := compileIdPProfile(rc.candidate)
+		prov, err := compileIdPProfileAt(rc.candidate, &rc.cacheGen)
 		if err != nil {
 			discardSupersededRecoveryEpisode(rc.darkCandidate)
 			retireOnDefinitiveAnswer(rc, err)
@@ -603,7 +614,7 @@ func runIdPRecoveryLoop(ctx context.Context) {
 			// Compile the COPY: compiling writes discovered endpoints into the
 			// profile, and this runs without r.mu held. The registry's own
 			// pointer is passed only as the generation token.
-			prov, err := compileIdPProfile(dc.candidate)
+			prov, err := compileIdPProfileAt(dc.candidate, &dc.cacheGen)
 			if err != nil {
 				// Already counted + rate-limit-logged by the metadata plane —
 				// but that episode may now belong to a source NOTHING fetches.

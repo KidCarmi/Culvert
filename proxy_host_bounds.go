@@ -86,6 +86,10 @@ import (
 //     this gate already bounded; the inner `req.URL.Path` is a separate
 //     unbounded untrusted value (register row PX-22) that needs a decryption
 //     profile and an allowed destination to reach, so it is its own finding.
+//     **CLOSED by CHAOS-92** (proxy_path_bounds.go), which found the same value
+//     reachable on the PLAIN-HTTP path with neither prerequisite — and bounds
+//     it by clamping what the sinks RETAIN rather than by refusing the request,
+//     because unlike an authority a long path can be legitimate.
 // ---------------------------------------------------------------------------
 
 // maxDestHostLen is the longest hostname that can exist, in its CANONICAL
