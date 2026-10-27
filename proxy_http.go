@@ -283,7 +283,7 @@ func serveHTTPFileBlock(w http.ResponseWriter, r *http.Request, ext, source stri
 	atomic.AddInt64(&statFileBlocked, 1)
 	atomic.AddInt64(&statBlocked, 1)
 	recordRequestAuthURI(cip, r.Method, r.Host, "FILE_BLOCKED", ext, "", id.Identity, "inspect", "", AuthLogFields{AuthSource: id.AuthSource})
-	logger.Printf("FILE_BLOCKED (%s) %s -> %q%q (ext=%q)", source, cip, sanitizeLog(r.Host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
+	logger.Printf("FILE_BLOCKED (%s) %s -> %q%q (ext=%q)", source, cip, sanitizeLog(r.Host), sanitizeLog(boundRetainedPath(r.URL.Path)), sanitizeLog(ext))
 	serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 }
 

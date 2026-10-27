@@ -151,14 +151,29 @@ type RevocationList struct {
 	mu     sync.Mutex
 	tokens map[string]time.Time // b64 payload → session expiry
 	users  map[string]time.Time // username → revocation expiry (all sessions for this user)
+
+	// sinceSweep counts insertions since the last expired-entry sweep.
+	// CHAOS-73: eviction used to be lazy-on-read only, which never fires for
+	// the one key that is guaranteed never to be presented again — the cookie
+	// that just logged out — so an un-clustered node had no evictor at all.
+	// See revocation_bounds.go.
+	sinceSweep int
+
+	// verified holds the tokens this process admitted through RevokeVerified
+	// (or reloaded from the file with a valid provenance MAC). Only these are
+	// written to the revocations file with a provenance MAC, and only entries
+	// carrying a valid one are reloaded past the untrusted-origin bounds. See
+	// provenanceMAC in revocation_bounds.go.
+	verified map[string]struct{}
 }
 
 // NewRevocationList returns an empty list (used by tests to swap the
 // package singleton, mirroring the bl pointer-swap idiom).
 func NewRevocationList() *RevocationList {
 	return &RevocationList{
-		tokens: map[string]time.Time{},
-		users:  map[string]time.Time{},
+		tokens:   map[string]time.Time{},
+		users:    map[string]time.Time{},
+		verified: map[string]struct{}{},
 	}
 }
 
@@ -166,10 +181,24 @@ func NewRevocationList() *RevocationList {
 var Revoked = NewRevocationList()
 
 // Revoke marks a token (its b64 payload) as revoked until exp.
-func (r *RevocationList) Revoke(token string, exp time.Time) {
+//
+// It reports whether the list actually changed, so a caller that persists
+// after revoking does not rewrite the whole file for a no-op. Callers that
+// do not care may ignore the result.
+//
+// CHAOS-73: this is the UNVERIFIED primitive and it is now internal to the
+// package's own trusted callers plus tests. The logout path must use
+// RevokeVerified, which authenticates the cookie first — see
+// revocation_bounds.go for why the MAC check is the whole security property.
+func (r *RevocationList) Revoke(token string, exp time.Time) bool {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if prev, exists := r.tokens[token]; exists && !prev.Before(exp) {
+		return false
+	}
 	r.tokens[token] = exp
-	r.mu.Unlock()
+	r.sweepIfDueLocked(time.Now())
+	return true
 }
 
 // IsRevoked reports whether the token is currently revoked, lazily
@@ -186,6 +215,7 @@ func (r *RevocationList) IsRevoked(token string) bool {
 	// honoured. See revocation_expiry.go.
 	if revocationExpired(time.Now(), exp) {
 		delete(r.tokens, token) // lazy eviction
+		delete(r.verified, token)
 		return false
 	}
 	return true
@@ -216,10 +246,16 @@ func (r *RevocationList) IsUserRevoked(username string) bool {
 	return true
 }
 
-// RevocationEntry is a single revoked session token for gRPC gossip.
+// RevocationEntry is a single revoked session token for gRPC gossip and the
+// persistence file.
 type RevocationEntry struct {
 	Token  string `json:"token"`
 	Expiry int64  `json:"expiry"` // Unix timestamp
+	// Prov is the provenance MAC of a locally MAC-verified revocation. It is
+	// written to the PERSISTENCE FILE only (never by ExportRevocations, so the
+	// gossip wire is unchanged) and lets LoadRevocations tell this appliance's
+	// own verified entries from untrusted ones. See provenanceMAC.
+	Prov string `json:"prov,omitempty"`
 }
 
 // ExportRevocations returns all non-expired revocation entries for syncing.
@@ -227,26 +263,51 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
+	// One shared sweep rather than a second inline copy of the eviction rule
+	// (CHAOS-73: two dialects for one question inside one struct is the trap).
+	r.sweepLocked(now)
 	entries := make([]RevocationEntry, 0, len(r.tokens))
 	for tok, exp := range r.tokens {
-		// SEC-REVEXP-1: this loop both PERSISTS (SaveRevocations) and GOSSIPS
-		// (the DP→CP push), so evicting a still-honoured entry here removed it
-		// from the on-disk file and from every peer, not just from this map.
-		if revocationExpired(now, exp) {
-			delete(r.tokens, tok)
-			continue
-		}
 		entries = append(entries, RevocationEntry{Token: tok, Expiry: exp.Unix()})
+	}
+	return entries
+}
+
+// exportPersisted is ExportRevocations plus the provenance MAC on every
+// locally verified entry; it is what SaveRevocations writes.
+func (r *RevocationList) exportPersisted() []RevocationEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sweepLocked(time.Now())
+	entries := make([]RevocationEntry, 0, len(r.tokens))
+	for tok, exp := range r.tokens {
+		e := RevocationEntry{Token: tok, Expiry: exp.Unix()}
+		if _, ok := r.verified[tok]; ok {
+			e.Prov = provenanceMAC(tok, e.Expiry)
+		}
+		entries = append(entries, e)
 	}
 	return entries
 }
 
 // MergeRevocations imports remote revocation entries (from other cluster nodes).
 // Only adds entries that are not yet expired and not already present.
+// CHAOS-73: this is an UNTRUSTED-ORIGIN path — a peer node chooses the key
+// bytes, the key length and the entry count — so every entry goes through
+// admitUntrustedLocked (key-size bound, entry cap, counted refusal). The list
+// is swept first so the cap is measured against LIVE entries rather than
+// against expired ones nobody has read since they died.
 func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
+	return r.mergeUntrusted(entries, false)
+}
+
+// mergeUntrusted admits entries from an untrusted origin; persisted marks the
+// on-disk revocations file (see admitUntrustedLocked).
+func (r *RevocationList) mergeUntrusted(entries []RevocationEntry, persisted bool) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
+	r.sweepLocked(now)
 	added := 0
 	for _, e := range entries {
 		exp := time.Unix(e.Expiry, 0)
@@ -256,10 +317,24 @@ func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
 		if revocationExpired(now, exp) {
 			continue // already expired
 		}
-		if _, exists := r.tokens[e.Token]; !exists {
+		// A persisted entry carrying a valid provenance MAC is one this
+		// appliance verified itself (RevokeVerified) under the current signing
+		// key, so it reloads past the untrusted bounds: refusing it on size or
+		// capacity would resurrect a session an operator revoked (Codex P1/P2,
+		// CodeRabbit, PR #1591). Gossip never takes this branch.
+		if persisted && validProvenance(e) {
+			if _, exists := r.tokens[e.Token]; !exists {
+				added++
+			}
 			r.tokens[e.Token] = exp
-			added++
+			r.verified[e.Token] = struct{}{}
+			continue
 		}
+		if !r.admitUntrustedLocked(e, now) {
+			continue
+		}
+		r.tokens[e.Token] = time.Unix(e.Expiry, 0)
+		added++
 	}
 	return added
 }
@@ -276,14 +351,18 @@ func (r *RevocationList) Count() int {
 // tests that touch shared revocation state.
 func (r *RevocationList) SwapForTest() (restore func()) {
 	r.mu.Lock()
-	prevTokens, prevUsers := r.tokens, r.users
+	prevTokens, prevUsers, prevSweep, prevVerified := r.tokens, r.users, r.sinceSweep, r.verified
 	r.tokens = map[string]time.Time{}
 	r.users = map[string]time.Time{}
+	r.verified = map[string]struct{}{}
+	r.sinceSweep = 0
 	r.mu.Unlock()
 	return func() {
 		r.mu.Lock()
 		r.tokens = prevTokens
 		r.users = prevUsers
+		r.verified = prevVerified
+		r.sinceSweep = prevSweep
 		r.mu.Unlock()
 	}
 }
@@ -309,13 +388,34 @@ func RevocationsPath() string {
 	return revocationsPath
 }
 
+// saveMu serializes the WHOLE save — snapshot, marshal and write — for every
+// caller.
+//
+// r.mu is released when exportPersisted returns, so without this two writers
+// (a logout request goroutine and the DP's 3 s revocation-sync loop) can each
+// snapshot and then race to AtomicWrite: the rename that lands LAST wins, and
+// it may carry the OLDER snapshot. The file then silently lacks a revocation
+// that is still live in memory, and a restart inside that window resurrects
+// the session (CodeRabbit, PR #1591).
+//
+// Serializing here rather than at one call site is deliberate: a lock around
+// a single caller is no protection while another writer calls SaveRevocations
+// directly. Holding it across the write is safe for the request path because
+// it is NOT r.mu — IsRevoked, and therefore authentication, never waits on it.
+var saveMu sync.Mutex
+
 // SaveRevocations writes all non-expired revocations to disk as JSON.
+// The whole save is serialized by saveMu; see its comment for why.
 func (r *RevocationList) SaveRevocations() error {
 	path := RevocationsPath()
 	if path == "" {
 		return nil
 	}
-	entries := r.ExportRevocations()
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	// Snapshot INSIDE the lock, so the write that lands last is the one whose
+	// snapshot was taken last.
+	entries := r.exportPersisted()
 	data, err := json.Marshal(entries)
 	if err != nil {
 		return fmt.Errorf("marshal revocations: %w", err)
@@ -343,7 +443,7 @@ func (r *RevocationList) LoadRevocations() error {
 	if err := json.Unmarshal(data, &entries); err != nil {
 		return fmt.Errorf("unmarshal revocations: %w", err)
 	}
-	added := r.MergeRevocations(entries)
+	added := r.mergeUntrusted(entries, true)
 	if added > 0 {
 		obs.Printf("Session: loaded %d revocations from disk", added)
 	}
@@ -368,15 +468,18 @@ func TTL() time.Duration {
 	return ttl
 }
 
-// SetTTL updates the session lifetime. Clamped to [15min, 7d].
+// MaxSessionLifetime is the longest session TTL SetTTL admits. No session
+// this appliance issues can expire later than issue time plus this.
+const MaxSessionLifetime = 7 * 24 * time.Hour
+
+// SetTTL updates the session lifetime. Clamped to [15min, MaxSessionLifetime].
 func SetTTL(d time.Duration) {
 	const minTTL = 15 * time.Minute
-	const maxTTL = 7 * 24 * time.Hour
 	if d < minTTL {
 		d = minTTL
 	}
-	if d > maxTTL {
-		d = maxTTL
+	if d > MaxSessionLifetime {
+		d = MaxSessionLifetime
 	}
 	ttlMu.Lock()
 	ttl = d

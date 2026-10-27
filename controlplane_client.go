@@ -1100,8 +1100,13 @@ func (c *DataPlaneClient) persistOwedRevocations() {
 	if !c.revocationsUnsaved.Load() {
 		return
 	}
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		logger.Printf("DataPlane: failed to persist revocations: %v", err)
+	// Through the coordinator, never SaveRevocations directly: persistRevocations
+	// serializes this write against the logout path's and records a failure in
+	// the process-wide dirty flag a later logout retries on
+	// (TestChaos73_WallSavesGoThroughTheCoordinator, CodeRabbit on PR #1591). The
+	// per-client flag is cleared only on THIS call's success, so a concurrent
+	// writer clearing the shared flag cannot strand this round's merge.
+	if !persistRevocations() {
 		return // still owed; the next round (or loop exit) retries
 	}
 	c.revocationsUnsaved.Store(false)
