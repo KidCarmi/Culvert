@@ -15,7 +15,7 @@ import (
 )
 
 func TestInstallScript_PersistSessionSecret_UnderErrexit_ExistingEnvWithoutSecret(t *testing.T) {
-	fn := extractShellFunctionBraceAware(t, "scripts/install.sh", "persist_host_env_session_secret")
+	fn := installSharedEnvPredicate(t) + "\n" + extractShellFunctionBraceAware(t, "scripts/install.sh", "persist_host_env_session_secret")
 	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
 
 	dir := t.TempDir()

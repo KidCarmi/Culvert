@@ -41,6 +41,13 @@ type OperatorContract struct {
 	// on stalled storage wait twice). Unexported: never serialized, and the
 	// support-bundle redactor skips it.
 	rosterViewerRow *OperatorContractCheck
+
+	// accessCIDRViewerRow is the access_cidr_lists row's non-admin rendering,
+	// built from the SAME read of the rejection state as the admin row in
+	// Checks (accessCIDRListsRows, access_cidr_diag.go) so the two can never
+	// describe different states. Unexported for the same reason as above:
+	// never serialized, and the support-bundle redactor skips it.
+	accessCIDRViewerRow *OperatorContractCheck
 }
 
 // OperatorContractCheck is one row in the diagnostics report.
@@ -151,6 +158,9 @@ func buildOperatorContract() OperatorContract {
 	// envelope, run validateConfigBackup on it. Shared across the
 	// three config-version checks so they don't each re-read the file.
 	cv := summarizeLatestConfigVersion()
+	// One read of the access-list rejection state, rendered for admin and
+	// non-admin together (SEC-DIAG-ACCESSCIDR-1).
+	accessCIDRAdmin, accessCIDRViewer := accessCIDRListsRows()
 	checks := []OperatorContractCheck{
 		checkStorage(),
 		checkPolicyLoaded(),
@@ -163,7 +173,7 @@ func buildOperatorContract() OperatorContract {
 		checkConfigSnapshotApply(),
 		checkSAMLStatePosture(),
 		checkSAMLBaseURLPosture(),
-		checkAccessCIDRLists(),
+		accessCIDRAdmin,
 		checkOIDCBaseURLPosture(),
 		checkDefaultAuthOpen(),
 		checkYARAEnginePosture(),
@@ -193,6 +203,7 @@ func buildOperatorContract() OperatorContract {
 		checkIdentityBackend(),
 		checkCredentialVerification(),
 		checkInteractiveLoginState(),
+		checkSessionRevocation(),
 		checkAlertWebhookSigning(),
 		checkUpstreamCredentials(),
 		checkOIDCJWKSTrust(),
@@ -220,6 +231,9 @@ func buildOperatorContract() OperatorContract {
 	// that has never activated and is failing). Contributes nothing when the feed
 	// is healthy, disabled, or serving the embedded baseline without failures.
 	checks = append(checks, checkSaaSFeed()...)
+	// OCSP enabled but not consulted on inspected HTTPS origin handshakes.
+	// Contributes nothing while revocation checking is off.
+	checks = append(checks, checkOCSPCoverage()...)
 	// PAC profiles last served with compile warnings. Contributes nothing when
 	// every served profile compiled cleanly.
 	checks = append(checks, checkPACDegraded()...)
@@ -245,6 +259,8 @@ func buildOperatorContract() OperatorContract {
 		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
 		Checks:          checks,
 		rosterViewerRow: &rosterViewer,
+
+		accessCIDRViewerRow: &accessCIDRViewer,
 	}
 }
 
@@ -751,6 +767,28 @@ func redactContractForRole(c OperatorContract, isAdmin bool) OperatorContract {
 					Message: rosterDurabilityViewerUnavailable, OperatorAction: diagnosticsRedactedAction}
 			}
 			statusChanged = statusChanged || checks[i].Status != prev
+		case accessCIDRListsCode:
+			// SEC-DIAG-ACCESSCIDR-1. Replaced by the rendering built from the
+			// same read of the rejection state, rather than edited here: the
+			// admin-only half is the UI allowlist (its rejected entry and
+			// whether the list in force is empty), while the trusted-proxy half
+			// is already viewer-readable through GET /api/settings/network and
+			// is carried through verbatim. The status is warn in both
+			// renderings, so no verdict recomputation is needed; an ok row has
+			// nothing admin-only in it and is returned identical by the
+			// builder.
+			if checks[i].Status == diagOK {
+				continue
+			}
+			if c.accessCIDRViewerRow != nil {
+				checks[i] = *c.accessCIDRViewerRow
+			} else {
+				// A contract built without the pair (a hand-assembled
+				// OperatorContract in a caller or a test) must not fall
+				// through to the admin text.
+				checks[i] = OperatorContractCheck{Code: accessCIDRListsCode, Status: checks[i].Status,
+					Message: accessCIDRUIAllowRedacted, OperatorAction: diagnosticsRedactedAction}
+			}
 		}
 	}
 	c.Checks = checks

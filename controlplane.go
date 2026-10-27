@@ -45,7 +45,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/session"
 )
 
 // ─── gRPC service definition (no protoc needed) ───────────────────────────────
@@ -141,6 +144,20 @@ type MetricsReport struct {
 	Epoch          int64  `json:"epoch,omitempty"`           // highest fencing epoch the node has observed
 	CulvertVersion string `json:"culvert_version,omitempty"` // build version string on the node
 	SyncedFP       string `json:"synced_fp,omitempty"`       // T3 P1: blocklist synced fingerprint (drift detection)
+	// AuditClusterPushDrops is CHAOS-61's DP->CP audit push-queue drop count
+	// (auditPendingDrops(), process-lifetime, never reset) as observed on THIS
+	// node when the report was built. It only ever moves on a Data Plane node
+	// (the counter is charged by internal/audit's DP push-queue path, which a
+	// Control Plane never exercises). Carried in the heartbeat, rather than left
+	// as a purely local /healthz/metrics fact, so the CP's own dashboard can
+	// aggregate it across the fleet instead of requiring an admin to open every
+	// DP's admin UI individually to learn the centralized audit trail has a gap.
+	AuditClusterPushDrops int64 `json:"audit_cluster_push_drops,omitempty"`
+	// AuditDropsReported is the capability bit for the field above: true from
+	// every build that reports AuditClusterPushDrops. With omitempty a zero
+	// count and a legacy build that cannot report one decode identically, so
+	// the CP keys "is this node's count trustworthy?" on this bit instead.
+	AuditDropsReported bool `json:"audit_drops_reported,omitempty"`
 }
 
 // nodeMetrics aggregates metrics from all connected Data Plane nodes.
@@ -148,6 +165,72 @@ var (
 	nodeMetricsMu sync.RWMutex
 	nodeMetrics   = map[string]MetricsReport{}
 )
+
+// auditClusterPushDropsTotal is the CHAOS-61 counter an admin should actually
+// look at: this node's own drops (non-zero only when this process is itself a
+// Data Plane) plus the drops most recently reported by every OTHER Data Plane
+// node heartbeating to it (non-zero only on a Control Plane). A standalone or
+// DP node has no entries in nodeMetrics and this degrades to
+// auditPendingDrops() alone; a Control Plane node's own auditPendingDrops() is
+// always zero, so this degrades to the fleet sum. Either way, GET /api/stats
+// reports the number that answers "is our centralized audit trail complete?"
+// from whichever node the admin happens to be looking at.
+//
+// A process that runs both roles also heartbeats to itself, so its own
+// nodeMetrics entry carries the same process-lifetime counter as
+// auditPendingDrops(); that entry is skipped (the local read is fresher) so
+// the drops are not counted twice.
+func auditClusterPushDropsTotal() int64 {
+	total := auditPendingDrops()
+	// clusterRole is read-only outside the cluster-role arbiter
+	// (cluster_role_arbiter.go) — every other reader goes through
+	// clusterRoleSnapshot(), since a direct RLock can observe a mixed tuple
+	// while the CP claim is asynchronous.
+	self := clusterRoleSnapshot().nodeID
+	nodeMetricsMu.RLock()
+	for id := range nodeMetrics {
+		if self != "" && id == self {
+			continue
+		}
+		total += nodeMetrics[id].AuditClusterPushDrops
+	}
+	nodeMetricsMu.RUnlock()
+	return total
+}
+
+// auditClusterPushUnreportingNodes counts enrolled nodes whose audit drop
+// count the Control Plane cannot trust, so a zero total is not evidence the
+// centralized trail is complete:
+//   - disconnected (heartbeat timeout) or draining (SetNodeDraining, for
+//     maintenance): the node cannot deliver its count, and losing the CP
+//     link — or going down for maintenance — is exactly when its push queue
+//     drops. checkNodeLiveness only ever flips "connected" to "disconnected",
+//     so a draining DP that actually stops heartbeating never becomes
+//     "disconnected" either; it would otherwise go unnoticed indefinitely;
+//   - connected with no heartbeat on file yet (CP restart, HA promotion, or
+//     the ~60s metricsLoop startup window) or heartbeating from a build
+//     without AuditDropsReported (a rolling upgrade): either way there is no
+//     trustworthy drop field to read.
+//
+// Reported beside the total so the dashboard can say "unknown" instead of
+// "complete". Zero on a standalone or DP-only node.
+func auditClusterPushUnreportingNodes() int {
+	nodes := globalClusterStore.ListNodes()
+	n := 0
+	nodeMetricsMu.RLock()
+	defer nodeMetricsMu.RUnlock()
+	for i := range nodes {
+		switch nodes[i].Status {
+		case "disconnected", "draining":
+			n++
+		case "connected":
+			if m, ok := nodeMetrics[nodes[i].NodeID]; !ok || !m.AuditDropsReported {
+				n++
+			}
+		}
+	}
+	return n
+}
 
 // ─── Distributed rate limit aggregation ──────────────────────────────────────
 //
@@ -233,12 +316,72 @@ var globalRevAggregator = &revocationAggregator{
 	perNode: map[string][]RevocationEntry{},
 }
 
-// Update stores the latest revocation entries from a node.
+// maxRevocationsPerNode caps how many revocation entries the Control Plane
+// retains from ONE Data Plane node.
+//
+// CHAOS-73: this aggregator is the DP→CP push direction, and it bounded
+// nothing — neither the entry count nor the key length — while
+// MergedExcluding walks the union of EVERY node's entries and allocates a
+// dedup map over it on EVERY SyncRevocations call, which each node makes
+// every 3 s. So one node's oversized push cost the CP O(total) CPU and
+// allocation per node per tick, and was then fanned back out to every other
+// node in the fleet to be merged and persisted.
+//
+// internal/audit's DP→CP queue already caps this same direction at 1000 with
+// a drops counter on the explicit reasoning that a DP which cannot reach its
+// CP must not grow unbounded; the identical argument applies in reverse to a
+// CP aggregating from its fleet. The cap is deliberately far above any real
+// deployment (a node holds one entry per logout inside one session TTL) so
+// reaching it means a node is malfunctioning or hostile, not busy.
+const maxRevocationsPerNode = 4096
+
+// Update stores the latest revocation entries from a node, bounded.
+//
+// Entries are DROPPED rather than the push being refused: a refusal would
+// also discard the node's legitimate entries, and the honest degradation is
+// that cluster-wide revocation is incomplete for the overflow — which is
+// counted, because a dropped revocation means a session an operator killed
+// may still authenticate on other nodes.
 func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) {
+	// Capacity is bounded by the cap, not by the peer-supplied length: the
+	// stored slice must not retain a backing array proportional to the whole
+	// request (Codex P2, PR #1591).
+	kept := make([]RevocationEntry, 0, min(len(entries), maxRevocationsPerNode))
+	dropped := 0
+	for _, e := range entries {
+		if len(e.Token) > session.MaxRevocationTokenLen {
+			dropped++
+			continue
+		}
+		if len(kept) >= maxRevocationsPerNode {
+			dropped++
+			continue
+		}
+		// Provenance is meaningful ONLY for this node's own persistence file,
+		// and nothing on the gossip path reads it — but it is a decodable
+		// field on the wire, so a peer can attach an arbitrarily large value
+		// that the length bound above (which measures the TOKEN) does not see.
+		// The Control Plane retains these entries and fans them to every other
+		// node every 3 s, so clearing it here is what makes the per-node
+		// bounds bound what is actually stored and broadcast (Codex P2).
+		e.Prov = ""
+		kept = append(kept, e)
+	}
+	if dropped > 0 {
+		clusterRevocationDrops.Add(int64(dropped))
+	}
 	a.mu.Lock()
-	a.perNode[nodeID] = entries
+	a.perNode[nodeID] = kept
 	a.mu.Unlock()
 }
+
+// clusterRevocationDrops counts revocation entries the Control Plane refused
+// to retain from a Data Plane node (over-long key, or past the per-node cap).
+// Non-zero means cluster-wide session revocation is incomplete.
+var clusterRevocationDrops atomic.Int64
+
+// clusterRevocationDropTotal reports the count for the metrics surface.
+func clusterRevocationDropTotal() int64 { return clusterRevocationDrops.Load() }
 
 // MergedExcluding returns all revocation entries from other nodes.
 func (a *revocationAggregator) MergedExcluding(nodeID string) []RevocationEntry {

@@ -55,8 +55,23 @@ func danglingFileProfileRules(rules []PolicyRule) []string {
 
 // fileProfileEnforced reports whether a rule's file profile is ever evaluated
 // by FileProfileBlocked on the request path.
+//
+// The action test goes through canonicalPolicyAction because that is what the
+// request path dispatches on (applyPolicyDecision, proxy.go). SEC-POLICYACTION-1
+// made the dispatch fold case and resolve an EMPTY action to Allow, so a rule
+// persisted as "allow" — or with no action at all, the shape an operator-managed
+// policy_file or a replayed snapshot produces — reaches the ActionAllow branch
+// and really does have its file profile evaluated. Comparing the RAW action here
+// answered "no" for exactly those rules, so a dangling profile on one of them
+// blocked every file-bearing transaction it matched (fail-closed, correctly)
+// while file_profile_resolution still reported diagOK — the one row that exists
+// to tell an administrator why downloads stopped. The predicate's own contract
+// above is "ever evaluated by FileProfileBlocked on the request path", so it has
+// to read the action the way the request path does. Enforcement is untouched:
+// this function feeds only the diagnostics row.
 func fileProfileEnforced(r *PolicyRule) bool {
-	return ruleIsEnabled(r) && ruleTypeOf(r) == ruleTypeAccess && r.Action == ActionAllow &&
+	action, known := canonicalPolicyAction(r.Action)
+	return ruleIsEnabled(r) && ruleTypeOf(r) == ruleTypeAccess && known && action == ActionAllow &&
 		r.FileFiltering && r.FileProfile != FileProfileNone
 }
 

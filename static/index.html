@@ -2569,6 +2569,10 @@ Firefox (all platforms):
               <span class="info-key">Tracing Headers Replaced</span>
               <span class="info-val" id="s-tracing-header-rejected">-</span>
             </div>
+            <div class="info-item" title="Client-supplied request paths that were clamped before Culvert retained a copy of them - in a log line, in a block page, or in the request-log URI. The request itself is never refused and policy enforcement always sees the whole path; only the retained copy is bounded, and it carries a marker naming the original length. Sustained growth means a source is sending very long paths to make Culvert write far more than it received (log-write and response-body amplification) through the proxy data plane.">
+              <span class="info-key">Request Paths Clamped</span>
+              <span class="info-val" id="s-retained-path-truncated">-</span>
+            </div>
           </div>
         </div>
 
@@ -8598,6 +8602,16 @@ async function fetchStats() {
       sthr.textContent = thr > 0 ? fmt(thr) + ' replaced' : 'None';
       sthr.style.color = thr > 0 ? 'var(--warn,#b8860b)' : '';
     }
+    // Clamped request paths (CHAOS-92): same invisibility as the row above —
+    // the request succeeds and enforcement sees the whole path, so a source
+    // probing for log-write and response-body amplification leaves no other
+    // trace an admin would notice without a metrics scraper.
+    const srpt = document.getElementById('s-retained-path-truncated');
+    if (srpt) {
+      const rpt = s.retainedPathTruncated || 0;
+      srpt.textContent = rpt > 0 ? fmt(rpt) + ' clamped' : 'None';
+      srpt.style.color = rpt > 0 ? 'var(--warn,#b8860b)' : '';
+    }
     // Oversized-username login attempts (CHAOS-63): each one is refused with a
     // plain 400 and otherwise leaves no trace an admin would see without a
     // metrics scraper or shell access to the process log. Surfacing the count
@@ -8671,20 +8685,37 @@ async function fetchStats() {
     // non-zero count means admin actions have already vanished for good.
     if ((s.auditLogWriteErrors || 0) > 0) {
       setPosture('logging', 'crit', fmt(s.auditLogWriteErrors) + ' audit entries lost (compliance record incomplete)');
-    } else if ((s.logWriteErrors || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
-    } else if ((s.processLogWriteErrors || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.processLogWriteErrors) + ' process-log lines lost');
-    } else if (logFallback.req || logFallback.audit) {
-      const which = logFallback.req && logFallback.audit ? 'Request+audit log'
-        : logFallback.req ? 'Request log' : 'Audit log';
-      setPosture('logging', 'warn', which + ' in-memory only (restart wipes)');
-    } else if ((s.logBackpressure || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.logBackpressure) + ' requests delayed by log I/O');
-    } else if ((s.processLogBackpressure || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.processLogBackpressure) + ' process-log lines delayed by log I/O');
     } else {
-      setPosture('logging', 'ok', 'Persisting');
+      // Every active warning is shown, in priority order, rather than the
+      // first one hiding the rest: several of these counters are
+      // process-lifetime, so a single precedence slot would let an old
+      // condition mask a new local failure indefinitely.
+      const warns = [];
+      if ((s.auditClusterPushDrops || 0) > 0) {
+        // CHAOS-61: this node's local audit file is fine, but a DP->CP push
+        // queue dropped entries while the Control Plane was unreachable, so the
+        // CENTRALIZED audit trail has a gap. Distinct remedy (restore the CP
+        // link, not disk space or local I/O), so it gets its own message.
+        warns.push(fmt(s.auditClusterPushDrops) + ' audit entries dropped syncing to Control Plane (centralized record incomplete)');
+      }
+      if ((s.auditClusterPushUnreportingNodes || 0) > 0) {
+        // A disconnected Data Plane cannot report its drops until it
+        // reconnects, and a pre-upgrade build never reports them, so a zero
+        // above is not proof of completeness.
+        const un = s.auditClusterPushUnreportingNodes;
+        warns.push(fmt(un) + ' Data Plane node' + (un === 1 ? '' : 's') + ' disconnected or not reporting audit drops (centralized audit completeness unknown)');
+      }
+      if ((s.logWriteErrors || 0) > 0) warns.push(fmt(s.logWriteErrors) + ' write errors');
+      if ((s.processLogWriteErrors || 0) > 0) warns.push(fmt(s.processLogWriteErrors) + ' process-log lines lost');
+      if (logFallback.req || logFallback.audit) {
+        const which = logFallback.req && logFallback.audit ? 'Request+audit log'
+          : logFallback.req ? 'Request log' : 'Audit log';
+        warns.push(which + ' in-memory only (restart wipes)');
+      }
+      if ((s.logBackpressure || 0) > 0) warns.push(fmt(s.logBackpressure) + ' requests delayed by log I/O');
+      if ((s.processLogBackpressure || 0) > 0) warns.push(fmt(s.processLogBackpressure) + ' process-log lines delayed by log I/O');
+      if (warns.length) setPosture('logging', 'warn', warns.join(' · '));
+      else setPosture('logging', 'ok', 'Persisting');
     }
     const c2b = document.getElementById('c2-shadow-banner');
     if (c2b) c2b.style.display = s.c2Mode === 'shadow' ? 'block' : 'none';
@@ -12646,6 +12677,13 @@ function setPosture(id, state, text) {
   const el = document.getElementById('po-' + id);
   if (!el) return;
   el.textContent = text;
+  // .posture-state clips with white-space:nowrap + ellipsis to keep the tile
+  // compact, which silently hides anything past the visible width — the
+  // Logging tile can now join several concurrent warnings with " · " and the
+  // combined string regularly overflows. The native title tooltip is the
+  // cheapest accessible way to read the full text without widening every
+  // tile or adding a detail view (CodeRabbit review, PR #1414).
+  el.title = text;
   el.classList.remove('skeleton');
   const item = el.closest('.posture-item');
   if (item) item.dataset.state = state;

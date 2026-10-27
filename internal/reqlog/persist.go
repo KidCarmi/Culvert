@@ -124,9 +124,12 @@ var (
 // So ~6% off one logged request serially and ~15% off it at four cores, at
 // zero allocations either way. State the rest honestly: Add is still ~flat in
 // core count after this change, because the remaining ceiling is ringMu's
-// 328-byte copy in Add. That is a different lock, it guards real shared state
-// rather than a nil check, and it is a separate concern — see the note on
-// BenchmarkAddParallel.
+// 352-byte copy in Add. That is a different lock, it guards real shared state
+// rather than a nil check, and it is a separate concern — measured and LEFT
+// IN PLACE for now, because a totally ordered ring pays one shared
+// read-modify-write per entry however it is built. Not closed, though: a
+// sharded ordered ring measures faster at four cores and slower at one or two.
+// See ring_order_bench_test.go for the arms, the crossover and the headroom.
 //
 // A note on how these numbers were obtained, because an earlier revision of
 // this comment got it wrong. The parallel arms first published each iteration's

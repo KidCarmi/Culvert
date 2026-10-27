@@ -292,13 +292,23 @@ func apiAuthLogout(w http.ResponseWriter, r *http.Request) {
 	//
 	// Clearing stays UNCONDITIONAL, and the answer stays 200: logout must
 	// always discard the browser's cookie, whatever it was carrying.
+	//
+	// The revocation itself is NOT gated on decodeSession, because that gate is
+	// stricter than "signed" in two ways that matter here. Decode also refuses
+	// a token that is already revoked, so a replayed logout could never repair
+	// a revocation save that failed the first time; and it refuses a deleted
+	// user's token, which the boundary above says IS revocable.
+	// revokeSessionCookie authenticates the cookie itself (MAC first, then
+	// expiry, never the revocation lookups), so an unsigned cookie still writes
+	// nothing. The audit entry keeps the stricter gate: it names a subject, so
+	// it records only a session that was live.
 	sess, _ := readUISessionCookie(r)
 	if sess != nil {
 		auditEvent(r, "auth.logout", sess.Sub, "admin UI logout")
-		// Revoke the session token so it cannot be reused even if the cookie is
-		// replayed before it naturally expires.
-		revokeSessionCookie(uiSessionCookieName, r)
 	}
+	// Revoke the session token so it cannot be reused even if the cookie is
+	// replayed before it naturally expires.
+	revokeSessionCookie(uiSessionCookieName, r)
 	clearUISessionCookie(w, r)
 	jsonOK(w, map[string]any{"ok": true})
 }

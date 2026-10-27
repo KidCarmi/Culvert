@@ -7,7 +7,183 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Diagnostics now warns when OCSP checking is enabled but does not cover
+  inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
+  on the OCSP panel and in a one-time log line; the one-page diagnostics report
+  read as healthy. A new `ocsp_coverage` WARN row (additive, report-only, no row
+  while OCSP is off) names the unchecked paths. No handshake behavior changes.
+
 ### Security
+
+- **The `file_profile_resolution` diagnostics row went blind to the very rules
+  SEC-POLICYACTION-1 taught the request path to honour.** That change made
+  `applyPolicyDecision` (`proxy.go`) dispatch on `canonicalPolicyAction`, which
+  folds ASCII case and resolves an EMPTY action to Allow — so a rule persisted as
+  `"allow"`, `"ALLOW"` or with no action at all (the shape an operator-managed
+  `policy_file` or a replayed CP snapshot produces) now reaches the `ActionAllow`
+  branch and really does have `FileProfileBlocked` evaluated against it.
+
+  `fileProfileEnforced` (`file_profile_health.go`) still compared the RAW action,
+  so it answered "not enforced" for exactly those rules. With a dangling
+  `FileProfileID`, every file-bearing transaction such a rule matched was blocked
+  fail-closed — correctly — while the row reported `ok`. That row exists for one
+  purpose: to tell an administrator whose users report "downloads are blocked"
+  why, instead of sending them to SSH and `grep`. Its own stated contract is
+  "ever evaluated by `FileProfileBlocked` on the request path", so it has to read
+  the action the way the request path does, and it now does. Enforcement is
+  untouched — the predicate feeds only the diagnostics row — and the negative
+  control is pinned too: an action this build cannot dispatch at all is blocked
+  outright by the fail-closed branch, so its profile is never evaluated and the
+  predicate still says so.
+- **An unauthenticated request chose how many bytes Culvert retained, on a stock
+  install (CHAOS-92).** `r.URL.Path` was the last unbounded client-chosen string
+  on the data path. Its two siblings were already closed and neither reaches it:
+  `request_tracing_bounds.go` (SEC-REQID-1) bounds the tracing headers and
+  `proxy_host_bounds.go` (CHAOS-69) bounds the destination authority, whose own
+  "deliberately NOT done" note named the path as its own finding. The path was
+  copied, unbounded, into three retaining sinks — the process log (5 sites), a
+  **buffered HTML response body** (5 sites, through `serveBlockPage`) and the
+  request-log `URI` field (4 sites, through `policyLogURI`). Measured through the
+  real `handleRequest`, with no authentication, no operator opt-in and no
+  configuration (`.exe` is in the shipped `fileblock.DefaultBlockedExts`): a
+  1 048 581-byte path wrote **1 048 636 bytes** to the process log and served a
+  **5 245 731-byte** block page when filled with `'`, because `html/template`
+  escapes it to the 5-byte `&#39;` — so the amplification factor was the
+  client's to choose. Wire-verified rather than only via `httptest`: that target
+  arrives as `r.URL.Path` byte for byte through a real `net/http` server, since
+  the proxy listener sets no `MaxHeaderBytes` and net/http's 1 MiB default
+  governs the request line. The process log is a 50 MB `fileutil.RotatingFile`
+  keeping exactly one archive, and every write **succeeded**, so the logsink
+  backpressure counter, `storageDegraded()` and `storage_write_failed` all
+  reported healthy while the whole retained forensic record rotated away in
+  seconds (CWE-778, OWASP A09:2021). The bound is on **retention, not
+  admission**: a long path can be legitimate, unlike an authority RFC 1035 caps,
+  so refusing the request would be an egress outage — but a truncated path is
+  still a usable log value. Every matcher continues to decide on the **complete**
+  path; clamping what a matcher sees would be fail-open, because truncating the
+  end removes the extension a file-block rule matches. `serveBlockPage` and
+  `policyLogURI` clamp at the chokepoint so one edit bounds every present and
+  future sink, the five log sites clamp inside the `sanitizeLog` argument so the
+  scan and its copy are bounded too, the cut backs off to a UTF-8 boundary, and
+  the retained value carries an explicit marker naming the original length. New
+  counter `culvert_retained_path_truncated_total`. Thirteen gates, seven of them
+  verified to fail against the pre-fix tree with the measured numbers and two of
+  them source gates, so a new sink reintroduces the defect loudly. Full
+  write-up: `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53, which also records the
+  CDR-sidecar filename sink and a >8 KiB refusal tier as open owner decisions.
+
+- **An inspected tunnel's inner-host pin accepted an authority `net/http` will
+  not send, so the upstream received no authority at all.** A CONNECT tunnel is
+  authorized once, against the CONNECT authority, and `innerHostPinnedToTunnel`
+  (`inspect_host_pin.go`) exists so an inner request cannot name a different
+  destination on that already-authorized tunnel. Its own documentation refuses
+  an EMPTY inner host for a specific reason: `Request.Write` serializes that as
+  a literal `Host: `, and a shared front end answers an authority-less
+  HTTP/1.1 request from its default or fallback vhost — a destination policy
+  never evaluated, with the log row, scan verdicts and CDR decisions all still
+  naming the CONNECT host.
+
+  That refusal was reachable **through** the comparison. `hostutil.StripHostPort`
+  ends in `net.SplitHostPort`, which splits on the last colon and never
+  validates the port, so `Host: allowed.example.com:0/x` reduced to the
+  authorized host and PINNED — while `Request.write` applied
+  `httpguts.ValidHostHeader` to the same value, found the `/`, and (with
+  `usingProxy=false`) zeroed the authority entirely. Measured on go1.27.3:
+  `allowed.example.com:0/x`, `allowed.example.com:443?x` and
+  `allowed.example.com:@blocked.example.com` all pinned and all put `Host: ` on
+  the wire. This is the same defect class #1632's own review fixed for square
+  brackets ("the pin compares a REPAIRED value while the origin receives an
+  UNREPAIRED one"); two further repairs did the same thing and were not covered.
+
+  The second was IDNA case. `NormalizeHostStrict` lowercases before
+  `idna.ToASCII` while `httpguts.PunycodeHostPort` does not, and punycode
+  carries case in its payload — so against tunnel `xn--bcher-kva.example.com`,
+  an inner `BÜCHER.example.com` pinned while the wire carried
+  `xn--BCHER-2pa.example.com`: a different label, not a case variant
+  (`bcher-2pa` != `bcher-kva`), i.e. a name policy never evaluated. The comment
+  asserting a U-label inner host was safe is corrected rather than left to
+  invite a maintainer back toward the hole.
+
+  Both are closed by one rule instead of a list of refused spellings:
+  `innerAuthorityAsSent` canonicalizes through the SAME helpers `net/http` and
+  the HTTP/2 header encoder use and refuses anything they would not forward
+  verbatim, so the pin cannot drift from the wire because it now reads the
+  wire's own definition. Nothing a conforming client sends is newly refused —
+  every pre-existing accepted spelling (trailing root dot, lowercase U-label,
+  `host:443`, bracketed IPv6, IP-literal tunnel) still pins, and the two shapes
+  that look divergent but are the same destination (an ASCII-case A-label
+  variant, an empty port) are now pinned explicitly by the table.
+  `TestInnerHostPin_WireAgreesWithWhatWasPinned` is the differential oracle and
+  the reason this is not a spelling list: for every inner authority the pin
+  accepts, it drives the real `ReadRequest` → `Request.Write` path and asserts
+  the serialized `Host` still canonicalizes to the tunnel host, with a
+  non-vacuity guard. `go.mod` is unchanged (`golang.org/x/net` was already a
+  direct dependency).
+
+- **The new access-list Diagnostics row served the admin-only UI allowlist
+  posture to a viewer.** `checkAccessCIDRLists` joined the operator contract,
+  which `/api/diagnostics` and `/api/health/explain` serve at RoleViewer, but
+  was not classified in `redactContractForRole` — so a viewer or operator read
+  the rejected entry verbatim (the message embeds
+  `fmt.Errorf("invalid IP/CIDR: %s", c)` over the configured value) together
+  with whether the allowlist IN FORCE is empty, spelled out as "the admin UI
+  accepts every client IP", or else its entry count. `GET /api/ui-allow-ips`
+  requires RoleAdmin in both methods and nothing else reads that list, so the
+  row answered "is admin-UI IP restriction in force on this node?" — the
+  question asked before trying a stolen credential from off-network — to the
+  lowest authenticated role.
+
+  `accessCIDRListsRows` now renders the row twice from ONE read of the
+  rejection state (the `rosterViewerRow` discipline, so the two renderings
+  cannot straddle a settings save and disagree), and `redactContractForRole`
+  swaps in the non-admin rendering. The status stays `warn` below admin — a
+  non-admin must still see that a network list is misconfigured and escalate —
+  and an `ok` row is returned identical to both roles. The **trusted-proxy**
+  clause is deliberately carried through unredacted: `GET /api/settings/network`
+  already returns `trusted_proxy_cidrs` at RoleViewer, so withholding it would
+  cost an operator remediation detail without concealing anything. Both
+  directions are pinned, including an over-redaction control and a positive
+  control that the admin keeps the full evidence.
+
+- **`scripts/install.sh` had two disagreeing answers to "is this secret already
+  set?", and the looser one guarded the cluster session key.**
+  `secret_already_set` knows what docker compose resolves — `VAR=`, `VAR=""`,
+  `VAR=''`, `VAR=` with an inline comment and a CRLF-only value are all EMPTY —
+  while `persist_host_env_session_secret` kept its own `^VAR=.+`, which matches
+  every one of those shapes. Measured against both revisions of the real
+  function: for all four empty shapes the installer reported "already
+  configured" and declined to persist the operator's `CULVERT_SESSION_SECRET`,
+  so compose interpolated `""` and every node fell back to its own random
+  per-process signing key instead of the shared cluster key — admin sessions
+  silently stop validating across nodes, which is exactly the failure that
+  function's header comment exists to prevent. (The fallback key is freshly
+  random, so this is a cluster-availability failure, not a weak-key one.)
+
+  Both callers now delegate to one predicate, `env_file_value_set`, reporting
+  0 = set, 1 = absent or empty, 2 = could not read. That third code is
+  load-bearing and preserved: the session-secret path must tell "no entry, safe
+  to add" from "could not look", because confusing them overwrites a signing
+  key it was unable to read. An empty entry is overwritten; a non-empty one is
+  still never touched.
+
+### Fixed
+
+- **`README.md` documented the opposite of CDR's fail-closed guarantee.** The
+  `-cdr-fail-mode` row still said that when no Sluice instance is available at
+  all "CDR is skipped and the file passes through in either mode" — the exact
+  behaviour the CDR unavailable fail-mode fix replaced, and which
+  `docs/OPERATIONS.md` §6 and `config.example.yaml` were updated for while the
+  README was not. An operator reading it concludes `fail_mode: closed` does not
+  cover a Sluice outage, the one case the setting exists for. The row now states
+  that the configured mode applies when no instance can be called, that `open`
+  passes the file through unsanitized and that `closed` refuses it with block
+  reason `cdr_unavailable`, counted in `culvert_cdr_fail_closed_total`.
+  `TestREADMEDocumentsCDRUnavailableFailMode` asserts the row against the code's
+  own `cdrUnavailableBlockReason` constant, with negative controls for the
+  retired claim and a positive control that the fail-open half is still
+  documented.
 
 - **Two merge-gate workflows reached their actions through MUTABLE tags, and a
   repository-wide gate now refuses that.** `.github/workflows/pr-api-governance.yml`
@@ -87,6 +263,53 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The backup archive was published world-readable, and a restore accepted an
+  archive that was never encrypted (CHAOS-82).** Four defects on the two paths
+  that decide who can read a backup and what a restore will install, all
+  recorded with file and line by the CHAOS-74 sweep and unfixed until now.
+
+  `writeBackupTarball` used `os.Create` — 0666 before umask, so **0644** as
+  measured — with no `Chmod` anywhere in the file, while the archive aggregates
+  files that are individually 0600: `cluster-ca.key` (the fleet's MITM-capable
+  CA key), `ui_users.json` (password hashes, TOTP secrets) and
+  `idp_profiles.json` (OIDC client secrets, LDAP bind credentials). Any local
+  account or co-mounted container with read access to `/backup` obtained all of
+  it. The same writer published through a fixed, symlink-following
+  `<out>.tmp`: with the pre-fix writer restored, a symlink planted at that path
+  **received the entire archive** (687 bytes onto a canary outside the output
+  directory) and `runBackup` returned success — an exfiltration primitive for
+  the CA key available to anyone who can create one directory entry in
+  `/backup`. `os.Create` also truncates, so a stale file there was destroyed,
+  and two concurrent backups to one `outPath` shared an inode and interleaved
+  into a corrupt archive reported as success. Publication now goes through
+  `os.CreateTemp` (`O_EXCL` on an unpredictable name) plus an explicit `Chmod`
+  to 0600, which is what makes the mode independent of the process umask;
+  streaming is preserved.
+
+  On the restore side, `loadAndMaybeDecrypt` chose the envelope by magic-byte
+  sniff and consulted the passphrase **only** in the encrypted branch, so a
+  plaintext blob returned before the passphrase was ever examined. Anyone who
+  could write into `/backup` substituted a hand-built unencrypted tarball
+  carrying their own `ui_users.json`; the manifest is self-referential, so every
+  content check still passed and the restore installed an attacker-authored
+  admin roster. A plaintext archive is now refused when a passphrase is
+  configured, symmetric with the KDF-iteration downgrade `backupcrypt` already
+  refuses at the header level. The legitimate plaintext restore — no passphrase
+  supplied, which is what the maintenance agent already does for an unencrypted
+  archive — is unaffected, and is pinned by a negative control.
+
+  Finally, `parseEncHeader` enforced an iteration floor and no ceiling, and
+  `DecryptBlob` fed the archive-declared count straight to `pbkdf2.Key`: with
+  the new `encMaxIters` removed, a declared `0xFFFFFFFF` did not complete in
+  280 s before the harness killed it, against an instant refusal with the
+  ceiling in place — four attacker-controlled header bytes on a blob that could
+  never have authenticated.
+
+  Every gate was mutation-tested against its reverted fix. Two backup-plane
+  rows stay open with their reasoning recorded (§51.5): unbounded restore
+  memory, and `modeFull` silently dropping live artifacts absent from the
+  archive — the latter needs an operator-contract decision because
+  `admin_settings.json` is where `default_action` persists.
 - **The syslog/SIEM writer handle was published without synchronization, so a
   "disable forwarding" click could abort an in-flight proxy request, and every
   runtime retarget leaked a delivery goroutine and its collector socket
@@ -395,6 +618,51 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   not the class.
 
 ### Performance
+
+- **A policy publication now allocates one array per revision instead of one
+  object per rule.** `sortLocked` cloned every definition with its own
+  `new(PolicyRule)` and sorted the clones; it now decides the order first, on a
+  private copy of the live pointers, and clones into ONE contiguous
+  `[]PolicyRule` in publication order. The permutation is identical by
+  construction — the same comparator over the same input sequence, and the clone
+  preserves `Priority` — so this is a layout and allocation change only.
+
+  It is a control-plane cost with a **data-plane consequence**, which is the
+  reason to care: `sortLocked` runs under `ps.mu`, the writer lock, and
+  `evaluationSnapshot` takes the matching RLock before every scan, so a
+  publication stalls ALL policy evaluation for exactly as long as it takes.
+  Every policy edit, config-version restore and cluster config sync pays it.
+
+  Measured with benchstat (n=10, 4-core Xeon @2.10GHz, go1.27.3) on the new
+  `BenchmarkPolicyPublish_SortLocked`: allocations/op **-25% at every rule
+  count**, wall time **1 000 rules 582.4 µs → 483.8 µs (-16.9%, p=0.000)** and
+  **10 000 rules 4.932 ms → 4.034 ms (-18.2%, p=0.002)**, with **no significant
+  change at 100 rules** (54.5 µs → 50.3 µs, p=0.105). `ReplaceAll` inherits it
+  (**100 rules -8.5%**, **10 000 rules -16.1%**); bytes/op is essentially
+  unchanged (-0.4%), because the same definitions are still copied — what goes
+  away is the per-rule allocation, not the data.
+
+  Two negative results are recorded on `sortLocked` itself so they are not
+  re-derived. First, the layout does **not** measurably help the per-request
+  scan: `BenchmarkPolicyEvaluate_NoMatch`/`MatchLast`/`CIDRRules` came out at
+  -3.75% geomean with every size at p > 0.05, because the replaced per-rule
+  `new(PolicyRule)` loop already drew from a single 576-byte size-class span and
+  so was near-contiguous before this change. Second, the engine's superlinear
+  scaling above ~1 000 rules (**7.6 ns/rule at 1 000 → 29.3 ns/rule at
+  10 000**) is the touched working set (~5.7 MB of definitions) leaving L2, not
+  heap scatter; only shrinking what the scan streams per rule can address it,
+  and this change deliberately does not attempt that.
+
+  `TestPolicyPublish_RevisionIsOneContiguousArray` is the regression gate and is
+  **structural, not timed**: the property is worth one allocation out of the ~3
+  a definition clone costs, so a wall-clock or allocation-count bound would have
+  a thin margin and would rot. It asserts the published definitions sit at
+  one-struct stride from a single base, in scan order, and it fails against the
+  pre-change shape (verified). `TestPolicyPublish_OrderingIsUnchangedByTheLayout`
+  is the behavioral control for ordering and for the precompute still landing on
+  the published definitions. `BenchmarkPolicyPublish_EvaluateDuringPublish` is
+  the concurrency arm: evaluation latency with a background publisher holding
+  and releasing the writer lock underneath it.
 
 - A scheduled rule's **timezone is now resolved once per policy evaluation**
   instead of once per rule. Both halves of the per-rule work depend only on
@@ -745,6 +1013,83 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **CHAOS-73 review rounds.** A genuine revocation whose cookie exceeded the
+  untrusted-origin key bound was dropped when the revocations file was
+  reloaded, so the revoked cookie authenticated again after a restart;
+  locally verified entries are now persisted with a provenance MAC
+  (domain-separated, never the cookie's own signature, never on the gossip
+  wire) and restored past both the size bound and the entry cap, while gossip
+  and legacy entries keep the untrusted rules. Untrusted entries may no longer
+  claim an expiry beyond the maximum session lifetime: such entries are never
+  swept, and enough of them permanently fill the list so that legitimate
+  remote revocations are refused at capacity. A revocation whose durable write
+  failed is repaired by the browser's retry instead of being lost at the next
+  restart. The Control Plane bounds the memory it retains per node, not just
+  the entry count, and clears peer-supplied provenance before storing or
+  re-broadcasting an entry. The refusal counter, its metric help, the
+  `session_revocation` contract row and the runbook no longer assert that a
+  refusal is an attack — a cookie signed under a previous session secret is
+  genuine and unverifiable, and a key rotation makes ordinary browsers
+  produce one. Concurrent revocation saves are serialized end to end: the
+  snapshot and the write under the owner's lock, and the save together with
+  the flag that records whether it landed under the coordinator's, so a
+  writer whose save succeeded can no longer clear the retry a writer whose
+  save failed had just recorded and leave the file behind memory with nothing
+  owed. Reconciled with SEC-REVOKE-1 (already on main), which fixed the same
+  unsigned-cookie write by gating `apiAuthLogout`'s revocation on
+  `decodeSession`: the audit entry keeps that gate, but the revocation is
+  routed through `revokeSessionCookie`'s own MAC verification instead, because
+  `Decode` also refuses an already-revoked token and so blocked the replay that
+  repairs a failed save or reconciles a shorter peer-imported expiry.
+
+- `/api/auth/logout` is on the admin-UI auth middleware's **public** allowlist
+  — correctly, since an expired or already-revoked session cannot authenticate
+  a request and must still be able to clear its own cookie. But
+  `revokeSessionCookie` then base64-decoded whatever cookie arrived, read the
+  expiry out of the *decoded* payload, inserted the payload bytes as the
+  session-revocation key, and rewrote the entire revocations file. **The HMAC
+  was never checked** (CHAOS-73), and the call site's comment asserted the
+  opposite — "HMAC already verified by decodeSession" is true of `Decode` and
+  false here, because `apiAuthLogout` calls the function unconditionally; the
+  `sess != nil` guard above it covers only the audit entry.
+
+  So an **unauthenticated** caller chose the retained key, its **length** and
+  its **expiry**. Measured against the real handler behind a real `net/http`
+  server: a **524,389-byte** forged cookie answered `200` and was retained with
+  a 100-year expiry, which the evictor — keyed on that same attacker-chosen
+  value — can never reclaim; 200 requests carrying 16 KiB each (3.2 MB in)
+  wrote **441 MB** to disk, the amplification running 17x → 34x → 68x → 135x as
+  the request count doubled (**quadratic**, because every insert rewrites the
+  whole file); and in a cluster the entry reaches the payload each Data Plane
+  pushes to the Control Plane every 3 s, so one unauthenticated request to one
+  node's admin port becomes durable state on **every** node. `MergeRevocations`
+  separately accepted 50,000 peer-supplied entries with no cap at all.
+
+  The fix **authenticates rather than bounds**: a revocation key is the payload
+  half of a cookie this appliance signed, so a cookie it did not sign cannot
+  name a session of its own and refusing it loses nothing. Verification costs no
+  availability for the case the public route exists to serve — `Decode` checks
+  the MAC before the expiry, so a genuine *expired* cookie still verifies and
+  still logs out, and it is deliberately not counted as a probe. The two writers
+  authentication cannot reach (cluster gossip, the on-disk file) keep a derived
+  key-size bound and an entry cap with counted refusals; the MAC-verified local
+  path is **exempt** from both, so a real session stays revocable however large
+  its cookie grew. The Control Plane's revocation aggregator is bounded in the
+  same change, the persist is gated on an actual change (which removes the rest
+  of the quadratic term even for authenticated callers), and the expired-entry
+  sweep no longer depends on a read of the exact key — previously an
+  un-clustered node had no evictor at all.
+
+  A refusal stays silent to the caller (same status, body and `Set-Cookie` as a
+  genuine logout) so logout cannot become a cookie-validity oracle. New
+  surfaces: `culvert_session_revoke_refused_total`,
+  `culvert_session_revoke_rejected_total{reason}`,
+  `culvert_session_revocations_tracked`,
+  `culvert_cluster_revocation_drops_total`, a WARN-only `session_revocation`
+  diagnostics row (counts only), and a rate-limited `SESSION_REVOKE_REFUSED`
+  log line. No new alert event and no `/readyz` row. Gates: 21 functions in
+  `session_revocation_chaos_test.go`, with ten mutations each verified failing
+  its gate. Runbook: `docs/operator/session-revocation-plane.md`.
 - The IDNA memo's value bound (`len(norm) > maxMemoHostLen`, 253 bytes) had no
   gate on its main-tier axis: an in-limit host that **expands** past the bound
   through punycode encoding. The long tier's oversize cases exercise the same
@@ -2599,6 +2944,68 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   process log for the CHAOS-61 transition line. Read-only, no behavior change.
 
 ### Performance
+
+- Session-cookie verification no longer builds HMAC state per request. The
+  signed cookie is the FIRST credential arm `resolveRequestAuth` tries, so
+  `session.Decode` runs on the proxy authentication hot path and not just the
+  admin UI — every authenticated proxied request verified one MAC. Building the
+  state, not hashing the ~250-byte payload, dominated that step:
+  `crypto/hmac.New` costs five allocations (the HMAC struct, the ipad and opad
+  blocks, an inner and an outer `sha256.Digest`), and the old form paid them per
+  request plus a payload copy for `Write`, a digest for `Sum(nil)`, two for
+  `EncodeToString`, and two more for the `[]byte` conversions `hmac.Equal`
+  needed — nine allocations in `mac` alone, each with a named owner under
+  `-memprofilerate=1`.
+
+  HMAC state is explicitly reusable (`Reset` re-primes the inner hash with
+  ipad), so it is now built ONCE per signing key and recycled through a pool
+  published atomically beside the key, and the digest is summed and
+  base64url-encoded through inline buffers so the verify path compares bytes
+  without ever materialising the expected signature as a string. The hashing is
+  untouched — same key, same two block compressions, same alphabet,
+  byte-identical output — and `SetSigningKey` remains the single install
+  funnel, now rebinding the engine only when the key actually CHANGED, because
+  `applySnapshotSessionSecret` reinstalls the CP-synced secret on every
+  snapshot apply whether or not it moved and an unconditional rebind would
+  discard the warm pool on each of those no-ops. Because the engine now caches
+  the key instead of re-reading it per MAC, `SetSigningKey` also stores a COPY:
+  holding the caller's slice would let a caller that mutated the slice it had
+  installed and then reinstalled it hand that comparison the same bytes on both
+  sides, skipping the rebind — after which cookies from before the rotation
+  would keep verifying and `SigningKey`, which feeds the Control Plane snapshot
+  export, would report a key local verification no longer used. The copy sits on
+  the rebind path, so the no-op reinstall stays allocation-free.
+
+  Measured on the development box (linux/amd64, 4-core Xeon @ 2.80GHz, medians
+  of 3 runs, each pair timed in the SAME run against a verbatim copy of the
+  replaced form) under the toolchain this branch now pins, go1.27.3: the verify
+  step 2 521 → 1 454 ns and 9 allocations / 896 B → ZERO; four-way parallel
+  1 061 → 367 ns; a whole `Decode` 6 563 → 3 879 ns, 15 → 6 allocations,
+  1 304 → 408 B; four-way parallel 2 565 → 1 290 ns.
+
+  The same measurement under go1.26.9, the pin when this work began, read
+  `Decode` 6 134 → 4 903 ns, 26 → 17 allocations, 1 648 → 752 B. Go 1.27 made
+  the `encoding/json` half of `Decode` dramatically cheaper on its own — 17
+  allocations to 6, none of it this change — while this change's own
+  contribution is IDENTICAL on both pins: nine allocations and 896 bytes of
+  HMAC construction. The relative timing win on `Decode` therefore GREW, from
+  −20% to −41%, because a fixed cost removed from a smaller total is a larger
+  share of it. The allocation gate's absolute bound was retightened 20 → 10
+  with that remeasurement, since a bound set against 17 would have let a
+  threefold regression pass once the measured value fell to 6.
+
+  What remains in `Decode` is the base64 payload decode and `encoding/json`'s
+  unmarshal into `Session`, deliberately left alone. The size of the timing win
+  depends on how expensive the runner's
+  allocator is relative to SHA-256, so the gate asserts the structural
+  property instead — the verify step builds no HMAC state, no digest and no
+  expected-signature string — and extends the zero bound to the reject path,
+  so an unauthenticated client cannot drive allocation by replaying garbage
+  cookies. Equivalence is pinned by a differential test (five key shapes x ten
+  payload shapes x ten signature shapes, plus an end-to-end `Decode` oracle)
+  and a fuzz target; the pooling-specific hazards — key rotation under
+  concurrent verification, no-op reinstall keeping the pool, a real rotation
+  swapping it, the engine owning its key copy — have their own tests.
 
 - The per-IP connection limiter now does its whole job in ONE critical section
   per call, and stores the counter by value. `Acquire` + a deferred `Release`
