@@ -1721,7 +1721,7 @@ setup_at_rest_encryption() {
   # host-env value is equally operator-supplied, and warn-and-continue here
   # would run the install with the operator's encryption intent silently
   # dropped.
-  if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_LOG_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+  if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?CULVERT_LOG_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
     validate_passphrase_for_env_file "CULVERT_LOG_PASSPHRASE" "$CULVERT_LOG_PASSPHRASE"
     env_put CULVERT_LOG_PASSPHRASE "$CULVERT_LOG_PASSPHRASE" "$envfile"
   fi
@@ -1750,7 +1750,7 @@ setup_at_rest_encryption() {
     # operator's explicit encryption intent is never silently dropped into an
     # unencrypted-CA install (the earlier warn-and-skip posture contradicted
     # the interactive path's error on the identical input).
-    if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_CA_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+    if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?CULVERT_CA_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
       validate_passphrase_for_env_file "CULVERT_CA_PASSPHRASE" "$CULVERT_CA_PASSPHRASE"
       env_put CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
     fi
@@ -1791,7 +1791,7 @@ setup_at_rest_encryption() {
     # host-env fallback below still runs.)
     local existing_pass=""
     if [[ -f "$envfile" ]]; then
-      existing_pass="$(grep -E '^CULVERT_LOG_PASSPHRASE=' "$envfile" | tail -1 | cut -d= -f2-)" || true
+      existing_pass="$(grep -E '^[[:space:]]*(export[[:space:]]+)?CULVERT_LOG_PASSPHRASE=' "$envfile" | tail -1 | cut -d= -f2-)" || true
     fi
     [[ -z "$existing_pass" ]] && existing_pass="${CULVERT_LOG_PASSPHRASE:-}"
     # .env values round-trip through docker compose's own interpolation (it
