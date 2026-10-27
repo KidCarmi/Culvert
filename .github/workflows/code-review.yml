@@ -50,9 +50,13 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           reporter: github-pr-review          # inline comments on the diff
+          # 12m, inside the job's timeout-minutes: 15. This workflow runs only on
+          # pull_request, so its golangci cache is scoped to each PR ref and every
+          # PR's first run is cold; a cold full-tree run overruns 5m and the
+          # timeout fails the job even with fail_on_error: false.
           golangci_lint_flags: >-
             --config=.golangci.yml
-            --timeout=5m
+            --timeout=12m
           filter_mode: diff_context
           # Advisory: the blocking lint verdict is the Fast PR Gate's
           # --new-from-rev run. fail_on_error:true here would also hard-fail
