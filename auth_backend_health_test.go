@@ -179,9 +179,7 @@ func TestOIDC_IdPOutageIsNotCached_RecoversImmediately(t *testing.T) {
 	}
 	// ...but nothing about that denial may be remembered. This is the defect:
 	// before the fix the negative sat in the cache for the full TTL.
-	a.mu.Lock()
-	cached := len(a.cache)
-	a.mu.Unlock()
+	cached := a.cache.len()
 	if cached != 0 {
 		t.Fatalf("IdP outage poisoned the auth cache with %d entr(ies) — a valid token stays denied for the whole TTL after recovery", cached)
 	}
@@ -270,9 +268,7 @@ func TestOIDC_MalformedResponseIsTreatedAsUnavailable(t *testing.T) {
 	if a.Verify("alice", "some-token") {
 		t.Fatal("malformed introspection response must fail closed")
 	}
-	a.mu.Lock()
-	cached := len(a.cache)
-	a.mu.Unlock()
+	cached := a.cache.len()
 	if cached != 0 {
 		t.Errorf("malformed response cached %d entr(ies); it is an endpoint fault, not a token verdict", cached)
 	}
@@ -328,9 +324,7 @@ func TestLDAP_UnreachableDirectoryIsNotCached(t *testing.T) {
 	if a.Verify("alice", "correct-password") {
 		t.Fatal("expected deny while the directory is unreachable (fail closed)")
 	}
-	a.mu.Lock()
-	cached := len(a.cache)
-	a.mu.Unlock()
+	cached := a.cache.len()
 	if cached != 0 {
 		t.Fatalf("directory outage poisoned the auth cache with %d entr(ies) — the user stays locked out for the whole TTL after the directory returns", cached)
 	}

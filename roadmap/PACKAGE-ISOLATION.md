@@ -157,6 +157,20 @@ implicit initialization and shared runtime variables, with negative controls.
    remains a separate security-reviewed performance project; no weaker KDF,
    shared mutable test spool or skipped assertions as an isolation shortcut.
 
+6. **Implemented — identity-backend result cache (`internal/identcache`,
+   ADR-0041, #1633).** Codex P1 on the CHAOS-76 sweep: the cache shared by the
+   LDAP bind and both RFC 7662 introspection backends had been introduced as a
+   `package main` engine. `identcache.Cache[T]` owns the entries, client
+   buckets, expiry, compaction and eviction policy. The cap and the eviction
+   sink are `Options`, and the package holds no globals. Main keeps the
+   zero-value-usable binding `identityResultCache[T]`, which passes
+   `maxAuthCacheSize` and the process-wide `/metrics` total, and all backend,
+   dispatch and metrics integration gates. Nine engine gates moved with their
+   names unchanged. Boundary, ownership and one root binding gate were added.
+   `store.go`'s victim ordering delegates to `identcache.BetterVictim`. Merging
+   it with `authCacheStore` and `internal/authstate` is deliberately not done
+   (CHAOS-76 §54.7).
+
 ## Measurement and validation contract
 
 See [pilot evidence](../docs/engineering/package-isolation-pilot.md). Keep focused

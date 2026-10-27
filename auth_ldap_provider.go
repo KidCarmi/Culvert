@@ -453,10 +453,27 @@ func (p *LDAPIdPProvider) Verify(username, password string) bool {
 	return p.engine.Verify(username, password)
 }
 
+// VerifyFrom is Verify carrying the caller's client-fairness key (CHAOS-76).
+func (p *LDAPIdPProvider) VerifyFrom(client, username, password string) bool {
+	return p.engine.VerifyFrom(client, username, password)
+}
+
 // ResolveIdentity authenticates and returns the full Identity (Sub = user DN,
 // Groups = group-attribute values, Provider = profile ID).
 func (p *LDAPIdPProvider) ResolveIdentity(username, password string) (*Identity, bool) {
 	return p.engine.resolveIdentity(username, password)
+}
+
+// CacheEvictions forwards the engine's displacement counter so the active
+// provider can be asked for it without knowing which engine backs it
+// (CHAOS-76).
+func (p *LDAPIdPProvider) CacheEvictions() uint64 { return p.engine.CacheEvictions() }
+
+// ResolveIdentityFrom is ResolveIdentity carrying the caller's client-fairness
+// key, so one flooding source cannot displace another client's cached
+// directory verdict (CHAOS-76).
+func (p *LDAPIdPProvider) ResolveIdentityFrom(client, username, password string) (*Identity, bool) {
+	return p.engine.resolveIdentityFrom(client, username, password)
 }
 
 // CaptiveLoginURL always returns "": LDAP can NEVER drive a browser SSO flow.

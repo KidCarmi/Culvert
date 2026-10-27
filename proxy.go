@@ -380,8 +380,14 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 				// types (SAML) structurally — the credential chain is the
 				// capability-explicit accessor, not "everything enabled".
 				authed := false
+				// The fairness key reaches the registry providers' result
+				// caches too (CHAOS-76), not just the legacy fallback below:
+				// these ARE the caches in a registry deployment, and without
+				// an attributed key every entry shares one bucket, so one
+				// source can evict another client's cached verdict.
+				registryClientKey := authStateClientKey(r)
 				for _, prov := range idpRegistry.EnabledCredentialProviders() {
-					id, resolved := prov.ResolveIdentity(u, p)
+					id, resolved := resolveIdentityAttributed(prov, registryClientKey, u, p)
 					if !resolved || id == nil || strings.TrimSpace(id.Sub) == "" {
 						continue
 					}

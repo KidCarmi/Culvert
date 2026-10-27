@@ -16,11 +16,40 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   row (additive, report-only, no row when unconfigured or healthy) carries no
   file path or error text. No certificate-loading behavior changes.
 
+- **The on-demand backup audit action stays `backup.trigger`; `backup.create`
+  is recorded as its alias (T-71).** A terminology review proposed renaming it
+  to match the `<noun>.create` convention, but `backup.trigger` has shipped in
+  every release since v1.0.254 and SIEM rules and saved audit searches match it
+  verbatim, so it is kept as the stable identifier on every surface (audit trail,
+  SIEM/syslog JSON, `/api/audit` JSON and CSV export, OpenAPI
+  `x-culvert-audit-event`). Each backup still records exactly one entry, so no
+  per-action count or alert double-counts. Deprecation note: `.trigger` is
+  deprecated for **new** audit actions, which use `<noun>.create`;
+  `backup.trigger` itself is grandfathered and will not be renamed. No action is
+  needed by operators. Gate: `backup_audit_action_compat_test.go`; glossary:
+  `docs/design/PRODUCT-TERMINOLOGY.md` ("Backup").
+
 - **Diagnostics now warns when OCSP checking is enabled but does not cover
   inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
   on the OCSP panel and in a one-time log line; the one-page diagnostics report
   read as healthy. A new `ocsp_coverage` WARN row (additive, report-only, no row
   while OCSP is off) names the unchecked paths. No handshake behavior changes.
+
+### Deprecated
+
+- **Session-revocation refusal metrics renamed; the released names stay as
+  deprecated aliases until v1.1.0 (T-70).** `culvert_session_revoke_refused_total`
+  (unlabeled) and `culvert_session_revoke_rejected_total{reason}` shipped in
+  v1.0.340 and used two near-synonyms for one plane with different scopes. The
+  canonical names are now `culvert_session_revoke_unverifiable_total` (logout
+  cookies this appliance could not verify) and
+  `culvert_session_revoke_refusals_total{reason}` (every refused entry, same six
+  reasons). Both released names keep emitting with the same name, labels and
+  value from the same snapshot, so existing dashboards and alerts are
+  unaffected. **They are removed in v1.1.0**; move queries to the new names
+  before that upgrade. `culvert_session_revoke_refused_total` is never
+  reassigned to another meaning. Gate: `session_revoke_metric_alias_test.go`.
+  Runbook: `docs/operator/session-revocation-plane.md`.
 
 ### Security
 
@@ -78,6 +107,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   alerted. Refusing the object outright is the safer answer and a real option,
   but it is a posture change for large downloads that no operator asked for, and
   is left to the owner as the open half of CHAOS-101.
+- **The Basic-auth SSE re-check no longer counts as a login attempt
+  (SEC-BASICAUTH-5, RISK-032).** A live dashboard stream re-checks its HTTP
+  Basic credential about once a minute, through the same chokepoint as a real
+  submission, so each re-check drew on the per-IP Basic failure budget and was
+  recorded against the two-tier lockout. Streams still carrying a
+  rotated-away password locked their administrator out of the new, correct
+  password, and a legitimate stream on a shared egress reset a co-located
+  attacker's failure count once per interval. `checkUIBasicAuth` is now the
+  single `cfg.VerifyUIUser` call site behind `verifyUIBasicAuth` (submission,
+  unchanged: atomic `Reserve`/`Refund` budget, lockout, per-attempt
+  `auth.basic.fail` audit) and `revalidateUIBasicAuth` (re-check: every refusal
+  still applies, so a rotated, deleted, TOTP-enrolled or locked credential still
+  ends the stream, but nothing is reserved or recorded). Responses are
+  unchanged: refused Basic requests get `401`, `/api/auth/status` answers
+  `200 {"loggedIn":false}`, and only `POST /api/auth/login` returns `429`.
+- **The admin public allowlist no longer pre-authorises `/api/auth/totp*`
+  (SEC-PUBLICPATH-1, RISK-033).** The prefix matched no registered route, so
+  the first TOTP enrol/disable handler would have been served without
+  authentication. Removed (no behaviour change today), and every allowlist
+  entry must now match a registered route
+  (`TestPublicAllowlist_EveryEntryMatchesARegisteredRoute`).
+- **New `culvert_login_limiter_entries` gauge** reports the live size of the
+  admin credential lockout state, whose keys an unauthenticated caller chooses.
+  New runbook `docs/operator/admin-api-credential-lockout.md`: clear a stuck
+  lock with the admin-only `GET`/`POST /api/auth/lockouts` instead of a restart.
 
 - **A Data Plane that synchronized during a revoked cookie's final second was
   told the session was not revoked, while the Control Plane went on rejecting
@@ -3041,6 +3095,93 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
+- A flood of bogus credentials from a single unauthenticated client could
+  evict another client's cached authentication verdict, and during an identity
+  backend outage that turned a cache hit into a denial (CHAOS-76, register rows
+  AU-67/AU-68). All three identity-backend result caches on the proxy
+  credential path — the LDAP directory bind, the legacy RFC 7662 introspection
+  backend and the IdP-registry introspection provider — evicted "an arbitrary
+  entry" at their 5,000-entry cap: a Go map range that stops at the first key,
+  so whichever entry Go's randomised map iteration yielded — **live or already
+  expired**, and in either case unrelated to age, ownership or liveness. That
+  is the same defect CHAOS-57 closed in the local credential cache, on three
+  caches it was never ported to.
+
+  The flood costs nothing to mount. The proxy credential path hands whatever
+  username, password or bearer token the client supplied to the configured
+  backend, and an authoritative denial is cached deliberately — RFC 7662 §2.2
+  answers an unknown or expired token with `200 {"active":false}`, and a
+  directory that answers "no such user" is authoritative — because not caching
+  those would make every wrong credential a fresh round trip. So each bogus
+  credential writes an entry, so a sustained flood displaces the honest
+  verdicts: the gate measures a 3x-cap flood reliably removing a specific
+  honest entry, which is the evidence this rests on. (As a first-order model,
+  if each insertion past the cap took a uniform draw the survival probability
+  would be `(1 - 1/N)^k`, about 37% at one cap-worth and 5% at three; Go's map
+  iteration is randomised but gives no uniformity guarantee, so treat those
+  figures as an illustration of the shape, not a measurement.) Fifteen
+  thousand requests bearing nothing but bogus credentials is the whole
+  cost. Nothing
+  reclaimed an expired entry either — a lookup reported a miss and left it in
+  the map — so the steady state under a flood was a cache full of dead
+  verdicts while eviction destroyed the few live ones.
+
+  Displacement alone costs the victim a full directory bind or introspection
+  round trip on every subsequent request, which lands the attacker's
+  amplification on legitimate traffic and on the customer's own IdP. The sharper
+  consequence is the interaction with the unreachable-backend cooldown: when the
+  backend is down the gate denies **without** a round trip, and a client whose
+  verdict is cached is served from the cache and never reaches it. Evicting that
+  entry means the next request falls through and is denied, for the whole
+  cooldown, for a credential that was valid a moment earlier — inverting the
+  cache's purpose for exactly the users it exists to serve. Authentication
+  remained fail-closed throughout and no credential was ever wrongly accepted;
+  what an anonymous client gained was the ability to make authentication fail
+  for other people.
+
+  The three caches now share one policy, the one `internal/authstate` defines
+  and CHAOS-57 put in the local cache, in a new internal owner,
+  `internal/identcache` (ADR-0041). The cap and the eviction sink are injected
+  by package main, which keeps only a binding and the integration gates. The
+  victim ordering moved with it as `identcache.BetterVictim`, and `store.go`'s
+  `betterAuthCacheVictim` now delegates to it rather than keeping a copy. The
+  tree still holds two definitions of that ordering, that one and the
+  identical `better` in `internal/authstate`; consolidating the engines is
+  recorded as follow-up, not done here. Entries are attributed to a client
+  fairness key and eviction takes the oldest entry of the client holding the
+  most, so a flooding source evicts itself and a client holding one entry cannot
+  be displaced until every other client is down to one too. An expired entry is
+  always the better victim, and a lookup now reclaims one in place. Work per
+  insertion stays proportional to the number of active clients rather than to
+  the cache size, which is what keeps the fix clear of the separate
+  full-scan-under-the-mutex defect CHAOS-57 also closed. The fairness key was
+  already computed on both data-plane paths and was being discarded at every
+  provider dispatch point — the two in `store.go` and the IdP-registry loop in
+  `proxy.go`, which is the one tried first in a registry deployment. All three
+  now go through a single helper that prefers the client-attributed form, so a
+  backend keeping no result cache (SAML, which is browser-mediated) is
+  unaffected and a new call site inherits the behaviour instead of re-deciding
+  it. Displacement is counted per backend and exposed as
+  `culvert_identity_cache_evictions_total`, accumulated at the point of
+  eviction into a process-owned total so it covers both the legacy provider and
+  the registry providers and cannot fall when an operator edits an IdP profile
+  (editing one has the registry compile a fresh provider, and a Prometheus
+  counter that decreases reads as a restart). It sits beside the existing
+  `culvert_auth_cache_evictions_total` for the local cache.
+
+  One detail of the generalisation had to be unpicked again: a positive
+  introspection verdict is bounded by the token's own declared `exp` rather
+  than by the backend's configured TTL, and both original stores held that
+  deadline exactly because they recorded it against the same clock sample the
+  clamp had measured. Expressing it as a duration for the shared store
+  restarted that clock on insertion, so an entry outlived its token by whatever
+  elapsed in between (measured at 1.1 us and 553 ns for the two backends). The
+  store now takes an absolute deadline where the caller has one and keeps the
+  duration form only where the bound is a configured TTL. Gates: seventeen
+  (nine of them now in `internal/identcache`), with every gate that pins a
+  defect verified failing against the behaviour that defect describes, plus a
+  root gate on the binding's cap and sink and the package's boundary and
+  ownership tests.
 
 - Two security-regression gates added for the memoized IDNA slow path
   (`internal/hostutil/idnamemo.go`), each run against **both** retention tiers
@@ -3109,6 +3250,67 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   round trip. Only deployments using category groups in policy rules are
   affected; no configuration, API or metric surface changes.
 
+- An enabled SAML or OIDC identity provider no longer depends on being able to
+  reach the identity provider in order to EXIST. Compiling a profile performs a
+  synchronous outbound fetch — SAML metadata, OIDC discovery — and it had no
+  cache, no fallback and no retry, on three paths: appliance boot, the admin
+  save, and every Control Plane → Data Plane config sync. Three consequences.
+  An IdP that was briefly unreachable at boot left the profile enabled, stored
+  and listed in the admin UI but with **no live provider**, permanently for the
+  life of the process and with no metric, health row or alert to say so —
+  browser SSO simply stopped, and a scoped `SSORequired` rule returned 403 for
+  every user, against a green dashboard. An ordinary IdP maintenance window
+  **aborted the whole config snapshot**, stopping policy, blocklist and
+  threat-feed distribution to every data plane in the fleet. And because the
+  config version could not advance, every data plane retried the fetch every
+  30 seconds for the duration of the outage, aiming the fleet's full poll rate
+  at the identity provider that was already down.
+
+  The appliance now keeps the last document it successfully fetched and
+  degrades to it, bounded by a 7-day staleness ceiling — withdrawing a key from
+  published metadata is your IdP's revocation lever, so the fallback is a
+  bounded degradation rather than an open-ended one. The network always wins
+  when it answers, so an IdP-side key rotation is still picked up at the next
+  compile; cached bytes are parsed and validated by exactly the same code as
+  network bytes; and a cached document is bound to its source URL, so
+  re-pointing a profile gets no cache. A profile that still cannot be compiled
+  now retries on its own at a bounded, jittered rate and goes live on the first
+  successful fetch — no restart. New: the `idp_metadata` diagnostics row,
+  `culvert_idp_enabled_not_live` (page on `> 0`) and `culvert_idp_metadata_*`,
+  and the existing `identity_backend_unreachable` alert with source
+  `idp_metadata`. Nothing is added to `/readyz`: an IdP outage is fleet-wide,
+  and failing readiness would eject a fleet that is still proxying fine. An
+  unresolvable IdP hostname now falls back to the cached document instead of
+  being reported as a configuration error (an OIDC discovery URL is admitted on
+  structure; the DNS-backed check runs on the fetch, where its failure routes to
+  the cache), the SAML pre-flight host check shares the fetch's deadline instead
+  of resolving unbounded ahead of it, and switching a profile to inline
+  `metadataXml` clears its now-unresolvable remote-fetch failure episode. The
+  fallback is **stale-if-error** (RFC 5861): only a transport failure or an
+  HTTP 5xx is answered from the cache. A 4xx, any other non-200, an empty body,
+  or a document the appliance cannot accept (malformed metadata, or a discovery
+  document naming an `authorization_endpoint` that resolves into a private
+  range) fails the compile as before and never replaces the cached copy.
+  Re-pointing a profile from one remote source to another retires the old
+  source's failure episode on commit, so a repoint away from a broken IdP stops
+  alerting instead of paging indefinitely for a URL that is no longer
+  configured. The staleness ceiling is the EARLIER of 7 days and the SAML
+  metadata's own `validUntil`, and it is enforced on a **running** appliance
+  rather than only when a profile is next compiled: a provider whose cached
+  document has expired is retired (logged as `IDP_METADATA_EXPIRED`), so new
+  browser SSO through it fails closed instead of continuing to trust a signing
+  certificate your IdP may have withdrawn, and the retry loop brings it back
+  automatically on the first successful fetch. A provider that is live but
+  serving from cache is also revalidated by the retry loop and replaced the
+  moment the IdP answers again (`IDP_METADATA_REVALIDATED`), so a key rotated
+  during the outage is adopted within minutes of recovery. None of this revokes
+  sessions: the profile stays enabled and stored throughout, and a provider
+  serving a freshly fetched document is never retired however old the cached
+  copy beside it is. Deleting a profile discards its cached documents, and a
+  metadata fetch still in flight when the deletion is saved can no longer write
+  the deleted profile's document back, so a profile recreated under the same id
+  and source during an outage cannot compile from the deleted profile's signing
+  material. See `docs/operator/idp-metadata-availability.md`.
 ### Fixed
 
 - Six support-domain durable writes bypassed `fileutil.AtomicWrite`, the
