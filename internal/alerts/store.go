@@ -55,6 +55,14 @@ package alerts
 //                             means no threat-feed coverage at all and says so. Fired once per
 //                             episode, never per failed round; cleared only by an observed clean
 //                             sync. Detail carries a BOUNDED source class, never the fetch error.
+//   "syslog_feed_down"      — the remote syslog/SIEM feed has lost events and delivered nothing for
+//                             the degradation window (CHAOS-66): audit and request events are not
+//                             reaching the collector and are NOT replayed. The node keeps proxying
+//                             normally and the LOCAL audit JSONL is unaffected, so this is a
+//                             compliance-record gap, not a traffic fault. Fired once per episode,
+//                             never per dropped event; cleared only by an event that actually
+//                             reaches the collector. Detail carries a BOUNDED reason class, never
+//                             the collector address or a transport error.
 //   "mcp_gateway_down"      — MCP enablement was requested but the capability is not serving:
 //                             activation failed, the listener degraded, or it stopped while still
 //                             configured (RISK-027). Fired once per episode, never per request.
@@ -868,22 +876,37 @@ func newDeliveryTransport(dial func(context.Context, string, string) (net.Conn, 
 	}
 }
 
+// deliveryTimeout is one delivery attempt's deadline. Named (it was an inline
+// 5s literal in two places) because the retry pass's budget and in-flight lease
+// are both reasoned about as multiples of it.
+const deliveryTimeout = 5 * time.Second
+
 // deliveryClient is the process-wide webhook delivery client. The per-attempt
-// deadline is unchanged: 5s here plus the caller's request context.
+// deadline is unchanged: deliveryTimeout here plus the caller's request context.
 var deliveryClient = &http.Client{
-	Timeout:   5 * time.Second,
+	Timeout:   deliveryTimeout,
 	Transport: newDeliveryTransport(ssrf.SafeDialContext),
 }
 
 // Deliver performs one delivery attempt (attempt=1) and records the result.
 // Exposed for main's webhook-test admin endpoint; Dispatch and the retry
 // loop use it internally.
+//
+// The delivery is bounded by deliveryTimeout but not otherwise cancellable;
+// callers that hold a lifecycle context (the retry pass) use
+// deliverAttemptContext so a shutdown aborts the in-flight POST instead of
+// waiting it out (CHAOS-93 RT-2).
 func (as *Store) Deliver(h Webhook, payload Payload) bool {
-	return as.deliverAttempt(h, payload, 1)
+	return as.deliverAttemptContext(context.Background(), h, payload, 1)
 }
 
-// deliverAttempt performs the actual HTTP POST and records the result.
-func (as *Store) deliverAttempt(h Webhook, payload Payload, attempt int) bool {
+// deliverAttemptContext performs the actual HTTP POST and records the result.
+// The caller's lifecycle context is the parent of the per-delivery timeout, and
+// the attempt number is the one the caller actually knows. `attempt` reaches
+// the delivery record, which is what the admin delivery-history surface
+// renders — the retry pass used to go through Deliver and therefore recorded
+// every re-delivery as attempt 1 (CHAOS-93 RT-5).
+func (as *Store) deliverAttemptContext(parent context.Context, h Webhook, payload Payload, attempt int) bool {
 	record := Delivery{
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		WebhookID:   h.ID,
@@ -906,7 +929,7 @@ func (as *Store) deliverAttempt(h Webhook, payload Payload, attempt int) bool {
 		as.RecordDelivery(record)
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, deliveryTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
@@ -952,7 +975,27 @@ const (
 	retryMax      = 3
 	retryBaseSec  = 5 // exponential: 5s, 15s, 45s
 	retryQueueMax = 500
+
+	// retryLease is how long a CLAIMED entry is held out of the ready set while
+	// its delivery is in flight. It is the crash window, not a delay: a pass
+	// that completes re-arms the entry on its own backoff, so the lease is only
+	// ever observed when the process died between the claim and the resolve
+	// (CHAOS-93 RT-1). Comfortably above deliveryTimeout so a slow-but-live
+	// delivery is never double-sent by the next pass.
+	retryLease = 60 * time.Second
 )
+
+// retryPassBudget bounds ONE pass of the retry loop. A pass delivers serially
+// and each delivery may burn the full deliveryTimeout, so without a budget a
+// full queue against a blackholing webhook occupies the loop for
+// retryQueueMax × deliveryTimeout ≈ 42 minutes (CHAOS-93 RT-2). The budget does
+// not slow recovery down — the loop re-enters on the next tick and resumes from
+// the durable queue — it just stops one pass from becoming an unbounded,
+// uncancellable stretch of work.
+//
+// A var (not a const) so the budget gate can shrink it rather than spending the
+// real budget in CI. Production code never reassigns it.
+var retryPassBudget = 30 * time.Second
 
 // retryFile is a var (not const) so tests can redirect writes to a temp dir
 // and so the appliance can bind it to its persisted-state root at boot
@@ -967,7 +1010,20 @@ func SetRetryQueuePath(path string) { retryFile = path }
 func RetryQueuePath() string { return retryFile }
 
 // retryEntry represents a failed webhook delivery queued for retry.
+//
+// ID is this node's local identity for the entry, assigned on enqueue and
+// persisted. It exists because the retry pass now resolves an entry it claimed
+// EARLIER (CHAOS-93 RT-1): the entry stays in the durable queue across its own
+// delivery attempt, so the pass needs a way to name the one it is holding that
+// does not break when a concurrent enqueue shifts the slice. Matching on
+// content would not do — two identical alerts for one webhook are an ordinary
+// occurrence, and the queue is allowed to hold both.
+//
+// `omitempty` plus assignRetryIDsLocked keeps the file backward compatible: a
+// queue persisted before this field existed loads with ID 0 everywhere and is
+// renumbered at load.
 type retryEntry struct {
+	ID        uint64    `json:"id,omitempty"`
 	WebhookID string    `json:"webhook_id"`
 	Payload   Payload   `json:"payload"`
 	Attempt   int       `json:"attempt"`
@@ -977,6 +1033,10 @@ type retryEntry struct {
 var (
 	retryMu    sync.Mutex
 	retryQueue []retryEntry
+
+	// retryNextID issues retryEntry.ID. Guarded by retryMu; monotonic within a
+	// process and re-seeded past the persisted maximum at load.
+	retryNextID uint64
 
 	// retryExhaustedTotal / retryDroppedTotal count deliveries that were
 	// permanently given up on (all attempts used, or the queue was full) so
@@ -1008,32 +1068,63 @@ func RetryDroppedTotal() int64 {
 
 // enqueueRetry adds a failed delivery to the retry queue.
 func enqueueRetry(hookID string, payload Payload, attempt int) {
-	if attempt >= retryMax {
-		retryExhaustedTotal.Add(1)
-		obs.Printf("Alert retry exhausted for webhook %q event %q after %d attempts",
-			obs.Sanitize(hookID), obs.Sanitize(payload.Event), attempt)
-		return
+	retryMu.Lock()
+	exhausted, dropped := enqueueRetryLocked(hookID, payload, attempt)
+	if !exhausted {
+		// An exhausted attempt mutates nothing; anything else (queued, or
+		// refused by the cap) persists, exactly as before.
+		saveRetryQueueLocked()
 	}
+	retryMu.Unlock()
+	noteRetryOutcome(hookID, payload, attempt, exhausted, dropped)
+}
+
+// enqueueRetryLocked is enqueueRetry's queue mutation, split out so resolveRetry
+// can remove a claimed entry and queue its next attempt in ONE critical section.
+// It reports which give-up path was taken, if either, so the counters and the
+// log line are emitted by noteRetryOutcome outside retryMu — the lock stays off
+// the logging path, as it was before the split.
+func enqueueRetryLocked(hookID string, payload Payload, attempt int) (exhausted, dropped bool) {
+	if attempt >= retryMax {
+		return true, false
+	}
+	if len(retryQueue) >= retryQueueMax {
+		return false, true
+	}
+	retryNextID++
+	retryQueue = append(retryQueue, retryEntry{
+		ID:        retryNextID,
+		WebhookID: hookID,
+		Payload:   payload,
+		Attempt:   attempt,
+		NextRetry: time.Now().Add(retryBackoff(attempt)),
+	})
+	return false, false
+}
+
+// retryBackoff is the per-attempt delay: retryBaseSec tripling per attempt
+// (5s, 15s, 45s).
+func retryBackoff(attempt int) time.Duration {
 	backoff := time.Duration(retryBaseSec) * time.Second
 	for i := 0; i < attempt; i++ {
 		backoff *= 3
 	}
-	entry := retryEntry{
-		WebhookID: hookID,
-		Payload:   payload,
-		Attempt:   attempt,
-		NextRetry: time.Now().Add(backoff),
-	}
-	retryMu.Lock()
-	if len(retryQueue) < retryQueueMax {
-		retryQueue = append(retryQueue, entry)
-	} else {
+	return backoff
+}
+
+// noteRetryOutcome records a permanently given-up delivery on the counters the
+// delivery-history API exports, and logs it. Called with retryMu NOT held.
+func noteRetryOutcome(hookID string, payload Payload, attempt int, exhausted, dropped bool) {
+	switch {
+	case exhausted:
+		retryExhaustedTotal.Add(1)
+		obs.Printf("Alert retry exhausted for webhook %q event %q after %d attempts",
+			obs.Sanitize(hookID), obs.Sanitize(payload.Event), attempt)
+	case dropped:
 		retryDroppedTotal.Add(1)
 		obs.Printf("Alert retry queue full (%d entries), dropping retry for webhook %q event %q",
 			retryQueueMax, obs.Sanitize(hookID), obs.Sanitize(payload.Event))
 	}
-	saveRetryQueueLocked()
-	retryMu.Unlock()
 }
 
 // StartRetryLoop runs a background loop that retries failed deliveries.
@@ -1046,6 +1137,7 @@ func StartRetryLoop(ctx context.Context, current func() *Store) {
 	if data, err := os.ReadFile(retryFile); err == nil {
 		_ = json.Unmarshal(data, &retryQueue)
 	}
+	assignRetryIDsLocked()
 	retryMu.Unlock()
 
 	ticker := time.NewTicker(10 * time.Second)
@@ -1059,40 +1151,186 @@ func StartRetryLoop(ctx context.Context, current func() *Store) {
 			// re-delivers failed webhooks, so letting a panic kill the process
 			// would turn a bad queue entry into a gateway outage; letting it
 			// kill the goroutine would silently strand every retry forever.
-			obs.SafeCall("alerts_retry", func() { processRetryQueue(current()) })
+			obs.SafeCall("alerts_retry", func() { processRetryQueue(ctx, current()) })
 		}
 	}
 }
 
-func processRetryQueue(store *Store) {
-	now := time.Now()
-
-	retryMu.Lock()
-	var ready []retryEntry
-	var remaining []retryEntry
-	for i := range retryQueue {
-		if now.After(retryQueue[i].NextRetry) {
-			ready = append(ready, retryQueue[i])
-		} else {
-			remaining = append(remaining, retryQueue[i])
-		}
-	}
-	retryQueue = remaining
-	if len(ready) > 0 {
-		saveRetryQueueLocked()
-	}
-	retryMu.Unlock()
-
+// processRetryQueue runs ONE pass of the retry queue: it claims a due entry,
+// delivers it, resolves it, and repeats until nothing is due, the pass budget
+// is spent or ctx is cancelled.
+//
+// CHAOS-93 RT-1 — why it claims one entry at a time instead of draining the
+// ready set up front. The original pass moved EVERY due entry out of
+// retryQueue, persisted the truncated queue, and only then started delivering
+// them one by one at up to deliveryTimeout each. For the length of that pass
+// the not-yet-attempted entries existed solely in a local slice: absent from
+// memory's queue and absent from the file. An ordinary restart — SIGTERM on a
+// config reload, the lifecycle ctx cancelled at shutdown order 40 while the
+// pass runs on, OOM, a node reboot — therefore discarded all of them, and
+// discarded them in SILENCE: neither retryExhaustedTotal nor retryDroppedTotal
+// covers this path, the delivery history never records an attempt, and no line
+// is logged. Against a blackholing webhook the window was the full pass, up to
+// retryQueueMax × deliveryTimeout ≈ 42 minutes, and the loss up to
+// retryQueueMax-1 alerts. Losing alerts quietly is the worst available failure
+// for the plane whose job is to report that something else broke; it is the
+// ST-8 shape (§13) in the alert queue.
+//
+// So an entry stays in the durable queue across its own delivery attempt. A
+// claim re-arms NextRetry to now+retryLease, which holds the entry out of the
+// ready set for the attempt without removing it, and persists that — so a
+// crash mid-attempt leaves the entry queued and it is retried after the lease
+// with its attempt count intact (the attempt did not complete, so it is not
+// charged). The entry leaves the queue only when its attempt has RESOLVED:
+// removed on success, re-armed on its own backoff by enqueueRetry on failure.
+// internal/support's upload queue (support_upload_queue.go) already works this
+// way — the entry holds an `uploading` state in the durable queue rather than
+// being lifted out of it.
+func processRetryQueue(ctx context.Context, store *Store) {
 	if store == nil {
 		return
 	}
-	for i := range ready {
-		hook, ok := store.GetByID(ready[i].WebhookID)
-		if !ok || !hook.Enabled {
+	deadline := time.Now().Add(retryPassBudget)
+	for {
+		if ctx.Err() != nil {
+			return // shutdown: the unattempted entries are still queued and durable
+		}
+		if !time.Now().Before(deadline) {
+			// CHAOS-93 RT-2: one pass is bounded. The loop re-enters on the
+			// next tick and resumes from the durable queue, so this caps a
+			// pass's LENGTH without capping recovery.
+			return
+		}
+		claimed, ok := claimNextRetry(time.Now())
+		if !ok {
+			return // nothing due
+		}
+		hook, found := store.GetByID(claimed.WebhookID)
+		if !found || !hook.Enabled {
+			// Pre-existing behaviour: a retry for a webhook the operator
+			// deleted or disabled is dropped rather than held. It has to be
+			// dropped EXPLICITLY now that the claim leaves it in the queue.
+			dropRetry(claimed.ID)
 			continue
 		}
-		if ok := store.Deliver(hook, ready[i].Payload); !ok {
-			enqueueRetry(ready[i].WebhookID, ready[i].Payload, ready[i].Attempt+1)
+		delivered := retryDeliver(ctx, store, hook, claimed)
+		if !delivered && ctx.Err() != nil {
+			// Interrupted, not failed. A cancelled POST returns the same false
+			// a badly-answering webhook does, and resolveRetry cannot tell them
+			// apart — so charging this one would spend an attempt the webhook
+			// never saw, and for an entry already on its last attempt it would
+			// REMOVE the alert and count it "exhausted after retryMax
+			// attempts". That is the RT-1 loss again, one entry wide: an alert
+			// discarded by an ordinary shutdown. Cancellation can also land
+			// between this loop's ctx check and the request, so the check has
+			// to be here, AFTER the attempt, not only before it.
+			//
+			// An attempt that did not happen is not charged: the claim already
+			// left the entry in the durable queue, so returning now preserves
+			// it at its original attempt count, due again after the lease.
+			return
+		}
+		resolveRetry(claimed, delivered)
+	}
+}
+
+// retryDeliver is the retry pass's delivery seam (the startupAlertFire pattern
+// in package main). Production is the store's context-aware delivery; the
+// CHAOS-93 gates replace it so they can observe the durable queue WHILE an
+// attempt is in flight, which is the whole property under test and is otherwise
+// unobservable — the real path needs a reachable webhook origin, and
+// ssrf.SafeDialContext correctly refuses the loopback address a test server
+// would be on.
+var retryDeliver = func(ctx context.Context, store *Store, h Webhook, e retryEntry) bool {
+	// retryEntry.Attempt counts the attempts ALREADY made — 1 after a failed
+	// first delivery, 0 for an entry queued because the delivery semaphore was
+	// full and nothing was tried — so the delivery about to happen is the next
+	// one after that.
+	return store.deliverAttemptContext(ctx, h, e.Payload, e.Attempt+1)
+}
+
+// claimNextRetry takes the earliest entry due at now, re-arms it to
+// now+retryLease in the durable queue and returns a copy of it as claimed.
+// Reports false when nothing is due.
+func claimNextRetry(now time.Time) (retryEntry, bool) {
+	retryMu.Lock()
+	defer retryMu.Unlock()
+	best := -1
+	for i := range retryQueue {
+		if !now.After(retryQueue[i].NextRetry) {
+			continue
+		}
+		if best < 0 || retryQueue[i].NextRetry.Before(retryQueue[best].NextRetry) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return retryEntry{}, false
+	}
+	retryQueue[best].NextRetry = now.Add(retryLease)
+	claimed := retryQueue[best]
+	saveRetryQueueLocked()
+	return claimed, true
+}
+
+// resolveRetry closes out a claimed entry: removed from the durable queue on a
+// successful delivery, replaced by its next attempt on a failed one.
+//
+// The removal and the re-arm are one critical section so the entry is never
+// absent from the queue with its attempt unresolved — the defect this function
+// exists to avoid, one scale down.
+func resolveRetry(claimed retryEntry, delivered bool) {
+	if delivered {
+		dropRetry(claimed.ID)
+		return
+	}
+	retryMu.Lock()
+	removeRetryLocked(claimed.ID)
+	exhausted, dropped := enqueueRetryLocked(claimed.WebhookID, claimed.Payload, claimed.Attempt+1)
+	saveRetryQueueLocked()
+	retryMu.Unlock()
+	noteRetryOutcome(claimed.WebhookID, claimed.Payload, claimed.Attempt+1, exhausted, dropped)
+}
+
+// dropRetry removes one entry by id and persists the queue.
+func dropRetry(id uint64) {
+	retryMu.Lock()
+	defer retryMu.Unlock()
+	if removeRetryLocked(id) {
+		saveRetryQueueLocked()
+	}
+}
+
+// removeRetryLocked deletes the entry with the given id, reporting whether it
+// was present. An id of 0 matches nothing: 0 is the "never assigned" value, and
+// a persisted queue is renumbered off it at load.
+func removeRetryLocked(id uint64) bool {
+	if id == 0 {
+		return false
+	}
+	for i := range retryQueue {
+		if retryQueue[i].ID != id {
+			continue
+		}
+		retryQueue = append(retryQueue[:i], retryQueue[i+1:]...)
+		return true
+	}
+	return false
+}
+
+// assignRetryIDsLocked renumbers a queue loaded from disk: entries persisted
+// before retryEntry carried an id get one, and retryNextID is seeded past every
+// id in the file so a restart cannot reissue one.
+func assignRetryIDsLocked() {
+	for i := range retryQueue {
+		if retryQueue[i].ID > retryNextID {
+			retryNextID = retryQueue[i].ID
+		}
+	}
+	for i := range retryQueue {
+		if retryQueue[i].ID == 0 {
+			retryNextID++
+			retryQueue[i].ID = retryNextID
 		}
 	}
 }

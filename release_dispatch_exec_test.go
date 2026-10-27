@@ -81,6 +81,10 @@ func planTo(t *testing.T, cat *Catalog, cfg DispatchConfig, running []string) *D
 func newExec(agent AgentClient, audit func(DispatchAuditEvent)) *DispatchExecutor {
 	e := NewDispatchExecutor(agent, DispatchConfig{ProxyRepo: dispatchRepo}, audit)
 	e.newOpID = func() string { return "OP01" } // deterministic key
+	// CHAOS-93 RT-3 added a real inter-attempt backoff. Every test here asserts
+	// Apply/WaitOp OUTCOMES, not the schedule, so the wait is recorded instead
+	// of spent; TestExec_ApplyRetryBacksOffBetweenAttempts owns the schedule.
+	e.applyWait = func(context.Context, time.Duration) error { return nil }
 	return e
 }
 

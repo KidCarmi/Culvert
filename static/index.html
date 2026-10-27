@@ -10984,17 +10984,20 @@ async function loadSettings() {
   // Syslog
   try {
     const sl = await api('/api/syslog');
+    // `addr` is the CONFIGURED collector and stays populated when its dial
+    // failed; `servingAddr` is what is actually being served. Keying this
+    // section off a serving address meant a failed boot dial answered addr:""
+    // with degraded:true, so the form lost the operator's own address and
+    // hideSyslogDrops() ran on the one feed losing every event (CHAOS-81,
+    // Codex P2, PR #1494).
     document.getElementById('s-syslog-addr').value = sl.addr || '';
     document.getElementById('s-syslog-format').value = sl.format || 'rfc3164';
     if (sl.addr) {
-      const el = document.getElementById('s-syslog-status');
-      el.style.display = '';
-      const fmtLabel = sl.format === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
-      el.textContent = '✓ Forwarding to ' + sl.addr + ' (' + fmtLabel + ')';
-      el.style.color = 'var(--green)';
+      renderSyslogTarget(sl);
       renderSyslogDrops(sl.drops, sl.panics);
     } else {
       // No forwarding configured - never leave a stale drop warning visible.
+      document.getElementById('s-syslog-status').style.display = 'none';
       hideSyslogDrops();
     }
   } catch(e) { console.error(e); }
@@ -11156,8 +11159,35 @@ async function saveUIAllowIPs() {
 
 // ── Syslog / SIEM ─────────────────────────────────────────────────────────
 // renderSyslogDrops / hideSyslogDrops keep the drop-count row in sync with the
-// forwarding state so a stale amber warning can't survive a reconfigure/disable
-// (a new collector starts a fresh writer at Drops()==0; disabling clears it).
+// forwarding state. The counters are PROCESS-lifetime (CHAOS-81 P2-4): they
+// carry every collector this process has retired, so a re-point does NOT
+// start them back at zero and they must never be inferred from a mutation
+// response - only GET /api/syslog answers them. Disabling still hides the row
+// because a node with no configured collector shows none, which is what a
+// reload displays too.
+// renderSyslogTarget states which collector is being SERVED, and never claims
+// the configured one is unless it actually is. The green tick used to be
+// unconditional on `addr` being set, so a boot that connected target A and
+// then failed to connect the persisted target B reported "Forwarding to A" in
+// green with no hint that B - the one the form shows - is unserved.
+function renderSyslogTarget(sl) {
+  const el = document.getElementById('s-syslog-status');
+  el.style.display = '';
+  const fmtLabel = sl.format === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
+  if (sl.targetMet) {
+    el.textContent = '✓ Forwarding to ' + sl.addr + ' (' + fmtLabel + ')';
+    el.style.color = 'var(--green)';
+    return;
+  }
+  el.style.color = 'var(--warn,#b8860b)';
+  if (sl.servingAddr) {
+    el.textContent = '⚠ ' + sl.addr + ' could not be connected - events are still going to the PREVIOUS collector '
+      + sl.servingAddr + ' (' + fmtLabel + '). Nothing retries; re-save to try again.';
+    return;
+  }
+  el.textContent = '⚠ ' + sl.addr + ' is configured but NOT connected - audit and request events are not reaching the SIEM. '
+    + 'Nothing retries; re-save to try again.';
+}
 function renderSyslogDrops(drops, panics) {
   const dropsEl = document.getElementById('s-syslog-drops');
   const n = drops || 0;
@@ -11197,9 +11227,22 @@ async function saveSyslog() {
     const fmtLabel = (res.format || format) === 'rfc5424' ? 'RFC 5424' : 'RFC 3164';
     el.textContent = '✓ Forwarding to ' + addr + ' (' + fmtLabel + ')';
     el.style.color = 'var(--green)';
-    // Reconfiguring points at a fresh writer whose drop counter starts at 0 -
-    // reset the row rather than leaving a prior collector's stale warning up.
-    renderSyslogDrops(res.drops);
+    // Re-read the authoritative GET for the counters. They survive a
+    // re-point, so the save response cannot carry them: rendering its absent
+    // `drops` field showed "no delivery drops" and erased the loss history at
+    // exactly the moment an operator re-points to remediate it (Codex P2,
+    // PR #1494). On a failed re-read keep the row as it stands - a stale real
+    // number beats a fabricated zero.
+    try {
+      const cur = await api('/api/syslog');
+      renderSyslogDrops(cur.drops, cur.panics);
+      // One renderer for the target claim too: the optimistic line above is
+      // sound (POST refuses a failed dial with 400, so a 2xx means this
+      // target IS the one being served) but a second copy of the sentence is
+      // a second answer to the same question. On a failed re-read the
+      // optimistic line stands.
+      renderSyslogTarget(cur);
+    } catch(_) { /* keep the existing row */ }
     toast('Syslog configured', 'success');
   } catch(e) { toast('Error: ' + e.message, 'error'); }
 }
@@ -19840,6 +19883,7 @@ function resetBlockPage() {
              on its own) or has stopped entirely (the listening socket is gone —
              restart required). Fires once per episode, never per retry. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="socks5_listener_down"> SOCKS5 listener not accepting connections</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="syslog_feed_down"> SIEM/syslog feed not delivering events</label>
         <!-- CHAOS-71: this node is configured as a Control Plane but its gRPC listener
              has been unable to bind or serve for over 30 s (or its supervisor stopped).
              Config distribution, node enrollment and certificate renewal are unavailable

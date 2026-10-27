@@ -123,6 +123,28 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-26 — `CHAOS-93` CLAIMED (placeholder, commit one). Domain: the retry
+plane — every loop in the tree that re-attempts a failed operation, asked three
+questions the SIMULATE list puts next to each other: does it WAIT between
+attempts, can it be INTERRUPTED, and does the work survive the attempt?** Id
+claimed in this committed row before any code was written, per the convention
+above. `CHAOS-92` is the highest id merged on `main`; 68, 72, 76, 79/80, 81, 87
+and 88 are still claimed by sweeps open when this one started (68 = PR #1437,
+72 = #1564, 76 = #1633, 79/80 = #1626, 81 = #1494, 87 = #1485, 88 = #1711) and
+89–91 remain held by [the 2026-10-13 round](CHAOS-REVIEW-2026-10-13.md), so this
+sweep took 93 and will not move.
+
+Scope is the three retry/cancellation rows the
+[2026-10-18 sweep](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-18.md)
+verified and deliberately left open as its suggested improvements 4–6 — the
+zero-delay `applyWithRetry`, the feed rounds that discard the scheduler's
+context, and the serial uncancellable alert-retry pass — plus what asking the
+third question (*does the work survive?*) of the alert queue turned up, which
+outranks all three: a pass REMOVES its ready entries from the durable queue
+before delivering any of them, so an ordinary restart discards every
+not-yet-attempted entry in silence. Findings, measurements and gates are
+written up in §57 below.
+
 **2026-10-25 — `CHAOS-92` CLAIMED (placeholder, commit one). Domain: the
 client-supplied request PATH on the unauthenticated data path — the last
 unbounded client-chosen string sitting in front of sinks that retain it.** Id
@@ -421,6 +443,65 @@ and it is the next free id on main. Findings and gates are written up in §44
 below** — written as §41 and renumbered in merge order when main was brought
 in again, because `CHAOS-74` had merged as §41/§42 and the open `CHAOS-75`
 sweep (#1605) holds §43.
+
+**2026-09-24 — CHAOS-81 sweep (the SIEM/syslog forwarding path under a
+collector outage). ID CLAIMED IN THIS PLACEHOLDER ROW AS COMMIT ONE, BEFORE ANY
+CODE WAS WRITTEN — AND IT STILL MOVED.** It was claimed as `CHAOS-66`, which was
+free in the merged tree that morning; the SOCKS5-bind sweep (the row below)
+claimed the same id from the same tree on the same day and merged first, so per
+the rule this header already states — *an id is rewritable for free right up
+until its first merge, so the sweep that is still an open PR renumbers ITSELF* —
+this one moved to `CHAOS-72` / §42 (the coordinator's allocation; §37–§41 are reserved for other open sweeps) while still unmerged, and a third open sweep
+was concurrently titled `chaos-66` as well. **It moved a second time, to `CHAOS-81` / §45, when main was brought in
+on 2026-10-23:** #1611 (the CDR breaker) had merged holding `CHAOS-72`, §41–§44
+had merged (`CHAOS-74`, its adjacent-domain sweep, `CHAOS-75`, `CHAOS-71`), and
+open sweeps held `CHAOS-73` and `CHAOS-76`–`80`, so it took the next id above
+every visible claim, the rule this row states below. Its section moved once more,
+to §53, on 2026-10-25, when `CHAOS-78` (#1675) merged as §45, and to §56, on
+2026-10-27, when `CHAOS-92` merged as §53; the id did not move.
+
+**That is the sharpest evidence yet about what the placeholder row does and does
+not buy, and it refines the remedy rather than refuting it.** A committed
+placeholder row prevents a collision only against a sweep that READS it, i.e.
+against sweeps that start later and from a tree that already carries the claim.
+It cannot arbitrate two sweeps that claim from the same merged tree within the
+same window, which is exactly the case §32's entry already identified when it
+recorded that "take the next free id" cannot be the tie-break. Nothing short of
+an allocator that is WRITTEN TO before the branch exists — one durable
+append-only list, the `TECHNICAL-RISK-REGISTER.md` recommendation of 2026-07-11
+— can, and this is now at least the eleventh occurrence. The row still earned
+its keep in the only way available to it: because the claim was committed, the
+collision was found by a conflict in THIS file rather than by two merged
+sections silently sharing an id, which is how the `CHAOS-50` triple survived.
+The id chosen is deliberately NOT the next free one (`67`): three other open PRs
+hold `CHAOS-68`, `-69` and `-70` in their own claim rows, and picking the lowest
+free number is what produced this collision in the first place, so this sweep
+took the next id above every claim visible on an open PR.
+
+Ten defects, all closed — seven from the sweep, three from the Codex review
+round; four residual rows recorded (SL-1 UDP cannot prove delivery and is the
+default, SL-2 the flat reconnect backoff, SL-3 no durable spool, SL-4 the
+unsynchronised window between a write completing and the failure-count read —
+round 9, reachable only by a queue-full drop, whose *resolved* verdict is the
+correct one; see the round-9 section). The finding:
+the only health surface covering the SIEM feed decides on state fixed at INIT
+time, so a collector that goes away during ordinary uptime left the node
+reporting *"remote syslog/SIEM forwarding is active"* while every audit and
+request event it produced was discarded — measured at 49 of 49 dropped with the
+row still `ok`. Alongside it: delivery loss reached no Prometheus series, no
+`/healthz` field, no alert and no log line, so no rule could be written for it;
+the one counter that existed was cumulative with no time axis; `InitSyslog`
+leaked the Writer it replaced (one goroutine and one ESTABLISHED collector
+socket per re-init, on EVERY boot of an appliance carrying both a YAML and a
+persisted target); and `POST /api/syslog/test` — the probe the diagnostics row
+itself tells operators to use to "confirm connectivity" — answered `ok: true`
+unconditionally, a second-order casualty of WK-9's otherwise-correct async fix.
+The seventh was found while wiring the plane and is a plain concurrency defect:
+`globalSyslog` was a bare package-level pointer mutated by the admin plane and
+read on the REQUEST PATH (`recordRequest`'s `WriteRequest`, the audit fan-out's
+`WriteAudit`), confirmed under `-race` — nothing in the suite exercised both at
+once, and this sweep would have added two more readers to it. Written up in
+§56.
 
 **2026-09-23 — CHAOS-87 sweep (the interactive IdP compile path).** Claimed
 `CHAOS-66` in a committed placeholder before writing code, but main's SOCKS5-bind
@@ -15961,3 +16042,2678 @@ They now live in `internal/identcache`, recorded in
 
 The register rows were renumbered AU-30/AU-31 → AU-67/AU-68 in the same round,
 because #1437 holds AU-18…AU-62 (see the dated header entry).
+
+---
+
+## 56. CHAOS-81 — The SIEM forwarding path under a collector outage
+
+**Id note.** Written as `CHAOS-72` / §42 and renumbered to `CHAOS-81` / §45 in
+merge order when main was brought in (see this sweep's revision-log row), then
+to §53 when `CHAOS-78` (#1675) merged as §45, and to §56 when `CHAOS-92`
+merged as §53 (§54 and §55 are held by open sweeps). Gates and source comments
+carry the new id.
+
+**Overlap with §45 (`CHAOS-78`).** Both sweeps converted the package-main
+syslog handle to an `atomic.Pointer`. §45 merged first, so its declaration and
+accessors (`globalSyslogHandle`, `syslogHandle`, `setSyslogHandle`) and its
+AST wall are the ones in the tree; this sweep's own names (`globalSyslog`,
+`activeSyslog`, `setActiveSyslog`), where they appear below, now mean those.
+What this section adds on top is the publication transaction
+(`syslogPublishMu`), the successor handoff, the sealed-totals accounting and
+the delivery health plane. The engine keeps both exclusions against the
+close-versus-enqueue window: this sweep's `sendMu`, which the sealed-totals
+accounting depends on, and §45's `inFlight` registration, which `Close`'s
+bounded `waitForSenders` still reads.
+
+**Sweep date:** 2026-09-24. **Scope:** `internal/syslog`, `syslog.go`,
+`checkSyslogFeed` (diagnostics.go), the `/api/syslog` + `/api/syslog/test`
+admin surface, and the new `syslog_health.go` plane.
+
+### The one-sentence finding
+
+The only health surface that reports on the SIEM feed decides on state fixed at
+**init time**, so a collector that goes away during ordinary uptime — the common
+case, not the narrow one — leaves the node reporting **"remote syslog/SIEM
+forwarding is active"** while every audit and request event it produces is
+discarded, uncounted by any series a monitoring system can read.
+
+### Why this path
+
+`internal/syslog` carries the customer's security record OFF the box. Both
+`globalSyslog.WriteAudit` (store.go:416 — every `auditEvent`) and
+`globalSyslog.WriteRequest` (store.go:1873 — every request-log entry) go
+through it. For a great many enterprises the SIEM *is* the record of record:
+the node-local audit JSONL is a `fileutil.RotatingFile` capped at 50 MB with
+one archive and is frequently never collected. A collector that stops receiving
+is therefore a hole in the compliance trail, which is the CWE-778 / A09:2021
+class `internal/audit`'s own header names by number.
+
+This tree has closed that class twice already — ST-8 (§13) for local audit
+write loss, and CHAOS-61 (§30) for the DP→CP audit push queue, whose write-up
+records the reasoning verbatim: the queue *"dropped with no counter, metric or
+log line — three hundred lines below this package's own documented contract for
+the durable path."* The syslog feed is the third member of the family and was
+the one still below that contract.
+
+### The defects
+
+**D1 — the contract row answers a different question than the one it prints.**
+`checkSyslogFeed` is `globalSyslog == nil || syslogConfigured !=
+syslogConfiguredAddr` and nothing else. Both operands are strings assigned once
+during startup. The row was written for a **boot-time** connect failure, which
+is real (its own comment carefully works through the YAML-then-admin double-init
+case) but requires the collector to be down in the exact window the proxy
+starts. The runtime case — the collector dying at any point across weeks of
+uptime — was not merely uncovered: it took the `else` branch and returned
+`diagOK` with the message *"remote syslog/SIEM forwarding is active"*.
+Reproduced against the real handler and the real engine on the pre-fix tree:
+**49 of 49 audit events dropped, row `ok`, message "active"**. A health surface
+that asserts a false statement is worse than no surface, because it is the one
+an auditor is shown.
+
+**D2 — loss was invisible to every machine-readable surface.** `Drops()` had
+exactly **one** consumer in the entire tree: the `drops` field of `GET
+/api/syslog`, an admin-only JSON blob. No Prometheus series, so no alerting
+rule *could* be written. No `/healthz` field, where both of its siblings
+(`auditLogWriteErrors`, `auditClusterPushDrops`) report. No alert event. No log
+line — the drain goroutine drops silently by construction, which is correct for
+the hot path and left the operator with nothing at all.
+
+**D3 — the one counter that existed could not answer the question.** `Drops()`
+is cumulative with no time axis. `drops: 40213` cannot distinguish a feed that
+is dark right now from one that healed last Tuesday. CHAOS-59 settled this
+shape for the threat feed: freshness needs a last-success timestamp and
+staleness needs a duration. Neither existed here.
+
+**D4 — `InitSyslog` leaked the Writer it replaced.** `globalSyslog = sw` was
+the whole handover. The previous Writer's drain goroutine stays parked on
+`select { case <-s.queue; case <-s.stop }` — nobody holds the queue, nobody
+closes `stop` — **holding its collector socket open forever**. Measured on the
+pre-fix tree: `+1` goroutine and a connection to the abandoned collector still
+`ESTABLISHED` at the far end (a read there timed out rather than seeing EOF);
+many SIEMs count such a phantom session against a per-source connection
+licence. This is **not only an admin action**: `main.go:206` runs
+`initObservability` (YAML/flags) and `main.go:240` runs
+`initPersistentAdminState` → `LoadAdminSettings` → `applyAdminServices`, and
+`snapshotAdminEndpoints` persists `syslogConfigured` into
+`admin_settings.json` — so once an operator saves any admin setting, **every
+subsequent boot** calls `InitSyslog` twice and leaks one Writer. Descriptor
+exhaustion is the recorded terminal state of WK-11/PX-6 and the entry point to
+CHAOS-54's findings.
+
+**D5 — the remediation instruction pointed at a probe that cannot fail.**
+`POST /api/syslog/test` called `Write` and answered `{"ok": true, "message":
+"test message sent"}` unconditionally. That was true when delivery was
+synchronous. Once WK-9's fix made it asynchronous, `Write` became a channel
+send and the endpoint confirmed only that the channel had room — it returned
+`ok` for a collector that had been dead for a week. `checkSyslogFeed`'s own
+`OperatorAction` told operators to *"use POST /api/syslog/test to confirm
+connectivity"*. **A probe that cannot fail is worse than no probe**, and this
+one is a second-order casualty of an otherwise-correct fix: the async change
+did not consider which callers depended on `Write` being a delivery.
+
+**D6 — the writer handle is mutated at runtime and read on the request path,
+with no synchronisation.** `globalSyslog` was a bare package-level
+`*syslogWriter`. It is written by the admin plane (`apiSyslogConfig` re-points
+or disables forwarding) and read on the REQUEST PATH — `store.go:1873`
+(`WriteRequest`, once per proxied request) and `store.go:416` (`WriteAudit`,
+once per admin action) — plus the diagnostics row, the `/metrics` scrape and
+the `/healthz` probe, each from its own handler goroutine. Confirmed under
+`-race` against the real `apiSyslogConfig` and `recordRequest` shapes. Nothing
+in the suite happened to exercise both at once, which is the only reason it had
+never been reported — and this sweep would have made it worse by adding two
+more readers. Found while wiring the plane, fixed rather than recorded, because
+a sweep may not leave a known data race on the request path in the subsystem it
+just rewrote.
+
+### What shipped
+
+`internal/syslog` gains the delivery axis while staying the stdlib-only leaf
+its header contract requires: every drop site routes through one `noteDrop`
+chokepoint that moves the counter, the timestamp **and** a bounded reason class
+together, successes route through `noteDelivered`, and `Stats()` is a lock-free
+snapshot. The chokepoint matters more than the fields: a future drop site that
+moves `Drops()` alone would rebuild exactly the unreadable counter this sweep
+came to fix.
+
+`syslog_health.go` is the plane, shaped like `threatfeed_health.go` and
+`socks5_health.go` with no new operator vocabulary beyond one event name:
+`culvert_syslog_{up,degraded,delivered_total,drops_total,panics_total,last_success_timestamp_seconds,stale_seconds,queue_depth}`
+(emitted **only when a collector is configured** — the CHAOS-54 rule), the
+`syslog_feed` row extended with a delivery verdict, `syslogDrops` on `/healthz`
+when non-zero, a fire-once `syslog_feed_down` alert, and a rate-limited log
+pair.
+
+Four decisions are load-bearing.
+
+**Degradation requires BOTH halves — drops observed AND nothing delivered for
+five minutes.** Drops alone is a blip the reconnect machine absorbs; age alone
+is an idle gateway with nothing to forward. Requiring both is what makes the
+predicate unable to fire on silence, and inventing a fault from silence is how
+a health plane loses its audience. Five minutes is chosen against the engine's
+own state machine: `deliverLine` retries at most every 5 s, so by the time this
+fires the writer has failed roughly sixty bounded attempts.
+
+**Recovery is on OBSERVED evidence only** — one event that actually reached the
+collector. Elapsed time never clears it (the `ca_health.go` / `storage_health.go`
+discipline). The cost is stated rather than hidden: a node whose collector was
+fixed while the node was quiet stays reported as down until it delivers
+something, which is what `POST /api/syslog/test` is for and what the row's
+`OperatorAction` says.
+
+**A dark SIEM feed FAILS the diagnostics row where a stale threat feed only
+WARNS**, and the asymmetry is deliberate. Stale intelligence still has a
+degraded-but-useful state — the gateway keeps enforcing last-known-good
+entries. A dark SIEM feed has none: the events are destroyed as they are
+produced and are never replayed.
+
+**No `/readyz` row and no `/healthz` failure.** A node whose SIEM feed is down
+is proxying perfectly — policy, category, DPI, AV, CDR and the local audit JSONL
+are untouched. Failing readiness would eject a healthy gateway over its logging
+plane, converting a compliance gap into a traffic outage. That is the trade §19
+refused for the category store, §25 for the admin UI listener and §27 for the
+threat feed, and the answer is the same here.
+
+`globalSyslog` is now an `atomic.Pointer[syslogWriter]` behind
+`activeSyslog()` / `setActiveSyslog()`, and every call site loads ONCE into a
+local. The mechanical conversion produced `if activeSyslog() != nil {
+activeSyslog().X() }` at seven sites — a check-then-act against a handle the
+admin plane can clear in between, i.e. the same defect in a new costume — so
+each one was rewritten as `if sw := activeSyslog(); sw != nil`. The publication
+in `InitSyslog` is a `Swap`, not a load-then-store: two concurrent re-points
+would otherwise both read the same predecessor, one closing a writer the other
+was about to leak.
+
+Two further races surfaced only once the gate existed, both created by this
+sweep's own observer running `syslogFeedState` on the DRAIN goroutine: the
+clock seams (`syslogHealthNow` and the engine's `now`) were bare function
+values a test replaces, and the snapshot read the `syslogConfigured` /
+`syslogConfiguredAddr` intent strings the admin handler mutates. The clock
+seams are now atomic; the intent comparison was simply removed from the
+snapshot, since nothing consumed it — `checkSyslogFeed`'s own init branch
+already answers that question on the handler goroutine. **A new observer is a
+new concurrency context**: every global the observed function touches has to be
+re-examined against the goroutine it is now reached from, and a plain package
+var that was safe under "written at startup, read by handlers" stops being safe
+the moment a worker goroutine joins the readers.
+
+The replaced-Writer close is **asynchronous**, which is a decision and not an
+oversight: `Writer.Close` is self-bounded but that bound is ~7 s against a
+wedged collector, and the collector being replaced is — by the nature of the
+operation — the one the operator has decided is broken. Paying it synchronously
+would let a dead SIEM stall the boot (before the proxy listener is up, the
+CHAOS-57 lesson) or the admin request that is fixing it.
+
+### Deliberately NOT done, and recorded
+
+**UDP cannot prove delivery, and `udp://` is the DEFAULT** when the operator
+omits a scheme. A write to a connected UDP socket almost always succeeds
+regardless of whether anything is listening; an ICMP port-unreachable surfaces,
+at best, on a *later* write, and a collector silently discarding datagrams
+surfaces nothing. So on UDP `Delivered` means "this kernel accepted the
+datagram", not "the SIEM received it", and `culvert_syslog_up 1` is not
+evidence the SIEM has the events. This is a property of the protocol, not a
+defect to fix in the gateway. It is made explicit instead: the row appends a
+caveat sentence, `GET /api/syslog` reports `deliveryProvable: false`, the probe
+answers `sent` rather than `delivered`, and the runbook says to use `tcp://`
+when delivery evidence is required. **Register row SL-1** — an operator-visible
+default that produces a weaker guarantee than the surface appears to give is a
+posture decision, not a bug, and the owner may prefer to change the default.
+
+**The reconnect backoff stays a flat 5 s with no jitter.** CHAOS-59's rule
+(bounded exponential backoff plus stable per-node jitter, because a fleet
+reconnecting in lockstep against a recovering origin is a herd) applies in
+spirit, but the rate here is already bounded at 0.2 dials/s per node and
+reconnection is driven by line arrival rather than a ticker, so an idle node
+generates none at all. Changing it is a behaviour change in a sweep about
+visibility, and this tree's own rule is one concern per change. **Register row
+SL-2.**
+
+**Events lost during an outage are not replayed and no spool is added.** A
+durable on-disk spool is the obvious ask and is deliberately refused here: it
+would put the compliance feed's queue on the same volume whose failure §13 and
+§31 exist to survive, and a spool that can itself be corrupted or filled trades
+one loss mode for two. The honest answer is that the node-local audit JSONL
+already holds the audit half and is the recovery path the runbook names.
+**Register row SL-3.**
+
+**`GET /api/syslog` remains admin-only.** The delivery fields say nothing a
+viewer could act on without the ability to re-point the target, and the
+diagnostics row (viewer-visible, counts only) already carries the posture.
+
+### Gates
+
+`internal/syslog/syslog_stats_test.go` (7) and `syslog_health_chaos_test.go`
+(17).
+
+Every defect gate was **verified failing against its reintroduced pre-fix
+shape**: the contract row reported `ok`/"forwarding is active" with a dead
+collector and 5 drops; `/healthz` carried no `syslogDrops`; the replaced Writer
+held its collector connection `ESTABLISHED`; and `POST /api/syslog/test`
+answered `ok: true` against a dead collector.
+
+Two gates exist because of a lesson this document already records one subsystem
+over. `TestChaos81_ProbeReportsTheRealOutcome` exercises `syslogDeliveryProbe`
+directly and **passed unchanged against the reverted handler** — walling the
+function is not walling the path, exactly as the SOCKS5 log-injection note
+found for `pluginDecision`. `TestChaos81_TestEndpointReportsFailureAgainstADeadCollector`
+drives the real handler, and
+`TestChaos81_MetricsExpositionCallsTheSyslogWriter` pins the exposition wiring
+structurally (a source scan, with its own not-vacuous control) because a metrics
+writer nobody calls satisfies a test that calls it directly.
+
+`TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic` is the D6 gate
+and carries no assertion beyond "the race detector saw nothing" — a torn handle
+is the defect, and `-race` is the only instrument that observes it. Verified
+failing against the reintroduced bare-pointer shape. It is also the gate that
+found the two clock-seam races above, which is the argument for writing it at
+all: a concurrency gate earns its keep by finding what its author did not know
+to look for.
+
+One gate was demoted to a control after being written as a defect gate.
+`ReplacedWriterDoesNotCorruptTheSuccessorsState` was meant to prove that
+detaching the delivery observer before closing a displaced writer stops that
+writer charging its final-flush drops against its replacement. It passes
+against the tree WITHOUT the detach, because the isolation holds by
+construction: `syslogFeedState` reads its counters from whichever writer is
+live. The detach stays as hygiene and is documented as hygiene; the test stays
+as a control on the property an operator depends on. **A gate that cannot fail
+is worth less than no gate**, so labelling it is not a formality — an
+unlabelled vacuous gate is read by the next person as proof of something it
+never tested.
+
+Five controls, because the cheapest ways to pass the defect gates are all worse
+than the defect: a plane that reported every feed as degraded would satisfy
+"sees a runtime outage" (`HealthyFeedStillReportsActive`); one that never
+reported degraded would satisfy "does not page an idle node"
+(`IdleNodeIsNeverDegraded` pins the other direction); a healthy feed must still
+deliver exactly what it delivered before and pay no observer cost on the happy
+path (`HealthyFeedIsUnchangedAndSilent`); and a panicking observer must never
+take the drain goroutine down (`PanickingObserverCannotKillDelivery` — CHAOS-24's
+rule, already applied to `SetPanicObserver` in the same file).
+
+### The Codex P1 round, and what it says about the sweep's own blind spots
+
+Three P1 findings, all correct, all closed. Each is the same shape: a rule this
+sweep applied correctly in one place and failed to carry to the next — the
+pattern §35 named after finding it four times in one sweep, arriving here on a
+different subsystem.
+
+**P1-B is the one that would have cost a customer a false page, and it is
+the sharpest.** `snap.Drops > 0 && snap.Age >= syslogDegradedAfter` reads as
+"something is failing and nothing is getting through", and it is not what it
+says: `Drops` is CUMULATIVE and never resets, so one transient loss — a queue
+overflow during a collector GC pause, weeks ago — armed the first half
+PERMANENTLY. The node then only had to go quiet for five minutes for `Age` to
+cross the threshold, and every surface reported a **perfectly healthy feed as
+DOWN**: the `fail` row, the alert, `culvert_syslog_up 0`. Reproduced: 101
+historical drops, `ConsecutiveFailures == 0`, one idle month, row `fail`. The
+predicate now keys on `ConsecutiveFailures`, which the engine resets on every
+delivery and which therefore means what the predicate needs it to mean —
+something is failing NOW.
+
+The reason this survived self-review is worth more than the fix. This file's own
+header argues at length that the predicate "cannot fire on an idle node", and
+there is a control test named `IdleNodeIsNeverDegraded` asserting exactly that —
+**but it uses a feed with ZERO drops.** It tested the half of the claim that was
+already true. A control written from the same mental model as the code inherits
+the model's blind spot; this one needed a feed that had dropped AND recovered,
+which is the state the author was not thinking about because the author was
+thinking about outages, not about their aftermath. *When a control exists for a
+claim and the claim is still wrong, suspect the control's inputs before the
+control's logic.*
+
+**P1-A: the observer is driven by drops, and drops are driven by traffic, which
+stops.** A collector that dies, produces two minutes of losses and is then
+followed by a quiet period crosses the threshold with nothing left to call the
+evaluator. The metrics and the diagnostics row compute the truth on READ, so a
+Prometheus deployment still sees it — but the `syslog_feed_down` alert and the
+warning log, which this very document advertises as the paging surfaces, never
+fire. The sibling planes do not have this hole because their drivers cannot
+stop: `threatfeed_health.go` is evaluated from a periodic feed loop,
+`socks5_health.go` from an accept loop that retries at 1/s. This one borrowed
+their shape without noticing that its driver is customer traffic. Closed with
+`startSyslogHealthWatchdog` — the CHAOS-23 answer, a detection-only ticker at a
+tenth of the window — and the wiring is pinned structurally, because a watchdog
+nobody starts satisfies a test that calls its body directly.
+
+**P1-C: the probe inferred its verdict instead of observing it.** It compared
+writer-wide `Delivered`/`Drops` around its own write, so on a gateway with
+concurrent traffic another line's delivery landed between the snapshot and the
+read and the probe answered "the collector accepted the test event" while its
+own message was still queued behind a collector about to drop it. That is the
+defect this whole sweep is about — claiming more than the evidence supports —
+committed by the endpoint written to fix it. `Writer.WriteProbe` now returns a
+per-message acknowledgement signalled by the drain goroutine, where the
+delivered-counter delta around one `deliverGuarded` call IS exact because that
+goroutine is the counter's sole writer. **Honest limitation: the P1-C gate
+proves the new primitive answers correctly in both directions; it cannot be
+made to fail deterministically against the old shape, because that defect is a
+race.** Recorded rather than dressed up as a verified-failing gate.
+
+### A note on how the recovery gate was nearly wrong
+
+`TestChaos81_RecoveryRequiresADeliveredEvent` first waited for `Delivered > 0`
+and failed. The cause is worth recording: **the first TCP write after the peer
+closes still succeeds** — the RST arrives later — so a collector that had
+already gone away left `Delivered` at 1, and the gate would have observed that
+stale success and concluded the feed had recovered without a byte reaching
+anything. It now captures a baseline and waits for an increase. The same
+property is why the engine's own `noteDelivered` is an honest name only on TCP
+and only for the *socket*, which is the same limitation the UDP caveat above
+states in its strong form.
+
+### Codex round 4 — the feed monitoring could not see, and the page that latched the wrong record
+
+Two more, both of the family this section already names.
+
+**P1-F — a configured-but-never-connected feed exported nothing.** Every
+surface in `syslog_health.go` gated on `configured`, which is set only once a
+Writer is installed. The boot path *tolerates* a failed dial by design —
+`loadObservability` logs `Syslog: connect failed … continuing without syslog`
+and carries on, which is the right posture for a gateway — so a node whose
+collector was unreachable at boot exported **no `culvert_syslog_*` series at
+all**. The documented paging rule is `culvert_syslog_up == 0`, and an absent
+series cannot satisfy it: the one node whose SIEM feed never came up was also
+the one node monitoring could not see, while a node that connected and then
+died was fully visible. This is the emission rule of this very file (never
+export a zero for a feature nobody asked for) applied to the *wrong question* —
+"is there a Writer" instead of "did an operator ask for one". It survived
+because the plane disagreed with itself: the `syslog_feed` contract row has
+always reported this case as `fail` ("configured but failed to connect"), so
+the surface an operator reads by hand was right and the surface a rule reads
+was silent.
+
+The health record now carries the operator INTENT (`intendedTarget`/`intentAt`)
+under its own mutex, set at the two startup paths that tolerate a failed
+connect. Three decisions worth keeping. **The intent is duplicated** —
+`syslogConfiguredAddr` already records it — and deliberately: that variable is
+a plain string, and `syslogFeedState` is reached from the DRAIN goroutine, so
+reading it there would reintroduce D6 in a new place. (It also means that
+variable's own unsynchronised read/write pair — `checkSyslogFeed` reads it from
+one handler goroutine while `apiSyslogConfig` writes it from another — is still
+open; repointing the row at the record would close both, and is recorded as a
+follow-up rather than folded into a fix for something else.) **An unmet intent
+is reported DOWN IMMEDIATELY**, not after the degradation window, which is the
+one place this sweep departs from "degradation is a DURATION": nothing retries
+a failed `InitSyslog`, so there is no transient to wait out, and the contract
+row has always answered this condition without a grace. **The displaced
+writer's counters are left untouched** in the re-point-failed shape — a Writer
+still serving a target the operator has moved away from has real drops on it,
+and zeroing them would make `culvert_syslog_drops_total` go BACKWARDS, breaking
+`rate()` on the one series that measures compliance loss. The alert gets its
+own bounded sentence: the general one dates the outage from a delivery that
+never happened and names a drop count that is structurally zero, which would
+send an operator hunting a collector that is discarding events when the remedy
+is that no connection was ever made.
+
+**P1-G — a stale degradation snapshot paged about the old target and latched
+the new one.** `evaluateSyslogDegradation` SNAPSHOTS and then takes the lock to
+COMMIT. An admin re-point landing between the two installs a fresh record
+(`noteSyslogWriterInstalled` resets the latch for the new writer), and the
+stale callback then fired a page describing the OLD collector **and set the NEW
+record's `alerted` flag** — which nothing clears, because ordinary deliveries
+do not invoke the observer and only a further re-point resets it. The
+replacement's first real outage would have been silent. The snapshot now
+carries the Writer it describes and the commit half refuses a record that has
+been replaced.
+
+The window is microseconds wide and cannot be scheduled through the public
+entry point, so the commit is its OWN function (`commitSyslogDegradation`) and
+the gate drives it directly — the same answer CHAOS-66 reached for `adopt`'s
+Stop race, and for the same reason: *a gate that cannot fail for the defect it
+names is worse than no gate*. It carries a CONTROL requiring the live writer's
+own snapshot to still page, because a commit half that refused everything would
+satisfy every other assertion in that test while deleting the alert.
+
+Both defect gates were verified failing against their reintroduced pre-fix
+shapes (P1-F: the metrics gate restored to `!snap.Configured`, which exports
+nothing; P1-G: the writer-identity check removed, which pages *and* latches).
+
+### Codex round 5 — the counter that went backwards, and the episode with no birthday
+
+**P2 — a runtime re-point reset every exported counter.** `InitSyslog`
+installs a brand-new Writer and the plane read its counters directly, so
+`culvert_syslog_drops_total` DECREASED with no process restart. That is the one
+thing a Prometheus counter may not do: `rate()` reads a decrease as a counter
+reset and discards the interval. The same reset removed `syslogDrops` from
+`/healthz` and turned the `syslog_feed` row's "N dropped since startup" back to
+clean — at exactly the moment an operator re-points the collector to REMEDIATE
+the outage that produced the losses, i.e. the evidence disappears when it is
+most wanted.
+
+What makes this one worth recording beyond the fix: the P1-F change committed
+minutes earlier carries a comment arguing that a displaced Writer's counters
+must be left alone *because zeroing them would make the counter go backwards
+and break `rate()`* — and the re-point path was doing precisely that, one
+function away. Getting a rule right at the surface you are editing says nothing
+about the other surfaces that already violate it; the reviewer's value here was
+reading the rule and then looking for where it was already broken.
+
+Displaced Writers' finals are folded into `retired{Delivered,Drops,Panics}`.
+Labelling the series by target was the alternative and is rejected: the label
+value would be an operator-supplied address, which is the unbounded-label-set
+defect this register records as WK-12/RS-5. The residual is documented rather
+than hidden — a displaced Writer is closed ASYNCHRONOUSLY, so anything it
+records after the fold (its final flush) is not carried, which can only
+UNDER-count at a generation boundary and can never make a counter decrease.
+The per-episode fields stay strictly per-Writer, pinned by a CONTROL: carrying
+the whole predecessor's state forward is the cheapest way to make the counters
+monotonic, and it would report a healthy replacement as broken from its first
+byte.
+
+**P1 — an episode whose start had not been published yet was dated from the
+previous episode's end.** `noteDrop` runs on the CALLER's goroutine for a
+queue-full drop, so several request goroutines reach it at once. The one whose
+`consecutiveFail.Add(1)` returns 1 can be descheduled between that and
+`failSinceNano.Store(t)` while another increments to 2 and invokes the
+observer. `Stats` then saw a non-zero failure count beside a `failSince` left
+over from an episode a delivery had already ended — and CLAMPED it up to
+`lastSuccess`. On a node quiet since its last delivery that dates a brand-new
+episode from that delivery, so past the degradation window it is an immediate
+false DOWN page on the episode's FIRST drop.
+
+`ConsecutiveFailures > 0 && failSince < lastSuccess` is provably an unpublished
+start, because a delivery resets the count. So the fail-SAFE reading of the
+same evidence is to refuse to date the episode at all: the consumer's predicate
+requires a known start and therefore declines to page, the real start lands
+microseconds later, and the 30 s watchdog re-evaluates regardless. Nothing is
+suppressed beyond that window. The clamp was reaching for the same invariant
+and chose the direction that guesses rather than the one that abstains —
+*when two facts disagree, the safe answer is "unknown", not the more alarming
+of the two.*
+
+The window is a couple of instructions wide and cannot be scheduled from a
+test, so the gate drives `Stats`'s inputs directly (it is a pure function of
+them) and reproduces exactly the state the race produces. It carries two
+controls: a published start must still be dated, and a genuinely long episode
+that began after the last delivery must keep its own start rather than be
+truncated.
+
+### Codex round 6 — the callers that still bypassed the snapshot
+
+Three more, and all three are the same shape: the previous round made the
+delivery SNAPSHOT the single source of truth, and three callers were still
+answering from somewhere else.
+
+**P1 — a failure recorded while a delivery was in flight was erased by it.**
+Queue-full drops run `noteDrop` on the CALLER's goroutine (`tryEnqueue` holds
+only `sendMu`), so one can land between a successful write and the clear that
+follows. `noteDelivered`'s unconditional `consecutiveFail.Swap(0)` discarded
+that loss and emitted a recovery notification for an episode that had not
+ended; if traffic then stopped, the watchdog saw zero consecutive failures
+forever and the lost event could never degrade the feed. `deliverLine` now
+captures the count BEFORE any write and `noteDelivered` clears exactly that
+count by COMPARE-AND-SWAP, so a concurrent drop makes the clear fail and the
+failure survives. That is the fail-safe direction and it costs nothing:
+degradation also requires no delivery for the window, and we just delivered,
+so a retained failure cannot page on its own.
+
+**The naive CAS on its own is strictly worse than the defect, and finding that
+before shipping is the transferable part.** A failure that survives a delivery
+has a recorded start that predates the last success — and `Stats` refuses to
+date such an episode (that is round 4's P1-H rule, which exists to stop a
+brand-new episode being dated from an old fact). No later drop takes the 0→1
+edge, so the start would never be corrected: a real outage beginning at that
+instant would be undatable, and therefore un-degradable, FOREVER. `noteDrop`
+therefore RE-STAMPS whenever the recorded start is not after the last success.
+The write side is the only place with enough information to tell "this start
+belongs to an episode a delivery already ended" from "this start is simply
+old", which is exactly why the read side abstains. *A read-side rule that
+declines to guess needs a write-side counterpart that can eventually supply the
+answer — otherwise abstention becomes silence.*
+
+**P2 ×2 — `GET /api/syslog` was still answering from the live Writer.** It read
+`drops`/`panics` straight off `activeSyslog()`, so a runtime re-point reset
+them on that endpoint while `/metrics` and the response's own adjacent
+`delivered` field kept the process-lifetime totals — reloading the admin UI
+erased the loss history at exactly the moment an operator re-points the
+collector to remediate, and contradicted the contract's own "cumulative and
+monotonic" wording. And it gated `neverDelivered`/`deliveryProvable` on
+`Configured`, which is set only once a Writer exists, so a target whose boot
+dial failed answered `degraded:true, neverDelivered:false` — the response
+denying the single fact its own verdict rests on. Both now read from the
+snapshot, gated on `Configured || Intended`: the same predicate the metrics
+plane uses, because the question is whether an operator ASKED for a collector.
+
+These two are round 5's P2-4 and round 4's P1-F arriving at a surface neither
+fix visited. The rule each of them established was correct; what neither did
+was enumerate the OTHER readers of the same facts. The gate therefore drives
+the REAL handler rather than `syslogFeedState` — walling the function is not
+walling the path, which this section has now recorded three times.
+
+Every defect gate was verified failing against the shape it targets: the
+restored `Swap(0)`, the removed re-stamp branch (which fails on the
+undatable-episode assertion rather than the count one — the two halves of the
+P1 are pinned separately), and the handler's live-Writer reads. Controls: an
+ordinary delivery must still clear a real episode and report recovery exactly
+once, and a node that forwards nowhere must still claim nothing.
+
+### Round 7 — the surviving failure had to stay DATABLE, a walk limit was redirecting events backwards, and the loss nobody could count
+
+**P1 — a retained failure whose episode start is unusable is a number nobody
+can act on.** Round 6 stopped a racing delivery from ERASING a queue-full
+drop. It did not keep that survivor *actionable*. `noteDelivered` stamped
+`lastSuccessNano` when the BOOKKEEPING ran rather than when the write was
+attempted, so a drop landing between the two carried a timestamp EARLIER than
+the success it raced — and `Stats` refuses a start older than the last
+success, which is P1-H's rule and is right. Only a drop taking the 0→1 edge
+re-stamps, so nothing corrected it. A node that went quiet at that instant
+therefore carried an unresolved failure that could **never** reach the
+degradation window, while the contract row printed `FAILING NOW … failing for
+0s` for as long as the silence lasted — a self-contradictory sentence on an
+operator surface, permanently, which is this section's own thesis.
+
+The same shape reaches a second interleaving with no 0→1 edge at all: an
+episode is running, a delivery succeeds (ending it), a concurrent drop makes
+the compare-and-swap fail, and the survivor inherits the *ended* episode's
+start.
+
+Two halves, both required:
+
+- `deliverLine` captures `successAt` immediately BEFORE each write attempt.
+  Under-stating a success by the duration of one write is the fail-SAFE
+  direction — it can only make the feed look staler than it is.
+- `noteDelivered` RE-DATES a surviving failure whose start does not follow
+  that success, to the success itself. The loss is known to have happened
+  after that write, so this is the honest value, not a guess.
+
+**The early stamp is what makes the re-date race-free, and is not
+belt-and-braces.** It guarantees a concurrent drop's own timestamp EXCEEDS the
+success, so whichever of the two stores lands last leaves a datable start.
+Without it, a drop whose `Add` is already visible but whose `Store` has not
+landed lets the re-date be overwritten by an older value, and the episode is
+undatable again. That interleaving cannot be scheduled from a test, so rather
+than claim coverage the property it rests on is pinned instead:
+`noteDelivered` records the instant its CALLER supplies and never invents one
+(verified failing against a restored late stamp).
+
+> **The transferable rule: a retained signal is worth nothing if the value that
+> makes it actionable is left unusable.** When a fix decides to KEEP state,
+> enumerate every field a consumer needs in order to act on it — not just the
+> one the finding named. Round 6 kept the count and left the clock behind.
+
+**P2 — an internal walk limit may not redirect events BACKWARDS.**
+`handOffQueued` reported `false` for two different things: *this writer names
+no successor* (the caller still owns the line) and *the hop bound was
+exhausted*. Both `drainLoop` callers read `false` as the first and fell
+through to `deliverTracked`, which writes through THIS writer's own
+connection — the collector the operator has already replaced. So a queue
+surviving more than `maxHandoffHops` rapid re-points sent security events to
+the displaced collector, while the bound's stated contract was to drop and
+count them: P1-E's defect re-entering through the bound added for it.
+
+Exhaustion is now a LOSS — counted on this writer, the prober acked
+not-delivered, and reported as handled so no caller can fall back. It is
+charged under the existing `closed` class rather than a new one: the outcome
+and the operator's remedy are identical to the end-of-chain branch above it,
+and the reason vocabulary is a CLOSED SET on a published API enum that should
+not grow to name an internal walk limit. The gate builds a chain of closed
+writers longer than the bound with a LIVE writer beyond it, and asserts the
+far end received nothing — otherwise the bound was never reached and the gate
+would prove nothing.
+
+**P2 — a loss that happens because there is no Writer is still a loss.** P1-F
+made a configured-but-never-connected collector VISIBLE
+(`culvert_syslog_up 0`, a degraded row) and left it UNCOUNTABLE. Both fan-outs
+skip at `if sw := activeSyslog(); sw != nil` in `store.go`, charging the
+skipped event to nothing — so `culvert_syslog_drops_total` read **0** and
+`/healthz` carried no `syslogDrops` throughout the worst outage this plane can
+report. An operator asking *how much did I lose?* was answered *nothing* while
+the answer was *everything*.
+
+A Writer's counters structurally cannot hold this: the loss happens *because
+there is no Writer*. `noteSyslogEventSkipped` folds it into the
+process-lifetime total — the one series meaning "events that did not reach the
+SIEM" — and the `configured but failed to connect` row now names the
+magnitude, which is the surface an operator actually reads.
+
+It is ARMED only while an operator has asked for a collector and none is
+installed. That gate is not an optimisation but the same emission rule the
+metrics plane already applies: a node that was never asked to forward anywhere
+is not losing anything by not forwarding, and counting there would accrue a
+large, permanent and meaningless "loss" on every appliance that does not use
+the feature. It also keeps the request path to one relaxed atomic load on the
+no-collector branch, which is the common case.
+
+Its gate drives the REAL `auditEvent` and `recordRequest` paths. The skip
+lives in `store.go`, so a gate on the counter alone would have proved the
+counter works and said nothing about either fan-out — *walling the function is
+not walling the path*, now recorded four times in this section. Each fan-out
+was unwired in turn and the gate fails for each.
+
+**A published number was wrong and is corrected here — twice.** Earlier rounds
+of this write-up and its PR description gave the root gate count as
+`syslog_health_chaos_test.go (22)`. The file held **28** at that point. The
+correction paragraph then stated **32**, which was also wrong: the file held
+**34** when it was written. The engine counts (9 → 11 in
+`syslog_stats_test.go`, 3 → 4 in `syslog_handoff_format_test.go`) were right.
+
+Counts move every round, so the authoritative figure is the one in the round's
+own `Gates:` line and nowhere else. As of round 11: **44** root gates, **13**
+engine stats gates, **6** handoff gates, **23** declared controls. Recording
+the same total in a second place is what produced both errors; this paragraph
+survives as the record of that, not as a second source of truth.
+
+### Round 8 — a delivery resolves what preceded it, and two edits that were never really there
+
+**P1 — the clearest case in this sweep of a later change invalidating an
+earlier one's stated rationale.** `deliverLine` read the failure count at
+function ENTRY. Round 6 chose that deliberately and wrote down why:
+
+> a drop that happened during a reconnect is a real loss, and retaining it
+> costs nothing (the delivery resets the age half of the degradation
+> predicate either way).
+
+That was true when written. Round 7 made it false — it gave a surviving
+failure a usable episode start, and a *datable* failure can outlast the
+degradation window on its own. So a queue-full drop landing while `writeLine`
+was blocked, at a moment the collector was demonstrably still accepting bytes
+because the write then SUCCEEDED, was excluded from the clear and left behind;
+a node that went idle afterwards reported DOWN five minutes later off the back
+of a delivery that had worked.
+
+The count is now read AFTER the write completes, which states the rule at the
+boundary:
+
+- a drop recorded **before** completion is a real compliance loss, stays in
+  `Drops`, and is **resolved** — it is not evidence the feed is down;
+- a drop recorded **after** completion still fails the compare-and-swap and
+  still survives, which is round 6's property, untouched.
+
+That split also explains why this cannot weaken real-outage detection: a dark
+collector produces `write_failed`/`connect_failed` drops on the drain
+goroutine, serialized with `noteDelivered`, with no success to resolve them.
+
+> **When a change makes previously inert state load-bearing, every decision
+> that was justified by that state being inert has to be re-read, not
+> inherited.** Round 7 did not go back and re-read round 6's rationale, and
+> the rationale was sitting in a comment four lines above the code it no
+> longer justified.
+
+**The gate for it had to drive the real `deliverLine`.** The existing
+`noteDelivered`-level gate supplies the count itself, so it pins the CONTRACT
+("clear exactly this count") and is structurally blind to which count
+`deliverLine` chooses to pass — which is the entire defect. Verified: it stays
+green against the reintroduced entry capture. The new gate injects the drop
+through the clock seam, which the happy path calls exactly once to stamp
+`successAt` immediately before the write, placing the loss in precisely the
+window an entry capture excludes. *Walling the function is not walling the
+path* — fifth time in this section.
+
+**P2 — an edit that silently applied nowhere, behind a gate that could not
+fail.** `noteSyslogForwardingDisabled` cleared the health record but not
+`syslogIntentArmedWithoutWriter`, so an operator who disables a collector that
+never connected keeps accruing SIEM "losses" on every audit and request event
+for the life of the process — the disable's own audit entry first — and they
+surface the moment forwarding is enabled again.
+
+Two process failures produced it, and both are worth recording:
+
+1. The round-7 patch applied three replacements and asserted on two of them.
+   The third matched nothing and was a silent no-op. It is now placed and the
+   placement is **verified by function**, not assumed from the patch
+   succeeding.
+2. Its gate installed a Writer before disabling — which already disarms the
+   counter — so the disable assertion passed whether or not the code existed.
+   *A gate that exercises the transition through a state where the property
+   already holds is not a gate.* Replaced with the reachable shape: intent
+   recorded, no writer ever installed, then disable.
+
+**P2 — `/healthz` omitted the loss `/metrics` reported.** `syslogDropCount`
+gated on `Configured`, which is set only once a Writer exists, so it withheld
+`syslogDrops` for exactly the outage where every event is being lost, while
+`/metrics` reported the identical number. It now uses the metrics plane's own
+`Configured || Intended` predicate.
+
+This is the **third** time in this sweep that a correct rule was established
+and the other readers of the same fact were not enumerated — P2-5/P2-6 on the
+admin API, P2-8 on the fan-outs, and now the health accessor. The habit to
+adopt is mechanical: *when a predicate changes, grep for every consumer of the
+value it governs before calling the change done.*
+
+### Round 9 — a snapshot that read a later generation, an alert that asserted the wrong half of a two-shape state, and one window that stays open
+
+**P2 — a reader outside the publication transition made the counter go
+backwards.** `syslogFeedState` copies the health record's retired totals and
+the Writer they belong to together under `syslogHealth.mu`, then released that
+lock and re-loaded `activeSyslog()`. A re-point landing in the gap retires the
+displaced Writer's finals into a `retiredDrops` this snapshot has already
+copied, so the snapshot pairs a NEW generation's live counters with retired
+totals that already absorbed the OLD one — the displaced generation vanishes
+from the sum and `culvert_syslog_drops_total` **decreases** for that scrape.
+
+Prometheus reads a decrease as a counter reset and discards the interval, and
+that is precisely the defect **P2-4** was opened for. P2-4 fixed the WRITE side
+(a fresh Writer's zeroed counters no longer erase the history) and left a
+READER that does not participate in the publication transition free to
+reproduce the same symptom. The snapshot now reads the writer it captured, so
+it is internally consistent by construction rather than by timing.
+
+> A serialized transition only buys consistency for the readers that take part
+> in it. After fixing a publication race, enumerate the readers — not just the
+> writers.
+
+The window is a few instructions wide and cannot be scheduled through the
+public entry point, so the mechanism is pinned by source scan, which is this
+file's existing convention for wiring. Two things keep that gate honest: it
+strips `//` lines before scanning (the rationale comment names the very
+accessor being banned, so scanning prose would make the gate assert the
+absence of an explanation — caught as a false positive while writing it), and
+a control requires `activeSyslog()` to survive elsewhere in the file, because
+the rule is about THIS reader and not a ban on the accessor.
+
+**P2 — the unmet-intent alert asserted a false statement for half the states
+that reach it.** A boot that connects target A and then fails to connect the
+persisted target B leaves a live Writer serving A while the record's intent is
+B. That is an unmet intent and is correctly reported degraded — but the page
+said *"no connection was ever established"* and *"NOTHING is serving it"*. Both
+are false there: a connection was established, something is serving, and events
+are reaching a collector, just not the configured one. A false statement on an
+operator surface, inside the alert this sweep added because the contract row
+was asserting a false statement.
+
+The two shapes are distinguished by `Configured`, which is true only once a
+Writer is installed, so no new field was needed. The superseded-target sentence
+says events are still reaching the PREVIOUS collector — the fact that decides
+whether the operator is hunting a dial failure or a stale configuration.
+Neither sentence names an address: `Detail` is the alert dedup key, and an
+operator-supplied target there is the WK-12/RS-5 unbounded-key defect.
+
+The review that produced this finding asked for those events to be **counted as
+drops**, and that half is declined with reasoning. They reached a collector.
+`culvert_syslog_drops_total` means *did not reach the SIEM*; widening it to
+*did not reach the currently intended SIEM* would conflate delivery-elsewhere
+with destruction on the one series that measures compliance loss. The state is
+already reported degraded (both `syslogFeedState` exits route through
+`finishUnmetSyslogIntent`, which sets `Degraded`), so the gap was never
+visibility — it was the sentence.
+
+**Self-review — the fix for that was one `configured` away from committing
+the same error in the other direction.** Its first shape branched on
+`snap.Configured`. That is equivalent today: the record sets `configured` and
+`writer` together, in one critical section, at every install and every clear.
+But it is a PROXY for what the sentence claims, and the move that breaks it is
+one this repo has already made — **CHAOS-66 records `configured` for the SOCKS5
+listener BEFORE its first bind attempt**, deliberately, so a listener that has
+never come up is not reported as "not configured".
+
+Adopting that shape here was measured rather than argued, by mutating
+`noteSyslogIntent` to set `configured` and running both branch forms against a
+feed with no writer at all:
+
+| branch | Detail produced |
+| --- | --- |
+| `snap.Configured` | *"events are still being delivered to the PREVIOUS target"* — **false**, nothing is serving |
+| `snap.writer != nil` | *"no connection was ever established"* — correct |
+
+So the branch now reads `snap.writer`, the field this function already trusts
+for its P1-G staleness check, and the pairing is a stated rule rather than an
+unstated assumption: `TestChaos81_RecordWriterPairingIsAnInvariant` walks every
+transition that touches either field and fails against the CHAOS-66 shape. The
+wall is behavioural, not a source scan, because the shape that actually breaks
+the invariant is an install path that sets the two fields in two separate
+critical sections, which reads perfectly well.
+
+The wall is separate from the branch on purpose: three other consumers read
+`Configured` as *a writer exists* — the metrics emission gate, `/healthz`'s
+drop field, and the admin API — so the rule has to hold for them whatever this
+one branch does.
+
+> When a sentence makes a claim, branch on the field that IS the claim. An
+> equivalent proxy is only equivalent until someone changes what it means, and
+> the change that does it will be defensible in its own file.
+
+**P1 — recorded as residual SL-4 rather than closed.** Round 8 moved the
+failure-count read to after the write completes. The few instructions between
+`writeLine` returning and that read are unsynchronised, so a drop landing there
+is counted in `failuresBefore` and resolved, although by round 8's own rule it
+arrived after completion and should survive. Three facts make that acceptable
+and none of them is timing luck:
+
+- **Only one drop class can reach it.** `deliverLine` holds `s.mu` for its
+  whole body, so every drain-goroutine drop (`connect_failed`, `write_failed`,
+  `backoff`) is serialised with the read. Only a queue-full drop from a caller
+  goroutine can race it, because `tryEnqueue` holds `sendMu` alone.
+- **"Resolved" is the correct verdict for that drop.** A queue-full drop
+  microseconds after a successful write is local backpressure, not a dark
+  collector — the same verdict this boundary deliberately assigns to a drop
+  landing *during* the write.
+- **Closing it would cost more than it buys.** The queue-full path would have
+  to take `s.mu`, which parks request goroutines behind the drain goroutine's
+  blocking write. That is the latency coupling the whole async design exists to
+  prevent: a slow SIEM must cost drops, not proxy latency.
+
+A genuine outage is unaffected — its drops come from FAILED writes on the drain
+goroutine, there is no success to resolve them, and degradation proceeds
+normally. The residual is written into the code at the boundary it governs, not
+only here.
+
+### Round 10 — a stale-commit guard blind to the one transition it most needed to see, and a probe that re-derived its own transport
+
+**P2-13 — the round-9 fix failing in the shape its instrument cannot
+distinguish.** Round 9's P1-G guard refused a stale degradation commit with
+`syslogHealth.writer != snap.writer`. That answers "is this still the record I
+described" on every path where a Writer exists, and collapses where none does:
+a boot dial that FAILED leaves `writer == nil`, and
+`noteSyslogForwardingDisabled` ALSO sets `writer = nil`, so the comparison is
+`nil != nil` — false — and the stale callback commits.
+
+The reachable sequence is the ordinary remediation one. An operator configures
+a collector; the dial fails; the plane records the intent, installs no Writer
+and reports the feed degraded immediately (correctly — nothing retries a failed
+`InitSyslog`, so there is no transient to wait out). A snapshot of that verdict
+goes in flight. The operator gives up and disables forwarding. The commit then
+lands in the FRESH record and does two things, the second worse than the first:
+
+- it fires `syslog_feed_down` for a feature the operator has just switched off,
+  with a Detail that describes a collector nobody is asking for any more; and
+- it sets `alerted` on that record. Nothing clears that latch but an install —
+  ordinary deliveries do not invoke the observer — so the next time forwarding
+  is enabled, its **first real outage is silent**.
+
+The record now carries a monotonic `gen`, bumped by every transition that
+REPLACES what it describes (install, disable, test reset), captured into the
+snapshot and compared at commit. The pointer check is removed, not supplemented:
+a counter IS "the record changed", where the pointer was a proxy for it, and one
+predicate cannot drift against a second that is not there.
+
+`noteSyslogIntent` deliberately does not bump it. Recording an intent changes
+what the operator ASKED for, not what the record DESCRIBES, and a pending
+unmet-and-degraded verdict stays true across it; suppressing there would only
+delay a legitimate page to the next 30 s watchdog tick.
+
+**The transferable rule is round 9b's arriving from the opposite side.** There
+the lesson was to stop branching on an equivalent proxy for a claim. Here it is
+that a proxy which is equivalent on every path you tested can be silently
+non-equivalent on the one you did not: a pointer identity collapses whenever the
+pointer is nil. When a check means *this is still the same thing*, give the
+thing an identity that cannot collide with another thing's.
+
+**P2-14 — the probe inferred its transport.** `syslogDeliveryProbe` took the
+Writer as a parameter and then read `syslogHealth.target` in its own separate
+critical section, classifying a delivered ack by
+`strings.HasPrefix(target, "tcp://")`. Two reads of two different things, so a
+re-point landing between them made the endpoint describe a UDP datagram with
+the TCP sentence — "the collector accepted the test event" — for a send nothing
+may have received.
+
+UDP's inability to prove delivery is register row SL-1 and is stated on every
+other surface in this plane (`deliveryProvable:false`, the contract row's
+caveat, the "sent" rather than "delivered" wording). The one endpoint an
+operator is told to use to CONFIRM connectivity was the one that could
+contradict all of them. It is round 7's P1-C repeating on the transport instead
+of the outcome: *an endpoint whose whole job is to be believed may not infer its
+answer.*
+
+`Writer.DeliveryProvable()` reads the transport off the Writer it was
+constructed with, so the answer belongs to the generation that served the line
+by construction rather than by timing. The snapshot's own UDP caveat needed no
+change — round 9 already made `target` and `described` a single locked read,
+which is why the same defect did not reach the contract row.
+
+**Gates.** `TestChaos81_DisabledFeedDoesNotInheritAnInFlightDegradation` and
+`TestChaos81_ProbeClassifiesTransportFromTheWriterThatServedIt`, each with its
+own control, the round-9 P1-G gate updated to carry generations, and
+`TestChaos81_EveryRecordTransitionAdvancesTheGeneration` as a structural wall.
+
+Mutations, each verified failing the gate that targets it: the reverted pointer
+comparison (both halves — it pages AND latches), the reverted target-string
+classification, `DeliveryProvable` hardwired false (which fails BOTH the new
+control and the pre-existing `ProbeReportsTheRealOutcome`), a commit half that
+refuses every snapshot (which fails both stale-commit gates' controls), and
+each of the three generation bumps dropped in turn.
+
+**The wall needed the wall.** The stale-commit guard now rests on the
+generation, so a future transition that swaps `writer` without bumping `gen`
+reopens the defect — and no behavioural gate can reach that, because the three
+sites are correct today and a fourth would simply not be exercised by any
+existing test. Hence the structural wall. Its FIRST shape was vacuous, in the
+way this file keeps recording: it drove its install step through
+`armSyslogFeed`, which resets the record first, so the reset's own bump masked
+a missing bump at the install site and the wall passed against a tree that had
+dropped it. That was found by mutating the code, not by reading the wall. The
+same masking then appeared one step over — the reset was stepped AFTER the
+disable, where no writer change occurs at all, so its own bump was unwalled
+too. It now drives `noteSyslogWriterInstalled`, `noteSyslogForwardingDisabled`
+and `resetSyslogHealthForTest` directly, and steps the reset while a writer is
+installed.
+
+*A wall that runs its subject through a convenience helper inherits that
+helper's side effects, and a side effect that performs the very thing you are
+pinning makes the wall unfalsifiable. Step the transition itself, and mutate
+each site to prove the wall can see it — including the sites that look too
+obvious to check.*
+
+**Self-review, same round: the last place the fact was derived twice.** Fixing
+P2-14 left the snapshot's `UDP` caveat — the one the contract row, `/healthz`
+and `GET /api/syslog` read — still derived from
+`strings.HasPrefix(target, "tcp://")` while the probe now asked the Writer.
+
+The two agree today. `InitSyslog` is the only installer and hands the record
+the very address it parsed the network from, so the string and the writer's
+`network` cannot currently disagree. That is what makes it a latent trap and
+not a live defect — and it is also exactly the state P2-14 was in until a
+re-point pulled the two apart. A second answer to a question that already has
+one is the defect (§30's rule), whether or not it has diverged yet.
+
+The snapshot now asks `described.DeliveryProvable()` whenever a Writer exists.
+The string survives only as the fallback for a feed that has none, which is not
+a second answer: there is no transport to ask, and the operator's intended
+address is the only thing that can describe what they asked for.
+
+`TestChaos81_TransportClaimHasOneSource` walls the agreement — for an installed
+writer the snapshot's claim must equal the writer's, and a `tcp://` string
+written onto the record must not override a UDP writer. Verified failing
+against the reverted string-only derivation. Its control runs both ways, because
+hardwiring the caveat on passes every agreement assertion while telling an
+operator with an evidence-capable TCP collector that it cannot give evidence.
+
+**A note on the lint gate, recorded because it cost a red CI round.** The
+structural wall's control was first written as
+`if !(beforeW != afterW && afterG <= beforeG)`, which golangci-lint's
+staticcheck flags (QF1001). `golangci-lint` cannot be run locally against this
+repo: v2.5.0's own module declares `go 1.24` and the config targets 1.25, so it
+refuses to load; rebuilding it with the repo's toolchain does not help (the
+guard reads the tool's module language version, not its build compiler), and
+forcing past the guard crashes its go1.24-built analyzer on go1.26 source.
+Standalone `staticcheck` at 2025.1.1 with `-checks=all` does NOT reproduce the
+finding, so it is not a substitute. The control now applies a NAMED predicate
+shared with the check it vouches for — better than the negation on its own
+terms, since a control that re-derives the rule can pass while the rule it
+vouches for has drifted.
+
+### Round 11 — two round-10 fixes landing one hop short, and a transition that left its metadata behind
+
+**P2-16 — the acknowledgement must carry the transport, because only the
+sender knows it.** Round 10 bound the probe's `delivered`-vs-`sent` wording to
+the Writer the CALLER held. That is correct against a re-point and still
+wrong, because `handOffQueued` moves a queued line — its ack channel included
+— to a successor that may speak a different transport. A probe queued on a TCP
+writer and handed to a UDP one was reported as *"the collector accepted the
+test event"* for a datagram nothing may have received.
+
+It is round 10's own defect surviving one hop along, in the endpoint whose
+whole job is to be believed, and it is the third time this plane has been
+caught inferring an answer instead of carrying it (round 7 on the outcome,
+round 10 on the transport, now on the transport again after a handoff).
+`WriteProbe` returns a `ProbeOutcome{Delivered, Provable}` stamped by the
+Writer that actually performed the send; `ackQueued` takes that Writer as an
+argument, and the flush-timeout branch — where nothing sent the line — passes
+nil.
+
+> When a value can be handed on, bind the claim to the thing that will finally
+> act on it, not to the thing you were given.
+
+**P2-17 — a loss at the end of a bounded walk must be countable, and the walk
+must not charge a writer it never asked.** The exported drop total is each
+displaced Writer's finals, folded at the moment it is displaced, plus the LIVE
+Writer's own counters. A drop charged to an intermediate after its fold
+therefore lands nowhere: real compliance loss, absent from
+`culvert_syslog_drops_total` and `/healthz`, on the one series this plane
+exists to keep honest.
+
+`send` also checked its hop bound at the TOP of its loop, so on exhaustion `w`
+held a writer that had been assigned and never asked. With the live writer
+sitting at the exhaustion point that charged a drop to a healthy collector
+which never saw the line, and stamped `closed` on its `LastFailureReason` —
+which is an input to the health plane. Neither shape delivers the line; the
+bound is spent either way. What changes is whether the evidence names the
+writer that actually refused.
+
+The bound is now spent before advancing, and the exhausted terminal charges a
+process-lifetime `lateDrops` IN ADDITION to the Writer's own counter — the
+`syslogSkippedNoWriter` precedent. It cannot double-count: both terminal sites
+are reached only through `enqClosed`, and a closed Writer's finals were folded
+strictly before it could be walked past. The end-of-chain branch is
+deliberately not charged, because that writer is the live one and its drop is
+already read.
+
+**P2-15 — the config metadata was not part of the transition it describes.**
+`syslogConfigured` / `syslogConfiguredAddr` decide what `GET /api/syslog`
+reports, what `checkSyslogFeed` compares and what `admin_settings.json`
+persists. The admin handler assigned them AFTER `InitSyslog` returned, outside
+`syslogPublishMu`, so a concurrent disable clearing the writer and the strings
+in between left the process with no active writer while every config surface
+said forwarding was on — and the next restart re-enabled a target the operator
+had switched off. They are now set inside the same critical section that
+publishes the writer, and cleared inside the disable's; callers record only the
+INTENT beforehand, which is what survives a dial that produces no writer.
+
+**That fix made a deferred follow-up load-bearing, and it had to be closed in
+the same change.** This section had recorded the pair as an unsynchronised
+read/write to be repointed at the health record later. That was tolerable
+while the writes sat on the admin handler. Moving them into `InitSyslog` puts
+the write on a CONCURRENT path, and the concurrent-repoint gate caught the
+read as a real race under `-race` within minutes — *a new writer is a new
+concurrency context*, this sweep's own lesson arriving for the third time.
+Every access now goes through `syslogConfiguredTargets()` /
+`noteSyslogConfiguredIntent()`, and a structural wall forbids naming either
+variable outside its owning files: a direct read is correct on a quiet node
+and racy only under a re-point, which is the case no ordinary test drives.
+
+> Deferring a known hazard is a judgement about REACHABILITY, not about the
+> hazard. When a change moves code onto a path that reaches it, the deferral
+> expires with that change — it does not carry over on the strength of having
+> been written down.
+
+**Gates.** `TestProbeAckCarriesTheSendingTransport` and
+`TestSendExhaustedWalkIsCountableAndTriesItsLastWriter` in the engine;
+`TestChaos81_ConfigMetadataIsPublishedWithTheWriter` and
+`TestChaos81_ConfigMetadataIsReadOnlyThroughItsAccessors` in the root. Each has
+its own control. Four mutations verified failing the gate that targets them:
+an ack that ignores its sender, the late-drop charge removed, the bound
+restored to the top of the loop, and the metadata assignment moved back
+outside the transaction.
+
+**One gate was VACUOUS on its first shape and mutation is what found it**, as
+in round 10. The off-by-one assertion was written against a chain longer than
+the bound, where the exhaustion point lands on an intermediate — so the
+pre-fix and fixed shapes both charge a closed writer and the gate could not
+tell them apart (verified: it passed against the reverted loop). It now places
+the LIVE writer exactly at the exhaustion point, which is the only arrangement
+where the two shapes differ observably.
+
+**Self-review, same round: the late-drop counter was counted into a void.**
+The first shape of P2-17 added `lateDrops`, charged it at both terminal sites,
+exported `LateDrops()` and gated it — and never folded it into `snap.Drops`.
+The loss therefore moved a counter that no surface reads, which is precisely
+the defect the counter was added to close, committed inside its own fix.
+
+The engine gate could not see it, and that is the whole lesson rather than an
+excuse: it asserts the COUNTER moves, and the counter did. Measured, not
+recalled — with the fold removed,
+`TestSendExhaustedWalkIsCountableAndTriesItsLastWriter` stays GREEN while
+`TestChaos81_LateDropsReachTheExportedTotal` fails on all three surfaces it
+reads (`syslogFeedState`, `/healthz`'s `syslogDropCount`, and the real
+`culvert_syslog_drops_total` exposition body).
+
+> When a fix adds a counter, the deliverable is the SURFACE, never the
+> counter. Gate the surface — *walling the function is not walling the path*,
+> which this section has now recorded four times and demonstrated once against
+> its own work.
+
+**And the late-drop counter had to be handed back.** `lateDrops` is
+process-lifetime by design — its whole purpose is to outlive the Writer the
+loss was charged against — which makes it exactly the kind of global a test
+must RESTORE rather than merely stop looking at. The new gate produces one
+late drop, which shifted the exported drop total for every gate that ran
+after it; seven unrelated CHAOS-81 gates turned red, all asserting exact
+counts. `ResetLateDropsForTest` joins `resetSyslogHealthForTest`, beside the
+`syslogSkippedNoWriter` reset that is there for the same reason.
+
+That is the `swapAutoExclude` fence-pollution rule, and this section has now
+hit it twice in its own work (`armSyslogFeed` leaking live writers was the
+first). *A global a test installs — or increments — is a global the test must
+take back.*
+
+**And a shuffled run over a `-run` filter is NOT the determinism gate.** The
+local `-count=2 -shuffle=on -run 'TestChaos81_'` run passed, and the change
+was pushed on the strength of it. CI's `Deep · determinism (shuffle, count=2)`
+and `Race · root shard 1` both failed, because they shuffle the WHOLE package:
+the gates that assert absolute drop counts and the gate that produces one only
+interleave once the unfiltered set is in play. A filter narrows the
+permutation space to the tests you already suspected, which is the opposite of
+what shuffling is for. Reproduce a suspected isolation failure with a filter;
+never clear one with it.
+
+**A note on `funlen`, recorded because it cost two red rounds.**
+`syslogFeedState` crossed the 50-statement bound twice as this round added to
+it. It is now split at the seam the code already had: the caller assembles the
+history that outlives any one Writer, and `applyLiveWriterStats` folds in the
+episode IN PROGRESS. The linter found a real structural point, but it found it
+in CI both times, because `golangci-lint` cannot run locally against this repo
+(v2.5.0's module declares `go 1.24` against a 1.25 target, rebuilding does not
+help since the guard reads the tool's module language version, and forcing
+past it crashes its go1.24-built analyzer on go1.26 source). Standalone
+`staticcheck` does not carry the same check set. Anyone extending this file
+should expect the length bound to be enforced only by CI.
+
+### Round 12 — the fold was taken before the writer was final, and two readers still spanned a transition
+
+Three findings. The first was found by MEASURING a residual this note had
+already written down and dismissed; the other two are Codex P2s, and both are
+earlier rules in this sweep arriving at a reader that had not been updated.
+
+**(a) The fold must be taken when the writer is FINAL, not when it is
+displaced.** P2-4 made the exported counters process-lifetime by folding each
+displaced Writer's totals into `retired*` — and took that fold at the moment
+of displacement, while the Writer's drain was still flushing. Every loss the
+final flush recorded after that landed on counters nothing reads. The note
+recorded the gap honestly but estimated it wrongly:
+
+> Residual, documented rather than hidden: a displaced Writer is closed
+> ASYNCHRONOUSLY, so anything it records after this snapshot (its final flush)
+> is not carried. That can only UNDER-count at a generation boundary; it can
+> never make a counter decrease, which is the property that matters.
+
+Measured against the real `disableActiveSyslog` path with a collector that
+dies mid-flight, 2000 events at a time:
+
+```
+trial 0: writer own drops=1999 delivered=1 (2000) | EXPORTED 1949 + 1  -> 50 lost
+trial 1: writer own drops=1999 delivered=1 (2000) | EXPORTED 1967 + 1  -> 32 lost
+trial 2: writer own drops=1999 delivered=1 (2000) | EXPORTED    0 + 0  -> 2000 lost
+trial 3: writer own drops=1999 delivered=1 (2000) | EXPORTED 1837 + 1  -> 162 lost
+trial 4: writer own drops=1999 delivered=1 (2000) | EXPORTED 1946 + 1  -> 53 lost
+```
+
+Every unaccounted event was attributable to the fold ordering — the Writer
+itself counted all 2000 in every trial, and none were lost to the
+documented "abrupt death loses the in-flight batch" class. Trial 2 is the one
+that matters: `culvert_syslog_drops_total` read **zero** for a feed that had
+just destroyed everything, because the drain had barely started when the fold
+ran. That is the loss-history erasure P2-4 exists to prevent, arriving from
+the WRITE side after P2-4 closed the READ side.
+
+The boundary is now SEALING. The drain publishes its cumulative finals
+(`finalStats`) under `sendMu` held exclusively, as the last thing it does
+before closing `done`. A displaced-but-unsealed Writer is TRACKED
+(`syslogHealth.retiring`) and its delta folded on every read of the retired
+totals — there is exactly one such read, `syslogFeedState`, and it settles
+first. The settle that observes the seal takes a genuinely final value and
+untracks the Writer.
+
+**A loss is charged to `lateDrops` only when the Writer is RETIRED *and*
+SEALED, and needing both is the whole of the correctness argument.** Keyed on
+the seal alone it double-counts every loss recorded against a Writer that is
+still installed — those counters are read live and folded nowhere else — and
+moves the loss into the "lost to an earlier target" bucket while that target
+is still the current one. Keyed on retirement alone it double-counts
+everything still inside the fold to come. `MarkRetired` therefore has to run
+BEFORE anything closes the Writer, since a loss landing after the seal but
+before the mark is in neither accounting; both owners mark first and release
+second.
+
+**The Writer's own counters deliberately keep moving after sealing.**
+Freezing them was the first shape, and it was wrong in a way worth recording:
+a Writer that is sealed but still INSTALLED stops reporting that it is failing
+at all, so the degradation predicate — which reads `ConsecutiveFailures` and
+`FailingSince` off the live Writer — goes blind on exactly the feed that has
+just lost its drain. Two existing gates caught this immediately, which is the
+argument for keeping fixtures that reach a state production is not supposed to
+reach. Cumulative totals need one home because they are folded elsewhere;
+episode state has one reader and must stay live.
+
+**(b) A superseded writer's delivery is not evidence the intended collector is
+back** (Codex P2). Round 9b fixed the alert WORDING for the shape where target
+A is serving while a persisted target B never connected, and left the RECOVERY
+side of the same shape untouched. A keeps its delivery observer, so one of A's
+own transient episodes ending reached `noteSyslogDeliveryRecovered`, cleared
+B's fire-once latch and logged "SIEM feed delivering again" — both false for B
+— after which the 30 s watchdog re-fired the DOWN page, and again, for as long
+as the mixed state lasted. Recovery now refuses to clear while the intent is
+unmet, through `syslogIntentUnmet`: ONE predicate, shared with the snapshot,
+because writing it twice is how the two came to disagree. The latch is not
+stranded — every transition that RESOLVES the intent already clears it.
+
+**(c) A reader that pairs a target with a separately-loaded writer is reading
+two generations** (Codex P2). Round 11c published the config metadata inside
+the publication transaction; `syslogConfiguredTargets()` then released
+`syslogPublishMu` before its callers loaded `activeSyslog()`. A disable landing
+in between yields the old address beside no writer; a re-point yields target A
+beside writer B. `snapshotAdminEndpoints` PERSISTS that pair, so the mismatch
+outlives the process: a restart can re-enable a target the operator has just
+switched off, or restart one speaking the previous collector's wire format.
+This is round 9a's rule — *a snapshot must read the generation it describes* —
+arriving at a third reader, so the two-value accessor was REPLACED rather than
+supplemented. `syslogConfiguredSnapshot()` returns target, intent and writer
+in one critical section and is the only way to obtain any pair of them; a
+structural wall pins the three readers against a second load.
+
+**Two residuals, recorded rather than hidden.** The tracking list is capped
+at 64; every retire settles the list first, so an evicted entry has already
+had its delta folded and loses only what it records afterwards — i.e. overflow
+degrades to exactly the pre-fix behaviour for that one Writer, and only under
+a burst of re-points faster than any read. And the mark-before-close ordering
+is a CONTRACT, not an enforced invariant: an owner that closed a Writer before
+marking it retired would lose whatever the drain recorded between the seal and
+the mark, because the fold then reads the sealed snapshot. Both owners mark
+first, and it is stated on `MarkRetired`, but it cannot be made exact by
+locking — the retire runs under `syslogHealth.mu` and `chargeTerminalDrop`
+holds `sendMu` while its `noteDrop` reaches the observer, so taking `sendMu`
+under the health mutex would invert the lock order and deadlock.
+
+**A note on the control that nearly proved nothing.** The exactly-once control
+for (a) has to observe a Writer that is sealed AND still tracked for folding.
+Its first version sealed the writer and then read the baseline — but the read
+is what settles, and settling a sealed writer untracks it, so the control
+closed the very window it existed for and passed against the double-counting
+shape it was written to reject. It now reads the baseline while the writer is
+still unsealed. *A control that reads the state it is about to test can close
+the window it exists for.*
+
+### Round 13 — round 12's own rule, not carried to two consumers
+
+Both findings are Codex P2s, and both are the same shape: round 12 changed
+what a value means, and a consumer of that value still assumed the old
+meaning.
+
+**(a) An install must not erase a loss that already happened.**
+`noteSyslogEventSkipped` re-read `syslogIntentArmedWithoutWriter` at CHARGE
+time. A fan-out goroutine can observe no Writer, be descheduled, and resume
+after a successful install has cleared the flag: its event reached no
+collector, but the fresh read says "not armed" and the loss never appears in
+`culvert_syslog_drops_total` or `/healthz`. The arming state is now sampled by
+the CALLER (`syslogSkipArmed`) immediately before it looks for a Writer, and
+handed to the charge — so "there was a configured collector" is observed no
+later than "there was no Writer", which is the pair the charge is a statement
+about. The interleaving is a few instructions wide and cannot be scheduled
+through the fan-outs, so the gate drives the boundary the fix introduced
+rather than pretending to schedule the race.
+
+**(b) The process-lifetime counters have exactly one source, and the UI was
+reading a second.** P2-4 made the totals survive a re-point. The admin panel
+still assumed the opposite in three places: `renderSyslogDrops`' own header
+said *"a new collector starts a fresh writer at Drops()==0; disabling clears
+it"*, and `saveSyslog` rendered `res.drops` from the POST response — which
+does not carry the counters at all. An absent field is `undefined`, `|| 0`
+makes it zero, and the panel reported **"no delivery drops" for a feed that
+had just lost events**, until the operator reloaded the page. That is the
+loss-history erasure P2-4 exists to prevent, surviving one layer up, in the
+surface an admin actually looks at while re-pointing a collector to remediate
+the outage that produced those drops.
+
+Codex offered two fixes: return the totals from the mutation, or have the UI
+re-read the GET. The second was taken. Returning them from POST would create a
+second answer to a question that already has one — the defect this sweep
+records under CHAOS-61's rule — and would change a published response shape,
+which in this repo means regenerating the OpenAPI bundle and the TypeScript
+client as well. A failed re-read deliberately leaves the existing row: a stale
+real number beats a fabricated zero.
+
+The UI half is walled structurally, because no Go test can drive a browser
+handler and the failure is a wrong NUMBER rather than an error. The wall
+carries a control rejecting the cheapest wrong fix — rendering nothing at all,
+which would leave the previous collector's count on screen indefinitely — and
+both mutations (the pre-fix `renderSyslogDrops(res.drops)` and the
+render-nothing shape) were verified failing against it.
+
+**The transferable rule: when a change makes a value survive something it used
+to be reset by, every surface that renders it inherited an assumption that is
+now false. Enumerate the CONSUMERS of the fact, not the producers.** Round 12
+enumerated the producers (both retire paths) and stopped there.
+
+#### Round 13 postscript — the wall that already existed, and two self-inflicted detours
+
+The UI gate above read the admin SPA with a CWD-relative `os.ReadFile`. The
+repo already walls that class (`TestTestFileReadsAreCWDIndependent`), because
+a concurrent `os.Chdir` in another test makes a relative read pick up the
+wrong file; the wall's own doc comment records that the class "cost real
+debugging time to track down". It was walked back into the same day, and it
+is deterministic — it accounted for every red on that head: race shard 3, the
+race verdict, the Fast Gate, determinism and the Deep Gate. (The QA and
+Security gate NAMES passed, because on PRs they are pass-through shells — a
+green there proves nothing about the sharded engine.)
+
+Two process lessons cost more time than the fix:
+
+**Do not truncate a failing run's output.** The identity of the failing test
+was lost TWICE to `| tail -20`, once here and once in the unattributed
+failure this sweep recorded earlier. `go test` prints `--- FAIL:` where the
+failure happens, and the root package's buffered logger output can push it
+tens of thousands of lines from the end. Write the whole run to a file and
+grep it. Note also that GitHub's job-log API returns only the tail (capped
+around 630 KB) and the full artifact lives on blob storage, so on a package
+this verbose CI cannot tell you WHICH test failed — only that one did. The
+local capture is the instrument.
+
+**Do not mutate the working tree while a background probe is reading it.** A
+mutation experiment (reverting `static/index.html` to its pre-fix shape to
+confirm a gate was not vacuous) ran while a background reproduction loop was
+live against the same tree. The loop caught the mutation and reported a
+failure that looked like the bug being hunted. Mutation testing and
+background probes need the tree to themselves.
+
+**And the diagnostic one:** the leading hypothesis before the reproduction was
+the heaviest new fixture (12,000 events through dead sockets under
+`-count=2`). It was wrong, and acting on it would have right-sized a fixture
+that was never the problem while leaving the real defect in place. An
+intermittent-looking failure is not evidence of a timing bug: here it was a
+deterministic source-scan violation that only LOOKED intermittent because
+different CI jobs sample different shards and some gate names are shells.
+
+### Round 14 — the observer's own cost, on the goroutine it said it never ran on
+
+**The finding (Codex P2).** A queue-full drop is charged by `tryEnqueue` on
+the CALLER's goroutine — the audit or request-log fan-out, i.e. a proxy
+request goroutine. `noteDrop` then invokes the delivery observer
+synchronously, and the observer ran the entire health plane inline:
+`syslogFeedState` takes the process-wide `syslogHealth.mu`, settles the
+retired writers under it (work **round 12 added**), and
+`commitSyslogDegradation` takes the same mutex a second time — all while the
+caller still holds `sendMu.RLock`. So during a sustained SIEM outage,
+concurrent proxy requests serialized in the health plane instead of recording
+an atomic drop and moving on.
+
+**Measured** (4-core Xeon @2.10GHz, medians of n=5, `noteSyslogDelivery(false)`
+against an armed feed):
+
+| | GOMAXPROCS=1 | GOMAXPROCS=4 |
+|---|---|---|
+| pre-fix | 149.0 ns/op | **267.6 ns/op** |
+| fixed | 169.2 ns/op | **73.6 ns/op** |
+
+Pre-fix, four cores delivered **0.56x** the throughput of one — adding cores
+SUBTRACTED throughput. That is the same signature `internal/connlimit`,
+`internal/threatfeed`, the IP filter and the latency histogram each record,
+arriving here on the request path at exactly the load the asynchronous writer
+exists to absorb. It was also self-reinforcing: the same per-line cost on the
+drain goroutine slows the drain, which fills the queue, which puts *more*
+request goroutines on this path.
+
+**Why this is this note's own argument failing at its edge.** The observer is
+deliberately asymmetric — called on every drop, never on an ordinary success
+— on the recorded reasoning that a success is a gateway's steady state and a
+callback there would tax the happy path to observe a fault that is not
+happening. That reasoning is correct about the steady state and silent about
+the OUTAGE, where drops become the steady state at the full request rate.
+
+**The fix is a CLAIM, not a lock.** `syslogEvalInFlight.CompareAndSwap`
+collapses concurrent evaluations to one; a caller that loses does **not**
+wait, it returns having done nothing, so there is no queue to serialize on.
+
+What makes a dropped evaluation safe is that `noteDrop` has already recorded
+everything durable about the loss — the counter, the timestamp and the reason,
+all atomics — *before* it notifies. The evaluation is a pure READER asking
+"should I page now?", and the answer is a function of that recorded state plus
+the clock. Skipping a read therefore loses nothing, and two independent
+drivers ask again regardless: every later drop, and the 30s watchdog. This is
+the plane's own *freshness is EVALUATED, never latched* property, used here to
+make the read **droppable**.
+
+Two properties keep it behaviour-preserving:
+
+- **A sequential caller is unaffected** — the previous call released the claim
+  — which is why all 54 existing gates hold with no change. Only CONCURRENT
+  drops collapse, and they ask a question whose answer cannot differ between
+  them: degradation needs a non-zero consecutive-failure count (the first drop
+  already established it) and an age threshold (a property of the clock).
+- **The release is DEFERRED, not trailing.** `notifyDelivery` contains a
+  panicking observer, so a trailing store would leave the claim held forever
+  and the feed could never page again.
+
+**Rejected: a rate floor on top of the claim.** The evaluation rate is already
+bounded by the DROP rate rather than by a spin loop, so at a realistic 10k
+losses/s the surviving work is ~0.16% of a core. A time floor would also have
+changed sequential semantics, which every existing gate rests on.
+
+**Recorded, not rounded away:** one core is at parity to ~13% for the added
+CAS pair (measured across runs, so partly box drift). A single-core gateway
+with one drop source is the shape a forward proxy is never in — the
+`internal/connlimit` `maphash` precedent.
+
+**The transferable lesson is the comment.** `noteSyslogDelivery`'s doc said
+*"It runs on the drain goroutine and must never call back into the Writer"*.
+The second clause is right; the first is **false for one of its two callers**,
+and is contradicted by this very section three hundred lines up, where the
+caller-goroutine charge is spelled out to explain a different defect. That
+false sentence is why the cost survived thirteen rounds of review of this same
+file: every reader who checked "is this expensive?" was told it ran on a
+goroutine where the answer did not matter.
+
+> **A comment asserting a goroutine context is a load-bearing claim. When a
+> second caller is added, the comment is part of the diff.**
+
+**Gates** (4, `syslog_health_chaos_test.go`):
+
+- `ADropEvaluatesOnlyWhenNoEvaluationIsInFlight` — the DEFECT gate, verified
+  failing against the reintroduced pre-fix shape. The rule is *evaluate if and
+  only if no evaluation is already in flight*, pinned as a UNIT against the
+  real entry point. The injected clock is the instrument: `syslogFeedState`
+  reads it exactly once per evaluation on a feed that is not degraded, so the
+  call count IS the evaluation count.
+- `ConcurrentDropsAreRaceFree` — drives 64 concurrent drops under `-race` and
+  deliberately asserts **no count**: which goroutine wins the claim is a
+  scheduling outcome. It proves the plane is race-free under the real shape
+  and that the claim is left FREE afterwards, which is what catches a leaked
+  claim.
+- `ASequentialDropStillEvaluates` — CONTROL. The cheapest way to pass the
+  defect gate is to stop evaluating on a drop at all, which would delete the
+  "immediate on a busy node" driver and leave the 30s watchdog as the only
+  one.
+- `ADegradedFeedStillPagesFromADropUnderConcurrency` — CONTROL, driven by a
+  real killed collector: coalescing must drop redundant evaluations, never the
+  one that crosses the threshold.
+
+All three controls PASS against the pre-fix tree, which is what makes them
+controls rather than second defect gates. The three mutations (pre-fix shape,
+never-evaluate, never-release) are each caught by a **different subset** of the
+four, which is what proves none of them is redundant.
+
+#### Round 14 postscript — the gate that would have hung
+
+The first shape of the defect gate raced concurrent goroutines through a clock
+that **blocked the winner**, so the losers' non-arrival was the observable. It
+was withdrawn before it shipped, for two reasons this file has already
+recorded in other words:
+
+- **Spurious under `-shuffle`.** A stray goroutine from another test reaching
+  the clock first consumes the blocking call, and the winner's own read then
+  returns immediately — the count assertion fails for a reason that has
+  nothing to do with the property.
+- **The defect would present as a HANG.** Against the pre-fix shape the losers
+  reach the clock too, and block there. A gate that can flake gets muted; a
+  gate that hangs is worse than no gate, because a 10-minute package timeout
+  says nothing about which assertion failed.
+
+It surfaced as a 600.119s timeout on the local `-count=2 -shuffle=on` run —
+which is also how the harness learned that CI gives that job `-timeout=20m`
+while `go test` defaults to 10, so the local run had been reporting a budget
+overrun as a failure. The property is now pinned deterministically as a unit,
+and the concurrency exercise keeps `-race` coverage without asserting anything
+a scheduler decides.
+
+### Round 15 — an all-or-nothing resolve, and a reason one hop short
+
+Two P2s, both of them an earlier round's rule implemented at the wrong
+granularity.
+
+#### (a) A delivery resolves exactly the failures it observed
+
+Round 8 established the boundary: `deliverLine` reads the failure count **after
+the write completes**, so a drop recorded before completion is resolved by the
+delivery and one recorded after survives. `noteDelivered` implemented that with
+`CompareAndSwap(failuresBefore, 0)` — which resolves the episode only when
+*nothing raced it*.
+
+When a queue-full drop landed between the read and the swap, the swap failed
+and kept **every** failure, including the prefix the delivery had just proved
+resolved. An episode of N losses, followed by a successful write and one racing
+drop, reported **N+1 losses "since that delivery"** instead of 1 — on the
+contract row and on `GET /api/syslog`. An operator asking *how much have I lost
+since the feed last worked?* was handed the whole backlog.
+
+The degradation predicate is a **boolean** over this count, so the page was
+never wrong. Only the number an operator acts on was — which is why this is a
+P2.
+
+Subtracting the observed prefix states round 6's property precisely instead of
+all-or-nothing: the racing drop still survives, and now it survives **alone**.
+
+**It is a CAS loop, not a bare `Add(-failuresBefore)`.** An underflow here is
+not a smaller error but a catastrophic one: a wrapped `uint64` is a permanently
+non-zero failure count, i.e. a feed reported as failing for the life of the
+process. It cannot happen today — only this function decreases the counter, and
+its sole production caller is `deliverLine` on the single drain goroutine under
+`s.mu` — but that is an argument about a **caller**, and the standing lesson of
+this section is that such arguments get invalidated by later changes without
+anyone noticing. The clamp makes the invariant local.
+
+**An existing gate had to be inverted**, and it is the clearest self-documented
+case in the sweep. `TestNoteDelivered_ReDatesAnEpisodeThatOutlivedTheDeliveryItRacedWith`
+asserted `ConsecutiveFailures == 3` with the message *"the raced drop must
+survive the failed CAS"* — while its own prose four lines above says *"the
+survivor belongs to a NEW episode beginning at the delivery"*, singular. The
+test documented the correct model and pinned the defect's arithmetic.
+
+#### (b) The acknowledgement carries the sender's reason
+
+Round 11 bound the probe's `delivered`-vs-`sent` wording to the Writer that
+performed the send, because `handOffQueued` moves a queued line **and its ack**
+to a successor. It left the failure class reading
+`sw.Stats().LastFailureReason` — the writer the probe was *handed*, which never
+attempted the send and reports `unknown` on a fresh chain or an unrelated stale
+class on a busy one. Round 10's defect surviving one hop along, one field later,
+in the endpoint whose whole job is to be believed.
+
+**Reading that field at ack time would also have repeated round 7's P1-C**: it
+is writer-*wide*, and a concurrent line's failure can overwrite it between the
+drop and the read. So the reason is not derived at all. `deliverLine` **returns**
+the bounded class it charged (nil on success), `deliverGuarded` returns
+`&reasonPanic` from its recover path, and each handoff/flush terminal passes its
+own literal — `ProbeOutcome.Reason` is per-**line** by construction rather than
+by timing.
+
+The `!queued` branch deliberately still reads `sw`, and is correct: `enqueue`
+fails only on `sw` itself, so `sw` *is* the writer that charged it.
+
+> **When a value can be handed on, bind every claim to the thing that will
+> finally act.** Round 11 bound one of two, and the other waited a round.
+
+#### Gates (5)
+
+- `TestNoteDelivered_ResolvesOnlyTheFailuresItObserved` — a four-case table,
+  verified failing against the reintroduced CAS on exactly the two cases where
+  something races. The two where nothing races **pass** against the defect,
+  which makes them controls inside the table.
+- `TestNoteDelivered_CannotUnderflowTheFailureCount` — pins the clamp.
+- `TestAckCarriesTheSendersFailureReason` — drives a probe handed to a successor
+  whose queue is **full** and requires `queue_full` from that successor, while
+  asserting as a **precondition** that the handed writer carries no reason at
+  all. Without that precondition the gate could not distinguish the two writers.
+- `TestAckReasonIsEmptyOnDelivery` — CONTROL against stamping a class
+  unconditionally, which would report a failure reason alongside a success.
+- `TestChaos81_TheProbeReportsTheSendersReasonNotItsOwnWriters` — the PATH half:
+  an AST wall on the handler's ack branch, because *walling the function is not
+  walling the path*, and `ProbeReportsTheRealOutcome` passed unchanged against a
+  reverted handler once already in this sweep.
+
+### Round 16 — one chain, two walks
+
+Two P2s with **one root cause**: `enqueue`, a single-writer caller-side helper,
+had exactly one caller left — `WriteProbe`. `send` outgrew it in round 11 when
+it gained the successor walk, and the probe was left on the old path. One chain
+with two walks over it produced exactly the two defects that shape produces.
+
+#### (a) A probe must follow the chain its ordinary lines follow
+
+`POST /api/syslog/test` captures a Writer, and a concurrent re-point can close
+it before the enqueue. The probe was then dropped against the **displaced**
+Writer: the healthy replacement never saw the test event and the endpoint
+answered `dropped` for a collector that was working — in the one endpoint whose
+whole job is to be believed. The refusal also went through a bare `noteDrop`
+rather than `chargeTerminalDrop`, so whenever the old Writer had already sealed
+the loss landed on counters no surface reads: *counting into a void*, recorded
+for the third time in this sweep.
+
+`WriteProbe` now routes an `enqClosed` through `handOffQueued`, the same walk a
+queued line takes. That walk already charges and acknowledges every in-chain
+terminal itself, so the surviving `(nil, false)` return is reached only when
+there is no successor at all — the one case where the captured Writer really is
+the terminal, and therefore the one case where the handler may still read the
+reason from it. The attribution round 15 established is preserved rather than
+re-derived.
+
+#### (b) The hop bound counts successor links, and `send` stopped one short
+
+`handOffQueued` offers the line to `maxHandoffHops` successors. `send` compared
+`hop+1` against the bound **before** advancing, so it followed only
+`maxHandoffHops-1` links and charged the line to the second-to-last. At exactly
+that depth the Writer it skipped is the **live** one, so a security event was
+lost to a collector that would have accepted it.
+
+**That off-by-one was introduced by round 11's own fix for the opposite error.**
+The bound used to be checked at the *top* of the loop, which charged a Writer
+that had been assigned and never asked; moving it below the attempt corrected
+the attribution and over-corrected the depth by one.
+
+> **A fix that moves a bound corrects one end and must be re-counted at the
+> other.**
+
+#### Provenance, and what this round adds
+
+The code fix for both findings was written and pushed independently as
+`f31bded` while this session was preparing its own. That fix is correct and
+smaller: it leaves `send`'s per-attempt formatting alone, where the competing
+version unified the two walks into one and changed the event-timestamp
+semantics on the hot path — a refactor the findings did not require. It was
+therefore discarded in favour of the landed fix. What survives from it is
+evidence, documentation, and one deletion:
+
+- `TestSendAndHandOffAgreeOnChainDepth` pins the **property** rather than the
+  depth. The landed exhaustion gate asserts the writer at exactly
+  `maxHandoffHops` links receives the line, which catches this instance; the
+  parity gate asserts the two walks reach the same writer at depths 1,
+  bound-1, bound and bound+1, so it also catches a future divergence in either
+  direction — including one introduced by changing the constant or by touching
+  only one walk.
+- `TestProbeRefusalOnASealedWriterReachesTheExportedTotal` closes the
+  accounting half at the **surface**. The landed no-successor control asserts
+  `Stats().Drops` on a Writer that was never retired or sealed — the case where
+  that counter IS still read — so it cannot see a loss charged to a sealed one.
+  Verified: a mutation that keeps the handoff but charges the terminal with a
+  bare `noteDrop` passes every landed gate and fails only this one.
+- `TestProbeOnAnOpenWriterWithASuccessorStaysPut` is the control against
+  walking unconditionally, which would hand a probe past a perfectly healthy
+  collector. Verified: that mutation passes every landed gate and fails only
+  this one.
+- The dead `enqueue` helper is **deleted** rather than left unused. It was a
+  second caller-side enqueue path with different semantics from the one `send`
+  walks, and `WriteProbe` picking the wrong one is how this defect arose. A
+  dead duplicate of a path that must not be chosen is an invitation to choose
+  it.
+
+> **Two independent fixes for one finding is a merge, not a race. Evaluate the
+> landed one on its merits, keep the gates it does not have, and record whose
+> code shipped.**
+
+#### Note on this round's documentation
+
+`main` has since decomposed `CLAUDE.md` into `AGENTS.md` plus
+`docs/agent-context/`, with a hash-verified preserved archive and an enforced
+eager-load budget. Architecture prose no longer belongs in `CLAUDE.md`, so this
+record is the canonical one. The preserved archive was checked for statements
+this round falsifies and contains none — its baseline predates the probe
+acknowledgement and the hop bound entirely — so no `errata.md` entry is
+required.
+
+### Round 17 — a verdict in flight, a replaced writer, and one response per target
+
+Three P2s. Two of them are the same shape from opposite directions — **a
+statement attached to the wrong moment, and a statement attached to the wrong
+target** — and the third is this file's own asymmetry argument reaching one
+more caller.
+
+#### (a) A displaced writer's full queue is not a loss
+
+`releaseReplacedSyslogWriter` names the successor **before** it closes the
+predecessor, and that close is `go old.Close()` — asynchronous. So
+`successor != nil && !closed` is not a narrow window: it is the ordinary state
+of a just-displaced writer. And its queue being full is the ordinary *reason*
+for the re-point.
+
+`send` advanced along the successor chain only on `enqClosed`. A full queue
+answered `enqDropped`, which `send` treated as terminal: the event was
+destroyed on the collector the operator had already moved off, **charged as a
+compliance drop**, with the healthy replacement sitting idle. Measured against
+the pre-fix tree: the successor's queue empty, `old.Drops() == 1`.
+
+`handOffQueued` was right to treat `enqDropped` as terminal, and that is not
+an inconsistency — it starts at `s.successor`, so the writer it is enqueueing
+to is a *live* one, whose full queue is genuine backpressure. The two cases
+are **one rule**: a loss is only a loss once nobody better is available.
+
+So `tryEnqueue` now distinguishes them. `enqDisplaced` is uncounted and both
+walkers advance on it, exactly as they do for a closed writer. Three details
+are load-bearing:
+
+- **The enqueue is attempted first, and only a REFUSAL consults the
+  successor.** A displaced writer with room keeps taking the line — its own
+  drain hands it on — so skipping a displaced writer wholesale would change
+  the ordinary re-point path and make the drain's handoff unreachable from
+  `send`. Pinned as a control; that mutation fails it and nothing else.
+- **Nothing is charged when the replacement accepts.** Following the successor
+  without this is still a false accusation on the one series that means
+  *events that did not reach the SIEM*, so it has its own gate.
+- **A full queue on the live writer is still a counted `queue_full` drop.**
+  The control for that asserted only the COUNT at first and was **vacuous**:
+  reporting every full queue as displaced still charges one drop, at the end
+  of the walk, under `closed` — so an operator chasing a collector that cannot
+  keep up is told the writer was replaced instead. It now asserts the class.
+
+`handOffQueued` gets the same rule for free, and it is reachable there too: a
+run of rapid re-points can leave an *intermediate* writer both replaced and
+backed up.
+
+Four mutations, each caught by a different subset: revert `tryEnqueue` (3
+gates), never charge a queue-full drop (the strengthened control), `send`
+ignores `enqDisplaced` (1 gate), skip displaced writers wholesale (2 gates).
+
+#### (b) A dial that has not returned is not a verdict
+
+Both boot paths record the intent and *then* dial, synchronously, for up to
+`syslog.DialTimeout` (5s). `initBackgroundServices` starts the 30s watchdog one
+init slice **before** `initPersistentAdminState` reaches `applyAdminServices`,
+and the webhook store is already loaded — so a tick landing inside that dial
+dispatched `syslog_feed_down` and logged that the collector *"could not be
+connected 0s ago and nothing retries"*. Both claims were false; nothing had
+failed yet. Installing the writer clears the fire-once latch but cannot retract
+a delivered webhook.
+
+That log line is this sweep's headline defect in miniature: **a health surface
+asserting a false statement.**
+
+An intent is now PENDING for the length of one dial. Four decisions:
+
+- **A deadline, not a flag.** A flag a caller forgets to clear is a latch that
+  makes the feed permanently unpageable — the fail-OPEN failure this plane
+  keeps recording. A deadline expires on its own, so a missed resolver costs
+  bounded delay, and freshness stays EVALUATED rather than latched (CHAOS-61's
+  rule, which this file applies everywhere else). Pinned by a gate that
+  advances the clock past the grace **without anything clearing it**.
+- **Folded into the ONE definition.** `syslogIntentUnmet` is deliberately the
+  single definition shared by the snapshot and the recovery path; spelling the
+  conjunction at each consumer is how one answer becomes two.
+- **Derived, not chosen.** The grace is `syslog.DialTimeout + 1s`, with the
+  engine's budget newly exported so there is one source for it, and a gate
+  requiring the grace to cover the dial AND stay below the watchdog tick — a
+  grace at or above the tick would postpone a *real* page by a whole tick.
+- **A resolved failure is immediate.** `noteSyslogDialResolved` closes the
+  grace early on the failure branch, because the read surfaces are exactly
+  what an operator looks at after a boot that failed.
+
+Two findings about my own work are recorded rather than smoothed over:
+
+- **The deadline clear in `noteSyslogWriterInstalled` is HYGIENE, not a fix.**
+  An install forces `intendedTarget == target`, so `syslogIntentUnmet`
+  short-circuits before ever consulting the deadline. Removing the line changes
+  no surface today — measured, not reasoned — and the call site now says so.
+  The control that appeared to pin it was vacuous twice over: first because
+  `armSyslogFeed` resets the record *before* it dials (so the grace was cleared
+  by the reset), and then because of the short-circuit. It is kept, rewritten
+  to pin the production ORDER, which no other gate exercises, and explicitly
+  labelled with what it does not pin.
+- **19 existing gates called `noteSyslogIntent` to mean "the dial failed".**
+  That is now only half of the boot sequence, so they went red. They were not
+  loosened: a `noteSyslogFailedDial` helper names the *whole* failed-boot
+  sequence once, every one of them uses it, and all 19 pass unchanged — so the
+  semantics each pinned before this round is the semantics it pins now. The
+  gates that are about the pending window call the two halves themselves and
+  drive the injected clock.
+
+> **When a change makes a previously-instantaneous transition take time, every
+> gate that treated it as instantaneous was encoding a sequence, not a state.
+> Name the sequence once and let them all say it.**
+
+#### (c) One response, one target per field
+
+`GET /api/syslog` read the serving address through `syslogConfiguredSnapshot`
+— a *different lock*, therefore a different generation — and the verdict
+through `syslogFeedState`, and reported the serving address as `addr`. Two
+shapes followed:
+
+- A failed boot dial answered `addr:""` beside `degraded:true`. The legacy
+  panel keys its **whole** syslog section off `addr`, so it cleared the
+  operator's own address out of the form, hid the status line and ran
+  `hideSyslogDrops()` — on the one feed that is losing every event. Measured:
+  `{"addr":"","degraded":true,...}`.
+- A boot that connected A and then failed to connect the persisted B answered A
+  beside B's degraded verdict, while `format`, `lastSuccessUnix` and
+  `deliveryProvable` all described A.
+
+The health record already held both strings, read under one lock — it simply
+did not expose them. So the fix **removes** a read rather than adding one:
+`Target` and `IntendedTarget` go on the snapshot, the handler drops
+`syslogConfiguredSnapshot` entirely, and `addr`/`servingAddr`/`targetMet` name
+the two collectors separately. Every field now comes from one critical section,
+so the response is one generation by construction rather than by timing —
+round 9a's rule at a fourth reader.
+
+`syslogConfiguredSnapshot` keeps two real callers (the persistence path and
+diagnostics), so round 16's dead-duplicate rule does not bite; the
+config-metadata wall's claim was widened to name both acceptable one-generation
+sources, because it no longer describes this reader.
+
+The product half is where the harm was, so it is gated too:
+`renderSyslogTarget` claims a green tick only on `targetMet` and otherwise
+names the configured collector and the previous one still receiving events.
+Both mutations — green unconditionally, warn unconditionally — fail it. The
+save path now renders the target through the same renderer on its re-read,
+removing a second copy of the sentence.
+
+Adding two response fields regenerated **both** artifacts, which is the lesson
+`conventions.md` records from this very PR: `make api-bundle` for
+`openapi.json`, then `npm run generate` under the pinned Node for
+`types.gen.ts`. The pinned toolchain was not installed in this environment and
+was obtained rather than bypassed — forcing past a toolchain gate is how
+generated output stops being reproducible.
+
+#### Gates and mutations
+
+Added: 6 in `internal/syslog/syslog_handoff_format_test.go` (A), 7 in
+`syslog_health_chaos_test.go` (B), 5 more (C). Mutation evidence is recorded
+per finding above; every defect gate was verified failing against the shape it
+targets, and every control was verified failing against the cheapest wrong fix
+it is named for — with the two vacuous controls found by measurement, not by
+review, and fixed or relabelled.
+
+#### Environment note
+
+Nine root-package tests fail in this sandbox and are unrelated to this PR:
+`example.com` does not resolve here (only hosts the agent proxy needs do), and
+`validateExternalURL`'s DNS check is fail-closed, so every IdP-registry fixture
+using the IANA-reserved domain is refused. CI resolves it normally. The
+determinism verdict for this round is read with those nine excluded.
+
+#### Round 17 addendum — the CodeRabbit batch
+
+Three findings arrived on the same head, all labelled Minor; one of them is in
+this plane's headline class and the label understates it.
+
+**(d) The probe confirmed a collector the operator had replaced.**
+`apiSyslogTest` loaded the writer on its own, so in the superseded state
+(writer A live, intended B's dial failed) it reached A and answered
+`delivered` — *"the collector accepted the test event"*, `ok: true`. Meanwhile
+`syslog_feed_down` is firing, and the `syslog_feed` row's own OperatorAction
+points the operator **at this endpoint** to confirm the fix; round 12b's
+recovery rule correctly refuses to clear that episode for A's delivery, so the
+alert stays up while the test says it worked. Two contradictory statements on
+one operator surface — the superseded-target finding at a **third** surface,
+after the alert wording (9b) and the recovery clear (12b).
+
+The verdict is asked through `snap.IntentUnmet`, **not** by comparing the two
+target strings at the call site. A string comparison would be a second
+definition of a question that already has one — and it would also miss round
+17(b)'s pending-dial grace, reporting `superseded` for an intent a boot dial is
+still deciding. The writer probed is `snap.writer`, from the same snapshot, so
+the writer and the verdict are one generation (round 10b's rule: the probe may
+not infer its transport or its outcome from separately-read state, and that now
+extends to *which collector it is even testing*).
+
+**That fix consumed the control sample of two structural walls**, which is
+worth recording because it is the second time this round that a control turned
+out to rest on something that could move. Both walls used `apiSyslogTest` as
+their positive sample — "it reads only the writer, it pairs it with nothing" —
+and it is now a config-metadata reader itself, so it JOINED the list it used to
+be the counterexample to. The sample is now `persistLogEntry`: the request-path
+fan-out, chosen because loading the live writer and handing it a line is the
+whole of its job, so it cannot stop doing so the way an admin handler did.
+
+> **A control's positive sample must be something that cannot stop having the
+> property. Pick the function whose job IS the property, not the one that
+> happens to have it today.**
+
+**(e) The observability snapshot did not restore the health plane.**
+`snapshotObservabilityGlobals` restores the writer pointer and the config
+strings; the health record is not part of it, and `loadObservability` writes it
+on both paths. A test driving a collector that cannot be connected therefore
+left `intendedTarget` set and the skipped-event counter ARMED, so every later
+test's audit and request events were charged to `culvert_syslog_drops_total` as
+SIEM losses. Verified by a throwaway gate before fixing. That is the
+`swapAutoExclude` fence-pollution rule — a global a test installs is a global
+the test must take back, not merely stop pointing at — and round 17(b) made it
+sharper by adding `dialVerdictBy` to the same unrestored record.
+
+**(f) A paragraph split the probe-outcome table.** Round 16's explanation
+landed *inside* the Markdown table, so `unknown` and `unconfigured` rendered as
+literal text with pipes: two of five probe outcomes were invisible to anyone
+reading the runbook. My own defect, from the round that added the paragraph.
+Fixed by moving the paragraph below the table, which also made room for the new
+`superseded` row.
+
+Mutations: probe loads the writer on its own (2 gates, including the repointed
+config-metadata wall now live for `apiSyslogTest`); refuse every probe (the
+control); snapshot stops restoring the health plane (the fixture gate).
+
+**(g) And one of round 17(a)'s own gates read an absolute process-lifetime
+counter.** `TestSend_FollowingTheSuccessorChargesNoDrop` asserted
+`LateDrops() == 0` where every other gate in that file takes a delta. It passed
+only because another test resets the counter a hundred lines above it in source
+order; under `-shuffle=on` it fails the moment the exhausted-walk gate lands in
+between (reproduced deterministically with a two-test `-run`, which is the
+inverse of this file's other lesson — there a filter *hid* an ordering fault,
+here a filter *exposed* one the full run hid).
+
+This is round 11's postscript verbatim — *the counter had to be handed back,
+because it is process-lifetime by design and one gate's late drop shifted the
+total for every gate after it* — committed in a gate added one round later.
+
+> **When a counter survives what used to reset it, every assertion about it is
+> relative. A gate that reads it absolutely passes on the ordering it happened
+> to be written under.**
+
+#### Round 17 — recorded residual
+
+During the pending-dial grace the API reports `targetMet:false` with an empty
+`servingAddr`, so the panel's warning sentence — which ends *"Nothing retries;
+re-save to try again"* — is not strictly true for those few seconds: a dial
+*is* in flight. It is recorded rather than fixed because the window is
+unreachable in practice: both callers run inside `initObservability` /
+`initPersistentAdminState`, before `startAdminUI` has a listener, so no
+operator can load the Settings panel during it. Closing it would mean a third
+state on the response for a boot condition nobody can observe. If a future
+change makes an intent pending on a path the admin UI is already serving — a
+re-point that dials asynchronously, say — this becomes reachable and the
+response needs a `dialPending` field.
+
+#### Round 17 — process: a round lands as ONE push
+
+Four of this round's required-check failures were not failures. `Fast PR Gate`
+and `Deep PR Gate` reported `failure` on `b48812f`, `f31bded`, `6f4ba92`,
+`4eab29a`, `ce57bbd` and `43faff6`; every one of those workflow runs has
+conclusion **`cancelled`**, and the aggregate's own message says why:
+
+```
+##[error]required job 'test-race' result=cancelled — cannot trust the gate
+```
+
+The gate is right to refuse — a cancelled race job is not evidence — and the
+cause was mine: six pushes in about twenty-five minutes, each cancelling the
+in-flight run for the ref. Three of them were polish (a tightened doc sentence,
+a recorded residual, this note's predecessor), and each cost a full CI cycle and
+manufactured a pair of red required checks indistinguishable from real ones
+until the logs were read. Two of those reds arrived as wake events whose
+handling instructions are "this ends in a pushed fix or a comment on the PR" —
+so a self-inflicted cancellation also generates work that looks mandatory.
+
+> **A review round lands as one push. Polish that arrives separately is not
+> free: it costs a CI cycle, it replaces a green verdict with a pending one,
+> and it produces red required checks that cannot be distinguished from genuine
+> failures without opening the job log.**
+
+Verified on the uncancelled head: both required gates green, plus API Contract,
+API Governance, CI, Code Review, CodeQL, Edge-Case Validation Lab, Proxy UI E2E,
+QA Gate and Security Release Gate. Module-wide `-count=2 -shuffle=on` (seed
+1792156379732326309): 111 packages pass; the root package's 9 failures are all
+`validateExternalURL` failing closed because `example.com` does not resolve in
+that sandbox, each appearing exactly twice — deterministic environment, not
+ordering. Nothing this round touched failed.
+
+### Round 18 — a verdict that outlived its episode, and two answers to "how much did this writer lose"
+
+Two P2s, and they are the same mistake at two different altitudes: **a value
+read as though there were only one of it.** One is a staleness generation keyed
+on the wrong event; the other is a cumulative counter read as a pair.
+
+#### (a) A recovery that invalidates nothing
+
+`syslogHealthRecord.gen` is the staleness identity the watchdog's
+snapshot/commit split relies on: the snapshot half captures `gen`, the commit
+half refuses to act if it has moved. It was documented, and implemented, as
+*"the identity of the RECORD"* — bumped by an install, a disable and the test
+reset, the three transitions that replace what the record describes.
+
+`noteSyslogDeliveryRecovered` replaces nothing. It clears `alerted`, `logAt`
+and `suppressed` and leaves the writer, the target and the intent exactly as
+they were. So a snapshot taken while the feed was down, committing a moment
+after the recovery, passed the staleness check and **paged a feed that was
+already delivering again** — and, because the commit half sets `alerted`, it
+also re-latched it.
+
+That re-latch is the serious half, and its failure mode is **silence**. The
+delivery observer is edge-triggered: `noteSyslogDeliveryRecovered` runs on the
+transition out of an episode, never on an ordinary success. With the episode
+already over, nothing will clear `alerted` again. The next genuine outage
+reaches `alertNow = !alerted` as false and **pages nobody**. Reproduced in all
+three steps against the pre-fix tree; the third printed
+
+```
+DEFECT(3): a genuine outage after the stale commit fired 0 alerts, want 1 — the latch suppressed the page
+```
+
+The fix is one line — `syslogHealth.gen++` on the clearing path — but the
+line is not the deliverable. The **definition** is:
+
+> **Define a staleness generation by what it PROTECTS, not by what changed. The
+> only consumer of `gen` is the check that asks "is this degraded verdict still
+> true?", so every transition that can falsify a degraded verdict has to move
+> it — including one that replaces nothing at all.**
+
+Under the old rule, three of the four bumps were correct by coincidence: an
+install, a disable and a reset all happen to falsify a degraded verdict *and*
+replace the record. Recovery is the case where the two rules disagree, and the
+old rule gave the wrong answer. The doc comment now states the rule, names
+recovery as the case that distinguishes them, and — the other direction of the
+same test — explains why `noteSyslogIntent` still does **not** bump: recording
+a new intent leaves a pending unmet-degraded verdict TRUE, so there is nothing
+to invalidate.
+
+The bump sits after the early return, not before it. `noteSyslogDeliveryRecovered`
+returns early when the intent is unmet, because a delivery by the writer being
+*served* is not evidence about the collector the operator *asked* for — round
+12(b). Bumping on that path would clear a verdict that is still true, and
+round 12(b)'s own note already says what keeps the latch from being stranded:
+every transition that RESOLVES the intent clears it.
+
+Two gates. The defect gate drives a degraded snapshot of the CURRENT
+generation across a recovery and asserts three things, not one: no page fires,
+the record is **not left latched**, and — the half that matters — a genuine
+outage after it still pages. A gate asserting only "the commit is refused"
+would have passed a fix that silenced the alert path altogether, and would have
+said nothing about the stranded latch, which is the part an operator actually
+pays for. The control comes at it from the other side: a snapshot taken AFTER a
+recovery, describing a fresh outage, must still page — because the cheapest way
+to pass the defect gate is to stop committing degraded snapshots at all.
+
+#### (b) Two cumulative values, read as a pair
+
+A retired `Writer` has **two** cumulative totals, on purpose: the live counters
+and the sealed `finalStats` the drain publishes on its way out. The live ones
+deliberately keep moving after the seal — `chargeTerminalDrop` keeps counting,
+and reports that the loss belongs to the process-lifetime `lateDrops` counter
+instead of to the writer's fold.
+
+Both folding call sites read them as a pair:
+
+```go
+st, sealed := old.FinalStats()
+if !sealed {
+    st = old.Stats()
+}
+```
+
+Two unsynchronised loads, and the Writer can seal between them. The fallback
+then folds a live value that already includes a post-seal loss — **already
+charged to `lateDrops`**, so it is counted twice — and the next
+`settleRetiredSyslogWritersLocked` reads the *sealed* snapshot, which is
+**smaller** than what was folded. The delta goes negative and
+`culvert_syslog_drops_total` **decreases**: the one thing a Prometheus counter
+may not do, and precisely the contract the sealing boundary was introduced to
+keep.
+
+`settleRetiredSyslogWritersLocked`'s own doc comment asserted the opposite —
+*"a settle can never make `culvert_syslog_drops_total` decrease"* — and
+attributed it to a Writer's counters being monotonic. They are monotonic. That
+was never the reason: with two cumulative values per Writer, monotonicity of
+each says nothing about a fold that reads one and a settle that reads the
+other. The comment is corrected rather than deleted, because the claim it makes
+is the contract — it just has to rest on the right thing.
+
+`CumulativeStats()` answers with one of the two, so a folded value is never
+succeeded by a smaller one. What makes the pair safe is the **order**: the live
+counters are read **first**, and only then is the seal loaded. If the seal is
+present the finals are the answer exactly; if it is absent, the Writer had not
+sealed at the *later* of the two reads and therefore not at the earlier one
+either, so the live value predates the seal and cannot exceed the finals that
+follow. The original code had exactly these two reads in the opposite order,
+which is the whole defect.
+
+**The first shape of that fix deadlocked the appliance.** It is worth recording
+in full, because the fix was wrong in a way the finding was not.
+
+The first `CumulativeStats` read the seal flag and the counters under one
+acquisition of `sendMu` — exact, obviously correct in isolation, and a
+**three-way deadlock**:
+
+- Both folding consumers run with `syslogHealth.mu` **held** (their names say
+  so: `…Locked`).
+- A line this Writer refuses charges its drop from `tryEnqueue`, which holds
+  `sendMu.RLock`, and `noteDrop` notifies the delivery observer from inside
+  that — and the observer takes `syslogHealth.mu`.
+
+So the two lock orders are opposite. Two read locks coexist, which is why this
+looks survivable — until a `Close()` is parked on `sendMu.Lock()`. Go's
+`RWMutex` then stops new readers from barging ahead of the waiting writer, and
+the cycle closes. Not a window; a cycle.
+
+`TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic` — an existing
+gate from an earlier round, written for a different defect — **hung to the test
+timeout**, and `SIGQUIT` named all three edges on one Writer (`0x…b1a140`):
+
+```
+goroutine 61  tryEnqueue (holds sendMu.R) → noteDrop → notifyDelivery
+              → noteSyslogDelivery → syslog_health.go:1080  [waiting: syslogHealth.mu]
+goroutine 65  syslogFeedState (holds syslogHealth.mu) → settleRetiredSyslogWritersLocked
+              → CumulativeStats → syslog.go:253            [waiting: sendMu.R]
+goroutine 12  releaseReplacedSyslogWriter → Writer.Close → syslog.go:1362
+                                                            [waiting: sendMu.W]
+```
+
+Three things about this are worth keeping:
+
+- **It is CA-17 again** (§17.2, CHAOS-50): a lock held across a call that
+  re-enters the same domain through a callback. That one was a self-deadlock
+  under `ca.mu`; this one is an inversion between two domains' mutexes. The
+  repository had already paid for this failure class once, which is an argument
+  for the wall below rather than for a comment.
+- **The ordering argument makes the lock unnecessary**, so the fix is not a
+  lock reordering or a copy under a third mutex — it is deleting the lock and
+  proving the pair safe without it. A fix that needs *less* synchronisation
+  than the defect is usually the right one.
+- **The gate that caught it was a hang**, which is the most expensive failure
+  shape a suite has: it burns the whole package timeout and names no test
+  without a stack dump. So the property is pinned **structurally** instead —
+  `CumulativeStats` may take no lock, however briefly, and must read the live
+  counters before the seal. Both halves are mutation-verified, and the wall has
+  a positive control (`tryEnqueue`, whose job *is* to hold `sendMu`) so a
+  broken AST walk cannot pass silently.
+
+> **A function called with a foreign mutex held may take no lock of its own —
+> including a read lock, including briefly. If the domain it reaches into can
+> call back into yours, the two read locks are not harmless; they are one
+> parked writer away from a cycle.**
+
+> **A folding consumer must read ONE cumulative value, and the ORDER of the two
+> reads is the proof. A check-then-read pair is not a snapshot of either value;
+> reversing it makes it one.**
+
+Five engine gates pin it: that the sealed and live values do diverge at all
+(the negative control — without divergence the whole defect is unreachable and
+every gate below is vacuous), that `CumulativeStats` prefers the finals once
+sealed, that it reports the live counters before sealing, the no-lock /
+live-read-first wall above, and that wall's own positive control.
+The consumer side is walled **structurally** — the window is a few instructions
+wide and cannot be scheduled through either caller, the same reason round 9's
+snapshot wall and round 17's config-metadata wall are structural. The wall
+requires each folding function to call `CumulativeStats` and forbids
+`FinalStats`/`Stats` inside it, with a control asserting the plane still calls
+`.Stats()` somewhere, so a broken AST walk cannot pass silently.
+
+#### Round 18 — the rest of the lock graph, swept and clean
+
+Finding a lock-order inversion in my own fix is a reason to ask whether the
+plane has others, so the whole graph was walked rather than just the edge that
+hung. Three locks are involved: `syslogHealth.mu`, `syslogPublishMu` and each
+Writer's `sendMu`.
+
+- **Health plane → Writer.** Every call the health plane makes to a Writer
+  while holding `syslogHealth.mu` is lock-free: `Stats()` and `FinalStats()`
+  are pure atomic loads, `MarkRetired()` is an atomic store, and
+  `CumulativeStats()` is now lock-free by construction and walled. `Close()`,
+  the one Writer method that takes `sendMu` exclusively, is never called from
+  under `syslogHealth.mu` — `releaseReplacedSyslogWriter` spawns it
+  (`go old.Close()`) and `disableActiveSyslog` calls it with
+  `syslogPublishMu` already released.
+- **Publish → health.** `syslogPublishMu` is always taken *outside*
+  `syslogHealth.mu` (`InitSyslog` → `noteSyslogWriterInstalled`,
+  `disableActiveSyslog` → `noteSyslogForwardingDisabled`), and nothing takes it
+  while holding `syslogHealth.mu`. `syslogFeedState` deliberately reads the
+  published pair through a reader that does not participate in it (round 17).
+  One direction only, so no cycle.
+- **Writer → health.** This is the callback edge, `notifyDelivery` →
+  `noteSyslogDelivery`, and it runs with `sendMu.RLock` held by `tryEnqueue` or
+  `chargeTerminalDrop`. It is the edge that makes the first rule above a
+  requirement rather than a preference.
+
+Nothing else to fix. Recorded because "I checked the rest of the graph" is the
+part of a deadlock fix that usually goes unwritten, and because the *shape* of
+the rule — an observer callback that re-enters the caller's domain — is
+reusable: this is the second time it has cost this repository a hang (CA-17,
+§17.2).
+
+#### Round 18 — a gate that mirrors the caller, not the API
+
+The first engine gate asserted `LateDrops() == 1` after calling
+`chargeTerminalDrop` directly, and it was wrong: `chargeTerminalDrop` only
+*reports* that the loss belongs to the late counter — the production caller is
+the one that acts on it (`if late := ...; late { noteLateDrop() }`). Asserting
+on the counter while skipping the half of the contract the caller owns tests a
+sequence nothing executes.
+
+> **When a function returns a verdict for its caller to act on, a gate that
+> asserts the effect must perform the caller's half too — or it is asserting
+> against a code path that does not exist.**
+
+#### Round 18 — verification
+
+Mutation-verified, each fix by a distinct gate subset:
+
+| Mutation | Caught by |
+| --- | --- |
+| remove `syslogHealth.gen++` from `noteSyslogDeliveryRecovered` | `TestChaos81_RecoveredEpisodeRejectsItsPreRecoverySnapshot`, on all three assertions; the control stays green |
+| `CumulativeStats` takes `sendMu.RLock` again | `TestCumulativeStatsTakesNoLockAndReadsLiveFirst` |
+| `CumulativeStats` loads the seal before the live read | `TestCumulativeStatsTakesNoLockAndReadsLiveFirst` |
+| `CumulativeStats` returns live counters even when sealed | `TestCumulativeStatsPrefersTheSealedFinals` |
+| `CumulativeStats` drops the live fallback | `TestCumulativeStatsReportsLiveCountersBeforeSealing` |
+| either folding consumer reverts to `FinalStats`-then-`Stats` | `TestChaos81_FoldingReadsOneCumulativeValue` |
+
+Checks run on the final tree, `go1.26.10` per `go.mod`'s `toolchain`:
+
+- `go vet ./...` — clean.
+- `go test -race -count=2 -shuffle=on ./internal/syslog/` — pass.
+- `go test -race -run 'TestChaos81_|TestSyslog|TestCumulative' .` — 78 gates
+  pass in 16.8s, 77 of them `TestChaos81_` (74 carried forward, 3 new). The one
+  that hung to the test timeout against the first fix,
+  `TestChaos81_WriterHandleIsSafeUnderConcurrentRepointAndTraffic`, completes in
+  0.33s.
+- `go test .` (the whole root package, 416.8s) — exactly nine failures, all
+  `validateExternalURL` failing closed because `example.com` does not resolve
+  in this sandbox (`URL must be https:// and must not point to a private
+  address`, from the IdP persistence and admin-IdP tests). The same nine as
+  round 17; nothing this round touched failed.
+- `python3 docs/agent-context/check.py` — pass (no guidance path changed; run
+  because the round edits instruction-adjacent prose).
+
+Not run locally: `golangci-lint`, which cannot execute against this repository
+here, and the hosted gates. A passing local check is not a passing merge gate.
+
+#### Round 18 — the CodeRabbit batch, and one residual
+
+Four Minor findings, every one correct, and every one the same class as the
+headline defects: **an operator surface claiming more than its evidence
+supports.** By label they do not start a push of their own, so they rode a
+single follow-up commit rather than cancelling the in-flight gate run (round
+17's lesson).
+
+- **Degradation is not only the loss-based rule.** `finishUnmetSyslogIntent`
+  overlays `Degraded = true` on an unmet intent with zero losses and no window
+  to wait out, so both the CHANGELOG entry and the runbook section titled "How
+  degradation is decided" gave one of two conditions as *the* definition. Both
+  now name the loss-based rule as the loss-based rule.
+
+  **My first pass fixed the wrong place.** The finding anchors on the runbook's
+  **metrics and diagnostics tables** — `culvert_syslog_up` ("`0` once it is
+  degraded") and the `fail` row ("events are being lost and nothing has been
+  delivered for 5 minutes") — and says so explicitly; I read it as being about
+  the prose section and corrected that instead. A reader who takes the row
+  literally writes an alert rule for a condition that is one of two. Both rows
+  now name both conditions, and the `fail` status has the second as its own
+  line. Recorded because the error is instructive: the prose was *also* wrong,
+  so the first fix looked like it had addressed the finding, and nothing would
+  have caught that it had not.
+- **`delivered` on TCP is a successful local write.** Stronger than the finding
+  put it: `Write` returning without error means the bytes reached the LOCAL
+  socket buffer, so a connection breaking before it drains loses a line already
+  counted as delivered — the remote kernel need never have seen it. The engine's
+  own `noteDelivered` comment says "the collector's kernel accepted the bytes";
+  the runbook had flattened that to "the collector accepted this event", and the
+  `tcp://` recommendation presented TCP as delivery evidence outright.
+- **The probe remediation step was transport-blind.** It told every operator to
+  look for `outcome: "delivered"`. UDP is the default when the address omits a
+  scheme and can only ever answer `sent`, so the step directed the majority of
+  deployments to wait for an outcome their transport cannot produce.
+
+- **Package-source scans must be anchored** (🔵 Trivial, and the one that
+  mattered to CI). The round-18 wall read `os.ReadFile("syslog_health.go")`,
+  and `syslogFuncDecl` passed a bare relative name to `parser.ParseFile`. A
+  CWD-relative read in the test binary races any concurrent `os.Chdir` — a
+  flake class this repository has already paid for, which is why
+  `pkgSourceDir()` exists and why
+  `TestTestFileReadsAreCWDIndependent` forbids it. That wall matches the
+  LITERAL pattern `os.ReadFile("x.go")`, so a variable-derived read and a
+  `filepath.Glob("*.go")` both slip past it: **the wall guards the spelling,
+  not the property.** Four sites anchored (the new wall, `syslogFuncDecl`, and
+  two earlier globs of mine).
+
+  Proven rather than reasoned: built with `go test -c` and run from an empty
+  directory, the anchored walls all pass; with the anchors reverted the same
+  binary reports `open syslog_health.go: no such file or directory` and
+  `parse admin_settings.go: ... no such file or directory`. So the flake was
+  reachable, and the anchor is what removes it.
+
+  > **A wall that matches a spelling catches the shape it was written against.
+  > `os.ReadFile("x.go")` and `os.ReadFile(f)` have the same defect and only
+  > one of them is forbidden.** Recorded as a limitation of
+  > `TestTestFileReadsAreCWDIndependent` rather than fixed here: widening it to
+  > variable-derived reads touches every source-scanning wall in the package and
+  > is not this PR's to do.
+
+**Residual, recorded not fixed:** the probe's own response `message` for
+`delivered` is the string *"the collector accepted the test event"*
+(`syslog_health.go`), which carries the same overstatement the runbook row just
+lost. It is a wire string with three test references and nobody raised it;
+changing it would widen this PR past what the findings asked for. The runbook
+now says explicitly that the row, not the message, is the accurate statement. If
+a later round touches that response, the message should become a claim about the
+write rather than about the collector.
+
+### Round 19 — the third reader, and a claim that was true of a state and false of an instant
+
+One P2, and it is round 18(b) arriving at the reader I had explicitly argued was
+safe.
+
+Round 18(b) fixed the two **folding** consumers to take a retired Writer's
+cumulative totals as one value. `syslogFeedState` has a third reader of a
+Writer's counters — the **installed** one — and it kept `sw.Stats()`, with this
+comment of mine beside it:
+
+> The engine only charges a loss to LateDrops once the owner has RETIRED the
+> Writer, so the two can never overlap.
+
+That sentence is true of a **state** and false of an **instant.** The Writer
+does not have to be retired when it is captured, only by the time it is read,
+and `syslogFeedState` captures under `syslogHealth.mu`, releases it, and reads
+the counters afterwards. A disable landing in that window:
+
+1. retires and seals the captured Writer and folds its finals into a
+   `retiredDrops` this snapshot has **already copied** (so the fold is not the
+   problem);
+2. leaves a request holding the old handle, whose next loss
+   `chargeTerminalDrop` charges to `lateDrops` **and** to the Writer's own live
+   counters — correctly, because those two are read by different consumers;
+3. and this snapshot adds **both**.
+
+Reproduced deterministically through the real `syslogFeedState`, no goroutine
+racing: the whole transition is landed inside the clock seam the function calls
+after unlocking. One lost event, `lateDrops == 1`:
+
+```
+lateDrops=1 first.Drops=2 second.Drops=1
+```
+
+`Drops=2` for one event, then `Drops=1` off the smaller sealed finals — the
+exported counter DECREASING, which is the one thing it may not do, reached for
+the third time in this sweep by a third route.
+
+**The fix removes the window rather than detecting it.** The Writer's counters,
+`syslogLateDrops()` and `syslogSkippedNoWriter` are now read under the same
+`syslogHealth.mu` acquisition as the retired totals, and `applyLiveWriterStats`
+folds what its caller captured instead of re-reading. That lock is the one every
+retirement holds — a retirement marks the Writer, seals it, folds its finals and
+clears `syslogHealth.writer` in one critical section — so a non-nil `described`
+captured under it is provably **not yet retired**, and none of its losses can be
+in `lateDrops`. The terms cannot describe the same loss twice because they all
+describe one instant.
+
+Reading the counters under that lock is only safe because of round 18's lock
+sweep: `Stats()` is pure atomic loads and takes no Writer lock, which is exactly
+the property the no-lock wall on `CumulativeStats` pins. The two rounds are one
+rule from opposite ends.
+
+The counters stay **live** rather than sealed, and that is still deliberate: the
+installed Writer's totals are folded nowhere else, so switching to its seal
+would move its losses into the "lost to an earlier target" bucket while it is
+still the current one. The episode fields need the same thing for a different
+reason — a Writer can be sealed while still installed, and the degradation
+predicate has to keep seeing it fail.
+
+#### Round 19 — the gate that could not pin its own defect
+
+Worth recording in full, because the first gate looked sufficient and was not.
+
+The behavioural gate reproduces the defect through the production function and
+fails against the pre-fix file on both consequences (counted twice; total
+decreased). Then the obvious mutation — move the capture from before the unlock
+to the line **after** it, which is still broken — **passed it.** The injection
+point is `syslogHealthNow()`, called some lines after the unlock, so a read
+placed between the two is never seen by the seam the gate drives.
+
+> **A behavioural gate on an interleaving pins the window it was written
+> against. When the fix is a PLACEMENT, the window's own boundary is what
+> moves, so the placement needs a structural wall.**
+
+So the property is walled structurally as well: in `syslogFeedState` the
+Writer's counters and `syslogLateDrops()` must both be read at a position
+**before** the `Unlock()` call, and `applyLiveWriterStats` may not call
+`Stats()` or `CumulativeStats()` at all. Measured: the wall fails on both
+placement mutations (capture after the unlock; a re-read inside the consumer)
+and on the pre-fix file, naming the file and line of each.
+
+The live-term control is **not** duplicated. The cheapest way to pass the
+behavioural gate is to stop counting the installed Writer's drops at all, and
+that mutation fails `TestChaos81_DropsReachMetricsAndHealthz`, which kills a
+collector under a live feed and requires the losses to reach `/metrics` and
+`/healthz`. Verified by applying it rather than asserted: the control goes red
+(`/healthz carries no syslogDrops field`) while the new gate stays green. Naming
+an existing control beats writing a second one, but only once you have run the
+mutation that proves it is the control.
+
+#### Round 19 — the lint gate caught what my pre-push check did not
+
+The wall above landed at cognitive complexity **32** against `gocognit`'s 30,
+and `Gate · golangci-lint` said so within a minute of the push. The miss is
+worth recording precisely: before pushing I checked `funlen` and `cyclop` for
+the production function and `funlen` for the test file, read the `_test.go`
+exclusion list — `funlen`, `dupl`, `cyclop` — and did not notice that
+**`gocognit` is not on it.** Test files are held to the full bar for that one.
+
+> **An exclusion list is a claim about the linters it names, not about "tests
+> are exempt". Read which ones.**
+
+Fixed by extracting three flat helpers (`syslogCallNamed`,
+`syslogFirstCallPos`, `syslogForbidCounterReads`) so the wall reads as four
+assertions rather than two nested AST walks. Measured with the tool rather
+than estimated: `gocognit` now puts the wall below 20 and the file's worst
+function at 23.
+
+The same pass tightened a control that was wrong in a quiet way. The first
+draft fatally failed with *"control: no Stats() call found in
+syslogFeedState"* on the pre-fix file — which is the DEFECT, not a broken
+matcher, so the wall would have reported its most important case as a
+self-test failure. The control now covers only the lock release, where a
+broken walk really does return NoPos for everything, and the required reads
+report their own absence in the terms of the defect.
+
+#### Round 19 — on the branch moving underneath this sweep
+
+`main` landed CHAOS-78 (#1675) while this branch was green and idle, converting
+the same package-main syslog handle to an `atomic.Pointer` under different
+names. Another session reconciled it in `c0329c07`: main's
+`globalSyslogHandle` / `syslogHandle` / `setSyslogHandle` won, this branch's
+CHAOS-81 delta stayed on top, and the chaos register renumbered §45 → §53.
+
+Recorded because the reconciliation is the risk, not the rename. Two
+concurrency designs for the same window now coexist: this branch's `sendMu`
+and main's `inFlight` registration with `Close`'s bounded `waitForSenders`.
+They compose — `Close` takes `sendMu`, stores `closed`, **releases it**, and
+only then spins in a bounded `waitForSenders`, so there is no wait under the
+lock, and round 18(b)'s cycle cannot re-form through a lock-free
+`CumulativeStats`. Checked on the merged head rather than assumed, together
+with all six round-18 gates and the round-18 contracts in the source.
+
+#### Round 19 — process, carried from round 18
+
+Round 17 recorded the rule *a review round lands as one push*, and round 18
+broke it twice: `d256201` and `d23efe8` each landed over an in-flight run,
+producing four red required checks on superseded heads whose workflow runs all
+read `cancelled` and whose upstream jobs had not run a single test. The second
+push was weighed and accepted — it changed no `.go` file, so the cancelled race
+shards re-ran against byte-identical sources — and the first was not. Held out
+of its own commit for exactly the reason it records, and carried here on the
+first push that changes files anyway.
+
+### Round 20 — the writer half of a window whose reader was already hardened
+
+One P2, and it is the mirror of an earlier P1 in this same sweep.
+
+`noteDrop` runs on the CALLER's goroutine for a queue-full drop, so many
+request goroutines reach it at once and its two halves can be split by the
+scheduler: one records the failure and takes the 0->1 edge, then publishes the
+episode's start. The reader was hardened for that window earlier (Codex P1):
+`Stats` refuses a start that predates the last delivery rather than clamping it
+up, because clamping dated a brand-new episode from an old delivery and paged
+immediately.
+
+The writer half was still open, in the opposite order:
+
+1. A takes the edge at `t0` and is descheduled before publishing.
+2. A delivery at `t1` ENDS A's episode.
+3. A new outage at `t2` takes its own edge and dates itself correctly.
+4. A resumes and publishes `t0` over it.
+
+`Stats` then refuses `t0` (`fs >= ls` fails), so the node reports
+`ConsecutiveFailures > 0` with **no datable start**. And the re-dating branch
+that exists for exactly this hazard only runs on a SUBSEQUENT drop — so on a
+node that goes quiet, nothing ever recovers the date. `FailingFor` stays 0, the
+five-minute window can never elapse, and **that outage is never paged.**
+
+Reproduced deterministically, no goroutine racing: every step is a production
+operation, and A's deschedule is reproduced by splitting its two halves, which
+is what a deschedule is. Measured against the pre-fix tree:
+`ConsecutiveFailures=1 FailingSince.IsZero()=true`.
+
+> **Hardening the reader of a window does not close it. The reader can refuse
+> bad data; it cannot restore good data the writer destroyed.**
+
+The fix publishes the start only while no delivery has intervened since the
+edge was claimed. The witness is the last-success stamp, captured BEFORE the
+window and passed into the second half — an episode is delimited by
+deliveries, so a delivery is exactly the event that invalidates an unpublished
+start. Keyed on the delivery rather than on a timestamp comparison, so it stays
+correct if the wall clock steps backwards (see the residual below, which it
+therefore does not depend on).
+
+Refusing to publish is exactly right rather than merely safe: the reader would
+reject the value anyway, and the episode that IS current has already been dated
+by whoever took its own edge.
+
+#### Round 20 — two gates I nearly got wrong, and one wall I did not write
+
+**The first guard was a tautology.** It read the witness and compared it to
+another load of the same field, both on the far side of the window — so it was
+`x == x`. The fix is not the comparison but WHERE the witness comes from: before
+the window, passed in. That is why the two halves are now named methods rather
+than one function with a comment about a race.
+
+**The first reproduction could not see the fix.** It simulated A's resumption
+with a direct `failSinceNano.Store`, bypassing the guarded path entirely, so
+the guard could not possibly affect it — it passed the broken code and the
+fixed code alike. Extracting the halves fixed the gate and the production
+clarity in one move.
+
+**The control I nearly cited does not cover this.** The reader-side controls in
+`TestStats_UnpublishedEpisodeStartIsNotDatedFromTheLastDelivery` store
+`failSinceNano` directly, so they never reach `noteDrop`. Measured rather than
+assumed: with publication removed entirely, every reader-side gate stayed green
+and only the new gate went red. Two writer-side controls were therefore
+written — an unraced edge must date its episode, and a drop after a delivery
+must date the NEW one, which catches a witness keyed so broadly it never
+matches.
+
+**The increment comes before the witness read, and that ordering is reasoned,
+not gated.** Reading the witness first opens the mirror-image hole: a delivery
+landing between that read and the increment leaves a legitimately NEW episode
+holding a pre-delivery witness, so its publication is refused and the episode
+is undatable — the same silent outage, from the other side. Found on an
+adversarial re-read of my own fix, after I had explicitly reasoned that the
+order inside `claimEpisodeStart` "does not matter"; it does.
+
+What is NOT claimed is a gate for it. The window is two adjacent atomic
+operations, so a single-threaded test cannot interleave a delivery into it —
+measured: with the order reversed, every gate here still passes. A test
+asserting otherwise was written, found vacuous by that mutation, and
+**deleted** rather than kept with a docstring claiming more than it verifies.
+Gating it would mean splitting the claim itself into two publishable halves,
+which is a seam nobody needs for a correctness argument this short. The
+ordering is stated at the call site with its reason.
+
+**And no structural wall, deliberately.** Round 19's fix was a PLACEMENT, which
+its behavioural gate provably could not pin, so it needed a wall. This fix is a
+VALUE the interleaving reads, so the gate catches every way of getting it
+wrong — verified by mutation: ignoring the witness, never publishing, a witness
+that never matches, and loading the witness inside the second half each turn it
+red.
+
+> **Add the wall when the property is a placement the gate cannot reach, not as
+> a reflex. Run the mutation that would need it first.**
+
+#### Round 20 — recorded residual: this plane dates its episodes on the wall clock
+
+Found while reconciling main, not reported by a reviewer, and **recorded rather
+than fixed** — the owner's call, because the fix is a round of its own.
+
+`internal/syslog` holds its stamps as bare `int64` nanos and rebuilds them with
+`time.Unix(0, n)`, which carries no monotonic reading. Every interval the health
+plane measures from them — `Age` from `LastSuccess`, `FailingFor` from
+`FailingSince` — is therefore a WALL-CLOCK interval, which is exactly the class
+§47 (`CHAOS-83`) and §48 (`CHAOS-84`) established repo-wide. Neither sweep
+claims this site: neither mentions `internal/syslog` or `syslog_health`
+anywhere, and §48 explicitly left the ids held by open branches — 81 among
+them — out of scope.
+
+Measured, driving both clock seams:
+
+```
+after 20m outage:           Degraded=true  Age=19m59s FailingFor=19m59s CF=3
+after a 50m backward step:  Degraded=false Age=0s     FailingFor=0s     CF=3
+```
+
+A backward step clears a genuine degraded verdict while `ConsecutiveFailures`
+still reports 3 — the feed reads healthy while events are being lost. If the
+step lands before the window elapses, no page fires at all until the clock
+catches up. The triggers are ordinary: an NTP correction after a wrong RTC, a
+resumed hypervisor snapshot, an operator fixing the date. The plane already
+clamps a negative age to zero with a comment calling a page on a clock
+correction "noise", which is a deliberate trade-off — made before `CHAOS-83`
+established the repo rule that a bound of this kind must not be wall-clock at
+all.
+
+Why it is not fixed here, in two parts:
+
+- **The shape is settled but not small.** `monotime.go` (added by §47) already
+  provides the pattern, so nothing has to be invented. But `LastSuccess` is
+  ALSO exported as a unix timestamp — `culvert_syslog_last_success_timestamp_seconds`
+  and `lastSuccessUnix` on `GET /api/syslog` — where the wall clock is the
+  correct answer. So the fix is not "replace the stamps": it is a SECOND,
+  monotonic stamp used only for the elapsed comparisons, plus a wall forbidding
+  elapsed measurement off the display one, or the next change quietly
+  reintroduces this. `monotime.go` is `package main`, so the engine needs its
+  own equivalent.
+- **A plane-side mirror would be the wrong fix.** The plane reads episode state
+  live from the writer by design (round 12: one reader, no second source of
+  truth), so stamping the plane's own monotonic view would be the "two answers
+  to one question" shape this sweep has rejected repeatedly. The stamp belongs
+  in the engine.
+
+Round 20's own fix is keyed on a delivery rather than on a timestamp
+comparison, so it does not depend on this being fixed first.
+
+---
+
+## 57. CHAOS-93 — The retry plane: does it wait, can it be interrupted, does the work survive?
+
+**Scope.** Every loop in the tree that re-attempts a failed operation, asked the
+three questions the SIMULATE list puts next to each other — *broken retries*,
+*broken backoff*, *SIGTERM*, *unexpected restart*. The subject is the retry
+*mechanism*, not a subsystem, so the sweep crosses three owners: release
+delivery, the intelligence feeds and observability.
+
+**Origin.** The three retry/cancellation rows the
+[2026-10-18 sweep](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-18.md)
+verified and left open as its suggested improvements 4–6, each deferred because
+it needed "its own regression test and a judgment call about deployment-visible
+timing". This sweep is that follow-up. Asking the third question (*does the work
+survive the attempt?*) of the alert queue then turned up a defect that was not
+in the inherited scope and outranks all three.
+
+Findings, measurements, risk matrix and gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-26.md).
+
+### 57.1 The finding the inherited scope did not contain
+
+**`processRetryQueue` took the work out of the durability mechanism in order to
+do the work.** It moved EVERY due entry out of `retryQueue`, persisted the
+truncated queue, and only then delivered them one at a time at up to 5s each.
+For the length of that pass the not-yet-attempted entries existed solely in a
+local slice — absent from memory's queue and absent from the file — so an
+ordinary restart discarded all of them: `SIGTERM` on a config reload, the
+lifecycle ctx cancelled at shutdown order 40 while the pass runs on (nothing
+joins the goroutine, and the late phase has a 30s budget), OOM, a node reboot.
+
+And it discarded them in SILENCE. The plane has two counters built precisely so
+an admin can see alerting degradation on the delivery-history API —
+`retryExhaustedTotal` and `retryDroppedTotal` — and neither covers this path; no
+delivery is recorded and nothing is logged. The queue depth simply drops, which
+reads as *drained* rather than *discarded*. Against a blackholing webhook the
+window is `retryQueueMax` × `deliveryTimeout` = 500 × 5s ≈ **42 minutes** and the
+loss up to **499** alerts. The gate measures it: `persisted 0 of 10 entries`.
+
+This is the **ST-8** shape (§13) relocated into the alert queue, and worse in one
+respect: losing alerts quietly is the worst available failure for the plane whose
+whole job is to report that something *else* broke. The register already applies
+that reasoning to §13 and to the SIEM-feed row CHAOS-81 holds (a feed must report
+whether it is DELIVERING, not whether it once connected).
+
+The fix is the shape the tree already uses one directory over:
+`support_upload_queue.go` holds an `uploading` state IN the durable queue rather
+than lifting the entry out of it. An entry now stays queued across its own
+attempt; a claim re-arms `NextRetry` to `now+retryLease` (60s) and persists that,
+so a crash mid-attempt leaves the entry queued and it is retried after the lease
+with its attempt count intact — an attempt that did not complete is not charged.
+
+### 57.2 The three inherited rows
+
+- **RT-3, `applyWithRetry` retried with zero delay** (`release_dispatch_exec.go`).
+  Three attempts, no sleep, no backoff, no jitter. The budget exists for exactly
+  one fault — a maintenance agent that is briefly unreachable, nearly always
+  because it is restarting — and that fault refuses the connection in
+  microseconds, so the whole budget burned in well under a millisecond and the
+  dispatch landed `TerminalFailedNeedsAttn`, needing a manual re-dispatch, for an
+  agent that was serving again a second later. Now bounded exponential (2s, 4s)
+  through an interruptible wait. `WaitOp`, 170 lines down the same file, already
+  had this shape.
+- **RT-4, both feed rounds discarded the scheduler's context**
+  (`internal/threatfeed`, `internal/feedsync`). `feedsched.Config.Run` is
+  documented "It must respect ctx" and the package promises "prompt
+  cancellation"; both feeds declared `Run: func(context.Context) bool` and
+  dropped the parameter, fetching on `context.Background()`. A stalled origin
+  therefore held the round for up to 60s past `SIGTERM`, and the UT1 round went
+  on to a 50+ MB `BulkWrite` into a BadgerDB that shutdown order 120 is closing.
+  The propagation gate shows the pre-fix round dialling the real third-party
+  origins under an already-cancelled context.
+- **RT-2, the alert retry pass was unbounded and uncancellable.** It took no
+  context and each delivery built its own from `context.Background()`, so the
+  loop's `ctx.Done()` select was only reached BETWEEN passes. Now ctx-threaded
+  and bounded by `retryPassBudget`; the bound caps a pass's LENGTH, not recovery,
+  because the next tick resumes from the durable queue.
+
+### 57.2a Review follow-up — the shutdown that still charged an attempt
+
+Codex rejected the first version of the RT-1 fix on PR #1734 and was right. The
+claim/resolve split made a CRASH mid-attempt safe, but a clean CANCELLATION
+still charged the interrupted attempt: once RT-2 gave the delivery the lifecycle
+context, a cancelled POST returned exactly the `false` a badly-answering webhook
+returns, and `resolveRetry` could not tell them apart — so a shutdown during an
+entry's LAST attempt removed it and counted `retryExhaustedTotal`, "exhausted
+after 3 attempts", with the third attempt never having reached the webhook.
+The RT-1 loss shape again, one entry wide, and a contradiction of this sweep's
+own claim that an attempt which did not complete is not charged.
+
+The two fixes interact, which is why neither row found it alone. Fixed by
+distinguishing interrupted from failed, with the check AFTER the attempt (which
+also closes the cancellation landing between the pass's ctx check and the
+request). Gate: `TestProcessRetryQueue_CancelledDeliveryDoesNotConsumeAnAttempt`,
+verified to fail against the first version with `0 entries persisted, want 1`.
+See §9a of [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-26.md).
+
+### 57.3 What the sweep did NOT change, and why
+
+**Neither new backoff is jittered.** `feedsched` and `saas_feed_scheduler.go`
+jitter because their origins are SHARED — a fleet in lockstep is a thundering
+herd against a third-party provider. Neither new site has a shared origin: a
+`DispatchExecutor` is single-flight against ONE agent, and the alert retry queue
+is per-node and serial. That is the reasoning `uploadRetryBackoff` already
+records for the same decision, and determinism keeps both schedules exactly
+testable. A generic "add jitter to every backoff" review note would be wrong
+here.
+
+**The feed clients still dial without `ssrf.SafeDialContext`.** Left exactly as
+the 2026-10-18 sweep left it and for its reason: an on-prem or air-gapped feed
+mirror on an RFC1918 address is a normal enterprise topology the guard would
+reject, and whether these two feeds are deliberately exempt is recorded at
+neither site. Still an owner decision. This sweep edited the same two functions
+and deliberately did not resolve it — threading a context is not the occasion to
+move a destination-trust boundary.
+
+**Nothing joins the alert retry goroutine at shutdown.** The pass is cancellable
+now, so it stops promptly, but the registry does not WAIT for it. Adding a join
+is a shutdown-ownership decision for that owner, and the durability fix makes it
+unnecessary for correctness: whatever the pass had not finished is in the file.
+
+**Retries here remain unbounded in COUNT where they were** (the feeds) **and
+bounded where they were** (`retryMax = 3`, `applyRetries = 2`). The sweep's
+subject is rate, interruptibility and durability, not the budgets — and
+`feedsched`'s own doc records why its unbounded-but-rate-bounded retry is
+correct: "avoid infinite retries" forbids a silent hot loop, not a rate-bounded
+loop whose state an operator can read.
