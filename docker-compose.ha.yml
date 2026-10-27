@@ -49,6 +49,11 @@ services:
     build:
       context: ./appliance/clamav
     container_name: culvert-clamav
+    # No raw/packet sockets: nothing here needs them, and CAP_NET_RAW is the
+    # prerequisite of the open AF_PACKET TX_RING kernel finding
+    # (CVE-2026-98503; #1528 M2). Docker's default set otherwise unchanged.
+    cap_drop:
+      - NET_RAW
     restart: unless-stopped
     volumes:
       - clamav-db:/var/lib/clamav
@@ -66,6 +71,11 @@ services:
   proxy:
     build: .
     container_name: culvert
+    # No raw/packet sockets: nothing here needs them, and CAP_NET_RAW is the
+    # prerequisite of the open AF_PACKET TX_RING kernel finding
+    # (CVE-2026-98503; #1528 M2). Docker's default set otherwise unchanged.
+    cap_drop:
+      - NET_RAW
     restart: unless-stopped
     depends_on:
       - clamav
@@ -168,6 +178,11 @@ services:
   dp:
     build: .
     container_name: culvert-dp
+    # No raw/packet sockets: nothing here needs them, and CAP_NET_RAW is the
+    # prerequisite of the open AF_PACKET TX_RING kernel finding
+    # (CVE-2026-98503; #1528 M2). Docker's default set otherwise unchanged.
+    cap_drop:
+      - NET_RAW
     restart: unless-stopped
     profiles: ["dp"]
     depends_on:

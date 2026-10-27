@@ -279,6 +279,14 @@ systemctl mask e2scrub_all.timer >/dev/null 2>&1 || true
 # vmwgfx ioctl CVEs (see the rule).
 install -m 0644 "$APPL/provision/72-culvert-drm.rules" /etc/udev/rules.d/72-culvert-drm.rules
 
+# Kernel runtime settings that close unused attack surface (see the file):
+# io_uring refused for every process. The value is checked as installed, so a
+# drift between the file and the build fails here; the running value is
+# checked on the booted guest by the lab qualification.
+install -m 0644 "$APPL/provision/sysctl-culvert-hardening.conf" /etc/sysctl.d/99-culvert-hardening.conf
+grep -qxE 'kernel\.io_uring_disabled[[:space:]]*=[[:space:]]*2' /etc/sysctl.d/99-culvert-hardening.conf \
+  || { echo "99-culvert-hardening.conf must set kernel.io_uring_disabled = 2" >&2; exit 1; }
+
 # Kernel modules the appliance never uses, made unloadable (see the file).
 install -m 0644 "$APPL/provision/modprobe-culvert-unused.conf" /etc/modprobe.d/culvert-unused.conf
 # Every module the file denies is checked (the list is read from the file, so
