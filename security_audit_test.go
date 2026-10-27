@@ -23,6 +23,13 @@ import (
 // ── uiAuthMiddleware Tests ─────────────────────────────────────────────────
 
 func TestUIAuthMiddleware_PublicPaths(t *testing.T) {
+	// Authentication must be CONFIGURED for this assertion to mean anything:
+	// while !cfg.IsConfigured() uiAuthMiddleware grants RoleAdmin to every
+	// request, so every path answers 200 and the test passes vacuously. That
+	// is how a stale "/api/auth/totp/setup" entry here survived until
+	// SEC-PUBLICPATH-1 removed the prefix it pinned.
+	d0EnableLocalAuth(t)
+
 	handler := uiAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -33,7 +40,6 @@ func TestUIAuthMiddleware_PublicPaths(t *testing.T) {
 		"/api/auth/login",
 		"/api/auth/logout",
 		"/api/auth/status",
-		"/api/auth/totp/setup",
 		"/auth/callback",
 		"/proxy.pac",
 		"/pac/default.pac",

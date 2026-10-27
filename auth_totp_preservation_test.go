@@ -497,40 +497,17 @@ func compositeLitFieldNames(lit *ast.CompositeLit) map[string]bool {
 	return set
 }
 
-// TestWall_TOTPPublicPrefixIsInert guards the OTHER half of the TOTP
-// subsystem's integrity: its reachability.
-//
-// uiAuthMiddleware's public allowlist carries a
-// strings.HasPrefix(path, "/api/auth/totp") entry (ui_middleware.go), but no
-// route is registered under it — the prefix is inert, and TOTP enrolment today
-// arrives only out of band (a restored roster, a provisioned ui_users.json).
-// That makes it a latent trap rather than a live defect: the day someone wires
-// a self-service enrolment or de-enrolment endpoint there, it is UNAUTHENTICATED
-// by default, and because such an endpoint is naturally viewer-level neither
-// the C2 metadata gate (uiRole defaults to RoleViewer with no session) nor the
-// handler's own requireRole(RoleViewer) would stop an anonymous caller from
-// enrolling — or removing — a second factor.
-//
-// So the prefix must stay inert until someone decides otherwise ON PURPOSE.
-// This test fails the moment a route lands under it, and the fix is a
-// deliberate one: either gate the new route (drop the prefix from
-// isPublicUIAuthPath) or record here why it must be public.
-func TestWall_TOTPPublicPrefixIsInert(t *testing.T) {
-	const prefix = "/api/auth/totp"
-	if !isPublicUIAuthPath(prefix + "/enroll") {
-		t.Fatalf("wall is vacuous: %q is no longer on the uiAuthMiddleware public allowlist "+
-			"— if the entry was removed deliberately, remove this test with it", prefix)
-	}
-	for _, rt := range uiRoutes {
-		if strings.HasPrefix(rt.Path, prefix) {
-			t.Errorf("route %q (%s) is served UNAUTHENTICATED: it matches the inert %q public "+
-				"prefix in isPublicUIAuthPath. A TOTP enrolment/de-enrolment endpoint reachable "+
-				"without a session lets an anonymous caller add or remove a second factor — gate "+
-				"it by dropping the prefix from the allowlist, or justify it here (SEC-TOTP-1).",
-				rt.Path, rt.Handler, prefix)
-		}
-	}
-}
+// TestWall_TOTPPublicPrefixIsInert stood here and was REMOVED WITH THE ENTRY
+// IT GUARDED (SEC-PUBLICPATH-1, RISK-033), as its own vacuity check
+// instructed ("if the entry was removed deliberately, remove this test with
+// it"). It watched the inert `/api/auth/totp` prefix in isPublicUIAuthPath and
+// failed if a route ever landed under it. The prefix is gone, so a future
+// /api/auth/totp/* route is gated by default rather than public by default.
+// The allowlist is now walled generally instead of per prefix:
+// TestPublicAllowlist_EveryEntryMatchesARegisteredRoute
+// (ui_public_allowlist_test.go) fails for ANY entry that matches no registered
+// route, and TestPublicAllowlist_MirrorMatchesTheFunction names the former
+// TOTP paths as never-public.
 
 // TestWall_PublicAllowlistRoutesAreDeclaredPublic pins the forward direction of
 // allowlist/metadata agreement: anything uiAuthMiddleware serves without
