@@ -1,0 +1,243 @@
+package main
+
+import (
+	"sync/atomic"
+	"time"
+)
+
+// ---------------------------------------------------------------------------
+// CHAOS-88 — a session is an identity only while the provider that minted it
+// is still an identity source this appliance honours.
+//
+// A `ps_session` cookie is minted in exactly two places, both interactive IdP
+// callbacks (`authOIDCCallback`, `authSAMLCallback` → `setSessionCookie`), and
+// it carries the asserting profile's id in `pvd` plus the GROUPS that provider
+// asserted. `resolveRequestAuth`'s arm 1 read all three straight out of the
+// cookie and consulted NOTHING about the provider, so deleting or disabling an
+// IdP — the one lever an operator has for "cut this federation off" — revoked
+// nothing already minted: every browser holding such a cookie kept its subject
+// AND its groups for the rest of the session TTL (default 8 h, max 7 d), and
+// those groups go straight into `policyStore.Evaluate`, so group-scoped allow
+// rules kept matching for a federation the operator had just removed.
+//
+// The asymmetry is INSIDE ONE FUNCTION: arm 2 (Proxy-Authorization Basic)
+// iterates `idpRegistry.EnabledCredentialProviders()` on every request, so a
+// deleted provider stops authenticating credentials immediately — and
+// `TestResolveRequestAuthRejectsEnabledOIDCWithoutLiveBackend` already pins
+// that posture. Arm 1 consulted the live set never. One revocation action, two
+// postures, decided only by which arm the client happens to be on.
+//
+// THE FIX IS DERIVED STATE, NOT A REVOCATION EVENT, and that choice is the
+// load-bearing part. A `RevocationList.RevokeProvider` entry (the obvious
+// shape, mirroring the existing `RevokeUser`) would have to be persisted, be
+// gossiped, and be emitted by every writer of the registry — and the admin
+// DELETE handler is only ONE of those writers. `IdPRegistry.ReplaceAll` is
+// also reached from config import, config-version rollback and the CP→DP
+// `syncSnapshotIdPProfiles` path, none of which run that handler. Probing the
+// stored, enabled profile set (`IdPRegistry.ProfileEnabled` — NOT the compiled
+// live set, see sessionProviderLive) instead is correct for all of them at
+// once, needs no persistence
+// (the registry file already is), needs no gossip (`ConfigSnapshot.IdPProfiles`
+// already carries it fleet-wide), cannot be evicted, and cannot go stale:
+// freshness is EVALUATED on every request rather than latched at the moment of
+// an admin action — the `ca_health.go` / CHAOS-61 discipline. A second
+// mechanism answering the same question is the defect this repo keeps
+// recording, so `RevokeProvider` is deliberately NOT added.
+//
+// `RevokeUser` (register row AU-19) is a DIFFERENT dimension and is NOT closed
+// here: the `users` map is still neither persisted nor gossiped while the
+// sibling `tokens` map in the same struct is both. It is bounded for the admin
+// UI by `uiAuthMiddleware`'s roster backstop and is unreachable from the proxy
+// cookie (which no local login ever mints), so it is recorded, not fixed.
+// ---------------------------------------------------------------------------
+
+// sessionProviderLocal is the `pvd` value `setUISessionCookie` stamps on an
+// admin-UI session. It names no registry profile; the admin UI owns its own
+// backstop (`uiAuthMiddleware`'s `cfg.UIUserExists` check).
+const sessionProviderLocal = "local"
+
+// sessionProviderLive reports whether the provider named by a VERIFIED session
+// cookie is still a live identity source.
+//
+// It admits exactly three shapes, and each exclusion is the reason the
+// predicate can be fail-closed without being an availability regression:
+//
+//   - "" — EXACTLY the empty string, a cookie minted before the `pvd` field
+//     existed. Refusing these would log out every pre-upgrade session on the
+//     deploy that adds this check, for no security gain: such a cookie names
+//     no federation, so there is no federation to have been cut off.
+//
+//     THE EMPTINESS TEST IS ON THE RAW STRING AND MUST STAY THERE. Trimming
+//     first makes a whitespace-only `pvd` indistinguishable from unset — the
+//     exact mistake `initSessionSecret` (session.go) documents at length and
+//     deliberately avoids — and here it is also a DIVERGENCE, which is the
+//     worse half: `identityAuthSource` tests `id.Provider != ""` on the raw
+//     value, so a `pvd` of "  " would be treated as "no federation" by this
+//     predicate while still being stamped into `authenticatedSource` and
+//     carried into the policy decision as a federation name. Two layers
+//     disagreeing about which values mean "no provider" is the defect; the
+//     rule is that this predicate asks the SAME question `identityAuthSource`
+//     asks, never a re-derived one, and `TestChaos88_ProviderEmptinessAgreesWithIdentityAuthSource`
+//     pins the agreement from both sides. Caught by this sweep's own
+//     `ControlPrefixAloneIsNotAProvider` gate, which is why that control
+//     enumerates whitespace.
+//
+//   - "local" — the admin-UI cookie. Not a registry id.
+//
+//   - a profile id that is currently STORED AND ENABLED
+//     (`IdPRegistry.ProfileEnabled`), whether or not it has a live compiled
+//     provider. Delete, disable and removal by `ReplaceAll` (config import,
+//     rollback, the CP→DP snapshot) change that answer, and in all three the
+//     operator's intent is that this federation authenticates nobody.
+//
+//     It is deliberately NOT `LiveProvider` (enabled AND compiled). A profile
+//     also drops out of `r.live` when its metadata/discovery fetch fails at
+//     compile time, or when its cached document is retired at the CHAOS-87
+//     staleness ceiling — and neither is a revocation. Keyed on `r.live`,
+//     restarting a node while an IdP is unreachable logged out every session
+//     of that IdP and sent users to an IdP that was down, contradicting the
+//     registry's own rule that a compile failure must not silently flip the
+//     operator's configuration (owner decision on #1485/#1564: an unreachable
+//     IdP is degraded availability, not revocation).
+//
+// The profile id is matched EXACTLY, never through `stripIdPPrefix`. The
+// interactive providers stamp the BARE profile id into `Identity.Provider`
+// (`auth_oidc_flow.go` `ExchangeCode`, `auth_saml.go` `extractSAMLIdentity`),
+// and the minter wall below pins that every legitimately minted cookie carries
+// that id or "local", so a `pvd` is always a literal profile id. An earlier
+// shape also probed the prefixed `Name()` spelling (`saml:<id>`) by stripping
+// it, on the theory that probing both forms could not widen anything. It
+// could: profile ids are free-form, so `corp` and `saml:corp` can both exist,
+// and after `saml:corp` was deleted or disabled its cookies failed the exact
+// probe and then passed the stripped one through the UNRELATED enabled `corp`,
+// keeping their identity and groups across the revocation (AU-70, Codex). A
+// stripped spelling names a different profile, not the same one.
+//
+// issuedAt is the cookie's mint second (`Session.Iat`, 0 when the cookie
+// predates the field), compared with the profile's SessionsNotBefore cutoff
+// (AU-65). Without it the predicate had no memory that a cut ever happened:
+// disable a compromised IdP, re-enable it under the same id inside the TTL,
+// and every cookie refused throughout the disabled window authenticated again
+// with the subject and groups asserted BEFORE the incident. The cutoff is the
+// smallest durable record that closes that: one field on a profile that is
+// already persisted and already carried fleet-wide, still read per request.
+// The "" and "local" exemptions are untouched — neither names a profile, so
+// neither has a cutoff to compare against.
+func sessionProviderLive(provider string, issuedAt int64) bool {
+	// Raw, untrimmed — see the emptiness note above. A whitespace-only value
+	// is a provider name that resolves to nothing, not an absent field.
+	if provider == "" || provider == sessionProviderLocal {
+		return true
+	}
+	return idpRegistry.ProfileAdmitsSession(provider, issuedAt)
+}
+
+// stampSessionsNotBefore sets next.SessionsNotBefore, the AU-65 session cutoff,
+// from the STORED profile prev (nil when next's id is not registered). Called
+// by Upsert under the registry lock, so the create-vs-edit decision and the
+// stamp read the same state.
+//
+//   - prev == nil (a create, INCLUDING a re-create under an id that was
+//     deleted): now. A cookie that names this id was minted by a previous
+//     incarnation, or by nothing at all, and must not ride the new one.
+//   - prev disabled, next enabled (a re-enable): now. Every cookie minted
+//     before the disable was refused throughout it and stays refused.
+//   - anything else: prev's value, whatever the request carried. The field is
+//     server-owned; letting the body lower it would make "set it to 0" a
+//     one-request undo of a revocation, and a GET-then-PUT round trip echoes
+//     it back on every edit.
+//
+// Deliberately NOT moved by: an edit of an enabled profile, a disable (which
+// already refuses every cookie), a compile failure or a staleness retirement
+// (neither runs Upsert, and an unreachable IdP is degraded availability, not
+// revocation, §50.6c), or ReplaceAll (the CP→DP snapshot, which must carry the
+// Control Plane's stamp verbatim rather than restamp each node's clock, and
+// whose first apply on a fresh node would otherwise log every session out).
+//
+// The stamp is the WALL clock, at one-second granularity, because it is
+// compared with `Session.Iat` minted from the wall clock on whichever node
+// served the login. A Control Plane clock that was ahead when it stamped, or a
+// node whose clock is behind, refuses fresh logins until the minting clock
+// passes the cutoff; disabling and re-enabling the profile again restamps it.
+func stampSessionsNotBefore(prev, next *IdPProfile) {
+	switch {
+	case prev == nil, !prev.Enabled && next.Enabled:
+		next.SessionsNotBefore = time.Now().Unix()
+	default:
+		next.SessionsNotBefore = prev.SessionsNotBefore
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Visibility. A refusal is otherwise indistinguishable from a user who simply
+// has no cookie: the request falls through to the no-credential dispatch and
+// is challenged exactly as an anonymous one would be, which is the point of
+// the fix and also the reason it needs its own counter.
+// ---------------------------------------------------------------------------
+
+var (
+	// sessionProviderRevokedTotal counts REQUESTS whose verified session named
+	// a provider that is no longer live — not distinct sessions. A browser
+	// keeps re-sending a dead cookie until it is re-challenged and logs in
+	// again, so the rate is set by traffic; the name says "requests" in the
+	// metric help and the runbook for exactly that reason.
+	//
+	// Emitted UNCONDITIONALLY, unlike the gauges elsewhere in this tree: there
+	// is no configuration to gate it on, so a flat zero means "no request has
+	// carried a session from a removed provider" and can never mean "the
+	// feature is off" (the inverse of the socks5/cluster_ca emission rule, for
+	// the same one-reading-per-series reason).
+	sessionProviderRevokedTotal atomic.Int64
+
+	// sessionProviderLogGate is the CAS-claimed rate gate for the log line.
+	// Claimed, not read-compare-store: concurrent requests on a flood would
+	// all observe the same expired stamp and all emit, which would make a
+	// mitigation for a log-volume problem into one (CHAOS-70 round 1 P2). The
+	// cumulative count rides every line, so the magnitude is never suppressed.
+	// The stamp is MONOTONIC (monoNanos, CHAOS-83): process-local, never
+	// persisted, so a wall-clock step in either direction cannot latch it.
+	sessionProviderLogGate atomic.Int64
+)
+
+// sessionProviderLogInterval bounds the refusal log to one line per minute.
+const sessionProviderLogInterval = time.Minute
+
+// sessionProviderRevokedCount returns the cumulative refusal count for the
+// admin/metrics surfaces.
+func sessionProviderRevokedCount() int64 { return sessionProviderRevokedTotal.Load() }
+
+// noteSessionProviderRevoked charges the refusal and, at most once per
+// interval, names it in the process log.
+//
+// The ACCOUNTING LANDS FIRST, before anything observable: a reader — or a gate
+// — acting on the refusal must never be able to observe the counter unmoved
+// (CHAOS-69 round 3, where exactly one of four entry points had the accounting
+// and the reply in the wrong order because the sequence was hand-written
+// inline instead of going through the shared helper).
+func noteSessionProviderRevoked(provider, subject, clientIP string) {
+	total := sessionProviderRevokedTotal.Add(1)
+
+	// CHAOS-83: measured on the MONOTONIC clock. On the wall clock a backwards
+	// step left the stamp in the future and needed its own re-arm branch; a
+	// monotonic elapsed time is correct across a step in either direction, so
+	// neither a latched gate nor a negative-age branch is possible.
+	now := monoNanos()
+	last := sessionProviderLogGate.Load()
+	if last != 0 && time.Duration(now-last) < sessionProviderLogInterval {
+		return
+	}
+	if !sessionProviderLogGate.CompareAndSwap(last, now) {
+		return // another request claimed this window
+	}
+	logger.Printf("AUTH_SESSION_PROVIDER_REVOKED client=%s provider=%q identity=%q total=%d: "+
+		"the session was signed by this appliance but its identity provider is no longer enabled; "+
+		"the request is treated as unauthenticated and re-challenged",
+		sanitizeLog(clientIP), sanitizeLog(provider), sanitizeLog(subject), total)
+}
+
+// resetSessionProviderBoundsForTest clears the process-global counter and rate
+// gate. A leaked gate suppresses the line for every later test in the package.
+func resetSessionProviderBoundsForTest() {
+	sessionProviderRevokedTotal.Store(0)
+	sessionProviderLogGate.Store(0)
+}

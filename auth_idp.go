@@ -73,6 +73,24 @@ type IdPProfile struct {
 	// the authoritative source.
 	KnownGroups []string `json:"knownGroups,omitempty"`
 
+	// SessionsNotBefore is the Unix second before which a session cookie
+	// naming this profile is not an identity (AU-65, §50.6f). Zero means no
+	// cutoff, which is what every profile stored before the field existed
+	// carries, so the deploy that adds it logs nobody out.
+	//
+	// SERVER-OWNED. Upsert derives it from the stored profile and ignores
+	// whatever the request body carried (stampSessionsNotBefore): it moves to
+	// "now" when a profile is CREATED (including re-created under an id that
+	// was deleted) and when a stored profile goes from disabled to enabled,
+	// and it is kept unchanged by every other write. It is durable because the
+	// registry file is, and it reaches every node through
+	// ConfigSnapshot.IdPProfiles, which ReplaceAll stores verbatim — a Data
+	// Plane never stamps its own clock. It is never moved by reachability: a
+	// compile failure or a CHAOS-87 staleness retirement does not run Upsert,
+	// so an unreachable IdP stays degraded availability, not revocation
+	// (§50.6c).
+	SessionsNotBefore int64 `json:"sessionsNotBefore,omitempty"`
+
 	// Only one of OIDC/SAML/LDAP is populated depending on Type.
 	OIDC *OIDCProfileConfig `json:"oidc,omitempty"`
 	SAML *SAMLProfileConfig `json:"saml,omitempty"`
@@ -365,6 +383,10 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		}
 	}
 
+	// AU-65: the session cutoff is derived from the STORED profile, under the
+	// same lock that decides create-vs-edit, never taken from the request.
+	stampSessionsNotBefore(liveProfile, p)
+
 	var compiled IdentityProvider
 	if p.Enabled {
 		prov, err := compileIdPProfile(p)
@@ -640,8 +662,11 @@ func compileIdPProfile(p *IdPProfile) (IdentityProvider, error) {
 // and revalidation loops. gen is the cache retirement epoch captured at that
 // selection, so a deletion committed between selecting the profile and its
 // document fetch still fences the fetch's cache write (IDP-19, Codex round 22).
-// nil captures the epoch immediately before the fetch, which is exact for every
-// caller that compiles under r.mu or for a profile it is about to commit.
+// nil captures the epoch immediately before the fetch, which is exact for a
+// caller that compiles under r.mu (Upsert, boot). Every caller that compiles a
+// QUEUE of candidates outside r.mu — the recovery and revalidation loops, and
+// ReplaceAll (IDP-20) — must capture each candidate's epoch before the queue
+// starts and pass it in.
 func compileIdPProfileAt(p *IdPProfile, gen *idpmeta.Generation) (IdentityProvider, error) {
 	switch p.Type {
 	case IdPTypeOIDC:
@@ -811,6 +836,27 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		discardAllCandidateEpisodesLocked()
 	}
 
+	// The snapshot's candidates compile ONE AFTER ANOTHER outside r.mu, so a
+	// candidate can wait behind another's slow fetch, and an admin Delete can
+	// commit during that wait. Capturing the cache retirement epoch only when
+	// the waiting candidate's own fetch began accepted its write after the
+	// Delete's Forget. An abort later in the loop (a candidate failing
+	// validation or compile, or persistence failing) then left the DELETED
+	// profile's document in the cache, and recreating it during an outage
+	// compiled from that document (IDP-20, Codex round 23: the same rule as
+	// IDP-19, at the third serial compile queue). Every candidate's epoch is
+	// therefore taken here, before the queue starts, under the read lock that
+	// orders it against Delete's Forget, exactly as the recovery loops take
+	// theirs at selection.
+	cacheGens := make(map[string]idpmeta.Generation, len(nextProfiles))
+	r.mu.RLock()
+	for _, p := range nextProfiles {
+		if p != nil {
+			cacheGens[p.ID] = idpMetadataStore().Generation(p.ID)
+		}
+	}
+	r.mu.RUnlock()
+
 	for _, p := range nextProfiles {
 		normalizeIdPProfileWriteInput(p)
 		if err := validateIdPProfile(p); err != nil {
@@ -820,7 +866,8 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		if !p.Enabled {
 			continue
 		}
-		prov, err := compileIdPProfile(p)
+		gen := cacheGens[p.ID]
+		prov, err := compileIdPProfileAt(p, &gen)
 		if err != nil {
 			discardAllCandidateEpisodes()
 			return fmt.Errorf("idp %q compile error: %w", p.ID, err)
@@ -1047,6 +1094,9 @@ func publicIdPProfile(p *IdPProfile) *IdPProfile {
 		Enabled:      p.Enabled,
 		Priority:     p.Priority,
 		KnownGroups:  append([]string(nil), p.KnownGroups...),
+		// Not a secret: read-only evidence of the last cut (AU-65), and the
+		// only way an operator or the audit diff can see that one happened.
+		SessionsNotBefore: p.SessionsNotBefore,
 	}
 	if p.OIDC != nil {
 		cp.OIDC = &OIDCProfileConfig{
@@ -1155,6 +1205,58 @@ func (r *IdPRegistry) LiveProvider(id string) (IdentityProvider, bool) {
 	return p, ok
 }
 
+// ProfileEnabled reports whether a profile with this id is STORED and ENABLED,
+// whether or not it currently has a live compiled provider. Allocation-free:
+// it runs on the proxy request path (sessionProviderLive).
+//
+// It deliberately differs from LiveProvider. A profile drops out of r.live when
+// its metadata/discovery fetch fails at compile time or when its cached
+// document is retired at the staleness ceiling, and neither is the operator
+// revoking the IdP: an unreachable IdP is degraded AVAILABILITY. Only an
+// explicit delete, disable or removal by ReplaceAll changes this answer.
+func (r *IdPRegistry) ProfileEnabled(id string) bool {
+	if id == "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.ID == id {
+			return p.Enabled
+		}
+	}
+	return false
+}
+
+// ProfileAdmitsSession reports whether a VERIFIED session cookie that names
+// profile id and was minted at issuedAt (Unix seconds; 0 for a cookie minted
+// before the field existed) is still an identity: the profile is stored and
+// enabled exactly as ProfileEnabled asks, AND the cookie was not minted before
+// the profile's SessionsNotBefore cutoff (AU-65). Allocation-free, one pass
+// under the read lock: it runs on the proxy request path (sessionProviderLive).
+//
+// EVALUATED, NOT LATCHED: both halves are read from the stored profile on every
+// call, so the answer changes the moment the registry does, from any writer.
+// A zero cutoff admits every cookie, including a legacy one with no iat; a
+// non-zero cutoff refuses a legacy cookie, because a cookie that cannot say
+// when it was minted cannot prove it postdates the cut (fail-closed, and only
+// for a profile an operator has created or re-enabled since the upgrade).
+// Granularity is one second, the cookie's own: a cookie minted in the same
+// second as the cutoff is admitted.
+func (r *IdPRegistry) ProfileAdmitsSession(id string, issuedAt int64) bool {
+	if id == "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.ID == id {
+			return p.Enabled && (p.SessionsNotBefore == 0 || issuedAt >= p.SessionsNotBefore)
+		}
+	}
+	return false
+}
+
 // EnabledProviders returns all live (enabled+compiled) providers in profile order.
 func (r *IdPRegistry) EnabledProviders() []IdentityProvider {
 	r.mu.RLock()
@@ -1243,6 +1345,40 @@ func (r *IdPRegistry) HasEnabledInteractiveProvider() bool {
 			if _, ok := r.live[p.ID]; ok {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// HasEnabledInteractiveProfile reports whether any STORED, ENABLED profile is
+// of an interactive type — deliberately NOT gated on a live compiled instance,
+// which is the one and only difference from HasEnabledInteractiveProvider.
+//
+// The two are not interchangeable and the split is the point. "Can this
+// deployment start an SSO flow right now?" must be live-gated: redirecting a
+// browser at a provider that failed to compile sends the user to a login that
+// cannot answer. "Does this deployment federate identity at all?" must not be:
+// a profile whose provider is dark still MINTED the cookies in flight, and
+// sessionProviderLive honours those cookies on ProfileEnabled — enabled, not
+// live — so a predicate that decides whether to READ a cookie has to ask the
+// same question the predicate that decides whether to HONOUR it asks.
+//
+// resolveRequestAuth's `authRequired` is that reader. Keeping it on the
+// live-gated probe meant a staleness-ceiling retirement in a SAML-only
+// deployment (no local account, no legacy provider, no credential-capable
+// profile) closed the Stage-1 gate entirely, so arm 1 never ran and a session
+// this appliance had decided to KEEP silently stopped being an identity —
+// no revocation counter, no log line, and identity/group-scoped policy
+// quietly stopped matching. See
+// TestChaos88_DefectSAMLOnlyDarkProfileStillReadsItsSessions.
+//
+// Allocation-free, like its siblings: this runs on every proxied request.
+func (r *IdPRegistry) HasEnabledInteractiveProfile() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.Interactive() {
+			return true
 		}
 	}
 	return false

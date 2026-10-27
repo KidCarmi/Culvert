@@ -76,7 +76,19 @@ to this checkout, not to an unmerged branch.
   capped at min(7 days, SAML `validUntil`) on the compile path and on live
   providers, and the recovery loop revalidates cache-serving providers. An
   unreachable IdP is degraded availability, never revocation: only an
-  explicit delete or disable revokes sessions.
+  explicit delete, a disable, or removal by `ReplaceAll` (config import,
+  config-version rollback, the CP→DP snapshot) revokes sessions.
+- Proxy-session provider bounds (CHAOS-88):
+  [session_provider_bounds.go](../../session_provider_bounds.go) and the
+  [revocation runbook](../operator/identity-provider-revocation.md). A verified
+  `ps_session` is an identity only while its `pvd` profile is stored and
+  enabled (`IdPRegistry.ProfileEnabled`, never `LiveProvider`); `""` and
+  `"local"` are always admitted. Delete, disable and `ReplaceAll` removal
+  revoke; a compile failure or staleness retirement does not. The lever reaches
+  the fleet through `ConfigSnapshot.IdPProfiles`, which carries NO `omitempty`
+  (`WireWipeCapable`): an emptied registry must serialise as `[]` so deleting
+  the LAST profile wipes DP copies, while a missing key still means absent —
+  redaction nils the field and a DP polls `GetConfig` before enrollment.
 
 ## Proxy, policy and scanning
 

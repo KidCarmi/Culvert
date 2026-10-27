@@ -1017,6 +1017,15 @@ type Session struct {
 	// decoding cleanly: their Jti unmarshals to "" and the field is
 	// simply absent on the wire.
 	Jti string `json:"jti,omitempty"`
+	// Iat is the Unix second the cookie was minted (AU-65). Package main
+	// compares it with the asserting profile's SessionsNotBefore cutoff, so
+	// re-enabling or re-creating an IdP under the same id does not revive
+	// the sessions it minted before the cut. omitempty for the same reason
+	// as Jti: a cookie minted before the field existed decodes to 0 and is
+	// admitted only by a profile that carries no cutoff, and an older binary
+	// ignores the key (json.Unmarshal drops unknown fields; the MAC covers
+	// the encoded payload, not the struct).
+	Iat int64 `json:"iat,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
