@@ -419,8 +419,14 @@ func (a *revocationAggregator) MergedExcluding(nodeID string) []RevocationEntry 
 	var merged []RevocationEntry
 	seen := map[string]bool{}
 	for _, e := range a.cpLocal {
-		if time.Unix(e.Expiry, 0).Before(now) {
-			continue // expired
+		// SEC-REVEXP-1: the one oracle, not a local comparison. `exp.Before(now)`
+		// is `now.After(exp)` transposed, and every wire expiry is a whole second
+		// while `now` carries a sub-second remainder — so for the whole second
+		// numbered Expiry it omitted an entry whose cookie Decode still accepts.
+		// This loop answers a DP's SyncRevocations, so the omission reached the
+		// requesting node as "no such revocation" (AU-63).
+		if !session.RevocationLiveAt(now, e.Expiry) {
+			continue // expired on the shared oracle
 		}
 		if !seen[e.Token] {
 			seen[e.Token] = true
@@ -432,8 +438,11 @@ func (a *revocationAggregator) MergedExcluding(nodeID string) []RevocationEntry 
 			continue
 		}
 		for _, e := range entries {
-			if time.Unix(e.Expiry, 0).Before(now) {
-				continue // expired
+			// Same oracle as the CP loop above. Leaving this one on the raw
+			// predicate would put two dialects of one question inside one
+			// function, which is the shape AU-62 was.
+			if !session.RevocationLiveAt(now, e.Expiry) {
+				continue // expired on the shared oracle
 			}
 			if !seen[e.Token] {
 				seen[e.Token] = true

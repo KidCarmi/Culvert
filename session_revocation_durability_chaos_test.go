@@ -84,6 +84,75 @@ func chaos68Entry(label, user string, expiry int64) RevocationEntry {
 	return RevocationEntry{Token: label, User: user, Expiry: expiry}
 }
 
+// settleWithinSecondForAggregator parks until just after a second boundary, so
+// the observation that follows has most of a wall-clock second to complete
+// inside one Unix second. Same technique as internal/session's helper; the
+// aggregator lives in package main and cannot reach that one.
+func settleWithinSecondForAggregator(t *testing.T) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if time.Now().Nanosecond() < 150*int(time.Millisecond) {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// DEFECT (AU-63). MergedExcluding is what a Data Plane's SyncRevocations
+// request is answered with, and both of its loops decided "expired" with
+// `time.Unix(e.Expiry, 0).Before(now)` — `now.After(exp)` transposed.
+//
+// Every wire expiry is a whole second while `now` carries a sub-second
+// remainder, so for the whole wall-clock second numbered Expiry that test was
+// already true while session.Decode still accepted a cookie carrying that Exp.
+// A DP restarting or reconnecting inside that second therefore got a
+// SUCCESSFUL sync that omitted the revocation, and accepted the cookie the CP
+// was still rejecting. The CP's own copy survived, which is what made this
+// quiet: the fleet disagreed without anything failing.
+//
+// This is SEC-REVEXP-1's third reopening (AU-60 counting, AU-62 user export,
+// now cluster aggregation), and the reason the oracle now has an exported face
+// instead of each surface spelling the comparison itself.
+func TestAU63_MergedExcludingRetainsTheFinalSecond(t *testing.T) {
+	withChaos68Aggregator(t)
+
+	for attempt := 0; attempt < 25; attempt++ {
+		settleWithinSecondForAggregator(t)
+		sec := time.Now().Unix()
+
+		// One entry on each of the two loops, both expiring in the CURRENT
+		// second — the second Decode still honours.
+		globalRevAggregator.UpdateLocal([]RevocationEntry{
+			chaos68Entry("cp-final-second", "", sec),
+			chaos68Entry("cp-long-dead", "", sec-60),
+		})
+		globalRevAggregator.Update("dp-1", []RevocationEntry{
+			chaos68Entry("dp-final-second", "", sec),
+			chaos68Entry("dp-long-dead", "", sec-60),
+		})
+
+		got := map[string]bool{}
+		for _, e := range globalRevAggregator.MergedExcluding("dp-2") {
+			got[e.Token] = true
+		}
+		if time.Now().Unix() != sec {
+			continue // straddled a boundary — proves nothing either way
+		}
+
+		if !got["cp-final-second"] {
+			t.Error("the CP's own revocation was omitted inside its final second — a DP syncing now is told the session is not revoked while the CP still rejects it")
+		}
+		if !got["dp-final-second"] {
+			t.Error("a peer node's revocation was omitted inside its final second — the same hole on the perNode loop")
+		}
+		if got["cp-long-dead"] || got["dp-long-dead"] {
+			t.Error("an entry a minute past its expiry was still merged — retention must not widen beyond the oracle")
+		}
+		return
+	}
+	t.Fatal("could not complete an observation inside a single second after 25 attempts")
+}
+
 // DEFECT. The aggregator had exactly one writer — a Data Plane push — so the
 // Control Plane, which is the node the admin UI runs on, contributed nothing
 // to the fleet-wide merge. An admin revoking a session on the CP revoked it on

@@ -75,3 +75,20 @@ func revocationLive(now, exp time.Time) bool {
 func revocationExpired(now, exp time.Time) bool {
 	return !revocationLive(now, exp)
 }
+
+// RevocationLiveAt is the EXPORTED face of the same oracle, for the cluster
+// surfaces in package main that carry a RevocationEntry's wire expiry (an int64
+// Unix second) and cannot reach the unexported predicate.
+//
+// It exists so those surfaces do not hand-roll the comparison. A second
+// spelling of "has this revocation's lifetime ended?" outside this file is how
+// SEC-REVEXP-1 reopened twice: once in a counting path (AU-60), once in the
+// user-export loop beside an already-fixed token loop (AU-62). Both were a raw
+// `now.After(exp)` — or its transposition `exp.Before(now)` — standing in for
+// this function.
+//
+// Callers ask whether the revocation must still be HONOURED, which is the
+// question every persistence, gossip and aggregation surface actually has.
+func RevocationLiveAt(now time.Time, expiry int64) bool {
+	return revocationLive(now, time.Unix(expiry, 0))
+}

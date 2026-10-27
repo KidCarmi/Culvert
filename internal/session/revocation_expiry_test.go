@@ -356,6 +356,42 @@ func TestRevocationExpiry_UserExportDropsOnlyWhatDecodeRejects(t *testing.T) {
 	})
 }
 
+// TestRevocationExpiry_ExportedFaceAgreesWithTheOracle pins RevocationLiveAt
+// to the predicate it exposes. It exists so the exported face cannot drift
+// away from the unexported one it is supposed to BE — a drift that would hand
+// every main-side cluster surface a second dialect while looking correct.
+//
+// The differential is taken against the real Decode, not against
+// revocationLive, because agreeing with the function it wraps is trivially
+// true; agreeing with the cookie verifier is the actual contract.
+func TestRevocationExpiry_ExportedFaceAgreesWithTheOracle(t *testing.T) {
+	initSecret(t)
+
+	observeWithinSecond(t, func(sec int64) string {
+		for _, off := range []int64{-60, -2, -1, 0, 1, 60} {
+			exp := sec + off
+			s := &Session{Sub: "u", Exp: exp}
+			cookie, err := Encode(s)
+			if err != nil {
+				return fmt.Sprintf("encode: %v", err)
+			}
+			_, decErr := Decode(cookie)
+			decodeAccepts := decErr == nil
+			live := RevocationLiveAt(time.Now(), exp)
+			// A revocation must be honoured for at least as long as any cookie
+			// it names is accepted. Equality is the stronger property the one
+			// oracle gives us, so assert it.
+			if live != decodeAccepts {
+				return fmt.Sprintf("offset %+d: RevocationLiveAt=%v but Decode accepts=%v — the exported face and the cookie verifier disagree", off, live, decodeAccepts)
+			}
+			if !live && revocationLive(time.Now(), time.Unix(exp, 0)) {
+				return fmt.Sprintf("offset %+d: exported face dropped an entry the unexported oracle keeps", off)
+			}
+		}
+		return ""
+	})
+}
+
 // ─── Concurrency ────────────────────────────────────────────────────────────
 
 // TestRevocationExpiry_ConcurrentReadersAndWriters runs the predicate under

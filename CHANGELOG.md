@@ -17,6 +17,41 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A Data Plane that synchronized during a revoked cookie's final second was
+  told the session was not revoked, while the Control Plane went on rejecting
+  it.** `revocationAggregator.MergedExcluding` is what a DP's
+  `SyncRevocations` request is answered with, and both of its loops decided
+  expiry with `time.Unix(e.Expiry, 0).Before(now)` — `now.After(exp)`
+  transposed, which reads like a different question while being the same one.
+  Every wire expiry is a whole second while `time.Now()` carries a sub-second
+  remainder, so for the whole wall-clock second numbered `Expiry` the entry was
+  omitted although `session.Decode` still accepted a cookie carrying that
+  `Exp`.
+
+  Nothing failed while this happened, which is what made it serious: the sync
+  reported success, the CP's own copy stayed intact and kept rejecting the
+  cookie, and the DP simply never heard about the revocation. A node restarting
+  or reconnecting inside that second honoured a logged-out or deleted-account
+  cookie with no error anywhere in the fleet.
+
+  Both loops now call `session.RevocationLiveAt(now, e.Expiry)`, a new exported
+  face of the single expiry oracle. It exists because the cluster surfaces live
+  in package main and carry the int64 wire expiry, so they could not reach the
+  unexported predicate at all — each was spelling the comparison itself. The
+  `perNode` loop, which carried the same predicate before this change set, is
+  fixed alongside the `cpLocal` loop this change set added: two dialects of one
+  question inside one function is the defect, not a tidy-up. Strictly
+  fail-closed, as with the earlier fixes — an entry can only be carried
+  fractionally longer, never dropped sooner.
+
+  Gates: `AU63_MergedExcludingRetainsTheFinalSecond` asserts both loops retain
+  a final-second entry while still dropping a minute-old one, and
+  `RevocationExpiry_ExportedFaceAgreesWithTheOracle` holds the exported face to
+  a differential against the real `Decode` rather than against the predicate it
+  wraps. Verified RED against the restored `exp.Before(now)` — the root gate
+  fired on both assertions, so the `perNode` half was equally broken — and
+  against a drifted exported face, which both gates caught.
+
 - **Diagnostics reported "session revocation healthy … no drops" while a
   legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
   CHAOS-73 bounds what an untrusted origin — cluster gossip, or the on-disk
