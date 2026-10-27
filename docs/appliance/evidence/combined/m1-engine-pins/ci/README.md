@@ -12,9 +12,52 @@
 ## Fast: gitleaks, a dispatch-scope artifact
 
 - In dispatch mode the job runs `gitleaks detect` with **no commit range**. It scanned **6,939 commits**, including other branches that the checkout fetched, and reported 274 findings (`fast-gate-gitleaks-summary.txt`).
-- **None was introduced by this branch.** A local gitleaks git scan of exactly `b9105086..c1b08dbe` finds **0**. The only ancestor is `b8ac5ac2`, which is on `main` before the cutoff; its 1 finding is a commit hash inside an advisory URL.
+- **None was introduced by this branch.** A local gitleaks git scan of exactly `b9105086..c1b08dbe` finds **0**, and the per-finding table below agrees (0 rows with `introduced_by_m1=True`).
 - In PR mode the same job scans only the PR's own commits.
 - This is **not** offered as a PASS. It is a scope disposition for ASTRA to accept or reject.
+
+**Correction (27 Oct).** The first version of this README and of the summary file said that the one ancestor finding (`b8ac5ac2`) was "a commit hash inside an advisory URL". **That was wrong.** The per-finding check shows it is `internal/hashcache/hashcache_evict_bench_test.go:67`, a 47-hex benchmark key-tail constant in a `_test.go` file (rule `generic-api-key`). It is on `main` before the cutoff and **still present in the tested tree**. It is not allow-listed in `.gitleaks.toml`/`.gitleaksignore`. A PR-mode scan does not see it because it is not a PR commit.
+
+### Per-finding evidence (ASTRA 08:55)
+
+| File | What it is |
+|---|---|
+| `gitleaks-results.sarif.gz` | The job's own SARIF, gzipped (`gzip -n`): artifact `12719806724` (zip digest `sha256:f1941d79…`). The **uncompressed** file's sha256 is `af60b76dfebb2cc6fe8b90b2c2a371a2bbbf041795e08685c3a982cceda0d2e6`, the same as the downloaded artifact. The job ran with `--redact`, so **every one of the 274 snippets reads `REDACTED`**. It carries commit, path, line, columns and rule only. |
+| `gitleaks-findings.tsv` | One row per SARIF result, **in SARIF order**. Commits are shortened to 12 hex; the full ID is in the SARIF at the same position. |
+| `gitleaks-verify.py` | Re-checks the TSV against the SARIF and git. Prints counts and row numbers only, never matched text. |
+
+**TSV columns:**
+- **Identity:** commit, path, line, rule; copied from the SARIF.
+- **Ancestry:** `introduced_by_m1` (ancestor of `c1b08dbe` but not of `b9105086`), `ancestor_of_m1_head`, `on_main`, and up to 4 remote branches containing the commit. These come from `git merge-base --is-ancestor` and `git branch -r --contains`.
+- **`class` and `note`.**
+- **`line_in_tested_tree_c1b08dbe`:** `file-absent`, or `yes`/`no` for whether that exact line text exists in that file in the tested tree.
+
+**Counts:**
+
+| Measure | Result |
+|---|---|
+| Rule | 250 `sourcegraph-access-token`, 24 `generic-api-key` |
+| `introduced_by_m1` | 0 |
+| `ancestor_of_m1_head` | 1 (row 139, `b8ac5ac2`) |
+| `on_main` | 3 |
+| Present in the tested tree | 1 (row 139); 1 file present with the line absent (row 7); 272 `file-absent` |
+
+**How rows were classified.** Each flagged line was read with `git show <commit>:<path>` at the finding's **own** commit, never from the working tree. **No matched value is published**: the notes describe shapes only.
+
+| Class | Rows | Rule the verifier re-checks |
+|---|---|---|
+| `git-commit-hash-in-advisory-URL` | 246 | A 40-hex token in the flagged span lies inside an `http(s)://` URL on that line (`go.googlesource.com/…/+/<sha>`, `…/commit/<sha>`, in govulncheck/Trivy JSON) |
+| `go-module-h1-checksum` | 6 | The span overlaps an `h1:<base64>` go.sum-style token (Compose buildinfo dumps) |
+| `git-sha-or-tree-id-in-markdown` | 4 | A 40-hex token in the span, in a `.md` file (freeze/CI-binding records) |
+| `manual` | 18 | Read by me line by line; the `note` is my judgment and **is not re-derived by the verifier**. It covers test fixtures in `_test.go`/test scripts (6), sha256 digests of evidence files keyed by filename (9, two of them of `.dpapi` ciphertext), a git SHA in a JSON evidence record (1), and prose (2: the TLS group name `X25519MLKEM768`, and the words "key derivation"). |
+
+**Why the SARIF is gzipped and the commits shortened.** Both contain hundreds of 40-hex git commit IDs, and gitleaks' `sourcegraph-access-token` rule flags any 40-hex string. Committing them as plain text would add about 540 new findings to **this branch's own commits** and break the "0 introduced by M1" result above. A local self-scan confirmed this: every hit was a real git commit object in the clone, with no other content. The 12-hex prefix and the compressed SARIF avoid that, and no information is lost.
+
+**Verifier result** (run locally in a full clone of this branch with all remotes fetched): `rows 274 … PASS`.
+- **SARIF column quirk:** gitleaks' SARIF columns land one character late against the line git stores, on every row. The verifier therefore widens the span by one character on each side. That is stated in the script.
+- **Negative control:** relabelling single rows (139 → advisory-URL, 16 → h1, 8 → advisory-URL, 1 → markdown), or corrupting one row's commit, makes it **FAIL on exactly that row**, so a PASS is not vacuous.
+
+**Reproduce:** `python3 -I gitleaks-verify.py gitleaks-results.sarif.gz gitleaks-findings.tsv` from a clone that has every commit named in the SARIF. Most of those commits live only on other remote branches.
 
 ## Deep: NEW material finding in the ClamAV sidecar, so STOP
 
@@ -27,4 +70,4 @@
   - no F-P2 re-identity.
 
   The fix path would be the same approach as the earlier pcre2/zlib/nghttp2/musl pins (a `libcurl 8.23.0-r0` pin in `appliance/clamav/Dockerfile`). That **changes the sidecar's identity and F-P2 credit**, so it needs an owner decision.
-- **Reachability is not assessed.** I have not established which binaries in the sidecar load libcurl, or whether any HTTP/2 **upload** path runs on the appliance.
+- **Reachability:** a static reading, with no disposition, is in `sidecar-libcurl-reachability.md` (ASTRA 08:55).

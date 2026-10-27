@@ -13,13 +13,19 @@
 
 Both disks report `build-info` `git_commit` b9105086 and kernel 7.0.0-38-generic.
 
-**Strictly read-only:**
-- No module is loaded, nothing is mounted, no traffic is injected, and no configuration is changed.
+**Method:**
+- **No module is deliberately loaded, nothing is mounted, no traffic is injected, and no kernel, network or appliance configuration is changed.**
 - Commands that can autoload a module (`ip fou`, `ss` sock_diag, `ip tunnel`) are not used. Sockets come from `/proc/PID/net/*`, links from a netlink dump, and FOU is queried only if it is already loaded.
-- Module policy comes from `modprobe --showconfig` and `modprobe -n` (dry run, with real exit codes).
+- Module policy comes from `modprobe --showconfig` and `modprobe -n` (dry run; the `rc=` values are real exit codes).
 - **The loaded-module set is identical before and after the snapshot on both disks** (check `snapshot-loaded-nothing` PASS).
 - **The two disks load the identical 72-module set.**
-- The only guest change is the normal first console login: one-time password, then the forced change.
+
+**Method limits (ASTRA, 27 Oct). These correct an earlier "strictly read-only" wording, which overstated it:**
+- **Not file-system read-only.** Besides the normal first console login (one-time password, then the forced change), the script **created and removed two temporary files** in the guest: `/tmp/m2-policy.txt` and `/tmp/m2-ns.txt`.
+- **Endpoint module comparison only.** Identical before/after lists do **not** exclude a module that loaded and unloaded in between.
+- **One recorded exit code is wrong.** `[ip-link-exit=…]` is the exit status of the `sed` at the end of that pipeline, **not** of `ip`. The returned link lines are the evidence; that status is not.
+- **Missing output is not proof of absence.** Several reads use `2>/dev/null`, so an empty field can mean "not present" or "could not be read".
+- **Not fixed here.** Correcting the harness would need a lab-branch push, which itself triggers a lab run, and no further run is requested. The limits are recorded instead.
 
 Raw output: `M2-snapshot-*.txt`, `checks-*.jsonl`, `identities-*.txt`, `evidence-*.tar.gz`.
 

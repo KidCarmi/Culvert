@@ -3,7 +3,7 @@ gitleaks cmd: gitleaks detect --redact -v --exit-code=2 --report-format=sarif --
 8:19AM INF 6939 commits scanned.
 8:19AM INF scanned ~149399405 bytes (149.40 MB) in 36.7s
 8:19AM WRN leaks found: 274
-# findings by commit. None was introduced by review/1528-m1-engine-pins (b9105086..c1b08dbe, 0 findings in a local gitleaks git scan of that range). Only b8ac5ac2 is an ancestor: it is on main at/before cutoff a27cffb2 (1 finding, a commit hash in a docker/compose advisory URL inside govulncheck JSON). Every other commit is on unrelated branches that the dispatch checkout fetched:
+# findings by commit. None was introduced by review/1528-m1-engine-pins (b9105086..c1b08dbe, 0 findings in a local gitleaks git scan of that range). Only b8ac5ac2 is an ancestor: it is on main at/before cutoff a27cffb2 (1 finding: a 47-hex benchmark key-tail test constant in internal/hashcache/hashcache_evict_bench_test.go:67, still present in the tested tree; CORRECTED 27 Oct, the first version of this line wrongly called it an advisory-URL commit hash. See gitleaks-findings.tsv row 139). Every other commit is on unrelated branches that the dispatch checkout fetched:
     252 f0fe7b90cd6abc3c44f0a3068887d5902e305ab5
       7 2f451f1b116e5a5c0ef25819d07b5e0af624e676
       5 71e3851a1aa205d85d5ba623b63914cd6c348a6c
