@@ -1466,6 +1466,10 @@ is_fresh_deployment() {
 # docker compose resolves as NON-EMPTY". Exit 0 = set, 1 = absent or empty,
 # 2 = FILE could not be read (verdict unknown).
 #
+# Compose also accepts an `export ` prefix and leading blanks before KEY=, so
+# those lines count; otherwise an operator's own passphrase reads as absent and
+# a second one is generated and appended (last wins), orphaning the CA key.
+#
 # "Non-empty" means what docker compose resolves: only CR/blanks, an empty
 # quote pair ("" / ''), or a blank followed by an inline # comment is EMPTY
 # there, so none of those may count as configured. A lone opening quote at end
@@ -1488,7 +1492,7 @@ is_fresh_deployment() {
 env_file_value_set() {
   local var="$1" file="$2"
   [[ -r "$file" ]] || return 2
-  grep -Eq "^${var}=([^[:space:]\"']|[[:space:]]+([^[:space:]\"'#]|\"([^\"]|$)|'([^']|$))|\"([^\"]|$)|'([^']|$))" <(tr -d '\r' <"$file" 2>/dev/null)
+  grep -Eq "^[[:space:]]*(export[[:space:]]+)?${var}=([^[:space:]\"']|[[:space:]]+([^[:space:]\"'#]|\"([^\"]|$)|'([^']|$))|\"([^\"]|$)|'([^']|$))" <(tr -d '\r' <"$file" 2>/dev/null)
 }
 
 # secret_already_set VAR — true if VAR is non-empty in the host env or in .env.
