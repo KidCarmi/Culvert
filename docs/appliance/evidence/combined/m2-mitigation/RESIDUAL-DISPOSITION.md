@@ -1,6 +1,6 @@
-# M2 kernel HIGH: bounded residual disposition, revision 2
+# M2 kernel HIGH: bounded residual disposition, revision 3
 
-**Status: the producer's proposal; not accepted.** Revision 2 answers ASTRA's 27 Oct 16:10 HOLD. ASTRA and the owner decide. **The 30-day clock in §7 has not started**; it starts only if this disposition is finally accepted.
+**Status: the producer's proposal; not accepted.** Revision 2 answered ASTRA's 27 Oct 16:10 HOLD; revision 3 answers the two remaining gaps of 17:06 (census-loop failures, nested firewall operands: §1a, §3, §3a, §8). ASTRA and the owner decide. **The 30-day clock in §7 has not started**; it starts only if this disposition is finally accepted.
 
 **Scope:** the kernel the one replacement INTERNAL-ONLY OVA will carry (`linux-image-virtual-hwe-24.04` → `7.0.0-38-generic`, unchanged from `61c46d6d`), for internal QEMU-lab use only (§4). It authorizes nothing: no ESXi action, pilot, customer or production use, no kernel patch, and no rebuild.
 
@@ -47,7 +47,12 @@
 
 **Checked on the finished artifact, for every boot that has a checkpoint:**
 - **`<tag>-ordering`:** `systemd-sysctl`'s `ActiveEnterTimestampMonotonic` must be non-zero and earlier than the `ExecMainStartTimestampMonotonic` of both containerd and dockerd. The drop-in must be present with a recorded sha256.
-- **`<tag>-hardening`:** a census of every process's descriptors finds 0 io_uring rings. It **fails** if a process that still exists could not be read. It reports processes that exited during the scan, and descriptors that vanished between listing and reading, instead of hiding them. A non-atomic census is corroboration only.
+- **`<tag>-hardening`:** a census of every process's descriptors finds 0 io_uring rings. Every failed read is resolved before it is counted, and each non-success is recorded on its own line:
+  - an fd directory that cannot be listed is `exited` only if the process is gone (no `/proc` entry, or a zombie), otherwise `unreadable-alive`, which **fails**;
+  - a descriptor whose link cannot be read is read once more, then is `fd-vanished` only if its `/proc` entry is gone, otherwise `fd-unreadable`, which **fails**;
+  - the summary must carry exactly the expected counters, and each must equal its line count; a census that read no process or no descriptor fails.
+
+  Confirmed disappearances are reported, not hidden. The census is not atomic, so it is corroboration only.
 
 **Persistence:** the same checks at the reboot and final checkpoints show the drop-in and the value surviving the OS update, its reboot, three power-cycle recoveries and the history restore.
 
@@ -84,7 +89,7 @@ The `firstboot` checkpoint runs **after** steps 1–5. Its ordering evidence for
 
 | Finding | Advisory precondition | On this kernel / appliance | Reached from the network? | Bound and check |
 |---|---|---|---|---|
-| **98532** `ipv6_find_hdr` returns an offset past the packet end | A consumer that **uses** the returned transport offset. The demonstrated write is openvswitch's checksum update. | Module callers: see `module-imports-7.0.0-38.txt`. **nf_tables and nft_chain_nat are loaded by design**; openvswitch and ip_vs are denied. | **Yes.** `table inet culvert` sends every inbound IPv6 packet through `nft_set_pktinfo_ipv6` → `ipv6_find_hdr`, before authentication. | Consumers **reviewed**: `nft_payload_eval` (`skb_copy_bits`, bounded); `xt_tcpudp` via `nft_compat` (`skb_header_pointer`, bounded); NAT, where `nf_nat_ipv6_manip_pkt` locates the L4 header itself with `ipv6_skip_exthdr` and does not use nft's offset. **Gate on the booted replacement, `<tag>-ruleset`:** every expression of every rule, in every namespace, must be one of these source-checked forms, or the gate fails as "review required". Payload writes, queue, flowtable, exthdr, socket, tproxy and any unclassified xt match or target all fail it. The full ruleset is kept verbatim. **Residual uncertainty:** consumers in Ubuntu's tree or unenumerated built-in code paths. |
+| **98532** `ipv6_find_hdr` returns an offset past the packet end | A consumer that **uses** the returned transport offset. The demonstrated write is openvswitch's checksum update. | Module callers: see `module-imports-7.0.0-38.txt`. **nf_tables and nft_chain_nat are loaded by design**; openvswitch and ip_vs are denied. | **Yes.** `table inet culvert` sends every inbound IPv6 packet through `nft_set_pktinfo_ipv6` → `ipv6_find_hdr`, before authentication. | Consumers **reviewed**: `nft_payload_eval` (`skb_copy_bits`, bounded); `xt_tcpudp` via `nft_compat` (`skb_header_pointer`, bounded); NAT, where `nf_nat_ipv6_manip_pkt` locates the L4 header itself with `ipv6_skip_exthdr` and does not use nft's offset. **Gate on the booted replacement, `<tag>-ruleset`:** every expression of every rule, in every namespace, must be one of these source-checked forms, or the gate fails as "review required". **Nested operands are classified too:** both sides of a match, NAT address/port parameters, the key and value of a metadata assignment, and statement parameters are walked recursively. Only reviewed expression kinds (payload, meta, ct, prefix, map, set, range, concat, bitwise) with their reviewed fields pass; any other kind, an unexpected field, or an expression where only a literal is reviewed fails. Before this, `ct mark set socket mark` passed: the gate classified the assignment by its key alone. It, `jhash` and `numgen` operands now fail (real `nft -j` output, receipt 01). Payload writes, queue, flowtable, exthdr, socket, tproxy and any unclassified xt match or target all fail it. The full ruleset is kept verbatim. **Residual uncertainty:** consumers in Ubuntu's tree or unenumerated built-in code paths. |
 | **98573** `skb_checksum_setup_ipv6` underflow | A receive path calling `skb_checksum_setup` | Modules: only xen-netback (not loaded). Built in: **xen-netfront** calls it; virtio_net does not. | On a Xen guest with a PV NIC, yes. **Other built-in callers were not enumerated**, so "only on Xen" is not claimed. | Checkpoint: NIC drivers must be e1000 or vmxnet3. Xen is a STOP trigger. **Ubuntu status: fix pending** (§6 baseline). |
 | **98570** seg6/ioam6/rpl lwtunnel MAC-header headroom | An lwtunnel encap route **and** ingress via VLAN with `reorder_hdr` off | seg6/ioam6 lwtunnel built in; rpl not set; `8021q` not loaded | No: both are configuration (`CAP_NET_ADMIN`) | Checkpoint, every namespace: 0 encap routes, 0 VLAN links, seg6/ioam6 0 on every interface |
 | **98526** llc headroom on stacked devices | LLC response on a VLAN device | `llc` loaded (bridge/stp) | No VLAN device; creating one needs `CAP_NET_ADMIN` | Checkpoint: 0 VLAN links; `8021q` not loaded |
@@ -102,7 +107,9 @@ The `firstboot` checkpoint runs **after** steps 1–5. Its ordering evidence for
 ### 3a. Which network namespaces the argument covers
 
 **The argument depends on exactly three network namespaces:** the host's, `culvert`'s, and `culvert-clamav`'s. At every checkpoint the harness:
-- takes a census of every process's network namespace, and **fails** if any namespace outside these three exists;
+- takes a census of every process's network namespace, with one outcome per process: read, `exited` (confirmed gone) or `unreadable-alive`, which **fails**. The summary must agree with the lines;
+- acquires the three expected namespaces separately: the host's directly, each container's from `docker inspect` (recorded; a failed read fails the check by name);
+- **reconciles the two in both directions:** a namespace outside the three fails, and an expected one absent from the census fails. If fewer than three contexts were acquired, the check fails as "coverage not reconciled" instead of claiming coverage;
 - in each of the three, reads links, the IPv4 and IPv6 routes (`table all`), qdiscs, the nftables ruleset (JSON for the gate, text for review) and **every interface's** IPv6 `forwarding`, `seg6_enabled`, `ioam6_enabled` and `disable_ipv6`. It does not read only the `all`/`default` entries.
 
 **Not covered:** a namespace created and destroyed between two checkpoints. Containers cannot create one (seccomp), so that is again a host-root or restricted-principal residual under §2.
@@ -158,5 +165,9 @@ The `firstboot` checkpoint runs **after** steps 1–5. Its ordering evidence for
 **The checkpoint map** is in `../freeze-0648adeb/BOM.md` §5: first boot, after maintenance, after the OS-update reboot, at the end of the run.
 
 **The fail-closed contract and its receipts** (`harness-receipts/`):
-- **Self-test:** the evaluator is exercised against a passing fixture plus one mutation per failure mode. 51 cases, 0 wrong, including the valid-empty cases. It runs in `appliance-lab.sh selftest`, the first step of every lab job.
-- **Mutation evidence:** two mutations of the evaluator are each caught by the self-test. The guest script is also run with a failing `ip` and an absent `nft`; both are recorded as failures and fail their checks.
+- **Self-test:** the evaluator is exercised against a passing fixture plus one mutation per failure mode. **87 cases, 0 wrong**, including the valid-empty and confirmed-disappearance cases. It runs in `appliance-lab.sh selftest`, the first step of every lab job.
+- **Mutation evidence:** each of nine evaluator mutations is caught by the self-test. They include removing the expected-namespace reconciliation, accepting unreadable state as vanished, removing the docker-top reconciliation, and removing nested-operand validation. The guest script is also run with a failing `ip` and an absent `nft`; both are recorded as failures and fail their checks.
+- **Real collector outcomes** (producer sandbox, not the guest):
+  - The sandbox's PID 1 still exists and cannot be read, so the run records `fd-unreadable` ×21 and `unreadable-alive`, and both checks fail.
+  - With Docker stopped, the container pid reads fail by name, and the check reports "coverage not reconciled: only 1 of 3".
+  - Three real processes are killed at the moment the census reaches them. They are recorded as `exited` / `fd-vanished`, not as failures.

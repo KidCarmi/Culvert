@@ -1,0 +1,76 @@
+# mutation rc: exit status ignored
+# m2-verdict.py: 'if rc not in ok_rc:' -> 'if False:'
+# exit status 1 (lab e6bb0ff0, self-test unmodified)
+WRONG	ip link fails	preconditions fails: host links: no loopback in output
+WRONG	ip -4 route fails	preconditions fails: culvert routes4: no loopback local route (not a real read)
+WRONG	ip -6 route fails	did NOT fail preconditions (fails: [])
+WRONG	tc fails	preconditions fails: culvert-clamav qdisc: empty (loopback always has one)
+WRONG	module read fails	preconditions fails: module list lacks nf_tables (loaded by design): not a real read
+WRONG	netns census fails	preconditions fails: netns-census: no summary
+WRONG	ipv6-conf unreadable	preconditions fails: host ipv6-conf: empty
+WRONG	nft fails (installed)	ruleset fails: host nft-json: host nft-json: 0 lines
+WRONG	nft absent	ruleset fails: culvert nft-json: culvert nft-json: 0 lines
+WRONG	sysctl read fails	hardening fails: host sysctl: unparseable []
+WRONG	top fails	hardening fails: culvert top: unexpected output []
+WRONG	ordering read fails	ordering fails: ordering: 'systemd-sysctl.service'
+WRONG	sysctl drop-in missing	ordering fails: sysctl file: []
+WRONG	EICAR scan error	clamav fails: EICAR not FOUND: ['ERROR: Could not connect to clamd']
+WRONG	EICAR clean	clamav fails: EICAR not FOUND: ['stream: OK']
+87 cases, 15 wrong
+
+# mutation lo: loopback positive control removed
+# m2-verdict.py: 'if not any(re.match(r"^\\d+: lo:", l) for l in links):' -> 'if False:'
+# exit status 1 (lab e6bb0ff0, self-test unmodified)
+WRONG	ip link rc=0 but empty	did NOT fail preconditions (fails: [])
+87 cases, 1 wrong
+
+# mutation ns-missing: expected-namespace reconciliation removed
+# m2-verdict.py: 'missing = set(mine.values()) - seen' -> 'missing = set()'
+# exit status 1 (lab e6bb0ff0, self-test unmodified)
+WRONG	netns: expected context missing	did NOT fail preconditions (fails: [])
+87 cases, 1 wrong
+
+# mutation ns-alive: live-but-unreadable namespace accepted
+# m2-verdict.py: 'if nby["unreadable-alive"]:' -> 'if False:'
+# exit status 1 (lab e6bb0ff0, self-test unmodified)
+WRONG	netns: live process unreadable	did NOT fail preconditions (fails: [])
+87 cases, 1 wrong
+
+# mutation fd-unreadable: unreadable descriptor treated as vanished
+# m2-verdict.py: 'if by["fd-unreadable"]:' -> 'if False:'
+# exit status 1 (lab e6bb0ff0, self-test unmodified)
+WRONG	fd: descriptor present but unreadable	did NOT fail hardening (fails: [])
+87 cases, 1 wrong
+
+# mutation fd-alive: live-but-unreadable fd directory accepted
+# m2-verdict.py: 'if by["unreadable-alive"]:' -> 'if False:'
+# exit status 1 (lab e6bb0ff0, self-test unmodified)
+WRONG	fd: fd dir unreadable, process alive	did NOT fail hardening (fails: [])
+87 cases, 1 wrong
+
+# mutation top-outcome: docker-top pid reconciliation removed
+# m2-verdict.py: 'if len(outcome.get(pid, [])) != 1:' -> 'if False:'
+# exit status 1 (lab e6bb0ff0, self-test unmodified)
+WRONG	listed pid with no outcome	did NOT fail hardening (fails: [])
+WRONG	pid with two outcomes	hardening fails: m2-proc-unreadable culvert 4264
+87 cases, 2 wrong
+
+# mutation summary-keys: summary counter set not enforced
+# m2-verdict.py: 'if set(summ) != set(keys):' -> 'if False:'
+# exit status 1 (lab e6bb0ff0, self-test unmodified)
+# self-test aborted after 24 case lines; stderr tail: KeyError: 'unreadable_alive'
+
+# mutation operand: nested operand validation removed
+# m2-verdict.py: 'def operand_problems(node, path):' -> 'def operand_problems(node, path):\n    return []'
+# exit status 1 (lab e6bb0ff0, self-test unmodified)
+WRONG	exthdr match	did NOT fail ruleset (fails: [])
+WRONG	socket match	did NOT fail ruleset (fails: [])
+WRONG	nested: ct mark set socket mark	did NOT fail ruleset (fails: [])
+WRONG	nested: meta mark set jhash ip saddr	did NOT fail ruleset (fails: [])
+WRONG	nested: dnat to socket mark map	did NOT fail ruleset (fails: [])
+WRONG	nested: dnat to numgen map	did NOT fail ruleset (fails: [])
+WRONG	nested: exthdr inside a map's data set	did NOT fail ruleset (fails: [])
+WRONG	nested: unknown payload field	did NOT fail ruleset (fails: [])
+WRONG	nested: two-key operand object	did NOT fail ruleset (fails: [])
+87 cases, 9 wrong
+

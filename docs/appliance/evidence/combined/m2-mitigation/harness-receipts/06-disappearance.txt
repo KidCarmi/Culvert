@@ -1,0 +1,34 @@
+# targets: A=7241 (fd dir) B=7242 (descriptor) C=7243 (netns)
+## fd_census: every recorded outcome line, then the summary
+fd-unreadable 1 0 process_api
+fd-unreadable 1 1 process_api
+fd-unreadable 1 10 process_api
+fd-unreadable 1 11 process_api
+fd-unreadable 1 12 process_api
+fd-unreadable 1 13 process_api
+fd-unreadable 1 14 process_api
+fd-unreadable 1 15 process_api
+fd-unreadable 1 16 process_api
+fd-unreadable 1 17 process_api
+fd-unreadable 1 18 process_api
+fd-unreadable 1 19 process_api
+fd-unreadable 1 2 process_api
+fd-unreadable 1 21 process_api
+fd-unreadable 1 23 process_api
+fd-unreadable 1 3 process_api
+fd-unreadable 1 5 process_api
+fd-unreadable 1 6 process_api
+fd-unreadable 1 7 process_api
+fd-unreadable 1 8 process_api
+fd-unreadable 1 9 process_api
+exited 7241
+fd-vanished 7242 0
+fd-vanished 7242 1
+fd-vanished 7242 2
+summary procs=90 fds=235 rings=0 unreadable_alive=0 exited=1 fd_vanished=3 fd_unreadable=21
+## netns_census: every line except successful reads, then the summary
+unreadable-alive 1 process_api
+exited 7243
+summary procs=90 read=88 unreadable_alive=1 exited=1
+## targets' namespaces were read only if they appear here: 0 (0 expected)
+## targets still present afterwards: (none expected)

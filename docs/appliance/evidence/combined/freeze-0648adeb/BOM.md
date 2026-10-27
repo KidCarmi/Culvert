@@ -69,7 +69,7 @@ It is a **repository file only**. Its `cap_drop: [NET_RAW]` keeps repo-based HA 
 
 ## 5. Test map: what proves each change, and where
 
-> **Revision 3.1 (ASTRA 27 Oct 16:10).** Only the harness and documentation identities change: the lab is now `69fb5f36`, which replaces `9dcbb69d`. The candidate, source identity, epoch and sidecar constants in §1–§4 are unchanged and were not rebuilt.
+> **Revision 3.2 (ASTRA 27 Oct 17:06).** Only the harness and documentation identities change: the lab is now `e6bb0ff0`, which replaces `69fb5f36` (3.1, 16:10) and `9dcbb69d`. `e6bb0ff0` changes only the five M2 harness files (`m2-guest.sh`, `m2-verdict.py`, its self-test and two fixtures). The candidate, source identity, epoch and sidecar constants in §1–§4 are unchanged and were not rebuilt.
 
 **Pre-build** (done):
 
@@ -78,7 +78,7 @@ It is a **repository file only**. Its `cap_drop: [NET_RAW]` keeps repo-based HA 
 | M1 engine pins, sidecar `culvert.4` | Unchanged from the accepted record (`../freeze-93c83f90/BOM.md` §4) |
 | `cap_drop NET_RAW` | `TestM2Hardening_NoServiceKeepsNetRaw` (fails if the drop is removed). Deep 40523416237 ran the lifecycle, maintenance-agent and real-ClamAV jobs on the new compose files. Probe controls (`../m2-mitigation/probe-control/`): with `NET_RAW` dropped, root in a default-seccomp container gets `EPERM` for AF_PACKET; with default capabilities, root **opens** it. |
 | `io_uring_disabled = 2` | `TestM2Hardening_IoUringDisabledOnTheGuest`, `TestBuildOVA_CopiesEveryProvisionFilePrepareGuestInstalls`, and the build-time value check in `prepare-guest.sh`. Ordering rationale for applying it before workloads: `../m2-mitigation/RESIDUAL-DISPOSITION.md` §1a. |
-| **Harness, fail-closed** (lab `69fb5f36`) | `m2-guest.sh` records every observation with its exit status, and `m2-verdict.py` refuses anything not acquired and parsed. Receipts (`../m2-mitigation/harness-receipts/`): 51 self-test cases, 0 wrong (passing fixture, valid-empty cases, one case per failure mode). Two evaluator mutations are each caught. A real sandbox run fails closed on every facility the sandbox lacks, and a run with `ip` failing and `nft` absent fails both checks. The self-test runs as the first step of every lab job. |
+| **Harness, fail-closed** (lab `e6bb0ff0`) | `m2-guest.sh` records every observation with its exit status, and `m2-verdict.py` refuses anything not acquired and parsed.<br><br>**Census loops** record one outcome per process or descriptor. A confirmed disappearance is reported; unreadable state that still exists fails. The namespace census is reconciled with the three separately acquired contexts, and capability reads iterate the recorded `docker top`.<br><br>**Nested firewall operands** are classified recursively.<br><br>Receipts (`../m2-mitigation/harness-receipts/`):<ul><li>87 self-test cases, 0 wrong;</li><li>nine evaluator mutations, each caught;</li><li>real sandbox runs: unreadable PID 1 fails; Docker-down fails coverage as "only 1 of 3"; stubbed `ip`/`nft` fail;</li><li>a forced real disappearance is recorded as `exited`/`fd-vanished`.</li></ul>The self-test runs as the first step of every lab job. |
 
 **Post-build, on the one replacement.** These run after the artifact exists; they are not prerequisites for creating it. Every checkpoint (`M2H <tag>`) records seven checks:
 
@@ -94,7 +94,7 @@ It is a **repository file only**. Its `cap_drop: [NET_RAW]` keeps repo-based HA 
 
 Where the checkpoints sit in the run:
 
-| When (lab `69fb5f36`, matrix `candidate-0648adeb`) | Checkpoint | Regression checks already in the run |
+| When (lab `e6bb0ff0`, matrix `candidate-0648adeb`) | Checkpoint | Regression checks already in the run |
 |---|---|---|
 | Build | Identity step (§3) | `build-ova.sh` closure + cold-load + bundled agent = image version |
 | **First boot**, steps 1–5 | `M2H firstboot`. It runs **after** the workload and traffic steps, so the first boot's ordering evidence is the same-boot systemd timestamps, not its position. | 5 `clamav-real`, 5 `traffic`, 5 `ready-rows`, 5c category enforcement |
@@ -117,5 +117,5 @@ Where the checkpoints sit in the run:
 
 ## 7. What happens next, and what does not
 
-- **Once ASTRA accepts this closeout:** one `workflow_dispatch` of `appliance-lab.yml` on `test/appliance-lab` at the lab commit named in the handoff (now `69fb5f36` or a later lab commit ASTRA reviews). Its matrix holds exactly one entry, `candidate-0648adeb`. This is covered by the owner's existing conditional authorization (6400728126).
+- **Once ASTRA accepts this closeout:** one `workflow_dispatch` of `appliance-lab.yml` on `test/appliance-lab` at the lab commit named in the handoff (now `e6bb0ff0` or a later lab commit ASTRA reviews). Its matrix holds exactly one entry, `candidate-0648adeb`. This is covered by the owner's existing conditional authorization (6400728126).
 - **Not part of it:** a second build, ESXi action, merge, pilot, release, any copy of the OVA, or any deletion.

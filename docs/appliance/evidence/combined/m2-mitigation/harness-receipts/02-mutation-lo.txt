@@ -1,5 +1,0 @@
-# MUTATION (lo) of m2-verdict.py at lab 69fb5f36: if False:  # MUTATION: no loopback positive control
-# the unmodified self-test must report WRONG cases and exit 1:
-WRONG	ip link rc=0 but empty	did NOT fail preconditions (fails: [])
-51 cases, 1 wrong
-exit=1
