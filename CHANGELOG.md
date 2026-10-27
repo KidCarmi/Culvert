@@ -177,7 +177,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   fail-closed, as with the earlier fixes — an entry can only be carried
   fractionally longer, never dropped sooner.
 
-  Gates: `AU63_MergedExcludingRetainsTheFinalSecond` asserts both loops retain
+  Gates: `AU72_MergedExcludingRetainsTheFinalSecond` asserts both loops retain
   a final-second entry while still dropping a minute-old one, and
   `RevocationExpiry_ExportedFaceAgreesWithTheOracle` holds the exported face to
   a differential against the real `Decode` rather than against the predicate it

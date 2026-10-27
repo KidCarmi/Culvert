@@ -101,7 +101,7 @@ func settleWithinSecondForAggregator(t *testing.T) {
 	}
 }
 
-// DEFECT (AU-63). MergedExcluding is what a Data Plane's SyncRevocations
+// DEFECT (AU-72). MergedExcluding is what a Data Plane's SyncRevocations
 // request is answered with, and both of its loops decided "expired" with
 // `time.Unix(e.Expiry, 0).Before(now)` — `now.After(exp)` transposed.
 //
@@ -116,7 +116,7 @@ func settleWithinSecondForAggregator(t *testing.T) {
 // This is SEC-REVEXP-1's third reopening (AU-60 counting, AU-62 user export,
 // now cluster aggregation), and the reason the oracle now has an exported face
 // instead of each surface spelling the comparison itself.
-func TestAU63_MergedExcludingRetainsTheFinalSecond(t *testing.T) {
+func TestAU72_MergedExcludingRetainsTheFinalSecond(t *testing.T) {
 	withChaos68Aggregator(t)
 
 	for attempt := 0; attempt < 25; attempt++ {

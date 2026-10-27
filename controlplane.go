@@ -451,7 +451,7 @@ func (a *revocationAggregator) MergedExcluding(nodeID string) []RevocationEntry 
 		// while `now` carries a sub-second remainder — so for the whole second
 		// numbered Expiry it omitted an entry whose cookie Decode still accepts.
 		// This loop answers a DP's SyncRevocations, so the omission reached the
-		// requesting node as "no such revocation" (AU-63).
+		// requesting node as "no such revocation" (AU-72).
 		if !session.RevocationLiveAt(now, e.Expiry) {
 			continue // expired on the shared oracle
 		}
