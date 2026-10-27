@@ -166,6 +166,35 @@ func TestScanSvc_MatchInsideWindowStillBlocks(t *testing.T) {
 	}
 }
 
+// TestScanSvc_SignatureEndingOnTheProbeByteStillBlocks pins the probe byte as
+// SCANNED. The pre-fix handler scanned LimitReader(body, window+1), so a
+// signature whose last byte is byte window+1 was caught and blocked. Slicing
+// the probe off before scanning loses that last byte, the prefix comes back
+// clean, and the truncation refusal answers 413 — which the client classifies
+// as a size limit and forwards fail-open. Content the unfixed handler blocked
+// would then be admitted (Codex P2, PR #1711).
+func TestScanSvc_SignatureEndingOnTheProbeByteStillBlocks(t *testing.T) {
+	const window = 4096
+	const marker = "CULVERT-CHAOS101-MARKER"
+	withScanWindow(t, window, []string{marker})
+	addr := startScanSvc(t)
+
+	// The marker occupies bytes window+2-len(marker) .. window+1 (1-based), so
+	// it ends exactly on the overflow probe; the body continues past it.
+	body := append(bytes.Repeat([]byte("a"), window+1-len(marker)), []byte(marker)...)
+	if len(body) != window+1 {
+		t.Fatalf("premise broken: the marker must end on byte %d, body is %d bytes", window+1, len(body))
+	}
+	body = append(body, bytes.Repeat([]byte("a"), 64)...)
+
+	status, sr := postScan(t, addr, "text/plain", body)
+	if status != http.StatusOK || !sr.Blocked || sr.Clean {
+		t.Errorf("status=%d blocked=%v clean=%v, want 200 blocked=true clean=false: a signature ending on "+
+			"the overflow probe byte was blocked before CHAOS-101, and a 413 here is forwarded fail-open",
+			status, sr.Blocked, sr.Clean)
+	}
+}
+
 // TestScanSvc_OversizeRefusalIsCountedAndOnHealth: the sidecar is the only
 // process that knows its own window, so the refusal has to be legible HERE too
 // — the caller buffered within ITS limit and cannot discover that this one is

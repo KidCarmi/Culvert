@@ -98,9 +98,14 @@ any surface the product exposed.
 correctness argument — decides the refusal **last**, only for a prefix that came
 back clean. A block verdict wins and truncation is not reported at all on a
 block, the same asymmetry `readScanPrefix` documents for the local path. The
-engines see `data[:maxBytes]`, so what is scanned stays byte-identical to
-`LimitReader(body, maxBytes)` and the hash the client computes still describes
-the bytes it sent. `/health` publishes `oversize_refused` and
+engines still scan the probe byte — exactly the `LimitReader(body, maxBytes+1)`
+bytes the pre-fix handler scanned. An earlier revision sliced it off
+(`data[:maxBytes]`), and that lost a block: a signature ending on byte
+`maxBytes+1` no longer matched, the clean prefix drew a 413, and the client
+forwards a 413 fail-open, so content the unfixed handler blocked was admitted
+(Codex P2 on PR #1711; gated by
+`TestScanSvc_SignatureEndingOnTheProbeByteStillBlocks`, which fails against the
+sliced read). `/health` publishes `oversize_refused` and
 `scan_window_bytes`: the sidecar is the only process that knows its window,
 and the operator needs it to compare against the caller's.
 

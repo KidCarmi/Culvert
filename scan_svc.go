@@ -190,23 +190,24 @@ func scanSvcWindow() int64 {
 	return 5 << 20
 }
 
-// readScanWindow buffers at most limit bytes and reports whether the body
-// continued past them.
+// readScanWindow buffers at most limit+1 bytes and reports whether the body
+// continued past limit.
 //
 // limit+1 is the overflow PROBE: one byte past the window is all it takes to
-// learn that there is more, and the engines never see it — the returned slice
-// is capped at limit, so what gets scanned stays byte-identical to
-// LimitReader(body, limit) and the hash the client computes still describes the
-// bytes it sent. A read error is propagated, never laundered into a truncation.
+// learn that there is more. The probe byte is RETURNED, not sliced off, so the
+// engines scan exactly the bytes the handler scanned before CHAOS-101 —
+// LimitReader(body, limit+1). Dropping it would make a signature that ENDS on
+// that byte unmatchable: the handler would then answer 413, which the client
+// classifies as a size limit and forwards fail-open, admitting content the
+// pre-fix handler blocked (Codex P2, PR #1711; gated by
+// TestScanSvc_SignatureEndingOnTheProbeByteStillBlocks). A read error is
+// propagated, never laundered into a truncation.
 func readScanWindow(body io.Reader, limit int64) (data []byte, truncated bool, err error) {
 	raw, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
 		return nil, false, err
 	}
-	if int64(len(raw)) > limit {
-		return raw[:limit], true, nil
-	}
-	return raw, false, nil
+	return raw, int64(len(raw)) > limit, nil
 }
 
 // refuseTruncatedScan answers 413 for a body this process could not read to the

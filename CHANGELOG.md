@@ -39,7 +39,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   failure modes was the one without it.
 
   `handleScan` now uses the probe byte and refuses with 413 rather than
-  answering for a prefix, and publishes `oversize_refused` and
+  answering for a prefix. The probe byte is still scanned, so a signature that
+  ends on it blocks exactly as before the fix rather than drawing a fail-open
+  413. It also publishes `oversize_refused` and
   `scan_window_bytes` on `/health` — it is the only process that knows its
   window, and an operator needs it to compare against the caller's.
 
