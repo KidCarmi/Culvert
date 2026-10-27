@@ -49,10 +49,21 @@ All other §3 rows (engine, Compose plugin, sidecar, app image, guest OS) are un
 
 | Change | Pre-build evidence | Post-build gate on the replacement |
 |---|---|---|
-| `cap_drop NET_RAW` | `TestM2Hardening_NoServiceKeepsNetRaw` (fails if the clamav drop is removed); compose/installer/agent/appliance test set green; CI dispatch on this head (pending) | `CapEff`/`CapBnd` of both containers lack bit 13; `socket(AF_PACKET)` fails in each; EICAR block, freshclam update, proxy traffic and maintenance apply/rollback stay green |
+| `cap_drop NET_RAW` | `TestM2Hardening_NoServiceKeepsNetRaw` (fails if the clamav drop is removed); compose/installer/agent/appliance test set green; Deep dispatch 40523416237 green (17 jobs, including the real-ClamAV scenario, lifecycle and maintenance-agent flows on the new compose files) | `CapEff`/`CapBnd` of both containers lack bit 13; `socket(AF_PACKET)` fails in each; EICAR block, freshclam update, proxy traffic and maintenance apply/rollback stay green |
 | `io_uring_disabled = 2` | `TestM2Hardening_IoUringDisabledOnTheGuest` (fails on value 1); `TestBuildOVA_CopiesEveryProvisionFilePrepareGuestInstalls`; the build-time value check in `prepare-guest.sh` | `sysctl -n kernel.io_uring_disabled` = 2 on the booted guest; a host `io_uring_setup` returns `EPERM`; in each container `Seccomp: 2` and `io_uring_setup` returns `EPERM` |
 
-## 5. Still not done
+## 5. CI on `0648adeb` (runtime tree = `848c2c2f`, dispatch)
+
+| Gate | Result |
+|---|---|
+| **Deep** [40523416237](https://github.com/KidCarmi/Culvert/actions/runs/40523416237) | **success**, 17/17 jobs |
+| **Fast** [40523421826](https://github.com/KidCarmi/Culvert/actions/runs/40523421826) | 20 success / 2 skipped / 3 failure. The failures are the same exceptions ASTRA already documented; see below. |
+
+The two Fast failures, plus the aggregate check that follows from them:
+- **`golangci-lint`:** the identical four diagnostics in unchanged frozen files (`auth_oidc_flow.go:71`, `auth_saml.go:314`, `scan_svc.go:158/168`). None in the new code.
+- **`gitleaks`:** artifact `12742179218` (zip digest `sha256:39d78b7b…`, SARIF sha256 `9239eb5a…`) holds **274 results**. Comparing it by commit, path, line and rule with the adjudicated SARIF (`af60b76d…`) gives **0 added, 0 removed**.
+
+## 6. Still not done
 
 - No replacement OVA has been built.
 - **The post-build checks above are not yet in the lab harness.** They will be added before the single build, so that build's one qualification run includes them.
