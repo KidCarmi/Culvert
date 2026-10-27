@@ -12739,7 +12739,8 @@ its own finding."*
 ### 53.1 Executive summary
 
 `r.URL.Path` is copied, unbounded, into three retaining sinks — the process
-log (5 sites), a **buffered HTML response body** (5 sites) and the request-log
+log (6 sites; the sixth was missed by this sweep and closed as **CHAOS-92e**,
+§53.11), a **buffered HTML response body** (5 sites) and the request-log
 `URI` field (4 sites). On a **stock install**, with no authentication and no
 operator opt-in, one request chooses both how many bytes land in the rotating
 process log and, through `html/template` escaping, a **5x multiplier** on a
@@ -12839,7 +12840,9 @@ retention:
    pipeline.
 3. **The five log sites** clamp **inside** the `sanitizeLog` argument, so the
    scan and its possible 1 MiB copy are bounded too. Pinned by a source gate
-   that fails on any `sanitizeLog(…URL.Path)` without the clamp.
+   that fails on any `sanitizeLog(…URL.Path)` without the clamp — and that gate
+   matches on the `sanitizeLog(` token, so it could not see a sink that
+   sanitizes in the CALLEE. There was one, and §53.11 closes it.
 
 `maxRetainedRequestPath` is **2048** — above the historical 2083-byte Internet
 Explorer URL limit that web applications were built against for two decades,
@@ -12888,6 +12891,7 @@ make the mitigation for a write-amplification defect into one — the rule
 | CHAOS-92b | Same path → a 5 245 706-byte block page buffered in memory and written back; multiplier chosen by the client via `html/template` escaping | **HIGH** | **FIXED** | measured, 53.3 |
 | CHAOS-92c | `policyLogURI` retains the unbounded path into the ring, the JSONL, the SIEM feed and the redaction pipeline (opt-in per rule via `LogFullURI`) | **MEDIUM** | **FIXED** | measured, 53.2 |
 | CHAOS-92d | No counter, metric or health row on any of the above | **MEDIUM** | **FIXED** | source-verified |
+| CHAOS-92e | `fileblock.LogBlock` (`FILE_BLOCKED (tunnel %s)`) retains the DECRYPTED inner path, unbounded, from six `emitFileBlock` call sites — the sixth log sink, missed by this sweep's own enumeration and invisible to its source gate. Fed by `http.ReadRequest`, which caps nothing, so the value is unbounded on the wire rather than ~1 MiB | **MEDIUM** | **FIXED** | measured, 53.11 |
 
 ### 53.8 Rows left OPEN by attribution rather than fixed
 
@@ -12973,8 +12977,81 @@ measured numbers (1 048 631 log bytes; 5 245 706 body bytes), and seven
   meaningless for the `LogFullURI` case; the byte-budget question for the ring
   as a whole is X-3's and is not closed here.
 - **The source gates are textual.** They fail on a new unbounded
-  `sanitizeLog(…URL.Path)` site and on a direct `blockpage.Serve` call, which
-  are the two shapes that reintroduce the defect, but a new sink that retains
-  the path by some other route — a new `logstore` field, a new egress header —
-  would not trip them. CDR-PATH-1 is exactly that shape, found by reading
-  rather than by a gate.
+  `sanitizeLog(…URL.Path)` site, on a direct `blockpage.Serve` call and (§53.11)
+  on a direct `fileblock.LogBlock`/`BlockConn` call, which are the three shapes
+  that reintroduce the defect, but a new sink that retains the path by some
+  other route — a new `logstore` field, a new egress header — would not trip
+  them. CDR-PATH-1 is exactly that shape, found by reading rather than by a
+  gate. **So was CHAOS-92e**, which was not a NEW sink but an existing one this
+  sweep's enumeration missed: the lesson recorded in §53.11 is that a
+  token-matching gate certifies the sinks the author already found, and the
+  enumeration — not the gate — is the load-bearing step.
+
+### 53.11 CHAOS-92e — the sixth log sink, found by re-reading the claim
+
+**Date:** 2026-10-26. **Scope:** the sink §53.1 did not enumerate.
+
+`emitFileBlock` ([proxy_tunnel.go](../proxy_tunnel.go)) calls
+`fileblock.LogBlock` ([internal/fileblock](../internal/fileblock/fileblock.go)),
+which writes `FILE_BLOCKED (tunnel %s) -> %q%q (ext=%q)` with the client-chosen
+path as the second `%q`. Six call sites reach it: four pass `req.URL.Path` from
+the decrypted inner request (global extension, policy profile, content type,
+content disposition), one passes an origin-supplied `Content-Disposition`
+filename, and `inspectMagicBlock` forwards the path for the magic-byte and
+polyglot blocks.
+
+**Why the sweep's gate did not catch it.**
+`DefectEveryRetainingSinkGoesThroughTheClamp` matches lines carrying **both**
+`sanitizeLog(` and `URL.Path`. This sink sanitizes in the callee — `obs.Sanitize`,
+the deliberately independent internal twin of `sanitizeLog` (ADR-0003) — so its
+call sites carry no `sanitizeLog(` token at all and the gate never examined them.
+The structural claim "one edit bounds all present and future sinks" was true of
+the sinks §53.1 had enumerated, and the enumeration was short by one.
+
+**Why it is worse per request than the five that were fixed.** The plain-HTTP
+sinks are fed by a path net/http caps at `MaxHeaderBytes + 4096` (§53.3). This
+one is fed by `http.ReadRequest` on the decrypted stream, which is
+`readRequestLimit(b, math.MaxInt64)` over a `textproto.ReadLine()` with
+`lim = -1` — **no bound on the inner request line at all**. Measured through
+`emitFileBlock` (gates below, verified to FAIL against the pre-fix tree):
+
+| path bytes | fill | process log | log ÷ path |
+|-----------:|:----:|------------:|-----------:|
+| 1 048 576 | `A` | 1 048 646 | 1.0x |
+| 1 048 576 | `\x00` | 1 048 647 | 1.0x |
+| 1 048 576 | `\xff` | **4 194 375** | **4.0x** |
+
+`obs.Sanitize` folds bytes `< 0x20` and `0x7F` to `_`, so a control-byte fill
+costs 1x — but `0xFF` is not a control byte, and `%q` renders each one as the
+4-character `\xff`. The multiplier is the client's to choose, as it is for the
+block page. Severity is **MEDIUM**, not HIGH: the precondition is the one
+CHAOS-69 named for the inner path (an allowed destination with SSL inspection
+enabled), not §53.2's stock-install reachability.
+
+**The fix** is the clamp this sweep already built, applied at the chokepoint:
+`emitFileBlock` wraps `urlPath` in `boundRetainedPath` **inside** the
+`fileblock.LogBlock` argument, so the sanitiser's scan and its copy are bounded
+too. It is package main's only route into `LogBlock`, so one edit bounds all six
+call sites. Enforcement is untouched — `fileBlocker.CheckPath`,
+`FileProfileBlocked` and every matcher ran on the whole value at the call site
+before reaching the emitter, and `BlockMessage` derives the 403 body from `ext`
+and `source` only, so **no client-visible byte depends on the path**.
+
+Gates, in [proxy_path_bounds_test.go](../proxy_path_bounds_test.go):
+
+| Gate | Proves |
+|------|--------|
+| `DefectTunnelFileBlockLogStaysBounded` | one inspected request cannot choose the log volume; the line says it was truncated and the counter moves |
+| `DefectTunnelFileBlockClampIsTheChokepointNotTheCallSites` | **source gate**: `fileblock.LogBlock`/`BlockConn` are reachable from package main only through `emitFileBlock`, which clamps inside the argument |
+| `ControlTunnelFileBlockEnforcementStillSeesTheWholePath` | the load-bearing control — a 1 MiB `.exe` path still matches with `ext=".exe"` |
+| `ControlTunnelFileBlockResponseIsUnchanged` | the 403 bytes are byte-identical at 16 B and 1 MiB: retention-only |
+| `ControlTunnelFileBlockRetainsOrdinaryValuesVerbatim` | ordinary traffic is verbatim, unmarked, and does not move the counter |
+| `ControlTunnelFileBlockBoundIsInclusive` | the boundary through the emitter, not only through the helper |
+| `ControlTunnelFileBlockHandlesMalformedValues` | 2/3/4-byte runes straddling the cut at four offsets each, plus `\xff`/`\x00`/`\n`/`\x7f` fills: no panic, no manufactured invalid UTF-8, the CWE-117 barrier intact |
+| `ControlTunnelFileBlockIsConcurrencySafe` | 32 concurrent emissions, exact counter, clean under `-race` |
+
+**Residual risk.** `cdrFilenameFromURL` (CDR-PATH-1, §53.8) is still the open
+egress sink and is unaffected by this clamp. The inner request line remains
+unbounded **on the wire** — bounding it is the `MaxHeaderBytes`-shaped product
+decision recorded as PATH-REFUSAL-1, and for the inspect loop it would be a
+`LimitReader`/`ReadRequest` replacement rather than a server option.
