@@ -9,6 +9,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the upstream mTLS client certificate failed to
+  load, has expired, or expires within 30 days.** That state was visible only in
+  the OCSP panel API; the one-page report read as healthy while upstream servers
+  requiring mutual TLS rejected the node. A new `upstream_mtls_client_cert` WARN
+  row (additive, report-only, no row when unconfigured or healthy) carries no
+  file path or error text. No certificate-loading behavior changes.
+
 - **Diagnostics now warns when OCSP checking is enabled but does not cover
   inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
   on the OCSP panel and in a one-time log line; the one-page diagnostics report
