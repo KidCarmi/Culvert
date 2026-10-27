@@ -485,9 +485,10 @@ func setCDREnabledRuntime(on bool) error {
 // cdrActiveClient returns any live CDR client from the pool, or nil when
 // CDR is disabled / no instance is available.
 //
-// Backwards-compat: callers that just want "is CDR live?" treat nil as
-// "no" and keep working.  The proxy hot path should call cdrPickPooled()
-// instead to pick a healthy instance with circuit-breaker awareness.
+// It NEVER reserves a half-open probe (cdrClientPool.Pick is non-consuming):
+// its callers are status, UI and admin-diagnostic paths that do not record a
+// sanitize outcome, so a reservation taken here would strand the probe the
+// next real document needs.  The proxy hot path uses cdrPickPooledReserved.
 func cdrActiveClient() *CDRClient {
 	if pc := cdrPool.Pick(); pc != nil {
 		return pc.Client
@@ -521,7 +522,31 @@ func initCDRClient(cfg CDRConfig) error {
 	oldPool := cdrPool.List()
 	newPool, err := buildCDRPoolFromRegistry(cfg, oldPool)
 	if err != nil && len(newPool) == 0 {
-		// Complete failure — every instance failed to dial.
+		// Complete failure — every instance failed to dial, or none is
+		// enrolled. PUBLISH THE CONFIG ANYWAY, then report the error.
+		//
+		// The operator's enablement and fail_mode MUST reach the paths that
+		// decide what happens to a document nobody can scan. Returning here
+		// without publishing left cdrActiveCfg at its zero value — Enabled
+		// false — so an appliance configured enabled + fail_mode: closed that
+		// booted during a Sluice outage read itself as DISABLED and forwarded
+		// every inspected document unsanitized: exactly the state fail-closed
+		// exists to refuse (cdrUnavailableOutcome, cdr_proxy.go). It also made
+		// checkCDR report "disabled"/OK for a broken appliance instead of
+		// enabled-broken, and handed the two recovery re-inits
+		// (propagateServerRotation, the RenewCert poller, both calling
+		// initCDRClient(cdrActiveConfig())) a disabled config, which
+		// shutdownCDRClient'd CDR until restart rather than retrying.
+		//
+		// Ordering is unchanged for the breakers: nothing is constructed after
+		// this publish — buildCDRPoolFromRegistry has already returned and
+		// built nothing — so the cdr_breaker.go rule that a breaker is seeded
+		// from the config being applied, never from the published one, still
+		// holds on this path. Pinned by
+		// TestCDRUnavailable_FailClosedSurvivesPoolInitFailure.
+		cdrClientMu.Lock()
+		cdrActiveCfg = cfg
+		cdrClientMu.Unlock()
 		return fmt.Errorf("cdr: init pool: %w", err)
 	}
 	cdrPool.replace(newPool)

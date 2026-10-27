@@ -41,12 +41,12 @@ docker compose up -d          # a working proxy + admin UI, no config required
 | **TLS inspection** | Opt-in MITM with on-the-fly ECDSA P-256 leaf certs, per-host bypass, bounded leaf cache (10k entries / 1h TTL) |
 | **Policy** | Priority-ordered, first-match rules across 8 condition types; default-deny (Zero Trust); Allow / Drop / Block Page / Redirect actions; per-rule TLS inspect-or-bypass |
 | **Identity** | Local (bcrypt), OIDC (Auth-Code + PKCE), SAML 2.0, LDAP/AD; multi-IdP with email-domain routing; TOTP 2FA; admin RBAC (admin/operator/viewer) |
-| **Content security** | ClamAV antivirus, pure-Go YARA engine, URLhaus + OpenPhish threat feeds, regex DPI on decrypted responses, file-type blocking, domain blocklists, UT1 URL categories, CDR |
+| **Content security** | ClamAV antivirus, pure-Go YARA engine, URLhaus + OpenPhish threat feeds, regex DPI on decrypted responses, file-type blocking, domain blocklists, UT1 URL categories, [CDR](docs/operator/cdr-content-disarm-reconstruction.md) (Content Disarm & Reconstruction via the Sluice sidecar) |
 | **Observability** | Prometheus metrics, live SSE dashboard, structured JSON logs, syslog forwarding (RFC 3164/5424), signed webhook alerts, tamper-evident audit trail |
 | **Distributed** | gRPC Control Plane / Data Plane with mTLS, config-snapshot sync, node groups, per-group bandwidth/QoS, config versioning, rolling upgrades, optional etcd fencing lease for HA |
 | **Supply chain** | Signed release catalog (Ed25519 + Sigstore keyless), digest-pinned image dispatch, SLSA L3 provenance, Cosign-signed artifacts |
 
-See the interactive **[architecture overview](docs/architecture.md)** and the **[Admin UI / Control Plane reference](CLAUDE.md#admin-ui--control-plane)** for detail.
+See the interactive **[architecture overview](docs/architecture.md)** and the **[Admin UI / Control Plane reference](docs/agent-context/domains/admin-control-plane.md)** for detail.
 
 ---
 
@@ -151,7 +151,7 @@ security:
   ip_filter_mode: allow    # allow | block | "" (off)
   ip_list:
     - 192.168.1.0/24
-  rate_limit: 60           # requests/min per IP
+  rate_limit_rpm: 60       # requests/min per IP (canonical key; rate_limit is a deprecated alias)
   max_conns_per_ip: 256
 
 upstream:
@@ -177,11 +177,27 @@ Core        -port 8080  -ui-port 9090  -socks5-port 0  -config <file>
 TLS         -ca-path <bundle>  -tls-cert  -tls-key  -ui-no-tls
 Auth        -ui-users-file <db>  -ui-allow-ip <cidrs>  -session-timeout 8
 Filtering   -blocklist  -policy  -geoip-db  -clamav-addr  -yara-rules-dir  -threat-feed-db
-Logging     -logfile  -log-max-mb 50  -request-log-max-mb 100  -audit-log  -syslog
-Metrics     -metrics-token  -rate-limit  -otlp-endpoint <url>
+Logging     -logfile  -log-max-mb 50  -request-log <file>  -request-log-max-mb 100  -audit-log  -syslog
+Metrics     -metrics-token  -rate-limit-rpm  -otlp-endpoint <url>
 Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
 Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 ```
+
+Less common flags (the full list is `culvert -h`). Unless noted, a non-empty / non-zero / `true` flag value overrides the matching `config.yaml` value; an empty, zero or `false` flag falls through to the YAML value, so a flag cannot clear a setting the config file makes:
+
+| Flag | Purpose |
+|---|---|
+| `-ip-filter-mode allow\|block` | IP filter mode. Any other value aborts startup. YAML: `security.ip_filter_mode`. Filtering is off only when both are empty: `-ip-filter-mode=` does not disable a mode set in YAML; clear the YAML key instead. |
+| `-trust-forwarded-headers` | Trust `X-Forwarded-Host` and `X-Forwarded-Proto` only (OIDC redirect URL when `proxy.base_url` is unset, CP/DP bootstrap URLs). It does **not** trust `X-Forwarded-For`: client-IP resolution for admin allowlists, rate limits, lockout and audit uses `-trusted-proxy-cidrs` / `proxy.trusted_proxy_cidrs`. OR-ed with `proxy.trust_forwarded_headers` (either enables it). Unscoped (any direct peer) - read [OPERATIONS.md](docs/OPERATIONS.md) item 6 first. |
+| `-syslog-format rfc3164\|rfc5424` | Remote syslog message format (default `rfc3164`); used with `-syslog`. |
+| `-revocations-file`, `-fileprofiles-file`, `-cluster-db` | Persistence paths for session revocations, file-extension profiles and cluster state (e.g. `/data/revocations.json`). |
+| `-cat-sync-interval 24h` | Re-sync interval for the URL category community feed (with `-cat-feed-db`). |
+| `-scan-svc-listen :8484` | Run as the scan-microservice sidecar on this address (the client side is `-scan-svc-url`). `/scan` inspects bodies only with ClamAV (`-clamav-addr` / `security_scan.clamav_addr`) or loaded YARA rules (`-yara-rules-dir`) on the sidecar process itself; configured DPI patterns apply separately to text content types. `security_scan.enabled` or a threat-feed DB alone does not scan bodies (threat feeds check URLs and domains only): `/health` still reports ok and `/scan` answers clean for every body. |
+| `-list-backups -backup-dir /backup` | Print every regular file in `-backup-dir` (absolute path, default `/backup`) as a JSON array and exit. Entries are not filtered or validated as Culvert backups (directories and symlinks are skipped; `encrypted` is a magic-byte probe only), so keep the directory free of unrelated files. |
+| `-cdr-enabled`, `-cdr-endpoint`, `-cdr-certs-dir`, `-cdr-default-profile`, `-cdr-timeout-sec`, `-cdr-max-file-size-mb` | Sluice CDR client: enable, gRPC endpoint, bootstrap mTLS bundle directory (`ca.pem`, `client.pem`, `client.key`; read only while no instance is enrolled; UI enrollment writes `<data-dir>/integrations/sluice/<name>` instead), fallback profile (`default`), per-file deadline (>=30 s, default 35) and per-file size cap (default 50 MiB; larger files are not rejected: they skip sanitization and pass through unmodified, whatever the fail mode). `-cdr-enabled` can only turn CDR on; it cannot disable a config that enables it. |
+| `-cdr-fail-mode open\|closed`, `-cdr-default-mode`, `-cdr-server-fingerprint` | Sluice CDR client: behaviour when a Sluice call fails (default `open` passes the original file through; `closed` blocks it; the same mode is applied when no instance can be called at all — initial dial failed at startup, nothing enrolled, or every circuit breaker open — where `open` passes the file through unsanitized and `closed` refuses it with block reason `cdr_unavailable`, counted in `culvert_cdr_fail_closed_total`), mode sent when no policy rule applies (`ENFORCE` default, `REPORT_ONLY`, `BYPASS_WITH_REPORT`) and the pinned SHA-256 of Sluice's server certificate (64 hex chars, optional `sha256:` prefix and `:` separators). An invalid `-cdr-fail-mode` or `-cdr-server-fingerprint` aborts startup; an unrecognized `-cdr-default-mode` is treated as `ENFORCE`. YAML: `cdr.fail_mode`, `cdr.default_mode`, `cdr.server_fingerprint`; config load validates these only when `cdr.enabled: true` is in the file, so a disabled block turned on later by `-cdr-enabled` or the admin UI is not re-checked (a bad fail mode then acts as `open`, a bad mode as `ENFORCE`, a bad fingerprint fails the Sluice dial and leaves CDR off). |
+| `-ui-san host,ip,...` | Extra SANs for the self-signed admin-UI certificate. Unlike other flags it does not override YAML: the values are **merged** with `proxy.ui_sans`. A non-empty SAN list saved in `admin_settings.json` (admin UI settings) replaces both at startup. Only used for the auto-generated certificate: ignored with `-ui-no-tls` (plain HTTP) or when both `-tls-cert` and `-tls-key` are supplied; with TLS on and only one of the pair supplied, the self-signed certificate is used. |
+| `-support-bundle <path>` | One-shot, headless recovery command: writes a redacted support bundle containing only the always-on (L0) sections (currently product, health, readiness, crash and support metrics; crash holds the most recent recovered panic, if any) to `<path>` (a new file is created with mode `0600`; an existing file is overwritten and keeps its mode), prints its bundle ID, section counts and SHA-256, and exits without starting any listener. For the full bundle use the admin UI; see [support-bundles-and-diagnostics](docs/operator/support-bundles-and-diagnostics.md). |
 
 > In the shipped Docker image, persistence paths such as `/data/ca.bundle` and `/data/ui_users.json` are supplied by the compose command line, not by binary flag defaults.
 
@@ -191,6 +207,7 @@ Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 |---|---|
 | `CULVERT_CA_PASSPHRASE` | CA private-key encryption passphrase (**required** for TLS inspection) |
 | `CULVERT_LOG_PASSPHRASE` | Encryption-at-rest passphrase for the persistent log store. Falls back to `CULVERT_CA_PASSPHRASE` if unset; empty (both unset) = encryption off. |
+| `CULVERT_SESSION_SECRET` | Hex-encoded session-cookie HMAC key (≥ 64 hex chars). Set the same value on every node behind a load balancer so sessions are valid cluster-wide; takes priority over `session_secret` in the config file. A random per-start key is used only when neither this nor a valid `session_secret` is set. An invalid value here aborts startup. |
 | `CULVERT_C2_ENFORCE` | Admin RBAC enforcement mode. Default `enforce` (fail-closed); set `false`/`0`/`no`/`off` for shadow (log-only). Read once at startup. |
 | `CULVERT_RELEASE_PROXY_REPO` | Bare image repository allowed for release dispatch (default `ghcr.io/kidcarmi/culvert`; no tag/digest). |
 | `CULVERT_MAINT_AGENT_URL` | Local maintenance-agent endpoint (default Unix socket `/run/culvert-maint/culvert-maint.sock`). |
@@ -242,7 +259,7 @@ Culvert is built defense-in-depth. Every claim below is enforced in code.
 | **Certificate revocation** | OCSP checking (fail-closed when a published responder is unreachable), currently scoped to the upstream parent-proxy TLS handshake only - **not yet wired to SSL-inspected origin certificates**. CRL checking is **not yet implemented** - see [Limitations](#limitations--known-gaps) |
 | **Hop-by-hop stripping** | RFC 7230-compliant - parses the `Connection` header for dynamically listed hop-by-hop names |
 | **Header scrubbing** | Strips private IPs from `X-Forwarded-For`, drops private `X-Real-IP`, always removes `X-User-Identity` before forwarding |
-| **Password complexity** | 8+ chars, mixed case, and a digit required |
+| **Password complexity** | 8 bytes minimum and 72 bytes maximum (bcrypt's hard limit; both bounds count UTF-8 bytes, not characters), with at least one uppercase letter, one lowercase letter and one digit (`validatePasswordComplexity`, `store.go`) |
 | **Admin RBAC (defense-in-depth)** | Metadata-driven enforcement layer *in addition to* per-handler `requireRole`; report-only audit-completeness and role-divergence detectors; read-only governance surface at `/api/governance/control-plane` |
 
 ### Post-Quantum key exchange
@@ -370,7 +387,7 @@ Development phases, production-readiness items, and the engineering governance m
 
 1. Fork and branch (`git checkout -b feature/my-feature`)
 2. `go test -race ./...`
-3. Keep the admin-API route-metadata and config-surface parity tests green (see [`CLAUDE.md`](CLAUDE.md))
+3. Keep the admin-API route-metadata and config-surface parity tests green (see [current conventions](docs/agent-context/conventions.md))
 4. Open a PR - the full CI pipeline (CodeQL, security gate, golangci-lint) runs automatically
 
 ---

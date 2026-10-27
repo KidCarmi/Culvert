@@ -195,7 +195,7 @@ type PolicyRule struct {
 	srcIPNet *net.IPNet
 
 	// srcPrefix is srcIPNet expressed as a netip.Prefix, precomputed by
-	// sortLocked() from the SAME *net.IPNet via prefixFromIPNet (security.go) —
+	// sortLocked() from the SAME *net.IPNet via prefixFromIPNet (admission.go, over internal/admission) —
 	// the helper the IP filter already uses, so both matchers inherit one
 	// pinned conversion (including the 4-in-6 subtlety its differential test
 	// covers) instead of two hand-rolled ones.
@@ -263,9 +263,15 @@ type PolicySchedule struct {
 // definitions. Published revisions are immutable except for each rule's shared
 // atomic hit-accounting cell.
 type PolicyStore struct {
-	mu        sync.RWMutex
-	saveMu    sync.Mutex // serializes snapshot-through-policy-and-meta publication
-	rules     []*PolicyRule
+	mu     sync.RWMutex
+	saveMu sync.Mutex // serializes snapshot-through-policy-and-meta publication
+	rules  []*PolicyRule
+	// verified is the rule slice for which evaluationSnapshot's publication
+	// check has already passed. It is a memo of a property publication
+	// establishes, never a second source of truth: `rules` alone decides what
+	// the evaluator sees. See evaluationSnapshot for why it is compared by
+	// slice identity and why a stale value is always safe.
+	verified  []*PolicyRule
 	path      string
 	version   int64  // incremented on every mutation
 	updatedAt string // RFC3339 timestamp of last mutation
@@ -275,6 +281,88 @@ type PolicyStore struct {
 	// false (the GUI warning stays up) until a later write succeeds. Only a
 	// successful SaveErr, or a later Load, clears it.
 	adoptUnsaved atomic.Bool
+	// loadDropped is the bounded record of rules the most recent Load
+	// rejected (policyRulePersistable). Read-only diagnostic state for the
+	// operator contract; it never feeds evaluation. Replaced wholesale on
+	// every successful Load (a parsed file, or the adoption of a missing one)
+	// so a clean reload clears it. Written under mu, together with the rules
+	// or path that Load publishes; read lock-free by Diagnostics.
+	loadDropped atomic.Pointer[policyLoadDropped]
+	// droppedOnLoad counts the rules the most recent SUCCESSFUL Load refused
+	// via the fail-closed gate (policyRulePersistable). It exists so a caller
+	// can tell a policy file that filtered down to nothing from a genuinely
+	// empty one; see ConfiguredRuleCount and SEC-POLICYDROP-1.
+	droppedOnLoad atomic.Int64
+}
+
+// policyLoadDropped records the rules a Load rejected without retaining the
+// whole set: total counts every rejected rule, names keeps at most
+// policyLoadDroppedMaxNames display names of at most
+// policyLoadDroppedMaxNameBytes each, so a large hand-edited file bounds both
+// the resident state and the viewer-readable Diagnostics row.
+type policyLoadDropped struct {
+	names []string
+	total int
+}
+
+const (
+	policyLoadDroppedMaxNames     = 5
+	policyLoadDroppedMaxNameBytes = 128
+)
+
+// add counts one rejected rule and keeps its name while there is room,
+// truncated on a rune boundary to the byte bound.
+func (d *policyLoadDropped) add(name string) {
+	d.total++
+	if len(d.names) >= policyLoadDroppedMaxNames {
+		return
+	}
+	if len(name) > policyLoadDroppedMaxNameBytes {
+		cut := 0
+		for i := range name {
+			if i > policyLoadDroppedMaxNameBytes {
+				break
+			}
+			cut = i
+		}
+		name = name[:cut] + "…"
+	}
+	d.names = append(d.names, name)
+}
+
+// DroppedOnLoad reports how many rules the most recent successful Load refused
+// via the fail-closed persistability gate. A Load that failed before reading or
+// parsing the file leaves the previous value (and the previous rules) in place.
+// Runtime mutations do not change it: it describes the file as last loaded.
+func (ps *PolicyStore) DroppedOnLoad() int {
+	return int(ps.droppedOnLoad.Load())
+}
+
+// ConfiguredRuleCount reports the size of the rulebase the operator CONFIGURED
+// as of the last load: the rules that are installed plus the rules the load
+// gate refused. It is the fail-closed input for any decision that keys off
+// "has a policy been configured at all?" — above all the startup default-action
+// derivation in loadRewriteAndDefaultAction, which selects passthrough Allow
+// for a zero count and zero-trust Deny otherwise.
+//
+// SEC-POLICYDROP-1: len(List()) is the WRONG input for that question. A policy
+// file whose every rule the gate refuses (a hand-edited or downgraded-binary
+// file carrying an action this build cannot dispatch, an invalid auth rule, or
+// a SubjectMatch-bearing access rule) installs nothing, so len(List()) == 0
+// would report "no policy configured" and newly ADMIT the unmatched traffic the
+// nonempty-rule Deny default had been refusing — the refusal of a fail-open
+// rule turning into a fail-open default. Counting the refused rules keeps the
+// operator's intent ("I configured a policy") visible to that derivation.
+//
+// Because it describes the last load, a caller that needs the live installed
+// count must use List(); this is deliberately not a live view.
+// Both halves are read under ONE RLock, because Load publishes them together:
+// pairing an installed count with another load's refusal count could report
+// zero for a rulebase that was entirely refused.
+func (ps *PolicyStore) ConfiguredRuleCount() int {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return len(ps.rules) + int(ps.droppedOnLoad.Load())
 }
 
 // policyVersion returns the current version number and last-updated time.
@@ -376,6 +464,22 @@ func (ps *PolicyStore) Load(path string) error {
 			ps.mu.Lock()
 			ps.path = path
 			ps.adoptUnsaved.Store(true)
+			// The adopted file holds only the current (already filtered)
+			// rules, so nothing in it was rejected: clear any record left by
+			// an earlier Load of a different file. Published under ps.mu with
+			// the path, like the parsed-file branch below, so two concurrent
+			// Loads cannot leave one's record beside the other's state.
+			ps.loadDropped.Store(&policyLoadDropped{})
+			// SEC-POLICYDROP-1: this IS a successful load, so the refusal count
+			// must describe it. The branch keeps the current in-memory rules
+			// rather than replacing them, and nothing was refused in producing
+			// them from this path, so the honest answer is zero — leaving a
+			// previous file's count would have ConfiguredRuleCount describe a
+			// file this store no longer points at (CodeRabbit, PR #1651). The
+			// read- and parse-failure paths below deliberately do NOT clear it:
+			// they return without adopting anything, so the previous load still
+			// describes the rules that are installed.
+			ps.droppedOnLoad.Store(0)
 			ps.mu.Unlock()
 			if saveErr := ps.SaveErr(); saveErr != nil {
 				logWarnf("Policy: adopted %s but could not persist current rules yet: %v", sanitizeLog(path), saveErr)
@@ -402,6 +506,7 @@ func (ps *PolicyStore) Load(path string) error {
 	// only; the file is not rewritten here, so an offending line is inert and
 	// re-warned each load until removed.
 	kept := rules[:0]
+	dropped := &policyLoadDropped{}
 	for _, r := range rules {
 		if ok, reason := policyRulePersistable(r); !ok {
 			name := ""
@@ -409,13 +514,31 @@ func (ps *PolicyStore) Load(path string) error {
 				name = r.Name
 			}
 			logWarnf("Policy: dropping rule %q on load — %s", sanitizeLog(name), sanitizeLog(reason))
+			dropped.add(name)
 			continue
 		}
 		kept = append(kept, r)
 	}
 	rules = kept
+	if dropped.total > 0 {
+		logWarnf("Policy: %d of %d rule(s) in %s were refused by the load gate; the remaining %d are installed and the startup default action still treats this as a CONFIGURED policy (deny) rather than an empty one",
+			dropped.total, dropped.total+len(rules), sanitizeLog(path), len(rules))
+	}
 	ps.mu.Lock()
+	// SEC-POLICYDROP-1: remember the refusals, and publish them WITH the rules
+	// they were filtered out of. The count and ps.rules are one fact —
+	// "this is what the configured rulebase came to" — so a reader must never
+	// see one load's count beside another's rules: two overlapping Loads could
+	// otherwise leave a clean load's zero on top of a fully refused load's
+	// rules, and ConfiguredRuleCount would report zero for a policy that was
+	// entirely refused, which is the fail-OPEN direction (CodeRabbit, PR #1651).
+	// Stored unconditionally so a clean reload clears a previous file's count.
+	ps.droppedOnLoad.Store(int64(dropped.total))
 	ps.path = path
+	// Published in the same critical section as ps.rules, so the record
+	// always describes the Load whose rules are live, even when two Loads
+	// race (the last one to take ps.mu wins both).
+	ps.loadDropped.Store(dropped)
 	previousCounters := make(map[string]*policyRuleCounters, len(ps.rules))
 	for _, current := range ps.rules {
 		if validRuleID(current.ID) && current.counters != nil {
@@ -1216,13 +1339,55 @@ func (ps *PolicyStore) sortLocked() {
 	// Clone the slice and every definition before sorting/precomputing. A reader
 	// that captured the prior slice can finish against exactly that revision while
 	// this writer prepares and publishes the next one.
+	//
+	// The ORDER is decided first, on a private copy of the live pointers (read
+	// only — Priority — under the writer lock), and the definitions are cloned
+	// afterwards, in publication order, into ONE contiguous backing array. The
+	// permutation is identical to cloning first and sorting the clones: same
+	// comparator over the same input sequence, and the clone preserves Priority.
+	//
+	// What that buys is the ALLOCATION COUNT of a publication: one array per
+	// revision instead of one 568-byte object per rule. Measured on
+	// BenchmarkPolicyPublish_SortLocked (go1.27.3, 4-core amd64, benchstat over
+	// 10 runs): allocations/op -25% at every size, wall time -16.9% at 1 000
+	// rules (582µs → 484µs, p=0.000) and -18.2% at 10 000 (4.93ms → 4.03ms),
+	// and no significant change at 100 (p=0.105). ReplaceAll inherits it
+	// (-8.5% at 100 rules, -16.1% at 10 000).
+	//
+	// That is a control-plane cost with a DATA-PLANE consequence, which is why
+	// it is worth the care: this function runs under ps.mu, the writer lock, and
+	// evaluationSnapshot has to take the matching RLock before every scan, so a
+	// publication stalls all policy evaluation for exactly as long as it takes.
+	// Every policy edit, config-version restore and cluster config sync pays it.
+	//
+	// The layout is a deliberate SECOND-ORDER effect and was measured NOT to
+	// move the per-request scan: BenchmarkPolicyEvaluate_NoMatch/MatchLast/
+	// CIDRRules came out at -3.75% geomean with every size at p > 0.05. The
+	// reason is that the replaced per-rule `new(PolicyRule)` loop already drew
+	// from one size-class span, so the definitions were near-contiguous before
+	// this change too. Do not re-derive a scan win from "contiguous is faster";
+	// it was tried and it is not there. Relatedly, the engine's superlinear
+	// scaling above ~1 000 rules (7.6 ns/rule at 1 000 → 29.3 ns/rule at
+	// 10 000, BenchmarkPolicyEvaluate_NoMatch) is the touched working set
+	// (~5.7 MB of definitions) leaving L2, NOT heap scatter — shrinking what the
+	// scan streams per rule is the only thing that can address it, and this
+	// change deliberately does not attempt that.
+	//
+	// Retention is unchanged in practice: a reader holds the whole published
+	// slice, so every definition in the revision was already reachable from it.
+	// Nothing on the hot path WRITES through these pointers — accounting goes to
+	// the separately allocated counters cell — so sharing cache lines between
+	// adjacent definitions cannot introduce false sharing.
 	next := make([]*PolicyRule, len(ps.rules))
-	for i, rule := range ps.rules {
-		next[i] = clonePolicyRuleForPublication(rule)
-	}
+	copy(next, ps.rules)
 	sort.Slice(next, func(i, j int) bool {
 		return next[i].Priority < next[j].Priority
 	})
+	backing := make([]PolicyRule, len(next))
+	for i, rule := range next {
+		copyPolicyRuleForPublication(&backing[i], rule)
+		next[i] = &backing[i]
+	}
 	// Precompute the request-independent per-rule state once per mutation so
 	// Evaluate never re-derives it on the per-request hot path.
 	for i := range next {
@@ -1250,6 +1415,11 @@ func (ps *PolicyStore) sortLocked() {
 		precomputeSubjectNets(r.SubjectMatch)
 	}
 	ps.rules = next
+	// Publication is what establishes "every rule carries a counters cell", so
+	// it is also what records that this slice needs no further checking. Every
+	// other assignment to ps.rules leaves the memo naming a different slice,
+	// which is the fail-safe direction (one scan, never a stale verdict).
+	ps.verified = next
 }
 
 // copyPolicyRuleForPublication detaches every mutable nested value that the
@@ -1349,18 +1519,60 @@ type PolicyMatch struct {
 	ruleSnapshot      PolicyRule
 }
 
+// sameRuleSlice reports whether a and b are the same slice — same backing
+// array and same length — and therefore the same sequence of rule pointers.
+//
+// Identity, not equality: this is a memo key, and the only question it has to
+// answer is "is this the exact slice a previous check already accepted?".
+func sameRuleSlice(a, b []*PolicyRule) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+}
+
+// evaluationSnapshot returns the published rule slice for ONE evaluation.
+//
+// This runs on the per-request hot path (PolicyStore.Evaluate, i.e. every
+// proxied request on every protocol), so its cost must not scale with the
+// rulebase. It used to: the fast path scanned EVERY rule for a nil counters
+// cell before returning, and since production rules always have one, the scan
+// never short-circuited — it ran to completion on every request to prove a
+// negative. Measured on a 4-core Xeon @2.10GHz: 14 ns at 10 rules, 52 ns at
+// 100, 470 ns at 1 000 and 28 985 ns at 10 000 — superlinear, because the scan
+// is a pointer chase that leaves cache once the rulebase is large. It was paid
+// BEFORE evaluation, so it taxed even requests the engine decides in O(1): a
+// request matching the highest-priority rule cost 465 ns at 10 rules and
+// 30 900 ns at 10 000, i.e. at 10 000 rules ~98% of Evaluate was this scan and
+// ~2% was the policy decision.
+//
+// What the scan was actually asking is "has this slice been through
+// sortLocked?" — nil counters were only ever a PROXY for that, because
+// sortLocked is what allocates the cells (copyPolicyRuleForPublication) along
+// with normFQDN, srcIPNet, matchedConds and the Stage-1 subject nets. That is a
+// property of the SLICE, established once when it is published, so it is
+// checked once per publication instead of once per request: ps.verified
+// records the slice the check last accepted and the hot path compares slice
+// identity, which is O(1) at any rule count.
+//
+// Three properties make the memo safe, and they are why this is not the
+// atomic.Pointer read-view pattern used elsewhere in the tree:
+//
+//   - It FAILS SAFE. Every assignment to ps.rules installs a different slice
+//     (the mutators are copy-on-write), so the memo stops matching on its own
+//     and the next evaluator falls back to the full scan below. There is no
+//     "mutator forgot to republish" failure mode — the class of silent
+//     security failure the read-view pattern has to be walled against —
+//     because a stale memo costs one scan, never a wrong verdict.
+//   - It cannot be fooled by address reuse. ps.verified keeps the accepted
+//     backing array alive, so a later allocation can never land on it while
+//     the memo still names it.
+//   - It memoizes the EXISTING predicate rather than replacing it. The slow
+//     path below runs the same nil-counters scan and the same conditional
+//     sortLocked as before; the only change is that its verdict now sticks.
 func (ps *PolicyStore) evaluationSnapshot() []*PolicyRule {
 	ps.mu.RLock()
 	rules := ps.rules
-	needsPublication := false
-	for _, rule := range rules {
-		if rule.counters == nil {
-			needsPublication = true
-			break
-		}
-	}
+	verified := sameRuleSlice(ps.verified, rules)
 	ps.mu.RUnlock()
-	if !needsPublication {
+	if verified {
 		return rules
 	}
 
@@ -1375,6 +1587,9 @@ func (ps *PolicyStore) evaluationSnapshot() []*PolicyRule {
 			break
 		}
 	}
+	// The slice in hand has now passed exactly the check the pre-change fast
+	// path ran per request, so record it and let later evaluations skip it.
+	ps.verified = ps.rules
 	rules = ps.rules
 	ps.mu.Unlock()
 	return rules
@@ -1444,15 +1659,22 @@ func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.T
 	// host→category fusion depends only on the host, so running it per rule
 	// multiplied an O(all host patterns) taxonomy scan — plus a BadgerDB read
 	// per domain label on a feed-backed deployment — by the rule count.
-	catScratch := newHostCatScratch(in.host)
+	// Seeded, not lazy: in.normHost IS normalizeHost(in.host) (the field's own
+	// contract, set that way at every construction site), so re-deriving it
+	// here would normalize the destination twice per scan.
+	catScratch := newHostCatScratchNorm(in.host, in.normHost)
 	// The control flow is deliberately the parent enforcement loop's exact
 	// continue-based structure: on the nil-trace path (enforcement) it is
 	// branch-for-branch identical to the pre-extraction scan, and the skip-reason
 	// string literals are referenced only inside the `if trace != nil` guards, so
 	// they are never materialized on the hot path (no per-rule string work). The
 	// guards themselves are predicted-not-taken when trace is nil.
-	var scanNow time.Time
-	var scanNowSet bool
+	// Schedule state for the whole scan: the instant is read once on the first
+	// scheduled rule reached (a rulebase with none never reads the clock), and
+	// the timezone resolution plus the derived clock fields are memoised across
+	// the remaining rules. See scheduleClock.
+	var schedClock scheduleClock
+	var schedNowSet bool
 	for i := range rules {
 		rule := rules[i]
 		if !ruleIsEnabled(rule) {
@@ -1477,11 +1699,11 @@ func evalAccessRules(rules []*PolicyRule, in *accessEvalInput, now func() time.T
 			continue
 		}
 		if rule.Schedule != nil {
-			if !scanNowSet {
-				scanNow = now()
-				scanNowSet = true
+			if !schedNowSet {
+				schedClock.now = now()
+				schedNowSet = true
 			}
-			if !matchScheduleAt(rule.Schedule, scanNow) {
+			if !matchScheduleMemo(rule.Schedule, &schedClock) {
 				if trace != nil {
 					trace(rule, accessSkipSchedule)
 				}
@@ -1659,28 +1881,96 @@ func matchSchedule(s *PolicySchedule) bool {
 // instant to every scheduled rule — previously each rule paid its own
 // time.Now() inside the scan (and one decision could straddle a minute
 // boundary mid-scan).
+//
+// It is a ONE-SHOT use of the evaluation-scoped memo below, so this entry point
+// and the Stage-2 scan share a single implementation: there is exactly one
+// schedule-matching code path, and the memo cannot drift from it.
 func matchScheduleAt(s *PolicySchedule, now time.Time) bool {
-	loc := time.UTC
-	if s.Timezone != "" {
-		loc = scheduleLocation(s.Timezone)
+	c := scheduleClock{now: now}
+	return matchScheduleMemo(s, &c)
+}
+
+// scheduleClock memoises, for ONE evaluation scan, the per-timezone work a
+// scheduled rule needs: the *time.Location resolution and the derived clock
+// fields (weekday, minutes since midnight).
+//
+// Both halves of that are load bearing, and both were previously redone per
+// RULE even though they depend only on (instant, timezone) — never on the rule:
+//
+//   - The LOCATION lookup. scheduleLocationResolved already keeps tzdata off
+//     the hot path, but its process-wide sync.Map is keyed by an interface, so
+//     every probe pays runtime.nilinterhash → typehash → aeshashbody. Measured
+//     on a 1 000-scheduled-rule scan that map probe alone was 38.7% of the
+//     evaluation (scheduleLocationResolved 41.0% cumulative): one thousand
+//     identical lookups of the one timezone the deployment configured.
+//   - The CLOCK FIELDS. now.In(loc), Weekday(), Hour() and Minute() each
+//     re-derive the absolute-seconds split from scratch; together they were a
+//     further ~25% of the same scan.
+//
+// The memo is SINGLE-ENTRY and keyed on the timezone STRING, which is the shape
+// real rulebases have: a posture configures one timezone (or leaves it empty
+// for UTC), so the first scheduled rule resolves and every later one hits. A
+// rulebase that alternates timezones rule-by-rule simply re-derives, i.e. falls
+// back to exactly the pre-change cost — never worse.
+//
+// Passed by POINTER for the same reason clientSource is: a by-value copy would
+// throw the memo away before the next rule could see it. It stays on the
+// caller's stack and is never retained.
+type scheduleClock struct {
+	// now is the instant the whole scan decides against, captured once. The
+	// zero value means "not read yet"; the Stage-2 scan fills it lazily so a
+	// rulebase with no scheduled rule never reads the clock at all.
+	now time.Time
+
+	set     bool         // true once tz/local/weekday/minutes below are valid
+	tz      string       // timezone string the memo was derived for
+	local   time.Time    // now.In(loc), kept for the legacy string comparison
+	weekday time.Weekday // local.Weekday()
+	minutes int          // local minutes since midnight
+}
+
+// at returns the derived clock fields for tz, resolving and memoising on a
+// miss. The returned local time is only needed by the malformed-bounds legacy
+// path; the weekday and minutes carry the strict path.
+func (c *scheduleClock) at(tz string) (local time.Time, weekday time.Weekday, minutes int) {
+	if c.set && c.tz == tz {
+		return c.local, c.weekday, c.minutes
 	}
-	now = now.In(loc)
-	if !scheduleDayMatch(s.Days, now) {
+	loc := time.UTC
+	if tz != "" {
+		loc = scheduleLocation(tz)
+	}
+	l := c.now.In(loc)
+	c.set, c.tz = true, tz
+	c.local, c.weekday, c.minutes = l, l.Weekday(), l.Hour()*60+l.Minute()
+	return c.local, c.weekday, c.minutes
+}
+
+// matchScheduleMemo is the single schedule-matching implementation, reading the
+// instant and timezone through an evaluation-scoped memo. Decision order and
+// every comparison are those of the pre-memo matchScheduleAt.
+func matchScheduleMemo(s *PolicySchedule, c *scheduleClock) bool {
+	local, weekday, minutes := c.at(s.Timezone)
+	if !scheduleDayMatchWeekday(s.Days, weekday) {
 		return false
 	}
 	if s.TimeStart == "" || s.TimeEnd == "" {
 		return true
 	}
-	return scheduleTimeMatch(s.TimeStart, s.TimeEnd, now)
+	return scheduleTimeMatchMinutes(s.TimeStart, s.TimeEnd, minutes, local)
 }
 
-// scheduleDayMatch is the day-of-week check ("Mon", "Tue" …, case-insensitive).
-// An empty Days list means every day.
-func scheduleDayMatch(days []string, now time.Time) bool {
+// scheduleDayMatchWeekday is the day-of-week check ("Mon", "Tue" …,
+// case-insensitive); an empty Days list means every day. It takes an
+// ALREADY-DERIVED weekday so a scan that memoises it does not re-split the
+// instant per rule; comparison semantics are those of the pre-memo
+// scheduleDayMatch, which took a time.Time and is gone because the memo left it
+// without a caller.
+func scheduleDayMatchWeekday(days []string, wd time.Weekday) bool {
 	if len(days) == 0 {
 		return true
 	}
-	day := now.Weekday().String()[:3] // "Mon", "Tue" …
+	day := wd.String()[:3] // "Mon", "Tue" …
 	for _, d := range days {
 		if strings.EqualFold(d, day) {
 			return true
@@ -1696,12 +1986,19 @@ func scheduleDayMatch(days []string, now time.Time) bool {
 // allocation that put O(rules) heap garbage on the policy hot path. Malformed
 // bounds fall back to the legacy string comparison unchanged.
 func scheduleTimeMatch(startStr, endStr string, now time.Time) bool {
+	return scheduleTimeMatchMinutes(startStr, endStr, now.Hour()*60+now.Minute(), now)
+}
+
+// scheduleTimeMatchMinutes is scheduleTimeMatch against an already-derived
+// minutes-of-day, so a scan that memoises it does not re-split the instant per
+// rule. now is still required: the malformed-bounds fallback below compares
+// formatted strings and must stay byte-identical, and cur is ignored there.
+func scheduleTimeMatchMinutes(startStr, endStr string, cur int, now time.Time) bool {
 	start, okStart := parseClockMinutes(startStr)
 	end, okEnd := parseClockMinutes(endStr)
 	if !okStart || !okEnd {
 		return scheduleTimeMatchLegacy(startStr, endStr, now)
 	}
-	cur := now.Hour()*60 + now.Minute()
 	if start <= end {
 		// Normal range e.g. 09:00–17:00.
 		return cur >= start && cur < end
@@ -1807,7 +2104,7 @@ func newClientSource(clientIP string) clientSource {
 // zone here restores net.ParseIP's verdict exactly, so a zoned address still
 // matches no source-scoped rule rather than newly matching one. This is the
 // same parser swap, with the same explicit zone rejection, that the IP filter
-// already makes (ipFilterView.contains, security.go); the equivalence is
+// already makes (ipFilterView.contains, internal/admission); the equivalence is
 // pinned here by TestSrcPrefix_DifferentialAgainstLegacyMatcher, whose oracle
 // is still net.ParseIP.
 //
@@ -1982,7 +2279,9 @@ func matchDestNorm(rule *PolicyRule, host, normHost string, sc *hostCatScratch) 
 	// Amortized O(1) per rule: the host→category fusion is resolved ONCE per
 	// scan (hostCatScratch) and each of its halves is itself indexed — the
 	// urlcat reverse index answers host→category in O(labels) map probes
-	// (urlcat.Store.LookupHost) and the group membership check is a set probe.
+	// (urlcat.Store.LookupHost), and the group resolution plus membership check
+	// are two map probes off catgroup's lock-free published view (catgroup
+	// readView), with no per-rule lock on the group store.
 	if catGroupSet && !categoryGroupMatchesHostScratch(rule, sc) {
 		return false
 	}
@@ -2088,7 +2387,15 @@ func noteFileProfileUnresolvedBlock(id, name string) {
 	atomic.AddInt64(&statFileProfileUnresolvedBlocked, 1)
 	now := time.Now().Unix()
 	last := atomic.LoadInt64(&fileProfileUnresolvedLastLog)
-	if now-last >= 300 && atomic.CompareAndSwapInt64(&fileProfileUnresolvedLastLog, last, now) {
+	// CHAOS-84: MAGNITUDE, not sign. These are Unix SECONDS (not nanos, so no
+	// Duration conversion), and a backward clock step would otherwise suppress
+	// this line for the whole step — the only notice that a rule is blocking
+	// file-bearing transactions because its profile does not resolve.
+	elapsed := now - last
+	if elapsed < 0 {
+		elapsed = -elapsed
+	}
+	if elapsed >= 300 && atomic.CompareAndSwapInt64(&fileProfileUnresolvedLastLog, last, now) {
 		logger.Printf("WARN Policy: file profile id=%q (cached name %q) is referenced by a rule but does not resolve — file-bearing transactions on that rule are BLOCKED (fail-closed) until the profile store is restored or the rule is re-pointed (%d blocked since boot)",
 			sanitizeLog(id), sanitizeLog(name), atomic.LoadInt64(&statFileProfileUnresolvedBlocked))
 	}

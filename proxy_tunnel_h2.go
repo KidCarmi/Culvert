@@ -10,13 +10,13 @@ package main
 // (CVE-2023-44487) and the HTTP/2 CONTINUATION flood (CVE-2023-45288 — the Go /
 // x-net identifier; not the Apache-httpd CVE-2024-27316) are mitigated by default
 // in the vendored x/net v0.57.0 (the effective Rapid-Reset cap equals
-// MaxConcurrentStreams). Still deferred (marked inline):
-//   - :authority pinning / 421: NOT a security hole — upstreamCC is pinned to the
-//     CONNECT target so a client :authority cannot redirect the request off that
-//     connection (no SSRF). It is defense-in-depth against cross-origin coalescing
-//     confusion; deferred because a naive 421 risks breaking legitimate edge cases
-//     (IP-target CONNECT, single-SAN forged leaves already prevent coalescing) and
-//     warrants its own careful pass.
+// MaxConcurrentStreams). :authority pinning is enforced in the shared
+// runInspectExchange seam (SEC-TUNHOST-1, inspect_host_pin.go): upstreamCC is
+// pinned to the CONNECT target's address, so a client :authority cannot redirect
+// the request off that connection (no SSRF), but a shared front end routes by
+// :authority, so an unpinned stream reached a vhost policy never evaluated. A
+// mismatch is refused with the frozen pre-commit 403, not a 421; an IP-literal
+// CONNECT target is out of the pin's scope. Notes:
 //   - upstream (origin-initiated) GOAWAY → per-stream failure mapping is already
 //     handled: an origin GOAWAY errors the in-flight upstreamCC.RoundTrip, mapped to
 //     exRoundTripError/exDeliverError by handleH2StreamOutcome. No extra work.
@@ -389,9 +389,12 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 	// serverConn registers into the graceful-shutdown state and receives a client
 	// GOAWAY on process shutdown. The server carries the same caps as before —
 	// MaxConcurrentStreams (primary per-connection bound + effective Rapid-Reset
-	// cap), IdleTimeout, WriteByteTimeout, MaxReadFrameSize, and BaseConfig's
-	// MaxHeaderBytes — moved onto the shared instance, not changed. Eager-init makes
-	// h2InspectSrv non-nil in production; the fallback covers direct-call tests.
+	// cap), IdleTimeout, WriteByteTimeout, MaxReadFrameSize, and the base server's
+	// MaxHeaderBytes — moved onto the shared instance, not changed. serveConn picks
+	// the BaseConfig wiring that keeps both GOAWAY and those caps on whichever x/net
+	// server implementation this build compiles (see proxy_tunnel_h2_drain.go).
+	// Eager-init makes h2InspectSrv non-nil in production; the fallback covers
+	// direct-call tests.
 	sh := h2InspectSrv
 	if sh == nil {
 		// A nil here in production would mean init ordering regressed — the tunnel
@@ -405,12 +408,7 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 	// ServeConn runs each stream's handler in its own goroutine and blocks until
 	// the client connection is no longer readable (or a shutdown GOAWAY + stream
 	// completion, or the backstop force-close).
-	//lint:ignore SA1019 temporary compatibility bridge: x/net v0.59 deprecated this x/net/http2 API; kept until the inspected-H2 path migrates to Go's stdlib HTTP/2 APIs.
-	sh.srv.ServeConn(clientTLS, &http2.ServeConnOpts{
-		Context:    outer.Context(),
-		Handler:    handler,
-		BaseConfig: sh.base,
-	})
+	sh.serveConn(outer.Context(), clientTLS, handler)
 }
 
 // h2InspectStream handles one HTTP/2 stream: it reshapes the server-side request
@@ -429,13 +427,14 @@ func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Reque
 		filterStr = "on"
 		profileStr = sanitizeLog(string(match.Rule.FileProfile))
 	}
-	logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(req.URL.Path), profileStr, filterStr)
+	logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(boundRetainedPath(req.URL.Path)), profileStr, filterStr)
 
 	// Reshape the h2 server request for an h2 client RoundTrip: RoundTrip requires
 	// an absolute URL (scheme+host) and an empty RequestURI. The request travels
 	// over upstreamCC, which is pinned to the CONNECT target, so the :authority
-	// cannot redirect it off that connection (no SSRF). Strict :authority pinning
-	// / 421 handling is a security-PR refinement.
+	// cannot redirect it off that connection (no SSRF). runInspectExchange pins
+	// req.Host (:authority) to the authorized CONNECT host before this request
+	// is forwarded (SEC-TUNHOST-1).
 	reqPath := req.URL.Path
 
 	// Per-stream inactivity watchdog: cancel this stream's context if no body byte

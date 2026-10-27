@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alerts"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -295,8 +296,17 @@ func TestNoteCDRCallError_NoSubscriberNoDispatch(t *testing.T) {
 func TestNoteCDRCallError_SubscribedFiresOneDedupKey(t *testing.T) {
 	store := withCDRAlertStore(t)
 	resetCDRLogGate(t)
-	store.Add(AlertWebhook{URL: "https://example.invalid/hook", Events: []string{"cdr_unavailable"}, Enabled: true})
+	// The subscribed dispatch performs a REAL webhook delivery on a goroutine
+	// internal/alerts owns, and a failed delivery then saves the process-global
+	// retry queue. Aimed at https://example.invalid it outlived this test (a DNS
+	// lookup, bounded only by the 5 s delivery timeout) and did that save inside
+	// a LATER test — landing in an unrelated rollback's time-based storage-write
+	// scope (TestDCFin5_HistoricalRollbackIdentitySurvivesRestart under
+	// -shuffle 1792171671618181963). Loopback is refused at the SSRF dial guard
+	// with no lookup and no egress, and the drain below waits for that save.
+	store.Add(AlertWebhook{URL: "http://127.0.0.1:1/hook", Events: []string{"cdr_unavailable"}, Enabled: true})
 	rec := recordFireAlert(t)
+	retryBefore, droppedBefore := alerts.RetryQueueDepth(), alerts.RetryDroppedTotal()
 
 	const fires = 40
 	for i := range fires {
@@ -318,9 +328,32 @@ func TestNoteCDRCallError_SubscribedFiresOneDedupKey(t *testing.T) {
 		t.Fatalf("%d distinct dedup keys for %d failures of one outage, want 1 — a key per request "+
 			"cannot be suppressed and floods the bounded retry queue: %v", len(distinct), fires, distinct)
 	}
-	if tracked := store.DedupTracked(); tracked != 1 {
-		t.Fatalf("the alert store tracked %d dedup keys, want 1", tracked)
+	// The store dedups on exactly "event:detail", so the recorded content above
+	// IS this producer's key set; pin the one key to the bounded status class.
+	// Do NOT count store.DedupTracked() instead: the store is reachable through
+	// globalAlertStore by every `go fireAlert(...)` still in flight from an
+	// EARLIER test, and Dispatch records a key before it matches any hook. Under
+	// -shuffle 1793004681587733862 the two decryption_autoexclude promotions of
+	// TestADR0008_ClientPinnedRequiresAuthenticatedIdentity landed here and
+	// made it 3.
+	if want := codes.Unavailable.String(); !distinct[want] {
+		t.Fatalf("the outage's dedup key is %v, want the status class %q", distinct, want)
 	}
+	// Drain: the delivery goroutine's LAST shared write is the retry enqueue
+	// after its failure, made under the retry mutex that RetryQueueDepth also
+	// takes (or the drop counter, when the bounded queue is full). A saturated
+	// binary-wide delivery semaphore makes Dispatch enqueue synchronously, which
+	// satisfies the same condition. Nothing of this test is in flight after it.
+	deadline := time.Now().Add(5 * time.Second)
+	for alerts.RetryQueueDepth() <= retryBefore && alerts.RetryDroppedTotal() <= droppedBefore {
+		if time.Now().After(deadline) {
+			t.Fatal("the subscribed delivery never reached the retry queue")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	// The drop counter is bumped BEFORE the save, under the retry mutex, so
+	// take that mutex once more: the save has returned when this does.
+	_ = alerts.RetryQueueDepth()
 }
 
 // TestNoteCDRCallError_LogIsRateLimited pins the request-path half. The line is

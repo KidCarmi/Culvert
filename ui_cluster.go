@@ -21,17 +21,20 @@ func apiClusterStatus(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
+	// One locked snapshot: the CP supervisor claims the role asynchronously,
+	// so separate field reads could mix two states (and race).
+	view := clusterRoleSnapshot()
 	result := map[string]any{
-		"role":                   clusterRole.role,
-		"nodeID":                 clusterRole.nodeID,
-		"grpcAddr":               clusterRole.grpcAddr,
+		"role":                   view.role,
+		"nodeID":                 view.nodeID,
+		"grpcAddr":               view.grpcAddr,
 		"uptime":                 time.Since(startTime).Round(time.Second).String(),
 		"enrollEnabled":          globalClusterCA.Ready(),
 		"caFingerprint":          globalClusterCA.CACertFingerprint(),
 		"ha":                     globalHA.Status(),
 		"grpcCompressionEnabled": clusterGRPCCompression,
 	}
-	if clusterRole.role == "control-plane" {
+	if view.role == "control-plane" {
 		result["nodes"] = NodeMetricsList()
 		result["enrolledNodes"] = globalClusterStore.ListNodes()
 		result["activeTokens"] = countActiveTokens()
@@ -139,14 +142,72 @@ func apiClusterTokens(w http.ResponseWriter, r *http.Request) { //nolint:cyclop 
 		}
 		if err := globalClusterStore.Save(); err != nil {
 			logger.Printf("ClusterDB save error: %v", err)
+			// The token is ALREADY gone from the in-memory store — DeleteToken
+			// ran above — so this node has stopped honouring it whatever the
+			// response says, and a later successful Save persists that
+			// deletion. Answering 500 with no record at all would leave the
+			// only durable trace of the revocation on the next unrelated
+			// write (CWE-778; CodeRabbit, PR #1656). The token is NOT restored
+			// here: putting live enrollment material back because a disk write
+			// failed is the less safe of the two directions, and the 500
+			// already tells the operator to retry.
+			auditEvent(r, "enrollment.token_revoke_unpersisted", sanitizeLog(tokenHash),
+				"cluster enrollment token revoked in memory but the store write failed")
 			http.Error(w, "failed to persist token deletion", http.StatusInternalServerError)
 			return
 		}
+		// SEC-ENROLLAUDIT-1. Destroying cluster trust material was the one
+		// mutation on this route with no audit record: the POST that MINTS a
+		// token audits (apiClusterTokenCreate), and so does node revocation
+		// (apiClusterRevoke), but the DELETE that revokes a token left no
+		// trace of who removed it or when. The route metadata declared
+		// "audit delegated" for this method, which was true of POST and had
+		// no delegate at all here, so C2c's runtime audit-gap check could not
+		// notice either. Emitted only after the store has persisted, so the
+		// record cannot claim a revocation that did not survive the write.
+		//
+		// The hash comes from the query string, so it is sanitised like any
+		// other untrusted value (CWE-117) even though DeleteToken only
+		// returns true for a hash already in the store.
+		auditEvent(r, "enrollment.token_revoked", sanitizeLog(tokenHash),
+			"cluster enrollment token revoked")
+		// No saveConfigVersion: enrollment tokens are deliberately outside
+		// the rollback surface, for the reason recorded on
+		// apiClusterTokenCreate below.
 		jsonOK(w, map[string]any{"ok": true})
 
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// validateEnrollmentTokenRequest checks the node prefix (alphanumeric + _-
+// only, at most 255 characters) and the TTL (default 24 h, capped at 8760 h =
+// 1 year). Returns the effective TTL, or a client-facing error message.
+// Extracted from apiClusterTokenCreate unchanged, to keep that handler inside
+// the cyclomatic budget.
+func validateEnrollmentTokenRequest(nodePrefix string, ttlHours int) (ttl time.Duration, errMsg string) {
+	if len(nodePrefix) > 255 {
+		return 0, "node_prefix must be <= 255 characters"
+	}
+	for _, c := range nodePrefix {
+		if !isNodePrefixRune(c) {
+			return 0, "node_prefix must contain only alphanumeric characters, underscores, and dashes"
+		}
+	}
+	const maxTTLHours = 8760
+	if ttlHours > maxTTLHours {
+		return 0, fmt.Sprintf("ttl_hours must be <= %d (1 year)", maxTTLHours)
+	}
+	if ttlHours > 0 {
+		return time.Duration(ttlHours) * time.Hour, ""
+	}
+	return 24 * time.Hour, ""
+}
+
+// isNodePrefixRune reports whether c may appear in an enrollment node prefix.
+func isNodePrefixRune(c rune) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
 }
 
 // apiClusterTokenCreate mints a one-shot node-enrollment token.
@@ -160,7 +221,8 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	if clusterRole.role != "control-plane" {
+	view := clusterRoleSnapshot()
+	if view.role != "control-plane" {
 		http.Error(w, "enrollment only available on Control Plane", http.StatusBadRequest)
 		return
 	}
@@ -179,29 +241,10 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate node_prefix: alphanumeric + _- only, max 255 chars.
-	if req.NodePrefix != "" {
-		if len(req.NodePrefix) > 255 {
-			http.Error(w, "node_prefix must be <= 255 characters", http.StatusBadRequest)
-			return
-		}
-		for _, c := range req.NodePrefix {
-			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
-				http.Error(w, "node_prefix must contain only alphanumeric characters, underscores, and dashes", http.StatusBadRequest)
-				return
-			}
-		}
-	}
-
-	// Cap TTL at 8760 hours (1 year).
-	const maxTTLHours = 8760
-	ttl := 24 * time.Hour
-	if req.TTLHours > 0 {
-		if req.TTLHours > maxTTLHours {
-			http.Error(w, fmt.Sprintf("ttl_hours must be <= %d (1 year)", maxTTLHours), http.StatusBadRequest)
-			return
-		}
-		ttl = time.Duration(req.TTLHours) * time.Hour
+	ttl, verr := validateEnrollmentTokenRequest(req.NodePrefix, req.TTLHours)
+	if verr != "" {
+		http.Error(w, verr, http.StatusBadRequest)
+		return
 	}
 
 	// SEC-BOOTSTRAP-HOST-1 — bootstrap_cmd below is a `curl … | sudo bash`
@@ -223,7 +266,7 @@ func apiClusterTokenCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build enrollment URL.
-	cpAddr := clusterRole.grpcAddr
+	cpAddr := view.grpcAddr
 	caFP := globalClusterCA.CACertFingerprint()
 	enrollURL := fmt.Sprintf("culvert://enroll/%s/%s?ca-fp=sha256:%s", cpAddr, plaintext, caFP)
 
@@ -425,7 +468,7 @@ func apiClusterRevocations(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOK(w, map[string]any{
 		"local_revoked": sessionRevoked.Count(),
-		"cluster_mode":  audit.DPMode() || clusterRole.role == "control-plane",
+		"cluster_mode":  audit.DPMode() || isControlPlaneRole(),
 	})
 }
 

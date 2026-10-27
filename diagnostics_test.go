@@ -107,7 +107,8 @@ func assertCheckShape(t *testing.T, idx int, ck OperatorContractCheck) {
 }
 
 func TestApiDiagnostics_DefaultOK(t *testing.T) {
-	primeWritable(t) // baseline expects storage_path=ok
+	primeWritable(t)               // baseline expects storage_path=ok
+	pinRosterDurabilityBaseline(t) // and admin_roster_durability independent of test order
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
 
@@ -153,6 +154,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"interactive_login_state":    false,
 		"alert_webhook_signing":      false,
 		"memory_backstop":            false,
+		"admin_roster_durability":    false,
 	}
 	for i := range c.Checks {
 		assertCheckShape(t, i, c.Checks[i])
@@ -1116,6 +1118,11 @@ func resetDiagVerdictGlobals(t *testing.T) {
 	// same class of process-global and also folds into the aggregate verdict.
 	resetAuthCostHealthForTest()
 	t.Cleanup(resetAuthCostHealthForTest)
+	// CHAOS-71: the Control Plane gRPC listener record is a process-global that
+	// folds into the aggregate verdict via the cp_grpc_listener row, so it joins
+	// the same isolation helper — one rule to remember.
+	resetCPGRPCListenerHealthForTest()
+	t.Cleanup(resetCPGRPCListenerHealthForTest)
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version
@@ -1368,9 +1375,10 @@ func findSyslogFeedCheck(t *testing.T, c OperatorContract) OperatorContractCheck
 // This is a normal, valid posture (no remote SIEM forwarding) and must report
 // ok, not warn/fail.
 func TestApiDiagnostics_SyslogFeedNotConfigured(t *testing.T) {
-	prevAddr, prevSW := syslogConfiguredAddr, globalSyslog
-	syslogConfiguredAddr, globalSyslog = "", nil
-	t.Cleanup(func() { syslogConfiguredAddr, globalSyslog = prevAddr, prevSW })
+	prevAddr, prevSW := syslogConfiguredAddr, syslogHandle()
+	syslogConfiguredAddr = ""
+	setSyslogHandle(nil)
+	t.Cleanup(func() { syslogConfiguredAddr = prevAddr; setSyslogHandle(prevSW) })
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1384,13 +1392,14 @@ func TestApiDiagnostics_SyslogFeedNotConfigured(t *testing.T) {
 }
 
 // TestApiDiagnostics_SyslogFeedFail — a syslog target was configured but
-// InitSyslog never connected (globalSyslog nil), so the SIEM feed is silently
+// InitSyslog never connected (globalSyslogHandle nil), so the SIEM feed is silently
 // down. This is the blind-spot scenario the check exists to surface: it must
 // report fail with an operator_action.
 func TestApiDiagnostics_SyslogFeedFail(t *testing.T) {
-	prevAddr, prevSW := syslogConfiguredAddr, globalSyslog
-	syslogConfiguredAddr, globalSyslog = "tcp://collector.invalid:601", nil
-	t.Cleanup(func() { syslogConfiguredAddr, globalSyslog = prevAddr, prevSW })
+	prevAddr, prevSW := syslogConfiguredAddr, syslogHandle()
+	syslogConfiguredAddr = "tcp://collector.invalid:601"
+	setSyslogHandle(nil)
+	t.Cleanup(func() { syslogConfiguredAddr = prevAddr; setSyslogHandle(prevSW) })
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1407,16 +1416,17 @@ func TestApiDiagnostics_SyslogFeedFail(t *testing.T) {
 }
 
 // TestApiDiagnostics_SyslogFeedOK — a syslog target was configured and
-// InitSyslog succeeded (globalSyslog non-nil), matching the production success
+// InitSyslog succeeded (globalSyslogHandle non-nil), matching the production success
 // path. UDP construction never blocks on a handshake, so it stands in for a
 // live feed without a real collector.
 func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
-	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, globalSyslog
+	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, syslogHandle()
 	t.Cleanup(func() {
-		if globalSyslog != nil && globalSyslog != prevSW {
-			globalSyslog.Close()
+		if sw := syslogHandle(); sw != nil && sw != prevSW {
+			sw.Close()
 		}
-		syslogConfiguredAddr, syslogConfigured, globalSyslog = prevAddr, prevOK, prevSW
+		syslogConfiguredAddr, syslogConfigured = prevAddr, prevOK
+		setSyslogHandle(prevSW)
 	})
 	sw, err := newSyslogWriter("udp", "127.0.0.1:514", "rfc3164")
 	if err != nil {
@@ -1425,7 +1435,8 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 	// Success path: the live writer's target IS the operator's intent, so the
 	// intent (syslogConfiguredAddr) and the last-successful-connect tracker
 	// (syslogConfigured) agree.
-	syslogConfiguredAddr, syslogConfigured, globalSyslog = "udp://127.0.0.1:514", "udp://127.0.0.1:514", sw
+	syslogConfiguredAddr, syslogConfigured = "udp://127.0.0.1:514", "udp://127.0.0.1:514"
+	setSyslogHandle(sw)
 
 	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
@@ -1440,18 +1451,19 @@ func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
 
 // TestApiDiagnostics_SyslogFeedStalePreviousTarget is the regression test for
 // the stale-writer hole: observability inits from YAML/flags and connects the
-// first target (globalSyslog non-nil, syslogConfigured == that target), then a
+// first target (globalSyslogHandle non-nil, syslogConfigured == that target), then a
 // persisted admin-settings override re-inits to a NEW target that fails, moving
 // intent (syslogConfiguredAddr) without moving the live writer. A bare
-// globalSyslog != nil check reported OK; the feed to the intended collector is
+// globalSyslogHandle != nil check reported OK; the feed to the intended collector is
 // actually down.
 func TestApiDiagnostics_SyslogFeedStalePreviousTarget(t *testing.T) {
-	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, globalSyslog
+	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, syslogHandle()
 	t.Cleanup(func() {
-		if globalSyslog != nil && globalSyslog != prevSW {
-			globalSyslog.Close()
+		if sw := syslogHandle(); sw != nil && sw != prevSW {
+			sw.Close()
 		}
-		syslogConfiguredAddr, syslogConfigured, globalSyslog = prevAddr, prevOK, prevSW
+		syslogConfiguredAddr, syslogConfigured = prevAddr, prevOK
+		setSyslogHandle(prevSW)
 	})
 	sw, err := newSyslogWriter("udp", "127.0.0.1:514", "rfc3164")
 	if err != nil {
@@ -1459,7 +1471,7 @@ func TestApiDiagnostics_SyslogFeedStalePreviousTarget(t *testing.T) {
 	}
 	// Live writer + last-successful connect are the FIRST target; intent has
 	// since moved to a second target whose re-init failed.
-	globalSyslog = sw
+	setSyslogHandle(sw)
 	syslogConfigured = "udp://127.0.0.1:514"
 	syslogConfiguredAddr = "tcp://collector.invalid:601"
 
@@ -1551,6 +1563,10 @@ func TestApiDiagnostics_OIDCJWKSTrustReportsCeilingBreach(t *testing.T) {
 // way to discover or confirm-fix the condition without reading the process
 // log. This check makes the same evidence a standing GET /api/diagnostics
 // row instead.
+// This row's detail is admin-only (redactContractForRole): the roster it
+// describes is gated at RoleAdmin, so the remediation content asserted here
+// is driven as an admin. The viewer/operator posture is pinned separately by
+// TestApiDiagnostics_UsernameRowDetailIsAdminOnly.
 func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
 	snapshotCfgUIUsers(t)
 	longName := strings.Repeat("a", maxUsernameLen+1)
@@ -1558,7 +1574,7 @@ func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
 		t.Fatalf("SetUIUser: %v", err)
 	}
 
-	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
 	apiDiagnostics(w, r)
 
@@ -1599,8 +1615,18 @@ func TestApiDiagnostics_OversizeUsernameSurfacedOnContract(t *testing.T) {
 
 // TestApiDiagnostics_UsernameLengthOKByDefault pins the quiet case: an
 // ordinary roster with no oversize usernames reports ok, not warn.
+//
+// The test builds that roster itself. The roster is process-global, and
+// snapshotCfgUIUsers only restores it afterwards, so an account an earlier
+// test left behind used to be part of "the ordinary roster" here (#1563,
+// seed 1792141755409420182: TestSECBASIC1_OversizeUsernameIsBounded's 261-byte
+// account turned this row to warn).
 func TestApiDiagnostics_UsernameLengthOKByDefault(t *testing.T) {
 	snapshotCfgUIUsers(t)
+	cfg.mu.Lock()
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.user = ""
+	cfg.mu.Unlock()
 	if err := cfg.SetUIUser("ordinary-admin", "Chaos63-ordinary-1!", RoleAdmin); err != nil {
 		t.Fatalf("SetUIUser: %v", err)
 	}
@@ -1624,6 +1650,10 @@ func TestApiDiagnostics_UsernameLengthOKByDefault(t *testing.T) {
 // cfg.user when it has no roster entry (DeleteUIUser removes only the map
 // entry), so an oversize legacy name must keep the row at warn rather than
 // falsely reporting the remediation as done.
+// This row's detail is admin-only (redactContractForRole): the roster it
+// describes is gated at RoleAdmin, so the remediation content asserted here
+// is driven as an admin. The viewer/operator posture is pinned separately by
+// TestApiDiagnostics_UsernameRowDetailIsAdminOnly.
 func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	snapshotCfgUIUsers(t)
 	longName := strings.Repeat("l", maxUsernameLen+1)
@@ -1635,7 +1665,7 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 		t.Fatal("precondition: legacy name must still be a configured login name")
 	}
 
-	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
 	apiDiagnostics(w, r)
 
@@ -1647,7 +1677,7 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 		t.Errorf("admin_username_length status = %q, want warn for an oversize legacy login name with no roster entry", found.Status)
 	}
 	if !strings.Contains(found.OperatorAction, "/api/settings") || !strings.Contains(found.OperatorAction, "auth.user") {
-		t.Errorf("admin_username_length operator_action = %q, want the legacy-login remediation (Settings + -user/auth.user) — Admin Users cannot change cfg.user", found.OperatorAction)
+		t.Errorf("admin_username_length operator_action = %q, want the legacy-login remediation (Settings + -user/auth.user) — Administrators cannot change cfg.user", found.OperatorAction)
 	}
 	// POST /api/settings hashes whatever password it is given — a blank one
 	// included — so the remediation must require a new strong password
@@ -1655,16 +1685,16 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	if !strings.Contains(found.OperatorAction, "never leave the password blank") {
 		t.Errorf("admin_username_length operator_action = %q, want an explicit new-password requirement for the Settings step", found.OperatorAction)
 	}
-	// The legacy name has no Admin Users row here, so the mirror-cleanup
+	// The legacy name has no Administrators row here, so the mirror-cleanup
 	// step would be impossible to perform: overwriting cfg.user alone
 	// resolves it, and the action must not prescribe a roster delete.
 	if strings.Contains(found.OperatorAction, "delete the old name") {
 		t.Errorf("admin_username_length operator_action = %q, must not prescribe deleting a roster entry that does not exist", found.OperatorAction)
 	}
-	// Nor may it open with the generic Admin Users create/delete workflow:
+	// Nor may it open with the generic Administrators create/delete workflow:
 	// a legacy-only login has no roster row to replace or delete.
-	if strings.Contains(found.OperatorAction, "from Admin Users, create a replacement") {
-		t.Errorf("admin_username_length operator_action = %q, must not prescribe the Admin Users replace/delete workflow for a legacy-only login", found.OperatorAction)
+	if strings.Contains(found.OperatorAction, "from the Administrators panel, create a replacement") {
+		t.Errorf("admin_username_length operator_action = %q, must not prescribe the Administrators replace/delete workflow for a legacy-only login", found.OperatorAction)
 	}
 	// loadAuth re-applies -user AND -pass on every boot, so the startup
 	// password must change with the name or it overwrites the new one.
@@ -1677,7 +1707,7 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	if !strings.Contains(found.OperatorAction, "change-password") {
 		t.Errorf("admin_username_length operator_action = %q, want a durable-persistence step for the Settings-only replacement", found.OperatorAction)
 	}
-	// A legacy-only login gets no generic Admin Users clause, so the Settings
+	// A legacy-only login gets no generic Administrators clause, so the Settings
 	// step itself must state the 64-byte target: Settings enforces no length
 	// bound, and a merely "shorter" (e.g. 100-byte) name leaves the row warn.
 	if !strings.Contains(found.OperatorAction, "set a login of at most 64 bytes that") {
@@ -1685,7 +1715,7 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 	}
 	// SetAuth overwrites an existing roster entry of the same name (new
 	// password hash, RoleAdmin), so the replacement must be an unused name.
-	if !strings.Contains(found.OperatorAction, "that no existing Admin Users account already uses") {
+	if !strings.Contains(found.OperatorAction, "that no existing administrator account already uses") {
 		t.Errorf("admin_username_length operator_action = %q, want the legacy replacement to require an unused login", found.OperatorAction)
 	}
 	if strings.Contains(found.Message, longName) {
@@ -1698,6 +1728,10 @@ func TestApiDiagnostics_OversizeLegacyUsernameSurfacedOnContract(t *testing.T) {
 // mirrors the new name into the roster WITHOUT removing the old key, so the
 // row stays warn until the old name's roster entry is deleted too. The
 // operator_action must therefore name that delete step.
+// This row's detail is admin-only (redactContractForRole): the roster it
+// describes is gated at RoleAdmin, so the remediation content asserted here
+// is driven as an admin. The viewer/operator posture is pinned separately by
+// TestApiDiagnostics_UsernameRowDetailIsAdminOnly.
 func TestApiDiagnostics_MirroredLegacyUsernameRemediationSequence(t *testing.T) {
 	snapshotCfgUIUsers(t)
 	cfg.mu.Lock()
@@ -1710,7 +1744,7 @@ func TestApiDiagnostics_MirroredLegacyUsernameRemediationSequence(t *testing.T) 
 	}
 
 	get := func() *OperatorContractCheck {
-		r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+		r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 		w := httptest.NewRecorder()
 		apiDiagnostics(w, r)
 		found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
@@ -1784,6 +1818,10 @@ func TestApiDiagnostics_UsernameAboveAccountLimitButWithinLoginBound(t *testing.
 // the replacement, so when an affected account has TOTP the action must say
 // so and forbid deleting the old account first. A non-TOTP account must not
 // carry the caveat.
+// This row's detail is admin-only (redactContractForRole): the roster it
+// describes is gated at RoleAdmin, so the remediation content asserted here
+// is driven as an admin. The viewer/operator posture is pinned separately by
+// TestApiDiagnostics_UsernameRowDetailIsAdminOnly.
 func TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP(t *testing.T) {
 	snapshotCfgUIUsers(t)
 	longName := strings.Repeat("m", adminUsernameAccountLimit+1)
@@ -1791,7 +1829,7 @@ func TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP(t *testing.T) 
 		t.Fatalf("SetUIUser: %v", err)
 	}
 	get := func() *OperatorContractCheck {
-		r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+		r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 		w := httptest.NewRecorder()
 		apiDiagnostics(w, r)
 		found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")
@@ -1817,6 +1855,10 @@ func TestApiDiagnostics_OversizeUsernameRemediationWarnsAboutTOTP(t *testing.T) 
 // remediation: VerifyUIUser grants the roster role first, while SetAuth (the
 // Settings replacement) always creates the new name as admin, so following
 // the action without restoring the role would silently elevate the account.
+// This row's detail is admin-only (redactContractForRole): the roster it
+// describes is gated at RoleAdmin, so the remediation content asserted here
+// is driven as an admin. The viewer/operator posture is pinned separately by
+// TestApiDiagnostics_UsernameRowDetailIsAdminOnly.
 func TestApiDiagnostics_MirroredLegacyNonAdminRoleIsPreserved(t *testing.T) {
 	snapshotCfgUIUsers(t)
 	cfg.mu.Lock()
@@ -1833,7 +1875,7 @@ func TestApiDiagnostics_MirroredLegacyNonAdminRoleIsPreserved(t *testing.T) {
 	if role, ok := cfg.VerifyUIUser(longName, "Chaos63-role-2!"); !ok || role != RoleViewer {
 		t.Fatalf("precondition: effective role = %q/%v, want viewer", role, ok)
 	}
-	r := viewerCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
+	r := adminCtx(httptest.NewRequest(http.MethodGet, "/api/diagnostics", http.NoBody))
 	w := httptest.NewRecorder()
 	apiDiagnostics(w, r)
 	found := findDiagnosticCheck(decodeContract(t, w), "admin_username_length")

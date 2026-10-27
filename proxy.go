@@ -254,7 +254,11 @@ func policyLogURI(host, path string) string {
 	if path == "" {
 		return host
 	}
-	return host + path
+	// CHAOS-92: this is the single derivation of every retained request-log URI
+	// (logstore.Entry.URI → the in-memory ring, the persisted JSONL, syslog/SIEM
+	// and the redaction pipeline), so the clamp on the client-supplied path
+	// belongs here. See proxy_path_bounds.go.
+	return host + boundRetainedPath(path)
 }
 
 // recordInspectBlock logs a block decision from the SSL-inspect inner loop,
@@ -637,7 +641,7 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 			atomic.AddInt64(&statFileBlocked, 1)
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuth(clientIP, r.Method, r.Host, "FILE_BLOCKED", ext, "", authenticatedIdentity, authLog)
-			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(ext))
+			logger.Printf("FILE_BLOCKED %s -> %q%q (ext=%q)", clientIP, sanitizeLog(host), sanitizeLog(boundRetainedPath(r.URL.Path)), sanitizeLog(ext))
 			serveBlockPage(w, r.Host+r.URL.Path, "File Block", ext)
 			return "FILE_BLOCKED", true
 		}
@@ -675,9 +679,41 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 		if match.Rule.LogFullURI {
 			ruleURI = policyLogURI(r.Host, r.URL.Path)
 		}
+		// SEC-POLICYACTION-1 — resolve the stored action onto the constant
+		// this switch dispatches on, and fail CLOSED when it cannot be
+		// resolved.
+		//
+		// Pre-fix the switch read match.Action directly and had no `default:`,
+		// so an action this build does not recognize fell out of it to the
+		// function's trailing `return "OK", false`: the request was ALLOWED, no
+		// decision was recorded, and because the rule scan is first-match-wins
+		// (evalAccessRules) every LOWER-PRIORITY DENY RULE WAS SKIPPED TOO. One
+		// unrecognized action on a priority-1 `destFqdn: "*"` rule therefore
+		// disabled the whole rulebase beneath it, silently.
+		//
+		// It was reachable without hand-editing, because Action was validated
+		// only on the API ingress path: a mixed-version cluster (a Control Plane
+		// pushing a snapshot with a newer or renamed action), a restored backup,
+		// or an operator-managed policy_file all produced one.
+		// policyRulePersistable now refuses to install such a rule, and this is
+		// the runtime backstop for one that reached the matcher anyway.
+		//
+		// Blocking is the correct direction and mirrors the sibling gate in the
+		// same engine: IPFilter.Allowed denies all traffic on an unrecognized
+		// mode rather than admitting it.
+		action, actionKnown := canonicalPolicyAction(match.Action)
+		if !actionKnown {
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(match.Action), authenticatedIdentity, "", ruleURI, authLog)
+			logger.Printf("POLICY_UNKNOWN_ACTION %s %s %q {rule=%q priority=%d action=%q req_id=%s identity=%s action_taken=block}",
+				clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.Rule.Name), match.Rule.Priority,
+				sanitizeLog(string(match.Action)), reqID, sanitizeLog(authenticatedIdentity))
+			serveBlockPage(w, r.Host, "Unknown Policy Action", match.Rule.Name)
+			return "POLICY_BLOCK", true
+		}
 		// Each branch below emits its decision line through one of the
 		// logPolicy* helpers (see below the function) rather than inline.
-		switch match.Action {
+		switch action {
 		case ActionDrop:
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_DROP", match.Rule.Name, string(ActionDrop), authenticatedIdentity, "", ruleURI, authLog)
@@ -726,7 +762,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 					atomic.AddInt64(&statFileBlocked, 1)
 					atomic.AddInt64(&statBlocked, 1)
 					recordRequestAuthURI(clientIP, r.Method, r.Host, "FILE_BLOCKED", string(match.Rule.FileProfile), match.Rule.Name, authenticatedIdentity, "", ruleURI, authLog)
-					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(r.URL.Path), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
+					logger.Printf("FILE_BLOCKED (policy profile) %s -> %q%q (profile=%q rule=%q)", clientIP, sanitizeLog(host), sanitizeLog(boundRetainedPath(r.URL.Path)), sanitizeLog(string(match.Rule.FileProfile)), sanitizeLog(match.Rule.Name))
 					serveBlockPage(w, r.Host+r.URL.Path, "File Block (Policy)", string(match.Rule.FileProfile))
 					return "FILE_BLOCKED", true
 				}
@@ -1574,7 +1610,17 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// would lose the observation. The Drop branch's recorded status is
 	// deterministic (always POLICY_DROP), so emit it pre-abort here and skip
 	// the duplicate on the normal terminal path below. Enforcement untouched.
-	isDrop := match != nil && match.Rule != nil && match.Action == ActionDrop
+	// SEC-POLICYACTION-1: compare the CANONICAL action, the same value
+	// applyPolicyDecision will dispatch on. A rule stored as "drop" reaches the
+	// Drop branch there, so matching the raw string here would have skipped this
+	// pre-abort observation for exactly that rule and lost it (CodeRabbit on
+	// PR #1651, verified).
+	isDrop := false
+	if match != nil && match.Rule != nil {
+		if canon, known := canonicalPolicyAction(match.Action); known && canon == ActionDrop {
+			isDrop = true
+		}
+	}
 	if isDrop {
 		learnObserveDecision(auth, normHost, r.Method, match, "POLICY_DROP", "", learnCtx, learnHaveCtx)
 	}

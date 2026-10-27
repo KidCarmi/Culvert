@@ -952,6 +952,15 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
     <span id="config-freeze-msg"></span>
   </div>
 
+  <!-- Roster role clamp, non-admin view (SEC-RBAC-ROLE-1): the signed-in account
+       may itself be one held at viewer, and the explanation in Admin Users is
+       admin-only. Fixed text driven only by the count /api/stats already
+       returns to every role; which accounts are held stays admin-only. -->
+  <div id="roster-clamp-viewer-banner" class="banner warn" role="status" style="display:none;margin:14px 28px 0">
+    <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+    <span>Some console accounts are held at the viewer role because the saved user file names a role this version does not recognise (for example after restoring a backup from a newer version). If your account should have more access, ask an administrator to choose its role. If no administrator can sign in, recover from the host shell with --reset-password username:newpassword, which restores the admin role (and removes that account's two-factor enrolment).</span>
+  </div>
+
   <div class="content">
 
     <!-- ── DASHBOARD ─────────────────────────────────────────────────────── -->
@@ -1266,7 +1275,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         <div style="padding:14px 16px">
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:.95rem;font-weight:600">
             <input type="checkbox" id="ret-enabled" data-change="toggleLogSaving"> Save logs to disk
-            <span style="font-weight:400;font-size:.78rem;color:var(--muted)">(off = live feed only, last 5,000 in memory)</span>
+            <span style="font-weight:400;font-size:.78rem;color:var(--muted)">(off = live traffic only, last 5,000 in memory)</span>
           </label>
 
           <div id="ret-controls" style="margin-top:14px">
@@ -1795,7 +1804,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
         Connect OIDC or SAML 2.0 providers for single sign-on. Group memberships from the IdP are available as conditions in policy rules.
       </p>
       <div id="idp-persist-warning" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#f87171;border-radius:8px;padding:10px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.5">
-        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> identity providers are stored in memory only and will be <strong>lost on restart or upgrade</strong>. Start Culvert with <code>-idp-profiles-file /data/idp_profiles.json</code> (or set <code>proxy.idp_profiles_file</code> in config.yaml) to persist them.
       </div>
       <div id="idp-legacy-ldap-banner" style="display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:var(--text);border-radius:8px;padding:12px 14px;margin:0 0 16px;font-size:.82rem;line-height:1.6"></div>
       <div id="idp-list" style="display:flex;flex-direction:column;gap:10px"></div>
@@ -2560,6 +2569,10 @@ Firefox (all platforms):
               <span class="info-key">Tracing Headers Replaced</span>
               <span class="info-val" id="s-tracing-header-rejected">-</span>
             </div>
+            <div class="info-item" title="Client-supplied request paths that were clamped before Culvert retained a copy of them - in a log line, in a block page, or in the request-log URI. The request itself is never refused and policy enforcement always sees the whole path; only the retained copy is bounded, and it carries a marker naming the original length. Sustained growth means a source is sending very long paths to make Culvert write far more than it received (log-write and response-body amplification) through the proxy data plane.">
+              <span class="info-key">Request Paths Clamped</span>
+              <span class="info-val" id="s-retained-path-truncated">-</span>
+            </div>
           </div>
         </div>
 
@@ -2959,15 +2972,23 @@ Firefox (all platforms):
     <div class="view" id="view-users">
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Admin Users</span>
+          <span class="panel-title">Administrators</span>
           <button class="btn" data-click="openUserModal">+ Add User</button>
         </div>
         <div class="panel-body">
+          <p class="hint" id="roster-role-clamp-hint" style="display:none;color:var(--warn,#b8860b)">
+            <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+            <span id="roster-role-clamp-text"></span>
+          </p>
           <p class="hint">
             Manage who can access this dashboard and what they can do.
             <strong>admin</strong> - full access &nbsp;·&nbsp;
             <strong>operator</strong> - manage policy/blocklist/filters &nbsp;·&nbsp;
             <strong>viewer</strong> - read-only
+          </p>
+          <p class="hint" id="roster-persist-hint" style="display:none;color:var(--warn,#b8860b)">
+            <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
+            <span id="roster-persist-text"></span>
           </p>
           <table>
             <thead><tr>
@@ -3287,7 +3308,7 @@ Firefox (all platforms):
       </div>
 
       <div id="pol-persist-warning" class="banner crit" style="display:none" role="alert">
-        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> access rules are stored in memory only and will be <strong>lost on restart or update</strong>. Start Culvert with <code>-policy /data/policy.json</code> (or set <code>proxy.policy_file</code> in config.yaml) to persist them.
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> <strong>Not persisted:</strong> access rules are stored in memory only and will be <strong>lost on restart or upgrade</strong>. Start Culvert with <code>-policy /data/policy.json</code> (or set <code>proxy.policy_file</code> in config.yaml) to persist them.
       </div>
 
       <!-- Rule Table -->
@@ -3898,7 +3919,7 @@ Firefox (all platforms):
             How much of this node's TLS is actually being inspected right now, and why the rest is not.
             Coverage is <strong>inspected ÷ (inspected + bypass/exclusion)</strong> - decryption
             <em>failures</em> are counted separately (they are sessions to triage, not a deliberate coverage gap).
-            Counts are per-process since start; click any outcome or failure to see those sessions in the Live Feed.
+            Counts are per-process since start; click any outcome or failure to see those sessions in Traffic.
           </p>
           <div id="dechealth-coverage" style="margin:14px 0"></div>
           <div id="dechealth-bar" style="margin:14px 0"></div>
@@ -5254,7 +5275,7 @@ Firefox (all platforms):
                 <svg class="ico" aria-hidden="true"><use href="#i-refresh"/></svg> Refresh
               </button>
             </div>
-            <p class="hint">Version and health of the host-root agent that applies updates and runs backups - the same detail <code>systemctl status culvert-maint</code> shows, without SSH.</p>
+            <p class="hint">Version and health of the host-root agent that applies upgrades and runs backups - the same detail <code>systemctl status culvert-maint</code> shows, without SSH.</p>
             <div id="support-maint-agent" role="status" aria-live="polite"><p class="hint">Loading…</p></div>
           </div>
 
@@ -6148,7 +6169,7 @@ const viewMeta = {
   decprofiles:  { title: 'Decryption Profiles', meta: 'PAN-OS-style "how to decrypt" profiles referenced per policy rule (Inspect-as-HTTP/2, cert-verification, TLS floor/cap)' },
   policylearn: { title: 'Policy Learning', meta: 'Advisory, node-local learning - observes traffic during an explicit session and proposes born-disabled Allow rules with evidence; cannot alter enforcement policy' },
   decexclusions: { title: 'Decryption Exclusions', meta: 'Hosts inspection was auto-disabled for (fail-open learn cache) - volatile, per-node, expiring; every entry reduces inspection coverage' },
-  dechealth: { title: 'Decryption Health', meta: 'Inspection coverage, outcome mix, and failure taxonomy for this node (ADR-0011) - click any slice to drill into the Live Feed' },
+  dechealth: { title: 'Decryption Health', meta: 'Inspection coverage, outcome mix, and failure taxonomy for this node (ADR-0011) - click any slice to drill into Traffic' },
   fileblock:    { title: 'File Control',  meta: 'Block file downloads by extension - Executables, Scripts, Installers' },
   cdr:          { title: 'CDR',            meta: 'Content Disarm &amp; Reconstruction via Sluice - enrolled instances, policies, per-file testing' },
   rewrite:      { title: 'Header Rewrite', meta: 'Header injection & removal rules' },
@@ -6454,6 +6475,17 @@ function applySession(user, role) {
   uiRole     = role || '';
   uiUsername = user || '';
 
+  // SEC-HATOKEN-1 (client half). The HA join command is admin-only server-side,
+  // but this is a single-page app: a panel already rendered for an admin keeps
+  // its DOM across a logout and the next sign-in. Clearing here, at the one
+  // chokepoint every session change goes through (login and doLogout both call
+  // it), means the token cannot outlive the session that was allowed to see it
+  // even if the panel is never re-rendered.
+  const haCmdEl = document.getElementById('ha-deploy-cmd');
+  if (haCmdEl && role !== 'admin') {
+    haCmdEl.textContent = '';
+  }
+
   // Topbar info
   const info = document.getElementById('topbar-user-info');
   if (user || role) {
@@ -6621,7 +6653,34 @@ async function fetchUsers() {
   try {
     const d = await api('/api/auth/users');
     renderUsersTable(d.users || []);
+    renderRosterPersistHint(d);
   } catch (_) {}
+}
+
+// Admin-roster write failures (CHAOS-70), fed from the admin-only users
+// payload — never from the viewer-readable /api/stats. A refused change did
+// NOT take effect; a degraded login-path write means a single-use credential
+// or TOTP replay counter may not survive a restart.
+function renderRosterPersistHint(d) {
+  const hint = document.getElementById('roster-persist-hint');
+  if (!hint) return;
+  const failed = (d && d.adminRosterPersistFailures) || 0;
+  const degraded = (d && d.adminRosterPersistDegraded) || 0;
+  const parts = [];
+  if (failed > 0) {
+    parts.push(fmt(failed) + ' account change' + (failed === 1 ? ' was' : 's were') +
+      ' NOT applied because the roster could not be written to disk — verify the change took effect and retry once the data volume is writable.');
+  }
+  if (degraded > 0) {
+    parts.push(fmt(degraded) + ' login-time write' + (degraded === 1 ? '' : 's') +
+      ' (TOTP replay counter / backup-code use) failed to persist — a used code may be accepted again after a restart.');
+  }
+  if (parts.length) {
+    document.getElementById('roster-persist-text').textContent = parts.join(' ') + ' (counts since last restart)';
+    hint.style.display = '';
+  } else {
+    hint.style.display = 'none';
+  }
 }
 
 function renderUsersTable(users) {
@@ -6630,7 +6689,7 @@ function renderUsersTable(users) {
   tbody.innerHTML = tableRows(users, u => `
     <tr>
       <td><strong>${escHtml(u.username)}</strong></td>
-      <td><span class="badge role-badge-${escHtml(u.role)}" style="border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;text-transform:uppercase">${escHtml(u.role)}</span></td>
+      <td><span class="badge role-badge-${escHtml(u.role)}" style="border-radius:99px;padding:2px 10px;font-size:.72rem;font-weight:700;text-transform:uppercase">${escHtml(u.role)}</span>${u.roleClamped ? ' <span class="badge" data-role-clamped="1" title="The saved user file names a role this version does not recognise; held at viewer until a role is chosen" style="border-radius:99px;padding:2px 8px;font-size:.68rem;color:var(--warn,#b8860b)">held at viewer</span>' : ''}</td>
       <td>
         <button class="btn ghost sm" data-click="openUserModal" data-arg="${escHtml(u.username)}" data-arg2="${escHtml(u.role)}">Edit</button>
         ${u.username !== uiUsername ? `<button class="btn ghost sm" style="color:var(--red)" data-click="deleteUser" data-arg="${JSON.stringify(u.username).replace(/"/g,'&quot;')}">Delete</button>` : '<span style="color:var(--muted);font-size:.75rem">  (you)</span>'}
@@ -8543,6 +8602,16 @@ async function fetchStats() {
       sthr.textContent = thr > 0 ? fmt(thr) + ' replaced' : 'None';
       sthr.style.color = thr > 0 ? 'var(--warn,#b8860b)' : '';
     }
+    // Clamped request paths (CHAOS-92): same invisibility as the row above —
+    // the request succeeds and enforcement sees the whole path, so a source
+    // probing for log-write and response-body amplification leaves no other
+    // trace an admin would notice without a metrics scraper.
+    const srpt = document.getElementById('s-retained-path-truncated');
+    if (srpt) {
+      const rpt = s.retainedPathTruncated || 0;
+      srpt.textContent = rpt > 0 ? fmt(rpt) + ' clamped' : 'None';
+      srpt.style.color = rpt > 0 ? 'var(--warn,#b8860b)' : '';
+    }
     // Oversized-username login attempts (CHAOS-63): each one is refused with a
     // plain 400 and otherwise leaves no trace an admin would see without a
     // metrics scraper or shell access to the process log. Surfacing the count
@@ -8558,6 +8627,32 @@ async function fetchStats() {
         oversizeHint.style.display = '';
       } else {
         oversizeHint.style.display = 'none';
+      }
+    }
+    // Roster accounts held at viewer (SEC-RBAC-ROLE-1): ui_users.json named a
+    // role this build does not know (typically a backup restored from a newer
+    // build), so the account was lowered to read-only at load. The server
+    // already reports the count; without this note the admin only sees an
+    // account that mysteriously lost its authority. adminRosterRoleClamped is
+    // the canonical field (uiRosterRoleClamped is its deprecated alias).
+    const rc = s.adminRosterRoleClamped || 0;
+    // A clamped account cannot open the admin-only Admin Users view, so a
+    // non-admin also gets a fixed-text banner: it carries nothing beyond the
+    // count /api/stats already returns to every role.
+    const rcvBanner = document.getElementById('roster-clamp-viewer-banner');
+    if (rcvBanner) rcvBanner.style.display = (rc > 0 && uiRole && uiRole !== 'admin') ? '' : 'none';
+    const rcHint = document.getElementById('roster-role-clamp-hint');
+    if (rcHint) {
+      if (rc > 0) {
+        document.getElementById('roster-role-clamp-text').textContent =
+          fmt(rc) + ' account' + (rc === 1 ? ' is' : 's are') +
+          ' held at the viewer role: the saved user file names a role this version does not recognise ' +
+          '(for example after restoring a backup from a newer version). Those accounts are marked "held at viewer" in the list below: edit each one and choose a role to restore its access. ' +
+          'If no administrator can still sign in, recover from the host shell with --reset-password username:newpassword, ' +
+          'which restores the admin role (and removes that account\'s two-factor enrolment).';
+        rcHint.style.display = '';
+      } else {
+        rcHint.style.display = 'none';
       }
     }
     // nav badge
@@ -8590,20 +8685,37 @@ async function fetchStats() {
     // non-zero count means admin actions have already vanished for good.
     if ((s.auditLogWriteErrors || 0) > 0) {
       setPosture('logging', 'crit', fmt(s.auditLogWriteErrors) + ' audit entries lost (compliance record incomplete)');
-    } else if ((s.logWriteErrors || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.logWriteErrors) + ' write errors');
-    } else if ((s.processLogWriteErrors || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.processLogWriteErrors) + ' process-log lines lost');
-    } else if (logFallback.req || logFallback.audit) {
-      const which = logFallback.req && logFallback.audit ? 'Request+audit log'
-        : logFallback.req ? 'Request log' : 'Audit log';
-      setPosture('logging', 'warn', which + ' in-memory only (restart wipes)');
-    } else if ((s.logBackpressure || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.logBackpressure) + ' requests delayed by log I/O');
-    } else if ((s.processLogBackpressure || 0) > 0) {
-      setPosture('logging', 'warn', fmt(s.processLogBackpressure) + ' process-log lines delayed by log I/O');
     } else {
-      setPosture('logging', 'ok', 'Persisting');
+      // Every active warning is shown, in priority order, rather than the
+      // first one hiding the rest: several of these counters are
+      // process-lifetime, so a single precedence slot would let an old
+      // condition mask a new local failure indefinitely.
+      const warns = [];
+      if ((s.auditClusterPushDrops || 0) > 0) {
+        // CHAOS-61: this node's local audit file is fine, but a DP->CP push
+        // queue dropped entries while the Control Plane was unreachable, so the
+        // CENTRALIZED audit trail has a gap. Distinct remedy (restore the CP
+        // link, not disk space or local I/O), so it gets its own message.
+        warns.push(fmt(s.auditClusterPushDrops) + ' audit entries dropped syncing to Control Plane (centralized record incomplete)');
+      }
+      if ((s.auditClusterPushUnreportingNodes || 0) > 0) {
+        // A disconnected Data Plane cannot report its drops until it
+        // reconnects, and a pre-upgrade build never reports them, so a zero
+        // above is not proof of completeness.
+        const un = s.auditClusterPushUnreportingNodes;
+        warns.push(fmt(un) + ' Data Plane node' + (un === 1 ? '' : 's') + ' disconnected or not reporting audit drops (centralized audit completeness unknown)');
+      }
+      if ((s.logWriteErrors || 0) > 0) warns.push(fmt(s.logWriteErrors) + ' write errors');
+      if ((s.processLogWriteErrors || 0) > 0) warns.push(fmt(s.processLogWriteErrors) + ' process-log lines lost');
+      if (logFallback.req || logFallback.audit) {
+        const which = logFallback.req && logFallback.audit ? 'Request+audit log'
+          : logFallback.req ? 'Request log' : 'Audit log';
+        warns.push(which + ' in-memory only (restart wipes)');
+      }
+      if ((s.logBackpressure || 0) > 0) warns.push(fmt(s.logBackpressure) + ' requests delayed by log I/O');
+      if ((s.processLogBackpressure || 0) > 0) warns.push(fmt(s.processLogBackpressure) + ' process-log lines delayed by log I/O');
+      if (warns.length) setPosture('logging', 'warn', warns.join(' · '));
+      else setPosture('logging', 'ok', 'Persisting');
     }
     const c2b = document.getElementById('c2-shadow-banner');
     if (c2b) c2b.style.display = s.c2Mode === 'shadow' ? 'block' : 'none';
@@ -9079,7 +9191,7 @@ async function loadDecRedaction() {
   const cb = document.getElementById('dechealth-redact');
   if (!cb) return;
   try {
-    const d = await api('/api/decryption/redaction');
+    const d = await api('/api/traffic/redaction');
     cb.checked = !!d.redact_hosts;
   } catch (e) { /* not permitted / unavailable — leave unchecked */ }
 }
@@ -9089,7 +9201,7 @@ async function toggleDecRedaction() {
   const cb = document.getElementById('dechealth-redact');
   if (!cb) return;
   try {
-    await api('/api/decryption/redaction', { method: 'PUT', body: JSON.stringify({ redact_hosts: cb.checked }) });
+    await api('/api/traffic/redaction', { method: 'PUT', body: JSON.stringify({ redact_hosts: cb.checked }) });
     toast('Host/SNI redaction ' + (cb.checked ? 'enabled' : 'disabled'), 'success');
   } catch (e) {
     cb.checked = !cb.checked; // revert the optimistic flip
@@ -12565,6 +12677,13 @@ function setPosture(id, state, text) {
   const el = document.getElementById('po-' + id);
   if (!el) return;
   el.textContent = text;
+  // .posture-state clips with white-space:nowrap + ellipsis to keep the tile
+  // compact, which silently hides anything past the visible width — the
+  // Logging tile can now join several concurrent warnings with " · " and the
+  // combined string regularly overflows. The native title tooltip is the
+  // cheapest accessible way to read the full text without widening every
+  // tile or adding a detail view (CodeRabbit review, PR #1414).
+  el.title = text;
   el.classList.remove('skeleton');
   const item = el.closest('.posture-item');
   if (item) item.dataset.state = state;
@@ -19220,8 +19339,29 @@ async function loadHA(isCP) {
         syncCard.style.display = 'none';
         syncNote.style.display = 'none';
       }
-      if (r.deploy_cmd) {
-        document.getElementById('ha-deploy-cmd').textContent = r.deploy_cmd;
+      // SEC-HATOKEN-1 (client half). Three things have to line up here, and
+      // the server omitting deploy_cmd for a non-admin is only the first.
+      //
+      //  - An ABSENT field must CLEAR this element rather than leave the
+      //    previous value rendered. This is a single-page app, so the <pre>
+      //    survives a session change in the same tab; without the else, an
+      //    admin who opened the HA panel and logged out left their join token
+      //    in the DOM — and in the click-to-copy handler — for whoever signed
+      //    in next.
+      //  - The CURRENT role is re-checked at the moment of the write, because
+      //    loadHA is async: an admin response already in flight can resolve
+      //    AFTER applySession has switched the tab to a non-admin session, and
+      //    would otherwise write the token straight back into the DOM that
+      //    applySession had just cleared. Checking only on the way in, or only
+      //    at session change, leaves that window open (CodeRabbit on PR #1651,
+      //    verified — loadHA awaits its fetch).
+      //  - textContent, never innerHTML.
+      const haCmd = document.getElementById('ha-deploy-cmd');
+      const haIsAdmin = (typeof uiRole !== 'undefined' && uiRole === 'admin');
+      if (haIsAdmin && r.deploy_cmd) {
+        haCmd.textContent = r.deploy_cmd;
+      } else {
+        haCmd.textContent = '';
       }
       // Recent role transitions (M5) - newest first, from the bounded ring.
       const fevWrap = document.getElementById('ha-failover-events');
@@ -19700,6 +19840,11 @@ function resetBlockPage() {
              on its own) or has stopped entirely (the listening socket is gone —
              restart required). Fires once per episode, never per retry. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="socks5_listener_down"> SOCKS5 listener not accepting connections</label>
+        <!-- CHAOS-71: this node is configured as a Control Plane but its gRPC listener
+             has been unable to bind or serve for over 30 s (or its supervisor stopped).
+             Config distribution, node enrollment and certificate renewal are unavailable
+             fleet-wide; this node's own proxy keeps serving. Fires once per episode. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cp_grpc_listener_down"> Control Plane gRPC listener down (fleet config distribution unavailable)</label>
         <!-- CHAOS-57: threat intelligence has not synced successfully for over 2x the
              sync interval, or has never synced on this node. Last-known-good entries
              keep being enforced throughout — this is degraded freshness, not a dark
@@ -20181,6 +20326,11 @@ async function renderMCPCommandCenter(){
   var items=[];
   if(rolloutErr) items.push(['warn','Rollout posture unavailable: /api/mcp/rollout did not respond - kill switch, hard-fail and production-lock state are unknown','mcp-rollout']);
   if(distErr) items.push(['warn','Distribution posture unavailable: /api/mcp/distribution did not respond - fleet-effective state is unknown','mcp-health']);
+  // The DP applier fails CLOSED when its trust config is bad (previously visible only in the
+  // startup log and the raw API): the node silently ignores signed CP rollouts. Read-only
+  // surfacing of the bounded dp_compose_reason; "not_configured"/"ready" are healthy states.
+  var dpWarn=distErr?'':mcpxDpComposeWarning(d.dp_compose_reason);
+  if(dpWarn) items.push(['warn',dpWarn,'mcp-health']);
   if(gwKilled) items.push(['crit','Emergency kill switch active on gateway: all admission stopped (node-local)','mcp-rollout']);
   if(mgmtKilled) items.push(['crit','Emergency kill switch active on management: all admission stopped (node-local)','mcp-rollout']);
   if(gwSev!=='none') items.push([(gwSev==='high'||gwSev==='critical')?'crit':'warn','Gateway durability '+gwSev+': see durability meters','mcp-health']);
@@ -22089,6 +22239,16 @@ function mcpxFmtBytes(n){
   var u=['KiB','MiB','GiB','TiB'], i=-1; do{ n/=1024; i++; }while(n>=1024 && i<u.length-1);
   return n.toFixed(n<10?1:0)+' '+u[i];
 }
+// mcpxDpComposeWarning maps the bounded dp_compose_reason to an operator
+// message, or '' for the healthy states ("not_configured"/"ready"). Shared by the
+// Command Center "Needs attention" item and its Health drill-down, so the view
+// the item links to shows the same diagnosis.
+function mcpxDpComposeWarning(reason){
+  reason=reason||'';
+  if(!reason || reason==='not_configured' || reason==='ready') return '';
+  var dpWhy={invalid_trust_json:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS is present but is not valid JSON',invalid_trust_alg:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS names an unsupported algorithm',invalid_trust_key:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS holds a malformed public key',invalid_trust_store:'CULVERT_MCP_DISTRIBUTION_TRUST_KEYS could not form a trust store',state_dir_unavailable:'the durable state directory could not be created',recover_failed:'durable state could not be recovered',invalid_applier:'the applier could not be built'};
+  return 'This node ignores signed MCP distribution (fail-closed): '+(dpWhy[reason]||('reason '+reason))+'. Fix it and restart; see the startup log for detail.';
+}
 async function mcpxHealthLoad(){
   var root=document.getElementById('mcpx-health-root'); if(!root) return;
   var myTicket=++mcpxHealthTicket;
@@ -22097,6 +22257,17 @@ async function mcpxHealthLoad(){
   if(myTicket!==mcpxHealthTicket) return;
   root.textContent='';
   if(mcpxRfErr(d)){ root.appendChild(mcpxEl('div','mcpx-empty','Health unavailable - '+d.__err+'. (Unavailable read - not zero sessions and not zero durability use.)')); mcpxAnnounce('MCP health unavailable'); return; }
+  // DP distribution composition (fail-closed applier): the Command Center links
+  // here for it, so render it here. A failed read is shown as unavailable, never
+  // as healthy.
+  var dist=await mcpxRfFetch('/api/mcp/distribution');
+  if(myTicket!==mcpxHealthTicket) return;
+  if(mcpxRfErr(dist)){
+    root.appendChild(mcpxEl('div','mcpx-source','DP distribution composition unavailable - '+dist.__err+'.'));
+  } else {
+    var dpWarn=mcpxDpComposeWarning(dist.dp_compose_reason);
+    if(dpWarn){ var w=mcpxEl('div','mcpx-empty',dpWarn); w.setAttribute('role','alert'); root.appendChild(w); }
+  }
   var cards=mcpxEl('div','mcpx-cards2');
   cards.appendChild(mcpxHealthCard('Gateway', d.gateway));
   cards.appendChild(mcpxHealthCard('Management', d.management));

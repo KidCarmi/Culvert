@@ -198,16 +198,30 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	}()
 
 	// Gate + pool pick.  Pool picker returns nil when every instance's
-	// circuit breaker is open OR no clients are enrolled.  Either way
-	// we skip CDR for this request — the caller's fail_mode then
-	// decides whether to still deliver the file.
+	// circuit breaker is open OR no clients are enrolled.  Either way this
+	// request cannot be scanned, so fail_mode decides whether it is still
+	// delivered — applied HERE, by cdrUnavailableOutcome, not by the caller.
+	// It used to be applied by neither: this branch returned an unconditional
+	// pass, so a fail-CLOSED deployment forwarded every document unsanitized
+	// for as long as no instance was available.
 	if !cfg.Enabled {
 		return cdrPassSkipped("SKIPPED")
 	}
-	pooled := cdrPickPooled()
+	pooled, resv := cdrPickPooledReserved()
 	if pooled == nil {
-		return cdrPassSkipped("SKIPPED")
+		return cdrUnavailableOutcome(cfg)
 	}
+	// Hand back the half-open probe slot on EVERY return below that does not
+	// record an outcome: the oversize gate (it needs this instance's profile
+	// cap, so it cannot run before the pick), a cache hit, a client-side
+	// file_too_large refusal, a panic, and an outcome lost because the
+	// instance left the pool. Each of those used to abandon the reservation,
+	// so a non-RPC request arriving first after every re-arm kept the breaker
+	// in half-open indefinitely while normal documents skipped CDR (fail-open
+	// by default: forwarded unsanitized). One unconditional defer rather than
+	// a flag: after OnSuccess/OnFailure the breaker has left half-open, which
+	// makes Release a no-op, so it cannot undo a recorded outcome.
+	defer pooled.Breaker.Release(resv)
 	client := pooled.Client
 	instanceName := pooled.Name
 
@@ -240,11 +254,11 @@ func safeCDRSanitize(ctx context.Context, req cdrRequestContext, body []byte, ct
 	ms := time.Since(t0).Milliseconds()
 	if err != nil {
 		if !IsFileTooLarge(err) {
-			cdrMarkOutcome(instanceName, true)
+			cdrMarkOutcome(instanceName, resv, true)
 		}
 		return cdrHandleCallError(err, profile, modeStr, ms, cfg)
 	}
-	return cdrClassifyResult(res, instanceName, profile, modeStr, ms, hashHex, epoch, cfg)
+	return cdrClassifyResult(res, instanceName, resv, profile, modeStr, ms, hashHex, epoch, cfg)
 }
 
 // cdrGateOversize returns SKIPPED_OVERSIZE when body is over the
@@ -312,7 +326,7 @@ func cdrCallContext(ctx context.Context, cfg CDRConfig) (context.Context, contex
 	}
 	timeout := 35 * time.Second
 	if cfg.TimeoutSec > 0 {
-		timeout = time.Duration(cfg.TimeoutSec) * time.Second
+		timeout = cdrTimeoutSecDuration(cfg.TimeoutSec)
 	}
 	return context.WithTimeout(ctx, timeout)
 }
@@ -321,20 +335,20 @@ func cdrCallContext(ctx context.Context, cfg CDRConfig) (context.Context, contex
 // appropriate cdrRunResult, marks the CB, and caches the decision
 // where safe.  Split out of safeCDRSanitize to keep that function's
 // cyclomatic under the linter threshold.
-func cdrClassifyResult(res *cdrRunSanitizeResult, instance, profile, mode string, ms int64, hashHex string, epoch int64, cfg CDRConfig) *cdrRunResult {
+func cdrClassifyResult(res *cdrRunSanitizeResult, instance string, resv cdrProbeReservation, profile, mode string, ms int64, hashHex string, epoch int64, cfg CDRConfig) *cdrRunResult {
 	switch res.Status {
 	case pb.Status_CLEAN:
-		cdrMarkOutcome(instance, false)
+		cdrMarkOutcome(instance, resv, false)
 		cdrCache.Put(hashHex, &cdrCacheEntry{
 			status: "CLEAN", profile: profile, mode: mode,
 			expiresAt: time.Now().Add(cdrCache.ttl), epoch: epoch,
 		})
 		return cdrPassClean(profile, mode, nil, ms, false)
 	case pb.Status_SANITIZED:
-		cdrMarkOutcome(instance, false)
+		cdrMarkOutcome(instance, resv, false)
 		return cdrSwapResult(res.SanitizedData, res.Threats, profile, mode, ms)
 	case pb.Status_BLOCKED:
-		cdrMarkOutcome(instance, false)
+		cdrMarkOutcome(instance, resv, false)
 		reason := res.ErrorMessage
 		if reason == "" {
 			reason = "cdr_blocked"
@@ -346,19 +360,32 @@ func cdrClassifyResult(res *cdrRunSanitizeResult, instance, profile, mode string
 		})
 		return cdrBlockResult(reason, res.Threats, profile, mode, ms, false)
 	case pb.Status_UNSUPPORTED:
-		cdrMarkOutcome(instance, false)
+		cdrMarkOutcome(instance, resv, false)
 		cdrCache.Put(hashHex, &cdrCacheEntry{
 			status: "UNSUPPORTED", profile: profile, mode: mode,
 			expiresAt: time.Now().Add(cdrCache.ttl), epoch: epoch,
 		})
 		return cdrPassUnsupported(profile, mode, ms, false)
 	case pb.Status_ERROR:
-		cdrMarkOutcome(instance, true)
+		cdrMarkOutcome(instance, resv, true)
 		return cdrErrorOutcome(res.ErrorMessage, profile, mode, ms, cfg)
 	}
 	// Unknown status — defensive.  Treat like ERROR.
-	cdrMarkOutcome(instance, true)
+	cdrMarkOutcome(instance, resv, true)
 	return cdrErrorOutcome(fmt.Sprintf("unknown_status_%d", res.Status), profile, mode, ms, cfg)
+}
+
+// cdrStatusIsInstanceFailure reports whether a Sluice status counts against
+// the instance's breaker — the classification cdrClassifyResult applies: an
+// engine ERROR or a status this build does not know is a failure; every
+// verdict (CLEAN, SANITIZED, BLOCKED, UNSUPPORTED) is a success.
+func cdrStatusIsInstanceFailure(st pb.Status) bool {
+	switch st {
+	case pb.Status_CLEAN, pb.Status_SANITIZED, pb.Status_BLOCKED, pb.Status_UNSUPPORTED:
+		return false
+	default:
+		return true
+	}
 }
 
 // cdrRunSanitizeResult is a type alias so cdrClassifyResult can take the
@@ -392,8 +419,27 @@ type cdrStageDecision struct {
 //nolint:gocognit // orchestration splits poorly; already extracted from handleTunnelInspect
 func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, ce string,
 	br blockResponder, hostOnly, clientIP string, id ProxyIdentity) cdrStageDecision {
-	if cdrActiveClient() == nil {
-		return cdrStageDecision{body: body, scanBody: scanBody}
+	// Non-consuming liveness gate. It MUST NOT reserve: the original gate
+	// (cdrActiveClient() -> a reserving Pick()) spent the single half-open
+	// probe on a check that issues no RPC and therefore can never record an
+	// outcome. safeCDRSanitize's own pick was then denied and skipped CDR,
+	// leaving the breaker wedged in half-open for the rest of the process
+	// lifetime — under the default fail-OPEN FailMode, every later document
+	// forwarded unsanitized. The probe belongs to the call below.
+	if !cdrAnyInstanceAvailable() {
+		// Unscannable, so fail_mode decides. The config read stays INSIDE this
+		// branch: the scanning path below keeps its single pre-existing read at
+		// the call site, so the hot path pays no extra lock for this fix.
+		// Fail-open keeps the original early return verbatim (no outcome, no
+		// counter, no log); fail-closed refuses the document through the SAME
+		// emission the cdrBlock branch below uses, so a refusal and a verdict
+		// block are indistinguishable downstream.
+		res := cdrUnavailableOutcome(cdrActiveConfig())
+		if res.Outcome != cdrBlock {
+			return cdrStageDecision{body: body, scanBody: scanBody}
+		}
+		recordCDRTerminal(res.Status)
+		return cdrEmitStageBlock(res, br, hostOnly, clientIP, id)
 	}
 	res := safeCDRSanitize(r.Context(), cdrRequestContext{
 		Host:        hostOnly,
@@ -406,14 +452,7 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 
 	switch res.Outcome {
 	case cdrBlock:
-		atomic.AddInt64(&statBlocked, 1)
-		recordRequest(clientIP, "CONNECT", hostOnly, "CDR_BLOCKED", res.ProfileName, res.BlockReason, id.Identity, "inspect")
-		logger.Printf("CDR_BLOCKED %s -> %q reason=%q profile=%q mode=%q threats=%q",
-			clientIP, sanitizeLog(hostOnly),
-			sanitizeLog(res.BlockReason), sanitizeLog(res.ProfileName),
-			sanitizeLog(res.Mode), sanitizeLog(cdrSummariseThreats(res.Threats)))
-		scanBlockConn(br, hostOnly, res.BlockReason, "cdr")
-		return cdrStageDecision{blocked: true}
+		return cdrEmitStageBlock(res, br, hostOnly, clientIP, id)
 	case cdrSwap:
 		atomic.AddInt64(&statCDRBytesOut, int64(len(res.Body)))
 		newBody := res.Body
@@ -433,6 +472,25 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 		return cdrStageDecision{body: body, scanBody: scanBody}
 	}
 	return cdrStageDecision{body: body, scanBody: scanBody}
+}
+
+// cdrEmitStageBlock writes one CDR block onto the inspected tunnel: counter,
+// request log, log line and 403, then the decision the caller breaks on.
+//
+// Extracted from runCDRStage's cdrBlock branch so the unavailable fail-closed
+// refusal cannot drift from the verdict-driven one — a block an operator sees
+// in the request log or the block page must look the same whichever produced
+// it. Byte-identical to the pre-extraction branch, including the CWE-117
+// sanitizeLog/%q treatment of the host and of every Sluice-supplied value.
+func cdrEmitStageBlock(res *cdrRunResult, br blockResponder, hostOnly, clientIP string, id ProxyIdentity) cdrStageDecision {
+	atomic.AddInt64(&statBlocked, 1)
+	recordRequest(clientIP, "CONNECT", hostOnly, "CDR_BLOCKED", res.ProfileName, res.BlockReason, id.Identity, "inspect")
+	logger.Printf("CDR_BLOCKED %s -> %q reason=%q profile=%q mode=%q threats=%q",
+		clientIP, sanitizeLog(hostOnly),
+		sanitizeLog(res.BlockReason), sanitizeLog(res.ProfileName),
+		sanitizeLog(res.Mode), sanitizeLog(cdrSummariseThreats(res.Threats)))
+	scanBlockConn(br, hostOnly, res.BlockReason, "cdr")
+	return cdrStageDecision{blocked: true}
 }
 
 // cdrHandleCallError maps a Sanitize() transport error to an outcome.
@@ -521,7 +579,11 @@ func cdrCallErrorClass(err error) string {
 // triggering failure; see that function for why.
 func noteCDRCallError(err error) {
 	now := time.Now().UnixNano()
-	if prev := cdrCallErrorLogAt.Load(); (prev == 0 || now-prev >= int64(cdrCallErrorLogInterval)) &&
+	// CHAOS-84: MAGNITUDE, not sign — a backward clock step would otherwise
+	// silence the Sluice call-error line for the whole step. Comparing the
+	// absolute interval bounds that to one window; a claimant that loses the CAS
+	// below still suppresses, because the CAS is what decides.
+	if prev := cdrCallErrorLogAt.Load(); (prev == 0 || time.Duration(now-prev).Abs() >= cdrCallErrorLogInterval) &&
 		cdrCallErrorLogAt.CompareAndSwap(prev, now) {
 		logger.Print(cdrCallErrorLogLine(err, cdrCallErrorReportedTotal()))
 	}
@@ -573,6 +635,51 @@ func cdrCallErrorReportedTotal() int64 {
 func cdrCallErrorLogLine(err error, total int64) string {
 	return fmt.Sprintf("CDR: call error (%s): %s; errors total %d",
 		cdrCallErrorClass(err), sanitizeLog(err.Error()), total)
+}
+
+// cdrUnavailableBlockReason is the block reason for a document refused because
+// CDR could not scan it at all. It is deliberately distinct from the reasons
+// cdrErrorOutcome carries (a gRPC status) so an operator can tell "Sluice
+// answered with an error" from "there was no Sluice to ask".
+const cdrUnavailableBlockReason = "cdr_unavailable"
+
+// cdrUnavailableFailsClosed reports whether a request that could NOT be scanned
+// must be refused rather than forwarded unsanitized: CDR is enabled AND the
+// operator configured cdr.fail_mode: closed.
+//
+// The cfg.Enabled half is load-bearing. "No instance available" is also what a
+// DISABLED CDR looks like from the pool (no clients enrolled), and fail_mode
+// says nothing about a feature that is off — blocking there would refuse every
+// inspected document on a deployment that never asked for CDR.
+func cdrUnavailableFailsClosed(cfg CDRConfig) bool {
+	return cfg.Enabled && !cfg.CDRFailOpen()
+}
+
+// cdrUnavailableOutcome is the outcome for a request CDR could not scan because
+// no instance was available — every instance's breaker open, or none enrolled.
+//
+// WHY IT IS NOT AN UNCONDITIONAL PASS. fail_mode: closed is the operator's
+// instruction that an unscanned document must not reach the endpoint, and
+// cdrErrorOutcome has always honoured it for a Sluice that answers with an
+// error. The unavailable path did not: it returned cdrPassSkipped("SKIPPED"),
+// which runCDRStage forwards, so the one case the setting exists for — Sluice
+// unreachable, i.e. a sustained outage rather than a single bad RPC — was
+// exactly the case that fell open, with the breaker's own trip threshold
+// (5 consecutive failures by default) putting the switch within reach of
+// anything that could make Sluice fail that often. See
+// cdr_fail_closed_unavailable_test.go — TestCDRUnavailableOutcome_AppliesFailMode
+// for the decision table and TestRunCDRStage_UnavailableFailClosedRefusesTheTunnel
+// for the proxy path.
+//
+// Fail-OPEN deployments (the default, and any explicit fail_mode: open) are
+// unchanged: the SKIPPED pass, and the counters it does not touch, are
+// byte-identical to the pre-fix behaviour.
+func cdrUnavailableOutcome(cfg CDRConfig) *cdrRunResult {
+	if !cdrUnavailableFailsClosed(cfg) {
+		return cdrPassSkipped("SKIPPED")
+	}
+	atomic.AddInt64(&statCDRFailClosed, 1)
+	return cdrBlockResult(cdrUnavailableBlockReason, nil, "", "", 0, false)
 }
 
 // cdrErrorOutcome applies the configured fail_mode to an error event.

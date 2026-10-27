@@ -16,6 +16,7 @@ func withIdPSyncGlobals(t *testing.T) {
 }
 
 func TestApplyConfigSnapshot_SyncsIdPProfilesAndAuthBaseURL(t *testing.T) {
+	bindFreshAdmissionOwners(t) // the snapshot apply mutates ipf/rl in place (RISK-030)
 	withIdPSyncGlobals(t)
 
 	applyConfigSnapshot(ConfigSnapshot{

@@ -360,7 +360,8 @@ type InvalidIPEntry struct {
 // (each doubling ~4x), which extrapolates to minutes at 100k — and the
 // ConfigSnapshot cap for this list is maxSnapIPList (2,000,000). That would
 // stall a boot or a snapshot apply on a legitimate enterprise allowlist.
-// AddAll is linear. Pinned by TestBenchGate_IPFilterBulkLoadIsLinear.
+// AddAll is linear. Pinned by TestIPFilterView_BulkLoadPublishesOnce (exactly
+// one publish per AddAll, at any entry count).
 func (f *IPFilter) AddAll(entries []string) []InvalidIPEntry {
 	if len(entries) == 0 {
 		return nil
@@ -386,21 +387,45 @@ func (f *IPFilter) addLocked(entry string) error {
 		return nil
 	}
 	if ip := net.ParseIP(entry); ip != nil {
+		// Lazy init, exactly as addExemptionLocked does: a bare IPFilter{}
+		// composite literal compiles anywhere (its fields are unexported, so
+		// it is the only literal form outside this package), and a nil map here
+		// would panic on the first mutation instead of storing the entry.
+		// Defensive: production filters (including the snapshot apply path's,
+		// which calls NewIPFilter before AddAll) are constructor-created.
+		if f.single == nil {
+			f.single = map[string]bool{}
+		}
 		f.single[ip.String()] = true
 		return nil
 	}
 	return &net.AddrError{Err: "invalid IP or CIDR", Addr: entry}
 }
 
+// canonicalEntry maps an entry spelling to the key Add stores it under: a CIDR
+// becomes its network address, a plain IP its canonical text. Anything that
+// does not parse is returned unchanged so the raw-string match keeps working.
+func canonicalEntry(entry string) string {
+	if _, cidr, err := net.ParseCIDR(entry); err == nil {
+		return cidr.String()
+	}
+	if ip := net.ParseIP(entry); ip != nil {
+		return ip.String()
+	}
+	return entry
+}
+
 // Remove removes an entry and publishes the updated filter view.
 func (f *IPFilter) Remove(entry string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	canon := canonicalEntry(entry)
 	delete(f.single, entry)
+	delete(f.single, canon)
 	// Remove from nets slice.
 	filtered := f.nets[:0]
 	for _, n := range f.nets {
-		if n.String() != entry {
+		if s := n.String(); s != entry && s != canon {
 			filtered = append(filtered, n)
 		}
 	}
@@ -415,6 +440,37 @@ func (f *IPFilter) ClearAll() {
 	f.single = map[string]bool{}
 	f.publishView()
 	f.mu.Unlock()
+}
+
+// Replace installs mode and entries as the filter's ENTIRE configuration in
+// one pass, under ONE writer lock, publishing the derived view ONCE. Every
+// previous entry is discarded; a nil or empty entries slice leaves the filter
+// with the given mode and no entries. Invalid entries are skipped and
+// returned, as AddAll reports them, for logging after the lock is released.
+//
+// This is the wholesale-replacement primitive for a caller that previously
+// built a fresh filter and swapped the pointer it enforces with (the CP→DP
+// snapshot apply). Replacing a live filter's pointer is a data race against
+// the lock-free Allowed readers in the request path; replacing its contents
+// here is not: readers observe either the previous view or the new one, never
+// an intermediate (a SetMode / ClearAll / AddAll sequence publishes three
+// views, and the middle one is an empty allowlist that denies everything or an
+// empty blocklist that admits everything). Linear in the entry count, like
+// AddAll. The owner's identity, and any observer installed on it, are kept.
+func (f *IPFilter) Replace(mode string, entries []string) []InvalidIPEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mode = mode
+	f.nets = nil
+	f.single = map[string]bool{}
+	var invalid []InvalidIPEntry
+	for _, entry := range entries {
+		if err := f.addLocked(entry); err != nil {
+			invalid = append(invalid, InvalidIPEntry{Entry: entry, Err: err})
+		}
+	}
+	f.publishView()
+	return invalid
 }
 
 // List returns a detached list of configured entries.
@@ -512,6 +568,11 @@ type RateLimiter struct {
 	// IsExempt.
 	exemptView atomic.Pointer[rlExemptView]
 
+	// exemptPublishHook is an instance-local test observer, nil in production
+	// (the IPFilter.publishHook pattern). Called under exemptMu after
+	// publication; it must not re-enter locking methods.
+	exemptPublishHook atomic.Pointer[func(*RateLimiter)]
+
 	// Distributed admission and its diagnostic history belong to this limiter.
 	// All three zero values are usable; constructors create no goroutines.
 	remoteCounts       clusterCountStore
@@ -565,6 +626,9 @@ func (r *RateLimiter) publishExemptViewLocked() {
 		}
 	}
 	r.exemptView.Store(v)
+	if h := r.exemptPublishHook.Load(); h != nil {
+		(*h)(r)
+	}
 }
 
 // clientBucket is one IP's sliding window of in-window request stamps, held as
@@ -617,8 +681,8 @@ func (r *RateLimiter) publishExemptViewLocked() {
 // the accept/reject decision is identical to the filter-and-copy form, pinned
 // against a verbatim copy of it by TestRateLimitWindow_DifferentialAgainstLegacy
 // over 300 randomized (limit, window, gap) shapes. The one case that is not
-// verdict-identical is a concurrent OUT-OF-ORDER arrival, and it is bounded and
-// fail-closed by construction — see the clamp on add.
+// verdict-identical is a concurrent OUT-OF-ORDER arrival: clamping can delay
+// expiration of an admitted sample — see the fixed-history guarantee on add.
 type clientBucket struct {
 	// stamps is the ring storage; its LENGTH is the capacity. head indexes the
 	// oldest in-window stamp and n counts them, so the live entries are
@@ -659,16 +723,19 @@ func (b *clientBucket) expire(cutoff time.Time) {
 // Clamping the new stamp up to the newest one present restores the ordering
 // invariant BY CONSTRUCTION, and it is the cheap half of the two available
 // fixes: the alternative — moving the clock read inside the shard lock — was
-// built and measured, and it costs ~45% of the end-to-end gate at 4 cores
+// built and measured for #1265, costing ~45% of the end-to-end gate at 4 cores
 // (153 -> 230 ns/op) because it lengthens a critical section that 1/64 of all
 // traffic serialises on. The clamp is one comparison on a value already in
 // cache.
 //
-// What the clamp gives up is bounded and lands FAIL-CLOSED: an inverted stamp
-// is recorded as its predecessor's time, so it can only expire EARLIER than
-// its true arrival, never later — the window can never admit more than the
-// limit. The inversion is bounded by the gap between the clock read and the
-// lock acquisition (microseconds) against a window measured in seconds.
+// The recorded stamp is never earlier than its original pre-lock sample, so
+// clamping can DELAY expiration, never advance it. For the SAME admitted
+// samples and cutoff, expiry therefore retains at least as many entries as
+// filtering the original samples: it cannot release capacity early. This is
+// not a claim of identical verdicts for independently evolving histories;
+// conservative rejections can change which later requests occupy a slot.
+// The sample is not the lock-acquisition time. Scheduling and lock contention
+// can delay appending without a guaranteed microsecond bound.
 func (b *clientBucket) add(t time.Time, limit int) {
 	if b.n == len(b.stamps) {
 		b.grow(limit)
@@ -786,7 +853,7 @@ func (r *RateLimiter) AddExemption(entry string) error {
 // instead makes a bulk load O(N²) in the entry count, and the ConfigSnapshot
 // cap for this list is maxSnapRateLimitExempt (10,000). Same trap, same shape
 // and same reason as IPFilter.AddAll; pinned by
-// TestBenchGate_RateLimitExemptBulkLoadIsLinear.
+// TestRLExemptView_BulkLoadPublishesOnce.
 func (r *RateLimiter) AddExemptions(entries []string) []InvalidIPEntry {
 	if len(entries) == 0 {
 		return nil
@@ -825,10 +892,12 @@ func (r *RateLimiter) addExemptionLocked(entry string) error {
 func (r *RateLimiter) RemoveExemption(entry string) {
 	r.exemptMu.Lock()
 	defer r.exemptMu.Unlock()
+	canon := canonicalEntry(entry)
 	delete(r.exemptIPs, entry)
+	delete(r.exemptIPs, canon)
 	filtered := r.exemptNets[:0]
 	for _, n := range r.exemptNets {
-		if n.String() != entry {
+		if s := n.String(); s != entry && s != canon {
 			filtered = append(filtered, n)
 		}
 	}
@@ -897,6 +966,27 @@ func (r *RateLimiter) Enabled() bool {
 	return r.enabled.Load()
 }
 
+// bucketFor returns ip's sliding-window bucket in this shard, creating it on
+// first sight. Callers MUST hold s.mu.
+//
+// Allow and AllowClusterAware share this one bucket-creation path so the two
+// admission entry points cannot drift apart. A nil shard map reads as a miss,
+// so the cold branch is the only one that writes: a bare RateLimiter{} that
+// was Configure()d would otherwise panic here, on the request path. This is
+// defensive (production limiters come from NewRateLimiter); the lazy init keeps
+// the limit enforced against a real bucket, at zero cost once warm.
+func (s *rlShard) bucketFor(ip string) *clientBucket {
+	b, ok := s.clients[ip]
+	if !ok {
+		if s.clients == nil {
+			s.clients = map[string]*clientBucket{}
+		}
+		b = &clientBucket{}
+		s.clients[ip] = b
+	}
+	return b
+}
+
 // Allow returns true if the IP is within its rate limit or is exempt.
 func (r *RateLimiter) Allow(ip string) bool {
 	if !r.enabled.Load() {
@@ -914,11 +1004,7 @@ func (r *RateLimiter) Allow(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.clients[ip]
-	if !ok {
-		b = &clientBucket{}
-		s.clients[ip] = b
-	}
+	b := s.bucketFor(ip)
 	b.lastSeen = now
 
 	// Evict old timestamps (amortized O(1) — see clientBucket).
@@ -1037,18 +1123,44 @@ func clusterRemoteCountMaxAge(window time.Duration) time.Duration {
 // broadcast is older than maxAge (or none has ever been applied). It is the ONLY
 // read accessor for enforcement — there is deliberately no unconditional Get, so
 // a future caller cannot reintroduce the frozen-count path by accident.
-// A NEGATIVE age (the clock moved back between the stamp and this read) is
-// stale, not fresh. `age >= maxAge` alone reads a future stamp as brand new and
-// would honour the broadcast for however far back the clock went — and it would
-// disagree with ClusterFreshness, which reports the same condition as
-// stale. Two answers to one question is the defect; both fail toward the local
-// decision, which is where every other failure on this path lands.
+// A NEGATIVE age against a clock read taken AFTER the stamp was loaded (the
+// clock moved back between the stamp and this read) is stale, not fresh.
+// `age >= maxAge` alone reads a future stamp as brand new and would honour the
+// broadcast for however far back the clock went — and it would disagree with
+// ClusterFreshness, which reports the same condition as stale. Two answers to
+// one question is the defect; both fail toward the local decision, which is
+// where every other failure on this path lands.
+//
+// The caller's `now` is NOT that clock read. AllowClusterAware samples its
+// clock before the shard lock and the gossip loop's Apply stamps with its own
+// time.Now(), so a broadcast that lands between the two steps is always a few
+// microseconds AHEAD of the decision's clock. Treating that as a rollback
+// zeroed the remote half of a live decision and admitted a request the
+// cluster-wide limit refused — a transient, self-inflicted fail-open on every
+// gossip tick that overlapped a decision (seen as
+// TestDistributedAdmission_ProductionWiring admitting the SOCKS5 leg, 6 local
+// + 2 remote against a limit of 8, with gossip every millisecond). So a
+// negative age re-reads the clock ONCE, after the stamp was loaded: a stamp
+// still in the future against that read is a genuine rollback; one behind it
+// is simply fresh. The steady-state path never takes the branch, so it costs
+// nothing per request, and it is the same stamp-then-clock order
+// ClusterFreshness already uses, so enforcement and diagnostics agree on the
+// same instant. Pinned by TestChaos61_InFlightBroadcast* and
+// TestChaos61_GenuineRollbackIsStillStale.
 func (c *clusterCountStore) FreshCount(ip string, now time.Time, maxAge time.Duration) int {
 	applied := c.appliedAtNano.Load()
 	if applied == 0 {
 		return 0
 	}
-	if age := now.Sub(time.Unix(0, applied)); age < 0 || age >= maxAge {
+	appliedAt := time.Unix(0, applied)
+	age := now.Sub(appliedAt)
+	if age < 0 {
+		age = time.Since(appliedAt)
+		if age < 0 {
+			return 0
+		}
+	}
+	if age >= maxAge {
 		return 0
 	}
 	c.mu.RLock()
@@ -1166,11 +1278,7 @@ func (r *RateLimiter) AllowClusterAware(ip string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.clients[ip]
-	if !ok {
-		b = &clientBucket{}
-		s.clients[ip] = b
-	}
+	b := s.bucketFor(ip)
 	b.lastSeen = now
 
 	// Evict old timestamps (amortized O(1) — see clientBucket).

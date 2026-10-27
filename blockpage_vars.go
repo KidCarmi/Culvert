@@ -14,6 +14,11 @@ import (
 func setBlockPageHTML(html string) error { return blockpage.SetHTML(html) }
 func getBlockPageHTML() string           { return blockpage.GetHTML() }
 
+// serveBlockPage is the single chokepoint every block page passes through, so
+// the CHAOS-92 clamp on the client-supplied portion of url goes HERE rather
+// than at the five call sites: the template renders url with html/template
+// escaping, which turns a megabyte of `'` into ~5 MiB buffered in memory and
+// written back to an unauthenticated client. See proxy_path_bounds.go.
 func serveBlockPage(w http.ResponseWriter, url, category, ruleName string) {
-	blockpage.Serve(w, url, category, ruleName)
+	blockpage.Serve(w, boundRetainedBlockPageURL(url), category, ruleName)
 }

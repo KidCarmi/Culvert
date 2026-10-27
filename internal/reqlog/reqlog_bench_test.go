@@ -55,6 +55,31 @@ func BenchmarkAdd(b *testing.B) {
 // BenchmarkAddParallel measures Add under concurrent callers — the proxy
 // records entries from many request goroutines, so ringMu hold time is
 // contention on the request hot path.
+//
+// Read it against BenchmarkAddLegacyGateParallel (persist_gate_bench_test.go),
+// which is the same path with the pre-change persistMu gate still in it.
+//
+// This benchmark is still ~FLAT in core count after that gate was removed
+// (49.0 / 96.1 / 157.4 ns at GOMAXPROCS 1/2/4 on the Xeon the gate comment
+// records). The remaining ceiling is ringMu itself: every logged request
+// copies a 352-byte Entry under one process-wide exclusive lock. That is NOT
+// the same kind of finding as the gate was — the lock guards real shared
+// state, not a nil check — and removing it means changing what Get()
+// guarantees about ordering.
+//
+// That has now been MEASURED, in ring_order_bench_test.go, and the outcome is
+// a CROSSOVER rather than a closed question. A total order costs one shared
+// read-modify-write per entry whoever pays it — at four cores that single
+// atomic add is ~16% of this whole arm and more than it costs serially — so
+// ringMu is not simply removable. But core-local shards carrying a global
+// sequence stamp measure 1.3-2.3x FASTER than this arm at four cores while
+// costing 19-55% at one and two; the direct-mapped ticket ring is the wrong
+// design either way (1.9-3.0x worse at two cores). The conclusion is to keep
+// ringMu on 4-vCPU evidence and treat the sharded design as the candidate to
+// qualify on real 16-/32-core hardware. Read that file's header before
+// re-deriving any of it, especially the note on why absolute ns/op here is not
+// comparable between invocations (this arm's own P=4 median moved 43% between
+// two runs) and why only same-invocation ratios are quoted.
 func BenchmarkAddParallel(b *testing.B) {
 	restore := SwapRingForTest()
 	defer restore()

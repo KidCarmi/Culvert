@@ -228,14 +228,29 @@ const (
 func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 	// Stop HA leader election and release lock before gRPC shutdown.
 	reg.Register("ha-stop", shutdownOrderHAStop, func(context.Context) error {
+		// CHAOS-71: close the CP activation gate FIRST. The CP supervisor is
+		// stopped later (order 20), so a bind adopted in between must not
+		// publish or start its HA leadership resume. The gate is held only for
+		// the address publish, never across the resume, so this returns
+		// promptly.
+		beginCPActivationShutdown()
+		// CHAOS-71: latch HA shutdown BEFORE Stop, so a leadership resume still
+		// waiting on the fencing backend (it runs outside the activation gate)
+		// aborts at once and can never take a role or start HA work after Stop
+		// has joined the loops.
+		globalHA.BeginShutdown()
 		globalHA.Stop()
 		return nil
 	})
 	// Gracefully stop gRPC server (drains in-flight RPCs).
-	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, func(context.Context) error {
-		StopControlPlaneGRPC()
-		return nil
-	})
+	//
+	// CHAOS-71: stops the SUPERVISOR, not just the server. Stopping the server
+	// alone would leave the listener's bind/serve/rebind loop to observe the
+	// serve ending and bind a fresh socket on the way out — a listener coming
+	// up during shutdown, which is worse than the terminal silence it replaced.
+	// The supervisor's backoff sleep is interruptible, so this hook never waits
+	// one out.
+	reg.Register("control-plane-grpc-stop", shutdownOrderControlPlaneGRPCStop, stopControlPlaneListener)
 	// Close the CDR client before cancelling lifecycle context so any
 	// in-flight Sanitize streams get a clean tear-down rather than a
 	// context-cancelled transport error.
@@ -446,8 +461,8 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 	// the original behaviour exactly.
 	reg.Register("tunnel-drain", shutdownOrderTunnelDrain, drainActiveTunnels)
 	reg.Register("syslog-close", shutdownOrderSyslogClose, func(context.Context) error {
-		if globalSyslog != nil {
-			_ = globalSyslog.Close() // best-effort flush
+		if sw := syslogHandle(); sw != nil {
+			_ = sw.Close() // best-effort flush
 		}
 		return nil
 	})

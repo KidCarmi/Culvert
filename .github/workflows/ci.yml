@@ -75,7 +75,7 @@ jobs:
         run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o culvert .
 
       - name: Upload binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: culvert-linux-amd64
           path: culvert
@@ -190,7 +190,7 @@ jobs:
 
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -215,14 +215,14 @@ jobs:
           echo "image=ghcr.io/$LC" >> $GITHUB_OUTPUT
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # cosign verifies candidate records in the plan step and signs below.
       - name: Install cosign
@@ -332,7 +332,7 @@ jobs:
       - name: Build and push image
         if: steps.plan.outputs.build == 'true'
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -469,18 +469,18 @@ jobs:
       candidate_tag: ${{ steps.candidate.outputs.candidate_tag }}
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Resolve or create the release candidate binding
         id: candidate
         env:
@@ -530,7 +530,7 @@ jobs:
       id-token: write   # cosign keyless signing of the qualification record (main)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -558,7 +558,7 @@ jobs:
           echo "qualifying ${IMAGE}@${DIGEST} as ${VERSION} (compiler pin ${TOOLCHAIN})"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -566,7 +566,7 @@ jobs:
       - name: Set up QEMU (to execute the arm64 candidate)
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Verify platforms, revision, compiler and version file
         env:
@@ -678,6 +678,25 @@ jobs:
               "${IMAGE}@${DIGEST}"
           done
 
+      - name: Candidate full-severity advisory (same promoted digest, both platforms)
+        if: always() && steps.what.outputs.digest != ''
+        env:
+          IMAGE: ${{ steps.what.outputs.image }}
+          DIGEST: ${{ steps.what.outputs.digest }}
+        run: |
+          for p in linux/amd64 linux/arm64; do
+            bash .github/scripts/trivy-suppression-report.sh "${IMAGE}@${DIGEST}" "$p" candidate-security-evidence remote
+          done
+
+      - name: Upload candidate package and vulnerability evidence
+        if: always() && steps.what.outputs.digest != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-security-evidence
+          path: candidate-security-evidence/
+          retention-days: 30
+          if-no-files-found: error
+
       # ── The qualification record (main push only) ──────────────────────────
       # Signed under the main producer identity, over the digest. The tag run
       # refuses a main candidate that lacks it (candidate-plan-tag.sh).
@@ -728,7 +747,7 @@ jobs:
       actions: read       # require-gate.sh (tag-path guard)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -833,7 +852,7 @@ jobs:
       # release, and the verify below proves this run's signature landed.
       - name: Log in to GitHub Container Registry (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -870,7 +889,7 @@ jobs:
             "ghcr.io/kidcarmi/culvert@${{ needs.resolve-candidate.outputs.digest }}"
 
       - name: Upload generated catalog bundle (signed on tag path)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-catalog-bundle
           path: ${{ steps.spec.outputs.out }}
@@ -904,7 +923,7 @@ jobs:
       # running — and stayed downloadable if either then failed.
       - name: Stage complete signed catalog bundle on the draft Release (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: true
           files: ${{ steps.pkg.outputs.bundle }}
@@ -960,7 +979,7 @@ jobs:
       actions: read     # require-gate.sh (list-workflow-runs)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1013,14 +1032,14 @@ jobs:
           echo "channel tip: $TIP"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Promote the verified digest onto the public channels
         id: promote
@@ -1141,7 +1160,7 @@ jobs:
       actions: read     # require-gate.sh (list-workflow-runs)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1194,14 +1213,14 @@ jobs:
           echo "channel tip: $TIP"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Promote the verified digest onto the public channels
         id: promote
@@ -1285,7 +1304,7 @@ jobs:
       id-token: write     # cosign keyless blob signing of the re-signed index.json
     steps:
       - name: Harden runner (egress audit — same baseline as catalog-pipeline)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1521,7 +1540,7 @@ jobs:
 
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1631,7 +1650,7 @@ jobs:
       #   culvert.sbom.cdx.json
       - name: Install syft (pinned)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
       - name: Generate + sign binary SBOMs (linux/amd64 leg)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: |
@@ -1665,7 +1684,7 @@ jobs:
       # Staged as a DRAFT — see the note in catalog-pipeline. publish-release
       # is the only job that makes this release public.
       - name: Stage proxy release asset + signature bundle (draft)
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: true
           files: |
@@ -1674,7 +1693,7 @@ jobs:
 
       - name: Stage culvert-maint release asset + signature bundle (draft, linux)
         if: matrix.goos == 'linux'
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: true
           files: |
@@ -1688,7 +1707,7 @@ jobs:
       # the .sigstore.json is the in-toto attestation binding it to the binary.
       - name: Stage SBOMs + attestation bundles (draft, linux/amd64 leg)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: true
           files: |
@@ -1698,7 +1717,7 @@ jobs:
             culvert-maint.sbom.cdx.json.sigstore.json
 
       - name: Upload per-leg subjects artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-subjects-${{ matrix.goos }}-${{ matrix.goarch }}
           path: subjects-${{ matrix.goos }}-${{ matrix.goarch }}.txt
@@ -1719,7 +1738,7 @@ jobs:
       hashes: ${{ steps.merge.outputs.hashes }}
     steps:
       - name: Download per-leg subject artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-subjects-*
           merge-multiple: true
@@ -1770,7 +1789,7 @@ jobs:
           - { goos: windows, goarch: amd64, ext: .exe }
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           # Needs module-proxy egress: the composite runs `go mod download` for
           # BOTH modules (cmd/culvert-maint deps are not in the root-go.sum
@@ -1891,7 +1910,7 @@ jobs:
       actions: read     # require-release-evidence.sh
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1911,7 +1930,7 @@ jobs:
         run: .github/scripts/require-release-evidence.sh "$GITHUB_SHA" assert
 
       - name: Download the signed provenance artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ needs.provenance.outputs.provenance-name }}
       - name: Assert the attestation is present and non-empty
@@ -1923,7 +1942,7 @@ jobs:
           test -s "$PROV" || { echo "::error::${PROV} is missing or empty — refusing"; exit 1; }
           echo "attaching ${PROV} ($(stat -c%s "$PROV") bytes)"
       - name: Stage the attestation on the draft
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           draft: true
           files: ${{ needs.provenance.outputs.provenance-name }}

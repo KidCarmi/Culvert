@@ -1,6 +1,16 @@
 # Culvert Configuration
 # Copy to config.yaml and edit as needed.
-# CLI flags always override values in this file.
+# Precedence is per key. In general a non-empty CLI flag overrides the matching value in this file
+# (an empty, zero or false flag falls through to it). The list keys ui_sans, ui_allow_ips and
+# proxy.trusted_proxy_cidrs are instead MERGED with their flag, so the CLI cannot remove an entry
+# listed here.
+# Settings saved from the admin UI (admin_settings.json in the data dir) are re-applied at boot after
+# this file and the CLI. For most keys only a NON-EMPTY saved value wins: a value cleared in the UI is
+# replaced again by the one set here or on the CLI after a restart (a syslog or OTLP exporter the UI
+# disabled resumes, so remove it here too), and a saved syslog target that cannot connect at boot
+# leaves the earlier one active. Some keys are saved with an explicit marker and are authoritative
+# instead (e.g. trusted_proxy_cidrs: a list saved in the UI, including an EMPTY one, replaces the
+# value here and on the CLI on every boot).
 #
 # Usage:
 #   ./culvert -config config.yaml
@@ -15,12 +25,15 @@ proxy:
   log_max_mb: 50      # Rotate log when it reaches this size in MB
   tls_cert: ""        # Custom TLS certificate for Web UI (PEM, optional)
   tls_key: ""         # Custom TLS key for Web UI (PEM, optional)
+  ui_sans: []         # Extra SANs (IPs or hostnames) for the auto-generated self-signed Web UI cert. MERGED with
+                      # --ui-san (flag values first, then these), so the CLI cannot remove a SAN listed here;
+                      # a non-empty list saved from the admin UI replaces both at boot.
   ca_path: "/data/ca.bundle"      # Persistent Root CA bundle (mount /data as Docker volume)
   metrics_token: ""   # Bearer token for /metrics endpoint (empty = open access)
   policy_file: ""     # JSON file for PBAC policy rules
   base_url: ""        # Full external UI URL for OIDC/SAML callbacks and SAML SP metadata (e.g. "https://proxy.corp.com:9090" or "https://proxy.corp.com/culvert"). REQUIRED for SAML (its SP metadata is built at startup with no request to derive a URL from). For OIDC, takes priority over trust_forwarded_headers when set. Does not affect the CP/DP bootstrap-script/enrollment-address URLs below — see docs/OPERATIONS.md item 6 for the full picture (including gRPC-address precedence and why disabling trust_forwarded_headers alone does not secure an unset base_url).
   trust_forwarded_headers: false  # Trust X-Forwarded-Host/-Proto — on top of the request's own Host header, which is used either way whenever base_url is unset — to derive the OIDC redirect URL (only if base_url is unset; never for SAML) and the CP/DP bootstrap-script URL (always). UNSCOPED: honored from any direct peer, unlike trusted_proxy_cidrs below. See docs/OPERATIONS.md item 6 before relying on this for security.
-  trusted_proxy_cidrs: []  # Reverse-proxy IPs/CIDRs whose X-Forwarded-For is trusted for the admin-UI client IP (login lockout, admin-API rate limit, admin-IP allowlist, audit). Empty = always use the direct peer (spoofing-safe). Set when the admin UI is fronted by an L7 proxy (RISK-019).
+  trusted_proxy_cidrs: []  # Reverse-proxy IPs/CIDRs whose X-Forwarded-For is trusted for the admin-UI client IP (login lockout, admin-API rate limit, admin-IP allowlist, audit). Empty = always use the direct peer (spoofing-safe). Set when the admin UI is fronted by an L7 proxy (RISK-019). MERGED with -trusted-proxy-cidrs (the CLI cannot remove an entry listed here); a list saved in the admin UI, even an empty one, replaces both at boot.
   geoip_db: "/app/GeoLite2-Country.mmdb"  # GeoIP database (db-ip.com CC BY 4.0)
   idp_profiles_file: "/data/idp_profiles.json" # JSON file persisting IdP profiles (OIDC/SAML SSO). Empty = in-memory only — profiles are LOST on restart. CLI -idp-profiles-file overrides.
   url_categories_file: "" # JSON file for dynamic URL categories
@@ -93,7 +106,10 @@ security:
   ip_list: []
     # - 192.168.1.0/24
     # - 10.0.0.5
-  rate_limit: 0       # Max requests per minute per IP (0 = disabled)
+  rate_limit_rpm: 0   # Max requests per minute per IP (0 = disabled). Canonical key — matches the
+    # name used by the admin API, the CP->DP wire, config-version diffs, and the
+    # culvert_rate_limit_rpm metric. rate_limit is accepted as a deprecated alias
+    # (a startup log line is emitted when it's used); prefer rate_limit_rpm in new configs.
   max_conns_per_ip: 0 # Max concurrent connections per IP (0 = disabled, e.g. 256)
 
 # ── Security Scanning ──────────────────────────────────────────────────────
@@ -106,7 +122,60 @@ security_scan:
   sync_interval: "6h"    # Threat feed re-download interval
   cache_ttl: "1h"        # SHA-256 scan result cache TTL
   cache_size: 10000      # Max entries in scan result cache
-  max_scan_mb: 5         # Max response size to buffer for scanning (MiB)
+  max_scan_mb: 5         # Max response size to buffer for scanning (MiB). Applied only when local scanning is
+                         # initialised (enabled: true, or clamav_addr / yara_rules_dir / threat_feed_db set);
+                         # otherwise (scan_svc_url mode, or DPI patterns alone) the window stays at 5 MiB.
+  scan_svc_listen: ""    # Run THIS process as the scan sidecar (ClamAV/YARA/DPI over HTTP), e.g. "127.0.0.1:8484".
+                         # /scan, /health and /status have NO authentication or rate limit: bind loopback or a
+                         # private interface and firewall it; never expose it to untrusted networks (":8484"
+                         # binds every interface).
+                         # /scan inspects bodies only with clamav_addr or loaded yara_rules_dir rules on THIS
+                         # process (configured DPI patterns apply separately to text content). enabled: true
+                         # or threat_feed_db alone does not scan bodies (feeds check URLs/domains only):
+                         # /health still reports ok and /scan answers clean for every body.
+  scan_svc_url: ""       # Delegate body scanning to a scan sidecar instead of in-process, e.g. "http://scan-svc:8484"
+
+# ── Content Disarm & Reconstruction (Sluice) ───────────────────────────────
+# Strips active content (macros, JS, OLE) from SSL-inspected downloads via the Sluice sidecar.
+# PREREQUISITE: CDR runs only on response bodies the inspection path buffers for scanning, i.e. when
+# a body scanner is active (security_scan clamav_addr / yara_rules_dir rules / scan_svc_url, or DPI
+# patterns for text). With none, every response bypasses CDR even with enabled: true. Hosts on the
+# scan-exclusion list skip CDR too.
+# Validated only when enabled: true. Fields below are optional unless noted.
+
+cdr:
+  enabled: false          # Also forced ON at boot, whatever this says, while <data-dir>/cdr_enabled exists (written
+                          # by the admin UI toggle or the first enrollment); disable via the UI, which removes it.
+  endpoint: ""            # Sluice "host:port" (e.g. "sluice:8443"); required when enabled
+  fail_mode: "open"       # A live Sanitize call that fails (unreachable mid-call / timeout / ERROR): "open" = deliver the
+                          # original (CDR_ERROR request-log event) | "closed" = 403 block page. The cdr_unavailable
+                          # alert fires only for transport/RPC failures, NOT for an ERROR result Sluice returns.
+                          # Also applied when CDR is enabled but no instance can be called (initial dial failed at
+                          # startup, nothing enrolled, every breaker open): "open" passes the file through unsanitized,
+                          # "closed" refuses it with block reason cdr_unavailable (counted in culvert_cdr_fail_closed_total).
+                          # Enabling CDR from the admin UI at runtime (first enable, or disable + re-enable) runs it
+                          # with this and the other cdr values at their DEFAULTS, i.e. "open", until the next restart.
+  default_profile: "default"  # Sanitize profile when no policy rule applies; must exist in Sluice's Health response
+  default_mode: "ENFORCE" # "ENFORCE" | "REPORT_ONLY" | "BYPASS_WITH_REPORT"
+  timeout_sec: 35         # Per-Sanitize deadline in seconds (must be >= 30)
+  max_file_size_mb: 0     # Per-file CDR cap (0 = default 50 MiB), compared against the bytes CDR receives. CDR receives
+                          # only the scan window (security_scan.max_scan_mb when local scanning is initialised, else a
+                          # fixed 5 MiB; see max_scan_mb): a response larger than the window is sent to Sluice TRUNCATED
+                          # and the remainder is appended UNSANITIZED, so the delivered file can be corrupt and keep
+                          # active content past the window. CDR covers a file completely only when it fits within that
+                          # window. A SANITIZED body is currently forwarded with the origin's Content-Length, so when its
+                          # size differs the download can be truncated or fail. A body that fits the window but exceeds
+                          # this cap is NOT rejected: it skips sanitization and passes through unmodified
+                          # (SKIPPED_OVERSIZE), whatever fail_mode says. Values above 50 do NOT widen coverage: the client
+                          # refuses payloads over its fixed 50 MiB cap, and those files also pass through unsanitized
+                          # (SKIPPED_OVERSIZE). Keep equal to Sluice's own cap.
+  chunk_size_kb: 0        # gRPC stream chunk in KiB, 16-3072 (0 = default 64 KiB)
+  server_fingerprint: "" # TOFU-pinned SHA-256 of the Sluice server cert (hex, optional "sha256:" prefix). REQUIRED
+                          # for the config-only bootstrap path (no enrolled instance): without it the client is never
+                          # built and CDR stays effectively off, although config validation passes.
+  certs_dir: ""           # Pre-provisioned bootstrap bundle (ca.pem, client.pem, client.key), read only while no
+                          # instance is enrolled (needs endpoint + server_fingerprint). UI enrollment ignores
+                          # it and writes certificates under <data-dir>/integrations/sluice/<name>.
 
 # ── Upstream Proxy Chaining ────────────────────────────────────────────────
 
@@ -143,9 +212,19 @@ file_block:
 # ── Logging & Observability ───────────────────────────────────────────────
 
 log_format: "text"      # "text" (default) | "json" (structured, fields: time, msg, req_id, identity, rule, action)
+log_level: ""           # DEBUG | INFO (default) | WARN | ERROR. NOT a general severity filter: DEBUG enables debug
+                        # lines and ERROR suppresses WARN-helper lines, but ordinary log output (INFO, POLICY_*
+                        # decisions) is always written. A level saved from the admin UI wins at boot.
 default_action: ""      # "allow" (passthrough) | "deny" (zero-trust); auto-detected if empty
 audit_log_file: ""      # Persistent JSONL audit log path (e.g. "/data/audit.jsonl")
 syslog_addr: ""         # Syslog forwarding: "udp://host:514" or "tcp://host:601"
+syslog_format: ""       # "rfc3164" (default) | "rfc5424" (preferred by Splunk HEC / Elastic / QRadar)
+otlp_endpoint: ""       # OTLP/HTTP collector base URL (metrics + traces), e.g. "https://otlp.example.com:4318".
+                        # The exporters dial through the SSRF guard, which refuses loopback, RFC 1918, link-local
+                        # and other internal addresses, so a collector reached at a private address (for example
+                        # a Docker/Kubernetes service name such as "otel-collector") is refused.
+request_log_file: ""    # Persistent JSONL request log path; empty = in-memory only (lost on restart)
+request_log_max_mb: 100 # Request-log rotation size in MB
 
 # Saved request-log HISTORY (queryable, retention-managed; survives restart).
 # Normally enabled from the admin UI (Live Feed → "Save logs to disk") with no
@@ -257,7 +336,13 @@ mcp:
 
 # ── Admin UI ──────────────────────────────────────────────────────────────
 
-ui_allow_ips: []        # CIDRs allowed to access admin panel (empty = all)
+ui_allow_ips: []        # CIDRs allowed to access admin panel (empty = all). MERGED with -ui-allow-ip, so the CLI
+                        # cannot remove an entry listed here; a non-empty list saved in the admin UI replaces both.
   # - "10.0.0.0/8"
   # - "192.168.1.100"
 session_timeout_hours: 8  # Admin session lifetime (1–168 hours)
+session_secret: ""      # Hex (>=64 chars / 32 bytes) HMAC key for session cookies; set the SAME value on every node behind a
+                        # load balancer. CULVERT_SESSION_SECRET takes priority when set — prefer the env var so the secret
+                        # stays out of the config file. A random per-start key (single node only) is used when neither is
+                        # set, or when this value is not valid hex of >=32 bytes (startup continues; the warning for an
+                        # invalid value is logged unless log_level is ERROR, which suppresses it).

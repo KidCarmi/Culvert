@@ -16,7 +16,8 @@ package main
 //     swept even when RateLimitRPM is 0; see loadConnAndRateLimit)
 //   - cleanup goroutine ticks rl.Cleanup() + ssrf.CacheCleanup() +
 //     loginLimiter.Cleanup() + apiLimiter.Cleanup() +
-//     enrollRateLimitCleanup()
+//     basicAuthFailLimiter.Cleanup() + enrollRateLimitCleanup() +
+//     unenrolledConfigPullCleanup()
 //   - log strings unchanged so operators see the same startup banner
 //   - Loader returns the cleanup-goroutine cancel func (always non-nil now)
 //     so the caller can store it on s.rlCleanupCancel. The early-phase
@@ -99,6 +100,7 @@ func rateLimitCleanupLoop(ctx context.Context) {
 				apiLimiter.Cleanup()
 				basicAuthFailLimiter.Cleanup()
 				enrollRateLimitCleanup()
+				unenrolledConfigPullCleanup()
 			})
 		}
 	}

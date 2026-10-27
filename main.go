@@ -51,95 +51,98 @@ var dataDir = "/data"
 // PR2's main() extraction.
 type startupState struct {
 	// ── CLI flag pointers (all set in parseFlags) ─────────────────────────
-	configPath              *string
-	proxyPort               *int
-	uiPortFlag              *int
-	user                    *string
-	pass                    *string
-	blockFile               *string
-	logFilePath             *string
-	logMaxMB                *int
-	tlsCert                 *string
-	tlsKey                  *string
-	rateLimitRPM            *int
-	ipMode                  *string
-	socks5Port              *int
-	metricsTok              *string
-	cpGRPCAddr              *string
-	cpGRPCCert              *string
-	cpGRPCKey               *string
-	cpGRPCCA                *string
-	haJoin                  *string
-	haToken                 *string
-	haAutoFailover          *bool
-	haEtcdEndpoints         *string
-	haEtcdCert              *string
-	haEtcdKey               *string
-	haEtcdCA                *string
-	haLeaseTTL              *int
-	dpCPAddr                *string
-	dpNodeID                *string
-	dpCert                  *string
-	dpKey                   *string
-	dpCA                    *string
-	policyFile              *string
-	caPath                  *string
-	auditLog                *string
-	requestLogPath          *string
-	requestLogMaxMB         *int
-	syslogAddr              *string
-	syslogFormat            *string
-	otlpEndpoint            *string
-	uiAllowIP               *string
-	trustedProxyCIDRs       *string
-	sessionHrs              *int
-	geoIPDB                 *string
-	clamavAddr              *string
-	yaraRulesDir            *string
-	threatFeedDB            *string
-	uiUsersFile             *string
-	fileProfilesFile        *string
-	idpProfilesFile         *string
-	uiNoTLS                 *bool
-	catFeedDB               *string
-	catFeedURL              *string
-	catSyncIntvl            *string
-	enrollURL               *string
-	clusterDB               *string
-	clusterInsecureFlag     *bool
-	revocationsFile         *string
-	scanSvcListen           *string
-	scanSvcURL              *string
-	updaterURLFlag          *string // deprecated: legacy updater removed; parsed-but-ignored
-	updaterURLAllowFlag     *string // deprecated: legacy updater removed; parsed-but-ignored
-	uiSANsFlag              *string
-	trustFwdHeaders         *bool
-	resetPwUser             *string
-	supportBundleOut        *string
-	backupOut               *string
-	backupEncrypt           *bool
-	restoreIn               *string
-	restoreMode             *string
-	restoreConfirm          *confirmFlag
-	prepareDowngrade        *bool
-	downgradeTargetSchema   *int
-	restoreAcceptDPReenroll *bool
-	restoreAllowCounterRB   *bool
-	listLeftovers           *bool
-	cleanupLeftovers        *bool
-	cleanupOlderThan        *string
-	cleanupKeepLast         *int
-	listBackups             *bool
-	listBackupsDir          *string
-	cdrEnabledFlag          *bool
-	cdrEndpointFlag         *string
-	cdrFailModeFlag         *string
-	cdrProfileFlag          *string
-	cdrModeFlag             *string
-	cdrTimeoutFlag          *int
-	cdrMaxSizeFlag          *int
-	cdrFingerprintFlag      *string
-	cdrCertsDirFlag         *string
+	configPath               *string
+	proxyPort                *int
+	uiPortFlag               *int
+	user                     *string
+	pass                     *string
+	blockFile                *string
+	logFilePath              *string
+	logMaxMB                 *int
+	tlsCert                  *string
+	tlsKey                   *string
+	rateLimitRPM             *int // -rate-limit (deprecated alias; see rateLimitRPMCanonical)
+	rateLimitRPMCanonical    *int // -rate-limit-rpm (canonical; terminology governance T-29)
+	rateLimitRPMFlagSet      bool // true iff -rate-limit was explicitly passed (flag.Visit; distinguishes an explicit 0 from "not passed" — see loadFileConfigAndFlags)
+	rateLimitRPMCanonicalSet bool // true iff -rate-limit-rpm was explicitly passed
+	ipMode                   *string
+	socks5Port               *int
+	metricsTok               *string
+	cpGRPCAddr               *string
+	cpGRPCCert               *string
+	cpGRPCKey                *string
+	cpGRPCCA                 *string
+	haJoin                   *string
+	haToken                  *string
+	haAutoFailover           *bool
+	haEtcdEndpoints          *string
+	haEtcdCert               *string
+	haEtcdKey                *string
+	haEtcdCA                 *string
+	haLeaseTTL               *int
+	dpCPAddr                 *string
+	dpNodeID                 *string
+	dpCert                   *string
+	dpKey                    *string
+	dpCA                     *string
+	policyFile               *string
+	caPath                   *string
+	auditLog                 *string
+	requestLogPath           *string
+	requestLogMaxMB          *int
+	syslogAddr               *string
+	syslogFormat             *string
+	otlpEndpoint             *string
+	uiAllowIP                *string
+	trustedProxyCIDRs        *string
+	sessionHrs               *int
+	geoIPDB                  *string
+	clamavAddr               *string
+	yaraRulesDir             *string
+	threatFeedDB             *string
+	uiUsersFile              *string
+	fileProfilesFile         *string
+	idpProfilesFile          *string
+	uiNoTLS                  *bool
+	catFeedDB                *string
+	catFeedURL               *string
+	catSyncIntvl             *string
+	enrollURL                *string
+	clusterDB                *string
+	clusterInsecureFlag      *bool
+	revocationsFile          *string
+	scanSvcListen            *string
+	scanSvcURL               *string
+	updaterURLFlag           *string // deprecated: legacy updater removed; parsed-but-ignored
+	updaterURLAllowFlag      *string // deprecated: legacy updater removed; parsed-but-ignored
+	uiSANsFlag               *string
+	trustFwdHeaders          *bool
+	resetPwUser              *string
+	supportBundleOut         *string
+	backupOut                *string
+	backupEncrypt            *bool
+	restoreIn                *string
+	restoreMode              *string
+	restoreConfirm           *confirmFlag
+	prepareDowngrade         *bool
+	downgradeTargetSchema    *int
+	restoreAcceptDPReenroll  *bool
+	restoreAllowCounterRB    *bool
+	listLeftovers            *bool
+	cleanupLeftovers         *bool
+	cleanupOlderThan         *string
+	cleanupKeepLast          *int
+	listBackups              *bool
+	listBackupsDir           *string
+	cdrEnabledFlag           *bool
+	cdrEndpointFlag          *string
+	cdrFailModeFlag          *string
+	cdrProfileFlag           *string
+	cdrModeFlag              *string
+	cdrTimeoutFlag           *int
+	cdrMaxSizeFlag           *int
+	cdrFingerprintFlag       *string
+	cdrCertsDirFlag          *string
 
 	// ── Derived locals shared across init functions ──────────────────────
 	fc             *FileConfig
@@ -286,7 +289,8 @@ func parseFlags(s *startupState) {
 	s.logMaxMB = flag.Int("log-max-mb", 0, "Log rotation size in MB (default 50; overrides config)")
 	s.tlsCert = flag.String("tls-cert", "", "TLS cert file for UI (optional)")
 	s.tlsKey = flag.String("tls-key", "", "TLS key file for UI (optional)")
-	s.rateLimitRPM = flag.Int("rate-limit", 0, "Max requests/min per IP (0=off)")
+	s.rateLimitRPM = flag.Int("rate-limit", 0, "Max requests/min per IP (0=off). Deprecated: use -rate-limit-rpm")
+	s.rateLimitRPMCanonical = flag.Int("rate-limit-rpm", 0, "Max requests/min per IP (0=off); canonical flag, matches rate_limit_rpm on every other surface")
 	s.ipMode = flag.String("ip-filter-mode", "", "IP filter mode: allow|block (empty=off)")
 	s.socks5Port = flag.Int("socks5-port", 0, "SOCKS5 proxy port (0=disabled)")
 	s.metricsTok = flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
@@ -368,6 +372,22 @@ func parseFlags(s *startupState) {
 	s.cdrFingerprintFlag = flag.String("cdr-server-fingerprint", "", "TOFU-pinned SHA-256 of Sluice's server cert (hex; 'sha256:' prefix optional)")
 	s.cdrCertsDirFlag = flag.String("cdr-certs-dir", "", "Directory holding Sluice mTLS client bundle (ca.pem, client.pem, client.key)")
 	flag.Parse()
+	// firstNonZero (used throughout loadFileConfigAndFlags) cannot tell an
+	// explicit "0" apart from a flag the operator never passed — every
+	// "0=off" CLI flag in this program shares that limitation. For the two
+	// rate-limit flags specifically that ambiguity is load-bearing (the
+	// canonical -rate-limit-rpm must be able to explicitly disable a
+	// nonzero -rate-limit/config.yaml value during a migration window, PR
+	// #1504 review), so their presence is tracked separately via
+	// flag.Visit, which iterates only flags that were actually set.
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "rate-limit":
+			s.rateLimitRPMFlagSet = true
+		case "rate-limit-rpm":
+			s.rateLimitRPMCanonicalSet = true
+		}
+	})
 }
 
 // handleOneShotCommands handles one-shot CLI commands that exit before starting the proxy.
@@ -654,7 +674,30 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.cert = firstStr(*s.tlsCert, s.fc.Proxy.TLSCert)
 	s.key = firstStr(*s.tlsKey, s.fc.Proxy.TLSKey)
 	s.cert, s.key = resolveUITLSCertKey(s.cert, s.key)
-	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
+	// Precedence by explicit presence, not by firstNonZero: an operator
+	// passing "-rate-limit-rpm 0" to explicitly disable a nonzero
+	// -rate-limit/config.yaml value during a migration window must have
+	// that 0 win, which a nonzero-based merge cannot express (PR #1504
+	// review). fc.Security.RateLimit already reflects YAML-side precedence
+	// (reconcileDeprecatedRateLimitKey), including an explicit
+	// rate_limit_rpm: 0 there.
+	switch {
+	case s.rateLimitRPMCanonicalSet:
+		s.rlRPM = *s.rateLimitRPMCanonical
+	case s.rateLimitRPMFlagSet:
+		s.rlRPM = *s.rateLimitRPM
+	default:
+		s.rlRPM = s.fc.Security.RateLimit
+	}
+	// Checked on the RESOLVED value, mirroring validatePortRanges just above:
+	// FileConfig.validateLimits only rejects a negative security.rate_limit/
+	// rate_limit_rpm in config.yaml, which a CLI flag bypasses entirely. Without
+	// this, a typo like "-rate-limit-rpm=-1" would reach loadConnAndRateLimit's
+	// "> 0" enable check and silently behave as disabled instead of failing
+	// startup (Codex review, PR #1504).
+	if err := validateRateLimitRPM(s.rlRPM); err != nil {
+		log.Fatalf("Invalid rate limit configuration: %v", err)
+	}
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
 	// config.yaml's security.ip_filter_mode is validated at load time
 	// (FileConfig.validateEnums, via loadFileConfig -> fc.validate()) — an
@@ -694,6 +737,8 @@ func initLogger(s *startupState) {
 	// Route internal/* package logs (obs facade) into the same logger. Published
 	// once here at startup, before any traffic is served (ADR-0003 seam).
 	obs.SetSink(func(line string) { logger.Print(line) })
+	// Config was parsed before the logger existed; report deprecated keys now.
+	s.fc.logDeprecatedRateLimitKey()
 }
 
 // initLifecycleContext creates the app-wide lifecycle context.
@@ -734,7 +779,7 @@ func initSession(s *startupState) {
 // observability_startup.go + observability_startup_config.go; this is
 // a thin shim that resolves the slice config and hands it to the
 // loader. No carry to startupState — the file handles stay on their
-// owning packages' state (globalSyslog, internal/audit, internal/reqlog)
+// owning packages' state (globalSyslogHandle, internal/audit, internal/reqlog)
 // and continue to be released by the existing syslog-close / audit-log-
 // close / request-log-close shutdown hooks.
 func initObservability(s *startupState) {
@@ -928,11 +973,20 @@ func initSSLBypassAndDPI(s *startupState) {
 
 // initRewriteAndDefaultAction is the PR3 expansion shim: resolve the
 // header-rewrite + default-policy-action slice and apply it. Passes
-// the current policy-rule count so the loader can derive the zero-
+// the CONFIGURED policy-rule count so the loader can derive the zero-
 // trust-vs-passthrough default when fc.DefaultAction is unset.
+//
+// SEC-POLICYDROP-1: the count is policyStore.ConfiguredRuleCount() — installed
+// rules PLUS the rules Load refused — not len(policyStore.List()). A policy
+// file whose every rule the fail-closed load gate refuses installs nothing, and
+// an installed count of zero would tell the loader "no policy configured",
+// selecting passthrough Allow and newly admitting the unmatched traffic the
+// nonempty-rule Deny default had refused. Ordering matters here: initPolicy
+// (and therefore policyStore.Load) runs earlier in the init block, so the
+// refusal count is already final by the time this shim reads it.
 func initRewriteAndDefaultAction(s *startupState) {
 	cfg := resolveRewriteDefaultActionStartupConfig(s.fc)
-	loadRewriteAndDefaultAction(cfg, len(policyStore.List()))
+	loadRewriteAndDefaultAction(cfg, policyStore.ConfiguredRuleCount())
 }
 
 // initScanning wires up ClamAV, YARA, threat feeds, and the optional scan microservice sidecar.
@@ -1207,6 +1261,7 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 			logger.Printf("Config reload error: %v — keeping current config", err)
 			return
 		}
+		reloaded.logDeprecatedRateLimitKey()
 		applyHotReload(reloaded)
 		logger.Println("Config reloaded successfully")
 	})
@@ -1409,6 +1464,23 @@ func validatePortRanges(proxyPort, uiPort, socks5Port int) error {
 	return nil
 }
 
+// validateRateLimitRPM checks the RESOLVED per-IP rate limit (already merged
+// through the canonical/deprecated-flag presence switch and
+// firstNonZero(CLI, config.yaml) in loadFileConfigAndFlags). FileConfig's own
+// validateLimits rejects a negative security.rate_limit/rate_limit_rpm, but
+// that check runs on the raw YAML fields before CLI overrides are applied —
+// exactly the gap validatePortRanges/validatePortCollisions close for the
+// three listener ports — so a CLI-only negative value (e.g. a
+// "-rate-limit-rpm=-1" typo) would otherwise reach loadConnAndRateLimit's
+// "> 0" enable check and be silently treated as "disabled" rather than
+// failing startup (Codex review, PR #1504).
+func validateRateLimitRPM(n int) error {
+	if n < 0 {
+		return fmt.Errorf("rate limit must be >= 0, got %d", n)
+	}
+	return nil
+}
+
 // validatePortCollisions checks the three RESOLVED listener ports (proxy,
 // admin UI, SOCKS5 — already merged through firstNonZero(CLI, config.yaml,
 // default)) for duplicates. SOCKS5's documented "disabled" sentinel (0) is
@@ -1454,52 +1526,180 @@ func initUpstreamPool(fc *FileConfig) {
 	loadUpstreamPool(resolveUpstreamPoolStartupConfig(fc), appLifecycleCtx)
 }
 
+// clusterCADir returns the directory the cluster CA lives in: beside the
+// cluster state file.
+func clusterCADir(clusterDBPath string) string {
+	return filepath.Dir(clusterDBPath)
+}
+
+// legacyClusterCADir reproduces the CA directory earlier releases derived
+// from the cluster state path: the text before the last "/", or "." when the
+// path has none. For a root-level state file ("/cluster.json") that is "",
+// which InitOrLoad cleaned to ".", so those releases created the CA in the
+// process working directory (the Docker image's WORKDIR). It is used only to
+// find a CA such a release already created; nothing is generated there.
+func legacyClusterCADir(clusterDBPath string) string {
+	if idx := strings.LastIndex(clusterDBPath, "/"); idx >= 0 {
+		return filepath.Clean(clusterDBPath[:idx])
+	}
+	return "."
+}
+
+// clusterCAFilePresent reports whether dir holds either half of the cluster
+// CA pair. Any error other than not-exist counts as present, so the caller
+// keeps that directory and InitOrLoad surfaces the error (fail closed)
+// instead of looking elsewhere.
+func clusterCAFilePresent(dir string) bool {
+	for _, name := range []string{"cluster-ca.crt", "cluster-ca.key"} {
+		p, err := safeCAPath(dir, name)
+		if err != nil {
+			return true
+		}
+		if _, err := os.Stat(p); err == nil || !os.IsNotExist(err) {
+			return true
+		}
+	}
+	return false
+}
+
+// chooseClusterCADir returns dir unless an upgrade must keep a CA at its
+// legacy location: the two directories differ, dir holds no CA file and
+// legacyDir holds one. The legacy CA is then loaded in place (no copy, so
+// the key file and its permissions are untouched) rather than a new CA being
+// generated in dir, which would break mTLS trust for every enrolled node. A
+// partial pair at the legacy location is chosen too, so InitOrLoad fails
+// closed on it instead of bootstrapping a replacement CA.
+func chooseClusterCADir(dir, legacyDir string) (string, bool) {
+	if filepath.Clean(dir) == filepath.Clean(legacyDir) || clusterCAFilePresent(dir) || !clusterCAFilePresent(legacyDir) {
+		return dir, false
+	}
+	return legacyDir, true
+}
+
 // initClusterCA initialises the cluster CA for node enrollment.
 func initClusterCA(clusterDBPath string) {
-	caDir := "."
-	if idx := strings.LastIndex(clusterDBPath, "/"); idx >= 0 {
-		caDir = clusterDBPath[:idx]
+	initClusterCAIn(clusterCADir(clusterDBPath), legacyClusterCADir(clusterDBPath))
+}
+
+// initClusterCAIn loads or creates the cluster CA in dir, falling back to an
+// existing CA in legacyDir per chooseClusterCADir.
+func initClusterCAIn(dir, legacyDir string) {
+	chosen, legacy := chooseClusterCADir(dir, legacyDir)
+	if legacy {
+		logger.Printf("ClusterCA: no CA in %q; loading the existing CA from legacy directory %q (stop the process and move its cluster-ca.* files to %q to adopt the new location)",
+			sanitizeLog(dir), sanitizeLog(chosen), sanitizeLog(dir))
 	}
-	if err := globalClusterCA.InitOrLoad(caDir); err != nil {
+	if err := globalClusterCA.InitOrLoad(chosen); err != nil {
 		logger.Printf("ClusterCA: init error: %v — enrollment disabled", err)
 	}
 }
 
-// enableControlPlane activates Control Plane mode: starts the gRPC server,
+// enableControlPlane activates Control Plane mode: starts the gRPC listener,
 // initialises the cluster CA, and starts the heartbeat monitor.
-// Safe to call at runtime from the admin API (idempotent — returns error if already CP).
+//
+// This is the SYNCHRONOUS entry point, used by the live admin API
+// (`apiClusterMode`) and by the HA promote callback. A listener that cannot
+// come up is reported as an error — which is what it always did here, and the
+// asymmetry CHAOS-71 found was that the BOOT path took the same error and
+// called `logFatalf` on it. The boot path is now
+// `enableControlPlaneResilient`; see cp_grpc_bind.go for the finding.
+//
+// Idempotent: returns an error if already CP.
 func enableControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string) error {
-	clusterRoleMu.Lock()
-	defer clusterRoleMu.Unlock()
+	return activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath, false, nil)
+}
 
-	if clusterRole.role == "control-plane" {
+// enableControlPlaneResilient is the BOOT path's entry point: identical to
+// enableControlPlane except that a first-attempt listener failure is TOLERATED
+// — the supervisor keeps retrying at a bounded rate and this node serves
+// traffic meanwhile — instead of terminating the process.
+//
+// onActivated runs ONCE, after the CP role is claimed on an observed bind. It
+// carries the work that must not happen until the listener is real; on the boot
+// path that is the HA leadership resume.
+func enableControlPlaneResilient(grpcAddr, certFile, keyFile, caFile, clusterDBPath string, onActivated func()) error {
+	return activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath, true, onActivated)
+}
+
+// activateControlPlane is the shared body: one-time preparation, then the
+// listener, then the role.
+//
+// cpActivationMu is the OUTER lock and is taken for the whole operation —
+// preparation, bind and role claim are four individually-atomic steps that are
+// jointly not, so un-serialised two concurrent activations could each bind and
+// the later role claim could point at a socket the other one is serving (the
+// `caMutationMu` pattern, §18). clusterRoleMu is taken INSIDE it, briefly, by
+// the readers and by commitActivation (claimRole) — never held across the
+// bind, which is what lets the supervisor goroutine claim the role on a later
+// successful attempt without deadlocking against a starter waiting on it.
+func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath string, tolerateFirstFailure bool, onActivated func()) error {
+	// An undo still draining (deactivateControlPlane) holds the role it is
+	// about to restore: wait it out, OUTSIDE the lock its release takes, so a
+	// promote retry gets "deactivating, retry" rather than "already running"
+	// (Codex P1 4303232156 on #1645).
+	if err := awaitCPDeactivation(cpListenerStopWait()); err != nil {
+		return err
+	}
+	cpActivationMu.Lock()
+	defer cpActivationMu.Unlock()
+	if cpDeactivation != nil {
+		return fmt.Errorf("%w — retry once it completes", errCPDeactivating)
+	}
+
+	alreadyCP := isControlPlaneRole()
+	if alreadyCP {
 		return fmt.Errorf("already running as control-plane")
 	}
 	if grpcAddr == "" {
 		return fmt.Errorf("gRPC listen address is required")
 	}
+	if cpSupervisor != nil {
+		return fmt.Errorf("a control-plane listener is already starting")
+	}
 
 	// CHAOS-01: seed + arm the durable config-version floor BEFORE the first
 	// publish so a restarted (or HA-promoted) CP never re-issues version
 	// numbers at or below what running DPs have already seen.
+	//
+	// CHAOS-71: this preparation runs ONCE, outside the retry loop, and that
+	// placement is deliberate. Folding it into the retried unit would
+	// re-publish a config version and rewrite the durable floor file on EVERY
+	// rebind attempt — a write every 30 s for the length of an outage, to
+	// re-derive state that has not changed.
 	globalConfigStore.armVersionPersistence(filepath.Join(dataDir, cpConfigVersionFile))
+	// CHAOS-71: from here on the CP address list is owned by its source, so a
+	// full publish captured before a delayed bind can never overwrite the list
+	// the activation publishes (ConfigStore.Update).
+	globalConfigStore.setCPAddressSource(buildCPAddressList)
 	// Initial publish. A commit-time rejection (startup config already over a
 	// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
 	// the CP still serves locally, so boot continues.
 	_ = globalConfigStore.Update(CurrentConfigSnapshot())
 	initClusterCA(clusterDBPath)
-	if err := StartControlPlaneGRPC(grpcAddr, certFile, keyFile, caFile); err != nil {
+
+	cfg := cpListenerConfig{addr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile}
+	sup, err := startControlPlaneListener(cfg, tolerateFirstFailure, onActivated)
+	if err != nil {
+		// Refused: no supervisor, no role — so no address-list owner either
+		// (Codex review of #1556). The resilient boot path does not return
+		// here on a bind failure; it keeps the ownership its retries need.
+		globalConfigStore.releaseCPAddressSource()
 		return err
 	}
+	cpSupervisor = sup
 
-	// Only set role after gRPC is successfully started.
-	clusterRole.role = "control-plane"
-	clusterRole.grpcAddr = grpcAddr
-	clusterRole.certFile = certFile
-	clusterRole.keyFile = keyFile
-	clusterRole.caFile = caFile
-	globalClusterStore.StartHeartbeatMonitor(appLifecycleCtx.Done())
-	logger.Printf("ControlPlane: enabled via GUI (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
+	// The role is claimed by the supervisor on an OBSERVED bind — never here.
+	// A first-attempt failure therefore leaves the node `standalone` and the
+	// supervisor claims the role itself when a later attempt succeeds, so
+	// there is exactly ONE writer of that transition
+	// (commitActivation). All this does is say which happened.
+	if sup.currentServer() == nil {
+		logger.Printf("ControlPlane: gRPC listener on %s is not up yet — this node stays standalone and keeps "+
+			"serving proxy traffic while the listener retries in the background",
+			strings.ReplaceAll(grpcAddr, "\n", ""))
+		return nil
+	}
+	logger.Printf("ControlPlane: enabled (gRPC %s)", strings.ReplaceAll(grpcAddr, "\n", ""))
 	return nil
 }
 
@@ -1551,8 +1751,17 @@ func applyHotReload(fc *FileConfig) {
 		logger.Printf("Reload: default action %s", fc.DefaultAction)
 	}
 
-	// Rate limit
-	if fc.Security.RateLimit > 0 {
+	// Rate limit. fc.Security.RateLimit is already reconciled (loadFileConfig ->
+	// reconcileDeprecatedRateLimitKey), so the canonical/deprecated precedence —
+	// including an explicit rate_limit_rpm: 0 — is already correct here. But a
+	// plain "> 0" guard would only ever be able to RAISE the limit on reload,
+	// never disable it: a reloaded file explicitly setting rate_limit_rpm: 0 to
+	// turn rate limiting off would silently do nothing. RateLimitRPM's pointer
+	// survives reconciliation, so its presence still distinguishes "the
+	// canonical key was explicitly set in this reload" from "the reloaded file
+	// doesn't mention rate limiting at all" (the latter must stay a no-op, same
+	// as every other applyHotReload block) — CodeRabbit review, PR #1504.
+	if fc.Security.RateLimitRPM != nil || fc.Security.RateLimit > 0 {
 		rl.Configure(fc.Security.RateLimit, time.Minute)
 		logger.Printf("Reload: rate limit %d req/min", fc.Security.RateLimit)
 	}

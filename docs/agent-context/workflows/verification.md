@@ -13,7 +13,7 @@ This procedure grants no additional permission to install tools, use privileged 
 
 ## Toolchains and module boundaries
 
-- The compiler pin is the root [`go.mod`](../../../go.mod) `toolchain` line, currently `go1.26.9`. Its `go 1.26.6` line is the minimum language version, not the compiler pin. Record `go env GOVERSION` and `go env GOTOOLCHAIN`. CI uses [setup-go-cache](../../../.github/actions/setup-go-cache/action.yml) to install and verify the exact compiler. Do not add a workflow-level `GOTOOLCHAIN` override; it can prevent setup-go from honoring the pin.
+- The compiler pin is the root [`go.mod`](../../../go.mod) `toolchain` line, currently `go1.27.3`. Its `go 1.26.6` line is the minimum language version, not the compiler pin. Record `go env GOVERSION` and `go env GOTOOLCHAIN`. CI uses [setup-go-cache](../../../.github/actions/setup-go-cache/action.yml) to install and verify the exact compiler. Do not add a workflow-level `GOTOOLCHAIN` override; it can prevent setup-go from honoring the pin.
 - [`cmd/culvert-maint/go.mod`](../../../cmd/culvert-maint/go.mod) defines a separate module. Its language minimum is currently Go 1.25, but CI builds it with the root compiler pin. Root `go test ./...` does not test this module; run its checks from `cmd/culvert-maint`.
 - The frontend is a separate npm tree. Read [`frontend/.node-version`](../../../frontend/.node-version), [`frontend/package.json`](../../../frontend/package.json), and [`assert-toolchain.sh`](../../../frontend/scripts/assert-toolchain.sh); current pins are Node 24.19.0 and npm 11.17.0. Its OpenAPI generator has another npm tree at `frontend/tools/openapi-gen`. Preserve both trees' ignore-scripts policy.
 - Re-read pins after rebasing. If the exact toolchain or required service is unavailable, record that check as blocked or not run, with the actual reason. A different compiler's result is not the pinned result.
@@ -34,7 +34,7 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null .
 TEST_SEED=20260421 go test -count=2 -shuffle=on -timeout=20m ./...
 ```
 
-The shuffled double run is the existing Deep determinism command. Capture the printed shuffle seed on failure. Formatting and lint settings come from CI and [`.golangci.yml`](../../../.golangci.yml); Fast's root lint is diff-scoped with `--new-from-rev`, not a demand to fix unrelated legacy findings. Its currently pinned golangci-lint version is v2.5.0. Use the actual review base for that comparison.
+The shuffled double run is the existing Deep determinism command. Capture the printed shuffle seed on failure. Formatting and lint settings come from CI and [`.golangci.yml`](../../../.golangci.yml); Fast's root lint is diff-scoped with `--new-from-rev`, not a demand to fix unrelated legacy findings. Its currently pinned golangci-lint version is v2.15.0. Use the actual review base for that comparison.
 
 For a local full-root race/coverage diagnostic, Fast's unsharded reference uses:
 
@@ -52,10 +52,10 @@ Read [`internal/admission/doc.go`](../../../internal/admission/doc.go), its scop
 ```sh
 go test -race -shuffle=on -count=2 ./internal/admission
 go test -race -count=1 -run 'TestAdmissionMigration_|TestDistributedAdmission_ProductionWiring' .
-go test -tags benchgate -run 'TestBenchGate_' -count=1 -timeout=10m -v . ./internal/admission
+go test -tags benchgate -run 'TestBenchGate_' -count=1 -p 1 -timeout=10m -v . ./internal/admission ./internal/threatfeed ./internal/catgroup ./internal/session
 ```
 
-The root selection is a starting point, not exhaustive coverage of changed HTTP/SOCKS5, persistence, or cluster behavior. Inspect those callers and add their existing tests. The tagged command must include both root and admission: package-only success misses root gates and root-only success misses the moved rate-window gates. Test names do not establish build-tag membership; inspect each file's `//go:build` header. `TestChaos61_` admission tests need no chaos tag.
+The root selection is a starting point, not exhaustive coverage of changed HTTP/SOCKS5, persistence, or cluster behavior. Inspect those callers and add their existing tests. The tagged command must name every package that owns a `benchgate` file — currently root, `internal/admission`, `internal/threatfeed`, `internal/catgroup` and `internal/session`: package-only success misses root gates, root-only success misses the moved rate-window and CIDR-flatness gates, and omitting a package silently skips its gate rather than failing. Take the list from the `benchgate` job in [Fast PR Gate](../../../.github/workflows/pr-fast-gate.yml), which is the required path that runs them, and extend that job in the same change that adds a gate — a gate CI does not run is not a gate. A wall-clock ratio gate belongs in a `benchgate`-tagged file, never the default suite, where the shuffled determinism job runs it under load. Test names do not establish build-tag membership; inspect each file's `//go:build` header. `TestChaos61_` admission tests need no chaos tag.
 
 [`coverage-floor.sh`](../../../.github/scripts/coverage-floor.sh) owns the existing global and per-file contracts: global 55%, plus its complete per-file table, including 70% for root `security.go`, admission `engine.go`, and `freshness.go`. Per-file values are averages of function coverage, not package coverage. Omitted floor files must fail. Do not replace this with a new package threshold.
 
