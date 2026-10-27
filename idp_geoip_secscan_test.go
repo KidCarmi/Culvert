@@ -322,12 +322,12 @@ func TestOIDCCacheSetWithExp_TokenExpiry(t *testing.T) {
 	// Set with a token expiry sooner than ttl
 	futureExp := time.Now().Add(5 * time.Minute).Unix()
 	a.oidcCacheSetIdentityWithExp("expiry-test", "", &Identity{Sub: "test"}, true, &futureExp)
-	e := a.cache.entryForTest("expiry-test")
-	if e == nil {
+	expiry, ok := a.cache.expiryForTest("expiry-test")
+	if !ok {
 		t.Fatal("cache entry should exist")
 	}
 	// Expiry should be roughly 5 minutes (not 1 hour)
-	if e.expiry.After(time.Now().Add(10 * time.Minute)) {
+	if expiry.After(time.Now().Add(10 * time.Minute)) {
 		t.Error("oidcCacheSetWithExp should use shorter tokenExp, not ttl")
 	}
 }

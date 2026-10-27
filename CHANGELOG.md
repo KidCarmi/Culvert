@@ -2594,7 +2594,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - A flood of bogus credentials from a single unauthenticated client could
   evict another client's cached authentication verdict, and during an identity
   backend outage that turned a cache hit into a denial (CHAOS-76, register rows
-  AU-30/AU-31). All three identity-backend result caches on the proxy
+  AU-67/AU-68). All three identity-backend result caches on the proxy
   credential path — the LDAP directory bind, the legacy RFC 7662 introspection
   backend and the IdP-registry introspection provider — evicted "an arbitrary
   entry" at their 5,000-entry cap: a Go map range that stops at the first key,
@@ -2636,11 +2636,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   for other people.
 
   The three caches now share one policy, the one `internal/authstate` defines
-  and CHAOS-57 put in the local cache, reusing `store.go`'s existing victim
-  ordering rather than adding a fourth copy of it (the tree holds two
-  definitions of that ordering, not one: `betterAuthCacheVictim` in `store.go`
-  and the identical `better` in `internal/authstate`; consolidating them is
-  recorded as follow-up, not done here): entries are attributed to a client
+  and CHAOS-57 put in the local cache, in a new internal owner,
+  `internal/identcache` (ADR-0041). The cap and the eviction sink are injected
+  by package main, which keeps only a binding and the integration gates. The
+  victim ordering moved with it as `identcache.BetterVictim`, and `store.go`'s
+  `betterAuthCacheVictim` now delegates to it rather than keeping a copy. The
+  tree still holds two definitions of that ordering, that one and the
+  identical `better` in `internal/authstate`; consolidating the engines is
+  recorded as follow-up, not done here. Entries are attributed to a client
   fairness key and eviction takes the oldest entry of the client holding the
   most, so a flooding source evicts itself and a client holding one entry cannot
   be displaced until every other client is down to one too. An expired entry is
@@ -2670,9 +2673,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   restarted that clock on insertion, so an entry outlived its token by whatever
   elapsed in between (measured at 1.1 us and 553 ns for the two backends). The
   store now takes an absolute deadline where the caller has one and keeps the
-  duration form only where the bound is a configured TTL. Gates: seventeen,
-  with every gate that pins a defect verified failing against the behaviour
-  that defect describes.
+  duration form only where the bound is a configured TTL. Gates: seventeen
+  (nine of them now in `internal/identcache`), with every gate that pins a
+  defect verified failing against the behaviour that defect describes, plus a
+  root gate on the binding's cap and sink and the package's boundary and
+  ownership tests.
 
 - Two security-regression gates added for the memoized IDNA slow path
   (`internal/hostutil/idnamemo.go`), each run against **both** retention tiers

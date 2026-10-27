@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -180,142 +179,6 @@ func TestChaos76_FloodCannotTurnACachedPositiveIntoADenialDuringAnOutage(t *test
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The policy itself, on the shared store.
-// ─────────────────────────────────────────────────────────────────────────────
-
-// An expired entry is free to drop — it would have been a miss anyway — so
-// evicting a LIVE entry while a dead one occupies capacity is pure loss. The
-// pre-fix policy did exactly that, and nothing else reclaimed the dead ones.
-//
-// The population is inverted on purpose: ONE expired entry in a cache that is
-// otherwise full of live ones. An arbitrary victim is therefore a live entry
-// with probability (cap-1)/cap, which makes this a deterministic oracle rather
-// than a coin flip.
-func TestChaos76_ExpiredEntriesAreEvictedBeforeLiveOnes(t *testing.T) {
-	var c identityResultCache[*Identity]
-
-	// One expired entry, alone in its bucket so it is that bucket's FRONT —
-	// the only positions the bounded eviction scan examines.
-	c.set("dead", "dead-client", nil, false, time.Nanosecond)
-	live := make([]string, 0, maxAuthCacheSize-1)
-	for i := 0; i < maxAuthCacheSize-1; i++ {
-		k := fmt.Sprintf("live-%d", i)
-		live = append(live, k)
-		c.set(k, fmt.Sprintf("live-client-%d", i%4), &Identity{Sub: "alice"}, true, honestEntryTTL)
-	}
-	time.Sleep(5 * time.Millisecond) // let the one short-TTL entry lapse
-
-	c.set("newcomer", "newcomer-client", nil, false, honestEntryTTL)
-
-	if _, _, hit := c.get("dead"); hit {
-		t.Error("the expired entry survived the eviction that the newcomer forced")
-	}
-	survivors := 0
-	for _, k := range live {
-		if _, _, hit := c.get(k); hit {
-			survivors++
-		}
-	}
-	if survivors != len(live) {
-		t.Fatalf("eviction took %d LIVE entr(ies) while an expired one sat in the cache "+
-			"(%d of %d live entries survived) — an expired entry is free to drop, so taking a "+
-			"live one in preference is pure loss (CHAOS-76)", len(live)-survivors, survivors, len(live))
-	}
-}
-
-// A lookup reclaims an expired entry in place, so a dead verdict stops
-// occupying capacity as soon as anybody looks at it. Pre-fix, the lookup
-// reported a miss and left the entry sitting there.
-func TestChaos76_LookupReclaimsAnExpiredEntry(t *testing.T) {
-	var c identityResultCache[*Identity]
-	c.set("k", "client", &Identity{Sub: "alice"}, true, time.Nanosecond)
-	time.Sleep(5 * time.Millisecond)
-
-	if c.len() != 1 {
-		t.Fatalf("precondition: len = %d, want 1", c.len())
-	}
-	if _, _, hit := c.get("k"); hit {
-		t.Fatal("an expired entry was reported as a hit")
-	}
-	if got := c.len(); got != 0 {
-		t.Fatalf("a lookup left %d expired entr(ies) occupying capacity, want 0 (CHAOS-76)", got)
-	}
-}
-
-// The victim must never depend on Go's map iteration order, or the policy is
-// untestable and an attacker's odds change per process.
-func TestChaos76_EvictionVictimIsDeterministic(t *testing.T) {
-	victimOf := func() string {
-		var c identityResultCache[*Identity]
-		// Three clients of different sizes, all live. "big" is the largest
-		// holder, so its oldest entry is the only correct victim.
-		c.set("small", "small-client", nil, true, honestEntryTTL)
-		c.set("medium-0", "medium-client", nil, true, honestEntryTTL)
-		c.set("medium-1", "medium-client", nil, true, honestEntryTTL)
-		for i := 0; i < maxAuthCacheSize-3; i++ {
-			c.set(fmt.Sprintf("big-%d", i), "big-client", nil, true, honestEntryTTL)
-		}
-		c.set("newcomer", "newcomer-client", nil, true, honestEntryTTL)
-
-		for _, k := range []string{"small", "medium-0", "medium-1", "big-0"} {
-			if _, _, hit := c.get(k); !hit {
-				return k
-			}
-		}
-		return "<none>"
-	}
-
-	first := victimOf()
-	if first != "big-0" {
-		t.Fatalf("eviction victim = %q, want \"big-0\" — the oldest entry of the largest holder; "+
-			"a different victim means the policy is reading Go's map order (CHAOS-76)", first)
-	}
-	// Repeat: map order differs per range, so a non-deterministic policy
-	// diverges across runs in the same process.
-	for i := 0; i < 8; i++ {
-		if got := victimOf(); got != first {
-			t.Fatalf("eviction victim varied across runs (%q then %q) — it depends on map order (CHAOS-76)", first, got)
-		}
-	}
-}
-
-// A client holding ONE entry is untouchable until every other client is down
-// to one too: the property that makes an attacker buy distinct source
-// addresses rather than run a for-loop.
-func TestChaos76_ASingleEntryHolderOutlivesEveryLargerHolder(t *testing.T) {
-	var c identityResultCache[*Identity]
-	c.set("lonely", "lonely-client", &Identity{Sub: "alice"}, true, honestEntryTTL)
-	// 6x the cap: under an arbitrary-victim policy the lonely entry's survival
-	// probability is (1-1/cap)^(6*cap) = e^-6, about one run in four hundred.
-	for i := 0; i < 6*maxAuthCacheSize; i++ {
-		c.set(fmt.Sprintf("flood-%d", i), fmt.Sprintf("flood-client-%d", i%4), nil, false, honestEntryTTL)
-	}
-	if _, _, hit := c.get("lonely"); !hit {
-		t.Fatal("a single-entry holder was displaced while four larger holders remained (CHAOS-76)")
-	}
-}
-
-// The compaction trap: under a sustained flood the un-consumed window stays
-// pinned at the cap while head and len advance together forever, so a
-// window-based compaction test never fires and the backing array grows with
-// total request count — a memory leak reachable by the same flood the
-// eviction policy exists to survive.
-func TestChaos76_BucketBackingSliceDoesNotGrowWithRequestCount(t *testing.T) {
-	var c identityResultCache[*Identity]
-	const flood = 6 * maxAuthCacheSize
-	for i := 0; i < flood; i++ {
-		c.set(fmt.Sprintf("k-%d", i), "one-flooding-client", nil, false, honestEntryTTL)
-	}
-	if got := c.len(); got > maxAuthCacheSize {
-		t.Fatalf("cache holds %d entries, cap is %d", got, maxAuthCacheSize)
-	}
-	if got := c.keysRetainedForTest("one-flooding-client"); got > 4*maxAuthCacheSize {
-		t.Fatalf("one client's bucket retains %d key slots after %d requests against a cap of %d — "+
-			"the backing array is growing with request count (CHAOS-76)", got, flood, maxAuthCacheSize)
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // The structural half: the fairness key has to REACH the provider caches.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -423,63 +286,6 @@ func TestChaos76_EveryCachingIdentityBackendIsClientAttributed(t *testing.T) {
 	}
 }
 
-// Displacement must be VISIBLE: it is the operator's only signal that cached
-// verdicts are being thrown away, and every eviction costs somebody a full
-// backend round trip or a denial during a cooldown.
-func TestChaos76_EvictionsAreCounted(t *testing.T) {
-	var c identityResultCache[*Identity]
-	for i := 0; i < maxAuthCacheSize+64; i++ {
-		c.set(fmt.Sprintf("k-%d", i), "client", nil, false, honestEntryTTL)
-	}
-	if got := c.Evictions(); got < 64 {
-		t.Fatalf("Evictions() = %d after %d insertions past the cap, want >= 64 — "+
-			"displacement is invisible to the operator (CHAOS-76)", got, 64)
-	}
-}
-
-// The store is reached concurrently from every request goroutine on the
-// credential path, and it is new shared state. The bucket index, the entry map
-// and the compaction window all have to stay consistent with each other under
-// contention — a bucket whose live count drifts from the entry map would either
-// evict the wrong victim forever or leak capacity.
-func TestChaos76_ConcurrentUseKeepsTheCapAndTheBucketIndexConsistent(t *testing.T) {
-	var c identityResultCache[*Identity]
-
-	const (
-		workers   = 32
-		perWorker = 400
-	)
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func(w int) {
-			defer wg.Done()
-			client := fmt.Sprintf("client-%d", w%6)
-			for i := 0; i < perWorker; i++ {
-				k := fmt.Sprintf("w%d-k%d", w, i)
-				c.set(k, client, &Identity{Sub: "alice"}, true, honestEntryTTL)
-				c.get(k)
-				// Re-set the same key: the overwrite path has to remove the old
-				// entry from its bucket before re-attributing it, or the live
-				// count double-counts and the fairness ordering goes wrong.
-				c.set(k, client, &Identity{Sub: "alice"}, true, honestEntryTTL)
-				c.get(fmt.Sprintf("w%d-k%d", (w+1)%workers, i))
-			}
-		}(w)
-	}
-	wg.Wait()
-
-	if got := c.len(); got > maxAuthCacheSize {
-		t.Fatalf("cache holds %d entries after concurrent use, cap is %d", got, maxAuthCacheSize)
-	}
-	// Every bucket's live count must equal what the entry map actually
-	// attributes to that client.
-	if drift, client := c.bucketDriftForTest(); drift != 0 {
-		t.Fatalf("bucket live count for %q drifts from the entry map by %d — the eviction "+
-			"policy reads live counts, so drift corrupts the victim choice (CHAOS-76)", client, drift)
-	}
-}
-
 // An eviction counter nobody can read is not observability. culvert_auth_cache_
 // evictions_total has been on /metrics since CHAOS-57 for the local cache; the
 // identity backends' displacement needs the same surface, for the same reason.
@@ -517,46 +323,6 @@ func TestChaos76_LegacyProviderEvictionsAreReportedOnConfig(t *testing.T) {
 	// AuthCacheEvictions, and this accessor must not claim its count.
 	if got := (&Config{}).IdentityCacheEvictions(); got != 0 {
 		t.Errorf("IdentityCacheEvictions = %d with no external backend, want 0", got)
-	}
-}
-
-// Codex review finding on PR #1633, confirmed: re-verifying a credential after
-// its TTL calls set() again for the SAME key. set removes the old record and
-// appends the key, so the bucket's key slice holds that key TWICE while live
-// counts it once — and compactLocked kept BOTH slots, because it asks only
-// whether c.entries[k] is present and the newest record answers yes for every
-// historical slot. So nothing reclaimed the duplicates and b.keys grew with
-// total request count behind a bounded map.
-//
-// This is the same trap compactLocked's own comment warns about, reached by a
-// different route, and the realistic shape is ordinary: the fairness key is a
-// client address, so one NAT'd office is ONE bucket holding many live
-// credentials, each re-verified every TTL.
-func TestChaos76_RefreshingACredentialDoesNotGrowItsBucketForever(t *testing.T) {
-	var c identityResultCache[*Identity]
-	const (
-		client    = "198.51.100.7"
-		creds     = 20   // distinct credentials behind one NAT'd address
-		refreshes = 2000 // each re-verified after its TTL lapses
-	)
-
-	// Keep the bucket alive throughout: with more than one live entry the
-	// bucket is never dropped, which is the state the duplicates accumulate in.
-	for i := 0; i < creds; i++ {
-		c.set(fmt.Sprintf("cred-%d", i), client, &Identity{Sub: "alice"}, true, honestEntryTTL)
-	}
-	for r := 0; r < refreshes; r++ {
-		c.set(fmt.Sprintf("cred-%d", r%creds), client, &Identity{Sub: "alice"}, true, honestEntryTTL)
-	}
-
-	if got := c.len(); got != creds {
-		t.Fatalf("entry count = %d, want %d — refreshes must replace, not accumulate", got, creds)
-	}
-	// The bucket may carry some slack, but it must not scale with request count.
-	if got := c.keysRetainedForTest(client); got > 8*creds {
-		t.Fatalf("one client's bucket retains %d key slots for %d live credentials after "+
-			"%d refreshes — the backing array is growing with request count, behind a "+
-			"bounded map (CHAOS-76, Codex finding on #1633)", got, creds, refreshes)
 	}
 }
 
@@ -693,51 +459,6 @@ func TestChaos76_EvictionCounterCoversEveryCacheAndNeverFalls(t *testing.T) {
 	}
 }
 
-// Codex review finding on PR #1633 (second pass), confirmed by probe: set on a
-// key the bucket already lists leaves the old slot in place and appends a new
-// one, so a bucket reads [A, B, A] while live counts two. A presence test
-// cannot reject the leading A, because the NEW record answers "present" for
-// every historical position of that key — so frontLocked returned the FRESHLY
-// REFRESHED entry as the client's oldest, and eviction preferred it to the
-// genuinely older B. Compaction deduplicates but is skipped at eight keys or
-// fewer, so small buckets stayed wrong indefinitely.
-//
-// Measured before the fix: keys=[A B A], front=A, with A.added NEWER than
-// B.added.
-func TestChaos76_RefreshDoesNotMakeAnEntryLookLikeItsClientsOldest(t *testing.T) {
-	var c identityResultCache[*Identity]
-	const client = "198.51.100.7"
-
-	c.set("A", client, &Identity{Sub: "a"}, true, honestEntryTTL)
-	time.Sleep(2 * time.Millisecond)
-	c.set("B", client, &Identity{Sub: "b"}, true, honestEntryTTL)
-	time.Sleep(2 * time.Millisecond)
-	// Refresh A. B keeps the bucket alive, which is the state the stale slot
-	// survives in, and the bucket is far too small for compaction to fire.
-	c.set("A", client, &Identity{Sub: "a"}, true, honestEntryTTL)
-
-	c.mu.Lock()
-	k, front, ok := c.frontLocked(client, c.buckets[client])
-	addedA, addedB := c.entries["A"].added, c.entries["B"].added
-	c.mu.Unlock()
-
-	if !ok {
-		t.Fatal("frontLocked found no entry for a client holding two")
-	}
-	if addedB.After(addedA) {
-		t.Fatalf("precondition: B should be the older entry (A=%s B=%s)", addedA, addedB)
-	}
-	if k != "B" {
-		t.Fatalf("frontLocked = %q, want \"B\" — the client's genuinely oldest entry. Returning the "+
-			"just-refreshed entry makes eviction take a verdict written moments ago in preference "+
-			"to an older one, and if the backend then enters its cooldown that client is denied "+
-			"despite having just been verified (CHAOS-76)", k)
-	}
-	if !front.added.Equal(addedB) {
-		t.Errorf("front entry's added = %s, want B's %s", front.added, addedB)
-	}
-}
-
 // A positive verdict clamped to the token's own `exp` must expire WITH the
 // token, not a scheduling delay later.
 //
@@ -766,7 +487,7 @@ func TestChaos76_AClampedVerdictExpiresWithItsTokenNotLater(t *testing.T) {
 		for i := range inserts {
 			k := cacheKey("", fmt.Sprintf("tok-%d", i))
 			a.oidcCacheSetIdentityWithExp(k, "client", &Identity{Sub: "alice"}, true, &exp)
-			assertExpiresWithToken(t, a.cache.entryForTest(k), deadline, i)
+			assertExpiresWithToken(t, &a.cache, k, deadline, i)
 		}
 	})
 
@@ -775,21 +496,49 @@ func TestChaos76_AClampedVerdictExpiresWithItsTokenNotLater(t *testing.T) {
 		for i := range inserts {
 			k := cacheKey("", fmt.Sprintf("tok-%d", i))
 			p.introspectCacheSet(k, "client", &Identity{Sub: "alice"}, true, &exp)
-			assertExpiresWithToken(t, p.cache.entryForTest(k), deadline, i)
+			assertExpiresWithToken(t, &p.cache, k, deadline, i)
 		}
 	})
 }
 
-func assertExpiresWithToken(t *testing.T, e *identityCacheEntry[*Identity], deadline time.Time, i int) {
+func assertExpiresWithToken(t *testing.T, c *identityResultCache[*Identity], key string, deadline time.Time, i int) {
 	t.Helper()
-	if e == nil {
+	expiry, ok := c.expiryForTest(key)
+	if !ok {
 		t.Fatalf("insert %d: no entry recorded", i)
 	}
-	if !e.expiry.Equal(deadline) {
+	if !expiry.Equal(deadline) {
 		t.Fatalf("insert %d: the cached positive expires %s AFTER the token's own exp "+
 			"(recorded %s, token deadline %s) — the clamped duration was re-derived against a "+
 			"later clock sample, so the verdict outlives the credential it came from and requests "+
 			"in that interval authenticate on an expired token (CHAOS-76)",
-			i, e.expiry.Sub(deadline), e.expiry, deadline)
+			i, expiry.Sub(deadline), expiry, deadline)
+	}
+}
+
+// The binding is composition only (ADR-0041), so what it must get right is
+// the two dependencies it hands the engine: the application cap, shared with
+// the local credential cache, and the process-wide eviction sink /metrics
+// reads. The engine's own gates live in internal/identcache and build their
+// caches with an explicit cap, so nothing there would notice this binding
+// passing a different one.
+func TestChaos76_TheBindingSuppliesTheApplicationCapAndSink(t *testing.T) {
+	var c identityResultCache[*Identity]
+	before := identityCacheEvictionsTotal()
+	for i := 0; i < maxAuthCacheSize+7; i++ {
+		c.set(fmt.Sprintf("k-%d", i), "client", nil, false, honestEntryTTL)
+	}
+	if got := c.len(); got != maxAuthCacheSize {
+		t.Fatalf("binding holds %d entries after %d inserts, want the application cap %d",
+			got, maxAuthCacheSize+7, maxAuthCacheSize)
+	}
+	if got := c.Evictions(); got != 7 {
+		t.Fatalf("binding counted %d evictions, want 7", got)
+	}
+	// Other tests may evict concurrently into the same process-wide total, so
+	// this is a lower bound on the delta.
+	if delta := identityCacheEvictionsTotal() - before; delta < 7 {
+		t.Fatalf("the process-wide total rose by %d, want at least the binding's 7 — "+
+			"the eviction sink is not wired", delta)
 	}
 }

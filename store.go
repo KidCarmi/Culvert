@@ -23,6 +23,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/audit"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/identcache"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/totp"
 )
@@ -620,15 +621,12 @@ func (a *authCacheStore) evictOneLocked(now time.Time) {
 // better eviction victim than the incumbent. Ordering: most live entries
 // first, then the oldest entry, then the lexicographically smaller client key
 // — total and deterministic, so the victim never depends on map order.
+//
+// The definition lives with the identity-backend result cache
+// (identcache.BetterVictim, ADR-0041), so the local cache and the three
+// identity caches cannot drift apart on what "better victim" means.
 func betterAuthCacheVictim(live int, added time.Time, client string, bestLive int, bestAdded time.Time, bestClient string) bool {
-	switch {
-	case live != bestLive:
-		return live > bestLive
-	case !added.Equal(bestAdded):
-		return added.Before(bestAdded)
-	default:
-		return client < bestClient
-	}
+	return identcache.BetterVictim(live, added, client, bestLive, bestAdded, bestClient)
 }
 
 // frontLocked returns the client's oldest still-present entry, advancing head
