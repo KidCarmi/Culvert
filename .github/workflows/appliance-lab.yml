@@ -1318,8 +1318,10 @@ jobs:
     if: ${{ contains(github.event.head_commit.message, '[fp2-isolated]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
-    # Owner decision 6387402372 (#1528): ONE run for the NEW sidecar
-    # culvert/clamav:1.5.4-culvert.3 (brotli-libs 1.2.1-r0). No OVA carries it and
+    # Re-run (user directive, 27 Oct) for the NEW sidecar
+    # culvert/clamav:1.5.4-culvert.4 = culvert.3 + libcurl 8.23.0-r0
+    # (CVE-2026-92392), source 93c83f90. Earlier: owner decision 6387402372 ran
+    # it once for culvert.3 (brotli-libs 1.2.1-r0). No OVA carries it and
     # that approval forbids building one, so BOTH arms come from pinned inputs on
     # this runner instead of a retained OVA (the bad788e5 artifact 11666266481 has
     # expired, 410):
@@ -1340,12 +1342,12 @@ jobs:
             kind: pull
             image_ref: "docker.io/clamav/clamav@sha256:57deb108fc4c72778aa83eafbca7bb7153e28c3f57c005afd38d31f16da86f23"
             expect: nonzero
-          - label: candidate-1.5.4-culvert.3
+          - label: candidate-1.5.4-culvert.4
             kind: build
-            src_commit: "524637857f6aa56df20d938b814da55dfc8f9465"
-            dockerfile_sha256: "dccebff1c328b80d6134e5160c00f763e40c1cc72a26009a389a8d859174afc7"
-            sidecar_ref: "culvert/clamav:1.5.4-culvert.3"
-            source_date_epoch: "1792855424"
+            src_commit: "93c83f903edaad7714cba21f07335aaf2f88e1c9"
+            dockerfile_sha256: "4b08fcf3052345918cfc14fd426b90d7d8695a1cdb96364af541d8e275288234"
+            sidecar_ref: "culvert/clamav:1.5.4-culvert.4"
+            source_date_epoch: "1793096442"
             expect: zero
     env:
       ARM_KIND: ${{ matrix.kind }}
@@ -1417,7 +1419,7 @@ jobs:
               build first.tar; build rebuild.tar
               d1="$(top first.tar)"; d2="$(top rebuild.tar)"
               echo "build 1: $d1"$'\n'"build 2: $d2" | tee "$E/reproducible.txt"
-              [ "$d1" = "$d2" ] || { echo "::error::culvert.3 is not reproducible ($d1 vs $d2) — identity cannot be bound"; exit 1; }
+              [ "$d1" = "$d2" ] || { echo "::error::$SIDECAR_REF is not reproducible ($d1 vs $d2) — identity cannot be bound"; exit 1; }
               gzip -n -6 < first.tar > clamav.tar.gz
               sha256sum clamav.tar.gz | sed 's#clamav.tar.gz#clamav.tar.gz (gzip -n -6 of the OCI archive, as build-ova.sh bakes it)#' | tee "$E/archive.sha256"
               sha256sum first.tar | tee -a "$E/archive.sha256"
@@ -1430,7 +1432,7 @@ jobs:
           esac
           echo "$id" > "$E/image-id.txt"
           docker run --rm --network none --entrypoint sh "$id" -c "apk info -v 2>/dev/null | sort" > "$E/apk-packages.txt"
-          grep -E '^(clamav|libclamav|musl|musl-utils|pcre2|zlib|nghttp2-libs|brotli-libs)-[0-9]' "$E/apk-packages.txt" | tee "$E/packages.txt" || true
+          grep -E '^(clamav|libclamav|musl|musl-utils|pcre2|zlib|nghttp2-libs|brotli-libs|libcurl|c-ares|ca-certificates-bundle)-[0-9]' "$E/apk-packages.txt" | tee "$E/packages.txt" || true
           echo "IMG=$id" >> "$GITHUB_ENV"
       - name: Stock clamd.conf + bounded temp filesystem + clamd up (freshclam off, signatures recorded)
         run: |
