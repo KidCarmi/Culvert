@@ -272,11 +272,22 @@ func TestRevocationExpiry_MalformedPeerExpiries(t *testing.T) {
 			t.Errorf("Expiry=%d was admitted", exp)
 		}
 	}
-	// A far-future expiry is admitted — a peer choosing it is CHAOS-73's
-	// concern (bounding), not this one's. Pinned so the two fixes stay
-	// distinguishable.
-	if added := rl.MergeRevocations([]RevocationEntry{{Token: "far", Expiry: 1 << 40}}); added != 1 {
-		t.Errorf("far-future entry: added %d, want 1", added)
+	// A far-future expiry is CHAOS-73's concern (bounding), not this one's:
+	// an untrusted origin may not name an expiry no session this appliance
+	// issues could carry, so it is refused and counted as far_future. Pinned
+	// so the two fixes stay distinguishable: the refusal comes from the
+	// lifetime bound, and an ordinary in-lifetime peer expiry is still
+	// admitted on the expiry oracle alone.
+	farBefore := Refused(RevokeFarFuture)
+	if added := rl.MergeRevocations([]RevocationEntry{{Token: "far", Expiry: 1 << 40}}); added != 0 {
+		t.Errorf("far-future entry: added %d, want 0 (refused by the CHAOS-73 lifetime bound)", added)
+	}
+	if got := Refused(RevokeFarFuture) - farBefore; got < 1 {
+		t.Errorf("far-future refusal not counted as %q (delta %d)", RevokeFarFuture, got)
+	}
+	inLife := time.Now().Add(time.Hour).Unix()
+	if added := rl.MergeRevocations([]RevocationEntry{{Token: "in-life", Expiry: inLife}}); added != 1 {
+		t.Errorf("in-lifetime peer entry: added %d, want 1", added)
 	}
 }
 

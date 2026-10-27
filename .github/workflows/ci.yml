@@ -75,7 +75,7 @@ jobs:
         run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o culvert .
 
       - name: Upload binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: culvert-linux-amd64
           path: culvert
@@ -190,7 +190,7 @@ jobs:
 
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -215,7 +215,7 @@ jobs:
           echo "image=ghcr.io/$LC" >> $GITHUB_OUTPUT
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -469,12 +469,12 @@ jobs:
       candidate_tag: ${{ steps.candidate.outputs.candidate_tag }}
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -530,7 +530,7 @@ jobs:
       id-token: write   # cosign keyless signing of the qualification record (main)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -558,7 +558,7 @@ jobs:
           echo "qualifying ${IMAGE}@${DIGEST} as ${VERSION} (compiler pin ${TOOLCHAIN})"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -690,7 +690,7 @@ jobs:
 
       - name: Upload candidate package and vulnerability evidence
         if: always() && steps.what.outputs.digest != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: candidate-security-evidence
           path: candidate-security-evidence/
@@ -747,7 +747,7 @@ jobs:
       actions: read       # require-gate.sh (tag-path guard)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -852,7 +852,7 @@ jobs:
       # release, and the verify below proves this run's signature landed.
       - name: Log in to GitHub Container Registry (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -889,7 +889,7 @@ jobs:
             "ghcr.io/kidcarmi/culvert@${{ needs.resolve-candidate.outputs.digest }}"
 
       - name: Upload generated catalog bundle (signed on tag path)
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-catalog-bundle
           path: ${{ steps.spec.outputs.out }}
@@ -979,7 +979,7 @@ jobs:
       actions: read     # require-gate.sh (list-workflow-runs)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1032,7 +1032,7 @@ jobs:
           echo "channel tip: $TIP"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1160,7 +1160,7 @@ jobs:
       actions: read     # require-gate.sh (list-workflow-runs)
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1213,7 +1213,7 @@ jobs:
           echo "channel tip: $TIP"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1304,7 +1304,7 @@ jobs:
       id-token: write     # cosign keyless blob signing of the re-signed index.json
     steps:
       - name: Harden runner (egress audit — same baseline as catalog-pipeline)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1540,7 +1540,7 @@ jobs:
 
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1717,7 +1717,7 @@ jobs:
             culvert-maint.sbom.cdx.json.sigstore.json
 
       - name: Upload per-leg subjects artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-subjects-${{ matrix.goos }}-${{ matrix.goarch }}
           path: subjects-${{ matrix.goos }}-${{ matrix.goarch }}.txt
@@ -1789,7 +1789,7 @@ jobs:
           - { goos: windows, goarch: amd64, ext: .exe }
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           # Needs module-proxy egress: the composite runs `go mod download` for
           # BOTH modules (cmd/culvert-maint deps are not in the root-go.sum
@@ -1910,7 +1910,7 @@ jobs:
       actions: read     # require-release-evidence.sh
     steps:
       - name: Harden runner (egress audit — baseline for the block flip, Phase 2b)
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

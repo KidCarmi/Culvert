@@ -51,95 +51,98 @@ var dataDir = "/data"
 // PR2's main() extraction.
 type startupState struct {
 	// ── CLI flag pointers (all set in parseFlags) ─────────────────────────
-	configPath              *string
-	proxyPort               *int
-	uiPortFlag              *int
-	user                    *string
-	pass                    *string
-	blockFile               *string
-	logFilePath             *string
-	logMaxMB                *int
-	tlsCert                 *string
-	tlsKey                  *string
-	rateLimitRPM            *int
-	ipMode                  *string
-	socks5Port              *int
-	metricsTok              *string
-	cpGRPCAddr              *string
-	cpGRPCCert              *string
-	cpGRPCKey               *string
-	cpGRPCCA                *string
-	haJoin                  *string
-	haToken                 *string
-	haAutoFailover          *bool
-	haEtcdEndpoints         *string
-	haEtcdCert              *string
-	haEtcdKey               *string
-	haEtcdCA                *string
-	haLeaseTTL              *int
-	dpCPAddr                *string
-	dpNodeID                *string
-	dpCert                  *string
-	dpKey                   *string
-	dpCA                    *string
-	policyFile              *string
-	caPath                  *string
-	auditLog                *string
-	requestLogPath          *string
-	requestLogMaxMB         *int
-	syslogAddr              *string
-	syslogFormat            *string
-	otlpEndpoint            *string
-	uiAllowIP               *string
-	trustedProxyCIDRs       *string
-	sessionHrs              *int
-	geoIPDB                 *string
-	clamavAddr              *string
-	yaraRulesDir            *string
-	threatFeedDB            *string
-	uiUsersFile             *string
-	fileProfilesFile        *string
-	idpProfilesFile         *string
-	uiNoTLS                 *bool
-	catFeedDB               *string
-	catFeedURL              *string
-	catSyncIntvl            *string
-	enrollURL               *string
-	clusterDB               *string
-	clusterInsecureFlag     *bool
-	revocationsFile         *string
-	scanSvcListen           *string
-	scanSvcURL              *string
-	updaterURLFlag          *string // deprecated: legacy updater removed; parsed-but-ignored
-	updaterURLAllowFlag     *string // deprecated: legacy updater removed; parsed-but-ignored
-	uiSANsFlag              *string
-	trustFwdHeaders         *bool
-	resetPwUser             *string
-	supportBundleOut        *string
-	backupOut               *string
-	backupEncrypt           *bool
-	restoreIn               *string
-	restoreMode             *string
-	restoreConfirm          *confirmFlag
-	prepareDowngrade        *bool
-	downgradeTargetSchema   *int
-	restoreAcceptDPReenroll *bool
-	restoreAllowCounterRB   *bool
-	listLeftovers           *bool
-	cleanupLeftovers        *bool
-	cleanupOlderThan        *string
-	cleanupKeepLast         *int
-	listBackups             *bool
-	listBackupsDir          *string
-	cdrEnabledFlag          *bool
-	cdrEndpointFlag         *string
-	cdrFailModeFlag         *string
-	cdrProfileFlag          *string
-	cdrModeFlag             *string
-	cdrTimeoutFlag          *int
-	cdrMaxSizeFlag          *int
-	cdrFingerprintFlag      *string
-	cdrCertsDirFlag         *string
+	configPath               *string
+	proxyPort                *int
+	uiPortFlag               *int
+	user                     *string
+	pass                     *string
+	blockFile                *string
+	logFilePath              *string
+	logMaxMB                 *int
+	tlsCert                  *string
+	tlsKey                   *string
+	rateLimitRPM             *int // -rate-limit (deprecated alias; see rateLimitRPMCanonical)
+	rateLimitRPMCanonical    *int // -rate-limit-rpm (canonical; terminology governance T-29)
+	rateLimitRPMFlagSet      bool // true iff -rate-limit was explicitly passed (flag.Visit; distinguishes an explicit 0 from "not passed" — see loadFileConfigAndFlags)
+	rateLimitRPMCanonicalSet bool // true iff -rate-limit-rpm was explicitly passed
+	ipMode                   *string
+	socks5Port               *int
+	metricsTok               *string
+	cpGRPCAddr               *string
+	cpGRPCCert               *string
+	cpGRPCKey                *string
+	cpGRPCCA                 *string
+	haJoin                   *string
+	haToken                  *string
+	haAutoFailover           *bool
+	haEtcdEndpoints          *string
+	haEtcdCert               *string
+	haEtcdKey                *string
+	haEtcdCA                 *string
+	haLeaseTTL               *int
+	dpCPAddr                 *string
+	dpNodeID                 *string
+	dpCert                   *string
+	dpKey                    *string
+	dpCA                     *string
+	policyFile               *string
+	caPath                   *string
+	auditLog                 *string
+	requestLogPath           *string
+	requestLogMaxMB          *int
+	syslogAddr               *string
+	syslogFormat             *string
+	otlpEndpoint             *string
+	uiAllowIP                *string
+	trustedProxyCIDRs        *string
+	sessionHrs               *int
+	geoIPDB                  *string
+	clamavAddr               *string
+	yaraRulesDir             *string
+	threatFeedDB             *string
+	uiUsersFile              *string
+	fileProfilesFile         *string
+	idpProfilesFile          *string
+	uiNoTLS                  *bool
+	catFeedDB                *string
+	catFeedURL               *string
+	catSyncIntvl             *string
+	enrollURL                *string
+	clusterDB                *string
+	clusterInsecureFlag      *bool
+	revocationsFile          *string
+	scanSvcListen            *string
+	scanSvcURL               *string
+	updaterURLFlag           *string // deprecated: legacy updater removed; parsed-but-ignored
+	updaterURLAllowFlag      *string // deprecated: legacy updater removed; parsed-but-ignored
+	uiSANsFlag               *string
+	trustFwdHeaders          *bool
+	resetPwUser              *string
+	supportBundleOut         *string
+	backupOut                *string
+	backupEncrypt            *bool
+	restoreIn                *string
+	restoreMode              *string
+	restoreConfirm           *confirmFlag
+	prepareDowngrade         *bool
+	downgradeTargetSchema    *int
+	restoreAcceptDPReenroll  *bool
+	restoreAllowCounterRB    *bool
+	listLeftovers            *bool
+	cleanupLeftovers         *bool
+	cleanupOlderThan         *string
+	cleanupKeepLast          *int
+	listBackups              *bool
+	listBackupsDir           *string
+	cdrEnabledFlag           *bool
+	cdrEndpointFlag          *string
+	cdrFailModeFlag          *string
+	cdrProfileFlag           *string
+	cdrModeFlag              *string
+	cdrTimeoutFlag           *int
+	cdrMaxSizeFlag           *int
+	cdrFingerprintFlag       *string
+	cdrCertsDirFlag          *string
 
 	// ── Derived locals shared across init functions ──────────────────────
 	fc             *FileConfig
@@ -286,7 +289,8 @@ func parseFlags(s *startupState) {
 	s.logMaxMB = flag.Int("log-max-mb", 0, "Log rotation size in MB (default 50; overrides config)")
 	s.tlsCert = flag.String("tls-cert", "", "TLS cert file for UI (optional)")
 	s.tlsKey = flag.String("tls-key", "", "TLS key file for UI (optional)")
-	s.rateLimitRPM = flag.Int("rate-limit", 0, "Max requests/min per IP (0=off)")
+	s.rateLimitRPM = flag.Int("rate-limit", 0, "Max requests/min per IP (0=off). Deprecated: use -rate-limit-rpm")
+	s.rateLimitRPMCanonical = flag.Int("rate-limit-rpm", 0, "Max requests/min per IP (0=off); canonical flag, matches rate_limit_rpm on every other surface")
 	s.ipMode = flag.String("ip-filter-mode", "", "IP filter mode: allow|block (empty=off)")
 	s.socks5Port = flag.Int("socks5-port", 0, "SOCKS5 proxy port (0=disabled)")
 	s.metricsTok = flag.String("metrics-token", "", "Bearer token for /metrics (empty=open)")
@@ -368,6 +372,22 @@ func parseFlags(s *startupState) {
 	s.cdrFingerprintFlag = flag.String("cdr-server-fingerprint", "", "TOFU-pinned SHA-256 of Sluice's server cert (hex; 'sha256:' prefix optional)")
 	s.cdrCertsDirFlag = flag.String("cdr-certs-dir", "", "Directory holding Sluice mTLS client bundle (ca.pem, client.pem, client.key)")
 	flag.Parse()
+	// firstNonZero (used throughout loadFileConfigAndFlags) cannot tell an
+	// explicit "0" apart from a flag the operator never passed — every
+	// "0=off" CLI flag in this program shares that limitation. For the two
+	// rate-limit flags specifically that ambiguity is load-bearing (the
+	// canonical -rate-limit-rpm must be able to explicitly disable a
+	// nonzero -rate-limit/config.yaml value during a migration window, PR
+	// #1504 review), so their presence is tracked separately via
+	// flag.Visit, which iterates only flags that were actually set.
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "rate-limit":
+			s.rateLimitRPMFlagSet = true
+		case "rate-limit-rpm":
+			s.rateLimitRPMCanonicalSet = true
+		}
+	})
 }
 
 // handleOneShotCommands handles one-shot CLI commands that exit before starting the proxy.
@@ -654,7 +674,30 @@ func loadFileConfigAndFlags(s *startupState) {
 	s.cert = firstStr(*s.tlsCert, s.fc.Proxy.TLSCert)
 	s.key = firstStr(*s.tlsKey, s.fc.Proxy.TLSKey)
 	s.cert, s.key = resolveUITLSCertKey(s.cert, s.key)
-	s.rlRPM = firstNonZero(*s.rateLimitRPM, s.fc.Security.RateLimit)
+	// Precedence by explicit presence, not by firstNonZero: an operator
+	// passing "-rate-limit-rpm 0" to explicitly disable a nonzero
+	// -rate-limit/config.yaml value during a migration window must have
+	// that 0 win, which a nonzero-based merge cannot express (PR #1504
+	// review). fc.Security.RateLimit already reflects YAML-side precedence
+	// (reconcileDeprecatedRateLimitKey), including an explicit
+	// rate_limit_rpm: 0 there.
+	switch {
+	case s.rateLimitRPMCanonicalSet:
+		s.rlRPM = *s.rateLimitRPMCanonical
+	case s.rateLimitRPMFlagSet:
+		s.rlRPM = *s.rateLimitRPM
+	default:
+		s.rlRPM = s.fc.Security.RateLimit
+	}
+	// Checked on the RESOLVED value, mirroring validatePortRanges just above:
+	// FileConfig.validateLimits only rejects a negative security.rate_limit/
+	// rate_limit_rpm in config.yaml, which a CLI flag bypasses entirely. Without
+	// this, a typo like "-rate-limit-rpm=-1" would reach loadConnAndRateLimit's
+	// "> 0" enable check and silently behave as disabled instead of failing
+	// startup (Codex review, PR #1504).
+	if err := validateRateLimitRPM(s.rlRPM); err != nil {
+		log.Fatalf("Invalid rate limit configuration: %v", err)
+	}
 	s.ipModeVal = firstStr(*s.ipMode, s.fc.Security.IPFilterMode)
 	// config.yaml's security.ip_filter_mode is validated at load time
 	// (FileConfig.validateEnums, via loadFileConfig -> fc.validate()) — an
@@ -694,6 +737,8 @@ func initLogger(s *startupState) {
 	// Route internal/* package logs (obs facade) into the same logger. Published
 	// once here at startup, before any traffic is served (ADR-0003 seam).
 	obs.SetSink(func(line string) { logger.Print(line) })
+	// Config was parsed before the logger existed; report deprecated keys now.
+	s.fc.logDeprecatedRateLimitKey()
 }
 
 // initLifecycleContext creates the app-wide lifecycle context.
@@ -1216,6 +1261,7 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 			logger.Printf("Config reload error: %v — keeping current config", err)
 			return
 		}
+		reloaded.logDeprecatedRateLimitKey()
 		applyHotReload(reloaded)
 		logger.Println("Config reloaded successfully")
 	})
@@ -1418,6 +1464,23 @@ func validatePortRanges(proxyPort, uiPort, socks5Port int) error {
 	return nil
 }
 
+// validateRateLimitRPM checks the RESOLVED per-IP rate limit (already merged
+// through the canonical/deprecated-flag presence switch and
+// firstNonZero(CLI, config.yaml) in loadFileConfigAndFlags). FileConfig's own
+// validateLimits rejects a negative security.rate_limit/rate_limit_rpm, but
+// that check runs on the raw YAML fields before CLI overrides are applied —
+// exactly the gap validatePortRanges/validatePortCollisions close for the
+// three listener ports — so a CLI-only negative value (e.g. a
+// "-rate-limit-rpm=-1" typo) would otherwise reach loadConnAndRateLimit's
+// "> 0" enable check and be silently treated as "disabled" rather than
+// failing startup (Codex review, PR #1504).
+func validateRateLimitRPM(n int) error {
+	if n < 0 {
+		return fmt.Errorf("rate limit must be >= 0, got %d", n)
+	}
+	return nil
+}
+
 // validatePortCollisions checks the three RESOLVED listener ports (proxy,
 // admin UI, SOCKS5 — already merged through firstNonZero(CLI, config.yaml,
 // default)) for duplicates. SOCKS5's documented "disabled" sentinel (0) is
@@ -1463,13 +1526,70 @@ func initUpstreamPool(fc *FileConfig) {
 	loadUpstreamPool(resolveUpstreamPoolStartupConfig(fc), appLifecycleCtx)
 }
 
+// clusterCADir returns the directory the cluster CA lives in: beside the
+// cluster state file.
+func clusterCADir(clusterDBPath string) string {
+	return filepath.Dir(clusterDBPath)
+}
+
+// legacyClusterCADir reproduces the CA directory earlier releases derived
+// from the cluster state path: the text before the last "/", or "." when the
+// path has none. For a root-level state file ("/cluster.json") that is "",
+// which InitOrLoad cleaned to ".", so those releases created the CA in the
+// process working directory (the Docker image's WORKDIR). It is used only to
+// find a CA such a release already created; nothing is generated there.
+func legacyClusterCADir(clusterDBPath string) string {
+	if idx := strings.LastIndex(clusterDBPath, "/"); idx >= 0 {
+		return filepath.Clean(clusterDBPath[:idx])
+	}
+	return "."
+}
+
+// clusterCAFilePresent reports whether dir holds either half of the cluster
+// CA pair. Any error other than not-exist counts as present, so the caller
+// keeps that directory and InitOrLoad surfaces the error (fail closed)
+// instead of looking elsewhere.
+func clusterCAFilePresent(dir string) bool {
+	for _, name := range []string{"cluster-ca.crt", "cluster-ca.key"} {
+		p, err := safeCAPath(dir, name)
+		if err != nil {
+			return true
+		}
+		if _, err := os.Stat(p); err == nil || !os.IsNotExist(err) {
+			return true
+		}
+	}
+	return false
+}
+
+// chooseClusterCADir returns dir unless an upgrade must keep a CA at its
+// legacy location: the two directories differ, dir holds no CA file and
+// legacyDir holds one. The legacy CA is then loaded in place (no copy, so
+// the key file and its permissions are untouched) rather than a new CA being
+// generated in dir, which would break mTLS trust for every enrolled node. A
+// partial pair at the legacy location is chosen too, so InitOrLoad fails
+// closed on it instead of bootstrapping a replacement CA.
+func chooseClusterCADir(dir, legacyDir string) (string, bool) {
+	if filepath.Clean(dir) == filepath.Clean(legacyDir) || clusterCAFilePresent(dir) || !clusterCAFilePresent(legacyDir) {
+		return dir, false
+	}
+	return legacyDir, true
+}
+
 // initClusterCA initialises the cluster CA for node enrollment.
 func initClusterCA(clusterDBPath string) {
-	caDir := "."
-	if idx := strings.LastIndex(clusterDBPath, "/"); idx >= 0 {
-		caDir = clusterDBPath[:idx]
+	initClusterCAIn(clusterCADir(clusterDBPath), legacyClusterCADir(clusterDBPath))
+}
+
+// initClusterCAIn loads or creates the cluster CA in dir, falling back to an
+// existing CA in legacyDir per chooseClusterCADir.
+func initClusterCAIn(dir, legacyDir string) {
+	chosen, legacy := chooseClusterCADir(dir, legacyDir)
+	if legacy {
+		logger.Printf("ClusterCA: no CA in %q; loading the existing CA from legacy directory %q (stop the process and move its cluster-ca.* files to %q to adopt the new location)",
+			sanitizeLog(dir), sanitizeLog(chosen), sanitizeLog(dir))
 	}
-	if err := globalClusterCA.InitOrLoad(caDir); err != nil {
+	if err := globalClusterCA.InitOrLoad(chosen); err != nil {
 		logger.Printf("ClusterCA: init error: %v — enrollment disabled", err)
 	}
 }
@@ -1631,8 +1751,17 @@ func applyHotReload(fc *FileConfig) {
 		logger.Printf("Reload: default action %s", fc.DefaultAction)
 	}
 
-	// Rate limit
-	if fc.Security.RateLimit > 0 {
+	// Rate limit. fc.Security.RateLimit is already reconciled (loadFileConfig ->
+	// reconcileDeprecatedRateLimitKey), so the canonical/deprecated precedence —
+	// including an explicit rate_limit_rpm: 0 — is already correct here. But a
+	// plain "> 0" guard would only ever be able to RAISE the limit on reload,
+	// never disable it: a reloaded file explicitly setting rate_limit_rpm: 0 to
+	// turn rate limiting off would silently do nothing. RateLimitRPM's pointer
+	// survives reconciliation, so its presence still distinguishes "the
+	// canonical key was explicitly set in this reload" from "the reloaded file
+	// doesn't mention rate limiting at all" (the latter must stay a no-op, same
+	// as every other applyHotReload block) — CodeRabbit review, PR #1504.
+	if fc.Security.RateLimitRPM != nil || fc.Security.RateLimit > 0 {
 		rl.Configure(fc.Security.RateLimit, time.Minute)
 		logger.Printf("Reload: rate limit %d req/min", fc.Security.RateLimit)
 	}

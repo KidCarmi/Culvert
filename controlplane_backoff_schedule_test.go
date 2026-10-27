@@ -164,18 +164,20 @@ func TestDPBackoff_DoesNotMutateTheStreak(t *testing.T) {
 
 // TestDPFailover_RetryFailureIsCharged pins the streak across a failover.
 //
-// failover() zeroes failCount for the new CP, and backoff() only reads it, so
-// the immediate retry's failure has to be charged by pollConfig itself. Without
-// that the new CP silently gets a FOURTH failed request before the next
-// failover instead of a third — the old double-charging backoff() happened to
-// cover this path, and removing that increment exposed it. Raised by CodeRabbit
-// on PR #1658.
+// The streak counts failed polls, and failover() keeps it (CHAOS-89), so the
+// poll that fails over — including its immediate retry against the new CP —
+// advances the streak by exactly one, and the gate re-crosses after
+// dpFailoverAfterFailures more failed polls. A reset here would let a
+// reachable-but-not-serving CP pair flap forever on the ladder's lowest rung;
+// a second charge for the retry would fail over every two polls instead of
+// every three. Originally raised by CodeRabbit on PR #1658, when failover()
+// still zeroed the streak.
 func TestDPFailover_RetryFailureIsCharged(t *testing.T) {
 	c, ctx := failingDPClient(t, []string{"cp-1:9443", "cp-2:9443"})
 
 	// Three consecutive failures: the third reaches failover, which succeeds on
-	// a lazy dial, zeroes the streak, and then retries — and that retry fails
-	// too, because every call through this client fails.
+	// a lazy dial and then retries — and that retry fails too, because every
+	// call through this client fails.
 	for i := 1; i <= 3; i++ {
 		if _, ok := c.pollConfig(ctx); ok {
 			t.Fatalf("poll %d unexpectedly succeeded", i)
@@ -184,8 +186,8 @@ func TestDPFailover_RetryFailureIsCharged(t *testing.T) {
 	if c.activeIdx != 1 {
 		t.Fatalf("activeIdx=%d want 1 — failover must have been reached on the 3rd failure", c.activeIdx)
 	}
-	if c.failCount != 1 {
-		t.Errorf("failCount=%d after the post-failover retry failed, want 1 — an uncharged "+
-			"retry failure gives the new CP an extra chance before the next failover", c.failCount)
+	if c.failCount != 3 {
+		t.Errorf("failCount=%d after 3 failed polls (the 3rd with a failed post-failover retry), want 3 — "+
+			"the streak must neither reset across a failover nor be charged twice for one poll", c.failCount)
 	}
 }
