@@ -359,12 +359,45 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errMsg, http.StatusBadRequest)
 		return
 	}
-	pred := buildLogFilterPredicate(q)
+	page, total := filterLogPage(all, fromMs, toMs, offsetVal, limitVal, buildLogFilterPredicate(q))
+	jsonOK(w, map[string]any{"logs": page, "total": total})
+}
 
-	// Index-based range + pointer to avoid copying each LogEntry (~320 bytes)
-	// per iteration. all[:0:0] has cap 0 so the first append reallocates — the
-	// shared (cached) backing array is never mutated.
-	filtered := all[:0:0]
+// filterLogPage scans an entry slice newest-first and returns ONE page of the
+// matches plus the exact count of every match. It backs the in-memory-ring and
+// JSONL branches of GET /api/logs; the store-backed branch pushes the same
+// window into the query instead.
+//
+// The scan visits every entry — it has to, because `total` is exact — but it
+// COPIES only the entries that land inside [offset, offset+limit). The
+// pre-change loop appended every match into a slice grown from zero capacity
+// and then sliced that result down to `limit`, so a dashboard poll over the
+// full 5 000-entry ring allocated ~7.5 MB of doubling-growth backing arrays and
+// then discarded all but `limit` of the 352-byte entries it had just copied
+// (measured: 9.9 MB/op unfiltered, 9.3 MB/op for a 50-row page — see
+// ui_logs_page_bench_test.go and the frozen pre-change shape it benchmarks
+// against). Entries are read through a pointer so the loop never copies a
+// non-matching entry at all, and the caller's backing array is never mutated.
+//
+// The returned page is nil, not an empty slice, when nothing lands in the
+// window: the pre-change handler emitted `"logs": null` for an out-of-range
+// offset and for an empty ring, and that wire shape is preserved.
+func filterLogPage(all []LogEntry, fromMs, toMs int64, offset, limit int, pred func(*LogEntry) bool) (page []LogEntry, total int) {
+	// At most `limit` entries can be paged out, and at most len(all)-offset can
+	// remain after the offset, so one allocation of that size is always enough.
+	//
+	// Trade-off, stated rather than engineered around: this sizes the page by
+	// the REQUESTED limit, where the pre-change shape grew with the number of
+	// MATCHES. A narrow filter with a large limit therefore over-allocates (one
+	// allocation, worst case `limit` entries ~= 1.76 MB at the 5 000 clamp,
+	// which is the size of the snapshot the caller is already holding, versus
+	// ~12 kB before). That is one allocation on a rare operator query, against
+	// 7.5 MB of doubling-growth garbage on the poll every open dashboard tab
+	// issues every 3 s. Sizing by matches would mean growing the slice again,
+	// which is the cost being removed; it is not worth the complexity.
+	if pageCap := min(limit, len(all)-offset); pageCap > 0 {
+		page = make([]LogEntry, 0, pageCap)
+	}
 	for i := range all {
 		e := &all[i]
 		if fromMs != 0 && e.TS < fromMs {
@@ -376,20 +409,15 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 		if !pred(e) {
 			continue
 		}
-		filtered = append(filtered, *e)
-	}
-	total := len(filtered)
-	// Apply offset/limit pagination.
-	if offsetVal >= total {
-		filtered = nil
-	} else {
-		end := offsetVal + limitVal
-		if end > total {
-			end = total
+		if total >= offset && len(page) < limit {
+			page = append(page, *e)
 		}
-		filtered = filtered[offsetVal:end]
+		total++
 	}
-	jsonOK(w, map[string]any{"logs": filtered, "total": total})
+	if len(page) == 0 {
+		page = nil
+	}
+	return page, total
 }
 
 // apiLogsMaxLimit clamps a single /api/logs page so one query cannot demand an
