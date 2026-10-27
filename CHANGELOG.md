@@ -9,6 +9,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the upstream mTLS client certificate failed to
+  load, has expired, or expires within 30 days.** That state was visible only in
+  the OCSP panel API; the one-page report read as healthy while upstream servers
+  requiring mutual TLS rejected the node. A new `upstream_mtls_client_cert` WARN
+  row (additive, report-only, no row when unconfigured or healthy) carries no
+  file path or error text. No certificate-loading behavior changes.
+
 - **Diagnostics now warns when OCSP checking is enabled but does not cover
   inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
   on the OCSP panel and in a one-time log line; the one-page diagnostics report
@@ -17,6 +24,81 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Diagnostics reported "session revocation healthy … no drops" while a
+  legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
+  CHAOS-73 bounds what an untrusted origin — cluster gossip, or the on-disk
+  revocations file — may insert into the revocation list, and charges a reason
+  for each refusal. `checkSessionRevocation` summed two of the three:
+  `RevokeOversize` and `RevokeCapacity`, but not `RevokeFarFuture`. A node that
+  dropped only far-future entries took the `diagOK` branch and printed "no
+  refusals, no drops" — on the one authenticated surface whose own contract is
+  that a dropped entry "means a session an operator deliberately killed may
+  still authenticate, here or on another node" (CWE-778; the underlying drop is
+  CWE-613).
+
+  `RevokeFarFuture` is the reason with a benign trigger, which is what made the
+  omission matter. `admitUntrustedLocked` refuses a gossiped entry whose expiry
+  exceeds `now + MaxSessionLifetime + revocationExpirySkew`; that is exactly 7
+  days plus 1 hour, and `POST /api/session-timeout` admits `hours` up to 168 —
+  so at the maximum *supported* session TTL the entire inter-node clock-skew
+  budget is one hour. In a cluster at `session_timeout: 168h` with a peer whose
+  clock runs more than an hour ahead, that peer's legitimate revocations are
+  dropped on the receiving node, the revoked cookie keeps authenticating there
+  for the remainder of its life, and Diagnostics affirmatively said revocation
+  was healthy. The count is now summed, the row names the expiry bound among the
+  causes, and the operator action names clock skew as the benign cause to check
+  FIRST — this file's own rule that a refusal surface must not assert an attack.
+  The bound itself is unchanged: widening `revocationExpirySkew` is a security
+  behavior change and is recorded as an owner decision instead.
+- **Peer-supplied Control Plane addresses reached the Data Plane's process log
+  unsanitized (CWE-117).** `applyAddressesLocked` adopts the CP config
+  snapshot's `cp_addresses` verbatim into the client's address list and states
+  that both lists "are peer-supplied … so they are untrusted log values under
+  the CWE-117 rule" — but four older sinks in the same file printed an address
+  from that same list with a bare `%s`: both of `connect`'s lines and both of
+  `failover`'s. `validateConfigSnapshot` count-caps `cp_addresses` at 100 and
+  never validates an entry as `host:port`, so a newline inside one forged
+  records in the DP's process log and in every downstream syslog/OTLP consumer.
+  All four now use `sanitizeLog` with `%q`, and the failover line sanitizes the
+  wrapped error too, since it carries the same address. Pinned by a source gate
+  so a fifth sink cannot reintroduce it. A hostile Control Plane already
+  dictates the Data Plane's policy, so the marginal impact is log integrity —
+  but the convention is the convention, and the inconsistency sat inside one
+  file.
+- **A sixth log sink retained the decrypted inner request path, unbounded, after
+  CHAOS-92 bounded the other five (CHAOS-92e).** The CHAOS-92 sweep enumerated
+  three retaining sink families and clamped each at a chokepoint, with a source
+  gate to keep future sinks bounded. The gate matches call sites carrying both
+  `sanitizeLog(` and `URL.Path` — so it never examined
+  `fileblock.LogBlock`, which sanitizes in the callee (`obs.Sanitize`, the
+  independent internal twin, ADR-0003) and writes the client-chosen path into the
+  50 MB/one-archive rotating process log as `FILE_BLOCKED (tunnel %s)`. Six
+  `emitFileBlock` call sites reach it, four of them passing `req.URL.Path`
+  straight from the decrypted inner request.
+
+  It is worse per request than the five that were fixed: those are fed by a path
+  net/http caps at `MaxHeaderBytes + 4096`, while this one is fed by
+  `http.ReadRequest` on the decrypted stream — `readRequestLimit(b,
+  math.MaxInt64)` over a `textproto.ReadLine()` with no limit — so the inner
+  request line is unbounded on the wire. Measured through the emitter: a 1 MiB
+  path wrote 1 048 646 log bytes, and a 1 MiB path of `0xFF` wrote 4 194 375,
+  because `obs.Sanitize` folds control bytes but `0xFF` is not one and `%q`
+  renders each as the 4-character `\xff`. Every write succeeds, so the logsink
+  backpressure counter and every storage-health surface stay green while the
+  retained record rotates away (CWE-778, OWASP A09:2021). Reachability is the one
+  CHAOS-69 named for the inner path — an allowed destination with SSL inspection
+  enabled — not CHAOS-92's stock-install reachability.
+
+  `emitFileBlock` now clamps with the sweep's own `boundRetainedPath`, inside the
+  `fileblock.LogBlock` argument so the sanitiser's scan and its copy are bounded
+  too. It is package main's only route into `LogBlock`, so one edit bounds all
+  six call sites, and a source gate now fails on a direct
+  `fileblock.LogBlock`/`BlockConn` call from package main. **Enforcement and the
+  client-visible response are untouched**: every matcher ran on the whole value
+  at the call site before the emitter, and the 403 body derives from the
+  extension and source only — pinned by a control that asserts the emitted bytes
+  are identical at 16 B and 1 MiB. Recorded with its measurements in
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53.11.
 - **The `file_profile_resolution` diagnostics row went blind to the very rules
   SEC-POLICYACTION-1 taught the request path to honour.** That change made
   `applyPolicyDecision` (`proxy.go`) dispatch on `canonicalPolicyAction`, which
