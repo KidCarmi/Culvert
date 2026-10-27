@@ -1362,6 +1362,25 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 	refScanDeleteLock()
 	defer refScanDeleteUnlock()
 
+	// CHAOS-79: everything below this point MUTATES live enforcement state with
+	// no rollback, so a round that dies partway leaves two config generations
+	// blended. Bracket the region so an interrupted apply is distinguishable
+	// from one refused before any mutation. end… is NOT deferred on purpose: a
+	// deferred clear would run during panic unwinding and erase the fact being
+	// recorded. The region is one call, so there is exactly one begin and one
+	// end, and a future early return inside it cannot bypass the clear — only a
+	// panic crossing it can, which is the condition being detected.
+	// See configsnapshot_apply_health.go.
+	beginConfigSnapshotApplyMutation()
+	err := applySnapshotMutations(snap)
+	endConfigSnapshotApplyMutation()
+	return err
+}
+
+// applySnapshotMutations is applyConfigSnapshot's mutating region: every call
+// here replaces live enforcement state. Order is preserved verbatim from before
+// the CHAOS-79 extraction, and the caller holds the reference-integrity gate.
+func applySnapshotMutations(snap ConfigSnapshot) error {
 	applySnapshotPolicyAndTraffic(snap)
 	applySnapshotClusterRuntime(snap)
 
@@ -1704,6 +1723,49 @@ func applySnapshotExtendedState(snap ConfigSnapshot) {
 	// Node groups.
 	if snap.NodeGroups != nil && globalNodeGroups != nil {
 		globalNodeGroups.ReplaceAll(snap.NodeGroups)
+	}
+
+	reportDroppedStartupOrderSlices(snap)
+}
+
+// reportDroppedStartupOrderSlices logs any CP-authoritative snapshot slice that
+// applySnapshotExtendedState could not apply because its store does not exist
+// yet (CHAOS-80).
+//
+// The `!= nil` store guards in applySnapshotExtendedState carry TWO different
+// conditions, and only one of them is a no-op. A nil FIELD is the presence
+// contract: an older or rolled-back CP that omits the slice must leave the
+// node's durable state alone. A nil STORE is a startup-ORDER fact:
+// globalBandwidth and globalNodeGroups are built by initPersistentAdminState
+// (main.go), which runs AFTER initCluster — and initCluster is what calls
+// startDataPlane, whose applyDPLastGoodConfigSnapshot replays the
+// last-known-good snapshot SYNCHRONOUSLY. So on every Data Plane boot the
+// replay reaches the apply with both stores still nil and drops both slices,
+// while the surrounding apply goes on to record a complete, successful,
+// version-advancing apply. The version ratchet then suppresses the next poll
+// (`snap.Version <= lastVersion`), so nothing re-applies them until the CP
+// increments the config version.
+//
+// Enforcement normally still converges, because both stores reload the same
+// content from their own node-local JSON moments later (ReplaceAll persists on
+// every apply). That convergence is a property of the local files, not of this
+// apply: a restored, re-imaged or partially-populated volume breaks it, and the
+// node then enforces stale or absent bandwidth/QoS and node-group state with
+// every surface reporting a current config. Until the ordering itself is fixed,
+// a dropped slice is at least REPORTED rather than silent, naming the slice and
+// the version so an operator can correlate it instead of inferring it.
+func reportDroppedStartupOrderSlices(snap ConfigSnapshot) {
+	if snap.BandwidthPolicies != nil && globalBandwidth == nil {
+		logger.Printf("DataPlane: config v%d bandwidth policies NOT applied (%d policy/policies) — "+
+			"the bandwidth store is not constructed yet at this point in startup; the node keeps its "+
+			"node-local bandwidth state until the control plane publishes a new config version",
+			snap.Version, len(snap.BandwidthPolicies))
+	}
+	if snap.NodeGroups != nil && globalNodeGroups == nil {
+		logger.Printf("DataPlane: config v%d node groups NOT applied (%d group(s)) — "+
+			"the node-group store is not constructed yet at this point in startup; the node keeps its "+
+			"node-local group state until the control plane publishes a new config version",
+			snap.Version, len(snap.NodeGroups))
 	}
 }
 

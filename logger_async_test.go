@@ -195,12 +195,34 @@ func TestSetupLogger_JSONModeBatchingPreservesRecordBoundaries(t *testing.T) {
 		if err := json.Unmarshal(line, &rec); err != nil {
 			t.Fatalf("output line %d is not a standalone JSON object (record boundaries broken): %v\nline=%q", seq, err, line)
 		}
-		want := "POLICY_ALLOW seq=" + strconv.Itoa(seq)
-		if rec.Msg != want {
-			t.Fatalf("line %d msg=%q, want %q — records were merged or reordered", seq, rec.Msg, want)
-		}
 		if strings.Contains(rec.Msg, "\n") {
 			t.Fatalf("line %d msg contains an embedded newline — a batch was folded into one record", seq)
+		}
+		// This test owns only the records it wrote. `logger` is a package GLOBAL
+		// that withSetupLogger swaps without excluding other writers, so any
+		// goroutine still holding it writes into this temp file too — and one
+		// does: an alert webhook delivery runs asynchronously and reports a
+		// failure through obs.Printf (internal/alerts/store.go, "Alert webhook
+		// %q: delivery error"), which lands on the application logger whenever
+		// the DNS/connect failure for a test-configured URL resolves. Under
+		// -shuffle that can be during THIS test.
+		//
+		// Both assertions above stay on EVERY line, because they are the actual
+		// regression: encoding moved in front of the batching sink, so no line
+		// may be a folded batch, whoever wrote it. What must NOT be asserted is
+		// that line N is record N — that was never the boundary contract, only
+		// an accident of being the sole writer, and it turned an unrelated
+		// interleaved line into a positional avalanche (the first foreign line
+		// shifts every subsequent comparison). Skipping a foreign record keeps
+		// the contract that matters: every record this writer emitted is whole,
+		// unmerged and in order, and the seq != n check below still catches one
+		// that was merged or lost.
+		if !strings.HasPrefix(rec.Msg, "POLICY_ALLOW seq=") {
+			continue
+		}
+		want := "POLICY_ALLOW seq=" + strconv.Itoa(seq)
+		if rec.Msg != want {
+			t.Fatalf("record %d msg=%q, want %q — records were merged or reordered", seq, rec.Msg, want)
 		}
 		seq++
 	}

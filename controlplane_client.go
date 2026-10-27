@@ -78,6 +78,13 @@ type DataPlaneClient struct {
 	deltaUnsupported  bool // T3 P1: set when a CP returns Unimplemented for GetConfigDelta
 	deltaProbeSkips   int  // T3 P1: polls skipped since the delta latch was set (re-probe counter)
 	callForTest       func(context.Context, string, json.RawMessage) (json.RawMessage, error)
+	// revocationsUnsaved records that a revocation merge has landed in memory
+	// but its persist has not completed. It exists because MergeRevocations
+	// counts only NEWLY added tokens, so a save that is skipped once can never
+	// be re-triggered by a later identical full-set response — see
+	// revocationSyncRound (CHAOS-79, Codex P1). Atomic because the gate and the
+	// revocation loop are different goroutines under -race.
+	revocationsUnsaved atomic.Bool
 	// pendingAddrs is a CP address list whose redial failed (CHAOS-91), held
 	// for retryPendingAddresses. Guarded by mu.
 	pendingAddrs []string
@@ -334,6 +341,51 @@ func (c *DataPlaneClient) failover() bool {
 	return false
 }
 
+// ── CHAOS-79: the DP control-plane sync plane runs its rounds guarded ────────
+//
+// Run launches FIVE long-lived workers inside the proxy's own process, and Go
+// terminates that process on an unrecovered panic in ANY goroutine. Until
+// CHAOS-79 none of the five ran its round under the per-round guard CHAOS-24
+// (crashguard.go, runGuarded) established for every other background worker in
+// the tree — including dpCertRenewalLoop, started by the SAME startDataPlane a
+// line below Run. These five were simply never in that sweep's scope, so they
+// were the odd ones out rather than a reasoned exception.
+//
+// The exposure is not abstract. Every round here parses and APPLIES a payload
+// the node does not author: a config snapshot that can reach ~60 MiB and drives
+// the blocklist, IP filter, rate limiter, policy/SSL-bypass/rewrite compilers,
+// IdP registry, URL categories and a signed MCP envelope; a rate-limit
+// broadcast; a revocation set; a heartbeat reply. A fault anywhere under that
+// fan-out — in CP/DP version skew during a rolling upgrade, or from a fenced-out
+// zombie leader the epoch ratchet exists precisely to distrust — killed the
+// gateway, dropping every in-flight tunnel. Under the shipped compose file's
+// `restart: unless-stopped` a deterministic fault becomes a crash loop, because
+// the node replays the same last-known-good snapshot on every boot.
+//
+// Per round, never per goroutine (the CHAOS-24 rule, unchanged): a recover at
+// the top of one of these goroutines would convert a loud crash into a SILENT
+// permanent stall — config never syncs again, revocations never propagate,
+// cluster rate limiting never refreshes — with the process up and every
+// dashboard green. Guarding the round keeps the ticker alive, so a transient
+// fault costs one interval and self-heals, and the crash plane counts and
+// reports it (culvert_crash_records_total{component}).
+//
+// Two rounds additionally need the §12.2 fail-closed treatment, because
+// containment alone would make them worse than the crash:
+//
+//   - the config round must mark the apply REJECTED (guardedConfigRound), or a
+//     panic mid-apply leaves a partially applied config reported as healthy;
+//   - the audit round must RETURN its drained batch to the queue
+//     (auditPushRound), or containment destroys evidence once per interval,
+//     forever, with the process alive.
+const (
+	dpComponentConfigPoll    = "dp_config_poll"
+	dpComponentMetricsPush   = "dp_metrics_push"
+	dpComponentRateLimitSync = "dp_ratelimit_gossip"
+	dpComponentRevocation    = "dp_revocation_sync"
+	dpComponentAuditPush     = "dp_audit_push"
+)
+
 // dpStartupStaggerMax caps the one-time phase offset applied before each
 // CP-facing ticker starts (CHAOS-89).
 //
@@ -413,7 +465,8 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 	// it to smooth a one-time boot burst would trade a security property for
 	// load. The stagger below spreads every SUBSEQUENT poll, which is the
 	// sustained herd; the cold-start burst is recorded as residual risk.
-	c.fetchAndApply(ctx)
+	// Guarded like every later round (CHAOS-79).
+	c.guardedConfigRound(ctx)
 	if !staggerLoopStart(ctx, interval) {
 		return
 	}
@@ -424,8 +477,67 @@ func (c *DataPlaneClient) pollLoop(ctx context.Context, interval time.Duration) 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.fetchAndApply(ctx)
+			c.guardedConfigRound(ctx)
 		}
+	}
+}
+
+// guardedConfigRound runs one config-sync round under the CHAOS-24 guard and
+// fails the apply-health surface closed when that round died INSIDE the
+// mutating apply.
+//
+// Marking the apply rejected is load-bearing, not bookkeeping. fetchAndApply
+// records an outcome at every payload-content rejection point in the
+// received→parsed→validated→fenced→synchronized→applied chain
+// (configsnapshot_apply_health.go), and a panic is the one way the "applied"
+// step can fail WITHOUT reaching any of them: the round dies before
+// markConfigSnapshotApplyOK, which leaves the surface reporting the PREVIOUS
+// success while the node enforces a half-applied snapshot — blocklist and IP
+// filter swapped, policy rules or URL categories not. Before CHAOS-79 that
+// state was unreachable (the process died), so containment creates it; the
+// surface must therefore learn about it in the same commit. Recovery is the
+// existing one: lastVersion is advanced only after a complete apply, so the
+// next poll re-fetches and re-applies the same version rather than
+// short-circuiting on it.
+//
+// The marking is conditional on the apply having actually begun, and that
+// condition is the correction to this function's first shape (Codex P2). A
+// panic BEFORE any mutation — in the RPC, the parse, the validation or the
+// fence — leaves the node on its last-known-good config, whole; claiming the
+// configuration CONTENT was rejected there is false, and it would also STICK:
+// the "unchanged" sentinel and the delta no-op both return without reaching
+// markConfigSnapshotApplyOK, so on a steady-state cluster nothing would ever
+// clear the latch and the operator contract would report a content rejection
+// indefinitely. The crash record (dpComponentConfigPoll) is the correct and
+// sufficient signal for a pre-mutation fault; the apply-health surface speaks
+// only for the apply.
+func (c *DataPlaneClient) guardedConfigRound(ctx context.Context) {
+	panicked := runGuarded(dpComponentConfigPoll, func() { c.fetchAndApply(ctx) })
+	// Consume under the apply gate, because this node's config round is not the
+	// only applier (CodeRabbit review of the CHAOS-79 fix). An HA standby sync
+	// applies a bundle through the same applyConfigSnapshot (ha.go), and
+	// startDataPlane is wired INDEPENDENTLY of the CP/HA branch
+	// (cluster_startup.go), so one node can run both. The depth counter is
+	// process-global, so an unsynchronized consume could Swap(0) away a
+	// concurrent HA apply's in-flight increment; that apply's own end would
+	// then drive the counter NEGATIVE, and the next pre-mutation panic would
+	// read non-zero and falsely mark a configuration-content rejection — the
+	// P2 defect reintroduced through cross-path interference, and permanent
+	// again because no unchanged response clears it.
+	//
+	// refScanDeleteLock is the gate every snapshot apply already holds across
+	// its mutating region, so taking it here means the consume can only ever
+	// observe BALANCED bracket states. Nothing is held under it but one atomic
+	// swap, and this round's own apply has long returned, so there is no
+	// nesting and no self-deadlock.
+	//
+	// Consume unconditionally: a round that completed normally must not leave a
+	// marker behind for the next one to read.
+	refScanDeleteLock()
+	interrupted := consumeConfigSnapshotApplyInterrupted()
+	refScanDeleteUnlock()
+	if panicked && interrupted {
+		markConfigSnapshotApplyRejected()
 	}
 }
 
@@ -555,18 +667,17 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 		return // nothing changed
 	}
 	snapForDisk := snap
-	applyExternalAuthSnapshotSettings(snap)
-	if err := syncSnapshotIdPProfiles(snap); err != nil {
-		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
-		markConfigSnapshotApplyRejected()
-		return
-	}
-	snap.IdPProfiles = nil
-	// fetchAndApply pre-validated above, so a rejection here is unexpected; log
-	// and do NOT persist last-good or advance lastVersion on it (a partial/empty
-	// apply must not be recorded as the new good state).
-	if err := applyConfigSnapshot(snap); err != nil {
-		logger.Printf("DataPlane: config snapshot v%d apply rejected: %v", snap.Version, err)
+	// CHAOS-79: the full path's mutations START HERE, not at applyConfigSnapshot
+	// — external-auth settings and the IdP registry are live state, and the IdP
+	// sync compiles every enabled provider. Bracketing only the inner region
+	// left a panic in either of them looking like a clean apply. One begin and
+	// one end around a single call, so no future early return inside the
+	// sequence can bypass the clear; only a panic can, which is the condition.
+	// end is NOT deferred — see configsnapshot_apply_health.go.
+	beginConfigSnapshotApplyMutation()
+	err := applyFullSnapshotMutations(&snap)
+	endConfigSnapshotApplyMutation()
+	if err != nil {
 		markConfigSnapshotApplyRejected()
 		return
 	}
@@ -575,6 +686,30 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	markConfigSnapshotApplyOK()
 	c.lastVersion.Store(snap.Version)
 	c.lastPolicyVersion.Store(snap.PolicyVersion)
+}
+
+// applyFullSnapshotMutations is the full path's mutating sequence: every call
+// here replaces live enforcement state. Extracted so fetchAndApply brackets it
+// with exactly one begin/end (CHAOS-79); order is preserved verbatim.
+//
+// snap is taken by pointer only because the caller's copy must observe the
+// IdPProfiles clearing between the sync and the snapshot apply, which the
+// pre-extraction code did inline.
+func applyFullSnapshotMutations(snap *ConfigSnapshot) error {
+	applyExternalAuthSnapshotSettings(*snap)
+	if err := syncSnapshotIdPProfiles(*snap); err != nil {
+		logger.Printf("DataPlane: config snapshot v%d apply incomplete: %v", snap.Version, err)
+		return err
+	}
+	snap.IdPProfiles = nil
+	// fetchAndApply pre-validated above, so a rejection here is unexpected; log
+	// and do NOT persist last-good or advance lastVersion on it (a partial/empty
+	// apply must not be recorded as the new good state).
+	if err := applyConfigSnapshot(*snap); err != nil {
+		logger.Printf("DataPlane: config snapshot v%d apply rejected: %v", snap.Version, err)
+		return err
+	}
+	return nil
 }
 
 // tryDeltaSync performs one GetConfigDelta poll. Returns true when the cycle is
@@ -676,8 +811,15 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 	// mutation happens for a delta whose blocklist is rejected. snapForDisk keeps
 	// the full remainder (incl. IdP profiles) for the last-good file.
 	snapForDisk := remainder
-	if err := applyBlocklistDeltaSnapshot(remainder, reply.Deltas, reply.TargetFP); err != nil {
-		logger.Printf("DataPlane: delta v%d apply failed: %v — full resync", reply.TargetVersion, err)
+	// CHAOS-79: the delta path never calls applyConfigSnapshot, so it needs its
+	// OWN bracket — applyBlocklistDeltaSnapshot swaps the blocklist chain and
+	// then the non-blocklist remainder, and an interrupted delta previously left
+	// the apply-health surface reporting success over mixed-generation state.
+	beginConfigSnapshotApplyMutation()
+	deltaErr := applyBlocklistDeltaSnapshot(remainder, reply.Deltas, reply.TargetFP)
+	endConfigSnapshotApplyMutation()
+	if deltaErr != nil {
+		logger.Printf("DataPlane: delta v%d apply failed: %v — full resync", reply.TargetVersion, deltaErr)
 		markConfigSnapshotApplyRejected()
 		return false
 	}
@@ -776,21 +918,30 @@ func (c *DataPlaneClient) metricsLoop(ctx context.Context, interval time.Duratio
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			report := c.buildMetricsReport()
-			b, _ := json.Marshal(report)
-			raw, err := c.call(ctx, methodPushMetrics, b)
-			if err != nil {
-				logger.Printf("DataPlane: PushMetrics error: %v", err)
-				continue
-			}
-			// ADR-0005 S3: every heartbeat reply carries the CP's fencing
-			// epoch — ratchet it so leadership changes are learned between
-			// config polls (a stale reply just logs; nothing to reject here).
-			var reply dpHeartbeatReply
-			if json.Unmarshal(raw, &reply) == nil {
-				_ = dpObserveEpoch("heartbeat reply", reply.Epoch)
-			}
+			runGuarded(dpComponentMetricsPush, func() { c.metricsRound(ctx) })
 		}
+	}
+}
+
+// metricsRound pushes one heartbeat and ratchets the epoch its reply carries.
+// A panicking round is contained and counted: the CP's own heartbeat-timeout
+// path (enrollment.go) is the loud outcome of a heartbeat that does not arrive,
+// so skipping one interval degrades exactly as a failed PushMetrics RPC already
+// does, and the next tick retries.
+func (c *DataPlaneClient) metricsRound(ctx context.Context) {
+	report := c.buildMetricsReport()
+	b, _ := json.Marshal(report)
+	raw, err := c.call(ctx, methodPushMetrics, b)
+	if err != nil {
+		logger.Printf("DataPlane: PushMetrics error: %v", err)
+		return
+	}
+	// ADR-0005 S3: every heartbeat reply carries the CP's fencing
+	// epoch — ratchet it so leadership changes are learned between
+	// config polls (a stale reply just logs; nothing to reject here).
+	var reply dpHeartbeatReply
+	if json.Unmarshal(raw, &reply) == nil {
+		_ = dpObserveEpoch("heartbeat reply", reply.Epoch)
 	}
 }
 
@@ -818,41 +969,53 @@ func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time
 			limiter.SetClusterEnabled(false)
 			return
 		case <-ticker.C:
-			// CHAOS-61: evaluate broadcast freshness on EVERY tick, including the
-			// ones whose RPC fails — reporting only from the success branch
-			// would mean the state is never reported during the outage that
-			// causes it.
-			//
-			// This deliberately does NOT report on a node whose rate limiter is
-			// off: ClusterFreshness is un-armed there and returns a
-			// not-stale status, because AllowClusterAware short-circuits before
-			// consulting a remote count, so there is no enforcement for an
-			// expired broadcast to degrade. The first version of this call
-			// claimed the opposite in its own comment and pinned every freshness
-			// surface at "degraded" on the default posture (limit 0).
-			noteClusterRateLimitFreshness(limiter)
-			if !limiter.Enabled() {
-				continue
-			}
-			deltas := rateLimitWireDeltas(limiter)
-			gossip := RateLimitGossip{
-				NodeID: c.nodeID,
-				Deltas: deltas,
-			}
-			b, _ := json.Marshal(gossip)
-			raw, err := c.call(ctx, methodSyncRateLimits, b)
-			if err != nil {
-				logger.Printf("DataPlane: SyncRateLimits error: %v", err)
-				continue
-			}
-			var broadcast RateLimitBroadcast
-			if err := json.Unmarshal(raw, &broadcast); err != nil {
-				logger.Printf("DataPlane: SyncRateLimits parse error: %v", err)
-				continue
-			}
-			limiter.ApplyRemoteCounts(broadcast.RemoteCounts)
+			runGuarded(dpComponentRateLimitSync, func() { c.rateLimitGossipRound(ctx, limiter) })
 		}
 	}
+}
+
+// rateLimitGossipRound exchanges one batch of hot-IP deltas with the CP.
+//
+// Containment must keep the LOOP, never return from the goroutine: a goroutine
+// that returns here leaves the limiter cluster-enabled (SetClusterEnabled(false)
+// runs only on ctx.Done) with nothing ever refreshing the broadcast again —
+// which is the frozen-broadcast blackhole CHAOS-61 closed, manufactured by the
+// recovery instead of by an outage. Guarding the round keeps the per-tick
+// freshness evaluation below armed, so an operator still sees the state degrade.
+func (c *DataPlaneClient) rateLimitGossipRound(ctx context.Context, limiter *RateLimiter) {
+	// CHAOS-61: evaluate broadcast freshness on EVERY tick, including the
+	// ones whose RPC fails — reporting only from the success branch
+	// would mean the state is never reported during the outage that
+	// causes it.
+	//
+	// This deliberately does NOT report on a node whose rate limiter is
+	// off: ClusterFreshness is un-armed there and returns a
+	// not-stale status, because AllowClusterAware short-circuits before
+	// consulting a remote count, so there is no enforcement for an
+	// expired broadcast to degrade. The first version of this call
+	// claimed the opposite in its own comment and pinned every freshness
+	// surface at "degraded" on the default posture (limit 0).
+	noteClusterRateLimitFreshness(limiter)
+	if !limiter.Enabled() {
+		return
+	}
+	deltas := rateLimitWireDeltas(limiter)
+	gossip := RateLimitGossip{
+		NodeID: c.nodeID,
+		Deltas: deltas,
+	}
+	b, _ := json.Marshal(gossip)
+	raw, err := c.call(ctx, methodSyncRateLimits, b)
+	if err != nil {
+		logger.Printf("DataPlane: SyncRateLimits error: %v", err)
+		return
+	}
+	var broadcast RateLimitBroadcast
+	if err := json.Unmarshal(raw, &broadcast); err != nil {
+		logger.Printf("DataPlane: SyncRateLimits parse error: %v", err)
+		return
+	}
+	limiter.ApplyRemoteCounts(broadcast.RemoteCounts)
 }
 
 // revocationSyncLoop syncs session revocation entries with the CP every few
@@ -860,6 +1023,9 @@ func (c *DataPlaneClient) rateLimitGossipLoop(ctx context.Context, interval time
 func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.Duration) {
 	logger.Printf("DataPlane: distributed session revocation enabled (sync every %s)", interval)
 	if !staggerLoopStart(ctx, interval) {
+		// A cancellation during the stagger is a shutdown too, so it settles an
+		// owed persist exactly as the ctx.Done() branch below does (CHAOS-79).
+		runGuarded(dpComponentRevocation, c.persistOwedRevocations)
 		return
 	}
 	ticker := time.NewTicker(interval)
@@ -868,39 +1034,93 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 	for {
 		select {
 		case <-ctx.Done():
+			// Shutdown is the one exit with no next round to retry an owed
+			// write, so discharge it here. Guarded: this runs on the shutdown
+			// path, where a panic must not escape.
+			runGuarded(dpComponentRevocation, c.persistOwedRevocations)
 			return
 		case <-ticker.C:
-			local := sessionRevoked.ExportRevocations()
-			req := struct {
-				NodeID  string            `json:"node_id"`
-				Entries []RevocationEntry `json:"entries"`
-			}{
-				NodeID:  c.nodeID,
-				Entries: local,
-			}
-			b, _ := json.Marshal(req)
-			raw, err := c.call(ctx, methodSyncRevocations, b)
-			if err != nil {
-				logger.Printf("DataPlane: SyncRevocations error: %v", err)
-				continue
-			}
-			var resp struct {
-				Entries []RevocationEntry `json:"entries"`
-			}
-			if err := json.Unmarshal(raw, &resp); err != nil {
-				logger.Printf("DataPlane: SyncRevocations parse error: %v", err)
-				continue
-			}
-			if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
-				logger.Printf("DataPlane: merged %d remote session revocations", added)
-				// persistRevocations, not SaveRevocations: a direct save
-				// bypasses the dirty-state tracking, so a failure here would
-				// leave the file behind memory with nothing recording that a
-				// retry is owed (CodeRabbit, PR #1591).
-				persistRevocations()
-			}
+			runGuarded(dpComponentRevocation, func() { c.revocationSyncRound(ctx) })
 		}
 	}
+}
+
+// revocationSyncRound exchanges one revocation set with the CP.
+//
+// Containment must keep the LOOP for a security reason: this loop is how a
+// logout on one node invalidates the session on every other node, so a
+// goroutine that stops syncing leaves revoked sessions live fleet-wide while
+// the node reports healthy — a silent fail-OPEN. A skipped round only delays
+// propagation by one interval, exactly as a failed SyncRevocations RPC already
+// does, and the next tick re-sends the full local set (ExportRevocations is a
+// full export, not a delta), so nothing is lost by the skip.
+func (c *DataPlaneClient) revocationSyncRound(ctx context.Context) {
+	// Discharge an owed persist on EVERY exit path, including the RPC and parse
+	// errors below — see persistOwedRevocations.
+	defer c.persistOwedRevocations()
+
+	local := sessionRevoked.ExportRevocations()
+	req := struct {
+		NodeID  string            `json:"node_id"`
+		Entries []RevocationEntry `json:"entries"`
+	}{
+		NodeID:  c.nodeID,
+		Entries: local,
+	}
+	b, _ := json.Marshal(req)
+	raw, err := c.call(ctx, methodSyncRevocations, b)
+	if err != nil {
+		logger.Printf("DataPlane: SyncRevocations error: %v", err)
+		return
+	}
+	var resp struct {
+		Entries []RevocationEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		logger.Printf("DataPlane: SyncRevocations parse error: %v", err)
+		return
+	}
+	if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
+		logger.Printf("DataPlane: merged %d remote session revocations", added)
+		// Mark dirty BEFORE attempting the save, never after: a panic inside
+		// SaveRevocations must leave the node knowing the write is still owed.
+		c.revocationsUnsaved.Store(true)
+	}
+}
+
+// persistOwedRevocations writes the revocation set whenever a merge has landed
+// in memory but its persist has not completed.
+//
+// It is called through `defer` from revocationSyncRound, and that is the whole
+// point (CodeRabbit review of the CHAOS-79 fix). Retrying the save only after a
+// successful RPC — where this logic first sat — defeated the fix under exactly
+// the condition that makes the underlying fail-open dangerous: while the CP is
+// unreachable, every round returns early at the RPC or the parse, so the owed
+// write was never re-attempted, and a restart then loaded a file that never
+// received those revocations and ACCEPTED the revoked cookies. The save is
+// purely local; it never needed the CP to succeed, so it must not be gated on
+// one.
+//
+// Deferred rather than called at entry so a merge landing in THIS round is
+// included, and so a contained panic still discharges the write on the way out
+// (the round runs under runGuarded, so a fault in here is contained too).
+// MergeRevocations counts only tokens that were NOT already present, so the
+// owed flag — not `added` — is the only thing that can drive the retry: once a
+// merge has landed, every later full-set response reports added == 0.
+func (c *DataPlaneClient) persistOwedRevocations() {
+	if !c.revocationsUnsaved.Load() {
+		return
+	}
+	// Through the coordinator, never SaveRevocations directly: persistRevocations
+	// serializes this write against the logout path's and records a failure in
+	// the process-wide dirty flag a later logout retries on
+	// (TestChaos73_WallSavesGoThroughTheCoordinator, CodeRabbit on PR #1591). The
+	// per-client flag is cleared only on THIS call's success, so a concurrent
+	// writer clearing the shared flag cannot strand this round's merge.
+	if !persistRevocations() {
+		return // still owed; the next round (or loop exit) retries
+	}
+	c.revocationsUnsaved.Store(false)
 }
 
 // auditPushLoop forwards local audit events to the CP for centralized logging.
@@ -917,25 +1137,48 @@ func (c *DataPlaneClient) auditPushLoop(ctx context.Context, interval time.Durat
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			events := drainPendingAuditEvents()
-			if len(events) == 0 {
-				continue
-			}
-			req := struct {
-				NodeID string       `json:"node_id"`
-				Events []AuditEntry `json:"events"`
-			}{
-				NodeID: c.nodeID,
-				Events: events,
-			}
-			b, _ := json.Marshal(req)
-			if _, err := c.call(ctx, methodPushAuditEvents, b); err != nil {
-				logger.Printf("DataPlane: PushAuditEvents error (%d events): %v", len(events), err)
-				// Re-queue events so they're retried on the next interval.
-				requeueAuditEvents(events)
-			}
+			runGuarded(dpComponentAuditPush, func() { c.auditPushRound(ctx) })
 		}
 	}
+}
+
+// auditPushRound forwards one drained batch of local audit events to the CP.
+//
+// The deferred requeue is the fail-closed half of the CHAOS-79 guard, and it is
+// why this round could not simply be wrapped. Drain REMOVES the batch from the
+// pending queue, so between the drain and a successful push the only copy of
+// those events is this local slice. Before the guard, a panic in here killed the
+// process and lost the batch once; with the guard and no requeue it would lose a
+// batch EVERY interval, forever, with the process alive and every surface
+// green — containment turning a one-off loss into silent, recurring destruction
+// of the audit trail the appliance exists to produce. Requeueing on the panic
+// path treats a panicked push exactly as a failed push: the batch goes back
+// (newest kept under audit.Requeue's cap) and the next tick retries it.
+func (c *DataPlaneClient) auditPushRound(ctx context.Context) {
+	events := drainPendingAuditEvents()
+	if len(events) == 0 {
+		return
+	}
+	delivered := false
+	defer func() {
+		if !delivered {
+			// Re-queue events so they're retried on the next interval.
+			requeueAuditEvents(events)
+		}
+	}()
+	req := struct {
+		NodeID string       `json:"node_id"`
+		Events []AuditEntry `json:"events"`
+	}{
+		NodeID: c.nodeID,
+		Events: events,
+	}
+	b, _ := json.Marshal(req)
+	if _, err := c.call(ctx, methodPushAuditEvents, b); err != nil {
+		logger.Printf("DataPlane: PushAuditEvents error (%d events): %v", len(events), err)
+		return
+	}
+	delivered = true
 }
 
 // call performs a unary gRPC call with a JSON payload.

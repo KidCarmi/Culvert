@@ -168,7 +168,10 @@ var sessionRevocationsDirty atomic.Bool
 var persistMu sync.Mutex
 
 // persistRevocations saves and tracks whether the file is in step with memory.
-func persistRevocations() {
+// It reports whether THIS call's write landed, for a caller that tracks its
+// own owed write (the DP revocation-sync round, CHAOS-79): the shared flag
+// alone cannot tell it, since another writer's success may clear it.
+func persistRevocations() bool {
 	persistMu.Lock()
 	defer persistMu.Unlock()
 	if err := sessionRevoked.SaveRevocations(); err != nil {
@@ -179,9 +182,10 @@ func persistRevocations() {
 		// marshal failure can fold a peer-supplied token into the message and
 		// forge log lines (CWE-117, CodeQL alert 418 on PR #1591).
 		logger.Printf("Session: failed to persist revocations: %q", sanitizeLog(err.Error()))
-		return
+		return false
 	}
 	sessionRevocationsDirty.Store(false)
+	return true
 }
 
 // persistRevocationsIfDirty retries a previously failed write. Callers reach
