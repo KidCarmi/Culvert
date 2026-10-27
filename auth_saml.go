@@ -71,6 +71,13 @@ func (p *SAMLProvider) servedDocumentValidUntil() time.Time {
 
 // NewSAMLProvider builds a SAMLProvider from an IdPProfile.
 func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
+	return newSAMLProviderAt(p, nil)
+}
+
+// newSAMLProviderAt is NewSAMLProvider for a compile whose cache retirement
+// epoch was captured when the profile was SELECTED (see idpFetchGeneration);
+// nil captures it immediately before the metadata fetch.
+func newSAMLProviderAt(p *IdPProfile, gen *idpmeta.Generation) (*SAMLProvider, error) {
 	cfg := p.SAML
 	if cfg.MetadataURL == "" && cfg.MetadataXML == "" {
 		return nil, fmt.Errorf("saml[%s]: metadata_url or metadata_xml required", p.ID)
@@ -79,7 +86,7 @@ func NewSAMLProvider(p *IdPProfile) (*SAMLProvider, error) {
 		return nil, fmt.Errorf("saml[%s] name_id_format: %w", p.ID, err)
 	}
 
-	idpMeta, cachedAt, validUntil, err := fetchSAMLMetadata(p.ID, cfg)
+	idpMeta, cachedAt, validUntil, err := fetchSAMLMetadata(p.ID, cfg, gen)
 	if err != nil {
 		return nil, fmt.Errorf("saml[%s] metadata: %w", p.ID, err)
 	}
@@ -257,7 +264,11 @@ func newSAMLStateStore() *samlStateStore {
 //
 // The third result is the metadata's own validUntil (zero when it declares
 // none); see samlMetadataValidUntil.
-func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (ed *saml.EntityDescriptor, cachedAt, validUntil time.Time, err error) {
+//
+// captured is the cache retirement epoch the caller took when it selected the
+// profile; nil captures it immediately before the fetch. See
+// idpFetchGeneration.
+func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig, captured *idpmeta.Generation) (ed *saml.EntityDescriptor, cachedAt, validUntil time.Time, err error) {
 	var xmlData []byte
 
 	if cfg.MetadataURL != "" {
@@ -271,10 +282,11 @@ func fetchSAMLMetadata(profileID string, cfg *SAMLProfileConfig) (ed *saml.Entit
 		if err := validateSAMLMetadataURL(cfg.MetadataURL); err != nil {
 			return nil, time.Time{}, time.Time{}, err
 		}
-		// The retirement epoch is taken BEFORE the fetch so a deletion
-		// committed while it is on the wire can refuse its cache write (IDP-18).
-		gen := idpMetadataStore().Generation(profileID)
-		fetched, fetchErr := fetchSAMLMetadataOverNetwork(cfg.MetadataURL)
+		// The retirement epoch is taken BEFORE the fetch — or earlier, when the
+		// profile was selected for recovery — so a deletion committed in
+		// between can refuse this fetch's cache write (IDP-18).
+		gen := idpFetchGeneration(profileID, captured)
+		fetched, fetchErr := fetchSAMLMetadataOverNetwork(idpRemoteURL(cfg.MetadataURL))
 		doc, docCachedAt, err := resolveIdPDocument(profileID, idpmeta.KindSAMLMetadata, cfg.MetadataURL, gen, fetched, fetchErr,
 			validateSAMLMetadataDocument, samlMetadataValidUntil)
 		if err != nil {
@@ -388,7 +400,8 @@ func validateSAMLMetadataURL(raw string) error {
 // followed by an authority), so it narrows nothing a valid metadata URL uses.
 var samlMetadataURLShape = regexp.MustCompile(`(?i)^https?://[^/]`)
 
-func fetchSAMLMetadataOverNetwork(raw string) ([]byte, error) {
+func fetchSAMLMetadataOverNetwork(src idpRemoteURL) ([]byte, error) {
+	raw := string(src)
 	if !samlMetadataURLShape.MatchString(raw) {
 		return nil, fmt.Errorf("metadata URL must be an absolute http or https URL")
 	}

@@ -115,7 +115,8 @@ var oidcDiscoveryURLShape = regexp.MustCompile(`(?i)^https?://[^/]`)
 // same function as the outbound request so CodeQL can verify it; a check in a
 // calling function is what raised a critical go/request-forgery alert when
 // this helper was first split out.
-func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
+func fetchOIDCDiscoveryOverNetwork(src idpRemoteURL) ([]byte, error) {
+	wellKnown := string(src)
 	// Inline url.Parse + scheme check + private-host check, in the SAME
 	// function as the request, per the repo's SSRF convention.
 	//
@@ -185,6 +186,13 @@ func fetchOIDCDiscoveryOverNetwork(wellKnown string) ([]byte, error) {
 // for a configured profile. The caller is responsible for ensuring issuer is a
 // valid HTTPS URL.
 func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time, error) {
+	return fetchOIDCDiscoveryAt(profileID, issuer, nil)
+}
+
+// fetchOIDCDiscoveryAt is fetchOIDCDiscovery with the caller's captured cache
+// retirement epoch (nil: capture it now, before the fetch). See
+// idpFetchGeneration.
+func fetchOIDCDiscoveryAt(profileID, issuer string, captured *idpmeta.Generation) (*oidcDiscoveryDoc, time.Time, error) {
 	// The trailing-slash normalisation lives INSIDE oidcWellKnownURL — see the
 	// note there. Trimming again here is what made two layers disagree.
 	wellKnown := oidcWellKnownURL(issuer)
@@ -232,10 +240,11 @@ func fetchOIDCDiscovery(profileID, issuer string) (*oidcDiscoveryDoc, time.Time,
 	//
 	// Do not narrow this validator again. A gate that admits what the compile
 	// rejects is a cache-poisoning path, not an optimisation.
-	// The retirement epoch is taken BEFORE the fetch so a deletion committed
-	// while it is on the wire can refuse its cache write (IDP-18).
-	gen := idpMetadataStore().Generation(profileID)
-	fetched, fetchErr := fetchOIDCDiscoveryOverNetwork(wellKnown)
+	// The retirement epoch is taken BEFORE the fetch — or earlier, when the
+	// profile was selected for recovery — so a deletion committed in between
+	// can refuse this fetch's cache write (IDP-18).
+	gen := idpFetchGeneration(profileID, captured)
+	fetched, fetchErr := fetchOIDCDiscoveryOverNetwork(idpRemoteURL(wellKnown))
 	var parsed *oidcDiscoveryDoc
 	_, cachedAt, err := resolveIdPDocument(profileID, idpmeta.KindOIDCDiscovery, wellKnown, gen, fetched, fetchErr, func(b []byte) error {
 		doc, vErr := parseAndValidateOIDCDiscovery(profileID, b)
@@ -414,7 +423,7 @@ func probeOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
 	if err := validateExternalURL(wellKnown); err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
-	raw, err := fetchOIDCDiscoveryOverNetwork(wellKnown)
+	raw, err := fetchOIDCDiscoveryOverNetwork(idpRemoteURL(wellKnown))
 	if err != nil {
 		return nil, err
 	}
@@ -891,6 +900,13 @@ func (p *OIDCFlowProvider) introspectCacheSet(key string, identity *Identity, ok
 // NewOIDCFlowProvider validates the profile, runs OIDC discovery, and returns
 // a ready-to-use OIDCFlowProvider.
 func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
+	return newOIDCFlowProviderAt(p, nil)
+}
+
+// newOIDCFlowProviderAt is NewOIDCFlowProvider for a compile whose cache
+// retirement epoch was captured when the profile was SELECTED (see
+// idpFetchGeneration); nil captures it immediately before the discovery fetch.
+func newOIDCFlowProviderAt(p *IdPProfile, gen *idpmeta.Generation) (*OIDCFlowProvider, error) {
 	cfg := p.OIDC
 	if cfg.ClientID == "" {
 		return nil, fmt.Errorf("oidc[%s]: client_id required", p.ID)
@@ -903,7 +919,7 @@ func NewOIDCFlowProvider(p *IdPProfile) (*OIDCFlowProvider, error) {
 	}
 	client := &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
-	disc, cachedAt, err := fetchOIDCDiscovery(p.ID, cfg.Issuer)
+	disc, cachedAt, err := fetchOIDCDiscoveryAt(p.ID, cfg.Issuer, gen)
 	if err != nil {
 		return nil, fmt.Errorf("oidc[%s] discovery: %w", p.ID, err)
 	}

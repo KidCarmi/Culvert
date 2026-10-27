@@ -131,7 +131,7 @@ func TestChaos87_OIDCDiscoveryFetchErrorsAreClassified(t *testing.T) {
 	wellKnown := m.srv.URL + "/.well-known/openid-configuration"
 
 	m.status.Store(503)
-	_, err := fetchOIDCDiscoveryOverNetwork(wellKnown)
+	_, err := fetchOIDCDiscoveryOverNetwork(idpRemoteURL(wellKnown))
 	if err == nil || !idpFetchStaleEligible(err) {
 		t.Fatalf("a 503 must be stale-eligible, got %v", err)
 	}
@@ -140,12 +140,12 @@ func TestChaos87_OIDCDiscoveryFetchErrorsAreClassified(t *testing.T) {
 	}
 
 	m.status.Store(404)
-	if _, err := fetchOIDCDiscoveryOverNetwork(wellKnown); err == nil || idpFetchStaleEligible(err) {
+	if _, err := fetchOIDCDiscoveryOverNetwork(idpRemoteURL(wellKnown)); err == nil || idpFetchStaleEligible(err) {
 		t.Fatalf("a 404 must NOT be stale-eligible, got %v", err)
 	}
 
 	m.srv.Close()
-	if _, err := fetchOIDCDiscoveryOverNetwork(wellKnown); err == nil || !idpFetchStaleEligible(err) {
+	if _, err := fetchOIDCDiscoveryOverNetwork(idpRemoteURL(wellKnown)); err == nil || !idpFetchStaleEligible(err) {
 		t.Fatalf("a refused connection must be stale-eligible, got %v", err)
 	}
 }

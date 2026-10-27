@@ -1327,7 +1327,7 @@ func TestChaos87_SAMLMetadataURLShapeBarrier(t *testing.T) {
 		if samlMetadataURLShape.MatchString(bad) {
 			t.Errorf("barrier admitted %q", bad)
 		}
-		if _, err := fetchSAMLMetadataOverNetwork(bad); err == nil {
+		if _, err := fetchSAMLMetadataOverNetwork(idpRemoteURL(bad)); err == nil {
 			t.Errorf("fetch accepted %q", bad)
 		}
 	}
@@ -1375,7 +1375,7 @@ func TestChaos87_OIDCDiscoveryURLShapeBarrier(t *testing.T) {
 		if oidcDiscoveryURLShape.MatchString(bad) {
 			t.Errorf("barrier admitted %q", bad)
 		}
-		if _, err := fetchOIDCDiscoveryOverNetwork(bad); err == nil {
+		if _, err := fetchOIDCDiscoveryOverNetwork(idpRemoteURL(bad)); err == nil {
 			t.Errorf("fetch accepted %q", bad)
 		}
 	}
@@ -3228,14 +3228,15 @@ func TestChaos87_EveryInteractiveProviderIsBoundToTheCeiling(t *testing.T) {
 		t.Fatalf("IdPType constant scan found %d declarations, expected at least the shipped 3 — the wall has gone vacuous", len(decls))
 	}
 
-	// 2. compileIdPProfile is the ONE dispatch from a type to a provider, so
-	//    the constructor it names for each type is the authority on which
-	//    concrete type goes live. Reading it keeps this wall honest if the
-	//    dispatch changes.
-	compile := chaos87FuncSource(t, string(src), "func compileIdPProfile(")
+	// 2. compileIdPProfileAt is the ONE dispatch from a type to a provider
+	//    (compileIdPProfile delegates to it with a nil epoch), so the
+	//    constructor it names for each type is the authority on which concrete
+	//    type goes live. Reading it keeps this wall honest if the dispatch
+	//    changes.
+	compile := chaos87FuncSource(t, string(src), "func compileIdPProfileAt(")
 	ctorRe := regexp.MustCompile(`case (IdPType[A-Za-z]+):`)
 	if len(ctorRe.FindAllString(compile, -1)) < 3 {
-		t.Fatalf("compileIdPProfile no longer dispatches on IdPType constants — the wall cannot map a type to its provider")
+		t.Fatalf("compileIdPProfileAt no longer dispatches on IdPType constants — the wall cannot map a type to its provider")
 	}
 
 	health, err := os.ReadFile(filepath.Join(pkgSourceDir(), "idp_metadata_health.go")) // #nosec G304 -- fixed in-repo path
@@ -3254,14 +3255,14 @@ func TestChaos87_EveryInteractiveProviderIsBoundToTheCeiling(t *testing.T) {
 		}
 		checkedInteractive++
 
-		// The constructor named for this type in compileIdPProfile.
-		armRe := regexp.MustCompile(`case ` + regexp.QuoteMeta(constName) + `:[\s\S]*?return (New[A-Za-z]+)\(p\)`)
+		// The constructor named for this type in compileIdPProfileAt: either
+		// New<Provider>(p) or new<Provider>At(p, gen).
+		armRe := regexp.MustCompile(`case ` + regexp.QuoteMeta(constName) + `:[\s\S]*?return (?:New|new)([A-Za-z]+?)(?:At)?\(p[,)]`)
 		m := armRe.FindStringSubmatch(compile)
 		if m == nil {
-			t.Fatalf("interactive type %s: compileIdPProfile has no `return New…(p)` arm; cannot identify the provider bound to the ceiling", constName)
+			t.Fatalf("interactive type %s: compileIdPProfileAt has no `return New…(p)` / `return new…At(p, gen)` arm; cannot identify the provider bound to the ceiling", constName)
 		}
-		ctor := m[1] // e.g. NewSAMLProvider
-		provType := strings.TrimPrefix(ctor, "New")
+		provType := m[1] // e.g. SAMLProvider
 
 		// A compile-time assertion for that concrete type must exist, so a
 		// rename or deletion of servedDocumentCachedAt is a BUILD failure
@@ -4435,5 +4436,217 @@ func TestChaos87_RecreateAfterDeleteStillCaches(t *testing.T) {
 	corp.down.Store(true)
 	if _, err := compileIdPProfile(chaos87Profile("corp", corp.URL())); err != nil {
 		t.Fatalf("the recreated profile cannot ride out an outage from its own document: %v", err)
+	}
+}
+
+// IDP-19, Codex review round 22. The revalidation loop compiles its candidates
+// one after another, so a candidate can wait behind another's slow fetch. A
+// profile deleted during that wait used to capture the ALREADY-ADVANCED
+// retirement epoch when its own fetch began, so the fence accepted its write and
+// the deleted generation's document was cached again. The epoch is now captured
+// when the candidate is SELECTED, under the registry lock.
+func TestChaos87_QueuedRevalidationCandidateCannotRecacheADeletedProfile(t *testing.T) {
+	store := chaos87Env(t)
+	slow := newChaos87IdP(t)
+	gone := newChaos87IdP(t)
+	for _, p := range []*IdPProfile{chaos87Profile("slow", slow.URL()), chaos87Profile("gone", gone.URL())} {
+		if err := idpRegistry.Upsert(p); err != nil {
+			t.Fatalf("healthy upsert %s: %v", p.ID, err)
+		}
+	}
+	slow.down.Store(true)
+	gone.down.Store(true)
+	for _, p := range []*IdPProfile{chaos87Profile("slow", slow.URL()), chaos87Profile("gone", gone.URL())} {
+		if err := idpRegistry.Upsert(p); err != nil {
+			t.Fatalf("upsert %s during the outage must publish from cache: %v", p.ID, err)
+		}
+	}
+	if got := len(idpRegistry.cacheServingProfiles()); got != 2 {
+		t.Fatalf("setup: %d cache-serving providers, want 2", got)
+	}
+
+	release := slow.holdRequests()
+	defer release()
+	before := slow.hits.Load()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		revalidateCacheServingProviders()
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for slow.hits.Load() == before {
+		if time.Now().After(deadline) {
+			release()
+			<-done
+			t.Fatal("the first candidate's fetch never reached its IdP")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// "gone" is queued behind "slow" and has not fetched yet.
+	goneHits := gone.hits.Load()
+	if err := idpRegistry.Delete("gone"); err != nil {
+		release()
+		<-done
+		t.Fatalf("delete: %v", err)
+	}
+	gone.down.Store(false) // its IdP answers when the queued fetch finally runs
+	release()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("revalidation did not finish")
+	}
+	if gone.hits.Load() == goneHits {
+		t.Fatal("setup: the queued candidate never fetched, so the gate exercised nothing")
+	}
+	if _, _, err := store.Get("gone", idpmeta.KindSAMLMetadata, gone.URL()); !errors.Is(err, idpmeta.ErrNoEntry) {
+		t.Fatalf("a candidate selected before the delete cached the deleted generation's document (Get = %v)", err)
+	}
+	gone.down.Store(true)
+	if err := idpRegistry.Upsert(chaos87Profile("gone", gone.URL())); err == nil {
+		t.Fatal("a profile recreated during an outage compiled from the DELETED profile's cached metadata")
+	}
+}
+
+// IDP-19 (round 22), the PAIR wall. Both loops in idp_recovery.go — dark recovery
+// and revalidation — compile candidates selected earlier under r.mu, so both
+// must hand the compile the epoch captured at selection. The behavioural gate
+// above drives the revalidation loop; this pins that neither loop compiles
+// through the capture-at-fetch entry point, so the dark loop cannot drift.
+func TestChaos87_RecoveryLoopsCompileWithTheSelectionEpoch(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "idp_recovery.go"))
+	if err != nil {
+		t.Fatalf("read source: %v", err)
+	}
+	body := string(src)
+	if strings.Contains(body, "compileIdPProfile(") {
+		t.Fatal("idp_recovery.go compiles through compileIdPProfile, which captures the cache " +
+			"retirement epoch at fetch time: a candidate queued behind a slow fetch would miss a delete")
+	}
+	if got := strings.Count(body, ".cacheGen)"); got != 2 {
+		t.Fatalf("%d compile sites pass a candidate's captured cacheGen, want 2 (dark recovery + revalidation)", got)
+	}
+}
+
+// IDP-19 (round 22), the DARK RECOVERY half — Codex's own reproducer. Two dark
+// profiles with cached documents; the FIRST one's fetch is held so the second
+// queues behind it; the second is deleted while it waits. Its compile then runs
+// after the delete's Forget. Capturing the epoch when that fetch began accepted
+// the write and cached the deleted generation's document again; the epoch taken
+// at selection refuses it.
+func TestChaos87_QueuedDarkRecoveryCandidateCannotRecacheADeletedProfile(t *testing.T) {
+	store := chaos87Env(t)
+	first := newChaos87IdP(t)
+	gone := newChaos87IdP(t)
+	for _, p := range []*IdPProfile{chaos87Profile("first", first.URL()), chaos87Profile("gone", gone.URL())} {
+		if err := idpRegistry.Upsert(p); err != nil {
+			t.Fatalf("healthy upsert %s: %v", p.ID, err)
+		}
+	}
+	// Both DARK: enabled and stored, no live provider, documents intact.
+	idpRegistry.mu.Lock()
+	delete(idpRegistry.live, "first")
+	delete(idpRegistry.live, "gone")
+	idpRegistry.mu.Unlock()
+	if n := len(idpRegistry.darkEnabledProfiles()); n != 2 {
+		t.Fatalf("setup: expected two dark profiles, got %d", n)
+	}
+
+	release := first.holdRequests()
+	defer release()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); runIdPRecoveryLoop(ctx) }()
+	chaos87WaitForHeldFetch(t, first, release)
+
+	// "gone" is queued behind "first" and has not fetched yet.
+	goneHits := gone.hits.Load()
+	if err := idpRegistry.Delete("gone"); err != nil {
+		release()
+		t.Fatalf("delete: %v", err)
+	}
+	if _, _, err := store.Get("gone", idpmeta.KindSAMLMetadata, gone.URL()); !errors.Is(err, idpmeta.ErrNoEntry) {
+		release()
+		t.Fatalf("setup: the committed delete did not retire the document (Get = %v)", err)
+	}
+	release() // both IdPs are UP: "first" goes live, "gone" fetches after its delete
+	chaos87WaitForLoop(t, done, cancel)
+
+	if gone.hits.Load() == goneHits {
+		t.Fatal("setup: the queued candidate never fetched, so the gate exercised nothing")
+	}
+	if _, _, err := store.Get("gone", idpmeta.KindSAMLMetadata, gone.URL()); !errors.Is(err, idpmeta.ErrNoEntry) {
+		t.Fatalf("a dark candidate selected before the delete cached the deleted generation's document (Get = %v)", err)
+	}
+	gone.down.Store(true)
+	if err := idpRegistry.Upsert(chaos87Profile("gone", gone.URL())); err == nil {
+		t.Fatal("a profile recreated during an outage compiled from the DELETED profile's cached metadata")
+	}
+}
+
+// IDP-19 CONTROL. The epoch is per profile, so a delete of an UNRELATED profile
+// while a candidate waits in the queue must not fence that candidate: its fetch
+// still refreshes its own cached document. This is the property the cheaper
+// per-pass alternative recorded in row IDP-19 would give up, and the one
+// TestPutIfCurrent_AnUnrelatedDeleteDoesNotFence pins at the store.
+func TestChaos87_QueuedCandidateStillCachesAfterAnUnrelatedDelete(t *testing.T) {
+	store := chaos87Env(t)
+	slow := newChaos87IdP(t)
+	keep := newChaos87IdP(t)
+	other := newChaos87IdP(t)
+	for _, p := range []*IdPProfile{chaos87Profile("slow", slow.URL()), chaos87Profile("keep", keep.URL()), chaos87Profile("other", other.URL())} {
+		if err := idpRegistry.Upsert(p); err != nil {
+			t.Fatalf("healthy upsert %s: %v", p.ID, err)
+		}
+	}
+	slow.down.Store(true)
+	keep.down.Store(true)
+	for _, p := range []*IdPProfile{chaos87Profile("slow", slow.URL()), chaos87Profile("keep", keep.URL())} {
+		if err := idpRegistry.Upsert(p); err != nil {
+			t.Fatalf("upsert %s during the outage must publish from cache: %v", p.ID, err)
+		}
+	}
+	if got := len(idpRegistry.cacheServingProfiles()); got != 2 {
+		t.Fatalf("setup: %d cache-serving providers, want 2", got)
+	}
+
+	release := slow.holdRequests()
+	defer release()
+	before := slow.hits.Load()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		revalidateCacheServingProviders()
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for slow.hits.Load() == before {
+		if time.Now().After(deadline) {
+			release()
+			<-done
+			t.Fatal("the first candidate's fetch never reached its IdP")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// "keep" is queued behind "slow"; an UNRELATED profile is deleted meanwhile.
+	if err := idpRegistry.Delete("other"); err != nil {
+		release()
+		<-done
+		t.Fatalf("delete: %v", err)
+	}
+	keep.rotateSigningKey(t)
+	keep.down.Store(false)
+	release()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("revalidation did not finish")
+	}
+	doc, _, err := store.Get("keep", idpmeta.KindSAMLMetadata, keep.URL())
+	if err != nil {
+		t.Fatalf("the queued candidate's document is gone after an unrelated delete: %v", err)
+	}
+	if want, _ := keep.doc.Load().(string); string(doc) != want {
+		t.Fatal("an unrelated profile's delete fenced the queued candidate: its fresh document was not cached")
 	}
 }
