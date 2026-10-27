@@ -141,7 +141,80 @@ fixed): SOCKS5 accepts before the admission posture is restored"), carried
 forward unchanged by the [2026-10-26 sweep](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-26.md)
 §11 — generalized from "the SOCKS5 ordering is wrong" to "which listeners have
 this window at all, and what closes it without moving startup ownership".
-Findings, measurements and gates are written up in the dated review.
+Findings, measurements and gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-27.md).
+
+Six listeners, one window. The sweep's own finding is small and its negative
+half is the durable part:
+
+- **`CHAOS-102` — SOCKS5 relayed from any source IP between `bind(2)` and the
+  operator's allowlist.** `initSOCKS5` (stmt 40 of `main`) binds and
+  `startSOCKS5` returns only once the accept loop is serving; the GUI-persisted
+  admission posture is restored on stmt 41. `handleSOCKS5` consults exactly the
+  three globals `applyAdminSecurity` writes — `ipf`, `rl`, `connLimiter` — and
+  with no `-ip-filter-mode`/YAML `ip_filter_mode` (the normal case once the
+  allowlist was built in the GUI) `applyAdminSecurity` is their only writer. So
+  for the length of stmt 41 the first admission gate of an inline security
+  gateway admitted everything, unrate-limited and uncapped, and nothing
+  anywhere distinguished a session the allowlist approved from one admitted
+  because there was no allowlist yet. Measured: ≈1 ms on a healthy volume (639
+  µs of it a single fsynced atomic write), ~7.6 sessions/ms serially — and the
+  window is the `/data` latency, so it widens exactly as the node degrades,
+  reaching its worst case through the *slow filesystem* / *disk full* faults
+  already registered under other ids.
+
+  **The load-bearing part is the shape of the fix.** The 2026-10-18 sweep named
+  the obvious remedy (move `initSOCKS5` after `initPersistentAdminState`) and
+  declined it, correctly: it changes startup ownership and when optional-
+  listener health is first reported, against an explicit `AGENTS.md` rule, to
+  close a millisecond. A GATE separates the concerns — armed by `initSOCKS5`
+  immediately before the bind, released by `loadPersistentAdminState`
+  immediately after `LoadAdminSettings` — so the bind, its health reporting and
+  the boot order are all untouched and the only change is that a connection
+  inside the window is refused instead of relayed.
+
+  Two judgment calls are recorded rather than assumed. The gate's zero value is
+  OPEN, which is not fail-open: an unarmed gate means "no boot opened this
+  window", and defaulting to closed would make correctness depend on ~1,500
+  test files remembering to release it — *a gate that everything has to opt out
+  of is a gate that gets opted out of in production too*. And the release is
+  unconditional on the OUTCOME: `LoadAdminSettings`' three failure returns
+  never reach `applyAdminSecurity`, but that condition is permanent rather than
+  racy and is already surfaced by a named log line, the `state_file_corrupt`
+  alert and a `/readyz` row, so holding the listener closed for it would be a
+  posture change, not the closure of a race (carried as **BW-6**).
+
+- **The other five listeners have no window, and four have none for the same
+  reason** — they start after `initPersistentAdminState`. Verified, not
+  assumed: CP gRPC binds 17 statements EARLIER (stmt 24) and is still correct
+  (mTLS against a CA installed before its own bind, plus a compiled-in
+  enrollment limiter; no reference to `ipf`/`rl`/`connLimiter` anywhere in
+  `cp_grpc*.go`), and the scan sidecar (stmt 35) reads only scanner limits
+  configured before it binds and never written by `admin_settings.go` —
+  checked because CHAOS-101 is a finding about that sidecar's buffer window and
+  a posture window stacked on it would have compounded.
+
+- **The primary data path's absence of a window was load-bearing and
+  unenforced.** `buildAndStartProxyServer` only CONSTRUCTS the server; the
+  listener opens in `runProxyUntilShutdown`, the last statement of `main`. That
+  asymmetry is the entire argument that the SOCKS5 row is a defect rather than
+  a posture — and a refactor moving the bind up would have handed the HTTP/HTTPS
+  plane the same window on a far larger blast radius, silently. Now walled.
+
+This sweep also leaves one row OPEN by attribution rather than fixing it:
+
+- **A DP node's CP-pushed admission posture is clobbered at boot and never
+  self-heals.** `initCluster` (stmt 24) replays the last-good snapshot through
+  `applySnapshotAdmission` (`ipf.Replace`), then `initConnAndRateLimit` (stmt
+  25) re-applies local YAML/flag posture and `applyAdminSecurity` (stmt 41) the
+  node-local GUI posture on top; the CP's `config_unchanged` sentinel means an
+  unchanged config version is never re-applied, so the clobber is permanent.
+  This is the ADMISSION half of the shape registered as the open half of
+  **CHAOS-18**, which recorded only the default policy action — same boot
+  order, same sentinel, `ipf`/`rl` instead. Not fixed: which source wins on an
+  enrolled node is a precedence decision between "explicit configuration wins"
+  (errata) and the CP's authority, and it is the same owner decision CHAOS-18's
+  open half already waits on (**BW-7**).
 
 **2026-10-26 — `CHAOS-93` CLAIMED (placeholder, commit one). Domain: the retry
 plane — every loop in the tree that re-attempts a failed operation, asked three
