@@ -128,6 +128,15 @@ That closes ASTRA's R7 binding gap. The image ID E1 observed is now tied, throug
 - **Disposition:** FIXED in source, the same way as musl. `brotli-libs=1.2.1-r0` is pinned and asserted inside the build, and the tag moves to `culvert/clamav:1.5.4-culvert.3`.
 - **What this does not cover:** the shipped OVA `27006cf4` still carries `culvert.1`, and no OVA has been built with `culvert.3`. F-P2 has **not** been run on `culvert.3` bytes, and no reuse is claimed.
 
+### Follow-up: libcurl on `culvert.3` (Deep gate, 2026-10-27)
+
+- **Found by:** the Deep gate's trivy scan of the sidecar built from source, on dispatch run 40472538130 (head `c1b08dbe`). The DB had refreshed since the 2026-10-25 exact-OVA scan.
+- **Finding:** `CVE-2026-92392`, **HIGH**, "HTTP/2 upload Use-After-Free", in `libcurl` `8.22.0-r0`, fixed in `8.23.0-r0` (present in Alpine v3.24 `main`). The shipped sidecar in OVA `61c46d6d` (`4c365e40`) carries the same `8.22.0-r0`.
+- **Reachability:** static only, in `evidence/combined/m1-engine-pins/ci/sidecar-libcurl-reachability.md`. The running libcurl consumer (freshclam) issues GETs only; the uploading tool (`clamsubmit`) is never started.
+- **Disposition:** FIXED in source at the user's direction (27 Oct). `libcurl=8.23.0-r0` is added in its **own** `apk add` **without** `--upgrade` and asserted inside the build. The tag moves to `culvert/clamav:1.5.4-culvert.4`.
+- **Why no `--upgrade`:** apk's `--upgrade` also upgrades the named package's dependencies. For libcurl that would float `c-ares` (1.34.8 → 1.34.9) and `ca-certificates-bundle` (20260909 → 20261020) to unpinned versions. Measured with apk 3.0.8 (the base's own version) applying the exact RUN sequence to a copy of the extracted base rootfs: versus the base, only `musl`, `musl-utils`, `brotli-libs` (unchanged from `culvert.3`) and `libcurl` change, and the package count stays at 41.
+- **What this does not cover:** no OVA carries `culvert.4`. F-P2 has **not** yet been run on `culvert.4` bytes. The `culvert.4` image ID is known only once CI or the OVA build produces it.
+
 ---
 
 ## R7 — OS / kernel applicability on the exact disk (`r7-kernel/`)

@@ -37,6 +37,15 @@
 # on 2026-10-24. Alpine v3.24 main carries the fix in -r1. New bytes, so a new
 # tag (culvert.3), and the F-P2 reproduction must re-run on THIS sidecar too.
 #
+# libcurl 8.23.0-r0 (CVE-2026-92392, HIGH, "HTTP/2 upload Use-After-Free"; the
+# base ships 8.22.0-r0) is a REAL upgrade, found by the Deep gate's trivy scan
+# on 2026-10-27. It is a SEPARATE `apk add` WITHOUT --upgrade on purpose:
+# --upgrade also upgrades a package's dependencies, which for libcurl would
+# float c-ares and ca-certificates-bundle to whatever Alpine ships that day
+# (measured with apk 3.0.8 against the base). Plain `add` of the exact version
+# changes libcurl alone. New bytes, so a new tag (culvert.4), and F-P2 must
+# re-run on THIS sidecar.
+#
 # The tag (manifest.env CLAMAV_SIDECAR_REF) changes with EVERY content change:
 # Compose builds this image only when its local tag is ABSENT, so new content
 # under an old tag would never reach an existing appliance.
@@ -64,4 +73,6 @@ RUN apk add --no-cache --upgrade 'pcre2=10.49-r0' 'zlib=1.3.2-r1' 'nghttp2-libs=
  && test "$(apk info -v 2>/dev/null | grep '^zlib-[0-9]')" = 'zlib-1.3.2-r1' \
  && test "$(apk info -v 2>/dev/null | grep '^nghttp2-libs-[0-9]')" = 'nghttp2-libs-1.70.0-r0' \
  && test "$(apk info -v 2>/dev/null | grep '^brotli-libs-[0-9]')" = 'brotli-libs-1.2.1-r0' \
+ && apk add --no-cache 'libcurl=8.23.0-r0' \
+ && test "$(apk info -v 2>/dev/null | grep '^libcurl-[0-9]')" = 'libcurl-8.23.0-r0' \
  && rm -rf /var/log/apk.log /var/cache/apk/*

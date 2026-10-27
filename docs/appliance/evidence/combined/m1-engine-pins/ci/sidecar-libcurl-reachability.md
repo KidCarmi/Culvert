@@ -92,3 +92,5 @@ These are the `readelf -d` NEEDED entries across all ELF files in the extracted 
 
 1. Pin `libcurl=8.23.0-r0` in `appliance/clamav/Dockerfile`. This yields a new sidecar identity and needs a fresh F-P2 proof and new BOM entries.
 2. Record a bounded residual, using the evidence above.
+
+**Outcome (27 Oct, user directive):** option 1 was taken. `libcurl=8.23.0-r0` is pinned in its own `apk add` (no `--upgrade`, so its dependencies do not float), under the new tag `culvert/clamav:1.5.4-culvert.4`. See the libcurl follow-up in `docs/appliance/r6-r7-security-dispositions.md`. F-P2 on the new bytes is still to run.
