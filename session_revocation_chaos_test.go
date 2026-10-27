@@ -49,6 +49,12 @@ func chaos73Setup(t *testing.T) {
 	t.Cleanup(restore)
 	resetSessionRevokeCountersForTest()
 	t.Cleanup(resetSessionRevokeCountersForTest)
+	// CHAOS-68's durability record (session_revocation_health.go) now composes
+	// the same `session_revocation` row and feeds the replay-repair predicate
+	// (revocationSaveOwed), so a degraded or vanished-file state leaked by a
+	// CHAOS-68 gate would steer these gates into the wrong branch.
+	resetSessionRevocationHealthForTest()
+	t.Cleanup(resetSessionRevocationHealthForTest)
 	prev := session.RevocationsPath()
 	t.Cleanup(func() { session.SetRevocationsPath(prev) })
 	session.SetRevocationsPath("")
@@ -975,6 +981,19 @@ func TestChaos73_DefectFailedPersistIsRetriedByTheReplay(t *testing.T) {
 // save on EVERY logout, which restores the write amplification this sweep
 // measured at 441 MB from 3.2 MB of input. After a SUCCESSFUL save, a replayed
 // logout must write nothing at all.
+//
+// The instrument is a SENTINEL written over the file, not a deleted file.
+// CHAOS-68 (PR #1437, reconciled onto this design) widened the replay repair
+// to every provable durability doubt, and a backing file that VANISHED after
+// it was written is one of them (AU-35): without the repair, a revocation in
+// force in memory is gone at the next restart, the fail-open direction. So
+// deleting the file now creates the very condition under which one repair
+// write is correct, and the self-limiting repair (the write recreates the
+// file, so the next replay finds nothing owed) is pinned by
+// TestChaos68_AU45_ControlHealthyRepeatLogoutDoesNotRewrite and this gate's
+// unconditional-save mutation alike. A sentinel keeps the file present and
+// healthy, so any write at all — the unconditional save this control exists
+// to catch — overwrites it.
 func TestChaos73_ControlReplayedLogoutStillWritesNothingWhenClean(t *testing.T) {
 	chaos73Setup(t)
 	resetSessionRevocationsDirtyForTest()
@@ -991,14 +1010,21 @@ func TestChaos73_ControlReplayedLogoutStillWritesNothingWhenClean(t *testing.T) 
 		t.Fatalf("setup: the first save did not land: %v", err)
 	}
 
-	// Remove the file. A clean replay must NOT recreate it.
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove: %v", err)
+	// Overwrite the file with a sentinel. A clean replay must NOT rewrite it.
+	const sentinel = "chaos73-no-rewrite-sentinel"
+	if err := os.WriteFile(path, []byte(sentinel), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
 	}
-	if code := logoutWith(t, cookie); code != http.StatusOK {
-		t.Fatalf("replayed logout = %d; want 200", code)
+	for range 3 {
+		if code := logoutWith(t, cookie); code != http.StatusOK {
+			t.Fatalf("replayed logout = %d; want 200", code)
+		}
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
+	got, err := os.ReadFile(path) // #nosec G304 -- temp path created by this test
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != sentinel {
 		t.Error("a replayed logout rewrote the file although nothing changed; the " +
 			"no-change-no-write rule that removes the quadratic amplification is gone")
 	}
@@ -1515,8 +1541,20 @@ func TestChaos73_DropSurfaceNamesTheBenignCause(t *testing.T) {
 
 // TestChaos73_ControlCleanStateStillReportsHealthy is the negative control: the
 // widened sum must not make an untouched node warn.
+//
+// "Untouched" means a node with durable persistence configured and working.
+// CHAOS-68 (PR #1437, reconciled onto this row) deliberately WARNs on the
+// unconfigured default, because there every revocation is lost on restart, so
+// the clean baseline for the admission sum is a configured node whose file has
+// been written — the only state in which no other branch has anything to say.
 func TestChaos73_ControlCleanStateStillReportsHealthy(t *testing.T) {
 	chaos73Setup(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+	noteRevocationPersistenceConfigured(path)
+	if persistRevocations() != persistLanded {
+		t.Fatal("setup: the baseline save did not land")
+	}
 	row := checkSessionRevocation()
 	if row.Status != diagOK {
 		t.Errorf("row status = %v on a clean node, want ok: %s", row.Status, row.Message)

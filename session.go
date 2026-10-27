@@ -119,6 +119,13 @@ func sessionIdentity(s *Session) *Identity {
 //
 // The cookie is cleared by the caller either way. A refusal must not tell an
 // unauthenticated prober whether the cookie it sent was genuine.
+//
+// It has TWO callers, both logout handlers on the PUBLIC allowlist:
+// `/api/auth/logout` (the admin UI) and `/auth/logout` (the portal/proxy
+// session, which proxy.go's identity arm reads for identity- and group-scoped
+// policy). The second only CLEARED its cookie before CHAOS-68 (AU-29), which is
+// exactly why the MAC-first check matters on both: neither caller has
+// authenticated the request.
 func revokeSessionCookie(cookieName string, r *http.Request) {
 	c, err := r.Cookie(cookieName)
 	if err != nil {
@@ -157,12 +164,23 @@ func revokeSessionCookie(cookieName string, r *http.Request) {
 		// verified, so this retry cannot be driven by an unauthenticated
 		// caller; without it, a transient save failure is never retried for
 		// that token and the revocation is lost at the next restart.
+		//
+		// CHAOS-68 widens "behind" from "a save failed" to every durability
+		// doubt the health plane can prove — including a backing file that
+		// VANISHED after it was written (AU-35), which no failed save ever
+		// recorded. See persistRevocationsIfDirty.
 		if reason == session.RevokeAlreadyKnown {
 			persistRevocationsIfDirty()
 		}
 		return
 	}
-	persistRevocations()
+	if persistRevocations() == persistFenced {
+		// A REFUSAL is not a failure: this boot could not read (or could not
+		// quarantine) the revocations file, so the save declined to rename
+		// over content nobody saw (AU-37/AU-38). The revocation is in force in
+		// memory; the contract row names the repair. Counted, not logged.
+		noteRevocationPersistRefused(1)
+	}
 }
 
 // ---------------------------------------------------------------------------

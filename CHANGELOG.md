@@ -133,6 +133,58 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   New runbook `docs/operator/admin-api-credential-lockout.md`: clear a stuck
   lock with the admin-only `GET`/`POST /api/auth/lockouts` instead of a restart.
 
+- **Cluster revocation sync no longer stops when the revocation list outgrows
+  one message (AU-50, AU-71).** A Data Plane's `SyncRevocations` request
+  carried its whole list, fleet entries included, inside the 16 MiB inbound
+  limit; past it every sync failed and the node could neither publish nor learn
+  a logout. Both legs are now byte-budgeted under their gRPC limits (15 MiB
+  request, 127 MiB reply): the node's own logouts go first, then account
+  revocations, then the rest rotate through later ticks. Nothing is removed
+  from any revocation list. New counter
+  `culvert_cluster_revocation_sync_deferred_total{leg="request"|"reply"}`.
+- **The portal logout (`/auth/logout`) refuses cross-site requests and is
+  rate-limited (AU-55, AU-54).** A request with `Sec-Fetch-Site: cross-site`
+  no longer revokes or clears anything; it gets a same-origin confirmation page
+  that POSTs back. A cookie-bearing logout now spends the same per-client
+  budget as `/api/` mutations and answers `429` past it, without clearing the
+  cookie. Own-site navigations and clients that send no `Sec-Fetch-Site` log
+  out immediately, as before.
+
+- **A Data Plane that synchronized during a revoked cookie's final second was
+  told the session was not revoked, while the Control Plane went on rejecting
+  it.** `revocationAggregator.MergedExcluding` is what a DP's
+  `SyncRevocations` request is answered with, and both of its loops decided
+  expiry with `time.Unix(e.Expiry, 0).Before(now)` — `now.After(exp)`
+  transposed, which reads like a different question while being the same one.
+  Every wire expiry is a whole second while `time.Now()` carries a sub-second
+  remainder, so for the whole wall-clock second numbered `Expiry` the entry was
+  omitted although `session.Decode` still accepted a cookie carrying that
+  `Exp`.
+
+  Nothing failed while this happened, which is what made it serious: the sync
+  reported success, the CP's own copy stayed intact and kept rejecting the
+  cookie, and the DP simply never heard about the revocation. A node restarting
+  or reconnecting inside that second honoured a logged-out or deleted-account
+  cookie with no error anywhere in the fleet.
+
+  Both loops now call `session.RevocationLiveAt(now, e.Expiry)`, a new exported
+  face of the single expiry oracle. It exists because the cluster surfaces live
+  in package main and carry the int64 wire expiry, so they could not reach the
+  unexported predicate at all — each was spelling the comparison itself. The
+  `perNode` loop, which carried the same predicate before this change set, is
+  fixed alongside the `cpLocal` loop this change set added: two dialects of one
+  question inside one function is the defect, not a tidy-up. Strictly
+  fail-closed, as with the earlier fixes — an entry can only be carried
+  fractionally longer, never dropped sooner.
+
+  Gates: `AU72_MergedExcludingRetainsTheFinalSecond` asserts both loops retain
+  a final-second entry while still dropping a minute-old one, and
+  `RevocationExpiry_ExportedFaceAgreesWithTheOracle` holds the exported face to
+  a differential against the real `Decode` rather than against the predicate it
+  wraps. Verified RED against the restored `exp.Before(now)` — the root gate
+  fired on both assertions, so the `perNode` half was equally broken — and
+  against a drifted exported face, which both gates caught.
+
 - **Diagnostics reported "session revocation healthy … no drops" while a
   legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
   CHAOS-73 bounds what an untrusted origin — cluster gossip, or the on-disk
@@ -438,6 +490,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   own `cdrUnavailableBlockReason` constant, with negative controls for the
   retired claim and a positive control that the fail-open half is still
   documented.
+
+- **A deleted account's revocation was erased from disk and from every peer
+  during the final second its cookies were still honoured.**
+  `ExportRevocations` walks two maps, and SEC-REVEXP-1's shared expiry oracle
+  reached only the first. The username-keyed loop eleven lines below it kept a
+  raw `now.After(exp)`, under a comment explaining why the token loop above
+  needed the oracle. Every user expiry is a whole second
+  (`MergeRevocations` stores `time.Unix(e.Expiry, 0)`) while `time.Now()`
+  carries a sub-second remainder, so for the whole wall-clock second numbered
+  `Exp` that test was already true while `Decode` still accepted cookies
+  carrying it.
+
+  This loop is not an observability read — it is the body of the export behind
+  `SaveRevocations`, the DP→CP sync push, the Control Plane aggregator and the
+  HA bundle sent to the standby. So during that second the account revocation
+  was deleted from memory, from the revocations file and from every node, while
+  the deleted account's sessions authenticated. The record was destroyed rather
+  than ignored, which is why no later sweep could repair it.
+
+  The coverage hole was exact: `ExportDropsOnlyWhatDecodeRejects` drives
+  `rl.Revoke`, which only ever writes the token map, and
+  `UserRevocationHonoursTheSameOracle` asserts `IsUserRevoked` — the read path,
+  not the export. Both loops now share one eviction test, and it is `Decode`'s
+  acceptance test. Strictly fail-closed, in the same direction as the original
+  fix: an entry can only be retained fractionally longer, never dropped
+  sooner, and retention stays capped by the TTL that set the expiry.
+
+  Gate: `RevocationExpiry_UserExportDropsOnlyWhatDecodeRejects`, keyed on the
+  `User` field because that is what makes an entry an account revocation on the
+  wire. Verified RED against the restored `now.After(exp)`, and the two
+  pre-existing gates verified GREEN against that same mutation — which is what
+  establishes the hole was real rather than the new gate a duplicate.
 
 - **Two merge-gate workflows reached their actions through MUTABLE tags, and a
   repository-wide gate now refuses that.** `.github/workflows/pr-api-governance.yml`
@@ -2261,8 +2345,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the `exp` claim this appliance signs into a cookie. The change can only
   retain an entry longer — by under one second — and never drop one sooner, so
   it cannot resurrect a session, refuse a legitimate logout, or unbound the
-  list. Applied at all four sites that decided the question: `IsRevoked`,
-  `IsUserRevoked`, `ExportRevocations` and `MergeRevocations`.
+  list. Applied at every site that decided the question: `IsRevoked`,
+  `IsUserRevoked`, `MergeRevocations` and **both** loops of
+  `ExportRevocations`, which walks the token map and the username-keyed map
+  separately. The first pass routed only the token loop through the oracle and
+  left the account loop on the raw predicate; that omission and its gate are
+  the entry immediately below.
 
   Gates: 9 new tests in `internal/session/revocation_expiry_test.go` — **7
   regression gates**, each measured to fail against the pre-fix predicate and
@@ -2627,6 +2715,252 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   earlier names `culvert_ui_roster_role_clamped_total` and
   `uiRosterRoleClamped` (T-64) are still emitted with the same value as
   deprecated aliases for one release window.
+
+- Session revocations did not survive a restart and did not reach the cluster
+  (CHAOS-68). A Culvert session cookie is self-contained and is trusted on its
+  HMAC alone — nothing re-consults the user roster on a request, and the admin
+  role is read out of the cookie — so the revocation list is the only way to
+  withdraw authority from a session that is already issued, for up to seven
+  days. Four defects: an account-level revocation (`DELETE /api/auth/users`)
+  was written only to memory, so an ordinary restart resurrected a deleted
+  account's live sessions; it was never gossiped either, so on a cluster only
+  the node that served the delete stopped honouring the cookie — including for
+  identity- and group-scoped proxy policy, not just the admin UI; the Control
+  Plane, which is the node the admin UI runs on, neither contributed its own
+  revocations to the fleet nor applied what it received, so a logout performed
+  on the Control Plane propagated nowhere; and a corrupt revocations file
+  booted the node with an empty list behind one log line, after which the next
+  save overwrote the evidence. Both revocation kinds now reach disk and the
+  fleet, the Control Plane participates in both directions, and a corrupt file
+  is quarantined through the existing `state_file_corrupt` path — including a
+  document whose top-level value is the JSON literal `null`, which parses
+  without error into an empty list and so used to be accepted silently. A
+  revocation save that fails transiently is retried on a later cluster sync
+  rather than skipped because the entry is already in memory — on an HA standby
+  the replicated bundle is the only writer, so without the retry the volume
+  could be repaired and the revocation still never reach disk. A backing file
+  that disappears after startup — deleted, or carried off by a replaced mount —
+  is likewise rewritten on the next sync instead of leaving the in-force
+  revocations in memory only; nothing observes such a disappearance on its own,
+  because no write is attempted and so no failure is recorded. The
+  persisted document remains a JSON array so an older binary still parses the
+  token revocations it understands.
+
+  A revocations file that could not be READ is no longer overwritten. It is
+  deliberately not quarantined, because its contents may be intact behind a
+  transient permission or I/O fault — but the process boots with an empty list,
+  and the first logout, account deletion or cluster sync used to rename a
+  complete file over it. `AtomicWrite` needs only the parent directory to be
+  writable, so an unreadable file in a writable directory was silently replaced
+  by the few revocations that node happened to know about, and the operator's
+  own remedy then loaded the truncated file. Saves are now refused while the
+  file is unread; revocations applied in the meantime are enforced in memory,
+  counted by `culvert_session_revocation_persist_refused_total`, and reported on
+  the diagnostics row, which is the size of the re-apply job. A refusal is not
+  counted as a write failure — no write was attempted and the volume may be
+  healthy.
+
+  A corrupt revocations file that could not be moved aside is no longer
+  overwritten either. The quarantine's own failure message warned that "the
+  next save WILL OVERWRITE it" and that warning was the only mitigation; the
+  boot path now checks whether the rename succeeded and refuses writes when it
+  did not, so the only copy of the damaged file survives until an operator can
+  take it. And a revocations directory that disappears is no longer reported as
+  durable: a deleted file is recreated by the next save, but a deleted parent
+  directory cannot be, and the metric, the cluster API and the diagnostics row
+  said otherwise until some later write happened to fail.
+
+  The HA state bundle now stays inside the CP↔DP gRPC frame. That bundle is one
+  message carrying the published config, the CA material, the cluster state and
+  the leader's revocation set; the config alone may reach 120 MiB against a
+  128 MiB frame, and the revocation set is the only member with no cap of its
+  own. An over-size message is rejected wholesale, so the standby would lose the
+  config, the CA material, the cluster state and the same revocations, with
+  failover readiness gone until entries expired. The leader now trims the
+  revocation set to fit — account revocations first, then longest-remaining-life
+  — and reports it on two series that answer different questions:
+  `culvert_ha_bundle_revocations_subset` is a gauge saying whether the standby
+  is holding a subset **right now** (alert on this one; it also drives the
+  `haBundleRevocationsDropped` field on `/healthz`, present only when non-zero)
+  and `culvert_ha_bundle_revocations_dropped_total` is the cumulative
+  magnitude. HA sync keeps working through a trim, so every other surface stays
+  green. Both present-tense surfaces clear on their own once a later bundle
+  carries the complete set — the usual outcome, since revocations are
+  replicated only until their session expires and the trim keeps the
+  longest-lived entries, so the dropped tail is the part that ages out first. A
+  bundle that is over budget with no revocations left to give back is logged
+  instead, because the overflow is then the config's and no trim can repair
+  it. The bundle's byte budget is derived from the 128 MiB transport frame
+  (127 MiB) rather than from the 120 MiB cap on the config it carries — set to
+  the latter, a config published at its own limit consumed the whole budget and
+  every revocation was dropped, which is the case the trim exists for.
+
+  A repeat logout can now repair a revocation whose save failed. Logout
+  authenticates the cookie before writing anything, and previously did so
+  through the decoder that rejects an already-revoked token — so retrying a
+  logout after a transient write failure was refused before it could reach the
+  save. On a single node that was terminal: every other path that rewrites the
+  file is driven by a cluster peer, so the node stayed degraded until some
+  unrelated revocation occurred and a restart brought the logged-out cookie
+  back. Clicking Log out again now repairs it. The retry writes only while
+  durability is actually in doubt, so it cannot be used to force writes on a
+  healthy node, and an unsigned cookie still writes nothing.
+
+  This work is reconciled with the public-logout admission plane (CHAOS-73,
+  listed above). Logout authenticates the cookie through `RevokeVerified`, and
+  every revocation save (logout, account deletion and all three cluster merge
+  paths) now goes through one save coordinator. A failed save on any of those
+  paths therefore marks a retry as owed. The replayed-logout repair also covers
+  a revocations file that disappeared after it was written, and a refused save
+  (the file could not be read at boot) is counted once instead of being retried
+  on every replay. User-level revocations from a cluster peer or from the
+  on-disk file get the same size, expiry and count limits as token revocations,
+  and the Control Plane bounds their username field. Every refusal is counted.
+  The `session_revocation` diagnostics row combines both planes' checks, in this
+  order: durability failures, then dropped or unverifiable entries, then the
+  unconfigured-default warning.
+
+  A Control Plane leader also repairs its own revocations file. Every repair
+  path is driven by a peer, so a leader with an HA standby and no data-plane
+  nodes calling in received nothing and its file could stay missing until the
+  next logout. The diagnostics remedy has been corrected to match: a sync
+  rewrites the file only on a node that receives revocations.
+
+  The persist-failure counter is reported as failed save attempts rather than as
+  affected revocations. It increments once per failed save, and both the startup
+  probe and the cluster retry loop attempt saves on an unchanged list, so one
+  fault could appear as hundreds of affected sessions and overstate the
+  operator's re-application scope. The diagnostics row now names the attempts as
+  the age of the fault and the in-force token and account counts as what a
+  restart would actually lose.
+
+  The two ways a load can fail now carry the recovery action that matches each.
+  A file that was read and would not parse is quarantined and has a restorable
+  `.corrupt.*` copy; a file that could not be read at all (permissions, I/O, a
+  mount that went away) is deliberately left alone, so it has no such copy — and
+  the diagnostics row used to print the quarantine remedy for both, sending an
+  operator after evidence that was never produced. The read-failure row now
+  names the permission/mount repair, and says that the unread file's contents
+  stay recoverable only until the next logout or account deletion on that node
+  replaces it.
+
+  A revocations path that cannot hold a write is reported with the action that
+  repairs it. Three conditions make every save fail — the parent directory is
+  gone, a path component is a regular file, or the path is itself a directory —
+  and they need three different remedies: restore the mount, clear what is in
+  the way, remove the directory at the target. The second and third used to read
+  as healthy (the checks for "does not exist" do not match a path component that
+  is a file, and a directory at the target stats cleanly, so neither the missing
+  file nor the missing parent check fired) while every save was lost and a
+  restart discarded the in-memory list. All three are now detected and the
+  diagnostics row names the one that applies; a condition that cannot be proved
+  (a permission or I/O error rather than a definite absence) still reports
+  nothing, because only definite evidence may move a surface whose claim is that
+  a revocation applied now would survive.
+
+  The read-failure row scopes the re-application job to the revocations actually
+  in force. It had reported the refused-save counter, which counts attempts: an
+  entry that later expires is dropped from the live set while the counter never
+  decreases, and a repeated logout of one cookie increments it again. Nothing is
+  loaded from the file in that state, so the in-force token and account counts
+  are exactly what this boot applied and what a restart would lose — the same
+  correction already applied to the persist-failure row. The runbook's metric
+  table and its two recovery procedures, the counter's own documentation and the
+  `/metrics` help text now all say the same thing, so an operator reading any of
+  them is sent to the live counts for the re-application scope and to the
+  counter only for the magnitude of the incident. The counter's unit is stated
+  correctly for the first time, too: it counts revocation *entries*, and one
+  refused save can add more than one, because the cluster merge charges every
+  entry it had added while the logout and account-deletion paths charge one.
+
+  `culvert_ha_bundle_revocations_subset` now says what it can observe. The gauge
+  is recorded while a bundle is being marshalled — before it is delivered and
+  before the standby applies it — and HA bundles are pulled with no
+  acknowledgment, so a cancelled response or a failed apply leaves the standby
+  short while the gauge reads zero. Its help text and the runbook's alert
+  guidance say so and point at the HA sync freshness signals, because an
+  operator reading it as delivery could treat a promotion as safe.
+
+  A revocations path that cannot hold a write is now diagnosed ahead of the
+  failures it causes. A directory at the configured path makes the boot read
+  fail with a code that is not corruption, so the node reported that the list
+  could not be read and told the operator to check permissions and the mount and
+  restart — which fails identically — while claiming the file was left in place
+  and its contents might still be intact, of a path holding no contents. Writes
+  are fenced in that state, so nothing was ever persisted, behind an instruction
+  that could not work. A definitively unusable path now takes the diagnostics
+  row ahead of every load or write failure, because it is the cause of them and
+  carries the only remedy that applies; a fault that cannot be proved still
+  reports nothing and leaves the row to the generic branches.
+
+  Recovering from a corrupt revocations file no longer destroys the revocations
+  made since boot. The quarantine frees the path, so writes are not fenced and
+  the next logout or sync creates a fresh file holding those entries — and the
+  documented repair was to move the repaired file back, which replaced them.
+  The procedure now records the live counts first and merges rather than
+  overwrites, keeping the later expiry where an entry appears on both sides. The corrupt-file recovery procedure also no longer suggests
+  disabling the compromised account as an interim step: administrator accounts
+  have no disabled state, so deleting the account — which the procedure already
+  covers — is the only action that answers.
+
+  Counting revocations no longer deletes one a second before the cookie stops
+  being honoured. The live-count helper behind the metrics gauges, the
+  diagnostics row and the cluster revocations API pruned expired entries on a
+  test that disagreed with the cookie verifier: session expiries are whole
+  seconds while the clock carries a sub-second remainder, so for the whole
+  second an expiry names, the prune considered the entry gone while the verifier
+  still accepted the cookie. A metrics scrape landing in that second therefore
+  destroyed the revocation and the logged-out cookie authenticated again for the
+  rest of it. The prune now uses the same shared expiry test as the verifier, so
+  an entry survives for exactly as long as some cookie could still be accepted.
+
+  The corrupt-file diagnostics row now gives the same recovery action as the
+  runbook. The procedure was corrected to require merging the quarantined copy
+  with the file written since boot, keeping the later expiry on a collision,
+  because a successful quarantine leaves writes unfenced and a plain restore
+  replaces the revocations applied in the meantime. The diagnostics row — which
+  an operator reads first — still said to restore and restart.
+
+  Revocation persistence remains opt-in (`-revocations-file`) and is not
+  changed here, but it is no longer silent: a new `session_revocation`
+  diagnostics row and `culvert_session_revocation_*` metrics report whether a
+  revocation applied on this node would survive a restart, and the row names
+  the coupling that makes the default dangerous — a stable session signing key,
+  which every clustered deployment configures, is what lets a cookie outlive
+  the restart that discards its revocation. Operators running a cluster should
+  set `-revocations-file`. See `docs/operator/session-revocation.md`.
+
+- The proxy/portal logout did not revoke the session it ended (CHAOS-68,
+  AU-29). `/auth/logout` cleared the cookie and nothing else — which is a
+  request to the browser, not a withdrawal of authority — so the token stayed
+  valid until its natural expiry and a retained or stolen copy replayed
+  against this node or any other in the fleet. This is the proxy session,
+  which feeds identity- and group-scoped policy on the data plane, so the
+  window was an enforcement gap rather than an admin-console one; the admin
+  logout had always revoked. Both paths now revoke.
+
+  Closing it required hardening the shared helper first (AU-30):
+  `revokeSessionCookie` read the expiry out of the cookie without verifying
+  its signature, and both logout routes are on the public allowlist, while the
+  revocation map is uncapped, each entry expires at a time taken from the
+  cookie, and every call writes the whole list to disk and gossips it
+  fleet-wide. One unauthenticated caller could therefore mint arbitrarily many
+  effectively permanent entries across the fleet. The cookie is now
+  authenticated before anything is revoked; a genuine logout is unchanged.
+
+- Revocation durability was reported from configuration rather than evidence
+  (CHAOS-68, AU-31). A configured-but-absent revocations file counted as a
+  clean first run, so the diagnostics row, the cluster API and the metric read
+  healthy even when the parent directory was missing, read-only or otherwise
+  unwritable and the first save was certain to fail — the fault surfaced only
+  when some operator's logout, hours later, happened to be the first write.
+  The node now proves the path at startup by writing the file, so a bad path
+  degrades at boot. This covers an existing file as well as an absent one: a
+  file that is present and parses proves only that the path is readable, so a
+  volume remounted read-only still reported durable until the first logout
+  failed. The startup write is deliberately skipped when the file could not be
+  read or could not be parsed — the content may be intact behind a transient
+  fault, or be about to be quarantined, and writing would destroy it.
 - An unauthenticated client could park a gateway core for minutes with one
   request by choosing a very long destination host (CHAOS-69, register rows
   PX-21/PX-23/PX-24/PX-25). The destination authority is written by the client,

@@ -94,6 +94,10 @@ type DataPlaneClient struct {
 	// struct-literal client in the tests — means "no jitter", which is exactly
 	// what a cadence assertion wants: see jitterDelay.
 	jitter func(time.Duration) time.Duration
+	// revSyncCursor is where the budgeted SyncRevocations request's rotating
+	// window stopped (AU-50). Read and written only by revocationSyncLoop's
+	// goroutine (revocationSyncRound), so it needs no lock.
+	revSyncCursor revSyncCursor
 }
 
 // dpBackoffCeiling caps the post-failure retry delay. A DP that cannot reach
@@ -1052,22 +1056,31 @@ func (c *DataPlaneClient) revocationSyncLoop(ctx context.Context, interval time.
 // goroutine that stops syncing leaves revoked sessions live fleet-wide while
 // the node reports healthy — a silent fail-OPEN. A skipped round only delays
 // propagation by one interval, exactly as a failed SyncRevocations RPC already
-// does, and the next tick re-sends the full local set (ExportRevocations is a
-// full export, not a delta), so nothing is lost by the skip.
+// does, and nothing is lost by the skip: every entry is still in the local
+// list, and the next tick's request is built from it again.
+//
+// AU-50: the request is BUDGETED below the 16 MiB send/receive limit this leg
+// rides (maxClusterInboundMsgSize). It used to export the whole live list —
+// including every fleet entry merged from earlier replies — so past 16 MiB
+// every sync failed with ResourceExhausted and this node could neither
+// publish a logout nor learn one. When the list does not fit, this node's own
+// logouts go first and the rest rotate through later ticks (see
+// revocation_sync_budget.go); nothing is removed from the local list, which
+// would un-revoke a session. The rotation cursor lives on the client and is
+// touched only by this loop's goroutine; a round that panics mid-plan leaves
+// it at its previous value, which only re-sends a window.
 func (c *DataPlaneClient) revocationSyncRound(ctx context.Context) {
 	// Discharge an owed persist on EVERY exit path, including the RPC and parse
 	// errors below — see persistOwedRevocations.
 	defer c.persistOwedRevocations()
 
-	local := sessionRevoked.ExportRevocations()
-	req := struct {
-		NodeID  string            `json:"node_id"`
-		Entries []RevocationEntry `json:"entries"`
-	}{
-		NodeID:  c.nodeID,
-		Entries: local,
+	local, other := sessionRevoked.ExportRevocationsByOrigin()
+	b, deferred, err := buildRevocationSyncRequest(c.nodeID, local, other, revocationSyncRequestBudget, &c.revSyncCursor)
+	if err != nil {
+		logger.Printf("DataPlane: SyncRevocations request not built: %v", err)
+		return
 	}
-	b, _ := json.Marshal(req)
+	noteRevocationSyncDeferred(&revocationSyncRequestDeferred, "DataPlane", "request", c.nodeID, deferred, revocationSyncRequestBudget)
 	raw, err := c.call(ctx, methodSyncRevocations, b)
 	if err != nil {
 		logger.Printf("DataPlane: SyncRevocations error: %v", err)
@@ -1080,11 +1093,16 @@ func (c *DataPlaneClient) revocationSyncRound(ctx context.Context) {
 		logger.Printf("DataPlane: SyncRevocations parse error: %v", err)
 		return
 	}
-	if added := sessionRevoked.MergeRevocations(resp.Entries); added > 0 {
+	if added := mergeClusterRevocations(resp.Entries); added > 0 {
 		logger.Printf("DataPlane: merged %d remote session revocations", added)
 		// Mark dirty BEFORE attempting the save, never after: a panic inside
 		// SaveRevocations must leave the node knowing the write is still owed.
 		c.revocationsUnsaved.Store(true)
+		if sessionRevoked.WriteFenced() {
+			// AU-52: a fenced save is a refusal, counted once per merged ENTRY
+			// (as mergeAndPersistRevocations charges it), not once per retry.
+			noteRevocationPersistRefused(added)
+		}
 	}
 }
 
@@ -1107,20 +1125,25 @@ func (c *DataPlaneClient) revocationSyncRound(ctx context.Context) {
 // MergeRevocations counts only tokens that were NOT already present, so the
 // owed flag — not `added` — is the only thing that can drive the retry: once a
 // merge has landed, every later full-set response reports added == 0.
+//
+// This PR's CHAOS-68 durability retries (AU-34/AU-35: a save that failed on
+// any writer, or a backing file that vanished after it was written) ride the
+// same deferred call through persistClusterMergedRevocations, so the DP keeps
+// the repair it had through mergeAndPersistRevocations, now also on rounds the
+// CP never answered.
 func (c *DataPlaneClient) persistOwedRevocations() {
-	if !c.revocationsUnsaved.Load() {
-		return
-	}
 	// Through the coordinator, never SaveRevocations directly: persistRevocations
 	// serializes this write against the logout path's and records a failure in
 	// the process-wide dirty flag a later logout retries on
 	// (TestChaos73_WallSavesGoThroughTheCoordinator, CodeRabbit on PR #1591). The
 	// per-client flag is cleared only on THIS call's success, so a concurrent
-	// writer clearing the shared flag cannot strand this round's merge.
-	if !persistRevocations() {
-		return // still owed; the next round (or loop exit) retries
+	// writer clearing the shared flag cannot strand this round's merge. A
+	// write-fenced refusal is not a success either: the merge is in force in
+	// memory only, so it stays owed until a write can land (the refusal itself
+	// is cheap and is not logged per attempt).
+	if persistClusterMergedRevocations(0, c.revocationsUnsaved.Load(), "DataPlane") {
+		c.revocationsUnsaved.Store(false)
 	}
-	c.revocationsUnsaved.Store(false)
 }
 
 // auditPushLoop forwards local audit events to the CP for centralized logging.

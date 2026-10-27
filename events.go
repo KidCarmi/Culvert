@@ -376,6 +376,7 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "# TYPE culvert_session_revocations_tracked gauge\nculvert_session_revocations_tracked %d\n", sessionRevoked.Tracked())
 	fmt.Fprintf(w, "\n# HELP culvert_cluster_revocation_drops_total Revocation entries the Control Plane refused to retain from a Data Plane node (over-long key, or past the per-node cap). Non-zero means a session an operator revoked may still authenticate on other nodes\n")
 	fmt.Fprintf(w, "# TYPE culvert_cluster_revocation_drops_total counter\nculvert_cluster_revocation_drops_total %d\n", clusterRevocationDropTotal())
+	writeRevocationSyncDeferredMetrics(w)
 
 	// SEC-REQID-1: client-supplied tracing headers replaced because they were
 	// over-long or carried bytes that must not reach a log line. The request

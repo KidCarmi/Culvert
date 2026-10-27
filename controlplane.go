@@ -310,10 +310,47 @@ func (a *rateLimitAggregator) Stats() (nodes int, hotIPs int) {
 type revocationAggregator struct {
 	mu      sync.Mutex
 	perNode map[string][]RevocationEntry // nodeID → latest entries
+	// cpLocal holds the Control Plane's OWN revocations (CHAOS-68).
+	//
+	// It is a SEPARATE FIELD rather than a reserved key in perNode, and that is
+	// the whole point: a reserved key is only as safe as the guarantee that no
+	// enrolled node can ever be named it, and node ids reach this map from an
+	// enrollment. A field cannot be addressed by Update(nodeID, …) at all, so a
+	// node cannot overwrite the CP's slot and MergedExcluding cannot filter the
+	// CP's entries out of that node's merge — regardless of what the node is
+	// called. Collision is structurally absent instead of merely unlikely.
+	cpLocal []RevocationEntry
+	// respCursor is, per requesting node, where the budgeted SyncRevocations
+	// REPLY's rotating window stopped (AU-71). An entry exists only while that
+	// node's reply is over budget, and its key space is perNode's (verified
+	// node ids), so it is bounded by the same thing.
+	respCursor map[string]revSyncCursor
 }
 
 var globalRevAggregator = &revocationAggregator{
 	perNode: map[string][]RevocationEntry{},
+}
+
+// responseCursor returns where nodeID's previous over-budget reply stopped.
+func (a *revocationAggregator) responseCursor(nodeID string) revSyncCursor {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.respCursor[nodeID]
+}
+
+// setResponseCursor records where nodeID's reply stopped; a cleared cursor
+// (the whole set fitted) deletes the entry.
+func (a *revocationAggregator) setResponseCursor(nodeID string, c revSyncCursor) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !c.set {
+		delete(a.respCursor, nodeID)
+		return
+	}
+	if a.respCursor == nil {
+		a.respCursor = map[string]revSyncCursor{}
+	}
+	a.respCursor[nodeID] = c
 }
 
 // maxRevocationsPerNode caps how many revocation entries the Control Plane
@@ -349,7 +386,11 @@ func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) 
 	kept := make([]RevocationEntry, 0, min(len(entries), maxRevocationsPerNode))
 	dropped := 0
 	for _, e := range entries {
-		if len(e.Token) > session.MaxRevocationTokenLen {
+		// CHAOS-68 added a second free-form field to the wire, a user
+		// revocation's User. It is bounded exactly like the token, for the
+		// reason Prov is cleared below: a length bound on one field is no
+		// bound on what is stored and fanned out if a sibling field is not.
+		if len(e.Token) > session.MaxRevocationTokenLen || len(e.User) > session.MaxRevocationTokenLen {
 			dropped++
 			continue
 		}
@@ -383,20 +424,52 @@ var clusterRevocationDrops atomic.Int64
 // clusterRevocationDropTotal reports the count for the metrics surface.
 func clusterRevocationDropTotal() int64 { return clusterRevocationDrops.Load() }
 
-// MergedExcluding returns all revocation entries from other nodes.
+// UpdateLocal stores the Control Plane's own revocation entries (CHAOS-68).
+//
+// Before this, the aggregator had exactly one writer — a Data Plane push — so
+// the CP contributed nothing to the fleet-wide merge. The admin UI runs on the
+// CP, which makes it the node where logouts and account deletions actually
+// happen, so the one node whose revocations mattered most was the one node
+// whose revocations went nowhere.
+func (a *revocationAggregator) UpdateLocal(entries []RevocationEntry) {
+	a.mu.Lock()
+	a.cpLocal = entries
+	a.mu.Unlock()
+}
+
+// MergedExcluding returns all revocation entries from other nodes, plus the
+// Control Plane's own (which are never excluded — the requester is never the CP).
 func (a *revocationAggregator) MergedExcluding(nodeID string) []RevocationEntry {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := time.Now()
 	var merged []RevocationEntry
 	seen := map[string]bool{}
+	for _, e := range a.cpLocal {
+		// SEC-REVEXP-1: the one oracle, not a local comparison. `exp.Before(now)`
+		// is `now.After(exp)` transposed, and every wire expiry is a whole second
+		// while `now` carries a sub-second remainder — so for the whole second
+		// numbered Expiry it omitted an entry whose cookie Decode still accepts.
+		// This loop answers a DP's SyncRevocations, so the omission reached the
+		// requesting node as "no such revocation" (AU-72).
+		if !session.RevocationLiveAt(now, e.Expiry) {
+			continue // expired on the shared oracle
+		}
+		if !seen[e.Token] {
+			seen[e.Token] = true
+			merged = append(merged, e)
+		}
+	}
 	for nid, entries := range a.perNode {
 		if nid == nodeID {
 			continue
 		}
 		for _, e := range entries {
-			if time.Unix(e.Expiry, 0).Before(now) {
-				continue // expired
+			// Same oracle as the CP loop above. Leaving this one on the raw
+			// predicate would put two dialects of one question inside one
+			// function, which is the shape AU-62 was.
+			if !session.RevocationLiveAt(now, e.Expiry) {
+				continue // expired on the shared oracle
 			}
 			if !seen[e.Token] {
 				seen[e.Token] = true

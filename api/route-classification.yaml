@@ -3344,7 +3344,7 @@ routes:
     domain: "auth"
     visibility: intentionally-undocumented
     min_role: "public"
-    mutating: false
+    mutating: true
     audit_expected: false
     danger_level: medium
     documented: false

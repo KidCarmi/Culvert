@@ -167,32 +167,112 @@ var sessionRevocationsDirty atomic.Bool
 // flag without the lock.
 var persistMu sync.Mutex
 
+// persistOutcome is what one coordinated save did. It is NOT an error type on
+// purpose: most callers only need to know whether the save was REFUSED (a
+// write fence, which they count) or had RECOVERED from an earlier failure
+// (which the cluster merge path announces), and a returned error would invite
+// each caller to log it again — the per-attempt amplification the coordinator
+// exists to prevent.
+type persistOutcome int
+
+const (
+	// persistLanded — the save wrote the complete live list (or persistence is
+	// not configured, which writes nothing and is not a failure).
+	persistLanded persistOutcome = iota
+	// persistRecovered — persistLanded, and the file had been behind memory.
+	persistRecovered
+	// persistFailed — the write failed; the file is behind memory and a retry
+	// is owed (sessionRevocationsDirty).
+	persistFailed
+	// persistFenced — the save was REFUSED by internal/session's write fence
+	// (CHAOS-68 AU-37/AU-38): this boot could not read, or could not
+	// quarantine, the revocations file, so nothing may be renamed over it.
+	// Not a failure, and deliberately NOT marked dirty: no retry can land until
+	// a restart clears the fence, so owing one would only turn every replayed
+	// logout and every sync tick into a refused "repair" (AU-47).
+	persistFenced
+)
+
 // persistRevocations saves and tracks whether the file is in step with memory.
-// It reports whether THIS call's write landed, for a caller that tracks its
-// own owed write (the DP revocation-sync round, CHAOS-79): the shared flag
-// alone cannot tell it, since another writer's success may clear it.
-func persistRevocations() bool {
+//
+// It is the ONLY production caller of sessionRevoked.SaveRevocations
+// (TestChaos73_WallSavesGoThroughTheCoordinator): the logout path, the
+// account-deletion path and all three cluster merge paths (CHAOS-68's
+// mergeAndPersistRevocations) go through it, so the dirty flag describes every
+// writer rather than the one that happened to call it.
+//
+// The failure line is keyed on the TRANSITION into dirty, not on the attempt
+// (CHAOS-68). The cluster merge path retries an owed save on every sync tick —
+// 3 s on a Data Plane, 5 s on an HA standby — so a per-attempt line is hundreds
+// an hour while a volume is broken, and a mitigation for a durability defect
+// must not become a write-amplification one (CHAOS-63's rule). The magnitude
+// stays in culvert_session_revocation_persist_failures_total, which the
+// internal/session failure observer counts on every attempt.
+//
+// The outcome is THIS call's result, for a caller that tracks its own owed
+// write (the DP revocation-sync round, CHAOS-79): the shared flag alone cannot
+// tell it, since another writer's success may clear it. persistLanded and
+// persistRecovered mean this call's write landed; nothing else does.
+func persistRevocations() persistOutcome {
 	persistMu.Lock()
 	defer persistMu.Unlock()
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		sessionRevocationsDirty.Store(true)
+	wasDirty := sessionRevocationsDirty.Load()
+	err := sessionRevoked.SaveRevocations()
+	if err == nil {
+		sessionRevocationsDirty.Store(false)
+		if wasDirty {
+			return persistRecovered
+		}
+		return persistLanded
+	}
+	if session.IsWriteFenced(err) {
+		return persistFenced
+	}
+	sessionRevocationsDirty.Store(true)
+	if !wasDirty {
 		// sanitizeLog + %q, not a bare %v: this error is object-derived and
 		// carries untrusted content. SaveRevocations marshals the entries,
 		// whose tokens come from cluster gossip and the on-disk file, so a
 		// marshal failure can fold a peer-supplied token into the message and
 		// forge log lines (CWE-117, CodeQL alert 418 on PR #1591).
 		logger.Printf("Session: failed to persist revocations: %q", sanitizeLog(err.Error()))
-		return false
 	}
-	sessionRevocationsDirty.Store(false)
-	return true
+	return persistFailed
 }
 
-// persistRevocationsIfDirty retries a previously failed write. Callers reach
-// it on a no-change revocation, so it must do nothing at all in the healthy
-// case — the point of not writing when nothing changed.
+// revocationSaveOwed reports whether the file may be BEHIND the in-memory list
+// and a save could repair it. It is the union of every doubt either plane can
+// prove, because each one alone misses a case the other sees:
+//
+//   - sessionRevocationsDirty (CHAOS-73) — a coordinated save failed.
+//   - sessionRevocationPersistDegraded (CHAOS-68 AU-25) — ANY save failed,
+//     including the boot probe, which internal/session runs directly before
+//     any coordinated save exists.
+//   - the backing file VANISHED after it was written (CHAOS-68 AU-35): no save
+//     was attempted, so neither flag above ever moved, and a restart loads a
+//     file that never received the revocations in force. Not counted while
+//     saves are write-fenced (AU-47): no save can land there.
+//
+// Every one of them self-clears on the first save that lands (the flags) or
+// re-creates the file (vanished), so a caller that retries on this predicate
+// writes at most once per episode in the healthy-again case.
+func revocationSaveOwed() bool {
+	if sessionRevocationsDirty.Load() {
+		return true
+	}
+	failing, vanished := revocationDurabilityDoubt()
+	return failing || vanished
+}
+
+// persistRevocationsIfDirty retries a previously failed (or silently lost)
+// write. Callers reach it on a no-change revocation, so it must do nothing at
+// all in the healthy case — the point of not writing when nothing changed.
+//
+// It is reached only from a MAC-VERIFIED replay (RevokeAlreadyKnown), so an
+// unauthenticated caller cannot drive the retry, and the predicate it keys on
+// clears itself, so a replaying caller cannot turn it into a per-request write.
 func persistRevocationsIfDirty() {
-	if !sessionRevocationsDirty.Load() {
+	if !revocationSaveOwed() {
 		return
 	}
 	persistRevocations()
@@ -217,12 +297,22 @@ func resetSessionRevokeCountersForTest() {
 	// branch for every later test in the binary, so a gate asserting on the
 	// refusal branch silently examines the wrong row.
 	clusterRevocationDrops.Store(0)
+	// AU-50/AU-71: the gossip-deferral counters and their log window, for the
+	// same reason — a later gate asserting "nothing deferred" must not read an
+	// earlier gate's backlog.
+	revocationSyncRequestDeferred.Store(0)
+	revocationSyncResponseDeferred.Store(0)
+	revocationSyncDeferLogged.Store(0)
 	session.ResetRefusalCountersForTest()
 }
 
 // ── operator contract ────────────────────────────────────────────────────────
 
-// checkSessionRevocation is the `session_revocation` operator-contract row.
+// revocationAdmissionRow is the CHAOS-73 half of the `session_revocation`
+// operator-contract row (checkSessionRevocation, session_revocation_health.go,
+// composes it after CHAOS-68's durability branches). It returns ok=false when
+// neither of its conditions holds, so the composed row falls through to the
+// persistence-posture and healthy branches.
 //
 // It reports on TWO things an operator cannot otherwise see, and it is
 // deliberately WARN-only in both cases:
@@ -247,7 +337,7 @@ func resetSessionRevokeCountersForTest() {
 // The row carries COUNTS ONLY — never a client address, never a cookie or any
 // prefix of one, never a token key. `/api/diagnostics` is a viewer-role
 // surface, and the bytes in question are attacker-chosen.
-func checkSessionRevocation() OperatorContractCheck {
+func revocationAdmissionRow() (OperatorContractCheck, bool) {
 	refused := sessionRevocationRefusedTotal()
 	// Every untrusted-origin refusal admitUntrustedLocked counts, plus the
 	// Control Plane's per-node drop. SEC-REVDIAG-1: RevokeFarFuture was missing
@@ -281,7 +371,7 @@ func checkSessionRevocation() OperatorContractCheck {
 				"dropped here — verify time sync across the cluster before suspecting a peer. Then force " +
 				"a re-login for the affected administrators (change the session secret to invalidate every " +
 				"session at once), and check whether a cluster peer is pushing malformed revocation state.",
-		}
+		}, true
 	}
 	if refused > 0 {
 		return OperatorContractCheck{
@@ -295,11 +385,7 @@ func checkSessionRevocation() OperatorContractCheck {
 				"that keeps climbing with no recent key change is probing of the public /api/auth/logout " +
 				"endpoint: confirm the admin port is not reachable from untrusted networks, and check the " +
 				"rate-limited SESSION_REVOKE_REFUSED log lines for the source.",
-		}
+		}, true
 	}
-	return OperatorContractCheck{
-		Code:    "session_revocation",
-		Status:  diagOK,
-		Message: fmt.Sprintf("session revocation healthy (%d entries tracked, no refusals, no drops)", tracked),
-	}
+	return OperatorContractCheck{}, false
 }

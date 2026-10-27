@@ -403,7 +403,32 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Revoke all active sessions for the deleted user (Finding 5.2).
+		//
+		// CHAOS-68: the revocation must be made DURABLE here, exactly as a
+		// logout's is (revokeSessionCookie, session.go). Without this the
+		// account deletion was reported as complete while the only record that
+		// its live sessions had been withdrawn lived in this process's memory:
+		// a restart — an ordinary redeploy, an OOM, a SIGKILL — resurrected the
+		// deleted account's cookie for the remainder of its TTL (up to 7 days),
+		// and no other node in the cluster ever learned of it at all.
+		//
+		// The persist failure is logged and counted rather than failing the
+		// request: the account IS deleted (SaveUIUsersFile above owns that
+		// durability), and refusing here would leave the caller unsure which of
+		// the two happened. What the operator gets instead is the
+		// session_revocation contract row and
+		// culvert_session_revocation_persist_failures_total — a durability
+		// failure on this path is a security-control failure, so it is counted
+		// and surfaced rather than living in one log line.
 		sessionRevoked.RevokeUser(username)
+		if persistRevocations() == persistFenced {
+			// See session.go: a refusal (the file was not read this boot) is
+			// counted, not logged per attempt and never treated as a write
+			// failure — the remedy is the permission repair the load-degraded
+			// row names, not free space (AU-37). A real failure is logged by
+			// the coordinator and marks the retry owed.
+			noteRevocationPersistRefused(1)
+		}
 		auditEvent(r, "auth.users.delete", username, "")
 		w.WriteHeader(http.StatusNoContent)
 
@@ -1218,8 +1243,40 @@ background:#2563eb;color:#fff;text-decoration:none;text-align:center}a.btn:hover
 	fmt.Fprintf(w, `</body></html>`)
 }
 
-// POST /auth/logout — clear session cookie.
+// GET|POST /auth/logout — revoke and clear the portal session cookie.
+//
+// Two admission rules run BEFORE anything is revoked or cleared, and both
+// refuse by doing nothing rather than by doing half (ui_auth_logout_guard.go):
+//
+//   - AU-55: a cross-site request (Sec-Fetch-Site: cross-site) performs no
+//     mutation and is answered with a same-origin confirmation page whose
+//     form POSTs back here through securityMiddleware's same-origin check.
+//   - AU-54: a request that carries a session cookie is charged to the same
+//     per-client limiter the /api/ mutations use; over the limit it is
+//     refused with 429, and the cookie is NOT cleared, because clearing a
+//     cookie whose revocation was skipped would report a logout that never
+//     withdrew the token's authority.
 func authLogout(w http.ResponseWriter, r *http.Request) {
+	if portalLogoutIsCrossSite(r) {
+		writePortalLogoutConfirmation(w)
+		return
+	}
+	if !admitPortalLogout(w, r) {
+		return
+	}
+	// REVOKE, then clear. Clearing a cookie is a request to the browser, not a
+	// withdrawal of authority: the token stays valid until its natural expiry,
+	// so anyone who kept a copy — or stole one — can replay it against this
+	// node or any other in the fleet. This is the PROXY/portal session, which
+	// proxy.go's identity arm reads for identity- and group-scoped policy on
+	// the DATA plane, so the replay window is an enforcement gap and not just
+	// an admin-console one.
+	//
+	// The admin logout (apiAuthLogout) has always revoked; this path only
+	// cleared, which made §2 of docs/operator/session-revocation.md — "admin or
+	// user logs out → token revoked" — false for exactly half of the table
+	// (Codex P1, PR #1437).
+	revokeSessionCookie(sessionCookieName, r)
 	clearSessionCookie(w, r)
 	http.Redirect(w, r, "/", http.StatusFound)
 }

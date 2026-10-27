@@ -346,6 +346,57 @@ func (r *RevocationList) admitUntrustedLocked(e RevocationEntry, now time.Time) 
 	return true
 }
 
+// revocationEntryUser returns the username an entry revokes, or "" for an
+// ordinary TOKEN revocation (CHAOS-68). An explicit User field wins; otherwise
+// a Token carrying userRevocationTokenPrefix is a user entry that has passed
+// through a node predating CHAOS-68 (it drops the unknown `user` field but
+// keeps the token verbatim).
+func revocationEntryUser(e RevocationEntry) string {
+	if e.User != "" {
+		return e.User
+	}
+	if user, ok := strings.CutPrefix(e.Token, userRevocationTokenPrefix); ok {
+		return user
+	}
+	return ""
+}
+
+// admitUntrustedUserLocked is admitUntrustedLocked for a USER revocation
+// arriving from an untrusted origin (cluster gossip, or the persisted file).
+// Caller holds r.mu, has swept, and has already rejected an expired entry.
+//
+// CHAOS-68 added user entries to the gossip wire and the file; CHAOS-73 bounded
+// those same untrusted paths for tokens. Combining the two without this would
+// have left a peer able to plant an UNBOUNDED number of arbitrarily long,
+// effectively immortal user entries — the exact shape CHAOS-73 closed for
+// tokens, one map over. The bounds are the same three, and none of them can
+// refuse a genuine account revocation: RevokeUser records now+TTL, which is
+// never past MaxSessionLifetime, a username is far shorter than a cookie, and
+// MaxRevocationEntries deleted accounts inside one session lifetime is not a
+// real deployment. Refusals are COUNTED through the same reasons, so the
+// session_revocation row's dropped branch reports them.
+//
+// An entry already present is admitted (the caller keeps the LATER expiry),
+// because the far-future bound above already caps how far a peer can extend it.
+func (r *RevocationList) admitUntrustedUserLocked(e RevocationEntry, user string, exp, now time.Time) bool {
+	if len(e.Token) > MaxRevocationTokenLen || len(user) > MaxRevocationTokenLen {
+		noteRefusal(RevokeOversize)
+		return false
+	}
+	if exp.After(now.Add(MaxSessionLifetime + revocationExpirySkew)) {
+		noteRefusal(RevokeFarFuture)
+		return false
+	}
+	if _, exists := r.users[user]; exists {
+		return true
+	}
+	if len(r.users) >= MaxRevocationEntries {
+		noteRefusal(RevokeCapacity)
+		return false
+	}
+	return true
+}
+
 // provenanceDomain separates the provenance MAC from the cookie MAC. A cookie
 // is b64 + "." + mac(b64); the provenance input always starts with this
 // prefix, so a provenance value is never a usable cookie signature and the
