@@ -122,7 +122,7 @@ third question (*does the work survive?*) of the alert queue turned up, which
 outranks all three: a pass REMOVES its ready entries from the durable queue
 before delivering any of them, so an ordinary restart discards every
 not-yet-attempted entry in silence. Findings, measurements and gates are
-written up in §54 below.
+written up in §57 below.
 
 **2026-10-25 — `CHAOS-92` CLAIMED (placeholder, commit one). Domain: the
 client-supplied request PATH on the unauthenticated data path — the last
@@ -13003,7 +13003,7 @@ measured numbers (1 048 631 log bytes; 5 245 706 body bytes), and seven
 
 ---
 
-## 54. CHAOS-93 — The retry plane: does it wait, can it be interrupted, does the work survive?
+## 57. CHAOS-93 — The retry plane: does it wait, can it be interrupted, does the work survive?
 
 **Scope.** Every loop in the tree that re-attempts a failed operation, asked the
 three questions the SIMULATE list puts next to each other — *broken retries*,
@@ -13022,7 +13022,7 @@ in the inherited scope and outranks all three.
 Findings, measurements, risk matrix and gates are written up in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-26.md).
 
-### 54.1 The finding the inherited scope did not contain
+### 57.1 The finding the inherited scope did not contain
 
 **`processRetryQueue` took the work out of the durability mechanism in order to
 do the work.** It moved EVERY due entry out of `retryQueue`, persisted the
@@ -13054,7 +13054,7 @@ attempt; a claim re-arms `NextRetry` to `now+retryLease` (60s) and persists that
 so a crash mid-attempt leaves the entry queued and it is retried after the lease
 with its attempt count intact — an attempt that did not complete is not charged.
 
-### 54.2 The three inherited rows
+### 57.2 The three inherited rows
 
 - **RT-3, `applyWithRetry` retried with zero delay** (`release_dispatch_exec.go`).
   Three attempts, no sleep, no backoff, no jitter. The budget exists for exactly
@@ -13080,7 +13080,7 @@ with its attempt count intact — an attempt that did not complete is not charge
   and bounded by `retryPassBudget`; the bound caps a pass's LENGTH, not recovery,
   because the next tick resumes from the durable queue.
 
-### 54.2a Review follow-up — the shutdown that still charged an attempt
+### 57.2a Review follow-up — the shutdown that still charged an attempt
 
 Codex rejected the first version of the RT-1 fix on PR #1734 and was right. The
 claim/resolve split made a CRASH mid-attempt safe, but a clean CANCELLATION
@@ -13099,7 +13099,7 @@ request). Gate: `TestProcessRetryQueue_CancelledDeliveryDoesNotConsumeAnAttempt`
 verified to fail against the first version with `0 entries persisted, want 1`.
 See §9a of [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-26.md).
 
-### 54.3 What the sweep did NOT change, and why
+### 57.3 What the sweep did NOT change, and why
 
 **Neither new backoff is jittered.** `feedsched` and `saas_feed_scheduler.go`
 jitter because their origins are SHARED — a fleet in lockstep is a thundering
