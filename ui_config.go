@@ -383,6 +383,20 @@ func apiLogs(w http.ResponseWriter, r *http.Request) {
 // window: the pre-change handler emitted `"logs": null` for an out-of-range
 // offset and for an empty ring, and that wire shape is preserved.
 func filterLogPage(all []LogEntry, fromMs, toMs int64, offset, limit int, pred func(*LogEntry) bool) (page []LogEntry, total int) {
+	// CWE-770. `limit` originates in a client query parameter, and it now sizes
+	// an allocation, so the bound is applied HERE, at the allocation, and not
+	// left to the caller: the same reason the SSRF guards sit inline at their
+	// dial sites rather than behind a wrapper (conventions.md, "Security-
+	// sensitive I/O"). It also makes the helper self-bounding — the fill
+	// condition below is `len(page) < limit`, so an unclamped limit would grow
+	// the slice past the reservation. parseLogQueryWindow already clamps to the
+	// same constant, so this is a no-op for every current caller. A zero or
+	// negative limit reserves nothing and pages nothing, while `total` is still
+	// counted in full.
+	if limit > apiLogsMaxLimit {
+		limit = apiLogsMaxLimit
+	}
+
 	// At most `limit` entries can be paged out, and at most len(all)-offset can
 	// remain after the offset, so one allocation of that size is always enough.
 	//

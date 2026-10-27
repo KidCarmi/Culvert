@@ -96,6 +96,51 @@ func TestFilterLogPage_MatchesLegacyShape(t *testing.T) {
 	}
 }
 
+// TestFilterLogPage_ClampsLimitAtAllocation covers the CWE-770 clamp. `limit`
+// reaches this function from a client query parameter and now sizes an
+// allocation, so the bound is applied at the allocation rather than trusted
+// from the caller (CodeQL "Slice memory allocation with excessive size value",
+// alert 425 on PR #1744). parseLogQueryWindow clamps to the same constant, so
+// no HTTP request can reach the function with a larger limit — this pins the
+// helper's own guarantee, which is why it is asserted directly and not through
+// the differential oracle (the frozen pre-change shape had no such bound).
+func TestFilterLogPage_ClampsLimitAtAllocation(t *testing.T) {
+	all := logPageOracleEntries(apiLogsMaxLimit + 2000)
+	pred := buildLogFilterPredicate(url.Values{})
+
+	page, total := filterLogPage(all, 0, 0, 0, apiLogsMaxLimit*100, pred)
+	if total != len(all) {
+		t.Errorf("total = %d, want %d — the clamp must bound the PAGE, never the count", total, len(all))
+	}
+	if len(page) != apiLogsMaxLimit {
+		t.Errorf("page = %d entries, want %d (apiLogsMaxLimit)", len(page), apiLogsMaxLimit)
+	}
+	if cap(page) > apiLogsMaxLimit {
+		t.Errorf("page cap = %d, want <= %d — the reservation is what the clamp exists to bound",
+			cap(page), apiLogsMaxLimit)
+	}
+	// At the clamp itself the result must be identical, so the guard cannot be
+	// off by one at the only boundary a real request can reach.
+	atClamp, _ := filterLogPage(all, 0, 0, 0, apiLogsMaxLimit, pred)
+	if !reflect.DeepEqual(page, atClamp) {
+		t.Errorf("page at limit=%d differs from page at the clamp", apiLogsMaxLimit*100)
+	}
+}
+
+func TestFilterLogPage_NonPositiveLimit(t *testing.T) {
+	all := logPageOracleEntries(100)
+	pred := buildLogFilterPredicate(url.Values{})
+	for _, limit := range []int{0, -1, -1000} {
+		page, total := filterLogPage(all, 0, 0, 0, limit, pred)
+		if total != len(all) {
+			t.Errorf("limit=%d: total = %d, want %d", limit, total, len(all))
+		}
+		if page != nil {
+			t.Errorf("limit=%d: page = %d entries, want nil", limit, len(page))
+		}
+	}
+}
+
 func TestFilterLogPage_EmptyInput(t *testing.T) {
 	pred := buildLogFilterPredicate(url.Values{})
 	page, total := filterLogPage(nil, 0, 0, 0, 1000, pred)
