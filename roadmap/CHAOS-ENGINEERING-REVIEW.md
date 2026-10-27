@@ -123,6 +123,26 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-27 — `CHAOS-102` CLAIMED (placeholder, commit one). Domain: the
+PRE-POSTURE ACCEPT WINDOW — for every listener in the process, what does it
+serve between the moment its socket is bound and the moment the operator's
+persisted admission posture is installed?** Id claimed in this committed row
+before any code was written, per the convention above, and checked against
+`origin/main` rather than the working tree, per the 2026-09-25 amendment:
+`CHAOS-101` is the highest id anywhere on `main`, 94–100 were taken or
+allocated by sweeps that have since merged or closed, and no open PR holds a
+chaos id at claim time (#1705, #1549, #1548, #1536, #1528, #1526, #1739, #1740,
+#1741 — none is a chaos sweep), so this sweep took 102 and will not move.
+
+Scope is the registered-and-unfixed row the
+[2026-10-18 sweep](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-18.md)
+left open as "SOCKS5 pre-posture accept window" (its §"REPORTED (verified, not
+fixed): SOCKS5 accepts before the admission posture is restored"), carried
+forward unchanged by the [2026-10-26 sweep](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-26.md)
+§11 — generalized from "the SOCKS5 ordering is wrong" to "which listeners have
+this window at all, and what closes it without moving startup ownership".
+Findings, measurements and gates are written up in the dated review.
+
 **2026-10-26 — `CHAOS-93` CLAIMED (placeholder, commit one). Domain: the retry
 plane — every loop in the tree that re-attempts a failed operation, asked three
 questions the SIMULATE list puts next to each other: does it WAIT between
