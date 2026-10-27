@@ -15,6 +15,22 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   read as healthy. A new `ocsp_coverage` WARN row (additive, report-only, no row
   while OCSP is off) names the unchecked paths. No handshake behavior changes.
 
+### Deprecated
+
+- **Session-revocation refusal metrics renamed; the released names stay as
+  deprecated aliases until v1.1.0 (T-70).** `culvert_session_revoke_refused_total`
+  (unlabeled) and `culvert_session_revoke_rejected_total{reason}` shipped in
+  v1.0.340 and used two near-synonyms for one plane with different scopes. The
+  canonical names are now `culvert_session_revoke_unverifiable_total` (logout
+  cookies this appliance could not verify) and
+  `culvert_session_revoke_refusals_total{reason}` (every refused entry, same six
+  reasons). Both released names keep emitting with the same name, labels and
+  value from the same snapshot, so existing dashboards and alerts are
+  unaffected. **They are removed in v1.1.0**; move queries to the new names
+  before that upgrade. `culvert_session_revoke_refused_total` is never
+  reassigned to another meaning. Gate: `session_revoke_metric_alias_test.go`.
+  Runbook: `docs/operator/session-revocation-plane.md`.
+
 ### Security
 
 - **The `file_profile_resolution` diagnostics row went blind to the very rules
@@ -1082,8 +1098,8 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
   A refusal stays silent to the caller (same status, body and `Set-Cookie` as a
   genuine logout) so logout cannot become a cookie-validity oracle. New
-  surfaces: `culvert_session_revoke_unverifiable_total`,
-  `culvert_session_revoke_refused_total{reason}`,
+  surfaces: `culvert_session_revoke_refused_total`,
+  `culvert_session_revoke_rejected_total{reason}`,
   `culvert_session_revocations_tracked`,
   `culvert_cluster_revocation_drops_total`, a WARN-only `session_revocation`
   diagnostics row (counts only), and a rate-limited `SESSION_REVOKE_REFUSED`

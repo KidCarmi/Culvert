@@ -39,7 +39,7 @@ valid.
 | Surface | What it tells you |
 |---|---|
 | `culvert_session_revoke_unverifiable_total` | Logout requests carrying a cookie this appliance did not sign. **Ordinary traffic cannot produce one** — a genuine expired cookie and a replayed logout are both excluded — so any non-zero value is somebody sending forged cookies. |
-| `culvert_session_revoke_refused_total{reason}` | Every refused revocation entry, by reason. `unsigned` / `malformed` / `expired` come from the public logout endpoint; `oversize` / `capacity` / `far_future` come from the **untrusted-origin** paths (cluster gossip, the on-disk revocations file). `far_future` is an entry whose expiry lies beyond the maximum session lifetime (7 days plus one hour of clock skew), which no session this appliance issues can have. Revocations this node verified itself are written to the revocations file with a provenance MAC (under the session signing key) and are reloaded past the size bound and the entry cap, so a revoked large cookie stays revoked across a restart with the same key; persisted entries without a valid MAC are treated as untrusted. With a random per-start key the MAC does not verify after restart, which is harmless because the old cookies no longer verify either. |
+| `culvert_session_revoke_refusals_total{reason}` | Every refused revocation entry, by reason. `unsigned` / `malformed` / `expired` come from the public logout endpoint; `oversize` / `capacity` / `far_future` come from the **untrusted-origin** paths (cluster gossip, the on-disk revocations file). `far_future` is an entry whose expiry lies beyond the maximum session lifetime (7 days plus one hour of clock skew), which no session this appliance issues can have. Revocations this node verified itself are written to the revocations file with a provenance MAC (under the session signing key) and are reloaded past the size bound and the entry cap, so a revoked large cookie stays revoked across a restart with the same key; persisted entries without a valid MAC are treated as untrusted. With a random per-start key the MAC does not verify after restart, which is harmless because the old cookies no longer verify either. |
 | `culvert_session_revocations_tracked` | Entries currently held. Bounded by real logins inside one session TTL. A value that tracks *request* rate rather than *login* rate means something is inserting entries that are not sessions. |
 | `culvert_cluster_revocation_drops_total` | Entries the Control Plane refused to retain from a Data Plane node. **Non-zero means a session an operator revoked may still authenticate on other nodes.** |
 | `/api/diagnostics` → `session_revocation` | The operator-contract row. WARN-only; counts only, never a client address or any part of a cookie. |
@@ -52,6 +52,28 @@ The two counters mean different things and point at different actions:
   admin port.
 * **`drops` climbing** is a security decision that did not take effect
   everywhere. That is the one to act on.
+
+### Deprecated metric names (removed in v1.1.0)
+
+The two refusal counters were renamed by T-70 of the 2026-10-25 terminology
+review. Their released names (v1.0.340 onward) keep emitting **unchanged** —
+same name, same labels, same value — as deprecated aliases until **v1.1.0**,
+so existing dashboards and alert rules keep working. Move them to the new
+names before upgrading to v1.1.0:
+
+| Released name (deprecated) | New name | Notes |
+|---|---|---|
+| `culvert_session_revoke_refused_total` | `culvert_session_revoke_unverifiable_total` | Unlabeled. Logout cookies this appliance could not verify. |
+| `culvert_session_revoke_rejected_total{reason}` | `culvert_session_revoke_refusals_total{reason}` | Same six `reason` values. |
+
+`culvert_session_revoke_refused_total` keeps its released meaning (the
+unlabeled could-not-verify count) for its whole life and is **never** reused
+for the per-reason series: an alert on it must not start evaluating a
+different quantity under the same name. Both pairs are emitted from one
+snapshot, so the old and new names always agree within a scrape. A query that
+must span the rename can select both names and take one, which neither gaps
+nor double-counts:
+`max by (instance, reason) ({__name__=~"culvert_session_revoke_(rejected|refusals)_total"})`.
 
 ## Runbook
 
