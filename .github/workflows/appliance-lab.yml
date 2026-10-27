@@ -108,19 +108,14 @@ jobs:
           # identity = the linux/amd64 MANIFEST digest (index.json
           # manifests[0].digest), not the config blob 75dd735c…. The ClamAV
           # sidecar must reproduce the F-P2-tested image byte for byte.
-          # M1 compatibility (owner 6400728126, step 4): NO build. The retained
-          # internal OVA 61c46d6d (run 40185226897, sha256 verified) boots with
-          # the candidate engine pins of review/1528-m1-engine-pins 5c4c2be8 —
-          # Docker 29.9.2 / containerd.io 2.4.2-3 from Docker's signed noble
-          # repository, provenance re-verified on this runner — installed into
-          # the DISPOSABLE disk copy before first boot (harness LAB_ENGINE_DEBS).
-          # The OVA's bytes are untouched; the booted disk is not the OVA's disk.
-          # Everything the engine touches then runs on it: first-boot offline
-          # image load, sidecar --no-build, the signed-update apply/rollback
-          # fixture (pressure: 1 extracts this OVA's own archive for it),
-          # engine surface + version, 3 maintenance reboots, history, in-guest
-          # disk pressure.
-          - variant: m1-engine-b9105086
+          # M2 read-only kernel-exposure snapshot (owner 6400728126; ASTRA
+          # 27 Oct). NO build, NO qualify campaign: boot the retained OVA
+          # 61c46d6d to first-boot steady state, take the strictly read-only
+          # snapshot (harness `m2`: modules before/after must be identical),
+          # stop. Two disks: the UNMODIFIED OVA (the accepted artifact) and the
+          # same OVA with the M1 engine pins installed into the disposable copy
+          # before first boot (what the replacement would ship).
+          - variant: m2-ova61c46d6d
             provisioning: source
             source_sha: "b910508629e9d80352067bc8ec608753ddf0924e"
             image_run: "40133521510"
@@ -129,12 +124,18 @@ jobs:
             retained_run: "40185226897"
             retained_name: "appliance-lab-ova-candidate-b9105086"
             retained_sha256: "61c46d6db6603d76edbb0d64327bed85e76bea86d24457e9f3ae36e71bd5854a"
+            m2_only: "1"
+          - variant: m2-engine-b9105086
+            provisioning: source
+            source_sha: "b910508629e9d80352067bc8ec608753ddf0924e"
+            image_run: "40133521510"
+            image_tar_sha256: "1db620abbf4fe34424749e64a4e8b96861a945a201583ab386d47926cd7ec7fb"
+            expect_image_id: "sha256:ca27cf9a645431ed77255efa0897daabb63bbed9c6b4acd6ac574820422d186c"
+            retained_run: "40185226897"
+            retained_name: "appliance-lab-ova-candidate-b9105086"
+            retained_sha256: "61c46d6db6603d76edbb0d64327bed85e76bea86d24457e9f3ae36e71bd5854a"
+            m2_only: "1"
             engine_debs: "docker-ce_29.9.2-1~ubuntu.24.04~noble_amd64.deb=95ddf7a2d8b8c0eb82d8597d4d604e294dcf741081f2e228524d5ab9bfd7c8ae docker-ce-cli_29.9.2-1~ubuntu.24.04~noble_amd64.deb=74747b5c99000279b9b2c7eb82543b4121d8436a58aa3be7e78ac6681d74794f containerd.io_2.4.2-3~ubuntu.24.04~noble_amd64.deb=f811ab57d1f4bb0cce19df7d526da8c711d8ebea0447cc83da1999188e664122"
-            pressure: "1"
-            engine_surface: "1"
-            disk: dm
-            recovery_profiles: "fast:0:0:60"
-            recovery_reboots: "3"
     env:
       APPLIANCE_SOURCE_SHA: ${{ matrix.source_sha }}
       SOURCE_IMAGE_RUN_ID: ${{ matrix.image_run }}
@@ -656,6 +657,7 @@ jobs:
           export LAB_EXPECT_IMAGE_ID="${{ matrix.expect_image_id }}" LAB_MIN_FREE_GB=20 LAB_ACCEL=kvm
           export LAB_HISTORY="${{ matrix.history || '1' }}"
           export LAB_ENGINE_SURFACE="${{ matrix.engine_surface || '0' }}"
+          export LAB_M2_ONLY="${{ matrix.m2_only || '0' }}"
           export LAB_PRESSURE="${{ matrix.pressure || '0' }}" LAB_FP2="${{ matrix.fp2 || '0' }}" LAB_LDAP="${{ matrix.ldap || '0' }}"
           # A [cache-bypass] push runs the cache-bypass regression on THIS
           # candidate's 1.5.4 engine (the all-dispatch short-circuits to it

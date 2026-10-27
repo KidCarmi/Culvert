@@ -2733,6 +2733,90 @@ s=json.dumps(es); sys.exit(0 if "alice" in s and "bob" in s else 1)' "$EV/L4-log
     [[ "$r" == 200 ]] && check L outage-recovery pass "directory restarted: dave 200 without any appliance action" || check L outage-recovery fail "directory restarted: dave still $r after 150 s"
   else check L outage blocked "no LAB_LDAP_STOP/START provided"; fi
   api PUT /api/settings/default-auth-outcome '{"defaultAuthOutcome":"Exempt"}' > /dev/null; }
+# ── M2 read-only kernel-exposure snapshot (owner 6400728126; ASTRA 27 Oct) ───
+# Strictly read-only observation of the booted guest for the three new
+# CRITICAL kernel advisories (GUE CVE-2026-98621, stmmac CVE-2026-98571,
+# nvmet-auth CVE-2026-98725) and the prioritized HIGH clusters. Nothing is
+# loaded, mounted or reconfigured to collect it, and no traffic is injected:
+# commands that can autoload a module are avoided (`ip fou`, `ss`
+# sock_diag, `ip tunnel`, `ethtool` for absent drivers) in favour of /proc and
+# /sys reads; `modprobe -n`/`--resolve-alias` only resolve; configfs is listed
+# only if it is ALREADY mounted. /proc/modules is captured before and after and
+# must be identical (proof the snapshot itself loaded nothing). Every command's
+# exit status is recorded; an unavailable tool is a recorded observation.
+# The first console login of the boot (one-time password -> forced change)
+# precedes it — the only guest change, and it is the normal admin first login.
+cmd_m2() { local f="$EV/M2-snapshot.txt" a b
+  gpriv --timeout 600 > "$f" 2>&1 <<'EOS' || true
+run() { echo "\$ $*"; "$@" 2>&1; echo "[exit=$?]"; }
+echo "=== identity"
+echo "boot_id=$(cat /proc/sys/kernel/random/boot_id)"
+echo "uname=$(uname -a)"; echo "cmdline=$(cat /proc/cmdline)"
+echo "build-info-sha256=$(sha256sum /var/lib/culvert-appliance/build-info.json 2>/dev/null | cut -d' ' -f1)"
+echo "build-git-commit=$(grep -o '"git_commit": *"[0-9a-f]*"' /var/lib/culvert-appliance/build-info.json 2>/dev/null)"
+for p in docker-ce docker-ce-cli containerd.io docker-compose-plugin linux-image-virtual-hwe-24.04 bpftrace bpfcc-tools linux-tools-common ubuntu-kernel-accessories; do echo "pkg $p=$(dpkg-query -W -f='${Version} ${db:Status-Abbrev}' "$p" 2>/dev/null || echo absent)"; done
+echo "=== modules-before"; sort /proc/modules | awk '{print $1, $3, $4}'
+echo "=== effective module policy"
+echo "modules_disabled=$(cat /proc/sys/kernel/modules_disabled) modprobe=$(cat /proc/sys/kernel/modprobe)"
+echo "policy-files:"; ls -l /etc/modprobe.d/ 2>&1; sha256sum /etc/modprobe.d/* 2>&1
+modprobe --showconfig 2>/dev/null | grep -E '^(blacklist|install) ' | sort > /tmp/m2-policy.txt; echo "showconfig blacklist+install lines=$(wc -l < /tmp/m2-policy.txt) sha256=$(sha256sum < /tmp/m2-policy.txt | cut -c1-64)"
+for m in fou fou6 nvmet nvmet_tcp nvmet_rdma nvmet_fc nvme_loop stmmac stmmac_pci stmmac_platform dwmac_generic dwmac_intel ip_vs ipip sit gre ip_gre ip6_tunnel vxlan geneve bpfilter binder_linux; do
+  out=$(modprobe -n -v "$m" 2>&1); rc=$?
+  echo "policy $m: $(grep -E "^(blacklist|install) $m( |$)" /tmp/m2-policy.txt | tr '\n' ';') | dry-run: $(printf '%s' "$out" | tr '\n' ' ') rc=$rc"
+done; rm -f /tmp/m2-policy.txt
+echo "=== devices + driver bindings (PCI)"
+for d in /sys/bus/pci/devices/*; do
+  drv=$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null); al=$(cat "$d/modalias" 2>/dev/null)
+  echo "pci $(basename "$d") class=$(cat "$d/class") vendor=$(cat "$d/vendor") device=$(cat "$d/device") driver=${drv:-none} alias-resolves-to=[$(modprobe --resolve-alias "$al" 2>/dev/null | tr '\n' ' ')]"
+done
+echo "=== platform/other buses with a bound driver"
+for b in platform usb virtio scsi; do for d in /sys/bus/$b/devices/*; do [ -e "$d/driver" ] && echo "$b $(basename "$d") driver=$(basename "$(readlink "$d/driver")")"; done; done 2>/dev/null
+echo "net-ifaces:"; for i in /sys/class/net/*; do echo "net $(basename "$i") driver=$(basename "$(readlink "$i/device/driver" 2>/dev/null)" 2>/dev/null) type=$(cat "$i/type") flags=$(cat "$i/flags")"; done
+echo "any stmmac/dwmac bound: $(ls -d /sys/bus/*/drivers/stmmac* /sys/bus/*/drivers/dwmac* 2>/dev/null | tr '\n' ' ' || true)"
+echo "=== network namespaces (unique net ns -> one pid each, read via /proc/PID/net, no nsenter for sockets)"
+for p in /proc/[0-9]*; do n=$(readlink "$p/ns/net" 2>/dev/null) && echo "$n $(basename "$p")"; done | sort -u -k1,1 > /tmp/m2-ns.txt
+cat /tmp/m2-ns.txt
+while read -r ns pid; do
+  echo "--- ns $ns via pid $pid ($(cat /proc/$pid/comm 2>/dev/null))"
+  echo "udp4 sockets (local ip:port hex, st, uid):"; awk 'NR>1{print "  udp4", $2, $4, $8}' /proc/$pid/net/udp 2>/dev/null
+  echo "udp6 sockets:"; awk 'NR>1{print "  udp6", $2, $4, $8}' /proc/$pid/net/udp6 2>/dev/null
+  echo "tcp listeners (st 0A):"; awk 'NR>1 && $4=="0A"{print "  tcp4", $2}' /proc/$pid/net/tcp 2>/dev/null; awk 'NR>1 && $4=="0A"{print "  tcp6", $2}' /proc/$pid/net/tcp6 2>/dev/null
+  echo "links:"; nsenter -t "$pid" -n ip -d -o link show 2>&1 | sed 's/^/  /'; echo "  [ip-link-exit=$?]"
+  echo "sysctls:"; nsenter -t "$pid" -n sh -c 'for k in net/ipv4/ip_forward net/ipv6/conf/all/forwarding net/ipv6/conf/all/disable_ipv6 net/ipv4/conf/all/rp_filter net/bridge/bridge-nf-call-iptables; do printf "  %s=%s\n" "$k" "$(cat /proc/sys/$k 2>/dev/null || echo absent)"; done'
+  echo "ip_vs: $(cat /proc/$pid/net/ip_vs 2>/dev/null | head -3 | tr '\n' ' ' || true)"
+done < /tmp/m2-ns.txt; rm -f /tmp/m2-ns.txt
+echo "=== FOU/GUE (only queried if the module is already loaded; never autoloaded)"
+if grep -qE '^fou6? ' /proc/modules; then run ip fou show; else echo "fou not loaded: no FOU/GUE receive port can exist"; fi
+echo "=== checksum/offload features (loaded drivers only)"
+for i in /sys/class/net/*; do n=$(basename "$i"); [ -e "$i/device/driver" ] || continue; command -v ethtool >/dev/null && { echo "-- $n"; ethtool -k "$n" 2>&1 | grep -E 'checksum|segmentation|receive-offload|udp-tunnel' | sed 's/^/  /'; } || echo "ethtool unavailable"; done
+echo "=== NVMe target (configfs listed only if already mounted; nothing mounted)"
+echo "nvmet modules loaded: $(grep -E '^nvme(t|_loop)' /proc/modules | awk '{print $1}' | tr '\n' ' ')"
+findmnt -t configfs -n -o TARGET 2>&1; echo "[findmnt-exit=$?]"
+if [ -d /sys/kernel/config/nvmet ]; then ls -laR /sys/kernel/config/nvmet 2>&1 | head -60; else echo "/sys/kernel/config/nvmet absent"; fi
+echo "nvme listener ports (4420 0x1144 / 8009 0x1F49) in the root ns tcp table: $(awk 'NR>1 && $4=="0A" && ($2 ~ /:1144$/ || $2 ~ /:1F49$/)' /proc/net/tcp /proc/net/tcp6 | wc -l)"
+echo "=== capability / syscall / BPF boundaries"
+for k in kernel/unprivileged_bpf_disabled net/core/bpf_jit_harden kernel/perf_event_paranoid kernel/io_uring_disabled kernel/apparmor_restrict_unprivileged_userns user/max_user_namespaces kernel/yama/ptrace_scope kernel/kptr_restrict kernel/dmesg_restrict kernel/kexec_load_disabled kernel/unprivileged_userfaultfd fs/protected_symlinks; do echo "sysctl $k=$(cat /proc/sys/$k 2>/dev/null || echo absent)"; done
+echo "filesystems: $(grep -E 'binder|fuse|squashfs|overlay|configfs|bpf|tracefs|debugfs' /proc/filesystems | tr -s '\t\n' ' ')"
+echo "mounted special fs:"; findmnt -n -o TARGET,FSTYPE -t bpf,tracefs,debugfs,binder,fuse,configfs 2>&1
+echo "login-capable accounts: $(awk -F: '$7 !~ /(nologin|false)$/{print $1":"$7}' /etc/passwd | tr '\n' ' ')"
+echo "docker group: $(getent group docker)"
+for c in $(docker ps -q 2>/dev/null); do
+  docker inspect -f 'container {{.Name}} privileged={{.HostConfig.Privileged}} capadd={{.HostConfig.CapAdd}} capdrop={{.HostConfig.CapDrop}} secopt={{.HostConfig.SecurityOpt}} devices={{len .HostConfig.Devices}} pid={{.HostConfig.PidMode}} net={{.HostConfig.NetworkMode}} user={{.Config.User}} ro={{.HostConfig.ReadonlyRootfs}} mainpid={{.State.Pid}}' "$c"
+  p=$(docker inspect -f '{{.State.Pid}}' "$c"); grep -E '^(CapEff|CapBnd|NoNewPrivs|Seccomp):' /proc/$p/status | tr '\n' ' '; echo
+done
+echo "=== modules-after"; sort /proc/modules | awk '{print $1, $3, $4}'
+EOS
+  a="$(sed -n '/^=== modules-before$/,/^=== effective module policy$/p' "$f" | sed '1d;$d' | awk '{print $1}')"
+  b="$(sed -n '/^=== modules-after$/,$p' "$f" | sed '1d' | awk '{print $1}')"
+  if [[ -z "$a" ]] || ! grep -q '^boot_id=' "$f"; then check M2 snapshot fail "snapshot incomplete (no identity or module list; see M2-snapshot.txt)"; return 0; fi
+  check M2 snapshot pass "$(grep -m1 '^boot_id=' "$f"); $(grep -m1 '^build-git-commit=' "$f"); $(printf '%s\n' "$a" | wc -l) modules loaded"
+  [[ "$a" == "$b" ]] && check M2 snapshot-loaded-nothing pass "the loaded-module set is identical before and after the snapshot" \
+    || check M2 snapshot-loaded-nothing fail "module set changed during the snapshot: $(diff <(printf '%s\n' "$a") <(printf '%s\n' "$b") | tr '\n' ' ')"
+  check M2 fou-gue info "$(grep -m1 -E '^fou not loaded|^\$ ip fou show' "$f")"
+  check M2 stmmac info "$(grep -m1 '^any stmmac/dwmac bound:' "$f"); NIC $(grep -E '^net ' "$f" | grep -v 'driver= ' | tr '\n' ' ')"
+  check M2 nvmet info "$(grep -m1 '^nvmet modules loaded:' "$f"); $(grep -m1 -E '^/sys/kernel/config/nvmet absent' "$f" || echo 'configfs nvmet PRESENT'); $(grep -m1 '^nvme listener ports' "$f")"
+  check M2 namespaces info "$(grep -c '^--- ns ' "$f") network namespace(s) observed"
+}
 cmd_collect() {
   mkdir -p "$EV/guest"
   if { [[ "$LAB_EXTERNAL" == 1 ]] || qemu_alive; } && gop status-json > "$EV/guest/status-json.json" 2>/dev/null; then
@@ -3532,6 +3616,7 @@ case "${1:-}" in
   history) cmd_history; [[ "$(failures)" == 0 ]] ;;
   adoption) cmd_adoption; [[ "$(failures)" == 0 ]] ;;
   engine-surface) cmd_engine_surface; [[ "$(failures)" == 0 ]] ;;
+  m2) cmd_m2; [[ "$(failures)" == 0 ]] ;;
   console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
   fp2) cmd_fp2; [[ "$(failures)" == 0 ]] ;;
   cachebypass) cmd_cachebypass; [[ "$(failures)" == 0 ]] ;;
@@ -3540,6 +3625,9 @@ case "${1:-}" in
   down) cmd_down ;;
   all)
     trap 'cmd_collect || true; cmd_down || true' EXIT
+    # LAB_M2_ONLY=1: boot to first-boot steady state, take the read-only M2
+    # snapshot, stop. No qualify campaign (ASTRA: no repeat).
+    if [[ "${LAB_M2_ONLY:-0}" == 1 ]]; then cmd_preflight; cmd_up; cmd_m2; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     cmd_preflight; cmd_up; cmd_qualify; fail_fast_after qualify
     if [[ "${LAB_FP2:-0}" == 1 ]]; then cmd_fp2; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     if [[ "${LAB_CACHEBYPASS:-0}" == 1 ]]; then cmd_cachebypass; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
