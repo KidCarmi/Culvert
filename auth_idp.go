@@ -73,6 +73,24 @@ type IdPProfile struct {
 	// the authoritative source.
 	KnownGroups []string `json:"knownGroups,omitempty"`
 
+	// SessionsNotBefore is the Unix second before which a session cookie
+	// naming this profile is not an identity (AU-65, §50.6f). Zero means no
+	// cutoff, which is what every profile stored before the field existed
+	// carries, so the deploy that adds it logs nobody out.
+	//
+	// SERVER-OWNED. Upsert derives it from the stored profile and ignores
+	// whatever the request body carried (stampSessionsNotBefore): it moves to
+	// "now" when a profile is CREATED (including re-created under an id that
+	// was deleted) and when a stored profile goes from disabled to enabled,
+	// and it is kept unchanged by every other write. It is durable because the
+	// registry file is, and it reaches every node through
+	// ConfigSnapshot.IdPProfiles, which ReplaceAll stores verbatim — a Data
+	// Plane never stamps its own clock. It is never moved by reachability: a
+	// compile failure or a CHAOS-87 staleness retirement does not run Upsert,
+	// so an unreachable IdP stays degraded availability, not revocation
+	// (§50.6c).
+	SessionsNotBefore int64 `json:"sessionsNotBefore,omitempty"`
+
 	// Only one of OIDC/SAML/LDAP is populated depending on Type.
 	OIDC *OIDCProfileConfig `json:"oidc,omitempty"`
 	SAML *SAMLProfileConfig `json:"saml,omitempty"`
@@ -364,6 +382,10 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 			forgetIdPMetadataEpisodeForSource(p.ID, candidateRef)
 		}
 	}
+
+	// AU-65: the session cutoff is derived from the STORED profile, under the
+	// same lock that decides create-vs-edit, never taken from the request.
+	stampSessionsNotBefore(liveProfile, p)
 
 	var compiled IdentityProvider
 	if p.Enabled {
@@ -1072,6 +1094,9 @@ func publicIdPProfile(p *IdPProfile) *IdPProfile {
 		Enabled:      p.Enabled,
 		Priority:     p.Priority,
 		KnownGroups:  append([]string(nil), p.KnownGroups...),
+		// Not a secret: read-only evidence of the last cut (AU-65), and the
+		// only way an operator or the audit diff can see that one happened.
+		SessionsNotBefore: p.SessionsNotBefore,
 	}
 	if p.OIDC != nil {
 		cp.OIDC = &OIDCProfileConfig{
@@ -1198,6 +1223,35 @@ func (r *IdPRegistry) ProfileEnabled(id string) bool {
 	for _, p := range r.profiles {
 		if p != nil && p.ID == id {
 			return p.Enabled
+		}
+	}
+	return false
+}
+
+// ProfileAdmitsSession reports whether a VERIFIED session cookie that names
+// profile id and was minted at issuedAt (Unix seconds; 0 for a cookie minted
+// before the field existed) is still an identity: the profile is stored and
+// enabled exactly as ProfileEnabled asks, AND the cookie was not minted before
+// the profile's SessionsNotBefore cutoff (AU-65). Allocation-free, one pass
+// under the read lock: it runs on the proxy request path (sessionProviderLive).
+//
+// EVALUATED, NOT LATCHED: both halves are read from the stored profile on every
+// call, so the answer changes the moment the registry does, from any writer.
+// A zero cutoff admits every cookie, including a legacy one with no iat; a
+// non-zero cutoff refuses a legacy cookie, because a cookie that cannot say
+// when it was minted cannot prove it postdates the cut (fail-closed, and only
+// for a profile an operator has created or re-enabled since the upgrade).
+// Granularity is one second, the cookie's own: a cookie minted in the same
+// second as the cutoff is admitted.
+func (r *IdPRegistry) ProfileAdmitsSession(id string, issuedAt int64) bool {
+	if id == "" {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.ID == id {
+			return p.Enabled && (p.SessionsNotBefore == 0 || issuedAt >= p.SessionsNotBefore)
 		}
 	}
 	return false

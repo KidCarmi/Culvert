@@ -391,7 +391,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 		// exactly "no cookie": arm 2 then arm 3 re-challenge the client
 		// through the EXISTING no-credential dispatch, so there is no new
 		// posture and nothing to keep in step with it.
-		if sessErr == nil && sess != nil && !sessionProviderLive(sess.Provider) {
+		if sessErr == nil && sess != nil && !sessionProviderLive(sess.Provider, sess.Iat) {
 			noteSessionProviderRevoked(sess.Provider, sess.Sub, clientIP)
 			sess = nil
 		}

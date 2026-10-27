@@ -77,9 +77,18 @@ func c72Setup(t *testing.T, posture string) {
 }
 
 // c72Request mints a cookie this appliance would really have issued: signed
-// with the live key, carrying the asserting profile's id in `pvd` and the
-// groups that provider asserted.
+// with the live key, carrying the asserting profile's id in `pvd`, the
+// groups that provider asserted, and, as setSessionCookie stamps it, the
+// mint second in `iat` (AU-65), here "now".
 func c72Request(t *testing.T, provider string) *http.Request {
+	t.Helper()
+	return c72RequestMintedAt(t, provider, time.Now().Unix())
+}
+
+// c72RequestMintedAt is c72Request with an explicit mint second, so a gate can
+// hold a cookie minted BEFORE an incident (iat 0 models a cookie minted before
+// the field existed).
+func c72RequestMintedAt(t *testing.T, provider string, iat int64) *http.Request {
 	t.Helper()
 	r := httptest.NewRequestWithContext(context.Background(), "GET", "http://example.com/", http.NoBody)
 	if provider == "<none>" {
@@ -92,6 +101,7 @@ func c72Request(t *testing.T, provider string) *http.Request {
 		Provider: provider,
 		Exp:      time.Now().Add(8 * time.Hour).Unix(),
 		Jti:      newSessionJti(),
+		Iat:      iat,
 	})
 	if err != nil {
 		t.Fatalf("encodeSession: %v", err)
@@ -237,7 +247,7 @@ func TestChaos88_ControlLiveProviderStillAuthenticatesWithGroups(t *testing.T) {
 // the moment no IdP is configured, which is the default posture.
 func TestChaos88_ControlLocalProviderIsNeverRefused(t *testing.T) {
 	c72Setup(t, "deleted")
-	if !sessionProviderLive(sessionProviderLocal) {
+	if !sessionProviderLive(sessionProviderLocal, time.Now().Unix()) {
 		t.Fatal("the local admin-UI provider must never be refused")
 	}
 	if got := sessionProviderRevokedCount(); got != 0 {
@@ -251,7 +261,7 @@ func TestChaos88_ControlLocalProviderIsNeverRefused(t *testing.T) {
 // federation to have been cut off.
 func TestChaos88_ControlLegacyEmptyProviderIsNeverRefused(t *testing.T) {
 	c72Setup(t, "deleted")
-	if !sessionProviderLive("") {
+	if !sessionProviderLive("", time.Now().Unix()) {
 		t.Fatal("a pre-pvd legacy session must not be refused")
 	}
 	c72Resolve(t, "")
@@ -282,17 +292,17 @@ func TestChaos88_ControlAbsentCookieChargesNothing(t *testing.T) {
 // spelling.
 func TestChaos88_OnlyTheExactProfileIDResolves(t *testing.T) {
 	c72Setup(t, "live")
-	if !sessionProviderLive("corp") {
+	if !sessionProviderLive("corp", time.Now().Unix()) {
 		t.Error("the live provider's own id was refused")
 	}
 	for _, spelling := range []string{"saml:corp", "oidc:corp", "ldap:corp"} {
-		if sessionProviderLive(spelling) {
+		if sessionProviderLive(spelling, time.Now().Unix()) {
 			t.Errorf("%q was admitted through the unrelated profile \"corp\"", spelling)
 		}
 	}
 	c72Setup(t, "deleted")
 	for _, spelling := range []string{"corp", "saml:corp", "oidc:corp"} {
-		if sessionProviderLive(spelling) {
+		if sessionProviderLive(spelling, time.Now().Unix()) {
 			t.Errorf("removed provider spelled %q was admitted", spelling)
 		}
 	}
@@ -307,18 +317,18 @@ func TestChaos88_APrefixedProfileIDCannotRideAnotherProfile(t *testing.T) {
 	c72Setup(t, "live") // "corp", enabled
 	prefixed := &IdPProfile{ID: "saml:corp", Type: IdPTypeSAML, Enabled: true, Name: "Corp SAML"}
 	idpRegistry.profiles = append(idpRegistry.profiles, prefixed)
-	if !sessionProviderLive("saml:corp") {
+	if !sessionProviderLive("saml:corp", time.Now().Unix()) {
 		t.Fatal("setup: the enabled profile \"saml:corp\" does not own its own cookies")
 	}
 	prefixed.Enabled = false // disabled: still stored, authenticates nobody
-	if sessionProviderLive("saml:corp") {
+	if sessionProviderLive("saml:corp", time.Now().Unix()) {
 		t.Fatal("a cookie from the DISABLED profile \"saml:corp\" was admitted through the unrelated profile \"corp\"")
 	}
 	idpRegistry.profiles = idpRegistry.profiles[:1] // deleted
-	if sessionProviderLive("saml:corp") {
+	if sessionProviderLive("saml:corp", time.Now().Unix()) {
 		t.Fatal("a cookie from the DELETED profile \"saml:corp\" was admitted through the unrelated profile \"corp\"")
 	}
-	if !sessionProviderLive("corp") {
+	if !sessionProviderLive("corp", time.Now().Unix()) {
 		t.Fatal("control: the unrelated enabled profile lost its own sessions")
 	}
 }
@@ -328,7 +338,7 @@ func TestChaos88_APrefixedProfileIDCannotRideAnotherProfile(t *testing.T) {
 func TestChaos88_ControlPrefixAloneIsNotAProvider(t *testing.T) {
 	c72Setup(t, "live")
 	for _, spelling := range []string{"saml:", "oidc:", "other", "saml:other", "  ", "CORP"} {
-		if sessionProviderLive(spelling) {
+		if sessionProviderLive(spelling, time.Now().Unix()) {
 			t.Errorf("%q was admitted as a live provider", spelling)
 		}
 	}
@@ -510,7 +520,7 @@ func TestChaos88_ProviderEmptinessAgreesWithIdentityAuthSource(t *testing.T) {
 		// And a value that DOES name a federation must be refused while that
 		// federation is not live (the "local" admin-UI value excepted: it
 		// names no registry profile and the UI owns its own backstop).
-		if !namesNoFederation && pvd != sessionProviderLocal && sessionProviderLive(pvd) {
+		if !namesNoFederation && pvd != sessionProviderLocal && sessionProviderLive(pvd, time.Now().Unix()) {
 			t.Errorf("pvd %q names a federation that is not live, yet was admitted", pvd)
 		}
 	}

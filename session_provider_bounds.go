@@ -112,13 +112,60 @@ const sessionProviderLocal = "local"
 // probe and then passed the stripped one through the UNRELATED enabled `corp`,
 // keeping their identity and groups across the revocation (AU-70, Codex). A
 // stripped spelling names a different profile, not the same one.
-func sessionProviderLive(provider string) bool {
+//
+// issuedAt is the cookie's mint second (`Session.Iat`, 0 when the cookie
+// predates the field), compared with the profile's SessionsNotBefore cutoff
+// (AU-65). Without it the predicate had no memory that a cut ever happened:
+// disable a compromised IdP, re-enable it under the same id inside the TTL,
+// and every cookie refused throughout the disabled window authenticated again
+// with the subject and groups asserted BEFORE the incident. The cutoff is the
+// smallest durable record that closes that: one field on a profile that is
+// already persisted and already carried fleet-wide, still read per request.
+// The "" and "local" exemptions are untouched — neither names a profile, so
+// neither has a cutoff to compare against.
+func sessionProviderLive(provider string, issuedAt int64) bool {
 	// Raw, untrimmed — see the emptiness note above. A whitespace-only value
 	// is a provider name that resolves to nothing, not an absent field.
 	if provider == "" || provider == sessionProviderLocal {
 		return true
 	}
-	return idpRegistry.ProfileEnabled(provider)
+	return idpRegistry.ProfileAdmitsSession(provider, issuedAt)
+}
+
+// stampSessionsNotBefore sets next.SessionsNotBefore, the AU-65 session cutoff,
+// from the STORED profile prev (nil when next's id is not registered). Called
+// by Upsert under the registry lock, so the create-vs-edit decision and the
+// stamp read the same state.
+//
+//   - prev == nil (a create, INCLUDING a re-create under an id that was
+//     deleted): now. A cookie that names this id was minted by a previous
+//     incarnation, or by nothing at all, and must not ride the new one.
+//   - prev disabled, next enabled (a re-enable): now. Every cookie minted
+//     before the disable was refused throughout it and stays refused.
+//   - anything else: prev's value, whatever the request carried. The field is
+//     server-owned; letting the body lower it would make "set it to 0" a
+//     one-request undo of a revocation, and a GET-then-PUT round trip echoes
+//     it back on every edit.
+//
+// Deliberately NOT moved by: an edit of an enabled profile, a disable (which
+// already refuses every cookie), a compile failure or a staleness retirement
+// (neither runs Upsert, and an unreachable IdP is degraded availability, not
+// revocation, §50.6c), or ReplaceAll (the CP→DP snapshot, which must carry the
+// Control Plane's stamp verbatim rather than restamp each node's clock, and
+// whose first apply on a fresh node would otherwise log every session out).
+//
+// The stamp is the WALL clock, at one-second granularity, because it is
+// compared with `Session.Iat` minted from the wall clock on whichever node
+// served the login. A Control Plane clock that was ahead when it stamped, or a
+// node whose clock is behind, refuses fresh logins until the minting clock
+// passes the cutoff; disabling and re-enabling the profile again restamps it.
+func stampSessionsNotBefore(prev, next *IdPProfile) {
+	switch {
+	case prev == nil, !prev.Enabled && next.Enabled:
+		next.SessionsNotBefore = time.Now().Unix()
+	default:
+		next.SessionsNotBefore = prev.SessionsNotBefore
+	}
 }
 
 // ---------------------------------------------------------------------------
