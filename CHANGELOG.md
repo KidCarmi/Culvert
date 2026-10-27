@@ -170,6 +170,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- A SIEM outage could become permanently unpageable if a delivery landed at the
+  wrong instant. A queue-full drop is charged on the request goroutine that
+  suffered it, and the goroutine that begins an outage records the failure and
+  then publishes the outage's start time. Descheduled between the two, it
+  resumed after a delivery had ended its outage and a later drop had correctly
+  dated a new one — and overwrote that good start with its own, now
+  pre-delivery, timestamp. The health plane refuses a start that predates the
+  last delivery, so the node then reported an unresolved outage with no start
+  time: the five-minute degradation window could never elapse, and on a node
+  that went quiet nothing ever re-dated it, so `syslog_feed_down` never fired
+  for that outage. The start is now published only while no delivery has
+  intervened, keyed on the delivery itself rather than on a timestamp
+  comparison so it holds if the wall clock steps backwards.
+
 - **`README.md` documented the opposite of CDR's fail-closed guarantee.** The
   `-cdr-fail-mode` row still said that when no Sluice instance is available at
   all "CDR is skipped and the file passes through in either mode" — the exact

@@ -897,3 +897,131 @@ func TestLockMatcherSeesTheLocksItForbids(t *testing.T) {
 		t.Fatal("control: the walk cannot find RLock in tryEnqueue, so the wall above proves nothing")
 	}
 }
+
+// ── A failure start is published only while its episode is still current ─────
+//
+// noteDrop runs on the CALLER's goroutine for a queue-full drop, so its two
+// halves can be split by the scheduler: claimEpisodeStart records the failure
+// and reports the 0->1 edge, publishEpisodeStart publishes the start. A caller
+// descheduled between them resumes after a delivery has ENDED its episode and
+// a later drop has correctly dated a NEW one.
+//
+// Publishing unconditionally there overwrites the good start with a stale,
+// pre-success value. Stats refuses it (its `fs >= ls` test fails), so an
+// outage with ConsecutiveFailures > 0 has NO datable start — and because
+// noteDrop's re-dating branch only runs on a SUBSEQUENT drop, a node that goes
+// quiet never recovers the date. FailingFor stays 0, the degradation window
+// can never elapse, and that outage is never paged (Codex P2, PR #1494).
+//
+// The reader was already hardened for the opposite order (it refuses a stale
+// start rather than clamping it up — Codex P1, earlier in this sweep). This is
+// the writer half of the same window: the reader cannot help once the good
+// value is gone.
+//
+// No structural wall accompanies this one, and that is a measured decision
+// rather than an omission. Round 19's fix was a PLACEMENT, which its
+// behavioural gate could not pin; this fix is a VALUE the interleaving reads,
+// so the gate below catches every way of getting it wrong — verified by
+// mutation: ignoring the witness, never publishing, and loading the witness
+// inside publishEpisodeStart (the tautology) each turn it red.
+func TestNoteDrop_StaleEdgePublicationCannotOrphanTheEpisode(t *testing.T) {
+	var clock time.Time
+	restore := SetNowForTest(func() time.Time { return clock })
+	t.Cleanup(restore)
+
+	w := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	base := time.Unix(1_700_000_000, 0)
+
+	// A reaches noteDrop, takes the 0->1 edge, and is descheduled before it
+	// publishes.
+	clock = base
+	witnessA, edgeA := w.claimEpisodeStart()
+	staleStart := clock.UnixNano()
+	if !edgeA {
+		t.Fatal("precondition: A must take the 0->1 edge")
+	}
+
+	// The drain delivers a line. A's episode is resolved.
+	clock = base.Add(1 * time.Second)
+	w.noteDelivered(1, clock.UnixNano())
+	if cf := w.consecutiveFail.Load(); cf != 0 {
+		t.Fatalf("precondition: the delivery must end A's episode, consecutiveFail = %d", cf)
+	}
+
+	// A NEW outage begins and dates itself correctly.
+	clock = base.Add(2 * time.Second)
+	realStart := clock
+	w.noteDrop(&reasonQueueFull)
+	if st := w.Stats(); !st.FailingSince.Equal(realStart) {
+		t.Fatalf("precondition: the new episode must be dated %s before A resumes, got %s", realStart, st.FailingSince)
+	}
+
+	// A resumes and runs the second half with the timestamp it computed before
+	// the delivery. Traffic then stops: nothing else will re-date the episode.
+	w.publishEpisodeStart(staleStart, witnessA)
+
+	st := w.Stats()
+	if st.ConsecutiveFailures == 0 {
+		t.Fatal("precondition: the outage must still be unresolved")
+	}
+	if st.FailingSince.IsZero() {
+		t.Fatalf("an ongoing outage (ConsecutiveFailures = %d) has no datable start: FailingFor stays 0, so the degradation window can never elapse and the outage is never paged",
+			st.ConsecutiveFailures)
+	}
+	if !st.FailingSince.Equal(realStart) {
+		t.Errorf("FailingSince = %s; want %s — A's stale start must not displace the episode that is actually running", st.FailingSince, realStart)
+	}
+}
+
+// CONTROL: an ordinary drop, with nothing racing it, must still publish and
+// date its episode. Refusing to publish at all satisfies the gate above while
+// deleting the degradation predicate's only time axis — and the reader-side
+// controls in TestStats_UnpublishedEpisodeStartIsNotDatedFromTheLastDelivery do NOT cover it,
+// because they store failSinceNano directly rather than going through noteDrop
+// (measured before this control existed: with publication removed, every
+// reader-side gate stayed green and only the gate above went red).
+func TestNoteDrop_AnUnracedEdgeDatesItsEpisode(t *testing.T) {
+	var clock time.Time
+	restore := SetNowForTest(func() time.Time { return clock })
+	t.Cleanup(restore)
+
+	w := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	clock = time.Unix(1_700_000_000, 0)
+
+	w.noteDrop(&reasonQueueFull)
+	st := w.Stats()
+	if st.FailingSince.IsZero() {
+		t.Fatal("a plain first drop published no episode start; the feed can never become degradable")
+	}
+	if !st.FailingSince.Equal(clock) {
+		t.Errorf("FailingSince = %s; want %s", st.FailingSince, clock)
+	}
+}
+
+// CONTROL, the other direction: a drop that follows a delivery must date the
+// NEW episode. A witness keyed too broadly — one that never matches — would
+// refuse every publication after the first delivery, which is the same
+// undatable outage by a different route.
+func TestNoteDrop_ADropAfterADeliveryDatesTheNewEpisode(t *testing.T) {
+	var clock time.Time
+	restore := SetNowForTest(func() time.Time { return clock })
+	t.Cleanup(restore)
+
+	w := &Writer{network: "udp", format: "rfc3164", host: "h", tag: "culvert", pid: "1", queue: make(chan queuedLine, 1)}
+	base := time.Unix(1_700_000_000, 0)
+
+	clock = base
+	w.noteDrop(&reasonQueueFull)
+	clock = base.Add(1 * time.Second)
+	w.noteDelivered(1, clock.UnixNano())
+
+	clock = base.Add(2 * time.Second)
+	w.noteDrop(&reasonQueueFull)
+	st := w.Stats()
+	if st.FailingSince.IsZero() {
+		t.Fatal("the episode after a delivery was never dated; the witness refuses legitimate publications")
+	}
+	if !st.FailingSince.Equal(clock) {
+		t.Errorf("FailingSince = %s; want %s — the new episode starts at its own first drop", st.FailingSince, clock)
+	}
+}

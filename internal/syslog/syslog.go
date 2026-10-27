@@ -1093,11 +1093,62 @@ func now() time.Time {
 // freshness axis. Every drop site goes through here so a future one cannot be
 // added that moves Drops() without moving the reason and the timestamp — the
 // split that made the cumulative counter unreadable in the first place.
+// claimEpisodeStart is noteDrop's FIRST half: it records one failure and
+// reports whether this caller is the one that began the episode.
+//
+// It returns a WITNESS — the last-success stamp as it stood before the
+// increment — because the two halves can be split by the scheduler and the
+// second half must be able to tell whether its episode is still the current
+// one. An episode is delimited by deliveries, so lastSuccessNano is that
+// witness; keyed on a delivery rather than on a timestamp comparison, it stays
+// correct if the wall clock steps backwards.
+//
+// Split out of noteDrop so a test can drive the halves in the order a
+// descheduled caller produces. The window between them is real: noteDrop runs
+// on the CALLER's goroutine for a queue-full drop, so many request goroutines
+// reach it at once.
+func (s *Writer) claimEpisodeStart() (witness int64, edge bool) {
+	// The increment comes FIRST and the witness is read after it. Reading the
+	// witness first opens the mirror-image hole: a delivery landing between
+	// that read and the increment leaves a legitimately NEW episode holding a
+	// pre-delivery witness, so its publication is refused and the episode is
+	// undatable — the same silent outage this guard exists to prevent, by the
+	// opposite route. Taken after the increment, the witness can only be
+	// invalidated by a delivery that lands inside the window the guard is
+	// about, and a delivery that lands there has either ended this episode
+	// (so Stats needs no start) or re-dated it itself (noteDelivered's
+	// trailing re-stamp).
+	edge = s.consecutiveFail.Add(1) == 1
+	return s.lastSuccessNano.Load(), edge
+}
+
+// publishEpisodeStart is noteDrop's SECOND half: it publishes t as the current
+// episode's start, unless a delivery has intervened since witness was taken.
+//
+// Without that condition, a caller descheduled between the two halves resumes
+// after a delivery has ENDED its episode and a later drop has correctly dated
+// a NEW one — and overwrites that good start with its own stale, pre-success
+// value. Stats then refuses it (its `fs >= ls` test fails), so an outage with
+// ConsecutiveFailures > 0 has NO datable start; and because noteDrop's
+// re-dating branch only runs on a SUBSEQUENT drop, a node that goes quiet
+// never recovers the date. FailingFor stays 0, the degradation window can
+// never elapse, and that outage is never paged (Codex P2, PR #1494).
+//
+// Refusing to publish is exactly right rather than merely safe: the reader
+// would reject this value anyway, and the episode that IS current has already
+// been dated by whoever took its own edge.
+func (s *Writer) publishEpisodeStart(t, witness int64) {
+	if s.lastSuccessNano.Load() == witness {
+		s.failSinceNano.Store(t)
+	}
+}
+
 func (s *Writer) noteDrop(reason *string) {
 	s.drops.Add(1)
+	witness, edge := s.claimEpisodeStart()
 	t := now().UnixNano()
-	if s.consecutiveFail.Add(1) == 1 {
-		s.failSinceNano.Store(t)
+	if edge {
+		s.publishEpisodeStart(t, witness)
 	} else if s.failSinceNano.Load() <= s.lastSuccessNano.Load() {
 		// The count was already non-zero, so this is not the 0->1 edge — but
 		// the recorded start predates the last delivery, which means it

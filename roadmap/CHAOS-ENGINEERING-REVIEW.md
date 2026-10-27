@@ -15437,3 +15437,150 @@ push was weighed and accepted — it changed no `.go` file, so the cancelled rac
 shards re-ran against byte-identical sources — and the first was not. Held out
 of its own commit for exactly the reason it records, and carried here on the
 first push that changes files anyway.
+
+### Round 20 — the writer half of a window whose reader was already hardened
+
+One P2, and it is the mirror of an earlier P1 in this same sweep.
+
+`noteDrop` runs on the CALLER's goroutine for a queue-full drop, so many
+request goroutines reach it at once and its two halves can be split by the
+scheduler: one records the failure and takes the 0->1 edge, then publishes the
+episode's start. The reader was hardened for that window earlier (Codex P1):
+`Stats` refuses a start that predates the last delivery rather than clamping it
+up, because clamping dated a brand-new episode from an old delivery and paged
+immediately.
+
+The writer half was still open, in the opposite order:
+
+1. A takes the edge at `t0` and is descheduled before publishing.
+2. A delivery at `t1` ENDS A's episode.
+3. A new outage at `t2` takes its own edge and dates itself correctly.
+4. A resumes and publishes `t0` over it.
+
+`Stats` then refuses `t0` (`fs >= ls` fails), so the node reports
+`ConsecutiveFailures > 0` with **no datable start**. And the re-dating branch
+that exists for exactly this hazard only runs on a SUBSEQUENT drop — so on a
+node that goes quiet, nothing ever recovers the date. `FailingFor` stays 0, the
+five-minute window can never elapse, and **that outage is never paged.**
+
+Reproduced deterministically, no goroutine racing: every step is a production
+operation, and A's deschedule is reproduced by splitting its two halves, which
+is what a deschedule is. Measured against the pre-fix tree:
+`ConsecutiveFailures=1 FailingSince.IsZero()=true`.
+
+> **Hardening the reader of a window does not close it. The reader can refuse
+> bad data; it cannot restore good data the writer destroyed.**
+
+The fix publishes the start only while no delivery has intervened since the
+edge was claimed. The witness is the last-success stamp, captured BEFORE the
+window and passed into the second half — an episode is delimited by
+deliveries, so a delivery is exactly the event that invalidates an unpublished
+start. Keyed on the delivery rather than on a timestamp comparison, so it stays
+correct if the wall clock steps backwards (see the residual below, which it
+therefore does not depend on).
+
+Refusing to publish is exactly right rather than merely safe: the reader would
+reject the value anyway, and the episode that IS current has already been dated
+by whoever took its own edge.
+
+#### Round 20 — two gates I nearly got wrong, and one wall I did not write
+
+**The first guard was a tautology.** It read the witness and compared it to
+another load of the same field, both on the far side of the window — so it was
+`x == x`. The fix is not the comparison but WHERE the witness comes from: before
+the window, passed in. That is why the two halves are now named methods rather
+than one function with a comment about a race.
+
+**The first reproduction could not see the fix.** It simulated A's resumption
+with a direct `failSinceNano.Store`, bypassing the guarded path entirely, so
+the guard could not possibly affect it — it passed the broken code and the
+fixed code alike. Extracting the halves fixed the gate and the production
+clarity in one move.
+
+**The control I nearly cited does not cover this.** The reader-side controls in
+`TestStats_UnpublishedEpisodeStartIsNotDatedFromTheLastDelivery` store
+`failSinceNano` directly, so they never reach `noteDrop`. Measured rather than
+assumed: with publication removed entirely, every reader-side gate stayed green
+and only the new gate went red. Two writer-side controls were therefore
+written — an unraced edge must date its episode, and a drop after a delivery
+must date the NEW one, which catches a witness keyed so broadly it never
+matches.
+
+**The increment comes before the witness read, and that ordering is reasoned,
+not gated.** Reading the witness first opens the mirror-image hole: a delivery
+landing between that read and the increment leaves a legitimately NEW episode
+holding a pre-delivery witness, so its publication is refused and the episode
+is undatable — the same silent outage, from the other side. Found on an
+adversarial re-read of my own fix, after I had explicitly reasoned that the
+order inside `claimEpisodeStart` "does not matter"; it does.
+
+What is NOT claimed is a gate for it. The window is two adjacent atomic
+operations, so a single-threaded test cannot interleave a delivery into it —
+measured: with the order reversed, every gate here still passes. A test
+asserting otherwise was written, found vacuous by that mutation, and
+**deleted** rather than kept with a docstring claiming more than it verifies.
+Gating it would mean splitting the claim itself into two publishable halves,
+which is a seam nobody needs for a correctness argument this short. The
+ordering is stated at the call site with its reason.
+
+**And no structural wall, deliberately.** Round 19's fix was a PLACEMENT, which
+its behavioural gate provably could not pin, so it needed a wall. This fix is a
+VALUE the interleaving reads, so the gate catches every way of getting it
+wrong — verified by mutation: ignoring the witness, never publishing, a witness
+that never matches, and loading the witness inside the second half each turn it
+red.
+
+> **Add the wall when the property is a placement the gate cannot reach, not as
+> a reflex. Run the mutation that would need it first.**
+
+#### Round 20 — recorded residual: this plane dates its episodes on the wall clock
+
+Found while reconciling main, not reported by a reviewer, and **recorded rather
+than fixed** — the owner's call, because the fix is a round of its own.
+
+`internal/syslog` holds its stamps as bare `int64` nanos and rebuilds them with
+`time.Unix(0, n)`, which carries no monotonic reading. Every interval the health
+plane measures from them — `Age` from `LastSuccess`, `FailingFor` from
+`FailingSince` — is therefore a WALL-CLOCK interval, which is exactly the class
+§47 (`CHAOS-83`) and §48 (`CHAOS-84`) established repo-wide. Neither sweep
+claims this site: neither mentions `internal/syslog` or `syslog_health`
+anywhere, and §48 explicitly left the ids held by open branches — 81 among
+them — out of scope.
+
+Measured, driving both clock seams:
+
+```
+after 20m outage:           Degraded=true  Age=19m59s FailingFor=19m59s CF=3
+after a 50m backward step:  Degraded=false Age=0s     FailingFor=0s     CF=3
+```
+
+A backward step clears a genuine degraded verdict while `ConsecutiveFailures`
+still reports 3 — the feed reads healthy while events are being lost. If the
+step lands before the window elapses, no page fires at all until the clock
+catches up. The triggers are ordinary: an NTP correction after a wrong RTC, a
+resumed hypervisor snapshot, an operator fixing the date. The plane already
+clamps a negative age to zero with a comment calling a page on a clock
+correction "noise", which is a deliberate trade-off — made before `CHAOS-83`
+established the repo rule that a bound of this kind must not be wall-clock at
+all.
+
+Why it is not fixed here, in two parts:
+
+- **The shape is settled but not small.** `monotime.go` (added by §47) already
+  provides the pattern, so nothing has to be invented. But `LastSuccess` is
+  ALSO exported as a unix timestamp — `culvert_syslog_last_success_timestamp_seconds`
+  and `lastSuccessUnix` on `GET /api/syslog` — where the wall clock is the
+  correct answer. So the fix is not "replace the stamps": it is a SECOND,
+  monotonic stamp used only for the elapsed comparisons, plus a wall forbidding
+  elapsed measurement off the display one, or the next change quietly
+  reintroduces this. `monotime.go` is `package main`, so the engine needs its
+  own equivalent.
+- **A plane-side mirror would be the wrong fix.** The plane reads episode state
+  live from the writer by design (round 12: one reader, no second source of
+  truth), so stamping the plane's own monotonic view would be the "two answers
+  to one question" shape this sweep has rejected repeatedly. The stamp belongs
+  in the engine.
+
+Round 20's own fix is keyed on a delivery rather than on a timestamp
+comparison, so it does not depend on this being fixed first.
+
