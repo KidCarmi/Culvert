@@ -839,8 +839,10 @@ type OIDCFlowProvider struct {
 	// serialized, while the request goroutine is held. The legacy single-provider
 	// backend (auth_oidc.go) has had both since CHAOS-47 — this is the same
 	// contract on the newer surface, reusing the same primitives.
-	mu    sync.Mutex
-	cache map[string]*oidcCacheEntry // key = cacheKey("", token)
+	// cache carries its own mutex and the client-attributed eviction policy —
+	// see identityResultCache for why that policy is a security control
+	// (CHAOS-76). Keyed by cacheKey("", token).
+	cache identityResultCache[*Identity]
 	ttl   time.Duration
 	gate  authProbeGate
 }
@@ -859,17 +861,16 @@ func (p *OIDCFlowProvider) cacheTTL() time.Duration {
 
 // introspectCacheGet returns a cached verdict, if one is live.
 func (p *OIDCFlowProvider) introspectCacheGet(key string) (identity *Identity, ok, hit bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if e, found := p.cache[key]; found && time.Now().Before(e.expiry) {
-		return cloneIdentity(e.identity), e.ok, true
+	id, verdict, hit := p.cache.get(key)
+	if !hit {
+		return nil, false, false
 	}
-	return nil, false, false
+	return cloneIdentity(id), verdict, true
 }
 
 // introspectCacheSet records an AUTHORITATIVE verdict. Infrastructure failures
 // never reach here — see ResolveIdentity.
-func (p *OIDCFlowProvider) introspectCacheSet(key string, identity *Identity, ok bool, tokenExp *int64) (*Identity, bool) {
+func (p *OIDCFlowProvider) introspectCacheSet(key, client string, identity *Identity, ok bool, tokenExp *int64) (*Identity, bool) {
 	if ok && (identity == nil || strings.TrimSpace(identity.Sub) == "") {
 		identity = nil
 		ok = false
@@ -880,22 +881,21 @@ func (p *OIDCFlowProvider) introspectCacheSet(key string, identity *Identity, ok
 		identity = nil
 		ok = false
 	}
-	p.mu.Lock()
-	if p.cache == nil {
-		p.cache = map[string]*oidcCacheEntry{}
-	}
-	// Evict an arbitrary entry when full — the key space is token-derived and
-	// therefore caller-controlled, so the map must stay bounded.
-	if len(p.cache) >= maxAuthCacheSize {
-		for k := range p.cache {
-			delete(p.cache, k)
-			break
-		}
-	}
-	p.cache[key] = &oidcCacheEntry{ok: ok, identity: cloneIdentity(identity), expiry: now.Add(ttl)}
-	p.mu.Unlock()
+	// The key space is token-derived and therefore caller-controlled, so the
+	// map must stay bounded AND the choice of victim must be fair. The
+	// pre-CHAOS-76 implementation got the first half right and evicted "an
+	// arbitrary entry" for the second — whichever entry Go's map order yielded
+	// first, live or expired.
+	// setUntil, not set: see oidcCacheSetIdentityWithExp. The clamped deadline
+	// belongs to the token, so it is passed as an absolute instant derived from
+	// the same `now`, never re-derived from a duration inside the store.
+	p.cache.setUntil(key, client, cloneIdentity(identity), ok, now.Add(ttl))
 	return cloneIdentity(identity), ok
 }
+
+// CacheEvictions reports how many cached introspection verdicts have been
+// displaced to stay under the cap. See LDAPAuth.CacheEvictions.
+func (p *OIDCFlowProvider) CacheEvictions() uint64 { return p.cache.Evictions() }
 
 // NewOIDCFlowProvider validates the profile, runs OIDC discovery, and returns
 // a ready-to-use OIDCFlowProvider.
@@ -936,7 +936,6 @@ func newOIDCFlowProviderAt(p *IdPProfile, gen *idpmeta.Generation) (*OIDCFlowPro
 		cfg:     cfg,
 		disc:    disc,
 		client:  client,
-		cache:   map[string]*oidcCacheEntry{},
 		ttl:     oidcFlowCacheTTL,
 
 		cachedAt: cachedAt,
@@ -976,11 +975,28 @@ func (p *OIDCFlowProvider) Verify(username, token string) bool {
 	return ok && id != nil
 }
 
+// VerifyFrom is Verify carrying the caller's client-fairness key (CHAOS-76);
+// see ResolveIdentityFrom.
+func (p *OIDCFlowProvider) VerifyFrom(client, username, token string) bool {
+	id, ok := p.ResolveIdentityFrom(client, username, token)
+	return ok && id != nil
+}
+
 // ResolveIdentity introspects the token (for non-browser clients) or validates
 // an ID token (for browser flows after callback).  For non-browser clients
 // the token is treated as an opaque access token and sent to the introspection
 // endpoint.
 func (p *OIDCFlowProvider) ResolveIdentity(username, token string) (*Identity, bool) {
+	return p.ResolveIdentityFrom("", username, token)
+}
+
+// ResolveIdentityFrom is ResolveIdentity attributing any cache entry it writes
+// to the caller's client-fairness key, so a flood of distinct bogus tokens
+// from one source cannot displace another client's cached verdict (CHAOS-76).
+// Data-plane callers that know their peer MUST use this; the plain
+// ResolveIdentity passes the empty key, which is valid but puts every such
+// caller in one shared fairness bucket.
+func (p *OIDCFlowProvider) ResolveIdentityFrom(client, _ string, token string) (*Identity, bool) {
 	if token == "" {
 		return nil, false
 	}
@@ -998,7 +1014,7 @@ func (p *OIDCFlowProvider) ResolveIdentity(username, token string) (*Identity, b
 	if p.disc.IntrospectionEndpoint == "" {
 		return nil, false
 	}
-	return p.resolveByIntrospection(token)
+	return p.resolveByIntrospection(client, token)
 }
 
 // resolveByIntrospection is the cached, gated, observable introspection path
@@ -1007,7 +1023,7 @@ func (p *OIDCFlowProvider) ResolveIdentity(username, token string) (*Identity, b
 // endpoint is cacheable. A failure to REACH the IdP denies this request and is
 // then forgotten, so a one-second IdP blip cannot keep denying valid tokens for
 // the full cache TTL after the IdP is healthy again.
-func (p *OIDCFlowProvider) resolveByIntrospection(token string) (*Identity, bool) {
+func (p *OIDCFlowProvider) resolveByIntrospection(client, token string) (*Identity, bool) {
 	backend := p.Name()
 
 	// A bearer token has one canonical identity regardless of which Basic
@@ -1049,7 +1065,7 @@ func (p *OIDCFlowProvider) resolveByIntrospection(token string) (*Identity, bool
 	p.gate.recordReachable()
 	noteAuthBackendReachable(backend)
 
-	return p.introspectCacheSet(k, id, ok, exp)
+	return p.introspectCacheSet(k, client, id, ok, exp)
 }
 
 // CaptiveLoginURL builds an OIDC authorization URL with PKCE + state + nonce,

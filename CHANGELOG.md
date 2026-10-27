@@ -16,6 +16,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   row (additive, report-only, no row when unconfigured or healthy) carries no
   file path or error text. No certificate-loading behavior changes.
 
+- **The on-demand backup audit action stays `backup.trigger`; `backup.create`
+  is recorded as its alias (T-71).** A terminology review proposed renaming it
+  to match the `<noun>.create` convention, but `backup.trigger` has shipped in
+  every release since v1.0.254 and SIEM rules and saved audit searches match it
+  verbatim, so it is kept as the stable identifier on every surface (audit trail,
+  SIEM/syslog JSON, `/api/audit` JSON and CSV export, OpenAPI
+  `x-culvert-audit-event`). Each backup still records exactly one entry, so no
+  per-action count or alert double-counts. Deprecation note: `.trigger` is
+  deprecated for **new** audit actions, which use `<noun>.create`;
+  `backup.trigger` itself is grandfathered and will not be renamed. No action is
+  needed by operators. Gate: `backup_audit_action_compat_test.go`; glossary:
+  `docs/design/PRODUCT-TERMINOLOGY.md` ("Backup").
+
 - **Diagnostics now warns when OCSP checking is enabled but does not cover
   inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
   on the OCSP panel and in a one-time log line; the one-page diagnostics report
@@ -2765,6 +2778,93 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
+- A flood of bogus credentials from a single unauthenticated client could
+  evict another client's cached authentication verdict, and during an identity
+  backend outage that turned a cache hit into a denial (CHAOS-76, register rows
+  AU-67/AU-68). All three identity-backend result caches on the proxy
+  credential path — the LDAP directory bind, the legacy RFC 7662 introspection
+  backend and the IdP-registry introspection provider — evicted "an arbitrary
+  entry" at their 5,000-entry cap: a Go map range that stops at the first key,
+  so whichever entry Go's randomised map iteration yielded — **live or already
+  expired**, and in either case unrelated to age, ownership or liveness. That
+  is the same defect CHAOS-57 closed in the local credential cache, on three
+  caches it was never ported to.
+
+  The flood costs nothing to mount. The proxy credential path hands whatever
+  username, password or bearer token the client supplied to the configured
+  backend, and an authoritative denial is cached deliberately — RFC 7662 §2.2
+  answers an unknown or expired token with `200 {"active":false}`, and a
+  directory that answers "no such user" is authoritative — because not caching
+  those would make every wrong credential a fresh round trip. So each bogus
+  credential writes an entry, so a sustained flood displaces the honest
+  verdicts: the gate measures a 3x-cap flood reliably removing a specific
+  honest entry, which is the evidence this rests on. (As a first-order model,
+  if each insertion past the cap took a uniform draw the survival probability
+  would be `(1 - 1/N)^k`, about 37% at one cap-worth and 5% at three; Go's map
+  iteration is randomised but gives no uniformity guarantee, so treat those
+  figures as an illustration of the shape, not a measurement.) Fifteen
+  thousand requests bearing nothing but bogus credentials is the whole
+  cost. Nothing
+  reclaimed an expired entry either — a lookup reported a miss and left it in
+  the map — so the steady state under a flood was a cache full of dead
+  verdicts while eviction destroyed the few live ones.
+
+  Displacement alone costs the victim a full directory bind or introspection
+  round trip on every subsequent request, which lands the attacker's
+  amplification on legitimate traffic and on the customer's own IdP. The sharper
+  consequence is the interaction with the unreachable-backend cooldown: when the
+  backend is down the gate denies **without** a round trip, and a client whose
+  verdict is cached is served from the cache and never reaches it. Evicting that
+  entry means the next request falls through and is denied, for the whole
+  cooldown, for a credential that was valid a moment earlier — inverting the
+  cache's purpose for exactly the users it exists to serve. Authentication
+  remained fail-closed throughout and no credential was ever wrongly accepted;
+  what an anonymous client gained was the ability to make authentication fail
+  for other people.
+
+  The three caches now share one policy, the one `internal/authstate` defines
+  and CHAOS-57 put in the local cache, in a new internal owner,
+  `internal/identcache` (ADR-0041). The cap and the eviction sink are injected
+  by package main, which keeps only a binding and the integration gates. The
+  victim ordering moved with it as `identcache.BetterVictim`, and `store.go`'s
+  `betterAuthCacheVictim` now delegates to it rather than keeping a copy. The
+  tree still holds two definitions of that ordering, that one and the
+  identical `better` in `internal/authstate`; consolidating the engines is
+  recorded as follow-up, not done here. Entries are attributed to a client
+  fairness key and eviction takes the oldest entry of the client holding the
+  most, so a flooding source evicts itself and a client holding one entry cannot
+  be displaced until every other client is down to one too. An expired entry is
+  always the better victim, and a lookup now reclaims one in place. Work per
+  insertion stays proportional to the number of active clients rather than to
+  the cache size, which is what keeps the fix clear of the separate
+  full-scan-under-the-mutex defect CHAOS-57 also closed. The fairness key was
+  already computed on both data-plane paths and was being discarded at every
+  provider dispatch point — the two in `store.go` and the IdP-registry loop in
+  `proxy.go`, which is the one tried first in a registry deployment. All three
+  now go through a single helper that prefers the client-attributed form, so a
+  backend keeping no result cache (SAML, which is browser-mediated) is
+  unaffected and a new call site inherits the behaviour instead of re-deciding
+  it. Displacement is counted per backend and exposed as
+  `culvert_identity_cache_evictions_total`, accumulated at the point of
+  eviction into a process-owned total so it covers both the legacy provider and
+  the registry providers and cannot fall when an operator edits an IdP profile
+  (editing one has the registry compile a fresh provider, and a Prometheus
+  counter that decreases reads as a restart). It sits beside the existing
+  `culvert_auth_cache_evictions_total` for the local cache.
+
+  One detail of the generalisation had to be unpicked again: a positive
+  introspection verdict is bounded by the token's own declared `exp` rather
+  than by the backend's configured TTL, and both original stores held that
+  deadline exactly because they recorded it against the same clock sample the
+  clamp had measured. Expressing it as a duration for the shared store
+  restarted that clock on insertion, so an entry outlived its token by whatever
+  elapsed in between (measured at 1.1 us and 553 ns for the two backends). The
+  store now takes an absolute deadline where the caller has one and keeps the
+  duration form only where the bound is a configured TTL. Gates: seventeen
+  (nine of them now in `internal/identcache`), with every gate that pins a
+  defect verified failing against the behaviour that defect describes, plus a
+  root gate on the binding's cap and sink and the package's boundary and
+  ownership tests.
 
 - Two security-regression gates added for the memoized IDNA slow path
   (`internal/hostutil/idnamemo.go`), each run against **both** retention tiers
