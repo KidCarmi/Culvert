@@ -100,29 +100,25 @@ const sessionProviderLocal = "local"
 //     operator's configuration (owner decision on #1485/#1564: an unreachable
 //     IdP is degraded availability, not revocation).
 //
-// BOTH the bare id and the prefixed `Name()` form are probed, and that is not
-// defensive clutter: this codebase carries two representations of one provider
-// identity on purpose — the interactive providers stamp the BARE profile id
-// into `Identity.Provider` (`auth_oidc_flow.go` `ExchangeCode`,
-// `auth_saml.go` `extractSAMLIdentity`) while `Name()` returns `oidc:<id>` /
-// `saml:<id>`, which is why `stripIdPPrefix` exists at all. A fail-closed
-// bound applied to the wrong representation is a customer-visible outage, not
-// a tightening (CHAOS-69's round-1 IDN regression, learned the expensive way),
-// and probing both cannot WIDEN anything: each form must still resolve to an
-// enabled profile.
+// The profile id is matched EXACTLY, never through `stripIdPPrefix`. The
+// interactive providers stamp the BARE profile id into `Identity.Provider`
+// (`auth_oidc_flow.go` `ExchangeCode`, `auth_saml.go` `extractSAMLIdentity`),
+// and the minter wall below pins that every legitimately minted cookie carries
+// that id or "local", so a `pvd` is always a literal profile id. An earlier
+// shape also probed the prefixed `Name()` spelling (`saml:<id>`) by stripping
+// it, on the theory that probing both forms could not widen anything. It
+// could: profile ids are free-form, so `corp` and `saml:corp` can both exist,
+// and after `saml:corp` was deleted or disabled its cookies failed the exact
+// probe and then passed the stripped one through the UNRELATED enabled `corp`,
+// keeping their identity and groups across the revocation (AU-69, Codex). A
+// stripped spelling names a different profile, not the same one.
 func sessionProviderLive(provider string) bool {
 	// Raw, untrimmed — see the emptiness note above. A whitespace-only value
 	// is a provider name that resolves to nothing, not an absent field.
 	if provider == "" || provider == sessionProviderLocal {
 		return true
 	}
-	if idpRegistry.ProfileEnabled(provider) {
-		return true
-	}
-	if bare := stripIdPPrefix(provider); bare != provider {
-		return idpRegistry.ProfileEnabled(bare)
-	}
-	return false
+	return idpRegistry.ProfileEnabled(provider)
 }
 
 // ---------------------------------------------------------------------------

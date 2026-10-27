@@ -1502,6 +1502,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | AU-65 | **Re-enabling an IdP under the SAME id revives the sessions it minted.** AU-2's lever is pure derived state with no durable record that a cut happened, and §50.7 deliberately does not clear the cookie on refusal — so a cookie refused throughout the disabled window authenticates again, with the subject and groups asserted BEFORE the incident, as soon as the profile returns. Confirmed against the real resolver (live → disabled → re-enabled restores identity and groups). Reached by the ordinary incident sequence: disable a compromised IdP, investigate, re-enable within the 8 h default TTL. | **NEW** (recorded; runbook §4 corrected and the three workarounds named — keep it disabled past the TTL, re-create under a different id, or rotate the session signing key. The fix is a provider GENERATION stamped into the cookie at mint, which keeps all four §50.4 properties but changes the session AND profile schema with CP→DP and downgrade consequences — its own change. Agreement pinned by `TestChaos88_DocumentedResidual_SameIDRestoration`.) | M | `session_provider_bounds.go` `sessionProviderLive`; §50.6f; raised as P1 by Codex on PR #1564 |
 | AU-64 | **Deleting the LAST IdP profile on the CP reached no Data Plane node.** `idpRegistry.All()` returns a non-nil EMPTY slice for an empty registry; `ConfigSnapshot.IdPProfiles` carried `omitempty`, so the key never reached the wire; the DP decoded nil and `syncSnapshotIdPProfiles` skipped. The removed federation stayed stored, enabled and LIVE on every DP — AU-2's lever answered "enabled", its sessions kept their asserted groups for the full TTL, and NEW logins through it kept working; with `-idp-profiles-file` it survived restarts. All three DP intake paths (full snapshot, delta, last-known-good replay) share the one nil-skip. Removing a non-last profile always propagated, which is why it was invisible. **`TestConfigSurfaces_SnapshotWireWipe` exists for exactly this bug class and never looked: it iterates only `semNilSkipEmptyWipe` bindings, and the row was labelled `semValidatedSkip`.** | GAP → **CLOSED** (§50.6d: drop `omitempty`, relabel the row `semNilSkipEmptyWipe` + `WireWipeCapable`; the apply side was already nil-skip/empty-wipe, so no logic changed. `nil` still means ABSENT — redaction nils the field and a DP polls `GetConfig` before enrollment, so reading `null` as a clear would let an unauthenticated caller wipe every enrolling node's registry; pinned by two controls.) | **H** | `controlplane_snapshot.go` `IdPProfiles`, `config_surfaces.go` row `idp_profiles`, `syncSnapshotIdPProfiles`; tests `session_provider_cluster_test.go` (4) |
 | AU-66 | **A SAML-only deployment stopped reading its session cookies entirely when the provider went dark.** AU-2's fix keys arm 1 on `ProfileEnabled` (§50.6c: an unreachable IdP is degraded availability, not revocation) — but the gate ABOVE arm 1, `authRequired`, keys on `HasEnabledInteractiveProvider`, which is enabled AND **live**. With no local account, no legacy provider and no credential-capable profile, a CHAOS-87 staleness retirement darkens an ENABLED profile, `authRequired` goes false and the whole Stage-1 block is skipped: the session this appliance had decided to KEEP is never read. Measured `proceed=true identity="" groups=[]` — no revocation counter, no log, and identity/group-scoped ALLOW rules silently stop matching. Worse than the revocation §50.6c forbids, because a revocation is decided and counted and this is skipped. Every §50 gate missed it: `c72Setup` installs a local admin, which holds `credCapable` true. | GAP → **CLOSED** (§50.6g: a SECOND predicate, `HasEnabledInteractiveProfile` — enabled, not live — opens arm 1 only, via `sessionCapable`; arms 2 and 3 stay on `authRequired`, so the live-gated `ssoCapable` and the no-backend inert guard are untouched and no unfulfillable challenge or hot-path log becomes reachable. Both wrong fixes measured failing.) | **H** | `proxy.go` `sessionCapable`, `auth_idp.go` `HasEnabledInteractiveProfile`; tests `session_provider_availability_test.go` (4); raised as P2 by Codex on PR #1564 |
+| AU-69 | **A session from a DELETED or DISABLED profile survived through an unrelated profile whose id was its prefix-stripped spelling.** `sessionProviderLive` fell back to `ProfileEnabled(stripIdPPrefix(pvd))`, and profile ids are free-form, so a cookie from `saml:corp` resolved through `corp` after `saml:corp` was removed: its identity and groups outlived the revocation. Found by Codex (§50.6h) | H | `session_provider_bounds.go` `sessionProviderLive` | **CLOSED.** Exact `ProfileEnabled(pvd)` only. The minter wall pins that legitimate cookies carry the bare id or `"local"`, so this costs no availability. Gates `TestChaos88_APrefixedProfileIDCannotRideAnotherProfile` and `TestChaos88_OnlyTheExactProfileIDResolves` fail with the fallback restored |
 | AU-3 | Proxy-path Basic-auth bcrypt is **not rate-limited** — correct-username + N wrong-passwords is a cache miss every time → full ~100ms bcrypt per request → CPU starvation. The `loginLimiter` guards only the admin UI. **Understated: the WRONG-username branch is worse (AU-3a) and needs no valid username at all.** | GAP → **CLOSED** (CHAOS-57, §25: `internal/authcost` bounds concurrency globally + per client, fail-closed) | M → **C** | `store.go` `verifyAuthFrom`, `internal/authcost`, `auth_cost_health.go` |
 | AU-3a | The wrong-username branch runs an unconditional bcrypt against the dummy hash (RISK-008 timing equaliser), is reached BEFORE the result cache, and never populates it — so a flood of DISTINCT usernames is a guaranteed miss every time. Measured **79.6 ms of exclusive CPU per ~200-byte request (51,631x a cached auth)**; **66 req/s (~13 KB/s) consumed 100% of a 4-core box** and degraded other CPU work **15.6x**. Unauthenticated, remotely triggerable, and in the DEFAULT posture nothing stands in front of it — the connection limiter, rate limiter and IP filter all ship disabled. | GAP → **CLOSED** (CHAOS-57) | **C** | `store.go:521` (pre-fix), gates `TestChaos57_WrongUsernamePathIsGoverned`, `..._ConcurrentVerificationsAreBounded` |
 | AU-3c | The auth result cache evicted **one arbitrary LIVE entry** at capacity (a Go map range stopping at the first key), so a flood of distinct passwords under a known username displaced OTHER clients' cached positives. Measured: an honest client's cached credential survived a 1x-capacity flood and was reliably gone by 2x — after which that user paid a full ~80 ms bcrypt on EVERY request. The attacker's amplification lands on legitimate traffic. Same class as the `internal/authstate` finding. | GAP → **CLOSED** (CHAOS-57: `internal/authstate`'s fair-eviction policy ported — oldest entry of the largest holder, deterministic) | H | `store.go` `evictOneLocked`, gate `TestChaos57_FloodCannotDisplaceAnHonestClientsCachedResult` |
@@ -14086,14 +14087,15 @@ moment it refuses something legitimate, so each admitted shape is argued:
   and a failed compile all remove it, and in all three the operator's intent is
   that this federation authenticates nobody.
 
-**BOTH representations are probed, and that is not defensive clutter.** This
-codebase carries two spellings of one provider identity on purpose: the
-interactive providers stamp the **bare** profile id into `Identity.Provider`
-(`ExchangeCode`, `extractSAMLIdentity`) while `Name()` returns `oidc:<id>` /
-`saml:<id>` — which is why `stripIdPPrefix` exists at all. A bound applied to
-the wrong representation is a customer-visible outage rather than a tightening
-(CHAOS-69's round-1 IDN regression, learned the expensive way), and probing
-both cannot widen anything: each form must still resolve to a live provider.
+**~~BOTH representations are probed~~ — superseded by §50.6h (AU-69): the id is
+matched EXACTLY.** This paragraph first argued that the interactive providers
+stamp the **bare** profile id into `Identity.Provider` while `Name()` returns
+`oidc:<id>` / `saml:<id>`, so the predicate should also accept the stripped
+spelling, and that *"probing both cannot widen anything: each form must still
+resolve to a live provider"*. The last clause was wrong. Profile ids are
+free-form, so a stripped spelling can resolve to a DIFFERENT live profile. The
+minter wall below already pins that no legitimate cookie carries a prefixed
+spelling, so the fallback bought no availability and cost a revocation bypass.
 
 **A SELF-REVIEW CONTROL CAUGHT THE FIX'S OWN DEFECT, and it is the sharpest
 lesson here.** The first shape opened with `p := strings.TrimSpace(provider)`
@@ -14502,6 +14504,32 @@ retirement is what makes the state reachable at RUNTIME — before it, an
 enabled-but-dark interactive profile only came from a compile failure at boot
 or at an admin write, so nothing darkened a healthy provider hours later
 without anyone touching it.
+
+### 50.6h A stripped spelling named a DIFFERENT profile (AU-69, Codex)
+
+Codex, on the round-23 head: profile ids are free-form, so `corp` and
+`saml:corp` can both be configured, and the SAML callback stamps the actual id
+`saml:corp` into its cookies. After `saml:corp` was deleted or disabled, those
+cookies failed the exact `ProfileEnabled` probe and then passed the
+`stripIdPPrefix` fallback through the unrelated, enabled `corp`. Their subject
+and asserted groups survived the revocation with no re-authentication, which
+defeats the operator's lever for exactly the compromised-provider case it exists
+for.
+
+**Fix: exact match only.** `sessionProviderLive` asks `ProfileEnabled(pvd)` and
+nothing else. This is the fail-closed shape, and it costs no availability. The
+minter wall (`setSessionCookie`'s two interactive callers stamp the bare id,
+`setUISessionCookie` stamps `"local"`) is what made the fallback unnecessary,
+and it was already in the tree. Two test fixtures had pinned a prefixed
+spelling of a live id (`TestAuthSource_SessionCookieProvider`,
+`TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC`). Both now use
+the bare id the providers actually stamp, because no minter produces the other
+spelling. Gates: `TestChaos88_APrefixedProfileIDCannotRideAnotherProfile`
+(Codex's scenario, disabled and deleted, with a control that `corp` keeps its
+own sessions) and `TestChaos88_OnlyTheExactProfileIDResolves`, which replaces
+`…BothProviderRepresentationsResolve`. Both fail with the stripped fallback
+restored. *A probe that "cannot widen" must be checked against every value the
+other side can hold, not only the values the authors meant.*
 
 ### 50.7 Deliberately NOT done
 

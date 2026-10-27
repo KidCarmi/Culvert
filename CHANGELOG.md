@@ -2074,9 +2074,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   and a node polls `GetConfig` before enrollment completes.
 
   Sessions naming `"local"` (the admin-UI cookie, which has its own roster
-  backstop) and pre-`pvd` legacy sessions are never refused. Both provider
-  spellings — the bare profile id and the prefixed `oidc:`/`saml:` form — are
-  accepted for an enabled provider.
+  backstop) and pre-`pvd` legacy sessions are never refused. A session's
+  provider must match an enabled profile id EXACTLY, the bare id every
+  interactive provider stamps. An earlier shape also accepted the
+  prefix-stripped spelling, which let a cookie from a removed `saml:corp`
+  profile ride an unrelated enabled `corp` profile (AU-69).
 
   **Operator-visible:** `culvert_session_provider_revoked_total` (always
   emitted; counts *requests*, not sessions), `sessionProviderRevoked` on
