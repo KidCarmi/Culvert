@@ -321,7 +321,9 @@ could not create + delete a tiny temp file under the configured data
 directory. Common causes and fixes:
 
 1. **Volume not mounted.** In Docker / Kubernetes, confirm the volume
-   is bound to `/data` (or your `--data-dir`). `docker inspect` or
+   is bound to `/data` (or the absolute path set in the startup-only
+   `CULVERT_DATA_DIR` environment variable; there is no `--data-dir`
+   flag). `docker inspect` or
    `kubectl describe pod` will show the mount source. Re-create the
    container with the volume attached.
 2. **Wrong owner or mode.** The proxy process must own (or be able to
