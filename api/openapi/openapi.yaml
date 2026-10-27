@@ -6802,7 +6802,7 @@ paths:
       x-culvert-idempotency: non-idempotent
       x-culvert-introduced-version: 1.0.0
       x-culvert-danger-level: medium
-      x-culvert-audit-event: backup.create
+      x-culvert-audit-event: backup.trigger
       requestBody:
         required: true
         content:

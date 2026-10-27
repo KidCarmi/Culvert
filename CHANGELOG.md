@@ -9,6 +9,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **The on-demand backup audit action stays `backup.trigger`; `backup.create`
+  is recorded as its alias (T-71).** A terminology review proposed renaming it
+  to match the `<noun>.create` convention, but `backup.trigger` has shipped in
+  every release since v1.0.254 and SIEM rules and saved audit searches match it
+  verbatim, so it is kept as the stable identifier on every surface (audit trail,
+  SIEM/syslog JSON, `/api/audit` JSON and CSV export, OpenAPI
+  `x-culvert-audit-event`). Each backup still records exactly one entry, so no
+  per-action count or alert double-counts. Deprecation note: `.trigger` is
+  deprecated for **new** audit actions, which use `<noun>.create`;
+  `backup.trigger` itself is grandfathered and will not be renamed. No action is
+  needed by operators. Gate: `backup_audit_action_compat_test.go`; glossary:
+  `docs/design/PRODUCT-TERMINOLOGY.md` ("Backup").
+
 - **Diagnostics now warns when OCSP checking is enabled but does not cover
   inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
   on the OCSP panel and in a one-time log line; the one-page diagnostics report

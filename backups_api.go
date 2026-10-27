@@ -332,7 +332,7 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 			"the backup may still have started — check the archive listing", http.StatusBadGateway)
 		return
 	}
-	auditEvent(r, "backup.create", filename, fmt.Sprintf("encrypt=%v op_id=%s", encrypt, opID))
+	auditEvent(r, backupAuditAction, filename, fmt.Sprintf("encrypt=%v op_id=%s", encrypt, opID))
 	// The listing is cached for backupsCacheTTL — drop it so the next GET
 	// (e.g. right after this op reaches a terminal state) shows the new
 	// archive instead of a stale pre-trigger snapshot.
@@ -357,6 +357,21 @@ func apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 // malformed id is answered 400 by the CP instead of reaching the agent,
 // being rejected there, and surfacing as a misleading 502 upstream failure.
 var backupOpIDRE = regexp.MustCompile(`^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$`)
+
+// backupAuditAction is the audit action for an admin-started on-demand backup.
+// It has shipped since v1.0.254 and reaches consumers VERBATIM: the SIEM hook
+// forwards Entry.Action unchanged (store.go → syslog JSON), and the /api/audit
+// CSV/JSON exports and the Audit panel's text filter show it as-is. SIEM rules
+// and saved searches match on it, so it is a wire identifier, not wording, and
+// it stays `backup.trigger` (T-71).
+//
+// `backup.create` names the same event one layer down (backupOpKind, the
+// maintenance agent's operation kind, which this entry already records as
+// op_id=). The terminology docs record it as an ALIAS of this action. It is
+// never emitted as a second audit entry: two entries per backup would
+// double-count every backup in any per-action count, rule or alert.
+// TestT71_BackupAuditActionCompat pins all of this.
+const backupAuditAction = "backup.trigger"
 
 // backupOpKind is the agent's op kind for a backup this API can trigger
 // (cmd/culvert-maint/internal/ops KindBackupCreate).

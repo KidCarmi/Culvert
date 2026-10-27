@@ -8,37 +8,47 @@
 > diagnostics (#1490), state-file quarantine diagnostics (#1408), admission-engine extraction
 > (#1522/#1523, internal packages only).
 
+> **Finding ID.** This report was drafted as T-64. Main has since assigned T-64 twice (the 2026-10-11
+> operation-identifier finding and the 2026-10-15 admin-roster finding) and T-65..T-69, and open
+> #1715 holds T-70, so this report's finding is renumbered **T-71**.
+
 ## Executive Summary
 
-One new drift item (T-64) found and **fixed in this change**. Everything else sampled is consistent.
+One new drift item (T-71) found. It is **resolved by recording an alias, not by a rename**: the audit
+action has shipped, and SIEM rules and saved searches match it verbatim.
 
-**Terminology Health Score: 7.9 → 7.9** (T-64 is charged 0.1 and returned 0.1 in the same change; the
+**Terminology Health Score: 7.9 → 7.9** (T-71 is charged 0.1 and returned 0.1 in the same change; the
 7.9 baseline is the 2026-09-24 report's comparison figure including T-57/T-58/T-17/T-59).
 
 ## Findings
 
-### T-64 — On-demand backup audit action said `trigger`, every sibling says `create` (FIXED) — Priority: Low
+### T-71 — On-demand backup audit action says `trigger`, every sibling says `create` (RESOLVED: alias) — Priority: Low
 
 - **Business concept:** an admin starting a new backup archive from the Support panel.
-- **Current names:** audit action `backup.trigger` (`backups_api.go`), OpenAPI
-  `x-culvert-audit-event: backup.trigger`, agent operation kind `backup.create`
-  (`backupOpKind`), route comment "POST /api/backups (backup.create trigger)", GUI "Backup Now" /
-  "Start Backup".
-- **Problem:** `backup.trigger` was the only `.trigger` audit action in the tree; the same operation
-  was named `backup.create` one layer down. Creating actions use `<noun>.create`
-  (`support.bundle.create`, `alert.webhook.create`, `nodegroup.create`, ...). An auditor searching the
-  trail for backup creation would not find it under the vocabulary the rest of the trail uses, and the
-  audit name and the operation id the same entry records (`op_id=`) disagreed on the verb.
-- **Canonical name:** `backup.create`. "Trigger" describes the mechanism (a POST that kicks the
-  agent), not the business event.
-- **Fix:** `backups_api.go`, `backups_api_test.go`, `openapi.yaml`/`openapi.json` (regenerated via
-  `make api-bundle`; `make api-verify` green), CHANGELOG entry. No GUI string changes (the buttons
-  describe the user action and are already consistent with each other).
-- **Migration:** the action was introduced in #1468 on 2026-09-26 and has shipped in every published
-  release since v1.0.254 (latest v1.0.261 at the 2026-10-16 correction; the original text said it had
-  not shipped in a tagged release). Compatibility risk is limited to SIEM rules or saved audit filters
-  keyed on the old name; entries already in the trail keep `backup.trigger` (called out in the
-  CHANGELOG). Complexity: trivial. PR size: XS (6 lines + docs).
+- **Current names:** audit action `backup.trigger` (`backups_api.go`, now the named constant
+  `backupAuditAction`), OpenAPI `x-culvert-audit-event: backup.trigger`, agent operation kind
+  `backup.create` (`backupOpKind`), route comment "POST /api/backups (backup.create trigger)", GUI
+  "Backup Now" / "Start Backup".
+- **Problem:** `backup.trigger` is the only `.trigger` audit action in the tree; the same operation is
+  named `backup.create` one layer down. Creating actions use `<noun>.create` (`support.bundle.create`,
+  `alert.webhook.create`, `nodegroup.create`, ...). An auditor searching the trail under the
+  vocabulary the rest of the trail uses would not find it.
+- **Why not rename:** the action was introduced in #1468 on 2026-09-26 and has shipped in every
+  published release since v1.0.254. `audit.Add` hands `Entry.Action` to the SIEM hook unchanged
+  (`store.go` → syslog JSON), and the `/api/audit` JSON/CSV exports and the Audit panel's text filter
+  show it as-is, so a SIEM rule or saved search keyed on `backup.trigger` would silently stop matching
+  every new backup after an upgrade. Emitting both names was also rejected: two entries per backup
+  double-count it in every per-action count, rule and alert, and a second action in the same entry is
+  not expressible without changing the audit wire shape.
+- **Resolution:** `backup.trigger` stays the **canonical, stable** audit action. `backup.create` (the
+  agent operation kind, already recorded in the same entry's detail as `op_id=`) is recorded as its
+  **alias** in `docs/design/PRODUCT-TERMINOLOGY.md` ("Backup" row). `.trigger` is deprecated for NEW
+  audit actions, which use `<noun>.create`; `backup.trigger` itself is grandfathered. Gate:
+  `backup_audit_action_compat_test.go` drives the real handler and asserts exactly one
+  `backup.trigger` entry per backup on the trail, the live SIEM forwarder, `/api/audit`, the CSV
+  export and the OpenAPI contract.
+- **Migration:** none. Existing filters, SIEM rules and saved searches keep matching. Complexity:
+  trivial. PR size: S (one named constant, one gate, docs).
 
 ## Checked, no drift
 
@@ -58,4 +68,4 @@ T-54 and the other IDs listed in the 2026-09-24 report remain as described there
 
 ## Stop-condition assessment
 
-Not triggered: one production-worthy improvement existed and was applied. No cosmetic renames proposed.
+Not triggered: one production-worthy improvement existed and was applied as a documented alias rather than a rename of a shipped identifier. No cosmetic renames proposed.
