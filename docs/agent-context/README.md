@@ -50,7 +50,9 @@ to this checkout, not to an unmerged branch.
 - `auth*`, `session*`, `ui_auth*`, `ui_session*`, `ui_rbac*`, credential/roster/TOTP
   mutations in `store.go`: inspect [store.go](../../store.go),
   [session owner](../../internal/session), [auth-state owner](../../internal/authstate),
-  [credential-cost owner](../../internal/authcost) and the corresponding tests.
+  [credential-cost owner](../../internal/authcost), the identity-backend
+  [result-cache owner](../../internal/identcache) (ADR-0041) and the
+  corresponding tests.
 - LDAP: [ADR-0027](../adr/0027-ldap-first-class-idp.md),
   [auth_ldap_provider.go](../../auth_ldap_provider.go) and
   [directory implementation](../../auth_ldap.go). Internal directory transport

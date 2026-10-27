@@ -23,6 +23,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/audit"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/identcache"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/totp"
 )
@@ -620,15 +621,12 @@ func (a *authCacheStore) evictOneLocked(now time.Time) {
 // better eviction victim than the incumbent. Ordering: most live entries
 // first, then the oldest entry, then the lexicographically smaller client key
 // — total and deterministic, so the victim never depends on map order.
+//
+// The definition lives with the identity-backend result cache
+// (identcache.BetterVictim, ADR-0041), so the local cache and the three
+// identity caches cannot drift apart on what "better victim" means.
 func betterAuthCacheVictim(live int, added time.Time, client string, bestLive int, bestAdded time.Time, bestClient string) bool {
-	switch {
-	case live != bestLive:
-		return live > bestLive
-	case !added.Equal(bestAdded):
-		return added.Before(bestAdded)
-	default:
-		return client < bestClient
-	}
+	return identcache.BetterVictim(live, added, client, bestLive, bestAdded, bestClient)
 }
 
 // frontLocked returns the client's oldest still-present entry, advancing head
@@ -1077,6 +1075,15 @@ func (c *Config) verifyAuthFrom(snapshot authBackendSnapshot, client, user, pass
 		// their cost and their failure modes are governed by CHAOS-47's
 		// authProbeGate instead. Charging them a verification slot here would
 		// bound the wrong resource.
+		//
+		// The fairness key still has to reach them (CHAOS-76). authProbeGate
+		// governs REACHABILITY — it says nothing about who may displace whose
+		// entry in the provider's result cache, and that cache is populated by
+		// unauthenticated requests on a caller-controlled key space. Dropping
+		// the key here left the displacement axis with no owner at all.
+		if v, ok := snapshot.provider.(clientAttributedVerifier); ok {
+			return v.VerifyFrom(client, user, pass)
+		}
 		return snapshot.provider.Verify(user, pass)
 	}
 	if snapshot.user == "" {
@@ -1129,6 +1136,33 @@ func (c *Config) VerifyAuth(user, pass string) bool {
 // full bcrypt on its next request (CHAOS-57).
 func (c *Config) AuthCacheEvictions() uint64 { return c.cache.Evictions() }
 
+// IdentityCacheEvictions reports how many cached verdicts the LEGACY external
+// identity backend has displaced to stay under its cap, or 0 when no such
+// backend is configured (local bcrypt reports through AuthCacheEvictions).
+//
+// This covers only the single provider on Config. A registry deployment's
+// caches live in idpRegistry instead, and an LDAP registry cutover explicitly
+// unwires the legacy provider, so the operator-facing metric must sum both —
+// see identityCacheEvictionsTotal, which is what /metrics reads (Codex review,
+// PR #1633).
+//
+// Same meaning as AuthCacheEvictions one layer out, and the same reason to
+// expose it (CHAOS-76): every eviction costs the displaced client a full
+// directory bind or introspection round trip on its next request, or a denial
+// outright while the backend sits in its unreachable cooldown. A climbing
+// counter means either the cap is undersized for real login volume or somebody
+// is flooding the credential path.
+func (c *Config) IdentityCacheEvictions() uint64 {
+	provider := c.snapshotAuthBackend().provider
+	if provider == nil {
+		return 0
+	}
+	if ev, ok := provider.(interface{ CacheEvictions() uint64 }); ok {
+		return ev.CacheEvictions()
+	}
+	return 0
+}
+
 // VerifyAuthFrom is VerifyAuth with the caller's client-fairness key, so the
 // CHAOS-57 verification governor can attribute the bcrypt work. Data-plane
 // callers that know their peer MUST use this: the plain VerifyAuth passes the
@@ -1163,10 +1197,12 @@ func (c *Config) resolveAuthIdentityFromSnapshot(snapshot authBackendSnapshot, c
 	if snapshot.provider == nil && snapshot.user == "" {
 		return nil, false
 	}
-	if resolver, ok := snapshot.provider.(interface {
-		ResolveIdentity(username, credential string) (*Identity, bool)
-	}); ok {
-		return resolver.ResolveIdentity(user, pass)
+	// Prefer the client-attributed form so the caller's fairness key reaches
+	// the provider's result cache (CHAOS-76), through the same helper the
+	// registry dispatch in proxy.go uses. Providers that implement neither
+	// identity form fall through to local verification below.
+	if resolver, ok := snapshot.provider.(identityResolver); ok {
+		return resolveIdentityAttributed(resolver, client, user, pass)
 	}
 	if !c.verifyAuthFrom(snapshot, client, user, pass) {
 		return nil, false
