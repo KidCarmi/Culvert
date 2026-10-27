@@ -1,0 +1,367 @@
+=== identity
+boot_id=01e9f070-c5e0-405d-8aeb-927319d80a07
+uname=Linux culvert-lab 7.0.0-38-generic #38~24.04.4-Ubuntu SMP PREEMPT_DYNAMIC Mon Sep 14 16:37:11 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+cmdline=BOOT_IMAGE=/vmlinuz-7.0.0-38-generic root=UUID=1bfefdfb-34c9-46c7-854f-399d0a1dea04 ro console=tty1 console=ttyS0 splash plymouth.ignore-serial-consoles nomodeset
+build-info-sha256=27aa807393dd77431cafdab2040ad9de18429b6d77f9a66b7bcdcc9ba0606560
+build-git-commit="git_commit": "b910508629e9d80352067bc8ec608753ddf0924e"
+pkg docker-ce=5:29.9.0-1~ubuntu.24.04~noble hi 
+pkg docker-ce-cli=5:29.9.0-1~ubuntu.24.04~noble hi 
+pkg containerd.io=2.4.1-2~ubuntu.24.04~noble hi 
+pkg docker-compose-plugin=5.6.1-1~ubuntu.24.04~noble hi 
+pkg linux-image-virtual-hwe-24.04=7.0.0-38.38~24.04.4 ii 
+pkg bpftrace=0.20.2-1ubuntu4.3 ii 
+pkg bpfcc-tools=0.29.1+ds-1ubuntu7 ii 
+pkg linux-tools-common=6.8.0-147.147 ii 
+pkg ubuntu-kernel-accessories=1.539.2 ii 
+=== modules-before
+aesni_intel 0 -
+async_memcpy 2 raid456,async_raid6_recov,
+async_pq 2 raid456,async_raid6_recov,
+async_raid6_recov 1 raid456,
+async_tx 5 raid456,async_raid6_recov,async_memcpy,async_pq,async_xor,
+async_xor 3 raid456,async_raid6_recov,async_pq,
+autofs4 2 -
+binfmt_misc 1 -
+bridge 0 -
+btrfs 0 -
+dm_multipath 0 -
+dmi_sysfs 0 -
+drm_ttm_helper 0 -
+e1000 0 -
+efi_pstore 0 -
+floppy 0 -
+ghash_clmulni_intel 0 -
+i2c_piix4 0 -
+i2c_smbus 1 i2c_piix4,
+input_leds 0 -
+intel_rapl_common 1 intel_rapl_msr,
+intel_rapl_msr 0 -
+ip_set 1 xt_set,
+ip_tables 0 -
+isofs 0 -
+joydev 0 -
+libblake2b 1 btrfs,
+linear 0 -
+llc 2 bridge,stp,
+mac_hid 0 -
+msr 0 -
+nf_conntrack 6 xt_nat,nf_conntrack_netlink,xt_conntrack,xt_MASQUERADE,nf_nat,nft_ct,
+nf_conntrack_netlink 0 -
+nf_defrag_ipv4 1 nf_conntrack,
+nf_defrag_ipv6 1 nf_conntrack,
+nf_nat 3 xt_nat,xt_MASQUERADE,nft_chain_nat,
+nf_tables 242 nft_chain_nat,nft_compat,nft_ct,
+nfnetlink 7 nf_conntrack_netlink,ip_set,nft_compat,nf_tables,
+nft_chain_nat 9 -
+nft_compat 18 -
+nft_ct 2 -
+nls_iso8859_1 1 -
+overlay 2 -
+parport 2 ppdev,parport_pc,
+parport_pc 0 -
+pata_acpi 0 -
+ppdev 0 -
+psmouse 0 -
+qemu_fw_cfg 0 -
+raid0 0 -
+raid1 0 -
+raid10 0 -
+raid456 0 -
+raid6_pq 4 btrfs,raid456,async_raid6_recov,async_pq,
+sch_fq_codel 2 -
+serio_raw 0 -
+stp 1 bridge,
+tls 0 -
+ttm 1 drm_ttm_helper,
+veth 0 -
+vga16fb 0 -
+vgastate 1 vga16fb,
+x_tables 8 xt_nat,xt_tcpudp,xt_conntrack,xt_MASQUERADE,xt_set,xt_addrtype,nft_compat,ip_tables,
+xfrm_algo 1 xfrm_user,
+xfrm_user 1 -
+xor 2 btrfs,async_xor,
+xt_MASQUERADE 2 -
+xt_addrtype 4 -
+xt_conntrack 2 -
+xt_nat 10 -
+xt_set 0 -
+xt_tcpudp 0 -
+=== effective module policy
+modules_disabled=0 modprobe=/sbin/modprobe
+policy-files:
+total 44
+-rw-r--r-- 1 root root  325 Apr 18  2024 blacklist-ath_pci.conf
+-rw-r--r-- 1 root root  210 Apr 18  2024 blacklist-firewire.conf
+-rw-r--r-- 1 root root  677 Apr 18  2024 blacklist-framebuffer.conf
+-rw-r--r-- 1 root root  583 Apr 18  2024 blacklist-rare-network.conf
+-rw-r--r-- 1 root root 1518 Apr 18  2024 blacklist.conf
+-rw-r--r-- 1 root root 9857 Oct 25 10:38 culvert-unused.conf
+-rw-r--r-- 1 root root  264 Apr 30 12:32 disable-algif_aead.conf
+-rw-r--r-- 1 root root  347 Apr 18  2024 iwlwifi.conf
+-rw-r--r-- 1 root root  379 Jul 29  2024 mdadm.conf
+1bca34650bd5b96b3b0a5c880f04e01e8151cae85af7d69c9a00adfaaca6c5bd  /etc/modprobe.d/blacklist-ath_pci.conf
+37c8be8a4b292b28bf683edf18ca2ad77467d0384b6c5c030c11f8d1de4e822d  /etc/modprobe.d/blacklist-firewire.conf
+383278f65de289767c8c0564fa31038a3980e76223160c4c3fb70ddc6fcf403a  /etc/modprobe.d/blacklist-framebuffer.conf
+d63190beb14c3ab0ad848d9ad17cf7eafecf3df9814fe390107ce68659d4d73c  /etc/modprobe.d/blacklist-rare-network.conf
+6854dbe3a233ab035ae6593c9bb577d1859d32a934e6fb2d60aaba99a4e45cb8  /etc/modprobe.d/blacklist.conf
+320246254eb6454b0d5bca53beafdf752626e754d702f6ea0760a190762775b5  /etc/modprobe.d/culvert-unused.conf
+3edb721c3498e104e490b3a96195fe49dc0d88846c50d48605907cbe0b7fbf7a  /etc/modprobe.d/disable-algif_aead.conf
+ff7191f16a3d71e46b980fccabae0b20cfefe9254119e84e4fd6b85ebf3e8170  /etc/modprobe.d/iwlwifi.conf
+f1e2f3f7d12a9401012b9acb8324f949eb623a58f786536845fd5c70888107be  /etc/modprobe.d/mdadm.conf
+showconfig blacklist+install lines=272 sha256=21e773ca383065902e90968c89035f074313deaa4b471c79155b0a444abf433e
+policy fou:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/udp_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/ip6_udp_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/ip_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/fou.ko.zst  rc=0
+policy fou6:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/udp_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/ip6_udp_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/tunnel6.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/ip6_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/ip_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/fou.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/fou6.ko.zst  rc=0
+policy nvmet: blacklist nvmet;install nvmet /bin/false; | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/crypto/hkdf.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/common/nvme-auth.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/common/nvme-keyring.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/host/nvme-core.ko.zst  install /bin/false  rc=0
+policy nvmet_tcp: blacklist nvmet_tcp;install nvmet_tcp /bin/false; | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/crypto/hkdf.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/common/nvme-auth.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/common/nvme-keyring.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/host/nvme-core.ko.zst  install /bin/false  install /bin/false  rc=0
+policy nvmet_rdma:  | dry-run: install /bin/false  install /bin/false  install /bin/false  install /bin/false  insmod /lib/modules/7.0.0-38-generic/kernel/crypto/hkdf.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/common/nvme-auth.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/common/nvme-keyring.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/host/nvme-core.ko.zst  install /bin/false  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/target/nvmet-rdma.ko.zst  rc=0
+policy nvmet_fc:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/crypto/hkdf.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/common/nvme-auth.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/common/nvme-keyring.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/host/nvme-core.ko.zst  install /bin/false  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/target/nvmet-fc.ko.zst  rc=0
+policy nvme_loop:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/crypto/hkdf.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/common/nvme-auth.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/common/nvme-keyring.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/host/nvme-core.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/host/nvme-fabrics.ko.zst  install /bin/false  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/nvme/target/nvme-loop.ko.zst  rc=0
+policy stmmac:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/phy/phylink.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/pcs/pcs_xpcs.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/stmmac.ko.zst  rc=0
+policy stmmac_pci:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/phy/phylink.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/pcs/pcs_xpcs.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/stmmac.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/stmmac_libpci.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/stmmac-pci.ko.zst  rc=0
+policy stmmac_platform:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/phy/phylink.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/pcs/pcs_xpcs.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/stmmac.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/stmmac-platform.ko.zst  rc=0
+policy dwmac_generic:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/phy/phylink.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/pcs/pcs_xpcs.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/stmmac.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/stmmac-platform.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/dwmac-generic.ko.zst  rc=0
+policy dwmac_intel:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/phy/phylink.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/pcs/pcs_xpcs.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/stmmac.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/ethernet/stmicro/stmmac/dwmac-intel.ko.zst  rc=0
+policy ip_vs: blacklist ip_vs;install ip_vs /bin/false; | dry-run: install /bin/false  rc=0
+policy ipip:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/ip_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/tunnel4.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/ipip.ko.zst  rc=0
+policy sit:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/ip_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/tunnel4.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/sit.ko.zst  rc=0
+policy gre:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/gre.ko.zst  rc=0
+policy ip_gre:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/gre.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/ip_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/ip_gre.ko.zst  rc=0
+policy ip6_tunnel:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/tunnel6.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/ip6_tunnel.ko.zst  rc=0
+policy vxlan: blacklist vxlan;install vxlan /bin/false; | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/udp_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/ip6_udp_tunnel.ko.zst  install /bin/false  rc=0
+policy geneve:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv4/udp_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/net/ipv6/ip6_udp_tunnel.ko.zst  insmod /lib/modules/7.0.0-38-generic/kernel/drivers/net/geneve.ko.zst  rc=0
+policy bpfilter:  | dry-run: modprobe: FATAL: Module bpfilter not found in directory /lib/modules/7.0.0-38-generic rc=1
+policy binder_linux:  | dry-run: insmod /lib/modules/7.0.0-38-generic/kernel/drivers/android/binder_linux.ko.zst  rc=0
+=== devices + driver bindings (PCI)
+pci 0000:00:00.0 class=0x060000 vendor=0x8086 device=0x1237 driver=none alias-resolves-to=[intel_agp ]
+pci 0000:00:01.0 class=0x060100 vendor=0x8086 device=0x7000 driver=none alias-resolves-to=[]
+pci 0000:00:01.1 class=0x010180 vendor=0x8086 device=0x7010 driver=ata_piix alias-resolves-to=[pata_acpi ]
+pci 0000:00:01.3 class=0x068000 vendor=0x8086 device=0x7113 driver=piix4_smbus alias-resolves-to=[i2c_piix4 ]
+pci 0000:00:02.0 class=0x030000 vendor=0x15ad device=0x0405 driver=none alias-resolves-to=[vmwgfx ]
+pci 0000:00:03.0 class=0x010000 vendor=0x1af4 device=0x1004 driver=virtio-pci alias-resolves-to=[virtio_pci ]
+pci 0000:00:04.0 class=0x020000 vendor=0x8086 device=0x100e driver=e1000 alias-resolves-to=[e1000 ]
+=== platform/other buses with a bound driver
+platform LNXPWRBN:00 driver=acpi-button
+platform QEMU0002:00 driver=fw_cfg
+platform alarmtimer.0.auto driver=alarmtimer
+platform floppy.0 driver=floppy
+platform i8042 driver=i8042
+platform kgdboc driver=kgdboc
+platform serial8250 driver=serial8250
+virtio virtio0 driver=virtio_scsi
+scsi 0:0:0:0 driver=sd
+scsi 2:0:0:0 driver=sr
+net-ifaces:
+net br-0791bdc05a69 driver= type=1 flags=0x1003
+net docker0 driver= type=1 flags=0x1003
+net ens4 driver=e1000 type=1 flags=0x1003
+net lo driver= type=772 flags=0x9
+net veth38c8c0f driver= type=1 flags=0x1303
+net vethb84fcd7 driver= type=1 flags=0x1303
+any stmmac/dwmac bound: 
+=== network namespaces (unique net ns -> one pid each, read via /proc/PID/net, no nsenter for sockets)
+net:[4026531833] 1
+net:[4026532221] 2201
+net:[4026532291] 3781
+--- ns net:[4026531833] via pid 1 (systemd)
+udp4 sockets (local ip:port hex, st, uid):
+  udp4 3600007F:0035 07 991
+  udp4 3500007F:0035 07 991
+  udp4 0F02000A:0044 07 998
+udp6 sockets:
+tcp listeners (st 0A):
+  tcp4 00000000:0016
+  tcp4 3600007F:0035
+  tcp4 3500007F:0035
+  tcp4 00000000:2382
+  tcp4 00000000:1F90
+  tcp6 00000000000000000000000000000000:0016
+  tcp6 00000000000000000000000000000000:2382
+  tcp6 00000000000000000000000000000000:1F90
+links:
+  1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00 promiscuity 0  allmulti 0 minmtu 0 maxmtu 0 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+  2: ens4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000\    link/ether 52:54:00:12:34:56 brd ff:ff:ff:ff:ff:ff promiscuity 0  allmulti 0 minmtu 46 maxmtu 16110 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 parentbus pci parentdev 0000:00:04.0 \    altname enp0s4
+  3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN mode DEFAULT group default \    link/ether 62:24:cb:64:6c:05 brd ff:ff:ff:ff:ff:ff promiscuity 0  allmulti 0 minmtu 68 maxmtu 65535 \    bridge forward_delay 1500 hello_time 200 max_age 2000 ageing_time 30000 stp_state 0 priority 32768 vlan_filtering 0 vlan_protocol 802.1Q bridge_id 8000.62:24:cb:64:6c:5 designated_root 8000.62:24:cb:64:6c:5 root_port 0 root_path_cost 0 topology_change 0 topology_change_detected 0 hello_timer    0.00 tcn_timer    0.00 topology_change_timer    0.00 gc_timer  246.62 vlan_default_pvid 1 vlan_stats_enabled 0 vlan_stats_per_port 0 group_fwd_mask 0 group_address 01:80:c2:00:00:00 mcast_snooping 1 no_linklocal_learn 0 mcast_vlan_snooping 0 mcast_router 1 mcast_query_use_ifaddr 0 mcast_querier 0 mcast_hash_elasticity 16 mcast_hash_max 4096 mcast_last_member_count 2 mcast_startup_query_count 2 mcast_last_member_interval 100 mcast_membership_interval 26000 mcast_querier_interval 25500 mcast_query_interval 12500 mcast_query_response_interval 1000 mcast_startup_query_interval 3125 mcast_stats_enabled 0 mcast_igmp_version 2 mcast_mld_version 1 nf_call_iptables 0 nf_call_ip6tables 0 nf_call_arptables 0 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+  6: br-0791bdc05a69: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \    link/ether 3e:cc:1b:6f:9b:d7 brd ff:ff:ff:ff:ff:ff promiscuity 0  allmulti 0 minmtu 68 maxmtu 65535 \    bridge forward_delay 1500 hello_time 200 max_age 2000 ageing_time 30000 stp_state 0 priority 32768 vlan_filtering 0 vlan_protocol 802.1Q bridge_id 8000.3e:cc:1b:6f:9b:d7 designated_root 8000.3e:cc:1b:6f:9b:d7 root_port 0 root_path_cost 0 topology_change 0 topology_change_detected 0 hello_timer    0.00 tcn_timer    0.00 topology_change_timer    0.00 gc_timer  255.54 vlan_default_pvid 1 vlan_stats_enabled 0 vlan_stats_per_port 0 group_fwd_mask 0 group_address 01:80:c2:00:00:00 mcast_snooping 1 no_linklocal_learn 0 mcast_vlan_snooping 0 mcast_router 1 mcast_query_use_ifaddr 0 mcast_querier 0 mcast_hash_elasticity 16 mcast_hash_max 4096 mcast_last_member_count 2 mcast_startup_query_count 2 mcast_last_member_interval 100 mcast_membership_interval 26000 mcast_querier_interval 25500 mcast_query_interval 12500 mcast_query_response_interval 1000 mcast_startup_query_interval 3125 mcast_stats_enabled 0 mcast_igmp_version 2 mcast_mld_version 1 nf_call_iptables 0 nf_call_ip6tables 0 nf_call_arptables 0 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+  7: vethb84fcd7@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-0791bdc05a69 state UP mode DEFAULT group default \    link/ether 5a:4c:a1:c8:fd:35 brd ff:ff:ff:ff:ff:ff link-netnsid 0 promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 \    veth \    bridge_slave state forwarding priority 32 cost 2 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.3e:cc:1b:6f:9b:d7 designated_root 8000.3e:cc:1b:6f:9b:d7 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 2 numrxqueues 2 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+  12: veth38c8c0f@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-0791bdc05a69 state UP mode DEFAULT group default \    link/ether 4e:9e:3a:10:fc:e9 brd ff:ff:ff:ff:ff:ff link-netnsid 1 promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 \    veth \    bridge_slave state forwarding priority 32 cost 2 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8002 port_no 0x2 designated_port 32770 designated_cost 0 designated_bridge 8000.3e:cc:1b:6f:9b:d7 designated_root 8000.3e:cc:1b:6f:9b:d7 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer    0.00 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off addrgenmode eui64 numtxqueues 2 numrxqueues 2 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+  [ip-link-exit=0]
+sysctls:
+  net/ipv4/ip_forward=1
+  net/ipv6/conf/all/forwarding=0
+  net/ipv6/conf/all/disable_ipv6=0
+  net/ipv4/conf/all/rp_filter=2
+  net/bridge/bridge-nf-call-iptables=absent
+ip_vs: 
+--- ns net:[4026532221] via pid 2201 (init)
+udp4 sockets (local ip:port hex, st, uid):
+  udp4 0B00007F:CECE 07 0
+udp6 sockets:
+tcp listeners (st 0A):
+  tcp4 00000000:0CEE
+  tcp4 0B00007F:941B
+  tcp6 00000000000000000000000000000000:0CEE
+links:
+  1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00 promiscuity 0  allmulti 0 minmtu 0 maxmtu 0 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+  2: eth0@if7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \    link/ether 16:30:c4:ee:f2:dc brd ff:ff:ff:ff:ff:ff link-netnsid 0 promiscuity 0  allmulti 0 minmtu 68 maxmtu 65535 \    veth addrgenmode eui64 numtxqueues 2 numrxqueues 2 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+  [ip-link-exit=0]
+sysctls:
+  net/ipv4/ip_forward=1
+  net/ipv6/conf/all/forwarding=0
+  net/ipv6/conf/all/disable_ipv6=0
+  net/ipv4/conf/all/rp_filter=2
+  net/bridge/bridge-nf-call-iptables=absent
+ip_vs: 
+--- ns net:[4026532291] via pid 3781 (culvert)
+udp4 sockets (local ip:port hex, st, uid):
+  udp4 0B00007F:C21B 07 0
+udp6 sockets:
+tcp listeners (st 0A):
+  tcp4 0B00007F:A13B
+  tcp6 00000000000000000000000000000000:1F90
+  tcp6 00000000000000000000000000000000:2382
+links:
+  1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00 promiscuity 0  allmulti 0 minmtu 0 maxmtu 0 addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+  2: eth0@if12: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \    link/ether 32:b2:8c:61:32:5f brd ff:ff:ff:ff:ff:ff link-netnsid 0 promiscuity 0  allmulti 0 minmtu 68 maxmtu 65535 \    veth addrgenmode eui64 numtxqueues 2 numrxqueues 2 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+  [ip-link-exit=0]
+sysctls:
+  net/ipv4/ip_forward=1
+  net/ipv6/conf/all/forwarding=0
+  net/ipv6/conf/all/disable_ipv6=0
+  net/ipv4/conf/all/rp_filter=2
+  net/bridge/bridge-nf-call-iptables=absent
+ip_vs: 
+=== FOU/GUE (only queried if the module is already loaded; never autoloaded)
+fou not loaded: no FOU/GUE receive port can exist
+=== checksum/offload features (loaded drivers only)
+-- ens4
+  rx-checksumming: off
+  tx-checksumming: on
+  	tx-checksum-ipv4: off [fixed]
+  	tx-checksum-ip-generic: on
+  	tx-checksum-ipv6: off [fixed]
+  	tx-checksum-fcoe-crc: off [fixed]
+  	tx-checksum-sctp: off [fixed]
+  tcp-segmentation-offload: on
+  	tx-tcp-segmentation: on
+  	tx-tcp-ecn-segmentation: off [fixed]
+  	tx-tcp-mangleid-segmentation: off
+  	tx-tcp6-segmentation: off [fixed]
+  	tx-tcp-accecn-segmentation: off [fixed]
+  generic-segmentation-offload: on
+  generic-receive-offload: on
+  large-receive-offload: off [fixed]
+  tx-fcoe-segmentation: off [fixed]
+  tx-gre-segmentation: off [fixed]
+  tx-gre-csum-segmentation: off [fixed]
+  tx-ipxip4-segmentation: off [fixed]
+  tx-ipxip6-segmentation: off [fixed]
+  tx-udp_tnl-segmentation: off [fixed]
+  tx-udp_tnl-csum-segmentation: off [fixed]
+  tx-tunnel-remcsum-segmentation: off [fixed]
+  tx-sctp-segmentation: off [fixed]
+  tx-esp-segmentation: off [fixed]
+  tx-udp-segmentation: off [fixed]
+=== NVMe target (configfs listed only if already mounted; nothing mounted)
+nvmet modules loaded: 
+/sys/kernel/config
+[findmnt-exit=0]
+/sys/kernel/config/nvmet absent
+nvme listener ports (4420 0x1144 / 8009 0x1F49) in the root ns tcp table: 0
+=== capability / syscall / BPF boundaries
+sysctl kernel/unprivileged_bpf_disabled=2
+sysctl net/core/bpf_jit_harden=0
+sysctl kernel/perf_event_paranoid=4
+sysctl kernel/io_uring_disabled=0
+sysctl kernel/apparmor_restrict_unprivileged_userns=1
+sysctl user/max_user_namespaces=12274
+sysctl kernel/yama/ptrace_scope=1
+sysctl kernel/kptr_restrict=1
+sysctl kernel/dmesg_restrict=1
+sysctl kernel/kexec_load_disabled=0
+sysctl kernel/unprivileged_userfaultfd=absent
+sysctl fs/protected_symlinks=1
+filesystems: nodev configfs nodev debugfs nodev tracefs nodev bpf squashfs fuseblk nodev fuse nodev fusectl nodev overlay 
+mounted special fs:
+/sys/fs/bpf         bpf
+/sys/kernel/debug   debugfs
+/sys/kernel/tracing tracefs
+/sys/kernel/config  configfs
+login-capable accounts: root:/bin/bash sync:/bin/sync culvert:/bin/bash culvert-operator:/opt/culvert-appliance/bin/culvert-access 
+docker group: docker:x:988:
+container /culvert privileged=false capadd=[] capdrop=[] secopt=[] devices=0 pid= net=culvert_default user=proxy ro=false mainpid=3781
+CapEff:	0000000000000000 CapBnd:	00000000a80425fb NoNewPrivs:	0 Seccomp:	2 
+container /culvert-clamav privileged=false capadd=[] capdrop=[] secopt=[] devices=0 pid= net=culvert_default user= ro=false mainpid=2201
+CapEff:	00000000a80425fb CapBnd:	00000000a80425fb NoNewPrivs:	0 Seccomp:	2 
+=== modules-after
+aesni_intel 0 -
+async_memcpy 2 raid456,async_raid6_recov,
+async_pq 2 raid456,async_raid6_recov,
+async_raid6_recov 1 raid456,
+async_tx 5 raid456,async_raid6_recov,async_memcpy,async_pq,async_xor,
+async_xor 3 raid456,async_raid6_recov,async_pq,
+autofs4 2 -
+binfmt_misc 1 -
+bridge 0 -
+btrfs 0 -
+dm_multipath 0 -
+dmi_sysfs 0 -
+drm_ttm_helper 0 -
+e1000 0 -
+efi_pstore 0 -
+floppy 0 -
+ghash_clmulni_intel 0 -
+i2c_piix4 0 -
+i2c_smbus 1 i2c_piix4,
+input_leds 0 -
+intel_rapl_common 1 intel_rapl_msr,
+intel_rapl_msr 0 -
+ip_set 1 xt_set,
+ip_tables 0 -
+isofs 0 -
+joydev 0 -
+libblake2b 1 btrfs,
+linear 0 -
+llc 2 bridge,stp,
+mac_hid 0 -
+msr 0 -
+nf_conntrack 6 xt_nat,nf_conntrack_netlink,xt_conntrack,xt_MASQUERADE,nf_nat,nft_ct,
+nf_conntrack_netlink 0 -
+nf_defrag_ipv4 1 nf_conntrack,
+nf_defrag_ipv6 1 nf_conntrack,
+nf_nat 3 xt_nat,xt_MASQUERADE,nft_chain_nat,
+nf_tables 242 nft_chain_nat,nft_compat,nft_ct,
+nfnetlink 7 nf_conntrack_netlink,ip_set,nft_compat,nf_tables,
+nft_chain_nat 9 -
+nft_compat 18 -
+nft_ct 2 -
+nls_iso8859_1 1 -
+overlay 2 -
+parport 2 ppdev,parport_pc,
+parport_pc 0 -
+pata_acpi 0 -
+ppdev 0 -
+psmouse 0 -
+qemu_fw_cfg 0 -
+raid0 0 -
+raid1 0 -
+raid10 0 -
+raid456 0 -
+raid6_pq 4 btrfs,raid456,async_raid6_recov,async_pq,
+sch_fq_codel 2 -
+serio_raw 0 -
+stp 1 bridge,
+tls 0 -
+ttm 1 drm_ttm_helper,
+veth 0 -
+vga16fb 0 -
+vgastate 1 vga16fb,
+x_tables 8 xt_nat,xt_tcpudp,xt_conntrack,xt_MASQUERADE,xt_set,xt_addrtype,nft_compat,ip_tables,
+xfrm_algo 1 xfrm_user,
+xfrm_user 1 -
+xor 2 btrfs,async_xor,
+xt_MASQUERADE 2 -
+xt_addrtype 4 -
+xt_conntrack 2 -
+xt_nat 10 -
+xt_set 0 -
+xt_tcpudp 0 -

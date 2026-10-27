@@ -1,0 +1,42 @@
+Gate · classify diff	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Audit · unsharded race reference	skipped	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · maint-agent (cmd/culvert-maint)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · golangci-lint	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · fmt + vet + build	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · perf-regression (allocs/op)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · MCP design predicates	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · gitleaks	failure	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · proxy traffic smoke (advisory)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · govulncheck + gosec	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · agent guidance (routes + preservation)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · go test -race (sharded) / Race · compile root once + partition	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · go test -race (sharded) / Race · lane coverage universe	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · frontend / Frontend · verify + determinism	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · frontend / Frontend · real-binary browser smoke	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · go test -race (sharded) / Race · non-root packages	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · go test -race (sharded) / Race · privileged test (root)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · go test -race (sharded) / Race · root shard 1	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · go test -race (sharded) / Race · root shard 2	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · go test -race (sharded) / Race · root shard 0	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · go test -race (sharded) / Race · root shard 3	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · go test -race (sharded) / Race · verdict + coverage evidence	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Gate · coverage floors (global + per-file)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Audit · sharded vs unsharded	skipped	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+✅ Fast PR Gate — APPROVED	failure	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · classify diff	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · packaging (shellcheck/sudoers/systemd)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · determinism (shuffle, count=2)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · hadolint	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · staticcheck	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · F-DISK-1 full-filesystem stores (root tmpfs)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · appliance console + power/lifecycle regressions / ssh-boundary	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · appliance console + power/lifecycle regressions / console	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · go-licenses	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · terraform (fmt/validate)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · build image (once) / Build proxy image (amd64, artifact-shared)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · compose validation	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · appliance scenario A with real ClamAV	failure	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · appliance lifecycle (real images)	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · appliance maintenance-agent flow	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+Deep · trivy image scan	success	c1b08dbefd9233f29de0dafd09d631c0d99fc748
+✅ Deep PR Gate — APPROVED	failure	c1b08dbefd9233f29de0dafd09d631c0d99fc748

@@ -1,0 +1,8 @@
+variant=m2-engine-b9105086
+lab_commit=0071fc13b60a37b157ed9c9d5fff13a31967b60a
+image_source=b910508629e9d80352067bc8ec608753ddf0924e
+provisioning_source=b910508629e9d80352067bc8ec608753ddf0924e
+source_image_run=40133521510 tar_sha256=1db620abbf4fe34424749e64a4e8b96861a945a201583ab386d47926cd7ec7fb from=
+expected_image_id=sha256:ca27cf9a645431ed77255efa0897daabb63bbed9c6b4acd6ac574820422d186c
+superseded_ova_sha256=e24eb542f973fb70360bad5124ef81fdab8b6f8d67af601720613cbcca3700a4 (NOT the artifact booted here)
+engine_overlay=LAB-ONLY: docker-ce_29.9.2-1~ubuntu.24.04~noble_amd64.deb=95ddf7a2d8b8c0eb82d8597d4d604e294dcf741081f2e228524d5ab9bfd7c8ae docker-ce-cli_29.9.2-1~ubuntu.24.04~noble_amd64.deb=74747b5c99000279b9b2c7eb82543b4121d8436a58aa3be7e78ac6681d74794f containerd.io_2.4.2-3~ubuntu.24.04~noble_amd64.deb=f811ab57d1f4bb0cce19df7d526da8c711d8ebea0447cc83da1999188e664122 installed into the disposable disk before first boot; the booted disk is NOT the OVA disk (OVA bytes verified, unchanged)

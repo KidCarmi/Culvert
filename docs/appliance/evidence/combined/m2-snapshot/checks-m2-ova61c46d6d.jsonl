@@ -1,0 +1,17 @@
+{"run":"20261027T082323Z","step":"P","check":"tools","result":"pass","detail":"qemu, qemu-img, ssh, curl, python3, openssl, iso tool present"}
+{"run":"20261027T082323Z","step":"P","check":"memory","result":"pass","detail":"14631 MiB available (need 6144)"}
+{"run":"20261027T082323Z","step":"P","check":"disk","result":"pass","detail":"82 GiB free at //culvert-lab/lab (need 20: OVA + VMDK + base + overlay growth)"}
+{"run":"20261027T082323Z","step":"P","check":"accel","result":"pass","detail":"accel=kvm (kvm usable: yes)"}
+{"run":"20261027T082323Z","step":"1","check":"ova-sha256","result":"pass","detail":"culvert-appliance-1.0.327-candidate.gb910508629e9-ubuntu-24.04.ova sha256 61c46d6db6603d76edbb0d64327bed85e76bea86d24457e9f3ae36e71bd5854a"}
+{"run":"20261027T082323Z","step":"1","check":"ova-manifest","result":"pass","detail":"every .mf digest matches"}
+{"run":"20261027T082323Z","step":"1","check":"disk-chain","result":"pass","detail":"base.qcow2 (0444, from the OVA's own VMDK) \u2190 overlay.qcow2 (disposable)"}
+{"run":"20261027T082323Z","step":"2","check":"boot-started","result":"pass","detail":"qemu pid 8330 accel=kvm"}
+{"run":"20261027T082323Z","step":"2","check":"kernel-started","result":"pass","detail":"[    0.000000] Linux version 7.0.0-38-generic (buildd@lcy02-amd64-063) (x86_64-linux-gnu-g after 5s"}
+{"run":"20261027T082323Z","step":"2","check":"operator-ssh-up","result":"pass","detail":"culvert-operator SSH (OVF-delivered key, status-json) after 23s"}
+{"run":"20261027T082323Z","step":"2","check":"firstboot-complete","result":"pass","detail":"status-json: complete recorded, phase provisioned, 55s from power-on"}
+{"run":"20261027T082323Z","step":"M2","check":"snapshot","result":"pass","detail":"boot_id=01e9f070-c5e0-405d-8aeb-927319d80a07; build-git-commit=\"git_commit\": \"b910508629e9d80352067bc8ec608753ddf0924e\"; 72 modules loaded"}
+{"run":"20261027T082323Z","step":"M2","check":"snapshot-loaded-nothing","result":"pass","detail":"the loaded-module set is identical before and after the snapshot"}
+{"run":"20261027T082323Z","step":"M2","check":"fou-gue","result":"info","detail":"fou not loaded: no FOU/GUE receive port can exist"}
+{"run":"20261027T082323Z","step":"M2","check":"stmmac","result":"info","detail":"any stmmac/dwmac bound: ; NIC net ens4 driver=e1000 type=1 flags=0x1003 "}
+{"run":"20261027T082323Z","step":"M2","check":"nvmet","result":"info","detail":"nvmet modules loaded: ; /sys/kernel/config/nvmet absent; nvme listener ports (4420 0x1144 / 8009 0x1F49) in the root ns tcp table: 0"}
+{"run":"20261027T082323Z","step":"M2","check":"namespaces","result":"info","detail":"3 network namespace(s) observed"}

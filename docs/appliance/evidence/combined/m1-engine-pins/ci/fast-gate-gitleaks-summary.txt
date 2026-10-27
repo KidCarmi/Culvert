@@ -1,0 +1,33 @@
+# Fast gate run 40472535523, job 'Gate · gitleaks' — dispatch mode on c1b08dbe
+gitleaks cmd: gitleaks detect --redact -v --exit-code=2 --report-format=sarif --report-path=results.sarif --log-level=debug
+8:19AM INF 6939 commits scanned.
+8:19AM INF scanned ~149399405 bytes (149.40 MB) in 36.7s
+8:19AM WRN leaks found: 274
+# findings by commit. None was introduced by review/1528-m1-engine-pins (b9105086..c1b08dbe, 0 findings in a local gitleaks git scan of that range). Only b8ac5ac2 is an ancestor: it is on main at/before cutoff a27cffb2 (1 finding, a commit hash in a docker/compose advisory URL inside govulncheck JSON). Every other commit is on unrelated branches that the dispatch checkout fetched:
+    252 f0fe7b90cd6abc3c44f0a3068887d5902e305ab5
+      7 2f451f1b116e5a5c0ef25819d07b5e0af624e676
+      5 71e3851a1aa205d85d5ba623b63914cd6c348a6c
+      2 f2e4406ef9a5aa2df89111ee98431f6138e15730
+      2 01850da7c2ad5f3395e4a817350afe77b1ce18c4
+      1 b8ac5ac200953de0bf62141db9dd7e41a0e11ab0
+      1 b54b8a9182bf3023fb7c20fdee0fc1a5e86f703b
+      1 aa278d95fe4b42ab874e2ff02b4b2db144a95d46
+      1 9b7b4a830b37b40cebb279892551884cbd83f670
+      1 5f781e980c6cbd4417489a202ba8787cf061e6a0
+      1 21505ad2541d5be6135ed84fc33697146cf75b8e
+      1 07337b796a0edeceaf83e5f313c9e04456ffad6b
+# findings by file:
+    123 evidence/security-r6-r7-1528/r6-compose/govulncheck-561.json
+    123 evidence/security-r6-r7-1528/r6-compose/govulncheck-560.json
+      7 docs/appliance/evidence/7e-esxi-20261008/browser-campaign-2-aggregate.json
+      5 docs/appliance/evidence/combined/freeze-b9105086/CI-BINDING.md
+      3 evidence/security-r6-r7-1528/r6-compose/buildinfo-561.txt
+      3 evidence/security-r6-r7-1528/r6-compose/buildinfo-560.txt
+      2 docs/appliance/evidence/local-esxi-4f27d945-20261004.json
+      2 chaos79_dp_sync_worker_panic_test.go
+      1 test/e2e/appliance/esxi/test_pixel_console.py
+      1 roadmap/CHAOS-ENGINEERING-REVIEW.md
+      1 internal/hashcache/hashcache_evict_bench_test.go
+      1 install_script_session_secret_empty_env_test.go
+      1 docs/appliance/evidence/cd8-esxi-20261008/esxi-visual-followup.json
+      1 auth_password_change_failure_audit_test.go
