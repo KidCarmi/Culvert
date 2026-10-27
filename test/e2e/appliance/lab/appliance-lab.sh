@@ -342,6 +342,10 @@ PY
   bl '{"available":true,"count":2,"backups":[{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true},{"filename":"baseline.enc","path":"/backup/baseline.enc","size_bytes":4096,"encrypted":true}]}' 0.8 FAIL "duplicate entry"
   bl '{"available":true,"count":0,"backups":[],"note":"baseline.enc"}' 0.8 FAIL "filename only in another field"
   rm -f "$d/exp.json"; bl "$good" 0.8 FAIL "no pre-reboot baseline"
+  # #1528 M2: the checkpoint verdicts fail closed (m2-verdict-selftest.py:
+  # a passing fixture, valid-empty cases, and one case per failure mode).
+  if python3 -I "$HERE/m2-verdict-selftest.py" > "$d/m2-selftest.txt" 2>&1; then log "selftest ok: m2 verdicts ($(tail -1 "$d/m2-selftest.txt"))"
+  else log "selftest FAILED: m2 verdicts: $(grep -E 'WRONG|Error|Traceback' "$d/m2-selftest.txt" | head -5 | tr '\n' ' ')"; rc=1; fi
   rm -rf "$d"; return "$rc"; }
 through_proxy() { curl -sS -m 20 -x "$P" -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
 # Threat-domain allowlist FIXTURES + survival proof (owner P1, PR #1528). The
@@ -2893,116 +2897,28 @@ m2probe_build() {
     go build -trimpath -ldflags='-s -w' -o "$WORK/m2probe/m2probe" .) > "$EV/M2H-probe-build.txt" 2>&1 || return 1
   { go version; sha256sum "$WORK/m2probe/m2probe"; } >> "$EV/M2H-probe-build.txt" 2>&1
 }
-m2_checkpoint() { local tag="$1" f="$EV/M2H-$1.txt" sum pid bad="" pre="" cl="" c u l
+m2_checkpoint() { local tag="$1" f="$EV/M2H-$1.txt" sum pid rc=0 st name detail n=0
   [[ "${LAB_M2_HARDENING:-0}" == 1 ]] || return 0
   if [[ ! -s "$WORK/m2probe/m2probe" ]] && ! m2probe_build; then
     check M2H "$tag-hardening" fail "the in-container probe did not build: $(tail -3 "$EV/M2H-probe-build.txt" | tr '\n' ' ')"; return 0; fi
   sum="$(sha256sum "$WORK/m2probe/m2probe" | cut -c1-64)"
   python3 -m http.server "$LAB_M2PROBE_PORT" --bind 127.0.0.1 --directory "$WORK/m2probe" > "$WORK/m2probe-http.log" 2>&1 &
   pid=$!; sleep 1
-  { printf 'M2SUM=%q\nM2URL=%q\n' "$sum" "http://10.0.2.2:$LAB_M2PROBE_PORT/m2probe"; cat <<'EOS'; } | gpriv --timeout 300 > "$f" 2>&1 || true
-echo "=== m2 host"
-echo "m2-boot-id=$(cat /proc/sys/kernel/random/boot_id)"
-echo "m2-io_uring_disabled=$(sysctl -n kernel.io_uring_disabled 2>/dev/null || echo unset)"
-echo "m2-sysctl-file $(sha256sum /etc/sysctl.d/99-culvert-hardening.conf 2>/dev/null | cut -d' ' -f1 || echo missing)"
-echo "m2-host-io_uring_setup=$(python3 -c 'import ctypes,errno
-l=ctypes.CDLL(None,use_errno=True); p=ctypes.create_string_buffer(120)
-r=l.syscall(425,1,p); e=ctypes.get_errno()
-print("opened" if r>=0 else "errno:"+errno.errorcode.get(e,str(e)))' 2>&1)"
-# The sysctl refuses NEW rings only; a ring created before it took effect
-# keeps working. Count every io_uring file descriptor any process holds.
-n=0; for l in /proc/[0-9]*/fd/*; do
-  [ "$(readlink "$l" 2>/dev/null)" = 'anon_inode:[io_uring]' ] && { n=$((n+1)); echo "m2-io_uring-fd $l"; }; done
-echo "m2-io_uring-fds=$n"
-echo "=== m2 containers"
-curl -fsS -m 30 -o /run/culvert-lab-m2probe "$M2URL" || echo "m2-probe-fetch-failed"
-got="$(sha256sum /run/culvert-lab-m2probe 2>/dev/null | cut -c1-64)"
-echo "m2-probe-sha256 want=$M2SUM got=${got:-none}"
-chmod 0755 /run/culvert-lab-m2probe 2>/dev/null || true
-for c in culvert culvert-clamav; do
-  echo "m2-container $c $(docker inspect -f 'id={{printf "%.12s" .Id}} started={{.State.StartedAt}} restarts={{.RestartCount}} user={{.Config.User}} capdrop={{.HostConfig.CapDrop}} capadd={{.HostConfig.CapAdd}} privileged={{.HostConfig.Privileged}} secopt={{.HostConfig.SecurityOpt}}' "$c" 2>&1)"
-  for p in $(docker top "$c" -eo pid 2>/dev/null | tail -n +2); do
-    python3 -c 'import sys
-c,p=sys.argv[1:3]; d={}
-for l in open("/proc/%s/status" % p):
-    k,_,v=l.partition(":"); d[k]=v.strip()
-e=int(d["CapEff"],16); b=int(d["CapBnd"],16)
-print("m2-proc %s %s comm=%s uid=%s capeff=%s capbnd=%s netraw-eff=%d netraw-bnd=%d netadmin-bnd=%d sysadmin-bnd=%d seccomp=%s" % (c,p,open("/proc/%s/comm" % p).read().strip().replace(" ","_"),d["Uid"].split()[1],d["CapEff"],d["CapBnd"],(e>>13)&1,(b>>13)&1,(b>>12)&1,(b>>21)&1,d.get("Seccomp")))' "$c" "$p" 2>/dev/null || echo "m2-proc-unreadable $c $p"
-  done
-  if [ "$got" = "$M2SUM" ] && docker cp /run/culvert-lab-m2probe "$c:/tmp/.culvert-m2probe" >/dev/null 2>&1; then
-    o="$(docker exec -u 0 "$c" /tmp/.culvert-m2probe 2>&1)"; echo "m2-probe $c as=root rc=$? $o"
-    o="$(docker exec "$c" /tmp/.culvert-m2probe 2>&1)"; echo "m2-probe $c as=default rc=$? $o"
-    docker exec -u 0 "$c" rm -f /tmp/.culvert-m2probe; echo "m2-probe-removed $c rc=$?"
-  else echo "m2-probe-not-run $c"; fi
-done
-rm -f /run/culvert-lab-m2probe
-echo "=== m2 clamav regression (NET_RAW dropped, io_uring off)"
-echo "m2-clamav-version $(docker exec culvert-clamav clamdscan --version 2>&1)"
-echo "m2-clamav-eicar $(printf '%s%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$' 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' | docker exec -i culvert-clamav clamdscan --no-summary --stream - 2>&1 | tr '\n' ' ')"
-echo "m2-freshclam $(docker exec culvert-clamav sh -c 'tail -n 200 /var/log/clamav/freshclam.log 2>/dev/null | grep -E "up.to.date|updated|ERROR|WARNING" | tail -3' 2>&1 | tr '\n' ' ')"
-echo "=== m2 network preconditions (read-only; nothing here loads a module)"
-mods=""; for m in 8021q act_ct act_pedit act_mirred act_skbedit sch_taprio sch_mqprio nf_flow_table nft_flow_offload nfnetlink_queue openvswitch ip6_tables ip6t_ah ip6t_frag ip6t_hbh ip6t_rt ip6t_srh nf_socket_ipv6 xt_TPROXY xt_HMARK xt_ipvs xt_l2tp ip_vs ip_vs_pe_sip xen_netback i40e ixgbe mlx5_core; do
-  grep -q "^$m " /proc/modules && mods="$mods $m"; done
-echo "m2-precond-modules-loaded=[${mods# }]"
-dz=""; for m in nf_tables nft_chain_nat nf_conntrack bridge llc veth; do grep -q "^$m " /proc/modules && dz="$dz $m"; done
-echo "m2-by-design-modules-loaded=[${dz# }]"
-echo "m2-nic-drivers $(for i in /sys/class/net/*/device/driver; do basename "$(readlink -f "$i")"; done 2>/dev/null | sort -u | tr '\n' ' ')"
-echo "m2-vlan-links=$(ip -d -o link show 2>/dev/null | grep -c ' vlan protocol ')"
-echo "m2-encap-routes=$( { ip -o -4 route show table all; ip -o -6 route show table all; } 2>/dev/null | grep -c ' encap ')"
-echo "m2-qdisc-kinds=$(tc qdisc show 2>/dev/null | awk '{print $2}' | sort -u | tr '\n' ' ')"
-if command -v nft >/dev/null; then rs="$(nft list ruleset 2>&1)"; echo "m2-ruleset-source=nft"
-elif iptables -V 2>/dev/null | grep -q nf_tables; then rs="$(iptables-save 2>&1; ip6tables-save 2>&1)"; echo "m2-ruleset-source=iptables-nft"
-else rs=""; echo "m2-ruleset-source=unreadable"; fi
-echo "m2-ruleset-lines=$(printf '%s\n' "$rs" | grep -c .)"
-echo "m2-ruleset-hits=$(printf '%s\n' "$rs" | grep -ciE 'flowtable|flow add|FLOWOFFLOAD|NFQUEUE| queue |exthdr|TPROXY|HMARK')"
-echo "m2-ruleset-tables $(nft list tables 2>/dev/null | tr '\n' ';')"
-# The full ruleset, verbatim, so its consumers of the IPv6 transport offset
-# (CVE-2026-98532) can be reviewed on the booted appliance itself.
-printf '%s\n' "$rs" | sed 's/^/m2-ruleset| /'
-for k in net.ipv4.ip_forward net.ipv6.conf.all.forwarding net.ipv6.conf.default.forwarding net.ipv6.conf.all.disable_ipv6 net.ipv6.conf.all.seg6_enabled net.ipv6.conf.default.seg6_enabled net.ipv6.conf.all.ioam6_enabled net.ipv6.conf.default.ioam6_enabled kernel.unprivileged_bpf_disabled; do
-  echo "m2-sysctl $k=$(sysctl -n "$k" 2>/dev/null || echo unset)"; done
-echo "m2-mdb-entries=$(bridge mdb show 2>/dev/null | grep -c .)"
-EOS
+  # The guest script (m2-guest.sh) records every observation with its exit
+  # status; the transport status is KEPT and judged with the transcript.
+  { printf 'M2SUM=%q\nM2URL=%q\n' "$sum" "http://10.0.2.2:$LAB_M2PROBE_PORT/m2probe"; cat "$HERE/m2-guest.sh"; } \
+    | gpriv --timeout 600 > "$f" 2>&1 || rc=$?
   kill "$pid" 2>/dev/null || true
-  # hardening: io_uring off and no ring alive; no container process holds
-  # NET_RAW (effective or bounding), NET_ADMIN or SYS_ADMIN (bounding), and
-  # each runs under seccomp filter mode; the probe was refused everything.
-  [[ "$(sed -n 's/^m2-io_uring_disabled=//p' "$f")" == 2 ]] || bad+="kernel.io_uring_disabled=$(sed -n 's/^m2-io_uring_disabled=//p' "$f"); "
-  grep -qx 'm2-host-io_uring_setup=errno:EPERM' "$f" || bad+="host $(grep '^m2-host-io_uring_setup=' "$f" || echo 'io_uring_setup not probed'); "
-  grep -qx 'm2-io_uring-fds=0' "$f" || bad+="io_uring rings held: $(grep '^m2-io_uring-fd' "$f" | tr '\n' ' '); "
-  for c in culvert culvert-clamav; do
-    [[ "$(grep -c "^m2-proc $c " "$f")" -gt 0 ]] || bad+="no process of $c read; "
-    for u in root default; do
-      l="$(grep "^m2-probe $c as=$u " "$f" || true)"
-      [[ "$l" == *" rc=0 uid="*" afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM "* ]] || bad+="probe $c as=$u: ${l:-not run}; "
-    done
-    grep -qx "m2-probe-removed $c rc=0" "$f" || bad+="probe not removed from $c; "
-  done
-  # `|| true`: a passing guest leaves grep -v nothing to print (exit 1);
-  # under set -euo pipefail that would abort the run here.
-  l="$(grep -E '^m2-proc(-unreadable)? ' "$f" | grep -vE ' netraw-eff=0 netraw-bnd=0 netadmin-bnd=0 sysadmin-bnd=0 seccomp=2$' | tr '\n' ' ' || true)"
-  [[ -z "$l" ]] || bad+="process(es) with NET_RAW/NET_ADMIN/SYS_ADMIN or without seccomp filter: $l"
-  if [[ -n "$bad" ]]; then check M2H "$tag-hardening" fail "$bad"
-  else check M2H "$tag-hardening" pass "boot $(sed -n 's/^m2-boot-id=//p' "$f" | cut -c1-8): io_uring_disabled=2, host io_uring_setup EPERM, 0 io_uring rings held; $(grep -c '^m2-proc ' "$f") container processes without NET_RAW/NET_ADMIN/SYS_ADMIN, Seccomp 2; probe (sha256 ${sum:0:12}) as root and as the container user in culvert and culvert-clamav: AF_PACKET, io_uring, new netns, new userns all EPERM; containers $(grep '^m2-container ' "$f" | sed -E 's/^m2-container ([^ ]+) id=([^ ]+) started=([^ ]+) .*/\1@\2 \3/' | tr '\n' ' ')"; fi
-  # preconditions of the residual network findings (RESIDUAL-DISPOSITION.md).
-  [[ "$(sed -n 's/^m2-precond-modules-loaded=//p' "$f")" == "[]" ]] || pre+="loaded: $(sed -n 's/^m2-precond-modules-loaded=//p' "$f"); "
-  grep -qx 'm2-vlan-links=0' "$f" || pre+="$(grep '^m2-vlan-links=' "$f" || echo 'vlan links not listed'); "
-  grep -qx 'm2-encap-routes=0' "$f" || pre+="$(grep '^m2-encap-routes=' "$f" || echo 'routes not listed'); "
-  l="$(sed -n 's/^m2-qdisc-kinds=//p' "$f")"; [[ -n "$l" ]] || pre+="qdiscs not listed; "
-  for u in $l; do [[ " fq_codel noqueue pfifo_fast mq fq " == *" $u "* ]] || pre+="qdisc $u; "; done
-  grep -qx 'm2-ruleset-source=unreadable' "$f" && pre+="ruleset unreadable; "
-  grep -qx 'm2-ruleset-hits=0' "$f" || pre+="$(grep '^m2-ruleset-hits=' "$f" || echo 'ruleset not checked'); "
-  for u in net.ipv6.conf.all.forwarding net.ipv6.conf.default.forwarding net.ipv6.conf.all.seg6_enabled net.ipv6.conf.default.seg6_enabled net.ipv6.conf.all.ioam6_enabled net.ipv6.conf.default.ioam6_enabled; do
-    grep -qx "m2-sysctl $u=0" "$f" || pre+="$(grep "^m2-sysctl $u=" "$f" || echo "$u not read"); "; done
-  grep -qx 'm2-sysctl kernel.unprivileged_bpf_disabled=2' "$f" || pre+="$(grep '^m2-sysctl kernel.unprivileged_bpf_disabled=' "$f"); "
-  if [[ -n "$pre" ]]; then check M2H "$tag-preconditions" fail "$pre"
-  else check M2H "$tag-preconditions" pass "no VLAN link, no lwtunnel encap route, qdiscs [$(sed -n 's/^m2-qdisc-kinds=//p' "$f")], none of the precondition modules loaded (by design: $(sed -n 's/^m2-by-design-modules-loaded=//p' "$f")), $(sed -n 's/^m2-ruleset-source=//p' "$f") ruleset ($(sed -n 's/^m2-ruleset-lines=//p' "$f") lines) without flowtable/queue/exthdr/TPROXY/HMARK, IPv6 forwarding/seg6/ioam6 off, unprivileged BPF off; NICs $(sed -n 's/^m2-nic-drivers //p' "$f"); mdb entries $(sed -n 's/^m2-mdb-entries=//p' "$f")"; fi
-  # ClamAV regression in the same state: clamd still scans (EICAR found),
-  # the proxy reports the sidecar ready, and freshclam's last lines.
-  grep -q '^m2-clamav-eicar .*FOUND' "$f" || cl+="$(grep '^m2-clamav-eicar' "$f" || echo 'no EICAR scan'); "
-  ready_clamav_ok || cl+="/ready clamav not ok; "
-  if [[ -n "$cl" ]]; then check M2H "$tag-clamav" fail "$cl"
-  else check M2H "$tag-clamav" pass "clamd found EICAR on a stream scan; /ready clamav ok; $(sed -n 's/^m2-clamav-version //p' "$f"); freshclam: $(sed -n 's/^m2-freshclam //p' "$f" | head -c 200)"; fi
+  # All verdicts come from m2-verdict.py, which fails closed: an observation
+  # that was not acquired (rc) and parsed (shape + positive control) fails
+  # its check; it is never read as "nothing found".
+  while IFS=$'\t' read -r st name detail; do
+    n=$((n+1)); check M2H "$name" "$st" "$detail"
+  done < <(python3 -I "$HERE/m2-verdict.py" "$f" "$tag" "$rc" 2>"$EV/M2H-$tag-verdict.err" || true)
+  [[ $n -ge 6 ]] || check M2H "$tag-verdict" fail "the verdict evaluator produced $n checks: $(head -c 300 "$EV/M2H-$tag-verdict.err")"
+  # Runner side of the ClamAV regression: the proxy reports the sidecar ready.
+  if ready_clamav_ok; then check M2H "$tag-clamav-ready" pass "/ready clamav ok"
+  else check M2H "$tag-clamav-ready" fail "/ready clamav not ok"; fi
 }
 
 # ── engine-surface: who can reach the container engine on the booted guest ──

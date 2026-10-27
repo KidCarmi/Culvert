@@ -99,7 +99,7 @@ and is evidence about the original only through that comparison.
 
 ## M2 hardening checkpoints (`LAB_M2_HARDENING=1`, #1528)
 
-Matrix entries with `m2_hardening: "1"` run `m2_checkpoint` four times. Each writes `M2H-<tag>.txt` and records three checks: `<tag>-hardening`, `<tag>-preconditions` and `<tag>-clamav`.
+Matrix entries with `m2_hardening: "1"` run `m2_checkpoint` four times:
 
 | Tag | When | What has just recreated or restarted something |
 |---|---|---|
@@ -108,21 +108,43 @@ Matrix entries with `m2_hardening: "1"` run `m2_checkpoint` four times. Each wri
 | `reboot` | end of step 8 | OS update + reboot (7) |
 | `final` | after `history` | recovery power cycles + history restore |
 
-What each check requires:
+**Collection.** `m2-guest.sh` runs as root on the guest. Every observation goes through `obs`, which records `m2-obs <ctx> <name> rc=<n> lines=<n>` beside the command's stdout and stderr. The transcript ends with `m2-end`.
 
-- **hardening**
-  - `kernel.io_uring_disabled=2`, and a host `io_uring_setup` returns `EPERM`.
-  - **No process holds an io_uring descriptor.** The sysctl refuses new rings; it does not revoke one that already exists.
-  - No container process has `NET_RAW` (effective or bounding), `NET_ADMIN` or `SYS_ADMIN` (bounding), or runs without seccomp.
-  - `m2probe` (below), run inside each container as root and as the container's own user, is refused all four requests.
-- **preconditions** (`docs/appliance/evidence/combined/m2-mitigation/RESIDUAL-DISPOSITION.md` §3, §5):
-  - no VLAN link and no lwtunnel encap route;
-  - qdisc kinds limited to fq_codel, noqueue, pfifo_fast, mq and fq;
-  - none of the precondition modules loaded;
-  - an nftables ruleset with no flowtable, queue, exthdr, TPROXY or HMARK rule (the full ruleset is copied verbatim into the evidence);
-  - IPv6 forwarding, seg6 and ioam6 off;
-  - unprivileged BPF off.
-- **clamav:** clamd finds EICAR on a stream scan, and `/ready` reports clamav ok. freshclam's last log lines are recorded, not gated.
+**Verdicts.** `m2-verdict.py` produces the checks: `<tag>-transcript`, `-hardening`, `-ordering`, `-preconditions`, `-ruleset` and `-clamav`. The harness adds `<tag>-clamav-ready`.
+
+**Fail closed.** An observation counts only if it was **acquired** (expected exit status, line count matching) and **parsed** (expected shape, plus a positive control where one exists):
+- every namespace's links include `lo`;
+- the IPv4 `table all` includes the loopback `local` route;
+- the module list includes `nf_tables`;
+- the host ruleset includes the appliance's `inet culvert` table;
+- every namespace has `all`/`default`/`lo` IPv6 entries.
+
+An unreadable observation fails its check; it is never "nothing found". A valid empty result passes only beside its positive control. The transport exit status is kept, and an evaluator that produces fewer than six checks is itself a failure.
+
+What each check covers:
+
+- **hardening:**
+  - `io_uring_disabled=2`, and a host `io_uring_setup` returns `EPERM`;
+  - an io_uring descriptor census. It fails on a ring, or on a process that still exists but could not be read. Processes that exited and descriptors that vanished mid-scan are reported, not hidden; the census is corroboration, not proof.
+  - per-process `NET_RAW`/`NET_ADMIN`/`SYS_ADMIN`/seccomp;
+  - `m2probe` as root and as the container user in both containers.
+- **ordering:** for this boot, `systemd-sysctl` was active before containerd and dockerd started, and the drop-in is present. The sysctl refuses new rings only, so this ordering is what excludes a ring created before it.
+- **preconditions:**
+  - a census of network namespaces: exactly host, `culvert` and `culvert-clamav`, or it fails;
+  - in each namespace: no VLAN link, no encap route, allowed qdisc kinds only, IPv6 `forwarding`/`seg6_enabled`/`ioam6_enabled` 0 on every interface;
+  - none of the 32 precondition modules loaded;
+  - unprivileged BPF off;
+  - NIC e1000 or vmxnet3.
+- **ruleset:** every expression of every nftables rule in each namespace (`nft -j`) must be a source-checked form, or the check fails as "review required":
+  - read-only matches on payload/meta/ct;
+  - verdicts;
+  - NAT, which finds the L4 header with `ipv6_skip_exthdr`;
+  - xt `tcp`/`udp`/`addrtype`/`conntrack`/`state`/`comment`/`mark`.
+  
+  A payload write, queue, flowtable, exthdr, socket, tproxy or unknown statement fails. The text ruleset is kept verbatim.
+- **clamav:** clamd finds EICAR on a stream scan (`rc=1` + `FOUND`). freshclam's last lines are recorded, not gated.
+
+**Self-test.** `m2-verdict-selftest.py` runs inside `appliance-lab.sh selftest`, the first step of every lab job. It requires `m2-fixtures/pass.txt` to pass, valid-empty cases to pass, and one mutation per failure mode to fail the named check. The fixture's header lists what was substituted from the real sandbox transcript.
 
 **`m2probe/`** is a static Go program. The harness builds it on the runner and serves it on 127.0.0.1 (10.0.2.2 from the guest). The guest verifies its sha256 before it `docker cp`s the probe into a container. After the run, the harness removes it from the container and the guest. The probe asks for:
 - an `AF_PACKET` socket;

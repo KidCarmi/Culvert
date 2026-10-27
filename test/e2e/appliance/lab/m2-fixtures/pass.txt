@@ -1,0 +1,391 @@
+# m2-verdict self-test fixture: a PASSING transcript.
+# Base: m2-guest.sh run for real in the producer sandbox (Docker 29.6.2, two stand-in containers on a
+# user-defined network, so netns census, links, routes, qdisc, Docker's real nft rules, the probe and
+# per-process caps are real). Substituted, because the sandbox lacks them (each listed record replaced):
+#   host sysctl (io_uring 2/bpf 2/ip_forward 1), sysctl-file, io_uring-setup (EPERM), ordering (systemd),
+#   modules (the 72 names of M2 snapshot run 40472951974), nics (e1000), ipv6-conf (no IPv6 in sandbox),
+#   clamav version/eicar (no clamd), and host nft-json += the appliance's inet culvert table as REAL nft
+#   JSON (appliance/provision/nftables.conf loaded into a throwaway netns, nft -j list ruleset).
+m2-begin boot_id=8cbc29ad-16a0-4be7-aba2-882124474c25
+m2-obs host sysctl rc=0 lines=3
+m2-out host sysctl| 2
+m2-out host sysctl| 2
+m2-out host sysctl| 1
+m2-obs host sysctl-file rc=0 lines=1
+m2-out host sysctl-file| 4aabdb4710efc7c2b359bbbed3f485fa3aaae27ce26c343a657e45ed632ae560  /etc/sysctl.d/99-culvert-hardening.conf
+m2-obs host io_uring-setup rc=0 lines=1
+m2-out host io_uring-setup| errno:EPERM
+m2-obs host ordering rc=0 lines=11
+m2-out host ordering| Id=systemd-sysctl.service
+m2-out host ordering| ActiveEnterTimestampMonotonic=4512338
+m2-out host ordering| ExecMainStartTimestampMonotonic=4471020
+m2-out host ordering| 
+m2-out host ordering| Id=containerd.service
+m2-out host ordering| ActiveEnterTimestampMonotonic=9120771
+m2-out host ordering| ExecMainStartTimestampMonotonic=8807412
+m2-out host ordering| 
+m2-out host ordering| Id=docker.service
+m2-out host ordering| ActiveEnterTimestampMonotonic=12544006
+m2-out host ordering| ExecMainStartTimestampMonotonic=9204517
+m2-obs host sysctl-journal rc=0 lines=0
+m2-obs host io_uring-fds rc=0 lines=1
+m2-out host io_uring-fds| summary procs=92 fds=236 rings=0 unreadable_alive=0 exited=0 fd_vanished=21
+m2-obs host modules rc=0 lines=72
+m2-out host modules| aesni_intel 16384 0 - Live 0x0000000000000000
+m2-out host modules| async_memcpy 16384 0 - Live 0x0000000000000000
+m2-out host modules| async_pq 16384 0 - Live 0x0000000000000000
+m2-out host modules| async_raid6_recov 16384 0 - Live 0x0000000000000000
+m2-out host modules| async_tx 16384 0 - Live 0x0000000000000000
+m2-out host modules| async_xor 16384 0 - Live 0x0000000000000000
+m2-out host modules| autofs4 16384 0 - Live 0x0000000000000000
+m2-out host modules| binfmt_misc 16384 0 - Live 0x0000000000000000
+m2-out host modules| bridge 16384 0 - Live 0x0000000000000000
+m2-out host modules| btrfs 16384 0 - Live 0x0000000000000000
+m2-out host modules| dm_multipath 16384 0 - Live 0x0000000000000000
+m2-out host modules| dmi_sysfs 16384 0 - Live 0x0000000000000000
+m2-out host modules| drm_ttm_helper 16384 0 - Live 0x0000000000000000
+m2-out host modules| e1000 16384 0 - Live 0x0000000000000000
+m2-out host modules| efi_pstore 16384 0 - Live 0x0000000000000000
+m2-out host modules| floppy 16384 0 - Live 0x0000000000000000
+m2-out host modules| ghash_clmulni_intel 16384 0 - Live 0x0000000000000000
+m2-out host modules| i2c_piix4 16384 0 - Live 0x0000000000000000
+m2-out host modules| i2c_smbus 16384 0 - Live 0x0000000000000000
+m2-out host modules| input_leds 16384 0 - Live 0x0000000000000000
+m2-out host modules| intel_rapl_common 16384 0 - Live 0x0000000000000000
+m2-out host modules| intel_rapl_msr 16384 0 - Live 0x0000000000000000
+m2-out host modules| ip_set 16384 0 - Live 0x0000000000000000
+m2-out host modules| ip_tables 16384 0 - Live 0x0000000000000000
+m2-out host modules| isofs 16384 0 - Live 0x0000000000000000
+m2-out host modules| joydev 16384 0 - Live 0x0000000000000000
+m2-out host modules| libblake2b 16384 0 - Live 0x0000000000000000
+m2-out host modules| linear 16384 0 - Live 0x0000000000000000
+m2-out host modules| llc 16384 0 - Live 0x0000000000000000
+m2-out host modules| mac_hid 16384 0 - Live 0x0000000000000000
+m2-out host modules| msr 16384 0 - Live 0x0000000000000000
+m2-out host modules| nf_conntrack 16384 0 - Live 0x0000000000000000
+m2-out host modules| nf_conntrack_netlink 16384 0 - Live 0x0000000000000000
+m2-out host modules| nf_defrag_ipv4 16384 0 - Live 0x0000000000000000
+m2-out host modules| nf_defrag_ipv6 16384 0 - Live 0x0000000000000000
+m2-out host modules| nf_nat 16384 0 - Live 0x0000000000000000
+m2-out host modules| nf_tables 16384 0 - Live 0x0000000000000000
+m2-out host modules| nfnetlink 16384 0 - Live 0x0000000000000000
+m2-out host modules| nft_chain_nat 16384 0 - Live 0x0000000000000000
+m2-out host modules| nft_compat 16384 0 - Live 0x0000000000000000
+m2-out host modules| nft_ct 16384 0 - Live 0x0000000000000000
+m2-out host modules| nls_iso8859_1 16384 0 - Live 0x0000000000000000
+m2-out host modules| overlay 16384 0 - Live 0x0000000000000000
+m2-out host modules| parport 16384 0 - Live 0x0000000000000000
+m2-out host modules| parport_pc 16384 0 - Live 0x0000000000000000
+m2-out host modules| pata_acpi 16384 0 - Live 0x0000000000000000
+m2-out host modules| ppdev 16384 0 - Live 0x0000000000000000
+m2-out host modules| psmouse 16384 0 - Live 0x0000000000000000
+m2-out host modules| qemu_fw_cfg 16384 0 - Live 0x0000000000000000
+m2-out host modules| raid0 16384 0 - Live 0x0000000000000000
+m2-out host modules| raid1 16384 0 - Live 0x0000000000000000
+m2-out host modules| raid10 16384 0 - Live 0x0000000000000000
+m2-out host modules| raid456 16384 0 - Live 0x0000000000000000
+m2-out host modules| raid6_pq 16384 0 - Live 0x0000000000000000
+m2-out host modules| sch_fq_codel 16384 0 - Live 0x0000000000000000
+m2-out host modules| serio_raw 16384 0 - Live 0x0000000000000000
+m2-out host modules| stp 16384 0 - Live 0x0000000000000000
+m2-out host modules| tls 16384 0 - Live 0x0000000000000000
+m2-out host modules| ttm 16384 0 - Live 0x0000000000000000
+m2-out host modules| veth 16384 0 - Live 0x0000000000000000
+m2-out host modules| vga16fb 16384 0 - Live 0x0000000000000000
+m2-out host modules| vgastate 16384 0 - Live 0x0000000000000000
+m2-out host modules| x_tables 16384 0 - Live 0x0000000000000000
+m2-out host modules| xfrm_algo 16384 0 - Live 0x0000000000000000
+m2-out host modules| xfrm_user 16384 0 - Live 0x0000000000000000
+m2-out host modules| xor 16384 0 - Live 0x0000000000000000
+m2-out host modules| xt_MASQUERADE 16384 0 - Live 0x0000000000000000
+m2-out host modules| xt_addrtype 16384 0 - Live 0x0000000000000000
+m2-out host modules| xt_conntrack 16384 0 - Live 0x0000000000000000
+m2-out host modules| xt_nat 16384 0 - Live 0x0000000000000000
+m2-out host modules| xt_set 16384 0 - Live 0x0000000000000000
+m2-out host modules| xt_tcpudp 16384 0 - Live 0x0000000000000000
+m2-obs host nics rc=0 lines=1
+m2-out host nics| /sys/class/net/ens4 e1000
+m2-obs host mdb rc=0 lines=0
+m2-obs host netns-census rc=0 lines=3
+m2-out host netns-census| net:[4026531833] 10
+m2-out host netns-census| net:[4026532268] 1351
+m2-out host netns-census| net:[4026532324] 1421
+m2-obs culvert pid rc=0 lines=1
+m2-out culvert pid| 1351
+m2-obs culvert-clamav pid rc=0 lines=1
+m2-out culvert-clamav pid| 1421
+m2-obs host netns rc=0 lines=1
+m2-out host netns| net:[4026531833]
+m2-obs host links rc=0 lines=8
+m2-out host links| 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00 promiscuity 0  allmulti 0 minmtu 0 maxmtu 0 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-out host links| 2: ifb0: <BROADCAST,NOARP> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 32\    link/ether be:ac:ce:77:e1:8a brd ff:ff:ff:ff:ff:ff promiscuity 0  allmulti 0 minmtu 0 maxmtu 0 \    ifb numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-out host links| 3: ifb1: <BROADCAST,NOARP> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 32\    link/ether 8e:7e:bd:ef:9f:25 brd ff:ff:ff:ff:ff:ff promiscuity 0  allmulti 0 minmtu 0 maxmtu 0 \    ifb numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-out host links| 4: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1400 qdisc pfifo_fast state UP mode DEFAULT group default qlen 1000\    link/ether 02:fc:00:00:00:01 brd ff:ff:ff:ff:ff:ff promiscuity 0  allmulti 0 minmtu 68 maxmtu 65535 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 parentbus virtio parentdev virtio7 
+m2-out host links| 5: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN mode DEFAULT group default \    link/ether be:63:b9:92:6b:c3 brd ff:ff:ff:ff:ff:ff promiscuity 0  allmulti 0 minmtu 68 maxmtu 65535 \    bridge forward_delay 1500 hello_time 200 max_age 2000 ageing_time 30000 stp_state 0 priority 32768 vlan_filtering 0 bridge_id 8000.be:63:b9:92:6b:c3 designated_root 8000.be:63:b9:92:6b:c3 root_port 0 root_path_cost 0 topology_change 0 topology_change_detected 0 hello_timer    0.00 tcn_timer    0.00 topology_change_timer    0.00 gc_timer   96.63 group_fwd_mask 0 group_address 01:80:c2:00:00:00 mcast_snooping 1 no_linklocal_learn 0 mcast_vlan_snooping 0 mcast_router 1 mcast_query_use_ifaddr 0 mcast_querier 0 mcast_hash_elasticity 16 mcast_hash_max 4096 mcast_last_member_count 2 mcast_startup_query_count 2 mcast_last_member_interval 100 mcast_membership_interval 26000 mcast_querier_interval 25500 mcast_query_interval 12500 mcast_query_response_interval 1000 mcast_startup_query_interval 3124 mcast_stats_enabled 0 mcast_igmp_version 2 mcast_mld_version 1 nf_call_iptables 0 nf_call_ip6tables 0 nf_call_arptables 0 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-out host links| 8: br-fe5432ba08f7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \    link/ether aa:99:89:ad:f9:92 brd ff:ff:ff:ff:ff:ff promiscuity 0  allmulti 0 minmtu 68 maxmtu 65535 \    bridge forward_delay 1500 hello_time 200 max_age 2000 ageing_time 30000 stp_state 0 priority 32768 vlan_filtering 0 bridge_id 8000.aa:99:89:ad:f9:92 designated_root 8000.aa:99:89:ad:f9:92 root_port 0 root_path_cost 0 topology_change 0 topology_change_detected 0 hello_timer    0.00 tcn_timer    0.00 topology_change_timer    0.00 gc_timer  125.28 group_fwd_mask 0 group_address 01:80:c2:00:00:00 mcast_snooping 1 no_linklocal_learn 0 mcast_vlan_snooping 0 mcast_router 1 mcast_query_use_ifaddr 0 mcast_querier 0 mcast_hash_elasticity 16 mcast_hash_max 4096 mcast_last_member_count 2 mcast_startup_query_count 2 mcast_last_member_interval 100 mcast_membership_interval 26000 mcast_querier_interval 25500 mcast_query_interval 12500 mcast_query_response_interval 1000 mcast_startup_query_interval 3124 mcast_stats_enabled 0 mcast_igmp_version 2 mcast_mld_version 1 nf_call_iptables 0 nf_call_ip6tables 0 nf_call_arptables 0 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-out host links| 11: veth0c1567d@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-fe5432ba08f7 state UP mode DEFAULT group default \    link/ether 3e:54:dc:20:72:9a brd ff:ff:ff:ff:ff:ff link-netnsid 0 promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 \    veth \    bridge_slave state forwarding priority 32 cost 2 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8001 port_no 0x1 designated_port 32769 designated_cost 0 designated_bridge 8000.aa:99:89:ad:f9:92 designated_root 8000.aa:99:89:ad:f9:92 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer   11.04 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off numtxqueues 4 numrxqueues 4 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-out host links| 12: vethe51b436@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-fe5432ba08f7 state UP mode DEFAULT group default \    link/ether 6e:5f:77:d8:d9:be brd ff:ff:ff:ff:ff:ff link-netnsid 1 promiscuity 1  allmulti 1 minmtu 68 maxmtu 65535 \    veth \    bridge_slave state forwarding priority 32 cost 2 hairpin off guard off root_block off fastleave off learning on flood on port_id 0x8002 port_no 0x2 designated_port 32770 designated_cost 0 designated_bridge 8000.aa:99:89:ad:f9:92 designated_root 8000.aa:99:89:ad:f9:92 hold_timer    0.00 message_age_timer    0.00 forward_delay_timer   11.32 topology_change_ack 0 config_pending 0 proxy_arp off proxy_arp_wifi off mcast_router 1 mcast_fast_leave off mcast_flood on bcast_flood on mcast_to_unicast off neigh_suppress off group_fwd_mask 0 group_fwd_mask_str 0x0 vlan_tunnel off isolated off locked off numtxqueues 4 numrxqueues 4 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-obs host routes4 rc=0 lines=13
+m2-out host routes4| default via 192.0.2.1 dev eth0 
+m2-out host routes4| 172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown 
+m2-out host routes4| 172.18.0.0/16 dev br-fe5432ba08f7 proto kernel scope link src 172.18.0.1 
+m2-out host routes4| 192.0.2.0/24 dev eth0 proto kernel scope link src 192.0.2.2 
+m2-out host routes4| local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1 
+m2-out host routes4| local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1 
+m2-out host routes4| broadcast 127.255.255.255 dev lo table local proto kernel scope link src 127.0.0.1 
+m2-out host routes4| local 172.17.0.1 dev docker0 table local proto kernel scope host src 172.17.0.1 
+m2-out host routes4| broadcast 172.17.255.255 dev docker0 table local proto kernel scope link src 172.17.0.1 linkdown 
+m2-out host routes4| local 172.18.0.1 dev br-fe5432ba08f7 table local proto kernel scope host src 172.18.0.1 
+m2-out host routes4| broadcast 172.18.255.255 dev br-fe5432ba08f7 table local proto kernel scope link src 172.18.0.1 
+m2-out host routes4| local 192.0.2.2 dev eth0 table local proto kernel scope host src 192.0.2.2 
+m2-out host routes4| broadcast 192.0.2.255 dev eth0 table local proto kernel scope link src 192.0.2.2 
+m2-obs host routes6 rc=0 lines=0
+m2-obs host qdisc rc=0 lines=6
+m2-out host qdisc| qdisc noqueue 0: dev lo root refcnt 2 
+m2-out host qdisc| qdisc pfifo_fast 0: dev eth0 root refcnt 2 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+m2-out host qdisc| qdisc noqueue 0: dev docker0 root refcnt 2 
+m2-out host qdisc| qdisc noqueue 0: dev br-fe5432ba08f7 root refcnt 2 
+m2-out host qdisc| qdisc noqueue 0: dev veth0c1567d root refcnt 2 
+m2-out host qdisc| qdisc noqueue 0: dev vethe51b436 root refcnt 2 
+m2-obs host nft-json rc=0 lines=1
+m2-out host nft-json| {"nftables":[{"metainfo":{"version":"1.0.9","release_name":"Old Doc Yak #3","json_schema_version":1}},{"table":{"family":"ip","name":"nat","handle":1}},{"chain":{"family":"ip","table":"nat","name":"DOCKER","handle":1}},{"chain":{"family":"ip","table":"nat","name":"PREROUTING","handle":2,"type":"nat","hook":"prerouting","prio":-100,"policy":"accept"}},{"chain":{"family":"ip","table":"nat","name":"OUTPUT","handle":4,"type":"nat","hook":"output","prio":-100,"policy":"accept"}},{"chain":{"family":"ip","table":"nat","name":"POSTROUTING","handle":6,"type":"nat","hook":"postrouting","prio":100,"policy":"accept"}},{"rule":{"family":"ip","table":"nat","chain":"DOCKER","handle":11,"expr":[{"match":{"op":"!=","left":{"meta":{"key":"iifname"}},"right":"br-fe5432ba08f7"}},{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":18099}},{"counter":{"packets":0,"bytes":0}},{"xt":{"type":"target","name":"DNAT"}}]}},{"rule":{"family":"ip","table":"nat","chain":"PREROUTING","handle":3,"expr":[{"xt":{"type":"match","name":"addrtype"}},{"counter":{"packets":2,"bytes":183}},{"jump":{"target":"DOCKER"}}]}},{"rule":{"family":"ip","table":"nat","chain":"OUTPUT","handle":5,"expr":[{"match":{"op":"!=","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"prefix":{"addr":"127.0.0.0","len":8}}}},{"xt":{"type":"match","name":"addrtype"}},{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER"}}]}},{"rule":{"family":"ip","table":"nat","chain":"POSTROUTING","handle":9,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":{"prefix":{"addr":"172.18.0.0","len":16}}}},{"match":{"op":"!=","left":{"meta":{"key":"oifname"}},"right":"br-fe5432ba08f7"}},{"counter":{"packets":0,"bytes":0}},{"xt":{"type":"target","name":"MASQUERADE"}}]}},{"rule":{"family":"ip","table":"nat","chain":"POSTROUTING","handle":8,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":{"prefix":{"addr":"172.17.0.0","len":16}}}},{"match":{"op":"!=","left":{"meta":{"key":"oifname"}},"right":"docker0"}},{"counter":{"packets":0,"bytes":0}},{"xt":{"type":"target","name":"MASQUERADE"}}]}},{"table":{"family":"ip","name":"filter","handle":2}},{"chain":{"family":"ip","table":"filter","name":"DOCKER","handle":1}},{"chain":{"family":"ip","table":"filter","name":"DOCKER-FORWARD","handle":2}},{"chain":{"family":"ip","table":"filter","name":"DOCKER-BRIDGE","handle":3}},{"chain":{"family":"ip","table":"filter","name":"DOCKER-CT","handle":4}},{"chain":{"family":"ip","table":"filter","name":"DOCKER-INTERNAL","handle":5}},{"chain":{"family":"ip","table":"filter","name":"FORWARD","handle":6,"type":"filter","hook":"forward","prio":0,"policy":"drop"}},{"chain":{"family":"ip","table":"filter","name":"DOCKER-USER","handle":15}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER","handle":26,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"172.18.0.3"}},{"match":{"op":"!=","left":{"meta":{"key":"iifname"}},"right":"br-fe5432ba08f7"}},{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"br-fe5432ba08f7"}},{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":80}},{"counter":{"packets":0,"bytes":0}},{"accept":null}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER","handle":18,"expr":[{"match":{"op":"!=","left":{"meta":{"key":"iifname"}},"right":"docker0"}},{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"docker0"}},{"counter":{"packets":0,"bytes":0}},{"drop":null}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER","handle":22,"expr":[{"match":{"op":"!=","left":{"meta":{"key":"iifname"}},"right":"br-fe5432ba08f7"}},{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"br-fe5432ba08f7"}},{"counter":{"packets":0,"bytes":0}},{"drop":null}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER-FORWARD","handle":10,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER-CT"}}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER-FORWARD","handle":9,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER-INTERNAL"}}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER-FORWARD","handle":8,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER-BRIDGE"}}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER-FORWARD","handle":17,"expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"docker0"}},{"counter":{"packets":0,"bytes":0}},{"accept":null}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER-FORWARD","handle":21,"expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"br-fe5432ba08f7"}},{"counter":{"packets":0,"bytes":0}},{"accept":null}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER-BRIDGE","handle":20,"expr":[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"docker0"}},{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER"}}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER-BRIDGE","handle":24,"expr":[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"br-fe5432ba08f7"}},{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER"}}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER-CT","handle":19,"expr":[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"docker0"}},{"xt":{"type":"match","name":"conntrack"}},{"counter":{"packets":0,"bytes":0}},{"accept":null}]}},{"rule":{"family":"ip","table":"filter","chain":"DOCKER-CT","handle":23,"expr":[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"br-fe5432ba08f7"}},{"xt":{"type":"match","name":"conntrack"}},{"counter":{"packets":0,"bytes":0}},{"accept":null}]}},{"rule":{"family":"ip","table":"filter","chain":"FORWARD","handle":16,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER-USER"}}]}},{"rule":{"family":"ip","table":"filter","chain":"FORWARD","handle":7,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER-FORWARD"}}]}},{"table":{"family":"ip6","name":"nat","handle":3}},{"chain":{"family":"ip6","table":"nat","name":"DOCKER","handle":1}},{"chain":{"family":"ip6","table":"nat","name":"PREROUTING","handle":2,"type":"nat","hook":"prerouting","prio":-100,"policy":"accept"}},{"chain":{"family":"ip6","table":"nat","name":"OUTPUT","handle":4,"type":"nat","hook":"output","prio":-100,"policy":"accept"}},{"rule":{"family":"ip6","table":"nat","chain":"PREROUTING","handle":3,"expr":[{"xt":{"type":"match","name":"addrtype"}},{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER"}}]}},{"rule":{"family":"ip6","table":"nat","chain":"OUTPUT","handle":5,"expr":[{"match":{"op":"!=","left":{"payload":{"protocol":"ip6","field":"daddr"}},"right":"::1"}},{"xt":{"type":"match","name":"addrtype"}},{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER"}}]}},{"table":{"family":"ip6","name":"filter","handle":4}},{"chain":{"family":"ip6","table":"filter","name":"DOCKER","handle":1}},{"chain":{"family":"ip6","table":"filter","name":"DOCKER-FORWARD","handle":2}},{"chain":{"family":"ip6","table":"filter","name":"DOCKER-BRIDGE","handle":3}},{"chain":{"family":"ip6","table":"filter","name":"DOCKER-CT","handle":4}},{"chain":{"family":"ip6","table":"filter","name":"DOCKER-INTERNAL","handle":5}},{"chain":{"family":"ip6","table":"filter","name":"FORWARD","handle":6,"type":"filter","hook":"forward","prio":0,"policy":"accept"}},{"chain":{"family":"ip6","table":"filter","name":"DOCKER-USER","handle":11}},{"rule":{"family":"ip6","table":"filter","chain":"DOCKER-FORWARD","handle":10,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER-CT"}}]}},{"rule":{"family":"ip6","table":"filter","chain":"DOCKER-FORWARD","handle":9,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER-INTERNAL"}}]}},{"rule":{"family":"ip6","table":"filter","chain":"DOCKER-FORWARD","handle":8,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER-BRIDGE"}}]}},{"rule":{"family":"ip6","table":"filter","chain":"FORWARD","handle":12,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER-USER"}}]}},{"rule":{"family":"ip6","table":"filter","chain":"FORWARD","handle":7,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"DOCKER-FORWARD"}}]}},{"table":{"family":"ip","name":"raw","handle":5}},{"chain":{"family":"ip","table":"raw","name":"PREROUTING","handle":1,"type":"filter","hook":"prerouting","prio":-300,"policy":"accept"}},{"rule":{"family":"ip","table":"raw","chain":"PREROUTING","handle":4,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"172.18.0.2"}},{"match":{"op":"!=","left":{"meta":{"key":"iifname"}},"right":"br-fe5432ba08f7"}},{"counter":{"packets":0,"bytes":0}},{"drop":null}]}},{"rule":{"family":"ip","table":"raw","chain":"PREROUTING","handle":5,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"172.18.0.3"}},{"match":{"op":"!=","left":{"meta":{"key":"iifname"}},"right":"br-fe5432ba08f7"}},{"counter":{"packets":0,"bytes":0}},{"drop":null}]}},{"table":{"family":"inet","name":"culvert","handle":1}},{"chain":{"family":"inet","table":"culvert","name":"input","handle":1,"type":"filter","hook":"input","prio":0,"policy":"drop"}},{"rule":{"family":"inet","table":"culvert","chain":"input","handle":2,"expr":[{"match":{"op":"==","left":{"meta":{"key":"iif"}},"right":"lo"}},{"accept":null}]}},{"rule":{"family":"inet","table":"culvert","chain":"input","handle":3,"expr":[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":["established","related"]}},{"accept":null}]}},{"rule":{"family":"inet","table":"culvert","chain":"input","handle":4,"expr":[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":"invalid"}},{"drop":null}]}},{"rule":{"family":"inet","table":"culvert","chain":"input","handle":5,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"protocol"}},"right":"icmp"}},{"accept":null}]}},{"rule":{"family":"inet","table":"culvert","chain":"input","handle":6,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip6","field":"nexthdr"}},"right":"ipv6-icmp"}},{"accept":null}]}},{"rule":{"family":"inet","table":"culvert","chain":"input","handle":8,"expr":[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":{"set":["br-*","docker0"]}}},{"accept":null}]}},{"rule":{"family":"inet","table":"culvert","chain":"input","handle":9,"comment":"SSH (key-only)","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":22}},{"accept":null}]}},{"rule":{"family":"inet","table":"culvert","chain":"input","handle":10,"comment":"Culvert proxy / PAC / health","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":8080}},{"accept":null}]}},{"rule":{"family":"inet","table":"culvert","chain":"input","handle":11,"comment":"Culvert admin UI (HTTPS)","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":9090}},{"accept":null}]}},{"rule":{"family":"inet","table":"culvert","chain":"input","handle":12,"expr":[{"counter":{"packets":0,"bytes":0}},{"drop":null}]}}]}
+m2-obs host nft-text rc=0 lines=107
+m2-out host nft-text| table ip nat {
+m2-out host nft-text| 	chain DOCKER {
+m2-out host nft-text| 		iifname != "br-fe5432ba08f7" tcp dport 18099 counter packets 0 bytes 0 dnat to 172.18.0.3:80
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain PREROUTING {
+m2-out host nft-text| 		type nat hook prerouting priority dstnat; policy accept;
+m2-out host nft-text| 		fib daddr type local counter packets 2 bytes 183 jump DOCKER
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain OUTPUT {
+m2-out host nft-text| 		type nat hook output priority dstnat; policy accept;
+m2-out host nft-text| 		ip daddr != 127.0.0.0/8 fib daddr type local counter packets 0 bytes 0 jump DOCKER
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain POSTROUTING {
+m2-out host nft-text| 		type nat hook postrouting priority srcnat; policy accept;
+m2-out host nft-text| 		ip saddr 172.18.0.0/16 oifname != "br-fe5432ba08f7" counter packets 0 bytes 0 masquerade
+m2-out host nft-text| 		ip saddr 172.17.0.0/16 oifname != "docker0" counter packets 0 bytes 0 masquerade
+m2-out host nft-text| 	}
+m2-out host nft-text| }
+m2-out host nft-text| table ip filter {
+m2-out host nft-text| 	chain DOCKER {
+m2-out host nft-text| 		ip daddr 172.18.0.3 iifname != "br-fe5432ba08f7" oifname "br-fe5432ba08f7" tcp dport 80 counter packets 0 bytes 0 accept
+m2-out host nft-text| 		iifname != "docker0" oifname "docker0" counter packets 0 bytes 0 drop
+m2-out host nft-text| 		iifname != "br-fe5432ba08f7" oifname "br-fe5432ba08f7" counter packets 0 bytes 0 drop
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain DOCKER-FORWARD {
+m2-out host nft-text| 		counter packets 0 bytes 0 jump DOCKER-CT
+m2-out host nft-text| 		counter packets 0 bytes 0 jump DOCKER-INTERNAL
+m2-out host nft-text| 		counter packets 0 bytes 0 jump DOCKER-BRIDGE
+m2-out host nft-text| 		iifname "docker0" counter packets 0 bytes 0 accept
+m2-out host nft-text| 		iifname "br-fe5432ba08f7" counter packets 0 bytes 0 accept
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain DOCKER-BRIDGE {
+m2-out host nft-text| 		oifname "docker0" counter packets 0 bytes 0 jump DOCKER
+m2-out host nft-text| 		oifname "br-fe5432ba08f7" counter packets 0 bytes 0 jump DOCKER
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain DOCKER-CT {
+m2-out host nft-text| 		oifname "docker0" ct state related,established counter packets 0 bytes 0 accept
+m2-out host nft-text| 		oifname "br-fe5432ba08f7" ct state related,established counter packets 0 bytes 0 accept
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain DOCKER-INTERNAL {
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain FORWARD {
+m2-out host nft-text| 		type filter hook forward priority filter; policy drop;
+m2-out host nft-text| 		counter packets 0 bytes 0 jump DOCKER-USER
+m2-out host nft-text| 		counter packets 0 bytes 0 jump DOCKER-FORWARD
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain DOCKER-USER {
+m2-out host nft-text| 	}
+m2-out host nft-text| }
+m2-out host nft-text| table ip6 nat {
+m2-out host nft-text| 	chain DOCKER {
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain PREROUTING {
+m2-out host nft-text| 		type nat hook prerouting priority dstnat; policy accept;
+m2-out host nft-text| 		fib daddr type local counter packets 0 bytes 0 jump DOCKER
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain OUTPUT {
+m2-out host nft-text| 		type nat hook output priority dstnat; policy accept;
+m2-out host nft-text| 		ip6 daddr != ::1 fib daddr type local counter packets 0 bytes 0 jump DOCKER
+m2-out host nft-text| 	}
+m2-out host nft-text| }
+m2-out host nft-text| table ip6 filter {
+m2-out host nft-text| 	chain DOCKER {
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain DOCKER-FORWARD {
+m2-out host nft-text| 		counter packets 0 bytes 0 jump DOCKER-CT
+m2-out host nft-text| 		counter packets 0 bytes 0 jump DOCKER-INTERNAL
+m2-out host nft-text| 		counter packets 0 bytes 0 jump DOCKER-BRIDGE
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain DOCKER-BRIDGE {
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain DOCKER-CT {
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain DOCKER-INTERNAL {
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain FORWARD {
+m2-out host nft-text| 		type filter hook forward priority filter; policy accept;
+m2-out host nft-text| 		counter packets 0 bytes 0 jump DOCKER-USER
+m2-out host nft-text| 		counter packets 0 bytes 0 jump DOCKER-FORWARD
+m2-out host nft-text| 	}
+m2-out host nft-text| 
+m2-out host nft-text| 	chain DOCKER-USER {
+m2-out host nft-text| 	}
+m2-out host nft-text| }
+m2-out host nft-text| table ip raw {
+m2-out host nft-text| 	chain PREROUTING {
+m2-out host nft-text| 		type filter hook prerouting priority raw; policy accept;
+m2-out host nft-text| 		ip daddr 172.18.0.2 iifname != "br-fe5432ba08f7" counter packets 0 bytes 0 drop
+m2-out host nft-text| 		ip daddr 172.18.0.3 iifname != "br-fe5432ba08f7" counter packets 0 bytes 0 drop
+m2-out host nft-text| 	}
+m2-out host nft-text| }
+m2-err host nft-text| # Warning: table ip nat is managed by iptables-nft, do not touch!
+m2-err host nft-text| # Warning: table ip filter is managed by iptables-nft, do not touch!
+m2-err host nft-text| # Warning: table ip6 nat is managed by iptables-nft, do not touch!
+m2-obs host ipv6-conf rc=0 lines=10
+m2-out host ipv6-conf| all forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out host ipv6-conf| default forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out host ipv6-conf| lo forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out host ipv6-conf| ifb0 forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out host ipv6-conf| ifb1 forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out host ipv6-conf| eth0 forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out host ipv6-conf| docker0 forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out host ipv6-conf| br-fe5432ba08f7 forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out host ipv6-conf| veth0c1567d forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out host ipv6-conf| vethe51b436 forwarding=0 seg6=0 ioam6=0 disable=0
+m2-obs culvert netns rc=0 lines=1
+m2-out culvert netns| net:[4026532268]
+m2-obs culvert links rc=0 lines=2
+m2-out culvert links| 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00 promiscuity 0  allmulti 0 minmtu 0 maxmtu 0 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-out culvert links| 2: eth0@if11: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \    link/ether a2:62:69:6e:98:e7 brd ff:ff:ff:ff:ff:ff link-netnsid 0 promiscuity 0  allmulti 0 minmtu 68 maxmtu 65535 \    veth numtxqueues 4 numrxqueues 4 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-obs culvert routes4 rc=0 lines=7
+m2-out culvert routes4| default via 172.18.0.1 dev eth0 
+m2-out culvert routes4| 172.18.0.0/16 dev eth0 proto kernel scope link src 172.18.0.2 
+m2-out culvert routes4| local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1 
+m2-out culvert routes4| local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1 
+m2-out culvert routes4| broadcast 127.255.255.255 dev lo table local proto kernel scope link src 127.0.0.1 
+m2-out culvert routes4| local 172.18.0.2 dev eth0 table local proto kernel scope host src 172.18.0.2 
+m2-out culvert routes4| broadcast 172.18.255.255 dev eth0 table local proto kernel scope link src 172.18.0.2 
+m2-obs culvert routes6 rc=0 lines=0
+m2-obs culvert qdisc rc=0 lines=2
+m2-out culvert qdisc| qdisc noqueue 0: dev lo root refcnt 2 
+m2-out culvert qdisc| qdisc noqueue 0: dev eth0 root refcnt 2 
+m2-obs culvert nft-json rc=0 lines=1
+m2-out culvert nft-json| {"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "ip", "name": "nat", "handle": 1}}, {"chain": {"family": "ip", "table": "nat", "name": "DOCKER_OUTPUT", "handle": 1}}, {"chain": {"family": "ip", "table": "nat", "name": "OUTPUT", "handle": 2, "type": "nat", "hook": "output", "prio": -100, "policy": "accept"}}, {"chain": {"family": "ip", "table": "nat", "name": "DOCKER_POSTROUTING", "handle": 4}}, {"chain": {"family": "ip", "table": "nat", "name": "POSTROUTING", "handle": 5, "type": "nat", "hook": "postrouting", "prio": 100, "policy": "accept"}}, {"rule": {"family": "ip", "table": "nat", "chain": "DOCKER_OUTPUT", "handle": 9, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.11"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 53}}, {"counter": {"packets": 0, "bytes": 0}}, {"xt": {"type": "target", "name": "DNAT"}}]}}, {"rule": {"family": "ip", "table": "nat", "chain": "DOCKER_OUTPUT", "handle": 7, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.11"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "dport"}}, "right": 53}}, {"counter": {"packets": 0, "bytes": 0}}, {"xt": {"type": "target", "name": "DNAT"}}]}}, {"rule": {"family": "ip", "table": "nat", "chain": "OUTPUT", "handle": 3, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.11"}}, {"counter": {"packets": 0, "bytes": 0}}, {"jump": {"target": "DOCKER_OUTPUT"}}]}}, {"rule": {"family": "ip", "table": "nat", "chain": "DOCKER_POSTROUTING", "handle": 10, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": "127.0.0.11"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "sport"}}, "right": 40443}}, {"counter": {"packets": 0, "bytes": 0}}, {"xt": {"type": "target", "name": "SNAT"}}]}}, {"rule": {"family": "ip", "table": "nat", "chain": "DOCKER_POSTROUTING", "handle": 8, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": "127.0.0.11"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "sport"}}, "right": 51434}}, {"counter": {"packets": 0, "bytes": 0}}, {"xt": {"type": "target", "name": "SNAT"}}]}}, {"rule": {"family": "ip", "table": "nat", "chain": "POSTROUTING", "handle": 6, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.11"}}, {"counter": {"packets": 0, "bytes": 0}}, {"jump": {"target": "DOCKER_POSTROUTING"}}]}}]}
+m2-obs culvert nft-text rc=0 lines=21
+m2-out culvert nft-text| table ip nat {
+m2-out culvert nft-text| 	chain DOCKER_OUTPUT {
+m2-out culvert nft-text| 		ip daddr 127.0.0.11 tcp dport 53 counter packets 0 bytes 0 dnat to 127.0.0.11:40443
+m2-out culvert nft-text| 		ip daddr 127.0.0.11 udp dport 53 counter packets 0 bytes 0 dnat to 127.0.0.11:51434
+m2-out culvert nft-text| 	}
+m2-out culvert nft-text| 
+m2-out culvert nft-text| 	chain OUTPUT {
+m2-out culvert nft-text| 		type nat hook output priority dstnat; policy accept;
+m2-out culvert nft-text| 		ip daddr 127.0.0.11 counter packets 0 bytes 0 jump DOCKER_OUTPUT
+m2-out culvert nft-text| 	}
+m2-out culvert nft-text| 
+m2-out culvert nft-text| 	chain DOCKER_POSTROUTING {
+m2-out culvert nft-text| 		ip saddr 127.0.0.11 tcp sport 40443 counter packets 0 bytes 0 snat to :53
+m2-out culvert nft-text| 		ip saddr 127.0.0.11 udp sport 51434 counter packets 0 bytes 0 snat to :53
+m2-out culvert nft-text| 	}
+m2-out culvert nft-text| 
+m2-out culvert nft-text| 	chain POSTROUTING {
+m2-out culvert nft-text| 		type nat hook postrouting priority srcnat; policy accept;
+m2-out culvert nft-text| 		ip daddr 127.0.0.11 counter packets 0 bytes 0 jump DOCKER_POSTROUTING
+m2-out culvert nft-text| 	}
+m2-out culvert nft-text| }
+m2-err culvert nft-text| # Warning: table ip nat is managed by iptables-nft, do not touch!
+m2-obs culvert ipv6-conf rc=0 lines=4
+m2-out culvert ipv6-conf| all forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out culvert ipv6-conf| default forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out culvert ipv6-conf| lo forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out culvert ipv6-conf| eth0 forwarding=0 seg6=0 ioam6=0 disable=1
+m2-obs culvert-clamav netns rc=0 lines=1
+m2-out culvert-clamav netns| net:[4026532324]
+m2-obs culvert-clamav links rc=0 lines=2
+m2-out culvert-clamav links| 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00 promiscuity 0  allmulti 0 minmtu 0 maxmtu 0 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-out culvert-clamav links| 2: eth0@if12: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \    link/ether a6:ce:b6:32:fc:61 brd ff:ff:ff:ff:ff:ff link-netnsid 0 promiscuity 0  allmulti 0 minmtu 68 maxmtu 65535 \    veth numtxqueues 4 numrxqueues 4 gso_max_size 65536 gso_max_segs 65535 tso_max_size 524280 tso_max_segs 65535 gro_max_size 65536 
+m2-obs culvert-clamav routes4 rc=0 lines=7
+m2-out culvert-clamav routes4| default via 172.18.0.1 dev eth0 
+m2-out culvert-clamav routes4| 172.18.0.0/16 dev eth0 proto kernel scope link src 172.18.0.3 
+m2-out culvert-clamav routes4| local 127.0.0.0/8 dev lo table local proto kernel scope host src 127.0.0.1 
+m2-out culvert-clamav routes4| local 127.0.0.1 dev lo table local proto kernel scope host src 127.0.0.1 
+m2-out culvert-clamav routes4| broadcast 127.255.255.255 dev lo table local proto kernel scope link src 127.0.0.1 
+m2-out culvert-clamav routes4| local 172.18.0.3 dev eth0 table local proto kernel scope host src 172.18.0.3 
+m2-out culvert-clamav routes4| broadcast 172.18.255.255 dev eth0 table local proto kernel scope link src 172.18.0.3 
+m2-obs culvert-clamav routes6 rc=0 lines=0
+m2-obs culvert-clamav qdisc rc=0 lines=2
+m2-out culvert-clamav qdisc| qdisc noqueue 0: dev lo root refcnt 2 
+m2-out culvert-clamav qdisc| qdisc noqueue 0: dev eth0 root refcnt 2 
+m2-obs culvert-clamav nft-json rc=0 lines=1
+m2-out culvert-clamav nft-json| {"nftables": [{"metainfo": {"version": "1.0.9", "release_name": "Old Doc Yak #3", "json_schema_version": 1}}, {"table": {"family": "ip", "name": "nat", "handle": 1}}, {"chain": {"family": "ip", "table": "nat", "name": "DOCKER_OUTPUT", "handle": 1}}, {"chain": {"family": "ip", "table": "nat", "name": "OUTPUT", "handle": 2, "type": "nat", "hook": "output", "prio": -100, "policy": "accept"}}, {"chain": {"family": "ip", "table": "nat", "name": "DOCKER_POSTROUTING", "handle": 4}}, {"chain": {"family": "ip", "table": "nat", "name": "POSTROUTING", "handle": 5, "type": "nat", "hook": "postrouting", "prio": 100, "policy": "accept"}}, {"rule": {"family": "ip", "table": "nat", "chain": "DOCKER_OUTPUT", "handle": 9, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.11"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 53}}, {"counter": {"packets": 0, "bytes": 0}}, {"xt": {"type": "target", "name": "DNAT"}}]}}, {"rule": {"family": "ip", "table": "nat", "chain": "DOCKER_OUTPUT", "handle": 7, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.11"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "dport"}}, "right": 53}}, {"counter": {"packets": 0, "bytes": 0}}, {"xt": {"type": "target", "name": "DNAT"}}]}}, {"rule": {"family": "ip", "table": "nat", "chain": "OUTPUT", "handle": 3, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.11"}}, {"counter": {"packets": 0, "bytes": 0}}, {"jump": {"target": "DOCKER_OUTPUT"}}]}}, {"rule": {"family": "ip", "table": "nat", "chain": "DOCKER_POSTROUTING", "handle": 10, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": "127.0.0.11"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "sport"}}, "right": 37079}}, {"counter": {"packets": 0, "bytes": 0}}, {"xt": {"type": "target", "name": "SNAT"}}]}}, {"rule": {"family": "ip", "table": "nat", "chain": "DOCKER_POSTROUTING", "handle": 8, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": "127.0.0.11"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "udp", "field": "sport"}}, "right": 44869}}, {"counter": {"packets": 0, "bytes": 0}}, {"xt": {"type": "target", "name": "SNAT"}}]}}, {"rule": {"family": "ip", "table": "nat", "chain": "POSTROUTING", "handle": 6, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.11"}}, {"counter": {"packets": 0, "bytes": 0}}, {"jump": {"target": "DOCKER_POSTROUTING"}}]}}]}
+m2-obs culvert-clamav nft-text rc=0 lines=21
+m2-out culvert-clamav nft-text| table ip nat {
+m2-out culvert-clamav nft-text| 	chain DOCKER_OUTPUT {
+m2-out culvert-clamav nft-text| 		ip daddr 127.0.0.11 tcp dport 53 counter packets 0 bytes 0 dnat to 127.0.0.11:37079
+m2-out culvert-clamav nft-text| 		ip daddr 127.0.0.11 udp dport 53 counter packets 0 bytes 0 dnat to 127.0.0.11:44869
+m2-out culvert-clamav nft-text| 	}
+m2-out culvert-clamav nft-text| 
+m2-out culvert-clamav nft-text| 	chain OUTPUT {
+m2-out culvert-clamav nft-text| 		type nat hook output priority dstnat; policy accept;
+m2-out culvert-clamav nft-text| 		ip daddr 127.0.0.11 counter packets 0 bytes 0 jump DOCKER_OUTPUT
+m2-out culvert-clamav nft-text| 	}
+m2-out culvert-clamav nft-text| 
+m2-out culvert-clamav nft-text| 	chain DOCKER_POSTROUTING {
+m2-out culvert-clamav nft-text| 		ip saddr 127.0.0.11 tcp sport 37079 counter packets 0 bytes 0 snat to :53
+m2-out culvert-clamav nft-text| 		ip saddr 127.0.0.11 udp sport 44869 counter packets 0 bytes 0 snat to :53
+m2-out culvert-clamav nft-text| 	}
+m2-out culvert-clamav nft-text| 
+m2-out culvert-clamav nft-text| 	chain POSTROUTING {
+m2-out culvert-clamav nft-text| 		type nat hook postrouting priority srcnat; policy accept;
+m2-out culvert-clamav nft-text| 		ip daddr 127.0.0.11 counter packets 0 bytes 0 jump DOCKER_POSTROUTING
+m2-out culvert-clamav nft-text| 	}
+m2-out culvert-clamav nft-text| }
+m2-err culvert-clamav nft-text| # Warning: table ip nat is managed by iptables-nft, do not touch!
+m2-obs culvert-clamav ipv6-conf rc=0 lines=4
+m2-out culvert-clamav ipv6-conf| all forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out culvert-clamav ipv6-conf| default forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out culvert-clamav ipv6-conf| lo forwarding=0 seg6=0 ioam6=0 disable=0
+m2-out culvert-clamav ipv6-conf| eth0 forwarding=0 seg6=0 ioam6=0 disable=1
+m2-probe-sha256 want=8ecf174ab1966c1aa659aaa30a23bc49da0dfdbbf261a34f655f4beb92f724b1 got=8ecf174ab1966c1aa659aaa30a23bc49da0dfdbbf261a34f655f4beb92f724b1
+m2-container culvert id=e33b17d5cd7e started=2026-10-27T16:22:07.337185411Z restarts=0 user=1000 capdrop=[CAP_NET_RAW] capadd=<no value> privileged=false secopt=<no value>
+m2-obs culvert top rc=0 lines=2
+m2-out culvert top| PID
+m2-out culvert top| 1351
+m2-proc culvert 1351 comm=sleep uid=1000 capeff=0000000000000000 capbnd=00000000a80405fb netraw-eff=0 netraw-bnd=0 netadmin-bnd=0 sysadmin-bnd=0 seccomp=2
+m2-probe culvert as=root rc=0 uid=0 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=00000000a80405fb capbnd=00000000a80405fb nonewprivs=0 seccomp=2
+m2-probe culvert as=default rc=0 uid=1000 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=0000000000000000 capbnd=00000000a80405fb nonewprivs=0 seccomp=2
+m2-probe-removed culvert rc=0
+m2-container culvert-clamav id=8cc3fb9752c0 started=2026-10-27T16:22:07.653470114Z restarts=0 user= capdrop=[CAP_NET_RAW] capadd=<no value> privileged=false secopt=<no value>
+m2-obs culvert-clamav top rc=0 lines=2
+m2-out culvert-clamav top| PID
+m2-out culvert-clamav top| 1421
+m2-proc culvert-clamav 1421 comm=sleep uid=0 capeff=00000000a80405fb capbnd=00000000a80405fb netraw-eff=0 netraw-bnd=0 netadmin-bnd=0 sysadmin-bnd=0 seccomp=2
+m2-probe culvert-clamav as=root rc=0 uid=0 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=00000000a80405fb capbnd=00000000a80405fb nonewprivs=0 seccomp=2
+m2-probe culvert-clamav as=default rc=0 uid=0 afpacket=errno:EPERM io_uring=errno:EPERM netns=errno:EPERM userns=errno:EPERM capeff=00000000a80405fb capbnd=00000000a80405fb nonewprivs=0 seccomp=2
+m2-probe-removed culvert-clamav rc=0
+m2-obs clamav version rc=0 lines=1
+m2-out clamav version| ClamAV 1.5.4/27805/Tue Oct 27 08:23:41 2026
+m2-obs clamav eicar rc=1 lines=1
+m2-out clamav eicar| stream: Eicar-Test-Signature FOUND
+m2-obs clamav freshclam rc=0 lines=0
+m2-err clamav freshclam| tail: cannot open '/var/log/clamav/freshclam.log' for reading: No such file or directory
+m2-end
