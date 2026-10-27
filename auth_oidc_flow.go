@@ -160,14 +160,14 @@ func fetchOIDCDiscoveryOverNetwork(src idpRemoteURL) ([]byte, error) {
 	// The request is built from the PARSED url, as the SAML sibling is: the
 	// guard above checked u, so fetching the raw string would be validating
 	// one URL and requesting another. For a URL this shape it round-trips.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody) // #nosec G704 -- admin/operator-supplied discovery URL; the taint is real and is guarded IN THIS FUNCTION (oidcDiscoveryURLShape + url.Parse + scheme check + isPrivateHostContext) and at connect time by ssrfSafeDialContext; gosec's SSRF analyzer models NO sanitizers, so an annotation is the only disposition. TestChaos87_OIDCDiscoveryURLShapeBarrier + TestWall_IdPMetadataFetchersCarryTheRequestForgeryBarrier (RISK-002).
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery request: %w", err)
 	}
 	// Every failure below is CLASSIFIED for resolveIdPDocument's
 	// stale-if-error rule: transport and 5xx may be answered from the
 	// last-known-good cache, a 4xx/other status may not.
-	resp, err := client.Do(req) // #nosec G704 -- same guarded request on the ssrfSafeDialContext transport, redirects included; TestChaos87_OIDCDiscoveryURLShapeBarrier (RISK-002).
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, idpFetchUnavailable(fmt.Errorf("oidc discovery fetch: %w", err))
 	}
