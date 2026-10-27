@@ -701,6 +701,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The Stage-2 policy scan no longer streams a 568-byte rule definition to
+  reject a destination.** Every proxied request on every protocol runs
+  `PolicyStore.Evaluate`, a priority-ordered first-match scan over the whole
+  rulebase, and that scan was the largest Culvert-owned CPU cost on the request
+  path (7.4% of an end-to-end HTTP forward at 500 rules, where the rest is
+  kernel and `net/http`). Its cost was the WORKING SET, not the comparisons:
+  `PolicyRule` is 568 bytes spread over nine cache lines, the scan reads fields
+  on five or six of them per rule, and at 10 000 rules the ~5.7 MB of
+  definitions leaves L2 — which is why the engine scaled superlinearly,
+  7.6 ns/rule at 1 000 rising to 29.3 ns/rule at 10 000. `sortLocked`'s own note
+  diagnosed exactly this ("shrinking what the scan streams per rule is the only
+  thing that can address it") and declined to attempt it. This is that change.
+
+  A rule's destination FQDN is the first thing `matchDestNorm` tests and the
+  most common access-rule scope in a gateway rulebase, so it is the
+  discriminator worth packing. Publication now also emits a **16-byte row per
+  rule** in one contiguous array — four rows per cache line, hardware
+  prefetchable — holding the two facts a mismatch is provable from without
+  touching the definition: the shortest host that can match, and the pattern's
+  trailing bytes packed into one word. `hostutil.MatchFQDNNorm` is
+  suffix-anchored in every branch, so a host that is too short, or whose packed
+  trailing bytes differ, cannot match.
+
+  Measured with benchstat over 10 runs per side, back to back on one host
+  (go1.27.3, 4-core Xeon @2.10GHz):
+
+  | benchmark | before | after | delta |
+  | --- | --- | --- | --- |
+  | `PolicyEvaluate_NoMatch/rules=1000` | 10.06 µs | 1.20 µs | **−88.0%** |
+  | `PolicyEvaluate_NoMatch/rules=10000` | 233.9 µs | 12.96 µs | **−94.5%** |
+  | `PolicyEvaluate_MatchLast/rules=10001` | 236.8 µs | 12.76 µs | **−94.6%** |
+  | `PolicyEvaluate_CIDRRules/rules=1000` | 15.51 µs | 1.24 µs | −92.0% |
+  | `PolicyEvaluate_ScheduledRules/rules=1000` | 24.19 µs | 1.23 µs | −94.9% |
+  | `PerfQual_Evaluate/rules=500/nomatch` | 5.08 µs | 638 ns | −87.4% |
+
+  The superlinear knee is gone with it: 29.3 ns/rule at 10 000 rules becomes
+  1.3 ns/rule. Allocations on the scan are unchanged (0 per evaluation on a
+  miss, 1 for the returned `PolicyMatch` on a hit).
+
+  **The index is one-directional and never authoritative.** A row can only make
+  the scan reject a rule the full predicate would also have rejected; nothing is
+  admitted, matched or skipped on a row's word, and every rule that survives the
+  prefilter runs the complete unmodified check sequence. It is paired with its
+  revision by SLICE IDENTITY, so an index published for another revision is
+  discarded rather than applied, and a revision that never reached publication
+  simply gets no prefilter and the pre-change scan. `TestPolicyScanIndex_`
+  `DifferentialOracle` drives the real evaluator twice over randomized
+  rulebases — with the index and without — and requires the selected rule to be
+  identical; `TestPolicyScanIndex_NegativeControl` proves that oracle can fail
+  by feeding it an over-eager row. The Policy Tester's trace path keeps the
+  prefilter off, because it must reach the real predicate behind every reported
+  skip reason.
+
+  **Costs, measured rather than assumed.** Publication grows by one array and
+  one struct — +2 allocations and +2.4% bytes per revision, ~+3–5% of
+  `sortLocked`'s wall time — which matters because publication holds the writer
+  lock that evaluation's RLock waits on. A rulebase no row can prefilter (
+  category-, country- or source-only) publishes **no** index at all and stays on
+  exactly the pre-change path; charging it was measured at +26% on
+  `PolicyEvaluate_CategoryRules/rules=200` and is the reason that case is
+  special-cased rather than tolerated. Two further shapes of the change were
+  measured and backed out for the same reason — a per-width host-tail
+  `[9]uint64` carried in the per-scan struct (+22% on the same benchmark,
+  because the inlined comparison takes its address and the 72 bytes displace the
+  scan's other per-rule state), and folding the scan's two eligibility checks
+  into a helper returning the skip reason (+26%, ~9 ns/rule, because it
+  materializes a string header per rule). Both rejections are recorded beside
+  the code. Rules scoped only by category, category group or country get no
+  prefilter by design; their predicates are not suffix-anchored and are already
+  amortized to O(1) per rule by their own per-scan scratch.
+
 - **A policy publication now allocates one array per revision instead of one
   object per rule.** `sortLocked` cloned every definition with its own
   `new(PolicyRule)` and sorted the clones; it now decides the order first, on a
