@@ -107,6 +107,8 @@ unconfigured and states this coupling.
 | Status | Meaning | Action |
 |---|---|---|
 | `ok` | Revocations are durable; counts of tokens and accounts in force | none |
+| `warn` | Revocation entries were **dropped** on an untrusted path (a cluster peer or the on-disk file sent an over-long, far-future or over-cap entry) | [session-revocation-plane.md](session-revocation-plane.md) |
+| `warn` | Logout requests carried a cookie this appliance could **not verify** (a key rotation, or probing of the public logout endpoint) | [session-revocation-plane.md](session-revocation-plane.md) |
 | `warn` | No revocations file configured — revocations are lost on restart | Set `--revocations-file` (§3) |
 | `fail` | A revocation could not be **written** | §5 |
 | `fail` | The persisted list could not be **parsed** (corrupt; quarantined) | §6 |
@@ -115,8 +117,10 @@ unconfigured and states this coupling.
 | `fail` | The persisted list could not be **read** (permissions, I/O, mount) | §6 |
 | `fail` | The revocations file is **missing** | §6a |
 
-The row carries counts and a remedy only. It never names a revoked username or
-token — it is reachable at viewer role.
+The `fail` branches outrank both admission `warn` branches, and those outrank
+the unconfigured-default `warn`. The row carries counts and a remedy only. It
+never names a revoked username or token, because it is reachable at viewer
+role.
 
 ### Metrics — `/metrics`
 

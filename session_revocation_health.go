@@ -653,6 +653,16 @@ func checkSessionRevocation() OperatorContractCheck {
 			OperatorAction: "Check the mount backing the revocations file and whether it was deleted or restored over. The next logout or account deletion on this node recreates it with the full list. A sync also rewrites it, but only on a node that RECEIVES revocations — a data-plane node, an HA standby applying the leader's bundle, or a Control Plane leader being polled by either — so a leader with no standby and no data-plane nodes calling in is not repaired by sync at all. Until one of those lands, treat every revocation shown here as lost on restart.",
 		}
 	}
+	// CHAOS-73's admission branches (dropped untrusted entries, refused
+	// unverifiable logouts) rank BELOW every durability FAIL above — those say
+	// revocations the operator applied are not, or will not stay, in force —
+	// and ABOVE the unconfigured-default warning, because a dropped entry is a
+	// security decision that did not take effect and a refusal is the only
+	// evidence of probing, while the default posture is already the same
+	// message on every unconfigured node.
+	if row, ok := revocationAdmissionRow(); ok {
+		return row
+	}
 	if !h.Configured {
 		return OperatorContractCheck{
 			Code:   "session_revocation",
@@ -665,7 +675,7 @@ func checkSessionRevocation() OperatorContractCheck {
 	return OperatorContractCheck{
 		Code:   "session_revocation",
 		Status: diagOK,
-		Message: fmt.Sprintf("session revocations are durable (%d token, %d account revocation(s) in force)",
+		Message: fmt.Sprintf("session revocations are durable (%d token, %d account revocation(s) in force; no refusals, no drops)",
 			tokens, users),
 	}
 }
@@ -762,39 +772,34 @@ func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
 	// announce a missing file every tick — the flag's own onset line already
 	// said what is wrong.
 	failing, vanished := revocationDurabilityDoubt()
-	if added == 0 && !failing && !vanished {
+	owed := sessionRevocationsDirty.Load()
+	if added == 0 && !failing && !vanished && !owed {
 		return 0
 	}
 	if vanished {
 		logger.Printf("%s: the revocations file is missing — rewriting the %d token and %d account revocation(s) held in memory",
 			who, sessionRevoked.Count(), sessionRevoked.UserCount())
 	}
-	if err := sessionRevoked.SaveRevocations(); err != nil {
+	// Through the CHAOS-73 coordinator, never a direct SaveRevocations: the
+	// coordinator owns the dirty flag the logout repair keys on, and it logs a
+	// failure once per episode rather than once per sync tick.
+	switch persistRevocations() {
+	case persistFenced:
 		// A REFUSAL is not a failure and must not be logged per attempt
 		// (AU-37). This boot could not read the revocations file, so the save
 		// is declined to avoid renaming over content nobody saw; the merged
 		// entries are in force in memory and the load-degraded contract row
-		// already names the repair. The sync loops run every 3-5s, so logging
-		// here would emit hundreds of lines an hour for a condition reported
-		// once at boot — this function's own rule, two paragraphs up. The
-		// magnitude goes to the counter, and magnitude is ALL it is: this site
-		// charges one per ENTRY it had added, the counter never decrements, and
-		// the re-apply scope is the live list the contract row reports (AU-52).
-		if session.IsWriteFenced(err) {
-			noteRevocationPersistRefused(added)
-			return added
+		// already names the repair. The magnitude goes to the counter, and
+		// magnitude is ALL it is: this site charges one per ENTRY it had added,
+		// the counter never decrements, and the re-apply scope is the live list
+		// the contract row reports (AU-52).
+		noteRevocationPersistRefused(added)
+	case persistLanded, persistRecovered:
+		if failing || owed {
+			logger.Printf("%s: merged session revocations are durable again", who)
 		}
-		// Onset only. While degraded the counter carries the magnitude.
-		if !failing {
-			// CWE-117: as in session.go, the error is wrapped from a marshal
-			// over request-supplied token keys. `who` is a caller-chosen
-			// constant, not request data.
-			logger.Printf("%s: failed to persist merged revocations: %q", who, sanitizeLog(err.Error()))
-		}
-		return added
-	}
-	if failing {
-		logger.Printf("%s: merged session revocations are durable again", who)
+	case persistFailed:
+		// Logged by the coordinator at onset; the counter carries the rest.
 	}
 	return added
 }

@@ -153,18 +153,19 @@ type RevocationList struct {
 	tokens map[string]time.Time // b64 payload → session expiry
 	users  map[string]time.Time // username → revocation expiry (all sessions for this user)
 
-	// saveMu serializes SaveRevocations end to end: snapshot THROUGH rename.
-	//
-	// It is a SECOND mutex rather than a wider hold of mu, and that is
-	// deliberate. mu guards the maps every enforcement decision reads
-	// (IsRevoked runs on the admin path) and every revocation writes, so
-	// holding it across a marshal and an fsync would let a slow or full volume
-	// delay the act of revoking — making a durability mechanism cost
-	// availability of the security control it exists to protect. saveMu blocks
-	// only other SAVERS.
-	//
-	// Lock order is saveMu → mu, and mu is never held while taking saveMu.
-	saveMu sync.Mutex
+	// sinceSweep counts insertions since the last expired-entry sweep.
+	// CHAOS-73: eviction used to be lazy-on-read only, which never fires for
+	// the one key that is guaranteed never to be presented again — the cookie
+	// that just logged out — so an un-clustered node had no evictor at all.
+	// See revocation_bounds.go.
+	sinceSweep int
+
+	// verified holds the tokens this process admitted through RevokeVerified
+	// (or reloaded from the file with a valid provenance MAC). Only these are
+	// written to the revocations file with a provenance MAC, and only entries
+	// carrying a valid one are reloaded past the untrusted-origin bounds. See
+	// provenanceMAC in revocation_bounds.go.
+	verified map[string]struct{}
 
 	// unread is set when THIS boot could not READ the revocations file, and it
 	// makes SaveRevocations refuse rather than overwrite.
@@ -221,8 +222,9 @@ const (
 // package singleton, mirroring the bl pointer-swap idiom).
 func NewRevocationList() *RevocationList {
 	return &RevocationList{
-		tokens: map[string]time.Time{},
-		users:  map[string]time.Time{},
+		tokens:   map[string]time.Time{},
+		users:    map[string]time.Time{},
+		verified: map[string]struct{}{},
 	}
 }
 
@@ -230,10 +232,24 @@ func NewRevocationList() *RevocationList {
 var Revoked = NewRevocationList()
 
 // Revoke marks a token (its b64 payload) as revoked until exp.
-func (r *RevocationList) Revoke(token string, exp time.Time) {
+//
+// It reports whether the list actually changed, so a caller that persists
+// after revoking does not rewrite the whole file for a no-op. Callers that
+// do not care may ignore the result.
+//
+// CHAOS-73: this is the UNVERIFIED primitive and it is now internal to the
+// package's own trusted callers plus tests. The logout path must use
+// RevokeVerified, which authenticates the cookie first — see
+// revocation_bounds.go for why the MAC check is the whole security property.
+func (r *RevocationList) Revoke(token string, exp time.Time) bool {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if prev, exists := r.tokens[token]; exists && !prev.Before(exp) {
+		return false
+	}
 	r.tokens[token] = exp
-	r.mu.Unlock()
+	r.sweepIfDueLocked(time.Now())
+	return true
 }
 
 // IsRevoked reports whether the token is currently revoked, lazily
@@ -250,6 +266,7 @@ func (r *RevocationList) IsRevoked(token string) bool {
 	// honoured. See revocation_expiry.go.
 	if revocationExpired(time.Now(), exp) {
 		delete(r.tokens, token) // lazy eviction
+		delete(r.verified, token)
 		return false
 	}
 	return true
@@ -313,16 +330,23 @@ const userRevocationTokenPrefix = "user:"
 //   - a USER revocation (the account was deleted) sets User to the username and
 //     Token to userRevocationTokenPrefix+User.
 //
-// User is `omitempty` and Token is always populated, so the document stays a
-// JSON array that a binary predating CHAOS-68 parses without error. That
-// downgrade compatibility is deliberate: promoting the file to an object would
-// make an older binary fail the whole parse and lose the TOKEN revocations it
-// does understand — trading a gap for a regression.
+// User and Prov are `omitempty` and Token is always populated, so the document
+// stays a JSON array that a binary predating CHAOS-68 parses without error.
+// That downgrade compatibility is deliberate: promoting the file to an object
+// would make an older binary fail the whole parse and lose the TOKEN
+// revocations it does understand — trading a gap for a regression.
 type RevocationEntry struct {
 	Token  string `json:"token"`
 	Expiry int64  `json:"expiry"` // Unix timestamp
-	// User, when non-empty, makes this a user-level revocation.
+	// User, when non-empty, makes this a user-level revocation (CHAOS-68).
 	User string `json:"user,omitempty"`
+	// Prov is the provenance MAC of a locally MAC-verified TOKEN revocation. It
+	// is written to the PERSISTENCE FILE only (never by ExportRevocations, so
+	// the gossip wire is unchanged) and lets LoadRevocations tell this
+	// appliance's own verified entries from untrusted ones. See provenanceMAC.
+	// User entries never carry one: they are reloaded through the untrusted
+	// bounds, which no genuine account revocation can exceed.
+	Prov string `json:"prov,omitempty"`
 }
 
 // ExportRevocations returns all non-expired revocation entries — BOTH kinds —
@@ -337,28 +361,21 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
+	// One shared sweep rather than a second inline copy of the eviction rule
+	// (CHAOS-73: two dialects for one question inside one struct is the trap).
+	// sweepLocked covers BOTH maps with SEC-REVEXP-1's oracle.
+	r.sweepLocked(now)
 	entries := make([]RevocationEntry, 0, len(r.tokens)+len(r.users))
 	for tok, exp := range r.tokens {
-		// SEC-REVEXP-1: this loop both PERSISTS (SaveRevocations) and GOSSIPS
-		// (the DP→CP push), so evicting a still-honoured entry here removed it
-		// from the on-disk file and from every peer, not just from this map.
-		if revocationExpired(now, exp) {
-			delete(r.tokens, tok)
-			continue
-		}
 		entries = append(entries, RevocationEntry{Token: tok, Expiry: exp.Unix()})
 	}
 	for user, exp := range r.users {
-		// SEC-REVEXP-1: the SAME oracle as the token loop above, and for the
-		// same reason — this loop persists and gossips too, so a raw
-		// now.After(exp) deleted a deleted ACCOUNT's revocation from disk and
-		// from every peer during the wall-clock second numbered Exp, while
-		// Decode still accepted that account's cookies. Fixing the token loop
-		// did not fix its twin (AU-52's standing rule).
-		if revocationExpired(now, exp) {
-			delete(r.users, user)
-			continue
-		}
+		// SEC-REVEXP-1: no inline eviction here. sweepLocked above already
+		// dropped expired USER entries with the same oracle as the tokens — a
+		// raw now.After(exp) in this loop once deleted a deleted ACCOUNT's
+		// revocation from disk and from every peer during the wall-clock second
+		// numbered Exp, while Decode still accepted that account's cookies
+		// (AU-52's standing rule: fixing one loop does not fix its twin).
 		entries = append(entries, RevocationEntry{
 			Token:  userRevocationTokenPrefix + user,
 			Expiry: exp.Unix(),
@@ -368,22 +385,63 @@ func (r *RevocationList) ExportRevocations() []RevocationEntry {
 	return entries
 }
 
-// MergeRevocations imports remote revocation entries (from other cluster nodes,
-// or from the persisted file at boot). Only adds entries that are not yet
-// expired and not already present. Returns how many entries were newly applied.
+// exportPersisted is ExportRevocations plus the provenance MAC on every
+// locally verified TOKEN entry; it is what SaveRevocations writes. It carries
+// BOTH kinds (CHAOS-68): a file that held only tokens would make an account
+// deletion's revocation vanish at the next restart.
+func (r *RevocationList) exportPersisted() []RevocationEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sweepLocked(time.Now())
+	entries := make([]RevocationEntry, 0, len(r.tokens)+len(r.users))
+	for tok, exp := range r.tokens {
+		e := RevocationEntry{Token: tok, Expiry: exp.Unix()}
+		if _, ok := r.verified[tok]; ok {
+			e.Prov = provenanceMAC(tok, e.Expiry)
+		}
+		entries = append(entries, e)
+	}
+	for user, exp := range r.users {
+		entries = append(entries, RevocationEntry{
+			Token:  userRevocationTokenPrefix + user,
+			Expiry: exp.Unix(),
+			User:   user,
+		})
+	}
+	return entries
+}
+
+// MergeRevocations imports remote revocation entries (from other cluster
+// nodes). Only adds entries that are not yet expired and not already present.
+// Returns how many entries were newly applied.
 //
-// An entry is classified as a USER revocation when it carries an explicit User
-// field, OR when its Token carries userRevocationTokenPrefix. The second form
-// only arises when the entry has passed through a node predating CHAOS-68,
-// which drops the unknown `user` JSON field but preserves the token verbatim;
-// recovering the username from the prefix means one hop through an old node
-// degrades nothing. A token that merely LOOKS like a user entry cannot be a
-// real cookie payload (see userRevocationTokenPrefix), so this classification
-// can never swallow a genuine token revocation.
+// CHAOS-73: this is an UNTRUSTED-ORIGIN path — a peer node chooses the key
+// bytes, the key length and the entry count — so every entry goes through the
+// untrusted admission bounds (key-size bound, far-future refusal, entry cap,
+// counted refusal). The list is swept first so the cap is measured against
+// LIVE entries rather than against expired ones nobody has read since they
+// died.
+//
+// CHAOS-68: an entry is classified as a USER revocation when it carries an
+// explicit User field, OR when its Token carries userRevocationTokenPrefix.
+// The second form only arises when the entry has passed through a node
+// predating CHAOS-68, which drops the unknown `user` JSON field but preserves
+// the token verbatim; recovering the username from the prefix means one hop
+// through an old node degrades nothing. A token that merely LOOKS like a user
+// entry cannot be a real cookie payload (see userRevocationTokenPrefix), so
+// this classification can never swallow a genuine token revocation. User
+// entries get the same untrusted bounds as tokens (admitUntrustedUserLocked).
 func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
+	return r.mergeUntrusted(entries, false)
+}
+
+// mergeUntrusted admits entries from an untrusted origin; persisted marks the
+// on-disk revocations file (see admitUntrustedLocked).
+func (r *RevocationList) mergeUntrusted(entries []RevocationEntry, persisted bool) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
+	r.sweepLocked(now)
 	added := 0
 	for _, e := range entries {
 		exp := time.Unix(e.Expiry, 0)
@@ -393,14 +451,10 @@ func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
 		if revocationExpired(now, exp) {
 			continue // already expired
 		}
-		user := e.User
-		if user == "" {
-			user = strings.TrimPrefix(e.Token, userRevocationTokenPrefix)
-			if user == e.Token {
-				user = "" // no prefix — an ordinary token revocation
+		if user := revocationEntryUser(e); user != "" {
+			if !r.admitUntrustedUserLocked(e, user, exp, now) {
+				continue
 			}
-		}
-		if user != "" {
 			// Keep the LATER expiry: a re-delete of the same username extends
 			// the window, and taking the earlier one would shorten a revocation
 			// on a gossip round trip.
@@ -410,19 +464,37 @@ func (r *RevocationList) MergeRevocations(entries []RevocationEntry) int {
 			}
 			continue
 		}
-		if _, exists := r.tokens[e.Token]; !exists {
+		// A persisted entry carrying a valid provenance MAC is one this
+		// appliance verified itself (RevokeVerified) under the current signing
+		// key, so it reloads past the untrusted bounds: refusing it on size or
+		// capacity would resurrect a session an operator revoked (Codex P1/P2,
+		// CodeRabbit, PR #1591). Gossip never takes this branch.
+		if persisted && validProvenance(e) {
+			if _, exists := r.tokens[e.Token]; !exists {
+				added++
+			}
 			r.tokens[e.Token] = exp
-			added++
+			r.verified[e.Token] = struct{}{}
+			continue
 		}
+		if !r.admitUntrustedLocked(e, now) {
+			continue
+		}
+		r.tokens[e.Token] = time.Unix(e.Expiry, 0)
+		added++
 	}
 	return added
 }
 
 // Count returns the number of active revoked session TOKENS.
+//
+// It sweeps first (sweepLocked), so it reports LIVE entries; see the note
+// after UserCount for why.
 func (r *RevocationList) Count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return pruneExpiredLocked(r.tokens)
+	r.sweepLocked(time.Now())
+	return len(r.tokens)
 }
 
 // UserCount returns the number of active user-level revocations.
@@ -434,57 +506,41 @@ func (r *RevocationList) Count() int {
 func (r *RevocationList) UserCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return pruneExpiredLocked(r.users)
+	r.sweepLocked(time.Now())
+	return len(r.users)
 }
 
-// pruneExpiredLocked drops every entry whose expiry has passed and returns how
-// many remain. The caller must hold r.mu.
+// Why Count and UserCount sweep (CHAOS-68), and why through sweepLocked.
 //
 // Counting live entries rather than map length is not cosmetic. Expiry in this
-// list is otherwise LAZY — IsRevoked drops an entry only when something asks
-// about that exact token, and ExportRevocations drops them only when something
-// persists or gossips — so on a standalone node with persistence off and no
-// cluster peer, nothing ever asks, and an expired revocation sits in the map for
-// the life of the process. Both counts feed gauges whose HELP text says
-// "currently in force" and the /api/cluster/revocations surface, so an expired
-// entry reported there is a WRONG answer, not merely a stale one: it tells an
-// operator that sessions are still being denied when they are not.
-//
-// Pruning rather than skipping also bounds the map on exactly that node, which
-// is the one where nothing else would ever collect it.
+// list is otherwise amortised — IsRevoked drops an entry only when something
+// asks about that exact token, and the insertion-driven sweep runs only every
+// revocationSweepEvery inserts — so on a quiet standalone node an expired
+// revocation can sit in the map for a long time. Both counts feed gauges whose
+// HELP text says "currently in force" and the /api/cluster/revocations
+// surface, so an expired entry reported there is a WRONG answer, not merely a
+// stale one: it tells an operator that sessions are still being denied when
+// they are not.
 //
 // The eviction test is SEC-REVEXP-1's shared oracle, NOT a raw now.After(exp),
-// and that is a security property rather than tidiness. This function DELETES,
-// and it is reached from read-only surfaces — a /metrics scrape, the
+// and that is a security property rather than tidiness. These functions
+// DELETE, and they are reached from read-only surfaces — a /metrics scrape, the
 // session_revocation diagnostics row, /api/cluster/revocations — so a looser
-// test here destroys a revocation that Decode would still honour. Every
-// production expiry is a whole second while time.Now() carries a sub-second
-// remainder, so for the whole wall-clock second numbered Exp, now.After(exp) is
-// already true while Decode still accepts the cookie: counting would evict the
-// entry and the logged-out cookie would authenticate again for the rest of that
-// second. revocation_expiry.go documents that exact hole, measured against the
-// real Decode, for the eviction sites that existed when it was written; this
-// function was added afterwards and reintroduced it (Codex P2, PR #1437).
-//
-// Reported by Codex on PR #1437 as a P2.
-func pruneExpiredLocked(m map[string]time.Time) int {
-	now := time.Now()
-	for k, exp := range m {
-		if revocationExpired(now, exp) {
-			delete(m, k)
-		}
-	}
-	return len(m)
-}
+// test here destroys a revocation that Decode would still honour (Codex P2,
+// PR #1437). Going through sweepLocked rather than a private prune loop also
+// keeps the `verified` provenance set in step with `tokens` (CHAOS-73), which a
+// prune that deleted only from `tokens` would leave holding orphaned keys.
 
 // SwapForTest replaces the list's maps with empty ones and returns a restore
 // function. Mirrors the snapshot/restore pattern documented in CLAUDE.md for
 // tests that touch shared revocation state.
 func (r *RevocationList) SwapForTest() (restore func()) {
 	r.mu.Lock()
-	prevTokens, prevUsers := r.tokens, r.users
+	prevTokens, prevUsers, prevSweep, prevVerified := r.tokens, r.users, r.sinceSweep, r.verified
 	r.tokens = map[string]time.Time{}
 	r.users = map[string]time.Time{}
+	r.verified = map[string]struct{}{}
+	r.sinceSweep = 0
 	r.mu.Unlock()
 	// The unread fence is a LATCH on this object, cleared in production only by
 	// a load that succeeds — which normally means a restart. It therefore
@@ -503,6 +559,8 @@ func (r *RevocationList) SwapForTest() (restore func()) {
 		r.mu.Lock()
 		r.tokens = prevTokens
 		r.users = prevUsers
+		r.verified = prevVerified
+		r.sinceSweep = prevSweep
 		r.mu.Unlock()
 		r.writeFence.Store(prevFence)
 	}
@@ -662,11 +720,29 @@ func notePersistSuccess() {
 	callObserver(fn)
 }
 
+// saveMu serializes the WHOLE save — snapshot, marshal and write — for every
+// caller.
+//
+// r.mu is released when exportPersisted returns, so without this two writers
+// (a logout request goroutine and the DP's 3 s revocation-sync loop) can each
+// snapshot and then race to AtomicWrite: the rename that lands LAST wins, and
+// it may carry the OLDER snapshot. The file then silently lacks a revocation
+// that is still live in memory, and a restart inside that window resurrects
+// the session (CodeRabbit, PR #1591).
+//
+// Serializing here rather than at one call site is deliberate: a lock around
+// a single caller is no protection while another writer calls SaveRevocations
+// directly. Holding it across the write is safe for the request path because
+// it is NOT r.mu — IsRevoked, and therefore authentication, never waits on it.
+var saveMu sync.Mutex
+
 // SaveRevocations writes all non-expired revocations to disk as JSON.
 //
 // Every failure path is routed through notePersistFailure, so "the revocation
 // is not durable" is a countable event rather than one log line at a call site
 // that returns 200 regardless.
+//
+// The whole save is serialized by saveMu; see its comment for why.
 func (r *RevocationList) SaveRevocations() error {
 	path := RevocationsPath()
 	if path == "" {
@@ -675,33 +751,27 @@ func (r *RevocationList) SaveRevocations() error {
 		// configuration) is reported by the health plane, not here.
 		return nil
 	}
-	// Snapshot THROUGH rename under one lock. ExportRevocations takes and
-	// releases mu on its own, so without this the sequence
-	// export → marshal → AtomicWrite is three independently-atomic steps that
-	// are jointly not: two concurrent savers can interleave so the one holding
-	// the OLDER snapshot renames last, and the file loses a revocation both
-	// callers were told had been applied. Nothing detects it — both return nil,
-	// both count as a successful write, and the durability row stays green —
-	// until a restart resurrects the session. That is the defect class this
-	// whole sweep exists to close, and this function had it: before this change
-	// SaveRevocations had ONE caller, and it now has five, three of them in
-	// background loops (the CP SyncRevocations handler, the DP sync loop, the HA
-	// bundle apply) that run concurrently with an admin's delete.
-	//
-	// Reported by Codex on PR #1437 as a P1.
 	// Refuse BEFORE taking saveMu and before any I/O: there is nothing to
 	// serialise, and a caller must not be delayed by other savers to be told
-	// that nothing will be written.
+	// that nothing will be written (AU-37/AU-38).
 	switch r.writeFence.Load() {
 	case fenceUnread:
 		return ErrRevocationsUnread
 	case fenceUnquarantined:
 		return ErrRevocationsUnquarantined
 	}
-	r.saveMu.Lock()
-	defer r.saveMu.Unlock()
-
-	entries := r.ExportRevocations()
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	// Snapshot INSIDE the lock, so the write that lands last is the one whose
+	// snapshot was taken last. Before CHAOS-73's saveMu, export → marshal →
+	// AtomicWrite were three independently-atomic steps that were jointly not:
+	// two concurrent savers could interleave so the OLDER snapshot renamed
+	// last, and the file lost a revocation both callers were told had been
+	// applied (reported independently by Codex on PR #1437 as a P1 and by
+	// CodeRabbit on PR #1591). SaveRevocations has several callers, three of
+	// them background loops (the CP SyncRevocations handler, the DP sync loop,
+	// the HA bundle apply) that run concurrently with an admin's delete.
+	entries := r.exportPersisted()
 	data, err := json.Marshal(entries)
 	if err != nil {
 		return notePersistFailure(fmt.Errorf("marshal revocations: %w", err))
@@ -834,7 +904,7 @@ func (r *RevocationList) LoadRevocations() error {
 		// Reported by Codex on PR #1437 as a P1.
 		return fmt.Errorf("%w: top-level value is null, not an array", ErrRevocationsCorrupt)
 	}
-	added := r.MergeRevocations(entries)
+	added := r.mergeUntrusted(entries, true)
 	if added > 0 {
 		obs.Printf("Session: loaded %d revocations from disk", added)
 	}
@@ -866,15 +936,18 @@ func TTL() time.Duration {
 	return ttl
 }
 
-// SetTTL updates the session lifetime. Clamped to [15min, 7d].
+// MaxSessionLifetime is the longest session TTL SetTTL admits. No session
+// this appliance issues can expire later than issue time plus this.
+const MaxSessionLifetime = 7 * 24 * time.Hour
+
+// SetTTL updates the session lifetime. Clamped to [15min, MaxSessionLifetime].
 func SetTTL(d time.Duration) {
 	const minTTL = 15 * time.Minute
-	const maxTTL = 7 * 24 * time.Hour
 	if d < minTTL {
 		d = minTTL
 	}
-	if d > maxTTL {
-		d = maxTTL
+	if d > MaxSessionLifetime {
+		d = MaxSessionLifetime
 	}
 	ttlMu.Lock()
 	ttl = d
@@ -927,46 +1000,7 @@ func Encode(s *Session) (string, error) {
 // Decode parses and verifies a session cookie value.
 // Returns an error when the signature is invalid, the session has expired,
 // or the token/user has been revoked.
-//
-// This is THE authentication primitive for a session cookie. If you need a
-// decode that tolerates an existing revocation, you want DecodeForRevocation
-// and you should read why it exists first.
-func Decode(raw string) (*Session, error) { return decode(raw, true) }
-
-// DecodeForRevocation authenticates a cookie for the LOGOUT path only: it
-// performs every check Decode does EXCEPT the two revocation lookups.
-//
-// **This is not an authentication function and must never be used as one.** A
-// session it accepts may be one this node has already revoked, or one whose
-// account has been deleted. The only caller is revokeSessionCookie, and a
-// structural wall (TestChaos68_AU45_WallDecodeForRevocationHasOneCaller, in
-// package main) keeps it that way, because a second caller would be a silent
-// authentication bypass.
-//
-// It exists because AU-30 made logout authenticate the cookie before writing
-// anything — correct, and it closed a fleet-wide write-amplification hole —
-// but it routed that through Decode, which REJECTS an already-revoked token.
-// So a logout whose SaveRevocations failed transiently could never be repaired
-// by retrying the logout: the second attempt was refused at the door, before
-// reaching the save. On a standalone appliance nothing else retries — every
-// other repair path (SyncRevocations, the DP poll loop, the HA bundle merge) is
-// driven by a PEER — so the node stayed degraded until some unrelated
-// revocation happened, and a restart brought the cookie back to life. That is
-// AU-41's lesson one topology over: the single-node case is the one with no
-// peer to repair it (AU-45).
-//
-// The signature check is what makes this safe, and it is unchanged: a forged
-// cookie is refused here exactly as it is in Decode, so no caller can mint a
-// revocation entry. The expiry check is kept for the same reason — an expired
-// cookie authenticates nothing, so revoking it would only let a caller write
-// entries for arbitrary past expiries.
-func DecodeForRevocation(raw string) (*Session, error) { return decode(raw, false) }
-
-// decode is the ONE implementation behind both exported forms. The revocation
-// lookups are a parameter rather than a second copy of the body precisely
-// because the parts that must never diverge — the constant-time MAC compare and
-// the expiry check — are the parts a copy would silently let drift.
-func decode(raw string, consultRevocations bool) (*Session, error) {
+func Decode(raw string) (*Session, error) {
 	dot := strings.LastIndex(raw, ".")
 	if dot < 0 {
 		return nil, fmt.Errorf("session: malformed cookie")
@@ -979,9 +1013,8 @@ func decode(raw string, consultRevocations bool) (*Session, error) {
 		return nil, fmt.Errorf("session: invalid signature")
 	}
 
-	// Revocation check (explicit logout). Skipped only by DecodeForRevocation,
-	// whose whole purpose is to let a repeat logout re-persist this entry.
-	if consultRevocations && Revoked.IsRevoked(b64) {
+	// Revocation check (explicit logout).
+	if Revoked.IsRevoked(b64) {
 		return nil, fmt.Errorf("session: revoked")
 	}
 
@@ -996,11 +1029,8 @@ func decode(raw string, consultRevocations bool) (*Session, error) {
 	if time.Now().Unix() > s.Exp {
 		return nil, fmt.Errorf("session: expired")
 	}
-	// User-level revocation (account deleted while session was active). Also
-	// skipped by DecodeForRevocation: a logout arriving after the account was
-	// deleted must still be able to persist its own token entry, or the repair
-	// path would have the same hole one branch over.
-	if consultRevocations && s.Sub != "" && Revoked.IsUserRevoked(s.Sub) {
+	// User-level revocation (account deleted while session was active).
+	if s.Sub != "" && Revoked.IsUserRevoked(s.Sub) {
 		return nil, fmt.Errorf("session: user revoked")
 	}
 	return &s, nil

@@ -98,91 +98,88 @@ func sessionIdentity(s *Session) *Identity {
 	}
 }
 
-// revokeSessionCookie adds the cookie from r to the revocation list.
+// revokeSessionCookie adds the cookie from r to the revocation list, if and
+// only if this appliance signed it.
 //
-// THE COOKIE IS AUTHENTICATED FIRST, and that is a security requirement rather
-// than tidiness. Both call sites are logout handlers on the PUBLIC allowlist
-// (`/api/auth/logout` and `/auth/logout` — see uiAuthMiddleware), so the cookie
-// value reaching this function is attacker-chosen. The revocation map is
-// uncapped, its entries expire only at an expiry taken FROM THE COOKIE, and
-// every call marshals the whole list to disk and gossips it fleet-wide — so
-// revoking on an UNVERIFIED value let one unauthenticated caller mint
-// arbitrarily many permanent entries, in memory, on disk and on every node.
-// That is CHAOS-63's write-amplification shape (a public endpoint reaching a
-// durable sink with unbounded caller-chosen bytes) pointed at the one control
-// that withdraws session authority.
+// CHAOS-73. The previous body decoded the cookie and inserted its payload
+// WITHOUT verifying the HMAC, on the explicit but mistaken reasoning that the
+// signature had "already [been] verified by decodeSession". It has not been on
+// this path: `/api/auth/logout` is PUBLIC and apiAuthLogout calls this
+// function unconditionally, not only when readUISessionCookie returned a
+// session. An unauthenticated caller therefore chose the retained key, its
+// length and its expiry — see session_revocation_bounds.go for the measured
+// consequences (a 524 KB forged cookie retained with a 100-year expiry, and
+// quadratic disk write amplification), and for why verifying is strictly
+// better here than bounding.
 //
-// The earlier body read the expiry with a bare base64+JSON decode and its
-// comment claimed "HMAC already verified by decodeSession" — true of the
-// value's ORIGIN on the admin path, never of this function, which re-reads the
-// cookie off the request itself and verified nothing.
+// Verification loses nothing. A revocation key is the payload half of a cookie
+// we signed, so a cookie we did not sign cannot name a session of ours; and
+// the MAC is checked BEFORE the expiry (as in Decode), so the expired cookie
+// this public route exists to clear still verifies and still logs out.
 //
-// decodeSession splits on the same final dot and keys its own revocation check
-// on the same b64 payload, so authenticating here changes no key and no
-// behaviour for a genuine logout. A cookie that fails to verify needs no
-// revocation by construction: every consumer already rejects it. Expired and
-// already-revoked land in the same branch for the same reason.
+// The cookie is cleared by the caller either way. A refusal must not tell an
+// unauthenticated prober whether the cookie it sent was genuine.
+//
+// It has TWO callers, both logout handlers on the PUBLIC allowlist:
+// `/api/auth/logout` (the admin UI) and `/auth/logout` (the portal/proxy
+// session, which proxy.go's identity arm reads for identity- and group-scoped
+// policy). The second only CLEARED its cookie before CHAOS-68 (AU-29), which is
+// exactly why the MAC-first check matters on both: neither caller has
+// authenticated the request.
 func revokeSessionCookie(cookieName string, r *http.Request) {
 	c, err := r.Cookie(cookieName)
 	if err != nil {
 		return
 	}
-	// AU-30: the cookie is AUTHENTICATED before anything is written, so an
-	// unauthenticated caller can never mint revocation entries. AU-45: that
-	// authentication deliberately does NOT go through Decode, which refuses an
-	// already-revoked token — which would make a repeat logout unable to repair
-	// a save that failed the first time. See DecodeForRevocation, and do not
-	// "simplify" this back to decodeSession.
-	sess, err := session.DecodeForRevocation(c.Value)
-	if err != nil || sess == nil {
+	changed, reason := sessionRevoked.RevokeVerified(c.Value)
+	if !changed {
+		// Two of the no-change reasons are ORDINARY TRAFFIC and must not be
+		// charged to the probe counter, or the one signal an operator has that
+		// the public endpoint is being attacked is buried in normal use:
+		//
+		//   RevokeAlreadyKnown — a replayed logout of a cookie we already hold
+		//     (a double-submit, or a browser retrying). Also deliberately NOT
+		//     persisted: "a mutation reporting no change issues no write"
+		//     (CHAOS-70), which is most of what made the amplification
+		//     quadratic even for an authenticated caller.
+		//
+		//   RevokeExpired — a genuine cookie whose session already lapsed,
+		//     which is exactly what a user coming back the next day and
+		//     clicking Log out produces. Decode rejects it on expiry alone, so
+		//     there is nothing to record. It is still visible in the
+		//     per-reason series for diagnostics, just not in the aggregate.
+		//
+		// Everything else means the caller sent something this appliance
+		// cannot VERIFY. That is usually a forgery, but it is not only a
+		// forgery: a cookie signed under a PREVIOUS session secret — after a
+		// deliberate rotation, or after a restart that minted a fresh random
+		// key — is a genuine cookie from an ordinary browser and lands here
+		// too. The counter cannot tell them apart, so the surfaces it feeds
+		// must not claim it can (Codex P2, PR #1591).
+		if reason != session.RevokeAlreadyKnown && reason != session.RevokeExpired {
+			noteSessionRevokeRefusal(r, reason, len(c.Value))
+		}
+		// A replayed logout is the one chance to repair a file that is BEHIND
+		// the in-memory list. RevokeAlreadyKnown is reached only after the MAC
+		// verified, so this retry cannot be driven by an unauthenticated
+		// caller; without it, a transient save failure is never retried for
+		// that token and the revocation is lost at the next restart.
+		//
+		// CHAOS-68 widens "behind" from "a save failed" to every durability
+		// doubt the health plane can prove — including a backing file that
+		// VANISHED after it was written (AU-35), which no failed save ever
+		// recorded. See persistRevocationsIfDirty.
+		if reason == session.RevokeAlreadyKnown {
+			persistRevocationsIfDirty()
+		}
 		return
 	}
-	dot := strings.LastIndex(c.Value, ".")
-	if dot < 0 {
-		return
-	}
-	token := c.Value[:dot]
-
-	// A repeat logout of an already-revoked cookie is a REPAIR OPPORTUNITY, and
-	// on a standalone appliance it is the only one there is: every other path
-	// that rewrites this file (SyncRevocations, the DP poll loop, the HA bundle
-	// merge) needs a PEER, and the default deployment has none.
-	//
-	// It is gated on durability actually being in doubt, and that gate is the
-	// load-bearing half. Persisting on EVERY repeat would turn a once-per-cookie
-	// write into a per-request marshal, fsync, rename and fleet-wide gossip,
-	// driven by anyone replaying one valid cookie against a PUBLIC route — the
-	// write-amplification shape CHAOS-63 exists for, aimed at the control that
-	// withdraws session authority. Gated, the extra write happens only while a
-	// save is already failing or the file has vanished, and one save that lands
-	// clears the flag, so the repair terminates on its own.
-	//
-	// Re-revoking cannot grow the list: Revoke is a map assignment keyed by the
-	// token, and the expiry comes from the same cookie, so the entry is
-	// byte-identical to the one already there.
-	if sessionRevoked.IsRevoked(token) {
-		if failing, vanished := revocationDurabilityDoubt(); !failing && !vanished {
-			return
-		}
-	}
-
-	sessionRevoked.Revoke(token, time.Unix(sess.Exp, 0))
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		// A REFUSAL is not a failure: this boot could not read the revocations
-		// file, so we decline to rename over content we never saw (AU-37). The
-		// revocation is in force in memory and the load-degraded contract row
-		// already names the repair; counting it as a write failure would send
-		// the operator to check free space instead.
-		if session.IsWriteFenced(err) {
-			noteRevocationPersistRefused(1)
-		} else {
-			// CWE-117: the error is wrapped from json.Marshal over a map whose
-			// KEYS are request-supplied cookie tokens, so CodeQL traces it as
-			// tainted and the repo convention is to make the sanitiser visible
-			// at the call site. Sanitising one argument does not sanitise the
-			// call (SEC-SOCKS5-LOG-1).
-			logger.Printf("Session: failed to persist revocations: %q", sanitizeLog(err.Error()))
-		}
+	if persistRevocations() == persistFenced {
+		// A REFUSAL is not a failure: this boot could not read (or could not
+		// quarantine) the revocations file, so the save declined to rename
+		// over content nobody saw (AU-37/AU-38). The revocation is in force in
+		// memory; the contract row names the repair. Counted, not logged.
+		noteRevocationPersistRefused(1)
 	}
 }
 

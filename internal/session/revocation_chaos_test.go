@@ -1085,3 +1085,130 @@ func TestFenceWritesUnquarantined_RefusesWithItsOwnReason(t *testing.T) {
 		t.Error("the shared predicate does not recognise its own reason")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Reconciliation with CHAOS-73 (PR #1591, already on main).
+//
+// CHAOS-73 bounded every UNTRUSTED-origin write to this list (gossip and the
+// persisted file) for TOKEN entries. CHAOS-68 put USER entries on exactly
+// those two paths. Composed naively, a peer could plant an unbounded number of
+// arbitrarily long, effectively immortal user revocations — CHAOS-73's defect,
+// one map over. These gates pin the composition.
+
+// DEFECT. Each untrusted user entry that no genuine account revocation could
+// produce is refused and COUNTED under CHAOS-73's bounded reasons.
+func TestChaos68_UntrustedUserEntryIsBounded(t *testing.T) {
+	cases := []struct {
+		name   string
+		entry  func(now time.Time) RevocationEntry
+		reason RevokeReason
+	}{
+		{"oversize-user", func(now time.Time) RevocationEntry {
+			u := strings.Repeat("u", MaxRevocationTokenLen+1)
+			return RevocationEntry{Token: userRevocationTokenPrefix + "x", User: u, Expiry: now.Add(time.Hour).Unix()}
+		}, RevokeOversize},
+		{"oversize-prefixed-token", func(now time.Time) RevocationEntry {
+			return RevocationEntry{Token: userRevocationTokenPrefix + strings.Repeat("u", MaxRevocationTokenLen), Expiry: now.Add(time.Hour).Unix()}
+		}, RevokeOversize},
+		{"far-future", func(now time.Time) RevocationEntry {
+			return RevocationEntry{Token: userRevocationTokenPrefix + "mallory", User: "mallory",
+				Expiry: now.Add(MaxSessionLifetime + 2*revocationExpirySkew).Unix()}
+		}, RevokeFarFuture},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ResetRefusalCountersForTest()
+			t.Cleanup(ResetRefusalCountersForTest)
+			r := NewRevocationList()
+			if added := r.MergeRevocations([]RevocationEntry{c.entry(time.Now())}); added != 0 {
+				t.Errorf("added = %d, want 0: an untrusted peer planted a user revocation no genuine account deletion can produce", added)
+			}
+			if n := r.UserCount(); n != 0 {
+				t.Errorf("UserCount = %d, want 0", n)
+			}
+			if got := Refused(c.reason); got != 1 {
+				t.Errorf("Refused(%s) = %d, want 1: the drop is invisible to the session_revocation row", c.reason, got)
+			}
+		})
+	}
+}
+
+// DEFECT. The user map is capped for untrusted origins exactly like the token
+// map, and the refusal is counted.
+func TestChaos68_UntrustedUserEntriesAreCapped(t *testing.T) {
+	ResetRefusalCountersForTest()
+	t.Cleanup(ResetRefusalCountersForTest)
+	r := NewRevocationList()
+	exp := time.Now().Add(time.Hour)
+	r.mu.Lock()
+	for i := range MaxRevocationEntries {
+		r.users[fmt.Sprintf("filler-%d", i)] = exp
+	}
+	r.mu.Unlock()
+
+	if added := r.MergeRevocations([]RevocationEntry{{Token: userRevocationTokenPrefix + "one-too-many", User: "one-too-many", Expiry: exp.Unix()}}); added != 0 {
+		t.Errorf("added = %d past the cap, want 0", added)
+	}
+	if got := Refused(RevokeCapacity); got != 1 {
+		t.Errorf("Refused(capacity) = %d, want 1", got)
+	}
+	// CONTROL: an entry already present is not a new entry and must still be
+	// able to EXTEND (a re-delete of the same account), even at the cap.
+	later := exp.Add(time.Hour)
+	if added := r.MergeRevocations([]RevocationEntry{{Token: userRevocationTokenPrefix + "filler-7", User: "filler-7", Expiry: later.Unix()}}); added != 1 {
+		t.Errorf("extending an existing user revocation at the cap added %d, want 1", added)
+	}
+}
+
+// CONTROL. The cheapest way to pass the two gates above is to refuse user
+// entries from untrusted origins altogether — which is CHAOS-68's original
+// defect (a deleted account revoked on one node only) all over again.
+func TestChaos68_GenuineUserEntryStillCrossesTheBoundedPaths(t *testing.T) {
+	ResetRefusalCountersForTest()
+	t.Cleanup(ResetRefusalCountersForTest)
+	chaosRevocationsPath(t)
+
+	src := NewRevocationList()
+	src.RevokeUser("carol") // now + TTL: the genuine shape
+	gossiped := NewRevocationList()
+	if added := gossiped.MergeRevocations(src.ExportRevocations()); added != 1 || !gossiped.IsUserRevoked("carol") {
+		t.Fatalf("a genuine user revocation did not cross the bounded gossip path (added=%d)", added)
+	}
+	if err := gossiped.SaveRevocations(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	reloaded := NewRevocationList()
+	if err := reloaded.LoadRevocations(); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !reloaded.IsUserRevoked("carol") {
+		t.Error("a genuine user revocation did not survive the bounded persisted-file path")
+	}
+	for _, reason := range []RevokeReason{RevokeOversize, RevokeFarFuture, RevokeCapacity} {
+		if got := Refused(reason); got != 0 {
+			t.Errorf("Refused(%s) = %d for a genuine entry, want 0", reason, got)
+		}
+	}
+}
+
+// DEFECT. Count/UserCount evict through sweepLocked, so the `verified`
+// provenance set cannot keep a key its token map has already dropped — an
+// orphan would hand the provenance MAC to whatever untrusted copy of that token
+// arrives later, and reload it past the untrusted bounds.
+func TestChaos68_CountEvictionKeepsProvenanceInStep(t *testing.T) {
+	r := NewRevocationList()
+	r.mu.Lock()
+	r.tokens["expired-verified"] = time.Now().Add(-time.Hour)
+	r.verified["expired-verified"] = struct{}{}
+	r.mu.Unlock()
+
+	if n := r.Count(); n != 0 {
+		t.Fatalf("Count = %d, want 0", n)
+	}
+	r.mu.Lock()
+	_, orphan := r.verified["expired-verified"]
+	r.mu.Unlock()
+	if orphan {
+		t.Error("Count evicted the token but left its provenance mark behind")
+	}
+}

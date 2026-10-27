@@ -4,9 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -291,8 +288,9 @@ func TestChaos68_ExistingFileOnUnwritablePathIsNotReportedDurable(t *testing.T) 
 // AU-45 (Codex round 4) — a repeat logout can REPAIR a failed persistence.
 //
 // AU-30 made logout authenticate the cookie before writing anything, which was
-// right and closed a fleet-wide write-amplification hole. But it routed that
-// through Decode, which REJECTS an already-revoked token — so a logout whose
+// right and closed a fleet-wide write-amplification hole (CHAOS-73 on main
+// closed the same hole as RevokeVerified). But it routed that through Decode,
+// which REJECTS an already-revoked token — so a logout whose
 // SaveRevocations failed transiently could never be repaired by retrying it:
 // the second attempt was refused at the door, before reaching the save.
 //
@@ -305,9 +303,17 @@ func TestChaos68_ExistingFileOnUnwritablePathIsNotReportedDurable(t *testing.T) 
 
 // DEFECT: retrying logout after a failed save persists the revocation.
 //
-// Verified FAILING against the pre-fix body (session.Decode in place of
-// session.DecodeForRevocation): the retry returns at the decode and the file
-// is never written.
+// Verified FAILING against the pre-fix body (session.Decode in place of the
+// revocation-tolerant authentication): the retry returns at the decode and the
+// file is never written.
+//
+// Reconciled with CHAOS-73 (PR #1591). The repair now runs through main's
+// design rather than CHAOS-68's original DecodeForRevocation seam:
+// RevokeVerified checks the MAC first and reports RevokeAlreadyKnown for the
+// retry, and persistRevocationsIfDirty retries because the coordinator marked
+// the failed save dirty. The two designs agreed on this behaviour; only the
+// seam differed, so the seam that is now on main was kept and this gate pins
+// the behaviour through it.
 func TestChaos68_AU45_RepeatLogoutRepairsAFailedPersist(t *testing.T) {
 	withChaos68Revocations(t)
 	value, key := logoutTestSession(t, "chaos68-au45-repair")
@@ -387,101 +393,71 @@ func TestChaos68_AU45_ControlHealthyRepeatLogoutDoesNotRewrite(t *testing.T) {
 	}
 }
 
-// DecodeForRevocation keeps every check that makes the logout write safe, and
-// drops only the one that blocks the repair.
-func TestChaos68_AU45_DecodeForRevocationKeepsTheSafetyChecks(t *testing.T) {
-	withChaos68Revocations(t)
-	value, key := logoutTestSession(t, "chaos68-au45-decode")
+// ---------------------------------------------------------------------------
+// Reconciliation with CHAOS-73 (PR #1591, already on main).
+//
+// Main's logout path (RevokeVerified + the persistRevocations coordinator and
+// its dirty flag) replaced CHAOS-68's DecodeForRevocation seam. Where the two
+// designs DISAGREED, the reconciliation kept the fail-closed answer for the
+// revocation, and these gates are the proof.
 
-	// A forged signature is refused — this is what stops an unauthenticated
-	// caller minting revocation entries (AU-30), and it is the whole reason
-	// this seam is safe to have at all.
-	if _, err := session.DecodeForRevocation("eyJzdWIiOiJ4IiwiZXhwIjo0MTAyNDQ0ODAwfQ.not-a-signature"); err == nil {
-		t.Error("DecodeForRevocation accepted a forged cookie: a public route can now mint revocations")
-	}
+// DEFECT (AU-35 through main's coordinator). A revocations file that VANISHED
+// after it was written is repaired by a replayed logout. Main's original
+// replay retried only a FAILED save, so a deleted file — which no failed save
+// ever recorded — stayed missing while the revocation lived in RAM only, and a
+// restart made the logged-out cookie valid again.
+func TestChaos68_ReplayedLogoutRepairsAVanishedFile(t *testing.T) {
+	chaos73Setup(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
 
-	// An already-revoked cookie IS accepted — the defect this exists to fix.
-	sessionRevoked.Revoke(key, time.Now().Add(time.Hour))
-	if _, err := session.Decode(value); err == nil {
-		t.Fatal("precondition: Decode must reject a revoked cookie")
+	cookie := genuineCookie(t, "chaos68-vanished-replay", time.Hour, nil)
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
 	}
-	if _, err := session.DecodeForRevocation(value); err != nil {
-		t.Errorf("DecodeForRevocation rejected an already-revoked cookie, so the repair path is unreachable: %v", err)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("setup: the first logout did not persist (%v)", err)
 	}
-
-	// An expired cookie is still refused: it authenticates nothing, so
-	// admitting it would only let a caller write entries for past expiries.
-	expired, err := session.Encode(&session.Session{Sub: "chaos68-au45-expired", Exp: time.Now().Add(-time.Hour).Unix()})
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("replayed logout = %d; want 200", code)
+	}
+	data, err := os.ReadFile(path) // #nosec G304 -- test-owned temp path
 	if err != nil {
-		t.Fatalf("mint expired: %v", err)
+		t.Fatalf("the replay did not repair the vanished file, so the logout is undone by the next restart: %v", err)
 	}
-	if _, err := session.DecodeForRevocation(expired); err == nil {
-		t.Error("DecodeForRevocation accepted an expired cookie")
+	key := cookie[:strings.LastIndex(cookie, ".")]
+	if !strings.Contains(string(data), key) {
+		t.Errorf("the repaired file does not carry the revoked token: %s", data)
 	}
 }
 
-// WALL: DecodeForRevocation has exactly one caller.
-//
-// It is a decode that deliberately ignores revocation, so a second caller
-// reaching for it as an authentication primitive would be a silent bypass —
-// admitting a session this node has already revoked, or one whose account was
-// deleted. Behavioural coverage cannot see that; only an inventory can.
-func TestChaos68_AU45_WallDecodeForRevocationHasOneCaller(t *testing.T) {
-	// Anchored to pkgSourceDir(), never the CWD: a concurrent os.Chdir in
-	// another test would otherwise flake this wall (static_read_wall_test.go
-	// enforces that rule, and caught this file breaking it).
-	dir := pkgSourceDir()
-	fset := token.NewFileSet()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read dir: %v", err)
-	}
-	callers := map[string]int{}
-	scanned := 0
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		scanned++
-		ast.Inspect(f, func(n ast.Node) bool {
-			fn, ok := n.(*ast.FuncDecl)
-			if !ok {
-				return true
-			}
-			ast.Inspect(fn.Body, func(m ast.Node) bool {
-				sel, ok := m.(*ast.SelectorExpr)
-				if !ok || sel.Sel == nil || sel.Sel.Name != "DecodeForRevocation" {
-					return true
-				}
-				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "session" {
-					callers[fn.Name.Name]++
-				}
-				return true
-			})
-			return false
-		})
-	}
-	if scanned == 0 {
-		t.Fatal("scanned no source files — the wall is vacuous")
-	}
+// DEFECT (AU-37/AU-47 through main's coordinator). A write-FENCED save is a
+// refusal, not a failure: it is counted once per revocation, it does not mark
+// a retry owed, and a replay therefore does not drive a refused "repair" per
+// request on a public route.
+func TestChaos68_FencedLogoutIsCountedNotOwed(t *testing.T) {
+	chaos73Setup(t)
+	session.SetRevocationsPath(filepath.Join(t.TempDir(), "revocations.json"))
+	sessionRevoked.FenceWritesUnquarantined() // restored by SwapForTest's cleanup
 
-	// The seam's own doc comment points a future reader at this wall by name.
-	// A stale reference there is the CHAOS-70 round-2 defect (a document naming
-	// something that does not exist), and it is cheap to pin rather than trust.
-	src, err := os.ReadFile(filepath.Join(dir, "internal", "session", "session.go"))
-	if err != nil {
-		t.Fatalf("read seam source: %v", err)
+	before := sessionRevocationPersistRefused.Load()
+	cookie := genuineCookie(t, "chaos68-fenced", time.Hour, nil)
+	for range 4 {
+		if code := logoutWith(t, cookie); code != http.StatusOK {
+			t.Fatalf("logout = %d; want 200", code)
+		}
 	}
-	const self = "TestChaos68_AU45_WallDecodeForRevocationHasOneCaller"
-	if !strings.Contains(string(src), self) {
-		t.Errorf("DecodeForRevocation's doc comment does not name %s, so a reader told a wall protects it cannot find one", self)
+	if got := sessionRevocationPersistRefused.Load() - before; got != 1 {
+		t.Errorf("refused counter moved by %d over one logout and three replays, want 1", got)
 	}
-	if len(callers) != 1 || callers["revokeSessionCookie"] == 0 {
-		t.Errorf("session.DecodeForRevocation must be called only by revokeSessionCookie, found %v — a decode that ignores revocation is an authentication bypass anywhere else", callers)
+	if sessionRevocationsDirty.Load() {
+		t.Error("a fenced refusal marked a retry owed; no save can land until a restart, so every replay would repeat it")
+	}
+	if sessionRevocationPersistDegraded.Load() {
+		t.Error("a fenced refusal was reported as a failing volume")
+	}
+	key := cookie[:strings.LastIndex(cookie, ".")]
+	if !sessionRevoked.IsRevoked(key) {
+		t.Error("the fence must cost durability only, never enforcement: the revocation is not in force")
 	}
 }

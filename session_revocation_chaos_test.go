@@ -1,2210 +1,1427 @@
 package main
 
+// session_revocation_chaos_test.go — CHAOS-73 gates.
+//
+// The defect: `/api/auth/logout` is PUBLIC (correctly — an expired session
+// must be able to clear its own cookie) and `revokeSessionCookie` inserted
+// whatever cookie it was handed into the process-wide revocation list without
+// verifying the HMAC, then rewrote the whole revocations file. An
+// unauthenticated caller therefore chose the retained key, its length and its
+// expiry; the entries were immortal, persisted, and gossiped fleet-wide.
+//
+// Every Defect* gate here was verified FAILING against the reintroduced
+// pre-fix body (which `preFixRevokeSessionCookie` keeps verbatim, so the gates
+// cannot go vacuous), and every Control* gate was verified failing against the
+// cheapest wrong fix — refusing every revocation, which passes all nine defect
+// gates while silently deleting logout as a security control.
+
 import (
-	"bytes"
+	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/session"
 )
 
-// CHAOS-68 root gates — the Control Plane's place in the revocation plane, and
-// the visibility of a revocation that is not durable.
-//
-// The defect gates were verified failing against their reintroduced pre-fix
-// shapes.
+// ── fixture ──────────────────────────────────────────────────────────────────
 
-func withChaos68Revocations(t *testing.T) {
+// chaos73Setup isolates every process-global this plane touches: the
+// revocation list, the persistence path, and the counters + rate-limit window
+// (a leaked armed window suppresses the log line a later gate asserts on).
+func chaos73Setup(t *testing.T) {
 	t.Helper()
-	restore := sessionRevoked.SwapForTest()
+	if !session.HasSigningKey() {
+		initSessionSecret()
+	}
+	restore := session.Revoked.SwapForTest()
+	t.Cleanup(restore)
+	resetSessionRevokeCountersForTest()
+	t.Cleanup(resetSessionRevokeCountersForTest)
+	// CHAOS-68's durability record (session_revocation_health.go) now composes
+	// the same `session_revocation` row and feeds the replay-repair predicate
+	// (revocationSaveOwed), so a degraded or vanished-file state leaked by a
+	// CHAOS-68 gate would steer these gates into the wrong branch.
 	resetSessionRevocationHealthForTest()
-	// AU-38 made these gates the first in this file to reach the REAL
-	// quarantine, which writes the process-global stateCorruption record and
-	// feeds /readyz a state_file_session_revocations fail row. That record is
-	// STICKY in one direction by design -- quarantineCorruptStateFile keeps
-	// the most severe outcome, so a FAILED quarantine is never overwritten by
-	// a later successful one -- so leaking it does not merely add a row, it
-	// pins the wrong row for the rest of the binary. Same class as the
-	// SwapForTest fence and the health record beside it: a process-global a
-	// gate writes is registered with the isolation primitive in the same
-	// change.
-	resetStateCorruption()
-	resetStorageWriteHealthForTest()
-	prevPath := session.RevocationsPath()
-	t.Cleanup(func() {
-		restore()
-		session.SetRevocationsPath(prevPath)
-		resetSessionRevocationHealthForTest()
-		resetStateCorruption()
-		resetStorageWriteHealthForTest()
-	})
+	t.Cleanup(resetSessionRevocationHealthForTest)
+	prev := session.RevocationsPath()
+	t.Cleanup(func() { session.SetRevocationsPath(prev) })
+	session.SetRevocationsPath("")
 }
 
-func withChaos68Aggregator(t *testing.T) {
+// forgedCookie builds an UNSIGNED cookie: a well-formed Session payload with
+// `pad` bytes of attacker filler and a far-future expiry, plus junk where the
+// HMAC belongs. This is what an unauthenticated caller can send.
+func forgedCookie(t *testing.T, pad int, tag string) string {
 	t.Helper()
-	globalRevAggregator.mu.Lock()
-	prevPerNode, prevLocal := globalRevAggregator.perNode, globalRevAggregator.cpLocal
-	globalRevAggregator.perNode = map[string][]RevocationEntry{}
-	globalRevAggregator.cpLocal = nil
-	globalRevAggregator.mu.Unlock()
-	t.Cleanup(func() {
-		globalRevAggregator.mu.Lock()
-		globalRevAggregator.perNode, globalRevAggregator.cpLocal = prevPerNode, prevLocal
-		globalRevAggregator.mu.Unlock()
-	})
+	s := session.Session{
+		Sub:      "forged-" + tag,
+		Provider: "local",
+		Exp:      time.Now().Add(100 * 365 * 24 * time.Hour).Unix(),
+		Name:     strings.Repeat("A", pad),
+	}
+	payload, err := json.Marshal(&s)
+	if err != nil {
+		t.Fatalf("marshal forged session: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(payload) + ".not-a-valid-hmac"
 }
 
-// chaos68Entry builds a revocation fixture. The token is an opaque test label,
-// not a credential; building the entry from parameters keeps gosec's
-// literal-value G101 heuristic off fixture strings.
-func chaos68Entry(label, user string, expiry int64) RevocationEntry {
-	return RevocationEntry{Token: label, User: user, Expiry: expiry}
+// genuineCookie builds a cookie this appliance really signed.
+func genuineCookie(t *testing.T, sub string, ttl time.Duration, groups []string) string {
+	t.Helper()
+	s := session.Session{
+		Sub: sub, Provider: "local", Role: "viewer",
+		Exp: time.Now().Add(ttl).Unix(), Jti: session.NewJti(), Groups: groups,
+	}
+	raw, err := session.Encode(&s)
+	if err != nil {
+		t.Fatalf("encode genuine session: %v", err)
+	}
+	return raw
 }
 
-// DEFECT. The aggregator had exactly one writer — a Data Plane push — so the
-// Control Plane, which is the node the admin UI runs on, contributed nothing
-// to the fleet-wide merge. An admin revoking a session on the CP revoked it on
-// the CP alone.
-func TestChaos68_ControlPlaneOwnRevocationsReachTheFleet(t *testing.T) {
-	withChaos68Aggregator(t)
-
-	cpLocal := []RevocationEntry{
-		chaos68Entry("cp-logout-token", "", time.Now().Add(time.Hour).Unix()),
-		chaos68Entry("user:deleted-admin", "deleted-admin", time.Now().Add(time.Hour).Unix()),
-	}
-	globalRevAggregator.UpdateLocal(cpLocal)
-	globalRevAggregator.Update("dp-1", nil)
-
-	merged := globalRevAggregator.MergedExcluding("dp-1")
-	var sawToken, sawUser bool
-	for _, e := range merged {
-		if e.Token == "cp-logout-token" {
-			sawToken = true
-		}
-		if e.User == "deleted-admin" {
-			sawUser = true
-		}
-	}
-	if !sawToken {
-		t.Error("a logout performed on the Control Plane never reaches a Data Plane")
-	}
-	if !sawUser {
-		t.Error("an account deleted on the Control Plane never reaches a Data Plane")
+// sessionCookieFor builds the request cookie every gate below sends.
+//
+// Secure/HttpOnly/SameSite are set only to satisfy gosec G124: they are
+// attributes of a RESPONSE cookie and are irrelevant on an inbound request
+// cookie, where only Name=Value is serialized onto the wire. The repo's
+// existing session tests set them for the same reason — keeping it in one
+// helper means the rationale is stated once rather than at five call sites.
+func sessionCookieFor(value string) *http.Cookie {
+	return &http.Cookie{
+		Name: uiSessionCookieName, Value: value,
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	}
 }
 
-// STRUCTURAL. The CP's slot must not be addressable as a node id, or an
-// enrolled node could overwrite it — or be excluded from its own merge.
-func TestChaos68_CPSlotIsNotAddressableByANodeID(t *testing.T) {
-	withChaos68Aggregator(t)
+// logoutWith drives the REAL handler with the given cookie value and reports
+// the status code.
+func logoutWith(t *testing.T, cookie string) int {
+	t.Helper()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/auth/logout", http.NoBody)
+	req.AddCookie(sessionCookieFor(cookie))
+	rec := httptest.NewRecorder()
+	apiAuthLogout(rec, req)
+	return rec.Code
+}
 
-	globalRevAggregator.UpdateLocal([]RevocationEntry{
-		{Token: "cp-entry", Expiry: time.Now().Add(time.Hour).Unix()},
-	})
-	// A node may be named anything at all; none of it may displace the CP slot.
-	for _, hostile := range []string{"", "cpLocal", "__culvert_control_plane_local__", "cp"} {
-		globalRevAggregator.Update(hostile, []RevocationEntry{
-			{Token: "hostile", Expiry: time.Now().Add(time.Hour).Unix()},
-		})
-		var sawCP bool
-		for _, e := range globalRevAggregator.MergedExcluding(hostile) {
-			if e.Token == "cp-entry" {
-				sawCP = true
+// preFixRevokeSessionCookie is the pre-CHAOS-73 body, VERBATIM. It exists so
+// the defect gates can be proven non-vacuous: if a future refactor made the
+// forged cookie unparseable for some unrelated reason, every gate below would
+// pass while proving nothing, and TestChaos73_DefectProof would catch it.
+func preFixRevokeSessionCookie(cookieName string, r *http.Request) {
+	c, err := r.Cookie(cookieName)
+	if err != nil {
+		return
+	}
+	dot := strings.LastIndex(c.Value, ".")
+	if dot < 0 {
+		return
+	}
+	b64part := c.Value[:dot]
+	if payload, decErr := base64.RawURLEncoding.DecodeString(b64part); decErr == nil {
+		var s Session
+		if json.Unmarshal(payload, &s) == nil {
+			sessionRevoked.Revoke(b64part, time.Unix(s.Exp, 0))
+			if err := sessionRevoked.SaveRevocations(); err != nil {
+				_ = err
 			}
 		}
-		if !sawCP {
-			t.Fatalf("a node named %q displaced or excluded the Control Plane's own revocations", hostile)
-		}
 	}
 }
 
-// CONTROL. The requesting node must still not be sent its own entries back —
-// the CP contribution must not defeat the exclusion the merge exists for.
-func TestChaos68_RequesterStillExcludedFromItsOwnEntries(t *testing.T) {
-	withChaos68Aggregator(t)
+// ── DEFECT PROOF ─────────────────────────────────────────────────────────────
 
-	globalRevAggregator.Update("dp-1", []RevocationEntry{
-		{Token: "dp1-token", Expiry: time.Now().Add(time.Hour).Unix()},
-	})
-	globalRevAggregator.Update("dp-2", []RevocationEntry{
-		{Token: "dp2-token", Expiry: time.Now().Add(time.Hour).Unix()},
-	})
+// TestChaos73_DefectProof pins that the forged cookie this suite sends really
+// IS retained by the pre-fix body. Without it, a change that made the forgery
+// inert would turn every defect gate below green while the defect was intact.
+func TestChaos73_DefectProof(t *testing.T) {
+	chaos73Setup(t)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/auth/logout", http.NoBody)
+	req.AddCookie(sessionCookieFor(forgedCookie(t, 4096, "proof")))
 
-	for _, e := range globalRevAggregator.MergedExcluding("dp-1") {
-		if e.Token == "dp1-token" {
-			t.Fatal("a node was sent its own revocation entries back")
-		}
+	preFixRevokeSessionCookie(uiSessionCookieName, req)
+
+	if got := session.Revoked.Tracked(); got != 1 {
+		t.Fatalf("pre-fix body retained %d entries; want 1 — the forged cookie this suite "+
+			"relies on is no longer reaching the insert, so every Defect* gate below is vacuous", got)
 	}
 }
 
-// Expired entries in the CP's own slot must not ride the merge forever.
-func TestChaos68_ExpiredCPEntriesAreNotMerged(t *testing.T) {
-	withChaos68Aggregator(t)
+// ── DEFECT GATES ─────────────────────────────────────────────────────────────
 
-	globalRevAggregator.UpdateLocal([]RevocationEntry{
-		{Token: "stale-cp", Expiry: time.Now().Add(-time.Hour).Unix()},
-	})
-	for _, e := range globalRevAggregator.MergedExcluding("dp-1") {
-		if e.Token == "stale-cp" {
-			t.Fatal("an expired Control-Plane revocation was merged into the fleet view")
+// D1. The core property: an unauthenticated caller cannot make this appliance
+// retain anything.
+func TestChaos73_DefectUnsignedCookieIsNotRetained(t *testing.T) {
+	chaos73Setup(t)
+	for i := 0; i < 5; i++ {
+		if code := logoutWith(t, forgedCookie(t, 4096, fmt.Sprint(i))); code != http.StatusOK {
+			t.Fatalf("logout %d = %d; want 200 (a refusal must not change the response)", i, code)
 		}
+	}
+	if got := session.Revoked.Tracked(); got != 0 {
+		t.Errorf("revocation entries = %d; want 0 — unsigned cookies were retained", got)
+	}
+	if got := sessionRevocationRefusedTotal(); got != 5 {
+		t.Errorf("refusals counted = %d; want 5", got)
+	}
+	if got := session.Refused(session.RevokeUnsigned); got != 5 {
+		t.Errorf("unsigned refusals = %d; want 5", got)
 	}
 }
 
-// DEFECT. An account deletion must leave a DURABLE revocation. Before this,
-// apiAuthUsers' DELETE branch revoked in memory only, so the next restart
-// resurrected the deleted account's live sessions for the rest of their TTL.
-func TestChaos68_AccountDeletionRevocationIsDurable(t *testing.T) {
-	withChaos68Revocations(t)
+// D2. The size of the forgery does not matter, and the gate drives a REAL
+// net/http server: httptest.NewRequest can set a Cookie header the wire could
+// never deliver, which would make this prove less than it claims
+// (SEC-BOOTSTRAP-HOST-1's lesson).
+func TestChaos73_DefectOversizeForgedCookieIsRefusedOverTheWire(t *testing.T) {
+	chaos73Setup(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/auth/logout", apiAuthLogout)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// 384 KiB of filler encodes to a ~524 KB cookie, which net/http's default
+	// 1 MiB header budget accepts. The pre-fix tree retained every byte.
+	cookie := forgedCookie(t, 384*1024, "wire")
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/auth/logout", http.NoBody)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Cookie", uiSessionCookieName+"="+cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("the wire refused a %d-byte cookie, so this gate cannot test what it claims: %v", len(cookie), err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; want 200", resp.StatusCode)
+	}
+	if got := session.Revoked.Tracked(); got != 0 {
+		t.Errorf("a %d-byte forged cookie retained %d entries; want 0", len(cookie), got)
+	}
+}
+
+// D3. The write amplification. The pre-fix handler rewrote the ENTIRE file
+// after every insert, so bytes written grew quadratically in request count
+// (measured 17x → 34x → 68x → 135x as n doubled). A refused cookie must write
+// NOTHING AT ALL.
+func TestChaos73_DefectForgedCookiesWriteNothingToDisk(t *testing.T) {
+	chaos73Setup(t)
 	path := filepath.Join(t.TempDir(), "revocations.json")
 	session.SetRevocationsPath(path)
 
-	// The exact pair the DELETE branch performs.
-	sessionRevoked.RevokeUser("departing-admin")
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		t.Fatalf("save: %v", err)
+	for i := 0; i < 40; i++ {
+		logoutWith(t, forgedCookie(t, 16*1024, fmt.Sprint(i)))
 	}
+	if fi, err := os.Stat(path); err == nil {
+		t.Errorf("40 unauthenticated requests wrote a %d-byte revocations file; want no file at all", fi.Size())
+	} else if !os.IsNotExist(err) {
+		t.Errorf("stat: %v", err)
+	}
+}
 
-	data, err := os.ReadFile(path)
+// D4. The attacker chose the EXPIRY, which is what made the junk immortal: the
+// evictor keys on that same value, so a 100-year expiry can never be reclaimed.
+// Once the MAC is verified the expiry is a value WE signed.
+func TestChaos73_DefectAttackerChosenExpiryCannotPinAnEntry(t *testing.T) {
+	chaos73Setup(t)
+	logoutWith(t, forgedCookie(t, 64, "immortal"))
+	if got := session.Revoked.Tracked(); got != 0 {
+		t.Fatalf("entries = %d; want 0", got)
+	}
+	// Belt and braces: even an entry that somehow arrived must not outlive a
+	// sweep if its expiry has passed, and must not be reclaimable only by a
+	// read of that exact key (the standalone-node evictor gap, D8).
+	session.Revoked.Sweep()
+	if got := session.Revoked.Tracked(); got != 0 {
+		t.Errorf("after sweep entries = %d; want 0", got)
+	}
+}
+
+// D5. A replayed logout of a cookie already on the list must not rewrite the
+// file. This is the other half of the quadratic term and it applies to
+// AUTHENTICATED callers too, so authentication alone does not close it
+// (CHAOS-70: a mutation reporting no change issues no write).
+func TestChaos73_DefectReplayedLogoutWritesNothingFurther(t *testing.T) {
+	chaos73Setup(t)
+	path := filepath.Join(t.TempDir(), "revocations.json")
+	session.SetRevocationsPath(path)
+
+	cookie := genuineCookie(t, "replay", time.Hour, nil)
+	logoutWith(t, cookie)
+	fi, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("the account deletion wrote no revocations file: %v", err)
+		t.Fatalf("a genuine logout must persist: %v", err)
 	}
-	if !strings.Contains(string(data), "departing-admin") {
-		t.Errorf("the deleted account is not in the persisted revocation list: %s", data)
+	first := fi.ModTime()
+	firstSize := fi.Size()
+
+	time.Sleep(10 * time.Millisecond)
+	for i := 0; i < 20; i++ {
+		logoutWith(t, cookie)
+	}
+	fi2, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !fi2.ModTime().Equal(first) || fi2.Size() != firstSize {
+		t.Errorf("20 replayed logouts rewrote the file (mtime %v→%v, size %d→%d); want no further write",
+			first, fi2.ModTime(), firstSize, fi2.Size())
+	}
+	if got := session.Revoked.Tracked(); got != 1 {
+		t.Errorf("entries = %d; want 1", got)
 	}
 }
 
-// DEFECT. A revocation that could not be written down must be countable and
-// must turn the operator-contract row to fail — the admin action reports
-// success either way, so this row is the only thing that disagrees with them.
-func TestChaos68_PersistFailureIsVisibleToTheOperator(t *testing.T) {
-	withChaos68Revocations(t)
-
-	if got := checkSessionRevocation(); got.Status == diagFail {
-		t.Fatalf("row already failing before the fault: %+v", got)
+// D6. Cluster gossip is an UNTRUSTED origin: a peer chooses the key bytes.
+// Authentication cannot reach this path, so it needs the structural bound.
+func TestChaos73_DefectRemoteMergeIsBoundedInKeySize(t *testing.T) {
+	chaos73Setup(t)
+	exp := time.Now().Add(time.Hour).Unix()
+	entries := []session.RevocationEntry{
+		{Token: strings.Repeat("x", session.MaxRevocationTokenLen+1), Expiry: exp},
+		{Token: strings.Repeat("y", 256*1024), Expiry: exp},
 	}
-	noteRevocationPersistFailure(os.ErrPermission)
-
-	row := checkSessionRevocation()
-	if row.Status != diagFail {
-		t.Errorf("status = %q, want %q — a non-durable revocation must not read as healthy", row.Status, diagFail)
+	if added := session.Revoked.MergeRevocations(entries); added != 0 {
+		t.Errorf("merged %d over-long remote entries; want 0", added)
 	}
-	if row.OperatorAction == "" {
-		t.Error("the row names no operator action")
-	}
-	if revocationsAreDurable() {
-		t.Error("revocationsAreDurable() is true after an observed persist failure")
+	if got := session.Refused(session.RevokeOversize); got != 2 {
+		t.Errorf("oversize refusals = %d; want 2", got)
 	}
 }
 
-// DEFECT. The DEFAULT posture — no revocations file configured — must be
-// stated, not silent. It is the shipped posture, and combined with a stable
-// signing key (which every clustered deployment sets) it means a cookie
-// outlives the restart that discards its revocation.
-func TestChaos68_UnconfiguredPersistenceIsReported(t *testing.T) {
-	withChaos68Revocations(t)
-	session.SetRevocationsPath("")
-
-	row := checkSessionRevocation()
-	if row.Status != diagWarn {
-		t.Errorf("status = %q, want %q for an unconfigured revocations file", row.Status, diagWarn)
+// D7. ...and in entry COUNT. A peer sent 50,000 entries with no cap before.
+func TestChaos73_DefectRemoteMergeIsBoundedInEntryCount(t *testing.T) {
+	chaos73Setup(t)
+	exp := time.Now().Add(time.Hour).Unix()
+	entries := make([]session.RevocationEntry, session.MaxRevocationEntries+500)
+	for i := range entries {
+		entries[i] = session.RevocationEntry{Token: fmt.Sprintf("remote-%d", i), Expiry: exp}
 	}
-	if !strings.Contains(row.OperatorAction, "-revocations-file") {
-		t.Errorf("the row does not name the remedy: %q", row.OperatorAction)
+	added := session.Revoked.MergeRevocations(entries)
+	if added > session.MaxRevocationEntries {
+		t.Errorf("merged %d entries; want at most the %d cap", added, session.MaxRevocationEntries)
 	}
-	if revocationsAreDurable() {
-		t.Error("revocationsAreDurable() is true with no persistence configured")
+	if got := session.Refused(session.RevokeCapacity); got == 0 {
+		t.Error("capacity refusals = 0; a refused remote entry must be counted — it means " +
+			"cluster-wide revocation is incomplete on this node")
 	}
 }
 
-// A failed LOAD means revocations the operator already applied are not in
-// force on this node, which must not read as healthy either.
-func TestChaos68_DegradedLoadIsReported(t *testing.T) {
-	withChaos68Revocations(t)
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-	noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
-
-	if row := checkSessionRevocation(); row.Status != diagFail {
-		t.Errorf("status = %q, want %q after a failed load", row.Status, diagFail)
+// D8. The missing evictor. Eviction was lazy-on-READ only, which never fires
+// for the one key guaranteed never to be presented again — the cookie that
+// just logged out — so an UN-CLUSTERED node had no evictor at all and the list
+// (and its file, reloaded at every boot) grew for the life of the deployment.
+func TestChaos73_DefectExpiredEntriesAreSweptWithoutBeingRead(t *testing.T) {
+	chaos73Setup(t)
+	past := time.Now().Add(-time.Hour)
+	for i := 0; i < 50; i++ {
+		session.Revoked.Revoke(fmt.Sprintf("dead-%d", i), past)
 	}
-	if revocationsAreDurable() {
-		t.Error("revocationsAreDurable() is true after a degraded load")
+	if got := session.Revoked.Tracked(); got != 50 {
+		t.Fatalf("setup: entries = %d; want 50", got)
 	}
-}
-
-// An UNREADABLE file is deliberately not quarantined, so its recovery action
-// must not point at a readiness row or a .corrupt.* copy that do not exist —
-// while a CORRUPT file's action still must.
-func TestChaos68_LoadFailureActionMatchesTheFault(t *testing.T) {
-	withChaos68Revocations(t)
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-	noteRevocationLoadDegraded(fmt.Errorf("read revocations: %w", os.ErrPermission))
-	row := checkSessionRevocation()
-	if row.Status != diagFail {
-		t.Fatalf("status = %q, want %q after an unreadable load", row.Status, diagFail)
-	}
-	if strings.Contains(row.OperatorAction, ".corrupt.") || strings.Contains(row.OperatorAction, "state_file_session_revocations") {
-		t.Errorf("unreadable-file action points at quarantine artifacts that do not exist: %q", row.OperatorAction)
-	}
-	if !strings.Contains(row.OperatorAction, "permission") {
-		t.Errorf("unreadable-file action = %q, want it to name the permission/mount fix", row.OperatorAction)
-	}
-
-	withChaos68Revocations(t)
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-	noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
-	if row := checkSessionRevocation(); !strings.Contains(row.OperatorAction, ".corrupt.") {
-		t.Errorf("corrupt-file action = %q, want it to name the quarantined copy", row.OperatorAction)
+	session.Revoked.Sweep()
+	if got := session.Revoked.Tracked(); got != 0 {
+		t.Errorf("after sweep entries = %d; want 0 — expired entries are reclaimable "+
+			"only by reading their exact key", got)
 	}
 }
 
-// CONTROL. A healthy, configured node must read OK — a row that always fails
-// is worth nothing, and would train an operator to ignore it.
-func TestChaos68_HealthyNodeReadsOK(t *testing.T) {
-	withChaos68Revocations(t)
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
+// D9. The Control Plane aggregator retained whatever a node pushed, uncapped,
+// and MergedExcluding walks the union of every node's entries on EVERY sync
+// call from EVERY node (each node syncs every 3 s).
+func TestChaos73_DefectControlPlaneAggregatorIsBounded(t *testing.T) {
+	before := clusterRevocationDropTotal()
+	exp := time.Now().Add(time.Hour).Unix()
 
-	row := checkSessionRevocation()
-	if row.Status != diagOK {
-		t.Errorf("status = %q, want %q on a healthy configured node (%s)", row.Status, diagOK, row.Message)
+	push := make([]session.RevocationEntry, maxRevocationsPerNode+1000)
+	for i := range push {
+		push[i] = session.RevocationEntry{Token: fmt.Sprintf("cp-%d", i), Expiry: exp}
 	}
-	if !revocationsAreDurable() {
-		t.Error("revocationsAreDurable() is false on a healthy configured node")
+	push = append(push, session.RevocationEntry{
+		Token: strings.Repeat("z", session.MaxRevocationTokenLen+1), Expiry: exp})
+
+	agg := &revocationAggregator{perNode: map[string][]RevocationEntry{}}
+	agg.Update("node-a", push)
+	agg.mu.Lock()
+	kept := len(agg.perNode["node-a"])
+	agg.mu.Unlock()
+
+	if kept > maxRevocationsPerNode {
+		t.Errorf("Control Plane retained %d entries from one node; want at most %d",
+			kept, maxRevocationsPerNode)
+	}
+	if clusterRevocationDropTotal() == before {
+		t.Error("dropped entries were not counted — a dropped revocation means a session an " +
+			"operator killed may still authenticate on other nodes")
 	}
 }
 
-// The row is a viewer-reachable surface, so it must carry counts and a remedy
-// but never the revoked usernames themselves.
-func TestChaos68_ContractRowDoesNotLeakRevokedIdentities(t *testing.T) {
-	withChaos68Revocations(t)
-	sessionRevoked.RevokeUser("secret-person")
-	sessionRevoked.Revoke("secret-token-payload", time.Now().Add(time.Hour))
-
-	for _, row := range []OperatorContractCheck{checkSessionRevocation()} {
-		blob := row.Message + " " + row.OperatorAction
-		if strings.Contains(blob, "secret-person") || strings.Contains(blob, "secret-token-payload") {
-			t.Errorf("the contract row discloses a revoked identity: %q", blob)
-		}
-	}
-}
-
-// The row must be registered in the operator contract, or none of the above
-// reaches an operator.
-func TestChaos68_ContractRowIsRegistered(t *testing.T) {
-	oc := buildOperatorContract()
-	for i := range oc.Checks {
-		if oc.Checks[i].Code == "session_revocation" {
-			return
-		}
-	}
-	t.Fatal("session_revocation is not in the operator contract")
-}
-
-// STRUCTURAL WALL. The aggregator gates above prove the PRIMITIVE carries the
-// Control Plane's revocations; this proves the handler actually calls it.
+// ── CONTROLS ─────────────────────────────────────────────────────────────────
 //
-// Behavioural coverage cannot reach SyncRevocations without an mTLS peer
-// context, an enrolled node and an unfenced HA lease, so the wiring is pinned
-// by shape instead — the same instrument, and the same reason, as
-// TestSOCKS5_EveryDestinationSinkIsAudited. Both directions are required: a
-// Control Plane that contributes but does not consume still fails to enforce a
-// logout performed on a Data Plane.
-func TestChaos68_SyncRevocationsWiresBothDirections(t *testing.T) {
+// The cheapest way to pass every gate above is to refuse every revocation,
+// which deletes logout as a security control. Each control below was verified
+// FAILING against that shape, and PASSING against both the pre-fix and the
+// fixed tree — which is what makes it a control rather than a second defect
+// gate.
+
+// C1. Logout must still actually revoke.
+func TestChaos73_ControlGenuineLogoutStillRevokes(t *testing.T) {
+	chaos73Setup(t)
+	cookie := genuineCookie(t, "real-user", time.Hour, nil)
+	if _, err := session.Decode(cookie); err != nil {
+		t.Fatalf("setup: a freshly signed cookie must decode: %v", err)
+	}
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
+	}
+	if got := session.Revoked.Tracked(); got != 1 {
+		t.Fatalf("entries = %d; want 1 — logout no longer revokes anything", got)
+	}
+	if _, err := session.Decode(cookie); err == nil {
+		t.Error("the logged-out cookie still decodes; replaying it would keep working")
+	}
+	if got := sessionRevocationRefusedTotal(); got != 0 {
+		t.Errorf("a genuine logout charged %d refusals; want 0", got)
+	}
+}
+
+// C2. The case the PUBLIC route exists to serve: a genuine but EXPIRED cookie.
+// Decode checks the MAC before the expiry, so verification must not break it —
+// and it must not be charged to the probe counter, or ordinary next-day logout
+// traffic buries the one signal an operator has (D1's counter).
+func TestChaos73_ControlExpiredGenuineCookieStillLogsOutQuietly(t *testing.T) {
+	chaos73Setup(t)
+	cookie := genuineCookie(t, "stale-user", -time.Hour, nil)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/auth/logout", http.NoBody)
+	req.AddCookie(sessionCookieFor(cookie))
+	rec := httptest.NewRecorder()
+	apiAuthLogout(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d; want 200", rec.Code)
+	}
+	if got := sessionRevocationRefusedTotal(); got != 0 {
+		t.Errorf("an ordinary expired-cookie logout charged %d probe refusals; want 0", got)
+	}
+	// The cookie must still be cleared, or the browser keeps sending it.
+	var cleared bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == uiSessionCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Error("the session cookie was not cleared")
+	}
+}
+
+// TestChaos73_ExpiredIsStillVisibleInThePerReasonSeries is deliberately NOT
+// part of the control above. It asserts behaviour that has no pre-fix
+// counterpart (the counter did not exist), so folding it into a control made
+// that control fail against the pre-fix tree — i.e. it was a defect gate
+// wearing a control's label, which costs the control its whole purpose. Split
+// out so the control is a true control.
+func TestChaos73_ExpiredIsStillVisibleInThePerReasonSeries(t *testing.T) {
+	chaos73Setup(t)
+	logoutWith(t, genuineCookie(t, "stale-diag", -time.Hour, nil))
+	if got := session.Refused(session.RevokeExpired); got != 1 {
+		t.Errorf("per-reason expired count = %d; want 1 — excluded from the probe aggregate, "+
+			"but an operator must still be able to see it", got)
+	}
+}
+
+// C3. A refusal must not be an ORACLE. If a forged cookie produced a different
+// status, body or Set-Cookie than a genuine one, an unauthenticated prober
+// could use logout to test whether a captured cookie is still valid.
+func TestChaos73_ControlRefusalIsNotAnOracle(t *testing.T) {
+	chaos73Setup(t)
+
+	run := func(cookie string) (int, string, int) {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/auth/logout", http.NoBody)
+		req.AddCookie(sessionCookieFor(cookie))
+		rec := httptest.NewRecorder()
+		apiAuthLogout(rec, req)
+		return rec.Code, rec.Body.String(), len(rec.Result().Cookies())
+	}
+	gCode, gBody, gCookies := run(genuineCookie(t, "oracle", time.Hour, nil))
+	fCode, fBody, fCookies := run(forgedCookie(t, 64, "oracle"))
+
+	if gCode != fCode {
+		t.Errorf("status differs: genuine=%d forged=%d — logout is a cookie-validity oracle", gCode, fCode)
+	}
+	if gBody != fBody {
+		t.Errorf("body differs: genuine=%q forged=%q", gBody, fBody)
+	}
+	if gCookies != fCookies {
+		t.Errorf("Set-Cookie count differs: genuine=%d forged=%d", gCookies, fCookies)
+	}
+}
+
+// chaos73PeerEntry builds a peer-supplied revocation fixture. The token is an
+// opaque test label, not a credential; passing it as a parameter keeps gosec's
+// literal-value G101 heuristic off fixture strings.
+func chaos73PeerEntry(label string, expiry int64) session.RevocationEntry {
+	return session.RevocationEntry{Token: label, Expiry: expiry}
+}
+
+// C4. Cluster-wide revocation must still work. The cheapest way to pass D6/D7
+// is to stop merging, which silently deletes fleet-wide session invalidation.
+func TestChaos73_ControlLegitimateRemoteRevocationIsStillMerged(t *testing.T) {
+	chaos73Setup(t)
+	entries := []session.RevocationEntry{
+		chaos73PeerEntry("peer-session-1", time.Now().Add(time.Hour).Unix()),
+		chaos73PeerEntry("peer-session-2", time.Now().Add(2*time.Hour).Unix()),
+	}
+	if added := session.Revoked.MergeRevocations(entries); added != 2 {
+		t.Fatalf("merged %d legitimate remote entries; want 2", added)
+	}
+	if !session.Revoked.IsRevoked("peer-session-1") {
+		t.Error("a merged remote revocation is not enforced locally")
+	}
+	// ...and it must still be re-exportable, or the gossip chain breaks.
+	if got := len(session.Revoked.ExportRevocations()); got != 2 {
+		t.Errorf("exported %d entries; want 2", got)
+	}
+}
+
+// C5. THE EXEMPTION. A genuine session whose cookie exceeds the untrusted-path
+// key bound must STILL be revocable: the bound exists to stop a peer or a file
+// growing the map, and refusing to revoke a real session is the one failure
+// this control may not have. Same shape as CHAOS-63's configured-username
+// exemption, and verified failing against a build that applies the bound on
+// the local path too.
+func TestChaos73_ControlVerifiedRevocationIsExemptFromTheKeyBound(t *testing.T) {
+	chaos73Setup(t)
+	// A real IdP can return a very large group set; Encode has no bound.
+	groups := make([]string, 0, 600)
+	for i := 0; i < 600; i++ {
+		groups = append(groups, fmt.Sprintf("CN=group-%04d,OU=Groups,DC=corp,DC=example,DC=com", i))
+	}
+	cookie := genuineCookie(t, "big-groups", time.Hour, groups)
+	dot := strings.LastIndex(cookie, ".")
+	if dot <= session.MaxRevocationTokenLen {
+		t.Fatalf("setup: payload is %d bytes, not above the %d bound — this control is vacuous",
+			dot, session.MaxRevocationTokenLen)
+	}
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
+	}
+	if got := session.Revoked.Tracked(); got != 1 {
+		t.Fatalf("entries = %d; want 1 — a real session with a large cookie became unrevocable", got)
+	}
+	if _, err := session.Decode(cookie); err == nil {
+		t.Error("the large genuine cookie still decodes after logout")
+	}
+}
+
+// C6. The bound must be DERIVED, not guessed: it is re-measured against the
+// live Encode so a future Session field growth fails the build rather than
+// silently pushing ordinary sessions onto the refused path.
+func TestChaos73_ControlKeyBoundExceedsABrowserCarriableCookie(t *testing.T) {
+	// The de-facto browser limit is 4096 bytes for the whole cookie, so a
+	// session whose cookie fits in a browser must fit under the bound with
+	// room to spare.
+	groups := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		groups = append(groups, fmt.Sprintf("CN=group-%02d,OU=Groups,DC=corp,DC=example,DC=com", i))
+	}
+	s := session.Session{
+		Sub: "a-fairly-long-subject@corp.example.com", Email: "a-fairly-long-subject@corp.example.com",
+		Name: "A Fairly Long Display Name", Provider: "oidc", Role: "admin",
+		Exp: time.Now().Add(time.Hour).Unix(), Jti: session.NewJti(), Groups: groups,
+	}
+	raw, err := session.Encode(&s)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if len(raw) > 4096 {
+		t.Skipf("fixture cookie is %d bytes, past the browser limit; not the case this control bounds", len(raw))
+	}
+	payload := len(raw[:strings.LastIndex(raw, ".")])
+	if payload >= session.MaxRevocationTokenLen {
+		t.Fatalf("a browser-carriable cookie encodes to a %d-byte key, at or above the %d bound — "+
+			"ordinary sessions would be refused on the untrusted paths; raise MaxRevocationTokenLen",
+			payload, session.MaxRevocationTokenLen)
+	}
+	if session.MaxRevocationTokenLen < 2*4096 {
+		t.Errorf("MaxRevocationTokenLen = %d; want at least twice the 4096-byte browser cookie limit "+
+			"so the bound keeps its derived margin", session.MaxRevocationTokenLen)
+	}
+}
+
+// ── STRUCTURAL WALL ──────────────────────────────────────────────────────────
+
+// TestChaos73_WallNoProductionCallerUsesTheUnverifiedPrimitive AST-walks every
+// non-test file of package main and fails on any call to the UNVERIFIED
+// Revoke primitive.
+//
+// Behavioural coverage cannot reach this. Every gate above keeps passing if a
+// future handler — a second logout route, an SSO single-logout callback, a
+// "revoke this session" admin action — inserts into the list without verifying
+// the cookie, because those gates drive apiAuthLogout and nothing else. The
+// defect this sweep closed was exactly that shape: one public handler reaching
+// a primitive that trusts its input, with a comment asserting the verification
+// had already happened somewhere else.
+//
+// This is CHAOS-70's lesson generalised one step. That wall AST-walked ONE
+// FILE and its own note records the consequence: "this sweep's own note claimed
+// the transaction lock covered EVERY persisted roster mutation while its
+// structural wall AST-walks ui_auth.go only — the claim was broader than the
+// wall and the mutator that escaped both lived in another file. Enumerate such
+// a class from the PRIMITIVE, not from the file being edited." So this wall is
+// scoped to the PRIMITIVE across the whole package, not to session.go.
+func TestChaos73_WallNoProductionCallerUsesTheUnverifiedPrimitive(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	var scanned int
+	var offenders []string
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f) // #nosec G304 -- test-local repo file
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		scanned++
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, f, src, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", f, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Revoke" {
+				return true
+			}
+			recv, ok := sel.X.(*ast.Ident)
+			if !ok || recv.Name != "sessionRevoked" {
+				return true
+			}
+			offenders = append(offenders,
+				fmt.Sprintf("%s:%d", f, fset.Position(call.Pos()).Line))
+			return true
+		})
+	}
+
+	// Not-vacuous: if the glob or the parse stops matching, this wall silently
+	// guards nothing. CHAOS-70's pre-existing wall earned its keep exactly here
+	// — it fired three consecutive times as call sites moved.
+	if scanned < 50 {
+		t.Fatalf("scanned only %d production files; the selector has stopped matching and this "+
+			"wall is vacuous", scanned)
+	}
+	if len(offenders) > 0 {
+		t.Errorf("sessionRevoked.Revoke (the UNVERIFIED primitive) is called from production code at %v.\n"+
+			"Use RevokeVerified, which authenticates the cookie first. A revocation key is the payload "+
+			"half of a cookie this appliance signed, so anything that does not verify lets its caller "+
+			"choose the retained key, its length and its expiry (CHAOS-73).", offenders)
+	}
+}
+
+// TestChaos73_WallIsNotVacuous proves the wall's selector really does match
+// the shape it forbids, by running the same predicate over a synthetic file.
+// Without this, a typo in the receiver or method name would pass forever.
+func TestChaos73_WallIsNotVacuous(t *testing.T) {
+	const bad = `package main
+func offender() { sessionRevoked.Revoke("k", someTime) }
+`
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), "controlplane_server.go"), nil, 0)
+	file, err := parser.ParseFile(fset, "synthetic.go", bad, 0)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-
-	var body *ast.FuncDecl
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if ok && fn.Name.Name == "SyncRevocations" {
-			body = fn
-			break
-		}
-	}
-	if body == nil {
-		t.Fatal("SyncRevocations not found in controlplane_server.go")
-	}
-
-	want := map[string]bool{
-		"UpdateLocal":       false, // contribute: the CP's own list enters the merge
-		"MergeRevocations":  false, // consume: a DP's revocations are enforced on the CP
-		"ExportRevocations": false, // the contribution is the LIVE list, not a stale copy
-	}
-	ast.Inspect(body, func(n ast.Node) bool {
+	var hits int
+	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		if name := chaos68CalleeName(call); name != "" {
-			if _, tracked := want[name]; tracked {
-				want[name] = true
-			}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Revoke" {
+			return true
 		}
+		recv, ok := sel.X.(*ast.Ident)
+		if !ok || recv.Name != "sessionRevoked" {
+			return true
+		}
+		hits++
 		return true
 	})
-	for name, found := range want {
-		if !found {
-			t.Errorf("SyncRevocations does not call %s — the Control Plane is isolated from the revocation plane in at least one direction", name)
-		}
+	if hits != 1 {
+		t.Fatalf("the wall's selector matched %d times on a file that definitely contains the "+
+			"forbidden shape; the wall above cannot fail and is therefore vacuous", hits)
 	}
 }
 
-// The session_revocation row is viewer-reachable through /api/diagnostics,
-// which is walled against echoing secret names and raw filesystem paths
-// (TestApiDiagnostics_NoSensitiveValues). That wall only fires when this row
-// happens to be in its warn branch, so whether it catches a regression depends
-// on test ORDER — the first draft of this row named both a /data/ path and the
-// session-secret environment variable and passed the unshuffled suite.
-//
-// This gate drives every branch of the row deterministically and applies the
-// same forbidden list, so the order dependence cannot hide a leak here again.
-func TestChaos68_ContractRowNeverEchoesSensitiveTokens(t *testing.T) {
-	forbidden := []string{"sessionSecret", "CULVERT_SESSION_SECRET", "-----BEGIN", "/data/"}
+// ── RUNBOOK WALLS ────────────────────────────────────────────────────────────
 
-	// Each branch declares the status it must reach. Without that a setup that
-	// silently lands in a DIFFERENT branch would still pass the leak check, and
-	// the wall's claim to drive every branch would be false while green — the
-	// vacuous-gate failure mode this sweep keeps pinning against.
-	branches := []struct {
-		name  string
-		want  string
-		setup func(t *testing.T)
-	}{
-		{"unconfigured", diagWarn, func(*testing.T) {}},
-		{"healthy", diagOK, func(t *testing.T) {
-			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-		}},
-		{"load-degraded-corrupt", diagFail, func(t *testing.T) {
-			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-			noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
-		}},
-		// AU-36. The read-failure branch is a SECOND composition of this row,
-		// and a wall that drives only its sibling would not see a leak here —
-		// the branch-coverage lesson this wall exists for, one branch deeper.
-		{"load-degraded-unreadable", diagFail, func(t *testing.T) {
-			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-			noteRevocationLoadDegraded(fmt.Errorf("open: %w", os.ErrPermission))
-		}},
-		{"persist-failed", diagFail, func(t *testing.T) {
-			noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-			noteRevocationPersistFailure(os.ErrPermission)
-		}},
-		// AU-35. The row names a mount and a deletion, which is the branch most
-		// likely to reach for a raw path when someone rewords it.
-		{"vanished-file", diagFail, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "revocations.json")
-			session.SetRevocationsPath(path)
-			noteRevocationPersistenceConfigured(path)
-		}},
-		// AU-39/AU-46/AU-51. Three MORE compositions of this row, each with its
-		// own remedy sentence, and each one a place a future reword reaches for
-		// the configured path to say which thing is in the way. The wall drove
-		// six branches while this row had nine; a wall whose claim is "every
-		// branch" has to grow with the branches, which is the lesson one layer
-		// out from AU-36's own.
-		{"parent-missing", diagFail, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "gone", "revocations.json")
-			session.SetRevocationsPath(path)
-			noteRevocationPersistenceConfigured(path)
-		}},
-		{"parent-occupied", diagFail, func(t *testing.T) {
-			parent := filepath.Join(t.TempDir(), "mount")
-			if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
-				t.Fatalf("occupy the parent path: %v", err)
-			}
-			path := filepath.Join(parent, "revocations.json")
-			session.SetRevocationsPath(path)
-			noteRevocationPersistenceConfigured(path)
-		}},
-		{"target-is-a-directory", diagFail, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "revocations.json")
-			if err := os.Mkdir(path, 0o700); err != nil {
-				t.Fatalf("mkdir target: %v", err)
-			}
-			session.SetRevocationsPath(path)
-			noteRevocationPersistenceConfigured(path)
-		}},
-	}
-
-	for _, b := range branches {
-		t.Run(b.name, func(t *testing.T) {
-			withChaos68Revocations(t)
-			b.setup(t)
-			row := checkSessionRevocation()
-			if row.Status != b.want {
-				t.Fatalf("setup reached status %q, want %q — this sub-case is no longer driving the %s branch", row.Status, b.want, b.name)
-			}
-			blob := row.Code + " " + row.Message + " " + row.OperatorAction
-			for _, needle := range forbidden {
-				if strings.Contains(blob, needle) {
-					t.Errorf("the %s branch leaks %q on a viewer-reachable surface: %q", b.name, needle, blob)
-				}
-			}
-			if row.Message == "" {
-				t.Error("branch produced an empty message")
-			}
-		})
-	}
-}
-
-// DEFECT (Codex P2). The diagnostics row and the durable gauge must recover
-// when the volume is repaired. Keyed on the cumulative counter they never did,
-// and this file's own comment claimed the opposite — the ca_health.go mistake,
-// reproduced in the change that cites ca_health.go as its model.
-func TestChaos68_DurabilityRecoversWhenWritesSucceedAgain(t *testing.T) {
-	withChaos68Revocations(t)
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-
-	noteRevocationPersistFailure(os.ErrPermission)
-	if revocationsAreDurable() {
-		t.Fatal("durable while writes are failing")
-	}
-	if checkSessionRevocation().Status != diagFail {
-		t.Fatal("row is not failing while writes are failing")
-	}
-
-	// The operator repairs the volume and a save lands.
-	noteRevocationPersistSuccess()
-
-	if !revocationsAreDurable() {
-		t.Error("revocationsAreDurable() is still false after a successful write — the row latches until process restart")
-	}
-	if row := checkSessionRevocation(); row.Status != diagOK {
-		t.Errorf("status = %q, want %q after recovery (%s)", row.Status, diagOK, row.Message)
-	}
-	// The incident stays visible as magnitude, on /metrics, not as a stuck row.
-	if got := sessionRevocationPersistFailures.Load(); got != 1 {
-		t.Errorf("cumulative failures = %d, want 1 — recovery must not erase the incident's magnitude", got)
-	}
-}
-
-// A failure AFTER a recovery must degrade again — the flag is state, not a
-// one-shot latch in either direction.
-func TestChaos68_DurabilityDegradesAgainAfterRecovery(t *testing.T) {
-	withChaos68Revocations(t)
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-
-	noteRevocationPersistFailure(os.ErrPermission)
-	noteRevocationPersistSuccess()
-	noteRevocationPersistFailure(os.ErrPermission)
-
-	if revocationsAreDurable() {
-		t.Error("a second write failure did not re-degrade the durability signal")
-	}
-	if got := sessionRevocationPersistFailures.Load(); got != 2 {
-		t.Errorf("cumulative failures = %d, want 2", got)
-	}
-}
-
-// DEFECT (Codex P1). The HA standby verifies the SAME cookies as the leader —
-// the bundle replicates SessionHMAC — while SyncRevocations, the only other
-// carrier of revocations, is fenced on a standby. Without revocations in the
-// bundle, a session revoked on the leader authenticated against the standby and
-// survived a promotion with full authority.
-func TestChaos68_HABundleCarriesRevocationsToTheStandby(t *testing.T) {
-	leader := session.NewRevocationList()
-	leader.Revoke("leader-logout", time.Now().Add(time.Hour))
-	leader.RevokeUser("fired-admin")
-
-	bundle := HAStateBundle{Revocations: leader.ExportRevocations()}
-
-	// Round-trip the wire form: the standby decodes JSON, not a Go value.
-	raw, err := json.Marshal(bundle)
+// TestChaos73_WallRunbookNamesRegisteredEndpoints mirrors the CHAOS-70 round-2
+// gate for this sweep's runbook. That round found the roster runbook sending
+// operators to a path that does not exist, so they got a 404 mid-incident;
+// prose cannot be unit-tested but the endpoints it names can.
+func TestChaos73_WallRunbookNamesRegisteredEndpoints(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "session-revocation-plane.md")) // #nosec G304 -- fixed in-repo path
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		t.Fatalf("read runbook: %v", err)
 	}
-	var got HAStateBundle
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	registered := map[string]bool{}
+	for i := range uiRoutes {
+		registered[uiRoutes[i].Path] = true
 	}
-
-	standby := session.NewRevocationList()
-	standby.MergeRevocations(got.Revocations)
-
-	if !standby.IsRevoked("leader-logout") {
-		t.Error("a logout performed on the leader does not reach the standby")
-	}
-	if !standby.IsUserRevoked("fired-admin") {
-		t.Error("an account deleted on the leader does not reach the standby — after promotion its sessions authenticate again")
-	}
-}
-
-// The bundle must stay byte-identical when there is nothing to replicate, so a
-// standby predating this field is unaffected.
-func TestChaos68_HABundleOmitsEmptyRevocations(t *testing.T) {
-	raw, err := json.Marshal(HAStateBundle{})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if strings.Contains(string(raw), "revocations") {
-		t.Errorf("an empty revocation set is on the wire: %s", raw)
-	}
-}
-
-// STRUCTURAL WALL. The bundle carrying the field is worth nothing unless the
-// leader fills it and the standby applies it. applyHABundle and the HASync
-// handler both need live HA state to drive behaviourally, so the wiring is
-// pinned by shape — the same instrument as SyncRevocationsWiresBothDirections.
-func TestChaos68_HAWiresRevocationsInBothDirections(t *testing.T) {
-	for _, tc := range []struct{ file, fn, call string }{
-		{"controlplane_server.go", "HASync", "ExportRevocations"},
-		{"ha.go", "applyHABundle", "MergeRevocations"},
-	} {
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), tc.file), nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", tc.file, err)
-		}
-		var target *ast.FuncDecl
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if ok && fn.Name.Name == tc.fn {
-				target = fn
-				break
-			}
-		}
-		if target == nil {
-			t.Errorf("%s not found in %s", tc.fn, tc.file)
+	found := 0
+	for _, m := range regexp.MustCompile(`/api/[A-Za-z0-9/_-]+`).FindAllString(string(data), -1) {
+		path := strings.TrimRight(m, "/-_")
+		if registered[path] {
+			found++
 			continue
 		}
-		var found bool
-		ast.Inspect(target, func(n ast.Node) bool {
-			if call, ok := n.(*ast.CallExpr); ok {
-				if chaos68CalleeName(call) == tc.call {
-					found = true
-				}
-			}
-			return true
-		})
-		if !found {
-			t.Errorf("%s does not call %s — the HA standby is isolated from the revocation plane in that direction", tc.fn, tc.call)
-		}
+		t.Errorf("the runbook names %q, which is not registered in uiRoutes — an operator following "+
+			"these steps gets a 404", path)
+	}
+	if found == 0 {
+		t.Fatal("the wall matched no /api/ paths in the runbook; its selector has gone stale")
 	}
 }
 
-// DEFECT (CI-only, found by the determinism and -race gates on PR #1437).
-// The session_revocation row is the sweep's only diagFail-capable row, and both
-// states that produce it are PROCESS-GLOBALS that LATCH: the persist-failure
-// flag clears only on an observed successful write, and the load-degraded flag
-// never clears (it is a boot fact).
+// TestChaos73_WallRunbookLogFieldsMatchTheEmitter pins the documented log line
+// against what the code really emits.
 //
-// In production that is correct. In the test binary it is cross-talk: any test
-// whose SaveRevocations fails — an unwritable dataDir, a revocations path left
-// pointing at a removed temp dir — latches the record for the rest of the run,
-// and from then on the aggregate /api/diagnostics verdict is "fail". Every
-// later test asserting `Verdict != diagFail` then fails, in an order-dependent
-// way that only shows up under -shuffle/-count=2.
-//
-// resetDiagVerdictGlobals exists to enumerate exactly these globals, and
-// CHAOS-45, CHAOS-47 and CHAOS-57 each had to register theirs when they added a
-// diagFail-capable row. This sweep added one and did not — the same "a second
-// thing was added beside an existing one and the existing machinery was never
-// taught about it" shape §38.8 names.
-func TestChaos68_RevocationHealthIsIsolatedFromTheAggregateVerdict(t *testing.T) {
-	// Dirty the record the way a failing-volume test does, WITHOUT the
-	// per-test isolation helper — this is the cross-talk, not a tidy test.
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-	noteRevocationPersistFailure(os.ErrPermission)
-	if checkSessionRevocation().Status != diagFail {
-		t.Fatal("precondition: a persist failure must make the row fail")
-	}
+// CHAOS-69 round 3 found its own runbook carrying a pre-rework example with a
+// field the emitter never printed, so an operator building log parsing from the
+// doc could not tell which bound had fired. A documented log line is a PARSING
+// CONTRACT. This gate pins the CONTRACT (the prefix and the field names), not
+// the layout, so how many examples the doc shows stays the author's call —
+// an earlier draft of CHAOS-69's gate demanded both tiers and would have
+// failed the build over formatting.
+func TestChaos73_WallRunbookLogFieldsMatchTheEmitter(t *testing.T) {
+	chaos73Setup(t)
 
-	// A later diagnostics test declares its isolation the canonical way.
-	t.Run("verdict-asserting test after the cross-talk", func(t *testing.T) {
-		resetDiagVerdictGlobals(t)
-		if got := checkSessionRevocation().Status; got == diagFail {
-			t.Errorf("session_revocation is still %q after resetDiagVerdictGlobals — "+
-				"the latched record leaks into every later aggregate-verdict assertion", got)
-		}
-		if c := buildOperatorContract(); c.Verdict == diagFail {
-			t.Errorf("aggregate verdict = %q; an earlier test's revocation-write failure "+
-				"must not fail an unrelated test's diagnostics report", c.Verdict)
-		}
+	// Capture what the emitter really produces, via the shared helper.
+	emitted := captureLogger(t, func() {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/auth/logout", http.NoBody)
+		req.AddCookie(sessionCookieFor(forgedCookie(t, 64, "logfields")))
+		apiAuthLogout(httptest.NewRecorder(), req)
 	})
-
-	// And the helper must restore, not merely clear: this outer test's own
-	// record is its business, and a helper that leaked the OTHER way would
-	// silently disarm the production signal for the rest of the binary.
-	t.Cleanup(resetSessionRevocationHealthForTest)
-}
-
-// DEFECT (Codex P2, PR #1437) — a docs defect with a behavioural root, so it is
-// pinned behaviourally rather than by grepping the runbook.
-//
-// The runbook's first draft told operators to PAGE on
-// `culvert_session_revocation_durable == 0`, describing it as "writes are
-// failing RIGHT NOW". That gauge is derived from revocationsAreDurable(), which
-// is deliberately false when persistence is simply UNCONFIGURED — the shipped
-// default, and the posture most appliances are in. So the suggested page would
-// have fired permanently on every default installation, for a node with a
-// perfectly healthy disk and zero write failures, while metrics.go's own comment
-// called the same expression a warn.
-//
-// This gate pins the fact the documentation has to reflect: the gauge is
-// two-valued over three causes, so `durable == 0` alone cannot distinguish the
-// default posture from an active fault. The page therefore keys on the
-// current write-degraded state (culvert_session_revocation_persist_degraded),
-// and that is what the runbook and metrics.go now both say.
-func TestChaos68_DurableZeroDoesNotImplyAWriteFailure(t *testing.T) {
-	withChaos68Revocations(t)
-
-	// The shipped default: no revocations file configured, nothing wrong.
-	if revocationsAreDurable() {
-		t.Fatal("precondition: an unconfigured node must not report durable")
-	}
-	if got := sessionRevocationPersistFailures.Load(); got != 0 {
-		t.Fatalf("precondition: a healthy default node must have 0 persist failures, got %d", got)
+	if !strings.Contains(emitted, "SESSION_REVOKE_REFUSED") {
+		t.Fatalf("the emitter produced no SESSION_REVOKE_REFUSED line (%q); this gate cannot "+
+			"compare against the runbook", emitted)
 	}
 
-	// So an alert keyed on the gauge ALONE fires here — on a healthy appliance.
-	// That is the whole finding: the expression is true, and nothing is wrong.
-	if sessionRevocationPersistDegraded.Load() {
-		t.Error("an unconfigured node must not be reported as write-degraded — " +
-			"conflating the two is what made the bare gauge look pageable")
-	}
-
-	// The conjunction the runbook and metrics.go now document does NOT fire
-	// here, which is the property that makes it safe to page on.
-	pageWouldFire := sessionRevocationPersistDegraded.Load()
-	if pageWouldFire {
-		t.Error("the documented page fires on a healthy default appliance")
-	}
-
-	// And it DOES fire once a write actually fails, so the conjunction has not
-	// been tightened into something that never pages.
-	noteRevocationPersistFailure(os.ErrPermission)
-	pageFiresOnRealFailure := sessionRevocationPersistDegraded.Load()
-	if !pageFiresOnRealFailure {
-		t.Error("the documented page does not fire when writes are actually failing")
-	}
-}
-
-// scrapeSessionRevocationPersistDegraded returns the value of
-// culvert_session_revocation_persist_degraded on /metrics, or -1 if absent.
-func scrapeSessionRevocationPersistDegraded(t *testing.T) int {
-	t.Helper()
-	prevTok := metricsToken
-	metricsToken = ""
-	t.Cleanup(func() { metricsToken = prevTok })
-	w := httptest.NewRecorder()
-	handleMetrics(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))
-	for _, line := range strings.Split(w.Body.String(), "\n") {
-		if v, ok := strings.CutPrefix(line, "culvert_session_revocation_persist_degraded "); ok {
-			n, err := strconv.Atoi(strings.TrimSpace(v))
-			if err != nil {
-				t.Fatalf("unparseable persist_degraded value %q", v)
-			}
-			return n
-		}
-	}
-	return -1
-}
-
-// DEFECT (Codex P2, PR #1437, second round). The runbook's page was
-// `durable == 0 and increase(persist_failures_total[15m]) > 0`. After ONE
-// failed save with no further logout/sync to trigger another write, the
-// degradation is still in force (durable stays 0) but increase() over the
-// window drops to 0 after 15 minutes — so the page cleared while durability
-// had NOT recovered. The page must be driven by CURRENT write state that only
-// a landed save clears; this pins that the series exists, is 0 on a healthy
-// default node, latches on a failure with no further writes, and clears only
-// on a successful save.
-func TestChaos68_WriteDegradedPageLatchesUntilASaveLands(t *testing.T) {
-	withChaos68Revocations(t)
-
-	if got := scrapeSessionRevocationPersistDegraded(t); got != 0 {
-		t.Fatalf("culvert_session_revocation_persist_degraded = %d on a healthy default node; want 0 "+
-			"(-1 means the series is missing, so there is nothing current-state to page on)", got)
-	}
-	noteRevocationPersistFailure(os.ErrPermission)
-	// No further write happens — the increase()-window shape would clear here
-	// once the window passes. The state-based series must not.
-	for i := 0; i < 3; i++ {
-		if got := scrapeSessionRevocationPersistDegraded(t); got != 1 {
-			t.Fatalf("scrape %d after an unresolved save failure: persist_degraded = %d; want 1", i, got)
-		}
-	}
-	noteRevocationPersistSuccess()
-	if got := scrapeSessionRevocationPersistDegraded(t); got != 0 {
-		t.Fatalf("persist_degraded = %d after a save landed; want 0", got)
-	}
-}
-
-// chaos68UnwritablePath returns a path whose PARENT is a regular file, so every
-// write fails with ENOTDIR. Deliberately not a permission bit: root bypasses
-// DAC, so a mode-based fault would make this gate skip on the CI runner — which
-// is exactly where a durability regression must not go unnoticed.
-func chaos68UnwritablePath(t *testing.T) string {
-	t.Helper()
-	blocker := filepath.Join(t.TempDir(), "not-a-directory")
-	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
-		t.Fatalf("seed blocker: %v", err)
-	}
-	return filepath.Join(blocker, "revocations.json")
-}
-
-// DEFECT GATE (Codex P1, PR #1437 — AU-34). All three cluster merge sites used
-// to persist only inside `if added > 0`. MergeRevocations returns 0 once the
-// entry is already in memory, so ONE transient failure was permanent: every
-// later sync carried the same entry, added nothing, and never retried. The
-// revocation stayed in RAM, never reached disk, and a restart resurrected the
-// session it was meant to withdraw.
-//
-// Verified failing against the pre-fix shape (`if added > 0 { save }`): the
-// repaired path was never written and the entry was lost.
-func TestChaos68_FailedSaveIsRetriedOnALaterSyncThatAddsNothing(t *testing.T) {
-	withChaos68Revocations(t)
-
-	bad := chaos68UnwritablePath(t)
-	session.SetRevocationsPath(bad)
-	noteRevocationPersistenceConfigured(bad)
-
-	exp := time.Now().Add(time.Hour)
-	entries := []RevocationEntry{{Token: "tok-must-become-durable", Expiry: exp.Unix()}}
-
-	// First sync: the entry merges, the save fails.
-	if added := mergeAndPersistRevocations(entries, "test"); added != 1 {
-		t.Fatalf("first merge added %d, want 1", added)
-	}
-	if revocationsAreDurable() {
-		t.Fatal("reported durable while the write was failing")
-	}
-
-	// The operator repairs the volume.
-	good := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(good)
-
-	// A LATER sync carries the SAME entry, so the merge adds nothing.
-	if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
-		t.Fatalf("second merge added %d, want 0 — the entry is already in memory", added)
-	}
-
-	raw, err := os.ReadFile(good)
+	data, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "session-revocation-plane.md")) // #nosec G304 -- fixed in-repo path
 	if err != nil {
-		t.Fatalf("the repaired path was never written, so the revocation is still not durable: %v", err)
+		t.Fatalf("read runbook: %v", err)
 	}
-	if !strings.Contains(string(raw), "tok-must-become-durable") {
-		t.Errorf("persisted document does not carry the revocation: %s", raw)
+	doc := string(data)
+	if !strings.Contains(doc, "SESSION_REVOKE_REFUSED") {
+		t.Fatal("the runbook no longer documents the SESSION_REVOKE_REFUSED line; this wall is vacuous")
 	}
-	if !revocationsAreDurable() {
-		t.Error("still reported non-durable after a save that landed")
+	for _, field := range []string{"reason=", "bytes=", "total=", "action=none"} {
+		if !strings.Contains(emitted, field) {
+			t.Errorf("the emitter does not print %q, but the runbook documents it", field)
+		}
+		if !strings.Contains(doc, field) {
+			t.Errorf("the runbook does not document the %q field the emitter prints — an operator "+
+				"building log parsing from it would miss it", field)
+		}
 	}
 }
 
-// CONTROL. The cheapest way to pass the gate above is to save on EVERY merge
-// call. The standby syncs every 5s and the DP loop every 3s, so that would
-// rewrite the whole list continuously on every node in the fleet, forever —
-// trading a durability defect for a write-amplification one.
-func TestChaos68_HealthyNodeDoesNotRewriteOnEverySync(t *testing.T) {
-	withChaos68Revocations(t)
+// A MAC-verified revocation of a LARGE genuine cookie is admitted past the key
+// bound and persisted; it must still be admitted when the file is reloaded,
+// or a restart with the same signing key resurrects the revoked session
+// (Codex P1, PR #1591).
+func TestChaos73_ControlLargeVerifiedRevocationSurvivesReload(t *testing.T) {
+	chaos73Setup(t)
+	session.SetRevocationsPath(filepath.Join(t.TempDir(), "revocations.json"))
+	groups := make([]string, 0, 600)
+	for i := 0; i < 600; i++ {
+		groups = append(groups, fmt.Sprintf("CN=group-%04d,OU=Groups,DC=corp,DC=example,DC=com", i))
+	}
+	cookie := genuineCookie(t, "big-groups-reload", time.Hour, groups)
+	if dot := strings.LastIndex(cookie, "."); dot <= session.MaxRevocationTokenLen {
+		t.Fatalf("setup: payload is %d bytes, not above the %d bound — this control is vacuous", dot, session.MaxRevocationTokenLen)
+	}
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
+	}
+
+	// Simulate the restart: an empty list reloading the persisted file.
+	session.Revoked.SwapForTest() // restored by chaos73Setup's cleanup
+	if err := session.Revoked.LoadRevocations(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := session.Revoked.Tracked(); got != 1 {
+		t.Fatalf("after reload entries = %d; want 1 — the large revocation was dropped on restart", got)
+	}
+	if _, err := session.Decode(cookie); err == nil {
+		t.Error("the revoked large cookie decodes again after a restart")
+	}
+
+	// CONTROL: gossip keeps the bound for the very same entry.
+	entries := session.Revoked.ExportRevocations()
+	session.Revoked.SwapForTest()
+	before := session.Refused(session.RevokeOversize)
+	if added := session.Revoked.MergeRevocations(entries); added != 0 {
+		t.Errorf("gossip admitted %d oversized entries; the remote path must keep the key bound", added)
+	}
+	if session.Refused(session.RevokeOversize) <= before {
+		t.Error("control: the gossip refusal was not counted as oversize")
+	}
+}
+
+// An untrusted entry may not claim an expiry no genuine session can have:
+// such an entry is never swept until then, and enough of them fill the cap
+// and lock out genuine remote revocations (Codex P1, PR #1591).
+func TestChaos73_DefectRemoteFarFutureExpiryIsRefused(t *testing.T) {
+	chaos73Setup(t)
+	far := time.Now().Add(session.MaxSessionLifetime + 2*time.Hour).Unix()
+	near := time.Now().Add(session.MaxSessionLifetime).Unix()
+	added := session.Revoked.MergeRevocations([]session.RevocationEntry{
+		{Token: "far-future", Expiry: far},
+		{Token: "within-lifetime", Expiry: near},
+	})
+	if added != 1 {
+		t.Fatalf("merged %d entries; want 1 (only the within-lifetime one)", added)
+	}
+	if got := session.Refused(session.RevokeFarFuture); got != 1 {
+		t.Errorf("far_future refusals = %d; want 1", got)
+	}
+}
+
+// The Control Plane's retained slice must not keep a backing array sized by
+// the peer's request: the per-node cap bounds memory, not just length.
+func TestChaos73_DefectControlPlaneRetainedCapacityIsBounded(t *testing.T) {
+	prevDrops := clusterRevocationDrops.Load()
+	t.Cleanup(func() { clusterRevocationDrops.Store(prevDrops) })
+	agg := &revocationAggregator{perNode: map[string][]RevocationEntry{}}
+	exp := time.Now().Add(time.Hour).Unix()
+	big := make([]RevocationEntry, maxRevocationsPerNode*4)
+	for i := range big {
+		big[i] = RevocationEntry{Token: fmt.Sprintf("t%06d", i), Expiry: exp}
+	}
+	agg.Update("dp-1", big)
+	if got := cap(agg.perNode["dp-1"]); got > maxRevocationsPerNode {
+		t.Fatalf("retained capacity = %d; want at most %d", got, maxRevocationsPerNode)
+	}
+}
+
+// THE CONTROL FOR THE RELOAD WAIVER, and it is what keeps the waiver narrow.
+//
+// ControlLargeVerifiedRevocationSurvivesReload above proves the persisted path
+// admits an oversized GENUINE entry. On its own that is satisfied just as well
+// by a waiver that admits any oversized entry at all, which would re-open the
+// disk half of the original defect: a revocations file written by a build that
+// predates this sweep holds attacker-chosen keys of arbitrary length, and
+// LoadRevocations feeds it straight back in.
+//
+// So this pins that the waiver is AUTHENTICATED: only an entry carrying a
+// valid provenance MAC (written by SaveRevocations for revocations this node
+// verified itself) reloads past the key bound. Shape alone was the first
+// version of the waiver and reviewers rejected it, because an external writer
+// can produce a session-shaped payload with a matching expiry; every case
+// below is MAC-less and must be refused, including the shaped ones. Verified
+// failing against a build whose waiver returns true unconditionally — a
+// mutation that passes every other CHAOS-73 gate, which is why this one is
+// not redundant. (internal/session's provenance tests cover wrong-token and
+// wrong-expiry MACs.)
+func TestChaos73_ControlPersistedOversizeWaiverIsShapeGated(t *testing.T) {
+	oversize := session.MaxRevocationTokenLen + 1
+
+	// A session-shaped payload whose own Exp is far future, re-labelled on
+	// disk with a near expiry: the two disagree, so it is not our shape.
+	inner := session.Session{
+		Sub: "mismatched", Provider: "local", Role: "admin",
+		Exp: time.Now().Add(72 * time.Hour).Unix(), Jti: session.NewJti(),
+		Groups: []string{strings.Repeat("g", oversize)},
+	}
+	raw, err := json.Marshal(&inner)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	shapedButMismatched := base64.RawURLEncoding.EncodeToString(raw)
+
+	cases := []struct {
+		name  string
+		entry session.RevocationEntry
+	}{
+		{
+			// Exactly what the vulnerable build wrote: opaque attacker bytes.
+			name: "opaque attacker bytes",
+			entry: session.RevocationEntry{
+				Token:  strings.Repeat("A", oversize),
+				Expiry: time.Now().Add(time.Hour).Unix(),
+			},
+		},
+		{
+			// Decodes as base64 but is not a Session at all.
+			name: "valid base64, not a session",
+			entry: session.RevocationEntry{
+				Token:  base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("{", oversize))),
+				Expiry: time.Now().Add(time.Hour).Unix(),
+			},
+		},
+		{
+			name:  "session-shaped but the expiry disagrees",
+			entry: session.RevocationEntry{Token: shapedButMismatched, Expiry: time.Now().Add(time.Hour).Unix()},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			chaos73Setup(t)
+			path := filepath.Join(t.TempDir(), "revocations.json")
+			session.SetRevocationsPath(path)
+
+			if len(tc.entry.Token) <= session.MaxRevocationTokenLen {
+				t.Fatalf("setup: token is %d bytes, not above the %d bound — this case is vacuous",
+					len(tc.entry.Token), session.MaxRevocationTokenLen)
+			}
+			data, err := json.Marshal([]session.RevocationEntry{tc.entry})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if err := session.Revoked.LoadRevocations(); err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if got := session.Revoked.Tracked(); got != 0 {
+				t.Errorf("admitted %d oversized entries from the file; want 0 — the reload "+
+					"waiver is no longer shape-gated and the disk half of the bound is gone", got)
+			}
+			if session.Refused(session.RevokeOversize) == 0 {
+				t.Error("the refusal was not counted, so an operator has no signal that a " +
+					"legacy file is being rejected")
+			}
+		})
+	}
+}
+
+// ── CODEX ROUND 2: the retry, the accusation, and the peer's extra field ────
+
+// A revocation whose durable write FAILED must be repaired by the browser's
+// retry, not silently lost at the next restart.
+//
+// Persisting only when the list changes (CHAOS-70's rule) is what removes most
+// of the amplification, but it also removes the second chance: the retry
+// reports RevokeAlreadyKnown, the handler returns, and nothing rewrites the
+// file unless an UNRELATED revocation happens later. Verified failing against
+// the previous shape, where the no-change branch returned without saving.
+func TestChaos73_DefectFailedPersistIsRetriedByTheReplay(t *testing.T) {
+	chaos73Setup(t)
+	resetSessionRevocationsDirtyForTest()
+	t.Cleanup(resetSessionRevocationsDirtyForTest)
+
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "no-such-dir")
+	path := filepath.Join(missing, "revocations.json")
+	session.SetRevocationsPath(path)
+
+	cookie := genuineCookie(t, "persist-retry", time.Hour, nil)
+
+	// First logout: the revocation is recorded in memory and the write fails.
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("setup: the file exists, so the write did not fail — this gate is vacuous")
+	}
+	if session.Revoked.Tracked() != 1 {
+		t.Fatalf("the revocation is not in memory; want 1 entry")
+	}
+
+	// The volume comes back, and the browser retries the logout.
+	if err := os.MkdirAll(missing, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("replayed logout = %d; want 200", code)
+	}
+
+	data, err := os.ReadFile(path) // #nosec G304 -- temp path created by this test
+	if err != nil {
+		t.Fatalf("the failed write was never retried, so the revocation is lost at the next "+
+			"restart and the revoked cookie authenticates again: %v", err)
+	}
+	var entries []session.RevocationEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("persisted %d entries; want 1", len(entries))
+	}
+}
+
+// THE CONTROL for the retry. The cheapest way to pass the gate above is to
+// save on EVERY logout, which restores the write amplification this sweep
+// measured at 441 MB from 3.2 MB of input. After a SUCCESSFUL save, a replayed
+// logout must write nothing at all.
+//
+// The instrument is a SENTINEL written over the file, not a deleted file.
+// CHAOS-68 (PR #1437, reconciled onto this design) widened the replay repair
+// to every provable durability doubt, and a backing file that VANISHED after
+// it was written is one of them (AU-35): without the repair, a revocation in
+// force in memory is gone at the next restart, the fail-open direction. So
+// deleting the file now creates the very condition under which one repair
+// write is correct, and the self-limiting repair (the write recreates the
+// file, so the next replay finds nothing owed) is pinned by
+// TestChaos68_AU45_ControlHealthyRepeatLogoutDoesNotRewrite and this gate's
+// unconditional-save mutation alike. A sentinel keeps the file present and
+// healthy, so any write at all — the unconditional save this control exists
+// to catch — overwrites it.
+func TestChaos73_ControlReplayedLogoutStillWritesNothingWhenClean(t *testing.T) {
+	chaos73Setup(t)
+	resetSessionRevocationsDirtyForTest()
+	t.Cleanup(resetSessionRevocationsDirtyForTest)
+
 	path := filepath.Join(t.TempDir(), "revocations.json")
 	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
 
-	exp := time.Now().Add(time.Hour)
-	entries := []RevocationEntry{{Token: "tok-a", Expiry: exp.Unix()}}
-	if added := mergeAndPersistRevocations(entries, "test"); added != 1 {
-		t.Fatalf("first merge added %d, want 1", added)
+	cookie := genuineCookie(t, "no-rewrite", time.Hour, nil)
+	if code := logoutWith(t, cookie); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
 	}
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("first merge did not persist: %v", err)
+		t.Fatalf("setup: the first save did not land: %v", err)
 	}
 
-	// Scribble a sentinel over the file so a later write is observable, then
-	// re-sync the SAME entries on a healthy node. Nothing new, nothing
-	// degraded, nothing to do — the sentinel must survive.
-	//
-	// The instrument used to be os.Remove, and AU-35 turned that into a
-	// measurement error: a missing file is now itself a reason to rewrite, so
-	// the control was creating the very condition it meant to rule out and
-	// could no longer tell "a healthy node wrote" from "a node repaired a file
-	// this test deleted". A sentinel leaves the file PRESENT — the actual
-	// healthy state — and is replaced only by a real write, which is the one
-	// thing being asked about.
-	sentinel := []byte(`["do-not-rewrite-me"]`)
-	if err := os.WriteFile(path, sentinel, 0o600); err != nil {
-		t.Fatalf("seed sentinel: %v", err)
+	// Overwrite the file with a sentinel. A clean replay must NOT rewrite it.
+	const sentinel = "chaos73-no-rewrite-sentinel"
+	if err := os.WriteFile(path, []byte(sentinel), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
 	}
-	for i := 0; i < 3; i++ {
-		if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
-			t.Fatalf("re-merge added %d, want 0", added)
+	for range 3 {
+		if code := logoutWith(t, cookie); code != http.StatusOK {
+			t.Fatalf("replayed logout = %d; want 200", code)
 		}
 	}
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(path) // #nosec G304 -- temp path created by this test
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if !bytes.Equal(got, sentinel) {
-		t.Errorf("a healthy node rewrote the revocations file on a sync that changed nothing: %s", got)
+	if string(got) != sentinel {
+		t.Error("a replayed logout rewrote the file although nothing changed; the " +
+			"no-change-no-write rule that removes the quadratic amplification is gone")
 	}
 }
 
-// CONTROL. While a volume is broken the retry runs on every sync, so the
-// failure line must be keyed on the TRANSITION rather than the attempt — at a
-// 3-5s cadence a per-attempt line is hundreds an hour, and a mitigation for a
-// durability defect must not become a write-amplification one. The magnitude
-// stays in the counter.
-func TestChaos68_RetryLogsOncePerEpisodeNotPerAttempt(t *testing.T) {
-	withChaos68Revocations(t)
-	bad := chaos68UnwritablePath(t)
-	session.SetRevocationsPath(bad)
-	noteRevocationPersistenceConfigured(bad)
-
-	var buf bytes.Buffer
-	old := logger
-	logger = log.New(&buf, "", 0)
-	t.Cleanup(func() { logger = old })
-
-	exp := time.Now().Add(time.Hour)
-	entries := []RevocationEntry{{Token: "tok-noisy", Expiry: exp.Unix()}}
-	for i := 0; i < 8; i++ {
-		mergeAndPersistRevocations(entries, "test")
+// The refusal surfaces must not assert that a refusal IS an attack.
+//
+// A cookie signed under a previous session secret — after a rotation, or after
+// a restart that minted a fresh random key — is a genuine cookie from an
+// ordinary browser and is refused here as unverifiable. The counter cannot
+// tell it from a forgery, so the operator-facing text must not claim it can
+// (Codex P2, PR #1591; the same accusation-counter rule CHAOS-65 recorded).
+func TestChaos73_RefusalSurfaceDoesNotAssertProbing(t *testing.T) {
+	chaos73Setup(t)
+	if code := logoutWith(t, forgedCookie(t, 32, "accusation")); code != http.StatusOK {
+		t.Fatalf("logout = %d; want 200", code)
 	}
-
-	if n := strings.Count(buf.String(), "failed to persist merged revocations"); n != 1 {
-		t.Errorf("emitted %d failure lines across 8 syncs, want exactly 1 (onset only): %s", n, buf.String())
+	row := checkSessionRevocation()
+	if row.Status != diagWarn {
+		t.Fatalf("row status = %v; want warn after a refusal", row.Status)
 	}
-	if got := sessionRevocationPersistFailures.Load(); got < 8 {
-		t.Errorf("cumulative failures = %d, want >= 8 — the counter must carry the magnitude the log suppresses", got)
+	text := row.Message + " " + row.OperatorAction
+	if strings.Contains(text, "Ordinary traffic does not produce this") {
+		t.Error("the row still asserts that ordinary traffic cannot produce a refusal; a " +
+			"session-secret rotation makes every old cookie unverifiable and ordinary " +
+			"browsers produce exactly this")
 	}
-}
-
-// CONTROL. Recovery is announced once, so an operator watching the log can see
-// the episode close without tailing metrics.
-func TestChaos68_RetrySuccessAnnouncesRecoveryOnce(t *testing.T) {
-	withChaos68Revocations(t)
-	bad := chaos68UnwritablePath(t)
-	session.SetRevocationsPath(bad)
-	noteRevocationPersistenceConfigured(bad)
-
-	exp := time.Now().Add(time.Hour)
-	entries := []RevocationEntry{{Token: "tok-recover", Expiry: exp.Unix()}}
-	mergeAndPersistRevocations(entries, "test")
-
-	var buf bytes.Buffer
-	old := logger
-	logger = log.New(&buf, "", 0)
-	t.Cleanup(func() { logger = old })
-
-	session.SetRevocationsPath(filepath.Join(t.TempDir(), "revocations.json"))
-	for i := 0; i < 3; i++ {
-		mergeAndPersistRevocations(entries, "test")
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "rotation") && !strings.Contains(lower, "key change") {
+		t.Error("the row does not name the benign cause, so an operator is sent hunting an " +
+			"attacker after their own key rotation")
 	}
-
-	if n := strings.Count(buf.String(), "durable again"); n != 1 {
-		t.Errorf("emitted %d recovery lines, want exactly 1: %s", n, buf.String())
+	if !strings.Contains(lower, "could not verify") && !strings.Contains(lower, "unverifiable") {
+		t.Error("the row should describe the cookie as unverifiable rather than as forged")
 	}
 }
 
-// STRUCTURAL WALL. The reviewer found this on the HA standby, but all three
-// cluster merge sites carried the identical shape — and the CP handler is not
-// behaviourally reachable from a test (it needs an mTLS peer, an enrolled node
-// and an unfenced HA lease, which is why SyncRevocationsWiresBothDirections is
-// a wall too). Requiring every site to route through the one primitive is what
-// stops a fourth merge site reintroducing the gap silently.
-func TestChaos68_EveryRevocationMergeSiteRetriesThroughThePrimitive(t *testing.T) {
-	// Anchored to pkgSourceDir(), never the CWD: a concurrent os.Chdir in
-	// another test would otherwise make this wall flake (static_read_wall_test.go).
-	dir := pkgSourceDir()
-	entries, err := os.ReadDir(dir)
+// A peer's provenance field is never retained or re-broadcast.
+//
+// `Prov` is decodable on the SyncRevocations wire (the RPC carries raw JSON),
+// and the per-node bounds measure the TOKEN, so a malfunctioning or hostile
+// node can attach an arbitrarily large value that the Control Plane stores and
+// fans to every other node every 3 s. Verified failing against the previous
+// `kept = append(kept, e)`.
+func TestChaos73_DefectPeerProvenanceIsNotRetained(t *testing.T) {
+	agg := &revocationAggregator{perNode: map[string][]RevocationEntry{}}
+	huge := strings.Repeat("P", 1<<20) // 1 MiB, well inside the inbound budget
+	agg.Update("node-a", []RevocationEntry{{
+		Token: "ordinary-token", Expiry: time.Now().Add(time.Hour).Unix(), Prov: huge,
+	}})
+
+	agg.mu.Lock()
+	kept := agg.perNode["node-a"]
+	agg.mu.Unlock()
+
+	if len(kept) != 1 {
+		t.Fatalf("retained %d entries; want 1 — the entry itself is legitimate", len(kept))
+	}
+	if kept[0].Prov != "" {
+		t.Errorf("retained %d bytes of peer-supplied provenance; the per-node bound measures "+
+			"the token only, so this is unbounded state the CP also re-broadcasts",
+			len(kept[0].Prov))
+	}
+	if kept[0].Token != "ordinary-token" {
+		t.Errorf("token = %q; the legitimate part of the entry must survive", kept[0].Token)
+	}
+}
+
+// TestChaos73_WallSavesGoThroughTheCoordinator AST-walks every non-test file
+// of package main and fails on a direct `sessionRevoked.SaveRevocations()`
+// outside persistRevocations.
+//
+// The dirty-state retry is only as good as the set of writers that maintain
+// it. The control-plane revocation-sync loop called SaveRevocations directly,
+// so a failure there left the file behind memory with nothing recording that a
+// retry was owed — and a later logout, finding nothing dirty, wrote nothing
+// (CodeRabbit, PR #1591).
+//
+// Scoped to the PRIMITIVE rather than to one file, for the reason CHAOS-70
+// recorded and this PR has now hit twice: the writer that escapes a claim
+// lives in a file nobody thought to look at.
+func TestChaos73_WallSavesGoThroughTheCoordinator(t *testing.T) {
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(pkgSourceDir())
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
-	found := 0
+	checked, offenders := 0, []string{}
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		src, err := os.ReadFile(filepath.Join(dir, name))
+		file, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), name), nil, 0)
 		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+			continue // not this gate's job to police parse errors
 		}
-		n := strings.Count(string(src), "sessionRevoked.MergeRevocations(")
-		if n == 0 {
-			continue
+		checked++
+		// The coordinator's body is the one place allowed to make the call,
+		// so take its byte range and walk EVERYTHING else.
+		//
+		// Descending only into *ast.FuncDecl would miss a call inside a
+		// package-level function literal (`var save = func() { ... }`): that
+		// is a production writer, it bypasses the coordinator exactly as a
+		// named function would, and the wall was blind to it (CodeRabbit,
+		// PR #1591). The not-vacuous probe below keeps that honest.
+		var skipLo, skipHi token.Pos
+		for _, decl := range file.Decls {
+			d, ok := decl.(*ast.FuncDecl)
+			if ok && d.Name.Name == "persistRevocations" && d.Body != nil {
+				skipLo, skipHi = d.Body.Pos(), d.Body.End()
+			}
 		}
-		found += n
-		if name != "session_revocation_health.go" {
-			t.Errorf("%s calls sessionRevoked.MergeRevocations directly (%d time(s)) — route it through mergeAndPersistRevocations, or a failed save there is never retried (AU-34)", name, n)
-		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if skipLo.IsValid() && call.Pos() >= skipLo && call.Pos() < skipHi {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "SaveRevocations" {
+				return true
+			}
+			recv, ok := sel.X.(*ast.Ident)
+			if !ok || recv.Name != "sessionRevoked" {
+				return true
+			}
+			offenders = append(offenders, fmt.Sprintf("%s:%d", name, fset.Position(call.Pos()).Line))
+			return true
+		})
 	}
-	if found != 1 {
-		t.Errorf("found %d direct MergeRevocations call(s) in package main, want exactly 1 (the primitive) — the selector is stale, so this wall is not guarding anything", found)
+	if checked < 50 {
+		t.Fatalf("only %d non-test files parsed; the selector is not matching the package "+
+			"and this wall is vacuous", checked)
+	}
+	if len(offenders) > 0 {
+		t.Errorf("direct sessionRevoked.SaveRevocations() outside persistRevocations: %v — "+
+			"a save that bypasses the coordinator does not record that a retry is owed when "+
+			"it fails", offenders)
 	}
 }
 
-// chaos68CalleeName returns the called function's name whether it is spelled as
-// a method (sessionRevoked.MergeRevocations) or a plain function
-// (mergeAndPersistRevocations), and folds the retry primitive onto the
-// requirement it satisfies.
+// TestChaos73_WallPersistHoldsOneLockOverSaveAndFlag pins that
+// persistRevocations takes persistMu BEFORE it writes and before either
+// dirty-flag store, so the save and the record of whether it landed are one
+// critical section.
 //
-// The two "wires both directions" walls below scan for a literal
-// MergeRevocations call. AU-34 moved every cluster merge site behind
-// mergeAndPersistRevocations, so those walls fired — correctly: as spelled, the
-// function no longer did what they required. The property they guard is
-// unchanged (the CP and the HA standby each participate in BOTH directions), so
-// the right repair is to teach them the new spelling, never to relax them.
-func chaos68CalleeName(call *ast.CallExpr) string {
-	var name string
-	switch fn := call.Fun.(type) {
-	case *ast.SelectorExpr:
-		name = fn.Sel.Name
-	case *ast.Ident:
-		name = fn.Name
-	default:
-		return ""
-	}
-	if name == "mergeAndPersistRevocations" {
-		return "MergeRevocations"
-	}
-	return name
+// Routing every writer through the coordinator (the wall above) orders the
+// FILE: saveMu is held across snapshot-and-write, so the rename that lands
+// last carries the newest snapshot. It says nothing about the flag, which
+// lives out here in main and is stored after SaveRevocations has returned and
+// released saveMu. A goroutine whose write succeeded can be descheduled right
+// there and land its Store(false) after a later goroutine whose write FAILED
+// stored true: the flag then reads "in step" while the file is behind memory,
+// persistRevocationsIfDirty returns early, nothing ever repairs the file, and
+// a restart resurrects the revoked session (CodeRabbit, PR #1591).
+//
+// Structural because the window is a deschedule between two statements:
+// there is no deterministic way to drive it from a test, and a probabilistic
+// one would pass against the defect most runs. Removing the Lock line — the
+// cheapest wrong fix, and exactly the pre-fix shape — fails this gate.
+// persistShape is what the wall below reads out of persistRevocations: the
+// byte offset of each call it cares about, so their ORDER can be asserted.
+type persistShape struct {
+	lockAt          int   // earliest persistMu.Lock, -1 if absent
+	saves           []int // sessionRevoked.SaveRevocations
+	stores          []int // sessionRevocationsDirty.Store
+	allUnlocks      []int // every persistMu.Unlock, however spelled
+	deferredUnlocks map[int]bool
 }
 
-// DEFECT (AU-35). A backing file that disappears AFTER the boot probe leaves
-// every observer clear — no write was attempted, so no failure fired, so the
-// persist-degraded flag stays false. Keying the retry on that flag alone meant
-// a cluster sync carrying only already-known entries took the early return
-// forever, and the revocations stayed in RAM only. The next restart loaded a
-// file that had never received them and the cookies were live again.
+// readPersistShape walks one function body and records those offsets. Split
+// out from the gate so each stays within the repository's complexity budget.
+func readPersistShape(fset *token.FileSet, fn *ast.FuncDecl) persistShape {
+	sh := persistShape{lockAt: -1, deferredUnlocks: map[int]bool{}}
+	named := func(n ast.Node) (recv, name string, off int, ok bool) {
+		call, isCall := n.(*ast.CallExpr)
+		if !isCall {
+			return "", "", 0, false
+		}
+		sel, isSel := call.Fun.(*ast.SelectorExpr)
+		if !isSel {
+			return "", "", 0, false
+		}
+		id, isID := sel.X.(*ast.Ident)
+		if !isID {
+			return "", "", 0, false
+		}
+		return id.Name, sel.Sel.Name, fset.Position(call.Pos()).Offset, true
+	}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		// An unlock that is NOT deferred releases the lock part-way through
+		// the body, which is the defect wearing a lock.
+		if d, isDefer := n.(*ast.DeferStmt); isDefer {
+			if recv, name, off, ok := named(d.Call); ok && recv == "persistMu" && name == "Unlock" {
+				sh.deferredUnlocks[off] = true
+			}
+			return true
+		}
+		recv, name, off, ok := named(n)
+		if !ok {
+			return true
+		}
+		switch {
+		case recv == "persistMu" && name == "Lock":
+			if sh.lockAt < 0 || off < sh.lockAt {
+				sh.lockAt = off
+			}
+		case recv == "sessionRevoked" && name == "SaveRevocations":
+			sh.saves = append(sh.saves, off)
+		case recv == "sessionRevocationsDirty" && name == "Store":
+			sh.stores = append(sh.stores, off)
+		case recv == "persistMu" && name == "Unlock":
+			sh.allUnlocks = append(sh.allUnlocks, off)
+		}
+		return true
+	})
+	return sh
+}
+
+func TestChaos73_WallPersistHoldsOneLockOverSaveAndFlag(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), "session_revocation_bounds.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse session_revocation_bounds.go: %v", err)
+	}
+
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "persistRevocations" {
+			fn = d
+			break
+		}
+	}
+	if fn == nil {
+		t.Fatal("persistRevocations not found; this wall is watching a function that no " +
+			"longer exists and proves nothing")
+	}
+
+	sh := readPersistShape(fset, fn)
+	lockAt, saves, stores := sh.lockAt, sh.saves, sh.stores
+	deferredUnlocks, allUnlocks := sh.deferredUnlocks, sh.allUnlocks
+
+	// Not vacuous: the body must still contain the write and BOTH flag stores
+	// this gate claims to be ordering.
+	if len(saves) != 1 {
+		t.Fatalf("found %d SaveRevocations calls in persistRevocations, want 1; the "+
+			"coordinator no longer has the shape this wall asserts", len(saves))
+	}
+	if len(stores) != 2 {
+		t.Fatalf("found %d sessionRevocationsDirty.Store calls, want 2 (the failure and "+
+			"success arms); this wall is not ordering what it claims", len(stores))
+	}
+
+	if lockAt < 0 {
+		t.Fatalf("persistRevocations never calls persistMu.Lock: the save and the " +
+			"dirty-flag store are not one critical section, so a succeeded-then-" +
+			"descheduled writer can clear the flag a failed writer set, and the file " +
+			"stays behind memory with no retry owed")
+	}
+	for _, off := range append(append([]int{}, saves...), stores...) {
+		if off < lockAt {
+			t.Errorf("a save or dirty-flag store at offset %d precedes persistMu.Lock at %d; "+
+				"everything the coordinator does must be under the one lock", off, lockAt)
+		}
+	}
+
+	// Taking the lock is not enough: it has to still be HELD at the stores.
+	// Locking only around the write and unlocking before the flag update is
+	// the cheapest wrong fix, and it leaves the defect exactly intact.
+	if len(deferredUnlocks) == 0 {
+		t.Errorf("persistRevocations takes persistMu but never defers the Unlock; the " +
+			"lock must be released at return, not part-way through the body")
+	}
+	for _, off := range allUnlocks {
+		if !deferredUnlocks[off] {
+			t.Errorf("persistMu.Unlock at offset %d is not deferred: the lock is dropped "+
+				"before the dirty-flag store, so a succeeded-then-descheduled writer can "+
+				"still clear the flag a failed writer set", off)
+		}
+	}
+}
+
+// TestChaos73_ControlConcurrentPersistsLeaveTheFileAndFlagAgreeing drives the
+// coordinator from many goroutines at once and asserts the end state is
+// honest: either the flag is dirty, or the file on disk carries every
+// revocation still in memory.
 //
-// Reported by Codex on PR #1437 as a P2, against the merge primitive's early
-// return.
-func TestChaos68_VanishedBackingFileIsRewrittenOnTheNextSync(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
+// This is a CONTROL, not a defect gate. The race above is a deschedule window
+// too narrow to hit reliably, so this passes on the pre-fix tree too; its job
+// is to prove the lock did not introduce a deadlock or a lost write, and to
+// give the race detector something real to inspect.
+func TestChaos73_ControlConcurrentPersistsLeaveTheFileAndFlagAgreeing(t *testing.T) {
+	chaos73Setup(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "revocations.json")
 	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
 
-	exp := time.Now().Add(time.Hour)
-	entries := []RevocationEntry{{Token: "tok-gone", Expiry: exp.Unix()}}
-	if added := mergeAndPersistRevocations(entries, "test"); added != 1 {
-		t.Fatalf("first merge added %d, want 1", added)
+	const writers = 24
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			session.Revoked.Revoke(fmt.Sprintf("tok-%d", i), time.Now().Add(time.Hour))
+			persistRevocations()
+			persistRevocationsIfDirty()
+		}(i)
 	}
+	wg.Wait()
 
-	// The mount is replaced, or an operator deletes the file. Nothing observes
-	// it: no save was attempted, so the degraded flag is still clear.
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	if sessionRevocationPersistDegraded.Load() {
-		t.Fatal("precondition: the flag must still be clear — the whole point is that nothing observed the deletion")
-	}
-
-	// The next sync carries the SAME entry, so the merge adds nothing.
-	if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
-		t.Fatalf("re-merge added %d, want 0 — the entry is already in memory", added)
-	}
+	// A final persist from the quiescent state: whatever the concurrent phase
+	// left behind, the file must now match memory.
+	persistRevocations()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("the vanished revocations file was not rewritten: %v", err)
+		t.Fatalf("read revocations file: %v", err)
 	}
-	if !strings.Contains(string(data), "tok-gone") {
-		t.Errorf("the rewritten file does not carry the in-force revocation: %s", data)
+	var onDisk []session.RevocationEntry
+	if err := json.Unmarshal(data, &onDisk); err != nil {
+		t.Fatalf("unmarshal revocations file: %v", err)
+	}
+	if len(onDisk) != writers {
+		t.Errorf("file holds %d revocations, memory holds %d; a concurrent save lost a "+
+			"revocation that a restart would then resurrect", len(onDisk), writers)
+	}
+	if sessionRevocationsDirty.Load() {
+		t.Error("dirty after a successful quiescent persist: the flag would force an " +
+			"endless retry of a write that already landed")
 	}
 }
 
-// The repair is SELF-LIMITING: once the file is back, the next sync finds it
-// present and takes the early return again. Exactly one extra write per
-// disappearance, not one per tick — otherwise the fix for a durability defect
-// becomes the write-amplification defect this file keeps refusing to ship.
-func TestChaos68_VanishedFileRepairIsOneWriteNotAPerTickRewrite(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-
-	exp := time.Now().Add(time.Hour)
-	entries := []RevocationEntry{{Token: "tok-once", Expiry: exp.Unix()}}
-	mergeAndPersistRevocations(entries, "test")
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-
-	// First sync after the disappearance repairs it.
-	mergeAndPersistRevocations(entries, "test")
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("repair did not happen: %v", err)
-	}
-
-	// Every sync after that must leave the file alone, proven with the same
-	// non-perturbing sentinel the healthy-node control uses.
-	sentinel := []byte(`["do-not-rewrite-me"]`)
-	if err := os.WriteFile(path, sentinel, 0o600); err != nil {
-		t.Fatalf("seed sentinel: %v", err)
-	}
-	for i := 0; i < 3; i++ {
-		mergeAndPersistRevocations(entries, "test")
-	}
-	got, err := os.ReadFile(path)
+// TestChaos73_WallPersistFailureLogIsSanitized pins that the persist-failure
+// log passes its error through sanitizeLog rather than logging it bare.
+//
+// The error is object-derived and carries untrusted content: SaveRevocations
+// marshals the revocation entries, whose tokens arrive over cluster gossip
+// and from the on-disk file, so a marshal failure can fold a peer-supplied
+// token into the message. Logged raw, that token can carry newlines and
+// forge whole log lines (CWE-117). CodeQL traced three such flows to this one
+// statement and posted alert 418 on PR #1591.
+//
+// sanitizeLog leads with strings.ReplaceAll, which is the barrier CodeQL
+// recognises; %q keeps the value visibly one field. CodeQL itself only
+// comments on NEW code, so without this gate a later edit back to a bare %v
+// would land silently.
+func TestChaos73_WallPersistFailureLogIsSanitized(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join(pkgSourceDir(), "session_revocation_bounds.go"), nil, 0)
 	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if !bytes.Equal(got, sentinel) {
-		t.Errorf("the repair kept firing after the file was restored: %s", got)
-	}
-}
-
-// CONTROL. A node with no persistence configured must pay nothing — no stat
-// storm, no save attempt, no degradation — on a sync that adds nothing. The
-// cheapest way to pass the defect gate is to drop the early return entirely,
-// which would put every unconfigured appliance in the fleet through a save
-// attempt on every 3-5s tick.
-func TestChaos68_UnconfiguredNodePaysNothingForTheVanishedFileCheck(t *testing.T) {
-	withChaos68Revocations(t)
-	session.SetRevocationsPath("")
-
-	if revocationBackingFileIsGone() {
-		t.Error("an unconfigured node reports its backing file missing — there is no backing file")
-	}
-	exp := time.Now().Add(time.Hour)
-	entries := []RevocationEntry{chaos68Entry("tok-unconf", "", exp.Unix())}
-	mergeAndPersistRevocations(entries, "test")
-	if added := mergeAndPersistRevocations(entries, "test"); added != 0 {
-		t.Fatalf("re-merge added %d, want 0", added)
-	}
-	if sessionRevocationPersistDegraded.Load() {
-		t.Error("an unconfigured node was marked persist-degraded")
-	}
-}
-
-// Only a DEFINITIVELY absent file counts as gone. An unreadable one is not
-// evidence the content is missing — it may be intact behind a transient fault
-// — and this file already applies that rule to LoadRevocations. A second,
-// stricter posture for the same question is the divergence class this sweep
-// keeps closing.
-func TestChaos68_UnreadablePathIsNotReportedAsAVanishedFile(t *testing.T) {
-	withChaos68Revocations(t)
-	// A path whose PARENT is a regular file: stat fails with ENOTDIR, which is
-	// an error but is not "the file is not there".
-	session.SetRevocationsPath(chaos68UnwritablePath(t))
-
-	if revocationBackingFileIsGone() {
-		t.Error("an unstattable path was reported as a definitively missing file; only ENOENT may count")
-	}
-}
-
-// The operator-contract row must SAY the in-force revocations are no longer on
-// disk. Its OK message claims they are durable, which is exactly the
-// proposition a vanished file falsifies — distinct from the durable gauge,
-// whose claim ("a revocation applied right now would survive") stays true
-// because SaveRevocations recreates the file.
-func TestChaos68_VanishedBackingFileFailsTheContractRow(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-
-	sessionRevoked.RevokeUser("departed")
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-	if row := checkSessionRevocation(); row.Status != diagOK {
-		t.Fatalf("precondition: row = %q, want %q (%s)", row.Status, diagOK, row.Message)
+		t.Fatalf("parse session_revocation_bounds.go: %v", err)
 	}
 
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-	row := checkSessionRevocation()
-	if row.Status != diagFail {
-		t.Errorf("status = %q, want %q once the backing file is gone (%s)", row.Status, diagFail, row.Message)
-	}
-	// Viewer-reachable surface: counts and a remedy, never the revoked identity
-	// and never a raw path.
-	if strings.Contains(row.Message, "departed") || strings.Contains(row.OperatorAction, "departed") {
-		t.Errorf("the row leaked a revoked identity: %+v", row)
-	}
-	if strings.Contains(row.Message, path) || strings.Contains(row.OperatorAction, path) {
-		t.Errorf("the row leaked the raw revocations path: %+v", row)
-	}
-}
-
-// The repair announces the MISSING FILE, not a recovery. Reporting it as
-// "durable again" would claim recovery from a degradation that was never
-// reported, sending an operator to hunt for a failure line that does not
-// exist — and the line must be one per disappearance, not one per 3-5s tick.
-func TestChaos68_VanishedFileRepairAnnouncesItselfOncePerDisappearance(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-
-	exp := time.Now().Add(time.Hour)
-	entries := []RevocationEntry{{Token: "tok-log", Expiry: exp.Unix()}}
-	mergeAndPersistRevocations(entries, "test")
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove: %v", err)
-	}
-
-	var buf bytes.Buffer
-	old := logger
-	logger = log.New(&buf, "", 0)
-	t.Cleanup(func() { logger = old })
-
-	for i := 0; i < 6; i++ {
-		mergeAndPersistRevocations(entries, "test")
-	}
-
-	out := buf.String()
-	if n := strings.Count(out, "the revocations file is missing"); n != 1 {
-		t.Errorf("emitted %d missing-file lines across 6 syncs, want exactly 1: %s", n, out)
-	}
-	if strings.Contains(out, "durable again") {
-		t.Errorf("a repaired vanished file was reported as recovery from a degradation that was never reported: %s", out)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// AU-36: an unreadable revocations file gets the remedy that matches it.
-//
-// The load path already distinguished a PARSE failure (quarantined, leaves a
-// .corrupt.* copy and a state_file_session_revocations readiness row) from a
-// READ failure (deliberately NOT quarantined — the content may be intact
-// behind a transient permission or I/O fault). It then discarded the
-// distinction when recording the health, so the contract row printed the
-// quarantine remedy for both and sent an operator hunting artifacts that only
-// exist in the other case, mid-incident, on the one control that can withdraw
-// an already-issued session.
-//
-// Same defect class as CHAOS-66's socks5BindRemedy: a bounded classifier is
-// worth nothing if one remedy is printed for every class.
-// ---------------------------------------------------------------------------
-
-// DEFECT GATE. An unreadable file must not be described as quarantined, and
-// must not point at evidence that was never produced.
-func TestChaos68_AU36_UnreadableLoadDoesNotAdvertiseAQuarantine(t *testing.T) {
-	withChaos68Revocations(t)
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-	noteRevocationLoadDegraded(fmt.Errorf("open revocations: %w", os.ErrPermission))
-
-	row := checkSessionRevocation()
-	if row.Status != diagFail {
-		t.Fatalf("status = %q, want %q after an unreadable load", row.Status, diagFail)
-	}
-	blob := row.Message + " " + row.OperatorAction
-	// Each of these exists ONLY after a parse failure. Naming any of them on
-	// the read-failure branch is the defect.
-	for _, absent := range []string{".corrupt", "quarantin", "state_file_session_revocations"} {
-		if strings.Contains(strings.ToLower(blob), strings.ToLower(absent)) {
-			t.Errorf("the unreadable-load row names %q, which only exists after a PARSE failure: %q", absent, blob)
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "persistRevocations" {
+			fn = d
 		}
 	}
-	// It must still say what to do.
-	low := strings.ToLower(blob)
-	if !strings.Contains(low, "permission") || !strings.Contains(low, "restart") {
-		t.Errorf("the unreadable-load row does not name the permission/mount repair or the restart: %q", blob)
+	if fn == nil {
+		t.Fatal("persistRevocations not found; this wall proves nothing")
 	}
-}
 
-// INVERTED by AU-37. This gate used to require the remedy to WARN that the
-// next revocation would overwrite the unread file — it pinned a documented
-// hazard. AU-37 removed the hazard instead: SaveRevocations now refuses while
-// the file is unread, so the remedy must promise the opposite, that the file
-// is preserved and a restart after the repair recovers it. Inverting it is
-// deliberate, not incidental: the old assertion would now pass only if the
-// fence were gone.
-func TestChaos68_AU37_UnreadableRemedyPromisesTheFileIsPreserved(t *testing.T) {
-	withChaos68Revocations(t)
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-	noteRevocationLoadDegraded(fmt.Errorf("read revocations: %w", errors.New("input/output error")))
-
-	action := strings.ToLower(checkSessionRevocation().OperatorAction)
-	if strings.Contains(action, "replaces it") {
-		t.Errorf("the remedy still warns the file will be overwritten, which AU-37 made false: %q", action)
-	}
-	if !strings.Contains(action, "not being written") {
-		t.Errorf("the remedy does not state that the unread file is protected from writes: %q", action)
-	}
-	if !strings.Contains(action, "restart") {
-		t.Errorf("the remedy does not name the restart that recovers the contents: %q", action)
-	}
-}
-
-// CONTROL. The corrupt branch must KEEP pointing at the quarantine. The
-// cheapest way to pass the two gates above is to delete the quarantine remedy
-// entirely, which would strip the one branch that really does leave a
-// restorable copy of its only recovery instruction.
-func TestChaos68_AU36_CorruptLoadStillNamesTheQuarantine(t *testing.T) {
-	withChaos68Revocations(t)
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-	noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
-
-	row := checkSessionRevocation()
-	if row.Status != diagFail {
-		t.Fatalf("status = %q, want %q after a corrupt load", row.Status, diagFail)
-	}
-	blob := strings.ToLower(row.Message + " " + row.OperatorAction)
-	// "quarantin" is here on purpose: the established vocabulary of this
-	// codebase and the runbook, which the CORRUPT branch may use freely. Only
-	// the READ branch is forbidden it, because there it names nothing real.
-	for _, needle := range []string{".corrupt", "state_file_session_revocations", "quarantin"} {
-		if !strings.Contains(blob, needle) {
-			t.Errorf("the corrupt-load row no longer names %q — the operator's only restore path: %q", needle, blob)
+	logs, sanitized := 0, 0
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
 		}
-	}
-}
-
-// CONTROL. The two branches must actually DIFFER. A switch that returns one
-// string satisfies every "names its own remedy" assertion above — the CHAOS-66
-// distinct-remedy control, applied here.
-func TestChaos68_AU36_TheTwoLoadFailuresCarryDistinctRemedies(t *testing.T) {
-	read := func(err error) OperatorContractCheck {
-		withChaos68Revocations(t)
-		noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-		noteRevocationLoadDegraded(err)
-		return checkSessionRevocation()
-	}
-	corrupt := read(session.ErrRevocationsCorrupt)
-	unreadable := read(fmt.Errorf("open: %w", os.ErrPermission))
-
-	if corrupt.OperatorAction == unreadable.OperatorAction {
-		t.Errorf("both load failures print one remedy, so the classifier buys nothing: %q", corrupt.OperatorAction)
-	}
-	if corrupt.Message == unreadable.Message {
-		t.Errorf("both load failures print one message: %q", corrupt.Message)
-	}
-}
-
-// WALL. The quarantine decision and the remedy selection must consult ONE
-// predicate. If a call site classifies the error itself, the action taken and
-// the action advertised can drift apart — which is the defect AU-36 closed.
-func TestChaos68_AU36_QuarantineAndRemedyShareOnePredicate(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "session_startup.go"))
-	if err != nil {
-		t.Fatalf("read session_startup.go: %v", err)
-	}
-	body := string(src)
-	if !strings.Contains(body, "revocationLoadIsCorrupt(err)") {
-		t.Error("session_startup.go no longer decides the quarantine with revocationLoadIsCorrupt")
-	}
-	if strings.Contains(body, "ErrRevocationsCorrupt") {
-		t.Error("session_startup.go classifies the load error itself; it must ask revocationLoadIsCorrupt " +
-			"so the quarantine and the advertised remedy cannot disagree")
-	}
-	// Not vacuous: the recorder must be the one place the classification is
-	// stored, and it must derive it from the same predicate.
-	health, err := os.ReadFile(filepath.Join(pkgSourceDir(), "session_revocation_health.go"))
-	if err != nil {
-		t.Fatalf("read session_revocation_health.go: %v", err)
-	}
-	if !strings.Contains(string(health), "corrupt := revocationLoadIsCorrupt(err)") {
-		t.Error("noteRevocationLoadDegraded no longer derives LoadCorrupt from the shared predicate")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// AU-37: a file that could not be READ is never overwritten.
-//
-// A read failure is deliberately not quarantined, on the reasoning that the
-// content may be intact behind a transient fault and moving a healthy
-// security-critical file aside is the worse error. That reasoning only holds
-// if nothing LATER overwrites it — and something did. The process boots with an
-// EMPTY list, and the first logout, account deletion or cluster sync that adds
-// an entry calls SaveRevocations, which renames a complete temp file over the
-// target. AtomicWrite needs only the parent DIRECTORY to be writable, so an
-// unreadable file in a writable directory is replaced by the handful of
-// revocations this process happens to know about; every revocation that was on
-// disk and never read is gone, and the operator's own remedy (fix the
-// permission, restart) then loads the truncated file.
-//
-// Fail-OPEN on the one control that can withdraw an already-issued session,
-// reachable by ordinary operation rather than by a second fault. Reported by
-// Codex on PR #1437 as a P1.
-//
-// The boot probe already refused to write on this branch for exactly this
-// reason; the runtime writers did not. Same file, same fault, opposite
-// postures — the "two answers to one question" class this sweep keeps closing.
-// ---------------------------------------------------------------------------
-
-// au37UnreadableFeed returns a list whose backing file exists, holds content,
-// and cannot be read — the real shape, driven through the real load path.
-func au37UnreadableFeed(t *testing.T) (rl *session.RevocationList, path string) {
-	t.Helper()
-	path = filepath.Join(t.TempDir(), "revocations.json")
-	// Content a healthy boot WOULD have loaded. Its survival is the property.
-	original := []byte(`[{"token":"user:victim","exp":4102444800}]`)
-	if err := os.WriteFile(path, original, 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if err := os.Chmod(path, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	session.SetRevocationsPath(path)
-	rl = session.NewRevocationList()
-	if err := rl.LoadRevocations(); err == nil {
-		t.Skip("running as root: DAC is bypassed, so the file cannot be made unreadable here")
-	}
-	return rl, path
-}
-
-// DEFECT GATE. A save after an unreadable load must not touch the file.
-func TestChaos68_AU37_SaveRefusesAfterAnUnreadableLoad(t *testing.T) {
-	withChaos68Revocations(t)
-	rl, path := au37UnreadableFeed(t)
-
-	rl.Revoke("a-token-this-process-knows", time.Now().Add(time.Hour))
-	err := rl.SaveRevocations()
-	if !errors.Is(err, session.ErrRevocationsUnread) {
-		t.Fatalf("SaveRevocations err = %v, want ErrRevocationsUnread — an unread file must never be overwritten", err)
-	}
-
-	// The original bytes must still be there. Read as the owner can.
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatalf("chmod back: %v", err)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if !strings.Contains(string(got), "user:victim") {
-		t.Errorf("the unread revocations file was overwritten and its contents are gone: %s", got)
-	}
-}
-
-// DEFECT GATE. The refusal is not a persistence FAILURE: no write was
-// attempted, so it must not set the degraded flag or move the failure counter,
-// which would replace the load-degraded row's remedy (fix the permission) with
-// "check free space" — the wrong investigation.
-func TestChaos68_AU37_RefusalIsNotCountedAsAWriteFailure(t *testing.T) {
-	withChaos68Revocations(t)
-	rl, _ := au37UnreadableFeed(t)
-
-	rl.Revoke("another-token", time.Now().Add(time.Hour))
-	_ = rl.SaveRevocations()
-
-	if sessionRevocationPersistDegraded.Load() {
-		t.Error("a refusal set the persist-degraded flag; it is not a write failure and the volume may be healthy")
-	}
-	if got := sessionRevocationPersistFailures.Load(); got != 0 {
-		t.Errorf("persist failures = %d, want 0 — a refused save attempted no write", got)
-	}
-}
-
-// DEFECT GATE. The refusal is COUNTED. It is the operator's only measure of
-// how many revocations are memory-only, which is also the size of the re-apply
-// job the contract row asks for.
-func TestChaos68_AU37_RefusalsAreCountedAndSurfaced(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-	noteRevocationLoadDegraded(fmt.Errorf("read revocations: %w", os.ErrPermission))
-
-	// Three revocations are live; the cumulative refusal counter reads 7
-	// (refusals of entries since expired, a user revocation extended twice).
-	// The row must report what is held in memory NOW, not the counter.
-	for i := 0; i < 3; i++ {
-		sessionRevoked.Revoke(fmt.Sprintf("live-%d", i), time.Now().Add(time.Hour))
-	}
-	noteRevocationPersistRefused(7)
-	if got := sessionRevocationPersistRefused.Load(); got != 7 {
-		t.Fatalf("refused counter = %d, want 7", got)
-	}
-	msg := checkSessionRevocation().Message
-	if !strings.Contains(msg, "3 token") {
-		t.Errorf("the row does not report the live memory-only revocations: %q", msg)
-	}
-	if strings.Contains(msg, "7") {
-		t.Errorf("the row reports the cumulative refusal counter as if it were held in memory: %q", msg)
-	}
-}
-
-// CONTROL. A healthy node must still persist. The cheapest way to pass every
-// gate above is to refuse every save, which would silently delete the
-// durability this whole sweep exists to provide.
-func TestChaos68_AU37_ReadableFileStillPersists(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(path)
-	rl := session.NewRevocationList()
-	if err := rl.LoadRevocations(); err != nil {
-		t.Fatalf("load on a clean path: %v", err)
-	}
-	rl.Revoke("token", time.Now().Add(time.Hour))
-	if err := rl.SaveRevocations(); err != nil {
-		t.Fatalf("a healthy node must still persist: %v", err)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if !strings.Contains(string(got), "token") {
-		t.Errorf("a healthy save wrote nothing useful: %s", got)
-	}
-}
-
-// CONTROL. A CORRUPT file must STILL be writable after the caller quarantines
-// it. The fence is specific to an UNREAD file; extending it to the corrupt case
-// would leave a quarantined node unable to persist anything until a restart,
-// which is a durability outage the quarantine exists to avoid.
-func TestChaos68_AU37_CorruptFileDoesNotFenceTheSave(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	session.SetRevocationsPath(path)
-	rl := session.NewRevocationList()
-	err := rl.LoadRevocations()
-	if !errors.Is(err, session.ErrRevocationsCorrupt) {
-		t.Fatalf("load err = %v, want ErrRevocationsCorrupt", err)
-	}
-	// The caller quarantines, then the node carries on. A save must work.
-	rl.Revoke("post-quarantine", time.Now().Add(time.Hour))
-	if err := rl.SaveRevocations(); err != nil {
-		t.Fatalf("a corrupt (quarantined) file must not fence the save: %v", err)
-	}
-}
-
-// UID-INDEPENDENT COUNTERPART to the two chmod gates above, which skip as root
-// because DAC cannot deny root a read. A DIRECTORY at the configured path fails
-// os.ReadFile with EISDIR for every uid, so the same fence is driven on every
-// runner — without it, the two gates above are unguarded on exactly the lanes
-// this repository runs as root.
-//
-// The write target is then pointed at an ordinary file holding known content,
-// which is what makes this a proof of the fence rather than of the directory:
-// the refusal must happen before any path work, so a save must return the
-// sentinel and leave those bytes alone.
-func TestChaos68_AU37_UnreadLoadFencesEverySubsequentSave(t *testing.T) {
-	withChaos68Revocations(t)
-	dir := t.TempDir()
-
-	unreadable := filepath.Join(dir, "revocations-as-a-directory.json")
-	if err := os.Mkdir(unreadable, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	session.SetRevocationsPath(unreadable)
-	rl := session.NewRevocationList()
-	err := rl.LoadRevocations()
-	if err == nil {
-		t.Fatal("reading a directory as the revocations file must fail")
-	}
-	if errors.Is(err, session.ErrRevocationsCorrupt) {
-		t.Fatalf("EISDIR must classify as a READ failure, not corruption: %v", err)
-	}
-
-	target := filepath.Join(dir, "revocations.json")
-	original := []byte(`[{"token":"user:victim","exp":4102444800}]`)
-	if err := os.WriteFile(target, original, 0o600); err != nil {
-		t.Fatalf("seed target: %v", err)
-	}
-	session.SetRevocationsPath(target)
-
-	rl.Revoke("token-known-only-to-this-process", time.Now().Add(time.Hour))
-	if err := rl.SaveRevocations(); !errors.Is(err, session.ErrRevocationsUnread) {
-		t.Fatalf("SaveRevocations err = %v, want ErrRevocationsUnread", err)
-	}
-	got, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if !bytes.Equal(got, original) {
-		t.Errorf("a save after an unread load wrote to disk: %s", got)
-	}
-	if sessionRevocationPersistDegraded.Load() {
-		t.Error("the refusal set the persist-degraded flag; no write was attempted")
-	}
-}
-
-// DEFECT GATE for the MERGE path's wiring, which the other AU-37 gates do not
-// reach: mergeAndPersistRevocations is the one writer that runs on a LOOP
-// (the CP handler, the DP sync, the HA bundle apply, every 3-5s), so it is the
-// one place a refusal could become both an uncounted event and a per-tick log
-// line. Removing its refusal branch left every other gate green — which is why
-// this exists.
-func TestChaos68_AU37_MergePathCountsTheRefusalAndStaysQuiet(t *testing.T) {
-	withChaos68Revocations(t)
-	dir := t.TempDir()
-
-	unreadable := filepath.Join(dir, "as-a-directory.json")
-	if err := os.Mkdir(unreadable, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	session.SetRevocationsPath(unreadable)
-	if err := sessionRevoked.LoadRevocations(); err == nil {
-		t.Fatal("reading a directory as the revocations file must fail")
-	}
-	noteRevocationPersistenceConfigured(unreadable)
-	noteRevocationLoadDegraded(errors.New("read revocations: is a directory"))
-
-	var logged bytes.Buffer
-	prev := logger
-	logger = log.New(&logged, "", 0)
-	t.Cleanup(func() { logger = prev })
-
-	before := sessionRevocationPersistRefused.Load()
-	added := mergeAndPersistRevocations([]RevocationEntry{
-		{Token: "user:alice", User: "alice", Expiry: time.Now().Add(time.Hour).Unix()},
-		{Token: "user:bob", User: "bob", Expiry: time.Now().Add(time.Hour).Unix()},
-	}, "test")
-	if added != 2 {
-		t.Fatalf("added = %d, want 2 — the merge itself must still apply", added)
-	}
-	if got := sessionRevocationPersistRefused.Load() - before; got != 2 {
-		t.Errorf("refused counter moved by %d, want 2 — the merge path must charge what it could not persist", got)
-	}
-	if sessionRevocationPersistDegraded.Load() {
-		t.Error("the merge path treated a refusal as a write failure")
-	}
-	// The sync loops run every few seconds; a per-attempt line here is the
-	// write-amplification this function's own contract forbids. The condition
-	// was already logged once at boot and is on the contract row.
-	if strings.Contains(logged.String(), "failed to persist") {
-		t.Errorf("the merge path logged a refusal as a persistence failure, once per sync tick: %q", logged.String())
-	}
-}
-
-// ---------------------------------------------------------------------------
-// AU-38 / AU-39: two premises that can be false.
-//
-// AU-37 fenced saves for a file that could not be READ, and deliberately
-// exempted the CORRUPT branch because "the quarantine moves the file aside, so
-// the path is free". AU-35 left the durable gauge alone because "AtomicWrite
-// creates the file". Both are conditional statements that were treated as
-// unconditional: the quarantine can FAIL (leaving the only copy in place), and
-// AtomicWrite cannot create anything when the PARENT DIRECTORY is gone.
-//
-// Both reported by Codex on PR #1437 as P2s, and both reproduced before fixing.
-// ---------------------------------------------------------------------------
-
-// au38LongBase returns a basename in the band where AtomicWrite's `.tmp.<10>`
-// suffix still fits inside the 255-byte filename limit but the quarantine's
-// longer `.corrupt.<19-digit ns>` does not — the shape that makes a failed
-// rename coexist with a successful write.
-func au38LongBase() string { return strings.Repeat("r", 235) }
-
-// DEFECT GATE. A corrupt file that could not be quarantined must never be
-// overwritten: it is the only copy of whatever the node was enforcing.
-//
-// This drives the REAL boot path (loadSession), not the primitive. A first
-// draft called quarantineCorruptStateFile and FenceWritesUnquarantined
-// directly from the test, and BOTH the pre-fix shape and an over-broad
-// always-fence shape passed it — it proved the fence works and nothing about
-// the call site that has to arm it, which is the entire fix. The same vacuity
-// AU-37's merge-path mutation exposed, one finding later.
-func TestChaos68_AU38_FailedQuarantineFencesTheSave(t *testing.T) {
-	withChaos68Revocations(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, au38LongBase())
-	corrupt := []byte(`{this is not a revocations array`)
-	if err := os.WriteFile(path, corrupt, 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	// Probe the filesystem band before asserting anything about it.
-	if err := os.Rename(path, fmt.Sprintf("%s.corrupt.%d", path, time.Now().UnixNano())); err == nil {
-		t.Skip("this filesystem allows the longer .corrupt.<ns> name; the band is not reproducible here")
-	}
-
-	if err := loadSession(sessionStartupConfig{RevocationsFile: path}); err == nil {
-		t.Fatal("loadSession must report the corrupt revocations file")
-	}
-
-	sessionRevoked.Revoke("a-token-this-process-knows", time.Now().Add(time.Hour))
-	if err := sessionRevoked.SaveRevocations(); !errors.Is(err, session.ErrRevocationsUnquarantined) {
-		t.Fatalf("SaveRevocations err = %v, want ErrRevocationsUnquarantined", err)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if !bytes.Equal(got, corrupt) {
-		t.Errorf("the only copy of the corrupt file was overwritten: %q", got)
-	}
-	if row := checkSessionRevocation(); row.Status != diagFail {
-		t.Errorf("contract row = %q, want %q", row.Status, diagFail)
-	}
-}
-
-// DEFECT GATE. The two refusals must be DISTINGUISHABLE, because their
-// remedies differ — an unread file needs a permission repair, an
-// unquarantined one needs its path freed by hand.
-func TestChaos68_AU38_TheTwoRefusalsAreDistinctButBothFenced(t *testing.T) {
-	if errors.Is(session.ErrRevocationsUnquarantined, session.ErrRevocationsUnread) ||
-		errors.Is(session.ErrRevocationsUnread, session.ErrRevocationsUnquarantined) {
-		t.Error("the two refusal sentinels are not distinguishable, so a caller cannot tell the remedies apart")
-	}
-	for _, err := range []error{session.ErrRevocationsUnread, session.ErrRevocationsUnquarantined} {
-		if !session.IsWriteFenced(err) {
-			t.Errorf("IsWriteFenced(%v) = false; a call site would count this refusal as a failing volume", err)
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Printf" {
+			return true
 		}
-	}
-	if session.IsWriteFenced(os.ErrPermission) {
-		t.Error("IsWriteFenced accepted an ordinary write error, which would hide a real persistence failure")
-	}
-}
-
-// DEFECT GATE. The row must not send the operator after a .corrupt.* copy that
-// the failed quarantine never created.
-func TestChaos68_AU38_FailedQuarantineRowDoesNotPromiseACopy(t *testing.T) {
-	withChaos68Revocations(t)
-	noteRevocationPersistenceConfigured(filepath.Join(t.TempDir(), "revocations.json"))
-	noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
-	noteRevocationQuarantineFailed()
-
-	row := checkSessionRevocation()
-	if row.Status != diagFail {
-		t.Fatalf("status = %q, want %q", row.Status, diagFail)
-	}
-	blob := strings.ToLower(row.Message + " " + row.OperatorAction)
-	if strings.Contains(blob, "restore the quarantined") {
-		t.Errorf("the row offers a quarantined copy that was never created: %q", blob)
-	}
-	if !strings.Contains(blob, "only copy") && !strings.Contains(blob, "still in place") {
-		t.Errorf("the row does not say the damaged file is still at its path: %q", blob)
-	}
-}
-
-// CONTROL. A SUCCESSFUL quarantine must still leave the path writable — the
-// cheapest way to pass the gates above is to fence every corrupt load, which
-// would leave a quarantined node unable to persist anything until a restart.
-func TestChaos68_AU38_SuccessfulQuarantineStillAllowsSaves(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if err := loadSession(sessionStartupConfig{RevocationsFile: path}); err == nil {
-		t.Fatal("loadSession must report the corrupt revocations file")
-	}
-	if _, err := os.Stat(path); err == nil {
-		t.Fatal("precondition: an ordinary path must have been quarantined away")
-	}
-	sessionRevoked.Revoke("post-quarantine", time.Now().Add(time.Hour))
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		t.Fatalf("a successfully quarantined path must stay writable: %v", err)
-	}
-}
-
-// DEFECT GATE. A vanished PARENT falsifies "a revocation applied right now
-// would survive"; a vanished FILE does not. The gauge must tell them apart.
-func TestChaos68_AU39_VanishedParentIsNotDurable(t *testing.T) {
-	withChaos68Revocations(t)
-	parent := filepath.Join(t.TempDir(), "mount")
-	if err := os.Mkdir(parent, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	path := filepath.Join(parent, "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		t.Fatalf("baseline save: %v", err)
-	}
-	if !revocationsAreDurable() {
-		t.Fatalf("precondition: a healthy node must read durable")
-	}
-
-	if err := os.RemoveAll(parent); err != nil {
-		t.Fatalf("remove parent: %v", err)
-	}
-	if revocationsAreDurable() {
-		t.Error("durable is true with the parent directory gone, but no save can recreate the target")
-	}
-	row := checkSessionRevocation()
-	if row.Status != diagFail {
-		t.Errorf("status = %q, want %q with the parent gone", row.Status, diagFail)
-	}
-	blob := strings.ToLower(row.Message + " " + row.OperatorAction)
-	if !strings.Contains(blob, "director") && !strings.Contains(blob, "mount") {
-		t.Errorf("the row does not name the missing directory/mount: %q", blob)
-	}
-	// It must NOT repeat the vanished-FILE remedy, which is false here.
-	if strings.Contains(blob, "next logout or account deletion recreates it") {
-		t.Errorf("the row promises a recreate that cannot happen with no parent: %q", blob)
-	}
-}
-
-// CONTROL. A vanished FILE with an intact parent is still durable — the
-// cheapest way to pass the gate above is to report every ENOENT non-durable,
-// which would contradict AU-35's recorded (and correct) split and page every
-// node whose file is merely waiting to be rewritten.
-func TestChaos68_AU39_VanishedFileWithIntactParentStaysDurable(t *testing.T) {
-	withChaos68Revocations(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		t.Fatalf("baseline save: %v", err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove file: %v", err)
-	}
-	if !revocationsAreDurable() {
-		t.Error("a deleted file with an intact parent is still recreatable by the next save; durable must stay true")
-	}
-	if got := revocationTargetUnusableReason(); got != "" {
-		t.Errorf("an intact directory holding a deleted file reported %q", got)
-	}
-}
-
-// CONTROL. An UNCONFIGURED node must pay nothing and claim nothing.
-func TestChaos68_AU39_UnconfiguredNodeNeedsNoParentCheck(t *testing.T) {
-	withChaos68Revocations(t)
-	session.SetRevocationsPath("")
-	if got := revocationTargetUnusableReason(); got != "" {
-		t.Errorf("an unconfigured node reported %q", got)
-	}
-	if revocationsAreDurable() {
-		t.Error("an unconfigured node must not read durable")
-	}
-}
-
-// A parent path component that is a regular FILE (ENOTDIR) is as definitive as
-// a missing directory: no save can succeed, so the target must not read as
-// durable (Codex P2, PR #1437). os.IsNotExist is false for ENOTDIR.
-func TestChaos68_ParentIsAFileIsNotDurable(t *testing.T) {
-	withChaos68Revocations(t)
-	parent := filepath.Join(t.TempDir(), "mount")
-	if err := os.Mkdir(parent, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	path := filepath.Join(parent, "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		t.Fatalf("baseline save: %v", err)
-	}
-	if err := os.RemoveAll(parent); err != nil {
-		t.Fatalf("remove parent: %v", err)
-	}
-	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
-		t.Fatalf("replace parent with a file: %v", err)
-	}
-	if got := revocationTargetUnusableReason(); got != "not_a_directory" {
-		t.Fatalf("a parent replaced by a regular file (ENOTDIR) reported %q, want %q", got, "not_a_directory")
-	}
-	if revocationsAreDurable() {
-		t.Error("durable is true although every save into a non-directory parent fails")
-	}
-}
-
-// While saves are write-fenced, a missing backing file is expected (the
-// runbook moves the original aside) and cannot be repaired by retrying, so it
-// must not be reported as a `vanished` doubt that drives per-tick logs and
-// refused repairs (CodeRabbit review, PR #1437).
-func TestChaos68_FencedListReportsNoVanishedDoubt(t *testing.T) {
-	withChaos68Revocations(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		t.Fatalf("baseline save: %v", err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove file: %v", err)
-	}
-	if _, vanished := revocationDurabilityDoubt(); !vanished {
-		t.Fatal("control: an unfenced list with its file removed must report the vanished doubt")
-	}
-	sessionRevoked.FenceWritesUnquarantined() // reset by withChaos68Revocations' SwapForTest restore
-	if failing, vanished := revocationDurabilityDoubt(); failing || vanished {
-		t.Errorf("fenced list reported failing=%v vanished=%v; want neither — no save can repair it", failing, vanished)
-	}
-}
-
-// A revocations path replaced by a DIRECTORY passes every stat-based check,
-// but no save can rename over it, so it must not read as durable.
-func TestChaos68_TargetIsADirectoryIsNotDurable(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		t.Fatalf("baseline save: %v", err)
-	}
-	if !revocationsAreDurable() {
-		t.Fatal("precondition: a healthy node must read durable")
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove file: %v", err)
-	}
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatalf("replace with a directory: %v", err)
-	}
-	if revocationsAreDurable() {
-		t.Error("durable is true although the revocations path is a directory every save fails on")
-	}
-	if row := checkSessionRevocation(); row.Status != diagFail {
-		t.Errorf("status = %q, want %q with the path a directory", row.Status, diagFail)
-	}
-}
-
-// DEFECT (AU-46, operator half). A path component replaced by a regular file
-// is definitively non-durable — the durability predicate said so — but the row
-// kept printing the MISSING-parent remedy: restore the mount or directory. The
-// directory is not gone, something is in its way, and the action is to clear
-// it. A bounded classifier is worth nothing if one remedy is printed for every
-// class (AU-36), on the row that classifier was added for.
-func TestChaos68_AU46_OccupiedParentRowNamesItsOwnRemedy(t *testing.T) {
-	withChaos68Revocations(t)
-	parent := filepath.Join(t.TempDir(), "mount")
-	path := filepath.Join(parent, "revocations.json")
-	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
-		t.Fatalf("occupy the parent path: %v", err)
-	}
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-
-	row := checkSessionRevocation()
-	if row.Status != diagFail {
-		t.Fatalf("status = %q, want %q", row.Status, diagFail)
-	}
-	if !strings.Contains(row.Message, "not a directory") {
-		t.Errorf("row does not name the condition: %q", row.Message)
-	}
-	if strings.Contains(row.OperatorAction, "Restore the mount") {
-		t.Errorf("row printed the missing-parent remedy for an occupied path: %q", row.OperatorAction)
-	}
-	if !strings.Contains(row.OperatorAction, "Remove or rename whatever occupies") {
-		t.Errorf("row does not name the remedy for an occupied path: %q", row.OperatorAction)
-	}
-}
-
-// DEFECT (AU-51, operator half). Same shape for the third class: the target
-// itself is a directory, so the thing to remove IS the target, not a mount and
-// not an intruder beside it.
-//
-// The unusable-path branch runs FIRST, ahead of every failure branch, so the
-// row is correct whether or not a save has been attempted — which is the
-// correction Codex's EISDIR finding forced on AU-51's original ordering (see
-// TestChaos68_AU56_*). The gate therefore drives the save and re-reads, which
-// the earlier ordering could not survive.
-func TestChaos68_AU51_DirectoryTargetRowNamesItsOwnRemedy(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatalf("mkdir target: %v", err)
-	}
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-
-	if got := revocationTargetUnusableReason(); got != "target_is_a_directory" {
-		t.Fatalf("reason = %q, want %q", got, "target_is_a_directory")
-	}
-	row := checkSessionRevocation()
-	if !strings.Contains(row.Message, "is a DIRECTORY") {
-		t.Errorf("row does not name the condition: %q", row.Message)
-	}
-	if strings.Contains(row.OperatorAction, "Restore the mount") {
-		t.Errorf("row printed the missing-parent remedy: %q", row.OperatorAction)
-	}
-	if !strings.Contains(row.OperatorAction, "Remove that directory") {
-		t.Errorf("row does not name the remedy for a directory target: %q", row.OperatorAction)
-	}
-
-	// Proof the premise is real rather than assumed — and then the row must
-	// STILL name the directory, because a failed save must not mask the cause.
-	if err := sessionRevoked.SaveRevocations(); err == nil {
-		t.Error("SaveRevocations succeeded against a directory target; the gate's premise is wrong")
-	}
-	if after := checkSessionRevocation(); !strings.Contains(after.Message, "is a DIRECTORY") {
-		t.Errorf("a failed save masked the cause: %q", after.Message)
-	}
-}
-
-// CONTROL. The cheapest way to pass both gates above is to reword every branch
-// alike, which would send an operator whose mount is gone hunting for a file to
-// delete. The missing-parent class must keep its own remedy.
-func TestChaos68_AU46_ControlMissingParentKeepsItsRemedy(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "gone", "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-
-	if got := revocationTargetUnusableReason(); got != "missing" {
-		t.Fatalf("reason = %q, want %q", got, "missing")
-	}
-	row := checkSessionRevocation()
-	if !strings.Contains(row.OperatorAction, "Restore the mount") {
-		t.Errorf("a missing parent lost its own remedy: %q", row.OperatorAction)
-	}
-}
-
-// The runbook's §6c table keys an operator's three different actions on what
-// the diagnostics row SAYS, so those quoted fragments are a lookup contract: a
-// reword of one message orphans the row an operator is reading mid-incident,
-// and no behavioural assertion can see it.
-//
-// This is CHAOS-69's rule — a documented line is a contract, so pin it against
-// the emitter rather than against a regex rewritten in the test — applied to a
-// diagnostics row. It pins only the property that can break: every "Row says"
-// cell must be a substring of the message the emitter really produces for that
-// class. How the table is laid out, and how many classes it shows, stay the
-// author's call.
-func TestChaos68_AU51_RunbookTableMatchesTheRowMessages(t *testing.T) {
-	const doc = "docs/operator/session-revocation.md"
-	raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), doc))
-	if err != nil {
-		t.Fatalf("read %s: %v", doc, err)
-	}
-	lines := strings.Split(string(raw), "\n")
-
-	start := -1
-	for i, l := range lines {
-		if strings.HasPrefix(l, "## 6c.") {
-			start = i
-			break
-		}
-	}
-	if start < 0 {
-		t.Fatalf("%s has no §6c section; if it was renamed, update this gate deliberately", doc)
-	}
-
-	var quoted []string
-	for _, l := range lines[start:] {
-		if strings.HasPrefix(l, "## ") && !strings.HasPrefix(l, "## 6c.") {
-			break
-		}
-		if !strings.HasPrefix(l, "| ") || strings.HasPrefix(l, "| ---") || strings.HasPrefix(l, "| Row says") {
-			continue
-		}
-		// strings.Split ignores the `\|` escape that markdown honours, so a
-		// future cell containing an escaped pipe would be silently cut in half
-		// and this gate would compare a fragment. Refuse loudly instead of
-		// mis-parsing — the same trap that has already produced a malformed
-		// register row in this sweep (AU-49).
-		if strings.Contains(l, "\\|") {
-			t.Fatalf("§6c row contains an escaped pipe, which this gate's splitter cannot read: %q", l)
-		}
-		cells := strings.Split(l, "|")
-		if len(cells) < 3 {
-			continue
-		}
-		if c := strings.TrimSpace(cells[1]); c != "" {
-			quoted = append(quoted, c)
-		}
-	}
-	if len(quoted) == 0 {
-		t.Fatal("found no row-message cells in §6c; the selector no longer matches the table")
-	}
-
-	// What the emitter really produces, for every class it can report.
-	produced := make([]string, 0, 3)
-	for _, reason := range []string{"missing", "not_a_directory", "target_is_a_directory"} {
-		produced = append(produced, revocationTargetUnusableRow(reason, 0, 0).Message)
-	}
-
-	for _, q := range quoted {
-		found := false
-		for _, m := range produced {
-			if strings.Contains(m, q) {
-				found = true
-				break
+		logs++
+		for _, arg := range call.Args {
+			inner, ok := arg.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			if id, ok := inner.Fun.(*ast.Ident); ok && id.Name == "sanitizeLog" {
+				sanitized++
 			}
 		}
-		if !found {
-			t.Errorf("§6c documents a row message the emitter never produces:\n  doc:       %q\n  emitter:   %q", q, produced)
-		}
-	}
-	if len(quoted) != len(produced) {
-		t.Errorf("§6c documents %d classes and the emitter has %d; a class with no row an operator can look up is a class with no remedy", len(quoted), len(produced))
-	}
-}
+		return true
+	})
 
-// CONTROL. The cheapest way to pass every unusable-path gate is to report
-// every existing target unusable, which takes every node non-durable.
-func TestChaos68_AU51_ControlRegularFileTargetStaysDurable(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		t.Fatalf("baseline save: %v", err)
+	// Not vacuous: the coordinator must still log on the failure arm.
+	if logs != 1 {
+		t.Fatalf("found %d Printf calls in persistRevocations, want 1; this wall is "+
+			"no longer watching the statement CodeQL flagged", logs)
 	}
-	if got := revocationTargetUnusableReason(); got != "" {
-		t.Errorf("a regular-file target reported %q", got)
-	}
-	if !revocationsAreDurable() {
-		t.Error("an ordinary writable target reported non-durable")
-	}
-}
-
-// DEFECT (AU-59, Codex P2, PR #1437): the RUNBOOK required a merge and the
-// DIAGNOSTICS ROW still directed a blind restore.
-//
-// AU-57 corrected §6 because a SUCCESSFUL quarantine frees the path and leaves
-// writes unfenced, so the next logout or cluster sync creates a fresh file
-// holding the revocations applied since boot — and "restore the quarantined
-// copy and restart" replaces them, making their cookies valid again. The row
-// is the surface an operator reads FIRST (it is on /api/diagnostics), and it
-// kept the instruction the runbook had just removed.
-//
-// This gate pins the AGREEMENT rather than either wording, because the twin
-// surfaces are what let the defect through twice: fixing one surface does not
-// fix its twin (AU-52's lesson, and AU-57's).
-func TestChaos68_AU59_QuarantineRowAndRunbookAgreeOnMergeNotRestore(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-	noteRevocationLoadDegraded(session.ErrRevocationsCorrupt)
-
-	row := checkSessionRevocation()
-	if row.Status != diagFail {
-		t.Fatalf("status = %q, want %q", row.Status, diagFail)
-	}
-	action := row.OperatorAction
-
-	// The row must require the merge and say why a plain restore is unsafe.
-	for _, want := range []string{"MERGE", "later expiry", "NOT fenced"} {
-		if !strings.Contains(action, want) {
-			t.Errorf("row does not carry %q:\n  %q", want, action)
-		}
-	}
-	// And it must not still be telling the operator to restore over the file.
-	if strings.Contains(action, "Restore the quarantined") {
-		t.Errorf("row still directs a blind restore: %q", action)
-	}
-
-	// The runbook's §6 must be making the same demand, so the two cannot drift
-	// apart again without one of them failing here.
-	doc, err := os.ReadFile(filepath.Join(pkgSourceDir(), "docs", "operator", "session-revocation.md"))
-	if err != nil {
-		t.Fatalf("read runbook: %v", err)
-	}
-	// Whitespace-normalised: the contract is the requirement, not the line
-	// wrapping, and the runbook wraps "keep the LATER\n   expiry" across lines.
-	// Matching raw prose would make this gate fail on a reflow, which is how a
-	// doc gate earns a mute.
-	body := strings.ToLower(strings.Join(strings.Fields(string(doc)), " "))
-	for _, want := range []string{"not fenced", "merge", "later expiry"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("runbook no longer requires %q; the row and the runbook have drifted", want)
-		}
-	}
-}
-
-// DEFECT (AU-56, Codex P2, PR #1437): a DEFINITIVE path fault was MASKED by the
-// generic failure branches that it causes.
-//
-// With `--revocations-file` naming a directory at boot, os.ReadFile returns
-// EISDIR. That is not corruption, so the load records a plain LoadDegraded and
-// the read-failure row told the operator to check permissions and the mount and
-// restart — which reproduces the fault exactly — while also claiming the file
-// "was left in place" and its "contents may still be intact", of a path that
-// holds no contents. Writes are fenced in that state, so the node persists
-// nothing, forever, behind a remedy that cannot work.
-//
-// AU-51's original ordering put the unusable-path branch AFTER the failure
-// branches on the reasoning that a save that really failed is better evidence
-// than a predictive stat. That is true of evidence of FAILURE and false of
-// DIAGNOSIS: a failed write says only THAT something is wrong, the stat says
-// WHY, and the operator acts on the why. The branch is now FIRST.
-func TestChaos68_AU56_DefinitivePathFaultOutranksTheFailuresItCauses(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		setup func(t *testing.T) string // returns the configured path
-		want  string
-	}{
-		{"target is a directory", func(t *testing.T) string {
-			path := filepath.Join(t.TempDir(), "revocations.json")
-			if err := os.Mkdir(path, 0o700); err != nil {
-				t.Fatalf("mkdir target: %v", err)
-			}
-			return path
-		}, "is a DIRECTORY"},
-		{"parent is a file", func(t *testing.T) string {
-			parent := filepath.Join(t.TempDir(), "mount")
-			if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
-				t.Fatalf("occupy the parent: %v", err)
-			}
-			return filepath.Join(parent, "revocations.json")
-		}, "not a directory"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			withChaos68Revocations(t)
-			path := tc.setup(t)
-			session.SetRevocationsPath(path)
-
-			// Exactly what session_startup.go does at boot.
-			if err := sessionRevoked.LoadRevocations(); err != nil {
-				noteRevocationLoadDegraded(err)
-			}
-			noteRevocationPersistenceConfigured(path)
-
-			row := checkSessionRevocation()
-			if !strings.Contains(row.Message, tc.want) {
-				t.Errorf("the load failure masked the cause:\n  message: %q\n  want to contain: %q", row.Message, tc.want)
-			}
-			// The masked remedies, each of which reproduces the fault.
-			for _, wrong := range []string{
-				"Check the permissions and the mount",
-				"Check free space",
-				"contents may still be intact",
-			} {
-				if strings.Contains(row.OperatorAction, wrong) || strings.Contains(row.Message, wrong) {
-					t.Errorf("row carries a remedy that reproduces the fault (%q): %q / %q", wrong, row.Message, row.OperatorAction)
-				}
-			}
-		})
-	}
-}
-
-// CONTROL. A load failure with a perfectly usable path must KEEP the
-// permissions/mount remedy. The cheapest way to pass the gate above is to stop
-// printing that remedy at all, which would delete the recovery action for the
-// ordinary unreadable-file case (§6).
-func TestChaos68_AU56_ControlUsablePathKeepsTheLoadRemedy(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(path)
-	if err := sessionRevoked.SaveRevocations(); err != nil {
-		t.Fatalf("baseline save: %v", err)
-	}
-	noteRevocationPersistenceConfigured(path)
-	noteRevocationLoadDegraded(errors.New("open revocations.json: permission denied"))
-
-	row := checkSessionRevocation()
-	if !strings.Contains(row.OperatorAction, "Check the permissions and the mount") {
-		t.Errorf("an ordinary unreadable file lost its own remedy: %q", row.OperatorAction)
-	}
-}
-
-// DEFECT (AU-52, Codex P2, PR #1437). The unread-fence row reported a
-// CUMULATIVE count of refused save ATTEMPTS as the set held in memory.
-//
-// AU-42 fixed exactly this for the persist-FAILURE counter and the refused
-// counter beside it kept the defect: a fenced revocation that later expires is
-// pruned from Count but the counter never decreases, and re-revoking the same
-// subject increments it again — so the number overstated the re-apply job and
-// could name revocations that are no longer in force.
-func TestChaos68_AU52_UnreadRowScopesTheReapplyJobToLiveCounts(t *testing.T) {
-	withChaos68Revocations(t)
-	path := filepath.Join(t.TempDir(), "revocations.json")
-	session.SetRevocationsPath(path)
-	noteRevocationPersistenceConfigured(path)
-	noteRevocationLoadDegraded(errors.New("open revocations.json: permission denied"))
-
-	// Three refused attempts, but only one revocation actually in force.
-	sessionRevoked.Revoke("tok-live", time.Now().Add(time.Hour))
-	for i := 0; i < 3; i++ {
-		noteRevocationPersistRefused(1)
-	}
-	row := checkSessionRevocation()
-	if !strings.Contains(row.Message, "1 token") {
-		t.Errorf("row does not scope the re-apply job to the live count: %q", row.Message)
-	}
-	if strings.Contains(row.Message, "3 applied since") {
-		t.Errorf("row still presents cumulative attempts as the live set: %q", row.Message)
+	if sanitized == 0 {
+		t.Error("persistRevocations logs its error without sanitizeLog: a revocation " +
+			"token supplied over gossip can reach the log through the marshal error " +
+			"and forge log lines (CWE-117)")
 	}
 }

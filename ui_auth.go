@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KidCarmi/Culvert/internal/session"
 	"github.com/KidCarmi/Culvert/internal/totp"
 	"github.com/crewjam/saml"
 )
@@ -422,19 +421,13 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 		// failure on this path is a security-control failure, so it is counted
 		// and surfaced rather than living in one log line.
 		sessionRevoked.RevokeUser(username)
-		if err := sessionRevoked.SaveRevocations(); err != nil {
+		if persistRevocations() == persistFenced {
 			// See session.go: a refusal (the file was not read this boot) is
 			// counted, not logged per attempt and never treated as a write
 			// failure — the remedy is the permission repair the load-degraded
-			// row names, not free space (AU-37).
-			if session.IsWriteFenced(err) {
-				noteRevocationPersistRefused(1)
-			} else {
-				// CWE-117: username was already sanitised and `err` was not —
-				// the SEC-SOCKS5-LOG-1 shape exactly, where a sanitised argument
-				// sits beside a raw one that can re-emit the same bytes.
-				logger.Printf("Session: failed to persist user revocation for %q: %q", sanitizeLog(username), sanitizeLog(err.Error()))
-			}
+			// row names, not free space (AU-37). A real failure is logged by
+			// the coordinator and marks the retry owed.
+			noteRevocationPersistRefused(1)
 		}
 		auditEvent(r, "auth.users.delete", username, "")
 		w.WriteHeader(http.StatusNoContent)

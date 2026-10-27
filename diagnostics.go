@@ -188,7 +188,6 @@ func buildOperatorContract() OperatorContract {
 		checkAuditPersistence(),
 		roster.adminRow(),
 		checkCategoryFeedDB(),
-		checkSessionRevocation(),
 		checkThreatFeed(),
 		checkRequestHistory(),
 		checkBandwidthQoSEnforcement(),
@@ -203,6 +202,7 @@ func buildOperatorContract() OperatorContract {
 		checkIdentityBackend(),
 		checkCredentialVerification(),
 		checkInteractiveLoginState(),
+		checkSessionRevocation(),
 		checkAlertWebhookSigning(),
 		checkUpstreamCredentials(),
 		checkOIDCJWKSTrust(),
@@ -230,6 +230,9 @@ func buildOperatorContract() OperatorContract {
 	// that has never activated and is failing). Contributes nothing when the feed
 	// is healthy, disabled, or serving the embedded baseline without failures.
 	checks = append(checks, checkSaaSFeed()...)
+	// OCSP enabled but not consulted on inspected HTTPS origin handshakes.
+	// Contributes nothing while revocation checking is off.
+	checks = append(checks, checkOCSPCoverage()...)
 	// PAC profiles last served with compile warnings. Contributes nothing when
 	// every served profile compiled cleanly.
 	checks = append(checks, checkPACDegraded()...)
