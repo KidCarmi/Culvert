@@ -390,8 +390,7 @@ func apiCountryTraffic(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(countryTraffic.Top(20))
+	jsonOK(w, countryTraffic.Top(20))
 }
 
 // sessionRevokeReasons is the fixed, bounded label set of the per-reason
