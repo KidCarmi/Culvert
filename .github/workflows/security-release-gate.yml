@@ -127,7 +127,7 @@ jobs:
       - name: Upload SARIF to GitHub Security tab
         if: always()
         continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
         with:
           sarif_file: gosec-results.sarif
           category: gosec
@@ -239,7 +239,7 @@ jobs:
       - name: Upload Trivy SARIF
         if: always()
         continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -296,7 +296,7 @@ jobs:
       - name: Upload Trivy image SARIF
         if: always()
         continue-on-error: true   # requires GitHub Advanced Security; skip gracefully if unavailable
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
         with:
           sarif_file: trivy-image.sarif
           category: trivy-image
@@ -371,7 +371,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Generate SBOM with Syft
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path: "."
           format: "cyclonedx-json"
@@ -534,7 +534,7 @@ jobs:
       - name: Upload Hadolint SARIF
         if: always()
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v3
         with:
           sarif_file: hadolint.sarif
           category: hadolint

@@ -225,6 +225,13 @@ func apiStats(w http.ResponseWriter, r *http.Request) {
 		// without this count the probing is invisible to an operator who has
 		// no metrics scraper or shell access to the log.
 		"tracingHeaderRejected": requestIDRejected.Load() + traceparentRejected.Load(),
+		// CHAOS-92: client-supplied request paths clamped before being retained
+		// in a log line, a block page or the request-log URI. Same reason as the
+		// sibling above and not the CHAOS-69 one: the request is never refused,
+		// so the caller sees nothing and neither does an operator without a
+		// metrics scraper or shell access to the log. Enforcement still sees the
+		// whole path; only the retained copy is bounded.
+		"retainedPathTruncated": retainedPathTruncated.Load(),
 	})
 }
 

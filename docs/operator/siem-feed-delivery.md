@@ -527,4 +527,4 @@ its `globalSyslogHandle` / `syslogHandle` / `setSyslogHandle` names.
 - `roadmap/CHAOS-ENGINEERING-REVIEW.md` §13 (ST-8, local audit write loss) and
   §30 (CHAOS-61, DP→CP audit push drops) — the other two members of this
   compliance-record family
-- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53 — the CHAOS-81 write-up
+- `roadmap/CHAOS-ENGINEERING-REVIEW.md` §56 — the CHAOS-81 write-up

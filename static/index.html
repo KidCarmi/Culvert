@@ -2569,6 +2569,10 @@ Firefox (all platforms):
               <span class="info-key">Tracing Headers Replaced</span>
               <span class="info-val" id="s-tracing-header-rejected">-</span>
             </div>
+            <div class="info-item" title="Client-supplied request paths that were clamped before Culvert retained a copy of them - in a log line, in a block page, or in the request-log URI. The request itself is never refused and policy enforcement always sees the whole path; only the retained copy is bounded, and it carries a marker naming the original length. Sustained growth means a source is sending very long paths to make Culvert write far more than it received (log-write and response-body amplification) through the proxy data plane.">
+              <span class="info-key">Request Paths Clamped</span>
+              <span class="info-val" id="s-retained-path-truncated">-</span>
+            </div>
           </div>
         </div>
 
@@ -8597,6 +8601,16 @@ async function fetchStats() {
       const thr = s.tracingHeaderRejected || 0;
       sthr.textContent = thr > 0 ? fmt(thr) + ' replaced' : 'None';
       sthr.style.color = thr > 0 ? 'var(--warn,#b8860b)' : '';
+    }
+    // Clamped request paths (CHAOS-92): same invisibility as the row above —
+    // the request succeeds and enforcement sees the whole path, so a source
+    // probing for log-write and response-body amplification leaves no other
+    // trace an admin would notice without a metrics scraper.
+    const srpt = document.getElementById('s-retained-path-truncated');
+    if (srpt) {
+      const rpt = s.retainedPathTruncated || 0;
+      srpt.textContent = rpt > 0 ? fmt(rpt) + ' clamped' : 'None';
+      srpt.style.color = rpt > 0 ? 'var(--warn,#b8860b)' : '';
     }
     // Oversized-username login attempts (CHAOS-63): each one is refused with a
     // plain 400 and otherwise leaves no trace an admin would see without a
