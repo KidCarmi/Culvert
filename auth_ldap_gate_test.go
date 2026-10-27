@@ -213,9 +213,7 @@ func TestLDAP_AccountRejectionIsNotCached(t *testing.T) {
 	}
 	a.noteVerifyError(fmt.Errorf("%w: %w", errLDAPAccountRejected, ldapErr(ldap.LDAPResultConstraintViolation)))
 
-	a.mu.Lock()
-	cached := len(a.cache)
-	a.mu.Unlock()
+	cached := a.cache.len()
 	if cached != 0 {
 		t.Errorf("account rejection poisoned the auth cache with %d entr(ies)", cached)
 	}

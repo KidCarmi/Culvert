@@ -9,13 +9,129 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the upstream mTLS client certificate failed to
+  load, has expired, or expires within 30 days.** That state was visible only in
+  the OCSP panel API; the one-page report read as healthy while upstream servers
+  requiring mutual TLS rejected the node. A new `upstream_mtls_client_cert` WARN
+  row (additive, report-only, no row when unconfigured or healthy) carries no
+  file path or error text. No certificate-loading behavior changes.
+
+- **The on-demand backup audit action stays `backup.trigger`; `backup.create`
+  is recorded as its alias (T-71).** A terminology review proposed renaming it
+  to match the `<noun>.create` convention, but `backup.trigger` has shipped in
+  every release since v1.0.254 and SIEM rules and saved audit searches match it
+  verbatim, so it is kept as the stable identifier on every surface (audit trail,
+  SIEM/syslog JSON, `/api/audit` JSON and CSV export, OpenAPI
+  `x-culvert-audit-event`). Each backup still records exactly one entry, so no
+  per-action count or alert double-counts. Deprecation note: `.trigger` is
+  deprecated for **new** audit actions, which use `<noun>.create`;
+  `backup.trigger` itself is grandfathered and will not be renamed. No action is
+  needed by operators. Gate: `backup_audit_action_compat_test.go`; glossary:
+  `docs/design/PRODUCT-TERMINOLOGY.md` ("Backup").
+
 - **Diagnostics now warns when OCSP checking is enabled but does not cover
   inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
   on the OCSP panel and in a one-time log line; the one-page diagnostics report
   read as healthy. A new `ocsp_coverage` WARN row (additive, report-only, no row
   while OCSP is off) names the unchecked paths. No handshake behavior changes.
 
+### Deprecated
+
+- **Session-revocation refusal metrics renamed; the released names stay as
+  deprecated aliases until v1.1.0 (T-70).** `culvert_session_revoke_refused_total`
+  (unlabeled) and `culvert_session_revoke_rejected_total{reason}` shipped in
+  v1.0.340 and used two near-synonyms for one plane with different scopes. The
+  canonical names are now `culvert_session_revoke_unverifiable_total` (logout
+  cookies this appliance could not verify) and
+  `culvert_session_revoke_refusals_total{reason}` (every refused entry, same six
+  reasons). Both released names keep emitting with the same name, labels and
+  value from the same snapshot, so existing dashboards and alerts are
+  unaffected. **They are removed in v1.1.0**; move queries to the new names
+  before that upgrade. `culvert_session_revoke_refused_total` is never
+  reassigned to another meaning. Gate: `session_revoke_metric_alias_test.go`.
+  Runbook: `docs/operator/session-revocation-plane.md`.
+
 ### Security
+
+- **The scan sidecar reported a truncated read as `clean: true`, so content past
+  its own window was admitted with an affirmative clean verdict (CHAOS-101).**
+  `scan_svc.go` `handleScan` read `io.LimitReader(body, maxBytes+1)` — the
+  classic overflow probe — and then never compared `len(data)` against
+  `maxBytes`, so it paid for the probe byte and discarded what it proved. The
+  reply then carried the PREFIX's verdict as the whole object's, and
+  `secscan.ScanResponse` has no truncation field to say otherwise.
+
+  No code bug is needed to reach this, only configuration: each process derives
+  `maxScanBufferBytes()` from its OWN `security.max_scan_mb`, and nothing
+  reconciles the caller's window with the sidecar's — which is precisely the
+  topology the handler's own doc comment recommends ("multiple proxy instances
+  sharing one scanner"). A fleet of 20 MiB proxies in front of a sidecar left at
+  the 5 MiB default had scanning silently off for every byte past 5 MiB, with no
+  counter, no log line and no alert anywhere, and the caller's own overflow
+  signal correctly did not fire because the body fit the CALLER's window. The
+  in-process path has had a signal for this exact event since Finding 4.2
+  (`logScanLimitExceeded`: counter, one log line, `scan_skipped` alert); the
+  process-isolated deployment recommended as the *remedy* for the local path's
+  failure modes was the one without it.
+
+  `handleScan` now uses the probe byte and refuses with 413 rather than
+  answering for a prefix. The probe byte is still scanned, so a signature that
+  ends on it blocks exactly as before the fix rather than drawing a fail-open
+  413. It also publishes `oversize_refused` and
+  `scan_window_bytes` on `/health` — it is the only process that knows its
+  window, and an operator needs it to compare against the caller's.
+
+  **Ordering is the correctness argument.** Refusing on size FIRST — the obvious
+  shape — turns a body whose malware sits inside the window into a 413, which
+  the client classifies as a size limit and therefore forwards fail-open: the
+  one case where the sidecar holds a real block verdict is the case the refusal
+  would throw away, so the "safe" check would have admitted content the unfixed
+  code blocked. The verdict therefore wins and truncation is not reported at all
+  on a block, the same asymmetry `readScanPrefix` documents for the local path.
+  A negative control pins it, and failed against the first draft of this fix.
+
+  Client side, 413 is classified as the size limit it is and charges the LOCAL
+  path's vocabulary — `statScanSkipped`, hence `culvert_scan_skipped_total`, and
+  the `scan_skipped` alert with `Source: "size_limit"` — for the same reason
+  `remoteScanRefused` reuses the timeout vocabulary: it is the same decision, so
+  one phenomenon keeps one counter and one alert class whichever window clipped
+  the object, and an operator already alerting on `scan_skipped` needs no second
+  name. A load balancer in front of the sidecar enforcing its own smaller body
+  limit returns 413 for the same reason, so the classification is right there
+  too; every other status keeps its fault classification.
+
+  Operators running a mismatched fleet will see NEW `scan_skipped` volume on
+  upgrade. That volume is the defect becoming visible, not a regression; the
+  remedy is named in the log line and measurable from `/health`. The posture for
+  oversize bodies is the local path's, unchanged: fail-open, counted and
+  alerted. Refusing the object outright is the safer answer and a real option,
+  but it is a posture change for large downloads that no operator asked for, and
+  is left to the owner as the open half of CHAOS-101.
+- **The Basic-auth SSE re-check no longer counts as a login attempt
+  (SEC-BASICAUTH-5, RISK-032).** A live dashboard stream re-checks its HTTP
+  Basic credential about once a minute, through the same chokepoint as a real
+  submission, so each re-check drew on the per-IP Basic failure budget and was
+  recorded against the two-tier lockout. Streams still carrying a
+  rotated-away password locked their administrator out of the new, correct
+  password, and a legitimate stream on a shared egress reset a co-located
+  attacker's failure count once per interval. `checkUIBasicAuth` is now the
+  single `cfg.VerifyUIUser` call site behind `verifyUIBasicAuth` (submission,
+  unchanged: atomic `Reserve`/`Refund` budget, lockout, per-attempt
+  `auth.basic.fail` audit) and `revalidateUIBasicAuth` (re-check: every refusal
+  still applies, so a rotated, deleted, TOTP-enrolled or locked credential still
+  ends the stream, but nothing is reserved or recorded). Responses are
+  unchanged: refused Basic requests get `401`, `/api/auth/status` answers
+  `200 {"loggedIn":false}`, and only `POST /api/auth/login` returns `429`.
+- **The admin public allowlist no longer pre-authorises `/api/auth/totp*`
+  (SEC-PUBLICPATH-1, RISK-033).** The prefix matched no registered route, so
+  the first TOTP enrol/disable handler would have been served without
+  authentication. Removed (no behaviour change today), and every allowlist
+  entry must now match a registered route
+  (`TestPublicAllowlist_EveryEntryMatchesARegisteredRoute`).
+- **New `culvert_login_limiter_entries` gauge** reports the live size of the
+  admin credential lockout state, whose keys an unauthenticated caller chooses.
+  New runbook `docs/operator/admin-api-credential-lockout.md`: clear a stuck
+  lock with the admin-only `GET`/`POST /api/auth/lockouts` instead of a restart.
 
 - **Diagnostics reported "session revocation healthy … no drops" while a
   legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
@@ -259,6 +375,55 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   intervened, keyed on the delivery itself rather than on a timestamp
   comparison so it holds if the wall clock steps backwards.
 
+- **The alert webhook retry queue lost its unattempted entries on an ordinary
+  restart, and lost them silently (CHAOS-93 RT-1).** A retry pass moved every due
+  entry out of the queue, persisted the truncated queue, and only then delivered
+  them one at a time at up to 5s each — so for the length of that pass the
+  not-yet-attempted alerts existed only in memory, absent from both the queue and
+  the file. A `SIGTERM` on a config reload, the lifecycle context cancelled at
+  shutdown while the pass ran on, an OOM or a node reboot therefore discarded all
+  of them, and neither `retryExhaustedTotal` nor `retryDroppedTotal` nor the
+  delivery history nor the log recorded it: the queue depth simply dropped, which
+  reads as *drained* rather than *discarded*. Against a blackholing webhook the
+  window was the whole pass — up to 500 × 5s ≈ 42 minutes — and the loss up to
+  499 alerts, security events among them. An entry now stays in the durable queue
+  across its own attempt and leaves only once that attempt has resolved; a crash
+  mid-attempt leaves it queued, retried after a 60s lease with its attempt count
+  intact, because an attempt that did not complete is not charged.
+  A delivery interrupted by shutdown is not charged as an attempt: a cancelled
+  POST returns the same failure a badly-answering webhook does, so without that
+  distinction a shutdown during an entry's last attempt removed the alert and
+  counted it "exhausted after 3 attempts" though the webhook was never reached.
+- **A retry pass could not be interrupted or bounded (CHAOS-93 RT-2).** The pass
+  took no context and each delivery built its own from `context.Background()`, so
+  the loop only checked for shutdown *between* passes and a full queue against a
+  blackholing webhook occupied it for ~42 minutes. The pass is now cancellable
+  and bounded; the bound caps a pass's length, not recovery, since the next tick
+  resumes from the durable queue. Delivery throughput is unchanged.
+- **Every webhook re-delivery was recorded as attempt 1 (CHAOS-93 RT-5).** The
+  retry pass delivered through the first-attempt entry point, so the delivery
+  history the admin surface renders could not distinguish a third attempt from a
+  first. It now records the entry's real attempt number.
+- **A release dispatch's Apply retries ran back to back with no delay
+  (CHAOS-93 RT-3).** The three attempts existed for one fault — a maintenance
+  agent that is briefly unreachable, nearly always because it is restarting — and
+  that fault refuses the connection in microseconds, so the whole retry budget
+  burned in well under a millisecond and the dispatch terminated
+  `FAILED_NEEDS_ATTN`, needing a manual re-dispatch, for an agent that was
+  serving again a second later. The attempts are now spaced by bounded
+  exponential backoff (2s then 4s), interruptible so a shutdown does not sit out
+  the backoff of a doomed dispatch, and a cancellation is reported as such rather
+  than as an agent fault.
+- **The threat-feed and category-feed rounds ignored the scheduler's shutdown
+  context (CHAOS-93 RT-4).** Both declared a context-taking round function and
+  dropped the parameter, fetching on `context.Background()` instead, so a stalled
+  feed origin could not be interrupted by `SIGTERM` and the round ran on for up
+  to its 60s HTTP timeout past the point where the process was told to stop. The
+  UT1 category round then went on to issue a 50+ MB bulk write into a store that
+  shutdown was closing; it now checks for cancellation immediately before that
+  write, is charged as a failed round so the health plane sees it, and leaves the
+  last-good category data untouched. The admin "sync now" action deliberately
+  still runs to completion rather than being bound to the request.
 - **`README.md` documented the opposite of CDR's fail-closed guarantee.** The
   `-cdr-fail-mode` row still said that when no Sluice instance is available at
   all "CDR is skipped and the file passes through in either mode" — the exact
@@ -801,6 +966,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   not the class.
 
 ### Performance
+
+- **The Stage-2 policy scan no longer streams a 568-byte rule definition to
+  reject a destination.** Every proxied request on every protocol runs
+  `PolicyStore.Evaluate`, a priority-ordered first-match scan over the whole
+  rulebase, and that scan was the largest Culvert-owned CPU cost on the request
+  path (7.4% of an end-to-end HTTP forward at 500 rules, where the rest is
+  kernel and `net/http`). Its cost was the WORKING SET, not the comparisons:
+  `PolicyRule` is 568 bytes spread over nine cache lines, the scan reads fields
+  on five or six of them per rule, and at 10 000 rules the ~5.7 MB of
+  definitions leaves L2 — which is why the engine scaled superlinearly,
+  7.6 ns/rule at 1 000 rising to 29.3 ns/rule at 10 000. `sortLocked`'s own note
+  diagnosed exactly this ("shrinking what the scan streams per rule is the only
+  thing that can address it") and declined to attempt it. This is that change.
+
+  A rule's destination FQDN is the first thing `matchDestNorm` tests and the
+  most common access-rule scope in a gateway rulebase, so it is the
+  discriminator worth packing. Publication now also emits a **16-byte row per
+  rule** in one contiguous array — four rows per cache line, hardware
+  prefetchable — holding the two facts a mismatch is provable from without
+  touching the definition: the shortest host that can match, and the pattern's
+  trailing bytes packed into one word. `hostutil.MatchFQDNNorm` is
+  suffix-anchored in every branch, so a host that is too short, or whose packed
+  trailing bytes differ, cannot match.
+
+  Measured with benchstat over 10 runs per side, back to back on one host
+  (go1.27.3, 4-core Xeon @2.10GHz):
+
+  | benchmark | before | after | delta |
+  | --- | --- | --- | --- |
+  | `PolicyEvaluate_NoMatch/rules=1000` | 10.06 µs | 1.20 µs | **−88.0%** |
+  | `PolicyEvaluate_NoMatch/rules=10000` | 233.9 µs | 12.96 µs | **−94.5%** |
+  | `PolicyEvaluate_MatchLast/rules=10001` | 236.8 µs | 12.76 µs | **−94.6%** |
+  | `PolicyEvaluate_CIDRRules/rules=1000` | 15.51 µs | 1.24 µs | −92.0% |
+  | `PolicyEvaluate_ScheduledRules/rules=1000` | 24.19 µs | 1.23 µs | −94.9% |
+  | `PerfQual_Evaluate/rules=500/nomatch` | 5.08 µs | 638 ns | −87.4% |
+
+  The superlinear knee is gone with it: 29.3 ns/rule at 10 000 rules becomes
+  1.3 ns/rule. Allocations on the scan are unchanged (0 per evaluation on a
+  miss, 1 for the returned `PolicyMatch` on a hit).
+
+  **The index is one-directional and never authoritative.** A row can only make
+  the scan reject a rule the full predicate would also have rejected; nothing is
+  admitted, matched or skipped on a row's word, and every rule that survives the
+  prefilter runs the complete unmodified check sequence. It is paired with its
+  revision by SLICE IDENTITY, so an index published for another revision is
+  discarded rather than applied, and a revision that never reached publication
+  simply gets no prefilter and the pre-change scan. `TestPolicyScanIndex_`
+  `DifferentialOracle` drives the real evaluator twice over randomized
+  rulebases — with the index and without — and requires the selected rule to be
+  identical; `TestPolicyScanIndex_NegativeControl` proves that oracle can fail
+  by feeding it an over-eager row. The Policy Tester's trace path keeps the
+  prefilter off, because it must reach the real predicate behind every reported
+  skip reason.
+
+  **Costs, measured rather than assumed.** Publication grows by one array and
+  one struct — +2 allocations and +2.4% bytes per revision, ~+3–5% of
+  `sortLocked`'s wall time — which matters because publication holds the writer
+  lock that evaluation's RLock waits on. A rulebase no row can prefilter (
+  category-, country- or source-only) publishes **no** index at all and stays on
+  exactly the pre-change path; charging it was measured at +26% on
+  `PolicyEvaluate_CategoryRules/rules=200` and is the reason that case is
+  special-cased rather than tolerated. Two further shapes of the change were
+  measured and backed out for the same reason — a per-width host-tail
+  `[9]uint64` carried in the per-scan struct (+22% on the same benchmark,
+  because the inlined comparison takes its address and the 72 bytes displace the
+  scan's other per-rule state), and folding the scan's two eligibility checks
+  into a helper returning the skip reason (+26%, ~9 ns/rule, because it
+  materializes a string header per rule). Both rejections are recorded beside
+  the code. Rules scoped only by category, category group or country get no
+  prefilter by design; their predicates are not suffix-anchored and are already
+  amortized to O(1) per rule by their own per-scan scratch.
 
 - **A policy publication now allocates one array per revision instead of one
   object per rule.** `sortLocked` cloned every definition with its own
@@ -2699,6 +2935,93 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from the environment, and a responder on a private address is refused. An
   egress-restricted deployment must allow the responder hosts named in its
   upstreams' certificates. See `docs/operator/ocsp-revocation-checking.md`.
+- A flood of bogus credentials from a single unauthenticated client could
+  evict another client's cached authentication verdict, and during an identity
+  backend outage that turned a cache hit into a denial (CHAOS-76, register rows
+  AU-67/AU-68). All three identity-backend result caches on the proxy
+  credential path — the LDAP directory bind, the legacy RFC 7662 introspection
+  backend and the IdP-registry introspection provider — evicted "an arbitrary
+  entry" at their 5,000-entry cap: a Go map range that stops at the first key,
+  so whichever entry Go's randomised map iteration yielded — **live or already
+  expired**, and in either case unrelated to age, ownership or liveness. That
+  is the same defect CHAOS-57 closed in the local credential cache, on three
+  caches it was never ported to.
+
+  The flood costs nothing to mount. The proxy credential path hands whatever
+  username, password or bearer token the client supplied to the configured
+  backend, and an authoritative denial is cached deliberately — RFC 7662 §2.2
+  answers an unknown or expired token with `200 {"active":false}`, and a
+  directory that answers "no such user" is authoritative — because not caching
+  those would make every wrong credential a fresh round trip. So each bogus
+  credential writes an entry, so a sustained flood displaces the honest
+  verdicts: the gate measures a 3x-cap flood reliably removing a specific
+  honest entry, which is the evidence this rests on. (As a first-order model,
+  if each insertion past the cap took a uniform draw the survival probability
+  would be `(1 - 1/N)^k`, about 37% at one cap-worth and 5% at three; Go's map
+  iteration is randomised but gives no uniformity guarantee, so treat those
+  figures as an illustration of the shape, not a measurement.) Fifteen
+  thousand requests bearing nothing but bogus credentials is the whole
+  cost. Nothing
+  reclaimed an expired entry either — a lookup reported a miss and left it in
+  the map — so the steady state under a flood was a cache full of dead
+  verdicts while eviction destroyed the few live ones.
+
+  Displacement alone costs the victim a full directory bind or introspection
+  round trip on every subsequent request, which lands the attacker's
+  amplification on legitimate traffic and on the customer's own IdP. The sharper
+  consequence is the interaction with the unreachable-backend cooldown: when the
+  backend is down the gate denies **without** a round trip, and a client whose
+  verdict is cached is served from the cache and never reaches it. Evicting that
+  entry means the next request falls through and is denied, for the whole
+  cooldown, for a credential that was valid a moment earlier — inverting the
+  cache's purpose for exactly the users it exists to serve. Authentication
+  remained fail-closed throughout and no credential was ever wrongly accepted;
+  what an anonymous client gained was the ability to make authentication fail
+  for other people.
+
+  The three caches now share one policy, the one `internal/authstate` defines
+  and CHAOS-57 put in the local cache, in a new internal owner,
+  `internal/identcache` (ADR-0041). The cap and the eviction sink are injected
+  by package main, which keeps only a binding and the integration gates. The
+  victim ordering moved with it as `identcache.BetterVictim`, and `store.go`'s
+  `betterAuthCacheVictim` now delegates to it rather than keeping a copy. The
+  tree still holds two definitions of that ordering, that one and the
+  identical `better` in `internal/authstate`; consolidating the engines is
+  recorded as follow-up, not done here. Entries are attributed to a client
+  fairness key and eviction takes the oldest entry of the client holding the
+  most, so a flooding source evicts itself and a client holding one entry cannot
+  be displaced until every other client is down to one too. An expired entry is
+  always the better victim, and a lookup now reclaims one in place. Work per
+  insertion stays proportional to the number of active clients rather than to
+  the cache size, which is what keeps the fix clear of the separate
+  full-scan-under-the-mutex defect CHAOS-57 also closed. The fairness key was
+  already computed on both data-plane paths and was being discarded at every
+  provider dispatch point — the two in `store.go` and the IdP-registry loop in
+  `proxy.go`, which is the one tried first in a registry deployment. All three
+  now go through a single helper that prefers the client-attributed form, so a
+  backend keeping no result cache (SAML, which is browser-mediated) is
+  unaffected and a new call site inherits the behaviour instead of re-deciding
+  it. Displacement is counted per backend and exposed as
+  `culvert_identity_cache_evictions_total`, accumulated at the point of
+  eviction into a process-owned total so it covers both the legacy provider and
+  the registry providers and cannot fall when an operator edits an IdP profile
+  (editing one has the registry compile a fresh provider, and a Prometheus
+  counter that decreases reads as a restart). It sits beside the existing
+  `culvert_auth_cache_evictions_total` for the local cache.
+
+  One detail of the generalisation had to be unpicked again: a positive
+  introspection verdict is bounded by the token's own declared `exp` rather
+  than by the backend's configured TTL, and both original stores held that
+  deadline exactly because they recorded it against the same clock sample the
+  clamp had measured. Expressing it as a duration for the shared store
+  restarted that clock on insertion, so an entry outlived its token by whatever
+  elapsed in between (measured at 1.1 us and 553 ns for the two backends). The
+  store now takes an absolute deadline where the caller has one and keeps the
+  duration form only where the bound is a configured TTL. Gates: seventeen
+  (nine of them now in `internal/identcache`), with every gate that pins a
+  defect verified failing against the behaviour that defect describes, plus a
+  root gate on the binding's cap and sink and the package's boundary and
+  ownership tests.
 
 - Two security-regression gates added for the memoized IDNA slow path
   (`internal/hostutil/idnamemo.go`), each run against **both** retention tiers
@@ -2767,6 +3090,67 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   round trip. Only deployments using category groups in policy rules are
   affected; no configuration, API or metric surface changes.
 
+- An enabled SAML or OIDC identity provider no longer depends on being able to
+  reach the identity provider in order to EXIST. Compiling a profile performs a
+  synchronous outbound fetch — SAML metadata, OIDC discovery — and it had no
+  cache, no fallback and no retry, on three paths: appliance boot, the admin
+  save, and every Control Plane → Data Plane config sync. Three consequences.
+  An IdP that was briefly unreachable at boot left the profile enabled, stored
+  and listed in the admin UI but with **no live provider**, permanently for the
+  life of the process and with no metric, health row or alert to say so —
+  browser SSO simply stopped, and a scoped `SSORequired` rule returned 403 for
+  every user, against a green dashboard. An ordinary IdP maintenance window
+  **aborted the whole config snapshot**, stopping policy, blocklist and
+  threat-feed distribution to every data plane in the fleet. And because the
+  config version could not advance, every data plane retried the fetch every
+  30 seconds for the duration of the outage, aiming the fleet's full poll rate
+  at the identity provider that was already down.
+
+  The appliance now keeps the last document it successfully fetched and
+  degrades to it, bounded by a 7-day staleness ceiling — withdrawing a key from
+  published metadata is your IdP's revocation lever, so the fallback is a
+  bounded degradation rather than an open-ended one. The network always wins
+  when it answers, so an IdP-side key rotation is still picked up at the next
+  compile; cached bytes are parsed and validated by exactly the same code as
+  network bytes; and a cached document is bound to its source URL, so
+  re-pointing a profile gets no cache. A profile that still cannot be compiled
+  now retries on its own at a bounded, jittered rate and goes live on the first
+  successful fetch — no restart. New: the `idp_metadata` diagnostics row,
+  `culvert_idp_enabled_not_live` (page on `> 0`) and `culvert_idp_metadata_*`,
+  and the existing `identity_backend_unreachable` alert with source
+  `idp_metadata`. Nothing is added to `/readyz`: an IdP outage is fleet-wide,
+  and failing readiness would eject a fleet that is still proxying fine. An
+  unresolvable IdP hostname now falls back to the cached document instead of
+  being reported as a configuration error (an OIDC discovery URL is admitted on
+  structure; the DNS-backed check runs on the fetch, where its failure routes to
+  the cache), the SAML pre-flight host check shares the fetch's deadline instead
+  of resolving unbounded ahead of it, and switching a profile to inline
+  `metadataXml` clears its now-unresolvable remote-fetch failure episode. The
+  fallback is **stale-if-error** (RFC 5861): only a transport failure or an
+  HTTP 5xx is answered from the cache. A 4xx, any other non-200, an empty body,
+  or a document the appliance cannot accept (malformed metadata, or a discovery
+  document naming an `authorization_endpoint` that resolves into a private
+  range) fails the compile as before and never replaces the cached copy.
+  Re-pointing a profile from one remote source to another retires the old
+  source's failure episode on commit, so a repoint away from a broken IdP stops
+  alerting instead of paging indefinitely for a URL that is no longer
+  configured. The staleness ceiling is the EARLIER of 7 days and the SAML
+  metadata's own `validUntil`, and it is enforced on a **running** appliance
+  rather than only when a profile is next compiled: a provider whose cached
+  document has expired is retired (logged as `IDP_METADATA_EXPIRED`), so new
+  browser SSO through it fails closed instead of continuing to trust a signing
+  certificate your IdP may have withdrawn, and the retry loop brings it back
+  automatically on the first successful fetch. A provider that is live but
+  serving from cache is also revalidated by the retry loop and replaced the
+  moment the IdP answers again (`IDP_METADATA_REVALIDATED`), so a key rotated
+  during the outage is adopted within minutes of recovery. None of this revokes
+  sessions: the profile stays enabled and stored throughout, and a provider
+  serving a freshly fetched document is never retired however old the cached
+  copy beside it is. Deleting a profile discards its cached documents, and a
+  metadata fetch still in flight when the deletion is saved can no longer write
+  the deleted profile's document back, so a profile recreated under the same id
+  and source during an outage cannot compile from the deleted profile's signing
+  material. See `docs/operator/idp-metadata-availability.md`.
 ### Fixed
 
 - Six support-domain durable writes bypassed `fileutil.AtomicWrite`, the

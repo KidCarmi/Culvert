@@ -254,7 +254,6 @@ func oidcFlowIntrospectProvider(id, srvURL string) *OIDCFlowProvider {
 		cfg:     &OIDCProfileConfig{ClientID: "culvert-client"},
 		disc:    &oidcDiscoveryDoc{IntrospectionEndpoint: srvURL},
 		client:  &http.Client{Timeout: 5 * time.Second},
-		cache:   map[string]*oidcCacheEntry{},
 	}
 }
 
@@ -515,7 +514,6 @@ func TestOIDCFlow_ForeignProviderTokenDoesNotStormJWKS(t *testing.T) {
 		disc:    &oidcDiscoveryDoc{Issuer: "https://a.example.test"},
 		jwks:    jwksCacheAgainst(t, srv),
 		client:  &http.Client{Timeout: 5 * time.Second},
-		cache:   map[string]*oidcCacheEntry{},
 	}
 
 	// A well-formed JWT signed by a DIFFERENT provider: parses, unknown kid.

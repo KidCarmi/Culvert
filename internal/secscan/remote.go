@@ -176,9 +176,44 @@ func remoteScanRefused(hash string) *Result {
 	return &Result{Blocked: true, Reason: "scan timeout", Source: "timeout", Hash: hash}
 }
 
+// remoteScanOversize records a body the sidecar could not read to the end
+// because it exceeded the SIDECAR's scan window.
+//
+// It deliberately reuses the LOCAL path's vocabulary — statScanSkipped, hence
+// culvert_scan_skipped_total, and the request path's existing scan_skipped
+// alert with Source "size_limit" — for the same reason remoteScanRefused
+// reuses the timeout vocabulary: it is the same decision. "The object was
+// larger than the scan window, so bytes were forwarded unscanned" is one
+// phenomenon with one counter and one alert class, whether the window that
+// clipped it belongs to this process (security_scan.go logScanLimitExceeded)
+// or to the sidecar. An operator who has alerted on scan_skipped is already
+// watching for exactly this, and does not have to learn that the
+// process-isolated deployment reports it somewhere else.
+//
+// The posture is therefore the local path's, unchanged: fail-OPEN, counted and
+// alerted. Refusing the object instead would be the safer answer and is a real
+// option, but it is a POSTURE change for large downloads that no operator
+// asked for — it belongs to the owner, not to the fix that makes the event
+// visible. Recorded as the open half of CHAOS-101.
+func remoteScanOversize() {
+	AddScanSkipped()
+	if degradedLogAllowed(&lastRemoteOversizeLog) {
+		obs.Warnf("ScanSvc: sidecar refused a body larger than ITS scan window — forwarding UNSCANNED (fail-open). " +
+			"The sidecar's security.max_scan_mb is smaller than this process's; align them")
+	}
+	if !alerts.HasSubscriber("scan_skipped") {
+		return
+	}
+	go alerts.Fire("scan_skipped", alerts.Payload{
+		Source: "size_limit",
+		Detail: "sidecar scan window exceeded",
+	})
+}
+
 var (
-	lastRemoteFailLog    atomic.Int64
-	lastRemoteRefusalLog atomic.Int64
+	lastRemoteFailLog     atomic.Int64
+	lastRemoteRefusalLog  atomic.Int64
+	lastRemoteOversizeLog atomic.Int64
 )
 
 // maxRemoteScanResponse bounds the sidecar's /scan reply. The verdict is a
@@ -246,6 +281,9 @@ func (rs *RemoteScanner) ScanBody(data []byte, contentType string) *Result {
 	case remoteOutcomeCapacity:
 		atomic.AddInt64(&statRemoteScanSaturated, 1)
 		return remoteScanRefused(hash)
+	case remoteOutcomeOversize:
+		remoteScanOversize()
+		return nil // fail-open, counted as scan-skipped (Finding 4.2 posture)
 	default:
 		remoteScanFail(class, cause)
 		return nil // fail-open (WK-2b)
@@ -258,6 +296,16 @@ const (
 	remoteOutcomeVerdict  = "verdict"
 	remoteOutcomeBudget   = "budget exceeded"
 	remoteOutcomeCapacity = "sidecar at capacity"
+
+	// remoteOutcomeOversize is HTTP 413: the sidecar read the body only as far
+	// as its OWN window and says so rather than answering for a prefix
+	// (CHAOS-101). That is a size limit, not a fault — the same phenomenon the
+	// local path reports via logScanLimitExceeded — so it gets the size-limit
+	// vocabulary in remoteScanOversize instead of being laundered into a
+	// generic sidecar fault. A proxy or load balancer in front of the sidecar
+	// enforcing its own smaller body limit returns the same status for the same
+	// reason, so the classification is right for that topology too.
+	remoteOutcomeOversize = "scan window exceeded"
 	remoteFaultRequest    = "request build error"
 	remoteFaultTransport  = "transport error"
 	remoteFaultRead       = "response read error"
@@ -294,6 +342,10 @@ func (rs *RemoteScanner) scanOnce(ctx context.Context, client *http.Client, base
 			// never emits 429 today; a load balancer or a third-party scanner
 			// in front of it can, and classifying it correctly costs nothing.
 			return nil, remoteOutcomeCapacity, "HTTP 429"
+		}
+		if resp.StatusCode == http.StatusRequestEntityTooLarge {
+			// A size limit, not a fault (CHAOS-101; see remoteOutcomeOversize).
+			return nil, remoteOutcomeOversize, "HTTP 413"
 		}
 		// The status code IS the class here: it is bounded (a few dozen
 		// values), stable across requests, and the actionable half of the

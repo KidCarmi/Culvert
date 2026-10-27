@@ -156,8 +156,13 @@ func sseAuthStillValid(r *http.Request) bool {
 	}
 	// No session cookie — the connection was authenticated via HTTP Basic Auth.
 	if user, pass, ok := r.BasicAuth(); ok {
-		// SEC-BASIC-1: same controls as every other admin-plane Basic site.
-		_, valid := verifyUIBasicAuth(r, user, pass)
+		// SEC-BASIC-1: same refusals as every other admin-plane Basic site.
+		// SEC-BASICAUTH-5 (RISK-032): through the LIVENESS wrapper, which
+		// refuses exactly as the submission path does but reserves no per-IP
+		// budget and records nothing against the lockout. These headers were
+		// captured when the stream was established and cannot change, so a
+		// re-check is never a new guess. See revalidateUIBasicAuth.
+		_, valid := revalidateUIBasicAuth(r, user, pass)
 		return valid
 	}
 	return false
@@ -355,17 +360,7 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	// means "nothing has been probed" and never "the feature is off" — the
 	// same rule as culvert_proxy_oversize_host_rejected_total above, and the
 	// inverse of the armed-only gauges elsewhere in this file.
-	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_refused_total Logout requests whose session cookie was refused before anything was retained because this appliance could not verify it (bad signature or malformed). A genuine expired cookie and a replayed logout are excluded, but a cookie signed under a PREVIOUS session secret is not: after a key rotation or a restart with a fresh random key, ordinary browsers produce this until they re-authenticate. Sustained growth with no recent key change means an unauthenticated source is probing /api/auth/logout\n")
-	fmt.Fprintf(w, "# TYPE culvert_session_revoke_refused_total counter\nculvert_session_revoke_refused_total %d\n",
-		sessionRevocationRefusedTotal())
-	fmt.Fprintf(w, "\n# HELP culvert_session_revoke_rejected_total Revocation entries rejected by reason. unsigned/malformed/expired are the public logout endpoint; oversize/capacity/far_future are the UNTRUSTED-origin paths (cluster gossip, the on-disk revocations file); oversize/capacity mean cluster-wide revocation is incomplete on this node, far_future means an entry claimed an expiry no session this appliance issues can have\n")
-	fmt.Fprintf(w, "# TYPE culvert_session_revoke_rejected_total counter\n")
-	for _, reason := range []session.RevokeReason{
-		session.RevokeUnsigned, session.RevokeMalformed, session.RevokeExpired,
-		session.RevokeOversize, session.RevokeCapacity, session.RevokeFarFuture,
-	} {
-		fmt.Fprintf(w, "culvert_session_revoke_rejected_total{reason=%q} %d\n", string(reason), session.Refused(reason))
-	}
+	writeSessionRevokeMetrics(w)
 	fmt.Fprintf(w, "\n# HELP culvert_session_revocations_tracked Session revocation entries currently held. Bounded by real logins inside one session TTL; a value tracking request rate rather than login rate means something is inserting entries that are not sessions\n")
 	fmt.Fprintf(w, "# TYPE culvert_session_revocations_tracked gauge\nculvert_session_revocations_tracked %d\n", sessionRevoked.Tracked())
 	fmt.Fprintf(w, "\n# HELP culvert_cluster_revocation_drops_total Revocation entries the Control Plane refused to retain from a Data Plane node (over-long key, or past the per-node cap). Non-zero means a session an operator revoked may still authenticate on other nodes\n")
@@ -393,6 +388,16 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_retained_path_truncated_total Client-supplied request paths clamped before being retained in a log line, a block page or the request-log URI. Sustained growth means a source is attempting write amplification through the proxy data plane\n")
 	fmt.Fprintf(w, "# TYPE culvert_retained_path_truncated_total counter\nculvert_retained_path_truncated_total %d\n",
 		retainedPathTruncated.Load())
+
+	// AU-17b: the live size of the admin credential lockout state. Its keys
+	// are usernames an UNAUTHENTICATED caller chooses (the public GET on
+	// /api/auth/status accepts Basic), so the entry count is a security
+	// observable: the per-IP Basic failure budget bounds how fast one source
+	// can grow it, and this gauge is how an operator sees a source cycling
+	// usernames rather than guessing passwords.
+	fmt.Fprintf(w, "\n# HELP culvert_login_limiter_entries Live tier-1 (IP, username) pair plus tier-2 account entries held by the admin credential lockout\n")
+	fmt.Fprintf(w, "# TYPE culvert_login_limiter_entries gauge\nculvert_login_limiter_entries %d\n",
+		loginLimiter.EntryCount())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.
@@ -400,6 +405,62 @@ func apiCountryTraffic(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleViewer) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(countryTraffic.Top(20))
+	jsonOK(w, countryTraffic.Top(20))
+}
+
+// sessionRevokeReasons is the fixed, bounded label set of the per-reason
+// refusal series. It never grows from caller input (WK-12/RS-5).
+var sessionRevokeReasons = [...]session.RevokeReason{
+	session.RevokeUnsigned, session.RevokeMalformed, session.RevokeExpired,
+	session.RevokeOversize, session.RevokeCapacity, session.RevokeFarFuture,
+}
+
+// Session-revocation refusal metric names (T-70, 2026-10-25 terminology review).
+//
+// The released names shipped in v1.0.340 and keep emitting, unchanged in name,
+// labels and meaning, as deprecated aliases until v1.1.0:
+//
+//   - culvert_session_revoke_refused_total (UNLABELED) is the logout-cookie
+//     "could not verify" counter. Canonical: culvert_session_revoke_unverifiable_total.
+//   - culvert_session_revoke_rejected_total{reason} is the per-reason series.
+//     Canonical: culvert_session_revoke_refusals_total{reason}.
+//
+// Neither released name may ever be reassigned to another meaning. In
+// particular culvert_session_revoke_refused_total must never become a labeled
+// per-reason series: an existing alert on it would keep evaluating, silently,
+// against a different quantity. TestT70_SessionRevokeMetricAliases pins this.
+const (
+	sessionRevokeUnverifiableMetric       = "culvert_session_revoke_unverifiable_total"
+	sessionRevokeRefusalsMetric           = "culvert_session_revoke_refusals_total"
+	sessionRevokeRefusedDeprecatedMetric  = "culvert_session_revoke_refused_total"
+	sessionRevokeRejectedDeprecatedMetric = "culvert_session_revoke_rejected_total"
+
+	sessionRevokeUnverifiableHelp = "Logout requests whose session cookie was refused before anything was retained because this appliance could not verify it (bad signature or malformed). A genuine expired cookie and a replayed logout are excluded, but a cookie signed under a PREVIOUS session secret is not: after a key rotation or a restart with a fresh random key, ordinary browsers produce this until they re-authenticate. Sustained growth with no recent key change means an unauthenticated source is probing /api/auth/logout"
+	sessionRevokeRefusalsHelp     = "Revocation entries refused by reason. unsigned/malformed/expired are the public logout endpoint; oversize/capacity/far_future are the UNTRUSTED-origin paths (cluster gossip, the on-disk revocations file); oversize/capacity mean cluster-wide revocation is incomplete on this node, far_future means an entry claimed an expiry no session this appliance issues can have"
+)
+
+// writeSessionRevokeMetrics emits the CHAOS-73 refusal counters under their
+// canonical names and, from the SAME snapshot, under the deprecated released
+// names, so a scrape never shows the two names disagreeing.
+func writeSessionRevokeMetrics(w *strings.Builder) {
+	unverifiable := sessionRevocationRefusedTotal()
+	var byReason [len(sessionRevokeReasons)]int64
+	for i, reason := range sessionRevokeReasons {
+		byReason[i] = session.Refused(reason)
+	}
+	writeRevokeCounter := func(name, help string) {
+		fmt.Fprintf(w, "\n# HELP %s %s\n# TYPE %s counter\n%s %d\n", name, help, name, name, unverifiable)
+	}
+	writeRevokeByReason := func(name, help string) {
+		fmt.Fprintf(w, "\n# HELP %s %s\n# TYPE %s counter\n", name, help, name)
+		for i, reason := range sessionRevokeReasons {
+			fmt.Fprintf(w, "%s{reason=%q} %d\n", name, string(reason), byReason[i])
+		}
+	}
+	writeRevokeCounter(sessionRevokeUnverifiableMetric, sessionRevokeUnverifiableHelp)
+	writeRevokeByReason(sessionRevokeRefusalsMetric, sessionRevokeRefusalsHelp)
+	writeRevokeCounter(sessionRevokeRefusedDeprecatedMetric,
+		"DEPRECATED alias of "+sessionRevokeUnverifiableMetric+" (T-70): same series and value, removed in v1.1.0. "+sessionRevokeUnverifiableHelp)
+	writeRevokeByReason(sessionRevokeRejectedDeprecatedMetric,
+		"DEPRECATED alias of "+sessionRevokeRefusalsMetric+" (T-70): same labels and values, removed in v1.1.0. "+sessionRevokeRefusalsHelp)
 }

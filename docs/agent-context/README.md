@@ -50,7 +50,9 @@ to this checkout, not to an unmerged branch.
 - `auth*`, `session*`, `ui_auth*`, `ui_session*`, `ui_rbac*`, credential/roster/TOTP
   mutations in `store.go`: inspect [store.go](../../store.go),
   [session owner](../../internal/session), [auth-state owner](../../internal/authstate),
-  [credential-cost owner](../../internal/authcost) and the corresponding tests.
+  [credential-cost owner](../../internal/authcost), the identity-backend
+  [result-cache owner](../../internal/identcache) (ADR-0041) and the
+  corresponding tests.
 - LDAP: [ADR-0027](../adr/0027-ldap-first-class-idp.md),
   [auth_ldap_provider.go](../../auth_ldap_provider.go) and
   [directory implementation](../../auth_ldap.go). Internal directory transport
@@ -60,6 +62,21 @@ to this checkout, not to an unmerged branch.
   fairness, audit identity and session behavior. For credential changes read the
   [TOTP preservation block](history/authentication-and-identity.md#claude-main-l226-l226)
   and [password no-version test](../../auth_password_change_no_versioning_test.go).
+- Interactive IdP metadata/discovery last-known-good (CHAOS-87):
+  [internal/idpmeta](../../internal/idpmeta/idpmeta.go),
+  [idp_metadata_cache.go](../../idp_metadata_cache.go),
+  [idp_recovery.go](../../idp_recovery.go),
+  [idp_metadata_health.go](../../idp_metadata_health.go), the
+  [operator contract](../operator/idp-metadata-availability.md) and
+  [roadmap §49](../../roadmap/CHAOS-ENGINEERING-REVIEW.md). A third party decides
+  whether a document is fresh, never whether the IdP exists. Cache is
+  stale-if-error only on transport errors and HTTP 5xx; a 4xx or an
+  invalid/refused document fails the compile and never replaces the cached
+  copy. Cached bytes take the same parser as network bytes. Stale serving is
+  capped at min(7 days, SAML `validUntil`) on the compile path and on live
+  providers, and the recovery loop revalidates cache-serving providers. An
+  unreachable IdP is degraded availability, never revocation: only an
+  explicit delete or disable revokes sessions.
 
 ## Proxy, policy and scanning
 

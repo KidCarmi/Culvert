@@ -453,7 +453,7 @@ func TestLegacyLDAP_RegistryRejects_NeverLegacyFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy.cacheSet(cacheKey("eve", "eve-pass"), true, nil)
+	legacy.cacheSet(cacheKey("eve", "eve-pass"), "", true, nil)
 	cfg.SetProvider(legacy)
 
 	// Registry LDAP that REJECTS eve.

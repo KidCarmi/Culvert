@@ -25,6 +25,13 @@ the chokepoint: the admin middleware (`uiAuthMiddleware`), the SSE authorizer
 (`sseAuthStillValid`), and `GET /api/auth/status` — which is on the public
 allowlist, so it was reachable with no session at all.
 
+The SSE authorizer is a liveness **re-check** of a credential the stream was
+already admitted with, so it enters the chokepoint through
+`revalidateUIBasicAuth` (SEC-BASICAUTH-5): every refusal still applies, but it
+draws nothing from the per-IP failure budget and records nothing against the
+lockout. A password rotation therefore cuts streams still carrying the old
+password without locking the administrator out.
+
 ## BREAKING: accounts with TOTP enrolled cannot use Basic
 
 The Basic scheme carries exactly one credential, so an enrolled second factor
@@ -66,8 +73,10 @@ refused **before** any bcrypt runs, which is also what bounds the CPU cost of a
 guessing flood — Basic over `GET` is not covered by the mutating-method API
 rate limiter.
 
-An operator locked out by a runaway script can clear the state by restarting
-the node, or wait out `lockout.Duration`.
+An operator locked out by a runaway script can list and clear the lock in-band
+with the admin-only `GET`/`POST /api/auth/lockouts`, or wait out
+`lockout.Duration`. Restarting the node also clears it but interrupts traffic;
+see [admin-api-credential-lockout.md](admin-api-credential-lockout.md).
 
 ## Residual, recorded
 
