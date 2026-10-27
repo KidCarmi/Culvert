@@ -29,68 +29,111 @@ PRECOND_MODULES = (
 ).split()
 
 # ── nftables rule classification (the explicit ruleset gate) ───────────────
-# Every expression of every rule must be one of these, each with the reason it
-# cannot write packet bytes at the transport offset ipv6_find_hdr returns
-# (CVE-2026-98532). Anything else is "review required" and fails the gate.
-VERDICT_ONLY = {"accept", "drop", "reject", "jump", "goto", "return", "continue",
-                "counter", "log", "limit", "notrack", "quota"}
-# Matches read packet bytes only through nft_payload_eval -> skb_copy_bits,
-# or no packet bytes at all (meta, ct).
-MATCH_LEAVES = {"payload", "meta", "ct", "&", "|", "^", "<<", ">>", "concat",
-                "set", "range", "prefix", "elem"}
+# Every statement of every rule, AND every operand nested inside it (match
+# sides, NAT address/port, mangle key and value, map keys and data), must be
+# built only from the reviewed forms below. Anything else is "review
+# required" and fails the gate: an unknown statement, statement parameter,
+# expression kind or object shape is never accepted by default.
+#
+# Reviewed expression kinds (operands):
+#   payload    read through nft_payload_eval -> skb_copy_bits (bounded)
+#   meta, ct   packet metadata / conntrack state; no packet bytes
+#   map        lookup whose key and data are themselves checked operands
+#   set, prefix, range, elem, concat, & | ^ << >>   containers/operators over
+#              checked operands or literals
+# Not reviewed (fail): socket (nf_socket_ipv6 calls ipv6_find_hdr), exthdr,
+# fib, rt, osf, ipsec, numgen, jhash, symhash, tcp/ip/sctp/dccp option, ...
+LITERAL = (str, int, float, bool, type(None))
+OPERAND_FIELDS = {
+    "payload": {"protocol", "field", "base", "offset", "len"},
+    "meta": {"key"},
+    "ct": {"key", "family", "dir"},
+    "prefix": {"addr", "len"},
+    "map": {"key", "data"},
+    "elem": {"val", "timeout", "expires", "comment"},
+}
+OPERAND_CONTAINERS = {"set", "range", "concat", "&", "|", "^", "<<", ">>"}
+# Statements that move no packet bytes, with the literal parameters each may carry.
+VERDICT_PARAMS = {
+    "accept": set(), "drop": set(), "return": set(), "continue": set(), "notrack": set(),
+    "jump": {"target"}, "goto": {"target"},
+    "counter": {"packets", "bytes"},
+    "log": {"prefix", "level", "group", "snaplen", "queue-threshold", "flags"},
+    "limit": {"rate", "burst", "per", "rate_unit", "burst_unit", "inv"},
+    "quota": {"val", "val_unit", "used", "used_unit", "inv"},
+    "reject": {"type", "expr"},
+}
 # NAT rewrites go through nf_nat_ipv6_manip_pkt, which finds the L4 header
 # itself with ipv6_skip_exthdr (nf_nat_proto.c), not nft's transport offset.
+# Its address/port operands are checked like any other operand.
+NAT_PARAMS = {"addr", "port", "family", "flags", "type"}
 NAT_EXPRS = {"snat", "dnat", "masquerade", "redirect"}
-XT_TARGETS = {"MASQUERADE": "nf_nat", "DNAT": "nf_nat", "SNAT": "nf_nat", "REDIRECT": "nf_nat"}
+XT_TARGETS = {"MASQUERADE", "DNAT", "SNAT", "REDIRECT"}
 # xt matches: tcp/udp read through skb_header_pointer (xt_tcpudp.c); the
-# others read no transport-header bytes.
+# others read no transport-header bytes. nft shows xt parameters as opaque,
+# so only the name is checked, and only names safe for any parameters pass.
 XT_MATCHES = {"tcp", "udp", "addrtype", "conntrack", "state", "comment", "mark"}
-# Mangles of metadata (meta/ct keys) change no packet bytes.
-MANGLE_OK_KEYS = {"meta", "ct"}
+# A mangle may only write metadata (meta / ct keys); its value is an operand.
+MANGLE_KEYS = {"meta", "ct"}
 
 
-def leaves(node, out):
-    """Collect the expression keys of a match operand. Literal containers
-    (prefix, range, elem) hold values, not expressions, and are not walked."""
-    if isinstance(node, dict):
-        for k, v in node.items():
-            out.add(k)
-            if k in ("&", "|", "^", "<<", ">>", "concat", "set"):
-                leaves(v, out)
-    elif isinstance(node, list):
-        for v in node:
-            leaves(v, out)
+def operand_problems(node, path):
+    """[] when node is a literal or built only from reviewed expressions."""
+    if isinstance(node, LITERAL):
+        return []
+    if isinstance(node, list):
+        out = []
+        for i, x in enumerate(node):
+            out += operand_problems(x, "%s[%d]" % (path, i))
+        return out
+    if not isinstance(node, dict) or len(node) != 1:
+        return ["%s: unrecognised operand %s" % (path, json.dumps(node)[:80])]
+    (k, v), = node.items()
+    if k in OPERAND_CONTAINERS:
+        return operand_problems(v, "%s.%s" % (path, k))
+    if k in OPERAND_FIELDS:
+        if not isinstance(v, dict) or not set(v) <= OPERAND_FIELDS[k]:
+            return ["%s.%s: unexpected fields %s" % (path, k, json.dumps(v)[:80])]
+        out = []
+        for f, x in v.items():
+            out += operand_problems(x, "%s.%s.%s" % (path, k, f))
+        return out
+    return ["%s: unreviewed expression %s" % (path, k)]
 
 
 def classify_rule_expr(e):
-    """None when allowed, else a short reason."""
+    """[] when the statement and all its nested operands are reviewed forms."""
     if not isinstance(e, dict) or len(e) != 1:
-        return "unparseable expression %r" % (e,)
+        return ["unparseable statement %s" % json.dumps(e)[:80]]
     (k, v), = e.items()
-    if k in VERDICT_ONLY:
-        return None
+    if k in VERDICT_PARAMS:
+        if v is None:
+            return []
+        if not isinstance(v, dict) or not set(v) <= VERDICT_PARAMS[k]:
+            return ["%s with unexpected parameters %s" % (k, json.dumps(v)[:80])]
+        return [p for f, x in v.items() for p in (
+            [] if isinstance(x, LITERAL) else ["%s.%s: non-literal parameter" % (k, f)])]
     if k == "match":
-        ks = set()
-        leaves(v.get("left"), ks)
-        leaves(v.get("right"), ks)
-        bad = sorted(x for x in ks if x not in MATCH_LEAVES)
-        return None if not bad else "match reads %s" % ",".join(bad)
+        if not isinstance(v, dict) or set(v) != {"op", "left", "right"}:
+            return ["match with unexpected shape %s" % json.dumps(v)[:80]]
+        return operand_problems(v["left"], "match.left") + operand_problems(v["right"], "match.right")
     if k in NAT_EXPRS:
-        return None
+        if v is None:
+            return []
+        if not isinstance(v, dict) or not set(v) <= NAT_PARAMS:
+            return ["%s with unexpected parameters %s" % (k, json.dumps(v)[:80])]
+        return [p for f, x in v.items() for p in operand_problems(x, "%s.%s" % (k, f))]
     if k == "xt":
-        t, n = v.get("type"), v.get("name")
-        if t == "target" and n in XT_TARGETS:
-            return None
-        if t == "match" and n in XT_MATCHES:
-            return None
-        return "xt %s %s" % (t, n)
+        t, n = (v or {}).get("type"), (v or {}).get("name")
+        if (t == "target" and n in XT_TARGETS) or (t == "match" and n in XT_MATCHES):
+            return []
+        return ["xt %s %s" % (t, n)]
     if k == "mangle":
-        key = v.get("key", {})
-        kk = set(key) if isinstance(key, dict) else {"?"}
-        if kk <= MANGLE_OK_KEYS:
-            return None
-        return "payload write (mangle %s)" % ",".join(sorted(kk))
-    return "unclassified statement %s" % k
+        key = (v or {}).get("key")
+        if not (isinstance(key, dict) and len(key) == 1 and set(key) <= MANGLE_KEYS):
+            return ["payload or other non-metadata write (mangle %s)" % json.dumps(key)[:80]]
+        return operand_problems(key, "mangle.key") + operand_problems(v.get("value"), "mangle.value")
+    return ["unclassified statement %s" % k]
 
 
 def nft_review(doc):
@@ -108,8 +151,7 @@ def nft_review(doc):
             r = it["rule"]
             rules += 1
             for e in r["expr"]:
-                why = classify_rule_expr(e)
-                if why:
+                for why in classify_rule_expr(e):
                     problems.append("%s/%s/%s#%s: %s" % (r["family"], r["table"], r["chain"], r.get("handle"), why))
     return rules, tables, problems
 
@@ -156,6 +198,33 @@ class Unavailable(Exception):
     pass
 
 
+def census(lines, kinds, keys, name):
+    """Parse a per-item census: every line is one of `kinds` or the single
+    summary, which must carry exactly the counters `keys`. Returns
+    (summary dict, {kind: [lines]}) or raises Unavailable; the callers check
+    that the counters equal the per-item line counts."""
+    by = {k: [] for k in kinds}
+    summ = None
+    for l in lines:
+        k = l.split(" ", 1)[0]
+        if k == "summary":
+            if summ is not None:
+                raise Unavailable("%s: two summaries" % name)
+            try:
+                summ = {a: int(b) for a, b in (x.split("=") for x in l.split()[1:])}
+            except ValueError:
+                raise Unavailable("%s: unparseable summary %r" % (name, l))
+        elif k in by:
+            by[k].append(l)
+        else:
+            raise Unavailable("%s: unrecognised line %r" % (name, l[:80]))
+    if summ is None:
+        raise Unavailable("%s: no summary" % name)
+    if set(summ) != set(keys):
+        raise Unavailable("%s: summary counters %s, expected %s" % (name, sorted(summ), sorted(keys)))
+    return summ, by
+
+
 def run(path, tag, gpriv_rc):
     E = Eval(path)
     res = []
@@ -196,22 +265,47 @@ def run(path, tag, gpriv_rc):
         hp.append(str(x))
     try:
         f = E.get("host", "io_uring-fds")
-        m = [l for l in f if l.startswith("summary ")]
-        if len(m) != 1:
-            raise Unavailable("io_uring-fds: no summary")
-        kv = dict(x.split("=") for x in m[0].split()[1:])
-        if int(kv["procs"]) == 0 or int(kv["fds"]) == 0:
-            hp.append("io_uring census read nothing (%s)" % m[0])
-        if int(kv["rings"]) != 0:
-            hp.append("io_uring rings held: %s" % " | ".join(l for l in f if l.startswith("ring ")))
-        if int(kv["unreadable_alive"]) != 0:
-            hp.append("processes alive but unreadable: %s" % " | ".join(l for l in f if l.startswith("unreadable-alive ")))
-        hd.append("io_uring descriptor census: %s rings among %s fds of %s processes (exited during scan %s, fds vanished %s; corroboration, not proof)" % (
-            kv["rings"], kv["fds"], kv["procs"], kv["exited"], kv["fd_vanished"]))
-    except (Unavailable, KeyError, ValueError) as x:
+        kv, by = census(f, ("ring", "unreadable-alive", "exited", "fd-vanished", "fd-unreadable"),
+                        ("procs", "fds", "rings", "unreadable_alive", "exited", "fd_vanished", "fd_unreadable"), "io_uring-fds")
+        for k, key in (("ring", "rings"), ("unreadable-alive", "unreadable_alive"), ("exited", "exited"),
+                       ("fd-vanished", "fd_vanished"), ("fd-unreadable", "fd_unreadable")):
+            if len(by[k]) != kv[key]:
+                raise Unavailable("io_uring-fds: %d %s lines, summary says %d" % (len(by[k]), k, kv[key]))
+        if kv["procs"] == 0 or kv["fds"] == 0:
+            hp.append("io_uring census read nothing (procs=%d fds=%d)" % (kv["procs"], kv["fds"]))
+        if by["ring"]:
+            hp.append("io_uring rings held: %s" % " | ".join(by["ring"]))
+        if by["unreadable-alive"]:
+            hp.append("fd directory unreadable for a live process: %s" % " | ".join(by["unreadable-alive"]))
+        if by["fd-unreadable"]:
+            hp.append("descriptor still present but unreadable: %s" % " | ".join(by["fd-unreadable"]))
+        hd.append("io_uring descriptor census: 0 rings among %d fds of %d processes; %d processes exited and %d descriptors closed during the scan (each confirmed gone; corroboration, not proof)" % (
+            kv["fds"], kv["procs"], kv["exited"], kv["fd_vanished"]))
+    except Unavailable as x:
         hp.append("io_uring census: %s" % x)
     for c in CONTAINERS:
         procs = E.line("m2-proc %s " % c)
+        try:
+            top = E.get(c, "top")
+            if not top or top[0].strip() != "PID" or len(top) < 2:
+                raise Unavailable("%s top: unexpected output %r" % (c, top[:2]))
+            listed = [x.strip() for x in top[1:]]
+            if not all(x.isdigit() for x in listed):
+                raise Unavailable("%s top: non-numeric pid in %r" % (c, listed))
+            outcome = {}
+            for kind in ("m2-proc", "m2-proc-exited", "m2-proc-unreadable"):
+                for l in E.line("%s %s " % (kind, c)):
+                    outcome.setdefault(l.split()[2], []).append(kind)
+            for pid in listed:
+                if len(outcome.get(pid, [])) != 1:
+                    hp.append("%s pid %s from docker top has %s outcome(s)" % (c, pid, outcome.get(pid, "no")))
+            for pid in set(outcome) - set(listed):
+                hp.append("%s pid %s read but not in the recorded docker top" % (c, pid))
+            ex = [p for p, k in outcome.items() if k == ["m2-proc-exited"]]
+            if ex:
+                hd.append("%s: %d listed process(es) exited before their status was read (confirmed gone)" % (c, len(ex)))
+        except Unavailable as x:
+            hp.append(str(x))
         if not procs:
             hp.append("no process of %s read" % c)
         for l in procs:
@@ -266,13 +360,28 @@ def run(path, tag, gpriv_rc):
     # network contexts ---------------------------------------------------------
     pp, pd, rp, rd = [], [], [], []
     try:
-        census = E.get("host", "netns-census")
-        seen = {l.split()[0] for l in census if l.startswith("net:[")}
+        nkv, nby = census(E.get("host", "netns-census"), ("ns", "unreadable-alive", "exited"),
+                          ("procs", "read", "unreadable_alive", "exited"), "netns-census")
+        if (len(nby["ns"]), len(nby["unreadable-alive"]), len(nby["exited"])) != (nkv["read"], nkv["unreadable_alive"], nkv["exited"]) \
+                or nkv["procs"] != nkv["read"] + nkv["unreadable_alive"] + nkv["exited"]:
+            raise Unavailable("netns-census: lines and summary disagree (%s)" % nkv)
+        if nby["unreadable-alive"]:
+            pp.append("network namespace unreadable for a live process: %s" % " | ".join(nby["unreadable-alive"]))
+        seen = {l.split()[1] for l in nby["ns"]}
         if not seen:
-            raise Unavailable("netns census empty")
+            raise Unavailable("netns census read no namespace")
     except Unavailable as x:
         pp.append(str(x))
         seen = set()
+    # The container contexts are acquired by `docker inspect`; a failed read
+    # leaves that context out of the run and must say so by name.
+    for c in CONTAINERS:
+        try:
+            pid = E.get(c, "pid")
+            if len(pid) != 1 or not pid[0].strip().isdigit() or pid[0].strip() == "0":
+                raise Unavailable("%s pid: %r" % (c, pid))
+        except Unavailable as x:
+            pp.append(str(x))
     mine = {}
     for ctx in CTXS:
         try:
@@ -344,9 +453,16 @@ def run(path, tag, gpriv_rc):
             rp.append("%s nft-json: %s" % (ctx, x))
     if seen and len(mine) == len(CTXS):
         extra = seen - set(mine.values())
+        missing = set(mine.values()) - seen
         if extra:
             pp.append("network namespace(s) outside the three contexts: %s" % ",".join(sorted(extra)))
-        pd.insert(0, "network namespaces: exactly host + culvert + culvert-clamav (%d)" % len(seen))
+        if missing:
+            pp.append("expected context namespace(s) absent from the census: %s" % ",".join(
+                "%s=%s" % (c, n) for c, n in sorted(mine.items()) if n in missing))
+        pd.insert(0, "network namespaces: the census of %d processes (%d exited during the scan, each confirmed gone) found exactly the three acquired contexts host + culvert + culvert-clamav" % (
+            nkv["procs"], nkv["exited"]))
+    elif seen:
+        pp.append("namespace coverage not reconciled: only %d of 3 context namespaces acquired" % len(mine))
     try:
         mods = E.get("host", "modules")
         names = {l.split()[0] for l in mods if l.strip()}

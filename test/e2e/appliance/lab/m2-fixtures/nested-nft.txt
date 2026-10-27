@@ -1,0 +1,46 @@
+# Real `nft -j list ruleset` output (nftables 1.0.9, each rule loaded alone into a throwaway netns with
+# `unshare -n nft -f`), used verbatim by m2-verdict-selftest.py's 'nested' cases. Format: <family hook>|<nft
+# statement>, then OK <the rule's expr JSON> or ERR <nft's error> (forms nft refused in that hook/family).
+# The self-test's other nested cases (exthdr inside a map's data set, unknown NAT/payload/log parameters,
+# an expression in a counter parameter, a two-key operand object) are SYNTHETIC structure that nft does
+# not emit; they pin that the validator refuses unknown shapes rather than accepting them by default.
+nat|tcp dport 80 dnat to 10.0.0.1:8080
+OK  [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 80}}, {"dnat": {"addr": "10.0.0.1", "port": 8080}}]
+nat|ip saddr 10.0.0.0/8 snat to 1.2.3.4
+ERR /dev/stdin:1:61-95: Error: Could not process rule: Operation not supported
+nat|dnat to tcp dport map { 80 : 10.0.0.2, 443 : 10.0.0.3 }
+OK  [{"dnat": {"addr": {"map": {"key": {"payload": {"protocol": "tcp", "field": "dport"}}, "data": {"set": [[80, "10.0.0.2"], [443, "10.0.0.3"]]}}}}}]
+nat|masquerade
+ERR /dev/stdin:1:61-70: Error: Could not process rule: Operation not supported
+nat|meta mark set tcp dport
+OK  [{"mangle": {"key": {"meta": {"key": "mark"}}, "value": {"payload": {"protocol": "tcp", "field": "dport"}}}}]
+nat|ct mark set meta mark
+OK  [{"mangle": {"key": {"ct": {"key": "mark"}}, "value": {"meta": {"key": "mark"}}}}]
+nat|meta mark set jhash ip saddr mod 4
+OK  [{"mangle": {"key": {"meta": {"key": "mark"}}, "value": {"jhash": {"mod": 4, "expr": {"payload": {"protocol": "ip", "field": "saddr"}}}}}}]
+nat|dnat to numgen inc mod 2 map { 0 : 10.0.0.1, 1 : 10.0.0.2 }
+OK  [{"dnat": {"addr": {"map": {"key": {"numgen": {"mode": "inc", "mod": 2, "offset": 0}}, "data": {"set": [[0, "10.0.0.1"], [1, "10.0.0.2"]]}}}}}]
+filter6|meta mark set ip6 nexthdr
+OK  [{"mangle": {"key": {"meta": {"key": "mark"}}, "value": {"payload": {"protocol": "ip6", "field": "nexthdr"}}}}]
+filter6|meta mark set exthdr dst exists
+ERR /dev/stdin:1:79-84: Error: syntax error, unexpected exthdr
+filter6|meta mark set rt type
+ERR /dev/stdin:1:82-85: Error: syntax error, unexpected type
+filter6|meta mark set fib daddr type
+ERR /dev/stdin:1:79-81: Error: syntax error, unexpected fib
+filter6|ct mark set socket mark
+OK  [{"mangle": {"key": {"ct": {"key": "mark"}}, "value": {"socket": {"key": "mark"}}}}]
+nat-pre|dnat to socket mark map { 1 : 10.0.0.1 }
+OK  [{"dnat": {"addr": {"map": {"key": {"socket": {"key": "mark"}}, "data": {"set": [[1, "10.0.0.1"]]}}}}}]
+nat-pre|dnat to meta mark map { 1 : 10.0.0.1 }
+OK  [{"dnat": {"addr": {"map": {"key": {"meta": {"key": "mark"}}, "data": {"set": [[1, "10.0.0.1"]]}}}}}]
+nat-pre|dnat to 10.0.0.0/24
+OK  [{"dnat": {"addr": {"prefix": {"addr": "10.0.0.0", "len": 24}}}}]
+nat-post|masquerade
+OK  [{"masquerade": null}]
+nat-post|ip saddr 10.0.0.0/8 snat to 1.2.3.4
+OK  [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": {"prefix": {"addr": "10.0.0.0", "len": 8}}}}, {"snat": {"addr": "1.2.3.4"}}]
+nat-post|snat to ip saddr map { 10.0.0.1 : 1.2.3.4 }
+OK  [{"snat": {"addr": {"map": {"key": {"payload": {"protocol": "ip", "field": "saddr"}}, "data": {"set": [["10.0.0.1", "1.2.3.4"]]}}}}}]
+nat-post|masquerade to :1024-2048
+ERR /dev/stdin:1:77-85: Error: transport protocol mapping is only valid after transport protocol match
