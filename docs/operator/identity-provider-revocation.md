@@ -149,7 +149,7 @@ the provider disabled past the session TTL, re-create it under a **different
 id** (sessions naming the old id then resolve to nothing), or rotate the
 session signing key, which invalidates every proxy session on the appliance.
 Closing this properly needs a provider generation stamped into the cookie —
-tracked as register row **AU-22** in
+tracked as register row **AU-65** in
 `roadmap/CHAOS-ENGINEERING-REVIEW.md` §50.6f.
 
 If you removed the **only** interactive provider and no local admin account

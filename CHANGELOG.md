@@ -1846,7 +1846,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   persistence, no gossip, and no expiry.
 
   **That "already synced fleet-wide" claim was itself false for the one case an
-  operator reaches for, and is fixed here too** (register row **AU-21**,
+  operator reaches for, and is fixed here too** (register row **AU-64**,
   §50.6d). `ConfigSnapshot.IdPProfiles` carried `omitempty`, so a Control Plane
   whose registry had just become empty serialised no `idp_profiles` key at all;
   the Data Plane read that as "absent — keep what I have" and skipped. Deleting
@@ -1892,7 +1892,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
   **Recorded, not fixed:** there is still no lever to revoke a single federated
   subject — `RevokeUser` has one caller, the local account-delete handler, and
-  no admin route (new register row **AU-20**).
+  no admin route (new register row **AU-63**).
 
 - A read-only **viewer** could read the HA join token and from it obtain the
   **cluster CA private key** (SEC-HATOKEN-1). `GET /api/cluster/ha` is gated at

@@ -175,7 +175,7 @@ func TestChaos88_ControlNonLastRemovalStillPropagates(t *testing.T) {
 	c72AssertRevoked(t, "removing one of two profiles on the CP")
 }
 
-// DOCUMENTED RESIDUAL (AU-22, §50.6f). Re-enabling a provider under the SAME
+// DOCUMENTED RESIDUAL (AU-65, §50.6f). Re-enabling a provider under the SAME
 // id revives the sessions it minted: the predicate is pure derived state, and
 // §50.7 deliberately does not clear the cookie on refusal, so nothing durable
 // records that a cut happened.
@@ -218,7 +218,7 @@ func TestChaos88_DocumentedResidual_SameIDRestoration(t *testing.T) {
 	idpRegistry.profiles = []*IdPProfile{p}
 
 	out, proceed, code := c72Resolve(t, "corp")
-	// Compare the group VALUES, not their count. The whole claim of AU-22 is
+	// Compare the group VALUES, not their count. The whole claim of AU-65 is
 	// that the groups the provider asserted BEFORE the incident come back, and
 	// those groups go straight to policyStore.Evaluate — a length check would
 	// pass on two entirely different groups, i.e. on a changed authorization
@@ -227,7 +227,7 @@ func TestChaos88_DocumentedResidual_SameIDRestoration(t *testing.T) {
 		t.Fatalf("documented residual no longer holds — a pre-incident cookie is no longer "+
 			"revived by re-enabling the same profile id: proceed=%v identity=%q groups=%v "+
 			"(want %v) status=%d.\n"+
-			"If you stamped a provider generation into the cookie, that is the AU-22 fix: invert "+
+			"If you stamped a provider generation into the cookie, that is the AU-65 fix: invert "+
 			"this gate and correct §4 of docs/operator/identity-provider-revocation.md in the "+
 			"same change, so the runbook stops describing behaviour the code no longer has.",
 			proceed, out.identity, out.groups, preIncidentGroups, code)
