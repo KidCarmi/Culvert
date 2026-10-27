@@ -2915,6 +2915,29 @@ for c in $(docker ps -q); do
   docker inspect -f 'container {{.Name}} privileged={{.HostConfig.Privileged}} capadd={{.HostConfig.CapAdd}} devices={{len .HostConfig.Devices}} seccomp={{.HostConfig.SecurityOpt}} userns={{.HostConfig.UsernsMode}} pid={{.HostConfig.PidMode}} net={{.HostConfig.NetworkMode}}' "$c"
 done
 echo "nic-drivers $(for i in /sys/class/net/*/device/driver; do basename "$(readlink -f "$i")"; done 2>/dev/null | sort -u | tr '\n' ' ')"
+echo "=== M2 hardening (#1528)"
+# io_uring off for every process (sysctl drop-in), proven by a REAL syscall
+# from root on the host: io_uring_setup (425) must fail with EPERM.
+echo "m2-io_uring_disabled=$(sysctl -n kernel.io_uring_disabled 2>/dev/null || echo unset)"
+echo "m2-sysctl-file $(sha256sum /etc/sysctl.d/99-culvert-hardening.conf 2>/dev/null | cut -d' ' -f1 || echo missing)"
+echo "m2-host-io_uring_setup=$(python3 -c 'import ctypes,errno
+l=ctypes.CDLL(None,use_errno=True); p=ctypes.create_string_buffer(120)
+r=l.syscall(425,1,p); e=ctypes.get_errno()
+print("opened" if r>=0 else "errno:"+errno.errorcode.get(e,str(e)))' 2>&1)"
+# CAP_NET_RAW (bit 13) must be in neither the effective nor the bounding set
+# of ANY process in the Culvert/ClamAV containers, and each runs under seccomp
+# filter mode. Read from the kernel's view of every process, not the config.
+for c in culvert culvert-clamav; do
+  echo "m2-capdrop $c $(docker inspect -f '{{.HostConfig.CapDrop}}' "$c" 2>/dev/null)"
+  for p in $(docker top "$c" -eo pid 2>/dev/null | tail -n +2); do
+    python3 -c 'import sys
+c,p=sys.argv[1:3]; d={}
+for l in open("/proc/%s/status" % p):
+    k,_,v=l.partition(":"); d[k]=v.strip()
+e=int(d["CapEff"],16); b=int(d["CapBnd"],16)
+print("m2-proc %s %s comm=%s capeff=%s capbnd=%s netraw-eff=%d netraw-bnd=%d seccomp=%s nnp=%s" % (c,p,open("/proc/%s/comm" % p).read().strip().replace(" ","_"),d["CapEff"],d["CapBnd"],(e>>13)&1,(b>>13)&1,d.get("Seccomp"),d.get("NoNewPrivs")))' "$c" "$p" 2>/dev/null || echo "m2-proc-unreadable $c $p"
+  done
+done
 echo "tpm $(ls -l /dev/tpm* 2>/dev/null | awk '{print $1, $3":"$4, $NF}' | tr '\n' ';' || true)"
 echo "fuse-mounts $(findmnt -rn -t fuse,fuseblk,fuse.* 2>/dev/null | wc -l) btrfs-mounts $(findmnt -rn -t btrfs 2>/dev/null | wc -l) nfs-mounts $(findmnt -rn -t nfs,nfs4 2>/dev/null | wc -l)"
 echo "perf-tool $(command -v perf >/dev/null && echo present || echo absent)"
@@ -3053,6 +3076,19 @@ EOS
   grep -qx 'net-autoload-unreviewed=\[\]' "$f" || asf+="unprivileged network autoload neither denied nor reviewed: $(grep '^net-autoload-unreviewed=' "$f"); "
   if [[ -n "$asf" ]]; then check E kernel-cve-assumptions fail "$asf"
   else check E kernel-cve-assumptions pass "unprivileged BPF disabled ($(sed -n 's/^sysctl kernel.unprivileged_bpf_disabled=//p' "$f")), perf_event_paranoid $(sed -n 's/^sysctl kernel.perf_event_paranoid=//p' "$f"), $(grep -c '^container ' "$f") containers unprivileged with no added caps or devices, no perf tool, no FUSE/btrfs/NFS mounts, unprivileged userns restricted, ldisc autoload off, network autoload $(sed -n 's/^net-autoload //p' "$f") (none unreviewed); NICs: $(sed -n 's/^nic-drivers //p' "$f")"; fi
+  # #1528 M2 (ASTRA 27 Oct): io_uring off on the host; no process in the
+  # Culvert/ClamAV containers holds CAP_NET_RAW (effective or bounding); each
+  # runs under seccomp filter mode (Docker's default profile denies io_uring).
+  local m2bad="" m2c m2p
+  [[ "$(sed -n 's/^m2-io_uring_disabled=//p' "$f")" == 2 ]] || m2bad+="kernel.io_uring_disabled=$(sed -n 's/^m2-io_uring_disabled=//p' "$f"); "
+  grep -qx 'm2-host-io_uring_setup=errno:EPERM' "$f" || m2bad+="host $(grep '^m2-host-io_uring_setup=' "$f" || echo 'io_uring_setup not probed'); "
+  for m2c in culvert culvert-clamav; do
+    [[ "$(grep -c "^m2-proc $m2c " "$f")" -gt 0 ]] || m2bad+="no process of $m2c read; "
+  done
+  m2p="$(grep -E '^m2-proc(-unreadable)? ' "$f" | grep -vE ' netraw-eff=0 netraw-bnd=0 seccomp=2 ' | tr '\n' ' ')"
+  [[ -z "$m2p" ]] || m2bad+="process(es) with NET_RAW or without seccomp filter: $m2p"
+  if [[ -n "$m2bad" ]]; then check E m2-hardening fail "$m2bad"
+  else check E m2-hardening pass "kernel.io_uring_disabled=2 and a host io_uring_setup returns EPERM; $(grep -c '^m2-proc ' "$f") container processes (culvert: $(grep -c '^m2-proc culvert ' "$f"), culvert-clamav: $(grep -c '^m2-proc culvert-clamav ' "$f")) lack CAP_NET_RAW in CapEff and CapBnd and run with Seccomp 2; cap_drop $(sed -n 's/^m2-capdrop //p' "$f" | tr '\n' ' ')"; fi
   # CVE-2025-40190: no mounted ext4 filesystem carries ea_inode.
   if ! grep -q '^ext4 ' "$f"; then check E ext4-no-ea-inode fail "no ext4 mount listed"
   elif grep '^ext4 ' "$f" | grep -qw ea_inode; then check E ext4-no-ea-inode fail "$(grep '^ext4 ' "$f" | grep -w ea_inode | tr '\n' ' ')"
