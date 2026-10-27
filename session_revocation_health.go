@@ -748,7 +748,35 @@ func revocationDurabilityDoubt() (failing, vanished bool) {
 //
 // Reported by Codex on PR #1437 as a P1 (AU-34).
 func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
-	added := sessionRevoked.MergeRevocations(entries)
+	added := mergeClusterRevocations(entries)
+	persistClusterMergedRevocations(added, false, who)
+	return added
+}
+
+// mergeClusterRevocations is the ONE place package main merges peer revocation
+// entries (TestChaos68_EveryRevocationMergeSiteRetriesThroughThePrimitive).
+// Every caller must pair it with persistClusterMergedRevocations:
+// mergeAndPersistRevocations does so inline, and the DP revocation-sync round
+// does so from its deferred owed-write discharge (CHAOS-79), marking the write
+// owed BEFORE any save is attempted so a panic inside the save still leaves it
+// owed.
+func mergeClusterRevocations(entries []RevocationEntry) int {
+	return sessionRevoked.MergeRevocations(entries)
+}
+
+// persistClusterMergedRevocations is the persist half of
+// mergeAndPersistRevocations, split out so the DP revocation-sync round can run
+// it from its deferred, CP-independent owed-write discharge (CHAOS-79) instead
+// of only after a successful RPC. added is how many entries the caller's merge
+// newly applied; owed is a caller-tracked write that has not landed yet (the
+// DP's per-client flag). It reports whether a save was attempted and whether
+// THAT save landed.
+//
+// A missing backing file with an EMPTY in-memory list is not a doubt: loading a
+// missing file yields exactly that empty list, so a rewrite would repair
+// nothing, and a round that merged nothing must not write (CHAOS-79's clean
+// round control).
+func persistClusterMergedRevocations(added int, owed bool, who string) (attempted, landed bool) {
 	// "Durability is in doubt" is TWO conditions, not one. The flag covers a
 	// save that was attempted and failed; revocationBackingFileIsGone covers a
 	// file that was never written down again because nobody attempted anything
@@ -772,9 +800,12 @@ func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
 	// announce a missing file every tick — the flag's own onset line already
 	// said what is wrong.
 	failing, vanished := revocationDurabilityDoubt()
-	owed := sessionRevocationsDirty.Load()
-	if added == 0 && !failing && !vanished && !owed {
-		return 0
+	if vanished && sessionRevoked.Count()+sessionRevoked.UserCount() == 0 {
+		vanished = false // nothing in memory that the missing file lacks
+	}
+	shared := sessionRevocationsDirty.Load()
+	if added == 0 && !owed && !failing && !vanished && !shared {
+		return false, false
 	}
 	if vanished {
 		logger.Printf("%s: the revocations file is missing — rewriting the %d token and %d account revocation(s) held in memory",
@@ -795,11 +826,14 @@ func mergeAndPersistRevocations(entries []RevocationEntry, who string) int {
 		// the contract row reports (AU-52).
 		noteRevocationPersistRefused(added)
 	case persistLanded, persistRecovered:
-		if failing || owed {
+		// Keyed on the SHARED doubts only: a caller's own owed flag is set on
+		// every merge, so announcing a recovery on it would be a line per merge.
+		if failing || shared {
 			logger.Printf("%s: merged session revocations are durable again", who)
 		}
+		return true, true
 	case persistFailed:
 		// Logged by the coordinator at onset; the counter carries the rest.
 	}
-	return added
+	return true, false
 }

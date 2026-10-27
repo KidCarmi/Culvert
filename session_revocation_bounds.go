@@ -208,6 +208,11 @@ const (
 // must not become a write-amplification one (CHAOS-63's rule). The magnitude
 // stays in culvert_session_revocation_persist_failures_total, which the
 // internal/session failure observer counts on every attempt.
+//
+// The outcome is THIS call's result, for a caller that tracks its own owed
+// write (the DP revocation-sync round, CHAOS-79): the shared flag alone cannot
+// tell it, since another writer's success may clear it. persistLanded and
+// persistRecovered mean this call's write landed; nothing else does.
 func persistRevocations() persistOutcome {
 	persistMu.Lock()
 	defer persistMu.Unlock()

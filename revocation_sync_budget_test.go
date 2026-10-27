@@ -132,7 +132,7 @@ func TestAU50_RevocationListOverTheRequestCapStillSyncs(t *testing.T) {
 	const maxTicks = 6 // ~17.7 MiB of backlog through a >=7.5 MiB window: 3 ticks
 	ticks := 0
 	for ticks < maxTicks && len(reached) < len(all) {
-		c.syncRevocationsOnce(context.Background())
+		c.revocationSyncRound(context.Background())
 		if callErr != nil {
 			t.Fatalf("tick %d: SyncRevocations failed through the real frame: %v", ticks+1, callErr)
 		}
