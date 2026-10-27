@@ -1,0 +1,10 @@
+total 110196
+-rw-r--r--    1 clamav   clamav        9078 Oct 12 01:46 bytecode-339.cvd.sign
+-rw-r--r--    1 clamav   clamav      281702 Oct 12 01:46 bytecode.cvd
+-rw-r--r--    1 clamav   clamav        9078 Oct 12 01:45 daily-28150.cvd.sign
+-rw-r--r--    1 clamav   clamav    23442302 Oct 12 01:45 daily.cvd
+-rw-r--r--    1 clamav   clamav        9078 Oct 12 01:45 main-63.cvd.sign
+-rw-r--r--    1 clamav   clamav    89072577 Oct 12 01:45 main.cvd
+6d4aa01f219e988060fc419f495d07f27e0cdf1a2cccc065971da922c76f7ffb  /var/lib/clamav/bytecode.cvd
+5f449c739feee6bc85c66a72faee3307d4ee377dbaf5606942be6a25e6b68851  /var/lib/clamav/daily.cvd
+0b2182d229f46981ec8f535382222f7c9dfdd656b250ad47988b910a8d302365  /var/lib/clamav/main.cvd

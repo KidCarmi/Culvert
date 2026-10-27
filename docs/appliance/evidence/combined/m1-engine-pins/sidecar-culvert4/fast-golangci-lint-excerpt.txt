@@ -1,0 +1,6 @@
+2026-10-27T10:22:40.9207865Z [36;1mgolangci-lint run --timeout=10m --new-from-rev "origin/$BASE_REF"[0m
+2026-10-27T10:27:45.3916172Z ##[error]auth_oidc_flow.go:71:14: httpNoBody: http.NoBody should be preferred to the nil request body (gocritic)
+2026-10-27T10:27:45.3926042Z ##[error]auth_saml.go:314:15: httpNoBody: http.NoBody should be preferred to the nil request body (gocritic)
+2026-10-27T10:27:45.3928867Z ##[error]scan_svc.go:158:34: whyNoLint: include an explanation for nolint directive (gocritic)
+2026-10-27T10:27:45.3930918Z ##[error]scan_svc.go:168:44: whyNoLint: include an explanation for nolint directive (gocritic)
+2026-10-27T10:27:45.4761764Z ##[error]Process completed with exit code 1.

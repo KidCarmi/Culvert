@@ -1,0 +1,5 @@
+2026-10-27T10:26:00.8096810Z 10:26:00 pass [X] clamav-real-sidecar: the REAL sidecar culvert/clamav:1.5.4-culvert.4 from the deploy bundle ran (pcre2-10.49-r0; signatures downloaded, healthcheck passed, /ready strict incl. the scanner rows)
+2026-10-27T10:26:01.1579771Z pass image-identity: clamav=sha256:5ae9675fb3925fdd1003417537bdacd4b8f4f9118fa4cfbdcd51d9fdac8e1c86 proxy=sha256:d3816d961f1da1ae15557b55f2c93d20341c7299b1fcfa129b915e8301c8106f
+2026-10-27T10:26:15.7633228Z pass image-identity: clamav=sha256:07da81d4dd0015fce71fbb4858efa8066b625b7dba8489e3173fedda8eeceb2d proxy=sha256:d3816d961f1da1ae15557b55f2c93d20341c7299b1fcfa129b915e8301c8106f
+2026-10-27T10:26:37.5486900Z │                     Target                     │  Type  │ Vulnerabilities │
+2026-10-27T10:26:37.5487867Z │ culvert/clamav:1.5.4-culvert.4 (alpine 3.24.2) │ alpine │        0        │

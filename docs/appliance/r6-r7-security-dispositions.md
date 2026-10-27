@@ -135,7 +135,11 @@ That closes ASTRA's R7 binding gap. The image ID E1 observed is now tied, throug
 - **Reachability:** static only, in `evidence/combined/m1-engine-pins/ci/sidecar-libcurl-reachability.md`. The running libcurl consumer (freshclam) issues GETs only; the uploading tool (`clamsubmit`) is never started.
 - **Disposition:** FIXED in source at the user's direction (27 Oct). `libcurl=8.23.0-r0` is added in its **own** `apk add` **without** `--upgrade` and asserted inside the build. The tag moves to `culvert/clamav:1.5.4-culvert.4`.
 - **Why no `--upgrade`:** apk's `--upgrade` also upgrades the named package's dependencies. For libcurl that would float `c-ares` (1.34.8 → 1.34.9) and `ca-certificates-bundle` (20260909 → 20261020) to unpinned versions. Measured with apk 3.0.8 (the base's own version) applying the exact RUN sequence to a copy of the extracted base rootfs: versus the base, only `musl`, `musl-utils`, `brotli-libs` (unchanged from `culvert.3`) and `libcurl` change, and the package count stays at 41.
-- **What this does not cover:** no OVA carries `culvert.4`. F-P2 has **not** yet been run on `culvert.4` bytes. The `culvert.4` image ID is known only once CI or the OVA build produces it.
+- **Verified (27 Oct):**
+  - Deep gate dispatch 40487749917 on `93c83f90`: success, and Trivy reports 0 vulnerabilities in `culvert.4`.
+  - F-P2 isolated re-run 40487883047: 0 wrong-cleans on `culvert.4`, image `sha256:91eae57526b246da28cb370bd824c45af51e245be0093afcc316bc3fbe941f9d`, built twice with `SOURCE_DATE_EPOCH=1793096442`. The 1.4.6 control reproduced the bug with 63 wrong-cleans.
+  - Evidence: `evidence/combined/m1-engine-pins/sidecar-culvert4/`.
+- **What this does not cover:** no OVA carries `culvert.4`. An OVA bakes the F-P2-tested ID only if it is built with that same `SOURCE_DATE_EPOCH`.
 
 ---
 
