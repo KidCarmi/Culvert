@@ -35,6 +35,22 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   read as healthy. A new `ocsp_coverage` WARN row (additive, report-only, no row
   while OCSP is off) names the unchecked paths. No handshake behavior changes.
 
+### Deprecated
+
+- **Session-revocation refusal metrics renamed; the released names stay as
+  deprecated aliases until v1.1.0 (T-70).** `culvert_session_revoke_refused_total`
+  (unlabeled) and `culvert_session_revoke_rejected_total{reason}` shipped in
+  v1.0.340 and used two near-synonyms for one plane with different scopes. The
+  canonical names are now `culvert_session_revoke_unverifiable_total` (logout
+  cookies this appliance could not verify) and
+  `culvert_session_revoke_refusals_total{reason}` (every refused entry, same six
+  reasons). Both released names keep emitting with the same name, labels and
+  value from the same snapshot, so existing dashboards and alerts are
+  unaffected. **They are removed in v1.1.0**; move queries to the new names
+  before that upgrade. `culvert_session_revoke_refused_total` is never
+  reassigned to another meaning. Gate: `session_revoke_metric_alias_test.go`.
+  Runbook: `docs/operator/session-revocation-plane.md`.
+
 ### Security
 
 - **The scan sidecar reported a truncated read as `clean: true`, so content past
