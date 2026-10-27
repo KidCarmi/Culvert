@@ -234,6 +234,9 @@ func buildOperatorContract() OperatorContract {
 	// OCSP enabled but not consulted on inspected HTTPS origin handshakes.
 	// Contributes nothing while revocation checking is off.
 	checks = append(checks, checkOCSPCoverage()...)
+	// Upstream mTLS client certificate failed to load or is expired/expiring.
+	// Contributes nothing when no client certificate is configured.
+	checks = append(checks, checkUpstreamMTLSClientCert()...)
 	// PAC profiles last served with compile warnings. Contributes nothing when
 	// every served profile compiled cleanly.
 	checks = append(checks, checkPACDegraded()...)

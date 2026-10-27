@@ -9,6 +9,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the upstream mTLS client certificate failed to
+  load, has expired, or expires within 30 days.** That state was visible only in
+  the OCSP panel API; the one-page report read as healthy while upstream servers
+  requiring mutual TLS rejected the node. A new `upstream_mtls_client_cert` WARN
+  row (additive, report-only, no row when unconfigured or healthy) carries no
+  file path or error text. No certificate-loading behavior changes.
+
 - **Diagnostics now warns when OCSP checking is enabled but does not cover
   inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
   on the OCSP panel and in a one-time log line; the one-page diagnostics report
@@ -17,6 +24,136 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The scan sidecar reported a truncated read as `clean: true`, so content past
+  its own window was admitted with an affirmative clean verdict (CHAOS-101).**
+  `scan_svc.go` `handleScan` read `io.LimitReader(body, maxBytes+1)` — the
+  classic overflow probe — and then never compared `len(data)` against
+  `maxBytes`, so it paid for the probe byte and discarded what it proved. The
+  reply then carried the PREFIX's verdict as the whole object's, and
+  `secscan.ScanResponse` has no truncation field to say otherwise.
+
+  No code bug is needed to reach this, only configuration: each process derives
+  `maxScanBufferBytes()` from its OWN `security.max_scan_mb`, and nothing
+  reconciles the caller's window with the sidecar's — which is precisely the
+  topology the handler's own doc comment recommends ("multiple proxy instances
+  sharing one scanner"). A fleet of 20 MiB proxies in front of a sidecar left at
+  the 5 MiB default had scanning silently off for every byte past 5 MiB, with no
+  counter, no log line and no alert anywhere, and the caller's own overflow
+  signal correctly did not fire because the body fit the CALLER's window. The
+  in-process path has had a signal for this exact event since Finding 4.2
+  (`logScanLimitExceeded`: counter, one log line, `scan_skipped` alert); the
+  process-isolated deployment recommended as the *remedy* for the local path's
+  failure modes was the one without it.
+
+  `handleScan` now uses the probe byte and refuses with 413 rather than
+  answering for a prefix. The probe byte is still scanned, so a signature that
+  ends on it blocks exactly as before the fix rather than drawing a fail-open
+  413. It also publishes `oversize_refused` and
+  `scan_window_bytes` on `/health` — it is the only process that knows its
+  window, and an operator needs it to compare against the caller's.
+
+  **Ordering is the correctness argument.** Refusing on size FIRST — the obvious
+  shape — turns a body whose malware sits inside the window into a 413, which
+  the client classifies as a size limit and therefore forwards fail-open: the
+  one case where the sidecar holds a real block verdict is the case the refusal
+  would throw away, so the "safe" check would have admitted content the unfixed
+  code blocked. The verdict therefore wins and truncation is not reported at all
+  on a block, the same asymmetry `readScanPrefix` documents for the local path.
+  A negative control pins it, and failed against the first draft of this fix.
+
+  Client side, 413 is classified as the size limit it is and charges the LOCAL
+  path's vocabulary — `statScanSkipped`, hence `culvert_scan_skipped_total`, and
+  the `scan_skipped` alert with `Source: "size_limit"` — for the same reason
+  `remoteScanRefused` reuses the timeout vocabulary: it is the same decision, so
+  one phenomenon keeps one counter and one alert class whichever window clipped
+  the object, and an operator already alerting on `scan_skipped` needs no second
+  name. A load balancer in front of the sidecar enforcing its own smaller body
+  limit returns 413 for the same reason, so the classification is right there
+  too; every other status keeps its fault classification.
+
+  Operators running a mismatched fleet will see NEW `scan_skipped` volume on
+  upgrade. That volume is the defect becoming visible, not a regression; the
+  remedy is named in the log line and measurable from `/health`. The posture for
+  oversize bodies is the local path's, unchanged: fail-open, counted and
+  alerted. Refusing the object outright is the safer answer and a real option,
+  but it is a posture change for large downloads that no operator asked for, and
+  is left to the owner as the open half of CHAOS-101.
+
+- **Diagnostics reported "session revocation healthy … no drops" while a
+  legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
+  CHAOS-73 bounds what an untrusted origin — cluster gossip, or the on-disk
+  revocations file — may insert into the revocation list, and charges a reason
+  for each refusal. `checkSessionRevocation` summed two of the three:
+  `RevokeOversize` and `RevokeCapacity`, but not `RevokeFarFuture`. A node that
+  dropped only far-future entries took the `diagOK` branch and printed "no
+  refusals, no drops" — on the one authenticated surface whose own contract is
+  that a dropped entry "means a session an operator deliberately killed may
+  still authenticate, here or on another node" (CWE-778; the underlying drop is
+  CWE-613).
+
+  `RevokeFarFuture` is the reason with a benign trigger, which is what made the
+  omission matter. `admitUntrustedLocked` refuses a gossiped entry whose expiry
+  exceeds `now + MaxSessionLifetime + revocationExpirySkew`; that is exactly 7
+  days plus 1 hour, and `POST /api/session-timeout` admits `hours` up to 168 —
+  so at the maximum *supported* session TTL the entire inter-node clock-skew
+  budget is one hour. In a cluster at `session_timeout: 168h` with a peer whose
+  clock runs more than an hour ahead, that peer's legitimate revocations are
+  dropped on the receiving node, the revoked cookie keeps authenticating there
+  for the remainder of its life, and Diagnostics affirmatively said revocation
+  was healthy. The count is now summed, the row names the expiry bound among the
+  causes, and the operator action names clock skew as the benign cause to check
+  FIRST — this file's own rule that a refusal surface must not assert an attack.
+  The bound itself is unchanged: widening `revocationExpirySkew` is a security
+  behavior change and is recorded as an owner decision instead.
+- **Peer-supplied Control Plane addresses reached the Data Plane's process log
+  unsanitized (CWE-117).** `applyAddressesLocked` adopts the CP config
+  snapshot's `cp_addresses` verbatim into the client's address list and states
+  that both lists "are peer-supplied … so they are untrusted log values under
+  the CWE-117 rule" — but four older sinks in the same file printed an address
+  from that same list with a bare `%s`: both of `connect`'s lines and both of
+  `failover`'s. `validateConfigSnapshot` count-caps `cp_addresses` at 100 and
+  never validates an entry as `host:port`, so a newline inside one forged
+  records in the DP's process log and in every downstream syslog/OTLP consumer.
+  All four now use `sanitizeLog` with `%q`, and the failover line sanitizes the
+  wrapped error too, since it carries the same address. Pinned by a source gate
+  so a fifth sink cannot reintroduce it. A hostile Control Plane already
+  dictates the Data Plane's policy, so the marginal impact is log integrity —
+  but the convention is the convention, and the inconsistency sat inside one
+  file.
+- **A sixth log sink retained the decrypted inner request path, unbounded, after
+  CHAOS-92 bounded the other five (CHAOS-92e).** The CHAOS-92 sweep enumerated
+  three retaining sink families and clamped each at a chokepoint, with a source
+  gate to keep future sinks bounded. The gate matches call sites carrying both
+  `sanitizeLog(` and `URL.Path` — so it never examined
+  `fileblock.LogBlock`, which sanitizes in the callee (`obs.Sanitize`, the
+  independent internal twin, ADR-0003) and writes the client-chosen path into the
+  50 MB/one-archive rotating process log as `FILE_BLOCKED (tunnel %s)`. Six
+  `emitFileBlock` call sites reach it, four of them passing `req.URL.Path`
+  straight from the decrypted inner request.
+
+  It is worse per request than the five that were fixed: those are fed by a path
+  net/http caps at `MaxHeaderBytes + 4096`, while this one is fed by
+  `http.ReadRequest` on the decrypted stream — `readRequestLimit(b,
+  math.MaxInt64)` over a `textproto.ReadLine()` with no limit — so the inner
+  request line is unbounded on the wire. Measured through the emitter: a 1 MiB
+  path wrote 1 048 646 log bytes, and a 1 MiB path of `0xFF` wrote 4 194 375,
+  because `obs.Sanitize` folds control bytes but `0xFF` is not one and `%q`
+  renders each as the 4-character `\xff`. Every write succeeds, so the logsink
+  backpressure counter and every storage-health surface stay green while the
+  retained record rotates away (CWE-778, OWASP A09:2021). Reachability is the one
+  CHAOS-69 named for the inner path — an allowed destination with SSL inspection
+  enabled — not CHAOS-92's stock-install reachability.
+
+  `emitFileBlock` now clamps with the sweep's own `boundRetainedPath`, inside the
+  `fileblock.LogBlock` argument so the sanitiser's scan and its copy are bounded
+  too. It is package main's only route into `LogBlock`, so one edit bounds all
+  six call sites, and a source gate now fails on a direct
+  `fileblock.LogBlock`/`BlockConn` call from package main. **Enforcement and the
+  client-visible response are untouched**: every matcher ran on the whole value
+  at the call site before the emitter, and the 403 body derives from the
+  extension and source only — pinned by a control that asserts the emitted bytes
+  are identical at 16 B and 1 MiB. Recorded with its measurements in
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53.11.
 - **The `file_profile_resolution` diagnostics row went blind to the very rules
   SEC-POLICYACTION-1 taught the request path to honour.** That change made
   `applyPolicyDecision` (`proxy.go`) dispatch on `canonicalPolicyAction`, which
@@ -618,6 +755,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   not the class.
 
 ### Performance
+
+- **The Stage-2 policy scan no longer streams a 568-byte rule definition to
+  reject a destination.** Every proxied request on every protocol runs
+  `PolicyStore.Evaluate`, a priority-ordered first-match scan over the whole
+  rulebase, and that scan was the largest Culvert-owned CPU cost on the request
+  path (7.4% of an end-to-end HTTP forward at 500 rules, where the rest is
+  kernel and `net/http`). Its cost was the WORKING SET, not the comparisons:
+  `PolicyRule` is 568 bytes spread over nine cache lines, the scan reads fields
+  on five or six of them per rule, and at 10 000 rules the ~5.7 MB of
+  definitions leaves L2 — which is why the engine scaled superlinearly,
+  7.6 ns/rule at 1 000 rising to 29.3 ns/rule at 10 000. `sortLocked`'s own note
+  diagnosed exactly this ("shrinking what the scan streams per rule is the only
+  thing that can address it") and declined to attempt it. This is that change.
+
+  A rule's destination FQDN is the first thing `matchDestNorm` tests and the
+  most common access-rule scope in a gateway rulebase, so it is the
+  discriminator worth packing. Publication now also emits a **16-byte row per
+  rule** in one contiguous array — four rows per cache line, hardware
+  prefetchable — holding the two facts a mismatch is provable from without
+  touching the definition: the shortest host that can match, and the pattern's
+  trailing bytes packed into one word. `hostutil.MatchFQDNNorm` is
+  suffix-anchored in every branch, so a host that is too short, or whose packed
+  trailing bytes differ, cannot match.
+
+  Measured with benchstat over 10 runs per side, back to back on one host
+  (go1.27.3, 4-core Xeon @2.10GHz):
+
+  | benchmark | before | after | delta |
+  | --- | --- | --- | --- |
+  | `PolicyEvaluate_NoMatch/rules=1000` | 10.06 µs | 1.20 µs | **−88.0%** |
+  | `PolicyEvaluate_NoMatch/rules=10000` | 233.9 µs | 12.96 µs | **−94.5%** |
+  | `PolicyEvaluate_MatchLast/rules=10001` | 236.8 µs | 12.76 µs | **−94.6%** |
+  | `PolicyEvaluate_CIDRRules/rules=1000` | 15.51 µs | 1.24 µs | −92.0% |
+  | `PolicyEvaluate_ScheduledRules/rules=1000` | 24.19 µs | 1.23 µs | −94.9% |
+  | `PerfQual_Evaluate/rules=500/nomatch` | 5.08 µs | 638 ns | −87.4% |
+
+  The superlinear knee is gone with it: 29.3 ns/rule at 10 000 rules becomes
+  1.3 ns/rule. Allocations on the scan are unchanged (0 per evaluation on a
+  miss, 1 for the returned `PolicyMatch` on a hit).
+
+  **The index is one-directional and never authoritative.** A row can only make
+  the scan reject a rule the full predicate would also have rejected; nothing is
+  admitted, matched or skipped on a row's word, and every rule that survives the
+  prefilter runs the complete unmodified check sequence. It is paired with its
+  revision by SLICE IDENTITY, so an index published for another revision is
+  discarded rather than applied, and a revision that never reached publication
+  simply gets no prefilter and the pre-change scan. `TestPolicyScanIndex_`
+  `DifferentialOracle` drives the real evaluator twice over randomized
+  rulebases — with the index and without — and requires the selected rule to be
+  identical; `TestPolicyScanIndex_NegativeControl` proves that oracle can fail
+  by feeding it an over-eager row. The Policy Tester's trace path keeps the
+  prefilter off, because it must reach the real predicate behind every reported
+  skip reason.
+
+  **Costs, measured rather than assumed.** Publication grows by one array and
+  one struct — +2 allocations and +2.4% bytes per revision, ~+3–5% of
+  `sortLocked`'s wall time — which matters because publication holds the writer
+  lock that evaluation's RLock waits on. A rulebase no row can prefilter (
+  category-, country- or source-only) publishes **no** index at all and stays on
+  exactly the pre-change path; charging it was measured at +26% on
+  `PolicyEvaluate_CategoryRules/rules=200` and is the reason that case is
+  special-cased rather than tolerated. Two further shapes of the change were
+  measured and backed out for the same reason — a per-width host-tail
+  `[9]uint64` carried in the per-scan struct (+22% on the same benchmark,
+  because the inlined comparison takes its address and the 72 bytes displace the
+  scan's other per-rule state), and folding the scan's two eligibility checks
+  into a helper returning the skip reason (+26%, ~9 ns/rule, because it
+  materializes a string header per rule). Both rejections are recorded beside
+  the code. Rules scoped only by category, category group or country get no
+  prefilter by design; their predicates are not suffix-anchored and are already
+  amortized to O(1) per rule by their own per-scan scratch.
 
 - **A policy publication now allocates one array per revision instead of one
   object per rule.** `sortLocked` cloned every definition with its own
