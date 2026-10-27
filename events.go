@@ -380,6 +380,19 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_tracing_header_rejected_total Client-supplied tracing headers replaced with a generated value because they exceeded the byte limit or carried non-visible-ASCII bytes. Sustained growth means a source is attempting log forgery or log-write amplification through the proxy data plane\n")
 	fmt.Fprintf(w, "# TYPE culvert_tracing_header_rejected_total counter\nculvert_tracing_header_rejected_total{header=\"x_request_id\"} %d\nculvert_tracing_header_rejected_total{header=\"traceparent\"} %d\n",
 		requestIDRejected.Load(), traceparentRejected.Load())
+
+	// CHAOS-92: client-supplied request paths clamped before being retained in
+	// the process log, a block page or the request-log URI. Always emitted, for
+	// the same reason as the oversize-host counter above: the clamp is
+	// unconditional in every build, so a flat zero means "no client has sent a
+	// path over the limit", never "the bound is off". The request itself is
+	// unaffected — enforcement still sees the whole path — so this counter is
+	// the operator's only aggregate signal that a source is attempting
+	// log-write and response-body amplification through the proxy data plane.
+	// The truncation is also visible inline, in the record it happened to.
+	fmt.Fprintf(w, "\n# HELP culvert_retained_path_truncated_total Client-supplied request paths clamped before being retained in a log line, a block page or the request-log URI. Sustained growth means a source is attempting write amplification through the proxy data plane\n")
+	fmt.Fprintf(w, "# TYPE culvert_retained_path_truncated_total counter\nculvert_retained_path_truncated_total %d\n",
+		retainedPathTruncated.Load())
 }
 
 // apiCountryTraffic returns the top destination countries for the dashboard.

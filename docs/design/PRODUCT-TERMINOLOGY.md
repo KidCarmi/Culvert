@@ -25,7 +25,7 @@ is listed under "replaces".
 | **Steering profile** | A PAC traffic-steering ruleset assigning client networks to proxy pools (`internal/pac`, `/api/pac/profiles`, GUI "Steering Profiles") | the fourth distinct "Profile" concept alongside file/decryption/CDR profiles — always say "steering profile," never bare "profile," on this screen |
 | **Proxy pool** (PAC) | The ordered `PROXY a; PROXY b` failover chain a steering profile hands to a client browser (`internal/pac.Pool`, GUI "Proxy Pools") | distinct from **Upstream Proxies** — Culvert's own server-side outbound egress chain (`/api/upstream`); never call the latter a "proxy pool" outside its own screen |
 | **Provider** | An identity provider profile (OIDC/SAML/LDAP; `/api/idp`) | "IdP" acceptable in dense tables |
-| **Appliance** | *Not used.* Culvert deploys as binary/container; the UI says **node** or **instance** | avoid inventing appliance language |
+| **Appliance** | One deployed Culvert system as the operator addresses it ("restart the appliance", "this appliance"): a standalone gateway, or one cluster member viewed from its own console. Used in the legacy GUI, operator runbooks and `/metrics` HELP text; the cross-repo contracts (`CONTRACTS-OWNERSHIP.md`) use it for the Culvert side of the TAC boundary | Do not use for a cluster member as seen from the Control Plane or fleet views — that is **Node**. Do not mass-rename existing uses to "node" or "instance" |
 | **Node** | An enrolled cluster member (`EnrolledNode`) | — |
 | **Cluster** | The CP/DP deployment (`/api/cluster/*`) | "Cluster Nodes" nav label → "Cluster" |
 | **Control Plane / Data Plane (CP/DP)** | Node roles per `controlplane.go` | spell out on first use per screen |
