@@ -2232,6 +2232,104 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `TestIPFilterReplace_*` and the `Replace` republish case in the IPFilter
   mutator inventory.
 
+- Deleting or disabling an identity provider revoked nothing it had already
+  minted (**CHAOS-88**, register row **AU-2**). A `ps_session` cookie carries
+  the asserting profile's id and **the groups that provider asserted**, and
+  `resolveRequestAuth`'s session arm read all of it straight out of the
+  verified cookie without consulting the provider — so a browser holding such a
+  cookie kept its subject and groups for the rest of the session lifetime
+  (8 hours by default, up to 7 days at a raised TTL) after the operator removed
+  the federation. Those groups feed `policyStore.Evaluate` directly, so
+  group-scoped **allow** rules kept matching for a provider that was gone, while
+  `idpRegistry.Delete` answered `204` and the change was audited as a successful
+  `idp.delete`.
+
+  The asymmetry was inside one function: the `Proxy-Authorization: Basic` arm
+  twenty lines below consults `EnabledCredentialProviders()` on every request,
+  as does every other registry consumer — the session arm was the single
+  outlier.
+
+  Fixed as **derived state, not a revocation event**: `sessionProviderLive`
+  (`session_provider_bounds.go`) asks the registry per request whether the
+  session's profile still EXISTS and is ENABLED (`IdPRegistry.ProfileEnabled`),
+  and a refusal degrades to exactly "no cookie" — the client is re-challenged
+  through the existing no-credential dispatch. Only an explicit delete,
+  disable, or removal by a registry replacement revokes: an IdP that is
+  unreachable — a provider that failed to compile, or one retired at the
+  metadata staleness ceiling — is degraded availability, not revocation, so a
+  node restarted during an IdP outage does not log out that IdP's sessions. A `RevokeProvider` entry was deliberately
+  not added: the admin handler is only one writer of the registry
+  (`ReplaceAll` is also reached from config import, config-version rollback and
+  the CP→DP snapshot), whereas the provider set is already durable and already
+  synced fleet-wide, so the absence *is* the revocation and needs no
+  persistence, no gossip, and no expiry.
+
+  **That "already synced fleet-wide" claim was itself false for the one case an
+  operator reaches for, and is fixed here too** (register row **AU-64**,
+  §50.6d). `ConfigSnapshot.IdPProfiles` carried `omitempty`, so a Control Plane
+  whose registry had just become empty serialised no `idp_profiles` key at all;
+  the Data Plane read that as "absent — keep what I have" and skipped. Deleting
+  the **last** identity provider therefore left it stored, enabled and live on
+  every Data Plane node: its sessions kept authenticating with their asserted
+  groups for the full TTL, **and new logins through the removed federation kept
+  working**. Removing a provider while another remained always propagated, which
+  is why it was invisible outside a single-provider deployment. The field now
+  omits `omitempty` and its `config_surfaces` row is `semNilSkipEmptyWipe` +
+  `WireWipeCapable`, which also brings it under
+  `TestConfigSurfaces_SnapshotWireWipe` — the wall that exists for exactly this
+  bug class and had skipped it because the row was labelled `semValidatedSkip`.
+  The apply path already distinguished the two cases, so no logic changed: an
+  empty list is an explicit clear, while a **missing** `idp_profiles` key still
+  means "absent, keep what I have" — which is what an older Control Plane sends
+  and what an unenrolled caller receives, since the field is redacted to nothing
+  and a node polls `GetConfig` before enrollment completes.
+
+  Sessions naming `"local"` (the admin-UI cookie, which has its own roster
+  backstop) and pre-`pvd` legacy sessions are never refused. A session's
+  provider must match an enabled profile id EXACTLY, the bare id every
+  interactive provider stamps. An earlier shape also accepted the
+  prefix-stripped spelling, which let a cookie from a removed `saml:corp`
+  profile ride an unrelated enabled `corp` profile (AU-70).
+
+  **Re-enabling or re-creating a provider under the same id no longer revives
+  the sessions it minted** (register row **AU-65**, §50.6f). With the check
+  being pure "is this profile enabled right now", disabling a compromised IdP
+  and re-enabling it within the session TTL brought every pre-incident cookie
+  back, with the groups it carried. A profile now holds a server-owned session
+  cutoff, `sessionsNotBefore`, stamped when the profile is created (including
+  a re-create under a deleted id) and when it goes from disabled to enabled.
+  Session cookies now carry their mint time (`iat`), and a cookie minted
+  before the cutoff is refused. Nothing else moves the cutoff: not an edit,
+  not a disable, and not an unreachable or retired IdP. Existing profiles
+  carry no cutoff, so the upgrade logs nobody out. The cutoff reaches every
+  node through the existing configuration snapshot. It is visible read-only
+  on `GET /api/idp/{id}` and in the `idp.update` / `idp.create` audit diff.
+  An older release ignores it.
+
+  **Operator-visible:** `culvert_session_provider_revoked_total` (always
+  emitted; counts *requests*, not sessions), `sessionProviderRevoked` on
+  `GET /api/stats`, a banner on the Identity Providers panel, and a
+  rate-limited `AUTH_SESSION_PROVIDER_REVOKED` log line carrying the cumulative
+  count. A step that settles after removing a provider is expected; a count
+  that keeps climbing means clients are not re-authenticating. Runbook:
+  `docs/operator/identity-provider-revocation.md`.
+
+  **Request-forgery barrier on the OIDC discovery fetch.**
+  `fetchOIDCDiscoveryOverNetwork` passed its raw, caller-supplied URL to
+  `http.NewRequestWithContext` while every check in the function measured the
+  *parsed* url beside it — functionally equivalent, since the parsed value came
+  from that same string, but it left the fetched value outside the checks and
+  raised a critical CodeQL `go/request-forgery` alert. It now mirrors the SAML
+  fetcher exactly: a `MatchString` shape barrier on the raw value, and the
+  request built from the parsed url. A structural wall
+  (`idp_fetch_barrier_test.go`) now pins both properties on *both* fetchers, so
+  the SAML/OIDC pair cannot drift apart again — it had produced four findings
+  that way.
+
+  **Recorded, not fixed:** there is still no lever to revoke a single federated
+  subject — `RevokeUser` has one caller, the local account-delete handler, and
+  no admin route (new register row **AU-63**).
+
 - A read-only **viewer** could read the HA join token and from it obtain the
   **cluster CA private key** (SEC-HATOKEN-1). `GET /api/cluster/ha` is gated at
   `RoleViewer` — correctly, it is a dashboard — and on a leader it

@@ -67,8 +67,15 @@ func TestAuthSource_IdPRegistryBasic(t *testing.T) {
 }
 
 // TestAuthSource_SessionCookieProvider: a signed session cookie attributes to
-// the session's Provider — covering the browser-SSO path. A SAML-shaped
-// provider ID proves the scheme-prefixed form round-trips verbatim.
+// the session's Provider — covering the browser-SSO path — and the value is
+// recorded verbatim.
+//
+// The id names the LIVE profile startAuthProxy installs, spelled exactly as the
+// interactive providers stamp it: the bare profile id. CHAOS-88 made a session
+// naming a provider that is not stored and enabled stop being an identity, and
+// AU-70 made that match EXACT (a stripped `saml:<id>` spelling names a
+// different profile), so a fixture with any other spelling would be modelling
+// the removed-provider case rather than ordinary browser SSO.
 func TestAuthSource_SessionCookieProvider(t *testing.T) {
 	backend, _ := startCountingBackend(t)
 	proxyURL := startAuthProxy(t, testProvider(),
@@ -76,7 +83,7 @@ func TestAuthSource_SessionCookieProvider(t *testing.T) {
 	if !sessionSecretSet() {
 		initSessionSecret()
 	}
-	val, err := encodeSession(&Session{Sub: "alice", Email: "alice@example.com", Groups: []string{"engineering"}, Provider: "saml:corp", Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti()})
+	val, err := encodeSession(&Session{Sub: "alice", Email: "alice@example.com", Groups: []string{"engineering"}, Provider: "test-idp", Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti()})
 	if err != nil {
 		t.Fatalf("encode session: %v", err)
 	}
@@ -89,8 +96,8 @@ func TestAuthSource_SessionCookieProvider(t *testing.T) {
 	if !ok {
 		t.Fatal("no OK log entry for the backend host")
 	}
-	if src != "saml:corp" {
-		t.Errorf("auth_source = %q, want %q (session Provider)", src, "saml:corp")
+	if src != "test-idp" {
+		t.Errorf("auth_source = %q, want %q (session Provider)", src, "test-idp")
 	}
 }
 

@@ -174,6 +174,31 @@
   `TestService_EndpointRebindingUsesNewClient` tests endpoint selection, not safety
   of arbitrary endpoint destinations. G704 now blocks new unannotated sites in
   standalone gosec and golangci; root race runs the behavioral tests.
+  The CHAOS-87/88 fetch split (`fetchSAMLMetadataOverNetwork`,
+  `fetchOIDCDiscoveryOverNetwork`) briefly raised four G704 findings (the
+  `http.NewRequestWithContext` and `Client.Do` of each). They are NOT annotated:
+  the reported path could not run. Both fetchers had the signature
+  `func(string) ([]byte, error)`, the shape of package main's injected file-read
+  seams (for example the SaaS feed generation store's `fs.readFile`), and the
+  class-hierarchy call graph resolves a call through a func-typed field to every
+  function of that signature, so the taint analysis saw a request-derived edge
+  into both fetchers that no execution takes. The fetchers now take a distinct
+  `idpRemoteURL` parameter type, which removes the impossible edge and leaves
+  every real call path analysed. The taint that IS real — `POST
+  /api/idp/oidc/discover` carries an admin-supplied issuer, and a SAML profile's
+  `metadata_url` is operator configuration — is controlled in two layers IN the
+  fetching function: shape regexp + `url.Parse` + scheme check +
+  `isPrivateHostContext` refuse a host that resolves private NOW, and
+  `ssrfSafeDialContext` refuses one that resolves public there and private at
+  connect time (DNS rebinding), redirects included. Evidence:
+  `TestChaos87_SAMLMetadataURLShapeBarrier`,
+  `TestChaos87_OIDCDiscoveryURLShapeBarrier`,
+  `TestChaos87_MetadataPreflightsAreBoundedByTheRequestBudget` and the AST wall
+  `TestWall_IdPMetadataFetchersCarryTheRequestForgeryBarrier`. Residual: an
+  operator who can write a profile can still direct the appliance at any PUBLIC
+  URL; that is the feature, and it is bounded by admin RBAC plus the
+  audit-then-`saveConfigVersion` record of the write. The type is not a
+  sanitizer and adds no validation, so it must never be read as one.
 - **Remaining gap:** other cloned transports with a guarded dialer and inherited
   proxy must be reviewed individually. This fix establishes no universal SSRF
   claim for SAML, LDAP, alerts, feeds, release catalogs or the forward proxy.

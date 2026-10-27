@@ -334,7 +334,7 @@ func TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC(t *testing.T
 			Sub:      "alice@example.test",
 			Email:    "alice@example.test",
 			Groups:   []string{"engineering"},
-			Provider: "oidc:corp-oidc",
+			Provider: "oidc:test-idp",
 		},
 	}}
 	backend := setupProxyIdentityE2E(t, provider)
@@ -350,10 +350,15 @@ func TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC(t *testing.T
 	w = httptest.NewRecorder()
 	r = makeRequest(backend.URL, nil)
 	r.AddCookie(sessionCookieForIdentity(t, &Identity{
-		Sub:      "alice@example.test",
-		Email:    "alice@example.test",
-		Groups:   []string{"engineering"},
-		Provider: "oidc:corp-oidc",
+		Sub:    "alice@example.test",
+		Email:  "alice@example.test",
+		Groups: []string{"engineering"},
+		// LIVE, and spelled as the interactive providers stamp it: the bare
+		// profile id of the profile setupProxyIdentityE2E installs. Since
+		// CHAOS-88 a session naming a provider that is not stored and enabled
+		// is no longer an identity, and since AU-70 that match is exact — a
+		// stripped `oidc:<id>` spelling names a different profile.
+		Provider: "test-idp",
 	}))
 	handleRequest(w, r)
 	if w.Code != http.StatusOK {
