@@ -298,7 +298,7 @@ func TestChaos88_OnlyTheExactProfileIDResolves(t *testing.T) {
 	}
 }
 
-// AU-69 (Codex). Profile ids are free-form, so `corp` and `saml:corp` can both
+// AU-70 (Codex). Profile ids are free-form, so `corp` and `saml:corp` can both
 // be configured. A cookie minted by `saml:corp` carries exactly that id. Once
 // `saml:corp` is deleted or disabled, that cookie must be refused even while the
 // unrelated `corp` stays enabled. Stripping the prefix found `corp` and kept

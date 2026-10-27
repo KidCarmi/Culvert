@@ -2181,7 +2181,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   provider must match an enabled profile id EXACTLY, the bare id every
   interactive provider stamps. An earlier shape also accepted the
   prefix-stripped spelling, which let a cookie from a removed `saml:corp`
-  profile ride an unrelated enabled `corp` profile (AU-69).
+  profile ride an unrelated enabled `corp` profile (AU-70).
 
   **Operator-visible:** `culvert_session_provider_revoked_total` (always
   emitted; counts *requests*, not sessions), `sessionProviderRevoked` on

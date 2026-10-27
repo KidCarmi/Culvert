@@ -110,7 +110,7 @@ const sessionProviderLocal = "local"
 // could: profile ids are free-form, so `corp` and `saml:corp` can both exist,
 // and after `saml:corp` was deleted or disabled its cookies failed the exact
 // probe and then passed the stripped one through the UNRELATED enabled `corp`,
-// keeping their identity and groups across the revocation (AU-69, Codex). A
+// keeping their identity and groups across the revocation (AU-70, Codex). A
 // stripped spelling names a different profile, not the same one.
 func sessionProviderLive(provider string) bool {
 	// Raw, untrimmed — see the emptiness note above. A whitespace-only value

@@ -356,7 +356,7 @@ func TestClusterAuth_ProxyTokenProviderParityFixtureStillCoversOIDC(t *testing.T
 		// LIVE, and spelled as the interactive providers stamp it: the bare
 		// profile id of the profile setupProxyIdentityE2E installs. Since
 		// CHAOS-88 a session naming a provider that is not stored and enabled
-		// is no longer an identity, and since AU-69 that match is exact — a
+		// is no longer an identity, and since AU-70 that match is exact — a
 		// stripped `oidc:<id>` spelling names a different profile.
 		Provider: "test-idp",
 	}))

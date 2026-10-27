@@ -73,7 +73,7 @@ func TestAuthSource_IdPRegistryBasic(t *testing.T) {
 // The id names the LIVE profile startAuthProxy installs, spelled exactly as the
 // interactive providers stamp it: the bare profile id. CHAOS-88 made a session
 // naming a provider that is not stored and enabled stop being an identity, and
-// AU-69 made that match EXACT (a stripped `saml:<id>` spelling names a
+// AU-70 made that match EXACT (a stripped `saml:<id>` spelling names a
 // different profile), so a fixture with any other spelling would be modelling
 // the removed-provider case rather than ordinary browser SSO.
 func TestAuthSource_SessionCookieProvider(t *testing.T) {
