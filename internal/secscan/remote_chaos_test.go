@@ -69,7 +69,7 @@ func jsonSidecar(t *testing.T, resp ScanResponse) *httptest.Server {
 
 // countersDelta returns what changed between two snapshots, so gates can assert
 // on process-global counters other tests in this binary also move.
-type delta struct{ timeout, fail, saturated int64 }
+type delta struct{ timeout, fail, saturated, skipped int64 }
 
 func since(before CounterSnapshot) delta {
 	after := Counters()
@@ -77,6 +77,7 @@ func since(before CounterSnapshot) delta {
 		timeout:   after.ScanTimeout - before.ScanTimeout,
 		fail:      after.RemoteScanFail - before.RemoteScanFail,
 		saturated: after.RemoteScanSaturated - before.RemoteScanSaturated,
+		skipped:   after.ScanSkipped - before.ScanSkipped,
 	}
 }
 
@@ -174,9 +175,11 @@ func resetRemoteLogGates(t *testing.T) {
 	t.Helper()
 	lastRemoteFailLog.Store(0)
 	lastRemoteRefusalLog.Store(0)
+	lastRemoteOversizeLog.Store(0)
 	t.Cleanup(func() {
 		lastRemoteFailLog.Store(0)
 		lastRemoteRefusalLog.Store(0)
+		lastRemoteOversizeLog.Store(0)
 	})
 }
 

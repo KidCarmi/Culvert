@@ -175,10 +175,30 @@ for "the scan did not finish in time."
 | Sidecar reports capacity (HTTP 429) | **Fail closed** — refuse | `culvert_remote_scan_saturated_total` + the timeout counter above |
 | Sidecar unreachable / 5xx / unintelligible reply | **Fail open** — forward, counted + alerted | `culvert_remote_scan_fail_total`, `scan_svc_down` alert (register row WK-2b) |
 | Sidecar returns 200 without a verdict | **Fail open**, counted as a fault | `culvert_remote_scan_fail_total`, alert detail `no verdict in response` |
+| Body larger than the **sidecar's own** window (HTTP 413) | **Fail open** — forward, counted + alerted, same posture as the local path's over-limit body | `culvert_scan_skipped_total` (shared with the local path), `scan_skipped` alert, `Source: size_limit` (CHAOS-101) |
 | Content matched by the sidecar | Block | — |
 
+**Align the two scan windows.** Each process derives its window from its OWN
+`security.max_scan_mb`, and nothing reconciles them. Until CHAOS-101 a sidecar
+window NARROWER than the caller's was invisible and unsafe: the sidecar scanned
+the prefix it could read and answered `clean: true` for the whole object, so
+scanning was silently off past its window — and the caller's own over-limit
+signal correctly stayed quiet, because the body fit the CALLER's window. The
+sidecar now refuses that read, but the fix makes the mismatch *visible*, not
+harmless: a mismatched fleet forwards those bodies unscanned (fail open, per the
+table above) and emits `scan_skipped`. Check both sides and set them equal:
+
+```sh
+# the sidecar's own window, and how many bodies it has refused
+curl -s http://scan-svc:8484/health | jq '{scan_window_bytes, oversize_refused}'
+```
+
+`oversize_refused` rising, or `scan_skipped` with `Source: size_limit` on a proxy
+whose own `max_scan_mb` is larger, means the sidecar is the narrower of the two.
+
 **Suggested paging rules on a sidecar deployment.** Every `culvert_scan_*`
-series except `culvert_scan_timeout_total` is structurally zero here, so page on:
+series except `culvert_scan_timeout_total` and `culvert_scan_skipped_total` is
+structurally zero here, so page on:
 
 - `rate(culvert_remote_scan_fail_total[5m]) > 0` — content is being forwarded
   unscanned. This is the one that matters.
@@ -186,6 +206,11 @@ series except `culvert_scan_timeout_total` is structurally zero here, so page on
   leading indicator of budget refusals.
 - `rate(culvert_scan_timeout_total[5m])` rising — users will be seeing
   `403 scan timeout`; §4's triage applies unchanged.
+- `rate(culvert_scan_skipped_total[5m]) > 0` on a sidecar deployment — bodies are
+  being forwarded unscanned because the sidecar's window is narrower than the
+  caller's. Unlike the local path, where this series means "the operator's own
+  configured limit was exceeded", here it means the two windows disagree, which
+  is a misconfiguration to fix rather than a cost to accept.
 
 **Scan exclusions.** Both lists (hosts and SHA-256 hashes) apply in sidecar mode
 and are consulted before the round trip. If you ran a sidecar deployment on a
