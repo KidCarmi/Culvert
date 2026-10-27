@@ -7,7 +7,147 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Diagnostics now warns when OCSP checking is enabled but does not cover
+  inspected HTTPS origins.** The coverage gap (CHAOS-65 OCSP-8) was visible only
+  on the OCSP panel and in a one-time log line; the one-page diagnostics report
+  read as healthy. A new `ocsp_coverage` WARN row (additive, report-only, no row
+  while OCSP is off) names the unchecked paths. No handshake behavior changes.
+
 ### Security
+
+- **Diagnostics reported "session revocation healthy … no drops" while a
+  legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
+  CHAOS-73 bounds what an untrusted origin — cluster gossip, or the on-disk
+  revocations file — may insert into the revocation list, and charges a reason
+  for each refusal. `checkSessionRevocation` summed two of the three:
+  `RevokeOversize` and `RevokeCapacity`, but not `RevokeFarFuture`. A node that
+  dropped only far-future entries took the `diagOK` branch and printed "no
+  refusals, no drops" — on the one authenticated surface whose own contract is
+  that a dropped entry "means a session an operator deliberately killed may
+  still authenticate, here or on another node" (CWE-778; the underlying drop is
+  CWE-613).
+
+  `RevokeFarFuture` is the reason with a benign trigger, which is what made the
+  omission matter. `admitUntrustedLocked` refuses a gossiped entry whose expiry
+  exceeds `now + MaxSessionLifetime + revocationExpirySkew`; that is exactly 7
+  days plus 1 hour, and `POST /api/session-timeout` admits `hours` up to 168 —
+  so at the maximum *supported* session TTL the entire inter-node clock-skew
+  budget is one hour. In a cluster at `session_timeout: 168h` with a peer whose
+  clock runs more than an hour ahead, that peer's legitimate revocations are
+  dropped on the receiving node, the revoked cookie keeps authenticating there
+  for the remainder of its life, and Diagnostics affirmatively said revocation
+  was healthy. The count is now summed, the row names the expiry bound among the
+  causes, and the operator action names clock skew as the benign cause to check
+  FIRST — this file's own rule that a refusal surface must not assert an attack.
+  The bound itself is unchanged: widening `revocationExpirySkew` is a security
+  behavior change and is recorded as an owner decision instead.
+- **Peer-supplied Control Plane addresses reached the Data Plane's process log
+  unsanitized (CWE-117).** `applyAddressesLocked` adopts the CP config
+  snapshot's `cp_addresses` verbatim into the client's address list and states
+  that both lists "are peer-supplied … so they are untrusted log values under
+  the CWE-117 rule" — but four older sinks in the same file printed an address
+  from that same list with a bare `%s`: both of `connect`'s lines and both of
+  `failover`'s. `validateConfigSnapshot` count-caps `cp_addresses` at 100 and
+  never validates an entry as `host:port`, so a newline inside one forged
+  records in the DP's process log and in every downstream syslog/OTLP consumer.
+  All four now use `sanitizeLog` with `%q`, and the failover line sanitizes the
+  wrapped error too, since it carries the same address. Pinned by a source gate
+  so a fifth sink cannot reintroduce it. A hostile Control Plane already
+  dictates the Data Plane's policy, so the marginal impact is log integrity —
+  but the convention is the convention, and the inconsistency sat inside one
+  file.
+- **A sixth log sink retained the decrypted inner request path, unbounded, after
+  CHAOS-92 bounded the other five (CHAOS-92e).** The CHAOS-92 sweep enumerated
+  three retaining sink families and clamped each at a chokepoint, with a source
+  gate to keep future sinks bounded. The gate matches call sites carrying both
+  `sanitizeLog(` and `URL.Path` — so it never examined
+  `fileblock.LogBlock`, which sanitizes in the callee (`obs.Sanitize`, the
+  independent internal twin, ADR-0003) and writes the client-chosen path into the
+  50 MB/one-archive rotating process log as `FILE_BLOCKED (tunnel %s)`. Six
+  `emitFileBlock` call sites reach it, four of them passing `req.URL.Path`
+  straight from the decrypted inner request.
+
+  It is worse per request than the five that were fixed: those are fed by a path
+  net/http caps at `MaxHeaderBytes + 4096`, while this one is fed by
+  `http.ReadRequest` on the decrypted stream — `readRequestLimit(b,
+  math.MaxInt64)` over a `textproto.ReadLine()` with no limit — so the inner
+  request line is unbounded on the wire. Measured through the emitter: a 1 MiB
+  path wrote 1 048 646 log bytes, and a 1 MiB path of `0xFF` wrote 4 194 375,
+  because `obs.Sanitize` folds control bytes but `0xFF` is not one and `%q`
+  renders each as the 4-character `\xff`. Every write succeeds, so the logsink
+  backpressure counter and every storage-health surface stay green while the
+  retained record rotates away (CWE-778, OWASP A09:2021). Reachability is the one
+  CHAOS-69 named for the inner path — an allowed destination with SSL inspection
+  enabled — not CHAOS-92's stock-install reachability.
+
+  `emitFileBlock` now clamps with the sweep's own `boundRetainedPath`, inside the
+  `fileblock.LogBlock` argument so the sanitiser's scan and its copy are bounded
+  too. It is package main's only route into `LogBlock`, so one edit bounds all
+  six call sites, and a source gate now fails on a direct
+  `fileblock.LogBlock`/`BlockConn` call from package main. **Enforcement and the
+  client-visible response are untouched**: every matcher ran on the whole value
+  at the call site before the emitter, and the 403 body derives from the
+  extension and source only — pinned by a control that asserts the emitted bytes
+  are identical at 16 B and 1 MiB. Recorded with its measurements in
+  `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53.11.
+- **The `file_profile_resolution` diagnostics row went blind to the very rules
+  SEC-POLICYACTION-1 taught the request path to honour.** That change made
+  `applyPolicyDecision` (`proxy.go`) dispatch on `canonicalPolicyAction`, which
+  folds ASCII case and resolves an EMPTY action to Allow — so a rule persisted as
+  `"allow"`, `"ALLOW"` or with no action at all (the shape an operator-managed
+  `policy_file` or a replayed CP snapshot produces) now reaches the `ActionAllow`
+  branch and really does have `FileProfileBlocked` evaluated against it.
+
+  `fileProfileEnforced` (`file_profile_health.go`) still compared the RAW action,
+  so it answered "not enforced" for exactly those rules. With a dangling
+  `FileProfileID`, every file-bearing transaction such a rule matched was blocked
+  fail-closed — correctly — while the row reported `ok`. That row exists for one
+  purpose: to tell an administrator whose users report "downloads are blocked"
+  why, instead of sending them to SSH and `grep`. Its own stated contract is
+  "ever evaluated by `FileProfileBlocked` on the request path", so it has to read
+  the action the way the request path does, and it now does. Enforcement is
+  untouched — the predicate feeds only the diagnostics row — and the negative
+  control is pinned too: an action this build cannot dispatch at all is blocked
+  outright by the fail-closed branch, so its profile is never evaluated and the
+  predicate still says so.
+- **An unauthenticated request chose how many bytes Culvert retained, on a stock
+  install (CHAOS-92).** `r.URL.Path` was the last unbounded client-chosen string
+  on the data path. Its two siblings were already closed and neither reaches it:
+  `request_tracing_bounds.go` (SEC-REQID-1) bounds the tracing headers and
+  `proxy_host_bounds.go` (CHAOS-69) bounds the destination authority, whose own
+  "deliberately NOT done" note named the path as its own finding. The path was
+  copied, unbounded, into three retaining sinks — the process log (5 sites), a
+  **buffered HTML response body** (5 sites, through `serveBlockPage`) and the
+  request-log `URI` field (4 sites, through `policyLogURI`). Measured through the
+  real `handleRequest`, with no authentication, no operator opt-in and no
+  configuration (`.exe` is in the shipped `fileblock.DefaultBlockedExts`): a
+  1 048 581-byte path wrote **1 048 636 bytes** to the process log and served a
+  **5 245 731-byte** block page when filled with `'`, because `html/template`
+  escapes it to the 5-byte `&#39;` — so the amplification factor was the
+  client's to choose. Wire-verified rather than only via `httptest`: that target
+  arrives as `r.URL.Path` byte for byte through a real `net/http` server, since
+  the proxy listener sets no `MaxHeaderBytes` and net/http's 1 MiB default
+  governs the request line. The process log is a 50 MB `fileutil.RotatingFile`
+  keeping exactly one archive, and every write **succeeded**, so the logsink
+  backpressure counter, `storageDegraded()` and `storage_write_failed` all
+  reported healthy while the whole retained forensic record rotated away in
+  seconds (CWE-778, OWASP A09:2021). The bound is on **retention, not
+  admission**: a long path can be legitimate, unlike an authority RFC 1035 caps,
+  so refusing the request would be an egress outage — but a truncated path is
+  still a usable log value. Every matcher continues to decide on the **complete**
+  path; clamping what a matcher sees would be fail-open, because truncating the
+  end removes the extension a file-block rule matches. `serveBlockPage` and
+  `policyLogURI` clamp at the chokepoint so one edit bounds every present and
+  future sink, the five log sites clamp inside the `sanitizeLog` argument so the
+  scan and its copy are bounded too, the cut backs off to a UTF-8 boundary, and
+  the retained value carries an explicit marker naming the original length. New
+  counter `culvert_retained_path_truncated_total`. Thirteen gates, seven of them
+  verified to fail against the pre-fix tree with the measured numbers and two of
+  them source gates, so a new sink reintroduces the defect loudly. Full
+  write-up: `roadmap/CHAOS-ENGINEERING-REVIEW.md` §53, which also records the
+  CDR-sidecar filename sink and a >8 KiB refusal tier as open owner decisions.
 
 - **An inspected tunnel's inner-host pin accepted an authority `net/http` will
   not send, so the upstream received no authority at all.** A CONNECT tunnel is
@@ -554,6 +694,51 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **A policy publication now allocates one array per revision instead of one
+  object per rule.** `sortLocked` cloned every definition with its own
+  `new(PolicyRule)` and sorted the clones; it now decides the order first, on a
+  private copy of the live pointers, and clones into ONE contiguous
+  `[]PolicyRule` in publication order. The permutation is identical by
+  construction — the same comparator over the same input sequence, and the clone
+  preserves `Priority` — so this is a layout and allocation change only.
+
+  It is a control-plane cost with a **data-plane consequence**, which is the
+  reason to care: `sortLocked` runs under `ps.mu`, the writer lock, and
+  `evaluationSnapshot` takes the matching RLock before every scan, so a
+  publication stalls ALL policy evaluation for exactly as long as it takes.
+  Every policy edit, config-version restore and cluster config sync pays it.
+
+  Measured with benchstat (n=10, 4-core Xeon @2.10GHz, go1.27.3) on the new
+  `BenchmarkPolicyPublish_SortLocked`: allocations/op **-25% at every rule
+  count**, wall time **1 000 rules 582.4 µs → 483.8 µs (-16.9%, p=0.000)** and
+  **10 000 rules 4.932 ms → 4.034 ms (-18.2%, p=0.002)**, with **no significant
+  change at 100 rules** (54.5 µs → 50.3 µs, p=0.105). `ReplaceAll` inherits it
+  (**100 rules -8.5%**, **10 000 rules -16.1%**); bytes/op is essentially
+  unchanged (-0.4%), because the same definitions are still copied — what goes
+  away is the per-rule allocation, not the data.
+
+  Two negative results are recorded on `sortLocked` itself so they are not
+  re-derived. First, the layout does **not** measurably help the per-request
+  scan: `BenchmarkPolicyEvaluate_NoMatch`/`MatchLast`/`CIDRRules` came out at
+  -3.75% geomean with every size at p > 0.05, because the replaced per-rule
+  `new(PolicyRule)` loop already drew from a single 576-byte size-class span and
+  so was near-contiguous before this change. Second, the engine's superlinear
+  scaling above ~1 000 rules (**7.6 ns/rule at 1 000 → 29.3 ns/rule at
+  10 000**) is the touched working set (~5.7 MB of definitions) leaving L2, not
+  heap scatter; only shrinking what the scan streams per rule can address it,
+  and this change deliberately does not attempt that.
+
+  `TestPolicyPublish_RevisionIsOneContiguousArray` is the regression gate and is
+  **structural, not timed**: the property is worth one allocation out of the ~3
+  a definition clone costs, so a wall-clock or allocation-count bound would have
+  a thin margin and would rot. It asserts the published definitions sit at
+  one-struct stride from a single base, in scan order, and it fails against the
+  pre-change shape (verified). `TestPolicyPublish_OrderingIsUnchangedByTheLayout`
+  is the behavioral control for ordering and for the precompute still landing on
+  the published definitions. `BenchmarkPolicyPublish_EvaluateDuringPublish` is
+  the concurrency arm: evaluation latency with a background publisher holding
+  and releasing the writer lock underneath it.
+
 - A scheduled rule's **timezone is now resolved once per policy evaluation**
   instead of once per rule. Both halves of the per-rule work depend only on
   `(instant, timezone)` and never on the rule, yet `matchScheduleAt` redid both
@@ -903,6 +1088,83 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **CHAOS-73 review rounds.** A genuine revocation whose cookie exceeded the
+  untrusted-origin key bound was dropped when the revocations file was
+  reloaded, so the revoked cookie authenticated again after a restart;
+  locally verified entries are now persisted with a provenance MAC
+  (domain-separated, never the cookie's own signature, never on the gossip
+  wire) and restored past both the size bound and the entry cap, while gossip
+  and legacy entries keep the untrusted rules. Untrusted entries may no longer
+  claim an expiry beyond the maximum session lifetime: such entries are never
+  swept, and enough of them permanently fill the list so that legitimate
+  remote revocations are refused at capacity. A revocation whose durable write
+  failed is repaired by the browser's retry instead of being lost at the next
+  restart. The Control Plane bounds the memory it retains per node, not just
+  the entry count, and clears peer-supplied provenance before storing or
+  re-broadcasting an entry. The refusal counter, its metric help, the
+  `session_revocation` contract row and the runbook no longer assert that a
+  refusal is an attack — a cookie signed under a previous session secret is
+  genuine and unverifiable, and a key rotation makes ordinary browsers
+  produce one. Concurrent revocation saves are serialized end to end: the
+  snapshot and the write under the owner's lock, and the save together with
+  the flag that records whether it landed under the coordinator's, so a
+  writer whose save succeeded can no longer clear the retry a writer whose
+  save failed had just recorded and leave the file behind memory with nothing
+  owed. Reconciled with SEC-REVOKE-1 (already on main), which fixed the same
+  unsigned-cookie write by gating `apiAuthLogout`'s revocation on
+  `decodeSession`: the audit entry keeps that gate, but the revocation is
+  routed through `revokeSessionCookie`'s own MAC verification instead, because
+  `Decode` also refuses an already-revoked token and so blocked the replay that
+  repairs a failed save or reconciles a shorter peer-imported expiry.
+
+- `/api/auth/logout` is on the admin-UI auth middleware's **public** allowlist
+  — correctly, since an expired or already-revoked session cannot authenticate
+  a request and must still be able to clear its own cookie. But
+  `revokeSessionCookie` then base64-decoded whatever cookie arrived, read the
+  expiry out of the *decoded* payload, inserted the payload bytes as the
+  session-revocation key, and rewrote the entire revocations file. **The HMAC
+  was never checked** (CHAOS-73), and the call site's comment asserted the
+  opposite — "HMAC already verified by decodeSession" is true of `Decode` and
+  false here, because `apiAuthLogout` calls the function unconditionally; the
+  `sess != nil` guard above it covers only the audit entry.
+
+  So an **unauthenticated** caller chose the retained key, its **length** and
+  its **expiry**. Measured against the real handler behind a real `net/http`
+  server: a **524,389-byte** forged cookie answered `200` and was retained with
+  a 100-year expiry, which the evictor — keyed on that same attacker-chosen
+  value — can never reclaim; 200 requests carrying 16 KiB each (3.2 MB in)
+  wrote **441 MB** to disk, the amplification running 17x → 34x → 68x → 135x as
+  the request count doubled (**quadratic**, because every insert rewrites the
+  whole file); and in a cluster the entry reaches the payload each Data Plane
+  pushes to the Control Plane every 3 s, so one unauthenticated request to one
+  node's admin port becomes durable state on **every** node. `MergeRevocations`
+  separately accepted 50,000 peer-supplied entries with no cap at all.
+
+  The fix **authenticates rather than bounds**: a revocation key is the payload
+  half of a cookie this appliance signed, so a cookie it did not sign cannot
+  name a session of its own and refusing it loses nothing. Verification costs no
+  availability for the case the public route exists to serve — `Decode` checks
+  the MAC before the expiry, so a genuine *expired* cookie still verifies and
+  still logs out, and it is deliberately not counted as a probe. The two writers
+  authentication cannot reach (cluster gossip, the on-disk file) keep a derived
+  key-size bound and an entry cap with counted refusals; the MAC-verified local
+  path is **exempt** from both, so a real session stays revocable however large
+  its cookie grew. The Control Plane's revocation aggregator is bounded in the
+  same change, the persist is gated on an actual change (which removes the rest
+  of the quadratic term even for authenticated callers), and the expired-entry
+  sweep no longer depends on a read of the exact key — previously an
+  un-clustered node had no evictor at all.
+
+  A refusal stays silent to the caller (same status, body and `Set-Cookie` as a
+  genuine logout) so logout cannot become a cookie-validity oracle. New
+  surfaces: `culvert_session_revoke_refused_total`,
+  `culvert_session_revoke_rejected_total{reason}`,
+  `culvert_session_revocations_tracked`,
+  `culvert_cluster_revocation_drops_total`, a WARN-only `session_revocation`
+  diagnostics row (counts only), and a rate-limited `SESSION_REVOKE_REFUSED`
+  log line. No new alert event and no `/readyz` row. Gates: 21 functions in
+  `session_revocation_chaos_test.go`, with ten mutations each verified failing
+  its gate. Runbook: `docs/operator/session-revocation-plane.md`.
 - The IDNA memo's value bound (`len(norm) > maxMemoHostLen`, 253 bytes) had no
   gate on its main-tier axis: an in-limit host that **expands** past the bound
   through punycode encoding. The long tier's oversize cases exercise the same

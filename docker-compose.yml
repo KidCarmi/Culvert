@@ -168,7 +168,7 @@ services:
       # "-syslog",          "udp://10.0.0.1:514",
       # "-ui-allow-ip",     "10.0.0.0/8,192.168.0.0/16",
       # "-session-timeout", "8",
-      # "-rate-limit",      "200"
+      # "-rate-limit-rpm",  "200"
     ]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]

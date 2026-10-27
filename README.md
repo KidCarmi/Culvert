@@ -41,7 +41,7 @@ docker compose up -d          # a working proxy + admin UI, no config required
 | **TLS inspection** | Opt-in MITM with on-the-fly ECDSA P-256 leaf certs, per-host bypass, bounded leaf cache (10k entries / 1h TTL) |
 | **Policy** | Priority-ordered, first-match rules across 8 condition types; default-deny (Zero Trust); Allow / Drop / Block Page / Redirect actions; per-rule TLS inspect-or-bypass |
 | **Identity** | Local (bcrypt), OIDC (Auth-Code + PKCE), SAML 2.0, LDAP/AD; multi-IdP with email-domain routing; TOTP 2FA; admin RBAC (admin/operator/viewer) |
-| **Content security** | ClamAV antivirus, pure-Go YARA engine, URLhaus + OpenPhish threat feeds, regex DPI on decrypted responses, file-type blocking, domain blocklists, UT1 URL categories, CDR |
+| **Content security** | ClamAV antivirus, pure-Go YARA engine, URLhaus + OpenPhish threat feeds, regex DPI on decrypted responses, file-type blocking, domain blocklists, UT1 URL categories, [CDR](docs/operator/cdr-content-disarm-reconstruction.md) (Content Disarm & Reconstruction via the Sluice sidecar) |
 | **Observability** | Prometheus metrics, live SSE dashboard, structured JSON logs, syslog forwarding (RFC 3164/5424), signed webhook alerts, tamper-evident audit trail |
 | **Distributed** | gRPC Control Plane / Data Plane with mTLS, config-snapshot sync, node groups, per-group bandwidth/QoS, config versioning, rolling upgrades, optional etcd fencing lease for HA |
 | **Supply chain** | Signed release catalog (Ed25519 + Sigstore keyless), digest-pinned image dispatch, SLSA L3 provenance, Cosign-signed artifacts |
@@ -151,7 +151,7 @@ security:
   ip_filter_mode: allow    # allow | block | "" (off)
   ip_list:
     - 192.168.1.0/24
-  rate_limit: 60           # requests/min per IP
+  rate_limit_rpm: 60       # requests/min per IP (canonical key; rate_limit is a deprecated alias)
   max_conns_per_ip: 256
 
 upstream:
@@ -178,7 +178,7 @@ TLS         -ca-path <bundle>  -tls-cert  -tls-key  -ui-no-tls
 Auth        -ui-users-file <db>  -ui-allow-ip <cidrs>  -session-timeout 8
 Filtering   -blocklist  -policy  -geoip-db  -clamav-addr  -yara-rules-dir  -threat-feed-db
 Logging     -logfile  -log-max-mb 50  -request-log <file>  -request-log-max-mb 100  -audit-log  -syslog
-Metrics     -metrics-token  -rate-limit  -otlp-endpoint <url>
+Metrics     -metrics-token  -rate-limit-rpm  -otlp-endpoint <url>
 Control Pl. -cp-grpc-addr  -cp-grpc-cert  -cp-grpc-key  -cp-grpc-ca
 Data Plane  -dp-cp-addr  -dp-node-id  -dp-cert  -dp-key  -dp-ca
 ```
