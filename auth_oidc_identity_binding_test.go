@@ -133,8 +133,8 @@ func TestOIDCAuth_CacheIsTokenBoundNotCallerBound(t *testing.T) {
 	if first.Sub != "canonical-subject" || second.Sub != "canonical-subject" {
 		t.Fatalf("cached identities = (%+v, %+v), want canonical subject", first, second)
 	}
-	if len(provider.cache) != 1 {
-		t.Fatalf("cache entries = %d, want one token-bound entry", len(provider.cache))
+	if provider.cache.len() != 1 {
+		t.Fatalf("cache entries = %d, want one token-bound entry", provider.cache.len())
 	}
 }
 
@@ -330,7 +330,7 @@ func TestOIDCAuth_CacheReturnsDetachedIdentity(t *testing.T) {
 	srv, provider := mockIDP(t, introspectionResponse{Active: true, Sub: "unused"})
 	defer srv.Close()
 	key := cacheKey("", "detached-token")
-	provider.oidcCacheSetIdentityWithExp(key, &Identity{Sub: "canonical", Groups: []string{"engineering"}, Provider: "oidc"}, true, nil)
+	provider.oidcCacheSetIdentityWithExp(key, "", &Identity{Sub: "canonical", Groups: []string{"engineering"}, Provider: "oidc"}, true, nil)
 
 	first, ok, hit := provider.oidcIdentityCacheGet(key)
 	if !hit || !ok || first == nil {

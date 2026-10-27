@@ -7,6 +7,7 @@ package alerts
 // restores it.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -94,8 +95,8 @@ func TestProcessRetryQueue_Empty(t *testing.T) {
 	snapshotRetryQueue(t)
 
 	// Should not panic on empty queue (nil store is also tolerated).
-	processRetryQueue(&Store{})
-	processRetryQueue(nil)
+	processRetryQueue(context.Background(), &Store{})
+	processRetryQueue(context.Background(), nil)
 }
 
 func TestSaveRetryQueueLocked(t *testing.T) {

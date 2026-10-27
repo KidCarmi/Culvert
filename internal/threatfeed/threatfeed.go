@@ -296,9 +296,12 @@ func (tf *Feed) schedulerConfig() feedsched.Config {
 		// next window can recover on its own. A panicked round is charged as a
 		// FAILURE by the scheduler, so a systematically panicking body backs
 		// off rather than retrying at speed.
-		Run: func(context.Context) bool {
+		Run: func(ctx context.Context) bool {
 			var ok bool
-			if obs.SafeCall("threatfeed", func() { ok = tf.syncRound() }) {
+			// CHAOS-93 RT-4: the scheduler's ctx reaches the round. It used to
+			// be dropped here, so the fetches ran on context.Background() and
+			// a stalled feed origin could not be interrupted by SIGTERM.
+			if obs.SafeCall("threatfeed", func() { ok = tf.syncRound(ctx) }) {
 				return false
 			}
 			return ok
@@ -319,13 +322,18 @@ func (tf *Feed) SyncInterval() time.Duration {
 // Retained as the void-returning entry point for the admin API's manual sync
 // and for callers that do not schedule; syncRound carries the outcome the
 // scheduler and the health plane need.
-func (tf *Feed) Sync() { tf.syncRound() }
+//
+// Deliberately NOT bound to an admin request's context: an operator who clicks
+// "sync now" and closes the tab wants the sync, not a cancelled one. The
+// scheduler's rounds are the ones that must be interruptible, and they come
+// through syncRound directly.
+func (tf *Feed) Sync() { tf.syncRound(context.Background()) }
 
 // syncRound performs one sync and reports whether EVERY configured feed
 // fetched cleanly. A partial success is a failure for scheduling purposes: the
 // sources that did fetch are installed (see applySync), but the round is
 // retried on the backoff schedule because one source's coverage is now frozen.
-func (tf *Feed) syncRound() bool {
+func (tf *Feed) syncRound(ctx context.Context) bool {
 	obs.Debugf("ThreatFeed: starting sync")
 	newURLs := make(map[string]entry, 50_000)
 	newDomains := make(map[string]entry, 20_000)
@@ -333,13 +341,13 @@ func (tf *Feed) syncRound() bool {
 	var failedSources []string
 	replacedSources := make(map[string]bool, 2)
 
-	if ok, fail := tf.fetchFeedInto(urlHausTextFeed, sourceURLhaus, "URLhaus", newURLs, newDomains); ok {
+	if ok, fail := tf.fetchFeedInto(ctx, urlHausTextFeed, sourceURLhaus, "URLhaus", newURLs, newDomains); ok {
 		replacedSources[sourceURLhaus] = true
 	} else {
 		failures = append(failures, fail)
 		failedSources = append(failedSources, sourceURLhaus)
 	}
-	if ok, fail := tf.fetchFeedInto(openPhishFeed, sourceOpenPhish, "OpenPhish", newURLs, newDomains); ok {
+	if ok, fail := tf.fetchFeedInto(ctx, openPhishFeed, sourceOpenPhish, "OpenPhish", newURLs, newDomains); ok {
 		replacedSources[sourceOpenPhish] = true
 	} else {
 		failures = append(failures, fail)
@@ -436,8 +444,8 @@ func classifyFailedSources(sources []string) string {
 // returns (0, nil) from fetchTextFeed, and these public feeds are never
 // legitimately empty, so treating it as clean would wipe the feed the same
 // way a hard error used to (caught by review on PR #587).
-func (tf *Feed) fetchFeedInto(feedURL, source, label string, urls, domains map[string]entry) (replaced bool, failure string) {
-	n, err := tf.fetchTextFeed(feedURL, source, urls, domains)
+func (tf *Feed) fetchFeedInto(ctx context.Context, feedURL, source, label string, urls, domains map[string]entry) (replaced bool, failure string) {
+	n, err := tf.fetchTextFeed(ctx, feedURL, source, urls, domains)
 	if err != nil {
 		obs.Printf("ThreatFeed: %s sync failed: %v", label, err)
 		return false, fmt.Sprintf("%s: %v", label, err)
@@ -925,9 +933,9 @@ func (tf *Feed) RemoveDomainAllowlist(domain string) error {
 // A method (pre-extraction it was a package function reading the
 // globalThreatFeed singleton for the allowlist check): the only caller is
 // Sync on the same instance, so behavior is unchanged.
-func (tf *Feed) fetchTextFeed(feedURL, source string, urls, domains map[string]entry) (int, error) {
+func (tf *Feed) fetchTextFeed(ctx context.Context, feedURL, source string, urls, domains map[string]entry) (int, error) {
 	client := &http.Client{Timeout: feedHTTPTimeout}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, feedURL, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, http.NoBody)
 	if err != nil {
 		return 0, fmt.Errorf("build request: %w", err)
 	}

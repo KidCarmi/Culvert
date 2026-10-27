@@ -83,7 +83,7 @@ func TestSyncer_DegradedStoreFailsTheRoundWithoutFetchingOrCrashing(t *testing.T
 	fs := New(db, srv.URL, time.Hour)
 	before := SyncFailures()
 	for i := 1; i <= 3; i++ {
-		if fs.syncRound() {
+		if fs.syncRound(context.Background()) {
 			t.Fatal("a round against a degraded store reported success")
 		}
 		h := fs.Health()

@@ -334,14 +334,16 @@ func TestSECBASIC1_ConcurrentBasicAttempts(t *testing.T) {
 // TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller is the structural wall.
 // The defect was three independent call sites drifting from the login
 // handler's control set; behavioural tests can only cover the sites that exist
-// today, so this fails the build when a FOURTH appears. verifyUIBasicAuth and
-// apiAuthLogin are the only functions permitted to call cfg.VerifyUIUser —
+// today, so this fails the build when a FOURTH appears. checkUIBasicAuth (behind
+// verifyUIBasicAuth and revalidateUIBasicAuth) and apiAuthLogin are the only functions permitted to call cfg.VerifyUIUser —
 // apiAuthLogin because it applies the full control set inline (lockout, TOTP,
 // audit, anti-brute-force delay) and owns the interactive flow.
 func TestSECBASIC1_VerifyUIUserHasNoOtherRequestPathCaller(t *testing.T) {
 	allowed := map[string]string{
-		"verifyUIBasicAuth": "THE admin-plane Basic chokepoint; applies lockout + TOTP refusal + audit",
-		"apiAuthLogin":      "the interactive login handler; applies the same controls inline plus the TOTP challenge",
+		// SEC-BASICAUTH-5: the single call site behind verifyUIBasicAuth
+		// (submission) and revalidateUIBasicAuth (SSE liveness re-check).
+		"checkUIBasicAuth": "THE admin-plane Basic chokepoint; applies lockout + TOTP refusal + audit",
+		"apiAuthLogin":     "the interactive login handler; applies the same controls inline plus the TOTP challenge",
 		// Re-authentication of an ALREADY-authenticated caller for a sensitive
 		// action. The username comes from the session, never the request, so
 		// there is no enumeration surface and no unauthenticated reach; it is a
