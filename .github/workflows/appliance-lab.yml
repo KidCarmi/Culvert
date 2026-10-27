@@ -54,7 +54,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[agent-identity]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[sidecar-exact]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -729,7 +729,7 @@ jobs:
 
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[agent-identity]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[sidecar-exact]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -1500,6 +1500,119 @@ jobs:
           name: appliance-lab-fp2-isolated-${{ matrix.label }}
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
+
+  # ASTRA 27 Oct 10:56 (#1528): the Deep gate scanned a CI-built sidecar
+  # (07da81d4, plain docker build), which is NOT the identity F-P2 accepted
+  # (manifest 91eae575, explicit SOURCE_DATE_EPOCH 1793096442) or the one the
+  # replacement OVA will bake. This rebuilds THAT identity from the pinned
+  # source exactly as the F-P2 candidate arm did, refuses unless both builds
+  # equal the expected manifest, then scans those exact bytes with the shared
+  # sidecar-scan.sh (all-severity record + SBOM + the Deep gate policy) and
+  # retains the archive itself for independent rescans. Opt-in: [sidecar-exact].
+  exact-sidecar-scan:
+    name: "Lab · exact sidecar culvert.4 (manifest 91eae575): reproduce + all-severity scan + SBOM + retained archive"
+    if: ${{ contains(github.event.head_commit.message, '[sidecar-exact]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SRC_COMMIT: "93c83f903edaad7714cba21f07335aaf2f88e1c9"
+      DOCKERFILE_SHA256: "4b08fcf3052345918cfc14fd426b90d7d8695a1cdb96364af541d8e275288234"
+      SIDECAR_REF: "culvert/clamav:1.5.4-culvert.4"
+      ARM_SDE: "1793096442"
+      EXPECT_MANIFEST: "sha256:91eae57526b246da28cb370bd824c45af51e245be0093afcc316bc3fbe941f9d"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Workspace
+        run: |
+          set -euo pipefail
+          best=/; [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ] && best=/mnt
+          sudo mkdir -p "$best/exactsc" && sudo chown "$(id -u):$(id -g)" "$best/exactsc"
+          echo "W=$best/exactsc" >> "$GITHUB_ENV"; mkdir -p "$best/exactsc/evidence" "$best/exactsc/archive"
+      - name: "Docker 29.9.2 / containerd.io 2.4.2-3 on the containerd image store (same engine as the F-P2 candidate build)"
+        run: |
+          set -euo pipefail
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" | sudo tee /etc/apt/sources.list.d/docker-lab.list >/dev/null
+          sudo apt-get update -q
+          v=5:29.9.2-1~ubuntu.24.04~noble c=2.4.2-3~ubuntu.24.04~noble
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" "containerd.io=$c"
+          sudo mkdir -p /etc/docker
+          [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo python3 -c 'import json; p="/etc/docker/daemon.json"; d=json.load(open(p)); d.setdefault("features",{})["containerd-snapshotter"]=True; json.dump(d,open(p,"w"))'
+          sudo systemctl restart docker
+          for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
+          docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee "$W/evidence/docker-engine.txt" | grep -q 'server=29.9.2 .*io.containerd.snapshotter.v1'
+      - name: Reproduce the F-P2-accepted identity (two no-cache builds, both must equal the expected manifest)
+        run: |
+          set -euo pipefail
+          cd "$W"; E="$W/evidence"
+          docker buildx version | tee "$E/docker-version.txt"
+          git -C "$GITHUB_WORKSPACE" fetch -q --depth=1 origin "$SRC_COMMIT"
+          mkdir -p ctx
+          git -C "$GITHUB_WORKSPACE" show "$SRC_COMMIT:appliance/clamav/Dockerfile" > ctx/Dockerfile
+          git -C "$GITHUB_WORKSPACE" ls-tree "$SRC_COMMIT" appliance/clamav/ | tee "$E/source-tree.txt"
+          [ "$(git -C "$GITHUB_WORKSPACE" ls-tree "$SRC_COMMIT" appliance/clamav/ | wc -l)" -eq 1 ] || { echo "::error::build context is not the single Dockerfile"; exit 1; }
+          got="$(sha256sum ctx/Dockerfile | cut -d' ' -f1)"
+          echo "$got  appliance/clamav/Dockerfile @ $SRC_COMMIT" | tee "$E/dockerfile.sha256"
+          [ "$got" = "$DOCKERFILE_SHA256" ] || { echo "::error::Dockerfile sha256 $got, expected $DOCKERFILE_SHA256"; exit 1; }
+          echo "SOURCE_DATE_EPOCH=$ARM_SDE ($(date -u -d "@$ARM_SDE" +%Y-%m-%dT%H:%M:%SZ), commit time of $SRC_COMMIT)" | tee "$E/source-date-epoch.txt"
+          build() { docker buildx build -q --no-cache --platform linux/amd64 --provenance=false --sbom=false \
+              --build-arg SOURCE_DATE_EPOCH="$ARM_SDE" \
+              --output "type=oci,dest=$1,name=$SIDECAR_REF,rewrite-timestamp=true" ctx >/dev/null; }
+          top() { tar -xOf "$1" index.json | python3 -I -c 'import json,sys; m=json.load(sys.stdin)["manifests"]; assert len(m)==1, len(m); print(m[0]["digest"])'; }
+          build first.tar; build rebuild.tar
+          d1="$(top first.tar)"; d2="$(top rebuild.tar)"
+          echo "build 1: $d1"$'\n'"build 2: $d2"$'\n'"expected (F-P2 run 40487883047): $EXPECT_MANIFEST" | tee "$E/reproducible.txt"
+          [ "$d1" = "$d2" ] || { echo "::error::not reproducible ($d1 vs $d2)"; exit 1; }
+          [ "$d1" = "$EXPECT_MANIFEST" ] || { echo "::error::rebuilt manifest $d1 is not the F-P2-accepted $EXPECT_MANIFEST"; exit 1; }
+          cmp first.tar rebuild.tar && echo "the two OCI archives are byte-identical" | tee -a "$E/reproducible.txt" || echo "the two OCI archives differ outside the manifest graph" | tee -a "$E/reproducible.txt"
+          rm -f rebuild.tar
+          gzip -n -6 < first.tar > archive/clamav.tar.gz
+          ( cd archive && sha256sum clamav.tar.gz ) | tee "$E/archive.sha256"
+          sha256sum first.tar | tee -a "$E/archive.sha256"
+          docker load -q -i first.tar | tee "$E/docker-load.txt"
+          id="$(docker image inspect -f '{{.Id}}' "$SIDECAR_REF")"
+          echo "loaded $SIDECAR_REF -> image id $id" | tee "$E/loaded-id.txt"
+          [ "$id" = "$EXPECT_MANIFEST" ] || { echo "::error::loaded id $id is not $EXPECT_MANIFEST"; exit 1; }
+          docker run --rm --network none --entrypoint sh "$id" -c "apk info -v 2>/dev/null | sort" > "$E/apk-packages.txt"
+          wc -l < "$E/apk-packages.txt" | sed 's/^/apk packages: /' | tee -a "$E/apk-packages.count"
+      - name: Bind archive → manifest → config (every blob re-hashed)
+        run: |
+          set -euo pipefail
+          cfg="$(test/e2e/appliance/lab/sidecar-scan.sh bind "$W/first.tar" "$EXPECT_MANIFEST" top "$W/evidence/binding.json")"
+          cat "$W/evidence/binding.json"
+          echo "SIDECAR_CONFIG=$cfg" >> "$GITHUB_ENV"
+      - name: Reachability record for these exact bytes
+        run: test/e2e/appliance/lab/sidecar-scan.sh reach "$W/first.tar" "$W/evidence/binding.json" "$W/rootfs" "$W/evidence"
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
+        with:
+          version: v0.69.3
+          cache: true
+      - name: Scan the exact archive (all severities + SBOM + Deep gate policy)
+        run: |
+          set -uo pipefail
+          gate=0; test/e2e/appliance/lab/sidecar-scan.sh trivy "$W/first.tar" "$SIDECAR_CONFIG" "$W/evidence" || gate=$?
+          {
+            echo "### Exact sidecar $SIDECAR_REF — reproduced manifest \`$EXPECT_MANIFEST\`"
+            echo "config \`$SIDECAR_CONFIG\` (Trivy ImageID matches)"
+            echo; echo '```'; cat "$W/evidence/severity-summary.json" "$W/evidence/sbom-summary.txt" 2>/dev/null; echo '```'
+            echo "Deep-gate policy (no fixable HIGH/CRITICAL): exit $gate"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$gate"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: appliance-lab-exact-sidecar-scan-culvert.4
+          path: ${{ env.W }}/evidence/
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: success()
+        with:
+          name: appliance-lab-exact-sidecar-archive-culvert.4
+          path: ${{ env.W }}/archive/clamav.tar.gz
+          if-no-files-found: error
+          compression-level: 0
 
   # F-P2 CAUSAL control (owner follow-up 6097484537 item 2): ClamAV 1.4.6
   # built from the release source twice on one runner — STOCK, and PATCHED
