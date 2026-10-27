@@ -785,6 +785,58 @@ func TestChaos79_OwedRevocationPersistIsDischargedOnShutdown(t *testing.T) {
 	}
 }
 
+// TestChaos79_OwedRevocationPersistStaysOwedWhenTheWriteFails pins the half of
+// the coordinator reroute that nothing else did.
+//
+// main (#1591) serializes every revocation save through persistRevocations and
+// walls off a direct SaveRevocations in package main, so this round's owed-write
+// retry goes through the coordinator. The coordinator reports whether THIS
+// call's write landed, and the per-client owed flag must be cleared only on
+// that — not on the process-wide dirty flag, which another writer's success
+// clears. Clearing it on anything else strands this round's merge in memory:
+// nothing retries, and a restart inside that window accepts the revoked
+// cookies, which is the original P1 reintroduced one level down.
+//
+// Mutation-checked: dropping the return-value test (persistRevocations(); then
+// Store(false) unconditionally) left the whole suite green before this gate
+// existed, so the invariant was carried by reasoning alone.
+func TestChaos79_OwedRevocationPersistStaysOwedWhenTheWriteFails(t *testing.T) {
+	t.Cleanup(sessionRevoked.SwapForTest())
+	resetSessionRevocationsDirtyForTest()
+	t.Cleanup(resetSessionRevocationsDirtyForTest)
+
+	// A path under a directory that does not exist, so SaveRevocations fails
+	// and persistRevocations reports false.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no-such-dir", "revocations.json")
+	defer withRevocationsPath(t, path)()
+
+	entry := chaos79Entry("chaos79-writefail", time.Now().Add(time.Hour).Unix())
+	if added := sessionRevoked.MergeRevocations([]RevocationEntry{entry}); added != 1 {
+		t.Fatalf("priming merge added %d, want 1", added)
+	}
+
+	c := &DataPlaneClient{nodeID: "chaos79"}
+	c.revocationsUnsaved.Store(true)
+
+	c.persistOwedRevocations()
+
+	// Anti-vacuity: the gate is only meaningful if the write genuinely failed.
+	// If SaveRevocations ever creates the parent directory, this fixture stops
+	// exercising the failure path and the assertions below prove nothing.
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("the fixture no longer fails the write, so this gate proves nothing")
+	}
+
+	if !c.revocationsUnsaved.Load() {
+		t.Error("a FAILED persist cleared the owed flag — this round's merge is now in memory " +
+			"only, nothing retries it, and a restart accepts those revoked cookies")
+	}
+	if !sessionRevocationsDirty.Load() {
+		t.Error("a failed persist left the shared dirty flag clear, so no later logout retries it")
+	}
+}
+
 // TestChaos79_MarkerConsumeIsSerializedAgainstAConcurrentApply is the gate for
 // the cross-path interference: the depth counter is process-global and this
 // node's config round is not the only applier (an HA standby sync applies a

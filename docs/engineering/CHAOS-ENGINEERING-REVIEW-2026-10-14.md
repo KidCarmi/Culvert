@@ -212,7 +212,7 @@ Branch `claude/serene-cerf-4brbca`, three files:
 - `controlplane_snapshot.go` — `reportDroppedStartupOrderSlices`, called at the
   end of `applySnapshotExtendedState`, reports a CP-authoritative slice dropped
   because its store does not exist yet.
-- `chaos79_dp_sync_worker_panic_test.go` — 13 gates (§8).
+- `chaos79_dp_sync_worker_panic_test.go` — 24 gates: the 13 in §8, plus the review-driven ones in §6a.
 
 No behavior changes on any healthy path: a clean round is byte-identical to
 before, and the `continue`→`return` rewrites inside the extracted rounds
@@ -359,6 +359,39 @@ which is a different question from whether the fix is right.**
 
 ---
 
+### The coordinator reroute, and the invariant nothing pinned
+
+**A later merge from main moved this fix's write behind a coordinator, kept the
+property correct by reasoning, and left nothing that would notice if it
+stopped being correct.** main (#1591) serialized every revocation save through
+`persistRevocations` and walled off a direct `sessionRevoked.SaveRevocations()`
+in package main, so the merged tree failed that wall: `persistOwedRevocations`
+called it directly and its save raced the logout path's. The resolution routed
+the retry through the coordinator, which now reports whether **this** call's
+write landed, and clears the per-client owed flag only on that — because the
+process-wide dirty flag is cleared by any writer's success, so reading it
+instead would let a concurrent logout strand this round's merge.
+
+That reasoning is right, and it was load-bearing: clearing the owed flag
+regardless of the coordinator's return reintroduces the original P1 one level
+down, since the merge then lives in memory with nothing owing it. Mutating
+exactly that — `persistRevocations()` followed by an unconditional
+`Store(false)` — left the entire suite **green**. The invariant was carried by
+the commit message alone.
+
+`TestChaos79_OwedRevocationPersistStaysOwedWhenTheWriteFails` now pins it,
+driving a genuinely failing write (a revocations path under a directory that
+does not exist) and requiring both the per-client flag and the shared dirty
+flag to stay set. It carries an anti-vacuity guard: if `SaveRevocations` ever
+starts creating the parent directory, the fixture stops exercising the failure
+path, and the gate fails loudly rather than passing for the wrong reason.
+
+The general form, for the next person who reroutes a fail-closed write: **a
+merge that preserves a property by reasoning has not preserved it, because the
+next edit will not read the merge commit.** Three of the five review findings on
+this change were about a mechanism being right and its scope too narrow; this
+one is about a mechanism being right and nothing holding it there.
+
 ## 7. Residual Risk / deliberately left
 
 - **CHAOS-80 is reported, not repaired.** The real fix is to construct the
@@ -443,7 +476,7 @@ test binary*, which is the defect itself:
 
 | Gate | Pre-fix result |
 |---|---|
-| `TestChaos79_ConfigRoundPanicIsContainedAndMarksApplyRejected` | FAIL — binary died inside `fetchAndApply` |
+| `TestChaos79_ConfigRoundPanicIsContainedAndCounted` | FAIL — binary died inside `fetchAndApply` (renamed from `...AndMarksApplyRejected`: the original name asserted the Codex P2 defect, see §6a) |
 | `TestChaos79_PollLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
 | `TestChaos79_MetricsLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
 | `TestChaos79_RevocationLoopSurvivesEveryPanickingRound` | FAIL — binary died on round 1 |
@@ -470,7 +503,9 @@ stopped firing, or that it fires unconditionally:
   components, so a config fault can never be mistaken for an audit fault in
   `culvert_crash_records_total{component}`.
 
-**Counts.** 13 new gates (11 CHAOS-79, 2 CHAOS-80) in one new root file.
+**Counts.** 24 new gates (22 CHAOS-79, 2 CHAOS-80) in one new root file. The 13
+above are the original submission; the other 11 were added by the review rounds
+in §6a, each against the defect that round found.
 
 **Commands and results** (Go 1.26.9 from `go.mod`'s `toolchain`):
 
