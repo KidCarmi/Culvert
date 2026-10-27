@@ -1,0 +1,23 @@
+# live sudoers precedence proof — run at 2026-10-27T08:12:40Z
+# source: 10b46a2e3cccd4dff67ee878d6aa6411f795bb39 (pin commit 5c4c2be8 is its ancestor: yes); manifest/test files unchanged vs 5c4c2be8: yes
+# uid=0 go version go1.27.3 linux/amd64 sudo=Sudo version 1.9.15p5
+## BEFORE: test accounts / sudoers.d
+accounts-matching-cvsudotest: 0
+total 12
+drwxr-xr-x   2 root root 4096 Oct 26 12:31 .
+drwxr-xr-x 100 root root 4096 Oct 27 08:12 ..
+-r--r-----   1 root root 1068 Jan 29  2024 README
+## TEST
+=== RUN   TestSudoPolicy_LiveLastMatchPrecedence
+    appliance_firstboot_test.go:842: live sudoers precedence proven on cvsudotest617: 90-password refuses -n; 95-NOPASSWD overrides; 10-NOPASSWD loses
+--- PASS: TestSudoPolicy_LiveLastMatchPrecedence (5.14s)
+PASS
+ok  	github.com/KidCarmi/Culvert	5.253s
+go-test-exit=0
+## AFTER: test accounts / sudoers.d / home dirs
+accounts-matching-cvsudotest: 0
+total 12
+drwxr-xr-x   2 root root 4096 Oct 27 08:16 .
+drwxr-xr-x 100 root root 4096 Oct 27 08:16 ..
+-r--r-----   1 root root 1068 Jan 29  2024 README
+ls: cannot access '/home/cvsudotest*': No such file or directory

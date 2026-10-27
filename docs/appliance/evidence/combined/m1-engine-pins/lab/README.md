@@ -35,11 +35,19 @@
 | 4–5 setup + enforcement | PASS | Setup token; deny default; real egress allow/deny. The ClamAV sidecar is up from the baked archive (`--no-build`) and `/ready clamav ok`. UT1 category sync and a category rule. |
 | 6 maintenance agent | PASS | Agent reachable over its socket via sudoers. Backup through the agent, listed. Restore dry-run. Live commit refused. down → restore → up. |
 | 6c signed update | PASS | Unsigned apply refused 403. Signed apply → target image. **Agent rollback** → baseline `ca27cf9a`. |
-| 7–8 OS update + reboot | PASS | `culvert-os-update`, then reboot: back in 31 s. **Docker still held, engine 29.9.2.** Stack resumed; policy, CA (PSCA at rest), support bundle and backup all persisted. |
-| E engine surface | PASS | **`engine-version`**: docker-ce 29.9.2, containerd.io 2.4.2-3, running dockerd 29.9.2 (go1.26.10), running containerd v2.4.2. No TCP listener, root-only sockets, **CRI still disabled** (`disabled_plugins=["cri"]`), 67 denied modules, kernel unchanged. |
+| 7–8 OS update + reboot | PASS | `culvert-os-update`, then reboot: back in 31 s. **Docker still held, engine 29.9.2.** Stack resumed; policy, CA (PSCA at rest), support bundle and backup all persisted. The OS update installed and upgraded nothing but **removed 34 packages** (see the correction below). |
+| E engine surface | PASS | **`engine-version`**: docker-ce 29.9.2, containerd.io 2.4.2-3, running dockerd 29.9.2 (go1.26.10), running containerd v2.4.2. No TCP listener, root-only sockets, the **CRI API plugin not loaded** (`io.containerd.grpc.v1 cri` absent, `disabled_plugins=["cri"]`; the `io.containerd.cri.v1` images/runtime plugins are still present), 67 denied modules, kernel unchanged. |
 | R recovery | PASS | 3 maintenance reboots recovered in 36.9 s / 41.7 s / 36.6 s (budget 60 s). EICAR is blocked by ClamAV after each reboot. |
 | H history | PASS | Encrypted history export. Volume destroyed and restored into a fresh volume with a rotated log key. 12 records re-imported, identical. |
 | P disk pressure | PASS | Full **blocks**, full **inodes**, and package-write ENOSPC. Traffic stays blocked with no EICAR delivered. `/ready` fails truthfully. App update fails with nothing changed; backup is complete or refused cleanly. dpkg recovers once space returns. Proxy is never restarted; Docker stays held. |
+
+## Corrections (ASTRA, 27 Oct)
+
+- **"0 package actions" was wrong.** The harness check text for the OS update said 0 package actions. `07-os-update.txt` actually shows `0 upgraded, 0 newly installed, 34 to remove`: an autoremove-purge of `ubuntu-kernel-accessories` and its dependents, including `bpftrace`, `bpfcc-tools`, `python3-bpfcc`, `linux-tools-common`, `libllvm18`, `libc6-dev` and `squashfs-tools`. The kernel and Docker stayed held.
+- **The same 34-package removal happens on the baseline.** The unmodified-OVA run 40185226897 shows the identical set, so this is **pre-existing** and not caused by the engine change.
+- **The removal shows these packages ship in the OVA** until the first OS update removes them. That is recorded for the revised BOM and the M2 surface (BPF tooling on disk), not changed here.
+- **Post-maintenance observations are not first-boot inventory.** The engine-surface rows were taken after that OS update and must not be read as the first-boot package inventory.
+- **"CRI still disabled" is narrowed.** It means only that the CRI **API** plugin is not loaded. The CRI image and runtime plugins are present.
 
 ## Run 40337235215 (superseded)
 

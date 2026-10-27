@@ -98,7 +98,12 @@ Go toolchains (`go version`):
 ## Compatibility checks done here
 
 - **Manifest parses** (`bash -n`, sourced): the four pins resolve to the values above.
-- **Root tests that consume `manifest.env` or the appliance install path** (archive closure, CI lane, ClamAV image helper, first boot, scan closeout, cosign pin, installer local-images / sidecar-start / host-refresh) pass **76/76** under go1.27.3 (`raw/root-tests.log`). That includes the opt-in live sudoers precedence proof, run as root with `CULVERT_SUDO_POLICY_LIVE=1`, which cleaned up its temporary user.
+- **Root tests that consume `manifest.env` or the appliance install path** (archive closure, CI lane, ClamAV image helper, first boot, scan closeout, cosign pin, installer local-images / sidecar-start / host-refresh) under go1.27.3: `raw/root-tests.log` shows **75 PASS, 1 SKIP, 0 FAIL**. The skip is `TestSudoPolicy_LiveLastMatchPrecedence`, which is opt-in (`CULVERT_SUDO_POLICY_LIVE=1`, root + sudo).
+- **Correction (ASTRA, 27 Oct):** the first version of this README, and commit `5c4c2be8`'s message, claimed **76/76** including that live proof. The live test *was* run separately as root on 26 Oct, but its output was never saved, so the claim was unsupported by the published log.
+- **The live test was re-run on 27 Oct with a raw receipt** (`raw/root-tests-live-sudoers.log`):
+  - **PASS** with `go-test-exit=0`;
+  - source `10b46a2e`, with `appliance_firstboot_test.go` and `appliance/` byte-identical to `5c4c2be8`;
+  - **cleanup receipt:** 0 `cvsudotest*` accounts, an unchanged `/etc/sudoers.d` (README only) and no home directory, both before and after.
 
 ## Not done here (lab, separate go-ahead)
 
