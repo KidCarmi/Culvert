@@ -24,6 +24,61 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The scan sidecar reported a truncated read as `clean: true`, so content past
+  its own window was admitted with an affirmative clean verdict (CHAOS-101).**
+  `scan_svc.go` `handleScan` read `io.LimitReader(body, maxBytes+1)` — the
+  classic overflow probe — and then never compared `len(data)` against
+  `maxBytes`, so it paid for the probe byte and discarded what it proved. The
+  reply then carried the PREFIX's verdict as the whole object's, and
+  `secscan.ScanResponse` has no truncation field to say otherwise.
+
+  No code bug is needed to reach this, only configuration: each process derives
+  `maxScanBufferBytes()` from its OWN `security.max_scan_mb`, and nothing
+  reconciles the caller's window with the sidecar's — which is precisely the
+  topology the handler's own doc comment recommends ("multiple proxy instances
+  sharing one scanner"). A fleet of 20 MiB proxies in front of a sidecar left at
+  the 5 MiB default had scanning silently off for every byte past 5 MiB, with no
+  counter, no log line and no alert anywhere, and the caller's own overflow
+  signal correctly did not fire because the body fit the CALLER's window. The
+  in-process path has had a signal for this exact event since Finding 4.2
+  (`logScanLimitExceeded`: counter, one log line, `scan_skipped` alert); the
+  process-isolated deployment recommended as the *remedy* for the local path's
+  failure modes was the one without it.
+
+  `handleScan` now uses the probe byte and refuses with 413 rather than
+  answering for a prefix. The probe byte is still scanned, so a signature that
+  ends on it blocks exactly as before the fix rather than drawing a fail-open
+  413. It also publishes `oversize_refused` and
+  `scan_window_bytes` on `/health` — it is the only process that knows its
+  window, and an operator needs it to compare against the caller's.
+
+  **Ordering is the correctness argument.** Refusing on size FIRST — the obvious
+  shape — turns a body whose malware sits inside the window into a 413, which
+  the client classifies as a size limit and therefore forwards fail-open: the
+  one case where the sidecar holds a real block verdict is the case the refusal
+  would throw away, so the "safe" check would have admitted content the unfixed
+  code blocked. The verdict therefore wins and truncation is not reported at all
+  on a block, the same asymmetry `readScanPrefix` documents for the local path.
+  A negative control pins it, and failed against the first draft of this fix.
+
+  Client side, 413 is classified as the size limit it is and charges the LOCAL
+  path's vocabulary — `statScanSkipped`, hence `culvert_scan_skipped_total`, and
+  the `scan_skipped` alert with `Source: "size_limit"` — for the same reason
+  `remoteScanRefused` reuses the timeout vocabulary: it is the same decision, so
+  one phenomenon keeps one counter and one alert class whichever window clipped
+  the object, and an operator already alerting on `scan_skipped` needs no second
+  name. A load balancer in front of the sidecar enforcing its own smaller body
+  limit returns 413 for the same reason, so the classification is right there
+  too; every other status keeps its fault classification.
+
+  Operators running a mismatched fleet will see NEW `scan_skipped` volume on
+  upgrade. That volume is the defect becoming visible, not a regression; the
+  remedy is named in the log line and measurable from `/health`. The posture for
+  oversize bodies is the local path's, unchanged: fail-open, counted and
+  alerted. Refusing the object outright is the safer answer and a real option,
+  but it is a posture change for large downloads that no operator asked for, and
+  is left to the owner as the open half of CHAOS-101.
+
 - **Diagnostics reported "session revocation healthy … no drops" while a
   legitimate remote revocation had in fact been dropped (SEC-REVDIAG-1).**
   CHAOS-73 bounds what an untrusted origin — cluster gossip, or the on-disk

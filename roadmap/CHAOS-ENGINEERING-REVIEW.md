@@ -120,6 +120,85 @@ bounds `r.URL.Path`, which reaches the process log, a buffered HTML response
 body and the policy decision lines on a stock install. Findings, measurements
 and gates are written up in §53 below.
 
+**2026-10-24 — `CHAOS-101` CLAIMED (placeholder, commit one; renumbered from
+`CHAOS-88`).** Id allocated in this committed line before any code was written,
+per the convention the header above reaches twice independently. It was first
+claimed as `CHAOS-88` (`CHAOS-86` was the highest id written up in this
+register and `CHAOS-87` was held by an open sweep, PR #1485), but `CHAOS-88` was
+also allocated to the open sweep in PR #1564 and `CHAOS-89`–`CHAOS-100` were
+taken or allocated before this merged, so it was renumbered to `CHAOS-101`.
+Only the id moved; the finding, fix and tests are unchanged. Scope: the
+**scan sidecar's own buffer window** (`scan_svc.go` `handleScan`) — the
+process-isolated deployment that the CHAOS-52 runbook recommends as the remedy
+for the in-process scanner's failure modes. Findings, risk matrix and
+verification are written up in [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-24.md).
+
+- **`CHAOS-101` — the scan sidecar answered `clean: true` for a body it had only
+  partially read.** `handleScan` read `LimitReader(body, maxBytes+1)` — the
+  classic overflow probe — and then never looked at the probe byte, so the
+  prefix's verdict was reported as the whole object's. The two scan windows are
+  independent by construction (each process derives `maxScanBufferBytes()` from
+  its own `security.max_scan_mb`), so no code bug is needed: a 20 MiB proxy
+  fleet in front of a sidecar left at the 5 MiB default had scanning silently
+  off past 5 MiB, with no counter, no log and no alert — and the caller's own
+  overflow signal correctly did not fire, because the body fit the CALLER's
+  window. The in-process path has had the signal for this exact event since
+  Finding 4.2 (`logScanLimitExceeded`); the deployment recommended as the
+  *remedy* for the local path's weaknesses was the one without it.
+
+  **The load-bearing lesson is about the fix.** Refusing oversize reads before
+  scanning — the obvious shape, and the first draft — makes the system LESS
+  safe: a body whose malware sits INSIDE the window becomes a 413, which the
+  client (correctly) classifies as a size limit and therefore forwards
+  fail-open, so the one case where the sidecar holds a real block verdict is the
+  case the "safe" check throws away. It would have admitted content the unfixed
+  code blocked. The negative control written before the fix caught it; the
+  verdict now wins and truncation is not reported at all on a block, the same
+  asymmetry `readScanPrefix` documents. Same shape as CHAOS-75, where adding
+  `runGuarded` and nothing else resolved a race the wrong way 10 times out of 10.
+
+  Client side, 413 lands on the LOCAL path's vocabulary (`statScanSkipped`,
+  `scan_skipped`, `Source: "size_limit"`) for the same reason
+  `remoteScanRefused` reuses the timeout vocabulary: it is the same decision.
+  Posture unchanged (fail-open, counted and alerted); refusing the object
+  outright is the safer answer but a posture change for large downloads, left to
+  the owner as the **open half of CHAOS-101**.
+
+This sweep also leaves rows OPEN by attribution rather than fixing them, each
+with file:line evidence in the dated review. Three of the four actively report
+HEALTHY while failing, which is the common thread worth carrying forward:
+
+- **The cluster audit trail is not durable, and the ack claims it is.**
+  `PushAuditEvents` returns `{"ok":true}` for events that land in a 5000-entry
+  in-memory ring (`controlplane.go:279-299`) whose trim is uncounted and which
+  has no file writer anywhere; the DP then clears `audit.pending` permanently
+  (`controlplane_client.go:724`). A CP restart evaporates the centralized trail.
+  The durability was BELIEVED to exist: `controlplane_server.go`'s hang analysis
+  named this handler as one that "appends to a `fileutil.RotatingFile`" — **that
+  false premise is corrected in this PR**, and the sweep's hang conclusion for
+  that handler does not hold. The durable sink is an owner decision (location,
+  retention, backup, cluster sync), the same shape as the open **WK-22**.
+- **A logstore batch-flush failure is log-only, and the gauge keeps claiming it
+  is saving.** `wb.Flush()` discards up to 256 entries with no counter, and the
+  `json.Marshal` branch is a bare `continue` — the branch the audit sibling
+  charges deliberately. `culvert_logstore_available` stays 1 while its own HELP
+  string reads "open **and saving history**"; the record is set once at open and
+  never revisited. Same **ST-8** shape, with the added twist that the metric
+  documents a guarantee the code does not implement.
+- **The flush-phase post-mortem is written into an already-closed sink.** The
+  phase error is logged after `RunAll` returns, and the log closer is the LAST
+  flush hook, so the line naming which durable close failed is accepted by a
+  dead sink and charged to neither `writeErrors` nor `backpressure`. The
+  codebase is half-aware — the completion line was already moved ahead of the
+  flush phase for this reason; the error path was not.
+- **A UT1 tarball yielding zero entries is recorded as a fully successful
+  sync**, and the SaaS feed's **backoff can loosen the cadence ~6×**. Both are
+  asymmetries against siblings that decided the opposite way WITH the reasoning
+  written down and attributed to a prior review — `threatfeed`'s `n == 0` gate
+  (PR #587) and `feedsched.backoffBounds`' floor-and-ceiling clamp (PR #1305).
+  Neither main-side path received the sibling's fix, and neither has a test that
+  could catch it.
+
 **2026-10-23 — `CHAOS-82` sweep (the backup plane: archive publication mode and
 the restore-side encryption trust boundary). Id claimed in this placeholder row
 as commit one**, before any code, per the convention above. `CHAOS-75` is the
