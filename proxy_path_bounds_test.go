@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -530,4 +531,263 @@ func truncForMsg(s string) string {
 		return s
 	}
 	return s[:200] + fmt.Sprintf("...[+%d B]", len(s)-200)
+}
+
+// ─── CHAOS-92e — the SIXTH process-log sink: the tunnel file-block line ───
+//
+// §53.2's enumeration of the retaining log sites names five: the two
+// `FILE_BLOCKED` lines in proxy.go, `FILE_BLOCKED (%s)` in proxy_http.go and
+// the two `SSL_INNER` lines. It missed `FILE_BLOCKED (tunnel %s)`, which is
+// emitted from internal/fileblock's LogBlock and reached from package main
+// through emitFileBlock (proxy_tunnel.go) at six call sites — four of them
+// passing `req.URL.Path` straight from the decrypted inner request.
+//
+// The source gate above could not see it. It matches on a line carrying BOTH
+// `sanitizeLog(` and `URL.Path`, and this sink sanitizes in the CALLEE
+// (`obs.Sanitize`, the internal twin of sanitizeLog), so the call sites carry
+// no `sanitizeLog(` token at all. The structural claim "one edit bounds all
+// present and future sinks" held only for the sinks the sweep had enumerated.
+//
+// It is the WORST of the six by magnitude. The plain-HTTP sinks are fed by a
+// path net/http caps at `MaxHeaderBytes + 4096` (~1 MiB, §53.3). This one is
+// fed by `http.ReadRequest` (proxy_tunnel.go), which is
+// `readRequestLimit(b, math.MaxInt64)` over `textproto.ReadLine()` with
+// `lim = -1` — NO bound on the inner request line at all. The precondition is
+// the one CHAOS-69 named for the inner path (an inspected destination), not
+// the stock-install reachability of 53.2, so the row is MEDIUM rather than
+// HIGH; the retained volume per request is unbounded rather than ~1 MiB.
+//
+// The clamp goes on the same value, at the same depth as the other five: inside
+// the argument, before the sanitiser's scan and its copy. emitFileBlock is the
+// only route from package main into LogBlock, so it is the chokepoint, and the
+// gate below pins that rather than the six call sites.
+
+// chaos92EmitFileBlock drives the tunnel file-block emitter with a client-chosen
+// path and returns the emitted 403 body plus the captured process log.
+func chaos92EmitFileBlock(t *testing.T, urlPath, ext, source string) (string, *bytes.Buffer) {
+	t.Helper()
+	logBuf := chaos92CaptureLog(t)
+	s := &spyResponder{}
+	emitFileBlock(s, "inspected.example", urlPath, ext, source)
+	if s.calls != 1 {
+		t.Fatalf("emitFileBlock routed through the responder %d times, want 1", s.calls)
+	}
+	return s.lastBd, logBuf
+}
+
+// TestChaos92_DefectTunnelFileBlockLogStaysBounded is the defect gate. Against
+// the pre-fix tree a 1 MiB inner path writes the whole value into the rotating
+// process log — the CHAOS-92a defect, on the sink 53.2 did not enumerate.
+func TestChaos92_DefectTunnelFileBlockLogStaysBounded(t *testing.T) {
+	resetRetainedPathStateForTest()
+	t.Cleanup(resetRetainedPathStateForTest)
+
+	const pathBytes = 1 << 20
+	_, logBuf := chaos92EmitFileBlock(t, chaos92Path(pathBytes, "A"), "exe", "global ext")
+
+	// One line, so the ceiling is the bound plus the line's own fixed text and
+	// the marker. 8 KiB is generous for both and still two orders of magnitude
+	// under the defect.
+	if got := logBuf.Len(); got > 8192 {
+		t.Errorf("a %d-byte inner path wrote %d bytes to the process log, want <= 8192 — the client chooses the log volume", pathBytes, got)
+	}
+	if !strings.Contains(logBuf.String(), fmt.Sprintf("truncated; %d bytes total", pathBytes)) {
+		t.Errorf("the truncated line does not say it was truncated, so an operator cannot tell it from a complete one: %s", truncForMsg(logBuf.String()))
+	}
+	if n := retainedPathTruncated.Load(); n != 1 {
+		t.Errorf("retainedPathTruncated = %d, want 1 — this sink's clamps are invisible in aggregate", n)
+	}
+}
+
+// TestChaos92_DefectTunnelFileBlockClampIsTheChokepointNotTheCallSites is the
+// source gate for this sink, and it is the one the sweep was missing: a seventh
+// emitFileBlock call site, or a new direct fileblock.LogBlock/BlockConn call,
+// must not be able to reintroduce the defect without failing a gate.
+func TestChaos92_DefectTunnelFileBlockClampIsTheChokepointNotTheCallSites(t *testing.T) {
+	const chokepoint = "proxy_tunnel.go"
+	sources := chaos92PackageSources(t)
+
+	var stray []string
+	for name, src := range sources {
+		for _, call := range []string{"fileblock.LogBlock(", "fileblock.BlockConn("} {
+			if n := strings.Count(src, call); n > 0 && name != chokepoint {
+				stray = append(stray, fmt.Sprintf("%s calls %s directly (%d time(s))", name, call, n))
+			}
+		}
+	}
+	sort.Strings(stray)
+	if len(stray) > 0 {
+		t.Errorf("tunnel file-block log sinks bypass the clamp:\n%s\nEvery caller must go through emitFileBlock, which is where the CHAOS-92 clamp lives", strings.Join(stray, "\n"))
+	}
+
+	src := sources[chokepoint]
+	if n := strings.Count(src, "fileblock.LogBlock("); n != 1 {
+		t.Fatalf("%s has %d fileblock.LogBlock calls, want exactly 1 — the chokepoint moved and this gate is stale", chokepoint, n)
+	}
+	if strings.Count(src, "fileblock.BlockConn(") != 0 {
+		t.Error("package main calls fileblock.BlockConn, which logs the path through its own LogBlock call and bypasses emitFileBlock's clamp")
+	}
+
+	// The clamp must sit INSIDE the LogBlock argument, so the sanitiser's scan
+	// and its copy of the value are bounded too — clamping the retained bytes
+	// after a 1 MiB scan would bound the record and still pay for the value.
+	body := chaos92FuncBody(t, src, "func emitFileBlock(")
+	if !regexp.MustCompile(`fileblock\.LogBlock\([^()]*boundRetainedPath\(urlPath\)`).MatchString(body) {
+		t.Errorf("emitFileBlock does not clamp urlPath inside the fileblock.LogBlock argument — every tunnel file-block sink is unbounded:\n%s", body)
+	}
+}
+
+// chaos92FuncBody returns the source text of the function whose declaration
+// starts with decl, up to the first line that is exactly "}". Textual, like the
+// gates around it, and it fails loudly rather than returning "" so a rename
+// cannot make the caller pass vacuously.
+func chaos92FuncBody(t *testing.T, src, decl string) string {
+	t.Helper()
+	i := strings.Index(src, decl)
+	if i < 0 {
+		t.Fatalf("declaration %q not found — the gate is stale", decl)
+	}
+	rest := src[i:]
+	if j := strings.Index(rest, "\n}"); j >= 0 {
+		return rest[:j+2]
+	}
+	t.Fatalf("declaration %q has no closing brace at column 0 — the gate is stale", decl)
+	return ""
+}
+
+// TestChaos92_ControlTunnelFileBlockEnforcementStillSeesTheWholePath is the
+// load-bearing control for this sink, the same one 53.9 names for the others:
+// clamping a value a MATCHER decides on would be fail-OPEN, because truncating
+// the end of a path removes the extension a file-block rule matches.
+func TestChaos92_ControlTunnelFileBlockEnforcementStillSeesTheWholePath(t *testing.T) {
+	chaos92Isolate(t)
+
+	huge := chaos92Path(1<<20, "A")
+	if ext := fileBlocker.CheckPath(huge); ext != ".exe" {
+		t.Fatalf("fileBlocker.CheckPath on a 1 MiB .exe path = %q, want %q — the clamp reached a matcher and the block is fail-open", ext, ".exe")
+	}
+	body, _ := chaos92EmitFileBlock(t, huge, ".exe", "global ext")
+	if !strings.Contains(body, ".exe") {
+		t.Errorf("the emitted 403 does not name the blocked extension: %q", body)
+	}
+}
+
+// TestChaos92_ControlTunnelFileBlockResponseIsUnchanged proves the clamp is
+// retention-only on this sink too: the bytes the client receives do not depend
+// on the path at all, so no client-visible behaviour changed.
+func TestChaos92_ControlTunnelFileBlockResponseIsUnchanged(t *testing.T) {
+	resetRetainedPathStateForTest()
+	t.Cleanup(resetRetainedPathStateForTest)
+
+	short, _ := chaos92EmitFileBlock(t, "/a/b/payload.exe", "exe", "global ext")
+	long, _ := chaos92EmitFileBlock(t, chaos92Path(1<<20, "A"), "exe", "global ext")
+	if short != long {
+		t.Errorf("the 403 body changed with the path length:\n short: %q\n  long: %q", short, truncForMsg(long))
+	}
+}
+
+// TestChaos92_ControlTunnelFileBlockRetainsOrdinaryValuesVerbatim proves
+// ordinary traffic is byte-identical through this sink and does not move the
+// counter — a counter normal traffic moves is not a usable signal.
+func TestChaos92_ControlTunnelFileBlockRetainsOrdinaryValuesVerbatim(t *testing.T) {
+	resetRetainedPathStateForTest()
+	t.Cleanup(resetRetainedPathStateForTest)
+
+	const p = "/downloads/release/v1.2.3/installer.exe"
+	_, logBuf := chaos92EmitFileBlock(t, p, "exe", "global ext")
+	if !strings.Contains(logBuf.String(), p) {
+		t.Errorf("an ordinary path was not retained verbatim: %s", truncForMsg(logBuf.String()))
+	}
+	if strings.Contains(logBuf.String(), "truncated;") {
+		t.Error("an ordinary path was marked truncated")
+	}
+	if n := retainedPathTruncated.Load(); n != 0 {
+		t.Errorf("retainedPathTruncated = %d after ordinary traffic, want 0", n)
+	}
+}
+
+// TestChaos92_ControlTunnelFileBlockBoundIsInclusive pins the boundary through
+// the emitter rather than through the helper, so a future clamp applied with a
+// different constant here is caught.
+func TestChaos92_ControlTunnelFileBlockBoundIsInclusive(t *testing.T) {
+	resetRetainedPathStateForTest()
+	t.Cleanup(resetRetainedPathStateForTest)
+
+	atCap := "/" + strings.Repeat("a", maxRetainedRequestPath-1)
+	if _, logBuf := chaos92EmitFileBlock(t, atCap, "exe", "global ext"); !strings.Contains(logBuf.String(), atCap) {
+		t.Error("a value of exactly maxRetainedRequestPath was clamped — the bound must be inclusive")
+	}
+	if n := retainedPathTruncated.Load(); n != 0 {
+		t.Fatalf("retainedPathTruncated = %d at the bound, want 0", n)
+	}
+	over := atCap + "b"
+	_, logBuf := chaos92EmitFileBlock(t, over, "exe", "global ext")
+	if !strings.Contains(logBuf.String(), fmt.Sprintf("truncated; %d bytes total", len(over))) {
+		t.Errorf("a value one byte over the bound was not marked with its original length: %s", truncForMsg(logBuf.String()))
+	}
+	if n := retainedPathTruncated.Load(); n != 1 {
+		t.Errorf("retainedPathTruncated = %d, want 1", n)
+	}
+}
+
+// TestChaos92_ControlTunnelFileBlockHandlesMalformedValues is the malformed-input
+// gate. A decrypted inner path arrives percent-decoded, so it can carry
+// multi-byte runes AND bytes that are not UTF-8 at all. Neither may panic, the
+// cut must not manufacture invalid UTF-8, and a sequence that was already
+// invalid is left alone — the clamp is a cut-site correction, not a sanitiser.
+func TestChaos92_ControlTunnelFileBlockHandlesMalformedValues(t *testing.T) {
+	resetRetainedPathStateForTest()
+	t.Cleanup(resetRetainedPathStateForTest)
+
+	t.Run("rune straddling the cut", func(t *testing.T) {
+		for _, r := range []string{"é", "€", "𐍈"} {
+			for shift := 0; shift < 4; shift++ {
+				p := "/" + strings.Repeat("a", maxRetainedRequestPath-2+shift) + strings.Repeat(r, 8)
+				kept := strings.TrimSuffix(boundRetainedPath(p), fmt.Sprintf(retainedPathTruncationMarker, len(p)))
+				if !utf8.ValidString(kept) {
+					t.Errorf("rune %q shift %d: the emitter's clamp cut through a rune", r, shift)
+				}
+				if _, logBuf := chaos92EmitFileBlock(t, p, "exe", "global ext"); logBuf.Len() > 8192 {
+					t.Errorf("rune %q shift %d: %d log bytes, want <= 8192", r, shift, logBuf.Len())
+				}
+			}
+		}
+	})
+	t.Run("already-invalid UTF-8 and control bytes", func(t *testing.T) {
+		for _, fill := range []string{"\xff", "\x00", "\n", "\x7f"} {
+			p := "/" + strings.Repeat(fill, 1<<20)
+			_, logBuf := chaos92EmitFileBlock(t, p, "exe", "global ext")
+			if logBuf.Len() > 16384 {
+				t.Errorf("fill %q: %d log bytes, want <= 16384", fill, logBuf.Len())
+			}
+			// The sanitiser's contract, unchanged by the clamp: no raw control
+			// byte reaches the record (CWE-117).
+			if strings.ContainsAny(logBuf.String(), "\x00\x7f") || strings.Contains(logBuf.String(), "\n"+fill) {
+				t.Errorf("fill %q: a control byte survived into the log record", fill)
+			}
+		}
+	})
+}
+
+// TestChaos92_ControlTunnelFileBlockIsConcurrencySafe drives the clamp from the
+// shape production uses it in — one goroutine per inspected exchange. Run under
+// -race this also covers the counter.
+func TestChaos92_ControlTunnelFileBlockIsConcurrencySafe(t *testing.T) {
+	resetRetainedPathStateForTest()
+	t.Cleanup(resetRetainedPathStateForTest)
+	chaos92CaptureLog(t)
+
+	const workers = 32
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			emitFileBlock(&spyResponder{}, "inspected.example", chaos92Path(1<<16, "A"), "exe", "global ext")
+		}()
+	}
+	wg.Wait()
+	if n := retainedPathTruncated.Load(); n != workers {
+		t.Errorf("retainedPathTruncated = %d after %d concurrent clamps, want %d", n, workers, workers)
+	}
 }
