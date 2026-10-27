@@ -23,8 +23,8 @@ import (
 // and the tail check and every rule falls through to the full predicate. This
 // is the worst case for the index and the one that decides whether it is safe
 // to carry on the hot path at all.
-func buildAdversarialScanStore(size int) (*PolicyStore, string) {
-	const host = "aaaaaa0000.shared-tail.example.com"
+func buildAdversarialScanStore(size int) (ps *PolicyStore, host string) {
+	host = "aaaaaa0000.shared-tail.example.com"
 	rules := make([]PolicyRule, size)
 	for i := 0; i < size; i++ {
 		// Same total length as host, same trailing bytes, differing only in the
@@ -36,7 +36,7 @@ func buildAdversarialScanStore(size int) (*PolicyStore, string) {
 			Action:   ActionAllow,
 		}
 	}
-	ps := &PolicyStore{}
+	ps = &PolicyStore{}
 	ps.ReplaceAll(rules)
 	return ps, host
 }
@@ -142,7 +142,7 @@ var scanRowSink []policyScanRow
 // builder: one matching rule last, the rest distinct non-matching FQDNs. It
 // does not reuse the F3 qualification helper so this file stays independent of
 // an untracked artifact.
-func buildMatchPositionStoreForIndexBench(size int) (*PolicyStore, string) {
+func buildMatchPositionStoreForIndexBench(size int) (ps *PolicyStore, host string) {
 	rules := make([]PolicyRule, size)
 	for i := 0; i < size; i++ {
 		rules[i] = PolicyRule{
@@ -153,7 +153,7 @@ func buildMatchPositionStoreForIndexBench(size int) (*PolicyStore, string) {
 		}
 	}
 	rules[size-1].DestFQDN = "target.example.com"
-	ps := &PolicyStore{}
+	ps = &PolicyStore{}
 	ps.ReplaceAll(rules)
 	return ps, "target.example.com"
 }
