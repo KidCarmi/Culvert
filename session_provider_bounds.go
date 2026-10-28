@@ -45,10 +45,31 @@ import (
 // recording, so `RevokeProvider` is deliberately NOT added.
 //
 // `RevokeUser` (register row AU-19) is a DIFFERENT dimension and is NOT closed
-// here: the `users` map is still neither persisted nor gossiped while the
-// sibling `tokens` map in the same struct is both. It is bounded for the admin
-// UI by `uiAuthMiddleware`'s roster backstop and is unreachable from the proxy
-// cookie (which no local login ever mints), so it is recorded, not fixed.
+// here. ITS CONTAINMENT ARGUMENT NO LONGER HOLDS, and the record is corrected
+// rather than left to read as reassurance: this comment used to say the `users`
+// map was "neither persisted nor gossiped while the sibling `tokens` map is
+// both", and CHAOS-68 — in this same sweep — made it both. `ExportRevocations`
+// and `ExportRevocationsByOrigin` now walk `r.users` onto the gossip wire and
+// `exportPersisted` onto disk, and `RevocationEntry.User` carries the username
+// fleet-wide.
+//
+// So the two bounds the old wording leaned on are gone. It is no longer
+// "unreachable from the proxy cookie": a peer's `SyncRevocations` push can
+// name any `User`, `MergeRevocations` admits it under the untrusted bounds
+// (length, far-future expiry, capacity — nothing about whether that account is
+// this node's to revoke), and `Decode` applies `IsUserRevoked(s.Sub)` to the
+// PROXY session as well as the admin one. Nor is the admin roster backstop a
+// bound on it: a re-created account passes `UIUserExists` and is still refused
+// by the surviving revocation, because nothing compares `Session.Iat` against
+// when the cut was made — the comparison `ProfileAdmitsSession` performs for a
+// provider (AU-65, above) has no equivalent on the account dimension, and
+// there is no un-revoke path, so the entry stands until its own expiry (up to
+// MaxSessionLifetime).
+//
+// That is fail-CLOSED (it over-revokes, never under-revokes) and so is not
+// fixed here on this sweep's own rule against widening a security control
+// without the owner's decision. It is recorded so the next reader does not
+// re-derive the retired containment argument.
 // ---------------------------------------------------------------------------
 
 // sessionProviderLocal is the `pvd` value `setUISessionCookie` stamps on an

@@ -53,6 +53,33 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A Data Plane's revocation push reached the Control Plane's OWN session list
+  unbounded, so one enrolled node could make the CP stop honouring every other
+  node's logouts (SEC-REVMERGE-1).** CHAOS-68 gave the CP's `SyncRevocations`
+  handler a second consumer of a peer's entries —
+  `mergeAndPersistRevocations`, which writes them into the CP's own
+  `sessionRevoked`, the list `Decode` enforces and `SaveRevocations` persists.
+  `revocationAggregator.Update` already bounded the same slice at
+  `maxRevocationsPerNode` (4096) for the fan-out slot and counted the
+  overflow, but it did not RETURN the bounded set, and the new consumer was
+  handed the raw `req.Entries`. The per-node cap therefore governed what the
+  CP broadcast and not what it enforced and persisted. The RPC accepts 16 MiB
+  and a minimal entry marshals to 33 bytes, so one request carried ~490k
+  entries against the GLOBAL `MaxRevocationEntries` of 65536; past that cap
+  `admitUntrustedLocked` refuses every further untrusted entry with
+  `RevokeCapacity`, so a genuine logout performed on any other node was no
+  longer honoured on the node that hosts the admin UI — the exact fail-open
+  CHAOS-68 exists to close — and the junk persisted across restarts for up to
+  the session lifetime. `Update` now returns the set it retained and the
+  handler merges that, so ONE bound governs both consumers structurally and a
+  future third consumer inherits it rather than having to re-apply the cap.
+  Nothing else moves: the entries were already `Prov`-cleared, which the
+  gossip merge ignores, and no revocation is removed from any list. Requires a
+  compromised enrolled node (`verifyNode`'s mTLS check is unchanged and still
+  precedes every side effect). Gate:
+  `session_revocation_cp_merge_bound_test.go`, whose cap, fail-open, boundary
+  and account-parity cases were each measured failing against the pre-fix
+  handler. Review: `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-10-27.md`.
 - **SOCKS5 relayed connections from any source IP for the length of one boot
   statement, before the operator's persisted admission posture was installed
   (CHAOS-102).** `main` binds the optional SOCKS5 listener at `initSOCKS5` and
