@@ -12,22 +12,21 @@ substitute another file):
 
 | | |
 |---|---|
-| OVA | `culvert-appliance-1.0.269-candidate.g4524311ba974-ubuntu-24.04.ova` (2,131,865,600 bytes; retained lab artifact `12228273676`) |
-| OVA SHA-256 | `27006cf4ad158342109b972e522438328453933df278c31b3fcf1d5301574ebd` |
-| Application image | OCI manifest `sha256:36af5a8cb2d2c055fe079f211f5975bb5cef048d6cd13245a3be979fcdf8738a`, config `sha256:fc622ce09678a0c4df5291b8642262e09aca6faa8b4c5ae3d6e1db6ea2ecebd8` |
-| Agent / console binaries (SHA-256) | `b35b38e8b82989328117138365310d195c10eff112f3714a5585b4a6068f825a` / `5b65efabfc2c5c158f80ad799510a9725e7b319cbd518dabf3edc4b0e71fa969` |
-| Source commit (image AND provisioning) | `4524311ba9743abcf9df05e9955e2842eb48168c` (PR #1528 frozen head) |
+| OVA | `culvert-appliance-1.0.360-candidate.g0648adeba52e-ubuntu-24.04.ova` (lab artifact `12756793569`, run 40555901182; ZIP SHA-256 `124fcc372cfa1953f05be8e3c640504a4b546b8abd1a532e89d819cce9ebf903`) |
+| OVA SHA-256 | `325c142a7df441eb97dd5a5e688e0fb89979b8ee29680175d627fcf8556df96f` |
+| Application image | OCI index/manifest `sha256:20b6abcbc17028e50aa7db1871dd3e6175a61d533afd961302cc7558dc5a8ed0`, config `sha256:c7fa4cff4c5de10bffdd407ece0e18a24be220e335199b56184989be1de7fb0e` |
+| ClamAV sidecar | `culvert/clamav:1.5.4-culvert.4`, image ID `sha256:91eae57526b246da28cb370bd824c45af51e245be0093afcc316bc3fbe941f9d` |
+| Agent / console binaries (SHA-256, ASTRA-verified prefixes) | `2631f25c…34372` / `c4a24736…a3b69` |
+| Source commit (image AND provisioning) | `0648adeba52e09f15505095ba1ff556304b9fcef` (freeze revision 3) |
 
-This is the canonical candidate as of 2026-10-23. ASTRA has already run its
-own exact-byte ESXi qualification of this OVA (ESXi 8.0.1, PR #1528 review
-5592731454, "E1"). Lifecycle, enforcement, three timed reboots, backup,
-same-appliance and source-absent restore, and encrypted-history recovery PASS
-on these bytes. The live failed-unit startup display FAILS, and the
-category-store writer-ownership defect is present in them. The current gate
-decision is in `readiness-report.md` §0. Earlier candidate identities that
-appeared in this table (for example `4c4b7728…` / `e24eb542…`) are historical
-and must not be substituted. A replacement OVA gets its own table, filled from
-its own build record.
+This is the replacement candidate ASTRA accepted on 27 October 2026 for
+internal QEMU qualification with time-boxed residuals. Its ESXi qualification is
+planned in `evidence/combined/esxi-325c142a/PLAN.md`, which says which steps
+below run, in what order, with what extra checks, and which earlier evidence is
+reused. The previous candidate `27006cf4…` (source `4524311b`) was qualified on
+ESXi 8.0.1 in review 5592731454 with the live failed-unit display FAILING; that
+result is historical and is not inherited by this OVA. Earlier identities
+(`27006cf4…`, `4c4b7728…`, `e24eb542…`, `61c46d6d…`) must not be substituted.
 
 This is a **candidate** build: unsigned CI image, never for customers. First
 boot logs `CULVERT_MAINT_TRUST_UNVERIFIED_IMAGE=1` on the console for that
@@ -36,7 +35,7 @@ reason; a release OVA never does.
 ## 0. Variables (edit once)
 
 ```bash
-export OVA=./culvert-appliance-1.0.269-candidate.g4524311ba974-ubuntu-24.04.ova
+export OVA=./culvert-appliance-1.0.360-candidate.g0648adeba52e-ubuntu-24.04.ova
 export VI='vi://administrator@vsphere.local@vcenter.example/DC/host/Cluster'   # target
 export NET='VM Network'           # port group carrying management + proxy traffic
 export VMNAME=culvert-qual-01
@@ -50,7 +49,7 @@ export EV=./culvert-qual-evidence; mkdir -p "$EV"
 ## 1. Verify the artefact
 
 ```bash
-echo "27006cf4ad158342109b972e522438328453933df278c31b3fcf1d5301574ebd  $OVA" | sha256sum -c - | tee "$EV/01-ova-sha256.txt"
+echo "325c142a7df441eb97dd5a5e688e0fb89979b8ee29680175d627fcf8556df96f  $OVA" | sha256sum -c - | tee "$EV/01-ova-sha256.txt"
 tar -xOf "$OVA" "$(tar -tf "$OVA" | grep '\.ovf$')" | grep -E 'CANDIDATE|Version|ovf:capacity' | tee "$EV/01-ovf-head.txt"
 ```
 
@@ -94,8 +93,8 @@ export TOKEN="$($SSH 'sudo culvert-status' | awk -F': *' '/Setup token:/{print $
 Pass: `State: services running — setup pending`; `state/` lists
 `ovf console images install agent complete` `.done` files; the `culvert` container
 runs the application image whose OCI manifest is
-`sha256:36af5a8cb2d2c055fe079f211f5975bb5cef048d6cd13245a3be979fcdf8738a` (the containerd image store reports the manifest
-digest); the token is 32 characters.
+`sha256:20b6abcbc17028e50aa7db1871dd3e6175a61d533afd961302cc7558dc5a8ed0` (the containerd image store reports the manifest
+digest), `culvert-clamav` runs `sha256:91eae57526b246da28cb370bd824c45af51e245be0093afcc316bc3fbe941f9d`; the token is 32 characters.
 
 ## 4. Enrol the first administrator (setup token is required)
 
@@ -166,6 +165,9 @@ upgrade through real sudoers` and `appliance-agent`.
 
 ```bash
 $SSH 'sudo culvert-os-update check' | tee "$EV/07-check-before.txt"
+# STOP here (do not run `os`) if 07-check-before.txt lists a newer linux-image:
+# a released HWE kernel is a STOP trigger of the accepted M2 residual, and
+# installing it would change the kernel under qualification.
 $SSH 'sudo culvert-os-update os' 2>&1 | tee "$EV/07-os-update.txt"
 $SSH 'sudo culvert-os-update check; ls -l /var/run/reboot-required 2>/dev/null; dpkg -l "linux-image-*" | awk "/^ii/{print \$2, \$3}"; apt-mark showhold; sudo docker version --format "{{.Server.Version}}"' | tee "$EV/07-check-after-update.txt"
 $SSH 'sudo culvert-os-update reboot' 2>&1 | tee "$EV/07-reboot.txt" || true     # the SSH session drops here
