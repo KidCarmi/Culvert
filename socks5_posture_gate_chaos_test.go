@@ -510,3 +510,120 @@ func TestCHAOS102_ReleasedGateIsOneAtomicLoad(t *testing.T) {
 		t.Fatalf("socks5PostureHeld allocates %v per call — it is the first statement of every SOCKS5 connection", allocs)
 	}
 }
+
+// ── The half the arm-end wall cannot see: the arm must precede the bind ─────
+
+// TestCHAOS102_Wall_TheArmPrecedesTheBind closes the one refactor every
+// existing wall admits.
+//
+// TestCHAOS102_Wall_NoListenerServesBeforeThePostureIsClosed accepts any
+// `armSOCKS5PostureGate` in initSOCKS5's callee SET, and it has to: both the
+// arm and `startSOCKS5` sit inside the same top-level `if s.socks5PortVal > 0`
+// statement, so callStatementIndexForTest reports the SAME index for the two
+// and cannot order them. A refactor that keeps the arm but moves it below the
+// bind therefore passes that wall while reopening the window — startSOCKS5
+// returns only once the accept loop is serving (socks5_bind.go), so between
+// its return and the arm the handler's three admission globals are at their
+// compiled defaults and a connection from any source IP is relayed
+// unfiltered, unrate-limited and uncapped.
+//
+// The release end is already pinned this way — the release wall above fails
+// when releaseAt < loadAt. This is the symmetric assertion on the arm end,
+// and it compares POSITIONS rather than statement indices because the two
+// calls share a statement.
+//
+// The arm-absent shapes (the pre-fix bind-first boot and the reorder remedy)
+// belong to the callee-set wall above and are deliberately not re-judged here.
+func TestCHAOS102_Wall_TheArmPrecedesTheBind(t *testing.T) {
+	file := parseMainPkgFileForTest(t, "main.go")
+	fn := funcDeclForTest(t, file, "initSOCKS5")
+
+	bindAt := callPosForTest(fn, "startSOCKS5")
+	if bindAt == token.NoPos {
+		t.Fatal("initSOCKS5 no longer calls startSOCKS5 — re-derive CHAOS-102's window against the new bind site")
+	}
+	armAt := callPosForTest(fn, "armSOCKS5PostureGate")
+	if armAt == token.NoPos {
+		return // owned by TestCHAOS102_Wall_NoListenerServesBeforeThePostureIsClosed
+	}
+	if armAt > bindAt {
+		t.Fatalf("CHAOS-102 regression: initSOCKS5 arms the pre-posture gate at offset %d, AFTER the "+
+			"startSOCKS5 bind at offset %d. startSOCKS5 returns with the accept loop already serving, so "+
+			"a connection arriving before the arm is relayed with no IP filter, no rate limit and no "+
+			"connection cap. Move armSOCKS5PostureGate back above the bind", armAt, bindAt)
+	}
+}
+
+// TestCHAOS102_Wall_TheArmPrecedesTheBindNegativeControls proves the wall
+// above can fail, and documents why it needs a position rather than the
+// statement index the other walls use: on the shipped shape
+// callStatementIndexForTest gives the arm and the bind the SAME index, so it
+// classifies the broken order as correct.
+func TestCHAOS102_Wall_TheArmPrecedesTheBindNegativeControls(t *testing.T) {
+	const shipped = `package main
+func initSOCKS5(s *startupState) {
+	if s.socks5PortVal > 0 {
+		armSOCKS5PostureGate()
+		s.socks5Srv = startSOCKS5(s.socks5PortVal)
+	}
+}`
+	const inverted = `package main
+func initSOCKS5(s *startupState) {
+	if s.socks5PortVal > 0 {
+		s.socks5Srv = startSOCKS5(s.socks5PortVal)
+		armSOCKS5PostureGate()
+	}
+}`
+	for name, tc := range map[string]struct {
+		src           string
+		armBeforeBind bool
+	}{
+		"the shipped shape — arm, then bind":      {shipped, true},
+		"the refactor the callee-set wall admits": {inverted, false},
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), "control.go", tc.src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		fn := funcDeclForTest(t, file, "initSOCKS5")
+		armAt, bindAt := callPosForTest(fn, "armSOCKS5PostureGate"), callPosForTest(fn, "startSOCKS5")
+		if armAt == token.NoPos || bindAt == token.NoPos {
+			t.Fatalf("%s: callPosForTest missed a call that is present (arm %d, bind %d)", name, armAt, bindAt)
+		}
+		if got := armAt < bindAt; got != tc.armBeforeBind {
+			t.Errorf("%s: arm-before-bind = %v, want %v", name, got, tc.armBeforeBind)
+		}
+		// The reason this wall exists: the index helper cannot separate them.
+		if callStatementIndexForTest(fn, "armSOCKS5PostureGate") != callStatementIndexForTest(fn, "startSOCKS5") {
+			t.Errorf("%s: the arm and the bind no longer share a top-level statement — "+
+				"callStatementIndexForTest could order them and this wall's premise has changed", name)
+		}
+	}
+}
+
+// callPosForTest returns the source position of the FIRST call to name
+// anywhere in fn, or token.NoPos when there is none. Unlike
+// callStatementIndexForTest it yields a position, which is what distinguishes
+// two calls sharing one top-level statement — exactly the case initSOCKS5
+// presents, where the arm and the bind both live inside the port guard.
+func callPosForTest(fn *ast.FuncDecl, name string) token.Pos {
+	if fn == nil || fn.Body == nil {
+		return token.NoPos
+	}
+	pos := token.NoPos
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if pos != token.NoPos {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == name {
+			pos = call.Pos()
+			return false
+		}
+		return true
+	})
+	return pos
+}
