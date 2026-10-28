@@ -400,7 +400,11 @@ func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMe
 	if err := verifyNode(ctx, req.NodeID); err != nil {
 		return nil, err
 	}
-	globalRevAggregator.Update(req.NodeID, req.Entries)
+	// kept is the per-node-BOUNDED set (maxRevocationsPerNode, plus the
+	// field-length bounds and Prov clearing). Both consumers below take it
+	// rather than req.Entries: the fan-out slot and the CP's own
+	// sessionRevoked are governed by one cap. See revocationAggregator.Update.
+	kept := globalRevAggregator.Update(req.NodeID, req.Entries)
 
 	// CHAOS-68: the CP is a session-bearing node like any other, and it is the
 	// node the admin UI runs on — so it is where a logout and an account
@@ -421,7 +425,7 @@ func (s *controlPlaneServer) SyncRevocations(ctx context.Context, raw json.RawMe
 	//  2. CONSUME — apply what this DP reported to the CP's own list, so a
 	//     logout performed on a DP is enforced on the CP too.
 	globalRevAggregator.UpdateLocal(sessionRevoked.ExportRevocations())
-	mergeAndPersistRevocations(req.Entries, "ControlPlane")
+	mergeAndPersistRevocations(kept, "ControlPlane")
 
 	// AU-71: the reply is budgeted against the frame the DP receives with,
 	// exactly as the request is budgeted against the CP's inbound bound

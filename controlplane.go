@@ -372,14 +372,30 @@ func (a *revocationAggregator) setResponseCursor(nodeID string, c revSyncCursor)
 // reaching it means a node is malfunctioning or hostile, not busy.
 const maxRevocationsPerNode = 4096
 
-// Update stores the latest revocation entries from a node, bounded.
+// Update stores the latest revocation entries from a node, bounded, and
+// RETURNS the bounded set it retained.
 //
 // Entries are DROPPED rather than the push being refused: a refusal would
 // also discard the node's legitimate entries, and the honest degradation is
 // that cluster-wide revocation is incomplete for the overflow — which is
 // counted, because a dropped revocation means a session an operator killed
 // may still authenticate on other nodes.
-func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) {
+//
+// THE RETURN VALUE IS THE BOUND, AND EVERY CONSUMER OF A PEER'S PUSH MUST USE
+// IT RATHER THAN THE RAW REQUEST. CHAOS-68 gave the CP's SyncRevocations
+// handler a SECOND consumer of the same slice — mergeAndPersistRevocations,
+// which writes the peer's entries into the Control Plane's OWN sessionRevoked
+// — and that consumer was handed `req.Entries` while only the fan-out slot
+// got the bounded set. The per-node cap then governed what the CP broadcast
+// but not what it enforced and persisted locally, so one enrolled node could
+// fill the GLOBAL MaxRevocationEntries (65536) from a single 16 MiB request
+// (~490k minimal entries) and make the CP refuse every LATER remote
+// revocation with RevokeCapacity — a genuine logout on another node no longer
+// honoured on the Control Plane, which is the exact fail-open CHAOS-68 exists
+// to close. Returning the bounded slice makes the one cap govern both
+// consumers structurally, instead of each call site remembering to re-apply
+// it. Gate: session_revocation_cp_merge_bound_test.go.
+func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) []RevocationEntry {
 	// Capacity is bounded by the cap, not by the peer-supplied length: the
 	// stored slice must not retain a backing array proportional to the whole
 	// request (Codex P2, PR #1591).
@@ -414,6 +430,10 @@ func (a *revocationAggregator) Update(nodeID string, entries []RevocationEntry) 
 	a.mu.Lock()
 	a.perNode[nodeID] = kept
 	a.mu.Unlock()
+	// Safe to hand out: a later Update for this node REPLACES the map value
+	// with a freshly allocated slice rather than mutating this backing array,
+	// and MergeRevocations only reads the entries it is given.
+	return kept
 }
 
 // clusterRevocationDrops counts revocation entries the Control Plane refused

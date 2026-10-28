@@ -60,6 +60,72 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A Data Plane's revocation push reached the Control Plane's OWN session list
+  unbounded, so one enrolled node could make the CP stop honouring every other
+  node's logouts (SEC-REVMERGE-1).** CHAOS-68 gave the CP's `SyncRevocations`
+  handler a second consumer of a peer's entries —
+  `mergeAndPersistRevocations`, which writes them into the CP's own
+  `sessionRevoked`, the list `Decode` enforces and `SaveRevocations` persists.
+  `revocationAggregator.Update` already bounded the same slice at
+  `maxRevocationsPerNode` (4096) for the fan-out slot and counted the
+  overflow, but it did not RETURN the bounded set, and the new consumer was
+  handed the raw `req.Entries`. The per-node cap therefore governed what the
+  CP broadcast and not what it enforced and persisted. The RPC accepts 16 MiB
+  and a minimal entry marshals to 33 bytes, so one request carried ~490k
+  entries against the GLOBAL `MaxRevocationEntries` of 65536; past that cap
+  `admitUntrustedLocked` refuses every further untrusted entry with
+  `RevokeCapacity`, so a genuine logout performed on any other node was no
+  longer honoured on the node that hosts the admin UI — the exact fail-open
+  CHAOS-68 exists to close — and the junk persisted across restarts for up to
+  the session lifetime. `Update` now returns the set it retained and the
+  handler merges that, so ONE bound governs both consumers structurally and a
+  future third consumer inherits it rather than having to re-apply the cap.
+  Nothing else moves: the entries were already `Prov`-cleared, which the
+  gossip merge ignores, and no revocation is removed from any list. Requires a
+  compromised enrolled node (`verifyNode`'s mTLS check is unchanged and still
+  precedes every side effect). Gate:
+  `session_revocation_cp_merge_bound_test.go`, whose cap, fail-open, boundary
+  and account-parity cases were each measured failing against the pre-fix
+  handler. Review: `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-10-27.md`.
+- **SOCKS5 relayed connections from any source IP for the length of one boot
+  statement, before the operator's persisted admission posture was installed
+  (CHAOS-102).** `main` binds the optional SOCKS5 listener at `initSOCKS5` and
+  restores the GUI-persisted posture on the next statement, via
+  `LoadAdminSettings` → `applyAdminSecurity`. `startSOCKS5` returns with the
+  accept loop already serving, and `handleSOCKS5` consults exactly the three
+  globals `applyAdminSecurity` writes — the IP filter, the rate limiter and the
+  per-IP connection cap. With no `-ip-filter-mode` and no YAML
+  `ip_filter_mode`, which is the normal case once the allowlist was built in
+  the GUI, `applyAdminSecurity` is their only writer, so inside that window an
+  unconfigured IP filter admitted every address, there was no rate limit and no
+  connection cap — and nothing distinguished a session the allowlist approved
+  from one admitted because there was no allowlist yet.
+
+  The window is the storage prefix `loadPersistentAdminState` runs before
+  reaching `LoadAdminSettings` (a writability probe, config versioning, three
+  store constructions, the alert store, hit counters and one fsynced atomic
+  write): measured at ≈1 ms on a healthy volume, admitting ~7.6 SOCKS5
+  sessions per millisecond from a single client. Because every item in that
+  prefix is I/O on the persisted-state volume, the window widens exactly as
+  that volume degrades.
+
+  A SOCKS5 connection arriving before the posture is installed is now
+  **refused** rather than relayed, recorded as `NOT_READY`, and counted. The
+  listener binds where it always did and its health is reported at the same
+  point in boot — the bind was deliberately not moved, because that would
+  change startup ownership and when optional-listener failure becomes visible.
+  Two new report-only series, emitted only on a node where SOCKS5 is
+  configured: `culvert_socks5_posture_pending` (1 while the window is open)
+  and `culvert_socks5_posture_refused_total`. One log line per boot names the
+  gates that are missing; a boot that refused nothing logs nothing. **No
+  operator action is needed and no setting changed.** `socks5_port: 0` (the
+  default) is unaffected — with no listener there is nothing to refuse. Nodes
+  with SOCKS5 enabled on a slow or contended persisted-state volume may see a
+  small number of refused connections immediately after a restart, which
+  clients retry; the counter records how many. Gates:
+  `socks5_posture_gate_chaos_test.go`; review:
+  `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-27.md`.
+
 - **The scan sidecar reported a truncated read as `clean: true`, so content past
   its own window was admitted with an affirmative clean verdict (CHAOS-101).**
   `scan_svc.go` `handleScan` read `io.LimitReader(body, maxBytes+1)` — the

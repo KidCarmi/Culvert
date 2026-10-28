@@ -1117,6 +1117,14 @@ func initSOCKS5(s *startupState) {
 	// than recomputed so the bound port is guaranteed to be the same value
 	// that was validated.
 	if s.socks5PortVal > 0 {
+		// CHAOS-102: arm the pre-posture gate BEFORE the bind. startSOCKS5
+		// blocks until the first bind(2) resolves and the accept loop is
+		// serving by the time it returns, while the GUI-persisted admission
+		// posture is restored on the NEXT line of main (initPersistentAdminState
+		// -> LoadAdminSettings -> applyAdminSecurity). Arming here is what
+		// guarantees there is no moment in which the socket exists and the gate
+		// does not. Released in loadPersistentAdminState.
+		armSOCKS5PostureGate()
 		s.socks5Srv = startSOCKS5(s.socks5PortVal)
 	}
 }
