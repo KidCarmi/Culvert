@@ -407,12 +407,56 @@ func socks5Negotiate(conn net.Conn, clientIP string) bool {
 	return true
 }
 
+// socks5SourceDenied applies the two source-address admission gates — the IP
+// filter, then the rate limiter — and reports whether the connection was
+// refused. Each records the request-history action string it has always used
+// (`IP_BLOCKED`, `RATE_LIMITED`) and closes without a reply, exactly as the
+// inline checks did.
+//
+// The pair is extracted together and left exactly where it was, AFTER the
+// per-IP connection limit, because the order has side effects: `rl.AllowAuto`
+// COUNTS the attempt, so a connection the connection limiter refuses must
+// still not consume a rate-limit token. The connection limit itself is not in
+// here — it hands back a slot whose Release is deferred for the tunnel's whole
+// lifetime, which belongs to the caller.
+//
+// Extracted by CHAOS-102 so that adding the posture gate to handleSOCKS5 does
+// not push it past the configured cyclop threshold; the conventions ask for a
+// coherent helper rather than a suppression, and "the gates keyed on the
+// source address" is the coherent unit.
+func socks5SourceDenied(clientIP string) bool {
+	if !ipf.Allowed(clientIP) {
+		recordRequest(clientIP, "SOCKS5", "", "IP_BLOCKED", "", "", "", "")
+		return true
+	}
+	if !rl.AllowAuto(clientIP) {
+		recordRequest(clientIP, "SOCKS5", "", "RATE_LIMITED", "", "", "", "")
+		return true
+	}
+	return false
+}
+
 func handleSOCKS5(conn net.Conn) {
 	defer recoverGoroutine("socks5") // the whole SOCKS5 chain runs in its own goroutine
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck // deadline is best-effort; a set failure still yields a bounded relay via peer close
 
 	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+
+	// ── Admission posture not installed yet ──────────────────────────────────
+	// CHAOS-102. main binds this listener one statement before it restores the
+	// GUI-persisted admission posture, so inside that window all three gates
+	// below are at their compiled defaults: an unconfigured ipf admits every
+	// address, rl has no limit and connLimiter is disabled. Refuse rather than
+	// relay. Checked FIRST, ahead of even the connection limit, because every
+	// gate after it is part of the state that is missing — a refusal must not
+	// depend on the posture it exists to compensate for. See
+	// socks5_posture_gate.go for why this is a gate and not a reorder of main.
+	if socks5PostureHeld() {
+		noteSOCKS5PostureRefusal(clientIP)
+		recordRequest(clientIP, "SOCKS5", "", "NOT_READY", "", "", "", "")
+		return
+	}
 
 	// ── Connection limit per IP ──────────────────────────────────────────────
 	// Symmetric with handleRequest (proxy.go): SOCKS5 tunnels hold goroutines
@@ -426,15 +470,8 @@ func handleSOCKS5(conn net.Conn) {
 	}
 	defer connLimiter.Release(clientIP)
 
-	// ── IP filter ────────────────────────────────────────────────────────────
-	if !ipf.Allowed(clientIP) {
-		recordRequest(clientIP, "SOCKS5", "", "IP_BLOCKED", "", "", "", "")
-		return
-	}
-
-	// ── Rate limit ───────────────────────────────────────────────────────────
-	if !rl.AllowAuto(clientIP) {
-		recordRequest(clientIP, "SOCKS5", "", "RATE_LIMITED", "", "", "", "")
+	// ── IP filter, then rate limit ───────────────────────────────────────────
+	if socks5SourceDenied(clientIP) {
 		return
 	}
 
