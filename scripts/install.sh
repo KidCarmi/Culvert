@@ -1466,6 +1466,10 @@ is_fresh_deployment() {
 # docker compose resolves as NON-EMPTY". Exit 0 = set, 1 = absent or empty,
 # 2 = FILE could not be read (verdict unknown).
 #
+# Compose also accepts an `export ` prefix and leading blanks before KEY=, so
+# those lines count; otherwise an operator's own passphrase reads as absent and
+# a second one is generated and appended (last wins), orphaning the CA key.
+#
 # "Non-empty" means what docker compose resolves: only CR/blanks, an empty
 # quote pair ("" / ''), or a blank followed by an inline # comment is EMPTY
 # there, so none of those may count as configured. A lone opening quote at end
@@ -1479,16 +1483,21 @@ is_fresh_deployment() {
 # the exact failure its own comment exists to prevent. A second spelling of
 # this predicate is how the two drift; keep it here.
 #
-# Process substitution, not a pipe: grep -q exits at the first match, and under
-# pipefail the producer's SIGPIPE (141) would override that success. The
-# readability probe is separate so a genuine read failure is reported as 2
-# rather than collapsing into grep's "not found" 1 — persist_host_env_session_
-# secret must be able to tell "no entry, safe to add" from "could not look",
-# because confusing them overwrites a signing key it was unable to read.
+# Only the LAST assignment of VAR is judged, because compose keeps the last
+# one: a non-empty `export VAR=x` followed by `VAR=` resolves EMPTY, and
+# answering "set" for it would leave the CA key without a passphrase.
+#
+# The full grep + tail reads all input, so no producer is cut off by SIGPIPE;
+# the final grep -q reads a here-string. The readability probe is separate so
+# a genuine read failure is reported as 2 rather than collapsing into grep's
+# "not found" 1 — persist_host_env_session_secret must be able to tell "no
+# entry, safe to add" from "could not look", because confusing them
+# overwrites a signing key it was unable to read.
 env_file_value_set() {
-  local var="$1" file="$2"
+  local var="$1" file="$2" last=""
   [[ -r "$file" ]] || return 2
-  grep -Eq "^${var}=([^[:space:]\"']|[[:space:]]+([^[:space:]\"'#]|\"([^\"]|$)|'([^']|$))|\"([^\"]|$)|'([^']|$))" <(tr -d '\r' <"$file" 2>/dev/null)
+  last="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${var}=" <(tr -d '\r' <"$file" 2>/dev/null) | tail -n 1)" || true
+  grep -Eq "^[[:space:]]*(export[[:space:]]+)?${var}=([^[:space:]\"']|[[:space:]]+([^[:space:]\"'#]|\"([^\"]|$)|'([^']|$))|\"([^\"]|$)|'([^']|$))" <<<"$last"
 }
 
 # secret_already_set VAR — true if VAR is non-empty in the host env or in .env.
@@ -1717,7 +1726,9 @@ setup_at_rest_encryption() {
   # host-env value is equally operator-supplied, and warn-and-continue here
   # would run the install with the operator's encryption intent silently
   # dropped.
-  if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_LOG_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+  # "Already in .env" uses the shared env_file_value_set predicate, not `=.+`:
+  # `export VAR=""` matches `=.+` but compose resolves it empty.
+  if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! env_file_value_set CULVERT_LOG_PASSPHRASE "$envfile"; then
     validate_passphrase_for_env_file "CULVERT_LOG_PASSPHRASE" "$CULVERT_LOG_PASSPHRASE"
     env_put CULVERT_LOG_PASSPHRASE "$CULVERT_LOG_PASSPHRASE" "$envfile"
   fi
@@ -1746,7 +1757,9 @@ setup_at_rest_encryption() {
     # operator's explicit encryption intent is never silently dropped into an
     # unencrypted-CA install (the earlier warn-and-skip posture contradicted
     # the interactive path's error on the identical input).
-    if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! grep -Eq '^CULVERT_CA_PASSPHRASE=.+' "$envfile" 2>/dev/null; then
+    # Shared predicate, as for the log passphrase above: an empty-resolving
+    # entry such as `export VAR=""` must not suppress the write.
+    if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! env_file_value_set CULVERT_CA_PASSPHRASE "$envfile"; then
       validate_passphrase_for_env_file "CULVERT_CA_PASSPHRASE" "$CULVERT_CA_PASSPHRASE"
       env_put CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
     fi
@@ -1787,7 +1800,25 @@ setup_at_rest_encryption() {
     # host-env fallback below still runs.)
     local existing_pass=""
     if [[ -f "$envfile" ]]; then
-      existing_pass="$(grep -E '^CULVERT_LOG_PASSPHRASE=' "$envfile" | tail -1 | cut -d= -f2-)" || true
+      # CR stripped as in env_file_value_set, which already counted a CRLF
+      # line as set; a trailing CR would otherwise fail the charset guard.
+      existing_pass="$(tr -d '\r' <"$envfile" | grep -E '^[[:space:]]*(export[[:space:]]+)?CULVERT_LOG_PASSPHRASE=' | tail -1 | cut -d= -f2-)" || true
+      # Resolve the value as compose's dotenv parser does, so the charset
+      # guard below judges the passphrase and not its .env syntax: drop
+      # leading blanks; a quoted value is the inside of ONE matching pair
+      # (blanks or a `#` comment after the closing quote are dropped, the
+      # inside is untouched); an unquoted value ends at the first blank-
+      # preceded `#`, minus trailing blanks. A `#` with no blank before it
+      # stays and the guard decides. Anything not matched stays verbatim, and
+      # the guard still rejects any quote, backslash or $ left in it.
+      local dq_re='^"([^"]*)"[[:space:]]*(#.*)?$' sq_re="^'([^']*)'[[:space:]]*(#.*)?\$"
+      existing_pass="${existing_pass#"${existing_pass%%[![:space:]]*}"}"
+      if [[ "$existing_pass" =~ $dq_re || "$existing_pass" =~ $sq_re ]]; then
+        existing_pass="${BASH_REMATCH[1]}"
+      elif [[ "$existing_pass" != [\"\']* ]]; then
+        existing_pass="${existing_pass%%[[:space:]]#*}"
+        existing_pass="${existing_pass%"${existing_pass##*[![:space:]]}"}"
+      fi
     fi
     [[ -z "$existing_pass" ]] && existing_pass="${CULVERT_LOG_PASSPHRASE:-}"
     # .env values round-trip through docker compose's own interpolation (it
