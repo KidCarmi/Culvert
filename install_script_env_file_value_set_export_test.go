@@ -267,3 +267,33 @@ func TestInstallScript_SetupAtRestEncryption_ReuseBranchStripsOneQuotePair(t *te
 		})
 	}
 }
+
+// env_file_value_set strips CR, so a CRLF .env line reaches the CA-reuse
+// branch; the reader must strip it too, or the trailing CR fails the charset
+// guard and the CA passphrase stays unset. Before the export form was
+// accepted, an exported CRLF line read as unset and a CA passphrase was
+// generated instead.
+func TestInstallScript_SetupAtRestEncryption_ReuseBranchReadsCRLFLogPassphrase(t *testing.T) {
+	const crlfValue = "ExistingSecret12345"
+	for _, content := range []string{
+		"export CULVERT_LOG_PASSPHRASE=" + crlfValue + "\r\n",
+		"CULVERT_LOG_PASSPHRASE=" + crlfValue + "\r\n",
+		"export CULVERT_LOG_PASSPHRASE=\"" + crlfValue + "\"\r\n",
+		"  CULVERT_LOG_PASSPHRASE='" + crlfValue + "'\r\n",
+		"OTHER=x\r\nexport CULVERT_LOG_PASSPHRASE=" + crlfValue + "\r\nMORE=y\r\n",
+	} {
+		t.Run(content, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, code, env := runSetupAtRestEncryptionWithHostEnv(t, dir, "unset CULVERT_LOG_PASSPHRASE CULVERT_CA_PASSPHRASE")
+			if code != 0 {
+				t.Fatalf("setup_at_rest_encryption failed (exit %d):\n%s", code, out)
+			}
+			if got, _ := composeResolvedEnvValue(env, "CULVERT_CA_PASSPHRASE"); got != crlfValue {
+				t.Fatalf("compose resolves CULVERT_CA_PASSPHRASE to %q, want %q; .env:\n%q", got, crlfValue, env)
+			}
+		})
+	}
+}

@@ -1800,7 +1800,9 @@ setup_at_rest_encryption() {
     # host-env fallback below still runs.)
     local existing_pass=""
     if [[ -f "$envfile" ]]; then
-      existing_pass="$(grep -E '^[[:space:]]*(export[[:space:]]+)?CULVERT_LOG_PASSPHRASE=' "$envfile" | tail -1 | cut -d= -f2-)" || true
+      # CR stripped as in env_file_value_set, which already counted a CRLF
+      # line as set; a trailing CR would otherwise fail the charset guard.
+      existing_pass="$(tr -d '\r' <"$envfile" | grep -E '^[[:space:]]*(export[[:space:]]+)?CULVERT_LOG_PASSPHRASE=' | tail -1 | cut -d= -f2-)" || true
       # Compose strips one matching pair of surrounding quotes; do the same so
       # a quoted value is not rejected for its quotes. The charset guard below
       # still rejects any quote, backslash or $ left inside.
