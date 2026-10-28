@@ -19619,3 +19619,95 @@ subject is rate, interruptibility and durability, not the budgets — and
 `feedsched`'s own doc records why its unbounded-but-rate-bounded retry is
 correct: "avoid infinite retries" forbids a silent hot loop, not a rate-bounded
 loop whose state an operator can read.
+
+---
+
+## 58. CHAOS-103 — The second process: two Culvert processes, one `/data`
+
+Findings, the executed fault injection, the risk matrix, the regression fixture
+and the gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-28.md).
+Summarised here because two rows are load-bearing for later sweeps.
+
+The register had asked what happens when the volume is damaged (§19), when a
+store is corrupt (§31, §41) and what a listener serves before the posture is
+installed (§57's predecessor, CHAOS-102). It had not asked **who owns the
+volume**. Nothing in the tree detected a second Culvert process opened against
+the same `/data`: both booted, both served, both reported
+`"leader":true,"write_authority":true`, and neither logged a word about the
+other.
+
+- **`CHAOS-103` / SW-1 — a second process is an UNAUTHENTICATED ADMIN CONTROL
+  PLANE over the live gateway's volume.** `uiAuthMiddleware` grants `RoleAdmin`
+  with no credentials while `cfg.IsConfigured()` is false — the necessary
+  first-run bootstrap window — and that predicate is per-process in-memory state
+  read once at boot by `LoadUIUsersFile`. A second process that booted before
+  the operator ran the wizard therefore holds the window open for its whole
+  life. Reproduced end to end: after the real gateway persisted `[alice]`, the
+  second process still answered `needsSetup:true`, served `GET /api/auth/users`
+  200 with no credentials (the real gateway answered 401), accepted an
+  unauthenticated `POST /api/policy` that persisted an `Allow` + `SSL Bypass`
+  rule to the live `policy.json` with `modifiedBy:"unknown"`, and an
+  unauthenticated `POST /api/setup/complete` that replaced the roster with
+  `[attacker]`. The real gateway kept serving `alice` from memory throughout, so
+  nothing looked wrong until its next ordinary restart — at which point `alice`
+  got 401, the attacker was the only admin, and the attacker's rule was
+  enforced. **No attacker is required**: a `compose up` over a stale manual run,
+  or a rolling update briefly sharing one RWO volume, is enough to lock the
+  operator out silently.
+
+  Fixed by deciding the window from the DURABLE roster
+  (`setup_bootstrap_window.go`): all five gates that asked `!cfg.IsConfigured()`
+  now ask `bootstrapWindowOpen()`, and the durable term is re-read inside
+  `setupCompleteMu` so a roster that became non-empty since this process loaded
+  one cannot be replaced by a request that observed the stale latch.
+
+- **The class fix, and the shape of it.** `datadir_writer_lock.go` takes a
+  process-lifetime `flock` on `<dataDir>/.culvert-writer.lock` in `main`
+  immediately after `checkInterruptedRestore` — the same slot, for the same
+  reasons (after the one-shots so `--list`/`--restore` still reach an orphaned
+  directory; before `initLogger`, whose rotation renames an inode another
+  process may still be writing). **A positively identified live holder refuses
+  the boot; every other outcome degrades with a notice.** That asymmetry is the
+  whole design: the kernel releases an `flock` when its owner dies, so a lock
+  that cannot be taken means a process is running *right now* and there is no
+  stale-lock recovery path to get wrong — while a volume where the lock file
+  cannot be created is an existing documented degraded mode (CHAOS-05/07) that
+  must not become an unbootable gateway. `CULVERT_ALLOW_MULTIPLE_WRITERS=1`
+  overrides the refusal, loudly, as an escape hatch and not a deployment mode.
+
+- **Two prior mechanisms were doing half the job, and the half each skipped is
+  why this stayed invisible.** `internal/storeguard` is the one subsystem that
+  *can* see a second process (badger flocks its own directories) and
+  deliberately **degrades** on that signal — "another process holds the store"
+  is on its environmental deny-list, so a live store is never renamed out from
+  under its owner. Correct, unchanged, and precisely the reason the second
+  process kept booting with the rest of the volume unguarded. And the primary
+  proxy listener's `logFatalf` on a bind failure was the only thing that ever
+  stopped a second process — but it is the LAST statement of `main`, so every
+  boot-time write had already landed, and it does nothing at all when the
+  operator gave the second process different ports. Every other listener
+  rebinds for the life of the process (admin UI, SOCKS5 per §22/§36, CP gRPC per
+  §44), so none of them can be the guard either.
+
+- **The write surface a second process reaches is boot AND shutdown, not just
+  "while both run".** `saveHitCounters` runs synchronously on boot
+  (`persistent_admin_state_startup.go:59`); `globalClusterStore.Save()` and the
+  policy-learning flush run from the LATE shutdown hooks
+  (`main_shutdown.go:381,413`). So *stopping* the accidental instance is itself
+  a write of its own stale world onto the live volume. Every durable surface on
+  the JSON state plane is a whole-file replacement through `internal/fileutil`,
+  and `rename(2)` ignores who else holds the file open, so a divergence is never
+  a torn file — it is a coherent file containing the wrong process's world, and
+  every integrity check passes. `config_versions/` is the sharpest: the sequence
+  is seeded by scanning the directory at boot, so two processes allocate from one
+  series and a version number stops identifying a configuration.
+
+Left open and attributed rather than fixed: **SW-6**, the one-shot commands
+(`--restore` above all) run before the guard and still overwrite a volume a live
+gateway owns — covering them means deciding per one-shot whether a live holder
+refuses, and `--list` must not. **SW-7**, the degraded verdicts have a named log
+line but no alert and no `/readyz` row, unlike the `state_file_corrupt` pattern
+this class otherwise follows; wiring them would carry the verdict forward into
+the observability slice, which is a change to that slice rather than to this
+race. Both are recorded in §11 of the dated review.
