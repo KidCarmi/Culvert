@@ -11,8 +11,8 @@ func TestMCPGatewayDiagnostics(t *testing.T) {
 		t.Fatalf("a node that never requested MCP must add no row, got %+v", rows)
 	}
 
-	const secretReason = "tls_cert_path=/etc/culvert/private/mcp.pem"
-	withMCPStatus(t, mcpObserveActivation{State: mcpObserveInvalid, EnableRequested: true, Reason: secretReason})
+	const privatePathReason = "tls_cert_path=/etc/culvert/private/mcp.pem"
+	withMCPStatus(t, mcpObserveActivation{State: mcpObserveInvalid, EnableRequested: true, Reason: privatePathReason})
 	rows := checkMCPGateway()
 	if len(rows) != 1 {
 		t.Fatalf("faulted MCP must add exactly one row, got %d", len(rows))
@@ -21,7 +21,7 @@ func TestMCPGatewayDiagnostics(t *testing.T) {
 	if r.Code != "mcp_gateway" || r.Status != diagWarn || r.OperatorAction == "" {
 		t.Fatalf("unexpected row %+v", r)
 	}
-	if strings.Contains(r.Message, secretReason) || strings.Contains(r.OperatorAction, secretReason) {
+	if strings.Contains(r.Message, privatePathReason) || strings.Contains(r.OperatorAction, privatePathReason) {
 		t.Fatalf("viewer-readable row must not carry the activation reason: %+v", r)
 	}
 
