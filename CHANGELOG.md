@@ -7,6 +7,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Performance
+
+- **The SSL-inspect decryption-profile resolve no longer walks the whole
+  profile store, and no longer scales with how many profiles an operator
+  created.** `decryptprofile.Store` resolves a profile by its stable ID on two
+  proxy paths, and both did it by ranging the entire name-keyed map comparing
+  `p.ID`. `FailOpenScopeByID` still carried the original reasoning for that —
+  "a small admin set, only on the SSL-inspect CONNECT path" — and it was true
+  when written. It stopped being true when Inspect-as-HTTP/2 landed:
+  `resolveH2StallTimeout` resolves the matched rule's profile **per HTTP/2
+  stream** inside `h2InspectStream`, to read one `int`, and one inspected H2
+  connection multiplexes many streams. The CONNECT path pays it three times
+  over as well (`resolveStripALPN` once, `upstreamInspectTLSConfigForMatch`
+  twice). It is the same lesson `handleRequest` records for CHAOS-69: a bound
+  is a property of the POSITION as well as the value.
+
+  The store now carries a stable-ID index, rebuilt whole from the name map
+  under the write lock on every mutation rather than patched key by key — the
+  rebuild is wholly derived, so it cannot drift the way an incremental update
+  can when a later writer forgets a branch (`s.order` already carries a scar
+  from exactly that bug class in `Rename`).
+
+  Measured on an idle 4-core Xeon @2.10GHz with both arms timed in the same run
+  against a verbatim copy of the replaced walk, medians of `-count=5`:
+  `GetByID` 152→120 ns at 1 profile, 174→121 at 8, 354→120 at 32 and
+  934→116 at 128; `FailOpenScopeByID` (the no-copy accessor, so the lookup
+  undiluted) 51.8→26.2 ns at 1 and 741→24.7 ns at 128. The result is the
+  SHAPE, not any one number: the cost is now flat in the profile count where
+  it grew at ~5.5 ns per installed profile, and even one profile improves
+  because ranging a Go map costs iterator setup a hashed lookup does not.
+
+  Behavior is unchanged with one deliberate exception. `replaceContents`
+  de-duplicates by name and not by ID, so a config import or CP→DP snapshot can
+  install two differently-named profiles sharing an ID; the walk resolved such
+  an ID to whichever one Go's randomized map iteration reached first, differing
+  between calls in one process. The index resolves it to the first in insertion
+  order — the tie-break `replaceContents` already applies to duplicate names.
+
+  The index costs one extra pass per mutation: ~6-7% of the in-memory bulk
+  rebuild (376 ns of 6.5 µs at 8 profiles, 58 µs of 825 µs at 1000), before the
+  JSON marshal and fsync a real install then performs.
+
 ### Changed
 
 - **Diagnostics now warns when the MCP gateway was enabled but is not serving.**
