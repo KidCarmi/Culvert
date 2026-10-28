@@ -1343,6 +1343,14 @@ culvert_socks5_binds_total %d
 # HELP culvert_socks5_bind_backoff_seconds Current SOCKS5 rebind backoff; 0 when the listener is bound
 # TYPE culvert_socks5_bind_backoff_seconds gauge
 culvert_socks5_bind_backoff_seconds %g
+
+# HELP culvert_socks5_posture_pending 1 while the SOCKS5 listener is bound but the operator's persisted admission posture has not been installed yet
+# TYPE culvert_socks5_posture_pending gauge
+culvert_socks5_posture_pending %d
+
+# HELP culvert_socks5_posture_refused_total SOCKS5 connections refused since startup because the persisted admission posture was not installed yet
+# TYPE culvert_socks5_posture_refused_total counter
+culvert_socks5_posture_refused_total %d
 `,
 			up,
 			sk.Total,
@@ -1352,6 +1360,16 @@ culvert_socks5_bind_backoff_seconds %g
 			sk.BindTotal,
 			sk.Binds,
 			sk.BindBackoff.Seconds(),
+			// CHAOS-102: the pre-posture accept window. `posture_pending 1`
+			// means the socket is bound but the persisted admission posture
+			// (IP filter, rate limit, per-IP connection cap) is not installed,
+			// so the handler is refusing rather than relaying. A boot-window
+			// gauge, expected to read 0 on every scrape of a running node; the
+			// counter beside it is the durable evidence, because the window is
+			// milliseconds on a healthy volume and the line that reports it
+			// will have rotated long before anyone asks.
+			socks5PosturePendingGauge(),
+			socks5PostureRefusedTotal(),
 		)
 	}
 

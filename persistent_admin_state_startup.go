@@ -58,6 +58,15 @@ func loadPersistentAdminState(cfg persistentAdminStateStartupConfig, ctx context
 	// closes the rename/crash window before the first periodic counter save.
 	saveHitCounters(cfg.HitCountersPath)
 	LoadAdminSettings(cfg.AdminSettingsPath)
+	// CHAOS-102: the admission posture restore has now run, so reopen the
+	// SOCKS5 pre-posture gate initSOCKS5 armed before it bound (a no-op on the
+	// socks5_port: 0 appliance, which never armed it). Unconditional on the
+	// OUTCOME by design: LoadAdminSettings has three early returns that never
+	// reach applyAdminSecurity (file absent, unreadable, quarantined-corrupt)
+	// and each is already surfaced by its own log line, alert and /readyz row,
+	// so holding the listener closed for them would be a posture change rather
+	// than the closure of a race. socks5_posture_gate.go records the argument.
+	releaseSOCKS5PostureGate()
 	// M7 Slice 2: validate the node-local telemetry consent config once, at
 	// boot, so a malformed/unsafe/invalid config is surfaced immediately
 	// rather than on the next admin page load. SYNCHRONOUS AND INERT — it
