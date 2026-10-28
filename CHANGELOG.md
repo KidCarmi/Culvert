@@ -9,6 +9,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the MCP gateway was enabled but is not serving.**
+  A gateway that failed to start, degraded or stopped was visible only on
+  `/readyz`, `/metrics` and the alert; the one-page report read as healthy. A
+  new `mcp_gateway` WARN row (additive, report-only, no row when MCP was never
+  requested or is healthy) carries a fixed message and never the activation
+  reason. MCP startup and readiness behavior are unchanged.
+
 - **Diagnostics now warns when the upstream mTLS client certificate failed to
   load, has expired, or expires within 30 days.** That state was visible only in
   the OCSP panel API; the one-page report read as healthy while upstream servers

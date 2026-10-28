@@ -237,6 +237,9 @@ func buildOperatorContract() OperatorContract {
 	// Upstream mTLS client certificate failed to load or is expired/expiring.
 	// Contributes nothing when no client certificate is configured.
 	checks = append(checks, checkUpstreamMTLSClientCert()...)
+	// MCP gateway enabled but not serving (failed to start, degraded or stopped).
+	// Contributes nothing when MCP was never requested or is healthy.
+	checks = append(checks, checkMCPGateway()...)
 	// PAC profiles last served with compile warnings. Contributes nothing when
 	// every served profile compiled cleanly.
 	checks = append(checks, checkPACDegraded()...)
