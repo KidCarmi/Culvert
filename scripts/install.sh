@@ -1803,11 +1803,21 @@ setup_at_rest_encryption() {
       # CR stripped as in env_file_value_set, which already counted a CRLF
       # line as set; a trailing CR would otherwise fail the charset guard.
       existing_pass="$(tr -d '\r' <"$envfile" | grep -E '^[[:space:]]*(export[[:space:]]+)?CULVERT_LOG_PASSPHRASE=' | tail -1 | cut -d= -f2-)" || true
-      # Compose strips one matching pair of surrounding quotes; do the same so
-      # a quoted value is not rejected for its quotes. The charset guard below
-      # still rejects any quote, backslash or $ left inside.
-      if [[ "$existing_pass" =~ ^\"(.*)\"$ || "$existing_pass" =~ ^\'(.*)\'$ ]]; then
+      # Resolve the value as compose's dotenv parser does, so the charset
+      # guard below judges the passphrase and not its .env syntax: drop
+      # leading blanks; a quoted value is the inside of ONE matching pair
+      # (blanks or a `#` comment after the closing quote are dropped, the
+      # inside is untouched); an unquoted value ends at the first blank-
+      # preceded `#`, minus trailing blanks. A `#` with no blank before it
+      # stays and the guard decides. Anything not matched stays verbatim, and
+      # the guard still rejects any quote, backslash or $ left in it.
+      local dq_re='^"([^"]*)"[[:space:]]*(#.*)?$' sq_re="^'([^']*)'[[:space:]]*(#.*)?\$"
+      existing_pass="${existing_pass#"${existing_pass%%[![:space:]]*}"}"
+      if [[ "$existing_pass" =~ $dq_re || "$existing_pass" =~ $sq_re ]]; then
         existing_pass="${BASH_REMATCH[1]}"
+      elif [[ "$existing_pass" != [\"\']* ]]; then
+        existing_pass="${existing_pass%%[[:space:]]#*}"
+        existing_pass="${existing_pass%"${existing_pass##*[![:space:]]}"}"
       fi
     fi
     [[ -z "$existing_pass" ]] && existing_pass="${CULVERT_LOG_PASSPHRASE:-}"

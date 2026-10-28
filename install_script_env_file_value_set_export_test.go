@@ -297,3 +297,62 @@ func TestInstallScript_SetupAtRestEncryption_ReuseBranchReadsCRLFLogPassphrase(t
 		})
 	}
 }
+
+// env_file_value_set counts a value followed by blanks or a ` # note` inline
+// comment as set, and compose drops both. The reuse reader must drop them
+// too, or the charset guard rejects the value and the CA passphrase stays
+// unset. Before the export form was accepted, these lines read as unset and
+// a CA passphrase was generated. Inside quotes nothing is touched, and a `#`
+// with no blank before it is part of the value, so the guard still judges it.
+func TestInstallScript_SetupAtRestEncryption_ReuseBranchDropsInlineCommentAndBlanks(t *testing.T) {
+	const want = "ExistingSecret12345"
+	accepted := []string{
+		"export CULVERT_LOG_PASSPHRASE=" + want + "   ",
+		"export CULVERT_LOG_PASSPHRASE=" + want + " # note",
+		"export CULVERT_LOG_PASSPHRASE=" + want + "\t#note # more",
+		"export CULVERT_LOG_PASSPHRASE=  " + want,
+		"export CULVERT_LOG_PASSPHRASE=\"" + want + "\" # note",
+		"export CULVERT_LOG_PASSPHRASE=\"" + want + "\" # logs", // Codex P2 #1742 input
+		"export CULVERT_LOG_PASSPHRASE='" + want + "'   ",
+		"export CULVERT_LOG_PASSPHRASE=" + want + " # note\r",
+	}
+	for _, line := range accepted {
+		t.Run(line, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(line+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, code, env := runSetupAtRestEncryptionWithHostEnv(t, dir, "unset CULVERT_LOG_PASSPHRASE CULVERT_CA_PASSPHRASE")
+			if code != 0 {
+				t.Fatalf("setup_at_rest_encryption failed (exit %d):\n%s", code, out)
+			}
+			if got, _ := composeResolvedEnvValue(env, "CULVERT_CA_PASSPHRASE"); got != want {
+				t.Fatalf("compose resolves CULVERT_CA_PASSPHRASE to %q, want %q; .env:\n%q", got, want, env)
+			}
+		})
+	}
+
+	// Controls: still rejected by the unchanged charset guard, so no CA entry.
+	rejected := []string{
+		"export CULVERT_LOG_PASSPHRASE=abcdef#ghijkl123",
+		"CULVERT_LOG_PASSPHRASE=abcdef#ghijkl123",
+		"export CULVERT_LOG_PASSPHRASE=\"Existing Secret12345\" # note",
+		"export CULVERT_LOG_PASSPHRASE=\"Existing#Secret12345\"",
+		"export CULVERT_LOG_PASSPHRASE=\"" + want + "\"trailing",
+	}
+	for _, line := range rejected {
+		t.Run(line, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(line+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, code, env := runSetupAtRestEncryptionWithHostEnv(t, dir, "unset CULVERT_LOG_PASSPHRASE CULVERT_CA_PASSPHRASE")
+			if code != 0 {
+				t.Fatalf("setup_at_rest_encryption failed (exit %d):\n%s", code, out)
+			}
+			if ca, ok := composeResolvedEnvValue(env, "CULVERT_CA_PASSPHRASE"); ok {
+				t.Fatalf("value rejected by the charset guard was reused as CULVERT_CA_PASSPHRASE=%q; .env:\n%s", ca, env)
+			}
+		})
+	}
+}
