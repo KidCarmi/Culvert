@@ -123,6 +123,25 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-28 — `CHAOS-103` CLAIMED (placeholder, commit one). Domain: the
+SECOND PROCESS — what happens when two Culvert processes run against one
+`/data`, and which durable surfaces does the accidental one overwrite?** Id
+claimed in this committed row before any code was written, per the convention
+above, and checked against `origin/main` rather than the working tree, per the
+2026-09-25 amendment: `CHAOS-102` is the highest id anywhere on `main`, and no
+open PR holds a chaos id at claim time (#1747, #1746, #1705, #1549, #1548,
+#1536, #1528, #1526 — none is a chaos sweep), so this sweep took 103 and will
+not move.
+
+Scope is the SIMULATE list's *unexpected restart* / *operational surprises* /
+*state corruption* rows asked as one question the register has not asked
+before: the boot path has a refusal for a half-finished restore
+(`checkInterruptedRestore`) and badger's own directory flock protects the
+embedded stores, so what covers the JSON state plane and the admin control
+plane when a second process opens the same volume? Findings, measurements and
+gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-28.md).
+
 **2026-10-27 — `CHAOS-102` CLAIMED (placeholder, commit one). Domain: the
 PRE-POSTURE ACCEPT WINDOW — for every listener in the process, what does it
 serve between the moment its socket is bound and the moment the operator's
