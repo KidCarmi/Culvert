@@ -113,6 +113,22 @@ func acquireDataDirWriterLock(dir string) (dataDirWriterVerdict, string, error) 
 	if dir == "" {
 		return dataDirWriterUndetermined, "", errors.New("no persisted-state root configured")
 	}
+	// The data root may not exist yet on a genuine fresh install, and the guard
+	// runs long before the statement that would otherwise create it (initPAC →
+	// loadPAC's own MkdirAll). Opening the lock file first would return ENOENT,
+	// degrade, and leave the process holding NOTHING for its whole life — while
+	// startup then created the directory, so a second process could take the
+	// lock and boot alongside it. On a healthy filesystem. Creating the root
+	// here is what makes the guard real on a first boot; a creation that
+	// genuinely fails (read-only volume, no permission, a root that is a file)
+	// still degrades below, which is the CHAOS-05/07 posture.
+	//
+	// 0o700 matches loadPAC, the statement that creates this directory today.
+	// MkdirAll is a no-op on an existing directory and never changes its mode,
+	// so an operator's 0o750 volume is left exactly as it is.
+	if err := os.MkdirAll(dir, 0o700); err != nil { // #nosec G304 G703 -- the operator-configured persisted-state root itself; no request input reaches it
+		return dataDirWriterUndetermined, filepath.Join(dir, dataDirWriterLockName), err
+	}
 	path := filepath.Join(dir, dataDirWriterLockName)
 	// O_CREATE without O_EXCL by design: the lock file is expected to survive
 	// across boots and is meaningless on its own — the flock is the state, the
@@ -148,6 +164,13 @@ func acquireDataDirWriterLock(dir string) (dataDirWriterVerdict, string, error) 
 // so --list/--restore/--cleanup-restore-leftovers keep working on an orphaned
 // state directory. That is the same slot checkInterruptedRestore occupies, for
 // the same reasons.
+//
+// It also has to run after checkInterruptedRestore specifically, not merely
+// near it: acquiring the lock CREATES the data root, and an interrupted restore
+// is diagnosed by that root being ABSENT with a `.bak` sibling. Creating it
+// first would erase the evidence of the very condition that refusal exists to
+// catch. checkInterruptedRestore exits the process, so its refusal is always
+// reached first.
 func checkDataDirSingleWriter(dir string) error {
 	verdict, path, cause := acquireDataDirWriterLock(dir)
 	switch verdict {

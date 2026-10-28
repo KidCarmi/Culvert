@@ -333,7 +333,7 @@ but CULVERT_ALLOW_MULTIPLE_WRITERS is set, so this process is starting anyway. .
 
 ### Gates
 
-Seven in `datadir_writer_lock_test.go`, six in `setup_bootstrap_window_test.go`
+Ten in `datadir_writer_lock_test.go`, six in `setup_bootstrap_window_test.go`
 (one a twelve-case table) and four in `chaos103_second_process_test.go`.
 
 **Pre-fix run** — the durable term removed from `bootstrapWindowOpen`, nothing
@@ -385,6 +385,54 @@ exist because the real helpers log and increment counters, and this derivation
 runs on an admin request: calling them would re-quarantine, double-count the
 loader's own report and emit a line per request. The drift risk that creates is
 exactly what the oracle holds.
+
+### 9a. The review round: the guard did not arm on a first boot
+
+The first version of the single-writer guard had a hole, found by Codex on
+PR #1750 (P2) and reproduced before being accepted:
+
+**On a genuine fresh install whose data root does not exist yet, the lock-file
+open returned `ENOENT`, the guard degraded, and the process held nothing for its
+whole life — while startup then created the directory, so a second process could
+take the lock and boot alongside it.** On a healthy filesystem. Measured with
+two real processes against a non-existent `CULVERT_DATA_DIR`: `NO LOCK FILE —
+A holds nothing`, then `B alive: YES-BOTH-RUNNING`.
+
+The cause is the guard's own position. It runs before the statement that creates
+the root (`initPAC` → `loadPAC`'s `os.MkdirAll(filepath.Dir(cfg.ConfigPath),
+0o700)`, [pac_startup.go:23](../../pac_startup.go)), which is exactly where it
+has to be to precede the first write — so it had to create the root itself
+rather than find it. It now does, with `0o700` to match the statement that
+creates it today; `MkdirAll` is a no-op on an existing directory and never
+changes its mode, so an operator's `0o750` volume is untouched. A creation that
+genuinely fails (read-only volume, no permission, a root that is a file) still
+degrades, which is the same fail-safe rule.
+
+**This is the sharper lesson of the round, and it is about the degraded verdict,
+not the refusal.** Every case the fail-safe rule was written for — a read-only
+volume, a filesystem without `flock` — is a *genuinely* unobservable lock state,
+and degrading is right. `ENOENT` on a first boot looks identical at the call
+site and is not that case at all: it is a healthy volume the guard simply had
+not created yet. A rule of the form *anything I cannot classify, degrade* is
+correct only as far as the classifier is; here it silently swallowed the one
+condition under which the guard was needed most and reported it in the same
+words as a damaged disk. The gate added for it
+(`TestDataDirSingleWriter_AcquiresOnAFirstBootWhoseRootDoesNotExistYet`) asserts
+the lock is HELD, not merely that nothing refused — a weaker assertion would
+have passed against the broken version.
+
+**The fix created an interaction worth pinning.** Acquiring the lock now creates
+the data root, and `checkInterruptedRestore` (RISK-005) diagnoses a restore
+commit killed mid-rename by precisely that root being ABSENT with a `.bak`
+sibling. Running the guard first would create the root, make that refusal a
+no-op, and boot the gateway on an empty volume with the operator's real data
+stranded in a `.bak` nobody is told about. `main`'s order is already safe —
+`checkInterruptedRestore` exits the process before the guard is reached —
+verified end to end against the built binary (exit 1 on `interrupted restore
+detected`, root still absent afterwards) and pinned by
+`TestDataDirSingleWriter_MustNotRunBeforeTheInterruptedRestoreRefusal`, which
+asserts both halves so a future reorder of `main` fails a test instead of
+destroying the evidence.
 
 ### Full-module and lint
 

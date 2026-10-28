@@ -93,7 +93,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   read-only or permission-denied volume, a filesystem without `flock`) degrades
   with a process-log notice, as CHAOS-05/07's posture requires. The kernel
   releases the lock when its holder dies, so SIGKILL, OOM and power loss leave
-  no stale lock and nothing to clean up by hand. `CULVERT_ALLOW_MULTIPLE_WRITERS=1`
+  no stale lock and nothing to clean up by hand. The guard creates the data root
+  itself when it does not exist yet: it runs before the statement that otherwise
+  creates it, so without that a first boot on a fresh install degraded and held
+  nothing for the whole process lifetime while a second process could still take
+  the lock. It stays ordered after the interrupted-restore refusal, which
+  diagnoses a killed restore commit by that root being absent. `CULVERT_ALLOW_MULTIPLE_WRITERS=1`
   overrides the refusal for storage that reports lock state wrongly; it is loud,
   env-only, and not a supported deployment mode.
 

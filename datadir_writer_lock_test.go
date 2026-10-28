@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withFreshWriterLockState isolates the package globals the guard owns. The
@@ -184,5 +185,107 @@ func TestDataDirWriterLock_NotInBackupManifest(t *testing.T) {
 		if strings.Contains(art.SrcPath, dataDirWriterLockName) || strings.Contains(art.TarPath, dataDirWriterLockName) {
 			t.Fatalf("the single-writer lock must not be a backup artifact, found %+v", art)
 		}
+	}
+}
+
+// TestDataDirSingleWriter_AcquiresOnAFirstBootWhoseRootDoesNotExistYet is the
+// regression gate for the Codex P2 finding on PR #1750.
+//
+// The guard runs long before the statement that creates the data root
+// (initPAC → loadPAC's MkdirAll), so on a genuine fresh install the lock-file
+// open returned ENOENT, the guard degraded, and the process held NOTHING for
+// its whole life — while startup went on to create the directory, so a second
+// process could take the lock and boot alongside it. On a healthy filesystem,
+// which is what made it worse than the degraded cases this rule is for.
+//
+// Reproduced before the fix with two real processes against a non-existent
+// CULVERT_DATA_DIR: "NO LOCK FILE", both processes alive.
+func TestDataDirSingleWriter_AcquiresOnAFirstBootWhoseRootDoesNotExistYet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("advisory locking is not available on this platform")
+	}
+	withFreshWriterLockState(t)
+	root := filepath.Join(t.TempDir(), "data-not-created-yet")
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("premise broken: %q must not exist, stat err = %v", root, err)
+	}
+
+	if err := checkDataDirSingleWriter(root); err != nil {
+		t.Fatalf("a first boot must acquire the lock, not refuse: %v", err)
+	}
+	if dataDirWriterLockHandle == nil {
+		t.Fatal("a first boot must HOLD the lock; a degraded verdict here leaves the guard inert for the whole process lifetime")
+	}
+	if dataDirWriterLockNotice != "" {
+		t.Fatalf("a first boot on a healthy volume must record no degraded notice, got %q", dataDirWriterLockNotice)
+	}
+	if _, err := os.Stat(filepath.Join(root, dataDirWriterLockName)); err != nil {
+		t.Fatalf("the lock file must exist after acquisition: %v", err)
+	}
+
+	// And the lock it took must actually exclude a second process.
+	if verdict, _, cause := acquireDataDirWriterLock(root); verdict != dataDirWriterHeld {
+		t.Fatalf("second acquisition verdict = %v, want dataDirWriterHeld (cause=%v)", verdict, cause)
+	}
+}
+
+// TestDataDirSingleWriter_DoesNotCreateTheRootWhenCreationFails keeps the
+// fail-safe half intact now that the guard creates the root: a root that cannot
+// be created must still degrade rather than refuse, and must not leave a
+// half-made directory or a retained descriptor behind.
+func TestDataDirSingleWriter_DoesNotCreateTheRootWhenCreationFails(t *testing.T) {
+	withFreshWriterLockState(t)
+	parent := filepath.Join(t.TempDir(), "parent-is-a-file")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	root := filepath.Join(parent, "data") // cannot be created: parent is a file
+
+	verdict, _, cause := acquireDataDirWriterLock(root)
+	if verdict != dataDirWriterUndetermined {
+		t.Fatalf("verdict = %v, want dataDirWriterUndetermined (cause=%v)", verdict, cause)
+	}
+	if err := checkDataDirSingleWriter(root); err != nil {
+		t.Fatalf("an uncreatable root must degrade, not refuse; got %v", err)
+	}
+	if dataDirWriterLockHandle != nil {
+		t.Fatal("a failed acquisition must not retain a descriptor")
+	}
+}
+
+// TestDataDirSingleWriter_MustNotRunBeforeTheInterruptedRestoreRefusal pins the
+// interaction the MkdirAll above creates.
+//
+// Acquiring the lock now CREATES the data root, and checkInterruptedRestore
+// (RISK-005) diagnoses a restore commit killed mid-rename by exactly that root
+// being ABSENT while a `.bak` sibling holds the operator's previous data. So
+// running the single-writer guard first would create the root, make the refusal
+// a no-op, and boot the gateway on an empty volume with the real data stranded
+// in a `.bak` nobody is told about — losing the data that refusal exists to
+// save.
+//
+// main's order makes this safe (checkInterruptedRestore exits the process
+// before the guard is reached), and both halves are asserted here so a future
+// reorder fails a test instead of silently destroying the evidence. Verified
+// end to end against the built binary: with a well-formed `.bak` sibling the
+// process exits 1 on "interrupted restore detected" and the root is still
+// absent afterwards.
+func TestDataDirSingleWriter_MustNotRunBeforeTheInterruptedRestoreRefusal(t *testing.T) {
+	withFreshWriterLockState(t)
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "data") // absent: renamed aside, commit killed
+	makeDir(t, parent, leftoverName("bak", time.Unix(1_700_000_000, 0), 4242))
+
+	// Half one: the refusal fires on this state, so main exits before the guard.
+	if err := checkInterruptedRestore(dataDir); err == nil {
+		t.Fatal("premise broken: checkInterruptedRestore must refuse an absent root with a .bak sibling")
+	}
+
+	// Half two: the guard WOULD create the root, which is why it must run after.
+	if err := checkDataDirSingleWriter(dataDir); err != nil {
+		t.Fatalf("guard: %v", err)
+	}
+	if _, err := os.Stat(dataDir); err != nil {
+		t.Fatalf("expected the guard to create the root (that is the hazard being pinned): %v", err)
 	}
 }
