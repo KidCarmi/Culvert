@@ -7,6 +7,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **install.sh no longer replaces an at-rest passphrase it could not read.** A
+  root-owned `0600` `.env` re-run unprivileged made `setup_at_rest_encryption`
+  treat the file as having no passphrase, so a host-env `CULVERT_CA_PASSPHRASE`
+  (or a freshly generated log passphrase) overwrote the real one and orphaned
+  the encrypted CA bundle. It now takes ownership first and, if the file is
+  still unreadable, leaves it unchanged with a warning.
+
 ### Changed
 
 - **Diagnostics now warns when the MCP gateway was enabled but is not serving.**

@@ -1711,6 +1711,21 @@ persist_host_env_session_secret() {
 setup_at_rest_encryption() {
   local envfile="$INSTALL_DIR/.env"
 
+  # An .env we cannot read must not be judged "no passphrase": every check
+  # below would answer "unset" and env_put (which takes ownership via sudo)
+  # would append a different passphrase over the one already in the file,
+  # orphaning the encrypted CA bundle and saved logs. Self-heal ownership first
+  # (as persist_host_env_session_secret does); if it is still unreadable, leave
+  # it alone.
+  if [[ -e "$envfile" && ! -r "$envfile" ]]; then
+    sudo chown "$(id -un)" "$envfile" 2>/dev/null || true
+  fi
+  if [[ -e "$envfile" && ! -r "$envfile" ]]; then
+    warn "Cannot read $envfile — leaving the encryption passphrases unchanged rather than risk replacing"
+    warn "existing ones. Fix its permissions and re-run, or set CULVERT_*_PASSPHRASE there yourself."
+    return 0
+  fi
+
   # A host-environment-only CULVERT_LOG_PASSPHRASE (exported by an automated,
   # non-interactive install) has the same failure shape the CA branch below
   # guards against: secret_already_set() counts it as "configured", but §7
