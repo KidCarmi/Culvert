@@ -69,6 +69,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **CHAOS-102's own regression gate could be defeated by a one-line refactor
+  that kept the arm and moved it below the bind (SEC-SOCKS5GATE-1).** The
+  pre-posture gate is pinned at both ends by AST walls, but only the RELEASE end
+  was pinned by statement ORDER (`releaseAt < loadAt` fails). The arm end was
+  pinned by presence alone — `armSOCKS5PostureGate` anywhere in `initSOCKS5`'s
+  callee set — and it had to be, because `callStatementIndexForTest` reports the
+  index of the enclosing top-level statement and both the arm and `startSOCKS5`
+  sit inside the same `if s.socks5PortVal > 0` block, so it returns the SAME
+  index for the two and cannot order them. Inverting those two lines reopens an
+  accept window in which a SOCKS5 client is admitted from any source IP,
+  unrate-limited, uncapped and relayed to an arbitrary TCP destination, and all
+  ten pre-existing CHAOS-102 tests passed on that inverted tree — measured, not
+  reasoned. `TestCHAOS102_Wall_TheArmPrecedesTheBind` now compares `token.Pos`
+  rather than statement indices and fails when the arm follows the bind; the
+  arm-ABSENT shapes (the pre-fix boot order and the reorder remedy) are left to
+  the callee-set wall that already owns them, so the two do not overlap. Its
+  negative controls classify both synthetic `initSOCKS5` bodies and additionally
+  assert the premise — that the index helper cannot separate the two calls — so
+  the wall self-reports if a later refactor makes it redundant. Test-only: no
+  production file changes and no runtime behavior moves. Review:
+  `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-10-28.md`.
 - **A Data Plane's revocation push reached the Control Plane's OWN session list
   unbounded, so one enrolled node could make the CP stop honouring every other
   node's logouts (SEC-REVMERGE-1).** CHAOS-68 gave the CP's `SyncRevocations`
