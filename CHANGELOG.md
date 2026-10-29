@@ -59,6 +59,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when an enabled alert webhook's latest delivery
+  failed.** Failed deliveries were visible only in the Alert Webhooks delivery
+  history; the one-page report read as healthy while security alerts stopped
+  reaching a receiver. A new `alert_delivery` WARN row (additive, report-only,
+  no row when every enabled webhook's latest attempt succeeded) carries a count
+  only, never a webhook name, URL or error text. Dispatch, retry and signing are
+  unchanged.
+
 - **Diagnostics now warns when the MCP gateway was enabled but is not serving.**
   A gateway that failed to start, degraded or stopped was visible only on
   `/readyz`, `/metrics` and the alert; the one-page report read as healthy. A
