@@ -307,10 +307,11 @@ func (p *Profile) SecurityGen() string {
 	return computeSecurityGen(p)
 }
 
-// Store manages persistent decryption profiles with O(1) name lookups.
+// Store manages persistent decryption profiles with O(1) name AND id lookups.
 type Store struct {
 	mu       sync.RWMutex
 	profiles map[string]*Profile // keyed by lowercase name
+	byID     map[string]*Profile // keyed by stable ID — see reindexLocked
 	order    []string            // insertion order for stable list output
 	path     string
 
@@ -356,7 +357,72 @@ func (s *Store) Version() int64 {
 }
 
 // New builds an empty store.
-func New() *Store { return &Store{profiles: make(map[string]*Profile)} }
+func New() *Store {
+	return &Store{profiles: make(map[string]*Profile), byID: make(map[string]*Profile)}
+}
+
+// reindexLocked rebuilds the stable-ID index from s.profiles. The caller must
+// hold s.mu for WRITING.
+//
+// ── Why an index, and why a REBUILD rather than an incremental patch ────────
+//
+// GetByID and FailOpenScopeByID used to answer by ranging the whole name-keyed
+// map and comparing p.ID. That O(profiles) walk was reasoned about — and
+// documented on FailOpenScopeByID — as "a small admin set, only on the
+// SSL-inspect CONNECT path". The CONNECT premise no longer holds: the
+// InspectHTTP2 work added resolveH2StallTimeout, which resolves the profile
+// PER HTTP/2 STREAM inside h2InspectStream, and one inspected H2 connection
+// multiplexes many streams. The bound travelled to a caller that pays it at a
+// different rate — the same shape as the CHAOS-69 lesson recorded in
+// handleRequest: a cost is a property of the POSITION as well as the value.
+//
+// The index is REBUILT WHOLE from s.profiles rather than patched key by key.
+// Mutations are admin writes and CP→DP installs — rare, already O(profiles)
+// for the persist that follows, and already holding the write lock — so the
+// rebuild is free where it runs, and being wholly derived it cannot drift out
+// of step with the map the way an incremental update can when a later writer
+// forgets one branch. s.order already carries a scar from exactly that bug
+// class (see Rename). TestIDIndex_ConsistentAfterEveryMutation pins it.
+//
+// DUPLICATE IDs: replaceContents de-duplicates by NAME, not by ID, so a
+// config import or a CP→DP snapshot can install two differently-named
+// profiles carrying the same ID. The old walk returned whichever of them Go's
+// randomized map iteration reached first — a different answer on different
+// calls in the same process. The index resolves such an ID to the FIRST
+// profile in s.order, which is deterministic and is the tie-break
+// replaceContents already applies to duplicate names ("keep first, drop
+// dup"). Nondeterministic → deterministic is the intended change; which of
+// two colliding profiles wins is not a contract either form could offer.
+func (s *Store) reindexLocked() {
+	byID := make(map[string]*Profile, len(s.profiles))
+	add := func(p *Profile) {
+		if p.ID == "" {
+			return
+		}
+		if _, dup := byID[p.ID]; dup {
+			return // first wins (see the doc comment)
+		}
+		byID[p.ID] = p
+	}
+	// s.order first, so the duplicate-ID tie-break is INSERTION order and not
+	// Go's randomized map order.
+	for _, key := range s.order {
+		if p, ok := s.profiles[key]; ok {
+			add(p)
+		}
+	}
+	// Then a sweep of s.profiles, so the index is complete even if an entry is
+	// missing from s.order. That should not happen — every insert appends —
+	// but s.order has diverged before (Rename's re-key dropped a profile from
+	// List, Save and the CP→DP snapshot), and the replaced walk ranged
+	// s.profiles, so an order-only index would newly hide from GetByID a
+	// profile the walk could still find. The sweep costs one pass over a map
+	// already being walked and removes the coupling entirely.
+	for _, p := range s.profiles {
+		add(p)
+	}
+	s.byID = byID
+}
 
 // Validate checks a profile's fields. Enforced on EVERY write path (Add/Update/
 // ReplaceAll) so config-import and CP→DP snapshot-apply cannot smuggle an invalid
@@ -584,6 +650,7 @@ func (s *Store) restoreSnapshot(profiles []Profile, version int64) {
 	s.profiles = built
 	s.order = order
 	s.version = version
+	s.reindexLocked()
 	s.mu.Unlock()
 }
 
@@ -677,23 +744,24 @@ func (s *Store) FailOpenScope(name string) (id, gen string, ok bool) {
 // fail-close profile but whose stale name points at a different fail-open one
 // could get its (fail-close) session bypassed, violating the "fail-close is
 // un-poisonable" invariant. Mirrors resolveDecryptionProfile: name fallback only
-// when the id resolves to no profile at all. No-copy fast path; O(profiles), a
-// small admin set, only on the SSL-inspect CONNECT path.
+// when the id resolves to no profile at all. No-copy fast path, and O(1) since
+// the reindexLocked ID index landed (it was O(profiles) on the reasoning that
+// this runs only on the SSL-inspect CONNECT path — true here, but the premise
+// did not survive contact with the per-stream caller reindexLocked describes).
 func (s *Store) FailOpenScopeByID(id string) (scope, gen string, resolved bool) {
 	if id == "" {
 		return "", "", false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, p := range s.profiles {
-		if p.ID == id {
-			if p.OnInspectError == "fail-open" {
-				return p.ID, p.SecurityGen(), true // resolved + fail-open → scope + security generation (same source as the learn path)
-			}
-			return "", "", true // resolved but fail-close → no scope, and no name fallback
-		}
+	p := s.byID[id]
+	if p == nil {
+		return "", "", false // not found → caller may fall back to the name
 	}
-	return "", "", false // not found → caller may fall back to the name
+	if p.OnInspectError == "fail-open" {
+		return p.ID, p.SecurityGen(), true // resolved + fail-open → scope + security generation (same source as the learn path)
+	}
+	return "", "", true // resolved but fail-close → no scope, and no name fallback
 }
 
 // GetByName returns a profile by name (case-insensitive). O(1). nil if not found.
@@ -732,6 +800,7 @@ func (s *Store) Add(p Profile) (*Profile, error) {
 	np.securityGen = computeSecurityGen(&np)
 	s.profiles[key] = &np
 	s.order = append(s.order, key)
+	s.reindexLocked()
 	c := copyOut(&np)
 	return &c, nil
 }
@@ -756,6 +825,7 @@ func (s *Store) Update(p Profile) error {
 	np := p
 	np.securityGen = computeSecurityGen(&np)
 	s.profiles[key] = &np
+	s.reindexLocked() // the stored pointer changed; the index must follow it
 	return nil
 }
 
@@ -774,6 +844,7 @@ func (s *Store) Delete(name string) error {
 			break
 		}
 	}
+	s.reindexLocked()
 	return nil
 }
 
@@ -856,24 +927,26 @@ func (s *Store) replaceContents(profiles []Profile, logSkips bool) (migrated, sk
 	s.mu.Lock()
 	s.profiles = built
 	s.order = order
+	s.reindexLocked()
 	s.mu.Unlock()
 	return migrated, skipped, certMigrated
 }
 
-// GetByID returns a copy of the profile with the given stable ID, or nil.
+// GetByID returns a copy of the profile with the given stable ID, or nil. O(1)
+// via the reindexLocked ID index (it walked the whole name-keyed map until the
+// per-stream caller described there made that cost visible).
 func (s *Store) GetByID(id string) *Profile {
 	if id == "" {
 		return nil
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, p := range s.profiles {
-		if p.ID == id {
-			cp := copyOut(p)
-			return &cp
-		}
+	p := s.byID[id]
+	if p == nil {
+		return nil
 	}
-	return nil
+	cp := copyOut(p) // copied UNDER the lock: Rename mutates a stored Name in place
+	return &cp
 }
 
 // UpdateByID replaces the content of the profile with the given stable ID
@@ -900,6 +973,7 @@ func (s *Store) UpdateByID(id string, p Profile) error {
 		np := p
 		np.securityGen = computeSecurityGen(&np)
 		s.profiles[key] = &np
+		s.reindexLocked() // the stored pointer changed; the index must follow it
 		return nil
 	}
 	return fmt.Errorf("profile id %q not found", id)
@@ -937,6 +1011,9 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if newKey == curKey {
 		// Same key (no change or case-only) — update the display name in place.
+		// No reindex: the stored *Profile and its ID are both unchanged, so the
+		// ID index still points at the right object. Pinned by
+		// TestIDIndex_ConsistentAfterEveryMutation/Rename-case-only.
 		cur.Name = newName
 		cur.UpdatedAt = now
 		return oldName, nil
@@ -960,6 +1037,7 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 			break
 		}
 	}
+	s.reindexLocked()
 	return oldName, nil
 }
 
@@ -972,17 +1050,19 @@ func (s *Store) DeleteByID(id string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, p := range s.profiles {
-		if p.ID == id {
-			name := p.Name
-			delete(s.profiles, key)
-			for i, k := range s.order {
-				if k == key {
-					s.order = append(s.order[:i], s.order[i+1:]...)
-					break
-				}
-			}
-			return name, nil
+		if p.ID != id {
+			continue
 		}
+		name := p.Name
+		delete(s.profiles, key)
+		for i, k := range s.order {
+			if k == key {
+				s.order = append(s.order[:i], s.order[i+1:]...)
+				break
+			}
+		}
+		s.reindexLocked()
+		return name, nil
 	}
 	return "", fmt.Errorf("profile id %q not found", id)
 }

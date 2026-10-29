@@ -243,6 +243,9 @@ func buildOperatorContract() OperatorContract {
 	// PAC profiles last served with compile warnings. Contributes nothing when
 	// every served profile compiled cleanly.
 	checks = append(checks, checkPACDegraded()...)
+	// Enabled alert webhooks whose latest delivery failed. Contributes nothing
+	// when every enabled webhook's latest recorded attempt succeeded.
+	checks = append(checks, checkAlertDelivery()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
