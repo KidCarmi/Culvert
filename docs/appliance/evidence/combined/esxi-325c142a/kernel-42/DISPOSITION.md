@@ -33,12 +33,12 @@
 - **`autoremove --purge` removes no kernel** (`autoremove-kernel-protection.txt`):
   - APT 2.8.3 protects the booted kernel (38 during `os`) and the newest two (42, 38).
   - So 38 stays installed as a GRUB fallback after the reboot.
-- **Non-kernel autoremove** depends on the guest's `extended_states`, which the inventory does not carry. The transaction cannot make a non-kernel package newly removable.
+- **Non-kernel autoremove: 34 removals, all pre-existing (CORRECTED 29 Oct; see `autoremove-reconciliation.md`).** My first version said "0 removals". That was wrong: my simulation had marked every non-kernel package as manually installed. The 34 are the packages ASTRA retained. They became orphans when the build purged the GA kernel metapackage `linux-virtual`. They are removable on the as-shipped 38 image, and the 42 upgrade adds none. QEMU run 40555 already removed exactly these 34 on this OVA.
 - **Pending-transaction rule for ASTRA, before `os`:** run read-only on the console:
   - `apt-get -s upgrade --with-new-pkgs`
   - `apt-get -s autoremove --purge`
   
-  **STOP and report** if either differs from the 5 packages above / 0 removals. A different set is a transaction nobody reviewed.
+  **STOP and report** if either differs from the 5 packages above, or from the exact 34 removals in `autoremove-34.txt` (corrected from "0 removals"). A different set is a transaction nobody reviewed.
 
 ## 2. Module and configuration delta, 38 → 42
 
