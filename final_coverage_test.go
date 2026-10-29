@@ -349,6 +349,7 @@ func TestAPITimeseries_WrongMethod(_ *testing.T) {
 // ─── apiAuthLogin success when auth disabled ──────────────────────────────────
 
 func TestAPIAuthLogin_Success_AuthDisabled(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	_ = cfg.SetAuth("", "")
 
 	w := httptest.NewRecorder()
