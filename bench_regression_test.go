@@ -1023,6 +1023,19 @@ func TestBenchGate_MatchSnapshotAllocs(t *testing.T) {
 				t.Fatalf("%s: shape %q has no bound — a new BenchmarkMatchSnapshot arm must be measured and bounded here, not left ungated", half.name, shape.name)
 			}
 			res := testing.Benchmark(func(b *testing.B) { half.run(b, shape) })
+			// A b.Fatalf inside testing.Benchmark does NOT fail the enclosing
+			// test: it returns a ZERO BenchmarkResult whose AllocsPerOp and
+			// AllocedBytesPerOp are both 0, which sails through every ceiling
+			// below. Without this guard the gate would pass precisely when it
+			// stopped exercising the matched-request path — the same trap
+			// TestBenchGate_ForwardedForFilterAllocs above guards against.
+			if res.N == 0 {
+				t.Errorf("%s: the %s-shaped benchmark did not run (zero result), so the bounds below "+
+					"measured nothing. Its fixture stopped matching — check the shape still produces a "+
+					"match (the scheduled arm's window, buildSnapshotShapeStore) before trusting any "+
+					"result from this gate.", half.name, shape.name)
+				continue
+			}
 			allocs, bytes := res.AllocsPerOp(), res.AllocedBytesPerOp()
 			t.Logf("%s match shape=%s: %d allocs/op (bound %d), %d B/op (bound %d), %d ns/op",
 				half.name, shape.name, allocs, want.allocs, bytes, want.bytes, res.NsPerOp())
@@ -1085,8 +1098,13 @@ func TestBenchGate_MatchSnapshotSizeClassHeadroom(t *testing.T) {
 		{"PolicyRule", maxPolicyRule, 576, func() any { return new(sizeProbeRuleCeiling) }, func() any { return new(sizeProbeRuleOver) }},
 		{"PolicyMatch", maxPolicyMatch, 640, func() any { return new(sizeProbeMatchCeiling) }, func() any { return new(sizeProbeMatchOver) }},
 	} {
-		at := testing.Benchmark(func(b *testing.B) { benchAllocProbe(b, probe.atCeiling) }).AllocedBytesPerOp()
-		over := testing.Benchmark(func(b *testing.B) { benchAllocProbe(b, probe.over) }).AllocedBytesPerOp()
+		atRes := testing.Benchmark(func(b *testing.B) { benchAllocProbe(b, probe.atCeiling) })
+		overRes := testing.Benchmark(func(b *testing.B) { benchAllocProbe(b, probe.over) })
+		if atRes.N == 0 || overRes.N == 0 {
+			t.Errorf("the %s size-class oracle did not run (zero result), so it proves nothing about the boundary", probe.name)
+			continue
+		}
+		at, over := atRes.AllocedBytesPerOp(), overRes.AllocedBytesPerOp()
 		t.Logf("%s oracle: a pointer-bearing %d-byte object allocates %d B, %d-byte allocates %d B",
 			probe.name, probe.ceiling, at, probe.excess, over)
 		if over <= at {

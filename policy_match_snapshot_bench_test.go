@@ -120,8 +120,16 @@ func benchSnapshotShapes() []benchSnapshotShape {
 // rule — the one whose fields the snapshot has to detach.
 //
 // The schedule arm must stay ACTIVE for the whole benchmark or the rule stops
-// matching, so it spans every weekday across the full day; matchesSchedule is
-// not what is being measured here.
+// matching, so it spans every day of the week across the full day;
+// matchesSchedule is not what is being measured here.
+//
+// The end bound is "24:00", not "23:59". scheduleTimeMatchMinutes (policy.go)
+// compares `cur < end`, so "23:59" leaves the rule UNMATCHED for the whole
+// 23:59:00-23:59:59 minute in the schedule's timezone — a once-a-day window in
+// which this benchmark would silently measure the no-match path, or fail
+// part-way through a run that crosses the boundary. parseClockMinutes accepts
+// "24:00" as 1440 precisely as the exclusive end-of-day bound for a full-day
+// window (Codex review, PR #1756).
 func buildSnapshotShapeStore(size int, shape benchSnapshotShape) *PolicyStore {
 	ps := &PolicyStore{}
 	rules := make([]PolicyRule, size)
@@ -139,7 +147,7 @@ func buildSnapshotShapeStore(size int, shape benchSnapshotShape) *PolicyStore {
 	if s := rules[0].Schedule; s != nil {
 		s.Days = []string{"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 		s.TimeStart = "00:00"
-		s.TimeEnd = "23:59"
+		s.TimeEnd = "24:00" // exclusive end-of-day; "23:59" is dead for one minute a day
 	}
 	ps.ReplaceAll(rules)
 	return ps
