@@ -23,3 +23,4 @@ same in both: CONFIG_BPF_LSM=y
 same in both: CONFIG_FUTEX_PRIVATE_HASH=y
 same in both: CONFIG_PAGE_POOL_STATS=y
 same in both: CONFIG_SECURITY_APPARMOR=y
+## ZFS / v4l2loopback main-modules (the two packages the owner named): same .ko names in 38 and 42 (zfs: spl.ko, zfs.ko; v4l2loopback: v4l2loopback.ko). Neither is on the shipped denylist. None appears in the loaded-module lists of the earlier M2 snapshots (m2-snapshot/, 0 matches). Installed, not loaded: an autoload needs a ZFS pool import or a v4l2 user, both root-only. ASTRA confirms on 42 from the M2 preconditions module census.

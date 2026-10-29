@@ -49,6 +49,8 @@ Source file: `module-config-delta.txt`. The 38 config is byte-identical to the s
 - **Added:** `i2c-hid-acpi-prp0001`. It loads only on a matching ACPI device.
 - Neither name is on the denylist.
 
+**ZFS and v4l2loopback** (the owner asked about these packages): each 42 package carries the same module names as its 38 predecessor (`spl`, `zfs`; `v4l2loopback`). Neither is denylisted, and neither appears in any earlier M2 loaded-module list. They are installed, not loaded: autoloading needs a root-only action (a ZFS pool import, or a v4l2 user).
+
 **Shipped denylist:** 66 of its 67 names are loadable modules in both kernels. `dccp` has been removed upstream in both, so its entry is inert. No denylisted module became built-in.
 
 **M2 precondition modules:** availability is identical in 38 and 42.
@@ -140,11 +142,12 @@ The exact-byte scan classed 185 CRITICAL/HIGH kernel findings as "present" on th
 - Use the M2 tag **`reboot`** after the OS-update reboot, as in the QEMU checkpoint map (BOM §5).
 - On ESXi this is the **first M2 evidence on 42**. In QEMU, `os` did not change the kernel.
 
-**Add four read-only console observations after the reboot.** These need no harness change:
+**Add five read-only console observations after the reboot.** These need no harness change:
 - `uname -r` = `7.0.0-42-generic`
 - `cat /sys/kernel/security/lsm` contains `bpf` (records §2)
 - `dpkg -l 'linux-image-7.0.0-*'` lists both 38 and 42
 - `sysctl kernel.unprivileged_bpf_disabled` = 2 (also covered inside `preconditions`)
+- `grep -E '^(zfs|spl|v4l2loopback) ' /proc/modules` returns nothing (installed, not loaded)
 
 **The rest is unchanged:**
 - Q7: three timed recoveries of ≤120 s each.
