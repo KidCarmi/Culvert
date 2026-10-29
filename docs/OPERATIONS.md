@@ -309,10 +309,70 @@ linked above is the only supported reference.
 * `config_versions/v{N}.json` — automatic config snapshots (50 kept)
 * `ui_users.json` — admin accounts (bcrypt hashes)
 * `audit.jsonl`, `requests.jsonl` — audit and request logs
+* `.culvert-writer.lock` — the single-writer lock (zero bytes; see below).
+  Not archived by `--backup` and nothing to restore: the lock lives in the
+  `flock` the running process holds, not in the file
 
 The config-version snapshots under `config_versions/` are an in-place
 rollback mechanism — separate from your full backup, but useful for
 quick "undo" of an admin change.
+
+### One process per `/data` — "another Culvert process is already using this data directory"
+
+`/data` has exactly one writer. Culvert takes an advisory `flock` on
+`<dataDir>/.culvert-writer.lock` during startup and **refuses to boot** when a
+live process already holds it:
+
+```
+FATAL: another Culvert process is already using this data directory
+(/data/.culvert-writer.lock). Run one Culvert process per data directory: ...
+```
+
+This is working as intended, and the fix is to have one process:
+
+1. **Find the other process.** `docker ps` / `kubectl get pods` for a container
+   you forgot, `ps aux | grep culvert` for a manual run started during
+   troubleshooting. A rolling update that briefly runs the old and new pods
+   against one ReadWriteOnce volume will produce this until the old pod exits —
+   the new one then starts on its own.
+2. **Or give this process its own volume** with the startup-only
+   `CULVERT_DATA_DIR` environment variable.
+
+**Why it refuses rather than sharing.** Two processes on one `/data` are two
+last-writer-wins racers over the admin roster, the policy, admin settings, the
+hit counters, the cluster store and the `config_versions/` series — and they
+write on the way *in* (hit counters are persisted during startup) and on the way
+*out* (the cluster-store and policy-learning flushes run at shutdown), so
+*stopping* an accidental second instance is itself a write of its stale state
+over the live one. Every one of those files is replaced whole, so the result is
+never a damaged file you could detect — it is an intact file containing the
+other process's configuration. A second process also used to hold the
+unauthenticated first-run setup window open, which is why this is a refusal and
+not a warning (CHAOS-103).
+
+**There is never a stale lock to clean up.** The kernel releases an `flock` when
+its holder dies, so a `SIGKILL`, an OOM kill, a kernel panic and a power loss all
+release it. If you see this message, a process really is running right now.
+**Do not delete `.culvert-writer.lock`** — deleting it does not release
+anything, and the next start simply re-creates it.
+
+**When the lock cannot be established** — a read-only or permission-denied
+volume, or a filesystem without `flock` support — Culvert still starts and logs
+
+```
+DataDir: single-writer lock not established on "…" (…); a second Culvert
+process on this data directory would NOT be detected.
+```
+
+That is deliberate: a degraded volume must not become an unbootable gateway (see
+`storage_path` below). In that state, enforcing one process per data directory is
+on you.
+
+**`CULVERT_ALLOW_MULTIPLE_WRITERS=1`** starts anyway when a live holder is
+reported, for storage that reports lock state wrongly. It logs a warning every
+boot and is an escape hatch, not a supported configuration — if you need it,
+open an issue with your storage backend, because every risk above applies while
+it is set.
 
 ### Recovering from a `storage_path = fail` on Diagnostics
 

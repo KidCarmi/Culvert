@@ -207,11 +207,24 @@ func main() {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
+	// CHAOS-103: take the single-writer lock on the persisted-state root before
+	// anything writes to it, and refuse the boot when a LIVE process already
+	// holds it. Same slot and same mechanism as the refusal above, for the same
+	// reasons: after the one-shots (so --list/--restore still reach an orphaned
+	// directory) and before initLogger (whose rotation can rename a log file the
+	// other process is still writing to). Only a positively identified holder
+	// refuses; an unobservable lock state degrades with a notice emitted once the
+	// application logger exists. See datadir_writer_lock.go.
+	if err := checkDataDirSingleWriter(dataDir); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
 	setInsecureFlag(s)
 	runEnrollmentMode(s)
 	loadFileConfigAndFlags(s)
 	initUIExtras(s)
 	initLogger(s)
+	logDataDirWriterLockNotice() // CHAOS-103: an undetermined single-writer lock, now loggable
 	if dataDirOverridden() {
 		logger.Printf("DataDir: persisted-state root set by %s: %s", dataDirEnv, dataDir)
 	}

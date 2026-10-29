@@ -59,6 +59,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when an enabled alert webhook's latest delivery
+  failed.** Failed deliveries were visible only in the Alert Webhooks delivery
+  history; the one-page report read as healthy while security alerts stopped
+  reaching a receiver. A new `alert_delivery` WARN row (additive, report-only,
+  no row when every enabled webhook's latest attempt succeeded) carries a count
+  only, never a webhook name, URL or error text. Dispatch, retry and signing are
+  unchanged.
+
 - **Diagnostics now warns when the MCP gateway was enabled but is not serving.**
   A gateway that failed to start, degraded or stopped was visible only on
   `/readyz`, `/metrics` and the alert; the one-page report read as healthy. A
@@ -131,6 +139,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the wall self-reports if a later refactor makes it redundant. Test-only: no
   production file changes and no runtime behavior moves. Review:
   `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-10-28.md`.
+- **A second Culvert process on the same data directory was an unauthenticated
+  admin control plane over the live gateway's configuration, and nothing
+  detected it (CHAOS-103).** `uiAuthMiddleware` grants `RoleAdmin` with no
+  credentials while `cfg.IsConfigured()` is false — the necessary first-run
+  bootstrap window — and that predicate is per-process in-memory state read once
+  at boot. A second process started against one `/data` before first-run setup
+  therefore held the window open for its whole life: after the real gateway had
+  persisted its admin account, the second process still reported
+  `needsSetup:true`, answered admin APIs 200 with no credentials, accepted an
+  unauthenticated `POST /api/policy` that persisted an `Allow` + `SSL Bypass`
+  rule to the live `policy.json`, and accepted an unauthenticated `POST
+  /api/setup/complete` that replaced the roster — all of which became the
+  gateway's enforced state at its next ordinary restart, with the operator's own
+  admin account gone. The bootstrap window is now decided by the DURABLE roster
+  (`bootstrapWindowOpen`), re-read inside the setup critical section, at every
+  gate that previously read the in-memory latch. A genuine fresh install, an
+  in-memory-only roster and open (`unauth`) mode are unchanged.
+
+- **Culvert now takes a single-writer lock on its persisted-state root and
+  refuses to boot when a live process already holds it (CHAOS-103).** Two
+  processes on one `/data` were two last-writer-wins racers over the roster,
+  policy, admin settings, hit counters, cluster store and the config-version
+  series — on boot (`saveHitCounters`) and on a graceful stop (the cluster and
+  policy-learning flush hooks), so *stopping* an accidental second instance was
+  itself a write of its stale world onto the live volume. Badger's own directory
+  flock protected only the embedded stores, and `internal/storeguard`
+  deliberately degrades on that signal rather than refusing, so nothing stopped
+  the rest. A process-lifetime `flock` on `<dataDir>/.culvert-writer.lock` is now
+  taken in startup beside the interrupted-restore refusal. Only a positively
+  identified live holder refuses the boot; an unobservable lock state (a
+  read-only or permission-denied volume, a filesystem without `flock`) degrades
+  with a process-log notice, as CHAOS-05/07's posture requires. The kernel
+  releases the lock when its holder dies, so SIGKILL, OOM and power loss leave
+  no stale lock and nothing to clean up by hand. The guard creates the data root
+  itself when it does not exist yet: it runs before the statement that otherwise
+  creates it, so without that a first boot on a fresh install degraded and held
+  nothing for the whole process lifetime while a second process could still take
+  the lock. It stays ordered after the interrupted-restore refusal, which
+  diagnoses a killed restore commit by that root being absent. `CULVERT_ALLOW_MULTIPLE_WRITERS=1`
+  overrides the refusal for storage that reports lock state wrongly; it is loud,
+  env-only, and not a supported deployment mode.
+
 - **A Data Plane's revocation push reached the Control Plane's OWN session list
   unbounded, so one enrolled node could make the CP stop honouring every other
   node's logouts (SEC-REVMERGE-1).** CHAOS-68 gave the CP's `SyncRevocations`
