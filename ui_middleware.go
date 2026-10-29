@@ -264,7 +264,13 @@ func uiAuthMiddleware(next http.Handler) http.Handler {
 		// Setup not yet complete — first-time bootstrap. Gate on IsConfigured (NOT
 		// AuthEnabled): open mode (defaultAuthOutcome=Exempt) counts as configured,
 		// so it keeps the admin UI gated rather than granting RoleAdmin to all.
-		if !cfg.IsConfigured() {
+		//
+		// CHAOS-103: asked through bootstrapWindowOpen, which also consults the
+		// DURABLE roster. IsConfigured alone is per-process in-memory state, so a
+		// second process on the same /data held this grant open for its whole life
+		// after the real gateway had been configured — an unauthenticated admin
+		// control plane over the live volume. See setup_bootstrap_window.go.
+		if bootstrapWindowOpen() {
 			ctx := context.WithValue(r.Context(), uiRoleKey{}, RoleAdmin)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return

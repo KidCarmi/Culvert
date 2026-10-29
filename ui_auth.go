@@ -148,7 +148,7 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 	// "admin"), the session cookie now names an existing user and remains a
 	// valid admin session for its full TTL — uiAuthMiddleware's only check on
 	// a local session is that the named user still exists.
-	preSetup := !cfg.IsConfigured()
+	preSetup := bootstrapWindowOpen() // CHAOS-103: durable-aware, not the per-process latch
 	if preSetup {
 		role, ok = RoleAdmin, true
 	}
@@ -225,7 +225,7 @@ func apiAuthStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !cfg.IsConfigured() {
+	if bootstrapWindowOpen() { // CHAOS-103: durable-aware, not the per-process latch
 		jsonOKAuthStatus(w, map[string]any{"loggedIn": true, "user": "", "role": RoleAdmin})
 		return
 	}
@@ -599,7 +599,7 @@ func apiSetupStatus(w http.ResponseWriter, r *http.Request) {
 	// Flag only — this route is public (isPublicUIAuthPath: /api/setup*), so
 	// the raw self-sign error must not travel with it. See jsonOKAuthStatus.
 	jsonOK(w, map[string]any{
-		"needsSetup":      !cfg.IsConfigured(),
+		"needsSetup":      bootstrapWindowOpen(), // CHAOS-103: durable-aware
 		"ui_tls_fallback": uiTLSFallbackActive,
 	})
 }
@@ -634,7 +634,7 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 	// otherwise a client that stalls or drips its request body could
 	// monopolize the lock and block the legitimate first-time setup request
 	// during the bootstrap window.
-	if cfg.IsConfigured() {
+	if !bootstrapWindowOpen() { // CHAOS-103: durable-aware, not the per-process latch
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
 	}
@@ -670,7 +670,10 @@ func apiSetupComplete(w http.ResponseWriter, r *http.Request) {
 	// whether this request is allowed to mutate cfg.
 	setupCompleteMu.Lock()
 	defer setupCompleteMu.Unlock()
-	if cfg.IsConfigured() {
+	// CHAOS-103: the durable term is re-read HERE, inside the critical section,
+	// so a roster that became non-empty since this process loaded one cannot be
+	// replaced by a request that observed the stale in-memory latch.
+	if !bootstrapWindowOpen() {
 		http.Error(w, "setup already complete", http.StatusForbidden)
 		return
 	}
