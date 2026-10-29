@@ -1765,8 +1765,11 @@ func (c *Config) loadUIUsersFile(path string) error {
 			totpLastCounter: rec.TOTPLastCounter,
 			persistedRole:   persistedRole,
 		}
-		// Keep legacy single-user in sync with the first admin found.
-		if rec.Role == RoleAdmin && c.user == "" {
+		// Keep legacy single-user in sync with the first admin found. A
+		// pre-RBAC record with no role signs in as admin (see loadedRosterRole),
+		// so it counts: otherwise IsConfigured stays false with the account on
+		// disk and the first-run bootstrap window grants unauthenticated admin.
+		if (rec.Role == RoleAdmin || rec.Role == "") && c.user == "" {
 			c.user = rec.Username
 			c.passHash = hash
 		}

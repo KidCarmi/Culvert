@@ -9,6 +9,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A pre-RBAC roster with role-less accounts no longer leaves the first-run
+  window open.** A `ui_users.json` record with no `role` signs in as admin but
+  never counted toward `IsConfigured()`, so the gateway answered `needsSetup:true`
+  and granted unauthenticated admin (and `/api/setup/complete`) with the account
+  on disk. The loader and the durable bootstrap anchor now treat it as a
+  completed setup.
 - **install.sh no longer replaces an at-rest passphrase it could not read.** A
   root-owned `0600` `.env` re-run unprivileged made `setup_at_rest_encryption`
   treat the file as having no passphrase, so a host-env `CULVERT_CA_PASSPHRASE`

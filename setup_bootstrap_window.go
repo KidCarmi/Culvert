@@ -128,7 +128,7 @@ func rosterBytesConfigure(data []byte) bool {
 		if _, err := hex.DecodeString(rec.PassHash); err != nil {
 			continue
 		}
-		if effectiveRosterRoleQuiet(rec.Role) == RoleAdmin {
+		if r := effectiveRosterRoleQuiet(rec.Role); r == RoleAdmin || r == "" {
 			return true
 		}
 	}
