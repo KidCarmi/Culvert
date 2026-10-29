@@ -860,30 +860,42 @@ func (ca *clusterCA) initPrimary(dir string) error {
 
 	switch {
 	case !certMissing && !keyMissing:
-		// CA-3: decrypt at-rest key if it is a PSCA envelope (content-driven,
-		// fail closed on KEK/corruption — never regenerate). loadFromPEM stays
-		// a pure plaintext-PEM parser.
-		sealed, wasEncrypted, decErr := openClusterCAKey(ca.dir, keyPEM)
-		if decErr != nil {
-			return decErr
-		}
-		// The decrypted CA key stays inside the closure and is zeroized on return;
-		// it never crosses back into package main as a plain []byte.
-		return sealed.WithPlaintext(func(plainKey []byte) error {
-			if err := ca.loadFromPEM(certPEM, plainKey); err != nil {
-				return err
-			}
-			// Opt-in migration: plaintext on disk + encryption enabled → migrate.
-			if !wasEncrypted && clusterCAKeyEncryptionEnabled() {
-				return migrateClusterCAKeyToEncrypted(ca.dir, keyPath, plainKey)
-			}
-			return nil
-		})
+		return ca.adoptPrimaryFromDisk(certPEM, keyPEM, keyPath)
 	case !certMissing && keyMissing:
 		return fmt.Errorf("cluster CA bootstrap: partial pair on disk (cert %q present, key %q missing) — refuse to overwrite; remove both files for fresh bootstrap or restore the missing one", certPath, keyPath)
 	case certMissing && !keyMissing:
 		return fmt.Errorf("cluster CA bootstrap: partial pair on disk (cert %q missing, key %q present) — refuse to overwrite; remove both files for fresh bootstrap or restore the missing one", certPath, keyPath)
 	}
+	return ca.bootstrapPrimary(certPath, keyPath)
+}
+
+// adoptPrimaryFromDisk loads an existing CA pair. Called by initPrimary with
+// ca.mu HELD; it writes ca.cert/key/certPEM through loadFromPEM.
+func (ca *clusterCA) adoptPrimaryFromDisk(certPEM, keyPEM []byte, keyPath string) error {
+	// CA-3: decrypt at-rest key if it is a PSCA envelope (content-driven,
+	// fail closed on KEK/corruption — never regenerate). loadFromPEM stays
+	// a pure plaintext-PEM parser.
+	sealed, wasEncrypted, decErr := openClusterCAKey(ca.dir, keyPEM)
+	if decErr != nil {
+		return decErr
+	}
+	// The decrypted CA key stays inside the closure and is zeroized on return;
+	// it never crosses back into package main as a plain []byte.
+	return sealed.WithPlaintext(func(plainKey []byte) error {
+		if err := ca.loadFromPEM(certPEM, plainKey); err != nil {
+			return err
+		}
+		// Opt-in migration: plaintext on disk + encryption enabled → migrate.
+		if !wasEncrypted && clusterCAKeyEncryptionEnabled() {
+			return migrateClusterCAKeyToEncrypted(ca.dir, keyPath, plainKey)
+		}
+		return nil
+	})
+}
+
+// bootstrapPrimary generates and persists a brand-new cluster CA. Called by
+// initPrimary with ca.mu HELD, only when NEITHER file is on disk.
+func (ca *clusterCA) bootstrapPrimary(certPath, keyPath string) error {
 	// Both missing — generate new cluster CA.
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
