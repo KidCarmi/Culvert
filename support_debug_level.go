@@ -34,6 +34,10 @@ const (
 	debugLevelMinTTL   = 1 * time.Minute  // a meaningful floor; sub-minute windows are pointless
 	debugLevelMaxTTL   = 24 * time.Hour   // hard cap: a forgotten elevation cannot outlive a day
 	debugLevelTick     = 30 * time.Second // watchdog cadence
+
+	// crashComponentSupportDebugLevel names this worker in the crash record the
+	// per-round guard writes (CHAOS-105).
+	crashComponentSupportDebugLevel = "support_debug_level"
 )
 
 var errDebugTTL = errors.New("debug level requires a positive TTL within bounds")
@@ -173,7 +177,13 @@ func startDebugLevelWatchdog(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			if expired, lvl := debugLevelWatchdogTick(now); expired {
+			// CHAOS-105: this is the ACTIVE auto-stop for an elevated capture
+			// level. A panic here used to kill the gateway; contained, the
+			// worst case is that one tick does not revert and the next does.
+			var expired bool
+			var lvl int
+			runGuarded(crashComponentSupportDebugLevel, func() { expired, lvl = debugLevelWatchdogTick(now) })
+			if expired {
 				logger.Printf("support: debug capture level auto-reverted from L%d to baseline L%d (TTL expired)", lvl, int(debugLevelBaseline))
 				auditSystem("support.debug_level.auto_revert", "debug-level", "TTL expired; capture level reverted to baseline")
 			}

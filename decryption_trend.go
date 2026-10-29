@@ -48,6 +48,10 @@ type decCoverageTrend struct {
 
 var decTrend = &decCoverageTrend{now: time.Now, totals: coverageTotals}
 
+// crashComponentDecryptionTrend names this worker in the crash record the
+// per-round guard writes (CHAOS-105).
+const crashComponentDecryptionTrend = "decryption_trend"
+
 // coverageTotals folds the monotonic session counter into the three coverage buckets
 // (inspected / all bypass-or-exclusion / failed), matching the /api/decryption/health
 // partition.
@@ -118,7 +122,9 @@ func startDecCoverageSampler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			decTrend.sample()
+			// CHAOS-105: a sampler for an audit CHART must not be able to end
+			// the process; a bad round costs one interval.
+			runGuarded(crashComponentDecryptionTrend, decTrend.sample)
 		}
 	}
 }

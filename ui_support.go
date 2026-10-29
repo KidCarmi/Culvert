@@ -49,6 +49,10 @@ const (
 	// supportRetentionTick is the age-sweep cadence (fixed; not tuned).
 	supportRetentionTick = 6 * time.Hour
 
+	// crashComponentSupportRetention names this worker in the crash record the
+	// per-round guard writes (CHAOS-105).
+	crashComponentSupportRetention = "support_retention"
+
 	// supportMaxStoreBytes is a hard ceiling on the TOTAL on-disk size of the bundle
 	// store. The count/age caps can't predict per-bundle size, and the
 	// supportMinFreeBytes preflight only REFUSES a new build (507) — it never reclaims
@@ -987,7 +991,10 @@ func startSupportRetentionJanitor(ctx context.Context) {
 		pruneSupportBundlesByAge(time.Now(), supportRetentionMaxAgeVal())
 		pruneSupportBundlesBySize(supportMaxStoreBytes, "")
 	}
-	sweep()
+	// CHAOS-105: the boot sweep is the one round that is not behind a ticker,
+	// so an unguarded panic here killed the process during startup rather than
+	// costing an interval. Guarded, boot continues and the next tick retries.
+	runGuarded(crashComponentSupportRetention, sweep)
 	t := time.NewTicker(supportRetentionTick)
 	defer t.Stop()
 	for {
@@ -995,7 +1002,10 @@ func startSupportRetentionJanitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			sweep()
+			// CHAOS-105: the sweep walks the on-disk bundle store, whose
+			// contents can include a half-written directory from a crash, and
+			// it runs unattended. One bad round must cost one interval.
+			runGuarded(crashComponentSupportRetention, sweep)
 		}
 	}
 }
