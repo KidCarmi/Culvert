@@ -1465,7 +1465,14 @@ func (ca *clusterCA) restoreSecondaryFromRotation() {
 	if !time.Now().Before(st.OldExpires) {
 		return
 	}
+	// TotalNodes is a snapshot taken when the rotation started, so a node that
+	// enrolled after it (and therefore already holds a new-CA certificate) can
+	// push RenewedNodes past it. Clamp, so the operator-facing count below
+	// never reads negative.
 	pending := st.TotalNodes - len(st.RenewedNodes)
+	if pending < 0 {
+		pending = 0
+	}
 
 	bakPath, err := safeCAPath(dir, "cluster-ca.crt.bak")
 	if err != nil {
