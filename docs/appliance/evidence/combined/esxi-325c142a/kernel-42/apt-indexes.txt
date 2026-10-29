@@ -1,0 +1,8 @@
+# Signed indexes used by the APT simulation (isolated root; Signed-By /usr/share/keyrings/ubuntu-archive-keyring.gpg; apt 2.8.3, the guest's version). Retrieved 2026-10-29T18:53:42Z.
+noble	Thu, 25 Apr 2024 15:10:33 UTC	InRelease sha256=cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0	Good signature from "Ubuntu Archive Automatic Signing Key (2018) <ftpmaster@ubuntu.com>" key F6ECB3762474EDA9D21B7022871920D1991BC93C
+noble-updates	Thu, 29 Oct 2026 13:22:21 UTC	InRelease sha256=1af76bea40c6b8ddbc51a51046c5a3e7912c9611536e97afc673a4b1c39d1886	Good signature from "Ubuntu Archive Automatic Signing Key (2018) <ftpmaster@ubuntu.com>" key F6ECB3762474EDA9D21B7022871920D1991BC93C
+noble-security	Thu, 29 Oct 2026 16:38:05 UTC	InRelease sha256=d90e89008640e66a6eacc13ffaad0fbbd205877cc51acdd8d4f99f9d21fcfee0	Good signature from "Ubuntu Archive Automatic Signing Key (2018) <ftpmaster@ubuntu.com>" key F6ECB3762474EDA9D21B7022871920D1991BC93C
+noble-backports	Wed, 28 Oct 2026 21:24:20 UTC	InRelease sha256=b6a0b10bb67d8da7ecb72a3f62dda5f408091d5a1abe8cbda2380f4af6b705cd	Good signature from "Ubuntu Archive Automatic Signing Key (2018) <ftpmaster@ubuntu.com>" key F6ECB3762474EDA9D21B7022871920D1991BC93C
+# Status file: exact OVA inventory rootfs-dpkg.tsv (680 packages, exact-byte scan run 40579), stanzas from the verified snapshot 20261002T120000Z (623) and live (57) Packages; Docker packages status 'hold'.
+# status sha256=ebec9a707945c8eebb1a3cb28013349297d0cecbb93f7678f36e89eeddb7e484  inventory sha256=675a0773a0422e56e648ca5d90177d6d99056fbcb01ee1aeb0991af2f1b70aff
+# preferences: Package: snapd / Pin: release * / Pin-Priority: -1 (as shipped)

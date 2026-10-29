@@ -1,0 +1,25 @@
+# 38 vs 42 module and config delta. Debs: kernel-debs.tsv (signed-index hashes, re-hashed after download). The 38 config equals the shipped OVA's /boot/config-7.0.0-38-generic byte for byte.
+## .ko set (linux-modules + main-modules-zfs + main-modules-v4l2loopback + linux-image): 38=6903 files, 42=6903 files
+< ./lib/modules/KVER/kernel/drivers/acpi/platform_profile.ko.zst
+> ./lib/modules/KVER/kernel/drivers/hid/i2c-hid/i2c-hid-acpi-prp0001.ko.zst
+## shipped denylist appliance/provision/modprobe-culvert-unused.conf (67 names): present as a loadable module in 38=66, 42=66; absent from both: dccp (removed upstream; the entry is inert). No denylisted module became built-in (no =m to =y change below touches one).
+## PRECOND_MODULES of m2-verdict.py (32 names): availability identical in 38 and 42 (31 loadable modules in both; nft_exthdr is part of nf_tables.ko in both, never a separate module, so that entry is inert in both and exthdr expressions stay covered by the ruleset gate).
+## config diff (all other lines identical; config-38 13330 lines, config-42 13332 lines)
+< # CONFIG_EROFS_FS_ONDEMAND is not set
+> # CONFIG_X86_AMD_PSTATE_DYNAMIC_EPP is not set
+< CONFIG_ACPI_PLATFORM_PROFILE=m
+> CONFIG_ACPI_PLATFORM_PROFILE=y
+> CONFIG_EROFS_FS_ZIP_LZMA_DEFAULT_MAX_STREAMS=16
+> CONFIG_HAVE_ARCH_GET_SECUREBOOT=y
+< CONFIG_LSM="landlock,lockdown,yama,integrity,apparmor"
+> CONFIG_LSM="landlock,lockdown,yama,integrity,apparmor,bpf"
+< CONFIG_PREFIX_SYMBOLS=y
+> CONFIG_RUSTC_HAS_APXF=y
+< CONFIG_VERSION_SIGNATURE="Ubuntu 7.0.0-38.38~24.04.4-generic 7.0.14"
+> CONFIG_VERSION_SIGNATURE="Ubuntu 7.0.0-42.42~24.04.1-generic 7.0.14"
+same in both: CONFIG_IO_URING=y
+same in both: CONFIG_BPF_UNPRIV_DEFAULT_OFF=y
+same in both: CONFIG_BPF_LSM=y
+same in both: CONFIG_FUTEX_PRIVATE_HASH=y
+same in both: CONFIG_PAGE_POOL_STATS=y
+same in both: CONFIG_SECURITY_APPARMOR=y

@@ -1,0 +1,10 @@
+# culvert-os-update os step 2: apt-get -y autoremove --purge. Simulated on the POST-upgrade state (exact inventory + the 5 packages of apt-transaction.txt), with the 38 and 42 kernel packages marked auto-installed (worst case for retention).
+# APT 2.8.3 protects kernels internally (APT::Protect-Kernels, KernelCount=2 plus the booted kernel). On the VM the booted kernel during 'os' is 7.0.0-38, so both 38 and 42 are protected by two independent rules. This sandbox boots another kernel, which is why its regex also lists 6.18.44.
+Found kernel 7.0.0-42-generic(7.0.0-42.42~24.04.1)
+Found kernel 7.0.0-38-generic(7.0.0-38.38~24.04.4)
+Amount of kernels to keep 2
+Keeping previous kernel 7.0.0-42.42~24.04.1
+Keeping previous kernel 7.0.0-38.38~24.04.4
+Kernel protection regex: ^linux-.*-6\.18\.44-fc-v185$|^linux-.*-7\.0\.0-38-generic$|^linux-.*-7\.0\.0-42-generic$|^kfreebsd-.*-6\.18\.44-fc-v185$|^kfreebsd-.*-7\.0\.0-38-generic$|^kfreebsd-.*-7\.0\.0-42-generic$|^gnumach-.*-6\.18\.44-fc-v185$|^gnumach-.*-7\.0\.0-38-generic$|^gnumach-.*-7\.0\.0-42-generic$|^.*-modules-6\.18\.44-fc-v185$|^.*-modules-7\.0\.0-38-generic$|^.*-modules-7\.0\.0-42-generic$|^.*-kernel-6\.18\.44-fc-v185$|^.*-kernel-7\.0\.0-38-generic$|^.*-kernel-7\.0\.0-42-generic$
+0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+# Non-kernel autoremove candidates depend on the guest's /var/lib/apt/extended_states, which the exact-byte inventory does not carry. The transaction changes the dependencies of ONE package (linux-image-virtual-hwe-24.04: Depends linux-image-7.0.0-38-generic -> -42-), so it can make no non-kernel package newly removable; anything else autoremove would purge was already removable at first boot. ASTRA records the read-only 'apt-get -s autoremove --purge' before 'os' (expected: 0 to remove).
