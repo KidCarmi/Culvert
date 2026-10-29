@@ -47,11 +47,10 @@ func TestCHAOS105_SSEBroadcastLoop_ContainsAndSurvivesAFailingRound(t *testing.T
 	resetCrashGuardStateForTest()
 	t.Cleanup(resetCrashGuardStateForTest)
 
-	var rounds, healthy int64
+	var healthy int64
 	fail := make(chan struct{})
 	b := newSSEBroadcaster(time.Millisecond)
 	b.round = func() {
-		atomic.AddInt64(&rounds, 1)
 		select {
 		case <-fail: // the fault has been cleared
 			atomic.AddInt64(&healthy, 1)
@@ -66,8 +65,22 @@ func TestCHAOS105_SSEBroadcastLoop_ContainsAndSurvivesAFailingRound(t *testing.T
 
 	// The loop must keep ticking THROUGH the failures: a deterministic fault
 	// costs one interval each time, not the worker and not the process.
-	chaos105WaitFor(t, func() bool { return atomic.LoadInt64(&rounds) >= 3 },
-		"the broadcaster loop stopped after a panicking round — a contained panic must cost one tick, not the worker")
+	//
+	// Wait on the evidence this test then asserts on, NOT on a counter the
+	// round bumps on entry. runGuarded records the crash from a DEFERRED
+	// recover, and recordCrash increments statCrashRecords before it stores
+	// the record, so "the callback has been entered three times" does not
+	// imply either is caught up; asserting off that would fail on healthy
+	// code whenever the third round was descheduled mid-panic. Three stored
+	// crash records are themselves proof the loop ran three rounds and
+	// contained every one, which is the property under test.
+	chaos105WaitFor(t, func() bool {
+		if atomic.LoadInt64(&statCrashRecords) < 3 {
+			return false
+		}
+		_, stored := lastCrashSnapshot()
+		return stored
+	}, "the broadcaster loop stopped after a panicking round — a contained panic must cost one tick, not the worker")
 
 	if got := atomic.LoadInt64(&statCrashRecords); got < 3 {
 		t.Errorf("crash records = %d, want >= 3 — a contained panic must stay observable", got)
