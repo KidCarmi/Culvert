@@ -16,11 +16,17 @@ import (
 
 func TestDecompressForScan_Identity(t *testing.T) {
 	data := []byte("plain text content")
-	got := decompressForScan(data, "")
+	got, bomb := decompressForScan(data, "")
+	if bomb {
+		t.Error("identity content must never be refused")
+	}
 	if !bytes.Equal(got, data) {
 		t.Error("empty Content-Encoding should return data unchanged")
 	}
-	got = decompressForScan(data, "identity")
+	got, bomb = decompressForScan(data, "identity")
+	if bomb {
+		t.Error("identity content must never be refused")
+	}
 	if !bytes.Equal(got, data) {
 		t.Error("identity encoding should return data unchanged")
 	}
@@ -41,7 +47,10 @@ func TestDecompressForScan_Gzip(t *testing.T) {
 		t.Fatal("gzip compression produced identical output")
 	}
 
-	got := decompressForScan(compressed, "gzip")
+	got, bomb := decompressForScan(compressed, "gzip")
+	if bomb {
+		t.Fatal("a normal gzip body must not be refused")
+	}
 	if !bytes.Equal(got, original) {
 		t.Errorf("gzip decompression failed:\n  got:  %q\n  want: %q", got, original)
 	}
@@ -49,7 +58,10 @@ func TestDecompressForScan_Gzip(t *testing.T) {
 
 func TestDecompressForScan_InvalidGzip(t *testing.T) {
 	data := []byte("this is not gzip data")
-	got := decompressForScan(data, "gzip")
+	got, bomb := decompressForScan(data, "gzip")
+	if bomb {
+		t.Fatal("a malformed gzip header is a fallback, not a refusal")
+	}
 	// Should fall back to returning raw bytes.
 	if !bytes.Equal(got, data) {
 		t.Error("invalid gzip should return raw data")
@@ -65,7 +77,10 @@ func TestDecompressForScan_Brotli(t *testing.T) {
 	}
 	w.Close()
 
-	got := decompressForScan(buf.Bytes(), "br")
+	got, bomb := decompressForScan(buf.Bytes(), "br")
+	if bomb {
+		t.Fatal("a normal brotli body must not be refused")
+	}
 	if !bytes.Equal(got, original) {
 		t.Errorf("brotli decompression failed: got %q, want %q", got, original)
 	}
@@ -73,7 +88,11 @@ func TestDecompressForScan_Brotli(t *testing.T) {
 
 func TestDecompressForScan_GzipBomb(t *testing.T) {
 	// Create a gzip stream with a large uncompressed payload (>64MB).
-	// decompressForScan should limit to maxDecompressBytes.
+	//
+	// Before CHAOS-106 the only bound was maxDecompressBytes, so this was
+	// admitted as a 64 MiB buffer and scanned. It is now REFUSED: 65 MiB out of
+	// ~64 KiB in is ~1000:1, far past the ratio allowance, so no scanner could
+	// see what the response would deliver and the response fails closed.
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	// Write 65MB of zeros (compresses very well).
@@ -83,7 +102,13 @@ func TestDecompressForScan_GzipBomb(t *testing.T) {
 	}
 	gz.Close()
 
-	got := decompressForScan(buf.Bytes(), "gzip")
+	got, bomb := decompressForScan(buf.Bytes(), "gzip")
+	if !bomb {
+		t.Fatalf("a ~1000:1 expansion must be refused; got %d bytes and no refusal", len(got))
+	}
+	if got != nil {
+		t.Errorf("a refused expansion must hand back no bytes, got %d", len(got))
+	}
 	if len(got) > maxDecompressBytes {
 		t.Errorf("gzip bomb protection failed: got %d bytes, max %d", len(got), maxDecompressBytes)
 	}

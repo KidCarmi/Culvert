@@ -45,8 +45,23 @@ import (
 
 // h2MaxConcurrentStreams bounds concurrent streams per inspected H2 connection.
 // This is the primary per-connection resource cap: the scan pipeline buffers up
-// to maxScanBufferBytes per in-flight response, so the per-connection scan-buffer
-// memory ceiling is maxScanBufferBytes × this. Kept intentionally low (not the
+// to maxScanBufferBytes per in-flight response, so the per-connection
+// scan-buffer memory ceiling is maxScanBufferBytes × this.
+//
+// That arithmetic covers the BUFFERING stage only. A Content-Encoding adds the
+// expansion stage on top, and before CHAOS-106 that stage was bounded by a flat
+// secscan.MaxDecompressBytes (64 MiB) with no relation to the window at all —
+// so the real per-connection ceiling was 64 MiB × this (measured 2.0 GiB held,
+// 3.64 GiB peak from 5 MiB of wire bytes), not maxScanBufferBytes × this.
+// secscan's expansion is now bounded against the bytes the origin actually
+// transferred, which restores the proportionality the line above assumes; the
+// honest statement is that a stream holds up to maxScanBufferBytes buffered
+// PLUS its expansion, with the expansion bounded by
+// min(MaxDecompressBytes, secscan's ratio allowance for the buffered bytes).
+// Bounding the AGGREGATE across streams needs an admission gate on concurrent
+// inspected responses, which this cap is not (CHAOS-106 §7).
+//
+// Kept intentionally low (not the
 // 100 browsers advertise) because native H2 multiplies H1's single-in-flight
 // memory by this factor; 32 keeps a malicious connection's buffered footprint an
 // order of magnitude below the naive 100 while covering real client fan-out. It

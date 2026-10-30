@@ -1367,7 +1367,18 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	// 1.1 fix: decompress gzip/deflate bodies before scanning so ClamAV/YARA
 	// signatures match the actual content.
 	ce := resp.Header.Get("Content-Encoding")
-	scanBody := decompressForScan(body, ce)
+	scanBody, bomb := decompressForScan(body, ce)
+	if bomb {
+		// CHAOS-106: the declared encoding expands past the ratio allowance,
+		// so no scanner can see the content this response would deliver.
+		// Refuse it through the SAME emission a scanner verdict uses, so a
+		// decompression refusal and a block are indistinguishable downstream.
+		origBody.Close()
+		atomic.AddInt64(&statBlocked, 1)
+		recordInspectBlock(id, "SCAN_BLOCKED", scanDecompressSource, scanDecompressReason, hostOnly, req.URL.Path, match, dec)
+		scanBlockConn(br, hostOnly, scanDecompressReason, scanDecompressSource)
+		return scanBlocked
+	}
 
 	// File blocking: magic byte detection — block archives even if the
 	// URL/Content-Disposition doesn't reveal the format.

@@ -30,6 +30,16 @@ type (
 // (proxy.go, cdr_proxy.go) and the test suite.
 var decompressForScan = secscan.DecompressForScan
 
+// scanDecompressSource / scanDecompressReason label a CHAOS-106 refusal on
+// every surface a scanner verdict reaches (request log, block page, process
+// log). They are BOUNDED literals, not formatted from the response, so the
+// alert store's dedup window can suppress a flood and the operator sees one
+// class rather than one row per refused response.
+const (
+	scanDecompressSource = "decompress"
+	scanDecompressReason = "decompression ratio exceeded"
+)
+
 // readScanBuffer fills the scan buffer for one response body. It replaces
 // io.ReadAll(io.LimitReader(body, limit)) at the two buffering call sites
 // (the SSL-inspect inner loop and the plain-HTTP path), using the origin's
@@ -372,7 +382,10 @@ func secScanStatusMap() map[string]interface{} {
 		// daemon fault (different operator response), and late-discarded
 		// verdicts say how often content was decided by the deadline rather
 		// than by the engines.
-		"stat_clam_saturated":    counters.ClamSaturated,
+		"stat_clam_saturated": counters.ClamSaturated,
+		// CHAOS-106: fail-CLOSED refusals, so reported beside the saturation
+		// plane rather than beside the fail-open stat_scan_skipped.
+		"stat_decompress_bombs":  counters.DecompressBombs,
 		"stat_scan_late_discard": counters.ScanLateDiscarded,
 		"scan_inflight":          counters.ScanInflight,
 
