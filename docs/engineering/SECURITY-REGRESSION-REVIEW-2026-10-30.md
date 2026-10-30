@@ -429,13 +429,16 @@ Toolchain from [go.mod](../../go.mod) (`toolchain go1.27.3`), taken from the
 | New gates under race | `go test -race -run 'TestKillSwitchBackend' .` | **pass** |
 | Defect gates vs pre-fix tree | probe reverted in place, same gates re-run | **FAIL as designed** (`want 3, got 0`; stale row text; missing break-glass) — and `GenuineNoBackendUnchanged` **passed** in that tree, proving it is a control |
 | Roster wall, widened list, before any other change | full wall suite | **0 new findings** |
-| Root suite | `go test -count=1 -timeout=40m .` | see the branch's own run record |
+| Root suite | `go test -count=1 -timeout=40m .` | **pass** (601 s) |
+| Guidance checker | `python3 docs/agent-context/check.py` | pass (exit 0) |
+| Gate lint (blocking form) | `golangci-lint run --timeout=10m --new-from-rev origin/main`, linter **v2.15.0 built with go1.27.3** — installed per the pinned gate, not the container's `PATH` copy | **started, had not reported when this was written** — the hosted Fast PR Gate is the measurement that counts |
 
-**Not run, and why.** `benchgate`, the chaos-tagged suites and the hosted
-QA/CodeQL gates. Nothing allocation-, feed- or concurrency-shaped changed here:
-the production delta is one enum value, one branch in a diagnostics probe and
-two strings, and the only other edit is a test-gate list. The pinned
-`golangci-lint` from the blocking gate was **not** run locally for this change
-and the container's `PATH` copy is deliberately not substituted for it — the
-hosted Fast PR Gate is the measurement that counts. A passing local check is
+**Not run, and why.** `benchgate`, the chaos-tagged suites, a full-tree lint
+differential against the base, and the hosted QA/CodeQL gates. Nothing
+allocation-, feed- or concurrency-shaped changed here: the production delta is
+one enum value, one branch in a diagnostics probe and two strings, and the only
+other edit is a test-gate list. The full-tree complexity comparison that
+`--new-from-rev` cannot see is not material for a change that adds one `if` to
+a function well under the configured `cyclop` threshold, but it was not
+measured, so it is listed here rather than claimed. A passing local check is
 not a passing hosted review or merge gate.
