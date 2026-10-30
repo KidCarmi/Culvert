@@ -24,12 +24,26 @@ package main
 // Without any backend the no-credential Default arm is inert and falls
 // through to Stage 2 (TestKillSwitchNoBackend_NoRule_InertStage2), so the row
 // must not claim formerly exempt clients are now authenticated.
+//
+// SEC-AUTHENABLED-1 added a FOURTH state that neither of the two probes above
+// can see. A roster holding admitted accounts with no present admin and no
+// provider — the clamped or legacy-role state — leaves credCapable and
+// ssoCapable both false, but resolveRequestAuth's rosterWithoutVerifier term
+// arms the Stage-1 gate anyway and is excluded from the no-backend inert
+// guard, so the forced-Default arm answers with a 407 nothing can satisfy.
+// Reporting killSwitchBackendNone there told the operator the opposite of what
+// the gateway does, and named the wrong repair: the roster is a lockout for the
+// --reset-password break-glass, not a failed IdP profile.
 type killSwitchBackend int
 
 const (
 	killSwitchBackendNone      killSwitchBackend = iota // gate sees no backend: Stage 2 decides
 	killSwitchBackendNotLoaded                          // gate sees an enabled credential profile, but none is loaded
 	killSwitchBackendLive                               // a loaded validator or live SSO provider exists
+	// killSwitchBackendNoVerifier is the SEC-AUTHENABLED-1 state: the roster
+	// holds accounts, so the gate is armed, but nothing can verify a presented
+	// credential. Every formerly exempt request is refused, not fallen through.
+	killSwitchBackendNoVerifier
 )
 
 func checkAuthExemptKillSwitch() []OperatorContractCheck {
@@ -39,6 +53,14 @@ func checkAuthExemptKillSwitch() []OperatorContractCheck {
 func currentKillSwitchBackend() killSwitchBackend {
 	sso := idpRegistry.HasEnabledInteractiveProvider()
 	if !hasCredentialCapableProvider() && !sso {
+		// cfg.AuthEnabled() is the exact discriminator resolveRequestAuth uses
+		// for rosterWithoutVerifier, read here only as a boolean: with neither
+		// a credential-capable validator nor a live interactive provider, an
+		// active authentication backend can only be an admitted roster account,
+		// and that arms the gate rather than leaving it inert.
+		if cfg != nil && cfg.AuthEnabled() {
+			return killSwitchBackendNoVerifier
+		}
 		return killSwitchBackendNone
 	}
 	liveCred := cfg != nil && (cfg.GetUser() != "" || cfg.ProviderEnabled())
@@ -71,6 +93,14 @@ func authExemptKillSwitchRows(envDisabled, runtimeDisabled bool, backend killSwi
 	if backend == killSwitchBackendNotLoaded {
 		effect = "so formerly exempt clients are now challenged for credentials, but no loaded provider can validate them: an enabled credential (OIDC/LDAP) profile is configured but failed to load"
 		action = "Fix or re-enable the failed profile under Identity Providers (the startup log names the error) so challenged clients can authenticate. " + action
+	}
+	if backend == killSwitchBackendNoVerifier {
+		// SEC-AUTHENABLED-1: the gate IS armed here, so this is the opposite of
+		// the killSwitchBackendNone row below — nothing falls through to Stage 2.
+		// Stated as a refusal rather than a challenge, because that is what the
+		// client observes: the 407 is real but unsatisfiable.
+		effect = "so formerly exempt clients are now challenged for credentials (407) that nothing on this node can verify: the administrator roster holds accounts but no usable administrator account, and no identity provider is enabled, so every formerly exempt request is refused"
+		action = "Restore an administrator account with the --reset-password break-glass before clearing the kill switch — the roster holds accounts whose effective role is not administrator (a restored backup from a newer build, or a pre-RBAC roster), so no presented credential can be verified and proxy traffic is refused whether the kill switch is engaged or not. " + action
 	}
 	if backend == killSwitchBackendNone {
 		// Deliberately not an enumeration of per-rule outcomes: without a

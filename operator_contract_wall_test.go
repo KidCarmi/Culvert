@@ -587,8 +587,20 @@ func TestWall_OperatorContractRenderer_NegativeControls(t *testing.T) {
 // writes (a consumed backup code or TOTP replay counter that may not survive
 // a restart) and non-durable mutations are admin-only under the PR #1545
 // policy table.
+//
+// AuthEnabled and IsConfigured became roster reads in this window:
+// SEC-SETUPANCHOR-1 gave IsConfigured a len(c.uiUsers) term and
+// SEC-AUTHENABLED-1 gave AuthEnabled the same one. Before those changes
+// neither touched the roster, so neither was listed — and nothing re-listed
+// them, which left two unregistered paths from a contract row to roster state.
+// Both return a boolean existence fact, so nothing leaks through them today
+// (every reachable caller is classified below for other reads it makes), but
+// the wall exists to catch the row that has not been written yet: PR #1545's
+// finding was a new check rendering len(inv.names) past every wall. A Config
+// read that answers a question ABOUT the roster belongs here whatever its name
+// suggests.
 var (
-	rosterAccessorMethods = []string{"ListUIUsers", "UserHasTOTP", "GetUser", "hasLocalAdministrator", "rosterPersistTarget", "rosterWriteEvidence"}
+	rosterAccessorMethods = []string{"ListUIUsers", "UserHasTOTP", "GetUser", "hasLocalAdministrator", "rosterPersistTarget", "rosterWriteEvidence", "AuthEnabled", "IsConfigured"}
 	rosterCounterVars     = []string{"rosterPersistRefused", "rosterPersistBestEffort", "rosterNotDurable"}
 )
 
@@ -628,10 +640,10 @@ var rosterRowExceptions = map[string]rosterClass{
 		Reason: "the inventory checkOversizeConfiguredUsernames renders; every consumer is classified"},
 	"hasCredentialCapableProvider": {Kind: rosterProbe, Reason: "reads cfg.GetUser() only as a BOOLEAN " +
 		"existence probe; renders no name, role, count or second-factor posture"},
-	"currentKillSwitchBackend": {Kind: rosterProbe, Reason: "reads cfg.GetUser() only as a BOOLEAN " +
-		"existence probe, folded with the provider checks into a three-state backend enum (none, " +
-		"not loaded, live) for the auth_exempt_kill_switch row; renders no name, role, count or " +
-		"second-factor posture"},
+	"currentKillSwitchBackend": {Kind: rosterProbe, Reason: "reads cfg.GetUser() and cfg.AuthEnabled() " +
+		"only as BOOLEAN existence probes, folded with the provider checks into a four-state backend " +
+		"enum (none, not loaded, live, no verifier) for the auth_exempt_kill_switch row; renders no " +
+		"name, role, count or second-factor posture"},
 	// buildOperatorContract reads the roster facts ONCE per contract and
 	// renders both rows from them (Codex P2 4320228851 on PR #1601), so the
 	// classified producers are rosterDurabilityFacts' own methods.
