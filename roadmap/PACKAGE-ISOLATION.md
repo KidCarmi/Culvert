@@ -144,7 +144,7 @@ implicit initialization and shared runtime variables, with negative controls.
    and omitted/uncovered implementation profiles. See [design](../docs/adr/0039-admission-engine-package.md),
    [inventory](../docs/engineering/admission-test-migration.tsv) and
    [validation/measurements](../docs/engineering/admission-engine-extraction.md).
-4. **Mapped 2026-10-30 — policy pure-core feasibility (verdict: do not extract yet; see "Policy pure-core mapping" below).** Depends on coordination
+4. **Mapped 2026-10-30 — policy pure-core feasibility (verdict: not ready under the current boundary; see "Policy pure-core mapping" and the #1526 reconciliation below; authoritative next action is IM-006).** Depends on coordination
    with #1470 and admission results, not a promise to extract. Map rule vocabulary,
    live match dependencies and hit-accounting ownership against ADR-0026. Accept:
    one evaluator across enforcement/tester/replay; no injected fail-open load
@@ -236,68 +236,112 @@ extraction ceiling for one night, even for the evaluator alone once
 `PolicyRule` (35 JSON-tagged fields plus unexported precomputed matcher state, used by config import, CP snapshot, UI,
 learning) must move with it.
 
-**Verdict.**
-1. `PolicyRule` is the blocker, not the scan loop. It is the persistence, CP
-   snapshot and API wire type; moving it means either an exported-struct package
-   consumed by every root domain (a shared vocabulary hub, rejected by ADR-0002)
-   or a mirror type with a conversion on the hot path (ADR-0026 measured +4.5%
-   from the call boundary alone).
-2. A pure core would need the four hidden inputs above injected as an
-   interface/func set (category resolver, group resolver, geo cache, unresolved
-   notifiers). That is more than the ~5 identifiers / no-callback rule allows,
-   and the notifiers are callbacks into main.
-3. Geo and file-profile side effects (metric increments, fail-closed log) sit
-   inside what ADR-0026 calls "pure"; any extraction must keep them observable.
+**Verdict: not ready under the current boundary** (restated 2026-10-30 after
+the #1526 reconciliation below).
+1. The scan loop is not the obstacle; `PolicyRule` is: it is the persistence,
+   CP-snapshot and API wire type. Under the *current* boundary this mapping
+   found two options, an exported-struct package consumed by every root domain
+   (a shared vocabulary hub, which ADR-0002 rejects) or a mirror type converted
+   on the hot path. The only *measured* number here is ADR-0026's +4.5% from a
+   call boundary alone; the cost of a mirror conversion is inference, not a
+   measurement. ADR-0040 (#1526) describes a third path this mapping did not
+   assess: make the lookup environment explicit in main first, then extract an
+   ordinal-returning matching engine that never receives `PolicyRule`.
+2. The four hidden inputs above are what ADR-0040 calls the lookup
+   environment. Today they are process globals, so an extraction would need
+   callbacks into main; after the ADR-0040 prerequisite they are construction
+   inputs owned in main. "Callbacks into main" is a property of the current
+   boundary, not a permanent fact.
+3. Geo and file-profile side effects (metric increments, the fail-closed log)
+   sit inside what ADR-0026 calls "pure". ADR-0040 keeps the geo observation in
+   main's adapter; the file-profile notifier is an addition this mapping found.
 
-**Recommended narrower follow-ups (each needs its own design, none started):**
-- (a) Define `internal/policy/match` for *leaf* matchers that take only strings
-  and need no `PolicyRule`: `matchScheduleAt`/`scheduleClock`/`parseClockMinutes`
-  (policy.go:1854–2085, ~230 lines, owns only `scheduleLocCache`),
-  `matchIPOrCIDR`/`clientSource`, `matchAuthSource`/`splitIdPSource`,
-  `matchFQDN*` (already `hostutil`). Pure engines with stdlib deps; candidate for
-  a bounded night. Their white-box tests: `policy_schedule_{clock,minutes}_test.go`,
-  `policy_srcprefix_test.go`.
-- (b) Move `hostCatScratch` (policy_hostcat.go, 258 lines) next to `internal/urlcat`
-  only after `catStore` becomes an injected `*urlcat.Store` field (a prerequisite
-  singleton-to-instance PR, as ADR-0038 did for admission).
-- (c) Leave `PolicyStore`, drafts, learning-accept and snapshot transactions in main.
+**Narrower follow-ups (each needs its own accepted design; none started):**
+- (a) Leaf matchers that take only strings and no `PolicyRule`:
+  `matchScheduleAt`/`scheduleClock`/`parseClockMinutes` (policy.go:1854–2085,
+  ~230 lines), `matchIPOrCIDR`/`clientSource`, `matchAuthSource`/`splitIdPSource`.
+  **Blocked** pending IM-006 and a separately accepted boundary: ADR-0040 requires
+  `scheduleLocCache` to become an explicit schedule-resolver instance, so (a) must
+  not carry it across as a package global. White-box tests:
+  `policy_schedule_{clock,minutes}_test.go`, `policy_srcprefix_test.go` (mixed;
+  its publication/draft assertions stay root per the #1526 inventory).
+- (b) `hostCatScratch` (policy_hostcat.go, 258 lines) only after `catStore`
+  becomes an explicit owner (ADR-0040's borrowed-store treatment).
+- (c) `PolicyStore`, drafts, learning-accept and snapshot transactions stay main.
 
-**Next night:** extract candidate (a) only if a fresh grep confirms the schedule
-and source matchers read no `cfg`/global (they appeared stdlib-only in this
-mapping, not yet proven by a dependency walk); otherwise do item 5's timing
-measurement. Candidate (a) is *proposed*, not scheduled; no ADR row added.
+### Reconciliation with #1526 (ADR-0040, `codex/policy-core-feasibility`)
 
-Overlap note: open PR #1526 (`codex/policy-core-feasibility`, holding
-ADR-0040) is the same feasibility question at a 2026-10-01 baseline, before
-#1470 merged. The mapping above is the fresher verdict; keep one of the two.
+Inspected #1526 at head `884b1fb4` (merge-base with main `77c0c583`) against
+main `174f157f`. Its design, inventory and measurements are evidence to keep,
+not to discard. Closing, merging or superseding #1526 is the owner's call;
+nothing here supersedes ADR-0040.
 
-## Nightly queue (program state; one transition per night)
+| #1526 finding | Status on `174f157f` | Evidence |
+|---|---|---|
+| **PREREQUISITE FIRST**: explicit lookup owners in main before any package | **Still valid** | `accessEvaluator`, `accessEvalSources`, `policyScheduleResolver`, `newAccessEvaluator` absent from main; `catStore` (policy.go:65) and `scheduleLocCache` (policy.go:1854) still process-wide |
+| Step 1, wait for #1470's disposition | **Resolved** | #1470 merged 2026-10-19 (`97099d2f`); use it intact; `verified`/`sameRuleSlice` are on main |
+| #1505 overlap (urlcat lock sharding, `policy_category_bench_test.go`) | **Landed** | the bench file is on main; #1526's `policy-core-baseline.json` predates it and must be re-measured before reuse |
+| #1485 overlap (IdP availability / startup integration) | **Merged** (`98920187`) | recheck the startup integration tests named in #1526 before the ownership PR |
+| SOCKS5 does not call `PolicyStore.Evaluate` | Not rechecked tonight | carry as unverified; verify in IM-006's map |
+| Test inventory TSV, 327 entries, 31 conditional moves | **Preserved by reference** | still the migration inventory; its `baseline` column (`3fcc07e7`) needs a refresh pass, not a rewrite |
+| focused-38 timings and benchmarks | Valid for `3fcc07e7` only | not current evidence; re-run per the measurement contract |
+| ADR number 0040 | Still free on main | `docs/adr` holds 0037, 0038, 0039, 0041 |
 
-The nightly shift reads this table as its state. States:
-`proposed → mapped → extracted → closed(shipped | rejected)`. One transition
-per night; an item with ≤250 lines, ≤3 inbound root files and no package-level
-mutable variable may go `proposed → extracted` in one night. Every night ends
-in a PR (docs-only nights too) so a transition is reviewable; an unmerged
-branch is not state. WIP cap: one open extraction PR and one open docs PR.
+Where the two mappings differ: this one adds the file-profile notifier and
+counts `geo` as a hidden input; #1526 adds the feed view, community DB,
+category-group store and the Stage-1/CDR shared-matcher consumers, which this
+mapping did not enumerate. Union them in IM-006's map.
 
-Evidence is a 2026-10-30 parse-level walk of the 439 root production files at
-`174f157f`: "root deps" counts top-level identifiers used from other root files
-(parser noise removed), "in" counts root files that reference the candidate's
-declarations, "tests" counts root test files that reference them. Re-measure
-before mapping; the walk does not type-check, so read the source (the
-ADR-0002 `geoip`/`isPrivateIP` lesson).
+**One authoritative policy next action:** IM-006, ADR-0040 step 2
+("refactor(policy): bind evaluation lookup owners"), after the owner decides
+#1526's disposition. No policy extraction, and no leaf-matcher move, before it.
 
-| # | Candidate | Lines | Root deps | In | Tests | State | Notes |
-|---|---|---|---|---|---|---|---|
-| 1 | `inspect_h2_alpn.go` → `internal/alpnpeek` | 198 | 0 | 1 | 9 | proposed | Read-only ClientHello ALPN parser, stdlib only. First, to prove the PR/label/review pipeline on a trivially safe move. Small-item exception applies. |
-| 2 | `saas_feed_floor.go` → `internal/feedfloor` | 906 | 0 (`fileutil`, `urlcatfeed`) | 10 | 9 | proposed | F3b-1 durable floor/commit-intent state machine; authority `roadmap/FEEDS-DISTRIBUTION-F3-DESIGN.md` Part B. Its `var` block is error sentinels plus a CRC table. Under the 1,500-line cap alone. |
-| 3 | `saas_feed_genstore.go` → same package | 539 | 2, both in #2 | 4 | 6 | proposed | F3b-2 immutable generation storage; depends only on `floorCanonicalBytes`/`validSHA256Hex`. Extract after #2. |
-| 4 | `upstream_backup_strip.go` → `internal/upstream/backupstrip` | 517 | 0 | 2 | 12 | proposed | Backup secret stripping for sealed upstream credentials (2F-D, C5/C12). Security-sensitive: byte-identical output is the acceptance gate. Tests look black-box; confirm before deciding what moves. |
-| 5 | `policy.go` leaf matchers → `internal/policy/match` | ~230 | TBD | ? | `policy_schedule_*`, `policy_srcprefix_test.go` | proposed | Night-1 candidate (a) above. A split of a 2,526-line hub; the MAP night must reconcile with #1526 first. |
-| 6 | `realclientip.go` → `internal/realclientip` | 154 | 0 | 15 | 9 | proposed | RISK-019 trusted-proxy client IP. Wide shim (15 inbound). Check whether its `var` block is trusted-proxy configuration; if so an instance owner comes first (ADR-0038 pattern). |
-| 7 | `traffic_redaction.go` → fold into `internal/redaction` | 341 | 1 (`decRedactHosts`) | 4 | 7 | proposed | Keyed pseudonymizer with atomic key state. Posture must be injected first; two nights. |
-| 8 | `mcp_evidence_readmodel.go`, `mcp_shadow_metrics.go` → `internal/mcp/…` | 317, 164 | 0 | 4, 3 | 4, 4 | proposed | Projections over `internal/mcp/rollout`. MCP carries heavy open-PR traffic; the overlap check is mandatory. |
-| 9 | `proxy_path_bounds.go`, `proxy_host_bounds.go`, `request_tracing_bounds.go` | 222, ?, 290 | small, cross-linked | 7 | — | proposed | Pure bounds helpers on the hot path; proxy composition stays in main. Measure benchgates before mapping. |
+## Internal migration program (nightly shift state)
+
+This section is the program's state. The nightly shift reads it first and
+changes it only when evidence, implementation or a plan decision changes.
+
+**Operating rules.**
+- Each run first reconciles the active program PR and current main. A PR is
+  updated only when evidence, implementation or a meaningful plan decision
+  changes. `WAITING_REVIEW`, `WAITING_CI`, `IDLE` and `BLOCKED` are valid run
+  outcomes; no PR or documentation transition is manufactured to satisfy a
+  daily quota.
+- **One open program PR at a time**, counting discovery, prerequisite and code
+  PRs. While it waits, maintain it or report waiting; start no other slice.
+- States: `proposed → mapped → implementation under review → shipped (merged)`,
+  or `rejected/deferred`. An unmerged implementation is not shipped; closing
+  without merge is not acceptance. "One transition per run" is a work bound,
+  never an obligation to advance.
+- Identification: PR title prefix `[internal-migrate]`, body marker
+  `<!-- culvert-internal-migration -->`, task IDs `IM-nnn`. No label is required.
+- Pilot limit: at most **three sequential code PRs**, then an assessment of
+  ownership, independently runnable tests, review burden and failures before
+  the owner accepts continuation. Independent review and owner-controlled
+  merge; no auto-merge, release or OVA promotion.
+- Code starts only after this plan is merged or the owner explicitly accepts
+  the pilot.
+
+**Tasks.** Evidence levels: *packet* (source, callers and tests read; ready for
+owner acceptance), *lead* (parse-level counts only; not a design). The
+2026-10-30 parse-level walk of 439 root files at `174f157f` counts top-level
+identifiers used from other root files and root files/tests referencing the
+candidate; it does not type-check and it over-counts common words (IM-001's
+"9 tests" in the first draft was the word `cursor`; the real count is one file).
+
+| ID | Task | Status | Owner | Base / head | PR | Depends on | Evidence | Next action |
+|---|---|---|---|---|---|---|---|---|
+| IM-000 | Discovery: policy mapping, #1526 reconciliation, this program section | implementation under review | nightly shift | `main` / `claude/hopeful-knuth-kyvpgs` | #1760 | — | this document | owner review; merge or amend |
+| IM-001 | `inspect_h2_alpn.go` → `internal/alpnpeek` (pilot 1 of ≤3) | proposed, **awaiting owner acceptance** | nightly shift | `main` / tbd | — | IM-000 merged or accepted | **packet** below | on acceptance: one code PR per the packet |
+| IM-002 | `saas_feed_floor.go` → `internal/feedfloor` | proposed | — | — | — | IM-001 assessment | lead (906 ln, 0 root deps, `fileutil`+`urlcatfeed`, 10 inbound; `var` block is error sentinels + CRC table) | map: callers, fsync/path ownership, F3 §B cross-check, the 9 referencing test files |
+| IM-003 | `saas_feed_genstore.go` → same package | proposed | — | — | — | IM-002 | lead (539 ln; 2 deps, both in IM-002) | map after IM-002 |
+| IM-004 | `upstream_backup_strip.go` → `internal/upstream/backupstrip` | proposed | — | — | — | IM-001 assessment | lead (517 ln, 0 root deps, 2 inbound; 12 test files by grep, unclassified) | map: classify tests, define byte-identical output fixture |
+| IM-005 | `policy.go` leaf matchers (follow-up (a)) | **blocked** | — | — | — | IM-006 + accepted boundary | mapping above | none until IM-006 ships |
+| IM-006 | Policy evaluation lookup owners (ADR-0040 step 2) | blocked on #1526 disposition | owner decides | — | #1526 (design) | owner | ADR-0040, `policy-core-feasibility.md`, TSV | owner: merge/rebase/close #1526; then one ownership PR |
+| IM-007 | `realclientip.go` → `internal/realclientip` | proposed | — | — | — | — | lead (154 ln, 0 root deps, 15 inbound; `var` block unaudited) | map: is the `var` block trusted-proxy config (then instance owner first, ADR-0038 pattern) |
+| IM-008 | `traffic_redaction.go` → `internal/redaction` | proposed | — | — | — | posture injection | lead (341 ln; reads `decRedactHosts`; atomic key state) | map: posture as construction input |
+| IM-009 | `mcp_evidence_readmodel.go`, `mcp_shadow_metrics.go` → `internal/mcp/…` | proposed | — | — | — | overlap check | lead (0 root deps; heavy open MCP PR traffic) | map only after an overlap check against open MCP PRs |
+| IM-010 | `proxy_path_bounds.go`, `proxy_host_bounds.go`, `request_tracing_bounds.go` | proposed | — | — | — | benchgate measurement | lead (hot path; cross-linked) | measure before mapping |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -305,4 +349,77 @@ Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 walk, but main owns the published transport by convention), `ca.go`,
 `release_*.go`, `ui_*.go`, `auth_*.go`, `auth.go`, `identity.go`,
 `security_scan.go`, `configversion.go`, `*_startup*.go`, `*_vars.go` and the
-`*_health.go` probe adapters.
+`*_health.go` probe adapters. Performance benefit of any task is unmeasured
+until matched runs per the measurement contract establish it.
+
+### IM-001 acceptance packet: `inspect_h2_alpn.go` → `internal/alpnpeek`
+
+Baseline `174f157f`; source, both callers and the test file read in full.
+
+- **Responsibility.** Read-only, bounds-checked extraction of the ALPN protocol
+  list from a buffered plaintext TLS ClientHello, fail-closed (`ok=false`) on
+  any inconsistency, never over-reading or panicking; plus the `h2` membership
+  predicate. One cohesive concern; the security-posture comment moves verbatim
+  into `doc.go`.
+- **Symbols.** `inspect_h2_alpn.go` (198 lines, no build tag, no `go:embed` or
+  `go:generate`): consts `tlsHandshakeClientHello`, `tlsRecordHandshake`,
+  `extALPN`; funcs `parseClientHelloALPN`, `scanExtensionsForALPN`,
+  `parseALPNExtension`, `clientOffersH2`; type `cursor` with `remaining`,
+  `skip`, `skipVec8`, `skipVec16`, `readVec16`. `cursor` is declared nowhere
+  else in root.
+- **State, initialization, lifecycle.** None: no package variable, no `init`,
+  no goroutine, no I/O, no logging. Input slice is borrowed read-only for the
+  call; returned strings are copies. Imports nothing; uses no identifier from
+  any other root file (read, not only counted). Ownership in one sentence:
+  main's tunnel code owns the buffered reader and the fallback decision; the
+  package owns only the parse.
+- **Proposed API** (2 exported identifiers): `func Parse(buf []byte) (protos
+  []string, ok bool)` and `func OffersH2(protos []string) bool`. Everything
+  else unexported. Package name `alpnpeek`; files `doc.go`, `alpn.go`,
+  `alpn_test.go`.
+- **Production callers.** `proxy_tunnel_h2.go:312` (`parseClientHelloALPN(full)`
+  inside `peekClientALPN(br *bufio.Reader) []string`) and `proxy_tunnel_h2.go:160`
+  (`clientOffersH2(clientOffer)`). `peekClientALPN` stays in main: it owns the
+  `bufio.Peek(5)` / `Peek(5+recLen)` window and the `["http/1.1"]` fallback,
+  which is the fail-closed policy. The two call sites change to
+  `alpnpeek.Parse` / `alpnpeek.OffersH2`; no root alias file is needed because
+  no other production or test code references the symbols.
+- **Tests.** `inspect_h2_alpn_test.go` (119 lines, default tag):
+  `TestParseClientHelloALPN` (six subtests), `FuzzParseClientHelloALPN` (five
+  in-code seeds; no checked-in corpus under `testdata/fuzz/`), and the helpers
+  `u8`/`be16`/`be24`/`buildClientHello`. All are engine-only and move with
+  names unchanged. **Root integration coverage:** no root test references
+  `peekClientALPN`, `handshakeUpstreamALPN` or `newMITMClientConfigForALPN`
+  directly; the fallback path is covered only indirectly by tunnel tests. The
+  pilot adds no test and changes no behavior; the gap is recorded, not fixed.
+- **Overlap (fresh, 2026-10-30).** Open PRs #1705 and #1528 touch
+  `proxy_tunnel.go`, not `proxy_tunnel_h2.go` or `inspect_h2_alpn.go`; #1549,
+  #1548, #1536 and #1526 touch neither. No semantic overlap found; recheck
+  heads before the code PR.
+- **CI, coverage and discovery.** No per-file coverage floor names
+  `inspect_h2_alpn.go` or `proxy_tunnel_h2.go` (`.github/scripts/coverage-floor.sh`);
+  the global 55% floor still counts the moved statements. The non-root lane
+  discovers the package through `go list ./...`; CodeQL's path filter already
+  includes `internal/**`. `.github/qa-root-shard-timings.json` names the moved
+  entries, which is balancing data, not inclusion authority. **Pre-existing
+  gap:** `fuzz-nightly.yml` is a hand-maintained matrix of nine targets and does
+  not include `FuzzParseClientHelloALPN` today; adding
+  `{ target: FuzzParseClientHelloALPN, pkg: "./internal/alpnpeek" }` is a
+  workflow edit for the owner, outside the pilot's no-gate-change rule.
+- **Verification plan for the code PR** (record exact SHA and output):
+  `go build ./...`; `go vet ./...`; `go test -race -count=3 -shuffle=on
+  ./internal/alpnpeek`; `go test -run '^$' -fuzz '^FuzzParseClientHelloALPN$'
+  -fuzztime 60s ./internal/alpnpeek`; `go test -race -count=2 -shuffle=on -run
+  'Tunnel|H2|ALPN|Inspect' .`; the Fast gate's pinned `golangci-lint` built with
+  the `go.mod` toolchain, `--new-from-rev origin/main` plus a full-tree
+  comparison; `cmd/rootshard inventory -check-list` to show the root inventory
+  lost exactly the two entries and the package gained them; a boundary test in
+  the package (no imports beyond stdlib, no package variable, no `init`) with a
+  negative control, as `internal/identcache` does. Expected properties:
+  byte-for-byte identical parser logic, unchanged fallback behavior, ADR number
+  per `docs_adr_numbering_test.go` (0040 is held by #1526; 0042 is the next
+  free number if #1526 keeps 0040).
+- **Why this pilot first.** It is the smallest move that exercises the whole
+  program mechanism (packet, review, inventory check, ADR, merge) on code
+  whose behavior is fully pinned by its own tests and fuzz target. Its size is
+  not the argument; its lack of state, callers and hidden dependencies is.
