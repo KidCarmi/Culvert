@@ -335,6 +335,17 @@ func TestChaos64_StaleServesDoNotStackRefreshes(t *testing.T) {
 	}
 	wg.Wait()
 
+	// The refresh is asynchronous: resolveHost returns before its goroutine
+	// reaches the resolver, so wait for the one refresh call to land rather
+	// than reading the counter the instant the burst returns.
+	waitForResolverCalls(t, calls, 2)
+	// Then give any stacked refresh goroutines a window to land too. A correct
+	// implementation never exceeds 2, so this can only fail on the bug.
+	settle := time.Now().Add(50 * time.Millisecond)
+	for time.Now().Before(settle) && calls.Load() <= 2 {
+		time.Sleep(time.Millisecond)
+	}
+
 	// Exactly one refresh, not one per request.
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("100 stale serves against a wedged resolver used %d resolver calls, want 2 (warm-up + ONE refresh) — refreshes are stacking per request", n)
