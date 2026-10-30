@@ -1340,6 +1340,33 @@ func inspectMagicBlock(br blockResponder, origBody io.ReadCloser, match *PolicyM
 //     let this surface as a clean, empty success. Conflating it with scanBlocked
 //     produced a silent empty 200 on the H2 path (an on-path origin reset became a
 //     cacheable success); keeping it distinct is the fail-closed contract.
+//
+// inspectMagicStage runs the two content-shape blocks that precede every
+// scanner — archive magic bytes and Content-Type/magic-byte polyglots — and
+// reports whether one of them blocked the response.
+//
+// Extracted as a pair because they are one stage: both decide from the first
+// bytes of the decompressed body alone, both emit through inspectMagicBlock,
+// and both run before CDR and before any scanner. Keeping them inline put
+// scanInspectBody's cyclomatic complexity at 16 against a threshold of 15
+// once CHAOS-106 added the expansion refusal — and because the DECLARATION
+// line was unchanged, `--new-from-rev` could not see it; only the full-tree
+// comparison against the base did.
+func inspectMagicStage(req *http.Request, br blockResponder, origBody io.ReadCloser, match *PolicyMatch, scanBody []byte, ct, hostOnly string, id ProxyIdentity, dec *DecryptionBlock) bool {
+	// Block archives even if the URL/Content-Disposition doesn't reveal the
+	// format.
+	if archType := IsBlockedArchive(scanBody); archType != "" {
+		inspectMagicBlock(br, origBody, match, "FILE_BLOCKED", "magic:"+archType, "magic bytes", hostOnly, id, req.URL.Path, dec)
+		return true
+	}
+	// Block files whose Content-Type doesn't match their actual magic bytes.
+	if reason := CheckMagicVsContentType(scanBody, ct); reason != "" {
+		inspectMagicBlock(br, origBody, match, "POLYGLOT_BLOCKED", reason, "polyglot", hostOnly, id, req.URL.Path, dec)
+		return true
+	}
+	return false
+}
+
 func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponder, match *PolicyMatch, id ProxyIdentity, hostOnly string, dec *DecryptionBlock) scanBodyOutcome {
 	ct := resp.Header.Get("Content-Type")
 	// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering.
@@ -1380,16 +1407,8 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 		return scanBlocked
 	}
 
-	// File blocking: magic byte detection — block archives even if the
-	// URL/Content-Disposition doesn't reveal the format.
-	if archType := IsBlockedArchive(scanBody); archType != "" {
-		inspectMagicBlock(br, origBody, match, "FILE_BLOCKED", "magic:"+archType, "magic bytes", hostOnly, id, req.URL.Path, dec)
-		return scanBlocked
-	}
-	// File blocking: polyglot detection — block files whose Content-Type
-	// doesn't match their actual magic bytes.
-	if reason := CheckMagicVsContentType(scanBody, ct); reason != "" {
-		inspectMagicBlock(br, origBody, match, "POLYGLOT_BLOCKED", reason, "polyglot", hostOnly, id, req.URL.Path, dec)
+	// The two content-shape blocks that precede every scanner.
+	if inspectMagicStage(req, br, origBody, match, scanBody, ct, hostOnly, id, dec) {
 		return scanBlocked
 	}
 

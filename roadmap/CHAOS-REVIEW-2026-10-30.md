@@ -355,6 +355,14 @@ One commit on `claude/serene-cerf-kk1orz`:
   tile.
 - `proxy_tunnel_h2.go` — the per-connection memory-ceiling comment corrected
   with the true arithmetic and with what still bounds nothing (§7.2).
+- `proxy_tunnel.go` — `inspectMagicStage` extracted (the archive-magic and
+  polyglot blocks, which are one stage: both decide from the first bytes of the
+  decompressed body, both emit through `inspectMagicBlock`, both precede CDR
+  and every scanner). The refusal branch put `scanInspectBody` at cyclop 16
+  against a threshold of 15, and because its DECLARATION line is unchanged
+  `--new-from-rev` could not see it — only the full-tree comparison against the
+  base could, which is exactly the measurement
+  [conventions](../docs/agent-context/conventions.md) requires for this reason.
 - `internal/secscan/decompress_ratio_chaos_test.go`,
   `chaos106_decompress_failclosed_test.go` — the gates in §9.
 - `scanner_test.go`, `coverage_day3_test.go` — the four pre-existing
@@ -409,9 +417,9 @@ window-truncated gzip stream fails to decompress at all and would take the
 | `go test -run 'TestCHAOS106' -count=1 ./internal/secscan/ .` | pass (and verified FAILING in both packages with the ratio bound neutered to the pre-fix flat ceiling) |
 | `go test -count=1 ./internal/secscan/` | pass |
 | `go test -run 'Scan\|Decompress\|DPI\|CDR\|Inspect\|Magic\|Polyglot\|Clam\|YARA\|Metrics\|Support\|OTLP' -count=1 .` | pass |
-| `golangci-lint run --new-from-rev origin/main` (the gate's own command, v2.15.0 installed with the `go.mod` toolchain) | see the PR body for the result at the pushed SHA |
-| Full-tree `golangci-lint run`, compared against the same measurement on `origin/main` | see the PR body |
-| `go test -race ./...` | see the PR body for the result at the pushed SHA |
+| `golangci-lint run --new-from-rev origin/main` (the gate's own command, v2.15.0 installed with the `go.mod` toolchain) | **0 issues** |
+| Full-tree `golangci-lint run`, compared against the same measurement on an `origin/main` worktree | **996 → 996**; every touched file identical to its base count. The first full-tree run read 997 and named `scanInspectBody` at cyclop 16 — invisible to `--new-from-rev`, which reported 0 issues at the same revision — and `inspectMagicStage` closed it. |
+| `go test -race -count=1 ./...` | see the PR body for the result at the pushed SHA |
 
 A passing local check is not a passing hosted gate; the Fast PR Gate's sharded
 `-race` run and CodeQL are authoritative.
