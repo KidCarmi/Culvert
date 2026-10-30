@@ -419,10 +419,23 @@ window-truncated gzip stream fails to decompress at all and would take the
 | `go test -run 'Scan\|Decompress\|DPI\|CDR\|Inspect\|Magic\|Polyglot\|Clam\|YARA\|Metrics\|Support\|OTLP' -count=1 .` | pass |
 | `golangci-lint run --new-from-rev origin/main` (the gate's own command, v2.15.0 installed with the `go.mod` toolchain) | **0 issues** |
 | Full-tree `golangci-lint run`, compared against the same measurement on an `origin/main` worktree | **996 → 996**; every touched file identical to its base count. The first full-tree run read 997 and named `scanInspectBody` at cyclop 16 — invisible to `--new-from-rev`, which reported 0 issues at the same revision — and `inspectMagicStage` closed it. |
-| `go test -race -count=1 ./...` | see the PR body for the result at the pushed SHA |
+| `go test -race -count=1 ./...` | superseded by the hosted sharded run below, which is the authoritative one; the local unsharded run was stopped once CI's had passed |
 
-A passing local check is not a passing hosted gate; the Fast PR Gate's sharded
-`-race` run and CodeQL are authoritative.
+A passing local check is not a passing hosted gate, so the hosted result is
+recorded separately. At `724acb5`: **37 success, 51 skipped, 0 failures**, with
+all four aggregates APPROVED (Fast PR Gate, Deep PR Gate, QA Gate, Security
+Gate).
+
+| Hosted gate | Result |
+|---|---|
+| `Gate · go test -race (sharded)` — root shards 0-3, non-root packages, privileged, verdict + coverage evidence | pass |
+| `Deep · determinism (shuffle, count=2)` | pass — the lane that would catch an order-dependent or state-leaking gate, which matters here because `setupProxyTest` resets at test START and does not restore |
+| `Gate · golangci-lint` | pass |
+| `Gate · fmt + vet + build`, `Gate · govulncheck + gosec`, `Deep · staticcheck`, `Gate · gitleaks` | pass |
+| `CodeQL` | pass — the gate that matters most for this change, since the refusal log value is origin-supplied |
+| `Gate · perf-regression (allocs/op)` | pass — the scan path carries alloc benchmarks (`TestBenchGate_DPIScanAllocs*`), so this is the gate that would catch `readCapped` costing more than the `io.ReadAll` it replaces |
+| `Gate · proxy traffic smoke`, `Deep · compose validation` | pass |
+| `Gate · frontend` | **skipped**, which is the confirmation that withdrawing the OpenAPI entry was the right call: that lane triggers on `api/openapi/openapi.json` and would have required the regenerated client. |
 
 ---
 
