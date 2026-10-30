@@ -266,3 +266,43 @@ learning) must move with it.
 and source matchers read no `cfg`/global (they appeared stdlib-only in this
 mapping, not yet proven by a dependency walk); otherwise do item 5's timing
 measurement. Candidate (a) is *proposed*, not scheduled; no ADR row added.
+
+Overlap note: open PR #1526 (`codex/policy-core-feasibility`, holding
+ADR-0040) is the same feasibility question at a 2026-10-01 baseline, before
+#1470 merged. The mapping above is the fresher verdict; keep one of the two.
+
+## Nightly queue (program state; one transition per night)
+
+The nightly shift reads this table as its state. States:
+`proposed → mapped → extracted → closed(shipped | rejected)`. One transition
+per night; an item with ≤250 lines, ≤3 inbound root files and no package-level
+mutable variable may go `proposed → extracted` in one night. Every night ends
+in a PR (docs-only nights too) so a transition is reviewable; an unmerged
+branch is not state. WIP cap: one open extraction PR and one open docs PR.
+
+Evidence is a 2026-10-30 parse-level walk of the 439 root production files at
+`174f157f`: "root deps" counts top-level identifiers used from other root files
+(parser noise removed), "in" counts root files that reference the candidate's
+declarations, "tests" counts root test files that reference them. Re-measure
+before mapping; the walk does not type-check, so read the source (the
+ADR-0002 `geoip`/`isPrivateIP` lesson).
+
+| # | Candidate | Lines | Root deps | In | Tests | State | Notes |
+|---|---|---|---|---|---|---|---|
+| 1 | `inspect_h2_alpn.go` → `internal/alpnpeek` | 198 | 0 | 1 | 9 | proposed | Read-only ClientHello ALPN parser, stdlib only. First, to prove the PR/label/review pipeline on a trivially safe move. Small-item exception applies. |
+| 2 | `saas_feed_floor.go` → `internal/feedfloor` | 906 | 0 (`fileutil`, `urlcatfeed`) | 10 | 9 | proposed | F3b-1 durable floor/commit-intent state machine; authority `roadmap/FEEDS-DISTRIBUTION-F3-DESIGN.md` Part B. Its `var` block is error sentinels plus a CRC table. Under the 1,500-line cap alone. |
+| 3 | `saas_feed_genstore.go` → same package | 539 | 2, both in #2 | 4 | 6 | proposed | F3b-2 immutable generation storage; depends only on `floorCanonicalBytes`/`validSHA256Hex`. Extract after #2. |
+| 4 | `upstream_backup_strip.go` → `internal/upstream/backupstrip` | 517 | 0 | 2 | 12 | proposed | Backup secret stripping for sealed upstream credentials (2F-D, C5/C12). Security-sensitive: byte-identical output is the acceptance gate. Tests look black-box; confirm before deciding what moves. |
+| 5 | `policy.go` leaf matchers → `internal/policy/match` | ~230 | TBD | ? | `policy_schedule_*`, `policy_srcprefix_test.go` | proposed | Night-1 candidate (a) above. A split of a 2,526-line hub; the MAP night must reconcile with #1526 first. |
+| 6 | `realclientip.go` → `internal/realclientip` | 154 | 0 | 15 | 9 | proposed | RISK-019 trusted-proxy client IP. Wide shim (15 inbound). Check whether its `var` block is trusted-proxy configuration; if so an instance owner comes first (ADR-0038 pattern). |
+| 7 | `traffic_redaction.go` → fold into `internal/redaction` | 341 | 1 (`decRedactHosts`) | 4 | 7 | proposed | Keyed pseudonymizer with atomic key state. Posture must be injected first; two nights. |
+| 8 | `mcp_evidence_readmodel.go`, `mcp_shadow_metrics.go` → `internal/mcp/…` | 317, 164 | 0 | 4, 3 | 4, 4 | proposed | Projections over `internal/mcp/rollout`. MCP carries heavy open-PR traffic; the overlap check is mandatory. |
+| 9 | `proxy_path_bounds.go`, `proxy_host_bounds.go`, `request_tracing_bounds.go` | 222, ?, 290 | small, cross-linked | 7 | — | proposed | Pure bounds helpers on the hot path; proxy composition stays in main. Measure benchgates before mapping. |
+
+Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
+`store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
+`enrollment.go`, `upstream.go`, `upstream_transport.go` (zero root deps in the
+walk, but main owns the published transport by convention), `ca.go`,
+`release_*.go`, `ui_*.go`, `auth_*.go`, `auth.go`, `identity.go`,
+`security_scan.go`, `configversion.go`, `*_startup*.go`, `*_vars.go` and the
+`*_health.go` probe adapters.
