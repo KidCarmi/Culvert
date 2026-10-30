@@ -9,6 +9,55 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A compressed response can no longer allocate 64 MiB of heap from 160 KiB of
+  traffic (CHAOS-106).** The transparent decompression that lets ClamAV/YARA/DPI
+  signatures match actual content rather than compressed bytes had no bound
+  related to anything an operator controls. The scan pipeline buffers at most
+  `maxScanBufferBytes()` per response (default 5 MiB, the only per-response size
+  knob an operator has), and `secscan.DecompressForScan` then expanded that
+  prefix under a flat `MaxDecompressBytes` of 64 MiB — a constant unrelated to
+  the window, so a 1 MiB window and a 64 MiB window produced the same expansion.
+  Measured across 32 concurrent expansions, i.e. one inspected HTTP/2 connection
+  at `h2MaxConcurrentStreams`: **160.6 KiB of gzip bought a 64.0 MiB expansion
+  (408:1), and 5.0 MiB of traffic reached 2048.0 MiB held and 3642.3 MiB of peak
+  heap.** `proxy_tunnel_h2.go` states the per-connection ceiling as
+  `maxScanBufferBytes × h2MaxConcurrentStreams` (160 MiB at defaults) and sizes
+  the stream cap at 32 by that arithmetic; with the expansion stage counted the
+  real figure was 2 GiB, so the cap was chosen against a budget the pipeline did
+  not honour. An in-line gateway that exhausts memory is a full loss of egress
+  for everyone behind it, and the attacker needs only a client that can reach an
+  origin it controls.
+
+  The expansion is now bounded by `min(MaxDecompressBytes, max(64 ×
+  compressedBytes, 1 MiB))`. Reaching the ratio half **refuses** the response
+  (fail-closed, blocked like a scanner verdict with `source=decompress`);
+  reaching the flat half keeps the previous truncate-and-scan behavior verbatim,
+  because content large enough to reach it transferred its bytes honestly.
+  Refusal rather than truncation because a 400:1 ratio is what a padded archive
+  hiding a payload produces, so the one shape that trips the bound is the shape
+  where an uninspected tail matters most. The factor sits several times above
+  legitimate web content (3–10:1 for HTML/JS/CSS, 10–20:1 for JSON, ~50:1 for
+  the most repetitive real text) and several times below a bomb (400–1000:1);
+  the 1 MiB floor exists because the ratio alone is unfair to small responses,
+  where a few hundred bytes of framing legitimately expand far past 64x. Every
+  pre-existing fallback is unchanged: an absent, unknown or malformed
+  `Content-Encoding`, a truncated or corrupt stream and an empty expansion all
+  still hand back the original bytes with no refusal, so a header typo never
+  blocks traffic.
+
+  The refusal is reported to the caller rather than silently downgraded to a
+  compressed-byte scan — a bound the caller can ignore is a bypass the attacker
+  selects by choosing the ratio — and all three call sites fail closed. The same
+  measurement post-fix: 32/32 refused, 0 bytes held, **289.6 MiB peak (12.6x
+  lower)**. New counter `culvert_scan_decompress_bombs_total`, with
+  `stat_decompress_bombs` on the scan-status API, `decompress_bombs` in the
+  support bundle, a tile on the Security panel and one rate-limited log line
+  naming the class — the condition was previously invisible, since the existing
+  `scan_inflight` gauge covers body *scans* and the expansion happens before
+  `ScanBody` is called. The aggregate across concurrent responses and the
+  absolute 64 MiB per-response ceiling remain open; see
+  `roadmap/CHAOS-REVIEW-2026-10-30.md` §7.
+
 - **A Control Plane restart during a cluster-CA rotation no longer locks every
   un-renewed node out of mTLS (CHAOS-104).** The dual-CA overlap that makes a
   rotation survivable was memory-only: `commitImport` demotes the outgoing CA
