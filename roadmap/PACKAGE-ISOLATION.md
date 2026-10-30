@@ -331,8 +331,8 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 
 | ID | Task | Status | Owner | Base / head | PR | Depends on | Evidence | Next action |
 |---|---|---|---|---|---|---|---|---|
-| IM-000 | Discovery: policy mapping, #1526 reconciliation, this program section | implementation under review | nightly shift | `main` / `claude/hopeful-knuth-kyvpgs` | #1760 | — | this document | owner review; merge or amend |
-| IM-001 | `inspect_h2_alpn.go` → `internal/alpnpeek` (pilot 1 of ≤3) | proposed, **awaiting owner acceptance** | nightly shift | `main` / tbd | — | IM-000 merged or accepted | **packet** below | on acceptance: one code PR per the packet |
+| IM-000 | Discovery: policy mapping, #1526 reconciliation, this program section | shipped (merged 2026-10-30, `5eef0c25`) | nightly shift | `main` | #1760 | — | this document | — |
+| IM-001 | `inspect_h2_alpn.go` → `internal/alpnpeek` (pilot 1 of ≤3) | **accepted by the owner** (recorded by merging the PR that set this row); ready for extraction | nightly shift | `main` / `claude/pkg-isolation-<date>` | — | IM-000 shipped | **packet** below | next run: re-verify the packet against that night's main, then open the single code PR |
 | IM-002 | `saas_feed_floor.go` → `internal/feedfloor` | proposed | — | — | — | IM-001 assessment | lead (906 ln, 0 root deps, `fileutil`+`urlcatfeed`, 10 inbound; `var` block is error sentinels + CRC table) | map: callers, fsync/path ownership, F3 §B cross-check, the 9 referencing test files |
 | IM-003 | `saas_feed_genstore.go` → same package | proposed | — | — | — | IM-002 | lead (539 ln; 2 deps, both in IM-002) | map after IM-002 |
 | IM-004 | `upstream_backup_strip.go` → `internal/upstream/backupstrip` | proposed | — | — | — | IM-001 assessment | lead (517 ln, 0 root deps, 2 inbound; 12 test files by grep, unclassified) | map: classify tests, define byte-identical output fixture |
