@@ -200,6 +200,7 @@ func TestSecurityMiddleware_OPTIONS(t *testing.T) {
 // ─── /api/setup ───────────────────────────────────────────────────────────────
 
 func TestAPISetupStatus_NeedsSetup(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	// Reset auth so needsSetup = true.
 	origUser := cfg.GetUser()
 	_ = cfg.SetAuth("", "")
@@ -243,6 +244,7 @@ func TestAPISetupComplete_AlreadyDone(t *testing.T) {
 }
 
 func TestAPISetupComplete_ShortPassword(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "") // ensure no auth configured
@@ -263,6 +265,7 @@ func TestAPISetupComplete_ShortPassword(t *testing.T) {
 // exceeds 72 bytes" instead of the same 400 validation response every other
 // weak-password case gets.
 func TestAPISetupComplete_PasswordTooLong(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "") // ensure no auth configured
@@ -280,6 +283,7 @@ func TestAPISetupComplete_PasswordTooLong(t *testing.T) {
 }
 
 func TestAPISetupComplete_UnauthMode(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "")
@@ -313,6 +317,7 @@ func TestAPISetupComplete_UnauthMode(t *testing.T) {
 // must both fail the request AND roll the in-memory state back so a retry
 // goes through the normal, retryable setup path.
 func TestAPISetupComplete_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	snapshotAuthGlobals(t)
@@ -372,6 +377,7 @@ func TestAPISetupComplete_PersistFailure_DoesNotClaimSuccess(t *testing.T) {
 // never reaches apiSetupComplete's caller — so the handler still replies
 // {"ok":true,"unauth":true} even though nothing was durably saved.
 func TestAPISetupComplete_UnauthModePersistFailure_DoesNotClaimSuccess(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	snapshotAuthGlobals(t)
@@ -426,6 +432,7 @@ func TestAPISetupComplete_UnauthModePersistFailure_DoesNotClaimSuccess(t *testin
 // exists, so a second requester racing the legitimate admin's first POST
 // must not also be able to provision a credential set.
 func TestAPISetupComplete_ConcurrentRequests_OnlyOneWins(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "")
@@ -464,6 +471,7 @@ func TestAPISetupComplete_ConcurrentRequests_OnlyOneWins(t *testing.T) {
 // ─── /api/auth ────────────────────────────────────────────────────────────────
 
 func TestAPIAuthStatus_NoAuth(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	_ = cfg.SetAuth("", "")
 	w := httptest.NewRecorder()
 	apiAuthStatus(w, getReq("/api/auth/status"))
@@ -487,6 +495,7 @@ func TestAPIAuthLogin_WrongMethod(t *testing.T) {
 }
 
 func TestAPIAuthLogin_NoAuth(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	_ = cfg.SetAuth("", "")
 	initSecret(t)
 
@@ -519,6 +528,7 @@ func TestAPIAuthLogin_NoAuth(t *testing.T) {
 // cookie now names an existing user and remains a valid admin session for
 // its full TTL.
 func TestAPIAuthLogin_PreSetupSession_RejectedAfterSetupCreatesSameUsername(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "")

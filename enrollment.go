@@ -806,8 +806,26 @@ func safeCAPath(dir, name string) (string, error) {
 	return cleaned, nil
 }
 
-// InitOrLoad initializes or loads the cluster CA from disk.
+// InitOrLoad initializes or loads the cluster CA from disk, and reinstates the
+// dual-CA overlap of a rotation that was still in progress (CHAOS-104).
+//
+// The two halves are separate functions because they own different state and
+// different locks. initPrimary owns cert/key/certPEM under ca.mu;
+// restoreSecondaryFromRotation reads the durable rotation record (which takes
+// the ClusterStore's lock) BEFORE it takes ca.mu, so the two are never nested
+// and the notify runs with ca.mu released — the inversion CHAOS-50/51 closed on
+// this type.
 func (ca *clusterCA) InitOrLoad(dir string) error {
+	if err := ca.initPrimary(dir); err != nil {
+		return err
+	}
+	ca.restoreSecondaryFromRotation()
+	return nil
+}
+
+// initPrimary loads or bootstraps the PRIMARY cluster CA. It owns ca.cert,
+// ca.key and ca.certPEM; the secondary (overlap) CA is not its business.
+func (ca *clusterCA) initPrimary(dir string) error {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
 
@@ -842,30 +860,42 @@ func (ca *clusterCA) InitOrLoad(dir string) error {
 
 	switch {
 	case !certMissing && !keyMissing:
-		// CA-3: decrypt at-rest key if it is a PSCA envelope (content-driven,
-		// fail closed on KEK/corruption — never regenerate). loadFromPEM stays
-		// a pure plaintext-PEM parser.
-		sealed, wasEncrypted, decErr := openClusterCAKey(ca.dir, keyPEM)
-		if decErr != nil {
-			return decErr
-		}
-		// The decrypted CA key stays inside the closure and is zeroized on return;
-		// it never crosses back into package main as a plain []byte.
-		return sealed.WithPlaintext(func(plainKey []byte) error {
-			if err := ca.loadFromPEM(certPEM, plainKey); err != nil {
-				return err
-			}
-			// Opt-in migration: plaintext on disk + encryption enabled → migrate.
-			if !wasEncrypted && clusterCAKeyEncryptionEnabled() {
-				return migrateClusterCAKeyToEncrypted(ca.dir, keyPath, plainKey)
-			}
-			return nil
-		})
+		return ca.adoptPrimaryFromDisk(certPEM, keyPEM, keyPath)
 	case !certMissing && keyMissing:
 		return fmt.Errorf("cluster CA bootstrap: partial pair on disk (cert %q present, key %q missing) — refuse to overwrite; remove both files for fresh bootstrap or restore the missing one", certPath, keyPath)
 	case certMissing && !keyMissing:
 		return fmt.Errorf("cluster CA bootstrap: partial pair on disk (cert %q missing, key %q present) — refuse to overwrite; remove both files for fresh bootstrap or restore the missing one", certPath, keyPath)
 	}
+	return ca.bootstrapPrimary(certPath, keyPath)
+}
+
+// adoptPrimaryFromDisk loads an existing CA pair. Called by initPrimary with
+// ca.mu HELD; it writes ca.cert/key/certPEM through loadFromPEM.
+func (ca *clusterCA) adoptPrimaryFromDisk(certPEM, keyPEM []byte, keyPath string) error {
+	// CA-3: decrypt at-rest key if it is a PSCA envelope (content-driven,
+	// fail closed on KEK/corruption — never regenerate). loadFromPEM stays
+	// a pure plaintext-PEM parser.
+	sealed, wasEncrypted, decErr := openClusterCAKey(ca.dir, keyPEM)
+	if decErr != nil {
+		return decErr
+	}
+	// The decrypted CA key stays inside the closure and is zeroized on return;
+	// it never crosses back into package main as a plain []byte.
+	return sealed.WithPlaintext(func(plainKey []byte) error {
+		if err := ca.loadFromPEM(certPEM, plainKey); err != nil {
+			return err
+		}
+		// Opt-in migration: plaintext on disk + encryption enabled → migrate.
+		if !wasEncrypted && clusterCAKeyEncryptionEnabled() {
+			return migrateClusterCAKeyToEncrypted(ca.dir, keyPath, plainKey)
+		}
+		return nil
+	})
+}
+
+// bootstrapPrimary generates and persists a brand-new cluster CA. Called by
+// initPrimary with ca.mu HELD, only when NEITHER file is on disk.
+func (ca *clusterCA) bootstrapPrimary(certPath, keyPath string) error {
 	// Both missing — generate new cluster CA.
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -1124,7 +1154,19 @@ func backupCAFiles(dir string, certPEM []byte, key *ecdsa.PrivateKey) {
 	// certificate, so disclosure lets an attacker mint a node cert, impersonate
 	// a DP to the Control Plane and receive the full ConfigSnapshot (which
 	// carries SessionHMAC and the IdP secrets).
-	_ = fileutil.AtomicWrite(certBak, certPEM, 0o600)
+	// CHAOS-104: the CERT backup is load-bearing, not just an operator
+	// convenience — restoreSecondaryFromRotation rebuilds the dual-CA overlap
+	// from it after a restart. A write that does not land therefore makes the
+	// rotation about to start unrecoverable across a restart, so say so NOW,
+	// while the operator is still at the console, instead of leaving it to be
+	// discovered as a fleet-wide mTLS lockout on the next boot. The write stays
+	// best-effort: the rotation itself is sound, and failing it here would
+	// strand the fleet on a CA that is about to expire.
+	if err := fileutil.AtomicWrite(certBak, certPEM, 0o600); err != nil {
+		logger.Printf("ClusterCA: could not back up the outgoing CA to %q: %v — the rotation proceeds, but a "+
+			"restart before every node renews will NOT restore the dual-CA overlap and unrenewed nodes would "+
+			"have to re-enroll", sanitizeLog(certBak), err)
+	}
 	if key != nil {
 		if der, err := x509.MarshalECPrivateKey(key); err == nil {
 			keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
@@ -1367,6 +1409,137 @@ func (ca *clusterCA) commitImport(cert *x509.Certificate, key *ecdsa.PrivateKey,
 		eff.trackRotate = true
 	}
 	return eff, nil
+}
+
+// restoreSecondaryFromRotation reinstates the dual-CA overlap after a process
+// restart that landed inside one (CHAOS-104).
+//
+// The overlap is what makes a cluster-CA rotation survivable: commitImport
+// demotes the outgoing CA to the secondary slot and AllCACertsPEM publishes it
+// into the Control Plane's mTLS client-CA pool, so a Data Plane node that has
+// not renewed yet keeps verifying. That slot was memory-only — loadFromPEM
+// restores cert/key/certPEM and nothing else — so a restart inside the overlap
+// came back trusting ONLY the new CA and rejected every node still presenting
+// an old-CA certificate: precisely the set cluster.json records as pending.
+// Both rotation entry points open that window, and RotateIfNeeded's is
+// UNATTENDED, so no operator need be present when it opens.
+//
+// No new durable state is needed to recover, which is why this is a load path
+// and not a new file. Two records already survive the restart and this only
+// re-binds them:
+//
+//   - cluster.json's CARotation carries OldFingerprint and OldExpires
+//     (StartCARotation → saveLocked), and
+//   - cluster-ca.crt.bak carries the outgoing CA's PEM (backupCAFiles, through
+//     fileutil.AtomicWrite).
+//
+// The backup path is FULLY PREDICTABLE, so the durable fingerprint is what
+// makes trusting it safe: the file is admitted only when its SHA-256 matches
+// the fingerprint the rotation itself recorded. A planted or stale .bak fails
+// that check and is refused, so this cannot become a way to re-add a retired
+// trust anchor. What goes into the pool is re-encoded from the single verified
+// certificate rather than the file's bytes, so extra PEM blocks in the backup
+// cannot ride along into the client-CA pool.
+//
+// Fail-closed direction: every refusal leaves the node trusting only the new
+// CA, which is the pre-change behavior. A refusal is therefore not silent —
+// each branch says what it could not reinstate and how many nodes that strands,
+// because the absence of that signal is what made this fleet-wide lockout
+// invisible.
+func (ca *clusterCA) restoreSecondaryFromRotation() {
+	ca.mu.RLock()
+	dir, havePrimary, haveSecondary := ca.dir, ca.cert != nil, ca.secondaryCert != nil
+	ca.mu.RUnlock()
+	// Nothing to extend trust from, or an overlap is already installed (a
+	// re-InitOrLoad in a live process must not disturb it).
+	if !havePrimary || haveSecondary {
+		return
+	}
+
+	st := globalClusterStore.CARotationStatus()
+	if st == nil || st.OldFingerprint == "" {
+		return // no rotation in progress: a stale .bak is none of our business
+	}
+	// An overlap whose window has closed must not be reinstated — it is a
+	// bounded migration window, not a second permanent trust anchor.
+	if !time.Now().Before(st.OldExpires) {
+		return
+	}
+	// TotalNodes is a snapshot taken when the rotation started, so a node that
+	// enrolled after it (and therefore already holds a new-CA certificate) can
+	// push RenewedNodes past it. Clamp, so the operator-facing count below
+	// never reads negative.
+	pending := st.TotalNodes - len(st.RenewedNodes)
+	if pending < 0 {
+		pending = 0
+	}
+
+	bakPath, err := safeCAPath(dir, "cluster-ca.crt.bak")
+	if err != nil {
+		logger.Printf("ClusterCA: rotation in progress but the previous CA's backup path is unusable: %v — "+
+			"%d node(s) that have not renewed will be refused at mTLS until they re-enroll", err, pending)
+		return
+	}
+	bakPEM, err := os.ReadFile(bakPath)
+	if err != nil {
+		logger.Printf("ClusterCA: rotation in progress but the previous CA backup %q could not be read: %v — "+
+			"the dual-CA overlap is NOT restored and %d node(s) that have not renewed will be refused at "+
+			"mTLS until they re-enroll", sanitizeLog(bakPath), err, pending)
+		return
+	}
+	// The production CA validator: rejects a non-CA, an expired and a
+	// not-yet-valid certificate, so an unusable anchor never enters the pool.
+	cert, err := parseAndValidateCACert(bakPEM)
+	if err != nil {
+		logger.Printf("ClusterCA: rotation in progress but the previous CA backup %q is not a usable CA: %v — "+
+			"the dual-CA overlap is NOT restored and %d node(s) that have not renewed will be refused at "+
+			"mTLS until they re-enroll", sanitizeLog(bakPath), err, pending)
+		return
+	}
+	sum := sha256.Sum256(cert.Raw)
+	if fp := hex.EncodeToString(sum[:]); fp != st.OldFingerprint {
+		logger.Printf("ClusterCA: rotation in progress but the previous CA backup %q is a DIFFERENT certificate "+
+			"than the rotation recorded (backup %s, expected %s) — refusing to trust it; the dual-CA overlap is "+
+			"NOT restored and %d node(s) that have not renewed will be refused at mTLS until they re-enroll",
+			sanitizeLog(bakPath), sanitizeLog(fp), sanitizeLog(st.OldFingerprint), pending)
+		return
+	}
+
+	// Never extend trust past the certificate's own validity, nor past the
+	// window the authority recorded: take whichever ends first.
+	exp := st.OldExpires
+	if cert.NotAfter.Before(exp) {
+		exp = cert.NotAfter
+	}
+	// Re-encode from the verified certificate: exactly one block, the one whose
+	// fingerprint was checked.
+	verifiedPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+
+	ca.mu.Lock()
+	// Re-check under the write lock: an import could have landed in between,
+	// and its secondary is newer than this one.
+	if ca.cert == nil || ca.secondaryCert != nil {
+		ca.mu.Unlock()
+		return
+	}
+	ca.secondaryCert = cert
+	ca.secondaryPEM = verifiedPEM
+	ca.secondaryExp = exp
+	onRotate := ca.onRotate
+	ca.mu.Unlock()
+
+	logger.Printf("ClusterCA: restored the in-progress rotation's dual-CA overlap from %q (previous CA trusted "+
+		"until %s; %d of %d node(s) still to renew)", sanitizeLog(bakPath),
+		exp.UTC().Format(time.RFC3339), pending, st.TotalNodes)
+
+	// CHAOS-50/51: onRotate is rebuildCPCertPool, which reads AllCACertsPEM
+	// under ca.mu.RLock — so it is called with the lock RELEASED. On the boot
+	// path it is still nil (initClusterCA runs before the listener builds its
+	// TLS), and the pool is then built from AllCACertsPEM anyway; on a live
+	// re-activation it is set, and the pool must be rebuilt to pick this up.
+	if onRotate != nil {
+		onRotate()
+	}
 }
 
 // SecondaryActive returns true if a secondary (old) CA is still in the overlap period.

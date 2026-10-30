@@ -99,11 +99,24 @@ func durableSetupComplete() bool {
 //     form is tried. A file that satisfies neither is corrupt, and a corrupt
 //     roster leaves the wizard open today (CHAOS-05 quarantines and keeps
 //     going) — so it must leave it open here too.
-//   - a record configures nothing unless its hash decodes as hex (the loader
-//     skips the record otherwise) and its EFFECTIVE role, after the same
-//     least-privilege clamp the loader applies to a role this build does not
-//     enroll, is admin. `cfg.user` — the term IsConfigured actually reads — is
-//     set from the first such record and from no other.
+//   - a record configures nothing unless its hash decodes as hex, which is the
+//     loader's own admission test: it `continue`s past a record whose hash does
+//     not, and admits every record that does to `c.uiUsers`.
+//
+// Any ADMITTED record anchors setup, whatever its role. This mirrors
+// IsConfigured's len(c.uiUsers) term (SEC-SETUPANCHOR-1): an earlier form of
+// this function asked whether a record's EFFECTIVE role — after the loader's
+// least-privilege clamp — was admin, which made the durable backstop agree with
+// the in-memory predicate precisely where that predicate was wrong, and left
+// the first-run window open on a roster that plainly recorded a completed
+// setup. A restored backup whose only admin carries a role this build does not
+// enroll (clamped to RoleViewer), or a legacy pre-RBAC roster with an empty
+// role, is a lockout for --reset-password to repair, not grounds to grant
+// unauthenticated RoleAdmin. The role term is therefore gone rather than
+// relaxed, and the username term with it: the loader keys `c.uiUsers` by
+// whatever username a record carries, including the empty string, so requiring
+// a non-empty one here would have been a divergence in the direction that
+// leaves the window OPEN.
 //
 // The durable `default_auth_outcome` is the second anchor, because open mode
 // ("unauth") completes setup without creating any account at all. It is resolved
@@ -121,16 +134,10 @@ func rosterBytesConfigure(data []byte) bool {
 		return true
 	}
 	for i := range records {
-		rec := &records[i]
-		if rec.Username == "" {
-			continue
+		if _, err := hex.DecodeString(records[i].PassHash); err != nil {
+			continue // the loader skips this record entirely
 		}
-		if _, err := hex.DecodeString(rec.PassHash); err != nil {
-			continue
-		}
-		if effectiveRosterRoleQuiet(rec.Role) == RoleAdmin {
-			return true
-		}
+		return true // the loader admitted it, so this roster records a setup
 	}
 	return false
 }
@@ -146,16 +153,6 @@ func envelopeDeclaresExempt(env uiUsersFileEnvelope) bool {
 		return ok && outcome == OutcomeExempt
 	}
 	return env.UnauthMode
-}
-
-// effectiveRosterRoleQuiet is loadedRosterRole without its log line and clamp
-// counter. Reporting a clamp here would double-count the loader's own report of
-// the same file and emit it once per admin request.
-func effectiveRosterRoleQuiet(role UIRole) UIRole {
-	if role == "" || roleEnrolled(role) {
-		return role
-	}
-	return RoleViewer
 }
 
 // resetDurableSetupAnchorForTest re-opens the latch between tests. Test

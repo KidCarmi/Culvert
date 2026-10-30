@@ -606,6 +606,7 @@ func TestLegacyLDAP_DPSnapshotSyncCutsOver(t *testing.T) {
 
 // IsConfigured semantics around the sentinel.
 func TestIsConfigured_LegacyLDAPRetiredCountsAsConfigured(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	withNoLocalAdminAuth(t)
 	prevProvider := cfg.snapshotAuthBackend().provider
 	t.Cleanup(func() { cfg.SetProvider(prevProvider) })

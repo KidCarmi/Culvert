@@ -30,7 +30,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 
 - [`ha-lease-failover.md`](ha-lease-failover.md) — automatic HA failover backed by an etcd fencing lease (ADR-0005).
 - [`ha-lease-recovery.md`](ha-lease-recovery.md) — recovering a fencing lease that could not be reacquired (denied promotion, denied resume, self-fence).
-- [`cluster-ca-expiry.md`](cluster-ca-expiry.md) — cluster (enrollment) CA expiry and the resulting control-plane trust outage.
+- [`cluster-ca-expiry.md`](cluster-ca-expiry.md) — cluster (enrollment) CA expiry and the resulting control-plane trust outage, plus (§6) a restart during a rotation and the dual-CA overlap it reinstates.
 - [`cluster-config-capacity.md`](cluster-config-capacity.md) — CP→DP config-sync capacity limits and operations.
 - [`cluster-rate-limit-freshness.md`](cluster-rate-limit-freshness.md) — how cluster-wide rate limiting degrades during a Control Plane outage.
 - [`dp-bootstrap-artifact-safety.md`](dp-bootstrap-artifact-safety.md) — why the Control Plane refuses to render a one-click Data Plane bootstrap script or compose file for a non-`host[:port]` authority.

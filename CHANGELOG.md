@@ -9,6 +9,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A Control Plane restart during a cluster-CA rotation no longer locks every
+  un-renewed node out of mTLS (CHAOS-104).** The dual-CA overlap that makes a
+  rotation survivable was memory-only: `commitImport` demotes the outgoing CA
+  into `secondaryCert`/`secondaryPEM`/`secondaryExp` and `AllCACertsPEM`
+  publishes it into the Control Plane's mTLS client-CA pool, but `loadFromPEM`
+  restores only `cert`/`key`/`certPEM`. A restart anywhere inside the overlap
+  came back trusting only the new CA and refused every Data Plane node still
+  presenting an old-CA certificate — exactly the set `cluster.json` records as
+  pending renewal — with nothing logged and `/api/cluster/ca` still reporting
+  normal rotation progress. Recovery was per-node re-enrollment by hand,
+  because renewal itself rides the channel that had just been refused. Both
+  entry points open that window and `RotateIfNeeded`'s is unattended.
+
+  No new durable state was needed: the rotation's bookkeeping already persists
+  (`StartCARotation`, carrying `OldFingerprint` and `OldExpires`) and so does
+  the outgoing CA's PEM (`backupCAFiles` → `cluster-ca.crt.bak`, through
+  `fileutil.AtomicWrite`); only the binding between them was lost. `InitOrLoad`
+  now re-derives the secondary from those two records. Because the backup path
+  is fully predictable, the durable fingerprint carries the decision: the file
+  is admitted only when its SHA-256 matches the one the rotation recorded, it
+  must pass the production CA validator, and what enters the pool is re-encoded
+  from that single verified certificate rather than the file's bytes. A lapsed
+  window is never reinstated and, with no rotation recorded, a stale `.bak` is
+  ignored. Every refusal keeps the previous posture (new CA only) and now says
+  what it could not restore and how many nodes that strands. `backupCAFiles`
+  also reports a backup write that did not land, since that file is now
+  load-bearing for recovery.
+
+- **A panic in any of five background-worker rounds no longer terminates the
+  gateway (CHAOS-105).** Go ends the process on an unrecovered panic in any
+  goroutine and all five workers are `go`-detached, so one bad round was a
+  total outage — proxy data plane included. Four of the five serve
+  observability or housekeeping (the live-dashboard SSE broadcaster, the
+  decryption-coverage trend sampler, the support retention janitor and the
+  support upload worker), so a non-essential feature could kill the thing it
+  reports on; the fifth is the debug-level watchdog, the active auto-stop for
+  an elevated capture level. Each round now runs through CHAOS-24's
+  `runGuarded` under its own crash-component id, so a fault costs one interval
+  and is recorded in the same crash pipeline as a proxy or admin panic. The
+  retention janitor's synchronous boot sweep is guarded too: unguarded, a panic
+  there killed the process during startup.
+
 - **install.sh no longer replaces an at-rest passphrase it could not read.** A
   root-owned `0600` `.env` re-run unprivileged made `setup_at_rest_encryption`
   treat the file as having no passphrase, so a host-env `CULVERT_CA_PASSPHRASE`
@@ -144,6 +186,45 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   Runbook: `docs/operator/session-revocation-plane.md`.
 
 ### Security
+
+- **A roster holding accounts but no present admin reopened the unauthenticated
+  first-run bootstrap window (SEC-SETUPANCHOR-1).** `uiAuthMiddleware` grants
+  RoleAdmin to every unauthenticated request while the first-run window is
+  open, and `IsConfigured()` anchored that window on `c.user`, which
+  `loadUIUsersFile` sets only from a record whose EFFECTIVE role is admin. A
+  roster that plainly recorded a completed setup therefore left every term of
+  the predicate false, and an anonymous `GET /api/auth/users` was granted
+  RoleAdmin through the real `requireRole(RoleAdmin)` door — the whole admin
+  control plane, including roster and policy writes, on a configured appliance.
+
+  Two routes reach that state without touching the admin API, neither needing
+  any prior authority. `loadedRosterRole`'s least-privilege clamp is the first:
+  restoring a backup taken by a build that enrolls a role this one does not
+  clamps the only admin to `RoleViewer`, so a control written to fail CLOSED
+  against role-based privilege escalation was what handed the appliance to
+  anonymous callers — the clamp did exactly its job, and the composition
+  inverted the result. A legacy pre-RBAC roster is the second: its empty role is
+  never equal to `RoleAdmin`, and such an account signs in as admin through the
+  middleware's own compat branch, so those deployments served an anonymous admin
+  plane on every boot. CHAOS-103's durable backstop did not help, because
+  `rosterBytesConfigure` faithfully mirrored the clamp and so agreed with the
+  in-memory predicate precisely where that predicate was wrong.
+
+  Any ADMITTED roster account is now a setup anchor, independent of its role, on
+  both the in-memory (`IsConfigured`) and durable (`rosterBytesConfigure`)
+  sides. Setup created the roster; a roster with no usable admin is a LOCKOUT
+  for the `--reset-password` break-glass to repair — which the
+  `admin_roster_durability` diagnostics row already exists to name — never
+  grounds to grant authority to callers who hold none. The new term only ever
+  makes the predicate MORE true, so it can only CLOSE the window, and the
+  first-run and rollback paths are untouched because both carry an empty roster:
+  a quarantined corrupt roster (CHAOS-05) still loads none, and
+  `SetAuthDurably`'s compensation restores "no accounts, empty legacy pair", so
+  a genuine fresh install and a rolled-back setup both stay retryable. Pinned by
+  `setup_anchor_roster_test.go`, whose anonymous cases drive real requests
+  through `uiAuthMiddleware` and `requireRole` rather than asserting the
+  predicate, and whose negative controls hold the five states that must keep the
+  window open.
 
 - **CHAOS-102's own regression gate could be defeated by a one-line refactor
   that kept the arm and moved it below the bind (SEC-SOCKS5GATE-1).** The

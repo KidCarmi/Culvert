@@ -25,6 +25,10 @@ import (
 // exposition.
 var hub = sse.NewHub()
 
+// crashComponentSSEBroadcast names this worker in the crash record the
+// per-round guard writes (CHAOS-105).
+const crashComponentSSEBroadcast = "sse_broadcast"
+
 // sseWriteTimeout bounds each SSE frame write. The dashboard ticks every 1 s,
 // so a healthy client drains well within this window; a half-open TCP peer
 // (client gone, no RST — and SSE runs with WriteTimeout 0) would otherwise
@@ -53,16 +57,25 @@ type DashboardPayload struct {
 type sseBroadcaster struct {
 	interval time.Duration
 	done     chan struct{}
+	// round is the work one tick performs. Always b.tick in production; it is
+	// injectable for the same reason decCoverageTrend's clock and totals are,
+	// so CHAOS-105's containment gate can drive a failing round without
+	// mutating the process-wide globals tick reads (nil-ing those would panic
+	// any OTHER live worker that touches them, which is the hazard the guard
+	// exists to prevent in the first place).
+	round func()
 }
 
 // newSSEBroadcaster returns a broadcaster that ticks at the given interval.
 // Production callers use time.Second; tests pass a smaller interval to keep
 // cancellation tests fast without changing production behaviour.
 func newSSEBroadcaster(interval time.Duration) *sseBroadcaster {
-	return &sseBroadcaster{
+	b := &sseBroadcaster{
 		interval: interval,
 		done:     make(chan struct{}),
 	}
+	b.round = b.tick
+	return b
 }
 
 // Done returns a channel that is closed after run returns. Because
@@ -81,7 +94,14 @@ func (b *sseBroadcaster) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			b.tick()
+			// CHAOS-105: one round per guard. This loop reads the widest set of
+			// mutable globals in the binary (tsGet, countryTraffic, secscan,
+			// the connection gauges) for a DASHBOARD, so without this a fault
+			// in any of them took the whole gateway — data plane included —
+			// down with the live view. Per-round, not per-goroutine: a
+			// recover at the top would stop the dashboard for good instead of
+			// costing it one tick.
+			runGuarded(crashComponentSSEBroadcast, b.round)
 		}
 	}
 }
