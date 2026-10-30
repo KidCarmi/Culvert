@@ -26,8 +26,10 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/KidCarmi/Culvert/internal/sslbypass"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
@@ -952,5 +954,206 @@ func TestBenchGate_PolicyEvalScheduleOverheadBounded(t *testing.T) {
 			"and clock fields through it. That cost is paid inside the request goroutine on every "+
 			"proxied request against a scheduled posture.",
 			rules, ratio, maxRatio)
+	}
+}
+
+// TestBenchGate_MatchSnapshotAllocs locks in the per-request cost of the
+// DETACHED rule snapshot a policy decision carries. Both halves of the decision
+// path build one — PolicyStore.Evaluate into PolicyMatch, and
+// resolveAuthOutcomeSnapshot into a standalone PolicyRule — through the single
+// copyPolicyRuleForMatch core, so a nested value that stops being shared (or
+// starts being copied twice) shows up here on whichever half it touches.
+//
+// Why the arms are SHAPED rule fixtures rather than one rule: the detach is a
+// per-FIELD decision, so its cost depends entirely on which optional fields the
+// matched rule sets. TestBenchGate_PolicyEvalAllocs above measures the SCAN
+// with bare fixture rules and is blind to this; the shapes here are the ones a
+// deployment actually runs, down to PolicyStore.Add filling Enabled on every
+// rule created through the admin API. See
+// policy_match_snapshot_bench_test.go for the measurements, and for the
+// implemented-and-rejected attempt to remove the three *bool allocations.
+//
+// Both halves are gated, on both allocs/op and B/op, as CEILINGS. Allocations
+// are the primary gate for the usual reason (deterministic, hardware-
+// independent). B/op is gated too, which is unusual here and deliberate:
+// PolicyMatch and PolicyRule sit exactly at the top of their malloc size
+// classes (see the headroom gate below), so a single added field moves bytes/op
+// by a whole 64-byte class step while allocs/op does not move at all. An
+// alloc-only gate would pass that silently. A cheaper detach passes both.
+func TestBenchGate_MatchSnapshotAllocs(t *testing.T) {
+	type bound struct {
+		allocs int64
+		bytes  int64
+	}
+	// Steady state at the time of measurement, with headroom below the next
+	// 64-byte size-class step:
+	//
+	//	Stage-2  1 / 2 / 4 / 6 allocs at 640 / 641 / 643 / 835 B
+	//	Stage-1  6 / 7 / 9 / 9 allocs at 848 / 849 / 851 / 851 B
+	halves := []struct {
+		name   string
+		run    func(*testing.B, benchSnapshotShape)
+		bounds map[string]bound
+	}{
+		{
+			name: "Evaluate",
+			run:  benchMatchSnapshot,
+			bounds: map[string]bound{
+				"bare":      {allocs: 1, bytes: 648},
+				"enabled":   {allocs: 2, bytes: 648},
+				"logging":   {allocs: 4, bytes: 648},
+				"scheduled": {allocs: 6, bytes: 848},
+			},
+		},
+		{
+			name: "resolveAuthOutcomeSnapshot",
+			run:  benchAuthMatchSnapshot,
+			bounds: map[string]bound{
+				"bare":      {allocs: 6, bytes: 856},
+				"enabled":   {allocs: 7, bytes: 856},
+				"logging":   {allocs: 9, bytes: 856},
+				"scheduled": {allocs: 9, bytes: 856},
+			},
+		},
+	}
+	for _, half := range halves {
+		for _, shape := range benchSnapshotShapes() {
+			want, ok := half.bounds[shape.name]
+			if !ok {
+				t.Fatalf("%s: shape %q has no bound — a new BenchmarkMatchSnapshot arm must be measured and bounded here, not left ungated", half.name, shape.name)
+			}
+			res := testing.Benchmark(func(b *testing.B) { half.run(b, shape) })
+			// A b.Fatalf inside testing.Benchmark does NOT fail the enclosing
+			// test: it returns a ZERO BenchmarkResult whose AllocsPerOp and
+			// AllocedBytesPerOp are both 0, which sails through every ceiling
+			// below. Without this guard the gate would pass precisely when it
+			// stopped exercising the matched-request path — the same trap
+			// TestBenchGate_ForwardedForFilterAllocs above guards against.
+			if res.N == 0 {
+				t.Errorf("%s: the %s-shaped benchmark did not run (zero result), so the bounds below "+
+					"measured nothing. Its fixture stopped matching — check the shape still produces a "+
+					"match (the scheduled arm's window, buildSnapshotShapeStore) before trusting any "+
+					"result from this gate.", half.name, shape.name)
+				continue
+			}
+			allocs, bytes := res.AllocsPerOp(), res.AllocedBytesPerOp()
+			t.Logf("%s match shape=%s: %d allocs/op (bound %d), %d B/op (bound %d), %d ns/op",
+				half.name, shape.name, allocs, want.allocs, bytes, want.bytes, res.NsPerOp())
+			if allocs > want.allocs {
+				t.Errorf("REGRESSION: %s on a %s-shaped match detaches in %d allocs/op, exceeding the bound %d — "+
+					"the decision snapshot (copyPolicyRuleForMatch, policy.go) has gained a per-match "+
+					"allocation. Either a nested value that used to be aliased is now copied, or a new "+
+					"PolicyRule field needs detaching. This is paid inside the request goroutine on every "+
+					"matched request, on every protocol.", half.name, shape.name, allocs, want.allocs)
+			}
+			if bytes > want.bytes {
+				t.Errorf("REGRESSION: %s on a %s-shaped match allocates %d B/op, exceeding the bound %d — "+
+					"most likely PolicyMatch or PolicyRule crossed a malloc size class (a 64-byte step; "+
+					"see TestBenchGate_MatchSnapshotSizeClassHeadroom) rather than gaining an allocation. "+
+					"Re-measure BenchmarkMatchSnapshot before moving this bound.",
+					half.name, shape.name, bytes, want.bytes)
+			}
+		}
+	}
+}
+
+// TestBenchGate_MatchSnapshotSizeClassHeadroom records a non-obvious allocator
+// fact about two structs on the per-request decision path, so that a future
+// field addition is a measured decision instead of an accident.
+//
+// Go gives an object that is LARGER than 512 bytes and CONTAINS POINTERS an
+// 8-byte malloc header, and that header counts against the object's size class.
+// PolicyMatch (632 bytes) and PolicyRule (568) therefore allocate 640 and 576
+// bytes respectively — exactly their classes, with zero slack. Both are already
+// packed as tightly as the allocator permits, and the NEXT byte added to either
+// costs a full class step: +64 B/op on every matched request for PolicyMatch,
+// and the same again for PolicyRule, which is embedded in PolicyMatch and is
+// also the standalone Stage-1 snapshot. That is what made folding the three
+// *bool cells into the snapshot a measured loss despite removing three
+// allocations (policy_match_snapshot_bench_test.go).
+//
+// The bounds are therefore the size-class ceilings, not the current sizes: a
+// field that fits in existing padding passes. If a field genuinely must be
+// added past that, re-measure BenchmarkMatchSnapshot, move this bound and
+// TestBenchGate_MatchSnapshotAllocs together, and record the new bytes/op in
+// the commit message — do not relax one and leave the other.
+func TestBenchGate_MatchSnapshotSizeClassHeadroom(t *testing.T) {
+	if strconv.IntSize != 64 {
+		t.Skipf("the size classes and the 8-byte malloc header are 64-bit values; this is %d-bit", strconv.IntSize)
+	}
+	// 640 and 576 are the malloc size classes; 8 bytes of each are the header.
+	const maxPolicyMatch = 640 - 8
+	const maxPolicyRule = 576 - 8
+
+	// Differential oracle: confirm the allocator still steps where the constants
+	// above say it does, by measuring pointer-bearing probes at each ceiling and
+	// one word past it. This keeps the gate honest across Go releases — if a
+	// future runtime changes the header rule, this reports it instead of letting
+	// the ceilings silently gate the wrong boundary.
+	for _, probe := range []struct {
+		name            string
+		ceiling, excess int
+		atCeiling, over func() any
+	}{
+		{"PolicyRule", maxPolicyRule, 576, func() any { return new(sizeProbeRuleCeiling) }, func() any { return new(sizeProbeRuleOver) }},
+		{"PolicyMatch", maxPolicyMatch, 640, func() any { return new(sizeProbeMatchCeiling) }, func() any { return new(sizeProbeMatchOver) }},
+	} {
+		atRes := testing.Benchmark(func(b *testing.B) { benchAllocProbe(b, probe.atCeiling) })
+		overRes := testing.Benchmark(func(b *testing.B) { benchAllocProbe(b, probe.over) })
+		if atRes.N == 0 || overRes.N == 0 {
+			t.Errorf("the %s size-class oracle did not run (zero result), so it proves nothing about the boundary", probe.name)
+			continue
+		}
+		at, over := atRes.AllocedBytesPerOp(), overRes.AllocedBytesPerOp()
+		t.Logf("%s oracle: a pointer-bearing %d-byte object allocates %d B, %d-byte allocates %d B",
+			probe.name, probe.ceiling, at, probe.excess, over)
+		if over <= at {
+			t.Errorf("the %s size-class oracle no longer steps between %d and %d bytes (%d B vs %d B): the "+
+				"runtime's malloc-header rule changed, so the ceilings in this test no longer describe the "+
+				"real boundary. Re-derive them from these measurements before trusting the bounds below.",
+				probe.name, probe.ceiling, probe.excess, at, over)
+		}
+	}
+
+	matchSize := int(unsafe.Sizeof(PolicyMatch{}))
+	ruleSize := int(unsafe.Sizeof(PolicyRule{}))
+	t.Logf("PolicyMatch = %d bytes (ceiling %d); PolicyRule = %d bytes (ceiling %d)",
+		matchSize, maxPolicyMatch, ruleSize, maxPolicyRule)
+
+	if matchSize > maxPolicyMatch {
+		t.Errorf("PolicyMatch is %d bytes, over the %d-byte ceiling — with the 8-byte malloc header it no "+
+			"longer fits the 640-byte size class, so every matched request now allocates at least 704 B "+
+			"instead of 640 (+64 B/op of request-path garbage, on every protocol).", matchSize, maxPolicyMatch)
+	}
+	if ruleSize > maxPolicyRule {
+		t.Errorf("PolicyRule is %d bytes, over the %d-byte ceiling — with the 8-byte malloc header it no "+
+			"longer fits the 576-byte size class. PolicyRule is embedded in PolicyMatch and is also the "+
+			"standalone Stage-1 auth snapshot, so this costs +64 B/op on BOTH per-request snapshots and "+
+			"pushes PolicyMatch over its own ceiling as well.", ruleSize, maxPolicyRule)
+	}
+}
+
+// The size-class probes are pointer-BEARING on purpose: the 8-byte malloc
+// header the ceilings above account for is only attached to an object that both
+// exceeds 512 bytes and contains pointers, which is exactly the shape of
+// PolicyRule and PolicyMatch. A pointer-free object of the same size allocates
+// its own size class with no header and would measure the wrong boundary. An
+// array of pointers is the smallest honest probe: every element is a pointer
+// word, so the size is the element count times 8 with nothing to pad.
+type (
+	sizeProbeRuleCeiling  = [71]*int // 568 bytes = the PolicyRule ceiling
+	sizeProbeRuleOver     = [72]*int // 576 bytes = one word past it
+	sizeProbeMatchCeiling = [79]*int // 632 bytes = the PolicyMatch ceiling
+	sizeProbeMatchOver    = [80]*int // 640 bytes = one word past it
+)
+
+// benchAllocProbeSink keeps each probe allocation alive past its iteration so
+// the compiler cannot stack-allocate or elide it.
+var benchAllocProbeSink any
+
+func benchAllocProbe(b *testing.B, alloc func() any) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchAllocProbeSink = alloc()
 	}
 }

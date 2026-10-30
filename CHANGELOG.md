@@ -59,6 +59,33 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   still unreadable, leaves it unchanged with a warning.
 ### Performance
 
+- **The per-request policy decision snapshot is now measured on the rule shapes
+  deployments actually run, and its allocation floor is gated.** No runtime
+  behavior changes. `BenchmarkPerfQual_Evaluate` reported a matched request at
+  1 alloc/op, and that figure was an artifact of its fixture: its rules are
+  `PolicyRule` literals carrying only Priority/Name/DestFQDN/Action, so every
+  optional pointer field is nil and the detaching copy behind `PolicyMatch`
+  (`copyPolicyRuleForMatch`) takes none of its per-field branches. `PolicyStore.Add`
+  fills `Enabled` on every rule created through the admin API, so the smallest
+  real rule already costs 2 allocs/op per matched request, a rule that also sets
+  the logging/ALPN switches costs 4, and a time-scoped rule costs 6 at 835 B/op.
+  The Stage-1 auth resolver detaches through the same helper and shows the same
+  per-field growth. `BenchmarkMatchSnapshot` / `BenchmarkAuthMatchSnapshot`
+  (`policy_match_snapshot_bench_test.go`) measure each shape and
+  `TestBenchGate_MatchSnapshotAllocs` bounds both allocs/op and B/op.
+
+  Folding the three `*bool` cells into the snapshot allocation was implemented
+  and REJECTED on the measurements, which the benchmark file records so the
+  attempt is not repeated. It removes allocations exactly as predicted (Stage-2
+  logging 4 → 1) and is still a loss: `enabled` went 518.7 → 543.1 ns/op (+4.7%)
+  and 641 → 704 B/op. A detached `*bool` is a 1-byte pointer-free object served
+  by Go's tiny allocator, so it is already nearly free, while an object over 512
+  bytes that contains pointers carries an 8-byte malloc header that counts
+  against its size class — putting `PolicyMatch` (632 B) and `PolicyRule` (568 B)
+  exactly at the top of the 640- and 576-byte classes. The next byte added to
+  either costs a full 64-byte class step on every matched request, which
+  `TestBenchGate_MatchSnapshotSizeClassHeadroom` now records and enforces.
+
 - **The SSL-inspect decryption-profile resolve no longer walks the whole
   profile store, and no longer scales with how many profiles an operator
   created.** `decryptprofile.Store` resolves a profile by its stable ID on two
