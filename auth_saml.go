@@ -311,7 +311,7 @@ func fetchSAMLMetadata(cfg *SAMLProfileConfig) (*saml.EntityDescriptor, error) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), http.NoBody)
 		if err != nil {
 			return nil, fmt.Errorf("metadata request: %w", err)
 		}

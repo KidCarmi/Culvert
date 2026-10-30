@@ -2,6 +2,7 @@ package main
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -67,17 +68,11 @@ func TestM2Hardening_NoServiceKeepsNetRaw(t *testing.T) {
 				continue
 			}
 			checked++
-			drops := false
-			for _, c := range s.CapDrop {
-				if c == "NET_RAW" || c == "CAP_NET_RAW" || c == "ALL" {
-					drops = true
-				}
-			}
-			if !drops {
+			if !slices.ContainsFunc(s.CapDrop, coversNetRaw) {
 				t.Errorf("%s: service %q (%s) must cap_drop NET_RAW", f, name, s.Image)
 			}
 			for _, c := range s.CapAdd {
-				if c == "NET_RAW" || c == "CAP_NET_RAW" || c == "ALL" {
+				if coversNetRaw(c) {
 					t.Errorf("%s: service %q must not cap_add %s", f, name, c)
 				}
 			}
@@ -87,4 +82,10 @@ func TestM2Hardening_NoServiceKeepsNetRaw(t *testing.T) {
 			t.Errorf("%s: only %d Culvert/ClamAV services found; the image pattern no longer matches", f, checked)
 		}
 	}
+}
+
+// coversNetRaw reports whether a compose capability name grants or removes
+// NET_RAW (directly or via ALL).
+func coversNetRaw(c string) bool {
+	return c == "NET_RAW" || c == "CAP_NET_RAW" || c == "ALL"
 }

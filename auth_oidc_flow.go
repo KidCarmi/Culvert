@@ -68,7 +68,7 @@ func fetchOIDCDiscovery(issuer string) (*oidcDiscoveryDoc, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, wellKnown, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery request: %w", err)
 	}

@@ -155,7 +155,7 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 	resp.ElapsedMS = time.Since(start).Milliseconds()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck // headers are already sent; an encode failure here is a client-side write the caller cannot be told about
 }
 
 // handleHealth returns 200 OK for liveness probes.
@@ -165,7 +165,7 @@ func (ss *ScanService) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // headers are already sent; an encode failure here is a client-side write the caller cannot be told about
 		"status":   "ok",
 		"requests": atomic.LoadInt64(&statScanSvcRequests),
 	})

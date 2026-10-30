@@ -484,7 +484,7 @@ func (fs *Syncer) Sync() { fs.syncRound() }
 
 // syncRound performs one sync and reports success, so the scheduler can pick
 // the retry cadence and the health surfaces can report the failure.
-func (fs *Syncer) syncRound() bool {
+func (fs *Syncer) syncRound() bool { //nolint:funlen // R1 writer ownership: the guard → download → space refusal → BeginImport → watched write → certify order is reviewed as one linear sequence; splitting it would scatter those ordering invariants
 	obs.Printf("FeedSync: starting UT1 sync from %s", fs.feedURL)
 	start := time.Now()
 	fs.lastAttempt.Store(start)
@@ -687,6 +687,7 @@ func (fs *Syncer) Stats() (int64, time.Time, time.Duration) {
 // domain → mappedCategory map ready for BulkWrite.
 func downloadAndParse(url string) (map[string]string, error) {
 	client := &http.Client{Timeout: feedSyncHTTPTimeout}
+	// #nosec G704 -- url is the operator-configured category feed (-cat-feed-url, default the UT1 tarball), never request-derived; the repo's gosec job excludes G704 for the same reason, and a private-host guard here would refuse internal feed mirrors
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
