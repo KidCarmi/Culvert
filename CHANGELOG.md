@@ -157,6 +157,32 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   predicate, and whose negative controls hold the five states that must keep the
   window open.
 
+- **The same roster state silently turned SOCKS5 proxy authentication off and
+  let any SSE stream outlive its credential (SEC-AUTHENABLED-1).**
+  `AuthEnabled()` had the `c.user`-only shape SEC-SETUPANCHOR-1 removed from
+  `IsConfigured()`, so a roster whose only admin was clamped to `RoleViewer`, or
+  a legacy roster with an empty role, answered false on a gateway that has
+  accounts. `socks5Negotiate` then selected the SOCKS5 NO-AUTH method, and
+  `sseAuthStillValid` returned true unconditionally, so a stream with no valid
+  session or Basic credential kept receiving live telemetry. `AuthEnabled()` now
+  takes SEC-SETUPANCHOR-1's role-independent term (any admitted roster account).
+  `verifyAuthFrom`'s "no backend, authentication disabled" sentinel reads the
+  same term from its snapshot, so it now refuses instead of accepting. Without
+  that, requiring USERPASS would have accepted any credential, because the
+  local data-plane credential is the admin pair alone.
+
+  **Operator impact:** in that state SOCKS5 now refuses every client until an
+  admin exists again (`--reset-password`). Before, it relayed without
+  authentication. A gateway with no accounts at all is unchanged: no-auth
+  SOCKS5, the empty-backend sentinel, and no SSE re-check. A normal admin
+  roster is also unchanged. The informational `authEnabled` fields (`/api/stats`,
+  `GET /api/security`, the support bundle, the cluster snapshot mirror) now
+  report true in that state. The HTTP proxy is not changed: its
+  `credCapable`/`authRequired` gate reads `GetUser()`, not `AuthEnabled()`.
+  Pinned by `auth_enabled_roster_test.go`, which drives the real SOCKS5
+  listener and the SSE re-check for both roster routes, with fresh-gateway and
+  admin-roster negative controls.
+
 - **CHAOS-102's own regression gate could be defeated by a one-line refactor
   that kept the arm and moved it below the bind (SEC-SOCKS5GATE-1).** The
   pre-posture gate is pinned at both ends by AST walls, but only the RELEASE end

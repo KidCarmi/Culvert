@@ -45,7 +45,7 @@ class it exists to cover. It is fixed and gated here.
 |---|---|---|---|
 | **S-1** | A roster holding accounts but **no present admin** reopens the unauthenticated first-run bootstrap window. `loadedRosterRole`'s least-privilege clamp and a legacy pre-RBAC roster both reach that state with no prior authority. Proved end to end: anonymous `GET /api/auth/users` → **200 with `RoleAdmin`** | **HIGH** (pre-existing; auth bypass. Not a regression — the new durable backstop mirrored it) | **FIXED + gated** |
 | **S-2** | CHAOS-103 made the public, unauthenticated `/api/setup/status` do a roster-file read **and a JSON parse per request** while the window is open | LOW (introduced this window; bounded, operator-controlled input) | Reported — see the note on why a size cap is the wrong fix |
-| **R-1** | `AuthEnabled()` carries the same `c.user`-only shape as S-1. In the clamped-roster state it answers **false**, which selects the SOCKS5 **no-auth** method and makes `sseAuthStillValid` return true unconditionally | MEDIUM (pre-existing; different domain) | Reported — owner decision, deliberately **not** changed |
+| **R-1** | `AuthEnabled()` carries the same `c.user`-only shape as S-1. In the clamped-roster state it answers **false**, which selects the SOCKS5 **no-auth** method and makes `sseAuthStillValid` return true unconditionally | MEDIUM (pre-existing; different domain) | Reported here; the owner later approved a fix, now landed as `SEC-AUTHENABLED-1` (see the R-1 update in §2) |
 
 Surfaces reviewed and found **clean**: the `/data` single-writer lock (verdict
 semantics, platform degradation, position in `main`), the bootstrap-window
@@ -258,6 +258,17 @@ that fail-open, which is a live traffic-breaking behaviour change rather than a
 test-visible one; and "fail-open/fail-closed is domain-specific, not a slogan".
 It is the top item for owner decision. (Noted in passing: `AuthEnabled`'s doc
 comment still describes an `OutcomeExempt` term its body no longer has.)
+
+**R-1 update (2026-10-30): fixed as `SEC-AUTHENABLED-1`, with owner approval.**
+`AuthEnabled()` now includes the `len(c.uiUsers) > 0` term, so SOCKS5 requires
+USERPASS and the SSE re-check runs. `verifyAuthFrom`'s empty-backend sentinel
+reads the same term and now refuses. Without that change, requiring USERPASS
+would have accepted any credential. In the clamped or legacy state, SOCKS5
+therefore refuses every client until `--reset-password` restores an admin.
+That is the traffic-breaking change described above, which the owner accepted.
+The stale doc comment is corrected. The HTTP proxy's `authRequired` gate reads
+`GetUser()` and is unchanged. See the CHANGELOG entry and
+`auth_enabled_roster_test.go`.
 
 **Other residual items.**
 
