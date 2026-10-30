@@ -144,7 +144,7 @@ implicit initialization and shared runtime variables, with negative controls.
    and omitted/uncovered implementation profiles. See [design](../docs/adr/0039-admission-engine-package.md),
    [inventory](../docs/engineering/admission-test-migration.tsv) and
    [validation/measurements](../docs/engineering/admission-engine-extraction.md).
-4. **Exact next step — policy pure-core feasibility and ownership design.** Depends on coordination
+4. **Mapped 2026-10-30 — policy pure-core feasibility (verdict: do not extract yet; see "Policy pure-core mapping" below).** Depends on coordination
    with #1470 and admission results, not a promise to extract. Map rule vocabulary,
    live match dependencies and hit-accounting ownership against ADR-0026. Accept:
    one evaluator across enforcement/tester/replay; no injected fail-open load
@@ -198,3 +198,71 @@ Treat a published remote map as transferred and immutable. Configure/enable
 switches retain history; lifecycle cancellation belongs to the caller. Engine tests must run with `go test ./internal/admission` without
 application globals; adapters continue to test real composition from main.
 The concurrent-owner tests and publication negative controls enforce this seam.
+
+## Policy pure-core mapping (2026-10-30, shortlist item 4)
+
+Mapping night: no code moved. Baseline `origin/main` 174f157f. #1470 (snapshot
+O(1) memo) merged 2026-10-19, so the coordination blocker is gone. Shortlist
+items 1–3 and 6 are shipped (`internal/shutdown`, `internal/admission`,
+`internal/identcache`); item 4 is the next unshipped one and is explicitly a
+feasibility step, not an extraction.
+
+**Evaluator surface (source: `policy.go`, `policy_hostcat.go`, `policy_scanindex.go`,
+`categorygroup.go`).** `evalAccessRules(rules, rows, *accessEvalInput, now, trace)`
+is the single scan (ADR-0026). Callers: `PolicyStore.Evaluate` (policy.go:1779,
+hit accounting stays in the caller) and the Policy Tester (`ui_policy.go:2783`);
+tests: `coverage_isolation_policy_test.go`, `policy_scanindex_{,bench_}test.go`.
+It is pure of mutation/logging/locks, but its matchers are not pure of
+*environment*:
+
+| Hidden input read by matchers | Where | Nature |
+|---|---|---|
+| `catStore` (`internal/urlcat`) | `policy_hostcat.go` (9 refs), `matchCategory` | package-level singleton, already an internal owner |
+| category-group store | `categorygroup.go` `categoryGroupMatchesHostScratch` | root singleton over `internal/catgroup` |
+| `geo.LookupCached` + `noteGeoCountryUnresolved` | `matchDestNorm` | singleton plus metrics side effect on the "pure" path |
+| `noteFileProfileUnresolvedBlock`, `logger` | `FileProfileBlocked` (policy.go:2378–2445) | log/metric side effects, fail-closed behavior |
+| `time.Now` | injected already | fine |
+| `scheduleLocCache` | policy.go:1854 | process-wide `sync.Map`, benign cache |
+
+**Store/state side (not part of a pure core).** `PolicyStore` (policy.go:265) owns
+`mu`, published rules, `verified` memo, `scanIndex`, per-rule `counters`, version
+meta, and persistence (`Load/Save/saveTo/saveMeta`, `DroppedOnLoad` fail-closed
+load gate). Plus `policy_draft.go` (1,204 lines), `policy_mutation.go`,
+`policy_learning_*`, `policy_refs.go`, `policy_ref_validation.go`. Total
+`policy*.go` production ≈ 6.3k lines; 29 root production files reference
+`policyStore`; 194 root test files mention `PolicyStore`/`PolicyRule`, 59 are
+`policy*_test.go` (~15k lines). That is far over the ~15 file / ~1,500 line
+extraction ceiling for one night, even for the evaluator alone once
+`PolicyRule` (35 JSON-tagged fields plus unexported precomputed matcher state, used by config import, CP snapshot, UI,
+learning) must move with it.
+
+**Verdict.**
+1. `PolicyRule` is the blocker, not the scan loop. It is the persistence, CP
+   snapshot and API wire type; moving it means either an exported-struct package
+   consumed by every root domain (a shared vocabulary hub, rejected by ADR-0002)
+   or a mirror type with a conversion on the hot path (ADR-0026 measured +4.5%
+   from the call boundary alone).
+2. A pure core would need the four hidden inputs above injected as an
+   interface/func set (category resolver, group resolver, geo cache, unresolved
+   notifiers). That is more than the ~5 identifiers / no-callback rule allows,
+   and the notifiers are callbacks into main.
+3. Geo and file-profile side effects (metric increments, fail-closed log) sit
+   inside what ADR-0026 calls "pure"; any extraction must keep them observable.
+
+**Recommended narrower follow-ups (each needs its own design, none started):**
+- (a) Define `internal/policy/match` for *leaf* matchers that take only strings
+  and need no `PolicyRule`: `matchScheduleAt`/`scheduleClock`/`parseClockMinutes`
+  (policy.go:1854–2085, ~230 lines, owns only `scheduleLocCache`),
+  `matchIPOrCIDR`/`clientSource`, `matchAuthSource`/`splitIdPSource`,
+  `matchFQDN*` (already `hostutil`). Pure engines with stdlib deps; candidate for
+  a bounded night. Their white-box tests: `policy_schedule_{clock,minutes}_test.go`,
+  `policy_srcprefix_test.go`.
+- (b) Move `hostCatScratch` (policy_hostcat.go, 258 lines) next to `internal/urlcat`
+  only after `catStore` becomes an injected `*urlcat.Store` field (a prerequisite
+  singleton-to-instance PR, as ADR-0038 did for admission).
+- (c) Leave `PolicyStore`, drafts, learning-accept and snapshot transactions in main.
+
+**Next night:** extract candidate (a) only if a fresh grep confirms the schedule
+and source matchers read no `cfg`/global (they appeared stdlib-only in this
+mapping, not yet proven by a dependency walk); otherwise do item 5's timing
+measurement. Candidate (a) is *proposed*, not scheduled; no ADR row added.
