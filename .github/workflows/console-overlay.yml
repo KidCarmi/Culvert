@@ -1,0 +1,95 @@
+# console-overlay.yml — LAB ONLY (branch test/appliance-lab). Builds the
+# culvert-console overlay for the Q7 fix candidate on PR #1528.
+#
+# It runs the OVA builder's own function (appliance/build/console-bundle.sh
+# build_console_bundle) twice, from two source commits, on one runner:
+#   1. the OVA 325c142a source commit 0648adeb, which must reproduce the shipped
+#      console byte for byte (c4a24736…). That proves this recipe and toolchain
+#      are the ones the OVA used, so the overlay differs only by its source;
+#   2. the fix commit, whose bundle is uploaded with its sha256 and build info.
+# It also runs the console test suite on the fix commit. No OVA is built,
+# nothing is published, nothing is signed; the artifact is an internal lab
+# overlay only. Runs only on a push whose message carries [console-overlay].
+name: Console Overlay (lab)
+
+on:
+  push:
+    branches: [test/appliance-lab]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: console-overlay-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  overlay:
+    if: ${{ contains(github.event.head_commit.message, '[console-overlay]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      BASE_COMMIT: 0648adeba52e09f15505095ba1ff556304b9fcef
+      BASE_CONSOLE_SHA256: c4a24736bcada3b270e6368a43cdd0eeaf213b3549e53b6d5b7518f7896a3b69
+      FIX_COMMIT: c88c0e76ff89a68646679a47fd3c7dca9dc9267f
+    steps:
+      - name: Checkout base source (OVA 325c142a)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BASE_COMMIT }}
+          path: base-src
+          persist-credentials: false
+      - name: Checkout fix source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.FIX_COMMIT }}
+          path: fix-src
+          persist-credentials: false
+      - name: Same go.mod toolchain line in both sources
+        run: |
+          set -euo pipefail
+          a=$(awk '$1=="toolchain"{print $2}' base-src/go.mod)
+          b=$(awk '$1=="toolchain"{print $2}' fix-src/go.mod)
+          echo "base=$a fix=$b"
+          [[ -n $a && $a == "$b" ]]
+          cmp base-src/go.sum fix-src/go.sum
+          cmp base-src/appliance/build/console-bundle.sh fix-src/appliance/build/console-bundle.sh
+      - name: Go toolchain pinned by the appliance source
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: fix-src/go.mod
+          cache: false
+      - name: Build both bundles with the OVA builder's function
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source fix-src/appliance/build/console-bundle.sh
+          build_console_bundle base-src out/base/console
+          build_console_bundle fix-src out/fix/console
+          {
+            echo "# console overlay build record"
+            echo "runner_go=$(go env GOVERSION)"
+            for v in base fix; do
+              echo "## $v"
+              sha256sum out/$v/console/*
+              go version -m out/$v/console/culvert-console
+            done
+          } | tee out/build-record.txt
+      - name: Base reproduces the shipped console exactly
+        id: repro
+        run: |
+          set -euo pipefail
+          got=$(sha256sum out/base/console/culvert-console | cut -d' ' -f1)
+          echo "base console: $got (shipped $BASE_CONSOLE_SHA256)" | tee -a out/build-record.txt
+          [[ $got == "$BASE_CONSOLE_SHA256" ]]
+      - name: Console test suite on the fix commit
+        working-directory: fix-src
+        run: GOFLAGS= go test -race -count=1 ./cmd/culvert-console 2>&1 | tee ../out/fix-console-tests.txt
+      - name: Upload overlay
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: console-overlay-c88c0e76
+          path: out/
+          retention-days: 30
+          if-no-files-found: error
