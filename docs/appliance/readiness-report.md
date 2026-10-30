@@ -17,6 +17,8 @@ This block supersedes nothing below it. It records **one owner-approved integrat
 | Commits on `review/1528-m1-engine-pins` | the candidate line of OVA `325c142a`, source `0648adeb` |
 | 1. `b241b4697bdceb06dbffa87677769d1eb1590e1c` | `cherry-pick -x` of fix `c88c0e76ff89a68646679a47fd3c7dca9dc9267f` onto `cfd61404`. Scope: 3 files in `cmd/culvert-console/`; only `action_linux.go` is product code (+40/−1). Its tree equals the fix tree everywhere outside `docs/` (verified locally and in CI). |
 | 2. `e77fcaacaea70b165b0a233bc416642c217e2f44` | Test-only: the regression's guardian helper uses `exec.CommandContext` (the Fast gate's `noctx` finding on commit 1). The console binary is unchanged. |
+| 3. `165e6f363` | Lint fixes for the candidate line's 8 golangci-lint findings (see CI closure below). Not in `cmd/culvert-console/`; the console binary is unchanged. |
+| 4. `c27387b03` | Gitleaks history classification (274 exact fingerprints) and this provenance correction. No code. |
 
 PR #1528's own head (`feat/onprem-appliance-readiness`, frozen `4524311b`) is **unchanged**. That was an owner choice: the candidate line, not the frozen head.
 
@@ -64,21 +66,27 @@ The results below apply to the **tested overlay candidate only**:
 - The `e77fcaac` rows were rebuilt locally from a shallow tag-free clone. The same procedure reproduced `8b141120` from `c88c0e76`.
 - A clone with git tags gives a different stamped hash, because Go derives the module version from tags. It does not change the stamp-free hash.
 
-**CI** (workflow_dispatch; #1528 and #1705 conflict with main, so pull_request CI does not trigger):
+**CI closure (owner direction, 30 Oct).** Every run is bound to its SHA and was started by workflow_dispatch: #1528 and #1705 conflict with `main`, so pull_request CI does not trigger.
 
-| Run on `e77fcaac` | Result | Against the `0648adeb` baseline (Fast 40523421826 / Deep 40523416237) |
-|---|---|---|
-| Deep PR Gate [41043501718](https://github.com/KidCarmi/Culvert/actions/runs/41043501718) | **success** | Same (success) |
-| Appliance Console [41043504711](https://github.com/KidCarmi/Culvert/actions/runs/41043504711) | **success** | — |
-| Fast PR Gate [41043498033](https://github.com/KidCarmi/Culvert/actions/runs/41043498033) | **failure**: 20 jobs succeeded; `gitleaks`, `golangci-lint` and the aggregate failed | Same three failures as the baseline. `gitleaks` is the same failing step: the 274 history-scope findings bounded in the freeze BOM; a scan of the two integration commits finds 0 leaks. `golangci-lint` reports 8 issues: the baseline's 5, plus 3 in `events.go`/`internal/feedsync/feedsync.go`, which this branch has not touched since `0648adeb` but `main` has (the lint is scoped against moving `main`). **No lint issue is in the integration diff**; the one it introduced (`noctx`, commit 1) is fixed in commit 2. |
-
-Neither Fast failure is offered as a pass. They block a PR-gate APPROVED on this line exactly as they did on `0648adeb`.
+1. **On `e77fcaac`: Fast failed, as it already had on the `0648adeb` baseline.**
+   - Deep [41043501718](https://github.com/KidCarmi/Culvert/actions/runs/41043501718) succeeded; Appliance Console [41043504711](https://github.com/KidCarmi/Culvert/actions/runs/41043504711) succeeded.
+   - Fast [41043498033](https://github.com/KidCarmi/Culvert/actions/runs/41043498033) failed on `gitleaks` and on `golangci-lint` (8 issues, none in the integration diff).
+2. **Fixes:**
+   - `165e6f36`: focused lint fixes. The runtime-affecting ones are `events.go` (`jsonOK`, which logs encode errors) and `http.NoBody` on two GET discovery requests. The rest are reasons on `nolint`/`#nosec` directives and a test refactor.
+   - `c27387b0`: gitleaks. The 275 full-history findings are classified and get 274 exact fingerprints; none is a credential (`evidence/combined/gitleaks-history-20261030.md`).
+3. **On `c27387b0`: all required checks pass.**
+   - Fast [41060365245](https://github.com/KidCarmi/Culvert/actions/runs/41060365245): 23 jobs succeeded; `gitleaks`, `golangci-lint` and **`Fast PR Gate — APPROVED`** all succeeded.
+   - Deep [41060368651](https://github.com/KidCarmi/Culvert/actions/runs/41060368651): 17/17 succeeded, including **`Deep PR Gate — APPROVED`**.
+   - Appliance Console [41060373241](https://github.com/KidCarmi/Culvert/actions/runs/41060373241): success.
+4. The final candidate head adds only this documentation update on top of `c27387b0`. Its own run is linked in PR #1528.
 
 **Remaining gates (unchanged by this integration):**
 - No OVA contains the fix. A replacement candidate build needs separate owner approval and gets a new identity, and its changed paths need ASTRA's impacted qualification (R4).
 - FB-1: the next build must be snapshot-pinned or explicitly labelled live-archive (`evidence/combined/future-build/FB-1-APT-SNAPSHOT.md`).
 - R6/R7 security residuals and owner dispositions.
 - R9 release provenance (signed tag build, OVA signature).
+- ASTRA's independent review of the CI fixes, the 274 gitleaks fingerprints (including confirming that the `test_pixel_console.py` fixture was never a lab credential) and this provenance wording.
+- Owner decision (recommended, not implemented): the dispatch-mode gitleaks scan covers every ref, so unrelated branches can turn it red again. Scope it to the dispatched ref, or split the all-refs audit from the per-line gate.
 - MERGE / PILOT / RELEASE remain **NO-GO**. Only the owner approves a GO.
 
 
