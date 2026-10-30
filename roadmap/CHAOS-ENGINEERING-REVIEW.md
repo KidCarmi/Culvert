@@ -15,6 +15,14 @@ DP's stale active-address index), plus a 29-item backlog. Its promotion
 self-deadlock and address-republish findings merged on main as CHAOS-71 riders
 (§44.8). Rows below that it changes are annotated inline.
 
+The 2026-10-29 round is recorded in
+[CHAOS-REVIEW-2026-10-29.md](CHAOS-REVIEW-2026-10-29.md) — CHAOS-104 (the
+cluster-CA dual-CA overlap was memory-only, so a Control Plane restart inside a
+rotation locked every un-renewed Data Plane node out of mTLS) and CHAOS-105 (the
+last five background-worker rounds outside CHAOS-24's per-round panic guard). It
+closes the 2026-10-13 backlog's `D-1` and `L-6`, and re-classifies `L-1`, `L-2`
+and `X-2` there.
+
 This document is a standing register. It records where Culvert already survives failure safely
 (and *why*, by code path) and where it does not. The one code change shipped alongside the original
 review is a fail-closed fix for a latent nil-deref panic in the enrollment path (Finding HA-9);

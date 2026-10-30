@@ -27,6 +27,10 @@ const (
 	// supportUploadTick is the worker's poll cadence — the appliance's own outbound
 	// schedule. Fixed (not tunable); a queued bundle is not latency-sensitive.
 	supportUploadTick = 30 * time.Second
+
+	// crashComponentSupportUpload names this worker in the crash record the
+	// per-round guard writes (CHAOS-105).
+	crashComponentSupportUpload = "support_upload"
 	// supportUploadResumeChunk is the chunk size used when RESUMING a session whose
 	// gateway-chosen size we no longer have. The gateway accepts a PUT at any
 	// offset, so this only sizes our own reads.
@@ -45,7 +49,10 @@ func startSupportUploadWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			drainDueUploads(ctx, realUploadFunc)
+			// CHAOS-105: this round dials the TAC gateway and walks on-disk
+			// queue entries, so its inputs are partly remote and partly
+			// whatever survived a crash. A fault in one entry costs one tick.
+			runGuarded(crashComponentSupportUpload, func() { drainDueUploads(ctx, realUploadFunc) })
 		}
 	}
 }

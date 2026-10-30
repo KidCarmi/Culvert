@@ -134,7 +134,70 @@ entirely** on a node with no cluster CA (the ordinary single-node appliance, and
 node), so these rules do not fire outside a cluster. The counters stay present at 0, which is their
 normal non-alerting state.
 
-## 6. What this runbook does not cover
+## 6. A restart during a rotation, and the dual-CA overlap
+
+A rotation does not re-issue every node certificate at once. The outgoing CA is kept as a
+**secondary** trust anchor so nodes that have not renewed yet keep authenticating, and each node
+renews on its own schedule inside that window. `cluster.json` records the window — the outgoing
+CA's fingerprint, when the overlap ends, and which nodes have renewed — and `cluster-ca.crt.bak`
+holds the outgoing CA's certificate.
+
+A control-plane restart inside that window (a redeploy, an OOM kill, a node reboot, an HA
+promotion) **reinstates the overlap from those two records**. It is verified, not assumed: the
+backup is accepted only when its SHA-256 matches the fingerprint the rotation recorded, so a stale
+or substituted file at that predictable path is refused rather than trusted. On success you get one
+line naming how many nodes still have to renew:
+
+```
+ClusterCA: restored the in-progress rotation's dual-CA overlap from "/data/cluster-ca.crt.bak"
+  (previous CA trusted until 2026-11-28T09:14:02Z; 7 of 12 node(s) still to renew)
+```
+
+### When the overlap cannot be restored
+
+If the backup is missing, unreadable, not a usable CA, or not the certificate the rotation
+recorded, the node starts trusting **only the new CA** and says so explicitly — every one of those
+lines ends with the number of nodes it strands:
+
+```
+ClusterCA: rotation in progress but the previous CA backup "/data/cluster-ca.crt.bak" could not be
+  read: ... — the dual-CA overlap is NOT restored and 7 node(s) that have not renewed will be
+  refused at mTLS until they re-enroll
+```
+
+Those nodes cannot recover on their own: renewal rides the same mTLS channel they have just been
+refused. Confirm the shape before acting:
+
+| Surface | What tells you |
+|---|---|
+| `GET /api/cluster/ca` | the rotation block — whether an overlap is still open and when it ends |
+| Admin UI → Cluster → Nodes | the stranded set is the enrolled nodes **absent** from the rotation's renewed list |
+| Logs (CP) | the `the dual-CA overlap is NOT restored` line, once per start, carrying the count |
+| Node side | the DP's gRPC dial fails in the TLS handshake, with a `remote error: tls:` alert from the CP rejecting its client certificate — note this is the CP refusing the node's cert, not the node distrusting the CP, so it reads differently from §2's `certificate has expired` |
+
+Then **re-enroll each stranded node** with a fresh enrollment token, exactly as in §3. There is no
+in-band remedy: the control plane cannot hand a node a certificate the node can present until the
+node trusts the issuer.
+
+### Avoiding it
+
+- Do not restart the control plane between a rotation and the fleet finishing renewal unless you
+  have to. The window is normally short, and `/api/cluster/ca` shows when it closes.
+- Treat this line at **rotation** time as actionable immediately — it means the rotation that just
+  succeeded will not survive a restart, while the fix is still a file-permission or free-space
+  problem rather than a fleet outage:
+
+```
+ClusterCA: could not back up the outgoing CA to "/data/cluster-ca.crt.bak": ... — the rotation
+  proceeds, but a restart before every node renews will NOT restore the dual-CA overlap and
+  unrenewed nodes would have to re-enroll
+```
+
+- A **chain** of rotations inside one overlap keeps only the most recent outgoing CA: the secondary
+  slot and the recorded fingerprint are both singular. Let one rotation's overlap close before
+  starting another.
+
+## 7. What this runbook does not cover
 
 - **Inspection Root CA expiry** — different CA, different blast radius:
   [`root-ca-expiry.md`](root-ca-expiry.md).

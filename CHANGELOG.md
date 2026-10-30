@@ -9,6 +9,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A Control Plane restart during a cluster-CA rotation no longer locks every
+  un-renewed node out of mTLS (CHAOS-104).** The dual-CA overlap that makes a
+  rotation survivable was memory-only: `commitImport` demotes the outgoing CA
+  into `secondaryCert`/`secondaryPEM`/`secondaryExp` and `AllCACertsPEM`
+  publishes it into the Control Plane's mTLS client-CA pool, but `loadFromPEM`
+  restores only `cert`/`key`/`certPEM`. A restart anywhere inside the overlap
+  came back trusting only the new CA and refused every Data Plane node still
+  presenting an old-CA certificate — exactly the set `cluster.json` records as
+  pending renewal — with nothing logged and `/api/cluster/ca` still reporting
+  normal rotation progress. Recovery was per-node re-enrollment by hand,
+  because renewal itself rides the channel that had just been refused. Both
+  entry points open that window and `RotateIfNeeded`'s is unattended.
+
+  No new durable state was needed: the rotation's bookkeeping already persists
+  (`StartCARotation`, carrying `OldFingerprint` and `OldExpires`) and so does
+  the outgoing CA's PEM (`backupCAFiles` → `cluster-ca.crt.bak`, through
+  `fileutil.AtomicWrite`); only the binding between them was lost. `InitOrLoad`
+  now re-derives the secondary from those two records. Because the backup path
+  is fully predictable, the durable fingerprint carries the decision: the file
+  is admitted only when its SHA-256 matches the one the rotation recorded, it
+  must pass the production CA validator, and what enters the pool is re-encoded
+  from that single verified certificate rather than the file's bytes. A lapsed
+  window is never reinstated and, with no rotation recorded, a stale `.bak` is
+  ignored. Every refusal keeps the previous posture (new CA only) and now says
+  what it could not restore and how many nodes that strands. `backupCAFiles`
+  also reports a backup write that did not land, since that file is now
+  load-bearing for recovery.
+
+- **A panic in any of five background-worker rounds no longer terminates the
+  gateway (CHAOS-105).** Go ends the process on an unrecovered panic in any
+  goroutine and all five workers are `go`-detached, so one bad round was a
+  total outage — proxy data plane included. Four of the five serve
+  observability or housekeeping (the live-dashboard SSE broadcaster, the
+  decryption-coverage trend sampler, the support retention janitor and the
+  support upload worker), so a non-essential feature could kill the thing it
+  reports on; the fifth is the debug-level watchdog, the active auto-stop for
+  an elevated capture level. Each round now runs through CHAOS-24's
+  `runGuarded` under its own crash-component id, so a fault costs one interval
+  and is recorded in the same crash pipeline as a proxy or admin panic. The
+  retention janitor's synchronous boot sweep is guarded too: unguarded, a panic
+  there killed the process during startup.
+
 - **install.sh no longer replaces an at-rest passphrase it could not read.** A
   root-owned `0600` `.env` re-run unprivileged made `setup_at_rest_encryption`
   treat the file as having no passphrase, so a host-env `CULVERT_CA_PASSPHRASE`
@@ -16,6 +58,33 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the encrypted CA bundle. It now takes ownership first and, if the file is
   still unreadable, leaves it unchanged with a warning.
 ### Performance
+
+- **The per-request policy decision snapshot is now measured on the rule shapes
+  deployments actually run, and its allocation floor is gated.** No runtime
+  behavior changes. `BenchmarkPerfQual_Evaluate` reported a matched request at
+  1 alloc/op, and that figure was an artifact of its fixture: its rules are
+  `PolicyRule` literals carrying only Priority/Name/DestFQDN/Action, so every
+  optional pointer field is nil and the detaching copy behind `PolicyMatch`
+  (`copyPolicyRuleForMatch`) takes none of its per-field branches. `PolicyStore.Add`
+  fills `Enabled` on every rule created through the admin API, so the smallest
+  real rule already costs 2 allocs/op per matched request, a rule that also sets
+  the logging/ALPN switches costs 4, and a time-scoped rule costs 6 at 835 B/op.
+  The Stage-1 auth resolver detaches through the same helper and shows the same
+  per-field growth. `BenchmarkMatchSnapshot` / `BenchmarkAuthMatchSnapshot`
+  (`policy_match_snapshot_bench_test.go`) measure each shape and
+  `TestBenchGate_MatchSnapshotAllocs` bounds both allocs/op and B/op.
+
+  Folding the three `*bool` cells into the snapshot allocation was implemented
+  and REJECTED on the measurements, which the benchmark file records so the
+  attempt is not repeated. It removes allocations exactly as predicted (Stage-2
+  logging 4 → 1) and is still a loss: `enabled` went 518.7 → 543.1 ns/op (+4.7%)
+  and 641 → 704 B/op. A detached `*bool` is a 1-byte pointer-free object served
+  by Go's tiny allocator, so it is already nearly free, while an object over 512
+  bytes that contains pointers carries an 8-byte malloc header that counts
+  against its size class — putting `PolicyMatch` (632 B) and `PolicyRule` (568 B)
+  exactly at the top of the 640- and 576-byte classes. The next byte added to
+  either costs a full 64-byte class step on every matched request, which
+  `TestBenchGate_MatchSnapshotSizeClassHeadroom` now records and enforces.
 
 - **The SSL-inspect decryption-profile resolve no longer walks the whole
   profile store, and no longer scales with how many profiles an operator
