@@ -193,15 +193,31 @@ func TestChaos88_ProfileEnabledSemanticsAndAllocations(t *testing.T) {
 // c72NoCredentialBackend strips the local admin c72Setup installed, leaving a
 // deployment whose ONLY identity backend is the browser-only SAML profile.
 // c72Setup's cleanup restores the real values.
+//
+// It also empties the roster for the test's duration (restored on cleanup).
+// These fixtures share the global cfg, so an account an earlier test left in
+// cfg.uiUsers would survive the strip — and a roster with accounts but no
+// verifier is not "no backend": the HTTP proxy fails it closed
+// (SEC-AUTHENABLED-1). The premise is asserted, not assumed.
 func c72NoCredentialBackend(t *testing.T) {
 	t.Helper()
 	cfg.mu.Lock()
 	cfg.user, cfg.passHash = "", nil
+	prevUsers := cfg.uiUsers
+	cfg.uiUsers = nil
 	cfg.authRevision++
 	cfg.mu.Unlock()
 	cfg.cache.clear()
+	t.Cleanup(func() {
+		cfg.mu.Lock()
+		cfg.uiUsers = prevUsers
+		cfg.mu.Unlock()
+	})
 	if hasCredentialCapableProvider() {
 		t.Fatal("setup: the deployment must have no credential-capable validator")
+	}
+	if cfg.AuthEnabled() {
+		t.Fatal("setup: the deployment must have no roster account and no provider")
 	}
 }
 

@@ -352,7 +352,19 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	}
 	credCapable := hasCredentialCapableProvider()
 	ssoCapable := idpRegistry.HasEnabledInteractiveProvider() // allocation-free probe, INTERACTIVE types only (ADR-0027) — an enabled LDAP profile must not advertise an SSO flow it can never fulfil
-	authRequired := credCapable || ssoCapable || originalEffective == OutcomeExempt
+	// SEC-AUTHENABLED-1: accounts exist but nothing can verify a presented
+	// credential — the roster's only admin was clamped by loadedRosterRole, or
+	// the roster is a legacy one with an empty role, so there is no admin pair
+	// and no provider. Without this term that state read as "no backend": the
+	// gate was skipped (or the inert guard below fell through) and every
+	// request left Stage-1 unauthenticated. With it the gate is armed and the
+	// Default outcome challenges, which nothing can satisfy, so the gateway
+	// refuses until an admin is restored. Exempt outcomes are untouched.
+	// cfg.AuthEnabled() is SOCKS5's predicate (one RLock, no allocation) and is
+	// evaluated only when credCapable is false, so a gateway with an admin pays
+	// nothing for it.
+	rosterWithoutVerifier := !credCapable && cfg.AuthEnabled()
+	authRequired := credCapable || ssoCapable || rosterWithoutVerifier || originalEffective == OutcomeExempt
 	// sessionCapable is a SUPERSET of authRequired and opens arm 1 ONLY.
 	//
 	// The two probes behind it ask different questions on purpose:
@@ -580,7 +592,9 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// authenticatedSource stays "unauth", and the default-deny backstop
 					// still applies (open ≠ allow). Backend-present behavior is
 					// unchanged — this guard is skipped whenever a backend exists.
-					if !credCapable && !ssoCapable {
+					// A roster with accounts is NOT "no backend" (SEC-AUTHENABLED-1):
+					// the unfulfillable 407 below is the intended fail-closed answer.
+					if !credCapable && !ssoCapable && !rosterWithoutVerifier {
 						logger.Printf("AUTH_NO_BACKEND_INERT (no credential/SSO backend) %s -> %q {req_id=%s action=fallthrough}",
 							clientIP, sanitizeLog(r.Host), reqID)
 						break

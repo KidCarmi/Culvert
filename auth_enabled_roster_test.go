@@ -24,6 +24,7 @@ package main
 // behave exactly as before.
 
 import (
+	"encoding/base64"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -213,4 +214,216 @@ func TestAuthEnabled_AdminRosterUnchanged(t *testing.T) {
 	if !sseAuthStillValid(sseStreamWithCookie(t, rosterSessionCookie(t, RoleAdmin))) {
 		t.Error("admin roster: the admin's valid session must keep its SSE stream")
 	}
+}
+
+// ── HTTP proxy (Stage-1 resolveRequestAuth) ──────────────────────────────────
+//
+// The HTTP proxy's gate is not AuthEnabled: resolveRequestAuth derives
+// authRequired from hasCredentialCapableProvider (GetUser / provider / a
+// credential-capable IdP) and, inside it, falls through the no-backend inert
+// guard when neither a credential nor an SSO backend exists. A roster with
+// accounts but no admin pair answered "no backend" to both, so under the
+// Default outcome every request — with no credential, or with ANY presented
+// credential, since arm 2 never runs without credCapable — left Stage-1
+// unauthenticated and was decided by Stage-2 policy alone: an allow rule
+// admitted it with no identity. These gates call resolveRequestAuth directly
+// because "proceeded unauthenticated" is the Stage-1 contract; the 403 a test
+// would see through handleRequest is only the default-deny backstop.
+
+// httpProxyRequest is a proxied request with an optional Basic credential and
+// an optional browser User-Agent (which selects the captive-portal branch).
+func httpProxyRequest(t *testing.T, method, target, user, pass string, browser bool) *http.Request {
+	t.Helper()
+	r := makeRequest(target, nil)
+	r.Method = method
+	if user != "" || pass != "" {
+		r.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(user+":"+pass)))
+	}
+	if browser {
+		r.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0")
+	}
+	return r
+}
+
+// resolveHTTPProxyAuth runs Stage-1 on r and returns the recorder, the
+// outcome and whether the request may proceed to Stage-2.
+func resolveHTTPProxyAuth(t *testing.T, r *http.Request) (*httptest.ResponseRecorder, authOutcome, bool) {
+	t.Helper()
+	w := httptest.NewRecorder()
+	out, proceed := resolveRequestAuth(w, r, "127.0.0.1", "sec-authenabled-1")
+	return w, out, proceed
+}
+
+// assertHTTPProxyRefusesEverything is the HTTP half of the defect gate: with
+// accounts but no admin pair and no provider, nothing can verify a credential,
+// so every request is refused with the existing 407 challenge.
+func assertHTTPProxyRefusesEverything(t *testing.T) {
+	t.Helper()
+	for _, tc := range []struct {
+		name           string
+		method, target string
+		user, pass     string
+		browser        bool
+	}{
+		{"no credential", http.MethodGet, "http://sec-authenabled.example.test/", "", "", false},
+		{"arbitrary credential", http.MethodGet, "http://sec-authenabled.example.test/", "attacker", "anything", false},
+		{"roster account's own UI password", http.MethodGet, "http://sec-authenabled.example.test/", "alice", "Sup3rSecret!x", false},
+		{"browser, no credential", http.MethodGet, "http://sec-authenabled.example.test/", "", "", true},
+		{"CONNECT, no credential", http.MethodConnect, "http://sec-authenabled.example.test:443", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, out, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, tc.method, tc.target, tc.user, tc.pass, tc.browser))
+			if proceed {
+				t.Fatalf("SEC-AUTHENABLED-1: HTTP proxy request proceeded unauthenticated (source=%q identity=%q) on a gateway with accounts",
+					out.source, out.identity)
+			}
+			if w.Code != http.StatusProxyAuthRequired {
+				t.Errorf("want the existing 407 challenge, got %d", w.Code)
+			}
+			if got := w.Header().Get("Proxy-Authenticate"); got != `Basic realm="Culvert"` {
+				t.Errorf("want the existing Basic challenge, got Proxy-Authenticate=%q", got)
+			}
+		})
+	}
+}
+
+// TestAuthEnabled_ClampedAdminRosterHTTPProxyRefused is the HTTP gate for the
+// least-privilege clamp route.
+func TestAuthEnabled_ClampedAdminRosterHTTPProxyRefused(t *testing.T) {
+	setupProxyTest(t)
+	withFreshPolicyStore(t)
+	if roleEnrolled(UIRole("superadmin")) {
+		t.Skip("this build enrolls 'superadmin'; the clamp cannot be provoked with it")
+	}
+	c := loadRoster(t, rosterWithRole(t, UIRole("superadmin")))
+	if c.user != "" || c.provider != nil || hasCredentialCapableProvider() {
+		t.Fatal("premise broken: want no admin pair, no provider and no credential-capable IdP")
+	}
+	assertHTTPProxyRefusesEverything(t)
+}
+
+// TestAuthEnabled_LegacyEmptyRoleRosterHTTPProxyRefused is the same gate by
+// the pre-RBAC route.
+func TestAuthEnabled_LegacyEmptyRoleRosterHTTPProxyRefused(t *testing.T) {
+	setupProxyTest(t)
+	withFreshPolicyStore(t)
+	c := loadRoster(t, rosterWithRole(t, ""))
+	if c.user != "" || c.provider != nil || len(c.uiUsers) != 1 {
+		t.Fatalf("premise broken: want one admitted account, no admin pair, no provider (user=%q accounts=%d)",
+			c.user, len(c.uiUsers))
+	}
+	assertHTTPProxyRefusesEverything(t)
+}
+
+// TestAuthEnabled_HTTPProxyFreshGatewayUnchanged: with no accounts at all the
+// no-backend inert guard still applies — Stage-1 proceeds unauthenticated and
+// Stage-2's default-deny decides, exactly as before.
+func TestAuthEnabled_HTTPProxyFreshGatewayUnchanged(t *testing.T) {
+	setupProxyTest(t)
+	withFreshPolicyStore(t)
+	withRosterOnDisk(t, "")
+	if err := cfg.LoadUIUsersFile(); err != nil {
+		t.Fatalf("load roster: %v", err)
+	}
+	for _, browser := range []bool{false, true} {
+		w, out, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://fresh.example.test/", "", "", browser))
+		if !proceed {
+			t.Fatalf("fresh gateway (browser=%v): Stage-1 must stay inert, got status %d", browser, w.Code)
+		}
+		if out.source != "unauth" || out.identity != "" {
+			t.Errorf("fresh gateway: want source=unauth and no identity, got source=%q identity=%q", out.source, out.identity)
+		}
+	}
+}
+
+// TestAuthEnabled_HTTPProxyAdminRosterUnchanged: a present admin pair still
+// authenticates over Basic, and a request without a credential is challenged.
+func TestAuthEnabled_HTTPProxyAdminRosterUnchanged(t *testing.T) {
+	setupProxyTest(t)
+	withFreshPolicyStore(t)
+	loadRoster(t, adminRoster(t, RoleAdmin))
+
+	_, out, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://admin.example.test/", "alice", "Sup3rSecret!x", false))
+	if !proceed || out.identity != "alice" || out.source != "local" {
+		t.Fatalf("admin roster: valid Basic must authenticate as alice/local, got proceed=%v identity=%q source=%q",
+			proceed, out.identity, out.source)
+	}
+	w, _, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://admin.example.test/", "alice", "wrong", false))
+	if proceed || w.Code != http.StatusProxyAuthRequired {
+		t.Errorf("admin roster: a wrong password must 407, got proceed=%v status=%d", proceed, w.Code)
+	}
+	w, _, proceed = resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://admin.example.test/", "", "", false))
+	if proceed || w.Code != http.StatusProxyAuthRequired {
+		t.Errorf("admin roster: no credential must 407, got proceed=%v status=%d", proceed, w.Code)
+	}
+}
+
+// TestAuthEnabled_HTTPProxyExemptStillExempt: the fix applies to the Default
+// outcome only. On the SAME defect-state roster, an operator-chosen open
+// default (Exempt) still admits a request with no credential, and a scoped
+// Exempt rule still fires as a scoped exemption.
+func TestAuthEnabled_HTTPProxyExemptStillExempt(t *testing.T) {
+	t.Run("default Exempt", func(t *testing.T) {
+		setupProxyTest(t)
+		withFreshPolicyStore(t)
+		loadRoster(t, rosterWithRole(t, ""))
+		cfg.SetDefaultAuthOutcome(OutcomeExempt)
+		w, out, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://open.example.test/", "", "", false))
+		if !proceed {
+			t.Fatalf("default Exempt: a no-credential request must still be admitted, got status %d", w.Code)
+		}
+		if out.source != "unauth" {
+			t.Errorf("default Exempt: want source=unauth, got %q", out.source)
+		}
+	})
+	t.Run("scoped Exempt rule", func(t *testing.T) {
+		setupProxyTest(t)
+		withFreshPolicyStore(t)
+		loadRoster(t, rosterWithRole(t, ""))
+		setAuthExemptDisabled(false)
+		t.Cleanup(func() { setAuthExemptDisabled(false) })
+		const host = "scoped-exempt.example.test"
+		policyStore.Add(slice7ExemptRule(host))
+		w, out, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://"+host+"/", "", "", false))
+		// The invariant is "still admitted, no identity". The attribution
+		// differs: before the fix this state skipped the whole Stage-1 gate
+		// (source "unauth", the rule never evaluated); with the gate armed the
+		// rule now fires and is recorded as a scoped exemption ("exempt").
+		if !proceed {
+			t.Fatalf("scoped Exempt: a no-credential request must still be exempted, got status %d", w.Code)
+		}
+		if out.identity != "" {
+			t.Errorf("scoped Exempt: an exemption must never create an identity, got %q", out.identity)
+		}
+		t.Logf("scoped Exempt: source=%q", out.source)
+	})
+}
+
+// TestAuthEnabled_HTTPProxyArmedGateEdges pins the two deliberate consequences
+// of arming the gate in the defect state, both of which already hold on any
+// gateway that has a backend: a presented credential is never exempted, and
+// the Exempt kill switch is strictly MORE restrictive.
+func TestAuthEnabled_HTTPProxyArmedGateEdges(t *testing.T) {
+	t.Run("Exempt default, presented credential", func(t *testing.T) {
+		setupProxyTest(t)
+		withFreshPolicyStore(t)
+		loadRoster(t, rosterWithRole(t, ""))
+		cfg.SetDefaultAuthOutcome(OutcomeExempt)
+		w, _, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://open.example.test/", "attacker", "anything", false))
+		if proceed || w.Code != http.StatusProxyAuthRequired {
+			t.Errorf("a presented credential nothing can verify must 407, never be exempted: proceed=%v status=%d", proceed, w.Code)
+		}
+	})
+	t.Run("Exempt default, kill switch engaged", func(t *testing.T) {
+		setupProxyTest(t)
+		withFreshPolicyStore(t)
+		loadRoster(t, rosterWithRole(t, ""))
+		cfg.SetDefaultAuthOutcome(OutcomeExempt)
+		setAuthExemptDisabled(true)
+		t.Cleanup(func() { setAuthExemptDisabled(false) })
+		w, _, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://open.example.test/", "", "", false))
+		if proceed || w.Code != http.StatusProxyAuthRequired {
+			t.Errorf("the kill switch forces Default, which must challenge on a gateway with accounts: proceed=%v status=%d", proceed, w.Code)
+		}
+	})
 }
