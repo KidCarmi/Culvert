@@ -33,11 +33,28 @@ func TestConfig_Auth(t *testing.T) {
 		t.Error("VerifyAuth should fail with wrong password")
 	}
 
+	// SetAuth("") clears the legacy admin pair, but SetAuth("alice") mirrored
+	// alice into the roster and she is still there. An admitted roster
+	// account keeps authentication ENABLED (SEC-AUTHENABLED-1), and with no
+	// admin pair nothing can verify a data-plane credential, so VerifyAuth
+	// fails closed instead of reporting "auth disabled".
 	if err := c.SetAuth("", ""); err != nil {
 		t.Fatalf("SetAuth('','') error: %v", err)
 	}
-	if c.AuthEnabled() {
-		t.Error("auth should be disabled when user is empty")
+	if !c.AuthEnabled() {
+		t.Error("auth must stay enabled while the roster still holds an account")
+	}
+	if c.VerifyAuth("alice", "secret") || c.VerifyAuth("anyone", "anything") {
+		t.Error("with roster accounts but no admin pair, VerifyAuth must refuse every credential")
+	}
+
+	// With no accounts at all, an empty user is still "auth disabled".
+	empty := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	if err := empty.SetAuth("", ""); err != nil {
+		t.Fatalf("SetAuth('','') on an empty Config: %v", err)
+	}
+	if empty.AuthEnabled() {
+		t.Error("auth should be disabled when user is empty and no accounts exist")
 	}
 }
 

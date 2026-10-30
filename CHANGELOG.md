@@ -226,6 +226,52 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   predicate, and whose negative controls hold the five states that must keep the
   window open.
 
+- **The same roster state silently turned SOCKS5 and HTTP proxy authentication
+  off and let any SSE stream outlive its credential (SEC-AUTHENABLED-1).**
+  `AuthEnabled()` had the `c.user`-only shape SEC-SETUPANCHOR-1 removed from
+  `IsConfigured()`, so a roster whose only admin was clamped to `RoleViewer`, or
+  a legacy roster with an empty role, answered false on a gateway that has
+  accounts. `socks5Negotiate` then selected the SOCKS5 NO-AUTH method, and
+  `sseAuthStillValid` returned true unconditionally, so a stream with no valid
+  session or Basic credential kept receiving live telemetry. `AuthEnabled()` now
+  takes SEC-SETUPANCHOR-1's role-independent term (any admitted roster account).
+  `verifyAuthFrom`'s "no backend, authentication disabled" sentinel reads the
+  same term from its snapshot, so it now refuses instead of accepting. Without
+  that, requiring USERPASS would have accepted any credential, because the
+  local data-plane credential is the admin pair alone.
+
+  The HTTP proxy had the same gap through a different predicate.
+  `resolveRequestAuth` armed Stage-1 only for a credential-capable or SSO
+  backend (`hasCredentialCapableProvider()` reads `GetUser()`), and its
+  no-backend inert guard fell through otherwise. Under the Default outcome,
+  every request in that state left Stage-1 unauthenticated, with no credential
+  or with any credential, and only Stage-2 policy decided it. A roster with
+  accounts but no verifier now arms the gate and is not treated as "no
+  backend". The Default outcome answers with the existing 407 challenge, which
+  nothing can satisfy, so the HTTP proxy refuses too. Exempt outcomes are
+  unchanged: an Exempt default, or a scoped Exempt rule, still admits a request
+  that carries no credential. The extra probe is `cfg.AuthEnabled()` (one
+  RLock, no allocation), evaluated only when there is no credential backend.
+
+  **Operator impact:** in that state SOCKS5 and the HTTP proxy now refuse every
+  client until an admin exists again (`--reset-password`). Before, they relayed
+  without authentication. Two narrower consequences of arming the gate:
+  - Under an Exempt default, a request that presents a credential is now
+    answered 407, as it already is on any gateway with a backend. Before, it
+    fell through.
+  - With the Exempt kill switch engaged, the forced Default outcome now
+    challenges instead of staying inert.
+
+  A gateway with no accounts at all is unchanged: no-auth SOCKS5, the inert
+  HTTP Stage-1, the empty-backend sentinel, and no SSE re-check. A normal admin
+  roster is also unchanged. The informational `authEnabled` fields
+  (`/api/stats`, `GET /api/security`, the support bundle, the cluster snapshot
+  mirror) now report true in that state. Pinned by
+  `auth_enabled_roster_test.go`, which drives the real SOCKS5 listener, the SSE
+  re-check and `resolveRequestAuth` for both roster routes. Its negative
+  controls are a fresh gateway, an admin roster with valid Basic, and an
+  Exempt default or scoped Exempt rule.
+
 - **CHAOS-102's own regression gate could be defeated by a one-line refactor
   that kept the arm and moved it below the bind (SEC-SOCKS5GATE-1).** The
   pre-posture gate is pinned at both ends by AST walls, but only the RELEASE end

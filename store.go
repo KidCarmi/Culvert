@@ -953,7 +953,9 @@ func (c *Config) GetUser() string {
 }
 
 // SetAuth hashes pass with bcrypt and clears the auth cache.
-// Call with empty user to disable local authentication.
+// Call with an empty user to clear the legacy admin pair. That disables local
+// authentication only when the roster is also empty: admitted roster accounts
+// keep AuthEnabled true (SEC-AUTHENABLED-1).
 // Has no effect on an external AuthProvider.
 func (c *Config) SetAuth(user, pass string) error {
 	if user == "" {
@@ -1027,11 +1029,18 @@ type authBackendSnapshot struct {
 	user     string
 	passHash []byte
 	revision uint64
+	// hasRoster records len(c.uiUsers) > 0 at snapshot time — AuthEnabled's
+	// roster term (SEC-AUTHENABLED-1), captured under the same lock so the
+	// empty-backend sentinel in verifyAuthFrom answers from the same state.
+	hasRoster bool
 }
 
 func (c *Config) snapshotAuthBackend() authBackendSnapshot {
 	c.mu.RLock()
-	snapshot := authBackendSnapshot{provider: c.provider, user: c.user, passHash: c.passHash, revision: c.authRevision}
+	snapshot := authBackendSnapshot{
+		provider: c.provider, user: c.user, passHash: c.passHash, revision: c.authRevision,
+		hasRoster: len(c.uiUsers) > 0,
+	}
 	c.mu.RUnlock()
 	return snapshot
 }
@@ -1093,7 +1102,14 @@ func (c *Config) verifyAuthFrom(snapshot authBackendSnapshot, client, user, pass
 		return snapshot.provider.Verify(user, pass)
 	}
 	if snapshot.user == "" {
-		return true // auth disabled
+		// No local credential and no provider. With no accounts at all this is
+		// the historical "auth disabled" sentinel. With admitted roster accounts
+		// AuthEnabled is true (SEC-AUTHENABLED-1): authentication is required,
+		// but nothing here can verify a credential, because the local data-plane
+		// credential is the admin pair alone. Fail CLOSED: answering true would
+		// turn "USERPASS required" into "any USERPASS accepted". The operator
+		// restores an admin with the --reset-password break-glass.
+		return !snapshot.hasRoster
 	}
 
 	c.mu.RLock()
@@ -1216,15 +1232,28 @@ func (c *Config) resolveAuthIdentityFromSnapshot(snapshot authBackendSnapshot, c
 	return &Identity{Sub: user, Provider: "local"}, true
 }
 
-// AuthEnabled returns true when any form of authentication is active, or when
-// the global default is open/Exempt (setup is considered complete). The
-// `defaultAuthOutcome == OutcomeExempt` term is the behavior-identical successor
-// of the legacy `unauthMode` term (Slice 2); the SOCKS5 coupling is intentionally
-// preserved here and decoupled later (Slice 5).
+// AuthEnabled reports whether an authentication backend is active: a local
+// admin credential, an admitted roster account, or an external provider. It is
+// credential-only — the global default (Exempt) is deliberately NOT a term
+// (Slice 5 decoupled it; IsConfigured carries that one). SOCKS5 method
+// selection and the SSE mid-stream re-check enforce on it.
+//
+// The len(c.uiUsers) term (SEC-AUTHENABLED-1) is SEC-SETUPANCHOR-1's term,
+// applied here for the same reason. `c.user` is set by loadUIUsersFile only
+// from a record whose EFFECTIVE role is admin, so a roster whose only admin was
+// clamped to RoleViewer by loadedRosterRole (a restore from a newer build), or
+// a legacy pre-RBAC roster with an empty role, left this predicate false on a
+// gateway that has accounts — and both enforcement sites read that as
+// "authentication is off": SOCKS5 offered NO-AUTH and the SSE re-check waved
+// every stream through. Any admitted account therefore enables
+// authentication, independent of its role. A gateway with no accounts at all
+// is unchanged. verifyAuthFrom's empty-backend sentinel keys on the same
+// snapshot, so requiring a credential here is never satisfied by an arbitrary
+// one there.
 func (c *Config) AuthEnabled() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.user != "" || c.provider != nil
+	return c.user != "" || len(c.uiUsers) > 0 || c.provider != nil
 }
 
 // IsConfigured reports whether initial setup is complete: a credential backend
