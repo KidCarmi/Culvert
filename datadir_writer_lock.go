@@ -182,7 +182,7 @@ func checkDataDirSingleWriter(dir string) error {
 			dataDirWriterLockNotice = fmt.Sprintf(
 				"DataDir: WARNING — another Culvert process holds the single-writer lock on %q, but %s is set, so this process is starting anyway. "+
 					"Two processes on one data directory overwrite each other's roster, policy, admin settings and config versions, and the second one keeps the "+
-					"unauthenticated first-run bootstrap window open. Unset %s and run one process per data directory.",
+					"unauthenticated first-run setup window open. Unset %s and run one process per data directory.",
 				path, allowMultipleWritersEnv, allowMultipleWritersEnv)
 			return nil
 		}

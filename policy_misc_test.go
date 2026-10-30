@@ -164,6 +164,7 @@ func TestAPIAuthLogin_InvalidCreds(t *testing.T) {
 }
 
 func TestAPIAuthLogin_AuthDisabled(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	// When auth is disabled, any credentials succeed
 	_ = cfg.SetAuth("", "")
 

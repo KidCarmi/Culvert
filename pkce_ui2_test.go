@@ -110,6 +110,7 @@ func TestAPISetupComplete_AlreadySetup(t *testing.T) {
 }
 
 func TestAPISetupComplete_BadJSON(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	// Make sure auth is not enabled
@@ -123,6 +124,7 @@ func TestAPISetupComplete_BadJSON(t *testing.T) {
 }
 
 func TestAPISetupComplete_EmptyUser(t *testing.T) {
+	clearLocalAuthForTest(t) // SEC-SETUPANCHOR-1: "unconfigured" means no legacy pair AND no roster
 	resetSetupLockout()
 	t.Cleanup(resetSetupLockout)
 	_ = cfg.SetAuth("", "")
