@@ -1,0 +1,8 @@
+snapshot-pin-check: APT 2.8.3, Ubuntu archive snapshot 20261002T120000Z, InRelease SHA-256 verified: noble=cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0 noble-updates=6e43c5996bd6cf1d1fe7389a3d6ec383761635cdad2dfb58c020bded199235af noble-security=3b358f744efb789bab437ac77209ac20be2c8665197ce274f65c5f812bd4d519 noble-backports=dc4d31dc0a8897dbecfd0375a4041b4aeb4a6fae00c688cf923daec3c4a258f8
+PASS C1 pinned update; all four InRelease files equal the manifest pins
+PASS C1 snapshot candidate systemd 255.4-1ubuntu8.17 comes from https://snapshot.ubuntu.com/ubuntu/20261002T120000Z (live candidate: 255.4-1ubuntu8.18)
+PASS C2 guard refuses: apt-snapshot: GUEST_APT_SNAPSHOT=20991231T000000Z is not earlier than the build start (20261030T185732Z)
+PASS C2 APT accepted the future ID (rc 0, E6); the pin check refuses it: apt-snapshot: snapshot 20991231T000000Z noble-updates InRelease is 3e30429b6923a2bc9dd1a8ce6a6dcb2292c2f0b3a88036d8d2e38cc65d2df9b5, manifest pins 6e43c5996bd6cf1d1fe7389a3d6ec383761635cdad2dfb58c020bded199235af (GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES)
+PASS C3 Snapshot: yes on Docker's repository: rc 100 (E: Snapshots not supported for https://download.docker.com/linux/ubuntu/ noble)
+PASS C4 unreachable index: plain update rc 0 (warning only), pinned update rc 100
+snapshot-pin-check: logs in /home/runner/work/_temp/t4

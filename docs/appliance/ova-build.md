@@ -32,9 +32,14 @@ stale by import time; the sidecar downloads it on first start (see first-boot).
 ## Build host requirements
 
 * Linux, `qemu-img`, libguestfs (`virt-customize`, `virt-cat`, `virt-ls`),
-  `docker` with daemon access, `curl`, `tar`, `gzip`, `sha256sum`, `python3`.
-  Optional: `gpgv` + `/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg`
+  `docker` with daemon access, `curl`, `tar`, `gzip`, `xz`, `sha256sum`,
+  `python3`, `gpg` and `gpgv` (FB-1: the pinned package indexes are fetched
+  and verified on the build host, and Docker's index signature is checked
+  with `gpgv`). Network access to snapshot.ubuntu.com and
+  download.docker.com. Optional: `/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg`
   (present on Ubuntu hosts) for base-image signature verification.
+  `appliance/build/snapshot-pin-check.sh` (FB-1 T4) checks the snapshot
+  mechanism on a host with APT 2.8.x before a build.
 * The Docker daemon must use the **containerd image store**
   (`{"features":{"containerd-snapshotter":true}}`, the default on a fresh
   Docker 29 install). A classic store saves a re-created manifest without the
@@ -86,6 +91,9 @@ Outputs in `--out`:
   cosign result, host component versions (pinned Docker versions,
   `culvert-maint --version` taken from the image's deploy bundle), git commit
   + dirty flag, `SOURCE_DATE_EPOCH`, build timestamp, final OVA SHA256
+* `package-provenance.tsv` — every installed package reconciled against the
+  pinned snapshot / Docker indexes (FB-1); the build fails if any package
+  cannot be accounted for.
 * `dpkg-list.txt` and `host-components.txt` — the guest package inventory,
   captured inside the guest during the build (input for the SBOM evidence)
 * `prepare-guest.log` — the in-guest customization transcript, read back out
@@ -166,12 +174,27 @@ verifies on import.
   `.ova.sha256`/`build-info.json` from the release, not by rebuilding it.
 * The base image serial is pinned, so a newer Ubuntu cloud image is a manifest
   change, never a silent drift.
-* **Guest security updates are pinned too.** `prepare-guest.sh` step 1b runs
-  `apt-get upgrade` against the Ubuntu archive SNAPSHOT named by
-  `GUEST_APT_SNAPSHOT` in `manifest.env` (`apt -o Acquire::Snapshot`,
-  snapshot.ubuntu.com), so the base image's packages ship at a reviewed,
-  dated state instead of the serial's — same manifest, same versions — and
-  `build-upgrades.txt` next to the OVA lists what moved. The upgrade runs
+* **Guest security updates are pinned too (FB-1).** Every Ubuntu package
+  `prepare-guest.sh` installs or upgrades comes from the Ubuntu archive
+  SNAPSHOT named by `GUEST_APT_SNAPSHOT` in `manifest.env`
+  (snapshot.ubuntu.com, `apt-get --snapshot ID` through `apt-snapshot.sh`,
+  Ubuntu sources opted in with `Snapshot: yes`), so the base image's packages
+  ship at a reviewed, dated state instead of the serial's — same manifest,
+  same versions — and `build-upgrades.txt` next to the OVA lists what moved.
+  The ID alone proves nothing (APT serves a wrong or future ID as the
+  archive's current state), so `manifest.env` also pins the SHA-256 of each
+  suite's snapshot InRelease: the guest refuses an InRelease that differs,
+  and `build-ova.sh` fetches the same indexes on the build host, then
+  reconciles every installed package against them (Docker's four packages
+  against Docker's signed index at their pins) and refuses anything else.
+  `package-provenance.tsv` next to the OVA records each package's origin,
+  pockets, pool path and `.deb` SHA-256. **OVAs built before FB-1, including
+  325c142a, passed `-o Acquire::Snapshot`, which APT ignores: they were built
+  from the live archive of their build day** (57 of 325c142a's 680 versions
+  are not in its pinned snapshot; `evidence/combined/future-build/FB-1-APT-SNAPSHOT.md`).
+  Raising the snapshot is a reviewed change of five values: the ID and the
+  four InRelease hashes (fetch each `dists/<suite>/InRelease`, verify it with
+  `gpgv` against the Ubuntu archive keyring, record its SHA-256). The upgrade runs
   with `--with-new-pkgs`, so the kernel moves to the snapshot's newest ABI at
   build time (a plain `upgrade` kept it back: the 7e53720d OVA booted
   6.8.0-142 while its own snapshot carried 6.8.0-146); the superseded

@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Status** | **OPEN. Blocks the next release/candidate OVA build.** |
-| **Scope** | Specification only. No source, build or OVA change is authorized now (owner 6506229963). |
-| **This OVA** | 325c142a's identity, exact-byte scans and qualification evidence remain valid **for its bytes**. Its provenance is not rewritten. Its build was **not** snapshot-locked. |
+| **Status** | **Source/test closure on `review/1528-m1-engine-pins` (§6). Artifact closure OPEN:** T5 needs an actual replacement OVA. Until then FB-1 is not lifted. |
+| **Scope** | §1–§5 are the original specification (owner 6506229963), unchanged. §6 records the implementation the owner then authorized (fix + isolated verification + CI; no OVA build). |
+| **This OVA** | 325c142a's identity, exact-byte scans and qualification evidence remain valid **for its bytes**. Its provenance is not rewritten. Its build was **not** snapshot-locked: it was built from the live archive of its build day. The fix does not change that, and nothing here may be read as making 325c142a snapshot-reproducible. |
 
 ## 1. Defect
 
@@ -108,3 +108,32 @@ These are the snapshot `20261002T120000Z` InRelease files. Each was fetched and 
 Result: **57 failures**, and the 4 Docker packages at their manifest pins. That is the expected red case.
 
 A future pin bump may choose a newer snapshot. These values only illustrate the format.
+
+## 6. Implementation (source/test closure, 30 Oct 2026)
+
+Commit `d452d50dda9943bafaa4e03d3f77e542dd6d97dd` on `review/1528-m1-engine-pins` (PR #1528's frozen branch is unchanged).
+
+| §3 step | Where | What |
+|---|---|---|
+| 1 | `appliance/build/apt-snapshot.sh` (new; sourced by `prepare-guest.sh`) | `apt_snap` / `apt_snap_update` / `apt_cache_snap` put `--snapshot ID` on every call. All six old sites and the purges now use them. The kernel guard compares against the **snapshot** candidate. |
+| 1 (scope widened) | `prepare-guest.sh` §1 | The pinned update and InRelease check now run **before** the Docker install. So Docker's Ubuntu dependencies and `pigz`/`psmisc` also resolve from the snapshot; at 0648adeb they came from the live archive. The only raw APT calls left are the live update after the sources are restored, and `apt-get clean`. |
+| 2 | `apt_snap_sources_enable` / `_restore` | Every `ubuntu.sources` stanza gets exactly one `Snapshot: yes`; the original is restored after the section. Any other source is refused, and Docker's must declare `snapshot=no`. |
+| 3 | `manifest.env` + `apt_snap_require_pins` / `apt_snap_verify_inrelease` | The four §5 hashes are now pins. Build refusal cases: the ID is malformed or not earlier than the build start; an InRelease is missing; an InRelease differs from its pin. |
+| 4 | `apt_snap_update` | `--error-on=any`. APT 2.8.3 accepts it on `update` only; on `install` it is rc 100 "not understood", which is why there are two helpers. |
+| 5 | `build-ova.sh` §1b + §5, `reconcile-package-provenance.py` (new) | **Before the guest step, the build host fetches the indexes independently.** The chain is pin → InRelease → `Packages.xz` SHA-256 → `Packages`. Docker's InRelease is checked with `gpgv` against the fingerprint-pinned key. **After the guest step, every `dpkg-list.txt` row is reconciled.** A row passes only if it is either in the pinned snapshot, or one of the four Docker packages at its pin found in Docker's index. Anything else fails the build. The result is `package-provenance.tsv`. Package identity is the `.deb` SHA-256: the archive can list one file under two pool paths (`ocl-icd` 2.3.2-1build1 is in `pool/universe` in noble and `pool/main` in noble-updates). |
+| 6 | `build-upgrades.txt` header, build log | These now name the snapshot ID **and** the four verified InRelease hashes. There is no live-archive mode: a build without the pins is refused. |
+
+**Regression evidence**
+
+| Test | Result |
+|---|---|
+| T1/T2: `appliance_fb1_snapshot_provenance_test.go`, static | **Red on the pre-fix scripts:** 49 failures, including all six ignored-option sites. Green on the fix. |
+| Guest library behaviour (offline) | The checks refuse each of the following: a future ID, a malformed ID, a missing pin, a short pin, a changed InRelease, a missing InRelease, and a live list standing in for the snapshot one. The source checks refuse a stray `.list`, a stray `.sources`, and a Docker source without `snapshot=no`. The restore returns the original bytes, and the helper argv is exact. |
+| T3 (offline; real stanzas from snapshot 20261002T120000Z restricted to the inventory's names; the real 325c142a inventory, sha256 `675a0773…`) | (a) **refused on exactly the recorded 57** (the list is byte-identical to `provenance-nonsnapshot-57.tsv`). (b) Without the 57: 623 rows (619 snapshot + 4 Docker). Each of the following fails: (c) a Docker package off its pin, a pin absent from Docker's index, or a pinned package not installed; (d) an unknown package, a live-only version, or the wrong architecture; (e) a missing index, an emptied index, or a missing InRelease; (f) an InRelease off its pin. A tampered `Packages` under a valid InRelease, a tampered Docker index, and two different `.deb` hashes for one version also fail. |
+| T3(a) on the **full** real indexes (local, 30 Oct) | 57 refused, identical list. The 623 reconcile. All four Docker `.deb` hashes equal those M1 verified (`m1-engine-pins/`, `r6-r7-security-dispositions.md`). |
+| Mutation check | Ten mutations of the reconciler and library are each caught by at least one test. |
+| T4: `appliance/build/snapshot-pin-check.sh`, network, isolated APT roots, on a hosted runner (APT 2.8.3) | **All PASS**, lab run 41111194290 (`fb1-t4/`). E2, E5, E6 and E7 are reproduced against the fix. A future ID is refused by the guard and, with the guard bypassed, by the pin check. build-ova.sh's own fetch block stops on a wrong pin. On the fetched real indexes, 325c142a is refused on exactly the 57. |
+| T5: the next built OVA | **Pending:** it needs an owner-approved replacement build. |
+
+**Before the next build, raise the pin.** 44 of the 57 live-only versions are security-pocket updates. A build correctly pinned to `20261002T120000Z` would ship older versions than 325c142a. The readiness report §0-FB1 has the prerequisite list.
+

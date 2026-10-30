@@ -6,6 +6,55 @@
 
 This report separates **implemented**, **tested** (and how: unit gates, executed Docker qualification against real images, CI), **blocked** (exact prerequisite), and **unsupported** (deliberately out of the pilot). Nothing here claims production readiness; the product document deadline is not a deployment date.
 
+## 0-FB1. Status update (2026-10-30): FB-1 snapshot provenance fixed in source (artifact closure pending)
+
+This block supersedes nothing below it. It records **one owner-authorized change**: FB-1 implementation, isolated verification and CI (PR #1528, 30 Oct). No OVA was built, no guest was deployed, and ESXi was not touched.
+
+**Where.** The commit is `d452d50dda9943bafaa4e03d3f77e542dd6d97dd` on `review/1528-m1-engine-pins`, on top of candidate-line closure `020bc05a`. PR #1528's frozen branch (`4524311b`) is unchanged.
+
+**What changed.**
+- The guest build now actually resolves every Ubuntu package from snapshot `GUEST_APT_SNAPSHOT`:
+  - `--snapshot` is on every APT call, through `appliance/build/apt-snapshot.sh`;
+  - the Ubuntu sources carry `Snapshot: yes`;
+  - the update runs with `--error-on=any`;
+  - the four InRelease SHA-256 values are pinned in `manifest.env`.
+- **Scope is wider than the 0648adeb defect.** At 0648adeb the Docker install's Ubuntu dependencies and `pigz`/`psmisc` came from the live archive too. They now come from the snapshot.
+- After the guest step, `build-ova.sh` independently reconciles every installed package against the pinned indexes, plus Docker's signed index for the four pinned Docker packages. Anything else fails the build. The record is `package-provenance.tsv`.
+- Details and the step-by-step mapping: `evidence/combined/future-build/FB-1-APT-SNAPSHOT.md` §6.
+
+**Historical provenance is unchanged.** OVA `325c142a`, and every OVA before FB-1, was built from the **live archive** of its build day. It is not snapshot-reproducible: 57 of its 680 versions are not in its pinned snapshot. Its exact-byte inventory and scans remain its authoritative package record.
+
+**Regression evidence (source/test closure)**
+
+| Check | Result |
+|---|---|
+| T1/T2 static walls | Red on the 0648adeb scripts: 49 failures, including all six ignored-option sites. Green on `d452d50d`. |
+| T3: real 325c142a inventory vs real snapshot stanzas (offline, in the Go suite) | Refused on **exactly the recorded 57**. Without them, 623 rows reconcile (619 snapshot + 4 Docker). Every negative case (c)–(f) fails closed, as do tampered indexes and conflicting `.deb` hashes. |
+| T3(a) on the full real indexes | Same 57; the four Docker `.deb` hashes equal those M1 verified. |
+| Mutations | 10 of 10 caught. |
+| T4: network lane on a hosted runner, lab run [41111194290](https://github.com/KidCarmi/Culvert/actions/runs/41111194290) (APT 2.8.3) | All PASS: pinned update + pins; snapshot candidate (systemd 8.17 vs live 8.18); a future ID is refused by the guard and, with the guard bypassed, by the pin check (APT served the live noble-updates InRelease with rc 0); `Snapshot: yes` on Docker's repository gives rc 100; `--error-on=any` gives rc 100 where a plain update gives rc 0; build-ova.sh's own fetch block stops on a wrong pin; reconciliation on the fetched indexes refuses 325c142a on exactly the 57. Evidence: `evidence/combined/future-build/fb1-t4/`. |
+| T5: the replacement OVA's own reconciliation | **Pending**: it needs an actual replacement build. FB-1 stays open until T5 passes. |
+
+**Consequence for the next build: the snapshot pin must be raised first.**
+- Built correctly against the current pin `20261002T120000Z`, the replacement would ship **older** versions than 325c142a for all 57 live-only packages.
+- **44 of those 57 are security-pocket updates**: openssh, sudo, curl, systemd, libxml2, zlib1g, xz-utils, libnss3, git, bind9 and others.
+- So a correctly pinned build on the old pin is a security regression against the OVA it replaces.
+- The fix is a reviewed change of five values: a snapshot ID no earlier than 325c142a's build day, plus the four InRelease SHA-256 values. Each value is fetched twice, checked with `gpgv` against the Ubuntu archive key, then T4 is re-run with the new pins.
+- This is not done here: the pin is a reviewed input, not something a fix commit should choose.
+
+**Exact prerequisites for one replacement candidate build**
+1. Owner build authorization, with a new candidate identity.
+2. The snapshot pin raised as above (five reviewed values), with T4 re-run green on the new pins.
+3. ASTRA's review of FB-1 (source/test closure), and the required CI on this line's final SHA.
+4. A build from this candidate line's head. It carries the M1 engine pins, the Q7 console fix and FB-1. Build-host tools: `xz`, `gpg`, `gpgv`, plus network access to snapshot.ubuntu.com and download.docker.com. The lab runner has all of these (proven by T4).
+5. After the build:
+   - T5, the build's own `package-provenance.tsv`: 0 non-snapshot packages, InRelease hashes equal to the manifest;
+   - exact-byte OVA scans;
+   - ASTRA's impacted qualification;
+   - R6/R7 dispositions refreshed for the new package set.
+
+MERGE / PILOT / RELEASE remain **NO-GO**. Only the owner approves a GO.
+
 ## 0-Q7. Status update (2026-10-30): Q7 console fix integrated on the candidate line
 
 This block supersedes nothing below it. It records **one owner-approved integration** (PR #1528, 30 Oct). §0 and every historical section stay as written.
@@ -82,7 +131,7 @@ The results below apply to the **tested overlay candidate only**:
 
 **Remaining gates (unchanged by this integration):**
 - No OVA contains the fix. A replacement candidate build needs separate owner approval and gets a new identity, and its changed paths need ASTRA's impacted qualification (R4).
-- FB-1: the next build must be snapshot-pinned or explicitly labelled live-archive (`evidence/combined/future-build/FB-1-APT-SNAPSHOT.md`).
+- FB-1: the next build must be snapshot-pinned or explicitly labelled live-archive (`evidence/combined/future-build/FB-1-APT-SNAPSHOT.md`). *Update 30 Oct: fixed in source; see §0-FB1. Artifact closure (T5) is pending.*
 - R6/R7 security residuals and owner dispositions.
 - R9 release provenance (signed tag build, OVA signature).
 - ASTRA's independent review of the CI fixes, the 274 gitleaks fingerprints (including confirming that the `test_pixel_console.py` fixture was never a lab credential) and this provenance wording.

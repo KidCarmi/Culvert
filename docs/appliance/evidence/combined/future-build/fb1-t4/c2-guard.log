@@ -1,0 +1,1 @@
+apt-snapshot: GUEST_APT_SNAPSHOT=20991231T000000Z is not earlier than the build start (20261030T185732Z)

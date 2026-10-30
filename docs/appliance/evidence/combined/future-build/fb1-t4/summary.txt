@@ -1,0 +1,3 @@
+PASS wrong pin refused: [build] ERROR: snapshot 20261002T120000Z noble-security InRelease is 3b358f744efb789bab437ac77209ac20be2c8665197ce274f65c5f812bd4d519, manifest pins 0000000000000000000000000000000000000000000000000000000000000000
+PASS 325c142a refused on exactly the recorded 57 (real fetched indexes)
+PASS 623-package inventory reconciled:       4 docker     619 ubuntu-snapshot 

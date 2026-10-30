@@ -1,0 +1,2 @@
+E: Failed to fetch http://culvert-fb1-unreachable.invalid/ubuntu/dists/noble/InRelease  Could not resolve 'culvert-fb1-unreachable.invalid'
+E: Some index files failed to download. They have been ignored, or old ones used instead.
