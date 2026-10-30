@@ -1,15 +1,20 @@
-# console-overlay.yml — LAB ONLY (branch test/appliance-lab). Builds the
-# culvert-console overlay for the Q7 fix candidate on PR #1528.
+# console-overlay.yml — LAB ONLY (branch test/appliance-lab). Builds and
+# compares the culvert-console for the Q7 fix on PR #1528's candidate line.
 #
 # It runs the OVA builder's own function (appliance/build/console-bundle.sh
-# build_console_bundle) twice, from two source commits, on one runner:
-#   1. the OVA 325c142a source commit 0648adeb, which must reproduce the shipped
-#      console byte for byte (c4a24736…). That proves this recipe and toolchain
-#      are the ones the OVA used, so the overlay differs only by its source;
-#   2. the fix commit, whose bundle is uploaded with its sha256 and build info.
-# It also runs the console test suite on the fix commit. No OVA is built,
-# nothing is published, nothing is signed; the artifact is an internal lab
-# overlay only. Runs only on a push whose message carries [console-overlay].
+# build_console_bundle) from three source commits on one runner, with the
+# go.mod toolchain and shallow tag-free checkouts (the OVA build's shape):
+#   1. base 0648adeb (OVA 325c142a source) must reproduce the shipped console
+#      byte for byte (c4a24736…): proves this recipe/toolchain is the OVA's;
+#   2. fix c88c0e76 must reproduce ASTRA's tested overlay (8b141120…);
+#   3. the integrated head (fix cherry-picked onto the candidate line) is
+#      recorded. Its source tree must equal the fix tree outside docs/, and
+#      with the VCS stamp removed (-buildvcs=false, otherwise identical flags)
+#      its console must equal the fix console byte for byte — the only
+#      difference left in the stamped binaries is the commit stamp itself.
+# The console suite runs on the integrated head. No OVA is built, nothing is
+# published or signed. Runs only on a push whose message carries
+# [console-overlay].
 name: Console Overlay (lab)
 
 on:
@@ -32,6 +37,8 @@ jobs:
       BASE_COMMIT: 0648adeba52e09f15505095ba1ff556304b9fcef
       BASE_CONSOLE_SHA256: c4a24736bcada3b270e6368a43cdd0eeaf213b3549e53b6d5b7518f7896a3b69
       FIX_COMMIT: c88c0e76ff89a68646679a47fd3c7dca9dc9267f
+      FIX_CONSOLE_SHA256: 8b141120f7b5adb47e98580dc1527551ba513473374de493c896e40d698e49a2
+      INTEG_COMMIT: b241b4697bdceb06dbffa87677769d1eb1590e1c
     steps:
       - name: Checkout base source (OVA 325c142a)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,57 +46,79 @@ jobs:
           ref: ${{ env.BASE_COMMIT }}
           path: base-src
           persist-credentials: false
-      - name: Checkout fix source
+      - name: Checkout fix source (tested overlay)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.FIX_COMMIT }}
           path: fix-src
           persist-credentials: false
-      - name: Same go.mod toolchain line in both sources
+      - name: Checkout integrated head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.INTEG_COMMIT }}
+          path: integ-src
+          persist-credentials: false
+      - name: Integrated tree equals the fix tree outside docs/
         run: |
           set -euo pipefail
-          a=$(awk '$1=="toolchain"{print $2}' base-src/go.mod)
-          b=$(awk '$1=="toolchain"{print $2}' fix-src/go.mod)
-          echo "base=$a fix=$b"
-          [[ -n $a && $a == "$b" ]]
-          cmp base-src/go.sum fix-src/go.sum
-          cmp base-src/appliance/build/console-bundle.sh fix-src/appliance/build/console-bundle.sh
+          diff -r --exclude=.git --exclude=docs fix-src integ-src | tee integ-tree-diff.txt
+          echo "integrated tree == fix tree outside docs/"
+          for d in base-src integ-src; do
+            [[ $(awk '$1=="toolchain"{print $2}' $d/go.mod) == $(awk '$1=="toolchain"{print $2}' fix-src/go.mod) ]]
+          done
       - name: Go toolchain pinned by the appliance source
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: fix-src/go.mod
+          go-version-file: integ-src/go.mod
           cache: false
-      - name: Build both bundles with the OVA builder's function
+      - name: Build all bundles with the OVA builder's function
         run: |
           set -euo pipefail
+          mkdir -p out
+          mv integ-tree-diff.txt out/
           # shellcheck source=/dev/null
-          source fix-src/appliance/build/console-bundle.sh
-          build_console_bundle base-src out/base/console
-          build_console_bundle fix-src out/fix/console
+          source integ-src/appliance/build/console-bundle.sh
+          for v in base fix integ; do build_console_bundle $v-src out/$v/console; done
+          # Same flags as build_console_bundle, VCS stamp removed.
+          for v in fix integ; do
+            ( cd $v-src && GOENV=off GOWORK=off GOFLAGS= GO111MODULE=on GOEXPERIMENT= \
+                CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOAMD64=v1 \
+                go build -mod=readonly -buildmode=exe -trimpath -buildvcs=false \
+                -o ../out/novcs-$v-culvert-console ./cmd/culvert-console )
+          done
           {
-            echo "# console overlay build record"
+            echo "# console build record"
             echo "runner_go=$(go env GOVERSION)"
-            for v in base fix; do
+            for v in base fix integ; do
               echo "## $v"
               sha256sum out/$v/console/*
               go version -m out/$v/console/culvert-console
             done
+            echo "## -buildvcs=false"
+            sha256sum out/novcs-*-culvert-console
           } | tee out/build-record.txt
-      - name: Base reproduces the shipped console exactly
-        id: repro
+      - name: Reproduce shipped and tested consoles; prove integrated equivalence
         run: |
           set -euo pipefail
-          got=$(sha256sum out/base/console/culvert-console | cut -d' ' -f1)
-          echo "base console: $got (shipped $BASE_CONSOLE_SHA256)" | tee -a out/build-record.txt
-          [[ $got == "$BASE_CONSOLE_SHA256" ]]
-      - name: Console test suite on the fix commit
-        working-directory: fix-src
-        run: GOFLAGS= go test -race -count=1 ./cmd/culvert-console 2>&1 | tee ../out/fix-console-tests.txt
-      - name: Upload overlay
+          h() { sha256sum "$1" | cut -d' ' -f1; }
+          {
+            echo "base  $(h out/base/console/culvert-console) expect $BASE_CONSOLE_SHA256"
+            echo "fix   $(h out/fix/console/culvert-console) expect $FIX_CONSOLE_SHA256"
+            echo "integ $(h out/integ/console/culvert-console)"
+            echo "novcs fix $(h out/novcs-fix-culvert-console) integ $(h out/novcs-integ-culvert-console)"
+          } | tee -a out/build-record.txt
+          [[ $(h out/base/console/culvert-console) == "$BASE_CONSOLE_SHA256" ]]
+          [[ $(h out/fix/console/culvert-console) == "$FIX_CONSOLE_SHA256" ]]
+          cmp out/novcs-fix-culvert-console out/novcs-integ-culvert-console
+          echo "integrated console == tested console with the VCS stamp removed" | tee -a out/build-record.txt
+      - name: Console test suite on the integrated head
+        working-directory: integ-src
+        run: GOFLAGS= go test -race -count=1 ./cmd/culvert-console 2>&1 | tee ../out/integ-console-tests.txt
+      - name: Upload
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: console-overlay-c88c0e76
+          name: console-integration-b241b469
           path: out/
           retention-days: 30
           if-no-files-found: error
