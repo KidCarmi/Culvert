@@ -1239,10 +1239,35 @@ func (c *Config) AuthEnabled() bool {
 // no wired provider) would flip setup back to "incomplete" — which the admin
 // middleware treats as unauthenticated RoleAdmin for everyone. Retirement is
 // a deliberate, durable operator state, so it counts as configured.
+//
+// The len(c.uiUsers) term (SEC-SETUPANCHOR-1) is the same class of fix for the
+// same failure, reached through the ROLE of the roster's accounts rather than
+// the kind of the backend. `c.user` is set by loadUIUsersFile only from a
+// record whose EFFECTIVE role is admin, so a roster that holds accounts but no
+// present admin left every other term false and reopened the first-run window
+// — unauthenticated RoleAdmin for everyone, on an appliance that demonstrably
+// HAD been set up. loadedRosterRole's least-privilege clamp reaches that state
+// by design: restoring a backup from a build that enrolls a role this one does
+// not clamps the only admin to RoleViewer, so a control written to fail CLOSED
+// against role-based escalation handed the whole admin plane to anonymous
+// callers. A legacy pre-RBAC roster (empty role, never equal to RoleAdmin) is
+// the same state by a second route.
+//
+// Any ADMITTED account is therefore a setup anchor, independent of its role.
+// Setup created the roster; a roster with no usable admin is a LOCKOUT to be
+// repaired with the --reset-password break-glass (which the
+// admin_roster_durability row exists to name), never a reason to grant
+// authority to callers who hold none. The term only ever makes this predicate
+// MORE true, so it can only CLOSE the window — and it leaves the first-run and
+// rollback paths alone, because both carry an empty roster: a quarantined
+// corrupt roster (CHAOS-05) still loads none, and SetAuthDurably's rollback
+// restores "no accounts, empty legacy pair" (see its comment), so the wizard
+// stays retryable. Mirrored on the durable side by rosterBytesConfigure.
 func (c *Config) IsConfigured() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.user != "" || c.provider != nil || c.defaultAuthOutcome == OutcomeExempt || legacyLDAPRetired()
+	return c.user != "" || len(c.uiUsers) > 0 || c.provider != nil ||
+		c.defaultAuthOutcome == OutcomeExempt || legacyLDAPRetired()
 }
 
 // DefaultAuthOutcome returns the authoritative global Stage-1 default applied on
