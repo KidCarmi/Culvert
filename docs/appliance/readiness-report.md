@@ -20,11 +20,14 @@ This block supersedes nothing below it. It records **one owner-approved integrat
 
 PR #1528's own head (`feat/onprem-appliance-readiness`, frozen `4524311b`) is **unchanged**. That was an owner choice: the candidate line, not the frozen head.
 
-**Defect closed (in source, not in any OVA).**
-- At shutdown, the console cancelled a recovery shell that held the terminal foreground. The shell was then killed without handing the foreground back.
-- The console's terminal restore then ran from the background, and SIGTTOU stopped the console.
-- The stopped console could not run its 5 s watchdog, so systemd waited its full 90 s session timeout.
+**Reproduced defect, fixed in source (not in any OVA).**
+- The failed Q7 run spent 90.097 s waiting for console PID 3241 to stop, and systemd then killed it.
+- ASTRA reproduced the defect independently with the unchanged shipped console:
+  - the recovery shell held the terminal foreground and was killed without handing it back;
+  - the console's terminal restore then ran from the background;
+  - SIGTTOU stopped the console, so its 5 s watchdog could not run.
 - The fix blocks SIGTTOU in the restoring thread only, takes the foreground back, then restores. Regression: `TestRealPTYCancelledForegroundChildDoesNotStopConsole` fails on the old restore (`state T`) and passes on the fix.
+- **The reproduced SIGTTOU defect is consistent with the 90.097 s wait. It is not proof of what stopped historical PID 3241: that signal was not captured and remains unproven.**
 
 **ESXi results and their exact scope.**
 
@@ -53,7 +56,10 @@ The results below apply to the **tested overlay candidate only**:
 | `e77fcaac` (head) | `62d935b6562fe5d16cb87f9a75a175dbebad7c0e01e3500d7f92d25d5dfee59d` | `6a6da862…` (identical) |
 
 - The stamped hashes differ **only** by the embedded commit stamp (`vcs.revision`, `vcs.time` and the derived module pseudo-version).
-- With the stamp removed, every build since `c88c0e76` is byte-identical. So the integrated console is the binary ASTRA tested.
+- With the stamp removed, the builds of `c88c0e76`, `b241b469` and `e77fcaac` are byte-identical in the same build environment.
+- **What that establishes:** the integrated source is equivalent to the tested source, through same-environment unstamped rebuilds.
+- **What it does not establish:** an integrated-head build is **not** the exact stamped binary `8b141120…` deployed and qualified on ESXi. Its own stamped hash differs (`62d935b6…` for `e77fcaac`).
+- ESXi credit stays with `original-325c-postmaintenance-k42-console-8b141120`. A future OVA built from this line carries its own stamped console and needs its own identity.
 - Evidence: lab run [41040999583](https://github.com/KidCarmi/Culvert/actions/runs/41040999583), artifact `console-integration-b241b469`. It reproduces `c4a24736` and `8b141120`, shows the `b241b469` stamped and stamp-free hashes, and confirms the integrated tree is unchanged outside `docs/`.
 - The `e77fcaac` rows were rebuilt locally from a shallow tag-free clone. The same procedure reproduced `8b141120` from `c88c0e76`.
 - A clone with git tags gives a different stamped hash, because Go derives the module version from tags. It does not change the stamp-free hash.

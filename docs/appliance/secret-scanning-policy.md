@@ -67,8 +67,11 @@ commit `42ba4f38`). It is a synthetic fixture beside sibling values such as
 `OTHER_SECRET=must-never-appear`, used to prove the reveal path redacts it. A PR
 scan never reached it because each PR run covers only that push's commit range.
 
-`.gitleaksignore` records only these 25 complete
-`commit:path:rule:line` fingerprints. It suppresses neither whole historical
+`.gitleaksignore` records only complete `commit:path:rule:line`
+fingerprints: these 25, plus the 274 classified on 2026-10-30
+(`evidence/combined/gitleaks-history-20261030.md`: public commit SHAs,
+module checksums and file digests in archived evidence, and synthetic test
+fixtures across all fetched refs; none is a credential). It suppresses neither whole historical
 commits nor future findings in those files. The policy regression rejects
 non-fingerprint entries. Additional historical findings remain subject to review;
 this list does not claim that every other local or remote Git ref was audited.
