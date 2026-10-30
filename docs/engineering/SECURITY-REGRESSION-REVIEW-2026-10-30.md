@@ -431,7 +431,11 @@ Toolchain from [go.mod](../../go.mod) (`toolchain go1.27.3`), taken from the
 | Roster wall, widened list, before any other change | full wall suite | **0 new findings** |
 | Root suite | `go test -count=1 -timeout=40m .` | **pass** (601 s) |
 | Guidance checker | `python3 docs/agent-context/check.py` | pass (exit 0) |
-| Gate lint (blocking form) | `golangci-lint run --timeout=10m --new-from-rev origin/main`, linter **v2.15.0 built with go1.27.3** — installed per the pinned gate, not the container's `PATH` copy | **started, had not reported when this was written** — the hosted Fast PR Gate is the measurement that counts |
+| Gate lint (blocking form) | `golangci-lint run --timeout=10m --new-from-rev origin/main`, linter **v2.15.0 built with go1.27.3** — installed per the pinned gate, not the container's `PATH` copy | **0 issues** (exit 0) on the second run; the first reported one `gocritic unnamedResult` on the new gate file's `proxyAnswer`, fixed by naming its results |
+
+The pinned linter was built with the `go.mod` toolchain rather than taken from
+the container's `PATH`, which the conventions record as the step whose omission
+has repeatedly been logged as "local lint is unavailable".
 
 **Not run, and why.** `benchgate`, the chaos-tagged suites, a full-tree lint
 differential against the base, and the hosted QA/CodeQL gates. Nothing
