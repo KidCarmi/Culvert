@@ -1,0 +1,105 @@
+# snapshot-pin-check.yml — LAB ONLY (branch test/appliance-lab). FB-1 T4: the
+# network regression lane for the snapshot-pinned guest build on PR #1528's
+# candidate line, run on a clean hosted runner (APT 2.8.x, like the guest).
+#
+#   1. appliance/build/snapshot-pin-check.sh: isolated APT roots, the SAME
+#      library (apt-snapshot.sh) and manifest pins prepare-guest.sh uses:
+#      C1 pinned update + InRelease pins + snapshot candidate, C2 future ID,
+#      C3 Snapshot: yes on an unsupported source, C4 --error-on=any.
+#   2. build-ova.sh's own index-fetch block (extracted verbatim, run alone):
+#      the real indexes are fetched and verified against the pins, then the
+#      reconciler runs on the real OVA 325c142a inventory (must fail on
+#      exactly the recorded 57) and on that inventory without the 57 (must
+#      pass); a wrong pin must stop the block.
+# No OVA is built, nothing is published or signed. Runs only on a push whose
+# message carries [snapshot-pin-check].
+name: Snapshot Pin Check (lab)
+
+on:
+  push:
+    branches: [test/appliance-lab]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snapshot-pin-check-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  t4:
+    if: ${{ contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      FB1_COMMIT: d452d50dda9943bafaa4e03d3f77e542dd6d97dd
+    steps:
+      - name: Checkout the FB-1 implementation commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.FB1_COMMIT }}
+          path: src
+          persist-credentials: false
+
+      - name: Runner identity
+        run: |
+          mkdir -p ev
+          { echo "commit=$(git -C src rev-parse HEAD)"; apt-get --version | head -1; . /etc/os-release; echo "runner_os=$PRETTY_NAME"
+            date -u +%FT%TZ; } | tee ev/identity.txt
+          test "$(git -C src rev-parse HEAD)" = "$FB1_COMMIT"
+
+      - name: T4 — snapshot-pin-check.sh (isolated APT roots)
+        run: |
+          set -o pipefail
+          bash src/appliance/build/snapshot-pin-check.sh "$RUNNER_TEMP/t4" 2>&1 | tee ev/t4-snapshot-pin-check.txt
+          cp "$RUNNER_TEMP"/t4/*.log ev/ 2>/dev/null || true
+
+      - name: build-ova.sh index fetch + reconciliation on real indexes
+        run: |
+          set -euo pipefail
+          B=src/appliance/build
+          awk '/^# ── 1b. Pinned package indexes/{p=1} /^# ── 2\. /{p=0} p' "$B/build-ova.sh" > fetch-block.sh
+          sha256sum fetch-block.sh "$B/build-ova.sh" | tee ev/fetch-block.sha256
+          # Negative: a wrong pin stops the block (and the build) before the guest step.
+          if (set -a; . "$B/manifest.env"; set +a; GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY=$(printf '0%.0s' $(seq 64)) \
+                bash -c 'set -euo pipefail; log(){ :; }; die(){ echo "[build] ERROR: $*" >&2; exit 1; }; WORK="$1"; . "$2"' x "$RUNNER_TEMP/neg" "$PWD/fetch-block.sh") \
+                > ev/fetch-wrong-pin.txt 2>&1; then
+            echo "FAIL: a wrong InRelease pin did not stop the index fetch"; exit 1
+          fi
+          grep -q 'noble-security InRelease is .*manifest pins 0000' ev/fetch-wrong-pin.txt
+          echo "PASS wrong pin refused: $(tail -1 ev/fetch-wrong-pin.txt)" | tee -a ev/summary.txt
+          # Positive: the real fetch with the manifest pins.
+          (set -a; . "$B/manifest.env"; set +a
+           bash -c 'set -euo pipefail; log(){ echo "[build] $*"; }; die(){ echo "[build] ERROR: $*" >&2; exit 1; }; WORK="$1"; . "$2"' x "$RUNNER_TEMP/w" "$PWD/fetch-block.sh") 2>&1 | tee ev/fetch.txt
+          P="$RUNNER_TEMP/w/provenance"
+          (cd "$P" && sha256sum snapshot/*.InRelease docker/InRelease) | tee ev/fetched-inrelease.sha256
+          set -a; . "$B/manifest.env"; set +a
+          rec() { python3 -I "$B/reconcile-package-provenance.py" --dpkg-list "$1" --snapshot-dir "$P/snapshot" --snapshot-id "$GUEST_APT_SNAPSHOT" \
+            --pin "noble=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE" --pin "noble-updates=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES" \
+            --pin "noble-security=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY" --pin "noble-backports=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS" \
+            --docker-dir "$P/docker" --docker-uri "$DOCKER_APT_URL" \
+            --docker-pin "docker-ce=$DOCKER_CE_VERSION" --docker-pin "docker-ce-cli=$DOCKER_CE_CLI_VERSION" \
+            --docker-pin "containerd.io=$CONTAINERD_IO_VERSION" --docker-pin "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_VERSION" --out "$2"; }
+          INV="$B/testdata/provenance/inventory-325c142a.tsv"
+          echo "675a0773a0422e56e648ca5d90177d6d99056fbcb01ee1aeb0991af2f1b70aff  $INV" | sha256sum -c -
+          # Red: OVA 325c142a as shipped.
+          if rec "$INV" ev/325c142a-provenance.tsv > ev/reconcile-325c142a.txt 2>&1; then echo "FAIL: 325c142a reconciled clean"; exit 1; fi
+          grep -P '^  package\t' ev/reconcile-325c142a.txt | awk -F'\t' '{split($3,a," "); print $2"\t"a[1]}' | sort > ev/got-57.tsv
+          grep -v '^#' src/docs/appliance/evidence/combined/esxi-325c142a/kernel-42/provenance-nonsnapshot-57.tsv | tail -n +2 | cut -f1,2 | sort > ev/want-57.tsv
+          diff ev/want-57.tsv ev/got-57.tsv
+          test "$(grep -c . ev/got-57.tsv)" = 57
+          test "$(grep -c '^  ' ev/reconcile-325c142a.txt)" = 57
+          echo "PASS 325c142a refused on exactly the recorded 57 (real fetched indexes)" | tee -a ev/summary.txt
+          # Green: the same inventory without the 57.
+          awk -F'\t' 'NR==FNR{b[$1"\t"$2]=1;next} !(($1"\t"$2) in b)' ev/want-57.tsv "$INV" > inv-623.tsv
+          rec inv-623.tsv ev/package-provenance-623.tsv | tee ev/reconcile-623.txt
+          test "$(awk -F'\t' '!/^#/ && $1 != "package"' ev/package-provenance-623.tsv | wc -l)" = 623
+          echo "PASS 623-package inventory reconciled: $(awk -F'\t' 'NR>4{print $4}' ev/package-provenance-623.tsv | sort | uniq -c | tr '\n' ' ')" | tee -a ev/summary.txt
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fb1-snapshot-pin-check-${{ env.FB1_COMMIT }}
+          path: ev/
+          retention-days: 30
