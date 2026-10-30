@@ -1,0 +1,478 @@
+{
+  "baseline_sha": "3fcc07e7ab5d1e3bd4d19e6cadc8bb63b682f3af",
+  "baseline_tree": "b4158d816f7a9bf5fc51a467578c8dc4ff5e4201",
+  "date": "2026-10-01",
+  "go": "go version go1.26.8 linux/amd64",
+  "cpu": "AMD EPYC 9V74 80-Core Processor; 5 visible logical CPUs",
+  "GOMAXPROCS": "4",
+  "GOFLAGS": "-mod=readonly -p=4",
+  "cache_contract": "Warm module cache throughout; warm compiler cache except root-cold-build, whose GOCACHE directory was newly created; result caching disabled with count=1 (race count=3). No competing measurement jobs launched.",
+  "focused_selector": "^(TestHostCatScratch_ResolvesFusionOnce|TestHostCatScratch_BoundToItsHost|TestEvaluate_CategoryGroupScanSharesOneResolution|TestPolicyPrecompute_CIDRMatch|TestPolicyPrecompute_InvalidCIDRFailsClosed|TestPolicyPrecompute_ExactIPStillMatches|TestPolicyPrecompute_MatchedConditions|TestPolicyPrecompute_MatchSourceFallback|TestScheduleLocation_CachesAndFallsBack|TestPolicyPrecompute_ScheduleTimezone|TestPolicyStore_EvaluateConcurrentMutationNoRace|TestPolicyStore_EvaluateConcurrentAllPublicationMutatorsNoRace|TestPolicyStore_PublicationPreservesRuleIdentityAndHits|TestPolicyStore_PublicationPreservesFirstMatchReorder|TestPolicyStore_ReplaceAllStillResetsHitAccounting|TestPolicyStore_ListCannotMutatePublishedDefinition|TestPolicyStore_ListClonesAuthNestedData|TestPolicyStore_PolicyMatchCannotMutatePublishedDefinition|TestPolicyStore_PolicyMatchMaterializesLiveAccounting|TestRestoreHitCountsConcurrentEvaluateNoRace|TestRestoreHitCountsPreservesLiveHitAndNewerLastHit|TestPolicyStoreListDoesNotExposeCounterCell|TestPolicyStore_UpdatePreservesStableID|TestBackfillIDsConcurrentEvaluateNoRace|TestParseClockMinutes|TestScheduleTimeMatch_OrderEquivalence|TestScheduleTimeMatch_MalformedBoundsKeepLegacyBehavior|TestMatchScheduleAt_SharedInstant|TestEvaluate_ScheduledRuleDeniedByWindow|TestSrcPrefix_DifferentialAgainstLegacyMatcher|TestSrcPrefix_DifferentialRandomized|TestSrcPrefix_PrecomputeAgreesWithIPNet|TestSrcPrefix_ClearedOnPublicationCopy|TestSrcPrefix_NotContentForDraftComparison|TestSrcPrefix_ConcurrentEvaluateAndReplace|TestPolicyTester_SkipsDisabledRule|TestPolicyTester_RunningRulebase|TestPolicyTester_DraftRulebase)$",
+  "measurements": [
+    {
+      "label": "root-warmup-build",
+      "wall_seconds": 30.922561737999786,
+      "exit": 0
+    },
+    {
+      "label": "focused-command-0",
+      "wall_seconds": 2.5142590909999853,
+      "exit": 0
+    },
+    {
+      "label": "root-warm-build-0",
+      "wall_seconds": 0.5399140329991496,
+      "exit": 0
+    },
+    {
+      "label": "focused-prebuilt-0",
+      "wall_seconds": 0.29928259100051946,
+      "exit": 0
+    },
+    {
+      "label": "focused-command-1",
+      "wall_seconds": 2.3189950520009006,
+      "exit": 0
+    },
+    {
+      "label": "root-warm-build-1",
+      "wall_seconds": 0.523678404999373,
+      "exit": 0
+    },
+    {
+      "label": "focused-prebuilt-1",
+      "wall_seconds": 0.2834294519998366,
+      "exit": 0
+    },
+    {
+      "label": "focused-command-2",
+      "wall_seconds": 2.0488554229996225,
+      "exit": 0
+    },
+    {
+      "label": "root-warm-build-2",
+      "wall_seconds": 0.4658789830009482,
+      "exit": 0
+    },
+    {
+      "label": "focused-prebuilt-2",
+      "wall_seconds": 0.24854896000033477,
+      "exit": 0
+    },
+    {
+      "label": "focused-race-shuffle",
+      "wall_seconds": 50.793233005999355,
+      "exit": 0
+    },
+    {
+      "label": "policy-bench",
+      "wall_seconds": 6.205166763000307,
+      "exit": 0
+    },
+    {
+      "label": "root-cold-build",
+      "wall_seconds": 58.273365143000774,
+      "exit": 0
+    }
+  ],
+  "benchmark_command": "root.test -test.run=^$ -test.bench=^BenchmarkPolicyEvaluate_(NoMatch|MatchLast|CIDRRules|ScheduledRules)$ -test.benchtime=100ms -test.count=3 -test.benchmem",
+  "benchmarks": [
+    {
+      "name": "BenchmarkPolicyEvaluate_NoMatch/rules=10-4",
+      "samples": [
+        {
+          "ns_per_op": 153.3,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 156.2,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 155.6,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_NoMatch/rules=100-4",
+      "samples": [
+        {
+          "ns_per_op": 1260.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 1246.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 1250.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_NoMatch/rules=1000-4",
+      "samples": [
+        {
+          "ns_per_op": 12974.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 13486.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 13283.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_NoMatch/rules=10000-4",
+      "samples": [
+        {
+          "ns_per_op": 157346.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 146162.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 155592.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_MatchLast/rules=11-4",
+      "samples": [
+        {
+          "ns_per_op": 411.5,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        },
+        {
+          "ns_per_op": 404.7,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        },
+        {
+          "ns_per_op": 418.5,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_MatchLast/rules=101-4",
+      "samples": [
+        {
+          "ns_per_op": 1542.0,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        },
+        {
+          "ns_per_op": 1581.0,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        },
+        {
+          "ns_per_op": 1630.0,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_MatchLast/rules=1001-4",
+      "samples": [
+        {
+          "ns_per_op": 13535.0,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        },
+        {
+          "ns_per_op": 13050.0,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        },
+        {
+          "ns_per_op": 12702.0,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_MatchLast/rules=10001-4",
+      "samples": [
+        {
+          "ns_per_op": 157914.0,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        },
+        {
+          "ns_per_op": 146765.0,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        },
+        {
+          "ns_per_op": 151743.0,
+          "bytes_per_op": 641,
+          "allocs_per_op": 2
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_CIDRRules/rules=10-4",
+      "samples": [
+        {
+          "ns_per_op": 234.4,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 238.7,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 264.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_CIDRRules/rules=100-4",
+      "samples": [
+        {
+          "ns_per_op": 2039.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 1929.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 1858.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_CIDRRules/rules=1000-4",
+      "samples": [
+        {
+          "ns_per_op": 20443.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 17396.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 18412.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_ScheduledRules/rules=10-4",
+      "samples": [
+        {
+          "ns_per_op": 546.8,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 552.9,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 521.3,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_ScheduledRules/rules=100-4",
+      "samples": [
+        {
+          "ns_per_op": 4462.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 4470.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 4536.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ]
+    },
+    {
+      "name": "BenchmarkPolicyEvaluate_ScheduledRules/rules=1000-4",
+      "samples": [
+        {
+          "ns_per_op": 48887.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 48744.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        },
+        {
+          "ns_per_op": 44789.0,
+          "bytes_per_op": 0,
+          "allocs_per_op": 0
+        }
+      ]
+    }
+  ],
+  "ci": {
+    "fast": {
+      "run": {
+        "workflow": "Fast PR Gate",
+        "workflowPath": ".github/workflows/pr-fast-gate.yml",
+        "event": "pull_request",
+        "runId": 36839090899,
+        "attempt": 1,
+        "rerun": false,
+        "headSha": "6a83a2bfbbf52e78354b0cfbe2f8ee1406b8bd3d",
+        "headBranch": "codex/repair-frontend-audit",
+        "testedSha": "",
+        "displayTitle": "refactor: extract admission engine and refresh vulnerable frontend locks",
+        "status": "completed",
+        "conclusion": "success",
+        "createdAt": "2026-10-01T08:52:43Z",
+        "attemptCreatedAt": "2026-10-01T08:52:43Z",
+        "startedAt": "2026-10-01T08:52:43Z"
+      },
+      "timing": {
+        "elapsedToAggregateSeconds": 854,
+        "elapsedToRaceVerdictSeconds": 814,
+        "wallSpanSeconds": 854,
+        "busySeconds": 723,
+        "runnerMinutes": 67.4,
+        "runnerMinutesNote": "sum of this attempt's job durations (parallel jobs counted in full); not wall time and not billing",
+        "attemptQueueSeconds": 121,
+        "jobQueue": {
+          "jobs": 21,
+          "sumSeconds": 103,
+          "medianSeconds": 3,
+          "maxSeconds": 38
+        },
+        "jobSetup": {
+          "jobs": 21,
+          "sumSeconds": 272,
+          "medianSeconds": 15,
+          "maxSeconds": 23
+        },
+        "jobWork": {
+          "jobs": 21,
+          "sumSeconds": 3706,
+          "medianSeconds": 118,
+          "maxSeconds": 491
+        }
+      },
+      "unknowns": [
+        "the race ran but its verdict.json was not readable: completeness is unknown",
+        "runner image read from 0 of 21 measured jobs' logs: this run's cohort is unverified",
+        "shard metadata read for shards [], GitHub scheduled shards [0 1 2 3]: an unread shard may have run another toolchain",
+        "toolchain not observed (no shard meta.json read): this run's cohort is unverified",
+        "Offline metadata analysis using unchanged cmd/cireport Analyze; artifact and log retrieval deliberately omitted because the environment proxy denies storage access."
+      ]
+    },
+    "deep": {
+      "run": {
+        "workflow": "Deep PR Gate",
+        "workflowPath": ".github/workflows/pr-deep-gate.yml",
+        "event": "pull_request",
+        "runId": 36839090820,
+        "attempt": 1,
+        "rerun": false,
+        "headSha": "6a83a2bfbbf52e78354b0cfbe2f8ee1406b8bd3d",
+        "headBranch": "codex/repair-frontend-audit",
+        "testedSha": "",
+        "displayTitle": "refactor: extract admission engine and refresh vulnerable frontend locks",
+        "status": "completed",
+        "conclusion": "success",
+        "createdAt": "2026-10-01T08:52:43Z",
+        "attemptCreatedAt": "2026-10-01T08:52:43Z",
+        "startedAt": "2026-10-01T08:52:43Z"
+      },
+      "timing": {
+        "elapsedToAggregateSeconds": 828,
+        "elapsedToRaceVerdictSeconds": null,
+        "wallSpanSeconds": 828,
+        "busySeconds": 759,
+        "runnerMinutes": 19.1,
+        "runnerMinutesNote": "sum of this attempt's job durations (parallel jobs counted in full); not wall time and not billing",
+        "attemptQueueSeconds": 63,
+        "jobQueue": {
+          "jobs": 11,
+          "sumSeconds": 31,
+          "medianSeconds": 3,
+          "maxSeconds": 3
+        },
+        "jobSetup": {
+          "jobs": 11,
+          "sumSeconds": 86,
+          "medianSeconds": 8,
+          "maxSeconds": 16
+        },
+        "jobWork": {
+          "jobs": 11,
+          "sumSeconds": 1014,
+          "medianSeconds": 17,
+          "maxSeconds": 732
+        }
+      },
+      "unknowns": [
+        "runner image read from 0 of 11 measured jobs' logs: this run's cohort is unverified",
+        "Offline metadata analysis using unchanged cmd/cireport Analyze; artifact and log retrieval deliberately omitted because the environment proxy denies storage access."
+      ]
+    },
+    "limitations": "Metadata-only analysis using unchanged cmd/cireport.Analyze; logs/artifacts unavailable through environment proxy, so runner-image/cache cohorts and race artifact timings are unobserved. Fast/Deep totals exclude other workflows and author/review time."
+  },
+  "validation": {
+    "focused_tests": 38,
+    "race_repeats": 3,
+    "race_result": "pass",
+    "tagged_gates": {
+      "stage2_category": 7,
+      "shared_auth": 2,
+      "result": "pass"
+    },
+    "documentation": "ADR numbering and heading tests, relative links, inventory names/tags and exact selector: pass"
+  }
+}
