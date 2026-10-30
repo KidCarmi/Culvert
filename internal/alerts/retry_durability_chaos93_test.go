@@ -249,21 +249,34 @@ func TestProcessRetryQueue_PassIsBoundedByBudget(t *testing.T) {
 	// has worked through all twelve.
 	spend := retryPassBudget / 5
 	var attempts int
+	var started []time.Time
 	retryDeliver = func(_ context.Context, _ *Store, _ Webhook, _ retryEntry) bool {
 		attempts++
+		started = append(started, time.Now())
 		time.Sleep(spend)
 		return false
 	}
 
 	start := time.Now()
 	processRetryQueue(context.Background(), storeWithHook("hook-budget", "https://example.invalid/hook"))
-	elapsed := time.Since(start)
 
 	if attempts >= total {
 		t.Errorf("pass ignored its budget: made %d attempts of %d queued", attempts, total)
 	}
-	if elapsed > retryPassBudget+2*spend {
-		t.Errorf("pass overran its budget: %v > %v", elapsed, retryPassBudget)
+	// The budget is checked before each attempt, so at most the one attempt
+	// whose check passed just before the deadline may begin after it. Counting
+	// late starts, rather than bounding total elapsed time, keeps this exact
+	// under a slow runner: the per-attempt queue saves are real disk writes and
+	// a wall-clock bound charged them against the budget.
+	budgetEnd := start.Add(retryPassBudget)
+	late := 0
+	for _, at := range started {
+		if !at.Before(budgetEnd) {
+			late++
+		}
+	}
+	if late > 1 {
+		t.Errorf("pass overran its budget: %d attempts started after %v, want at most 1", late, retryPassBudget)
 	}
 	if depth := RetryQueueDepth(); depth == 0 {
 		t.Error("budgeted pass emptied the queue; the unattempted entries must stay queued")

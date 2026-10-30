@@ -152,12 +152,16 @@ func TestClose_WaitsForAnInFlightSenderBeforeStoppingTheDrain(t *testing.T) {
 	w := newAsyncTestWriter(conn)
 
 	w.inFlight.Add(1) // stands in for a sender inside the window
+	// start is taken BEFORE the release timer begins, so a Close that waited
+	// for the release always measures at least parked. Taken after, the
+	// goroutine's sleep could already be under way and a correct Close would
+	// read as early on a preempted runner.
+	start := time.Now()
 	go func() {
 		time.Sleep(parked)
 		w.inFlight.Add(-1)
 	}()
 
-	start := time.Now()
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
