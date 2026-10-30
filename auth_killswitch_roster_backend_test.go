@@ -64,7 +64,7 @@ func killSwitchRow(t *testing.T) OperatorContractCheck {
 
 // proxyAnswer drives the real request path and returns the status the client
 // sees plus the challenge header, so a row's claim can be checked against it.
-func proxyAnswer(t *testing.T, host string) (int, string) {
+func proxyAnswer(t *testing.T, host string) (status int, challenge string) {
 	t.Helper()
 	w := httptest.NewRecorder()
 	handleRequest(w, nonBrowserReq(host))
