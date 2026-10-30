@@ -155,8 +155,10 @@ func TestConsoleGuardianProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
 	// #nosec G204 -- execute this test binary with a fixed helper-test selector.
-	cmd := exec.Command(exe, "-test.run=^TestTerminalProcess$", "--", "console-pty")
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestTerminalProcess$", "--", "console-pty")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Foreground: true, Ctty: 0}
 	if err := cmd.Start(); err != nil {
