@@ -11,6 +11,10 @@
 #      reconciler runs on the real OVA 325c142a inventory (must fail on
 #      exactly the recorded 57) and on that inventory without the 57 (must
 #      pass); a wrong pin must stop the block.
+#   3. C5 (.github/lab/fb1-c5.sh): the guest's section-1 source set (Ubuntu
+#      Snapshot: yes + Docker snapshot=no) with a simulated install of what
+#      prepare-guest.sh installs: Docker at its pins, every Ubuntu package a
+#      snapshot version.
 # No OVA is built, nothing is published or signed. Runs only on a push whose
 # message carries [snapshot-pin-check].
 name: Snapshot Pin Check (lab)
@@ -34,6 +38,11 @@ jobs:
     env:
       FB1_COMMIT: d452d50dda9943bafaa4e03d3f77e542dd6d97dd
     steps:
+      - name: Checkout lab helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/lab
       - name: Checkout the FB-1 implementation commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -95,6 +104,13 @@ jobs:
           rec inv-623.tsv ev/package-provenance-623.tsv | tee ev/reconcile-623.txt
           test "$(awk -F'\t' '!/^#/ && $1 != "package"' ev/package-provenance-623.tsv | wc -l)" = 623
           echo "PASS 623-package inventory reconciled: $(awk -F'\t' 'NR>4{print $4}' ev/package-provenance-623.tsv | sort | uniq -c | tr '\n' ' ')" | tee -a ev/summary.txt
+
+      - name: C5 — the guest's section-1 source set, simulated install
+        run: |
+          set -o pipefail
+          bash .github/lab/fb1-c5.sh "$PWD/src/appliance/build" "$RUNNER_TEMP/c5" 2>&1 | tee ev/c5-guest-source-set.txt
+          cp "$RUNNER_TEMP/c5.inst" ev/c5-simulated-installs.txt
+          test "$(grep -c '^PASS C5' ev/c5-guest-source-set.txt)" = 2
 
       - name: Upload evidence
         if: always()
