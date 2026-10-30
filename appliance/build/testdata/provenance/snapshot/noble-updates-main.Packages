@@ -1,0 +1,2297 @@
+Package: apparmor
+Architecture: amd64
+Version: 4.0.1really4.0.1-0ubuntu0.24.04.8
+Filename: pool/main/a/apparmor/apparmor_4.0.1really4.0.1-0ubuntu0.24.04.8_amd64.deb
+SHA256: 190fa2ae7b76a52982bd796fbd25a067f7c42b8ec75c3797bfa67b694bf43297
+
+Package: apport
+Architecture: all
+Version: 2.28.3-0ubuntu0.1
+Filename: pool/main/a/apport/apport_2.28.3-0ubuntu0.1_all.deb
+SHA256: 3fb6842df77c2a60373981d2a00e25c11b3793f4301e115bcb9dd3e3b69e8847
+
+Package: apport-core-dump-handler
+Architecture: all
+Version: 2.28.3-0ubuntu0.1
+Filename: pool/main/a/apport/apport-core-dump-handler_2.28.3-0ubuntu0.1_all.deb
+SHA256: b49ff6b040f2d250c2fef753e5a96885bacf63b9330c5a8abb31a72b3fbe37ef
+
+Package: apt
+Architecture: amd64
+Version: 2.8.3
+Filename: pool/main/a/apt/apt_2.8.3_amd64.deb
+SHA256: c9ace99efc7726fe0035f921a9acf262a9723bbf35b861aab4f9075a0be67442
+
+Package: apt-utils
+Architecture: amd64
+Version: 2.8.3
+Filename: pool/main/a/apt/apt-utils_2.8.3_amd64.deb
+SHA256: 2284b5d72e67d528a4fc19400519ab8584ca00f8f394b0e4ec13f7340459049d
+
+Package: base-files
+Architecture: amd64
+Version: 13ubuntu10.5
+Filename: pool/main/b/base-files/base-files_13ubuntu10.5_amd64.deb
+SHA256: 87e8c41e62f61625fb78a982d0bc0a70f40ef8375bc313b154914d1b3759c823
+
+Package: bind9-dnsutils
+Architecture: amd64
+Version: 1:9.18.39-0ubuntu0.24.04.7
+Filename: pool/main/b/bind9/bind9-dnsutils_9.18.39-0ubuntu0.24.04.7_amd64.deb
+SHA256: f5e72a2daa6deb2d5c5c0ba30fa8207be89d0332b8d3fefaf743c4e486af8486
+
+Package: bind9-host
+Architecture: amd64
+Version: 1:9.18.39-0ubuntu0.24.04.7
+Filename: pool/main/b/bind9/bind9-host_9.18.39-0ubuntu0.24.04.7_amd64.deb
+SHA256: b0c250c18a7d1cb5538f655e7aa273028f587a89a04a755054f2acca209c9c1b
+
+Package: bind9-libs
+Architecture: amd64
+Version: 1:9.18.39-0ubuntu0.24.04.7
+Filename: pool/main/b/bind9/bind9-libs_9.18.39-0ubuntu0.24.04.7_amd64.deb
+SHA256: 5d2e9fe6874be8691dc1945290938af2deaa2a13dc782ea2a3afbf10784ea1b8
+
+Package: bpftrace
+Architecture: amd64
+Version: 0.20.2-1ubuntu4.3
+Filename: pool/main/b/bpftrace/bpftrace_0.20.2-1ubuntu4.3_amd64.deb
+SHA256: fa9c71f518a8483ec1b43b6f662a1b1eeba8e3517cb874162558869cbe3675d4
+
+Package: bsdextrautils
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/bsdextrautils_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: aa1d336f8e54351528195a7e1bedb8176b04a81c60f3d9c97ecd044a044ac6fb
+
+Package: bsdutils
+Architecture: amd64
+Version: 1:2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/bsdutils_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: 761e5ad2ff5c30d1bfa9f41dcfe042b3475495c78c11949a9792585bd1f6765b
+
+Package: busybox-initramfs
+Architecture: amd64
+Version: 1:1.36.1-6ubuntu3.1
+Filename: pool/main/b/busybox/busybox-initramfs_1.36.1-6ubuntu3.1_amd64.deb
+SHA256: ca306983a443c8a32d99994f3490e8c6366c0f643c85ab12d835f15a043ec52b
+
+Package: busybox-static
+Architecture: amd64
+Version: 1:1.36.1-6ubuntu3.1
+Filename: pool/main/b/busybox/busybox-static_1.36.1-6ubuntu3.1_amd64.deb
+SHA256: 944b2728f53ceb3916cec2c962873c9951e612408099601751db2a0a5d81e0ed
+
+Package: byobu
+Architecture: all
+Version: 6.11-0ubuntu1.1
+Filename: pool/main/b/byobu/byobu_6.11-0ubuntu1.1_all.deb
+SHA256: d2b1c4f482c42b7d4804b485b8a28cd12fe12bd4f84dca3b7ab1e3aca3a13a64
+
+Package: ca-certificates
+Architecture: all
+Version: 20260601~24.04.1
+Filename: pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb
+SHA256: 6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50
+
+Package: cloud-init
+Architecture: all
+Version: 26.1-0ubuntu1~24.04.1
+Filename: pool/main/c/cloud-init/cloud-init_26.1-0ubuntu1~24.04.1_all.deb
+SHA256: 1cb0b11bcaf4d6578b45c86ccfc0b2ee28b7b233f0d6e7a3d1a35f615c8f9de8
+
+Package: cloud-initramfs-copymods
+Architecture: all
+Version: 0.49~24.04.1
+Filename: pool/main/c/cloud-initramfs-tools/cloud-initramfs-copymods_0.49~24.04.1_all.deb
+SHA256: 2d119377727d63e271a033ff68fbcc61eddf2db3fbe19146f6aa368bc1d4ee33
+
+Package: cloud-initramfs-dyn-netconf
+Architecture: all
+Version: 0.49~24.04.1
+Filename: pool/main/c/cloud-initramfs-tools/cloud-initramfs-dyn-netconf_0.49~24.04.1_all.deb
+SHA256: abeec2a8e9ceda045bffcd0e939a266fbf123654375f3fec7a686d2ecc8735e2
+
+Package: console-setup
+Architecture: all
+Version: 1.226ubuntu1.1
+Filename: pool/main/c/console-setup/console-setup_1.226ubuntu1.1_all.deb
+SHA256: d364ab6a2c1e88a3829702b3bd66769533fd68f9c17f02ef251e9d6764875518
+
+Package: console-setup-linux
+Architecture: all
+Version: 1.226ubuntu1.1
+Filename: pool/main/c/console-setup/console-setup-linux_1.226ubuntu1.1_all.deb
+SHA256: 0eb39899bd329dea2286e4223c6a4ec8baa54d26cd292ddce43831805430a415
+
+Package: coreutils
+Architecture: amd64
+Version: 9.4-3ubuntu6.3
+Filename: pool/main/c/coreutils/coreutils_9.4-3ubuntu6.3_amd64.deb
+SHA256: e1e9a17892be0cc83b7cea747edf331ffeb6d6c010b4db296e60d888e8e9274c
+
+Package: cpio
+Architecture: amd64
+Version: 2.15+dfsg-1ubuntu2.1
+Filename: pool/main/c/cpio/cpio_2.15+dfsg-1ubuntu2.1_amd64.deb
+SHA256: fbac731755302d218d785b4c391530e7773527f553e24946f9580636a47641b2
+
+Package: cryptsetup
+Architecture: amd64
+Version: 2:2.7.0-1ubuntu4.2
+Filename: pool/main/c/cryptsetup/cryptsetup_2.7.0-1ubuntu4.2_amd64.deb
+SHA256: ed5fd9a77f2867ce094ac8eca180fea3887b92a5409a21a4c73d01a33118d83a
+
+Package: cryptsetup-bin
+Architecture: amd64
+Version: 2:2.7.0-1ubuntu4.2
+Filename: pool/main/c/cryptsetup/cryptsetup-bin_2.7.0-1ubuntu4.2_amd64.deb
+SHA256: 63fc1b21893ddcbc85968cf06d6c321d77ad062fa6210c029b0554aaade04eab
+
+Package: cryptsetup-initramfs
+Architecture: all
+Version: 2:2.7.0-1ubuntu4.2
+Filename: pool/main/c/cryptsetup/cryptsetup-initramfs_2.7.0-1ubuntu4.2_all.deb
+SHA256: 2d0cad34abef898ea030e46e16ac37d1c692a0beb9acc114026e32ab72b91f71
+
+Package: curl
+Architecture: amd64
+Version: 8.5.0-2ubuntu10.15
+Filename: pool/main/c/curl/curl_8.5.0-2ubuntu10.15_amd64.deb
+SHA256: 4358c023e3c1a74bb1e77935807ea2088b137a898167fca278a1767c353ac1c5
+
+Package: dbus
+Architecture: amd64
+Version: 1.14.10-4ubuntu4.1
+Filename: pool/main/d/dbus/dbus_1.14.10-4ubuntu4.1_amd64.deb
+SHA256: 0d59be1393d5b01552edbf16c7b9357c473bf625aa47365ce2e8eef6da1dd2e1
+
+Package: dbus-bin
+Architecture: amd64
+Version: 1.14.10-4ubuntu4.1
+Filename: pool/main/d/dbus/dbus-bin_1.14.10-4ubuntu4.1_amd64.deb
+SHA256: 0d2c7e425967039594ea099f6128231769e1ed2cc2f6fd7d895fea135c9e1964
+
+Package: dbus-daemon
+Architecture: amd64
+Version: 1.14.10-4ubuntu4.1
+Filename: pool/main/d/dbus/dbus-daemon_1.14.10-4ubuntu4.1_amd64.deb
+SHA256: 785ad36aafc8912300e44a1cea438e28ea36fb94c631f5849408aea85d2ab2bf
+
+Package: dbus-session-bus-common
+Architecture: all
+Version: 1.14.10-4ubuntu4.1
+Filename: pool/main/d/dbus/dbus-session-bus-common_1.14.10-4ubuntu4.1_all.deb
+SHA256: aa88bf2f2107e7d948d0e01001b447fc6cae81b285a6e7daf33dcb62737de62f
+
+Package: dbus-system-bus-common
+Architecture: all
+Version: 1.14.10-4ubuntu4.1
+Filename: pool/main/d/dbus/dbus-system-bus-common_1.14.10-4ubuntu4.1_all.deb
+SHA256: 4db2e3e18c6abee1a1d1e2f91289e229dd862e6e1ef00463c5533c612c4f1809
+
+Package: dbus-user-session
+Architecture: amd64
+Version: 1.14.10-4ubuntu4.1
+Filename: pool/main/d/dbus/dbus-user-session_1.14.10-4ubuntu4.1_amd64.deb
+SHA256: e585b1694b854c3b75bfb39cc4022cafe7b14e44fd435433b613b8fb9919cb41
+
+Package: dhcpcd-base
+Architecture: amd64
+Version: 1:10.0.6-1ubuntu3.2
+Filename: pool/main/d/dhcpcd/dhcpcd-base_10.0.6-1ubuntu3.2_amd64.deb
+SHA256: 606672ce6eec804b6490e261c0afd77bfeedf73ff29aab165a464e1e8df43a43
+
+Package: diffutils
+Architecture: amd64
+Version: 1:3.10-1ubuntu0.1
+Filename: pool/main/d/diffutils/diffutils_3.10-1ubuntu0.1_amd64.deb
+SHA256: c2acc7889f1d75986c40bee57c0875c02146a9c8833980abfb0a6c62c52301d3
+
+Package: dirmngr
+Architecture: amd64
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/dirmngr_2.4.4-2ubuntu17.6_amd64.deb
+SHA256: 3c80161cf0918a3b94b78274bf4c63fafe76f15cc8060898527e0757b1df98fd
+
+Package: distro-info-data
+Architecture: all
+Version: 0.72-0ubuntu0.24.04.1
+Filename: pool/main/d/distro-info-data/distro-info-data_0.72-0ubuntu0.24.04.1_all.deb
+SHA256: c4f7d3a00f67d7a8cfe67e2f12a85b483183b3c80e380851c6200cc18cdbaf4d
+
+Package: dmeventd
+Architecture: amd64
+Version: 2:1.02.185-3ubuntu3.2
+Filename: pool/main/l/lvm2/dmeventd_1.02.185-3ubuntu3.2_amd64.deb
+SHA256: 9681c525c8fe73c06b8d01b903654f89e8d6486bab71574862d1fb2f2d4aaf07
+
+Package: dmidecode
+Architecture: amd64
+Version: 3.5-3ubuntu0.2
+Filename: pool/main/d/dmidecode/dmidecode_3.5-3ubuntu0.2_amd64.deb
+SHA256: b6a124313f744b7ddf7c20b9db040e5b66677685f22a8c9bd63a2a7312e83ede
+
+Package: dmsetup
+Architecture: amd64
+Version: 2:1.02.185-3ubuntu3.2
+Filename: pool/main/l/lvm2/dmsetup_1.02.185-3ubuntu3.2_amd64.deb
+SHA256: 25619bad426e6ea795bf441c929f3c444ddf15c08740841ccc214951ce7ab6f8
+
+Package: dpkg
+Architecture: amd64
+Version: 1.22.6ubuntu6.6
+Filename: pool/main/d/dpkg/dpkg_1.22.6ubuntu6.6_amd64.deb
+SHA256: ceb6aa4da59fbcb8a3b0549b4280c60b7d849b519859797c8668bdfbe378fb3b
+
+Package: dracut-install
+Architecture: amd64
+Version: 060+5-1ubuntu3.4
+Filename: pool/main/d/dracut/dracut-install_060+5-1ubuntu3.4_amd64.deb
+SHA256: 89c56859f10c44da8fa6e1fd923511087caaefc733bd8836e6ef6d0f35d73409
+
+Package: e2fsprogs
+Architecture: amd64
+Version: 1.47.0-2.4~exp1ubuntu4.1
+Filename: pool/main/e/e2fsprogs/e2fsprogs_1.47.0-2.4~exp1ubuntu4.1_amd64.deb
+SHA256: 1d0fb19dcf14316d04602260871dba3c1441c0ecf3c3bde54eacba35dcc5a40b
+
+Package: e2fsprogs-l10n
+Architecture: all
+Version: 1.47.0-2.4~exp1ubuntu4.1
+Filename: pool/main/e/e2fsprogs/e2fsprogs-l10n_1.47.0-2.4~exp1ubuntu4.1_all.deb
+SHA256: 698ca71e35dfa785db4d3c559c712b45be3f3891cbc16a33f901620d338a5f92
+
+Package: eject
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/eject_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: e49024f6e5c1becc7bdff11589ea7973b8f522ad77f515a94cfb8176dbb699e3
+
+Package: fdisk
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/fdisk_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: 4a27cce5a9ad937298ce82722912e8ceefd123773de5c39fa8cf2a2f61cf4657
+
+Package: fwupd
+Architecture: amd64
+Version: 2.0.20-1ubuntu2~24.04.2
+Filename: pool/main/f/fwupd/fwupd_2.0.20-1ubuntu2~24.04.2_amd64.deb
+SHA256: 0e04b5c0081114c080e4a3618e12e73a311f33bf061c8e53c151459a6149fcea
+
+Package: gawk
+Architecture: amd64
+Version: 1:5.2.1-2ubuntu0.1
+Filename: pool/main/g/gawk/gawk_5.2.1-2ubuntu0.1_amd64.deb
+SHA256: baaf6853bea746485bff4ae0e506599b3c5093ebe6ec9b9584e4272f94f75b93
+
+Package: gcc-14-base
+Architecture: amd64
+Version: 14.2.0-4ubuntu2~24.04.1
+Filename: pool/main/g/gcc-14/gcc-14-base_14.2.0-4ubuntu2~24.04.1_amd64.deb
+SHA256: b95c172411a7fdae70307cf33a9f5320ba5e056b556454543dd5b679d5ce1c4f
+
+Package: gir1.2-glib-2.0
+Architecture: amd64
+Version: 2.80.0-6ubuntu3.9
+Filename: pool/main/g/glib2.0/gir1.2-glib-2.0_2.80.0-6ubuntu3.9_amd64.deb
+SHA256: 7e890c7148c1c9d11861aa8822dae18329008683a391e46434f37f8f4f0a5a20
+
+Package: gir1.2-packagekitglib-1.0
+Architecture: amd64
+Version: 1.2.8-2ubuntu1.5
+Filename: pool/main/p/packagekit/gir1.2-packagekitglib-1.0_1.2.8-2ubuntu1.5_amd64.deb
+SHA256: f499a8403c1c51f018346dc130144110a9943c9473e5ec596387180acd4347f2
+
+Package: git
+Architecture: amd64
+Version: 1:2.43.0-1ubuntu7.3
+Filename: pool/main/g/git/git_2.43.0-1ubuntu7.3_amd64.deb
+SHA256: 099bb129f543adc4c14203334b0fa0a909f8bf038c4d56bc9cc7c774ebf78f87
+
+Package: git-man
+Architecture: all
+Version: 1:2.43.0-1ubuntu7.3
+Filename: pool/main/g/git/git-man_2.43.0-1ubuntu7.3_all.deb
+SHA256: 5701f931ed2cd30644700b0fc1cda7c2214f93a63ef84c0c80e43ce40d2cf1d2
+
+Package: gnupg
+Architecture: all
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/gnupg_2.4.4-2ubuntu17.6_all.deb
+SHA256: d278c81e407d51dae2b7df30adc08ecd6a0acde5884fc5ba2d1ef107f0e8ab0b
+
+Package: gnupg-l10n
+Architecture: all
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/gnupg-l10n_2.4.4-2ubuntu17.6_all.deb
+SHA256: 042af06f1fa4b88a8ac6c212b535587b9f432150843adb75da1d676648d7a046
+
+Package: gnupg-utils
+Architecture: amd64
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/gnupg-utils_2.4.4-2ubuntu17.6_amd64.deb
+SHA256: d27240259f74be5ec4c07ec505d087a3d6a4a66eedef479eb067d8f364263a12
+
+Package: gpg
+Architecture: amd64
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/gpg_2.4.4-2ubuntu17.6_amd64.deb
+SHA256: 34a775d73a2fe9b6e9205668e39954fe0c1e5c046b1a30c307c7d1e6e22cd1a7
+
+Package: gpg-agent
+Architecture: amd64
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/gpg-agent_2.4.4-2ubuntu17.6_amd64.deb
+SHA256: 7b6778c1d297a4d4e889005917a0b9996a24d704e2e79d52be65b5d1f6b651ce
+
+Package: gpg-wks-client
+Architecture: amd64
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/gpg-wks-client_2.4.4-2ubuntu17.6_amd64.deb
+SHA256: a90e6dd579dd18ab57bd429d57846f89d1a71fba928bc5dbc7234a2cbdfc4865
+
+Package: gpgconf
+Architecture: amd64
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/gpgconf_2.4.4-2ubuntu17.6_amd64.deb
+SHA256: 59d35df3b5d7e6dd8235c39c56f8008d1380275765d1a10343e5b9be185e2b7a
+
+Package: gpgsm
+Architecture: amd64
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/gpgsm_2.4.4-2ubuntu17.6_amd64.deb
+SHA256: c19746c589c9cb7fa15de8a21790fef0a0b061c3e2758823536d3ac0973ca51a
+
+Package: gpgv
+Architecture: amd64
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/gpgv_2.4.4-2ubuntu17.6_amd64.deb
+SHA256: c8810069e98cd343c4c5c64b3ef5a0bb1f526419cff3266cd99ed4c87ad99868
+
+Package: grub-common
+Architecture: amd64
+Version: 2.12-1ubuntu7.3
+Filename: pool/main/g/grub2/grub-common_2.12-1ubuntu7.3_amd64.deb
+SHA256: 464e7c3a9f261b2120a6755fbf753384669c666a5cc7cd571cf836d6da88373f
+
+Package: grub-efi-amd64-bin
+Architecture: amd64
+Version: 2.12-1ubuntu7.3
+Filename: pool/main/g/grub2-unsigned/grub-efi-amd64-bin_2.12-1ubuntu7.3_amd64.deb
+SHA256: 92ae3a846e799aea52e980e9761ac638ab79fc800e789928e9a6d713067e108e
+
+Package: grub-efi-amd64-signed
+Architecture: amd64
+Version: 1.202.5+2.12-1ubuntu7.3
+Filename: pool/main/g/grub2-signed/grub-efi-amd64-signed_1.202.5+2.12-1ubuntu7.3_amd64.deb
+SHA256: 8bd5cd99c3af82aab23af0f15f54c91799f343416412e122df661ef36a44a511
+
+Package: grub-pc
+Architecture: amd64
+Version: 2.12-1ubuntu7.3
+Filename: pool/main/g/grub2/grub-pc_2.12-1ubuntu7.3_amd64.deb
+SHA256: 68fc1d0e4d883262884bde20f4bcd559fb9cdf1af3277666eed46eb8be7865bd
+
+Package: grub-pc-bin
+Architecture: amd64
+Version: 2.12-1ubuntu7.3
+Filename: pool/main/g/grub2/grub-pc-bin_2.12-1ubuntu7.3_amd64.deb
+SHA256: 698d80bc51c0c593fbc829758365a0e4bce96819e2c8c754ae77dfe39b0388df
+
+Package: grub2-common
+Architecture: amd64
+Version: 2.12-1ubuntu7.3
+Filename: pool/main/g/grub2/grub2-common_2.12-1ubuntu7.3_amd64.deb
+SHA256: 0aeaa52ff0cfd55c8b123692b666ba6c5214e19b185013a4ee2e2231f4ccda48
+
+Package: gzip
+Architecture: amd64
+Version: 1.12-1ubuntu3.2
+Filename: pool/main/g/gzip/gzip_1.12-1ubuntu3.2_amd64.deb
+SHA256: 4067522fbffe22672e4cf683bfc32e4a304bc872cf76f10049ab36d1a9eedb91
+
+Package: ibverbs-providers
+Architecture: amd64
+Version: 50.0-2ubuntu0.2
+Filename: pool/main/r/rdma-core/ibverbs-providers_50.0-2ubuntu0.2_amd64.deb
+SHA256: 69847c5522d32c14aa3de318da8edea1a1cac6a7d936d81082bf292975f83bb6
+
+Package: inetutils-telnet
+Architecture: amd64
+Version: 2:2.5-3ubuntu4.2
+Filename: pool/main/i/inetutils/inetutils-telnet_2.5-3ubuntu4.2_amd64.deb
+SHA256: 078ee4e769e8462727000570e25595b4e61b4caa9d58f0668bd3948637419faf
+
+Package: initramfs-tools
+Architecture: all
+Version: 0.142ubuntu25.8
+Filename: pool/main/i/initramfs-tools/initramfs-tools_0.142ubuntu25.8_all.deb
+SHA256: 3a75c03e5d409f4e266b3d908e3278a439a221d0576db55eab588cac9388cefe
+
+Package: initramfs-tools-bin
+Architecture: amd64
+Version: 0.142ubuntu25.8
+Filename: pool/main/i/initramfs-tools/initramfs-tools-bin_0.142ubuntu25.8_amd64.deb
+SHA256: 556a5afcb16ec4ec36b0bb0f0df6af6eef9a95141b7cca6740d4344cd24a4f0e
+
+Package: initramfs-tools-core
+Architecture: all
+Version: 0.142ubuntu25.8
+Filename: pool/main/i/initramfs-tools/initramfs-tools-core_0.142ubuntu25.8_all.deb
+SHA256: 1a26fed5136ae049e5abc33995ac362f7af26bd7470e6a49c596474da0c3e1b8
+
+Package: iproute2
+Architecture: amd64
+Version: 6.1.0-1ubuntu6.4
+Filename: pool/main/i/iproute2/iproute2_6.1.0-1ubuntu6.4_amd64.deb
+SHA256: f6c91ec6dba02f8965c88f901205c7db72bc8bf38ef1fdfaaee51030dfa145ea
+
+Package: iputils-ping
+Architecture: amd64
+Version: 3:20240117-1ubuntu0.1
+Filename: pool/main/i/iputils/iputils-ping_20240117-1ubuntu0.1_amd64.deb
+SHA256: 6d9674cc32e110bb6bb26555f5be13381ee839466f2544b284b2b13572482de7
+
+Package: iputils-tracepath
+Architecture: amd64
+Version: 3:20240117-1ubuntu0.1
+Filename: pool/main/i/iputils/iputils-tracepath_20240117-1ubuntu0.1_amd64.deb
+SHA256: 1989f645a7b4e469dabfe73c8dce9f9401c7417a0b338c164c5dee61a9ec3e89
+
+Package: jq
+Architecture: amd64
+Version: 1.7.1-3ubuntu0.24.04.2
+Filename: pool/main/j/jq/jq_1.7.1-3ubuntu0.24.04.2_amd64.deb
+SHA256: f59183392f84fe67b407b494d8ba6185e9b0e4a106ffcb369490bd20a83fd40e
+
+Package: keyboard-configuration
+Architecture: all
+Version: 1.226ubuntu1.1
+Filename: pool/main/c/console-setup/keyboard-configuration_1.226ubuntu1.1_all.deb
+SHA256: efd41eab2266789a7b43b2f36516860c28f19920d0c656b3cdc2647547f61330
+
+Package: keyboxd
+Architecture: amd64
+Version: 2.4.4-2ubuntu17.6
+Filename: pool/main/g/gnupg2/keyboxd_2.4.4-2ubuntu17.6_amd64.deb
+SHA256: 1bb5f40735b55a17abfb587607816724771fb38fd123b083b7d24bc606c2ecda
+
+Package: klibc-utils
+Architecture: amd64
+Version: 2.0.13-4ubuntu0.2
+Filename: pool/main/k/klibc/klibc-utils_2.0.13-4ubuntu0.2_amd64.deb
+SHA256: b0eae4b03e8c7f2b8c5dfca637183ed62d8e344fdad0aabf623b696eccfa4a36
+
+Package: kmod
+Architecture: amd64
+Version: 31+20240202-2ubuntu7.2
+Filename: pool/main/k/kmod/kmod_31+20240202-2ubuntu7.2_amd64.deb
+SHA256: 687693dfad23c96570d96a1c7cc1b8709d31a93f82ac765a11b2bd9130f1dfae
+
+Package: kpartx
+Architecture: amd64
+Version: 0.9.4-5ubuntu8.2
+Filename: pool/main/m/multipath-tools/kpartx_0.9.4-5ubuntu8.2_amd64.deb
+SHA256: f3d35f80f6938c8c1cc1b2758c74561d91059d6b50bff29b190368e1665a0254
+
+Package: krb5-locales
+Architecture: all
+Version: 1.20.1-6ubuntu2.10
+Filename: pool/main/k/krb5/krb5-locales_1.20.1-6ubuntu2.10_all.deb
+SHA256: ed5e7e254c244ff686c4c9722ff613c6748ce6317c30ff2ce3c3e3066023f6c8
+
+Package: landscape-common
+Architecture: amd64
+Version: 24.02-0ubuntu5.7
+Filename: pool/main/l/landscape-client/landscape-common_24.02-0ubuntu5.7_amd64.deb
+SHA256: 478ba7823bede1cf23c3eef8b04d28b421388ebc9e85747e363e33a40edba6fc
+
+Package: less
+Architecture: amd64
+Version: 590-2ubuntu2.1
+Filename: pool/main/l/less/less_590-2ubuntu2.1_amd64.deb
+SHA256: f26481c7f5e492e7536f9e75a9aa237f4772b637cdc933f356bc567e180b8a39
+
+Package: libacl1
+Architecture: amd64
+Version: 2.3.2-1build1.1
+Filename: pool/main/a/acl/libacl1_2.3.2-1build1.1_amd64.deb
+SHA256: f2bfd3f8f00413d5f1f04fc723063803c56ac0f1e0efae3bc41f2d7276972ec3
+
+Package: libaio1t64
+Architecture: amd64
+Version: 0.3.113-6build1.1
+Filename: pool/main/liba/libaio/libaio1t64_0.3.113-6build1.1_amd64.deb
+SHA256: 433212b33e26d424605c01cec1de33b63f2cc12870987b4cb7b3625baba66a19
+
+Package: libaom3
+Architecture: amd64
+Version: 3.8.2-2ubuntu0.2
+Filename: pool/main/a/aom/libaom3_3.8.2-2ubuntu0.2_amd64.deb
+SHA256: d1ada7141fc5eb4e3ffdcdd027da2afc1177b41c3acac40eb3a132959241cb1f
+
+Package: libapparmor1
+Architecture: amd64
+Version: 4.0.1really4.0.1-0ubuntu0.24.04.8
+Filename: pool/main/a/apparmor/libapparmor1_4.0.1really4.0.1-0ubuntu0.24.04.8_amd64.deb
+SHA256: 9c9ab793bcf772315fc754abb9b9a9f1ef4f828bd5d1c0a40c6e192624f3e86e
+
+Package: libapt-pkg6.0t64
+Architecture: amd64
+Version: 2.8.3
+Filename: pool/main/a/apt/libapt-pkg6.0t64_2.8.3_amd64.deb
+SHA256: 500579fafa3c5ab8ba2002b7cd76690532ea76efe1b2f250569104c615b7042b
+
+Package: libarchive13t64
+Architecture: amd64
+Version: 3.7.2-2ubuntu0.8
+Filename: pool/main/liba/libarchive/libarchive13t64_3.7.2-2ubuntu0.8_amd64.deb
+SHA256: ba9684092d71656a3bfd909518c76cc15eefeef9cbac0a36a8cef5632c62f56f
+
+Package: libattr1
+Architecture: amd64
+Version: 1:2.5.2-1ubuntu0.1
+Filename: pool/main/a/attr/libattr1_2.5.2-1ubuntu0.1_amd64.deb
+SHA256: a99e2e2dfcefbc0e9c99fdc0b284c8b35eaa58744163aaed476de1c93d3c4ef4
+
+Package: libaudit-common
+Architecture: all
+Version: 1:3.1.2-2.1ubuntu0.1
+Filename: pool/main/a/audit/libaudit-common_3.1.2-2.1ubuntu0.1_all.deb
+SHA256: b1b6fca3f7ed86db971c073352a6741f1f60f4a94eeb2c1eb0aca8a7e4b11660
+
+Package: libaudit1
+Architecture: amd64
+Version: 1:3.1.2-2.1ubuntu0.1
+Filename: pool/main/a/audit/libaudit1_3.1.2-2.1ubuntu0.1_amd64.deb
+SHA256: 326a55fce45a620f12b98baf581fb037eb0fcea1ab3969c54cf177f51be8abfe
+
+Package: libblkid1
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/libblkid1_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: 3bcf169cd65e2539059b2287924090fc629f9bf90f595fc25465a7efe950ee82
+
+Package: libblockdev-crypto3
+Architecture: amd64
+Version: 3.1.1-1ubuntu0.1
+Filename: pool/main/libb/libblockdev/libblockdev-crypto3_3.1.1-1ubuntu0.1_amd64.deb
+SHA256: a6f82f205c4708405d7e72d1cc2162304327f2e190f1e2be6377e9bfc9c625c4
+
+Package: libblockdev-fs3
+Architecture: amd64
+Version: 3.1.1-1ubuntu0.1
+Filename: pool/main/libb/libblockdev/libblockdev-fs3_3.1.1-1ubuntu0.1_amd64.deb
+SHA256: 5af3af751896b08463bf82b009868e439b7ce56557ce085d53a0614342a14a0c
+
+Package: libblockdev-loop3
+Architecture: amd64
+Version: 3.1.1-1ubuntu0.1
+Filename: pool/main/libb/libblockdev/libblockdev-loop3_3.1.1-1ubuntu0.1_amd64.deb
+SHA256: 28c65e9e3b72509f2828d281a07149fe66d3dd8c1a89a35be068668ecadc5e1c
+
+Package: libblockdev-mdraid3
+Architecture: amd64
+Version: 3.1.1-1ubuntu0.1
+Filename: pool/main/libb/libblockdev/libblockdev-mdraid3_3.1.1-1ubuntu0.1_amd64.deb
+SHA256: 919bac9aee1f0606bc57c9485df5ddb2522aa00814a6dc6660700d144b41b05e
+
+Package: libblockdev-nvme3
+Architecture: amd64
+Version: 3.1.1-1ubuntu0.1
+Filename: pool/main/libb/libblockdev/libblockdev-nvme3_3.1.1-1ubuntu0.1_amd64.deb
+SHA256: 0c89c4a709cfec3689f2f96bf8a068fe1f5fc45ce5e04c2bf40702a6de60f7ab
+
+Package: libblockdev-part3
+Architecture: amd64
+Version: 3.1.1-1ubuntu0.1
+Filename: pool/main/libb/libblockdev/libblockdev-part3_3.1.1-1ubuntu0.1_amd64.deb
+SHA256: dc220b51a8276c2ce9878833fa7979be3439b840907a4ca9da5df726f98bfaa6
+
+Package: libblockdev-swap3
+Architecture: amd64
+Version: 3.1.1-1ubuntu0.1
+Filename: pool/main/libb/libblockdev/libblockdev-swap3_3.1.1-1ubuntu0.1_amd64.deb
+SHA256: a8da394b14fdc7e3c0b1cbc307dae056adb9dc1c03b5195a8fc172fb261a4f79
+
+Package: libblockdev-utils3
+Architecture: amd64
+Version: 3.1.1-1ubuntu0.1
+Filename: pool/main/libb/libblockdev/libblockdev-utils3_3.1.1-1ubuntu0.1_amd64.deb
+SHA256: 019c84bec89353717d2a26e5314499fe7fc8d6bc24fdb86aa8f05e8e5c145853
+
+Package: libblockdev3
+Architecture: amd64
+Version: 3.1.1-1ubuntu0.1
+Filename: pool/main/libb/libblockdev/libblockdev3_3.1.1-1ubuntu0.1_amd64.deb
+SHA256: 96159cf0640f333e389de71eb4f302f0ae60a7264e2b138e4785ff3eff7e020d
+
+Package: libbsd0
+Architecture: amd64
+Version: 0.12.1-1build1.1
+Filename: pool/main/libb/libbsd/libbsd0_0.12.1-1build1.1_amd64.deb
+SHA256: f3857b0863ac5cfd4263e9bf6cfb1d4be88d5321e4070d5bc2b62b0949e6c86f
+
+Package: libbz2-1.0
+Architecture: amd64
+Version: 1.0.8-5.1ubuntu0.1
+Filename: pool/main/b/bzip2/libbz2-1.0_1.0.8-5.1ubuntu0.1_amd64.deb
+SHA256: 36ee08b00b1ee5018b2fce02881b7d2d73c9b4e32990bde3388400d86c48126a
+
+Package: libc-bin
+Architecture: amd64
+Version: 2.39-0ubuntu8.9
+Filename: pool/main/g/glibc/libc-bin_2.39-0ubuntu8.9_amd64.deb
+SHA256: 066398a06ef1a218d4109461d4c636eafe83322ad19b179de9ef7af42b3fec58
+
+Package: libc-dev-bin
+Architecture: amd64
+Version: 2.39-0ubuntu8.9
+Filename: pool/main/g/glibc/libc-dev-bin_2.39-0ubuntu8.9_amd64.deb
+SHA256: 77db23aba4582d034d9a95e4818a16e7e51a2d4fb17a9204439688e288d67f4c
+
+Package: libc-devtools
+Architecture: amd64
+Version: 2.39-0ubuntu8.9
+Filename: pool/main/g/glibc/libc-devtools_2.39-0ubuntu8.9_amd64.deb
+SHA256: 3eff6f67712cfb5b4586e1276fbb5cd481102a28241058a8a8258f8ce0c660b0
+
+Package: libc6
+Architecture: amd64
+Version: 2.39-0ubuntu8.9
+Filename: pool/main/g/glibc/libc6_2.39-0ubuntu8.9_amd64.deb
+SHA256: ff5557d99b51f761c4b7c92368b9cc45565eda17df9bf9eb4b134d09825008be
+
+Package: libc6-dev
+Architecture: amd64
+Version: 2.39-0ubuntu8.9
+Filename: pool/main/g/glibc/libc6-dev_2.39-0ubuntu8.9_amd64.deb
+SHA256: e13d5fcc1b2a86f75bca8e0026a8e39f24fe97ca86e92be79991f8697eb1306f
+
+Package: libcap2
+Architecture: amd64
+Version: 1:2.66-5ubuntu2.4
+Filename: pool/main/libc/libcap2/libcap2_2.66-5ubuntu2.4_amd64.deb
+SHA256: 23c627c77c66552a658e62852f244f4946dc543898e0ec5428d5dc6bffde2d6a
+
+Package: libcap2-bin
+Architecture: amd64
+Version: 1:2.66-5ubuntu2.4
+Filename: pool/main/libc/libcap2/libcap2-bin_2.66-5ubuntu2.4_amd64.deb
+SHA256: a8c875e1711a7a101e995814e6500c826cb658551660ef967ec15fbda79a3997
+
+Package: libclang-cpp18
+Architecture: amd64
+Version: 1:18.1.3-1ubuntu1
+Filename: pool/main/l/llvm-toolchain-18/libclang-cpp18_18.1.3-1ubuntu1_amd64.deb
+SHA256: e91eda104813ee0468d145d010a4a4e142401f3f17f9a65596c66d416298d018
+
+Package: libclang1-18
+Architecture: amd64
+Version: 1:18.1.3-1ubuntu1
+Filename: pool/main/l/llvm-toolchain-18/libclang1-18_18.1.3-1ubuntu1_amd64.deb
+SHA256: 1ed67106d743ab4f12db2726c5fc11c436c5e1fba613e9f1006bf3fa05cc69bd
+
+Package: libcom-err2
+Architecture: amd64
+Version: 1.47.0-2.4~exp1ubuntu4.1
+Filename: pool/main/e/e2fsprogs/libcom-err2_1.47.0-2.4~exp1ubuntu4.1_amd64.deb
+SHA256: 7ab24d3057dabf86db8f771ad6e43f073ed86b6b950d6e8ba22cb9fe6707bbc9
+
+Package: libcryptsetup12
+Architecture: amd64
+Version: 2:2.7.0-1ubuntu4.2
+Filename: pool/main/c/cryptsetup/libcryptsetup12_2.7.0-1ubuntu4.2_amd64.deb
+SHA256: f6f6a7f35104da711997b52c92ab91ce1f47dd039d276d5beb797d713447c9f2
+
+Package: libcurl3t64-gnutls
+Architecture: amd64
+Version: 8.5.0-2ubuntu10.15
+Filename: pool/main/c/curl/libcurl3t64-gnutls_8.5.0-2ubuntu10.15_amd64.deb
+SHA256: 91dd664037afcba0154922aadf1c0ce2f66a1135145223f88812d693078059c2
+
+Package: libcurl4t64
+Architecture: amd64
+Version: 8.5.0-2ubuntu10.15
+Filename: pool/main/c/curl/libcurl4t64_8.5.0-2ubuntu10.15_amd64.deb
+SHA256: 02f8f39727a43d5a7057cba35cda866be00d929b91ea67ed02dd9d6402fa551c
+
+Package: libdbus-1-3
+Architecture: amd64
+Version: 1.14.10-4ubuntu4.1
+Filename: pool/main/d/dbus/libdbus-1-3_1.14.10-4ubuntu4.1_amd64.deb
+SHA256: 5d630480f04b4b442300ce847a3fa705ea4d14d80ba6de91f99b51a4e4953b08
+
+Package: libdeflate0
+Architecture: amd64
+Version: 1.19-1build1.1
+Filename: pool/main/libd/libdeflate/libdeflate0_1.19-1build1.1_amd64.deb
+SHA256: 8e7dfa9e63a9b5058071b84da48bb2e30dea07de169e80fbc759fe0e68639269
+
+Package: libdevmapper-event1.02.1
+Architecture: amd64
+Version: 2:1.02.185-3ubuntu3.2
+Filename: pool/main/l/lvm2/libdevmapper-event1.02.1_1.02.185-3ubuntu3.2_amd64.deb
+SHA256: 7fabf1d0874b86ee96bec13dbbd01a455264e1adcf1076ae88f7487bf452e4fd
+
+Package: libdevmapper1.02.1
+Architecture: amd64
+Version: 2:1.02.185-3ubuntu3.2
+Filename: pool/main/l/lvm2/libdevmapper1.02.1_1.02.185-3ubuntu3.2_amd64.deb
+SHA256: 0d43a02b9030a50edbc49c9580f88f01eef2b043baad1c6200672c39643c0efe
+
+Package: libdrm-amdgpu1
+Architecture: amd64
+Version: 2.4.125-1ubuntu0.1~24.04.2
+Filename: pool/main/libd/libdrm/libdrm-amdgpu1_2.4.125-1ubuntu0.1~24.04.2_amd64.deb
+SHA256: aa29b7898bae596bf07e55ba178cf8d5ea698fe83688e1b34520d86010251a7a
+
+Package: libdrm-common
+Architecture: all
+Version: 2.4.125-1ubuntu0.1~24.04.2
+Filename: pool/main/libd/libdrm/libdrm-common_2.4.125-1ubuntu0.1~24.04.2_all.deb
+SHA256: 0b60996bc18fa1545e60a47bb0fe1a7f360ec06fe62ba35fb8d8ba2a54e62166
+
+Package: libdrm2
+Architecture: amd64
+Version: 2.4.125-1ubuntu0.1~24.04.2
+Filename: pool/main/libd/libdrm/libdrm2_2.4.125-1ubuntu0.1~24.04.2_amd64.deb
+SHA256: 4d3e858dd57be617c49d87c5ddcdb35df744a4f0a559981256ae2ba174718584
+
+Package: libdw1t64
+Architecture: amd64
+Version: 0.190-1.1ubuntu0.1
+Filename: pool/main/e/elfutils/libdw1t64_0.190-1.1ubuntu0.1_amd64.deb
+SHA256: edaa9ce4221d95f4bd72a9805100902e313092a2f31a7a51e7186be97734714d
+
+Package: libelf1t64
+Architecture: amd64
+Version: 0.190-1.1ubuntu0.1
+Filename: pool/main/e/elfutils/libelf1t64_0.190-1.1ubuntu0.1_amd64.deb
+SHA256: b4aee123a37472d213647594b4f7d4a0d13615b0ca2a6fd33926b768d6b232c2
+
+Package: libevent-core-2.1-7t64
+Architecture: amd64
+Version: 2.1.12-stable-9ubuntu2.2
+Filename: pool/main/libe/libevent/libevent-core-2.1-7t64_2.1.12-stable-9ubuntu2.2_amd64.deb
+SHA256: 2a5264b572f5fe50fc9d63e115d308c79b9fb746d13cc55b5ea1f0f01a78daa7
+
+Package: libexpat1
+Architecture: amd64
+Version: 2.6.1-2ubuntu0.6
+Filename: pool/main/e/expat/libexpat1_2.6.1-2ubuntu0.6_amd64.deb
+SHA256: 494b8e672f722130c6bca6a7bc4cc31a43ca891a31d60d868bfdd699a3c20b13
+
+Package: libext2fs2t64
+Architecture: amd64
+Version: 1.47.0-2.4~exp1ubuntu4.1
+Filename: pool/main/e/e2fsprogs/libext2fs2t64_1.47.0-2.4~exp1ubuntu4.1_amd64.deb
+SHA256: 276686704314749497f1530ff9e62fd0280328be786a28db0cfe2aa31c88119e
+
+Package: libfdisk1
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/libfdisk1_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: 7f67b127d239f51218c1eb63c3b0c219bbf26f450349bed9ad5d9f10a6b80c1b
+
+Package: libfreetype6
+Architecture: amd64
+Version: 2.13.2+dfsg-1ubuntu0.1
+Filename: pool/main/f/freetype/libfreetype6_2.13.2+dfsg-1ubuntu0.1_amd64.deb
+SHA256: f6937fd8a77e83001dcfd3857d5a5cfbd4caaeb297c7fdb71ec50514843e48af
+
+Package: libfwupd3
+Architecture: amd64
+Version: 2.0.20-1ubuntu2~24.04.2
+Filename: pool/main/f/fwupd/libfwupd3_2.0.20-1ubuntu2~24.04.2_amd64.deb
+SHA256: 5a12e12912f12891418e6b9ea0cb49f6161efd80af8bb9e04b182d6ae20b78f4
+
+Package: libgcc-s1
+Architecture: amd64
+Version: 14.2.0-4ubuntu2~24.04.1
+Filename: pool/main/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_amd64.deb
+SHA256: aa7fadbe33b78bcf99885318040601c550c208929565b179891d9a3cc2aa68cd
+
+Package: libgcrypt20
+Architecture: amd64
+Version: 1.10.3-2ubuntu0.2
+Filename: pool/main/libg/libgcrypt20/libgcrypt20_1.10.3-2ubuntu0.2_amd64.deb
+SHA256: 957b9eeaa83cf6f2d5d5d76dbb8aa31d3297e6781d8a02fa08dcc897ae650a0b
+
+Package: libglib2.0-0t64
+Architecture: amd64
+Version: 2.80.0-6ubuntu3.9
+Filename: pool/main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu3.9_amd64.deb
+SHA256: a66ef54888a18e20b55dd3988177f6029caa81dc16198c043a715500b62cf06f
+
+Package: libglib2.0-bin
+Architecture: amd64
+Version: 2.80.0-6ubuntu3.9
+Filename: pool/main/g/glib2.0/libglib2.0-bin_2.80.0-6ubuntu3.9_amd64.deb
+SHA256: e0e2ccb6ee3c0c8f3556417872a4340a2e0ddb3e50af6de3f8e5fc999c98693f
+
+Package: libglib2.0-data
+Architecture: all
+Version: 2.80.0-6ubuntu3.9
+Filename: pool/main/g/glib2.0/libglib2.0-data_2.80.0-6ubuntu3.9_all.deb
+SHA256: 87b6c824ce057baed1144474640e083f167096453393f93727f8d3a1d75a2707
+
+Package: libgmp10
+Architecture: amd64
+Version: 2:6.3.0+dfsg-2ubuntu6.1
+Filename: pool/main/g/gmp/libgmp10_6.3.0+dfsg-2ubuntu6.1_amd64.deb
+SHA256: 285f8a505dfa8e1b33f357a9d8d3477ad35bf18c0b34771a6df4c25923f3ae0d
+
+Package: libgnutls30t64
+Architecture: amd64
+Version: 3.8.3-1.1ubuntu3.6
+Filename: pool/main/g/gnutls28/libgnutls30t64_3.8.3-1.1ubuntu3.6_amd64.deb
+SHA256: b8944756260c5ea6b7fac019745f931f905aa7a4df0763676b1b25c911b692e2
+
+Package: libgpg-error-l10n
+Architecture: all
+Version: 1.47-3build2.1
+Filename: pool/main/libg/libgpg-error/libgpg-error-l10n_1.47-3build2.1_all.deb
+SHA256: a9c8cf9128208c5829b589e76d1782a9a90fbff90295fcbf303e0e8db62223ff
+
+Package: libgpg-error0
+Architecture: amd64
+Version: 1.47-3build2.1
+Filename: pool/main/libg/libgpg-error/libgpg-error0_1.47-3build2.1_amd64.deb
+SHA256: 93654ee8180a73a0363f25c51dc673d67cbabcbecd164187b8a2deb54d007aef
+
+Package: libgraphite2-3
+Architecture: amd64
+Version: 1.3.14-2ubuntu0.24.04.1
+Filename: pool/main/g/graphite2/libgraphite2-3_1.3.14-2ubuntu0.24.04.1_amd64.deb
+SHA256: 2413ea0f6670d6610ee7c2f550551d69fa341f4b9c78e20eb397f0d1bbe914cb
+
+Package: libgssapi-krb5-2
+Architecture: amd64
+Version: 1.20.1-6ubuntu2.10
+Filename: pool/main/k/krb5/libgssapi-krb5-2_1.20.1-6ubuntu2.10_amd64.deb
+SHA256: 0d4a0187bcdbbe3e6a10bfa574100087d12052d0d0ef28614fd6210021c587b2
+
+Package: libgstreamer1.0-0
+Architecture: amd64
+Version: 1.24.2-1ubuntu0.1
+Filename: pool/main/g/gstreamer1.0/libgstreamer1.0-0_1.24.2-1ubuntu0.1_amd64.deb
+SHA256: 306a6a5cff08630b79b8a68e5f888da7d8e209a452e9b5e24449cca95d8e71f5
+
+Package: libheif-plugin-aomdec
+Architecture: amd64
+Version: 1.17.6-1ubuntu4.9
+Filename: pool/main/libh/libheif/libheif-plugin-aomdec_1.17.6-1ubuntu4.9_amd64.deb
+SHA256: d5494f16d0e51b897a653a1f91e6bbdce4917476d7be40867cb214462cbd4fb2
+
+Package: libheif-plugin-aomenc
+Architecture: amd64
+Version: 1.17.6-1ubuntu4.9
+Filename: pool/main/libh/libheif/libheif-plugin-aomenc_1.17.6-1ubuntu4.9_amd64.deb
+SHA256: 987e34445c7afa8252dc926d6f4e0856d4bbd78bb6c851361a43301e1bac043d
+
+Package: libheif1
+Architecture: amd64
+Version: 1.17.6-1ubuntu4.9
+Filename: pool/main/libh/libheif/libheif1_1.17.6-1ubuntu4.9_amd64.deb
+SHA256: 1680862f44d1f15cb2a507596c268c0de30f636cd682e912859e241d7c033467
+
+Package: libhogweed6t64
+Architecture: amd64
+Version: 3.9.1-2.2build1.1
+Filename: pool/main/n/nettle/libhogweed6t64_3.9.1-2.2build1.1_amd64.deb
+SHA256: a9b5f7e9d49ba9060e1c933567046fbc6feab6096799cbf550b7214dc9b0f49b
+
+Package: libibverbs1
+Architecture: amd64
+Version: 50.0-2ubuntu0.2
+Filename: pool/main/r/rdma-core/libibverbs1_50.0-2ubuntu0.2_amd64.deb
+SHA256: 8489558105ee1d1c65ae6e0f1bac0e9b15f314a68f106ee9a63c89821242bd8e
+
+Package: libicu74
+Architecture: amd64
+Version: 74.2-1ubuntu3.1
+Filename: pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb
+SHA256: c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8
+
+Package: libidn2-0
+Architecture: amd64
+Version: 2.3.7-2build1.1
+Filename: pool/main/libi/libidn2/libidn2-0_2.3.7-2build1.1_amd64.deb
+SHA256: 46bfd10df095a23b65f58115de47a547c9a2d14627749bd0423ae78c14be77d3
+
+Package: libisns0t64
+Architecture: amd64
+Version: 0.101-0.3ubuntu0.1
+Filename: pool/main/o/open-isns/libisns0t64_0.101-0.3ubuntu0.1_amd64.deb
+SHA256: 759134d37b7cb3445ec68f5c9bf32942c472a15eff9a909a19c440e0d52e4b05
+
+Package: libjcat1
+Architecture: amd64
+Version: 0.2.3-1~ubuntu0.24.04.1
+Filename: pool/main/libj/libjcat/libjcat1_0.2.3-1~ubuntu0.24.04.1_amd64.deb
+SHA256: bca7e13f6ab9ff3a363a0362350689530f74dd0b65e9adc468d163eff30240f2
+
+Package: libjq1
+Architecture: amd64
+Version: 1.7.1-3ubuntu0.24.04.2
+Filename: pool/main/j/jq/libjq1_1.7.1-3ubuntu0.24.04.2_amd64.deb
+SHA256: 078fbf38b2e7c3f24cc5dc894d1bb03b617894b887a6e13d5943e13818e724f3
+
+Package: libk5crypto3
+Architecture: amd64
+Version: 1.20.1-6ubuntu2.10
+Filename: pool/main/k/krb5/libk5crypto3_1.20.1-6ubuntu2.10_amd64.deb
+SHA256: 273f7cc95a68d927d7f71c3e78b7717a16a8d86e646a206bae7bf797150ae9db
+
+Package: libklibc
+Architecture: amd64
+Version: 2.0.13-4ubuntu0.2
+Filename: pool/main/k/klibc/libklibc_2.0.13-4ubuntu0.2_amd64.deb
+SHA256: bf0f954755593208ea06f921aa27c45585196b7c44fc4d86c4c3f5c10f5d153e
+
+Package: libkmod2
+Architecture: amd64
+Version: 31+20240202-2ubuntu7.2
+Filename: pool/main/k/kmod/libkmod2_31+20240202-2ubuntu7.2_amd64.deb
+SHA256: a9cbdc424bc0a5c8af3d6445488a48de76df5ff4d76b7dab8aaf88f712358bbc
+
+Package: libkrb5-3
+Architecture: amd64
+Version: 1.20.1-6ubuntu2.10
+Filename: pool/main/k/krb5/libkrb5-3_1.20.1-6ubuntu2.10_amd64.deb
+SHA256: 60b48c5a3233f1d8caba30d6573edc8e131911ab6d63adcd664f7cbe62708362
+
+Package: libkrb5support0
+Architecture: amd64
+Version: 1.20.1-6ubuntu2.10
+Filename: pool/main/k/krb5/libkrb5support0_1.20.1-6ubuntu2.10_amd64.deb
+SHA256: 9224ede3246a82a845ea97652ecfae57f88e8d8f520d8a186f9157167574fb34
+
+Package: libldap-common
+Architecture: all
+Version: 2.6.10+dfsg-0ubuntu0.24.04.1
+Filename: pool/main/o/openldap/libldap-common_2.6.10+dfsg-0ubuntu0.24.04.1_all.deb
+SHA256: d509c254b8fea34f1e8186f6fccef1a499798931c471108c63529bcca9e40516
+
+Package: libldap2
+Architecture: amd64
+Version: 2.6.10+dfsg-0ubuntu0.24.04.1
+Filename: pool/main/o/openldap/libldap2_2.6.10+dfsg-0ubuntu0.24.04.1_amd64.deb
+SHA256: 7f3f8e565401256f21d5aa562c9f92dbb63537b73aaea6283e4db5264f1598f4
+
+Package: libllvm18
+Architecture: amd64
+Version: 1:18.1.3-1ubuntu1
+Filename: pool/main/l/llvm-toolchain-18/libllvm18_18.1.3-1ubuntu1_amd64.deb
+SHA256: af6197096ce3b89aab86de59f01c1b5feb008b2ae1514a03906c0664edb8b0b1
+
+Package: liblvm2cmd2.03
+Architecture: amd64
+Version: 2.03.16-3ubuntu3.2
+Filename: pool/main/l/lvm2/liblvm2cmd2.03_2.03.16-3ubuntu3.2_amd64.deb
+SHA256: d527e11d027f8413b1534556c0e78ce4a5a29583a57b2af37a8c32b84ba4e39b
+
+Package: liblz4-1
+Architecture: amd64
+Version: 1.9.4-1build1.1
+Filename: pool/main/l/lz4/liblz4-1_1.9.4-1build1.1_amd64.deb
+SHA256: 319331270d5cc52d5ebffe51c941d7b01b432bc402c2924b557209a64d4ecbad
+
+Package: liblzma5
+Architecture: amd64
+Version: 5.6.1+really5.4.5-1ubuntu0.3
+Filename: pool/main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1ubuntu0.3_amd64.deb
+SHA256: d2eabd41ca77d2c2dd9d5d4ef478cccb64ffde6279c47cf4699a857d46785a52
+
+Package: libmbim-glib4
+Architecture: amd64
+Version: 1.31.2-0ubuntu3.1
+Filename: pool/main/libm/libmbim/libmbim-glib4_1.31.2-0ubuntu3.1_amd64.deb
+SHA256: 69bf470c669ac3db729049a101c7bb7d2d1d7043d81953147f83498be5a64e05
+
+Package: libmbim-proxy
+Architecture: amd64
+Version: 1.31.2-0ubuntu3.1
+Filename: pool/main/libm/libmbim/libmbim-proxy_1.31.2-0ubuntu3.1_amd64.deb
+SHA256: dbffa54e6a8d5c52f7a3db629a9f91ef8558bb552a8e146d060e2f6f6af7c3c5
+
+Package: libmbim-utils
+Architecture: amd64
+Version: 1.31.2-0ubuntu3.1
+Filename: pool/main/libm/libmbim/libmbim-utils_1.31.2-0ubuntu3.1_amd64.deb
+SHA256: a2d34cce4e8ce77d2e27d0fa47430798b346555c0065482612c8a73b29fe56af
+
+Package: libmd0
+Architecture: amd64
+Version: 1.1.0-2build1.1
+Filename: pool/main/libm/libmd/libmd0_1.1.0-2build1.1_amd64.deb
+SHA256: e5ba01d3c41f256aaf57ec59aa0554857162e3e7f97cdfbff1ed2c0e8d720ee7
+
+Package: libmodule-scandeps-perl
+Architecture: all
+Version: 1.35-1ubuntu0.24.04.1
+Filename: pool/main/libm/libmodule-scandeps-perl/libmodule-scandeps-perl_1.35-1ubuntu0.24.04.1_all.deb
+SHA256: 5f8cd74bdab977385652a8106d8f5727dba52dd561b1cd6b5fd9a7fef317e01c
+
+Package: libmount1
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/libmount1_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: 8f2c25589f187dacfdc5bb6be2af0aee6c2ba7b4d2edd1ca4b26753469f07aae
+
+Package: libmpfr6
+Architecture: amd64
+Version: 4.2.1-1build1.1
+Filename: pool/main/m/mpfr4/libmpfr6_4.2.1-1build1.1_amd64.deb
+SHA256: aebc1c8b69a1f98bb43dfc268daecd181116dbf40b13ee4e822eb4bdd52b493a
+
+Package: libncurses6
+Architecture: amd64
+Version: 6.4+20240113-1ubuntu2.2
+Filename: pool/main/n/ncurses/libncurses6_6.4+20240113-1ubuntu2.2_amd64.deb
+SHA256: 59e8527dfd14473393960bfb7c69566f1ad9d576423421dcb8b8dcdbb3e7fca1
+
+Package: libncursesw6
+Architecture: amd64
+Version: 6.4+20240113-1ubuntu2.2
+Filename: pool/main/n/ncurses/libncursesw6_6.4+20240113-1ubuntu2.2_amd64.deb
+SHA256: 579c9488755d1ddd70f66480cafd2f68776f68314d15d9cf4b5449d0de0fc968
+
+Package: libnetplan1
+Architecture: amd64
+Version: 1.1.2-8ubuntu1~24.04.3
+Filename: pool/main/n/netplan.io/libnetplan1_1.1.2-8ubuntu1~24.04.3_amd64.deb
+SHA256: bd089ac3bb276e6a2897d48cf929a4a635c3d9f7e0c9164869ba0e8d6bf3e091
+
+Package: libnettle8t64
+Architecture: amd64
+Version: 3.9.1-2.2build1.1
+Filename: pool/main/n/nettle/libnettle8t64_3.9.1-2.2build1.1_amd64.deb
+SHA256: 6d97fbc1972633083f08f51ccab433606c97bbceb897c631c66495117ca3406f
+
+Package: libnftables1
+Architecture: amd64
+Version: 1.0.9-1ubuntu0.1
+Filename: pool/main/n/nftables/libnftables1_1.0.9-1ubuntu0.1_amd64.deb
+SHA256: fcaee001747a6adaa0cd9337fef437b3aa7a7a6d5246b62fbd4784d3d6a5009e
+
+Package: libnghttp2-14
+Architecture: amd64
+Version: 1.59.0-1ubuntu0.4
+Filename: pool/main/n/nghttp2/libnghttp2-14_1.59.0-1ubuntu0.4_amd64.deb
+SHA256: 73adcbb9df32cd7c9d46b1c7598bbbbcf249be705d62d966694cfc9976a15dfe
+
+Package: libnl-3-200
+Architecture: amd64
+Version: 3.7.0-0.3build1.1
+Filename: pool/main/libn/libnl3/libnl-3-200_3.7.0-0.3build1.1_amd64.deb
+SHA256: 15b3f61db753dc3db6f62f4259f8b822299343e500886776486612a13a2ed247
+
+Package: libnl-genl-3-200
+Architecture: amd64
+Version: 3.7.0-0.3build1.1
+Filename: pool/main/libn/libnl3/libnl-genl-3-200_3.7.0-0.3build1.1_amd64.deb
+SHA256: 9ca0cb63f295d00e6346b9924278c07cfc61311cbd288b805b06e25aa08c9fd8
+
+Package: libnl-route-3-200
+Architecture: amd64
+Version: 3.7.0-0.3build1.1
+Filename: pool/main/libn/libnl3/libnl-route-3-200_3.7.0-0.3build1.1_amd64.deb
+SHA256: c9dbd29cb7fdcf1a0587726cbc5432a7d3e81242108dfcfa2dd6716c44c74d4d
+
+Package: libnss-systemd
+Architecture: amd64
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/libnss-systemd_255.4-1ubuntu8.17_amd64.deb
+SHA256: 19379b984aa26e95b592068f37e5259a2f44fd985273157f161f6b31077ce787
+
+Package: libnss3
+Architecture: amd64
+Version: 2:3.98-1ubuntu0.2
+Filename: pool/main/n/nss/libnss3_3.98-1ubuntu0.2_amd64.deb
+SHA256: 4254f11d782dfb970e78113519a59d440112ed43c4b56f709da0aef81da8651a
+
+Package: libntfs-3g89t64
+Architecture: amd64
+Version: 1:2022.10.3-1.2ubuntu3.2
+Filename: pool/main/n/ntfs-3g/libntfs-3g89t64_2022.10.3-1.2ubuntu3.2_amd64.deb
+SHA256: 4ae668265884cbccb44d01a389cee7909343916627d21b04a7f202719d916071
+
+Package: libnuma1
+Architecture: amd64
+Version: 2.0.18-1ubuntu0.24.04.1
+Filename: pool/main/n/numactl/libnuma1_2.0.18-1ubuntu0.24.04.1_amd64.deb
+SHA256: f333b8edf6f0b705c19f2a67008194df66f7aab0fa2350dc98510569a033ff29
+
+Package: libnvme1t64
+Architecture: amd64
+Version: 1.8-3ubuntu1
+Filename: pool/main/libn/libnvme/libnvme1t64_1.8-3ubuntu1_amd64.deb
+SHA256: 6cf86a02e66abf2fbdef9f97340775bbe0b58c7b687e146636cc1ed1702e4c59
+
+Package: libopeniscsiusr
+Architecture: amd64
+Version: 2.1.9-3ubuntu5.4
+Filename: pool/main/o/open-iscsi/libopeniscsiusr_2.1.9-3ubuntu5.4_amd64.deb
+SHA256: f7398352c3d7b9a8502a631ef072a7aca6385c1a374f00a6e1ea0fbda14dd031
+
+Package: libp11-kit0
+Architecture: amd64
+Version: 0.25.3-4ubuntu2.2
+Filename: pool/main/p/p11-kit/libp11-kit0_0.25.3-4ubuntu2.2_amd64.deb
+SHA256: e7c58aeac19d89f5f1492dfaa52b8623bcd56edc40983f5243ad56d94f477bf2
+
+Package: libpackagekit-glib2-18
+Architecture: amd64
+Version: 1.2.8-2ubuntu1.5
+Filename: pool/main/p/packagekit/libpackagekit-glib2-18_1.2.8-2ubuntu1.5_amd64.deb
+SHA256: 1547df2ca59565e255616c8ffa9ca4088a48584103f92bbe56e1f3da984f902f
+
+Package: libpam-cap
+Architecture: amd64
+Version: 1:2.66-5ubuntu2.4
+Filename: pool/main/libc/libcap2/libpam-cap_2.66-5ubuntu2.4_amd64.deb
+SHA256: d25dfd8aca462788683f3d98b1b1867d58969f331e88608a73953254ed75d5ed
+
+Package: libpam-modules
+Architecture: amd64
+Version: 1.5.3-5ubuntu5.7
+Filename: pool/main/p/pam/libpam-modules_1.5.3-5ubuntu5.7_amd64.deb
+SHA256: c8e86ef52e3a743dc67d90f4c6654f7f529deafa6a523fe9076e809785aeea18
+
+Package: libpam-modules-bin
+Architecture: amd64
+Version: 1.5.3-5ubuntu5.7
+Filename: pool/main/p/pam/libpam-modules-bin_1.5.3-5ubuntu5.7_amd64.deb
+SHA256: e6753b038042cd007843cbc79a81e732d82d0d2415bcf78ff2120c50b5e54f82
+
+Package: libpam-runtime
+Architecture: all
+Version: 1.5.3-5ubuntu5.7
+Filename: pool/main/p/pam/libpam-runtime_1.5.3-5ubuntu5.7_all.deb
+SHA256: 879a23df25b1ba28801c9caf73f1ac36724bdff9834b5a0db7d0ac5ba6f8e191
+
+Package: libpam-systemd
+Architecture: amd64
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/libpam-systemd_255.4-1ubuntu8.17_amd64.deb
+SHA256: 60b50012e97f815686fcd5ff2055c13396d354bbac9974a77e8557346ccebe4e
+
+Package: libpam0g
+Architecture: amd64
+Version: 1.5.3-5ubuntu5.7
+Filename: pool/main/p/pam/libpam0g_1.5.3-5ubuntu5.7_amd64.deb
+SHA256: 1d7f54e77f0455ab5e607cd5e78b576801d8efdc66115e02cf3c6e708d093667
+
+Package: libpcap0.8t64
+Architecture: amd64
+Version: 1.10.4-4.1ubuntu3.1
+Filename: pool/main/libp/libpcap/libpcap0.8t64_1.10.4-4.1ubuntu3.1_amd64.deb
+SHA256: 58e93055e14afdd27ff5faf62cf738ce5e79c06c30b3f83561beba874e5d8b67
+
+Package: libpcre2-8-0
+Architecture: amd64
+Version: 10.42-4ubuntu2.1
+Filename: pool/main/p/pcre2/libpcre2-8-0_10.42-4ubuntu2.1_amd64.deb
+SHA256: 110a797a57673d3ee497a141cf988199258058c57525799c63194d81822529a0
+
+Package: libperl5.38t64
+Architecture: amd64
+Version: 5.38.2-3.2ubuntu0.6
+Filename: pool/main/p/perl/libperl5.38t64_5.38.2-3.2ubuntu0.6_amd64.deb
+SHA256: e9e5ac9a657e0cacf5f0de977c1573c696ee74515d5136c4e9a0ce9467d32ae7
+
+Package: libplymouth5
+Architecture: amd64
+Version: 24.004.60-1ubuntu7.2
+Filename: pool/main/p/plymouth/libplymouth5_24.004.60-1ubuntu7.2_amd64.deb
+SHA256: 3ebb74c8bafcef6967565c6b05e39d73484ebdd7bc98f8a8d7412024ddbde73d
+
+Package: libpng16-16t64
+Architecture: amd64
+Version: 1.6.43-5ubuntu0.6
+Filename: pool/main/libp/libpng1.6/libpng16-16t64_1.6.43-5ubuntu0.6_amd64.deb
+SHA256: ac0163f58b8aa52dfdd17cdc10a83f3db084cb91a62686023f5c983d6ff89f8b
+
+Package: libpolkit-agent-1-0
+Architecture: amd64
+Version: 124-2ubuntu1.24.04.4
+Filename: pool/main/p/policykit-1/libpolkit-agent-1-0_124-2ubuntu1.24.04.4_amd64.deb
+SHA256: a866dda52a6db409bf3da9006a06ada11b1b921af760f016d091a480ececa8ce
+
+Package: libpolkit-gobject-1-0
+Architecture: amd64
+Version: 124-2ubuntu1.24.04.4
+Filename: pool/main/p/policykit-1/libpolkit-gobject-1-0_124-2ubuntu1.24.04.4_amd64.deb
+SHA256: e19b4dda5c402bf2982bd454c84177acd54f4c7b67b83c949b2c72443c10531e
+
+Package: libproc2-0
+Architecture: amd64
+Version: 2:4.0.4-4ubuntu3.3
+Filename: pool/main/p/procps/libproc2-0_4.0.4-4ubuntu3.3_amd64.deb
+SHA256: 8a73e2656ddcdb078e06e20abb5a92b182145e12376a9a9282db8374da34d228
+
+Package: libpython3-stdlib
+Architecture: amd64
+Version: 3.12.3-0ubuntu2.1
+Filename: pool/main/p/python3-defaults/libpython3-stdlib_3.12.3-0ubuntu2.1_amd64.deb
+SHA256: 57ebb378c59d2f9ef479bee0abc933c560878cc10e2c3af8e05d6fdb2ed63da4
+
+Package: libpython3.12-minimal
+Architecture: amd64
+Version: 3.12.3-1ubuntu0.17
+Filename: pool/main/p/python3.12/libpython3.12-minimal_3.12.3-1ubuntu0.17_amd64.deb
+SHA256: d646ad7112b5adec21ba0e1af015f04ae8ca7f5efdc619622547dd6673c4c14b
+
+Package: libpython3.12-stdlib
+Architecture: amd64
+Version: 3.12.3-1ubuntu0.17
+Filename: pool/main/p/python3.12/libpython3.12-stdlib_3.12.3-1ubuntu0.17_amd64.deb
+SHA256: 45d3f530ba1f9d6e879ad46b92046fabab13fe50a82450e4f65557a3bbad1489
+
+Package: libpython3.12t64
+Architecture: amd64
+Version: 3.12.3-1ubuntu0.17
+Filename: pool/main/p/python3.12/libpython3.12t64_3.12.3-1ubuntu0.17_amd64.deb
+SHA256: 0d29f4763eb95b8a4283a4aca3ef1d9658629c618be1778def41bdc31be12b46
+
+Package: libsasl2-2
+Architecture: amd64
+Version: 2.1.28+dfsg1-5ubuntu3.1
+Filename: pool/main/c/cyrus-sasl2/libsasl2-2_2.1.28+dfsg1-5ubuntu3.1_amd64.deb
+SHA256: eda097f98dcb3a08b9ce157d6191d140e4885c1cba47b683c94b8ca45e88f458
+
+Package: libsasl2-modules
+Architecture: amd64
+Version: 2.1.28+dfsg1-5ubuntu3.1
+Filename: pool/main/c/cyrus-sasl2/libsasl2-modules_2.1.28+dfsg1-5ubuntu3.1_amd64.deb
+SHA256: a05457e0cc509235bcca25ab857ceb29465bfa23c559036f15b3ce557c8a5153
+
+Package: libsasl2-modules-db
+Architecture: amd64
+Version: 2.1.28+dfsg1-5ubuntu3.1
+Filename: pool/main/c/cyrus-sasl2/libsasl2-modules-db_2.1.28+dfsg1-5ubuntu3.1_amd64.deb
+SHA256: 1f13548b1774cd9c70c50b8c3267204a101334a4d2f979338896ba5a4c6f81b8
+
+Package: libseccomp2
+Architecture: amd64
+Version: 2.5.5-1ubuntu3.1
+Filename: pool/main/libs/libseccomp/libseccomp2_2.5.5-1ubuntu3.1_amd64.deb
+SHA256: 33fc96f1e008d27c042a3db9bcd16f7f4d49e866f7a3141b758a799328dbdc3f
+
+Package: libselinux1
+Architecture: amd64
+Version: 3.5-2ubuntu2.1
+Filename: pool/main/libs/libselinux/libselinux1_3.5-2ubuntu2.1_amd64.deb
+SHA256: 6abaa6c26f46ef17764c4a753e0e84de1cdadde5634fd2987621fdc617988d19
+
+Package: libsmartcols1
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/libsmartcols1_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: 84f33a780d27cce20a2cd925e7ce8498daba2dbc614d433548a19fbb2c5dac18
+
+Package: libsodium23
+Architecture: amd64
+Version: 1.0.18-1ubuntu0.24.04.1
+Filename: pool/main/libs/libsodium/libsodium23_1.0.18-1ubuntu0.24.04.1_amd64.deb
+SHA256: 74d6f8fbd65f7f71b6f4f4223bef5fb57c1c14cd4e9ce788ead2b88e8c3ee236
+
+Package: libsqlite3-0
+Architecture: amd64
+Version: 3.45.1-1ubuntu2.8
+Filename: pool/main/s/sqlite3/libsqlite3-0_3.45.1-1ubuntu2.8_amd64.deb
+SHA256: b1190bb72359f5fcc47406aa46065eaf4f1ca208085c51224a52b04bedc0b4bb
+
+Package: libss2
+Architecture: amd64
+Version: 1.47.0-2.4~exp1ubuntu4.1
+Filename: pool/main/e/e2fsprogs/libss2_1.47.0-2.4~exp1ubuntu4.1_amd64.deb
+SHA256: e3b6140b815970461c4312f1dc3d6b1f0d62d99f4ebe2ad087bffa630010035a
+
+Package: libssh-4
+Architecture: amd64
+Version: 0.10.6-2ubuntu0.5
+Filename: pool/main/libs/libssh/libssh-4_0.10.6-2ubuntu0.5_amd64.deb
+SHA256: 2448ce5f99e49721d12f8b227f2472dd08ed7a78184dd819fd03a42693024a16
+
+Package: libssl3t64
+Architecture: amd64
+Version: 3.0.13-0ubuntu3.16
+Filename: pool/main/o/openssl/libssl3t64_3.0.13-0ubuntu3.16_amd64.deb
+SHA256: 219f43b1cd836a4da550938db5fda93160d269d39a4edcf1f1ce698a470db797
+
+Package: libstdc++6
+Architecture: amd64
+Version: 14.2.0-4ubuntu2~24.04.1
+Filename: pool/main/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_amd64.deb
+SHA256: a51f8de7829211db961a31f02158058ad1a95f92ac6d0a5dff6350e2821c54c0
+
+Package: libsystemd-shared
+Architecture: amd64
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/libsystemd-shared_255.4-1ubuntu8.17_amd64.deb
+SHA256: 8722a69d99c1a7e6f72c5389e9c6d8053d95d2f5f4fede5dc83118f735812518
+
+Package: libsystemd0
+Architecture: amd64
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/libsystemd0_255.4-1ubuntu8.17_amd64.deb
+SHA256: 4776d2ac7e21efe2ae31f3f7955a7ccd97277225eecf36910a26faf4544979ae
+
+Package: libtasn1-6
+Architecture: amd64
+Version: 4.19.0-3ubuntu0.24.04.2
+Filename: pool/main/libt/libtasn1-6/libtasn1-6_4.19.0-3ubuntu0.24.04.2_amd64.deb
+SHA256: f82c9ad142f952ea523bda5bfca7bb0802af3a50b8c0f0dd9ec18cdfa104bde7
+
+Package: libtiff6
+Architecture: amd64
+Version: 4.5.1+git230720-4ubuntu2.5
+Filename: pool/main/t/tiff/libtiff6_4.5.1+git230720-4ubuntu2.5_amd64.deb
+SHA256: 564cdf59dda5e1a826c51b5868ee2785fffa26ee5a7bad95bc5e8c8224c931b8
+
+Package: libtinfo6
+Architecture: amd64
+Version: 6.4+20240113-1ubuntu2.2
+Filename: pool/main/n/ncurses/libtinfo6_6.4+20240113-1ubuntu2.2_amd64.deb
+SHA256: b67a6df2bdab61d273eabebd208bb6a3fb12618a390a067e1ee305a409ff03d9
+
+Package: libtraceevent1
+Architecture: amd64
+Version: 1:1.8.2-1ubuntu2.1
+Filename: pool/main/libt/libtraceevent/libtraceevent1_1.8.2-1ubuntu2.1_amd64.deb
+SHA256: fb03496824a22ffb70c67a92a66c4e369bbbefc934078a1fecda564364793d56
+
+Package: libtraceevent1-plugin
+Architecture: amd64
+Version: 1:1.8.2-1ubuntu2.1
+Filename: pool/main/libt/libtraceevent/libtraceevent1-plugin_1.8.2-1ubuntu2.1_amd64.deb
+SHA256: 47219f2315b4855daa19e8c5070a5f73a2d14dc13235c1d26d4a4bbadac7730a
+
+Package: libtss2-esys-3.0.2-0t64
+Architecture: amd64
+Version: 4.0.1-7.1ubuntu5.1
+Filename: pool/main/t/tpm2-tss/libtss2-esys-3.0.2-0t64_4.0.1-7.1ubuntu5.1_amd64.deb
+SHA256: 7ae4f9fdfd7b5221a294dd91b4f595f426b3c8aa7dc39be3e65824971e916fe2
+
+Package: libtss2-mu-4.0.1-0t64
+Architecture: amd64
+Version: 4.0.1-7.1ubuntu5.1
+Filename: pool/main/t/tpm2-tss/libtss2-mu-4.0.1-0t64_4.0.1-7.1ubuntu5.1_amd64.deb
+SHA256: 9940a4de987536b357fde7a3137f7dc00a188ad744905af061b437ae22f7012b
+
+Package: libtss2-sys1t64
+Architecture: amd64
+Version: 4.0.1-7.1ubuntu5.1
+Filename: pool/main/t/tpm2-tss/libtss2-sys1t64_4.0.1-7.1ubuntu5.1_amd64.deb
+SHA256: 0590ff8e5126ed3de8e8588ac3b538f4d32e3174c5480722d1e9f6389acf3c0d
+
+Package: libtss2-tcti-cmd0t64
+Architecture: amd64
+Version: 4.0.1-7.1ubuntu5.1
+Filename: pool/main/t/tpm2-tss/libtss2-tcti-cmd0t64_4.0.1-7.1ubuntu5.1_amd64.deb
+SHA256: fc53beb421a94bba344d2fd37c6cf524c604aac18382ce0f9c2ffe5564f1b7ac
+
+Package: libtss2-tcti-device0t64
+Architecture: amd64
+Version: 4.0.1-7.1ubuntu5.1
+Filename: pool/main/t/tpm2-tss/libtss2-tcti-device0t64_4.0.1-7.1ubuntu5.1_amd64.deb
+SHA256: d55ce053c026de094b9129438548141ab9b623f33edd62c756ed6df601e6e7ca
+
+Package: libtss2-tcti-mssim0t64
+Architecture: amd64
+Version: 4.0.1-7.1ubuntu5.1
+Filename: pool/main/t/tpm2-tss/libtss2-tcti-mssim0t64_4.0.1-7.1ubuntu5.1_amd64.deb
+SHA256: 5d4caaa0881695c17c5d864d12ff25f42b5da8bb702b4e790da92f463782475f
+
+Package: libtss2-tcti-swtpm0t64
+Architecture: amd64
+Version: 4.0.1-7.1ubuntu5.1
+Filename: pool/main/t/tpm2-tss/libtss2-tcti-swtpm0t64_4.0.1-7.1ubuntu5.1_amd64.deb
+SHA256: 23da903b6baf636d264b7739360392baf3e01e3459fc4f5dddd60518bec9e2a3
+
+Package: libudev1
+Architecture: amd64
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/libudev1_255.4-1ubuntu8.17_amd64.deb
+SHA256: 6efea3770f738db2fd43ebdaed3d91ef0cde8aa8387b4803080af473326ebdb0
+
+Package: libudisks2-0
+Architecture: amd64
+Version: 2.10.1-6ubuntu1.5
+Filename: pool/main/u/udisks2/libudisks2-0_2.10.1-6ubuntu1.5_amd64.deb
+SHA256: 177ad727eb13f5ec515a11f1936224a727774533c08bb371357b8dbc96c67662
+
+Package: libunistring5
+Architecture: amd64
+Version: 1.1-2build1.1
+Filename: pool/main/libu/libunistring/libunistring5_1.1-2build1.1_amd64.deb
+SHA256: 203d7657b5f54633fba1a9c9b784d556ef83c9f6787b3185ba55a88e07b865a3
+
+Package: libunwind8
+Architecture: amd64
+Version: 1.6.2-3build1.1
+Filename: pool/main/libu/libunwind/libunwind8_1.6.2-3build1.1_amd64.deb
+SHA256: 825cb8724bb6b3389587e30c03ab3381f56a2422cafe3b1945f37e055c65e942
+
+Package: libuuid1
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/libuuid1_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: 7e2992d3a79fc05514dc5966558ee9c66a7214a47edf2a36017b9e2777528665
+
+Package: libxml2
+Architecture: amd64
+Version: 2.9.14+dfsg-1.3ubuntu3.9
+Filename: pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3.9_amd64.deb
+SHA256: 6e578bc383096718c9eea8a76a3edfacfea06e525e1aa7a187ee41906436d94e
+
+Package: libxmlb2
+Architecture: amd64
+Version: 0.3.24-1~ubuntu0.24.04.1
+Filename: pool/main/libx/libxmlb/libxmlb2_0.3.24-1~ubuntu0.24.04.1_amd64.deb
+SHA256: 69916d794b0aad84ae3d4a7d08caa06e595bcd99c80af32c9b3eaa2eba342d4c
+
+Package: libxpm4
+Architecture: amd64
+Version: 1:3.5.17-1ubuntu0.24.04.2
+Filename: pool/main/libx/libxpm/libxpm4_3.5.17-1ubuntu0.24.04.2_amd64.deb
+SHA256: e14b1581dc675ded6519132f5fccb31b39d534117399d3153082e353b6fe2704
+
+Package: libxslt1.1
+Architecture: amd64
+Version: 1.1.39-0exp1ubuntu0.24.04.3
+Filename: pool/main/libx/libxslt/libxslt1.1_1.1.39-0exp1ubuntu0.24.04.3_amd64.deb
+SHA256: e716daf96ea2526cab92e5cc4708739d5f2f4b89fb76782dfda7f49283eeeb40
+
+Package: libzstd1
+Architecture: amd64
+Version: 1.5.5+dfsg2-2build1.1
+Filename: pool/main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1.1_amd64.deb
+SHA256: dfcf25061e07aad7efd3f4f880ba5ad4d4d09ebe7fc8cc77ab6b8a161d6d4727
+
+Package: linux-base
+Architecture: all
+Version: 4.5ubuntu9+24.04.2
+Filename: pool/main/l/linux-base/linux-base_4.5ubuntu9+24.04.2_all.deb
+SHA256: b6ea776f8a0b0ce788d8920b3d6a7843ac731ec12d41e6718da9294fdacff633
+
+Package: linux-image-7.0.0-38-generic
+Architecture: amd64
+Version: 7.0.0-38.38~24.04.4
+Filename: pool/main/l/linux-signed-hwe-7.0/linux-image-7.0.0-38-generic_7.0.0-38.38~24.04.4_amd64.deb
+SHA256: 1791405b126cb2ef8b969dc6706292a02c12da9f581bb3f8fac2d1272a419fd4
+
+Package: linux-image-virtual-hwe-24.04
+Architecture: amd64
+Version: 7.0.0-38.38~24.04.4
+Filename: pool/main/l/linux-meta-hwe-7.0/linux-image-virtual-hwe-24.04_7.0.0-38.38~24.04.4_amd64.deb
+SHA256: ce9c67a6d5d8681f01682eb43312a279405cc206398ab230758dc55579da2101
+
+Package: linux-libc-dev
+Architecture: amd64
+Version: 6.8.0-146.146
+Filename: pool/main/l/linux/linux-libc-dev_6.8.0-146.146_amd64.deb
+SHA256: 1a7bb04132d01cd14bea3d615e5861096ca1f70c4659902eb14b36c21993cadc
+
+Package: linux-main-modules-v4l2loopback-7.0.0-38-generic
+Architecture: amd64
+Version: 7.0.0-38.38~24.04.4
+Filename: pool/main/l/linux-main-signed-hwe-7.0/linux-main-modules-v4l2loopback-7.0.0-38-generic_7.0.0-38.38~24.04.4_amd64.deb
+SHA256: e235f65cf8d56f6658f71690a77e9ddd39bc528c7f158a179de2a0d96c3f7978
+
+Package: linux-main-modules-zfs-7.0.0-38-generic
+Architecture: amd64
+Version: 7.0.0-38.38~24.04.4
+Filename: pool/main/l/linux-main-signed-hwe-7.0/linux-main-modules-zfs-7.0.0-38-generic_7.0.0-38.38~24.04.4_amd64.deb
+SHA256: 1c332f89afb3be2d3268ae4511a2ccad27b6f031a128b083ec4bef897d372566
+
+Package: linux-modules-7.0.0-38-generic
+Architecture: amd64
+Version: 7.0.0-38.38~24.04.4
+Filename: pool/main/l/linux-hwe-7.0/linux-modules-7.0.0-38-generic_7.0.0-38.38~24.04.4_amd64.deb
+SHA256: 99536f44ce1802e63ed79a90d386bb1025ec12bf7a2f5af43287dbb4af247202
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-41.41
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-41.41_all.deb
+SHA256: ea00c274eccfd760eb7f0ad7684415081e504814ff1ce3e7a6ef053b88b011c3
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-53.55
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-53.55_all.deb
+SHA256: b7feb382977cbcf3515b6cf4fd7ad0dfe234b497d4e7f307d955b30abfed10b7
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-71.71
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-71.71_all.deb
+SHA256: f72d84b9454c96233ef5c4c8de6661a33c7a5687efe08c558c63b660113d7e06
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-100.100
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-100.100_all.deb
+SHA256: eb62a667507f0ff99c94652d77b436482489cd89ac2f82edddd8fc426f8db0cd
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-101.101
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-101.101_all.deb
+SHA256: eaaad658e7685b52b20130461c4061eaf2ce079583d9af0cff55d4b38fdb098f
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-106.106
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-106.106_all.deb
+SHA256: 88b9418627a33964e5ee2b9183f89e8e67c6a7b5f2bab3715f5f8fa593671afd
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-107.107
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-107.107_all.deb
+SHA256: 5e871735a84746f141d1f4aa16ece486be37ca80df38b988911671fd6b6a2ce4
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-110.110
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-110.110_all.deb
+SHA256: 1ff48be27725a05dac72a522e8aa1044aa22fe6e1851bfc41609cbe1c9db03a4
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-111.111
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-111.111_all.deb
+SHA256: f60923ceb5b21891446885056a452957ae12078913c31b795703f72195168ac1
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-117.117
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-117.117_all.deb
+SHA256: 0b0e19e644eaf2e702cab1ea868c1c9fbcd920ed7d26aaa07d78ed4b7b8c9582
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-124.124
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-124.124_all.deb
+SHA256: 2c09819cdb0c381843985491ca02e96b3cb22d2dfd6e38c9acef04a28a4d5ad3
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-134.134
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-134.134_all.deb
+SHA256: f436d016475c4bc811d9db2424019fb6007597d2c2e496beafe28990c0cb20a1
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-136.136
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-136.136_all.deb
+SHA256: 292f04e94a321b95d072d758009170b514b9fed08e41f711017cbe1c01e7e136
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-137.137
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-137.137_all.deb
+SHA256: 36e5e053cd7d9bb3a87f79dcc6f2bed9794b9432fbbb7e7e5a03a7aa0b14e412
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-138.138
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-138.138_all.deb
+SHA256: 557be625abea935b5b6cd9cc9ba5ddcd3ffbe030ce01e26c5b8f919dc9d7a230
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-139.139
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-139.139_all.deb
+SHA256: 587c0fa13f58ef652652caec799a580fb956452fe7ebf055d095003569c737db
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-142.142
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-142.142_all.deb
+SHA256: 3ea14c2ba59dba71d9b2aea8156d933f84c6961e05f9415cd0aa0588cc593621
+
+Package: linux-tools-common
+Architecture: all
+Version: 6.8.0-146.146
+Filename: pool/main/l/linux/linux-tools-common_6.8.0-146.146_all.deb
+SHA256: 85e04feef3d18834391d8352269e4e57d999ba0a81d11c09873e173266059fc2
+
+Package: locales
+Architecture: all
+Version: 2.39-0ubuntu8.9
+Filename: pool/main/g/glibc/locales_2.39-0ubuntu8.9_all.deb
+SHA256: f8310ef4ba442845cf5d44a5ce3d5d7accb659bae96b3a0999002132209cd367
+
+Package: login
+Architecture: amd64
+Version: 1:4.13+dfsg1-4ubuntu3.2
+Filename: pool/main/s/shadow/login_4.13+dfsg1-4ubuntu3.2_amd64.deb
+SHA256: 393cb0ed5c12e5a6c0f8e1f0c035fbc5781c19321f43c7d10733c917fb17e01b
+
+Package: logsave
+Architecture: amd64
+Version: 1.47.0-2.4~exp1ubuntu4.1
+Filename: pool/main/e/e2fsprogs/logsave_1.47.0-2.4~exp1ubuntu4.1_amd64.deb
+SHA256: dba74a557ae28b51b5a5190aefeef611cbf989211b1814282d58a1c536f43b5b
+
+Package: lshw
+Architecture: amd64
+Version: 02.19.git.2021.06.19.996aaad9c7-2ubuntu0.24.04.1
+Filename: pool/main/l/lshw/lshw_02.19.git.2021.06.19.996aaad9c7-2ubuntu0.24.04.1_amd64.deb
+SHA256: fd431d5eb27fea7f8fa1048f76e0d9cc2969cf307f7e84848ad02b81a2d8b580
+
+Package: lvm2
+Architecture: amd64
+Version: 2.03.16-3ubuntu3.2
+Filename: pool/main/l/lvm2/lvm2_2.03.16-3ubuntu3.2_amd64.deb
+SHA256: 6333e7396390aae125153e42148a57818461db8b6b8784db11b707df831ab61c
+
+Package: lxd-agent-loader
+Architecture: all
+Version: 0.7ubuntu0.1
+Filename: pool/main/l/lxd-agent-loader/lxd-agent-loader_0.7ubuntu0.1_all.deb
+SHA256: ce2aa5b188fb286f9c8eae05ad424bb10a161d260f64a57163f0f66f03880752
+
+Package: lxd-installer
+Architecture: all
+Version: 4ubuntu0.1
+Filename: pool/main/l/lxd-installer/lxd-installer_4ubuntu0.1_all.deb
+SHA256: 1359e30487b9316e84fab65f0cade57d534fe5d63dff5c560707581729251323
+
+Package: mdadm
+Architecture: amd64
+Version: 4.3-1ubuntu2.1
+Filename: pool/main/m/mdadm/mdadm_4.3-1ubuntu2.1_amd64.deb
+SHA256: 7d5691bd73244e677a8cc800c237110074007b26f1800d0d1d22bdbddc10cfa6
+
+Package: motd-news-config
+Architecture: all
+Version: 13ubuntu10.5
+Filename: pool/main/b/base-files/motd-news-config_13ubuntu10.5_all.deb
+SHA256: 0a48c0461e5716578654a78bac4fb60388ef62cd8f1621ed839a3d18dce3d897
+
+Package: mount
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/mount_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: 09e929ceb9fc5d11757f28429b3151601c44db4c96e0bc5ad46c501c8d56f4f9
+
+Package: mtr-tiny
+Architecture: amd64
+Version: 0.95-1.1ubuntu0.1
+Filename: pool/main/m/mtr/mtr-tiny_0.95-1.1ubuntu0.1_amd64.deb
+SHA256: 185a8b996a448628bd05f5407a1d945b1511089919e13b540513c47611df73a0
+
+Package: multipath-tools
+Architecture: amd64
+Version: 0.9.4-5ubuntu8.2
+Filename: pool/main/m/multipath-tools/multipath-tools_0.9.4-5ubuntu8.2_amd64.deb
+SHA256: b4a73a7babb429eb2f68ee24d2384903e0a703d1531064d29d72c2751c2ace5c
+
+Package: nano
+Architecture: amd64
+Version: 7.2-2ubuntu0.2
+Filename: pool/main/n/nano/nano_7.2-2ubuntu0.2_amd64.deb
+SHA256: 41a7c04b40ed8b3b3f2327fb190851a3485317dd26b7bdefe21a78da788f28aa
+
+Package: ncurses-base
+Architecture: all
+Version: 6.4+20240113-1ubuntu2.2
+Filename: pool/main/n/ncurses/ncurses-base_6.4+20240113-1ubuntu2.2_all.deb
+SHA256: 7a00fc1174fbc32ce68bfd2038ca4b8275dc2851f78e911180c0928534682b05
+
+Package: ncurses-bin
+Architecture: amd64
+Version: 6.4+20240113-1ubuntu2.2
+Filename: pool/main/n/ncurses/ncurses-bin_6.4+20240113-1ubuntu2.2_amd64.deb
+SHA256: 897a9d87aebfd92ed47223faef6ce40fa19196309ee98cfd8479ed38e5f75773
+
+Package: ncurses-term
+Architecture: all
+Version: 6.4+20240113-1ubuntu2.2
+Filename: pool/main/n/ncurses/ncurses-term_6.4+20240113-1ubuntu2.2_all.deb
+SHA256: 2668c9473c2d89669eec7affc4e8aaca97bc1d22bbd730cc4b2140354c1095f8
+
+Package: needrestart
+Architecture: all
+Version: 3.6-7ubuntu4.5
+Filename: pool/main/n/needrestart/needrestart_3.6-7ubuntu4.5_all.deb
+SHA256: 0fafb62367a17255e729c9f56eb8b7339c81272f8b6b84925cfa7ef46ad3d174
+
+Package: netplan-generator
+Architecture: amd64
+Version: 1.1.2-8ubuntu1~24.04.3
+Filename: pool/main/n/netplan.io/netplan-generator_1.1.2-8ubuntu1~24.04.3_amd64.deb
+SHA256: 81895542a8d4e527c4faa6234a16f60c0cd102357a0b69fea10ee95907511bf7
+
+Package: netplan.io
+Architecture: amd64
+Version: 1.1.2-8ubuntu1~24.04.3
+Filename: pool/main/n/netplan.io/netplan.io_1.1.2-8ubuntu1~24.04.3_amd64.deb
+SHA256: e390b66584704aff3596094994186c684474a148d876694337af39634664cbaf
+
+Package: nftables
+Architecture: amd64
+Version: 1.0.9-1ubuntu0.1
+Filename: pool/main/n/nftables/nftables_1.0.9-1ubuntu0.1_amd64.deb
+SHA256: d648859fccde3c17b8b9b89993427564f91f394a39306db1f67bd5ea3ac42c6e
+
+Package: ntfs-3g
+Architecture: amd64
+Version: 1:2022.10.3-1.2ubuntu3.2
+Filename: pool/main/n/ntfs-3g/ntfs-3g_2022.10.3-1.2ubuntu3.2_amd64.deb
+SHA256: 3a34223b68b55596eb91768b9c879b8a740b16467f56673ea2b1c0e8093d678e
+
+Package: numactl
+Architecture: amd64
+Version: 2.0.18-1ubuntu0.24.04.1
+Filename: pool/main/n/numactl/numactl_2.0.18-1ubuntu0.24.04.1_amd64.deb
+SHA256: 9fd7c98cb88a0f9f364689674a5594d635d0368603b51d2139ee1184ebf25bdc
+
+Package: open-iscsi
+Architecture: amd64
+Version: 2.1.9-3ubuntu5.4
+Filename: pool/main/o/open-iscsi/open-iscsi_2.1.9-3ubuntu5.4_amd64.deb
+SHA256: 1d6b8275a39d067e073f2b01252dd3ffc132c11392278af1d2878f1cd8e2f441
+
+Package: open-vm-tools
+Architecture: amd64
+Version: 2:13.0.10-0ubuntu0.24.04.1
+Filename: pool/main/o/open-vm-tools/open-vm-tools_13.0.10-0ubuntu0.24.04.1_amd64.deb
+SHA256: a7030cdc7c0681be293da1ab265c51d5d8607ad65607a85c2d0068abd0ea9f92
+
+Package: openssh-client
+Architecture: amd64
+Version: 1:9.6p1-3ubuntu13.19
+Filename: pool/main/o/openssh/openssh-client_9.6p1-3ubuntu13.19_amd64.deb
+SHA256: c77365e50089a9be1ccc4cb28a586d7485b9d83798e67b8ad6636e53cc921649
+
+Package: openssh-server
+Architecture: amd64
+Version: 1:9.6p1-3ubuntu13.19
+Filename: pool/main/o/openssh/openssh-server_9.6p1-3ubuntu13.19_amd64.deb
+SHA256: dae4c1ee35cc57555f4e594805845c280350e2d40f0fecf84c6e8bb245848581
+
+Package: openssh-sftp-server
+Architecture: amd64
+Version: 1:9.6p1-3ubuntu13.19
+Filename: pool/main/o/openssh/openssh-sftp-server_9.6p1-3ubuntu13.19_amd64.deb
+SHA256: 29fcc2c9b1a0c9229bc524f76ff7bd0f525809fc406ad333ae21f3a7398b6d8a
+
+Package: openssl
+Architecture: amd64
+Version: 3.0.13-0ubuntu3.16
+Filename: pool/main/o/openssl/openssl_3.0.13-0ubuntu3.16_amd64.deb
+SHA256: 675b84971ffd4467707008c25ef7520f90ea7c23ef27b7a76b0dccf1d7c4dc3f
+
+Package: overlayroot
+Architecture: all
+Version: 0.49~24.04.1
+Filename: pool/main/c/cloud-initramfs-tools/overlayroot_0.49~24.04.1_all.deb
+SHA256: 83888163dc1f752e01e1d9ef4c24f69ad5d5f5007c92ea35f4d2653f6a47d41f
+
+Package: packagekit
+Architecture: amd64
+Version: 1.2.8-2ubuntu1.5
+Filename: pool/main/p/packagekit/packagekit_1.2.8-2ubuntu1.5_amd64.deb
+SHA256: 7731a59a7c9acbd0e32d957184ffd3bfc0034a68ba6309f22b7d177ca14067a7
+
+Package: packagekit-tools
+Architecture: amd64
+Version: 1.2.8-2ubuntu1.5
+Filename: pool/main/p/packagekit/packagekit-tools_1.2.8-2ubuntu1.5_amd64.deb
+SHA256: c3dd52e2f363cf0214ed5e1a2f24ac277ed337a16aae2c258b7838f2d7ae47dd
+
+Package: passwd
+Architecture: amd64
+Version: 1:4.13+dfsg1-4ubuntu3.2
+Filename: pool/main/s/shadow/passwd_4.13+dfsg1-4ubuntu3.2_amd64.deb
+SHA256: 139b51228c8065eefa3051f649d8480eb986f1cf629448e49d2eaf9813318412
+
+Package: pci.ids
+Architecture: all
+Version: 0.0~2024.03.31-1ubuntu0.1
+Filename: pool/main/p/pci.ids/pci.ids_0.0~2024.03.31-1ubuntu0.1_all.deb
+SHA256: 1b8e5abfbd8d38c66cee2ecb843b26413d0a80e2844d2dbabf0197ab3dee9168
+
+Package: perl
+Architecture: amd64
+Version: 5.38.2-3.2ubuntu0.6
+Filename: pool/main/p/perl/perl_5.38.2-3.2ubuntu0.6_amd64.deb
+SHA256: 1a2341674a1c69e3247537ab243dc3d5878b74a39a696964232e1a4f5a27502d
+
+Package: perl-base
+Architecture: amd64
+Version: 5.38.2-3.2ubuntu0.6
+Filename: pool/main/p/perl/perl-base_5.38.2-3.2ubuntu0.6_amd64.deb
+SHA256: 50e1b2c2646387a94664fbea144af1d1b16cf6e0778426baa198166ca3246697
+
+Package: perl-modules-5.38
+Architecture: all
+Version: 5.38.2-3.2ubuntu0.6
+Filename: pool/main/p/perl/perl-modules-5.38_5.38.2-3.2ubuntu0.6_all.deb
+SHA256: 9c4c90145209d4f85be9255417008e8decb9cd5d189f446fd39ad096e31199cf
+
+Package: plymouth
+Architecture: amd64
+Version: 24.004.60-1ubuntu7.2
+Filename: pool/main/p/plymouth/plymouth_24.004.60-1ubuntu7.2_amd64.deb
+SHA256: 75a9ed79b5af3544ad787e8c8660bb2d41a3bed11b23517eee3ff23a2e7f7d88
+
+Package: plymouth-label
+Architecture: amd64
+Version: 24.004.60-1ubuntu7.2
+Filename: pool/main/p/plymouth/plymouth-label_24.004.60-1ubuntu7.2_amd64.deb
+SHA256: 2a0adfa69b71a526dedd730800c52bcab64ff0afaf0a862ec5de776f1737dbce
+
+Package: plymouth-theme-ubuntu-text
+Architecture: amd64
+Version: 24.004.60-1ubuntu7.2
+Filename: pool/main/p/plymouth/plymouth-theme-ubuntu-text_24.004.60-1ubuntu7.2_amd64.deb
+SHA256: 33b0a2c8034b8b6bbf74cb07294ba0b63d3ec037b96f8905b1e8ea567d5be37f
+
+Package: polkitd
+Architecture: amd64
+Version: 124-2ubuntu1.24.04.4
+Filename: pool/main/p/policykit-1/polkitd_124-2ubuntu1.24.04.4_amd64.deb
+SHA256: 67f33d33ef0253a85297d77945e6b402027a58dea6cc2f18bb6fd2774f1068a6
+
+Package: pollinate
+Architecture: all
+Version: 4.33-3.1ubuntu1.3
+Filename: pool/main/p/pollinate/pollinate_4.33-3.1ubuntu1.3_all.deb
+SHA256: 391f3192e6d12e86e5f92dc3f8207aa6e7dd84f8d477ed7b8d62c4529d3f935e
+
+Package: powermgmt-base
+Architecture: all
+Version: 1.37ubuntu0.1
+Filename: pool/main/p/powermgmt-base/powermgmt-base_1.37ubuntu0.1_all.deb
+SHA256: d83a8078c640f60bdeb79c803142814c503e31eecae743f05d7f99f41f632beb
+
+Package: procps
+Architecture: amd64
+Version: 2:4.0.4-4ubuntu3.3
+Filename: pool/main/p/procps/procps_4.0.4-4ubuntu3.3_amd64.deb
+SHA256: 08d7baeff0285804178a8ed99b49514f210d38881bd118157cd9e222646c17a5
+
+Package: python-apt-common
+Architecture: all
+Version: 2.7.7ubuntu5.3
+Filename: pool/main/p/python-apt/python-apt-common_2.7.7ubuntu5.3_all.deb
+SHA256: ee46d9a2cfb887c4e3b017137711c84d7a336e388e55c6af1870ad93d57eb373
+
+Package: python3
+Architecture: amd64
+Version: 3.12.3-0ubuntu2.1
+Filename: pool/main/p/python3-defaults/python3_3.12.3-0ubuntu2.1_amd64.deb
+SHA256: e691b9cc40841c41bbdc50bd794c876cb1b1801306ea27b06e9a1458180df1e9
+
+Package: python3-apport
+Architecture: all
+Version: 2.28.3-0ubuntu0.1
+Filename: pool/main/a/apport/python3-apport_2.28.3-0ubuntu0.1_all.deb
+SHA256: 285a2fe343de172af4ff36992ea6028a63567eaf3535f36063a9ebb5271ce8ff
+
+Package: python3-apt
+Architecture: amd64
+Version: 2.7.7ubuntu5.3
+Filename: pool/main/p/python-apt/python3-apt_2.7.7ubuntu5.3_amd64.deb
+SHA256: f240266ebe34ec2562c277c4257b032a8546b479337fdba1536a8d19804d0eb2
+
+Package: python3-cryptography
+Architecture: amd64
+Version: 41.0.7-4ubuntu0.4
+Filename: pool/main/p/python-cryptography/python3-cryptography_41.0.7-4ubuntu0.4_amd64.deb
+SHA256: 8fa33b608a16df054bf26ea3a653b1d512ab745d01e56fa938673ebc8c727060
+
+Package: python3-distupgrade
+Architecture: all
+Version: 1:24.04.29
+Filename: pool/main/u/ubuntu-release-upgrader/python3-distupgrade_24.04.29_all.deb
+SHA256: dc26117e19c9ae8ce4b3152054381e8c9f25f2d0747a8db13092cf9c26619eb5
+
+Package: python3-httplib2
+Architecture: all
+Version: 0.20.4-3ubuntu0.1
+Filename: pool/main/p/python-httplib2/python3-httplib2_0.20.4-3ubuntu0.1_all.deb
+SHA256: 49b9bc8c0190f506d97605623cff309f98be845e650f8d18440147deae5c77de
+
+Package: python3-idna
+Architecture: all
+Version: 3.6-2ubuntu0.2
+Filename: pool/main/p/python-idna/python3-idna_3.6-2ubuntu0.2_all.deb
+SHA256: 9094258aba489349e87bbd3ed561c727c5c19f6b940835a431b4f89bae32c602
+
+Package: python3-jinja2
+Architecture: all
+Version: 3.1.2-1ubuntu1.3
+Filename: pool/main/j/jinja2/python3-jinja2_3.1.2-1ubuntu1.3_all.deb
+SHA256: 3929521159dd53451b0005ac6b8a1a8dbc42bf74ce83309b50389520f08a937c
+
+Package: python3-jwt
+Architecture: all
+Version: 2.7.0-1ubuntu0.2
+Filename: pool/main/p/pyjwt/python3-jwt_2.7.0-1ubuntu0.2_all.deb
+SHA256: a5d839f008d4b3e8c0df9c229790aa59668ce05bc6201fcf7a021e982b71acbc
+
+Package: python3-minimal
+Architecture: amd64
+Version: 3.12.3-0ubuntu2.1
+Filename: pool/main/p/python3-defaults/python3-minimal_3.12.3-0ubuntu2.1_amd64.deb
+SHA256: 9ba5dd55cdcf6121c147dc5cb87403169b5933e3a56da0de57774f2ce819cf06
+
+Package: python3-netplan
+Architecture: amd64
+Version: 1.1.2-8ubuntu1~24.04.3
+Filename: pool/main/n/netplan.io/python3-netplan_1.1.2-8ubuntu1~24.04.3_amd64.deb
+SHA256: 6c188dcf4291e1d5b1c4b87beb4b1be40df4f369726e035fd84269b56d7564d0
+
+Package: python3-openssl
+Architecture: all
+Version: 23.2.0-1ubuntu0.1
+Filename: pool/main/p/pyopenssl/python3-openssl_23.2.0-1ubuntu0.1_all.deb
+SHA256: 17ca62abb695637116b501875c4d7ef3a6a964113663797357a57df90be043eb
+
+Package: python3-pkg-resources
+Architecture: all
+Version: 68.1.2-2ubuntu1.2
+Filename: pool/main/s/setuptools/python3-pkg-resources_68.1.2-2ubuntu1.2_all.deb
+SHA256: 13caaa69d5ba8b02e90087d4bcef714c0581e591e820804d15d12f582055147a
+
+Package: python3-problem-report
+Architecture: all
+Version: 2.28.3-0ubuntu0.1
+Filename: pool/main/a/apport/python3-problem-report_2.28.3-0ubuntu0.1_all.deb
+SHA256: 086f3998727cad0aff452385e9cedc0e9fd84cb61bb29c1bc49bbf61e21abe8f
+
+Package: python3-pyasn1
+Architecture: all
+Version: 0.4.8-4ubuntu0.3
+Filename: pool/main/p/pyasn1/python3-pyasn1_0.4.8-4ubuntu0.3_all.deb
+SHA256: 37813face70ac1f6f345de702371ae5cb44fb030b24fbd441a770a9aa72c2392
+
+Package: python3-requests
+Architecture: all
+Version: 2.31.0+dfsg-1ubuntu1.2
+Filename: pool/main/r/requests/python3-requests_2.31.0+dfsg-1ubuntu1.2_all.deb
+SHA256: ee4785403eecf620f91cc0724b3017a5893f474f3dd3a521a13e15ef33ab5669
+
+Package: python3-setuptools
+Architecture: all
+Version: 68.1.2-2ubuntu1.2
+Filename: pool/main/s/setuptools/python3-setuptools_68.1.2-2ubuntu1.2_all.deb
+SHA256: 27ede03d8c5046c30cf1dcdc8835708408d27bdd3561e881b5d66656e6ff23e7
+
+Package: python3-software-properties
+Architecture: all
+Version: 0.99.49.4
+Filename: pool/main/s/software-properties/python3-software-properties_0.99.49.4_all.deb
+SHA256: 856df960f441aee189ac1851d79838bc3dc3287b4f48a4c2d5e56d47b93d41bd
+
+Package: python3-twisted
+Architecture: all
+Version: 24.3.0-1ubuntu0.2
+Filename: pool/main/t/twisted/python3-twisted_24.3.0-1ubuntu0.2_all.deb
+SHA256: a3f7e3ee5613aeccadc0665195bccf13ac5e59f23df55d53f6aed23ac583aec3
+
+Package: python3-update-manager
+Architecture: all
+Version: 1:24.04.12
+Filename: pool/main/u/update-manager/python3-update-manager_24.04.12_all.deb
+SHA256: 55ee1fa2ac721e940a6e4f2e638b56a5364c0fc5525e661e0a5ceb758f1150d1
+
+Package: python3-urllib3
+Architecture: all
+Version: 2.0.7-1ubuntu0.7
+Filename: pool/main/p/python-urllib3/python3-urllib3_2.0.7-1ubuntu0.7_all.deb
+SHA256: 84970da97957c055f5ccc7c4d470f31a4091318dffa2c47f670db23665b7aa95
+
+Package: python3.12
+Architecture: amd64
+Version: 3.12.3-1ubuntu0.17
+Filename: pool/main/p/python3.12/python3.12_3.12.3-1ubuntu0.17_amd64.deb
+SHA256: 6745c9463432e619d7402b117ad4ac86c31dcd3999ba20daa9e395f6f9909d86
+
+Package: python3.12-minimal
+Architecture: amd64
+Version: 3.12.3-1ubuntu0.17
+Filename: pool/main/p/python3.12/python3.12-minimal_3.12.3-1ubuntu0.17_amd64.deb
+SHA256: d452689b9660845345a4c3e05e4ad82c082d5474e04031b7aa47f1a6d5610a6e
+
+Package: rsync
+Architecture: amd64
+Version: 3.2.7-1ubuntu1.5
+Filename: pool/main/r/rsync/rsync_3.2.7-1ubuntu1.5_amd64.deb
+SHA256: 8f952895697d19a6f1caa71f17c7d4e8c1f1fb485eb824ffe3e4c77dd587b338
+
+Package: rsyslog
+Architecture: amd64
+Version: 8.2312.0-3ubuntu9.4
+Filename: pool/main/r/rsyslog/rsyslog_8.2312.0-3ubuntu9.4_amd64.deb
+SHA256: 29dd0e9f7be2543c26f7aa15e77567ff8229ba3a001f4c32e37208aae9237280
+
+Package: screen
+Architecture: amd64
+Version: 4.9.1-1ubuntu1
+Filename: pool/main/s/screen/screen_4.9.1-1ubuntu1_amd64.deb
+SHA256: 8fed84af7de16c1f486be506ef40431fc2cb73b5fb705f2c17de5875f0507d0b
+
+Package: sed
+Architecture: amd64
+Version: 4.9-2ubuntu0.24.04.1
+Filename: pool/main/s/sed/sed_4.9-2ubuntu0.24.04.1_amd64.deb
+SHA256: 5406c0950df2653be3d4acaf9f169c51d30cf4a617b63423e64d2853b0d72b5c
+
+Package: software-properties-common
+Architecture: all
+Version: 0.99.49.4
+Filename: pool/main/s/software-properties/software-properties-common_0.99.49.4_all.deb
+SHA256: 36e179d8d4f8be092b090db03c68dd4b9214c1917e4f5ab77b9ba06bf85723ae
+
+Package: sosreport
+Architecture: amd64
+Version: 4.11.2-0ubuntu0~24.04.1
+Filename: pool/main/s/sosreport/sosreport_4.11.2-0ubuntu0~24.04.1_amd64.deb
+SHA256: 22db0fe0fac847183026571250a72787af545635ff25b1efe0860e1dfcc7ced6
+
+Package: ssh-import-id
+Architecture: all
+Version: 5.11-0ubuntu2.24.04.1
+Filename: pool/main/s/ssh-import-id/ssh-import-id_5.11-0ubuntu2.24.04.1_all.deb
+SHA256: 97bb2840a271ee0573da934ce1811f961e4b844fe876e34602b4661db25135b5
+
+Package: sudo
+Architecture: amd64
+Version: 1.9.15p5-3ubuntu5.24.04.3
+Filename: pool/main/s/sudo/sudo_1.9.15p5-3ubuntu5.24.04.3_amd64.deb
+SHA256: f0a64eab46d4a8881bba7b757de34aa0016870516813a50ccc08cdf67381a329
+
+Package: systemd
+Architecture: amd64
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/systemd_255.4-1ubuntu8.17_amd64.deb
+SHA256: 250345b73e42a97ee71cae7c1e470897dfad3c639eb0a7aafe4f9a3a29871cb2
+
+Package: systemd-dev
+Architecture: all
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/systemd-dev_255.4-1ubuntu8.17_all.deb
+SHA256: 70b863bd1188f49a3ba0ccde5355abd6611a8a5dcd8b92addf25c8036f22556d
+
+Package: systemd-hwe-hwdb
+Architecture: all
+Version: 255.1.7
+Filename: pool/main/s/systemd-hwe/systemd-hwe-hwdb_255.1.7_all.deb
+SHA256: 60d104ea0afd444ec73a0372d0c04043e2bce98d9c8875afbf134caffe4b29a7
+
+Package: systemd-resolved
+Architecture: amd64
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/systemd-resolved_255.4-1ubuntu8.17_amd64.deb
+SHA256: 5d87c0ae134eb027e4e8dbfd920699ab03d2c12b36e2cd1b1bc8dfedfe6bc26b
+
+Package: systemd-sysv
+Architecture: amd64
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/systemd-sysv_255.4-1ubuntu8.17_amd64.deb
+SHA256: 000c90facb7f0f33a3c771ac8cf58221f80239184fb9e24fe78086ffea6e2cf9
+
+Package: systemd-timesyncd
+Architecture: amd64
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/systemd-timesyncd_255.4-1ubuntu8.17_amd64.deb
+SHA256: cf41200d368dddbe13629cf07783663fce3a44a13a80e2c669de1d56678fa5b7
+
+Package: tar
+Architecture: amd64
+Version: 1.35+dfsg-3ubuntu0.4
+Filename: pool/main/t/tar/tar_1.35+dfsg-3ubuntu0.4_amd64.deb
+SHA256: fdf41a87936824e50c8ac11b0b22d1395aeb0754feef2dae5575b5d5a93793ec
+
+Package: tcpdump
+Architecture: amd64
+Version: 4.99.4-3ubuntu4.24.04.1
+Filename: pool/main/t/tcpdump/tcpdump_4.99.4-3ubuntu4.24.04.1_amd64.deb
+SHA256: 6333724c69b1078759fa3c5914d7d0369fdfb6aab21694b038d1685c4c09772e
+
+Package: telnet
+Architecture: all
+Version: 0.17+2.5-3ubuntu4.2
+Filename: pool/main/i/inetutils/telnet_0.17+2.5-3ubuntu4.2_all.deb
+SHA256: df0bb0964156d1eca3ca5bee0ffa09089f8ac880038ee33e210b45f2337f3e95
+
+Package: thin-provisioning-tools
+Architecture: amd64
+Version: 0.9.0-2ubuntu5.1
+Filename: pool/main/t/thin-provisioning-tools/thin-provisioning-tools_0.9.0-2ubuntu5.1_amd64.deb
+SHA256: c7fed85c84eb2a950cee181b8b7f6f0be1541b44ddae4d0e827f77d6d417d647
+
+Package: tmux
+Architecture: amd64
+Version: 3.4-1ubuntu0.1
+Filename: pool/main/t/tmux/tmux_3.4-1ubuntu0.1_amd64.deb
+SHA256: 2913e17aa61879d1f905aab6f374f153f1ece63aefba1b996e387325d1d5338d
+
+Package: tzdata
+Architecture: all
+Version: 2026c-0ubuntu0.24.04.1
+Filename: pool/main/t/tzdata/tzdata_2026c-0ubuntu0.24.04.1_all.deb
+SHA256: ef12c9ef81905b5ac558504b2f8c20da9be5f28861020b3fb5e8b15fb3fae2f6
+
+Package: ubuntu-kernel-accessories
+Architecture: amd64
+Version: 1.539.2
+Filename: pool/main/u/ubuntu-meta/ubuntu-kernel-accessories_1.539.2_amd64.deb
+SHA256: 76bb737022fba5af66e34212dbbf8b1d97d00375adfcf8d5ec0a20900be02436
+
+Package: ubuntu-minimal
+Architecture: amd64
+Version: 1.539.2
+Filename: pool/main/u/ubuntu-meta/ubuntu-minimal_1.539.2_amd64.deb
+SHA256: b7e0cf2ef11094c7169de2cae11d6745f68e2044386b1473ec15a45ea269c6ae
+
+Package: ubuntu-pro-client
+Architecture: amd64
+Version: 37.2ubuntu~24.04.1
+Filename: pool/main/u/ubuntu-advantage-tools/ubuntu-pro-client_37.2ubuntu~24.04.1_amd64.deb
+SHA256: c148f08254e2a961d473fb742660afd4041fc5a6e8907509640e0aaa20f11f75
+
+Package: ubuntu-pro-client-l10n
+Architecture: amd64
+Version: 37.2ubuntu~24.04.1
+Filename: pool/main/u/ubuntu-advantage-tools/ubuntu-pro-client-l10n_37.2ubuntu~24.04.1_amd64.deb
+SHA256: 144e2d65f02fab1116b1dc7173ff6e181e03a020930bf3f7633139f55b5bc905
+
+Package: ubuntu-release-upgrader-core
+Architecture: all
+Version: 1:24.04.29
+Filename: pool/main/u/ubuntu-release-upgrader/ubuntu-release-upgrader-core_24.04.29_all.deb
+SHA256: be3e4274cff3ecd4941b7cb6cd8b90865dcedded21dcf053298e2016629be3b5
+
+Package: ubuntu-server
+Architecture: amd64
+Version: 1.539.2
+Filename: pool/main/u/ubuntu-meta/ubuntu-server_1.539.2_amd64.deb
+SHA256: 9a38ea62d6309429d6283592c7f9439652ff76d47212010c126ab9cd623be2b6
+
+Package: ubuntu-standard
+Architecture: amd64
+Version: 1.539.2
+Filename: pool/main/u/ubuntu-meta/ubuntu-standard_1.539.2_amd64.deb
+SHA256: 86eee4aa5f149b94984df2f8b79fe0cdcf81cc38ca5b441f9df4516b38ade7f7
+
+Package: udev
+Architecture: amd64
+Version: 255.4-1ubuntu8.17
+Filename: pool/main/s/systemd/udev_255.4-1ubuntu8.17_amd64.deb
+SHA256: 5d0c4d4489e70f52199230a1e403e05c6fe445d5b672f22a59afc16cd64815bb
+
+Package: udisks2
+Architecture: amd64
+Version: 2.10.1-6ubuntu1.5
+Filename: pool/main/u/udisks2/udisks2_2.10.1-6ubuntu1.5_amd64.deb
+SHA256: 407003db65592a6c5981b95a3d92ea813093fcb0ee94bb47787a68c8d5fee022
+
+Package: update-manager-core
+Architecture: all
+Version: 1:24.04.12
+Filename: pool/main/u/update-manager/update-manager-core_24.04.12_all.deb
+SHA256: 7fdfc6d1ae8d81982b5982f70e4f27ccf08c3e4d60fbde8f228fe53db6f943d0
+
+Package: update-notifier-common
+Architecture: all
+Version: 3.192.68.2
+Filename: pool/main/u/update-notifier/update-notifier-common_3.192.68.2_all.deb
+SHA256: 50c3303b52aaaaadcf11750e1a0afc905bdee0d6f75aa2f1febdd4416afe7fec
+
+Package: util-linux
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/util-linux_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: 08eb17ba3b83378ed1e73d8335d0ce03b429c0bbeb07e374f536234edab02465
+
+Package: uuid-runtime
+Architecture: amd64
+Version: 2.39.3-9ubuntu6.6
+Filename: pool/main/u/util-linux/uuid-runtime_2.39.3-9ubuntu6.6_amd64.deb
+SHA256: 3517a3ae6cb6c6ad8ef9daa7fd95639d83abaa4f67859ba95fe444a4f25e6f6b
+
+Package: vim
+Architecture: amd64
+Version: 2:9.1.0016-1ubuntu7.20
+Filename: pool/main/v/vim/vim_9.1.0016-1ubuntu7.20_amd64.deb
+SHA256: fdfa220aa0a6b602c8d64a73f4ed36afdb9b30bf10eb5db4da233c60a42f77f0
+
+Package: vim-common
+Architecture: all
+Version: 2:9.1.0016-1ubuntu7.20
+Filename: pool/main/v/vim/vim-common_9.1.0016-1ubuntu7.20_all.deb
+SHA256: c5d612fc90715eb91bf887601d2e3f96c936cec5cd6c1d17eec17bfc4fe57f37
+
+Package: vim-runtime
+Architecture: all
+Version: 2:9.1.0016-1ubuntu7.20
+Filename: pool/main/v/vim/vim-runtime_9.1.0016-1ubuntu7.20_all.deb
+SHA256: c6956fd0fcf9cfc7d27265454e224329a2aa05af9860844b22e1b7974b01a9dc
+
+Package: vim-tiny
+Architecture: amd64
+Version: 2:9.1.0016-1ubuntu7.20
+Filename: pool/main/v/vim/vim-tiny_9.1.0016-1ubuntu7.20_amd64.deb
+SHA256: c34fc5f03822e36ac2812d8d59eeb20aaeb5b018491b049f5d94285991c36cb2
+
+Package: wget
+Architecture: amd64
+Version: 1.21.4-1ubuntu4.5
+Filename: pool/main/w/wget/wget_1.21.4-1ubuntu4.5_amd64.deb
+SHA256: 2aa5a734b21b49ff6bd2239546b3f88275f8abb55dd8a984249e6cd0c1173a92
+
+Package: wireless-regdb
+Architecture: all
+Version: 2026.05.30-0ubuntu1~24.04.1
+Filename: pool/main/w/wireless-regdb/wireless-regdb_2026.05.30-0ubuntu1~24.04.1_all.deb
+SHA256: e4ee541d99f009f1225100fead946907afe3ad9b614fd5707f7363d7a9c03d39
+
+Package: xfsprogs
+Architecture: amd64
+Version: 6.6.0-1ubuntu2.1
+Filename: pool/main/x/xfsprogs/xfsprogs_6.6.0-1ubuntu2.1_amd64.deb
+SHA256: 2da65187043b2f8739f68d919faec7c1a4c172804c6a7cd6d816e02dd941bc71
+
+Package: xkb-data
+Architecture: all
+Version: 2.41-2ubuntu1.1
+Filename: pool/main/x/xkeyboard-config/xkb-data_2.41-2ubuntu1.1_all.deb
+SHA256: e99f2a0b4c56cdf35dec489e56b6a8418826cab8ce6306ec6d0bd98e2cd0014a
+
+Package: xxd
+Architecture: amd64
+Version: 2:9.1.0016-1ubuntu7.20
+Filename: pool/main/v/vim/xxd_9.1.0016-1ubuntu7.20_amd64.deb
+SHA256: abe2a776ec6472e6b9b0a8497d3c2e8007f9863092dfd1448f4a68d0c25af750
+
+Package: xz-utils
+Architecture: amd64
+Version: 5.6.1+really5.4.5-1ubuntu0.3
+Filename: pool/main/x/xz-utils/xz-utils_5.6.1+really5.4.5-1ubuntu0.3_amd64.deb
+SHA256: 778edae086bc8f34d80f36f301bc8fb3eff2d906c146dfb533ea6840b6d64e00
+
+Package: zlib1g
+Architecture: amd64
+Version: 1:1.3.dfsg-3.1ubuntu2.2
+Filename: pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.2_amd64.deb
+SHA256: 84b9cf5752b29c9f92c27cd4c4ba9bbcc70b5ccf9b1b515421a28ae23212e273
+
+Package: zstd
+Architecture: amd64
+Version: 1.5.5+dfsg2-2build1.1
+Filename: pool/main/libz/libzstd/zstd_1.5.5+dfsg2-2build1.1_amd64.deb
+SHA256: d7667f83e3a2caeaaecaca464d542ee6ccf537259a479622796c84afc96d6032

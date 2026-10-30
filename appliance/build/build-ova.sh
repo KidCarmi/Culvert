@@ -41,11 +41,13 @@
 #
 # Outputs (in --out): culvert-appliance-<ver>-<os>.ova, .ova.sha256,
 #   build-info.json, dpkg-list.txt (guest package inventory for SBOM evidence),
-#   host-components.txt, build-upgrades.txt (packages the pinned-snapshot
-#   security upgrade moved), prepare-guest.log (the in-guest transcript).
+#   package-provenance.tsv (every installed package reconciled against the
+#   pinned snapshot / Docker indexes; FB-1), host-components.txt,
+#   build-upgrades.txt (packages the pinned-snapshot security upgrade moved),
+#   prepare-guest.log (the in-guest transcript).
 #
 # Requires: qemu-img, guestfish, virt-customize, virt-cat, virt-ls, docker (daemon access),
-# curl, gzip, tar, sha256sum, python3, the root go.mod Go compiler;
+# curl, gzip, xz, tar, sha256sum, python3, gpg, gpgv, the root go.mod Go compiler;
 # gpgv + ubuntu-cloudimage-keyring optional.
 set -euo pipefail
 
@@ -91,11 +93,14 @@ set -a
 set +a
 for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE_INDEX_DIGEST \
          APP_IMAGE_AMD64_DIGEST CLAMAV_IMAGE_REPO CLAMAV_IMAGE_TAG CLAMAV_IMAGE_INDEX_DIGEST \
-         CLAMAV_IMAGE_AMD64_DIGEST CLAMAV_SIDECAR_REF COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION GUEST_KERNEL_META VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION; do
+         CLAMAV_IMAGE_AMD64_DIGEST CLAMAV_SIDECAR_REF COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION GUEST_KERNEL_META VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION \
+         DOCKER_CE_CLI_VERSION CONTAINERD_IO_VERSION DOCKER_COMPOSE_PLUGIN_VERSION DOCKER_APT_URL DOCKER_APT_GPG_URL DOCKER_APT_KEY_FPR \
+         GUEST_OS_CODENAME GUEST_APT_SNAPSHOT GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES \
+         GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS; do
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
-for t in qemu-img guestfish virt-customize virt-cat virt-ls lsinitramfs docker curl gzip tar sha256sum python3 go; do
+for t in qemu-img guestfish virt-customize virt-cat virt-ls lsinitramfs docker curl gzip xz tar sha256sum python3 gpg gpgv go; do
   command -v "$t" >/dev/null 2>&1 || die "required tool missing: $t"
 done
 CONSOLE_GO_VERSION="$(console_go_version "$REPO")"
@@ -117,7 +122,7 @@ mkdir -p "$OUT" "$WORK/cache" "$WORK/overlay"
 # launched into the same --work a minute apart).
 exec 9>"$WORK/.lock"
 flock -n 9 || die "another build is already using $WORK"
-cleanup() { if [[ "$KEEP_WORK" -eq 0 ]]; then rm -rf "$WORK/overlay" "$WORK/disk.qcow2" "$WORK/ova"; fi; }
+cleanup() { if [[ "$KEEP_WORK" -eq 0 ]]; then rm -rf "$WORK/overlay" "$WORK/disk.qcow2" "$WORK/ova" "$WORK/provenance"; fi; }
 trap cleanup EXIT
 
 # ── 1. Base image ───────────────────────────────────────────────────────────
@@ -143,6 +148,46 @@ fi
 # Recorded in build-info.json (provenance; not a gate).
 HOST_CONTAINERD="$(docker version --format '{{range .Server.Components}}{{if eq .Name "containerd"}}{{.Version}}{{end}}{{end}}')"
 log "build host containerd: $HOST_CONTAINERD"
+
+# ── 1b. Pinned package indexes (FB-1) ──────────────────────────────────────
+# Fetched HERE, on the build host, independently of the guest, before the
+# long guest step, so a wrong pin fails in seconds. Trust chain, no network
+# trust: manifest pin -> snapshot InRelease bytes -> the Packages.xz SHA-256
+# that InRelease lists -> decompressed Packages, whose SHA-256 the reconciler
+# checks against InRelease again. Docker's index is not pinned (its repository
+# has no snapshots) but signed: its InRelease is verified with gpgv against
+# the key whose fingerprint the manifest pins. Section 5 reconciles the
+# guest's installed packages against these indexes.
+PROV="$WORK/provenance"
+rm -rf "$PROV"; mkdir -p "$PROV/snapshot" "$PROV/docker" "$PROV/gnupg"; chmod 700 "$PROV/gnupg"
+SNAP_BASE="https://snapshot.ubuntu.com/ubuntu/${GUEST_APT_SNAPSHOT}"
+log "fetching the pinned snapshot indexes ($GUEST_APT_SNAPSHOT)"
+for suite_pin in "noble=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE" "noble-updates=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES" \
+                 "noble-security=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY" "noble-backports=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS"; do
+  suite="${suite_pin%%=*}"; pin="${suite_pin#*=}"
+  curl -fsSL --retry 3 -o "$PROV/snapshot/$suite.InRelease" "$SNAP_BASE/dists/$suite/InRelease" || die "could not fetch the $suite snapshot InRelease"
+  got="$(sha256sum "$PROV/snapshot/$suite.InRelease" | cut -d' ' -f1)"
+  [[ "$got" == "$pin" ]] || die "snapshot $GUEST_APT_SNAPSHOT $suite InRelease is $got, manifest pins $pin"
+  for comp in main restricted universe multiverse; do
+    want="$(awk -v f="$comp/binary-amd64/Packages.xz" '/^SHA256:/{s=1;next} /^[^ ]/{s=0} s && $3==f {print $1}' "$PROV/snapshot/$suite.InRelease")"
+    [[ "$want" =~ ^[0-9a-f]{64}$ ]] || die "the $suite InRelease lists no $comp/binary-amd64/Packages.xz"
+    curl -fsSL --retry 3 -o "$PROV/snapshot/$suite-$comp.Packages.xz" "$SNAP_BASE/dists/$suite/$comp/binary-amd64/Packages.xz" \
+      || die "could not fetch the $suite/$comp snapshot index"
+    [[ "$(sha256sum "$PROV/snapshot/$suite-$comp.Packages.xz" | cut -d' ' -f1)" == "$want" ]] || die "the $suite/$comp index does not match its InRelease"
+    xz -dc "$PROV/snapshot/$suite-$comp.Packages.xz" > "$PROV/snapshot/$suite-$comp.Packages"
+    rm -f "$PROV/snapshot/$suite-$comp.Packages.xz"
+  done
+done
+curl -fsSL --retry 3 -o "$PROV/docker/key.asc" "$DOCKER_APT_GPG_URL" || die "could not fetch the Docker apt key"
+docker_fpr="$(GNUPGHOME="$PROV/gnupg" gpg --batch --with-colons --show-keys "$PROV/docker/key.asc" 2>/dev/null | awk -F: '$1=="fpr"{print $10; exit}')"
+[[ "$docker_fpr" == "$DOCKER_APT_KEY_FPR" ]] || die "Docker apt key fingerprint mismatch: got '$docker_fpr' want '$DOCKER_APT_KEY_FPR'"
+GNUPGHOME="$PROV/gnupg" gpg --batch --dearmor -o "$PROV/docker/key.gpg" "$PROV/docker/key.asc"
+curl -fsSL --retry 3 -o "$PROV/docker/InRelease" "$DOCKER_APT_URL/dists/$GUEST_OS_CODENAME/InRelease" || die "could not fetch Docker's InRelease"
+gpgv --keyring "$PROV/docker/key.gpg" "$PROV/docker/InRelease" 2>"$PROV/docker/gpgv.log" \
+  || { cat "$PROV/docker/gpgv.log" >&2; die "Docker's InRelease is not signed by the pinned key"; }
+curl -fsSL --retry 3 -o "$PROV/docker/Packages" "$DOCKER_APT_URL/dists/$GUEST_OS_CODENAME/stable/binary-amd64/Packages" \
+  || die "could not fetch Docker's package index"
+log "snapshot $GUEST_APT_SNAPSHOT indexes match the four manifest InRelease pins; Docker index signature verified"
 
 # ── 2. Application images by digest ─────────────────────────────────────────
 pull_by_digest() { # repo index_digest amd64_digest tag
@@ -373,6 +418,8 @@ mkdir -p "$OV/opt/culvert-appliance/bin"
 # prepare-guest.sh rides in the overlay: virt-customize --run executes a script
 # with /bin/sh (dash) regardless of its shebang, so it is invoked via bash.
 cp "$HERE/prepare-guest.sh" "$OV/opt/culvert-appliance/prepare-guest.sh"
+# The ONE APT entry point of the pinned section (FB-1), sourced by prepare-guest.sh.
+cp "$HERE/apt-snapshot.sh" "$OV/opt/culvert-appliance/apt-snapshot.sh"
 
 # ── BUILD-HOST-ONLY accommodation: an intercepting HTTPS proxy ──────────────
 # A sandboxed build host may force outbound HTTPS through a local proxy
@@ -600,6 +647,18 @@ virt-cat -a "$DISK" /var/lib/culvert-appliance/host-components.txt > "$OUT/host-
 # Present only when manifest.env pins GUEST_APT_SNAPSHOT (prepare-guest.sh 1b).
 virt-cat -a "$DISK" /var/lib/culvert-appliance/build-upgrades.txt > "$OUT/build-upgrades.txt" 2>/dev/null || rm -f "$OUT/build-upgrades.txt"
 grep -q "^docker-ce	${DOCKER_CE_VERSION}	amd64$" "$OUT/dpkg-list.txt" || die "docker-ce is not the pinned version in the guest"
+# FB-1: every installed package must come from the pinned snapshot or be a
+# pinned Docker package found in Docker's signed index. A live-only version,
+# an unknown origin, a Docker package off its pin or a broken index fails
+# the build; package-provenance.tsv is the record of where each came from.
+python3 "$HERE/reconcile-package-provenance.py" --dpkg-list "$OUT/dpkg-list.txt" \
+  --snapshot-dir "$PROV/snapshot" --snapshot-id "$GUEST_APT_SNAPSHOT" \
+  --pin "noble=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE" --pin "noble-updates=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES" \
+  --pin "noble-security=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY" --pin "noble-backports=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS" \
+  --docker-dir "$PROV/docker" --docker-uri "$DOCKER_APT_URL" \
+  --docker-pin "docker-ce=$DOCKER_CE_VERSION" --docker-pin "docker-ce-cli=$DOCKER_CE_CLI_VERSION" \
+  --docker-pin "containerd.io=$CONTAINERD_IO_VERSION" --docker-pin "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_VERSION" \
+  --out "$OUT/package-provenance.tsv" || die "package provenance reconciliation failed (FB-1): see the list above"
 # The kernel is the HWE series the manifest names, exactly one image ships, and
 # no GA kernel metapackage came back (prepare-guest.sh 1b).
 grep -q "^${GUEST_KERNEL_META}	" "$OUT/dpkg-list.txt" || die "$GUEST_KERNEL_META is not installed in the guest"

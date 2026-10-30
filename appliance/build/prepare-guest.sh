@@ -70,7 +70,21 @@ if [[ -f "$STATE/build-env.sh" ]]; then
   fi
 fi
 
-# ── 1. Docker Engine + Compose plugin, pinned, from Docker's official repo ──
+# ── 1. Pin the Ubuntu archive to the manifest snapshot (FB-1) ──────────────
+# EVERY Ubuntu package this script installs or upgrades — Docker's Ubuntu
+# dependencies, pigz/psmisc, the security upgrade, the kernel, the boot
+# presentation packages — resolves from snapshot GUEST_APT_SNAPSHOT, whose
+# InRelease bytes are pinned in manifest.env. The rules and the APT 2.8.3
+# behaviour behind them are in apt-snapshot.sh. Docker's repository has no
+# snapshot service: it keeps snapshot=no and is pinned by exact versions,
+# then build-ova.sh reconciles every installed package (Ubuntu against these
+# snapshot indexes, Docker against its signed index) and refuses anything
+# else. There is no live-archive mode: a build without the pins is refused.
+# shellcheck source=appliance/build/apt-snapshot.sh
+. "$APPL/apt-snapshot.sh"
+apt_snap_require_pins
+[[ -n "${GUEST_KERNEL_META:-}" ]] || { echo "manifest.env: GUEST_KERNEL_META is not set" >&2; exit 1; }
+
 log "configuring Docker apt repository"
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL "$DOCKER_APT_GPG_URL" -o /tmp/docker.gpg.asc
@@ -82,132 +96,136 @@ fi
 gpg --batch --dearmor -o /etc/apt/keyrings/docker.gpg /tmp/docker.gpg.asc
 chmod a+r /etc/apt/keyrings/docker.gpg
 rm -f /tmp/docker.gpg.asc
-# snapshot=no: Docker's repository has no snapshot service; without the
-# option the pinned-snapshot apt run below would refuse the whole update.
+# snapshot=no: Docker's repository has no snapshot service. Under --snapshot
+# such a source would be used live anyway (FB-1 E4); stating it makes that a
+# declared exception rather than a silent one, and apt_snap_sources_enable
+# refuses a Docker source without it.
 echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg snapshot=no] ${DOCKER_APT_URL} ${GUEST_OS_CODENAME} stable" \
   > /etc/apt/sources.list.d/docker.list
 
-log "apt-get update"
-apt-get update -qq
+apt_snap_sources_enable /etc/apt/sources.list.d/docker.list
+SNAPSHOT_LABEL="$(apt_snap_label)"
+log "pinned index update: $SNAPSHOT_LABEL"
+apt_snap_update -qq
+apt_snap_verify_inrelease
+log "snapshot InRelease files match the manifest pins"
+
 log "installing pinned Docker packages"
-apt-get install -y -qq --no-install-recommends \
+apt_snap install -y -qq --no-install-recommends \
   "docker-ce=${DOCKER_CE_VERSION}" \
   "docker-ce-cli=${DOCKER_CE_CLI_VERSION}" \
   "containerd.io=${CONTAINERD_IO_VERSION}" \
   "docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_VERSION}"
 # install.sh's quick-start path also wants these on the host (pigz speeds image
 # loads; psmisc provides fuser for its apt-lock wait). Both are tiny.
-apt-get install -y -qq --no-install-recommends pigz psmisc
+apt_snap install -y -qq --no-install-recommends pigz psmisc
 # Keep the pinned engine from drifting via an operator's casual `apt upgrade`;
 # culvert-os-update --docker is the deliberate, stack-aware upgrade path.
 apt-mark hold docker-ce docker-ce-cli containerd.io docker-compose-plugin >/dev/null
 
-# ── 1b. Guest security updates, pinned to an Ubuntu archive SNAPSHOT ───────
+# ── 1b. Guest security updates from the same pinned snapshot ───────────────
 # The base cloud image serial is weeks old by the time it is built into an
 # appliance: the run-9 guest scan found 33 findings Ubuntu had already fixed
 # (2 HIGH in openssl/libssl3t64). They are applied at BUILD time — a customer
 # must not boot a known-vulnerable OpenSSL and wait for unattended-upgrades on
-# their own network — but from an archive snapshot pinned in manifest.env
-# (GUEST_APT_SNAPSHOT, snapshot.ubuntu.com), so the input-pinning contract
-# holds: same manifest ⇒ same package versions, and the SBOM/CVE evidence
-# describes exactly what shipped. `--with-new-pkgs` lets the kernel
+# their own network — but from the pinned snapshot, so the input-pinning
+# contract holds: same manifest ⇒ same package versions, and the SBOM/CVE
+# evidence describes exactly what shipped. `--with-new-pkgs` lets the kernel
 # metapackages move to the snapshot's newest kernel ABI (a plain `upgrade`
 # keeps them back, because a new ABI is a NEW package): the 7e53720d
-# exact-byte scan found the OVA booting 6.8.0-142 while the pinned snapshot
-# already carried 6.8.0-146 and its security fixes. The superseded kernel's
-# packages are then purged, so exactly one kernel ships. Docker is held above
-# and cannot move.
-if [[ -n "${GUEST_APT_SNAPSHOT:-}" ]]; then
-  log "applying guest security updates from the Ubuntu archive snapshot ${GUEST_APT_SNAPSHOT}"
-  apt-get -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" update
-  before="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | sort)"
-  DEBIAN_FRONTEND=noninteractive apt-get -y -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" \
-    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold --with-new-pkgs upgrade
-  # The kernel series is Ubuntu's supported HWE kernel (manifest.env
-  # GUEST_KERNEL_META, see there for why). Install its image metapackage from
-  # the same snapshot, then remove the GA metapackage chain the cloud image
-  # ships: left in place it would keep the 6.8 ABI installed and pull every
-  # later 6.8 kernel back in. Removing a metapackage removes no kernel; the
-  # purge below drops the superseded 6.8 packages.
-  [[ -n "${GUEST_KERNEL_META:-}" ]] || { echo "manifest.env: GUEST_KERNEL_META is not set" >&2; exit 1; }
-  DEBIAN_FRONTEND=noninteractive apt-get -y -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" \
-    install --no-install-recommends "$GUEST_KERNEL_META"
-  ga_meta="$(dpkg-query -W -f='${Package} ${Status}\n' linux-virtual linux-image-virtual linux-headers-virtual \
-    linux-generic linux-image-generic linux-headers-generic 2>/dev/null | awk '$NF=="installed"{print $1}' || true)"
-  if [[ -n "$ga_meta" ]]; then
-    log "removing the GA kernel metapackages: $(echo "$ga_meta" | tr '\n' ' ')"
-    # shellcheck disable=SC2086 # one package name per word
-    DEBIAN_FRONTEND=noninteractive apt-get -y -qq purge $ga_meta
-  fi
-  dpkg-query -W -f='${Status}' "$GUEST_KERNEL_META" 2>/dev/null | grep -q ' installed$' \
-    || { echo "$GUEST_KERNEL_META is not installed after the GA metapackage purge" >&2; exit 1; }
-  # Exactly one kernel ships: purge every kernel-versioned package of an older
-  # ABI than the newest installed image.
-  newest_kver="$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' | sed -n 's/^linux-image-\([0-9][0-9.]*-[0-9]*\)-.*/\1/p' | sort -V | tail -1)"
-  [[ -n "$newest_kver" ]] || { echo "no kernel image installed" >&2; exit 1; }
-  stale_kpkgs="$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 'linux-modules-[0-9]*' 'linux-modules-extra-[0-9]*' \
-    'linux-headers-[0-9]*' 'linux-tools-[0-9]*' 'linux-cloud-tools-[0-9]*' 2>/dev/null \
-    | grep -vE -- "-${newest_kver//./\\.}(-|\$)" || true)"
-  if [[ -n "$stale_kpkgs" ]]; then
-    log "purging the superseded kernel: $(echo "$stale_kpkgs" | tr '\n' ' ')"
-    # shellcheck disable=SC2086 # one package name per word
-    DEBIAN_FRONTEND=noninteractive apt-get -y -qq purge $stale_kpkgs
-  fi
-  [[ "$(find /boot -maxdepth 1 -name 'vmlinuz-*' | wc -l)" == 1 ]] || { ls -l /boot >&2; echo "expected exactly one kernel in /boot" >&2; exit 1; }
-  # ... and that one is the snapshot's newest: a held or phased kernel would
-  # otherwise pass the one-kernel check on the old ABI.
-  meta="$GUEST_KERNEL_META"
-  inst="$(dpkg-query -W -f='${Version}' "$meta" 2>/dev/null || true)"
-  [[ -n "$inst" ]] || { echo "$meta is not installed" >&2; exit 1; }
-  cand="$(apt-cache -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" policy "$meta" | awk '/Candidate:/{print $2}')"
-  [[ "$inst" == "$cand" ]] || { echo "$meta is $inst, the snapshot's candidate is $cand (kernel held back)" >&2; exit 1; }
-  # ... and the one kernel in /boot is the one that metapackage depends on.
-  want_img="$(apt-cache -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" depends "$meta" | sed -n 's/^ *Depends: \(linux-image-[0-9][^ ]*\)$/\1/p' | head -1)"
-  [[ -n "$want_img" && -e "/boot/vmlinuz-${want_img#linux-image-}" ]] \
-    || { echo "$meta wants ${want_img:-?}, /boot has $(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f ')" >&2; exit 1; }
-  if dpkg-query -W -f='${Package} ${Status}\n' linux-image-virtual linux-image-generic 2>/dev/null | grep -q ' installed$'; then
-    echo "a GA kernel metapackage is installed again" >&2; exit 1
-  fi
-  log "kernel: $(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f')"
-  # snapd: a root daemon and 16 Go binaries the appliance never uses (no snap
-  # is installed or needed); the exact-byte scan attributed most host-binary
-  # findings to it. Only ubuntu-server RECOMMENDS snapd, so its purge removes
-  # nothing else. lxd-installer (a shell stub, no Go) stays: ubuntu-server
-  # DEPENDS on it, and purging it would remove ubuntu-server and leave its
-  # dependencies (open-vm-tools, unattended-upgrades, …) to the next
-  # `autoremove` in culvert-os-update. The pin keeps an upgrade from bringing
-  # snapd back; the check below refuses a purge that took anything with it.
-  log "purging snapd (unused root daemon)"
-  DEBIAN_FRONTEND=noninteractive apt-get -y -qq purge snapd
-  rm -rf /var/lib/snapd /var/cache/snapd /snap
-  printf 'Package: snapd\nPin: release *\nPin-Priority: -1\n' > /etc/apt/preferences.d/culvert-no-snapd
-  for keep in ubuntu-server open-vm-tools unattended-upgrades; do
-    [[ "$(dpkg-query -W -f='${db:Status-Status}' "$keep" 2>/dev/null)" == installed ]] \
-      || { echo "$keep is no longer installed after the snapd purge" >&2; exit 1; }
-  done
-  after="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | sort)"
-  # Shipped as evidence: exactly which packages the snapshot upgrade moved.
-  # comm, not diff: diff exits 1 whenever the lists differ, which under
-  # `set -o pipefail` aborted the whole first candidate build right after the
-  # upgrade had succeeded (measured). comm exits 0 on differences.
-  { echo "# guest packages upgraded at build time from snapshot ${GUEST_APT_SNAPSHOT} (old -> new)"
-    comm -3 <(echo "$before") <(echo "$after") | tr -d '\t' | sort | awk -F= '{v[$1]=v[$1] (v[$1]?" -> ":"") $2} END{for (p in v) print p " " v[p]}' | sort
-  } > "$STATE/build-upgrades.txt"
-  moved="$(grep -vc '^#' "$STATE/build-upgrades.txt" || true)"
-  log "build-time upgrades: ${moved:-0} package(s) moved"
-  # Custom theme basenames enter Ubuntu's graphical initramfs-hook branch
-  # even with the native text renderer: label/fontconfig are needed by that
-  # hook. Install from the same pinned snapshot, never at customer first boot.
-  log "installing pinned-snapshot early boot presentation packages"
-  apt-get -y -qq -o Acquire::Snapshot="${GUEST_APT_SNAPSHOT}" install --no-install-recommends \
-    plymouth plymouth-theme-ubuntu-text plymouth-label fontconfig
-  # Leave the snapshot behind: the deployed appliance updates from the live
-  # archive (unattended-upgrades + culvert-os-update), never from a snapshot.
-  apt-get -qq update
-else
-  echo 'Culvert boot splash requires the pinned GUEST_APT_SNAPSHOT.' >&2
-  exit 1
+# exact-byte scan found the OVA booting 6.8.0-142 while the snapshot already
+# carried 6.8.0-146 and its security fixes. The superseded kernel's packages
+# are then purged, so exactly one kernel ships. Docker is held above and
+# cannot move.
+log "applying guest security updates from $SNAPSHOT_LABEL"
+before="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | sort)"
+DEBIAN_FRONTEND=noninteractive apt_snap -y -qq \
+  -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold --with-new-pkgs upgrade
+# The kernel series is Ubuntu's supported HWE kernel (manifest.env
+# GUEST_KERNEL_META, see there for why). Install its image metapackage from
+# the same snapshot, then remove the GA metapackage chain the cloud image
+# ships: left in place it would keep the 6.8 ABI installed and pull every
+# later 6.8 kernel back in. Removing a metapackage removes no kernel; the
+# purge below drops the superseded 6.8 packages.
+DEBIAN_FRONTEND=noninteractive apt_snap -y -qq install --no-install-recommends "$GUEST_KERNEL_META"
+ga_meta="$(dpkg-query -W -f='${Package} ${Status}\n' linux-virtual linux-image-virtual linux-headers-virtual \
+  linux-generic linux-image-generic linux-headers-generic 2>/dev/null | awk '$NF=="installed"{print $1}' || true)"
+if [[ -n "$ga_meta" ]]; then
+  log "removing the GA kernel metapackages: $(echo "$ga_meta" | tr '\n' ' ')"
+  # shellcheck disable=SC2086 # one package name per word
+  DEBIAN_FRONTEND=noninteractive apt_snap -y -qq purge $ga_meta
 fi
+dpkg-query -W -f='${Status}' "$GUEST_KERNEL_META" 2>/dev/null | grep -q ' installed$' \
+  || { echo "$GUEST_KERNEL_META is not installed after the GA metapackage purge" >&2; exit 1; }
+# Exactly one kernel ships: purge every kernel-versioned package of an older
+# ABI than the newest installed image.
+newest_kver="$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' | sed -n 's/^linux-image-\([0-9][0-9.]*-[0-9]*\)-.*/\1/p' | sort -V | tail -1)"
+[[ -n "$newest_kver" ]] || { echo "no kernel image installed" >&2; exit 1; }
+stale_kpkgs="$(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 'linux-modules-[0-9]*' 'linux-modules-extra-[0-9]*' \
+  'linux-headers-[0-9]*' 'linux-tools-[0-9]*' 'linux-cloud-tools-[0-9]*' 2>/dev/null \
+  | grep -vE -- "-${newest_kver//./\\.}(-|\$)" || true)"
+if [[ -n "$stale_kpkgs" ]]; then
+  log "purging the superseded kernel: $(echo "$stale_kpkgs" | tr '\n' ' ')"
+  # shellcheck disable=SC2086 # one package name per word
+  DEBIAN_FRONTEND=noninteractive apt_snap -y -qq purge $stale_kpkgs
+fi
+[[ "$(find /boot -maxdepth 1 -name 'vmlinuz-*' | wc -l)" == 1 ]] || { ls -l /boot >&2; echo "expected exactly one kernel in /boot" >&2; exit 1; }
+# ... and that one is the snapshot's newest: a held or phased kernel would
+# otherwise pass the one-kernel check on the old ABI. apt_cache_snap: the
+# candidate must come from the SNAPSHOT lists. Before FB-1 this call carried
+# an option APT ignores and compared against the LIVE candidate, which is why
+# it could not see that the build was live.
+meta="$GUEST_KERNEL_META"
+inst="$(dpkg-query -W -f='${Version}' "$meta" 2>/dev/null || true)"
+[[ -n "$inst" ]] || { echo "$meta is not installed" >&2; exit 1; }
+cand="$(apt_cache_snap policy "$meta" | awk '/Candidate:/{print $2}')"
+[[ "$inst" == "$cand" ]] || { echo "$meta is $inst, the snapshot's candidate is $cand (kernel held back)" >&2; exit 1; }
+# ... and the one kernel in /boot is the one that metapackage depends on.
+want_img="$(apt_cache_snap depends "$meta" | sed -n 's/^ *Depends: \(linux-image-[0-9][^ ]*\)$/\1/p' | head -1)"
+[[ -n "$want_img" && -e "/boot/vmlinuz-${want_img#linux-image-}" ]] \
+  || { echo "$meta wants ${want_img:-?}, /boot has $(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f ')" >&2; exit 1; }
+if dpkg-query -W -f='${Package} ${Status}\n' linux-image-virtual linux-image-generic 2>/dev/null | grep -q ' installed$'; then
+  echo "a GA kernel metapackage is installed again" >&2; exit 1
+fi
+log "kernel: $(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f')"
+# snapd: a root daemon and 16 Go binaries the appliance never uses (no snap
+# is installed or needed); the exact-byte scan attributed most host-binary
+# findings to it. Only ubuntu-server RECOMMENDS snapd, so its purge removes
+# nothing else. lxd-installer (a shell stub, no Go) stays: ubuntu-server
+# DEPENDS on it, and purging it would remove ubuntu-server and leave its
+# dependencies (open-vm-tools, unattended-upgrades, …) to the next
+# `autoremove` in culvert-os-update. The pin keeps an upgrade from bringing
+# snapd back; the check below refuses a purge that took anything with it.
+log "purging snapd (unused root daemon)"
+DEBIAN_FRONTEND=noninteractive apt_snap -y -qq purge snapd
+rm -rf /var/lib/snapd /var/cache/snapd /snap
+printf 'Package: snapd\nPin: release *\nPin-Priority: -1\n' > /etc/apt/preferences.d/culvert-no-snapd
+for keep in ubuntu-server open-vm-tools unattended-upgrades; do
+  [[ "$(dpkg-query -W -f='${db:Status-Status}' "$keep" 2>/dev/null)" == installed ]] \
+    || { echo "$keep is no longer installed after the snapd purge" >&2; exit 1; }
+done
+after="$(dpkg-query -W -f='${binary:Package}=${Version}\n' | sort)"
+# Shipped as evidence: exactly which packages the snapshot upgrade moved.
+# comm, not diff: diff exits 1 whenever the lists differ, which under
+# `set -o pipefail` aborted the whole first candidate build right after the
+# upgrade had succeeded (measured). comm exits 0 on differences.
+{ echo "# guest packages upgraded at build time from the $SNAPSHOT_LABEL (old -> new)"
+  comm -3 <(echo "$before") <(echo "$after") | tr -d '\t' | sort | awk -F= '{v[$1]=v[$1] (v[$1]?" -> ":"") $2} END{for (p in v) print p " " v[p]}' | sort
+} > "$STATE/build-upgrades.txt"
+moved="$(grep -vc '^#' "$STATE/build-upgrades.txt" || true)"
+log "build-time upgrades: ${moved:-0} package(s) moved"
+# Custom theme basenames enter Ubuntu's graphical initramfs-hook branch
+# even with the native text renderer: label/fontconfig are needed by that
+# hook. Install from the same pinned snapshot, never at customer first boot.
+log "installing pinned-snapshot early boot presentation packages"
+apt_snap -y -qq install --no-install-recommends \
+  plymouth plymouth-theme-ubuntu-text plymouth-label fontconfig
+# Leave the snapshot behind: the deployed appliance updates from the live
+# archive (unattended-upgrades + culvert-os-update), never from a snapshot.
+# This is the ONLY apt call outside the pinned section, and it installs
+# nothing (the lists are deleted again in step 5).
+apt_snap_sources_restore
+apt-get -qq update
 
 # Docker daemon defaults for the appliance: containerd image store (the
 # default on a fresh 29.x install, pinned explicitly so a pre-baked image keeps

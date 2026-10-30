@@ -34,7 +34,7 @@ func TestPrepareGuest_ShipsTheSnapshotsNewestKernelOnly(t *testing.T) {
 		`'linux-image-[0-9]*' 'linux-modules-[0-9]*' 'linux-modules-extra-[0-9]*'`,
 		`'linux-headers-[0-9]*' 'linux-tools-[0-9]*' 'linux-cloud-tools-[0-9]*'`,
 		`| grep -vE -- "-${newest_kver//./\\.}(-|\$)" || true)"`,
-		`apt-get -y -qq purge $stale_kpkgs`,
+		`apt_snap -y -qq purge $stale_kpkgs`,
 		// ... and the build refuses unless exactly one kernel remains
 		`[[ "$(find /boot -maxdepth 1 -name 'vmlinuz-*' | wc -l)" == 1 ]] ||`,
 		// ... and it is the snapshot's candidate of the HWE image meta, not a
@@ -75,7 +75,7 @@ func TestPrepareGuest_ShipsTheHWEKernel(t *testing.T) {
 	for _, want := range []string{
 		`install --no-install-recommends "$GUEST_KERNEL_META"`,
 		`linux-virtual linux-image-virtual linux-headers-virtual \`,
-		`DEBIAN_FRONTEND=noninteractive apt-get -y -qq purge $ga_meta`,
+		`DEBIAN_FRONTEND=noninteractive apt_snap -y -qq purge $ga_meta`,
 		`"$GUEST_KERNEL_META is not installed after the GA metapackage purge"`,
 		`echo "a GA kernel metapackage is installed again" >&2; exit 1`,
 	} {
@@ -85,7 +85,7 @@ func TestPrepareGuest_ShipsTheHWEKernel(t *testing.T) {
 	}
 	// HWE install and GA removal happen before the one-kernel purge.
 	inst := strings.Index(src, `install --no-install-recommends "$GUEST_KERNEL_META"`)
-	purge := strings.Index(src, `apt-get -y -qq purge $stale_kpkgs`)
+	purge := strings.Index(src, `apt_snap -y -qq purge $stale_kpkgs`)
 	if inst < 0 || purge < inst {
 		t.Fatalf("the HWE kernel must be installed before the superseded kernel is purged (install=%d purge=%d)", inst, purge)
 	}
@@ -153,7 +153,7 @@ func TestPrepareGuest_DRMNodesAreRootOnly(t *testing.T) {
 func TestPrepareGuest_PurgesSnapdAndPinsItOut(t *testing.T) {
 	src := readSource(t, "appliance/build/prepare-guest.sh")
 	for _, want := range []string{
-		"apt-get -y -qq purge snapd\n",
+		"apt_snap -y -qq purge snapd\n",
 		`rm -rf /var/lib/snapd /var/cache/snapd /snap`,
 		// the purge must not take the server metapackage (and with it, at the
 		// next autoremove, open-vm-tools and the security auto-updates)
@@ -168,7 +168,7 @@ func TestPrepareGuest_PurgesSnapdAndPinsItOut(t *testing.T) {
 	if strings.Contains(src, "purge snapd lxd-installer") || regexp.MustCompile(`purge[^\n]*lxd-installer`).MatchString(src) {
 		t.Error("lxd-installer must not be purged: ubuntu-server DEPENDS on it")
 	}
-	purge := strings.Index(src, `apt-get -y -qq purge snapd`)
+	purge := strings.Index(src, `apt_snap -y -qq purge snapd`)
 	after := strings.Index(src, `after="$(dpkg-query -W`)
 	if purge < 0 || after < purge {
 		t.Error("snapd must be purged before the shipped package evidence is taken")

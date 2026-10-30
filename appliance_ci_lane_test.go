@@ -298,7 +298,7 @@ func TestClamAVSidecar_EveryContentChangeGetsANewTag(t *testing.T) {
 func TestClamAVSidecar_EveryShippedFileNamesTheSameLocalTag(t *testing.T) {
 	dir := pkgSourceDir()
 	read := func(rel string) string {
-		raw, err := os.ReadFile(filepath.Join(dir, rel))
+		raw, err := os.ReadFile(filepath.Join(dir, rel)) //nolint:gosec // G703: rel is a repository-relative literal chosen by this test; gosec started reporting it when the FB-1 test file joined the package
 		if err != nil {
 			t.Fatal(err)
 		}
