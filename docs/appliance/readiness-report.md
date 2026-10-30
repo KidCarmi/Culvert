@@ -6,6 +6,76 @@
 
 This report separates **implemented**, **tested** (and how: unit gates, executed Docker qualification against real images, CI), **blocked** (exact prerequisite), and **unsupported** (deliberately out of the pilot). Nothing here claims production readiness; the product document deadline is not a deployment date.
 
+## 0-Q7. Status update (2026-10-30): Q7 console fix integrated on the candidate line
+
+This block supersedes nothing below it. It records **one owner-approved integration** (PR #1528, 30 Oct). §0 and every historical section stay as written.
+
+**What changed.**
+
+| | |
+|---|---|
+| Commits on `review/1528-m1-engine-pins` | the candidate line of OVA `325c142a`, source `0648adeb` |
+| 1. `b241b4697bdceb06dbffa87677769d1eb1590e1c` | `cherry-pick -x` of fix `c88c0e76ff89a68646679a47fd3c7dca9dc9267f` onto `cfd61404`. Scope: 3 files in `cmd/culvert-console/`; only `action_linux.go` is product code (+40/−1). Its tree equals the fix tree everywhere outside `docs/` (verified locally and in CI). |
+| 2. `e77fcaacaea70b165b0a233bc416642c217e2f44` | Test-only: the regression's guardian helper uses `exec.CommandContext` (the Fast gate's `noctx` finding on commit 1). The console binary is unchanged. |
+
+PR #1528's own head (`feat/onprem-appliance-readiness`, frozen `4524311b`) is **unchanged**. That was an owner choice: the candidate line, not the frozen head.
+
+**Defect closed (in source, not in any OVA).**
+- At shutdown, the console cancelled a recovery shell that held the terminal foreground. The shell was then killed without handing the foreground back.
+- The console's terminal restore then ran from the background, and SIGTTOU stopped the console.
+- The stopped console could not run its 5 s watchdog, so systemd waited its full 90 s session timeout.
+- The fix blocks SIGTTOU in the restoring thread only, takes the foreground back, then restores. Regression: `TestRealPTYCancelledForegroundChildDoesNotStopConsole` fails on the old restore (`state T`) and passes on the fix.
+
+**ESXi results and their exact scope.**
+
+The results below apply to the **tested overlay candidate only**:
+- identity: `original-325c-postmaintenance-k42-console-8b141120`;
+- that is OVA `325c142a` after the authorized kernel 7.0.0-42 maintenance, with both console copies replaced by `8b141120…` (built from `c88c0e76`) and the running processes restarted and verified before Q7.
+
+| Gate | Result (ASTRA) |
+|---|---|
+| Q7, three consecutive recoveries, 120 s limit | PASS: 69.781 / 74.562 / 72.297 s |
+| Q8 encrypted restore | PASS |
+| Q9 real-ESXi VGA | PASS |
+| Q10 final M2 | PASS, 7/7 |
+
+- **Earlier Q7 history is preserved.** It had one 79.579 s pass, then a 122.219 s timeout with a 90.097 s console-session wait.
+- **These passes do not transfer** to OVA `325c142a` as shipped (it has console `c4a24736…` and does not contain the fix), nor to any OVA not yet built.
+- **Residuals stay open.** The exact stop signal of historical PID 3241 is unproven. The host security residuals (R6/R7, kernel present-HIGH, M2 bounded residual) are unchanged.
+
+**Console build: integrated head vs tested overlay.** Recipe: shallow tag-free checkout, go1.27.3, flags of `build_console_bundle` (this reproduces shipped `c4a24736…` from `0648adeb` and the tested `8b141120…` from `c88c0e76`).
+
+| Source | Console SHA-256 (VCS-stamped, as shipped) | Built with `-buildvcs=false` |
+|---|---|---|
+| `0648adeb` (OVA `325c142a` as shipped) | `c4a24736bcada3b270e6368a43cdd0eeaf213b3549e53b6d5b7518f7896a3b69` | — |
+| `c88c0e76` (ASTRA's tested overlay) | `8b141120f7b5adb47e98580dc1527551ba513473374de493c896e40d698e49a2` | `6a6da8622d36acea38c4536a501797d470fdfa0011ce76b95e25f0581a641e73` |
+| `b241b469` (integration commit 1) | `cb04bfd83d202ca7770cd3dea58c11589751944f44143c52163464be95a90b2a` | `6a6da862…` (identical) |
+| `e77fcaac` (head) | `62d935b6562fe5d16cb87f9a75a175dbebad7c0e01e3500d7f92d25d5dfee59d` | `6a6da862…` (identical) |
+
+- The stamped hashes differ **only** by the embedded commit stamp (`vcs.revision`, `vcs.time` and the derived module pseudo-version).
+- With the stamp removed, every build since `c88c0e76` is byte-identical. So the integrated console is the binary ASTRA tested.
+- Evidence: lab run [41040999583](https://github.com/KidCarmi/Culvert/actions/runs/41040999583), artifact `console-integration-b241b469`. It reproduces `c4a24736` and `8b141120`, shows the `b241b469` stamped and stamp-free hashes, and confirms the integrated tree is unchanged outside `docs/`.
+- The `e77fcaac` rows were rebuilt locally from a shallow tag-free clone. The same procedure reproduced `8b141120` from `c88c0e76`.
+- A clone with git tags gives a different stamped hash, because Go derives the module version from tags. It does not change the stamp-free hash.
+
+**CI** (workflow_dispatch; #1528 and #1705 conflict with main, so pull_request CI does not trigger):
+
+| Run on `e77fcaac` | Result | Against the `0648adeb` baseline (Fast 40523421826 / Deep 40523416237) |
+|---|---|---|
+| Deep PR Gate [41043501718](https://github.com/KidCarmi/Culvert/actions/runs/41043501718) | **success** | Same (success) |
+| Appliance Console [41043504711](https://github.com/KidCarmi/Culvert/actions/runs/41043504711) | **success** | — |
+| Fast PR Gate [41043498033](https://github.com/KidCarmi/Culvert/actions/runs/41043498033) | **failure**: 20 jobs succeeded; `gitleaks`, `golangci-lint` and the aggregate failed | Same three failures as the baseline. `gitleaks` is the same failing step: the 274 history-scope findings bounded in the freeze BOM; a scan of the two integration commits finds 0 leaks. `golangci-lint` reports 8 issues: the baseline's 5, plus 3 in `events.go`/`internal/feedsync/feedsync.go`, which this branch has not touched since `0648adeb` but `main` has (the lint is scoped against moving `main`). **No lint issue is in the integration diff**; the one it introduced (`noctx`, commit 1) is fixed in commit 2. |
+
+Neither Fast failure is offered as a pass. They block a PR-gate APPROVED on this line exactly as they did on `0648adeb`.
+
+**Remaining gates (unchanged by this integration):**
+- No OVA contains the fix. A replacement candidate build needs separate owner approval and gets a new identity, and its changed paths need ASTRA's impacted qualification (R4).
+- FB-1: the next build must be snapshot-pinned or explicitly labelled live-archive (`evidence/combined/future-build/FB-1-APT-SNAPSHOT.md`).
+- R6/R7 security residuals and owner dispositions.
+- R9 release provenance (signed tag build, OVA signature).
+- MERGE / PILOT / RELEASE remain **NO-GO**. Only the owner approves a GO.
+
+
 ## 0. Canonical status (2026-10-23) — read this first
 
 **Decision: MERGE / LIMITED PILOT / PRODUCTION RELEASE are NO-GO.** The rows
