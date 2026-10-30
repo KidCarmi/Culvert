@@ -417,7 +417,7 @@ func normCats(cats []string) []string {
 func buildCatSet(cats []string) map[string]bool {
 	m := make(map[string]bool, len(cats))
 	for _, c := range cats {
-		if c = strings.ToLower(c); c != "" {
+		if c = CategoryKey(c); c != "" {
 			m[c] = true
 		}
 	}
@@ -937,16 +937,55 @@ func (s *Store) Rename(id, newName string) (oldName string, err error) {
 // published view retires the per-call s.mu.RLock. See readView for the
 // measured figures.
 func (s *Store) MatchesCategoryByID(id, category string) (matched, resolved bool) {
+	return s.MatchesCategoryKeyByID(id, CategoryKey(category))
+}
+
+// CategoryKey derives the catSet lookup key for a category name. It is the
+// SINGLE definition of that derivation, shared with buildCatSet, so a caller
+// that memoizes a key cannot drift from the keys the sets are built with.
+func CategoryKey(category string) string { return strings.ToLower(category) }
+
+// MatchesCategoryKeyByID is MatchesCategoryByID taking the catSet KEY the
+// caller already holds — CategoryKey(category) — instead of the display-cased
+// category name.
+//
+// WHY THE PRE-KEYED FORM EXISTS. The key depends on the REQUEST (the
+// destination host's resolved category), not on the rule, while this function
+// is called ONCE PER category-group rule inside the policy scan every proxied
+// request walks. Deriving it here therefore multiplied a request-invariant cost
+// by the rule count — and it is an ALLOCATING cost, because strings.ToLower
+// returns its input unchanged only for an all-lowercase string and EVERY
+// shipped category name is display-cased ("Social Media", "Gambling", "HR &
+// Recruiting", ...), so the fast path never applied to a real taxonomy.
+//
+// Measured on a 4-core Xeon @2.80GHz (go1.27.3), the end-to-end policy scan at
+// 20 ID-stamped category-group rules against a CATEGORIZED destination
+// (BenchmarkPolicyEvaluate_CategoryGroupByID, alloc_objects profile at
+// memprofilerate=1): 20 allocs/op and 320 B/op, 91% of every allocation the
+// scan made, all of them this one line. Hoisting the derivation to the
+// per-scan scratch (package main's hostCatScratch.fusionCatKey) makes the scan
+// allocation-free — a CONSTANT, not a function of the rule count, which is the
+// same contract TestBenchGate_PolicyEvalAllocs already holds the plain-FQDN
+// path to.
+//
+// This is a pure hoist: the key is byte-identical to the one the string form
+// derives, so no membership decision can change. The lowering now happens
+// before the byID probe rather than after, which also means a DANGLING id no
+// longer pays for a key it never uses; resolved/matched are unaffected.
+//
+// The empty-key arm keeps MatchesCategoryByID's exact shape and position: a
+// resolved group with an UNCATEGORIZED host reports (false, true), so the
+// caller does NOT fall back to the stale denormalized name. CategoryKey("")
+// is "", so the two forms agree on that input too.
+func (s *Store) MatchesCategoryKeyByID(id, catKey string) (matched, resolved bool) {
 	if id == "" {
 		return false, false
 	}
-	catKey := strings.ToLower(category)
-
 	g := s.readState().byID[id]
 	if g == nil {
 		return false, false
 	}
-	if category == "" {
+	if catKey == "" {
 		return false, true
 	}
 	return g.catSet[catKey], true
@@ -1030,13 +1069,26 @@ func (s *Store) ContainsCategory(catName string) (groupName string, found bool) 
 // than by locking: a group reachable from a published view is never mutated in
 // place, because every writer installs a copy-on-write replacement.
 func (s *Store) MatchesCategory(groupName, category string) bool {
-	if category == "" {
+	return s.MatchesCategoryKey(groupName, CategoryKey(category))
+}
+
+// MatchesCategoryKey is MatchesCategory taking the catSet KEY the caller
+// already holds. See MatchesCategoryKeyByID for why the pre-keyed form exists;
+// this is the same hoist on the denormalized-NAME fallback leg, which an
+// un-migrated rule (no DestCategoryGroupID) still takes.
+//
+// The GROUP NAME is deliberately still lowered here. It is a per-RULE value,
+// not a request-invariant one, so the scratch cannot hoist it — retiring that
+// allocation means precomputing a normalized group name on the rule at publish
+// time, the way normFQDN is precomputed, which is a separate change with a
+// separate blast radius. It costs nothing on the ID leg that production takes
+// (stampObjectRefIDs stamps every rule saved against an existing group) and
+// nothing for an all-lowercase group name on either leg.
+func (s *Store) MatchesCategoryKey(groupName, catKey string) bool {
+	if catKey == "" {
 		return false
 	}
-	nameKey := strings.ToLower(groupName)
-	catKey := strings.ToLower(category)
-
-	g := s.readState().byName[nameKey]
+	g := s.readState().byName[strings.ToLower(groupName)]
 	if g == nil {
 		return false
 	}
