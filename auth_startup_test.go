@@ -98,6 +98,55 @@ func snapshotAuthGlobals(t *testing.T) {
 	})
 }
 
+// clearLocalAuthForTest puts the shared cfg into the state a FRESH INSTALL is
+// in — no local credential at all — and restores what it found on cleanup.
+//
+// `cfg.SetAuth("", "")` was the idiom for this, and it is incomplete: it clears
+// the legacy c.user/passHash pair and deliberately leaves the RBAC roster
+// alone, because clearing a credential must never delete admin accounts. The
+// roster is auth configuration too, so a test that means "nothing is
+// configured" has to clear both — and since cfg is process-global and shared,
+// a test that seeds an account without restoring it leaves that account
+// visible to every later test. This helper is the complete form AND the
+// restore, so it fixes the leak rather than tolerating it.
+//
+// Added with SEC-SETUPANCHOR-1, which made the gap observable: IsConfigured
+// now counts any roster account as a setup anchor (a roster with accounts but
+// no present admin used to reopen the unauthenticated first-run window), so a
+// leaked account from an earlier test now reads as a configured appliance.
+func clearLocalAuthForTest(t *testing.T) {
+	t.Helper()
+	cfg.mu.Lock()
+	oldUser := cfg.user
+	oldPassHash := append([]byte(nil), cfg.passHash...)
+	var oldUIUsers map[string]*uiAdminUser
+	if cfg.uiUsers != nil {
+		oldUIUsers = make(map[string]*uiAdminUser, len(cfg.uiUsers))
+		for k, v := range cfg.uiUsers {
+			uCopy := *v
+			uCopy.passHash = append([]byte(nil), v.passHash...)
+			uCopy.backupCodes = append([]string(nil), v.backupCodes...)
+			oldUIUsers[k] = &uCopy
+		}
+	}
+	cfg.user = ""
+	cfg.passHash = nil
+	cfg.uiUsers = map[string]*uiAdminUser{}
+	cfg.authRevision++
+	cfg.mu.Unlock()
+	cfg.cache.clear()
+
+	t.Cleanup(func() {
+		cfg.mu.Lock()
+		cfg.user = oldUser
+		cfg.passHash = oldPassHash
+		cfg.uiUsers = oldUIUsers
+		cfg.authRevision++
+		cfg.mu.Unlock()
+		cfg.cache.clear()
+	})
+}
+
 // ─── Resolver ────────────────────────────────────────────────────────
 
 func TestResolveAuthStartupConfig_Zero(t *testing.T) {

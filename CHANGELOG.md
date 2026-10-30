@@ -118,6 +118,45 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A roster holding accounts but no present admin reopened the unauthenticated
+  first-run bootstrap window (SEC-SETUPANCHOR-1).** `uiAuthMiddleware` grants
+  RoleAdmin to every unauthenticated request while the first-run window is
+  open, and `IsConfigured()` anchored that window on `c.user`, which
+  `loadUIUsersFile` sets only from a record whose EFFECTIVE role is admin. A
+  roster that plainly recorded a completed setup therefore left every term of
+  the predicate false, and an anonymous `GET /api/auth/users` was granted
+  RoleAdmin through the real `requireRole(RoleAdmin)` door — the whole admin
+  control plane, including roster and policy writes, on a configured appliance.
+
+  Two routes reach that state without touching the admin API, neither needing
+  any prior authority. `loadedRosterRole`'s least-privilege clamp is the first:
+  restoring a backup taken by a build that enrolls a role this one does not
+  clamps the only admin to `RoleViewer`, so a control written to fail CLOSED
+  against role-based privilege escalation was what handed the appliance to
+  anonymous callers — the clamp did exactly its job, and the composition
+  inverted the result. A legacy pre-RBAC roster is the second: its empty role is
+  never equal to `RoleAdmin`, and such an account signs in as admin through the
+  middleware's own compat branch, so those deployments served an anonymous admin
+  plane on every boot. CHAOS-103's durable backstop did not help, because
+  `rosterBytesConfigure` faithfully mirrored the clamp and so agreed with the
+  in-memory predicate precisely where that predicate was wrong.
+
+  Any ADMITTED roster account is now a setup anchor, independent of its role, on
+  both the in-memory (`IsConfigured`) and durable (`rosterBytesConfigure`)
+  sides. Setup created the roster; a roster with no usable admin is a LOCKOUT
+  for the `--reset-password` break-glass to repair — which the
+  `admin_roster_durability` diagnostics row already exists to name — never
+  grounds to grant authority to callers who hold none. The new term only ever
+  makes the predicate MORE true, so it can only CLOSE the window, and the
+  first-run and rollback paths are untouched because both carry an empty roster:
+  a quarantined corrupt roster (CHAOS-05) still loads none, and
+  `SetAuthDurably`'s compensation restores "no accounts, empty legacy pair", so
+  a genuine fresh install and a rolled-back setup both stay retryable. Pinned by
+  `setup_anchor_roster_test.go`, whose anonymous cases drive real requests
+  through `uiAuthMiddleware` and `requireRole` rather than asserting the
+  predicate, and whose negative controls hold the five states that must keep the
+  window open.
+
 - **CHAOS-102's own regression gate could be defeated by a one-line refactor
   that kept the arm and moved it below the bind (SEC-SOCKS5GATE-1).** The
   pre-posture gate is pinned at both ends by AST walls, but only the RELEASE end
