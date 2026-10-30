@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -67,7 +68,7 @@ func TestTerminalProcess(t *testing.T) {
 	}
 	var action string
 	switch os.Getenv("CONSOLE_TEST_MODE") {
-	case "action-return", "action-wait", "action-ignore":
+	case "action-return", "action-wait", "action-ignore", "action-foreground":
 		action, err = terminalActionFixture(ctx, os.Getenv("CONSOLE_TEST_MODE"))
 	case "confirm":
 		action, err = confirm(ctx, "CONFIRM READY: ")
@@ -88,6 +89,11 @@ func TestTerminalProcess(t *testing.T) {
 	}
 	if *before != *after {
 		t.Fatal("terminal modes not restored")
+	}
+	// The restore must not leave SIGTTOU ignored process-wide: a later child
+	// would inherit it. The kernel's own view, not os/signal's bookkeeping.
+	if mask := procSignalMask(t, "SigIgn"); mask&(1<<(uint(syscall.SIGTTOU)-1)) != 0 {
+		t.Fatalf("SIGTTOU left ignored after the terminal restore (SigIgn %#x)", mask)
 	}
 	switch {
 	case ctx.Err() != nil:
@@ -116,6 +122,7 @@ type terminalSession struct {
 	cmd     *exec.Cmd
 	chunks  chan string
 	pending string
+	seen    string // everything read, never cleared (await clears pending)
 }
 
 func startTerminal(t *testing.T, rows, columns uint16, term string) *terminalSession {
@@ -124,6 +131,44 @@ func startTerminal(t *testing.T, rows, columns uint16, term string) *terminalSes
 }
 
 func startTerminalMode(t *testing.T, rows, columns uint16, term, mode string) *terminalSession {
+	t.Helper()
+	return startTerminalSession(t, rows, columns, term, mode, false)
+}
+
+// startControllingTerminal reproduces the appliance's tty1 job-control shape:
+// a guardian (login's role) is the session leader of a PTY that is its
+// controlling terminal, and starts the console in its OWN foreground process
+// group. The console's group therefore has a parent in the same session and is
+// not orphaned, so a background terminal write raises SIGTTOU (an orphaned
+// group would get EIO instead and would not reproduce the stop).
+func startControllingTerminal(t *testing.T, mode string) *terminalSession {
+	t.Helper()
+	return startTerminalSession(t, 25, 80, "linux", mode, true)
+}
+
+// TestConsoleGuardianProcess is the guardian half of startControllingTerminal.
+func TestConsoleGuardianProcess(t *testing.T) {
+	if os.Args[len(os.Args)-1] != "console-guardian" {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G204 -- execute this test binary with a fixed helper-test selector.
+	cmd := exec.Command(exe, "-test.run=^TestTerminalProcess$", "--", "console-pty")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Foreground: true, Ctty: 0}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(os.Stdout, "CONSOLE PID %d\n", cmd.Process.Pid)
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func startTerminalSession(t *testing.T, rows, columns uint16, term, mode string, controlling bool) *terminalSession {
 	t.Helper()
 	fd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -154,8 +199,15 @@ func startTerminalMode(t *testing.T, rows, columns uint16, term, mode string) *t
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	// #nosec G204 -- execute this test binary with a fixed helper-test selector.
 	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestTerminalProcess$", "--", "console-pty")
+	if controlling {
+		// #nosec G204 -- execute this test binary with a fixed helper-test selector.
+		cmd = exec.CommandContext(ctx, exe, "-test.run=^TestConsoleGuardianProcess$", "--", "console-guardian")
+	}
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "TERM=" + term, "CONSOLE_TEST_MODE=" + mode}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+	if controlling {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		t.Fatal(err)
@@ -193,6 +245,7 @@ func (s *terminalSession) await(t *testing.T, text string) {
 				t.Fatalf("PTY closed before %q: %q", text, s.pending)
 			}
 			s.pending += chunk
+			s.seen += chunk
 		case <-deadline.C:
 			t.Fatalf("PTY timeout waiting for %q: %q", text, s.pending)
 		}
@@ -237,4 +290,25 @@ func TestRealPTYNavigationResizePasteAndRestoration(t *testing.T) {
 			}
 		})
 	}
+}
+
+// procSignalMask reads one hex signal mask (SigIgn, SigBlk, ...) of this
+// process from /proc/self/status.
+func procSignalMask(t *testing.T, field string) uint64 {
+	t.Helper()
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, field+":"); ok {
+			mask, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return mask
+		}
+	}
+	t.Fatalf("%s not in /proc/self/status", field)
+	return 0
 }

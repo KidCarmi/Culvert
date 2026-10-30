@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"runtime"
 	"slices"
 	"strconv"
 	"syscall"
@@ -65,7 +66,7 @@ func interactiveCommand(ctx context.Context, args []string) (result error) {
 	}
 	defer func() {
 		// Child programs may leave echo/canonical mode changed even on success.
-		restoreErr := errors.Join(unix.IoctlSetTermios(0, unix.TCSETS, original), unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH))
+		restoreErr := restoreTerminal(original)
 		if restoreErr != nil {
 			result = errors.Join(result, errTerminalState, restoreErr)
 		}
@@ -87,6 +88,44 @@ func interactiveCommand(ctx context.Context, args []string) (result error) {
 		return fmt.Errorf("run console action: %w", err)
 	}
 	return nil
+}
+
+// restoreTerminal takes the terminal foreground back for the console's process
+// group, then restores the modes the child may have changed.
+//
+// An interactive child (the recovery shell's bash) moves itself into its own
+// process group and makes it the terminal foreground. It hands the foreground
+// back when it exits normally, but not when it is killed: on cancellation
+// (SIGTERM at shutdown) bash ignores SIGTERM and WaitDelay SIGKILLs it. The
+// console is then a BACKGROUND process of its own terminal, and TCSETS from
+// the background raises SIGTTOU, whose default action stops the whole process.
+// A stopped process runs nothing, the shutdown watchdog included, so systemd
+// waited out its 90 s session stop timeout on a maintenance reboot (Q7, ESXi).
+//
+// While SIGTTOU is blocked in the calling thread, the kernel treats it as
+// ignored for these ioctls: both the foreground hand-back (TIOCSPGRP) and
+// TCSETS are permitted from the background and no stop signal is generated
+// (POSIX tcsetpgrp/tcsetattr; Linux tty_check_change). The mask is per-thread
+// and restored before returning, so the process-wide disposition is never
+// changed and no later child can inherit an ignored job-control signal.
+func restoreTerminal(original *unix.Termios) (result error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	var block, previous unix.Sigset_t
+	block.Val[(unix.SIGTTOU-1)/64] |= 1 << ((uint(unix.SIGTTOU) - 1) % 64)
+	if err := unix.PthreadSigmask(unix.SIG_BLOCK, &block, &previous); err != nil {
+		return err
+	}
+	defer func() {
+		result = errors.Join(result, unix.PthreadSigmask(unix.SIG_SETMASK, &previous, nil))
+	}()
+	var errs []error
+	// ENOTTY: not our controlling terminal (no job control applies).
+	if foreground, err := unix.IoctlGetInt(0, unix.TIOCGPGRP); err == nil && foreground != unix.Getpgrp() {
+		errs = append(errs, unix.IoctlSetPointerInt(0, unix.TIOCSPGRP, unix.Getpgrp()))
+	}
+	errs = append(errs, unix.IoctlSetTermios(0, unix.TCSETS, original), unix.IoctlSetInt(0, unix.TCFLSH, unix.TCIFLUSH))
+	return errors.Join(errs...)
 }
 
 func actionEnvironment() []string {
