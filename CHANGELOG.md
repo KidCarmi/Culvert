@@ -9,6 +9,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A Control Plane restart during a cluster-CA rotation no longer locks every
+  un-renewed node out of mTLS (CHAOS-104).** The dual-CA overlap that makes a
+  rotation survivable was memory-only: `commitImport` demotes the outgoing CA
+  into `secondaryCert`/`secondaryPEM`/`secondaryExp` and `AllCACertsPEM`
+  publishes it into the Control Plane's mTLS client-CA pool, but `loadFromPEM`
+  restores only `cert`/`key`/`certPEM`. A restart anywhere inside the overlap
+  came back trusting only the new CA and refused every Data Plane node still
+  presenting an old-CA certificate — exactly the set `cluster.json` records as
+  pending renewal — with nothing logged and `/api/cluster/ca` still reporting
+  normal rotation progress. Recovery was per-node re-enrollment by hand,
+  because renewal itself rides the channel that had just been refused. Both
+  entry points open that window and `RotateIfNeeded`'s is unattended.
+
+  No new durable state was needed: the rotation's bookkeeping already persists
+  (`StartCARotation`, carrying `OldFingerprint` and `OldExpires`) and so does
+  the outgoing CA's PEM (`backupCAFiles` → `cluster-ca.crt.bak`, through
+  `fileutil.AtomicWrite`); only the binding between them was lost. `InitOrLoad`
+  now re-derives the secondary from those two records. Because the backup path
+  is fully predictable, the durable fingerprint carries the decision: the file
+  is admitted only when its SHA-256 matches the one the rotation recorded, it
+  must pass the production CA validator, and what enters the pool is re-encoded
+  from that single verified certificate rather than the file's bytes. A lapsed
+  window is never reinstated and, with no rotation recorded, a stale `.bak` is
+  ignored. Every refusal keeps the previous posture (new CA only) and now says
+  what it could not restore and how many nodes that strands. `backupCAFiles`
+  also reports a backup write that did not land, since that file is now
+  load-bearing for recovery.
+
+- **A panic in any of five background-worker rounds no longer terminates the
+  gateway (CHAOS-105).** Go ends the process on an unrecovered panic in any
+  goroutine and all five workers are `go`-detached, so one bad round was a
+  total outage — proxy data plane included. Four of the five serve
+  observability or housekeeping (the live-dashboard SSE broadcaster, the
+  decryption-coverage trend sampler, the support retention janitor and the
+  support upload worker), so a non-essential feature could kill the thing it
+  reports on; the fifth is the debug-level watchdog, the active auto-stop for
+  an elevated capture level. Each round now runs through CHAOS-24's
+  `runGuarded` under its own crash-component id, so a fault costs one interval
+  and is recorded in the same crash pipeline as a proxy or admin panic. The
+  retention janitor's synchronous boot sweep is guarded too: unguarded, a panic
+  there killed the process during startup.
+
 - **install.sh no longer replaces an at-rest passphrase it could not read.** A
   root-owned `0600` `.env` re-run unprivileged made `setup_at_rest_encryption`
   treat the file as having no passphrase, so a host-env `CULVERT_CA_PASSPHRASE`
