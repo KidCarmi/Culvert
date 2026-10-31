@@ -30,9 +30,13 @@ InRelease that does not match its pin. All failures are reported.
 The output (package-provenance.tsv) records, per package, the origin, the
 pockets, the pool path, the .deb SHA-256 the verified index states, and the
 binding: acquired-verified (bytes this build downloaded and checked) or
-inherited-base-image (shipped in the base cloud image and not re-acquired:
-version in the pinned snapshot, bytes bound only by BASE_IMAGE_SHA256 — the
-explicit limit). Offline: it never touches the network.
+inherited-base-image. A package without a verified acquisition is accepted
+ONLY when the exact package/version/architecture is in the base image's
+pre-transaction dpkg status (--base-status, read by build-ova.sh on the build
+host from the verified base image file before any guest step): an upgraded
+or newly installed package with no acquisition receipt fails. Inherited bytes
+are bound only by BASE_IMAGE_SHA256, not per package — the explicit limit.
+Offline: it never touches the network.
 
 Layout of --snapshot-dir: <suite>.InRelease and <suite>-<component>.Packages
 (uncompressed). Layout of --docker-dir: InRelease and Packages.
@@ -207,6 +211,37 @@ def parse_pairs(values, what, problems, check=None):
     return out
 
 
+def read_base_status(path, problems):
+    """The base image's pre-transaction /var/lib/dpkg/status: the set of
+    installed (package, version, architecture) and its SHA-256."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        problems.append(f"base-status\t{path}\tunreadable: {e.strerror}")
+        return set(), {}, ""
+    installed, by_name = set(), {}
+    for stanza in raw.decode("utf-8", "replace").split("\n\n"):
+        fields = {}
+        for line in stanza.split("\n"):
+            k, sep, v = line.partition(": ")
+            if sep and not line.startswith((" ", "\t")):
+                fields[k] = v.strip()
+        if not fields.get("Package"):
+            continue
+        if not fields.get("Status", "").endswith(" installed"):
+            continue
+        name, ver, arch = fields["Package"], fields.get("Version", ""), fields.get("Architecture", "")
+        if not ver or not arch:
+            problems.append(f"base-status\t{name}\tinstalled stanza without Version/Architecture")
+            continue
+        installed.add((name, ver, arch))
+        by_name.setdefault((name, arch), set()).add(ver)
+    if not installed:
+        problems.append("base-status\t-\tno installed packages (not a dpkg status file?)")
+    return installed, by_name, hashlib.sha256(raw).hexdigest()
+
+
 def read_acquired(path, problems):
     """The guest's acquisition receipt: package, version, arch, sha256, file."""
     rows = []
@@ -302,6 +337,7 @@ def reconcile(args):
     docker, docker_inrelease = load_docker(args.docker_dir, problems)
     inventory = read_inventory(args.dpkg_list, problems)
     acquired = read_acquired(args.acquired, problems)
+    base, base_by_name, base_sha = read_base_status(args.base_status, problems)
     if problems:
         # A broken index would turn every package into a false "not found";
         # report the index problems alone.
@@ -315,7 +351,12 @@ def reconcile(args):
     for name, ver, arch in inventory:
         installed[name] = ver
         key = (name, ver, arch)
-        binding = "acquired-verified" if key in verified else "inherited-base-image"
+        if key in verified:
+            binding = "acquired-verified"
+        elif key in base:
+            binding = "inherited-base-image"
+        else:
+            binding = None  # neither acquired nor in the base image: refused below
         if name in docker_pins:
             if ver != docker_pins[name]:
                 problems.append(f"package\t{name}\t{ver} {arch} is not the manifest pin {docker_pins[name]}")
@@ -336,6 +377,11 @@ def reconcile(args):
         if rec.get("conflict"):
             problems.append(f"package\t{name}\t{ver} {arch} is listed with two different .deb hashes in the snapshot")
             continue
+        if binding is None:
+            had = sorted(base_by_name.get((name, arch), ()))
+            was = f"the base image had {', '.join(had)}" if had else "it is not in the base image"
+            problems.append(f"package\t{name}\t{ver} {arch} has no verified acquisition and {was}")
+            continue
         rows.append((name, ver, arch, "ubuntu-snapshot", snap_uri, ",".join(rec["pockets"]),
                      ",".join(rec["filenames"]), rec["sha256"], binding))
     for name, ver in sorted(docker_pins.items()):
@@ -352,7 +398,9 @@ def reconcile(args):
         "reviewed .deb SHA-256 " + " ".join(f"{n}={docker_shas[n]}" for n in sorted(docker_shas)),
         "# binding: acquired-verified = this build downloaded the .deb and its bytes equal the authenticated index "
         "(Docker: also the reviewed pin); inherited-base-image = shipped in the base cloud image and not re-acquired: "
-        "its VERSION is in the pinned snapshot, its BYTES are bound only by BASE_IMAGE_SHA256, not per package.",
+        "this exact package/version/architecture is in the base image's pre-transaction dpkg status "
+        f"(SHA-256 {base_sha}); its VERSION is in the pinned snapshot, its BYTES are bound only by "
+        "BASE_IMAGE_SHA256, not per package.",
         "package\tversion\tarch\torigin\turi\tpockets\tpool_path\tsha256\tbinding",
     ]
     return problems, header + ["\t".join(r) for r in sorted(rows)], counts
@@ -369,6 +417,8 @@ def main(argv=None):
     p.add_argument("--docker-pin", action="append", help="PACKAGE=VERSION (one per pinned Docker package)")
     p.add_argument("--docker-deb-sha256", action="append", help="PACKAGE=SHA256 (reviewed .deb hash per Docker pin)")
     p.add_argument("--acquired", required=True, help="the guest's acquisition receipt (acquired-debs.tsv)")
+    p.add_argument("--base-status", required=True,
+                   help="the base image's pre-transaction /var/lib/dpkg/status (base-dpkg-status.txt)")
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
 

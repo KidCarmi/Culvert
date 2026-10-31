@@ -269,6 +269,25 @@ func TestAptSnapshotFB1_T2_PinsSourcesAndReconciliationAreWired(t *testing.T) {
 	if rec0 < 0 || chk < rec0 || fetch < chk || strings.Count(bo, `GUEST_APT_BUILD_START="$(`) != 1 {
 		t.Errorf("build start must be recorded exactly once and checked before the first fetch (record=%d check=%d fetch=%d)", rec0, chk, fetch)
 	}
+	// The base inventory is read from the VERIFIED base image file before any
+	// guest step touches a disk, and the reconciler is handed it.
+	verified := strings.Index(bo, `die "base image SHA256 mismatch (manifest BASE_IMAGE_SHA256)"`)
+	baseRead := strings.Index(bo, `virt-cat -a "$BASE_FILE" /var/lib/dpkg/status > "$OUT/base-dpkg-status.txt"`)
+	diskMade := strings.Index(bo, `qemu-img convert -q -O qcow2 "$BASE_FILE" "$DISK"`)
+	guest := strings.Index(bo, `virt-customize -a "$DISK"`)
+	if verified < 0 || baseRead < verified || diskMade < baseRead || guest < diskMade {
+		t.Errorf("the base dpkg status must be read from the verified base file before the disk and the guest step (verify=%d read=%d disk=%d guest=%d)",
+			verified, baseRead, diskMade, guest)
+	}
+	for _, want := range []string{
+		`--base-status "$OUT/base-dpkg-status.txt"`,
+		`[[ -s "$OUT/base-dpkg-status.txt" ]] || die`,
+		`"base_dpkg_status_sha256": E["BI_BASE_STATUS_SHA"]`,
+	} {
+		if !strings.Contains(bo, want) {
+			t.Errorf("build-ova.sh lost %q", want)
+		}
+	}
 	// Reconcile after the guest inventory is read, before anything is packaged.
 	inv := strings.Index(bo, `virt-cat -a "$DISK" /var/lib/culvert-appliance/dpkg-list.txt`)
 	rec := strings.Index(bo, `reconcile-package-provenance.py`)
@@ -535,6 +554,61 @@ type fb1Index struct {
 	// receipt: the guest's acquisition receipt rows
 	// (package, version, arch, sha256, file). nil omits --acquired.
 	receipt []string
+	// baseStatus: the base image's pre-transaction dpkg status (--base-status).
+	// "" writes one that holds every non-Docker inventory row — the tests of
+	// index integrity then exercise only the index; the binding tests below
+	// pass the REAL base image status. noBase omits --base-status.
+	baseStatus string
+	noBase     bool
+}
+
+// fb1RealBaseStatus is /var/lib/dpkg/status of the pinned base image
+// (serial 20260926, BASE_IMAGE_SHA256 6a81c375…), read with `virt-cat -a
+// <image> /var/lib/dpkg/status` — the build-ova.sh command — from the image
+// verified against its pin and Ubuntu's signed SHA256SUMS.
+const fb1RealBaseStatusSHA256 = "3fde68c0b3bf65d2708cf0d263f9a28feeb64c75a4d42249ebd2d555b10dcc28"
+
+func fb1RealBaseStatus(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(fb1Fixtures, "base-dpkg-status-20260926.txt")
+	sum := sha256.Sum256([]byte(fb1Read(t, p)))
+	if got := hex.EncodeToString(sum[:]); got != fb1RealBaseStatusSHA256 {
+		t.Fatalf("base status fixture is not the 20260926 image's (sha256 %s)", got)
+	}
+	return p
+}
+
+// fb1BaseKeys parses a dpkg status file into installed name/version/arch rows.
+func fb1BaseKeys(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for _, st := range strings.Split(fb1Read(t, path), "\n\n") {
+		f := map[string]string{}
+		for _, l := range strings.Split(st, "\n") {
+			if k, v, ok := strings.Cut(l, ": "); ok && !strings.HasPrefix(l, " ") {
+				f[k] = v
+			}
+		}
+		if f["Package"] != "" && strings.HasSuffix(f["Status"], " installed") {
+			out[f["Package"]+"\t"+f["Version"]+"\t"+f["Architecture"]] = true
+		}
+	}
+	return out
+}
+
+// fb1StatusFile renders name\tversion\tarch rows as a dpkg status file.
+func fb1StatusFile(t *testing.T, rows []string, status string) string {
+	t.Helper()
+	var sb strings.Builder
+	for _, r := range rows {
+		f := strings.Split(r, "\t")
+		fmt.Fprintf(&sb, "Package: %s\nStatus: %s\nPriority: optional\nArchitecture: %s\nVersion: %s\nDescription: fixture\n\n", f[0], status, f[2], f[1])
+	}
+	p := filepath.Join(t.TempDir(), "base-dpkg-status.txt")
+	if err := os.WriteFile(p, []byte(sb.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // fb1Stanza returns Filename and SHA256 of (pkg, version, arch) in a
@@ -669,6 +743,19 @@ func fb1Reconcile(t *testing.T, ix fb1Index, inventory string, extra ...string) 
 		}
 		args = append(args, "--acquired", rp)
 	}
+	if !ix.noBase {
+		base := ix.baseStatus
+		if base == "" {
+			var rows []string
+			for _, r := range strings.Split(strings.TrimSpace(fb1Read(t, inventory)), "\n") {
+				if f := strings.Split(r, "\t"); len(f) == 3 && pins[f[0]] == "" {
+					rows = append(rows, r)
+				}
+			}
+			base = fb1StatusFile(t, rows, "install ok installed")
+		}
+		args = append(args, "--base-status", base)
+	}
 	cmd := exec.CommandContext(t.Context(), "python3", args...) //nolint:gosec // test-owned paths
 	raw, runErr := cmd.CombinedOutput()
 	written, _ := os.ReadFile(out)
@@ -754,16 +841,54 @@ func TestAptSnapshotFB1_T3a_Real325c142aInventoryFailsOnExactlyThe57(t *testing.
 
 // T3(b): the same inventory without the 57 reconciles; every row is
 // accounted for, with its origin and the .deb hash from the verified index.
-func TestAptSnapshotFB1_T3b_InSnapshotInventoryPasses(t *testing.T) {
-	ix := fb1BuildIndexes(t, nil)
-	bad := fb1Recorded57(t)
-	var rows []string
-	for _, r := range fb1RealInventory(t) {
-		f := strings.Split(r, "\t")
-		if !bad[f[0]+"\t"+f[1]] {
-			rows = append(rows, r)
+// fb1SnapshotReceiptRow is a receipt row for (pkg, ver, arch) from whichever
+// fixture Packages file lists it — the bytes the authenticated index names.
+func fb1SnapshotReceiptRow(t *testing.T, ix fb1Index, pkg, ver, arch string) string {
+	t.Helper()
+	want := []string{"Package: " + pkg, "Version: " + ver, "Architecture: " + arch}
+	for _, suite := range fb1Suites {
+		for _, comp := range fb1Components {
+			pf := filepath.Join(ix.snapDir, suite+"-"+comp+".Packages")
+			for _, st := range strings.Split(fb1Read(t, pf), "\n\n") {
+				lines := strings.Split(st, "\n")
+				if slices.Contains(lines, want[0]) && slices.Contains(lines, want[1]) && slices.Contains(lines, want[2]) {
+					return fb1ReceiptRow(t, pf, pkg, ver, arch)
+				}
+			}
 		}
 	}
+	t.Fatalf("%s %s %s is in no fixture index", pkg, ver, arch)
+	return ""
+}
+
+// fb1RealBuildCase: the 623 in-snapshot rows of the real 325c142a inventory,
+// the REAL base image status, and a receipt holding the four Docker packages
+// plus exactly the Ubuntu rows the base image does not already carry at that
+// version/architecture (what a build must download). It returns the index,
+// the inventory rows and the rows that need an acquisition.
+func fb1RealBuildCase(t *testing.T) (ix fb1Index, rows, need []string) {
+	t.Helper()
+	ix = fb1BuildIndexes(t, nil)
+	ix.baseStatus = fb1RealBaseStatus(t)
+	base := fb1BaseKeys(t, ix.baseStatus)
+	bad := fb1Recorded57(t)
+	for _, r := range fb1RealInventory(t) {
+		f := strings.Split(r, "\t")
+		if bad[f[0]+"\t"+f[1]] {
+			continue
+		}
+		rows = append(rows, r)
+		docker := strings.HasPrefix(r, "docker-") || strings.HasPrefix(r, "containerd.io\t")
+		if !docker && !base[r] {
+			need = append(need, r)
+			ix.receipt = append(ix.receipt, fb1SnapshotReceiptRow(t, ix, f[0], f[1], f[2]))
+		}
+	}
+	return ix, rows, need
+}
+
+func TestAptSnapshotFB1_T3b_InSnapshotInventoryPasses(t *testing.T) {
+	ix, rows, need := fb1RealBuildCase(t)
 	combined, tsv, err := fb1Reconcile(t, ix, fb1Inventory(t, rows))
 	if err != nil {
 		t.Fatalf("an all-in-snapshot inventory failed: %v\n%s", err, combined)
@@ -777,18 +902,33 @@ func TestAptSnapshotFB1_T3b_InSnapshotInventoryPasses(t *testing.T) {
 	if len(data) != 623 {
 		t.Fatalf("package-provenance.tsv has %d rows, want 623", len(data))
 	}
-	origins := map[string]int{}
+	acquired := map[string]bool{}
+	for _, r := range need {
+		acquired[r] = true
+	}
+	origins, bindings := map[string]int{}, map[string]int{}
 	for _, l := range data {
 		f := strings.Split(l, "\t")
 		if len(f) != 9 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(f[7]) || !strings.HasSuffix(f[6], ".deb") {
 			t.Fatalf("malformed provenance row: %q", l)
 		}
 		origins[f[3]]++
-		// Docker rows were acquired (bytes checked); nothing else was in
-		// this receipt, so every Ubuntu row is inherited from the base image.
-		if want := map[bool]string{true: "acquired-verified", false: "inherited-base-image"}[f[3] == "docker"]; f[8] != want {
+		bindings[f[8]]++
+		// Docker rows and every Ubuntu row the base image lacks at this
+		// version were acquired; only base-image rows are inherited.
+		want := "inherited-base-image"
+		if f[3] == "docker" || acquired[f[0]+"\t"+f[1]+"\t"+f[2]] {
+			want = "acquired-verified"
+		}
+		if f[8] != want {
 			t.Errorf("%s binding %q, want %q", f[0], f[8], want)
 		}
+	}
+	if bindings["acquired-verified"] != 4+len(need) || bindings["inherited-base-image"] != 623-4-len(need) || len(need) == 0 {
+		t.Errorf("bindings %v with %d Ubuntu rows needing an acquisition", bindings, len(need))
+	}
+	if !strings.Contains(tsv, fb1RealBaseStatusSHA256) {
+		t.Error("provenance header does not record the base status SHA-256")
 	}
 	if origins["docker"] != 4 || origins["ubuntu-snapshot"] != 619 {
 		t.Errorf("origins %v, want 4 docker + 619 ubuntu-snapshot", origins)
@@ -1072,6 +1212,116 @@ func TestAptSnapshotFB1_AcquisitionReceiptFailsClosed(t *testing.T) {
 	ix.receipt = nil
 	if out, _, err := fb1Reconcile(t, ix, fb1Inventory(t, fb1Minimal())); err == nil || !strings.Contains(out, "--acquired") {
 		t.Errorf("a reconciliation without --acquired ran:\n%s", out)
+	}
+}
+
+// ASTRA (4f56bdfc): a package with no acquisition receipt must not fall back
+// to inherited-base-image unless that exact package/version/architecture is
+// in the base image's pre-transaction dpkg status. Real data first: the real
+// 325c142a rows, the real base image status, a receipt with exactly what a
+// build downloads; then single and complete receipt deletions.
+func TestAptSnapshotFB1_MissingReceiptNeedsTheBaseInventory(t *testing.T) {
+	ix, rows, need := fb1RealBuildCase(t)
+	base := fb1BaseKeys(t, ix.baseStatus)
+	baseVer := map[string]string{}
+	for k := range base {
+		f := strings.Split(k, "\t")
+		baseVer[f[0]] = f[1]
+	}
+	var upgraded, added string
+	for _, r := range need {
+		name := strings.Split(r, "\t")[0]
+		if _, ok := baseVer[name]; ok && upgraded == "" {
+			upgraded = r
+		}
+		if _, ok := baseVer[name]; !ok && added == "" {
+			added = r
+		}
+	}
+	if upgraded == "" || added == "" {
+		t.Fatalf("the real case lacks an upgraded (%q) or a newly installed (%q) package", upgraded, added)
+	}
+	t.Logf("%d Ubuntu rows need an acquisition; upgraded probe %q, new probe %q", len(need), upgraded, added)
+	without := func(drop func(row string) bool) fb1Index {
+		c := ix
+		c.receipt = slices.DeleteFunc(slices.Clone(ix.receipt), drop)
+		return c
+	}
+	nameOf := func(r string) string { return strings.Split(r, "\t")[0] }
+	cases := []struct {
+		name, drop, want string
+	}{
+		{"an upgraded package without its receipt", upgraded,
+			nameOf(upgraded) + "\t" + strings.Split(upgraded, "\t")[1] + " " + strings.Split(upgraded, "\t")[2] +
+				" has no verified acquisition and the base image had " + baseVer[nameOf(upgraded)]},
+		{"a newly installed package without its receipt", added,
+			nameOf(added) + "\t" + strings.Split(added, "\t")[1] + " " + strings.Split(added, "\t")[2] +
+				" has no verified acquisition and it is not in the base image"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cut := without(func(r string) bool { return strings.HasPrefix(r, nameOf(c.drop)+"\t") })
+			out, tsv, err := fb1Reconcile(t, cut, fb1Inventory(t, rows))
+			if err == nil || !strings.Contains(out, c.want) || tsv != "" {
+				t.Errorf("deleting the receipt of %q was accepted or misreported: %v\n%s", c.drop, err, out)
+			}
+		})
+	}
+	t.Run("every Ubuntu receipt row deleted", func(t *testing.T) {
+		cut := without(func(r string) bool {
+			return !strings.HasPrefix(r, "docker-") && !strings.HasPrefix(r, "containerd.io\t")
+		})
+		out, _, err := fb1Reconcile(t, cut, fb1Inventory(t, rows))
+		if got := strings.Count(out, " has no verified acquisition and "); err == nil || got != len(need) {
+			t.Errorf("refused %d rows, want exactly the %d not in the base image: %v\n%s", got, len(need), err, out)
+		}
+	})
+}
+
+// Synthetic: what counts as "in the base image" is the exact triple of an
+// INSTALLED package, and the base status is required.
+func TestAptSnapshotFB1_MissingReceiptBaseInventoryIsExact(t *testing.T) {
+	adduser := "adduser\t3.137ubuntu1\tall"
+	syn := []struct {
+		name    string
+		base    string
+		receipt bool
+		want    string
+	}{
+		{"control: in the base image at this version and arch", fb1StatusFile(t, []string{adduser}, "install ok installed"), false, ""},
+		{"control: an older base version, but acquired", fb1StatusFile(t, []string{"adduser\t3.136\tall"}, "install ok installed"), true, ""},
+		{"an older base version, not acquired", fb1StatusFile(t, []string{"adduser\t3.136\tall"}, "install ok installed"), false,
+			"adduser\t3.137ubuntu1 all has no verified acquisition and the base image had 3.136"},
+		{"same version, other architecture", fb1StatusFile(t, []string{"adduser\t3.137ubuntu1\tamd64"}, "install ok installed"), false,
+			"adduser\t3.137ubuntu1 all has no verified acquisition and it is not in the base image"},
+		{"only config files left in the base image", fb1StatusFile(t, []string{adduser, "zlib1g\t1:1.3\tamd64"}, "deinstall ok config-files"), false,
+			"base-status\t-\tno installed packages"},
+		{"an empty base status", fb1StatusFile(t, nil, ""), false, "base-status\t-\tno installed packages"},
+	}
+	for _, c := range syn {
+		t.Run(c.name, func(t *testing.T) {
+			sx := fb1BuildIndexes(t, nil)
+			sx.baseStatus = c.base
+			if c.receipt {
+				sx.receipt = append(sx.receipt, fb1ReceiptRow(t, filepath.Join(sx.snapDir, "noble-main.Packages"), "adduser", "3.137ubuntu1", "all"))
+			}
+			out, tsv, err := fb1Reconcile(t, sx, fb1Inventory(t, fb1Minimal()))
+			if c.want == "" {
+				if err != nil || !strings.Contains(tsv, "adduser\t3.137ubuntu1\tall\t") {
+					t.Errorf("expected to pass: %v\n%s", err, out)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(out, c.want) {
+				t.Errorf("expected %q: %v\n%s", c.want, err, out)
+			}
+		})
+	}
+	// --base-status is required.
+	sx := fb1BuildIndexes(t, nil)
+	sx.noBase = true
+	if out, _, err := fb1Reconcile(t, sx, fb1Inventory(t, fb1Minimal())); err == nil || !strings.Contains(out, "--base-status") {
+		t.Errorf("a reconciliation without --base-status ran:\n%s", out)
 	}
 }
 

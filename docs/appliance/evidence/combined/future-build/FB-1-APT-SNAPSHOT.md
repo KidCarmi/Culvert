@@ -196,7 +196,7 @@ T4 C2 adds the impossible IDs on the hosted runner.
    - `acquired-verified`: this build downloaded the bytes and they matched;
    - `inherited-base-image`: the package was already in the base image at the snapshot's version.
 
-**Limit, stated so it is not overread.** Inherited packages were not downloaded. Their bytes are bound only by `BASE_IMAGE_SHA256`, the signed cloud-image file, not package by package. The reconciler reports their count separately and never claims byte identity for them.
+**Limit, stated so it is not overread.** Inherited packages were not downloaded. Their bytes are bound only by `BASE_IMAGE_SHA256`, the signed cloud-image file, not package by package. The reconciler reports their count separately and never claims byte identity for them. (*§7.4 below: in `4f56bdfc` the inherited label was a fallback for any package without a receipt; it is now bound to the recorded base inventory.*)
 
 **Tests:**
 - `DockerByteBindingRefusesASelfConsistentIndex` (ASTRA's reproduction);
@@ -251,3 +251,36 @@ The run IDs and the checkout SHA are in the PR #1528 handoff and in the readines
 - its own `package-provenance.tsv`: 0 non-snapshot rows, every Docker row `acquired-verified`;
 - `acquired-debs.tsv`;
 - InRelease hashes equal to the manifest.
+
+### 7.4 A missing receipt is not an inheritance (ASTRA, review of `4f56bdfc`)
+
+**Finding.** In `4f56bdfc`, any installed Ubuntu package without a receipt row was labelled `inherited-base-image`, without checking that the base image carried it. Deleting a row from `acquired-debs.tsv` therefore passed. This was confirmed on real data. Against the base image of serial 20260926, 94 of the 680 predicted rows are not in the base at that exact version/architecture: 67 upgraded, 27 new. Any of the 90 Ubuntu ones could have lost its receipt and still passed.
+
+**Fix.**
+- `build-ova.sh` reads `/var/lib/dpkg/status` from the verified base image file **on the build host, before any guest step** (`virt-cat -a "$BASE_FILE"`). The file is never modified and the guest never writes it, so the record is pre-transaction by construction.
+- The record is written to `base-dpkg-status.txt`, and its SHA-256 goes into `build-info.json`.
+- The reconciler requires `--base-status`. A package without a verified acquisition is accepted only when that exact installed package/version/architecture is in that status. Otherwise the build fails with `has no verified acquisition and the base image had <version>` or `… and it is not in the base image`.
+- The provenance header records the base status SHA-256.
+
+**Tests.**
+
+`MissingReceiptNeedsTheBaseInventory` runs on real data: the real 325c142a rows, the **real** base status (fixture sha256 `3fde68c0…`) and a receipt holding exactly what the base lacks. Each of the following is refused:
+- an upgraded package with its receipt deleted (`dracut-install`, base `060+5-1ubuntu3.3`);
+- a newly installed package with its receipt deleted (`fontconfig`);
+- every Ubuntu receipt row deleted: exactly the 33 such rows of that fixture population.
+
+Synthetic cases (`MissingReceiptBaseInventoryIsExact`):
+- refused: an older base version, the same version on another architecture, only config files left, an empty status;
+- refused: a missing `--base-status` argument;
+- controls that pass: an exact base row, and an older base version that was acquired.
+
+`T3b` now uses the real base status, and checks the 4 + 33 acquired-verified and remaining inherited bindings.
+
+`T2` pins three things: the read from `$BASE_FILE` after verification and before the disk and the guest step; the `--base-status` argument; and the empty-status refusal.
+
+**Mutations: 8 of 8 caught**, including the `4f56bdfc` fallback itself, a name-only match, counting config-file stanzas, and reading the status from the customised disk.
+
+**Network check** (lab). The lab re-reads the base status from the freshly downloaded and verified image, with the same `virt-cat` command, and requires it to equal the fixture. It then downloads all 94 packages the base lacks (C7). Every Ubuntu file must equal its authenticated index entry, and every Docker file its pin. The predicted inventory then reconciles to `acquired-verified=94 inherited-base-image=586`. Three receipt deletions are refused:
+- `openssh-server` (upgraded: the base had `…13.19`);
+- `pigz` (new);
+- all 90 Ubuntu rows.

@@ -97,6 +97,8 @@ Outputs in `--out`:
 * `acquired-debs.tsv` — the guest's acquisition receipt: every `.deb` the
   build downloaded (package, version, architecture, SHA-256, file), each
   checked against the authenticated metadata (FB-1).
+* `base-dpkg-status.txt` — the base image's dpkg status before any guest
+  transaction, read from the verified image on the build host (FB-1).
 * `dpkg-list.txt` and `host-components.txt` — the guest package inventory,
   captured inside the guest during the build (input for the SBOM evidence)
 * `prepare-guest.log` — the in-guest customization transcript, read back out
@@ -201,10 +203,16 @@ verifies on import.
   (`*_DEB_SHA256`): the guest refuses a downloaded Docker `.deb` with another
   hash, and the host refuses a Docker index that lists another hash for the
   pinned version. Each row's binding is `acquired-verified` (this build
-  downloaded and checked the bytes) or `inherited-base-image` (the package
-  was already in the base image at the snapshot's version; its bytes are
-  bound only by `BASE_IMAGE_SHA256`, the signed cloud-image hash, not
-  per-package). A Docker package must be `acquired-verified`. The snapshot ID
+  downloaded and checked the bytes) or `inherited-base-image`. A package
+  without a receipt is inherited ONLY when that exact
+  package/version/architecture is in the base image's pre-transaction
+  `/var/lib/dpkg/status`, which `build-ova.sh` reads on the build host from
+  the verified base image before any guest step (`base-dpkg-status.txt`
+  next to the OVA, its SHA-256 in `build-info.json`); an upgraded or newly
+  installed package without verified acquired bytes fails the build.
+  Inherited bytes are bound only by `BASE_IMAGE_SHA256`, the signed
+  cloud-image hash, not per package. A Docker package must be
+  `acquired-verified`. The snapshot ID
   must be a real UTC instant strictly earlier than the build start, which
   `build-ova.sh` records once, before any download, and hands to the guest
   (`GUEST_APT_BUILD_START`, also in `build-info.json`). **OVAs built before FB-1, including

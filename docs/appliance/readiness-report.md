@@ -6,6 +6,23 @@
 
 This report separates **implemented**, **tested** (and how: unit gates, executed Docker qualification against real images, CI), **blocked** (exact prerequisite), and **unsupported** (deliberately out of the pilot). Nothing here claims production readiness; the product document deadline is not a deployment date.
 
+## 0-FB1c. Status update (2026-10-31): base-inventory binding (ASTRA review of `4f56bdfc`)
+
+ASTRA did not accept `4f56bdfc`. The reason: a package with no acquisition receipt was labelled `inherited-base-image` without checking the base image, so deleting a receipt row passed.
+
+**Fixed.**
+- `build-ova.sh` records the base image's pre-transaction `/var/lib/dpkg/status` from the verified image file on the build host, before any guest step. The output is `base-dpkg-status.txt`.
+- The reconciler requires that record. It accepts a package without a receipt only when the exact package/version/architecture is in it.
+
+**Tests and checks.**
+- Real-data and synthetic missing-receipt tests cover upgraded and newly installed packages.
+- 8 of 8 mutations are caught.
+- A network lab check re-reads the base status and downloads all 94 packages the base lacks. The prediction reconciles to 94 acquired-verified and 586 inherited.
+- Details: `evidence/combined/future-build/FB-1-APT-SNAPSHOT.md` §7.4.
+- The final SHA, its checks and the lab run are in the PR #1528 handoff.
+
+T5 and build authorization remain pending. MERGE / PILOT / RELEASE remain **NO-GO**.
+
 ## 0-FB1b. Status update (2026-10-31): FB-1 corrections and snapshot pin raise (artifact closure pending)
 
 This block supersedes nothing below it. It records **one owner-directed round** (PR #1528, 31 Oct) on `review/1528-m1-engine-pins`. No OVA was built, no guest or VM was run, and ESXi was not touched. PR #1528's frozen branch (`4524311b`) is unchanged.

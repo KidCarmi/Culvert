@@ -45,6 +45,7 @@
 #   pinned snapshot / Docker indexes; FB-1), host-components.txt,
 #   build-upgrades.txt (packages the pinned-snapshot security upgrade moved),
 #   acquired-debs.tsv (every .deb the guest downloaded, with its SHA-256; FB-1),
+#   base-dpkg-status.txt (the base image's dpkg status before any transaction; FB-1),
 #   prepare-guest.log (the in-guest transcript).
 #
 # Requires: qemu-img, guestfish, virt-customize, virt-cat, virt-ls, docker (daemon access),
@@ -156,6 +157,16 @@ if command -v gpgv >/dev/null 2>&1 && [[ -f "${BASE_IMAGE_KEYRING:-/nonexistent}
   BASE_GPG="verified ($(grep -o 'using RSA key [0-9A-F]*' "$WORK/cache/gpgv.log" | head -1))"
   log "base image GPG: $BASE_GPG"
 fi
+# FB-1: the PRE-TRANSACTION base inventory, read on the build host from the
+# verified base image file itself (never modified; the guest never writes it).
+# The reconciler lets an installed package go without an acquisition receipt
+# only when this exact package/version/architecture is in it: an upgraded or
+# newly installed package must show verified acquired bytes.
+virt-cat -a "$BASE_FILE" /var/lib/dpkg/status > "$OUT/base-dpkg-status.txt" \
+  || die "could not read /var/lib/dpkg/status from the base image"
+[[ -s "$OUT/base-dpkg-status.txt" ]] || die "the base image's dpkg status is empty"
+BASE_STATUS_SHA="$(sha256sum "$OUT/base-dpkg-status.txt" | cut -d' ' -f1)"
+log "base image dpkg status recorded (sha256 $BASE_STATUS_SHA)"
 
 # Recorded in build-info.json (provenance; not a gate).
 HOST_CONTAINERD="$(docker version --format '{{range .Server.Components}}{{if eq .Name "containerd"}}{{.Version}}{{end}}{{end}}')"
@@ -500,7 +511,7 @@ BI_INSTALL_SHA="$INSTALL_SHA" BI_APP_VERSION="$APP_VERSION" BI_MAINT_VERSION="$M
 BI_CLAM_SIDECAR_ID="$CLAMAV_SIDECAR_ID" BI_CLAM_PCRE2="$CLAMAV_PCRE2" \
 BI_CONTAINERD="$HOST_CONTAINERD" BI_COSIGN="$COSIGN_RESULT" BI_BASE_GPG="$BASE_GPG" BI_APP_TAR_SHA="$APP_TAR_SHA" BI_CLAM_TAR_SHA="$CLAM_TAR_SHA" \
 BI_VERSION="$VERSION" BI_OVA="$OVA_BASENAME.ova" BI_GIT_COMMIT="$GIT_COMMIT" BI_GIT_DIRTY="$GIT_DIRTY" \
-BI_BUILD_TS="$BUILD_TS" BI_BUILD_WALL="$BUILD_WALL" BI_APT_BUILD_START="$GUEST_APT_BUILD_START" \
+BI_BUILD_TS="$BUILD_TS" BI_BUILD_WALL="$BUILD_WALL" BI_APT_BUILD_START="$GUEST_APT_BUILD_START" BI_BASE_STATUS_SHA="$BASE_STATUS_SHA" \
 BI_CONSOLE_GO_VERSION="$CONSOLE_GO_VERSION" BI_CONSOLE_BINARY_SHA="$CONSOLE_BINARY_SHA" \
 BI_CANDIDATE="$CANDIDATE" BI_CANDIDATE_SOURCE="$CANDIDATE_SOURCE" BI_CANDIDATE_TAR_SHA="$CANDIDATE_TAR_SHA" BI_CANDIDATE_RUN_ID="$CANDIDATE_RUN_ID" \
 python3 - "$OV/var/lib/culvert-appliance/build-info.json" <<'PY'
@@ -524,6 +535,7 @@ info = {
   "guest_os": {"id": E["GUEST_OS_ID"], "name": E["GUEST_OS_NAME"], "codename": E["GUEST_OS_CODENAME"],
                "base_image_url": E["BASE_IMAGE_URL"], "base_image_sha256": E["BASE_IMAGE_SHA256"],
                "base_image_serial": E["BASE_IMAGE_SERIAL"], "base_image_gpg": E["BI_BASE_GPG"],
+               "base_dpkg_status_sha256": E["BI_BASE_STATUS_SHA"],
                "standard_support_until": E["GUEST_OS_STANDARD_SUPPORT_UNTIL"], "esm_support_until": E["GUEST_OS_ESM_SUPPORT_UNTIL"],
                "package_sources": [E["BASE_IMAGE_URL"] + " (preinstalled)",
                                    E["DOCKER_APT_URL"] + " " + E["GUEST_OS_CODENAME"] + " stable (key " + E["DOCKER_APT_KEY_FPR"] + ")"]},
@@ -679,7 +691,7 @@ python3 "$HERE/reconcile-package-provenance.py" --dpkg-list "$OUT/dpkg-list.txt"
   --docker-pin "containerd.io=$CONTAINERD_IO_VERSION" --docker-pin "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_VERSION" \
   --docker-deb-sha256 "docker-ce=$DOCKER_CE_DEB_SHA256" --docker-deb-sha256 "docker-ce-cli=$DOCKER_CE_CLI_DEB_SHA256" \
   --docker-deb-sha256 "containerd.io=$CONTAINERD_IO_DEB_SHA256" --docker-deb-sha256 "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_DEB_SHA256" \
-  --acquired "$OUT/acquired-debs.tsv" \
+  --acquired "$OUT/acquired-debs.tsv" --base-status "$OUT/base-dpkg-status.txt" \
   --out "$OUT/package-provenance.tsv" || die "package provenance reconciliation failed (FB-1): see the list above"
 # The kernel is the HWE series the manifest names, exactly one image ships, and
 # no GA kernel metapackage came back (prepare-guest.sh 1b).

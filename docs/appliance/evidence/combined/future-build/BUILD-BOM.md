@@ -41,7 +41,8 @@ The PR #1528 handoff that names the final SHA records them. Each of them must eq
 | Serial / URL | `20260926`, `https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.img` |
 | SHA-256 | `6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2` |
 | Signature | `SHA256SUMS.gpg` against key `D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81` (`ubuntu-cloudimage-keyring.gpg`) |
-| **Limit** | Packages already in the base image at the snapshot's version are not downloaded by the build. Their bytes are bound by this SHA-256 only, not package by package (`package-provenance.tsv` binding `inherited-base-image`). |
+| **Base inventory** | `/var/lib/dpkg/status` of this image, read by `build-ova.sh` on the build host from the verified file before any guest step (`base-dpkg-status.txt`; for serial 20260926 sha256 `3fde68c0b3bf65d2708cf0d263f9a28feeb64c75a4d42249ebd2d555b10dcc28`, 664 installed packages, committed as `appliance/build/testdata/provenance/base-dpkg-status-20260926.txt`). |
+| **Limit** | A package may go without an acquisition receipt ONLY when this exact package/version/architecture is in the base inventory (`inherited-base-image`); an upgraded or newly installed package without verified acquired bytes fails the build. Inherited bytes are bound by this SHA-256 only, not package by package. Predicted for the replacement: 586 inherited, 94 acquired (4 Docker + 90 Ubuntu). |
 
 ## 4. Guest packages
 
@@ -91,6 +92,7 @@ A different ID or archive hash is **STOP/REPORT**, not a rerun. The sidecar's Al
 | `build-info.json` | `application.index_digest` = the candidate image ID; `apt_snapshot` = `20261029T180000Z`; `apt_build_start` later than it; git commit = the build commit, not dirty |
 | `package-provenance.tsv` | 0 non-snapshot rows; every Docker row `acquired-verified` with the §4 SHA-256 |
 | `acquired-debs.tsv` | present; every row verified by the reconciler |
+| `base-dpkg-status.txt` | sha256 `3fde68c0…` (equals the committed fixture for serial 20260926); recorded in `build-info.json` `guest_os.base_dpkg_status_sha256` |
 | `build-upgrades.txt` | names the snapshot ID and the four InRelease hashes |
 | Kernel | exactly one, `7.0.0-42-generic` |
 | Sidecar | §5 values |
