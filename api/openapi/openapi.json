@@ -4295,6 +4295,59 @@
         ],
         "type": "object"
       },
+      "ScanDecompressionSettings": {
+        "additionalProperties": false,
+        "description": "The scan-path decompression ratio bound (CHAOS-106). A compressed response whose declared Content-Encoding expands past `ratio_limit` times the bytes the origin transferred (above the small-response floor) is refused fail-closed. Node-local — outside export/import, config-version rollback, and CP→DP sync.",
+        "properties": {
+          "default_ratio_limit": {
+            "description": "The shipped fail-closed default (64).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "floor_bytes": {
+            "description": "Small-response floor: an expansion up to this many bytes is never refused by the ratio (not tunable).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "max_decompress_bytes": {
+            "description": "Flat per-response expansion ceiling; reaching it truncates and scans the prefix rather than refusing (not tunable).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "max_ratio_limit": {
+            "description": "Highest accepted value (256) — kept below the bomb ratios CHAOS-106 measured (~400:1 and up), so the bound cannot be configured off.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "min_ratio_limit": {
+            "description": "Lowest accepted value (16).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "ratio_limit": {
+            "description": "The ratio currently enforced.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "relaxed": {
+            "description": "True when ratio_limit is above the default; the operator contract reports a `scan_decompress_ratio` warning while it is.",
+            "type": "boolean"
+          },
+          "revision": {
+            "description": "Content-derived revision of the returned value; pass it back as ifRevision to fence a PUT.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ratio_limit",
+          "default_ratio_limit",
+          "min_ratio_limit",
+          "max_ratio_limit",
+          "relaxed",
+          "revision"
+        ],
+        "type": "object"
+      },
       "ScanExclusions": {
         "additionalProperties": true,
         "properties": {
@@ -4806,6 +4859,26 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "SetScanDecompression": {
+        "additionalProperties": false,
+        "properties": {
+          "ifRevision": {
+            "description": "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, last-writer-wins applies.",
+            "type": "string"
+          },
+          "ratio_limit": {
+            "description": "Expansion ratio to enforce. Setting the default (64) returns the node to following the shipped default.",
+            "format": "int64",
+            "maximum": 256,
+            "minimum": 16,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ratio_limit"
+        ],
         "type": "object"
       },
       "SetScanExclusions": {
@@ -21788,6 +21861,110 @@
         "x-culvert-idempotency": "safe",
         "x-culvert-introduced-version": "1.0.0",
         "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      }
+    },
+    "/api/security-scan/decompression": {
+      "get": {
+        "description": "Returns the scan-path decompression ratio bound (CHAOS-106) with its default and accepted range; `revision` fingerprints exactly the returned value.",
+        "operationId": "getScanDecompression",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanDecompressionSettings"
+                }
+              }
+            },
+            "description": "Decompression ratio bound."
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Decompression ratio bound",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-idempotency": "safe",
+        "x-culvert-introduced-version": "2.1.0",
+        "x-culvert-permission": "viewer",
+        "x-culvert-stability": "stable",
+        "x-culvert-tenant-scope": "appliance",
+        "x-culvert-visibility": "admin-supported"
+      },
+      "put": {
+        "description": "Sets the scan-path decompression ratio bound within [16, 256] (default 64). Raising it admits more repetitive compressed downloads (for example CSV or log exports past 64:1) at the cost of a cheaper decompression-bomb expansion; any value above the default is reported as a warning on the operator contract. Persist-before-apply: a 200 means the value is durable AND live. Audited; deliberately NOT a configuration version (rolling back could silently relax the bound).",
+        "operationId": "setScanDecompression",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetScanDecompression"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanDecompressionSettings"
+                }
+              }
+            },
+            "description": "Updated (persist-before-apply — durable AND live; carries the new revision)."
+          },
+          "400": {
+            "$ref": "#/components/responses/PlainBadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/PlainForbidden"
+          },
+          "409": {
+            "description": "Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the value changed since the asserted revision; nothing mutated."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The setting could not be persisted; the live bound is UNCHANGED (persist-before-apply). Body is plain text."
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "basicAuth": []
+          }
+        ],
+        "summary": "Set the decompression ratio bound",
+        "tags": [
+          "security"
+        ],
+        "x-culvert-audit-event": "security.scan_decompress_ratio",
+        "x-culvert-danger-level": "medium",
+        "x-culvert-idempotency": "idempotent",
+        "x-culvert-introduced-version": "2.1.0",
+        "x-culvert-permission": "admin",
         "x-culvert-stability": "stable",
         "x-culvert-tenant-scope": "appliance",
         "x-culvert-visibility": "admin-supported"

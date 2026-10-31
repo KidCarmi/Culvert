@@ -2307,6 +2307,26 @@ routes:
     audit_expected: true
     danger_level: high
     documented: true
+  - route: "/api/security-scan/decompression"
+    method: "GET"
+    handler: "apiSecScanDecompression"
+    domain: "security"
+    visibility: admin-supported
+    min_role: "viewer"
+    mutating: false
+    audit_expected: false
+    danger_level: none
+    documented: true
+  - route: "/api/security-scan/decompression"
+    method: "PUT"
+    handler: "apiSecScanDecompression"
+    domain: "security"
+    visibility: admin-supported
+    min_role: "admin"
+    mutating: true
+    audit_expected: true
+    danger_level: medium
+    documented: true
   - route: "/api/security-scan/exclusions"
     method: "GET"
     handler: "apiSecScanExclusions"

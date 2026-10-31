@@ -455,6 +455,13 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAOnSaturation"}}},
 	{ID: "yara_alert_degraded", Kind: kindConfig, RollbackExclusion: "rolling back could silently relax a YARA scanner posture the admin chose to tighten", Owner: "yara", AdminDurable: true,
 		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "YARAAlertDegraded"}}},
+	// CHAOS-106 scan-path decompression ratio. Same class as yara_*: a node-local
+	// scanner posture knob that can relax a fail-closed default, so AdminDurable
+	// ONLY — OFF export/import, version-rollback, and CP→DP. No sentinel: the
+	// default is recorded as 0 (absent), which is also the only invalid value.
+	{ID: "scan_decompress_ratio_limit", Kind: kindConfig, RollbackExclusion: "rolling back could silently re-raise the decompression-bomb ratio the admin chose to tighten", Owner: "secscan", AdminDurable: true,
+		Note:     "0/absent ⇒ shipped default 64; validated [16,256] by secscan on PUT and on load (out-of-range refused, default installed)",
+		Bindings: []surfaceBinding{{Struct: "AdminSettings", Field: "ScanDecompressRatioLimit"}}},
 
 	// Adaptive decryption-exclusion tunables (F10). AdminDurable-only — mirroring
 	// metrics_token / syslog_addr / yara_*: OFF export/import, OFF version-rollback,
@@ -699,11 +706,12 @@ var offRegistryRollbackExclusions = []rollbackExcludedSetting{
 // state IS a configSurfaces row (so it is already reported by the derivation)
 // to that row's ID.
 var rollbackMarkersCoveredByRegistry = map[string]string{
-	"ui_config.go:apiNetworkSettings":             "base_url",
-	"ui_policy.go:apiDecryptionExclusionTunables": "autoexclude_confirm_n",
-	"ui_policy.go:<file>":                         "alert_webhooks",
-	"ui_security.go:apiSecYARASettings":           "yara_enabled",
-	"ui_security.go:apiDomainAllowlist":           "threat_domain_allowlist",
+	"ui_config.go:apiNetworkSettings":                "base_url",
+	"ui_policy.go:apiDecryptionExclusionTunables":    "autoexclude_confirm_n",
+	"ui_policy.go:<file>":                            "alert_webhooks",
+	"ui_security.go:apiSecYARASettings":              "yara_enabled",
+	"ui_security_decompress.go:putScanDecompression": "scan_decompress_ratio_limit",
+	"ui_security.go:apiDomainAllowlist":              "threat_domain_allowlist",
 }
 
 // rollbackMarkersRuntimeOnly are off-rollback markers on handlers that change

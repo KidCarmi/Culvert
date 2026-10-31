@@ -996,6 +996,20 @@ components:
       type: object
       description: YARA engine runtime settings (fields vary by build/config).
       additionalProperties: true
+    ScanDecompressionSettings:
+      type: object
+      description: "The scan-path decompression ratio bound (CHAOS-106). A compressed response whose declared Content-Encoding expands past `ratio_limit` times the bytes the origin transferred (above the small-response floor) is refused fail-closed. Node-local — outside export/import, config-version rollback, and CP→DP sync."
+      required: [ratio_limit, default_ratio_limit, min_ratio_limit, max_ratio_limit, relaxed, revision]
+      additionalProperties: false
+      properties:
+        ratio_limit: { type: integer, format: int64, description: "The ratio currently enforced." }
+        default_ratio_limit: { type: integer, format: int64, description: "The shipped fail-closed default (64)." }
+        min_ratio_limit: { type: integer, format: int64, description: "Lowest accepted value (16)." }
+        max_ratio_limit: { type: integer, format: int64, description: "Highest accepted value (256) — kept below the bomb ratios CHAOS-106 measured (~400:1 and up), so the bound cannot be configured off." }
+        relaxed: { type: boolean, description: "True when ratio_limit is above the default; the operator contract reports a `scan_decompress_ratio` warning while it is." }
+        floor_bytes: { type: integer, format: int64, description: "Small-response floor: an expansion up to this many bytes is never refused by the ratio (not tunable)." }
+        max_decompress_bytes: { type: integer, format: int64, description: "Flat per-response expansion ceiling; reaching it truncates and scans the prefix rather than refusing (not tunable)." }
+        revision: { type: string, description: "Content-derived revision of the returned value; pass it back as ifRevision to fence a PUT." }
     DecryptionRedaction:
       type: object
       description: "Global destination-privacy posture (traffic-log destination pseudonymization). Node-local — outside export/import, config-version rollback, and CP→DP sync. Controls what destination information is retained in logs/observability; it does NOT control whether traffic is decrypted."
@@ -2018,6 +2032,15 @@ components:
         ifRevision:
           type: string
           description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, the legacy last-writer-wins contract applies."
+    SetScanDecompression:
+      type: object
+      required: [ratio_limit]
+      additionalProperties: false
+      properties:
+        ratio_limit: { type: integer, format: int64, minimum: 16, maximum: 256, description: "Expansion ratio to enforce. Setting the default (64) returns the node to following the shipped default." }
+        ifRevision:
+          type: string
+          description: "Optional stale-writer fence (2E-A): the `revision` from the matching GET. When present, a mismatch refuses the write with the structured 409 and no mutation; when absent, last-writer-wins applies."
     SetLogsRetention:
       type: object
       additionalProperties: false
@@ -6222,6 +6245,63 @@ paths:
         '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the surface changed since the asserted revision; nothing mutated.' }
         '500':
           description: The settings could not be persisted; the live engine posture is UNCHANGED (persist-before-apply). Body is plain text.
+          content:
+            text/plain: { schema: { type: string } }
+
+  /api/security-scan/decompression:
+    get:
+      operationId: getScanDecompression
+      tags: [security]
+      summary: Decompression ratio bound
+      description: "Returns the scan-path decompression ratio bound (CHAOS-106) with its default and accepted range; `revision` fingerprints exactly the returned value."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: viewer
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: safe
+      x-culvert-introduced-version: 2.1.0
+      responses:
+        '200':
+          description: Decompression ratio bound.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScanDecompressionSettings' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+    put:
+      operationId: setScanDecompression
+      tags: [security]
+      summary: Set the decompression ratio bound
+      description: "Sets the scan-path decompression ratio bound within [16, 256] (default 64). Raising it admits more repetitive compressed downloads (for example CSV or log exports past 64:1) at the cost of a cheaper decompression-bomb expansion; any value above the default is reported as a warning on the operator contract. Persist-before-apply: a 200 means the value is durable AND live. Audited; deliberately NOT a configuration version (rolling back could silently relax the bound)."
+      security:
+        - sessionCookie: []
+        - basicAuth: []
+      x-culvert-visibility: admin-supported
+      x-culvert-permission: admin
+      x-culvert-tenant-scope: appliance
+      x-culvert-stability: stable
+      x-culvert-idempotency: idempotent
+      x-culvert-introduced-version: 2.1.0
+      x-culvert-danger-level: medium
+      x-culvert-audit-event: security.scan_decompress_ratio
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetScanDecompression' }
+      responses:
+        '200':
+          description: Updated (persist-before-apply — durable AND live; carries the new revision).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScanDecompressionSettings' }
+        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '403': { $ref: '#/components/responses/PlainForbidden' }
+        '409': { description: 'Stale-writer fence conflict ({error, currentRevision, yourRevision}) — the value changed since the asserted revision; nothing mutated.' }
+        '500':
+          description: The setting could not be persisted; the live bound is UNCHANGED (persist-before-apply). Body is plain text.
           content:
             text/plain: { schema: { type: string } }
 

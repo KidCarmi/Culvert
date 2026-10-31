@@ -47,6 +47,7 @@ All are on `/metrics`, on `GET /api/security-scan/status`, and in the
 | `culvert_scan_timeout_total` | `stat_scan_timeout` | *Scan timeouts* | Responses refused because the scan exceeded the budget. |
 | `culvert_scan_late_discarded_total` | `stat_scan_late_discard` | *Late verdicts discarded* | A scan finished **after** the budget and said "clean"; the refusal stood and the verdict was thrown away. |
 | `culvert_clam_scan_errors_total` | `stat_clam_scan_error` | *ClamAV scan errors* | A genuine daemon fault (unreachable, protocol error). Fires the `scan_clam_error` alert. Dual-emitted as `culvert_clamav_scan_errors_total` — same value, the canonical name that matches the `culvert_clamav_*` family (`culvert_clamav_blocked_total`); build new dashboards/alert rules against the `culvert_clamav_*` prefix, `culvert_clam_scan_errors_total` is kept only for existing consumers. |
+| `culvert_scan_decompress_bombs_total` | `stat_decompress_bombs` | *Decompression refused* | A compressed response expanded past the decompression ratio bound (§4, "a compressed download is always refused") and was refused. A property of the content, not of node capacity. |
 
 **Capacity and faults are deliberately separate.** `culvert_clam_saturated_total`
 does **not** raise `scan_clam_error`, because the response is different: add
@@ -109,6 +110,42 @@ content by SHA-256 via the admin hash allowlist if it is known-good; or reduce
 then counted in `stat_scan_skipped` and alerted as `scan_skipped` — a *visible*
 pass-through, which is the point).
 
+### Symptom: a compressed download is always refused ("decompression ratio exceeded")
+
+Compressed responses are expanded before scanning so signatures match the real
+content. A response whose declared `Content-Encoding` expands past **64 times**
+the bytes the origin actually sent (above a 1 MiB small-response floor) is
+refused as a decompression bomb (CHAOS-106) — refused rather than scanned
+partially, because the unscanned tail is exactly where a padded archive hides
+its payload. Legitimate web content compresses at 3–20:1, but a very
+repetitive export (a large CSV or log file of near-identical rows) can exceed
+64:1 and is then refused on every retry.
+
+If that content is legitimate, an **administrator** can raise the bound under
+**Security → Security Scanning → Decompression Bound**, or with
+`PUT /api/security-scan/decompression` `{"ratio_limit": N}`
+(`GET` returns the current value, default and range):
+
+- Accepted range **16–256**; default **64**. 256 is deliberately below the
+  ratios measured for real decompression bombs (~400:1 and up), so the bound
+  cannot be configured off; content more repetitive than 256:1 is
+  indistinguishable from a bomb by ratio and stays refused. Exclude such a
+  known-good object by SHA-256 instead.
+- Any value **above 64** is a relaxed posture: the change is audited
+  (`security.scan_decompress_ratio`, with RELAXED in the detail), logged, and
+  reported as a `scan_decompress_ratio` **warning** on `/api/diagnostics` for as
+  long as it is set. Raising the ratio lets a maximal expansion be reached
+  with proportionally fewer wire bytes; the 64 MiB per-response expansion
+  ceiling is unchanged.
+- Lowering it (down to 16) is a memory-tightening choice; values below ~32
+  can refuse very repetitive JSON.
+- The setting is **per node**: it is persisted in that node's
+  `admin_settings.json` and is not exported/imported, not captured by
+  configuration-version rollback (a rollback could silently re-raise a ratio
+  you tightened), and not pushed from a Control Plane to Data Plane nodes —
+  set it on every node that inspects the traffic. Setting 64 returns the node
+  to the shipped default.
+
 ---
 
 ## 5. Adding scanning capacity
@@ -154,6 +191,7 @@ see the follow-up recorded in `roadmap/CHAOS-ENGINEERING-REVIEW.md` §20.4.
 | Scan exceeds the budget (slow engine, or queued too long) | **Fail closed** — refuse | Transient, self-clearing in seconds, retryable by the client, and inducible on demand by anyone who wants the gap. |
 | ClamAV daemon down / unreachable | **Fail open** — forward, counted + alerted | An operator-visible infrastructure state with its own alert and status surface; refusing all traffic on it is a fleet-wide outage. Recorded as an owner decision (register row WK-1b). |
 | Body larger than the scan window | **Fail open** — forward, counted + alerted (`scan_skipped`) | An explicit, configured limit rather than a failure. |
+| Compressed body expands past the decompression ratio bound (default 64:1, admin-tunable 16–256) | **Fail closed** — refuse, counted (`stat_decompress_bombs`) | The disproportionate expansion is itself the hostile shape; scanning a truncated prefix would forward the uninspected tail. |
 | Content matched by ClamAV or YARA | Block | — |
 
 The asymmetry between the first two rows is intentional and is the subject of

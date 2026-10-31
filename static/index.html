@@ -1709,6 +1709,25 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
             </div>
           </div>
 
+          <!-- Decompression bound (CHAOS-106) -->
+          <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+            <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">Decompression Bound</div>
+            <div style="font-size:.72rem;color:var(--muted);margin-bottom:10px">Compressed responses are expanded before scanning. One whose expansion exceeds this many times the bytes the origin actually sent is refused as a decompression bomb (fail-closed). Raise it only if legitimate, highly repetitive downloads (for example large CSV or log exports) are being refused. Allowed <span id="sec-decomp-range">16-256</span>; default <span id="sec-decomp-default">64</span>.</div>
+            <div id="sec-decomp-warn" style="display:none;background:rgba(234,179,8,.1);border-left:3px solid var(--yellow);padding:8px 12px;border-radius:6px;margin-bottom:10px;font-size:.78rem;color:var(--yellow)">
+              Warning: a ratio above the default admits more repetitive compressed content and makes a decompression-bomb expansion cheaper for an attacker to reach. The diagnostics page reports this as a warning while it is set.
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:10px">
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">Max expansion ratio (x compressed bytes)
+                <input id="sec-decomp-ratio" type="number" min="16" max="256" step="1" data-input="secDecompCheckWarn" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
+              </label>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn ghost sm" data-click="saveScanDecompression">Save Decompression Bound</button>
+              <button class="btn ghost sm" data-click="resetScanDecompression">Reset to Default</button>
+              <div id="sec-decomp-status" style="font-size:.78rem;display:none"></div>
+            </div>
+          </div>
+
           <!-- Scan exclusions (Tier 3.3) -->
           <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
             <div style="font-weight:600;font-size:.88rem;margin-bottom:4px">Full Content Scan Exclusions (ClamAV + YARA)</div>
@@ -5634,6 +5653,8 @@ document.addEventListener('click', e => {
     case 'deleteYARARule':    deleteYARARule(); break;
     case 'selectYARARule':    selectYARARule(arg); break;
     case 'saveYARASettings':  saveYARASettings(); break;
+    case 'saveScanDecompression':  saveScanDecompression(); break;
+    case 'resetScanDecompression': resetScanDecompression(); break;
     case 'saveScanExclusions': saveScanExclusions(); break;
     case 'saveDPIBypass':     saveDPIBypass(); break;
     case 'addTFAllowlistDomain': addTFAllowlistDomain(); break;
@@ -5993,6 +6014,7 @@ document.addEventListener('input', e => {
     case 'renderBlocklist':      renderBlocklist(); break;
     case 'onGroupSearchInput':   onGroupSearchInput(el.value); break;
     case 'syncSAMLMetadataSourceChoice': syncSAMLMetadataSourceChoice(); break;
+    case 'secDecompCheckWarn':   secDecompCheckWarn(); break;
     case 'fpSyncTitle':          document.getElementById('fp-editor-title').textContent = el.value || 'Profile'; break;
     case 'fpSyncNewTitle':       document.getElementById('fp-editor-title').textContent = el.value || 'New Profile'; break;
     default: console.warn('CSP delegation: unknown input action:', el.dataset.input);
@@ -9663,6 +9685,7 @@ async function loadSecurity() {
   loadTFAllowlist();
   loadYARARules();
   loadYARASettings();
+  loadScanDecompression();
   loadScanExclusions();
   loadDPIBypass();
 }
@@ -9996,6 +10019,64 @@ async function saveYARASettings() {
     statusEl.textContent = 'Error: ' + e.message;
   }
 }
+
+// ── Decompression bound (CHAOS-106) ─────────────────────────────────────
+let secDecompDefault = 64;
+let secDecompRevision = '';
+async function loadScanDecompression() {
+  try {
+    const s = await api('/api/security-scan/decompression');
+    secDecompDefault = s.default_ratio_limit;
+    secDecompRevision = s.revision || '';
+    const el = document.getElementById('sec-decomp-ratio');
+    if (el) { el.value = String(s.ratio_limit); el.min = String(s.min_ratio_limit); el.max = String(s.max_ratio_limit); }
+    const range = document.getElementById('sec-decomp-range');
+    if (range) range.textContent = s.min_ratio_limit + '-' + s.max_ratio_limit;
+    const def = document.getElementById('sec-decomp-default');
+    if (def) def.textContent = String(s.default_ratio_limit);
+    secDecompCheckWarn();
+  } catch(e) { console.error('loadScanDecompression:', e); }
+}
+
+function secDecompCheckWarn() {
+  const el = document.getElementById('sec-decomp-ratio');
+  const warn = document.getElementById('sec-decomp-warn');
+  if (!el || !warn) return;
+  warn.style.display = parseInt(el.value, 10) > secDecompDefault ? 'block' : 'none';
+}
+
+async function putScanDecompression(ratio) {
+  const statusEl = document.getElementById('sec-decomp-status');
+  statusEl.style.display = 'block';
+  statusEl.style.color = 'var(--muted)';
+  statusEl.textContent = 'Saving…';
+  try {
+    const body = { ratio_limit: ratio };
+    if (secDecompRevision) body.ifRevision = secDecompRevision;
+    await api('/api/security-scan/decompression', { method: 'PUT', body: JSON.stringify(body) });
+    statusEl.style.color = 'var(--green)';
+    statusEl.textContent = 'Saved.';
+    setTimeout(() => { statusEl.style.display = 'none'; }, 2000);
+    loadScanDecompression();
+  } catch(e) {
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+function saveScanDecompression() {
+  const v = document.getElementById('sec-decomp-ratio')?.value || '';
+  if (!/^[0-9]+$/.test(v.trim())) {
+    const statusEl = document.getElementById('sec-decomp-status');
+    statusEl.style.display = 'block';
+    statusEl.style.color = 'var(--red)';
+    statusEl.textContent = 'Error: enter a whole number.';
+    return;
+  }
+  putScanDecompression(parseInt(v, 10));
+}
+
+function resetScanDecompression() { putScanDecompression(secDecompDefault); }
 
 // ── YARA rule CRUD (Tier 3.1 / 3.2) ─────────────────────────────────────
 // The left column lists *files* (the unit of CRUD). Each file may contain
