@@ -59,6 +59,50 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   still unreadable, leaves it unchanged with a warning.
 ### Performance
 
+- **The category-group leg of the policy scan no longer allocates once per
+  rule.** No runtime behavior changes. `catgroup.Store`'s membership probe took
+  the display-cased category NAME and derived its `catSet` key with
+  `strings.ToLower` on every call, and `categoryGroupMatchesHostScratch` calls
+  it once per category-group rule inside the scan every proxied request walks.
+  The key it derived is the destination host's resolved category — a value
+  `hostCatScratch.fusion()` already resolves exactly once per scan — so a
+  request-invariant cost was being multiplied by the rule count. It was an
+  ALLOCATING cost on every real deployment rather than only in principle:
+  `strings.ToLower` returns its input unchanged only for an all-lowercase
+  string, and every category the product ships is display-cased ("Social
+  Media", "Gambling", "HR & Recruiting", ...), so the no-allocation fast path
+  never applied to an actual taxonomy. Only a CATEGORIZED destination reaches
+  the probe at all; an uncategorized one is answered by the existing
+  short-circuit, and that shape was already allocation-free.
+
+  The key now comes from a lazy `hostCatScratch.fusionCatKey` memo beside the
+  scratch's existing ones, and `catgroup` grows `MatchesCategoryKeyByID` /
+  `MatchesCategoryKey` that accept it, plus `CategoryKey` as the single
+  definition of the derivation — shared with `buildCatSet`, so a memoized key
+  cannot drift from the keys the sets are built with. The two string-argument
+  matchers remain as wrappers, so every other caller is untouched and the
+  existing differential oracle in `categorygroup_uncategorized_test.go` now
+  pins this hoist as well. Measured on the end-to-end `PolicyStore.Evaluate`
+  (4-core Xeon @2.80GHz, go1.27.3, shipped taxonomy, ID-stamped rules as
+  `stampObjectRefIDs` writes them, categorized destination): allocations go
+  from one per rule to a CONSTANT one per request — 10 → 1 at 10 rules, 200 → 1
+  at 200 — and 3 200 → 16 B/op at 200 rules. `benchstat` over the existing
+  end-to-end arms (count=8, p=0.000) reports 2.83 µs → 1.15 µs (-59%) at 20
+  rules, -54% on the by-name arms and -53% on the parallel arm, with the
+  uncategorized arms unchanged. `TestBenchGate_PolicyEvalCategoryGroupAllocs`
+  bounds the categorized scan at a constant across 1/10/50/200 rules — the
+  contract `TestBenchGate_PolicyEvalAllocs` already held the plain-FQDN leg to,
+  which could not see this leg because it scans FQDN rules — and a companion
+  gate keeps the uncategorized shape at zero.
+
+  The group-NAME lowering on the denormalized-name fallback leg is
+  deliberately left in place and recorded rather than fixed here: it is a
+  per-RULE value, so no per-request scratch can hoist it, and retiring it means
+  precomputing a normalized group name on the rule at publish time the way
+  `normFQDN` is precomputed — a different blast radius. It costs nothing on the
+  ID leg production takes (1 alloc/op for a display-cased group name on the
+  name leg, 0 for a lowercase one; `BenchmarkMatchesCategoryKey_NameLeg`).
+
 - **The per-request policy decision snapshot is now measured on the rule shapes
   deployments actually run, and its allocation floor is gated.** No runtime
   behavior changes. `BenchmarkPerfQual_Evaluate` reported a matched request at
