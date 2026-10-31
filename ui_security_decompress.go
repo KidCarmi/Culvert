@@ -143,9 +143,12 @@ func putScanDecompression(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEventDiff(r, scanDecompressAuditAction, "scan_decompress", scanDecompressAuditDetail(prev, target),
 		map[string]any{"ratio_limit": prev}, map[string]any{"ratio_limit": target})
-	if target > secscan.DefaultDecompressRatioLimit {
+	// Log the bound the scanner now enforces, read back from secscan, rather
+	// than the request value: it is what the hot path uses, and it keeps
+	// request-derived data out of the application log (CWE-117).
+	if live := secscan.DecompressRatioLimit(); live > secscan.DefaultDecompressRatioLimit {
 		logger.Printf("SecurityScan: decompression ratio limit RELAXED to %d (default %d) — compressed responses expanding up to %dx their transferred bytes are now admitted",
-			target, secscan.DefaultDecompressRatioLimit, target)
+			live, secscan.DefaultDecompressRatioLimit, live)
 	}
 	// Intentionally NOT calling saveConfigVersion: like the YARA engine
 	// settings (D-sec, CONFIG-VERSIONING-TRIAGE.md §4.2) this is a scanner
