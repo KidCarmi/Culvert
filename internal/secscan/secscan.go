@@ -664,21 +664,24 @@ func expandBound(n int) (limit int64, ratioBound bool) {
 // false, preserving the pre-CHAOS-106 truncate-and-scan behavior exactly.
 func expandForScan(r io.Reader, data []byte, ce string) (out []byte, readErr error, bomb bool) {
 	limit, ratioBound := expandBound(len(data))
+	if !ratioBound {
+		// The flat ceiling truncates, so it has no use for the probe below and
+		// must not take one: the pre-CHAOS-106 io.LimitReader never asked the
+		// decompressor for a byte past the ceiling, so a stream that is corrupt
+		// only AFTER it returned the decoded prefix. Probing would reach that
+		// corruption and drop the expansion back to the compressed bytes.
+		buf, err := readCapped(r, limit)
+		return buf, err, false
+	}
 	// One byte past the ceiling, so "the stream had more" is an observation
 	// rather than an inference from len == limit (which a body of exactly
 	// limit bytes would false-positive).
 	buf, err := readCapped(r, limit+1)
 	if int64(len(buf)) > limit {
-		if ratioBound {
-			noteDecompressBomb(ce, len(data), limit)
-			return nil, nil, true
-		}
-		return buf[:limit], nil, false
+		noteDecompressBomb(ce, len(data), limit)
+		return nil, nil, true
 	}
-	if err != nil {
-		return buf, err, false
-	}
-	return buf, nil, false
+	return buf, err, false
 }
 
 // noteDecompressBomb performs the refusal accounting: an exact counter plus a

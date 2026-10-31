@@ -20,6 +20,7 @@ package secscan
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -295,6 +296,82 @@ func TestCHAOS106_FlatCeilingStillTruncatesAndIsNeverRefused(t *testing.T) {
 	}
 	if int64(len(out)) != int64(MaxDecompressBytes) {
 		t.Errorf("truncated expansion = %d bytes, want exactly the ceiling %d", len(out), int64(MaxDecompressBytes))
+	}
+}
+
+// The flat ceiling must not read past itself. Before CHAOS-106 the expansion
+// was io.ReadAll(io.LimitReader(r, MaxDecompressBytes)), which never asked the
+// decompressor for a byte beyond the ceiling, so a stream that yields exactly
+// the ceiling and is corrupt only AFTER it returned the decoded prefix. A
+// one-byte probe past the ceiling reaches that corruption, and the expansion
+// falls back to the compressed bytes — the archive/DPI/YARA stages lose
+// visibility of a response that sits inside the default scan window. The
+// probe is only meaningful for the ratio ceiling, which refuses; the flat
+// ceiling truncates and must keep its capped read.
+func TestCHAOS106_FlatCeilingDoesNotProbePastItself(t *testing.T) {
+	// 2 MiB of incompressible bytes keeps the compressed size past 1 MiB, so
+	// expandBound returns the flat ceiling; zeros pad the expansion to
+	// EXACTLY MaxDecompressBytes.
+	raw := make([]byte, 2<<20)
+	fillPseudoRandom(raw, 7)
+	var buf bytes.Buffer
+	fw, err := flate.NewWriter(&buf, flate.BestSpeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write(make([]byte, MaxDecompressBytes-len(raw))); err != nil {
+		t.Fatal(err)
+	}
+	// Sync flush: every decoded byte is emitted and the stream is byte-aligned
+	// but not final, so whatever follows is read as the next block header.
+	if err := fw.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// 0x07 = BFINAL 1, BTYPE 11 (reserved): a corrupt block header.
+	buf.WriteByte(0x07)
+	if _, ratioBound := expandBound(buf.Len()); ratioBound {
+		t.Fatalf("fixture compressed to %d bytes — the ratio, not the ceiling, would decide", buf.Len())
+	}
+
+	out, refused := DecompressForScan(buf.Bytes(), "deflate")
+	if refused {
+		t.Fatal("an expansion at the flat ceiling must never be refused")
+	}
+	if int64(len(out)) != int64(MaxDecompressBytes) {
+		t.Fatalf("expansion = %d bytes, want the %d-byte decoded prefix (got %d compressed bytes back means the read went past the ceiling into the corrupt block)",
+			len(out), int64(MaxDecompressBytes), buf.Len())
+	}
+	if !bytes.Equal(out[:len(raw)], raw) {
+		t.Error("decoded prefix does not match the fixture")
+	}
+}
+
+// Negative control for the test above: the ratio ceiling still probes one byte
+// past itself, so an expansion of exactly the allowance is admitted while one
+// byte more is refused — the probe is what distinguishes the two.
+func TestCHAOS106_RatioCeilingStillProbesPastItself(t *testing.T) {
+	const compressed = 64 << 10
+	limit, ratioBound := expandBound(compressed)
+	if !ratioBound {
+		t.Fatalf("expandBound(%d) is not ratio-bound", compressed)
+	}
+	data := make([]byte, compressed)
+
+	exact, readErr, bomb := expandForScan(bytes.NewReader(make([]byte, limit)), data, "gzip")
+	if bomb || readErr != nil || int64(len(exact)) != limit {
+		t.Errorf("exactly the allowance: len=%d err=%v bomb=%v, want len=%d admitted", len(exact), readErr, bomb, limit)
+	}
+
+	before := DecompressBombs()
+	over, _, bomb := expandForScan(bytes.NewReader(make([]byte, limit+1)), data, "gzip")
+	if !bomb || over != nil {
+		t.Errorf("one byte past the allowance: bomb=%v out=%d bytes, want refused with nil out", bomb, len(over))
+	}
+	if DecompressBombs()-before != 1 {
+		t.Error("the refusal was not counted")
 	}
 }
 
