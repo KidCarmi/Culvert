@@ -129,8 +129,12 @@ If that content is legitimate, an **administrator** can raise the bound under
 - Accepted range **16–256**; default **64**. 256 is deliberately below the
   ratios measured for real decompression bombs (~400:1 and up), so the bound
   cannot be configured off; content more repetitive than 256:1 is
-  indistinguishable from a bomb by ratio and stays refused. Exclude such a
-  known-good object by SHA-256 instead.
+  indistinguishable from a bomb by ratio and stays refused. The SHA-256 hash
+  allowlist does **not** help here: the refusal happens before scanning, so
+  the hash checks are never reached. If the origin is trusted, a host-level
+  scan exclusion (checked before decompression on both the HTTP and inspected
+  HTTPS paths) lets it through — at the cost of skipping all scanning for that
+  host, which is a much broader grant than one object.
 - Any value **above 64** is a relaxed posture: the change is audited
   (`security.scan_decompress_ratio`, with RELAXED in the detail), logged, and
   reported as a `scan_decompress_ratio` **warning** on `/api/diagnostics` for as
