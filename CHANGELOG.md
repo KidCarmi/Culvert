@@ -406,6 +406,37 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A scan verdict cached under one ClamAV signature set stayed authoritative
+  for the whole `CacheTTL` after a set that detects the same content arrived
+  (CHAOS-107).** The verdict cache is keyed on the SHA-256 of the content alone,
+  so an entry carried no reference to the definitions that produced it. YARA
+  rule changes already flushed it on every admin path — they arrive *through*
+  Culvert — but ClamAV definitions are updated out-of-process by `freshclam`,
+  several times a day, and nothing asked whether they had changed. So
+  `freshclam` landing a signature did not re-arm the node for content it had
+  already called clean: the same bytes kept being served from cache, to every
+  user on the node, from any host, by exact hash, until the TTL lapsed
+  (default 1 h, operator-configurable and unclamped). The node already read the
+  signature counter every ten minutes and displayed it on the Security panel as
+  current; the two facts were never compared, and no counter, log line or alert
+  marked the window.
+
+  The scanner now records the identity of the signature set its cached verdicts
+  belong to (engine + database counter + database date) and flushes the cache
+  when it observes a different one, driven by a background poller so detection
+  does not depend on an operator having the dashboard open. Detection is within
+  roughly one `VERSION` window of the update; the cost is one cold cache per
+  signature update, the same trade the YARA path has always made. A **failed**
+  `VERSION` query deliberately does not flush — it is a fault in the observer,
+  not evidence the definitions moved, and flushing on it would let any daemon
+  blip wipe the cache node-wide and send every subsequent body to the daemon
+  that just failed to answer. New: `culvert_scan_sigdb_invalidations_total`,
+  `stat_scan_sigdb_invalidations` in the security-scan status JSON (local mode),
+  and `sigdb_generation` / `sigdb_invalidations` in the support bundle's scan
+  section, beside the hash-cache gauges they make interpretable. It is a
+  recovery counter: staying at zero while the reported signature counter
+  advances is the alert condition.
+
 - **A roster holding accounts but no present admin reopened the unauthenticated
   first-run bootstrap window (SEC-SETUPANCHOR-1).** `uiAuthMiddleware` grants
   RoleAdmin to every unauthenticated request while the first-run window is
