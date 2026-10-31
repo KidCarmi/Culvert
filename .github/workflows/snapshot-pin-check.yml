@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
-      FB1_COMMIT: 522f515dae4ae87f7d13e26a5eefc53e3473b8f9
+      FB1_COMMIT: 4f56bdfc854815f4a7fa4265237cb42d4c1476dd
     steps:
       - name: Checkout lab helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
