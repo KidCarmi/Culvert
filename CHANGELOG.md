@@ -7,6 +7,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- **An unreadable `admin_settings.json` is now visible in Diagnostics and
+  alerted, not just logged.** When the file exists but cannot be read
+  (permissions or a volume error) the node boots on defaults, so every
+  GUI-saved admin setting silently stops applying; the only trace was one
+  startup log line. The authenticated diagnostics now carry a failing
+  `state_file_admin_settings` row ("could not be read", path-free) with the
+  recovery action, and the existing `state_file_corrupt` alert fires. The file
+  is never moved or modified, and `/ready` rows and gating are unchanged.
+
 ### Added
 
 - **Administrators can now tune the CHAOS-106 decompression ratio bound
