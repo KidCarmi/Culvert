@@ -1506,22 +1506,22 @@ jobs:
   # the name obtain-image.sh already falls back to. No build, no boot.
   # Opt-in: [preserve-image].
   preserve-image:
-    name: "Lab · preserve candidate image tar (Deep run 41199359475, 4f56bdfc)"
+    name: "Lab · preserve candidate image tar (Deep run 41208642365, 0981ff3d)"
     if: ${{ contains(github.event.head_commit.message, '[preserve-image]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # FB-1b (31 Oct): the candidate of the FB-1 final SHA 4f56bdfc. The
-    # previous preservation (Deep 40523416237, 0648adeb) is lab-source-image-40523416237.
+    # FB-1c (31 Oct): the candidate of the FB-1 final SHA 0981ff3d. Earlier
+    # preservations: lab-source-image-41199359475 (4f56bdfc), -40523416237 (0648adeb).
     env:
-      SOURCE_IMAGE_RUN_ID: "41199359475"
-      SOURCE_IMAGE_TAR_SHA256: 698f59fe62f4a3978ddd33b74aaa4e56323a1f6cb121ecc4e51cde47232c2c47
+      SOURCE_IMAGE_RUN_ID: "41208642365"
+      SOURCE_IMAGE_TAR_SHA256: c98564d4d86d99e61a0e86541aeea5331a6ecce704e7f146b507d8e818484a52
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Obtain + verify (sha256, manifest digest, VERSION stamp)
         env:
           GH_TOKEN: ${{ github.token }}
-          WANT_MANIFEST: "sha256:ffb0748b2554d2c18467446b360301fe9789b5f91bcfb6540333a4d9cc09e41a"
-          WANT_VERSION: "v1.0.374-candidate.g4f56bdfc8548"
+          WANT_MANIFEST: "sha256:d2ce15f1f7a99c2875579d0cf55f1fe51f0c6e993071eed4bc201eccba732d79"
+          WANT_VERSION: "v1.0.375-candidate.g0981ff3d037d"
         run: |
           set -euo pipefail
           d="$RUNNER_TEMP/in"; from="$(test/e2e/appliance/lab/obtain-image.sh "$d")"
