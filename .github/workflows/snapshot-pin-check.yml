@@ -24,6 +24,14 @@
 #      .deb hash changed must be refused against the authenticated index.
 #      (The old-pin red case, 325c142a refused on exactly the 57, is pinned
 #      offline by T3a and was run on the network in lab run 41111194290.)
+#   4. Base inventory (ASTRA, 4f56bdfc): the pinned base image is fetched and
+#      verified (SHA-256 pin + Ubuntu's signed SHA256SUMS), its pre-transaction
+#      /var/lib/dpkg/status read with build-ova.sh's own `virt-cat` command and
+#      required to equal the committed fixture. Every predicted row the base
+#      lacks at that exact version/arch is REALLY downloaded (C7), the full
+#      receipt reconciles with --base-status, and deleting the receipt row of
+#      an upgraded package (openssh-server), of a newly installed one (pigz),
+#      or of every Ubuntu package is refused.
 # No OVA is built, nothing is published or signed. Runs only on a push whose
 # message carries [snapshot-pin-check].
 name: Snapshot Pin Check (lab)
@@ -43,9 +51,9 @@ jobs:
   t4:
     if: ${{ contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
-      FB1_COMMIT: 4f56bdfc854815f4a7fa4265237cb42d4c1476dd
+      FB1_COMMIT: 0981ff3d037dedcf08cf7686474c65ba6b3784bf
     steps:
       - name: Checkout lab helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,14 +80,61 @@ jobs:
           bash src/appliance/build/snapshot-pin-check.sh "$RUNNER_TEMP/t4" 2>&1 | tee ev/t4-snapshot-pin-check.txt
           cp "$RUNNER_TEMP"/t4/*.log ev/ 2>/dev/null || true
 
-      - name: C5/C6 — the guest's section-1 source set; simulated install; real acquisition + byte binding
+      - name: Base image — pre-transaction dpkg status (build-ova.sh's virt-cat), equal to the committed fixture
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
+          for _ in 1 2; do
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends libguestfs-tools qemu-utils ubuntu-cloudimage-keyring && break
+            sleep 15
+          done
+          sudo chmod 0644 /boot/vmlinuz-*
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
+          B=src/appliance/build; set -a; . "$B/manifest.env"; set +a
+          W="$RUNNER_TEMP/base"; mkdir -p "$W"
+          curl -fsSL --retry 3 -o "$W/img" "$BASE_IMAGE_URL"
+          echo "$BASE_IMAGE_SHA256  $W/img" | sha256sum -c - | tee ev/base-image-verify.txt
+          curl -fsSL -o "$W/SHA256SUMS" "$BASE_IMAGE_SUMS_URL"; curl -fsSL -o "$W/SHA256SUMS.gpg" "$BASE_IMAGE_SUMS_SIG_URL"
+          gpgv --keyring "$BASE_IMAGE_KEYRING" "$W/SHA256SUMS.gpg" "$W/SHA256SUMS" 2>&1 | tee -a ev/base-image-verify.txt
+          grep -q "^${BASE_IMAGE_SHA256} \*$(basename "$BASE_IMAGE_URL")$" "$W/SHA256SUMS"
+          # The exact build-ova.sh command, on the verified file.
+          LIBGUESTFS_BACKEND=direct virt-cat -a "$W/img" /var/lib/dpkg/status > ev/base-dpkg-status.txt
+          sha256sum ev/base-dpkg-status.txt "$B/testdata/provenance/base-dpkg-status-20260926.txt" | tee ev/base-dpkg-status.sha256
+          cmp ev/base-dpkg-status.txt "$B/testdata/provenance/base-dpkg-status-20260926.txt"
+          echo "PASS base status re-read from the verified image equals the committed fixture ($(sha256sum < ev/base-dpkg-status.txt | cut -c1-64))" | tee -a ev/summary.txt
+          # Every predicted row the base image does not carry at that exact version/arch.
+          CMP=src/docs/appliance/evidence/combined/future-build/fb1-snapshot-20261029/compare-325c142a.tsv
+          awk -F'\t' 'NR>1 && $4!="" {print $1"\t"$4"\t"$2}' "$CMP" > ev/predicted-inventory.tsv
+          python3 -I - ev/base-dpkg-status.txt ev/predicted-inventory.tsv > ev/need-acquisition.tsv <<'PY'
+          import sys
+          base = set()
+          for st in open(sys.argv[1]).read().split("\n\n"):
+              f = {}
+              for l in st.split("\n"):
+                  k, s, v = l.partition(": ")
+                  if s and not l.startswith(" "):
+                      f[k] = v
+              if "Package" in f and f.get("Status", "").endswith(" installed"):
+                  base.add((f["Package"], f["Version"], f["Architecture"]))
+          for l in open(sys.argv[2]):
+              r = tuple(l.rstrip("\n").split("\t"))
+              if r not in base:
+                  print("\t".join(r))
+          PY
+          test "$(wc -l < ev/need-acquisition.tsv)" = 94
+          grep -q '^openssh-server	' ev/need-acquisition.tsv; grep -q '^pigz	' ev/need-acquisition.tsv
+
+      - name: C5/C6/C7 — the guest's section-1 source set; simulated install; real acquisition + byte binding
         run: |
           set -o pipefail
-          bash .github/lab/fb1-c5.sh "$PWD/src/appliance/build" "$RUNNER_TEMP/c5" 2>&1 | tee ev/c5-guest-source-set.txt
+          bash .github/lab/fb1-c5.sh "$PWD/src/appliance/build" "$RUNNER_TEMP/c5" "$PWD/ev/need-acquisition.tsv" 2>&1 | tee ev/c5-guest-source-set.txt
           cp "$RUNNER_TEMP/c5.inst" ev/c5-simulated-installs.txt
           cp "$RUNNER_TEMP/c5.acquired.tsv" ev/c6-acquired-debs.tsv
+          cp "$RUNNER_TEMP/c5.acquired-full.tsv" ev/c7-acquired-debs-full.tsv
           test "$(grep -c '^PASS C5' ev/c5-guest-source-set.txt)" = 2
           test "$(grep -c '^PASS C6' ev/c5-guest-source-set.txt)" = 2
+          test "$(grep -c '^PASS C7' ev/c5-guest-source-set.txt)" = 1
 
       - name: build-ova.sh index fetch + reconciliation of the predicted inventory with the real receipt
         run: |
@@ -109,18 +164,27 @@ jobs:
             --docker-pin "containerd.io=$CONTAINERD_IO_VERSION" --docker-pin "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_VERSION" \
             --docker-deb-sha256 "docker-ce=$DOCKER_CE_DEB_SHA256" --docker-deb-sha256 "docker-ce-cli=$DOCKER_CE_CLI_DEB_SHA256" \
             --docker-deb-sha256 "containerd.io=$CONTAINERD_IO_DEB_SHA256" --docker-deb-sha256 "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_DEB_SHA256" \
-            --acquired "$2" --out "$3"; }
-          CMP=src/docs/appliance/evidence/combined/future-build/fb1-snapshot-20261029/compare-325c142a.tsv
-          awk -F'\t' 'NR>1 && $4!="" {print $1"\t"$4"\t"$2}' "$CMP" > ev/predicted-inventory.tsv
+            --acquired "$2" --base-status ev/base-dpkg-status.txt --out "$3"; }
           test "$(wc -l < ev/predicted-inventory.tsv)" = 680
-          # Green: predicted replacement inventory + C6's real receipt.
-          rec ev/predicted-inventory.tsv ev/c6-acquired-debs.tsv ev/package-provenance-predicted.tsv | tee ev/reconcile-predicted.txt
-          grep -q 'acquired-verified=9 inherited-base-image=671 acquired-not-installed=0' ev/reconcile-predicted.txt
-          test "$(awk -F'\t' '$9=="acquired-verified"' ev/package-provenance-predicted.tsv | wc -l)" = 9
-          echo "PASS predicted 680-package inventory reconciled on the real indexes: $(tail -1 ev/reconcile-predicted.txt)" | tee -a ev/summary.txt
+          # Green: predicted replacement inventory + C7's real full receipt + the real base status.
+          rec ev/predicted-inventory.tsv ev/c7-acquired-debs-full.tsv ev/package-provenance-predicted.tsv | tee ev/reconcile-predicted.txt
+          grep -q 'acquired-verified=94 inherited-base-image=586 acquired-not-installed=0' ev/reconcile-predicted.txt
+          test "$(awk -F'\t' '$9=="acquired-verified"' ev/package-provenance-predicted.tsv | wc -l)" = 94
+          echo "PASS predicted 680-package inventory reconciled on the real indexes + real base status: $(tail -1 ev/reconcile-predicted.txt)" | tee -a ev/summary.txt
+          # Red (ASTRA): a missing receipt is never relabelled inherited unless the base image has that exact row.
+          grep -v '^openssh-server	' ev/c7-acquired-debs-full.tsv > r-upgraded.tsv
+          if rec ev/predicted-inventory.tsv r-upgraded.tsv x.tsv > ev/reconcile-no-receipt-upgraded.txt 2>&1; then echo "FAIL: upgraded package without receipt reconciled"; exit 1; fi
+          grep -q 'openssh-server	.* has no verified acquisition and the base image had ' ev/reconcile-no-receipt-upgraded.txt
+          grep -v '^pigz	' ev/c7-acquired-debs-full.tsv > r-new.tsv
+          if rec ev/predicted-inventory.tsv r-new.tsv x.tsv > ev/reconcile-no-receipt-new.txt 2>&1; then echo "FAIL: new package without receipt reconciled"; exit 1; fi
+          grep -q 'pigz	2.8-1 amd64 has no verified acquisition and it is not in the base image' ev/reconcile-no-receipt-new.txt
+          grep -E '^(docker-|containerd\.io	)' ev/c7-acquired-debs-full.tsv > r-docker-only.tsv
+          if rec ev/predicted-inventory.tsv r-docker-only.tsv x.tsv > ev/reconcile-no-receipt-all.txt 2>&1; then echo "FAIL: no Ubuntu receipts reconciled"; exit 1; fi
+          test "$(grep -c ' has no verified acquisition and ' ev/reconcile-no-receipt-all.txt)" = 90
+          echo "PASS a missing receipt is refused: upgraded (openssh-server), new (pigz), all 90 Ubuntu rows the base lacks" | tee -a ev/summary.txt
           # Red: one acquired kernel .deb with different bytes.
           awk -F'\t' 'BEGIN{OFS="\t"} $1=="linux-modules-7.0.0-42-generic"{$4="0000000000000000000000000000000000000000000000000000000000000000"} 1' \
-            ev/c6-acquired-debs.tsv > tampered.tsv
+            ev/c7-acquired-debs-full.tsv > tampered.tsv
           if rec ev/predicted-inventory.tsv tampered.tsv tampered-out.tsv > ev/reconcile-tampered.txt 2>&1; then echo "FAIL: a changed .deb hash reconciled"; exit 1; fi
           grep -q 'linux-modules-7.0.0-42-generic.*the authenticated snapshot index lists' ev/reconcile-tampered.txt
           echo "PASS a kernel .deb with different bytes is refused against the authenticated index" | tee -a ev/summary.txt

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fb1-c5.sh BUILD_DIR WORK — LAB ONLY. FB-1 T4 case C5: the guest's section-1
+# fb1-c5.sh BUILD_DIR WORK [NEED] — LAB ONLY. FB-1 T4 case C5: the guest's section-1
 # source set (Ubuntu `Snapshot: yes` + Docker's one-line `snapshot=no`
 # source) under the production library, then a simulated install of what
 # prepare-guest.sh installs. Asserts the Docker pins are selected and every
@@ -90,3 +90,29 @@ while IFS=$'\t' read -r p v a sha _; do
 done < "$R.acquired.tsv"
 [[ "$k" -eq 5 ]] || { echo "FAIL C6 expected 5 kernel .debs, acquired $k"; exit 1; }
 echo "PASS C6 kernel: $k acquired kernel .debs are 7.0.0-42.42~24.04.1, equal their authenticated snapshot index entries and the approved kernel-42 identities"
+
+# C7 (optional 3rd argument NEED: name<TAB>version<TAB>arch rows — every row
+# of the predicted replacement inventory that the BASE IMAGE does not carry at
+# that exact version/arch, i.e. everything a build must download). A REAL
+# acquisition of all of them under the snapshot, through the production
+# receipt; every non-Docker file equal to its authenticated index entry. The
+# workflow then reconciles with the real base status and deletes receipt rows.
+NEED="${3:-}"
+if [[ -n "$NEED" ]]; then
+  mkdir -p "$R/dlfull"
+  specs=()
+  while IFS=$'\t' read -r p v _; do specs+=("$p=$v"); done < "$NEED"
+  (cd "$R/dlfull" && apt_snap download "${specs[@]}") >/dev/null
+  apt_snap_acquisition_receipt "$R/dlfull" "$R.acquired-full.tsv"
+  apt_snap_verify_docker_debs "$R.acquired-full.tsv"
+  n=0
+  while IFS=$'\t' read -r p v a sha _; do
+    case "$p" in docker-ce|docker-ce-cli|containerd.io|docker-compose-plugin) continue ;; esac
+    n=$((n + 1))
+    idx="$(apt_cache_snap show "$p=$v" | awk '/^SHA256: / && !n {print $2; n = 1}')"
+    [[ "$idx" == "$sha" ]] || { echo "FAIL C7 $p $v $a: acquired $sha, snapshot index ${idx:-none}"; exit 1; }
+  done < "$R.acquired-full.tsv"
+  [[ "$(wc -l < "$R.acquired-full.tsv")" -eq "$(wc -l < "$NEED")" ]] \
+    || { echo "FAIL C7 acquired $(wc -l < "$R.acquired-full.tsv") files for $(wc -l < "$NEED") required rows"; exit 1; }
+  echo "PASS C7 every package the base image lacks: $(wc -l < "$NEED") acquired (4 Docker at the pins + $n Ubuntu, each equal to its authenticated snapshot index entry)"
+fi
