@@ -253,6 +253,9 @@ func buildOperatorContract() OperatorContract {
 	// Enabled alert webhooks whose latest delivery failed. Contributes nothing
 	// when every enabled webhook's latest recorded attempt succeeded.
 	checks = append(checks, checkAlertDelivery()...)
+	// Cluster rate-limit broadcast stale: this node enforces only its local limit.
+	// Contributes nothing unless cluster rate limiting is armed and stale.
+	checks = append(checks, checkClusterRateLimitFreshness(rl)...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
