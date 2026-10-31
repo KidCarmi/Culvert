@@ -286,6 +286,70 @@ func bodyNeedsBuffering(contentType string) bool {
 
 // ── Admin / monitoring helpers ────────────────────────────────────────────────
 
+// secScanStatusMapRemote is the REMOTE (sidecar) half of secScanStatusMap.
+// Extracted so neither branch is read through the other: the two report
+// different planes (this one's local counters are structurally zero, and the
+// three identity keys are this node's to state, not the far end's) and the
+// combined function had grown past the configured funlen bound.
+func secScanStatusMapRemote(counters secscan.CounterSnapshot) map[string]interface{} {
+	m := map[string]interface{}{
+		"enabled":       true,
+		"scan_svc_mode": "remote",
+		"scan_svc_url":  redactURLUserinfo(globalRemoteScanner.URL()),
+	}
+	if status, err := globalRemoteScanner.Status(); err == nil {
+		for k, v := range status {
+			m[k] = v
+		}
+		// The sidecar's /status IS its own secScanStatusMap, so it carries
+		// its own "enabled" and "scan_svc_mode": "local". Merged in blind,
+		// those overwrote the three keys this process owns, and a proxy in
+		// remote mode reported scan_svc_mode "local" to its own admin UI.
+		// The identity of THIS node is not the far end's to state.
+		m["enabled"] = true
+		m["scan_svc_mode"] = "remote"
+		m["scan_svc_url"] = redactURLUserinfo(globalRemoteScanner.URL())
+		m["scan_svc_degraded"] = false
+	} else {
+		// BOUNDED class only — see apiScanSvcConfig: the raw error can
+		// carry the configured URL's userinfo onto this viewer surface.
+		reason := secscan.ProbeFailureReason(err)
+		m["scan_svc_status"] = "unreachable: " + reason
+		m["scan_svc_degraded"] = true
+		logger.Printf("ScanSvc: status probe failed for %q: reason=%s",
+			sanitizeLog(redactURLUserinfo(globalRemoteScanner.URL())), sanitizeLog(reason))
+	}
+	// Always include local threat feed stats (feeds run locally even with remote scanning).
+	feedTotal, feedLastSync, feedInterval := globalThreatFeed.Stats()
+	m["threat_feed_entries"] = feedTotal
+	m["threat_feed_last_sync"] = feedLastSync
+	m["threat_feed_interval"] = feedInterval.String()
+	feedOK, feedLastSuccess, feedErr := globalThreatFeed.SyncStatus()
+	m["threat_feed_sync_ok"] = feedOK
+	m["threat_feed_last_success"] = feedLastSuccess
+	if feedErr != "" {
+		m["threat_feed_sync_error"] = feedErr
+	}
+	m["stat_feed_blocked"] = counters.ThreatFeedBlocked
+	m["threat_feed_allowlist_masked"] = globalThreatFeed.AllowlistMaskedTotal()
+	// Tier 2.2: surface remote sidecar failure counter even when scan_svc_mode=remote.
+	m["stat_remote_scan_fail"] = counters.RemoteScanFail
+	// CHAOS-53: the fail-CLOSED half of the remote posture. scan_timeout now
+	// counts budget refusals from the sidecar path too, so this deployment
+	// finally reports both directions of a scanning fault instead of only
+	// the one that admits content.
+	m["stat_scan_timeout"] = counters.ScanTimeout
+	m["stat_remote_scan_saturated"] = counters.RemoteScanSaturated
+	m["remote_scan_inflight"] = counters.RemoteScanInflight
+	// CHAOS-106: the expansion bound refuses HERE, before the sidecar is
+	// asked — the sidecar only ever receives already-expanded bytes, so its
+	// own stat_decompress_bombs is structurally 0. Merged in blind, that 0
+	// told the Security panel nothing was refused while this node blocked
+	// every bomb. The counter of record is this process's.
+	m["stat_decompress_bombs"] = counters.DecompressBombs
+	return m
+}
+
 // secScanStatusMap returns a map suitable for JSON serialisation by the
 // /api/security-scan/status endpoint.
 func secScanStatusMap() map[string]interface{} {
@@ -293,62 +357,7 @@ func secScanStatusMap() map[string]interface{} {
 
 	// When remote scanner is active, fetch status from the sidecar.
 	if globalRemoteScanner.Enabled() {
-		m := map[string]interface{}{
-			"enabled":       true,
-			"scan_svc_mode": "remote",
-			"scan_svc_url":  redactURLUserinfo(globalRemoteScanner.URL()),
-		}
-		if status, err := globalRemoteScanner.Status(); err == nil {
-			for k, v := range status {
-				m[k] = v
-			}
-			// The sidecar's /status IS its own secScanStatusMap, so it carries
-			// its own "enabled" and "scan_svc_mode": "local". Merged in blind,
-			// those overwrote the three keys this process owns, and a proxy in
-			// remote mode reported scan_svc_mode "local" to its own admin UI.
-			// The identity of THIS node is not the far end's to state.
-			m["enabled"] = true
-			m["scan_svc_mode"] = "remote"
-			m["scan_svc_url"] = redactURLUserinfo(globalRemoteScanner.URL())
-			m["scan_svc_degraded"] = false
-		} else {
-			// BOUNDED class only — see apiScanSvcConfig: the raw error can
-			// carry the configured URL's userinfo onto this viewer surface.
-			reason := secscan.ProbeFailureReason(err)
-			m["scan_svc_status"] = "unreachable: " + reason
-			m["scan_svc_degraded"] = true
-			logger.Printf("ScanSvc: status probe failed for %q: reason=%s",
-				sanitizeLog(redactURLUserinfo(globalRemoteScanner.URL())), sanitizeLog(reason))
-		}
-		// Always include local threat feed stats (feeds run locally even with remote scanning).
-		feedTotal, feedLastSync, feedInterval := globalThreatFeed.Stats()
-		m["threat_feed_entries"] = feedTotal
-		m["threat_feed_last_sync"] = feedLastSync
-		m["threat_feed_interval"] = feedInterval.String()
-		feedOK, feedLastSuccess, feedErr := globalThreatFeed.SyncStatus()
-		m["threat_feed_sync_ok"] = feedOK
-		m["threat_feed_last_success"] = feedLastSuccess
-		if feedErr != "" {
-			m["threat_feed_sync_error"] = feedErr
-		}
-		m["stat_feed_blocked"] = counters.ThreatFeedBlocked
-		m["threat_feed_allowlist_masked"] = globalThreatFeed.AllowlistMaskedTotal()
-		// Tier 2.2: surface remote sidecar failure counter even when scan_svc_mode=remote.
-		m["stat_remote_scan_fail"] = counters.RemoteScanFail
-		// CHAOS-53: the fail-CLOSED half of the remote posture. scan_timeout now
-		// counts budget refusals from the sidecar path too, so this deployment
-		// finally reports both directions of a scanning fault instead of only
-		// the one that admits content.
-		m["stat_scan_timeout"] = counters.ScanTimeout
-		m["stat_remote_scan_saturated"] = counters.RemoteScanSaturated
-		m["remote_scan_inflight"] = counters.RemoteScanInflight
-		// CHAOS-106: the expansion bound refuses HERE, before the sidecar is
-		// asked — the sidecar only ever receives already-expanded bytes, so its
-		// own stat_decompress_bombs is structurally 0. Merged in blind, that 0
-		// told the Security panel nothing was refused while this node blocked
-		// every bomb. The counter of record is this process's.
-		m["stat_decompress_bombs"] = counters.DecompressBombs
-		return m
+		return secScanStatusMapRemote(counters)
 	}
 
 	feedTotal, feedLastSync, feedInterval := globalThreatFeed.Stats()
@@ -391,9 +400,15 @@ func secScanStatusMap() map[string]interface{} {
 		"stat_clam_saturated": counters.ClamSaturated,
 		// CHAOS-106: fail-CLOSED refusals, so reported beside the saturation
 		// plane rather than beside the fail-open stat_scan_skipped.
-		"stat_decompress_bombs":  counters.DecompressBombs,
-		"stat_scan_late_discard": counters.ScanLateDiscarded,
-		"scan_inflight":          counters.ScanInflight,
+		"stat_decompress_bombs": counters.DecompressBombs,
+		// CHAOS-107: verdict-cache flushes forced by a signature-set change.
+		// Reported beside the cache_* gauges it acts on, because it is what
+		// makes those gauges interpretable: a large warm cache is efficiency
+		// when its verdicts match the live definitions and a liability when
+		// they do not, and this is the only field that says which.
+		"stat_scan_sigdb_invalidations": counters.SigDBInvalidations,
+		"stat_scan_late_discard":        counters.ScanLateDiscarded,
+		"scan_inflight":                 counters.ScanInflight,
 
 		"threat_feed_allowlist_masked": globalThreatFeed.AllowlistMaskedTotal(),
 	}

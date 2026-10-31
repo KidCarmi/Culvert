@@ -136,6 +136,12 @@ type CounterSnapshot struct {
 	// ClamSaturated, and separate from ScanSkipped, which is fail-OPEN.
 	DecompressBombs int64
 
+	// SigDBInvalidations counts verdict-cache flushes forced by an observed
+	// ClamAV engine/signature-database change (CHAOS-107). A RECOVERY signal:
+	// it rises when new definitions are adopted, and staying at zero while the
+	// reported signature counter advances is itself the alarm.
+	SigDBInvalidations int64
+
 	// Remote (sidecar) deployment. Every counter above except RemoteScanFail is
 	// structurally zero there, so before CHAOS-53 a sidecar node exported no
 	// scanning signal at all.
@@ -157,6 +163,8 @@ func Counters() CounterSnapshot {
 		ScanLateDiscarded: atomic.LoadInt64(&statScanLateDiscarded),
 		ScanInflight:      scanInflight.Load(),
 		DecompressBombs:   atomic.LoadInt64(&statScanDecompressBombs),
+
+		SigDBInvalidations: atomic.LoadInt64(&statScanSigDBInvalidations),
 
 		RemoteScanSaturated: atomic.LoadInt64(&statRemoteScanSaturated),
 		RemoteScanInflight:  remoteScanInflight.Load(),
@@ -253,6 +261,23 @@ type Scanner struct {
 	clamVerVal    clamav.Version
 	clamVerOK     bool
 	clamVerExpiry time.Time
+
+	// sigGen is the identity of the signature set that produced the verdicts
+	// currently in the hash cache (CHAOS-107). The cache is keyed on the
+	// CONTENT hash alone, so without this it cannot tell a verdict computed
+	// under last week's definitions from one computed a second ago: a "clean"
+	// cached at 02:30 kept being served until CacheTTL expired, even after
+	// freshclam landed the signature that would have caught it. YARA rule
+	// mutations already clear the cache on every CRUD path (ui_security.go
+	// "Tier 1.1"); the ClamAV side had no equivalent because its definitions
+	// change out-of-process and nothing compared them.
+	//
+	// sigGenKnown distinguishes "no observation yet" from "observed an empty
+	// identity", so the FIRST successful observation re-baselines instead of
+	// counting as a change — otherwise every boot and every Init would flush a
+	// warm cache for nothing.
+	sigGen      string
+	sigGenKnown bool
 }
 
 // clamStatusTTL is how long a successful ClamAV ping result is considered fresh.
@@ -337,6 +362,14 @@ func (ss *Scanner) Init(clamAddr string, maxBytes int64, cache *hashcache.HashCa
 	// different engine/signature set.
 	ss.clamVerOK = false
 	ss.clamVerExpiry = time.Time{}
+	// And drop the recorded signature identity (CHAOS-107): a reconfigured
+	// daemon may be a different engine with a different signature set, so the
+	// next observation must RE-BASELINE rather than be compared against the
+	// old daemon's counter. Init either adopts a fresh cache or keeps one whose
+	// verdicts are already bounded by CacheTTL, so re-baselining here cannot
+	// strand a verdict that outlives its own definitions.
+	ss.sigGen = ""
+	ss.sigGenKnown = false
 }
 
 // Enabled reports whether the scanner has been initialised.
@@ -426,17 +459,124 @@ func (ss *Scanner) ClamAVVersion() (clamav.Version, bool) {
 	// available" so a down daemon isn't hammered on every poll.
 	v, err := versioner.Version()
 	ss.mu.Lock()
-	defer ss.mu.Unlock()
 	if err != nil {
 		obs.Printf("SecurityScan: ClamAV VERSION query failed: %v", err)
 		ss.clamVerOK = false
 		ss.clamVerExpiry = time.Now().Add(clamStatusTTL) // retry sooner than a good result
+		ss.mu.Unlock()
+		// Deliberately NOT a cache flush. A failed VERSION query is a fault in
+		// the OBSERVER, not evidence that the definitions changed, and
+		// flushing on it would hand any daemon blip a free node-wide cache
+		// wipe — every subsequent body re-scanned against the very daemon that
+		// just failed to answer, which is the self-sustaining saturation
+		// scanBodyInner's cancellation exists to prevent (CHAOS-52/53). The
+		// dark period cannot accumulate new false cleans either: the clamDark
+		// branch already refuses to cache a "clean" computed while ClamAV was
+		// unreachable. So uncertainty keeps the cache and stays bounded by
+		// CacheTTL; only a POSITIVE observation of a different signature set
+		// invalidates.
 		return clamav.Version{}, false
 	}
 	ss.clamVerVal = v
 	ss.clamVerOK = true
 	ss.clamVerExpiry = time.Now().Add(clamVersionTTL)
+	stale, prev, cache := ss.noteSignatureGenLocked(v)
+	ss.mu.Unlock()
+
+	if stale {
+		// Clear OUTSIDE ss.mu: the hash cache has its own mutex and this keeps
+		// the scanner lock off the cache's lock-ordering graph.
+		if cache != nil {
+			cache.Clear()
+		}
+		atomic.AddInt64(&statScanSigDBInvalidations, 1)
+		obs.Printf("SecurityScan: ClamAV signature set changed (%q -> %q) — scan verdict cache flushed so content cleared under the old definitions is re-scanned (CHAOS-107)",
+			prev, signatureGeneration(v))
+	}
 	return v, true
+}
+
+// signatureGeneration derives a stable identity for the detection capability a
+// VERSION reply describes. The signature counter is the primary key; the engine
+// and build date are folded in because an engine upgrade also changes what the
+// daemon can detect, and a reply that carries no parsed fields at all falls
+// back to the raw string. An empty result means "cannot tell", which callers
+// treat as no observation rather than as a change.
+func signatureGeneration(v clamav.Version) string {
+	key := v.Engine + "/" + v.DBVersion + "/" + v.DBDate
+	if strings.Trim(key, "/") == "" {
+		return strings.TrimSpace(v.Raw)
+	}
+	return key
+}
+
+// noteSignatureGenLocked records the observed signature identity and reports
+// whether the verdict cache must be flushed because it changed. Caller holds
+// ss.mu for writing; the flush itself is the caller's job, outside the lock.
+//
+// The invariant it maintains is "every verdict in the cache was produced under
+// ss.sigGen", and it is maintained WITHOUT depending on who observes first.
+// That matters: the first version observation does not necessarily precede the
+// first scan. On a node whose dashboard nobody opens, the poller's opening tick
+// is the first observation — but a tick that lost a race with early traffic
+// would otherwise BASELINE onto a cache already holding verdicts from the
+// previous signature set, silently adopting them as current. So:
+//
+//   - an unidentifiable reply is not recorded at all (it neither flushes now
+//     nor manufactures a change later);
+//   - the first identifiable observation baselines, and flushes only if the
+//     cache is already non-empty, because those entries have no provenance;
+//   - a later observation of a DIFFERENT identity flushes.
+//
+// The common case is therefore still free: the poller's opening tick runs
+// against an empty cache and only records the baseline.
+func (ss *Scanner) noteSignatureGenLocked(v clamav.Version) (stale bool, prev string, cache *hashcache.HashCache) {
+	gen := signatureGeneration(v)
+	if gen == "" {
+		return false, "", nil
+	}
+	known, prevGen := ss.sigGenKnown, ss.sigGen
+	ss.sigGen = gen
+	ss.sigGenKnown = true
+
+	switch {
+	case !known:
+		// Unprovenanced entries, if any, predate any recorded signature set.
+		if ss.cache != nil {
+			if _, _, size := ss.cache.Stats(); size > 0 {
+				return true, "unknown", ss.cache
+			}
+		}
+		return false, "", nil
+	case prevGen != gen:
+		return true, prevGen, ss.cache
+	default:
+		return false, "", nil
+	}
+}
+
+// RefreshSignatures re-reads the ClamAV signature identity and reconciles the
+// verdict cache against it, reporting whether an observation succeeded.
+//
+// It exists because the reconciliation must not depend on somebody WATCHING.
+// ClamAVVersion is otherwise called only by the dashboard metrics payload, so
+// on a node whose dashboard nobody has open the signature change would never be
+// noticed and the stale-clean window would run the full CacheTTL. The
+// background poller in package main drives this on a fixed cadence; the
+// 10-minute VERSION cache means a tick that lands inside the previous window is
+// free.
+func (ss *Scanner) RefreshSignatures() bool {
+	_, ok := ss.ClamAVVersion()
+	return ok
+}
+
+// SignatureGeneration reports the signature identity the cached verdicts were
+// computed under, and whether one has been observed at all. Test/diagnostic
+// accessor; the reconciliation is automatic.
+func (ss *Scanner) SignatureGeneration() (string, bool) {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	return ss.sigGen, ss.sigGenKnown
 }
 
 // ── URL / domain checks ───────────────────────────────────────────────────────
@@ -719,6 +859,18 @@ var statScanDecompressBombs int64
 // actions, and a shared gate lets whichever fires first suppress the other
 // (storage_health.go's rule, applied in yara.go for the same reason).
 var lastDecompressBombLog atomic.Int64
+
+// statScanSigDBInvalidations counts verdict-cache flushes forced by an observed
+// change of the ClamAV engine/signature-database identity (CHAOS-107). It is a
+// RECOVERY counter, not a failure counter: a non-zero value means the node
+// noticed new definitions and stopped trusting verdicts the old ones produced.
+// A value that stays at zero on a node whose dashboard shows the signature
+// counter advancing is the regression this counter exists to make visible.
+var statScanSigDBInvalidations int64
+
+// SigDBInvalidations reports verdict-cache flushes forced by a signature-set
+// change (CHAOS-107).
+func SigDBInvalidations() int64 { return atomic.LoadInt64(&statScanSigDBInvalidations) }
 
 // DecompressBombs reports responses refused by the scan-path expansion ratio
 // bound. A non-zero value means content was blocked for declaring an

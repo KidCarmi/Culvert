@@ -904,6 +904,10 @@ culvert_scan_inflight %d
 # TYPE culvert_scan_decompress_bombs_total counter
 culvert_scan_decompress_bombs_total %d
 
+# HELP culvert_scan_sigdb_invalidations_total Total scan-verdict-cache flushes forced by an observed ClamAV engine/signature-database change
+# TYPE culvert_scan_sigdb_invalidations_total counter
+culvert_scan_sigdb_invalidations_total %d
+
 # HELP culvert_remote_scan_fail_total Total remote scan-sidecar faults that forwarded content UNSCANNED (fail-open)
 # TYPE culvert_remote_scan_fail_total counter
 culvert_remote_scan_fail_total %d
@@ -976,6 +980,12 @@ culvert_auth_sso_required_total %d
 		scanCounters.ScanLateDiscarded,
 		scanCounters.ScanInflight,
 		scanCounters.DecompressBombs,
+		// CHAOS-107: a RECOVERY series, not a failure series. It rises when the
+		// node adopts new definitions and stops trusting verdicts the old ones
+		// produced. Flat at zero while culvert's reported signature counter
+		// advances is the alert condition — that is the shape the stale-clean
+		// window had before it was closed.
+		scanCounters.SigDBInvalidations,
 		// Remote (sidecar) scanning. Emitted unconditionally, like every other
 		// scan counter: a sidecar deployment used to export NO scanning signal
 		// at all — every culvert_scan_* series is structurally zero there and

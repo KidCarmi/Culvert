@@ -32,6 +32,13 @@ counter, log line or alert). It partly closes the 2026-10-13 backlog's `X-4`
 — the asymmetry half — and re-confirms `X-5` as open, correcting its stale
 per-pattern wording.
 
+The 2026-10-31 round is recorded in
+[CHAOS-REVIEW-2026-10-31.md](CHAOS-REVIEW-2026-10-31.md) — CHAOS-107 (a scan
+verdict cached under one ClamAV signature set stayed authoritative for the whole
+`CacheTTL` after a set that detects the same bytes arrived, so freshclam landing
+a signature did not re-arm the node for content it had already called clean, and
+no counter, log line or alert marked the window).
+
 This document is a standing register. It records where Culvert already survives failure safely
 (and *why*, by code path) and where it does not. The one code change shipped alongside the original
 review is a fail-closed fix for a latent nil-deref panic in the enrollment path (Finding HA-9);
@@ -157,7 +164,7 @@ what the scan path does when a scanner is slow (§20, CHAOS-52), saturated (§21
 CHAOS-53), dark (§20's `clamDark` branch) or handed a decompression bomb
 (CHAOS-106). It has not asked what the verdict CACHE does when the scanners get
 BETTER. Findings, measurements and gates are written up in
-[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-31.md).
+[the dated review](CHAOS-REVIEW-2026-10-31.md).
 
 **2026-10-28 — `CHAOS-103` CLAIMED (placeholder, commit one). Domain: the
 SECOND PROCESS — what happens when two Culvert processes run against one
