@@ -130,6 +130,8 @@ type scanSection struct {
 	ClamSaturated     int64 `json:"clam_saturated" redact:"internal"`
 	ScanLateDiscarded int64 `json:"scan_late_discarded" redact:"internal"`
 	ScanInflight      int64 `json:"scan_inflight" redact:"internal"`
+	// CHAOS-106: responses refused by the scan-path expansion ratio bound.
+	DecompressBombs int64 `json:"decompress_bombs" redact:"internal"`
 }
 
 type scanCollector struct{}
@@ -178,6 +180,7 @@ func (scanCollector) Collect(_ context.Context, in support.CollectInput, sink su
 		ClamSaturated:     c.ClamSaturated,
 		ScanLateDiscarded: c.ScanLateDiscarded,
 		ScanInflight:      c.ScanInflight,
+		DecompressBombs:   c.DecompressBombs,
 	}
 	res := in.Redactor.Classify(sec)
 	if err := sink.WriteJSON(res.Value); err != nil {

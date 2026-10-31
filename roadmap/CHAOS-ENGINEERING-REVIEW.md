@@ -23,6 +23,15 @@ last five background-worker rounds outside CHAOS-24's per-round panic guard). It
 closes the 2026-10-13 backlog's `D-1` and `L-6`, and re-classifies `L-1`, `L-2`
 and `X-2` there.
 
+The 2026-10-30 round is recorded in
+[CHAOS-REVIEW-2026-10-30.md](CHAOS-REVIEW-2026-10-30.md) — CHAOS-106 (scan-path
+decompression was bounded by a flat 64 MiB unrelated to the operator's scan
+window, so 160 KiB of gzip bought a 64 MiB expansion and one inspected HTTP/2
+connection reached 3.64 GiB of peak heap from 5 MiB of traffic, with no
+counter, log line or alert). It partly closes the 2026-10-13 backlog's `X-4`
+— the asymmetry half — and re-confirms `X-5` as open, correcting its stale
+per-pattern wording.
+
 This document is a standing register. It records where Culvert already survives failure safely
 (and *why*, by code path) and where it does not. The one code change shipped alongside the original
 review is a fail-closed fix for a latent nil-deref panic in the enrollment path (Finding HA-9);

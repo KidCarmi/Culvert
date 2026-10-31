@@ -456,7 +456,16 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 	case cdrSwap:
 		atomic.AddInt64(&statCDRBytesOut, int64(len(res.Body)))
 		newBody := res.Body
-		newScan := decompressForScan(newBody, ce)
+		newScan, bomb := decompressForScan(newBody, ce)
+		if bomb {
+			// CHAOS-106. Reaching here means the SANITIZED document re-encodes
+			// to an expansion past the ratio allowance, i.e. this process's own
+			// CDR engine produced what the bound exists to refuse. It is
+			// refused rather than passed on with a compressed-byte scan,
+			// because the downstream scanners would then see none of the
+			// content that is about to be delivered.
+			return cdrEmitStageBlock(cdrBlockResult(scanDecompressReason, res.Threats, res.ProfileName, res.Mode, res.DurationMs, false), br, hostOnly, clientIP, id)
+		}
 		recordRequest(clientIP, "CONNECT", hostOnly, "CDR_SANITIZED", res.ProfileName, cdrSummariseThreats(res.Threats), id.Identity, "inspect")
 		logger.Printf("CDR_SANITIZED %s -> %q profile=%q mode=%q threats=%q duration_ms=%d",
 			clientIP, sanitizeLog(hostOnly), sanitizeLog(res.ProfileName),

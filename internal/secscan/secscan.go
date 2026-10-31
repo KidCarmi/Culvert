@@ -131,6 +131,11 @@ type CounterSnapshot struct {
 	ScanLateDiscarded int64
 	ScanInflight      int64
 
+	// DecompressBombs counts responses refused by the scan-path expansion
+	// ratio bound (CHAOS-106). Fail-CLOSED, like ScanTimeout and
+	// ClamSaturated, and separate from ScanSkipped, which is fail-OPEN.
+	DecompressBombs int64
+
 	// Remote (sidecar) deployment. Every counter above except RemoteScanFail is
 	// structurally zero there, so before CHAOS-53 a sidecar node exported no
 	// scanning signal at all.
@@ -151,6 +156,7 @@ func Counters() CounterSnapshot {
 		ClamSaturated:     atomic.LoadInt64(&statClamSaturated),
 		ScanLateDiscarded: atomic.LoadInt64(&statScanLateDiscarded),
 		ScanInflight:      scanInflight.Load(),
+		DecompressBombs:   atomic.LoadInt64(&statScanDecompressBombs),
 
 		RemoteScanSaturated: atomic.LoadInt64(&statRemoteScanSaturated),
 		RemoteScanInflight:  remoteScanInflight.Load(),
@@ -494,18 +500,26 @@ func (ss *Scanner) CheckDomain(domain string) *Result {
 
 // DecompressForScan transparently decompresses a response body based on its
 // Content-Encoding header so that ClamAV/YARA signatures can match the actual
-// content. Supports gzip, deflate, and identity (no-op). Brotli ("br") is
-// attempted as gzip (some servers mislabel); on failure the raw bytes are
-// returned so the scan still runs (defense in depth).
+// content. Supports gzip, deflate, brotli, zstd and identity (no-op).
 //
-// Returned data is limited to MaxDecompressBytes to guard against gzip bombs.
-// If decompression fails, the original data is returned unchanged — the scan
-// still runs on compressed bytes (fail-open for availability, but the
-// signature gap is closed for the common case).
-func DecompressForScan(data []byte, contentEncoding string) []byte {
+// The expansion is bounded TWICE (CHAOS-106): by MaxDecompressBytes, and by
+// expandBound's ratio allowance relative to the compressed bytes actually
+// transferred. bomb reports that the ratio allowance was exceeded, i.e. the
+// origin declared an encoding whose expansion is wildly disproportionate to
+// what it sent; the caller must refuse the response (fail closed) and out is
+// nil. See expandBound for why that is a refusal rather than a truncation.
+//
+// Every other failure keeps the pre-CHAOS-106 posture verbatim: if the
+// encoding is unknown, the reader cannot be constructed, the stream is
+// truncated or corrupt, or the expansion is empty, the ORIGINAL data is
+// returned with bomb false — the scan still runs on compressed bytes
+// (fail-open for availability, but the signature gap is closed for the common
+// case). Reaching MaxDecompressBytes is likewise unchanged: the prefix that
+// fits is returned and scanned.
+func DecompressForScan(data []byte, contentEncoding string) (out []byte, bomb bool) {
 	ce := strings.ToLower(strings.TrimSpace(contentEncoding))
 	if ce == "" || ce == "identity" {
-		return data
+		return data, false
 	}
 
 	var reader io.ReadCloser
@@ -519,36 +533,225 @@ func DecompressForScan(data []byte, contentEncoding string) []byte {
 	case "br":
 		reader = io.NopCloser(brotli.NewReader(bytes.NewReader(data)))
 	case "zstd":
-		zr := zstdDecoderPool.Get().(*zstd.Decoder)
-		if err := zr.Reset(bytes.NewReader(data)); err != nil {
-			zstdDecoderPool.Put(zr)
-			return data
-		}
-		decompressed, zReadErr := io.ReadAll(io.LimitReader(zr, MaxDecompressBytes))
-		zstdDecoderPool.Put(zr)
-		if zReadErr != nil || len(decompressed) == 0 {
-			return data
-		}
-		return decompressed
+		return expandZstdForScan(data, ce)
 	default:
 		// Unknown encoding — scan raw bytes.
-		return data
+		return data, false
 	}
 	if err != nil {
 		// gzip.NewReader failed (malformed header) — scan raw bytes.
-		return data
+		return data, false
 	}
 	defer reader.Close()
 
-	decompressed, err := io.ReadAll(io.LimitReader(reader, MaxDecompressBytes))
-	if err != nil {
+	decompressed, readErr, isBomb := expandForScan(reader, data, ce)
+	if isBomb {
+		return nil, true
+	}
+	if readErr != nil {
 		// Decompression error (truncated, corrupt) — scan raw bytes.
-		return data
+		return data, false
 	}
 	if len(decompressed) == 0 {
-		return data // empty after decompression — scan original
+		return data, false // empty after decompression — scan original
 	}
-	return decompressed
+	return decompressed, false
+}
+
+// expandZstdForScan is DecompressForScan's zstd arm, extracted so the switch
+// stays inside the repository's cyclop threshold. Same contract as its
+// caller's other arms: (original bytes, false) on any fallback, (nil, true)
+// when the ratio allowance refuses the expansion.
+func expandZstdForScan(data []byte, ce string) (out []byte, bomb bool) {
+	zr := zstdDecoderPool.Get().(*zstd.Decoder)
+	if err := zr.Reset(bytes.NewReader(data)); err != nil {
+		zstdDecoderPool.Put(zr)
+		return data, false
+	}
+	decompressed, readErr, isBomb := expandForScan(zr, data, ce)
+	// Reset to nil before returning the decoder to the pool: the pooled decoder
+	// otherwise keeps a reference to the bytes.Reader over `data`, and on the
+	// refusal path that reader is the only thing still pinning the buffer just
+	// refused.
+	_ = zr.Reset(nil) //nolint:errcheck // nil reader is valid for a pooled decoder; this only drops the reference
+	zstdDecoderPool.Put(zr)
+	if isBomb {
+		return nil, true
+	}
+	if readErr != nil || len(decompressed) == 0 {
+		return data, false
+	}
+	return decompressed, false
+}
+
+// ── Scan-path expansion bounds (CHAOS-106) ───────────────────────────────────
+
+// decompressRatioLimit and decompressFloorBytes bound a scan-path expansion
+// against the compressed bytes the origin actually transferred.
+//
+// WHY A RATIO AND NOT ONLY MaxDecompressBytes. MaxDecompressBytes is a flat
+// 64 MiB, so before CHAOS-106 the buffering stage's cost to an attacker and
+// the expansion stage's cost to this process were decoupled: 160 KiB of wire
+// bytes bought a 64 MiB expansion (measured 408:1), and io.ReadAll's doubling
+// growth made the transient peak ~1.8x that again. The operator's only
+// per-response memory knob is the scan window (Scanner.maxBytes, default
+// 5 MiB) and it governed the COMPRESSED prefix only, so the one declared
+// ceiling in the pipeline — proxy_tunnel_h2.go's "maxScanBufferBytes x
+// h2MaxConcurrentStreams" — was wrong by the whole expansion factor. Tying the
+// allowance to the transferred bytes restores the proportionality that comment
+// assumes: an expansion can only be large if the origin actually sent a lot.
+//
+// WHY 64 AND A FLOOR. Real web content gzips at roughly 3-10:1 (HTML/JS/CSS),
+// 10-20:1 for JSON and up to ~50:1 for highly repetitive XML or log text.
+// Decompression bombs sit at 400-1000:1 (a gzip of zeros is ~1030:1). 64 is
+// therefore several times above anything legitimate and several times below
+// anything hostile. The floor exists because the ratio alone is unfair to
+// SMALL responses, where a few hundred bytes of framing legitimately expand
+// far past 64x: anything up to 16 KiB compressed gets the flat 1 MiB floor
+// instead.
+//
+// WHY REFUSAL AND NOT TRUNCATION. Truncating at the allowance and scanning the
+// prefix would forward the rest uninspected — the one place an attacker would
+// hide the payload, since a 400:1 ratio is exactly what a padded archive
+// produces. A response whose declared encoding expands past 64x the bytes it
+// transferred is itself hostile content on a security gateway, so it is
+// refused (AGENTS.md "prefer fail closed"; the same direction CHAOS-53 took
+// the sidecar's saturation path). Hitting MaxDecompressBytes is deliberately
+// NOT treated this way: that content transferred its bytes honestly, so its
+// prefix keeps being scanned exactly as before.
+const (
+	decompressRatioLimit = 64
+	decompressFloorBytes = 1 << 20
+)
+
+// statScanDecompressBombs counts responses refused because their expansion
+// exceeded the ratio allowance. Deliberately NOT folded into statScanSkipped:
+// CHAOS-52's rule is that "object larger than the window" and "refused" carry
+// different operator actions, and this one is a block, not a forward.
+var statScanDecompressBombs int64
+
+// lastDecompressBombLog gates the bomb log line. Its own gate, not a shared
+// one: a flood of bombs and a slow ClamAV daemon point at different operator
+// actions, and a shared gate lets whichever fires first suppress the other
+// (storage_health.go's rule, applied in yara.go for the same reason).
+var lastDecompressBombLog atomic.Int64
+
+// DecompressBombs reports responses refused by the scan-path expansion ratio
+// bound. A non-zero value means content was blocked for declaring an
+// expansion disproportionate to what it transferred.
+func DecompressBombs() int64 { return atomic.LoadInt64(&statScanDecompressBombs) }
+
+// expandBound returns the byte ceiling a scan-path expansion of n compressed
+// bytes may reach, and whether that ceiling is the RATIO allowance rather than
+// the flat MaxDecompressBytes. Only the ratio ceiling refuses; see the
+// constant block above.
+func expandBound(n int) (limit int64, ratioBound bool) {
+	allowance := int64(n) * decompressRatioLimit
+	if allowance < decompressFloorBytes {
+		allowance = decompressFloorBytes
+	}
+	if allowance < MaxDecompressBytes {
+		return allowance, true
+	}
+	return MaxDecompressBytes, false
+}
+
+// expandForScan reads r's expansion of data under expandBound's ceiling.
+//
+// It returns bomb true when the RATIO ceiling was reached and the stream still
+// had more to give; out is then nil and the caller must fail closed. Reaching
+// the flat MaxDecompressBytes ceiling instead returns the prefix with bomb
+// false, preserving the pre-CHAOS-106 truncate-and-scan behavior exactly.
+func expandForScan(r io.Reader, data []byte, ce string) (out []byte, readErr error, bomb bool) {
+	limit, ratioBound := expandBound(len(data))
+	if !ratioBound {
+		// The flat ceiling truncates, so it has no use for the probe below and
+		// must not take one: the pre-CHAOS-106 io.LimitReader never asked the
+		// decompressor for a byte past the ceiling, so a stream that is corrupt
+		// only AFTER it returned the decoded prefix. Probing would reach that
+		// corruption and drop the expansion back to the compressed bytes.
+		buf, err := readCapped(r, limit)
+		return buf, err, false
+	}
+	// One byte past the ceiling, so "the stream had more" is an observation
+	// rather than an inference from len == limit (which a body of exactly
+	// limit bytes would false-positive).
+	buf, err := readCapped(r, limit+1)
+	if int64(len(buf)) > limit {
+		noteDecompressBomb(ce, len(data), limit)
+		return nil, nil, true
+	}
+	return buf, err, false
+}
+
+// noteDecompressBomb performs the refusal accounting: an exact counter plus a
+// rate-limited line. The rate limit matters because this fires once per
+// refused RESPONSE and an attacker sets that rate, which is the amplifier
+// internal/logsink's blocking producer turns into request latency.
+func noteDecompressBomb(ce string, compressed int, limit int64) {
+	total := atomic.AddInt64(&statScanDecompressBombs, 1)
+	if !degradedLogAllowed(&lastDecompressBombLog) {
+		return
+	}
+	// ce is an origin-supplied header value, so it is sanitised (CWE-117) even
+	// though it has already been matched against the known encoding set.
+	obs.Warnf("SecurityScan: refusing %q response: %d compressed bytes expand past the %d-byte ratio allowance (limit %dx) — blocking (fail-closed); total %d",
+		obs.Sanitize(ce), compressed, limit, decompressRatioLimit, total)
+}
+
+// readCapped reads up to limit bytes from r, growing its buffer geometrically
+// but NEVER past limit.
+//
+// This replaces io.ReadAll(io.LimitReader(r, limit)), which does not know the
+// limit and therefore keeps doubling through it: at a 64 MiB ceiling the final
+// grow allocated well past 64 MiB while the previous array was still live, and
+// across concurrent expansions the measured peak was ~1.8x the live bytes
+// (3.64 GiB peak for 2.0 GiB held, CHAOS-106 §2.1). Clamping the last grow to
+// the ceiling makes the allocation the caller asked for the allocation it
+// gets.
+//
+// A reader that returns (0, nil) forever would spin here, which io.Reader
+// discourages but does not forbid; the no-progress counter bounds it the way
+// io.ReadAll's ErrNoProgress does for bufio.
+func readCapped(r io.Reader, limit int64) ([]byte, error) {
+	const (
+		initialCap    = 32 << 10
+		maxEmptyReads = 100
+	)
+	bufCap := int64(initialCap)
+	if bufCap > limit {
+		bufCap = limit
+	}
+	buf := make([]byte, 0, bufCap)
+	empty := 0
+	for int64(len(buf)) < limit {
+		if len(buf) == cap(buf) {
+			next := int64(cap(buf)) * 2
+			if next > limit {
+				next = limit
+			}
+			grown := make([]byte, len(buf), next)
+			copy(grown, buf)
+			buf = grown
+		}
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err == io.EOF {
+			return buf, nil
+		}
+		if err != nil {
+			return buf, err
+		}
+		if n == 0 {
+			empty++
+			if empty >= maxEmptyReads {
+				return buf, io.ErrNoProgress
+			}
+			continue
+		}
+		empty = 0
+	}
+	return buf, nil
 }
 
 // ── Body scanning ─────────────────────────────────────────────────────────────

@@ -244,7 +244,10 @@ func TestFileBlocker_SetPath_EmptyFile(t *testing.T) {
 func TestDecompressForScan_ZstdFallback(t *testing.T) {
 	// Invalid zstd data should return raw bytes (graceful fallback).
 	data := []byte("not valid zstd data at all")
-	result := decompressForScan(data, "zstd")
+	result, bomb := decompressForScan(data, "zstd")
+	if bomb {
+		t.Fatal("invalid zstd is a fallback, not a refusal")
+	}
 	if !bytes.Equal(result, data) {
 		t.Errorf("invalid zstd should return raw data, got %q", string(result))
 	}
