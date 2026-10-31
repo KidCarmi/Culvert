@@ -31,8 +31,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   The expansion is now bounded by `min(MaxDecompressBytes, max(64 ×
   compressedBytes, 1 MiB))`. Reaching the ratio half **refuses** the response
   (fail-closed, blocked like a scanner verdict with `source=decompress`);
-  reaching the flat half keeps the previous truncate-and-scan behavior verbatim,
-  because content large enough to reach it transferred its bytes honestly.
+  reaching the flat half keeps the previous truncate-and-scan behavior verbatim
+  (including never reading past the ceiling, so a stream corrupt only after
+  64 MiB still yields its decoded prefix), because content large enough to
+  reach it transferred its bytes honestly.
   Refusal rather than truncation because a 400:1 ratio is what a padded archive
   hiding a payload produces, so the one shape that trips the bound is the shape
   where an uninspected tail matters most. The factor sits several times above
@@ -50,7 +52,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   selects by choosing the ratio — and all three call sites fail closed. The same
   measurement post-fix: 32/32 refused, 0 bytes held, **289.6 MiB peak (12.6x
   lower)**. New counter `culvert_scan_decompress_bombs_total`, with
-  `stat_decompress_bombs` on the scan-status API, `decompress_bombs` in the
+  `stat_decompress_bombs` on the scan-status API (the proxy's own count in
+  `-scan-svc-url` mode too, since the refusal happens before the sidecar is
+  asked and the sidecar's figure is structurally 0), `decompress_bombs` in the
   support bundle, a tile on the Security panel and one rate-limited log line
   naming the class — the condition was previously invisible, since the existing
   `scan_inflight` gauge covers body *scans* and the expansion happens before
