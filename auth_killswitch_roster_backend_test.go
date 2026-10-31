@@ -52,10 +52,16 @@ func killSwitchProbeEnv(t *testing.T) {
 	t.Cleanup(func() { setAuthExemptDisabled(false) })
 }
 
-// killSwitchRow renders the single engaged row for the live process state.
+// killSwitchRow renders the single engaged ADMIN row for the live process
+// state, through the operator contract the handlers serve.
 func killSwitchRow(t *testing.T) OperatorContractCheck {
 	t.Helper()
-	rows := checkAuthExemptKillSwitch()
+	var rows []OperatorContractCheck
+	for _, c := range buildOperatorContract().Checks {
+		if c.Code == authExemptKillSwitchCode {
+			rows = append(rows, c)
+		}
+	}
 	if len(rows) != 1 {
 		t.Fatalf("engaged kill switch must contribute exactly one row, got %d", len(rows))
 	}
@@ -229,6 +235,51 @@ func TestKillSwitchBackendRows_NoVerifierRowShape(t *testing.T) {
 			t.Errorf("%s: the layer remediation %q must survive the break-glass prefix, got %q",
 				name, tc.layer, rows[0].OperatorAction)
 		}
+		// Codex P2 on PR #1765: clearing the switch does NOT keep every request
+		// refused — Exempt outcomes resume (resolveRequestAuth preserves them).
+		// The action must scope the "refused either way" claim to traffic that
+		// requires authentication and say what clearing restores.
+		if strings.Contains(rows[0].OperatorAction, "proxy traffic is refused whether the kill switch is engaged or not") {
+			t.Errorf("%s: the action still claims ALL proxy traffic stays refused once the switch clears: %q",
+				name, rows[0].OperatorAction)
+		}
+		for _, want := range []string{
+			"traffic that requires authentication stays refused until an administrator account exists",
+			"Clearing the kill switch alone restores only credential-free requests covered by an Exempt rule or the Exempt default",
+		} {
+			if !strings.Contains(rows[0].OperatorAction, want) {
+				t.Errorf("%s: the action must say %q, got %q", name, want, rows[0].OperatorAction)
+			}
+		}
+	}
+}
+
+// TestKillSwitchBackend_NoVerifierClearedSwitchResumesExempt is the oracle for
+// the row's "clearing restores exempt traffic" sentence (Codex P2 on PR
+// #1765): in the same roster-without-verifier state, clearing the switch lets
+// a credential-free request the Exempt default covers leave Stage 1 without a
+// challenge, while it stays a 407 with the switch engaged. Without this the
+// row's claim that only auth-required traffic stays refused would be prose.
+func TestKillSwitchBackend_NoVerifierClearedSwitchResumesExempt(t *testing.T) {
+	setupProxyTest(t)
+	loadRoster(t, rosterWithRole(t, ""))
+	killSwitchProbeEnv(t) // default Exempt, switch engaged
+
+	if got := currentKillSwitchBackend(); got != killSwitchBackendNoVerifier {
+		t.Fatalf("premise broken: want killSwitchBackendNoVerifier, got %d", got)
+	}
+	if code, _ := proxyAnswer(t, "ks-cleared-engaged.example.test"); code != http.StatusProxyAuthRequired {
+		t.Fatalf("premise broken: engaged switch in this state must answer 407, got %d", code)
+	}
+
+	setAuthExemptDisabled(false)
+	code, challenge := proxyAnswer(t, "ks-cleared-exempt.example.test")
+	if code == http.StatusProxyAuthRequired || challenge != "" {
+		t.Errorf("cleared switch: Exempt-default traffic must not be challenged in the no-verifier state "+
+			"(the row says clearing restores it), got %d challenge=%q", code, challenge)
+	}
+	if rows := authExemptKillSwitchRows(false, false, currentKillSwitchBackend()); len(rows) != 0 {
+		t.Errorf("a cleared switch must contribute no row, got %+v", rows)
 	}
 }
 

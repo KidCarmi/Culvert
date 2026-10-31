@@ -30,6 +30,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   changed, and the genuine no-backend row and its Stage-2 fall-through are
   pinned unchanged by a negative control.
 
+  The new state is admin-roster posture, so its detail is admin-only on the
+  viewer-readable contract (`/api/diagnostics`, `/api/health/explain`): the
+  restore clamp that reaches it leaves the restored accounts signing in as
+  viewers, who could otherwise read that their roster holds no administrator
+  and what effective role the accounts carry. Below admin the row keeps its
+  code, warn status, engaged layer and traffic impact (formerly exempt clients
+  are challenged and refused) and carries the fixed redacted action, through
+  the same precomputed-viewer-row pattern as `access_cidr_lists`; the other
+  three backend states reach every role unchanged. `currentKillSwitchBackend`
+  is reclassified on the roster wall from a probe to a roster input. The admin
+  row's remediation also no longer says all proxy traffic stays refused once
+  the switch clears: traffic that requires authentication does, until an
+  administrator exists, while credential-free requests an Exempt rule or the
+  Exempt default covers resume when the switch is cleared.
+
   The operator-contract roster wall lost coverage in the same window and is
   restored with it: `AuthEnabled` and `IsConfigured` both gained a
   `len(c.uiUsers)` term (`SEC-AUTHENABLED-1`, `SEC-SETUPANCHOR-1`) and so became

@@ -167,6 +167,21 @@ rather than a relaxation of the existing three:
   `--reset-password` break-glass while keeping each layer's own remediation
   intact as a suffix.
 - `cfg != nil` is checked, matching the function's existing defensive shape.
+- **Below-admin redaction (Codex P1 on PR #1765).** The no-verifier state is
+  admin-roster posture, and the clamp that reaches it leaves the restored
+  accounts signing in as viewers, which can read `/api/diagnostics` and
+  `/api/health/explain`. `redactContractForRole` now classifies
+  `auth_exempt_kill_switch`: below admin the row is replaced by the rendering
+  `authExemptKillSwitchContractRows` builds from the same backend read, which
+  keeps the code, warn status, engaged layer and traffic impact and drops the
+  cause and remediation (fixed `diagnosticsRedactedAction`). The other three
+  backend states reach every role unchanged. `currentKillSwitchBackend` is a
+  `rosterInput` on the roster wall, not a `rosterProbe`.
+- **Exempt traffic after clearing (Codex P2 on PR #1765).** The remediation
+  says traffic that requires authentication stays refused until an
+  administrator exists, while clearing the switch restores credential-free
+  requests an Exempt rule or the Exempt default covers — `resolveRequestAuth`
+  leaves Exempt outcomes untouched in this state.
 
 Report-only throughout: no enforcement predicate, policy, persistence or
 credential path is touched. The fix deliberately does **not** change
@@ -189,6 +204,10 @@ was the enforcement path that moved.
 | `GenuineNoBackendUnchanged` | negative control — pins **both** the `None` row and its Stage-2 403 fall-through, so a fix that changed enforcement fails here |
 | `AdminRosterUnchanged` | negative control (live verifier) |
 | `NoVerifierRowShape` | boundary — all three kill-switch layer combinations, and the clear-switch case that must contribute nothing |
+| `NoVerifierClearedSwitchResumesExempt` | differential oracle — clearing the switch in the same state lets Exempt-default traffic through unchallenged |
+| `TestKillSwitchRow_NoVerifierDetailIsAdminOnly` | authorization / disclosure — viewer and operator get the redacted row on both renderers, admin the full detail |
+| `TestKillSwitchRow_ViewerSafeStatesAreNotRedacted` | negative control — no over-redaction of the none / not-loaded / live rows |
+| `TestKillSwitchRow_HandAssembledContractFailsClosed` | malformed state — a contract without the viewer rendering gets a fixed row |
 | `NilConfigDoesNotPanic` | malformed state (the probe runs on the admin plane and must not panic it) |
 | `ConcurrentProbesAgree` | concurrency (`-race`, 16 readers) |
 
@@ -197,6 +216,15 @@ reverted in place): `want killSwitchBackendNoVerifier (3), got 0`, plus the
 stale row text and the missing break-glass. `GenuineNoBackendUnchanged` passed
 in that same reverted tree, which is what makes it a control rather than a
 restatement of the fix.
+
+The redaction gates were verified the same way: with the
+`auth_exempt_kill_switch` case removed from `redactContractForRole`,
+`NoVerifierDetailIsAdminOnly` and `HandAssembledContractFailsClosed` fail
+(viewer and operator receive the roster posture and `--reset-password` on
+both renderers) and so does `TestWall_RosterDerivedDiagnosticsAreEnumerated`
+("redactContractForRole does not classify that code"). With the old
+"whether the kill switch is engaged or not" remediation restored,
+`NoVerifierRowShape` fails on all three layer combinations.
 
 **CWE.** CWE-440 (expected behavior violation), with CWE-684 (incorrect
 provision of specified functionality) and CWE-1059 (insufficient or incorrect
