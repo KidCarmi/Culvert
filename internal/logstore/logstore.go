@@ -54,6 +54,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/obs"
+	"github.com/KidCarmi/Culvert/internal/storeguard"
 )
 
 // Entry is one request-log record (moved from package main's LogEntry; main
@@ -341,6 +342,11 @@ func (s *Store) SetCancelJanitor(cancel context.CancelFunc) { s.cancelJanitor = 
 // (days, GB) and passes the derived TTL/byte limits, the encryption key from
 // EncKey (nil = unencrypted), and the minimal-mode hook (nil = never
 // minimal). Tests use it directly for sub-day TTLs and tiny byte caps.
+//
+// It opens through storeguard.OpenBadger, never badger.Open directly: badger can
+// return a store without the table it is panicking on, and OpenBadger turns that
+// into storeguard.ErrIncompleteOpen so OpenResilientTTL keeps its poison marker
+// instead of clearing it over a store that is about to kill the process.
 func OpenTTL(dir string, ttl time.Duration, maxBytes int64, encKey []byte, minimal func() bool) (*Store, error) {
 	opts := badger.DefaultOptions(dir).
 		WithValueLogFileSize(128 << 20). // bound peak mmap inside containers
@@ -349,8 +355,13 @@ func OpenTTL(dir string, ttl time.Duration, maxBytes int64, encKey []byte, minim
 		// Badger requires an index cache when encryption is enabled.
 		opts = opts.WithEncryptionKey(encKey).WithIndexCacheSize(16 << 20)
 	}
-	db, err := badger.Open(opts)
+	db, err := storeguard.OpenBadger(opts)
 	if err != nil {
+		// An incomplete open is not an encryption problem and must reach
+		// storeguard.Open as itself, or its marker would be cleared.
+		if errors.Is(err, storeguard.ErrIncompleteOpen) {
+			return nil, err
+		}
 		// A key/plaintext mismatch (passphrase added, changed, lost, or salt
 		// gone) surfaces here; map it to a clear, actionable sentinel so the
 		// handler can guide the admin to purge rather than echo a raw Badger
