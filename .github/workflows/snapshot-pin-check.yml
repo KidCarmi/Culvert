@@ -4,21 +4,26 @@
 #
 #   1. appliance/build/snapshot-pin-check.sh: isolated APT roots, the SAME
 #      library (apt-snapshot.sh) and manifest pins prepare-guest.sh uses:
-#      C1 pinned update + InRelease pins + snapshot candidate, C2 future ID,
-#      C3 Snapshot: yes on an unsupported source, C4 --error-on=any.
-#   2. build-ova.sh's own index-fetch block (extracted verbatim, run alone):
-#      the real indexes are fetched and verified against the pins, then the
-#      reconciler runs on the real OVA 325c142a inventory (must fail on
-#      exactly the recorded 57) and on that inventory without the 57 (must
-#      pass); a wrong pin must stop the block.
-#   3. C5 (.github/lab/fb1-c5.sh): the guest's section-1 source set (Ubuntu
+#      C1 pinned update + InRelease pins + snapshot candidate, C2 future and
+#      calendar-impossible IDs, C3 Snapshot: yes on an unsupported source,
+#      C4 --error-on=any.
+#   2. C5 (.github/lab/fb1-c5.sh): the guest's section-1 source set (Ubuntu
 #      Snapshot: yes + Docker snapshot=no) with a simulated install of what
 #      prepare-guest.sh installs: Docker at its pins, every Ubuntu package a
 #      snapshot version.
-#   4. C6 (same script): a REAL download of the four Docker pins and the
+#      C6 (same script): a REAL download of the four Docker pins and the
 #      approved kernel-42 packages under the snapshot; the production receipt
 #      and Docker byte-pin check; each kernel .deb equal to its authenticated
 #      snapshot index entry and to the approved kernel-42 identity.
+#   3. build-ova.sh's own index-fetch block (extracted verbatim, run alone):
+#      a wrong pin must stop it; with the manifest pins it fetches and
+#      verifies the real indexes. The reconciler then runs on them with C6's
+#      REAL acquisition receipt: the predicted replacement inventory
+#      (fb1-snapshot-20261029/compare-325c142a.tsv) must reconcile with the 4
+#      Docker + 5 kernel rows acquired-verified; a receipt with one kernel
+#      .deb hash changed must be refused against the authenticated index.
+#      (The old-pin red case, 325c142a refused on exactly the 57, is pinned
+#      offline by T3a and was run on the network in lab run 41111194290.)
 # No OVA is built, nothing is published or signed. Runs only on a push whose
 # message carries [snapshot-pin-check].
 name: Snapshot Pin Check (lab)
@@ -57,8 +62,8 @@ jobs:
       - name: Runner identity
         run: |
           mkdir -p ev
-          { echo "commit=$(git -C src rev-parse HEAD)"; apt-get --version | head -1; . /etc/os-release; echo "runner_os=$PRETTY_NAME"
-            date -u +%FT%TZ; } | tee ev/identity.txt
+          { echo "workflow_sha=$GITHUB_SHA"; echo "commit=$(git -C src rev-parse HEAD)"; echo "tree=$(git -C src rev-parse HEAD^{tree})"
+            apt-get --version | head -1; . /etc/os-release; echo "runner_os=$PRETTY_NAME"; date -u +%FT%TZ; } | tee ev/identity.txt
           test "$(git -C src rev-parse HEAD)" = "$FB1_COMMIT"
 
       - name: T4 — snapshot-pin-check.sh (isolated APT roots)
@@ -67,7 +72,16 @@ jobs:
           bash src/appliance/build/snapshot-pin-check.sh "$RUNNER_TEMP/t4" 2>&1 | tee ev/t4-snapshot-pin-check.txt
           cp "$RUNNER_TEMP"/t4/*.log ev/ 2>/dev/null || true
 
-      - name: build-ova.sh index fetch + reconciliation on real indexes
+      - name: C5/C6 — the guest's section-1 source set; simulated install; real acquisition + byte binding
+        run: |
+          set -o pipefail
+          bash .github/lab/fb1-c5.sh "$PWD/src/appliance/build" "$RUNNER_TEMP/c5" 2>&1 | tee ev/c5-guest-source-set.txt
+          cp "$RUNNER_TEMP/c5.inst" ev/c5-simulated-installs.txt
+          cp "$RUNNER_TEMP/c5.acquired.tsv" ev/c6-acquired-debs.tsv
+          test "$(grep -c '^PASS C5' ev/c5-guest-source-set.txt)" = 2
+          test "$(grep -c '^PASS C6' ev/c5-guest-source-set.txt)" = 2
+
+      - name: build-ova.sh index fetch + reconciliation of the predicted inventory with the real receipt
         run: |
           set -euo pipefail
           B=src/appliance/build
@@ -92,31 +106,24 @@ jobs:
             --pin "noble-security=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY" --pin "noble-backports=$GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS" \
             --docker-dir "$P/docker" --docker-uri "$DOCKER_APT_URL" \
             --docker-pin "docker-ce=$DOCKER_CE_VERSION" --docker-pin "docker-ce-cli=$DOCKER_CE_CLI_VERSION" \
-            --docker-pin "containerd.io=$CONTAINERD_IO_VERSION" --docker-pin "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_VERSION" --out "$2"; }
-          INV="$B/testdata/provenance/inventory-325c142a.tsv"
-          echo "675a0773a0422e56e648ca5d90177d6d99056fbcb01ee1aeb0991af2f1b70aff  $INV" | sha256sum -c -
-          # Red: OVA 325c142a as shipped.
-          if rec "$INV" ev/325c142a-provenance.tsv > ev/reconcile-325c142a.txt 2>&1; then echo "FAIL: 325c142a reconciled clean"; exit 1; fi
-          grep -P '^  package\t' ev/reconcile-325c142a.txt | awk -F'\t' '{split($3,a," "); print $2"\t"a[1]}' | sort > ev/got-57.tsv
-          grep -v '^#' src/docs/appliance/evidence/combined/esxi-325c142a/kernel-42/provenance-nonsnapshot-57.tsv | tail -n +2 | cut -f1,2 | sort > ev/want-57.tsv
-          diff ev/want-57.tsv ev/got-57.tsv
-          test "$(grep -c . ev/got-57.tsv)" = 57
-          test "$(grep -c '^  ' ev/reconcile-325c142a.txt)" = 57
-          echo "PASS 325c142a refused on exactly the recorded 57 (real fetched indexes)" | tee -a ev/summary.txt
-          # Green: the same inventory without the 57.
-          awk -F'\t' 'NR==FNR{b[$1"\t"$2]=1;next} !(($1"\t"$2) in b)' ev/want-57.tsv "$INV" > inv-623.tsv
-          rec inv-623.tsv ev/package-provenance-623.tsv | tee ev/reconcile-623.txt
-          test "$(awk -F'\t' '!/^#/ && $1 != "package"' ev/package-provenance-623.tsv | wc -l)" = 623
-          echo "PASS 623-package inventory reconciled: $(awk -F'\t' 'NR>4{print $4}' ev/package-provenance-623.tsv | sort | uniq -c | tr '\n' ' ')" | tee -a ev/summary.txt
-
-      - name: C5/C6 — the guest's section-1 source set; simulated install; real acquisition + byte binding
-        run: |
-          set -o pipefail
-          bash .github/lab/fb1-c5.sh "$PWD/src/appliance/build" "$RUNNER_TEMP/c5" 2>&1 | tee ev/c5-guest-source-set.txt
-          cp "$RUNNER_TEMP/c5.inst" ev/c5-simulated-installs.txt
-          cp "$RUNNER_TEMP/c5.acquired.tsv" ev/c6-acquired-debs.tsv
-          test "$(grep -c '^PASS C5' ev/c5-guest-source-set.txt)" = 2
-          test "$(grep -c '^PASS C6' ev/c5-guest-source-set.txt)" = 2
+            --docker-pin "containerd.io=$CONTAINERD_IO_VERSION" --docker-pin "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_VERSION" \
+            --docker-deb-sha256 "docker-ce=$DOCKER_CE_DEB_SHA256" --docker-deb-sha256 "docker-ce-cli=$DOCKER_CE_CLI_DEB_SHA256" \
+            --docker-deb-sha256 "containerd.io=$CONTAINERD_IO_DEB_SHA256" --docker-deb-sha256 "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_DEB_SHA256" \
+            --acquired "$2" --out "$3"; }
+          CMP=src/docs/appliance/evidence/combined/future-build/fb1-snapshot-20261029/compare-325c142a.tsv
+          awk -F'\t' 'NR>1 && $4!="" {print $1"\t"$4"\t"$2}' "$CMP" > ev/predicted-inventory.tsv
+          test "$(wc -l < ev/predicted-inventory.tsv)" = 680
+          # Green: predicted replacement inventory + C6's real receipt.
+          rec ev/predicted-inventory.tsv ev/c6-acquired-debs.tsv ev/package-provenance-predicted.tsv | tee ev/reconcile-predicted.txt
+          grep -q 'acquired-verified=9 inherited-base-image=671 acquired-not-installed=0' ev/reconcile-predicted.txt
+          test "$(awk -F'\t' '$9=="acquired-verified"' ev/package-provenance-predicted.tsv | wc -l)" = 9
+          echo "PASS predicted 680-package inventory reconciled on the real indexes: $(tail -1 ev/reconcile-predicted.txt)" | tee -a ev/summary.txt
+          # Red: one acquired kernel .deb with different bytes.
+          awk -F'\t' 'BEGIN{OFS="\t"} $1=="linux-modules-7.0.0-42-generic"{$4="0000000000000000000000000000000000000000000000000000000000000000"} 1' \
+            ev/c6-acquired-debs.tsv > tampered.tsv
+          if rec ev/predicted-inventory.tsv tampered.tsv tampered-out.tsv > ev/reconcile-tampered.txt 2>&1; then echo "FAIL: a changed .deb hash reconciled"; exit 1; fi
+          grep -q 'linux-modules-7.0.0-42-generic.*the authenticated snapshot index lists' ev/reconcile-tampered.txt
+          echo "PASS a kernel .deb with different bytes is refused against the authenticated index" | tee -a ev/summary.txt
 
       - name: Upload evidence
         if: always()
