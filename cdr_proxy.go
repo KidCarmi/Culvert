@@ -454,7 +454,6 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 	case cdrBlock:
 		return cdrEmitStageBlock(res, br, hostOnly, clientIP, id)
 	case cdrSwap:
-		atomic.AddInt64(&statCDRBytesOut, int64(len(res.Body)))
 		newBody := res.Body
 		newScan, bomb := decompressForScan(newBody, ce)
 		if bomb {
@@ -466,6 +465,9 @@ func runCDRStage(r *http.Request, req *http.Request, body, scanBody []byte, ct, 
 			// content that is about to be delivered.
 			return cdrEmitStageBlock(cdrBlockResult(scanDecompressReason, res.Threats, res.ProfileName, res.Mode, res.DurationMs, false), br, hostOnly, clientIP, id)
 		}
+		// Counted only once the replacement body survived the bomb check: a
+		// refused replacement is never delivered, so it is not "bytes out".
+		atomic.AddInt64(&statCDRBytesOut, int64(len(res.Body)))
 		recordRequest(clientIP, "CONNECT", hostOnly, "CDR_SANITIZED", res.ProfileName, cdrSummariseThreats(res.Threats), id.Identity, "inspect")
 		logger.Printf("CDR_SANITIZED %s -> %q profile=%q mode=%q threats=%q duration_ms=%d",
 			clientIP, sanitizeLog(hostOnly), sanitizeLog(res.ProfileName),

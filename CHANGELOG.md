@@ -7,7 +7,54 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Added
+
+- **Administrators can now tune the CHAOS-106 decompression ratio bound
+  (default unchanged at 64:1).** The bound refuses a compressed response whose
+  declared `Content-Encoding` expands past 64x the bytes the origin transferred,
+  which also refuses legitimate, highly repetitive downloads — a large CSV or
+  log export of near-identical rows can compress past 64:1 and was refused on
+  every retry with no recourse short of a rebuild. `GET/PUT
+  /api/security-scan/decompression` (`{"ratio_limit": N}`; viewer read, admin
+  write, handler-level `requireRole`, optional `ifRevision` fence) and a
+  **Decompression Bound** control on the Security Scanning panel now move the
+  factor within **16–256**. The ceiling is deliberately below every bomb ratio
+  CHAOS-106 measured (408:1, ~1030:1 for zeros), so the setting cannot switch the
+  protection off: a zeros bomb is still refused at the maximum, and content more
+  repetitive than 256:1 is indistinguishable from a bomb by ratio and stays
+  refused. The 1 MiB small-response floor, the flat 64 MiB per-response ceiling
+  and refuse-not-truncate are unchanged and not tunable.
+
+  Validated twice — by the handler (400 on an out-of-range, fractional, quoted
+  or missing value) and by `internal/secscan` itself, which refuses an
+  out-of-range value and keeps the current bound, so no caller can install one.
+  The hot path reads the ratio from a single atomic (no lock), loaded once per
+  expansion so the ceiling and the refusal log agree. A value above the default
+  is a relaxed posture and is said so everywhere: the audit entry
+  (`security.scan_decompress_ratio`) carries `RELAXED` in its detail, a log line
+  is written, and the operator contract gains a `scan_decompress_ratio` row that
+  is `warn` for as long as it is set (`ok` at or below the default).
+
+  Mirrors the YARA engine settings on every axis: persist-before-apply through
+  `admin_settings.json` (a failed write is a 500 with the live bound
+  untouched), node-local, and deliberately **not** a configuration version,
+  not exported/imported and not replicated Control Plane → Data Plane (D-sec,
+  `CONFIG-VERSIONING-TRIAGE.md` §4.2: a rollback could silently re-raise a ratio
+  the operator chose to tighten). It is registered as a rollback exclusion, so
+  `GET /api/config/rollback-scope` lists it. The default is persisted as absent,
+  so an untouched node keeps following the shipped default; a hand-edited
+  out-of-range value is refused on load and the default installed. API contract
+  additive (`getScanDecompression` / `setScanDecompression`). Runbook:
+  `docs/operator/scan-capacity-and-timeouts.md` §4.
+
 ### Fixed
+
+- **`culvert_cdr_bytes_out_total` no longer counts a CDR replacement that was
+  refused.** In `runCDRStage`'s sanitized-swap branch the replacement body was
+  added to the counter before the CHAOS-106 decompression check, so a sanitized
+  document that was then refused as a decompression bomb was reported as bytes
+  delivered. The counter now moves only after the replacement survives that
+  check; an ordinary sanitized replacement is still counted in full.
 
 - **The Auth Exempt kill-switch operator-contract row no longer predicts the
   opposite of what the gateway does on a roster with no usable administrator
