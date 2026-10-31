@@ -355,7 +355,17 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 	}
 	// 1.1 fix: decompress gzip/deflate bodies before scanning so ClamAV/YARA
 	// signatures match the actual content.
-	scanData := decompressForScan(buffered, resp.Header.Get("Content-Encoding"))
+	scanData, bomb := decompressForScan(buffered, resp.Header.Get("Content-Encoding"))
+	if bomb {
+		// CHAOS-106: fail closed, exactly like the SCAN_BLOCKED branch below —
+		// nothing downstream can inspect what this response would deliver.
+		cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+		atomic.AddInt64(&statBlocked, 1)
+		recordRequestAuthURI(cip, r.Method, r.Host, "SCAN_BLOCKED", scanDecompressSource, scanDecompressReason, id.Identity, "inspect", "", AuthLogFields{AuthSource: id.AuthSource})
+		logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip, sanitizeLog(r.Host), scanDecompressSource, scanDecompressReason)
+		scanBlock(w, r.Host, scanDecompressReason, scanDecompressSource)
+		return true, nil
+	}
 
 	// F4: Archive magic byte detection — block archives even if the
 	// URL/Content-Disposition doesn't reveal the true format.

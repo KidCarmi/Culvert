@@ -900,6 +900,10 @@ culvert_scan_late_discarded_total %d
 # TYPE culvert_scan_inflight gauge
 culvert_scan_inflight %d
 
+# HELP culvert_scan_decompress_bombs_total Total responses refused because their declared encoding expanded past the scan-path ratio allowance (fail-closed)
+# TYPE culvert_scan_decompress_bombs_total counter
+culvert_scan_decompress_bombs_total %d
+
 # HELP culvert_remote_scan_fail_total Total remote scan-sidecar faults that forwarded content UNSCANNED (fail-open)
 # TYPE culvert_remote_scan_fail_total counter
 culvert_remote_scan_fail_total %d
@@ -971,6 +975,7 @@ culvert_auth_sso_required_total %d
 		scanCounters.ClamSaturated,
 		scanCounters.ScanLateDiscarded,
 		scanCounters.ScanInflight,
+		scanCounters.DecompressBombs,
 		// Remote (sidecar) scanning. Emitted unconditionally, like every other
 		// scan counter: a sidecar deployment used to export NO scanning signal
 		// at all — every culvert_scan_* series is structurally zero there and

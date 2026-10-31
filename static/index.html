@@ -1613,6 +1613,10 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <div id="sec-scan-late-discard" style="font-weight:600;font-size:.85rem">0</div>
             </div>
             <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Responses refused because their declared Content-Encoding expanded far past the bytes the origin actually sent (a decompression bomb). Fail-closed — the response was blocked. A property of the content, not of this node's capacity: the same response is refused on every retry.">Decompression refused</div>
+              <div id="sec-decompress-bombs" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
               <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px" title="Remote scan sidecar refused for capacity (HTTP 429). Fail-closed — also counted as a scan timeout. Add scanning capacity.">Sidecar at capacity</div>
               <div id="sec-remote-saturated" style="font-weight:600;font-size:.85rem">0</div>
             </div>
@@ -9906,6 +9910,7 @@ async function loadSecScanStatus() {
     setMetric('sec-scan-inflight', s.scan_inflight, 4, 16);
     setMetric('sec-yara-match-panics', s.yara_match_panics, 1, 10);
     setMetric('sec-scan-late-discard', s.stat_scan_late_discard, 1, 10);
+    setMetric('sec-decompress-bombs', s.stat_decompress_bombs, 1, 10);
   } catch(e) { console.error(e); }
 }
 
