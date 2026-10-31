@@ -128,6 +128,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the cluster rate-limit broadcast is stale.** A
+  Data Plane that stops receiving the Control Plane broadcast falls back to its
+  local limit by design, but that was visible only in a log line, a metric and
+  the Cluster page banner; the one-page report read as healthy. A new
+  `cluster_ratelimit_freshness` WARN row (additive, report-only, no row unless
+  cluster rate limiting is armed and stale) carries no node or address data.
+  Rate limiting is unchanged.
 - **Diagnostics now warns when an enabled alert webhook's latest delivery
   failed.** Failed deliveries were visible only in the Alert Webhooks delivery
   history; the one-page report read as healthy while security alerts stopped
