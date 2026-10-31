@@ -48,6 +48,13 @@ type OperatorContract struct {
 	// describe different states. Unexported for the same reason as above:
 	// never serialized, and the support-bundle redactor skips it.
 	accessCIDRViewerRow *OperatorContractCheck
+
+	// killSwitchViewerRow is the auth_exempt_kill_switch row's below-admin
+	// rendering, built from the SAME backend read as the admin row in Checks
+	// (authExemptKillSwitchContractRows, auth_killswitch_diag.go). Nil while
+	// the switch is clear, when the contract carries no such row. Unexported
+	// for the same reason as above.
+	killSwitchViewerRow *OperatorContractCheck
 }
 
 // OperatorContractCheck is one row in the diagnostics report.
@@ -252,7 +259,14 @@ func buildOperatorContract() OperatorContract {
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
-	checks = append(checks, checkAuthExemptKillSwitch()...)
+	// Auth Exempt kill switch: contributes nothing while clear. Rendered for
+	// admin and below admin from one backend read (SEC-KSROSTER-1).
+	var killSwitchViewer *OperatorContractCheck
+	if envKS, runtimeKS := authBypassDisabled(), authExemptDisabledRuntimeState(); envKS || runtimeKS {
+		ksAdmin, ksViewer := authExemptKillSwitchContractRows(envKS, runtimeKS)
+		checks = append(checks, ksAdmin)
+		killSwitchViewer = &ksViewer
+	}
 	checks = append(checks, authCredentialRequiredDiagnostics(policyStore.List(), hasCredentialCapableProvider())...)
 	// LDAP profile hygiene diagnostics (ADR-0027). Report-only; contribute
 	// nothing when no LDAP profiles exist.
@@ -273,6 +287,7 @@ func buildOperatorContract() OperatorContract {
 		rosterViewerRow: &rosterViewer,
 
 		accessCIDRViewerRow: &accessCIDRViewer,
+		killSwitchViewerRow: killSwitchViewer,
 	}
 }
 
@@ -739,6 +754,13 @@ const diagnosticsRedactedAction = "Ask an administrator to review this row in Di
 // restart) are admin-only. Because that last fact can be the row's only reason
 // to warn, its STATUS is recomputed too, and so is the verdict.
 //
+// The auth_exempt_kill_switch row is REPLACED by the rendering built from the
+// same backend read (killSwitchRowBelowAdmin): in the roster-without-verifier
+// state its admin text states that the roster has accounts but no usable
+// administrator, and the restore clamp that produces that state leaves those
+// accounts able to sign in as viewers (SEC-KSROSTER-1). The engaged layer and
+// the traffic impact stay visible; the cause and the remediation do not.
+//
 // Fail-closed by construction: the ONLY input that un-redacts is a proven
 // admin, so a future role added below admin, or a caller whose role cannot be
 // resolved, gets the redacted form without this function being revisited.
@@ -801,6 +823,8 @@ func redactContractForRole(c OperatorContract, isAdmin bool) OperatorContract {
 				checks[i] = OperatorContractCheck{Code: accessCIDRListsCode, Status: checks[i].Status,
 					Message: accessCIDRUIAllowRedacted, OperatorAction: diagnosticsRedactedAction}
 			}
+		case authExemptKillSwitchCode:
+			checks[i] = killSwitchRowBelowAdmin(c.killSwitchViewerRow, checks[i].Status)
 		}
 	}
 	c.Checks = checks
@@ -808,6 +832,23 @@ func redactContractForRole(c OperatorContract, isAdmin bool) OperatorContract {
 		c.Verdict = rollUpVerdict(checks)
 	}
 	return c
+}
+
+// killSwitchRowBelowAdmin is the auth_exempt_kill_switch row a non-admin
+// receives (SEC-KSROSTER-1). Replaced by the rendering built from the same
+// backend read, rather than edited here: in the roster-without-verifier state
+// the admin row says the roster holds accounts but no usable administrator and
+// what effective role they carry — roster posture, and the clamped accounts it
+// describes can sign in at RoleViewer. The status is warn in both renderings,
+// so no verdict recomputation is needed. A contract built without the viewer
+// rendering (a hand-assembled OperatorContract in a caller or a test) gets a
+// fixed row rather than falling through to the admin text.
+func killSwitchRowBelowAdmin(viewer *OperatorContractCheck, status string) OperatorContractCheck {
+	if viewer != nil {
+		return *viewer
+	}
+	return OperatorContractCheck{Code: authExemptKillSwitchCode, Status: status,
+		Message: "Auth Exempt kill switch is ENGAGED; its detail is shown to administrators only", OperatorAction: diagnosticsRedactedAction}
 }
 
 // adminUsernameInventory is the de-duplicated set of configured login names

@@ -9,6 +9,52 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The Auth Exempt kill-switch operator-contract row no longer predicts the
+  opposite of what the gateway does on a roster with no usable administrator
+  (SEC-KSROSTER-1).** `SEC-AUTHENABLED-1` armed the Stage-1 gate for a roster
+  that holds admitted accounts but has no present admin and no provider — the
+  clamped-admin state a restore from a newer build reaches, and the legacy
+  pre-RBAC empty-role state — and excluded it from the no-backend inert guard,
+  so the forced-Default arm answers with a 407 nothing can satisfy. That is the
+  intended fail-closed answer, but `currentKillSwitchBackend` was not updated
+  with it: both of its probes are false in that state, so it reported
+  `killSwitchBackendNone` and the row told the operator that engaging the
+  break-glass "does not make formerly exempt clients authenticate" and that
+  their requests "are decided by the remaining authentication rules and Stage 2
+  policy". In fact every formerly exempt client is refused, so an operator
+  following the row during an incident would have taken a full traffic outage
+  the contract said could not happen — and the row named the wrong repair, a
+  failed IdP profile, instead of the `--reset-password` break-glass that is the
+  only one. A fourth backend state (`killSwitchBackendNoVerifier`) now reports
+  the refusal and names the break-glass. Report-only: no enforcement behaviour
+  changed, and the genuine no-backend row and its Stage-2 fall-through are
+  pinned unchanged by a negative control.
+
+  The new state is admin-roster posture, so its detail is admin-only on the
+  viewer-readable contract (`/api/diagnostics`, `/api/health/explain`): the
+  restore clamp that reaches it leaves the restored accounts signing in as
+  viewers, who could otherwise read that their roster holds no administrator
+  and what effective role the accounts carry. Below admin the row keeps its
+  code, warn status, engaged layer and traffic impact (formerly exempt clients
+  are challenged and refused) and carries the fixed redacted action, through
+  the same precomputed-viewer-row pattern as `access_cidr_lists`; the other
+  three backend states reach every role unchanged. `currentKillSwitchBackend`
+  is reclassified on the roster wall from a probe to a roster input. The admin
+  row's remediation also no longer says all proxy traffic stays refused once
+  the switch clears: traffic that requires authentication does, until an
+  administrator exists, while credential-free requests an Exempt rule or the
+  Exempt default covers resume when the switch is cleared.
+
+  The operator-contract roster wall lost coverage in the same window and is
+  restored with it: `AuthEnabled` and `IsConfigured` both gained a
+  `len(c.uiUsers)` term (`SEC-AUTHENABLED-1`, `SEC-SETUPANCHOR-1`) and so became
+  roster reads, but neither was added to `rosterAccessorMethods`, leaving two
+  unregistered paths from a contract row to roster state. Nothing leaks through
+  them today — both answer a boolean and every reachable caller is already
+  classified for other reads — but the wall exists to catch the row that has
+  not been written yet. Both are now listed, which flags nothing in the current
+  tree.
+
 - **A Control Plane restart during a cluster-CA rotation no longer locks every
   un-renewed node out of mTLS (CHAOS-104).** The dual-CA overlap that makes a
   rotation survivable was memory-only: `commitImport` demotes the outgoing CA
