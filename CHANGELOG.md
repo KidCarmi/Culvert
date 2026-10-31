@@ -9,6 +9,51 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The Auth Exempt kill-switch operator-contract row no longer predicts the
+  opposite of what the gateway does on a roster with no usable administrator
+  (SEC-KSROSTER-1).** `SEC-AUTHENABLED-1` armed the Stage-1 gate for a roster
+  that holds admitted accounts but has no present admin and no provider — the
+  clamped-admin state a restore from a newer build reaches, and the legacy
+  pre-RBAC empty-role state — and excluded it from the no-backend inert guard,
+  so the forced-Default arm answers with a 407 nothing can satisfy. That is the
+  intended fail-closed answer, but `currentKillSwitchBackend` was not updated
+  with it: both of its probes are false in that state, so it reported
+  `killSwitchBackendNone` and the row told the operator that engaging the
+  break-glass "does not make formerly exempt clients authenticate" and that
+  their requests "are decided by the remaining authentication rules and Stage 2
+  policy". In fact every formerly exempt client is refused, so an operator
+  following the row during an incident would have taken a full traffic outage
+  the contract said could not happen — and the row named the wrong repair, a
+  failed IdP profile, instead of the `--reset-password` break-glass that is the
+  only one. A fourth backend state (`killSwitchBackendNoVerifier`) now reports
+  the refusal and names the break-glass. Report-only: no enforcement behaviour
+  changed, and the genuine no-backend row and its Stage-2 fall-through are
+  pinned unchanged by a negative control.
+
+  The new state is admin-roster posture, so its detail is admin-only on the
+  viewer-readable contract (`/api/diagnostics`, `/api/health/explain`): the
+  restore clamp that reaches it leaves the restored accounts signing in as
+  viewers, who could otherwise read that their roster holds no administrator
+  and what effective role the accounts carry. Below admin the row keeps its
+  code, warn status, engaged layer and traffic impact (formerly exempt clients
+  are challenged and refused) and carries the fixed redacted action, through
+  the same precomputed-viewer-row pattern as `access_cidr_lists`; the other
+  three backend states reach every role unchanged. `currentKillSwitchBackend`
+  is reclassified on the roster wall from a probe to a roster input. The admin
+  row's remediation also no longer says all proxy traffic stays refused once
+  the switch clears: traffic that requires authentication does, until an
+  administrator exists, while credential-free requests an Exempt rule or the
+  Exempt default covers resume when the switch is cleared.
+
+  The operator-contract roster wall lost coverage in the same window and is
+  restored with it: `AuthEnabled` and `IsConfigured` both gained a
+  `len(c.uiUsers)` term (`SEC-AUTHENABLED-1`, `SEC-SETUPANCHOR-1`) and so became
+  roster reads, but neither was added to `rosterAccessorMethods`, leaving two
+  unregistered paths from a contract row to roster state. Nothing leaks through
+  them today — both answer a boolean and every reachable caller is already
+  classified for other reads — but the wall exists to catch the row that has
+  not been written yet. Both are now listed, which flags nothing in the current
+  tree.
 - **A compressed response can no longer allocate 64 MiB of heap from 160 KiB of
   traffic (CHAOS-106).** The transparent decompression that lets ClamAV/YARA/DPI
   signatures match actual content rather than compressed bytes had no bound
@@ -112,6 +157,50 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   still unreadable, leaves it unchanged with a warning.
 ### Performance
 
+- **The category-group leg of the policy scan no longer allocates once per
+  rule.** No runtime behavior changes. `catgroup.Store`'s membership probe took
+  the display-cased category NAME and derived its `catSet` key with
+  `strings.ToLower` on every call, and `categoryGroupMatchesHostScratch` calls
+  it once per category-group rule inside the scan every proxied request walks.
+  The key it derived is the destination host's resolved category — a value
+  `hostCatScratch.fusion()` already resolves exactly once per scan — so a
+  request-invariant cost was being multiplied by the rule count. It was an
+  ALLOCATING cost on every real deployment rather than only in principle:
+  `strings.ToLower` returns its input unchanged only for an all-lowercase
+  string, and every category the product ships is display-cased ("Social
+  Media", "Gambling", "HR & Recruiting", ...), so the no-allocation fast path
+  never applied to an actual taxonomy. Only a CATEGORIZED destination reaches
+  the probe at all; an uncategorized one is answered by the existing
+  short-circuit, and that shape was already allocation-free.
+
+  The key now comes from a lazy `hostCatScratch.fusionCatKey` memo beside the
+  scratch's existing ones, and `catgroup` grows `MatchesCategoryKeyByID` /
+  `MatchesCategoryKey` that accept it, plus `CategoryKey` as the single
+  definition of the derivation — shared with `buildCatSet`, so a memoized key
+  cannot drift from the keys the sets are built with. The two string-argument
+  matchers remain as wrappers, so every other caller is untouched and the
+  existing differential oracle in `categorygroup_uncategorized_test.go` now
+  pins this hoist as well. Measured on the end-to-end `PolicyStore.Evaluate`
+  (4-core Xeon @2.80GHz, go1.27.3, shipped taxonomy, ID-stamped rules as
+  `stampObjectRefIDs` writes them, categorized destination): allocations go
+  from one per rule to a CONSTANT one per request — 10 → 1 at 10 rules, 200 → 1
+  at 200 — and 3 200 → 16 B/op at 200 rules. `benchstat` over the existing
+  end-to-end arms (count=8, p=0.000) reports 2.83 µs → 1.15 µs (-59%) at 20
+  rules, -54% on the by-name arms and -53% on the parallel arm, with the
+  uncategorized arms unchanged. `TestBenchGate_PolicyEvalCategoryGroupAllocs`
+  bounds the categorized scan at a constant across 1/10/50/200 rules — the
+  contract `TestBenchGate_PolicyEvalAllocs` already held the plain-FQDN leg to,
+  which could not see this leg because it scans FQDN rules — and a companion
+  gate keeps the uncategorized shape at zero.
+
+  The group-NAME lowering on the denormalized-name fallback leg is
+  deliberately left in place and recorded rather than fixed here: it is a
+  per-RULE value, so no per-request scratch can hoist it, and retiring it means
+  precomputing a normalized group name on the rule at publish time the way
+  `normFQDN` is precomputed — a different blast radius. It costs nothing on the
+  ID leg production takes (1 alloc/op for a display-cased group name on the
+  name leg, 0 for a lowercase one; `BenchmarkMatchesCategoryKey_NameLeg`).
+
 - **The per-request policy decision snapshot is now measured on the rule shapes
   deployments actually run, and its allocation floor is gated.** No runtime
   behavior changes. `BenchmarkPerfQual_Evaluate` reported a matched request at
@@ -181,6 +270,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the cluster rate-limit broadcast is stale.** A
+  Data Plane that stops receiving the Control Plane broadcast falls back to its
+  local limit by design, but that was visible only in a log line, a metric and
+  the Cluster page banner; the one-page report read as healthy. A new
+  `cluster_ratelimit_freshness` WARN row (additive, report-only, no row unless
+  cluster rate limiting is armed and stale) carries no node or address data.
+  Rate limiting is unchanged.
 - **Diagnostics now warns when an enabled alert webhook's latest delivery
   failed.** Failed deliveries were visible only in the Alert Webhooks delivery
   history; the one-page report read as healthy while security alerts stopped

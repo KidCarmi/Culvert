@@ -40,6 +40,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/alpnpeek"
 	"golang.org/x/net/http2"
 )
 
@@ -172,7 +173,7 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 
 	// Upstream ALPN offer, bounded by the client offer so up ∈ client's set.
 	upstreamProtos := []string{"http/1.1"}
-	if clientOffersH2(clientOffer) {
+	if alpnpeek.OffersH2(clientOffer) {
 		upstreamProtos = []string{"h2", "http/1.1"}
 	}
 	upstreamTLS, up, effectiveSkip, err := handshakeUpstreamALPN(r.Context(), rawUpstream, hostOnly, dec.SkipVerify, upstreamProtos, match)
@@ -309,7 +310,7 @@ func handshakeUpstreamALPN(ctx context.Context, rawUpstream net.Conn, hostOnly s
 // readerConn). Fail-closed: any short/oversized/malformed ClientHello returns
 // ["http/1.1"], so the tunnel degrades to the fully-inspected HTTP/1.1 path
 // rather than mis-negotiating. The parser itself is bounds-checked and fuzzed
-// (parseClientHelloALPN).
+// (alpnpeek.Parse).
 func peekClientALPN(br *bufio.Reader) []string {
 	fallback := []string{"http/1.1"}
 	hdr, err := br.Peek(5)
@@ -324,7 +325,7 @@ func peekClientALPN(br *bufio.Reader) []string {
 		// downgrade the decision to http/1.1.
 		return fallback
 	}
-	if protos, ok := parseClientHelloALPN(full); ok {
+	if protos, ok := alpnpeek.Parse(full); ok {
 		return protos
 	}
 	return fallback

@@ -58,10 +58,16 @@ func categoryGroupMatchesHostScratch(rule *PolicyRule, sc *hostCatScratch) bool 
 		// member (buildCatSet refuses it by construction).
 		return false
 	}
+	// The catSet KEY, not the display-cased category name: it is derived from
+	// the fusion result, so it is request-invariant and the scratch hoists it
+	// out of the rule scan. Passing the name instead made catgroup lower it
+	// once per category-group rule per request, which ALLOCATES for every
+	// category the product ships — see hostCatScratch.fusionCatKey.
+	catKey := sc.fusionCatKey()
 	if id := rule.DestCategoryGroupID; id != "" {
-		if matched, resolved := globalCategoryGroups.MatchesCategoryByID(id, hostCat); resolved {
+		if matched, resolved := globalCategoryGroups.MatchesCategoryKeyByID(id, catKey); resolved {
 			return matched
 		}
 	}
-	return globalCategoryGroups.MatchesCategory(rule.DestCategoryGroup, hostCat)
+	return globalCategoryGroups.MatchesCategoryKey(rule.DestCategoryGroup, catKey)
 }

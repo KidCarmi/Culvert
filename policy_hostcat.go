@@ -31,7 +31,11 @@ package main
 // signed-feed activation. That is a consistency improvement, not a relaxation —
 // the pointer is loaded at most one instant earlier than it would have been.
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/KidCarmi/Culvert/internal/catgroup"
+)
 
 // hostCatScratch memoizes the host-only halves of destination-category
 // resolution for the lifetime of ONE rule scan. It is keyed by the host it was
@@ -69,6 +73,11 @@ type hostCatScratch struct {
 	fusionCat     string
 	fusionTier    string
 	fusionPattern string
+
+	// fusionKey memoizes catgroup.CategoryKey(fusionCat) — the catSet lookup
+	// key for the resolved destination category. See fusionCatKey() below.
+	fusionKeySet bool
+	fusionKeyVal string
 
 	viewLookupSet bool
 	viewLookupCat string
@@ -187,6 +196,40 @@ func (sc *hostCatScratch) fusion() (category, tier, matchedBy string) {
 		sc.fusionSet = true
 	}
 	return sc.fusionCat, sc.fusionTier, sc.fusionPattern
+}
+
+// fusionCatKey returns the catgroup catSet lookup key for the scan's resolved
+// destination category — catgroup.CategoryKey(fusion category) — derived at
+// most once per scan.
+//
+// It is the last member of the request-invariant class this file exists to
+// hoist, and the only one that was still being re-derived PER RULE: the key
+// depends on the destination's category, which fusion() already resolves once,
+// but catgroup.Store.MatchesCategory{,ByID} took the DISPLAY-CASED name and
+// lowered it on every call — once per category-group rule per request. That
+// lowering ALLOCATES for every category the product ships, since
+// strings.ToLower only returns its input unchanged when the input is already
+// all-lowercase and the taxonomy is display-cased ("Social Media",
+// "Gambling", "HR & Recruiting", ...).
+//
+// Measured before this hoist (4-core Xeon @2.80GHz, go1.27.3, shipped taxonomy,
+// 20 ID-stamped category-group rules, categorized destination): 20 allocs/op
+// and 320 B/op on the full Evaluate, 91% of the scan's total allocation count
+// and linear in the rule count. After it the scan is allocation-free, and the
+// bound is a CONSTANT — see TestBenchGate_PolicyEvalCategoryGroupAllocs.
+//
+// Lazy, like every other field here: a scan with no category-group rule never
+// calls this and lowers nothing. Guarded by its own bool rather than by
+// emptiness, because "" is a legitimate key (an uncategorized destination) and
+// the call-site guard in categoryGroupMatchesHostScratch answers that shape
+// without ever reaching here.
+func (sc *hostCatScratch) fusionCatKey() string {
+	if !sc.fusionKeySet {
+		cat, _, _ := sc.fusion()
+		sc.fusionKeyVal = catgroup.CategoryKey(cat)
+		sc.fusionKeySet = true
+	}
+	return sc.fusionKeyVal
 }
 
 // resolveFusion carries the resolution order verbatim from the pre-hoist
