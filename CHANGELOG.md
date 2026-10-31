@@ -406,6 +406,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The one gate standing between a future response path and a CHAOS-106
+  scanner bypass could not see a new file.** `DecompressForScan` returns
+  `(nil, true)` when a declared `Content-Encoding` expands past the ratio
+  allowance, and the bound is only a defense if EVERY caller fails closed on
+  that second value — a caller that dropped it would scan the compressed bytes
+  instead, with the origin choosing the ratio that silences ClamAV, YARA, the
+  archive-magic check and the polyglot check at once. The compiler forces the
+  value to be received but not consulted, so
+  `TestCHAOS106_EveryDecompressCallSiteConsultsTheRefusal` was written as a
+  source gate. It checked a hard-coded list of the three files that call the
+  seam today, so the exact shape it bans — `scanData, _ := decompressForScan(…)`
+  — passed it unseen in any NEW file, which is where the fourth response path
+  (an H3 leg, a second CDR stage, a request-direction scan) would land. The
+  wall now DISCOVERS its inputs: every non-test file in the package is parsed
+  with `go/ast`, and each call of the seam must bind both results, name the
+  refusal rather than `_`, and branch on that name. `chaos106RefusalFloor`
+  asserts the three known call sites still exist, so a renamed seam that finds
+  nothing fails instead of reporting a clean gate. Proved in both directions
+  against a probe file carrying the banned shape: accepted by the wall as
+  merged, refused with file:line by the wall as fixed. Latent — no such caller
+  exists — and test-only: no production behavior moves. Two documentation
+  defects from the same change are fixed with it; one is not cosmetic in kind,
+  because `scanInspectBody`'s fail-closed outcome contract (the
+  `scanBlocked` / `scanReadError` distinction whose conflation once turned an
+  on-path origin reset into a cacheable empty 200 on the H2 path) had been
+  detached from its function by the complexity extraction and was documenting
+  `inspectMagicStage` instead. Review:
+  `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-10-31.md`.
 - **A roster holding accounts but no present admin reopened the unauthenticated
   first-run bootstrap window (SEC-SETUPANCHOR-1).** `uiAuthMiddleware` grants
   RoleAdmin to every unauthenticated request while the first-run window is
