@@ -15,6 +15,10 @@
 #      Snapshot: yes + Docker snapshot=no) with a simulated install of what
 #      prepare-guest.sh installs: Docker at its pins, every Ubuntu package a
 #      snapshot version.
+#   4. C6 (same script): a REAL download of the four Docker pins and the
+#      approved kernel-42 packages under the snapshot; the production receipt
+#      and Docker byte-pin check; each kernel .deb equal to its authenticated
+#      snapshot index entry and to the approved kernel-42 identity.
 # No OVA is built, nothing is published or signed. Runs only on a push whose
 # message carries [snapshot-pin-check].
 name: Snapshot Pin Check (lab)
@@ -36,7 +40,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
-      FB1_COMMIT: d452d50dda9943bafaa4e03d3f77e542dd6d97dd
+      FB1_COMMIT: 522f515dae4ae87f7d13e26a5eefc53e3473b8f9
     steps:
       - name: Checkout lab helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -105,12 +109,14 @@ jobs:
           test "$(awk -F'\t' '!/^#/ && $1 != "package"' ev/package-provenance-623.tsv | wc -l)" = 623
           echo "PASS 623-package inventory reconciled: $(awk -F'\t' 'NR>4{print $4}' ev/package-provenance-623.tsv | sort | uniq -c | tr '\n' ' ')" | tee -a ev/summary.txt
 
-      - name: C5 — the guest's section-1 source set, simulated install
+      - name: C5/C6 — the guest's section-1 source set; simulated install; real acquisition + byte binding
         run: |
           set -o pipefail
           bash .github/lab/fb1-c5.sh "$PWD/src/appliance/build" "$RUNNER_TEMP/c5" 2>&1 | tee ev/c5-guest-source-set.txt
           cp "$RUNNER_TEMP/c5.inst" ev/c5-simulated-installs.txt
+          cp "$RUNNER_TEMP/c5.acquired.tsv" ev/c6-acquired-debs.tsv
           test "$(grep -c '^PASS C5' ev/c5-guest-source-set.txt)" = 2
+          test "$(grep -c '^PASS C6' ev/c5-guest-source-set.txt)" = 2
 
       - name: Upload evidence
         if: always()

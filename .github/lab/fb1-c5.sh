@@ -8,6 +8,8 @@ set -euo pipefail
 B="$1"; R="$2"
 set -a; . "$B/manifest.env"; set +a
 . "$B/apt-snapshot.sh"
+# shellcheck disable=SC2034 # read by apt-snapshot.sh; recorded once, as build-ova.sh does
+GUEST_APT_BUILD_START="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$R/etc/apt/sources.list.d" "$R/etc/apt/apt.conf.d" "$R/etc/apt/preferences.d" "$R/etc/apt/keyrings" \
   "$R/var/lib/apt/lists/partial" "$R/var/cache/apt/archives/partial" "$R/var/lib/dpkg"
 : > "$R/var/lib/dpkg/status"
@@ -59,3 +61,32 @@ apt_snap_update -qq
 apt_snap_verify_inrelease
 echo "PASS C5 pinned update + InRelease pins with the guest source set (Docker snapshot=no beside Snapshot: yes)"
 c5_check "$R"
+
+# C6: a REAL acquisition under the production library — the four pinned
+# Docker packages and the approved kernel-42 packages — then the production
+# receipt, the Docker byte-pin check, and each Ubuntu file's SHA-256 against
+# its authenticated snapshot index entry (apt-cache show of that exact
+# version) and the approved kernel-42 identities. Records the kernel package
+# identities for the build BOM.
+mkdir -p "$R/dl"
+(cd "$R/dl" && apt_snap download "docker-ce=${DOCKER_CE_VERSION}" "docker-ce-cli=${DOCKER_CE_CLI_VERSION}" \
+  "containerd.io=${CONTAINERD_IO_VERSION}" "docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_VERSION}" \
+  "${GUEST_KERNEL_META}" linux-image-7.0.0-42-generic linux-modules-7.0.0-42-generic \
+  linux-main-modules-zfs-7.0.0-42-generic linux-main-modules-v4l2loopback-7.0.0-42-generic) >/dev/null
+apt_snap_acquisition_receipt "$R/dl" "$R.acquired.tsv"
+apt_snap_verify_docker_debs "$R.acquired.tsv"
+echo "PASS C6 Docker: the four acquired .debs equal the manifest SHA-256 pins"
+# The approved transaction's own identities (kernel-42 disposition).
+KDEBS="$B/../../docs/appliance/evidence/combined/esxi-325c142a/kernel-42/kernel-debs.tsv"
+k=0
+while IFS=$'\t' read -r p v a sha _; do
+  case "$p" in docker-ce|docker-ce-cli|containerd.io|docker-compose-plugin) continue ;; esac
+  k=$((k + 1))
+  idx="$(apt_cache_snap show "$p=$v" | awk '/^SHA256: / && !n {print $2; n = 1}')"   # no early exit: SIGPIPE + pipefail
+  [[ "$idx" == "$sha" ]] || { echo "FAIL C6 $p $v $a: acquired $sha, snapshot index ${idx:-none}"; exit 1; }
+  case "$v" in 7.0.0-42.42~24.04.1) ;; *) echo "FAIL C6 $p resolved $v, not the approved 7.0.0-42.42~24.04.1"; exit 1 ;; esac
+  appr="$(awk -F'\t' -v p="$p" -v v="$v" '$1==p && $2==v {print $4; exit}' "$KDEBS")"
+  [[ "$appr" == "$sha" ]] || { echo "FAIL C6 $p $v: acquired $sha, the approved transaction recorded ${appr:-none}"; exit 1; }
+done < "$R.acquired.tsv"
+[[ "$k" -eq 5 ]] || { echo "FAIL C6 expected 5 kernel .debs, acquired $k"; exit 1; }
+echo "PASS C6 kernel: $k acquired kernel .debs are 7.0.0-42.42~24.04.1, equal their authenticated snapshot index entries and the approved kernel-42 identities"
