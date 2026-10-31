@@ -140,6 +140,25 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-10-31 — `CHAOS-107` CLAIMED (placeholder, commit one). Domain: the
+SIGNATURE-DATABASE GENERATION — a scan verdict is cached by content hash for
+the whole `CacheTTL`, so which signature set produced it, and what happens to a
+cached `clean` when the signature set that would have caught it arrives
+afterwards?** Id claimed in this committed row before any code was written, per
+the convention above, and checked against `origin/main` rather than the working
+tree, per the 2026-09-25 amendment: `CHAOS-106` is the highest id anywhere on
+`main`, and no open PR holds a chaos id at claim time (#1772, #1771, #1705,
+#1549, #1548, #1536, #1528, #1526 — none is a chaos sweep), so this sweep took
+107 and will not move.
+
+Scope is the SIMULATE list's *threat feed unavailable* / *silent failures* rows
+turned around to ask about RECOVERY rather than outage: the register has asked
+what the scan path does when a scanner is slow (§20, CHAOS-52), saturated (§21,
+CHAOS-53), dark (§20's `clamDark` branch) or handed a decompression bomb
+(CHAOS-106). It has not asked what the verdict CACHE does when the scanners get
+BETTER. Findings, measurements and gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-10-31.md).
+
 **2026-10-28 — `CHAOS-103` CLAIMED (placeholder, commit one). Domain: the
 SECOND PROCESS — what happens when two Culvert processes run against one
 `/data`, and which durable surfaces does the accidental one overwrite?** Id
