@@ -79,6 +79,12 @@ func BenchmarkMatchesCategoryByID_StringArg(b *testing.B) {
 // that matter for an appliance: the removed allocation is per-call, so the
 // string form's cost is paid by every core at once and lands on the shared
 // allocator rather than on one goroutine's critical path.
+//
+// Each worker checks its own result, as the serial arms do, rather than writing
+// a shared package-level sink: concurrent writes to one variable are a data
+// race under -race and add cache-line contention the read-only production
+// lookup never has. b.Error, not b.Fatal, because FailNow must not be called
+// from a RunParallel worker goroutine.
 func BenchmarkMatchesCategoryKeyByID_Parallel(b *testing.B) {
 	s, ids := benchKeyStore(64)
 	key := CategoryKey(benchKeyCategory)
@@ -87,7 +93,10 @@ func BenchmarkMatchesCategoryKeyByID_Parallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			sinkMatched, _ = s.MatchesCategoryKeyByID(ids[i%len(ids)], key)
+			if m, ok := s.MatchesCategoryKeyByID(ids[i%len(ids)], key); !ok || !m {
+				b.Error("expected a resolved member match")
+				return
+			}
 			i++
 		}
 	})
@@ -100,7 +109,10 @@ func BenchmarkMatchesCategoryByID_StringArgParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			sinkMatched, _ = s.MatchesCategoryByID(ids[i%len(ids)], benchKeyCategory)
+			if m, ok := s.MatchesCategoryByID(ids[i%len(ids)], benchKeyCategory); !ok || !m {
+				b.Error("expected a resolved member match")
+				return
+			}
 			i++
 		}
 	})
@@ -143,7 +155,3 @@ func BenchmarkMatchesCategoryKey_NameLegLowercaseGroup(b *testing.B) {
 		}
 	}
 }
-
-// sinkMatched keeps the parallel arms' results observable so nothing is
-// optimized away.
-var sinkMatched bool
