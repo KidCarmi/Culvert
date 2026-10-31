@@ -34,6 +34,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 - [`cluster-config-capacity.md`](cluster-config-capacity.md) — CP→DP config-sync capacity limits and operations.
 - [`cluster-rate-limit-freshness.md`](cluster-rate-limit-freshness.md) — how cluster-wide rate limiting degrades during a Control Plane outage.
 - [`dp-bootstrap-artifact-safety.md`](dp-bootstrap-artifact-safety.md) — why the Control Plane refuses to render a one-click Data Plane bootstrap script or compose file for a non-`host[:port]` authority.
+- [`cp-grpc-listener-recovery.md`](cp-grpc-listener-recovery.md) — Control Plane gRPC listener degradation and recovery (CHAOS-71).
 
 ## Authentication and identity
 
@@ -45,6 +46,10 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 - [`admin-basic-auth.md`](admin-basic-auth.md) — HTTP Basic on the admin API: lockout, audit and username bounds now enforced, and why TOTP-enrolled accounts are refused (breaking change).
 - [`admin-api-credential-lockout.md`](admin-api-credential-lockout.md) — what a locked-out admin client sees, finding and clearing locks with `GET`/`POST /api/auth/lockouts` instead of a restart, and the `culvert_login_limiter_entries` gauge.
 - [`admin-roster-durability.md`](admin-roster-durability.md) — with a roster file configured (`-ui-users-file`, set by the shipped `docker-compose.yml`), admin account changes are durable-or-refused: what a failed `ui_users.json` write now returns and the recommended alerts. Without one (the flag's empty default) the roster is in-memory only: changes succeed but revert on restart, with a boot warning.
+- [`session-revocation.md`](session-revocation.md) — session revocation durability, cluster reach, and recovery (CHAOS-68).
+- [`session-revocation-plane.md`](session-revocation-plane.md) — what the admin-UI revocation list, `/api/auth/logout` and cluster revocation gossip bound, and what a refusal means (CHAOS-73).
+- [`identity-provider-revocation.md`](identity-provider-revocation.md) — what deleting or disabling an IdP cuts off on the proxy data path (`ps_session`) versus the admin UI session (CHAOS-88).
+- [`idp-metadata-availability.md`](idp-metadata-availability.md) — SAML `metadataUrl` and OIDC discovery availability for interactive identity providers (CHAOS-87).
 
 ## TLS inspection, certificates, and decryption
 
@@ -73,6 +78,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 - [`threat-feed-freshness.md`](threat-feed-freshness.md) — threat-feed sync cadence, staleness detection, and recovery.
 - [`threat-feed-domain-allowlist.md`](threat-feed-domain-allowlist.md) — managing the threat-feed domain allowlist.
 - [`policy-learning-mode.md`](policy-learning-mode.md) — Policy Learning Mode: observation, aggregation, and recommendation generation.
+- [`cdr-content-disarm-reconstruction.md`](cdr-content-disarm-reconstruction.md) — Content Disarm & Reconstruction (CDR) via the Sluice sidecar: eligibility, configuration, failure behavior.
 
 ## Storage and recovery
 
@@ -81,6 +87,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 - [`graceful-shutdown.md`](graceful-shutdown.md) — the shutdown envelope, its phases, and what a stall costs.
 - [`tunnel-drain-on-shutdown.md`](tunnel-drain-on-shutdown.md) — draining long-lived tunnels (WebSocket, SOCKS5, CONNECT) on shutdown.
 - [`secure-upload.md`](secure-upload.md) — secure upload of support bundles to TAC.
+- [`siem-feed-delivery.md`](siem-feed-delivery.md) — SIEM / syslog feed delivery health for audit events and request-log entries (CHAOS-81).
 
 ## MCP Agent Security Gateway (ADR-0024, disabled by default)
 

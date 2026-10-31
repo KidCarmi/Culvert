@@ -1,26 +1,4 @@
-package main
-
-// Read-only ClientHello ALPN extraction for the HTTP/2-inspection ALPN
-// intersection (plan C1). The SSL-inspect path handshakes the UPSTREAM leg
-// before the client leg, so it needs the client's offered ALPN protocols BEFORE
-// shaping the upstream offer — earlier than tls.Server's GetConfigForClient
-// callback fires. The inspect path already peeks the first client byte to detect
-// TLS (proxy_tunnel.go); this parses the ALPN extension out of the same buffered,
-// plaintext ClientHello WITHOUT consuming it (the buffered reader is handed to
-// tls.Server via readerConn, so the real handshake re-reads the identical bytes).
-//
-// Security posture (reviewers flagged this as new attack surface):
-//   - It parses attacker-influenced bytes, so it is written to NEVER over-read
-//     and NEVER panic — every field length is bounds-checked against the slice
-//     before use, and any inconsistency returns ok=false.
-//   - It is fail-closed: on any parse failure / truncation / absent ALPN the
-//     caller treats the client as offering only "http/1.1" (the inspectable
-//     HTTP/1.1-downgrade path), so a malformed or fragmented ClientHello can
-//     never trick the proxy into a protocol the client did not actually offer.
-//   - It reads ONLY the plaintext handshake record; the HTTP/2 connection preface
-//     is post-handshake ciphertext on a different layer and cannot be reached or
-//     stranded here.
-//   - It is fuzzed (FuzzParseClientHelloALPN).
+package alpnpeek
 
 // tlsHandshakeClientHello is the handshake message type for ClientHello.
 const tlsHandshakeClientHello = 0x01
@@ -31,7 +9,7 @@ const tlsRecordHandshake = 0x16
 // extALPN is the ALPN TLS extension type (RFC 7301).
 const extALPN = 0x0010
 
-// parseClientHelloALPN extracts the client's offered ALPN protocol list from a
+// Parse extracts the client's offered ALPN protocol list from a
 // buffered TLS ClientHello. buf must begin at the TLS record header (the first
 // byte the client sends, 0x16). It returns the protocol list in offer order and
 // ok=true only on a fully-consistent parse that contained an ALPN extension.
@@ -40,7 +18,7 @@ const extALPN = 0x0010
 // handshake record, the ClientHello spans beyond buf (fragmented / not fully
 // buffered), any length field is inconsistent, or no ALPN extension is present.
 // It never reads past len(buf) and never panics.
-func parseClientHelloALPN(buf []byte) (protos []string, ok bool) {
+func Parse(buf []byte) (protos []string, ok bool) {
 	// TLS record header: type(1) version(2) length(2).
 	if len(buf) < 5 || buf[0] != tlsRecordHandshake {
 		return nil, false
@@ -185,10 +163,10 @@ func (c *cursor) readVec16() ([]byte, bool) {
 	return out, true
 }
 
-// clientOffersH2 reports whether the parsed ALPN offer includes "h2". Used by the
+// OffersH2 reports whether the parsed ALPN offer includes "h2". Used by the
 // C1 intersection: native H2 inspection only offers h2 upstream when the client
 // itself offered h2 (else an HTTP/1.1-only client would be stranded).
-func clientOffersH2(protos []string) bool {
+func OffersH2(protos []string) bool {
 	for _, p := range protos {
 		if p == "h2" {
 			return true
