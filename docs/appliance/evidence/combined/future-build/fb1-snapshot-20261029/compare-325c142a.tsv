@@ -1,0 +1,685 @@
+package	arch	version_325c	version_predicted	class	325c_in_security	predicted_origin_or_note
+adduser	all	3.137ubuntu1	3.137ubuntu1	unchanged		noble-main
+apparmor	amd64	4.0.1really4.0.1-0ubuntu0.24.04.9	4.0.1really4.0.1-0ubuntu0.24.04.9	unchanged		noble-updates-main
+apport	all	2.28.3-0ubuntu0.1	2.28.3-0ubuntu0.1	unchanged		noble-updates-main
+apport-core-dump-handler	all	2.28.3-0ubuntu0.1	2.28.3-0ubuntu0.1	unchanged		noble-updates-main
+apport-symptoms	all	0.25	0.25	unchanged		noble-main
+appstream	amd64	1.0.2-1build6	1.0.2-1build6	unchanged		noble-main
+apt	amd64	2.8.3	2.8.3	unchanged		noble-updates-main
+apt-utils	amd64	2.8.3	2.8.3	unchanged		noble-updates-main
+base-files	amd64	13ubuntu10.5	13ubuntu10.5	unchanged		noble-updates-main
+base-passwd	amd64	3.6.3build1	3.6.3build1	unchanged		noble-main
+bash	amd64	5.2.21-2ubuntu4	5.2.21-2ubuntu4	unchanged		noble-main
+bash-completion	all	1:2.11-8	1:2.11-8	unchanged		noble-main
+bc	amd64	1.07.1-3ubuntu4	1.07.1-3ubuntu4	unchanged		noble-main
+bcache-tools	amd64	1.0.8-5build1	1.0.8-5build1	unchanged		noble-main
+bind9-dnsutils	amd64	1:9.18.39-0ubuntu0.24.04.8	1:9.18.39-0ubuntu0.24.04.8	unchanged	security	noble-security-main,noble-updates-main
+bind9-host	amd64	1:9.18.39-0ubuntu0.24.04.8	1:9.18.39-0ubuntu0.24.04.8	unchanged	security	noble-security-main,noble-updates-main
+bind9-libs	amd64	1:9.18.39-0ubuntu0.24.04.8	1:9.18.39-0ubuntu0.24.04.8	unchanged	security	noble-security-main,noble-updates-main
+bolt	amd64	0.9.7-1	0.9.7-1	unchanged		noble-main
+bpfcc-tools	all	0.29.1+ds-1ubuntu7	0.29.1+ds-1ubuntu7	unchanged		noble-main
+bpftrace	amd64	0.20.2-1ubuntu4.3	0.20.2-1ubuntu4.3	unchanged		noble-updates-main
+bsdextrautils	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+bsdutils	amd64	1:2.39.3-9ubuntu6.6	1:2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+btrfs-progs	amd64	6.6.3-1.1build2	6.6.3-1.1build2	unchanged		noble-main
+busybox-initramfs	amd64	1:1.36.1-6ubuntu3.1	1:1.36.1-6ubuntu3.1	unchanged	security	noble-security-main,noble-updates-main
+busybox-static	amd64	1:1.36.1-6ubuntu3.1	1:1.36.1-6ubuntu3.1	unchanged	security	noble-security-main,noble-updates-main
+byobu	all	6.11-0ubuntu1.1	6.11-0ubuntu1.1	unchanged		noble-updates-main
+ca-certificates	all	20260816ubuntu0.24.04.1	20260816ubuntu0.24.04.1	unchanged	security	noble-security-main,noble-updates-main
+cloud-guest-utils	all	0.33-1	0.33-1	unchanged		noble-main
+cloud-init	all	26.2-0ubuntu1~24.04.2	26.2-0ubuntu1~24.04.2	unchanged		noble-updates-main
+cloud-initramfs-copymods	all	0.49~24.04.1	0.49~24.04.1	unchanged		noble-updates-main
+cloud-initramfs-dyn-netconf	all	0.49~24.04.1	0.49~24.04.1	unchanged		noble-updates-main
+command-not-found	all	23.04.0	23.04.0	unchanged		noble-main
+console-setup	all	1.226ubuntu1.1	1.226ubuntu1.1	unchanged		noble-updates-main
+console-setup-linux	all	1.226ubuntu1.1	1.226ubuntu1.1	unchanged		noble-updates-main
+containerd.io	amd64	2.4.2-3~ubuntu.24.04~noble	2.4.2-3~ubuntu.24.04~noble	docker-pinned		docker (pinned)
+coreutils	amd64	9.4-3ubuntu6.3	9.4-3ubuntu6.3	unchanged	security	noble-security-main,noble-updates-main
+cpio	amd64	2.15+dfsg-1ubuntu2.1	2.15+dfsg-1ubuntu2.1	unchanged	security	noble-security-main,noble-updates-main
+cron	amd64	3.0pl1-184ubuntu2	3.0pl1-184ubuntu2	unchanged		noble-main
+cron-daemon-common	all	3.0pl1-184ubuntu2	3.0pl1-184ubuntu2	unchanged		noble-main
+cryptsetup	amd64	2:2.7.0-1ubuntu4.2	2:2.7.0-1ubuntu4.2	unchanged		noble-updates-main
+cryptsetup-bin	amd64	2:2.7.0-1ubuntu4.2	2:2.7.0-1ubuntu4.2	unchanged		noble-updates-main
+cryptsetup-initramfs	all	2:2.7.0-1ubuntu4.2	2:2.7.0-1ubuntu4.2	unchanged		noble-updates-main
+curl	amd64	8.5.0-2ubuntu10.16	8.5.0-2ubuntu10.16	unchanged	security	noble-security-main,noble-updates-main
+dash	amd64	0.5.12-6ubuntu5	0.5.12-6ubuntu5	unchanged		noble-main
+dbus	amd64	1.14.10-4ubuntu4.1	1.14.10-4ubuntu4.1	unchanged		noble-updates-main
+dbus-bin	amd64	1.14.10-4ubuntu4.1	1.14.10-4ubuntu4.1	unchanged		noble-updates-main
+dbus-daemon	amd64	1.14.10-4ubuntu4.1	1.14.10-4ubuntu4.1	unchanged		noble-updates-main
+dbus-session-bus-common	all	1.14.10-4ubuntu4.1	1.14.10-4ubuntu4.1	unchanged		noble-updates-main
+dbus-system-bus-common	all	1.14.10-4ubuntu4.1	1.14.10-4ubuntu4.1	unchanged		noble-updates-main
+dbus-user-session	amd64	1.14.10-4ubuntu4.1	1.14.10-4ubuntu4.1	unchanged		noble-updates-main
+debconf	all	1.5.86ubuntu1	1.5.86ubuntu1	unchanged		noble-main
+debconf-i18n	all	1.5.86ubuntu1	1.5.86ubuntu1	unchanged		noble-main
+debianutils	amd64	5.17build1	5.17build1	unchanged		noble-main
+dhcpcd-base	amd64	1:10.0.6-1ubuntu3.2	1:10.0.6-1ubuntu3.2	unchanged		noble-updates-main
+diffutils	amd64	1:3.10-1ubuntu0.1	1:3.10-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+dirmngr	amd64	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+distro-info	amd64	1.7build1	1.7build1	unchanged		noble-main
+distro-info-data	all	2026.10.12-0ubuntu0.24.04.1	2026.10.12-0ubuntu0.24.04.1	unchanged	security	noble-security-main,noble-updates-main
+dmeventd	amd64	2:1.02.185-3ubuntu3.2	2:1.02.185-3ubuntu3.2	unchanged		noble-updates-main
+dmidecode	amd64	3.5-3ubuntu0.2	3.5-3ubuntu0.2	unchanged		noble-updates-main
+dmsetup	amd64	2:1.02.185-3ubuntu3.2	2:1.02.185-3ubuntu3.2	unchanged		noble-updates-main
+docker-ce	amd64	5:29.9.2-1~ubuntu.24.04~noble	5:29.9.2-1~ubuntu.24.04~noble	docker-pinned		docker (pinned)
+docker-ce-cli	amd64	5:29.9.2-1~ubuntu.24.04~noble	5:29.9.2-1~ubuntu.24.04~noble	docker-pinned		docker (pinned)
+docker-compose-plugin	amd64	5.6.1-1~ubuntu.24.04~noble	5.6.1-1~ubuntu.24.04~noble	docker-pinned		docker (pinned)
+dosfstools	amd64	4.2-1.1build1	4.2-1.1build1	unchanged		noble-main
+dpkg	amd64	1.22.6ubuntu6.6	1.22.6ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+dracut-install	amd64	060+5-1ubuntu3.4	060+5-1ubuntu3.4	unchanged	security	noble-security-main,noble-updates-main
+e2fsprogs	amd64	1.47.0-2.4~exp1ubuntu4.1	1.47.0-2.4~exp1ubuntu4.1	unchanged		noble-updates-main
+e2fsprogs-l10n	all	1.47.0-2.4~exp1ubuntu4.1	1.47.0-2.4~exp1ubuntu4.1	unchanged		noble-updates-main
+eatmydata	all	131-1ubuntu1	131-1ubuntu1	unchanged		noble-main
+ed	amd64	1.20.1-1	1.20.1-1	unchanged		noble-main
+efibootmgr	amd64	18-1build2	18-1build2	unchanged		noble-main
+eject	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+ethtool	amd64	1:6.7-1build1	1:6.7-1build1	unchanged		noble-main
+fdisk	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+file	amd64	1:5.45-3build1	1:5.45-3build1	unchanged		noble-main
+finalrd	all	9build1	9build1	unchanged		noble-main
+findutils	amd64	4.9.0-5build1	4.9.0-5build1	unchanged		noble-main
+fontconfig	amd64	2.15.0-1.1ubuntu2	2.15.0-1.1ubuntu2	unchanged		noble-main
+fontconfig-config	amd64	2.15.0-1.1ubuntu2	2.15.0-1.1ubuntu2	unchanged		noble-main
+fonts-dejavu-core	all	2.37-8	2.37-8	unchanged		noble-main
+fonts-dejavu-mono	all	2.37-8	2.37-8	unchanged		noble-main
+fonts-ubuntu	all	0.869+git20240321-0ubuntu1	0.869+git20240321-0ubuntu1	unchanged		noble-main
+fonts-ubuntu-console	all	0.869+git20240321-0ubuntu1	0.869+git20240321-0ubuntu1	unchanged		noble-main
+friendly-recovery	all	0.2.42	0.2.42	unchanged		noble-main
+ftp	all	20230507-2build3	20230507-2build3	unchanged		noble-main
+fuse3	amd64	3.14.0-5build1	3.14.0-5build1	unchanged		noble-main
+fwupd	amd64	2.0.20-1ubuntu2~24.04.2	2.0.20-1ubuntu2~24.04.2	unchanged		noble-updates-main
+fwupd-signed	amd64	1.52+1.4-1	1.52+1.4-1	unchanged		noble-main
+gawk	amd64	1:5.2.1-2ubuntu0.1	1:5.2.1-2ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+gcc-14-base	amd64	14.2.0-4ubuntu2~24.04.1	14.2.0-4ubuntu2~24.04.1	unchanged	security	noble-security-main,noble-updates-main
+gdisk	amd64	1.0.10-1build1	1.0.10-1build1	unchanged		noble-main
+gettext-base	amd64	0.21-14ubuntu2	0.21-14ubuntu2	unchanged		noble-main
+gir1.2-girepository-2.0	amd64	1.80.1-1	1.80.1-1	unchanged		noble-main
+gir1.2-glib-2.0	amd64	2.80.0-6ubuntu3.10	2.80.0-6ubuntu3.10	unchanged		noble-updates-main
+gir1.2-packagekitglib-1.0	amd64	1.2.8-2ubuntu1.5	1.2.8-2ubuntu1.5	unchanged	security	noble-security-main,noble-updates-main
+git	amd64	1:2.43.0-1ubuntu7.4	1:2.43.0-1ubuntu7.4	unchanged	security	noble-security-main,noble-updates-main
+git-man	all	1:2.43.0-1ubuntu7.4	1:2.43.0-1ubuntu7.4	unchanged	security	noble-security-main,noble-updates-main
+gnupg	all	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+gnupg-l10n	all	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+gnupg-utils	amd64	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+gpg	amd64	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+gpg-agent	amd64	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+gpg-wks-client	amd64	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+gpgconf	amd64	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+gpgsm	amd64	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+gpgv	amd64	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+grep	amd64	3.11-4build1	3.11-4build1	unchanged		noble-main
+groff-base	amd64	1.23.0-3build2	1.23.0-3build2	unchanged		noble-main
+grub-common	amd64	2.12-1ubuntu7.3	2.12-1ubuntu7.3	unchanged		noble-updates-main
+grub-efi-amd64-bin	amd64	2.12-1ubuntu7.3	2.12-1ubuntu7.3	unchanged		noble-updates-main
+grub-efi-amd64-signed	amd64	1.202.5+2.12-1ubuntu7.3	1.202.5+2.12-1ubuntu7.3	unchanged		noble-updates-main
+grub-gfxpayload-lists	amd64	0.7build2	0.7build2	unchanged		noble-main
+grub-pc	amd64	2.12-1ubuntu7.3	2.12-1ubuntu7.3	unchanged		noble-updates-main
+grub-pc-bin	amd64	2.12-1ubuntu7.3	2.12-1ubuntu7.3	unchanged		noble-updates-main
+grub2-common	amd64	2.12-1ubuntu7.3	2.12-1ubuntu7.3	unchanged		noble-updates-main
+gzip	amd64	1.12-1ubuntu3.2	1.12-1ubuntu3.2	unchanged	security	noble-security-main,noble-updates-main
+hdparm	amd64	9.65+ds-1build1	9.65+ds-1build1	unchanged		noble-main
+hostname	amd64	3.23+nmu2ubuntu2	3.23+nmu2ubuntu2	unchanged		noble-main
+htop	amd64	3.3.0-4build1	3.3.0-4build1	unchanged		noble-main
+hwdata	all	0.379-1	0.379-1	unchanged		noble-main
+ibverbs-providers	amd64	50.0-2ubuntu0.2	50.0-2ubuntu0.2	unchanged		noble-updates-main
+ieee-data	all	20220827.1	20220827.1	unchanged		noble-main
+inetutils-telnet	amd64	2:2.5-3ubuntu4.2	2:2.5-3ubuntu4.2	unchanged	security	noble-security-main,noble-updates-main
+info	amd64	7.1-3build2	7.1-3build2	unchanged		noble-main
+init	amd64	1.66ubuntu1	1.66ubuntu1	unchanged		noble-main
+init-system-helpers	all	1.66ubuntu1	1.66ubuntu1	unchanged		noble-main
+initramfs-tools	all	0.142ubuntu25.8	0.142ubuntu25.8	unchanged		noble-updates-main
+initramfs-tools-bin	amd64	0.142ubuntu25.8	0.142ubuntu25.8	unchanged		noble-updates-main
+initramfs-tools-core	all	0.142ubuntu25.8	0.142ubuntu25.8	unchanged		noble-updates-main
+install-info	amd64	7.1-3build2	7.1-3build2	unchanged		noble-main
+iproute2	amd64	6.1.0-1ubuntu6.4	6.1.0-1ubuntu6.4	unchanged		noble-updates-main
+iptables	amd64	1.8.10-3ubuntu2	1.8.10-3ubuntu2	unchanged		noble-main
+iputils-ping	amd64	3:20240117-1ubuntu0.1	3:20240117-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+iputils-tracepath	amd64	3:20240117-1ubuntu0.1	3:20240117-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+iso-codes	all	4.16.0-1	4.16.0-1	unchanged		noble-main
+jq	amd64	1.7.1-3ubuntu0.24.04.2	1.7.1-3ubuntu0.24.04.2	unchanged	security	noble-security-main,noble-updates-main
+kbd	amd64	2.6.4-2ubuntu2	2.6.4-2ubuntu2	unchanged		noble-main
+keyboard-configuration	all	1.226ubuntu1.1	1.226ubuntu1.1	unchanged		noble-updates-main
+keyboxd	amd64	2.4.4-2ubuntu17.6	2.4.4-2ubuntu17.6	unchanged	security	noble-security-main,noble-updates-main
+klibc-utils	amd64	2.0.13-4ubuntu0.2	2.0.13-4ubuntu0.2	unchanged	security	noble-security-main,noble-updates-main
+kmod	amd64	31+20240202-2ubuntu7.2	31+20240202-2ubuntu7.2	unchanged	security	noble-security-main,noble-updates-main
+kpartx	amd64	0.9.4-5ubuntu8.2	0.9.4-5ubuntu8.2	unchanged		noble-updates-main
+krb5-locales	all	1.20.1-6ubuntu2.10	1.20.1-6ubuntu2.10	unchanged		noble-updates-main
+landscape-common	amd64	24.02-0ubuntu5.7	24.02-0ubuntu5.7	unchanged		noble-updates-main
+less	amd64	590-2ubuntu2.1	590-2ubuntu2.1	unchanged	security	noble-security-main,noble-updates-main
+libacl1	amd64	2.3.2-1build1.1	2.3.2-1build1.1	unchanged		noble-updates-main
+libaio1t64	amd64	0.3.113-6build1.1	0.3.113-6build1.1	unchanged		noble-updates-main
+libaom3	amd64	3.8.2-2ubuntu0.2	3.8.2-2ubuntu0.2	unchanged	security	noble-security-main,noble-updates-main
+libapparmor1	amd64	4.0.1really4.0.1-0ubuntu0.24.04.9	4.0.1really4.0.1-0ubuntu0.24.04.9	unchanged		noble-updates-main
+libappstream5	amd64	1.0.2-1build6	1.0.2-1build6	unchanged		noble-main
+libapt-pkg6.0t64	amd64	2.8.3	2.8.3	unchanged		noble-updates-main
+libarchive13t64	amd64	3.7.2-2ubuntu0.9	3.7.2-2ubuntu0.9	unchanged	security	noble-security-main,noble-updates-main
+libargon2-1	amd64	0~20190702+dfsg-4build1	0~20190702+dfsg-4build1	unchanged		noble-main
+libassuan0	amd64	2.5.6-1build1	2.5.6-1build1	unchanged		noble-main
+libatasmart4	amd64	0.19-5build3	0.19-5build3	unchanged		noble-main
+libatm1t64	amd64	1:2.5.1-5.1build1	1:2.5.1-5.1build1	unchanged		noble-main
+libattr1	amd64	1:2.5.2-1ubuntu0.1	1:2.5.2-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libaudit-common	all	1:3.1.2-2.1ubuntu0.1	1:3.1.2-2.1ubuntu0.1	unchanged		noble-updates-main
+libaudit1	amd64	1:3.1.2-2.1ubuntu0.1	1:3.1.2-2.1ubuntu0.1	unchanged		noble-updates-main
+libblkid1	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+libblockdev-crypto3	amd64	3.1.1-1ubuntu0.1	3.1.1-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libblockdev-fs3	amd64	3.1.1-1ubuntu0.1	3.1.1-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libblockdev-loop3	amd64	3.1.1-1ubuntu0.1	3.1.1-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libblockdev-mdraid3	amd64	3.1.1-1ubuntu0.1	3.1.1-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libblockdev-nvme3	amd64	3.1.1-1ubuntu0.1	3.1.1-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libblockdev-part3	amd64	3.1.1-1ubuntu0.1	3.1.1-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libblockdev-swap3	amd64	3.1.1-1ubuntu0.1	3.1.1-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libblockdev-utils3	amd64	3.1.1-1ubuntu0.1	3.1.1-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libblockdev3	amd64	3.1.1-1ubuntu0.1	3.1.1-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libbpf1	amd64	1:1.3.0-2build2	1:1.3.0-2build2	unchanged		noble-main
+libbpfcc	amd64	0.29.1+ds-1ubuntu7	0.29.1+ds-1ubuntu7	unchanged		noble-main
+libbrotli1	amd64	1.1.0-2ubuntu0.1	1.1.0-2ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libbsd0	amd64	0.12.1-1build1.1	0.12.1-1build1.1	unchanged		noble-updates-main
+libbytesize-common	all	2.10-1ubuntu2	2.10-1ubuntu2	unchanged		noble-main
+libbytesize1	amd64	2.10-1ubuntu2	2.10-1ubuntu2	unchanged		noble-main
+libbz2-1.0	amd64	1.0.8-5.1ubuntu0.1	1.0.8-5.1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libc-bin	amd64	2.39-0ubuntu8.9	2.39-0ubuntu8.9	unchanged	security	noble-security-main,noble-updates-main
+libc-dev-bin	amd64	2.39-0ubuntu8.9	2.39-0ubuntu8.9	unchanged	security	noble-security-main,noble-updates-main
+libc-devtools	amd64	2.39-0ubuntu8.9	2.39-0ubuntu8.9	unchanged	security	noble-security-main,noble-updates-main
+libc6	amd64	2.39-0ubuntu8.9	2.39-0ubuntu8.9	unchanged	security	noble-security-main,noble-updates-main
+libc6-dev	amd64	2.39-0ubuntu8.9	2.39-0ubuntu8.9	unchanged	security	noble-security-main,noble-updates-main
+libcairo2	amd64	1.18.0-3build1	1.18.0-3build1	unchanged		noble-main
+libcap-ng0	amd64	0.8.4-2build2	0.8.4-2build2	unchanged		noble-main
+libcap2	amd64	1:2.66-5ubuntu2.4	1:2.66-5ubuntu2.4	unchanged	security	noble-security-main,noble-updates-main
+libcap2-bin	amd64	1:2.66-5ubuntu2.4	1:2.66-5ubuntu2.4	unchanged	security	noble-security-main,noble-updates-main
+libcbor0.10	amd64	0.10.2-1.2ubuntu2	0.10.2-1.2ubuntu2	unchanged		noble-main
+libclang-cpp18	amd64	1:18.1.3-1ubuntu1	1:18.1.3-1ubuntu1	unchanged		noble-updates-main
+libclang1-18	amd64	1:18.1.3-1ubuntu1	1:18.1.3-1ubuntu1	unchanged		noble-updates-main
+libcom-err2	amd64	1.47.0-2.4~exp1ubuntu4.1	1.47.0-2.4~exp1ubuntu4.1	unchanged		noble-updates-main
+libcrypt-dev	amd64	1:4.4.36-4build1	1:4.4.36-4build1	unchanged		noble-main
+libcrypt1	amd64	1:4.4.36-4build1	1:4.4.36-4build1	unchanged		noble-main
+libcryptsetup12	amd64	2:2.7.0-1ubuntu4.2	2:2.7.0-1ubuntu4.2	unchanged		noble-updates-main
+libcurl3t64-gnutls	amd64	8.5.0-2ubuntu10.16	8.5.0-2ubuntu10.16	unchanged	security	noble-security-main,noble-updates-main
+libcurl4t64	amd64	8.5.0-2ubuntu10.16	8.5.0-2ubuntu10.16	unchanged	security	noble-security-main,noble-updates-main
+libdatrie1	amd64	0.2.13-3build1	0.2.13-3build1	unchanged		noble-main
+libdb5.3t64	amd64	5.3.28+dfsg2-7	5.3.28+dfsg2-7	unchanged		noble-main
+libdbus-1-3	amd64	1.14.10-4ubuntu4.1	1.14.10-4ubuntu4.1	unchanged		noble-updates-main
+libdebconfclient0	amd64	0.271ubuntu3	0.271ubuntu3	unchanged		noble-main
+libdeflate0	amd64	1.19-1build1.1	1.19-1build1.1	unchanged		noble-updates-main
+libdevmapper-event1.02.1	amd64	2:1.02.185-3ubuntu3.2	2:1.02.185-3ubuntu3.2	unchanged		noble-updates-main
+libdevmapper1.02.1	amd64	2:1.02.185-3ubuntu3.2	2:1.02.185-3ubuntu3.2	unchanged		noble-updates-main
+libdrm-amdgpu1	amd64	2.4.125-1ubuntu0.1~24.04.2	2.4.125-1ubuntu0.1~24.04.2	unchanged	security	noble-security-main,noble-updates-main
+libdrm-common	all	2.4.125-1ubuntu0.1~24.04.2	2.4.125-1ubuntu0.1~24.04.2	unchanged	security	noble-security-main,noble-updates-main
+libdrm2	amd64	2.4.125-1ubuntu0.1~24.04.2	2.4.125-1ubuntu0.1~24.04.2	unchanged	security	noble-security-main,noble-updates-main
+libduktape207	amd64	2.7.0+tests-0ubuntu3	2.7.0+tests-0ubuntu3	unchanged		noble-main
+libdw1t64	amd64	0.190-1.1ubuntu0.1	0.190-1.1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libeatmydata1	amd64	131-1ubuntu1	131-1ubuntu1	unchanged		noble-main
+libedit2	amd64	3.1-20230828-1build1	3.1-20230828-1build1	unchanged		noble-main
+libefiboot1t64	amd64	38-3.1build1	38-3.1build1	unchanged		noble-main
+libefivar1t64	amd64	38-3.1build1	38-3.1build1	unchanged		noble-main
+libelf1t64	amd64	0.190-1.1ubuntu0.1	0.190-1.1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+liberror-perl	all	0.17029-2	0.17029-2	unchanged		noble-main
+libestr0	amd64	0.1.11-1build1	0.1.11-1build1	unchanged		noble-main
+libevdev2	amd64	1.13.1+dfsg-1build1	1.13.1+dfsg-1build1	unchanged		noble-main
+libevent-core-2.1-7t64	amd64	2.1.12-stable-9ubuntu2.2	2.1.12-stable-9ubuntu2.2	unchanged	security	noble-security-main,noble-updates-main
+libexpat1	amd64	2.6.1-2ubuntu0.6	2.6.1-2ubuntu0.6	unchanged	security	noble-security-main,noble-updates-main
+libext2fs2t64	amd64	1.47.0-2.4~exp1ubuntu4.1	1.47.0-2.4~exp1ubuntu4.1	unchanged		noble-updates-main
+libfastjson4	amd64	1.2304.0-1build1	1.2304.0-1build1	unchanged		noble-main
+libfdisk1	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+libffi8	amd64	3.4.6-1build1	3.4.6-1build1	unchanged		noble-main
+libfido2-1	amd64	1.14.0-1build3	1.14.0-1build3	unchanged		noble-main
+libflashrom1	amd64	1.3.0-2.1ubuntu2	1.3.0-2.1ubuntu2	unchanged		noble-main
+libfontconfig1	amd64	2.15.0-1.1ubuntu2	2.15.0-1.1ubuntu2	unchanged		noble-main
+libfreetype6	amd64	2.13.2+dfsg-1ubuntu0.2	2.13.2+dfsg-1ubuntu0.2	unchanged	security	noble-security-main,noble-updates-main
+libfribidi0	amd64	1.0.13-3build1	1.0.13-3build1	unchanged		noble-main
+libftdi1-2	amd64	1.5-6build5	1.5-6build5	unchanged		noble-main
+libfuse3-3	amd64	3.14.0-5build1	3.14.0-5build1	unchanged		noble-main
+libfwupd3	amd64	2.0.20-1ubuntu2~24.04.2	2.0.20-1ubuntu2~24.04.2	unchanged		noble-updates-main
+libgcc-s1	amd64	14.2.0-4ubuntu2~24.04.1	14.2.0-4ubuntu2~24.04.1	unchanged	security	noble-security-main,noble-updates-main
+libgcrypt20	amd64	1.10.3-2ubuntu0.2	1.10.3-2ubuntu0.2	unchanged	security	noble-security-main,noble-updates-main
+libgd3	amd64	2.3.3-9ubuntu5	2.3.3-9ubuntu5	unchanged		noble-main
+libgdbm-compat4t64	amd64	1.23-5.1build1	1.23-5.1build1	unchanged		noble-main
+libgdbm6t64	amd64	1.23-5.1build1	1.23-5.1build1	unchanged		noble-main
+libgirepository-1.0-1	amd64	1.80.1-1	1.80.1-1	unchanged		noble-main
+libglib2.0-0t64	amd64	2.80.0-6ubuntu3.10	2.80.0-6ubuntu3.10	unchanged		noble-updates-main
+libglib2.0-bin	amd64	2.80.0-6ubuntu3.10	2.80.0-6ubuntu3.10	unchanged		noble-updates-main
+libglib2.0-data	all	2.80.0-6ubuntu3.10	2.80.0-6ubuntu3.10	unchanged		noble-updates-main
+libgmp10	amd64	2:6.3.0+dfsg-2ubuntu6.1	2:6.3.0+dfsg-2ubuntu6.1	unchanged		noble-updates-main
+libgnutls30t64	amd64	3.8.3-1.1ubuntu3.6	3.8.3-1.1ubuntu3.6	unchanged	security	noble-security-main,noble-updates-main
+libgpg-error-l10n	all	1.47-3build2.1	1.47-3build2.1	unchanged		noble-updates-main
+libgpg-error0	amd64	1.47-3build2.1	1.47-3build2.1	unchanged		noble-updates-main
+libgpgme11t64	amd64	1.18.0-4.1ubuntu4	1.18.0-4.1ubuntu4	unchanged		noble-main
+libgpm2	amd64	1.20.7-11	1.20.7-11	unchanged		noble-main
+libgraphite2-3	amd64	1.3.14-2ubuntu0.24.04.1	1.3.14-2ubuntu0.24.04.1	unchanged	security	noble-security-main,noble-updates-main
+libgssapi-krb5-2	amd64	1.20.1-6ubuntu2.10	1.20.1-6ubuntu2.10	unchanged		noble-updates-main
+libgstreamer1.0-0	amd64	1.24.2-1ubuntu0.1	1.24.2-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libgudev-1.0-0	amd64	1:238-5ubuntu1	1:238-5ubuntu1	unchanged		noble-main
+libharfbuzz0b	amd64	8.3.0-2build2	8.3.0-2build2	unchanged		noble-main
+libheif-plugin-aomdec	amd64	1.17.6-1ubuntu4.9	1.17.6-1ubuntu4.9	unchanged	security	noble-security-main,noble-updates-main
+libheif-plugin-aomenc	amd64	1.17.6-1ubuntu4.9	1.17.6-1ubuntu4.9	unchanged	security	noble-security-main,noble-updates-main
+libheif1	amd64	1.17.6-1ubuntu4.9	1.17.6-1ubuntu4.9	unchanged	security	noble-security-main,noble-updates-main
+libhogweed6t64	amd64	3.9.1-2.2build1.1	3.9.1-2.2build1.1	unchanged		noble-updates-main
+libibverbs1	amd64	50.0-2ubuntu0.2	50.0-2ubuntu0.2	unchanged		noble-updates-main
+libicu74	amd64	74.2-1ubuntu3.1	74.2-1ubuntu3.1	unchanged		noble-updates-main
+libidn2-0	amd64	2.3.7-2build1.1	2.3.7-2build1.1	unchanged		noble-updates-main
+libinih1	amd64	55-1ubuntu2	55-1ubuntu2	unchanged		noble-main
+libintl-perl	all	1.33-1build3	1.33-1build3	unchanged		noble-main
+libintl-xs-perl	amd64	1.33-1build3	1.33-1build3	unchanged		noble-main
+libip4tc2	amd64	1.8.10-3ubuntu2	1.8.10-3ubuntu2	unchanged		noble-main
+libip6tc2	amd64	1.8.10-3ubuntu2	1.8.10-3ubuntu2	unchanged		noble-main
+libisns0t64	amd64	0.101-0.3ubuntu0.1	0.101-0.3ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libjansson4	amd64	2.14-2build2	2.14-2build2	unchanged		noble-main
+libjbig0	amd64	2.1-6.1ubuntu2	2.1-6.1ubuntu2	unchanged		noble-main
+libjcat1	amd64	0.2.3-1~ubuntu0.24.04.1	0.2.3-1~ubuntu0.24.04.1	unchanged		noble-updates-main
+libjpeg-turbo8	amd64	2.1.5-2ubuntu2	2.1.5-2ubuntu2	unchanged		noble-main
+libjpeg8	amd64	8c-2ubuntu11	8c-2ubuntu11	unchanged		noble-main
+libjq1	amd64	1.7.1-3ubuntu0.24.04.2	1.7.1-3ubuntu0.24.04.2	unchanged	security	noble-security-main,noble-updates-main
+libjson-c5	amd64	0.17-1build1	0.17-1build1	unchanged		noble-main
+libjson-glib-1.0-0	amd64	1.8.0-2build2	1.8.0-2build2	unchanged		noble-main
+libjson-glib-1.0-common	all	1.8.0-2build2	1.8.0-2build2	unchanged		noble-main
+libk5crypto3	amd64	1.20.1-6ubuntu2.10	1.20.1-6ubuntu2.10	unchanged		noble-updates-main
+libkeyutils1	amd64	1.6.3-3build1	1.6.3-3build1	unchanged		noble-main
+libklibc	amd64	2.0.13-4ubuntu0.2	2.0.13-4ubuntu0.2	unchanged	security	noble-security-main,noble-updates-main
+libkmod2	amd64	31+20240202-2ubuntu7.2	31+20240202-2ubuntu7.2	unchanged	security	noble-security-main,noble-updates-main
+libkrb5-3	amd64	1.20.1-6ubuntu2.10	1.20.1-6ubuntu2.10	unchanged		noble-updates-main
+libkrb5support0	amd64	1.20.1-6ubuntu2.10	1.20.1-6ubuntu2.10	unchanged		noble-updates-main
+libksba8	amd64	1.6.6-1build1	1.6.6-1build1	unchanged		noble-main
+libldap-common	all	2.6.10+dfsg-0ubuntu0.24.04.1	2.6.10+dfsg-0ubuntu0.24.04.1	unchanged		noble-updates-main
+libldap2	amd64	2.6.10+dfsg-0ubuntu0.24.04.1	2.6.10+dfsg-0ubuntu0.24.04.1	unchanged		noble-updates-main
+liblerc4	amd64	4.0.0+ds-4ubuntu2	4.0.0+ds-4ubuntu2	unchanged		noble-main
+libllvm18	amd64	1:18.1.3-1ubuntu1	1:18.1.3-1ubuntu1	unchanged		noble-updates-main
+liblmdb0	amd64	0.9.31-1build1	0.9.31-1build1	unchanged		noble-main
+liblocale-gettext-perl	amd64	1.07-6ubuntu5	1.07-6ubuntu5	unchanged		noble-main
+liblvm2cmd2.03	amd64	2.03.16-3ubuntu3.2	2.03.16-3ubuntu3.2	unchanged		noble-updates-main
+liblz4-1	amd64	1.9.4-1build1.1	1.9.4-1build1.1	unchanged		noble-updates-main
+liblzma5	amd64	5.6.1+really5.4.5-1ubuntu0.4	5.6.1+really5.4.5-1ubuntu0.4	unchanged	security	noble-security-main,noble-updates-main
+liblzo2-2	amd64	2.10-2build4	2.10-2build4	unchanged		noble-main
+libmagic-mgc	amd64	1:5.45-3build1	1:5.45-3build1	unchanged		noble-main
+libmagic1t64	amd64	1:5.45-3build1	1:5.45-3build1	unchanged		noble-main
+libmaxminddb0	amd64	1.9.1-1build1	1.9.1-1build1	unchanged		noble-main
+libmbim-glib4	amd64	1.31.2-0ubuntu3.1	1.31.2-0ubuntu3.1	unchanged		noble-updates-main
+libmbim-proxy	amd64	1.31.2-0ubuntu3.1	1.31.2-0ubuntu3.1	unchanged		noble-updates-main
+libmbim-utils	amd64	1.31.2-0ubuntu3.1	1.31.2-0ubuntu3.1	unchanged		noble-updates-main
+libmd0	amd64	1.1.0-2build1.1	1.1.0-2build1.1	unchanged		noble-updates-main
+libmm-glib0	amd64	1.23.4-0ubuntu2	1.23.4-0ubuntu2	unchanged		noble-main
+libmnl0	amd64	1.0.5-2build1	1.0.5-2build1	unchanged		noble-main
+libmodule-find-perl	all	0.16-2	0.16-2	unchanged		noble-main
+libmodule-scandeps-perl	all	1.35-1ubuntu0.24.04.1	1.35-1ubuntu0.24.04.1	unchanged	security	noble-security-main,noble-updates-main
+libmount1	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+libmpfr6	amd64	4.2.1-1build1.1	4.2.1-1build1.1	unchanged		noble-updates-main
+libmspack0t64	amd64	0.11-1.1build1	0.11-1.1build1	unchanged		noble-main
+libncurses6	amd64	6.4+20240113-1ubuntu2.2	6.4+20240113-1ubuntu2.2	unchanged	security	noble-security-main,noble-updates-main
+libncursesw6	amd64	6.4+20240113-1ubuntu2.2	6.4+20240113-1ubuntu2.2	unchanged	security	noble-security-main,noble-updates-main
+libnetfilter-conntrack3	amd64	1.0.9-6build1	1.0.9-6build1	unchanged		noble-main
+libnetplan1	amd64	1.1.2-8ubuntu1~24.04.3	1.1.2-8ubuntu1~24.04.3	unchanged		noble-updates-main
+libnettle8t64	amd64	3.9.1-2.2build1.1	3.9.1-2.2build1.1	unchanged		noble-updates-main
+libnewt0.52	amd64	0.52.24-2ubuntu2	0.52.24-2ubuntu2	unchanged		noble-main
+libnfnetlink0	amd64	1.0.2-2build1	1.0.2-2build1	unchanged		noble-main
+libnftables1	amd64	1.0.9-1ubuntu0.1	1.0.9-1ubuntu0.1	unchanged		noble-updates-main
+libnftnl11	amd64	1.2.6-2build1	1.2.6-2build1	unchanged		noble-main
+libnghttp2-14	amd64	1.59.0-1ubuntu0.4	1.59.0-1ubuntu0.4	unchanged	security	noble-security-main,noble-updates-main
+libnl-3-200	amd64	3.7.0-0.3build1.1	3.7.0-0.3build1.1	unchanged		noble-updates-main
+libnl-genl-3-200	amd64	3.7.0-0.3build1.1	3.7.0-0.3build1.1	unchanged		noble-updates-main
+libnl-route-3-200	amd64	3.7.0-0.3build1.1	3.7.0-0.3build1.1	unchanged		noble-updates-main
+libnpth0t64	amd64	1.6-3.1build1	1.6-3.1build1	unchanged		noble-main
+libnspr4	amd64	2:4.35-1.1build1	2:4.35-1.1build1	unchanged		noble-main
+libnss-systemd	amd64	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+libnss3	amd64	2:3.98-1ubuntu0.3	2:3.98-1ubuntu0.3	unchanged	security	noble-security-main,noble-updates-main
+libntfs-3g89t64	amd64	1:2022.10.3-1.2ubuntu3.2	1:2022.10.3-1.2ubuntu3.2	unchanged	security	noble-security-main,noble-updates-main
+libnuma1	amd64	2.0.18-1ubuntu0.24.04.1	2.0.18-1ubuntu0.24.04.1	unchanged		noble-updates-main
+libnvme1t64	amd64	1.8-3ubuntu1	1.8-3ubuntu1	unchanged		noble-updates-main
+libonig5	amd64	6.9.9-1build1	6.9.9-1build1	unchanged		noble-main
+libopeniscsiusr	amd64	2.1.9-3ubuntu5.5	2.1.9-3ubuntu5.5	unchanged		noble-updates-main
+libp11-kit0	amd64	0.25.3-4ubuntu2.2	0.25.3-4ubuntu2.2	unchanged	security	noble-security-main,noble-updates-main
+libpackagekit-glib2-18	amd64	1.2.8-2ubuntu1.5	1.2.8-2ubuntu1.5	unchanged	security	noble-security-main,noble-updates-main
+libpam-cap	amd64	1:2.66-5ubuntu2.4	1:2.66-5ubuntu2.4	unchanged	security	noble-security-main,noble-updates-main
+libpam-modules	amd64	1.5.3-5ubuntu5.7	1.5.3-5ubuntu5.7	unchanged	security	noble-security-main,noble-updates-main
+libpam-modules-bin	amd64	1.5.3-5ubuntu5.7	1.5.3-5ubuntu5.7	unchanged	security	noble-security-main,noble-updates-main
+libpam-runtime	all	1.5.3-5ubuntu5.7	1.5.3-5ubuntu5.7	unchanged	security	noble-security-main,noble-updates-main
+libpam-systemd	amd64	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+libpam0g	amd64	1.5.3-5ubuntu5.7	1.5.3-5ubuntu5.7	unchanged	security	noble-security-main,noble-updates-main
+libpango-1.0-0	amd64	1.52.1+ds-1build1	1.52.1+ds-1build1	unchanged		noble-main
+libpangocairo-1.0-0	amd64	1.52.1+ds-1build1	1.52.1+ds-1build1	unchanged		noble-main
+libpangoft2-1.0-0	amd64	1.52.1+ds-1build1	1.52.1+ds-1build1	unchanged		noble-main
+libparted2t64	amd64	3.6-4build1	3.6-4build1	unchanged		noble-main
+libpcap0.8t64	amd64	1.10.4-4.1ubuntu3.1	1.10.4-4.1ubuntu3.1	unchanged	security	noble-security-main,noble-updates-main
+libpci3	amd64	1:3.10.0-2build1	1:3.10.0-2build1	unchanged		noble-main
+libpcre2-8-0	amd64	10.42-4ubuntu2.1	10.42-4ubuntu2.1	unchanged		noble-updates-main
+libperl5.38t64	amd64	5.38.2-3.2ubuntu0.6	5.38.2-3.2ubuntu0.6	unchanged	security	noble-security-main,noble-updates-main
+libpipeline1	amd64	1.5.7-2	1.5.7-2	unchanged		noble-main
+libpixman-1-0	amd64	0.42.2-1build1	0.42.2-1build1	unchanged		noble-main
+libplymouth5	amd64	24.004.60-1ubuntu7.2	24.004.60-1ubuntu7.2	unchanged		noble-updates-main
+libpng16-16t64	amd64	1.6.43-5ubuntu0.7	1.6.43-5ubuntu0.7	unchanged	security	noble-security-main,noble-updates-main
+libpolkit-agent-1-0	amd64	124-2ubuntu1.24.04.4	124-2ubuntu1.24.04.4	unchanged	security	noble-security-main,noble-updates-main
+libpolkit-gobject-1-0	amd64	124-2ubuntu1.24.04.4	124-2ubuntu1.24.04.4	unchanged	security	noble-security-main,noble-updates-main
+libpopt0	amd64	1.19+dfsg-1build1	1.19+dfsg-1build1	unchanged		noble-main
+libproc-processtable-perl	amd64	0.636-1build3	0.636-1build3	unchanged		noble-main
+libproc2-0	amd64	2:4.0.4-4ubuntu3.3	2:4.0.4-4ubuntu3.3	unchanged		noble-updates-main
+libprotobuf-c1	amd64	1.4.1-1ubuntu4	1.4.1-1ubuntu4	unchanged		noble-main
+libpsl5t64	amd64	0.21.2-1.1build1	0.21.2-1.1build1	unchanged		noble-main
+libpython3-stdlib	amd64	3.12.3-0ubuntu2.1	3.12.3-0ubuntu2.1	unchanged	security	noble-security-main,noble-updates-main
+libpython3.12-minimal	amd64	3.12.3-1ubuntu0.17	3.12.3-1ubuntu0.17	unchanged	security	noble-security-main,noble-updates-main
+libpython3.12-stdlib	amd64	3.12.3-1ubuntu0.17	3.12.3-1ubuntu0.17	unchanged	security	noble-security-main,noble-updates-main
+libpython3.12t64	amd64	3.12.3-1ubuntu0.17	3.12.3-1ubuntu0.17	unchanged	security	noble-security-main,noble-updates-main
+libqmi-glib5	amd64	1.35.2-0ubuntu2	1.35.2-0ubuntu2	unchanged		noble-main
+libqmi-proxy	amd64	1.35.2-0ubuntu2	1.35.2-0ubuntu2	unchanged		noble-main
+libqmi-utils	amd64	1.35.2-0ubuntu2	1.35.2-0ubuntu2	unchanged		noble-main
+libqrtr-glib0	amd64	1.2.2-1ubuntu4	1.2.2-1ubuntu4	unchanged		noble-main
+libreadline8t64	amd64	8.2-4build1	8.2-4build1	unchanged		noble-main
+libreiserfscore0t64	amd64	1:3.6.27-7.1build1	1:3.6.27-7.1build1	unchanged		noble-main
+librtmp1	amd64	2.4+20151223.gitfa8646d.1-2build7	2.4+20151223.gitfa8646d.1-2build7	unchanged		noble-main
+libsasl2-2	amd64	2.1.28+dfsg1-5ubuntu3.1	2.1.28+dfsg1-5ubuntu3.1	unchanged		noble-updates-main
+libsasl2-modules	amd64	2.1.28+dfsg1-5ubuntu3.1	2.1.28+dfsg1-5ubuntu3.1	unchanged		noble-updates-main
+libsasl2-modules-db	amd64	2.1.28+dfsg1-5ubuntu3.1	2.1.28+dfsg1-5ubuntu3.1	unchanged		noble-updates-main
+libseccomp2	amd64	2.5.5-1ubuntu3.1	2.5.5-1ubuntu3.1	unchanged		noble-updates-main
+libselinux1	amd64	3.5-2ubuntu2.1	3.5-2ubuntu2.1	unchanged		noble-updates-main
+libsemanage-common	all	3.5-1build5	3.5-1build5	unchanged		noble-main
+libsemanage2	amd64	3.5-1build5	3.5-1build5	unchanged		noble-main
+libsensors-config	all	1:3.6.0-9build1	1:3.6.0-9build1	unchanged		noble-main
+libsensors5	amd64	1:3.6.0-9build1	1:3.6.0-9build1	unchanged		noble-main
+libsepol2	amd64	3.5-2build1	3.5-2build1	unchanged		noble-main
+libsgutils2-1.46-2	amd64	1.46-3ubuntu4.1	1.46-3ubuntu4.1	unchanged	security	noble-security-main,noble-updates-main
+libsharpyuv0	amd64	1.3.2-0.4build3	1.3.2-0.4build3	unchanged		noble-main
+libsigsegv2	amd64	2.14-1ubuntu2	2.14-1ubuntu2	unchanged		noble-main
+libslang2	amd64	2.3.3-3build2	2.3.3-3build2	unchanged		noble-main
+libsmartcols1	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+libsodium23	amd64	1.0.18-1ubuntu0.24.04.1	1.0.18-1ubuntu0.24.04.1	unchanged	security	noble-security-main,noble-updates-main
+libsort-naturally-perl	all	1.03-4	1.03-4	unchanged		noble-main
+libsqlite3-0	amd64	3.45.1-1ubuntu2.8	3.45.1-1ubuntu2.8	unchanged	security	noble-security-main,noble-updates-main
+libss2	amd64	1.47.0-2.4~exp1ubuntu4.1	1.47.0-2.4~exp1ubuntu4.1	unchanged		noble-updates-main
+libssh-4	amd64	0.10.6-2ubuntu0.5	0.10.6-2ubuntu0.5	unchanged	security	noble-security-main,noble-updates-main
+libssl3t64	amd64	3.0.13-0ubuntu3.16	3.0.13-0ubuntu3.16	unchanged	security	noble-security-main,noble-updates-main
+libstdc++6	amd64	14.2.0-4ubuntu2~24.04.1	14.2.0-4ubuntu2~24.04.1	unchanged	security	noble-security-main,noble-updates-main
+libstemmer0d	amd64	2.2.0-4build1	2.2.0-4build1	unchanged		noble-main
+libsystemd-shared	amd64	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+libsystemd0	amd64	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+libtasn1-6	amd64	4.19.0-3ubuntu0.24.04.2	4.19.0-3ubuntu0.24.04.2	unchanged	security	noble-security-main,noble-updates-main
+libtcl8.6	amd64	8.6.14+dfsg-1build1	8.6.14+dfsg-1build1	unchanged		noble-main
+libterm-readkey-perl	amd64	2.38-2build4	2.38-2build4	unchanged		noble-main
+libtext-charwidth-perl	amd64	0.04-11build3	0.04-11build3	unchanged		noble-main
+libtext-iconv-perl	amd64	1.7-8build3	1.7-8build3	unchanged		noble-main
+libtext-wrapi18n-perl	all	0.06-10	0.06-10	unchanged		noble-main
+libthai-data	all	0.1.29-2build1	0.1.29-2build1	unchanged		noble-main
+libthai0	amd64	0.1.29-2build1	0.1.29-2build1	unchanged		noble-main
+libtiff6	amd64	4.5.1+git230720-4ubuntu2.5	4.5.1+git230720-4ubuntu2.5	unchanged	security	noble-security-main,noble-updates-main
+libtinfo6	amd64	6.4+20240113-1ubuntu2.2	6.4+20240113-1ubuntu2.2	unchanged	security	noble-security-main,noble-updates-main
+libtirpc-common	all	1.3.4+ds-1.1build1	1.3.4+ds-1.1build1	unchanged		noble-main
+libtirpc3t64	amd64	1.3.4+ds-1.1build1	1.3.4+ds-1.1build1	unchanged		noble-main
+libtraceevent1	amd64	1:1.8.2-1ubuntu2.1	1:1.8.2-1ubuntu2.1	unchanged		noble-updates-main
+libtraceevent1-plugin	amd64	1:1.8.2-1ubuntu2.1	1:1.8.2-1ubuntu2.1	unchanged		noble-updates-main
+libtracefs1	amd64	1.8.0-1ubuntu1	1.8.0-1ubuntu1	unchanged		noble-main
+libtss2-esys-3.0.2-0t64	amd64	4.0.1-7.1ubuntu5.1	4.0.1-7.1ubuntu5.1	unchanged	security	noble-security-main,noble-updates-main
+libtss2-mu-4.0.1-0t64	amd64	4.0.1-7.1ubuntu5.1	4.0.1-7.1ubuntu5.1	unchanged	security	noble-security-main,noble-updates-main
+libtss2-sys1t64	amd64	4.0.1-7.1ubuntu5.1	4.0.1-7.1ubuntu5.1	unchanged	security	noble-security-main,noble-updates-main
+libtss2-tcti-cmd0t64	amd64	4.0.1-7.1ubuntu5.1	4.0.1-7.1ubuntu5.1	unchanged	security	noble-security-main,noble-updates-main
+libtss2-tcti-device0t64	amd64	4.0.1-7.1ubuntu5.1	4.0.1-7.1ubuntu5.1	unchanged	security	noble-security-main,noble-updates-main
+libtss2-tcti-mssim0t64	amd64	4.0.1-7.1ubuntu5.1	4.0.1-7.1ubuntu5.1	unchanged	security	noble-security-main,noble-updates-main
+libtss2-tcti-swtpm0t64	amd64	4.0.1-7.1ubuntu5.1	4.0.1-7.1ubuntu5.1	unchanged	security	noble-security-main,noble-updates-main
+libuchardet0	amd64	0.0.8-1build1	0.0.8-1build1	unchanged		noble-main
+libudev1	amd64	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+libudisks2-0	amd64	2.10.1-6ubuntu1.5	2.10.1-6ubuntu1.5	unchanged	security	noble-security-main,noble-updates-main
+libunistring5	amd64	1.1-2build1.1	1.1-2build1.1	unchanged		noble-updates-main
+libunwind8	amd64	1.6.2-3build1.1	1.6.2-3build1.1	unchanged		noble-updates-main
+liburcu8t64	amd64	0.14.0-3.1build1	0.14.0-3.1build1	unchanged		noble-main
+libusb-1.0-0	amd64	2:1.0.27-1	2:1.0.27-1	unchanged		noble-main
+libutempter0	amd64	1.2.1-3build1	1.2.1-3build1	unchanged		noble-main
+libuuid1	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+libuv1t64	amd64	1.48.0-1.1build1	1.48.0-1.1build1	unchanged		noble-main
+libvolume-key1	amd64	0.3.12-7build2	0.3.12-7build2	unchanged		noble-main
+libwebp7	amd64	1.3.2-0.4build3	1.3.2-0.4build3	unchanged		noble-main
+libwrap0	amd64	7.6.q-33	7.6.q-33	unchanged		noble-main
+libx11-6	amd64	2:1.8.7-1ubuntu0.1	2:1.8.7-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libx11-data	all	2:1.8.7-1ubuntu0.1	2:1.8.7-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+libxau6	amd64	1:1.0.9-1build6	1:1.0.9-1build6	unchanged		noble-main
+libxcb-render0	amd64	1.15-1ubuntu2	1.15-1ubuntu2	unchanged		noble-main
+libxcb-shm0	amd64	1.15-1ubuntu2	1.15-1ubuntu2	unchanged		noble-main
+libxcb1	amd64	1.15-1ubuntu2	1.15-1ubuntu2	unchanged		noble-main
+libxdmcp6	amd64	1:1.1.3-0ubuntu6	1:1.1.3-0ubuntu6	unchanged		noble-main
+libxext6	amd64	2:1.3.4-1build2	2:1.3.4-1build2	unchanged		noble-main
+libxkbcommon0	amd64	1.6.0-1build1	1.6.0-1build1	unchanged		noble-main
+libxml2	amd64	2.9.14+dfsg-1.3ubuntu3.10	2.9.14+dfsg-1.3ubuntu3.10	unchanged	security	noble-security-main,noble-updates-main
+libxmlb2	amd64	0.3.24-1~ubuntu0.24.04.1	0.3.24-1~ubuntu0.24.04.1	unchanged		noble-updates-main
+libxmlsec1t64	amd64	1.2.39-5build2	1.2.39-5build2	unchanged		noble-main
+libxmlsec1t64-openssl	amd64	1.2.39-5build2	1.2.39-5build2	unchanged		noble-main
+libxmuu1	amd64	2:1.1.3-3build2	2:1.1.3-3build2	unchanged		noble-main
+libxpm4	amd64	1:3.5.17-1ubuntu0.24.04.2	1:3.5.17-1ubuntu0.24.04.2	unchanged	security	noble-security-main,noble-updates-main
+libxrender1	amd64	1:0.9.10-1.1build1	1:0.9.10-1.1build1	unchanged		noble-main
+libxslt1.1	amd64	1.1.39-0exp1ubuntu0.24.04.3	1.1.39-0exp1ubuntu0.24.04.3	unchanged	security	noble-security-main,noble-updates-main
+libxtables12	amd64	1.8.10-3ubuntu2	1.8.10-3ubuntu2	unchanged		noble-main
+libxxhash0	amd64	0.8.2-2build1	0.8.2-2build1	unchanged		noble-main
+libyaml-0-2	amd64	0.2.5-1build1	0.2.5-1build1	unchanged		noble-main
+libzstd1	amd64	1.5.5+dfsg2-2build1.1	1.5.5+dfsg2-2build1.1	unchanged		noble-updates-main
+linux-base	all	4.5ubuntu9+24.04.2	4.5ubuntu9+24.04.2	unchanged		noble-updates-main
+linux-image-7.0.0-38-generic	amd64	7.0.0-38.38~24.04.4		removed-kernel	security	superseded ABI 7.0.0-38 purged; newest 7.0.0-42
+linux-image-virtual-hwe-24.04	amd64	7.0.0-38.38~24.04.4	7.0.0-42.42~24.04.1	upgrade	security	noble-updates-main
+linux-libc-dev	amd64	6.8.0-147.147	6.8.0-147.147	unchanged	security	noble-security-main,noble-updates-main
+linux-main-modules-v4l2loopback-7.0.0-38-generic	amd64	7.0.0-38.38~24.04.4		removed-kernel	security	superseded ABI 7.0.0-38 purged; newest 7.0.0-42
+linux-main-modules-zfs-7.0.0-38-generic	amd64	7.0.0-38.38~24.04.4		removed-kernel	security	superseded ABI 7.0.0-38 purged; newest 7.0.0-42
+linux-modules-7.0.0-38-generic	amd64	7.0.0-38.38~24.04.4		removed-kernel	security	superseded ABI 7.0.0-38 purged; newest 7.0.0-42
+linux-tools-common	all	6.8.0-147.147	6.8.0-147.147	unchanged	security	noble-security-main,noble-updates-main
+locales	all	2.39-0ubuntu8.9	2.39-0ubuntu8.9	unchanged	security	noble-security-main,noble-updates-main
+login	amd64	1:4.13+dfsg1-4ubuntu3.2	1:4.13+dfsg1-4ubuntu3.2	unchanged		noble-updates-main
+logrotate	amd64	3.21.0-2build1	3.21.0-2build1	unchanged		noble-main
+logsave	amd64	1.47.0-2.4~exp1ubuntu4.1	1.47.0-2.4~exp1ubuntu4.1	unchanged		noble-updates-main
+lsb-release	all	12.0-2	12.0-2	unchanged		noble-main
+lshw	amd64	02.19.git.2021.06.19.996aaad9c7-2ubuntu0.24.04.1	02.19.git.2021.06.19.996aaad9c7-2ubuntu0.24.04.1	unchanged		noble-updates-main
+lsof	amd64	4.95.0-1build3	4.95.0-1build3	unchanged		noble-main
+lvm2	amd64	2.03.16-3ubuntu3.2	2.03.16-3ubuntu3.2	unchanged		noble-updates-main
+lxd-agent-loader	all	0.7ubuntu0.1	0.7ubuntu0.1	unchanged		noble-updates-main
+lxd-installer	all	4ubuntu0.1	4ubuntu0.1	unchanged		noble-updates-main
+man-db	amd64	2.12.0-4build2	2.12.0-4build2	unchanged		noble-main
+manpages	all	6.7-2	6.7-2	unchanged		noble-main
+manpages-dev	all	6.7-2	6.7-2	unchanged		noble-main
+mawk	amd64	1.3.4.20240123-1build1	1.3.4.20240123-1build1	unchanged		noble-main
+mdadm	amd64	4.3-1ubuntu2.1	4.3-1ubuntu2.1	unchanged		noble-updates-main
+media-types	all	10.1.0	10.1.0	unchanged		noble-main
+modemmanager	amd64	1.23.4-0ubuntu2	1.23.4-0ubuntu2	unchanged		noble-main
+mokutil	amd64	0.6.0-2build3	0.6.0-2build3	unchanged		noble-main
+motd-news-config	all	13ubuntu10.5	13ubuntu10.5	unchanged		noble-updates-main
+mount	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+mtr-tiny	amd64	0.95-1.1ubuntu0.1	0.95-1.1ubuntu0.1	unchanged		noble-updates-main
+multipath-tools	amd64	0.9.4-5ubuntu8.2	0.9.4-5ubuntu8.2	unchanged		noble-updates-main
+nano	amd64	7.2-2ubuntu0.2	7.2-2ubuntu0.2	unchanged	security	noble-security-main,noble-updates-main
+ncurses-base	all	6.4+20240113-1ubuntu2.2	6.4+20240113-1ubuntu2.2	unchanged	security	noble-security-main,noble-updates-main
+ncurses-bin	amd64	6.4+20240113-1ubuntu2.2	6.4+20240113-1ubuntu2.2	unchanged	security	noble-security-main,noble-updates-main
+ncurses-term	all	6.4+20240113-1ubuntu2.2	6.4+20240113-1ubuntu2.2	unchanged	security	noble-security-main,noble-updates-main
+needrestart	all	3.6-7ubuntu4.5	3.6-7ubuntu4.5	unchanged	security	noble-security-main,noble-updates-main
+netbase	all	6.4	6.4	unchanged		noble-main
+netcat-openbsd	amd64	1.226-1ubuntu2	1.226-1ubuntu2	unchanged		noble-main
+netplan-generator	amd64	1.1.2-8ubuntu1~24.04.3	1.1.2-8ubuntu1~24.04.3	unchanged		noble-updates-main
+netplan.io	amd64	1.1.2-8ubuntu1~24.04.3	1.1.2-8ubuntu1~24.04.3	unchanged		noble-updates-main
+networkd-dispatcher	all	2.2.4-1	2.2.4-1	unchanged		noble-main
+nftables	amd64	1.0.9-1ubuntu0.1	1.0.9-1ubuntu0.1	unchanged		noble-updates-main
+ntfs-3g	amd64	1:2022.10.3-1.2ubuntu3.2	1:2022.10.3-1.2ubuntu3.2	unchanged	security	noble-security-main,noble-updates-main
+numactl	amd64	2.0.18-1ubuntu0.24.04.1	2.0.18-1ubuntu0.24.04.1	unchanged		noble-updates-main
+open-iscsi	amd64	2.1.9-3ubuntu5.5	2.1.9-3ubuntu5.5	unchanged		noble-updates-main
+open-vm-tools	amd64	2:13.0.10-0ubuntu0.24.04.2	2:13.0.10-0ubuntu0.24.04.2	unchanged		noble-updates-main
+openssh-client	amd64	1:9.6p1-3ubuntu13.20	1:9.6p1-3ubuntu13.20	unchanged	security	noble-security-main,noble-updates-main
+openssh-server	amd64	1:9.6p1-3ubuntu13.20	1:9.6p1-3ubuntu13.20	unchanged	security	noble-security-main,noble-updates-main
+openssh-sftp-server	amd64	1:9.6p1-3ubuntu13.20	1:9.6p1-3ubuntu13.20	unchanged	security	noble-security-main,noble-updates-main
+openssl	amd64	3.0.13-0ubuntu3.16	3.0.13-0ubuntu3.16	unchanged	security	noble-security-main,noble-updates-main
+os-prober	amd64	1.81ubuntu4	1.81ubuntu4	unchanged		noble-main
+overlayroot	all	0.49~24.04.1	0.49~24.04.1	unchanged		noble-updates-main
+packagekit	amd64	1.2.8-2ubuntu1.5	1.2.8-2ubuntu1.5	unchanged	security	noble-security-main,noble-updates-main
+packagekit-tools	amd64	1.2.8-2ubuntu1.5	1.2.8-2ubuntu1.5	unchanged	security	noble-security-main,noble-updates-main
+parted	amd64	3.6-4build1	3.6-4build1	unchanged		noble-main
+passwd	amd64	1:4.13+dfsg1-4ubuntu3.2	1:4.13+dfsg1-4ubuntu3.2	unchanged		noble-updates-main
+pastebinit	all	1.6.2-1	1.6.2-1	unchanged		noble-main
+patch	amd64	2.7.6-7build3	2.7.6-7build3	unchanged		noble-main
+pci.ids	all	0.0~2024.03.31-1ubuntu0.1	0.0~2024.03.31-1ubuntu0.1	unchanged		noble-updates-main
+pciutils	amd64	1:3.10.0-2build1	1:3.10.0-2build1	unchanged		noble-main
+perl	amd64	5.38.2-3.2ubuntu0.6	5.38.2-3.2ubuntu0.6	unchanged	security	noble-security-main,noble-updates-main
+perl-base	amd64	5.38.2-3.2ubuntu0.6	5.38.2-3.2ubuntu0.6	unchanged	security	noble-security-main,noble-updates-main
+perl-modules-5.38	all	5.38.2-3.2ubuntu0.6	5.38.2-3.2ubuntu0.6	unchanged	security	noble-security-main,noble-updates-main
+pigz	amd64	2.8-1	2.8-1	unchanged		noble-universe
+pinentry-curses	amd64	1.2.1-3ubuntu5	1.2.1-3ubuntu5	unchanged		noble-main
+plymouth	amd64	24.004.60-1ubuntu7.2	24.004.60-1ubuntu7.2	unchanged		noble-updates-main
+plymouth-label	amd64	24.004.60-1ubuntu7.2	24.004.60-1ubuntu7.2	unchanged		noble-updates-main
+plymouth-theme-ubuntu-text	amd64	24.004.60-1ubuntu7.2	24.004.60-1ubuntu7.2	unchanged		noble-updates-main
+polkitd	amd64	124-2ubuntu1.24.04.4	124-2ubuntu1.24.04.4	unchanged	security	noble-security-main,noble-updates-main
+pollinate	all	4.33-3.1ubuntu1.3	4.33-3.1ubuntu1.3	unchanged	security	noble-security-main,noble-updates-main
+powermgmt-base	all	1.37ubuntu0.1	1.37ubuntu0.1	unchanged		noble-updates-main
+procps	amd64	2:4.0.4-4ubuntu3.3	2:4.0.4-4ubuntu3.3	unchanged		noble-updates-main
+psmisc	amd64	23.7-1build1	23.7-1build1	unchanged		noble-main
+publicsuffix	all	20231001.0357-0.1	20231001.0357-0.1	unchanged		noble-main
+python-apt-common	all	2.7.7ubuntu5.3	2.7.7ubuntu5.3	unchanged		noble-updates-main
+python-babel-localedata	all	2.10.3-3build1	2.10.3-3build1	unchanged		noble-main
+python3	amd64	3.12.3-0ubuntu2.1	3.12.3-0ubuntu2.1	unchanged	security	noble-security-main,noble-updates-main
+python3-apport	all	2.28.3-0ubuntu0.1	2.28.3-0ubuntu0.1	unchanged		noble-updates-main
+python3-apt	amd64	2.7.7ubuntu5.3	2.7.7ubuntu5.3	unchanged		noble-updates-main
+python3-attr	all	23.2.0-2	23.2.0-2	unchanged		noble-main
+python3-automat	all	22.10.0-2	22.10.0-2	unchanged		noble-main
+python3-babel	all	2.10.3-3build1	2.10.3-3build1	unchanged		noble-main
+python3-bcrypt	amd64	3.2.2-1build1	3.2.2-1build1	unchanged		noble-main
+python3-blinker	all	1.7.0-1	1.7.0-1	unchanged		noble-main
+python3-boto3	all	1.34.46+dfsg-1ubuntu1	1.34.46+dfsg-1ubuntu1	unchanged		noble-main
+python3-botocore	all	1.34.46+repack-1ubuntu1	1.34.46+repack-1ubuntu1	unchanged		noble-main
+python3-bpfcc	all	0.29.1+ds-1ubuntu7	0.29.1+ds-1ubuntu7	unchanged		noble-main
+python3-certifi	all	2023.11.17-1	2023.11.17-1	unchanged		noble-main
+python3-cffi-backend	amd64	1.16.0-2build1	1.16.0-2build1	unchanged		noble-main
+python3-chardet	all	5.2.0+dfsg-1	5.2.0+dfsg-1	unchanged		noble-main
+python3-click	all	8.1.6-2	8.1.6-2	unchanged		noble-main
+python3-colorama	all	0.4.6-4	0.4.6-4	unchanged		noble-main
+python3-commandnotfound	all	23.04.0	23.04.0	unchanged		noble-main
+python3-configobj	all	5.0.8-3	5.0.8-3	unchanged		noble-main
+python3-constantly	all	23.10.4-1	23.10.4-1	unchanged		noble-main
+python3-cryptography	amd64	41.0.7-4ubuntu0.4	41.0.7-4ubuntu0.4	unchanged	security	noble-security-main,noble-updates-main
+python3-dateutil	all	2.8.2-3ubuntu1	2.8.2-3ubuntu1	unchanged		noble-main
+python3-dbus	amd64	1.3.2-5build3	1.3.2-5build3	unchanged		noble-main
+python3-debconf	all	1.5.86ubuntu1	1.5.86ubuntu1	unchanged		noble-main
+python3-debian	all	0.1.49ubuntu2	0.1.49ubuntu2	unchanged		noble-main
+python3-distro	all	1.9.0-1	1.9.0-1	unchanged		noble-main
+python3-distro-info	all	1.7build1	1.7build1	unchanged		noble-main
+python3-distupgrade	all	1:24.04.29	1:24.04.29	unchanged		noble-updates-main
+python3-gdbm	amd64	3.12.3-0ubuntu1	3.12.3-0ubuntu1	unchanged		noble-main
+python3-gi	amd64	3.48.2-1	3.48.2-1	unchanged		noble-main
+python3-hamcrest	all	2.1.0-1	2.1.0-1	unchanged		noble-main
+python3-httplib2	all	0.20.4-3ubuntu0.1	0.20.4-3ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+python3-hyperlink	all	21.0.0-5	21.0.0-5	unchanged		noble-main
+python3-idna	all	3.6-2ubuntu0.2	3.6-2ubuntu0.2	unchanged	security	noble-security-main,noble-updates-main
+python3-incremental	all	22.10.0-1	22.10.0-1	unchanged		noble-main
+python3-jinja2	all	3.1.2-1ubuntu1.3	3.1.2-1ubuntu1.3	unchanged	security	noble-security-main,noble-updates-main
+python3-jmespath	all	1.0.1-1	1.0.1-1	unchanged		noble-main
+python3-json-pointer	all	2.0-0ubuntu1	2.0-0ubuntu1	unchanged		noble-main
+python3-jsonpatch	all	1.32-3	1.32-3	unchanged		noble-main
+python3-jsonschema	all	4.10.3-2ubuntu1	4.10.3-2ubuntu1	unchanged		noble-main
+python3-jwt	all	2.7.0-1ubuntu0.4	2.7.0-1ubuntu0.4	unchanged	security	noble-security-main,noble-updates-main
+python3-launchpadlib	all	1.11.0-6	1.11.0-6	unchanged		noble-main
+python3-lazr.restfulclient	all	0.14.6-1	0.14.6-1	unchanged		noble-main
+python3-lazr.uri	all	1.0.6-3	1.0.6-3	unchanged		noble-main
+python3-magic	all	2:0.4.27-3	2:0.4.27-3	unchanged		noble-main
+python3-markdown-it	all	3.0.0-2	3.0.0-2	unchanged		noble-main
+python3-markupsafe	amd64	2.1.5-1build2	2.1.5-1build2	unchanged		noble-main
+python3-mdurl	all	0.1.2-1	0.1.2-1	unchanged		noble-main
+python3-minimal	amd64	3.12.3-0ubuntu2.1	3.12.3-0ubuntu2.1	unchanged	security	noble-security-main,noble-updates-main
+python3-netaddr	all	0.8.0-2ubuntu1	0.8.0-2ubuntu1	unchanged		noble-main
+python3-netifaces	amd64	0.11.0-2build3	0.11.0-2build3	unchanged		noble-main
+python3-netplan	amd64	1.1.2-8ubuntu1~24.04.3	1.1.2-8ubuntu1~24.04.3	unchanged		noble-updates-main
+python3-newt	amd64	0.52.24-2ubuntu2	0.52.24-2ubuntu2	unchanged		noble-main
+python3-oauthlib	all	3.2.2-1	3.2.2-1	unchanged		noble-main
+python3-openssl	all	23.2.0-1ubuntu0.1	23.2.0-1ubuntu0.1	unchanged	security	noble-security-main,noble-updates-main
+python3-packaging	all	24.0-1	24.0-1	unchanged		noble-main
+python3-pexpect	all	4.9-2	4.9-2	unchanged		noble-main
+python3-pkg-resources	all	68.1.2-2ubuntu1.2	68.1.2-2ubuntu1.2	unchanged	security	noble-security-main,noble-updates-main
+python3-problem-report	all	2.28.3-0ubuntu0.1	2.28.3-0ubuntu0.1	unchanged		noble-updates-main
+python3-ptyprocess	all	0.7.0-5	0.7.0-5	unchanged		noble-main
+python3-pyasn1	all	0.4.8-4ubuntu0.3	0.4.8-4ubuntu0.3	unchanged	security	noble-security-main,noble-updates-main
+python3-pyasn1-modules	all	0.2.8-1	0.2.8-1	unchanged		noble-main
+python3-pygments	all	2.17.2+dfsg-1	2.17.2+dfsg-1	unchanged		noble-main
+python3-pyparsing	all	3.1.1-1	3.1.1-1	unchanged		noble-main
+python3-pyrsistent	amd64	0.20.0-1build2	0.20.0-1build2	unchanged		noble-main
+python3-requests	all	2.31.0+dfsg-1ubuntu1.2	2.31.0+dfsg-1ubuntu1.2	unchanged	security	noble-security-main,noble-updates-main
+python3-rich	all	13.7.1-1	13.7.1-1	unchanged		noble-main
+python3-s3transfer	all	0.10.1-1ubuntu2	0.10.1-1ubuntu2	unchanged		noble-main
+python3-serial	all	3.5-2	3.5-2	unchanged		noble-main
+python3-service-identity	all	24.1.0-1	24.1.0-1	unchanged		noble-main
+python3-setuptools	all	68.1.2-2ubuntu1.2	68.1.2-2ubuntu1.2	unchanged	security	noble-security-main,noble-updates-main
+python3-six	all	1.16.0-4	1.16.0-4	unchanged		noble-main
+python3-software-properties	all	0.99.49.4	0.99.49.4	unchanged		noble-updates-main
+python3-systemd	amd64	235-1build4	235-1build4	unchanged		noble-main
+python3-twisted	all	24.3.0-1ubuntu0.2	24.3.0-1ubuntu0.2	unchanged	security	noble-security-main,noble-updates-main
+python3-typing-extensions	all	4.10.0-1	4.10.0-1	unchanged		noble-main
+python3-tz	all	2024.1-2	2024.1-2	unchanged		noble-main
+python3-update-manager	all	1:24.04.12	1:24.04.12	unchanged		noble-updates-main
+python3-urllib3	all	2.0.7-1ubuntu0.8	2.0.7-1ubuntu0.8	unchanged	security	noble-security-main,noble-updates-main
+python3-wadllib	all	1.3.6-5	1.3.6-5	unchanged		noble-main
+python3-yaml	amd64	6.0.1-2build2	6.0.1-2build2	unchanged		noble-main
+python3-zope.interface	amd64	6.1-1build1	6.1-1build1	unchanged		noble-main
+python3.12	amd64	3.12.3-1ubuntu0.17	3.12.3-1ubuntu0.17	unchanged	security	noble-security-main,noble-updates-main
+python3.12-minimal	amd64	3.12.3-1ubuntu0.17	3.12.3-1ubuntu0.17	unchanged	security	noble-security-main,noble-updates-main
+readline-common	all	8.2-4build1	8.2-4build1	unchanged		noble-main
+rpcsvc-proto	amd64	1.4.2-0ubuntu7	1.4.2-0ubuntu7	unchanged		noble-main
+rsync	amd64	3.2.7-1ubuntu1.5	3.2.7-1ubuntu1.5	unchanged	security	noble-security-main,noble-updates-main
+rsyslog	amd64	8.2312.0-3ubuntu9.4	8.2312.0-3ubuntu9.4	unchanged	security	noble-security-main,noble-updates-main
+run-one	all	1.17-0ubuntu2	1.17-0ubuntu2	unchanged		noble-main
+sbsigntool	amd64	0.9.4-3.1ubuntu7	0.9.4-3.1ubuntu7	unchanged		noble-main
+screen	amd64	4.9.1-1ubuntu1	4.9.1-1ubuntu1	unchanged	security	noble-security-main,noble-updates-main
+secureboot-db	amd64	1.9build1	1.9build1	unchanged		noble-main
+sed	amd64	4.9-2ubuntu0.24.04.1	4.9-2ubuntu0.24.04.1	unchanged	security	noble-security-main,noble-updates-main
+sensible-utils	all	0.0.22	0.0.22	unchanged		noble-main
+sg3-utils	amd64	1.46-3ubuntu4.1	1.46-3ubuntu4.1	unchanged	security	noble-security-main,noble-updates-main
+sg3-utils-udev	all	1.46-3ubuntu4.1	1.46-3ubuntu4.1	unchanged	security	noble-security-main,noble-updates-main
+sgml-base	all	1.31	1.31	unchanged		noble-main
+shared-mime-info	amd64	2.4-4	2.4-4	unchanged		noble-main
+shim-signed	amd64	1.58+15.8-0ubuntu1	1.58+15.8-0ubuntu1	unchanged		noble-main
+software-properties-common	all	0.99.49.4	0.99.49.4	unchanged		noble-updates-main
+sosreport	amd64	4.11.2-0ubuntu0~24.04.1	4.11.2-0ubuntu0~24.04.1	unchanged		noble-updates-main
+squashfs-tools	amd64	1:4.6.1-1build1	1:4.6.1-1build1	unchanged		noble-main
+ssh-import-id	all	5.11-0ubuntu2.24.04.1	5.11-0ubuntu2.24.04.1	unchanged		noble-updates-main
+strace	amd64	6.8-0ubuntu2	6.8-0ubuntu2	unchanged		noble-main
+sudo	amd64	1.9.15p5-3ubuntu5.24.04.4	1.9.15p5-3ubuntu5.24.04.4	unchanged	security	noble-security-main,noble-updates-main
+sysstat	amd64	12.6.1-2	12.6.1-2	unchanged		noble-main
+systemd	amd64	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+systemd-dev	all	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+systemd-hwe-hwdb	all	255.1.7	255.1.7	unchanged		noble-updates-main
+systemd-resolved	amd64	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+systemd-sysv	amd64	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+systemd-timesyncd	amd64	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+sysvinit-utils	amd64	3.08-6ubuntu3	3.08-6ubuntu3	unchanged		noble-main
+tar	amd64	1.35+dfsg-3ubuntu0.4	1.35+dfsg-3ubuntu0.4	unchanged	security	noble-security-main,noble-updates-main
+tcl	amd64	8.6.14build1	8.6.14build1	unchanged		noble-main
+tcl8.6	amd64	8.6.14+dfsg-1build1	8.6.14+dfsg-1build1	unchanged		noble-main
+tcpdump	amd64	4.99.4-3ubuntu4.24.04.1	4.99.4-3ubuntu4.24.04.1	unchanged		noble-updates-main
+telnet	all	0.17+2.5-3ubuntu4.2	0.17+2.5-3ubuntu4.2	unchanged	security	noble-security-main,noble-updates-main
+thin-provisioning-tools	amd64	0.9.0-2ubuntu5.1	0.9.0-2ubuntu5.1	unchanged		noble-updates-main
+time	amd64	1.9-0.2build1	1.9-0.2build1	unchanged		noble-main
+tmux	amd64	3.4-1ubuntu0.2	3.4-1ubuntu0.2	unchanged		noble-updates-main
+tnftp	amd64	20230507-2build3	20230507-2build3	unchanged		noble-main
+tpm-udev	all	0.6ubuntu1	0.6ubuntu1	unchanged		noble-main
+trace-cmd	amd64	3.2-1ubuntu2	3.2-1ubuntu2	unchanged		noble-main
+tzdata	all	2026e-0ubuntu0.24.04.1	2026e-0ubuntu0.24.04.1	unchanged	security	noble-security-main,noble-updates-main
+ubuntu-kernel-accessories	amd64	1.539.2	1.539.2	unchanged		noble-updates-main
+ubuntu-keyring	all	2023.11.28.1	2023.11.28.1	unchanged		noble-main
+ubuntu-minimal	amd64	1.539.2	1.539.2	unchanged		noble-updates-main
+ubuntu-pro-client	amd64	38ubuntu0~24.04	38ubuntu0~24.04	unchanged		noble-updates-main
+ubuntu-pro-client-l10n	amd64	38ubuntu0~24.04	38ubuntu0~24.04	unchanged		noble-updates-main
+ubuntu-release-upgrader-core	all	1:24.04.29	1:24.04.29	unchanged		noble-updates-main
+ubuntu-server	amd64	1.539.2	1.539.2	unchanged		noble-updates-main
+ubuntu-standard	amd64	1.539.2	1.539.2	unchanged		noble-updates-main
+ucf	all	3.0043+nmu1	3.0043+nmu1	unchanged		noble-main
+udev	amd64	255.4-1ubuntu8.18	255.4-1ubuntu8.18	unchanged	security	noble-security-main,noble-updates-main
+udisks2	amd64	2.10.1-6ubuntu1.5	2.10.1-6ubuntu1.5	unchanged	security	noble-security-main,noble-updates-main
+ufw	all	0.36.2-6	0.36.2-6	unchanged		noble-main
+unattended-upgrades	all	2.9.1+nmu4ubuntu1	2.9.1+nmu4ubuntu1	unchanged		noble-main
+update-manager-core	all	1:24.04.12	1:24.04.12	unchanged		noble-updates-main
+update-notifier-common	all	3.192.68.2	3.192.68.2	unchanged		noble-updates-main
+usb-modeswitch	amd64	2.6.1-3ubuntu3	2.6.1-3ubuntu3	unchanged		noble-main
+usb-modeswitch-data	all	20191128-6	20191128-6	unchanged		noble-main
+usb.ids	all	2024.03.18-1	2024.03.18-1	unchanged		noble-main
+usbutils	amd64	1:017-3build1	1:017-3build1	unchanged		noble-main
+util-linux	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+uuid-runtime	amd64	2.39.3-9ubuntu6.6	2.39.3-9ubuntu6.6	unchanged	security	noble-security-main,noble-updates-main
+vim	amd64	2:9.1.0016-1ubuntu7.20	2:9.1.0016-1ubuntu7.20	unchanged	security	noble-security-main,noble-updates-main
+vim-common	all	2:9.1.0016-1ubuntu7.20	2:9.1.0016-1ubuntu7.20	unchanged	security	noble-security-main,noble-updates-main
+vim-runtime	all	2:9.1.0016-1ubuntu7.20	2:9.1.0016-1ubuntu7.20	unchanged	security	noble-security-main,noble-updates-main
+vim-tiny	amd64	2:9.1.0016-1ubuntu7.20	2:9.1.0016-1ubuntu7.20	unchanged	security	noble-security-main,noble-updates-main
+wget	amd64	1.21.4-1ubuntu4.5	1.21.4-1ubuntu4.5	unchanged	security	noble-security-main,noble-updates-main
+whiptail	amd64	0.52.24-2ubuntu2	0.52.24-2ubuntu2	unchanged		noble-main
+wireless-regdb	all	2026.05.30-0ubuntu1~24.04.1	2026.05.30-0ubuntu1~24.04.1	unchanged	security	noble-security-main,noble-updates-main
+xauth	amd64	1:1.1.2-1build1	1:1.1.2-1build1	unchanged		noble-main
+xdg-user-dirs	amd64	0.18-1build1	0.18-1build1	unchanged		noble-main
+xfsprogs	amd64	6.6.0-1ubuntu2.1	6.6.0-1ubuntu2.1	unchanged		noble-updates-main
+xkb-data	all	2.41-2ubuntu1.1	2.41-2ubuntu1.1	unchanged		noble-updates-main
+xml-core	all	0.19	0.19	unchanged		noble-main
+xxd	amd64	2:9.1.0016-1ubuntu7.20	2:9.1.0016-1ubuntu7.20	unchanged	security	noble-security-main,noble-updates-main
+xz-utils	amd64	5.6.1+really5.4.5-1ubuntu0.4	5.6.1+really5.4.5-1ubuntu0.4	unchanged	security	noble-security-main,noble-updates-main
+zerofree	amd64	1.1.1-1build5	1.1.1-1build5	unchanged		noble-main
+zlib1g	amd64	1:1.3.dfsg-3.1ubuntu2.3	1:1.3.dfsg-3.1ubuntu2.3	unchanged	security	noble-security-main,noble-updates-main
+zstd	amd64	1.5.5+dfsg2-2build1.1	1.5.5+dfsg2-2build1.1	unchanged		noble-updates-main
+linux-image-7.0.0-42-generic	amd64		7.0.0-42.42~24.04.1	added		noble-updates-main
+linux-main-modules-v4l2loopback-7.0.0-42-generic	amd64		7.0.0-42.42~24.04.1	added		noble-updates-main
+linux-main-modules-zfs-7.0.0-42-generic	amd64		7.0.0-42.42~24.04.1	added		noble-updates-main
+linux-modules-7.0.0-42-generic	amd64		7.0.0-42.42~24.04.1	added		noble-updates-main

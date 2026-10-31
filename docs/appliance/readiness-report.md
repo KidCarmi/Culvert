@@ -6,6 +6,42 @@
 
 This report separates **implemented**, **tested** (and how: unit gates, executed Docker qualification against real images, CI), **blocked** (exact prerequisite), and **unsupported** (deliberately out of the pilot). Nothing here claims production readiness; the product document deadline is not a deployment date.
 
+## 0-FB1b. Status update (2026-10-31): FB-1 corrections and snapshot pin raise (artifact closure pending)
+
+This block supersedes nothing below it. It records **one owner-directed round** (PR #1528, 31 Oct) on `review/1528-m1-engine-pins`. No OVA was built, no guest or VM was run, and ESXi was not touched. PR #1528's frozen branch (`4524311b`) is unchanged.
+
+**What changed**
+
+| | |
+|---|---|
+| **ASTRA finding 1: impossible snapshot IDs passed** | The ID must now be a real UTC instant, proved by a round trip through `date -u -d`. It must also be strictly earlier than **one** build start, which `build-ova.sh` records before any host fetch and hands to the guest. The guest never compares against its own clock. |
+| **ASTRA finding 2: versions were not bytes** | Three new checks bind bytes, not just versions:<ul><li>`manifest.env` pins the four Docker `.deb` SHA-256 values;</li><li>the guest writes an acquisition receipt (`acquired-debs.tsv`) and refuses Docker bytes that differ from the pins;</li><li>the host reconciler checks every acquired file against the authenticated snapshot index, or against the Docker pin, and refuses a Docker index that lists another hash.</li></ul>`package-provenance.tsv` now carries a binding column. **Limit:** packages inherited from the base image are bound only by `BASE_IMAGE_SHA256`. |
+| **Pin** | `20261029T180000Z`. Its four InRelease files equal the indexes of the owner-approved kernel-42 transaction. |
+| **Predicted package delta vs 325c142a** (680 rows, Debian ordering) | 671 unchanged; 4 Docker unchanged at the pins; kernel 7.0.0-38 → **7.0.0-42.42~24.04.1** (meta + 4 added, 4 superseded purged); **0 downgrades, 0 outside the snapshot**. All 209 security-pocket rows are kept or superseded by the approved kernel. |
+
+The detail is in `evidence/combined/future-build/FB-1-APT-SNAPSHOT.md` §7 and `fb1-snapshot-20261029/README.md`.
+
+**Tests.** Every FB-1 test passes, and the full root package passes. Mutations: 14 of 14 caught. Local C5/C6 against the pin (APT 2.8.3) passes:
+- the four Docker `.deb` files equal their pins;
+- the five kernel `.deb` files are 7.0.0-42, and each equals its snapshot index entry and its approved identity.
+
+The lab T4/C5/C6 runs and CI on the final SHA, each with its job's actual checkout SHA, are in the PR #1528 handoff.
+
+**Frozen build BOM:** `evidence/combined/future-build/BUILD-BOM.md`.
+
+**Exact prerequisites for one replacement build**
+1. ASTRA's acceptance of these corrections, the pin and the BOM.
+2. Green required CI on the final SHA, and lab T4/C5/C6 on that SHA (handoff).
+3. The Deep image of the final SHA preserved past its one-day expiry (lab `[preserve-image]`, no build or boot).
+4. Owner build authorization.
+5. After the build:
+   - the BOM §7 identity step, with T5 included;
+   - exact-byte scans;
+   - ASTRA's impacted qualification;
+   - R6/R7 dispositions refreshed for the kernel-42 package set.
+
+MERGE / PILOT / RELEASE remain **NO-GO**. Only the owner approves a GO.
+
 ## 0-FB1. Status update (2026-10-30): FB-1 snapshot provenance fixed in source (artifact closure pending)
 
 This block supersedes nothing below it. It records **one owner-authorized change**: FB-1 implementation, isolated verification and CI (PR #1528, 30 Oct). No OVA was built, no guest was deployed, and ESXi was not touched.

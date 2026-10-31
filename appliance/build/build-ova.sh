@@ -44,6 +44,7 @@
 #   package-provenance.tsv (every installed package reconciled against the
 #   pinned snapshot / Docker indexes; FB-1), host-components.txt,
 #   build-upgrades.txt (packages the pinned-snapshot security upgrade moved),
+#   acquired-debs.tsv (every .deb the guest downloaded, with its SHA-256; FB-1),
 #   prepare-guest.log (the in-guest transcript).
 #
 # Requires: qemu-img, guestfish, virt-customize, virt-cat, virt-ls, docker (daemon access),
@@ -58,6 +59,8 @@ MANIFEST="$HERE/manifest.env"
 . "$HERE/archive-identity.sh"
 # shellcheck source=appliance/build/console-bundle.sh
 . "$HERE/console-bundle.sh"
+# shellcheck source=appliance/build/apt-snapshot.sh
+. "$HERE/apt-snapshot.sh"
 OUT="$REPO/appliance/build/out"
 WORK="${TMPDIR:-/tmp}/culvert-ova-build"
 SKIP_COSIGN=0
@@ -96,7 +99,8 @@ for v in BASE_IMAGE_URL BASE_IMAGE_SHA256 APP_IMAGE_REPO APP_IMAGE_TAG APP_IMAGE
          CLAMAV_IMAGE_AMD64_DIGEST CLAMAV_SIDECAR_REF COLDLOAD_DIND_IMAGE DOCKER_CE_VERSION GUEST_KERNEL_META VM_DISK_GB VM_VCPUS VM_MEMORY_MB VM_HW_VERSION \
          DOCKER_CE_CLI_VERSION CONTAINERD_IO_VERSION DOCKER_COMPOSE_PLUGIN_VERSION DOCKER_APT_URL DOCKER_APT_GPG_URL DOCKER_APT_KEY_FPR \
          GUEST_OS_CODENAME GUEST_APT_SNAPSHOT GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES \
-         GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS; do
+         GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS \
+         DOCKER_CE_DEB_SHA256 DOCKER_CE_CLI_DEB_SHA256 CONTAINERD_IO_DEB_SHA256 DOCKER_COMPOSE_PLUGIN_DEB_SHA256; do
   [[ -n "${!v:-}" ]] || die "manifest.env: $v is not set"
 done
 
@@ -106,6 +110,14 @@ done
 CONSOLE_GO_VERSION="$(console_go_version "$REPO")"
 docker info >/dev/null 2>&1 || die "docker daemon not reachable"
 [[ -f "$REPO/scripts/install.sh" ]] || die "scripts/install.sh not found at $REPO"
+
+# FB-1: the build-start instant is recorded ONCE, here, before anything is
+# fetched, and handed to the guest in its manifest, so host and guest judge
+# the snapshot ID against the same instant: a real UTC calendar instant, ID
+# strictly earlier. apt_snap_require_pins is the guest's own check.
+GUEST_APT_BUILD_START="$(date -u +%Y%m%dT%H%M%SZ)"
+apt_snap_require_pins
+log "snapshot $GUEST_APT_SNAPSHOT is earlier than the recorded build start $GUEST_APT_BUILD_START"
 
 # SOURCE_DATE_EPOCH: the git commit time of this checkout unless the caller
 # pins one. Used for every mtime the build controls (tar, gzip).
@@ -393,6 +405,10 @@ CONSOLE_BINARY_SHA="$(sha256sum "$OV/opt/culvert-appliance/console/culvert-conso
 ACCESS_BINARY_SHA="$(sha256sum "$OV/opt/culvert-appliance/console/culvert-access" | cut -d' ' -f1)"
 cp "$REPO/scripts/install.sh" "$OV/opt/culvert-appliance/install.sh"
 cp "$MANIFEST" "$OV/var/lib/culvert-appliance/manifest.env"
+# The one recorded build-start instant (FB-1): the guest validates the
+# snapshot ID against it, not against its own clock.
+printf '\n# ── recorded by build-ova.sh ──\nGUEST_APT_BUILD_START=%s\n' "$GUEST_APT_BUILD_START" \
+  >> "$OV/var/lib/culvert-appliance/manifest.env"
 # The built sidecar's identity (first boot refuses a loaded image without it).
 printf '\n# ── ClamAV sidecar built by build-ova.sh ──\nCLAMAV_SIDECAR_ID=%s\n' "$CLAMAV_SIDECAR_ID" \
   >> "$OV/var/lib/culvert-appliance/manifest.env"
@@ -484,7 +500,7 @@ BI_INSTALL_SHA="$INSTALL_SHA" BI_APP_VERSION="$APP_VERSION" BI_MAINT_VERSION="$M
 BI_CLAM_SIDECAR_ID="$CLAMAV_SIDECAR_ID" BI_CLAM_PCRE2="$CLAMAV_PCRE2" \
 BI_CONTAINERD="$HOST_CONTAINERD" BI_COSIGN="$COSIGN_RESULT" BI_BASE_GPG="$BASE_GPG" BI_APP_TAR_SHA="$APP_TAR_SHA" BI_CLAM_TAR_SHA="$CLAM_TAR_SHA" \
 BI_VERSION="$VERSION" BI_OVA="$OVA_BASENAME.ova" BI_GIT_COMMIT="$GIT_COMMIT" BI_GIT_DIRTY="$GIT_DIRTY" \
-BI_BUILD_TS="$BUILD_TS" BI_BUILD_WALL="$BUILD_WALL" \
+BI_BUILD_TS="$BUILD_TS" BI_BUILD_WALL="$BUILD_WALL" BI_APT_BUILD_START="$GUEST_APT_BUILD_START" \
 BI_CONSOLE_GO_VERSION="$CONSOLE_GO_VERSION" BI_CONSOLE_BINARY_SHA="$CONSOLE_BINARY_SHA" \
 BI_CANDIDATE="$CANDIDATE" BI_CANDIDATE_SOURCE="$CANDIDATE_SOURCE" BI_CANDIDATE_TAR_SHA="$CANDIDATE_TAR_SHA" BI_CANDIDATE_RUN_ID="$CANDIDATE_RUN_ID" \
 python3 - "$OV/var/lib/culvert-appliance/build-info.json" <<'PY'
@@ -499,7 +515,8 @@ info = {
                 "ova": E["BI_OVA"], "product": E["APPLIANCE_PRODUCT"]},
   "source": {"git_commit": E["BI_GIT_COMMIT"], "git_dirty": E["BI_GIT_DIRTY"] == "true",
              "source_date_epoch": int(E["SOURCE_DATE_EPOCH"]), "build_timestamp": E["BI_BUILD_TS"],
-             "build_wallclock": E["BI_BUILD_WALL"], "install_sh_sha256": E["BI_INSTALL_SHA"]},
+             "build_wallclock": E["BI_BUILD_WALL"], "install_sh_sha256": E["BI_INSTALL_SHA"],
+             "apt_build_start": E["BI_APT_BUILD_START"], "apt_snapshot": E["GUEST_APT_SNAPSHOT"]},
   "console": {"source_git_commit": E["BI_GIT_COMMIT"], "source_git_dirty": E["BI_GIT_DIRTY"] == "true",
               "go_compiler": E["BI_CONSOLE_GO_VERSION"], "binary_sha256": E["BI_CONSOLE_BINARY_SHA"],
               "target": "linux/amd64", "cgo_enabled": False,
@@ -643,6 +660,8 @@ for splash_pair in culvert-splash-message:/etc/initramfs-tools/scripts/init-prem
     || die "boot console file differs from source: ${splash_pair#*:}"
 done
 virt-cat -a "$DISK" /var/lib/culvert-appliance/dpkg-list.txt       > "$OUT/dpkg-list.txt"
+virt-cat -a "$DISK" /var/lib/culvert-appliance/acquired-debs.tsv   > "$OUT/acquired-debs.tsv" \
+  || die "the guest wrote no acquisition receipt (acquired-debs.tsv)"
 virt-cat -a "$DISK" /var/lib/culvert-appliance/host-components.txt > "$OUT/host-components.txt"
 # Present only when manifest.env pins GUEST_APT_SNAPSHOT (prepare-guest.sh 1b).
 virt-cat -a "$DISK" /var/lib/culvert-appliance/build-upgrades.txt > "$OUT/build-upgrades.txt" 2>/dev/null || rm -f "$OUT/build-upgrades.txt"
@@ -658,6 +677,9 @@ python3 "$HERE/reconcile-package-provenance.py" --dpkg-list "$OUT/dpkg-list.txt"
   --docker-dir "$PROV/docker" --docker-uri "$DOCKER_APT_URL" \
   --docker-pin "docker-ce=$DOCKER_CE_VERSION" --docker-pin "docker-ce-cli=$DOCKER_CE_CLI_VERSION" \
   --docker-pin "containerd.io=$CONTAINERD_IO_VERSION" --docker-pin "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_VERSION" \
+  --docker-deb-sha256 "docker-ce=$DOCKER_CE_DEB_SHA256" --docker-deb-sha256 "docker-ce-cli=$DOCKER_CE_CLI_DEB_SHA256" \
+  --docker-deb-sha256 "containerd.io=$CONTAINERD_IO_DEB_SHA256" --docker-deb-sha256 "docker-compose-plugin=$DOCKER_COMPOSE_PLUGIN_DEB_SHA256" \
+  --acquired "$OUT/acquired-debs.tsv" \
   --out "$OUT/package-provenance.tsv" || die "package provenance reconciliation failed (FB-1): see the list above"
 # The kernel is the HWE series the manifest names, exactly one image ships, and
 # no GA kernel metapackage came back (prepare-guest.sh 1b).

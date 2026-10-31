@@ -11,7 +11,8 @@
 # SAME manifest pins, and checks the behaviour FB-1 measured (E2/E5/E6/E7):
 #   C1  pinned update + InRelease verification pass; the snapshot candidate
 #       of a canary (systemd) is the snapshot's, and differs from the live one
-#   C2  a future snapshot ID is refused by the guard; with the guard bypassed
+#   C2  a future snapshot ID and calendar-impossible IDs are refused by the
+#       guard (against the recorded build start); with the guard bypassed
 #       APT returns the archive's CURRENT state with rc 0 (E6) and the
 #       InRelease pin check is what fails
 #   C3  `Snapshot: yes` on a source with no snapshot service: update rc 100
@@ -28,6 +29,8 @@ set -a
 set +a
 # shellcheck source=appliance/build/apt-snapshot.sh
 . "$HERE/apt-snapshot.sh"
+# One recorded build-start instant, as build-ova.sh records it.
+GUEST_APT_BUILD_START="$(date -u +%Y%m%dT%H%M%SZ)"
 
 KEYRING=/usr/share/keyrings/ubuntu-archive-keyring.gpg
 [[ -f "$KEYRING" ]] || { echo "missing $KEYRING (ubuntu-keyring)" >&2; exit 2; }
@@ -58,7 +61,7 @@ ubuntu_sources() {
   printf 'Types: deb\nURIs: http://security.ubuntu.com/ubuntu/\nSuites: noble-security\nComponents: main\nSigned-By: %s\n' "$KEYRING"
 }
 
-echo "snapshot-pin-check: APT $apt_version, $(apt_snap_label)"
+echo "snapshot-pin-check: APT $apt_version, $(apt_snap_label), recorded build start $GUEST_APT_BUILD_START"
 
 # ── C1: the production path ─────────────────────────────────────────────────
 mkroot c1 "$(ubuntu_sources)"
@@ -85,6 +88,10 @@ real_id="$GUEST_APT_SNAPSHOT"
 GUEST_APT_SNAPSHOT=20991231T000000Z
 if (apt_snap_require_pins) 2>"$WORK/c2-guard.log"; then fail "C2 the guard accepted future ID $GUEST_APT_SNAPSHOT"
 else pass "C2 guard refuses: $(tail -1 "$WORK/c2-guard.log")"; fi
+for bad in 20260230T120000Z 20251340T256199Z 20260229T000000Z 20261029T240000Z; do
+  if (GUEST_APT_SNAPSHOT="$bad" apt_snap_require_pins) 2>>"$WORK/c2-guard.log"; then fail "C2 the guard accepted impossible ID $bad"
+  else pass "C2 guard refuses impossible ID $bad"; fi
+done
 mkroot c2 "$(ubuntu_sources)"
 apt_snap_sources_enable
 if apt_snap_update -qq >"$WORK/c2.log" 2>&1; then

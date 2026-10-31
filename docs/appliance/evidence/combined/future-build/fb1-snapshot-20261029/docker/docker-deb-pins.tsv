@@ -1,0 +1,11 @@
+# Docker stable index, c6462b3f9be9aa0cf68d13891d4b06c9e5cce77b7e05c64eb519fc46e4c98688 InRelease, gpgv:
+#   gpgv: Signature made Fri Oct 30 03:48:13 2026 UTC
+#   gpgv:                using RSA key 7EA0A9C3F273FCD8
+#   gpgv: Good signature from "Docker Release (CE deb) <docker@docker.com>"
+# key fingerprint 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 (manifest DOCKER_APT_KEY_FPR)
+# stable/binary-amd64/Packages sha256 2fc6d42b1c6bb45bf45e92e70d800bc7ac77d057e21c4c8c1b205ccf8d8e1258 (equals the InRelease entry)
+package	version	index_sha256	filename
+docker-ce	5:29.9.2-1~ubuntu.24.04~noble	95ddf7a2d8b8c0eb82d8597d4d604e294dcf741081f2e228524d5ab9bfd7c8ae	dists/noble/pool/stable/amd64/docker-ce_29.9.2-1~ubuntu.24.04~noble_amd64.deb
+docker-ce-cli	5:29.9.2-1~ubuntu.24.04~noble	74747b5c99000279b9b2c7eb82543b4121d8436a58aa3be7e78ac6681d74794f	dists/noble/pool/stable/amd64/docker-ce-cli_29.9.2-1~ubuntu.24.04~noble_amd64.deb
+containerd.io	2.4.2-3~ubuntu.24.04~noble	f811ab57d1f4bb0cce19df7d526da8c711d8ebea0447cc83da1999188e664122	dists/noble/pool/stable/amd64/containerd.io_2.4.2-3~ubuntu.24.04~noble_amd64.deb
+docker-compose-plugin	5.6.1-1~ubuntu.24.04~noble	9725be1df7fd5ccc6b21ac24112885896c8d134345e3f4aa20b3c2064ef4620e	dists/noble/pool/stable/amd64/docker-compose-plugin_5.6.1-1~ubuntu.24.04~noble_amd64.deb

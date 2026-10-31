@@ -1,0 +1,22 @@
+Reading package lists...
+Building dependency tree...
+Calculating upgrade...
+The following NEW packages will be installed:
+  linux-image-7.0.0-42-generic
+  linux-main-modules-v4l2loopback-7.0.0-42-generic
+  linux-main-modules-zfs-7.0.0-42-generic linux-modules-7.0.0-42-generic
+The following packages have been kept back:
+  containerd.io docker-ce docker-ce-cli docker-compose-plugin
+The following packages will be upgraded:
+  linux-image-virtual-hwe-24.04
+1 upgraded, 4 newly installed, 0 to remove and 4 not upgraded.
+Inst linux-main-modules-zfs-7.0.0-42-generic (7.0.0-42.42~24.04.1 Ubuntu:24.04/noble-updates [amd64]) []
+Inst linux-main-modules-v4l2loopback-7.0.0-42-generic (7.0.0-42.42~24.04.1 Ubuntu:24.04/noble-updates [amd64]) []
+Inst linux-modules-7.0.0-42-generic (7.0.0-42.42~24.04.1 Ubuntu:24.04/noble-updates [amd64]) []
+Inst linux-image-7.0.0-42-generic (7.0.0-42.42~24.04.1 Ubuntu:24.04/noble-updates [amd64])
+Inst linux-image-virtual-hwe-24.04 [7.0.0-38.38~24.04.4] (7.0.0-42.42~24.04.1 Ubuntu:24.04/noble-updates [amd64])
+Conf linux-main-modules-zfs-7.0.0-42-generic (7.0.0-42.42~24.04.1 Ubuntu:24.04/noble-updates [amd64])
+Conf linux-main-modules-v4l2loopback-7.0.0-42-generic (7.0.0-42.42~24.04.1 Ubuntu:24.04/noble-updates [amd64])
+Conf linux-modules-7.0.0-42-generic (7.0.0-42.42~24.04.1 Ubuntu:24.04/noble-updates [amd64])
+Conf linux-image-7.0.0-42-generic (7.0.0-42.42~24.04.1 Ubuntu:24.04/noble-updates [amd64])
+Conf linux-image-virtual-hwe-24.04 (7.0.0-42.42~24.04.1 Ubuntu:24.04/noble-updates [amd64])

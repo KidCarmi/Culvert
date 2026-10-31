@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -39,13 +40,34 @@ var fb1Suites = []string{"noble", "noble-updates", "noble-security", "noble-back
 
 var fb1Components = []string{"main", "restricted", "universe", "multiverse"}
 
-// The reviewed FB-1 §5 values (gpgv-verified, fetched twice byte-identical).
+// The selected snapshot (31 Oct pin raise) and its reviewed InRelease hashes:
+// gpgv-verified, fetched twice byte-identical, and equal to the indexes the
+// approved kernel-42 transaction was evaluated against
+// (fb1-snapshot-20261029/authn.tsv, esxi-325c142a/kernel-42/apt-indexes.txt).
+const fb1PinnedSnapshot = "20261029T180000Z"
+
 var fb1ReviewedPins = map[string]string{
 	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE":     "cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0",
-	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES":   "6e43c5996bd6cf1d1fe7389a3d6ec383761635cdad2dfb58c020bded199235af",
-	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY":  "3b358f744efb789bab437ac77209ac20be2c8665197ce274f65c5f812bd4d519",
-	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS": "dc4d31dc0a8897dbecfd0375a4041b4aeb4a6fae00c688cf923daec3c4a258f8",
+	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES":   "1af76bea40c6b8ddbc51a51046c5a3e7912c9611536e97afc673a4b1c39d1886",
+	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY":  "d90e89008640e66a6eacc13ffaad0fbbd205877cc51acdd8d4f99f9d21fcfee0",
+	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS": "b6a0b10bb67d8da7ecb72a3f62dda5f408091d5a1abe8cbda2380f4af6b705cd",
 }
+
+// The reviewed Docker .deb SHA-256 pins: read from Docker's gpgv-verified
+// index AND hashed from the downloaded files (31 Oct); the engine three equal
+// M1's recorded identities.
+var fb1ReviewedDockerDebs = map[string]string{
+	"DOCKER_CE_DEB_SHA256":             "95ddf7a2d8b8c0eb82d8597d4d604e294dcf741081f2e228524d5ab9bfd7c8ae",
+	"DOCKER_CE_CLI_DEB_SHA256":         "74747b5c99000279b9b2c7eb82543b4121d8436a58aa3be7e78ac6681d74794f",
+	"CONTAINERD_IO_DEB_SHA256":         "f811ab57d1f4bb0cce19df7d526da8c711d8ebea0447cc83da1999188e664122",
+	"DOCKER_COMPOSE_PLUGIN_DEB_SHA256": "9725be1df7fd5ccc6b21ac24112885896c8d134345e3f4aa20b3c2064ef4620e",
+}
+
+// The T3 fixtures are real stanzas of the PREVIOUS pin 20261002T120000Z: the
+// snapshot OVA 325c142a was supposed to be built from, which makes its real
+// inventory a red case (57 live-only versions). Their InRelease pins are
+// computed by the test, not taken from the manifest.
+const fb1FixtureSnapshot = "20261002T120000Z"
 
 func fb1Read(t *testing.T, path string) string {
 	t.Helper()
@@ -122,6 +144,8 @@ func TestAptSnapshotFB1_T1_EveryPinnedAptCallIsSnapshotAware(t *testing.T) {
 		"apt_snap_verify_inrelease",
 		`"docker-ce=${DOCKER_CE_VERSION}"`,
 		"apt_snap install -y -qq --no-install-recommends pigz psmisc",
+		`apt_snap_acquisition_receipt /var/cache/apt/archives "$STATE/acquired-debs.tsv"`,
+		`apt_snap_verify_docker_debs "$STATE/acquired-debs.tsv"`,
 		"--with-new-pkgs upgrade",
 		`apt_snap -y -qq install --no-install-recommends "$GUEST_KERNEL_META"`,
 		`cand="$(apt_cache_snap policy "$meta"`,
@@ -129,6 +153,9 @@ func TestAptSnapshotFB1_T1_EveryPinnedAptCallIsSnapshotAware(t *testing.T) {
 		"apt_snap -y -qq purge snapd",
 		"plymouth plymouth-theme-ubuntu-text plymouth-label fontconfig",
 		"apt_snap_sources_restore",
+		// The final receipt is taken after every install and before the cache is cleaned.
+		`log "acquisition receipt:`,
+		"apt-get clean",
 	}
 	pos := -1
 	for _, want := range order {
@@ -145,7 +172,8 @@ func TestAptSnapshotFB1_T1_EveryPinnedAptCallIsSnapshotAware(t *testing.T) {
 
 	// The helpers: --snapshot on every call, --error-on=any on the update.
 	for fn, wants := range map[string][]string{
-		"apt_snap":        {`apt-get "${APT_SNAP_OPTS[@]}" --snapshot "$GUEST_APT_SNAPSHOT" "$@"`},
+		"apt_snap": {`apt-get "${APT_SNAP_OPTS[@]}" --snapshot "$GUEST_APT_SNAPSHOT"`,
+			`-o APT::Get::Always-Include-Phased-Updates=true -o APT::Keep-Downloaded-Packages=true "$@"`},
 		"apt_snap_update": {`--snapshot "$GUEST_APT_SNAPSHOT" --error-on=any "$@" update`},
 		"apt_cache_snap":  {`apt-cache "${APT_SNAP_OPTS[@]}" --snapshot "$GUEST_APT_SNAPSHOT" "$@"`},
 	} {
@@ -183,8 +211,13 @@ func fb1ShellFunc(t *testing.T, src, name string) string {
 // opts out; build-ova.sh verifies the indexes and reconciles, fail-closed.
 func TestAptSnapshotFB1_T2_PinsSourcesAndReconciliationAreWired(t *testing.T) {
 	m := fb1ManifestVars(t)
-	if m["GUEST_APT_SNAPSHOT"] != "20261002T120000Z" {
-		t.Errorf("GUEST_APT_SNAPSHOT=%q: the reviewed pins below belong to 20261002T120000Z", m["GUEST_APT_SNAPSHOT"])
+	if m["GUEST_APT_SNAPSHOT"] != fb1PinnedSnapshot {
+		t.Errorf("GUEST_APT_SNAPSHOT=%q: the reviewed pins below belong to %s", m["GUEST_APT_SNAPSHOT"], fb1PinnedSnapshot)
+	}
+	for k, want := range fb1ReviewedDockerDebs {
+		if m[k] != want {
+			t.Errorf("manifest.env %s=%q, the reviewed Docker .deb SHA-256 is %s", k, m[k], want)
+		}
 	}
 	hex64 := regexp.MustCompile(`^[0-9a-f]{64}$`)
 	for k, want := range fb1ReviewedPins {
@@ -214,15 +247,27 @@ func TestAptSnapshotFB1_T2_PinsSourcesAndReconciliationAreWired(t *testing.T) {
 		`gpgv --keyring "$PROV/docker/key.gpg" "$PROV/docker/InRelease"`,
 		`python3 "$HERE/reconcile-package-provenance.py" --dpkg-list "$OUT/dpkg-list.txt"`,
 		`--out "$OUT/package-provenance.tsv" || die "package provenance reconciliation failed (FB-1)`,
+		`--acquired "$OUT/acquired-debs.tsv"`,
+		`|| die "the guest wrote no acquisition receipt (acquired-debs.tsv)"`,
+		`printf '\n# ── recorded by build-ova.sh ──\nGUEST_APT_BUILD_START=%s\n' "$GUEST_APT_BUILD_START"`,
 	} {
 		if !strings.Contains(bo, want) {
 			t.Errorf("build-ova.sh lost %q", want)
 		}
 	}
-	for _, pin := range []string{"DOCKER_CE_VERSION", "DOCKER_CE_CLI_VERSION", "CONTAINERD_IO_VERSION", "DOCKER_COMPOSE_PLUGIN_VERSION"} {
+	for _, pin := range []string{"DOCKER_CE_VERSION", "DOCKER_CE_CLI_VERSION", "CONTAINERD_IO_VERSION", "DOCKER_COMPOSE_PLUGIN_VERSION",
+		"DOCKER_CE_DEB_SHA256", "DOCKER_CE_CLI_DEB_SHA256", "CONTAINERD_IO_DEB_SHA256", "DOCKER_COMPOSE_PLUGIN_DEB_SHA256"} {
 		if !strings.Contains(bo, "=$"+pin+`"`) {
 			t.Errorf("build-ova.sh does not hand %s to the reconciler", pin)
 		}
+	}
+	// The build start is recorded once and the ID judged against it BEFORE
+	// anything is fetched (the base image is the first fetch).
+	rec0 := strings.Index(bo, `GUEST_APT_BUILD_START="$(date -u +%Y%m%dT%H%M%SZ)"`)
+	chk := strings.Index(bo, "\napt_snap_require_pins\n")
+	fetch := strings.Index(bo, "curl -fsSL")
+	if rec0 < 0 || chk < rec0 || fetch < chk || strings.Count(bo, `GUEST_APT_BUILD_START="$(`) != 1 {
+		t.Errorf("build start must be recorded exactly once and checked before the first fetch (record=%d check=%d fetch=%d)", rec0, chk, fetch)
 	}
 	// Reconcile after the guest inventory is read, before anything is packaged.
 	inv := strings.Index(bo, `virt-cat -a "$DISK" /var/lib/culvert-appliance/dpkg-list.txt`)
@@ -250,8 +295,14 @@ func fb1Bash(t *testing.T, env []string, script string) (string, error) {
 	return string(out), err
 }
 
+// fb1PinEnv: the manifest pins with ID id and a recorded build start that is
+// after every ID the tests treat as valid (and long before "now" is relevant).
 func fb1PinEnv(id string) []string {
-	env := []string{"GUEST_APT_SNAPSHOT=" + id}
+	return fb1PinEnvAt(id, "20261031T120000Z")
+}
+
+func fb1PinEnvAt(id, buildStart string) []string {
+	env := []string{"GUEST_APT_SNAPSHOT=" + id, "GUEST_APT_BUILD_START=" + buildStart}
 	for k, v := range fb1ReviewedPins {
 		env = append(env, k+"="+v)
 	}
@@ -259,19 +310,78 @@ func fb1PinEnv(id string) []string {
 }
 
 func TestAptSnapshotFB1_RequirePinsRefusesBadIDsAndPins(t *testing.T) {
-	if out, err := fb1Bash(t, fb1PinEnv("20261002T120000Z"), "apt_snap_require_pins"); err != nil {
+	if out, err := fb1Bash(t, fb1PinEnv(fb1PinnedSnapshot), "apt_snap_require_pins"); err != nil {
 		t.Fatalf("valid pins refused: %v %s", err, out)
 	}
+	// A real leap day is a real instant (control for the calendar check).
+	if out, err := fb1Bash(t, fb1PinEnvAt("20240229T235959Z", "20240301T000000Z"), "apt_snap_require_pins"); err != nil {
+		t.Fatalf("29 Feb 2024 23:59:59 refused: %v %s", err, out)
+	}
 	for name, env := range map[string][]string{
-		"future ID (served as 'now', E6)": fb1PinEnv("20991231T000000Z"),
-		"malformed ID":                    fb1PinEnv("2026-10-02"),
-		"empty ID":                        fb1PinEnv(""),
-		"missing pin":                     append(fb1PinEnv("20261002T120000Z"), "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY="),
-		"short pin":                       append(fb1PinEnv("20261002T120000Z"), "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE=cdb2f31d"),
+		// ASTRA's two reproductions on aa02e66e: shape-valid, calendar-impossible.
+		"30 Feb":                        fb1PinEnv("20260230T120000Z"),
+		"month 13, day 40, 25:61:99":    fb1PinEnv("20251340T256199Z"),
+		"29 Feb of a non-leap year":     fb1PinEnv("20260229T000000Z"),
+		"hour 24":                       fb1PinEnv("20261029T240000Z"),
+		"minute 60":                     fb1PinEnv("20261029T236000Z"),
+		"second 60":                     fb1PinEnv("20261029T235960Z"),
+		"day 00":                        fb1PinEnv("20261000T120000Z"),
+		"no Z":                          fb1PinEnv("20261029T180000"),
+		"leading space":                 fb1PinEnv(" 20261029T180000Z"),
+		"malformed ID":                  fb1PinEnv("2026-10-02"),
+		"empty ID":                      fb1PinEnv(""),
+		"future ID (served as now, E6)": fb1PinEnv("20991231T000000Z"),
+		"ID equal to the build start":   fb1PinEnvAt("20261031T120000Z", "20261031T120000Z"),
+		"ID after the build start":      fb1PinEnvAt(fb1PinnedSnapshot, "20261029T175959Z"),
+		"no recorded build start":       fb1PinEnvAt(fb1PinnedSnapshot, ""),
+		"impossible build start":        fb1PinEnvAt(fb1PinnedSnapshot, "20261131T000000Z"),
+		"missing InRelease pin":         append(fb1PinEnv(fb1PinnedSnapshot), "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY="),
+		"short InRelease pin":           append(fb1PinEnv(fb1PinnedSnapshot), "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE=cdb2f31d"),
 	} {
 		if out, err := fb1Bash(t, env, "apt_snap_require_pins"); err == nil {
 			t.Errorf("%s accepted: %s", name, out)
 		}
+	}
+}
+
+// The ID is judged against the ONE recorded build start, not the moving
+// clock: an ID earlier than now but after the recorded instant is refused,
+// and an ID before the recorded instant passes whatever the clock says.
+func TestAptSnapshotFB1_RequirePinsUsesTheRecordedInstantNotTheClock(t *testing.T) {
+	// 2020: both are long before "now"; a clock-based check would accept the ID.
+	if out, err := fb1Bash(t, fb1PinEnvAt("20200102T000000Z", "20200101T000000Z"), "apt_snap_require_pins"); err == nil {
+		t.Errorf("an ID after the recorded build start (but before now) was accepted: %s", out)
+	}
+	// A clock reading 1970 must not matter either: the stub answers any
+	// "what time is it" call with 1970 (the pre-fix check would then refuse
+	// every ID) and only delegates parsing (-d) to the real date.
+	bin := t.TempDir()
+	stub := "#!/bin/sh\ncase \" $* \" in *\" -d \"*) exec /bin/date \"$@\" ;; esac\necho 19700101T000000Z\n"
+	if err := os.WriteFile(filepath.Join(bin, "date"), []byte(stub), 0o700); err != nil { //nolint:gosec // executable test stub
+		t.Fatal(err)
+	}
+	env := append(fb1PinEnvAt(fb1PinnedSnapshot, "20261031T120000Z"), "PATH="+bin+":/usr/bin:/bin")
+	if out, err := fb1Bash(t, env, "apt_snap_require_pins"); err != nil {
+		t.Errorf("an ID before the recorded build start was refused: %v %s", err, out)
+	}
+
+	// The check must not depend on `date` REJECTING an impossible date. GNU
+	// date does; a normalizing implementation (busybox, BSD -j) rolls
+	// 2026-02-30 over to 2026-03-02 and exits 0. The round trip (the
+	// normalized instant must equal the input) catches it.
+	norm := t.TempDir()
+	nstub := "#!/bin/sh\ncase \" $* \" in *\" -d \"*) case \"$*\" in *2026-02-30*) echo 20260302T120000Z; exit 0 ;; esac; exec /bin/date \"$@\" ;; esac\necho 20261031T120000Z\n"
+	if err := os.WriteFile(filepath.Join(norm, "date"), []byte(nstub), 0o700); err != nil { //nolint:gosec // executable test stub
+		t.Fatal(err)
+	}
+	nenv := append(fb1PinEnvAt("20260230T120000Z", "20261031T120000Z"), "PATH="+norm+":/usr/bin:/bin")
+	if out, err := fb1Bash(t, nenv, "apt_snap_require_pins"); err == nil || !strings.Contains(out, "20260230T120000Z") {
+		t.Errorf("an impossible ID was accepted because date normalized it: %v %s", err, out)
+	}
+	// Control: the same normalizing stub still accepts a real instant.
+	nenv = append(fb1PinEnvAt(fb1PinnedSnapshot, "20261031T120000Z"), "PATH="+norm+":/usr/bin:/bin")
+	if out, err := fb1Bash(t, nenv, "apt_snap_require_pins"); err != nil {
+		t.Errorf("a real ID was refused under the normalizing date stub: %v %s", err, out)
 	}
 }
 
@@ -401,14 +511,14 @@ func TestAptSnapshotFB1_HelpersPassTheSnapshotSelector(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	env := append(fb1PinEnv("20261002T120000Z"), "PATH="+bin+":"+os.Getenv("PATH"))
+	env := append(fb1PinEnv(fb1PinnedSnapshot), "PATH="+bin+":"+os.Getenv("PATH"))
 	out, err := fb1Bash(t, env, `apt_snap_update -qq; apt_snap install -y pigz; apt_cache_snap policy systemd`)
 	if err != nil {
 		t.Fatalf("%v %s", err, out)
 	}
-	want := "apt-get --snapshot 20261002T120000Z --error-on=any -qq update\n" +
-		"apt-get --snapshot 20261002T120000Z install -y pigz\n" +
-		"apt-cache --snapshot 20261002T120000Z policy systemd\n"
+	want := "apt-get --snapshot 20261029T180000Z --error-on=any -qq update\n" +
+		"apt-get --snapshot 20261029T180000Z -o APT::Get::Always-Include-Phased-Updates=true -o APT::Keep-Downloaded-Packages=true install -y pigz\n" +
+		"apt-cache --snapshot 20261029T180000Z policy systemd\n"
 	if out != want {
 		t.Errorf("helper argv:\n%s\nwant:\n%s", out, want)
 	}
@@ -422,6 +532,48 @@ func TestAptSnapshotFB1_HelpersPassTheSnapshotSelector(t *testing.T) {
 type fb1Index struct {
 	snapDir, dockerDir string
 	pins               map[string]string
+	// receipt: the guest's acquisition receipt rows
+	// (package, version, arch, sha256, file). nil omits --acquired.
+	receipt []string
+}
+
+// fb1Stanza returns Filename and SHA256 of (pkg, version, arch) in a
+// Packages file.
+func fb1Stanza(t *testing.T, packages, pkg, ver, arch string) (filename, sha string) {
+	t.Helper()
+	for _, st := range strings.Split(fb1Read(t, packages), "\n\n") {
+		f := map[string]string{}
+		for _, l := range strings.Split(st, "\n") {
+			if k, v, ok := strings.Cut(l, ": "); ok {
+				f[k] = v
+			}
+		}
+		if f["Package"] == pkg && f["Version"] == ver && f["Architecture"] == arch {
+			return f["Filename"], f["SHA256"]
+		}
+	}
+	t.Fatalf("%s %s %s not in %s", pkg, ver, arch, packages)
+	return "", ""
+}
+
+// fb1ReceiptRow is one acquisition-receipt row for a stanza of packages.
+func fb1ReceiptRow(t *testing.T, packages, pkg, ver, arch string) string {
+	t.Helper()
+	fn, sha := fb1Stanza(t, packages, pkg, ver, arch)
+	return strings.Join([]string{pkg, ver, arch, sha, filepath.Base(fn)}, "\t")
+}
+
+// fb1DockerReceipt: the four pinned Docker packages acquired with the bytes
+// the (real) Docker index lists — which are the reviewed pins.
+func fb1DockerReceipt(t *testing.T, dockerDir string) []string {
+	t.Helper()
+	m := fb1ManifestVars(t)
+	var rows []string
+	for _, p := range [][2]string{{"docker-ce", "DOCKER_CE_VERSION"}, {"docker-ce-cli", "DOCKER_CE_CLI_VERSION"},
+		{"containerd.io", "CONTAINERD_IO_VERSION"}, {"docker-compose-plugin", "DOCKER_COMPOSE_PLUGIN_VERSION"}} {
+		rows = append(rows, fb1ReceiptRow(t, filepath.Join(dockerDir, "Packages"), p[0], m[p[1]], "amd64"))
+	}
+	return rows
 }
 
 // fb1BuildIndexes copies the committed real-stanza fixtures into a temp dir
@@ -451,7 +603,7 @@ func fb1BuildIndexes(t *testing.T, mutate func(dir string)) fb1Index {
 	}
 	for _, suite := range fb1Suites {
 		var sb strings.Builder
-		fmt.Fprintf(&sb, "Origin: Ubuntu\nSuite: %s\nNote: test fixture; stanzas are real snapshot 20261002T120000Z entries\nSHA256:\n", suite)
+		fmt.Fprintf(&sb, "Origin: Ubuntu\nSuite: %s\nNote: test fixture; stanzas are real snapshot "+fb1FixtureSnapshot+" entries\nSHA256:\n", suite)
 		for _, comp := range fb1Components {
 			h, n := sumFile(filepath.Join(ix.snapDir, suite+"-"+comp+".Packages"))
 			fmt.Fprintf(&sb, " %s %16d %s/binary-amd64/Packages\n", h, n, comp)
@@ -467,6 +619,7 @@ func fb1BuildIndexes(t *testing.T, mutate func(dir string)) fb1Index {
 	if err := os.WriteFile(filepath.Join(ix.dockerDir, "InRelease"), []byte(dockerInRelease), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	ix.receipt = fb1DockerReceipt(t, ix.dockerDir)
 	return ix
 }
 
@@ -478,7 +631,7 @@ func fb1Reconcile(t *testing.T, ix fb1Index, inventory string, extra ...string) 
 	m := fb1ManifestVars(t)
 	out := filepath.Join(t.TempDir(), "package-provenance.tsv")
 	args := []string{"-I", fb1Reconciler, "--dpkg-list", inventory, "--snapshot-dir", ix.snapDir,
-		"--snapshot-id", "20261002T120000Z", "--docker-dir", ix.dockerDir,
+		"--snapshot-id", fb1FixtureSnapshot, "--docker-dir", ix.dockerDir,
 		"--docker-uri", "https://download.docker.com/linux/ubuntu", "--out", out}
 	for _, s := range fb1Suites {
 		args = append(args, "--pin", s+"="+ix.pins[s])
@@ -487,12 +640,34 @@ func fb1Reconcile(t *testing.T, ix fb1Index, inventory string, extra ...string) 
 		"docker-ce": m["DOCKER_CE_VERSION"], "docker-ce-cli": m["DOCKER_CE_CLI_VERSION"],
 		"containerd.io": m["CONTAINERD_IO_VERSION"], "docker-compose-plugin": m["DOCKER_COMPOSE_PLUGIN_VERSION"],
 	}
+	shas := map[string]string{
+		"docker-ce": m["DOCKER_CE_DEB_SHA256"], "docker-ce-cli": m["DOCKER_CE_CLI_DEB_SHA256"],
+		"containerd.io": m["CONTAINERD_IO_DEB_SHA256"], "docker-compose-plugin": m["DOCKER_COMPOSE_PLUGIN_DEB_SHA256"],
+	}
+	// extra: "name=version" overrides a version pin, "sha:name=hex" a byte
+	// pin, "sha:name=" drops it.
 	for _, kv := range extra {
 		k, v, _ := strings.Cut(kv, "=")
+		if name, ok := strings.CutPrefix(k, "sha:"); ok {
+			shas[name] = v
+			continue
+		}
 		pins[k] = v
 	}
 	for k, v := range pins {
 		args = append(args, "--docker-pin", k+"="+v)
+	}
+	for k, v := range shas {
+		if v != "" {
+			args = append(args, "--docker-deb-sha256", k+"="+v)
+		}
+	}
+	if ix.receipt != nil {
+		rp := filepath.Join(t.TempDir(), "acquired-debs.tsv")
+		if err := os.WriteFile(rp, []byte(strings.Join(ix.receipt, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, "--acquired", rp)
 	}
 	cmd := exec.CommandContext(t.Context(), "python3", args...) //nolint:gosec // test-owned paths
 	raw, runErr := cmd.CombinedOutput()
@@ -537,7 +712,7 @@ func fb1Recorded57(t *testing.T) map[string]bool {
 	return out
 }
 
-var fb1NotInSnapshot = regexp.MustCompile(`(?m)^  package\t(\S+)\t(\S+) \S+ is not in snapshot 20261002T120000Z$`)
+var fb1NotInSnapshot = regexp.MustCompile(`(?m)^  package\t(\S+)\t(\S+) \S+ is not in snapshot ` + fb1FixtureSnapshot + `$`)
 
 // T3(a): the real 325c142a inventory against real snapshot stanzas fails,
 // naming exactly the 57 versions the evidence recorded — the build that
@@ -605,10 +780,15 @@ func TestAptSnapshotFB1_T3b_InSnapshotInventoryPasses(t *testing.T) {
 	origins := map[string]int{}
 	for _, l := range data {
 		f := strings.Split(l, "\t")
-		if len(f) != 8 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(f[7]) || !strings.HasSuffix(f[6], ".deb") {
+		if len(f) != 9 || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(f[7]) || !strings.HasSuffix(f[6], ".deb") {
 			t.Fatalf("malformed provenance row: %q", l)
 		}
 		origins[f[3]]++
+		// Docker rows were acquired (bytes checked); nothing else was in
+		// this receipt, so every Ubuntu row is inherited from the base image.
+		if want := map[bool]string{true: "acquired-verified", false: "inherited-base-image"}[f[3] == "docker"]; f[8] != want {
+			t.Errorf("%s binding %q, want %q", f[0], f[8], want)
+		}
 	}
 	if origins["docker"] != 4 || origins["ubuntu-snapshot"] != 619 {
 		t.Errorf("origins %v, want 4 docker + 619 ubuntu-snapshot", origins)
@@ -772,5 +952,286 @@ func TestAptSnapshotFB1_T3_IndexIntegrityFailsClosed(t *testing.T) {
 				t.Errorf("expected failure %q, got err=%v:\n%s", c.failure, err, out)
 			}
 		})
+	}
+}
+
+// ASTRA's reproduction on aa02e66e: an internally consistent Docker index
+// (InRelease lists the Packages hash) that names DIFFERENT bytes for the
+// pinned name/version/architecture was accepted. The reviewed byte pin now
+// refuses it, and so does the acquisition receipt.
+func TestAptSnapshotFB1_DockerByteBindingRefusesASelfConsistentIndex(t *testing.T) {
+	m := fb1ManifestVars(t)
+	evil := strings.Repeat("e", 64)
+	ix := fb1BuildIndexes(t, func(dir string) {
+		fb1Edit(t, filepath.Join(dir, "docker", "Packages"), func(b string) string {
+			return strings.Replace(b, "SHA256: "+m["DOCKER_CE_DEB_SHA256"], "SHA256: "+evil, 1)
+		})
+	})
+	// The receipt matches the doctored index, i.e. the attacker controls both.
+	for i, r := range ix.receipt {
+		if strings.HasPrefix(r, "docker-ce\t") {
+			ix.receipt[i] = strings.Replace(r, m["DOCKER_CE_DEB_SHA256"], evil, 1)
+		}
+	}
+	out, tsv, err := fb1Reconcile(t, ix, fb1Inventory(t, fb1Minimal()))
+	if err == nil || tsv != "" {
+		t.Fatalf("a self-consistent Docker index with other bytes was accepted:\n%s", out)
+	}
+	for _, want := range []string{
+		"docker-ce 5:29.9.2-1~ubuntu.24.04~noble amd64 is listed as " + evil + ", the reviewed pin is " + m["DOCKER_CE_DEB_SHA256"],
+		"is " + evil + ", the reviewed pin is " + m["DOCKER_CE_DEB_SHA256"],
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestAptSnapshotFB1_AcquisitionReceiptFailsClosed(t *testing.T) {
+	adduser := func(t *testing.T, ix fb1Index) string {
+		return fb1ReceiptRow(t, filepath.Join(ix.snapDir, "noble-main.Packages"), "adduser", "3.137ubuntu1", "all")
+	}
+	cases := []struct {
+		name    string
+		edit    func(t *testing.T, ix *fb1Index)
+		extra   []string
+		failure string
+		tsvHas  string
+	}{
+		{name: "control: an acquired Ubuntu .deb with the indexed bytes is acquired-verified",
+			edit:   func(t *testing.T, ix *fb1Index) { ix.receipt = append(ix.receipt, adduser(t, *ix)) },
+			tsvHas: "adduser\t3.137ubuntu1\tall\tubuntu-snapshot\t"},
+		{name: "same name/version/arch, different bytes (Ubuntu)",
+			edit: func(t *testing.T, ix *fb1Index) {
+				r := strings.Split(adduser(t, *ix), "\t")
+				r[3] = strings.Repeat("a", 64)
+				ix.receipt = append(ix.receipt, strings.Join(r, "\t"))
+			},
+			failure: "adduser\t3.137ubuntu1 all (adduser_3.137ubuntu1_all.deb) is " + strings.Repeat("a", 64) + ", the authenticated snapshot index lists"},
+		{name: "same name/version/arch, different bytes (Docker)",
+			edit: func(t *testing.T, ix *fb1Index) {
+				for i, r := range ix.receipt {
+					if strings.HasPrefix(r, "containerd.io\t") {
+						f := strings.Split(r, "\t")
+						f[3] = strings.Repeat("b", 64)
+						ix.receipt[i] = strings.Join(f, "\t")
+					}
+				}
+			},
+			failure: "containerd.io\t2.4.2-3~ubuntu.24.04~noble amd64 (containerd.io_2.4.2-3~ubuntu.24.04~noble_amd64.deb) is " + strings.Repeat("b", 64)},
+		{name: "one package acquired as two different files",
+			edit: func(t *testing.T, ix *fb1Index) {
+				r := strings.Split(adduser(t, *ix), "\t")
+				ix.receipt = append(ix.receipt, strings.Join(r, "\t"))
+				r[3], r[4] = strings.Repeat("c", 64), "adduser-other.deb"
+				ix.receipt = append(ix.receipt, strings.Join(r, "\t"))
+			},
+			failure: "adduser\t3.137ubuntu1 all was acquired as two different files"},
+		{name: "an acquired .deb the snapshot does not list",
+			edit: func(t *testing.T, ix *fb1Index) {
+				ix.receipt = append(ix.receipt, "evil-tool\t1.0\tamd64\t"+strings.Repeat("d", 64)+"\tevil-tool_1.0_amd64.deb")
+			},
+			failure: "evil-tool\t1.0 amd64 (evil-tool_1.0_amd64.deb) is not in snapshot"},
+		{name: "a pinned Docker package installed without an acquisition of its bytes",
+			edit: func(t *testing.T, ix *fb1Index) {
+				ix.receipt = slices.DeleteFunc(ix.receipt, func(r string) bool { return strings.HasPrefix(r, "docker-ce-cli\t") })
+			},
+			failure: "docker-ce-cli\t5:29.9.2-1~ubuntu.24.04~noble amd64 is installed but no verified acquisition of its bytes exists"},
+		{name: "no acquisition receipt",
+			edit:    func(t *testing.T, ix *fb1Index) { ix.receipt = []string{} },
+			failure: "acquired\t-\tthe acquisition receipt is empty"},
+		{name: "a malformed receipt row",
+			edit: func(t *testing.T, ix *fb1Index) {
+				ix.receipt = append(ix.receipt, "adduser\t3.137ubuntu1\tall\tnot-a-hash\tx.deb")
+			},
+			failure: "not <package>TAB<version>TAB<arch>TAB<sha256>TAB<file>"},
+		{name: "a Docker version pin without a reviewed byte pin",
+			extra:   []string{"sha:docker-compose-plugin="},
+			failure: "no reviewed .deb SHA-256 for docker-compose-plugin"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ix := fb1BuildIndexes(t, nil)
+			if c.edit != nil {
+				c.edit(t, &ix)
+			}
+			out, tsv, err := fb1Reconcile(t, ix, fb1Inventory(t, fb1Minimal()), c.extra...)
+			if c.failure == "" {
+				if err != nil || !strings.Contains(tsv, c.tsvHas) || !strings.Contains(tsv, "acquired-verified") {
+					t.Errorf("expected to pass with %q: %v\n%s\n%s", c.tsvHas, err, out, tsv)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(out, c.failure) || tsv != "" {
+				t.Errorf("expected failure %q, got err=%v:\n%s", c.failure, err, out)
+			}
+		})
+	}
+	// --acquired is a required argument: no receipt file, no reconciliation.
+	ix := fb1BuildIndexes(t, nil)
+	ix.receipt = nil
+	if out, _, err := fb1Reconcile(t, ix, fb1Inventory(t, fb1Minimal())); err == nil || !strings.Contains(out, "--acquired") {
+		t.Errorf("a reconciliation without --acquired ran:\n%s", out)
+	}
+}
+
+// fb1Deb builds a real .deb with the given control fields and returns its
+// path and SHA-256 (the receipt reads fields from the file, not its name).
+func fb1Deb(t *testing.T, dir, pkg, ver, arch, payload string) (path, sum string) {
+	t.Helper()
+	if _, err := exec.LookPath("dpkg-deb"); err != nil {
+		t.Skip("dpkg-deb not available")
+	}
+	root := filepath.Join(t.TempDir(), "pkg")
+	// dpkg-deb requires a 0755..0775 control directory.
+	if err := os.MkdirAll(filepath.Join(root, "DEBIAN"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(root, "DEBIAN"), 0o755); err != nil { //nolint:gosec // dpkg-deb's required mode
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "usr", "share", "doc"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	control := fmt.Sprintf("Package: %s\nVersion: %s\nArchitecture: %s\nMaintainer: test <t@example.invalid>\nDescription: fb1 fixture\n", pkg, ver, arch)
+	if err := os.WriteFile(filepath.Join(root, "DEBIAN", "control"), []byte(control), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "usr", "share", "doc", pkg), []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join(dir, "x_"+pkg+".deb")                                                               // deliberately not the canonical name
+	cmd := exec.CommandContext(t.Context(), "dpkg-deb", "--root-owner-group", "-Zxz", "--build", root, path) //nolint:gosec // test-owned paths
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dpkg-deb: %v %s", err, out)
+	}
+	b, err := os.ReadFile(path) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256(b)
+	return path, hex.EncodeToString(h[:])
+}
+
+// The guest-side half of the byte binding: the receipt records what the
+// files are, and the Docker check refuses anything but the reviewed bytes.
+func TestAptSnapshotFB1_GuestReceiptAndDockerByteCheck(t *testing.T) {
+	m := fb1ManifestVars(t)
+	cache := t.TempDir()
+	type deb struct{ name, verVar, shaVar string }
+	debs := []deb{{"docker-ce", "DOCKER_CE_VERSION", "DOCKER_CE_DEB_SHA256"}, {"docker-ce-cli", "DOCKER_CE_CLI_VERSION", "DOCKER_CE_CLI_DEB_SHA256"},
+		{"containerd.io", "CONTAINERD_IO_VERSION", "CONTAINERD_IO_DEB_SHA256"}, {"docker-compose-plugin", "DOCKER_COMPOSE_PLUGIN_VERSION", "DOCKER_COMPOSE_PLUGIN_DEB_SHA256"}}
+	env := []string{"C=" + cache, "R=" + filepath.Join(t.TempDir(), "acquired-debs.tsv")}
+	for _, d := range debs {
+		_, sum := fb1Deb(t, cache, d.name, m[d.verVar], "amd64", "payload "+d.name)
+		env = append(env, d.verVar+"="+m[d.verVar], d.shaVar+"="+sum) // pins = these fixture bytes
+	}
+	_, other := fb1Deb(t, cache, "pigz", "2.8-1", "amd64", "pigz")
+	out, err := fb1Bash(t, env, `apt_snap_acquisition_receipt "$C" "$R" && apt_snap_verify_docker_debs "$R" && cat "$R"`)
+	if err != nil {
+		t.Fatalf("receipt/check on the pinned bytes failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "pigz\t2.8-1\tamd64\t"+other+"\tx_pigz.deb") || strings.Count(out, "\n") != 5 {
+		t.Errorf("receipt rows (fields from the .deb, hash of the bytes):\n%s", out)
+	}
+	// Same name/version/arch, different bytes: refused.
+	envBad := append(slices.Clone(env), "CONTAINERD_IO_DEB_SHA256="+strings.Repeat("f", 64))
+	if out, err := fb1Bash(t, envBad, `apt_snap_acquisition_receipt "$C" "$R" && apt_snap_verify_docker_debs "$R"`); err == nil ||
+		!strings.Contains(out, "containerd.io "+m["CONTAINERD_IO_VERSION"]+": acquired .deb is") {
+		t.Errorf("different bytes for a pinned Docker package were accepted: %v\n%s", err, out)
+	}
+	// A different version than the pin: refused.
+	envVer := append(slices.Clone(env), "DOCKER_CE_VERSION=5:29.9.1-1~ubuntu.24.04~noble")
+	if out, err := fb1Bash(t, envVer, `apt_snap_acquisition_receipt "$C" "$R" && apt_snap_verify_docker_debs "$R"`); err == nil ||
+		!strings.Contains(out, "docker-ce: acquired "+m["DOCKER_CE_VERSION"]+" amd64, manifest pins 5:29.9.1") {
+		t.Errorf("a Docker version off its pin was accepted: %v\n%s", err, out)
+	}
+	// Missing, and duplicated: refused.
+	if err := os.Remove(filepath.Join(cache, "x_docker-compose-plugin.deb")); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := fb1Bash(t, env, `apt_snap_acquisition_receipt "$C" "$R" && apt_snap_verify_docker_debs "$R"`); err == nil ||
+		!strings.Contains(out, "docker-compose-plugin: expected exactly one acquired .deb, receipt has: none") {
+		t.Errorf("a missing Docker .deb was accepted: %v\n%s", err, out)
+	}
+	fb1Deb(t, cache, "docker-compose-plugin", m["DOCKER_COMPOSE_PLUGIN_VERSION"], "amd64", "payload docker-compose-plugin")
+	dup := filepath.Join(cache, "y_docker-compose-plugin.deb")
+	b, err := os.ReadFile(filepath.Join(cache, "x_docker-compose-plugin.deb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dup, b, 0o600); err != nil { //nolint:gosec // G703: test-chosen path under t.TempDir()
+		t.Fatal("could not duplicate the .deb")
+	}
+	if out, err := fb1Bash(t, env, `apt_snap_acquisition_receipt "$C" "$R" && apt_snap_verify_docker_debs "$R"`); err == nil ||
+		!strings.Contains(out, "docker-compose-plugin: expected exactly one acquired .deb") {
+		t.Errorf("a duplicated Docker .deb was accepted: %v\n%s", err, out)
+	}
+	// An empty cache is not a receipt.
+	if out, err := fb1Bash(t, []string{"C=" + t.TempDir(), "R=" + filepath.Join(t.TempDir(), "r")}, `apt_snap_acquisition_receipt "$C" "$R"`); err == nil {
+		t.Errorf("an empty package cache produced a receipt: %s", out)
+	}
+}
+
+const fb1SelectionEvidence = "docs/appliance/evidence/combined/future-build/fb1-snapshot-20261029"
+
+// The manifest pin is the one the selection evidence authenticated, that
+// evidence equals the indexes the approved kernel-42 transaction used, and
+// the committed 325c comparison has no downgrade, unknown origin or Docker
+// change, and resolves exactly the approved kernel.
+func TestAptSnapshotFB1_SelectedSnapshotMatchesItsEvidence(t *testing.T) {
+	m := fb1ManifestVars(t)
+	suiteVar := map[string]string{"noble": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE", "noble-updates": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES",
+		"noble-security": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY", "noble-backports": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS"}
+	seen := 0
+	for _, l := range strings.Split(strings.TrimSpace(fb1Read(t, filepath.Join(fb1SelectionEvidence, "authn.tsv"))), "\n") {
+		f := strings.Split(l, "\t")
+		if len(f) < 5 || suiteVar[f[0]] == "" {
+			t.Fatalf("authn.tsv row %q", l)
+		}
+		seen++
+		if m[suiteVar[f[0]]] != f[1] || f[2] != "fetch2=identical" || !strings.Contains(f[3], "Good signature") ||
+			!strings.HasSuffix(f[4], "F6ECB3762474EDA9D21B7022871920D1991BC93C") {
+			t.Errorf("%s: manifest %s, evidence %q", f[0], m[suiteVar[f[0]]], l)
+		}
+	}
+	if seen != 4 {
+		t.Errorf("authn.tsv covers %d suites, want 4", seen)
+	}
+	k42 := fb1Read(t, "docs/appliance/evidence/combined/esxi-325c142a/kernel-42/apt-indexes.txt")
+	for _, v := range suiteVar {
+		if !strings.Contains(k42, "sha256="+m[v]) {
+			t.Errorf("%s=%s is not an index the approved kernel-42 transaction used", v, m[v])
+		}
+	}
+	rows := strings.Split(strings.TrimSpace(fb1Read(t, filepath.Join(fb1SelectionEvidence, "compare-325c142a.tsv"))), "\n")
+	classes := map[string]int{}
+	for _, l := range rows[1:] {
+		f := strings.Split(l, "\t")
+		classes[f[4]]++
+		switch f[4] {
+		case "unchanged", "docker-pinned":
+			if f[2] != f[3] {
+				t.Errorf("%s classed %s but %s -> %s", f[0], f[4], f[2], f[3])
+			}
+		case "upgrade":
+			if f[0] != "linux-image-virtual-hwe-24.04" || f[3] != "7.0.0-42.42~24.04.1" {
+				t.Errorf("unexpected upgrade %q (only the approved kernel transition may move)", l)
+			}
+		case "added":
+			if !strings.Contains(f[0], "7.0.0-42-generic") || f[3] != "7.0.0-42.42~24.04.1" {
+				t.Errorf("unexpected addition %q", l)
+			}
+		case "removed-kernel":
+			if !strings.Contains(f[0], "7.0.0-38-generic") {
+				t.Errorf("unexpected removal %q", l)
+			}
+		default:
+			t.Errorf("conflict row %q", l)
+		}
+	}
+	if len(rows)-1 != 684 || classes["unchanged"] != 671 || classes["docker-pinned"] != 4 || classes["upgrade"] != 1 ||
+		classes["added"] != 4 || classes["removed-kernel"] != 4 {
+		t.Errorf("comparison classes %v over %d rows", classes, len(rows)-1)
 	}
 }

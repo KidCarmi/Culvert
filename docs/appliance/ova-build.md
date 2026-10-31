@@ -92,8 +92,11 @@ Outputs in `--out`:
   `culvert-maint --version` taken from the image's deploy bundle), git commit
   + dirty flag, `SOURCE_DATE_EPOCH`, build timestamp, final OVA SHA256
 * `package-provenance.tsv` — every installed package reconciled against the
-  pinned snapshot / Docker indexes (FB-1); the build fails if any package
-  cannot be accounted for.
+  pinned snapshot / Docker indexes, with its byte binding (FB-1); the build
+  fails if any package cannot be accounted for.
+* `acquired-debs.tsv` — the guest's acquisition receipt: every `.deb` the
+  build downloaded (package, version, architecture, SHA-256, file), each
+  checked against the authenticated metadata (FB-1).
 * `dpkg-list.txt` and `host-components.txt` — the guest package inventory,
   captured inside the guest during the build (input for the SBOM evidence)
 * `prepare-guest.log` — the in-guest customization transcript, read back out
@@ -188,23 +191,43 @@ verifies on import.
   reconciles every installed package against them (Docker's four packages
   against Docker's signed index at their pins) and refuses anything else.
   `package-provenance.tsv` next to the OVA records each package's origin,
-  pockets, pool path and `.deb` SHA-256. **OVAs built before FB-1, including
+  pockets, pool path, `.deb` SHA-256 and **binding**. A version match alone
+  does not bind bytes, so the guest also writes `acquired-debs.tsv`: the
+  package, version, architecture and SHA-256 of every `.deb` it downloaded,
+  read from the files themselves. The host reconciler refuses an acquired
+  file whose SHA-256 differs from the authenticated snapshot index entry for
+  that package/version/architecture. Docker's repository has no snapshots,
+  so `manifest.env` also pins each Docker `.deb`'s SHA-256
+  (`*_DEB_SHA256`): the guest refuses a downloaded Docker `.deb` with another
+  hash, and the host refuses a Docker index that lists another hash for the
+  pinned version. Each row's binding is `acquired-verified` (this build
+  downloaded and checked the bytes) or `inherited-base-image` (the package
+  was already in the base image at the snapshot's version; its bytes are
+  bound only by `BASE_IMAGE_SHA256`, the signed cloud-image hash, not
+  per-package). A Docker package must be `acquired-verified`. The snapshot ID
+  must be a real UTC instant strictly earlier than the build start, which
+  `build-ova.sh` records once, before any download, and hands to the guest
+  (`GUEST_APT_BUILD_START`, also in `build-info.json`). **OVAs built before FB-1, including
   325c142a, passed `-o Acquire::Snapshot`, which APT ignores: they were built
   from the live archive of their build day** (57 of 325c142a's 680 versions
   are not in its pinned snapshot; `evidence/combined/future-build/FB-1-APT-SNAPSHOT.md`).
   Raising the snapshot is a reviewed change of five values: the ID and the
   four InRelease hashes (fetch each `dists/<suite>/InRelease`, verify it with
-  `gpgv` against the Ubuntu archive keyring, record its SHA-256). The upgrade runs
+  `gpgv` against the Ubuntu archive keyring, record its SHA-256). The current
+  pin's selection, its authenticated metadata and its package comparison
+  against 325c142a are in `evidence/combined/future-build/fb1-snapshot-20261029/`. The upgrade runs
   with `--with-new-pkgs`, so the kernel moves to the snapshot's newest ABI at
   build time (a plain `upgrade` kept it back: the 7e53720d OVA booted
   6.8.0-142 while its own snapshot carried 6.8.0-146); the superseded
   kernel's packages are purged and the build refuses unless exactly one
   kernel is in `/boot`. The kernel series is Ubuntu's supported **HWE
-  kernel** (`GUEST_KERNEL_META=linux-image-virtual-hwe-24.04`, 7.0.0-38 in
-  the current snapshot — the 26.04 kernel backported to 24.04 and supported
-  for the rest of 24.04's life). Against Canonical's CVE tracker the GA 6.8.0
+  kernel** (`GUEST_KERNEL_META=linux-image-virtual-hwe-24.04`,
+  7.0.0-42.42~24.04.1 in the current snapshot `20261029T180000Z` — the
+  owner-approved kernel-42 disposition, `evidence/combined/esxi-325c142a/kernel-42/`;
+  the 26.04 kernel backported to 24.04 and supported for the rest of 24.04's
+  life). Against Canonical's CVE tracker at the 7c7b29ee scan the GA 6.8.0
   kernel had 5 CRITICAL and 138 HIGH CVEs open with no fixed 6.8.0 package;
-  the HWE kernel has 0 CRITICAL and 23 HIGH. The build installs the HWE image
+  the HWE kernel of that scan (7.0.0-38) had 0 CRITICAL and 23 HIGH. The build installs the HWE image
   metapackage (image only, no headers), removes the GA metapackage chain so it
   cannot pull the 6.8 ABI back, and refuses an image where the HWE meta is
   missing, a GA meta is present, more than one kernel image ships, or the

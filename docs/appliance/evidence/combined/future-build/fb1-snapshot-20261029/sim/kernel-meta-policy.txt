@@ -1,0 +1,11 @@
+linux-image-virtual-hwe-24.04:
+  Installed: 7.0.0-38.38~24.04.4
+  Candidate: 7.0.0-42.42~24.04.1
+  Version table:
+     7.0.0-42.42~24.04.1 500
+        500 https://snapshot.ubuntu.com/ubuntu/20261029T180000Z noble-updates/main amd64 Packages
+ *** 7.0.0-38.38~24.04.4 500
+        500 https://snapshot.ubuntu.com/ubuntu/20261029T180000Z noble-security/main amd64 Packages
+        100 /tmp/claude-0/-home-user-Culvert/9f0490a9-b6a6-5cfb-9bef-3520e8817f2e/scratchpad/fb2/sim/root/var/lib/dpkg/status
+     6.8.0-31.31 500
+        500 https://snapshot.ubuntu.com/ubuntu/20261029T180000Z noble/main amd64 Packages

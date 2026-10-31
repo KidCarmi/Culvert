@@ -45,16 +45,33 @@ apt_snap_pin_var() {
   esac
 }
 
-# Validate the snapshot ID and the four pins BEFORE any network access. The ID
-# must be a well-formed snapshot timestamp strictly earlier than now: a future
-# ID is served as the archive's current state (E6).
+# apt_snap_utc_instant VALUE: true only for a REAL UTC calendar instant written
+# YYYYMMDDTHHMMSSZ. The shape alone is not enough (ASTRA, 31 Oct: the first
+# version accepted 20260230T120000Z and 20251340T256199Z): the value must
+# round-trip unchanged through GNU date, which rejects impossible dates and
+# times and would otherwise normalize them (Feb 30 -> Mar 2, second 60).
+apt_snap_utc_instant() {
+  local v="${1:-}" iso back
+  [[ "$v" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z$ ]] || return 1
+  iso="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]} ${BASH_REMATCH[4]}:${BASH_REMATCH[5]}:${BASH_REMATCH[6]} UTC"
+  back="$(LC_ALL=C TZ=UTC date -u -d "$iso" +%Y%m%dT%H%M%SZ 2>/dev/null)" || return 1
+  [[ "$back" == "$v" ]]
+}
+
+# Validate the snapshot ID, the build-start instant and the four pins BEFORE
+# any network access. GUEST_APT_BUILD_START is recorded ONCE by build-ova.sh
+# (host) and handed to the guest in its manifest, so host and guest judge the
+# ID against the same instant rather than each reading a moving clock. The ID
+# must be strictly earlier than it: a future ID is served as the archive's
+# current state (E6).
 apt_snap_require_pins() {
-  local now suite var
-  [[ "${GUEST_APT_SNAPSHOT:-}" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] \
-    || apt_snap_die "GUEST_APT_SNAPSHOT='${GUEST_APT_SNAPSHOT:-}' is not a snapshot ID (YYYYMMDDTHHMMSSZ)"
-  now="$(date -u +%Y%m%dT%H%M%SZ)"
-  [[ "$GUEST_APT_SNAPSHOT" < "$now" ]] \
-    || apt_snap_die "GUEST_APT_SNAPSHOT=$GUEST_APT_SNAPSHOT is not earlier than the build start ($now)"
+  local suite var
+  apt_snap_utc_instant "${GUEST_APT_SNAPSHOT:-}" \
+    || apt_snap_die "GUEST_APT_SNAPSHOT='${GUEST_APT_SNAPSHOT:-}' is not a real UTC instant (YYYYMMDDTHHMMSSZ)"
+  apt_snap_utc_instant "${GUEST_APT_BUILD_START:-}" \
+    || apt_snap_die "GUEST_APT_BUILD_START='${GUEST_APT_BUILD_START:-}' is not a recorded build-start instant (YYYYMMDDTHHMMSSZ)"
+  [[ "$GUEST_APT_SNAPSHOT" < "$GUEST_APT_BUILD_START" ]] \
+    || apt_snap_die "GUEST_APT_SNAPSHOT=$GUEST_APT_SNAPSHOT is not earlier than the build start $GUEST_APT_BUILD_START"
   for suite in "${APT_SNAP_SUITES[@]}"; do
     var="$(apt_snap_pin_var "$suite")"
     [[ "${!var:-}" =~ ^[0-9a-f]{64}$ ]] || apt_snap_die "manifest.env: $var is not a SHA-256"
@@ -62,9 +79,14 @@ apt_snap_require_pins() {
 }
 
 # Every apt-get call of the pinned section. Never `update` (see below).
+# Always-Include-Phased-Updates: phasing picks a machine-dependent subset of
+# an update, so "same snapshot => same versions" would not hold; the pinned
+# snapshot is the reviewed set, so all of it applies. Keep-Downloaded-Packages:
+# the acquired .debs stay in the cache until the acquisition receipt is taken.
 apt_snap() {
   [[ "${1:-}" != update ]] || apt_snap_die "use apt_snap_update for update"
-  apt-get "${APT_SNAP_OPTS[@]}" --snapshot "$GUEST_APT_SNAPSHOT" "$@"
+  apt-get "${APT_SNAP_OPTS[@]}" --snapshot "$GUEST_APT_SNAPSHOT" \
+    -o APT::Get::Always-Include-Phased-Updates=true -o APT::Keep-Downloaded-Packages=true "$@"
 }
 
 # The pinned update: fails on any index it cannot fetch (E7).
@@ -142,3 +164,42 @@ apt_snap_label() {
   done
   echo "$out"
 }
+
+# apt_snap_acquisition_receipt CACHE_DIR OUT: one row per .deb the build
+# acquired — package, version, architecture (read from the .deb itself, not
+# its file name), SHA-256 of the bytes, file name. build-ova.sh reconciles
+# every row against the authenticated indexes and the Docker byte pins.
+apt_snap_acquisition_receipt() {
+  local dir="$1" out="$2" f
+  : > "$out.tmp"
+  for f in "$dir"/*.deb; do
+    [[ -e "$f" ]] || continue
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$(dpkg-deb -f "$f" Package)" "$(dpkg-deb -f "$f" Version)" "$(dpkg-deb -f "$f" Architecture)" \
+      "$(sha256sum "$f" | cut -d' ' -f1)" "${f##*/}" >> "$out.tmp"
+  done
+  sort "$out.tmp" > "$out"; rm -f "$out.tmp"
+  [[ -s "$out" ]] || apt_snap_die "no acquired packages in $dir (cache emptied before the receipt?)"
+}
+
+# apt_snap_verify_docker_debs RECEIPT: each pinned Docker package was acquired
+# exactly once, at its pinned version, with its reviewed SHA-256. Docker's
+# repository is not snapshotted, so these four byte pins are what binds them.
+apt_snap_verify_docker_debs() {
+  local receipt="$1" spec name ver shavar want rows
+  for spec in "docker-ce DOCKER_CE_VERSION DOCKER_CE_DEB_SHA256" \
+              "docker-ce-cli DOCKER_CE_CLI_VERSION DOCKER_CE_CLI_DEB_SHA256" \
+              "containerd.io CONTAINERD_IO_VERSION CONTAINERD_IO_DEB_SHA256" \
+              "docker-compose-plugin DOCKER_COMPOSE_PLUGIN_VERSION DOCKER_COMPOSE_PLUGIN_DEB_SHA256"; do
+    read -r name ver shavar <<<"$spec"
+    want="${!shavar:-}"
+    [[ "$want" =~ ^[0-9a-f]{64}$ ]] || apt_snap_die "manifest.env: $shavar is not a SHA-256"
+    rows="$(awk -F'\t' -v n="$name" '$1==n' "$receipt")"
+    [[ -n "$rows" && "$(wc -l <<<"$rows")" == 1 ]] || apt_snap_die "$name: expected exactly one acquired .deb, receipt has: ${rows:-none}"
+    [[ "$(cut -f2 <<<"$rows")" == "${!ver}" && "$(cut -f3 <<<"$rows")" == amd64 ]] \
+      || apt_snap_die "$name: acquired $(cut -f2,3 <<<"$rows" | tr '\t' ' '), manifest pins ${!ver} amd64"
+    [[ "$(cut -f4 <<<"$rows")" == "$want" ]] \
+      || apt_snap_die "$name ${!ver}: acquired .deb is $(cut -f4 <<<"$rows"), manifest pins $want ($shavar)"
+  done
+}
+

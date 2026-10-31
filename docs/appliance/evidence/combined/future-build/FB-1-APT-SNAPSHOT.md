@@ -137,3 +137,117 @@ Commit `d452d50dda9943bafaa4e03d3f77e542dd6d97dd` on `review/1528-m1-engine-pins
 
 **Before the next build, raise the pin.** 44 of the 57 live-only versions are security-pocket updates. A build correctly pinned to `20261002T120000Z` would ship older versions than 325c142a. The readiness report §0-FB1 has the prerequisite list.
 
+
+## 7. Corrections and pin raise (31 Oct 2026)
+
+This section covers ASTRA's two findings on §6 and the owner-authorized pin raise. §1–§6 are unchanged as the record of 30 Oct.
+
+### 7.1 The snapshot ID is a real UTC instant, earlier than one recorded build start
+
+**Finding.**
+- The ID check was a regex followed by a lexical comparison against `date -u` read at the point of the check.
+- So `20260230T120000Z` and `20251340T256199Z` passed.
+- The "now" it compared against was read inside the guest, after host downloads had already happened.
+
+**Fix.**
+- `apt_snap_utc_instant` passes an ID only if `date -u -d` parses it as a UTC instant **and** formatting that instant reproduces the input byte for byte.
+- The round trip does not rely on `date` refusing an impossible date: GNU date refuses one, but a normalizing `date` (busybox, BSD `-j`) would roll it over to another day.
+- `build-ova.sh` records **one** build start (`GUEST_APT_BUILD_START`) before the base-image download. It validates the pins against that instant at that point, before any network fetch.
+- The same value goes to the guest through the overlay manifest, and into `build-info.json` as `apt_build_start`.
+- The guest re-checks the ID against that recorded instant, never against its own clock.
+
+**Tests** (`RequirePinsRefusesBadIDsAndPins`, `RequirePinsUsesTheRecordedInstantNotTheClock`). Each of the following is refused:
+- 30 Feb, ASTRA's `20251340T256199Z`, 29 Feb 2026, hour 24, minute 60, second 60, a leading space, a missing `Z`;
+- an ID equal to, or later than, the build start;
+- a missing or impossible build start;
+- an impossible ID under a normalizing `date` stub.
+
+Two controls show the recorded instant decides, not the clock:
+- IDs in 2020, long before now, are refused when they are after the recorded start;
+- a clock stub reading 1970 is ignored.
+
+T4 C2 adds the impossible IDs on the hosted runner.
+
+### 7.2 Package bytes are bound to authenticated metadata, not just versions
+
+**Finding.**
+- The reconciler compared versions only.
+- Docker's repository has no snapshots, so a self-consistent Docker index listing another `.deb` hash for the pinned version passed (ASTRA's reproduction).
+
+**Fix: three layers.**
+
+1. **Reviewed Docker `.deb` pins.** `manifest.env` now carries `*_DEB_SHA256` for the four Docker packages. Each value was read from Docker's gpgv-verified index and hashed from the downloaded file. The engine three equal M1's verified identities (`fb1-snapshot-20261029/docker/`).
+2. **Guest acquisition receipt.**
+   - `prepare-guest.sh` records `acquired-debs.tsv` from the `.deb` files themselves: `dpkg-deb -f` for package/version/architecture, plus `sha256sum`.
+   - It records the receipt once after the Docker install and again before `apt-get clean`.
+   - It refuses a Docker `.deb` whose version, architecture or SHA-256 is not the pin, and a missing or duplicate Docker file.
+   - Phased updates are always included (`Always-Include-Phased-Updates`), so resolution never depends on the build machine's phasing hash.
+3. **Host reconciliation.** `reconcile-package-provenance.py --acquired` refuses all of the following:
+   - an acquired file whose SHA-256 differs from the **authenticated snapshot index** entry for the same package/version/architecture;
+   - an acquired Docker file that differs from the reviewed pin;
+   - a Docker index listing another hash for a pinned version;
+   - one package/version acquired as two different files;
+   - an acquired `.deb` the snapshot does not list;
+   - a Docker package installed without a verified acquisition;
+   - an empty or malformed receipt;
+   - a missing byte pin.
+
+   Each `package-provenance.tsv` row now carries **binding**:
+   - `acquired-verified`: this build downloaded the bytes and they matched;
+   - `inherited-base-image`: the package was already in the base image at the snapshot's version.
+
+**Limit, stated so it is not overread.** Inherited packages were not downloaded. Their bytes are bound only by `BASE_IMAGE_SHA256`, the signed cloud-image file, not package by package. The reconciler reports their count separately and never claims byte identity for them.
+
+**Tests:**
+- `DockerByteBindingRefusesASelfConsistentIndex` (ASTRA's reproduction);
+- `AcquisitionReceiptFailsClosed`: same name/version/architecture with different bytes, for Ubuntu and for Docker, plus each refusal above;
+- `GuestReceiptAndDockerByteCheck`: real `.deb` files built with `dpkg-deb`: control, different bytes, wrong version, missing file, duplicate file, empty cache.
+
+**Mutation check: 14 of 14 caught.** Two lines were each disabled and caught separately:
+- the round-trip compare (caught only by the normalizing-`date` case, which was added for that reason);
+- the build-start order.
+
+The others:
+- build-start validation;
+- the guest Docker SHA check;
+- the empty-receipt refusal;
+- the Docker index pin;
+- Ubuntu and Docker acquired-byte comparisons;
+- the Docker-must-be-acquired rule;
+- the duplicate-file rule;
+- `--acquired` being required;
+- unknown acquired files;
+- the build-ova pin call;
+- the guest verify call.
+
+### 7.3 The pin: `20261029T180000Z`
+
+Selection, authenticated metadata, kernel window, full comparison against 325c142a, and Docker index evidence: `fb1-snapshot-20261029/README.md`.
+
+**Summary.** The four InRelease files are byte-identical to the indexes the owner-approved kernel-42 transaction was resolved against.
+
+Against the 325c142a inventory, using Debian ordering:
+
+| Class | Rows |
+|---|---|
+| unchanged | 671 |
+| Docker, unchanged at the pins | 4 |
+| kernel meta upgrade, 7.0.0-38 → 7.0.0-42.42~24.04.1 | 1 |
+| 7.0.0-42 kernel packages added | 4 |
+| superseded 7.0.0-38 kernel packages purged | 4 |
+| downgrades | **0** |
+| versions outside the snapshot | **0** |
+
+All 209 rows whose 325c142a version is in noble-security are kept or superseded by the approved kernel. There is no conflict between the owner's three constraints at this snapshot, so no alternative is proposed.
+
+**Network checks** (lab, `.github/lab/fb1-c5.sh`, hosted runner, APT 2.8.3). C6 adds a real acquisition under the pin:
+- the four Docker `.deb` files equal their manifest pins, through the production receipt and check;
+- the five kernel `.deb` files are 7.0.0-42.42~24.04.1;
+- each kernel file equals its authenticated snapshot index entry **and** the approved kernel-42 identity (`esxi-325c142a/kernel-42/kernel-debs.tsv`).
+
+The run IDs and the checkout SHA are in the PR #1528 handoff and in the readiness report §0-FB1b.
+
+**T5 remains pending.** On the replacement OVA it requires:
+- its own `package-provenance.tsv`: 0 non-snapshot rows, every Docker row `acquired-verified`;
+- `acquired-debs.tsv`;
+- InRelease hashes equal to the manifest.
