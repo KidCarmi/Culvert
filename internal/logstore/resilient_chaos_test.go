@@ -107,6 +107,11 @@ func garbleTables(t *testing.T, dir string) int {
 // admin_settings.json and re-applied on every boot, so run 2 is not a
 // hypothetical — it is what `restart: unless-stopped` does, forever, with no
 // admin UI left to turn the setting back off.
+//
+// Run 1 does not always die INSIDE the open: badger.Open can return the store
+// without the panicking table just before the process ends. That path must
+// report the store incomplete and keep its marker, so it is asserted like the
+// other, never skipped.
 func TestChaos62_SurvivesUncatchableOpenPanicOnNextRun(t *testing.T) {
 	if dir := os.Getenv("CULVERT_LOGSTORE_PANIC_CHILD"); dir != "" {
 		runHistoryPanicChild(dir)
@@ -120,8 +125,15 @@ func TestChaos62_SurvivesUncatchableOpenPanicOnNextRun(t *testing.T) {
 	if strings.Contains(first, "child: recovered") {
 		t.Error("the panic was catchable at the call site — the marker mechanism is no longer needed; simplify")
 	}
-	if firstErr == nil || strings.Contains(first, "child: returned") {
+	incomplete := strings.Contains(first, "trigger="+string(storeguard.TriggerIncompleteOpen))
+	if firstErr == nil && !incomplete {
 		t.Skipf("badger no longer panics on a corrupt table (returned instead): %s", first)
+	}
+	if strings.Contains(first, "child: returned err=<nil>") {
+		t.Fatalf("run 1 reported a successful open of a store badger was panicking on — its marker was cleared, so the next run walks into the same corrupt store:\n%s", first)
+	}
+	if incomplete {
+		t.Log("run 1 returned the store incomplete before the panic ended it; its marker was kept")
 	}
 
 	// The dead child's marker must survive AND be recognised as abandoned: the

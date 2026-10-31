@@ -39,6 +39,14 @@ detects this and recovers automatically:
 Only one quarantined copy is kept. A host that keeps producing corruption must
 not fill the volume with evidence, and the newest copy is the useful one.
 
+A corrupt table (`.sst`) is the one case recovered on the **next** open rather
+than the same one: it makes the open crash the process, and occasionally the
+open returns a moment earlier with that table missing. Culvert checks every
+open against the store's manifest, refuses an incomplete store
+(`incomplete_open` in the log line) and leaves a marker, so the next open — a
+restart, or turning history saving back on — moves the directory aside before
+reading it.
+
 > **Your history from before the incident is in the quarantined copy.** If the
 > store is encrypted, that copy is still decryptable with the existing
 > `<dir>.salt` sidecar, which is deliberately left in place — so keep the

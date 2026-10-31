@@ -454,6 +454,15 @@ func (e errString) Error() string { return string(e) }
 //
 // Without the marker, boot 2 is byte-identical to boot 1 and the appliance
 // never comes up again.
+//
+// Boot 1 does not always die INSIDE the open. badger's per-table goroutine
+// releases its throttle while the panic unwinds, so badger.Open can return the
+// store without the panicking table just before the process ends (roughly 1 boot
+// in 600 under load). That path used to report err=<nil>, clear the marker, and
+// leave boot 2 to walk into the same corrupt store, and this test either skipped
+// or failed on it. It is now a recovery path like the other: the open must
+// report the store incomplete, keep its marker, and boot 2 must recover
+// through it.
 func TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot(t *testing.T) {
 	if dir := os.Getenv("CULVERT_CATDB_PANIC_CHILD"); dir != "" {
 		runPanicRecoveryChild(dir)
@@ -467,8 +476,15 @@ func TestOpenResilient_SurvivesUncatchableOpenPanicOnNextBoot(t *testing.T) {
 	if strings.Contains(first, "child: recovered") {
 		t.Error("the panic was catchable at the call site — the marker mechanism is no longer needed; simplify")
 	}
-	if firstErr == nil || strings.Contains(first, "child: returned") {
+	incomplete := strings.Contains(first, "trigger="+string(TriggerIncompleteOpen))
+	if firstErr == nil && !incomplete {
 		t.Skipf("badger no longer panics on a corrupt table (returned instead): %s", first)
+	}
+	if strings.Contains(first, "child: returned err=<nil>") {
+		t.Fatalf("boot 1 reported a successful open of a store badger was panicking on — its marker was cleared, so the next boot walks into the same corrupt store:\n%s", first)
+	}
+	if incomplete {
+		t.Log("boot 1 returned the store incomplete before the panic ended it; its marker was kept")
 	}
 	// The dead child's marker must survive AND be recognised as abandoned: the
 	// kernel released its flock when the process died, which is exactly what

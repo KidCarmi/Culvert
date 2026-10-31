@@ -51,6 +51,10 @@ const (
 	// TriggerRuntimeFault means a previous run contained a memory fault on the
 	// store's mapped tables after a healthy open (CHAOS-74).
 	TriggerRuntimeFault = storeguard.TriggerRuntimeFault
+	// TriggerIncompleteOpen means badger.Open returned the store without a
+	// table its manifest lists; the store was refused and its marker kept, so
+	// the next open quarantines it before badger reads it.
+	TriggerIncompleteOpen = storeguard.TriggerIncompleteOpen
 )
 
 // communityStorePolicy is deliberately EMPTY: this store is never opened with an

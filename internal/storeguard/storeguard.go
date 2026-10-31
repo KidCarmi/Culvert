@@ -42,6 +42,13 @@
 // On that signal the directory is quarantined BEFORE badger is allowed near it
 // again, so the second start succeeds where the first one died.
 //
+// An open that RETURNS is not proof that it survived. badger can hand back a
+// store without the table it is panicking on, moments before the panic ends the
+// process (see badger.go). So an opener that finds its store incomplete reports
+// ErrIncompleteOpen, and the attempt's marker is then kept rather than cleared:
+// the next open quarantines the directory exactly as if the process had died
+// inside badger.Open — which, a moment later, it usually has.
+//
 // The marker is per-attempt and flock-owned rather than a single shared path
 // because a shared one cannot survive concurrency: a second process starting
 // while the first is still inside Open would clear the first process's
@@ -173,7 +180,25 @@ const (
 	// store's mapped tables after a healthy open and recorded it with
 	// RecordFault (CHAOS-74).
 	TriggerRuntimeFault RecoveryTrigger = "runtime_fault"
+	// TriggerIncompleteOpen means the open returned a store missing tables its
+	// manifest lists (ErrIncompleteOpen). The store is refused and its marker is
+	// kept, so the quarantine happens on the next open, before badger reads it.
+	TriggerIncompleteOpen RecoveryTrigger = "incomplete_open"
 )
+
+// ErrIncompleteOpen is what an opener reports when the store it opened is not
+// the whole store — for badger, a table the manifest lists that the open never
+// loaded (see OpenBadger). The opener must close the store before returning it.
+//
+// It is identified corruption, but Open does NOT quarantine on it in the same
+// call. For badger the cause is usually a table-open panic still unwinding,
+// which ends the process at an arbitrary point: a quarantine started now could
+// be cut off after the rename but before its marker was cleared, and the next
+// start would then quarantine the fresh replacement and prune the real
+// evidence. Keeping the marker instead hands the decision to the next open,
+// which makes it before badger touches the directory, whether or not this
+// process survives to see it.
+var ErrIncompleteOpen = errors.New("storeguard: the store opened without every table its manifest lists")
 
 // Recovery reports what Open had to do. It is data, not logging: the caller
 // owns the log line, the alert, and the metrics, so this package stays free of
@@ -189,7 +214,8 @@ type Recovery struct {
 	// QuarantinePath is where it was moved to (empty unless Quarantined).
 	QuarantinePath string
 	// Skipped explains why a recovery that was triggered did NOT quarantine —
-	// a live lock holder, a missing directory, or a rename that failed. Empty
+	// a live lock holder, a missing directory, a rename that failed, or an
+	// incomplete open whose quarantine is deferred to the next open. Empty
 	// when nothing was skipped.
 	Skipped string
 	// ResidualQuarantines lists `.corrupt.*` siblings present at open time,
@@ -232,6 +258,11 @@ func openWith[T any](dir string, policy Policy, open func(string) (T, error), fs
 		rec.ResidualQuarantines = QuarantinedCopies(dir)
 		return store, rec, nil
 	}
+	if errors.Is(err, ErrIncompleteOpen) {
+		noteIncompleteOpen(&rec, err)
+		rec.ResidualQuarantines = QuarantinedCopies(dir)
+		return zero, rec, err
+	}
 
 	// A returned error. Quarantine only for positively-identified corruption,
 	// and only if this call has not already quarantined once.
@@ -250,13 +281,27 @@ func openWith[T any](dir string, policy Policy, open func(string) (T, error), fs
 		return zero, rec, err
 	}
 	// Exactly one retry — a fresh directory. No loop: if this fails the fault
-	// is environmental and retrying cannot help.
+	// is environmental and retrying cannot help. (An ErrIncompleteOpen here has
+	// already kept its own marker in openGuarded.)
 	store, err = openGuarded(dir, open)
 	rec.ResidualQuarantines = QuarantinedCopies(dir)
 	if err != nil {
 		return zero, rec, err
 	}
 	return store, rec, nil
+}
+
+// noteIncompleteOpen records an open that returned an incomplete store. Its
+// marker was kept, so the quarantine is deferred to the next open rather than
+// skipped. A quarantine this call already made is left as the reported
+// recovery: the replacement it opened is what came up incomplete.
+func noteIncompleteOpen(rec *Recovery, err error) {
+	if rec.Quarantined {
+		return
+	}
+	rec.Trigger = TriggerIncompleteOpen
+	rec.Cause = err.Error()
+	rec.Skipped = "deferred to the next open of this store, which moves it aside before reading it; this open may be racing a table-open panic that ends the process, so the quarantine is not started now"
 }
 
 // recoverBeforeOpen acts on the signals a PREVIOUS process left for this store
@@ -275,7 +320,7 @@ func recoverBeforeOpen(dir string, rec *Recovery, fsys markerFS) error {
 	switch {
 	case len(poison) > 0:
 		rec.Trigger = TriggerPoisonMarker
-		rec.Cause = "a previous start entered the store open and never returned (corrupt table, kill, or out-of-memory)"
+		rec.Cause = "a previous start entered the store open and never returned, or returned it incomplete (corrupt table, kill, or out-of-memory)"
 	case faulted:
 		if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
 			// The faulted store is already gone (an operator removed it, or a
@@ -352,13 +397,25 @@ func ApplyQuarantine(dir string, rec *Recovery) {
 	rec.QuarantinePath = qpath
 }
 
-// openGuarded arms this attempt's marker for the duration of one open call and
-// clears it whichever way the call returns. If the call does NOT return — the
-// uncatchable panic — the marker survives into the next start with its flock
-// released by the kernel, which is the entire point.
+// openGuarded arms this attempt's marker for the duration of one open call. If
+// the call does NOT return — the uncatchable panic — the marker survives into
+// the next start with its flock released by the kernel, which is the entire
+// point.
+//
+// A RETURN is not enough to clear it. badger can return a store without the
+// table it is panicking on, just before that panic ends the process, so a
+// return can come from a process that is already dying. The marker is cleared
+// only when the opener does not report ErrIncompleteOpen; when it does, the
+// marker is abandoned — kept, with this process's flock released — so the next
+// open, in this process or the next one, sees it exactly as if this process had
+// died inside the call.
 func openGuarded[T any](dir string, open func(string) (T, error)) (T, error) {
 	attempt := BeginAttempt(dir)
 	store, err := open(dir)
+	if errors.Is(err, ErrIncompleteOpen) {
+		attempt.Abandon()
+		return store, err
+	}
 	attempt.End()
 	return store, err
 }
@@ -487,6 +544,17 @@ func (a *OpenAttempt) End() {
 	}
 	if a.Path != "" {
 		_ = os.Remove(a.Path)
+	}
+	a.Lock.Release()
+}
+
+// Abandon releases this attempt's lock and leaves its marker in place: the
+// on-disk state of a process that died inside the open. It is how an open that
+// returned an incomplete store hands the quarantine to the next open (see
+// ErrIncompleteOpen). Safe on a zero-value attempt.
+func (a *OpenAttempt) Abandon() {
+	if a == nil {
+		return
 	}
 	a.Lock.Release()
 }
