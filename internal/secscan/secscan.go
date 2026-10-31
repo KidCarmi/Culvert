@@ -619,10 +619,94 @@ func expandZstdForScan(data []byte, ce string) (out []byte, bomb bool) {
 // the sidecar's saturation path). Hitting MaxDecompressBytes is deliberately
 // NOT treated this way: that content transferred its bytes honestly, so its
 // prefix keeps being scanned exactly as before.
+//
+// WHY THE RATIO IS OPERATOR-TUNABLE (and only within bounds). 64 is the
+// fail-closed DEFAULT, not a universal truth: a CSV or log export of
+// near-identical rows can legitimately compress past 64:1 and is then refused
+// whole. SetDecompressRatioLimit lets an administrator move the factor inside
+// [MinDecompressRatioLimit, MaxDecompressRatioLimit]; the floor, the flat
+// MaxDecompressBytes ceiling and the refusal semantics are NOT tunable. See
+// those constants for why the range stops where it does.
 const (
-	decompressRatioLimit = 64
-	decompressFloorBytes = 1 << 20
+	decompressRatioLimit = DefaultDecompressRatioLimit
+	decompressFloorBytes = DecompressFloorBytes
 )
+
+// DefaultDecompressRatioLimit is the shipped expansion ratio (see the block
+// above). It is what applies whenever no operator override is set.
+// DecompressFloorBytes is the small-response floor; exported for the admin
+// surface that reports it, and deliberately not tunable.
+const (
+	DefaultDecompressRatioLimit = 64
+	DecompressFloorBytes        = 1 << 20
+)
+
+// MinDecompressRatioLimit and MaxDecompressRatioLimit bound the operator
+// override. Validated here, in the owner, so no caller can install a value the
+// bound was not designed for.
+//
+// WHY 16 AT THE BOTTOM. Lowering the factor is a legitimate memory-tightening
+// choice on a small node (the per-response expansion is ratio x compressed
+// bytes), but HTML/JS/CSS already sits at 3-10:1 and JSON at 10-20:1. 16 is
+// the lowest value that still admits all ordinary markup; below it the bound
+// would refuse ordinary pages and stop being a bomb detector at all. Values
+// between 16 and ~32 can already refuse very repetitive JSON — that is the
+// operator's explicit, audited trade.
+//
+// WHY 256 AT THE TOP, NOT 1024. The measured CHAOS-106 bomb expanded at 408:1
+// and a gzip of zeros reaches ~1030:1. A ceiling at or above ~400 would let an
+// operator set a value at which the measured attack shape is admitted again,
+// i.e. switch the protection off while the UI still shows it as on. 256 is 4x
+// the default — room for CSV/log exports up to 256:1 — and still sits below
+// every bomb ratio CHAOS-106 measured, so the bound keeps refusing that shape
+// at the maximum. Content more repetitive than 256:1 is indistinguishable from
+// a bomb by ratio, which is exactly the signal the bound uses; it stays
+// refused. Raising the factor still lowers an attacker's cost per refused-byte
+// (64 MiB of expansion for 256 KiB of wire at the maximum instead of 1 MiB), so
+// the admin plane reports any value above the default as a relaxed posture.
+const (
+	MinDecompressRatioLimit = 16
+	MaxDecompressRatioLimit = 256
+)
+
+// decompressRatioOverride is the operator-set ratio, 0 meaning "unset — use
+// DefaultDecompressRatioLimit". Read on every scan-path expansion, so it is a
+// lone atomic (the Scanner.enabled reasoning): no lock on the response path,
+// and the zero value is the shipped default without any init ordering.
+var decompressRatioOverride atomic.Int64
+
+// ValidateDecompressRatioLimit reports whether n may be installed as the
+// expansion ratio.
+func ValidateDecompressRatioLimit(n int64) error {
+	if n < MinDecompressRatioLimit || n > MaxDecompressRatioLimit {
+		return fmt.Errorf("decompression ratio limit must be between %d and %d (default %d)",
+			MinDecompressRatioLimit, MaxDecompressRatioLimit, DefaultDecompressRatioLimit)
+	}
+	return nil
+}
+
+// SetDecompressRatioLimit installs n as the scan-path expansion ratio. An
+// out-of-range value is refused and the current ratio is kept (fail closed: a
+// bad value never widens the bound). Setting the default clears the override,
+// so an untouched node and a node reset to the default behave identically.
+func SetDecompressRatioLimit(n int64) error {
+	if err := ValidateDecompressRatioLimit(n); err != nil {
+		return err
+	}
+	if n == DefaultDecompressRatioLimit {
+		n = 0
+	}
+	decompressRatioOverride.Store(n)
+	return nil
+}
+
+// DecompressRatioLimit returns the ratio scan-path expansions are bounded by.
+func DecompressRatioLimit() int64 {
+	if n := decompressRatioOverride.Load(); n > 0 {
+		return n
+	}
+	return DefaultDecompressRatioLimit
+}
 
 // statScanDecompressBombs counts responses refused because their expansion
 // exceeded the ratio allowance. Deliberately NOT folded into statScanSkipped:
@@ -646,7 +730,14 @@ func DecompressBombs() int64 { return atomic.LoadInt64(&statScanDecompressBombs)
 // the flat MaxDecompressBytes. Only the ratio ceiling refuses; see the
 // constant block above.
 func expandBound(n int) (limit int64, ratioBound bool) {
-	allowance := int64(n) * decompressRatioLimit
+	return expandBoundAt(n, DecompressRatioLimit())
+}
+
+// expandBoundAt is expandBound for an already-loaded ratio, so one expansion
+// computes its ceiling and reports its refusal against the SAME value even if
+// an administrator changes the setting mid-read.
+func expandBoundAt(n int, ratio int64) (limit int64, ratioBound bool) {
+	allowance := int64(n) * ratio
 	if allowance < decompressFloorBytes {
 		allowance = decompressFloorBytes
 	}
@@ -663,7 +754,8 @@ func expandBound(n int) (limit int64, ratioBound bool) {
 // the flat MaxDecompressBytes ceiling instead returns the prefix with bomb
 // false, preserving the pre-CHAOS-106 truncate-and-scan behavior exactly.
 func expandForScan(r io.Reader, data []byte, ce string) (out []byte, readErr error, bomb bool) {
-	limit, ratioBound := expandBound(len(data))
+	ratio := DecompressRatioLimit()
+	limit, ratioBound := expandBoundAt(len(data), ratio)
 	if !ratioBound {
 		// The flat ceiling truncates, so it has no use for the probe below and
 		// must not take one: the pre-CHAOS-106 io.LimitReader never asked the
@@ -678,7 +770,7 @@ func expandForScan(r io.Reader, data []byte, ce string) (out []byte, readErr err
 	// limit bytes would false-positive).
 	buf, err := readCapped(r, limit+1)
 	if int64(len(buf)) > limit {
-		noteDecompressBomb(ce, len(data), limit)
+		noteDecompressBomb(ce, len(data), limit, ratio)
 		return nil, nil, true
 	}
 	return buf, err, false
@@ -688,7 +780,7 @@ func expandForScan(r io.Reader, data []byte, ce string) (out []byte, readErr err
 // rate-limited line. The rate limit matters because this fires once per
 // refused RESPONSE and an attacker sets that rate, which is the amplifier
 // internal/logsink's blocking producer turns into request latency.
-func noteDecompressBomb(ce string, compressed int, limit int64) {
+func noteDecompressBomb(ce string, compressed int, limit, ratio int64) {
 	total := atomic.AddInt64(&statScanDecompressBombs, 1)
 	if !degradedLogAllowed(&lastDecompressBombLog) {
 		return
@@ -696,7 +788,7 @@ func noteDecompressBomb(ce string, compressed int, limit int64) {
 	// ce is an origin-supplied header value, so it is sanitised (CWE-117) even
 	// though it has already been matched against the known encoding set.
 	obs.Warnf("SecurityScan: refusing %q response: %d compressed bytes expand past the %d-byte ratio allowance (limit %dx) — blocking (fail-closed); total %d",
-		obs.Sanitize(ce), compressed, limit, decompressRatioLimit, total)
+		obs.Sanitize(ce), compressed, limit, ratio, total)
 }
 
 // readCapped reads up to limit bytes from r, growing its buffer geometrically

@@ -213,6 +213,14 @@ type AdminSettings struct {
 	YARAOnSaturation  string `json:"yara_on_saturation,omitempty"`
 	YARAAlertDegraded bool   `json:"yara_alert_degraded"`
 
+	// ScanDecompressRatioLimit is the operator override for the CHAOS-106
+	// scan-path expansion ratio (internal/secscan). 0/absent means "use the
+	// shipped default" — the default is deliberately recorded as 0, so no
+	// sentinel is needed and an untouched node keeps following the default
+	// across upgrades. Node-local like the YARA engine settings: OFF
+	// export/import, version-rollback, and CP→DP.
+	ScanDecompressRatioLimit int64 `json:"scan_decompress_ratio_limit,omitempty"`
+
 	// Adaptive decryption-exclusion tunables (F10). AutoExcludeTunablesSaved is a
 	// sentinel (like YARASettingsSaved): when false the values below are not applied
 	// on load, so a zero-value field can't override the engine defaults on settings
@@ -394,6 +402,7 @@ func LoadAdminSettings(path string) {
 	applyLegacyLDAPRetirement(&s)
 	applyAdminNetwork(&s)
 	applyAdminYARA(&s)
+	applyAdminScanDecompressRatio(&s) // CHAOS-106 ratio override; out-of-range refused, default kept
 	applyAdminAutoExcludeTunables(&s)
 	applyAdminSupportRetention(&s)             // Slice B: configurable support-bundle retention caps
 	applyAdminPolicyLearning(&s)               // ADR-0025 M5A: record governed desired state (materialized by loadPolicyLearning)
@@ -882,6 +891,10 @@ type adminSaveOverrides struct {
 	// failure leaves the running posture untouched (never a 200 over a
 	// change that silently reverts on restart).
 	yaraSettings *yaraSettingsTarget
+	// scanDecompressRatio carries the TARGET scan-path decompression ratio
+	// for its persist-before-apply PUT (ui_security_decompress.go), on the
+	// same durable-before-live contract as yaraSettings.
+	scanDecompressRatio *int64
 	// decRedaction carries the TARGET destination-privacy state (posture + key
 	// + non-secret generation id) for the persist-before-apply redaction PUT
 	// (2E-B §A/§B/§C): the durable file records the target while the live
@@ -1102,6 +1115,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 		s.YARAAlertDegraded = yaraGetAlertDegraded()
 	}
 
+	snapshotScanDecompressRatio(&s, ov.scanDecompressRatio) // CHAOS-106 ratio override (0 = default)
 	snapshotAutoExcludeTunables(&s, ov.autoExclude)
 	snapshotSupportRetention(&s, ov.supportRetention) // Slice B: configurable retention caps
 	snapshotPolicyLearning(&s, ov.policyLearning)     // ADR-0025 M5A: governed enablement + recommendable guardrail

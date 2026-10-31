@@ -144,6 +144,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"saml_base_url":              false,
 		"default_auth_open":          false,
 		"yara_engine_posture":        false,
+		"scan_decompress_ratio":      false,
 		"config_snapshot_validator":  false,
 		"config_versions_present":    false,
 		"config_versions_readable":   false,

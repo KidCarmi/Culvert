@@ -184,6 +184,7 @@ func buildOperatorContract() OperatorContract {
 		checkOIDCBaseURLPosture(),
 		checkDefaultAuthOpen(),
 		checkYARAEnginePosture(),
+		checkScanDecompressRatioPosture(),
 		checkConfigSourcePrecedence(),
 		checkConfigSnapshotValidator(),
 		checkConfigVersionsPresent(cv),
