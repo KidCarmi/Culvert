@@ -342,6 +342,12 @@ func secScanStatusMap() map[string]interface{} {
 		m["stat_scan_timeout"] = counters.ScanTimeout
 		m["stat_remote_scan_saturated"] = counters.RemoteScanSaturated
 		m["remote_scan_inflight"] = counters.RemoteScanInflight
+		// CHAOS-106: the expansion bound refuses HERE, before the sidecar is
+		// asked — the sidecar only ever receives already-expanded bytes, so its
+		// own stat_decompress_bombs is structurally 0. Merged in blind, that 0
+		// told the Security panel nothing was refused while this node blocked
+		// every bomb. The counter of record is this process's.
+		m["stat_decompress_bombs"] = counters.DecompressBombs
 		return m
 	}
 

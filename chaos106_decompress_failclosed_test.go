@@ -274,3 +274,55 @@ func chaos106Source(t *testing.T, name string) string {
 	}
 	return string(b)
 }
+
+// The refusal happens in THIS process even with -scan-svc-url set: the sidecar
+// is handed already-expanded bytes, so its own stat_decompress_bombs is
+// structurally 0. secScanStatusMap's remote branch merges the sidecar's
+// /status, so without an explicit override that 0 reached the scan-status API
+// and the Security panel tile while this node blocked every bomb.
+func TestCHAOS106_RemoteStatusReportsTheLocalRefusalCounter(t *testing.T) {
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// What a real sidecar reports: it never decompresses for the proxy.
+		_, _ = io.WriteString(w, `{"enabled":true,"scan_svc_mode":"local","stat_decompress_bombs":0}`)
+	}))
+	t.Cleanup(sidecar.Close)
+
+	orig := globalRemoteScanner
+	globalRemoteScanner = &RemoteScanner{}
+	globalRemoteScanner.Init(sidecar.URL)
+	t.Cleanup(func() { globalRemoteScanner = orig })
+
+	// A local refusal, so the counter of record is non-zero.
+	if _, refused := decompressForScan(chaos106Bomb(t), "gzip"); !refused {
+		t.Fatal("fixture was not refused")
+	}
+	before := secscan.Counters().DecompressBombs
+
+	m := secScanStatusMap()
+	if m["scan_svc_mode"] != "remote" {
+		t.Fatalf("scan_svc_mode = %v, want remote — the remote branch was not exercised", m["scan_svc_mode"])
+	}
+	if m["scan_svc_degraded"] != false {
+		t.Fatalf("scan_svc_degraded = %v — the sidecar status was not merged, so the override is untested", m["scan_svc_degraded"])
+	}
+	got, ok := m["stat_decompress_bombs"].(int64)
+	if !ok {
+		t.Fatalf("stat_decompress_bombs = %#v (%T), want this process's int64 counter, not the sidecar's",
+			m["stat_decompress_bombs"], m["stat_decompress_bombs"])
+	}
+	if got < before || got == 0 {
+		t.Errorf("stat_decompress_bombs = %d, want the local counter (>= %d, non-zero)", got, before)
+	}
+
+	// The other half of the remote branch: an unreachable sidecar must report
+	// the same local counter.
+	sidecar.Close()
+	m = secScanStatusMap()
+	if m["scan_svc_degraded"] != true {
+		t.Fatalf("scan_svc_degraded = %v, want true with the sidecar closed", m["scan_svc_degraded"])
+	}
+	if got, ok := m["stat_decompress_bombs"].(int64); !ok || got < before {
+		t.Errorf("unreachable sidecar: stat_decompress_bombs = %#v, want the local counter (>= %d)", m["stat_decompress_bombs"], before)
+	}
+}
