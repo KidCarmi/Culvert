@@ -301,6 +301,102 @@ func TestOpen_AbandonedMarkerQuarantinesBeforeOpening(t *testing.T) {
 	}
 }
 
+// markersBeside lists every final-form marker beside dir, live or abandoned.
+func markersBeside(dir string) []string { return siblings(trimSep(dir), MarkerSuffix) }
+
+// An open that RETURNS is not proof it survived: badger can hand back a store
+// without the table it is panicking on, just before the panic ends the process.
+// The opener reports that as ErrIncompleteOpen, and the attempt's marker must
+// then SURVIVE — abandoned, exactly like a process that died inside the open —
+// with the disk otherwise untouched in this call.
+func TestOpen_IncompleteOpenKeepsTheMarkerForTheNextOpen(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	seedDir(t, dir)
+	o := &opener{errs: []error{fmt.Errorf("%w: table 7 not loaded", ErrIncompleteOpen)}}
+
+	st, rec, err := Open(dir, Policy{}, o.open)
+	if !errors.Is(err, ErrIncompleteOpen) || st != nil {
+		t.Fatalf("Open = (%v, %v), want ErrIncompleteOpen and no store", st, err)
+	}
+	if o.calls != 1 {
+		t.Errorf("open calls = %d, want 1 — the retry is the next open's job", o.calls)
+	}
+	if rec.Trigger != TriggerIncompleteOpen || rec.Quarantined || rec.Skipped == "" {
+		t.Errorf("recovery = %+v, want an incomplete open with its quarantine deferred", rec)
+	}
+	if _, serr := os.Stat(dir); serr != nil {
+		t.Fatalf("store directory was moved in the same call: %v", serr)
+	}
+	if got := AbandonedMarkers(dir); len(got) != 1 {
+		t.Fatalf("abandoned markers = %v, want exactly 1 — the next open cannot see the incomplete store", got)
+	}
+
+	// The next open acts on it before the opener runs, and clears it.
+	next := &opener{}
+	if _, rec2, err := Open(dir, Policy{}, next.open); err != nil || rec2.Trigger != TriggerPoisonMarker || !rec2.Quarantined {
+		t.Fatalf("next open = (%+v, %v), want a poison-marker quarantine", rec2, err)
+	}
+	if m := markersBeside(dir); len(m) != 0 {
+		t.Errorf("markers left after the recovery: %v", m)
+	}
+}
+
+// The other half: an open that completes clears its marker, so a healthy store
+// is never quarantined by its own breadcrumb on the next start.
+func TestOpen_CompleteOpenClearsItsMarker(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	seedDir(t, dir)
+	o := &opener{}
+
+	if _, rec, err := Open(dir, Policy{}, o.open); err != nil || rec.Trigger != TriggerNone {
+		t.Fatalf("Open = (%+v, %v), want a clean open", rec, err)
+	}
+	if m := markersBeside(dir); len(m) != 0 {
+		t.Fatalf("markers left after a complete open: %v", m)
+	}
+	if _, rec, err := Open(dir, Policy{}, o.open); err != nil || rec.Quarantined || rec.Trigger != TriggerNone {
+		t.Errorf("second open = (%+v, %v), want a clean open of the same store", rec, err)
+	}
+}
+
+// An ErrIncompleteOpen wrapped with other context (a close error joined on, a
+// caller's prefix) still keeps the marker: the decision is structural.
+func TestOpen_WrappedIncompleteOpenStillKeepsTheMarker(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	seedDir(t, dir)
+	wrapped := fmt.Errorf("open history: %w", errors.Join(
+		fmt.Errorf("%w: table 3 not loaded", ErrIncompleteOpen), errors.New("close: input/output error")))
+	o := &opener{errs: []error{wrapped}}
+
+	if _, _, err := Open(dir, Policy{}, o.open); !errors.Is(err, ErrIncompleteOpen) {
+		t.Fatalf("Open = %v, want ErrIncompleteOpen", err)
+	}
+	if got := AbandonedMarkers(dir); len(got) != 1 {
+		t.Errorf("abandoned markers = %v, want exactly 1", got)
+	}
+}
+
+// Abandon is the on-disk state of a death inside the open: the file stays and
+// the flock goes, so the marker reads as abandoned to everyone, including this
+// process's own next open.
+func TestOpenAttempt_AbandonLeavesAnAbandonedMarker(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "store")
+	a := BeginAttempt(dir)
+	if a.Path == "" {
+		t.Fatal("could not arm a marker")
+	}
+	if got := AbandonedMarkers(dir); len(got) != 0 {
+		t.Fatalf("a live attempt read as abandoned: %v", got)
+	}
+	a.Abandon()
+	if got := AbandonedMarkers(dir); len(got) != 1 || got[0] != a.Path {
+		t.Errorf("abandoned markers after Abandon = %v, want [%s]", got, a.Path)
+	}
+	var zero *OpenAttempt
+	zero.Abandon() // must not panic
+	(&OpenAttempt{}).Abandon()
+}
+
 // A marker whose owner is STILL RUNNING is not a poison signal. Acting on it
 // would destroy the breadcrumb of an attempt still in progress.
 func TestAbandonedMarkers_LiveAttemptIsNotAbandoned(t *testing.T) {

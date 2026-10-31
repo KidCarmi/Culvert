@@ -103,6 +103,11 @@ func (c *CommunityDB) noteMemFault() (first bool) {
 // OpenResilient (resilient.go), which detects and quarantines a store a
 // previous process could not survive. Direct Open is for callers that already
 // know the directory is sound (tests, and OpenResilient itself).
+//
+// It opens through storeguard.OpenBadger, never badger.Open directly: badger can
+// return a store without the table it is panicking on, and OpenBadger turns that
+// into storeguard.ErrIncompleteOpen so OpenResilient keeps its poison marker
+// instead of clearing it over a store that is about to kill the process.
 func Open(dir string) (*CommunityDB, error) {
 	opts := badger.DefaultOptions(dir).
 		// Reduce per-file size: 128 MiB vs the 1 GiB default.
@@ -111,7 +116,7 @@ func Open(dir string) (*CommunityDB, error) {
 		// Suppress BadgerDB's internal INFO logs; proxy's own logger handles them.
 		WithLogger(nil)
 
-	db, err := badger.Open(opts)
+	db, err := storeguard.OpenBadger(opts)
 	if err != nil {
 		return nil, err
 	}

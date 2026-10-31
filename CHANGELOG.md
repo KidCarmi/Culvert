@@ -49,6 +49,29 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A store opened without one of its tables no longer clears its own crash
+  marker, so a corrupt table can no longer leave the category or request-history
+  store in a crash loop by luck.** The poison marker that breaks the
+  corrupt-`.sst` crash loop (CHAOS-50/62) assumed that when badger dies on a
+  damaged table, `badger.Open` never returns. On badger v4.9.6 it can: each
+  table opens in a goroutine whose deferred throttle release runs while the
+  table-open panic unwinds, so `badger.Open` may return the store *without* the
+  panicking table moments before the panic ends the process. The guard then
+  cleared the marker, and the next start handed badger the same corrupt
+  directory — reproduced in roughly 1 boot in 600 under load, where the CHAOS-50
+  gate either failed ("abandoned markers … = []") or skipped as though badger had
+  stopped panicking. Both stores now open through `storeguard.OpenBadger`, which
+  compares the tables badger loaded with the tables the manifest lists (a
+  manifest re-read discounts a table a compaction retired during the open, so the
+  check is deterministic rather than timed). A missing table — including one
+  badger skips on `CHECKSUM_MISMATCH` — closes the store and reports
+  `storeguard.ErrIncompleteOpen`; `storeguard.Open` then keeps the attempt's
+  marker instead of clearing it and reports the attempt as `incomplete_open`, and
+  the next open (a restart, or re-enabling history) quarantines the directory
+  before badger reads it. The quarantine is deliberately not attempted in the same
+  call: the process is usually about to die mid-way through it. Both stores'
+  panic gates now assert recovery on that path instead of skipping it.
+
 - **`culvert_cdr_bytes_out_total` no longer counts a CDR replacement that was
   refused.** In `runCDRStage`'s sanitized-swap branch the replacement body was
   added to the counter before the CHAOS-106 decompression check, so a sanitized
