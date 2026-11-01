@@ -19,6 +19,16 @@ on:
   push:
     branches: [test/appliance-lab]
   workflow_dispatch:
+    # A manual dispatch runs NOTHING unless a route is chosen. guest-boot and
+    # f-disk-1 (both boot guests) are push-only; the only dispatchable route
+    # is build-only, which has no boot step at all.
+    inputs:
+      route:
+        description: "none = every job skips; build-only = build ONE OVA from frozen source 0981ff3d, identity checks, no boot"
+        type: choice
+        options: [none, build-only]
+        default: none
+        required: true
 
 permissions:
   contents: read
@@ -52,7 +62,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[preserve-image]') }}
+    if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[preserve-image]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -724,9 +734,197 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+  # ── Build-only route (#1528 FB-1 replacement; the build itself awaits owner
+  # authorization). ONE OVA from frozen source 0981ff3d and its preserved
+  # candidate image, the BOM section-7 identity checks on the outputs, and
+  # retention of every output — pass or fail. There is NO QEMU boot,
+  # qualification, F-DISK or console step in this job by construction; the
+  # only VM is the libguestfs build appliance build-ova.sh itself starts
+  # (build-time tooling, BOM section 6). Selected ONLY by
+  #   - a push whose head commit says [build-only] and not [lab-skip], or
+  #   - a manual dispatch with route=build-only on test/appliance-lab.
+  # guest-boot and f-disk-1 skip on [build-only] and on every dispatch.
+  build-only:
+    name: "Lab · build-only OVA (no boot): candidate-0981ff3d"
+    if: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[lab-skip]')) || (github.event_name == 'workflow_dispatch' && inputs.route == 'build-only') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      VARIANT: candidate-0981ff3d
+      # Frozen source (ASTRA FB-1 acceptance) and the BOM at that commit.
+      APPLIANCE_SOURCE_SHA: 0981ff3d037dedcf08cf7686474c65ba6b3784bf
+      APPLIANCE_SOURCE_TREE: e8d4bf11078fb32bdc7ad135fafa816b659c37e7
+      # Its Deep PR Gate image (run 41208642365; the deep-gate-image artifact
+      # has expired) via the copy lab run 41210140451 preserved.
+      SOURCE_IMAGE_RUN_ID: "41208642365"
+      SOURCE_IMAGE_ARTIFACT_ID: "13045996939"
+      SOURCE_IMAGE_ARTIFACT_RUN: "41210140451"
+      SOURCE_IMAGE_TAR_SHA256: c98564d4d86d99e61a0e86541aeea5331a6ecce704e7f146b507d8e818484a52
+      SOURCE_DATE_EPOCH_PIN: "1793096442"
+      EXPECT_IMAGE_ID: "sha256:d2ce15f1f7a99c2875579d0cf55f1fe51f0c6e993071eed4bc201eccba732d79"
+      EXPECT_APP_VERSION: v1.0.375-candidate.g0981ff3d037d
+      EXPECT_SIDECAR_ID: "sha256:91eae57526b246da28cb370bd824c45af51e245be0093afcc316bc3fbe941f9d"
+      EXPECT_SIDECAR_ARCHIVE_SHA256: 6482ae8c2774b30913b69d3d26778da8005817bdfb4df051f324e74c93c3c8ad
+      EXPECT_APT_SNAPSHOT: 20261029T180000Z
+      EXPECT_BASE_STATUS_SHA256: 3fde68c0b3bf65d2708cf0d263f9a28feeb64c75a4d42249ebd2d555b10dcc28
+      EXPECT_KERNEL: linux-image-7.0.0-42-generic
+      EXPECT_KERNEL_VERSION: 7.0.0-42.42~24.04.1
+      # Producer-reported stamped console hashes (clean tag-free 0981ff3d);
+      # measured here, before any boot, and compared.
+      EXPECT_CONSOLE_SHA256: 063faebdfea27315011013ff60bad029bd0ff4bd44b8c2f47552c8c5a02689a9
+      EXPECT_ACCESS_SHA256: 6a3a66fa0a3b7bf0b89502399dfc51b8b1451e85cd6db5656d0aa485cb553182
+    steps:
+      - name: Route guard (lab branch only; record what selected this job)
+        run: |
+          set -euo pipefail
+          echo "event=${{ github.event_name }} ref=${{ github.ref }} lab_commit=$GITHUB_SHA route=${{ inputs.route }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "${{ github.ref }}" = refs/heads/test/appliance-lab ] || { echo "::error::build-only runs from test/appliance-lab only"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Host preflight (disk) and lab directory
+        run: |
+          set -euo pipefail
+          # libguestfs uses /dev/kvm when it can (faster build); not a guest boot.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          { sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm; } || true  # best effort
+          nproc; free -m; df -h / /mnt 2>/dev/null || df -h /
+          best=/
+          if [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ]; then best=/mnt; fi
+          sudo mkdir -p "$best/culvert-lab" && sudo chown "$(id -u):$(id -g)" "$best/culvert-lab"
+          echo "LAB_ROOT=$best/culvert-lab" >> "$GITHUB_ENV"
+      - name: Install build tools
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          if [ -f /etc/apt/apt-mirrors.txt ]; then sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt; fi
+          sudo sed -i 's#http://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
+          for _ in 1 2; do
+            # qemu-system-x86 is libguestfs's own appliance runtime (build tooling).
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+              libguestfs-tools qemu-utils qemu-system-x86 genisoimage ubuntu-cloudimage-keyring isc-dhcp-client && break
+            sleep 15
+          done
+          for t in guestfish virt-customize virt-cat virt-ls qemu-img qemu-system-x86_64 genisoimage; do
+            command -v "$t" >/dev/null || { echo "::error::$t is not installed"; exit 1; }
+          done
+          sudo chmod 0644 /boot/vmlinuz-*
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
+          if command -v passt >/dev/null; then echo "::error::passt is still installed"; exit 1; fi
+          sudo rm -f /etc/resolv.conf
+          printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\noptions timeout:2 attempts:3\n' | sudo tee /etc/resolv.conf >/dev/null
+          getent hosts download.docker.com
+      - name: Probe libguestfs appliance networking (fails fast, before a long build)
+        run: |
+          set -euo pipefail
+          sudo env LIBGUESTFS_BACKEND=direct timeout 300 guestfish --network -a /dev/null run : \
+            debug sh "cat /etc/resolv.conf; ip -4 route; getent hosts download.docker.com || echo DNS-FAILED" | tee /tmp/lg-net.txt
+          ! grep -q DNS-FAILED /tmp/lg-net.txt
+      - name: Match the recorded build host's Docker engine (29.6.2)
+        run: |
+          set -euo pipefail
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" | sudo tee /etc/apt/sources.list.d/docker-lab.list >/dev/null
+          sudo apt-get update -q
+          v="$(apt-cache madison docker-ce | awk '$3 ~ /^5:29\.6\.2-/{print $3; exit}')"
+          [ -n "$v" ] || { echo "::error::docker-ce 29.6.2 not available"; exit 1; }
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --allow-downgrades "docker-ce=$v" "docker-ce-cli=$v" containerd.io
+          docker version --format 'client={{.Client.Version}} server={{.Server.Version}}'
+      - name: Use the containerd image store (the build's archive-identity guard requires it)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /etc/docker
+          [ -s /etc/docker/daemon.json ] || echo '{}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo python3 -c 'import json; p="/etc/docker/daemon.json"; d=json.load(open(p)); d.setdefault("features",{})["containerd-snapshotter"]=True; json.dump(d,open(p,"w"))'
+          sudo systemctl restart docker
+          for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
+          docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee /dev/stderr | grep -q 'server=29.6.2 .*io.containerd.snapshotter.v1'
+      - name: Obtain the candidate image tar (pinned preserved artifact; verified sha256)
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          from="$(test/e2e/appliance/lab/obtain-image.sh "$LAB_ROOT/in")"
+          [ "$from" = "pinned-artifact:$SOURCE_IMAGE_ARTIFACT_ID" ] || { echo "::error::image came from $from"; exit 1; }
+          echo "from=$from" >> "$GITHUB_OUTPUT"
+      - name: Check out the frozen source (clean, tag-free, exact commit and tree)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.APPLIANCE_SOURCE_SHA }}
+          path: appliance-src
+          persist-credentials: false
+      - name: Assert the checkout is exactly the frozen source
+        run: |
+          set -euo pipefail
+          cd appliance-src
+          [ "$(git rev-parse HEAD)" = "$APPLIANCE_SOURCE_SHA" ] || { echo "::error::HEAD is $(git rev-parse HEAD)"; exit 1; }
+          [ "$(git rev-parse 'HEAD^{tree}')" = "$APPLIANCE_SOURCE_TREE" ] || { echo "::error::tree is $(git rev-parse 'HEAD^{tree}')"; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "::error::checkout is dirty"; git status --porcelain; exit 1; }
+          [ -z "$(git tag --points-at HEAD)" ] || { echo "::error::checkout carries a tag"; exit 1; }
+          echo "source $APPLIANCE_SOURCE_SHA tree $APPLIANCE_SOURCE_TREE clean, tag-free" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Kernel-module denylist resolves to /bin/false on the real module tree (offline)
+        run: |
+          set -euo pipefail
+          conf=appliance-src/appliance/provision/modprobe-culvert-unused.conf
+          snap="$(sed -n 's/^GUEST_APT_SNAPSHOT=//p' appliance-src/appliance/build/manifest.env)"
+          KERNEL_META="$(sed -n 's/^GUEST_KERNEL_META=//p' appliance-src/appliance/build/manifest.env)"
+          export KERNEL_META="${KERNEL_META:-linux-image-virtual}"
+          test/e2e/appliance/lab/kmod-denylist-check.sh "$conf" "$snap" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Go toolchain pinned by the frozen source
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: appliance-src/go.mod
+          cache: false
+      - name: Build the candidate OVA (image + provisioning from one commit; no drift)
+        id: build
+        run: |
+          set -euo pipefail
+          src="$GITHUB_WORKSPACE/appliance-src"
+          sudo git config --global --add safe.directory "$src"
+          sudo -E env PATH="$PATH" GOTOOLCHAIN=local LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
+            SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH_PIN" \
+            "$src/appliance/build/build-ova.sh" \
+              --candidate-image-tar "$LAB_ROOT/in/culvert-image.tar" \
+              --candidate-source "$APPLIANCE_SOURCE_SHA" --candidate-run-id "$SOURCE_IMAGE_RUN_ID" \
+              --out "$LAB_ROOT/ova" --work "$LAB_ROOT/build" --keep-work 2>&1 | tee "$LAB_ROOT/build-ova.log"
+          rm -f "$LAB_ROOT/in/culvert-image.tar"
+      - name: Collect the build outputs and logs (pass or fail)
+        if: always() && steps.image.outcome == 'success'
+        run: |
+          set -uo pipefail
+          sudo mkdir -p "$LAB_ROOT/ova" && sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/ova"
+          cp "$LAB_ROOT/build-ova.log" "$LAB_ROOT/ova/" 2>/dev/null || true
+          mkdir -p "$LAB_ROOT/console"
+          for f in culvert-console culvert-access; do
+            sudo install -m 0644 -o "$(id -u)" -g "$(id -g)" "$LAB_ROOT/build/overlay/opt/culvert-appliance/console/$f" "$LAB_ROOT/console/$f" 2>/dev/null || true
+          done
+          (cd "$LAB_ROOT/console" && sha256sum culvert-console culvert-access > "$LAB_ROOT/ova/console-sha256.txt") || true
+          printf 'lab_commit=%s\nevent=%s\nsource=%s tree=%s\nimage_run=%s artifact=%s (uploaded by run %s) tar_sha256=%s from=%s\nsource_date_epoch=%s\n' \
+            "$GITHUB_SHA" "${{ github.event_name }}" "$APPLIANCE_SOURCE_SHA" "$APPLIANCE_SOURCE_TREE" \
+            "$SOURCE_IMAGE_RUN_ID" "$SOURCE_IMAGE_ARTIFACT_ID" "$SOURCE_IMAGE_ARTIFACT_RUN" "$SOURCE_IMAGE_TAR_SHA256" "${{ steps.image.outputs.from }}" \
+            "$SOURCE_DATE_EPOCH_PIN" > "$LAB_ROOT/ova/identities.txt"
+          ls -la "$LAB_ROOT/ova"
+      - name: "Identity (BOM section 7), before any boot"
+        id: identity
+        if: steps.build.outcome == 'success'
+        run: |
+          set -euo pipefail
+          python3 -I test/e2e/appliance/lab/build-only-identity.py "$LAB_ROOT/ova" \
+            appliance-src/appliance/build/manifest.env "$LAB_ROOT/console" 2>&1 | tee "$LAB_ROOT/ova/identity.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Retain the OVA and every output (unpublished; a failed build or identity is retained as FAILED)
+        if: always() && steps.image.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: appliance-lab-ova-${{ env.VARIANT }}${{ (steps.build.outcome != 'success' || steps.identity.outcome != 'success') && '-FAILED' || '' }}
+          path: ${{ env.LAB_ROOT }}/ova
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: warn
+
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[preserve-image]') }}
+    if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[preserve-image]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
