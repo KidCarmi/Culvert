@@ -436,14 +436,10 @@ func handleInspectH2(outer *http.Request, clientTLS, upstreamTLS *tls.Conn, host
 func h2InspectStream(outer *http.Request, w http.ResponseWriter, req *http.Request, upstreamCC *http2.ClientConn, hostOnly, clientIP string, match *PolicyMatch, id ProxyIdentity, decBlock *DecryptionBlock) {
 	// Per-request debug log, parity with the H1 loop's SSL_INNER line so admins can
 	// trace file-block/scan decisions on H2 tunnels too. Logged before the reshape
-	// (req.URL.Path is unchanged by it).
-	filterStr := "off"
-	profileStr := ""
-	if match != nil && match.Rule != nil && match.Rule.FileFiltering {
-		filterStr = "on"
-		profileStr = sanitizeLog(string(match.Rule.FileProfile))
-	}
-	logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(boundRetainedPath(req.URL.Path)), profileStr, filterStr)
+	// (req.URL.Path is unchanged by it). Parity is now STRUCTURAL rather than a
+	// duplicated format string: both transports render through the one emitter in
+	// proxy_sslinner_line.go, so the two lines cannot drift apart.
+	logSSLInnerRequest(clientIP, req.Method, hostOnly, req.URL.Path, match)
 
 	// Reshape the h2 server request for an h2 client RoundTrip: RoundTrip requires
 	// an absolute URL (scheme+host) and an empty RequestURI. The request travels

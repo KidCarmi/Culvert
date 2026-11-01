@@ -980,14 +980,12 @@ relayLoop:
 		}
 
 		// Debug: log every inner request so admins can trace file-blocking decisions.
-		// All values are sanitized or hardcoded to satisfy CodeQL CWE-117.
-		filterStr := "off"
-		profileStr := ""
-		if match != nil && match.Rule != nil && match.Rule.FileFiltering {
-			filterStr = "on"
-			profileStr = sanitizeLog(string(match.Rule.FileProfile))
-		}
-		logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(boundRetainedPath(req.URL.Path)), profileStr, filterStr)
+		// All values are sanitized or hardcoded to satisfy CodeQL CWE-117 — the
+		// barrier is inside logSSLInnerRequest, on each value, before the sink.
+		// This is the per-inner-REQUEST log site, the highest-frequency one in the
+		// product when inspection is on, so the line is rendered by appends into a
+		// pooled buffer rather than by fmt: see proxy_sslinner_line.go.
+		logSSLInnerRequest(clientIP, req.Method, hostOnly, req.URL.Path, match)
 
 		ex := &inspectExchange{
 			outer:     r,
