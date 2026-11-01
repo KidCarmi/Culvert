@@ -37,6 +37,12 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// configured.
 	go startSyslogHealthWatchdog(ctx)
 
+	// CHAOS-107: the ClamAV signature-generation observer. ClamAV definitions
+	// change out-of-process (freshclam), so the verdict cache can only be
+	// reconciled against them by ASKING on a cadence; nothing else in the
+	// process does. Self-no-ops when no local ClamAV is configured.
+	go startScanSignatureWatch(ctx)
+
 	// ADR-0011 §3: decryption inspection-coverage trend sampler (volatile time-series
 	// behind the Decryption Health panel's coverage-erosion chart).
 	go startDecCoverageSampler(ctx)

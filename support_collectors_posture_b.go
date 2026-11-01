@@ -132,6 +132,15 @@ type scanSection struct {
 	ScanInflight      int64 `json:"scan_inflight" redact:"internal"`
 	// CHAOS-106: responses refused by the scan-path expansion ratio bound.
 	DecompressBombs int64 `json:"decompress_bombs" redact:"internal"`
+	// CHAOS-107: the signature-set provenance of the hash-cache gauges above.
+	// Without these, HashCacheSize/Hits/Misses cannot answer the question a
+	// support bundle is usually opened to answer — "why was this object
+	// allowed?" — because a hit says the verdict was cached and nothing says
+	// which definitions produced it. SigDBGeneration is the identity the
+	// cached verdicts belong to; SigDBInvalidations is how often the node has
+	// adopted a new one.
+	SigDBGeneration    string `json:"sigdb_generation" redact:"internal"`
+	SigDBInvalidations int64  `json:"sigdb_invalidations" redact:"internal"`
 }
 
 type scanCollector struct{}
@@ -152,6 +161,11 @@ func (scanCollector) Collect(_ context.Context, in support.CollectInput, sink su
 	// + remote-enabled explicitly — otherwise a remote deployment misreads as
 	// "scanning disabled". Uses only the pure Enabled() probe (no sidecar dial).
 	remote := globalRemoteScanner.Enabled()
+	// "" until the signature observer has made its first successful
+	// observation (no ClamAV, or a daemon that has not answered VERSION yet),
+	// which is itself the diagnostic: cached verdicts with no recorded
+	// provenance.
+	sigGen, _ := globalSecScanner.SignatureGeneration()
 	mode := "local"
 	if remote {
 		mode = "remote"
@@ -165,22 +179,24 @@ func (scanCollector) Collect(_ context.Context, in support.CollectInput, sink su
 		DPIPatternCount:   len(dpiScanner.List()),
 		// Honor the runtime YARA toggle, not just "rules loaded" (production
 		// adapter is yaraGetEnabled() && rs.Enabled()); rule count stays raw.
-		YARAEnabled:       yaraGetEnabled() && globalYARA.Enabled(),
-		YARARuleCount:     globalYARA.Count(),
-		HashCacheReady:    globalSecScanner.CacheReady(),
-		HashCacheSize:     size,
-		HashCacheHits:     hits,
-		HashCacheMisses:   misses,
-		DPIBlocked:        atomic.LoadInt64(&statDPIBlocked),
-		ClamBlocked:       c.ClamBlocked,
-		YARABlocked:       c.YARABlocked,
-		ThreatFeedBlocked: c.ThreatFeedBlocked,
-		ScanTimeout:       c.ScanTimeout,
-		ScanSkipped:       c.ScanSkipped,
-		ClamSaturated:     c.ClamSaturated,
-		ScanLateDiscarded: c.ScanLateDiscarded,
-		ScanInflight:      c.ScanInflight,
-		DecompressBombs:   c.DecompressBombs,
+		YARAEnabled:        yaraGetEnabled() && globalYARA.Enabled(),
+		YARARuleCount:      globalYARA.Count(),
+		HashCacheReady:     globalSecScanner.CacheReady(),
+		HashCacheSize:      size,
+		HashCacheHits:      hits,
+		HashCacheMisses:    misses,
+		DPIBlocked:         atomic.LoadInt64(&statDPIBlocked),
+		ClamBlocked:        c.ClamBlocked,
+		YARABlocked:        c.YARABlocked,
+		ThreatFeedBlocked:  c.ThreatFeedBlocked,
+		ScanTimeout:        c.ScanTimeout,
+		ScanSkipped:        c.ScanSkipped,
+		ClamSaturated:      c.ClamSaturated,
+		ScanLateDiscarded:  c.ScanLateDiscarded,
+		ScanInflight:       c.ScanInflight,
+		DecompressBombs:    c.DecompressBombs,
+		SigDBGeneration:    sigGen,
+		SigDBInvalidations: c.SigDBInvalidations,
 	}
 	res := in.Redactor.Classify(sec)
 	if err := sink.WriteJSON(res.Value); err != nil {
