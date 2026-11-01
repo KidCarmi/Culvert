@@ -3941,15 +3941,15 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Scan hash-cache stats
-         * @description Returns the SHA-256 scan-result cache hit/miss/size stats.
+         * Scan verdict cache stats
+         * @description Returns the scan verdict cache hit/miss/size stats.
          */
         get: operations["getScanCache"];
         put?: never;
         post?: never;
         /**
-         * Purge scan cache
-         * @description Purge scan cache.
+         * Purge scan verdict cache
+         * @description Purge scan verdict cache.
          */
         delete: operations["purgeScanCache"];
         options?: never;
@@ -16090,7 +16090,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Scan hash-cache stats. */
+            /** @description Scan verdict cache stats. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -16114,7 +16114,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Purge scan cache. */
+            /** @description Purge scan verdict cache. */
             200: {
                 headers: {
                     [name: string]: unknown;
