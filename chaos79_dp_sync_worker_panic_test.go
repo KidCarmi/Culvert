@@ -498,6 +498,14 @@ func TestChaos79_RevocationSaveIsRetriedAfterAPanickedRound(t *testing.T) {
 // file, and must not leave the flag set.
 func TestChaos79_RevocationSaveIsNotOwedAfterACleanRound(t *testing.T) {
 	t.Cleanup(sessionRevoked.SwapForTest())
+	// "Clean" means no SHARED durability doubt either: a failed save elsewhere
+	// (the coordinator's dirty flag, or the AU-25 persist-degraded record)
+	// legitimately makes the next round retry the write, so this control must
+	// start from neither, whatever ran before it.
+	resetSessionRevocationsDirtyForTest()
+	t.Cleanup(resetSessionRevocationsDirtyForTest)
+	resetSessionRevocationHealthForTest()
+	t.Cleanup(resetSessionRevocationHealthForTest)
 	dir := t.TempDir()
 	defer withRevocationsPath(t, filepath.Join(dir, "revocations.json"))()
 
@@ -804,6 +812,16 @@ func TestChaos79_OwedRevocationPersistStaysOwedWhenTheWriteFails(t *testing.T) {
 	t.Cleanup(sessionRevoked.SwapForTest())
 	resetSessionRevocationsDirtyForTest()
 	t.Cleanup(resetSessionRevocationsDirtyForTest)
+	// The failed save below also trips the internal/session persist observer
+	// (sessionRevocationPersistDegraded, AU-25) and the storage write-health
+	// record, not only the coordinator's dirty flag. Both are process-globals
+	// that persistClusterMergedRevocations treats as an owed write, so leaking
+	// them makes a later clean round rewrite the file under -shuffle
+	// (TestChaos79_RevocationSaveIsNotOwedAfterACleanRound).
+	resetSessionRevocationHealthForTest()
+	t.Cleanup(resetSessionRevocationHealthForTest)
+	resetStorageWriteHealthForTest()
+	t.Cleanup(resetStorageWriteHealthForTest)
 
 	// A path under a directory that does not exist, so SaveRevocations fails
 	// and persistRevocations reports false.
