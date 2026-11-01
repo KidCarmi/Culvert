@@ -791,3 +791,114 @@ func TestChaos92_ControlTunnelFileBlockIsConcurrencySafe(t *testing.T) {
 		t.Errorf("retainedPathTruncated = %d after %d concurrent clamps, want %d", n, workers, workers)
 	}
 }
+
+// ─── The SSL_INNER sinks after the emitter extraction (PX-22 / X-1) ──────────
+//
+// TestChaos92_DefectEveryRetainingSinkGoesThroughTheClamp scans for lines
+// carrying BOTH `sanitizeLog(` and `URL.Path`. The two `SSL_INNER` lines that
+// §53.2 enumerated used to be two of those lines; they are now ONE emitter,
+// logSSLInnerRequest (proxy_sslinner_line.go), which both transports call with
+// the raw `req.URL.Path`. That is the same shape CHAOS-92e found for
+// `FILE_BLOCKED (tunnel %s)`: the clamp moved into the callee, so the call sites
+// carry no `sanitizeLog(` token and the line-scanning gate can no longer see
+// them.
+//
+// The clamp did not move out of the argument — it moved into a different
+// function's argument — but a gate that cannot see a sink does not bound it, so
+// the two gates below replace the coverage the line scan lost, in the shape
+// CHAOS-92e established: pin the CHOKEPOINT, not the call sites.
+
+// TestChaos92_DefectSSLInnerClampIsTheChokepointNotTheCallSites is the source
+// gate for the inspected-inner-request log sinks. A third transport, or a
+// re-inlined format string, must not be able to reintroduce the unbounded path
+// without failing a gate.
+func TestChaos92_DefectSSLInnerClampIsTheChokepointNotTheCallSites(t *testing.T) {
+	const chokepoint = "proxy_sslinner_line.go"
+	sources := chaos92PackageSources(t)
+
+	src, ok := sources[chokepoint]
+	if !ok {
+		t.Fatalf("%s is not in the package sources — the chokepoint moved and this gate is stale", chokepoint)
+	}
+
+	// Nothing but the emitter may render an SSL_INNER line. A direct
+	// logger.Printf elsewhere would be a sink with no clamp, which is exactly
+	// the pre-change shape.
+	var stray []string
+	for name, s := range sources {
+		if name == chokepoint || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		for i, line := range strings.Split(s, "\n") {
+			if strings.Contains(line, `"SSL_INNER`) {
+				stray = append(stray, fmt.Sprintf("%s:%d renders an SSL_INNER line outside the emitter: %s", name, i+1, strings.TrimSpace(line)))
+			}
+		}
+	}
+	sort.Strings(stray)
+	if len(stray) > 0 {
+		t.Errorf("inspected-inner-request log sinks bypass the clamp:\n%s\nEvery transport must go through logSSLInnerRequest, which is where the PX-22 clamp lives", strings.Join(stray, "\n"))
+	}
+
+	// Both shipped transports must actually reach it, or this gate is guarding
+	// a function nothing calls.
+	for _, caller := range []string{"proxy_tunnel.go", "proxy_tunnel_h2.go"} {
+		if !strings.Contains(sources[caller], "logSSLInnerRequest(") {
+			t.Errorf("%s does not call logSSLInnerRequest — either the transport stopped logging inner requests or it grew its own sink", caller)
+		}
+	}
+
+	// The clamp must sit INSIDE the sanitizeLog argument, so the sanitiser's
+	// scan and its copy of the value are bounded too — clamping the retained
+	// bytes after a 1 MiB scan would bound the record and still pay for the
+	// value. Same requirement, same reason, as the line scan above.
+	body := chaos92FuncBody(t, src, "func logSSLInnerRequest(")
+	if !regexp.MustCompile(`sanitizeLog\(boundRetainedPath\(path\)\)`).MatchString(body) {
+		t.Errorf("logSSLInnerRequest does not clamp path inside the sanitizeLog argument — both inspected-inner-request sinks are unbounded:\n%s", body)
+	}
+}
+
+// TestChaos92_DefectSSLInnerLogStaysBounded is the behavioural half: a client
+// that puts a megabyte in the inner request path must not choose the process
+// log's volume. This is the PX-22 defect proof, driven through the emitter the
+// transports actually use rather than through a reconstruction of it.
+func TestChaos92_DefectSSLInnerLogStaysBounded(t *testing.T) {
+	resetRetainedPathStateForTest()
+	t.Cleanup(resetRetainedPathStateForTest)
+
+	const pathBytes = 1 << 20
+	logBuf := chaos92CaptureLog(t)
+	logSSLInnerRequest("10.1.2.3", "GET", "inspected.example", chaos92Path(pathBytes, "A"), nil)
+
+	if got := logBuf.Len(); got > 8192 {
+		t.Errorf("a %d-byte inner path wrote %d bytes to the process log, want <= 8192 — the client chooses the log volume", pathBytes, got)
+	}
+	if !strings.Contains(logBuf.String(), fmt.Sprintf("truncated; %d bytes total", pathBytes)) {
+		t.Errorf("the truncated line does not say it was truncated, so an operator cannot tell it from a complete one: %s", truncForMsg(logBuf.String()))
+	}
+	if n := retainedPathTruncated.Load(); n != 1 {
+		t.Errorf("retainedPathTruncated = %d, want 1 — this sink's clamps are invisible in aggregate", n)
+	}
+}
+
+// TestChaos92_ControlSSLInnerRetainsOrdinaryValuesVerbatim is the negative
+// control: the clamp must be invisible for every real request. An ordinary
+// inner path is logged byte for byte, with no marker and no counter movement.
+func TestChaos92_ControlSSLInnerRetainsOrdinaryValuesVerbatim(t *testing.T) {
+	resetRetainedPathStateForTest()
+	t.Cleanup(resetRetainedPathStateForTest)
+
+	const path = "/npm/chart.js@4.4.1/dist/chart.umd.min.js"
+	logBuf := chaos92CaptureLog(t)
+	logSSLInnerRequest("10.1.2.3", "GET", "cdn.jsdelivr.net", path, nil)
+
+	if !strings.Contains(logBuf.String(), path) {
+		t.Errorf("an ordinary inner path was not retained verbatim: %s", truncForMsg(logBuf.String()))
+	}
+	if strings.Contains(logBuf.String(), "truncated;") {
+		t.Errorf("an ordinary inner path was marked truncated: %s", truncForMsg(logBuf.String()))
+	}
+	if n := retainedPathTruncated.Load(); n != 0 {
+		t.Errorf("retainedPathTruncated = %d after an ordinary path, want 0", n)
+	}
+}

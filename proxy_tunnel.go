@@ -980,14 +980,12 @@ relayLoop:
 		}
 
 		// Debug: log every inner request so admins can trace file-blocking decisions.
-		// All values are sanitized or hardcoded to satisfy CodeQL CWE-117.
-		filterStr := "off"
-		profileStr := ""
-		if match != nil && match.Rule != nil && match.Rule.FileFiltering {
-			filterStr = "on"
-			profileStr = sanitizeLog(string(match.Rule.FileProfile))
-		}
-		logger.Printf("SSL_INNER %s %s %s%s (profile=%q filter=%s)", sanitizeLog(clientIP), sanitizeLog(req.Method), sanitizeLog(hostOnly), sanitizeLog(boundRetainedPath(req.URL.Path)), profileStr, filterStr)
+		// All values are sanitized or hardcoded to satisfy CodeQL CWE-117 — the
+		// barrier is inside logSSLInnerRequest, on each value, before the sink.
+		// This is the per-inner-REQUEST log site, the highest-frequency one in the
+		// product when inspection is on, so the line is rendered by appends into a
+		// pooled buffer rather than by fmt: see proxy_sslinner_line.go.
+		logSSLInnerRequest(clientIP, req.Method, hostOnly, req.URL.Path, match)
 
 		ex := &inspectExchange{
 			outer:     r,
@@ -1324,23 +1322,6 @@ func inspectMagicBlock(br blockResponder, origBody io.ReadCloser, match *PolicyM
 	emitFileBlock(br, hostOnly, path, detail, source)
 }
 
-// scanInspectBody buffers and scans a decrypted tunnel response body: magic-byte
-// archive/polyglot detection, then CDR (content disarm), then either the remote
-// scan service or local DPI + ClamAV/YARA. The returned scanBodyOutcome tells the
-// caller how to terminate the exchange:
-//   - scanClean: nothing matched; resp.Body has been reassembled (buffered prefix
-//   - unread remainder) and the caller delivers it. Also returned when buffering
-//     does not apply (host excluded or a content type that needs no buffering),
-//     leaving the body untouched.
-//   - scanBlocked: content was blocked — the block page has already been written
-//     via the responder and origBody closed; the caller must stop serving.
-//   - scanReadError: the response body could not be fully read (origin RST/GOAWAY/
-//     truncation mid-buffer). NOTHING was written to the client, so the caller MUST
-//     fail the exchange (H1 tears the tunnel down; H2 resets the stream) — never
-//     let this surface as a clean, empty success. Conflating it with scanBlocked
-//     produced a silent empty 200 on the H2 path (an on-path origin reset became a
-//     cacheable success); keeping it distinct is the fail-closed contract.
-//
 // inspectMagicStage runs the two content-shape blocks that precede every
 // scanner — archive magic bytes and Content-Type/magic-byte polyglots — and
 // reports whether one of them blocked the response.
@@ -1367,6 +1348,22 @@ func inspectMagicStage(req *http.Request, br blockResponder, origBody io.ReadClo
 	return false
 }
 
+// scanInspectBody buffers and scans a decrypted tunnel response body: magic-byte
+// archive/polyglot detection, then CDR (content disarm), then either the remote
+// scan service or local DPI + ClamAV/YARA. The returned scanBodyOutcome tells the
+// caller how to terminate the exchange:
+//   - scanClean: nothing matched; resp.Body has been reassembled (buffered prefix
+//   - unread remainder) and the caller delivers it. Also returned when buffering
+//     does not apply (host excluded or a content type that needs no buffering),
+//     leaving the body untouched.
+//   - scanBlocked: content was blocked — the block page has already been written
+//     via the responder and origBody closed; the caller must stop serving.
+//   - scanReadError: the response body could not be fully read (origin RST/GOAWAY/
+//     truncation mid-buffer). NOTHING was written to the client, so the caller MUST
+//     fail the exchange (H1 tears the tunnel down; H2 resets the stream) — never
+//     let this surface as a clean, empty success. Conflating it with scanBlocked
+//     produced a silent empty 200 on the H2 path (an on-path origin reset became a
+//     cacheable success); keeping it distinct is the fail-closed contract.
 func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponder, match *PolicyMatch, id ProxyIdentity, hostOnly string, dec *DecryptionBlock) scanBodyOutcome {
 	ct := resp.Header.Get("Content-Type")
 	// Tier 3.3/3.4: admin-managed host allowlists short-circuit buffering.
