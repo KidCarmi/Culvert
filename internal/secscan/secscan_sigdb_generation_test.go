@@ -353,14 +353,36 @@ func TestCHAOS107_CounterSnapshotAgrees(t *testing.T) {
 // observers; this one exists so the concurrency gate tests the SCANNER's
 // synchronization rather than the fake's.
 type syncClamVer struct {
-	mu  sync.Mutex
-	ver clamav.Version
-	err error
+	mu    sync.Mutex
+	ver   clamav.Version
+	err   error
+	name  string
+	found bool
+	calls int
 }
 
 func (f *syncClamVer) Ping() error { return nil }
 
-func (f *syncClamVer) Scan([]byte) (name string, found bool, err error) { return "", false, nil }
+func (f *syncClamVer) Scan([]byte) (name string, found bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	return f.name, f.found, nil
+}
+
+// detect makes the fake report name for every subsequent scan, standing in for
+// the daemon loading a signature that covers the test payload.
+func (f *syncClamVer) detect(name string) {
+	f.mu.Lock()
+	f.name, f.found = name, true
+	f.mu.Unlock()
+}
+
+func (f *syncClamVer) scans() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
 
 func (f *syncClamVer) Version() (clamav.Version, error) {
 	f.mu.Lock()
@@ -372,4 +394,112 @@ func (f *syncClamVer) setVersion(v clamav.Version) {
 	f.mu.Lock()
 	f.ver = v
 	f.mu.Unlock()
+}
+
+// pausingYARA holds the FIRST Match call until released, so a test can park a
+// scan after its ClamAV leg has returned and before it publishes a verdict.
+// Later calls return immediately. The injected YARAMatcher is the package's
+// existing seam between the two legs (ADR-0006); no production hook is needed.
+type pausingYARA struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newPausingYARA() *pausingYARA {
+	return &pausingYARA{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (y *pausingYARA) Loaded() bool  { return true }
+func (y *pausingYARA) Enabled() bool { return true }
+
+func (y *pausingYARA) Match([]byte) []string {
+	first := false
+	y.once.Do(func() { first = true })
+	if first {
+		close(y.entered)
+		<-y.release
+	}
+	return nil
+}
+
+// TestCHAOS107_InFlightScanAcrossFlushIsNotCached is the race the flush alone
+// does not close. A scan whose ClamAV leg ran under the OLD definitions but
+// which is still in its YARA leg when the cache is flushed would otherwise
+// publish its old "clean" into the freshly emptied cache — and since later
+// observations of the same new generation do not flush again, that content
+// would bypass the new definitions for the full CacheTTL. The scan must carry
+// the cache generation it started under and lose the publication if the cache
+// was invalidated meanwhile.
+//
+// Both invalidation sources are pinned: the observed signature-set change, and
+// a direct cache flush (the operator flush and the YARA rule CRUD paths in
+// package main), which distrusts in-flight verdicts for the same reason.
+func TestCHAOS107_InFlightScanAcrossFlushIsNotCached(t *testing.T) {
+	cases := []struct {
+		name       string
+		invalidate func(t *testing.T, ss *Scanner, clam *syncClamVer)
+	}{
+		{"signature set change", func(t *testing.T, ss *Scanner, clam *syncClamVer) {
+			before := SigDBInvalidations()
+			clam.setVersion(clamav.Version{Engine: "ClamAV 1.0.0", DBVersion: "27001"})
+			expireVersionCache(ss)
+			if !ss.RefreshSignatures() {
+				t.Fatal("observation after the signature update failed")
+			}
+			if got := SigDBInvalidations() - before; got != 1 {
+				t.Fatalf("signature change must flush once mid-scan; delta = %d", got)
+			}
+		}},
+		{"operator cache flush", func(_ *testing.T, ss *Scanner, _ *syncClamVer) {
+			ss.CacheClear()
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clam := &syncClamVer{ver: clamav.Version{Engine: "ClamAV 1.0.0", DBVersion: "27000"}}
+			yara := newPausingYARA()
+			ss := newEnabledTestScanner(Deps{Clam: clam, Excl: fakeExcl{}, Yara: yara, Feed: fakeFeed{}})
+			if !ss.RefreshSignatures() {
+				t.Fatal("opening observation failed")
+			}
+
+			payload := []byte("dropper-cleared-by-the-old-definitions")
+			hash := hashcache.SHA256Hex(payload)
+			done := make(chan *Result, 1)
+			go func() { done <- ss.ScanBody(payload) }()
+
+			// Park the scan between its legs: ClamAV has already called the
+			// payload clean under the old definitions.
+			select {
+			case <-yara.entered:
+			case res := <-done:
+				t.Fatalf("scan finished before reaching YARA: %+v", res)
+			}
+			if got := clam.scans(); got != 1 {
+				t.Fatalf("precondition: ClamAV leg ran once before the pause, got %d", got)
+			}
+
+			// The new definitions now detect the payload, and the cache is
+			// invalidated while the old scan is still in flight.
+			clam.detect("Win.Trojan.Dropper")
+			tc.invalidate(t, ss, clam)
+
+			close(yara.release)
+			if res := <-done; res != nil {
+				t.Fatalf("the in-flight request itself completes clean (its verdict was computed before the change), got %+v", res)
+			}
+
+			if cached, ok := ss.CacheGet(hash); ok {
+				t.Fatalf("a verdict begun before the invalidation must not be published after it, cached %+v", cached)
+			}
+			res := ss.ScanBody(payload)
+			if res == nil || !res.Blocked || res.Source != "clamav" || res.Reason != "Win.Trojan.Dropper" {
+				t.Fatalf("the next request must be re-scanned under the new definitions and blocked, got %+v", res)
+			}
+			if got := clam.scans(); got != 2 {
+				t.Errorf("ClamAV must run again for the next request; scans = %d, want 2", got)
+			}
+		})
+	}
 }

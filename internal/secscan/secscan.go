@@ -485,7 +485,10 @@ func (ss *Scanner) ClamAVVersion() (clamav.Version, bool) {
 
 	if stale {
 		// Clear OUTSIDE ss.mu: the hash cache has its own mutex and this keeps
-		// the scanner lock off the cache's lock-ordering graph.
+		// the scanner lock off the cache's lock-ordering graph. Clearing also
+		// advances the cache generation, which is what stops a scan already
+		// in flight under the old definitions from re-publishing its verdict
+		// into the emptied cache (see verdictSink).
 		if cache != nil {
 			cache.Clear()
 		}
@@ -1226,8 +1229,24 @@ func runClam(ctx context.Context, clam ClamScanner, data []byte) (name string, f
 	return clam.Scan(data)
 }
 
-// publishVerdict records a verdict in the hash cache under the tighten-only
-// rule for abandoned scans.
+// verdictSink is where one scan publishes its verdict, fixed when the scan
+// STARTS: the cache it read from, that cache's invalidation generation at that
+// moment, and the caller's abandonment flag.
+//
+// The generation is what keeps a verdict on the side of the definitions that
+// produced it (CHAOS-107). A scan whose ClamAV leg ran under the old signature
+// set can still be in its YARA leg when the observed signature change flushes
+// the cache; publishing its "clean" afterwards would land a stale verdict in
+// the freshly emptied cache, and since later observations of the same new set
+// do not flush again, it would stand for the full CacheTTL.
+type verdictSink struct {
+	cache     *hashcache.HashCache
+	gen       uint64
+	abandoned *atomic.Bool
+}
+
+// publishVerdict records a verdict in the hash cache, refusing two kinds of
+// verdict that must not outlive the request that computed them.
 //
 // A scan whose caller already returned the fail-closed timeout verdict is
 // ABANDONED, and an abandoned scan must never publish a CLEAN result: doing so
@@ -1236,12 +1255,46 @@ func runClam(ctx context.Context, clam ClamScanner, data []byte) (name string, f
 // race between the deadline and the scanner. A late BLOCK is still published —
 // it can only tighten the cached verdict, and it upgrades the placeholder
 // "scan timeout" entry to the real threat name.
-func (ss *Scanner) publishVerdict(hash string, r hashcache.ScanCacheResult, abandoned *atomic.Bool) {
-	if r.Clean && abandoned != nil && abandoned.Load() {
+//
+// A scan that began before the cache was last cleared is STALE, and its verdict
+// is refused whichever way it went. Every Clear means "what was computed
+// before this point is no longer trusted" — new ClamAV definitions, changed
+// YARA rules, an operator flush — and that applies to a block as much as to a
+// clean: a block from a since-retracted signature or a deleted rule would
+// otherwise keep refusing the object for the full TTL. Refusing the
+// publication never changes the CURRENT request's result, only whether the
+// next request re-scans. The generation compare and the write are one step
+// under the cache's own lock, the lock Clear takes (SetIfGeneration), so no
+// flush can fall between them and no new lock is taken on the scan path.
+func (ss *Scanner) publishVerdict(sink verdictSink, hash string, r hashcache.ScanCacheResult) {
+	if r.Clean && sink.abandoned != nil && sink.abandoned.Load() {
 		noteLateCleanDiscarded(hash)
 		return
 	}
-	ss.cache.Set(hash, r)
+	if sink.cache == nil {
+		return
+	}
+	if !sink.cache.SetIfGeneration(hash, r, sink.gen) {
+		noteStaleVerdictDiscarded(hash, r)
+	}
+}
+
+// noteStaleVerdictDiscarded logs, rate-limited, a verdict refused because the
+// cache was invalidated while it was being computed. It is expected around a
+// signature update or a rule change and needs no operator action; the line
+// exists so a cache that stays cold across such an event can be explained.
+func noteStaleVerdictDiscarded(hash string, r hashcache.ScanCacheResult) {
+	if degradedLogAllowed(&lastStaleVerdictLog) {
+		obs.Printf("SecurityScan: not caching %s verdict (source %q) for hash %s — the scan cache was invalidated while it was being computed; the next request re-scans (CHAOS-107)",
+			cleanOrBlock(r), r.Source, hash)
+	}
+}
+
+func cleanOrBlock(r hashcache.ScanCacheResult) string {
+	if r.Clean {
+		return "clean"
+	}
+	return "block"
 }
 
 // noteLateCleanDiscarded records a clean verdict computed outside the scan
@@ -1266,10 +1319,11 @@ func noteLateCleanDiscarded(hash string) {
 const degradedLogInterval = time.Minute
 
 var (
-	lastLateDiscardLog atomic.Int64
-	lastSaturatedLog   atomic.Int64
-	lastAbandonedLog   atomic.Int64
-	lastClamErrorLog   atomic.Int64
+	lastLateDiscardLog  atomic.Int64
+	lastSaturatedLog    atomic.Int64
+	lastAbandonedLog    atomic.Int64
+	lastClamErrorLog    atomic.Int64
+	lastStaleVerdictLog atomic.Int64
 )
 
 // degradedLogAllowed reports whether enough time has passed since the last log
@@ -1295,7 +1349,16 @@ func degradedLogAllowed(last *atomic.Int64) bool {
 func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, abandoned *atomic.Bool) *Result {
 	ss.mu.RLock()
 	clam := ss.clam
+	cache := ss.cache
 	ss.mu.RUnlock()
+
+	// Fix the publication target BEFORE either engine runs (CHAOS-107): the
+	// generation must predate the definitions the verdict is computed under,
+	// or a flush that lands between the ClamAV and YARA legs would go unseen.
+	sink := verdictSink{cache: cache, abandoned: abandoned}
+	if cache != nil {
+		sink.gen = cache.Generation()
+	}
 
 	// ClamAV scan. An engine error (daemon crash mid-stream) falls through to
 	// YARA — fail-open for THIS request, but counted + alerted, and the verdict
@@ -1310,7 +1373,7 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 			ss.recordClamFailure(ctx, err)
 		case found:
 			atomic.AddInt64(&statClamBlocked, 1)
-			ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: false, Reason: name, Source: "clamav"}, abandoned)
+			ss.publishVerdict(sink, hash, hashcache.ScanCacheResult{Clean: false, Reason: name, Source: "clamav"})
 			return &Result{Blocked: true, Reason: name, Source: "clamav", Hash: hash}
 		}
 	}
@@ -1320,7 +1383,7 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 		if matches := y.Match(data); len(matches) > 0 {
 			reason := strings.Join(matches, ", ")
 			atomic.AddInt64(&statYARABlocked, 1)
-			ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: false, Reason: reason, Source: "yara"}, abandoned)
+			ss.publishVerdict(sink, hash, hashcache.ScanCacheResult{Clean: false, Reason: reason, Source: "yara"})
 			return &Result{Blocked: true, Reason: reason, Source: "yara", Hash: hash}
 		}
 	}
@@ -1338,7 +1401,7 @@ func (ss *Scanner) scanBodyInner(ctx context.Context, data []byte, hash string, 
 	// Content is clean — cache the negative result, unless ClamAV errored:
 	// a partial scan is not a clean verdict (the next occurrence rescans).
 	if !clamDark {
-		ss.publishVerdict(hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"}, abandoned)
+		ss.publishVerdict(sink, hash, hashcache.ScanCacheResult{Clean: true, Source: "clean"})
 	}
 	return nil
 }

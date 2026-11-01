@@ -45,6 +45,14 @@ type HashCache struct {
 	ttl     time.Duration
 	hits    atomic.Int64
 	misses  atomic.Int64
+
+	// gen is the invalidation epoch: Clear advances it, under mu held for
+	// writing, so "no Clear happened since generation g was read" is exactly
+	// "gen still equals g". It is an atomic only so Generation stays off the
+	// lock at scan start; every WRITE happens under mu, and SetIfGeneration
+	// compares it under mu, which is what makes the compare and the store one
+	// step with respect to Clear.
+	gen atomic.Uint64
 }
 
 // New returns a HashCache with the given capacity and TTL.
@@ -145,6 +153,40 @@ func (c *HashCache) SetTTLUnless(hash string, result ScanCacheResult, ttl time.D
 	return true
 }
 
+// Generation returns the cache's current invalidation epoch, for a caller that
+// is about to compute a verdict and must not publish it if the cache is
+// invalidated before it finishes (see SetIfGeneration).
+func (c *HashCache) Generation() uint64 { return c.gen.Load() }
+
+// SetIfGeneration stores result with the cache's configured TTL only if no
+// Clear has happened since gen was obtained from Generation, and reports
+// whether it stored.
+//
+// It exists for verdicts that take time to compute. A Clear means "everything
+// computed before this point is no longer trusted" — new signatures, changed
+// rules, an operator flush — and a verdict whose computation STARTED before the
+// Clear but finished after it belongs to the distrusted side. A plain Set would
+// land it in the freshly cleared cache, where nothing would ever invalidate it
+// again for the rest of the TTL. The generation compare and the store happen
+// under the same write lock Clear takes, so there is no window in which a Clear
+// can slip between them.
+func (c *HashCache) SetIfGeneration(hash string, result ScanCacheResult, gen uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.gen.Load() != gen {
+		return false
+	}
+	if len(c.entries) >= c.maxSize {
+		c.evictLocked()
+	}
+	c.entries[hash] = &hashCacheEntry{
+		result:    result,
+		expiresAt: time.Now().Add(c.ttl),
+	}
+	return true
+}
+
 // Stats returns (hits, misses, currentSize) for Prometheus / admin UI.
 func (c *HashCache) Stats() (hits, misses int64, currentSize int) {
 	c.mu.RLock()
@@ -165,10 +207,12 @@ func (c *HashCache) Evict(hash string) bool {
 	return ok
 }
 
-// Clear removes all entries from the cache.
+// Clear removes all entries from the cache and advances its invalidation
+// epoch, so a SetIfGeneration for a verdict begun before the Clear is refused.
 func (c *HashCache) Clear() {
 	c.mu.Lock()
 	c.entries = make(map[string]*hashCacheEntry, c.maxSize)
+	c.gen.Add(1)
 	c.mu.Unlock()
 }
 

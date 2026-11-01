@@ -118,3 +118,41 @@ func TestSet_EvictsExpiredFirst(t *testing.T) {
 		t.Errorf("size after expired-first eviction = %d, want 1 (only the fresh entry)", size)
 	}
 }
+
+// TestSetIfGeneration_RefusedAcrossClear pins the contract the scanner relies
+// on (CHAOS-107): a verdict whose computation began before a Clear must not be
+// stored after it, while one begun after the Clear, or with no Clear at all,
+// is stored normally. Evict is a per-entry removal, not an invalidation of
+// everything computed so far, so it must not advance the epoch.
+func TestSetIfGeneration_RefusedAcrossClear(t *testing.T) {
+	c := New(10, time.Hour)
+	clean := ScanCacheResult{Clean: true, Source: "clean"}
+
+	g0 := c.Generation()
+	if !c.SetIfGeneration("a", clean, g0) {
+		t.Fatal("store with the current generation must succeed")
+	}
+	c.Evict("a")
+	if c.Generation() != g0 {
+		t.Fatal("Evict must not advance the generation")
+	}
+
+	stale := c.Generation()
+	c.Clear()
+	if c.Generation() == stale {
+		t.Fatal("Clear must advance the generation")
+	}
+	if c.SetIfGeneration("b", clean, stale) {
+		t.Fatal("a verdict begun before Clear must be refused")
+	}
+	if _, ok := c.Get("b"); ok {
+		t.Fatal("refused verdict must not be in the cache")
+	}
+
+	if !c.SetIfGeneration("c", clean, c.Generation()) {
+		t.Fatal("a verdict begun after Clear must be stored")
+	}
+	if _, ok := c.Get("c"); !ok {
+		t.Fatal("stored verdict must be readable")
+	}
+}
