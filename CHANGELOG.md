@@ -432,7 +432,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   verdict into the emptied cache: every flush advances a cache generation that
   each scan captures before its first engine runs, and the generation check
   and the cache write are one step under the cache lock. This applies to every
-  flush, operator and YARA-rule ones included. A **failed**
+  flush, operator and YARA-rule ones included. The first identifiable
+  observation (for example the first successful one after an opening
+  `VERSION` failure) advances the generation even when the cache is empty, so a
+  scan begun under definitions the node never identified cannot publish
+  either; it counts as an invalidation only when it actually dropped cached
+  verdicts. A **failed**
   `VERSION` query deliberately does not flush — it is a fault in the observer,
   not evidence the definitions moved, and flushing on it would let any daemon
   blip wipe the cache node-wide and send every subsequent body to the daemon
