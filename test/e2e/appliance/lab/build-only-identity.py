@@ -6,7 +6,9 @@ outputs of ONE build-ova.sh invocation before anything could boot them. It
 re-checks, from the retained files, what the BOM requires of the build:
 
   build-info.json        source commit (clean), SOURCE_DATE_EPOCH, snapshot ID,
-                         build start later than the snapshot, candidate image
+                         build start later than the snapshot, base image
+                         signature verified by exactly the BOM signer (a
+                         "skipped" record is refused), candidate image
                          source/provisioning commit (no drift), image tar,
                          CI run, application image ID and VERSION, ClamAV
                          sidecar ID and archive, base status hash, OVA hash
@@ -106,6 +108,11 @@ def main():
     check("application.clamav_sidecar_image_id", app.get("clamav_sidecar_image_id"), env["EXPECT_SIDECAR_ID"])
     check("application.clamav_baked_tar_sha256", app.get("clamav_baked_tar_sha256"), env["EXPECT_SIDECAR_ARCHIVE_SHA256"])
     check("guest_os.base_image_sha256", gos.get("base_image_sha256"), m.get("BASE_IMAGE_SHA256"))
+    # The builder records "skipped (...)" when gpgv or the keyring is missing;
+    # only a positive verification by the exact BOM signer is accepted.
+    signer = env["EXPECT_BASE_SIGNER"]
+    check("manifest BASE_IMAGE_SIGNING_KEY_FPR is the BOM signer", m.get("BASE_IMAGE_SIGNING_KEY_FPR"), signer)
+    check("guest_os.base_image_gpg (positive, exact signer)", gos.get("base_image_gpg"), f"verified (using RSA key {signer})")
     check("guest_os.base_dpkg_status_sha256", gos.get("base_dpkg_status_sha256"), env["EXPECT_BASE_STATUS_SHA256"])
 
     # The OVA and its recorded hash

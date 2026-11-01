@@ -5,7 +5,7 @@
 # keeps the F-DISK-1 reproduction on its bounded nested-Docker host. Unpublished
 # test path: no tags, releases, catalog or registry pushes; nothing here is a
 # merge gate. The push trigger is restricted to the lab branch so the workflow
-# can bootstrap without existing on main; workflow_dispatch re-runs it.
+# can bootstrap without existing on main.
 #
 # Artifact identity: the runner cannot receive the OVA built on the qualification
 # host (sha256 e24eb542…). It rebuilds a SEPARATELY IDENTIFIED candidate from the
@@ -18,17 +18,8 @@ name: Appliance Lab
 on:
   push:
     branches: [test/appliance-lab]
-  workflow_dispatch:
-    # A manual dispatch runs NOTHING unless a route is chosen. guest-boot and
-    # f-disk-1 (both boot guests) are push-only; the only dispatchable route
-    # is build-only, which has no boot step at all.
-    inputs:
-      route:
-        description: "none = every job skips; build-only = build ONE OVA from frozen source 0981ff3d, identity checks, no boot"
-        type: choice
-        options: [none, build-only]
-        default: none
-        required: true
+  # No workflow_dispatch: GitHub dispatches only workflows present on the
+  # default branch, and this file is not on main. Every job is push-only.
 
 permissions:
   contents: read
@@ -740,13 +731,18 @@ jobs:
   # retention of every output — pass or fail. There is NO QEMU boot,
   # qualification, F-DISK or console step in this job by construction; the
   # only VM is the libguestfs build appliance build-ova.sh itself starts
-  # (build-time tooling, BOM section 6). Selected ONLY by
-  #   - a push whose head commit says [build-only] and not [lab-skip], or
-  #   - a manual dispatch with route=build-only on test/appliance-lab.
-  # guest-boot and f-disk-1 skip on [build-only] and on every dispatch.
+  # (build-time tooling, BOM section 6). Selected ONLY by a push to
+  # test/appliance-lab whose head commit message carries [build-only] and no
+  # other tag; every other lab job (this workflow, console-overlay,
+  # snapshot-pin-check) skips whenever [build-only] is present, so a mixed
+  # message runs nothing. The first step (build-only-route-guard.py) refuses
+  # any other bracket token, a push of more than one commit, and a trigger
+  # commit that changes any file (the trigger is an EMPTY commit on the
+  # reviewed head). The base image's signed SHA256SUMS must verify by exactly
+  # the BOM signer before the build starts.
   build-only:
     name: "Lab · build-only OVA (no boot): candidate-0981ff3d"
-    if: ${{ (github.event_name == 'push' && contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[lab-skip]')) || (github.event_name == 'workflow_dispatch' && inputs.route == 'build-only') }}
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[adopted-scan]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[console-overlay]') && !contains(github.event.head_commit.message, '[fail-fast]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[preserve-image]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -769,17 +765,29 @@ jobs:
       EXPECT_BASE_STATUS_SHA256: 3fde68c0b3bf65d2708cf0d263f9a28feeb64c75a4d42249ebd2d555b10dcc28
       EXPECT_KERNEL: linux-image-7.0.0-42-generic
       EXPECT_KERNEL_VERSION: 7.0.0-42.42~24.04.1
+      # BOM section 3: the base image's SHA256SUMS signer and keyring.
+      EXPECT_BASE_SIGNER: D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81
+      BASE_IMAGE_KEYRING: /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg
       # Producer-reported stamped console hashes (clean tag-free 0981ff3d);
       # measured here, before any boot, and compared.
       EXPECT_CONSOLE_SHA256: 063faebdfea27315011013ff60bad029bd0ff4bd44b8c2f47552c8c5a02689a9
       EXPECT_ACCESS_SHA256: 6a3a66fa0a3b7bf0b89502399dfc51b8b1451e85cd6db5656d0aa485cb553182
     steps:
-      - name: Route guard (lab branch only; record what selected this job)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Route guard (exactly [build-only]; one empty commit on the reviewed head)
+        env:
+          GUARD_EVENT: ${{ github.event_name }}
+          GUARD_REF: ${{ github.ref }}
+          GUARD_MESSAGE: ${{ github.event.head_commit.message }}
+          GUARD_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          echo "event=${{ github.event_name }} ref=${{ github.ref }} lab_commit=$GITHUB_SHA route=${{ inputs.route }}" | tee -a "$GITHUB_STEP_SUMMARY"
-          [ "${{ github.ref }}" = refs/heads/test/appliance-lab ] || { echo "::error::build-only runs from test/appliance-lab only"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ] || { echo "::error::checkout is not $GITHUB_SHA"; exit 1; }
+          GUARD_PARENT="$(git rev-parse HEAD^)" GUARD_HEAD_TREE="$(git rev-parse 'HEAD^{tree}')" GUARD_PARENT_TREE="$(git rev-parse 'HEAD^^{tree}')" \
+            python3 -I test/e2e/appliance/lab/build-only-route-guard.py | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Host preflight (disk) and lab directory
         run: |
           set -euo pipefail
@@ -863,6 +871,20 @@ jobs:
           [ -z "$(git status --porcelain)" ] || { echo "::error::checkout is dirty"; git status --porcelain; exit 1; }
           [ -z "$(git tag --points-at HEAD)" ] || { echo "::error::checkout carries a tag"; exit 1; }
           echo "source $APPLIANCE_SOURCE_SHA tree $APPLIANCE_SOURCE_TREE clean, tag-free" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: "Base image: signed SHA256SUMS verified by exactly the BOM signer (before the build)"
+        run: |
+          set -euo pipefail
+          man=appliance-src/appliance/build/manifest.env
+          val() { sed -n "s/^$1=//p" "$man"; }
+          [ "$(val BASE_IMAGE_SIGNING_KEY_FPR)" = "$EXPECT_BASE_SIGNER" ] || { echo "::error::manifest signer $(val BASE_IMAGE_SIGNING_KEY_FPR) is not the BOM signer"; exit 1; }
+          [ "$(val BASE_IMAGE_KEYRING)" = "$BASE_IMAGE_KEYRING" ] || { echo "::error::manifest keyring $(val BASE_IMAGE_KEYRING) differs from $BASE_IMAGE_KEYRING"; exit 1; }
+          d="$LAB_ROOT/base-signature"; mkdir -p "$d"
+          curl -fsSL --retry 3 -o "$d/SHA256SUMS" "$(val BASE_IMAGE_SUMS_URL)"
+          curl -fsSL --retry 3 -o "$d/SHA256SUMS.gpg" "$(val BASE_IMAGE_SUMS_SIG_URL)"
+          sha256sum "$BASE_IMAGE_KEYRING" > "$d/keyring.sha256"
+          url="$(val BASE_IMAGE_URL)"
+          test/e2e/appliance/lab/base-signature-check.sh "$BASE_IMAGE_KEYRING" "$d/SHA256SUMS" "$d/SHA256SUMS.gpg" \
+            "$EXPECT_BASE_SIGNER" "$(val BASE_IMAGE_SHA256)" "${url##*/}" 2>&1 | tee "$d/verify.txt" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Kernel-module denylist resolves to /bin/false on the real module tree (offline)
         run: |
           set -euo pipefail
@@ -882,7 +904,7 @@ jobs:
           set -euo pipefail
           src="$GITHUB_WORKSPACE/appliance-src"
           sudo git config --global --add safe.directory "$src"
-          sudo -E env PATH="$PATH" GOTOOLCHAIN=local LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg \
+          sudo -E env PATH="$PATH" GOTOOLCHAIN=local LIBGUESTFS_BACKEND=direct BASE_IMAGE_KEYRING="$BASE_IMAGE_KEYRING" \
             SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH_PIN" \
             "$src/appliance/build/build-ova.sh" \
               --candidate-image-tar "$LAB_ROOT/in/culvert-image.tar" \
@@ -895,6 +917,7 @@ jobs:
           set -uo pipefail
           sudo mkdir -p "$LAB_ROOT/ova" && sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/ova"
           cp "$LAB_ROOT/build-ova.log" "$LAB_ROOT/ova/" 2>/dev/null || true
+          cp -r "$LAB_ROOT/base-signature" "$LAB_ROOT/ova/" 2>/dev/null || true
           mkdir -p "$LAB_ROOT/console"
           for f in culvert-console culvert-access; do
             sudo install -m 0644 -o "$(id -u)" -g "$(id -g)" "$LAB_ROOT/build/overlay/opt/culvert-appliance/console/$f" "$LAB_ROOT/console/$f" 2>/dev/null || true
@@ -1044,7 +1067,7 @@ jobs:
   # re-quarantine). Runs ONLY on the explicit [midimport-kill] tag.
   f-disk-midimport-kill:
     name: "Lab · F-DISK interrupted-import recovery (SIGKILL mid-import → quarantine+rebuild)"
-    if: ${{ contains(github.event.head_commit.message, '[midimport-kill]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[midimport-kill]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -1194,7 +1217,7 @@ jobs:
     # run once the new candidate OVA exists and OVA_ARTIFACT_ID/OVA_SHA256 below
     # are repointed to it. On the default (untagged) Phase-1 push guest-boot
     # builds that OVA; this job then runs on the explicit [agent-identity] tag.
-    if: ${{ contains(github.event.head_commit.message, '[agent-identity]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[agent-identity]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -1325,7 +1348,7 @@ jobs:
   # [boot-console] runs this job alone.
   boot-console:
     name: "Lab · boot console (VMware SVGA, no serial) · ${{ matrix.variant }}"
-    if: ${{ contains(github.event.head_commit.message, '[boot-console]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[boot-console]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -1411,7 +1434,7 @@ jobs:
   # Runs only when the head commit says [saml-replay].
   saml-cookie-purpose:
     name: "Lab · SAML login + cookie-purpose replay · ${{ matrix.label }}"
-    if: ${{ contains(github.event.head_commit.message, '[saml-replay]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[saml-replay]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -1510,7 +1533,7 @@ jobs:
   # 32c2be57); the 1.4.6 bad788e5 control is retained to prove F-P2 reproduces.
   fp2-isolated:
     name: "Lab · F-P2 isolated: exact sidecar, temp-dir exhaustion, scripted client · ${{ matrix.label }}"
-    if: ${{ contains(github.event.head_commit.message, '[fp2-isolated]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[fp2-isolated]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     # Re-run (user directive, 27 Oct) for the NEW sidecar
@@ -1705,7 +1728,7 @@ jobs:
   # Opt-in: [preserve-image].
   preserve-image:
     name: "Lab · preserve candidate image tar (Deep run 41208642365, 0981ff3d)"
-    if: ${{ contains(github.event.head_commit.message, '[preserve-image]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[preserve-image]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # FB-1c (31 Oct): the candidate of the FB-1 final SHA 0981ff3d. Earlier
@@ -1760,7 +1783,7 @@ jobs:
   # retains the archive itself for independent rescans. Opt-in: [sidecar-exact].
   exact-sidecar-scan:
     name: "Lab · exact sidecar culvert.4 (manifest 91eae575): reproduce + all-severity scan + SBOM + retained archive"
-    if: ${{ contains(github.event.head_commit.message, '[sidecar-exact]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[sidecar-exact]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -1874,7 +1897,7 @@ jobs:
   # answers ERROR to every one of them.
   fp2-source:
     name: "Lab · F-P2 causal: ClamAV 1.4.6 from source, stock vs one-line patch"
-    if: ${{ contains(github.event.head_commit.message, '[fp2-source]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[fp2-source]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -1969,7 +1992,7 @@ jobs:
 
   ova-sidecar-scan:
     name: "Lab · candidate OVA's baked ClamAV sidecar: exact-byte scan + SBOM"
-    if: ${{ contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[saml-replay]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[saml-replay]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -2089,7 +2112,7 @@ jobs:
     # running by default only fails on a missing/stale artifact (it was pinned
     # to the retired 2e3bcc2a round). Set ADOPT_VARIANT to the adoption variant
     # and push with [adopted-scan] when that flow has produced the artifact.
-    if: ${{ contains(github.event.head_commit.message, '[adopted-scan]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[adopted-scan]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -2162,7 +2185,7 @@ jobs:
   # sidecars read out of each OVA's own disk. Runs only on [recovery-ab].
   recovery-ab:
     name: "Lab · recovery A/B on RETAINED OVAs (one runner, A B B A) + baked-sidecar diff"
-    if: ${{ contains(github.event.head_commit.message, '[recovery-ab]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[recovery-ab]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     env:
@@ -2350,7 +2373,7 @@ jobs:
   # Runs only on a commit whose message carries the sidecar-repro tag.
   sidecar-repro:
     name: "Lab · reproducible ClamAV sidecar build (real build-ova.sh block, 2 × 2 builds)"
-    if: ${{ contains(github.event.head_commit.message, '[sidecar-repro]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[sidecar-repro]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
@@ -2446,7 +2469,7 @@ jobs:
   # Runs only on a commit whose message carries the scan-candidate tag.
   scan-candidate:
     name: "Lab · exact-byte scan of the candidate (guest OS + host binaries + app image, all severities) + govulncheck"
-    if: ${{ contains(github.event.head_commit.message, '[scan-candidate]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[scan-candidate]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
