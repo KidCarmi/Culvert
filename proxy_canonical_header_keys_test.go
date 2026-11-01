@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -114,63 +116,105 @@ func receiverMentionsHeader(sel *ast.SelectorExpr) bool {
 	return strings.Contains(r, "Header") || strings.Contains(r, "Trailer")
 }
 
+// nonCanonicalKey is one gate finding: where it is, how it is spelled, how it
+// should be spelled, and whether it reached a Header accessor as a literal or
+// through a declared constant.
+type nonCanonicalKey struct {
+	pos, got, want, kind string
+}
+
+// classifyKey decides whether one string literal is a non-canonical header key.
+// It is the single place the canonicality question is asked.
+func classifyKey(lit *ast.BasicLit) (nonCanonicalKey, bool) {
+	if lit.Kind != token.STRING {
+		return nonCanonicalKey{}, false
+	}
+	s, err := strconv.Unquote(lit.Value)
+	if err != nil || !headerShaped.MatchString(s) {
+		return nonCanonicalKey{}, false
+	}
+	canon := textproto.CanonicalMIMEHeaderKey(s)
+	if canon == s {
+		return nonCanonicalKey{}, false
+	}
+	return nonCanonicalKey{got: s, want: canon}, true
+}
+
+// scanHeaderCall matches an inline literal handed to a Header accessor:
+// r.Header.Get("X-Bad-ID"), w.Header().Set(...), t.Del(...) on a trailer.
+func scanHeaderCall(fset *token.FileSet, node *ast.CallExpr) []nonCanonicalKey {
+	sel, ok := node.Fun.(*ast.SelectorExpr)
+	if !ok || !headerMethods[sel.Sel.Name] || len(node.Args) == 0 {
+		return nil
+	}
+	if !receiverMentionsHeader(sel) {
+		return nil
+	}
+	lit, ok := node.Args[0].(*ast.BasicLit)
+	if !ok {
+		return nil
+	}
+	k, bad := classifyKey(lit)
+	if !bad {
+		return nil
+	}
+	k.pos, k.kind = fset.Position(lit.Pos()).String(), "literal"
+	return []nonCanonicalKey{k}
+}
+
+// scanHeaderDecl matches a DECLARED header-name constant. This arm is why the
+// gate caught hdrRealIP at all: it reached Header.Get through a constant and
+// never appeared as a literal at the call site, so a literal-only gate would
+// have walked straight past the bug it exists to prevent.
+func scanHeaderDecl(fset *token.FileSet, node *ast.ValueSpec) []nonCanonicalKey {
+	var out []nonCanonicalKey
+	for i, name := range node.Names {
+		if !headerNamedDecl.MatchString(name.Name) || i >= len(node.Values) {
+			continue
+		}
+		lit, ok := node.Values[i].(*ast.BasicLit)
+		if !ok {
+			continue
+		}
+		k, bad := classifyKey(lit)
+		if !bad {
+			continue
+		}
+		k.pos, k.kind = fset.Position(lit.Pos()).String(), "const "+name.Name
+		out = append(out, k)
+	}
+	return out
+}
+
+// scanFileForNonCanonicalKeys is the WHOLE matcher, and deliberately the only
+// copy of it: both the tree gate and its self-check call this, so the
+// self-check proves THIS code can still fail rather than proving a
+// reimplementation of it can. A gate whose self-test exercises a parallel copy
+// of the matching logic is the same trap as a bound that measures the wrong
+// thing — which is the bug that motivated this whole file.
+func scanFileForNonCanonicalKeys(fset *token.FileSet, f *ast.File) []nonCanonicalKey {
+	var out []nonCanonicalKey
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			out = append(out, scanHeaderCall(fset, node)...)
+		case *ast.ValueSpec:
+			out = append(out, scanHeaderDecl(fset, node)...)
+		}
+		return true
+	})
+	return out
+}
+
 func TestCanonicalHeaderKeys_Tree(t *testing.T) {
 	fset := token.NewFileSet()
-	type bad struct {
-		pos, got, want, kind string
-	}
-	var found []bad
-
+	var found []nonCanonicalKey
 	for _, path := range repoGoFiles(t) {
 		f, err := parser.ParseFile(fset, path, nil, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
 		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch node := n.(type) {
-			// (a) Inline literals handed to a Header accessor.
-			case *ast.CallExpr:
-				sel, ok := node.Fun.(*ast.SelectorExpr)
-				if !ok || !headerMethods[sel.Sel.Name] || len(node.Args) == 0 {
-					return true
-				}
-				if !receiverMentionsHeader(sel) {
-					return true
-				}
-				lit, ok := node.Args[0].(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					return true
-				}
-				s, err := strconv.Unquote(lit.Value)
-				if err != nil || !headerShaped.MatchString(s) {
-					return true
-				}
-				if c := textproto.CanonicalMIMEHeaderKey(s); c != s {
-					found = append(found, bad{fset.Position(lit.Pos()).String(), s, c, "literal"})
-				}
-
-			// (b) Declared header-name constants, which is how hdrRealIP
-			// reached Header.Get without ever appearing as a literal there.
-			case *ast.ValueSpec:
-				for i, name := range node.Names {
-					if !headerNamedDecl.MatchString(name.Name) || i >= len(node.Values) {
-						continue
-					}
-					lit, ok := node.Values[i].(*ast.BasicLit)
-					if !ok || lit.Kind != token.STRING {
-						continue
-					}
-					s, err := strconv.Unquote(lit.Value)
-					if err != nil || !headerShaped.MatchString(s) {
-						continue
-					}
-					if c := textproto.CanonicalMIMEHeaderKey(s); c != s {
-						found = append(found, bad{fset.Position(lit.Pos()).String(), s, c, "const " + name.Name})
-					}
-				}
-			}
-			return true
-		})
+		found = append(found, scanFileForNonCanonicalKeys(fset, f)...)
 	}
 
 	for _, b := range found {
@@ -183,59 +227,46 @@ func TestCanonicalHeaderKeys_Tree(t *testing.T) {
 	}
 }
 
-// TestCanonicalHeaderKeys_SelfCheck proves the gate can FAIL. A structural gate
-// that silently stopped matching would be worse than no gate: it would read as
-// a green guarantee of a property nothing was checking, which is precisely how
-// "X-Real-IP" survived under a comment asserting canonicality.
+// TestCanonicalHeaderKeys_SelfCheck proves the gate can FAIL, by running the
+// REAL matcher over a synthetic file with known positives and known negatives.
+// A structural gate that silently stopped matching would be worse than no gate:
+// it would read as a green guarantee of a property nothing was checking, which
+// is exactly how "X-Real-IP" survived under a comment asserting canonicality.
 func TestCanonicalHeaderKeys_SelfCheck(t *testing.T) {
-	src := `package p
+	const src = `package p
+
 import "net/http"
-const hdrThing = "X-Real-IP"
-func f(r *http.Request) { _ = r.Header.Get("X-Bad-ID"); _ = r.Header.Get("Mcp-Session-Id") }
-func g(v interface{ Get(string) string }) { _ = v.Get("page") }
+
+const hdrThing = "X-Real-IP"      // positive: non-canonical CONSTANT
+const hdrFine = "Mcp-Session-Id"  // negative: canonical constant
+
+func f(r *http.Request) {
+	_ = r.Header.Get("X-Bad-ID")        // positive: non-canonical literal
+	_ = r.Header.Get("Mcp-Session-Id")  // negative: canonical literal
+}
+
+func g(v interface{ Get(string) string }) {
+	_ = v.Get("page") // negative: receiver is not a header map
+}
 `
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	var hits []string
-	ast.Inspect(f, func(n ast.Node) bool {
-		switch node := n.(type) {
-		case *ast.CallExpr:
-			sel, ok := node.Fun.(*ast.SelectorExpr)
-			if !ok || !headerMethods[sel.Sel.Name] || len(node.Args) == 0 || !receiverMentionsHeader(sel) {
-				return true
-			}
-			if lit, ok := node.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				s, _ := strconv.Unquote(lit.Value)
-				if headerShaped.MatchString(s) && textproto.CanonicalMIMEHeaderKey(s) != s {
-					hits = append(hits, s)
-				}
-			}
-		case *ast.ValueSpec:
-			for i, name := range node.Names {
-				if !headerNamedDecl.MatchString(name.Name) || i >= len(node.Values) {
-					continue
-				}
-				if lit, ok := node.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					s, _ := strconv.Unquote(lit.Value)
-					if headerShaped.MatchString(s) && textproto.CanonicalMIMEHeaderKey(s) != s {
-						hits = append(hits, s)
-					}
-				}
-			}
-		}
-		return true
-	})
 
-	got := strings.Join(hits, ",")
-	// "X-Real-IP" (const) and "X-Bad-ID" (literal) must be caught;
-	// "Mcp-Session-Id" is canonical and must not be; "page" must not be, since
-	// its receiver is not a header map — that negative is what keeps the
-	// tree-wide gate free of an allowlist.
-	if want := "X-Real-IP,X-Bad-ID"; got != want {
-		t.Fatalf("self-check detected %q, want %q: the gate's matching has drifted, so "+
+	var got []string
+	for _, k := range scanFileForNonCanonicalKeys(fset, f) {
+		got = append(got, k.got)
+	}
+	sort.Strings(got)
+
+	// The "page" negative is what keeps the tree-wide gate free of an
+	// allowlist: without the receiver check, url.Values.Get("page") and every
+	// other same-named accessor would be flagged.
+	want := []string{"X-Bad-ID", "X-Real-IP"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("self-check detected %v, want %v: the gate's matching has drifted, so "+
 			"TestCanonicalHeaderKeys_Tree passing proves nothing", got, want)
 	}
 }
