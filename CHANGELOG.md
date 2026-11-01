@@ -426,7 +426,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   when it observes a different one, driven by a background poller so detection
   does not depend on an operator having the dashboard open. Detection is within
   roughly one `VERSION` window of the update; the cost is one cold cache per
-  signature update, the same trade the YARA path has always made. A **failed**
+  signature update, the same trade the YARA path has always made. A scan
+  already in flight when the cache is flushed (its ClamAV leg run under the
+  old definitions, its YARA leg not yet finished) does not re-publish its
+  verdict into the emptied cache: every flush advances a cache generation that
+  each scan captures before its first engine runs, and the generation check
+  and the cache write are one step under the cache lock. This applies to every
+  flush, operator and YARA-rule ones included. A **failed**
   `VERSION` query deliberately does not flush — it is a fault in the observer,
   not evidence the definitions moved, and flushing on it would let any daemon
   blip wipe the cache node-wide and send every subsequent body to the daemon
