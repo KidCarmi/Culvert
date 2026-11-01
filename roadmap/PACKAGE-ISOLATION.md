@@ -332,7 +332,7 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | ID | Task | Status | Owner | Base / head | PR | Depends on | Evidence | Next action |
 |---|---|---|---|---|---|---|---|---|
 | IM-000 | Discovery: policy mapping, #1526 reconciliation, this program section | shipped (merged 2026-10-30, `5eef0c25`) | nightly shift | `main` | #1760 | — | this document | — |
-| IM-001 | `inspect_h2_alpn.go` → `internal/alpnpeek` (pilot 1 of ≤3) | **implementation under review** (owner accepted the pilot; not shipped until merged) | nightly shift | `main` / `claude/great-clarke-8gmanf` | this PR | IM-000 shipped | **packet** below; ADR-0042; moved `alpn.go`, `doc.go`, `boundary_test.go`, `alpn_test.go` (`TestParseClientHelloALPN`, `FuzzParseClientHelloALPN`); root inventory 8072 → 8070 | owner: review and merge; then a MEASURE/ASSESS run before IM-002 |
+| IM-001 | `inspect_h2_alpn.go` → `internal/alpnpeek` (pilot 1 of ≤3) | **shipped** (merged 2026-10-31, `86c095a49`) | nightly shift | `main` | #1766 | IM-000 shipped | **packet** below; ADR-0042; moved `alpn.go`, `doc.go`, `boundary_test.go`, `alpn_test.go`; root inventory 8072 → 8070; assessment below | owner: accept continuation to IM-002 (map) or stop the pilot |
 | IM-002 | `saas_feed_floor.go` → `internal/feedfloor` | proposed | — | — | — | IM-001 assessment | lead (906 ln, 0 root deps, `fileutil`+`urlcatfeed`, 10 inbound; `var` block is error sentinels + CRC table) | map: callers, fsync/path ownership, F3 §B cross-check, the 9 referencing test files |
 | IM-003 | `saas_feed_genstore.go` → same package | proposed | — | — | — | IM-002 | lead (539 ln; 2 deps, both in IM-002) | map after IM-002 |
 | IM-004 | `upstream_backup_strip.go` → `internal/upstream/backupstrip` | proposed | — | — | — | IM-001 assessment | lead (517 ln, 0 root deps, 2 inbound; 12 test files by grep, unclassified) | map: classify tests, define byte-identical output fixture |
@@ -351,6 +351,33 @@ walk, but main owns the published transport by convention), `ca.go`,
 `security_scan.go`, `configversion.go`, `*_startup*.go`, `*_vars.go` and the
 `*_health.go` probe adapters. Performance benefit of any task is unmeasured
 until matched runs per the measurement contract establish it.
+
+### Pilot 1 assessment (MEASURE, 2026-10-31, main `8138243fb`)
+
+Evidence only; no performance claim (the item is stateless and cold).
+
+- **Ownership.** One sentence holds: main's tunnel code owns the buffered
+  reader and fallback decision; `internal/alpnpeek` owns only the parse. 2
+  exported identifiers, no package vars/`init`, boundary test with negative
+  controls. Size: PR #1766 was 7 files, +177/-44; package is 405 lines
+  including tests.
+- **Independently runnable tests.** `go test -race -count=3 -shuffle=on
+  ./internal/alpnpeek` passes in about 1 s; the root lane
+  `-run 'Tunnel|H2|ALPN|Inspect' .` (count=2) passes in about 47 s, dominated by
+  root setup, not engine work.
+- **Review burden.** Zero review threads; the one merge needed a `main` merge
+  commit. All Fast/Deep gate jobs on the final head passed (87 check runs;
+  non-skipped all green).
+- **Failures.** None attributable to the move. PR body recorded two gaps:
+  the full-tree lint comparison and the full root suite were not run locally
+  (CI covered both).
+- **Open gaps (owner).** (1) `fuzz-nightly.yml` still lacks
+  `{ target: FuzzParseClientHelloALPN, pkg: "./internal/alpnpeek" }`: the
+  moved fuzz target remains outside nightly fuzzing. (2) No root test covers
+  the `peekClientALPN` fallback directly.
+- **Recommendation.** Continue to IM-002 as a MAP run only if the owner accepts;
+  IM-004 and IM-007 are equally stateless candidates. The pilot has used 1 of 3
+  code PRs.
 
 ### IM-001 acceptance packet: `inspect_h2_alpn.go` → `internal/alpnpeek`
 

@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -130,4 +131,41 @@ func isolateRewriterForTest(t *testing.T) {
 	t.Helper()
 	t.Cleanup(rewriter.Snapshot())
 	publishRewriteRules(nil)
+}
+
+// TestLoadAdminSettings_UnreadableFileSurfacedNotQuarantined pins the operator
+// signal for an EXISTING but unreadable settings file (EACCES/EIO): it used to
+// be log-only. The file must stay untouched, the authenticated diagnostics row
+// must name the condition, and /ready's row set must not change.
+func TestLoadAdminSettings_UnreadableFileSurfacedNotQuarantined(t *testing.T) {
+	captured := captureStartupAlerts(t)
+	isolateStateCorruption(t)
+	isolateRewriterForTest(t)
+
+	// A directory at the settings path makes os.ReadFile fail with a
+	// non-IsNotExist error even when the test runs as root.
+	path := filepath.Join(t.TempDir(), "admin_settings.json")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	swapAdminSettingsPath(t, path)
+	LoadAdminSettings(path)
+
+	if len(quarantinedFiles(t, path)) != 0 {
+		t.Fatal("an unreadable (not corrupt) file must never be quarantined")
+	}
+	rows := checkStateFileIntegrity()
+	if len(rows) != 1 || rows[0].Code != "state_file_admin_settings" || rows[0].Status != diagFail ||
+		!strings.Contains(rows[0].Message, "could not be read") {
+		t.Fatalf("want one failing 'could not be read' row, got %+v", rows)
+	}
+	if strings.Contains(rows[0].Message+rows[0].OperatorAction, path) {
+		t.Fatal("viewer-role diagnostics row must stay path-free")
+	}
+	if len(stateCorruptionSnapshot()) != 0 {
+		t.Fatal("/ready state_file rows must be unchanged by a read failure")
+	}
+	if len(*captured) != 0 {
+		t.Fatalf("alert must be queued until the webhook store loads, got %d", len(*captured))
+	}
 }

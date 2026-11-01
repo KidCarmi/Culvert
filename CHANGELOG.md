@@ -7,6 +7,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- **An unreadable `admin_settings.json` is now visible in Diagnostics and
+  alerted, not just logged.** When the file exists but cannot be read
+  (permissions or a volume error) the node boots on defaults, so every
+  GUI-saved admin setting silently stops applying; the only trace was one
+  startup log line. The authenticated diagnostics now carry a failing
+  `state_file_admin_settings` row ("could not be read", path-free) with the
+  recovery action, and the existing `state_file_corrupt` alert fires. The file
+  is never moved or modified, and `/ready` rows and gating are unchanged.
+
 ### Added
 
 - **Administrators can now tune the CHAOS-106 decompression ratio bound
@@ -227,6 +238,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   still unreadable, leaves it unchanged with a warning.
 ### Performance
 
+- **The per-inner-request `SSL_INNER` trace line costs one allocation instead
+  of six, and 24 bytes instead of 96, at every request-path length.** No
+  runtime behavior changes and no log output changes — byte-identity is the
+  acceptance condition, pinned by `TestSSLInnerLine_RenderIsByteIdentical`
+  (every branch, each awkward value driven through every operand position) and
+  `FuzzSSLInnerLine` against the frozen pre-change format string. On an
+  inspecting gateway this is the highest-frequency log site in the product: the
+  enclosing CONNECT is logged once and then carries every HTTP request on that
+  connection, so where the policy decision line is paid per TUNNEL this one is
+  paid per inner REQUEST, unconditionally, with no level gate. Both transports
+  (the H1 keep-alive loop in `proxy_tunnel.go`, the H2 stream handler in
+  `proxy_tunnel_h2.go`) held their own copy of one `logger.Printf` with six
+  %-verbs; fmt pays for that in objects — the variadic `...any` slice, one heap
+  box per string operand, and `strconv.Quote` behind `%q`.
+
+  The line is now rendered by appends (reusing `appendQuotedForLog`) into a
+  pooled carrier and handed to the logger as BYTES (`%s` on a `[]byte`), which
+  is what keeps the win: `log.Logger.Printf` appends into its own reused buffer
+  and never materializes the line, so bytes/op stays flat at 24 whatever the
+  line's length. Measured (`BenchmarkSSLInnerLine`, go1.27.3, 4-core Xeon
+  @2.80GHz, medians of n=5) by path length: 843→554 ns at 8 bytes, 984→509 at
+  40, 1018→671 at 200, 1141→931 at 500, and 2082→1727 at the 2 KiB retention
+  bound — 6 allocations to 1 throughout. H1/H2 parity is now structural (one
+  emitter, `proxy_sslinner_line.go`) rather than two format strings kept in step
+  by hand.
+
+  Recorded because it was nearly shipped the other way: applying the
+  `emitPolicyDecision` shape verbatim — appends into a stack scratch, handed to
+  `logger.Output` as a `string` — is the fastest form on a tiny path and **1.32x
+  SLOWER** than the code it replaces at a 500-byte path and 1.80x slower at the
+  bound, because `string(b)` allocates and copies the whole line. Paths here are
+  bounded at 2 KiB rather than the ~240 bytes a policy line tops out at, so that
+  crossover is inside this line's live range. The rejected form stays in the
+  benchmark as a third arm, and
+  `TestBenchGate_SSLInnerLineLongPathIsNotSlower` gates the long-path arm on
+  wall clock as a same-run ratio, so a future refactor that reintroduces a
+  line-sized allocation fails CI instead of passing an allocations-only gate.
+
 - **The category-group leg of the policy scan no longer allocates once per
   rule.** No runtime behavior changes. `catgroup.Store`'s membership probe took
   the display-cased category NAME and derived its `catSet` key with
@@ -405,6 +454,76 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   Runbook: `docs/operator/session-revocation-plane.md`.
 
 ### Security
+
+- **The one gate standing between a future response path and a CHAOS-106
+  scanner bypass could not see a new file.** `DecompressForScan` returns
+  `(nil, true)` when a declared `Content-Encoding` expands past the ratio
+  allowance, and the bound is only a defense if EVERY caller fails closed on
+  that second value — a caller that dropped it would scan the compressed bytes
+  instead, with the origin choosing the ratio that silences ClamAV, YARA, the
+  archive-magic check and the polyglot check at once. The compiler forces the
+  value to be received but not consulted, so
+  `TestCHAOS106_EveryDecompressCallSiteConsultsTheRefusal` was written as a
+  source gate. It checked a hard-coded list of the three files that call the
+  seam today, so the exact shape it bans — `scanData, _ := decompressForScan(…)`
+  — passed it unseen in any NEW file, which is where the fourth response path
+  (an H3 leg, a second CDR stage, a request-direction scan) would land. The
+  wall now DISCOVERS its inputs: every non-test file in the package is parsed
+  with `go/ast`, and each call of the seam must bind both results, name the
+  refusal rather than `_`, and branch on that name. `chaos106RefusalFloor`
+  asserts the three known call sites still exist, so a renamed seam that finds
+  nothing fails instead of reporting a clean gate. Proved in both directions
+  against a probe file carrying the banned shape: accepted by the wall as
+  merged, refused with file:line by the wall as fixed. Latent — no such caller
+  exists — and test-only: no production behavior moves. Two documentation
+  defects from the same change are fixed with it; one is not cosmetic in kind,
+  because `scanInspectBody`'s fail-closed outcome contract (the
+  `scanBlocked` / `scanReadError` distinction whose conflation once turned an
+  on-path origin reset into a cacheable empty 200 on the H2 path) had been
+  detached from its function by the complexity extraction and was documenting
+  `inspectMagicStage` instead. Review:
+  `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-10-31.md`.
+- **A scan verdict cached under one ClamAV signature set stayed authoritative
+  for the whole `CacheTTL` after a set that detects the same content arrived
+  (CHAOS-107).** The verdict cache is keyed on the SHA-256 of the content alone,
+  so an entry carried no reference to the definitions that produced it. YARA
+  rule changes already flushed it on every admin path — they arrive *through*
+  Culvert — but ClamAV definitions are updated out-of-process by `freshclam`,
+  several times a day, and nothing asked whether they had changed. So
+  `freshclam` landing a signature did not re-arm the node for content it had
+  already called clean: the same bytes kept being served from cache, to every
+  user on the node, from any host, by exact hash, until the TTL lapsed
+  (default 1 h, operator-configurable and unclamped). The node already read the
+  signature counter every ten minutes and displayed it on the Security panel as
+  current; the two facts were never compared, and no counter, log line or alert
+  marked the window.
+
+  The scanner now records the identity of the signature set its cached verdicts
+  belong to (engine + database counter + database date) and flushes the cache
+  when it observes a different one, driven by a background poller so detection
+  does not depend on an operator having the dashboard open. Detection is within
+  roughly one `VERSION` window of the update; the cost is one cold cache per
+  signature update, the same trade the YARA path has always made. A scan
+  already in flight when the cache is flushed (its ClamAV leg run under the
+  old definitions, its YARA leg not yet finished) does not re-publish its
+  verdict into the emptied cache: every flush advances a cache generation that
+  each scan captures before its first engine runs, and the generation check
+  and the cache write are one step under the cache lock. This applies to every
+  flush, operator and YARA-rule ones included. The first identifiable
+  observation (for example the first successful one after an opening
+  `VERSION` failure) advances the generation even when the cache is empty, so a
+  scan begun under definitions the node never identified cannot publish
+  either; it counts as an invalidation only when it actually dropped cached
+  verdicts. A **failed**
+  `VERSION` query deliberately does not flush — it is a fault in the observer,
+  not evidence the definitions moved, and flushing on it would let any daemon
+  blip wipe the cache node-wide and send every subsequent body to the daemon
+  that just failed to answer. New: `culvert_scan_sigdb_invalidations_total`,
+  `stat_scan_sigdb_invalidations` in the security-scan status JSON (local mode),
+  and `sigdb_generation` / `sigdb_invalidations` in the support bundle's scan
+  section, beside the hash-cache gauges they make interpretable. It is a
+  recovery counter: staying at zero while the reported signature counter
+  advances is the alert condition.
 
 - **A roster holding accounts but no present admin reopened the unauthenticated
   first-run bootstrap window (SEC-SETUPANCHOR-1).** `uiAuthMiddleware` grants
