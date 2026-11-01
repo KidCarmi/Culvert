@@ -425,8 +425,37 @@ not the container default.
 | S-1 both-directions proof | merged wall on the fixture: `sites=2 violations=[]`; fixed wall: 1 violation at `chaos106probe.go:12:16` |
 | `gofmt -l .` | clean |
 | `go vet .` | clean |
-| `go test -count=1 .` (full root package) | see §5.1 |
-| `golangci-lint run --timeout=10m --new-from-rev origin/main`, v2.15.0 installed with the `go.mod` toolchain (the gate's own command) | see §5.1 |
+| `go test -count=1 .` (full root package, 474 s) | PASS (`ok … 474.059s`) |
+| `golangci-lint run --new-from-rev origin/main` (the gate's own command) and a full-tree pass, v2.15.0 built with the `go.mod` toolchain | `0 issues.` / baseline unchanged — see §5.1 |
+
+### 5.1 Gate results
+
+**`golangci-lint` v2.15.0**, installed with the `go.mod` toolchain
+(`GOTOOLCHAIN=go1.27.3 go install …@v2.15.0`), which is the version
+`.github/workflows/pr-fast-gate.yml` pins — not the container's, which is older
+than this module's language version.
+
+- The gate's own command, `run --timeout=10m --new-from-rev origin/main`:
+  **`0 issues.`**
+- Full-tree pass, `run --timeout=35m ./...`: **174 issues, exit 1** — the
+  repository's pre-existing baseline (bodyclose 3, cyclop 24, dupl 4, errcheck
+  8, funlen 8, gocognit 24, gocritic 40, gosec 15, nestif 8, noctx 17,
+  staticcheck 14, unconvert 2, unparam 7). The full-tree pass is run because
+  `cyclop`, `funlen` and `gocognit` attribute to a function's DECLARATION line,
+  so `--new-from-rev` cannot see a function made more complex — and this change
+  did make `chaos106CallSiteViolations` more complex, adding a recursive
+  closure. The measurement is unchanged against the base by construction:
+  **zero** of the 174 findings name
+  `chaos106_decompress_failclosed_test.go`, the only Go file this change
+  touches, and none of the four `dupl` findings (the only cross-file linter
+  enabled) names it on either side. `gocognit` and `nestif` are NOT among the
+  `_test.go` exemptions in `.golangci.yml`, so the new nesting was held to the
+  full bar and cleared it.
+
+**`python3 docs/agent-context/check.py`**: exit 0 (static integrity; 486
+navigation links, 117 declared route edges). Run because this change adds a
+file under `docs/`, which is what the Fast PR Gate's `docs-guidance` job keys
+on.
 
 **Not run, and why.** CodeQL — not runnable locally; the `SSL_INNER` rewrite
 moves the `sanitizeLog` barrier into the emitter and hands `logger.Printf` a
