@@ -63,6 +63,7 @@ type stateCorruptionRecord struct {
 	ParseErr         string // BOUNDED cause class (stateCorruptionCauseClass); "" for a residual-only record
 	QuarantineFailed bool   // true when this boot's rename-aside attempt itself failed
 	Residual         bool   // true when detected via a prior boot's leftover quarantine file(s)
+	ReadFailed       bool   // true when an EXISTING file could not be read (EACCES/EIO); never quarantined
 	ResidualCount    int    // number of unreconciled quarantine siblings, when Residual
 }
 
@@ -134,6 +135,23 @@ func quarantineCorruptStateFile(kind, path string, parseErr error) string {
 
 	deferStartupAlert("state_file_corrupt", AlertPayload{Detail: detail, Source: "storage"})
 	return qpath
+}
+
+// noteStateFileUnreadable records that an EXISTING state file could not be
+// READ (EACCES/EIO). The file is deliberately not quarantined (see the header),
+// so before this the only trace was one startup log line while the node ran
+// with the feature's defaults. It feeds the authenticated diagnostics row and
+// the state_file_corrupt alert only: it does not touch stateCorruptionByKind,
+// so the /ready probe and its strict gating are unchanged.
+func noteStateFileUnreadable(kind, path string) {
+	detail := fmt.Sprintf("%s state file %s exists but could not be read — running with defaults for %s until it is readable and the node is restarted; the file was NOT moved or modified", kind, path, kind)
+	logger.Printf("StateCorruption: %q", sanitizeLog(detail))
+
+	stateCorruptionMu.Lock()
+	stateCorruptionRecordByKind[kind] = stateCorruptionRecord{ReadFailed: true}
+	stateCorruptionMu.Unlock()
+
+	deferStartupAlert("state_file_corrupt", AlertPayload{Detail: detail, Source: "storage"})
 }
 
 // noteResidualQuarantine re-surfaces an UNRECONCILED corruption from a
@@ -273,6 +291,14 @@ func checkStateFileIntegrity() []OperatorContractCheck {
 	for _, kind := range kinds {
 		rec := recs[kind]
 		switch {
+		case rec.ReadFailed:
+			checks = append(checks, OperatorContractCheck{
+				Code:   "state_file_" + kind,
+				Status: diagFail,
+				Message: fmt.Sprintf("%s state file exists but could not be read; this node is running with defaults for %s and GUI-saved values are not in effect",
+					kind, kind),
+				OperatorAction: "Fix the file's permissions or the volume error on this node's data volume (the file itself was not changed), then restart. Avoid saving changes of this kind until then.",
+			})
 		case rec.Residual:
 			checks = append(checks, OperatorContractCheck{
 				Code:   "state_file_" + kind,
