@@ -95,7 +95,7 @@ func mcpPost(ctx context.Context, cli *http.Client, mcpPort int, serverID, token
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	req.Header.Set("Mcp-Protocol-Version", "2025-11-25")
 	if sessionID != "" {
 		req.Header.Set("Mcp-Session-Id", sessionID)
 	}
@@ -119,7 +119,7 @@ func mcpPostRaw(ctx context.Context, cli *http.Client, mcpPort int, path, token,
 	}
 	req.Host = "gw.test"
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	req.Header.Set("Mcp-Protocol-Version", "2025-11-25")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}

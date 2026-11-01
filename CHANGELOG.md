@@ -9,6 +9,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Every HTTP header key the gateway looks up is now spelled in canonical MIME
+  form, which removes a per-request allocation from the forward path.**
+  `Header.Get`/`Set`/`Del` canonicalize the key they are handed: an
+  already-canonical spelling is scanned and returned verbatim, while any other
+  spelling copies the key into a `[]byte`, rewrites the casing and allocates.
+  `scrubForwardedHeaders` runs on every forwarded request (HTTP, CONNECT and
+  WebSocket alike) and looked up `"X-Real-IP"` — an acronym the canonical rule
+  lower-cases — so it allocated once per request purely to re-derive a
+  compile-time constant. The common forwarded request is now
+  allocation-free (measured 489.7 → 396.0 ns/op, 16 B and 1 alloc → **0 and 0**;
+  the timing share is hardware-dependent and noisy, the allocation removal is
+  not). The same spelling fix applies to the MCP listener's per-request
+  `Mcp-Protocol-Version` and `Dpop` reads and its `Www-Authenticate` challenge,
+  the PAC `Etag`/`X-Culvert-Pac-Version` response headers, and the admin UI's
+  `X-Xss-Protection`.
+
+  **No behavior, and no wire bytes, change.** `Get`/`Del` canonicalize the
+  *lookup* key, and the map being probed was itself populated under
+  `CanonicalMIMEHeaderKey` — by `Header.Set` for a request Culvert builds, by
+  `textproto.ReadMIMEHeader` for one it received — so both spellings always
+  addressed the same slot, and `Header.Write` already emitted the canonical key.
+  Only the redundant re-derivation is gone. A tree-wide AST gate
+  (`TestCanonicalHeaderKeys_Tree`) now fails any non-canonical header key in
+  production Go, for cost on a lookup and for *correctness* on the keys also
+  used as direct map indices, where a non-canonical spelling misses the header
+  outright. `_test.go` is deliberately out of its scope so deliberately
+  non-canonical client fixtures stay as negative controls.
+
 - **An unreadable `admin_settings.json` is now visible in Diagnostics and
   alerted, not just logged.** When the file exists but cannot be read
   (permissions or a volume error) the node boots on defaults, so every
