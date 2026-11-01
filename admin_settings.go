@@ -353,6 +353,7 @@ func LoadAdminSettings(path string) {
 		// loudly — every durable admin setting silently reverts to its default until
 		// this is fixed — but keep booting.
 		logger.Printf("AdminSettings: cannot read %q (%v) — every GUI-saved admin setting is using its default until the file is readable and the node is restarted", sanitizeLog(path), err)
+		noteStateFileUnreadable("admin_settings", path) // diagnostics row + alert; the log line was the only trace
 		// The YAML-seeded rewrite identities still need durability judgment:
 		// the finalize pass will attempt the ledger write (its targeted
 		// writer re-reads the file, fails the same way, and refuses to

@@ -1558,7 +1558,10 @@ env_put() {
     # existing $file with a truncated/empty temp file.
     tmp="$(mktemp "${file}.XXXXXX" 2>/dev/null)" || tmp="${file}.tmp.$$"
     rc=0
-    grep -vE "^${var}=" "$file" > "$tmp" 2>/dev/null && rc=0 || rc=$?
+    # LC_ALL=C + -a: under a UTF-8 locale grep treats a line with invalid UTF-8
+    # (a Latin-1 comment/value in a hand-edited .env) as binary and drops it
+    # from -v output, silently deleting the operator's line.
+    LC_ALL=C grep -avE "^${var}=" "$file" > "$tmp" 2>/dev/null && rc=0 || rc=$?
     if [[ $rc -eq 0 || $rc -eq 1 ]]; then
       mv "$tmp" "$file"
     else
