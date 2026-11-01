@@ -19,6 +19,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -237,42 +240,172 @@ func TestCHAOS106_ScanHTTPResponseBody_StillDeliversOrdinaryGzip(t *testing.T) {
 // two paths that exist today), and silently reopen the bypass. The compiler
 // already forces a second return value to be received; what it cannot force
 // is that the value be CONSULTED.
+//
+// It enumerates EVERY non-test file in the package rather than the list of
+// files that call the seam today. A list is the shape that fails on the call
+// site nobody has written yet: a future response path in a NEW file — an H3
+// leg, a second CDR stage, a request-direction scan — that bound the refusal
+// to `_` would appear in no list, so the wall would report a clean gate while
+// the expansion bound was bypassed on that path. Discovery also removes the
+// vacuous pass: chaos106RefusalFloor is asserted as a floor, so a wall that
+// stops finding the call sites it was written for fails instead of passing.
+
+// chaos106RefusalFloor names the files that must each still carry at least one
+// conforming call site. It is a FLOOR, not a filter — every other non-test
+// file in the package is checked the same way.
+var chaos106RefusalFloor = []string{"proxy_tunnel.go", "proxy_http.go", "cdr_proxy.go"}
+
 func TestCHAOS106_EveryDecompressCallSiteConsultsTheRefusal(t *testing.T) {
-	callers := map[string]string{
-		"proxy_tunnel.go": "scanBody, bomb := decompressForScan(",
-		"proxy_http.go":   "scanData, bomb := decompressForScan(",
-		"cdr_proxy.go":    "newScan, bomb := decompressForScan(",
+	// Anchored to the package directory via pkgSourceDir() rather than the
+	// process CWD — the requirement static_read_wall_test.go enforces for
+	// every structural wall.
+	dir := pkgSourceDir()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read package dir %q: %v", dir, err)
 	}
-	for file, want := range callers {
-		src := chaos106Source(t, file)
-		if !strings.Contains(src, want) {
-			t.Errorf("%s: no call site binding the refusal (%q). A caller that drops it with `_` turns the CHAOS-106 bound into a scanner bypass.", file, want)
+	sites := map[string]int{}
+	var violations []string
+	for _, e := range ents {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		// And the bound value must be branched on, not merely bound.
-		if !strings.Contains(src, "if bomb {") {
-			t.Errorf("%s: binds the refusal but never branches on it", file)
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
 		}
+		n, v := chaos106CallSiteViolations(fset, f)
+		sites[name] = n
+		violations = append(violations, v...)
 	}
-	// A discarded refusal anywhere in the tree is the shape this bans.
-	for _, file := range []string{"proxy_tunnel.go", "proxy_http.go", "cdr_proxy.go", "security_scan.go"} {
-		src := chaos106Source(t, file)
-		if strings.Contains(src, ", _ := decompressForScan(") || strings.Contains(src, ", _ = decompressForScan(") {
-			t.Errorf("%s: discards the decompression refusal", file)
+	for _, v := range violations {
+		t.Errorf("CHAOS-106 expansion bound: %s", v)
+	}
+	for _, want := range chaos106RefusalFloor {
+		if sites[want] == 0 {
+			t.Errorf("%s no longer calls decompressForScan: either the response path moved (re-anchor chaos106RefusalFloor) or that path stopped consulting the expansion bound", want)
 		}
 	}
 }
 
-// chaos106Source reads one of this package's own source files, anchored to the
-// package directory via pkgSourceDir() rather than the process CWD — the
-// requirement static_read_wall_test.go enforces for every structural wall.
-func chaos106Source(t *testing.T, name string) string {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(pkgSourceDir(), name))
-	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
+// chaos106CallSiteViolations reports how many decompressForScan call sites one
+// parsed file holds, and which of them do not fail closed on the refusal. A
+// conforming site assigns BOTH results, names the second one, and branches on
+// that name somewhere in the same file.
+func chaos106CallSiteViolations(fset *token.FileSet, f *ast.File) (sites int, violations []string) {
+	conforming := map[token.Pos]bool{}
+	refused := map[token.Pos]string{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Rhs) != 1 {
+			return true
+		}
+		call, ok := as.Rhs[0].(*ast.CallExpr)
+		if !ok || !chaos106IsDecompressCall(call) {
+			return true
+		}
+		if len(as.Lhs) != 2 {
+			refused[call.Pos()] = "does not bind both results as (bytes, refused), so the refusal is not even received"
+			return true
+		}
+		id, ok := as.Lhs[1].(*ast.Ident)
+		switch {
+		case !ok || id.Name == "_":
+			refused[call.Pos()] = "discards the decompression refusal; a dropped refusal turns the CHAOS-106 expansion bound into a scanner bypass, with the attacker choosing the ratio that silences the scanners"
+		case !chaos106BranchesOn(f, id.Name):
+			refused[call.Pos()] = "binds the refusal to " + id.Name + " but no `if` in this file branches on it, so nothing fails closed"
+		default:
+			conforming[call.Pos()] = true
+		}
+		return true
+	})
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !chaos106IsDecompressCall(call) {
+			return true
+		}
+		sites++
+		if conforming[call.Pos()] {
+			return true
+		}
+		where := fset.Position(call.Pos()).String()
+		if why, ok := refused[call.Pos()]; ok {
+			violations = append(violations, where+": "+why)
+			return true
+		}
+		violations = append(violations, where+": decompressForScan is called outside a two-value assignment, so no caller can consult the refusal")
+		return true
+	})
+	return sites, violations
+}
+
+// chaos106IsDecompressCall reports whether call is a direct call of the
+// package-level decompressForScan seam (security_scan.go).
+func chaos106IsDecompressCall(call *ast.CallExpr) bool {
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && id.Name == "decompressForScan"
+}
+
+// chaos106BranchesOn reports whether any if-condition in f tests name. Kept
+// permissive on the SHAPE of the condition (`if bomb`, `if bomb || x`) and
+// strict on its absence, which is the only thing that reopens the bypass.
+func chaos106BranchesOn(f *ast.File, name string) bool {
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		is, ok := n.(*ast.IfStmt)
+		if !ok || is.Cond == nil {
+			return true
+		}
+		ast.Inspect(is.Cond, func(c ast.Node) bool {
+			if id, ok := c.(*ast.Ident); ok && id.Name == name {
+				found = true
+			}
+			return !found
+		})
+		return true
+	})
+	return found
+}
+
+// TestCHAOS106_CallSiteWallRejectsADiscardedRefusal is the wall's own negative
+// control. A structural gate that quietly stopped matching would read exactly
+// like a clean one, so each banned shape is proved to fail it and the
+// permitted shape is proved to pass — including the over-strictness control,
+// since a wall that rejected the conforming shape would be removed rather than
+// fixed.
+func TestCHAOS106_CallSiteWallRejectsADiscardedRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		body          string
+		wantViolation bool
+	}{
+		{"conforming", "scan, bomb := decompressForScan(b, ce)\n\tif bomb {\n\t\treturn\n\t}\n\t_ = scan", false},
+		{"discarded", "scan, _ := decompressForScan(b, ce)\n\t_ = scan", true},
+		{"bound-but-never-branched", "scan, bomb := decompressForScan(b, ce)\n\t_, _ = scan, bomb", true},
+		{"single-value", "scan := decompressForScan(b, ce)\n\t_ = scan", true},
+		{"inlined-into-another-call", "_ = len(decompressForScan(b, ce))", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "package main\n\nfunc chaos106Probe(b []byte, ce string) {\n\t" + tc.body + "\n}\n"
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "chaos106probe.go", src, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatalf("parse fixture: %v", err)
+			}
+			sites, violations := chaos106CallSiteViolations(fset, f)
+			if sites != 1 {
+				t.Fatalf("fixture must hold exactly one call site, the wall found %d", sites)
+			}
+			if got := len(violations) > 0; got != tc.wantViolation {
+				t.Errorf("violation = %v (%v), want %v", got, violations, tc.wantViolation)
+			}
+		})
 	}
-	return string(b)
 }
 
 // The refusal happens in THIS process even with -scan-svc-url set: the sidecar

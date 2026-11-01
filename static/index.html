@@ -1717,7 +1717,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               Warning: a ratio above the default admits more repetitive compressed content and makes a decompression-bomb expansion cheaper for an attacker to reach. The diagnostics page reports this as a warning while it is set.
             </div>
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:10px">
-              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">Max expansion ratio (x compressed bytes)
+              <label style="display:flex;flex-direction:column;gap:4px;font-size:.78rem">Max decompression ratio (x compressed bytes)
                 <input id="sec-decomp-ratio" type="number" min="16" max="256" step="1" data-input="secDecompCheckWarn" style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.8rem">
               </label>
             </div>

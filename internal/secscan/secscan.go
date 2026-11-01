@@ -938,8 +938,10 @@ func expandForScan(r io.Reader, data []byte, ce string) (out []byte, readErr err
 		// The flat ceiling truncates, so it has no use for the probe below and
 		// must not take one: the pre-CHAOS-106 io.LimitReader never asked the
 		// decompressor for a byte past the ceiling, so a stream that is corrupt
-		// only AFTER it returned the decoded prefix. Probing would reach that
-		// corruption and drop the expansion back to the compressed bytes.
+		// only AFTER that point still yielded the decoded prefix, and the prefix
+		// is what was scanned. Probing one byte further would reach that
+		// corruption, surface it as a read error, and drop the expansion back to
+		// the compressed bytes — scanning less than the pre-CHAOS-106 path did.
 		buf, err := readCapped(r, limit)
 		return buf, err, false
 	}
