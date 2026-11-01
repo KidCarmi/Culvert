@@ -210,24 +210,32 @@ func (bs *Syncer) SetFeed(feedURL string, interval time.Duration) {
 		bs.feeds = map[string]*feedState{}
 	}
 	if st, ok := bs.feeds[feedURL]; ok {
-		if st.interval != interval {
-			st.interval = interval
-			// The old gate was lastAttempt+interval, computed per tick, so
-			// SHORTENING the cadence took effect immediately. nextAttempt is
-			// absolute, so without this it would hold the feed at a wait
-			// derived from the interval the operator just replaced. Pull the
-			// pending wait in, never push it out: when a backoff delay is
-			// already sooner than the new interval (the failing case) it
-			// stays, so this cannot slow a retry down.
-			if !st.lastAttempt.IsZero() && interval > 0 {
-				if due := st.lastAttempt.Add(interval); due.Before(st.nextAttempt) {
-					st.nextAttempt = due
-				}
-			}
-		}
+		setFeedIntervalLocked(st, interval)
 		return
 	}
 	bs.feeds[feedURL] = &feedState{interval: interval}
+}
+
+// setFeedIntervalLocked re-intervals an existing feed, keeping the pending
+// next-attempt honest about the new cadence. Caller holds Syncer.mu.
+//
+// The gate this replaced was lastAttempt+interval, recomputed on every tick,
+// so SHORTENING the cadence took effect immediately. nextAttempt is absolute,
+// so without this the feed would sit on a wait derived from the interval the
+// operator just replaced. The pending wait is only ever pulled IN, never
+// pushed out: when a backoff delay is already sooner than the new interval —
+// the failing case — it stays, so re-intervalling can never slow a retry down.
+func setFeedIntervalLocked(st *feedState, interval time.Duration) {
+	if st.interval == interval {
+		return
+	}
+	st.interval = interval
+	if st.lastAttempt.IsZero() || interval <= 0 {
+		return
+	}
+	if due := st.lastAttempt.Add(interval); due.Before(st.nextAttempt) {
+		st.nextAttempt = due
+	}
 }
 
 // ClearFeeds removes every configured feed. Used when restoring persisted
