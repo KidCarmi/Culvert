@@ -7,6 +7,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`install.sh` no longer writes invalid TOML when `allow_peers` has a trailing comma.** Wiring Release Management into an existing `/etc/culvert-maint/config.toml` with `allow_peers = ["alice",]` produced `["alice",, "1000"]`, which the maintenance agent refuses to parse. The append now reuses the existing comma.
+
 ### Changed
 
 - **An unreadable `admin_settings.json` is now visible in Diagnostics and
