@@ -480,23 +480,48 @@ func (ss *Scanner) ClamAVVersion() (clamav.Version, bool) {
 	ss.clamVerVal = v
 	ss.clamVerOK = true
 	ss.clamVerExpiry = time.Now().Add(clamVersionTTL)
-	stale, prev, cache := ss.noteSignatureGenLocked(v)
+	rec := ss.noteSignatureGenLocked(v)
 	ss.mu.Unlock()
 
-	if stale {
-		// Clear OUTSIDE ss.mu: the hash cache has its own mutex and this keeps
-		// the scanner lock off the cache's lock-ordering graph. Clearing also
-		// advances the cache generation, which is what stops a scan already
-		// in flight under the old definitions from re-publishing its verdict
-		// into the emptied cache (see verdictSink).
-		if cache != nil {
-			cache.Clear()
-		}
-		atomic.AddInt64(&statScanSigDBInvalidations, 1)
-		obs.Printf("SecurityScan: ClamAV signature set changed (%q -> %q) — scan verdict cache flushed so content cleared under the old definitions is re-scanned (CHAOS-107)",
-			prev, signatureGeneration(v))
-	}
+	rec.apply(signatureGeneration(v))
 	return v, true
+}
+
+// sigReconcile is what one signature observation requires of the verdict
+// cache, computed under ss.mu and applied outside it.
+type sigReconcile struct {
+	// invalidate: advance the cache epoch (and drop its entries), so no
+	// verdict begun before this observation can be published after it.
+	invalidate bool
+	// changed: the observation named a DIFFERENT identity from the recorded
+	// one, which counts as a signature-set flush whatever the cache held. A
+	// first observation is not a change; it counts only if it dropped entries.
+	changed bool
+	prev    string
+	cache   *hashcache.HashCache
+}
+
+// apply performs the reconciliation. It runs OUTSIDE ss.mu: the hash cache has
+// its own mutex and this keeps the scanner lock off the cache's lock-ordering
+// graph. Invalidating advances the cache generation even when the cache is
+// empty, which is what stops a scan already in flight under the old (or never
+// identified) definitions from publishing its verdict afterwards (see
+// verdictSink). The counter and the log line, by contrast, report only a flush
+// that meant something: a change of identity, or unprovenanced entries dropped.
+func (r sigReconcile) apply(gen string) {
+	if !r.invalidate {
+		return
+	}
+	dropped := 0
+	if r.cache != nil {
+		dropped = r.cache.Invalidate()
+	}
+	if !r.changed && dropped == 0 {
+		return
+	}
+	atomic.AddInt64(&statScanSigDBInvalidations, 1)
+	obs.Printf("SecurityScan: ClamAV signature set changed (%q -> %q) — scan verdict cache flushed so content cleared under the old definitions is re-scanned (CHAOS-107)",
+		r.prev, gen)
 }
 
 // signatureGeneration derives a stable identity for the detection capability a
@@ -514,8 +539,8 @@ func signatureGeneration(v clamav.Version) string {
 }
 
 // noteSignatureGenLocked records the observed signature identity and reports
-// whether the verdict cache must be flushed because it changed. Caller holds
-// ss.mu for writing; the flush itself is the caller's job, outside the lock.
+// how the verdict cache must be reconciled against it. Caller holds ss.mu for
+// writing; the reconciliation itself is the caller's job, outside the lock.
 //
 // The invariant it maintains is "every verdict in the cache was produced under
 // ss.sigGen", and it is maintained WITHOUT depending on who observes first.
@@ -527,16 +552,20 @@ func signatureGeneration(v clamav.Version) string {
 //
 //   - an unidentifiable reply is not recorded at all (it neither flushes now
 //     nor manufactures a change later);
-//   - the first identifiable observation baselines, and flushes only if the
-//     cache is already non-empty, because those entries have no provenance;
-//   - a later observation of a DIFFERENT identity flushes.
+//   - the first identifiable observation baselines and ALWAYS invalidates:
+//     cached entries have no provenance, and an empty cache does not mean no
+//     verdict is still being computed under definitions nobody identified (an
+//     opening VERSION failure leaves exactly that window open). It counts as a
+//     flush only if it actually dropped entries;
+//   - a later observation of a DIFFERENT identity invalidates and counts.
 //
 // The common case is therefore still free: the poller's opening tick runs
-// against an empty cache and only records the baseline.
-func (ss *Scanner) noteSignatureGenLocked(v clamav.Version) (stale bool, prev string, cache *hashcache.HashCache) {
+// against an empty cache with nothing in flight, so the epoch advance refuses
+// nothing and the baseline is all that is recorded.
+func (ss *Scanner) noteSignatureGenLocked(v clamav.Version) sigReconcile {
 	gen := signatureGeneration(v)
 	if gen == "" {
-		return false, "", nil
+		return sigReconcile{}
 	}
 	known, prevGen := ss.sigGenKnown, ss.sigGen
 	ss.sigGen = gen
@@ -544,17 +573,11 @@ func (ss *Scanner) noteSignatureGenLocked(v clamav.Version) (stale bool, prev st
 
 	switch {
 	case !known:
-		// Unprovenanced entries, if any, predate any recorded signature set.
-		if ss.cache != nil {
-			if _, _, size := ss.cache.Stats(); size > 0 {
-				return true, "unknown", ss.cache
-			}
-		}
-		return false, "", nil
+		return sigReconcile{invalidate: true, prev: "unknown", cache: ss.cache}
 	case prevGen != gen:
-		return true, prevGen, ss.cache
+		return sigReconcile{invalidate: true, changed: true, prev: prevGen, cache: ss.cache}
 	default:
-		return false, "", nil
+		return sigReconcile{}
 	}
 }
 

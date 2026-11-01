@@ -156,3 +156,31 @@ func TestSetIfGeneration_RefusedAcrossClear(t *testing.T) {
 		t.Fatal("stored verdict must be readable")
 	}
 }
+
+// TestInvalidate_AdvancesEpochOnEmptyCache: an empty cache says nothing about
+// verdicts still being computed, so Invalidate must advance the epoch even when
+// it drops nothing, and report exactly what it dropped otherwise.
+func TestInvalidate_AdvancesEpochOnEmptyCache(t *testing.T) {
+	c := New(10, time.Hour)
+	clean := ScanCacheResult{Clean: true, Source: "clean"}
+
+	inFlight := c.Generation()
+	if n := c.Invalidate(); n != 0 {
+		t.Fatalf("Invalidate on an empty cache dropped %d entries, want 0", n)
+	}
+	if c.Generation() == inFlight {
+		t.Fatal("Invalidate must advance the generation even on an empty cache")
+	}
+	if c.SetIfGeneration("a", clean, inFlight) {
+		t.Fatal("a verdict begun before an empty-cache Invalidate must be refused")
+	}
+
+	c.Set("x", clean)
+	c.Set("y", clean)
+	if n := c.Invalidate(); n != 2 {
+		t.Fatalf("Invalidate dropped %d entries, want 2", n)
+	}
+	if _, _, size := c.Stats(); size != 0 {
+		t.Fatalf("size after Invalidate = %d, want 0", size)
+	}
+}

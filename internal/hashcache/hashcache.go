@@ -209,11 +209,19 @@ func (c *HashCache) Evict(hash string) bool {
 
 // Clear removes all entries from the cache and advances its invalidation
 // epoch, so a SetIfGeneration for a verdict begun before the Clear is refused.
-func (c *HashCache) Clear() {
+func (c *HashCache) Clear() { c.Invalidate() }
+
+// Invalidate is Clear that also reports how many entries it dropped. The epoch
+// advances even when the cache is empty: an empty cache says nothing about
+// verdicts still being COMPUTED, and those are exactly what the epoch exists to
+// refuse. The count is read under the same lock as the drop, so it is exact.
+func (c *HashCache) Invalidate() (dropped int) {
 	c.mu.Lock()
+	dropped = len(c.entries)
 	c.entries = make(map[string]*hashCacheEntry, c.maxSize)
 	c.gen.Add(1)
 	c.mu.Unlock()
+	return dropped
 }
 
 // evictLocked removes all expired entries.  If the map is still at capacity

@@ -396,6 +396,13 @@ func (f *syncClamVer) setVersion(v clamav.Version) {
 	f.mu.Unlock()
 }
 
+// answerVersion makes VERSION succeed again, reporting v.
+func (f *syncClamVer) answerVersion(v clamav.Version) {
+	f.mu.Lock()
+	f.ver, f.err = v, nil
+	f.mu.Unlock()
+}
+
 // pausingYARA holds the FIRST Match call until released, so a test can park a
 // scan after its ClamAV leg has returned and before it publishes a verdict.
 // Later calls return immediately. The injected YARAMatcher is the package's
@@ -501,5 +508,77 @@ func TestCHAOS107_InFlightScanAcrossFlushIsNotCached(t *testing.T) {
 				t.Errorf("ClamAV must run again for the next request; scans = %d, want 2", got)
 			}
 		})
+	}
+}
+
+// TestCHAOS107_FirstObservationMidScanRefusesPublication: an empty cache at the
+// FIRST identifiable observation does not mean there is nothing to invalidate.
+// After an opening VERSION failure the node has no recorded signature set, and
+// a request can finish its ClamAV leg under the old definitions and still be in
+// YARA when a later poll first identifies the (already updated) set. Nothing
+// has been cached yet, so there are no entries to drop — but the in-flight
+// verdict has no provenance either, and if the observation leaves the cache
+// epoch where it was, that old "clean" is published into the cache and served
+// for the full CacheTTL. The first observation must therefore advance the epoch
+// regardless of entry count, while the invalidation counter still reports only
+// first-observation flushes that actually dropped verdicts.
+func TestCHAOS107_FirstObservationMidScanRefusesPublication(t *testing.T) {
+	clam := &syncClamVer{err: errValidation}
+	yara := newPausingYARA()
+	ss := newEnabledTestScanner(Deps{Clam: clam, Excl: fakeExcl{}, Yara: yara, Feed: fakeFeed{}})
+
+	// The opening observation fails, so nothing is recorded.
+	if ss.RefreshSignatures() {
+		t.Fatal("RefreshSignatures must report failure when VERSION errors")
+	}
+	if gen, known := ss.SignatureGeneration(); known || gen != "" {
+		t.Fatalf("precondition: no generation recorded after a failed VERSION, got %q known=%v", gen, known)
+	}
+
+	payload := []byte("dropper-cleared-before-the-first-observation")
+	hash := hashcache.SHA256Hex(payload)
+	done := make(chan *Result, 1)
+	go func() { done <- ss.ScanBody(payload) }()
+
+	// Park the scan between its legs: ClamAV has already called the payload
+	// clean, under definitions the node never identified.
+	select {
+	case <-yara.entered:
+	case res := <-done:
+		t.Fatalf("scan finished before reaching YARA: %+v", res)
+	}
+	if got := clam.scans(); got != 1 {
+		t.Fatalf("precondition: ClamAV leg ran once before the pause, got %d", got)
+	}
+	if _, _, size := ss.CacheStats(); size != 0 {
+		t.Fatalf("precondition: nothing cached while the scan is in flight, size = %d", size)
+	}
+
+	// The daemon now answers VERSION, with definitions that detect the payload.
+	clam.answerVersion(clamav.Version{Engine: "ClamAV 1.0.0", DBVersion: "27001"})
+	clam.detect("Win.Trojan.Dropper")
+	expireVersionCache(ss)
+
+	before := SigDBInvalidations()
+	if !ss.RefreshSignatures() {
+		t.Fatal("first successful observation failed")
+	}
+	if got := SigDBInvalidations() - before; got != 0 {
+		t.Errorf("a first observation on an EMPTY cache dropped nothing and must not count as a flush; delta = %d", got)
+	}
+
+	close(yara.release)
+	if res := <-done; res != nil {
+		t.Fatalf("the in-flight request itself completes clean (its verdict was computed before the observation), got %+v", res)
+	}
+	if cached, ok := ss.CacheGet(hash); ok {
+		t.Fatalf("a verdict begun before the first observation must not be published after it, cached %+v", cached)
+	}
+	res := ss.ScanBody(payload)
+	if res == nil || !res.Blocked || res.Source != "clamav" || res.Reason != "Win.Trojan.Dropper" {
+		t.Fatalf("the next request must be re-scanned under the observed definitions and blocked, got %+v", res)
+	}
+	if got := clam.scans(); got != 2 {
+		t.Errorf("ClamAV must run again for the next request; scans = %d, want 2", got)
 	}
 }
