@@ -46,11 +46,16 @@ func TestCHAOS107_SignatureUpdateInvalidatesCleanVerdict(t *testing.T) {
 	// poller's opening tick does (startScanSignatureWatch runs its first
 	// observation before its first tick, and initScanning precedes
 	// initBackgroundServices).
+	//
+	// The counter is process-global and other tests in this package advance
+	// it, so the assertion is a delta against a baseline taken here, never an
+	// absolute value: under -shuffle an absolute zero is order-dependent.
+	baseline := SigDBInvalidations()
 	if !ss.RefreshSignatures() {
 		t.Fatal("opening observation failed")
 	}
-	if n := SigDBInvalidations(); n != 0 {
-		t.Fatalf("baseline observation on an empty cache must not flush; invalidations = %d", n)
+	if n := SigDBInvalidations() - baseline; n != 0 {
+		t.Fatalf("baseline observation on an empty cache must not flush; invalidations delta = %d", n)
 	}
 
 	payload := []byte("a-dropper-no-signature-covers-yet")
