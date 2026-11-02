@@ -261,6 +261,9 @@ func buildOperatorContract() OperatorContract {
 	// Cluster rate-limit broadcast stale: this node enforces only its local limit.
 	// Contributes nothing unless cluster rate limiting is armed and stale.
 	checks = append(checks, checkClusterRateLimitFreshness(rl)...)
+	// Admin UI serving certificate expiring/expired, or an uploaded pair that is
+	// corrupt. Contributes nothing for the self-signed fallback or a healthy cert.
+	checks = append(checks, checkAdminUITLSCert()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
