@@ -134,13 +134,13 @@ func cdrWriteOperationalMetrics(w *strings.Builder) {
 
 func cdrWriteCacheMetrics(w *strings.Builder) {
 	hits, misses, size := cdrCache.Stats()
-	w.WriteString("\n# HELP culvert_cdr_cache_hits_total Hash cache hits (decision reused without calling Sluice)\n")
+	w.WriteString("\n# HELP culvert_cdr_cache_hits_total CDR result cache hits (decision reused without calling Sluice)\n")
 	w.WriteString("# TYPE culvert_cdr_cache_hits_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_cache_hits_total %d\n", hits)
-	w.WriteString("\n# HELP culvert_cdr_cache_misses_total Hash cache misses — required a Sluice call\n")
+	w.WriteString("\n# HELP culvert_cdr_cache_misses_total CDR result cache misses — required a Sluice call\n")
 	w.WriteString("# TYPE culvert_cdr_cache_misses_total counter\n")
 	fmt.Fprintf(w, "culvert_cdr_cache_misses_total %d\n", misses)
-	w.WriteString("\n# HELP culvert_cdr_cache_size Current number of entries in the CDR hash cache\n")
+	w.WriteString("\n# HELP culvert_cdr_cache_size Current number of entries in the CDR result cache\n")
 	w.WriteString("# TYPE culvert_cdr_cache_size gauge\n")
 	fmt.Fprintf(w, "culvert_cdr_cache_size %d\n", size)
 }
