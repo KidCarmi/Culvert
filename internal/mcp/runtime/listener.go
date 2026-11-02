@@ -289,7 +289,7 @@ func (l *Listener) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			l.pipe.routeAuthDenial(reason)
 		}
 		if status == http.StatusUnauthorized && l.challenge != "" {
-			w.Header().Set("WWW-Authenticate", l.challenge)
+			w.Header().Set("Www-Authenticate", l.challenge)
 		}
 		writeStatus(w, status)
 		return
@@ -377,12 +377,12 @@ func (l *Listener) extractRequest(w http.ResponseWriter, r *http.Request) (req R
 		Path:                 r.URL.Path,
 		SessionID:            r.Header.Get("Mcp-Session-Id"),
 		HasSession:           r.Header.Get("Mcp-Session-Id") != "",
-		ProtocolVersion:      r.Header.Get("MCP-Protocol-Version"),
-		HasVersionHeader:     r.Header.Get("MCP-Protocol-Version") != "",
+		ProtocolVersion:      r.Header.Get("Mcp-Protocol-Version"),
+		HasVersionHeader:     r.Header.Get("Mcp-Protocol-Version") != "",
 		AuthorizationHeaders: r.Header.Values("Authorization"),
 		BearerInQuery:        hasQueryCredential(r),
-		DPoPProof:            r.Header.Get("DPoP"),
-		HasDPoP:              r.Header.Get("DPoP") != "",
+		DPoPProof:            r.Header.Get("Dpop"),
+		HasDPoP:              r.Header.Get("Dpop") != "",
 		PeerCertThumbprint:   peerThumbprint(r, l.cfg.ClientCertMode),
 		CanonicalURI:         canonicalURI(r),
 		BodyReader:           body,
@@ -401,7 +401,7 @@ func (l *Listener) writeOutcome(w http.ResponseWriter, out Outcome) {
 	// the capability publishes metadata; never on a non-401 or an unconfigured
 	// listener, and it carries no token, tenant, or credential data.
 	if out.Status == http.StatusUnauthorized && l.challenge != "" {
-		w.Header().Set("WWW-Authenticate", l.challenge)
+		w.Header().Set("Www-Authenticate", l.challenge)
 	}
 	if len(out.ResponseBody) > 0 {
 		w.Header().Set("Content-Type", "application/json")

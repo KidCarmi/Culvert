@@ -39,6 +39,24 @@ verdict cached under one ClamAV signature set stayed authoritative for the whole
 a signature did not re-arm the node for content it had already called clean, and
 no counter, log line or alert marked the window).
 
+The 2026-11-01 round is recorded in
+[CHAOS-REVIEW-2026-11-01.md](CHAOS-REVIEW-2026-11-01.md) — CHAOS-108 (the
+FOURTH periodic feed loop). `internal/feedsched` was written to fix "a failed
+round is not retried until the next full interval" and "a fleet stays in phase
+forever", and its own package doc enumerates THREE feed loops; the
+operator-configured remote blocklist feed (`internal/blocklistfeed`) is not one
+of them and was never migrated. It had both named defects — a failed sync
+stamped the attempt on the ERROR path and the due-check gated on it, so one 503
+cost a full interval (24h by default), and the unjittered cadence pinned its
+phase at boot — plus a second root cause the three siblings do not share:
+`fetchFeedLines` never checked `resp.StatusCode`, so a 4xx/5xx error page was
+MERGED into the durable blocklist (`NormalizeLine` takes `fields[0]` of any
+line) while the round was recorded as a success, which also meant backoff would
+never engage for the most common outage mode. Both halves are fixed; the loop's
+missing staleness alert and health row are recorded as the open half. Id claimed
+in a committed placeholder row before any code per the 2026-09-25 amendment,
+checked against `origin/main` at `3c5fab1`.
+
 This document is a standing register. It records where Culvert already survives failure safely
 (and *why*, by code path) and where it does not. The one code change shipped alongside the original
 review is a fail-closed fix for a latent nil-deref panic in the enrollment path (Finding HA-9);

@@ -127,7 +127,7 @@ func (c *ghClient) get(ctx context.Context, rel string, limit int64) ([]byte, er
 		return nil, fmt.Errorf("request %s: %w", rel, err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "culvert-cireport")
 	if c.token != "" {
 		// net/http drops Authorization when a redirect leaves this host, so
@@ -169,7 +169,7 @@ func (c *ghClient) jobLogHead(ctx context.Context, repo string, jobID, n int64) 
 		return nil, fmt.Errorf("request %s: %w", rel, err)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "culvert-cireport")
 	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", n-1))
 	if c.token != "" {

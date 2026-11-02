@@ -9,9 +9,51 @@
 //
 // Multi-feed: each feed has its own URL, sync interval, and status. A single
 // scheduler goroutine (Start) wakes every tickInterval and syncs every feed
-// whose interval has elapsed since its last attempt. The scheduler is ALWAYS
-// started at startup — feeds added later via the admin API are picked up on
-// the next tick without a restart.
+// that is due. The scheduler is ALWAYS started at startup — feeds added later
+// via the admin API are picked up on the next tick without a restart.
+//
+// # CHAOS-108: the fourth feed loop
+//
+// internal/feedsched exists to fix two named failure modes in Culvert's
+// periodic feeds — "a failed round is not retried until the next full
+// interval" and "a fleet stays in phase forever" — and its package doc
+// enumerates THREE feed loops. This was the fourth, and it had both defects
+// plus the sharper version of the first:
+//
+//   - A failed sync stamped the attempt time and the due-check gated on it, so
+//     ANY transient failure (DNS blip, a 503 from the origin, a connection
+//     reset, a TLS error) pushed the next attempt a FULL interval away —
+//     DefaultInterval, 24 hours, on a stock install. Nothing retried in
+//     between. The worst shape is the boot pass: the immediate round runs
+//     because no attempt has been recorded, so a node that boots into a feed
+//     outage merges NO domains from that feed — not stale entries, none — and
+//     does not try again for a day. The blocklist is a deny control, so that
+//     window is fail-open on exactly the destinations the operator configured
+//     the feed to block.
+//   - The cadence carried no jitter and its phase was pinned at boot, so nodes
+//     that boot together (rolling upgrade, compose restart, a hypervisor
+//     recovering a rack) sync together against a third-party origin forever.
+//     That closes the same loop feedsched's doc describes: the herd provokes
+//     the rate-limit, and the absent retry then holds the whole fleet at that
+//     failure for the full interval.
+//   - The fetch was parented to context.Background(), so shutdown could not
+//     interrupt an in-flight sync.
+//
+// The fix reuses the OWNER's ladder rather than growing a second one: each
+// feed holds a feedsched.Scheduler used purely as a delay calculator
+// (NextDelay), which brings bounded exponential backoff, the interval-aware
+// floor/ceiling clamp that keeps retrying a strict TIGHTENING of the cadence,
+// and a stable per-feed jitter offset. The single shared tick is kept, so a
+// feed added through the admin API is still picked up within one tick and no
+// goroutine is created per feed.
+//
+// NOT fixed here, and recorded as the open half: this feed still has no
+// staleness alert or health row. internal/threatfeed has both (a
+// threat_feed_stale alert, plus a deferred startup variant); a blocklist feed
+// that has never synced, or is arbitrarily stale, raises neither and is
+// visible only as LastError in the admin API and one log line per attempt.
+// Adding an alert type is an owner decision with GUI/API parity consequences,
+// not a drive-by rider on a scheduling fix.
 package blocklistfeed
 
 import (
@@ -26,6 +68,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/feedsched"
 	"github.com/KidCarmi/Culvert/internal/obs"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
@@ -60,13 +103,27 @@ type Feed struct {
 	ImportedCount int64         // cumulative new domains merged from this feed
 }
 
-// feedState is the internal mutable state of one feed.
+// feedState is the internal mutable state of one feed. Every field is
+// read and written under Syncer.mu.
 type feedState struct {
-	interval      time.Duration
-	lastSync      time.Time
-	lastAttempt   time.Time
+	interval    time.Duration
+	lastSync    time.Time
+	lastAttempt time.Time // last round, success or failure (zero = never)
+	// nextAttempt is the earliest next AUTO sync: lastAttempt plus the delay
+	// the ladder returned for that round's outcome. Zero means "never
+	// attempted", which is due immediately — that is what makes the boot pass
+	// run. It replaced the old lastAttempt+interval gate, whose effect was
+	// that a FAILED round waited a full interval (CHAOS-108).
+	nextAttempt   time.Time
 	lastError     string
 	importedCount int64
+
+	// sched owns this feed's retry ladder and its stable jitter offset. It is
+	// used purely as a DELAY CALCULATOR (feedsched.Scheduler.NextDelay), never
+	// as a running loop: the Syncer keeps its single shared tick, so a feed
+	// added through the admin API is still picked up within one tick and no
+	// goroutine is created per feed. Lazily built by scheduleNextLocked.
+	sched *feedsched.Scheduler
 }
 
 // Syncer downloads and merges remote domain feeds into a Merger.
@@ -75,6 +132,60 @@ type Syncer struct {
 	bl    Merger
 	mu    sync.RWMutex
 	feeds map[string]*feedState // keyed by feed URL
+
+	// now and jitter are test seams, nil in production (see timeNow and
+	// newFeedScheduler). They exist so the cadence contract — backoff growth,
+	// the interval clamp, fleet spread — is asserted against a fake clock
+	// without sleeping, the way internal/feedsched's own tests do.
+	now    func() time.Time
+	jitter func(time.Duration) time.Duration
+}
+
+// timeNow reads the clock through the test seam.
+func (bs *Syncer) timeNow() time.Time {
+	if bs.now != nil {
+		return bs.now()
+	}
+	return time.Now()
+}
+
+// newFeedScheduler builds the delay calculator for one feed.
+//
+// Interval is a function so an admin edit to the cadence is re-read on every
+// round instead of being frozen here — and feedsched re-reads it to clamp the
+// backoff floor AND ceiling to the live interval, which is what keeps a retry
+// strictly faster than a healthy node's sync (see feedsched.backoffBounds).
+func (bs *Syncer) newFeedScheduler(st *feedState) *feedsched.Scheduler {
+	return feedsched.New(feedsched.Config{
+		Name: "blocklistfeed",
+		// Reads st.interval WITHOUT taking bs.mu: NextDelay is only ever
+		// called from scheduleNextLocked, whose caller holds the lock, and
+		// st.interval is only mutated under that same lock. Taking it here
+		// would deadlock — sync.RWMutex is not reentrant.
+		Interval: func() time.Duration { return st.interval },
+		// nil in production, so feedsched draws one StableJitter offset per
+		// feed: spread across the fleet and across this node's own feeds,
+		// chosen once rather than re-rolled per tick.
+		Jitter: bs.jitter,
+	})
+}
+
+// scheduleNextLocked charges the round to the feed's ladder and sets the
+// earliest next auto-sync. Returns the delay it applied, for the caller's log
+// line. Caller MUST hold bs.mu: NextDelay mutates the per-feed consecutive-
+// failure count and reads st.interval, and neither is otherwise synchronized
+// against a concurrent admin-API sync of the same feed.
+//
+// A feed with auto-sync disabled (interval <= 0) is still stamped; dueURLs
+// skips it on the interval check, so the value is inert until auto-sync is
+// re-enabled, at which point SetFeed re-derives it.
+func (bs *Syncer) scheduleNextLocked(st *feedState, ok bool) time.Duration {
+	if st.sched == nil {
+		st.sched = bs.newFeedScheduler(st)
+	}
+	d := st.sched.NextDelay(ok)
+	st.nextAttempt = st.lastAttempt.Add(d)
+	return d
 }
 
 // New creates an empty syncer for bl. Feeds are added via SetFeed (startup
@@ -99,10 +210,32 @@ func (bs *Syncer) SetFeed(feedURL string, interval time.Duration) {
 		bs.feeds = map[string]*feedState{}
 	}
 	if st, ok := bs.feeds[feedURL]; ok {
-		st.interval = interval
+		setFeedIntervalLocked(st, interval)
 		return
 	}
 	bs.feeds[feedURL] = &feedState{interval: interval}
+}
+
+// setFeedIntervalLocked re-intervals an existing feed, keeping the pending
+// next-attempt honest about the new cadence. Caller holds Syncer.mu.
+//
+// The gate this replaced was lastAttempt+interval, recomputed on every tick,
+// so SHORTENING the cadence took effect immediately. nextAttempt is absolute,
+// so without this the feed would sit on a wait derived from the interval the
+// operator just replaced. The pending wait is only ever pulled IN, never
+// pushed out: when a backoff delay is already sooner than the new interval —
+// the failing case — it stays, so re-intervalling can never slow a retry down.
+func setFeedIntervalLocked(st *feedState, interval time.Duration) {
+	if st.interval == interval {
+		return
+	}
+	st.interval = interval
+	if st.lastAttempt.IsZero() || interval <= 0 {
+		return
+	}
+	if due := st.lastAttempt.Add(interval); due.Before(st.nextAttempt) {
+		st.nextAttempt = due
+	}
 }
 
 // ClearFeeds removes every configured feed. Used when restoring persisted
@@ -156,46 +289,76 @@ func (bs *Syncer) Feeds() []Feed {
 // wakes every tickInterval and syncs each feed whose interval has elapsed
 // since its last attempt. Feeds with interval 0 are skipped.
 func (bs *Syncer) Start(ctx context.Context) {
+	round := func() { bs.syncDue(ctx) }
 	go func() {
 		// CHAOS-24: syncDue fetches and merges operator-configured remote
 		// blocklists. Guard the ROUND so one bad feed body costs a tick, not
 		// the process; the scheduler keeps waking and retries the next window.
-		obs.SafeCall("blocklistfeed", bs.syncDue)
+		//
+		// CHAOS-108: ctx now reaches the fetch, so shutdown interrupts an
+		// in-flight sync instead of waiting out httpTimeout. A panicking
+		// round is still charged as a failed round by scheduleNextLocked's
+		// caller only when it gets that far; a panic BEFORE the stamp leaves
+		// nextAttempt unchanged, so the next tick retries — the pre-existing
+		// "costs a tick, not the process" posture, unchanged.
+		obs.SafeCall("blocklistfeed", round)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(tickInterval):
-				obs.SafeCall("blocklistfeed", bs.syncDue)
+				obs.SafeCall("blocklistfeed", round)
 			}
 		}
 	}()
 }
 
-// syncDue syncs every feed that is due: auto-sync enabled (interval > 0)
-// and never attempted, or last attempted at least one interval ago.
-func (bs *Syncer) syncDue() {
-	now := time.Now()
+// syncDue syncs every feed that is due, stopping promptly on cancellation so
+// a shutdown does not start further fetches.
+func (bs *Syncer) syncDue(ctx context.Context) {
+	for _, feedURL := range bs.dueURLs(bs.timeNow()) {
+		if ctx.Err() != nil {
+			return
+		}
+		_, _ = bs.SyncFeedContext(ctx, feedURL)
+	}
+}
+
+// dueURLs lists the feeds whose next-attempt time has arrived: auto-sync
+// enabled (interval > 0) and either never attempted or past nextAttempt.
+// Sorted, so a round's order is deterministic for tests and log reading.
+func (bs *Syncer) dueURLs(now time.Time) []string {
 	bs.mu.RLock()
+	defer bs.mu.RUnlock()
 	var due []string
 	for feedURL, st := range bs.feeds {
 		if st.interval <= 0 {
 			continue
 		}
-		if st.lastAttempt.IsZero() || now.Sub(st.lastAttempt) >= st.interval {
+		if st.nextAttempt.IsZero() || !now.Before(st.nextAttempt) {
 			due = append(due, feedURL)
 		}
 	}
-	bs.mu.RUnlock()
-	for _, feedURL := range due {
-		_, _ = bs.SyncFeed(feedURL)
-	}
+	sort.Strings(due)
+	return due
 }
 
 // SyncFeed fetches one feed by URL and merges new domains into the blocklist.
 // Returns the number of new domains added and any error encountered. The
 // feed's status fields are updated either way.
+//
+// Deliberately NOT parented to the caller's request context: this is the
+// manual "Sync Now" path, and an operator who clicks it and then navigates
+// away must not abort the fetch. The SCHEDULER path uses SyncFeedContext so
+// shutdown can interrupt it.
 func (bs *Syncer) SyncFeed(feedURL string) (int, error) {
+	return bs.SyncFeedContext(context.Background(), feedURL)
+}
+
+// SyncFeedContext is SyncFeed with a caller-supplied context, used by the
+// scheduler so a shutdown interrupts an in-flight fetch rather than waiting
+// out httpTimeout (CHAOS-108).
+func (bs *Syncer) SyncFeedContext(ctx context.Context, feedURL string) (int, error) {
 	bs.mu.RLock()
 	_, known := bs.feeds[feedURL]
 	bs.mu.RUnlock()
@@ -203,7 +366,7 @@ func (bs *Syncer) SyncFeed(feedURL string) (int, error) {
 		return 0, fmt.Errorf("feed not configured: %s", feedURL)
 	}
 
-	lines, err := bs.fetchFeedLines(feedURL)
+	lines, err := bs.fetchFeedLines(ctx, feedURL)
 
 	bs.mu.Lock()
 	st, still := bs.feeds[feedURL]
@@ -211,10 +374,22 @@ func (bs *Syncer) SyncFeed(feedURL string) (int, error) {
 		bs.mu.Unlock()
 		return 0, nil
 	}
-	st.lastAttempt = time.Now()
+	st.lastAttempt = bs.timeNow()
+	// CHAOS-108: charge the round to the ladder BEFORE branching, so the
+	// failure path gets bounded backoff instead of a full interval. The old
+	// code stamped only the attempt time, and the due-check read it against
+	// the interval — which meant one 503 bought the origin a day of silence.
+	delay := bs.scheduleNextLocked(st, err == nil)
 	if err != nil {
 		st.lastError = err.Error()
+		failures := st.sched.Failures()
 		bs.mu.Unlock()
+		// Neither the error nor any request-derived value reaches this sink:
+		// the URL is operator-configured and sanitized with %q, and the
+		// remaining values are a count and a duration computed here. The
+		// error detail is already logged, at its own sink, by fetchFeedLines.
+		obs.Printf("BlocklistFeed: sync %q failed (%d consecutive) — retrying in %s, not at the configured interval",
+			obs.Sanitize(feedURL), failures, delay.Round(time.Second))
 		return 0, err
 	}
 	bs.mu.Unlock()
@@ -253,7 +428,7 @@ func (bs *Syncer) SyncAll() (int, error) {
 // time) so every sync — scheduler, manual, or settings-restored feed — is
 // re-checked, closing the gap where a feed host starts resolving to a
 // private address after it was saved.
-func (bs *Syncer) fetchFeedLines(feedURL string) ([]string, error) {
+func (bs *Syncer) fetchFeedLines(ctx context.Context, feedURL string) ([]string, error) {
 	if !urlPattern.MatchString(feedURL) {
 		return nil, fmt.Errorf("feed URL must be an absolute http(s) URL")
 	}
@@ -268,7 +443,10 @@ func (bs *Syncer) fetchFeedLines(feedURL string) ([]string, error) {
 		return nil, fmt.Errorf("feed URL blocked by SSRF guard: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
+	// Derived from the caller's context (the scheduler's lifecycle ctx, or
+	// Background for a manual sync), so httpTimeout still bounds the fetch
+	// while cancellation can also end it early.
+	ctx, cancel := context.WithTimeout(ctx, httpTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, http.NoBody)
 	if err != nil {
@@ -281,6 +459,25 @@ func (bs *Syncer) fetchFeedLines(feedURL string) ([]string, error) {
 		return nil, fmt.Errorf("fetch %s: %w", feedURL, err)
 	}
 	defer resp.Body.Close()
+
+	// CHAOS-108: the status gate both sibling feeds already have
+	// (internal/threatfeed, internal/feedsync). Without it this loop's notion
+	// of success was "the transport returned bytes", not "the origin served
+	// the feed", with two consequences:
+	//
+	//   - The error page was MERGED. blocklist.NormalizeLine takes fields[0]
+	//     of any line, so "upstream down" lists the host "upstream" and an
+	//     HTML body lists "<html>" — merge-only entries, attributed to this
+	//     feed, saved to disk and never removed. A deny control's durable
+	//     state took dictation from whatever answered the URL.
+	//   - The round was recorded as a SUCCESS: lastSync advanced and
+	//     lastError cleared, so an origin that has served 503 for a week
+	//     reported "synced just now, no error" — and would reset the retry
+	//     ladder added above, so backoff would never engage for the single
+	//     most common feed outage mode.
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, feedURL)
+	}
 
 	var lines []string
 	scanner := bufio.NewScanner(resp.Body)

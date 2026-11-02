@@ -320,7 +320,7 @@ func (p *HTTPCatalogProvider) fetchIndex(ctx context.Context) (body []byte, etag
 		if rerr != nil {
 			return nil, "", "", false, fmt.Errorf("release catalog: read index: %w", rerr)
 		}
-		return b, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), false, nil
+		return b, resp.Header.Get("Etag"), resp.Header.Get("Last-Modified"), false, nil
 	default:
 		return nil, "", "", false, fmt.Errorf("release catalog: index HTTP %d", resp.StatusCode)
 	}
