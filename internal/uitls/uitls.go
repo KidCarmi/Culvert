@@ -392,7 +392,7 @@ func imdsv2Token(client *http.Client, sessionURL string) string {
 	if err != nil {
 		return ""
 	}
-	req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+	req.Header.Set("X-Aws-Ec2-Metadata-Token-Ttl-Seconds", "21600")
 
 	resp, err := client.Do(req)
 	if err != nil {

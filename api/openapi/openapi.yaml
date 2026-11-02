@@ -6082,8 +6082,8 @@ paths:
     get:
       operationId: getScanCache
       tags: [security]
-      summary: Scan hash-cache stats
-      description: Returns the SHA-256 scan-result cache hit/miss/size stats.
+      summary: Scan verdict cache stats
+      description: Returns the scan verdict cache hit/miss/size stats.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -6095,7 +6095,7 @@ paths:
       x-culvert-introduced-version: 1.0.0
       responses:
         '200':
-          description: Scan hash-cache stats.
+          description: Scan verdict cache stats.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ScanCache' }
@@ -6103,8 +6103,8 @@ paths:
     delete:
       operationId: purgeScanCache
       tags: [security]
-      summary: Purge scan cache
-      description: Purge scan cache.
+      summary: Purge scan verdict cache
+      description: Purge scan verdict cache.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -6127,7 +6127,7 @@ paths:
           schema: { type: string }
       responses:
         '200':
-          description: Purge scan cache.
+          description: Purge scan verdict cache.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }

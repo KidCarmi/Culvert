@@ -327,7 +327,7 @@ func (f *feedFetcher) fetchManifest(ctx context.Context, manifestURL, priorETag 
 	case http.StatusNotModified:
 		// A conditional 304: typed result, NOT content. A prohibited-body on 304 is
 		// ignored (we never read/trust it) and freshness is not inferred here.
-		return feedFetchOutcome{NotModified: true, ETag: sanitizeETag(resp.Header.Get("ETag"))}, nil
+		return feedFetchOutcome{NotModified: true, ETag: sanitizeETag(resp.Header.Get("Etag"))}, nil
 	case http.StatusOK:
 		if err := rejectContentEncoding(resp); err != nil {
 			return feedFetchOutcome{}, err
@@ -336,7 +336,7 @@ func (f *feedFetcher) fetchManifest(ctx context.Context, manifestURL, priorETag 
 		if err != nil {
 			return feedFetchOutcome{}, fmt.Errorf("%w: manifest: %v", errFeedFetchBody, err)
 		}
-		return feedFetchOutcome{Body: body, ETag: sanitizeETag(resp.Header.Get("ETag"))}, nil
+		return feedFetchOutcome{Body: body, ETag: sanitizeETag(resp.Header.Get("Etag"))}, nil
 	default:
 		return feedFetchOutcome{}, fmt.Errorf("%w: manifest %d", errFeedFetchStatus, resp.StatusCode)
 	}
