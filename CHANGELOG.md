@@ -7,8 +7,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`install.sh` no longer writes invalid TOML when `allow_peers` has a trailing comma.** Wiring Release Management into an existing `/etc/culvert-maint/config.toml` with `allow_peers = ["alice",]` produced `["alice",, "1000"]`, which the maintenance agent refuses to parse. The append now reuses the existing comma.
+
 ### Changed
 
+- **Diagnostics now warns when destination-country rules cannot match because
+  no GeoIP database is loaded.** An enabled `destCountry` rule never matches
+  without a database, so a country block silently stops blocking; this was
+  visible only in the startup log (and `/api/geoip` for a failed load). The new
+  report-only `geoip_database_for_rules` row names the affected rules and says
+  whether the database is unconfigured or failed to load. No policy, matcher or
+  loader behaviour changed.
 - **A remote blocklist feed whose origin fails is now retried on a bounded
   ladder instead of waiting out the full sync interval, and an HTTP error
   response is no longer accepted as feed content (CHAOS-108).** The
@@ -480,6 +491,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The CHAOS-106 call-site gate let the first compliant caller in a file vouch
+  for every later one.** The gate now discovers its inputs, and it requires each
+  `decompressForScan` site to bind both results, name the refusal rather than
+  `_`, and branch on that name — but it searched for the branch across the
+  WHOLE FILE, and `bomb` is the name every conforming site in the tree already
+  uses. So `proxy_tunnel.go`, `proxy_http.go` and `cdr_proxy.go` each already
+  carry an `if bomb {`, and a SECOND site added to one of them that binds
+  `bomb` and omits its own branch was classified conforming: the gate reported
+  clean over a live scanner bypass, on the compressed bytes, with the origin
+  choosing the expansion ratio. Those three files are exactly where the fourth
+  response leg would land, and the identifier collision is not a coincidence —
+  a copied-and-adapted call site inherits the house name for the value. The
+  branch requirement is now scoped to the FUNCTION that holds the call, with
+  every nested function literal given its own scope, so a refusal bound inside
+  a closure cannot be excused by an `if` on the same name in the enclosing
+  function; a call site in no function at all is a violation, because nothing
+  there can fail closed. Kept permissive on the branch's shape and on where
+  inside the function it sits, since only its ABSENCE reopens the bypass.
+  Proved in both directions on one fixture holding a compliant site and a
+  bypass that share the name: accepted by the gate as it stood
+  (`sites=2 violations=[]`), refused with `file:line` by the gate as fixed, and
+  the compliant neighbour is asserted NOT to be reported. Latent — no such
+  caller exists, confirmed by the stricter gate over every non-test file in the
+  package — and test-only: no production behavior moves. Review:
+  `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-01.md`.
 - **The one gate standing between a future response path and a CHAOS-106
   scanner bypass could not see a new file.** `DecompressForScan` returns
   `(nil, true)` when a declared `Content-Encoding` expands past the ratio

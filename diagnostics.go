@@ -235,6 +235,10 @@ func buildOperatorContract() OperatorContract {
 	// Rules the last policy load rejected fail-closed. Contributes nothing when
 	// every rule in the file was accepted.
 	checks = append(checks, checkPolicyRulesDroppedOnLoad(policyStore)...)
+	// Enabled destination-country rules while no GeoIP database is loaded: such
+	// rules can never match. Contributes nothing when a database is loaded or no
+	// enabled rule uses a country condition.
+	checks = append(checks, checkGeoDatabaseForRules(policyStore.List())...)
 	// Signed SaaS feed (stale / degraded / waiting / critical, or an enabled feed
 	// that has never activated and is failing). Contributes nothing when the feed
 	// is healthy, disabled, or serving the embedded baseline without failures.
