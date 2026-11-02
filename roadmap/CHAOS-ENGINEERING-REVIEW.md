@@ -165,6 +165,26 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-11-02 — `CHAOS-109` CLAIMED (placeholder, commit one). Domain: the
+CATEGORY-FEED INGESTION PATH — a 50+ MB gzip tarball is fetched from a
+third-party mirror and expanded in-process on every node, so how many bytes is
+that origin actually allowed to spend, and does the round guard
+(`obs.SafeCall`, CHAOS-24) hold for the one resource `recover()` cannot see?**
+Id claimed in this committed row before any code was written, per the
+convention above, and checked against `origin/main` rather than the working
+tree, per the 2026-09-25 amendment: `CHAOS-108` is the highest id anywhere on
+`origin/main`, and no open PR holds a chaos id at claim time (#1794, #1793,
+#1792, #1791, #1790, #1788, #1705, #1549, #1548, #1536, #1528, #1526 — none is
+a chaos sweep), so this sweep took 109 and will not move.
+
+Scope is the SIMULATE list's *memory pressure* / *OOM* / *threat feed
+unavailable* rows asked on the INGEST plane rather than the inspection plane.
+CHAOS-106 bounded decompression where Culvert expands traffic it is scanning;
+the 2026-11-01 round (§8.3 of its dated review) recorded that no feed loop caps
+its response body and handed the class to "a round that treats all three". This
+is that round. Findings, measurements and gates are written up in
+[the dated review](CHAOS-REVIEW-2026-11-02.md).
+
 **2026-10-31 — `CHAOS-107` CLAIMED (placeholder, commit one). Domain: the
 SIGNATURE-DATABASE GENERATION — a scan verdict is cached by content hash for
 the whole `CacheTTL`, so which signature set produced it, and what happens to a
