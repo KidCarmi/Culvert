@@ -57,6 +57,39 @@ missing staleness alert and health row are recorded as the open half. Id claimed
 in a committed placeholder row before any code per the 2026-09-25 amendment,
 checked against `origin/main` at `3c5fab1`.
 
+The 2026-11-02 round is recorded in
+[CHAOS-REVIEW-2026-11-02.md](CHAOS-REVIEW-2026-11-02.md) — CHAOS-109 (the
+FEED-INGESTION BYTE BUDGET). CHAOS-106 bounded decompression on the plane where
+Culvert expands traffic it is INSPECTING; the plane where it expands a
+third-party feed had no bound at all. `internal/feedsync` fetches a 50+ MB gzip
+tarball from a community GitHub mirror and expands it in-process on every node,
+and its two apparent protections were not bounds: `maxDomainsPerCategory` is
+charged to a counter LOCAL to one archive member and tar permits duplicate
+member paths (measured: 40 duplicate members produced exactly 2,000,000 live map
+entries with no member near the cap), and the round guard the loop advertises
+(`obs.SafeCall`, CHAOS-24, "so a malformed/hostile archive costs one sync window
+rather than terminating an in-line gateway") cannot see a heap exhaustion
+because `recover()` does not run for a Go OOM. The GOMEMLIMIT backstop cannot
+either and says so — "It CANNOT reclaim memory that is still REACHABLE" — which
+is what the domain map is for the whole parse; measured, a 64 MiB soft limit was
+exceeded 3.7x over 112 GC cycles. Live-heap amplification is ~50x and linear
+(9.59 MiB of gzip ⇒ 512 MiB reachable heap), and because the scheduler syncs
+immediately when the DB is empty while the populating write is the step that
+never runs, a hostile mirror is a deterministic CRASH LOOP taking the proxy,
+control plane and admin UI with it. Fixed with compressed, expansion and
+aggregate-entry budgets; byte overruns refuse, the entry cap truncates (safe
+because `BulkWrite` overwrites and never deletes). The round also closes
+CHAOS-108 §8.3's open half for `internal/blocklistfeed`, which retained every
+feed line with no ceiling of any kind, and **corrects** §8.3 for
+`internal/threatfeed`, whose `maxFeedLines` is a real retention bound — its
+actual gap is that blank and `#` lines are not charged to the counter, a work
+bound rather than a memory one, rated LOW. `io.LimitReader` is deliberately not
+used: it reports a spent budget as a clean `io.EOF`, and measured (RED-D) that
+had a 65-line prefix of a 5,000-line deny list merged and the round recorded
+healthy. The unverified feed origin and the missing ingest-refusal alert are
+recorded as the open half. Id claimed in a committed placeholder row before any
+code per the 2026-09-25 amendment, checked against `origin/main` at `110bf9f`.
+
 This document is a standing register. It records where Culvert already survives failure safely
 (and *why*, by code path) and where it does not. The one code change shipped alongside the original
 review is a fail-closed fix for a latent nil-deref panic in the enrollment path (Finding HA-9);
