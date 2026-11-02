@@ -7,6 +7,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **The canonical-header-key gate now covers the direct map index, which is the
+  failure it exists to prevent.** `TestCanonicalHeaderKeys_Tree` required every
+  header key in production Go to be spelled in textproto canonical form, and
+  its own documentation named the reason: `scrubForwardedHeaders` reads
+  `r.Header[hdrForwardedFor]` as a direct slice, and indexing a map does not
+  canonicalise, so a non-canonical key there misses the header outright rather
+  than merely costing an allocation. The matcher checked only two shapes — a
+  literal handed to `Header.Get`/`Set`/`Del`/`Add`/`Values`, and a declaration
+  named `hdr*`/`header*` — so an `*ast.IndexExpr` (`r.Header["X-Real-IP"]`), a
+  `delete(r.Header, "X-Real-IP")`, and any constant named outside that
+  convention were all invisible. Rewriting the scrub's `X-Real-IP` branch in
+  the direct-index form the function already uses two statements above it, with
+  the spelling every external document uses, left the gate green over a live
+  scrub bypass: the private hop survives and is forwarded upstream, and on the
+  `X-User-Identity` leg a client-supplied identity claim reaches the upstream.
+  Three arms are added to the one matcher the self-check exercises — index,
+  `delete()`, and a per-package constant table so a key is judged by its
+  declared value rather than by the spelling of its identifier — proved in both
+  directions against the real tree. The map-keyed arms require a hyphen in the
+  key, because a JOSE token's `Header` claim map is spelled identically to an
+  `http.Header` index and telling them apart otherwise needs `go/types`; the
+  single-token field names in this tree are declared under the `hdr`/`header`
+  convention and stay covered at their declaration. No production behaviour
+  changes; latent at the time of the fix, with every header-name constant in
+  the tree already canonical.
+
 ### Fixed
 
 - **`install.sh` no longer writes invalid TOML when `allow_peers` has a trailing comma.** Wiring Release Management into an existing `/etc/culvert-maint/config.toml` with `allow_peers = ["alice",]` produced `["alice",, "1000"]`, which the maintenance agent refuses to parse. The append now reuses the existing comma.
