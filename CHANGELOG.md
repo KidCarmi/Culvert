@@ -7,7 +7,43 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **`install.sh` no longer writes invalid TOML when `allow_peers` has a trailing comma.** Wiring Release Management into an existing `/etc/culvert-maint/config.toml` with `allow_peers = ["alice",]` produced `["alice",, "1000"]`, which the maintenance agent refuses to parse. The append now reuses the existing comma.
+
 ### Changed
+
+- **Diagnostics now warns when destination-country rules cannot match because
+  no GeoIP database is loaded.** An enabled `destCountry` rule never matches
+  without a database, so a country block silently stops blocking; this was
+  visible only in the startup log (and `/api/geoip` for a failed load). The new
+  report-only `geoip_database_for_rules` row names the affected rules and says
+  whether the database is unconfigured or failed to load. No policy, matcher or
+  loader behaviour changed.
+- **A remote blocklist feed whose origin fails is now retried on a bounded
+  ladder instead of waiting out the full sync interval, and an HTTP error
+  response is no longer accepted as feed content (CHAOS-108).** The
+  operator-configured blocklist feed was the fourth periodic feed loop and the
+  only one never migrated onto `internal/feedsched`, so a failed sync stamped
+  the attempt time and the due-check gated on it: any transient failure — a DNS
+  blip, a 503, a connection reset — pushed the next attempt a full interval
+  away, 24 hours on a stock install, with nothing retried in between. The worst
+  shape was the boot pass, which runs because nothing has been attempted yet, so
+  a node booting into a feed outage merged no domains from that feed at all and
+  did not try again for a day. Separately, the fetch never checked the response
+  status, so a 4xx/5xx error page was merged into the blocklist as entries
+  (`upstream down` lists the host `upstream`) — durable and merge-only — while
+  the feed reported "synced just now, no error". Each feed now carries a
+  `feedsched` ladder (bounded exponential backoff, floor and ceiling both
+  clamped to the live interval so a retry is always faster than a healthy sync,
+  reset on the first success) and one stable jitter offset so a restarted fleet
+  no longer syncs in phase against a third-party origin; non-200 responses are
+  refused and charged to the ladder. The scheduler's fetch is also now parented
+  to the lifecycle context, so shutdown interrupts an in-flight sync; manual
+  "Sync Now" deliberately still is not, so an operator who navigates away does
+  not abort it. Manual-only feeds (interval 0) are unchanged, and shortening the
+  interval still takes effect immediately. This feed still has no staleness
+  alert or health row, unlike the threat feed — recorded as the open half.
 
 - **An unreadable `admin_settings.json` is now visible in Diagnostics and
   alerted, not just logged.** When the file exists but cannot be read
@@ -455,6 +491,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The CHAOS-106 call-site gate let the first compliant caller in a file vouch
+  for every later one.** The gate now discovers its inputs, and it requires each
+  `decompressForScan` site to bind both results, name the refusal rather than
+  `_`, and branch on that name — but it searched for the branch across the
+  WHOLE FILE, and `bomb` is the name every conforming site in the tree already
+  uses. So `proxy_tunnel.go`, `proxy_http.go` and `cdr_proxy.go` each already
+  carry an `if bomb {`, and a SECOND site added to one of them that binds
+  `bomb` and omits its own branch was classified conforming: the gate reported
+  clean over a live scanner bypass, on the compressed bytes, with the origin
+  choosing the expansion ratio. Those three files are exactly where the fourth
+  response leg would land, and the identifier collision is not a coincidence —
+  a copied-and-adapted call site inherits the house name for the value. The
+  branch requirement is now scoped to the FUNCTION that holds the call, with
+  every nested function literal given its own scope, so a refusal bound inside
+  a closure cannot be excused by an `if` on the same name in the enclosing
+  function; a call site in no function at all is a violation, because nothing
+  there can fail closed. Kept permissive on the branch's shape and on where
+  inside the function it sits, since only its ABSENCE reopens the bypass.
+  Proved in both directions on one fixture holding a compliant site and a
+  bypass that share the name: accepted by the gate as it stood
+  (`sites=2 violations=[]`), refused with `file:line` by the gate as fixed, and
+  the compliant neighbour is asserted NOT to be reported. Latent — no such
+  caller exists, confirmed by the stricter gate over every non-test file in the
+  package — and test-only: no production behavior moves. Review:
+  `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-01.md`.
 - **The one gate standing between a future response path and a CHAOS-106
   scanner bypass could not see a new file.** `DecompressForScan` returns
   `(nil, true)` when a declared `Content-Encoding` expands past the ratio
