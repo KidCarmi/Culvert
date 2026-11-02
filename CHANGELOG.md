@@ -20,6 +20,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   report-only `geoip_database_for_rules` row names the affected rules and says
   whether the database is unconfigured or failed to load. No policy, matcher or
   loader behaviour changed.
+- **A remote blocklist feed whose origin fails is now retried on a bounded
+  ladder instead of waiting out the full sync interval, and an HTTP error
+  response is no longer accepted as feed content (CHAOS-108).** The
+  operator-configured blocklist feed was the fourth periodic feed loop and the
+  only one never migrated onto `internal/feedsched`, so a failed sync stamped
+  the attempt time and the due-check gated on it: any transient failure — a DNS
+  blip, a 503, a connection reset — pushed the next attempt a full interval
+  away, 24 hours on a stock install, with nothing retried in between. The worst
+  shape was the boot pass, which runs because nothing has been attempted yet, so
+  a node booting into a feed outage merged no domains from that feed at all and
+  did not try again for a day. Separately, the fetch never checked the response
+  status, so a 4xx/5xx error page was merged into the blocklist as entries
+  (`upstream down` lists the host `upstream`) — durable and merge-only — while
+  the feed reported "synced just now, no error". Each feed now carries a
+  `feedsched` ladder (bounded exponential backoff, floor and ceiling both
+  clamped to the live interval so a retry is always faster than a healthy sync,
+  reset on the first success) and one stable jitter offset so a restarted fleet
+  no longer syncs in phase against a third-party origin; non-200 responses are
+  refused and charged to the ladder. The scheduler's fetch is also now parented
+  to the lifecycle context, so shutdown interrupts an in-flight sync; manual
+  "Sync Now" deliberately still is not, so an operator who navigates away does
+  not abort it. Manual-only feeds (interval 0) are unchanged, and shortening the
+  interval still takes effect immediately. This feed still has no staleness
+  alert or health row, unlike the threat feed — recorded as the open half.
+
 - **An unreadable `admin_settings.json` is now visible in Diagnostics and
   alerted, not just logged.** When the file exists but cannot be read
   (permissions or a volume error) the node boots on defaults, so every
