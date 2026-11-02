@@ -735,11 +735,11 @@ jobs:
   # test/appliance-lab whose head commit message carries [build-only] and no
   # other tag; every other lab job (this workflow, console-overlay,
   # snapshot-pin-check) skips whenever [build-only] is present, so a mixed
-  # message runs nothing. The first step (build-only-route-guard.py) refuses
-  # any other bracket token, a push of more than one commit, and a trigger
-  # commit that changes any file (the trigger is an EMPTY commit on the
-  # reviewed head). The base image's signed SHA256SUMS must verify by exactly
-  # the BOM signer before the build starts.
+  # message runs nothing. The route guard (first step) refuses anything but
+  # the exact BUILD_TRIGGER_MESSAGE on ONE empty commit with ONE parent that
+  # equals the previous branch head. The base image's signed SHA256SUMS must
+  # verify by exactly the BOM signer before the build starts. All operational
+  # logic is inline in this job; no lab harness file is changed for it.
   build-only:
     name: "Lab · build-only OVA (no boot): candidate-0981ff3d"
     if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[adopted-scan]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[console-overlay]') && !contains(github.event.head_commit.message, '[fail-fast]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[preserve-image]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
@@ -747,6 +747,10 @@ jobs:
     timeout-minutes: 180
     env:
       VARIANT: candidate-0981ff3d
+      # The ONE commit message that may start this job (an empty commit on the
+      # reviewed head; reviewed by ASTRA, with its SHA, parent and tree, before
+      # it is pushed).
+      BUILD_TRIGGER_MESSAGE: "lab: build the one FB-1 replacement OVA from 0981ff3d [build-only]"
       # Frozen source (ASTRA FB-1 acceptance) and the BOM at that commit.
       APPLIANCE_SOURCE_SHA: 0981ff3d037dedcf08cf7686474c65ba6b3784bf
       APPLIANCE_SOURCE_TREE: e8d4bf11078fb32bdc7ad135fafa816b659c37e7
@@ -767,6 +771,8 @@ jobs:
       EXPECT_KERNEL_VERSION: 7.0.0-42.42~24.04.1
       # BOM section 3: the base image's SHA256SUMS signer and keyring.
       EXPECT_BASE_SIGNER: D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81
+      EXPECT_BASE_IMAGE_SHA256: 6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2
+      EXPECT_BASE_IMAGE_NAME: ubuntu-24.04-server-cloudimg-amd64.img
       BASE_IMAGE_KEYRING: /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg
       # Producer-reported stamped console hashes (clean tag-free 0981ff3d);
       # measured here, before any boot, and compared.
@@ -777,7 +783,7 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
-      - name: Route guard (exactly [build-only]; one empty commit on the reviewed head)
+      - name: Route guard (exact trigger message; one empty commit with one parent on the previous branch head)
         env:
           GUARD_EVENT: ${{ github.event_name }}
           GUARD_REF: ${{ github.ref }}
@@ -786,8 +792,39 @@ jobs:
         run: |
           set -euo pipefail
           [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ] || { echo "::error::checkout is not $GITHUB_SHA"; exit 1; }
-          GUARD_PARENT="$(git rev-parse HEAD^)" GUARD_HEAD_TREE="$(git rev-parse 'HEAD^{tree}')" GUARD_PARENT_TREE="$(git rev-parse 'HEAD^^{tree}')" \
-            python3 -I test/e2e/appliance/lab/build-only-route-guard.py | tee -a "$GITHUB_STEP_SUMMARY"
+          # A root or merge commit is refused by the check below with a reason.
+          GUARD_PARENTS="$(git rev-list --parents -n 1 HEAD | cut -s -d' ' -f2-)"
+          GUARD_HEAD_TREE="$(git rev-parse 'HEAD^{tree}')"
+          GUARD_PARENT_TREE="$(git rev-parse --verify -q 'HEAD^^{tree}' || true)"
+          export GUARD_PARENTS GUARD_HEAD_TREE GUARD_PARENT_TREE
+          python3 -I - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os, re, sys
+          e = os.environ
+          bad = []
+          if e["GUARD_EVENT"] != "push":
+              bad.append(f"event is {e['GUARD_EVENT']!r}, not push")
+          if e["GUARD_REF"] != "refs/heads/test/appliance-lab":
+              bad.append(f"ref is {e['GUARD_REF']!r}, not refs/heads/test/appliance-lab")
+          msg = e["GUARD_MESSAGE"]
+          tags = [t.lower() for t in re.findall(r"\[[^\[\]\s]*\]", msg)]
+          if tags != ["[build-only]"]:
+              bad.append(f"the message must carry exactly one bracket tag, [build-only]; found {tags}")
+          if msg.rstrip("\n") != e["BUILD_TRIGGER_MESSAGE"]:
+              bad.append(f"the message is not exactly the reviewed trigger message {e['BUILD_TRIGGER_MESSAGE']!r}")
+          parents = e["GUARD_PARENTS"].split()
+          if len(parents) != 1:
+              bad.append(f"the trigger commit must have exactly one parent, has {len(parents)}")
+          if not re.fullmatch(r"[0-9a-f]{40}", e["GUARD_BEFORE"]) or parents[:1] != [e["GUARD_BEFORE"]]:
+              bad.append(f"the push must be exactly one commit on the previous head: parents {parents}, before {e['GUARD_BEFORE']!r}")
+          ht, pt = e["GUARD_HEAD_TREE"], e["GUARD_PARENT_TREE"]
+          if not re.fullmatch(r"[0-9a-f]{40}", ht) or ht != pt:
+              bad.append(f"the trigger commit must be empty: tree {ht!r}, parent tree {pt!r}")
+          for p in bad:
+              print(f"::error::build-only route refused: {p}")
+          if bad:
+              sys.exit(1)
+          print(f"build-only route: {e['GITHUB_SHA']} = one empty commit on {parents[0]} (tree {ht}), message exactly the reviewed trigger")
+          PY
       - name: Host preflight (disk) and lab directory
         run: |
           set -euo pipefail
@@ -847,15 +884,23 @@ jobs:
           sudo systemctl restart docker
           for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
           docker info --format 'server={{.ServerVersion}} driver={{.Driver}} {{.DriverStatus}}' | tee /dev/stderr | grep -q 'server=29.6.2 .*io.containerd.snapshotter.v1'
-      - name: Obtain the candidate image tar (pinned preserved artifact; verified sha256)
+      - name: Obtain the candidate image tar (exactly the pinned preserved artifact; verified sha256)
         id: image
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          from="$(test/e2e/appliance/lab/obtain-image.sh "$LAB_ROOT/in")"
-          [ "$from" = "pinned-artifact:$SOURCE_IMAGE_ARTIFACT_ID" ] || { echo "::error::image came from $from"; exit 1; }
-          echo "from=$from" >> "$GITHUB_OUTPUT"
+          d="$LAB_ROOT/in"; mkdir -p "$d"
+          meta="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$SOURCE_IMAGE_ARTIFACT_ID" --jq '[.name, (.expired|tostring), (.workflow_run.id|tostring)] | @tsv')"
+          IFS=$'\t' read -r name expired wrun <<<"$meta"
+          echo "artifact $SOURCE_IMAGE_ARTIFACT_ID: name=$name expired=$expired uploaded_by_run=$wrun" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$name" = "lab-source-image-$SOURCE_IMAGE_RUN_ID" ] || { echo "::error::artifact is '$name'"; exit 1; }
+          [ "$expired" = false ] || { echo "::error::artifact has expired"; exit 1; }
+          [ "$wrun" = "$SOURCE_IMAGE_ARTIFACT_RUN" ] || { echo "::error::artifact was uploaded by run $wrun"; exit 1; }
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$SOURCE_IMAGE_ARTIFACT_ID/zip" > "$d/pinned.zip"
+          unzip -q -o "$d/pinned.zip" -d "$d"; rm -f "$d/pinned.zip"
+          echo "$SOURCE_IMAGE_TAR_SHA256  $d/culvert-image.tar" | sha256sum -c -
+          echo "from=pinned-artifact:$SOURCE_IMAGE_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
       - name: Check out the frozen source (clean, tag-free, exact commit and tree)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -871,20 +916,48 @@ jobs:
           [ -z "$(git status --porcelain)" ] || { echo "::error::checkout is dirty"; git status --porcelain; exit 1; }
           [ -z "$(git tag --points-at HEAD)" ] || { echo "::error::checkout carries a tag"; exit 1; }
           echo "source $APPLIANCE_SOURCE_SHA tree $APPLIANCE_SOURCE_TREE clean, tag-free" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: "Base image: signed SHA256SUMS verified by exactly the BOM signer (before the build)"
+      - name: "Base image: fetch the signed SHA256SUMS (verified in the next step)"
         run: |
           set -euo pipefail
           man=appliance-src/appliance/build/manifest.env
-          val() { sed -n "s/^$1=//p" "$man"; }
-          [ "$(val BASE_IMAGE_SIGNING_KEY_FPR)" = "$EXPECT_BASE_SIGNER" ] || { echo "::error::manifest signer $(val BASE_IMAGE_SIGNING_KEY_FPR) is not the BOM signer"; exit 1; }
-          [ "$(val BASE_IMAGE_KEYRING)" = "$BASE_IMAGE_KEYRING" ] || { echo "::error::manifest keyring $(val BASE_IMAGE_KEYRING) differs from $BASE_IMAGE_KEYRING"; exit 1; }
           d="$LAB_ROOT/base-signature"; mkdir -p "$d"
-          curl -fsSL --retry 3 -o "$d/SHA256SUMS" "$(val BASE_IMAGE_SUMS_URL)"
-          curl -fsSL --retry 3 -o "$d/SHA256SUMS.gpg" "$(val BASE_IMAGE_SUMS_SIG_URL)"
+          curl -fsSL --retry 3 -o "$d/SHA256SUMS" "$(sed -n 's/^BASE_IMAGE_SUMS_URL=//p' "$man")"
+          curl -fsSL --retry 3 -o "$d/SHA256SUMS.gpg" "$(sed -n 's/^BASE_IMAGE_SUMS_SIG_URL=//p' "$man")"
+      - name: "Base image: SHA256SUMS signed by exactly the BOM signer, pinned row compared literally (before the build)"
+        # The frozen builder records base_image_gpg="skipped" when gpgv or the
+        # keyring is missing; this step makes both mandatory and requires one
+        # VALIDSIG by exactly EXPECT_BASE_SIGNER plus the literal pinned row.
+        run: |
+          set -euo pipefail
+          man=appliance-src/appliance/build/manifest.env
+          d="$LAB_ROOT/base-signature"
+          val() { sed -n "s/^$1=//p" "$man"; }
+          fail() { echo "::error::base signature: $*"; exit 1; }
+          [[ "$EXPECT_BASE_SIGNER" =~ ^[0-9A-F]{40}$ ]] || fail "EXPECT_BASE_SIGNER is not a 40-hex fingerprint"
+          [ "$(val BASE_IMAGE_SIGNING_KEY_FPR)" = "$EXPECT_BASE_SIGNER" ] || fail "manifest signer $(val BASE_IMAGE_SIGNING_KEY_FPR) is not the BOM signer"
+          [ "$(val BASE_IMAGE_KEYRING)" = "$BASE_IMAGE_KEYRING" ] || fail "manifest keyring $(val BASE_IMAGE_KEYRING) is not $BASE_IMAGE_KEYRING"
+          img_sha="$(val BASE_IMAGE_SHA256)"; url="$(val BASE_IMAGE_URL)"; img_name="${url##*/}"
+          [ "$img_sha" = "$EXPECT_BASE_IMAGE_SHA256" ] || fail "manifest base image sha256 $img_sha is not the BOM's"
+          [ "$img_name" = "$EXPECT_BASE_IMAGE_NAME" ] || fail "manifest base image name $img_name is not the BOM's"
+          command -v gpgv >/dev/null || fail "gpgv is not installed"
+          command -v gpg >/dev/null || fail "gpg is not installed"
+          [ -s "$BASE_IMAGE_KEYRING" ] || fail "keyring $BASE_IMAGE_KEYRING is missing or empty"
+          [ -s "$d/SHA256SUMS" ] || fail "SHA256SUMS is missing or empty"
+          [ -s "$d/SHA256SUMS.gpg" ] || fail "SHA256SUMS.gpg is missing or empty"
+          gh="$(mktemp -d)"
+          GNUPGHOME="$gh" gpg --batch --no-default-keyring --keyring "$BASE_IMAGE_KEYRING" --with-colons \
+            --with-subkey-fingerprints --list-keys 2>/dev/null | awk -F: '$1=="fpr"{print $10}' > "$gh/fprs"
+          grep -Fxq -- "$EXPECT_BASE_SIGNER" "$gh/fprs" || fail "keyring $BASE_IMAGE_KEYRING does not contain $EXPECT_BASE_SIGNER"
+          gpgv --status-fd 3 --keyring "$BASE_IMAGE_KEYRING" "$d/SHA256SUMS.gpg" "$d/SHA256SUMS" 3>"$gh/status" 2>"$gh/gpgv.log" \
+            || fail "gpgv rejected the signature: $(tr '\n' ' ' <"$gh/gpgv.log")"
+          mapfile -t valid < <(awk '$1=="[GNUPG:]" && $2=="VALIDSIG"{print $3}' "$gh/status")
+          [ "${#valid[@]}" -eq 1 ] || fail "expected exactly one VALIDSIG, got ${#valid[@]}"
+          [ "${valid[0]}" = "$EXPECT_BASE_SIGNER" ] || fail "signed by ${valid[0]}, not the BOM signer $EXPECT_BASE_SIGNER"
+          grep -Fxq -- "${img_sha} *${img_name}" "$d/SHA256SUMS" || fail "SHA256SUMS has no literal row '${img_sha} *${img_name}'"
+          cp "$gh/gpgv.log" "$d/gpgv.log"; cp "$gh/status" "$d/gpgv-status.txt"; rm -rf "$gh"
           sha256sum "$BASE_IMAGE_KEYRING" > "$d/keyring.sha256"
-          url="$(val BASE_IMAGE_URL)"
-          test/e2e/appliance/lab/base-signature-check.sh "$BASE_IMAGE_KEYRING" "$d/SHA256SUMS" "$d/SHA256SUMS.gpg" \
-            "$EXPECT_BASE_SIGNER" "$(val BASE_IMAGE_SHA256)" "${url##*/}" 2>&1 | tee "$d/verify.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "base signature: VALIDSIG ${valid[0]} over SHA256SUMS sha256 $(sha256sum "$d/SHA256SUMS" | cut -d' ' -f1); row '${img_sha} *${img_name}'" \
+            | tee "$d/verify.txt" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Kernel-module denylist resolves to /bin/false on the real module tree (offline)
         run: |
           set -euo pipefail
@@ -933,8 +1006,202 @@ jobs:
         if: steps.build.outcome == 'success'
         run: |
           set -euo pipefail
-          python3 -I test/e2e/appliance/lab/build-only-identity.py "$LAB_ROOT/ova" \
-            appliance-src/appliance/build/manifest.env "$LAB_ROOT/console" 2>&1 | tee "$LAB_ROOT/ova/identity.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 -I - "$LAB_ROOT/ova" appliance-src/appliance/build/manifest.env "$LAB_ROOT/console" <<'PY' 2>&1 | tee "$LAB_ROOT/ova/identity.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+          """build-only-identity.py OUT_DIR MANIFEST_ENV CONSOLE_DIR
+
+          The identity step of the build-only route (frozen BOM, section 7), run on the
+          outputs of ONE build-ova.sh invocation before anything could boot them. It
+          re-checks, from the retained files, what the BOM requires of the build:
+
+            build-info.json        source commit (clean), SOURCE_DATE_EPOCH, snapshot ID,
+                                   build start later than the snapshot, base image
+                                   signature verified by exactly the BOM signer (a
+                                   "skipped" record is refused), candidate image
+                                   source/provisioning commit (no drift), image tar,
+                                   CI run, application image ID and VERSION, ClamAV
+                                   sidecar ID and archive, base status hash, OVA hash
+            package-provenance.tsv only ubuntu-snapshot / docker origins, only the two
+                                   bindings, the 4 Docker rows acquired-verified at the
+                                   manifest pins and .deb SHA-256 values
+            acquired-debs.tsv      present; every acquired-verified row has a receipt
+                                   row with the same SHA-256
+            base-dpkg-status.txt   SHA-256 equals the pin and build-info's record
+            build-upgrades.txt     names the snapshot ID and the four InRelease hashes
+            dpkg-list.txt          exactly one linux-image-<abi>, the approved kernel
+            console binaries       culvert-console / culvert-access SHA-256 recorded and
+                                   compared with the producer-reported expectations
+
+          Expected values come from the environment (EXPECT_*, APPLIANCE_SOURCE_SHA, …)
+          and from the frozen source's own manifest.env. The 94/586 split is printed as
+          an observation, never checked: the prediction is not T5, and T5 belongs to
+          ASTRA. Exit 1 on any mismatch, after printing every check.
+          """
+          import hashlib
+          import json
+          import os
+          import sys
+
+
+          def sha256(path):
+              h = hashlib.sha256()
+              with open(path, "rb") as f:
+                  for chunk in iter(lambda: f.read(1 << 20), b""):
+                      h.update(chunk)
+              return h.hexdigest()
+
+
+          def manifest(path):
+              out = {}
+              for line in open(path, encoding="utf-8"):
+                  line = line.split("#", 1)[0].strip()
+                  if "=" in line:
+                      k, v = line.split("=", 1)
+                      out[k.strip()] = v.strip().strip('"')
+              return out
+
+
+          def rows(path):
+              """Data rows of a TSV, without comment lines and the column header."""
+              out = []
+              for line in open(path, encoding="utf-8"):
+                  line = line.rstrip("\n")
+                  if not line or line.startswith("#"):
+                      continue
+                  parts = line.split("\t")
+                  if parts[0] == "package":
+                      continue
+                  out.append(parts)
+              return out
+
+
+          def main():
+              out_dir, manifest_env, console_dir = sys.argv[1:4]
+              env = os.environ
+              m = manifest(manifest_env)
+              results = []
+
+              def check(name, got, want):
+                  ok = got == want
+                  results.append(ok)
+                  print(f"{'OK  ' if ok else 'FAIL'} {name}: got={got!r} want={want!r}")
+
+              def need(name, path):
+                  ok = os.path.isfile(path) and os.path.getsize(path) > 0
+                  results.append(ok)
+                  print(f"{'OK  ' if ok else 'FAIL'} {name}: {'present' if ok else 'missing or empty'} ({os.path.basename(path)})")
+                  return ok
+
+              p = lambda name: os.path.join(out_dir, name)  # noqa: E731
+              sha = env["APPLIANCE_SOURCE_SHA"]
+
+              # build-info.json
+              bi = {}
+              if need("build-info.json", p("build-info.json")):
+                  bi = json.load(open(p("build-info.json"), encoding="utf-8"))
+              src, cand, app, gos, art = (bi.get(k, {}) for k in ("source", "candidate", "application", "guest_os", "artifact"))
+              check("source.git_commit", src.get("git_commit"), sha)
+              check("source.git_dirty", src.get("git_dirty"), False)
+              check("source.source_date_epoch", src.get("source_date_epoch"), int(env["SOURCE_DATE_EPOCH_PIN"]))
+              check("source.apt_snapshot", src.get("apt_snapshot"), env["EXPECT_APT_SNAPSHOT"])
+              start = src.get("apt_build_start") or ""
+              check("source.apt_build_start is later than the snapshot",
+                    len(start) == 16 and start > env["EXPECT_APT_SNAPSHOT"], True)
+              check("candidate.image_source_git_commit", cand.get("image_source_git_commit"), sha)
+              check("candidate.provisioning_git_commit", cand.get("provisioning_git_commit"), sha)
+              check("candidate.provisioning_drift", cand.get("provisioning_drift"), False)
+              check("candidate.image_tar_sha256", cand.get("image_tar_sha256"), env["SOURCE_IMAGE_TAR_SHA256"])
+              check("candidate.ci_run_id", str(cand.get("ci_run_id")), env["SOURCE_IMAGE_RUN_ID"])
+              check("application.index_digest", app.get("index_digest"), env["EXPECT_IMAGE_ID"])
+              check("application.app_version_file", (app.get("app_version_file") or "").strip(), env["EXPECT_APP_VERSION"])
+              check("application.clamav_sidecar_image_id", app.get("clamav_sidecar_image_id"), env["EXPECT_SIDECAR_ID"])
+              check("application.clamav_baked_tar_sha256", app.get("clamav_baked_tar_sha256"), env["EXPECT_SIDECAR_ARCHIVE_SHA256"])
+              check("guest_os.base_image_sha256", gos.get("base_image_sha256"), m.get("BASE_IMAGE_SHA256"))
+              # The builder records "skipped (...)" when gpgv or the keyring is missing;
+              # only a positive verification by the exact BOM signer is accepted.
+              signer = env["EXPECT_BASE_SIGNER"]
+              check("manifest BASE_IMAGE_SIGNING_KEY_FPR is the BOM signer", m.get("BASE_IMAGE_SIGNING_KEY_FPR"), signer)
+              check("guest_os.base_image_gpg (positive, exact signer)", gos.get("base_image_gpg"), f"verified (using RSA key {signer})")
+              check("guest_os.base_dpkg_status_sha256", gos.get("base_dpkg_status_sha256"), env["EXPECT_BASE_STATUS_SHA256"])
+
+              # The OVA and its recorded hash
+              ovas = sorted(f for f in os.listdir(out_dir) if f.endswith(".ova"))
+              check("exactly one .ova", len(ovas), 1)
+              if len(ovas) == 1:
+                  ova_sha = sha256(p(ovas[0]))
+                  rec = open(p(ovas[0] + ".sha256"), encoding="utf-8").read().split()[0] if os.path.isfile(p(ovas[0] + ".sha256")) else None
+                  check(".ova.sha256 matches the file", rec, ova_sha)
+                  check("build-info artifact.sha256 matches the file", art.get("sha256"), ova_sha)
+                  print(f"     OVA {ovas[0]} sha256 {ova_sha}")
+
+              # base-dpkg-status.txt
+              if need("base-dpkg-status.txt", p("base-dpkg-status.txt")):
+                  check("base-dpkg-status.txt sha256", sha256(p("base-dpkg-status.txt")), env["EXPECT_BASE_STATUS_SHA256"])
+
+              # package-provenance.tsv
+              pins = {"docker-ce": ("DOCKER_CE_VERSION", "DOCKER_CE_DEB_SHA256"),
+                      "docker-ce-cli": ("DOCKER_CE_CLI_VERSION", "DOCKER_CE_CLI_DEB_SHA256"),
+                      "containerd.io": ("CONTAINERD_IO_VERSION", "CONTAINERD_IO_DEB_SHA256"),
+                      "docker-compose-plugin": ("DOCKER_COMPOSE_PLUGIN_VERSION", "DOCKER_COMPOSE_PLUGIN_DEB_SHA256")}
+              prov = rows(p("package-provenance.tsv")) if need("package-provenance.tsv", p("package-provenance.tsv")) else []
+              check("package-provenance rows have 9 columns", all(len(r) == 9 for r in prov), True)
+              prov = [r for r in prov if len(r) == 9]
+              check("origins outside ubuntu-snapshot/docker", sorted({r[3] for r in prov} - {"ubuntu-snapshot", "docker"}), [])
+              check("bindings outside acquired-verified/inherited-base-image",
+                    sorted({r[8] for r in prov} - {"acquired-verified", "inherited-base-image"}), [])
+              docker = {r[0]: r for r in prov if r[3] == "docker"}
+              check("docker rows", sorted(docker), sorted(pins))
+              for name, (vk, sk) in pins.items():
+                  r = docker.get(name, [""] * 9)
+                  check(f"{name} version", r[1], m.get(vk))
+                  check(f"{name} .deb sha256", r[7], m.get(sk))
+                  check(f"{name} binding", r[8], "acquired-verified")
+              acquired = [r for r in prov if r[8] == "acquired-verified"]
+              inherited = [r for r in prov if r[8] == "inherited-base-image"]
+              print(f"     observation (not checked; T5 decides): {len(prov)} packages, "
+                    f"acquired-verified={len(acquired)} inherited-base-image={len(inherited)} (prediction 680: 94 / 586)")
+
+              # acquired-debs.tsv
+              receipts = {}
+              if need("acquired-debs.tsv", p("acquired-debs.tsv")):
+                  for r in rows(p("acquired-debs.tsv")):
+                      if len(r) >= 4:
+                          receipts.setdefault((r[0], r[1], r[2]), set()).add(r[3])
+              missing = [f"{r[0]}={r[1]}/{r[2]}" for r in acquired if r[7] not in receipts.get((r[0], r[1], r[2]), ())]
+              check("acquired-verified rows without a matching receipt", missing, [])
+
+              # build-upgrades.txt
+              if need("build-upgrades.txt", p("build-upgrades.txt")):
+                  head = open(p("build-upgrades.txt"), encoding="utf-8").readline()
+                  check("build-upgrades names the snapshot", env["EXPECT_APT_SNAPSHOT"] in head, True)
+                  for k in ("NOBLE", "UPDATES", "SECURITY", "BACKPORTS"):
+                      v = m.get(f"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_{k}", "<unset>")
+                      check(f"build-upgrades names InRelease {k.lower()}", v in head, True)
+
+              # dpkg-list.txt: exactly one kernel image, the approved one
+              if need("dpkg-list.txt", p("dpkg-list.txt")):
+                  kern = [r for r in rows(p("dpkg-list.txt")) if r[0].startswith("linux-image-") and r[0][12:13].isdigit()]
+                  check("linux-image-<abi> packages", [(r[0], r[1] if len(r) > 1 else None) for r in kern],
+                        [(env["EXPECT_KERNEL"], env["EXPECT_KERNEL_VERSION"])])
+
+              # Console binaries, measured from the overlay the build installed
+              for name, var in (("culvert-console", "EXPECT_CONSOLE_SHA256"), ("culvert-access", "EXPECT_ACCESS_SHA256")):
+                  path = os.path.join(console_dir, name)
+                  got = sha256(path) if os.path.isfile(path) else None
+                  print(f"     measured {name} sha256 {got}")
+                  check(f"{name} sha256 (producer-reported expectation)", got, env[var])
+              check("build-info console.binary_sha256 is the measured console", bi.get("console", {}).get("binary_sha256"),
+                    sha256(os.path.join(console_dir, "culvert-console")) if os.path.isfile(os.path.join(console_dir, "culvert-console")) else None)
+
+              bad = results.count(False)
+              print(f"identity: {len(results) - bad}/{len(results)} checks passed")
+              if bad:
+                  print("::error::build-only identity mismatch; the OVA is retained as FAILED evidence and must not be booted")
+                  sys.exit(1)
+
+
+          if __name__ == "__main__":
+              main()
+          PY
       - name: Retain the OVA and every output (unpublished; a failed build or identity is retained as FAILED)
         if: always() && steps.image.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
