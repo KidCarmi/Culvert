@@ -400,6 +400,67 @@ func TestBenchGate_ScrubAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_ScrubAllocsInSitu is TestBenchGate_ScrubAllocs with the request
+// construction hoisted OUT of the measured loop, which is the only way the
+// scrub's own allocation count is visible at all.
+//
+// WHY BOTH GATES EXIST. The gate above builds an http.Request and sets three
+// headers INSIDE its loop, so ~12 of its ~13 baseline allocations are
+// net/http's and its bound of 16 is almost entirely construction headroom. A
+// change that added an allocation to scrubForwardedHeaders itself would move
+// that number from 13 to 14 and pass — and that is not hypothetical: a
+// Header.Get on the non-canonical constant "X-Real-IP" allocated once per
+// forwarded request behind this very gate, through several performance sweeps
+// of this file, until an alloc_objects profile at memprofilerate=1 attributed
+// it. A bound is only as tight as the thing it measures.
+//
+// This gate therefore measures the function and nothing else, and its bound is
+// ZERO. The common forwarded request — every X-Forwarded-For hop public and
+// already canonical, no X-Real-IP to delete — must not allocate at all: both
+// the no-rewrite fast path and the canonical header keys are properties the
+// scrub is supposed to have unconditionally, so there is no headroom to
+// reserve and a bound above 0 would only re-open the blind spot.
+//
+// Allocation counts are deterministic and hardware-independent, which is what
+// makes 0 a safe hard bound here where an ns/op threshold would not be.
+func TestBenchGate_ScrubAllocsInSitu(t *testing.T) {
+	const maxAllocs int64 = 0 // pre-canonical-key baseline: 1 (Header.Get("X-Real-IP"))
+	for _, tc := range []struct {
+		name   string
+		realIP string
+	}{
+		{"no X-Real-IP", ""},
+		{"public X-Real-IP", "203.0.113.9"},
+	} {
+		r, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+			"http://target.example.com/", http.NoBody)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		r.Header.Set(hdrForwardedFor, "203.0.113.9, 198.51.100.7")
+		if tc.realIP != "" {
+			r.Header.Set(hdrRealIP, tc.realIP)
+		}
+		res := testing.Benchmark(func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				scrubForwardedHeaders(r)
+			}
+		})
+		allocs := res.AllocsPerOp()
+		t.Logf("scrubForwardedHeaders in situ (%s): %d allocs/op (bound %d), %d ns/op",
+			tc.name, allocs, maxAllocs, res.NsPerOp())
+		if allocs > maxAllocs {
+			t.Errorf("REGRESSION: scrubForwardedHeaders (%s) allocates %d/op, exceeds bound %d — "+
+				"the per-request scrub is supposed to be allocation-free on the common shape. "+
+				"A non-canonical header key spelling is the usual cause (Header.Get/Set/Del "+
+				"re-derive and allocate for any non-canonical key); see "+
+				"TestCanonicalHeaderKeys_Tree and the hdrRealIP comment in proxy.go.",
+				tc.name, allocs, maxAllocs)
+		}
+	}
+}
+
 // TestBenchGate_ForwardedForFilterAllocs locks in the allocation-free
 // X-Forwarded-For filter. The scrub runs on every plain-HTTP request, every
 // WebSocket upgrade, and every decrypted inner exchange of an SSL-inspected

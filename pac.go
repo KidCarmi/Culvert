@@ -221,8 +221,8 @@ func servePACProfileFile(w http.ResponseWriter, r *http.Request) {
 func writePACResponse(w http.ResponseWriter, r *http.Request, art pac.Artifact, modTime time.Time, profileID string) {
 	etag := `"` + art.Digest + `"`
 	w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
-	w.Header().Set("ETag", etag)
-	w.Header().Set("X-Culvert-PAC-Version", art.CompilerVersion+"-"+art.Digest[:16])
+	w.Header().Set("Etag", etag)
+	w.Header().Set("X-Culvert-Pac-Version", art.CompilerVersion+"-"+art.Digest[:16])
 	if art.HostFallback {
 		w.Header().Set("Cache-Control", "no-cache, no-store")
 	} else {

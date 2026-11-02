@@ -1499,7 +1499,7 @@ func apiScanSvcConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET    /api/security-scan/cache          — return cache stats (hits, misses, size).
-// DELETE /api/security-scan/cache          — clear entire scan hash cache.
+// DELETE /api/security-scan/cache          — clear the entire scan verdict cache.
 // DELETE /api/security-scan/cache?hash=xxx — evict a single hash from the cache.
 func apiScanCache(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -1984,7 +1984,7 @@ func registerSecurityRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/security-scan/decompression", apiSecScanDecompression)     // GET/PUT — CHAOS-106 decompression ratio bound
 	mux.HandleFunc("/api/security-scan/exclusions", apiSecScanExclusions)           // GET/PUT — scan exclusion hashes/hosts
 	mux.HandleFunc("/api/security-scan/svc", apiScanSvcConfig)                      // GET — scan service mode info
-	mux.HandleFunc("/api/security-scan/cache", apiScanCache)                        // GET/DELETE — scan hash cache stats & purge
+	mux.HandleFunc("/api/security-scan/cache", apiScanCache)                        // GET/DELETE — scan verdict cache stats & purge
 	mux.HandleFunc("/api/content-scan/bypass", apiContentScanBypass)                // GET/PUT — legacy alias; canonical path is /api/dpi/bypass (T-10)
 	mux.HandleFunc("/api/dpi/bypass", apiContentScanBypass)                         // GET/PUT — DPI bypass host list
 

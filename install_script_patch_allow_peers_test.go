@@ -233,3 +233,23 @@ func TestInstallScript_PatchAllowPeers_HashInsideQuotedPeerPlusTrailingComment(t
 		t.Fatalf("patched config does not contain %q; got:\n%s", want, content)
 	}
 }
+
+// TestInstallScript_PatchAllowPeers_TrailingCommaProducesValidTOML — TOML
+// permits a trailing comma in an array (`["alice",]` / `["alice", ]`). The
+// append branch must not add a second comma, or the resulting
+// /etc/culvert-maint/config.toml is unparsable and the maintenance agent
+// fails to start even though the helper reports success.
+func TestInstallScript_PatchAllowPeers_TrailingCommaProducesValidTOML(t *testing.T) {
+	for _, line := range []string{`allow_peers = ["alice",]`, `allow_peers = ["alice", ]`} {
+		content, exitCode := runPatchAllowPeers(t, line, "1000")
+		if exitCode != 0 {
+			t.Fatalf("%q: patch returned failure (exit %d); config:\n%s", line, exitCode, content)
+		}
+		if strings.Contains(content, ",,") || strings.Contains(content, ", ,") {
+			t.Fatalf("%q: produced invalid TOML (doubled comma); config:\n%s", line, content)
+		}
+		if !strings.Contains(content, `"1000"`) {
+			t.Fatalf("%q: uid not added; config:\n%s", line, content)
+		}
+	}
+}

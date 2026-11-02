@@ -2299,6 +2299,13 @@ patch_allow_peers_numeric_uid() {
         patched=1
         next
       }
+      if (code ~ /,[[:space:]]*\][[:space:]]*$/) {
+        # TOML allows a trailing comma ("[\"a\",]"); do not add a second one.
+        sub(/[[:space:]]*\][[:space:]]*$/, " \"" uid "\"]", code)
+        print code comment
+        patched=1
+        next
+      }
       sub(/[[:space:]]*\][[:space:]]*$/, ", \"" uid "\"]", code)
       print code comment
       patched=1
