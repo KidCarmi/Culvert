@@ -104,6 +104,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   outright. `_test.go` is deliberately out of its scope so deliberately
   non-canonical client fixtures stay as negative controls.
 
+- **The request-log history store no longer allocates per entry when it
+  flushes, removing ~3 allocations and ~1 KB of garbage per proxied request.**
+  The store takes one entry per request, and its flush path encoded each one
+  with its own `json.Marshal` — an API that returns a freshly heap-allocated
+  slice every call — so the garbage it produced scaled with request rate. A
+  256-entry batch (the flush cap) cost 768 allocations and 271 KB. The batch is
+  now encoded through one retained buffer and one retained `json.Encoder`, with
+  Badger handed a subslice per entry: the encode step measures 382,893 →
+  257,023 ns/op and 271,447 → 793 B/op with **768 allocations → 0**, and the
+  whole flush including the Badger write 863,955 → 629,234 ns/op and 399,669 →
+  129,875 B/op. The win holds at every batch size the 500 ms flush ticker
+  produces, down to a single entry, so a lightly loaded gateway gains too. This
+  is the shape the JSONL request-log sink (`internal/reqlog`) already used; the
+  history store is its sibling on the same entry type and had not been given it.
+
+  **No behavior, and no stored bytes, change.** `json.Encoder.Encode` writes
+  exactly `json.Marshal`'s compact output plus one newline, with the same
+  default HTML escaping, so dropping that byte reproduces the previous value
+  exactly; a differential test pins every record against `json.Marshal` across
+  the empty entry, HTML-escapable runes, invalid UTF-8, U+2028/U+2029, the
+  nested `dec` block and a buffer-growing record, so a future change in
+  `encoding/json` fails the build rather than silently rewriting stored
+  records. An unencodable entry is still skipped without consuming a sequence
+  number, a failed flush still drops the batch without crediting the byte
+  counter, and the TTL is still read per entry. `internal/logstore` previously
+  had no benchmark coverage; it now carries the before/after arms, batch-size
+  regression arms and contended-producer arms.
+
 - **An unreadable `admin_settings.json` is now visible in Diagnostics and
   alerted, not just logged.** When the file exists but cannot be read
   (permissions or a volume error) the node boots on defaults, so every
@@ -484,6 +512,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the admin UI's TLS certificate is expiring,
+  expired, or the uploaded pair is corrupt.** These were visible only on the
+  Certificates panel; the one-page report read as healthy until browsers refused
+  the GUI. New `ui_tls_cert_expiry` (30 days or less) and `ui_tls_cert_corrupt`
+  WARN rows (additive, report-only, nothing for the self-signed fallback) carry
+  only a day count. TLS serving is unchanged.
 - **Diagnostics now warns when the cluster rate-limit broadcast is stale.** A
   Data Plane that stops receiving the Control Plane broadcast falls back to its
   local limit by design, but that was visible only in a log line, a metric and

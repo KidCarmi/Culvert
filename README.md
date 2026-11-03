@@ -264,7 +264,7 @@ Culvert is built defense-in-depth. Every claim below is enforced in code.
 
 ### Post-Quantum key exchange
 
-Culvert runs on Go 1.26, whose `crypto/tls` **auto-negotiates the hybrid X25519 + ML-KEM-768 key exchange** when the peer supports it - protecting confidentiality against "Harvest Now, Decrypt Later" attacks on all TLS connections. This capability is inherited from the Go toolchain rather than configured by Culvert, and adds ~1ms to the initial handshake with no ongoing cost. Certificate **signing** remains classical ECDSA P-256; PQC signatures (ML-DSA) will follow when the Go standard library adds native support.
+Culvert is built with the Go toolchain pinned in `go.mod` (`toolchain` line; currently 1.27.x), whose `crypto/tls` **auto-negotiates the hybrid X25519 + ML-KEM-768 key exchange** when the peer supports it - protecting confidentiality against "Harvest Now, Decrypt Later" attacks on all TLS connections. This capability is inherited from the Go toolchain rather than configured by Culvert, and adds ~1ms to the initial handshake with no ongoing cost. Certificate **signing** remains classical ECDSA P-256; PQC signatures (ML-DSA) will follow when the Go standard library adds native support.
 
 ### Supply-chain integrity
 
@@ -343,7 +343,7 @@ Detailed single-node, multi-node, and upstream-chaining topologies are in the **
 
 ## Development
 
-Requires **Go 1.26+**.
+Requires Go at or above the `go` line in `go.mod` (language minimum 1.26); CI, the Dockerfile and release builds use the pinned `toolchain` version (currently 1.27.3).
 
 ```bash
 go build -o culvert .                        # build
@@ -370,7 +370,7 @@ Stated plainly, because a security product should be honest about its edges:
 
 - **Revocation:** OCSP only - **CRL checking is not implemented**. OCSP fails open when a certificate publishes no responder. More significantly, the OCSP callbacks are wired to the upstream **parent-proxy** TLS handshake only (the `upstream.proxies` YAML block or the admin UI's Upstream panel) - the SSL-inspected **origin** certificate, the one your MITM policy is deciding to trust on the client's behalf, is **not currently OCSP-checked at all**. This is a deliberate, owner-tracked scope decision, not an oversight - attaching the same fail-closed check to every inspected handshake would make egress depend on reaching an external responder, which is unacceptable on networks where outbound port 80 is blocked by policy. See [`docs/operator/ocsp-revocation-checking.md`](docs/operator/ocsp-revocation-checking.md#6-why-inspected-https-is-not-covered-yet) for the coverage matrix and rationale.
 - **Fresh-install posture:** with zero rules and no `default_action`, the proxy starts in passthrough (allow), not deny. Enforce Zero Trust explicitly.
-- **Post-quantum:** key exchange is quantum-resistant (inherited from Go 1.26); certificate signing remains classical ECDSA P-256.
+- **Post-quantum:** key exchange is quantum-resistant (inherited from the Go standard library); certificate signing remains classical ECDSA P-256.
 - **SOCKS5:** CONNECT only - UDP ASSOCIATE is rejected.
 - **License gate:** blocks GPL/AGPL/LGPL; CPAL is not currently enforced by the license check.
 - **Sizing figures** in the deployment tables are engineering estimates, not published benchmarks - validate against your own workload before capacity planning.
