@@ -45,6 +45,39 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 - **`install.sh` no longer writes invalid TOML when `allow_peers` has a trailing comma.** Wiring Release Management into an existing `/etc/culvert-maint/config.toml` with `allow_peers = ["alice",]` produced `["alice",, "1000"]`, which the maintenance agent refuses to parse. The append now reuses the existing comma.
 
+### Performance
+
+- **Folding admin category overrides onto the SaaS feed snapshot is no longer
+  quadratic, so a large override set cannot stall a feed activation.**
+  `catoverride.ComposeView`/`ComposeMembership` asked, for every host in the
+  feed-owned snapshot, whether any override key covered it — by scanning the
+  key list and building `"." + key` for each pair. Composition therefore cost
+  O(feed x overrides), and the concatenation shed one transient string per pair
+  once a key passed the 32-byte stack buffer Go uses for a non-escaping concat,
+  which a realistic tenant subdomain does. This runs over the ENTIRE snapshot
+  (capped at an 8 MiB artifact, roughly 240,000 entries) on every signed
+  activation and every override-only recompose, under the activation
+  coordinator's lock, and again on every bulk category apply's reference
+  validation — an admin request path. Nothing caps the override count, so the
+  second factor is operator-controlled and unbounded: at 100,000 feed hosts and
+  1,024 override keys one composition measured **1,322 ms, now 16.8 ms
+  (-98.7%)**, and a long-key set shed 320,018 transient allocations where it now
+  sheds 22. Suppression now collects the override boundary keys once and walks
+  each host's ancestor suffixes against that set — the idiom the package's own
+  `checkSuffixConflicts` already used — so it is O(labels(host)) and
+  allocation-free. The set also carries its longest key length and skips any
+  longer candidate unhashed, which bounds the walk by the key length rather than
+  the host length; without it the fix would have traded a quadratic in the
+  override count for a quadratic in a dot-dense host's length.
+
+  **No behavior changes.** The removed predicate and the pre-change composition
+  bodies are kept frozen in-tree as a differential oracle and asserted equal
+  over degenerate host spellings and 4,000 randomized override sets. A single
+  non-covering override key is 14-26% slower (one `strings.HasSuffix` beats a
+  hashed probe plus a label walk); the crossover is between 1 and 16 keys, and
+  the +1.8 ms that costs an activation is not worth a branch in a
+  security-relevant composition.
+
 ### Changed
 
 - **Diagnostics now warns when destination-country rules cannot match because
