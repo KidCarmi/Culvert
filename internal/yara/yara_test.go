@@ -486,6 +486,20 @@ func TestMatchRegexWithTimeout_Normal(t *testing.T) {
 }
 
 func TestMatchRegexWithTimeout_TimeoutFailsClosed(t *testing.T) {
+	// The 1ns budget abandons the worker while it still holds its yaraInflight
+	// charge; it gives that charge back only when it is next scheduled, which
+	// can be after this test has returned. Left unwaited, that late Add(-1)
+	// lands in whichever test runs next — after a Store() (LoadDir's reset, the
+	// saturation tests' restore) it drives the counter below that test's
+	// baseline (seen under -shuffle as "inflight delta = -1"). Own the worker's
+	// whole lifetime: do not finish until the counter is back where it started.
+	base := inflightBaseline(t)
+	t.Cleanup(func() {
+		if got := waitInflight(t, base); got != base {
+			t.Errorf("inflight = %d, want %d: the abandoned worker never gave back its slot", got, base)
+		}
+	})
+
 	re := regexp.MustCompile(`^(a+)+$`) //nolint:gocritic // intentional pathological regex to exercise the match-timeout path
 	// Use a catastrophic backtracking input with near-zero timeout.
 	// The input "aaa...!" triggers exponential backtracking in the regex engine,
