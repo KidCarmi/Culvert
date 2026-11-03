@@ -47,6 +47,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now shows an uploaded admin UI certificate that is saved but not
+  yet serving.** The upload takes effect only after a restart (and never while
+  `-tls-cert`/`-tls-key` are set), but only the Certificates panel said so, so
+  the report read healthy while the GUI kept the old certificate. New
+  `ui_tls_cert_pending` WARN row (additive, report-only, absent once active or
+  corrupt). TLS serving is unchanged.
 - **Diagnostics now warns when destination-country rules cannot match because
   no GeoIP database is loaded.** An enabled `destCountry` rule never matches
   without a database, so a country block silently stops blocking; this was

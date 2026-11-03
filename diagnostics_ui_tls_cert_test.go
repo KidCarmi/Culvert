@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,36 @@ func TestAdminUITLSCertDiagnostics(t *testing.T) {
 	if len(rows) != 1 || rows[0].Code != "ui_tls_cert_corrupt" || rows[0].Status != diagWarn {
 		t.Fatalf("corrupt pair must warn, got %+v", rows)
 	}
+
+	// Saved-but-not-serving pair → pending-restart row; none once active.
+	dir := t.TempDir()
+	prevDir, prevActive := dataDir, uiCustomTLSActive
+	t.Cleanup(func() { dataDir, uiCustomTLSActive = prevDir, prevActive })
+	dataDir = dir
+	set(false, 0, false)
+	uiCustomTLSActive = false
+	if rows := checkAdminUITLSCert(); len(rows) != 0 {
+		t.Fatalf("no saved pair must add no row, got %+v", rows)
+	}
+	for _, f := range []string{customUITLSCertPath(), customUITLSKeyPath()} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows = checkAdminUITLSCert()
+	if len(rows) != 1 || rows[0].Code != "ui_tls_cert_pending" || rows[0].Status != diagWarn || rows[0].OperatorAction == "" {
+		t.Fatalf("saved-but-inactive pair must warn pending, got %+v", rows)
+	}
+	uiCustomTLSActive = true
+	if rows := checkAdminUITLSCert(); len(rows) != 0 {
+		t.Fatalf("an active pair must add no pending row, got %+v", rows)
+	}
+	uiCustomTLSActive = false
+	set(false, 0, true)
+	if rows := checkAdminUITLSCert(); len(rows) != 1 || rows[0].Code != "ui_tls_cert_corrupt" {
+		t.Fatalf("corrupt must not also read as pending, got %+v", rows)
+	}
+	dataDir = prevDir
 
 	found := false
 	for _, c := range buildOperatorContract().Checks {
