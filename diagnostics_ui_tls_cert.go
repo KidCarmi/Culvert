@@ -49,6 +49,22 @@ func checkAdminUITLSCert() []OperatorContractCheck {
 		Code:           "ui_tls_cert_expiry",
 		Status:         diagWarn,
 		Message:        msg,
-		OperatorAction: "Upload a replacement certificate and matching key under Settings → Network & TLS (Certificates), then restart to activate it.",
+		OperatorAction: uiTLSCertExpiryAction(uiCustomTLSActive),
 	})
+}
+
+// uiTLSCertExpiryAction names the step that actually replaces the serving
+// certificate for its source. A tracked expiry is always a custom pair: either
+// the GUI-uploaded one (uploaded=true, uiCustomTLSActive) or an explicit
+// -tls-cert/-tls-key flag or tls_cert/tls_key YAML path. resolveUITLSCertKey
+// returns the explicit paths before it considers an uploaded pair, so telling
+// that operator to upload and restart would leave the same certificate active.
+// Names the setting, never its path: this row is not admin-only.
+func uiTLSCertExpiryAction(uploaded bool) string {
+	if uploaded {
+		return "Upload a replacement certificate and matching key under Settings → Network & TLS (Certificates), then restart to activate it."
+	}
+	return "This certificate is set explicitly by the -tls-cert/-tls-key flags or tls_cert/tls_key in config.yaml, which take precedence over an uploaded pair. " +
+		"Replace the certificate and key files at those configured paths, or remove the explicit setting and upload a replacement under " +
+		"Settings → Network & TLS (Certificates), then restart to activate it."
 }
