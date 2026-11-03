@@ -32,6 +32,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -78,8 +79,99 @@ const (
 	feedSyncHTTPTimeout = 5 * time.Minute
 
 	// maxDomainsPerCategory caps ingestion to limit memory during bulk build.
+	// CHAOS-109: this is a PER-MEMBER cap, not an aggregate one. `count` is a
+	// local in parseDomainFile, reset on every call, and tar permits the same
+	// member path any number of times — so it bounded nothing an origin could
+	// not step around by repeating "blacklists/malware/domains". It is kept
+	// because it still bounds one honest category; maxDomainsTotal is the bound
+	// that actually holds. Measured: 40 duplicate members of 50_000 domains each
+	// produced exactly 2_000_000 live map entries without any single member ever
+	// reaching this cap.
 	maxDomainsPerCategory = 2_000_000
 )
+
+// The three CHAOS-109 ingest budgets are var, not const, for one reason: the
+// bound gates must be able to lower them. A gate that had to move 512 MiB of
+// gzip to prove the budget engages would never run in CI, and an unrun gate is
+// not a gate. Production code never assigns these; the gates restore them
+// through t.Cleanup.
+var (
+	// maxDomainsTotal is the AGGREGATE ingest ceiling across every member of the
+	// archive, and it is the real heap bound on this path: the domain→category
+	// map is REACHABLE for the whole parse, so it is exactly the memory the
+	// GOMEMLIMIT backstop documents it cannot reclaim (memory_backstop.go,
+	// "It CANNOT reclaim memory that is still REACHABLE"). Measured cost is
+	// ~128 B of live heap per entry, so this ceiling is ~512 MiB — the same
+	// order as the ~410–470 MiB reachable peak that backstop is sized around.
+	// The real UT1 feed carries ~3–4 M domains across all categories, so this
+	// leaves headroom for genuine growth.
+	//
+	// Reaching it TRUNCATES the round rather than refusing it, and that is safe
+	// in a way a truncated fetch would not be: BulkWrite overwrites keys as they
+	// arrive and never deletes, so a short round only adds fewer NEW domains and
+	// every previously known domain stays categorised. Refusing here would
+	// instead freeze coverage the first time a legitimate feed outgrew the
+	// ceiling, which is the worse failure.
+	maxDomainsTotal = 4_000_000
+
+	// maxFeedCompressedBytes bounds what the ORIGIN may send. The feed is a
+	// "50+ MB" tarball from a third-party GitHub mirror Culvert does not
+	// control, so this is ~10x its documented size: a feed that grew is still
+	// served, an origin sending ten times the feed is a fault or an attack.
+	// Exceeding it FAILS the round (charged failDownload — "the tarball did not
+	// arrive intact") and leaves the last-good BadgerDB authoritative.
+	maxFeedCompressedBytes int64 = 512 << 20
+
+	// maxFeedDecompressedBytes bounds the EXPANSION, independently of the
+	// compressed size, because a small body can expand without limit. This is
+	// the ingest-plane counterpart of secscan.MaxDecompressBytes on the
+	// inspection plane (CHAOS-106): bound the input AND bound what it expands
+	// to, and never let one stand in for the other. Exceeding it fails the round.
+	maxFeedDecompressedBytes int64 = 4 << 30
+)
+
+// errBudgetExceeded marks a spent byte budget. It is a distinct sentinel from
+// errIngestCapReached because the two outcomes are opposite: a spent BYTE
+// budget fails the round, while a reached ENTRY cap truncates it. It also has
+// to be distinguishable from a corrupt member: parseTarball logs-and-continues
+// on a member it cannot parse, and a budget error swallowed into that path
+// would be reported to the operator as "skipping <member>" — a benign line for
+// the one condition that must fail the round.
+var errBudgetExceeded = errors.New("ingest byte budget exceeded")
+
+// errMemberCapReached signals that maxDomainsPerCategory was reached for the
+// member being read. Unlike errIngestCapReached it stops only that member: the
+// import continues with the next one.
+var errMemberCapReached = errors.New("per-member domain cap reached")
+
+// errIngestCapReached signals that maxDomainsTotal was reached mid-member. It
+// is not a failure: parseTarball stops reading further members, records the
+// truncation and returns what it has.
+var errIngestCapReached = errors.New("aggregate domain ingest cap reached")
+
+// boundedReader fails the read once more than limit bytes have been consumed,
+// with an error naming WHICH budget was spent. io.LimitReader is not usable
+// here: it reports a spent budget as a clean io.EOF, which gzip and tar would
+// both report as a truncated archive — indistinguishable from a real transfer
+// cut, and the operator needs to be able to tell those apart.
+type boundedReader struct {
+	r     io.Reader
+	what  string
+	limit int64
+	read  int64
+}
+
+func (b *boundedReader) Read(p []byte) (int, error) {
+	if b.read >= b.limit {
+		return 0, fmt.Errorf("%s exceeded its %d-byte budget: %w", b.what, b.limit, errBudgetExceeded)
+	}
+	if over := b.read + int64(len(p)) - b.limit; over > 0 {
+		p = p[:int64(len(p))-over]
+	}
+	n, err := b.r.Read(p)
+	b.read += int64(n)
+	return n, err
+}
 
 // ut1CategoryMap maps UT1 directory names to our URLCategory values.
 // Only directories listed here are ingested; all others are ignored.
@@ -412,7 +504,11 @@ func downloadAndParse(ctx context.Context, url string) (map[string]string, error
 		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
 
-	return parseTarball(resp.Body)
+	// CHAOS-109: the origin's byte budget. Before this the only limit on how
+	// much a third-party mirror could spend was client.Timeout (5 minutes), so
+	// the effective bound was "whatever the link delivers in five minutes,
+	// times the ~50x live-heap amplification measured below".
+	return parseTarball(&boundedReader{r: resp.Body, what: "compressed feed body", limit: maxFeedCompressedBytes})
 }
 
 // parseTarball reads a gzip-compressed tar archive from r and extracts all
@@ -425,8 +521,14 @@ func parseTarball(r io.Reader) (map[string]string, error) {
 	}
 	defer gz.Close() //nolint:errcheck // gzip.Reader.Close flushes no data; error is non-actionable in deferred context
 
+	// CHAOS-109: bound the EXPANSION as well as the compressed input. Skipped
+	// members still stream through tar.Reader, so this is also what stops an
+	// archive of unclassified members from spending the whole 5-minute fetch
+	// window on gzip and tar work that can never produce an entry.
+	bounded := &boundedReader{r: gz, what: "decompressed feed archive", limit: maxFeedDecompressedBytes}
+
 	entries := make(map[string]string, 500_000)
-	tr := tar.NewReader(gz)
+	tr := tar.NewReader(bounded)
 
 	for {
 		hdr, err := tr.Next()
@@ -436,23 +538,47 @@ func parseTarball(r io.Reader) (map[string]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("tar read: %w", err)
 		}
-		if hdr.Typeflag != tar.TypeReg {
-			continue
+		if truncated, err := ingestTarMember(tr, hdr, entries); err != nil {
+			return nil, err
+		} else if truncated {
+			obs.Printf("FeedSync: aggregate ingest cap of %d domains reached; this import is TRUNCATED and later archive members were not read. Previously categorised domains are unaffected (the bulk write overwrites keys and never deletes).", maxDomainsTotal)
+			break
 		}
+	}
+	return entries, nil
+}
 
-		// Only process "blacklists/<category>/domains" entries.
-		mappedCat, ok := classifyTarEntry(hdr.Name)
-		if !ok {
-			continue
-		}
-
-		if err := parseDomainFile(tr, mappedCat, entries); err != nil {
+// ingestTarMember consumes one archive member into out. It reports (true, nil)
+// when the aggregate ingest cap was reached, which is a signal to stop reading
+// members rather than a failure. Split out of parseTarball so the bound checks
+// do not raise that function's measured complexity.
+func ingestTarMember(tr io.Reader, hdr *tar.Header, out map[string]string) (truncated bool, err error) {
+	if hdr.Typeflag != tar.TypeReg {
+		return false, nil
+	}
+	// Only process "blacklists/<category>/domains" entries.
+	mappedCat, ok := classifyTarEntry(hdr.Name)
+	if !ok {
+		return false, nil
+	}
+	if len(out) >= maxDomainsTotal {
+		return true, nil
+	}
+	if err := parseDomainFile(tr, mappedCat, out); err != nil {
+		switch {
+		case errors.Is(err, errIngestCapReached):
+			return true, nil
+		case errors.Is(err, errBudgetExceeded):
+			// NOT a skippable member: the origin overran its budget, which
+			// fails the whole round.
+			return false, fmt.Errorf("read %s: %w", hdr.Name, err)
+		default:
 			// Log but continue — a single corrupt category file should not
 			// abort the entire import.
 			obs.Printf("FeedSync: skipping %s: %v", hdr.Name, err)
 		}
 	}
-	return entries, nil
+	return false, nil
 }
 
 // classifyTarEntry returns the mapped URLCategory value for a tar entry path
@@ -474,7 +600,7 @@ func classifyTarEntry(path string) (string, bool) {
 
 // parseDomainFile reads one UT1 "domains" file from tr and adds its entries
 // into the shared map (domain → mappedCategory).
-func parseDomainFile(r io.Reader, mappedCat string, out map[string]string) error { //nolint:gocognit // byte-level streaming parser; complexity is inherent
+func parseDomainFile(r io.Reader, mappedCat string, out map[string]string) error {
 	count := 0
 	buf := make([]byte, 0, 256)
 	scratch := make([]byte, 4096)
@@ -482,32 +608,28 @@ func parseDomainFile(r io.Reader, mappedCat string, out map[string]string) error
 	for {
 		n, err := r.Read(scratch)
 		for _, b := range scratch[:n] {
-			if b == '\n' || b == '\r' {
-				line := strings.TrimSpace(string(buf))
-				buf = buf[:0]
-				if line == "" || line[0] == '#' {
-					continue
-				}
-				domain := strings.ToLower(line)
-				// Basic sanity: must contain at least one dot.
-				if !strings.Contains(domain, ".") {
-					continue
-				}
-				out[domain] = mappedCat
-				count++
-				if count >= maxDomainsPerCategory {
-					return nil // cap reached; drain remainder silently
-				}
-			} else {
+			if b != '\n' && b != '\r' {
 				buf = append(buf, b)
+				continue
 			}
+			aerr := acceptDomainLine(string(buf), mappedCat, out, &count)
+			buf = buf[:0]
+			if aerr == nil {
+				continue
+			}
+			if errors.Is(aerr, errMemberCapReached) {
+				return nil // per-member cap reached; drain remainder silently
+			}
+			return aerr
 		}
 		if err == io.EOF {
-			// Flush the last line if it didn't end with a newline.
-			if line := strings.TrimSpace(string(buf)); line != "" && line[0] != '#' {
-				if domain := strings.ToLower(line); strings.Contains(domain, ".") {
-					out[domain] = mappedCat
-				}
+			// Flush the last line if it didn't end with a newline. It goes
+			// through the same accept path as every other line, so the caps
+			// apply to it too — before CHAOS-109 this branch duplicated the
+			// normalisation and checked neither.
+			if aerr := acceptDomainLine(string(buf), mappedCat, out, &count); aerr != nil &&
+				!errors.Is(aerr, errMemberCapReached) && !errors.Is(aerr, errIngestCapReached) {
+				return aerr
 			}
 			return nil
 		}
@@ -515,4 +637,35 @@ func parseDomainFile(r io.Reader, mappedCat string, out map[string]string) error
 			return err
 		}
 	}
+}
+
+// acceptDomainLine normalises one raw feed line and records it against both
+// caps. Extracted from parseDomainFile's inner loop so the cap checks do not
+// deepen a block the nestif linter already measures at the function's
+// declaration line — the exact case conventions.md describes, where
+// --new-from-rev cannot see complexity added to an unchanged declaration.
+//
+// Returns errMemberCapReached or errIngestCapReached when a cap is reached;
+// the caller decides which of those stops a member and which stops the import.
+func acceptDomainLine(raw, mappedCat string, out map[string]string, count *int) error {
+	line := strings.TrimSpace(raw)
+	if line == "" || line[0] == '#' {
+		return nil
+	}
+	domain := strings.ToLower(line)
+	// Basic sanity: must contain at least one dot.
+	if !strings.Contains(domain, ".") {
+		return nil
+	}
+	out[domain] = mappedCat
+	*count++
+	if *count >= maxDomainsPerCategory {
+		return errMemberCapReached
+	}
+	// CHAOS-109: the aggregate cap is what bounds the heap. Checked against the
+	// SHARED map, so repeated members cannot each start a fresh budget.
+	if len(out) >= maxDomainsTotal {
+		return errIngestCapReached
+	}
+	return nil
 }
