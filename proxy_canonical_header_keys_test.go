@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"net/http"
 	"net/textproto"
 	"os"
@@ -194,9 +195,10 @@ func scanHeaderDecl(fset *token.FileSet, node *ast.ValueSpec) []nonCanonicalKey 
 	return out
 }
 
-// headerKeyDecls maps an identifier to the string literal it was declared
-// with, so a key that reaches a header through a CONSTANT can be judged by the
-// constant's VALUE instead of by its name.
+// headerKeyDecls resolves an identifier used as a header key to the string
+// literal of the declaration Go actually binds it to, so a key that reaches a
+// header through a CONSTANT can be judged by the constant's VALUE instead of by
+// its name.
 //
 // WHY THE NAME IS NOT ENOUGH. scanHeaderDecl matches declarations by the
 // `hdr`/`header` naming convention, which is what caught hdrRealIP. But the
@@ -205,32 +207,76 @@ func scanHeaderDecl(fset *token.FileSet, node *ast.ValueSpec) []nonCanonicalKey 
 // misses the header outright. `realIPKey = "X-Real-IP"` used as
 // r.Header[realIPKey] is that exact failure under a name the convention does
 // not cover, so it must be judged by use, not by spelling of the identifier.
-type headerKeyDecls map[string]*ast.BasicLit
+//
+// WHY IT IS KEYED BY OBJECT, NOT BY NAME. A first version keyed the table by
+// identifier name across the package, so an unrelated function's own
+// `const realIPKey = "X-Real-Ip"` overwrote the package-level
+// `const realIPKey = "X-Real-IP"` and silently excused both of its uses — and
+// the reversed spellings convicted canonical ones (Codex review, PR #1795).
+// go/types resolves each use to its declaring object by lexical scope, exactly
+// as the compiler does, so a local can only ever judge its own uses.
+type headerKeyDecls struct {
+	uses map[*ast.Ident]types.Object
+	lits map[types.Object]*ast.BasicLit
+}
 
-// collectHeaderKeyDecls records every const/var in one package that was
-// declared with a plain string literal. Scoped per PACKAGE because that is how
-// Go resolves an identifier: a same-named constant in another package must not
-// be able to convict — or to excuse — this one.
-func collectHeaderKeyDecls(files []*ast.File) headerKeyDecls {
-	decls := headerKeyDecls{}
+// lookup returns the literal id resolves to, if any. A nil table resolves
+// nothing, which is the literal-only mode.
+func (d *headerKeyDecls) lookup(id *ast.Ident) (*ast.BasicLit, bool) {
+	if d == nil {
+		return nil, false
+	}
+	obj, ok := d.uses[id]
+	if !ok {
+		return nil, false
+	}
+	lit, ok := d.lits[obj]
+	return lit, ok
+}
+
+// collectHeaderKeyDecls type-checks one package (imports stubbed, as
+// roster_facts_wall_test.go does: every identifier declared in the package
+// still resolves exactly) and records each constant declared with a plain
+// string literal, at any scope, plus each PACKAGE-LEVEL var so declared. A
+// function-local var is left out: its value is whatever was last assigned,
+// not its initializer. Scoped per PACKAGE because that is how Go resolves an
+// identifier: a same-named constant in another package must not be able to
+// convict — or to excuse — this one.
+func collectHeaderKeyDecls(fset *token.FileSet, files []*ast.File) *headerKeyDecls {
+	info := &types.Info{Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}}
+	conf := types.Config{Importer: stubImporter{}, Error: func(error) {}, FakeImportC: true}
+	pkg, _ := conf.Check("headerkeys", fset, files, info) // errors: stubbed imports
+	decls := &headerKeyDecls{uses: info.Uses, lits: map[types.Object]*ast.BasicLit{}}
 	for _, f := range files {
 		ast.Inspect(f, func(n ast.Node) bool {
-			vs, ok := n.(*ast.ValueSpec)
-			if !ok {
-				return true
-			}
-			for i, name := range vs.Names {
-				if i >= len(vs.Values) {
-					continue
-				}
-				if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					decls[name.Name] = lit
-				}
+			if vs, ok := n.(*ast.ValueSpec); ok {
+				decls.record(vs, info, pkg.Scope())
 			}
 			return true
 		})
 	}
 	return decls
+}
+
+// record adds the string-literal declarations of one ValueSpec.
+func (d *headerKeyDecls) record(vs *ast.ValueSpec, info *types.Info, pkgScope *types.Scope) {
+	for i, name := range vs.Names {
+		if i >= len(vs.Values) {
+			continue
+		}
+		lit, ok := vs.Values[i].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			continue
+		}
+		switch obj := info.Defs[name].(type) {
+		case *types.Const:
+			d.lits[obj] = lit
+		case *types.Var:
+			if obj.Parent() == pkgScope {
+				d.lits[obj] = lit
+			}
+		}
+	}
 }
 
 // fieldNameShaped is headerShaped PLUS a hyphen, and it is the second,
@@ -243,9 +289,11 @@ func collectHeaderKeyDecls(files []*ast.File) headerKeyDecls {
 // tree has non-HTTP maps spelled exactly that way: auth_oidc_flow.go reads
 // `unverified.Header["kid"]` and `t.Header["alg"]` on a JOSE/JWT token, whose
 // Header is a map[string]any of lowercase claim names. The first version of
-// this arm convicted both. Distinguishing them properly needs go/types, which
-// this gate deliberately does not take on (it would mean type-checking the
-// whole module from source inside a unit test).
+// this arm convicted both. Distinguishing them properly needs net/http's real
+// types, which the package check here deliberately does not load: its imports
+// are stubbed, so it resolves this package's own identifiers but not the type
+// of an imported map (loading them would mean type-checking the whole module
+// and its dependencies from source inside a unit test).
 //
 // A hyphen separates the two populations cleanly: HTTP field names used as map
 // keys here are multi-token ("X-Forwarded-For", "X-Real-Ip"); JOSE header
@@ -271,7 +319,7 @@ var fieldNameShaped = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*(-[A-Za-z0-9]+)+$
 // scanHeaderDecl already reports it once, at its declaration, which is the
 // actionable place to fix it. Reporting it again at every use would turn one
 // fix into a wall of duplicate findings.
-func classifyHeaderKeyExpr(fset *token.FileSet, e ast.Expr, decls headerKeyDecls, requireFieldName bool) (nonCanonicalKey, bool) {
+func classifyHeaderKeyExpr(fset *token.FileSet, e ast.Expr, decls *headerKeyDecls, requireFieldName bool) (nonCanonicalKey, bool) {
 	accept := func(k nonCanonicalKey) bool {
 		return !requireFieldName || fieldNameShaped.MatchString(k.got)
 	}
@@ -287,7 +335,7 @@ func classifyHeaderKeyExpr(fset *token.FileSet, e ast.Expr, decls headerKeyDecls
 		if headerNamedDecl.MatchString(v.Name) {
 			return nonCanonicalKey{}, false
 		}
-		lit, ok := decls[v.Name]
+		lit, ok := decls.lookup(v)
 		if !ok {
 			return nonCanonicalKey{}, false
 		}
@@ -312,7 +360,7 @@ func classifyHeaderKeyExpr(fset *token.FileSet, e ast.Expr, decls headerKeyDecls
 // write is invisible to every accessor. On scrubForwardedHeaders that is a
 // scrub that silently stops scrubbing: the private hop or the client-supplied
 // identity header rides through to the upstream.
-func scanHeaderIndex(fset *token.FileSet, node *ast.IndexExpr, decls headerKeyDecls) []nonCanonicalKey {
+func scanHeaderIndex(fset *token.FileSet, node *ast.IndexExpr, decls *headerKeyDecls) []nonCanonicalKey {
 	if !exprMentionsHeader(node.X) {
 		return nil
 	}
@@ -327,7 +375,7 @@ func scanHeaderIndex(fset *token.FileSet, node *ast.IndexExpr, decls headerKeyDe
 // scanHeaderDelete matches delete(r.Header, "X-Real-IP"). The builtin takes
 // the map key unchanged, exactly like an index expression, so it fails the same
 // way: a non-canonical key deletes nothing and the scrub reports success.
-func scanHeaderDelete(fset *token.FileSet, node *ast.CallExpr, decls headerKeyDecls) []nonCanonicalKey {
+func scanHeaderDelete(fset *token.FileSet, node *ast.CallExpr, decls *headerKeyDecls) []nonCanonicalKey {
 	id, ok := node.Fun.(*ast.Ident)
 	if !ok || id.Name != "delete" || len(node.Args) != 2 {
 		return nil
@@ -348,7 +396,7 @@ func scanHeaderDelete(fset *token.FileSet, node *ast.CallExpr, decls headerKeyDe
 // canonicalise, so this one is cost rather than correctness — but the same
 // constant is one edit away from an index expression, and the gate should not
 // depend on which of the two a future caller picks.
-func scanHeaderCallIdent(fset *token.FileSet, node *ast.CallExpr, decls headerKeyDecls) []nonCanonicalKey {
+func scanHeaderCallIdent(fset *token.FileSet, node *ast.CallExpr, decls *headerKeyDecls) []nonCanonicalKey {
 	sel, ok := node.Fun.(*ast.SelectorExpr)
 	if !ok || !headerMethods[sel.Sel.Name] || len(node.Args) == 0 {
 		return nil
@@ -377,7 +425,7 @@ func scanHeaderCallIdent(fset *token.FileSet, node *ast.CallExpr, decls headerKe
 // decls carries the package's string constants so a key reaching a header
 // through an identifier is judged by its VALUE. Pass nil to judge inline
 // literals only.
-func scanFileForNonCanonicalKeys(fset *token.FileSet, f *ast.File, decls headerKeyDecls) []nonCanonicalKey {
+func scanFileForNonCanonicalKeys(fset *token.FileSet, f *ast.File, decls *headerKeyDecls) []nonCanonicalKey {
 	var out []nonCanonicalKey
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -395,40 +443,45 @@ func scanFileForNonCanonicalKeys(fset *token.FileSet, f *ast.File, decls headerK
 	return out
 }
 
+// scanPackageForNonCanonicalKeys resolves one package's identifiers and runs
+// the matcher over each of its files. The tree gate and the scope fixtures
+// both call it, so the fixtures exercise the resolution the gate uses.
+func scanPackageForNonCanonicalKeys(fset *token.FileSet, files []*ast.File) []nonCanonicalKey {
+	decls := collectHeaderKeyDecls(fset, files)
+	var out []nonCanonicalKey
+	for _, f := range files {
+		out = append(out, scanFileForNonCanonicalKeys(fset, f, decls)...)
+	}
+	return out
+}
+
 func TestCanonicalHeaderKeys_Tree(t *testing.T) {
 	fset := token.NewFileSet()
 
-	// Grouped by directory, because the constant arm resolves an identifier to
-	// the literal it was declared with and Go resolves identifiers per
-	// PACKAGE. Scanning file-by-file would miss every key declared in one file
-	// of a package and used in another — which is the normal shape — and a
+	// Grouped by PACKAGE (directory plus package clause), because the constant
+	// arm resolves an identifier the way Go does, and Go resolves identifiers
+	// per package. Scanning file-by-file would miss every key declared in one
+	// file of a package and used in another — which is the normal shape — and a
 	// flat tree-wide table would let a same-named constant in an unrelated
 	// package convict or excuse this one.
-	byDir := map[string][]string{}
-	var dirs []string
+	byPkg := map[string][]*ast.File{}
+	var pkgs []string
 	for _, path := range repoGoFiles(t) {
-		d := filepath.Dir(path)
-		if _, seen := byDir[d]; !seen {
-			dirs = append(dirs, d)
+		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
 		}
-		byDir[d] = append(byDir[d], path)
+		k := filepath.Dir(path) + " " + f.Name.Name
+		if _, seen := byPkg[k]; !seen {
+			pkgs = append(pkgs, k)
+		}
+		byPkg[k] = append(byPkg[k], f)
 	}
-	sort.Strings(dirs)
+	sort.Strings(pkgs)
 
 	var found []nonCanonicalKey
-	for _, d := range dirs {
-		parsed := make([]*ast.File, 0, len(byDir[d]))
-		for _, path := range byDir[d] {
-			f, err := parser.ParseFile(fset, path, nil, 0)
-			if err != nil {
-				t.Fatalf("parse %s: %v", path, err)
-			}
-			parsed = append(parsed, f)
-		}
-		decls := collectHeaderKeyDecls(parsed)
-		for _, f := range parsed {
-			found = append(found, scanFileForNonCanonicalKeys(fset, f, decls)...)
-		}
+	for _, k := range pkgs {
+		found = append(found, scanPackageForNonCanonicalKeys(fset, byPkg[k])...)
 	}
 
 	for _, b := range found {
@@ -504,7 +557,7 @@ func jose(tok struct{ Header map[string]any }) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	decls := collectHeaderKeyDecls([]*ast.File{f})
+	decls := collectHeaderKeyDecls(fset, []*ast.File{f})
 	var got []string
 	for _, k := range scanFileForNonCanonicalKeys(fset, f, decls) {
 		got = append(got, k.got)
@@ -567,7 +620,7 @@ func scrub(r *http.Request) {
 		t.Fatalf("with no resolver the gate should see nothing here, got %+v", got)
 	}
 
-	got := scanFileForNonCanonicalKeys(fset, f, collectHeaderKeyDecls([]*ast.File{f}))
+	got := scanFileForNonCanonicalKeys(fset, f, collectHeaderKeyDecls(fset, []*ast.File{f}))
 	if len(got) != 2 {
 		t.Fatalf("want 2 findings (the index and the delete), got %d: %+v", len(got), got)
 	}
@@ -669,4 +722,97 @@ func TestCanonicalHeaderKeys_ScrubStillScrubs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// scanSyntheticPackage parses srcs (file name → source) as ONE package and runs
+// the same package-level matcher the tree gate runs over it.
+func scanSyntheticPackage(t *testing.T, srcs map[string]string) []nonCanonicalKey {
+	t.Helper()
+	names := make([]string, 0, len(srcs))
+	for name := range srcs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	fset := token.NewFileSet()
+	files := make([]*ast.File, 0, len(names))
+	for _, name := range names {
+		f, err := parser.ParseFile(fset, name, srcs[name], parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		files = append(files, f)
+	}
+	return scanPackageForNonCanonicalKeys(fset, files)
+}
+
+// TestCanonicalHeaderKeys_LexicalScope pins Codex P2 4448734747 on PR #1795:
+// an identifier must resolve to the declaration Go would bind it to, not to
+// any same-named declaration elsewhere in the package. A name-keyed table let
+// an unrelated function-local constant overwrite a package-level one, so the
+// local could both EXCUSE a non-canonical package key (direction 1) and
+// CONVICT a canonical one (direction 2).
+func TestCanonicalHeaderKeys_LexicalScope(t *testing.T) {
+	const scrub = `package p
+
+import "net/http"
+
+func scrub(r *http.Request) {
+	if vals := r.Header[realIPKey]; len(vals) > 0 {
+		delete(r.Header, realIPKey)
+	}
+}
+`
+	// The package-level declaration lives in its own file and the shadowing
+	// local in a later one, so the cross-file path is exercised as well.
+	pkgConst := func(v string) string {
+		return "package p\n\nconst realIPKey = " + strconv.Quote(v) + "\n"
+	}
+	localConst := func(v string) string {
+		return "package p\n\nfunc unrelated() string {\n\tconst realIPKey = " + strconv.Quote(v) + "\n\treturn realIPKey\n}\n"
+	}
+	keys := func(found []nonCanonicalKey) []string {
+		var got []string
+		for _, k := range found {
+			got = append(got, k.got)
+		}
+		sort.Strings(got)
+		return got
+	}
+
+	t.Run("local canonical constant does not excuse a package-level one", func(t *testing.T) {
+		got := keys(scanSyntheticPackage(t, map[string]string{
+			"a_keys.go": pkgConst("X-Real-IP"), "b_scrub.go": scrub, "c_unrelated.go": localConst("X-Real-Ip"),
+		}))
+		if want := []string{"X-Real-IP", "X-Real-IP"}; !slices.Equal(got, want) {
+			t.Fatalf("got %v, want %v (the index and the delete)", got, want)
+		}
+	})
+	t.Run("local non-canonical constant does not convict a package-level one", func(t *testing.T) {
+		if got := keys(scanSyntheticPackage(t, map[string]string{
+			"a_keys.go": pkgConst("X-Real-Ip"), "b_scrub.go": scrub, "c_unrelated.go": localConst("X-Real-IP"),
+		})); len(got) != 0 {
+			t.Fatalf("canonical package-level key falsely rejected: %v", got)
+		}
+	})
+	t.Run("a local constant judges only its own uses", func(t *testing.T) {
+		got := keys(scanSyntheticPackage(t, map[string]string{
+			"a_keys.go": pkgConst("X-Real-Ip"),
+			"b_scrub.go": `package p
+
+import "net/http"
+
+func shadowed(r *http.Request) {
+	const realIPKey = "X-Shadow-IP"
+	_ = r.Header[realIPKey]
+}
+
+func outer(r *http.Request) {
+	_ = r.Header[realIPKey]
+}
+`,
+		}))
+		if want := []string{"X-Shadow-IP"}; !slices.Equal(got, want) {
+			t.Fatalf("got %v, want %v (only the shadowing local's own use)", got, want)
+		}
+	})
 }
