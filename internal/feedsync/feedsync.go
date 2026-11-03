@@ -162,8 +162,11 @@ type boundedReader struct {
 }
 
 func (b *boundedReader) Read(p []byte) (int, error) {
-	if b.read >= b.limit {
-		return 0, fmt.Errorf("%s exceeded its %d-byte budget: %w", b.what, b.limit, errBudgetExceeded)
+	if b.read > b.limit {
+		return 0, b.exceeded()
+	}
+	if b.read == b.limit {
+		return b.probeBoundary()
 	}
 	if over := b.read + int64(len(p)) - b.limit; over > 0 {
 		p = p[:int64(len(p))-over]
@@ -171,6 +174,34 @@ func (b *boundedReader) Read(p []byte) (int, error) {
 	n, err := b.r.Read(p)
 	b.read += int64(n)
 	return n, err
+}
+
+// probeBoundary decides a spent budget by evidence rather than by position. A
+// body of EXACTLY limit bytes is within budget, but its final read need not
+// carry io.EOF: a chunked response that flushes its last payload before the
+// terminating chunk returns the data with a nil error and io.EOF only on the
+// next call. Treating that next call as an overrun fails the round for an
+// archive that is exactly the budget. So read ONE more byte: a clean io.EOF is
+// a complete body, a real byte is the overrun, and any other outcome (a
+// transport error, or a no-progress (0, nil)) is passed through.
+//
+// This is the same correction PR #1796 made to the blocklistfeed and
+// threatfeed copies of this reader (Codex P2 4448735208); this third copy was
+// missed there. Keeping the three in agreement matters because the gates lower
+// these limits, and a limit the gates can lower is a limit a boundary bug can
+// reach.
+func (b *boundedReader) probeBoundary() (int, error) {
+	var one [1]byte
+	n, err := b.r.Read(one[:])
+	if n > 0 {
+		b.read += int64(n)
+		return 0, b.exceeded()
+	}
+	return 0, err
+}
+
+func (b *boundedReader) exceeded() error {
+	return fmt.Errorf("%s exceeded its %d-byte budget: %w", b.what, b.limit, errBudgetExceeded)
 }
 
 // ut1CategoryMap maps UT1 directory names to our URLCategory values.
