@@ -452,6 +452,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the admin UI's TLS certificate is expiring,
+  expired, or the uploaded pair is corrupt.** These were visible only on the
+  Certificates panel; the one-page report read as healthy until browsers refused
+  the GUI. New `ui_tls_cert_expiry` (30 days or less) and `ui_tls_cert_corrupt`
+  WARN rows (additive, report-only, nothing for the self-signed fallback) carry
+  only a day count. TLS serving is unchanged.
 - **Diagnostics now warns when the cluster rate-limit broadcast is stale.** A
   Data Plane that stops receiving the Control Plane broadcast falls back to its
   local limit by design, but that was visible only in a log line, a metric and
