@@ -25,11 +25,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   scrub bypass: the private hop survives and is forwarded upstream, and on the
   `X-User-Identity` leg a client-supplied identity claim reaches the upstream.
   Three arms are added to the one matcher the self-check exercises — index,
-  `delete()`, and a per-package constant table so a key is judged by its
-  declared value rather than by the spelling of its identifier — proved in both
+  `delete()`, and constant resolution so a key is judged by its declared value
+  rather than by the spelling of its identifier — each package is type-checked
+  with stubbed imports so an identifier resolves by lexical scope to the
+  declaration Go binds it to, and an unrelated function-local constant of the
+  same name can neither excuse nor convict a package-level one — proved in both
   directions against the real tree. The map-keyed arms require a hyphen in the
   key, because a JOSE token's `Header` claim map is spelled identically to an
-  `http.Header` index and telling them apart otherwise needs `go/types`; the
+  `http.Header` index and telling them apart otherwise needs net/http's real
+  types, which the stubbed-import check does not load; the
   single-token field names in this tree are declared under the `hdr`/`header`
   convention and stay covered at their declaration. No production behaviour
   changes; latent at the time of the fix, with every header-name constant in
