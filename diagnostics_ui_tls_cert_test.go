@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"os"
 	"strings"
 	"testing"
@@ -152,5 +153,62 @@ func TestAdminUITLSCertExpiryActionBySource(t *testing.T) {
 		if strings.Contains(action, "/") && strings.Contains(action, ".pem") {
 			t.Errorf("action must not carry a file path, got %q", action)
 		}
+	}
+}
+
+// Codex review, PR #1799: uiCustomTLSActive is set once at startup, so after
+// the server boots with uploaded pair A and an admin uploads replacement B,
+// the flag still reads true while adminUIServeOnce keeps serving A. The
+// pending row must compare the saved certificate with the one actually
+// serving, not trust the startup source flag.
+func TestAdminUITLSCertPendingAfterReplacementUpload(t *testing.T) {
+	withTempDataDirForUITLS(t)
+	adminUITLSCertMu.Lock()
+	prevAt, prevKnown, prevLeaf := adminUITLSCertNotAfter, adminUITLSCertKnown, adminUITLSCertLeafSHA256
+	adminUITLSCertMu.Unlock()
+	t.Cleanup(func() {
+		adminUITLSCertMu.Lock()
+		adminUITLSCertNotAfter, adminUITLSCertKnown, adminUITLSCertLeafSHA256 = prevAt, prevKnown, prevLeaf
+		adminUITLSCertMu.Unlock()
+	})
+
+	now := time.Now()
+	certA, keyA := newCAPair(t, "ui-a", now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	certB, keyB := newCAPair(t, "ui-b", now.Add(-time.Hour), now.Add(90*24*time.Hour))
+
+	// Boot with A: persisted, selected at startup, bound and serving.
+	if err := persistCustomUITLS(certA, keyA); err != nil {
+		t.Fatal(err)
+	}
+	if c, k := resolveUITLSCertKey("", ""); c != customUITLSCertPath() || k != customUITLSKeyPath() || !uiCustomTLSActive {
+		t.Fatalf("persisted pair A must be selected at startup, got (%q, %q) active=%v", c, k, uiCustomTLSActive)
+	}
+	servingA, err := tls.X509KeyPair(certA, keyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteAdminUITLSCertExpiry(servingA)
+	if rows := checkAdminUITLSCert(); len(rows) != 0 {
+		t.Fatalf("serving the saved pair must add no row, got %+v", rows)
+	}
+
+	// Admin uploads replacement B: saved, but A is still the one served.
+	if err := persistCustomUITLS(certB, keyB); err != nil {
+		t.Fatal(err)
+	}
+	rows := checkAdminUITLSCert()
+	if len(rows) != 1 || rows[0].Code != "ui_tls_cert_pending" || rows[0].Status != diagWarn {
+		t.Fatalf("replacement B saved while A serves must warn pending, got %+v", rows)
+	}
+
+	// Once B is what the listener bound (restart or a re-bind attempt), the
+	// pending row clears.
+	servingB, err := tls.X509KeyPair(certB, keyB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteAdminUITLSCertExpiry(servingB)
+	if rows := checkAdminUITLSCert(); len(rows) != 0 {
+		t.Fatalf("serving the replacement must clear the pending row, got %+v", rows)
 	}
 }

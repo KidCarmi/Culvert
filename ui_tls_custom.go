@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"math"
@@ -78,13 +80,20 @@ var uiCustomTLSCorrupt bool
 // GET /api/settings/network. The auto self-signed fallback (10-year
 // validity, internal/uitls) is deliberately not tracked here — it is not
 // operator-configured and not worth an expiry warning.
+//
+// adminUITLSCertLeafSHA256 is the SHA-256 of that same serving leaf's DER,
+// recorded with the expiry. uiCustomTLSActive only says the running server
+// STARTED from the uploaded pair; a later upload overwrites the files without
+// touching the listener, so the fingerprint is what tells "the saved pair is
+// the one serving" apart from "a replacement is saved, awaiting a restart".
 var (
-	adminUITLSCertMu       sync.RWMutex
-	adminUITLSCertNotAfter time.Time
-	adminUITLSCertKnown    bool
+	adminUITLSCertMu         sync.RWMutex
+	adminUITLSCertNotAfter   time.Time
+	adminUITLSCertKnown      bool
+	adminUITLSCertLeafSHA256 [sha256.Size]byte
 )
 
-// noteAdminUITLSCertExpiry records the NotAfter of the leaf certificate in a
+// noteAdminUITLSCertExpiry records the NotAfter and leaf fingerprint of a
 // custom cert/key pair the admin UI is about to serve. Best-effort: a
 // malformed leaf (should be unreachable — the caller already validated the
 // pair loads as a matching tls.Certificate) leaves the prior value in place
@@ -101,6 +110,36 @@ func noteAdminUITLSCertExpiry(cert tls.Certificate) {
 	defer adminUITLSCertMu.Unlock()
 	adminUITLSCertNotAfter = leaf.NotAfter
 	adminUITLSCertKnown = true
+	adminUITLSCertLeafSHA256 = sha256.Sum256(cert.Certificate[0])
+}
+
+// adminUITLSServingLeafSHA256 returns the fingerprint recorded by the last
+// successful custom-cert bind. known is false until one has bound.
+func adminUITLSServingLeafSHA256() (sum [sha256.Size]byte, known bool) {
+	adminUITLSCertMu.RLock()
+	defer adminUITLSCertMu.RUnlock()
+	return adminUITLSCertLeafSHA256, adminUITLSCertKnown
+}
+
+// savedCustomUITLSLeafSHA256 returns the fingerprint of the leaf in the
+// persisted upload: the first CERTIFICATE block, the same one
+// tls.LoadX509KeyPair puts in Certificate[0]. ok is false when the file is
+// missing or holds no certificate block.
+func savedCustomUITLSLeafSHA256() (sum [sha256.Size]byte, ok bool) {
+	rest, err := os.ReadFile(customUITLSCertPath())
+	if err != nil {
+		return sum, false
+	}
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return sum, false
+		}
+		if block.Type == "CERTIFICATE" {
+			return sha256.Sum256(block.Bytes), true
+		}
+	}
 }
 
 // adminUITLSCertExpiry returns the currently known admin-UI serving

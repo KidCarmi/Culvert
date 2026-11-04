@@ -9,10 +9,12 @@ package main
 // diagnostics report, where an operator checks "is this node healthy", stayed
 // green until browsers started refusing the GUI.
 //
-// Also reports a saved-but-not-yet-serving uploaded pair (pending restart).
+// Also reports a saved-but-not-yet-serving uploaded pair (pending restart),
+// including a replacement uploaded while an earlier upload is serving.
 //
 // Report-only: derived from the same state GET /api/settings/network already
-// returns, no I/O, no change to TLS serving. Contributes nothing for the auto
+// returns plus a read of the saved certificate file to fingerprint its leaf,
+// no change to TLS serving. Contributes nothing for the auto
 // self-signed certificate or while a custom certificate has more than
 // uiTLSCertWarnDays of validity left. Carries no certificate subject, path or
 // key material — only a day count.
@@ -40,7 +42,7 @@ func checkAdminUITLSCert() []OperatorContractCheck {
 	// Certificates panel says so but the report did not. Also covers a pair
 	// shadowed by explicit -tls-cert/-tls-key settings, which a restart will
 	// not activate either, hence the wording below.
-	if !uiCustomTLSCorrupt && !uiCustomTLSActive && customUITLSFilesPresent() {
+	if uploadedUITLSCertPending() {
 		rows = append(rows, OperatorContractCheck{
 			Code:   "ui_tls_cert_pending",
 			Status: diagWarn,
@@ -68,6 +70,26 @@ func checkAdminUITLSCert() []OperatorContractCheck {
 		Message:        msg,
 		OperatorAction: uiTLSCertExpiryAction(uiCustomTLSActive),
 	})
+}
+
+// uploadedUITLSCertPending reports whether a valid uploaded pair is saved but
+// is not the certificate the admin UI is serving. uiCustomTLSActive alone is
+// not enough: it is set once at startup, and apiCertsUpload persists a
+// replacement without reloading the listener, so after A boots and B is
+// uploaded the flag still reads true while A is served. The saved leaf is
+// therefore compared with the one recorded at bind time. When either
+// fingerprint is unavailable (no custom bind yet, unreadable file) it keeps
+// the startup-flag answer rather than guess.
+func uploadedUITLSCertPending() bool {
+	if uiCustomTLSCorrupt || !customUITLSFilesPresent() {
+		return false
+	}
+	if !uiCustomTLSActive {
+		return true
+	}
+	serving, bound := adminUITLSServingLeafSHA256()
+	saved, ok := savedCustomUITLSLeafSHA256()
+	return bound && ok && serving != saved
 }
 
 // uiTLSCertExpiryAction names the step that actually replaces the serving
