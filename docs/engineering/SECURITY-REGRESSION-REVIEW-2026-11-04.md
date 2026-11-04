@@ -394,6 +394,7 @@ CI result for this SHA.
 |---|---|
 | `go build ./...`, `go vet ./...` | clean |
 | `go test ./internal/...` (all internal packages) | pass |
+| `go test -count=1 -timeout=40m .` (full root package) | pass, 404 s |
 | `go test . -run 'GODEBUG\|Toolchain\|TLS\|Cert\|Sigstore\|MITM\|Upstream\|Tunnel'` | pass (22.9 s) |
 | `go test . -run 'TestGODEBUG_'` incl. negative controls | pass |
 | GODEBUG wall mutation tests (pin deleted; setting misspelled) | both rejected, with the intended messages |
@@ -402,8 +403,7 @@ CI result for this SHA.
 | `python3 docs/agent-context/check.py` | exit 0 |
 | `go version -m` on linux/amd64 and darwin/arm64 builds | both record the pin |
 
-**Not run, and why.** The full root-package suite was started but is long-running
-and is not reported here as a pass; the `benchgate`-tagged allocation gates, the
+**Not run, and why.** The `benchgate`-tagged allocation gates, the
 `-race -shuffle=on` determinism jobs, the E2E installer-lifecycle job and the
 hosted aggregate gates were not run in this environment. The `go.mod` change is
 inert on linux by construction — `crypto/x509` consults the setting only under
