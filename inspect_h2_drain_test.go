@@ -256,26 +256,110 @@ func TestH2InspectDrain_GoawayAssertionRejectsPlainClose(t *testing.T) {
 // (refireH2InspectGoaway): a tunnel that starts serving AFTER the first GOAWAY wave
 // — a CONNECT that raced the admission fence — must still be GOAWAY'd by the next
 // gracefulShutdownH2InspectShared call on the same shared server.
+//
+// Two library behaviours make a naive sequence of "fire, serve late, re-fire"
+// prove nothing, so both are fenced off with barriers rather than sleeps:
+//
+//   - The wave is asynchronous. base.Shutdown starts each RegisterOnShutdown func
+//     on its own goroutine and returns without waiting (net/http Server.Shutdown),
+//     so the FIRST wave's goroutine can still be pending when the late conn
+//     registers, and then GOAWAYs it before its first stream (a rare scheduling
+//     race, seen under -race on loaded CI). The early conn is the barrier: it is
+//     registered before the first wave and has no stream to close afterwards, so
+//     its GOAWAY can only come from that wave's dispatch, which signals every conn
+//     while holding the server's activeConns lock. A conn that registers after
+//     that GOAWAY is observed therefore cannot be in the first wave.
+//   - Under Go 1.27's wrapping HTTP/2 server a conn served by a shut-down base
+//     sends its own GOAWAY as soon as its stream count drops to zero (keep-alives
+//     are off once base is shutting down). A late conn whose only stream had
+//     already completed would get a GOAWAY with or without the re-fire. Holding
+//     the late stream in flight across the re-fire rules that path out, so the
+//     GOAWAY observed below can only come from the re-fire.
 func TestH2InspectDrain_RefireReachesLateConn(t *testing.T) {
 	sh := newH2InspectServer()
-	if err := gracefulShutdownH2InspectShared(sh, context.Background()); err != nil {
-		t.Fatalf("first wave: %v", err)
-	}
-	cc := h2cLoopback(t, context.Background(), sh, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	early := h2cLoopback(t, context.Background(), sh, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	// Confirm the late conn is actually serving before the re-fire.
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://origin.test/late", http.NoBody)
-	resp, err := cc.rt.RoundTrip(req)
+	// A completed stream proves the early conn is registered before the first wave.
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://origin.test/early", http.NoBody)
+	resp, err := early.rt.RoundTrip(req)
 	if err != nil {
-		t.Fatalf("late conn did not serve a stream before the re-fire: %v", err)
+		t.Fatalf("early conn did not serve a stream before the first wave: %v", err)
 	}
 	_ = resp.Body.Close()
 
 	if err := gracefulShutdownH2InspectShared(sh, context.Background()); err != nil {
+		t.Fatalf("first wave: %v", err)
+	}
+	select {
+	case <-early.goaway: // the first wave's dispatch has run; the late conn cannot be in it
+	case <-time.After(5 * time.Second):
+		t.Fatal("first wave did not GOAWAY the conn registered before it within 5s")
+	}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	late := h2cLoopback(t, context.Background(), sh, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release // hold the late stream in flight across the re-fire
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "late")
+	}))
+	type rtResult struct {
+		body string
+		err  error
+	}
+	resCh := make(chan rtResult, 1)
+	go func() {
+		lreq, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://origin.test/late", http.NoBody)
+		lresp, lerr := late.rt.RoundTrip(lreq)
+		if lerr != nil {
+			resCh <- rtResult{err: lerr}
+			return
+		}
+		b, _ := io.ReadAll(lresp.Body)
+		_ = lresp.Body.Close()
+		resCh <- rtResult{body: string(b)}
+	}()
+	// Confirm the late conn is actually serving before the re-fire, and that nothing
+	// has GOAWAY'd it yet: the re-fire must be what reaches it.
+	select {
+	case <-entered:
+	case r := <-resCh:
+		t.Fatalf("late conn did not serve a stream before the re-fire: %v", r.err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("late conn did not start serving a stream within 10s")
+	}
+	select {
+	case <-late.goaway:
+		t.Fatal("late conn was GOAWAY'd before the re-fire; the test would not prove the re-fire reaches it")
+	default:
+	}
+
+	if err := gracefulShutdownH2InspectShared(sh, context.Background()); err != nil {
 		t.Fatalf("re-fire: %v", err)
 	}
-	assertH2GracefulGoaway(t, cc)
+	select {
+	case <-late.goaway: // delivered while the late stream is still open: the re-fire reached it
+	case <-time.After(5 * time.Second):
+		t.Fatal("re-fire did not GOAWAY the late conn within 5s")
+	}
+
+	// GOAWAY is graceful: the in-flight late stream still completes, and the conn
+	// then refuses new streams.
+	close(release)
+	select {
+	case r := <-resCh:
+		if r.err != nil {
+			t.Fatalf("in-flight late stream must complete cleanly after the re-fire GOAWAY, got err: %v", r.err)
+		}
+		if r.body != "late" {
+			t.Fatalf("in-flight late body = %q, want late", r.body)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight late stream did not complete within 10s after the re-fire GOAWAY")
+	}
+	assertH2GracefulGoaway(t, late)
 }
 
 // TestH2InspectDrain_NilServerNoop pins that the inner helper is a fast no-op on a
