@@ -192,9 +192,13 @@ func refireH2InspectGoaway() error {
 
 // gracefulShutdownH2InspectShared fires GOAWAY on every active tunnel of sh by
 // calling base.Shutdown, which re-dispatches the RegisterOnShutdown trigger on every
-// call. The 2s bound guards against a surprise block; in practice Shutdown returns in
-// microseconds (the base owns no listeners/conns — the real waiting is
-// drainActiveTunnels). No-op on nil sh. Split out as the testable inner helper so the
+// call. The dispatch is asynchronous: Shutdown starts the trigger on its own
+// goroutine and does not wait for it, so a return here means the wave has been
+// started, not delivered. A tunnel that registers while a wave is pending may be
+// GOAWAY'd by that wave; one that registers after it is reached by the next
+// per-tick re-fire. The 2s bound guards against a surprise block; in practice
+// Shutdown returns in microseconds (the base owns no listeners/conns — the real
+// waiting is drainActiveTunnels). No-op on nil sh. Split out as the testable inner helper so the
 // nil-case is exercised without driving process-global state.
 func gracefulShutdownH2InspectShared(sh *h2InspectShared, ctx context.Context) error {
 	if sh == nil {
