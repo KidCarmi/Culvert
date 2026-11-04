@@ -41,6 +41,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The DPI scan engine's abandoned worker goroutines are now counted and
+  capped, and the gateway no longer blocks clean traffic in proportion to its
+  own load (CHAOS-110).** `patternSet.scan` must run each regex match in a
+  goroutine to enforce its per-pattern budget, because `re.Match` is not
+  interruptible, and on overrun it abandons that goroutine — which keeps
+  running and keeps the whole response body reachable. Nothing counted or
+  capped them: measured, 200 concurrent abandoned scans held 200.3 MiB of
+  reachable heap after every parent had returned, and 64 at an 8 MiB scan
+  window held 512.1 MiB, which is heap `GOMEMLIMIT` cannot reclaim and
+  `recover()` cannot see. The second half was not a memory bug — the budget is
+  wall clock, so without a cap a match's elapsed time grew with the number of
+  other matches competing for the same cores and clean content was failed closed
+  because the gateway was busy: on one core, a match needing 68ms against a
+  200ms budget blocked 0 of 1 bodies at concurrency 1 but 4 of 4 at concurrency
+  4 and 32 of 32 at 32, with each block leaving another abandoned worker making
+  the next scan slower, and every one of those blocks logged against the
+  operator's pattern rather than against capacity. A counted gate of
+  `2 × GOMAXPROCS` now admits scan workers, with the slot released by the worker
+  rather than the parent so an abandoned worker keeps occupying the cap for as
+  long as it occupies the heap; a scan that finds the gate full waits, bounded
+  by the budget one pattern may run for, and only then fails closed — the same
+  verdict the timeout branch already returned, so no new fail-open path exists.
+  Bounding concurrency removes the false blocks rather than causing them: 0 of 4
+  where the baseline blocked 4 of 4, and the retained ceiling fell from 512.1
+  MiB to 64.0 MiB on the same workload. The worker's pattern walk is also now
+  wrapped in `obs.SafeCall` — it had no panic guard at all, and root's
+  `safeDPIScan` only looked like one because its `recover()` runs on the calling
+  goroutine and cannot see the worker's, leaving the class CHAOS-25 and
+  CHAOS-105 closed everywhere else open on the response-scanning path.
+  `dpi_inflight`, `dpi_inflight_max`, `dpi_saturation_blocks`,
+  `dpi_abandoned_workers` and `dpi_match_panics` are exposed on the role-gated
+  `/api/security-scan/status` with two tiles in the admin UI; the saturation log
+  names capacity and is rate-limited, and an approaching-saturation warning
+  fires at 80% of the cap. No new operator setting: the cap is derived from the
+  CPU allowance, so it tracks a container's cgroup quota automatically.
+
 - **A category-feed archive of exactly the ingest byte budget is accepted
   instead of failing every round.** The category feed's `boundedReader`
   rejected the read taken after a budget was reached without checking that any
