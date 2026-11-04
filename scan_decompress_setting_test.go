@@ -365,6 +365,36 @@ func TestScanDecompressSetting_LoadRefusesOutOfRange(t *testing.T) {
 	}
 }
 
+// The refusal is operator-visible: the diagnostics row warns (it used to read
+// OK at the default, hiding that the saved value was discarded), and a valid
+// load or a successful PUT clears it.
+func TestScanDecompressSetting_RefusedPersistedValueSurfacesInDiagnostics(t *testing.T) {
+	t.Cleanup(func() { scanDecompressRejectedPersisted.Store(0) })
+	setScanDecompressRatio(t, 200)
+	applyAdminScanDecompressRatio(&AdminSettings{ScanDecompressRatioLimit: 5000})
+	ck := checkScanDecompressRatioPosture()
+	if ck.Status != diagWarn || ck.OperatorAction == "" || !strings.Contains(ck.Message, "5000") {
+		t.Fatalf("refused value row = %+v, want a warn naming 5000 with an operator action", ck)
+	}
+	if got := secscan.DecompressRatioLimit(); got != secscan.DefaultDecompressRatioLimit {
+		t.Fatalf("enforced ratio %d, want the default (behaviour unchanged)", got)
+	}
+
+	applyAdminScanDecompressRatio(&AdminSettings{ScanDecompressRatioLimit: 128})
+	if ck := checkScanDecompressRatioPosture(); strings.Contains(ck.Message, "REFUSED") {
+		t.Fatalf("a valid reload left the refused warning: %+v", ck)
+	}
+
+	applyAdminScanDecompressRatio(&AdminSettings{ScanDecompressRatioLimit: 5000})
+	withAdminSettingsPathForTest(t, "")
+	if w := putScanDecompressionAs(t, RoleAdmin, "198.51.100.178", `{"ratio_limit":64}`); w.Code != http.StatusOK {
+		t.Fatalf("PUT status %d", w.Code)
+	}
+	if ck := checkScanDecompressRatioPosture(); ck.Status != diagOK {
+		t.Fatalf("after a successful PUT the row = %+v, want ok", ck)
+	}
+}
+
 // Persist-before-apply: a failed write is a truthful 500 and the live bound is
 // untouched.
 func TestScanDecompressSetting_PersistFailureLeavesTheBoundUnchanged(t *testing.T) {
