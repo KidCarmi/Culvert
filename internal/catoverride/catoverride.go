@@ -335,16 +335,10 @@ func cloneOverrides(o Overrides) Overrides {
 // that can only be detected against the live feed at activation (F3b), since
 // overrides are validated in isolation here.
 func ComposeView(feed map[string]string, o Overrides) map[string]string {
-	assertKeys := make([]string, 0, len(o.Recategorized)+len(o.Added))
-	for host := range o.Recategorized {
-		assertKeys = append(assertKeys, host)
-	}
-	for host := range o.Added {
-		assertKeys = append(assertKeys, host)
-	}
+	suppressed := newSuffixSuppressor(o)
 	out := make(map[string]string, len(feed))
 	for host, cat := range feed {
-		if suffixSuppressed(host, o.Tombstones) || suffixSuppressed(host, assertKeys) {
+		if suppressed.covers(host) {
 			continue
 		}
 		out[host] = cat
@@ -392,16 +386,10 @@ func SealedKeys(o Overrides) map[string]bool {
 // covered subtree. That keeps a removal a real removal: a multi-category host
 // cannot survive a tombstone through one of its other categories.
 func ComposeMembership(feed map[string][]string, o Overrides) map[string][]string {
-	assertKeys := make([]string, 0, len(o.Recategorized)+len(o.Added))
-	for host := range o.Recategorized {
-		assertKeys = append(assertKeys, host)
-	}
-	for host := range o.Added {
-		assertKeys = append(assertKeys, host)
-	}
+	suppressed := newSuffixSuppressor(o)
 	out := make(map[string][]string, len(feed))
 	for host, cats := range feed {
-		if suffixSuppressed(host, o.Tombstones) || suffixSuppressed(host, assertKeys) {
+		if suppressed.covers(host) {
 			continue
 		}
 		cp := make([]string, len(cats))
@@ -417,11 +405,93 @@ func ComposeMembership(feed map[string][]string, o Overrides) map[string][]strin
 	return out
 }
 
-// suffixSuppressed reports whether host is covered by any tombstone (equal to it
-// or a subdomain of it) — the host+subdomain scope of an override key (F0 §7.5).
-func suffixSuppressed(host string, tombstones []string) bool {
-	for _, t := range tombstones {
-		if host == t || strings.HasSuffix(host, "."+t) {
+// suffixSuppressor is the set of override boundary keys whose SUBTREE a
+// composition suppresses out of the feed layer: the tombstones UNIONED with the
+// assert keys (recategorizations + additions). The union is exact rather than a
+// simplification — the predicate it replaces was "covered by a tombstone OR
+// covered by an assert key", and set membership distributes over that OR, so one
+// probe answers both and the walk below runs once per feed host instead of twice.
+type suffixSuppressor struct {
+	keys map[string]struct{}
+	// maxLen is the longest key in the set. It is the HOST-LENGTH bound on the
+	// walk in covers: a key can only ever equal a candidate of the SAME length,
+	// so any candidate longer than this cannot match and must not be hashed.
+	// Without it the walk hashed every ancestor suffix of the host, which sums to
+	// O(len(host)^2) on a dot-dense authority — trading a quadratic in the
+	// override count for a quadratic in the host length, which is precisely the
+	// failure mode the CHAOS-69 doctrine exists to refuse ("a bound is a property
+	// of the POSITION as well as the value"). Override keys are NormalizeHost-
+	// bounded to 253 octets, so this caps the hashing at a constant regardless of
+	// how long the composed host is.
+	maxLen int
+}
+
+// newSuffixSuppressor collects every key a composition makes authoritative over
+// its own subtree. Same key set as SealedKeys by construction (that is the point
+// — the keys ComposeView/ComposeMembership suppress-then-reinsert are exactly the
+// keys a membership suffix-walk must stop at), but kept as its own unexported
+// probe type so the public SealedKeys contract and this internal fast path can
+// change independently. A no-op override set returns the zero value, which covers
+// nothing and allocates nothing.
+func newSuffixSuppressor(o Overrides) suffixSuppressor {
+	n := len(o.Tombstones) + len(o.Recategorized) + len(o.Added)
+	if n == 0 {
+		return suffixSuppressor{}
+	}
+	s := suffixSuppressor{keys: make(map[string]struct{}, n)}
+	add := func(host string) {
+		s.keys[host] = struct{}{}
+		if len(host) > s.maxLen {
+			s.maxLen = len(host)
+		}
+	}
+	for _, host := range o.Tombstones {
+		add(host)
+	}
+	for host := range o.Recategorized {
+		add(host)
+	}
+	for host := range o.Added {
+		add(host)
+	}
+	return s
+}
+
+// covers reports whether host is covered by any override key — equal to it or a
+// subdomain of it, the host+subdomain scope of an override key (F0 §7.5).
+//
+// This walks the HOST's ancestor suffixes and probes the key set — the idiom
+// checkSuffixConflicts already uses in validate.go — instead of scanning the key
+// list once per feed host. That is the whole optimization: suppression is now
+// O(labels(host)) and allocation-free rather than O(overrides) with a `"."+key`
+// concatenation per (host, key) pair. Composition walks the ENTIRE feed snapshot
+// (up to urlcatfeed.MaxArtifactSize of entries) on every activation, every
+// override-only recompose, and every bulk-apply reference validation, so the old
+// form was quadratic in feed x overrides and shed F x M transient strings
+// whenever a key exceeded the compiler's 32-byte stack concat buffer.
+//
+// EQUIVALENCE: `strings.HasSuffix(host, "."+key)` holds exactly when key is the
+// remainder of host after one of host's dots, so enumerating those remainders and
+// probing the set decides the same predicate. The equality arm is the first probe.
+// The degenerate empty key is preserved too: it matched only a trailing-dot host
+// before, and here only such a host yields "" as its final remainder.
+func (s suffixSuppressor) covers(host string) bool {
+	if len(s.keys) == 0 {
+		return false
+	}
+	if len(host) <= s.maxLen {
+		if _, ok := s.keys[host]; ok {
+			return true // host == key
+		}
+	}
+	for i := strings.IndexByte(host, '.'); i >= 0; i = strings.IndexByte(host, '.') {
+		host = host[i+1:]
+		// Skipping, not stopping: the remainders shrink as the walk advances, so
+		// one that is still too long to match says nothing about the next.
+		if len(host) > s.maxLen {
+			continue
+		}
+		if _, ok := s.keys[host]; ok {
 			return true
 		}
 	}
