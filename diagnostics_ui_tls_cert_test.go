@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +53,36 @@ func TestAdminUITLSCertDiagnostics(t *testing.T) {
 	if len(rows) != 1 || rows[0].Code != "ui_tls_cert_corrupt" || rows[0].Status != diagWarn {
 		t.Fatalf("corrupt pair must warn, got %+v", rows)
 	}
+
+	// Saved-but-not-serving pair → pending-restart row; none once active.
+	dir := t.TempDir()
+	prevDir, prevActive := dataDir, uiCustomTLSActive
+	t.Cleanup(func() { dataDir, uiCustomTLSActive = prevDir, prevActive })
+	dataDir = dir
+	set(false, 0, false)
+	uiCustomTLSActive = false
+	if rows := checkAdminUITLSCert(); len(rows) != 0 {
+		t.Fatalf("no saved pair must add no row, got %+v", rows)
+	}
+	for _, f := range []string{customUITLSCertPath(), customUITLSKeyPath()} {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows = checkAdminUITLSCert()
+	if len(rows) != 1 || rows[0].Code != "ui_tls_cert_pending" || rows[0].Status != diagWarn || rows[0].OperatorAction == "" {
+		t.Fatalf("saved-but-inactive pair must warn pending, got %+v", rows)
+	}
+	uiCustomTLSActive = true
+	if rows := checkAdminUITLSCert(); len(rows) != 0 {
+		t.Fatalf("an active pair must add no pending row, got %+v", rows)
+	}
+	uiCustomTLSActive = false
+	set(false, 0, true)
+	if rows := checkAdminUITLSCert(); len(rows) != 1 || rows[0].Code != "ui_tls_cert_corrupt" {
+		t.Fatalf("corrupt must not also read as pending, got %+v", rows)
+	}
+	dataDir = prevDir
 
 	found := false
 	for _, c := range buildOperatorContract().Checks {
@@ -121,5 +153,115 @@ func TestAdminUITLSCertExpiryActionBySource(t *testing.T) {
 		if strings.Contains(action, "/") && strings.Contains(action, ".pem") {
 			t.Errorf("action must not carry a file path, got %q", action)
 		}
+	}
+}
+
+// Codex review, PR #1799: uiCustomTLSActive is set once at startup, so after
+// the server boots with uploaded pair A and an admin uploads replacement B,
+// the flag still reads true while adminUIServeOnce keeps serving A. The
+// pending row must compare the saved certificate with the one actually
+// serving, not trust the startup source flag.
+func TestAdminUITLSCertPendingAfterReplacementUpload(t *testing.T) {
+	withTempDataDirForUITLS(t)
+	adminUITLSCertMu.Lock()
+	prevAt, prevKnown, prevLeaf := adminUITLSCertNotAfter, adminUITLSCertKnown, adminUITLSCertChainSHA256
+	adminUITLSCertMu.Unlock()
+	t.Cleanup(func() {
+		adminUITLSCertMu.Lock()
+		adminUITLSCertNotAfter, adminUITLSCertKnown, adminUITLSCertChainSHA256 = prevAt, prevKnown, prevLeaf
+		adminUITLSCertMu.Unlock()
+	})
+
+	now := time.Now()
+	certA, keyA := newCAPair(t, "ui-a", now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	certB, keyB := newCAPair(t, "ui-b", now.Add(-time.Hour), now.Add(90*24*time.Hour))
+
+	// Boot with A: persisted, selected at startup, bound and serving.
+	if err := persistCustomUITLS(certA, keyA); err != nil {
+		t.Fatal(err)
+	}
+	if c, k := resolveUITLSCertKey("", ""); c != customUITLSCertPath() || k != customUITLSKeyPath() || !uiCustomTLSActive {
+		t.Fatalf("persisted pair A must be selected at startup, got (%q, %q) active=%v", c, k, uiCustomTLSActive)
+	}
+	servingA, err := tls.X509KeyPair(certA, keyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteAdminUITLSCertExpiry(servingA)
+	if rows := checkAdminUITLSCert(); len(rows) != 0 {
+		t.Fatalf("serving the saved pair must add no row, got %+v", rows)
+	}
+
+	// Admin uploads replacement B: saved, but A is still the one served.
+	if err := persistCustomUITLS(certB, keyB); err != nil {
+		t.Fatal(err)
+	}
+	rows := checkAdminUITLSCert()
+	if len(rows) != 1 || rows[0].Code != "ui_tls_cert_pending" || rows[0].Status != diagWarn {
+		t.Fatalf("replacement B saved while A serves must warn pending, got %+v", rows)
+	}
+
+	// Once B is what the listener bound (restart or a re-bind attempt), the
+	// pending row clears.
+	servingB, err := tls.X509KeyPair(certB, keyB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteAdminUITLSCertExpiry(servingB)
+	if rows := checkAdminUITLSCert(); len(rows) != 0 {
+		t.Fatalf("serving the replacement must clear the pending row, got %+v", rows)
+	}
+}
+
+// TestAdminUITLSCertPendingAfterChainOnlyChange is the same-leaf case: the
+// operator re-uploads the serving leaf and key with a corrected intermediate
+// chain. The leaf is unchanged, but the listener keeps the chain it loaded at
+// bind time until a restart, so the row must still report pending.
+func TestAdminUITLSCertPendingAfterChainOnlyChange(t *testing.T) {
+	withTempDataDirForUITLS(t)
+	adminUITLSCertMu.Lock()
+	prevAt, prevKnown, prevChain := adminUITLSCertNotAfter, adminUITLSCertKnown, adminUITLSCertChainSHA256
+	adminUITLSCertMu.Unlock()
+	t.Cleanup(func() {
+		adminUITLSCertMu.Lock()
+		adminUITLSCertNotAfter, adminUITLSCertKnown, adminUITLSCertChainSHA256 = prevAt, prevKnown, prevChain
+		adminUITLSCertMu.Unlock()
+	})
+
+	now := time.Now()
+	leaf, key := newCAPair(t, "ui-leaf", now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	intermediate, _ := newCAPair(t, "ui-intermediate", now.Add(-time.Hour), now.Add(90*24*time.Hour))
+
+	if err := persistCustomUITLS(leaf, key); err != nil {
+		t.Fatal(err)
+	}
+	if c, k := resolveUITLSCertKey("", ""); c != customUITLSCertPath() || k != customUITLSKeyPath() || !uiCustomTLSActive {
+		t.Fatalf("persisted pair must be selected at startup, got (%q, %q) active=%v", c, k, uiCustomTLSActive)
+	}
+	serving, err := tls.X509KeyPair(leaf, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteAdminUITLSCertExpiry(serving)
+	if rows := checkAdminUITLSCert(); len(rows) != 0 {
+		t.Fatalf("serving the saved pair must add no row, got %+v", rows)
+	}
+
+	bundle := append(append([]byte{}, leaf...), intermediate...)
+	if err := persistCustomUITLS(bundle, key); err != nil {
+		t.Fatal(err)
+	}
+	rows := checkAdminUITLSCert()
+	if len(rows) != 1 || rows[0].Code != "ui_tls_cert_pending" || rows[0].Status != diagWarn {
+		t.Fatalf("same leaf with a new chain saved while the old chain serves must warn pending, got %+v", rows)
+	}
+
+	servingBundle, err := tls.X509KeyPair(bundle, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteAdminUITLSCertExpiry(servingBundle)
+	if rows := checkAdminUITLSCert(); len(rows) != 0 {
+		t.Fatalf("serving the new chain must clear the pending row, got %+v", rows)
 	}
 }
