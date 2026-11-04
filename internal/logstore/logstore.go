@@ -464,39 +464,20 @@ func (s *Store) Add(e Entry) {
 
 // writeLoop drains the queue, batching writes and flushing on a timer so the
 // store keeps up with bursty traffic without a fsync per entry.
+//
+// The encode step runs through one retained batchEncoder (batchencode.go)
+// rather than a json.Marshal per entry, so a batch costs no per-entry
+// allocation. Its three safety invariants are enforced by the shape of
+// flushBatch below — encode everything, THEN hand out subslices, and reset
+// only after Flush has returned — and are documented at that type.
 func (s *Store) writeLoop() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	batch := make([]Entry, 0, 256)
+	batch := make([]Entry, 0, flushBatchSize)
+	enc := newBatchEncoder()
 
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		wb := s.db.NewWriteBatch()
-		var added int64
-		for i := range batch {
-			b, err := json.Marshal(batch[i])
-			if err != nil {
-				continue
-			}
-			key := storeKey(batch[i].TS, atomic.AddUint32(&s.seq, 1))
-			ent := badger.NewEntry(key, b)
-			if ttl := time.Duration(atomic.LoadInt64(&s.ttlNanos)); ttl > 0 {
-				ent = ent.WithTTL(ttl)
-			}
-			_ = wb.SetEntry(ent)
-			added += int64(len(key) + len(b))
-		}
-		if err := wb.Flush(); err != nil {
-			obs.Printf("WARN logstore: batch flush: %v", err)
-			batch = batch[:0]
-			return
-		}
-		atomic.AddInt64(&s.bytesUsed, added)
-		batch = batch[:0]
-	}
+	flush := func() { batch = s.flushBatch(enc, batch) }
 
 	for {
 		select {
@@ -506,13 +487,65 @@ func (s *Store) writeLoop() {
 				return
 			}
 			batch = append(batch, e)
-			if len(batch) >= 256 {
+			if len(batch) >= flushBatchSize {
 				flush()
 			}
 		case <-ticker.C:
 			flush()
 		}
 	}
+}
+
+// flushBatchSize is the entry count that forces a flush; the 500ms ticker
+// flushes whatever is short of it.
+const flushBatchSize = 256
+
+// flushBatch encodes and writes one batch, returning the emptied batch slice
+// (capacity retained) for the caller to refill. It is a method so the flush
+// path is reachable from a benchmark without driving the whole write loop.
+//
+// Behaviour preserved from the per-entry json.Marshal form it replaces: an
+// entry that fails to encode is SKIPPED — it consumes no sequence number and
+// does not abort the batch — and a failed Flush drops the batch after logging,
+// without crediting bytesUsed.
+func (s *Store) flushBatch(enc *batchEncoder, batch []Entry) []Entry {
+	if len(batch) == 0 {
+		return batch
+	}
+	// Pass 1: encode every entry into the shared buffer. No record bytes may
+	// be read yet — append can still move the backing array (invariant 1).
+	enc.reset()
+	for i := range batch {
+		enc.add(i, &batch[i])
+	}
+
+	// Pass 2: the buffer is final, so subslices are now stable.
+	wb := s.db.NewWriteBatch()
+	var added int64
+	for i := range enc.recs {
+		val := enc.at(i)
+		key := storeKey(batch[enc.recs[i].entry].TS, atomic.AddUint32(&s.seq, 1))
+		ent := badger.NewEntry(key, val)
+		// Read per entry, exactly as the replaced loop did. Hoisting this out
+		// of the loop would make a runtime retention change apply to the whole
+		// in-flight batch instead of the entries after it — a different (if
+		// minor) semantic, and this change is only about the allocation.
+		if ttl := time.Duration(atomic.LoadInt64(&s.ttlNanos)); ttl > 0 {
+			ent = ent.WithTTL(ttl)
+		}
+		_ = wb.SetEntry(ent)
+		added += int64(len(key) + len(val))
+	}
+
+	// Flush waits for every pending write, and Badger copies values into the
+	// memtable arena, so no reference to enc.buf outlives this call — which is
+	// what makes the next reset() safe (invariant 2).
+	if err := wb.Flush(); err != nil {
+		obs.Printf("WARN logstore: batch flush: %v", err)
+		return batch[:0]
+	}
+	atomic.AddInt64(&s.bytesUsed, added)
+	return batch[:0]
 }
 
 // Close drains pending writes and closes the database. Safe to call once.

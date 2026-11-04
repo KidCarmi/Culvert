@@ -25,7 +25,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -953,7 +955,7 @@ func (tf *Feed) fetchTextFeed(ctx context.Context, feedURL, source string, urls,
 
 	now := time.Now()
 	count := 0
-	sc := bufio.NewScanner(resp.Body)
+	sc := bufio.NewScanner(&boundedReader{r: resp.Body, what: "feed body", limit: maxFeedBodyBytes})
 	for sc.Scan() && count < maxFeedLines {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -1345,3 +1347,68 @@ func (tf *Feed) SetEnabledForTest(enabled bool) (old bool) {
 	tf.mu.Unlock()
 	return old
 }
+
+// boundedReader fails the read once more than limit bytes have been consumed,
+// naming which budget was spent. io.LimitReader is deliberately not used: it
+// reports a spent budget as a clean io.EOF, which bufio.Scanner reports as a
+// complete body — so an overrun would be recorded as a successful short feed
+// and would reset this feed's retry ladder.
+// errBudgetExceeded marks a spent byte budget, so a caller can tell an origin
+// that overran its budget from a transport that simply ended.
+var errBudgetExceeded = errors.New("feed byte budget exceeded")
+
+type boundedReader struct {
+	r     io.Reader
+	what  string
+	limit int64
+	read  int64
+}
+
+func (b *boundedReader) Read(p []byte) (int, error) {
+	if b.read > b.limit {
+		return 0, b.exceeded()
+	}
+	if b.read == b.limit {
+		return b.probeBoundary()
+	}
+	if over := b.read + int64(len(p)) - b.limit; over > 0 {
+		p = p[:int64(len(p))-over]
+	}
+	n, err := b.r.Read(p)
+	b.read += int64(n)
+	return n, err
+}
+
+// probeBoundary decides a spent budget by evidence rather than by position. A
+// body of EXACTLY limit bytes is within budget, but its final read need not
+// carry io.EOF: a chunked response that flushes its last payload before the
+// terminating chunk returns the data with a nil error and io.EOF only on the
+// next call. Treating that next call as an overrun rejected a valid feed at
+// the boundary on every round (Codex review, PR #1796). So read ONE more byte:
+// a clean io.EOF is a complete body, a real byte is the overrun, and any other
+// outcome (a transport error, or a no-progress (0, nil)) is passed through.
+func (b *boundedReader) probeBoundary() (int, error) {
+	var one [1]byte
+	n, err := b.r.Read(one[:])
+	if n > 0 {
+		b.read += int64(n)
+		return 0, b.exceeded()
+	}
+	return 0, err
+}
+
+func (b *boundedReader) exceeded() error {
+	return fmt.Errorf("%s exceeded its %d-byte budget: %w", b.what, b.limit, errBudgetExceeded)
+}
+
+// maxFeedBodyBytes bounds the BYTES, which maxFeedLines does not. maxFeedLines
+// is a real retention bound and this loop was never the memory risk its
+// siblings were (CHAOS-109 corrects CHAOS-108 §8.3, which lumped all three
+// loops together as unbounded) — but the accept loop `continue`s on blank and
+// '#' lines WITHOUT charging the counter, so a body of nothing but comments is
+// scanned for the full feedHTTPTimeout while the cap never advances. That costs
+// CPU and bandwidth, not heap, so this budget is a work bound rather than a
+// memory bound. 64 MiB is ~20x the largest published URLhaus/OpenPhish export.
+//
+// var, not const, so the bound gate can lower it; production never assigns it.
+var maxFeedBodyBytes int64 = 64 << 20

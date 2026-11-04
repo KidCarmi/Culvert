@@ -7,12 +7,105 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **The canonical-header-key gate now covers the direct map index, which is the
+  failure it exists to prevent.** `TestCanonicalHeaderKeys_Tree` required every
+  header key in production Go to be spelled in textproto canonical form, and
+  its own documentation named the reason: `scrubForwardedHeaders` reads
+  `r.Header[hdrForwardedFor]` as a direct slice, and indexing a map does not
+  canonicalise, so a non-canonical key there misses the header outright rather
+  than merely costing an allocation. The matcher checked only two shapes — a
+  literal handed to `Header.Get`/`Set`/`Del`/`Add`/`Values`, and a declaration
+  named `hdr*`/`header*` — so an `*ast.IndexExpr` (`r.Header["X-Real-IP"]`), a
+  `delete(r.Header, "X-Real-IP")`, and any constant named outside that
+  convention were all invisible. Rewriting the scrub's `X-Real-IP` branch in
+  the direct-index form the function already uses two statements above it, with
+  the spelling every external document uses, left the gate green over a live
+  scrub bypass: the private hop survives and is forwarded upstream, and on the
+  `X-User-Identity` leg a client-supplied identity claim reaches the upstream.
+  Three arms are added to the one matcher the self-check exercises — index,
+  `delete()`, and constant resolution so a key is judged by its declared value
+  rather than by the spelling of its identifier — each package is type-checked
+  with stubbed imports so an identifier resolves by lexical scope to the
+  declaration Go binds it to, and an unrelated function-local constant of the
+  same name can neither excuse nor convict a package-level one — proved in both
+  directions against the real tree. The map-keyed arms require a hyphen in the
+  key, because a JOSE token's `Header` claim map is spelled identically to an
+  `http.Header` index and telling them apart otherwise needs net/http's real
+  types, which the stubbed-import check does not load; the
+  single-token field names in this tree are declared under the `hdr`/`header`
+  convention and stay covered at their declaration. No production behaviour
+  changes; latent at the time of the fix, with every header-name constant in
+  the tree already canonical.
+
 ### Fixed
+
+- **A category-feed archive of exactly the ingest byte budget is accepted
+  instead of failing every round.** The category feed's `boundedReader`
+  rejected the read taken after a budget was reached without checking that any
+  byte had actually exceeded it. A body of exactly the budget whose final read
+  returns data with a nil error and reports `io.EOF` only on the next call — the
+  shape of a chunked response that flushes its last payload before the
+  terminating chunk — was therefore charged as an origin overrun, which fails
+  the whole sync round and leaves the category database frozen at its last-good
+  contents for as long as the feed stays that size. The same off-by-one was
+  corrected in the remote-blocklist and threat-feed copies of this reader, but
+  the category-feed copy, which carries a budget on the compressed body and a
+  second on the decompressed archive, was missed. At the boundary the reader now
+  probes for one more byte: a clean `io.EOF` completes the body, a real byte is
+  the overrun, and a transport error passes through as itself so an origin is
+  not blamed for a budget it did not overrun. Enforcement is unchanged one byte
+  past the budget, and the sentinel that routes an overrun to a failed round
+  rather than to the log-and-continue arm a corrupt member takes is preserved.
+- **Feed ingestion now has a declared byte budget, so a third-party feed origin can no longer exhaust the gateway's memory.** The UT1 category feed is a 50+ MB gzip tarball fetched from a community GitHub mirror and expanded in-process on every node, and the only limit on how much that origin could spend was a five-minute HTTP timeout. The per-category domain cap was charged to a counter local to one archive member, and tar permits duplicate member paths, so an origin stepped around it by repeating a path (measured: 40 duplicate members produced exactly 2,000,000 live map entries without any member reaching the cap). Live-heap amplification was ~50x and linear, the domain map is reachable for the whole parse so the GOMEMLIMIT backstop could not reclaim it, and the round's panic guard cannot see an out-of-memory — and because the feed syncs immediately when the category database is empty while the write that populates it is the step that never runs, a broken or hostile mirror was a crash loop rather than a transient outage. The category feed now bounds the compressed body, the expansion and the aggregate entry count; the remote blocklist feed, which retained every line with no ceiling, bounds its body and line count; and the threat feed bounds its body so a comment-only response cannot be scanned for the full timeout. Byte overruns fail the round and leave the last-good data authoritative; entry and line caps truncate and log, which cannot remove existing coverage because the writes overwrite and never delete. A legitimate feed is unaffected.
 
 - **`install.sh` no longer writes invalid TOML when `allow_peers` has a trailing comma.** Wiring Release Management into an existing `/etc/culvert-maint/config.toml` with `allow_peers = ["alice",]` produced `["alice",, "1000"]`, which the maintenance agent refuses to parse. The append now reuses the existing comma.
 
+### Performance
+
+- **Folding admin category overrides onto the SaaS feed snapshot is no longer
+  quadratic, so a large override set cannot stall a feed activation.**
+  `catoverride.ComposeView`/`ComposeMembership` asked, for every host in the
+  feed-owned snapshot, whether any override key covered it — by scanning the
+  key list and building `"." + key` for each pair. Composition therefore cost
+  O(feed x overrides), and the concatenation shed one transient string per pair
+  once a key passed the 32-byte stack buffer Go uses for a non-escaping concat,
+  which a realistic tenant subdomain does. This runs over the ENTIRE snapshot
+  (capped at an 8 MiB artifact, roughly 240,000 entries) on every signed
+  activation and every override-only recompose, under the activation
+  coordinator's lock, and again on every bulk category apply's reference
+  validation — an admin request path. Nothing caps the override count, so the
+  second factor is operator-controlled and unbounded: at 100,000 feed hosts and
+  1,024 override keys one composition measured **1,322 ms, now 16.8 ms
+  (-98.7%)**, and a long-key set shed 320,018 transient allocations where it now
+  sheds 22. Suppression now collects the override boundary keys once and walks
+  each host's ancestor suffixes against that set — the idiom the package's own
+  `checkSuffixConflicts` already used — so it is O(labels(host)) and
+  allocation-free. The set also carries its longest key length and skips any
+  longer candidate unhashed, which bounds the walk by the key length rather than
+  the host length; without it the fix would have traded a quadratic in the
+  override count for a quadratic in a dot-dense host's length.
+
+  **No behavior changes.** The removed predicate and the pre-change composition
+  bodies are kept frozen in-tree as a differential oracle and asserted equal
+  over degenerate host spellings and 4,000 randomized override sets. A single
+  non-covering override key is 14-26% slower (one `strings.HasSuffix` beats a
+  hashed probe plus a label walk); the crossover is between 1 and 16 keys, and
+  the +1.8 ms that costs an activation is not worth a branch in a
+  security-relevant composition.
+
 ### Changed
 
+- **Diagnostics now shows an uploaded admin UI certificate that is saved but not
+  yet serving.** The upload takes effect only after a restart (and never while
+  `-tls-cert`/`-tls-key` are set), but only the Certificates panel said so, so
+  the report read healthy while the GUI kept the old certificate. New
+  `ui_tls_cert_pending` WARN row (additive, report-only, absent once active or
+  corrupt). It compares the saved certificate chain with the one the listener
+  bound, so a replacement uploaded while an earlier upload is serving, including
+  the same leaf with corrected intermediates, also reads as pending. TLS serving
+  is unchanged.
 - **Diagnostics now warns when destination-country rules cannot match because
   no GeoIP database is loaded.** An enabled `destCountry` rule never matches
   without a database, so a country block silently stops blocking; this was
@@ -71,6 +164,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   used as direct map indices, where a non-canonical spelling misses the header
   outright. `_test.go` is deliberately out of its scope so deliberately
   non-canonical client fixtures stay as negative controls.
+
+- **The request-log history store no longer allocates per entry when it
+  flushes, removing ~3 allocations and ~1 KB of garbage per proxied request.**
+  The store takes one entry per request, and its flush path encoded each one
+  with its own `json.Marshal` — an API that returns a freshly heap-allocated
+  slice every call — so the garbage it produced scaled with request rate. A
+  256-entry batch (the flush cap) cost 768 allocations and 271 KB. The batch is
+  now encoded through one retained buffer and one retained `json.Encoder`, with
+  Badger handed a subslice per entry: the encode step measures 382,893 →
+  257,023 ns/op and 271,447 → 793 B/op with **768 allocations → 0**, and the
+  whole flush including the Badger write 863,955 → 629,234 ns/op and 399,669 →
+  129,875 B/op. The win holds at every batch size the 500 ms flush ticker
+  produces, down to a single entry, so a lightly loaded gateway gains too. This
+  is the shape the JSONL request-log sink (`internal/reqlog`) already used; the
+  history store is its sibling on the same entry type and had not been given it.
+
+  **No behavior, and no stored bytes, change.** `json.Encoder.Encode` writes
+  exactly `json.Marshal`'s compact output plus one newline, with the same
+  default HTML escaping, so dropping that byte reproduces the previous value
+  exactly; a differential test pins every record against `json.Marshal` across
+  the empty entry, HTML-escapable runes, invalid UTF-8, U+2028/U+2029, the
+  nested `dec` block and a buffer-growing record, so a future change in
+  `encoding/json` fails the build rather than silently rewriting stored
+  records. An unencodable entry is still skipped without consuming a sequence
+  number, a failed flush still drops the batch without crediting the byte
+  counter, and the TTL is still read per entry. `internal/logstore` previously
+  had no benchmark coverage; it now carries the before/after arms, batch-size
+  regression arms and contended-producer arms.
 
 - **An unreadable `admin_settings.json` is now visible in Diagnostics and
   alerted, not just logged.** When the file exists but cannot be read
@@ -452,6 +573,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the admin UI's TLS certificate is expiring,
+  expired, or the uploaded pair is corrupt.** These were visible only on the
+  Certificates panel; the one-page report read as healthy until browsers refused
+  the GUI. New `ui_tls_cert_expiry` (30 days or less) and `ui_tls_cert_corrupt`
+  WARN rows (additive, report-only, nothing for the self-signed fallback) carry
+  only a day count. TLS serving is unchanged.
 - **Diagnostics now warns when the cluster rate-limit broadcast is stale.** A
   Data Plane that stops receiving the Control Plane broadcast falls back to its
   local limit by design, but that was visible only in a log line, a metric and
