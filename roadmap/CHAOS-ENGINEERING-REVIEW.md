@@ -198,6 +198,30 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-11-04 — `CHAOS-110` CLAIMED (placeholder, commit one). Domain: the DPI
+SCAN GOROUTINE — `internal/scanner` spawns one abandonable worker per inspected
+response body, so how many of them can exist at once, who counts them, and what
+does the gateway do to legitimate traffic when the engine is saturated?** Id
+claimed in this committed row before any code was written, per the convention
+above, and checked against `origin/main` rather than the working tree, per the
+2026-09-25 amendment: `CHAOS-109` is the highest id anywhere on `origin/main`
+(at `2d03196`), and no open PR holds a chaos id at claim time (#1803, #1802,
+#1705, #1549, #1548, #1536, #1528, #1526 — none is a chaos sweep), so this
+sweep took 110 and will not move.
+
+Scope is the SIMULATE list's *CPU starvation* / *memory pressure* / *thousands
+of simultaneous connections* rows asked about the one scanner producer whose
+rate is set by CLIENT traffic rather than by the operator, and it closes the
+2026-10-13 backlog's `X-5` — the row the 2026-10-30 round re-confirmed as open
+while correcting its per-pattern wording. CHAOS-52 asked what the scan path
+does when a scanner is SLOW and CHAOS-53 what it does when one is SATURATED;
+both asked about the sidecar and ClamAV, i.e. producers behind a network hop.
+This round asks it about the in-process regex engine, where the cost is paid in
+this process's own goroutines, heap and CPU, and where the twin
+(`internal/yara`) already ships the counted, posture-governed in-flight cap that
+this one does not. Findings, measurements and gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-04.md).
+
 **2026-11-02 — `CHAOS-109` CLAIMED (placeholder, commit one). Domain: the
 CATEGORY-FEED INGESTION PATH — a 50+ MB gzip tarball is fetched from a
 third-party mirror and expanded in-process on every node, so how many bytes is
