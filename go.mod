@@ -11,6 +11,29 @@ go 1.27.0
 // roadmap/CI-REDESIGN.md §20.
 toolchain go1.27.3
 
+// GODEBUG pins: compatibility defaults this gateway's posture depends on.
+//
+// The `go` line above is not only a language minimum — it SELECTS the default
+// value of every GODEBUG compatibility setting (`go doc godebug`), so a
+// dependency that requires a newer language version silently changes runtime
+// security behavior. That is how `x509sslcertoverrideplatform` flipped here:
+// sigstore-go v1.4.0 declares `go 1.27.0`, which forced this module's `go` line
+// from 1.26.6 to 1.27.0 (PR #1790), and Go 1.27 changed that setting's default
+// from 0 to 1. At 1 a `SSL_CERT_FILE`/`SSL_CERT_DIR` in the process environment
+// REPLACES the platform certificate verifier on the darwin and windows release
+// binaries — displacing the trust anchors `upstreamVerifyRoots` uses to verify
+// upstream certificates on SSL-inspected tunnels (proxy_tunnel.go). Pinned to 0
+// to keep the platform verifier authoritative there, which is the behavior that
+// shipped before that bump and the deterministic, non-environment-displaceable
+// one. Linux is unaffected either way: crypto/x509 honors both variables on
+// linux at either value.
+//
+// Every pin here is reviewed and asserted by godebug_pins_test.go, which
+// compares this list against the DefaultGODEBUG compiled into the binary. Do
+// not add or drop a line without recording why; an unpinned default is one a
+// dependency bump can change without review.
+godebug x509sslcertoverrideplatform=0
+
 require (
 	github.com/KidCarmi/Sluice v0.2.1-0.20260902055746-d6d4394ab74f
 	github.com/andybalholm/brotli v1.2.7
