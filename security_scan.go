@@ -364,15 +364,26 @@ func secScanStatusMap() map[string]interface{} {
 	feedOK, feedLastSuccess, feedErr := globalThreatFeed.SyncStatus()
 	hits, misses, cacheSize := globalSecScanner.CacheStats()
 	m := map[string]interface{}{
-		"enabled":                  globalSecScanner.Enabled(),
-		"scan_svc_mode":            "local",
-		"clamav_status":            globalSecScanner.ClamAVStatus(),
-		"yara_rules":               globalYARA.Count(),
-		"yara_warnings":            len(globalYARA.Warnings()), // Tier 2.1
-		"yara_inflight":            yaraInflightLoad(),         // Tier 1.3
-		"yara_inflight_max":        yaraGetMaxInflight(),       // Tier 1.3
-		"yara_match_panics":        yaraMatchPanicsLoad(),      // CHAOS-25: a match panicked (crashed) and was contained; distinct from a timeout
-		"yara_saturation_skips":    yaraSaturationSkipsLoad(),  // matches skipped at the in-flight cap; the rate-limited log no longer repeats the magnitude
+		"enabled":               globalSecScanner.Enabled(),
+		"scan_svc_mode":         "local",
+		"clamav_status":         globalSecScanner.ClamAVStatus(),
+		"yara_rules":            globalYARA.Count(),
+		"yara_warnings":         len(globalYARA.Warnings()), // Tier 2.1
+		"yara_inflight":         yaraInflightLoad(),         // Tier 1.3
+		"yara_inflight_max":     yaraGetMaxInflight(),       // Tier 1.3
+		"yara_match_panics":     yaraMatchPanicsLoad(),      // CHAOS-25: a match panicked (crashed) and was contained; distinct from a timeout
+		"yara_saturation_skips": yaraSaturationSkipsLoad(),  // matches skipped at the in-flight cap; the rate-limited log no longer repeats the magnitude
+		// CHAOS-110: the DPI engine's in-flight gate. dpi_saturation_blocks is an
+		// AVAILABILITY signal, not just a capacity one — each one is a response
+		// body that was failed closed without being inspected — and
+		// dpi_abandoned_workers is the uninterruptible-match population the cap
+		// is sized against. Role-gated surface, so the magnitudes are safe here;
+		// the public /healthz and /ready rows stay coarse by design.
+		"dpi_inflight":             dpiInflightLoad(),
+		"dpi_inflight_max":         dpiMaxInflightLoad(),
+		"dpi_saturation_blocks":    dpiSaturationBlocksLoad(),
+		"dpi_abandoned_workers":    dpiAbandonedWorkersLoad(),
+		"dpi_match_panics":         dpiMatchPanicsLoad(), // a match crashed and was contained; distinct from a timeout
 		"yara_enabled":             yaraGetEnabled(),
 		"yara_timeout_secs":        yaraGetTimeoutSecs(),
 		"yara_on_timeout":          yaraGetOnTimeout(),
