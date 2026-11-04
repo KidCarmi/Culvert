@@ -52,9 +52,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `-tls-cert`/`-tls-key` are set), but only the Certificates panel said so, so
   the report read healthy while the GUI kept the old certificate. New
   `ui_tls_cert_pending` WARN row (additive, report-only, absent once active or
-  corrupt). It compares the saved certificate with the one the listener bound,
-  so a replacement uploaded while an earlier upload is serving also reads as
-  pending. TLS serving is unchanged.
+  corrupt). It compares the saved certificate chain with the one the listener
+  bound, so a replacement uploaded while an earlier upload is serving, including
+  the same leaf with corrected intermediates, also reads as pending. TLS serving
+  is unchanged.
 - **Diagnostics now warns when destination-country rules cannot match because
   no GeoIP database is loaded.** An enabled `destCountry` rule never matches
   without a database, so a country block silently stops blocking; this was

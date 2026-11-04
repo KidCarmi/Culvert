@@ -13,7 +13,7 @@ package main
 // including a replacement uploaded while an earlier upload is serving.
 //
 // Report-only: derived from the same state GET /api/settings/network already
-// returns plus a read of the saved certificate file to fingerprint its leaf,
+// returns plus a read of the saved certificate file to fingerprint its chain,
 // no change to TLS serving. Contributes nothing for the auto
 // self-signed certificate or while a custom certificate has more than
 // uiTLSCertWarnDays of validity left. Carries no certificate subject, path or
@@ -76,7 +76,7 @@ func checkAdminUITLSCert() []OperatorContractCheck {
 // is not the certificate the admin UI is serving. uiCustomTLSActive alone is
 // not enough: it is set once at startup, and apiCertsUpload persists a
 // replacement without reloading the listener, so after A boots and B is
-// uploaded the flag still reads true while A is served. The saved leaf is
+// uploaded the flag still reads true while A is served. The saved chain is
 // therefore compared with the one recorded at bind time. When either
 // fingerprint is unavailable (no custom bind yet, unreadable file) it keeps
 // the startup-flag answer rather than guess.
@@ -87,8 +87,8 @@ func uploadedUITLSCertPending() bool {
 	if !uiCustomTLSActive {
 		return true
 	}
-	serving, bound := adminUITLSServingLeafSHA256()
-	saved, ok := savedCustomUITLSLeafSHA256()
+	serving, bound := adminUITLSServingChainSHA256()
+	saved, ok := savedCustomUITLSChainSHA256()
 	return bound && ok && serving != saved
 }
 
