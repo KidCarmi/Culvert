@@ -293,34 +293,64 @@ func TestCHAOS106_EveryDecompressCallSiteConsultsTheRefusal(t *testing.T) {
 // chaos106CallSiteViolations reports how many decompressForScan call sites one
 // parsed file holds, and which of them do not fail closed on the refusal. A
 // conforming site assigns BOTH results, names the second one, and branches on
-// that name somewhere in the same file.
+// that name inside the FUNCTION that holds the call.
+//
+// The branch is scoped to the enclosing function rather than to the file,
+// because `bomb` is the name every conforming site already uses. Under a
+// file-wide search the FIRST conforming site in a file licenses every later
+// site in that file to bind the same name and never branch on it — so the wall
+// reports a clean gate for a file that contains a live bypass. That is not a
+// hypothetical shape: a second response path is most likely to be added to
+// proxy_tunnel.go, which is exactly the file that already carries `if bomb {`.
+// Proved in both directions by
+// TestCHAOS106_CallSiteWallScopesTheBranchToItsOwnFunction.
 func chaos106CallSiteViolations(fset *token.FileSet, f *ast.File) (sites int, violations []string) {
 	conforming := map[token.Pos]bool{}
 	refused := map[token.Pos]string{}
-	ast.Inspect(f, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
-		if !ok || len(as.Rhs) != 1 {
+
+	// classify judges every call site in ONE function scope. A nested function
+	// literal gets its own scope, so a refusal bound inside a closure is not
+	// excused by an `if` on the same name in the enclosing function — that is a
+	// different variable. A call site in no function at all (a package-level
+	// var initializer) is classified by neither branch here and therefore
+	// reaches the counting pass below as a violation, which is correct: there
+	// is nothing there that could fail closed.
+	var classify func(scope ast.Node)
+	classify = func(scope ast.Node) {
+		ast.Inspect(scope, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.FuncLit); ok && ast.Node(lit) != scope {
+				classify(lit)
+				return false
+			}
+			as, ok := n.(*ast.AssignStmt)
+			if !ok || len(as.Rhs) != 1 {
+				return true
+			}
+			call, ok := as.Rhs[0].(*ast.CallExpr)
+			if !ok || !chaos106IsDecompressCall(call) {
+				return true
+			}
+			if len(as.Lhs) != 2 {
+				refused[call.Pos()] = "does not bind both results as (bytes, refused), so the refusal is not even received"
+				return true
+			}
+			id, ok := as.Lhs[1].(*ast.Ident)
+			switch {
+			case !ok || id.Name == "_":
+				refused[call.Pos()] = "discards the decompression refusal; a dropped refusal turns the CHAOS-106 expansion bound into a scanner bypass, with the attacker choosing the ratio that silences the scanners"
+			case !chaos106BranchesOn(scope, id.Name):
+				refused[call.Pos()] = "binds the refusal to " + id.Name + " but no `if` in the function that holds the call branches on it, so nothing fails closed"
+			default:
+				conforming[call.Pos()] = true
+			}
 			return true
+		})
+	}
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
+			classify(fd.Body)
 		}
-		call, ok := as.Rhs[0].(*ast.CallExpr)
-		if !ok || !chaos106IsDecompressCall(call) {
-			return true
-		}
-		if len(as.Lhs) != 2 {
-			refused[call.Pos()] = "does not bind both results as (bytes, refused), so the refusal is not even received"
-			return true
-		}
-		id, ok := as.Lhs[1].(*ast.Ident)
-		switch {
-		case !ok || id.Name == "_":
-			refused[call.Pos()] = "discards the decompression refusal; a dropped refusal turns the CHAOS-106 expansion bound into a scanner bypass, with the attacker choosing the ratio that silences the scanners"
-		case !chaos106BranchesOn(f, id.Name):
-			refused[call.Pos()] = "binds the refusal to " + id.Name + " but no `if` in this file branches on it, so nothing fails closed"
-		default:
-			conforming[call.Pos()] = true
-		}
-		return true
-	})
+	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok || !chaos106IsDecompressCall(call) {
@@ -348,12 +378,15 @@ func chaos106IsDecompressCall(call *ast.CallExpr) bool {
 	return ok && id.Name == "decompressForScan"
 }
 
-// chaos106BranchesOn reports whether any if-condition in f tests name. Kept
-// permissive on the SHAPE of the condition (`if bomb`, `if bomb || x`) and
-// strict on its absence, which is the only thing that reopens the bypass.
-func chaos106BranchesOn(f *ast.File, name string) bool {
+// chaos106BranchesOn reports whether any if-condition within scope tests name.
+// Kept permissive on the SHAPE of the condition (`if bomb`, `if bomb || x`) and
+// on WHERE inside the scope it sits (a closure defined in the same function
+// counts), and strict on its absence, which is the only thing that reopens the
+// bypass. scope is one function body, not the file: see
+// chaos106CallSiteViolations.
+func chaos106BranchesOn(scope ast.Node, name string) bool {
 	found := false
-	ast.Inspect(f, func(n ast.Node) bool {
+	ast.Inspect(scope, func(n ast.Node) bool {
 		if found {
 			return false
 		}
@@ -405,6 +438,62 @@ func TestCHAOS106_CallSiteWallRejectsADiscardedRefusal(t *testing.T) {
 				t.Errorf("violation = %v (%v), want %v", got, violations, tc.wantViolation)
 			}
 		})
+	}
+}
+
+// TestCHAOS106_CallSiteWallScopesTheBranchToItsOwnFunction is the control for
+// the shape a merely discovery-based wall is still blind to: two call sites in
+// ONE file, binding the refusal to the SAME name, where only the first fails
+// closed.
+//
+// `bomb` is the name every conforming site in the tree already uses, so a
+// branch search over the whole file means the first conforming site in a file
+// vouches for every later one in it. The result is the worst failure a gate can
+// have: the wall reports clean while the bypass it exists to ban is live. It is
+// also the likeliest place for the next site to land — a second response leg
+// (an H3 path, a second CDR stage, a request-direction scan) added to
+// proxy_tunnel.go, proxy_http.go or cdr_proxy.go, each of which already carries
+// `if bomb {` for its first site.
+//
+// Both directions are asserted: the bypass must be reported, and the
+// conforming site beside it must NOT be, since a wall that flagged the
+// compliant shape would be deleted rather than repaired.
+func TestCHAOS106_CallSiteWallScopesTheBranchToItsOwnFunction(t *testing.T) {
+	const src = `package main
+
+func chaos106ProbeFailsClosed(b []byte, ce string) {
+	scan, bomb := decompressForScan(b, ce)
+	if bomb {
+		return
+	}
+	_ = scan
+}
+
+func chaos106ProbeBypass(b []byte, ce string) {
+	scan, bomb := decompressForScan(b, ce)
+	_, _ = scan, bomb
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "chaos106probe.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	sites, violations := chaos106CallSiteViolations(fset, f)
+	if sites != 2 {
+		t.Fatalf("fixture must hold exactly two call sites, the wall found %d", sites)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("want exactly one violation (the non-branching site), got %d: %v", len(violations), violations)
+	}
+	// The reported site must be the bypass, not its compliant neighbour: a
+	// wall that counted the right NUMBER of violations while naming the wrong
+	// line would send the next editor to correct working code.
+	if !strings.Contains(violations[0], "chaos106probe.go:12") {
+		t.Errorf("violation names the wrong call site: %q (want the one on line 12, in chaos106ProbeBypass)", violations[0])
+	}
+	if !strings.Contains(violations[0], "no `if` in the function that holds the call") {
+		t.Errorf("violation does not explain the function-scoped rule: %q", violations[0])
 	}
 }
 

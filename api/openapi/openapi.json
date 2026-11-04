@@ -21768,7 +21768,7 @@
     },
     "/api/security-scan/cache": {
       "delete": {
-        "description": "Purge scan cache.",
+        "description": "Purge scan verdict cache.",
         "operationId": "purgeScanCache",
         "parameters": [
           {
@@ -21798,7 +21798,7 @@
                 }
               }
             },
-            "description": "Purge scan cache."
+            "description": "Purge scan verdict cache."
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
@@ -21815,7 +21815,7 @@
             "basicAuth": []
           }
         ],
-        "summary": "Purge scan cache",
+        "summary": "Purge scan verdict cache",
         "tags": [
           "security"
         ],
@@ -21829,7 +21829,7 @@
         "x-culvert-visibility": "admin-supported"
       },
       "get": {
-        "description": "Returns the SHA-256 scan-result cache hit/miss/size stats.",
+        "description": "Returns the scan verdict cache hit/miss/size stats.",
         "operationId": "getScanCache",
         "responses": {
           "200": {
@@ -21840,7 +21840,7 @@
                 }
               }
             },
-            "description": "Scan hash-cache stats."
+            "description": "Scan verdict cache stats."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"
@@ -21854,7 +21854,7 @@
             "basicAuth": []
           }
         ],
-        "summary": "Scan hash-cache stats",
+        "summary": "Scan verdict cache stats",
         "tags": [
           "security"
         ],

@@ -235,6 +235,10 @@ func buildOperatorContract() OperatorContract {
 	// Rules the last policy load rejected fail-closed. Contributes nothing when
 	// every rule in the file was accepted.
 	checks = append(checks, checkPolicyRulesDroppedOnLoad(policyStore)...)
+	// Enabled destination-country rules while no GeoIP database is loaded: such
+	// rules can never match. Contributes nothing when a database is loaded or no
+	// enabled rule uses a country condition.
+	checks = append(checks, checkGeoDatabaseForRules(policyStore.List())...)
 	// Signed SaaS feed (stale / degraded / waiting / critical, or an enabled feed
 	// that has never activated and is failing). Contributes nothing when the feed
 	// is healthy, disabled, or serving the embedded baseline without failures.
@@ -257,6 +261,9 @@ func buildOperatorContract() OperatorContract {
 	// Cluster rate-limit broadcast stale: this node enforces only its local limit.
 	// Contributes nothing unless cluster rate limiting is armed and stale.
 	checks = append(checks, checkClusterRateLimitFreshness(rl)...)
+	// Admin UI serving certificate expiring/expired, or an uploaded pair that is
+	// corrupt. Contributes nothing for the self-signed fallback or a healthy cert.
+	checks = append(checks, checkAdminUITLSCert()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)

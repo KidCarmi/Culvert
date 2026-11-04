@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"math"
@@ -78,13 +81,23 @@ var uiCustomTLSCorrupt bool
 // GET /api/settings/network. The auto self-signed fallback (10-year
 // validity, internal/uitls) is deliberately not tracked here — it is not
 // operator-configured and not worth an expiry warning.
+//
+// adminUITLSCertChainSHA256 fingerprints that same serving pair's complete
+// ordered certificate chain (leaf plus any intermediates), recorded with the
+// expiry. uiCustomTLSActive only says the running server STARTED from the
+// uploaded pair; a later upload overwrites the files without touching the
+// listener, so the fingerprint is what tells "the saved pair is the one
+// serving" apart from "a replacement is saved, awaiting a restart". The whole
+// chain, not just the leaf: re-uploading the same leaf with corrected
+// intermediates is also a change that waits for a restart.
 var (
-	adminUITLSCertMu       sync.RWMutex
-	adminUITLSCertNotAfter time.Time
-	adminUITLSCertKnown    bool
+	adminUITLSCertMu          sync.RWMutex
+	adminUITLSCertNotAfter    time.Time
+	adminUITLSCertKnown       bool
+	adminUITLSCertChainSHA256 [sha256.Size]byte
 )
 
-// noteAdminUITLSCertExpiry records the NotAfter of the leaf certificate in a
+// noteAdminUITLSCertExpiry records the NotAfter and chain fingerprint of a
 // custom cert/key pair the admin UI is about to serve. Best-effort: a
 // malformed leaf (should be unreachable — the caller already validated the
 // pair loads as a matching tls.Certificate) leaves the prior value in place
@@ -101,6 +114,57 @@ func noteAdminUITLSCertExpiry(cert tls.Certificate) {
 	defer adminUITLSCertMu.Unlock()
 	adminUITLSCertNotAfter = leaf.NotAfter
 	adminUITLSCertKnown = true
+	adminUITLSCertChainSHA256 = certChainSHA256(cert.Certificate)
+}
+
+// certChainSHA256 hashes an ordered list of DER certificates. Each entry is
+// length-prefixed so two different chains can never concatenate to the same
+// input.
+func certChainSHA256(ders [][]byte) [sha256.Size]byte {
+	h := sha256.New()
+	var n [8]byte
+	for _, der := range ders {
+		binary.BigEndian.PutUint64(n[:], uint64(len(der)))
+		h.Write(n[:])
+		h.Write(der)
+	}
+	var sum [sha256.Size]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// adminUITLSServingChainSHA256 returns the fingerprint recorded by the last
+// successful custom-cert bind. known is false until one has bound.
+func adminUITLSServingChainSHA256() (sum [sha256.Size]byte, known bool) {
+	adminUITLSCertMu.RLock()
+	defer adminUITLSCertMu.RUnlock()
+	return adminUITLSCertChainSHA256, adminUITLSCertKnown
+}
+
+// savedCustomUITLSChainSHA256 returns the fingerprint of the chain in the
+// persisted upload: every CERTIFICATE block in file order, the same list
+// tls.LoadX509KeyPair puts in Certificate. ok is false when the file is
+// missing or holds no certificate block.
+func savedCustomUITLSChainSHA256() (sum [sha256.Size]byte, ok bool) {
+	rest, err := os.ReadFile(customUITLSCertPath())
+	if err != nil {
+		return sum, false
+	}
+	var ders [][]byte
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			ders = append(ders, block.Bytes)
+		}
+	}
+	if len(ders) == 0 {
+		return sum, false
+	}
+	return certChainSHA256(ders), true
 }
 
 // adminUITLSCertExpiry returns the currently known admin-UI serving
