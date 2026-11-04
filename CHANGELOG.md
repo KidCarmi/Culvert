@@ -41,6 +41,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A category-feed archive of exactly the ingest byte budget is accepted
+  instead of failing every round.** The category feed's `boundedReader`
+  rejected the read taken after a budget was reached without checking that any
+  byte had actually exceeded it. A body of exactly the budget whose final read
+  returns data with a nil error and reports `io.EOF` only on the next call — the
+  shape of a chunked response that flushes its last payload before the
+  terminating chunk — was therefore charged as an origin overrun, which fails
+  the whole sync round and leaves the category database frozen at its last-good
+  contents for as long as the feed stays that size. The same off-by-one was
+  corrected in the remote-blocklist and threat-feed copies of this reader, but
+  the category-feed copy, which carries a budget on the compressed body and a
+  second on the decompressed archive, was missed. At the boundary the reader now
+  probes for one more byte: a clean `io.EOF` completes the body, a real byte is
+  the overrun, and a transport error passes through as itself so an origin is
+  not blamed for a budget it did not overrun. Enforcement is unchanged one byte
+  past the budget, and the sentinel that routes an overrun to a failed round
+  rather than to the log-and-continue arm a corrupt member takes is preserved.
 - **Feed ingestion now has a declared byte budget, so a third-party feed origin can no longer exhaust the gateway's memory.** The UT1 category feed is a 50+ MB gzip tarball fetched from a community GitHub mirror and expanded in-process on every node, and the only limit on how much that origin could spend was a five-minute HTTP timeout. The per-category domain cap was charged to a counter local to one archive member, and tar permits duplicate member paths, so an origin stepped around it by repeating a path (measured: 40 duplicate members produced exactly 2,000,000 live map entries without any member reaching the cap). Live-heap amplification was ~50x and linear, the domain map is reachable for the whole parse so the GOMEMLIMIT backstop could not reclaim it, and the round's panic guard cannot see an out-of-memory — and because the feed syncs immediately when the category database is empty while the write that populates it is the step that never runs, a broken or hostile mirror was a crash loop rather than a transient outage. The category feed now bounds the compressed body, the expansion and the aggregate entry count; the remote blocklist feed, which retained every line with no ceiling, bounds its body and line count; and the threat feed bounds its body so a comment-only response cannot be scanned for the full timeout. Byte overruns fail the round and leave the last-good data authoritative; entry and line caps truncate and log, which cannot remove existing coverage because the writes overwrite and never delete. A legitimate feed is unaffected.
 
 - **`install.sh` no longer writes invalid TOML when `allow_peers` has a trailing comma.** Wiring Release Management into an existing `/etc/culvert-maint/config.toml` with `allow_peers = ["alice",]` produced `["alice",, "1000"]`, which the maintenance agent refuses to parse. The append now reuses the existing comma.
@@ -80,6 +97,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now shows an uploaded admin UI certificate that is saved but not
+  yet serving.** The upload takes effect only after a restart (and never while
+  `-tls-cert`/`-tls-key` are set), but only the Certificates panel said so, so
+  the report read healthy while the GUI kept the old certificate. New
+  `ui_tls_cert_pending` WARN row (additive, report-only, absent once active or
+  corrupt). It compares the saved certificate chain with the one the listener
+  bound, so a replacement uploaded while an earlier upload is serving, including
+  the same leaf with corrected intermediates, also reads as pending. TLS serving
+  is unchanged.
 - **Diagnostics now warns when destination-country rules cannot match because
   no GeoIP database is loaded.** An enabled `destCountry` rule never matches
   without a database, so a country block silently stops blocking; this was

@@ -9,8 +9,12 @@ package main
 // diagnostics report, where an operator checks "is this node healthy", stayed
 // green until browsers started refusing the GUI.
 //
+// Also reports a saved-but-not-yet-serving uploaded pair (pending restart),
+// including a replacement uploaded while an earlier upload is serving.
+//
 // Report-only: derived from the same state GET /api/settings/network already
-// returns, no I/O, no change to TLS serving. Contributes nothing for the auto
+// returns plus a read of the saved certificate file to fingerprint its chain,
+// no change to TLS serving. Contributes nothing for the auto
 // self-signed certificate or while a custom certificate has more than
 // uiTLSCertWarnDays of validity left. Carries no certificate subject, path or
 // key material — only a day count.
@@ -33,6 +37,21 @@ func checkAdminUITLSCert() []OperatorContractCheck {
 			OperatorAction: "Upload a valid certificate and matching private key under Settings → Network & TLS (Certificates), then restart to activate it.",
 		})
 	}
+	// A pair saved from the GUI only takes effect at the next restart. While
+	// it is on disk, valid, and the running server is not using it, the
+	// Certificates panel says so but the report did not. Also covers a pair
+	// shadowed by explicit -tls-cert/-tls-key settings, which a restart will
+	// not activate either, hence the wording below.
+	if uploadedUITLSCertPending() {
+		rows = append(rows, OperatorContractCheck{
+			Code:   "ui_tls_cert_pending",
+			Status: diagWarn,
+			Message: "an uploaded admin UI certificate is saved but the GUI is not serving it — " +
+				"it takes effect only after a restart, and not at all while -tls-cert/-tls-key (or tls_cert/tls_key in config.yaml) are set",
+			OperatorAction: "Restart the proxy during a maintenance window to activate it. If the GUI still shows the old certificate after the restart, " +
+				"remove the explicit -tls-cert/-tls-key setting, which takes precedence over an uploaded pair.",
+		})
+	}
 	notAfter, known := adminUITLSCertExpiry()
 	if !known {
 		return rows
@@ -51,6 +70,26 @@ func checkAdminUITLSCert() []OperatorContractCheck {
 		Message:        msg,
 		OperatorAction: uiTLSCertExpiryAction(uiCustomTLSActive),
 	})
+}
+
+// uploadedUITLSCertPending reports whether a valid uploaded pair is saved but
+// is not the certificate the admin UI is serving. uiCustomTLSActive alone is
+// not enough: it is set once at startup, and apiCertsUpload persists a
+// replacement without reloading the listener, so after A boots and B is
+// uploaded the flag still reads true while A is served. The saved chain is
+// therefore compared with the one recorded at bind time. When either
+// fingerprint is unavailable (no custom bind yet, unreadable file) it keeps
+// the startup-flag answer rather than guess.
+func uploadedUITLSCertPending() bool {
+	if uiCustomTLSCorrupt || !customUITLSFilesPresent() {
+		return false
+	}
+	if !uiCustomTLSActive {
+		return true
+	}
+	serving, bound := adminUITLSServingChainSHA256()
+	saved, ok := savedCustomUITLSChainSHA256()
+	return bound && ok && serving != saved
 }
 
 // uiTLSCertExpiryAction names the step that actually replaces the serving
