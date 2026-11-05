@@ -136,6 +136,71 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The leaf-certificate cache hit path no longer takes the process-wide CA
+  lock, and no longer allocates.** `ca.Manager.GetCert` is the
+  `tls.Config.GetCertificate` callback for every SSL-inspected CONNECT, so its
+  cache-hit path runs once per inspected connection and is ~all of production
+  on a warm gateway. It read the leaf cache under `mu.RLock`, on the usual
+  reasoning that a reader lock is cheap. It is not: `RLock`/`RUnlock` are two
+  atomic read-modify-writes on ONE shared word, and `mu` is the MANAGER-wide
+  lock (`caCert`, `caKey`, `leafKey`, the secondary CA), so every inspected
+  handshake in the process wrote the same cache line purely to read a map that
+  in steady state never changes — the sixth appearance of the shape this tree
+  has already recorded in `internal/threatfeed`, `internal/connlimit`, the IP
+  filter, the latency histogram, `topHosts`, and the sign stampede in
+  `internal/ca/signflight.go`. The cache is now a `sync.Map`, which is the
+  shape this access pattern wants: a host's entry is written once on the miss
+  that signed it and then read for the whole 1 h TTL, so a hit is an atomic
+  pointer load plus a map read with no read-modify-write on any shared word.
+  Separately, `GetCert` ran `net.SplitHostPort` unconditionally on the SNI
+  name; SNI carries a bare hostname (RFC 6066 forbids a port and an IP
+  literal), so that call essentially always failed — and it reports failure by
+  allocating a `*net.AddrError` which is immediately discarded. At
+  `memprofilerate=1` that error was **100% of the hit path's allocations**, one
+  per inspected connection. Measured on go1.27.3, linux/amd64, 4-vCPU Xeon,
+  both arms in ONE invocation of `BenchmarkGetCert_Hit` (`RunParallel`, so
+  lower ns/op is more throughput), `-cpu 1,2,4 -count=9`, medians: **93.7 ->
+  69.2 ns at one core, 143.6 -> 96.6 at two, 158.9 -> 91.1 at four** (0.74x /
+  0.67x / 0.57x), and **32 B and 1 alloc/op to zero**. State the limit as
+  plainly as the gain: this did NOT make the path scale. One-to-four throughput
+  is 0.59x before and 0.76x after — better, still negative — because a CPU
+  profile of the new arm at four cores attributes 42% of samples to `GetCert`'s
+  own frame (`cacheHits.Add`) against 11% to `cachedLeaf`. The leaf cache is no
+  longer the contended word; `cacheHits`/`cacheMisses` are, and they are an
+  operator-visible metric (`CacheStats`, read by `ca_metrics.go` for `/metrics`
+  and by the support bundle), so sharding them is a separate change with its
+  own contract. Nothing about the cache's MEANING moves: the presence, TTL and
+  leaf-expiry decisions are byte-identical, the LRU still evicts the oldest 10%
+  at `certCacheMaxSize`, the CA-generation fence and the single flight are
+  untouched, and the cold-burst gate still measures 1.000 signs/host against
+  the legacy arm's 1.5-1.68. Two invariants the new storage introduces are
+  pinned rather than assumed. Entries are IMMUTABLE once stored, because the
+  hit path reads them unlocked — `AgeCacheEntryForTest` now REPLACES an entry
+  instead of writing through the pointer, and a concurrent reader/ager test
+  holds that under `-race`. And the reset stays a SINGLE atomic transition:
+  `sync.Map.Clear` is one atomic store of a fresh trie root, exactly the
+  property the `cm.cache = map[...]{}` assignment it replaced had, so a
+  handshake racing a CA replacement can never observe a half-emptied cache;
+  `Range`+`Delete` would not be, and the comment says so. `sync.Map` has no
+  `len()`, so the bound `certCacheMaxSize` enforces is now an explicit
+  `cacheLen` atomic (the `hostCounter.n` pattern from `store.go`), with gates
+  that an insert crossing the bound evicts and leaves `cacheLen` and
+  `cacheOrder` in agreement, and that a reset zeroes it — a counter left behind
+  would make the next insert look like an overflow and discard 1,000
+  just-signed leaves. Three new gates fail on the defect and were each verified
+  to do so: the lock gate holds `mu` EXCLUSIVELY across a `GetCert` that must
+  hit (reintroducing the `RLock` deadlocks the test with a goroutine dump
+  naming the frame, rather than failing statistically), the allocation gate is
+  an exact `AllocsPerRun == 0` (restoring the unconditional `SplitHostPort`
+  reports 1.0), and the structural CA-generation gate was taught the new reset
+  shape so it still names an open-coded cache clear instead of passing
+  vacuously on a tree where the assignment it used to look for no longer
+  exists. A port-bearing `ServerName` still resolves to the bare host's cache
+  entry, so the guard cannot split one host into two entries and two signs.
+  `New()` no longer initialises anything, which is the point: package main's
+  whitebox tests construct `&CertManager{}` directly, and the zero `Manager` is
+  now usable by construction.
+
 - **The scan path no longer rebuilds a gzip or deflate decoder for every
   response it inspects.** `secscan.DecompressForScan` expands a compressed
   response body so ClamAV, YARA and DPI see the content rather than the frame,

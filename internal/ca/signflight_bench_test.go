@@ -14,12 +14,26 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 // Before/after, measured in ONE run.
 //
-// getCertLegacy is a VERBATIM copy of the pre-single-flight GetCert body. It is
+// getCertLegacy is a copy of the pre-single-flight GetCert body. It is
 // frozen here so the comparison stays reproducible in-tree rather than living
 // in a commit message, and so the regression gate below can be a RATIO — which
 // is machine-independent and needs no re-baselining (the convention this tree
 // already uses for security_ratelimit_window_bench_test.go and
 // security_ratelimit_exempt_bench_test.go).
+//
+// It now baselines TWO changes at once, which is why it keeps mu.RLock around
+// the cache probe and keeps the unconditional net.SplitHostPort:
+//
+//   - the sign stampede (BenchmarkGetCert_ColdBurst — legacy has no flight,
+//     so its sign COUNT is the amplification), and
+//   - the hit-path synchronisation and allocation (BenchmarkGetCert_Hit —
+//     legacy reads the cache under the manager-wide RWMutex and pays the
+//     discarded *net.AddrError, so its ns/op and allocs/op are the before).
+//
+// The storage underneath is the live sync.Map either way; what is frozen is
+// the SHAPE of the access (one shared read-modify-write per probe, no flight),
+// which is the thing being measured. Reading it under RLock is still correct —
+// mu is simply no longer required for the read.
 // ─────────────────────────────────────────────────────────────────────────────
 
 func getCertLegacy(cm *Manager, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -33,11 +47,14 @@ func getCertLegacy(cm *Manager, hello *tls.ClientHelloInfo) (*tls.Certificate, e
 
 	now := time.Now()
 	cm.mu.RLock()
-	if entry, ok := cm.cache[host]; ok && now.Sub(entry.createdAt) < certCacheTTL &&
-		(entry.cert.Leaf == nil || now.Before(entry.cert.Leaf.NotAfter)) {
-		cm.mu.RUnlock()
-		cm.cacheHits.Add(1)
-		return entry.cert, nil
+	if v, ok := cm.cache.Load(host); ok {
+		if entry, _ := v.(*certCacheEntry); entry != nil &&
+			now.Sub(entry.createdAt) < certCacheTTL &&
+			(entry.cert.Leaf == nil || now.Before(entry.cert.Leaf.NotAfter)) {
+			cm.mu.RUnlock()
+			cm.cacheHits.Add(1)
+			return entry.cert, nil
+		}
 	}
 	cm.mu.RUnlock()
 	cm.cacheMisses.Add(1)
@@ -123,9 +140,42 @@ func BenchmarkGetCert_ColdBurst(b *testing.B) {
 	}
 }
 
-// BenchmarkGetCert_Hit pins that the steady-state hit path — which is ~all
-// traffic on a warm gateway — is untouched: it takes no flight lock and still
-// allocates nothing.
+// BenchmarkGetCert_Hit measures the steady-state hit path — one GetCert per
+// SSL-inspected connection, so ~all traffic on a warm gateway.
+//
+// Both arms are RunParallel, so ns/op is wall time per op across ALL workers:
+// lower is more throughput, a genuinely parallel cost FALLS as cores are added
+// and one that serialises RISES. Run it with -cpu 1,2,4 to see the shape, and
+// compare only arms from the SAME invocation — absolute ns/op on a shared vCPU
+// box is not comparable between runs (the convention
+// internal/reqlog/ring_order_bench_test.go records at length).
+//
+// go1.27.3, linux/amd64, 4-vCPU Xeon @2.30GHz, both arms in ONE invocation,
+// -cpu 1,2,4 -count=9 -benchtime=500000x, medians:
+//
+//	                         │   P=1   │   P=2   │   P=4   │ allocs/op
+//	legacy (mu.RLock probe)  │ 93.7 ns │ 143.6ns │ 158.9ns │     1
+//	current (sync.Map probe) │ 69.2 ns │  96.6ns │  91.1ns │     0
+//	current / legacy         │  0.74x  │  0.67x  │  0.57x  │
+//
+// The allocation is the discarded *net.AddrError from the unconditional
+// net.SplitHostPort — see GetCert.
+//
+// STATE THE LIMIT HONESTLY, because the headline ratio invites the wrong
+// conclusion: removing mu did NOT make this path scale. One-to-four throughput
+// is 0.59x legacy and 0.76x current — better, still negative. Two shared
+// read-modify-writes remain, and a CPU profile of the current arm at P=4
+// attributes 42% of samples to GetCert's own frame (cacheHits.Add) against
+// 11% to cachedLeaf, so the leaf cache is no longer the contended word:
+// cacheHits/cacheMisses are. They are an operator-visible metric (CacheStats,
+// read by ca_metrics.go for /metrics and by the support bundle), so sharding
+// them is a separate change with its own contract, not a tail to tack onto
+// this one.
+//
+// The 4-vCPU floor also flatters the legacy arm: testing.(*PB).Next is ~21% of
+// samples and is itself a contended counter, so both arms carry harness
+// contention this box cannot separate out. Re-measure the whole set in one
+// invocation; never compare a new arm against a number quoted here.
 func BenchmarkGetCert_Hit(b *testing.B) {
 	cm := New()
 	if err := cm.InitCA(); err != nil {
