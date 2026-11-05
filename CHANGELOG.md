@@ -64,6 +64,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The scan path no longer rebuilds a gzip or deflate decoder for every
+  response it inspects.** `secscan.DecompressForScan` expands a compressed
+  response body so ClamAV, YARA and DPI see the content rather than the frame,
+  and it runs once per scanned response on both primary SWG paths —
+  `scanInspectBody` for every decrypted HTTPS response and `handleHTTP` for
+  every scanned plain-HTTP one. Its `gzip` and `deflate` arms constructed a
+  decoder per call, and `compress/flate` sizes its state on construction and
+  never shrinks it: a fixed 32 KiB history window plus the Huffman tables, with
+  gzip's 512-byte header scratch on top. That was ~41 KB of garbage per
+  response whose only content is a window about to be overwritten, and `gzip`
+  is the Content-Encoding the open web actually serves, so it is the arm
+  carrying the traffic. It was also the last unpooled fixed-state arm: the
+  `zstd` arm has been pooled since CHAOS-106 for exactly this reason. Both arms
+  now `Reset` a pooled reader. Measured on a 16 KiB markup body (go1.27.3,
+  linux/amd64, 4 vCPU Xeon, medians of n=6): gzip **74,000 B/op and 7
+  allocs/op to 32,775 B/op and 1 alloc** (the remaining bytes are the shared
+  32 KiB output buffer, which both shapes pay), **35.2 us to 24.3 us**
+  serially, and **25.9 us to 14.3 us under 4-way parallelism** — the gap
+  widens with concurrency, because what is removed is allocator and GC work
+  every core was doing at once. Deflate is the same shape (6 allocs to 1,
+  33.3 us to 22.8 us, 27.9 us to 13.5 us parallel). The saving is a fixed cost
+  per response, so it is largest on the small responses that dominate real
+  traffic and fades on large ones (256 KiB: 27 allocs to 21, ns/op inside the
+  noise). Each pooled reader OWNS the `bytes.Reader` it decodes through and
+  resets it to nil on release, so a pooled decoder never pins the scan buffer —
+  up to 5 MiB by default — in a pool slot, which matters most on the CHAOS-106
+  refusal path where that reference would be the last thing holding a buffer
+  just declared hostile; it also keeps the hot path free of a 4 KiB `bufio`
+  wrap, since `*bytes.Reader` already satisfies `flate.Reader`. The decompressed
+  output is byte-identical: a differential oracle runs both arms against the
+  frozen pre-pool shapes over interleaved repeated reuse, including
+  window-spanning, truncated, empty, malformed and origin-named-header streams,
+  plus a concurrent differential and the bomb-refusal control. The brotli arm is
+  deliberately NOT pooled and says so: a brotli decoder's ring buffer is sized
+  from the window the ORIGIN declares (up to 16 MiB), so pooling it would trade
+  a bounded allocation for an origin-controlled retention — that needs its own
+  measurement and its own bound. A new `benchgate` allocation gate holds the
+  saving against the frozen arms and is wired into the Fast PR Gate, QA gate and
+  weekly stress job that run the tag.
+
 - **Folding admin category overrides onto the SaaS feed snapshot is no longer
   quadratic, so a large override set cannot stall a feed activation.**
   `catoverride.ComposeView`/`ComposeMembership` asked, for every host in the
