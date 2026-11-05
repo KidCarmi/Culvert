@@ -29,8 +29,10 @@ toolchain go1.27.3
 // linux at either value.
 //
 // Every pin here is reviewed and asserted by godebug_pins_test.go, which
-// compares this list against the DefaultGODEBUG compiled into the binary. Do
-// not add or drop a line without recording why; an unpinned default is one a
+// compares this list against the DefaultGODEBUG compiled into the binary and
+// that compiled set against a reviewed baseline tied to the `go` line's
+// major.minor, so raising the `go` line fails until its defaults are reviewed.
+// Do not add or drop a line without recording why; an unpinned default is one a
 // dependency bump can change without review.
 godebug x509sslcertoverrideplatform=0
 

@@ -33,12 +33,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   either direction — `crypto/x509` consults the setting only under
   `GOOS=windows/darwin/ios` and honours both variables on linux regardless — so
   the container deployment path does not change. The durable half is
-  `godebug_pins_test.go`: an exact allowlist (never a count) checked against
-  BOTH `go.mod` and the compiled `DefaultGODEBUG`, so a future language bump
-  that changes any other default fails a test instead of shipping. Its negative
-  controls feed the parser each directive form and `diffPins` each of the three
-  disagreement shapes; a misspelled setting name needs no control because the go
-  command refuses to load such a `go.mod` at all.
+  `godebug_pins_test.go`: an exact pin allowlist (never a count) checked against
+  `go.mod`, plus an exact reviewed baseline of the compiled `DefaultGODEBUG`
+  bound to the reviewed `go` line (1.27). Adopting a new default REMOVES a
+  compatibility entry rather than adding one, so the baseline fails on an entry
+  that disappears as well as one that appears, and the language guard fails a
+  `go` line raised together with the toolchain, where the compiled set never
+  moves. `tracebacklabels` (a traceback-format setting) is recorded as adopted
+  at 1.27. Its negative controls replay the measured 1.26.6 → 1.27.0 sets, feed
+  the parser each directive form and `diffPins` each disagreement shape; a
+  misspelled setting name needs no control because the go command refuses to
+  load such a `go.mod` at all.
 
 - **The canonical-header-key gate now covers the direct map index, which is the
   failure it exists to prevent.** `TestCanonicalHeaderKeys_Tree` required every

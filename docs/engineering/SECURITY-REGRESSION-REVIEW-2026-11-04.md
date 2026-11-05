@@ -247,16 +247,36 @@ load-bearing.
   `DefaultGODEBUG` is one the toolchain now defaults to on its own; the failure
   message says to re-read the rationale on the toolchain upgrade that caused it
   rather than years later.
-- `TestGODEBUG_CompiledDefaultsCarryNoUnreviewedSetting` — **the check that
-  would have caught this window's regression.** Any future `go` line movement
-  that changes another default lands here.
+- `TestGODEBUG_CompiledDefaultsMatchReviewedBaseline` — **the check that
+  would have caught this window's regression.** Adopting a new default does not
+  add a `DefaultGODEBUG` entry, it REMOVES the compatibility entry that held the
+  old one (the measurement above: two entries at 1.26.6, none at 1.27.0), so a
+  check that only rejects unreviewed entries is green on exactly this
+  transition. `reviewedGODEBUGBaseline` is the exact compiled set reviewed at
+  the current `go` line; an entry that APPEARS (an old default nobody reviewed)
+  and one that DISAPPEARS (a new default adopted) both fail, and the message
+  carries the review-and-update procedure.
+- `TestGODEBUG_GoLineMatchesReviewedLanguage` — binds the `go` line's
+  major.minor to `reviewedGODEBUGLanguage` (1.27), because raising the toolchain
+  and the `go` line together adopts every changed default while
+  `DefaultGODEBUG` never moves.
+- `TestGODEBUG_ReviewRecordsAreConsistent` — every pin is in the baseline at its
+  value; an adopted default is neither in the baseline nor pinned.
+  `reviewedGODEBUGAdoptions` records `tracebacklabels` (adopted at 1.27, see
+  above) as the audit trail for its removal.
 - `TestGODEBUG_NegativeControl_ParserAndDiffRejectDisagreement` — feeds the
   parser each directive form (single-line, block, commented-out, trailing
   comment) and `diffPins` each of the three disagreement shapes (value drift,
   missing pin, extra pin), so none of the above is vacuous.
+- `TestGODEBUG_NegativeControl_BaselineRejectsAppearingAndDisappearingEntries`
+  and `TestGODEBUG_NegativeControl_GoLineRejectsLanguageBump` — replay the
+  measured 1.26.6 → 1.27.0 sets (pinned and unpinned) through the baseline
+  comparison, and a minor `go` line bump through the language guard.
 
 The wall was mutation-tested, not just run green. Deleting the pin from `go.mod`
-fails two checks with the right messages. A misspelled setting name needs no
+fails three checks with the right messages (the baseline one as
+`DISAPPEARED x509sslcertoverrideplatform`), and a reviewed language that no
+longer matches the `go` line fails the language guard. A misspelled setting name needs no
 control and gets none, because the claim that it would slip through is false:
 the go command refuses to load such a `go.mod` at all —
 `go.mod:182: unknown godebug "x509sslcertoverrideplatfrom"` — verified against
