@@ -458,7 +458,7 @@ func dpStartupStagger(interval time.Duration) time.Duration {
 func (c *DataPlaneClient) Run(ctx context.Context, pollInterval time.Duration) {
 	go c.pollLoop(ctx, pollInterval)
 	go c.metricsLoop(ctx, pollInterval*2)
-	go c.rateLimitGossipLoop(ctx, 5*time.Second, rl)
+	go c.rateLimitGossipLoop(ctx, rlGossipInterval, rl)
 	go c.revocationSyncLoop(ctx, 3*time.Second)
 	go c.auditPushLoop(ctx, 10*time.Second)
 }
@@ -1003,7 +1003,13 @@ func (c *DataPlaneClient) rateLimitGossipRound(ctx context.Context, limiter *Rat
 	if !limiter.Enabled() {
 		return
 	}
-	deltas := rateLimitWireDeltas(limiter)
+	deltas, omitted := rateLimitWireDeltas(limiter)
+	// CHAOS-111: the export is bounded, hottest first. An omitted IP keeps its
+	// LOCAL rate limit; only the cluster-wide half of its count stops being
+	// gossiped. Reported every round, including the ones that omit nothing,
+	// which is what clears the present-tense gauge.
+	noteRateLimitHotIPsOmitted(&rlExportOmittedTotal, &rlExportOmittedNow,
+		"export", c.nodeID, omitted, maxExportedHotIPs)
 	gossip := RateLimitGossip{
 		NodeID: c.nodeID,
 		Deltas: deltas,

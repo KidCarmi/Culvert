@@ -370,11 +370,17 @@ func (s *controlPlaneServer) SyncRateLimits(ctx context.Context, raw json.RawMes
 		return nil, err
 	}
 
-	// Store this node's hot-IP counts.
-	globalRLAggregator.Update(gossip.NodeID, gossip.Deltas)
+	// Store this node's hot-IP counts, bounded (CHAOS-111). What a peer sends
+	// is not what this Control Plane has to retain.
+	ingestOmitted := globalRLAggregator.Update(gossip.NodeID, gossip.Deltas)
+	noteRateLimitHotIPsOmitted(&rlIngestOmittedTotal, &rlIngestOmittedNow,
+		"ingest", gossip.NodeID, ingestOmitted, maxGossipHotIPsPerNode)
 
-	// Return cluster totals minus this node's own counts.
-	remote := globalRLAggregator.ClusterTotalsExcluding(gossip.NodeID)
+	// Return cluster totals minus this node's own counts, bounded, and served
+	// from a cached generation rather than rebuilt inside this call.
+	remote, broadcastOmitted := globalRLAggregator.ClusterTotalsExcluding(gossip.NodeID)
+	noteRateLimitHotIPsOmitted(&rlBroadcastOmittedTotal, &rlBroadcastOmittedNow,
+		"broadcast", gossip.NodeID, broadcastOmitted, maxBroadcastHotIPs)
 	broadcast := RateLimitBroadcast{RemoteCounts: remote}
 	b, err := json.Marshal(broadcast)
 	if err != nil {
