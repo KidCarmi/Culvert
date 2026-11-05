@@ -1313,6 +1313,30 @@
           "enabled": {
             "type": "boolean"
           },
+          "hot_ips_broadcast_bound": {
+            "description": "Most hot IPs one Control Plane broadcast may carry.",
+            "type": "integer"
+          },
+          "hot_ips_omitted_broadcast": {
+            "description": "Fleet-tracked hot IPs the MOST RECENT broadcast did not carry because it exceeded hot_ips_broadcast_bound.",
+            "type": "integer"
+          },
+          "hot_ips_omitted_export": {
+            "description": "Hot IPs the MOST RECENT gossip export from this node left out because it exceeded hot_ips_per_node_bound. Rewritten every round including the ones that omit nothing, so it clears on its own. An omitted IP keeps its local rate limit; only the cluster-wide half of its count is not applied.",
+            "type": "integer"
+          },
+          "hot_ips_omitted_ingest": {
+            "description": "Hot IPs the MOST RECENT gossip this Control Plane received did not retain because the sending node exceeded hot_ips_per_node_bound.",
+            "type": "integer"
+          },
+          "hot_ips_omitted_total": {
+            "description": "Hot IPs omitted across every round since startup, summed over all three legs. A running total survives recovery, where the three present-tense values above do not.",
+            "type": "integer"
+          },
+          "hot_ips_per_node_bound": {
+            "description": "Most hot IPs one node may export per gossip round, and the most this Control Plane will retain from one node. Hot IPs beyond it are omitted coldest-first.",
+            "type": "integer"
+          },
           "remote_counts_age_secs": {
             "description": "Age of the last applied broadcast, in seconds. Absent when none has ever been applied.",
             "type": "number"

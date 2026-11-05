@@ -1618,6 +1618,39 @@ components:
         remote_counts_stale_episodes:
           type: integer
           description: Times the broadcast went stale since startup (one continuous outage counts once).
+        hot_ips_per_node_bound:
+          type: integer
+          description: >-
+            Most hot IPs one node may export per gossip round, and the most this
+            Control Plane will retain from one node. Hot IPs beyond it are
+            omitted coldest-first.
+        hot_ips_broadcast_bound:
+          type: integer
+          description: Most hot IPs one Control Plane broadcast may carry.
+        hot_ips_omitted_export:
+          type: integer
+          description: >-
+            Hot IPs the MOST RECENT gossip export from this node left out
+            because it exceeded hot_ips_per_node_bound. Rewritten every round
+            including the ones that omit nothing, so it clears on its own. An
+            omitted IP keeps its local rate limit; only the cluster-wide half of
+            its count is not applied.
+        hot_ips_omitted_ingest:
+          type: integer
+          description: >-
+            Hot IPs the MOST RECENT gossip this Control Plane received did not
+            retain because the sending node exceeded hot_ips_per_node_bound.
+        hot_ips_omitted_broadcast:
+          type: integer
+          description: >-
+            Fleet-tracked hot IPs the MOST RECENT broadcast did not carry
+            because it exceeded hot_ips_broadcast_bound.
+        hot_ips_omitted_total:
+          type: integer
+          description: >-
+            Hot IPs omitted across every round since startup, summed over all
+            three legs. A running total survives recovery, where the three
+            present-tense values above do not.
     ClusterRevocations:
       type: object
       required: [local_revoked, cluster_mode]
