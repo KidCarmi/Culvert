@@ -57,6 +57,25 @@ missing staleness alert and health row are recorded as the open half. Id claimed
 in a committed placeholder row before any code per the 2026-09-25 amendment,
 checked against `origin/main` at `3c5fab1`.
 
+The 2026-11-05 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-05.md)
+and summarised in §60 — CHAOS-111 (the HOT-IP GOSSIP PLANE). `SyncRateLimits` is
+the one CP↔DP RPC whose body is sized by HOSTILE traffic: one entry per hot IP,
+and an IP is hot at 50% of the configured limit with a FLOOR OF ONE, so at a
+tight limit every distinct source address seen in the window is exported for one
+request each. Neither leg was budgeted and the fleet total map was rebuilt
+INSIDE EVERY CALL under one global mutex. Measured: one RPC took 5.542 s against
+its own 5 s deadline and a 50-node round owed ~277 s against the 5 s interval, so
+the plane stopped — and a stopped plane means every node falls back to LOCAL
+limiting, which admitted 500 requests against a limit of 10 on a 50-node fleet
+(50x). The Control Plane also retained 164.2 MiB of attacker-keyed reachable
+heap, and `Stats()` walked the fleet under the same mutex from a viewer-gated
+endpoint (1.736 s). Four bounds and one cached generation; a 50-node round now
+costs 636 ms. The root cause is AU-50's own rule, written into the doc of the
+very constant that bounds this leg and not applied to the RPC named four lines
+above it. Closes the 2026-10-13 backlog's `X-6`. Id claimed in a committed
+placeholder row before any code, checked against `origin/main` at `ee0f2ab`.
+
 The 2026-11-04 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-04.md)
 and summarised in §59 — CHAOS-110 (the DPI SCAN GOROUTINE). `patternSet.scan`
@@ -248,9 +267,10 @@ the same way rather than relying on this paragraph.* `SyncRateLimits` is still
 named in the same doc's "all tiny" list, still unbudgeted, and its body is one
 entry per hot IP — a quantity an attacker chooses. Unlike the revocation plane
 its counts are REPLACE-semantics inside a short window, so `AU-50`'s rotation is
-the wrong shape here and the divergence is the finding's second half. Findings,
-measurements and gates are written up in
-[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-05.md).
+the wrong shape here and the divergence is the finding's second half. **Round complete.** Findings,
+measurements, the risk matrix and the nine verified-RED mutations are written up
+in [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-05.md)
+and summarised in §60.
 
 **2026-11-04 — `CHAOS-110` CLAIMED (placeholder, commit one). Domain: the DPI
 SCAN GOROUTINE — `internal/scanner` spawns one abandonable worker per inspected
@@ -20030,3 +20050,110 @@ raised scan window rather than a crafted body; and `X-5`'s "one goroutine per
 pattern" wording was already stale — the harness was hoisted to one worker per
 SCAN, which is why the alloc gate reads a constant 7 allocs/op across 1, 10, 20
 and 50 patterns and still does after this change.
+
+## 60. CHAOS-111 — The hot-IP gossip plane: the rate limiter switched off by the flood it exists to stop
+
+Findings, the executed fault injection, the risk matrix, the mutation test and
+the gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-05.md).
+Summarised here because four rows are load-bearing for later sweeps, and
+because this section **closes the 2026-10-13 backlog's `X-6`**.
+
+**The entry point was a comment, not a symptom.** `AU-50` budgeted a
+`SyncRevocations` request below `maxClusterInboundMsgSize` and wrote the general
+rule into that constant's own doc — *a new inbound RPC whose body can grow must
+be budgeted the same way rather than relying on this paragraph.* Four lines
+above, in the same comment, `SyncRateLimits` is named in the list of inbound
+RPCs that are "all tiny". It is the one whose length is chosen by TRAFFIC. The
+register's standing lesson — *citing a precedent is not applying it* — gains its
+sharpest instance: the counter-example was in the same comment as the rule.
+
+- **`CHAOS-111` / RL-1 — the hot-IP export was unbounded, and the trigger is
+  one request per address.** `ExportHotDeltas` returned one entry per qualifying
+  IP. An IP qualifies at `HotThresholdPercent` (50%) of the configured limit,
+  and the threshold is clamped to a FLOOR OF ONE — so at a tight configured
+  limit (1-3 per window) the hot set IS the client set, reachable with a single
+  request per address. A single ISP-assigned IPv6 /64 supplies 2^64 of them.
+  Overflow of the 16 MiB inbound frame at ~524 000 IPv4 or ~290 000 IPv6
+  entries (32 and 56 wire bytes each, measured). Fixed with
+  `admission.MaxExportedHotIPs`, hottest first, ties broken on the IP string so
+  sender and receiver agree about the same input.
+
+- **`CHAOS-111` / RL-2 — THE FINDING. The fleet total map was rebuilt inside
+  EVERY RPC, under ONE global mutex, so the plane's own cost was quadratic in
+  fleet size in a quantity the attacker sets.** Measured on a 50-node fleet at
+  50 000 distinct hot IPs per node: `ClusterTotalsExcluding` took **1.844 s** and
+  marshalling its 2.45 M-entry, 57.3 MiB reply **3.698 s** — **5.542 s for one
+  RPC against its own 5 s deadline** (`dpTightCallDeadline`) — so one round owed
+  **~277 s of serial work against the 5 s gossip interval**, a 55x
+  oversubscription that cannot drain while the traffic continues. Fixed by
+  building ONE aggregation generation per `rlTotalsCacheTTL` and serving every
+  node from it, with the reply built OUTSIDE the mutex: the per-RPC cost is now
+  O(`maxBroadcastHotIPs`) and independent of fleet size, and a 50-node round
+  costs **636 ms**. **Do not re-derive the totals per call.** The gate measures
+  the pre-fix shape on the same fixture in the same run and requires it to be at
+  least 2x worse, so a fast machine cannot report the fix as working on a tree
+  where it is not.
+
+- **`CHAOS-111` / RL-3 — the plane's failure mode hands the attacker the
+  multiplier, which is why RL-2 is a security row and not only an availability
+  one.** A failed or timed-out sync never reaches `ApplyRemoteCounts`, the
+  broadcast ages out, and CHAOS-61 — deliberately and correctly — stops
+  consulting an expired broadcast rather than enforcing a frozen snapshot of
+  timestamps that have all aged out. So every node degrades to LOCAL limiting:
+  measured, a configured limit of 10 with no broadcast admitted **500 requests
+  across a 50-node fleet, 50x the limit**. **CHAOS-61 is not the defect and must
+  not be "fixed"** — the defect was that the plane was trivially easy to stop.
+  The fix is at the cause; the degradation itself remains, now hard to reach.
+
+- **`CHAOS-111` / RL-4/5/6 — three uncapped surfaces around the same mutex.**
+  The Control Plane retained whatever a node sent, for every enrolled node:
+  **164.2 MiB** of reachable heap at 50 x 100 000, pruned only when a NODE goes
+  quiet for `rlNodeStaleAfter` and NEVER by cardinality. The reply was bounded
+  only by the 128 MiB frame. And `Stats()` built a set of every IP on every node
+  while holding the aggregator mutex — **1.736 s** at 50 x 50 000, from the
+  viewer-gated `GET /api/cluster/rate-limits`, so an operator refreshing the
+  panel that REPORTS the overload competed with the data path's own ingest for
+  the lock. All three fixed: a per-node INGEST bound (the receiver does not
+  trust the sender — a node predating the export bound must not choose how much
+  heap the Control Plane spends, so the ceiling is now fleet size x bound, an
+  operator quantity), `maxBroadcastHotIPs` on the reply, and `Stats()` served
+  from the generation.
+
+**The deliberate divergence from AU-50, and it is the half that matters.** A
+deferred revocation rides a later tick and the receiver merges ADDITIVELY, so
+AU-50 could rotate a backlog through successive messages and lose nothing.
+Rate-limit counts are the opposite shape: `Update` REPLACES a node's slot and
+`ApplyRemoteCounts` REPLACES the whole broadcast, both inside a window measured
+in seconds. Rotation would make an IP's cluster total oscillate between counted
+and zero every tick — worse than consistently omitting the coldest. So this
+plane TRUNCATES by hotness, and its safety rests on two guarantees rather than
+on "it arrives later": **(1) an omitted export keeps its LOCAL limit**, because
+`AllowClusterAware` sums `localCount + remoteCount`, so an omission narrows ONE
+address from cluster-aware to local where the pre-fix failure narrowed EVERY
+address on EVERY node at once; and **(2) a requester always receives the cluster
+sum for every hot IP it reported itself**, because the reply is built own-set
+first and only then filled from the fleet's hottest — so a node never loses the
+cluster view for traffic it is actually handling, however large the flood
+elsewhere. A reply built from a fleet-wide hotness ranking alone would NOT have
+property (2); that mutation is gated. **No new fail-open path exists anywhere in
+the change** — every bound replaces a state in which the plane carried nothing
+at all — and the wire schemas are byte-identical, so a mixed-version fleet
+interoperates in both directions.
+
+Left open and attributed rather than fixed, in priority order: **a
+`cluster_ratelimit_degraded` alert** — the signal is now on `/metrics`, the API
+and the panel, and it pages nobody, exactly the shape CHAOS-110 left open for
+`dpi_degraded`; **charging the aggregation against a work budget rather than a
+cadence**, since `rlTotalsCacheTTL` bounds how OFTEN a generation is rebuilt but
+not how expensive one rebuild is, which stays linear in node count; **making the
+broadcast's top-K exact per requester**, since candidates are ranked by the
+total INCLUDING the requester so that one ranking can be cached — exact below
+the bound, an approximation above it, and making it exact at every scale
+re-introduces the per-RPC cost this round removed; and **making the bounds
+operator settings**, deliberately NOT done because a runtime-mutable bound on a
+control whose failure mode is "the control stops" is a new way to turn the
+control off, so the recorded pattern (surface the deferral) is followed instead.
+`PX-6` — the Data Plane's own per-IP client map, still unbounded in cardinality
+— is untouched and named so this fix is not over-read: this round bounded the
+WIRE and what the Control Plane RETAINS, not what a node tracks locally.
