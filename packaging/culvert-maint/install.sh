@@ -119,12 +119,17 @@ sudoers_escape_colon() {
 # defeats a ^...$-anchored pattern).
 extract_toml_string() {
     awk -v k="$1" '
-        BEGIN { q = sprintf("%c", 39) }
+        BEGIN { q = sprintf("%c", 39); qq = q q q }
         /^[[:space:]]*#/ { next }
         $0 ~ "^[[:space:]]*"k"[[:space:]]*=" {
             line=$0
             sub("^[[:space:]]*"k"[[:space:]]*=[[:space:]]*", "", line)
-            if (substr(line, 1, 1) == q) {
+            if (substr(line, 1, 3) == qq) {
+                # One-line TOML multi-line literal string: ends at the next triple quote.
+                line = substr(line, 4)
+                idx = index(line, qq)
+                if (idx > 0) line = substr(line, 1, idx - 1)
+            } else if (substr(line, 1, 1) == q) {
                 line = substr(line, 2)
                 idx = index(line, q)
                 if (idx > 0) line = substr(line, 1, idx - 1)
