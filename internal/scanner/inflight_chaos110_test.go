@@ -32,10 +32,48 @@ func gatedSet(entered *atomic.Int64, release <-chan struct{}) *patternSet {
 
 // withGate pins the cap for one test and restores the production sizing after,
 // because the gate and its counters are package globals.
+//
+// The reset Stores the in-flight counter, so it must not run while a worker
+// from an earlier test is still alive: that worker's deferred release would
+// land AFTER the Store and decrement this test's counter, making its exact-count
+// assertions fail (seen under -shuffle as "Inflight() = 7, want 8" followed by
+// inflight=-1). Every test that abandons a worker owns its whole lifetime and
+// waits for the release itself (TestScan_TimeoutFailsClosed); this check
+// covers the remaining handoff window — a worker that has sent its verdict but
+// not yet run its deferred release — and turns a test that leaks a worker into
+// a named failure here instead of a silent miscount in whichever test follows.
 func withGate(t *testing.T, limit int) {
 	t.Helper()
+	if got := waitInflight(t, 0); got != 0 {
+		t.Fatalf("Inflight() = %d before resetting the gate, want 0: a preceding test left a "+
+			"scan worker alive — a test that abandons a worker must wait for its release", got)
+	}
 	resetInflightForTest(limit)
 	t.Cleanup(func() { resetInflightForTest(defaultMaxInflight()) })
+}
+
+// inflightBaseline waits out any straggling worker from an earlier test and
+// returns the in-flight count this test starts from. Same helper, same purpose,
+// as internal/yara's: a test that is about to abandon a worker records where
+// the counter stood so it can wait for its own worker's release.
+func inflightBaseline(t *testing.T) int64 {
+	t.Helper()
+	return waitInflight(t, 0)
+}
+
+// waitInflight waits, bounded, for the counter to come back to want and returns
+// what it last read, so a test never leaves a draining worker behind for the
+// next one to trip over. The caller decides whether a mismatch is a failure.
+func waitInflight(t *testing.T, want int64) int64 {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := Inflight()
+		if got == want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // waitFor polls cond until it holds or the deadline passes. Used only to wait

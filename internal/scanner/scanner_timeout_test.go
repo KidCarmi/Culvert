@@ -110,12 +110,26 @@ func TestScan_BudgetIsPerPatternNotPerScan(t *testing.T) {
 // TestScan_TimeoutFailsClosed pins the S17 verdict: a match that overruns its own
 // budget blocks (returns hit=true) and names the pattern.
 //
-// The match parks on a channel that is only closed by the deferred cleanup, so it
-// CANNOT complete while the scan is running — only the timeout case can be
-// selected. No race between a real regex and a short timer.
+// The match parks on a channel that is only closed by the cleanup, so it CANNOT
+// complete while the scan is running — only the timeout case can be selected.
+// No race between a real regex and a short timer.
+//
+// The timeout ABANDONS the worker while it still holds its in-flight slot
+// (CHAOS-110); it gives the slot back only after the match returns, which is
+// after this test has returned. Left unwaited, that late release lands in
+// whichever test runs next — after a gate reset it drives the counter below
+// that test's count (seen under -shuffle as "Inflight() = 0 after the parent
+// abandoned, want 1" and "Inflight() = 7, want 8"). Own the worker's whole
+// lifetime: do not finish until the counter is back where it started.
 func TestScan_TimeoutFailsClosed(t *testing.T) {
 	block := make(chan struct{})
-	defer close(block)
+	base := inflightBaseline(t)
+	t.Cleanup(func() {
+		close(block)
+		if got := waitInflight(t, base); got != base {
+			t.Errorf("Inflight() = %d, want %d: the abandoned worker never gave back its slot", got, base)
+		}
+	})
 
 	// Pattern 0 blocks forever; the rest would return quickly but must never run.
 	ps := fakeSet(5, func(idx int) bool {
@@ -209,6 +223,16 @@ func TestScan_AbandonedWorkerStopsEarly(t *testing.T) {
 	)
 	release := make(chan struct{})
 	finished := make(chan struct{})
+	// This test abandons its worker too, so it owns that worker's lifetime the
+	// same way TestScan_TimeoutFailsClosed does. <-finished below only proves
+	// the stuck match returned; the slot is released after that, by the
+	// worker's deferred release, so wait for the counter itself.
+	base := inflightBaseline(t)
+	t.Cleanup(func() {
+		if got := waitInflight(t, base); got != base {
+			t.Errorf("Inflight() = %d, want %d: the abandoned worker never gave back its slot", got, base)
+		}
+	})
 
 	ps := fakeSet(40, func(idx int) bool {
 		mu.Lock()
