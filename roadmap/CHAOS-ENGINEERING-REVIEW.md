@@ -228,6 +228,30 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-11-05 — `CHAOS-111` CLAIMED (placeholder, commit one). Domain: the HOT-IP
+GOSSIP PLANE — `SyncRateLimits` is the one cluster RPC whose body is sized by
+HOSTILE traffic, so what happens to distributed rate limiting when the flood it
+exists to stop makes its own gossip message too large to send?** Id claimed in
+this committed row before any code was written, per the convention above, and
+checked against `origin/main` rather than the working tree, per the 2026-09-25
+amendment: `CHAOS-110` is the highest id anywhere on `origin/main` (at
+`ee0f2ab`), and no open PR holds a chaos id at claim time (#1807, #1705, #1549,
+#1548, #1536, #1528, #1526 — none is a chaos sweep), so this sweep took 111 and
+will not move.
+
+Scope is the SIMULATE list's *thousands of simultaneous connections* and *mass
+reconnect storm* rows aimed at the one inbound cluster RPC that `AU-50` did NOT
+budget. `AU-50` found that a `SyncRevocations` request grows with the fleet,
+budgeted it below `maxClusterInboundMsgSize`, and wrote the general rule into
+that constant's own doc: *a new inbound RPC whose body can grow must be budgeted
+the same way rather than relying on this paragraph.* `SyncRateLimits` is still
+named in the same doc's "all tiny" list, still unbudgeted, and its body is one
+entry per hot IP — a quantity an attacker chooses. Unlike the revocation plane
+its counts are REPLACE-semantics inside a short window, so `AU-50`'s rotation is
+the wrong shape here and the divergence is the finding's second half. Findings,
+measurements and gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-05.md).
+
 **2026-11-04 — `CHAOS-110` CLAIMED (placeholder, commit one). Domain: the DPI
 SCAN GOROUTINE — `internal/scanner` spawns one abandonable worker per inspected
 response body, so how many of them can exist at once, who counts them, and what
