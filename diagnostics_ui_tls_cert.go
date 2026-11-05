@@ -34,7 +34,7 @@ func checkAdminUITLSCert() []OperatorContractCheck {
 			Status: diagWarn,
 			Message: "the uploaded admin UI certificate/key pair does not load as a matching pair — " +
 				"the GUI is being served with the self-signed fallback certificate and will be after every restart",
-			OperatorAction: "Upload a valid certificate and matching private key under Settings → Network & TLS (Certificates), then restart to activate it.",
+			OperatorAction: "Upload a valid certificate and matching private key under Certificates → Upload Custom Certificate (Target: Management UI), then restart to activate it.",
 		})
 	}
 	// A pair saved from the GUI only takes effect at the next restart. While
@@ -101,9 +101,9 @@ func uploadedUITLSCertPending() bool {
 // Names the setting, never its path: this row is not admin-only.
 func uiTLSCertExpiryAction(uploaded bool) string {
 	if uploaded {
-		return "Upload a replacement certificate and matching key under Settings → Network & TLS (Certificates), then restart to activate it."
+		return "Upload a replacement certificate and matching key under Certificates → Upload Custom Certificate (Target: Management UI), then restart to activate it."
 	}
 	return "This certificate is set explicitly by the -tls-cert/-tls-key flags or tls_cert/tls_key in config.yaml, which take precedence over an uploaded pair. " +
 		"Replace the certificate and key files at those configured paths, or remove the explicit setting and upload a replacement under " +
-		"Settings → Network & TLS (Certificates), then restart to activate it."
+		"Certificates → Upload Custom Certificate (Target: Management UI), then restart to activate it."
 }
