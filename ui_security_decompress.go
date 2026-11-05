@@ -24,12 +24,20 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
 // scanDecompressAuditAction is the audit Action for a ratio change.
 const scanDecompressAuditAction = "security.scan_decompress_ratio"
+
+// scanDecompressRejectedPersisted holds the out-of-range persisted ratio that
+// the last settings load refused (0 = none). Report-only: it never influences
+// the installed bound; it exists so the diagnostics row can tell the operator
+// that the running default is NOT the value they saved. Cleared by every load
+// and by a successful PUT.
+var scanDecompressRejectedPersisted atomic.Int64
 
 // scanDecompressRevisionOf derives the surface revision from one ratio value.
 // The ratio is a single atomic, so one Load is already a coherent snapshot —
@@ -128,6 +136,8 @@ func putScanDecompression(w http.ResponseWriter, r *http.Request) {
 			// re-validates anyway and keeps the current bound on refusal.
 			if err := secscan.SetDecompressRatioLimit(target); err != nil {
 				logger.Printf("SecurityScan: decompression ratio apply refused after a durable write: %v", err)
+			} else {
+				scanDecompressRejectedPersisted.Store(0)
 			}
 		},
 	})
@@ -185,12 +195,14 @@ func snapshotScanDecompressRatio(s *AdminSettings, override *int64) {
 // applyAdminSupportRetention pattern.
 func applyAdminScanDecompressRatio(s *AdminSettings) {
 	ratio := s.ScanDecompressRatioLimit
+	scanDecompressRejectedPersisted.Store(0)
 	if ratio == 0 {
 		ratio = secscan.DefaultDecompressRatioLimit
 	}
 	if err := secscan.SetDecompressRatioLimit(ratio); err != nil {
 		logger.Printf("AdminSettings: ignoring invalid persisted decompression ratio limit %d (%v) — using the default %d",
 			ratio, err, secscan.DefaultDecompressRatioLimit)
+		scanDecompressRejectedPersisted.Store(ratio)
 		_ = secscan.SetDecompressRatioLimit(secscan.DefaultDecompressRatioLimit) // the default is in range by construction
 	}
 }
@@ -202,6 +214,15 @@ func applyAdminScanDecompressRatio(s *AdminSettings) {
 // the same explicit visibility as a relaxed YARA posture.
 func checkScanDecompressRatioPosture() OperatorContractCheck {
 	ratio := secscan.DecompressRatioLimit()
+	if rej := scanDecompressRejectedPersisted.Load(); rej != 0 {
+		return OperatorContractCheck{
+			Code:   "scan_decompress_ratio",
+			Status: diagWarn,
+			Message: fmt.Sprintf("The saved decompression ratio limit %d is outside the allowed range %d–%d and was REFUSED at startup — the default %d:1 is in effect instead (fail-closed; scanning is not weakened, but your saved value is not applied)",
+				rej, secscan.MinDecompressRatioLimit, secscan.MaxDecompressRatioLimit, ratio),
+			OperatorAction: "Set a valid value under Security Scanning → Decompression Bound (saving it clears this warning), or keep the default.",
+		}
+	}
 	if ratio > secscan.DefaultDecompressRatioLimit {
 		return OperatorContractCheck{
 			Code:   "scan_decompress_ratio",

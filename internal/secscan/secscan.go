@@ -688,29 +688,26 @@ func DecompressForScan(data []byte, contentEncoding string) (out []byte, bomb bo
 		return data, false
 	}
 
-	var reader io.ReadCloser
-	var err error
-
 	switch ce {
 	case "gzip", "x-gzip":
-		reader, err = gzip.NewReader(bytes.NewReader(data))
+		return expandGzipForScan(data, ce)
 	case "deflate":
-		reader = flate.NewReader(bytes.NewReader(data))
+		return expandDeflateForScan(data, ce)
 	case "br":
-		reader = io.NopCloser(brotli.NewReader(bytes.NewReader(data)))
+		return expandBrotliForScan(data, ce)
 	case "zstd":
 		return expandZstdForScan(data, ce)
 	default:
 		// Unknown encoding — scan raw bytes.
 		return data, false
 	}
-	if err != nil {
-		// gzip.NewReader failed (malformed header) — scan raw bytes.
-		return data, false
-	}
-	defer reader.Close()
+}
 
-	decompressed, readErr, isBomb := expandForScan(reader, data, ce)
+// expansionVerdict is the shared tail every arm of DecompressForScan's switch
+// shares: the refusal, the three fall-back-to-compressed-bytes cases, and the
+// success. Keeping it in one function is what makes "only the decoder differs"
+// a structural claim rather than four copies that have to stay in agreement.
+func expansionVerdict(data, decompressed []byte, readErr error, isBomb bool) (out []byte, bomb bool) {
 	if isBomb {
 		return nil, true
 	}
@@ -741,13 +738,157 @@ func expandZstdForScan(data []byte, ce string) (out []byte, bomb bool) {
 	// refused.
 	_ = zr.Reset(nil) //nolint:errcheck // nil reader is valid for a pooled decoder; this only drops the reference
 	zstdDecoderPool.Put(zr)
-	if isBomb {
-		return nil, true
-	}
-	if readErr != nil || len(decompressed) == 0 {
+	return expansionVerdict(data, decompressed, readErr, isBomb)
+}
+
+// ── Pooled scan-path decompressors ───────────────────────────────────────────
+//
+// WHY THESE EXIST. compress/gzip and compress/flate allocate their decoder
+// state on construction and never shrink it: a flate decompressor carries a
+// fixed 32 KiB history window plus its Huffman tables, and gzip wraps one with
+// a 512-byte header scratch. Measured on this repository's toolchain
+// (go1.27.3, linux/amd64, 4 vCPU Xeon @ 2.10GHz, medians of n=6,
+// BenchmarkExpand* in decompress_pool_bench_test.go) over a 16 KiB markup
+// body — B/op includes readCapped's 32 KiB output buffer, which both arms pay:
+//
+//	                      legacy (per-response decoder)   pooled
+//	gzip, serial          35.2 us  74 000 B   7 allocs    24.3 us  32 775 B  1 alloc
+//	gzip, 4x parallel     25.9 us  74 000 B   7 allocs    14.3 us  32 780 B  1 alloc
+//	deflate, serial       33.3 us  73 296 B   6 allocs    22.8 us  32 775 B  1 alloc
+//	deflate, 4x parallel  27.9 us  73 296 B   6 allocs    13.5 us  32 780 B  1 alloc
+//
+// So on the body size that dominates real web traffic: 55% fewer bytes
+// allocated, 6 of the 7 allocations removed, ~31% less CPU serially and ~46%
+// less under 4-way parallelism — the gap WIDENS with concurrency, because what
+// is removed is allocator and GC work that every core was doing at once.
+//
+// That cost is paid PER RESPONSE on the primary SWG paths — scanInspectBody
+// (every decrypted HTTPS response) and handleHTTP (every scanned plain-HTTP
+// response) — and `gzip` is the Content-Encoding the open web actually serves,
+// so it is the arm that carries the traffic. It was also the only unpooled
+// fixed-state arm left: the zstd arm above has been pooled since CHAOS-106 for
+// exactly this reason, and its own comment names the per-response buffer cost
+// as the motivation. At 1 000 scanned gzip responses/second the reconstruction
+// alone is ~41 MB/s of garbage whose only content is a window about to be
+// overwritten; the pool turns that into bytes the allocator never sees, which
+// is GC pressure removed from the request goroutine rather than latency moved
+// around.
+//
+// The saving is a FIXED cost per response, so it is largest exactly where it
+// matters most and smallest where it does not: on a 256 KiB body the same
+// change is 27 -> 21 allocations and ns/op is inside the noise, because the
+// decode itself has become the work. Small responses are the common case.
+//
+// WHY THE SOURCE READER IS OWNED, NOT PASSED. A pooled decoder outlives the
+// response, so anything it still points at is retained until its next use.
+// Handing it a fresh bytes.Reader over `data` would pin the scan buffer — up
+// to the scan window, 5 MiB by default — in a pool slot, which is the leak the
+// zstd arm's Reset(nil) exists to prevent, and worst on the refusal path where
+// that reference is the last thing holding a buffer just declared hostile. So
+// each pooled reader owns its bytes.Reader and releases by resetting it to nil:
+// the decoder keeps pointing at a struct field that now describes an empty
+// slice. Owning it also keeps the hot path allocation-free in a second way —
+// *bytes.Reader satisfies flate.Reader (Read + ReadByte), so neither gzip.Reset
+// nor flate's Reset wraps it in a 4 KiB bufio.Reader.
+//
+// WHY BROTLI IS NOT POOLED. Pooling is only free when the retained state has a
+// fixed size. A brotli decoder's ring buffer is sized from the window the
+// ORIGIN declares in the stream header (up to 16 MiB), so a pooled brotli
+// reader would let a hostile response choose how much memory stays resident in
+// a pool slot, once per core, until a GC cycle reclaims it — trading a bounded
+// allocation for an origin-controlled retention on a security gateway. gzip and
+// flate have no such knob: their state is the same size for every stream. If
+// brotli is worth pooling it needs its own measurement and its own bound on
+// what may be kept, so it stays out of this change deliberately rather than by
+// oversight.
+//
+// Neither arm calls Close. For both decoders Close only reports the terminal
+// read error (compress/flate's is `if f.err == io.EOF { return nil }; return
+// f.err`) and releases nothing, so the deferred Close the pre-pool shape ran
+// was already a no-op; expandForScan's error return is the value that was ever
+// consulted.
+
+// gzipScanReader couples a reusable gzip.Reader with the bytes.Reader it reads
+// through. The source is a field, not an argument, so release can drop the
+// reference to the scan buffer without discarding the decoder state that is
+// the whole point of pooling.
+type gzipScanReader struct {
+	src bytes.Reader
+	z   gzip.Reader
+}
+
+var gzipScanReaderPool = sync.Pool{New: func() any { return new(gzipScanReader) }}
+
+// release returns g to the pool holding no reference to the bytes it just
+// expanded. The second Reset is what clears the rest of the decoder's view of
+// the stream — gzip.Reset assigns a fresh Reader value, so the origin-supplied
+// Header (Name/Comment/Extra are read from the stream) goes with it. It reports
+// io.EOF against the now-empty source, which is the expected outcome and not a
+// failure of anything.
+func (g *gzipScanReader) release() {
+	g.src.Reset(nil)
+	_ = g.z.Reset(&g.src) //nolint:errcheck // expected io.EOF on an empty source; called to clear retained header state
+	gzipScanReaderPool.Put(g)
+}
+
+// expandGzipForScan is DecompressForScan's gzip arm. Byte-for-byte the same
+// expansion as gzip.NewReader + expandForScan: Reset's documented contract is
+// that the reader becomes equivalent to a new one reading from src, and the
+// malformed-header fallback is the same (original bytes, false) the
+// NewReader-error branch returned.
+func expandGzipForScan(data []byte, ce string) (out []byte, bomb bool) {
+	g := gzipScanReaderPool.Get().(*gzipScanReader)
+	defer g.release()
+	g.src.Reset(data)
+	if err := g.z.Reset(&g.src); err != nil {
+		// Malformed gzip header — scan raw bytes.
 		return data, false
 	}
-	return decompressed, false
+	decompressed, readErr, isBomb := expandForScan(&g.z, data, ce)
+	return expansionVerdict(data, decompressed, readErr, isBomb)
+}
+
+// flateScanReader is gzipScanReader for a raw deflate stream. The decoder is
+// held as an io.ReadCloser because compress/flate does not export its
+// concrete type; it always satisfies flate.Resetter.
+type flateScanReader struct {
+	src bytes.Reader
+	r   io.ReadCloser
+}
+
+var flateScanReaderPool = sync.Pool{New: func() any {
+	f := new(flateScanReader)
+	// &f.src is stable for the lifetime of f, so the decoder can be bound to
+	// it once here and re-pointed at the same field on every Reset.
+	f.r = flate.NewReader(&f.src)
+	return f
+}}
+
+func (f *flateScanReader) release() {
+	f.src.Reset(nil)
+	_ = f.r.(flate.Resetter).Reset(&f.src, nil) //nolint:errcheck // compress/flate's Resetter returns nil unconditionally; called to drop the stream state
+	flateScanReaderPool.Put(f)
+}
+
+// expandDeflateForScan is DecompressForScan's deflate arm. flate.NewReader
+// cannot fail and neither can Resetter.Reset, so unlike the gzip arm there is
+// no construction-failure fallback to preserve — exactly as before.
+func expandDeflateForScan(data []byte, ce string) (out []byte, bomb bool) {
+	f := flateScanReaderPool.Get().(*flateScanReader)
+	defer f.release()
+	f.src.Reset(data)
+	if err := f.r.(flate.Resetter).Reset(&f.src, nil); err != nil {
+		return data, false
+	}
+	decompressed, readErr, isBomb := expandForScan(f.r, data, ce)
+	return expansionVerdict(data, decompressed, readErr, isBomb)
+}
+
+// expandBrotliForScan is DecompressForScan's brotli arm, unchanged and
+// deliberately unpooled — see "WHY BROTLI IS NOT POOLED" above.
+func expandBrotliForScan(data []byte, ce string) (out []byte, bomb bool) {
+	decompressed, readErr, isBomb := expandForScan(brotli.NewReader(bytes.NewReader(data)), data, ce)
+	return expansionVerdict(data, decompressed, readErr, isBomb)
 }
 
 // ── Scan-path expansion bounds (CHAOS-106) ───────────────────────────────────

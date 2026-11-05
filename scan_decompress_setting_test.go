@@ -28,11 +28,23 @@ import (
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
-// restoreScanDecompressRatio restores the live ratio a test changes.
+// restoreScanDecompressRatio restores the live ratio a test changes, together
+// with the refused-at-load latch: the diagnostics row reads both, so restoring
+// only the ratio leaks a refusal into whichever test runs next.
 func restoreScanDecompressRatio(t *testing.T) {
 	t.Helper()
+	restoreScanDecompressRejectedPersisted(t)
 	prev := secscan.DecompressRatioLimit()
 	t.Cleanup(func() { _ = secscan.SetDecompressRatioLimit(prev) })
+}
+
+// restoreScanDecompressRejectedPersisted snapshots the refused-at-load latch
+// (set by applyAdminScanDecompressRatio/LoadAdminSettings, cleared by a load or
+// a successful PUT) and restores it at cleanup.
+func restoreScanDecompressRejectedPersisted(t *testing.T) {
+	t.Helper()
+	prev := scanDecompressRejectedPersisted.Load()
+	t.Cleanup(func() { scanDecompressRejectedPersisted.Store(prev) })
 }
 
 // setScanDecompressRatio installs ratio (restored at cleanup).
@@ -362,6 +374,35 @@ func TestScanDecompressSetting_LoadRefusesOutOfRange(t *testing.T) {
 		if got := secscan.DecompressRatioLimit(); got != secscan.DefaultDecompressRatioLimit {
 			t.Errorf("persisted %d loaded as %d, want the default %d", bad, got, secscan.DefaultDecompressRatioLimit)
 		}
+	}
+}
+
+// The refusal is operator-visible: the diagnostics row warns (it used to read
+// OK at the default, hiding that the saved value was discarded), and a valid
+// load or a successful PUT clears it.
+func TestScanDecompressSetting_RefusedPersistedValueSurfacesInDiagnostics(t *testing.T) {
+	setScanDecompressRatio(t, 200) // restores the ratio and the refused latch
+	applyAdminScanDecompressRatio(&AdminSettings{ScanDecompressRatioLimit: 5000})
+	ck := checkScanDecompressRatioPosture()
+	if ck.Status != diagWarn || ck.OperatorAction == "" || !strings.Contains(ck.Message, "5000") {
+		t.Fatalf("refused value row = %+v, want a warn naming 5000 with an operator action", ck)
+	}
+	if got := secscan.DecompressRatioLimit(); got != secscan.DefaultDecompressRatioLimit {
+		t.Fatalf("enforced ratio %d, want the default (behaviour unchanged)", got)
+	}
+
+	applyAdminScanDecompressRatio(&AdminSettings{ScanDecompressRatioLimit: 128})
+	if ck := checkScanDecompressRatioPosture(); strings.Contains(ck.Message, "REFUSED") {
+		t.Fatalf("a valid reload left the refused warning: %+v", ck)
+	}
+
+	applyAdminScanDecompressRatio(&AdminSettings{ScanDecompressRatioLimit: 5000})
+	withAdminSettingsPathForTest(t, "")
+	if w := putScanDecompressionAs(t, RoleAdmin, "198.51.100.178", `{"ratio_limit":64}`); w.Code != http.StatusOK {
+		t.Fatalf("PUT status %d", w.Code)
+	}
+	if ck := checkScanDecompressRatioPosture(); ck.Status != diagOK {
+		t.Fatalf("after a successful PUT the row = %+v, want ok", ck)
 	}
 }
 
