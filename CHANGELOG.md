@@ -9,6 +9,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A dependency bump silently flipped a crypto/x509 trust-store default on the
+  macOS and Windows release binaries; the reviewed defaults are now pinned and
+  walled.** The root `go.mod` `go` line is not only a language minimum — it
+  SELECTS the default value of every GODEBUG compatibility setting, and the
+  compiler bakes the resulting non-base defaults into the binary as
+  `DefaultGODEBUG`. `sigstore-go` v1.4.0 declares `go 1.27.0`, so bumping it
+  raised this module's `go` line from 1.26.6 to 1.27.0, and Go 1.27 changed
+  `x509sslcertoverrideplatform` from 0 to 1. At 1, a `SSL_CERT_FILE` or
+  `SSL_CERT_DIR` in the process environment REPLACES the platform certificate
+  verifier on darwin/windows, displacing the root pool `upstreamVerifyRoots`
+  loads once and shares across every upstream `tls.Config` — the pool that
+  verifies the real server's certificate on SSL-inspected tunnels. Because the
+  gateway re-signs with its own CA after that verification, a displaced anchor
+  set is an undetectable MITM for every inspected flow: the client still sees a
+  valid padlock. Nothing in CI compared the two: the toolchain wall guards the
+  `toolchain` line, which did not move, and the `go` line carries no GODEBUG
+  assertion. `godebug x509sslcertoverrideplatform=0` is now declared in `go.mod`
+  with its rationale, restoring the behaviour that shipped before the bump and
+  keeping the platform verifier authoritative rather than environment-
+  displaceable. Verified end to end: the linux and darwin/arm64 binaries both
+  record `DefaultGODEBUG=x509sslcertoverrideplatform=0`. Linux is unaffected in
+  either direction — `crypto/x509` consults the setting only under
+  `GOOS=windows/darwin/ios` and honours both variables on linux regardless — so
+  the container deployment path does not change. The durable half is
+  `godebug_pins_test.go`: an exact pin allowlist (never a count) checked against
+  `go.mod`, plus an exact reviewed baseline of the compiled `DefaultGODEBUG`
+  bound to the reviewed `go` line (1.27). Adopting a new default REMOVES a
+  compatibility entry rather than adding one, so the baseline fails on an entry
+  that disappears as well as one that appears, and the language guard fails a
+  `go` line raised together with the toolchain, where the compiled set never
+  moves. `tracebacklabels` (a traceback-format setting) is recorded as adopted
+  at 1.27. Its negative controls replay the measured 1.26.6 → 1.27.0 sets, feed
+  the parser each directive form and `diffPins` each disagreement shape; a
+  misspelled setting name needs no control because the go command refuses to
+  load such a `go.mod` at all.
+
 - **The canonical-header-key gate now covers the direct map index, which is the
   failure it exists to prevent.** `TestCanonicalHeaderKeys_Tree` required every
   header key in production Go to be spelled in textproto canonical form, and
@@ -63,6 +99,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - **`install.sh` no longer writes invalid TOML when `allow_peers` has a trailing comma.** Wiring Release Management into an existing `/etc/culvert-maint/config.toml` with `allow_peers = ["alice",]` produced `["alice",, "1000"]`, which the maintenance agent refuses to parse. The append now reuses the existing comma.
 
 ### Performance
+
+- **The scan path no longer rebuilds a gzip or deflate decoder for every
+  response it inspects.** `secscan.DecompressForScan` expands a compressed
+  response body so ClamAV, YARA and DPI see the content rather than the frame,
+  and it runs once per scanned response on both primary SWG paths —
+  `scanInspectBody` for every decrypted HTTPS response and `handleHTTP` for
+  every scanned plain-HTTP one. Its `gzip` and `deflate` arms constructed a
+  decoder per call, and `compress/flate` sizes its state on construction and
+  never shrinks it: a fixed 32 KiB history window plus the Huffman tables, with
+  gzip's 512-byte header scratch on top. That was ~41 KB of garbage per
+  response whose only content is a window about to be overwritten, and `gzip`
+  is the Content-Encoding the open web actually serves, so it is the arm
+  carrying the traffic. It was also the last unpooled fixed-state arm: the
+  `zstd` arm has been pooled since CHAOS-106 for exactly this reason. Both arms
+  now `Reset` a pooled reader. Measured on a 16 KiB markup body (go1.27.3,
+  linux/amd64, 4 vCPU Xeon, medians of n=6): gzip **74,000 B/op and 7
+  allocs/op to 32,775 B/op and 1 alloc** (the remaining bytes are the shared
+  32 KiB output buffer, which both shapes pay), **35.2 us to 24.3 us**
+  serially, and **25.9 us to 14.3 us under 4-way parallelism** — the gap
+  widens with concurrency, because what is removed is allocator and GC work
+  every core was doing at once. Deflate is the same shape (6 allocs to 1,
+  33.3 us to 22.8 us, 27.9 us to 13.5 us parallel). The saving is a fixed cost
+  per response, so it is largest on the small responses that dominate real
+  traffic and fades on large ones (256 KiB: 27 allocs to 21, ns/op inside the
+  noise). Each pooled reader OWNS the `bytes.Reader` it decodes through and
+  resets it to nil on release, so a pooled decoder never pins the scan buffer —
+  up to 5 MiB by default — in a pool slot, which matters most on the CHAOS-106
+  refusal path where that reference would be the last thing holding a buffer
+  just declared hostile; it also keeps the hot path free of a 4 KiB `bufio`
+  wrap, since `*bytes.Reader` already satisfies `flate.Reader`. The decompressed
+  output is byte-identical: a differential oracle runs both arms against the
+  frozen pre-pool shapes over interleaved repeated reuse, including
+  window-spanning, truncated, empty, malformed and origin-named-header streams,
+  plus a concurrent differential and the bomb-refusal control. The brotli arm is
+  deliberately NOT pooled and says so: a brotli decoder's ring buffer is sized
+  from the window the ORIGIN declares (up to 16 MiB), so pooling it would trade
+  a bounded allocation for an origin-controlled retention — that needs its own
+  measurement and its own bound. A new `benchgate` allocation gate holds the
+  saving against the frozen arms and is wired into the Fast PR Gate, QA gate and
+  weekly stress job that run the tag.
 
 - **Folding admin category overrides onto the SaaS feed snapshot is no longer
   quadratic, so a large override set cannot stall a feed activation.**
