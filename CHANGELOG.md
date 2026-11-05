@@ -9,6 +9,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A dependency bump silently flipped a crypto/x509 trust-store default on the
+  macOS and Windows release binaries; the reviewed defaults are now pinned and
+  walled.** The root `go.mod` `go` line is not only a language minimum — it
+  SELECTS the default value of every GODEBUG compatibility setting, and the
+  compiler bakes the resulting non-base defaults into the binary as
+  `DefaultGODEBUG`. `sigstore-go` v1.4.0 declares `go 1.27.0`, so bumping it
+  raised this module's `go` line from 1.26.6 to 1.27.0, and Go 1.27 changed
+  `x509sslcertoverrideplatform` from 0 to 1. At 1, a `SSL_CERT_FILE` or
+  `SSL_CERT_DIR` in the process environment REPLACES the platform certificate
+  verifier on darwin/windows, displacing the root pool `upstreamVerifyRoots`
+  loads once and shares across every upstream `tls.Config` — the pool that
+  verifies the real server's certificate on SSL-inspected tunnels. Because the
+  gateway re-signs with its own CA after that verification, a displaced anchor
+  set is an undetectable MITM for every inspected flow: the client still sees a
+  valid padlock. Nothing in CI compared the two: the toolchain wall guards the
+  `toolchain` line, which did not move, and the `go` line carries no GODEBUG
+  assertion. `godebug x509sslcertoverrideplatform=0` is now declared in `go.mod`
+  with its rationale, restoring the behaviour that shipped before the bump and
+  keeping the platform verifier authoritative rather than environment-
+  displaceable. Verified end to end: the linux and darwin/arm64 binaries both
+  record `DefaultGODEBUG=x509sslcertoverrideplatform=0`. Linux is unaffected in
+  either direction — `crypto/x509` consults the setting only under
+  `GOOS=windows/darwin/ios` and honours both variables on linux regardless — so
+  the container deployment path does not change. The durable half is
+  `godebug_pins_test.go`: an exact pin allowlist (never a count) checked against
+  `go.mod`, plus an exact reviewed baseline of the compiled `DefaultGODEBUG`
+  bound to the reviewed `go` line (1.27). Adopting a new default REMOVES a
+  compatibility entry rather than adding one, so the baseline fails on an entry
+  that disappears as well as one that appears, and the language guard fails a
+  `go` line raised together with the toolchain, where the compiled set never
+  moves. `tracebacklabels` (a traceback-format setting) is recorded as adopted
+  at 1.27. Its negative controls replay the measured 1.26.6 → 1.27.0 sets, feed
+  the parser each directive form and `diffPins` each disagreement shape; a
+  misspelled setting name needs no control because the go command refuses to
+  load such a `go.mod` at all.
+
 - **The canonical-header-key gate now covers the direct map index, which is the
   failure it exists to prevent.** `TestCanonicalHeaderKeys_Tree` required every
   header key in production Go to be spelled in textproto canonical form, and
