@@ -20,15 +20,17 @@ type RateLimitBroadcast struct {
 }
 
 // rateLimitWireDeltas preserves nil as JSON null and maps engine counts into
-// the existing transport schema. Accounting remains owned by the engine.
-func rateLimitWireDeltas(r *RateLimiter) []RateLimitDelta {
-	counts := r.ExportHotDeltas()
+// the existing transport schema. Accounting — including the CHAOS-111 export
+// bound and which IPs it keeps — remains owned by the engine; this reports the
+// omission count so the caller can surface the degradation.
+func rateLimitWireDeltas(r *RateLimiter) (deltas []RateLimitDelta, omitted int) {
+	counts, omitted := r.ExportHotDeltasCapped(maxExportedHotIPs)
 	if counts == nil {
-		return nil
+		return nil, omitted
 	}
-	deltas := make([]RateLimitDelta, len(counts))
+	deltas = make([]RateLimitDelta, len(counts))
 	for i, count := range counts {
 		deltas[i] = RateLimitDelta{IP: count.IP, Count: count.Count}
 	}
-	return deltas
+	return deltas, omitted
 }

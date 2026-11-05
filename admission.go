@@ -20,3 +20,8 @@ func newRateLimiter() *RateLimiter                      { return admission.NewRa
 func prefixFromIPNet(n *net.IPNet) (netip.Prefix, bool) { return admission.PrefixFromIPNet(n) }
 
 const hotThresholdPct = admission.HotThresholdPercent
+
+// maxExportedHotIPs is the engine's bound on one hot-IP gossip export
+// (CHAOS-111), aliased here like hotThresholdPct so main's wire and
+// Control-Plane adapters name one number.
+const maxExportedHotIPs = admission.MaxExportedHotIPs
