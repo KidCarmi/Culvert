@@ -28,11 +28,23 @@ import (
 	"github.com/KidCarmi/Culvert/internal/secscan"
 )
 
-// restoreScanDecompressRatio restores the live ratio a test changes.
+// restoreScanDecompressRatio restores the live ratio a test changes, together
+// with the refused-at-load latch: the diagnostics row reads both, so restoring
+// only the ratio leaks a refusal into whichever test runs next.
 func restoreScanDecompressRatio(t *testing.T) {
 	t.Helper()
+	restoreScanDecompressRejectedPersisted(t)
 	prev := secscan.DecompressRatioLimit()
 	t.Cleanup(func() { _ = secscan.SetDecompressRatioLimit(prev) })
+}
+
+// restoreScanDecompressRejectedPersisted snapshots the refused-at-load latch
+// (set by applyAdminScanDecompressRatio/LoadAdminSettings, cleared by a load or
+// a successful PUT) and restores it at cleanup.
+func restoreScanDecompressRejectedPersisted(t *testing.T) {
+	t.Helper()
+	prev := scanDecompressRejectedPersisted.Load()
+	t.Cleanup(func() { scanDecompressRejectedPersisted.Store(prev) })
 }
 
 // setScanDecompressRatio installs ratio (restored at cleanup).
@@ -369,8 +381,7 @@ func TestScanDecompressSetting_LoadRefusesOutOfRange(t *testing.T) {
 // OK at the default, hiding that the saved value was discarded), and a valid
 // load or a successful PUT clears it.
 func TestScanDecompressSetting_RefusedPersistedValueSurfacesInDiagnostics(t *testing.T) {
-	t.Cleanup(func() { scanDecompressRejectedPersisted.Store(0) })
-	setScanDecompressRatio(t, 200)
+	setScanDecompressRatio(t, 200) // restores the ratio and the refused latch
 	applyAdminScanDecompressRatio(&AdminSettings{ScanDecompressRatioLimit: 5000})
 	ck := checkScanDecompressRatioPosture()
 	if ck.Status != diagWarn || ck.OperatorAction == "" || !strings.Contains(ck.Message, "5000") {
