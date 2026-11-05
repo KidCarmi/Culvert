@@ -199,12 +199,39 @@ func (g *slotGate) release() {
 // the operator sees the squeeze before it starts costing blocks. n is the depth
 // this acquisition just reached, so this costs no extra atomic load.
 func approachingCheck(n int64, limit int) {
-	if limit <= 0 || n < int64(limit*80/100) {
+	if limit <= 0 || n < approachingThreshold(limit) {
 		return
 	}
 	if logAllowed(&lastApproachingLog) {
 		obs.Warnf("DPI: approaching saturation: %d of %d in-flight scan workers", n, limit)
 	}
+}
+
+// approachingThreshold is the in-flight depth at which the gate is 80% full,
+// rounded UP.
+//
+// Rounding matters because this gate is sized from the CPU allowance and its
+// floor is 2 (inflightFloor), so the smallest real gate has two slots.
+// Truncating 80% DOWN made that threshold 2*80/100 = 1, which is one ORDINARY
+// scan: a single-vCPU container — a common sidecar shape — logged "approaching
+// saturation: 1 of 2" every saturationLogInterval forever, at no load at all.
+// That is the worst possible failure for this particular line, because it is
+// the lead indicator for the gate's fail-closed refusal (SaturationBlocks):
+// an operator who learns to ignore it loses the only warning they get before
+// clean content starts being blocked uninspected.
+//
+// Rounding up makes a 2-slot gate warn at 2 of 2 and leaves every larger gate
+// with its lead time (8 -> 7, 64 -> 52). At two and three slots there is no
+// lead time to be had; the honest threshold there is the cap itself.
+func approachingThreshold(limit int) int64 {
+	if limit <= 0 {
+		return 0
+	}
+	t := int64((limit*80 + 99) / 100)
+	if t > int64(limit) {
+		t = int64(limit)
+	}
+	return t
 }
 
 // logAllowed is a coarse once-per-interval gate on a degraded-state log line.
