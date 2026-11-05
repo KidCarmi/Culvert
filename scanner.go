@@ -32,6 +32,15 @@ var newContentScanner = scanner.New
 // (the engine func is scanner.MatchRegexWithTimeout).
 var matchDPIRegexWithTimeout = scanner.MatchRegexWithTimeout
 
+// CHAOS-110 accessors for the DPI scan engine's in-flight gate. Kept as
+// package-main seams in the same shape as yara_vars.go's, so the status map
+// below reads both engines through one convention.
+func dpiInflightLoad() int64         { return scanner.Inflight() }
+func dpiMaxInflightLoad() int        { return scanner.MaxInflight() }
+func dpiSaturationBlocksLoad() int64 { return scanner.SaturationBlocks() }
+func dpiAbandonedWorkersLoad() int64 { return scanner.AbandonedWorkers() }
+func dpiMatchPanicsLoad() int64      { return scanner.MatchPanics() }
+
 // statDPIBlocked counts response bodies blocked by DPI signature matches.
 var statDPIBlocked int64
 

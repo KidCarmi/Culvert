@@ -57,6 +57,36 @@ missing staleness alert and health row are recorded as the open half. Id claimed
 in a committed placeholder row before any code per the 2026-09-25 amendment,
 checked against `origin/main` at `3c5fab1`.
 
+The 2026-11-04 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-04.md)
+and summarised in §59 — CHAOS-110 (the DPI SCAN GOROUTINE). `patternSet.scan`
+must spawn a goroutine to enforce its per-pattern budget because `re.Match` is
+not interruptible, and on overrun it ABANDONS it; nothing counted or capped the
+abandoned population, and each abandoned worker keeps a whole response body
+reachable. Measured: 200 concurrent abandoned scans held 200.3 MiB after every
+parent had returned, and 64 at an 8 MiB window held 512.1 MiB — reachable heap,
+which `GOMEMLIMIT` cannot reclaim and `recover()` cannot see. The second half is
+not a memory bug: the budget is WALL CLOCK, so with no cap the gateway failed
+clean content closed in proportion to its own load (0 of 1 clean bodies blocked
+at concurrency 1, then 4 of 4, 8 of 8, 32 of 32 on one core with a 3x budget
+margin), and every block left another abandoned worker making the next scan
+slower. Fixed with a counted `2 × GOMAXPROCS` gate whose slot is released by the
+WORKER, so the cap can see an abandoned worker; the cap REMOVES those false
+blocks (0 of 4 after, where the baseline blocked 4 of 4) because it keeps
+elapsed time near CPU time. A third defect in the same function was fixed with
+it: the DPI worker goroutine had NO panic guard, and root's `safeDPIScan` only
+looks like one — its `recover()` is on the calling goroutine and cannot see the
+worker's — so the one class CHAOS-25 and CHAOS-105 closed everywhere else was
+still open on the response-scanning path. It closes the 2026-10-13 backlog's `X-5` for
+`internal/scanner`, and NARROWS it: Go's RE2 `regexp` has no catastrophic
+backtracking, so the trigger is CPU starvation or a raised scan window, not a
+crafted body, and the row's "one goroutine per pattern" wording was already
+stale. The missing `dpi_degraded` alert, the wall-clock budget itself, the
+un-rate-limited per-event timeout log and the DPI engine's borrowed scan window
+are recorded as the open half. Id claimed in a committed placeholder row before
+any code per the 2026-09-25 amendment, checked against `origin/main` at
+`2d03196`.
+
 The 2026-11-02 round is recorded in
 [CHAOS-REVIEW-2026-11-02.md](CHAOS-REVIEW-2026-11-02.md) — CHAOS-109 (the
 FEED-INGESTION BYTE BUDGET). CHAOS-106 bounded decompression on the plane where
@@ -197,6 +227,30 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in silence. The durable fix is still the one recorded above (allocate the id
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
+
+**2026-11-04 — `CHAOS-110` CLAIMED (placeholder, commit one). Domain: the DPI
+SCAN GOROUTINE — `internal/scanner` spawns one abandonable worker per inspected
+response body, so how many of them can exist at once, who counts them, and what
+does the gateway do to legitimate traffic when the engine is saturated?** Id
+claimed in this committed row before any code was written, per the convention
+above, and checked against `origin/main` rather than the working tree, per the
+2026-09-25 amendment: `CHAOS-109` is the highest id anywhere on `origin/main`
+(at `2d03196`), and no open PR holds a chaos id at claim time (#1803, #1802,
+#1705, #1549, #1548, #1536, #1528, #1526 — none is a chaos sweep), so this
+sweep took 110 and will not move.
+
+Scope is the SIMULATE list's *CPU starvation* / *memory pressure* / *thousands
+of simultaneous connections* rows asked about the one scanner producer whose
+rate is set by CLIENT traffic rather than by the operator, and it closes the
+2026-10-13 backlog's `X-5` — the row the 2026-10-30 round re-confirmed as open
+while correcting its per-pattern wording. CHAOS-52 asked what the scan path
+does when a scanner is SLOW and CHAOS-53 what it does when one is SATURATED;
+both asked about the sidecar and ClamAV, i.e. producers behind a network hop.
+This round asks it about the in-process regex engine, where the cost is paid in
+this process's own goroutines, heap and CPU, and where the twin
+(`internal/yara`) already ships the counted, posture-governed in-flight cap that
+this one does not. Findings, measurements and gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-04.md).
 
 **2026-11-02 — `CHAOS-109` CLAIMED (placeholder, commit one). Domain: the
 CATEGORY-FEED INGESTION PATH — a 50+ MB gzip tarball is fetched from a
@@ -19825,3 +19879,130 @@ line but no alert and no `/readyz` row, unlike the `state_file_corrupt` pattern
 this class otherwise follows; wiring them would carry the verdict forward into
 the observability slice, which is a change to that slice rather than to this
 race. Both are recorded in §11 of the dated review.
+
+---
+
+## 59. CHAOS-110 — The DPI scan goroutine: who counts the workers nobody is waiting for
+
+Findings, the executed fault injection, the risk matrix, the mutation test and
+the gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-04.md).
+Summarised here because three rows are load-bearing for later sweeps, and
+because this section **closes the 2026-10-13 backlog's `X-5`** — the row the
+2026-10-30 round re-confirmed as open while correcting its per-pattern wording.
+
+CHAOS-52 asked what the scan path does when a scanner is SLOW and CHAOS-53 what
+it does when one is SATURATED; both asked it of producers behind a network hop
+(the sidecar, ClamAV). Neither asked it of the IN-PROCESS regex engine, where
+the cost is paid in this process's own goroutines, heap and CPU — and where the
+twin engine (`internal/yara`) already ships the counted, posture-governed
+in-flight cap that this one did not.
+
+- **`CHAOS-110` / DPI-1 — the abandoned worker population was unbounded and
+  uncounted, and each worker retains a whole response body.** `patternSet.scan`
+  must spawn a goroutine to enforce its per-pattern budget, because `re.Match`
+  is not interruptible, and on overrun it ABANDONS that goroutine. An abandoned
+  worker keeps running (the `abandoned` flag is checked only BETWEEN patterns,
+  so the match that overran runs to completion) and keeps `data` reachable.
+  There was one worker per inspected response body
+  (`proxy_tunnel.go:1432` → `safeDPIScan`), with no gauge, no cap and no
+  saturation counter. Measured on the baseline, after every parent had returned
+  and the test held no body reference, following an explicit `runtime.GC()`:
+  **200 concurrent abandoned scans = 200 live goroutines and 200.3 MiB of
+  reachable heap**; 64 abandoned scans at an 8 MiB window = **512.1 MiB**,
+  released in full only when the matches ended. Reachable heap is the one thing
+  `GOMEMLIMIT` cannot reclaim and `recover()` cannot see — the same two facts
+  CHAOS-109 recorded on the ingest plane, so neither existing backstop covered
+  this. Fixed by `internal/scanner/inflight.go`: a counted gate of
+  `2 × GOMAXPROCS`, with the slot released by the **WORKER** in a `defer`, so an
+  abandoned worker keeps occupying the cap for exactly as long as it keeps
+  occupying the heap. Measured ceiling after the fix on the same workload:
+  **64.0 MiB** (= cap × window). Parent-release is the mutant the gates catch.
+
+- **`CHAOS-110` / DPI-2 — the budget is WALL CLOCK, so without a cap the
+  gateway blocked clean traffic in proportion to its own load, and each block
+  made the next one likelier.** A match's elapsed time grows with how many other
+  CPU-bound matches compete for the same cores, so scans fail closed because the
+  GATEWAY is busy rather than because the CONTENT is slow. Measured, one core,
+  a match needing 68ms against a 200ms budget (a 3x margin) over bodies that
+  match nothing: **0 of 1 clean bodies blocked at concurrency 1, 4 of 4 at
+  concurrency 4, 8 of 8 at 8, 32 of 32 at 32.** Nothing about the content
+  changed between those rows. Every one of those blocks then left another
+  abandoned worker competing for the same cores — the feedback half, and a
+  metastable failure reached by four concurrent requests on a CPU-starved node,
+  with no attacker. Bounding concurrency REMOVES these blocks rather than
+  causing them, because it keeps elapsed time near CPU time: measured **0 of 4**
+  after the fix where the baseline blocked 4 of 4. At concurrency 32 the offered
+  work (2.2 core-seconds) exceeds what one core can do inside a 200ms budget and
+  no scheme serves it all — there the gate's contribution is that 4 scans are
+  served instead of 0, for 259ms of CPU instead of 931ms, inside a memory
+  ceiling.
+
+- **`CHAOS-110` / DPI-3 — the blocks were attributed to the operator's
+  PATTERN.** Every capacity-induced block logged
+  `DPI: regex timeout after 200ms on pattern "…"`, so the node told the operator
+  their pattern was slow when the node was actually out of CPU, and the
+  remediation that points at — drop or rewrite the pattern — is the wrong one.
+  Gate refusals now name capacity (`in-flight cap reached`, rate-limited to once
+  per 10s) and there is an 80%-of-cap warning before blocks start, plus
+  `dpi_inflight` / `dpi_inflight_max` / `dpi_saturation_blocks` /
+  `dpi_abandoned_workers` on the role-gated `/api/security-scan/status` and two
+  admin-UI tiles beside the YARA ones. A budget overrun caused by contention
+  still names the pattern; see the open rows below.
+
+- **`CHAOS-110` / DPI-4 — the DPI worker goroutine had NO panic guard, and the
+  thing that looks like one is on the wrong goroutine.** `internal/scanner`
+  contained no `recover()` and no `obs.SafeCall` anywhere, while the worker runs
+  attacker-supplied bytes through a compiled regexp on the response-scanning
+  path. Root's `safeDPIScan` wraps the call in `recover()`, but that recover
+  runs on the CALLING goroutine and cannot see a panic in the worker's — so the
+  guard's name misleads a reader into thinking the case is covered. This is the
+  same class CHAOS-25 closed for `internal/yara`'s match goroutine (whose
+  comment gives the reason verbatim: an unrecovered panic there "would take down
+  an in-line gateway") and CHAOS-105 closed for five background workers; the DPI
+  worker was the one left. Fixed with `obs.SafeCall` around the whole pattern
+  walk, failing closed with a distinguishable reason (`dpi-match-panic`, counted
+  by `MatchPanics()`, surfaced as `dpi_match_panics`) and answering the parent
+  AT ONCE rather than making it wait out a budget that can never be met. The
+  guard is deliberately coarser than the twin's per-match one: a DPI scan yields
+  ONE verdict over the whole list, so a contained panic already forces "block"
+  and a surviving loop would have nothing left to decide — and wrapping once
+  keeps the cost O(1) in pattern count, which the alloc gate holds (still 7
+  allocs/op flat at 1, 10, 20 and 50 patterns).
+
+**The one deliberate divergence from the twin.** `internal/yara` decides AT the
+cap — it skips the match and resolves through an admin posture — because its
+matches are charged per rule STRING inside one scan. A DPI scan is one unit per
+RESPONSE, so the cap is reached by ordinary ARRIVAL concurrency, and an
+immediate verdict at the cap would turn "busy" into "blocking legitimate
+traffic". So a scan that finds the gate full WAITS, bounded by the same budget
+one pattern may run for; only when that wait expires does it fail closed, which
+is the same verdict the existing timeout branch already returns for the same
+epistemic state. **No new fail-open path exists anywhere in the change**, and
+the client-visible block page is unchanged (a fixed string naming no pattern),
+so a flood cannot be used to push content past DPI and the refusal discloses no
+posture to the client that triggered it.
+
+Left open and attributed rather than fixed, in priority order: **a
+`dpi_degraded` alert** — `internal/scanner` does not import `internal/alerts`
+(the twin does), so wiring one is a new package edge that belongs with a
+package-isolation record and an ADR, which means the signal is currently
+visible but pages nobody; **charging the budget against CPU time rather than
+wall clock**, which is what would actually fix DPI-3's remaining half and is a
+change to how the budget is DEFINED; **rate-limiting the per-event timeout
+log** (64 timeouts produced 64 `WARN` lines, into a sink that `X-2` records as
+blocking the request goroutine when full) — deliberately NOT changed, because
+`yaraTimeoutResult` logs every timeout unconditionally and narrowing per-event
+forensics on one of two agreeing engines is an owner decision; and **the DPI
+engine's own window**, since `safeDPIScan` receives the buffer sized by
+`maxScanBufferBytes()` as the larger of the DPI cap and the security scanner's
+`max_scan_mb`, so raising an unrelated scanner's setting silently multiplies
+what every DPI worker retains. All four are recorded in §8 of the dated review.
+
+Two narrowings of `X-5` are recorded so the row is not over-read: Go's `regexp`
+is RE2, so classic catastrophic backtracking is not available to an attacker and
+the realistic trigger is CPU starvation (a cgroup quota, a noisy neighbour) or a
+raised scan window rather than a crafted body; and `X-5`'s "one goroutine per
+pattern" wording was already stale — the harness was hoisted to one worker per
+SCAN, which is why the alloc gate reads a constant 7 allocs/op across 1, 10, 20
+and 50 patterns and still does after this change.

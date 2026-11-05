@@ -1593,6 +1593,14 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               <div id="sec-yara-inflight" style="font-weight:600;font-size:.85rem">0 / 50</div>
             </div>
             <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">DPI inflight</div>
+              <div id="sec-dpi-inflight" style="font-weight:600;font-size:.85rem">0 / 0</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
+              <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">DPI capacity blocks</div>
+              <div id="sec-dpi-saturation-blocks" style="font-weight:600;font-size:.85rem">0</div>
+            </div>
+            <div style="background:var(--surface2);border-radius:8px;padding:10px">
               <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">Sidecar fails</div>
               <div id="sec-remote-fail" style="font-weight:600;font-size:.85rem">0</div>
             </div>
@@ -9911,9 +9919,15 @@ async function loadSecScanStatus() {
       const el = document.getElementById(id);
       if (!el) return;
       const n = Number(val || 0);
-      el.textContent = (id === 'sec-yara-inflight')
-        ? (n + ' / ' + (s.yara_inflight_max || 50))
-        : String(n);
+      if (id === 'sec-yara-inflight') {
+        el.textContent = n + ' / ' + (s.yara_inflight_max || 50);
+      } else if (id === 'sec-dpi-inflight') {
+        // CHAOS-110: the DPI cap is sized from the node's CPU allowance, so
+        // there is no fixed fallback to show when the field is absent.
+        el.textContent = n + ' / ' + (s.dpi_inflight_max || 0);
+      } else {
+        el.textContent = String(n);
+      }
       if (critAt != null && n >= critAt) {
         el.style.color = 'var(--red)';
       } else if (warnAt != null && n >= warnAt) {
@@ -9925,6 +9939,12 @@ async function loadSecScanStatus() {
     setMetric('sec-scan-timeout', s.stat_scan_timeout, 1, 10);
     setMetric('sec-scan-skipped', s.stat_scan_skipped, 1, null);
     setMetric('sec-yara-inflight', s.yara_inflight, (s.yara_inflight_max||50)*0.8, s.yara_inflight_max||50);
+    // CHAOS-110: warn at 80% of the gate, critical at the cap — past it, scans
+    // are failed closed without being inspected.
+    const dpiCap = Number(s.dpi_inflight_max || 0);
+    setMetric('sec-dpi-inflight', s.dpi_inflight,
+      dpiCap > 0 ? dpiCap * 0.8 : null, dpiCap > 0 ? dpiCap : null);
+    setMetric('sec-dpi-saturation-blocks', s.dpi_saturation_blocks, 1, 10);
     setMetric('sec-remote-fail', s.stat_remote_scan_fail, 1, 10);
     setMetric('sec-remote-saturated', s.stat_remote_scan_saturated, 1, 10);
     setMetric('sec-remote-inflight', s.remote_scan_inflight, 4, 16);

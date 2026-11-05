@@ -397,10 +397,27 @@ func (s *ContentScanner) Scan(data []byte) (string, bool) {
 // patterns — strictly less waste than the per-pattern version, which left the
 // overrunning match running and then continued the loop on the calling goroutine.
 func (ps *patternSet) scan(data []byte, budget time.Duration) (string, bool) {
-	// One allocation for all shared state: the three fields are captured by the
-	// worker closure, so as separate locals they would escape as three separate
+	// CHAOS-110: book an in-flight slot before spawning the worker. The worker
+	// releases it on the way out, so a worker this scan ABANDONS keeps holding
+	// its slot — and therefore stays visible to the cap — until its
+	// uninterruptible match actually returns. See inflight.go for why the gate
+	// waits here rather than deciding immediately as internal/yara does.
+	slot, admitted := acquireSlot(budget)
+	if !admitted {
+		blocks := saturationBlocks.Add(1)
+		if logAllowed(&lastSaturatedLog) {
+			obs.Warnf("DPI: scan refused: in-flight cap reached (%d/%d) after waiting %s; refused total %d",
+				Inflight(), MaxInflight(), budget, blocks)
+		}
+		// S17: the content was never inspected, so it is not known clean. Same
+		// verdict, for the same reason, as the timeout branch below.
+		return SaturatedReason, true
+	}
+
+	// One allocation for all shared state: the fields are captured by the
+	// worker closure, so as separate locals they would escape as separate
 	// heap objects and give back part of the win at low pattern counts.
-	st := &scanState{done: make(chan scanVerdict, 1)}
+	st := &scanState{done: make(chan scanVerdict, 1), slot: slot}
 	st.startedAt.Store(time.Now().UnixNano())
 	go ps.match(data, st, budget)
 
@@ -425,6 +442,7 @@ func (ps *patternSet) scan(data []byte, budget time.Duration) (string, bool) {
 				continue
 			}
 			st.abandoned.Store(true)
+			abandonedWorkers.Add(1)
 			pattern := ""
 			if i := int(st.current.Load()); i >= 0 && i < len(ps.raw) {
 				pattern = ps.raw[i]
@@ -472,6 +490,46 @@ func budgetRemaining(budget time.Duration, startedAt, now int64) (remaining time
 // genuine-hang case, where the worker never gets to report anything), the worker
 // catches one that FINISHED past budget.
 func (ps *patternSet) match(data []byte, st *scanState, budget time.Duration) {
+	// The slot is released HERE, by the worker, and not by the parent: an
+	// abandoned worker still holds its goroutine and still keeps data
+	// reachable, so it must keep occupying the cap until the match it is stuck
+	// inside returns (CHAOS-110, inflight.go).
+	defer st.slot.release()
+
+	// CHAOS-110, and the same class CHAOS-25 closed for internal/yara: this
+	// goroutine runs attacker-supplied bytes through a compiled regexp on the
+	// response-scanning path, and an unrecovered panic here terminates an
+	// in-line gateway. Root's safeDPIScan LOOKS like the guard for that and is
+	// not — its recover() runs on the CALLING goroutine, which cannot see a
+	// panic in this one.
+	//
+	// The guard wraps the WHOLE pattern walk, where internal/yara's wraps each
+	// individual match. That is not a weaker choice, it is the granularity this
+	// verdict has: yara charges a verdict per rule STRING, so killing its
+	// worker would fail the remaining strings closed and turn one bad match
+	// into a whole-scan block. A DPI scan produces ONE hit/no-hit over the
+	// whole list, and a contained panic already forces that one verdict to
+	// "block", so there is nothing left for a surviving loop to decide. Wrapping
+	// once also keeps the cost O(1) in pattern count, which is the contract
+	// TestBenchGate_DPIScanAllocsConstantInPatternCount exists to hold.
+	//
+	// A contained panic yields NO verdict about the content — the same
+	// epistemic state a timeout leaves — so it fails closed (S17), and it
+	// answers the parent IMMEDIATELY rather than making it wait out a budget
+	// that will never be met.
+	var v scanVerdict
+	if obs.SafeCall(dpiMatchComponent, func() { v = ps.matchLoop(data, st, budget) }) {
+		matchPanics.Add(1)
+		st.done <- scanVerdict{pattern: PanicReason, hit: true}
+		return
+	}
+	st.done <- v
+}
+
+// matchLoop is the pattern walk itself, split out so the panic guard above can
+// wrap it in one closure per scan rather than one per pattern. It RETURNS the
+// verdict instead of publishing it, so there is exactly one send on st.done.
+func (ps *patternSet) matchLoop(data []byte, st *scanState, budget time.Duration) scanVerdict {
 	// One clock read per pattern, not two: a match ends where the next one begins,
 	// so the reading that closes pattern i also opens pattern i+1. The sliver of
 	// loop overhead this folds into the next pattern's elapsed time is charged
@@ -480,27 +538,30 @@ func (ps *patternSet) match(data []byte, st *scanState, budget time.Duration) {
 	started := time.Now()
 	for i, re := range ps.compiled {
 		if st.abandoned.Load() {
-			return // parent already failed closed; don't scan the rest
+			// Parent already failed closed; don't scan the rest. The verdict is
+			// discarded (st.done is buffered and nobody is reading it).
+			return scanVerdict{}
 		}
 		st.current.Store(int64(i))
 		st.startedAt.Store(started.UnixNano())
 		if ps.matchOne(re, data) {
-			st.done <- scanVerdict{pattern: ps.raw[i], hit: true}
-			return
+			return scanVerdict{pattern: ps.raw[i], hit: true}
 		}
 		finished := time.Now()
 		if finished.Sub(started) >= budget {
-			st.done <- scanVerdict{pattern: ps.raw[i], hit: true, timedOut: true}
-			return
+			return scanVerdict{pattern: ps.raw[i], hit: true, timedOut: true}
 		}
 		started = finished
 	}
-	st.done <- scanVerdict{}
+	return scanVerdict{}
 }
 
 // scanState is the shared state between a scan and its worker goroutine.
 type scanState struct {
 	done chan scanVerdict
+	// slot is the in-flight gate slot this scan booked; the worker returns it
+	// (CHAOS-110). nil only when the gate is uninitialised.
+	slot *slotGate
 	// startedAt is wall-clock UnixNano, not a monotonic reading: it is written by
 	// the worker and read by the parent, and Go's monotonic clock rides on
 	// time.Time values rather than on a plain int64 that can be stored atomically.
