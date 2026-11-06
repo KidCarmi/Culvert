@@ -57,6 +57,34 @@ missing staleness alert and health row are recorded as the open half. Id claimed
 in a committed placeholder row before any code per the 2026-09-25 amendment,
 checked against `origin/main` at `3c5fab1`.
 
+The 2026-11-06 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-06.md)
+and summarised in §61 — CHAOS-112 (the PER-IP CONNECTION LIMITER'S
+CONFIGURATION PLANE). `conn_limit_enabled` is the one admission surface
+`config_surfaces.go` declares NOT cluster-synced; `conn_limit_max_per_ip` beside
+it IS; and the Data Plane's only apply primitive was `Enable`, which writes
+BOTH. So every DP that applied any snapshot enabled per-source-IP connection
+limiting whether or not its operator configured it — the normal path on every
+clustered deployment, since the limiter ships disabled. The field cannot signal
+"off" either: `MaxPerIP()` answers with a cap while limiting is off, so the
+publisher can never emit the zero the binding's recorded `semSkipIfZero` would
+skip. Measured: a CP that configured nothing publishes 1024 and the pre-fix
+apply left the DP enabled at 1024; an operator's DISABLE arrived as "tighten to
+50 and stay on". The second half is why it survived — the refusal was the only
+front-door gate in `handleRequest` writing no row, no counter, no line and no
+metric (measured: 0, 0, 0 over 200 refusals), so a cap nobody configured refused
+traffic invisibly. A cap-only apply, an attributed row per refusal, a
+rate-limited line and five posture/refusal series. The root cause is this
+register's standing lesson in a new form: a registry row is a DESCRIPTION, not
+an enforcement mechanism — both of `config_surfaces.go`'s records here were
+accurate about intent and neither was true of the code, and this is the first
+instance where a row's `Apply` semantics were UNREACHABLE rather than merely
+mismatched. Carries a rider in a separate domain and a separate commit: the
+public login endpoint's bootstrap branch minted a 30-day tier-2 trusted-IP
+BYPASS grant from a login it had not verified, invisible to the lockouts API and
+cleared by no operator action. Id claimed in a committed placeholder row before
+any code, checked against `origin/main` at `b05d649`.
+
 The 2026-11-05 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-05.md)
 and summarised in §60 — CHAOS-111 (the HOT-IP GOSSIP PLANE). `SyncRateLimits` is
@@ -246,6 +274,34 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in silence. The durable fix is still the one recorded above (allocate the id
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
+
+**2026-11-06 — `CHAOS-112` CLAIMED (placeholder, commit one). Domain: the
+PER-IP CONNECTION LIMITER'S CONFIGURATION PLANE — `conn_limit_enabled` is the
+one admission surface `config_surfaces.go` declares NOT cluster-synced, so what
+is a Data Plane actually enforcing after it applies a snapshot from a Control
+Plane whose operator never configured the limiter at all?** Id claimed in this
+committed row before any code was written, per the convention above, and checked
+against `origin/main` rather than the working tree, per the 2026-09-25
+amendment: `CHAOS-111` is the highest id anywhere on `origin/main` (at
+`b05d649`), and no open PR holds a chaos id at claim time (#1815, #1814, #1705,
+#1549, #1548, #1536, #1528, #1526 — none is a chaos sweep), so this sweep took
+112 and will not move.
+
+Scope is the SIMULATE list's *configuration corruption* / *configuration
+rollback* / *Control Plane unavailable* rows aimed at the front-door gate whose
+refusal is the only one in `handleRequest` that writes nothing anywhere. The
+entry point is `PX-6`, open since the first sweep: the per-IP connection limiter
+ships DISABLED. This round asks what a cluster does with that default, because
+`ConnLimiter.MaxPerIP()` reports the cap whether or not limiting is on and
+`Disable` clears only the flag — so the CP publishes a non-zero cap from a
+limiter it is not using, the DP's only apply is `Enable`, and the `semSkipIfZero`
+semantics the registry records for that binding are unreachable by construction.
+Whether the resulting enforcement is visible anywhere is the second half, and it
+is the half that decides whether an operator can ever find the first.
+**Round complete.** Findings, measurements, the risk matrix and the twenty-one
+mutation runs are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-06.md)
+and summarised in §61.
 
 **2026-11-05 — `CHAOS-111` CLAIMED (placeholder, commit one). Domain: the HOT-IP
 GOSSIP PLANE — `SyncRateLimits` is the one cluster RPC whose body is sized by
@@ -1868,7 +1924,7 @@ Severity key: **C**ritical / **H**igh / **M**edium / **L**ow / **✓** handled w
 | PX-24 | **`topHosts` is bounded on the ENTRY-COUNT axis and never was on the KEY-SIZE axis** — the identical blindness §32 found in `internal/lockout`, whose `Cleanup` doc claimed the maps were bounded "against an unbounded-memory DoS". `topHostsMaxEntries` is 10 000 distinct hosts and the key is the client-supplied authority, so at the cap 1 MiB keys are ~10 GiB of resident heap in an in-line gateway whose OOM is a total traffic outage. Measured: 200 keys of 64 KiB retained 13 107 200 bytes, i.e. 655 MB at the cap for 64 KiB keys alone. Reached on the allow branch (`recordStats` → `topHosts.Record`), so a default-allow posture or any broad allow rule is enough. | **NEW** → **CLOSED** (CHAOS-69, §39 — the same entry-point bound; the cap itself is unchanged and still correct on its own axis) | **H** | `store.go:1723` (`topHosts.Record(redactedHost)`), `store.go:1937-1990` (`hostCounter`); gate `TestChaos69_DefectTopHostsNeverRetainsAnOversizeKey` |
 | PX-25 | **The admin plane reaches the same quadratic fusion from a viewer-role request.** `apiURLCatLookup` takes its host from a query string inside the 1 MiB header block and calls `lookupHostCategory` + `bl.IsBlocked`; the policy-test handler does the same with `body.Host` from a 1 MiB JSON body. Both are `RoleViewer`, so a read-only admin account could park an admin-plane goroutine for minutes with one request. | **NEW** → **CLOSED** (CHAOS-69, §39 — bounded through the SAME shared predicate as the data path, so the four entry points cannot drift apart) | M | `ui_policy.go` `apiURLCatLookup`, `ui_policy.go` policy-test handler |
 | PX-19 | **The SOCKS5 accept loop had no panic guard.** `handleSOCKS5` carries `recoverGoroutine`, but a panic in `serve` itself propagated to the runtime and killed the whole proxy process (the PX-4 class, one level up). | NEW → **CLOSED** (CHAOS-54: contained and reported as listener DOWN — the CHAOS-24 objection to recovering in a worker goroutine does not apply when the recovery path is the loudest state the subsystem can produce) | M | was: `socks5.go` `serve`; see §22 |
-| PX-6 | **No global connection cap**; per-IP map is unbounded in cardinality; limiter ships **disabled by default**. Distributed flood → FD/memory exhaustion. | GAP | H | `internal/connlimit/connlimit.go:12,67` (default disabled, `Acquire`→true when off) |
+| PX-6 | **No global connection cap**; per-IP map is unbounded in cardinality; limiter ships **disabled by default**. Distributed flood → FD/memory exhaustion. | GAP — **partly re-classified** (CHAOS-112, §61): the "ships disabled" half was NOT TRUE OF A CLUSTER. The CP→DP apply enabled it on every Data Plane at the default cap, because the snapshot's cap field was applied with `Enable` and `MaxPerIP()` can never answer 0. Fixed; enablement is node-local again. The CARDINALITY half stands, and gains a measured RESIDUE half: the shard maps' entry count is pruned and their CAPACITY never is — 11.9 MiB retained after 500 000 distinct sources fully drained with `ActiveIPs()` reading 0 (§61 / review §9.4), reported not fixed. No global cap still. | H | `internal/connlimit/connlimit.go:12,67` (default disabled, `Acquire`→true when off); `controlplane_snapshot.go` (the apply) |
 | PX-7 | Bandwidth/QoS token buckets are **never enforced on the data path** — `AllowBytes` has no call site in the relays. Configured QoS silently does nothing. | GAP (feature dead) | M | `internal/bandwidth` `AllowBytes` `bandwidth.go:261` — no caller in `proxy.go`/`socks5.go` |
 | PX-8 | Shutdown drain only accounts for CONNECT tunnels — WebSocket, both non-TLS inspect fallbacks, and SOCKS5 relays are invisible to `drainActiveTunnels`, so SIGTERM hard-kills them. **Re-scoped by CHAOS-57 and larger than recorded:** the invisibility also silently DESTROYED each severed tunnel's `TUNNEL_CLOSED` byte/duration accounting (written only after both relays drain), and `activeConns` — the drain's log line and the dashboard's `activeConns` field — undercounted by four whole classes. Counting alone would have been the wrong fix: the classes are long-lived by design, so a drain that waits with no way to END the wait costs a guaranteed 15 s per node and severs them anyway. | GAP → **CLOSED** (CHAOS-57: per-class registry owning the `activeConns` accounting, drain-deadline force-close backstop across all five classes, budget-clamped settle so the accounting lands ahead of the FLUSH hooks, `culvert_tunnels_active{class}` + `culvert_tunnel_drain_forced_total`) | M | was: `recordActiveConn` at the CONNECT sites only; now `proxy_tunnel_drain.go`, `drainActiveTunnels` `main_shutdown.go` — see §25 |
 | PX-9 | Half-open circuit admits **all** concurrent requests, not a single probe → thundering herd on a recovering upstream. | GAP | L/M | `internal/upstream/upstream.go:83` (no single-flight gate) |
@@ -20157,3 +20213,128 @@ control off, so the recorded pattern (surface the deferral) is followed instead.
 `PX-6` — the Data Plane's own per-IP client map, still unbounded in cardinality
 — is untouched and named so this fix is not over-read: this round bounded the
 WIRE and what the Control Plane RETAINS, not what a node tracks locally.
+
+## 61. CHAOS-112 — The per-IP connection limiter's configuration plane: a cap nobody configured, that nothing reports
+
+Full write-up, measurements, risk matrix and the twenty-one mutation runs:
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-06.md).
+
+`conn_limit_enabled` is the one admission surface
+[config_surfaces.go](../config_surfaces.go) declares **not** cluster-synced.
+`conn_limit_max_per_ip` beside it **is** cluster-synced. The Data Plane had
+exactly one primitive for applying either — `ConnLimiter.Enable` — and it writes
+**both**. So every Data Plane that applied any configuration snapshot turned
+per-source-IP connection limiting ON, at whatever cap the field carried, whether
+or not its operator had ever configured it. The limiter ships DISABLED (`PX-6`),
+so "nobody configured it" is the default state and this was the normal path on
+every clustered deployment: no fault, no attacker, no unusual configuration.
+
+**The field cannot be read as an enablement signal, and that is the root cause.**
+`MaxPerIP()` answers with a cap while limiting is off — correctly, so an
+operator's configured value survives an off/on cycle and `GET /api/connlimit`
+renders it rather than a misleading `0` — so the publisher
+`snap.MaxConnsPerIP = connLimiter.MaxPerIP()` can **never** emit zero, and the
+`semSkipIfZero` semantics the registry records for that binding ("zero value
+keeps live state") are **unreachable by construction**. Measured through the
+real publisher and the real apply: a Control Plane whose operator never
+configured the limiter publishes `max_conns_per_ip=1024`, and the pre-fix apply
+left the Data Plane at `Enabled()=true`, cap **1024**. Then the sharper half —
+an operator who turns the limiter OFF on the Control Plane publishes the cap it
+was last configured with, so their disable reached the fleet as **"tighten to 50
+and stay on"**. No CP→DP path calls `Disable` at all, so the intended remedy
+could not be expressed.
+
+**The second half is what let the first run on a live fleet.** The per-IP
+connection-limit refusal in `handleRequest` was a bare `http.Error` and a
+`return`: no request-history row, no `statBlocked`, no log line, nothing in
+`/metrics`, `/healthz` or any alert. It is the ONLY front-door gate in that
+function with no per-event observability — the IP filter and the rate limiter
+immediately below it each write a row AND a line, and its own SOCKS5 twin, whose
+comment claims symmetry with this very path, writes both. Measured over 200
+refusals: `statBlocked` delta **0**, `CONN_LIMITED` rows **0**, log lines **0**.
+So a node refusing traffic over a cap nobody configured produced a `503` that
+appeared nowhere, and the only way to discover the cap existed was to poll that
+one node's viewer-gated API and notice it contradicted the Control Plane. The
+enforcement error's direction is fail-CLOSED, which is exactly why it survived:
+nothing was insecure, so nothing complained.
+
+The root cause is this register's standing lesson in a new form. `AU-50`'s was
+*citing a precedent is not applying it*; this one is **a registry row is a
+description, not an enforcement mechanism**. `config_surfaces.go` exists because
+apply-path empty-value semantics drift — its own type doc says so — and it
+correctly recorded both that enablement is node-local and that the cap's apply
+is `semSkipIfZero`. Both records were accurate statements of intent and neither
+was true of the code, and this is the first instance where a row's `Apply`
+semantics were *unreachable* rather than merely mismatched.
+
+`ConnLimiter.SetMaxPerIP` applies the cluster cap and leaves the flag alone: a
+node with limiting on adopts the fleet value, a node with it off stays off while
+still RECORDING the cap, so enabling locally later adopts the fleet's number
+rather than this node's boot value. Non-positive is a no-op, preserving
+`semSkipIfZero` for an older Control Plane or an absent field. The refusal now
+writes the attributed row and the blocked counter unconditionally and the
+narrative line at most once per minute with the suppressed count — the asymmetry
+is deliberate, because `X-2` records `internal/logsink` as BLOCKING the request
+goroutine when full and `CHAOS-54` measured a per-event line at 7.68 M
+attempts / 300 ms, so an unbounded line here would have made a per-IP cap a
+proxy-wide latency amplifier. Five `culvert_connlimit_*` series carry the
+limiter's POSTURE as well as its refusals, because "is any node in this fleet
+enforcing a per-IP connection cap, and at what value?" previously had no
+fleet-wide answer at all.
+
+**Rider, separate domain, separate commit.** The same sweep's lockout
+investigation found that `POST /api/auth/login` — public — minted a tier-2
+**trusted-IP bypass grant** from a login it had not verified: inside the
+first-run bootstrap window it forces `role, ok = RoleAdmin, true` with
+`VerifyUIUser`'s verdict discarded, and then called `RecordSuccess` one line
+above the branch that deliberately refuses to issue a session for exactly the
+reason that applies here too. The grant exempts an attacker-chosen IP from the
+account-wide lock — the only backstop against distributed, IP-rotating brute
+force — for `TrustTTL` (30 days); it outlived the window (nothing in
+`apiSetupComplete` resets the limiter), appeared in no operator surface
+(`Snapshot` reports active locks, not grants) and was cleared by no operator
+action (`ResetUser` deliberately leaves trust alone), so the only remedy was the
+restart `lockout.go` designates as break-glass. The rule was already written
+down twice in this tree — `apiSetupComplete` states it for itself and
+`ui_basic_auth.go` enforces it for its own non-submission re-checks
+(`SEC-BASICAUTH-5`) — and this branch was the remaining caller recording a
+success it had not verified. `internal/lockout` gains `ClearFailures`, so the
+harmless half of a successful login (clearing the caller's own tier-1 counter,
+which is what stops a first-run operator locking themselves out of the window
+they are standing in) is available without the bypass.
+
+Left open and attributed rather than fixed, in priority order: **whether per-IP
+connection limiting should be cluster-synced at all** — this round made the code
+match the registry, not the registry match an operator's expectations, and "turn
+the limiter off for the fleet" still has no expression; **reclaiming the shard
+maps' capacity**, measured at **11.9 MiB retained after 500 000 distinct sources
+fully drained with `ActiveIPs()` reading 0** (the `PX-24` shape and the residue
+half of `PX-6` — the remedy belongs on `Release`, the proxy hot path, and
+`connlimit_footprint_test.go` currently RELIES on the retention); **making
+trusted-IP grants visible and revocable**, which is true of EARNED grants too
+and is a new operator action on the authentication plane; **a connection-limit
+posture alert**, the `dpi_degraded` / `cluster_ratelimit_degraded` shape again;
+and the pre-existing note that the HTTP path's slot is per-REQUEST, so this
+limiter bounds in-flight requests rather than idle sockets and never did.
+
+Three adjacent domains were swept, traced to source, and recorded rather than
+fixed (§10 of the dated review). The one to fix next: **the dashboard tick
+schedules credential re-verification in LOCKSTEP.** `apiEvents` re-checks every
+`sseRevalidateEvery = 60` RECEIVED BROADCAST MESSAGES, and every client receives
+the SAME broadcast, so every stream opened inside one tick window reaches 60 on
+the same round — an N-wide simultaneous bcrypt burst scheduled by the dashboard
+ticker rather than by any arriving request, from `RoleViewer`, with the
+attacker's connections byte-silent after setup. `internal/authcost`, the
+governor `CHAOS-57` added for precisely this cost, has ONE production call site
+(`verifyAuthFrom`); `VerifyUIUser` is ungoverned, and the register's own
+`CHAOS-57` scope note claiming the admin login path is "bounded by the
+brute-force lockout" is not true for a VALID credential. Also recorded: a
+**compliance export silently substitutes different data** —
+`audit.GetPersistent` returns the in-memory ring on ANY read error, ignoring
+`offset`, `limit`, `fromTS` and `toTS`, at HTTP 200 with an attachment, and the
+rotation window makes it reachable with no fault at all once per 50 MB; and
+**`D-5` confirmed open with its direction corrected** — the audit write is fully
+SYNCHRONOUS, so no signal or exit loses a record, only a machine-level fault
+inside the writeback window does, and the sharpest instance is not `D-5`'s own
+example but the audited-but-deliberately-UNVERSIONED set (password change,
+logout, CDR hygiene/revoke) where the unsynced JSONL is the SOLE durable record.

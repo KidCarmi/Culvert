@@ -1600,6 +1600,13 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// ── Connection limit per IP ─────────────────────────────────────────
 	if !connLimiter.Acquire(clientIP) {
+		// CHAOS-112: this branch used to write NOTHING — no row, no counter,
+		// no line — which made it the one front-door gate in this function an
+		// operator could not see firing. noteConnLimitRefusal writes the
+		// attributed request-history row and the blocked counter for every
+		// refusal and the narrative line at most once per interval; see
+		// connlimit_observability.go for why those two differ.
+		noteConnLimitRefusal(r, clientIP, reqID)
 		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
 		return
 	}
