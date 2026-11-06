@@ -240,3 +240,99 @@ func TestCertCache_ZeroValueManagerIsUsable(t *testing.T) {
 		t.Fatalf("cache len = %d after one sign on a zero-value Manager, want 1", n)
 	}
 }
+
+// liveCacheEntries counts what the sync.Map ACTUALLY holds. This is the one
+// quantity neither cacheLen nor cacheOrder is derived from, so it is the only
+// independent oracle for either of them.
+func liveCacheEntries(cm *Manager) int {
+	n := 0
+	cm.cache.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
+}
+
+// TestCertCache_LenAgreesWithTheMapItCounts is the independent half of the
+// bookkeeping gate.
+//
+// A forward proxy's client chooses the SNI, so it chooses this cache's keys:
+// certCacheMaxSize is a remote-memory-exhaustion bound, and since the leaf
+// cache became a sync.Map that bound is enforced against cacheLen rather than
+// against the map (ca.go, storeLeaf). The same change replaced the only
+// assertion in this package that read the map's real size —
+// TestGetCert_CacheOrderDoesNotGrowOnRefresh's `len(cm.cache)` became
+// `cm.CertCacheLen()` — so nothing compares the counter with its subject any
+// more. TestCertCache_LenDrivesEviction checks cacheLen against cacheOrder,
+// but the same two statement pairs in storeLeaf maintain both, so one omission
+// moves them together and that test stays green.
+//
+// The failure that would reach production: a later change that stores into or
+// deletes from cm.cache outside storeLeaf/resetLeafCacheLocked — a per-host
+// invalidation endpoint, a negative-cache entry, a TTL sweeper — without
+// moving cacheLen. The counter then under-counts, the `cacheLen >
+// certCacheMaxSize` branch stops firing, and the cache grows without bound on
+// attacker-chosen hostnames with every test in this package passing.
+func TestCertCache_LenAgreesWithTheMapItCounts(t *testing.T) {
+	cm := readyManager(t)
+
+	check := func(stage string) {
+		t.Helper()
+		live := liveCacheEntries(cm)
+		counter := cm.CertCacheLen()
+		cm.mu.RLock()
+		order := len(cm.cacheOrder)
+		cm.mu.RUnlock()
+		if counter != live {
+			t.Fatalf("%s: cacheLen = %d but the map holds %d entries — the bound is "+
+				"enforced against cacheLen, so it is now off by %d", stage, counter, live, counter-live)
+		}
+		if order != live {
+			t.Fatalf("%s: cacheOrder = %d but the map holds %d entries — an entry absent "+
+				"from cacheOrder can never be evicted", stage, order, live)
+		}
+	}
+
+	check("empty")
+
+	// Real signs, then a refresh of a host already cached (the CHAOS-28 axis:
+	// it must not add a second cacheOrder slot or a second count).
+	for i := 0; i < 5; i++ {
+		if _, err := cm.GetCert(&tls.ClientHelloInfo{ServerName: fmt.Sprintf("a%d.example.com", i)}); err != nil {
+			t.Fatalf("GetCert %d: %v", i, err)
+		}
+	}
+	check("five distinct hosts")
+
+	seed, ok := cm.cachedLeaf("a0.example.com", time.Now())
+	if !ok {
+		t.Fatal("a0.example.com was not cached")
+	}
+	cm.AgeCacheEntryForTest("a0.example.com", time.Now().Add(-2*certCacheTTL))
+	if _, err := cm.GetCert(&tls.ClientHelloInfo{ServerName: "a0.example.com"}); err != nil {
+		t.Fatalf("refresh GetCert: %v", err)
+	}
+	check("after a refresh of an already-cached host")
+
+	// Across the eviction bound, which is the branch cacheLen gates.
+	now := time.Now()
+	for i := cm.CertCacheLen(); i < certCacheMaxSize; i++ {
+		cm.SeedCacheEntryForTest(fmt.Sprintf("b%d.example.com", i), seed, now)
+	}
+	check("seeded to certCacheMaxSize")
+
+	if _, err := cm.GetCert(&tls.ClientHelloInfo{ServerName: "overflow.example.com"}); err != nil {
+		t.Fatalf("overflow GetCert: %v", err)
+	}
+	if n := cm.CertCacheLen(); n > certCacheMaxSize {
+		t.Fatalf("cache len = %d after crossing the bound, want <= %d", n, certCacheMaxSize)
+	}
+	check("after the insert that crosses the bound")
+
+	// A CA replacement is the other writer of all three.
+	cm.ClearCache()
+	if live := liveCacheEntries(cm); live != 0 {
+		t.Fatalf("the map holds %d entries after ClearCache, want 0", live)
+	}
+	check("after ClearCache")
+}

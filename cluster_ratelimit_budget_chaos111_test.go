@@ -719,3 +719,100 @@ func TestCHAOS111_ANewlyReportedOwnIPGetsItsClusterSumInsideACachedGeneration(t 
 		t.Fatalf("reply carried %d entries, over the bound %d", len(totals), maxBroadcastHotIPs)
 	}
 }
+
+// TestCHAOS111_PassOneStalenessStaysInsideTheGossipRound pins the one
+// fail-open window the cached generation introduces, and the constant relation
+// that keeps it negligible.
+//
+// Pass 1 skips an IP the generation does not track (controlplane.go), and a
+// KNOWN peer's refresh deliberately does not invalidate the generation. So a
+// peer count that lands after gen.builtAt, for an address no node's generation
+// slot held, reaches no reply until the generation rebuilds: that address is
+// enforced locally-only on the requesting node for the rest of
+// rlTotalsCacheTTL plus the wait for the requester's next round. The pre-fix
+// per-RPC sum did include it, so this is a real narrowing of remote
+// enforcement — accepted because the gossip plane was already eventually
+// consistent at rlGossipInterval and the freshness window the applied
+// broadcast is checked against is the whole rate-limit window.
+//
+// Two things must stay true for that to remain negligible, and neither is
+// pinned anywhere else. Raising rlTotalsCacheTTL toward the gossip interval
+// would multiply the window; raising it past the broadcast freshness window
+// would let the limiter run on counts it should have discarded.
+func TestCHAOS111_PassOneStalenessStaysInsideTheGossipRound(t *testing.T) {
+	// The constant relation. rlTotalsCacheTTL is the ONLY term the cache adds
+	// to a staleness budget that rlGossipInterval already dominates.
+	if rlTotalsCacheTTL >= rlGossipInterval {
+		t.Fatalf("rlTotalsCacheTTL = %v must stay well inside rlGossipInterval = %v: the cache may "+
+			"add at most a fraction of a gossip round to remote-count staleness", rlTotalsCacheTTL, rlGossipInterval)
+	}
+	// clusterRemoteCountMaxAge(window) IS the window, and every production
+	// RateLimiter.Configure call site passes a hardcoded time.Minute (only the
+	// limit is operator-configurable), so 1 minute is the freshness budget the
+	// cache spends from. A tenth of it is the line drawn here.
+	const productionWindow = time.Minute
+	if rlTotalsCacheTTL > productionWindow/10 {
+		t.Fatalf("rlTotalsCacheTTL = %v must stay under a tenth of the %v rate-limit window, which is "+
+			"what an applied broadcast's freshness is checked against (clusterRemoteCountMaxAge)",
+			rlTotalsCacheTTL, productionWindow)
+	}
+	if rlTotalsCacheTTL >= rlNodeStaleAfter {
+		t.Fatalf("rlTotalsCacheTTL = %v must stay far under rlNodeStaleAfter = %v", rlTotalsCacheTTL, rlNodeStaleAfter)
+	}
+
+	// The window itself, demonstrated rather than reasoned about, so a change
+	// that closed it (or widened it) shows up here.
+	resetCHAOS111Accounting(t)
+	agg := newTestRLAggregator()
+
+	const (
+		requester = "dp-requester"
+		peer      = "dp-peer"
+		freshIP   = "198.51.100.77"
+	)
+	agg.Update(requester, []RateLimitDelta{{IP: freshIP, Count: 4}})
+	// The peer must already be KNOWN, or its update invalidates the generation
+	// at once and this gate would not exercise the cache at all. Seed it on an
+	// unrelated address first.
+	agg.Update(peer, []RateLimitDelta{{IP: "203.0.113.9", Count: 1}})
+
+	// Build the generation: the requester holds freshIP, the peer does not.
+	if _, omitted := agg.ClusterTotalsExcluding(requester); omitted != 0 {
+		t.Fatalf("fixture: omitted = %d, want 0", omitted)
+	}
+	gen := pinRLGeneration(t, agg)
+	if gen.perNode[peer][freshIP] != 0 {
+		t.Fatal("fixture: the generation must predate the peer's count for freshIP")
+	}
+
+	// The peer starts counting freshIP. A known node's refresh deliberately
+	// does not invalidate the generation.
+	agg.Update(peer, []RateLimitDelta{{IP: "203.0.113.9", Count: 1}, {IP: freshIP, Count: 6}})
+	if currentRLGeneration(agg) != gen {
+		t.Fatal("fixture: a known peer's update invalidated the generation, so this gate does not exercise the cache")
+	}
+
+	totals, _ := agg.ClusterTotalsExcluding(requester)
+	if currentRLGeneration(agg) != gen {
+		t.Fatal("fixture: the reply was served from a rebuilt generation, not the cached one")
+	}
+	// DOCUMENTED, ACCEPTED: the peer's 6 is not visible yet. If this ever
+	// returns 6, the window was closed deliberately — update this gate and the
+	// pass 1 comment in controlplane.go rather than deleting the assertion.
+	if got := totals[freshIP]; got != 0 {
+		t.Fatalf("totals[%s] = %d inside the cached generation; this gate records that it is 0 "+
+			"(the peer's count landed after gen.builtAt). A non-zero value means the staleness "+
+			"window was closed — re-read the pass 1 comment in controlplane.go before changing this",
+			freshIP, got)
+	}
+
+	// And it must resolve on the very next generation, not persist.
+	agg.mu.Lock()
+	agg.gen = nil
+	agg.mu.Unlock()
+	totals, _ = agg.ClusterTotalsExcluding(requester)
+	if got := totals[freshIP]; got != 6 {
+		t.Fatalf("totals[%s] = %d after the generation rebuilt, want the peer's 6: the window must "+
+			"close on the next rebuild, not persist", freshIP, got)
+	}
+}

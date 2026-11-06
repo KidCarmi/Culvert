@@ -146,21 +146,89 @@ prefix. For those assertions the two serializations bind identically unless a
 prefix is bound differently elsewhere in the document. In that case only the
 new one is correct.
 
+### (d) The elements `validateAssertion` reads to reach its verdict
+
+`schema.go` and `service_provider.go`. (b) qualified the fields that carry
+*identity*. The fields that carry the assertion's *validity* kept bare tags, and
+encoding/xml treats the two shapes differently:
+
+| Shape | Behaviour on a second same-local-name match | Fields |
+|---|---|---|
+| pointer / value struct | the existing struct's **attributes are overwritten** | `Assertion.Conditions`, `SubjectConfirmation.SubjectConfirmationData`, `AudienceRestriction.Audience` |
+| slice | the match is **appended** | `Subject.SubjectConfirmations`, `Conditions.AudienceRestrictions` |
+
+Under (b)'s own precondition — an IdP-signed assertion carrying
+foreign-namespace elements — that defeated **every** check `validateAssertion`
+makes except the signature, `Issuer` and `IssueInstant`+`MaxIssueDelay`:
+
+| Check | How it fell against (a)+(b)+(c) |
+|---|---|
+| `Conditions` NotBefore/NotOnOrAfter | a foreign `<x:Conditions>` after the real one supplied both attributes |
+| `AudienceRestriction` | a foreign `<x:AudienceRestriction>` was **appended**, and `validateAudienceRestriction` accepts when *any* entry matches |
+| `Audience` | a foreign `<x:Audience>` after the real one overwrote its chardata *inside* the IdP's own `<saml:AudienceRestriction>` |
+| `SubjectConfirmationData` Recipient, InResponseTo, NotOnOrAfter | a foreign `<x:SubjectConfirmationData>` after the real one supplied all three |
+
+Measured: an assertion the IdP minted for **another** service provider, audience-restricted to it, bound to its ACS URL and expired 30 minutes earlier was **accepted**, with `AllowIDPInitiated: false` (Culvert's setting, so `InResponseTo` *is* checked) and the attacker's own in-flight request ID. That is cross-SP assertion reuse within `MaxIssueDelay` (90 s) — an authentication bypass on an SP that trusts the same IdP as any other.
+
+Patched tags: `Subject.SubjectConfirmations`, `SubjectConfirmation.NameID`,
+`SubjectConfirmation.SubjectConfirmationData`, `Assertion.Conditions`,
+`Conditions.AudienceRestrictions` and `AudienceRestriction.Audience`, all to
+`urn:oasis:names:tc:SAML:2.0:assertion <local>`.
+
+`validateAssertion` also gained one check, and it is **required by** the tag
+change rather than independent of it: the loop over `SubjectConfirmations` is
+the only place `Recipient` and `InResponseTo` are tested, so an empty slice
+skipped both (true in unpatched v0.5.1 too). Once the slice binds only to the
+assertion namespace, a foreign-namespace-*only* confirmation would leave it
+empty and reach exactly that fail-open. An empty slice is now
+`assertion Subject has no SubjectConfirmation`; the Web Browser SSO profile
+requires at least one bearer `<saml:SubjectConfirmation>`
+(saml-profiles-2.0-os §4.1.4.2).
+
+Behavior notes:
+
+- All six elements have `Element()` methods and the library builds its outbound
+  XML with those, so no byte Culvert emits changes. The only `xml.Marshal` calls
+  on a production path marshal *metadata* (`identity_provider.go:203`,
+  `samlsp/middleware.go:71`, Culvert's `ui_auth.go:1152`), which contains none
+  of these types.
+- A foreign-namespace element at any of these sites is now **ignored**, not
+  grounds for rejection: an otherwise-valid response carrying one still
+  authenticates (`TestSAMLGO20266909ForeignNamespaceValidationElementsAreIgnoredNotFatal`).
+- An assertion that qualifies `<saml:Assertion>` but *not* these children is
+  schema-invalid SAML and no longer parses into those fields. This is the same
+  compatibility cost (b) already accepted for `NameID` and the attribute chain.
+  The three spellings a real IdP uses — a declared prefix, a default `xmlns`,
+  and a prefix redeclared per element — all still bind, and that is a positive
+  control, not an inference: `TestGO20266909ValidationElementsAcceptEverySAMLNamespaceSpelling`.
+- `Conditions.AudienceRestrictions` being *empty* still passes the audience
+  check vacuously (`len(...) == 0` ⇒ valid). That is upstream's deliberate
+  reading of an optional element and is unchanged; it is not reachable as a
+  bypass of a restriction the IdP *did* sign, because the real
+  `<saml:AudienceRestriction>` now always survives in the slice.
+
+Tests: `TestGO20266909ValidationElementsRequireAssertionNamespace` (5 cases),
+`TestGO20266909ValidateAssertionRejectsForeignNamespaceValidationElements`
+(with the IdP's own signed values as the negative control),
+`TestGO20266909ValidateAssertionRequiresSubjectConfirmation`,
+`TestGO20266909ValidationElementsAcceptEverySAMLNamespaceSpelling`, and end to
+end through Culvert's callback,
+`TestSAMLGO20266909ForeignNamespaceValidationElementsDoNotAuthenticate` /
+`...AreIgnoredNotFatal` in `auth_saml_go_2026_6909_test.go`.
+
 ## Known remaining issues (not patched)
 
 These look questionable but are not shown to be exploitable in the same way.
 They were left unpatched to keep the fork minimal:
 
-- Bare or untyped tags remain on fields the library uses only for validation:
-  `Subject.SubjectConfirmations`, `SubjectConfirmation.NameID`,
-  `SubjectConfirmation.SubjectConfirmationData`, `Assertion.Conditions`,
-  `Conditions.AudienceRestrictions`, `AudienceRestriction.Audience`,
-  `Assertion.AuthnStatements`, `AttributeValue.NameID` and
-  `LogoutRequest.NameID`. Under the same precondition (an IdP-signed assertion
-  carrying foreign-namespace elements), a foreign `<x:Conditions>` or
-  `<x:SubjectConfirmationData>` placed after the real one would replace it
-  (last match wins). That could relax audience, recipient or expiry checks
-  rather than spoof identity.
+- Bare or untyped tags remain on `Assertion.AuthnStatements`,
+  `AttributeValue.NameID`, `Conditions.OneTimeUse`, `Conditions.ProxyRestriction`
+  and `LogoutRequest.NameID`. None of them is read by `validateAssertion`,
+  `validateAudienceRestriction` or Culvert's `extractSAMLIdentity`
+  (`AuthnStatement`, `SessionIndex` and SAML `LogoutRequest` appear nowhere in
+  Culvert outside this fork), so a foreign-namespace element at those sites
+  changes no decision this deployment makes. They are left alone to keep the
+  fork minimal; qualify them if a caller ever starts reading one.
 - `elementToBytes` keeps the document-wide prefix map for its two remaining
   callers (outbound ArtifactResolve, `InvalidResponseError.Response` text).
 
@@ -169,11 +237,30 @@ They were left unpatched to keep the fork minimal:
 - Kept upstream tests plus `go_2026_6909_test.go`: `go test -race -count=2 ./...`
   in this directory.
 - The complete v0.5.1 suite, including the dropped key-dependent tests, was run
-  against the patched sources in a scratch copy of the release. Results match
-  unpatched v0.5.1 exactly: 199 passes, plus one failure that is pre-existing
-  and unrelated (`TestSPCanProduceSignedRequestRedirectBinding`, a DEFLATE
-  output golden that differs under the current Go toolchain). The exception is
-  the `TestParseXMLArtifactResponse` marshal-format change described in (b).
+  against the patched sources in a scratch copy of the release, as a **three-arm
+  differential**: clean v0.5.1, the fork before (d), and the fork after (d).
+  Measured at the `go.mod` toolchain (go1.27.3):
+
+  | Arm | Result |
+  |---|---|
+  | clean v0.5.1 | **everything passes** |
+  | fork before (d) | `TestAttributeXMLRoundTrip`, `TestParseXMLArtifactResponse` |
+  | fork after (d) | the same two, **no new failures** |
+
+  Both are `xml.Marshal` golden-string tests, not behaviour: the patched structs
+  emit additional redundant `xmlns="urn:oasis:names:tc:SAML:2.0:assertion"`
+  declarations, and the parsed content is identical. `schema_test.go` is
+  adjusted for the first in the vendored copy (see (b)); the second is not
+  vendored. Every behavioural test in the release — including the
+  key-dependent `service_provider_test.go`, `identity_provider_test.go`,
+  `samlsp` and `samlidp` suites that are dropped from this tree — passes on all
+  three arms.
+
+  Corrects an earlier note here that claimed
+  `TestSPCanProduceSignedRequestRedirectBinding` was a pre-existing unrelated
+  failure "under the current Go toolchain". It passes on clean v0.5.1 at the
+  pinned toolchain, so it is not a baseline failure, and the point of this
+  section is to let a reader tell an introduced failure from a pre-existing one.
 
 ## Removal plan
 

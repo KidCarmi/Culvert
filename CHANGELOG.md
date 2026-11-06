@@ -9,6 +9,90 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The GO-2026-6909 SAML fork namespace-qualified the fields that carry
+  identity and left every field that decides whether an assertion is FOR this
+  service provider and STILL VALID on its namespace-blind tag.** `encoding/xml`
+  matches a bare-tagged or untagged field against an element of that local name
+  in ANY namespace, and it treats two shapes differently: a pointer or value
+  field has its attributes OVERWRITTEN by a later same-local-name match, while a
+  slice field is APPENDED to. Patch (b) fixed `Subject.NameID` and the attribute
+  chain. `Assertion.Conditions`, `SubjectConfirmation.SubjectConfirmationData`,
+  `AudienceRestriction.Audience`, `Subject.SubjectConfirmations` and
+  `Conditions.AudienceRestrictions` kept theirs, and under patch (b)'s own
+  precondition — an IdP-signed assertion carrying foreign-namespace elements —
+  that defeated every check `validateAssertion` makes except the signature, the
+  `Issuer` and `IssueInstant`+`MaxIssueDelay` (90 s): a foreign `<x:Conditions>`
+  supplied both validity instants, a foreign `<x:SubjectConfirmationData>`
+  supplied `Recipient`, `InResponseTo` and `NotOnOrAfter`, a foreign
+  `<x:Audience>` overwrote the chardata inside the IdP's own
+  `<saml:AudienceRestriction>`, and a foreign `<x:AudienceRestriction>` was
+  appended — which is enough on its own, because `validateAudienceRestriction`
+  accepts when ANY entry matches. Measured end to end through
+  `SAMLProvider.ExchangeAssertion` with `AllowIDPInitiated: false`: an assertion
+  the IdP minted for ANOTHER service provider, audience-restricted to it, bound
+  to its ACS URL and expired 30 minutes earlier authenticated here as that
+  assertion's subject, with its group claims. That is cross-SP assertion reuse,
+  an authentication bypass. All six fields are now qualified to
+  `urn:oasis:names:tc:SAML:2.0:assertion`. `validateAssertion` additionally
+  rejects an assertion whose `SubjectConfirmations` slice is EMPTY — a fail-open
+  that pre-dates the fork (the loop over it is the only place `Recipient` and
+  `InResponseTo` are checked, so zero iterations skipped both) and that the tag
+  change makes mandatory to close, since a foreign-namespace-only confirmation
+  would otherwise have become NO confirmation checks at all. Scoped to the
+  fields the authentication decision reads; `Assertion.AuthnStatements`,
+  `AttributeValue.NameID`, `Conditions.OneTimeUse`,
+  `Conditions.ProxyRestriction` and `LogoutRequest.NameID` are read by nothing
+  in Culvert and are left alone and recorded. No byte Culvert emits changes: all
+  six types build their outbound XML with `Element()`, and the only production
+  `xml.Marshal` calls marshal metadata. The complete upstream v0.5.1 suite —
+  including the key-dependent tests this tree drops — was run as a three-arm
+  differential (clean / fork-before / fork-after) and the fix adds NO new
+  failure; the three SAML-namespace spellings a real IdP uses are pinned as a
+  positive control on both arms. Nine new attack subtests, three conformance
+  controls, and two end-to-end cases through the real callback, one of which
+  asserts that an ignorable foreign element still authenticates so the fix stays
+  "bind correctly" rather than "reject anything unusual".
+  `third_party/saml/PATCHES.md` documents patch (d) and corrects two statements
+  in its own record: the slice fields are appended to rather than replaced, and
+  `TestSPCanProduceSignedRequestRedirectBinding` passes on clean v0.5.1 at the
+  pinned toolchain, so it is not the pre-existing baseline failure the
+  verification note claimed.
+- **The intercepting CA's leaf-cache memory bound became counter-driven in the
+  same change that removed its only independent oracle.** `b80a415` moved the
+  cache to a `sync.Map`, which has no `len()`, so `certCacheMaxSize` (10,000) is
+  now enforced against the hand-maintained `cm.cacheLen`. A forward proxy's
+  client chooses the SNI, so it chooses this cache's keys and that bound is a
+  remote-memory-exhaustion control. The same change rewrote the one assertion in
+  the package that read the map's real size (`len(cm.cache)` in
+  `TestGetCert_CacheOrderDoesNotGrowOnRefresh`) into a read of the counter, and
+  `TestCertCache_LenDrivesEviction` compares `cacheLen` with `cacheOrder` — both
+  maintained by the same two statement pairs, so one omission moves them
+  together. The bookkeeping is correct today; the guard was not.
+  `TestCertCache_LenAgreesWithTheMapItCounts` now counts what the `sync.Map`
+  actually holds with `Range` and asserts it against both, at every stage of the
+  lifecycle. Proven necessary by mutation: one untracked sibling
+  `cm.cache.Store` leaves all three pre-existing tests green while the map holds
+  twice the entries the bound allows. Test-only; no production code changed.
+- **CHAOS-111's cached gossip generation narrows remote rate-limit enforcement
+  for up to one second, and the comment said it lost nothing.** A known peer's
+  update deliberately does not invalidate the generation, and pass 1 of
+  `ClusterTotalsExcluding` skips any IP the generation does not track, so a peer
+  count that lands after `gen.builtAt` reaches no reply until the next rebuild
+  and `FreshCount` reads the missing IP as zero: that one address is enforced
+  locally-only on that one node for the rest of `rlTotalsCacheTTL` plus the wait
+  for the requester's next round. `ee0f2ab` summed the per-node slots live
+  inside the RPC and did include such a count, so this is a narrowing. It is
+  ACCEPTED, not fixed: ≤6 s against a 60 s broadcast freshness window, one
+  address on one node for one round, the local half of the limit never stops
+  applying, and not attacker-steerable — while both candidate fixes reintroduce
+  the O(nodes² × hot IPs) collapse CHAOS-111 exists to eliminate. The pass-1
+  comment claimed "absent from the reply is exactly what the pre-fix code
+  produced for an IP no OTHER node reported", which is wrong in the one case
+  that matters; it now states the real bound.
+  `TestCHAOS111_PassOneStalenessStaysInsideTheGossipRound` pins the constant
+  relations that keep the window negligible and demonstrates that it closes on
+  the next rebuild rather than persisting. Verified by mutation: raising
+  `rlTotalsCacheTTL` to 10 s fails the gate.
 - **The DPI engine's new saturation lead indicator fired at no load on a
   single-vCPU node, and a status-map comment named the wrong trust boundary.**
   `approachingCheck` truncated its 80% threshold DOWN, so on the two-slot gate
