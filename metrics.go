@@ -1087,45 +1087,7 @@ culvert_upstream_direct_fallback_total %d
 		upFallbackTotal,
 	)
 
-	// CHAOS-112: the per-IP connection limiter's POSTURE, not just its
-	// refusals. The posture gauges are the half that matters: this limiter
-	// ships disabled (PX-6) and its enablement is node-local, so "is any node
-	// in the fleet enforcing a per-IP connection cap, and at what value?" had
-	// no fleet-wide answer at all — the only surface was a viewer-gated
-	// GET /api/connlimit, one node at a time. `rejected_total` is the
-	// limiter's own counter and spans BOTH protocol paths; `refused_total` is
-	// the HTTP/CONNECT path's own charge, so the two can be reconciled (a
-	// gap between them is SOCKS5 refusals).
-	connLimEnabledVal := 0
-	if connLimiter.Enabled() {
-		connLimEnabledVal = 1
-	}
-	_, _ = fmt.Fprintf(w, `# HELP culvert_connlimit_enabled 1 while per-source-IP connection limiting is enforcing on this node; 0 while it is off (node-local, never set by a Control Plane snapshot)
-# TYPE culvert_connlimit_enabled gauge
-culvert_connlimit_enabled %d
-
-# HELP culvert_connlimit_max_per_ip The per-source-IP concurrency cap this node holds — reported whether or not limiting is enabled, so a cluster-synced cap is visible before an operator enables it locally
-# TYPE culvert_connlimit_max_per_ip gauge
-culvert_connlimit_max_per_ip %d
-
-# HELP culvert_connlimit_active_ips Source IPs currently holding at least one counted connection
-# TYPE culvert_connlimit_active_ips gauge
-culvert_connlimit_active_ips %d
-
-# HELP culvert_connlimit_rejected_total Connections refused over the per-IP cap since boot, across the HTTP/CONNECT and SOCKS5 paths
-# TYPE culvert_connlimit_rejected_total counter
-culvert_connlimit_rejected_total %d
-
-# HELP culvert_connlimit_http_refused_total Requests refused over the per-IP cap on the HTTP/CONNECT path since boot
-# TYPE culvert_connlimit_http_refused_total counter
-culvert_connlimit_http_refused_total %d
-`,
-		connLimEnabledVal,
-		connLimiter.MaxPerIP(),
-		connLimiter.ActiveIPs(),
-		connLimiter.Rejected(),
-		connLimitRefusedTotal.Load(),
-	)
+	connLimitWritePrometheus(w)
 
 	// CHAOS-50: Layer-2 community category store boot health. `available` is 0
 	// both when the store is unconfigured and when it failed to open — the

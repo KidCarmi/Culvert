@@ -77,9 +77,13 @@ func TestCHAOS112_SetMaxPerIPIsTheCapAcquireEnforces(t *testing.T) {
 	cl.Enable(4)
 	cl.SetMaxPerIP(2)
 
+	// Two separate statements, not `a || a`: Acquire MUTATES the per-IP count,
+	// so the two calls are different events even though they read identically.
 	const ip = "198.51.100.9"
-	if !cl.Acquire(ip) || !cl.Acquire(ip) {
-		t.Fatal("the first two connections must be admitted at a cap of 2")
+	for i := 1; i <= 2; i++ {
+		if !cl.Acquire(ip) {
+			t.Fatalf("connection %d refused at a cap of 2", i)
+		}
 	}
 	if cl.Acquire(ip) {
 		t.Error("a third connection was admitted at a cap of 2 — SetMaxPerIP's value does " +

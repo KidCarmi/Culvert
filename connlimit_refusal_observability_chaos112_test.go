@@ -139,7 +139,7 @@ func TestCHAOS112_MetricsExposeTheConnLimiterPosture(t *testing.T) {
 	t.Cleanup(func() { connLimiter.Release("203.0.113.114") })
 
 	w := httptest.NewRecorder()
-	handleMetrics(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	handleMetrics(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))
 	out := w.Body.String()
 
 	for _, want := range []string{
@@ -167,7 +167,7 @@ func TestCHAOS112_MetricsReportADisabledLimiterAsZero(t *testing.T) {
 	chaos112IsolateRefusals(t)
 
 	w := httptest.NewRecorder()
-	handleMetrics(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	handleMetrics(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))
 
 	if !strings.Contains(w.Body.String(), "\nculvert_connlimit_enabled 0\n") {
 		t.Error("a disabled limiter does not report culvert_connlimit_enabled 0")

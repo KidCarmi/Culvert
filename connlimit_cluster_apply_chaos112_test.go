@@ -34,6 +34,13 @@ import (
 func chaos112Isolate(t *testing.T) {
 	t.Helper()
 	setupProxyTest(t)
+	// The apply mutates ipf and rl IN PLACE (RISK-030), so saving the pointers
+	// would restore the mutated objects and leak a cleared filter or a zeroed
+	// rate limiter into whatever runs next. Required of every root test that
+	// reaches the apply path, and enforced structurally by
+	// TestSnapshotApplyFixture_Wall_EveryApplyCallerBindsFreshOwners — which is
+	// what caught this sweep's first draft.
+	bindFreshAdmissionOwners(t)
 	prev := connLimiter
 	t.Cleanup(func() { connLimiter = prev })
 	connLimiter = newConnLimiter()
@@ -53,8 +60,8 @@ func chaos112CaptureLog(t *testing.T) *bytes.Buffer {
 // is taken the way CurrentConfigSnapshot takes it — `connLimiter.MaxPerIP()`
 // (controlplane_snapshot.go) — because the whole finding is that that accessor
 // answers with a cap whether or not limiting is on.
-func chaos112Snapshot(version int64, cap int) ConfigSnapshot {
-	return ConfigSnapshot{Version: version, MaxConnsPerIP: cap}
+func chaos112Snapshot(version int64, maxPerIP int) ConfigSnapshot {
+	return ConfigSnapshot{Version: version, MaxConnsPerIP: maxPerIP}
 }
 
 // ───────────────────────── DEFECT GATES ─────────────────────────
@@ -119,10 +126,10 @@ func TestCHAOS112_ControlSnapshotUpdatesTheCapOfAnEnabledLimiter(t *testing.T) {
 // INVARIANT, so a later apply that grows a new enablement branch fails here.
 func TestCHAOS112_SnapshotNeverFlipsEnablementInEitherDirection(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		enable  bool
-		cap     int
-		wantCap int
+		name     string
+		enable   bool
+		maxPerIP int
+		wantCap  int
 	}{
 		{"off stays off", false, 32, 32},
 		{"on stays on", true, 32, 32},
@@ -136,7 +143,7 @@ func TestCHAOS112_SnapshotNeverFlipsEnablementInEitherDirection(t *testing.T) {
 			}
 			before := connLimiter.Enabled()
 
-			applyConfigSnapshot(chaos112Snapshot(103, tc.cap))
+			applyConfigSnapshot(chaos112Snapshot(103, tc.maxPerIP))
 
 			if got := connLimiter.Enabled(); got != before {
 				t.Errorf("Enabled() = %v, want %v — the apply moved node-local enablement", got, before)

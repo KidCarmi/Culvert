@@ -44,6 +44,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -74,7 +75,7 @@ func chaos112RiderLogin(t *testing.T, clientIP, user, pass string) *httptest.Res
 	if err != nil {
 		t.Fatalf("marshal login body: %v", err)
 	}
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body))
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/auth/login", bytes.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	r.RemoteAddr = clientIP + ":40000"
 	w := httptest.NewRecorder()
@@ -99,8 +100,10 @@ func chaos112RiderTier2Bypassed(t *testing.T, ip, username string) bool {
 }
 
 // chaos112RiderFloodIP returns distinct source addresses for the tier-2 flood.
+// Distinct is the only property that matters: tier 2 counts failures against one
+// username ACROSS IPs, so the flood must not collapse onto one pair key.
 func chaos112RiderFloodIP(i int) string {
-	return "198.18." + string(rune('0'+byte(i/10)%10)) + "." + string(rune('0'+byte(i%10)))
+	return fmt.Sprintf("198.18.%d.%d", (i/200)%200, i%200)
 }
 
 // ───────────────────────── DEFECT GATE ─────────────────────────

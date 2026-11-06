@@ -48,6 +48,8 @@ package main
 // lost with the lines.
 
 import (
+	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -139,4 +141,59 @@ func resetConnLimitRefusalStateForTest() {
 	connLimitRefusalLogState.mu.Unlock()
 	connLimitRefusedTotal.Store(0)
 	connLimitRefusalLogInterval = time.Minute
+}
+
+// connLimitWritePrometheus appends the per-IP connection limiter's POSTURE and
+// its refusals to the /metrics body.
+//
+// It is its own function rather than a block inside handleMetrics for the
+// reason conventions.md records: cyclop/gocognit/funlen attribute to a
+// function's DECLARATION line, so --new-from-rev cannot see a function a change
+// made more complex. handleMetrics is already over the gocognit threshold at
+// 45, and inlining this block measured it at 46 — a regression the diff-scoped
+// lint reported as zero issues. Measured again after the extraction: 45,
+// unchanged from the base.
+//
+// Takes an io.Writer rather than the ResponseWriter so the exposition can be
+// rendered into a buffer by a test, matching liveFeedWritePrometheus.
+func connLimitWritePrometheus(w io.Writer) {
+	// CHAOS-112: the per-IP connection limiter's POSTURE, not just its
+	// refusals. The posture gauges are the half that matters: this limiter
+	// ships disabled (PX-6) and its enablement is node-local, so "is any node
+	// in the fleet enforcing a per-IP connection cap, and at what value?" had
+	// no fleet-wide answer at all — the only surface was a viewer-gated
+	// GET /api/connlimit, one node at a time. `rejected_total` is the
+	// limiter's own counter and spans BOTH protocol paths; `refused_total` is
+	// the HTTP/CONNECT path's own charge, so the two can be reconciled (a
+	// gap between them is SOCKS5 refusals).
+	connLimEnabledVal := 0
+	if connLimiter.Enabled() {
+		connLimEnabledVal = 1
+	}
+	_, _ = fmt.Fprintf(w, `# HELP culvert_connlimit_enabled 1 while per-source-IP connection limiting is enforcing on this node; 0 while it is off (node-local, never set by a Control Plane snapshot)
+# TYPE culvert_connlimit_enabled gauge
+culvert_connlimit_enabled %d
+
+# HELP culvert_connlimit_max_per_ip The per-source-IP concurrency cap this node holds — reported whether or not limiting is enabled, so a cluster-synced cap is visible before an operator enables it locally
+# TYPE culvert_connlimit_max_per_ip gauge
+culvert_connlimit_max_per_ip %d
+
+# HELP culvert_connlimit_active_ips Source IPs currently holding at least one counted connection
+# TYPE culvert_connlimit_active_ips gauge
+culvert_connlimit_active_ips %d
+
+# HELP culvert_connlimit_rejected_total Connections refused over the per-IP cap since boot, across the HTTP/CONNECT and SOCKS5 paths
+# TYPE culvert_connlimit_rejected_total counter
+culvert_connlimit_rejected_total %d
+
+# HELP culvert_connlimit_http_refused_total Requests refused over the per-IP cap on the HTTP/CONNECT path since boot
+# TYPE culvert_connlimit_http_refused_total counter
+culvert_connlimit_http_refused_total %d
+`,
+		connLimEnabledVal,
+		connLimiter.MaxPerIP(),
+		connLimiter.ActiveIPs(),
+		connLimiter.Rejected(),
+		connLimitRefusedTotal.Load(),
+	)
 }
