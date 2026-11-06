@@ -247,6 +247,30 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-11-06 — `CHAOS-112` CLAIMED (placeholder, commit one). Domain: the
+PER-IP CONNECTION LIMITER'S CONFIGURATION PLANE — `conn_limit_enabled` is the
+one admission surface `config_surfaces.go` declares NOT cluster-synced, so what
+is a Data Plane actually enforcing after it applies a snapshot from a Control
+Plane whose operator never configured the limiter at all?** Id claimed in this
+committed row before any code was written, per the convention above, and checked
+against `origin/main` rather than the working tree, per the 2026-09-25
+amendment: `CHAOS-111` is the highest id anywhere on `origin/main` (at
+`b05d649`), and no open PR holds a chaos id at claim time (#1815, #1814, #1705,
+#1549, #1548, #1536, #1528, #1526 — none is a chaos sweep), so this sweep took
+112 and will not move.
+
+Scope is the SIMULATE list's *configuration corruption* / *configuration
+rollback* / *Control Plane unavailable* rows aimed at the front-door gate whose
+refusal is the only one in `handleRequest` that writes nothing anywhere. The
+entry point is `PX-6`, open since the first sweep: the per-IP connection limiter
+ships DISABLED. This round asks what a cluster does with that default, because
+`ConnLimiter.MaxPerIP()` reports the cap whether or not limiting is on and
+`Disable` clears only the flag — so the CP publishes a non-zero cap from a
+limiter it is not using, the DP's only apply is `Enable`, and the `semSkipIfZero`
+semantics the registry records for that binding are unreachable by construction.
+Whether the resulting enforcement is visible anywhere is the second half, and it
+is the half that decides whether an operator can ever find the first.
+
 **2026-11-05 — `CHAOS-111` CLAIMED (placeholder, commit one). Domain: the HOT-IP
 GOSSIP PLANE — `SyncRateLimits` is the one cluster RPC whose body is sized by
 HOSTILE traffic, so what happens to distributed rate limiting when the flood it
