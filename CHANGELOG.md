@@ -66,6 +66,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   named in the same comment's "all tiny" list four lines above. Closes the
   2026-10-13 backlog's `X-6`. An ALERT is deliberately left open and attributed;
   see §8.1 of the dated review.
+- **GO-2026-6909: SAML login no longer takes the identity or groups from a
+  foreign-namespace element, and a malformed signed assertion is rejected
+  instead of panicking. The fix is a patched fork of `github.com/crewjam/saml`,
+  pending an upstream release.** GO-2026-6909 covers `crewjam/saml` through
+  v0.5.1 and has no fixed version, so `govulncheck` (Gate · govulncheck +
+  gosec) was red on every code PR. Culvert reaches it through
+  `ServiceProvider.ParseResponse` in `SAMLProvider.ExchangeAssertion`.
+  `Subject.NameID` had no namespace in its struct tag, so encoding/xml bound a
+  `<NameID>` from any namespace. A signed assertion carrying a foreign-namespace
+  NameID, either instead of `<saml:NameID>` or after it (last match wins),
+  logged the user in as that value. The same flaw on
+  `AttributeStatement`/`Attribute`/`AttributeValue` let a foreign-namespace
+  statement supply the email fallback identity and the groups that feed
+  policy. `validateAssertion` also dereferenced `Subject`,
+  `SubjectConfirmationData` and `Conditions` without nil checks, so a signed
+  assertion that omitted one panicked after signature verification. The fork
+  also closes a bypass of the NameID fix. The parser re-declared every
+  namespace prefix found anywhere in the document onto the assertion, so when
+  only the assertion is signed, the relayed Response wrapper could rebind a
+  foreign prefix to the SAML namespace. Parsing now uses the bindings in scope
+  at the assertion. `go.mod` replaces the module with `third_party/saml`: the
+  v0.5.1 release byte for byte, plus the patched `schema.go`,
+  `service_provider.go` and one upstream test. Upstream tests, testdata and the
+  xmlenc fuzz harness were dropped because they carry real PEM private keys.
+  `third_party/saml/PATCHES.md` records provenance, every change, what was
+  dropped and the fields deliberately left as they are. Both Dockerfiles copy
+  the fork's `go.mod`/`go.sum` before `go mod download`, which needs them for a
+  directory replacement. `TestCanonicalHeaderKeys_Tree` now skips
+  `third_party/` as it already skipped `vendor/`, so vendored upstream code is
+  not edited for a Culvert style rule. The regressions are
+  `auth_saml_go_2026_6909_test.go` (end to end through the callback, with a
+  negative control proving the re-signed edit path is accepted when the NameID
+  is genuinely SAML) and `third_party/saml/go_2026_6909_test.go`. Each test fails or panics against
+  unpatched v0.5.1. Removal plan: when upstream ships a fix, delete the
+  `replace`, bump the `require`, delete `third_party/saml/` and the two
+  Dockerfile `COPY` lines, then rerun `govulncheck` and the SAML tests.
 
 - **A dependency bump silently flipped a crypto/x509 trust-store default on the
   macOS and Windows release binaries; the reviewed defaults are now pinned and
