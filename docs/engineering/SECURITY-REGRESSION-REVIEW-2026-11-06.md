@@ -602,7 +602,7 @@ Tested revision: `b05d649` plus the changes in this review. Toolchain
 | `go test -race -shuffle=on -count=2 ./internal/admission` | pass |
 | `go test -race -count=1 -run 'TestCHAOS111_\|TestAdmissionMigration_\|TestDistributedAdmission_ProductionWiring' .` | pass |
 | `python3 docs/agent-context/check.py` | pass |
-| `TEST_SEED=20260421 go test -race -count=1 -timeout=40m ./...` | see PR |
+| `TEST_SEED=20260421 go test -race -count=1 -timeout=40m ./...` | pass — 115 packages ok, 0 failures, no data races (root package 2052 s) |
 | full upstream v0.5.1 suite, three-arm differential | no new failures |
 | mutation tests (S-3 oracle, S-4 bound gate, S-1/S-2 pre-fix arms) | all catch their mutant |
 
