@@ -414,8 +414,9 @@ a selector that consumed counts would un-limit every exported IP),
 `CHAOS111_GossipOverTheBoundStillSyncs` (end to end through the REAL 16 MiB
 limits, its NEGATIVE CONTROL first proving the pre-fix unbounded request is
 refused `ResourceExhausted`),
-`CHAOS111_AWholeRoundStaysInsideTheGossipInterval` (with the pre-fix shape as an
-in-run control), `CHAOS111_StatsDoesNotWalkTheFleet`,
+`CHAOS111_AWholeRoundIsServedFromOneGeneration`,
+`CHAOS111_StatsDoesNotWalkTheFleet` (structural: one cached generation per
+round, Stats read from it),
 `CHAOS111_ControlTotalsMatchThePreFixDefinition` (differential oracle),
 `CHAOS111_GenerationIsSelfConsistentAcrossASlotReplacement`,
 `CHAOS111_ANewNodeIsVisibleAtOnce`,
@@ -425,7 +426,14 @@ in-run control), `CHAOS111_StatsDoesNotWalkTheFleet`,
 that the cumulative counter survives recovery),
 `CHAOS111_AnOmittedIPKeepsItsLocalRateLimit`,
 `CHAOS111_ARequesterAlwaysGetsTheClusterSumForItsOwnHotSet`,
-`CHAOS111_OperatorSurfacesNameTheBound`, `CHAOS111_OmissionLogIsRateLimited`.
+`CHAOS111_OperatorSurfacesNameTheBound`, `CHAOS111_OmissionLogIsRateLimited`,
+`CHAOS111_ANewlyReportedOwnIPGetsItsClusterSumInsideACachedGeneration`.
+The wall-clock gates run only in the isolated, uninstrumented benchgate job
+(`-tags benchgate`), because a production budget under the default suite's race
+and coverage instrumentation measures the instrumentation (a 7.3 s round against
+the 2.5 s threshold): `cluster_ratelimit_budget_chaos111_benchgate_test.go`:
+`TestBenchGate_CHAOS111_AWholeRoundStaysInsideTheGossipInterval` (with the
+pre-fix shape as an in-run control), `TestBenchGate_CHAOS111_StatsDoesNotWalkTheFleet`.
 
 ### 9.6 Mutation tests — the gates have teeth
 
@@ -436,7 +444,7 @@ catch it. **All nine RED**, none silently green:
 |---|---|
 | export bound removed | `ExportIsBoundedAndHottestFirst`, `ControlExportRetainsWindowAccounting` |
 | CP ingest bound removed (trust the peer) | `IngestBoundHoldsAgainstAPeerIgnoringIt` |
-| generation cache removed (rebuild per call) | `AWholeRoundStaysInsideTheGossipInterval` |
+| generation cache removed (rebuild per call) | `AWholeRoundIsServedFromOneGeneration`, `StatsDoesNotWalkTheFleet`; benchgate `AWholeRoundStaysInsideTheGossipInterval` |
 | own-set pass dropped (fleet ranking alone) | `ARequesterAlwaysGetsTheClusterSumForItsOwnHotSet` |
 | the LIVE slot subtracted instead of the summed one | `GenerationIsSelfConsistentAcrossASlotReplacement` |
 | new-node invalidation removed | `ANewNodeIsVisibleAtOnce` |

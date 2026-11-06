@@ -149,68 +149,86 @@ func TestCHAOS111_GossipOverTheBoundStillSyncs(t *testing.T) {
 
 // ─── The cost that actually failed ──────────────────────────────────────────
 
-// TestCHAOS111_AWholeRoundStaysInsideTheGossipInterval is the gate for the
-// finding itself. Every node in the fleet gossips once per interval, and each
-// call used to rebuild the fleet total map under one global mutex, so the round
-// cost was quadratic in fleet size. The CONTROL measures the pre-fix shape on
-// the SAME fixture and requires it to be materially worse — without it, a
-// machine fast enough to pass the bound would report the fix as working on a
-// tree where it was not.
-func TestCHAOS111_AWholeRoundStaysInsideTheGossipInterval(t *testing.T) {
+//
+// The WALL-CLOCK gates for this section (a 50-node round inside the gossip
+// interval, with the pre-fix per-call rebuild as an in-run control, and Stats
+// against an already-built generation) live in the isolated benchgate path,
+// cluster_ratelimit_budget_chaos111_benchgate_test.go: a production budget
+// applied under the default suite's race and coverage instrumentation measures
+// the instrumentation, not the fix. What stays here is the STRUCTURE those
+// timings rest on, asserted deterministically.
+
+// pinRLGeneration returns the aggregator's current generation with its build
+// stamp refreshed, so the next call is inside rlTotalsCacheTTL however slow the
+// runner. It keeps the structural gates below deterministic under -race and
+// coverage, where a real round can legitimately outlive the TTL.
+func pinRLGeneration(t *testing.T, agg *rateLimitAggregator) *rlTotalsGeneration {
+	t.Helper()
+	agg.mu.Lock()
+	defer agg.mu.Unlock()
+	if agg.gen == nil {
+		t.Fatal("no generation has been built")
+	}
+	agg.gen.builtAt = time.Now()
+	return agg.gen
+}
+
+// currentRLGeneration reads the aggregator's published generation.
+func currentRLGeneration(agg *rateLimitAggregator) *rlTotalsGeneration {
+	agg.mu.Lock()
+	defer agg.mu.Unlock()
+	return agg.gen
+}
+
+// TestCHAOS111_AWholeRoundIsServedFromOneGeneration is the functional half of
+// the finding's gate; the wall-clock half is
+// TestBenchGate_CHAOS111_AWholeRoundStaysInsideTheGossipInterval. Every node in
+// the fleet gossips once per interval, and each call used to rebuild the fleet
+// total map under one global mutex, so the round cost was quadratic in fleet
+// size. A full round of known nodes — each ingest plus its reply, marshalled,
+// exactly as SyncRateLimits does it — must be served from ONE generation, with
+// every reply bounded. Removing the cache (rebuilding per call) fails the
+// identity check, which no runner speed can mask.
+func TestCHAOS111_AWholeRoundIsServedFromOneGeneration(t *testing.T) {
 	resetCHAOS111Accounting(t)
 	const nodes = 50
 	agg := newTestRLAggregator()
 	for n := range nodes {
 		agg.Update(fmt.Sprintf("dp-node-%02d", n), hotFixture(n, maxGossipHotIPsPerNode, 64))
 	}
+	agg.ClusterTotalsExcluding("dp-node-00") // build the generation
 
-	// One full round: every node's ingest plus its reply, marshalled, exactly
-	// as SyncRateLimits does it.
-	start := time.Now()
+	fleet := nodes * maxGossipHotIPsPerNode
 	for n := range nodes {
 		id := fmt.Sprintf("dp-node-%02d", n)
 		agg.Update(id, hotFixture(n, maxGossipHotIPsPerNode, 64))
-		totals, _ := agg.ClusterTotalsExcluding(id)
+		gen := pinRLGeneration(t, agg)
+		totals, omitted := agg.ClusterTotalsExcluding(id)
+		if currentRLGeneration(agg) != gen {
+			t.Fatalf("%s: the reply rebuilt the generation inside its TTL; a round must be served from one cached aggregation", id)
+		}
+		if len(totals) == 0 || len(totals) > maxBroadcastHotIPs {
+			t.Fatalf("%s: reply carried %d entries, want 1..%d", id, len(totals), maxBroadcastHotIPs)
+		}
+		// Every other node's addresses have a positive remote count; whatever
+		// the reply does not carry must be reported, never silently dropped.
+		if want := fleet - maxGossipHotIPsPerNode - len(totals); omitted < want {
+			t.Fatalf("%s: omitted = %d, want at least %d (%d remote hot IPs, %d carried)",
+				id, omitted, want, fleet-maxGossipHotIPsPerNode, len(totals))
+		}
 		if _, err := json.Marshal(RateLimitBroadcast{RemoteCounts: totals}); err != nil {
 			t.Fatal(err)
 		}
-	}
-	round := time.Since(start)
-
-	// CONTROL: the pre-fix read, rebuilt inside every call.
-	start = time.Now()
-	for n := range nodes {
-		totals := naiveTotalsExcluding(agg, fmt.Sprintf("dp-node-%02d", n))
-		if _, err := json.Marshal(RateLimitBroadcast{RemoteCounts: totals}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	preFix := time.Since(start)
-
-	t.Logf("%d-node round at %d hot IPs each: fixed %s, pre-fix shape %s (%.1fx)",
-		nodes, maxGossipHotIPsPerNode, round.Round(time.Millisecond),
-		preFix.Round(time.Millisecond), float64(preFix)/float64(round))
-
-	// The budget: a round must finish inside the gossip interval with room to
-	// spare, since the Control Plane also serves config polls on the same CPU.
-	if budget := rlGossipInterval / 2; round > budget {
-		t.Fatalf("a %d-node round took %s, over half the %s gossip interval: the plane cannot keep up with its own cadence",
-			nodes, round, rlGossipInterval)
-	}
-	// And no single reply may approach the RPC's own deadline.
-	if perCall := round / nodes; perCall > dpTightCallDeadline/10 {
-		t.Fatalf("one gossip call costs %s, within 10x of its %s deadline", perCall, dpTightCallDeadline)
-	}
-	if preFix < round*2 {
-		t.Fatalf("control: the pre-fix per-call rebuild (%s) is not materially worse than the cached generation (%s) on this fixture, so this gate is not measuring the fix",
-			preFix, round)
 	}
 }
 
-// TestCHAOS111_StatsDoesNotWalkTheFleet pins the admin-surface half. Stats()
-// used to build a set of every IP on every node while holding the aggregator
-// mutex — 1.736 s at 50 x 50 000, from a viewer-gated GET — so the dashboard
-// that REPORTS the overload competed with the data path's ingest for the lock.
+// TestCHAOS111_StatsDoesNotWalkTheFleet pins the admin-surface half
+// functionally; the per-call cost is TestBenchGate_CHAOS111_StatsDoesNotWalkTheFleet.
+// Stats() used to build a set of every IP on every node while holding the
+// aggregator mutex — 1.736 s at 50 x 50 000, from a viewer-gated GET — so the
+// dashboard that REPORTS the overload competed with the data path's ingest for
+// the lock. It must answer from the generation already built, without
+// rebuilding it, and report the numbers the walk would.
 func TestCHAOS111_StatsDoesNotWalkTheFleet(t *testing.T) {
 	resetCHAOS111Accounting(t)
 	const nodes = 50
@@ -220,15 +238,14 @@ func TestCHAOS111_StatsDoesNotWalkTheFleet(t *testing.T) {
 	}
 	agg.ClusterTotalsExcluding("dp-node-00") // build the generation
 
-	start := time.Now()
 	for range 200 {
+		gen := pinRLGeneration(t, agg)
 		if gotNodes, gotIPs := agg.Stats(); gotNodes != nodes || gotIPs != nodes*maxGossipHotIPsPerNode {
 			t.Fatalf("Stats = (%d, %d), want (%d, %d)", gotNodes, gotIPs, nodes, nodes*maxGossipHotIPsPerNode)
 		}
-	}
-	el := time.Since(start)
-	if perCall := el / 200; perCall > 2*time.Millisecond {
-		t.Fatalf("Stats() costs %s per call against a generation already built; it is walking the fleet again", perCall)
+		if currentRLGeneration(agg) != gen {
+			t.Fatal("Stats() rebuilt the generation inside its TTL; it must read the one already built")
+		}
 	}
 }
 
@@ -668,26 +685,18 @@ func TestCHAOS111_ANewlyReportedOwnIPGetsItsClusterSumInsideACachedGeneration(t 
 	// The requester reports newIP. It is a KNOWN node, so the cached
 	// generation deliberately survives the update.
 	agg.Update(requester, []RateLimitDelta{{IP: "198.51.100.1", Count: 3}, {IP: newIP, Count: 3}})
-	agg.mu.Lock()
-	gen := agg.gen
-	if gen == nil {
-		agg.mu.Unlock()
+	if currentRLGeneration(agg) == nil {
 		t.Fatal("fixture: a known node's update invalidated the generation, so this gate does not exercise the cache")
-	}
-	if _, inGen := gen.perNode[requester][newIP]; inGen {
-		agg.mu.Unlock()
-		t.Fatal("fixture: the generation already holds the requester's new slot")
 	}
 	// Pin the generation inside its TTL so a slow (race/coverage) runner
 	// cannot rebuild it and pass this gate without exercising the cache.
-	gen.builtAt = time.Now()
-	agg.mu.Unlock()
+	gen := pinRLGeneration(t, agg)
+	if _, inGen := gen.perNode[requester][newIP]; inGen {
+		t.Fatal("fixture: the generation already holds the requester's new slot")
+	}
 
 	totals, _ := agg.ClusterTotalsExcluding(requester)
-	agg.mu.Lock()
-	served := agg.gen
-	agg.mu.Unlock()
-	if served != gen {
+	if currentRLGeneration(agg) != gen {
 		t.Fatal("fixture: the reply was served from a rebuilt generation, not the cached one")
 	}
 	if totals[newIP] != 2 {
