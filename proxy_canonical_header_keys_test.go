@@ -60,7 +60,10 @@ var headerMethods = map[string]bool{"Get": true, "Set": true, "Del": true, "Add"
 func repoGoFiles(t *testing.T) []string {
 	t.Helper()
 	var out []string
-	skip := map[string]bool{"vendor": true, "testdata": true, "node_modules": true, ".git": true}
+	// third_party holds vendored upstream source (the patched crewjam/saml
+	// fork, third_party/saml/PATCHES.md), excluded for the same reason as vendor:
+	// it is not Culvert's code, and editing it for style would widen the fork.
+	skip := map[string]bool{"vendor": true, "third_party": true, "testdata": true, "node_modules": true, ".git": true}
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
