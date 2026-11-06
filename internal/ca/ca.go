@@ -69,6 +69,12 @@ var RotationObserver func(oldExpiry, newExpiry time.Time)
 var CAChangedObserver func()
 
 // certCacheEntry pairs a leaf certificate with its creation timestamp for TTL.
+//
+// An entry is IMMUTABLE once stored. The hit path reads it with no lock held
+// (see cachedLeaf), so a stored entry's fields must never be written again —
+// back-dating one for a TTL test REPLACES it (AgeCacheEntryForTest) rather
+// than assigning through the pointer, which would be a data race against
+// every concurrent handshake.
 type certCacheEntry struct {
 	cert      *tls.Certificate
 	createdAt time.Time
@@ -98,9 +104,58 @@ type Manager struct {
 	// leaf signing is ever wired to an HSM, revisit this — the in-memory leaf
 	// key would then be a strictly weaker secret than the HSM-held CA key.
 	// Read-mostly; guarded by mu like the rest of the struct.
-	leafKey    *ecdsa.PrivateKey
-	cache      map[string]*certCacheEntry
-	cacheOrder []string // insertion order for LRU eviction
+	leafKey *ecdsa.PrivateKey
+	// cache is the leaf-cert cache: host string -> *certCacheEntry.
+	//
+	// It is a sync.Map, and that is a THROUGHPUT decision, not a style one.
+	// GetCert is the tls.Config.GetCertificate callback for every SSL-inspected
+	// CONNECT, so its hit path runs once per inspected connection and is ~all
+	// of production. It used to read this map under mu.RLock, on the usual
+	// reasoning that a reader lock is cheap. It is not: RLock/RUnlock are two
+	// atomic read-modify-writes on ONE shared word, and mu is the MANAGER-wide
+	// lock (caCert, caKey, leafKey, the secondary CA), so every inspected
+	// handshake in the process wrote the same cache line purely to read a map
+	// that in steady state never changes. Measured on a 4-vCPU Xeon,
+	// BenchmarkGetCert_Hit, both arms in one invocation, -count=9, medians
+	// (RunParallel, so lower ns/op is more throughput):
+	//
+	//	GOMAXPROCS │   1    │   2    │   4    │ 1->4 throughput
+	//	mu.RLock   │ 93.7ns │143.6ns │158.9ns │ 0.59x  (cores SUBTRACTED it)
+	//	sync.Map   │ 69.2ns │ 96.6ns │ 91.1ns │ 0.76x
+	//
+	// That is not a constant cost but a ceiling, and the appliance ships onto
+	// 16- and 32-core hardware. It is also the sixth time this tree has met
+	// this exact shape (internal/threatfeed, internal/connlimit, the IP
+	// filter, the latency histogram, topHosts in store.go, and the sign
+	// stampede one file over in signflight.go).
+	//
+	// sync.Map is the shape this access pattern wants: a host's entry is
+	// written once on the miss that signed it and then read for the whole
+	// certCacheTTL (1 h), so a steady-state hit is an atomic pointer load plus
+	// a map read with NO read-modify-write on any shared word. Entries are
+	// immutable (see certCacheEntry), which is what makes the unlocked read
+	// legal.
+	//
+	// It is NOT the end of the story, and the table says so: 0.76x is better
+	// than 0.59x and still negative. GetCert's own cacheHits.Add is now the
+	// contended word (42% of P=4 samples in its frame against 11% in
+	// cachedLeaf). Those counters are an operator-visible metric (CacheStats,
+	// read by ca_metrics.go for /metrics and by the support bundle), so
+	// sharding them is a separate change with its own contract — recorded here
+	// so the next reader does not have to re-derive it from a profile.
+	//
+	// mu still guards the RARE mutations that need to be atomic with
+	// cacheOrder — the insert, the LRU pass and the reset — and is never taken
+	// by the hit path.
+	cache sync.Map
+
+	// cacheLen is the live entry count in cache. sync.Map has no len(), and
+	// this is the quantity certCacheMaxSize bounds, so it is tracked
+	// explicitly (same reason hostCounter.n exists in store.go). Written only
+	// under mu, alongside the map mutation it describes; read lock-free.
+	cacheLen atomic.Int64
+
+	cacheOrder []string // insertion order for LRU eviction; guarded by mu
 
 	// caGen identifies the installed CA. It is retired (incremented) by
 	// resetLeafCacheLocked on every CA replacement, and is what keeps an
@@ -129,10 +184,14 @@ type Manager struct {
 	secondaryExpiry time.Time // when to stop using the secondary CA
 }
 
-// New returns a ready-to-use Manager with an initialised (empty) leaf cache.
+// New returns a ready-to-use Manager with an empty leaf cache.
 // Call InitCA / LoadOrInitCA / LoadCustomCA to install a Root CA.
+//
+// The zero Manager is equally usable — sync.Map needs no initialisation — and
+// package main's whitebox tests construct one directly, so nothing here may
+// become load-bearing setup.
 func New() *Manager {
-	return &Manager{cache: map[string]*certCacheEntry{}}
+	return &Manager{}
 }
 
 // caBundle is the plaintext PEM bundle written/read from disk.
@@ -716,8 +775,18 @@ func (cm *Manager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, error)
 	if host == "" {
 		host = "unknown"
 	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
+	// Only attempt the split when there is something to split. SNI carries a
+	// bare hostname (RFC 6066 forbids a port and an IP literal), so the call
+	// below essentially always FAILED — and net.SplitHostPort reports that
+	// failure by allocating a *net.AddrError which is then discarded, one per
+	// inspected connection. At memprofilerate=1 that error was 100% of the
+	// hit path's allocations (32 B, 1 alloc/op in BenchmarkGetCert_Hit).
+	// SplitHostPort cannot succeed without a colon, so the guard is
+	// value-preserving; the port-bearing spelling keeps its exact behaviour.
+	if strings.IndexByte(host, ':') >= 0 {
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
 	}
 
 	if cert, ok := cm.cachedLeaf(host, time.Now()); ok {
@@ -737,11 +806,23 @@ func (cm *Manager) GetCert(hello *tls.ClientHelloInfo) (*tls.Certificate, error)
 // cachedLeaf returns the cached leaf for host when one is present, inside its
 // cache TTL, and not itself expired. It is the read half of GetCert, split out
 // so signOnce can re-run the identical check before opening a flight.
+//
+// It takes NO lock — see the cache field for the measurement that motivates
+// that and for why the unlocked read is legal. The three acceptance decisions
+// (presence, cache TTL, leaf expiry) are byte-identical to the locked form;
+// only the synchronisation changed.
+//
+// It also relaxes this package's lock order rather than complicating it:
+// signOnce calls cachedLeaf while holding flightMu, and that call no longer
+// reaches mu at all, so the flightMu -> mu edge documented in signflight.go
+// loses its only hot instance.
 func (cm *Manager) cachedLeaf(host string, now time.Time) (*tls.Certificate, bool) {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	entry, ok := cm.cache[host]
-	if !ok || now.Sub(entry.createdAt) >= certCacheTTL {
+	v, ok := cm.cache.Load(host)
+	if !ok {
+		return nil, false
+	}
+	entry, _ := v.(*certCacheEntry)
+	if entry == nil || now.Sub(entry.createdAt) >= certCacheTTL {
 		return nil, false
 	}
 	if entry.cert.Leaf != nil && !now.Before(entry.cert.Leaf.NotAfter) {
@@ -775,22 +856,24 @@ func (cm *Manager) storeLeaf(host string, cert *tls.Certificate, gen uint64, now
 	// were also dead weight for eviction itself: the second and later copies of
 	// a host always resolved to "already gone" and were skipped, so dropping
 	// them changes no eviction decision — the first insertion still governs.
-	if _, tracked := cm.cache[host]; !tracked {
+	if _, tracked := cm.cache.Load(host); !tracked {
 		cm.cacheOrder = append(cm.cacheOrder, host)
+		cm.cacheLen.Add(1)
 	}
-	cm.cache[host] = &certCacheEntry{cert: cert, createdAt: now}
+	cm.cache.Store(host, &certCacheEntry{cert: cert, createdAt: now})
 	// LRU eviction: when cache exceeds max size, evict oldest 10% of entries.
-	if len(cm.cache) > certCacheMaxSize {
+	if cm.cacheLen.Load() > certCacheMaxSize {
 		evictCount := certCacheMaxSize / 10
 		evicted := 0
 		newOrder := cm.cacheOrder[:0:0]
 		for _, h := range cm.cacheOrder {
 			// Skip entries no longer in cache (already evicted or cleared externally).
-			if _, exists := cm.cache[h]; !exists {
+			if _, exists := cm.cache.Load(h); !exists {
 				continue
 			}
 			if evicted < evictCount {
-				delete(cm.cache, h)
+				cm.cache.Delete(h)
+				cm.cacheLen.Add(-1)
 				evicted++
 				continue
 			}
@@ -818,25 +901,31 @@ func (cm *Manager) storeLeaf(host string, cert *tls.Certificate, gen uint64, now
 // Every site that installs or replaces a CA must go through here; that is
 // pinned structurally by TestCAGeneration_EveryCacheResetRetiresTheGeneration.
 func (cm *Manager) resetLeafCacheLocked() {
-	cm.cache = map[string]*certCacheEntry{}
+	// Clear(), deliberately, and not Range+Delete. The hit path reads the
+	// cache with no lock held, so the reset must stay a SINGLE atomic
+	// transition or a concurrent handshake could observe a half-emptied cache
+	// and serve an outgoing-CA leaf after the replacement had begun.
+	// sync.Map.Clear is one atomic store of a fresh trie root, which is
+	// exactly the property the `cm.cache = map[...]{}` assignment it replaced
+	// had; Range+Delete would not be, and is how this would quietly regress.
+	cm.cache.Clear()
+	cm.cacheLen.Store(0)
 	cm.cacheOrder = nil
 	cm.caGen.Add(1)
 }
 
 // CertCacheLen returns the current number of cached leaf certificates (testing).
 func (cm *Manager) CertCacheLen() int {
-	cm.mu.RLock()
-	defer cm.mu.RUnlock()
-	return len(cm.cache)
+	return int(cm.cacheLen.Load())
 }
 
 // CacheStats returns (hits, misses, currentSize) for the leaf-cert cache (CA-2).
-// Hits/misses are lock-free atomics; size is read under the cache lock.
+// All three are lock-free atomics: size is cacheLen, which exists because
+// sync.Map has no len(). Each is individually consistent; the triple is not a
+// snapshot, which is what it already was (hits/misses were never read with the
+// lock held) and all a /metrics scrape needs.
 func (cm *Manager) CacheStats() (hits, misses int64, size int) {
-	cm.mu.RLock()
-	size = len(cm.cache)
-	cm.mu.RUnlock()
-	return cm.cacheHits.Load(), cm.cacheMisses.Load(), size
+	return cm.cacheHits.Load(), cm.cacheMisses.Load(), int(cm.cacheLen.Load())
 }
 
 // ClearCache removes all cached leaf certificates.
@@ -976,23 +1065,35 @@ func (cm *Manager) HasKeyProviderForTest() bool {
 // time so cache TTL / LRU-eviction behavior can be exercised deterministically.
 func (cm *Manager) SeedCacheEntryForTest(host string, cert *tls.Certificate, createdAt time.Time) {
 	cm.mu.Lock()
-	if _, tracked := cm.cache[host]; !tracked { // same no-duplicate rule as GetCert
+	if _, tracked := cm.cache.Load(host); !tracked { // same no-duplicate rule as GetCert
 		cm.cacheOrder = append(cm.cacheOrder, host)
+		cm.cacheLen.Add(1)
 	}
-	cm.cache[host] = &certCacheEntry{cert: cert, createdAt: createdAt}
+	cm.cache.Store(host, &certCacheEntry{cert: cert, createdAt: createdAt})
 	cm.mu.Unlock()
 }
 
 // AgeCacheEntryForTest back-dates an existing entry's creation time (past the
 // TTL when the delta exceeds certCacheTTL), for cache-expiry tests.
+//
+// It REPLACES the entry rather than assigning through the pointer: entries are
+// immutable once stored because the hit path reads them with no lock held (see
+// certCacheEntry). The replacement is not a new insert, so cacheOrder and
+// cacheLen are deliberately untouched — which is what keeps
+// TestGetCert_CacheOrderDoesNotGrowOnRefresh measuring the refresh path it
+// exists to guard.
 func (cm *Manager) AgeCacheEntryForTest(host string, createdAt time.Time) bool {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	e, ok := cm.cache[host]
+	v, ok := cm.cache.Load(host)
 	if !ok {
 		return false
 	}
-	e.createdAt = createdAt
+	e, _ := v.(*certCacheEntry)
+	if e == nil {
+		return false
+	}
+	cm.cache.Store(host, &certCacheEntry{cert: e.cert, createdAt: createdAt})
 	return true
 }
 
