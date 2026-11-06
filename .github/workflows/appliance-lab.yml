@@ -2057,6 +2057,7 @@ jobs:
           print("\n".join(md))
           sys.exit(0 if verdict.startswith("PASS") else 1)
           PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: qemu-campaign-evidence-${{ env.VARIANT }}-a${{ github.run_attempt }}
