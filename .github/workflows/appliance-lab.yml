@@ -1271,6 +1271,39 @@ jobs:
       # (name:read_ms:write_ms:budget_s).
       Q7_PROFILE: "q7:0:0:120"
       Q7_REBOOTS: "3"
+      # Start deadline as an epoch (2026-11-13T00:00:00Z), rechecked by the
+      # harness immediately before the first candidate boot; the campaign
+      # window (24 h) runs from that boot's UTC/monotonic anchor.
+      LAB_START_DEADLINE_EPOCH: "1794528000"
+      LAB_CAMPAIGN_WINDOW_S: "86400"
+      # Changed SAML metadata fetch: synthetic IdP metadata served from THIS
+      # commit's public URL, bytes pinned.
+      SAML_FIXTURE_PATH: test/e2e/appliance/lab/fixtures/saml-idp-metadata.xml
+      SAML_FIXTURE_SHA256: 4f1d081e54e80d2adac598d42b3eaa69103c97563330659e50b25dd4a1e21a5a
+      # Guest egress policy: the guest's processes run in this cgroup; it may
+      # reach only addresses its allowlisted names resolved to (80/443), the
+      # NTP name's addresses (udp 123), and the named loopback test services.
+      # Necessary destinations, from the product's defaults at 0981ff3d (each
+      # name covers its subdomains):
+      #   clamav.net                  freshclam signatures (database.clamav.net)
+      #   raw.githubusercontent.com   UT1 category tarball (internal/feedsync/feedsync.go:75); the SAML fixture
+      #   openphish.com, urlhaus.abuse.ch   threat feeds (internal/threatfeed/threatfeed.go:201-202)
+      #   catalog.culvertlabs.com     signed release catalog, on by default (release_wiring.go:233)
+      #   ghcr.io, pkg-containers.githubusercontent.com, tuf-repo-cdn.sigstore.dev,
+      #   rekor.sigstore.dev, fulcio.sigstore.dev   first-boot cosign trust gate for the
+      #                               maintenance agent (scripts/install.sh:585, 618-625; docs/appliance/first-boot.md:184-185)
+      #   archive.ubuntu.com, security.ubuntu.com, download.docker.com   apt sources (HTTP/HTTPS)
+      #   accounts.google.com         the changed OIDC discovery fetch (read-only)
+      #   example.com, example.org, example.net   the harness's controlled test traffic
+      # Deliberately NOT allowed (not necessary; refused fast): public-IP lookups for the
+      # UI certificate SANs (checkip.amazonaws.com, ipv4.icanhazip.com; internal/uitls/uitls.go:321)
+      # and its 169.254.169.254 probes, Ubuntu motd-news/apt-news, esm-cache, changelogs and
+      # fwupd refreshes, the GitHub release fallback (github.com, objects.githubusercontent.com),
+      # the dormant SaaS feed (feeds.culvertlabs.com), Docker Hub.
+      GUEST_CGROUP: culvert-lab-guest
+      EGRESS_ALLOW_NAMES: "clamav.net raw.githubusercontent.com openphish.com urlhaus.abuse.ch catalog.culvertlabs.com ghcr.io pkg-containers.githubusercontent.com tuf-repo-cdn.sigstore.dev rekor.sigstore.dev fulcio.sigstore.dev archive.ubuntu.com security.ubuntu.com download.docker.com accounts.google.com example.com example.org example.net"
+      EGRESS_NTP_NAME: ntp.ubuntu.com
+      EGRESS_LOOPBACK_PORTS: "443, 18431, 18432, 18434, 2222, 18080, 19090"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1326,6 +1359,8 @@ jobs:
           now, deadline = z(e["GUARD_NOW"]), z(e["CAMPAIGN_START_DEADLINE"])
           if now >= deadline:
               bad.append(f"start {e['GUARD_NOW']} is not before the owner's start deadline {e['CAMPAIGN_START_DEADLINE']}")
+          if str(int(deadline.timestamp())) != e.get("LAB_START_DEADLINE_EPOCH", ""):
+              bad.append(f"LAB_START_DEADLINE_EPOCH {e.get('LAB_START_DEADLINE_EPOCH')!r} is not the deadline {e['CAMPAIGN_START_DEADLINE']}")
           # The guest runs Ubuntu's apt-daily-upgrade.timer (06:00 UTC +
           # RandomizedDelaySec 60 min) with the security pocket allowed: a run
           # inside that window could change the package set mid-campaign. The
@@ -1368,6 +1403,9 @@ jobs:
           if [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ]; then best=/mnt; fi
           sudo mkdir -p "$best/culvert-lab" && sudo chown "$(id -u):$(id -g)" "$best/culvert-lab"
           echo "LAB_ROOT=$best/culvert-lab" >> "$GITHUB_ENV"
+          # Campaign-wide stop latch and clock anchor, shared by both guest legs.
+          echo "LAB_CAMPAIGN_STOP_FILE=$best/culvert-lab/campaign.stop" >> "$GITHUB_ENV"
+          echo "LAB_CAMPAIGN_CLOCK_FILE=$best/culvert-lab/campaign-clock.json" >> "$GITHUB_ENV"
       - name: Install lab tools
         timeout-minutes: 25
         run: |
@@ -1377,10 +1415,10 @@ jobs:
           printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
           for _ in 1 2; do
             sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-              libguestfs-tools qemu-utils qemu-system-x86 genisoimage isc-dhcp-client nftables skopeo imagemagick && break
+              libguestfs-tools qemu-utils qemu-system-x86 genisoimage isc-dhcp-client nftables skopeo imagemagick dnsmasq-base && break
             sleep 15
           done
-          for t in guestfish qemu-img qemu-system-x86_64 genisoimage nft skopeo convert ssh; do
+          for t in guestfish qemu-img qemu-system-x86_64 genisoimage nft skopeo convert ssh dnsmasq; do
             command -v "$t" >/dev/null || { echo "::error::$t is not installed"; exit 1; }
           done
           # libguestfs (read-only reads of the retained disk) needs the host kernel readable.
@@ -1513,143 +1551,292 @@ jobs:
           set -euo pipefail
           curl -fsS -m 20 "$OIDC_PUBLIC_ISSUER/.well-known/openid-configuration" -o "$LAB_ROOT/oidc-preboot.json"
           python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["issuer"].rstrip("/")==sys.argv[2].rstrip("/"), d.get("issuer"); print("issuer", d["issuer"])' "$LAB_ROOT/oidc-preboot.json" "$OIDC_PUBLIC_ISSUER"
-      - name: "Containment: egress limited to DNS/NTP/HTTP(S); self-test; listener monitor (a violation powers the guest down)"
+      - name: "Pre-boot identity of the SAML metadata fixture (public URL of THIS commit; bytes pinned) and its 404 control"
         run: |
           set -euo pipefail
-          C="$LAB_ROOT/containment"; mkdir -p "$C"
-          # OUTPUT hook: covers this host and QEMU's user-mode network (the
-          # guest's traffic leaves as QEMU's own sockets). Loopback (the guest's
-          # port forwards, the disposable registry, the lab's origins) stays open.
-          sudo nft -f - <<'NFT'
+          base="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA"
+          echo "LAB_SAML_METADATA_URL=$base/$SAML_FIXTURE_PATH" >> "$GITHUB_ENV"
+          echo "LAB_SAML_MISSING_URL=$base/$SAML_FIXTURE_PATH.absent" >> "$GITHUB_ENV"
+          [ "$(sha256sum "$SAML_FIXTURE_PATH" | cut -d' ' -f1)" = "$SAML_FIXTURE_SHA256" ] || { echo "::error::checked-out SAML fixture differs from the pin"; exit 1; }
+          curl -fsS -m 20 "$base/$SAML_FIXTURE_PATH" -o "$LAB_ROOT/saml-fixture.xml"
+          got="$(sha256sum "$LAB_ROOT/saml-fixture.xml" | cut -d' ' -f1)"
+          [ "$got" = "$SAML_FIXTURE_SHA256" ] || { echo "::error::served SAML fixture $got != $SAML_FIXTURE_SHA256"; exit 1; }
+          c="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' "$base/$SAML_FIXTURE_PATH.absent")"
+          [ "$c" = 404 ] || { echo "::error::the SAML 404 control answered $c"; exit 1; }
+          echo "SAML fixture served at $base/$SAML_FIXTURE_PATH = $got; 404 control answered 404" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: "Containment: guest cgroup; allowlisting resolver -> destination sets; bounded guest egress; preflight proofs; supervised monitor"
+        id: containment
+        run: |
+          set -euo pipefail
+          C="$LAB_ROOT/containment"; mkdir -p "$C"; date +%s > "$LAB_ROOT/job-start.epoch"
+          [ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ] || { echo "::error::cgroup v2 is required for the guest egress policy"; exit 1; }
+          sudo mkdir -p "/sys/fs/cgroup/$GUEST_CGROUP"
+          # The guest's resolver: allowlisted names only (NXDOMAIN otherwise);
+          # every answer for an allowed name is added to its destination set.
+          names="$(printf '%s\n' $EGRESS_ALLOW_NAMES | sort -u | paste -sd/ -)"
+          cat > "$C/dnsmasq.conf" <<EOF
+          port=5353
+          listen-address=127.0.0.1
+          bind-interfaces
+          no-resolv
+          no-hosts
+          log-queries=extra
+          log-facility=$C/dnsmasq.log
+          pid-file=$C/dnsmasq.pid
+          address=/#/
+          server=/$names/8.8.8.8
+          server=/$names/1.1.1.1
+          nftset=/$names/4#inet#culvert_lab_egress#allow4,6#inet#culvert_lab_egress#allow6
+          server=/$EGRESS_NTP_NAME/8.8.8.8
+          nftset=/$EGRESS_NTP_NAME/4#inet#culvert_lab_egress#ntp4,6#inet#culvert_lab_egress#ntp6
+          EOF
+          cat > "$C/egress.nft" <<EOF
           table inet culvert_lab_egress {
+            set allow4 { type ipv4_addr; }
+            set allow6 { type ipv6_addr; }
+            set ntp4 { type ipv4_addr; }
+            set ntp6 { type ipv6_addr; }
+            chain dns_redirect {
+              type nat hook output priority -100; policy accept;
+              socket cgroupv2 level 1 "$GUEST_CGROUP" ip daddr != 127.0.0.1 meta l4proto { tcp, udp } th dport 53 dnat ip to 127.0.0.1:5353
+            }
             chain out {
               type filter hook output priority 0; policy accept;
-              oifname "lo" accept
+              socket cgroupv2 level 1 "$GUEST_CGROUP" jump guest
+            }
+            chain guest {
               ct state established,related accept
-              ip daddr { 168.63.129.16, 169.254.169.254 } accept
-              meta l4proto { tcp, udp } th dport 53 accept
-              udp dport 123 accept
-              tcp dport { 80, 443 } accept
-              counter log prefix "culvert-lab-egress-deny " level info reject
+              # Loopback by address only: after the resolver redirect the
+              # output hook still reports the original device (state->out),
+              # so an oifname "lo" match would refuse the redirected query.
+              ip daddr 127.0.0.1 tcp dport { $EGRESS_LOOPBACK_PORTS } accept
+              ip daddr 127.0.0.1 meta l4proto { tcp, udp } th dport 5353 accept
+              ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 168.63.129.16, 224.0.0.0/3 } counter log prefix "culvert-guest-deny-local " reject
+              ip6 daddr { ::/128, ::1/128, fc00::/7, fe80::/10, ff00::/8 } counter log prefix "culvert-guest-deny-local " reject
+              ip daddr @allow4 tcp dport { 80, 443 } accept
+              ip6 daddr @allow6 tcp dport { 80, 443 } accept
+              ip daddr @ntp4 udp dport 123 accept
+              ip6 daddr @ntp6 udp dport 123 accept
+              counter log prefix "culvert-guest-deny " reject
             }
           }
-          NFT
-          sudo nft list table inet culvert_lab_egress | tee "$C/ruleset.txt"
-          sha256sum "$C/ruleset.txt" | cut -d' ' -f1 > "$C/ruleset.sha256"
-          # Self-test: an allowed HTTPS fetch and DNS answer; a denied port is refused.
-          curl -fsS -m 20 -o /dev/null https://archive.ubuntu.com/ubuntu/dists/noble/Release && echo "allowed: https archive.ubuntu.com" | tee "$C/selftest.txt"
-          getent hosts database.clamav.net >/dev/null && echo "allowed: dns database.clamav.net" | tee -a "$C/selftest.txt"
-          if timeout 10 bash -c 'exec 3<>/dev/tcp/1.1.1.1/22' 2>/dev/null; then echo "::error::egress to 1.1.1.1:22 was NOT refused"; exit 1; fi
-          if timeout 10 bash -c 'exec 3<>/dev/tcp/8.8.8.8/8443' 2>/dev/null; then echo "::error::egress to 8.8.8.8:8443 was NOT refused"; exit 1; fi
-          echo "refused: tcp 1.1.1.1:22, tcp 8.8.8.8:8443" | tee -a "$C/selftest.txt"
-          sudo nft list table inet culvert_lab_egress | grep -E 'counter packets [1-9]' | tee -a "$C/selftest.txt"
-          # TCP listener baseline, then a monitor: a new non-loopback TCP listener
-          # (the guest's port forwards are TCP; user-mode NAT's own UDP client
-          # sockets bind 0.0.0.0 by design and are not listeners), or
-          # the egress table gone, is a containment loss -> ACPI power-down of
-          # every lab guest through its QEMU monitor socket.
+          EOF
+          sudo nft -f "$C/egress.nft"
+          sudo dnsmasq --conf-file="$C/dnsmasq.conf"
+          sleep 1; sudo kill -0 "$(cat "$C/dnsmasq.pid")"
+          sudo chmod a+r "$C/dnsmasq.log" "$C/dnsmasq.pid" 2>/dev/null || true
+          # Effective-rule fingerprint: rules and set definitions, without
+          # handles, counter values or set elements (those move by design).
+          canon() { sudo nft -j list table inet culvert_lab_egress | python3 -I -c 'import json,sys
+          d=json.load(sys.stdin)["nftables"]
+          def s(o):
+              if isinstance(o, dict): return {k: s(v) for k, v in o.items() if k not in ("handle", "elem", "packets", "bytes", "metainfo")}
+              if isinstance(o, list): return [s(x) for x in o if not (isinstance(x, dict) and "metainfo" in x)]
+              return o
+          print(json.dumps(s(d), sort_keys=True))' | sha256sum | cut -c1-64; }
+          canon > "$C/ruleset.canon"; sudo nft list table inet culvert_lab_egress > "$C/ruleset.txt"
+          # Preflight proofs FROM INSIDE the guest cgroup (no exploitation:
+          # plain connection attempts), and the runner's own control plane
+          # from outside it.
+          python3 -m http.server 18999 --bind 127.0.0.1 >/dev/null 2>&1 & h1=$!
+          python3 -m http.server 18431 --bind 127.0.0.1 >/dev/null 2>&1 & h2=$!
+          sleep 1
+          cat > "$C/proof.sh" <<'P'
+          t() { local want="$1" name="$2"; shift 2; if "$@" >/dev/null 2>&1; then got=allowed; else got=refused; fi
+                printf '%s\t%s\t%s\n' "$([ "$got" = "$want" ] && echo PASS || echo FAIL)" "$want" "$name"; }
+          t allowed "dns: allowlisted name resolves (raw.githubusercontent.com)" getent ahostsv4 raw.githubusercontent.com
+          t allowed "https: allowlisted destination (the SAML fixture)" curl -fsS -m 15 -o /dev/null "$LAB_SAML_METADATA_URL"
+          t allowed "https: first-boot trust dependency (tuf-repo-cdn.sigstore.dev)" curl -sS -m 15 -o /dev/null https://tuf-repo-cdn.sigstore.dev/
+          t refused "dns: unrelated name (www.wikipedia.org) answers NXDOMAIN" getent ahostsv4 www.wikipedia.org
+          t refused "dns: a non-necessary product default (checkip.amazonaws.com) answers NXDOMAIN" getent ahostsv4 checkip.amazonaws.com
+          t refused "https: unrelated destination by address (1.1.1.1:443)" curl -sS -m 8 -k -o /dev/null https://1.1.1.1/
+          t refused "dns-over-tls to a public resolver (1.1.1.1:853)" timeout 8 bash -c 'exec 3<>/dev/tcp/1.1.1.1/853'
+          t refused "platform metadata 169.254.169.254:80" curl -sS -m 5 -o /dev/null http://169.254.169.254/
+          t refused "platform wire server 168.63.129.16:80" curl -sS -m 5 -o /dev/null http://168.63.129.16/
+          t refused "private network 10.1.0.1:80" curl -sS -m 5 -o /dev/null http://10.1.0.1/
+          t refused "loopback service not named for the guest (127.0.0.1:18999)" curl -sS -m 5 -o /dev/null http://127.0.0.1:18999/
+          t allowed "named loopback test service (127.0.0.1:18431)" curl -sS -m 5 -o /dev/null http://127.0.0.1:18431/
+          P
+          bash -c 'echo $$ | sudo tee "/sys/fs/cgroup/'"$GUEST_CGROUP"'/cgroup.procs" >/dev/null; grep -qx "0::/'"$GUEST_CGROUP"'" /proc/self/cgroup && exec bash "$0"' "$C/proof.sh" > "$C/proof.tsv"
+          kill "$h1" "$h2" 2>/dev/null || true
+          printf '%s\t%s\t%s\n' "$(curl -fsS -m 15 -o /dev/null https://api.github.com/zen && echo PASS || echo FAIL)" allowed "runner control plane outside the guest cgroup (api.github.com)" >> "$C/proof.tsv"
+          cat "$C/proof.tsv" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$(grep -c . "$C/proof.tsv")" -eq 13 ] && ! grep -qv '^PASS' "$C/proof.tsv" || { echo "::error::egress preflight proof failed"; exit 1; }
+          grep -E 'reply|NXDOMAIN|config' "$C/dnsmasq.log" | tail -8 || true
+          # TCP listener baseline, then the supervised monitor (root, outside
+          # the guest cgroup). Every 15 s it writes a numbered heartbeat after
+          # checking: the effective ruleset fingerprint, the resolver, the
+          # cgroup and no new non-loopback TCP listener. A violation latches
+          # the campaign stop, powers every lab guest down through its QEMU
+          # monitor and, if a guest is still running 60 s later, stops it.
           ss -H -ltn | awk '{print "tcp", $4}' | sort -u > "$C/listeners-baseline.txt"
           cat > "$C/monitor.sh" <<'MON'
           #!/usr/bin/env bash
-          C="$1"
-          loopback() { [[ "$1" == 127.* || "$1" == "[::1]"* || "$1" == "::1"* || "$1" == "[::ffff:127."* || "$1" == "*%lo:"* ]]; }
+          C="$1"; LATCH="$2"; G="$3"; seq=0; escalated=0
+          canon() { nft -j list table inet culvert_lab_egress 2>/dev/null | python3 -I -c 'import json,sys
+          d=json.load(sys.stdin)["nftables"]
+          def s(o):
+              if isinstance(o, dict): return {k: s(v) for k, v in o.items() if k not in ("handle", "elem", "packets", "bytes", "metainfo")}
+              if isinstance(o, list): return [s(x) for x in o if not (isinstance(x, dict) and "metainfo" in x)]
+              return o
+          print(json.dumps(s(d), sort_keys=True))' 2>/dev/null | sha256sum | cut -c1-64; }
+          escalate() {
+            local s
+            for s in /tmp/culvert-lab-[0-9a-f]*.sock; do
+              [[ -S "$s" && "$s" != *-ser-* ]] || continue
+              python3 -I -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.send(b"system_powerdown\n"); time.sleep(0.5)' "$s" 2>/dev/null \
+                && echo "$(date -u +%FT%TZ) $(date +%s) powerdown-sent $s" >> "$C/monitor.log"
+            done
+            sleep 60
+            if pgrep -f 'qemu-system-x86_64 -name culvert-' >/dev/null; then
+              pkill -TERM -f 'qemu-system-x86_64 -name culvert-'; echo "$(date -u +%FT%TZ) $(date +%s) escalation SIGTERM" >> "$C/monitor.log"; sleep 10
+              pkill -KILL -f 'qemu-system-x86_64 -name culvert-' && echo "$(date -u +%FT%TZ) $(date +%s) escalation SIGKILL" >> "$C/monitor.log"
+            fi; }
+          base="$(cat "$C/ruleset.canon")"
+          echo "$(date -u +%FT%TZ) $(date +%s) monitor-start pid=$$ ruleset=$base" >> "$C/monitor.log"
           while :; do
-            ts="$(date -u +%FT%TZ)"; v=""
-            sudo nft list table inet culvert_lab_egress >/dev/null 2>&1 || v="egress table missing"
-            while read -r proto addr; do
-              loopback "$addr" && continue
-              grep -qxF "$proto $addr" "$C/listeners-baseline.txt" || v="${v:+$v; }new listener $proto $addr"
-            done < <(ss -H -ltn | awk '{print "tcp", $4}' | sort -u)
-            if [[ -n "$v" ]]; then
-              echo "$ts VIOLATION $v" >> "$C/monitor.log"
-              for s in /tmp/culvert-lab-[0-9a-f]*.sock; do
-                [[ -S "$s" && "$s" != *-ser-* ]] || continue
-                python3 -I -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.send(b"system_powerdown\n"); time.sleep(0.5)' "$s" 2>/dev/null \
-                  && echo "$ts powerdown sent to $s" >> "$C/monitor.log"
-              done
-            else echo "$ts ok" >> "$C/monitor.log"; fi
-            sleep 30
+            seq=$((seq+1)); v=""
+            [ "$(canon)" = "$base" ] || v="egress ruleset changed or missing"
+            kill -0 "$(cat "$C/dnsmasq.pid" 2>/dev/null)" 2>/dev/null || v="${v:+$v; }guest resolver not running"
+            [ -d "/sys/fs/cgroup/$G" ] || v="${v:+$v; }guest cgroup missing"
+            while read -r a; do
+              case "$a" in 127.*|"[::1]"*|"::1"*|"[::ffff:127."*|*%lo:*) continue;; esac
+              grep -qxF "tcp $a" "$C/listeners-baseline.txt" || v="${v:+$v; }new listener tcp $a"
+            done < <(ss -H -ltn | awk '{print $4}' | sort -u)
+            if [ -n "$v" ]; then
+              echo "$(date -u +%FT%TZ) $(date +%s) VIOLATION seq=$seq $v" >> "$C/monitor.log"
+              ( set -o noclobber; echo "$(date -u +%FT%TZ) containment: $v" > "$LATCH" ) 2>/dev/null || true
+              chmod a+r "$LATCH" 2>/dev/null || true
+              if [ "$escalated" = 0 ]; then escalated=1; escalate & fi
+            else echo "$(date -u +%FT%TZ) $(date +%s) ok seq=$seq" >> "$C/monitor.log"; fi
+            sleep 15
           done
           MON
           chmod +x "$C/monitor.sh"
-          nohup "$C/monitor.sh" "$C" > /dev/null 2>&1 &
-          echo $! > "$C/monitor.pid"
-          sleep 2; kill -0 "$(cat "$C/monitor.pid")"; tail -1 "$C/monitor.log"
+          sudo nohup "$C/monitor.sh" "$C" "$LAB_CAMPAIGN_STOP_FILE" "$GUEST_CGROUP" > /dev/null 2>&1 &
+          for _ in $(seq 1 20); do [ -s "$C/monitor.log" ] && grep -q ' ok seq=1$' "$C/monitor.log" && break; sleep 1; done
+          sudo pgrep -f "$C/monitor.sh" | head -1 > "$C/monitor.pid"
+          [ -s "$C/monitor.pid" ] && grep -q ' ok seq=1$' "$C/monitor.log" || { echo "::error::the containment monitor did not start"; cat "$C/monitor.log" 2>/dev/null; exit 1; }
+          tail -2 "$C/monitor.log"
       - name: Pre-boot receipt (environment + identities), retained BEFORE the first candidate boot
+        id: receipt
         run: |
           set -euo pipefail
           C="$LAB_ROOT/containment"; R="$LAB_ROOT/receipt"; mkdir -p "$R"
           python3 -I - "$R/preboot-receipt.json" <<'PY'
-          import json, os, subprocess, sys, datetime as dt
+          import json, os, re, subprocess, sys, datetime as dt
           e = os.environ
-          sh = lambda c: subprocess.run(c, shell=True, capture_output=True, text=True).stdout.strip()
+          missing = []
+          def sh(name, c):
+              # pipefail: a probe like `qemu --version | head -1` must not
+              # borrow head's success when the command itself failed.
+              p = subprocess.run(["bash", "-o", "pipefail", "-c", c], capture_output=True, text=True)
+              out = p.stdout.strip()
+              if p.returncode != 0 or not out:
+                  missing.append(f"{name} (rc {p.returncode}, {'empty' if not out else 'output'})")
+              return out
+          def env(name):
+              v = e.get(name, "").strip()
+              if not v:
+                  missing.append(f"env {name}")
+              return v
           r = {
             "campaign": "retained-OVA QEMU campaign, owner decision 2026-11-06",
             "created_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "lab_commit": e["GITHUB_SHA"], "run_id": e["GITHUB_RUN_ID"], "run_attempt": e.get("GITHUB_RUN_ATTEMPT"),
-            "harness_blob": sh("git rev-parse HEAD:test/e2e/appliance/lab/appliance-lab.sh"),
-            "pkgset_verdict_blob": sh("git rev-parse HEAD:test/e2e/appliance/lab/pkgset-verdict.py"),
-            "workflow_blob": sh("git rev-parse HEAD:.github/workflows/appliance-lab.yml"),
-            "runner": {"image_os": e.get("ImageOS"), "image_version": e.get("ImageVersion"), "runner_os": e.get("RUNNER_OS"),
-                       "runner_arch": e.get("RUNNER_ARCH"), "runner_environment": e.get("RUNNER_ENVIRONMENT"),
-                       "os_release": sh(". /etc/os-release && echo \"$PRETTY_NAME\""), "kernel": sh("uname -a"),
-                       "cpus": sh("nproc"), "cpu_model": sh("grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"),
-                       "mem_mib": sh("free -m | awk '/^Mem:/{print $2}'"), "lab_root_free": sh(f"df -h {e['LAB_ROOT']} | tail -1")},
-            "qemu": {"version": sh("qemu-system-x86_64 --version | head -1"), "package": sh("dpkg-query -W -f='${Version}' qemu-system-x86"),
-                     "kvm": sh("ls -l /dev/kvm"), "acceleration": "kvm"},
-            "guest_profile": {"cpus": e["GUEST_CPUS"], "mem_mb": e["GUEST_MEM_MB"], "machine": "pc (SeaBIOS)", "disk": "virtio-scsi over a disposable raw copy behind device-mapper (LAB_DISK=dm)",
-                              "nic": "e1000, QEMU user-mode network, guest 22/8080/9090 forwarded to 127.0.0.1 only", "display": "vmware SVGA (console leg: VMware SVGA without serial)",
-                              "ovf_transport": "ovf-env.xml ISO", "q7_profile": e["Q7_PROFILE"], "q7_reboots": e["Q7_REBOOTS"]},
-            "artifact": {"id": e["OVA_ARTIFACT_ID"], "run": e["OVA_ARTIFACT_RUN"], "name": e["OVA_ARTIFACT_NAME"], "zip_sha256": e["OVA_ARTIFACT_ZIP_SHA256"],
-                         "ova": e["OVA_NAME"], "ova_sha256": e["OVA_SHA256"], "inputs": open(os.path.join(e["LAB_ROOT"], "ova-inputs.sha256")).read().split("\n")},
-            "source": {"sha": e["APPLIANCE_SOURCE_SHA"], "tree": e["APPLIANCE_SOURCE_TREE"], "go": sh("go version")},
-            "expect": {"image_id": e["EXPECT_IMAGE_ID"], "kernel_release": e["EXPECT_KERNEL_RELEASE"], "oidc_issuer": e["OIDC_PUBLIC_ISSUER"]},
-            "containment": {"egress_ruleset_sha256": open(os.path.join(e["LAB_ROOT"], "containment/ruleset.sha256")).read().strip(),
-                            "selftest": open(os.path.join(e["LAB_ROOT"], "containment/selftest.txt")).read().split("\n"),
+            "created_epoch": int(dt.datetime.now(dt.timezone.utc).timestamp()),
+            "lab_commit": env("GITHUB_SHA"), "run_id": env("GITHUB_RUN_ID"), "run_attempt": env("GITHUB_RUN_ATTEMPT"),
+            "harness_blob": sh("harness blob", "git rev-parse HEAD:test/e2e/appliance/lab/appliance-lab.sh"),
+            "pkgset_verdict_blob": sh("evaluator blob", "git rev-parse HEAD:test/e2e/appliance/lab/pkgset-verdict.py"),
+            "q7_observer_blob": sh("observer blob", "git rev-parse HEAD:test/e2e/appliance/lab/q7-probe-session.py"),
+            "saml_fixture_blob": sh("fixture blob", f"git rev-parse HEAD:{e.get('SAML_FIXTURE_PATH','')}"),
+            "workflow_blob": sh("workflow blob", "git rev-parse HEAD:.github/workflows/appliance-lab.yml"),
+            "runner": {"image_os": env("ImageOS"), "image_version": env("ImageVersion"), "runner_os": env("RUNNER_OS"),
+                       "runner_arch": env("RUNNER_ARCH"), "runner_environment": e.get("RUNNER_ENVIRONMENT", ""),
+                       "os_release": sh("os-release", ". /etc/os-release && echo \"$PRETTY_NAME\""), "kernel": sh("kernel", "uname -a"),
+                       "cpus": sh("cpus", "nproc"), "cpu_model": sh("cpu model", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"),
+                       "mem_mib": sh("memory", "free -m | awk '/^Mem:/{print $2}'"), "lab_root_free": sh("disk", f"df -h {e['LAB_ROOT']} | tail -1"),
+                       "cgroup": sh("cgroup v2", "stat -fc %T /sys/fs/cgroup")},
+            "qemu": {"version": sh("qemu version", "qemu-system-x86_64 --version | head -1"), "package": sh("qemu package", "dpkg-query -W -f='${Version}' qemu-system-x86"),
+                     "kvm": sh("kvm", "test -r /dev/kvm -a -w /dev/kvm && ls -l /dev/kvm"), "acceleration": "kvm"},
+            "guest_profile": {"cpus": env("GUEST_CPUS"), "mem_mb": env("GUEST_MEM_MB"), "machine": "pc (SeaBIOS)", "disk": "virtio-scsi over a disposable raw copy behind device-mapper (LAB_DISK=dm)",
+                              "nic": "e1000, QEMU user-mode network, guest 22/8080/9090 forwarded to 127.0.0.1 only", "display": "vmware SVGA (console leg: VMware SVGA without serial, then serial only)",
+                              "ovf_transport": "ovf-env.xml ISO", "q7_profile": env("Q7_PROFILE"), "q7_reboots": env("Q7_REBOOTS"), "q7_full_joint": True},
+            "artifact": {"id": env("OVA_ARTIFACT_ID"), "run": env("OVA_ARTIFACT_RUN"), "name": env("OVA_ARTIFACT_NAME"), "zip_sha256": env("OVA_ARTIFACT_ZIP_SHA256"),
+                         "ova": env("OVA_NAME"), "ova_sha256": env("OVA_SHA256"), "inputs": open(os.path.join(e["LAB_ROOT"], "ova-inputs.sha256")).read().split("\n")},
+            "source": {"sha": env("APPLIANCE_SOURCE_SHA"), "tree": env("APPLIANCE_SOURCE_TREE"), "go": sh("go", "go version")},
+            "expect": {"image_id": env("EXPECT_IMAGE_ID"), "kernel_release": env("EXPECT_KERNEL_RELEASE"), "oidc_issuer": env("OIDC_PUBLIC_ISSUER"),
+                       "saml_fixture": env("LAB_SAML_METADATA_URL"), "saml_fixture_sha256": env("SAML_FIXTURE_SHA256")},
+            "containment": {"guest_cgroup": env("GUEST_CGROUP"), "allow_names": env("EGRESS_ALLOW_NAMES").split(), "ntp_name": env("EGRESS_NTP_NAME"),
+                            "loopback_ports": env("EGRESS_LOOPBACK_PORTS"),
+                            "ruleset_canon": open(os.path.join(e["LAB_ROOT"], "containment/ruleset.canon")).read().strip(),
+                            "proof": open(os.path.join(e["LAB_ROOT"], "containment/proof.tsv")).read().split("\n"),
                             "listener_baseline": open(os.path.join(e["LAB_ROOT"], "containment/listeners-baseline.txt")).read().split("\n")},
-            "deadline": e["CAMPAIGN_START_DEADLINE"], "window_hours": 24,
+            "clock": {"start_deadline": env("CAMPAIGN_START_DEADLINE"), "start_deadline_epoch": env("LAB_START_DEADLINE_EPOCH"), "window_s": env("LAB_CAMPAIGN_WINDOW_S")},
           }
-          import re
-          for k in ("harness_blob", "pkgset_verdict_blob", "workflow_blob"):
+          for k in ("harness_blob", "pkgset_verdict_blob", "q7_observer_blob", "saml_fixture_blob", "workflow_blob"):
               if not re.fullmatch(r"[0-9a-f]{40}", r[k]):
-                  sys.exit(f"::error::receipt: {k} is not a git object id ({r[k]!r}); no receipt, no candidate execution")
+                  missing.append(f"{k} is not a git object id ({r[k]!r})")
+          if r["runner"]["cgroup"] != "cgroup2fs":
+              missing.append("cgroup v2 not mounted")
+          if missing:
+              sys.exit("::error::receipt incomplete, no candidate execution: " + "; ".join(missing))
           json.dump(r, open(sys.argv[1], "w"), indent=1)
           print(json.dumps({k: r[k] for k in ("runner", "qemu", "guest_profile")}, indent=1))
           PY
-          cp "$C/ruleset.txt" "$C/selftest.txt" "$C/listeners-baseline.txt" "$R/"
+          cp "$C/ruleset.txt" "$C/proof.tsv" "$C/listeners-baseline.txt" "$R/"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: qemu-campaign-preboot-receipt-a${{ github.run_attempt }}
           path: ${{ env.LAB_ROOT }}/receipt
           retention-days: 90
           if-no-files-found: error
-      - name: "Campaign: preflight → up → qualify → changed paths → engine surface → Q7 → history → final M2 (stop on failure; collect + ACPI down always)"
+      - name: "Campaign: preflight → up → qualify → changed paths → engine surface → full-joint Q7 → history → final M2 (stop latch; collect + ACPI down always)"
+        id: campaign
         timeout-minutes: 220
         run: |
           set -euo pipefail
+          C="$LAB_ROOT/containment"
+          # No guest leg starts with a latched stop or without a live, fresh monitor.
+          [ ! -e "$LAB_CAMPAIGN_STOP_FILE" ] || { echo "::error::campaign stop latched: $(cat "$LAB_CAMPAIGN_STOP_FILE")"; exit 1; }
+          sudo kill -0 "$(cat "$C/monitor.pid")" && [ $(( $(date +%s) - $(tail -1 "$C/monitor.log" | awk '{print $2}') )) -le 45 ] || { echo "::error::containment monitor not live"; exit 1; }
+          ! grep -q ' VIOLATION ' "$C/monitor.log" || { echo "::error::containment violation recorded"; exit 1; }
+          # Everything this step starts (the harness, QEMU and its user-mode
+          # network) lives in the guest cgroup the egress policy matches.
+          echo $$ | sudo tee "/sys/fs/cgroup/$GUEST_CGROUP/cgroup.procs" >/dev/null
+          grep -qx "0::/$GUEST_CGROUP" /proc/self/cgroup || { echo "::error::not in the guest cgroup"; exit 1; }
           export LAB_DIR="$LAB_ROOT/lab" LAB_DISK=dm LAB_ACCEL=kvm LAB_MIN_FREE_GB=20
           export LAB_CPUS="$GUEST_CPUS" LAB_MEM_MB="$GUEST_MEM_MB"
           export LAB_OVA="$LAB_ROOT/ova/$OVA_NAME" LAB_OVA_SHA256="$OVA_SHA256" LAB_EXPECT_IMAGE_ID="$EXPECT_IMAGE_ID"
-          export LAB_RECOVERY_REBOOTS="$Q7_REBOOTS" LAB_RECOVERY_PROFILES="$Q7_PROFILE" LAB_RECOVERY_VARIANTS=base
+          export LAB_RECOVERY_REBOOTS="$Q7_REBOOTS" LAB_RECOVERY_PROFILES="$Q7_PROFILE" LAB_RECOVERY_VARIANTS=base LAB_Q7_FULL_JOINT=1
           export LAB_HISTORY=1 LAB_ENGINE_SURFACE=1 LAB_M2_HARDENING=1 LAB_M2_ONLY=0
           export LAB_PRESSURE=0 LAB_FP2=0 LAB_LDAP=0 LAB_CACHEBYPASS=0
-          # Owner stop conditions: stop after the phase with a failed check.
-          export LAB_FAIL_FAST=1
+          # Owner stop conditions: the first failure latches the campaign stop.
+          export LAB_FAIL_FAST=1 LAB_CAMPAIGN_STOP_FILE LAB_START_DEADLINE_EPOCH LAB_CAMPAIGN_CLOCK_FILE LAB_CAMPAIGN_WINDOW_S
           export LAB_UPDATE_DIR="$LAB_ROOT/update"
           export LAB_OS_UPDATE=check LAB_EXPECT_DPKG="$LAB_ROOT/ova/dpkg-list.txt" LAB_EXPECT_KERNEL="$EXPECT_KERNEL_RELEASE"
-          export LAB_CHANGED_PATHS=1 LAB_OIDC_PUBLIC_ISSUER="$OIDC_PUBLIC_ISSUER"
+          export LAB_CHANGED_PATHS=1 LAB_OIDC_PUBLIC_ISSUER="$OIDC_PUBLIC_ISSUER" LAB_SAML_METADATA_URL LAB_SAML_MISSING_URL
           unset LAB_ENGINE_DEBS LAB_ADOPT_IMAGE_TAR LAB_EXTERNAL LAB_PRIV_CMD LAB_KEEP_DISKS
           test/e2e/appliance/lab/appliance-lab.sh all
       - name: "Console display: VMware SVGA, no serial — frames through boot, reboots, Esc, Alt+F12, serial-only (only after a clean campaign)"
+        id: console
         if: success()
-        timeout-minutes: 75
+        timeout-minutes: 90
         run: |
           set -euo pipefail
+          C="$LAB_ROOT/containment"
+          [ ! -e "$LAB_CAMPAIGN_STOP_FILE" ] || { echo "::error::campaign stop latched: $(cat "$LAB_CAMPAIGN_STOP_FILE")"; exit 1; }
+          sudo kill -0 "$(cat "$C/monitor.pid")" && [ $(( $(date +%s) - $(tail -1 "$C/monitor.log" | awk '{print $2}') )) -le 45 ] || { echo "::error::containment monitor not live"; exit 1; }
+          ! grep -q ' VIOLATION ' "$C/monitor.log" || { echo "::error::containment violation recorded"; exit 1; }
+          echo $$ | sudo tee "/sys/fs/cgroup/$GUEST_CGROUP/cgroup.procs" >/dev/null
+          grep -qx "0::/$GUEST_CGROUP" /proc/self/cgroup || { echo "::error::not in the guest cgroup"; exit 1; }
           export LAB_DIR="$LAB_ROOT/console" LAB_ACCEL=kvm LAB_MIN_FREE_GB=15 LAB_CPUS="$GUEST_CPUS" LAB_MEM_MB="$GUEST_MEM_MB"
           export LAB_OVA="$LAB_ROOT/ova/$OVA_NAME" LAB_OVA_SHA256="$OVA_SHA256"
+          export LAB_M2_HARDENING=1 LAB_EXPECT_DPKG="$LAB_ROOT/ova/dpkg-list.txt" LAB_EXPECT_KERNEL="$EXPECT_KERNEL_RELEASE"
+          export LAB_CAMPAIGN_STOP_FILE LAB_START_DEADLINE_EPOCH LAB_CAMPAIGN_CLOCK_FILE LAB_CAMPAIGN_WINDOW_S
           test/e2e/appliance/lab/appliance-lab.sh preflight
           test/e2e/appliance/lab/appliance-lab.sh console
-      - name: Safe shutdown (any guest still running is powered down by ACPI, then stopped) and containment monitor stop
+      - name: Safe shutdown (any guest still running is powered down by ACPI, then stopped), monitor liveness recorded, monitor and resolver stopped
+        id: shutdown
         if: always()
         run: |
           # Cleanup must run to the end: GitHub starts this shell with -e, and a
@@ -1665,22 +1852,37 @@ jobs:
             for _ in $(seq 1 60); do kill -0 "$(cat "$p")" 2>/dev/null || break; sleep 2; done
             kill -0 "$(cat "$p")" 2>/dev/null && { echo "guest did not power down in 120 s: SIGTERM"; kill "$(cat "$p")"; sleep 5; kill -9 "$(cat "$p")" 2>/dev/null || true; }
           done
-          [ -s "$C/monitor.pid" ] && kill "$(cat "$C/monitor.pid")" 2>/dev/null
-          [ -d "$C" ] && { sudo nft list table inet culvert_lab_egress > "$C/ruleset-end.txt" 2>&1 || true; }
+          if [ -d "$C" ]; then
+            alive=no; [ -s "$C/monitor.pid" ] && sudo kill -0 "$(cat "$C/monitor.pid")" 2>/dev/null && alive=yes
+            echo "$(date -u +%FT%TZ) $(date +%s) shutdown-check monitor-alive=$alive" | sudo tee -a "$C/monitor.log" >/dev/null
+            [ -s "$C/monitor.pid" ] && sudo kill "$(cat "$C/monitor.pid")" 2>/dev/null
+            echo "$(date -u +%FT%TZ) $(date +%s) monitor-stopped" | sudo tee -a "$C/monitor.log" >/dev/null
+            [ -s "$C/dnsmasq.pid" ] && sudo kill "$(cat "$C/dnsmasq.pid")" 2>/dev/null
+            sudo nft list table inet culvert_lab_egress > "$C/ruleset-end.txt" 2>&1 || true
+            sudo chmod -R a+r "$C" 2>/dev/null || true
+          fi
           echo "shutdown complete"
-      - name: Campaign verdict (scope-to-assertion map; PASS only if every required check passed and only declared residuals remain)
+      - name: Campaign verdict (scope-to-assertion map; PASS only if every required check passed, execution/cleanup succeeded, clock/receipt/containment evidence is complete)
         if: always()
+        env:
+          OUTCOME_CONTAINMENT: ${{ steps.containment.outcome }}
+          OUTCOME_RECEIPT: ${{ steps.receipt.outcome }}
+          OUTCOME_CAMPAIGN: ${{ steps.campaign.outcome }}
+          OUTCOME_CONSOLE: ${{ steps.console.outcome }}
+          OUTCOME_SHUTDOWN: ${{ steps.shutdown.outcome }}
         run: |
           set -uo pipefail
           mkdir -p "$LAB_ROOT/verdict"
           python3 -I - "$LAB_ROOT" "$LAB_ROOT/verdict" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, os, re, sys, time
           root, out = sys.argv[1], sys.argv[2]
+          e = os.environ
+          now = time.time()
           M2 = ["transcript", "hardening", "ordering", "preconditions", "ruleset", "clamav", "clamav-ready"]
           CP = ["firstboot", "maintenance", "reboot", "final"]
-          Q7 = [f"R/{c}-q7-{i}" for i in (1, 2, 3) for c in ("recovery", "backup-list", "state", "operator-capture-integrity")] + ["R/clamav-evidence", "R/recovery-cases"]
+          Q7 = [f"R/{c}-q7-{i}" for i in (1, 2, 3) for c in ("recovery", "backup-list", "state", "operator-capture-integrity")] + ["R/clamav-evidence", "R/recovery-cases", "R/operator-hostkey-pinned"]
           SCOPE = {
-            "cold boot / provisioning": ["P/tools", "P/memory", "P/disk", "P/accel", "1/ova-sha256", "1/ova-manifest", "1/disk-chain", "2/boot-started", "2/kernel-started",
+            "cold boot / provisioning": ["P/tools", "P/memory", "P/disk", "P/accel", "1/ova-sha256", "1/ova-manifest", "1/disk-chain", "2/campaign-clock-main", "2/boot-started", "2/kernel-started",
               "2/operator-ssh-up", "2/firstboot-complete", "3/status-setup-pending", "3/firstboot-steps", "3a/console-onetime-printed", "3a/console-login",
               "3a/password-changed", "3/culvert-status-setup-pending", "3/image-identity", "3/setup-token", "3e/recovery-secrets", "8/firstboot-not-rerun", "8/state-files"],
             "admin and agent access": ["3/operator-observe", "3c/operator-commands-refused", "3c/forwarding-refused", "3c/file-transfer-refused", "3c/local-admin-ssh-refused",
@@ -1689,28 +1891,29 @@ jobs:
             "policy enforcement": ["5/auth-exempt", "5/default-deny", "5/traffic", "5/status-ready-to-enforce", "5/ca-identity", "8/policy-persisted", "8/enforcement", "8/ca-identity", "8/ca-encrypted-at-rest"],
             "category readiness": ["5b/category-data", "5c/category-enforcement", "8/category-data"],
             "ClamAV behaviour": ["5/ready-rows", "5/clamav-real", "8/ready", "R/clamav-evidence"] + [f"M2H/{t}-{n}" for t in CP for n in ("clamav", "clamav-ready")],
-            "changed API/auth paths": ["CP/country-traffic-unauth", "CP/country-traffic", "CP/idp-discover-unauth", "CP/idp-discover-private-refused", "CP/idp-discover-public"],
+            "changed API/auth paths": ["CP/country-traffic-unauth", "CP/country-traffic", "CP/idp-discover-unauth", "CP/idp-discover-private-refused", "CP/idp-discover-public",
+              "CP/saml-create-unauth", "CP/saml-private-refused", "CP/saml-fetch-live", "CP/saml-metadata-fetch", "CP/saml-cleanup"],
             "backup / restore": ["6/agent-backup", "6/backup-listed", "6/restore-dry-run", "6b/restore-refused-while-running", "6b/allowlist-survived-restore", "6b/restore-commit",
               "8/backup-listed", "8/restore-persisted", "H/history-recorded", "H/history-export", "H/history-export-opaque", "H/history-backup", "H/history-source-destroyed",
               "H/history-gone-after-restore", "H/history-import-refused-while-running", "H/history-wrong-passphrase", "H/history-import-dry-run", "H/history-recovered",
               "H/allowlist-survived-recovery", "H/history-enforcement"],
-            "maintenance paths": ["6c/test-only-trust", "6c/unsigned-apply-refused", "6c/signed-apply", "6c/signed-rollback", "6d/support-bundle", "7/reboot", "7/kernel", "7/docker-held",
+            "maintenance paths": ["6c/test-only-trust", "6c/unsigned-apply-refused", "6c/signed-apply", "6c/signed-rollback", "6d/support-bundle", "7/os-update", "7/reboot", "7/kernel", "7/docker-held",
               "8/stack-resumed", "8/support-persisted", "8/image-identity"],
-            "Q7: three consecutive recoveries, 120 s full-joint": Q7,
-            "console display (QEMU evidence)": ["V/ova-sha256", "V/ova-manifest", "V1/tty1-after-first-boot", "V1/tty1-text-mode", "V1/splash-on-display", "V2/tty1-after-reboot-with-failures",
+            "Q7: three consecutive recoveries, FULL joint, 120 s deadline from authenticated acceptance": Q7,
+            "console display (QEMU evidence)": ["V/campaign-clock-console-v1", "V/ova-sha256", "V/ova-manifest", "V1/tty1-after-first-boot", "V1/tty1-text-mode", "V1/splash-on-display", "V2/tty1-after-reboot-with-failures",
               "V2/tty1-text-mode", "V2/splash-before-esc", "V2/esc-shows-boot-messages", "V2/esc-one-way", "V2/splash-healthy-control", "V2/splash-names-failed-unit",
               "V3/tty1-after-postboot-writes", "V4/tty1-after-clean-reboot", "V4/tty1-text-mode", "V4/no-graphics-after-splash", "V4/console-build-identity",
-              "V5/no-splash-without-display", "V5/serial-only-boot", "V5/serial-shutdown"],
-            "final M2 and engine surface": [f"M2H/{t}-{n}" for t in CP for n in M2 if not n.startswith("clamav")] + ["E/kernel-is-the-only-installed", "E/snapd-absent",
+              "V5/campaign-clock-console-v5", "V5/no-splash-without-display", "V5/serial-only-boot", "V5/serial-shutdown"],
+            "final M2 and engine surface (main leg)": [f"M2H/{t}-{n}" for t in CP for n in M2 if not n.startswith("clamav")] + ["E/kernel-is-the-only-installed", "E/snapd-absent",
               "E/engine-no-tcp-listener", "E/containerd-socket-root-only", "E/docker-socket-root-only", "E/dockerd-no-tcp-host", "E/containerd-cri-disabled", "E/kernel-modules-denied",
               "E/kernel-hwe", "E/drm-root-only", "E/kernel-cve-assumptions", "E/m2-hardening", "E/ext4-no-ea-inode", "E/extra-modules-unloadable", "E/containerd-tracing-off"],
-            "package set and kernel unchanged (stop condition)": [f"K/{t}-{n}" for t in ("maintenance", "recovery", "final") for n in ("pkgset", "kernel")],
+            "M2 on the console leg's own disk": [f"console:M2H/console-{t}-{n}" for t in ("firstboot", "final") for n in M2],
+            "package set and kernel unchanged (stop condition), both legs": [f"K/{t}-{n}" for t in ("firstboot", "maintenance", "recovery", "final") for n in ("pkgset", "kernel")]
+              + [f"console:K/console-{t}-{n}" for t in ("firstboot", "final") for n in ("pkgset", "kernel")],
           }
-          # Declared residuals: the ONLY checks allowed to be other than pass/info, each with its exact result.
+          # Declared residual: the ONLY check allowed to be other than pass/info.
           RESIDUAL = {
-            "4b/portal-cookie-replay": ("blocked", "needs an identity provider; covered by TestUISessionRole_RejectsReplayedPortalCookie and the proxy cookie-boundary tests in CI"),
-            "CP/saml-metadata-fetch": ("not-run", "SAML metadata URL fetch runs only on SAML profile creation; covered by CI only"),
-            "7/os-update": ("info", "package upgrade not run by campaign scope (LAB_OS_UPDATE=check: no kernel transition, package set held)"),
+            "4b/portal-cookie-replay": ("blocked", "needs an identity provider round trip; covered by TestUISessionRole_RejectsReplayedPortalCookie and the proxy cookie-boundary tests in CI"),
           }
           checks, order = {}, []
           for sub in ("lab", "console"):
@@ -1727,7 +1930,15 @@ jobs:
           for k, j in fails:
               problems.append(f"FAIL {k}: {j['detail'][:240]}")
           if any(k == "F/fail-fast" for k, _ in order):
-              problems.append("stop condition: the campaign stopped after a failed phase (LAB_FAIL_FAST)")
+              problems.append("stop condition: the campaign stopped after a failed phase")
+          # Execution and cleanup outcomes are part of the verdict.
+          for step in ("CONTAINMENT", "RECEIPT", "CAMPAIGN", "CONSOLE", "SHUTDOWN"):
+              o = e.get("OUTCOME_" + step, "")
+              if o != "success":
+                  problems.append(f"step {step.lower()} outcome {o or 'absent'!r}, not success")
+          latch = os.path.join(root, "campaign.stop")
+          if os.path.exists(latch):
+              problems.append("campaign stop latched: " + open(latch).read().strip()[:240])
           for item, req in SCOPE.items():
               missing = []
               for k in req:
@@ -1748,33 +1959,95 @@ jobs:
               for j in js:
                   if j["result"] in ("blocked", "not-run", "known-failure") and k not in RESIDUAL and not fails:
                       problems.append(f"undeclared {j['result']} {k}: {j['detail'][:200]}")
-          # 24 h window from the first candidate boot.
-          st = {}
-          sp = os.path.join(root, "lab", "state.env")
-          if os.path.exists(sp):
-              for line in open(sp):
-                  if "=" in line:
-                      a, b = line.rstrip("\n").split("=", 1); st[a] = b.strip("'")
-          boot = int(st["BOOT_STARTED"]) if st.get("BOOT_STARTED", "").isdigit() else None
-          if boot and time.time() - boot >= 86400:
-              problems.append("the campaign exceeded 24 h from the first candidate boot")
-          # Containment.
+          # Receipt: complete, and taken before the first boot.
+          rec = {}
+          try:
+              rec = json.load(open(os.path.join(root, "receipt", "preboot-receipt.json")))
+          except Exception as x:
+              if started:
+                  problems.append(f"receipt unreadable: {x}")
+          need = [("runner", "image_os"), ("runner", "image_version"), ("runner", "os_release"), ("runner", "kernel"), ("qemu", "version"), ("qemu", "package"), ("qemu", "kvm"),
+                  ("guest_profile", "cpus"), ("guest_profile", "mem_mb")]
+          for a, b in need:
+              if started and not str(rec.get(a, {}).get(b, "")).strip():
+                  problems.append(f"receipt lacks {a}.{b}")
+          # Clock: anchor present and consistent; every candidate boot before expiry.
+          job_start = None
+          try:
+              job_start = int(open(os.path.join(root, "job-start.epoch")).read().strip())
+          except Exception:
+              if started:
+                  problems.append("job start time absent")
+          anchor = None
+          try:
+              anchor = json.load(open(os.path.join(root, "campaign-clock.json")))
+          except Exception as x:
+              if started:
+                  problems.append(f"campaign clock anchor absent or unreadable: {x}")
+          deadline = int(e.get("LAB_START_DEADLINE_EPOCH", "0") or 0)
+          boot = None
+          if anchor is not None:
+              try:
+                  fb, ex, ws = float(anchor["first_boot_epoch"]), float(anchor["expiry_epoch"]), int(anchor["window_s"])
+                  boots = anchor["boots"]
+                  boot = fb
+                  if ws != 86400 or abs((ex - fb) - ws) > 1e-6: problems.append("clock anchor window is not the owner's 24 h")
+                  if not deadline or fb >= deadline: problems.append("first candidate boot is not before the start deadline")
+                  if rec.get("created_epoch") is None or fb < rec["created_epoch"]: problems.append("first candidate boot precedes the pre-boot receipt")
+                  if job_start is None or fb < job_start: problems.append("first candidate boot precedes the job start")
+                  if fb > now: problems.append("first candidate boot is in the future")
+                  legs = [b.get("leg") for b in boots]
+                  if legs[:1] != ["main"] or "console-v1" not in legs or "console-v5" not in legs: problems.append(f"campaign clock boots incomplete: {legs}")
+                  if any(not (fb <= float(b["epoch"]) < ex) for b in boots): problems.append("a candidate boot falls outside [first boot, expiry)")
+                  if now >= ex: problems.append("the campaign window expired before the verdict")
+              except Exception as x:
+                  problems.append(f"campaign clock anchor inconsistent: {x}")
+          # Containment: a live, continuous, current monitor from its start to
+          # the shutdown check, no violation, effective ruleset unchanged.
           ml = os.path.join(root, "containment", "monitor.log")
-          viol = [l.strip() for l in open(ml)] if os.path.exists(ml) else []
-          viol = [l for l in viol if " VIOLATION " in l]
+          viol, hb, mstart, scheck, mstop = [], [], None, None, None
+          if os.path.exists(ml):
+              for line in open(ml):
+                  f = line.split()
+                  if len(f) < 3 or not f[1].isdigit():
+                      problems.append(f"monitor log line unparseable: {line.strip()[:80]}"); continue
+                  ep, kind = int(f[1]), f[2]
+                  if kind == "monitor-start": mstart = ep
+                  elif kind == "ok": hb.append((ep, int(f[3].split("=")[1]) if len(f) > 3 and f[3].startswith("seq=") else -1))
+                  elif kind == "VIOLATION": viol.append(line.strip())
+                  elif kind == "shutdown-check": scheck = (ep, line.strip().endswith("monitor-alive=yes"))
+                  elif kind == "monitor-stopped": mstop = ep
+          if started:
+              if not os.path.exists(ml): problems.append("containment monitor log absent")
+              elif mstart is None: problems.append("monitor start not recorded")
+              else:
+                  if job_start is None or mstart < job_start: problems.append("monitor start precedes the job start (stale evidence)")
+                  if rec.get("created_epoch") is not None and mstart > rec["created_epoch"]: problems.append("monitor started after the pre-boot receipt")
+                  if not hb: problems.append("no monitor heartbeat")
+                  else:
+                      eps = [mstart] + [h[0] for h in hb]
+                      if any(b < a for a, b in zip(eps, eps[1:])): problems.append("monitor heartbeats out of order")
+                      if [h[1] for h in hb] != list(range(1, len(hb) + 1)): problems.append("monitor heartbeat sequence broken")
+                      gap = max(b - a for a, b in zip(eps, eps[1:])) if len(eps) > 1 else 0
+                      if gap > 45: problems.append(f"monitor heartbeat gap {gap}s (> 45 s)")
+                      if scheck is None: problems.append("shutdown did not check the monitor")
+                      else:
+                          if not scheck[1]: problems.append("the monitor was not alive at shutdown")
+                          if scheck[0] - hb[-1][0] > 45: problems.append("the last monitor heartbeat is stale at shutdown")
+                      if any(h[0] > now + 5 for h in hb): problems.append("monitor heartbeat in the future")
+                  if mstop is None: problems.append("monitor stop not recorded")
           if viol:
               problems.append(f"loss of containment: {viol[:3]}")
-          if started and not os.path.exists(ml):
-              problems.append("containment monitor log absent")
           if not started:
               verdict = "NOT STARTED (no candidate execution: stopped before the pre-boot receipt)"
           elif problems:
               verdict = "FAIL"
           else:
               verdict = "PASS" + (" with RESIDUALS" if residuals else "")
-          res = {"verdict": verdict, "lab_commit": os.environ.get("GITHUB_SHA"), "ova_sha256": os.environ.get("OVA_SHA256"),
+          res = {"verdict": verdict, "lab_commit": e.get("GITHUB_SHA"), "ova_sha256": e.get("OVA_SHA256"),
                  "first_candidate_boot_epoch": boot, "scope": [{"item": i, "result": r, "required": n, "not_passed": m} for i, r, n, m in rows],
                  "residuals": residuals, "problems": problems, "containment_violations": viol,
+                 "outcomes": {k[8:].lower(): e.get(k) for k in sorted(e) if k.startswith("OUTCOME_")},
                  "counts": {r: sum(1 for _, j in order if j["result"] == r) for r in ("pass", "fail", "info", "blocked", "not-run", "known-failure")}}
           json.dump(res, open(os.path.join(out, "verdict.json"), "w"), indent=1)
           md = [f"## QEMU campaign verdict: **{verdict}**", "", f"OVA `{res['ova_sha256']}`, lab `{res['lab_commit']}`", "", "| Scope item | Result | Required checks |", "|---|---|---|"]
@@ -1784,7 +2057,6 @@ jobs:
           print("\n".join(md))
           sys.exit(0 if verdict.startswith("PASS") else 1)
           PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: qemu-campaign-evidence-${{ env.VARIANT }}-a${{ github.run_attempt }}
@@ -1796,6 +2068,10 @@ jobs:
             ${{ env.LAB_ROOT }}/verdict
             ${{ env.LAB_ROOT }}/ova-inputs.sha256
             ${{ env.LAB_ROOT }}/update/fixture.txt
+            ${{ env.LAB_ROOT }}/campaign.stop
+            ${{ env.LAB_ROOT }}/campaign-clock.json
+            ${{ env.LAB_ROOT }}/job-start.epoch
+            ${{ env.LAB_ROOT }}/saml-fixture.xml
           retention-days: 90
           if-no-files-found: warn
 

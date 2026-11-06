@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- TEST-ONLY synthetic SAML IdP metadata for the #1528 lab campaign (LAB_CHANGED_PATHS=1).
+     It exists so the appliance's changed metadata-URL fetch can be exercised at
+     runtime from a public HTTPS URL. The certificate is self-signed; its private key was
+     deleted immediately after signing; the SSO endpoint is in the .invalid TLD. -->
+<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.culvert-lab-fixture.invalid/saml/metadata">
+  <md:IDPSSODescriptor WantAuthnRequestsSigned="false" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <md:KeyDescriptor use="signing">
+      <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+        <ds:X509Data>
+          <ds:X509Certificate>MIIDRzCCAi+gAwIBAgIUbBranKc2DXeRZTgi/dxtf/DF5VswDQYJKoZIhvcNAQELBQAwMzExMC8GA1UEAwwoY3VsdmVydC1sYWItc3ludGhldGljLXNhbWwtaWRwIFRFU1QtT05MWTAeFw0yNjExMDYxMDAzMjZaFw0zNjExMDMxMDAzMjZaMDMxMTAvBgNVBAMMKGN1bHZlcnQtbGFiLXN5bnRoZXRpYy1zYW1sLWlkcCBURVNULU9OTFkwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCm/HJqg5XEYZZaxjqu6pkIOzD/je5peF+893vBu/VUxKSwj5D7y/TGClIvp50Gx/bthq1TcmcdAfrB4nRwEaH8zyMxLNzMgpwC70i14ACjCU51GjqfMkh5YJ4oWlqFO3O7ztfwdv6v8FqwPCLF1heR6CKIZ4+Uz5W6C12fUhDb9wPgXEch4W5h5YwEQnbxugSpY3L2xonX6IFbECHgXYeRvx8zVwHni4mHsXhcgzvPevf3pdlKIgA/S/7wb2smUeqeLB3s+VuYCGSu98NQnfuFyUUbwZs7AMGn/+7Y3PIeKproWZx4nx9W0GZCO3UqzDS5yWs0szCWGlm9YwW+XVLLAgMBAAGjUzBRMB0GA1UdDgQWBBSLiSYBO3sh2C/31V/vXfgu9ky8OzAfBgNVHSMEGDAWgBSLiSYBO3sh2C/31V/vXfgu9ky8OzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQB2EnxS02Jj9tI+4rNxe181gjy2DS2uH41f7Jv7Tvwj/DJHqSOpwYoa/ulKpOO3EWGc8WAdB92naILm325JlZYXXqvXF/7AVMtUWx5BUnQnp1Q4P/7pRJx0V0Xsfx/OPrcilBh6cFC/vlu4tnpGcV4NRETDfdWGRMD9V0nA2aH42arCDXOwYxAR9SPCHPjNsxW3/c83N5KysDkFvOWyzEyXFzbBpwuzbtxwwf0dyD11YszL+o5r25SxcvUOEZ4Xu2r+cfxzU8a3N4XFDbjt9Nb91D/Qc7Go1iIgOlf+fz9rSVdqwxfrX9dT7/RxajEsh+TwanHL890QIVAlPgERpzFO</ds:X509Certificate>
+        </ds:X509Data>
+      </ds:KeyInfo>
+    </md:KeyDescriptor>
+    <md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</md:NameIDFormat>
+    <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.culvert-lab-fixture.invalid/saml/sso"/>
+  </md:IDPSSODescriptor>
+</md:EntityDescriptor>

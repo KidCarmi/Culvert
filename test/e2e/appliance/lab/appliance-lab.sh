@@ -128,6 +128,35 @@ LAB_RECOVERY_TIMEOUT="${LAB_RECOVERY_TIMEOUT:-1800}"
 LAB_OS_UPDATE="${LAB_OS_UPDATE:-os}"
 LAB_EXPECT_DPKG="${LAB_EXPECT_DPKG:-}"; LAB_EXPECT_KERNEL="${LAB_EXPECT_KERNEL:-}"
 LAB_CHANGED_PATHS="${LAB_CHANGED_PATHS:-0}"; LAB_OIDC_PUBLIC_ISSUER="${LAB_OIDC_PUBLIC_ISSUER:-https://accounts.google.com}"
+#   LAB_SAML_METADATA_URL / LAB_SAML_MISSING_URL  public HTTPS metadata fixture
+#                         and a public URL that answers 404: with
+#                         LAB_CHANGED_PATHS=1 an ENABLED synthetic SAML profile
+#                         is created (that is what compiles it and runs the
+#                         changed fetch), asserted and deleted.
+#   LAB_CAMPAIGN_STOP_FILE=PATH  campaign stop latch. The FIRST failed check
+#                         (or an external writer: the containment monitor)
+#                         creates PATH; its first line is kept. From then on
+#                         every gate, privileged guest command and Q7 sample
+#                         refuses, and the harness exits through its EXIT trap
+#                         (bounded diagnostics, ACPI power-down).
+#   LAB_Q7_FULL_JOINT=1   every counted Q7 sample ALSO requires a fresh admin
+#                         login with the normalized state (policy, default
+#                         action, CA, agent availability) equal to the
+#                         pre-reboot baseline, an authenticated direct clamd
+#                         PING->PONG on the guest with the running image equal
+#                         to the baseline, and the pinned operator host key.
+#                         The deadline is the profile budget from authenticated
+#                         acceptance: a sample ending after it never counts and
+#                         sampling stops there.
+#   LAB_START_DEADLINE_EPOCH=N, LAB_CAMPAIGN_CLOCK_FILE=PATH,
+#   LAB_CAMPAIGN_WINDOW_S=S  no candidate boot at or after N; the first boot
+#                         writes the clock anchor (UTC, host CLOCK_MONOTONIC,
+#                         expiry = anchor + S) and every later boot, in any
+#                         leg, requires a valid, unexpired anchor.
+LAB_SAML_METADATA_URL="${LAB_SAML_METADATA_URL:-}"; LAB_SAML_MISSING_URL="${LAB_SAML_MISSING_URL:-}"
+LAB_CAMPAIGN_STOP_FILE="${LAB_CAMPAIGN_STOP_FILE:-}"; LAB_Q7_FULL_JOINT="${LAB_Q7_FULL_JOINT:-0}"
+LAB_START_DEADLINE_EPOCH="${LAB_START_DEADLINE_EPOCH:-}"; LAB_CAMPAIGN_CLOCK_FILE="${LAB_CAMPAIGN_CLOCK_FILE:-}"
+LAB_CAMPAIGN_WINDOW_S="${LAB_CAMPAIGN_WINDOW_S:-86400}"; LAB_IN_TRAP=0
 ADMIN_USER=labadmin
 
 log()  { printf '%s [lab] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
@@ -142,7 +171,22 @@ check() { local st="$1" n="$2" r="$3" d="${4:-}"
   d="$(redact_str "$d")"
   python3 -c 'import json,sys; print(json.dumps({"run":sys.argv[1],"step":sys.argv[2],"check":sys.argv[3],"result":sys.argv[4],"detail":sys.argv[5]},separators=(",",":")))' \
     "$RUN_ID" "$st" "$n" "$r" "$d" >> "$JSONL"
-  log "$r [$st] $n: $d"; }
+  log "$r [$st] $n: $d"
+  # Campaign stop latch (LAB_CAMPAIGN_STOP_FILE): the first genuine failure
+  # stops everything after it. Inside the EXIT trap (collect/down) nothing
+  # exits, so diagnostics and the power-down always complete.
+  if [[ "$r" == fail && -n "$LAB_CAMPAIGN_STOP_FILE" ]]; then
+    campaign_latch "check $st/$n failed: ${d:0:300}"; STOP=1
+    [[ "$LAB_IN_TRAP" == 1 ]] || { log "campaign stop latched by $st/$n: stopping"; exit 3; }
+  fi; }
+# campaign_latch REASON — create the stop latch; the first writer's line wins.
+campaign_latch() { [[ -n "$LAB_CAMPAIGN_STOP_FILE" ]] || return 0
+  ( set -o noclobber; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$LAB_CAMPAIGN_STOP_FILE" ) 2>/dev/null || true; }
+campaign_latched() { [[ -n "$LAB_CAMPAIGN_STOP_FILE" && -e "$LAB_CAMPAIGN_STOP_FILE" ]]; }
+# A latch written elsewhere (a subshell's check, the containment monitor)
+# stops the harness at its next gate, privileged command or Q7 sample.
+campaign_halt_if_latched() { campaign_latched || return 0; [[ "$LAB_IN_TRAP" == 1 ]] && return 0
+  log "campaign stop latch present ($(head -c 200 "$LAB_CAMPAIGN_STOP_FILE")): stopping"; exit 3; }
 
 # Every secret this run holds, replaced wherever it appears.
 SECRET_FILES=(setup-token admin-pass console-pass console-onetime history-phrase log-pass-new)
@@ -179,6 +223,8 @@ DM_NAME="culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-8)"
 # gpriv [--as-user] [--timeout N] [--nowait] < script — authenticated local
 # administration: PAM login as culvert on the console, then sudo (root).
 gpriv() {
+  if campaign_latched && [[ "$LAB_IN_TRAP" != 1 ]]; then
+    echo "campaign stop latched: privileged guest command refused" >&2; return 97; fi
   if [[ -n "${LAB_PRIV_CMD:-}" ]]; then
     # shellcheck disable=SC2086 # the adapter command is a word list by contract
     $LAB_PRIV_CMD "$@"
@@ -614,6 +660,7 @@ PY
   local acc=(-machine "pc,accel=tcg" -cpu max)
   [[ "$ACCEL" == kvm ]] && acc=(-machine "pc,accel=kvm" -cpu host)
   : > "$WORK/console.log"; rm -f "$SER_SOCK"
+  campaign_clock_boot main 2 || return 1
   # ttyS0 is a socket (the authenticated console session attaches to it) whose
   # every byte is ALSO logged, client or not: console.log stays the boot record.
   qemu-system-x86_64 -name culvert-lab "${acc[@]}" -smp "$LAB_CPUS" -m "$LAB_MEM_MB" \
@@ -661,7 +708,7 @@ PY
 
 # ── qualify: vsphere-qualification.md steps 3–8 ─────────────────────────────
 STOP=0
-gate() { [[ $STOP == 0 ]] || { check "$1" "$2" not-run "an earlier step failed"; return 1; }; }
+gate() { campaign_halt_if_latched; [[ $STOP == 0 ]] || { check "$1" "$2" not-run "an earlier step failed"; return 1; }; }
 # boot_timing PREFIX STEP — where boot time went, from the guest's own record
 # (systemd-analyze + the unit journals that gate the stack). Evidence only: the
 # lab has no timing threshold; this is the capture for the unexplained ESXi
@@ -944,6 +991,8 @@ PY
   fi
   # M2 checkpoint 1: first boot, before the agent install recreates anything.
   [[ "${LAB_M2_HARDENING:-0}" == 1 ]] && gate M2H firstboot-hardening && m2_checkpoint firstboot
+  # Campaign: package set + kernel at first boot, before any maintenance work.
+  [[ -n "$LAB_EXPECT_DPKG$LAB_EXPECT_KERNEL" ]] && gate K firstboot-pkgset && pkgset_checkpoint firstboot
 
   # Step 6 — maintenance agent: backup through the product, restore DRY RUN.
   if gate 6 agent-backup; then
@@ -1063,14 +1112,18 @@ EOS
     else SUPPORT_BUNDLE_ID=""; check 6d support-bundle fail "create http $sc"; fi
   fi
   if gate 7 os-update; then
-    gpriv > "$EV/07-check-before.txt" 2>&1 <<<'culvert-os-update check' || true
-    local rc=0
+    local rc=0 crc=0
+    gpriv > "$EV/07-check-before.txt" 2>&1 <<<'culvert-os-update check' || crc=$?
     if [[ "$LAB_OS_UPDATE" == check ]]; then
       # Campaign scope: no package upgrade (the candidate already ships its
       # kernel; a live-archive upgrade would change the package set). The
-      # read-only check above is the maintenance path exercised; the reboot
-      # below is the product's own maintenance reboot.
-      check 7 os-update info "LAB_OS_UPDATE=check: package upgrade not run by campaign scope; read-only check exit recorded in 07-check-before.txt"
+      # read-only check IS the maintenance path exercised, so both the console
+      # transport and the command must succeed (exit 0) and its report must be
+      # present; the reboot below is the product's own maintenance reboot.
+      if [[ $crc == 0 ]] && grep -q -- '--- pending security updates' "$EV/07-check-before.txt" && grep -q -- '--- last unattended-upgrades run' "$EV/07-check-before.txt"; then
+        check 7 os-update pass "read-only culvert-os-update check: transport and command exit 0, report complete (07-check-before.txt)"
+      else check 7 os-update fail "read-only culvert-os-update check failed: exit $crc (90-99 = console transport): $(tail -3 "$EV/07-check-before.txt" | tr '\n' ' ')"; STOP=1; fi
+      check 7 os-upgrade info "package upgrade (culvert-os-update os) NOT run by campaign scope (D1): that path is unqualified on these bytes"
     else
       groot 'culvert-os-update os' 2700 > "$EV/07-os-update.txt" 2>&1 || rc=$?
       [[ $rc == 0 ]] && check 7 os-update pass "culvert-os-update os exit 0 ($(grep -cE '^(Setting up|Unpacking) ' "$EV/07-os-update.txt" || true) package actions)" || check 7 os-update fail "exit $rc: $(tail -3 "$EV/07-os-update.txt" | tr '\n' ' ')"
@@ -1543,6 +1596,64 @@ rec_operator_probe() { local tag="$1" sample="$2" off="$3" rc=0 t_a t_b ems
   rec_classify_probe "$WORK/rec-status.json" "$WORK/rec-status.err" "$rc" "$ems" \
     "$sample" "$off" "$LAB_HOST" "$EV/$tag-operator-probe.jsonl"
 }
+# ── Q7 full-joint members (LAB_Q7_FULL_JOINT=1) ─────────────────────────────
+# q7_state_member TAG N — authenticated administrator + CA/persistence + agent,
+# IN the sample: a FRESH admin login on its own cookie jar, then the same
+# normalized state rec_state_snapshot records (default action, policy persisted
+# and not draft, CA fingerprint, agent availability), equal to the pre-reboot
+# baseline. The image is compared by the direct observer. Prints ok or no:WHY.
+q7_state_member() { local j="$WORK/q7jar-$1-$2" c da pol f ag
+  rm -f "$j"
+  c="$(curl -ksS -m 2 -o /dev/null -w '%{http_code}' -X POST "$UI/api/auth/login" -H "Origin: $UI" -H 'Content-Type: application/json' \
+       -c "$j" -b "$j" -d "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" 2>/dev/null || echo 000)"
+  if [[ "$c" != 200 ]]; then rm -f "$j"; echo "no:admin-login-$c"; return 0; fi
+  da="$(curl -ksS -m 2 -H "Origin: $UI" -b "$j" "$UI/api/default-action" 2>/dev/null | python3 -c 'import json,sys
+a=json.load(sys.stdin).get("defaultAction"); print(a if a in ("allow","deny") else "INVALID:%r" % (a,))' 2>/dev/null || echo unreadable)"
+  pol="$(curl -ksS -m 2 -H "Origin: $UI" -b "$j" "$UI/api/policy" 2>/dev/null | python3 -c 'import json,sys
+d=json.load(sys.stdin); keys=("name","priority","action","enabled","destFQDN","destCategory","destCategoryGroup","destCountry","sslAction")
+rules=sorted(([r.get(k) for k in keys] for r in d.get("rules",[])), key=lambda r: (r[1] or 0, r[0] or ""))
+print(json.dumps({"default_action":sys.argv[1],"persisted":d.get("persisted"),"draft":d.get("draft"),"rules":rules},sort_keys=True))' "$da" 2>/dev/null || echo unreadable)"
+  f="$(curl -ksS -m 2 -H "Origin: $UI" -b "$j" "$UI/api/ca-cert" 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 || true)"
+  ag="$(curl -ksS -m 2 -H "Origin: $UI" -b "$j" "$UI/api/maintenance-agent" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin).get("available"))' 2>/dev/null || echo unreadable)"
+  rm -f "$j"
+  python3 -I -c 'import json,sys
+b=json.load(open(sys.argv[1])); cur={"login":sys.argv[2],"policy":sys.argv[3],"ca":sys.argv[4],"agent_available":sys.argv[5]}
+diff=[k for k in sorted(cur) if cur[k]!=b.get(k)]
+if not b.get("ca") or b.get("agent_available")!="True": diff.append("baseline-unusable")
+print("ok" if not diff else "no:"+",".join(diff))' "$EV/R-state-baseline.json" "$c" "$pol" "$f" "$ag" 2>/dev/null || echo "no:compare-error"; }
+# q7_pong_member JSONL SAMPLE_START BASE_IMAGE — the direct observer's verdict
+# for THIS sample: an observation that STARTED at or after the sample start
+# must answer PONG with the baseline image; any fresh failed observation fails
+# the member; none within 4.5 s of the sample start fails it.
+q7_pong_member() { python3 -I - "$1" "$2" "$3" <<'PY'
+import json, sys, time
+path, s0, img = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+while True:
+    rows, now = [], time.monotonic()
+    try:
+        for line in open(path):
+            try:
+                j = json.loads(line)
+            except ValueError:
+                continue
+            if "seq" in j and j["mono_start"] >= s0 and j["mono_end"] <= now:
+                rows.append(j)
+    except FileNotFoundError:
+        pass
+    bad = [r for r in rows if not (r["rc"] == 0 and r["pong"] == "PONG" and r["image"] == img)]
+    if bad:
+        r = bad[0]
+        print("no:pong=%s,rc=%s,image-%s" % (r["pong"], r["rc"], "ok" if r["image"] == img else "differs"))
+        break
+    if rows:
+        print("ok")
+        break
+    if now >= s0 + 4.5:
+        print("no:no-fresh-observation")
+        break
+    time.sleep(0.1)
+PY
+}
 recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   local k0 acc t0 st0 st1 ok=0 samples=0 s_start s s_prev="" pr pt pa pp dur gap why marks_pid
   local pp_class pp_phase pp_reason soff
@@ -1565,16 +1676,32 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
   if [[ -z "$acc" ]]; then kill "$marks_pid" 2>/dev/null; check R "recovery-$name-$i" fail "the maintenance reboot was not accepted (no authenticated acceptance marker): $(tail -c 300 "$EV/$tag-reboot.txt")"; return 1; fi
   local lag; lag="$(python3 -c 'import sys,time; print("%.6f" % (time.time()-float(sys.argv[1])))' "$acc")"
   t0="$(python3 -c 'import sys; print("%.6f" % (float(sys.argv[1]) - float(sys.argv[2])))' "$t0" "$lag")"
+  # Full joint (LAB_Q7_FULL_JOINT=1): the deadline IS the budget, from
+  # authenticated acceptance; the direct observer starts now (the acceptance
+  # session has ended) and types nothing until the new boot's login prompt.
+  local limit="$LAB_RECOVERY_TIMEOUT" qp="" qpj="$WORK/q7probe-$tag.jsonl" qps="$WORK/q7probe-$tag.stop" base_img="" ps_ pq stp
+  if [[ "$LAB_Q7_FULL_JOINT" == 1 ]]; then
+    limit="$budget"
+    base_img="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("image",""))' "$EV/R-state-baseline.json" 2>/dev/null || true)"
+    rm -f "$qpj" "$qps"
+    python3 "$HERE/q7-probe-session.py" --sock "$SER_SOCK" --secrets "$SEC" --console-log "$WORK/console.log" --out "$qpj" --stop "$qps" \
+      --max-s "$(( ${budget%.*} + 120 ))" --trace "$WORK/q7probe-$tag-trace.txt" > /dev/null 2>&1 &
+    qp=$!
+    printf 'sample_start_s\tsample_end_s\tduration_s\tstart_gap_s\tready_clamav\ttraffic\teicar\top_class\top_detail\tadmin_state\tclamd_pong\tcounted\n' > "$EV/$tag-samples.tsv"
+  else
   printf 'sample_start_s\tsample_end_s\tduration_s\tstart_gap_s\tready_clamav\ttraffic\teicar\top_class\top_detail\tcounted\n' > "$EV/$tag-samples.tsv"
+  fi
   while :; do
     qemu_alive || { kill "$marks_pid" 2>/dev/null; check R "recovery-$name-$i" fail "qemu exited during the reboot"; return 1; }
     s_start="$(mono)"
-    python3 -c 'import sys; sys.exit(0 if float(sys.argv[1])-float(sys.argv[2]) < float(sys.argv[3]) else 1)' "$s_start" "$t0" "$LAB_RECOVERY_TIMEOUT" || break
+    campaign_halt_if_latched
+    python3 -c 'import sys; sys.exit(0 if float(sys.argv[1])-float(sys.argv[2]) < float(sys.argv[3]) else 1)' "$s_start" "$t0" "$limit" || break
     if [[ -z "$tk" ]]; then
       (( $(grep -ac 'Linux version' "$WORK/console.log" || true) > k0 )) && tk="$(mono)"
       sleep 2; continue
     fi
     samples=$((samples+1))
+    if [[ "$LAB_Q7_FULL_JOINT" == 1 ]]; then q7_state_member "$tag" "$samples" > "$WORK/q7st-$tag-$samples" 2>/dev/null & stp=$!; fi
     if ready_clamav_ok; then pr=ok; else pr=no; fi; s="$(mono)"; [[ $pr == ok && -z "$ts_ready" ]] && ts_ready="$s"
     if rec_traffic; then pt=ok; else pt=no; fi
     s="$(mono)"; [[ $pt == ok && -z "$ts_traffic" ]] && ts_traffic="$s"
@@ -1587,6 +1714,11 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
     IFS=$'\t' read -r pp_class pp_phase pp_reason < <(rec_operator_probe "$tag" "$samples" "$soff")
     if [[ "$pp_class" == ready ]]; then pp=ok; else pp=no; fi
     s="$(mono)"; [[ $pp == ok && -z "$ts_phase" ]] && ts_phase="$s"
+    if [[ "$LAB_Q7_FULL_JOINT" == 1 ]]; then
+      wait "$stp" 2>/dev/null || true; ps_="$(head -c 200 "$WORK/q7st-$tag-$samples" 2>/dev/null)"; ps_="${ps_:-no:member-did-not-report}"
+      pq="$(q7_pong_member "$qpj" "$s_start" "$base_img")"
+      s="$(mono)"   # the sample ends when its LAST member answered
+    fi
     # Declared cadence: a sample counts only if it completed within 5 s and
     # started at most 5.5 s after the previous one. Overruns are retained in
     # the TSV and reset the consecutive count (ASTRA review, item 4).
@@ -1596,8 +1728,21 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
     python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= 5.0 else 1)' "$dur" || why=overrun-duration
     [[ "$gap" == first ]] || python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= 5.5 else 1)' "$gap" || why=overrun-gap
     [[ $pr == ok && $pt == ok && $pa == av && $pp == ok ]] || why=no
+    if [[ "$LAB_Q7_FULL_JOINT" == 1 ]]; then
+      why=yes   # re-judged from scratch: every member, measured to the LAST answer
+      dur="$(python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s" "$s_start")"
+      python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= 5.0 else 1)' "$dur" || why=overrun-duration
+      [[ "$gap" == first ]] || python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= 5.5 else 1)' "$gap" || why=overrun-gap
+      [[ $pr == ok && $pt == ok && $pa == av && $pp == ok && "$ps_" == ok && "$pq" == ok ]] || why=no
+      # A sample whose last member answered after the deadline never counts.
+      python3 -c 'import sys; sys.exit(0 if float(sys.argv[1])-float(sys.argv[2]) <= float(sys.argv[3]) else 1)' "$s" "$t0" "$budget" || why=after-deadline
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$soff" \
+        "$(python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s" "$t0")" "$dur" "$gap" "$pr" "$pt" "$pa" "$pp_class" "$pp_phase:$pp_reason" "$ps_" "$pq" "$why" >> "$EV/$tag-samples.tsv"
+      [[ "$why" == after-deadline ]] && break
+    else
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$soff" \
       "$(python3 -c 'import sys;print("%.3f"%(float(sys.argv[1])-float(sys.argv[2])))' "$s" "$t0")" "$dur" "$gap" "$pr" "$pt" "$pa" "$pp_class" "$pp_phase:$pp_reason" "$why" >> "$EV/$tag-samples.tsv"
+    fi
     s_prev="$s_start"
     if [[ $why == yes ]]; then
       ok=$((ok+1)); (( ok == 1 )) && first_joint="$s"
@@ -1611,8 +1756,11 @@ recovery_once() { local name="$1" i="$2" budget="$3"; local tag="R-$name-$i"
     # The next sample starts 5 s after this one STARTED, never sooner.
     python3 -c 'import sys,time; d=float(sys.argv[1])+5-time.monotonic(); time.sleep(d if d>0 else 0)' "$s_start"
   done
+  if [[ -n "$qp" ]]; then
+    touch "$qps"; for _ in $(seq 1 50); do kill -0 "$qp" 2>/dev/null || break; sleep 0.2; done
+    kill "$qp" 2>/dev/null || true; cp "$qpj" "$EV/$tag-clamd-observer.jsonl" 2>/dev/null || true
+  fi
   [[ -n "$bk_pid" ]] && wait "$bk_pid"
-  [[ -n "$bk_pid" ]] || check R "backup-list-$name-$i" fail "no healthy joint sample, so the backup listing was never attempted"
   kill "$marks_pid" 2>/dev/null || true
   st1="$(host_disk_stat)"
   local rec; rec="$(python3 "$HERE/recovery-timeline.py" "$t0" "$tk" "$ts_ready" "$ts_traffic" "$ts_av" "$ts_phase" "$first_joint" "$end" \
@@ -1661,7 +1809,12 @@ EOF
   else
     check R "operator-capture-integrity-$name-$i" fail "capture integrity: records=${cap_n:-0} overflow=${cap_ovf:-0} unparseable=${cap_nonp:-0} — overflow or invalid retained JSON is a capture failure, separate from product readiness"
   fi
-  if [[ "$rec" == none ]]; then check R "recovery-$name-$i" fail "not recovered (3 consecutive joint samples) within ${LAB_RECOVERY_TIMEOUT}s: $tl; $opsum"; recovery_guest "$tag"; return 1; fi
+  # The recovery verdict is recorded BEFORE its consequence (no backup
+  # listing without a healthy joint sample), so a stop latch names the cause.
+  if [[ "$rec" == none ]]; then check R "recovery-$name-$i" fail "not recovered (3 consecutive $([[ "$LAB_Q7_FULL_JOINT" == 1 ]] && echo FULL-joint || echo joint) samples) within ${limit}s: $tl; $opsum"
+    [[ -n "$bk_pid" ]] || check R "backup-list-$name-$i" fail "no healthy joint sample, so the backup listing was never attempted"
+    recovery_guest "$tag"; return 1; fi
+  [[ -n "$bk_pid" ]] || check R "backup-list-$name-$i" fail "no healthy joint sample, so the backup listing was never attempted"
   local recd; recd="$(printf '%.1f' "$rec")"
   if python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$rec" "$budget"; then
     check R "recovery-$name-$i" pass "recovered in ${recd}s (budget ${budget}s; unrounded $rec): $tl; $opsum"
@@ -1853,6 +2006,14 @@ cmd_recovery() { local prof name r w budget i expected=0 ran=0 v0
   (( LAB_RECOVERY_REBOOTS > 0 )) || return 0
   if [[ "$LAB_EXTERNAL" == 1 || "$LAB_DISK" != dm ]]; then check R recovery fail "BLOCKED: needs a QEMU guest with LAB_DISK=dm"; return 0; fi
   gate R recovery || { check R recovery fail "BLOCKED: an earlier gate did not pass"; return 0; }
+  # Full joint: "pinned operator access" — from here every operator probe
+  # requires the host key recorded at first contact (no trust-on-change).
+  if [[ "$LAB_Q7_FULL_JOINT" == 1 ]]; then
+    if [[ -s "$SEC/known_hosts" ]]; then
+      local o; for o in "${!SSH_OPTS[@]}"; do [[ "${SSH_OPTS[$o]}" == StrictHostKeyChecking=no ]] && SSH_OPTS[$o]=StrictHostKeyChecking=yes; done
+      check R operator-hostkey-pinned pass "Q7 operator probes require the recorded host key $(ssh-keygen -lf "$SEC/known_hosts" 2>/dev/null | awk '{print $2}' | head -1) (StrictHostKeyChecking=yes)"
+    else check R operator-hostkey-pinned fail "no recorded operator host key to pin"; fi
+  fi
   gpriv > "$EV/R-io-accounting.txt" 2>&1 <<'EOS' || true
 install -d /etc/systemd/system.conf.d
 printf '[Manager]\nDefaultIOAccounting=yes\n' > /etc/systemd/system.conf.d/90-culvert-lab-ioaccounting.conf
@@ -3523,6 +3684,7 @@ OVFENV
               -chardev "socket,id=hvc,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on"
               -device virtconsole,chardev=hvc)
   # V1 cold first boot.
+  campaign_clock_boot console-v1 V || return 1
   vqemu "${esxi[@]}"; vcapture_start; vmark "power-on: cold first boot (VMware SVGA, no serial port)"
   if ! vwait_ready "$LAB_FIRSTBOOT_TIMEOUT"; then
     vcheck V1 first-boot fail "not ready within ${LAB_FIRSTBOOT_TIMEOUT}s"; vcapture_stop; vsheet V1-first-boot 0 99999; return 1; fi
@@ -3537,6 +3699,10 @@ OVFENV
   vplymouth "$EV/V1-plymouth.txt"; vplymouth_check V1 splash-on-display "$EV/V1-plymouth.txt" success
   vttyreset "$EV/V1-ttyreset.txt"
   vcheck V1 getty-tty-reset info "$(grep -E '^(TTYReset|TTYVHangup)=|^open-rc=' "$EV/V1-ttyreset.txt" | tr '\n' ' ')(V1-ttyreset.txt)"
+  # Campaign: this leg boots its OWN copy of the disk — package set, kernel and
+  # M2 on it before its first lab change (V2's units), and again at the end.
+  [[ "${LAB_M2_HARDENING:-0}" == 1 ]] && m2_checkpoint console-firstboot
+  pkgset_checkpoint console-firstboot
   # V2 maintenance reboot with a slow unit ahead of logins and a failing unit.
   gpriv --timeout 120 > "$EV/V2-units.txt" 2>&1 <<'EOS' || true
 cat > /etc/systemd/system/lab-console-delay.service <<'U'
@@ -3700,6 +3866,7 @@ EOS
   groot 'systemctl poweroff' 60 > /dev/null 2>&1 || true
   for _ in $(seq 1 60); do qemu_alive || break; sleep 2; done
   if qemu_alive; then kill "$(cat "$WORK/qemu.pid")" 2>/dev/null || true; sleep 2; fi
+  campaign_clock_boot console-v5 V5 || return 1
   vqemu -vga none -display none -chardev "socket,id=ser0,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on" -serial chardev:ser0
   vwait_ready 900 || vcheck V5 serial-only-boot fail "not ready without a display adapter"
   sleep 10; cp "$WORK/console.log" "$EV/V5-serial.log"
@@ -3709,6 +3876,8 @@ EOS
   else vcheck V5 serial-only-boot fail "serial log incomplete (kernel=$(grep -ac 'Linux version' "$EV/V5-serial.log") ok=$(grep -acE 'OK .*(Started|Finished|Reached)' "$EV/V5-serial.log") login=$(grep -ac 'login:' "$EV/V5-serial.log"))"; fi
   # Shutdown on serial: with no display no Plymouth shutdown splash either, so
   # systemd's stop lines and the kernel's last line reach the serial console.
+  [[ "${LAB_M2_HARDENING:-0}" == 1 ]] && m2_checkpoint console-final
+  pkgset_checkpoint console-final
   local off; off="$(wc -c < "$WORK/console.log")"
   gpriv --nowait > "$EV/V5-poweroff.txt" 2>&1 <<<'systemctl poweroff' || true
   for _ in $(seq 1 90); do qemu_alive || break; sleep 2; done
@@ -3718,6 +3887,51 @@ EOS
   else vcheck V5 serial-shutdown fail "serial shutdown log incomplete (stopped=$(grep -acE 'OK .*Stopped' "$EV/V5-shutdown.log") powerdown=$(grep -ac 'reboot: Power down' "$EV/V5-shutdown.log"); qemu $(qemu_alive && echo still running || echo exited))"; fi
   redact_tree
 }
+# campaign_clock_boot LEG STEP — immediately before a candidate QEMU start:
+# refuse at/after LAB_START_DEADLINE_EPOCH (first boot) or at/after the anchor's
+# expiry (any later boot), and record the boot in the anchor. The anchor holds
+# UTC + epoch + host CLOCK_MONOTONIC of the FIRST candidate boot and expiry =
+# first boot + LAB_CAMPAIGN_WINDOW_S; it is rejected if missing fields, in the
+# future, from another host boot (monotonic went backwards) or inconsistent.
+campaign_clock_boot() { local leg="$1" st="$2" rc=0 out
+  [[ -n "$LAB_START_DEADLINE_EPOCH$LAB_CAMPAIGN_CLOCK_FILE" ]] || return 0
+  out="$(python3 -I - "$LAB_CAMPAIGN_CLOCK_FILE" "$leg" "$LAB_START_DEADLINE_EPOCH" "$LAB_CAMPAIGN_WINDOW_S" <<'PY'
+import json, os, sys, time
+path, leg, deadline, window = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+now, mono = time.time(), time.monotonic()
+def fail(m): print("FAIL " + m); sys.exit(1)
+if not path: fail("no LAB_CAMPAIGN_CLOCK_FILE")
+if not window.isdigit() or int(window) <= 0: fail("invalid LAB_CAMPAIGN_WINDOW_S %r" % window)
+window = int(window)
+if not os.path.exists(path):
+    if not deadline.isdigit(): fail("no immutable start deadline (LAB_START_DEADLINE_EPOCH=%r)" % deadline)
+    if now >= int(deadline): fail("start deadline %s passed (now %.0f): no first candidate boot" % (deadline, now))
+    a = {"first_boot_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), "first_boot_epoch": now,
+         "first_boot_mono": mono, "window_s": window, "expiry_epoch": now + window, "start_deadline_epoch": int(deadline),
+         "boots": [{"leg": leg, "epoch": now, "mono": mono}]}
+    msg = "first candidate boot %s (deadline %s); campaign expiry %s" % (a["first_boot_utc"], deadline,
+          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(a["expiry_epoch"])))
+else:
+    try:
+        a = json.load(open(path))
+        fb, fm, ex, sd = (float(a["first_boot_epoch"]), float(a["first_boot_mono"]), float(a["expiry_epoch"]), int(a["start_deadline_epoch"]))
+    except Exception as e:
+        fail("clock anchor unreadable: %s" % e)
+    if fb > now: fail("clock anchor is in the future (%.0f > %.0f)" % (fb, now))
+    if fm > mono: fail("clock anchor from another host boot (monotonic %.1f > %.1f)" % (fm, mono))
+    if abs((ex - fb) - window) > 1e-6 or a.get("window_s") != window: fail("clock anchor expiry inconsistent with the window")
+    if fb >= sd: fail("anchor records a first boot at/after the start deadline")
+    if abs((now - fb) - (mono - fm)) > 120: fail("wall clock and monotonic clock disagree since the first boot by %.0f s" % ((now - fb) - (mono - fm)))
+    if now >= ex: fail("campaign window expired at %s: no further candidate boot" % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ex)))
+    a["boots"].append({"leg": leg, "epoch": now, "mono": mono})
+    msg = "boot %d (%s) at +%.0f s of the campaign window; expiry %s" % (len(a["boots"]), leg, now - fb,
+          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ex)))
+tmp = path + ".tmp"; json.dump(a, open(tmp, "w"), indent=1); os.replace(tmp, path)
+print("PASS " + msg)
+PY
+)" || rc=$?
+  if (( rc == 0 )); then check "$st" "campaign-clock-$leg" pass "${out#PASS }"
+  else check "$st" "campaign-clock-$leg" fail "${out#FAIL }"; return 1; fi; }
 # ── campaign checkpoints (LAB_EXPECT_DPKG / LAB_EXPECT_KERNEL, LAB_CHANGED_PATHS)
 # pkgset_checkpoint TAG — the guest's package set and running kernel against
 # the build's own record (pkgset-verdict.py fails closed). No-op when unset.
@@ -3769,7 +3983,58 @@ ok=d.get("issuer","").rstrip("/")==iss and all(str(d.get(k,"")).startswith("http
 sys.exit(0 if ok else 1)' "$EV/CP-idp-discover-public.json" "$LAB_OIDC_PUBLIC_ISSUER" 2>/dev/null; then
     check CP idp-discover-public pass "discovery of $LAB_OIDC_PUBLIC_ISSUER: 200, issuer matches, https authorization/token endpoints (nothing saved)"
   else check CP idp-discover-public fail "discovery of $LAB_OIDC_PUBLIC_ISSUER: $c $(head -c 200 "$EV/CP-idp-discover-public.json")"; fi
-  check CP saml-metadata-fetch not-run "SAML metadata URL fetch runs only on SAML profile creation (state change); not exercised by this campaign"
+  if [[ -n "$LAB_SAML_METADATA_URL" && -n "$LAB_SAML_MISSING_URL" ]]; then cp_saml
+  else check CP saml-metadata-fetch not-run "no LAB_SAML_METADATA_URL/LAB_SAML_MISSING_URL: the changed SAML metadata fetch was not exercised"; fi
+}
+# cp_saml — the changed SAML metadata fetch, at runtime. Upsert compiles (and
+# so FETCHES) only an ENABLED profile: a synthetic enabled profile pointing at
+# the public fixture is created, its success is the proof that the fetch,
+# the parse and the compile worked; the public 404 URL proves the fetch is
+# live (no cache) and its failure is refused; a private URL is refused by
+# validation before any request. The profile is deleted and its absence
+# verified. Side effect (product behaviour, disclosed): compiling the first
+# SAML provider creates the appliance's SP key pair, which stays.
+cp_saml() { local c r id nm="lab-saml-fixture-${RUN_ID}" f="$EV/CP-saml.txt"
+  local mk='{"name":"%s","type":"saml","enabled":true,"priority":90,"emailDomains":["saml-fixture.invalid"],"saml":{"metadataUrl":"%s","nameIdFormat":"urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"}}'
+  : > "$f"
+  c="$(curl -ksS -m 30 -o /dev/null -w '%{http_code}' -X POST "$UI/api/idp" -H "Origin: $UI" -H 'Content-Type: application/json' \
+       -d "$(printf "$mk" "$nm-unauth" "$LAB_SAML_METADATA_URL")" 2>/dev/null || echo 000)"
+  echo "unauthenticated POST /api/idp -> $c" >> "$f"
+  [[ $c == 401 || $c == 403 ]] && check CP saml-create-unauth pass "unauthenticated profile creation refused ($c)" || check CP saml-create-unauth fail "unauthenticated POST /api/idp answered $c"
+  r="$(api POST /api/idp "$(printf "$mk" "$nm-private" "https://10.0.2.2/metadata.xml")")"; c="$(code <<<"$r")"
+  printf 'admin POST /api/idp private metadataUrl -> %s %s\n' "$c" "$(body <<<"$r" | head -c 200)" >> "$f"
+  [[ $c == 400 && "$(body <<<"$r")" == *metadata_url* && "$(body <<<"$r")" != *compile* ]] \
+    && check CP saml-private-refused pass "private metadata URL refused by validation before any fetch (400: $(body <<<"$r" | head -c 120))" \
+    || check CP saml-private-refused fail "private metadata URL answered $c: $(body <<<"$r" | head -c 200)"
+  r="$(api POST /api/idp "$(printf "$mk" "$nm-missing" "$LAB_SAML_MISSING_URL")")"; c="$(code <<<"$r")"
+  printf 'admin POST /api/idp public 404 metadataUrl -> %s %s\n' "$c" "$(body <<<"$r" | head -c 200)" >> "$f"
+  [[ $c == 400 && "$(body <<<"$r")" == *"HTTP 404 fetching metadata"* ]] \
+    && check CP saml-fetch-live pass "a public metadata URL answering 404 was FETCHED and refused at compile (400: $(body <<<"$r" | head -c 140))" \
+    || check CP saml-fetch-live fail "public 404 metadata URL answered $c: $(body <<<"$r" | head -c 200)"
+  r="$(api POST /api/idp "$(printf "$mk" "$nm" "$LAB_SAML_METADATA_URL")")"; c="$(code <<<"$r")"
+  body <<<"$r" > "$EV/CP-saml-created.json"
+  printf 'admin POST /api/idp fixture metadataUrl -> %s\n' "$c" >> "$f"
+  id="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); ok=d.get("type")=="saml" and d.get("enabled") is True and d.get("name")==sys.argv[2]
+print(d.get("id","") if ok else "")' "$EV/CP-saml-created.json" "$nm" 2>/dev/null || true)"
+  if [[ $c == 200 && "$id" =~ ^[0-9a-f]{12}$ ]]; then
+    check CP saml-metadata-fetch pass "enabled SAML profile $id compiled from the public fixture $LAB_SAML_METADATA_URL (fetch + parse + compile succeeded)"
+  else check CP saml-metadata-fetch fail "fixture profile creation answered $c: $(head -c 200 "$EV/CP-saml-created.json")"; fi
+  # Cleanup: EVERY lab-saml-fixture-* profile (the fixture's, and any that a
+  # refusal above unexpectedly created), then verify none remains.
+  local ids x dres="" dbad=0
+  r="$(api GET /api/idp)"
+  ids="$(python3 -c 'import json,sys
+d=json.loads(sys.stdin.read()); print(" ".join(p["id"] for p in d.get("profiles") or [] if str(p.get("name","")).startswith("lab-saml-fixture-") and str(p.get("id","")).isalnum()))' <<<"$(body <<<"$r")" 2>/dev/null || true)"
+  for x in $ids; do c="$(api DELETE "/api/idp/$x" | code)"; dres="$dres $x:$c"; [[ $c == 204 ]] || dbad=1; done
+  [[ -z "$id" || " $ids " == *" $id "* ]] || dbad=1
+  r="$(api GET /api/idp)"
+  printf 'cleanup: listed [%s] deleted [%s]; list after -> %s\n' "$ids" "${dres# }" "$(code <<<"$r")" >> "$f"
+  if [[ $dbad == 0 && "$(code <<<"$r")" == 200 ]] && python3 -c 'import json,sys
+d=json.loads(sys.stdin.read()); ps=d.get("profiles") or []
+sys.exit(0 if not any(str(p.get("name","")).startswith("lab-saml-fixture-") for p in ps) else 1)' <<<"$(body <<<"$r")" 2>/dev/null; then
+    check CP saml-cleanup pass "synthetic profile(s) [${dres# }] deleted (204); no lab-saml-fixture profile remains in /api/idp"
+  else check CP saml-cleanup fail "cleanup: listed [$ids] deleted [${dres# }] fixture '$id', list $(code <<<"$r"): $(body <<<"$r" | head -c 200)"; fi
 }
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
 # LAB_FAIL_FAST=1 (iteration runs only): after each phase, stop as soon as any
@@ -3797,14 +4062,14 @@ case "${1:-}" in
   adoption) cmd_adoption; [[ "$(failures)" == 0 ]] ;;
   engine-surface) cmd_engine_surface; [[ "$(failures)" == 0 ]] ;;
   m2) cmd_m2; [[ "$(failures)" == 0 ]] ;;
-  console) trap 'cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
+  console) trap 'LAB_IN_TRAP=1; cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
   fp2) cmd_fp2; [[ "$(failures)" == 0 ]] ;;
   cachebypass) cmd_cachebypass; [[ "$(failures)" == 0 ]] ;;
   ldap) cmd_ldap; [[ "$(failures)" == 0 ]] ;;
   collect) cmd_collect ;;
   down) cmd_down ;;
   all)
-    trap 'cmd_collect || true; cmd_down || true' EXIT
+    trap 'LAB_IN_TRAP=1; cmd_collect || true; cmd_down || true' EXIT
     # LAB_M2_ONLY=1: boot to first-boot steady state, take the read-only M2
     # snapshot, stop. No qualify campaign (ASTRA: no repeat).
     if [[ "${LAB_M2_ONLY:-0}" == 1 ]]; then cmd_preflight; cmd_up; cmd_m2; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
