@@ -538,7 +538,10 @@ deliberately, so changing it is a decision).
 
 `connlimit_refusal_observability_chaos112_test.go` (the telemetry):
 `CHAOS112_HTTPConnLimitRefusalIsObservable` (row asserted by UNIQUE client IP,
-never a length delta — the request ring is bounded),
+never a length delta — the request ring is bounded — and it asserts the row's
+METHOD and HOST, not merely its existence: a row that says a source was capped
+without saying what it was asking for is not the attribution its two
+neighbouring gates provide),
 `CHAOS112_ConnLimitRefusalLogIsRateLimited` (two-sided: some line, far fewer
 than one per refusal),
 `CHAOS112_MetricsExposeTheConnLimiterPosture`,
@@ -562,7 +565,7 @@ job and that job's package list is unchanged.
 
 ### 9.6 Mutation tests — the gates have teeth
 
-Eighteen mutation runs over seventeen distinct mutations, each applied to the
+Nineteen mutation runs over eighteen distinct mutations, each applied to the
 fixed tree and run against the gates that should catch it. **Every distinct
 mutation is caught**, none silently green — and the one useful negative is
 recorded rather than hidden: M3 escaped every ROOT gate, which is why the
@@ -585,6 +588,7 @@ the gates it motivated.
 | M9 the `/metrics` posture block is removed | both metrics gates |
 | M10 the enabled gauge is hardcoded to 1 | `MetricsReportADisabledLimiterAsZero` |
 | M11 the posture gauges report the wrong cap | `MetricsExposeTheConnLimiterPosture` |
+| M12 the row drops its method/host attribution | `HTTPConnLimitRefusalIsObservable` |
 | R1 (rider) the pre-fix shape: `RecordSuccess` above the `preSetup` branch | `BootstrapWindowLoginMintsNoTrustGrant` |
 | R2 (rider) the cheap fix: drop the success record entirely | `ControlAVerifiedLoginStillMintsItsGrant` |
 | R3 (rider) the bootstrap branch records nothing at all | `BootstrapWindowStillClearsItsOwnPairCounter` |
@@ -593,7 +597,47 @@ the gates it motivated.
 M3 is the useful one to record: it escaped every root gate and is the reason the
 owner-package file was written rather than assumed unnecessary.
 
-### 9.7 Checks run
+### 9.7 Lint, measured both ways — and the one that mattered
+
+The diff-scoped run the Fast gate uses is clean:
+
+```
+$ golangci-lint run --timeout=25m --new-from-rev origin/main
+0 issues.
+```
+
+That result alone would have been misleading, which is exactly what
+`conventions.md` warns about: `cyclop`, `funlen` and `gocognit` attribute to a
+function's **declaration** line, so `--new-from-rev` cannot see a function a
+change made more complex. The full-tree comparison against the same measurement
+on the base found one:
+
+```
+handleMetrics: cognitive complexity 45 (base b05d649)  ->  46 (first draft)
+```
+
+`handleMetrics` is already over the `gocognit` threshold of 30, so the finding
+was pre-existing and the diff-scoped run reported nothing — and the change made
+it worse by one anyway. The `/metrics` block was extracted into
+`connLimitWritePrometheus`, after which the full-tree measurement is **identical
+to the base**: same 174 issues, same per-linter totals, and no function's
+measured complexity changed.
+
+```
+$ diff <(base complexity findings) <(head complexity findings)
+IDENTICAL: no function's measured complexity changed vs the base
+$ diff <(base per-linter totals) <(head per-linter totals)
+IDENTICAL totals
+```
+
+Recorded because it is the second time this repository's own convention has
+caught something a reviewer reading the diff would not have: the first draft of
+this sweep's gates also failed
+`TestSnapshotApplyFixture_Wall_EveryApplyCallerBindsFreshOwners`, because the
+apply mutates `ipf` and `rl` in place (RISK-030) and a root test that reaches it
+must bind fresh owners or leak a cleared filter into whatever runs next.
+
+### 9.8 Checks run
 
 See the PR description for the exact commands and their results at the pushed
 SHA, including what was **not** run and why. A passing local check is not a

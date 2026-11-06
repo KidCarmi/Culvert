@@ -298,7 +298,7 @@ limiter it is not using, the DP's only apply is `Enable`, and the `semSkipIfZero
 semantics the registry records for that binding are unreachable by construction.
 Whether the resulting enforcement is visible anywhere is the second half, and it
 is the half that decides whether an operator can ever find the first.
-**Round complete.** Findings, measurements, the risk matrix and the eighteen
+**Round complete.** Findings, measurements, the risk matrix and the nineteen
 mutation runs are written up in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-06.md)
 and summarised in §61.
@@ -20216,7 +20216,7 @@ WIRE and what the Control Plane RETAINS, not what a node tracks locally.
 
 ## 61. CHAOS-112 — The per-IP connection limiter's configuration plane: a cap nobody configured, that nothing reports
 
-Full write-up, measurements, risk matrix and the eighteen mutation runs:
+Full write-up, measurements, risk matrix and the nineteen mutation runs:
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-06.md).
 
 `conn_limit_enabled` is the one admission surface
