@@ -241,6 +241,11 @@ type signedSAMLFixtureOptions struct {
 	mutateSPMetadata func(*saml.EntityDescriptor)
 	session          *saml.Session
 	assertionMaker   saml.AssertionMaker
+	// mutateAssertionEl, when set, edits the rendered <saml:Assertion> before
+	// the IdP signs the enclosing Response, so the edit is covered by a valid
+	// IdP signature (the Response signature; the assertion is not separately
+	// signed or encrypted on this path).
+	mutateAssertionEl func(t *testing.T, assertion *etree.Element)
 }
 
 func newSignedSAMLFixture(t *testing.T, mutateSPMetadata func(*saml.EntityDescriptor)) signedSAMLFixture {
@@ -311,6 +316,11 @@ func newSignedSAMLFixtureWithSession(t *testing.T, opts signedSAMLFixtureOptions
 	}
 	if err := assertionMaker.MakeAssertion(authnRequest, session); err != nil {
 		t.Fatalf("make assertion: %v", err)
+	}
+	if opts.mutateAssertionEl != nil {
+		assertionEl := authnRequest.Assertion.Element()
+		opts.mutateAssertionEl(t, assertionEl)
+		authnRequest.AssertionEl = assertionEl
 	}
 	if err := authnRequest.MakeResponse(); err != nil {
 		t.Fatalf("make response: %v", err)
