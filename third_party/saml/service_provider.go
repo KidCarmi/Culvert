@@ -1844,8 +1844,25 @@ func elementToBytes(el *etree.Element) ([]byte, error) {
 }
 
 // unmarshalElement serializes el into v by serializing el and then parsing it with xml.Unmarshal.
+//
+// Culvert fork (GO-2026-6909): el is serialized with exactly the namespace
+// bindings in scope at el (etreeutils.NSDetatch), not with elementToBytes'
+// document-wide prefix map, where the last binding of a prefix anywhere in
+// the document wins. That map let an element outside a signed assertion (in an
+// unsigned Response wrapper) rebind a prefix used inside it, so a
+// foreign-namespace NameID still parsed as saml:NameID.
 func unmarshalElement(el *etree.Element, v interface{}) error {
-	buf, err := elementToBytes(el)
+	ctx, err := etreeutils.NSBuildParentContext(el)
+	if err != nil {
+		return err
+	}
+	detached, err := etreeutils.NSDetatch(ctx, el)
+	if err != nil {
+		return err
+	}
+	doc := etree.NewDocument()
+	doc.SetRoot(detached)
+	buf, err := doc.WriteToBytes()
 	if err != nil {
 		return err
 	}

@@ -113,6 +113,39 @@ Tests: `TestGO20266909SubjectNameIDRequiresAssertionNamespace`,
 `TestGO20266909AttributesRequireAssertionNamespace`,
 `TestGO20266909NameIDPrefixDeclaredOnResponse`.
 
+### (c) `unmarshalElement`: serialize with the in-scope namespaces only
+
+`service_provider.go`, `unmarshalElement`. It used `elementToBytes`, which
+copies the element and declares on the copy every `prefix → URI` pair found
+**anywhere in the document** (`FindElements("//*")`, last one wins, in depth
+order). A prefix that is foreign at the NameID could therefore be rebound to
+the SAML namespace by an element elsewhere in the document. That defeated (b).
+
+Attack shape (end to end in
+`TestGO20266909SignedAssertionPrefixRebindingDoesNotSpoofNameID`):
+
+1. The IdP signs only the assertion (exclusive c14n, as `IdentityProvider`
+   does), and the assertion carries a foreign-namespace `p:NameID`. This is the
+   advisory's own precondition.
+2. Whoever relays the unsigned Response (the user's browser in the POST
+   binding) moves `xmlns:p` from the NameID to the Response root. Exclusive
+   c14n renders it on the NameID either way, so the signature still verifies.
+3. The relay adds an element deeper in the document than the NameID that binds
+   `p` to `urn:oasis:names:tc:SAML:2.0:assertion`.
+
+With (a) and (b) only, `ParseXMLResponse` returned
+`Subject.NameID = admin@example.com`. `unmarshalElement` now serializes with
+`etreeutils.NSDetatch(etreeutils.NSBuildParentContext(el), el)`, which is the
+bindings actually in scope at `el`. Descendants keep their own declarations.
+
+The change is limited to the parse path. `elementToBytes` itself is unchanged,
+so the outbound ArtifactResolve SOAP serialization and the `elementToString`
+error text are unaffected. For any assertion whose signature verifies, every
+prefix is declared in scope, because canonicalization fails on an undeclared
+prefix. For those assertions the two serializations bind identically unless a
+prefix is bound differently elsewhere in the document. In that case only the
+new one is correct.
+
 ## Known remaining issues (not patched)
 
 These look questionable but are not shown to be exploitable in the same way.
@@ -128,6 +161,8 @@ They were left unpatched to keep the fork minimal:
   `<x:SubjectConfirmationData>` placed after the real one would replace it
   (last match wins). That could relax audience, recipient or expiry checks
   rather than spoof identity.
+- `elementToBytes` keeps the document-wide prefix map for its two remaining
+  callers (outbound ArtifactResolve, `InvalidResponseError.Response` text).
 
 ## Verification
 

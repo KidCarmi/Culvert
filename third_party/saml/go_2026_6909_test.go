@@ -4,13 +4,21 @@ package saml
 // PATCHES.md. Each test fails (or panics) against unpatched v0.5.1.
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/xml"
+	"math/big"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/beevik/etree"
+	dsig "github.com/russellhaering/goxmldsig"
 )
 
 const go6909IdPEntityID = "https://idp.example.com/metadata"
@@ -280,4 +288,102 @@ func TestGO20266909NameIDPrefixDeclaredOnResponse(t *testing.T) {
 	if got := go6909NameIDValue(&a); got != "alice@example.com" {
 		t.Fatalf("Subject.NameID.Value = %q, want alice@example.com", got)
 	}
+}
+
+// Fix (c): end to end through ParseXMLResponse with a real assertion
+// signature. The IdP signs (exclusive c14n, as IdentityProvider does) an
+// assertion whose Subject holds the real saml:NameID followed by a
+// foreign-namespace p:NameID. The Response wrapper is NOT signed, so whoever
+// relays it (the user's browser in the POST binding) can edit it without
+// breaking the assertion signature. The relay moves the xmlns:p declaration
+// from the NameID to the Response (exclusive c14n renders it on the NameID
+// either way, so the signature still verifies) and adds an element, deeper in
+// the document than the NameID, that binds p to the SAML assertion namespace.
+// unmarshalElement used to serialize the assertion with a document-wide
+// prefix map in which that deeper binding won, so the foreign p:NameID parsed
+// as saml:NameID even with the namespace-qualified struct tag of fix (b).
+func TestGO20266909SignedAssertionPrefixRebindingDoesNotSpoofNameID(t *testing.T) {
+	sp := go6909ServiceProvider(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(6909),
+		Subject:      pkix.Name{CommonName: "go-2026-6909 test IdP"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp.IDPMetadata.IDPSSODescriptors = []IDPSSODescriptor{{SSODescriptor: SSODescriptor{RoleDescriptor: RoleDescriptor{
+		KeyDescriptors: []KeyDescriptor{{Use: "signing", KeyInfo: KeyInfo{X509Data: X509Data{
+			X509Certificates: []X509Certificate{{Data: base64.StdEncoding.EncodeToString(der)}},
+		}}}},
+	}}}}
+
+	now := time.Now()
+	assertionEl := go6909Assertion(sp, now).Element()
+	var subject *etree.Element
+	for _, child := range assertionEl.ChildElements() {
+		if child.Tag == "Subject" {
+			subject = child
+		}
+	}
+	foreign := etree.NewElement("p:NameID")
+	foreign.CreateAttr("xmlns:p", "urn:example:not-saml")
+	foreign.CreateAttr("Format", string(EmailAddressNameIDFormat))
+	foreign.SetText("admin@example.com")
+	subject.InsertChildAt(1, foreign) // right after the real saml:NameID
+
+	signer := dsig.NewDefaultSigningContext(dsig.TLSCertKeyStore(tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}))
+	signer.Canonicalizer = dsig.MakeC14N10ExclusiveCanonicalizerWithPrefixList(canonicalizerPrefixList)
+	signedAssertion, err := signer.SignEnveloped(assertionEl)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	responseEl := (&Response{
+		ID:           "id-response",
+		IssueInstant: now,
+		Version:      "2.0",
+		Destination:  sp.AcsURL.String(),
+		Status:       Status{StatusCode: StatusCode{Value: StatusSuccess}},
+	}).Element()
+	responseEl.AddChild(signedAssertion)
+
+	parse := func(t *testing.T, relayEdits bool) *Assertion {
+		t.Helper()
+		doc := etree.NewDocument()
+		doc.SetRoot(responseEl.Copy())
+		if relayEdits {
+			nameID := doc.Root().FindElement(".//Subject").ChildElements()[1] // the p:NameID
+			nameID.RemoveAttr("xmlns:p")
+			doc.Root().CreateAttr("xmlns:p", "urn:example:not-saml")
+			deep := doc.Root().CreateElement("samlp:Extensions").CreateElement("a").CreateElement("b")
+			deep.CreateElement("p:X").CreateAttr("xmlns:p", go6909AssertionNS)
+		}
+		buf, err := doc.WriteToBytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertion, err := sp.ParseXMLResponse(buf, nil, sp.AcsURL)
+		if err != nil {
+			t.Fatalf("ParseXMLResponse rejected the IdP-signed assertion: %v (%v)", err, err.(*InvalidResponseError).PrivateErr)
+		}
+		return assertion
+	}
+
+	t.Run("as signed", func(t *testing.T) {
+		if got := go6909NameIDValue(parse(t, false)); got != "alice@example.com" {
+			t.Fatalf("Subject.NameID.Value = %q, want alice@example.com", got)
+		}
+	})
+	t.Run("relay rebinds the foreign prefix", func(t *testing.T) {
+		if got := go6909NameIDValue(parse(t, true)); got != "alice@example.com" {
+			t.Fatalf("Subject.NameID.Value = %q, want alice@example.com", got)
+		}
+	})
 }
