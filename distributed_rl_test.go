@@ -95,7 +95,7 @@ func TestRateLimitAggregator_Basics(t *testing.T) {
 	})
 
 	// Exclude node-a: should get node-b counts only.
-	totals := agg.ClusterTotalsExcluding("node-a")
+	totals, _ := agg.ClusterTotalsExcluding("node-a")
 	if totals["1.1.1.1"] != 10 {
 		t.Fatalf("1.1.1.1 excluding node-a = %d, want 10", totals["1.1.1.1"])
 	}
@@ -107,7 +107,7 @@ func TestRateLimitAggregator_Basics(t *testing.T) {
 	}
 
 	// Exclude node-b: should get node-a counts.
-	totals = agg.ClusterTotalsExcluding("node-b")
+	totals, _ = agg.ClusterTotalsExcluding("node-b")
 	if totals["1.1.1.1"] != 30 {
 		t.Fatalf("1.1.1.1 excluding node-b = %d, want 30", totals["1.1.1.1"])
 	}
@@ -133,7 +133,7 @@ func TestRateLimitAggregator_StaleNodePruning(t *testing.T) {
 
 	agg.Update("fresh-node", []RateLimitDelta{{IP: "y.y.y.y", Count: 5}})
 
-	totals := agg.ClusterTotalsExcluding("fresh-node")
+	totals, _ := agg.ClusterTotalsExcluding("fresh-node")
 	if _, ok := totals["x.x.x.x"]; ok {
 		t.Fatal("stale node counts should be pruned")
 	}

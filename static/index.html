@@ -4929,12 +4929,26 @@ Firefox (all platforms):
             <div class="stat-card"><div class="stat-val" id="crl-hot">-</div><div class="stat-label">Hot IPs</div></div>
             <div class="stat-card"><div class="stat-val" id="crl-rpm">-</div><div class="stat-label">Limit (RPM)</div></div>
             <div class="stat-card" title="Fresh-to-stale transitions since this node started — how many separate times the Control Plane broadcast has gone stale, not just whether it is stale right now"><div class="stat-val" id="crl-episodes">-</div><div class="stat-label">Stale Episodes</div></div>
+            <div class="stat-card" title="Hot IPs the MOST RECENT gossip round left out because a leg hit its bound. Rewritten every round, so it clears itself when the hot set fits again. An omitted IP keeps its local rate limit; only the cluster-wide half of its count is not applied"><div class="stat-val" id="crl-omitted-now">-</div><div class="stat-label">Hot IPs Omitted (now)</div></div>
+            <div class="stat-card" title="Hot IPs omitted across every gossip round since this node started, over all three legs (this node's export, what this Control Plane retained per node, and what one broadcast carried). A running total survives recovery, where the gauge beside it does not"><div class="stat-val" id="crl-omitted-total">-</div><div class="stat-label">Hot IPs Omitted (total)</div></div>
           </div>
           <div id="crl-stale-banner" style="display:none;margin-top:12px;padding:10px 12px;border-radius:6px;background:rgba(255,176,32,.12);border:1px solid var(--yellow,#ffb020);color:var(--yellow,#ffb020)">
             <strong>Cluster counts not applied.</strong>
             <span id="crl-stale-detail"></span>
             This node is enforcing its LOCAL rate limit only — other nodes' request counts are ignored until a
             Control Plane broadcast arrives. Rate limits are still enforced; the cluster-wide aggregate is not.
+          </div>
+          <!-- CHAOS-111: the banner above reports a broadcast this node stopped
+               consulting, which reads as a Control Plane outage. This one names
+               the other cause - the hot set outgrew the gossip plane's bounds -
+               because an operator shown only the first looks at CP health and
+               finds a healthy CP. -->
+          <div id="crl-omitted-banner" style="display:none;margin-top:12px;padding:10px 12px;border-radius:6px;background:rgba(255,176,32,.12);border:1px solid var(--yellow,#ffb020);color:var(--yellow,#ffb020)">
+            <strong>Hot-IP set exceeds the gossip bounds.</strong>
+            <span id="crl-omitted-detail"></span>
+            The omitted addresses are the COLDEST and keep their local rate limit; only the cluster-wide half
+            of their count is not applied. A sustained value usually means a distributed flood of distinct
+            source addresses rather than a misconfiguration.
           </div>
         </div>
       </div>
@@ -19100,6 +19114,24 @@ async function loadClusterRateLimits(show) {
     // "has this happened before" signal the API already computes (Episodes) but
     // the panel never rendered — a running total survives recovery.
     document.getElementById('crl-episodes').textContent = r.remote_counts_stale_episodes || 0;
+    // CHAOS-111: the gossip plane's bounds. The "now" value is rewritten every
+    // round including the ones that omit nothing, so it clears itself; the
+    // total is the "has this happened before" signal that survives recovery.
+    const omittedNow = (r.hot_ips_omitted_export || 0) + (r.hot_ips_omitted_ingest || 0)
+      + (r.hot_ips_omitted_broadcast || 0);
+    document.getElementById('crl-omitted-now').textContent = omittedNow;
+    document.getElementById('crl-omitted-total').textContent = r.hot_ips_omitted_total || 0;
+    const omittedBanner = document.getElementById('crl-omitted-banner');
+    if (omittedNow > 0) {
+      omittedBanner.style.display = '';
+      document.getElementById('crl-omitted-detail').textContent =
+        `Most recent round omitted ${omittedNow} hot IP(s) — export ${r.hot_ips_omitted_export || 0} `
+        + `(bound ${r.hot_ips_per_node_bound}), Control Plane ingest ${r.hot_ips_omitted_ingest || 0} `
+        + `(bound ${r.hot_ips_per_node_bound}), broadcast ${r.hot_ips_omitted_broadcast || 0} `
+        + `(bound ${r.hot_ips_broadcast_bound}).`;
+    } else {
+      omittedBanner.style.display = 'none';
+    }
     // CHAOS-61: a stale broadcast is not an error — it is the gate that stops a
     // frozen Control Plane snapshot from denying a client forever — but it IS a
     // degradation of the distributed limit, and a 429 on this node no longer

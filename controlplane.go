@@ -239,10 +239,42 @@ func auditClusterPushUnreportingNodes() int {
 // latest snapshot per node, and on each SyncRateLimits call returns the
 // cluster-wide total minus the requesting node's own counts.
 
+// CHAOS-111 rewrote the read side of this aggregator. Before, every
+// SyncRateLimits call rebuilt the whole fleet total map from scratch while
+// holding mu, so the Control Plane's per-round cost was O(nodes^2 x hot IPs) in
+// a quantity hostile traffic sets — measured at ~277 s of serial work per 5 s
+// round on a 50-node fleet at 50 000 hot IPs each, with a single RPC taking
+// 5.542 s against its own 5 s deadline. One GENERATION is now built at most
+// once per rlTotalsCacheTTL and every node is served from it, so the per-RPC
+// cost is O(maxBroadcastHotIPs) and independent of fleet size. See
+// cluster_ratelimit_budget.go for the bounds and the rest of the measurements.
 type rateLimitAggregator struct {
 	mu       sync.Mutex
 	perNode  map[string]map[string]int // nodeID → {IP → count}
 	expireAt map[string]time.Time      // nodeID → last update time
+	gen      *rlTotalsGeneration       // cached aggregation; nil until first built
+}
+
+// rlTotalsGeneration is one immutable aggregation of the fleet's hot-IP counts.
+//
+// Immutability is what lets a reply be built OUTSIDE the mutex: the maps it
+// holds are never written after publication, and perNode's inner maps are safe
+// to share because Update always installs a freshly built map and never mutates
+// one in place.
+//
+// It records the per-node slots it summed, not the live ones, so a reply's
+// arithmetic is self-consistent: totals minus the requester's contribution AS
+// COUNTED is exactly "every other node's counts", even when that node's slot
+// has since been replaced. Subtracting the CURRENT slot from an older total
+// would over-subtract and silently under-count the cluster — the fail-open
+// direction.
+type rlTotalsGeneration struct {
+	builtAt    time.Time
+	totals     map[string]int            // fleet-wide totals, every live node included
+	perNode    map[string]map[string]int // the slots those totals were summed from
+	candidates []string                  // hottest fleet-wide keys, bounded
+	distinct   int                       // distinct hot IPs across the fleet
+	nodes      int
 }
 
 var globalRLAggregator = &rateLimitAggregator{
@@ -250,26 +282,49 @@ var globalRLAggregator = &rateLimitAggregator{
 	expireAt: map[string]time.Time{},
 }
 
-// Update stores the latest rate limit snapshot from a node.
-func (a *rateLimitAggregator) Update(nodeID string, deltas []RateLimitDelta) {
-	counts := make(map[string]int, len(deltas))
-	for _, d := range deltas {
-		counts[d.IP] = d.Count
+// Update stores the latest rate limit snapshot from a node, retaining at most
+// maxGossipHotIPsPerNode of its hottest IPs, and reports how many it left out.
+//
+// The bound is applied HERE as well as at the sender because the sender is a
+// peer: a node predating the export bound, or an enrolled node behaving badly,
+// would otherwise choose how much heap this Control Plane spends. With it, the
+// aggregator's ceiling is nodes x maxGossipHotIPsPerNode — a function of fleet
+// size rather than of traffic.
+func (a *rateLimitAggregator) Update(nodeID string, deltas []RateLimitDelta) (omitted int) {
+	kept := deltas
+	if len(deltas) > maxGossipHotIPsPerNode {
+		kept, omitted = hottestDeltas(deltas, maxGossipHotIPsPerNode)
+	}
+	counts := make(map[string]int, len(kept))
+	for i := range kept {
+		counts[kept[i].IP] = kept[i].Count
 	}
 	a.mu.Lock()
+	if _, known := a.perNode[nodeID]; !known {
+		// A node this generation has never seen must be visible AT ONCE, not
+		// after up to rlTotalsCacheTTL: an enrolling node contributing nothing
+		// for a second would make the fleet undercount. A node whose slot is
+		// merely refreshed does not invalidate — that is the steady state the
+		// cache exists for.
+		a.gen = nil
+	}
 	a.perNode[nodeID] = counts
 	a.expireAt[nodeID] = time.Now()
 	a.mu.Unlock()
+	return omitted
 }
 
-// ClusterTotalsExcluding returns per-IP totals across all nodes except excludeNode.
-// Stale entries (>2 minutes without update) are pruned.
-func (a *rateLimitAggregator) ClusterTotalsExcluding(excludeNode string) map[string]int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// generation returns the current aggregation, rebuilding it when it has aged
+// past rlTotalsCacheTTL. The caller must hold a.mu.
+func (a *rateLimitAggregator) generation(now time.Time) *rlTotalsGeneration {
+	if a.gen != nil && now.Sub(a.gen.builtAt) < rlTotalsCacheTTL {
+		return a.gen
+	}
 
-	// Prune stale nodes.
-	cutoff := time.Now().Add(-2 * time.Minute)
+	// Prune nodes that have gone quiet. This moved from the old per-RPC read
+	// path into the rebuild; at most rlTotalsCacheTTL of extra grace against an
+	// rlNodeStaleAfter window changes nothing about which nodes count.
+	cutoff := now.Add(-rlNodeStaleAfter)
 	for nid, t := range a.expireAt {
 		if t.Before(cutoff) {
 			delete(a.perNode, nid)
@@ -277,29 +332,126 @@ func (a *rateLimitAggregator) ClusterTotalsExcluding(excludeNode string) map[str
 		}
 	}
 
-	totals := map[string]int{}
+	gen := &rlTotalsGeneration{
+		builtAt: now,
+		totals:  make(map[string]int, len(a.perNode)*8),
+		perNode: make(map[string]map[string]int, len(a.perNode)),
+		nodes:   len(a.perNode),
+	}
 	for nid, counts := range a.perNode {
-		if nid == excludeNode {
-			continue
-		}
+		gen.perNode[nid] = counts // immutable once installed by Update
 		for ip, count := range counts {
-			totals[ip] += count
+			gen.totals[ip] += count
 		}
 	}
-	return totals
+	gen.distinct = len(gen.totals)
+	gen.candidates = hottestKeys(gen.totals, maxBroadcastHotIPs*rlBroadcastCandidateFactor)
+	a.gen = gen
+	rlTrackedIPsNow.Store(int64(gen.distinct))
+	return gen
 }
 
-// Stats returns the number of tracked nodes and total hot IPs.
+// ClusterTotalsExcluding returns per-IP totals across all nodes except
+// excludeNode, bounded to maxBroadcastHotIPs entries, and reports how many of
+// the fleet's tracked hot IPs the reply does not carry.
+//
+// The reply is built in two passes, and the order is the point:
+//
+//  1. Every hot IP THIS node reported in its LATEST gossip. These are the
+//     addresses whose next verdict on this node needs the cluster-wide sum, so
+//     a node never loses the cluster view for traffic it is actually handling
+//     — the guarantee that makes bounding this leg safe, and the counterpart of
+//     "an omitted export keeps its local limit" on the other leg. Bounded by
+//     the ingest bound, so this pass can never fill the reply on its own.
+//     Selection reads the live slot, not the generation's: a cached generation
+//     can predate the report, and a newly hot IP ranked below the cached fleet
+//     candidates would otherwise be dropped.
+//  2. The fleet's hottest remaining addresses, from the generation's cached
+//     candidate ranking. These are traffic this node has not seen yet but may,
+//     and the hottest are the ones whose cluster sum is nearest the limit.
+//
+// When the fleet's hot set fits the bounds — every deployment not under a
+// distinct-address flood — the reply's CONTENTS are what they were before
+// CHAOS-111: every IP with a positive count from another node, and nothing
+// else. The omission count is then exactly zero, which is the property that
+// says the bound has not changed ordinary behaviour.
+func (a *rateLimitAggregator) ClusterTotalsExcluding(excludeNode string) (remote map[string]int, omitted int) {
+	a.mu.Lock()
+	gen := a.generation(time.Now())
+	// The requester's latest slot, for SELECTION only. Update installs a fresh
+	// map and never mutates one in place, so it is safe to read unlocked.
+	latest := a.perNode[excludeNode]
+	a.mu.Unlock()
+
+	// gen is immutable, so the reply is built WITHOUT the mutex. This is the
+	// other half of the fix: the old code held mu across the whole rebuild, so
+	// every node's ingest queued behind every other node's aggregation.
+	//
+	// own is the slot the generation SUMMED, and it is what every count below
+	// subtracts: gen.totals minus own is exactly "every other node's counts"
+	// in that generation. Subtracting latest instead would over-subtract
+	// whenever the requester's counts grew since the build (fail-open).
+	own := gen.perNode[excludeNode]
+	totals := make(map[string]int, min(gen.distinct, maxBroadcastHotIPs))
+
+	// Pass 1: the requester's own hot set, as it LATEST reported it. An IP
+	// newer than the generation has no requester contribution in gen.totals
+	// (own[ip] is zero), so its remainder is the peers' counts. Absent from the
+	// reply is exactly what the pre-fix code produced for an IP no OTHER node
+	// reported, and FreshCount reads a missing IP as zero.
+	latestTracked := 0 // requester IPs the generation tracks (part of gen.distinct)
+	for ip := range latest {
+		total, tracked := gen.totals[ip]
+		if !tracked {
+			continue
+		}
+		latestTracked++
+		if count := total - own[ip]; count > 0 {
+			totals[ip] = count
+		}
+	}
+
+	// Pass 2: fill the remaining budget with the fleet's hottest.
+	skipped := 0
+	latestCandidates := 0 // requester IPs that are also ranked candidates
+	for _, ip := range gen.candidates {
+		if _, mine := latest[ip]; mine {
+			latestCandidates++
+		}
+		if _, have := totals[ip]; have {
+			continue
+		}
+		count := gen.totals[ip] - own[ip]
+		if count <= 0 {
+			continue
+		}
+		if len(totals) >= maxBroadcastHotIPs {
+			skipped++
+			continue
+		}
+		totals[ip] = count
+	}
+	// The tail beyond the candidates is omitted, except the requester's own
+	// tracked IPs in it: pass 1 already returned those with a positive
+	// remainder, and those without one have nothing to send. Counting them
+	// overstated lost coverage in the omission gauge and counter.
+	tail := gen.distinct - len(gen.candidates) - (latestTracked - latestCandidates)
+	return totals, skipped + tail
+}
+
+// Stats returns the number of tracked nodes and total hot IPs, read from the
+// current generation.
+//
+// It used to walk every node's map into a fresh set while holding mu — 1.736 s
+// at 50 nodes x 50 000 IPs, from the viewer-gated GET /api/cluster/rate-limits,
+// so an operator refreshing the panel that REPORTS the overload competed with
+// the data path's own gossip ingest for the same lock. The generation already
+// knows both numbers.
 func (a *rateLimitAggregator) Stats() (nodes int, hotIPs int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	seen := map[string]bool{}
-	for _, counts := range a.perNode {
-		for ip := range counts {
-			seen[ip] = true
-		}
-	}
-	return len(a.perNode), len(seen)
+	gen := a.generation(time.Now())
+	return gen.nodes, gen.distinct
 }
 
 // ─── Distributed session revocation aggregation ─────────────────────────────

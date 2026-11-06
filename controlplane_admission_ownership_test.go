@@ -134,8 +134,11 @@ func TestDistributedAdmission_ProductionWiring(t *testing.T) {
 		}
 	})
 	awaitAdmissionBroadcast(t, r)
-	if got := globalRLAggregator.ClusterTotalsExcluding("remote")[ip]; got != 6 {
-		t.Fatalf("gossip exported %d local requests, want 6", got)
+	if totals, _ := globalRLAggregator.ClusterTotalsExcluding("remote"); totals[ip] != 6 {
+		t.Fatalf("gossip exported %v local requests, want 6", func() any {
+			totals, _ := globalRLAggregator.ClusterTotalsExcluding("remote")
+			return totals[ip]
+		}())
 	}
 	if r.AllowAuto(ip) {
 		t.Fatal("6 local + 2 remote did not deny at snapshot limit 8")

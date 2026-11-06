@@ -52,6 +52,63 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `Extra` and no source bytes in a pool slot. Full findings, including the
   reported-not-fixed 5 s refusal stall and the absent operator control for the
   DPI cap, are in `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-05.md`.
+- **Distributed rate limiting could be switched off by the flood it exists to
+  stop, which handed an attacker N times the configured limit on an N-node
+  fleet (CHAOS-111).** `SyncRateLimits` is the one CP↔DP RPC whose body is sized
+  by hostile traffic: it carries one entry per "hot" IP, and an IP is hot at 50%
+  of the configured limit with a FLOOR OF ONE — so at a tight limit (1-3 per
+  window) every distinct source address seen in the window was exported, for one
+  request each. Nothing bounded the export, what the Control Plane retained per
+  node, the reply, or the work either side did per round, and the fleet total
+  map was rebuilt INSIDE EVERY CALL under one global mutex. Measured on a
+  50-node fleet at 50 000 distinct hot IPs per node: one RPC took 5.542 s
+  against its own 5 s deadline (1.844 s aggregating, 3.698 s marshalling a
+  2.45 M-entry, 57.3 MiB reply), so a round owed ~277 s of serial work against
+  the 5 s gossip interval — a 55x oversubscription that cannot drain while the
+  traffic continues, because the work scales with what the traffic sets. The end
+  state is a SECURITY failure, not only an availability one: a timed-out sync
+  never reaches `ApplyRemoteCounts`, the broadcast ages out, and CHAOS-61
+  deliberately stops consulting an expired broadcast — so every node degrades to
+  LOCAL limiting. Measured: a limit of 10 with no broadcast admitted 500
+  requests across 50 nodes, 50x the limit. The Control Plane also retained
+  164.2 MiB of attacker-keyed reachable heap at 50 x 100 000 (pruned only when a
+  NODE goes quiet for two minutes, never by cardinality), and `Stats()` walked
+  every node's map under the same mutex — 1.736 s from the viewer-gated
+  `GET /api/cluster/rate-limits`, so the panel that REPORTS the overload
+  competed with the data path's ingest. The only operator signal was CHAOS-61's
+  freshness `WARN`, which names an OUTAGE rather than an overload.
+  **Fixed with four bounds and one cached generation.** The export is capped at
+  `MaxExportedHotIPs` hottest first (`internal/admission`); the Control Plane
+  applies the same bound on INGEST, because a peer must not choose how much heap
+  it spends; one aggregation generation now serves every node for
+  `rlTotalsCacheTTL` and the reply is built OUTSIDE the mutex, making the
+  per-RPC cost independent of fleet size; and the reply is bounded at
+  `maxBroadcastHotIPs`, built own-set first then filled from the fleet's
+  hottest. Measured after: a 50-node round costs 636 ms against the 5 s
+  interval, 12.7 ms per call against its 5 s deadline. **No new fail-open path
+  exists** — every bound replaces a state in which the plane carried nothing at
+  all — and two guarantees carry the safety argument: an omitted export keeps
+  its LOCAL limit (`AllowClusterAware` sums local + remote), and a requester
+  always receives the cluster sum for every hot IP it reported itself, so a node
+  never loses the cluster view for traffic it is handling. This plane
+  deliberately DIVERGES from AU-50's revocation budget: counts are
+  replace-semantics inside a seconds-long window, so rotating a backlog would
+  make an IP's total oscillate between counted and zero every tick, and
+  truncation by hotness is the correct shape. The wire schemas are unchanged, so
+  a mixed-version fleet interoperates in both directions. Surfaced on
+  `culvert_cluster_ratelimit_hot_ips_omitted_total{leg}` (magnitude),
+  `culvert_cluster_ratelimit_hot_ips_omitted{leg}` (present tense, rewritten
+  every round including the clean ones, which is what clears it),
+  `culvert_cluster_ratelimit_tracked_ips`, six new
+  `GET /api/cluster/rate-limits` fields and two admin-UI tiles with a banner
+  that names the other cause beside the stale-broadcast one; one `WARN` per
+  minute at most, never per round. **The root cause is a precedent cited and not
+  applied:** AU-50 budgeted `SyncRevocations` below `maxClusterInboundMsgSize`
+  and wrote the rule into that constant's own doc — *a new inbound RPC whose
+  body can grow must be budgeted the same way* — while `SyncRateLimits` stayed
+  named in the same comment's "all tiny" list four lines above. Closes the
+  2026-10-13 backlog's `X-6`. An ALERT is deliberately left open and attributed;
+  see §8.1 of the dated review.
 - **GO-2026-6909: SAML login no longer takes the identity or groups from a
   foreign-namespace element, and a malformed signed assertion is rejected
   instead of panicking. The fix is a patched fork of `github.com/crewjam/saml`,

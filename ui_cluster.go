@@ -437,6 +437,19 @@ func apiClusterRateLimits(w http.ResponseWriter, r *http.Request) {
 		"remote_counts_max_age_secs":   crl.MaxAge.Seconds(),
 		"remote_counts_applied":        crl.Applied,
 		"remote_counts_stale_episodes": crl.Episodes,
+		// CHAOS-111: both legs of the gossip plane are bounded. These say
+		// whether a bound is CURRENTLY biting (the gauges, rewritten every
+		// round so they clear themselves) and how much it has ever left out
+		// (the totals). A non-zero "now" value means some hot IPs are being
+		// limited locally only, which is a narrowing of this control — and
+		// the pre-CHAOS-111 alternative was the whole plane failing.
+		"hot_ips_per_node_bound":    maxGossipHotIPsPerNode,
+		"hot_ips_broadcast_bound":   maxBroadcastHotIPs,
+		"hot_ips_omitted_export":    rlExportOmittedNow.Load(),
+		"hot_ips_omitted_ingest":    rlIngestOmittedNow.Load(),
+		"hot_ips_omitted_broadcast": rlBroadcastOmittedNow.Load(),
+		"hot_ips_omitted_total": rlExportOmittedTotal.Load() +
+			rlIngestOmittedTotal.Load() + rlBroadcastOmittedTotal.Load(),
 	}
 	if crl.Applied {
 		body["remote_counts_age_secs"] = crl.Age.Seconds()

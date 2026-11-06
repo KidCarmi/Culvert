@@ -1198,25 +1198,61 @@ func (c *clusterCountStore) Count() int {
 	return len(c.counts)
 }
 
+// MaxExportedHotIPs bounds how many hot IPs ONE gossip export carries
+// (CHAOS-111).
+//
+// The export's length is chosen by TRAFFIC, not by the operator: an IP
+// qualifies at HotThresholdPercent of the limit, and at a tight configured
+// limit that threshold clamps to ONE request, so every distinct source address
+// seen in the window is exported. That made the hot-IP gossip plane the one
+// cluster RPC an attacker could size, and the measured consequence was not a
+// large message — it was the plane switching itself off (a 5 s RPC deadline
+// blown by the Control Plane's own aggregation) and every node falling back to
+// LOCAL limiting, which hands a distributed flood N times the configured limit
+// on an N-node fleet. See cluster_ratelimit_budget.go in package main for the
+// other three bounds and the measurements.
+//
+// 4096 is far above any legitimate hot set — an IP is "hot" only at half the
+// configured limit, which healthy clients do not reach in numbers — and keeps
+// the export at ~128-230 KiB, two orders of magnitude inside the 16 MiB
+// inbound frame. It bites only under the flood.
+const MaxExportedHotIPs = 4096
+
 // ExportHotDeltas returns current in-window counts for IPs at or above
-// HotThresholdPercent of the configured limit. It expires old timestamps but does
-// not reset counts: repeated exports without new requests return the same count.
+// HotThresholdPercent of the configured limit, bounded to MaxExportedHotIPs
+// hottest. It expires old timestamps but does not reset counts: repeated
+// exports without new requests return the same count.
 func (r *RateLimiter) ExportHotDeltas() []HotCount {
+	deltas, _ := r.ExportHotDeltasCapped(MaxExportedHotIPs)
+	return deltas
+}
+
+// ExportHotDeltasCapped is ExportHotDeltas with the bound supplied, reporting
+// how many qualifying IPs it left out so the caller can count and surface the
+// degradation. A limit of zero or less means unbounded and is for tests only;
+// production goes through ExportHotDeltas.
+//
+// Selection is HOTTEST FIRST, because the cluster-wide sum only changes a
+// verdict for IPs near the limit: an IP omitted here keeps its LOCAL count and
+// stays locally rate limited, so an omission narrows one address from
+// cluster-aware to local. That is the whole safety argument for truncating
+// rather than failing — the pre-CHAOS-111 behaviour failed the RPC, which
+// narrowed EVERY address on EVERY node at once.
+func (r *RateLimiter) ExportHotDeltasCapped(limit int) (deltas []HotCount, omitted int) {
 	if !r.enabled.Load() {
-		return nil
+		return nil, 0
 	}
-	limit := int(r.limit.Load())
-	if limit <= 0 {
-		return nil
+	rateLimit := int(r.limit.Load())
+	if rateLimit <= 0 {
+		return nil, 0
 	}
-	threshold := limit * HotThresholdPercent / 100
+	threshold := rateLimit * HotThresholdPercent / 100
 	if threshold < 1 {
 		threshold = 1
 	}
-	window := time.Duration(r.window.Load())
-	cutoff := time.Now().Add(-window)
+	cutoff := time.Now().Add(-time.Duration(r.window.Load()))
 
-	var deltas []HotCount
+	sel := NewHotSelector(limit)
 	for i := range r.shards {
 		s := &r.shards[i]
 		s.mu.Lock()
@@ -1226,14 +1262,102 @@ func (r *RateLimiter) ExportHotDeltas() []HotCount {
 			// expired stamp was never counted) and leaves less for the next
 			// Allow to walk.
 			b.expire(cutoff)
-			count := b.n
-			if count >= threshold {
-				deltas = append(deltas, HotCount{IP: ip, Count: count})
+			if count := b.n; count >= threshold {
+				sel.Offer(HotCount{IP: ip, Count: count})
 			}
 		}
 		s.mu.Unlock()
 	}
-	return deltas
+	return sel.Result()
+}
+
+// HotSelector keeps the N hottest HotCounts out of an arbitrarily long stream
+// in O(stream x log N) time and O(N) space, which is what lets the export stay
+// bounded WITHOUT first materialising every qualifying IP (the quantity under
+// attacker control) or sorting it.
+//
+// It is a bounded MIN-heap: the root is the coldest entry held, so an arriving
+// entry is compared against the one it would displace. Ties break on IP so the
+// chosen set depends only on the data, never on map iteration order — a gate
+// asserting WHICH entries ride must not be flaky.
+type HotSelector struct {
+	limit int
+	heap  []HotCount // min-heap by hotLess when limit > 0; a plain list otherwise
+	seen  int
+}
+
+// NewHotSelector returns a selector holding at most limit entries. A limit of
+// zero or less means unbounded.
+func NewHotSelector(limit int) *HotSelector {
+	s := &HotSelector{limit: limit}
+	if limit > 0 {
+		s.heap = make([]HotCount, 0, limit)
+	}
+	return s
+}
+
+// hotLess orders COLDEST first: lower count, then higher IP. The heap root is
+// therefore the entry an incoming hotter one should replace.
+func hotLess(a, b HotCount) bool {
+	if a.Count != b.Count {
+		return a.Count < b.Count
+	}
+	return a.IP > b.IP
+}
+
+// Offer presents one entry to the selector.
+func (s *HotSelector) Offer(h HotCount) {
+	s.seen++
+	if s.limit <= 0 {
+		s.heap = append(s.heap, h)
+		return
+	}
+	if len(s.heap) < s.limit {
+		s.heap = append(s.heap, h)
+		s.up(len(s.heap) - 1)
+		return
+	}
+	if hotLess(s.heap[0], h) {
+		s.heap[0] = h
+		s.down(0)
+	}
+}
+
+// Result returns the held entries HOTTEST first and how many were left out.
+func (s *HotSelector) Result() (kept []HotCount, omitted int) {
+	if len(s.heap) == 0 {
+		return nil, 0
+	}
+	out := s.heap
+	sort.Slice(out, func(i, j int) bool { return hotLess(out[j], out[i]) })
+	return out, s.seen - len(out)
+}
+
+func (s *HotSelector) up(i int) {
+	for i > 0 {
+		parent := (i - 1) / 2
+		if !hotLess(s.heap[i], s.heap[parent]) {
+			return
+		}
+		s.heap[i], s.heap[parent] = s.heap[parent], s.heap[i]
+		i = parent
+	}
+}
+
+func (s *HotSelector) down(i int) {
+	for {
+		smallest := i
+		for _, child := range [2]int{2*i + 1, 2*i + 2} {
+			if child < len(s.heap) && hotLess(s.heap[child], s.heap[smallest]) {
+				smallest = child
+			}
+		}
+		if smallest == i {
+			return
+		}
+		s.heap[i], s.heap[smallest] = s.heap[smallest], s.heap[i]
+		i = smallest
+	}
 }
 
 // SetClusterEnabled selects distributed admission without clearing local history,
