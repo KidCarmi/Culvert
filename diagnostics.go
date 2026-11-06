@@ -264,6 +264,9 @@ func buildOperatorContract() OperatorContract {
 	// Admin UI serving certificate expiring/expired, or an uploaded pair that is
 	// corrupt. Contributes nothing for the self-signed fallback or a healthy cert.
 	checks = append(checks, checkAdminUITLSCert()...)
+	// Remote blocklist feeds whose latest sync failed. Contributes nothing when
+	// no feed is configured or every feed's latest attempt succeeded.
+	checks = append(checks, checkBlocklistFeeds()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
