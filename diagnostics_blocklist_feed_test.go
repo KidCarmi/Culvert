@@ -22,9 +22,9 @@ func TestCheckBlocklistFeeds(t *testing.T) {
 
 	// A loopback URL is refused by the outbound guard, so the attempt fails
 	// without any network access and records a LastError.
-	const secretURL = "http://127.0.0.1:1/token-abc123.txt"
-	blFeedSyncer.SetFeed(secretURL, time.Hour)
-	if _, err := blFeedSyncer.SyncFeed(secretURL); err == nil {
+	const leakProbeURL = "http://127.0.0.1:1/token-abc123.txt"
+	blFeedSyncer.SetFeed(leakProbeURL, time.Hour)
+	if _, err := blFeedSyncer.SyncFeed(leakProbeURL); err == nil {
 		t.Fatal("expected the loopback feed sync to fail")
 	}
 	rows := checkBlocklistFeeds()
