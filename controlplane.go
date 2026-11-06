@@ -357,12 +357,15 @@ func (a *rateLimitAggregator) generation(now time.Time) *rlTotalsGeneration {
 //
 // The reply is built in two passes, and the order is the point:
 //
-//  1. Every hot IP THIS node reported. These are the addresses whose next
-//     verdict on this node needs the cluster-wide sum, so a node never loses
-//     the cluster view for traffic it is actually handling — the guarantee that
-//     makes bounding this leg safe, and the counterpart of "an omitted export
-//     keeps its local limit" on the other leg. Bounded by the node's own export
-//     bound, so this pass can never fill the reply on its own.
+//  1. Every hot IP THIS node reported in its LATEST gossip. These are the
+//     addresses whose next verdict on this node needs the cluster-wide sum, so
+//     a node never loses the cluster view for traffic it is actually handling
+//     — the guarantee that makes bounding this leg safe, and the counterpart of
+//     "an omitted export keeps its local limit" on the other leg. Bounded by
+//     the ingest bound, so this pass can never fill the reply on its own.
+//     Selection reads the live slot, not the generation's: a cached generation
+//     can predate the report, and a newly hot IP ranked below the cached fleet
+//     candidates would otherwise be dropped.
 //  2. The fleet's hottest remaining addresses, from the generation's cached
 //     candidate ranking. These are traffic this node has not seen yet but may,
 //     and the hottest are the ones whose cluster sum is nearest the limit.
@@ -375,18 +378,28 @@ func (a *rateLimitAggregator) generation(now time.Time) *rlTotalsGeneration {
 func (a *rateLimitAggregator) ClusterTotalsExcluding(excludeNode string) (remote map[string]int, omitted int) {
 	a.mu.Lock()
 	gen := a.generation(time.Now())
+	// The requester's latest slot, for SELECTION only. Update installs a fresh
+	// map and never mutates one in place, so it is safe to read unlocked.
+	latest := a.perNode[excludeNode]
 	a.mu.Unlock()
 
 	// gen is immutable, so the reply is built WITHOUT the mutex. This is the
 	// other half of the fix: the old code held mu across the whole rebuild, so
 	// every node's ingest queued behind every other node's aggregation.
+	//
+	// own is the slot the generation SUMMED, and it is what every count below
+	// subtracts: gen.totals minus own is exactly "every other node's counts"
+	// in that generation. Subtracting latest instead would over-subtract
+	// whenever the requester's counts grew since the build (fail-open).
 	own := gen.perNode[excludeNode]
 	totals := make(map[string]int, min(gen.distinct, maxBroadcastHotIPs))
 
-	// Pass 1: the requester's own hot set. Absent from the reply is exactly
-	// what the pre-fix code produced for an IP no OTHER node reported, and
-	// FreshCount reads a missing IP as zero.
-	for ip := range own {
+	// Pass 1: the requester's own hot set, as it LATEST reported it. An IP
+	// newer than the generation has no requester contribution in gen.totals
+	// (own[ip] is zero), so its remainder is the peers' counts. Absent from the
+	// reply is exactly what the pre-fix code produced for an IP no OTHER node
+	// reported, and FreshCount reads a missing IP as zero.
+	for ip := range latest {
 		if count := gen.totals[ip] - own[ip]; count > 0 {
 			totals[ip] = count
 		}

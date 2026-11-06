@@ -623,3 +623,83 @@ func TestCHAOS111_TheBoundsRelationThatMakesPassOneSafe(t *testing.T) {
 			"serves rounds it has no data for", rlTotalsCacheTTL, rlGossipInterval)
 	}
 }
+
+// TestCHAOS111_ANewlyReportedOwnIPGetsItsClusterSumInsideACachedGeneration
+// pins the own-hot-set guarantee across the cache: an existing node that
+// reports a NEW hot IP while the cached generation still holds its PREVIOUS
+// slot must receive the cluster sum for that IP, even when it ranks below every
+// cached fleet candidate. Pass 1 must select from the requester's LATEST keys,
+// while still subtracting the slot the generation summed (an IP absent from
+// that slot contributes nothing of the requester's own to gen.totals, so the
+// remainder is exactly the peers' counts).
+//
+// Pre-fix, selection came from the generation's slot, so the new IP was not
+// prioritized and, with 20,480 hotter fleet addresses filling the candidate
+// ranking, it was dropped: a remote count of zero for an address the node is
+// handling, i.e. a successful broadcast that silently lost cluster enforcement
+// for it until the next rebuild.
+func TestCHAOS111_ANewlyReportedOwnIPGetsItsClusterSumInsideACachedGeneration(t *testing.T) {
+	resetCHAOS111Accounting(t)
+	agg := newTestRLAggregator()
+
+	const (
+		requester = "dp-existing"
+		newIP     = "198.51.100.250"
+	)
+	// The requester's PREVIOUS hot set, which the generation will hold.
+	agg.Update(requester, []RateLimitDelta{{IP: "198.51.100.1", Count: 3}})
+	// A peer already counting the address the requester is about to report.
+	agg.Update("dp-peer", []RateLimitDelta{{IP: newIP, Count: 2}})
+	// 20,480 fleet addresses, every one hotter than newIP, so the cached
+	// candidate ranking (maxBroadcastHotIPs*rlBroadcastCandidateFactor) cannot
+	// reach it.
+	const floodNodes = 5
+	for n := range floodNodes {
+		agg.Update(fmt.Sprintf("dp-flood-%02d", n), hotFixture(n, maxGossipHotIPsPerNode, 9000))
+	}
+	if got := floodNodes * maxGossipHotIPsPerNode; got != 20_480 || got <= maxBroadcastHotIPs*rlBroadcastCandidateFactor {
+		t.Fatalf("fixture: %d flood addresses must be 20,480 and exceed the %d cached candidates",
+			got, maxBroadcastHotIPs*rlBroadcastCandidateFactor)
+	}
+
+	// Build the generation with the requester's previous slot.
+	agg.ClusterTotalsExcluding(requester)
+
+	// The requester reports newIP. It is a KNOWN node, so the cached
+	// generation deliberately survives the update.
+	agg.Update(requester, []RateLimitDelta{{IP: "198.51.100.1", Count: 3}, {IP: newIP, Count: 3}})
+	agg.mu.Lock()
+	gen := agg.gen
+	if gen == nil {
+		agg.mu.Unlock()
+		t.Fatal("fixture: a known node's update invalidated the generation, so this gate does not exercise the cache")
+	}
+	if _, inGen := gen.perNode[requester][newIP]; inGen {
+		agg.mu.Unlock()
+		t.Fatal("fixture: the generation already holds the requester's new slot")
+	}
+	// Pin the generation inside its TTL so a slow (race/coverage) runner
+	// cannot rebuild it and pass this gate without exercising the cache.
+	gen.builtAt = time.Now()
+	agg.mu.Unlock()
+
+	totals, _ := agg.ClusterTotalsExcluding(requester)
+	agg.mu.Lock()
+	served := agg.gen
+	agg.mu.Unlock()
+	if served != gen {
+		t.Fatal("fixture: the reply was served from a rebuilt generation, not the cached one")
+	}
+	if totals[newIP] != 2 {
+		t.Fatalf("%s = %d in the requester's reply, want the peer's count 2: a hot IP the requester reported "+
+			"must carry its cluster sum even when the cached generation predates that report", newIP, totals[newIP])
+	}
+	// The generation's own slot is still what is subtracted: the requester's
+	// previously reported IP has no peer count, so it must stay absent.
+	if c, ok := totals["198.51.100.1"]; ok {
+		t.Fatalf("198.51.100.1 = %d in the requester's reply; only the requester reported it", c)
+	}
+	if len(totals) > maxBroadcastHotIPs {
+		t.Fatalf("reply carried %d entries, over the bound %d", len(totals), maxBroadcastHotIPs)
+	}
+}
