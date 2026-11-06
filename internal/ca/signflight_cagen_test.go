@@ -142,10 +142,22 @@ func TestCAGeneration_ReplacementRetiresTheGeneration(t *testing.T) {
 
 // TestCAGeneration_EveryCacheResetRetiresTheGeneration is STRUCTURAL, and it is
 // the gate that survives contact with future changes: a new CA-install path
-// that clears the cache by open-coding the map assignment would silently
-// reintroduce both defects above, and no behavioural test would name it. So
-// require that the ONLY place assigning cm.cache a fresh map is
-// resetLeafCacheLocked, which bumps the generation in the same breath.
+// that clears the leaf cache in place would silently reintroduce both defects
+// above, and no behavioural test would name it. So require that the ONLY place
+// that wholesale-resets cm.cache is resetLeafCacheLocked, which bumps the
+// generation in the same breath.
+//
+// Two shapes count as a wholesale reset, so that this gate cannot be stepped
+// around by changing the cache's TYPE (it has already changed once: the map
+// became a sync.Map so the GetCert hit path could read it without taking the
+// manager-wide RWMutex):
+//
+//   - cm.cache.Clear() — the sync.Map form in use today.
+//   - any assignment to cm.cache — the plain-map form, kept so a revert to
+//     `cm.cache = map[string]*certCacheEntry{}` is caught too.
+//
+// Per-host Store/Delete are deliberately NOT reset shapes: storeLeaf's insert
+// and its LRU eviction remove individual entries and must not retire the CA.
 //
 // Deterministic on any hardware, under any load, with or without -race.
 func TestCAGeneration_EveryCacheResetRetiresTheGeneration(t *testing.T) {
@@ -154,24 +166,40 @@ func TestCAGeneration_EveryCacheResetRetiresTheGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse ca.go: %v", err)
 	}
+	// isCacheSel reports whether e is the selector `<x>.cache`.
+	isCacheSel := func(e ast.Expr) bool {
+		sel, ok := e.(*ast.SelectorExpr)
+		return ok && sel.Sel.Name == "cache"
+	}
 	var offenders []string
+	resets := 0
 	var enclosing string
 	ast.Inspect(f, func(n ast.Node) bool {
 		if fd, ok := n.(*ast.FuncDecl); ok {
 			enclosing = fd.Name.Name
 			return true
 		}
-		as, ok := n.(*ast.AssignStmt)
-		if !ok || len(as.Lhs) != 1 {
-			return true
-		}
-		sel, ok := as.Lhs[0].(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "cache" {
+		var pos token.Pos
+		switch node := n.(type) {
+		case *ast.AssignStmt:
+			if len(node.Lhs) != 1 || !isCacheSel(node.Lhs[0]) {
+				return true
+			}
+			pos = node.Pos()
+		case *ast.CallExpr:
+			sel, ok := node.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Clear" || !isCacheSel(sel.X) {
+				return true
+			}
+			pos = node.Pos()
+		default:
 			return true
 		}
 		if enclosing != "resetLeafCacheLocked" {
-			offenders = append(offenders, enclosing+" ("+fset.Position(as.Pos()).String()+")")
+			offenders = append(offenders, enclosing+" ("+fset.Position(pos).String()+")")
+			return true
 		}
+		resets++
 		return true
 	})
 	if len(offenders) > 0 {
@@ -179,8 +207,10 @@ func TestCAGeneration_EveryCacheResetRetiresTheGeneration(t *testing.T) {
 			"Use resetLeafCacheLocked() — clearing the cache alone lets an in-flight sign started "+
 			"against the outgoing CA be joined by post-replacement callers and repopulate the cache.", offenders)
 	}
-	// Not vacuous: the one legitimate assignment must be found.
-	if enclosing == "" {
-		t.Fatal("the AST walk matched nothing; this gate is not checking what it claims")
+	// Not vacuous: the one legitimate reset must actually have been found, or
+	// this gate passes on a tree where the shape it looks for no longer exists.
+	if resets != 1 {
+		t.Fatalf("found %d wholesale leaf-cache resets inside resetLeafCacheLocked, want exactly 1 — "+
+			"the cache reset has changed shape and this gate is no longer checking what it claims", resets)
 	}
 }

@@ -9,6 +9,49 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The DPI engine's new saturation lead indicator fired at no load on a
+  single-vCPU node, and a status-map comment named the wrong trust boundary.**
+  `approachingCheck` truncated its 80% threshold DOWN, so on the two-slot gate
+  `defaultMaxInflight`'s `inflightFloor` gives a `GOMAXPROCS=1` container the
+  threshold was `2*80/100 == 1` — one ordinary scan. Such a node logged
+  "DPI: approaching saturation: 1 of 2 in-flight scan workers" every
+  `saturationLogInterval` forever, at zero load. That line is the lead indicator
+  for the CHAOS-110 gate's fail-closed refusal, so an operator who learns to
+  ignore it loses the only warning they get before clean content starts being
+  blocked uninspected. The threshold now rounds UP and is clamped to the cap
+  (1→1, 2→2, 3→3, 8→7, 64→52): the two- and three-slot gates warn only at the
+  cap, which is the honest threshold where there is no lead time to be had, and
+  every larger gate keeps its lead. Strictly more conservative than the previous
+  form at every cap, so it cannot introduce a warning anywhere, and it changes a
+  log trigger only — no scan verdict moves. Separately, the comment introduced
+  with the new `dpi_*` rows in `secScanStatusMap` claimed a "Role-gated surface".
+  That holds for `apiSecScanStatus`, which carries
+  `requireRole(w, r, RoleViewer)`, but the OPTIONAL scan sidecar
+  (`-scan-svc-listen`) serves the same map unauthenticated from
+  `ScanService.handleStatus`, as its own header documents. The comment now names
+  both surfaces; no role check was added to the sidecar, because that would
+  change a deliberate, documented, opt-in trust model. Two new test files pin
+  what the gate COSTS and what the pooled decompressors must never do:
+  `internal/scanner/inflight_cost_test.go` measures the refusal stall (a refused
+  scan waits the FULL budget before failing closed) and the wait-then-win
+  ceiling, holds slot conservation across repeated abandonment, confirms a
+  gateway with no DPI patterns never reaches the gate, and tables the threshold
+  above with a negative control against the truncating form;
+  `internal/secscan/decompress_pool_leak_test.go` is the negative control the
+  pooled scan-path decoders needed — a pooled `compress/flate` decompressor keeps
+  a 32 KiB history window between responses, and on a gateway consecutive
+  responses through one pool slot belong to different users, so a hostile body
+  built with `flate.NewWriterDict` (whose back-references reach BEFORE its own
+  start, with no dictionary negotiation in `Content-Encoding: deflate` to have
+  supplied one) is tried against both arms over 200 interleaved rounds and must
+  never return the prior response's canary. It does not: the guarantee is
+  `compress/flate`'s own `dist > histSize()` check with `histSize()` counting
+  only what the current stream wrote, which lives in the toolchain rather than
+  here and is therefore now asserted rather than reasoned about. The companion
+  case pins that `release()` leaves no origin-supplied gzip `Name`/`Comment`/
+  `Extra` and no source bytes in a pool slot. Full findings, including the
+  reported-not-fixed 5 s refusal stall and the absent operator control for the
+  DPI cap, are in `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-05.md`.
 - **Distributed rate limiting could be switched off by the flood it exists to
   stop, which handed an attacker N times the configured limit on an N-node
   fleet (CHAOS-111).** `SyncRateLimits` is the one CP↔DP RPC whose body is sized
@@ -230,6 +273,71 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The leaf-certificate cache hit path no longer takes the process-wide CA
+  lock, and no longer allocates.** `ca.Manager.GetCert` is the
+  `tls.Config.GetCertificate` callback for every SSL-inspected CONNECT, so its
+  cache-hit path runs once per inspected connection and is ~all of production
+  on a warm gateway. It read the leaf cache under `mu.RLock`, on the usual
+  reasoning that a reader lock is cheap. It is not: `RLock`/`RUnlock` are two
+  atomic read-modify-writes on ONE shared word, and `mu` is the MANAGER-wide
+  lock (`caCert`, `caKey`, `leafKey`, the secondary CA), so every inspected
+  handshake in the process wrote the same cache line purely to read a map that
+  in steady state never changes — the sixth appearance of the shape this tree
+  has already recorded in `internal/threatfeed`, `internal/connlimit`, the IP
+  filter, the latency histogram, `topHosts`, and the sign stampede in
+  `internal/ca/signflight.go`. The cache is now a `sync.Map`, which is the
+  shape this access pattern wants: a host's entry is written once on the miss
+  that signed it and then read for the whole 1 h TTL, so a hit is an atomic
+  pointer load plus a map read with no read-modify-write on any shared word.
+  Separately, `GetCert` ran `net.SplitHostPort` unconditionally on the SNI
+  name; SNI carries a bare hostname (RFC 6066 forbids a port and an IP
+  literal), so that call essentially always failed — and it reports failure by
+  allocating a `*net.AddrError` which is immediately discarded. At
+  `memprofilerate=1` that error was **100% of the hit path's allocations**, one
+  per inspected connection. Measured on go1.27.3, linux/amd64, 4-vCPU Xeon,
+  both arms in ONE invocation of `BenchmarkGetCert_Hit` (`RunParallel`, so
+  lower ns/op is more throughput), `-cpu 1,2,4 -count=9`, medians: **93.7 ->
+  69.2 ns at one core, 143.6 -> 96.6 at two, 158.9 -> 91.1 at four** (0.74x /
+  0.67x / 0.57x), and **32 B and 1 alloc/op to zero**. State the limit as
+  plainly as the gain: this did NOT make the path scale. One-to-four throughput
+  is 0.59x before and 0.76x after — better, still negative — because a CPU
+  profile of the new arm at four cores attributes 42% of samples to `GetCert`'s
+  own frame (`cacheHits.Add`) against 11% to `cachedLeaf`. The leaf cache is no
+  longer the contended word; `cacheHits`/`cacheMisses` are, and they are an
+  operator-visible metric (`CacheStats`, read by `ca_metrics.go` for `/metrics`
+  and by the support bundle), so sharding them is a separate change with its
+  own contract. Nothing about the cache's MEANING moves: the presence, TTL and
+  leaf-expiry decisions are byte-identical, the LRU still evicts the oldest 10%
+  at `certCacheMaxSize`, the CA-generation fence and the single flight are
+  untouched, and the cold-burst gate still measures 1.000 signs/host against
+  the legacy arm's 1.5-1.68. Two invariants the new storage introduces are
+  pinned rather than assumed. Entries are IMMUTABLE once stored, because the
+  hit path reads them unlocked — `AgeCacheEntryForTest` now REPLACES an entry
+  instead of writing through the pointer, and a concurrent reader/ager test
+  holds that under `-race`. And the reset stays a SINGLE atomic transition:
+  `sync.Map.Clear` is one atomic store of a fresh trie root, exactly the
+  property the `cm.cache = map[...]{}` assignment it replaced had, so a
+  handshake racing a CA replacement can never observe a half-emptied cache;
+  `Range`+`Delete` would not be, and the comment says so. `sync.Map` has no
+  `len()`, so the bound `certCacheMaxSize` enforces is now an explicit
+  `cacheLen` atomic (the `hostCounter.n` pattern from `store.go`), with gates
+  that an insert crossing the bound evicts and leaves `cacheLen` and
+  `cacheOrder` in agreement, and that a reset zeroes it — a counter left behind
+  would make the next insert look like an overflow and discard 1,000
+  just-signed leaves. Three new gates fail on the defect and were each verified
+  to do so: the lock gate holds `mu` EXCLUSIVELY across a `GetCert` that must
+  hit (reintroducing the `RLock` deadlocks the test with a goroutine dump
+  naming the frame, rather than failing statistically), the allocation gate is
+  an exact `AllocsPerRun == 0` (restoring the unconditional `SplitHostPort`
+  reports 1.0), and the structural CA-generation gate was taught the new reset
+  shape so it still names an open-coded cache clear instead of passing
+  vacuously on a tree where the assignment it used to look for no longer
+  exists. A port-bearing `ServerName` still resolves to the bare host's cache
+  entry, so the guard cannot split one host into two entries and two signs.
+  `New()` no longer initialises anything, which is the point: package main's
+  whitebox tests construct `&CertManager{}` directly, and the zero `Manager` is
+  now usable by construction.
+
 - **The scan path no longer rebuilds a gzip or deflate decoder for every
   response it inspects.** `secscan.DecompressForScan` expands a compressed
   response body so ClamAV, YARA and DPI see the content rather than the frame,
@@ -302,6 +410,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   security-relevant composition.
 
 ### Changed
+
+- **Diagnostics now warns when a remote blocklist feed's latest sync failed.**
+  The failure was visible only in the Blocklist feed panel; the one-page report
+  read as healthy while the blocklist stopped refreshing. A new `blocklist_feed`
+  WARN row (additive, report-only, no row when no feed is configured or all
+  succeeded) carries failing/total counts and never a feed URL or error text.
+  Feed sync, retry and blocking behavior are unchanged.
 
 - **Diagnostics now shows an uploaded admin UI certificate that is saved but not
   yet serving.** The upload takes effect only after a restart (and never while

@@ -377,8 +377,12 @@ func secScanStatusMap() map[string]interface{} {
 		// AVAILABILITY signal, not just a capacity one — each one is a response
 		// body that was failed closed without being inspected — and
 		// dpi_abandoned_workers is the uninterruptible-match population the cap
-		// is sized against. Role-gated surface, so the magnitudes are safe here;
-		// the public /healthz and /ready rows stay coarse by design.
+		// is sized against. Both magnitudes are posture detail, so mind which
+		// surface serves this map: /api/security-scan/status is RoleViewer-gated
+		// (ui_security.go), but the OPTIONAL scan sidecar serves the same map
+		// unauthenticated on its own listener (scan_svc.go handleStatus, enabled
+		// only by -scan-svc-listen and documented as host/network-trusted). The
+		// public /healthz and /ready rows stay coarse by design.
 		"dpi_inflight":             dpiInflightLoad(),
 		"dpi_inflight_max":         dpiMaxInflightLoad(),
 		"dpi_saturation_blocks":    dpiSaturationBlocksLoad(),
