@@ -22,7 +22,9 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
+	"io"
 	"runtime"
 	"strings"
 	"testing"
@@ -30,13 +32,60 @@ import (
 
 const leakCanary = "CULVERT-POOL-CANARY-7f3a9b2e-DO-NOT-LEAK"
 
+// leakWindow is compress/flate's history window (its unexported
+// maxMatchOffset): the most a back-reference can reach, and the size of the
+// buffer a pooled decoder keeps between streams.
+const leakWindow = 32 << 10
+
+// leakSecret is the "previous response": exactly one flate window of
+// canary-bearing rows. Exactly one window is deliberate — after the decoder
+// has emitted it, its ring buffer holds the secret byte-for-byte at the same
+// offsets a preset dictionary would occupy, so a decoder that failed to bound
+// history to the current stream would resolve the attack's back-references to
+// the secret EXACTLY rather than to shifted garbage. The row counter keeps the
+// rows distinct so the attack's references have to reach a specific offset in
+// the window rather than the nearest copy of a repeating period.
 func leakSecret() []byte {
 	var b bytes.Buffer
-	for b.Len() < 20<<10 {
-		b.WriteString(leakCanary)
-		b.WriteString("-padding-padding-padding-")
+	for i := 0; b.Len() < leakWindow; i++ {
+		fmt.Fprintf(&b, "%s-row-%05d-padding-", leakCanary, i)
 	}
-	return b.Bytes()
+	return b.Bytes()[:leakWindow]
+}
+
+// leakAttack returns a hostile plaintext and its raw deflate encoding against
+// the secret as a preset dictionary. The plaintext is copied OUT OF the secret,
+// so the encoder expresses it as back-references reaching before the start of
+// the stream, into the dictionary — the stream's only way to produce those
+// bytes is to read them from history it did not write. Before returning, it
+// proves that dependence rather than assuming it: the stream decodes to the
+// plaintext WITH the dictionary, is rejected by a fresh decoder WITHOUT it,
+// and does not carry the canary as literal bytes (the scan path's
+// corrupt-stream fallback returns the compressed bytes, so a literal canary
+// would trip the disclosure assertion even when the decoder is correct).
+func leakAttack(t *testing.T, secret []byte) (plain, raw []byte) {
+	t.Helper()
+	plain = append([]byte(nil), secret[8<<10:12<<10]...)
+	raw = leakFlateDict(t, secret, plain)
+
+	if bytes.Contains(raw, []byte(leakCanary)) {
+		t.Fatalf("attack stream carries the canary as literals; it must reach it only through the dictionary")
+	}
+	if len(raw) >= len(plain)/8 {
+		t.Fatalf("attack stream is %d bytes for %d plaintext bytes; expected back-references into the dictionary, not literals", len(raw), len(plain))
+	}
+	withDict, err := io.ReadAll(flate.NewReaderDict(bytes.NewReader(raw), secret))
+	if err != nil || !bytes.Equal(withDict, plain) {
+		t.Fatalf("attack stream does not decode to its plaintext with the dictionary (err=%v len=%d)", err, len(withDict))
+	}
+	fresh, err := io.ReadAll(flate.NewReader(bytes.NewReader(raw)))
+	if err == nil {
+		t.Fatalf("control: a fresh dictionary-free flate decoder accepted the attack stream (%d bytes); it does not exercise the history bound", len(fresh))
+	}
+	if bytes.Contains(fresh, []byte(leakCanary)) {
+		t.Fatalf("control: a fresh dictionary-free flate decoder emitted the canary before failing")
+	}
+	return plain, raw
 }
 
 func leakGzip(t *testing.T, plain []byte) []byte {
@@ -97,7 +146,7 @@ func leakGzipWrapRaw(raw, claimed []byte) []byte {
 	out = append(out, raw...)
 	var tail [8]byte
 	binary.LittleEndian.PutUint32(tail[0:4], crc32.ChecksumIEEE(claimed))
-	//nolint:gosec // G115: the gzip ISIZE field is the length mod 2^32 by RFC 1952; this helper's payload is a few dozen bytes
+	//nolint:gosec // G115: the gzip ISIZE field is the length mod 2^32 by RFC 1952; this helper's payload is a few KiB
 	binary.LittleEndian.PutUint32(tail[4:8], uint32(len(claimed)))
 	return append(out, tail[:]...)
 }
@@ -124,39 +173,58 @@ func leakGzipNamed(t *testing.T, name string, plain []byte) []byte {
 // pooling change needs and does not have: a pooled decompressor retains a
 // 32 KiB history window across responses, and a hostile stream that
 // back-references past its own start would read a PREVIOUS response's
-// plaintext out of it. Every expansion below must either error or decode only
-// its own bytes; none may contain the prior response's canary.
+// plaintext out of it.
+//
+// The attack stream is built so that it CAN only succeed by reading stale
+// history (leakAttack proves a fresh decoder rejects it), and each attack is
+// served immediately after the SAME encoding's pooled decoder expanded the
+// secret — gzip and deflate are separate pools, so priming one and attacking
+// the other would test nothing. The production guarantee pinned here is the
+// one compress/flate gives a reset decoder: the back-references fail with
+// CorruptInputError, DecompressForScan takes its corrupt-stream fallback and
+// returns the compressed bytes unchanged, and the secret never appears.
 func TestExpandPooled_CannotLeakAPriorResponse(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 
 	secret := leakSecret()
-	hostilePlain := []byte(strings.Repeat("x", 64))
+	attackPlain, attackRaw := leakAttack(t, secret)
 
-	// Interleave repeatedly on ONE goroutine at GOMAXPROCS=1 so the hostile
-	// stream is served by the same pooled object that just expanded the secret.
-	for i := 0; i < 200; i++ {
-		if out, bomb := DecompressForScan(leakGzip(t, secret), "gzip"); bomb || !bytes.Contains(out, []byte(leakCanary)) {
-			t.Fatalf("round %d: priming gzip expansion did not happen (bomb=%v len=%d)", i, bomb, len(out))
+	gzAttack := leakGzipWrapRaw(attackRaw, attackPlain)
+	if fresh, err := gzip.NewReader(bytes.NewReader(gzAttack)); err == nil {
+		if out, err := io.ReadAll(fresh); err == nil {
+			t.Fatalf("control: a fresh gzip reader accepted the attack stream (%d bytes); it does not exercise the history bound", len(out))
 		}
-		hostile := leakFlateDict(t, secret, hostilePlain)
-		out, bomb := DecompressForScan(hostile, "deflate")
-		if bomb {
-			t.Fatalf("round %d: hostile deflate refused as a bomb, unexpected", i)
-		}
-		if bytes.Contains(out, []byte(leakCanary)) {
-			t.Fatalf("round %d: LEAK — deflate arm returned a prior response's plaintext (%d bytes)", i, len(out))
-		}
+	}
 
-		if out, bomb := DecompressForScan(leakFlate(t, secret), "deflate"); bomb || !bytes.Contains(out, []byte(leakCanary)) {
-			t.Fatalf("round %d: priming deflate expansion did not happen (bomb=%v len=%d)", i, bomb, len(out))
-		}
-		gzHostile := leakGzipWrapRaw(leakFlateDict(t, secret, hostilePlain), hostilePlain)
-		out, bomb = DecompressForScan(gzHostile, "gzip")
-		if bomb {
-			t.Fatalf("round %d: hostile gzip refused as a bomb, unexpected", i)
-		}
-		if bytes.Contains(out, []byte(leakCanary)) {
-			t.Fatalf("round %d: LEAK — gzip arm returned a prior response's plaintext (%d bytes)", i, len(out))
+	arms := []struct {
+		name   string
+		ce     string
+		prime  []byte
+		attack []byte
+	}{
+		{"deflate", "deflate", leakFlate(t, secret), attackRaw},
+		{"gzip", "gzip", leakGzip(t, secret), gzAttack},
+	}
+
+	// Run each arm on ONE goroutine at GOMAXPROCS=1 so the attack is normally
+	// served by the very pooled object that just expanded the secret. Under
+	// -race sync.Pool drops a random share of Puts, so the rounds are repeated
+	// rather than relying on any single one reusing the object.
+	for _, arm := range arms {
+		for i := 0; i < 200; i++ {
+			if out, bomb := DecompressForScan(arm.prime, arm.ce); bomb || !bytes.Equal(out, secret) {
+				t.Fatalf("%s round %d: priming expansion did not decode the secret (bomb=%v len=%d)", arm.name, i, bomb, len(out))
+			}
+			out, bomb := DecompressForScan(arm.attack, arm.ce)
+			if bomb {
+				t.Fatalf("%s round %d: attack stream refused as a bomb, unexpected", arm.name, i)
+			}
+			if bytes.Contains(out, []byte(leakCanary)) {
+				t.Fatalf("%s round %d: LEAK — the pooled decoder resolved the attack against the previous response's history and returned its plaintext (%d bytes)", arm.name, i, len(out))
+			}
+			if !bytes.Equal(out, arm.attack) {
+				t.Fatalf("%s round %d: attack stream was not rejected: got %d bytes, want the corrupt-stream fallback (the %d compressed bytes)", arm.name, i, len(out), len(arm.attack))
+			}
 		}
 	}
 }
