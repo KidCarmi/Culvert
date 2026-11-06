@@ -224,7 +224,45 @@ func (cl *ConnLimiter) Enable(maxPerIP int) {
 	cl.enabled.Store(true)
 }
 
+// SetMaxPerIP replaces the per-IP cap WITHOUT touching enablement.
+//
+// It exists because Enable is the wrong primitive for a caller that has been
+// handed a cap and no enablement decision, and the CP→DP config-snapshot apply
+// is exactly that caller (CHAOS-112). `conn_limit_max_per_ip` is declared
+// ClusterSynced in the root config-surface registry; `conn_limit_enabled` has
+// no ConfigSnapshot binding at all — it is node-local, set by the startup
+// resolver, the persisted admin settings, the admin API or a config import.
+// Enable writes BOTH, so using it to apply a cluster-synced cap also wrote a
+// surface the registry says is not synced: every Data Plane that applied any
+// snapshot started enforcing the default cap, because MaxPerIP answers with a
+// cap whether or not limiting is on (see Disable) and so the publisher can
+// never emit a zero that would have been skipped.
+//
+// A non-positive cap is a no-op rather than a reset to the default. The wire
+// field's recorded semantics are semSkipIfZero — "zero keeps live state" — and
+// an older Control Plane, or a snapshot with the field absent, must leave the
+// node's cap exactly where it was.
+//
+// Memory ordering: unlike Enable this does not move the enabled flag, so
+// Acquire's load-bearing enabled-then-cap read order is unaffected. A reader
+// racing this store observes either the old or the new cap alongside an
+// unchanged flag, and both are legitimate point-in-time decisions — the hazard
+// Enable's store order exists to prevent (enabled==true paired with a stale
+// cap) cannot arise when the flag is not being published.
+func (cl *ConnLimiter) SetMaxPerIP(maxPerIP int) {
+	if maxPerIP <= 0 {
+		return
+	}
+	cl.maxPerIP.Store(int64(maxPerIP))
+}
+
 // Disable turns off connection limiting.
+//
+// It clears the flag only: the cap stays where it was, so MaxPerIP keeps
+// answering with it and a later Enable with no argument of its own would
+// resume at the operator's configured value. That is deliberate and it is also
+// why MaxPerIP can never return 0 — a reader cannot use the cap to infer
+// whether limiting is on, and must ask Enabled.
 func (cl *ConnLimiter) Disable() { cl.enabled.Store(false) }
 
 // Enabled reports whether connection limiting is currently active.
