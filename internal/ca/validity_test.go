@@ -219,8 +219,8 @@ func TestGetCert_CacheOrderDoesNotGrowOnRefresh(t *testing.T) {
 
 	cm.mu.RLock()
 	order := len(cm.cacheOrder)
-	entries := len(cm.cache)
 	cm.mu.RUnlock()
+	entries := cm.CertCacheLen()
 	if entries != 1 {
 		t.Fatalf("cache holds %d entries for one host, want 1", entries)
 	}
