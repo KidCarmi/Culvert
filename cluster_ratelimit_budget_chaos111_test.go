@@ -602,6 +602,13 @@ func TestCHAOS111_ARequesterAlwaysGetsTheClusterSumForItsOwnHotSet(t *testing.T)
 	if len(totals) > maxBroadcastHotIPs {
 		t.Fatalf("reply carried %d entries, over the bound %d", len(totals), maxBroadcastHotIPs)
 	}
+	// Every fixture IP has a positive remainder for the quiet node, so the
+	// exact omission is the oracle's count minus what the reply carried. The
+	// quiet node's own IPs rank below the candidates and are returned by pass
+	// 1; counting them as omitted overstated lost coverage in the gauge.
+	if want := len(naiveTotalsExcluding(agg, quiet)) - len(totals); omitted != want {
+		t.Fatalf("omitted = %d, want %d: own-set IPs the reply carries must not be counted as omitted", omitted, want)
+	}
 	for i := range quietIPs {
 		ip := quietIPs[i].IP
 		if totals[ip] != 2 {

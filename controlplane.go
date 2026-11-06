@@ -399,15 +399,25 @@ func (a *rateLimitAggregator) ClusterTotalsExcluding(excludeNode string) (remote
 	// (own[ip] is zero), so its remainder is the peers' counts. Absent from the
 	// reply is exactly what the pre-fix code produced for an IP no OTHER node
 	// reported, and FreshCount reads a missing IP as zero.
+	latestTracked := 0 // requester IPs the generation tracks (part of gen.distinct)
 	for ip := range latest {
-		if count := gen.totals[ip] - own[ip]; count > 0 {
+		total, tracked := gen.totals[ip]
+		if !tracked {
+			continue
+		}
+		latestTracked++
+		if count := total - own[ip]; count > 0 {
 			totals[ip] = count
 		}
 	}
 
 	// Pass 2: fill the remaining budget with the fleet's hottest.
 	skipped := 0
+	latestCandidates := 0 // requester IPs that are also ranked candidates
 	for _, ip := range gen.candidates {
+		if _, mine := latest[ip]; mine {
+			latestCandidates++
+		}
 		if _, have := totals[ip]; have {
 			continue
 		}
@@ -421,7 +431,12 @@ func (a *rateLimitAggregator) ClusterTotalsExcluding(excludeNode string) (remote
 		}
 		totals[ip] = count
 	}
-	return totals, skipped + (gen.distinct - len(gen.candidates))
+	// The tail beyond the candidates is omitted, except the requester's own
+	// tracked IPs in it: pass 1 already returned those with a positive
+	// remainder, and those without one have nothing to send. Counting them
+	// overstated lost coverage in the omission gauge and counter.
+	tail := gen.distinct - len(gen.candidates) - (latestTracked - latestCandidates)
+	return totals, skipped + tail
 }
 
 // Stats returns the number of tracked nodes and total hot IPs, read from the
