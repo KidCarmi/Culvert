@@ -214,6 +214,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **`scripts/install.sh` built a nonexistent Docker apt repo for Debian derivatives.**
+  The `ID_LIKE` fallback in `detect_distro` forced `DISTRO_ID=ubuntu` while keeping
+  the Debian codename (e.g. Raspberry Pi OS: `linux/ubuntu bookworm`), so
+  `apt-get update` failed. Pure Debian derivatives now use `linux/debian`; Ubuntu
+  derivatives use `UBUNTU_CODENAME`.
+
 - **The DPI scan engine's abandoned worker goroutines are now counted and
   capped, and the gateway no longer blocks clean traffic in proportion to its
   own load (CHAOS-110).** `patternSet.scan` must run each regex match in a
