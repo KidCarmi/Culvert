@@ -110,6 +110,24 @@ LAB_RECOVERY_PROFILES="${LAB_RECOVERY_PROFILES:-fast:0:0:60 esxi110:110:18:300}"
 LAB_RECOVERY_VARIANTS="${LAB_RECOVERY_VARIANTS:-base}"
 LAB_RA_KB="${LAB_RA_KB:-4096}"
 LAB_RECOVERY_TIMEOUT="${LAB_RECOVERY_TIMEOUT:-1800}"
+# Campaign controls (#1528 retained-OVA QEMU campaign). Each is OFF unless set;
+# unset, the harness behaves exactly as before.
+#   LAB_OS_UPDATE=check   step 7 runs the read-only `culvert-os-update check`
+#                         instead of `culvert-os-update os` (no package
+#                         upgrade), then the same maintenance reboot; the
+#                         kernel must then be UNCHANGED (pass), a change fails.
+#   LAB_EXPECT_DPKG=FILE  package-set checkpoints: the guest's
+#   LAB_EXPECT_KERNEL=R   `dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n'`
+#                         (the command that wrote the build's dpkg-list.txt)
+#                         must equal FILE exactly, and `uname -r` must be R.
+#   LAB_CHANGED_PATHS=1   the API/auth handlers changed since the last
+#                         runtime-qualified candidate line: GET
+#                         /api/country-traffic and POST /api/idp/discover.
+#                         LAB_OIDC_PUBLIC_ISSUER is the public HTTPS issuer
+#                         for the positive discovery case.
+LAB_OS_UPDATE="${LAB_OS_UPDATE:-os}"
+LAB_EXPECT_DPKG="${LAB_EXPECT_DPKG:-}"; LAB_EXPECT_KERNEL="${LAB_EXPECT_KERNEL:-}"
+LAB_CHANGED_PATHS="${LAB_CHANGED_PATHS:-0}"; LAB_OIDC_PUBLIC_ISSUER="${LAB_OIDC_PUBLIC_ISSUER:-https://accounts.google.com}"
 ADMIN_USER=labadmin
 
 log()  { printf '%s [lab] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
@@ -1046,8 +1064,17 @@ EOS
   fi
   if gate 7 os-update; then
     gpriv > "$EV/07-check-before.txt" 2>&1 <<<'culvert-os-update check' || true
-    local rc=0; groot 'culvert-os-update os' 2700 > "$EV/07-os-update.txt" 2>&1 || rc=$?
-    [[ $rc == 0 ]] && check 7 os-update pass "culvert-os-update os exit 0 ($(grep -cE '^(Setting up|Unpacking) ' "$EV/07-os-update.txt" || true) package actions)" || check 7 os-update fail "exit $rc: $(tail -3 "$EV/07-os-update.txt" | tr '\n' ' ')"
+    local rc=0
+    if [[ "$LAB_OS_UPDATE" == check ]]; then
+      # Campaign scope: no package upgrade (the candidate already ships its
+      # kernel; a live-archive upgrade would change the package set). The
+      # read-only check above is the maintenance path exercised; the reboot
+      # below is the product's own maintenance reboot.
+      check 7 os-update info "LAB_OS_UPDATE=check: package upgrade not run by campaign scope; read-only check exit recorded in 07-check-before.txt"
+    else
+      groot 'culvert-os-update os' 2700 > "$EV/07-os-update.txt" 2>&1 || rc=$?
+      [[ $rc == 0 ]] && check 7 os-update pass "culvert-os-update os exit 0 ($(grep -cE '^(Setting up|Unpacking) ' "$EV/07-os-update.txt" || true) package actions)" || check 7 os-update fail "exit $rc: $(tail -3 "$EV/07-os-update.txt" | tr '\n' ' ')"
+    fi
     gpriv > "$EV/07-check-after-update.txt" 2>&1 <<<'culvert-os-update check; ls -l /var/run/reboot-required 2>/dev/null; dpkg -l "linux-image-*" | awk "/^ii/{print \$2, \$3}"; apt-mark showhold; docker version --format "{{.Server.Version}}"' || true
     # The reboot ends the console session; the next privileged call logs in again.
     gpriv --nowait > "$EV/07-reboot.txt" 2>&1 <<<'culvert-os-update reboot' || true
@@ -1061,7 +1088,10 @@ EOS
       gpriv > "$EV/07-kernel-after.txt" 2>&1 <<<'uname -r; uname -v' || true
       local kb ka; kb="$(head -1 "$EV/03-kernel-before.txt")"; ka="$(head -1 "$EV/07-kernel-after.txt")"
       local newer; newer="$(awk -v run="linux-image-$kb" '$1 ~ /^linux-image-[0-9]/ && $1 != run {print $1}' "$EV/07-check-after-update.txt" | tr '\n' ' ')"
-      if [[ "$kb" != "$ka" ]]; then check 7 kernel pass "kernel CHANGED $kb → $ka"
+      if [[ "$LAB_OS_UPDATE" == check ]]; then
+        if [[ -n "$kb" && "$kb" == "$ka" && -z "$newer" ]]; then check 7 kernel pass "kernel unchanged across the maintenance reboot ($kb), no other linux-image installed"
+        else check 7 kernel fail "LAB_OS_UPDATE=check requires an unchanged kernel: before '$kb' after '$ka' other images '${newer}'"; STOP=1; fi
+      elif [[ "$kb" != "$ka" ]]; then check 7 kernel pass "kernel CHANGED $kb → $ka"
       elif [[ -n "$newer" ]]; then check 7 kernel fail "installed ${newer}but $kb still runs after the reboot"
       else check 7 kernel info "kernel unchanged ($kb): no newer linux-image was installed"; fi
       local holds; holds="$(grep -cE '^(docker-ce|docker-ce-cli|containerd.io|docker-compose-plugin)$' "$EV/07-check-after-update.txt" || true)"
@@ -3688,6 +3718,59 @@ EOS
   else vcheck V5 serial-shutdown fail "serial shutdown log incomplete (stopped=$(grep -acE 'OK .*Stopped' "$EV/V5-shutdown.log") powerdown=$(grep -ac 'reboot: Power down' "$EV/V5-shutdown.log"); qemu $(qemu_alive && echo still running || echo exited))"; fi
   redact_tree
 }
+# ── campaign checkpoints (LAB_EXPECT_DPKG / LAB_EXPECT_KERNEL, LAB_CHANGED_PATHS)
+# pkgset_checkpoint TAG — the guest's package set and running kernel against
+# the build's own record (pkgset-verdict.py fails closed). No-op when unset.
+pkgset_checkpoint() { local tag="$1" f="$EV/K-$1-dpkg.txt" rc=0 st name detail n=0
+  [[ -n "$LAB_EXPECT_DPKG" || -n "$LAB_EXPECT_KERNEL" ]] || return 0
+  gpriv --timeout 300 > "$f" 2>&1 <<'EOS' || rc=$?
+dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' 2>/dev/null; echo "LABRC=$?"
+echo "LABUNAME=$(uname -r)"
+EOS
+  while IFS=$'\t' read -r st name detail; do
+    n=$((n+1)); check K "$tag-$name" "$st" "$detail"
+  done < <(python3 -I "$HERE/pkgset-verdict.py" "$f" "$rc" "$LAB_EXPECT_DPKG" "$LAB_EXPECT_KERNEL" 2>"$EV/K-$tag.err" || true)
+  [[ $n -ge 1 ]] || check K "$tag-verdict" fail "the package-set evaluator produced no verdict: $(head -c 300 "$EV/K-$tag.err")"
+}
+# cmd_changed_paths — the API/auth handlers changed since the last runtime-
+# qualified candidate line (165e6f36): apiCountryTraffic now answers through
+# jsonOK; the OIDC discovery fetch (and SAML metadata fetch) send http.NoBody.
+# POST /api/idp/discover runs that discovery fetch and saves nothing; its
+# SSRF guard refuses a private issuer before any request. The SAML metadata
+# fetch runs only when a SAML profile is created and is not exercised here.
+cmd_changed_paths() { local c h f="$EV/CP-changed-paths.txt"
+  [[ "$LAB_CHANGED_PATHS" == 1 ]] || return 0
+  gate CP changed-paths || return 0
+  : > "$f"
+  c="$(curl -ksS -m 30 -o /dev/null -w '%{http_code}' "$UI/api/country-traffic" 2>/dev/null || echo 000)"
+  echo "unauthenticated GET /api/country-traffic -> $c" >> "$f"
+  [[ $c == 401 || $c == 403 ]] && check CP country-traffic-unauth pass "unauthenticated GET refused ($c)" || check CP country-traffic-unauth fail "unauthenticated GET answered $c"
+  c="$(curl -ksS -m 30 -o /dev/null -w '%{http_code}' -X POST "$UI/api/idp/discover" -H "Origin: $UI" -H 'Content-Type: application/json' -d '{"issuer":"https://accounts.google.com"}' 2>/dev/null || echo 000)"
+  echo "unauthenticated POST /api/idp/discover -> $c" >> "$f"
+  [[ $c == 401 || $c == 403 ]] && check CP idp-discover-unauth pass "unauthenticated POST refused ($c), no discovery fetch" || check CP idp-discover-unauth fail "unauthenticated POST answered $c"
+  : > "$JAR"; c="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$(cat "$SEC/admin-pass")\"}" | code)"
+  if [[ $c != 200 ]]; then check CP changed-paths fail "admin login http $c"; return 0; fi
+  c="$(curl -ksS -m 30 -D "$WORK/cp-ct.h" -o "$EV/CP-country-traffic.json" -w '%{http_code}' -b "$JAR" -H "Origin: $UI" "$UI/api/country-traffic" 2>/dev/null || echo 000)"
+  h="$(tr -d '\r' < "$WORK/cp-ct.h" | sed -n 's/^[Cc]ontent-[Tt]ype: *//p' | tail -1)"
+  echo "admin GET /api/country-traffic -> $c content-type '$h'" >> "$f"
+  if [[ $c == 200 && "$h" == application/json* ]] && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d, list) and len(d) <= 20 else 1)' "$EV/CP-country-traffic.json" 2>/dev/null; then
+    check CP country-traffic pass "admin GET 200, $h, JSON list of $(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$EV/CP-country-traffic.json") (Top(20))"
+  else check CP country-traffic fail "admin GET $c, content-type '$h', body $(head -c 200 "$EV/CP-country-traffic.json" 2>/dev/null)"; fi
+  local r; r="$(api POST /api/idp/discover '{"issuer":"https://10.0.2.2"}')"; c="$(code <<<"$r")"
+  printf 'admin POST /api/idp/discover private issuer -> %s %s\n' "$c" "$(body <<<"$r" | head -c 200)" >> "$f"
+  [[ $c == 400 && "$(body <<<"$r")" == issuer:* ]] && check CP idp-discover-private-refused pass "private issuer refused before any fetch (400 $(body <<<"$r" | head -c 120))" \
+    || check CP idp-discover-private-refused fail "private issuer answered $c: $(body <<<"$r" | head -c 200)"
+  r="$(api POST /api/idp/discover "{\"issuer\":\"$LAB_OIDC_PUBLIC_ISSUER\"}")"; c="$(code <<<"$r")"
+  body <<<"$r" > "$EV/CP-idp-discover-public.json"
+  printf 'admin POST /api/idp/discover %s -> %s\n' "$LAB_OIDC_PUBLIC_ISSUER" "$c" >> "$f"
+  if [[ $c == 200 ]] && python3 -c 'import json,sys
+d=json.load(open(sys.argv[1])); iss=sys.argv[2].rstrip("/")
+ok=d.get("issuer","").rstrip("/")==iss and all(str(d.get(k,"")).startswith("https://") for k in ("authorization_endpoint","token_endpoint"))
+sys.exit(0 if ok else 1)' "$EV/CP-idp-discover-public.json" "$LAB_OIDC_PUBLIC_ISSUER" 2>/dev/null; then
+    check CP idp-discover-public pass "discovery of $LAB_OIDC_PUBLIC_ISSUER: 200, issuer matches, https authorization/token endpoints (nothing saved)"
+  else check CP idp-discover-public fail "discovery of $LAB_OIDC_PUBLIC_ISSUER: $c $(head -c 200 "$EV/CP-idp-discover-public.json")"; fi
+  check CP saml-metadata-fetch not-run "SAML metadata URL fetch runs only on SAML profile creation (state change); not exercised by this campaign"
+}
 failures() { grep -c '"result":"fail"' "$JSONL" 2>/dev/null || true; }
 # LAB_FAIL_FAST=1 (iteration runs only): after each phase, stop as soon as any
 # check has failed. The EXIT trap still collects evidence and tears the guest
@@ -3726,15 +3809,19 @@ case "${1:-}" in
     # snapshot, stop. No qualify campaign (ASTRA: no repeat).
     if [[ "${LAB_M2_ONLY:-0}" == 1 ]]; then cmd_preflight; cmd_up; cmd_m2; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     cmd_preflight; cmd_up; cmd_qualify; fail_fast_after qualify
+    # Campaign checkpoints (no-ops unless LAB_EXPECT_DPKG/KERNEL, LAB_CHANGED_PATHS).
+    pkgset_checkpoint maintenance; cmd_changed_paths; fail_fast_after changed-paths
     if [[ "${LAB_FP2:-0}" == 1 ]]; then cmd_fp2; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     if [[ "${LAB_CACHEBYPASS:-0}" == 1 ]]; then cmd_cachebypass; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     if [[ "${LAB_LDAP:-0}" == 1 ]]; then cmd_ldap; n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]]; exit; fi
     if [[ "${LAB_ENGINE_SURFACE:-0}" == 1 ]]; then cmd_engine_surface; fail_fast_after engine-surface; fi
     cmd_recovery; fail_fast_after recovery
+    pkgset_checkpoint recovery; fail_fast_after pkgset-recovery
     if [[ -n "${LAB_ADOPT_IMAGE_TAR:-}" ]]; then cmd_adoption; fail_fast_after adoption; fi
     cmd_history
     # M2 checkpoint 4: after the recovery power cycles and the history restore.
     m2_checkpoint final
+    pkgset_checkpoint final
     if [[ "${LAB_PRESSURE:-0}" == 1 ]]; then cmd_pressure; fi
     n="$(failures)"; log "failures: $n"; [[ "$n" == 0 ]] ;;
   *) sed -n '2,32p' "$0"; exit 2 ;;

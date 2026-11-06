@@ -53,7 +53,7 @@ jobs:
   guest-boot:
     name: "Lab · ${{ matrix.variant }} OVA: build + QEMU guest boot + qualify"
     # A push whose head commit says [fdisk-only] reruns F-DISK-1 alone.
-    if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[preserve-image]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && github.event_name == 'push' && !contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[preserve-image]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -742,7 +742,7 @@ jobs:
   # logic is inline in this job; no lab harness file is changed for it.
   build-only:
     name: "Lab · build-only OVA (no boot): candidate-0981ff3d"
-    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[adopted-scan]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[console-overlay]') && !contains(github.event.head_commit.message, '[fail-fast]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[preserve-image]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && github.event_name == 'push' && contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[adopted-scan]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[console-overlay]') && !contains(github.event.head_commit.message, '[fail-fast]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[preserve-image]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -1212,9 +1212,596 @@ jobs:
           compression-level: 0
           if-no-files-found: warn
 
+  # ── Retained-OVA QEMU campaign (#1528; owner decision of 6 November 2026,
+  # recorded in the shared PR record 5978949299). ONE campaign on the retained
+  # FB-1 OVA f9d68540… (artifact 13442236115), its bytes verified before any
+  # boot; nothing is built. Selected ONLY by a push to test/appliance-lab whose
+  # head commit message is exactly QEMU_TRIGGER_MESSAGE, carrying [qemu-retained]
+  # and no other tag; every other lab job (this workflow, console-overlay,
+  # snapshot-pin-check) skips whenever [qemu-retained] is present. The route
+  # guard refuses: another event/ref/message, a non-empty or multi-parent
+  # commit, a start after CAMPAIGN_START_DEADLINE, a run window that can meet
+  # the guest's daily unattended-upgrades window, and any re-run attempt after
+  # an earlier attempt reached candidate execution (its pre-boot receipt
+  # exists). Infrastructure failures BEFORE that receipt may be re-run.
+  # Containment: runner egress limited to DNS/NTP/HTTP(S) (+ the platform's
+  # metadata addresses), no new non-loopback listener; a violation powers the
+  # guest down through the QEMU monitor. Stop conditions: LAB_FAIL_FAST=1
+  # (stop after the phase with a failed check) and the console leg runs only
+  # on success; evidence is collected and the guest shut down by ACPI either
+  # way. The campaign verdict is computed from the scope-to-assertion map in
+  # the "Campaign verdict" step: every required check must PASS; only the
+  # declared residuals may be other than pass.
+  qemu-retained:
+    name: "Lab · QEMU campaign on the retained FB-1 OVA f9d68540 (no build)"
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[adopted-scan]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[console-overlay]') && !contains(github.event.head_commit.message, '[fail-fast]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[preserve-image]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 345
+    env:
+      VARIANT: retained-f9d68540
+      # The ONE commit message that may start this job (an empty commit on the
+      # reviewed head; reviewed by ASTRA, with its SHA, parent and tree, before
+      # it is pushed).
+      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign on the retained FB-1 OVA f9d68540 [qemu-retained]"
+      # Owner decision 6 November 2026: start within seven days. Conservative
+      # bound: seven days from the earliest instant of that date.
+      CAMPAIGN_START_DEADLINE: "2026-11-13T00:00:00Z"
+      # The job's own limit; the daily-window guard reasons over it.
+      CAMPAIGN_MAX_MINUTES: "345"
+      # The retained artifact (run 41838656879 attempt 3) and the OVA in it.
+      OVA_ARTIFACT_ID: "13442236115"
+      OVA_ARTIFACT_RUN: "41838656879"
+      OVA_ARTIFACT_NAME: appliance-lab-ova-candidate-0981ff3d-FAILED
+      OVA_ARTIFACT_ZIP_SHA256: 4a89dda75c6dc3abc36340d79e8c59526d500582831c3c238c0199d5e8d1843c
+      OVA_NAME: culvert-appliance-1.0.375-candidate.g0981ff3d037d-ubuntu-24.04.ova
+      OVA_SHA256: f9d685406ca49cfa667f96013e78df3517e21964a88b3d4d8ecd42811000c43b
+      # Its frozen source (the signed-update fixture is built from it) and the
+      # image identity the guest must report.
+      APPLIANCE_SOURCE_SHA: 0981ff3d037dedcf08cf7686474c65ba6b3784bf
+      APPLIANCE_SOURCE_TREE: e8d4bf11078fb32bdc7ad135fafa816b659c37e7
+      EXPECT_IMAGE_ID: "sha256:d2ce15f1f7a99c2875579d0cf55f1fe51f0c6e993071eed4bc201eccba732d79"
+      EXPECT_KERNEL_RELEASE: 7.0.0-42-generic
+      # Public HTTPS issuer for the changed OIDC discovery fetch (read-only GET,
+      # no credential, nothing saved).
+      OIDC_PUBLIC_ISSUER: https://accounts.google.com
+      # Guest profile (the harness defaults, recorded in the receipt).
+      GUEST_CPUS: "2"
+      GUEST_MEM_MB: "4096"
+      # Q7: three maintenance reboots, no injected latency, 120 s budget
+      # (name:read_ms:write_ms:budget_s).
+      Q7_PROFILE: "q7:0:0:120"
+      Q7_REBOOTS: "3"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Route guard (exact trigger; one empty commit; start deadline; daily window; no re-run after candidate execution)
+        env:
+          GUARD_EVENT: ${{ github.event_name }}
+          GUARD_REF: ${{ github.ref }}
+          GUARD_MESSAGE: ${{ github.event.head_commit.message }}
+          GUARD_BEFORE: ${{ github.event.before }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ] || { echo "::error::checkout is not $GITHUB_SHA"; exit 1; }
+          # A root or merge commit is refused by the check below with a reason.
+          GUARD_PARENTS="$(git rev-list --parents -n 1 HEAD | cut -s -d' ' -f2-)"
+          GUARD_HEAD_TREE="$(git rev-parse 'HEAD^{tree}')"
+          GUARD_PARENT_TREE="$(git rev-parse --verify -q 'HEAD^^{tree}' || true)"
+          GUARD_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # Earlier attempts' artifacts: a pre-boot receipt means a previous
+          # attempt reached candidate execution, so no re-run is allowed.
+          GUARD_PRIOR=""
+          if [ "${GITHUB_RUN_ATTEMPT:-1}" != 1 ]; then
+            # COUNT= proves the listing answered (an empty listing is valid:
+            # an attempt that failed before its receipt may upload nothing).
+            GUARD_PRIOR="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" --jq '"COUNT=\(.total_count)", .artifacts[].name' | tr '\n' ' ')" || GUARD_PRIOR="LISTING-FAILED"
+          fi
+          export GUARD_PARENTS GUARD_HEAD_TREE GUARD_PARENT_TREE GUARD_NOW GUARD_PRIOR
+          python3 -I - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import datetime as dt, os, re, sys
+          e = os.environ
+          bad = []
+          if e["GUARD_EVENT"] != "push":
+              bad.append(f"event is {e['GUARD_EVENT']!r}, not push")
+          if e["GUARD_REF"] != "refs/heads/test/appliance-lab":
+              bad.append(f"ref is {e['GUARD_REF']!r}, not refs/heads/test/appliance-lab")
+          msg = e["GUARD_MESSAGE"]
+          tags = [t.lower() for t in re.findall(r"\[[^\[\]\s]*\]", msg)]
+          if tags != ["[qemu-retained]"]:
+              bad.append(f"the message must carry exactly one bracket tag, [qemu-retained]; found {tags}")
+          if msg.rstrip("\n") != e["QEMU_TRIGGER_MESSAGE"]:
+              bad.append(f"the message is not exactly the reviewed trigger message {e['QEMU_TRIGGER_MESSAGE']!r}")
+          parents = e["GUARD_PARENTS"].split()
+          if len(parents) != 1:
+              bad.append(f"the trigger commit must have exactly one parent, has {len(parents)}")
+          if not re.fullmatch(r"[0-9a-f]{40}", e["GUARD_BEFORE"]) or parents[:1] != [e["GUARD_BEFORE"]]:
+              bad.append(f"the push must be exactly one commit on the previous head: parents {parents}, before {e['GUARD_BEFORE']!r}")
+          ht, pt = e["GUARD_HEAD_TREE"], e["GUARD_PARENT_TREE"]
+          if not re.fullmatch(r"[0-9a-f]{40}", ht) or ht != pt:
+              bad.append(f"the trigger commit must be empty: tree {ht!r}, parent tree {pt!r}")
+          z = lambda s: dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+          now, deadline = z(e["GUARD_NOW"]), z(e["CAMPAIGN_START_DEADLINE"])
+          if now >= deadline:
+              bad.append(f"start {e['GUARD_NOW']} is not before the owner's start deadline {e['CAMPAIGN_START_DEADLINE']}")
+          # The guest runs Ubuntu's apt-daily-upgrade.timer (06:00 UTC +
+          # RandomizedDelaySec 60 min) with the security pocket allowed: a run
+          # inside that window could change the package set mid-campaign. The
+          # whole job span (start + CAMPAIGN_MAX_MINUTES) must avoid
+          # [05:50, 07:10] UTC on every day it touches.
+          end = now + dt.timedelta(minutes=int(e["CAMPAIGN_MAX_MINUTES"]))
+          day = now.replace(hour=0, minute=0, second=0)
+          while day <= end:
+              w0, w1 = day.replace(hour=5, minute=50), day.replace(hour=7, minute=10)
+              if now < w1 and end > w0:
+                  bad.append(f"the job span {now:%H:%M}-{end:%H:%M} UTC meets the guest's daily upgrade window {w0:%Y-%m-%d %H:%M}-{w1:%H:%M}; start between 07:10 and 00:05 UTC")
+              day += dt.timedelta(days=1)
+          attempt = e.get("GITHUB_RUN_ATTEMPT", "1")
+          if attempt != "1":
+              toks = e["GUARD_PRIOR"].split()
+              counts = [t[6:] for t in toks if t.startswith("COUNT=")]
+              names = [t for t in toks if not t.startswith("COUNT=")]
+              if len(counts) != 1 or not counts[0].isdigit():
+                  bad.append(f"attempt {attempt}: the run's artifacts could not be listed, so earlier candidate execution cannot be excluded")
+              elif int(counts[0]) != len(names) or int(counts[0]) > 100:
+                  bad.append(f"attempt {attempt}: artifact listing incomplete ({counts[0]} reported, {len(names)} read)")
+              elif any(n.startswith("qemu-campaign-preboot-receipt") for n in names):
+                  bad.append(f"attempt {attempt}: an earlier attempt reached candidate execution (pre-boot receipt present); no re-run after candidate execution")
+          for p in bad:
+              print(f"::error::QEMU campaign route refused: {p}")
+          if bad:
+              sys.exit(1)
+          print(f"QEMU campaign route: {e['GITHUB_SHA']} = one empty commit on {parents[0]} (tree {ht}), message exactly the reviewed trigger; start {e['GUARD_NOW']} < {e['CAMPAIGN_START_DEADLINE']}; span to {end:%Y-%m-%dT%H:%MZ} clear of the daily upgrade window; attempt {attempt}")
+          PY
+      - name: Harness self-test (a known-unavailable agent response must FAIL the agent oracle)
+        run: test/e2e/appliance/lab/appliance-lab.sh selftest
+      - name: Host preflight (KVM, RAM, disk) and lab directory
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          { sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm; } || true  # best effort; preflight requires kvm below
+          [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "::error::/dev/kvm is not usable: this campaign is specified with KVM acceleration"; exit 1; }
+          nproc; free -m; df -h / /mnt 2>/dev/null || df -h /
+          best=/
+          if [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ]; then best=/mnt; fi
+          sudo mkdir -p "$best/culvert-lab" && sudo chown "$(id -u):$(id -g)" "$best/culvert-lab"
+          echo "LAB_ROOT=$best/culvert-lab" >> "$GITHUB_ENV"
+      - name: Install lab tools
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          if [ -f /etc/apt/apt-mirrors.txt ]; then sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt; fi
+          sudo sed -i 's#http://azure\.archive\.ubuntu\.com/ubuntu#https://archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
+          for _ in 1 2; do
+            sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+              libguestfs-tools qemu-utils qemu-system-x86 genisoimage isc-dhcp-client nftables skopeo imagemagick && break
+            sleep 15
+          done
+          for t in guestfish qemu-img qemu-system-x86_64 genisoimage nft skopeo convert ssh; do
+            command -v "$t" >/dev/null || { echo "::error::$t is not installed"; exit 1; }
+          done
+          # libguestfs (read-only reads of the retained disk) needs the host kernel readable.
+          sudo chmod 0644 /boot/vmlinuz-*
+          if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi
+          if command -v passt >/dev/null; then echo "::error::passt is still installed"; exit 1; fi
+          # As in the guest-boot route: plain public resolvers (the guest's
+          # user-mode DNS forwards to the host's resolver).
+          sudo rm -f /etc/resolv.conf
+          printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\noptions timeout:2 attempts:3\n' | sudo tee /etc/resolv.conf >/dev/null
+          getent hosts archive.ubuntu.com
+      - name: Fetch the RETAINED OVA by artifact id (zip, OVA and .ova.sha256 verified before anything else reads it)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          d="$LAB_ROOT/dl"; mkdir -p "$d" "$LAB_ROOT/ova"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$OVA_ARTIFACT_ID" > "$d/artifact.json"
+          python3 -I - "$d/artifact.json" <<'PY'
+          import json, os, sys
+          a = json.load(open(sys.argv[1])); e = os.environ; bad = []
+          if a.get("name") != e["OVA_ARTIFACT_NAME"]: bad.append(f"name {a.get('name')!r}")
+          if str(a.get("workflow_run", {}).get("id")) != e["OVA_ARTIFACT_RUN"]: bad.append(f"run {a.get('workflow_run')}")
+          if a.get("digest") != "sha256:" + e["OVA_ARTIFACT_ZIP_SHA256"]: bad.append(f"digest {a.get('digest')!r}")
+          if a.get("expired") is not False: bad.append("expired")
+          for b in bad: print(f"::error::artifact {e['OVA_ARTIFACT_ID']}: {b}")
+          sys.exit(1 if bad else 0)
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$OVA_ARTIFACT_ID/zip" > "$d/artifact.zip"
+          got="$(sha256sum "$d/artifact.zip" | cut -d' ' -f1)"
+          [ "$got" = "$OVA_ARTIFACT_ZIP_SHA256" ] || { echo "::error::artifact zip sha256 $got != $OVA_ARTIFACT_ZIP_SHA256"; exit 1; }
+          unzip -q "$d/artifact.zip" -d "$LAB_ROOT/ova"; rm -f "$d/artifact.zip"
+          got="$(sha256sum "$LAB_ROOT/ova/$OVA_NAME" | cut -d' ' -f1)"
+          [ "$got" = "$OVA_SHA256" ] || { echo "::error::OVA sha256 $got != $OVA_SHA256"; exit 1; }
+          [ "$(cut -d' ' -f1 "$LAB_ROOT/ova/$OVA_NAME.sha256")" = "$OVA_SHA256" ] || { echo "::error::.ova.sha256 does not name $OVA_SHA256"; exit 1; }
+          [ "$(ls "$LAB_ROOT/ova/"*.ova | wc -l)" = 1 ] || { echo "::error::expected exactly one OVA in the artifact"; exit 1; }
+          (cd "$LAB_ROOT/ova" && sha256sum dpkg-list.txt build-info.json package-provenance.tsv identity.txt) | tee "$LAB_ROOT/ova-inputs.sha256"
+          grep -qP "^linux-image-${EXPECT_KERNEL_RELEASE//./\\.}\t" "$LAB_ROOT/ova/dpkg-list.txt" || { echo "::error::dpkg-list.txt does not record linux-image-$EXPECT_KERNEL_RELEASE"; exit 1; }
+          echo "retained OVA $OVA_SHA256 from artifact $OVA_ARTIFACT_ID (zip $OVA_ARTIFACT_ZIP_SHA256)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Check out the frozen source (signed-update fixture only; tree verified)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.APPLIANCE_SOURCE_SHA }}
+          path: appliance-src
+          persist-credentials: false
+      - name: Verify the frozen source checkout
+        run: |
+          set -euo pipefail
+          [ "$(git -C appliance-src rev-parse HEAD)" = "$APPLIANCE_SOURCE_SHA" ] || { echo "::error::appliance-src is not $APPLIANCE_SOURCE_SHA"; exit 1; }
+          [ "$(git -C appliance-src rev-parse 'HEAD^{tree}')" = "$APPLIANCE_SOURCE_TREE" ] || { echo "::error::appliance-src tree is not $APPLIANCE_SOURCE_TREE"; exit 1; }
+          [ -z "$(git -C appliance-src status --porcelain)" ] || { echo "::error::appliance-src is not clean"; exit 1; }
+      - name: Go toolchain pinned by the frozen source
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: appliance-src/go.mod
+          cache: false
+      - name: "Retained OVA: its own application archive + manifest for the signed-update fixture (read-only)"
+        run: |
+          set -euo pipefail
+          X="$LAB_ROOT/ova-x"; mkdir -p "$X"
+          tar -xf "$LAB_ROOT/ova/$OVA_NAME" -C "$X"
+          D="$(ls "$X"/*.vmdk | head -1)"
+          O="$LAB_ROOT/build/overlay/var/lib/culvert-appliance"; mkdir -p "$O/images"
+          sudo env LIBGUESTFS_BACKEND=direct guestfish --ro -a "$D" -i \
+            download /var/lib/culvert-appliance/manifest.env "$O/manifest.env" : \
+            download /var/lib/culvert-appliance/images/culvert.tar.gz "$O/images/culvert.tar.gz"
+          sudo chown -R "$(id -u):$(id -g)" "$LAB_ROOT/build"; rm -rf "$X"
+          grep -E '^APP_IMAGE_(INDEX_DIGEST|REPO|TAG)=' "$O/manifest.env"
+          sha256sum "$O/images/culvert.tar.gz"
+          # The OVA was not modified by reading it.
+          [ "$(sha256sum "$LAB_ROOT/ova/$OVA_NAME" | cut -d' ' -f1)" = "$OVA_SHA256" ] || { echo "::error::OVA bytes changed"; exit 1; }
+      - name: "TEST-ONLY signed-update lab: disposable TLS registry (as ghcr.io) + fixture release evidence"
+        # Identical in function to the guest-boot route's step; here a failure
+        # stops the job BEFORE candidate execution (step 6c is a required
+        # maintenance path, never BLOCKED).
+        run: |
+          set -euo pipefail
+          U="$LAB_ROOT/update"; mkdir -p "$U/certs"; cd "$U/certs"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3 -subj "/CN=culvert-lab-registry-ca (TEST-ONLY)" \
+            -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" -keyout ca.key -out "$U/ca.crt" 2>/dev/null
+          openssl req -newkey rsa:2048 -nodes -subj "/CN=ghcr.io" -keyout reg.key -out reg.csr 2>/dev/null
+          printf 'subjectAltName=DNS:ghcr.io,IP:127.0.0.1,IP:10.0.2.2\nextendedKeyUsage=serverAuth\n' > ext.cnf
+          openssl x509 -req -in reg.csr -CA "$U/ca.crt" -CAkey ca.key -CAcreateserial -days 3 -extfile ext.cnf -out reg.crt 2>/dev/null
+          rm -f ca.key reg.csr   # the CA signs exactly one certificate
+          for i in 1 2 3; do docker pull -q registry:2 && break; sleep 5; done
+          docker run -d --name lab-registry -p 127.0.0.1:443:443 -v "$U/certs:/certs:ro" \
+            -e REGISTRY_HTTP_ADDR=0.0.0.0:443 -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/reg.crt -e REGISTRY_HTTP_TLS_KEY=/certs/reg.key registry:2
+          sudo install -D -m 0644 "$U/ca.crt" /etc/docker/certs.d/127.0.0.1:443/ca.crt
+          for i in $(seq 1 30); do curl -fsS --cacert "$U/ca.crt" https://127.0.0.1/v2/ >/dev/null && break; sleep 1; done
+          ME="$LAB_ROOT/build/overlay/var/lib/culvert-appliance/manifest.env"
+          B="$(sed -n 's/^APP_IMAGE_INDEX_DIGEST=//p' "$ME" | tail -1 | tr -d '"')"; REPO="$(sed -n 's/^APP_IMAGE_REPO=//p' "$ME" | tail -1 | tr -d '"')"; TAG="$(sed -n 's/^APP_IMAGE_TAG=//p' "$ME" | tail -1 | tr -d '"')"
+          [[ "$B" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no APP_IMAGE_INDEX_DIGEST in the OVA manifest"; exit 1; }
+          gunzip -c "$LAB_ROOT/build/overlay/var/lib/culvert-appliance/images/culvert.tar.gz" > "$U/baseline-oci.tar"
+          skopeo copy --all --preserve-digests --dest-cert-dir /etc/docker/certs.d/127.0.0.1:443 \
+            "oci-archive:$U/baseline-oci.tar" docker://127.0.0.1:443/kidcarmi/culvert:lab-baseline
+          rm -f "$U/baseline-oci.tar"
+          got="sha256:$(skopeo inspect --raw --cert-dir /etc/docker/certs.d/127.0.0.1:443 docker://127.0.0.1:443/kidcarmi/culvert:lab-baseline | sha256sum | cut -d' ' -f1)"
+          [ "$got" = "$B" ] || { echo "::error::registry baseline $got != the OVA's index digest $B"; exit 1; }
+          [ ! -e "$HOME/.docker" ] || sudo chown -R "$(id -u):$(id -g)" "$HOME/.docker"
+          docker image inspect "$REPO:$TAG" >/dev/null 2>&1 || { docker pull -q "127.0.0.1:443/kidcarmi/culvert@$B" && docker tag "127.0.0.1:443/kidcarmi/culvert@$B" "$REPO:$TAG"; }
+          printf 'FROM %s:%s\nLABEL org.culvert.lab-target="1"\n' "$REPO" "$TAG" | docker build --provenance=false --sbom=false -t 127.0.0.1:443/kidcarmi/culvert:lab-target -
+          docker push -q 127.0.0.1:443/kidcarmi/culvert:lab-target
+          T="sha256:$(skopeo inspect --raw --cert-dir /etc/docker/certs.d/127.0.0.1:443 docker://127.0.0.1:443/kidcarmi/culvert:lab-target | sha256sum | cut -d' ' -f1)"
+          BREF="ghcr.io/kidcarmi/culvert@$B"; TREF="ghcr.io/kidcarmi/culvert@$T"
+          (cd "$GITHUB_WORKSPACE/appliance-src" && GOTOOLCHAIN=local go run ./test/e2e/release-proof-fixture --output "$U/fixture" --ref "baseline=$BREF" --ref "target=$TREF")
+          REQ="$GITHUB_WORKSPACE/appliance-src/test/e2e/release-proof-fixture/request.py"
+          printf '{"image_ref":"%s","pre_backup":false,"rollback_on_failure":true,"idempotency_key":"lab-unsigned-%s"}' "$TREF" "$GITHUB_RUN_ID" > "$U/apply-unsigned.json"
+          printf '{"image_ref":"%s","pre_backup":false,"rollback_on_failure":true,"idempotency_key":"lab-apply-%s"}' "$TREF" "$GITHUB_RUN_ID" | python3 "$REQ" --proofs "$U/fixture/proofs.json" --prior "$BREF" > "$U/apply-signed.json"
+          printf '{"mode":"image","image_ref":"%s","idempotency_key":"lab-rollback-%s"}' "$BREF" "$GITHUB_RUN_ID" | python3 "$REQ" --proofs "$U/fixture/proofs.json" > "$U/rollback-signed.json"
+          cp "$U/fixture/keyring.json" "$U/keyring.json"
+          printf 'BASELINE_REF=%s\nTARGET_REF=%s\nREGISTRY_ADDR=10.0.2.2\n' "$BREF" "$TREF" > "$U/refs.env"
+          {
+            echo "TEST-ONLY trust configuration for step 6c (never part of the OVA)"
+            echo "fixture: test/e2e/release-proof-fixture @ $APPLIANCE_SOURCE_SHA (ephemeral ed25519 key id lab-ephemeral; private key never written)"
+            echo "public keyring sha256: $(sha256sum "$U/keyring.json" | cut -d' ' -f1)"
+            echo "registry: disposable registry:2 on the runner (127.0.0.1:443), reached by the guest as ghcr.io via 10.0.2.2"
+            echo "registry CA sha256: $(sha256sum "$U/ca.crt" | cut -d' ' -f1) (CA private key deleted after signing one certificate)"
+            echo "baseline: $BREF (= the OVA's own index digest, pushed with digests preserved)"
+            echo "target:   $TREF (baseline + LABEL org.culvert.lab-target=1)"
+            echo "guest changes made by the harness: /etc/hosts ghcr.io entry, /etc/docker/certs.d/ghcr.io/ca.crt, /etc/culvert-maint/lab-fixture-keyring.json, release_trust_keys in /etc/culvert-maint/config.toml"
+          } > "$U/fixture.txt"
+          cat "$U/fixture.txt"; touch "$U/READY"
+      - name: "Recovery lab: device-mapper target available"
+        run: |
+          set -euo pipefail
+          sudo modprobe dm_delay 2>/dev/null || { sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" && sudo modprobe dm_delay; }
+          lsmod | grep -E '^dm_delay' && sudo dmsetup targets | grep -E '^(delay|linear) '
+      - name: "Pre-boot reachability of the public OIDC issuer (an outage here is infrastructure, before candidate execution)"
+        run: |
+          set -euo pipefail
+          curl -fsS -m 20 "$OIDC_PUBLIC_ISSUER/.well-known/openid-configuration" -o "$LAB_ROOT/oidc-preboot.json"
+          python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["issuer"].rstrip("/")==sys.argv[2].rstrip("/"), d.get("issuer"); print("issuer", d["issuer"])' "$LAB_ROOT/oidc-preboot.json" "$OIDC_PUBLIC_ISSUER"
+      - name: "Containment: egress limited to DNS/NTP/HTTP(S); self-test; listener monitor (a violation powers the guest down)"
+        run: |
+          set -euo pipefail
+          C="$LAB_ROOT/containment"; mkdir -p "$C"
+          # OUTPUT hook: covers this host and QEMU's user-mode network (the
+          # guest's traffic leaves as QEMU's own sockets). Loopback (the guest's
+          # port forwards, the disposable registry, the lab's origins) stays open.
+          sudo nft -f - <<'NFT'
+          table inet culvert_lab_egress {
+            chain out {
+              type filter hook output priority 0; policy accept;
+              oifname "lo" accept
+              ct state established,related accept
+              ip daddr { 168.63.129.16, 169.254.169.254 } accept
+              meta l4proto { tcp, udp } th dport 53 accept
+              udp dport 123 accept
+              tcp dport { 80, 443 } accept
+              counter log prefix "culvert-lab-egress-deny " level info reject
+            }
+          }
+          NFT
+          sudo nft list table inet culvert_lab_egress | tee "$C/ruleset.txt"
+          sha256sum "$C/ruleset.txt" | cut -d' ' -f1 > "$C/ruleset.sha256"
+          # Self-test: an allowed HTTPS fetch and DNS answer; a denied port is refused.
+          curl -fsS -m 20 -o /dev/null https://archive.ubuntu.com/ubuntu/dists/noble/Release && echo "allowed: https archive.ubuntu.com" | tee "$C/selftest.txt"
+          getent hosts database.clamav.net >/dev/null && echo "allowed: dns database.clamav.net" | tee -a "$C/selftest.txt"
+          if timeout 10 bash -c 'exec 3<>/dev/tcp/1.1.1.1/22' 2>/dev/null; then echo "::error::egress to 1.1.1.1:22 was NOT refused"; exit 1; fi
+          if timeout 10 bash -c 'exec 3<>/dev/tcp/8.8.8.8/8443' 2>/dev/null; then echo "::error::egress to 8.8.8.8:8443 was NOT refused"; exit 1; fi
+          echo "refused: tcp 1.1.1.1:22, tcp 8.8.8.8:8443" | tee -a "$C/selftest.txt"
+          sudo nft list table inet culvert_lab_egress | grep -E 'counter packets [1-9]' | tee -a "$C/selftest.txt"
+          # TCP listener baseline, then a monitor: a new non-loopback TCP listener
+          # (the guest's port forwards are TCP; user-mode NAT's own UDP client
+          # sockets bind 0.0.0.0 by design and are not listeners), or
+          # the egress table gone, is a containment loss -> ACPI power-down of
+          # every lab guest through its QEMU monitor socket.
+          ss -H -ltn | awk '{print "tcp", $4}' | sort -u > "$C/listeners-baseline.txt"
+          cat > "$C/monitor.sh" <<'MON'
+          #!/usr/bin/env bash
+          C="$1"
+          loopback() { [[ "$1" == 127.* || "$1" == "[::1]"* || "$1" == "::1"* || "$1" == "[::ffff:127."* || "$1" == "*%lo:"* ]]; }
+          while :; do
+            ts="$(date -u +%FT%TZ)"; v=""
+            sudo nft list table inet culvert_lab_egress >/dev/null 2>&1 || v="egress table missing"
+            while read -r proto addr; do
+              loopback "$addr" && continue
+              grep -qxF "$proto $addr" "$C/listeners-baseline.txt" || v="${v:+$v; }new listener $proto $addr"
+            done < <(ss -H -ltn | awk '{print "tcp", $4}' | sort -u)
+            if [[ -n "$v" ]]; then
+              echo "$ts VIOLATION $v" >> "$C/monitor.log"
+              for s in /tmp/culvert-lab-[0-9a-f]*.sock; do
+                [[ -S "$s" && "$s" != *-ser-* ]] || continue
+                python3 -I -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.send(b"system_powerdown\n"); time.sleep(0.5)' "$s" 2>/dev/null \
+                  && echo "$ts powerdown sent to $s" >> "$C/monitor.log"
+              done
+            else echo "$ts ok" >> "$C/monitor.log"; fi
+            sleep 30
+          done
+          MON
+          chmod +x "$C/monitor.sh"
+          nohup "$C/monitor.sh" "$C" > /dev/null 2>&1 &
+          echo $! > "$C/monitor.pid"
+          sleep 2; kill -0 "$(cat "$C/monitor.pid")"; tail -1 "$C/monitor.log"
+      - name: Pre-boot receipt (environment + identities), retained BEFORE the first candidate boot
+        run: |
+          set -euo pipefail
+          C="$LAB_ROOT/containment"; R="$LAB_ROOT/receipt"; mkdir -p "$R"
+          python3 -I - "$R/preboot-receipt.json" <<'PY'
+          import json, os, subprocess, sys, datetime as dt
+          e = os.environ
+          sh = lambda c: subprocess.run(c, shell=True, capture_output=True, text=True).stdout.strip()
+          r = {
+            "campaign": "retained-OVA QEMU campaign, owner decision 2026-11-06",
+            "created_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "lab_commit": e["GITHUB_SHA"], "run_id": e["GITHUB_RUN_ID"], "run_attempt": e.get("GITHUB_RUN_ATTEMPT"),
+            "harness_blob": sh("git rev-parse HEAD:test/e2e/appliance/lab/appliance-lab.sh"),
+            "pkgset_verdict_blob": sh("git rev-parse HEAD:test/e2e/appliance/lab/pkgset-verdict.py"),
+            "workflow_blob": sh("git rev-parse HEAD:.github/workflows/appliance-lab.yml"),
+            "runner": {"image_os": e.get("ImageOS"), "image_version": e.get("ImageVersion"), "runner_os": e.get("RUNNER_OS"),
+                       "runner_arch": e.get("RUNNER_ARCH"), "runner_environment": e.get("RUNNER_ENVIRONMENT"),
+                       "os_release": sh(". /etc/os-release && echo \"$PRETTY_NAME\""), "kernel": sh("uname -a"),
+                       "cpus": sh("nproc"), "cpu_model": sh("grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"),
+                       "mem_mib": sh("free -m | awk '/^Mem:/{print $2}'"), "lab_root_free": sh(f"df -h {e['LAB_ROOT']} | tail -1")},
+            "qemu": {"version": sh("qemu-system-x86_64 --version | head -1"), "package": sh("dpkg-query -W -f='${Version}' qemu-system-x86"),
+                     "kvm": sh("ls -l /dev/kvm"), "acceleration": "kvm"},
+            "guest_profile": {"cpus": e["GUEST_CPUS"], "mem_mb": e["GUEST_MEM_MB"], "machine": "pc (SeaBIOS)", "disk": "virtio-scsi over a disposable raw copy behind device-mapper (LAB_DISK=dm)",
+                              "nic": "e1000, QEMU user-mode network, guest 22/8080/9090 forwarded to 127.0.0.1 only", "display": "vmware SVGA (console leg: VMware SVGA without serial)",
+                              "ovf_transport": "ovf-env.xml ISO", "q7_profile": e["Q7_PROFILE"], "q7_reboots": e["Q7_REBOOTS"]},
+            "artifact": {"id": e["OVA_ARTIFACT_ID"], "run": e["OVA_ARTIFACT_RUN"], "name": e["OVA_ARTIFACT_NAME"], "zip_sha256": e["OVA_ARTIFACT_ZIP_SHA256"],
+                         "ova": e["OVA_NAME"], "ova_sha256": e["OVA_SHA256"], "inputs": open(os.path.join(e["LAB_ROOT"], "ova-inputs.sha256")).read().split("\n")},
+            "source": {"sha": e["APPLIANCE_SOURCE_SHA"], "tree": e["APPLIANCE_SOURCE_TREE"], "go": sh("go version")},
+            "expect": {"image_id": e["EXPECT_IMAGE_ID"], "kernel_release": e["EXPECT_KERNEL_RELEASE"], "oidc_issuer": e["OIDC_PUBLIC_ISSUER"]},
+            "containment": {"egress_ruleset_sha256": open(os.path.join(e["LAB_ROOT"], "containment/ruleset.sha256")).read().strip(),
+                            "selftest": open(os.path.join(e["LAB_ROOT"], "containment/selftest.txt")).read().split("\n"),
+                            "listener_baseline": open(os.path.join(e["LAB_ROOT"], "containment/listeners-baseline.txt")).read().split("\n")},
+            "deadline": e["CAMPAIGN_START_DEADLINE"], "window_hours": 24,
+          }
+          import re
+          for k in ("harness_blob", "pkgset_verdict_blob", "workflow_blob"):
+              if not re.fullmatch(r"[0-9a-f]{40}", r[k]):
+                  sys.exit(f"::error::receipt: {k} is not a git object id ({r[k]!r}); no receipt, no candidate execution")
+          json.dump(r, open(sys.argv[1], "w"), indent=1)
+          print(json.dumps({k: r[k] for k in ("runner", "qemu", "guest_profile")}, indent=1))
+          PY
+          cp "$C/ruleset.txt" "$C/selftest.txt" "$C/listeners-baseline.txt" "$R/"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qemu-campaign-preboot-receipt-a${{ github.run_attempt }}
+          path: ${{ env.LAB_ROOT }}/receipt
+          retention-days: 90
+          if-no-files-found: error
+      - name: "Campaign: preflight → up → qualify → changed paths → engine surface → Q7 → history → final M2 (stop on failure; collect + ACPI down always)"
+        timeout-minutes: 220
+        run: |
+          set -euo pipefail
+          export LAB_DIR="$LAB_ROOT/lab" LAB_DISK=dm LAB_ACCEL=kvm LAB_MIN_FREE_GB=20
+          export LAB_CPUS="$GUEST_CPUS" LAB_MEM_MB="$GUEST_MEM_MB"
+          export LAB_OVA="$LAB_ROOT/ova/$OVA_NAME" LAB_OVA_SHA256="$OVA_SHA256" LAB_EXPECT_IMAGE_ID="$EXPECT_IMAGE_ID"
+          export LAB_RECOVERY_REBOOTS="$Q7_REBOOTS" LAB_RECOVERY_PROFILES="$Q7_PROFILE" LAB_RECOVERY_VARIANTS=base
+          export LAB_HISTORY=1 LAB_ENGINE_SURFACE=1 LAB_M2_HARDENING=1 LAB_M2_ONLY=0
+          export LAB_PRESSURE=0 LAB_FP2=0 LAB_LDAP=0 LAB_CACHEBYPASS=0
+          # Owner stop conditions: stop after the phase with a failed check.
+          export LAB_FAIL_FAST=1
+          export LAB_UPDATE_DIR="$LAB_ROOT/update"
+          export LAB_OS_UPDATE=check LAB_EXPECT_DPKG="$LAB_ROOT/ova/dpkg-list.txt" LAB_EXPECT_KERNEL="$EXPECT_KERNEL_RELEASE"
+          export LAB_CHANGED_PATHS=1 LAB_OIDC_PUBLIC_ISSUER="$OIDC_PUBLIC_ISSUER"
+          unset LAB_ENGINE_DEBS LAB_ADOPT_IMAGE_TAR LAB_EXTERNAL LAB_PRIV_CMD LAB_KEEP_DISKS
+          test/e2e/appliance/lab/appliance-lab.sh all
+      - name: "Console display: VMware SVGA, no serial — frames through boot, reboots, Esc, Alt+F12, serial-only (only after a clean campaign)"
+        if: success()
+        timeout-minutes: 75
+        run: |
+          set -euo pipefail
+          export LAB_DIR="$LAB_ROOT/console" LAB_ACCEL=kvm LAB_MIN_FREE_GB=15 LAB_CPUS="$GUEST_CPUS" LAB_MEM_MB="$GUEST_MEM_MB"
+          export LAB_OVA="$LAB_ROOT/ova/$OVA_NAME" LAB_OVA_SHA256="$OVA_SHA256"
+          test/e2e/appliance/lab/appliance-lab.sh preflight
+          test/e2e/appliance/lab/appliance-lab.sh console
+      - name: Safe shutdown (any guest still running is powered down by ACPI, then stopped) and containment monitor stop
+        if: always()
+        run: |
+          # Cleanup must run to the end: GitHub starts this shell with -e, and a
+          # kill of an already-stopped process must not end the step early.
+          set +e -u -o pipefail
+          C="${LAB_ROOT:-/nonexistent}/containment"
+          for p in "${LAB_ROOT:-/nonexistent}"/lab/work/qemu.pid "${LAB_ROOT:-/nonexistent}"/console/work/qemu.pid; do
+            [ -s "$p" ] && kill -0 "$(cat "$p")" 2>/dev/null || continue
+            echo "guest $(cat "$p") still running: ACPI power-down"
+            for s in /tmp/culvert-lab-[0-9a-f]*.sock; do
+              [[ -S "$s" && "$s" != *-ser-* ]] && python3 -I -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.send(b"system_powerdown\n"); time.sleep(0.5)' "$s" 2>/dev/null
+            done
+            for _ in $(seq 1 60); do kill -0 "$(cat "$p")" 2>/dev/null || break; sleep 2; done
+            kill -0 "$(cat "$p")" 2>/dev/null && { echo "guest did not power down in 120 s: SIGTERM"; kill "$(cat "$p")"; sleep 5; kill -9 "$(cat "$p")" 2>/dev/null || true; }
+          done
+          [ -s "$C/monitor.pid" ] && kill "$(cat "$C/monitor.pid")" 2>/dev/null
+          [ -d "$C" ] && { sudo nft list table inet culvert_lab_egress > "$C/ruleset-end.txt" 2>&1 || true; }
+          echo "shutdown complete"
+      - name: Campaign verdict (scope-to-assertion map; PASS only if every required check passed and only declared residuals remain)
+        if: always()
+        run: |
+          set -uo pipefail
+          mkdir -p "$LAB_ROOT/verdict"
+          python3 -I - "$LAB_ROOT" "$LAB_ROOT/verdict" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, os, re, sys, time
+          root, out = sys.argv[1], sys.argv[2]
+          M2 = ["transcript", "hardening", "ordering", "preconditions", "ruleset", "clamav", "clamav-ready"]
+          CP = ["firstboot", "maintenance", "reboot", "final"]
+          Q7 = [f"R/{c}-q7-{i}" for i in (1, 2, 3) for c in ("recovery", "backup-list", "state", "operator-capture-integrity")] + ["R/clamav-evidence", "R/recovery-cases"]
+          SCOPE = {
+            "cold boot / provisioning": ["P/tools", "P/memory", "P/disk", "P/accel", "1/ova-sha256", "1/ova-manifest", "1/disk-chain", "2/boot-started", "2/kernel-started",
+              "2/operator-ssh-up", "2/firstboot-complete", "3/status-setup-pending", "3/firstboot-steps", "3a/console-onetime-printed", "3a/console-login",
+              "3a/password-changed", "3/culvert-status-setup-pending", "3/image-identity", "3/setup-token", "3e/recovery-secrets", "8/firstboot-not-rerun", "8/state-files"],
+            "admin and agent access": ["3/operator-observe", "3c/operator-commands-refused", "3c/forwarding-refused", "3c/file-transfer-refused", "3c/local-admin-ssh-refused",
+              "3c/sshd-effective", "3c/local-admin-sudo-needs-password", "4a/bootstrap-api-needs-token", "4/setup-without-token", "4/setup-with-token", "4/admin-login",
+              "4/status-setup-complete", "4/operator-setup-complete", "4b/demotion-immediate", "6/agent-installed", "6/agent-reachable", "8/admin-login", "8/agent-reachable", "8/operator-status"],
+            "policy enforcement": ["5/auth-exempt", "5/default-deny", "5/traffic", "5/status-ready-to-enforce", "5/ca-identity", "8/policy-persisted", "8/enforcement", "8/ca-identity", "8/ca-encrypted-at-rest"],
+            "category readiness": ["5b/category-data", "5c/category-enforcement", "8/category-data"],
+            "ClamAV behaviour": ["5/ready-rows", "5/clamav-real", "8/ready", "R/clamav-evidence"] + [f"M2H/{t}-{n}" for t in CP for n in ("clamav", "clamav-ready")],
+            "changed API/auth paths": ["CP/country-traffic-unauth", "CP/country-traffic", "CP/idp-discover-unauth", "CP/idp-discover-private-refused", "CP/idp-discover-public"],
+            "backup / restore": ["6/agent-backup", "6/backup-listed", "6/restore-dry-run", "6b/restore-refused-while-running", "6b/allowlist-survived-restore", "6b/restore-commit",
+              "8/backup-listed", "8/restore-persisted", "H/history-recorded", "H/history-export", "H/history-export-opaque", "H/history-backup", "H/history-source-destroyed",
+              "H/history-gone-after-restore", "H/history-import-refused-while-running", "H/history-wrong-passphrase", "H/history-import-dry-run", "H/history-recovered",
+              "H/allowlist-survived-recovery", "H/history-enforcement"],
+            "maintenance paths": ["6c/test-only-trust", "6c/unsigned-apply-refused", "6c/signed-apply", "6c/signed-rollback", "6d/support-bundle", "7/reboot", "7/kernel", "7/docker-held",
+              "8/stack-resumed", "8/support-persisted", "8/image-identity"],
+            "Q7: three consecutive recoveries, 120 s full-joint": Q7,
+            "console display (QEMU evidence)": ["V/ova-sha256", "V/ova-manifest", "V1/tty1-after-first-boot", "V1/tty1-text-mode", "V1/splash-on-display", "V2/tty1-after-reboot-with-failures",
+              "V2/tty1-text-mode", "V2/splash-before-esc", "V2/esc-shows-boot-messages", "V2/esc-one-way", "V2/splash-healthy-control", "V2/splash-names-failed-unit",
+              "V3/tty1-after-postboot-writes", "V4/tty1-after-clean-reboot", "V4/tty1-text-mode", "V4/no-graphics-after-splash", "V4/console-build-identity",
+              "V5/no-splash-without-display", "V5/serial-only-boot", "V5/serial-shutdown"],
+            "final M2 and engine surface": [f"M2H/{t}-{n}" for t in CP for n in M2 if not n.startswith("clamav")] + ["E/kernel-is-the-only-installed", "E/snapd-absent",
+              "E/engine-no-tcp-listener", "E/containerd-socket-root-only", "E/docker-socket-root-only", "E/dockerd-no-tcp-host", "E/containerd-cri-disabled", "E/kernel-modules-denied",
+              "E/kernel-hwe", "E/drm-root-only", "E/kernel-cve-assumptions", "E/m2-hardening", "E/ext4-no-ea-inode", "E/extra-modules-unloadable", "E/containerd-tracing-off"],
+            "package set and kernel unchanged (stop condition)": [f"K/{t}-{n}" for t in ("maintenance", "recovery", "final") for n in ("pkgset", "kernel")],
+          }
+          # Declared residuals: the ONLY checks allowed to be other than pass/info, each with its exact result.
+          RESIDUAL = {
+            "4b/portal-cookie-replay": ("blocked", "needs an identity provider; covered by TestUISessionRole_RejectsReplayedPortalCookie and the proxy cookie-boundary tests in CI"),
+            "CP/saml-metadata-fetch": ("not-run", "SAML metadata URL fetch runs only on SAML profile creation; covered by CI only"),
+            "7/os-update": ("info", "package upgrade not run by campaign scope (LAB_OS_UPDATE=check: no kernel transition, package set held)"),
+          }
+          checks, order = {}, []
+          for sub in ("lab", "console"):
+              p = os.path.join(root, sub, "evidence", "checks.jsonl")
+              if not os.path.exists(p):
+                  continue
+              for line in open(p):
+                  j = json.loads(line); k = f"{j['step']}/{j['check']}"
+                  key = k if sub == "lab" or k.startswith("V") else f"console:{k}"
+                  checks.setdefault(key, []).append(j); order.append((key, j))
+          started = os.path.exists(os.path.join(root, "receipt", "preboot-receipt.json"))
+          problems, rows = [], []
+          fails = [(k, j) for k, j in order if j["result"] == "fail"]
+          for k, j in fails:
+              problems.append(f"FAIL {k}: {j['detail'][:240]}")
+          if any(k == "F/fail-fast" for k, _ in order):
+              problems.append("stop condition: the campaign stopped after a failed phase (LAB_FAIL_FAST)")
+          for item, req in SCOPE.items():
+              missing = []
+              for k in req:
+                  rs = [j["result"] for j in checks.get(k, [])]
+                  if not rs or any(r != "pass" for r in rs):
+                      missing.append(f"{k}={'/'.join(rs) or 'absent'}")
+              rows.append((item, "PASS" if not missing else "FAIL", len(req), missing))
+              if missing:
+                  problems.append(f"scope '{item}': required evidence not passed: {', '.join(missing[:12])}")
+          residuals = []
+          for k, (want, why) in RESIDUAL.items():
+              rs = [j["result"] for j in checks.get(k, [])]
+              if rs == [want]:
+                  residuals.append(f"{k} ({want}): {why}")
+              elif started and not fails:
+                  problems.append(f"declared residual {k}: expected exactly one '{want}', got {rs or 'absent'}")
+          for k, js in checks.items():
+              for j in js:
+                  if j["result"] in ("blocked", "not-run", "known-failure") and k not in RESIDUAL and not fails:
+                      problems.append(f"undeclared {j['result']} {k}: {j['detail'][:200]}")
+          # 24 h window from the first candidate boot.
+          st = {}
+          sp = os.path.join(root, "lab", "state.env")
+          if os.path.exists(sp):
+              for line in open(sp):
+                  if "=" in line:
+                      a, b = line.rstrip("\n").split("=", 1); st[a] = b.strip("'")
+          boot = int(st["BOOT_STARTED"]) if st.get("BOOT_STARTED", "").isdigit() else None
+          if boot and time.time() - boot >= 86400:
+              problems.append("the campaign exceeded 24 h from the first candidate boot")
+          # Containment.
+          ml = os.path.join(root, "containment", "monitor.log")
+          viol = [l.strip() for l in open(ml)] if os.path.exists(ml) else []
+          viol = [l for l in viol if " VIOLATION " in l]
+          if viol:
+              problems.append(f"loss of containment: {viol[:3]}")
+          if started and not os.path.exists(ml):
+              problems.append("containment monitor log absent")
+          if not started:
+              verdict = "NOT STARTED (no candidate execution: stopped before the pre-boot receipt)"
+          elif problems:
+              verdict = "FAIL"
+          else:
+              verdict = "PASS" + (" with RESIDUALS" if residuals else "")
+          res = {"verdict": verdict, "lab_commit": os.environ.get("GITHUB_SHA"), "ova_sha256": os.environ.get("OVA_SHA256"),
+                 "first_candidate_boot_epoch": boot, "scope": [{"item": i, "result": r, "required": n, "not_passed": m} for i, r, n, m in rows],
+                 "residuals": residuals, "problems": problems, "containment_violations": viol,
+                 "counts": {r: sum(1 for _, j in order if j["result"] == r) for r in ("pass", "fail", "info", "blocked", "not-run", "known-failure")}}
+          json.dump(res, open(os.path.join(out, "verdict.json"), "w"), indent=1)
+          md = [f"## QEMU campaign verdict: **{verdict}**", "", f"OVA `{res['ova_sha256']}`, lab `{res['lab_commit']}`", "", "| Scope item | Result | Required checks |", "|---|---|---|"]
+          md += [f"| {i} | {r} | {n}{' — not passed: ' + ', '.join(m[:6]) if m else ''} |" for i, r, n, m in rows]
+          md += ["", "**Residuals:**"] + [f"- {x}" for x in residuals] + ["", "**Problems:**"] + [f"- {x}" for x in problems or ["none"]]
+          open(os.path.join(out, "verdict.md"), "w").write("\n".join(md) + "\n")
+          print("\n".join(md))
+          sys.exit(0 if verdict.startswith("PASS") else 1)
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: qemu-campaign-evidence-${{ env.VARIANT }}-a${{ github.run_attempt }}
+          path: |
+            ${{ env.LAB_ROOT }}/lab/evidence
+            ${{ env.LAB_ROOT }}/console/evidence
+            ${{ env.LAB_ROOT }}/receipt
+            ${{ env.LAB_ROOT }}/containment
+            ${{ env.LAB_ROOT }}/verdict
+            ${{ env.LAB_ROOT }}/ova-inputs.sha256
+            ${{ env.LAB_ROOT }}/update/fixture.txt
+          retention-days: 90
+          if-no-files-found: warn
+
   f-disk-1:
     name: "Lab · F-DISK-1 on the bounded nested-Docker host"
-    if: ${{ github.event_name == 'push' && !contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[preserve-image]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && github.event_name == 'push' && !contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[preserve-image]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -1334,7 +1921,7 @@ jobs:
   # re-quarantine). Runs ONLY on the explicit [midimport-kill] tag.
   f-disk-midimport-kill:
     name: "Lab · F-DISK interrupted-import recovery (SIGKILL mid-import → quarantine+rebuild)"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[midimport-kill]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[midimport-kill]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -1484,7 +2071,7 @@ jobs:
     # run once the new candidate OVA exists and OVA_ARTIFACT_ID/OVA_SHA256 below
     # are repointed to it. On the default (untagged) Phase-1 push guest-boot
     # builds that OVA; this job then runs on the explicit [agent-identity] tag.
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[agent-identity]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[agent-identity]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -1615,7 +2202,7 @@ jobs:
   # [boot-console] runs this job alone.
   boot-console:
     name: "Lab · boot console (VMware SVGA, no serial) · ${{ matrix.variant }}"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[boot-console]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[boot-console]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
@@ -1701,7 +2288,7 @@ jobs:
   # Runs only when the head commit says [saml-replay].
   saml-cookie-purpose:
     name: "Lab · SAML login + cookie-purpose replay · ${{ matrix.label }}"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[saml-replay]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[saml-replay]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -1800,7 +2387,7 @@ jobs:
   # 32c2be57); the 1.4.6 bad788e5 control is retained to prove F-P2 reproduces.
   fp2-isolated:
     name: "Lab · F-P2 isolated: exact sidecar, temp-dir exhaustion, scripted client · ${{ matrix.label }}"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[fp2-isolated]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[fp2-isolated]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     # Re-run (user directive, 27 Oct) for the NEW sidecar
@@ -1995,7 +2582,7 @@ jobs:
   # Opt-in: [preserve-image].
   preserve-image:
     name: "Lab · preserve candidate image tar (Deep run 41208642365, 0981ff3d)"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[preserve-image]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[preserve-image]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # FB-1c (31 Oct): the candidate of the FB-1 final SHA 0981ff3d. Earlier
@@ -2050,7 +2637,7 @@ jobs:
   # retains the archive itself for independent rescans. Opt-in: [sidecar-exact].
   exact-sidecar-scan:
     name: "Lab · exact sidecar culvert.4 (manifest 91eae575): reproduce + all-severity scan + SBOM + retained archive"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[sidecar-exact]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[sidecar-exact]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -2164,7 +2751,7 @@ jobs:
   # answers ERROR to every one of them.
   fp2-source:
     name: "Lab · F-P2 causal: ClamAV 1.4.6 from source, stock vs one-line patch"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[fp2-source]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[fp2-source]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -2259,7 +2846,7 @@ jobs:
 
   ova-sidecar-scan:
     name: "Lab · candidate OVA's baked ClamAV sidecar: exact-byte scan + SBOM"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[saml-replay]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[saml-replay]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -2379,7 +2966,7 @@ jobs:
     # running by default only fails on a missing/stale artifact (it was pinned
     # to the retired 2e3bcc2a round). Set ADOPT_VARIANT to the adoption variant
     # and push with [adopted-scan] when that flow has produced the artifact.
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[adopted-scan]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[adopted-scan]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -2452,7 +3039,7 @@ jobs:
   # sidecars read out of each OVA's own disk. Runs only on [recovery-ab].
   recovery-ab:
     name: "Lab · recovery A/B on RETAINED OVAs (one runner, A B B A) + baked-sidecar diff"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[recovery-ab]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[recovery-ab]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     env:
@@ -2640,7 +3227,7 @@ jobs:
   # Runs only on a commit whose message carries the sidecar-repro tag.
   sidecar-repro:
     name: "Lab · reproducible ClamAV sidecar build (real build-ova.sh block, 2 × 2 builds)"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[sidecar-repro]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[sidecar-repro]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
@@ -2736,7 +3323,7 @@ jobs:
   # Runs only on a commit whose message carries the scan-candidate tag.
   scan-candidate:
     name: "Lab · exact-byte scan of the candidate (guest OS + host binaries + app image, all severities) + govulncheck"
-    if: ${{ !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[scan-candidate]')) }}
+    if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[scan-candidate]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
