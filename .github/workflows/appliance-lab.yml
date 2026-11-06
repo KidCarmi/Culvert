@@ -1406,6 +1406,7 @@ jobs:
           # Campaign-wide stop latch and clock anchor, shared by both guest legs.
           echo "LAB_CAMPAIGN_STOP_FILE=$best/culvert-lab/campaign.stop" >> "$GITHUB_ENV"
           echo "LAB_CAMPAIGN_CLOCK_FILE=$best/culvert-lab/campaign-clock.json" >> "$GITHUB_ENV"
+          echo "LAB_CAMPAIGN_STARTED_FILE=$best/culvert-lab/campaign-started.json" >> "$GITHUB_ENV"
       - name: Install lab tools
         timeout-minutes: 25
         run: |
@@ -1692,11 +1693,19 @@ jobs:
               pkill -TERM -f 'qemu-system-x86_64 -name culvert-'; echo "$(date -u +%FT%TZ) $(date +%s) escalation SIGTERM" >> "$C/monitor.log"; sleep 10
               pkill -KILL -f 'qemu-system-x86_64 -name culvert-' && echo "$(date -u +%FT%TZ) $(date +%s) escalation SIGKILL" >> "$C/monitor.log"
             fi; }
+          live() { [ -n "$1" ] && [ -r "/proc/$1/stat" ] && [ "$(sed -n 's/^.*) \(.\) .*$/\1/p' "/proc/$1/stat" 2>/dev/null)" != Z ]; }
           base="$(cat "$C/ruleset.canon")"
           echo "$(date -u +%FT%TZ) $(date +%s) monitor-start pid=$$ ruleset=$base" >> "$C/monitor.log"
           while :; do
+            [ -e "$C/supervision.stopping" ] && { echo "$(date -u +%FT%TZ) $(date +%s) monitor-exit stopping" >> "$C/monitor.log"; exit 0; }
             seq=$((seq+1)); v=""
             [ "$(canon)" = "$base" ] || v="egress ruleset changed or missing"
+            # Mutual supervision: once the watchdog is up, it must be running
+            # with a heartbeat at most 45 s old.
+            if [ -s "$C/watchdog.pid" ]; then
+              wp="$(cat "$C/watchdog.pid")"; wl="$(awk '$3=="wd-ok"{e=$2} END{print e}' "$C/watchdog.log" 2>/dev/null)"
+              live "$wp" && [ -n "$wl" ] && [ $(( $(date +%s) - wl )) -le 45 ] || v="${v:+$v; }watchdog not running or its heartbeat is stale"
+            fi
             kill -0 "$(cat "$C/dnsmasq.pid" 2>/dev/null)" 2>/dev/null || v="${v:+$v; }guest resolver not running"
             [ -d "/sys/fs/cgroup/$G" ] || v="${v:+$v; }guest cgroup missing"
             while read -r a; do
@@ -1718,6 +1727,68 @@ jobs:
           sudo pgrep -f "$C/monitor.sh" | head -1 > "$C/monitor.pid"
           [ -s "$C/monitor.pid" ] && grep -q ' ok seq=1$' "$C/monitor.log" || { echo "::error::the containment monitor did not start"; cat "$C/monitor.log" 2>/dev/null; exit 1; }
           tail -2 "$C/monitor.log"
+          # The watchdog (root, outside the guest cgroup) supervises the
+          # monitor: every 10 s it requires the monitor running with a
+          # heartbeat at most 45 s old and re-checks the effective ruleset
+          # itself. The monitor supervises the watchdog the same way, and the
+          # harness checks both before every guest launch and at every gate,
+          # privileged command, Q7 sample and QEMU liveness poll. A failure
+          # latches the campaign stop and powers the guests down (ACPI, then
+          # SIGTERM, then SIGKILL), exactly as a containment violation does.
+          cat > "$C/watchdog.sh" <<'WD'
+          #!/usr/bin/env bash
+          C="$1"; LATCH="$2"; seq=0; escalated=0
+          canon() { nft -j list table inet culvert_lab_egress 2>/dev/null | python3 -I -c 'import json,sys
+          d=json.load(sys.stdin)["nftables"]
+          def s(o):
+              if isinstance(o, dict): return {k: s(v) for k, v in o.items() if k not in ("handle", "elem", "packets", "bytes", "metainfo")}
+              if isinstance(o, list): return [s(x) for x in o if not (isinstance(x, dict) and "metainfo" in x)]
+              return o
+          print(json.dumps(s(d), sort_keys=True))' 2>/dev/null | sha256sum | cut -c1-64; }
+          escalate() {
+            local s
+            for s in /tmp/culvert-lab-[0-9a-f]*.sock; do
+              [[ -S "$s" && "$s" != *-ser-* ]] || continue
+              python3 -I -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.send(b"system_powerdown\n"); time.sleep(0.5)' "$s" 2>/dev/null \
+                && echo "$(date -u +%FT%TZ) $(date +%s) powerdown-sent $s" >> "$C/watchdog.log"
+            done
+            sleep 60
+            if pgrep -f 'qemu-system-x86_64 -name culvert-' >/dev/null; then
+              pkill -TERM -f 'qemu-system-x86_64 -name culvert-'; echo "$(date -u +%FT%TZ) $(date +%s) escalation SIGTERM" >> "$C/watchdog.log"; sleep 10
+              pkill -KILL -f 'qemu-system-x86_64 -name culvert-' && echo "$(date -u +%FT%TZ) $(date +%s) escalation SIGKILL" >> "$C/watchdog.log"
+            fi; }
+          live() { [ -n "$1" ] && [ -r "/proc/$1/stat" ] && [ "$(sed -n 's/^.*) \(.\) .*$/\1/p' "/proc/$1/stat" 2>/dev/null)" != Z ]; }
+          base="$(cat "$C/ruleset.canon")"
+          echo "$(date -u +%FT%TZ) $(date +%s) watchdog-start pid=$$" >> "$C/watchdog.log"
+          while :; do
+            [ -e "$C/supervision.stopping" ] && { echo "$(date -u +%FT%TZ) $(date +%s) watchdog-exit stopping" >> "$C/watchdog.log"; exit 0; }
+            seq=$((seq+1)); v=""; now=$(date +%s)
+            mp="$(cat "$C/monitor.pid" 2>/dev/null)"
+            live "$mp" || v="monitor not running"
+            ml="$(awk '$3=="ok"{e=$2} END{print e}' "$C/monitor.log" 2>/dev/null)"
+            [ -n "$ml" ] && [ $(( now - ml )) -le 45 ] || v="${v:+$v; }monitor heartbeat stale (last ${ml:-none}, now $now)"
+            grep -q ' VIOLATION ' "$C/monitor.log" 2>/dev/null && v="${v:+$v; }monitor reported a violation"
+            [ "$(canon)" = "$base" ] || v="${v:+$v; }egress ruleset changed or missing"
+            if [ -n "$v" ]; then
+              echo "$(date -u +%FT%TZ) $(date +%s) SUPERVISION seq=$seq $v" >> "$C/watchdog.log"
+              ( set -o noclobber; echo "$(date -u +%FT%TZ) supervision: $v" > "$LATCH" ) 2>/dev/null || true
+              chmod a+r "$LATCH" 2>/dev/null || true
+              if [ "$escalated" = 0 ]; then escalated=1; escalate & fi
+            else echo "$(date -u +%FT%TZ) $(date +%s) wd-ok seq=$seq" >> "$C/watchdog.log"; fi
+            sleep 10
+          done
+          WD
+          chmod +x "$C/watchdog.sh"
+          sudo nohup "$C/watchdog.sh" "$C" "$LAB_CAMPAIGN_STOP_FILE" > /dev/null 2>&1 &
+          for _ in $(seq 1 20); do [ -s "$C/watchdog.log" ] && grep -q ' wd-ok seq=1$' "$C/watchdog.log" && break; sleep 1; done
+          sudo pgrep -f "$C/watchdog.sh" | head -1 > "$C/watchdog.pid"
+          [ -s "$C/watchdog.pid" ] && grep -q ' wd-ok seq=1$' "$C/watchdog.log" || { echo "::error::the containment watchdog did not start"; cat "$C/watchdog.log" 2>/dev/null; exit 1; }
+          # One full monitor cycle with the watchdog supervised must pass.
+          n0="$(grep -c ' ok seq=' "$C/monitor.log")"
+          for _ in $(seq 1 25); do [ "$(grep -c ' ok seq=' "$C/monitor.log")" -gt "$n0" ] && break; sleep 1; done
+          [ "$(grep -c ' ok seq=' "$C/monitor.log")" -gt "$n0" ] && ! grep -q ' VIOLATION ' "$C/monitor.log" || { echo "::error::monitor did not accept the watchdog"; tail -3 "$C/monitor.log"; exit 1; }
+          sudo chmod a+r "$C"/*.log "$C"/*.pid 2>/dev/null || true
+          tail -1 "$C/watchdog.log"
       - name: Pre-boot receipt (environment + identities), retained BEFORE the first candidate boot
         id: receipt
         run: |
@@ -1798,8 +1869,9 @@ jobs:
           C="$LAB_ROOT/containment"
           # No guest leg starts with a latched stop or without a live, fresh monitor.
           [ ! -e "$LAB_CAMPAIGN_STOP_FILE" ] || { echo "::error::campaign stop latched: $(cat "$LAB_CAMPAIGN_STOP_FILE")"; exit 1; }
-          sudo kill -0 "$(cat "$C/monitor.pid")" && [ $(( $(date +%s) - $(tail -1 "$C/monitor.log" | awk '{print $2}') )) -le 45 ] || { echo "::error::containment monitor not live"; exit 1; }
-          ! grep -q ' VIOLATION ' "$C/monitor.log" || { echo "::error::containment violation recorded"; exit 1; }
+          for s in monitor:ok watchdog:wd-ok; do n="${s%%:*}"; b="${s#*:}"; last="$(awk -v b="$b" '$3==b{e=$2} END{print e}' "$C/$n.log")"
+            p="$(cat "$C/$n.pid")"; [ -r "/proc/$p/stat" ] && [ "$(sed -n 's/^.*) \(.\) .*$/\1/p' "/proc/$p/stat")" != Z ] && [ -n "$last" ] && [ $(( $(date +%s) - last )) -le 45 ] || { echo "::error::containment $n not live"; exit 1; }; done
+          ! grep -qE ' (VIOLATION|SUPERVISION) ' "$C/monitor.log" "$C/watchdog.log" || { echo "::error::containment violation recorded"; exit 1; }
           # Everything this step starts (the harness, QEMU and its user-mode
           # network) lives in the guest cgroup the egress policy matches.
           echo $$ | sudo tee "/sys/fs/cgroup/$GUEST_CGROUP/cgroup.procs" >/dev/null
@@ -1811,7 +1883,9 @@ jobs:
           export LAB_HISTORY=1 LAB_ENGINE_SURFACE=1 LAB_M2_HARDENING=1 LAB_M2_ONLY=0
           export LAB_PRESSURE=0 LAB_FP2=0 LAB_LDAP=0 LAB_CACHEBYPASS=0
           # Owner stop conditions: the first failure latches the campaign stop.
-          export LAB_FAIL_FAST=1 LAB_CAMPAIGN_STOP_FILE LAB_START_DEADLINE_EPOCH LAB_CAMPAIGN_CLOCK_FILE LAB_CAMPAIGN_WINDOW_S
+          export LAB_FAIL_FAST=1 LAB_CAMPAIGN_STOP_FILE LAB_START_DEADLINE_EPOCH LAB_CAMPAIGN_CLOCK_FILE LAB_CAMPAIGN_WINDOW_S LAB_CAMPAIGN_STARTED_FILE
+          # Live supervision interlock in the harness (see the containment step).
+          export LAB_CONTAINMENT_DIR="$C"
           export LAB_UPDATE_DIR="$LAB_ROOT/update"
           export LAB_OS_UPDATE=check LAB_EXPECT_DPKG="$LAB_ROOT/ova/dpkg-list.txt" LAB_EXPECT_KERNEL="$EXPECT_KERNEL_RELEASE"
           export LAB_CHANGED_PATHS=1 LAB_OIDC_PUBLIC_ISSUER="$OIDC_PUBLIC_ISSUER" LAB_SAML_METADATA_URL LAB_SAML_MISSING_URL
@@ -1825,14 +1899,16 @@ jobs:
           set -euo pipefail
           C="$LAB_ROOT/containment"
           [ ! -e "$LAB_CAMPAIGN_STOP_FILE" ] || { echo "::error::campaign stop latched: $(cat "$LAB_CAMPAIGN_STOP_FILE")"; exit 1; }
-          sudo kill -0 "$(cat "$C/monitor.pid")" && [ $(( $(date +%s) - $(tail -1 "$C/monitor.log" | awk '{print $2}') )) -le 45 ] || { echo "::error::containment monitor not live"; exit 1; }
-          ! grep -q ' VIOLATION ' "$C/monitor.log" || { echo "::error::containment violation recorded"; exit 1; }
+          for s in monitor:ok watchdog:wd-ok; do n="${s%%:*}"; b="${s#*:}"; last="$(awk -v b="$b" '$3==b{e=$2} END{print e}' "$C/$n.log")"
+            p="$(cat "$C/$n.pid")"; [ -r "/proc/$p/stat" ] && [ "$(sed -n 's/^.*) \(.\) .*$/\1/p' "/proc/$p/stat")" != Z ] && [ -n "$last" ] && [ $(( $(date +%s) - last )) -le 45 ] || { echo "::error::containment $n not live"; exit 1; }; done
+          ! grep -qE ' (VIOLATION|SUPERVISION) ' "$C/monitor.log" "$C/watchdog.log" || { echo "::error::containment violation recorded"; exit 1; }
           echo $$ | sudo tee "/sys/fs/cgroup/$GUEST_CGROUP/cgroup.procs" >/dev/null
           grep -qx "0::/$GUEST_CGROUP" /proc/self/cgroup || { echo "::error::not in the guest cgroup"; exit 1; }
           export LAB_DIR="$LAB_ROOT/console" LAB_ACCEL=kvm LAB_MIN_FREE_GB=15 LAB_CPUS="$GUEST_CPUS" LAB_MEM_MB="$GUEST_MEM_MB"
           export LAB_OVA="$LAB_ROOT/ova/$OVA_NAME" LAB_OVA_SHA256="$OVA_SHA256"
           export LAB_M2_HARDENING=1 LAB_EXPECT_DPKG="$LAB_ROOT/ova/dpkg-list.txt" LAB_EXPECT_KERNEL="$EXPECT_KERNEL_RELEASE"
-          export LAB_CAMPAIGN_STOP_FILE LAB_START_DEADLINE_EPOCH LAB_CAMPAIGN_CLOCK_FILE LAB_CAMPAIGN_WINDOW_S
+          export LAB_CAMPAIGN_STOP_FILE LAB_START_DEADLINE_EPOCH LAB_CAMPAIGN_CLOCK_FILE LAB_CAMPAIGN_WINDOW_S LAB_CAMPAIGN_STARTED_FILE
+          export LAB_CONTAINMENT_DIR="$C"
           test/e2e/appliance/lab/appliance-lab.sh preflight
           test/e2e/appliance/lab/appliance-lab.sh console
       - name: Safe shutdown (any guest still running is powered down by ACPI, then stopped), monitor liveness recorded, monitor and resolver stopped
@@ -1853,10 +1929,17 @@ jobs:
             kill -0 "$(cat "$p")" 2>/dev/null && { echo "guest did not power down in 120 s: SIGTERM"; kill "$(cat "$p")"; sleep 5; kill -9 "$(cat "$p")" 2>/dev/null || true; }
           done
           if [ -d "$C" ]; then
-            alive=no; [ -s "$C/monitor.pid" ] && sudo kill -0 "$(cat "$C/monitor.pid")" 2>/dev/null && alive=yes
-            echo "$(date -u +%FT%TZ) $(date +%s) shutdown-check monitor-alive=$alive" | sudo tee -a "$C/monitor.log" >/dev/null
-            [ -s "$C/monitor.pid" ] && sudo kill "$(cat "$C/monitor.pid")" 2>/dev/null
-            echo "$(date -u +%FT%TZ) $(date +%s) monitor-stopped" | sudo tee -a "$C/monitor.log" >/dev/null
+            # Liveness of both supervisors is recorded BEFORE they are told to
+            # stop; the marker makes each exit without reporting the other.
+            for n in monitor watchdog; do
+              alive=no; [ -s "$C/$n.pid" ] && sudo kill -0 "$(cat "$C/$n.pid")" 2>/dev/null && alive=yes
+              echo "$(date -u +%FT%TZ) $(date +%s) shutdown-check $n-alive=$alive" | sudo tee -a "$C/$n.log" >/dev/null
+            done
+            sudo touch "$C/supervision.stopping"
+            for n in watchdog monitor; do
+              [ -s "$C/$n.pid" ] && sudo kill "$(cat "$C/$n.pid")" 2>/dev/null
+              echo "$(date -u +%FT%TZ) $(date +%s) $n-stopped" | sudo tee -a "$C/$n.log" >/dev/null
+            done
             [ -s "$C/dnsmasq.pid" ] && sudo kill "$(cat "$C/dnsmasq.pid")" 2>/dev/null
             sudo nft list table inet culvert_lab_egress > "$C/ruleset-end.txt" 2>&1 || true
             sudo chmod -R a+r "$C" 2>/dev/null || true
@@ -2000,42 +2083,54 @@ jobs:
                   if legs[:1] != ["main"] or "console-v1" not in legs or "console-v5" not in legs: problems.append(f"campaign clock boots incomplete: {legs}")
                   if any(not (fb <= float(b["epoch"]) < ex) for b in boots): problems.append("a candidate boot falls outside [first boot, expiry)")
                   if now >= ex: problems.append("the campaign window expired before the verdict")
+                  try:
+                      st = json.load(open(os.path.join(root, "campaign-started.json")))
+                      if any(st.get(k) != anchor.get(k) for k in ("first_boot_epoch", "first_boot_mono", "window_s", "expiry_epoch", "start_deadline_epoch")):
+                          problems.append("clock anchor does not match the once-started record")
+                  except Exception as x:
+                      problems.append(f"once-started record absent or unreadable: {x}")
               except Exception as x:
                   problems.append(f"campaign clock anchor inconsistent: {x}")
           # Containment: a live, continuous, current monitor from its start to
           # the shutdown check, no violation, effective ruleset unchanged.
-          ml = os.path.join(root, "containment", "monitor.log")
-          viol, hb, mstart, scheck, mstop = [], [], None, None, None
-          if os.path.exists(ml):
-              for line in open(ml):
+          # Containment: both supervisors live, continuous and current from
+          # their start to the shutdown check, no violation, ruleset unchanged.
+          viol = []
+          def supervisor(name, beat, bad_kind, max_gap):
+              path = os.path.join(root, "containment", name + ".log")
+              hb, mstart, scheck, mstop = [], None, None, None
+              if not os.path.exists(path):
+                  if started: problems.append(f"containment {name} log absent")
+                  return
+              for line in open(path):
                   f = line.split()
                   if len(f) < 3 or not f[1].isdigit():
-                      problems.append(f"monitor log line unparseable: {line.strip()[:80]}"); continue
+                      problems.append(f"{name} log line unparseable: {line.strip()[:80]}"); continue
                   ep, kind = int(f[1]), f[2]
-                  if kind == "monitor-start": mstart = ep
-                  elif kind == "ok": hb.append((ep, int(f[3].split("=")[1]) if len(f) > 3 and f[3].startswith("seq=") else -1))
-                  elif kind == "VIOLATION": viol.append(line.strip())
-                  elif kind == "shutdown-check": scheck = (ep, line.strip().endswith("monitor-alive=yes"))
-                  elif kind == "monitor-stopped": mstop = ep
-          if started:
-              if not os.path.exists(ml): problems.append("containment monitor log absent")
-              elif mstart is None: problems.append("monitor start not recorded")
+                  if kind == name + "-start": mstart = ep
+                  elif kind == beat: hb.append((ep, int(f[3].split("=")[1]) if len(f) > 3 and f[3].startswith("seq=") else -1))
+                  elif kind == bad_kind: viol.append(line.strip())
+                  elif kind == "shutdown-check": scheck = (ep, line.strip().endswith(f"{name}-alive=yes"))
+                  elif kind == name + "-stopped": mstop = ep
+              if not started: return
+              if mstart is None: problems.append(f"{name} start not recorded"); return
+              if job_start is None or mstart < job_start: problems.append(f"{name} start precedes the job start (stale evidence)")
+              if rec.get("created_epoch") is not None and mstart > rec["created_epoch"]: problems.append(f"{name} started after the pre-boot receipt")
+              if not hb: problems.append(f"no {name} heartbeat")
               else:
-                  if job_start is None or mstart < job_start: problems.append("monitor start precedes the job start (stale evidence)")
-                  if rec.get("created_epoch") is not None and mstart > rec["created_epoch"]: problems.append("monitor started after the pre-boot receipt")
-                  if not hb: problems.append("no monitor heartbeat")
+                  eps = [mstart] + [h[0] for h in hb]
+                  if any(y < x for x, y in zip(eps, eps[1:])): problems.append(f"{name} heartbeats out of order")
+                  if [h[1] for h in hb] != list(range(1, len(hb) + 1)): problems.append(f"{name} heartbeat sequence broken")
+                  gap = max(y - x for x, y in zip(eps, eps[1:])) if len(eps) > 1 else 0
+                  if gap > max_gap: problems.append(f"{name} heartbeat gap {gap}s (> {max_gap} s)")
+                  if scheck is None: problems.append(f"shutdown did not check the {name}")
                   else:
-                      eps = [mstart] + [h[0] for h in hb]
-                      if any(b < a for a, b in zip(eps, eps[1:])): problems.append("monitor heartbeats out of order")
-                      if [h[1] for h in hb] != list(range(1, len(hb) + 1)): problems.append("monitor heartbeat sequence broken")
-                      gap = max(b - a for a, b in zip(eps, eps[1:])) if len(eps) > 1 else 0
-                      if gap > 45: problems.append(f"monitor heartbeat gap {gap}s (> 45 s)")
-                      if scheck is None: problems.append("shutdown did not check the monitor")
-                      else:
-                          if not scheck[1]: problems.append("the monitor was not alive at shutdown")
-                          if scheck[0] - hb[-1][0] > 45: problems.append("the last monitor heartbeat is stale at shutdown")
-                      if any(h[0] > now + 5 for h in hb): problems.append("monitor heartbeat in the future")
-                  if mstop is None: problems.append("monitor stop not recorded")
+                      if not scheck[1]: problems.append(f"the {name} was not alive at shutdown")
+                      if scheck[0] - hb[-1][0] > max_gap: problems.append(f"the last {name} heartbeat is stale at shutdown")
+                  if any(h[0] > now + 5 for h in hb): problems.append(f"{name} heartbeat in the future")
+              if mstop is None: problems.append(f"{name} stop not recorded")
+          supervisor("monitor", "ok", "VIOLATION", 45)
+          supervisor("watchdog", "wd-ok", "SUPERVISION", 45)
           if viol:
               problems.append(f"loss of containment: {viol[:3]}")
           if not started:
@@ -2071,6 +2166,7 @@ jobs:
             ${{ env.LAB_ROOT }}/update/fixture.txt
             ${{ env.LAB_ROOT }}/campaign.stop
             ${{ env.LAB_ROOT }}/campaign-clock.json
+            ${{ env.LAB_ROOT }}/campaign-started.json
             ${{ env.LAB_ROOT }}/job-start.epoch
             ${{ env.LAB_ROOT }}/saml-fixture.xml
           retention-days: 90

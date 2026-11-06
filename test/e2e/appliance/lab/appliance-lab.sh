@@ -157,6 +157,19 @@ LAB_SAML_METADATA_URL="${LAB_SAML_METADATA_URL:-}"; LAB_SAML_MISSING_URL="${LAB_
 LAB_CAMPAIGN_STOP_FILE="${LAB_CAMPAIGN_STOP_FILE:-}"; LAB_Q7_FULL_JOINT="${LAB_Q7_FULL_JOINT:-0}"
 LAB_START_DEADLINE_EPOCH="${LAB_START_DEADLINE_EPOCH:-}"; LAB_CAMPAIGN_CLOCK_FILE="${LAB_CAMPAIGN_CLOCK_FILE:-}"
 LAB_CAMPAIGN_WINDOW_S="${LAB_CAMPAIGN_WINDOW_S:-86400}"; LAB_IN_TRAP=0
+# LAB_CAMPAIGN_STARTED_FILE=PATH  write-once record of the campaign's first
+#                         boot (default: next to the clock file). Only the
+#                         FIRST main launch may create it and the anchor; every
+#                         later launch requires both, matching, or refuses.
+# LAB_CONTAINMENT_DIR=DIR  live supervision interlock: the containment monitor
+#                         and its watchdog (DIR/{monitor,watchdog}.{pid,log})
+#                         must both run with a heartbeat at most
+#                         LAB_SUPERVISION_MAX_AGE s old, checked at every gate,
+#                         privileged command, Q7 sample, QEMU liveness poll and
+#                         immediately before every QEMU launch; otherwise the
+#                         stop is latched and the harness stops.
+LAB_CAMPAIGN_STARTED_FILE="${LAB_CAMPAIGN_STARTED_FILE:-${LAB_CAMPAIGN_CLOCK_FILE:+${LAB_CAMPAIGN_CLOCK_FILE%.json}.started.json}}"
+LAB_CONTAINMENT_DIR="${LAB_CONTAINMENT_DIR:-}"; LAB_SUPERVISION_MAX_AGE="${LAB_SUPERVISION_MAX_AGE:-45}"
 ADMIN_USER=labadmin
 
 log()  { printf '%s [lab] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
@@ -185,8 +198,46 @@ campaign_latch() { [[ -n "$LAB_CAMPAIGN_STOP_FILE" ]] || return 0
 campaign_latched() { [[ -n "$LAB_CAMPAIGN_STOP_FILE" && -e "$LAB_CAMPAIGN_STOP_FILE" ]]; }
 # A latch written elsewhere (a subshell's check, the containment monitor)
 # stops the harness at its next gate, privileged command or Q7 sample.
-campaign_halt_if_latched() { campaign_latched || return 0; [[ "$LAB_IN_TRAP" == 1 ]] && return 0
-  log "campaign stop latch present ($(head -c 200 "$LAB_CAMPAIGN_STOP_FILE")): stopping"; exit 3; }
+campaign_halt_if_latched() { [[ "$LAB_IN_TRAP" == 1 ]] && return 0
+  if campaign_latched; then log "campaign stop latch present ($(head -c 200 "$LAB_CAMPAIGN_STOP_FILE")): stopping"; exit 3; fi
+  campaign_supervision_check; }
+# campaign_supervision_check — the live interlock (LAB_CONTAINMENT_DIR): both
+# supervisors running, each with a fresh heartbeat, and neither reporting a
+# violation. Anything else latches the stop (first reason wins) and stops.
+campaign_supervision_check() { [[ -n "$LAB_CONTAINMENT_DIR" && "$LAB_IN_TRAP" != 1 ]] || return 0
+  local why; why="$(python3 -I - "$LAB_CONTAINMENT_DIR" "$LAB_SUPERVISION_MAX_AGE" <<'PY' 2>&1
+import os, sys, time
+c, max_age = sys.argv[1], float(sys.argv[2]); now = time.time(); bad = []
+for name, beat in (("monitor", "ok"), ("watchdog", "wd-ok")):
+    try:
+        pid = int(open(os.path.join(c, name + ".pid")).read().split()[0])
+        try:
+            state = open("/proc/%d/stat" % pid).read().rsplit(")", 1)[1].split()[0]
+        except (OSError, IndexError):
+            state = "gone"
+        if state in ("gone", "Z", "X"): bad.append("%s (pid %d) not running (%s)" % (name, pid, state))
+    except (OSError, ValueError, IndexError):
+        bad.append("%s pid unreadable" % name)
+    last = None
+    try:
+        for line in open(os.path.join(c, name + ".log")):
+            f = line.split()
+            if len(f) < 3 or not f[1].isdigit(): continue
+            if f[2] in ("VIOLATION", "SUPERVISION"): bad.append("%s reported %s" % (name, " ".join(f[2:])[:160]))
+            if f[2] == beat: last = int(f[1])
+    except OSError:
+        pass
+    if last is None: bad.append("%s has no heartbeat" % name)
+    elif last > now + 5: bad.append("%s heartbeat in the future" % name)
+    elif now - last > max_age: bad.append("%s heartbeat stale (%.0f s > %.0f s)" % (name, now - last, max_age))
+print("; ".join(bad) or "ok")
+PY
+)"
+  [[ "$why" == ok ]] && return 0
+  campaign_latch "supervision: ${why:0:300}"; log "campaign supervision interlock: $why: stopping"; exit 3; }
+# campaign_prelaunch LEG STEP — immediately before a candidate QEMU start: the
+# latch, the live supervisors, then the campaign clock (which records the boot).
+campaign_prelaunch() { campaign_halt_if_latched; campaign_clock_boot "$1" "$2"; }
 
 # Every secret this run holds, replaced wherever it appears.
 SECRET_FILES=(setup-token admin-pass console-pass console-onetime history-phrase log-pass-new)
@@ -225,6 +276,7 @@ DM_NAME="culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-8)"
 gpriv() {
   if campaign_latched && [[ "$LAB_IN_TRAP" != 1 ]]; then
     echo "campaign stop latched: privileged guest command refused" >&2; return 97; fi
+  campaign_supervision_check
   if [[ -n "${LAB_PRIV_CMD:-}" ]]; then
     # shellcheck disable=SC2086 # the adapter command is a word list by contract
     $LAB_PRIV_CMD "$@"
@@ -452,7 +504,7 @@ sys.exit(0 if sys.argv[1] in d else 1)' "$1"
 }
 # Monitor socket: a short fixed path (AF_UNIX paths are limited to 108 bytes).
 MON_SOCK="/tmp/culvert-lab-$(printf '%s' "$WORK" | sha256sum | cut -c1-12).sock"
-qemu_alive() { [[ -f "$WORK/qemu.pid" ]] && kill -0 "$(cat "$WORK/qemu.pid")" 2>/dev/null; }
+qemu_alive() { campaign_supervision_check; [[ -f "$WORK/qemu.pid" ]] && kill -0 "$(cat "$WORK/qemu.pid")" 2>/dev/null; }
 # screendump NAME — the VGA screen as PNG in the evidence (firmware and GRUB
 # write there, not to the serial console). Stdlib only: monitor socket + PPM→PNG.
 screendump() { qemu_alive && [[ -S "$MON_SOCK" ]] || return 0
@@ -660,7 +712,7 @@ PY
   local acc=(-machine "pc,accel=tcg" -cpu max)
   [[ "$ACCEL" == kvm ]] && acc=(-machine "pc,accel=kvm" -cpu host)
   : > "$WORK/console.log"; rm -f "$SER_SOCK"
-  campaign_clock_boot main 2 || return 1
+  campaign_prelaunch main 2 || return 1
   # ttyS0 is a socket (the authenticated console session attaches to it) whose
   # every byte is ALSO logged, client or not: console.log stays the boot record.
   qemu-system-x86_64 -name culvert-lab "${acc[@]}" -smp "$LAB_CPUS" -m "$LAB_MEM_MB" \
@@ -3617,6 +3669,7 @@ vwait_ready() { local deadline=$(( $(date +%s) + ${1:-1800} ))
 vqemu() { local acc=(-machine "pc,accel=tcg" -cpu max)
   [[ "$ACCEL" == kvm ]] && acc=(-machine "pc,accel=kvm" -cpu host)
   : > "$WORK/console.log"; rm -f "$SER_SOCK" "$MON_SOCK"
+  campaign_halt_if_latched   # every console start, whoever calls vqemu
   qemu-system-x86_64 -name culvert-console "${acc[@]}" -smp "$LAB_CPUS" -m "$LAB_MEM_MB" \
     -drive "file=$WORK/coverlay.qcow2,if=none,id=d0,format=qcow2,cache=writeback" \
     -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=d0,bus=scsi0.0 \
@@ -3684,7 +3737,7 @@ OVFENV
               -chardev "socket,id=hvc,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on"
               -device virtconsole,chardev=hvc)
   # V1 cold first boot.
-  campaign_clock_boot console-v1 V || return 1
+  campaign_prelaunch console-v1 V || return 1
   vqemu "${esxi[@]}"; vcapture_start; vmark "power-on: cold first boot (VMware SVGA, no serial port)"
   if ! vwait_ready "$LAB_FIRSTBOOT_TIMEOUT"; then
     vcheck V1 first-boot fail "not ready within ${LAB_FIRSTBOOT_TIMEOUT}s"; vcapture_stop; vsheet V1-first-boot 0 99999; return 1; fi
@@ -3866,7 +3919,7 @@ EOS
   groot 'systemctl poweroff' 60 > /dev/null 2>&1 || true
   for _ in $(seq 1 60); do qemu_alive || break; sleep 2; done
   if qemu_alive; then kill "$(cat "$WORK/qemu.pid")" 2>/dev/null || true; sleep 2; fi
-  campaign_clock_boot console-v5 V5 || return 1
+  campaign_prelaunch console-v5 V5 || return 1
   vqemu -vga none -display none -chardev "socket,id=ser0,path=$SER_SOCK,server=on,wait=off,logfile=$WORK/console.log,logappend=on" -serial chardev:ser0
   vwait_ready 900 || vcheck V5 serial-only-boot fail "not ready without a display adapter"
   sleep 10; cp "$WORK/console.log" "$EV/V5-serial.log"
@@ -3893,22 +3946,38 @@ EOS
 # UTC + epoch + host CLOCK_MONOTONIC of the FIRST candidate boot and expiry =
 # first boot + LAB_CAMPAIGN_WINDOW_S; it is rejected if missing fields, in the
 # future, from another host boot (monotonic went backwards) or inconsistent.
+# Only the main leg's first launch creates it, together with the write-once
+# LAB_CAMPAIGN_STARTED_FILE; a later launch with the anchor missing, or not
+# matching that record, is refused (and latched): the window is never reset.
 campaign_clock_boot() { local leg="$1" st="$2" rc=0 out
   [[ -n "$LAB_START_DEADLINE_EPOCH$LAB_CAMPAIGN_CLOCK_FILE" ]] || return 0
-  out="$(python3 -I - "$LAB_CAMPAIGN_CLOCK_FILE" "$leg" "$LAB_START_DEADLINE_EPOCH" "$LAB_CAMPAIGN_WINDOW_S" <<'PY'
+  out="$(python3 -I - "$LAB_CAMPAIGN_CLOCK_FILE" "$leg" "$LAB_START_DEADLINE_EPOCH" "$LAB_CAMPAIGN_WINDOW_S" "$LAB_CAMPAIGN_STARTED_FILE" <<'PY'
 import json, os, sys, time
-path, leg, deadline, window = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+path, leg, deadline, window, started = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 now, mono = time.time(), time.monotonic()
 def fail(m): print("FAIL " + m); sys.exit(1)
 if not path: fail("no LAB_CAMPAIGN_CLOCK_FILE")
+if not started or os.path.abspath(started) == os.path.abspath(path): fail("no separate once-started record (LAB_CAMPAIGN_STARTED_FILE=%r)" % started)
 if not window.isdigit() or int(window) <= 0: fail("invalid LAB_CAMPAIGN_WINDOW_S %r" % window)
 window = int(window)
 if not os.path.exists(path):
+    # Only the campaign's FIRST launch, which is the main leg, may start the
+    # clock; once the started record exists the original anchor is required
+    # and is never recreated.
+    if os.path.lexists(started): fail("the campaign already started (%s exists) but its clock anchor is missing: refusing to recreate it" % started)
+    if leg != "main": fail("leg %s cannot start the campaign clock: only the first main launch may" % leg)
     if not deadline.isdigit(): fail("no immutable start deadline (LAB_START_DEADLINE_EPOCH=%r)" % deadline)
     if now >= int(deadline): fail("start deadline %s passed (now %.0f): no first candidate boot" % (deadline, now))
     a = {"first_boot_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), "first_boot_epoch": now,
          "first_boot_mono": mono, "window_s": window, "expiry_epoch": now + window, "start_deadline_epoch": int(deadline),
          "boots": [{"leg": leg, "epoch": now, "mono": mono}]}
+    rec = {k: a[k] for k in ("first_boot_utc", "first_boot_epoch", "first_boot_mono", "window_s", "expiry_epoch", "start_deadline_epoch")}
+    try:
+        fd = os.open(started, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+    except FileExistsError:
+        fail("the once-started record %s appeared concurrently: refusing a second initialization" % started)
+    with os.fdopen(fd, "w") as f:
+        json.dump(rec, f, indent=1)
     msg = "first candidate boot %s (deadline %s); campaign expiry %s" % (a["first_boot_utc"], deadline,
           time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(a["expiry_epoch"])))
 else:
@@ -3917,6 +3986,13 @@ else:
         fb, fm, ex, sd = (float(a["first_boot_epoch"]), float(a["first_boot_mono"]), float(a["expiry_epoch"]), int(a["start_deadline_epoch"]))
     except Exception as e:
         fail("clock anchor unreadable: %s" % e)
+    try:
+        rec = json.load(open(started))
+    except Exception as e:
+        fail("clock anchor present but the once-started record is missing or unreadable (%s)" % e)
+    if any(rec.get(k) != a.get(k) for k in ("first_boot_epoch", "first_boot_mono", "window_s", "expiry_epoch", "start_deadline_epoch")):
+        fail("clock anchor does not match the once-started record: the campaign window was altered")
+    if not a.get("boots") or a["boots"][0].get("leg") != "main": fail("clock anchor does not start with the main leg")
     if fb > now: fail("clock anchor is in the future (%.0f > %.0f)" % (fb, now))
     if fm > mono: fail("clock anchor from another host boot (monotonic %.1f > %.1f)" % (fm, mono))
     if abs((ex - fb) - window) > 1e-6 or a.get("window_s") != window: fail("clock anchor expiry inconsistent with the window")
