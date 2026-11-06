@@ -331,11 +331,47 @@ func (l *LoginLimiter) RecordFailure(ip, username string) bool {
 	return pairTripped || acctTripped
 }
 
+// ClearFailures clears the (ip, username) pair's tier-1 failure history and
+// NOTHING ELSE. It mints no trust grant.
+//
+// It exists because RecordSuccess is the wrong primitive for a caller that has
+// not actually verified a credential, and the pre-setup bootstrap branch of
+// the admin login handler was exactly that caller (CHAOS-112 rider). A trust
+// grant is a tier-2 BYPASS: it is checked by accountLockSecondsLocked and
+// suppresses the account-wide lock for that IP for TrustTTL (30 days), which
+// is the only backstop against distributed, IP-rotating brute force. The
+// grant's contract — stated at the top of this file — is that it is earned by
+// "a SUCCESSFUL login", and a caller that forced its own authorization decision
+// has not completed one.
+//
+// So the two effects of a successful login are separated at the owner, and the
+// weaker one is available on its own: clearing an attacker's own pair counter
+// gives away nothing, while minting the bypass gives away the tier it bypasses.
+// A caller that cannot name the verified credential it is recording must call
+// this, never RecordSuccess.
+func (l *LoginLimiter) ClearFailures(ip, username string) {
+	username = boundUsername(username)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.pairs, pairKey(ip, username))
+}
+
 // RecordSuccess clears the pair's failure history and marks ip as trusted
 // for username (TrustTTL, bounded at trustMaxIPs with oldest-first eviction).
 // The tier-2 account counter is deliberately NOT cleared: a victim's
 // successful login must not erase the evidence of a concurrent distributed
 // attack, and the victim doesn't need it cleared — their IP is now trusted.
+//
+// PRECONDITION, and it is a security precondition rather than a usage note:
+// the caller MUST have verified a real credential for username — a
+// VerifyUIUser (or equivalent) that returned true on the password the client
+// actually supplied. The trust grant this mints is a tier-2 bypass that lives
+// for TrustTTL and is visible in no operator surface (Snapshot reports locks,
+// not grants) and cleared by no operator action (ResetUser deliberately leaves
+// trust alone), so an unearned one cannot be seen or revoked short of a
+// restart. A caller that forces its own authorization verdict — a first-run
+// bootstrap window, a liveness re-check of headers it already accepted, a
+// test harness — must call ClearFailures instead.
 func (l *LoginLimiter) RecordSuccess(ip, username string) {
 	username = boundUsername(username)
 	l.mu.Lock()
@@ -450,6 +486,16 @@ type LockedEntry struct {
 // EntryCount returns the number of tier-1 pair and tier-2 account entries the
 // limiter is holding (the trusted-IP grants are not counted: only a SUCCESSFUL
 // authentication creates one).
+//
+// That parenthesis is a PREMISE, not an observation, and it was false until the
+// CHAOS-112 rider: the admin login handler's pre-setup bootstrap branch reached
+// RecordSuccess with no credential verified, so an unauthenticated caller could
+// grow `trusted` — the one map here with no bound on its OUTER key and a
+// 30-day rather than a Window-length prune horizon — while this gauge read
+// zero for all of it. What now enforces the premise is RecordSuccess's stated
+// precondition and the ClearFailures primitive its non-verifying callers use
+// instead; the gate is TestCHAOS112Rider_BootstrapWindowLoginMintsNoTrustGrant
+// in package main.
 //
 // Both counted maps are keyed by data an UNAUTHENTICATED caller chooses, so
 // their size is a security observable, not a curiosity: MaxUsernameKeyLen

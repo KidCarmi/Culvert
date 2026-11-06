@@ -161,16 +161,40 @@ func apiAuthLogin(w http.ResponseWriter, r *http.Request) {
 		if !verifyLoginTOTP(w, r, clientIP, body.User, body.TOTP) {
 			return
 		}
-		loginLimiter.RecordSuccess(clientIP, body.User)
 		if preSetup {
 			// See the comment on preSetup above: issuing a real session here
 			// would outlive first-time setup if the operator later creates a
 			// user with this same name, so skip it — the bootstrap window
 			// already grants full access without one.
+			//
+			// CHAOS-112 rider: the limiter write has exactly the same
+			// outlives-the-window property, and it used to run ABOVE this
+			// branch. RecordSuccess mints a tier-2 trusted-IP grant — a bypass
+			// of the account-wide lock, which is the only backstop against
+			// distributed IP-rotating brute force — for TrustTTL (30 days),
+			// keyed by an attacker-chosen username and client IP. `ok` is
+			// forced true here with cfg.VerifyUIUser's verdict discarded, so
+			// no credential was checked and there is no successful login for a
+			// grant to represent; the grant then survives the operator running
+			// the wizard, appears in no operator surface (Snapshot reports
+			// locks, not grants), and is cleared by no operator action
+			// (ResetUser deliberately leaves trust alone).
+			//
+			// ClearFailures gives the window the harmless half — the caller's
+			// own tier-1 pair counter — and none of the bypass. This is the
+			// rule apiSetupComplete already states for itself ("there is no
+			// RecordSuccess here to ever build a trust grant that would bypass
+			// it") and the one ui_basic_auth.go's liveness path already
+			// enforces for its own non-submission re-checks (SEC-BASICAUTH-5).
+			loginLimiter.ClearFailures(clientIP, body.User)
 			auditEvent(r, "auth.login", body.User, "admin UI login (pre-setup bootstrap, no session issued)")
 			jsonOK(w, map[string]any{"ok": true, "user": body.User, "role": role})
 			return
 		}
+		// Past the bootstrap branch, `ok` came from cfg.VerifyUIUser on the
+		// password the client actually supplied, which is RecordSuccess's
+		// stated precondition for minting a trust grant.
+		loginLimiter.RecordSuccess(clientIP, body.User)
 		// Clear any pre-existing session cookie before issuing a new one
 		// to prevent session fixation attacks (defense-in-depth).
 		clearUISessionCookie(w, r)
