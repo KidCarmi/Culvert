@@ -50,6 +50,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -91,14 +92,21 @@ var connLimitRefusedTotal atomic.Int64
 // HTTP/CONNECT path: the blocked counter, the attributed request-history row,
 // and — at most once per interval — the narrative log line.
 //
+// The row carries method and host, exactly as the IP_BLOCKED and RATE_LIMITED
+// rows immediately below this gate do, so a refusal reads the same way in the
+// request history as every other front-door refusal. Both values are safe to
+// retain here: the destination authority is already bounded by CHAOS-69's gate,
+// which runs BEFORE this one, and the two rows below retain the same field from
+// the same point in the pipeline.
+//
 // clientIP is the resolved client address, already canonical (realClientIP) and
 // not client-chosen text, so it needs no sanitizeLog barrier of its own; the
 // line still routes it through sanitizeLog because a log value derived from a
 // request must not depend on a caller's promise to have canonicalized it.
-func noteConnLimitRefusal(clientIP, reqID string) {
+func noteConnLimitRefusal(r *http.Request, clientIP, reqID string) {
 	connLimitRefusedTotal.Add(1)
 	atomic.AddInt64(&statBlocked, 1)
-	recordRequest(clientIP, "CONNLIMIT", "", "CONN_LIMITED", "", "", "", "")
+	recordRequest(clientIP, r.Method, r.Host, "CONN_LIMITED", "", "", "", "")
 
 	suppressed, emit := connLimitRefusalLogDue()
 	if !emit {

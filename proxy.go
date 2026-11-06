@@ -1606,7 +1606,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		// attributed request-history row and the blocked counter for every
 		// refusal and the narrative line at most once per interval; see
 		// connlimit_observability.go for why those two differ.
-		noteConnLimitRefusal(clientIP, reqID)
+		noteConnLimitRefusal(r, clientIP, reqID)
 		http.Error(w, "Too Many Connections", http.StatusServiceUnavailable)
 		return
 	}

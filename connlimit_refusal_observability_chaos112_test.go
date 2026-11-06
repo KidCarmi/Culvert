@@ -72,10 +72,19 @@ func TestCHAOS112_HTTPConnLimitRefusalIsObservable(t *testing.T) {
 	}
 	var found bool
 	for _, e := range reqlog.Get() {
-		if e.IP == clientIP && e.Status == "CONN_LIMITED" {
-			found = true
-			break
+		if e.IP != clientIP || e.Status != "CONN_LIMITED" {
+			continue
 		}
+		found = true
+		// The row must carry the same attribution as the IP_BLOCKED and
+		// RATE_LIMITED rows immediately below this gate, or an operator can
+		// see that a source was capped without seeing what it was asking for.
+		if e.Method != http.MethodGet || e.Host != "example.com" {
+			t.Errorf("CONN_LIMITED row has method=%q host=%q, want %q and %q — the row does "+
+				"not carry the attribution its two neighbouring gates do",
+				e.Method, e.Host, http.MethodGet, "example.com")
+		}
+		break
 	}
 	if !found {
 		t.Errorf("no CONN_LIMITED request-history row for %s — the HTTP refusal is the only "+
