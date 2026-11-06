@@ -2,6 +2,7 @@ package saml
 
 import (
 	"encoding/xml"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,8 +29,13 @@ func TestAttributeXMLRoundTrip(t *testing.T) {
 	assert.Check(t, is.Equal("<saml:Attribute FriendlyName=\"TestFriendlyName\" Name=\"TestName\" NameFormat=\"urn:oasis:names:tc:SAML:2.0:attrname-format:basic\"><saml:AttributeValue xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:xs=\"http://www.w3.org/2001/XMLSchema\" xsi:type=\"xs:string\">test</saml:AttributeValue></saml:Attribute>",
 		string(x)))
 
+	// Culvert fork (GO-2026-6909): Attribute.Values only binds <AttributeValue>
+	// in the SAML assertion namespace, so the fragment must be parsed with its
+	// saml prefix declared, as it always is inside a real assertion. Upstream
+	// parsed the undeclared-prefix fragment above directly.
 	var actual Attribute
-	err = xml.Unmarshal(x, &actual)
+	err = xml.Unmarshal([]byte(strings.Replace(string(x), "<saml:Attribute ",
+		`<saml:Attribute xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" `, 1)), &actual)
 	assert.Check(t, err)
 	assert.Check(t, is.DeepEqual(expected, actual))
 }

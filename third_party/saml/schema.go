@@ -741,7 +741,9 @@ type Assertion struct {
 	// Statements []Statement
 	AuthnStatements []AuthnStatement `xml:"AuthnStatement"`
 	// AuthzDecisionStatements []AuthzDecisionStatement
-	AttributeStatements []AttributeStatement `xml:"AttributeStatement"`
+	// Culvert fork (GO-2026-6909): namespace-qualified so a foreign-namespace
+	// <AttributeStatement> cannot supply identity or group claims.
+	AttributeStatements []AttributeStatement `xml:"urn:oasis:names:tc:SAML:2.0:assertion AttributeStatement"`
 }
 
 // Element returns an etree.Element representing the object in XML form.
@@ -796,7 +798,10 @@ func (a *Assertion) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 type Subject struct {
 	XMLName xml.Name `xml:"urn:oasis:names:tc:SAML:2.0:assertion Subject"`
 	// BaseID               *BaseID  ... TODO
-	NameID *NameID
+	// Culvert fork (GO-2026-6909): a bare tag matched <NameID> in ANY namespace,
+	// so a foreign-namespace <NameID> inside <saml:Subject> set (or, appearing
+	// after the real one, overrode) the subject identity.
+	NameID *NameID `xml:"urn:oasis:names:tc:SAML:2.0:assertion NameID"`
 	// EncryptedID          *EncryptedID  ... TODO
 	SubjectConfirmations []SubjectConfirmation `xml:"SubjectConfirmation"`
 }
@@ -1188,7 +1193,8 @@ func (a *AuthnContextClassRef) Element() *etree.Element {
 //
 // See http://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf §2.7.3
 type AttributeStatement struct {
-	Attributes []Attribute `xml:"Attribute"`
+	// Culvert fork (GO-2026-6909): namespace-qualified, see Assertion.AttributeStatements.
+	Attributes []Attribute `xml:"urn:oasis:names:tc:SAML:2.0:assertion Attribute"`
 }
 
 // Element returns an etree.Element representing the object in XML form.
@@ -1207,7 +1213,7 @@ type Attribute struct {
 	FriendlyName string           `xml:",attr"`
 	Name         string           `xml:",attr"`
 	NameFormat   string           `xml:",attr"`
-	Values       []AttributeValue `xml:"AttributeValue"`
+	Values       []AttributeValue `xml:"urn:oasis:names:tc:SAML:2.0:assertion AttributeValue"` // Culvert fork (GO-2026-6909): namespace-qualified, see Assertion.AttributeStatements.
 }
 
 // Element returns an etree.Element representing the object in XML form.

@@ -1182,10 +1182,23 @@ func (sp *ServiceProvider) validateAssertion(assertion *Assertion, possibleReque
 	if assertion.IssueInstant.Add(MaxIssueDelay).Before(now) {
 		return fmt.Errorf("expired on %s", assertion.IssueInstant.Add(MaxIssueDelay))
 	}
+	// Culvert fork (GO-2026-6909): this runs after signature verification, so
+	// a signed assertion that omits a required element must be rejected with
+	// an error, not dereferenced. <saml:Issuer> is required in an assertion; an
+	// empty IDPMetadata.EntityID must not let an Issuer-less assertion through.
+	if assertion.Issuer.Value == "" {
+		return errors.New("assertion has no Issuer")
+	}
 	if assertion.Issuer.Value != sp.IDPMetadata.EntityID {
 		return fmt.Errorf("issuer is not %q", sp.IDPMetadata.EntityID)
 	}
+	if assertion.Subject == nil {
+		return errors.New("assertion has no Subject")
+	}
 	for _, subjectConfirmation := range assertion.Subject.SubjectConfirmations {
+		if subjectConfirmation.SubjectConfirmationData == nil {
+			return errors.New("assertion SubjectConfirmation has no SubjectConfirmationData")
+		}
 		requestIDvalid := false
 
 		// We *DO NOT* validate InResponseTo when AllowIDPInitiated is set. Here's why:
@@ -1222,6 +1235,9 @@ func (sp *ServiceProvider) validateAssertion(assertion *Assertion, possibleReque
 		if subjectConfirmation.SubjectConfirmationData.NotOnOrAfter.Add(MaxClockSkew).Before(now) {
 			return fmt.Errorf("assertion SubjectConfirmationData is expired")
 		}
+	}
+	if assertion.Conditions == nil {
+		return errors.New("assertion has no Conditions")
 	}
 	if assertion.Conditions.NotBefore.Add(-MaxClockSkew).After(now) {
 		return fmt.Errorf("assertion Conditions is not yet valid")
