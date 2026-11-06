@@ -407,6 +407,32 @@ go-fuzz harness, `example/`, CI metadata). Nothing was altered in `xmlenc/`,
 signature-verification or decryption path was touched beyond the three
 documented patches.
 
+**The two small PRs.** `diagnostics_blocklist_feed.go` (#1809) adds a
+report-only WARN row derived from the `Feeds()` snapshot the existing
+`/api/blocklist/feed` endpoint already returns. It makes no outbound request, so
+it adds no SSRF surface; it carries a **count only** — never a feed URL, which
+may embed a token, and never the raw error text; it logs nothing, so there is no
+log-injection surface; and it is appended to `buildOperatorContract()`, served
+behind the same `requireRole(RoleViewer)` as the rest of the diagnostics report.
+Sync, retry and enforcement behaviour are untouched.
+
+`packaging/culvert-maint/install.sh` (#1810) widens `extract_toml_string` to
+read a one-line triple-quoted TOML literal, which the previous form silently
+returned **empty** for (the single-quote branch stripped one quote, then found
+the next quote immediately and truncated to nothing). Extracting more than
+before is the shape that could matter, so every extraction site was traced:
+`compose_project_dir`, `compose_file`, `proxy_repo` and `compose_override_file`
+each pass through `reject_unsafe` — which rejects control characters, whitespace,
+both quote types and `|` — plus their own structural checks, all *downstream* of
+extraction, so nothing new reaches a sudoers literal or an argv token.
+`image_allowlist` is the one value not passed through `reject_unsafe`, and it is
+used solely as a `grep -E` pattern in a consistency check that must pass or the
+installer dies; it is never rendered into the sudoers output, and the installer
+already requires root, so no privilege boundary is crossed. For that key the
+change is in the **fail-closed** direction: a triple-quoted allowlist is now
+honoured instead of being treated as unset, and the unset default is a pattern
+anchored to `ghcr.io/kidcarmi/culvert` that cannot match a custom `proxy_repo`.
+
 **CHAOS-111 and CA.** Both were checked against `ee0f2ab` across rate-limit
 bypass, cache staleness, control-plane authorization, disclosure, memory/DoS and
 log injection (CHAOS-111) and key correctness, CA rotation, expiry, bounds, data
