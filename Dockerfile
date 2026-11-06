@@ -31,6 +31,11 @@ ENV GOTOOLCHAIN=local
 WORKDIR /app
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
+# go.mod replaces github.com/crewjam/saml with the patched in-repo fork
+# (third_party/saml, GO-2026-6909). `go mod download` reads a directory
+# replacement's go.mod to build the module graph, so it must be present
+# before the download; the fork's sources arrive with `COPY . .` below.
+COPY third_party/saml/go.mod third_party/saml/go.sum ./third_party/saml/
 RUN want="$(sed -n 's/^toolchain //p' go.mod)" && have="$(go env GOVERSION)" && \
     echo "compiler: ${have} (go.mod toolchain: ${want})" && \
     [ -n "${want}" ] && [ "${have}" = "${want}" ]
