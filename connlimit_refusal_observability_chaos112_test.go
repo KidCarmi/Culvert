@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/reqlog"
 )
@@ -126,6 +127,62 @@ func TestCHAOS112_ConnLimitRefusalLogIsRateLimited(t *testing.T) {
 		t.Errorf("%d CONN_LIMITED log lines for %d refusals — the line is not rate limited, so a "+
 			"flood against a configured cap writes one line per request into a sink that "+
 			"blocks the request goroutine when full (X-2)", lines, refusals)
+	}
+}
+
+// TestCHAOS112_ConnLimitRefusalLogResumesAfterTheInterval is the recovery half
+// of the rate limit, and the reason connLimitRefusalLogInterval is a var.
+//
+// A gate that only ever suppresses is indistinguishable from one that latched
+// shut, and a latched log gate is the failure CHAOS-83/84 describe for a
+// wall-clock elapsed-time check — so the gate must be shown to REOPEN, and to
+// carry the magnitude it suppressed while it was closed. AU-43's rule in log
+// form: a suppression must name what it suppressed.
+func TestCHAOS112_ConnLimitRefusalLogResumesAfterTheInterval(t *testing.T) {
+	chaos112IsolateRefusals(t)
+	buf := chaos112CaptureLog(t)
+	connLimitRefusalLogInterval = time.Millisecond
+
+	const clientIP = "203.0.113.116"
+	connLimiter.Enable(1)
+	if !connLimiter.Acquire(clientIP) {
+		t.Fatal("fixture: first Acquire must succeed")
+	}
+	t.Cleanup(func() { connLimiter.Release(clientIP) })
+
+	refuse := func(n int) {
+		for i := 0; i < n; i++ {
+			r := makeRequest("http://example.com/", nil)
+			r.RemoteAddr = clientIP + ":7000"
+			handleRequest(httptest.NewRecorder(), r)
+		}
+	}
+
+	refuse(1) // the first refusal after a quiet period always writes
+	first := strings.Count(buf.String(), "CONN_LIMITED")
+	if first != 1 {
+		t.Fatalf("first refusal produced %d lines, want exactly 1", first)
+	}
+	refuse(4) // suppressed inside the interval
+	if got := strings.Count(buf.String(), "CONN_LIMITED"); got != 1 {
+		t.Fatalf("lines = %d after 5 refusals inside the interval, want 1", got)
+	}
+
+	// Let the interval elapse, then refuse once more.
+	deadline := time.Now().Add(2 * time.Second)
+	for strings.Count(buf.String(), "CONN_LIMITED") < 2 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+		refuse(1)
+	}
+
+	out := buf.String()
+	if got := strings.Count(out, "CONN_LIMITED"); got < 2 {
+		t.Fatalf("the refusal line never resumed after the interval elapsed (%d lines) — a "+
+			"suppression gate that cannot reopen is a silent cap", got)
+	}
+	if !strings.Contains(out, "suppressed=") {
+		t.Error("the resumed line does not report how many refusals were suppressed while " +
+			"the gate was closed, so the magnitude is lost with the lines")
 	}
 }
 

@@ -544,6 +544,10 @@ without saying what it was asking for is not the attribution its two
 neighbouring gates provide),
 `CHAOS112_ConnLimitRefusalLogIsRateLimited` (two-sided: some line, far fewer
 than one per refusal),
+`CHAOS112_ConnLimitRefusalLogResumesAfterTheInterval` (the RECOVERY half — a
+gate that only ever suppresses is indistinguishable from one that latched shut,
+which is precisely the CHAOS-83/84 failure for an elapsed-time check, so it must
+be shown to reopen AND to carry the magnitude it suppressed),
 `CHAOS112_MetricsExposeTheConnLimiterPosture`,
 `CHAOS112_MetricsReportADisabledLimiterAsZero` (the AU-43 half: a present-tense
 gauge must name the value that clears it),
@@ -565,7 +569,7 @@ job and that job's package list is unchanged.
 
 ### 9.6 Mutation tests — the gates have teeth
 
-Nineteen mutation runs over eighteen distinct mutations, each applied to the
+Twenty-one mutation runs over twenty distinct mutations, each applied to the
 fixed tree and run against the gates that should catch it. **Every distinct
 mutation is caught**, none silently green — and the one useful negative is
 recorded rather than hidden: M3 escaped every ROOT gate, which is why the
@@ -589,6 +593,8 @@ the gates it motivated.
 | M10 the enabled gauge is hardcoded to 1 | `MetricsReportADisabledLimiterAsZero` |
 | M11 the posture gauges report the wrong cap | `MetricsExposeTheConnLimiterPosture` |
 | M12 the row drops its method/host attribution | `HTTPConnLimitRefusalIsObservable` |
+| M13 the resumed line stops reporting the suppressed count | `ConnLimitRefusalLogResumesAfterTheInterval` |
+| M14 the log gate never reopens | `ConnLimitRefusalLogResumesAfterTheInterval` |
 | R1 (rider) the pre-fix shape: `RecordSuccess` above the `preSetup` branch | `BootstrapWindowLoginMintsNoTrustGrant` |
 | R2 (rider) the cheap fix: drop the success record entirely | `ControlAVerifiedLoginStillMintsItsGrant` |
 | R3 (rider) the bootstrap branch records nothing at all | `BootstrapWindowStillClearsItsOwnPairCounter` |
