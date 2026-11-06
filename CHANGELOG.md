@@ -9,6 +9,49 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The DPI engine's new saturation lead indicator fired at no load on a
+  single-vCPU node, and a status-map comment named the wrong trust boundary.**
+  `approachingCheck` truncated its 80% threshold DOWN, so on the two-slot gate
+  `defaultMaxInflight`'s `inflightFloor` gives a `GOMAXPROCS=1` container the
+  threshold was `2*80/100 == 1` — one ordinary scan. Such a node logged
+  "DPI: approaching saturation: 1 of 2 in-flight scan workers" every
+  `saturationLogInterval` forever, at zero load. That line is the lead indicator
+  for the CHAOS-110 gate's fail-closed refusal, so an operator who learns to
+  ignore it loses the only warning they get before clean content starts being
+  blocked uninspected. The threshold now rounds UP and is clamped to the cap
+  (1→1, 2→2, 3→3, 8→7, 64→52): the two- and three-slot gates warn only at the
+  cap, which is the honest threshold where there is no lead time to be had, and
+  every larger gate keeps its lead. Strictly more conservative than the previous
+  form at every cap, so it cannot introduce a warning anywhere, and it changes a
+  log trigger only — no scan verdict moves. Separately, the comment introduced
+  with the new `dpi_*` rows in `secScanStatusMap` claimed a "Role-gated surface".
+  That holds for `apiSecScanStatus`, which carries
+  `requireRole(w, r, RoleViewer)`, but the OPTIONAL scan sidecar
+  (`-scan-svc-listen`) serves the same map unauthenticated from
+  `ScanService.handleStatus`, as its own header documents. The comment now names
+  both surfaces; no role check was added to the sidecar, because that would
+  change a deliberate, documented, opt-in trust model. Two new test files pin
+  what the gate COSTS and what the pooled decompressors must never do:
+  `internal/scanner/inflight_cost_test.go` measures the refusal stall (a refused
+  scan waits the FULL budget before failing closed) and the wait-then-win
+  ceiling, holds slot conservation across repeated abandonment, confirms a
+  gateway with no DPI patterns never reaches the gate, and tables the threshold
+  above with a negative control against the truncating form;
+  `internal/secscan/decompress_pool_leak_test.go` is the negative control the
+  pooled scan-path decoders needed — a pooled `compress/flate` decompressor keeps
+  a 32 KiB history window between responses, and on a gateway consecutive
+  responses through one pool slot belong to different users, so a hostile body
+  built with `flate.NewWriterDict` (whose back-references reach BEFORE its own
+  start, with no dictionary negotiation in `Content-Encoding: deflate` to have
+  supplied one) is tried against both arms over 200 interleaved rounds and must
+  never return the prior response's canary. It does not: the guarantee is
+  `compress/flate`'s own `dist > histSize()` check with `histSize()` counting
+  only what the current stream wrote, which lives in the toolchain rather than
+  here and is therefore now asserted rather than reasoned about. The companion
+  case pins that `release()` leaves no origin-supplied gzip `Name`/`Comment`/
+  `Extra` and no source bytes in a pool slot. Full findings, including the
+  reported-not-fixed 5 s refusal stall and the absent operator control for the
+  DPI cap, are in `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-05.md`.
 - **GO-2026-6909: SAML login no longer takes the identity or groups from a
   foreign-namespace element, and a malformed signed assertion is rejected
   instead of panicking. The fix is a patched fork of `github.com/crewjam/saml`,
