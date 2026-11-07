@@ -174,7 +174,7 @@ None of that helps when the socket is gone, which is what this round is about.
 
 | # | Scenario | Likelihood | Impact | Pre-fix severity | Post-fix |
 |---|---|---|---|---|---|
-| 1 | Sidecar never binds at boot (port held by a draining predecessor) | **High** — the ordinary redeploy | Fleet-wide fail-open scanning, indefinitely | **HIGH** | Rebinds; `up 0`, FAIL row, alert |
+| 1 | Sidecar never binds at boot (port held by a draining predecessor) | **High** — the ordinary redeploy | Fleet-wide fail-open scanning, indefinitely | **HIGH** | Rebinds; `warn` inside the 30 s threshold, then `up 0`, FAIL row and alert |
 | 2 | Serve loop dies at runtime (lost socket, fd exhaustion, interface teardown) | Medium | Fleet-wide fail-open scanning, indefinitely | **HIGH** | Rebinds; counted and surfaced |
 | 3 | SIGTERM during sidecar startup | Medium — every orchestrated restart | Held port → scenario 1 for the successor; severed in-flight scans | **MED** | `Shutdown` is terminal; socket released |
 | 4 | Data race on `ss.server` | Low (observable), always present (latent) | Undefined behavior on the shutdown path | **MED** | Removed; gated under `-race` |
@@ -218,16 +218,48 @@ indistinguishable from a dead one.
   "every caller pointed here is forwarding bodies UNSCANNED (fail-open)" —
   because an operator must not have to know the far end's posture to understand
   that scanning is off.
+- `/healthz` field `scan_svc` (fixed enum
+  `disabled`/`stopped`/`down`/`degraded`/`ready`), beside the `socks5`,
+  `admin_ui` and `cp_grpc` fields its three siblings already publish there.
+  Omitted entirely on a node that never asked for a sidecar — the `cp_grpc`
+  field's rule, not socks5's always-present one, because an always-present value
+  would make every ordinary proxy look like a sidecar host whose listener is
+  down. Posture only: the attempt count, the bind reason class and the remedy
+  stay on the role-gated `/api/diagnostics` row, because `handleHealth` serves
+  this UNAUTHENTICATED on the proxy port.
+- `/ready` row `scan_svc`, **report-only**, absent on a node that never asked
+  for a sidecar and absent after a graceful stop. Report-only for the cp_grpc
+  row's reason: a node whose sidecar cannot bind is proxying its OWN traffic
+  perfectly, so gating the default verdict would eject a healthy gateway from
+  rotation because the plane that scans for OTHER nodes is down — converting a
+  scanning outage into a traffic outage. **Report-only is a judgement about
+  this node's rotation, not about whether unscanned traffic is acceptable**;
+  that consequence is carried by the role-gated contract row, the alert and the
+  gauge, which is where a security decision belongs rather than in a
+  load-balancer probe. Strict callers opt in via `?strict=1`.
 - Alert `scan_svc_listener_down`, once per episode, detail = bounded bind class.
 - Four new Alerts-panel checkboxes: `scan_svc_listener_down`, `scan_svc_down`,
   `scan_timeout`, `scan_skipped`.
 
-**Threshold choice.** 30 s before the row fails and the alert fires, matching
-the Control-Plane listener's, for the same reason: shorter, and an ordinary
-restart of a colocated predecessor holding the port would page someone. A
-sidecar that is merely rebinding inside the threshold stays `up 1` with a
-`warn` row — the same asymmetry `culvert_socks5_listener_up` carries, and the
-thing `TestChaos113_ControlRebindingSidecarDoesNotPage` exists to protect.
+**Threshold choice, and the bug this round shipped in its first form.** 30 s
+before the row fails and the alert fires, matching the Control-Plane listener's,
+for the same reason: shorter, and an ordinary restart of a colocated
+predecessor holding the port would page someone. A sidecar that is merely
+rebinding inside the threshold stays `up 1` with a `warn` row — the same
+asymmetry `culvert_socks5_listener_up` carries.
+
+**`EverBound` chooses WHICH fail row and remedy, never WHETHER there is one.**
+The first form of this change had `!EverBound && BindFailures > 0` as its own
+fail arm, in both the contract row and the gauge — so a sidecar whose port was
+briefly held at boot failed its row and exported `up 0` on its FIRST failed
+bind, i.e. paged on every ordinary redeploy. That is precisely the condition
+CHAOS-66 added the threshold for on SOCKS5, whose never-bound branch is likewise
+gated on `BindUnavailable` rather than on the first attempt. It passed every
+other gate, because the only rebinding control covered the `EverBound` path —
+`TestChaos113_ControlRebindingSidecarDoesNotPage` drove a sidecar that HAD
+served. Found by re-reading this round's own gate, not by a gate.
+`TestChaos113_ControlNeverBoundInsideThresholdDoesNotPage` is the missing
+direction, and M15/M16 in §9.6 are the two mutations that reintroduce it.
 
 ---
 
@@ -415,6 +447,9 @@ Drift in the other direction: **zero**. Every event the panel offers is fired.
 === RUN   TestChaos113_ControlRebindingSidecarDoesNotPage     PASS
 === RUN   TestChaos113_ControlHealthySidecarIsSilent          PASS
 === RUN   TestChaos113_GracefulStopIsNotAnOutage              PASS
+=== RUN   TestChaos113_ControlNeverBoundInsideThresholdDoesNotPage PASS
+=== RUN   TestChaos113_HealthzFieldOmittedUnlessConfigured    PASS
+=== RUN   TestChaos113_ReadinessRowIsReportOnlyAndAbsentWhenUnconfigured PASS
 === RUN   TestChaos113_BackoffLadderIsBoundedAndResets        PASS
 === RUN   TestChaos113_BindErrorClassesAreBounded             PASS
 === RUN   TestChaos113_ShutdownBeforeServeIsHonoured          PASS
@@ -432,8 +467,8 @@ the suite is run both ways.
 ### 9.6 Mutation tests — the gates have teeth
 
 Every gate was run against a mutation of the thing it claims to pin. A gate
-that stays green under its own mutation is not a gate. Eighteen mutations were
-run; the fifteen below are red, and the three that came back green are the most
+that stays green under its own mutation is not a gate. Twenty-six mutations were
+run; the twenty-three below are red, and the three that came back green are the most
 useful thing in this section — see the note under the table.
 
 | # | Mutation | Gate | Result |
@@ -453,6 +488,14 @@ useful thing in this section — see the note under the table.
 | M12 | the gauge is exported on a node with no sidecar | `ControlHealthySidecarIsSilent` | **RED** |
 | M13 | the scanning-plane checkboxes are removed | `EveryFiredAlertIsSubscribableInTheGUI` | **RED** |
 | M14 | a recorded gap is quietly fixed but left in the list | `KnownAlertGUIGapsAreStillGaps` | **RED** |
+| M15 | never-bound fails its row on the FIRST bind (the bug this round shipped first) | `ControlNeverBoundInsideThresholdDoesNotPage` | **RED** |
+| M16 | the gauge drops on the FIRST failed bind of a never-bound sidecar | `ControlNeverBoundInsideThresholdDoesNotPage` | **RED** |
+| M17 | never-bound and lost-socket share one message, losing the bind remedy | `NeverBoundIsVisibleAndAlerts` | **RED** |
+| M18 | the `/healthz` field is always present (every proxy looks like a sidecar host) | `HealthzFieldOmittedUnlessConfigured` | **RED** |
+| M19 | the `/healthz` field reports a first-retry sidecar as `down` | `HealthzFieldOmittedUnlessConfigured` | **RED** |
+| M20 | the `/ready` row is published on a node with no sidecar | `ReadinessRowIsReportOnlyAndAbsentWhenUnconfigured` | **RED** |
+| M21 | the `/ready` detail leaks the bind reason class and address | `ReadinessRowIsReportOnlyAndAbsentWhenUnconfigured` | **RED** |
+| M22 | a not-serving sidecar reports `/ready` ok | `ReadinessRowIsReportOnlyAndAbsentWhenUnconfigured` | **RED** |
 
 **Three mutations came back GREEN. One was correct, one was mis-aimed, and one
 was a real gap in this round's own gates.**
@@ -492,24 +535,47 @@ leaked socket cannot pass.
 ### 9.7 Checks run
 
 ```
-go build ./...                                                   OK
-go vet ./...                                                     OK
-go test -run 'TestChaos113_' -count=1 .                          OK  (15 gates)
-go test -race -run 'TestChaos113_' -count=1 .                    OK
-go test -count=1 .                               FULL_MAIN_PLACEHOLDER
-go test -count=1 ./internal/...                  INTERNAL_PLACEHOLDER
-golangci-lint run --new-from-rev origin/main     LINT_DIFF_PLACEHOLDER
-golangci-lint run  (full tree, vs. the same measurement on the base)
-                                                 LINT_FULL_PLACEHOLDER
-python3 docs/agent-context/check.py                              OK  (exit 0)
+go build ./...                                            OK
+go vet ./...                                              OK
+go test -run 'TestChaos113_' -count=1 .                   OK   18 gates, 3.841s
+go test -race -run 'TestChaos113_' -count=1 .             OK   32.037s
+go test -run 'TestScanSvc|TestChaos101|TestChaos53' .     OK   the sidecar's
+                                                               existing suites
+go test -run 'TestDiag|Diagnostics' .                     OK   the contract report
+go test -run 'Readyz|TestReadiness|TestHealth|Healthz' .  OK   both probes
+go test -count=1 ./internal/...                           OK   no FAIL, no panic
+golangci-lint run --timeout=20m --new-from-rev origin/main
+                                                          OK   0 issues
+python3 docs/agent-context/check.py                       OK   exit 0
 ```
+
+**Not run, and why.** The full `go test -count=1 .` for package `main` was
+started twice and cancelled both times: the package is ~1540 files with timing
+and benchmark gates, and each attempt was invalidated by a later fix in this
+same round (the lint annotations, then the never-bound threshold bug, then the
+`/healthz` and `/ready` rows). Rather than report a stale pass, the targeted
+suites above were run on the FINAL tree — the sidecar's own, the diagnostics
+report, both probes, and all of `./internal/...` — and the hosted gate owns the
+whole-package run. Stated plainly because a cancelled check is not a passing
+one.
 
 The linter is the version `pr-fast-gate.yml` installs (`v2.15.0`), built with
 this module's `go.mod` toolchain (`go1.27.3`) — not the container's, which is
-older than this module's language version. Both the gate's own diff-scoped
-command AND a full-tree pass were run, because `cyclop`, `funlen` and `gocognit`
-attribute to a function's DECLARATION line and `--new-from-rev` therefore cannot
-see a function this change made more complex.
+older than this module's language version and is the recorded cause of "local
+lint is unavailable". The `--timeout` matters: the first run used the config's
+5 m and reported `Timeout exceeded`, which makes a clean result meaningless, so
+the gate's own `--timeout=10m` (here 20 m) is the honest budget. It found four
+issues on the first pass — one G404, one G122 and two `noctx` — all fixed, and
+the 0-issue result above is the re-run.
+
+**A full-tree pass was NOT compared against the base**, and that is a real gap
+in this round's verification: `cyclop`, `funlen` and `gocognit` attribute to a
+function's DECLARATION line, so `--new-from-rev` cannot see a function this
+change made more complex. The change adds new functions rather than growing
+existing ones (the largest, `checkScanSvcListener`, is a 5-arm switch that
+delegates its two long rows to helpers precisely to stay inside the 15-complexity
+threshold), so the risk is low — but low is not measured, and the hosted gate is
+what will measure it.
 
 A passing local check is not a passing hosted gate. These are local results for
 this SHA.

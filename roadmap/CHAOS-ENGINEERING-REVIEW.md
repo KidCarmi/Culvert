@@ -77,7 +77,9 @@ first two invisible end to end: `remoteScanFail` gates on
 **13 production alert events fired with no Alerts-panel checkbox** — the
 scanning plane had one of four — so the alert built for this condition could not
 fire on any deployment. Drift the other way: zero. Supervision, the five metric
-rows, the `scan_svc_listener` row and four checkboxes are fixed; the ten other
+rows, the `scan_svc_listener` row, the `/healthz` `scan_svc` field and the
+report-only `/ready` `scan_svc` row beside the three fields and three rows its
+siblings already publish there, and four checkboxes are fixed; the ten other
 unsubscribable events are pinned in EXECUTABLE form rather than patched from a
 sidecar round. Closes the scan-sidecar half of the 2026-10-13 backlog's `L-5`.
 Id AND section claimed in a committed placeholder row before any code, checked
@@ -20256,7 +20258,16 @@ after.*
   and the fleet forwards bodies **UNSCANNED**. Fixed with
   `superviseScanSvcListener`: bind → serve → rebind, 1 s doubling to a 30 s
   ceiling, ±25% jitter (the `internal/feedsched` phase property applied to a
-  listener), ladder reset after a 60 s stable serve.
+  listener), ladder reset after a 60 s stable serve. **One threshold governs
+  both the never-bound and the lost-socket case**, which this round got wrong
+  first: `!EverBound && BindFailures > 0` as its own fail arm, in the row AND
+  the gauge, paged on the FIRST failed bind, i.e. on every ordinary redeploy in
+  which a draining predecessor still holds the port — the condition CHAOS-66
+  added the threshold for on SOCKS5, whose never-bound branch is likewise gated
+  on `BindUnavailable`. `EverBound` chooses WHICH fail row and remedy, never
+  WHETHER there is one. It passed every other gate because the only rebinding
+  control drove a sidecar that HAD served; found by re-reading this round's own
+  gate, not by a gate.
 
 - **`CHAOS-113` / SS-2 — `Shutdown` reported SUCCESS and did nothing, and the
   field it read was a data race.** `ScanService.server` was written by the

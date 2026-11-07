@@ -443,8 +443,67 @@ func scanSvcWaitBackoff(ctx context.Context, svc *ScanService, d time.Duration) 
 	}
 }
 
-// scanSvcListenerStatus is the one-word status for the contract row and the
-// support bundle.
+// appendScanSvcReadinessCheck adds the report-only `scan_svc` row to /ready on
+// the PROXY port, completing the set alongside `socks5`, `admin_ui` and
+// `cp_grpc`.
+//
+// REPORT-ONLY, and the reasoning is the cp_grpc row's: a node whose sidecar
+// listener cannot bind is proxying its own traffic perfectly, so gating the
+// default readiness verdict on it would pull a fully-functional gateway out of
+// the load balancer because the plane that scans for OTHER nodes is down —
+// converting a scanning outage into a traffic outage. Operators who want such
+// nodes ejected opt in via /ready?strict=1.
+//
+// Note what that means and does not mean: report-only is the right call for
+// THIS node's rotation, and it is NOT a judgement that unscanned traffic is
+// acceptable. The fail-open consequence is carried by the role-gated
+// operator-contract row, the alert and culvert_scan_svc_listener_up, which is
+// where a security decision belongs — not by a load-balancer probe.
+//
+// Absent entirely on a node that never asked for a sidecar, so an ordinary
+// proxy never grows a permanently-green row.
+//
+// The detail is a FIXED string per branch. /ready is served UNAUTHENTICATED on
+// the proxy port, so the bind reason class and attempt count — which would tell
+// an unauthenticated caller exactly why this node's scanning plane is down —
+// stay on the role-gated row, the alert and the logs.
+func appendScanSvcReadinessCheck(checks map[string]*readinessCheck) {
+	snap := scanSvcListenerState()
+	if !snap.Configured || snap.Stopped {
+		return
+	}
+	switch {
+	case snap.Bound:
+		checks["scan_svc"] = &readinessCheck{Status: "ok"}
+	case snap.Unavailable():
+		checks["scan_svc"] = &readinessCheck{
+			Status: "fail",
+			Detail: "scan sidecar listener is not serving — see server logs",
+		}
+	default:
+		checks["scan_svc"] = &readinessCheck{
+			Status: "fail",
+			Detail: "scan sidecar listener is rebinding — see server logs",
+		}
+	}
+}
+
+// scanSvcHealthFieldValue is the /healthz `scan_svc` field: the status word on
+// a node that asked for a sidecar, and "" (omitted) on one that did not.
+//
+// Mirrors mcpHealthFieldValue's omission rule rather than socks5's
+// always-present field, for the reason the cp_grpc field documents: an
+// always-present value would make every ordinary proxy look like a sidecar host
+// whose listener is down.
+func scanSvcHealthFieldValue() string {
+	if !scanSvcListenerState().Configured {
+		return ""
+	}
+	return scanSvcListenerStatus()
+}
+
+// scanSvcListenerStatus is the one-word status for /healthz and the support
+// bundle. Fixed enum: disabled / stopped / down / degraded / ready.
 func scanSvcListenerStatus() string {
 	snap := scanSvcListenerState()
 	switch {
@@ -454,7 +513,7 @@ func scanSvcListenerStatus() string {
 		return "stopped"
 	case snap.Unavailable():
 		return "down"
-	case !snap.Bound:
+	case !snap.Bound, snap.Configured && !snap.EverBound:
 		return "degraded"
 	default:
 		return "ready"
@@ -491,9 +550,21 @@ func checkScanSvcListener() OperatorContractCheck {
 			Code: "scan_svc_listener", Status: diagOK,
 			Message: "scan sidecar stopped (graceful shutdown)",
 		}
-	case !snap.EverBound && snap.BindFailures > 0:
-		return scanSvcNeverBoundRow(snap)
 	case snap.Unavailable():
+		// EverBound chooses WHICH fail row and remedy, never WHETHER there is
+		// one: both go through Unavailable()'s threshold. Failing a never-bound
+		// sidecar on its FIRST bind failure would page on every ordinary
+		// redeploy in which a draining predecessor still holds the port —
+		// which is the condition CHAOS-66 added the threshold for on SOCKS5,
+		// where checkSOCKS5Listener's never-bound branch is likewise gated on
+		// BindUnavailable rather than on the first attempt. This round got it
+		// wrong in its first form (immediate FAIL plus up=0) and the bug was
+		// invisible because the only control covered the EverBound path;
+		// TestChaos113_ControlNeverBoundInsideThresholdDoesNotPage is the
+		// missing direction.
+		if !snap.EverBound {
+			return scanSvcNeverBoundRow(snap)
+		}
 		return scanSvcDownRow(snap)
 	case !snap.Bound:
 		return OperatorContractCheck{

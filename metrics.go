@@ -1405,7 +1405,12 @@ culvert_socks5_posture_refused_total %d
 	// remoteScanFail, fail-open, WK-2b). Alert on it accordingly.
 	if sv := scanSvcListenerState(); sv.Configured {
 		up, down := 1, 0
-		if sv.Unavailable() || (!sv.EverBound && sv.BindFailures > 0) {
+		// ONE threshold, Unavailable(), for both the never-bound and the
+		// lost-socket case. An extra `!EverBound && BindFailures > 0` arm here
+		// made a sidecar whose port is briefly held at boot export up=0 on its
+		// FIRST failed bind, i.e. page on every ordinary redeploy — the exact
+		// asymmetry culvert_socks5_listener_up exists to avoid.
+		if sv.Unavailable() {
 			up, down = 0, 1
 		}
 		_, _ = fmt.Fprintf(w, `# HELP culvert_scan_svc_listener_up 1 while the scan sidecar listener is bound and serving; 0 once it has never bound or has been unable to serve past the threshold

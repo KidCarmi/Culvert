@@ -171,11 +171,11 @@ func TestChaos113_NeverBoundIsVisibleAndAlerts(t *testing.T) {
 		return scanSvcListenerState().BindFailures >= 1
 	})
 
-	// Inside the threshold: retrying, NOT down. (Control direction.)
-	if row := checkScanSvcListener(); row.Status != diagFail {
-		// A never-bound sidecar is a FAIL row from the first failure: unlike a
-		// redeploy, there is no previous socket that was serving.
-		t.Errorf("never-bound row status = %q, want %q (%s)", row.Status, diagFail, row.Message)
+	// Inside the threshold: retrying, NOT down. A never-bound sidecar crosses
+	// the SAME threshold as a lost-socket one — see
+	// TestChaos113_ControlNeverBoundInsideThresholdDoesNotPage.
+	if row := checkScanSvcListener(); row.Status != diagWarn {
+		t.Errorf("never-bound row INSIDE the threshold = %q, want %q (%s)", row.Status, diagWarn, row.Message)
 	}
 
 	advanced.Store(true)
@@ -193,8 +193,68 @@ func TestChaos113_NeverBoundIsVisibleAndAlerts(t *testing.T) {
 			t.Errorf("/metrics missing %q for a sidecar that never bound", want)
 		}
 	}
-	if row := checkScanSvcListener(); !strings.Contains(row.Message, "UNSCANNED") {
+	row := checkScanSvcListener()
+	if row.Status != diagFail {
+		t.Errorf("never-bound row PAST the threshold = %q, want %q (%s)", row.Status, diagFail, row.Message)
+	}
+	if !strings.Contains(row.Message, "UNSCANNED") {
 		t.Errorf("the contract row does not say what a down sidecar COSTS: %q", row.Message)
+	}
+	if !strings.Contains(row.Message, "NEVER bound") {
+		t.Errorf("a sidecar that never bound gets the lost-socket wording: %q", row.Message)
+	}
+	if row.OperatorAction == "" {
+		t.Error("the never-bound FAIL row carries no operator action")
+	}
+}
+
+// TestChaos113_ControlNeverBoundInsideThresholdDoesNotPage is the control the
+// first form of this round was missing, and the reason it shipped a bug.
+//
+// A sidecar whose port is briefly held at boot — a draining predecessor, a
+// colocated service restarting, the ordinary redeploy — must not fail its row
+// or drop its gauge on the FIRST failed bind. The never-bound case gets a
+// different MESSAGE and remedy, never a different THRESHOLD. CHAOS-66 settled
+// this for SOCKS5, whose never-bound branch is likewise gated on
+// BindUnavailable rather than on the first attempt.
+//
+// The original shape (`!EverBound && BindFailures > 0` as its own fail arm, in
+// both the row and the gauge) passed every other gate, because the only
+// rebinding control covered the EverBound path.
+func TestChaos113_ControlNeverBoundInsideThresholdDoesNotPage(t *testing.T) {
+	scanSvcChaosSetup(t)
+	alerts := captureScanSvcAlerts()
+	noteScanSvcConfigured(":8484")
+
+	start := time.Now()
+	scanSvcHealthNow = func() time.Time { return start.Add(time.Second) }
+	maybeAlertScanSvcDown("port_in_use", noteScanSvcBindFailure("port_in_use", time.Second, start))
+
+	if snap := scanSvcListenerState(); snap.EverBound {
+		t.Fatalf("fixture is wrong: EverBound should be false")
+	}
+	body := renderMetrics(t)
+	if !strings.Contains(body, "culvert_scan_svc_listener_up 1") {
+		t.Error("a sidecar one second into its FIRST bind retry already exports listener_up 0 — this pages on every redeploy")
+	}
+	if !strings.Contains(body, "culvert_scan_svc_listener_down 0") {
+		t.Error("a sidecar one second into its FIRST bind retry is already reported down")
+	}
+	if row := checkScanSvcListener(); row.Status != diagWarn {
+		t.Errorf("row = %q (%s), want %q", row.Status, row.Message, diagWarn)
+	}
+	if got := alerts.count(); got != 0 {
+		t.Errorf("a first failed bind fired %d alerts", got)
+	}
+
+	// Past the threshold it must flip — otherwise the control has simply
+	// disabled the signal.
+	scanSvcHealthNow = func() time.Time { return start.Add(scanSvcUnavailableAfter + time.Second) }
+	if !strings.Contains(renderMetrics(t), "culvert_scan_svc_listener_up 0") {
+		t.Error("a never-bound sidecar past the threshold does not export listener_up 0")
+	}
+	if row := checkScanSvcListener(); row.Status != diagFail {
+		t.Errorf("row past the threshold = %q, want %q", row.Status, diagFail)
 	}
 }
 
@@ -325,6 +385,102 @@ func TestChaos113_GracefulStopIsNotAnOutage(t *testing.T) {
 	}
 	if got := alerts.count(); got != 0 {
 		t.Errorf("a graceful stop fired %d alerts", got)
+	}
+}
+
+// TestChaos113_HealthzFieldOmittedUnlessConfigured pins the /healthz `scan_svc`
+// field, the fourth listener's entry in the same report its three siblings
+// already publish.
+//
+// The omission rule is the cp_grpc field's, not socks5's always-present one: an
+// always-present value would make every ordinary proxy and every Data Plane in
+// the fleet look like a sidecar host whose listener is down. And the field
+// carries the POSTURE only — the attempt count, the bind reason class and the
+// remedy stay on the role-gated /api/diagnostics row, because handleHealth
+// serves this UNAUTHENTICATED on the proxy port.
+func TestChaos113_HealthzFieldOmittedUnlessConfigured(t *testing.T) {
+	scanSvcChaosSetup(t)
+
+	if got := scanSvcHealthFieldValue(); got != "" {
+		t.Errorf("a node with no sidecar publishes scan_svc=%q — every proxy then looks like a sidecar host", got)
+	}
+
+	noteScanSvcConfigured(":8484")
+	start := time.Now()
+	scanSvcHealthNow = func() time.Time { return start.Add(time.Second) }
+	noteScanSvcBindFailure("port_in_use", time.Second, start)
+	if got := scanSvcHealthFieldValue(); got != "degraded" {
+		t.Errorf("a sidecar retrying its first bind publishes scan_svc=%q, want degraded", got)
+	}
+
+	scanSvcHealthNow = func() time.Time { return start.Add(scanSvcUnavailableAfter + time.Second) }
+	if got := scanSvcHealthFieldValue(); got != "down" {
+		t.Errorf("a sidecar down past the threshold publishes scan_svc=%q, want down", got)
+	}
+
+	noteScanSvcBound()
+	if got := scanSvcHealthFieldValue(); got != "ready" {
+		t.Errorf("a serving sidecar publishes scan_svc=%q, want ready", got)
+	}
+
+	// The field must never leak the resolution onto an unauthenticated surface.
+	for _, forbidden := range []string{"port_in_use", ":8484", "attempt"} {
+		if strings.Contains(scanSvcHealthFieldValue(), forbidden) {
+			t.Errorf("the /healthz field leaks %q onto an unauthenticated surface", forbidden)
+		}
+	}
+}
+
+// TestChaos113_ReadinessRowIsReportOnlyAndAbsentWhenUnconfigured pins the
+// /ready `scan_svc` row, the fourth surface its three siblings publish.
+//
+// Two properties, pulling in opposite directions, which is why both are gated:
+// the row must EXIST and say fail when the sidecar is not serving (otherwise
+// the outage is invisible on the probe operators actually watch), and it must
+// NOT gate the default verdict (otherwise a scanning outage on one node becomes
+// a traffic outage for it — a healthy gateway ejected from rotation because the
+// plane that scans for OTHER nodes is down).
+func TestChaos113_ReadinessRowIsReportOnlyAndAbsentWhenUnconfigured(t *testing.T) {
+	scanSvcChaosSetup(t)
+
+	checks := map[string]*readinessCheck{}
+	appendScanSvcReadinessCheck(checks)
+	if _, ok := checks["scan_svc"]; ok {
+		t.Error("a node with no sidecar grows a scan_svc readiness row")
+	}
+
+	noteScanSvcConfigured(":8484")
+	start := time.Now()
+	scanSvcHealthNow = func() time.Time { return start.Add(time.Second) }
+	noteScanSvcBindFailure("port_in_use", time.Second, start)
+	checks = map[string]*readinessCheck{}
+	appendScanSvcReadinessCheck(checks)
+	row := checks["scan_svc"]
+	if row == nil {
+		t.Fatalf("a configured sidecar that is not serving has no readiness row")
+	}
+	if row.Status != "fail" {
+		t.Errorf("row status = %q, want fail", row.Status)
+	}
+	// UNAUTHENTICATED surface: the posture is public, the resolution is not.
+	for _, forbidden := range []string{"port_in_use", ":8484"} {
+		if strings.Contains(row.Detail, forbidden) {
+			t.Errorf("the readiness detail leaks %q onto an unauthenticated surface: %q", forbidden, row.Detail)
+		}
+	}
+
+	// Serving: ok. Gracefully stopped: no row at all.
+	noteScanSvcBound()
+	checks = map[string]*readinessCheck{}
+	appendScanSvcReadinessCheck(checks)
+	if got := checks["scan_svc"]; got == nil || got.Status != "ok" {
+		t.Errorf("a serving sidecar readiness row = %+v, want ok", got)
+	}
+	noteScanSvcListenerStopped()
+	checks = map[string]*readinessCheck{}
+	appendScanSvcReadinessCheck(checks)
+	if _, ok := checks["scan_svc"]; ok {
+		t.Error("a gracefully stopped sidecar still publishes a readiness row")
 	}
 }
 

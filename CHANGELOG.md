@@ -46,7 +46,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   stable serve); the `http.Server` is built in `NewScanService` so a `Shutdown`
   that precedes `Serve` is terminal and releases the port, and `Listen` refuses
   afterwards; five `culvert_scan_svc_*` rows, the `scan_svc_listener`
-  operator-contract row beside its three siblings, and a `scan_svc_listener_down`
+  operator-contract row beside its three siblings; the `/healthz` `scan_svc`
+  field beside the `socks5`/`admin_ui`/`cp_grpc` fields its siblings already
+  publish there, omitted entirely on a node that never asked for a sidecar and
+  carrying the posture only (the attempt count and bind reason class stay on the
+  role-gated diagnostics row, because `handleHealth` is unauthenticated on the
+  proxy port); the report-only `/ready` `scan_svc` row, which must NOT gate the
+  default verdict for the same reason `cp_grpc` does not — a node whose sidecar
+  cannot bind is proxying its own traffic perfectly, so ejecting it would turn a
+  scanning outage into a traffic outage, and report-only is a judgement about
+  this node's rotation rather than about whether unscanned traffic is acceptable;
+  a `scan_svc_listener_down`
   alert fired once per episode with a bounded bind class as its detail; and four
   new Alerts-panel checkboxes (`scan_svc_listener_down`, `scan_svc_down`,
   `scan_timeout`, `scan_skipped`). The fail-open posture itself is UNCHANGED and
@@ -54,7 +64,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   triggers it is now observable and self-healing. `culvert_scan_svc_listener_up`
   is the one gauge in `metrics.go` whose zero means a security control is off
   rather than a surface being unavailable; it stays 1 while the sidecar is merely
-  rebinding inside the threshold, so an ordinary redeploy does not page. The ten
+  rebinding inside the threshold, so an ordinary redeploy does not page. One
+  threshold governs both the never-bound and the lost-socket case — `EverBound`
+  chooses which fail row and remedy, never whether there is one. The first form
+  of this change got that wrong (`!EverBound && BindFailures > 0` as its own
+  fail arm, in the row and the gauge, paging on the FIRST failed bind at boot)
+  and it passed every other gate, because the only rebinding control drove a
+  sidecar that had already served; `ControlNeverBoundInsideThresholdDoesNotPage`
+  is the missing direction and two mutations reintroduce it. The ten
   remaining GUI-unsubscribable events are recorded in EXECUTABLE form
   (`scanAlertGUIKnownGaps`) behind two gates — one that stops a new event joining
   the list, one that fails if an entry has since been fixed — rather than patched
