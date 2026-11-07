@@ -1287,6 +1287,12 @@ jobs:
       # The hosts the candidate resolves under that manifest (issuer +
       # OIDC_RESOLVED_FIELDS); each must be an EXACT EGRESS_ALLOW_NAMES entry.
       OIDC_REVIEWED_RESOLVED_HOSTS: "accounts.google.com oauth2.googleapis.com www.googleapis.com"
+      # The JSON field tags of the candidate's decoder struct (0981ff3d
+      # auth_oidc_flow.go:44-51 oidcDiscoveryDoc, blob dc1eb5b0). Go's
+      # encoding/json (go1.27.3) also decodes a key into a field when it matches
+      # the tag ignoring ASCII case, with KELVIN SIGN as k and LONG S as s; the
+      # checker refuses every such alias and every decoded field not reviewed.
+      OIDC_CANDIDATE_DECODER_FIELDS: "issuer authorization_endpoint token_endpoint introspection_endpoint userinfo_endpoint jwks_uri"
       # Named in the document but never resolved by the candidate at 0981ff3d
       # (userinfo; device/revocation share oauth2.googleapis.com): must stay
       # refused, proving the allowlist is per host, not per domain.
@@ -1602,6 +1608,13 @@ jobs:
           RESOLVED_HOSTS = sorted(e["OIDC_REVIEWED_RESOLVED_HOSTS"].split())
           ALLOW = e["EGRESS_ALLOW_NAMES"].split()
           CONTROL = e["OIDC_UNRESOLVED_CONTROL"].lower()
+          DECODER = e["OIDC_CANDIDATE_DECODER_FIELDS"].split()
+          # The ONLY non-ASCII code points the candidate's decoder (go1.27.3
+          # encoding/json) accepts in place of a tag character, found by substituting
+          # every code point at a position of each distinct tag character: KELVIN
+          # SIGN for k and LATIN SMALL LETTER LONG S for s. Otherwise a key matches a
+          # tag only rune-for-rune with ASCII case ignored.
+          GO_FOLD_ASCII = {"\u212a": "K", "\u017f": "S"}
           # 0981ff3d internal/ssrf/ssrf.go privateRanges, verbatim. PrivateAddr unmaps
           # IPv4-mapped IPv6 and drops the zone first; PrivateHostContext refuses the
           # host if ANY LookupHost answer is private, and refuses a lookup error.
@@ -1640,6 +1653,16 @@ jobs:
               elif isinstance(o, str) and re.match(r"(?i)^[a-z][a-z0-9+.-]*://", o):
                   yield path, o
 
+          def decoded_as(key):
+              """The candidate struct fields Go's encoding/json would decode `key` into:
+              the exact tag, or a tag equal rune-for-rune under the decoder's fold."""
+              out = []
+              for f in DECODER:
+                  if len(key) != len(f): continue
+                  if all(a.upper() == b.upper() if a < "\x80" else GO_FOLD_ASCII.get(a) == b.upper() for a, b in zip(key, f)):
+                      out.append(f)
+              return out
+
           def private(a):
               ip = ipaddress.ip_address(a.split("%", 1)[0])
               if ip.version == 6 and ip.ipv4_mapped: ip = ip.ipv4_mapped
@@ -1663,6 +1686,8 @@ jobs:
               for h in sorted(set(unused) | {CONTROL}):
                   if covered(h): bad.append(f"{h} is never resolved by the candidate, yet the allowlist covers it")
               if CONTROL not in unused: bad.append(f"the refusal control {CONTROL} is not an unused host of the reviewed manifest")
+              for f in ["issuer"] + RESOLVED_FIELDS:
+                  if f not in DECODER: bad.append(f"{f} is not a field of the candidate's decoder (OIDC_CANDIDATE_DECODER_FIELDS)")
               return bad, hosts, unused
 
           def mapping(doc):
@@ -1678,6 +1703,15 @@ jobs:
                   else:
                       got[k] = doc[k]
                       if doc[k] != WANT[k]: bad.append(f"{k} changed to {doc[k]!r} (reviewed {WANT[k]!r})")
+              # As the candidate's decoder sees the top level: every key it would
+              # decode into a struct field must be that field's exact, reviewed key.
+              # An alias refuses whatever its value or position (Go applies keys in
+              # document order, so an alias before or after the canonical key changes
+              # the effective field either way).
+              for key in doc:
+                  for f in decoded_as(key):
+                      if key != f: bad.append(f"top-level key {key!r} is decoded by the candidate as {f!r} (Go encoding/json case-folding); aliases are refused")
+                      elif f not in WANT: bad.append(f"{f!r} is decoded by the candidate but is not in the reviewed manifest")
               extra = [(json.dumps(list(p)), u) for p, u in urls(doc) if not (len(p) == 1 and p[0] in WANT)]
               bad += [f"unreviewed URL at {p}: {u!r}" for p, u in extra]
               return bad, got, extra
@@ -2040,6 +2074,7 @@ jobs:
                             "ruleset_canon": open(os.path.join(e["LAB_ROOT"], "containment/ruleset.canon")).read().strip(),
                             "proof": open(os.path.join(e["LAB_ROOT"], "containment/proof.tsv")).read().split("\n"),
                             "oidc_resolved_fields": env("OIDC_RESOLVED_FIELDS").split(),
+                            "oidc_candidate_decoder_fields": env("OIDC_CANDIDATE_DECODER_FIELDS").split(),
                             "oidc_document_sha256": sh("oidc document", f"sha256sum {e['LAB_ROOT']}/oidc-preboot.json | cut -c1-64"),
                             "oidc_reviewed_resolved_hosts": env("OIDC_REVIEWED_RESOLVED_HOSTS").split(),
                             "oidc_reviewed_mapping": json.loads(env("OIDC_REVIEWED_MAPPING") or "{}"),
