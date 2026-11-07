@@ -206,6 +206,7 @@ func buildOperatorContract() OperatorContract {
 		checkCPAddressList(),
 		checkDNSResolution(),
 		checkIdPMetadata(),
+		checkIdPPersistence(),
 		checkGeoResolution(),
 		checkRequestLogPersistence(),
 		checkIdentityBackend(),
