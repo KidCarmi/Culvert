@@ -568,10 +568,23 @@ the gate's own `--timeout=10m` (here 20 m) is the honest budget. It found four
 issues on the first pass — one G404, one G122 and two `noctx` — all fixed, and
 the 0-issue result above is the re-run.
 
-**A full-tree pass was NOT compared against the base**, and that is a real gap
-in this round's verification: `cyclop`, `funlen` and `gocognit` attribute to a
+**A full-tree pass was NOT compared against the base** at first, and that gap
+materialized within minutes of opening the PR — so it is recorded as an
+outcome rather than a caveat. `cyclop`, `funlen` and `gocognit` attribute to a
 function's DECLARATION line, so `--new-from-rev` cannot see a function this
-change made more complex. The change adds new functions rather than growing
+change made more complex; the same blind spot turns out to apply to any finding
+on an UNCHANGED LINE inside a rewritten function. The hosted advisory
+`reviewdog` job (`filter_mode: diff_context`) immediately flagged
+`scan_svc.go`'s bare `net.Listen` under `noctx` — a line byte-identical to
+main's line 70, invisible to `--new-from-rev`, and one of 162 findings a
+full-tree run reports on this tree (the gate's own comment records ~137 legacy
+findings). It was fixed rather than deferred, because the function was rewritten
+around it here and the fix is a real improvement: the bind now takes the
+supervisor's context, so a shutdown during ADDRESS RESOLUTION aborts it instead
+of parking the supervisor in the kernel while the drain budget runs out — which
+is what the comment on that very line had always claimed and never enforced.
+A full-tree run was then done, and the remaining `scan_svc.go` finding
+(`whyNoLint` on `handleStatus`) is pre-existing and untouched by this round. The change adds new functions rather than growing
 existing ones (the largest, `checkScanSvcListener`, is a 5-arm switch that
 delegates its two long rows to helpers precisely to stay inside the 15-complexity
 threshold), so the risk is low — but low is not measured, and the hosted gate is
@@ -579,6 +592,47 @@ what will measure it.
 
 A passing local check is not a passing hosted gate. These are local results for
 this SHA.
+
+---
+
+## 9.8 Found while watching this PR's CI — NOT this round's, and not a test problem
+
+Two CI jobs went red on the PR, and neither is this change's. Both come from the
+GitHub runner image rolling to **Ubuntu 26.04**, and one of them is a real
+product defect that deserves its own sweep.
+
+**The one that matters.** `Race · root shard 0` and `shard 2` fail on
+`TestCulvertMaintInstall_SudoersRender_*` with:
+
+```
+syntax error: wildcards are not allowed in command arguments
+visudo: invalid sudoers file
+```
+
+`cmd/culvert-maint/internal/runner/templates_d16b.go` renders sudo rules
+containing `--older-than *` and `--keep-last *`. That is deliberate — its own
+comment calls it "one bounded wildcard token" and names the agent's validator as
+"the only barrier between operator input and a sudo argv". A newer `sudo`
+refuses wildcards in command arguments outright. **That is not a test
+expectation drifting; it is the sudoers file the INSTALLER WRITES being
+rejected on such a host**, so `culvert-maint` cannot be authorized for
+restore-leftover cleanup or upgrade. It is a deployment break that arrives on
+its own as distros roll forward, with no change on Culvert's side — exactly the
+shape this register exists to catch, in a domain this round does not own.
+Deliberately NOT fixed here: removing the wildcard has security consequences
+given that the validator is the stated barrier, and the alternatives
+(enumerating permitted values, or restructuring the rule) are an owner decision.
+Recorded for its own round.
+
+**The other.** `Admin-UI RBAC` fails in 21 s at the browser-install step:
+`Playwright does not support chromium on ubuntu26.04-x64` with the pinned driver
+1.60.0. The job's own summary says it does not block the PR.
+
+**Why neither is this PR's, established rather than asserted:** PR #1821 —
+unrelated work (an IdP-registry diagnostics row) — shows the IDENTICAL `visudo`
+failures an hour before this PR's run, and PRs whose CI ran before the image
+roll are clean. The failures name components this diff does not touch
+(`cmd/culvert-maint` sudoers rendering; Playwright/Chromium install).
 
 ---
 

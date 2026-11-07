@@ -20316,6 +20316,27 @@ and belongs to the owner. `culvert_remote_scan_fail_total`, the
 embeds the ephemeral local port and could not dedup), the affirmative-`Clean`
 requirement and the bounded replies are all correct and were left alone.
 
+**Found while watching this round's own PR CI, and recorded here because it is
+NOT this round's and belongs to another domain: the maintenance agent's sudoers
+file is REJECTED by newer `sudo`.**
+`cmd/culvert-maint/internal/runner/templates_d16b.go` renders sudo rules
+containing `--older-than *` and `--keep-last *` — deliberately, its own comment
+calling it "one bounded wildcard token" with the agent's validator as "the only
+barrier between operator input and a sudo argv". A newer `sudo` refuses
+wildcards in command arguments outright (`syntax error: wildcards are not
+allowed in command arguments` / `visudo: invalid sudoers file`), so on such a
+host the sudoers file **the installer writes** is invalid and `culvert-maint`
+cannot be authorized for restore-leftover cleanup or upgrade. That is a
+deployment break that arrives with no change on Culvert's side as distros roll
+forward, not a drifting test expectation. Surfaced by the GitHub runner image
+rolling to Ubuntu 26.04 (which independently broke the Playwright-based
+`Admin-UI RBAC` job: no chromium for `ubuntu26.04-x64` on the pinned driver).
+Established as pre-existing rather than asserted: unrelated PR #1821 shows the
+identical failures an hour earlier, and PRs whose CI ran before the roll are
+clean. NOT fixed here — removing the wildcard has security consequences given
+that the validator is the stated barrier, and the alternatives are an owner
+decision. **It wants its own id and round.**
+
 Left open and attributed rather than fixed, in priority order: **closing the
 unavailability episode on a STABLE SERVE rather than on a bind** — the sharpest
 remaining gap and one this round's own design introduced, so it is stated rather

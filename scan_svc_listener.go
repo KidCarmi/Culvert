@@ -349,7 +349,7 @@ func superviseScanSvcListener(ctx context.Context, svc *ScanService) {
 		if ctx.Err() != nil || svc.stoppedByShutdown() {
 			return
 		}
-		if !scanSvcBindOnce(svc, &backoff) {
+		if !scanSvcBindOnce(ctx, svc, &backoff) {
 			if !scanSvcWaitBackoff(ctx, svc, backoff) {
 				return
 			}
@@ -380,8 +380,10 @@ func superviseScanSvcListener(ctx context.Context, svc *ScanService) {
 
 // scanSvcBindOnce performs one bind attempt, recording the outcome and
 // advancing the ladder on failure. It reports whether the sidecar is bound.
-func scanSvcBindOnce(svc *ScanService, backoff *time.Duration) bool {
-	err := svc.Listen()
+func scanSvcBindOnce(ctx context.Context, svc *ScanService, backoff *time.Duration) bool {
+	// ctx-aware bind: a shutdown during address resolution aborts it rather
+	// than parking the supervisor in the kernel while the drain budget runs.
+	err := svc.listen(ctx)
 	if err == nil {
 		if recovered := noteScanSvcBound(); recovered {
 			logger.Printf("ScanSvc: listener on %q recovered", sanitizeLog(svc.addr))
