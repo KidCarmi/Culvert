@@ -1620,11 +1620,23 @@ jobs:
                   return None
               return h
 
-          def urls(o, path=""):
+          def parse(raw):
+              """JSON with duplicate object keys refused (no last-one-wins ambiguity)."""
+              def pairs(kv):
+                  d = {}
+                  for k, v in kv:
+                      if k in d: raise ValueError(f"duplicate key {k!r}")
+                      d[k] = v
+                  return d
+              return json.loads(raw, object_pairs_hook=pairs)
+
+          def urls(o, path=()):
+              """Every URL-like string with its UNAMBIGUOUS path: a tuple of keys and
+              list indices (an empty key is its own element, never elided)."""
               if isinstance(o, dict):
-                  for k, v in o.items(): yield from urls(v, f"{path}.{k}" if path else str(k))
+                  for k, v in o.items(): yield from urls(v, path + (k,))
               elif isinstance(o, list):
-                  for i, v in enumerate(o): yield from urls(v, f"{path}[{i}]")
+                  for i, v in enumerate(o): yield from urls(v, path + (i,))
               elif isinstance(o, str) and re.match(r"(?i)^[a-z][a-z0-9+.-]*://", o):
                   yield path, o
 
@@ -1654,26 +1666,36 @@ jobs:
               return bad, hosts, unused
 
           def mapping(doc):
-              got, bad = dict(urls(doc)), []
-              for k in sorted(set(WANT) | set(got)):
-                  if k not in got: bad.append(f"{k} removed (reviewed {WANT[k]!r})")
-                  elif k not in WANT: bad.append(f"{k} added: {got[k]!r} (not reviewed)")
-                  elif got[k] != WANT[k]: bad.append(f"{k} changed to {got[k]!r} (reviewed {WANT[k]!r})")
-              return bad, got
+              """The reviewed fields DIRECTLY at the top level, as the candidate reads
+              them, each the exact reviewed string; and no URL anywhere else (any
+              other path, at any depth, is unreviewed)."""
+              if not isinstance(doc, dict):
+                  return [f"the document is a JSON {type(doc).__name__}, not an object"], {}, []
+              bad, got = [], {}
+              for k in sorted(WANT):
+                  if k not in doc: bad.append(f"{k} removed from the top level (reviewed {WANT[k]!r})")
+                  elif not isinstance(doc[k], str): bad.append(f"{k} is a {type(doc[k]).__name__}, not the reviewed string {WANT[k]!r}")
+                  else:
+                      got[k] = doc[k]
+                      if doc[k] != WANT[k]: bad.append(f"{k} changed to {doc[k]!r} (reviewed {WANT[k]!r})")
+              extra = [(json.dumps(list(p)), u) for p, u in urls(doc) if not (len(p) == 1 and p[0] in WANT)]
+              bad += [f"unreviewed URL at {p}: {u!r}" for p, u in extra]
+              return bad, got, extra
 
           def audit(doc_path, out):
               bad, hosts, unused = config()
               raw = open(doc_path, "rb").read(); got = {}
-              try: mb, got = mapping(json.loads(raw)); bad += [f"document: {m}" for m in mb]
+              extra = []
+              try: mb, got, extra = mapping(parse(raw)); bad += [f"document: {m}" for m in mb]
               except ValueError as x: bad.append(f"document is not JSON ({x})")
               sha = hashlib.sha256(raw).hexdigest()
               print(f"discovery document {DISCOVERY}: sha256 {sha} ({len(raw)} bytes)")
               for k in sorted(WANT):
                   role = "resolved by the candidate" if k == "issuer" or k in RESOLVED_FIELDS else "named, never resolved by the candidate (host refused)" if hosts.get(k) in unused else "named, never resolved; its host is reviewed for another field"
                   print(f"{'PASS' if got.get(k) == WANT[k] else 'FAIL'} {k}: reviewed {WANT[k]} | observed {got.get(k, '(absent)')} | host {hosts.get(k)}: {role}")
-              for k in sorted(set(got) - set(WANT)):
-                  print(f"FAIL {k}: not in the reviewed manifest | observed {got[k]}")
-              json.dump({"discovery_url": DISCOVERY, "document_sha256": sha, "expected": WANT, "observed": got,
+              for p, u in extra:
+                  print(f"FAIL {p}: not a reviewed top-level field | observed {u}")
+              json.dump({"discovery_url": DISCOVERY, "document_sha256": sha, "expected": WANT, "observed": got, "unreviewed": [list(x) for x in extra],
                          "resolved_hosts": RESOLVED_HOSTS, "unused_hosts": unused, "problems": bad}, open(out, "w"), indent=1, sort_keys=True)
               if bad: sys.exit("::error::OIDC dependency audit failed, no candidate execution: " + "; ".join(bad))
 
@@ -1705,7 +1727,7 @@ jobs:
               if not probs and status != 200: probs.append(f"HTTP {status}" + (f", redirect to {loc!r} not followed" if loc else ""))
               elif not probs and len(body) > 65536: probs.append("over 64 KiB (the candidate reads at most 64 KiB)")
               elif not probs:
-                  try: probs += mapping(json.loads(body))[0]
+                  try: probs += mapping(parse(body))[0]
                   except ValueError as x: probs.append(f"not JSON ({x})")
               sha = hashlib.sha256(body).hexdigest()
               rec["discovery"] = {"url": DISCOVERY, "status": status, "location": loc, "sha256": sha, "problems": probs}
