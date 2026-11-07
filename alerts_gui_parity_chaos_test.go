@@ -146,7 +146,13 @@ func TestChaos113_KnownAlertGUIGapsAreStillGaps(t *testing.T) {
 func firedAlertEvents(t *testing.T) (events []string, filesScanned int) {
 	t.Helper()
 	set := map[string]bool{}
-	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+	// Anchored to pkgSourceDir(), NOT the process working directory: a
+	// CONCURRENT test's os.Chdir would otherwise make this walk enumerate a
+	// scratch tree, which is the CWD-race class static_read_wall_test.go
+	// exists to wall off — and whose doc names "the source-scanning parity
+	// walls" as exactly this case. Caught on this PR by
+	// TestTestFileReadsAreCWDIndependent, not by local runs.
+	err := filepath.WalkDir(pkgSourceDir(), func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // an unreadable corner of the tree is not this gate's business
 		}
@@ -183,9 +189,10 @@ func firedAlertEvents(t *testing.T) (events []string, filesScanned int) {
 // guiSubscribableEvents returns the events the Alerts panel offers.
 func guiSubscribableEvents(t *testing.T) map[string]bool {
 	t.Helper()
-	b, err := os.ReadFile("static/index.html")
+	// staticIndexHTMLPath(), not a CWD-relative read — see the walk above.
+	b, err := os.ReadFile(staticIndexHTMLPath())
 	if err != nil {
-		t.Fatalf("read static/index.html: %v", err)
+		t.Fatalf("read %s: %v", staticIndexHTMLPath(), err)
 	}
 	set := map[string]bool{}
 	for _, m := range guiEventRe.FindAllStringSubmatch(string(b), -1) {

@@ -549,6 +549,28 @@ golangci-lint run --timeout=20m --new-from-rev origin/main
 python3 docs/agent-context/check.py                       OK   exit 0
 ```
 
+**The targeted-suite shortcut hid a real defect, twice.** This is the round's
+most transferable lesson and it cost two round trips, so it is recorded as an
+outcome rather than a caveat:
+
+1. `--new-from-rev` could not see a `noctx` finding on an unchanged line inside
+   a function this change rewrote (§9.7 above).
+2. **`-run 'TestChaos113_'` could not see the repository's own anti-regression
+   walls.** `alerts_gui_parity_chaos_test.go` read the SPA with
+   `os.ReadFile("static/index.html")` and walked `filepath.WalkDir(".")`, both
+   CWD-relative. `static_read_wall_test.go`'s
+   `TestTestFileReadsAreCWDIndependent` forbids exactly that — a concurrent
+   test's `os.Chdir` makes such a read pick up a scratch tree, which the
+   determinism and `-race` gates catch as a flake — and its own doc names "the
+   source-scanning parity walls" as precisely this case. The wall never ran
+   locally because every local invocation filtered to this round's own gates.
+   Fixed by anchoring both to `staticIndexHTMLPath()` and `pkgSourceDir()`.
+
+Both gaps share one cause: **a filtered local run cannot see a gate that lives
+outside the filter.** The honest remedy is to run the package's walls — or the
+whole package — before claiming a change verified, which is what the hosted
+gate did and what this round did not.
+
 **Not run, and why.** The full `go test -count=1 .` for package `main` was
 started twice and cancelled both times: the package is ~1540 files with timing
 and benchmark gates, and each attempt was invalidated by a later fix in this
@@ -597,7 +619,12 @@ this SHA.
 
 ## 9.8 Found while watching this PR's CI — NOT this round's, and not a test problem
 
-Two CI jobs went red on the PR, and neither is this change's. Both come from the
+Several CI jobs went red on the PR. **One of them WAS this change's** — the
+CWD-relative read above, which appeared in `Race · root shard 3` and in
+`Deep · determinism`, and is fixed. Everything below is the remainder, which is
+not this change's. The first pass over these failures examined only shards 0
+and 2 and generalised from them; recording that here because the generalisation
+was wrong and a corrected note was posted on the PR. Both come from the
 GitHub runner image rolling to **Ubuntu 26.04**, and one of them is a real
 product defect that deserves its own sweep.
 
