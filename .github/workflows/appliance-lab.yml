@@ -1633,15 +1633,42 @@ jobs:
                   return None
               return h
 
+          MAX_DOC, MAX_DEPTH = 64 << 10, 64
+
           def parse(raw):
-              """JSON with duplicate object keys refused (no last-one-wins ambiguity)."""
+              """The RAW body bytes, judged at the candidate's own input boundary: it
+              decodes at most 64 KiB with go1.27.3 encoding/json, which reads UTF-8
+              only (a BOM, UTF-16 or UTF-32 is a syntax error) and has no NaN/Infinity.
+              Python's json would accept all of those, so they are refused here, at
+              every depth. Refused too, stricter than the candidate and never looser:
+              duplicate keys (no last-one-wins ambiguity); invalid UTF-8 and lone
+              surrogate escapes (the candidate substitutes U+FFFD, so the string it
+              reads would not be the one compared); nesting beyond MAX_DEPTH. So every
+              string accepted here is exactly the string the candidate decodes."""
+              if not isinstance(raw, bytes): raise ValueError("not raw bytes")
+              if len(raw) > MAX_DOC: raise ValueError(f"{len(raw)} bytes, over 64 KiB (the candidate reads at most 64 KiB)")
+              if raw[:3] == b"\xef\xbb\xbf": raise ValueError("leading UTF-8 BOM (the candidate's decoder refuses it)")
+              try: text = raw.decode("utf-8")
+              except UnicodeDecodeError as x:
+                  raise ValueError(f"not UTF-8 at byte {x.start} (the candidate reads UTF-8 only: a BOM, UTF-16 or UTF-32 is refused)") from None
+              def const(c): raise ValueError(f"non-JSON constant {c} (the candidate's decoder refuses it)")
               def pairs(kv):
                   d = {}
                   for k, v in kv:
                       if k in d: raise ValueError(f"duplicate key {k!r}")
                       d[k] = v
                   return d
-              return json.loads(raw, object_pairs_hook=pairs)
+              try: doc = json.loads(text, object_pairs_hook=pairs, parse_constant=const)
+              except RecursionError: raise ValueError(f"nesting deeper than {MAX_DEPTH}") from None
+              stack = [(doc, 1)]
+              while stack:
+                  o, n = stack.pop()
+                  if isinstance(o, (dict, list)) and n > MAX_DEPTH: raise ValueError(f"nesting deeper than {MAX_DEPTH}")
+                  for s in (list(o) if isinstance(o, dict) else [o] if isinstance(o, str) else []):
+                      if any(0xD800 <= ord(c) <= 0xDFFF for c in s):
+                          raise ValueError(f"lone surrogate escape in {s!r} (the candidate substitutes U+FFFD)")
+                  stack += [(v, n + 1) for v in (o.values() if isinstance(o, dict) else o if isinstance(o, list) else [])]
+              return doc
 
           def urls(o, path=()):
               """Every URL-like string with its UNAMBIGUOUS path: a tuple of keys and
