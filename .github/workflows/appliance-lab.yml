@@ -1276,6 +1276,17 @@ jobs:
       # every host they name to be allowlisted, and the containment proof
       # resolves and reaches each one from inside the guest cgroup.
       OIDC_RESOLVED_FIELDS: "authorization_endpoint token_endpoint jwks_uri"
+      # The REVIEWED endpoint manifest of the selected document (Google's
+      # discovery document as fetched 7 November 2026, sha256 f86b185f...):
+      # every URL it contains, at any depth, by key. The pre-boot audit and
+      # the in-cgroup proof require the served document's URL map to EQUAL
+      # this (added, removed or changed URLs stop the campaign before boot,
+      # even onto an allowlisted host); non-URL metadata is not frozen.
+      # Changing it is a route change for review, never automatic.
+      OIDC_REVIEWED_MAPPING: '{"authorization_endpoint":"https://accounts.google.com/o/oauth2/v2/auth","device_authorization_endpoint":"https://oauth2.googleapis.com/device/code","issuer":"https://accounts.google.com","jwks_uri":"https://www.googleapis.com/oauth2/v3/certs","revocation_endpoint":"https://oauth2.googleapis.com/revoke","token_endpoint":"https://oauth2.googleapis.com/token","userinfo_endpoint":"https://openidconnect.googleapis.com/v1/userinfo"}'
+      # The hosts the candidate resolves under that manifest (issuer +
+      # OIDC_RESOLVED_FIELDS); each must be an EXACT EGRESS_ALLOW_NAMES entry.
+      OIDC_REVIEWED_RESOLVED_HOSTS: "accounts.google.com oauth2.googleapis.com www.googleapis.com"
       # Named in the document but never resolved by the candidate at 0981ff3d
       # (userinfo; device/revocation share oauth2.googleapis.com): must stay
       # refused, proving the allowlist is per host, not per domain.
@@ -1567,64 +1578,147 @@ jobs:
           set -euo pipefail
           sudo modprobe dm_delay 2>/dev/null || { sudo apt-get install -y -q "linux-modules-extra-$(uname -r)" && sudo modprobe dm_delay; }
           lsmod | grep -E '^dm_delay' && sudo dmsetup targets | grep -E '^(delay|linear) '
-      - name: "Pre-boot reachability of the public OIDC issuer, and audit of every endpoint host the candidate resolves from its discovery document (an outage or an unlisted host here is infrastructure, before candidate execution)"
+      - name: "Pre-boot reachability of the public OIDC issuer, and its discovery document bound to the reviewed endpoint manifest (an outage or any endpoint change here stops before candidate execution)"
         run: |
           set -euo pipefail
-          curl -fsS -m 20 "$OIDC_PUBLIC_ISSUER/.well-known/openid-configuration" -o "$LAB_ROOT/oidc-preboot.json"
-          # Each host the candidate resolves (the issuer for the fetch, then
-          # OIDC_RESOLVED_FIELDS) must be covered by an allowlisted name, with
-          # the resolver's semantics: the name itself or a subdomain of it.
-          # Every other URL in the document is listed, not allowed. The host
-          # list feeds the containment proof (resolve + reach, in the cgroup).
-          python3 -I - "$LAB_ROOT/oidc-preboot.json" "$LAB_ROOT/oidc-endpoint-hosts.txt" <<'PY' | tee "$LAB_ROOT/oidc-audit.txt" | tee -a "$GITHUB_STEP_SUMMARY"
-          import hashlib, json, os, re, sys, urllib.parse as up
+          # One checker, shared with the containment proof (guest mode).
+          cat > "$LAB_ROOT/oidc-check.py" <<'OIDC'
+          """OIDC discovery dependency check, bound to the REVIEWED manifest.
+            audit DOC OUT.json  on the runner, before containment: every URL in the
+                                document (any depth) must equal OIDC_REVIEWED_MAPPING.
+            guest OUT.json      inside the guest cgroup, through the allowlisting
+                                resolver and the egress policy: fetch the issuer's
+                                discovery path (HTTP 200, no redirect followed) and bind
+                                it to the same manifest; resolve every reviewed host
+                                (A and AAAA, as LookupHost) and judge EVERY answer with
+                                the candidate's rule; complete TLS to each host (GET /,
+                                no credential). Prints proof.tsv rows."""
+          import hashlib, http.client, ipaddress, json, os, re, socket, ssl, sys, urllib.parse as up
           e = os.environ
-          raw = open(sys.argv[1], "rb").read(); d = json.loads(raw)
-          allow = e["EGRESS_ALLOW_NAMES"].split()
-          covered = lambda h: any(h == n or h.endswith("." + n) for n in allow)
-          label = r"[a-z0-9]([a-z0-9-]*[a-z0-9])?"
-          bad, need = [], {}
-          def host(u, what):
+          ISSUER = e["OIDC_PUBLIC_ISSUER"].rstrip("/")
+          DISCOVERY = ISSUER + "/.well-known/openid-configuration"
+          WANT = json.loads(e["OIDC_REVIEWED_MAPPING"])
+          RESOLVED_FIELDS = e["OIDC_RESOLVED_FIELDS"].split()
+          RESOLVED_HOSTS = sorted(e["OIDC_REVIEWED_RESOLVED_HOSTS"].split())
+          ALLOW = e["EGRESS_ALLOW_NAMES"].split()
+          CONTROL = e["OIDC_UNRESOLVED_CONTROL"].lower()
+          # 0981ff3d internal/ssrf/ssrf.go privateRanges, verbatim. PrivateAddr unmaps
+          # IPv4-mapped IPv6 and drops the zone first; PrivateHostContext refuses the
+          # host if ANY LookupHost answer is private, and refuses a lookup error.
+          PRIVATE = [ipaddress.ip_network(n) for n in (
+              "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+              "192.168.0.0/16", "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128",
+              "64:ff9b::/96", "100::/64", "fc00::/7", "fe80::/10", "ff00::/8")]
+          LABEL = r"[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+
+          def host_of(u):
               p = up.urlsplit(u); h = (p.hostname or "").lower()
               try: port = p.port
               except ValueError: port = -1
-              # A DNS name: dot-separated labels, the last one starting with a
-              # letter (so an IP literal, which the guest cannot reach by an
-              # allowlisted name, is refused here as what it is).
-              if p.scheme != "https" or port not in (None, 443) or not re.fullmatch(rf"({label}\.)+[a-z]([a-z0-9-]*[a-z0-9])?", h):
-                  bad.append(f"{what} {u!r} is not an https URL on a DNS name"); return None
+              if p.scheme != "https" or port not in (None, 443) or p.username or p.password \
+                 or not re.fullmatch(rf"({LABEL}\.)+[a-z]([a-z0-9-]*[a-z0-9])?", h):
+                  return None
               return h
-          if str(d.get("issuer", "")).rstrip("/") != e["OIDC_PUBLIC_ISSUER"].rstrip("/"):
-              bad.append(f"issuer {d.get('issuer')!r} is not {e['OIDC_PUBLIC_ISSUER']!r}")
-          h = host(e["OIDC_PUBLIC_ISSUER"], "issuer")
-          if h: need.setdefault(h, []).append("issuer (the discovery fetch)")
-          fields = e["OIDC_RESOLVED_FIELDS"].split()
-          for f in fields:
-              u = d.get(f, "")
-              if not isinstance(u, str) or not u:
-                  if f in ("authorization_endpoint", "token_endpoint"):
-                      bad.append(f"{f} is missing (the candidate requires it)")
-                  continue
-              h = host(u, f)
-              if h: need.setdefault(h, []).append(f)
-          print(f"discovery document of {e['OIDC_PUBLIC_ISSUER']}: sha256 {hashlib.sha256(raw).hexdigest()} ({len(raw)} bytes)")
-          for h, fs in sorted(need.items()):
-              ok = covered(h)
-              print(f"{'PASS' if ok else 'FAIL'} resolved by the candidate: {h} ({', '.join(fs)}): {'allowlisted' if ok else 'NOT allowlisted'}")
-              if not ok:
-                  bad.append(f"{h} ({', '.join(fs)}) is resolved by the candidate but not in EGRESS_ALLOW_NAMES")
-          for k, v in sorted(d.items()):
-              if k in fields or k == "issuer" or not isinstance(v, str) or not v.startswith(("http://", "https://")):
-                  continue
-              vh = (up.urlsplit(v).hostname or "").lower()
-              print(f"info named in the document, not resolved by the candidate: {k} -> {vh}" + (" (an allowlisted host for another field)" if vh in need else " (not allowlisted)"))
-          c = e["OIDC_UNRESOLVED_CONTROL"].lower()
-          if covered(c) or c in need:
-              bad.append(f"the refusal control {c} is allowlisted or resolved")
-          if bad:
-              sys.exit("::error::OIDC dependency audit failed, no candidate execution: " + "; ".join(bad))
-          open(sys.argv[2], "w").write("".join(f"{h}\n" for h in sorted(need)))
-          PY
+
+          def urls(o, path=""):
+              if isinstance(o, dict):
+                  for k, v in o.items(): yield from urls(v, f"{path}.{k}" if path else str(k))
+              elif isinstance(o, list):
+                  for i, v in enumerate(o): yield from urls(v, f"{path}[{i}]")
+              elif isinstance(o, str) and re.match(r"(?i)^[a-z][a-z0-9+.-]*://", o):
+                  yield path, o
+
+          def private(a):
+              ip = ipaddress.ip_address(a.split("%", 1)[0])
+              if ip.version == 6 and ip.ipv4_mapped: ip = ip.ipv4_mapped
+              return any(ip in n for n in PRIVATE)
+
+          def config():
+              """The reviewed manifest against the job's own policy."""
+              bad, hosts = [], {}
+              covered = lambda h: any(h == n or h.endswith("." + n) for n in ALLOW)
+              if WANT.get("issuer", "").rstrip("/") != ISSUER: bad.append("the reviewed issuer is not OIDC_PUBLIC_ISSUER")
+              for k, u in WANT.items():
+                  h = host_of(u)
+                  if h: hosts[k] = h
+                  else: bad.append(f"reviewed {k} {u!r} is not an https URL on a DNS name")
+              need = {hosts.get("issuer")} | {hosts.get(f) for f in RESOLVED_FIELDS}
+              if None in need or sorted(need) != RESOLVED_HOSTS:
+                  bad.append(f"OIDC_REVIEWED_RESOLVED_HOSTS {RESOLVED_HOSTS} are not the issuer and {RESOLVED_FIELDS} hosts")
+              for h in RESOLVED_HOSTS:
+                  if h not in ALLOW: bad.append(f"reviewed host {h} is not an exact EGRESS_ALLOW_NAMES entry")
+              unused = sorted(set(hosts.values()) - set(RESOLVED_HOSTS))
+              for h in sorted(set(unused) | {CONTROL}):
+                  if covered(h): bad.append(f"{h} is never resolved by the candidate, yet the allowlist covers it")
+              if CONTROL not in unused: bad.append(f"the refusal control {CONTROL} is not an unused host of the reviewed manifest")
+              return bad, hosts, unused
+
+          def mapping(doc):
+              got, bad = dict(urls(doc)), []
+              for k in sorted(set(WANT) | set(got)):
+                  if k not in got: bad.append(f"{k} removed (reviewed {WANT[k]!r})")
+                  elif k not in WANT: bad.append(f"{k} added: {got[k]!r} (not reviewed)")
+                  elif got[k] != WANT[k]: bad.append(f"{k} changed to {got[k]!r} (reviewed {WANT[k]!r})")
+              return bad, got
+
+          def audit(doc_path, out):
+              bad, hosts, unused = config()
+              raw = open(doc_path, "rb").read(); got = {}
+              try: mb, got = mapping(json.loads(raw)); bad += [f"document: {m}" for m in mb]
+              except ValueError as x: bad.append(f"document is not JSON ({x})")
+              sha = hashlib.sha256(raw).hexdigest()
+              print(f"discovery document {DISCOVERY}: sha256 {sha} ({len(raw)} bytes)")
+              for k in sorted(WANT):
+                  role = "resolved by the candidate" if k == "issuer" or k in RESOLVED_FIELDS else "named, never resolved by the candidate (host refused)" if hosts.get(k) in unused else "named, never resolved; its host is reviewed for another field"
+                  print(f"{'PASS' if got.get(k) == WANT[k] else 'FAIL'} {k}: reviewed {WANT[k]} | observed {got.get(k, '(absent)')} | host {hosts.get(k)}: {role}")
+              for k in sorted(set(got) - set(WANT)):
+                  print(f"FAIL {k}: not in the reviewed manifest | observed {got[k]}")
+              json.dump({"discovery_url": DISCOVERY, "document_sha256": sha, "expected": WANT, "observed": got,
+                         "resolved_hosts": RESOLVED_HOSTS, "unused_hosts": unused, "problems": bad}, open(out, "w"), indent=1, sort_keys=True)
+              if bad: sys.exit("::error::OIDC dependency audit failed, no candidate execution: " + "; ".join(bad))
+
+          def get(host, path):
+              c = http.client.HTTPSConnection(host, 443, timeout=20, context=ssl.create_default_context())
+              try:
+                  c.request("GET", path, headers={"User-Agent": "culvert-lab-preflight", "Accept": "application/json"})
+                  r = c.getresponse(); return r.status, r.getheader("Location"), r.read(65537)
+              finally: c.close()
+
+          def guest(out):
+              row = lambda ok, name: print(f"{'PASS' if ok else 'FAIL'}\tallowed\t{name}", flush=True)
+              rec = {"hosts": {}}
+              bad, hosts, unused = config()
+              row(not bad, "oidc: the reviewed manifest is consistent with the policy (exact allowlist entries; unused hosts refused)" + (f": {'; '.join(bad)}" if bad else ""))
+              for h in RESOLVED_HOSTS:
+                  try: ans, err = sorted({a[4][0] for a in socket.getaddrinfo(h, 443, 0, socket.SOCK_STREAM)}), None
+                  except OSError as x: ans, err = [], f"lookup failed: {x}"
+                  priv = [a for a in ans if private(a)]
+                  rec["hosts"][h] = {"answers": ans, "private": priv, "error": err}
+                  row(bool(ans) and not priv, f"dns: {h} through the guest resolver, A+AAAA {ans or err}: every answer public under the candidate's rule" + (f"; PRIVATE {priv}" if priv else ""))
+                  try: st = get(h, "/")[0]
+                  except (OSError, http.client.HTTPException) as x: st = f"error: {x}"
+                  rec["hosts"][h]["tls_root_status"] = st
+                  row(isinstance(st, int), f"https: TLS to {h} completes (GET /, status {st}; no credential)")
+              probs, body, status, loc = [], b"", None, None
+              try: status, loc, body = get(up.urlsplit(DISCOVERY).hostname, up.urlsplit(DISCOVERY).path)
+              except (OSError, http.client.HTTPException) as x: probs.append(f"fetch failed: {x}")
+              if not probs and status != 200: probs.append(f"HTTP {status}" + (f", redirect to {loc!r} not followed" if loc else ""))
+              elif not probs and len(body) > 65536: probs.append("over 64 KiB (the candidate reads at most 64 KiB)")
+              elif not probs:
+                  try: probs += mapping(json.loads(body))[0]
+                  except ValueError as x: probs.append(f"not JSON ({x})")
+              sha = hashlib.sha256(body).hexdigest()
+              rec["discovery"] = {"url": DISCOVERY, "status": status, "location": loc, "sha256": sha, "problems": probs}
+              row(not probs, f"discovery: GET {DISCOVERY} through the guest route: HTTP 200, no redirect, URL map equals the reviewed manifest" + (f": {'; '.join(probs)}" if probs else f" (sha256 {sha})"))
+              json.dump(rec, open(out, "w"), indent=1, sort_keys=True)
+
+          if __name__ == "__main__":
+              {"audit": lambda: audit(sys.argv[2], sys.argv[3]), "guest": lambda: guest(sys.argv[2])}[sys.argv[1]]()
+          OIDC
+          # No redirect is followed: anything but HTTP 200 on the discovery path stops here.
+          c="$(curl -sS -m 20 --proto =https --max-redirs 0 -o "$LAB_ROOT/oidc-preboot.json" -w '%{http_code}' "$OIDC_PUBLIC_ISSUER/.well-known/openid-configuration")"
+          [ "$c" = 200 ] || { echo "::error::OIDC discovery path answered HTTP $c (no redirect is followed); no candidate execution"; exit 1; }
+          python3 -I "$LAB_ROOT/oidc-check.py" audit "$LAB_ROOT/oidc-preboot.json" "$LAB_ROOT/oidc-audit.json" | tee "$LAB_ROOT/oidc-audit.txt" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: "Pre-boot identity of the SAML metadata fixture (public URL of THIS commit; bytes pinned) and its 404 control"
         run: |
           set -euo pipefail
@@ -1733,16 +1827,12 @@ jobs:
           t refused "dns: an OIDC host the candidate does not resolve ($OIDC_UNRESOLVED_CONTROL) answers NXDOMAIN" getent ahostsv4 "$OIDC_UNRESOLVED_CONTROL"
           t refused "dns: the parent domain googleapis.com is not allowlisted (NXDOMAIN)" getent ahostsv4 googleapis.com
           P
-          # Every OIDC endpoint host the candidate resolves (pre-boot audit,
-          # DNS-name syntax already enforced there): resolves for the guest,
-          # and an HTTPS connection completes (any HTTP status).
-          [ -s "$LAB_ROOT/oidc-endpoint-hosts.txt" ] || { echo "::error::no audited OIDC endpoint hosts"; exit 1; }
-          while read -r h; do
-            [[ "$h" =~ ^[a-z0-9.-]+$ ]] || { echo "::error::bad audited host '$h'"; exit 1; }
-            echo "t allowed \"dns: OIDC endpoint host the candidate resolves ($h)\" getent ahostsv4 $h"
-            echo "t allowed \"https: OIDC endpoint host the candidate resolves ($h)\" curl -sS -m 15 -o /dev/null https://$h/"
-          done < "$LAB_ROOT/oidc-endpoint-hosts.txt" >> "$C/proof.sh"
-          proof_rows=$((15 + 2 * $(grep -c . "$LAB_ROOT/oidc-endpoint-hosts.txt")))
+          # The OIDC proof through the enforced guest route (oidc-check.py from
+          # the pre-boot step): manifest consistency, then per reviewed host
+          # every A/AAAA answer judged by the candidate's rule and TLS, then the
+          # discovery path itself (HTTP 200, no redirect, manifest-bound).
+          echo 'python3 -I "$LAB_ROOT/oidc-check.py" guest "$LAB_ROOT/containment/oidc-guest.json"' >> "$C/proof.sh"
+          proof_rows=$((15 + 2 + 2 * $(wc -w <<<"$OIDC_REVIEWED_RESOLVED_HOSTS")))
           bash -c 'echo $$ | sudo tee "/sys/fs/cgroup/'"$GUEST_CGROUP"'/cgroup.procs" >/dev/null; grep -qx "0::/'"$GUEST_CGROUP"'" /proc/self/cgroup && exec bash "$0"' "$C/proof.sh" > "$C/proof.tsv"
           kill "$h1" "$h2" 2>/dev/null || true
           printf '%s\t%s\t%s\n' "$(curl -fsS -m 15 -o /dev/null https://api.github.com/zen && echo PASS || echo FAIL)" allowed "runner control plane outside the guest cgroup (api.github.com)" >> "$C/proof.tsv"
@@ -1929,8 +2019,11 @@ jobs:
                             "proof": open(os.path.join(e["LAB_ROOT"], "containment/proof.tsv")).read().split("\n"),
                             "oidc_resolved_fields": env("OIDC_RESOLVED_FIELDS").split(),
                             "oidc_document_sha256": sh("oidc document", f"sha256sum {e['LAB_ROOT']}/oidc-preboot.json | cut -c1-64"),
-                            "oidc_endpoint_hosts": open(os.path.join(e["LAB_ROOT"], "oidc-endpoint-hosts.txt")).read().split(),
-                            "oidc_audit": open(os.path.join(e["LAB_ROOT"], "oidc-audit.txt")).read().split("\n"),
+                            "oidc_reviewed_resolved_hosts": env("OIDC_REVIEWED_RESOLVED_HOSTS").split(),
+                            "oidc_reviewed_mapping": json.loads(env("OIDC_REVIEWED_MAPPING") or "{}"),
+                            "oidc_audit": json.load(open(os.path.join(e["LAB_ROOT"], "oidc-audit.json"))),
+                            "oidc_audit_text": open(os.path.join(e["LAB_ROOT"], "oidc-audit.txt")).read().split("\n"),
+                            "oidc_guest": json.load(open(os.path.join(e["LAB_ROOT"], "containment/oidc-guest.json"))),
                             "listener_baseline": open(os.path.join(e["LAB_ROOT"], "containment/listeners-baseline.txt")).read().split("\n")},
             "clock": {"start_deadline": env("CAMPAIGN_START_DEADLINE"), "start_deadline_epoch": env("LAB_START_DEADLINE_EPOCH"), "window_s": env("LAB_CAMPAIGN_WINDOW_S")},
           }
@@ -1944,7 +2037,7 @@ jobs:
           json.dump(r, open(sys.argv[1], "w"), indent=1)
           print(json.dumps({k: r[k] for k in ("runner", "qemu", "guest_profile")}, indent=1))
           PY
-          cp "$C/ruleset.txt" "$C/proof.tsv" "$C/listeners-baseline.txt" "$LAB_ROOT/oidc-preboot.json" "$LAB_ROOT/oidc-audit.txt" "$R/"
+          cp "$C/ruleset.txt" "$C/proof.tsv" "$C/listeners-baseline.txt" "$LAB_ROOT/oidc-preboot.json" "$LAB_ROOT/oidc-audit.json" "$LAB_ROOT/oidc-audit.txt" "$C/oidc-guest.json" "$R/"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: qemu-campaign-preboot-receipt-a${{ github.run_attempt }}
