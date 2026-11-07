@@ -336,6 +336,20 @@ liveness and is fine. The listener state is now on `/metrics` and the contract
 row; teaching `/health` to report the supervisor's view would help a probe that
 only has `/health`. Minor.
 
+### 8.7 Close the unavailability episode on a STABLE SERVE, not on a bind (MED)
+
+The flapping-sidecar gap in §10.4. `noteScanSvcBound` clears `firstFailure` and
+the `alerted` latch when the bind succeeds, so a socket that binds and dies
+immediately resets the episode every cycle and never crosses the 30 s
+threshold. Moving that reset to the post-serve path, gated on
+`scanSvcServeStableAfter`, is the correct shape and is a small change — but it
+is a state-machine change to a surface this round just added, it needs a flap
+gate plus a control proving an ordinary redeploy still does not page, and it is
+exactly the kind of same-round follow-on that produces an alert that is wrong in
+the other direction. Until then, alert on
+`increase(culvert_scan_svc_serve_exits_total[15m]) > 3`, which is monotonic
+through a flap.
+
 ---
 
 ## 9. Measurements and commands
@@ -512,10 +526,30 @@ this SHA.
    diagnostics report. §8.3.
 3. **Ten alert events remain unsubscribable from the UI.** Pinned, not fixed.
    §8.1.
-4. **The 30 s threshold is a judgement.** A deployment whose sidecar flaps on a
-   25 s period would stay `warn` and never page. The serve-exit counter is the
-   durable evidence for that shape; no gate asserts a flap is caught, because
-   the right answer for it is an owner decision about the threshold.
+4. **A FLAPPING sidecar does not page, and the flap can be sub-second.** This
+   is the sharpest remaining gap and it is in this round's own design, so it is
+   stated plainly rather than buried. `noteScanSvcBound` closes the
+   unavailability episode — clearing `firstFailure` and the `alerted` latch — at
+   BIND time, before the serve has proven anything. A socket that binds and then
+   dies immediately therefore never accumulates 30 s of episode, so the row
+   stays `warn`, `culvert_scan_svc_listener_up` reads 1 whenever a scrape lands
+   inside a serve, and nothing fires — while the sidecar is effectively down
+   almost all of the time and every caller is failing open. The damage is
+   bounded in rate, not in kind: `scanSvcBackoffAfterServe` retains and doubles
+   the ladder when a serve lasted under `scanSvcServeStableAfter`, so the loop
+   slows to one attempt per 30 s rather than spinning. The durable evidence is
+   `culvert_scan_svc_serve_exits_total`, which climbs monotonically through a
+   flap and is the right thing for an operator to alert on
+   (`increase(...[15m]) > 3`) until this is fixed properly. **The fix is to
+   close the episode when a serve proves STABLE rather than when a bind
+   succeeds** — i.e. move the `firstFailure`/`alerted` reset out of
+   `noteScanSvcBound` and into the post-serve path, gated on the same
+   `scanSvcServeStableAfter` the ladder already uses. Deliberately not taken
+   here: it is a state-machine change to the thing this round just introduced,
+   it wants its own gates (a flap gate, and a control proving an ordinary
+   redeploy still does not page), and shipping it unreviewed inside the round
+   that created the surface is how the alert ends up wrong in the other
+   direction. Recorded as §8.7.
 5. **Supervision cannot fix an address that is wrong.** A typo'd
    `scan_svc.listen` now produces a FAIL row with a remedy string instead of
    silence, which is the whole improvement — but it retries forever at the

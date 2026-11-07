@@ -96,7 +96,7 @@ func TestChaos113_ShutdownBeforeServeIsHonoured(t *testing.T) {
 
 	// The socket must be released, not merely unserved: a held port stops the
 	// replacement container from binding it.
-	ln, lerr := net.Listen("tcp", addr)
+	ln, lerr := (&net.ListenConfig{}).Listen(t.Context(), "tcp", addr)
 	if lerr != nil {
 		t.Errorf("the sidecar's address %s is still held after Shutdown: %v", addr, lerr)
 	} else {
@@ -211,7 +211,9 @@ func TestChaos113_ShutdownConcurrentWithListenLeaksNoSocket(t *testing.T) {
 		return // nothing was published: the strongest outcome
 	}
 	// A socket WAS published. It must not be left accepting.
-	c, derr := net.DialTimeout("tcp", ln.Addr().String(), 500*time.Millisecond)
+	dctx, dcancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer dcancel()
+	c, derr := (&net.Dialer{}).DialContext(dctx, "tcp", ln.Addr().String())
 	if derr == nil {
 		_ = c.Close()
 		t.Fatalf("%s still accepts connections after Shutdown — a bound socket was published onto a stopped service and leaked for the life of the process", ln.Addr())

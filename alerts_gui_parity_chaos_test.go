@@ -160,7 +160,7 @@ func firedAlertEvents(t *testing.T) (events []string, filesScanned int) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		b, rerr := os.ReadFile(path) // #nosec G304 -- walking this repository's own sources
+		b, rerr := os.ReadFile(path) // #nosec G304 G122 -- walking this repository's own checked-in sources; no untrusted symlinks
 		if rerr != nil {
 			return nil
 		}

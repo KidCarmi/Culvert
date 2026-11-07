@@ -20305,7 +20305,14 @@ and belongs to the owner. `culvert_remote_scan_fail_total`, the
 embeds the ephemeral local port and could not dedup), the affirmative-`Clean`
 requirement and the bounded replies are all correct and were left alone.
 
-Left open and attributed rather than fixed, in priority order: **the ten
+Left open and attributed rather than fixed, in priority order: **closing the
+unavailability episode on a STABLE SERVE rather than on a bind** — the sharpest
+remaining gap and one this round's own design introduced, so it is stated rather
+than buried: `noteScanSvcBound` clears the episode and the alert latch at BIND
+time, so a socket that binds and dies immediately never accumulates 30 s and a
+FLAPPING sidecar pages nobody while every caller fails open (the ladder bounds
+the rate, not the condition; `culvert_scan_svc_serve_exits_total` is monotonic
+through a flap and is the signal to alert on meanwhile); **the ten
 remaining GUI-unsubscribable events** (pinned, not fixed — the highest-value
 remainder, and a sweep of its own); **the fail-open posture itself** (WK-2b,
 owner decision, now with a stronger case for a refusal tier because an operator

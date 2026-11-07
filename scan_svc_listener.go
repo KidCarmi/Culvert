@@ -148,6 +148,20 @@ func noteScanSvcConfigured(addr string) {
 // noteScanSvcBound records a successful bind, closing any unavailability
 // episode. It reports whether this bind RECOVERED one (so the caller logs the
 // recovery rather than another "listening on" line).
+//
+// KNOWN GAP, recorded rather than quietly carried (CHAOS-113 §8.7/§10.4): the
+// episode closes at BIND time, before the serve has proven anything. A socket
+// that binds and dies immediately therefore resets firstFailure and the alerted
+// latch every cycle and never accumulates scanSvcUnavailableAfter, so a
+// FLAPPING sidecar stays `warn` and pages nobody while every caller fails open.
+// The ladder bounds the rate (scanSvcBackoffAfterServe retains and doubles the
+// backoff for a serve shorter than scanSvcServeStableAfter, so the loop settles
+// at one attempt per ceiling) but not the condition.
+// culvert_scan_svc_serve_exits_total is monotonic through a flap and is the
+// signal to alert on meanwhile. The fix is to move this reset to the post-serve
+// path gated on scanSvcServeStableAfter; it is a state-machine change to a
+// surface this round introduced and wants its own flap gate plus a control
+// proving an ordinary redeploy still does not page.
 func noteScanSvcBound() (recovered bool) {
 	scanSvcListener.mu.Lock()
 	defer scanSvcListener.mu.Unlock()
@@ -320,7 +334,7 @@ func jitterScanSvcBackoff(d time.Duration) time.Duration {
 	if span <= 0 {
 		return d
 	}
-	return d*3/4 + time.Duration(rand.Int64N(span)) //nolint:gosec // cadence spreading, not a security decision
+	return d*3/4 + time.Duration(rand.Int64N(span)) // #nosec G404 -- cadence spreading, not crypto
 }
 
 // superviseScanSvcListener runs the sidecar's bind → serve → rebind loop until
