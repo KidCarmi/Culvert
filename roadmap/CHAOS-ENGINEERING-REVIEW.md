@@ -247,6 +247,33 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
 
+**2026-11-07 — `CHAOS-113` CLAIMED (placeholder, commit one). Domain: the SCAN
+SIDECAR LISTENER — `-scan-svc-listen` is the one listener in the tree that got
+none of the lifecycle treatment the other three received, so what happens to a
+fleet's malware scanning when the socket it all depends on never binds, or dies
+after it did?** Id claimed in this committed row before any code was written,
+per the convention above, and checked against `origin/main` rather than the
+working tree, per the 2026-09-25 amendment: `CHAOS-111` is the highest id
+anywhere on `origin/main` (at `b05d649`), and **`CHAOS-112` is held by open PR
+#1819** (`claude/serene-cerf-it754q`, claimed 2026-11-06, the cluster per-IP-cap
+snapshot round) — which is exactly the case the amendment exists for, so this
+sweep did NOT take the next id after main's highest. Of the other open PRs
+(#1821, #1820, #1818, #1817, #1816, #1815, #1814, #1705, #1549, #1548, #1536,
+#1528, #1526) none is a chaos sweep. This sweep took 113 and will not move.
+
+Scope is the SIMULATE list's *SIGTERM* / *unexpected restart* / *unexpected
+startup order* / *ClamAV unavailable* rows aimed at the LAST listener in the
+tree with no supervision, and it closes the scan-sidecar half of the 2026-10-13
+backlog's `L-5` — the half that row recorded as `delegated` while its CP-gRPC
+half was closed by CHAOS-71. The class is not new: CHAOS-57 closed it for the
+admin UI, CHAOS-66/102 for SOCKS5, CHAOS-71 for the Control-Plane gRPC
+listener. Each of those three now has a rebind ladder, an `up` gauge, accept/bind
+counters and a health row. `scan_svc.go` has a `logger.Printf` and a goroutine
+that returns. What makes this the sharp instance rather than the leftover one is
+the far end: a sidecar that is not listening is the deployment in which
+`internal/secscan`'s `remoteScanFail` fails **OPEN** (WK-2b) — so the socket
+nothing watches is the socket that decides whether a fleet scans at all.
+
 **2026-11-05 — `CHAOS-111` CLAIMED (placeholder, commit one). Domain: the HOT-IP
 GOSSIP PLANE — `SyncRateLimits` is the one cluster RPC whose body is sized by
 HOSTILE traffic, so what happens to distributed rate limiting when the flood it
