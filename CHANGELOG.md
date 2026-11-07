@@ -7,6 +7,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A whitespace-only `cluster.grpc_addr` passed config validation under `cluster.role: control-plane`.**
+  The required-address check compared the raw string to `""`, so `grpc_addr: " "` loaded, resolved to a non-empty
+  listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
+
 ### Security
 
 - **The DPI engine's new saturation lead indicator fired at no load on a
