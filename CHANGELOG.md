@@ -7,6 +7,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Performance
+
+- **Every open tunnel held 128 KiB of relay buffer per direction that the relay
+  never read — ~256 KiB per tunnel of resident heap, or ~2.4 GiB at 10,000
+  concurrent tunnels.** `idleCopyCounted` took a pooled 128 KB buffer before its
+  copy loop and returned it on function exit, so the buffer was held for the
+  LIFETIME of the tunnel rather than for one copy. On every production relay
+  shape `io.CopyBuffer` never touched it: `io.copyBuffer` delegates to
+  `src.WriteTo(dst)` when `src` is an `io.WriterTo` and to `dst.ReadFrom(src)`
+  when `dst` is an `io.ReaderFrom`, and in both cases the buffer argument is
+  unused. Both ends of a CONNECT-bypass relay are `*net.TCPConn`, which
+  implements both interfaces (the kernel splice path the function's own comment
+  documents as deliberate), and each WebSocket relay's source is a
+  `*bufio.Reader`, which implements `io.WriterTo`. The buffer is now checked out
+  only for a pair whose copy will read it, using `io.copyBuffer`'s own dispatch
+  condition, so no dispatch decision and no relayed byte changes and a pair that
+  genuinely needs a buffer still gets a pooled 128 KB one. Measured over 48 idle
+  splice-path relay directions: live heap per direction 131,177 B to 70 B
+  (-99.95%), bytes allocated establishing the population 6.48 MB to 189 KB
+  (-97%), relay throughput unchanged at 2,460 MB/s against 2,483 MB/s before
+  (one spread, 2,337-2,851 MB/s across both arms), and the two interface
+  assertions cost 2.97 ns against the 11.45 ns `sync.Pool` round trip they
+  replace (0.81 ns against 2.81 ns at 4-way parallel). `allocs/op` could not see
+  any of this — a warm `sync.Pool` reports ~0 either way — so the new gates
+  measure residency directly, and a differential oracle asserts on every
+  production pair shape that the predicate still agrees with what
+  `io.CopyBuffer` actually does.
+
 ### Changed
 
 - **A stale legacy PAC file is now a Diagnostics row, not only a startup log
