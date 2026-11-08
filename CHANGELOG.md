@@ -7,6 +7,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- **A stale legacy PAC file is now a Diagnostics row, not only a startup log
+  line.** When a legacy `pac_config.json` is newer than the active store (edits
+  made by a downgraded build), those edits are ignored and clients are steered
+  by older settings. That was visible only by grepping the startup log. The new
+  `pac_legacy_config_newer` row on Infrastructure → Diagnostics states it with
+  the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
 - **A whitespace-only `cluster.grpc_addr` passed config validation under `cluster.role: control-plane`.**
@@ -300,6 +308,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **`scripts/install.sh` built a nonexistent Docker apt repo for Debian derivatives.**
+  The `ID_LIKE` fallback in `detect_distro` forced `DISTRO_ID=ubuntu` while keeping
+  the Debian codename (e.g. Raspberry Pi OS: `linux/ubuntu bookworm`), so
+  `apt-get update` failed. Pure Debian derivatives now use `linux/debian`; Ubuntu
+  derivatives use `UBUNTU_CODENAME`.
+
 - **The DPI scan engine's abandoned worker goroutines are now counted and
   capped, and the gateway no longer blocks clean traffic in proportion to its
   own load (CHAOS-110).** `patternSet.scan` must run each regex match in a
@@ -358,6 +372,64 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - **`install.sh` no longer writes invalid TOML when `allow_peers` has a trailing comma.** Wiring Release Management into an existing `/etc/culvert-maint/config.toml` with `allow_peers = ["alice",]` produced `["alice",, "1000"]`, which the maintenance agent refuses to parse. The append now reuses the existing comma.
 
 ### Performance
+
+- **A policy publication no longer allocates one object per rule condition just
+  to render the matched-conditions summary, cutting `sortLocked`'s allocation
+  count by ~45% and the publication stall it imposes on all policy evaluation by
+  ~10-12%.** `buildMatchedConditions` renders the compact `srcIP=... group=...
+  destCat=...` summary that is persisted on every published rule
+  (`PolicyRule.matchedConds`), emitted on every `POLICY_*` log line and surfaced
+  in the request feed. It runs once per rule inside `sortLocked`, which holds
+  `ps.mu` — the WRITER lock that `Evaluate`'s `evaluationSnapshot` must take the
+  matching `RLock` behind — so its cost is a data-plane latency figure and not
+  merely a reload figure, exactly as `sortLocked` already records for its own
+  layout. Every policy edit, draft promote/rollback, config-version restore and
+  cluster config sync pays it.
+
+  It built a `[]string` and joined it, which is one allocation for the
+  concatenated `"key="` + value of EVERY configured condition, plus the doubling
+  growth of the parts slice (1, 2, 4, 8), plus the join's result, plus a second
+  join for the country list. The cost therefore scaled with how SPECIFIC a rule
+  is, so the most specific rules — the ones an enterprise rulebase is actually
+  made of — paid the most: a rule configuring all nine conditions cost 13
+  allocations and 944 B. A heap profile of
+  `BenchmarkPolicyPublish_ReplaceAll/rules=10000` put this one function at
+  **33% of every object the whole bulk-replace path allocated**, the single
+  largest contributor, ahead of the definition clone itself. It now renders
+  straight into one frame-local scratch buffer and converts once at the end:
+  **one allocation — the returned string — for every shape**, with the
+  no-condition shape still returning the `"any"` constant and allocating nothing
+  (the fast path is tested BEFORE the scratch is declared, so a broad catch-all
+  rule does not pay to zero a buffer it never writes to).
+
+  Measured on go1.27.3, linux/amd64, 4-vCPU Xeon @ 2.10GHz. Per call, medians of
+  n=6 with both forms timed in the SAME run against the same rule values
+  (`BenchmarkBuildMatchedConditions`): no conditions 2.70 -> 2.40 ns / 0 -> 0
+  allocs, `destFQDN` only 65.8 -> 39.1 ns / 2 -> 1, a typical four-condition
+  rule 211 -> 54.6 ns / 5 -> 1, six country codes 248 -> 61.1 ns / 6 -> 1, all
+  nine conditions **785 -> 121 ns / 13 -> 1**. In situ on the existing
+  publication benchmarks (`benchstat`, n=8): `PolicyPublish_SortLocked`
+  **allocs/op -44.8% at 10 000 rules (29 006 -> 16 007)**, -44.7% at 1 000,
+  -43.9% at 100, all p=0.000, and **sec/op -12.2% at 1 000 rules (416 -> 365
+  µs) and -10.3% at 10 000 (3.54 -> 3.18 ms)**, p=0.000, with no significant
+  change at 100 (p=0.878); `PolicyPublish_ReplaceAll` allocs/op **-18.8%**
+  (69 041 -> 56 041 at 10 000) and sec/op -4.8% at 100 / -6.6% at 1 000, with no
+  significant change at 10 000 (p=0.065, where minting ULIDs for ID-less
+  imported rules dominates). Those in-situ figures are a LOWER bound on what a
+  real rulebase sees: the existing publication benchmarks install rules carrying
+  one or two conditions, and the per-call table shows the saving grows with rule
+  specificity.
+
+  The evaluation path was checked for a regression rather than assumed safe:
+  `PolicyEvaluate_NoMatch` stays allocation-free and `PolicyEvaluate_FirstMatch`
+  stays at 1 alloc / 640 B, both within noise at every rule count. The rendered
+  string is wire-visible, so equivalence with the join form is exact and pinned
+  by a differential test against a verbatim copy of the old implementation, a
+  20 000-iteration randomized subset sweep, and a differential fuzz target
+  (380 000 executions, no divergence). The one-allocation property is held by a
+  per-shape allocation budget (`TestBuildMatchedConditions_AllocBudget`) rather
+  than a timing threshold, because what the removed `mallocgc` calls are worth
+  is hardware- and GC-state-dependent while the allocation count is not.
 
 - **The leaf-certificate cache hit path no longer takes the process-wide CA
   lock, and no longer allocates.** `ca.Manager.GetCert` is the
