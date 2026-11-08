@@ -663,6 +663,27 @@ type dpLastGoodConfigSnapshotStatus struct {
 	// applyDPLastGoodConfigSnapshot re-syncs the registry from it at startup
 	// (nil means absent and is skipped by syncSnapshotIdPProfiles).
 	HasIdPProfiles bool
+	// IdPProfilesFingerprint identifies the profile set that startup restores
+	// from the on-disk snapshot (idpProfilesFingerprint; meaningful only when
+	// HasIdPProfiles). The IdP-persistence diagnostic compares it with the live
+	// registry so a local create/update/delete, which never rewrites the
+	// last-good file, withdraws the exemption. In-memory only: never
+	// serialized or reported.
+	IdPProfilesFingerprint [32]byte
+}
+
+// dpLastGoodConfigSnapshotLoadedStatus is the status of a last-good snapshot
+// that is now on disk (persisted or loaded).
+func dpLastGoodConfigSnapshotLoadedStatus(snap ConfigSnapshot) dpLastGoodConfigSnapshotStatus {
+	st := dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version, HasIdPProfiles: snap.IdPProfiles != nil}
+	if st.HasIdPProfiles {
+		fp, ok := idpProfilesFingerprint(snap.IdPProfiles)
+		// An unfingerprintable set cannot be proven to match the registry, so
+		// the diagnostic must keep warning (fail closed).
+		st.HasIdPProfiles = ok
+		st.IdPProfilesFingerprint = fp
+	}
+	return st
 }
 
 var dpLastGoodConfigSnapshotState atomic.Value // dpLastGoodConfigSnapshotStatus
@@ -1956,7 +1977,7 @@ func loadDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 		dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{LoadError: err.Error()})
 		return ConfigSnapshot{}, err
 	}
-	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version, HasIdPProfiles: snap.IdPProfiles != nil})
+	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotLoadedStatus(snap))
 	// Seed the poll-deadline size predictor from the on-disk snapshot so a
 	// cold-started DP's very FIRST poll already budgets time for a full transfer
 	// of roughly this size — otherwise a large config on a thin WAN times out at
@@ -2023,7 +2044,7 @@ func persistDPLastGoodConfigSnapshot(snap ConfigSnapshot) {
 		logger.Printf("DataPlane: last-known-good config persist failed: %v", err)
 		return
 	}
-	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version, HasIdPProfiles: snap.IdPProfiles != nil})
+	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotLoadedStatus(snap))
 }
 
 func setDPLastGoodConfigSnapshotSaveError(version int64, err error) {

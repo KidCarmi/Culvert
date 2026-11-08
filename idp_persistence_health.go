@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
@@ -22,9 +24,11 @@ import (
 // An enrolled data plane has a second durable copy: the last-known-good config
 // snapshot it persists after every applied full snapshot or delta carries
 // IdPProfiles, and applyDPLastGoodConfigSnapshot re-syncs the registry from it
-// at startup (dp_enrollment.go). Such a DP is not warned. A standalone node, a
-// DP that has not yet persisted a snapshot, one whose snapshot carried no
-// profiles (unenrolled/redacted), or one whose latest persist failed is.
+// at startup (dp_enrollment.go). Such a DP is not warned while its registry
+// still equals that snapshot's profiles. A standalone node, a DP that has not
+// yet persisted a snapshot, one whose snapshot carried no profiles
+// (unenrolled/redacted), one whose latest persist failed, or one whose registry
+// was changed locally since the last persist is.
 
 // idpRegistrySnapshotCounts returns durability and profile count under one lock
 // (cheaper than All(), which deep-clones every profile).
@@ -37,15 +41,44 @@ func idpRegistrySnapshotCounts() (persisted bool, profiles int) {
 	return idpRegistry.path != "", len(idpRegistry.profiles)
 }
 
+// idpProfilesFingerprint is a deterministic digest of a profile set in the
+// form the registry stores it: cloned (cloneIdPProfiles, which also folds an
+// empty slice into nil exactly as ReplaceAll's copy does) and write-normalized
+// (normalizeIdPProfileWriteInput), then JSON-encoded in list order. Order is
+// kept rather than sorted because ReplaceAll restores the snapshot's order and
+// routing reads the registry in that order. Secrets are part of the digest on
+// purpose — a local credential change is a divergence a restart would revert.
+// The digest stays in process memory; ok is false when encoding fails.
+func idpProfilesFingerprint(profiles []*IdPProfile) (fp [32]byte, ok bool) {
+	canonical := cloneIdPProfiles(profiles)
+	for _, p := range canonical {
+		normalizeIdPProfileWriteInput(p)
+	}
+	data, err := json.Marshal(canonical)
+	if err != nil {
+		return fp, false
+	}
+	return sha256.Sum256(data), true
+}
+
 // dpLastGoodSnapshotPersistsIdPProfiles reports whether this node is a data
-// plane whose on-disk last-known-good snapshot carries the IdP profiles it will
-// restore at startup.
+// plane whose on-disk last-known-good snapshot carries exactly the IdP profiles
+// the registry holds now, so a restart restores the current set. A local
+// mutation (apiIdPList/apiIdPItem stay writable on a DP) updates the registry
+// but never the last-good file, so it fails the comparison until the next
+// persisted snapshot matches again.
 func dpLastGoodSnapshotPersistsIdPProfiles() bool {
-	if !audit.DPMode() || activeDPClient.Load() == nil {
+	if !audit.DPMode() || activeDPClient.Load() == nil || idpRegistry == nil {
 		return false
 	}
 	st, _ := dpLastGoodConfigSnapshotState.Load().(dpLastGoodConfigSnapshotStatus)
-	return st.Loaded && st.SaveError == "" && st.HasIdPProfiles
+	if !st.Loaded || st.SaveError != "" || !st.HasIdPProfiles {
+		return false
+	}
+	// All() deep-copies under the registry read lock; the digest is computed
+	// after the lock is released.
+	current, ok := idpProfilesFingerprint(idpRegistry.All())
+	return ok && current == st.IdPProfilesFingerprint
 }
 
 func checkIdPPersistence() OperatorContractCheck {
