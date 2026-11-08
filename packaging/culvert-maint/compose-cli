@@ -1,0 +1,228 @@
+#!/bin/sh
+# Culvert Maintenance Agent: privileged compose `cli` wrapper
+#
+# Installed by packaging/culvert-maint/install.sh as
+#     /usr/local/libexec/culvert-maint/compose-cli    (root:root, mode 0755)
+# with the compose-path placeholder below rendered to the absolute
+# <compose_project_dir>/<compose_file> path. The rendered copy is the ONLY
+# thing the sudoers allowlist (packaging/sudoers/culvert-maint) grants for
+# the compose `cli` operations whose arguments vary per call: encrypted and
+# unencrypted backup, restore (dry-run and commit) and restore-leftover
+# cleanup (dry-run and commit).
+#
+# Why a wrapper: those operations used to be allowlisted directly with
+# sudoers wildcards (`--backup /backup/*`, `--restore /backup/* --mode ...`,
+# `--older-than * --keep-last *`). sudo-rs, the default sudo on Ubuntu 26.04,
+# rejects any `*` or `?` inside a command argument ("wildcards are not
+# allowed in command arguments"), so `visudo -c` refused the whole file and
+# the agent could not be installed. The sudoers rule for this wrapper now
+# carries no wildcard at all, and THIS script is the argument boundary.
+#
+# It is deliberately TIGHTER than the wildcards it replaces. Classic sudo's
+# `*` matches any characters, spaces included, so `/backup/*` also admitted
+# `/backup/../etc/x`, a path plus extra flags, and so on. This script admits
+# exactly the argv shapes the agent's runner emits
+# (cmd/culvert-maint/internal/runner/templates_d16b.go) and nothing else:
+#
+#   compose-cli backup-encrypted /backup/<name>
+#   compose-cli backup           /backup/<name>
+#   compose-cli restore /backup/<name> --mode <full|trust-root-only|state-only>
+#               [--accept-dp-reenrollment] [--allow-counter-rollback] [--confirm]
+#   compose-cli cleanup --older-than <duration> --keep-last <0..100> [--confirm]
+#
+#   <name>      1..255 bytes of [A-Za-z0-9._-], not starting with '.'
+#               (the agent's ValidateBackupFilename): no '/', no '..', no
+#               whitespace, no newline, no shell metacharacter.
+#   restore     optional flags only in that canonical order, each at most
+#               once: the same 3 modes x 4 flag sets x {dry-run, commit}
+#               = 24 combinations the old sudoers file enumerated.
+#   <duration>  digits, optional '.digits', one unit of ns|us|µs|ms|s|m|h
+#               (the agent's olderThanRE), with a value between 1h and
+#               8760h inclusive (the agent's validateOlderThan range).
+#   keep-last   0..100 in canonical decimal (the agent's strconv.Itoa).
+#
+# Anything else exits 64 before docker runs. Rejected values are never
+# echoed, so a hostile argument cannot inject into the agent's log.
+#
+# Hardening: fixed PATH and locale, no eval, no word splitting of any
+# argument, every expansion quoted, and docker is exec'd with an explicit
+# argv. CULVERT_BACKUP_PASSPHRASE reaches this script through the sudoers
+# env_keep scoped to it; it is unset for the subcommands that must not
+# carry it (unencrypted backup, cleanup), so docker sees the variable
+# exactly where it did under the old per-command env_keep.
+#
+# Do not edit the installed copy by hand; re-run install.sh instead.
+
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+LC_ALL=C
+export LC_ALL
+unset IFS CDPATH
+
+# Rendered by install.sh (single-quoted; install.sh refuses a value that
+# contains a single quote). Must stay on one line.
+COMPOSE_PATH='{compose_path}'
+DOCKER_BIN=/usr/bin/docker
+readonly COMPOSE_PATH DOCKER_BIN
+
+die() {
+    printf 'compose-cli: refused: %s\n' "$1" >&2
+    exit 64
+}
+
+# An unrendered template is not absolute, so it can never reach docker.
+case $COMPOSE_PATH in
+    /*) : ;;
+    *) die "wrapper is not rendered (compose path is not absolute); re-run install.sh" ;;
+esac
+
+# valid_backup_path PATH: /backup/<name>, <name> per the header.
+valid_backup_path() {
+    case $1 in
+        /backup/*) _name=${1#/backup/} ;;
+        *) return 1 ;;
+    esac
+    [ -n "$_name" ] || return 1
+    [ "${#_name}" -le 255 ] || return 1
+    case $_name in
+        .*) return 1 ;;
+        *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]*) return 1 ;;
+    esac
+    return 0
+}
+
+# valid_older_than DURATION: shape AND range, per the header. The bounds are
+# whole numbers in every unit, so the range test is exact integer math on
+# the integer part (plus "fraction is all zeros" at the upper bound): no
+# floating point, no external tool.
+valid_older_than() {
+    case $1 in
+        *ns) _num=${1%ns}; _lo=3600000000000; _hi=31536000000000000 ;;
+        *us) _num=${1%us}; _lo=3600000000; _hi=31536000000000 ;;
+        *µs) _num=${1%µs}; _lo=3600000000; _hi=31536000000000 ;;
+        *ms) _num=${1%ms}; _lo=3600000; _hi=31536000000 ;;
+        *s) _num=${1%s}; _lo=3600; _hi=31536000 ;;
+        *m) _num=${1%m}; _lo=60; _hi=525600 ;;
+        *h) _num=${1%h}; _lo=1; _hi=8760 ;;
+        *) return 1 ;;
+    esac
+    case $_num in
+        '' | .* | *. | *.*.*) return 1 ;;
+    esac
+    _int=${_num%%.*}
+    _frac=
+    case $_num in
+        *.*) _frac=${_num#*.} ;;
+    esac
+    case $_int in
+        *[!0123456789]*) return 1 ;;
+    esac
+    case $_frac in
+        *[!0123456789]*) return 1 ;;
+    esac
+    # Strip leading zeros (test(1) would otherwise still compare correctly,
+    # but the digit-count bound below must see significant digits only).
+    while :; do
+        case $_int in
+            0?*) _int=${_int#0} ;;
+            *) break ;;
+        esac
+    done
+    # Every upper bound has at most 17 digits; more cannot be in range and
+    # could overflow test(1)'s integer arithmetic.
+    [ "${#_int}" -le 17 ] || return 1
+    [ "$_int" -ge "$_lo" ] || return 1
+    [ "$_int" -le "$_hi" ] || return 1
+    if [ "$_int" -eq "$_hi" ]; then
+        case $_frac in
+            *[!0]*) return 1 ;;
+        esac
+    fi
+    return 0
+}
+
+# valid_keep_last N: 0..100, canonical decimal (no sign, no leading zero).
+valid_keep_last() {
+    case $1 in
+        0 | [123456789] | [123456789][0123456789] | 100) return 0 ;;
+    esac
+    return 1
+}
+
+[ "$#" -ge 1 ] || die "missing subcommand"
+_sub=$1
+shift
+
+case $_sub in
+    backup-encrypted)
+        [ "$#" -eq 1 ] || die "backup-encrypted takes exactly one argument"
+        valid_backup_path "$1" || die "backup-encrypted: invalid backup path"
+        exec "$DOCKER_BIN" compose -f "$COMPOSE_PATH" --profile cli run --rm \
+            -e CULVERT_BACKUP_PASSPHRASE cli --encrypt --backup "$1"
+        ;;
+
+    backup)
+        [ "$#" -eq 1 ] || die "backup takes exactly one argument"
+        valid_backup_path "$1" || die "backup: invalid backup path"
+        unset CULVERT_BACKUP_PASSPHRASE
+        exec "$DOCKER_BIN" compose -f "$COMPOSE_PATH" --profile cli run --rm \
+            cli --backup "$1"
+        ;;
+
+    restore)
+        [ "$#" -ge 3 ] || die "restore: missing arguments"
+        [ "$#" -le 6 ] || die "restore: too many arguments"
+        valid_backup_path "$1" || die "restore: invalid backup path"
+        _path=$1
+        [ "$2" = "--mode" ] || die "restore: expected --mode"
+        case $3 in
+            full | trust-root-only | state-only) _mode=$3 ;;
+            *) die "restore: invalid mode" ;;
+        esac
+        shift 3
+        _accept=
+        _allow=
+        _confirm=
+        if [ "$#" -gt 0 ] && [ "$1" = "--accept-dp-reenrollment" ]; then
+            _accept=1
+            shift
+        fi
+        if [ "$#" -gt 0 ] && [ "$1" = "--allow-counter-rollback" ]; then
+            _allow=1
+            shift
+        fi
+        if [ "$#" -gt 0 ] && [ "$1" = "--confirm" ]; then
+            _confirm=1
+            shift
+        fi
+        [ "$#" -eq 0 ] || die "restore: unexpected or out-of-order argument"
+        set -- --restore "$_path" --mode "$_mode"
+        if [ -n "$_accept" ]; then set -- "$@" --accept-dp-reenrollment; fi
+        if [ -n "$_allow" ]; then set -- "$@" --allow-counter-rollback; fi
+        if [ -n "$_confirm" ]; then set -- "$@" --confirm; fi
+        exec "$DOCKER_BIN" compose -f "$COMPOSE_PATH" --profile cli run --rm \
+            -e CULVERT_BACKUP_PASSPHRASE cli "$@"
+        ;;
+
+    cleanup)
+        [ "$#" -eq 4 ] || [ "$#" -eq 5 ] || die "cleanup: wrong number of arguments"
+        [ "$1" = "--older-than" ] || die "cleanup: expected --older-than"
+        valid_older_than "$2" || die "cleanup: invalid --older-than value"
+        [ "$3" = "--keep-last" ] || die "cleanup: expected --keep-last"
+        valid_keep_last "$4" || die "cleanup: invalid --keep-last value"
+        unset CULVERT_BACKUP_PASSPHRASE
+        if [ "$#" -eq 5 ]; then
+            [ "$5" = "--confirm" ] || die "cleanup: unexpected argument"
+            exec "$DOCKER_BIN" compose -f "$COMPOSE_PATH" --profile cli run --rm \
+                cli --cleanup-restore-leftovers --older-than "$2" --keep-last "$4" --confirm
+        fi
+        exec "$DOCKER_BIN" compose -f "$COMPOSE_PATH" --profile cli run --rm \
+            cli --cleanup-restore-leftovers --older-than "$2" --keep-last "$4"
+        ;;
+
+    *)
+        die "unknown subcommand"
+        ;;
+esac

@@ -106,17 +106,146 @@ func TestParity_D16bRegistryShape(t *testing.T) {
 			t.Errorf("registry has unexpected template %q (registry scope is closed)", id)
 		}
 	}
-	// Restore templates MUST have exactly 12 lines each (3 modes ×
-	// 4 flag combos). No fewer (would be incomplete coverage), no
-	// more (would mean extra wildcard surface leaked through).
+	// Restore templates used to enumerate 12 wildcarded sudoers lines
+	// each (3 modes × 4 flag combos). They now run through the
+	// compose-cli wrapper, so each MUST declare exactly the single
+	// argument-less wrapper line: no fewer (no allowlist), no more (no
+	// leftover wildcard surface). The 24 mode/flag combinations are
+	// enforced by the wrapper itself (wrapper_test.go).
 	for _, id := range []TemplateID{TemplateComposeCLIRestoreDryRun, TemplateComposeCLIRestoreCommit} {
 		tmpl := templateByID(id)
 		if tmpl == nil {
 			t.Errorf("template %q missing from registry", id)
 			continue
 		}
-		if got := len(tmpl.SudoersLines); got != 12 {
-			t.Errorf("template %q must enumerate exactly 12 sudoers lines (3 modes × 4 flag combos); got %d", id, got)
+		if len(tmpl.SudoersLines) != 1 || tmpl.SudoersLines[0] != ComposeCLIWrapperPath {
+			t.Errorf("template %q must declare exactly the wrapper sudoers line %q; got %q", id, ComposeCLIWrapperPath, tmpl.SudoersLines)
+		}
+	}
+}
+
+// sudoersCommandSpecs returns every command spec the sudoers file grants or
+// names: the command part of each NOPASSWD rule and each Cmnd_Alias member
+// (continuation lines folded). Comments and Defaults lines are skipped.
+func sudoersCommandSpecs(t *testing.T, content string) []string {
+	t.Helper()
+	var specs []string
+	var alias strings.Builder
+	inAlias := false
+	flushAlias := func() {
+		body := alias.String()
+		alias.Reset()
+		inAlias = false
+		if i := strings.Index(body, "="); i >= 0 {
+			for _, member := range strings.Split(body[i+1:], ",") {
+				if m := strings.TrimSpace(member); m != "" {
+					specs = append(specs, m)
+				}
+			}
+		}
+	}
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if inAlias {
+			alias.WriteString(" " + strings.TrimSuffix(line, `\`))
+			if !strings.HasSuffix(line, `\`) {
+				flushAlias()
+			}
+			continue
+		}
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "Defaults") {
+			continue
+		}
+		if strings.HasPrefix(line, "Cmnd_Alias") {
+			alias.WriteString(strings.TrimSuffix(line, `\`))
+			inAlias = true
+			if !strings.HasSuffix(line, `\`) {
+				flushAlias()
+			}
+			continue
+		}
+		idx := strings.Index(line, "NOPASSWD:")
+		if idx == -1 {
+			t.Fatalf("unexpected sudoers line shape: %q", line)
+		}
+		specs = append(specs, strings.TrimSpace(line[idx+len("NOPASSWD:"):]))
+	}
+	if inAlias {
+		t.Fatalf("unterminated Cmnd_Alias continuation in sudoers")
+	}
+	return specs
+}
+
+// sudoRsArgWildcardError mirrors sudo-rs's command-argument rule
+// (src/sudoers/tokens.rs, Command::construct): split the spec on
+// whitespace, drop a SOLE trailing `*` (the "any further arguments"
+// form), and reject the spec if any remaining argument contains `*` or
+// `?`. Returns "" when the spec is acceptable.
+func sudoRsArgWildcardError(spec string) string {
+	fields := strings.Fields(spec)
+	if len(fields) < 2 {
+		return ""
+	}
+	args := fields[1:]
+	if args[len(args)-1] == "*" {
+		args = args[:len(args)-1]
+	}
+	for _, a := range args {
+		if strings.ContainsAny(a, "*?") {
+			return "wildcards are not allowed in command arguments: " + a
+		}
+	}
+	return ""
+}
+
+// TestSudoers_NoWildcardInCommandArguments is the Ubuntu 26.04 regression
+// gate. sudo-rs, the default sudo there, refuses a sudoers file whose
+// command arguments carry `*` or `?` anywhere except as a sole trailing
+// `*`, and `visudo -c` then rejects the WHOLE file, so the agent cannot be
+// installed at all. CI runs the real `visudo -c` only on whatever sudo the
+// runner image ships; this static check applies the sudo-rs rule on every
+// runner, to both the on-disk file and every template's SudoersLines.
+func TestSudoers_NoWildcardInCommandArguments(t *testing.T) {
+	data, err := os.ReadFile(findSudoersFile(t))
+	if err != nil {
+		t.Fatalf("read sudoers: %v", err)
+	}
+	specs := sudoersCommandSpecs(t, string(data))
+	if len(specs) == 0 {
+		t.Fatal("parsed no command specs from the sudoers file")
+	}
+	for _, spec := range specs {
+		if msg := sudoRsArgWildcardError(spec); msg != "" {
+			t.Errorf("sudoers spec would fail sudo-rs visudo (%s):\n  %s", msg, spec)
+		}
+	}
+	for _, tmpl := range Registry() {
+		for _, line := range tmpl.SudoersLines {
+			if msg := sudoRsArgWildcardError(line); msg != "" {
+				t.Errorf("template %q sudoers line would fail sudo-rs visudo (%s):\n  %s", tmpl.ID, msg, line)
+			}
+		}
+	}
+
+	// Negative controls: the rule must still catch the shapes that broke
+	// main, and must still admit the sole-trailing form sudo-rs accepts.
+	for _, bad := range []string{
+		"/usr/bin/docker compose -f /srv/c.yml --profile cli run --rm cli --backup /backup/*",
+		"/usr/bin/docker compose -f /srv/c.yml --profile cli run --rm cli --restore /backup/* --mode full",
+		"/usr/bin/docker compose -f /srv/c.yml --profile cli run --rm cli --older-than * --keep-last *",
+		"/usr/bin/docker image inspect a?b",
+	} {
+		if sudoRsArgWildcardError(bad) == "" {
+			t.Errorf("negative control not caught: %q", bad)
+		}
+	}
+	for _, good := range []string{
+		"/usr/bin/docker image inspect *",
+		ComposeCLIWrapperPath,
+		"/usr/bin/docker compose -f /srv/c.yml down",
+	} {
+		if msg := sudoRsArgWildcardError(good); msg != "" {
+			t.Errorf("positive control rejected (%s): %q", msg, good)
 		}
 	}
 }
@@ -166,14 +295,18 @@ func TestSudoers_EnvKeepIsCommandScoped(t *testing.T) {
 		}
 	}
 
-	// The passphrase alias must scope to the cli encrypt/restore commands
-	// only — never the pull/tag/up image-selection commands.
+	// The passphrase alias must scope to the compose-cli wrapper ONLY —
+	// never a docker command directly (in particular not the pull/tag/up
+	// image-selection commands). The wrapper is the sole consumer: it
+	// forwards the var with `-e` for backup-encrypted/restore and unsets
+	// it for backup/cleanup (pinned by wrapper_test.go).
 	passAlias := aliasBody(content, "CULVERT_MAINT_PASSPHRASE_CMNDS")
-	if !strings.Contains(passAlias, "--encrypt") || !strings.Contains(passAlias, "--restore") {
-		t.Errorf("passphrase alias must cover --encrypt + --restore; got:\n%s", passAlias)
+	wantAlias := "Cmnd_Alias CULVERT_MAINT_PASSPHRASE_CMNDS = " + ComposeCLIWrapperPath
+	if normalize(passAlias) != wantAlias {
+		t.Errorf("passphrase alias must be exactly %q; got:\n%s", wantAlias, passAlias)
 	}
-	if strings.Contains(passAlias, "docker pull") || strings.Contains(passAlias, "docker tag") || strings.Contains(passAlias, "up -d") {
-		t.Errorf("passphrase alias must NOT cover the image pull/tag/up commands:\n%s", passAlias)
+	if strings.Contains(passAlias, "docker") {
+		t.Errorf("passphrase alias must NOT name any docker command directly:\n%s", passAlias)
 	}
 }
 

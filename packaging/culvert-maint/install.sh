@@ -25,13 +25,18 @@
 #      config, validate them, and (P1.4) seed the fixed local image tag
 #      culvert/proxy:pinned BEFORE touching sudoers.
 #   6. Render /etc/sudoers.d/culvert-maint from the template, reject any
-#      leftover placeholder, and validate with `visudo -c` before install.
+#      leftover placeholder, and validate with `visudo -c`; then render and
+#      install the root-owned compose-cli wrapper the sudoers file grants
+#      (/usr/local/libexec/culvert-maint/compose-cli, root:root 0755), and
+#      only then install the sudoers file.
 #   7. Prepare /var/lib/culvert-maint and operations/ subdir.
 #   8. Install the systemd unit and reload systemd.
 #
 # The sudoers file MUST be path-bound to the absolute compose path —
 # sudo's exact-arg matching does not honor cwd. This script enforces that
-# by rendering compose_project_dir + compose_file into the allowlist line.
+# by rendering compose_project_dir + compose_file into the allowlist line,
+# and into the compose-cli wrapper (which carries the compose path itself,
+# so the agent can never choose the compose file it runs as root).
 
 set -eu
 
@@ -100,6 +105,37 @@ sed_escape_replacement() {
 # sed-escaped correctly.
 sudoers_escape_colon() {
     printf '%s' "$1" | sed -e 's/:/\\:/g' -e 's/,/\\,/g'
+}
+
+# render_compose_cli_wrapper TEMPLATE COMPOSE_PATH OUT renders the privileged
+# compose-cli wrapper (packaging/culvert-maint/compose-cli). The sudoers file
+# grants that wrapper, with no argument wildcard, for every compose `cli`
+# operation whose arguments vary per call (sudo-rs, Ubuntu 26.04's default
+# sudo, rejects `*`/`?` in sudoers command arguments); the wrapper validates
+# the arguments and execs the fixed docker compose command. The compose path
+# is rendered INTO the wrapper as a single-quoted shell literal, so it MUST
+# NOT contain a single quote or a control character (reject_unsafe already
+# refuses both for compose_project_dir/compose_file; re-checked here because
+# this is a root-executed sink). It is sed-escaped only, never
+# sudoers-escaped: inside the wrapper it is a shell string, not a Cmnd.
+render_compose_cli_wrapper() {
+    _tmpl=$1
+    _cpath=$2
+    _out=$3
+    case "$_cpath" in
+        /*) : ;;
+        *) die "compose-cli wrapper: compose path must be absolute, got '$_cpath'" ;;
+    esac
+    case "$_cpath" in
+        *"'"* | *[[:cntrl:]]*) die "compose-cli wrapper: compose path must not contain a single quote or control character" ;;
+    esac
+    sed "s|{compose_path}|$(sed_escape_replacement "$_cpath")|g" "$_tmpl" > "$_out"
+    if grep -q '{compose_path}' "$_out"; then
+        die "compose-cli wrapper: rendered wrapper still contains the compose-path placeholder"
+    fi
+    [ "$(grep -cFx "COMPOSE_PATH='$_cpath'" "$_out")" = 1 ] || \
+        die "compose-cli wrapper: rendered compose path line not found exactly once"
+    sh -n "$_out" || die "compose-cli wrapper: rendered wrapper fails 'sh -n'"
 }
 
 # Read a TOML basic ("value") OR literal ('value') string value:  key = "value"
@@ -193,7 +229,7 @@ esac
 # (resolved + verified in §1b below, after the temp-cleanup trap is armed).
 BIN_ARG=${1:-${CULVERT_MAINT_BIN:-}}
 
-for c in id install useradd groupadd getent awk sed grep mktemp visudo systemctl docker; do
+for c in id install useradd groupadd getent awk sed grep find mktemp visudo systemctl docker; do
     command -v "$c" >/dev/null 2>&1 || die "required command not found: $c"
 done
 
@@ -206,21 +242,29 @@ SUDOERS_TEMPLATE="$SCRIPT_DIR/../sudoers/culvert-maint"
 CONFIG_TEMPLATE="$SCRIPT_DIR/config.example.toml"
 CONFIG_DEST=/etc/culvert-maint/config.toml
 SUDOERS_DEST=/etc/sudoers.d/culvert-maint
+# The root-owned wrapper the sudoers file grants for the variable-argument
+# compose `cli` operations. MUST equal runner.ComposeCLIWrapperPath and the
+# path in packaging/sudoers/culvert-maint.
+WRAPPER_TEMPLATE="$SCRIPT_DIR/compose-cli"
+WRAPPER_DIR=/usr/local/libexec/culvert-maint
+WRAPPER_DEST="$WRAPPER_DIR/compose-cli"
 
-for f in "$SYSTEMD_UNIT" "$SUDOERS_TEMPLATE" "$CONFIG_TEMPLATE"; do
+for f in "$SYSTEMD_UNIT" "$SUDOERS_TEMPLATE" "$CONFIG_TEMPLATE" "$WRAPPER_TEMPLATE"; do
     [ -f "$f" ] || die "missing packaging file: $f"
 done
 
-# Temp paths cleaned up on any exit: the rendered sudoers file and the
-# download/verify scratch dirs from §1b. Declared before the trap so `set -u`
-# never trips on an unset name inside the handler.
+# Temp paths cleaned up on any exit: the rendered sudoers file, the rendered
+# compose-cli wrapper and the download/verify scratch dirs from §1b. Declared
+# before the trap so `set -u` never trips on an unset name inside the handler.
 RENDERED_SUDOERS=""
 RENDERED_SUDOERS_TMP=""
+RENDERED_WRAPPER=""
 CLEAN_DL_DIR=""
 CLEAN_VERIFY_DIR=""
 cleanup() {
     [ -n "$RENDERED_SUDOERS" ] && rm -f "$RENDERED_SUDOERS"
     [ -n "$RENDERED_SUDOERS_TMP" ] && rm -f "$RENDERED_SUDOERS_TMP"
+    [ -n "$RENDERED_WRAPPER" ] && rm -f "$RENDERED_WRAPPER"
     [ -n "$CLEAN_DL_DIR" ] && rm -rf "$CLEAN_DL_DIR"
     [ -n "$CLEAN_VERIFY_DIR" ] && rm -rf "$CLEAN_VERIFY_DIR"
     return 0
@@ -561,6 +605,21 @@ if ! visudo -c -f "$RENDERED_SUDOERS" >/dev/null; then
     die "refusing to install an invalid sudoers file"
 fi
 
+# Render + install the compose-cli wrapper BEFORE the sudoers file that grants
+# it goes live, so the new grant never points at a missing or stale wrapper.
+# The wrapper is a sudo-granted root-executed file: it and every directory
+# above it must be root-owned and not group/world-writable, or the
+# culvert-maint user (or anyone else) could replace what sudo runs as root.
+RENDERED_WRAPPER=$(mktemp)
+render_compose_cli_wrapper "$WRAPPER_TEMPLATE" "$COMPOSE_PATH" "$RENDERED_WRAPPER"
+install -d -m 0755 -o root -g root "$WRAPPER_DIR"
+for _d in /usr/local /usr/local/libexec "$WRAPPER_DIR"; do
+    [ -n "$(find -H "$_d" -maxdepth 0 -type d -user root ! -perm /022)" ] || \
+        die "$_d must be a root-owned directory that is not group/world-writable (it holds the sudo-granted $WRAPPER_DEST)"
+done
+install -m 0755 -o root -g root "$RENDERED_WRAPPER" "$WRAPPER_DEST"
+log "rendered + installed $WRAPPER_DEST (compose_path=$COMPOSE_PATH)"
+
 install -m 0440 -o root -g root "$RENDERED_SUDOERS" "$SUDOERS_DEST"
 log "rendered + installed $SUDOERS_DEST (compose_path=$COMPOSE_PATH)"
 
@@ -585,8 +644,8 @@ log "installed /etc/systemd/system/culvert-maint.service"
 cat <<EOF
 install.sh: install complete.
 
-Compose path bound in sudoers allowlist:
-  $COMPOSE_PATH
+Compose path bound in sudoers allowlist and the compose-cli wrapper:
+  $COMPOSE_PATH   ($WRAPPER_DEST)
 Proxy repo bound in sudoers pull/tag allowlist (P1.4):
   $PROXY_REPO   →  retagged locally as culvert/proxy:pinned
 
@@ -607,6 +666,6 @@ Next steps:
         curl --unix-socket /run/culvert-maint/culvert-maint.sock http://localhost/v1/health
 
 If you change compose_project_dir or compose_file later, re-run this
-script — it will re-render and re-install the sudoers file with the
-new path.
+script — it will re-render and re-install the sudoers file and the
+compose-cli wrapper with the new path.
 EOF
