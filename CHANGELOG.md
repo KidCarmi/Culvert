@@ -15,6 +15,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   by older settings. That was visible only by grepping the startup log. The new
   `pac_legacy_config_newer` row on Infrastructure → Diagnostics states it with
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
+### Fixed
+
+- **A whitespace-only `cluster.grpc_addr` passed config validation under `cluster.role: control-plane`.**
+  The required-address check compared the raw string to `""`, so `grpc_addr: " "` loaded, resolved to a non-empty
+  listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
 
