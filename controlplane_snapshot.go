@@ -659,6 +659,10 @@ type dpLastGoodConfigSnapshotStatus struct {
 	LoadError    string
 	SavedVersion int64
 	SaveError    string
+	// HasIdPProfiles: the on-disk snapshot carries a non-nil IdPProfiles, so
+	// applyDPLastGoodConfigSnapshot re-syncs the registry from it at startup
+	// (nil means absent and is skipped by syncSnapshotIdPProfiles).
+	HasIdPProfiles bool
 }
 
 var dpLastGoodConfigSnapshotState atomic.Value // dpLastGoodConfigSnapshotStatus
@@ -1952,7 +1956,7 @@ func loadDPLastGoodConfigSnapshot() (ConfigSnapshot, error) {
 		dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{LoadError: err.Error()})
 		return ConfigSnapshot{}, err
 	}
-	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
+	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version, HasIdPProfiles: snap.IdPProfiles != nil})
 	// Seed the poll-deadline size predictor from the on-disk snapshot so a
 	// cold-started DP's very FIRST poll already budgets time for a full transfer
 	// of roughly this size — otherwise a large config on a thin WAN times out at
@@ -2019,7 +2023,7 @@ func persistDPLastGoodConfigSnapshot(snap ConfigSnapshot) {
 		logger.Printf("DataPlane: last-known-good config persist failed: %v", err)
 		return
 	}
-	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version})
+	dpLastGoodConfigSnapshotState.Store(dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version, HasIdPProfiles: snap.IdPProfiles != nil})
 }
 
 func setDPLastGoodConfigSnapshotSaveError(version int64, err error) {

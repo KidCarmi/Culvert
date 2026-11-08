@@ -525,7 +525,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
-- **Diagnostics now warns when identity providers exist only in memory.** Without `-idp-profiles-file` every IdP profile is lost on restart or upgrade and SSO/LDAP sign-in stops; previously visible only in the IdP panel banner and a log line. New `idp_profiles_persistence` operator-contract row (warn only when profiles exist and no file is set). Read-only; no persistence, authentication or enforcement change.
+- **Diagnostics now warns when identity providers exist only in memory.** Without `-idp-profiles-file` every IdP profile is lost on restart or upgrade and SSO/LDAP sign-in stops; previously visible only in the IdP panel banner and a log line. New `idp_profiles_persistence` operator-contract row (warn only when profiles exist, no file is set, and the node is not an enrolled data plane whose last-known-good config snapshot carries them). Read-only; no persistence, authentication or enforcement change.
 - **Administrators can now tune the CHAOS-106 decompression ratio bound
   (default unchanged at 64:1).** The bound refuses a compressed response whose
   declared `Content-Encoding` expands past 64x the bytes the origin transferred,
