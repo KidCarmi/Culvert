@@ -1,14 +1,16 @@
 #!/bin/sh
-# Culvert Maintenance Agent: privileged compose `cli` wrapper
+# Culvert Maintenance Agent: privileged compose `cli` / image wrapper
 #
 # Installed by packaging/culvert-maint/install.sh as
 #     /usr/local/libexec/culvert-maint/compose-cli    (root:root, mode 0755)
 # with the compose-path placeholder below rendered to the absolute
-# <compose_project_dir>/<compose_file> path. The rendered copy is the ONLY
-# thing the sudoers allowlist (packaging/sudoers/culvert-maint) grants for
-# the compose `cli` operations whose arguments vary per call: encrypted and
-# unencrypted backup, restore (dry-run and commit) and restore-leftover
-# cleanup (dry-run and commit).
+# <compose_project_dir>/<compose_file> path and the proxy-repo placeholder
+# rendered to the configured proxy_repo. The rendered copy is the ONLY thing
+# the sudoers allowlist (packaging/sudoers/culvert-maint) grants for the
+# privileged operations whose arguments vary per call: encrypted and
+# unencrypted backup, restore (dry-run and commit), restore-leftover cleanup
+# (dry-run and commit), and the upgrade path's running-container inspect,
+# digest-pinned image pull and retag to the pinned local tag.
 #
 # Why a wrapper: those operations used to be allowlisted directly with
 # sudoers wildcards (`--backup /backup/*`, `--restore /backup/* --mode ...`,
@@ -17,6 +19,13 @@
 # allowed in command arguments"), so `visudo -c` refused the whole file and
 # the agent could not be installed. The sudoers rule for this wrapper now
 # carries no wildcard at all, and THIS script is the argument boundary.
+#
+# The upgrade-path rules had the opposite problem: they were enumerated
+# (`docker inspect --format {{json\ .Image}} [0-9a-f]...` for each id length,
+# `docker pull <repo>@sha256\:[0-9a-f]...`), which sudo-rs parses but can
+# never match: it compares arguments literally, so `[0-9a-f]` is five
+# characters and the escaped space splits `{{json .Image}}` in two. Those
+# calls were refused on every sudo-rs host. They are now subcommands here.
 #
 # It is deliberately TIGHTER than the wildcards it replaces. Classic sudo's
 # `*` matches any characters, spaces included, so `/backup/*` also admitted
@@ -29,6 +38,9 @@
 #   compose-cli restore /backup/<name> --mode <full|trust-root-only|state-only>
 #               [--accept-dp-reenrollment] [--allow-counter-rollback] [--confirm]
 #   compose-cli cleanup --older-than <duration> --keep-last <0..100> [--confirm]
+#   compose-cli inspect-image <container-id>
+#   compose-cli pull <proxy_repo>@sha256:<digest>
+#   compose-cli tag  <proxy_repo>@sha256:<digest> culvert/proxy:pinned
 #
 #   <name>      1..255 bytes of [A-Za-z0-9._-], not starting with '.'
 #               (the agent's ValidateBackupFilename): no '/', no '..', no
@@ -40,6 +52,20 @@
 #               (the agent's olderThanRE), with a value between 1h and
 #               8760h inclusive (the agent's validateOlderThan range).
 #   keep-last   0..100 in canonical decimal (the agent's strconv.Itoa).
+#   <container-id>
+#               12..64 lowercase hex characters: a short or full docker
+#               container id (the agent's containerIDShapeRE; `docker compose
+#               ps --format json` reports the 12-character short id). Execs
+#               `docker inspect --format '{{json .Image}}' <id>`, so the
+#               output is only the image config digest and `--format` can
+#               never be changed or repeated.
+#   <proxy_repo>
+#               the rendered literal below, compared byte-for-byte (never as
+#               a pattern). A different repository, a tag (`:latest`), a
+#               second `@`, or a digest that is not exactly 64 lowercase hex
+#               characters is refused (the agent's validatePinnedDigestRef).
+#   tag         the destination is the fixed local tag culvert/proxy:pinned,
+#               the only tag the compose file resolves.
 #
 # Anything else exits 64 before docker runs. Rejected values are never
 # echoed, so a hostile argument cannot inject into the agent's log.
@@ -48,8 +74,9 @@
 # argument, every expansion quoted, and docker is exec'd with an explicit
 # argv. CULVERT_BACKUP_PASSPHRASE reaches this script through the sudoers
 # env_keep scoped to it; it is unset for the subcommands that must not
-# carry it (unencrypted backup, cleanup), so docker sees the variable
-# exactly where it did under the old per-command env_keep.
+# carry it (unencrypted backup, cleanup, inspect-image, pull, tag), so
+# docker sees the variable exactly where it did under the old per-command
+# env_keep.
 #
 # Do not edit the installed copy by hand; re-run install.sh instead.
 
@@ -64,8 +91,12 @@ unset IFS CDPATH
 # Rendered by install.sh (single-quoted; install.sh refuses a value that
 # contains a single quote). Must stay on one line.
 COMPOSE_PATH='{compose_path}'
+# Rendered by install.sh the same way (install.sh refuses a value outside the
+# agent's proxy_repo shape). Must stay on one line.
+PROXY_REPO='{proxy_repo}'
+PINNED_TAG=culvert/proxy:pinned
 DOCKER_BIN=/usr/bin/docker
-readonly COMPOSE_PATH DOCKER_BIN
+readonly COMPOSE_PATH PROXY_REPO PINNED_TAG DOCKER_BIN
 
 die() {
     printf 'compose-cli: refused: %s\n' "$1" >&2
@@ -76,6 +107,13 @@ die() {
 case $COMPOSE_PATH in
     /*) : ;;
     *) die "wrapper is not rendered (compose path is not absolute); re-run install.sh" ;;
+esac
+# Likewise for the proxy repo: the placeholder's braces are outside the
+# repository charset, so an unrendered wrapper can never pull or tag.
+case $PROXY_REPO in
+    '' | [!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]* | \
+        *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/:-]*)
+        die "wrapper is not rendered (proxy repo is not a repository); re-run install.sh" ;;
 esac
 
 # valid_backup_path PATH: /backup/<name>, <name> per the header.
@@ -151,6 +189,31 @@ valid_keep_last() {
     return 1
 }
 
+# valid_container_id ID: 12..64 lowercase hex characters, nothing else.
+valid_container_id() {
+    [ "${#1}" -ge 12 ] || return 1
+    [ "${#1}" -le 64 ] || return 1
+    case $1 in
+        *[!0123456789abcdef]*) return 1 ;;
+    esac
+    return 0
+}
+
+# valid_pinned_ref REF: exactly <PROXY_REPO>@sha256:<64 lowercase hex>. The
+# repo is quoted in the case pattern and in the prefix strip, so it is
+# compared literally, never as a glob.
+valid_pinned_ref() {
+    case $1 in
+        "$PROXY_REPO"@sha256:*) _digest=${1#"$PROXY_REPO"@sha256:} ;;
+        *) return 1 ;;
+    esac
+    [ "${#_digest}" -eq 64 ] || return 1
+    case $_digest in
+        *[!0123456789abcdef]*) return 1 ;;
+    esac
+    return 0
+}
+
 [ "$#" -ge 1 ] || die "missing subcommand"
 _sub=$1
 shift
@@ -220,6 +283,28 @@ case $_sub in
         fi
         exec "$DOCKER_BIN" compose -f "$COMPOSE_PATH" --profile cli run --rm \
             cli --cleanup-restore-leftovers --older-than "$2" --keep-last "$4"
+        ;;
+
+    inspect-image)
+        [ "$#" -eq 1 ] || die "inspect-image takes exactly one argument"
+        valid_container_id "$1" || die "inspect-image: invalid container id"
+        unset CULVERT_BACKUP_PASSPHRASE
+        exec "$DOCKER_BIN" inspect --format '{{json .Image}}' "$1"
+        ;;
+
+    pull)
+        [ "$#" -eq 1 ] || die "pull takes exactly one argument"
+        valid_pinned_ref "$1" || die "pull: not a digest-pinned reference to the configured proxy repo"
+        unset CULVERT_BACKUP_PASSPHRASE
+        exec "$DOCKER_BIN" pull "$1"
+        ;;
+
+    tag)
+        [ "$#" -eq 2 ] || die "tag takes exactly two arguments"
+        valid_pinned_ref "$1" || die "tag: image to retag is not a digest-pinned reference to the configured proxy repo"
+        [ "$2" = "$PINNED_TAG" ] || die "tag: destination must be the pinned local tag"
+        unset CULVERT_BACKUP_PASSPHRASE
+        exec "$DOCKER_BIN" tag "$1" "$PINNED_TAG"
         ;;
 
     *)

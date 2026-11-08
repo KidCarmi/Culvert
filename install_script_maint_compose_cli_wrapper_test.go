@@ -6,14 +6,16 @@ package main
 //
 // The wrapper replaced the sudoers argument wildcards (`--backup /backup/*`,
 // `--restore /backup/* --mode …`, `--older-than * --keep-last *`) that sudo-rs,
-// the default sudo on Ubuntu 26.04, rejects. sudo runs it as root, and the
-// compose path is rendered into it as a single-quoted shell literal, so the
-// render is a root-executed sink: these tests extract the REAL
-// render_compose_cli_wrapper() and sed_escape_replacement() helpers from the
-// installer, render the REAL template with compose paths full of shell
-// metacharacters, run the result, and require docker to receive the path
-// byte-for-byte (no expansion, no injection). The argument validation itself
-// is covered by cmd/culvert-maint/internal/runner/wrapper_test.go.
+// the default sudo on Ubuntu 26.04, rejects, and the upgrade-path
+// `[0-9a-f]`/escaped-space rules sudo-rs never matches. sudo runs it as root,
+// and the compose path and proxy_repo are rendered into it as single-quoted
+// shell literals, so the render is a root-executed sink: these tests extract
+// the REAL render_compose_cli_wrapper() and sed_escape_replacement() helpers
+// from the installer, render the REAL template with compose paths full of
+// shell metacharacters, run the result, and require docker to receive the
+// path (and the pinned ref) byte-for-byte (no expansion, no injection). The
+// argument validation itself is covered by
+// cmd/culvert-maint/internal/runner/wrapper_test.go.
 
 import (
 	"os"
@@ -73,7 +75,7 @@ func TestCulvertMaintInstall_WrapperRender_ComposePathIsInert(t *testing.T) {
 		}
 		script := harness +
 			`CPATH=$(cat "$OUT.path")` + "\n" +
-			`render_compose_cli_wrapper '` + maintWrapperTemplate + `' "$CPATH" "$OUT"` + "\n" +
+			`render_compose_cli_wrapper '` + maintWrapperTemplate + `' "$CPATH" ghcr.io/kidcarmi/culvert "$OUT"` + "\n" +
 			// Point the rendered copy at the fake docker (the shipped wrapper
 			// has no runtime override), then run it as install.sh would let
 			// sudo run it.
@@ -122,7 +124,7 @@ func TestCulvertMaintInstall_WrapperRender_RefusesUnsafeComposePath(t *testing.T
 			// The trailing x keeps $(…) from stripping a trailing newline.
 			script := harness +
 				`CPATH=$(cat "$OUT.path"; printf x); CPATH=${CPATH%x}` + "\n" +
-				`if ( render_compose_cli_wrapper '` + maintWrapperTemplate + `' "$CPATH" "$OUT" ) 2>/dev/null; then` + "\n" +
+				`if ( render_compose_cli_wrapper '` + maintWrapperTemplate + `' "$CPATH" ghcr.io/kidcarmi/culvert "$OUT" ) 2>/dev/null; then` + "\n" +
 				`    echo "render accepted an unsafe compose path" >&2; exit 1` + "\n" +
 				`fi` + "\n" +
 				// Refused before anything is written: no partial wrapper.
@@ -130,6 +132,108 @@ func TestCulvertMaintInstall_WrapperRender_RefusesUnsafeComposePath(t *testing.T
 			runShellScript(t, script, out)
 		})
 	}
+}
+
+// TestCulvertMaintInstall_WrapperRender_ProxyRepoIsLiteral renders the wrapper
+// with the proxy repos an operator can configure, including the day-2 e2e's
+// registry with a port, and requires the pinned pull/tag subcommands to hand
+// docker the exact `<repo>@sha256:<hex>` ref. Inside the wrapper the repo is a
+// shell string: its ':' must NOT carry the sudoers `\:` escape, or every
+// runner-emitted ref would be refused.
+func TestCulvertMaintInstall_WrapperRender_ProxyRepoIsLiteral(t *testing.T) {
+	harness := wrapperRenderHarness(t)
+	digest := strings.Repeat("0123456789abcdef", 4)
+	for _, repo := range []string{
+		"ghcr.io/kidcarmi/culvert",
+		"127.0.0.1:5000/culvert",
+		"registry.example.com:8443/team/culvert-proxy",
+		"a",
+	} {
+		out := filepath.Join(t.TempDir(), "compose-cli")
+		ref := repo + "@sha256:" + digest
+		script := harness +
+			`render_compose_cli_wrapper '` + maintWrapperTemplate + `' /srv/culvert/docker-compose.yml '` + repo + `' "$OUT"` + "\n" +
+			`sed -i "s|^DOCKER_BIN=/usr/bin/docker$|DOCKER_BIN=$FAKE|" "$OUT"` + "\n" +
+			`grep -qFx "PROXY_REPO='` + repo + `'" "$OUT"` + "\n" +
+			`sh "$OUT" pull '` + ref + `'` + "\n" +
+			`mv "$OUT.argv" "$OUT.pull"` + "\n" +
+			`sh "$OUT" tag '` + ref + `' culvert/proxy:pinned` + "\n"
+		runShellScript(t, script, out)
+		pull, err := os.ReadFile(out + ".pull")
+		if err != nil {
+			t.Fatalf("%q: pull did not reach docker: %v", repo, err)
+		}
+		if want := "pull\n" + ref + "\n"; string(pull) != want {
+			t.Errorf("%q: pull argv mismatch\n got: %q\nwant: %q", repo, pull, want)
+		}
+		tag, err := os.ReadFile(out + ".argv")
+		if err != nil {
+			t.Fatalf("%q: tag did not reach docker: %v", repo, err)
+		}
+		if want := "tag\n" + ref + "\nculvert/proxy:pinned\n"; string(tag) != want {
+			t.Errorf("%q: tag argv mismatch\n got: %q\nwant: %q", repo, tag, want)
+		}
+		rendered, err := os.ReadFile(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The script's `grep -qFx "PROXY_REPO='<repo>'"` already proved the
+		// repo is rendered verbatim (an escaped `\:` would fail it).
+		if strings.Contains(string(rendered), "{proxy_repo}") {
+			t.Errorf("%q: placeholder left in rendered wrapper", repo)
+		}
+	}
+}
+
+// TestCulvertMaintInstall_WrapperRender_RefusesUnsafeProxyRepo proves the
+// renderer refuses any proxy_repo outside the agent's proxy_repo shape before
+// writing anything: values that could break out of the single-quoted literal,
+// that a glob or the shell would interpret, or that the agent itself rejects.
+func TestCulvertMaintInstall_WrapperRender_RefusesUnsafeProxyRepo(t *testing.T) {
+	harness := wrapperRenderHarness(t)
+	for name, repo := range map[string]string{
+		"empty":           "",
+		"single quote":    "ghcr.io/it's/culvert",
+		"space":           "ghcr.io/kid carmi/culvert",
+		"newline":         "ghcr.io/kidcarmi/culvert\nx",
+		"subst":           "ghcr.io/$(id)/culvert",
+		"backtick":        "ghcr.io/`id`/culvert",
+		"dollar":          "ghcr.io/$HOME/culvert",
+		"glob star":       "ghcr.io/*/culvert",
+		"glob class":      "ghcr.io/[a]/culvert",
+		"glob question":   "ghcr.io/?/culvert",
+		"at sign":         "ghcr.io/kidcarmi/culvert@sha256",
+		"leading dash":    "-ghcr.io/culvert",
+		"leading dot":     ".ghcr.io/culvert",
+		"leading slash":   "/ghcr.io/culvert",
+		"placeholder":     "{proxy_repo}",
+		"backslash":       `ghcr.io\culvert`,
+		"pipe":            "ghcr.io|culvert",
+		"semicolon":       "ghcr.io;culvert",
+		"non-ascii":       "ghcr.io/café",
+		"too long (256)":  strings.Repeat("a", 256),
+		"double quote":    `ghcr.io/"x"/culvert`,
+		"ampersand":       "ghcr.io&culvert",
+		"tab":             "ghcr.io\tculvert",
+		"carriage return": "ghcr.io\rculvert",
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := filepath.Join(t.TempDir(), "compose-cli")
+			if err := os.WriteFile(out+".repo", []byte(repo), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			script := harness +
+				`REPO=$(cat "$OUT.repo"; printf x); REPO=${REPO%x}` + "\n" +
+				`if ( render_compose_cli_wrapper '` + maintWrapperTemplate + `' /srv/culvert/docker-compose.yml "$REPO" "$OUT" ) 2>/dev/null; then` + "\n" +
+				`    echo "render accepted an unsafe proxy_repo" >&2; exit 1` + "\n" +
+				`fi` + "\n" +
+				`[ ! -e "$OUT" ] || { echo "render wrote output for an unsafe proxy_repo" >&2; exit 1; }` + "\n"
+			runShellScript(t, script, out)
+		})
+	}
+	// The 255-byte boundary is accepted (the agent's proxyRepoShapeRE bound).
+	out := filepath.Join(t.TempDir(), "compose-cli")
+	runShellScript(t, harness+`render_compose_cli_wrapper '`+maintWrapperTemplate+`' /srv/culvert/docker-compose.yml '`+strings.Repeat("a", 255)+`' "$OUT"`+"\n", out)
 }
 
 // TestCulvertMaintInstall_WrapperPathAgreesEverywhere pins the one root-owned
@@ -142,6 +246,7 @@ func TestCulvertMaintInstall_WrapperPathAgreesEverywhere(t *testing.T) {
 		`WRAPPER_DEST="$WRAPPER_DIR/compose-cli"` + "\n",
 		`WRAPPER_TEMPLATE="$SCRIPT_DIR/compose-cli"` + "\n",
 		`install -m 0755 -o root -g root "$RENDERED_WRAPPER" "$WRAPPER_DEST"` + "\n",
+		`render_compose_cli_wrapper "$WRAPPER_TEMPLATE" "$COMPOSE_PATH" "$PROXY_REPO" "$RENDERED_WRAPPER"` + "\n",
 	} {
 		if !strings.Contains(install, want) {
 			t.Errorf("%s missing %q", maintInstallScript, strings.TrimSpace(want))

@@ -36,7 +36,9 @@
 # sudo's exact-arg matching does not honor cwd. This script enforces that
 # by rendering compose_project_dir + compose_file into the allowlist line,
 # and into the compose-cli wrapper (which carries the compose path itself,
-# so the agent can never choose the compose file it runs as root).
+# so the agent can never choose the compose file it runs as root). The
+# wrapper likewise carries proxy_repo, the only repository its pinned
+# `pull`/`tag` subcommands accept.
 
 set -eu
 
@@ -107,21 +109,28 @@ sudoers_escape_colon() {
     printf '%s' "$1" | sed -e 's/:/\\:/g' -e 's/,/\\,/g'
 }
 
-# render_compose_cli_wrapper TEMPLATE COMPOSE_PATH OUT renders the privileged
-# compose-cli wrapper (packaging/culvert-maint/compose-cli). The sudoers file
-# grants that wrapper, with no argument wildcard, for every compose `cli`
-# operation whose arguments vary per call (sudo-rs, Ubuntu 26.04's default
-# sudo, rejects `*`/`?` in sudoers command arguments); the wrapper validates
-# the arguments and execs the fixed docker compose command. The compose path
-# is rendered INTO the wrapper as a single-quoted shell literal, so it MUST
-# NOT contain a single quote or a control character (reject_unsafe already
-# refuses both for compose_project_dir/compose_file; re-checked here because
-# this is a root-executed sink). It is sed-escaped only, never
-# sudoers-escaped: inside the wrapper it is a shell string, not a Cmnd.
+# render_compose_cli_wrapper TEMPLATE COMPOSE_PATH PROXY_REPO OUT renders the
+# privileged compose-cli wrapper (packaging/culvert-maint/compose-cli). The
+# sudoers file grants that wrapper, with no argument wildcard, for every
+# privileged operation whose arguments vary per call: the compose `cli`
+# backup/restore/cleanup and the upgrade path's container inspect, pinned
+# pull and retag (sudo-rs, Ubuntu 26.04's default sudo, rejects `*`/`?` in
+# sudoers command arguments and matches `[0-9a-f]` classes and escaped spaces
+# literally); the wrapper validates the arguments and execs the fixed docker
+# command. The compose path and the proxy repo are rendered INTO the wrapper
+# as single-quoted shell literals, so the compose path MUST NOT contain a
+# single quote or a control character (reject_unsafe already refuses both
+# for compose_project_dir/compose_file; re-checked here because this is a
+# root-executed sink), and the proxy repo must have the agent's proxy_repo
+# shape (config.proxyRepoShapeRE: 1..255 bytes, an alphanumeric first, then
+# only [A-Za-z0-9._/:-]); a value outside it would make every pinned ref the
+# agent emits fail its own validation anyway. Both are sed-escaped only,
+# never sudoers-escaped: inside the wrapper they are shell strings, not Cmnds.
 render_compose_cli_wrapper() {
     _tmpl=$1
     _cpath=$2
-    _out=$3
+    _repo=$3
+    _out=$4
     case "$_cpath" in
         /*) : ;;
         *) die "compose-cli wrapper: compose path must be absolute, got '$_cpath'" ;;
@@ -129,12 +138,21 @@ render_compose_cli_wrapper() {
     case "$_cpath" in
         *"'"* | *[[:cntrl:]]*) die "compose-cli wrapper: compose path must not contain a single quote or control character" ;;
     esac
-    sed "s|{compose_path}|$(sed_escape_replacement "$_cpath")|g" "$_tmpl" > "$_out"
-    if grep -q '{compose_path}' "$_out"; then
-        die "compose-cli wrapper: rendered wrapper still contains the compose-path placeholder"
+    case "$_repo" in
+        '' | [!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789]* | \
+            *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/:-]*)
+            die "compose-cli wrapper: proxy_repo must start with a letter or digit and contain only [A-Za-z0-9._/:-]" ;;
+    esac
+    [ "${#_repo}" -le 255 ] || die "compose-cli wrapper: proxy_repo must be at most 255 bytes"
+    sed -e "s|{compose_path}|$(sed_escape_replacement "$_cpath")|g" \
+        -e "s|{proxy_repo}|$(sed_escape_replacement "$_repo")|g" "$_tmpl" > "$_out"
+    if grep -qE '\{compose_path\}|\{proxy_repo\}' "$_out"; then
+        die "compose-cli wrapper: rendered wrapper still contains a placeholder"
     fi
     [ "$(grep -cFx "COMPOSE_PATH='$_cpath'" "$_out")" = 1 ] || \
         die "compose-cli wrapper: rendered compose path line not found exactly once"
+    [ "$(grep -cFx "PROXY_REPO='$_repo'" "$_out")" = 1 ] || \
+        die "compose-cli wrapper: rendered proxy repo line not found exactly once"
     sh -n "$_out" || die "compose-cli wrapper: rendered wrapper fails 'sh -n'"
 }
 
@@ -447,8 +465,9 @@ PROJECT_DIR=$(extract_toml_string compose_project_dir)
 COMPOSE_FILE=$(extract_toml_string compose_file)
 [ -n "$COMPOSE_FILE" ] || COMPOSE_FILE=docker-compose.yml
 
-# proxy_repo (P1.4): the repo the sudoers `docker pull`/`docker tag` entries
-# bind to. Rendered into {proxy_repo} below, like {compose_path}.
+# proxy_repo (P1.4): the repo the compose-cli wrapper's `pull`/`tag`
+# subcommands bind to. Rendered into the wrapper's {proxy_repo} below, like
+# {compose_path}.
 PROXY_REPO=$(extract_toml_string proxy_repo)
 [ -n "$PROXY_REPO" ] || PROXY_REPO=ghcr.io/kidcarmi/culvert
 IMAGE_ALLOWLIST=$(extract_toml_string image_allowlist)
@@ -566,7 +585,11 @@ COMPOSE_PATH="$PROJECT_DIR/$COMPOSE_FILE"
 RENDERED_SUDOERS=$(mktemp)
 RENDERED_SUDOERS_TMP=$(mktemp)
 
-# Pass 1 — substitute {compose_path} and {proxy_repo}. A non-/ delimiter (|) lets
+# Pass 1 — substitute {compose_path} and {proxy_repo}. The shipped template no
+# longer carries {proxy_repo} (the repo binding moved into the compose-cli
+# wrapper, because sudo-rs cannot match the old `[0-9a-f]` digest pattern); the
+# substitution stays so a template that names it again is rendered, not left
+# as a placeholder. A non-/ delimiter (|) lets
 # the path/registry slashes pass through unescaped. Both values are
 # colon-escaped for sudoers FIRST (compose_project_dir may legally contain a
 # ':' — e.g. a path with a timestamp or mount label — and a registry port
@@ -611,14 +634,14 @@ fi
 # above it must be root-owned and not group/world-writable, or the
 # culvert-maint user (or anyone else) could replace what sudo runs as root.
 RENDERED_WRAPPER=$(mktemp)
-render_compose_cli_wrapper "$WRAPPER_TEMPLATE" "$COMPOSE_PATH" "$RENDERED_WRAPPER"
+render_compose_cli_wrapper "$WRAPPER_TEMPLATE" "$COMPOSE_PATH" "$PROXY_REPO" "$RENDERED_WRAPPER"
 install -d -m 0755 -o root -g root "$WRAPPER_DIR"
 for _d in /usr/local /usr/local/libexec "$WRAPPER_DIR"; do
     [ -n "$(find -H "$_d" -maxdepth 0 -type d -user root ! -perm /022)" ] || \
         die "$_d must be a root-owned directory that is not group/world-writable (it holds the sudo-granted $WRAPPER_DEST)"
 done
 install -m 0755 -o root -g root "$RENDERED_WRAPPER" "$WRAPPER_DEST"
-log "rendered + installed $WRAPPER_DEST (compose_path=$COMPOSE_PATH)"
+log "rendered + installed $WRAPPER_DEST (compose_path=$COMPOSE_PATH, proxy_repo=$PROXY_REPO)"
 
 install -m 0440 -o root -g root "$RENDERED_SUDOERS" "$SUDOERS_DEST"
 log "rendered + installed $SUDOERS_DEST (compose_path=$COMPOSE_PATH)"
@@ -646,7 +669,7 @@ install.sh: install complete.
 
 Compose path bound in sudoers allowlist and the compose-cli wrapper:
   $COMPOSE_PATH   ($WRAPPER_DEST)
-Proxy repo bound in sudoers pull/tag allowlist (P1.4):
+Proxy repo bound in the compose-cli wrapper's pull/tag subcommands (P1.4):
   $PROXY_REPO   →  retagged locally as culvert/proxy:pinned
 
 Next steps:
@@ -665,7 +688,7 @@ Next steps:
   5. Smoke test (as the allowed CP user):
         curl --unix-socket /run/culvert-maint/culvert-maint.sock http://localhost/v1/health
 
-If you change compose_project_dir or compose_file later, re-run this
-script — it will re-render and re-install the sudoers file and the
-compose-cli wrapper with the new path.
+If you change compose_project_dir, compose_file or proxy_repo later, re-run
+this script — it will re-render and re-install the sudoers file and the
+compose-cli wrapper with the new values.
 EOF

@@ -4,6 +4,16 @@ package main
 // sudoers render pipeline in packaging/culvert-maint/install.sh, specifically
 // the colon-escaping of {proxy_repo} (Gap B).
 //
+// UPDATE (sudo-rs): the shipped sudoers template no longer carries a
+// {proxy_repo} rule. The digest-pinned `docker pull`/`docker tag` entries used
+// `[0-9a-f]` classes, which sudo-rs (Ubuntu 26.04's default sudo) compares
+// literally, so they never matched; pull/tag now run through the compose-cli
+// wrapper, which carries the repo as a shell literal (covered by
+// install_script_maint_compose_cli_wrapper_test.go). These tests now pin that
+// the rendered file stays valid for a ported repo and carries NO direct
+// pull/tag rule, and that any appearance of a ported repo would still be
+// colon-escaped (the Pass-1 substitution is kept for that reason).
+//
 // The maintenance-agent installer renders packaging/sudoers/culvert-maint by
 // substituting {compose_path} and {proxy_repo} with sed. sudo treats a bare
 // ':' in a Cmnd spec as the Runas/Host separator, so a proxy_repo that carries
@@ -64,25 +74,27 @@ func renderMaintSudoers(t *testing.T, proxyRepo string) string {
 	return out
 }
 
-// pullTagLines returns the rendered `docker pull`/`docker tag` NOPASSWD command
-// lines (the P1.4 image pull/retag entries that embed {proxy_repo}).
-func pullTagLines(t *testing.T, path string) []string {
+// renderedSudoersLines returns the rendered file's lines and fails if any
+// direct `docker pull`/`docker tag` NOPASSWD rule remains: those now run
+// through the compose-cli wrapper, and a direct rule sudo-rs cannot match (or
+// a looser one it can) must not come back.
+func renderedSudoersLines(t *testing.T, path string) []string {
 	t.Helper()
 	data, err := os.ReadFile(path) //nolint:gosec // test reads a path it just wrote
 	if err != nil {
 		t.Fatalf("read rendered sudoers: %v", err)
 	}
-	var out []string
-	for _, ln := range strings.Split(string(data), "\n") {
+	lines := strings.Split(string(data), "\n")
+	for _, ln := range lines {
 		if strings.Contains(ln, "NOPASSWD:") &&
 			(strings.Contains(ln, "/usr/bin/docker pull ") || strings.Contains(ln, "/usr/bin/docker tag ")) {
-			out = append(out, ln)
+			t.Errorf("direct pull/tag NOPASSWD rule must not be rendered (it runs through the compose-cli wrapper):\n  %s", ln)
+		}
+		if strings.Contains(ln, "{proxy_repo}") {
+			t.Errorf("unrendered {proxy_repo} placeholder in rendered sudoers:\n  %s", ln)
 		}
 	}
-	if len(out) != 2 {
-		t.Fatalf("expected exactly 2 pull/tag NOPASSWD lines, got %d:\n%s", len(out), strings.Join(out, "\n"))
-	}
-	return out
+	return lines
 }
 
 // TestCulvertMaintInstall_SudoersRender_PortedRepoEscapesColon is the Gap B
@@ -95,13 +107,11 @@ func TestCulvertMaintInstall_SudoersRender_PortedRepoEscapesColon(t *testing.T) 
 
 	rendered := renderMaintSudoers(t, "127.0.0.1:5000/culvert")
 
-	for _, ln := range pullTagLines(t, rendered) {
-		// The port colon MUST be escaped; a bare "127.0.0.1:5000" is the bug.
+	for _, ln := range renderedSudoersLines(t, rendered) {
+		// Wherever the repo appears, its port colon MUST be escaped; a bare
+		// "127.0.0.1:5000" is the bug.
 		if strings.Contains(ln, "127.0.0.1:5000") {
 			t.Errorf("port colon left UNESCAPED in rendered sudoers line (visudo will reject it):\n  %s", ln)
-		}
-		if !strings.Contains(ln, `127.0.0.1\:5000`) {
-			t.Errorf("expected escaped port colon (127.0.0.1\\:5000) in rendered sudoers line:\n  %s", ln)
 		}
 	}
 
@@ -119,10 +129,7 @@ func TestCulvertMaintInstall_SudoersRender_DefaultRepoStillValid(t *testing.T) {
 
 	rendered := renderMaintSudoers(t, "ghcr.io/kidcarmi/culvert")
 
-	for _, ln := range pullTagLines(t, rendered) {
-		if !strings.Contains(ln, "ghcr.io/kidcarmi/culvert@sha256") {
-			t.Errorf("default repo not substituted verbatim in rendered sudoers line:\n  %s", ln)
-		}
+	for _, ln := range renderedSudoersLines(t, rendered) {
 		if strings.Contains(ln, `ghcr.io\`) {
 			t.Errorf("no-port repo should carry no backslash escape (over-escaping):\n  %s", ln)
 		}

@@ -2,21 +2,25 @@ package runner
 
 // wrapper_test.go runs the REAL privileged wrapper
 // (packaging/culvert-maint/compose-cli) that the sudoers file grants for
-// every variable-argument compose `cli` operation. It is the argument
-// boundary that replaced the sudoers wildcards sudo-rs rejects, so these
-// tests pin both directions:
+// every variable-argument compose `cli` operation and for the upgrade path's
+// container inspect, pinned pull and retag. It is the argument boundary that
+// replaced the sudoers wildcards sudo-rs rejects and the `[0-9a-f]` /
+// escaped-space patterns sudo-rs never matches, so these tests pin both
+// directions:
 //
 //   - every argv the runner emits in privilege_mode=sudoers is ACCEPTED,
 //     and the wrapper execs byte-for-byte the docker argv the runner would
 //     run without sudo (the runner and the wrapper cannot drift apart);
 //   - every other shape is REFUSED (exit 64) before docker runs: paths
 //     outside /backup, traversal, extra or reordered flags, non-numeric or
-//     out-of-range counts and durations, shell metacharacters, newlines.
+//     out-of-range counts and durations, shell metacharacters, newlines,
+//     container ids that are not 12..64 lowercase hex, and image refs that
+//     are not <proxy_repo>@sha256:<64 lowercase hex>.
 //
-// The wrapper under test is the shipped template with exactly two lines
-// rewritten by the harness: the compose-path placeholder (as install.sh
-// renders it) and DOCKER_BIN, pointed at the argv-printing fake from
-// runner_test.go. The wrapper has no test mode or environment override; the
+// The wrapper under test is the shipped template with exactly three lines
+// rewritten by the harness: the compose-path and proxy-repo placeholders (as
+// install.sh renders them) and DOCKER_BIN, pointed at the argv-printing fake
+// from runner_test.go. The wrapper has no test mode or environment override; the
 // installed copy cannot be redirected at run time.
 
 import (
@@ -33,9 +37,20 @@ import (
 const (
 	wrapperTemplateRel     = "packaging/culvert-maint/compose-cli"
 	wrapperComposePathLine = "COMPOSE_PATH='{compose_path}'"
+	wrapperProxyRepoLine   = "PROXY_REPO='{proxy_repo}'"
 	wrapperDockerBinLine   = "DOCKER_BIN=/usr/bin/docker"
 	wrapperTestComposePath = "/srv/culvert/docker-compose.yml"
+	// A registry with a port, as the day-2 e2e binds: the ':' must be an
+	// ordinary literal inside the wrapper (it is sudoers-escaped nowhere).
+	wrapperTestProxyRepo   = "127.0.0.1:5000/culvert"
 	wrapperRefusedExitCode = 64
+)
+
+// Fixed hex fixtures for the upgrade-path subcommands.
+var (
+	wrapperDigestA = strings.Repeat("0123456789abcdef", 4)
+	wrapperDigestB = strings.Repeat("f", 64)
+	wrapperRefA    = wrapperTestProxyRepo + "@sha256:" + wrapperDigestA
 )
 
 // findRepoFile walks up from the test's working directory to the first
@@ -91,12 +106,16 @@ func replaceExactlyOneLine(t *testing.T, src, old, repl string) string {
 }
 
 // writeWrapper renders the template for the harness and writes it to a temp
-// file. renderComposePath=false leaves the compose path unrendered.
-func writeWrapper(t *testing.T, dockerBin string, renderComposePath bool) string {
+// file. renderComposePath / renderProxyRepo = false leave that placeholder
+// unrendered.
+func writeWrapper(t *testing.T, dockerBin string, renderComposePath, renderProxyRepo bool) string {
 	t.Helper()
 	src := readWrapperTemplate(t)
 	if renderComposePath {
 		src = replaceExactlyOneLine(t, src, wrapperComposePathLine, "COMPOSE_PATH='"+wrapperTestComposePath+"'")
+	}
+	if renderProxyRepo {
+		src = replaceExactlyOneLine(t, src, wrapperProxyRepoLine, "PROXY_REPO='"+wrapperTestProxyRepo+"'")
 	}
 	src = replaceExactlyOneLine(t, src, wrapperDockerBinLine, "DOCKER_BIN="+dockerBin)
 	path := filepath.Join(t.TempDir(), "compose-cli")
@@ -150,7 +169,7 @@ func newWrapperHarness(t *testing.T) *wrapperHarness {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return &wrapperHarness{wrapper: writeWrapper(t, fake, true), fake: fake, exec: r, shells: shells}
+	return &wrapperHarness{wrapper: writeWrapper(t, fake, true, true), fake: fake, exec: r, shells: shells}
 }
 
 // wrapperRun is one wrapper invocation's observable outcome.
@@ -216,8 +235,10 @@ type runnerCall struct {
 
 // everyWrapperRoutedCall enumerates every argv shape the runner can send to
 // the wrapper: both backups, all 3 modes × 4 flag sets × {dryrun, commit}
-// restores (the 24 combinations the old sudoers file enumerated), and the
-// cleanup dryrun/commit across representative durations and counts.
+// restores (the 24 combinations the old sudoers file enumerated), the
+// cleanup dryrun/commit across representative durations and counts, and the
+// upgrade path's container inspect (shortest, a middle and the longest id
+// length), pinned pull and retag.
 func everyWrapperRoutedCall() []runnerCall {
 	ctx := context.Background()
 	calls := []runnerCall{
@@ -246,6 +267,22 @@ func everyWrapperRoutedCall() []runnerCall {
 				}},
 			)
 		}
+	}
+	for _, cid := range []string{"abcdef012345", "0123456789abc", strings.Repeat("a1", 20), wrapperDigestA} {
+		calls = append(calls, runnerCall{"inspect-image/" + cid, false, func(r *Runner) (*Result, error) {
+			return r.ComposeContainerInspect(ctx, cid)
+		}})
+	}
+	for _, digest := range []string{wrapperDigestA, wrapperDigestB} {
+		ref := wrapperTestProxyRepo + "@sha256:" + digest
+		calls = append(calls,
+			runnerCall{"pull/" + digest, false, func(r *Runner) (*Result, error) {
+				return r.ComposePullDigest(ctx, ref)
+			}},
+			runnerCall{"tag/" + digest, false, func(r *Runner) (*Result, error) {
+				return r.ComposeTagPinned(ctx, ref)
+			}},
+		)
 	}
 	return calls
 }
@@ -282,6 +319,7 @@ func captureArgv(t *testing.T, useSudo bool, c runnerCall) []string {
 		DockerBinary:      "/usr/bin/docker",
 		UseSudo:           useSudo,
 		SudoBinary:        "sudo",
+		ProxyRepo:         wrapperTestProxyRepo,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -305,8 +343,8 @@ func captureArgv(t *testing.T, useSudo bool, c runnerCall) []string {
 func TestWrapper_AcceptsEveryRunnerArgvAndExecsTheDockerForm(t *testing.T) {
 	h := newWrapperHarness(t)
 	calls := everyWrapperRoutedCall()
-	if got := len(calls); got != 2+24+11*6*2 {
-		t.Fatalf("expected 158 wrapper-routed calls, enumerated %d", got)
+	if got := len(calls); got != 2+24+11*6*2+4+2*2 {
+		t.Fatalf("expected 166 wrapper-routed calls, enumerated %d", got)
 	}
 	for _, c := range calls {
 		sudoArgv := captureArgv(t, true, c)
@@ -347,6 +385,9 @@ func TestWrapper_PassphraseForwardedOnlyWhereTheOldAliasKeptIt(t *testing.T) {
 		{[]string{"backup", "/backup/a.tar.gz"}, false},
 		{[]string{"cleanup", "--older-than", "168h", "--keep-last", "2"}, false},
 		{[]string{"cleanup", "--older-than", "168h", "--keep-last", "2", "--confirm"}, false},
+		{[]string{"inspect-image", "abcdef012345"}, false},
+		{[]string{"pull", wrapperRefA}, false},
+		{[]string{"tag", wrapperRefA, pinnedProxyTag}, false},
 	}
 	for _, c := range cases {
 		got := h.run(t, h.wrapper, c.args, overlay)
@@ -464,6 +505,9 @@ func TestWrapper_RefusesEverythingElse(t *testing.T) {
 	for _, d := range wrapperRejectedDurations {
 		cases["older-than "+d] = []string{"cleanup", "--older-than", d, "--keep-last", "1"}
 	}
+	for name, args := range wrapperRejectedUpgradeArgv() {
+		cases[name] = args
+	}
 
 	for name, args := range cases {
 		got := h.run(t, h.wrapper, args, map[string]string{EnvCulvertBackupPassphrase: "pw"})
@@ -479,6 +523,106 @@ func TestWrapper_RefusesEverythingElse(t *testing.T) {
 			}
 		}
 	}
+}
+
+// wrapperRejectedUpgradeArgv are inspect-image / pull / tag shapes the wrapper
+// must refuse: ids that are not 12..64 lowercase hex, refs that are not
+// exactly <proxy_repo>@sha256:<64 lowercase hex> (another repo, a lookalike
+// repo, a tag, a short/long/uppercase digest), a retag to anything but the
+// pinned tag, wrong arity, and shell metacharacters.
+func wrapperRejectedUpgradeArgv() map[string][]string {
+	d := wrapperDigestA
+	repo := wrapperTestProxyRepo
+	cases := map[string][]string{
+		// inspect-image: arity
+		"inspect no id":           {"inspect-image"},
+		"inspect two ids":         {"inspect-image", "abcdef012345", "abcdef012346"},
+		"inspect extra format":    {"inspect-image", "abcdef012345", "--format", "{{json .Config.Env}}"},
+		"inspect format first":    {"inspect-image", "--format", "{{json .Config.Env}}", "abcdef012345"},
+		"inspect format injected": {"inspect-image", "--format={{json .Config.Env}}"},
+		// inspect-image: id shape
+		"inspect empty id":       {"inspect-image", ""},
+		"inspect 11 hex":         {"inspect-image", "abcdef01234"},
+		"inspect 65 hex":         {"inspect-image", d + "a"},
+		"inspect uppercase":      {"inspect-image", "ABCDEF012345"},
+		"inspect mixed case":     {"inspect-image", "abcdeF012345"},
+		"inspect non-hex":        {"inspect-image", "abcdefg12345"},
+		"inspect container name": {"inspect-image", "culvert-proxy"},
+		"inspect leading dash":   {"inspect-image", "-abcdef012345"},
+		"inspect image id form":  {"inspect-image", "sha256:" + d},
+		"inspect space":          {"inspect-image", "abcdef 012345"},
+		"inspect newline":        {"inspect-image", "abcdef012345\n"},
+		"inspect semicolon":      {"inspect-image", "abcdef012345;id"},
+		"inspect subst":          {"inspect-image", "$(id)abcdef012345"},
+		"inspect glob":           {"inspect-image", "abcdef01234*"},
+		"inspect non-ascii":      {"inspect-image", "abcdef01234١"},
+
+		// pull: arity
+		"pull no ref":        {"pull"},
+		"pull extra arg":     {"pull", repo + "@sha256:" + d, "--all-tags"},
+		"pull platform flag": {"pull", "--platform", "linux/amd64", repo + "@sha256:" + d},
+		"pull two refs":      {"pull", repo + "@sha256:" + d, repo + "@sha256:" + wrapperDigestB},
+		// pull: wrong repository
+		"pull other repo":         {"pull", "ghcr.io/kidcarmi/culvert@sha256:" + d},
+		"pull lookalike suffix":   {"pull", repo + "x@sha256:" + d},
+		"pull lookalike subpath":  {"pull", repo + "/evil@sha256:" + d},
+		"pull lookalike prefix":   {"pull", "x" + repo + "@sha256:" + d},
+		"pull registry only":      {"pull", "127.0.0.1:5000@sha256:" + d},
+		"pull repo case":          {"pull", "127.0.0.1:5000/CULVERT@sha256:" + d},
+		"pull docker.io implicit": {"pull", "culvert@sha256:" + d},
+		// pull: a tag or a malformed digest
+		"pull tag":                  {"pull", repo + ":latest"},
+		"pull tag and digest":       {"pull", repo + ":v1@sha256:" + d},
+		"pull bare repo":            {"pull", repo},
+		"pull empty":                {"pull", ""},
+		"pull no algorithm":         {"pull", repo + "@" + d},
+		"pull sha512":               {"pull", repo + "@sha512:" + d + d},
+		"pull uppercase algorithm":  {"pull", repo + "@SHA256:" + d},
+		"pull 63 hex":               {"pull", repo + "@sha256:" + d[:63]},
+		"pull 65 hex":               {"pull", repo + "@sha256:" + d + "0"},
+		"pull uppercase digest":     {"pull", repo + "@sha256:" + strings.ToUpper(d)},
+		"pull non-hex digest":       {"pull", repo + "@sha256:" + d[:63] + "g"},
+		"pull digest then tag":      {"pull", repo + "@sha256:" + d + ":latest"},
+		"pull double digest":        {"pull", repo + "@sha256:" + d + "@sha256:" + d},
+		"pull trailing newline":     {"pull", repo + "@sha256:" + d + "\n"},
+		"pull leading space":        {"pull", " " + repo + "@sha256:" + d},
+		"pull semicolon":            {"pull", repo + "@sha256:" + d + ";id"},
+		"pull subst":                {"pull", repo + "@sha256:$(id)"},
+		"pull glob digest":          {"pull", repo + "@sha256:*"},
+		"pull glob digest suffix":   {"pull", repo + "@sha256:" + d[:63] + "?"},
+		"pull glob class":           {"pull", repo + "@sha256:" + d[:63] + "[a]"},
+		"pull option injection":     {"pull", "--quiet"},
+		"pull placeholder repo ref": {"pull", "{proxy_repo}@sha256:" + d},
+
+		// tag: arity and destination
+		"tag no args":           {"tag"},
+		"tag source only":       {"tag", repo + "@sha256:" + d},
+		"tag three args":        {"tag", repo + "@sha256:" + d, pinnedProxyTag, "extra"},
+		"tag other destination": {"tag", repo + "@sha256:" + d, "culvert/proxy:latest"},
+		"tag other repo dest":   {"tag", repo + "@sha256:" + d, "evil/proxy:pinned"},
+		"tag registry dest":     {"tag", repo + "@sha256:" + d, repo + ":pinned"},
+		"tag dest trailing sp":  {"tag", repo + "@sha256:" + d, pinnedProxyTag + " "},
+		"tag dest newline":      {"tag", repo + "@sha256:" + d, pinnedProxyTag + "\n"},
+		"tag swapped":           {"tag", pinnedProxyTag, repo + "@sha256:" + d},
+		"tag force flag":        {"tag", "-f", repo + "@sha256:" + d, pinnedProxyTag},
+		// tag: source must be a repo-bound digest
+		"tag source tag":          {"tag", repo + ":latest", pinnedProxyTag},
+		"tag source other repo":   {"tag", "ghcr.io/kidcarmi/culvert@sha256:" + d, pinnedProxyTag},
+		"tag source lookalike":    {"tag", repo + "x@sha256:" + d, pinnedProxyTag},
+		"tag source short digest": {"tag", repo + "@sha256:" + d[:12], pinnedProxyTag},
+		"tag source uppercase":    {"tag", repo + "@sha256:" + strings.ToUpper(d), pinnedProxyTag},
+		"tag source image id":     {"tag", "sha256:" + d, pinnedProxyTag},
+		"tag source subst":        {"tag", repo + "@sha256:" + d[:60] + "$(x)", pinnedProxyTag},
+
+		// casing / spelling of the subcommands themselves
+		"inspect spelled docker":   {"inspect", "abcdef012345"},
+		"inspect uppercase cmd":    {"INSPECT-IMAGE", "abcdef012345"},
+		"image pull spelled":       {"image", "pull", repo + "@sha256:" + d},
+		"pull uppercase cmd":       {"PULL", repo + "@sha256:" + d},
+		"manifest not routed":      {"manifest", "inspect", "--verbose", repo + "@sha256:" + d},
+		"image inspect not routed": {"image-inspect", repo + "@sha256:" + d},
+	}
+	return cases
 }
 
 // wrapperRejectedDurations are --older-than values the wrapper must refuse:
@@ -529,13 +673,60 @@ func TestWrapper_DurationVerdictIsNeverLooserThanTheAgent(t *testing.T) {
 }
 
 // TestWrapper_UnrenderedTemplateRefuses proves the shipped template cannot
-// reach docker before install.sh renders the compose path.
+// reach docker before install.sh renders BOTH placeholders: not for a backup,
+// and not for a pull whose ref spells the literal placeholder (which an
+// unchecked `{proxy_repo}` would otherwise match).
 func TestWrapper_UnrenderedTemplateRefuses(t *testing.T) {
 	h := newWrapperHarness(t)
-	raw := writeWrapper(t, h.fake, false)
-	got := h.run(t, raw, []string{"backup", "/backup/a.tar.gz"}, nil)
-	if got.ran || got.exitCode != wrapperRefusedExitCode {
-		t.Errorf("unrendered wrapper must refuse (exit %d) without running docker; got exit %d ran=%v", wrapperRefusedExitCode, got.exitCode, got.ran)
+	for _, tc := range []struct {
+		name              string
+		composePath, repo bool
+		args              []string
+	}{
+		{"nothing rendered", false, false, []string{"backup", "/backup/a.tar.gz"}},
+		{"compose path unrendered", false, true, []string{"backup", "/backup/a.tar.gz"}},
+		{"proxy repo unrendered (backup)", true, false, []string{"backup", "/backup/a.tar.gz"}},
+		{"proxy repo unrendered (pull)", true, false, []string{"pull", "{proxy_repo}@sha256:" + wrapperDigestA}},
+		{"proxy repo unrendered (tag)", true, false, []string{"tag", "{proxy_repo}@sha256:" + wrapperDigestA, pinnedProxyTag}},
+		{"proxy repo unrendered (inspect)", true, false, []string{"inspect-image", "abcdef012345"}},
+	} {
+		raw := writeWrapper(t, h.fake, tc.composePath, tc.repo)
+		got := h.run(t, raw, tc.args, nil)
+		if got.ran || got.exitCode != wrapperRefusedExitCode {
+			t.Errorf("%s: unrendered wrapper must refuse (exit %d) without running docker; got exit %d ran=%v", tc.name, wrapperRefusedExitCode, got.exitCode, got.ran)
+		}
+	}
+}
+
+// TestWrapper_PinnedPullTagRepoIsLiteral renders the wrapper with proxy
+// repos full of characters a glob or regex would treat specially and proves
+// the repo is compared byte-for-byte: the exact repo passes, a ref that the
+// repo would match only as a pattern is refused.
+func TestWrapper_PinnedPullTagRepoIsLiteral(t *testing.T) {
+	h := newWrapperHarness(t)
+	src := readWrapperTemplate(t)
+	for _, tc := range []struct {
+		repo, lookalike string
+	}{
+		{"registry.example.com/culvert", "registryXexample.com/culvert"},
+		{"127.0.0.1:5000/culvert", "127A0B0C1:5000/culvert"},
+		{"reg.io/a.b-c_d/culvert", "reg.io/aXb-c_d/culvert"},
+	} {
+		rendered := replaceExactlyOneLine(t, src, wrapperComposePathLine, "COMPOSE_PATH='"+wrapperTestComposePath+"'")
+		rendered = replaceExactlyOneLine(t, rendered, wrapperProxyRepoLine, "PROXY_REPO='"+tc.repo+"'")
+		rendered = replaceExactlyOneLine(t, rendered, wrapperDockerBinLine, "DOCKER_BIN="+h.fake)
+		path := filepath.Join(t.TempDir(), "compose-cli")
+		if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		good := tc.repo + "@sha256:" + wrapperDigestA
+		if got := h.run(t, path, []string{"pull", good}, nil); got.exitCode != 0 || !reflect.DeepEqual(got.argv, []string{h.fake, "pull", good}) {
+			t.Errorf("%s: exact repo refused or mangled (exit %d): %q %s", tc.repo, got.exitCode, got.argv, got.stderr)
+		}
+		bad := tc.lookalike + "@sha256:" + wrapperDigestA
+		if got := h.run(t, path, []string{"pull", bad}, nil); got.ran || got.exitCode != wrapperRefusedExitCode {
+			t.Errorf("%s: lookalike repo %q was not refused (exit %d)", tc.repo, tc.lookalike, got.exitCode)
+		}
 	}
 }
 
@@ -552,8 +743,10 @@ func TestWrapper_SourceHardening(t *testing.T) {
 		"\nexport PATH\n",
 		"\nLC_ALL=C\n",
 		"\n" + wrapperComposePathLine + "\n",
+		"\n" + wrapperProxyRepoLine + "\n",
+		"\nPINNED_TAG=" + pinnedProxyTag + "\n",
 		"\n" + wrapperDockerBinLine + "\n",
-		"\nreadonly COMPOSE_PATH DOCKER_BIN\n",
+		"\nreadonly COMPOSE_PATH PROXY_REPO PINNED_TAG DOCKER_BIN\n",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("wrapper source missing %q", strings.TrimSpace(want))
@@ -568,10 +761,31 @@ func TestWrapper_SourceHardening(t *testing.T) {
 	if n := strings.Count(src, "{compose_path}"); n != 1 {
 		t.Errorf("the compose-path placeholder must appear exactly once (install.sh renders every occurrence), found %d", n)
 	}
+	if n := strings.Count(src, "{proxy_repo}"); n != 1 {
+		t.Errorf("the proxy-repo placeholder must appear exactly once (install.sh renders every occurrence), found %d", n)
+	}
+	// Every exec is either the fixed docker compose cli prefix or one of the
+	// three exact upgrade-path commands.
+	upgradeExecs := map[string]bool{
+		`exec "$DOCKER_BIN" inspect --format '{{json .Image}}' "$1"`: true,
+		`exec "$DOCKER_BIN" pull "$1"`:                               true,
+		`exec "$DOCKER_BIN" tag "$1" "$PINNED_TAG"`:                  true,
+	}
+	seenUpgrade := 0
 	for _, ln := range strings.Split(code, "\n") {
-		if strings.Contains(ln, "exec ") && !strings.Contains(ln, `exec "$DOCKER_BIN" compose -f "$COMPOSE_PATH" --profile cli run --rm`) {
-			t.Errorf("every exec must be the fixed docker compose cli prefix, got: %s", strings.TrimSpace(ln))
+		if !strings.Contains(ln, "exec ") {
+			continue
 		}
+		if upgradeExecs[strings.TrimSpace(ln)] {
+			seenUpgrade++
+			continue
+		}
+		if !strings.Contains(ln, `exec "$DOCKER_BIN" compose -f "$COMPOSE_PATH" --profile cli run --rm`) {
+			t.Errorf("every exec must be the fixed docker compose cli prefix or an exact upgrade command, got: %s", strings.TrimSpace(ln))
+		}
+	}
+	if seenUpgrade != len(upgradeExecs) {
+		t.Errorf("expected each of the %d upgrade-path execs exactly once, found %d", len(upgradeExecs), seenUpgrade)
 	}
 }
 

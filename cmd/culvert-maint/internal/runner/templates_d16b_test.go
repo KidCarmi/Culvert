@@ -541,6 +541,9 @@ func TestWrapperRoutedTemplatesShareOneArgumentlessSudoersLine(t *testing.T) {
 		TemplateComposeCLIRestoreCommit:     true,
 		TemplateComposeCLICleanupDryRun:     true,
 		TemplateComposeCLICleanupCommit:     true,
+		TemplateComposeContainerInspect:     true,
+		TemplateImagePullDigest:             true,
+		TemplateImageTagPinned:              true,
 	}
 	for _, tmpl := range Registry() {
 		if routed[tmpl.ID] {

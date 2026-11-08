@@ -181,7 +181,22 @@ func sudoersCommandSpecs(t *testing.T, content string) []string {
 // whitespace, drop a SOLE trailing `*` (the "any further arguments"
 // form), and reject the spec if any remaining argument contains `*` or
 // `?`. Returns "" when the spec is acceptable.
+//
+// It ALSO rejects the two argument shapes sudo-rs parses but can never
+// match, because sudo-rs compares command arguments literally:
+//
+//   - a glob character class (`[0-9a-f]`): classic sudo's fnmatch reads it
+//     as "one hex digit", sudo-rs as the five literal characters, so the
+//     rule silently never matches and `sudo -n` refuses;
+//   - a backslash-escaped space (`{{json\ .Image}}`): classic sudo keeps it
+//     as one argument containing a space, sudo-rs splits it into two, so
+//     the argument count never matches.
+//
+// visudo accepts both under sudo-rs, so only this static rule catches them.
 func sudoRsArgWildcardError(spec string) string {
+	if strings.Contains(spec, `\ `) {
+		return "backslash-escaped space in a command argument (sudo-rs splits it into two arguments, so the rule never matches)"
+	}
 	fields := strings.Fields(spec)
 	if len(fields) < 2 {
 		return ""
@@ -193,6 +208,9 @@ func sudoRsArgWildcardError(spec string) string {
 	for _, a := range args {
 		if strings.ContainsAny(a, "*?") {
 			return "wildcards are not allowed in command arguments: " + a
+		}
+		if strings.ContainsAny(a, "[]") {
+			return "glob character class in a command argument (sudo-rs matches it literally, so the rule never matches): " + a
 		}
 	}
 	return ""
@@ -234,6 +252,12 @@ func TestSudoers_NoWildcardInCommandArguments(t *testing.T) {
 		"/usr/bin/docker compose -f /srv/c.yml --profile cli run --rm cli --restore /backup/* --mode full",
 		"/usr/bin/docker compose -f /srv/c.yml --profile cli run --rm cli --older-than * --keep-last *",
 		"/usr/bin/docker image inspect a?b",
+		// Parse under sudo-rs but never match there (see sudoRsArgWildcardError).
+		`/usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]`,
+		`/usr/bin/docker inspect --format {{json\ .Image}} abcdef012345`,
+		`/usr/bin/docker pull ghcr.io/kidcarmi/culvert@sha256\:[0-9a-f]`,
+		`/usr/bin/docker tag ghcr.io/kidcarmi/culvert@sha256\:[[:xdigit:]] culvert/proxy\:pinned`,
+		"/usr/bin/docker image inspect [abc]",
 	} {
 		if sudoRsArgWildcardError(bad) == "" {
 			t.Errorf("negative control not caught: %q", bad)
@@ -243,6 +267,8 @@ func TestSudoers_NoWildcardInCommandArguments(t *testing.T) {
 		"/usr/bin/docker image inspect *",
 		ComposeCLIWrapperPath,
 		"/usr/bin/docker compose -f /srv/c.yml down",
+		// An escaped colon is ordinary sudoers quoting, not a space or a class.
+		`/usr/bin/docker compose -f /srv/a\:b/c.yml ps --format json`,
 	} {
 		if msg := sudoRsArgWildcardError(good); msg != "" {
 			t.Errorf("positive control rejected (%s): %q", msg, good)
@@ -296,10 +322,11 @@ func TestSudoers_EnvKeepIsCommandScoped(t *testing.T) {
 	}
 
 	// The passphrase alias must scope to the compose-cli wrapper ONLY —
-	// never a docker command directly (in particular not the pull/tag/up
-	// image-selection commands). The wrapper is the sole consumer: it
+	// never a docker command directly (in particular not the up
+	// image-selection command). The wrapper is the sole consumer: it
 	// forwards the var with `-e` for backup-encrypted/restore and unsets
-	// it for backup/cleanup (pinned by wrapper_test.go).
+	// it for backup/cleanup/inspect-image/pull/tag (pinned by
+	// wrapper_test.go).
 	passAlias := aliasBody(content, "CULVERT_MAINT_PASSPHRASE_CMNDS")
 	wantAlias := "Cmnd_Alias CULVERT_MAINT_PASSPHRASE_CMNDS = " + ComposeCLIWrapperPath
 	if normalize(passAlias) != wantAlias {
@@ -310,28 +337,48 @@ func TestSudoers_EnvKeepIsCommandScoped(t *testing.T) {
 	}
 }
 
-// TestSudoers_ImagePullTagAreRepoBound asserts the P1.4 boundary: the pull
-// and tag entries bind a repo LITERAL ({proxy_repo}, no wildcard) + an exact
-// 64-class hex digest, and the tag destination is the fixed pinned tag.
+// TestSudoers_ImagePullTagAreRepoBound asserts the P1.4 boundary after the
+// sudo-rs move: NO direct `docker pull`, `docker tag` or `docker inspect`
+// rule may remain in the sudoers file (sudo-rs could never match the old
+// `[0-9a-f]` patterns, and a looser direct rule would let a direct sudo call
+// pull or retag an arbitrary image). The repo binding lives in the
+// compose-cli wrapper instead: it carries the {proxy_repo} placeholder
+// exactly once, as the single-quoted PROXY_REPO literal install.sh renders,
+// and the fixed culvert/proxy:pinned retag destination. The wrapper's
+// runtime validation is pinned by TestWrapper_PinnedPullTag* (wrapper_test.go).
 func TestSudoers_ImagePullTagAreRepoBound(t *testing.T) {
 	data, err := os.ReadFile(findSudoersFile(t)) //nolint:gosec // test reads packaging file by computed path
 	if err != nil {
 		t.Fatalf("read sudoers: %v", err)
 	}
-	// Colons are escaped (`\:`) for sudoers grammar.
-	digest := `{proxy_repo}@sha256\:` + strings.Repeat("[0-9a-f]", 64)
-	wantPull := "/usr/bin/docker pull " + digest
-	wantTag := "/usr/bin/docker tag " + digest + ` culvert/proxy\:pinned`
+	for _, spec := range sudoersCommandSpecs(t, string(data)) {
+		for _, banned := range []string{"/usr/bin/docker pull", "/usr/bin/docker tag", "/usr/bin/docker inspect"} {
+			if spec == banned || strings.HasPrefix(spec, banned+" ") {
+				t.Errorf("direct %q rule must not exist (it runs through the compose-cli wrapper):\n  %s", banned, spec)
+			}
+		}
+	}
+	// The sudoers template must not carry the {proxy_repo} placeholder at
+	// all, not even in a comment: install.sh substitutes it on every line,
+	// so a rendered comment would look like a repo-bound rule to anything
+	// that greps the installed file for "<repo>@sha256".
+	if strings.Contains(string(data), "{proxy_repo}") {
+		t.Errorf("sudoers template must not contain {proxy_repo} (the repo binding lives in the compose-cli wrapper)")
+	}
 	content := normalize(string(data))
-	if !strings.Contains(content, normalize(wantPull)) {
-		t.Errorf("sudoers missing repo-bound pull entry:\n  %s", wantPull)
-	}
-	if !strings.Contains(content, normalize(wantTag)) {
-		t.Errorf("sudoers missing repo-bound tag→pinned entry:\n  %s", wantTag)
-	}
 	// No `docker compose pull proxy` (the old env-selected path) may remain.
 	if strings.Contains(content, "compose -f {compose_path} pull proxy") {
 		t.Errorf("the old `docker compose pull proxy` entry must be removed (P1.4)")
+	}
+
+	wrapper := readWrapperTemplate(t)
+	if n := strings.Count(wrapper, "{proxy_repo}"); n != 1 {
+		t.Errorf("the wrapper must carry the {proxy_repo} placeholder exactly once (install.sh renders every occurrence), found %d", n)
+	}
+	for _, want := range []string{"\n" + wrapperProxyRepoLine + "\n", "\nPINNED_TAG=" + pinnedProxyTag + "\n"} {
+		if !strings.Contains(wrapper, want) {
+			t.Errorf("wrapper source missing %q", strings.TrimSpace(want))
+		}
 	}
 }
 

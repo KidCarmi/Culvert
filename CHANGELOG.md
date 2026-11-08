@@ -59,12 +59,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the agent rejects. `install_script_maint_compose_cli_wrapper_test.go`
   renders the wrapper with compose paths containing `$( )`, backticks,
   backslashes, `&`, `;`, `:` and `,`, and requires docker to receive the path
-  byte-for-byte. **Known follow-up, not changed here:** sudo-rs compares
-  arguments literally. The `[0-9a-f]`-class container-inspect and pinned
-  pull/tag entries, and the backslash-escaped space in `{{json\ .Image}}`, are
-  valid there but never match, so upgrade capture/apply through sudoers fails
-  closed ("a password is required") on sudo-rs hosts. They still work under
-  classic sudo.
+  byte-for-byte. **The upgrade path moved behind the same wrapper.** sudo-rs
+  also compares arguments literally, so the 53 enumerated
+  `docker inspect --format {{json\ .Image}} [0-9a-f]…` rules (one per
+  container-id length) and the digest-pinned
+  `docker pull`/`docker tag {proxy_repo}@sha256\:[0-9a-f]…` pair parsed but
+  never matched there: `[0-9a-f]` is five literal characters, and the
+  backslash-escaped space splits `{{json .Image}}` into two arguments. The
+  upgrade's capture, verify and pull were refused ("I'm afraid I can't do
+  that") on every sudo-rs host. Those 55 rules are removed, and the wrapper
+  gains three subcommands. `inspect-image <id>` accepts exactly one 12..64
+  lowercase-hex container id (the agent's own bound; `docker compose ps`
+  reports the 12-character short id) and execs
+  `docker inspect --format '{{json .Image}}' <id>`, so nothing can follow the
+  id and `--format` stays fixed. `pull <ref>` and
+  `tag <ref> culvert/proxy:pinned` accept only `<proxy_repo>@sha256:<64
+  lowercase hex>`, where `proxy_repo` is rendered into the wrapper by
+  install.sh and compared byte-for-byte. A tag, another or lookalike repo, a
+  digest of the wrong length or case, or a retag to any other destination is
+  refused. All three unset `CULVERT_BACKUP_PASSPHRASE`. install.sh refuses to
+  render a `proxy_repo` outside the agent's own shape (1..255 bytes,
+  alphanumeric first, then `[A-Za-z0-9._/:-]`). The runner calls
+  `sudo -n … compose-cli inspect-image|pull|tag` in sudo mode; the
+  `docker_group_lab` argv is unchanged. `TestSudoers_NoWildcardInCommandArguments`
+  now also flags glob character classes and backslash-escaped spaces in
+  arguments: it flagged exactly those 55 entries before this change. The
+  wrapper suite now covers 166 runner-emitted argvs and more than 200 refused
+  shapes. The install-lifecycle e2e verify-stage step now asserts that
+  `sudo -n /usr/local/libexec/culvert-maint/compose-cli inspect-image <id>`
+  escalates and returns the image config digest.
 
 - **The DPI engine's new saturation lead indicator fired at no load on a
   single-vCPU node, and a status-map comment named the wrong trust boundary.**

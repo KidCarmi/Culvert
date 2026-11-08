@@ -24,8 +24,10 @@
 #   (dryrun/commit). Every variable-argument cli operation goes through
 #   the root-owned compose-cli wrapper (see below).
 # Upgrade check scope: read-only image inspect + manifest inspect for
-#   the upgrade-availability check. NO pull, upgrade apply, or rollback
-#   yet — those land with their own handlers + entries.
+#   the upgrade-availability check (direct rules, sole trailing `*`).
+# Upgrade apply / rollback scope: running-container inspect, digest-pinned
+#   pull and retag to culvert/proxy:pinned, all through the compose-cli
+#   wrapper (see the section at the end of this file).
 #
 # Operator install steps:
 #   The recommended path is to run packaging/culvert-maint/install.sh,
@@ -57,9 +59,15 @@
 # (cmd/culvert-maint/internal/runner/parity_test.go) enforces that rule so
 # a regression fails on any runner image, not only on a sudo-rs host.
 #
+# The same file must also carry NO glob character class (`[0-9a-f]`) and
+# NO backslash-escaped space in an argument: sudo-rs parses both but compares
+# arguments literally, so such a rule silently never matches (the same test
+# flags them).
+#
 # The compose `cli` operations whose arguments vary per call (backup
-# encrypted/unencrypted, restore dryrun/commit, cleanup dryrun/commit) are
-# therefore NOT allowlisted as `docker compose … /backup/*` patterns any
+# encrypted/unencrypted, restore dryrun/commit, cleanup dryrun/commit) and the
+# upgrade path's container inspect, pinned pull and retag are therefore NOT
+# allowlisted as `docker compose … /backup/*` or `[0-9a-f]` patterns any
 # more. They are granted as ONE exact, argument-less rule for the
 # root-owned wrapper /usr/local/libexec/culvert-maint/compose-cli
 # (packaging/culvert-maint/compose-cli, rendered and installed root:root
@@ -67,8 +75,9 @@
 # exactly the argv the agent emits (a /backup/<name> path with the agent's
 # filename rules, the 3 restore modes × 4 flag sets × {dryrun, commit} in
 # canonical order, an --older-than duration of 1h..8760h, a --keep-last of
-# 0..100) and execs the same `docker compose` command these rules used to
-# match. That is TIGHTER than the old wildcards: classic sudo's `*` matches
+# 0..100, a 12..64 lowercase-hex container id, a
+# <proxy_repo>@sha256:<64 hex> reference) and execs the same docker command
+# these rules used to match. That is TIGHTER than the old wildcards: classic sudo's `*` matches
 # any characters including spaces, so `/backup/*` also admitted traversal
 # (`/backup/../x`) and extra appended flags.
 #
@@ -95,13 +104,14 @@
 # The remaining var is preserved with a COMMAND-SCOPED `Defaults!<alias>`
 # rather than a blanket `Defaults:culvert-maint env_keep` — least privilege:
 # it crosses the sudo boundary ONLY for the command that consumes it, and is
-# stripped for every other allowed command (ps, list-backups, image/manifest/
-# container inspect, pull, tag, up, down, …):
+# stripped for every other allowed command (ps, list-backups, image/manifest
+# inspect, up, down, …):
 #   - CULVERT_BACKUP_PASSPHRASE — reaches the cli container via `-e` for
 #                                encrypted backup/restore. Preserved ONLY
 #                                for the compose-cli wrapper, which itself
 #                                UNSETS it for the subcommands that must not
-#                                carry it (unencrypted `backup`, `cleanup`)
+#                                carry it (unencrypted `backup`, `cleanup`,
+#                                `inspect-image`, `pull`, `tag`)
 #                                and forwards it with `-e` only for
 #                                `backup-encrypted` and `restore` — the same
 #                                two docker commands the old per-command
@@ -113,8 +123,9 @@
 #
 # P1.4 (D1.6c-pin-value-binding-plan.md): CULVERT_PROXY_IMAGE and its
 # env_keep are GONE. The proxy image is no longer selected by an env var;
-# it is bound at THIS boundary by the repo-literal `docker pull` + retag
-# entries below, so a direct sudo can no longer choose an arbitrary image.
+# it is bound at THIS boundary by the compose-cli wrapper's repo-literal
+# `pull` + `tag` subcommands, so a direct sudo can no longer choose an
+# arbitrary image.
 Cmnd_Alias CULVERT_MAINT_PASSPHRASE_CMNDS = /usr/local/libexec/culvert-maint/compose-cli
 Defaults!CULVERT_MAINT_PASSPHRASE_CMNDS env_keep += "CULVERT_BACKUP_PASSPHRASE"
 
@@ -141,6 +152,8 @@ culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} --p
 #       file used to enumerate; flags only in that canonical order)
 #   cleanup --older-than <1h..8760h> --keep-last <0..100> [--confirm]
 #     → … --profile cli run --rm cli --cleanup-restore-leftovers --older-than <d> --keep-last <n> [--confirm]
+#   plus inspect-image / pull / tag for the upgrade path (see the last
+#   section of this file).
 # The compose file path is rendered INTO the root-owned wrapper by install.sh
 # (it is not an argument), so the wrapper rule is path-bound like every
 # direct `docker compose -f {compose_path}` rule here. State-changing variants
@@ -168,105 +181,31 @@ culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker compose -f {compose_path} -f 
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker image inspect *
 culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker manifest inspect --verbose *
 
-# ─── container inspect (upgrade-apply capture primitive, read-only) ──
-# Reads the running proxy container's image config digest so the apply
-# slice can capture what is ACTUALLY running (not what a tag resolves to
-# locally). Read-only: it cannot pull, restart, or mutate the stack, and
-# /v1/upgrades/apply is NOT activated by the slice that adds these lines.
+# ─── container inspect + image pull/retag (upgrade apply / rollback) ──
+# NO direct rule. These used to be enumerated here: one
+# `docker inspect --format {{json\ .Image}} [0-9a-f]…` line per container-id
+# length (12–64, 53 lines) and a `docker pull`/`docker tag`
+# `<proxy_repo>@sha256\:[0-9a-f]…` pair with 64 hex classes. sudo-rs (Ubuntu
+# 26.04's default sudo) parses those but compares arguments LITERALLY: a
+# `[0-9a-f]` class is five characters there, and the backslash-escaped space
+# splits `{{json .Image}}` into two arguments. They never matched, so the
+# upgrade capture, verify and pull were refused on every sudo-rs host.
 #
-# These entries are ENUMERATED, not wildcarded: one fixed-length
-# [0-9a-f] pattern per legal container-id length (12–64 = 53 lines).
-# There is deliberately NO trailing `*` — sudo's `*` matches whitespace,
-# so a single `… "{{json .Image}}" *` rule would also admit extra args
-# after the id (e.g. a second `--format {{json .Config.Env}}`, which
-# docker honors as the last --format), letting a direct sudo call dump
-# arbitrary container env/secrets as root. Enumerating fixed-length hex
-# classes bounds the rule to exactly one id of an allowed length and
-# nothing more, and keeps `--format` locked to `{{json .Image}}`. Same
-# "enumerate, never broaden for readability" rule as the restore flags
-# the compose-cli wrapper admits.
-# NOTE (sudo-rs): sudo-rs compares command arguments LITERALLY — a
-# `[0-9a-f]` class is not a pattern there, and a backslash-escaped space
-# is split into two arguments — so on a sudo-rs host (Ubuntu 26.04's
-# default sudo) these container-inspect entries and the pinned pull/tag
-# entries below parse but never match, and those calls fail CLOSED with
-# "a password is required". They are valid and effective under classic
-# sudo. Moving them behind a validating wrapper is tracked separately.
-# The space in `{{json .Image}}` is BACKSLASH-ESCAPED (`{{json\ .Image}}`)
-# because that value is ONE argv token containing a space. sudo does NOT
-# treat double quotes as argument grouping: a double-quoted
-# `"{{json .Image}}"` is split on the space into two sudoers tokens, the
-# arg count no longer matches the agent's single-token argv, the rule
-# silently misses, and `sudo -n` demands a password (observed on Amazon
-# Linux 2023 sudo 1.9.x). The backslash-escaped space is the portable way
-# to match a literal space in a sudoers command argument.
-# The lengths MUST match containerIDMinLen..containerIDMaxLen in
-# internal/runner/templates_upgrade.go (the parity test enforces it).
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker inspect --format {{json\ .Image}} [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-
-# ─── image pull + retag (upgrade apply / rollback image step, P1.4) ──
-# The proxy image is selected HERE, at the privilege boundary — not by an
-# env var. The repo is a RENDERED LITERAL ({proxy_repo}, substituted by
-# install.sh from config like {compose_path}); the digest is 64 enumerated
-# [0-9a-f] classes with NO trailing wildcard (sudo's `*` matches whitespace
-# and would admit extra argv). The retag DESTINATION is the fixed literal
-# culvert/proxy:pinned — the only tag the compose file resolves. Together
-# these bind the proxy image to "{proxy_repo} @ some sha256 digest": a
-# compromised culvert-maint user can no longer run a foreign image, nor
-# point the pinned tag anywhere else. State-changing (local image store).
-# The 64 [0-9a-f] classes MUST equal pinnedDigestHexLen in
-# internal/runner/templates_upgrade.go (the parity test enforces it).
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker pull {proxy_repo}@sha256\:[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
-culvert-maint ALL=(root) NOPASSWD: /usr/bin/docker tag {proxy_repo}@sha256\:[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f] culvert/proxy\:pinned
+# They now run through the SAME compose-cli wrapper rule above, which
+# validates the argv exactly as tightly as the enumerated rules did and execs:
+#   inspect-image <12..64 lowercase hex>
+#     → docker inspect --format '{{json .Image}}' <id>
+#       (read-only; one id, nothing after it, `--format` fixed, so a second
+#       `--format {{json .Config.Env}}` can never dump container secrets)
+#   pull <proxy_repo>@sha256:<64 lowercase hex>
+#     → docker pull <ref>
+#   tag <proxy_repo>@sha256:<64 lowercase hex> culvert/proxy:pinned
+#     → docker tag <ref> culvert/proxy:pinned
+# The proxy image is still selected at the privilege boundary, not by an env
+# var: proxy_repo is a literal rendered INTO the root-owned wrapper by
+# install.sh (like the compose path), compared byte-for-byte, and the retag
+# destination is the fixed culvert/proxy:pinned the compose file resolves. A
+# compromised culvert-maint user can still not run a foreign image, pull by
+# tag, or point the pinned tag anywhere else. pull/tag are state-changing
+# (local image store). The wrapper unsets CULVERT_BACKUP_PASSPHRASE for all
+# three, so the passphrase env_keep above never reaches these docker commands.
