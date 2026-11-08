@@ -69,7 +69,15 @@ proof_request(){ python3 "$ROOT/test/e2e/release-proof-fixture/request.py" --pro
 cid="$(docker create "$CUR_IMAGE")"; docker cp "$cid:/app/deploy/docker-compose.yml" "$PDIR/docker-compose.yml" >/dev/null; docker rm -f "$cid" >/dev/null
 cp "$HERE/docker-compose.qualify.yml" "$PDIR/docker-compose.override.yml"
 printf 'CULVERT_CA_PASSPHRASE=agentqual-ca-0123456789\nCULVERT_LOG_PASSPHRASE=agentqual-ca-0123456789\n' > "$PDIR/.env"
-docker tag "$PRED_IMAGE" "$PINNED"
+# Seed the stack from the REGISTRY's predecessor, not the local source image.
+# With the containerd image store, a pulled multi-platform image keeps its
+# index digest locally (ghcr v1.0.259: 238ba99b…), while the push above sends
+# only the local platform's manifest (amd64: f714e55b…). The running image
+# would then be one the registry and the signed baseline proof never name, so
+# every upgrade fails "release proof: target repository or digest mismatch"
+# and the offline rollback cannot find the prior image locally.
+# upgrade-enospc-qualify.sh seeds the same way.
+docker pull -q "$PRED_REF" >/dev/null; docker tag "$PRED_REF" "$PINNED"
 dc up -d >/dev/null 2>&1
 for _ in $(seq 1 40); do curl -fsS -m 3 http://127.0.0.1:8080/health >/dev/null 2>&1 && break; sleep 2; done
 # Seed state on PRED so the upgrade has something to preserve.

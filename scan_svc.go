@@ -50,8 +50,12 @@ func NewScanService(addr string) *ScanService {
 
 // Listen creates the TCP listener. Call this before Start() so the address is
 // available via Addr() without a data race.
+//
+// The bind goes through (*net.ListenConfig).Listen with a background context:
+// the same behaviour as net.Listen (nothing cancels it), stated in the
+// contextual-I/O form the repository's noctx rule requires.
 func (ss *ScanService) Listen() error {
-	ln, err := net.Listen("tcp", ss.addr)
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", ss.addr)
 	if err != nil {
 		return err
 	}
