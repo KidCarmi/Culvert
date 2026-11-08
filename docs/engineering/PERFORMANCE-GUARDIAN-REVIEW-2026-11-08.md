@@ -91,9 +91,9 @@ live heap measured after two forced collections (which also empties
 
 | | held-B/relay | 48 relays | allocated establishing 48 relays |
 |---|---|---|---|
-| legacy (always pooled) | 131,177 | 6.005 MB | 6.48 MB |
-| current (predicate) | 70 | 0.003 MB | 189 KB |
-| | **−131,107 (−99.95%)** | | **−97%** |
+| legacy (always pooled) | 131,177 | 6.005 MB | 6.43 MB |
+| current (predicate) | 70 | 0.003 MB | 135 KB |
+| | **−131,107 (−99.95%)** | | **−98%** |
 
 **Expected gain.** ~256 KiB of resident heap per concurrent tunnel removed
 (two directions). At 1k tunnels ~250 MiB; at 10k ~2.4 GiB. Secondary: one

@@ -30,12 +30,12 @@ package main
 // Measured on this machine (Go 1.27.3, linux/amd64, 4 vCPU Xeon @ 2.10 GHz,
 // 48 idle splice-path relay directions):
 //
-//	BenchmarkRelayResidency, -count=3      held-B/relay     48 relays
+//	BenchmarkRelayResidency, -count=2      held-B/relay     48 relays
 //	  legacy (always pooled)                   131,177       6.005 MB
 //	  current (predicate)                           70       0.003 MB
 //	                                        -131,107 B      -99.95%
 //
-//	allocated while establishing 48 relays   6.48 MB  ->  189 KB   (-97%)
+//	allocated while establishing 48 relays   6.43 MB  ->  135 KB   (-98%)
 //
 // Per TUNNEL that is ~256 KiB -> ~140 B, because a tunnel runs two directions.
 // At 1k concurrent tunnels the fix removes ~250 MiB of resident heap and at 10k
@@ -69,6 +69,8 @@ package main
 // (proxy_tunnel_relaybuf_benchgate_test.go) gate both numbers.
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
 	"runtime"
@@ -102,7 +104,7 @@ func idleCopyCountedLegacyAlwaysBuffered(dst net.Conn, src io.Reader, srcConn ne
 			shared.Store(monoNanos())
 		}
 		var ne net.Error
-		if err != nil && isTimeoutErr(err, &ne) {
+		if err != nil && errors.As(err, &ne) && ne.Timeout() {
 			if monoSince(shared.Load()) >= timeout {
 				_ = dst.Close()
 				_ = srcConn.Close()
@@ -112,16 +114,6 @@ func idleCopyCountedLegacyAlwaysBuffered(dst net.Conn, src io.Reader, srcConn ne
 		}
 		return total
 	}
-}
-
-// isTimeoutErr keeps the frozen body above free of an errors.As import that
-// would make it read as live code.
-func isTimeoutErr(err error, ne *net.Error) bool {
-	if e, ok := err.(net.Error); ok {
-		*ne = e
-		return e.Timeout()
-	}
-	return false
 }
 
 // relayHeldBytes establishes `relays` idle splice-path relay directions through
@@ -140,7 +132,7 @@ func relayHeldBytes(tb testing.TB, relays int, copyFn relayCopyFunc) (held uint6
 	// let a long -benchtime exhaust file descriptors and ephemeral ports. Every
 	// socket this function opens is closed by the teardown it returns, so the
 	// resource high-water mark is one population.
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		tb.Fatalf("listen: %v", err)
 	}
@@ -218,7 +210,7 @@ func relayDialPair(tb testing.TB, l net.Listener) (dialed, accepted net.Conn) {
 		c, err := l.Accept()
 		ch <- res{c, err}
 	}()
-	d, err := net.Dial("tcp", l.Addr().String())
+	d, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", l.Addr().String())
 	if err != nil {
 		tb.Fatalf("dial: %v", err)
 	}

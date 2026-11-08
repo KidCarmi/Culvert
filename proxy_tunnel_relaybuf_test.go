@@ -22,6 +22,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"io"
 	"net"
@@ -32,7 +33,7 @@ import (
 // relayTestListener returns a loopback TCP listener closed at test end.
 func relayTestListener(tb testing.TB) net.Listener {
 	tb.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		tb.Fatalf("listen: %v", err)
 	}
@@ -54,7 +55,7 @@ func relayTestTCPPair(tb testing.TB, l net.Listener) (dialed, accepted net.Conn)
 		c, err := l.Accept()
 		ch <- res{c, err}
 	}()
-	d, err := net.Dial("tcp", l.Addr().String())
+	d, err := (&net.Dialer{}).DialContext(context.Background(), "tcp", l.Addr().String())
 	if err != nil {
 		tb.Fatalf("dial: %v", err)
 	}
@@ -139,9 +140,10 @@ func TestRelayCopyReadsBuffer_MirrorsIOCopyDispatch(t *testing.T) {
 			if _, err := io.CopyBuffer(dst, src, buf); err != nil && err != io.EOF {
 				t.Logf("copy returned %v (expected on peer close)", err)
 			}
-			if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-				_ = cw.CloseWrite()
-			} else if c, ok := dst.(io.Closer); ok {
+			switch c := dst.(type) {
+			case interface{ CloseWrite() error }:
+				_ = c.CloseWrite()
+			case io.Closer:
 				_ = c.Close()
 			}
 			wg.Wait()
