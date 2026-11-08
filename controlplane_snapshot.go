@@ -661,19 +661,20 @@ type dpLastGoodConfigSnapshotStatus struct {
 	SaveError    string
 	// HasIdPProfiles: the on-disk snapshot carries a non-nil IdPProfiles, so
 	// applyDPLastGoodConfigSnapshot re-syncs the registry from it at startup
-	// (nil means absent and is skipped by syncSnapshotIdPProfiles).
+	// (nil means absent and is skipped by syncSnapshotIdPProfiles). That
+	// ReplaceAll runs after any -idp-profiles-file load and rewrites the file,
+	// so such a snapshot decides what a restart restores.
 	HasIdPProfiles bool
-	// IdPProfilesFingerprint identifies the profile set that startup restores
-	// from the on-disk snapshot (idpProfilesFingerprint; meaningful only when
-	// HasIdPProfiles). The IdP-persistence diagnostic compares it with the live
-	// registry so a local create/update/delete, which never rewrites the
-	// last-good file, withdraws the exemption. In-memory only: never
-	// serialized or reported.
-	IdPProfilesFingerprint [32]byte
+	// IdPProfilesFingerprint identifies that restored profile set
+	// (idpProfilesFingerprint), valid only when IdPProfilesFingerprintOK. The
+	// IdP-persistence diagnostic compares it with the live registry so a local
+	// create/update/delete, which never rewrites the last-good file, is
+	// reported as not durable. In-memory only: never serialized or reported.
+	IdPProfilesFingerprint   [32]byte
+	IdPProfilesFingerprintOK bool
 	// IdPProfileCount is how many profiles that on-disk snapshot restores at
-	// startup (0 when it carries none). Kept even when the set cannot be
-	// fingerprinted, and unchanged by a later failed persist (the write is
-	// atomic, so the older file stays in place).
+	// startup (0 when it carries none). All IdP fields are unchanged by a later
+	// failed persist: the write is atomic, so the older file stays in place.
 	IdPProfileCount int
 }
 
@@ -682,11 +683,9 @@ type dpLastGoodConfigSnapshotStatus struct {
 func dpLastGoodConfigSnapshotLoadedStatus(snap ConfigSnapshot) dpLastGoodConfigSnapshotStatus {
 	st := dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version, HasIdPProfiles: snap.IdPProfiles != nil, IdPProfileCount: len(snap.IdPProfiles)}
 	if st.HasIdPProfiles {
-		fp, ok := idpProfilesFingerprint(snap.IdPProfiles)
 		// An unfingerprintable set cannot be proven to match the registry, so
-		// the diagnostic must keep warning (fail closed).
-		st.HasIdPProfiles = ok
-		st.IdPProfilesFingerprint = fp
+		// the diagnostic keeps warning (fail closed).
+		st.IdPProfilesFingerprint, st.IdPProfilesFingerprintOK = idpProfilesFingerprint(snap.IdPProfiles)
 	}
 	return st
 }

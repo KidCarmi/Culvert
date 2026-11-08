@@ -233,7 +233,7 @@ func TestCheckIdPPersistence_DPLocalMutationInvalidatesLastGoodExemption(t *test
 	mustDo("local delete lg-a", r.Delete("lg-a"))
 	mustDo("local delete lg-b", r.Delete("lg-b"))
 	expect("local delete of the last provider after snapshot X", diagWarn)
-	if c := checkIdPPersistence(); !strings.Contains(c.Message, "2 profile(s) that a restart restores") {
+	if c := checkIdPPersistence(); !strings.Contains(c.Message, "registry (0 profile(s)) differs from its last-known-good config snapshot (2 profile(s))") {
 		t.Fatalf("empty registry vs snapshot X: message %q does not name the restored profiles", c.Message)
 	}
 	applyAndPersist(3, []*IdPProfile{})
@@ -244,4 +244,76 @@ func TestCheckIdPPersistence_DPLocalMutationInvalidatesLastGoodExemption(t *test
 	// A persist failure still withdraws it even when the registry matches.
 	setDPLastGoodConfigSnapshotSaveError(4, errors.New("disk full"))
 	expect("matching registry but the latest persist failed", diagWarn)
+}
+
+// On an enrolled DP the last-good snapshot is re-synced over the registry at
+// startup AFTER the -idp-profiles-file load, and ReplaceAll rewrites the file.
+// So a profiles file does not make a local DP change durable: a divergent
+// registry warns even though it is file-backed. With no loaded snapshot
+// carrying profiles, the file decides as on any other node.
+func TestCheckIdPPersistence_DPLastGoodSnapshotOverridesProfilesFile(t *testing.T) {
+	withDPLastGoodConfigTestGlobals(t)
+	origDP := audit.DPMode()
+	origClient := activeDPClient.Load()
+	t.Cleanup(func() {
+		audit.SetDPMode(origDP)
+		activeDPClient.Store(origClient)
+	})
+	audit.SetDPMode(true)
+	activeDPClient.Store(&DataPlaneClient{})
+	r := &IdPRegistry{path: filepath.Join(t.TempDir(), "idp.json"), live: map[string]IdentityProvider{}}
+	swapIdPRegistryForPersistenceTest(t, r)
+
+	profile := func(id, name string) *IdPProfile {
+		return &IdPProfile{ID: id, Name: name, Type: IdPTypeOIDC, EmailDomains: []string{"corp.example"},
+			KnownGroups: []string{}, OIDC: &OIDCProfileConfig{Issuer: "https://idp.example.com", ClientID: id}}
+	}
+	expect := func(step, want string) {
+		t.Helper()
+		c := checkIdPPersistence()
+		if c.Status != want {
+			t.Fatalf("%s: status = %s (%q), want %s", step, c.Status, c.Message, want)
+		}
+		if (c.Status == diagWarn) != (c.OperatorAction != "") {
+			t.Fatalf("%s: OperatorAction %q inconsistent with status %s", step, c.OperatorAction, c.Status)
+		}
+		if strings.Contains(c.Message+c.OperatorAction, "/data/") {
+			t.Fatalf("%s: row leaks a filesystem path: %q / %q", step, c.Message, c.OperatorAction)
+		}
+	}
+	mustDo := func(step string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+	}
+
+	mustDo("file-backed create", r.Upsert(profile("pf-a", "A")))
+	expect("file-backed DP with no last-good snapshot", diagOK)
+	persistDPLastGoodConfigSnapshot(ConfigSnapshot{Version: 1})
+	expect("file-backed DP whose snapshot carries no IdP profiles", diagOK)
+
+	snapX := []*IdPProfile{profile("pf-a", "A"), profile("pf-b", "B")}
+	snap := ConfigSnapshot{Version: 2, IdPProfiles: snapX}
+	mustDo("sync snapshot X", syncSnapshotIdPProfiles(snap))
+	persistDPLastGoodConfigSnapshot(snap)
+	expect("file-backed DP equal to persisted snapshot X", diagOK)
+
+	mustDo("local delete", r.Delete("pf-b"))
+	expect("file-backed DP after a local delete", diagWarn)
+	// (Re-creating pf-b locally would not restore equality: a create stamps a
+	// fresh SessionsNotBefore, which a restart from snapshot X reverts.)
+	mustDo("re-sync snapshot X", syncSnapshotIdPProfiles(snap))
+	persistDPLastGoodConfigSnapshot(snap)
+	expect("file-backed DP back in step with snapshot X", diagOK)
+	mustDo("local update", r.Upsert(profile("pf-a", "A renamed")))
+	expect("file-backed DP after a local update", diagWarn)
+
+	setDPLastGoodConfigSnapshotSaveError(3, errors.New("disk full"))
+	if c := checkIdPPersistence(); c.Status != diagWarn || !strings.Contains(c.Message, "could not be saved") {
+		t.Fatalf("failed persist on a file-backed DP: got %s (%q), want the save-failure warning", c.Status, c.Message)
+	}
+
+	audit.SetDPMode(false)
+	expect("same file-backed registry on a node that is not a data plane", diagOK)
 }

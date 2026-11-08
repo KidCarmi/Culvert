@@ -21,14 +21,16 @@ import (
 // persistence, enforcement or authentication behaviour. The flag it reports is
 // already exposed to viewers by GET /api/idp, so no role redaction is needed.
 //
-// An enrolled data plane has a second durable copy: the last-known-good config
-// snapshot it persists after every applied full snapshot or delta carries
-// IdPProfiles, and applyDPLastGoodConfigSnapshot re-syncs the registry from it
-// at startup (dp_enrollment.go). Such a DP is not warned while its registry
-// still equals that snapshot's profiles. A standalone node, a DP that has not
-// yet persisted a snapshot, one whose snapshot carried no profiles
-// (unenrolled/redacted), one whose latest persist failed, or one whose registry
-// was changed locally since the last persist is.
+// An enrolled data plane has a second durable copy, and it takes precedence:
+// the last-known-good config snapshot it persists after every applied full
+// snapshot or delta carries IdPProfiles, and applyDPLastGoodConfigSnapshot
+// re-syncs the registry from it at startup (dp_enrollment.go) — after, and over,
+// any -idp-profiles-file load. Such a DP is ok only while its registry equals
+// that snapshot's profiles and the latest persist succeeded; otherwise a
+// restart restores something else, profiles file or not, and the row warns.
+// When no loaded snapshot carries profiles (a standalone node, a DP that has
+// not persisted one yet, or an unenrolled/redacted snapshot), the profiles file
+// decides as on any other node.
 
 // idpRegistrySnapshotCounts returns durability and profile count under one lock
 // (cheaper than All(), which deep-clones every profile).
@@ -79,60 +81,56 @@ func clearDiscoveredOIDCEndpoints(p *IdPProfile) {
 	p.OIDC.JWKsURI = ""
 }
 
-// dpLastGoodSnapshotPersistsIdPProfiles reports whether this node is a data
-// plane whose on-disk last-known-good snapshot carries exactly the IdP profiles
-// the registry holds now, so a restart restores the current set. A local
-// mutation (apiIdPList/apiIdPItem stay writable on a DP) updates the registry
-// but never the last-good file, so it fails the comparison until the next
-// persisted snapshot matches again.
-func dpLastGoodSnapshotPersistsIdPProfiles() bool {
-	if !audit.DPMode() || activeDPClient.Load() == nil || idpRegistry == nil {
-		return false
-	}
-	st, _ := dpLastGoodConfigSnapshotState.Load().(dpLastGoodConfigSnapshotStatus)
-	if !st.Loaded || st.SaveError != "" || !st.HasIdPProfiles {
-		return false
-	}
-	// All() deep-copies under the registry read lock; the digest is computed
-	// after the lock is released.
-	current, ok := idpProfilesFingerprint(idpRegistry.All())
-	return ok && current == st.IdPProfilesFingerprint
+// dpLastGoodIdPRestore describes what an enrolled data plane's on-disk
+// last-known-good snapshot does to the IdP registry at the next startup.
+type dpLastGoodIdPRestore struct {
+	// governs: the snapshot carries IdPProfiles, so startup replaces the
+	// registry with them (after, and over, any -idp-profiles-file load).
+	governs bool
+	// matches: the registry holds exactly that set now, so a restart keeps it.
+	matches bool
+	// saveFailed: the latest persist failed, so the file on disk is older.
+	saveFailed bool
+	restored   int
 }
 
-// dpLastGoodRestoredIdPProfiles reports how many IdP profiles this data
-// plane's on-disk last-known-good snapshot restores at startup: 0 off an
-// enrolled DP or before a snapshot is loaded or persisted.
-func dpLastGoodRestoredIdPProfiles() int {
-	if !audit.DPMode() || activeDPClient.Load() == nil {
-		return 0
+// dpLastGoodIdPRestoreState reports that for this node; the zero value off an
+// enrolled DP or when no loaded snapshot carries IdP profiles. A local
+// mutation (apiIdPList/apiIdPItem stay writable on a DP) updates the registry
+// and any profiles file but never the last-good file, so it stops matching
+// until the next persisted snapshot equals the registry again.
+func dpLastGoodIdPRestoreState() dpLastGoodIdPRestore {
+	if !audit.DPMode() || activeDPClient.Load() == nil || idpRegistry == nil {
+		return dpLastGoodIdPRestore{}
 	}
 	st, _ := dpLastGoodConfigSnapshotState.Load().(dpLastGoodConfigSnapshotStatus)
-	if !st.Loaded {
-		return 0
+	if !st.Loaded || !st.HasIdPProfiles {
+		return dpLastGoodIdPRestore{}
 	}
-	return st.IdPProfileCount
+	r := dpLastGoodIdPRestore{governs: true, saveFailed: st.SaveError != "", restored: st.IdPProfileCount}
+	if !r.saveFailed && st.IdPProfilesFingerprintOK {
+		// All() deep-copies under the registry read lock; the digest is
+		// computed after the lock is released.
+		current, ok := idpProfilesFingerprint(idpRegistry.All())
+		r.matches = ok && current == st.IdPProfilesFingerprint
+	}
+	return r
 }
 
 func checkIdPPersistence() OperatorContractCheck {
 	const code = "idp_profiles_persistence"
 	persisted, n := idpRegistrySnapshotCounts()
+	lg := dpLastGoodIdPRestoreState()
 	switch {
+	case lg.governs && lg.matches:
+		return OperatorContractCheck{Code: code, Status: diagOK,
+			Message: "identity provider profiles are synced from the control plane and persisted in this data plane's last-known-good config snapshot"}
+	case lg.governs:
+		return dpLastGoodIdPDivergenceCheck(code, lg, n)
 	case persisted:
 		return OperatorContractCheck{Code: code, Status: diagOK,
 			Message: "identity provider profiles are persisted to disk"}
-	case dpLastGoodSnapshotPersistsIdPProfiles():
-		return OperatorContractCheck{Code: code, Status: diagOK,
-			Message: "identity provider profiles are synced from the control plane and persisted in this data plane's last-known-good config snapshot"}
 	case n == 0:
-		if restored := dpLastGoodRestoredIdPProfiles(); restored > 0 {
-			// A local delete of the last provider empties the registry but not
-			// the last-good file, so a restart brings the profiles back.
-			return OperatorContractCheck{Code: code, Status: diagWarn,
-				Message: fmt.Sprintf("no identity provider profiles are configured in memory, but this data plane's last-known-good "+
-					"config snapshot holds %d profile(s) that a restart restores — the local deletion is not durable", restored),
-				OperatorAction: "Delete the provider(s) on the control plane so the next synced snapshot carries the change, " +
-					"or set -idp-profiles-file (a file in the persistent data directory) or proxy.idp_profiles_file in config.yaml, then restart."}
-		}
 		return OperatorContractCheck{Code: code, Status: diagOK,
 			Message: "no identity providers configured (profiles would not survive a restart: no idp profiles file is set)"}
 	}
@@ -144,4 +142,23 @@ func checkIdPPersistence() OperatorContractCheck {
 		OperatorAction: "Set -idp-profiles-file (a file in the persistent data directory) or proxy.idp_profiles_file in config.yaml, " +
 			"then restart. Export the current profiles first if you need to keep them.",
 	}
+}
+
+// dpLastGoodIdPDivergenceCheck is the warning for a data plane whose restart
+// restores a last-good profile set other than the registry it runs now. A
+// profiles file does not help: startup re-syncs the snapshot over it.
+func dpLastGoodIdPDivergenceCheck(code string, lg dpLastGoodIdPRestore, n int) OperatorContractCheck {
+	if lg.saveFailed {
+		return OperatorContractCheck{Code: code, Status: diagWarn,
+			Message: fmt.Sprintf("this data plane's latest last-known-good config snapshot could not be saved — a restart restores "+
+				"the older snapshot's %d identity provider profile(s) over the current registry and any profiles file", lg.restored),
+			OperatorAction: "Fix the data plane's last-known-good persistence (free disk space or fix data directory permissions; " +
+				"see the data plane log) so the next synced snapshot is saved."}
+	}
+	return OperatorContractCheck{Code: code, Status: diagWarn,
+		Message: fmt.Sprintf("this data plane's identity provider registry (%d profile(s)) differs from its last-known-good config "+
+			"snapshot (%d profile(s)), which a restart restores over it and over any profiles file — local identity provider "+
+			"changes on a data plane are not durable", n, lg.restored),
+		OperatorAction: "Make identity provider changes on the control plane; the next synced snapshot replaces the " +
+			"last-known-good copy and this registry."}
 }
