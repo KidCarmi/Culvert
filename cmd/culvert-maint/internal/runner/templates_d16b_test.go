@@ -434,37 +434,134 @@ func TestComposeBackupList_StageTimeoutBoundsHang(t *testing.T) {
 	}
 }
 
-// ─── parity-derived: enumerated sudoers count ───────────────────────
+// ─── sudo mode: variable-argv templates route through the wrapper ───
 
-func TestEnumerateRestoreSudoersLines_Count(t *testing.T) {
-	dryrun := enumerateRestoreSudoersLines("PFX", false)
-	commit := enumerateRestoreSudoersLines("PFX", true)
-	if len(dryrun) != 12 {
-		t.Errorf("dryrun: want 12 lines, got %d", len(dryrun))
+// d16bSudoRunner is d16bRunner in privilege_mode=sudoers.
+func d16bSudoRunner(t *testing.T) (*Runner, *capturedExec) {
+	t.Helper()
+	capE := &capturedExec{}
+	r, err := New(Options{
+		ComposeProjectDir: "/srv/culvert",
+		ComposeFile:       "docker-compose.yml",
+		StageTimeout:      5 * time.Second,
+		EnvAllow:          []string{EnvCulvertBackupPassphrase},
+		DockerBinary:      "/usr/bin/docker",
+		UseSudo:           true,
+		SudoBinary:        "sudo",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	if len(commit) != 12 {
-		t.Errorf("commit: want 12 lines, got %d", len(commit))
+	r.SetExecHooksForTest(func(cmd *exec.Cmd) error {
+		capE.Argv = append([]string(nil), cmd.Args...)
+		capE.Env = append([]string(nil), cmd.Env...)
+		return nil
+	}, func(_ *exec.Cmd) error { return nil })
+	return r, capE
+}
+
+// TestSudoMode_VariableArgvTemplatesUseWrapper pins the exact argv each
+// variable-argument template emits under sudo: `sudo -n <wrapper> <sub> <tail>`
+// and never a direct `docker compose` call, which no sudoers rule would
+// match any more. The tail is byte-identical to the docker form's tail.
+func TestSudoMode_VariableArgvTemplatesUseWrapper(t *testing.T) {
+	ctx := context.Background()
+	w := ComposeCLIWrapperPath
+	cases := []struct {
+		name string
+		call func(r *Runner) (*Result, error)
+		want []string
+	}{
+		{"backup encrypted", func(r *Runner) (*Result, error) {
+			return r.ComposeBackupEncrypted(ctx, "snap.tar.gz", "pw")
+		}, []string{"sudo", "-n", w, "backup-encrypted", "/backup/snap.tar.gz"}},
+		{"backup unencrypted", func(r *Runner) (*Result, error) {
+			return r.ComposeBackupUnencrypted(ctx, "snap.tar.gz")
+		}, []string{"sudo", "-n", w, "backup", "/backup/snap.tar.gz"}},
+		{"restore dryrun, no flags", func(r *Runner) (*Result, error) {
+			return r.ComposeRestoreDryRun(ctx, "snap.tar.gz", RestoreModeFull, false, false, "")
+		}, []string{"sudo", "-n", w, "restore", "/backup/snap.tar.gz", "--mode", "full"}},
+		{"restore commit, all flags", func(r *Runner) (*Result, error) {
+			return r.ComposeRestoreCommit(ctx, "snap.tar.gz", RestoreModeStateOnly, true, true, "pw")
+		}, []string{
+			"sudo", "-n", w, "restore", "/backup/snap.tar.gz", "--mode", "state-only",
+			"--accept-dp-reenrollment", "--allow-counter-rollback", "--confirm",
+		}},
+		{"cleanup dryrun", func(r *Runner) (*Result, error) {
+			return r.ComposeCleanupDryRun(ctx, "168h", 3)
+		}, []string{"sudo", "-n", w, "cleanup", "--older-than", "168h", "--keep-last", "3"}},
+		{"cleanup commit", func(r *Runner) (*Result, error) {
+			return r.ComposeCleanupCommit(ctx, "720h", 0)
+		}, []string{"sudo", "-n", w, "cleanup", "--older-than", "720h", "--keep-last", "0", "--confirm"}},
 	}
-	for _, line := range dryrun {
-		if strings.Contains(line, "--confirm") {
-			t.Errorf("dryrun line must not contain --confirm: %q", line)
-		}
-	}
-	for _, line := range commit {
-		if !strings.HasSuffix(line, "--confirm") {
-			t.Errorf("commit line must terminate with --confirm: %q", line)
-		}
-	}
-	// Modes covered exactly once each per flag combo.
-	for _, mode := range []string{"full", "trust-root-only", "state-only"} {
-		count := 0
-		for _, line := range dryrun {
-			if strings.Contains(line, "--mode "+mode+" ") || strings.HasSuffix(line, "--mode "+mode) {
-				count++
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, capE := d16bSudoRunner(t)
+			if _, err := c.call(r); err != nil {
+				t.Fatalf("call: %v", err)
 			}
+			if !reflect.DeepEqual(capE.Argv, c.want) {
+				t.Errorf("argv mismatch\n got: %q\nwant: %q", capE.Argv, c.want)
+			}
+		})
+	}
+}
+
+// TestSudoMode_FixedArgvTemplatesStayDirect proves the wrapper is used ONLY
+// for the variable-argument templates: fixed-argv commands keep their exact,
+// directly allowlisted docker sudoers rule.
+func TestSudoMode_FixedArgvTemplatesStayDirect(t *testing.T) {
+	ctx := context.Background()
+	for name, call := range map[string]func(r *Runner) (*Result, error){
+		"status":       func(r *Runner) (*Result, error) { return r.ComposeStatus(ctx) },
+		"backup list":  func(r *Runner) (*Result, error) { return r.ComposeBackupList(ctx) },
+		"compose down": func(r *Runner) (*Result, error) { return r.ComposeDown(ctx) },
+		"compose up":   func(r *Runner) (*Result, error) { return r.ComposeUp(ctx) },
+	} {
+		r, capE := d16bSudoRunner(t)
+		if _, err := call(r); err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
-		if count != 4 {
-			t.Errorf("mode %q must appear in 4 lines (4 flag combos); got %d", mode, count)
+		if len(capE.Argv) < 4 || capE.Argv[0] != "sudo" || capE.Argv[1] != "-n" ||
+			capE.Argv[2] != "/usr/bin/docker" || capE.Argv[3] != "compose" {
+			t.Errorf("%s: want a direct `sudo -n /usr/bin/docker compose ...` call, got %q", name, capE.Argv)
+		}
+	}
+}
+
+// TestWrapperRoutedTemplatesShareOneArgumentlessSudoersLine pins the sudoers
+// side of the routing: every template with a WrapperArgv declares exactly the
+// bare wrapper path (no argument, no wildcard), and no other template claims
+// that line.
+func TestWrapperRoutedTemplatesShareOneArgumentlessSudoersLine(t *testing.T) {
+	routed := map[TemplateID]bool{
+		TemplateComposeCLIBackupEncrypted:   true,
+		TemplateComposeCLIBackupUnencrypted: true,
+		TemplateComposeCLIRestoreDryRun:     true,
+		TemplateComposeCLIRestoreCommit:     true,
+		TemplateComposeCLICleanupDryRun:     true,
+		TemplateComposeCLICleanupCommit:     true,
+		TemplateComposeContainerInspect:     true,
+		TemplateImagePullDigest:             true,
+		TemplateImageTagPinned:              true,
+	}
+	for _, tmpl := range Registry() {
+		if routed[tmpl.ID] {
+			if len(tmpl.WrapperArgv) == 0 {
+				t.Errorf("template %q must route through the wrapper", tmpl.ID)
+			}
+			if !reflect.DeepEqual(tmpl.SudoersLines, []string{ComposeCLIWrapperPath}) {
+				t.Errorf("template %q SudoersLines = %q, want exactly [%q]", tmpl.ID, tmpl.SudoersLines, ComposeCLIWrapperPath)
+			}
+			continue
+		}
+		if len(tmpl.WrapperArgv) != 0 {
+			t.Errorf("template %q unexpectedly routes through the wrapper", tmpl.ID)
+		}
+		for _, line := range tmpl.SudoersLines {
+			if line == ComposeCLIWrapperPath {
+				t.Errorf("template %q must not claim the wrapper sudoers line", tmpl.ID)
+			}
 		}
 	}
 }

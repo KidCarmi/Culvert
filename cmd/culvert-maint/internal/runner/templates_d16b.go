@@ -25,8 +25,20 @@
 //     is harmless (the cli ignores it).
 //   - Sudoers is the privilege boundary; the agent's validation is
 //     defense-in-depth. Every template registered here has matching
-//     sudoers entries enumerated in packaging/sudoers/culvert-maint;
-//     the parity test asserts the bidirectional match.
+//     sudoers entries in packaging/sudoers/culvert-maint; the parity
+//     test asserts the bidirectional match.
+//   - Templates whose argv carries a per-call value (backup path,
+//     restore path/mode/flags, cleanup duration/count) are NOT matched
+//     by a sudoers argument wildcard: sudo-rs (Ubuntu 26.04's default
+//     sudo) rejects `*`/`?` inside command arguments. In
+//     privilege_mode=sudoers they run through the root-owned wrapper
+//     ComposeCLIWrapperPath (packaging/culvert-maint/compose-cli), which
+//     the sudoers file grants as ONE exact, argument-less rule and which
+//     validates the argv strictly before exec'ing the very docker command
+//     in BaseArgv + the positional tail. WrapperArgv names the wrapper
+//     subcommand; the positional tail appended by each typed method is
+//     identical for both forms, so the two cannot drift apart (pinned by
+//     wrapper_test.go, which runs the real wrapper).
 package runner
 
 import (
@@ -111,9 +123,9 @@ func ValidateOlderThan(dur string) error { return validateOlderThan(dur) }
 func ValidateKeepLast(n int) error { return validateKeepLast(n) }
 
 // olderThanRE bounds the on-the-wire older_than string shape. The
-// sudoers entry uses `--older-than *` (one bounded wildcard token),
-// so the agent's validator is the only barrier between operator
-// input and a sudo argv. We accept ONLY the time.ParseDuration
+// compose-cli wrapper re-validates the same shape and range at the
+// sudo boundary (packaging/culvert-maint/compose-cli); this validator
+// is the up-front, defense-in-depth copy. We accept ONLY the time.ParseDuration
 // alphabet — digits, optional decimal, and one of the unit suffixes
 // — with no surrounding whitespace, control characters, or shell
 // metacharacters. time.ParseDuration alone tolerates nothing weird,
@@ -177,19 +189,17 @@ func backupPath(filename string) string {
 func d16bTemplates() []Template {
 	return []Template{
 		{
-			ID:       TemplateComposeCLIBackupEncrypted,
-			BaseArgv: []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "-e", EnvCulvertBackupPassphrase, "cli", "--encrypt", "--backup"},
-			SudoersLines: []string{
-				"/usr/bin/docker compose -f {compose_path} --profile cli run --rm -e " + EnvCulvertBackupPassphrase + " cli --encrypt --backup /backup/*",
-			},
+			ID:            TemplateComposeCLIBackupEncrypted,
+			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "-e", EnvCulvertBackupPassphrase, "cli", "--encrypt", "--backup"},
+			WrapperArgv:   []string{"backup-encrypted"},
+			SudoersLines:  []string{composeCLIWrapperSudoersLine},
 			StateChanging: true,
 		},
 		{
-			ID:       TemplateComposeCLIBackupUnencrypted,
-			BaseArgv: []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "cli", "--backup"},
-			SudoersLines: []string{
-				"/usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --backup /backup/*",
-			},
+			ID:            TemplateComposeCLIBackupUnencrypted,
+			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "cli", "--backup"},
+			WrapperArgv:   []string{"backup"},
+			SudoersLines:  []string{composeCLIWrapperSudoersLine},
 			StateChanging: true,
 		},
 		{
@@ -203,13 +213,15 @@ func d16bTemplates() []Template {
 		{
 			ID:            TemplateComposeCLIRestoreDryRun,
 			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "-e", EnvCulvertBackupPassphrase, "cli", "--restore"},
-			SudoersLines:  enumerateRestoreSudoersLines(restoreSudoersPrefix, false),
+			WrapperArgv:   []string{"restore"},
+			SudoersLines:  []string{composeCLIWrapperSudoersLine},
 			StateChanging: false,
 		},
 		{
 			ID:            TemplateComposeCLIRestoreCommit,
 			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "-e", EnvCulvertBackupPassphrase, "cli", "--restore"},
-			SudoersLines:  enumerateRestoreSudoersLines(restoreSudoersPrefix, true),
+			WrapperArgv:   []string{"restore"},
+			SudoersLines:  []string{composeCLIWrapperSudoersLine},
 			StateChanging: true,
 		},
 		{
@@ -239,63 +251,36 @@ func d16bTemplates() []Template {
 		{
 			ID:       TemplateComposeCLICleanupDryRun,
 			BaseArgv: []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "cli", "--cleanup-restore-leftovers", "--older-than"},
-			SudoersLines: []string{
-				// `*` matches one argv token; agent enforces strict
-				// time.ParseDuration shape and integer keep_last via
-				// validateOlderThan + validateKeepLast before sudo is
-				// even invoked. Single bounded wildcard per variable
-				// position is acceptable per the user's directive
-				// ("only bounded backup path wildcard where unavoidable").
-				"/usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --cleanup-restore-leftovers --older-than * --keep-last *",
-			},
+			// The duration and count are validated twice: up front by
+			// validateOlderThan + validateKeepLast, and again at the sudo
+			// boundary by the wrapper (same shape, same 1h..8760h and
+			// 0..100 ranges). No sudoers argument wildcard is involved.
+			WrapperArgv:   []string{"cleanup", "--older-than"},
+			SudoersLines:  []string{composeCLIWrapperSudoersLine},
 			StateChanging: false,
 		},
 		{
-			ID:       TemplateComposeCLICleanupCommit,
-			BaseArgv: []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "cli", "--cleanup-restore-leftovers", "--older-than"},
-			SudoersLines: []string{
-				"/usr/bin/docker compose -f {compose_path} --profile cli run --rm cli --cleanup-restore-leftovers --older-than * --keep-last * --confirm",
-			},
+			ID:            TemplateComposeCLICleanupCommit,
+			BaseArgv:      []string{"docker", "compose", "-f", "{compose_path}", "--profile", "cli", "run", "--rm", "cli", "--cleanup-restore-leftovers", "--older-than"},
+			WrapperArgv:   []string{"cleanup", "--older-than"},
+			SudoersLines:  []string{composeCLIWrapperSudoersLine},
 			StateChanging: true,
 		},
 	}
 }
 
-// restoreSudoersPrefix is the fixed prefix shared by every restore
-// allowlist entry. Suffix varies by mode and optional flags.
-const restoreSudoersPrefix = "/usr/bin/docker compose -f {compose_path} --profile cli run --rm -e " + EnvCulvertBackupPassphrase + " cli --restore /backup/*"
+// ComposeCLIWrapperPath is the root-owned wrapper (rendered from
+// packaging/culvert-maint/compose-cli and installed root:root 0755 by
+// packaging/culvert-maint/install.sh) through which every template with a
+// WrapperArgv runs in privilege_mode=sudoers. The compose file path is
+// rendered INTO the wrapper at install time, never passed as an argument.
+const ComposeCLIWrapperPath = "/usr/local/libexec/culvert-maint/compose-cli"
 
-// enumerateRestoreSudoersLines produces every legal restore allowlist
-// line. The product is:
-//
-//	prefix --mode <mode> [<flags-in-canonical-order>] [--confirm]
-//
-// where mode is one of {full, trust-root-only, state-only} and the
-// optional flag set has 4 combinations (none, accept-dp-reenrollment,
-// allow-counter-rollback, both — in that fixed order so sudoers
-// matching is deterministic). withConfirm controls whether each line
-// gets a trailing --confirm (commit template) or not (dryrun
-// template).
-//
-// Result: 12 lines per template (3 modes × 4 flag combos).
-func enumerateRestoreSudoersLines(prefix string, withConfirm bool) []string {
-	out := make([]string, 0, 12)
-	confirm := ""
-	if withConfirm {
-		confirm = " --confirm"
-	}
-	for _, mode := range []string{"full", "trust-root-only", "state-only"} {
-		for _, flags := range []string{
-			"",
-			" --accept-dp-reenrollment",
-			" --allow-counter-rollback",
-			" --accept-dp-reenrollment --allow-counter-rollback",
-		} {
-			out = append(out, prefix+" --mode "+mode+flags+confirm)
-		}
-	}
-	return out
-}
+// composeCLIWrapperSudoersLine is the single sudoers command shared by every
+// wrapper-routed template: the wrapper path with NO arguments and NO
+// wildcard (sudo then admits any argv, and the wrapper is the argument
+// boundary). The parity test pins it against packaging/sudoers/culvert-maint.
+const composeCLIWrapperSudoersLine = ComposeCLIWrapperPath
 
 // ─── Typed methods on *Runner ───────────────────────────────────────
 
@@ -393,8 +378,9 @@ func (r *Runner) buildRestoreArgv(id TemplateID, filename string, mode RestoreMo
 	argv := r.buildArgv(tmpl)
 	argv = append(argv, backupPath(filename), "--mode", string(mode))
 	// Optional flags in fixed canonical order: --accept-dp-reenrollment,
-	// then --allow-counter-rollback. Position matters for sudoers
-	// matching — every enumerated entry assumes this order.
+	// then --allow-counter-rollback, then --confirm. The compose-cli
+	// wrapper admits ONLY this order, so the order is part of the
+	// privilege contract, not cosmetics.
 	if acceptDP {
 		argv = append(argv, "--accept-dp-reenrollment")
 	}
@@ -466,8 +452,9 @@ func (r *Runner) buildCleanupArgv(id TemplateID, olderThan string, keepLast int,
 		return nil, fmt.Errorf("runner: template %s not registered", id)
 	}
 	argv := r.buildArgv(tmpl)
-	// BaseArgv ends at "--older-than"; append <dur>, --keep-last, <n>,
-	// and optionally --confirm. Canonical order is fixed for sudoers.
+	// BaseArgv (and WrapperArgv) end at "--older-than"; append <dur>,
+	// --keep-last, <n>, and optionally --confirm. The compose-cli wrapper
+	// admits only this canonical order.
 	argv = append(argv, olderThan, "--keep-last", strconv.Itoa(keepLast))
 	if withConfirm {
 		argv = append(argv, "--confirm")
