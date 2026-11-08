@@ -22,6 +22,7 @@ func loadPAC(cfg pacStartupConfig) error {
 		// Best-effort: Store.Set surfaces real write failures later.
 		_ = os.MkdirAll(dir, 0o700) //nolint:errcheck // best-effort; Store.Set surfaces real failures
 	}
+	pacLegacyNewerAtBoot.Store(false)
 	migrated, err := pacStore.LoadMigrate(cfg.ConfigPath, cfg.LegacyConfigPath)
 	if err != nil {
 		return fmt.Errorf("PAC config load error: %w", err)
@@ -30,6 +31,7 @@ func loadPAC(cfg pacStartupConfig) error {
 		logger.Printf("PAC config migrated from %s to %s (legacy file left in place, now frozen)",
 			cfg.LegacyConfigPath, cfg.ConfigPath)
 	} else if warnStaleLegacyPAC(cfg.ConfigPath, cfg.LegacyConfigPath) {
+		pacLegacyNewerAtBoot.Store(true)
 		// Downgrade→edit→re-upgrade hazard (Palo ops F5a): the store already
 		// exists but a newer legacy CWD file means edits made by a downgraded
 		// binary are being silently ignored. Warn loudly instead.
