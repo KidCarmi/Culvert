@@ -130,6 +130,76 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   bypass for up to a month that no operator can revoke — a listing field plus a
   revocation action, which under `conventions.md` means the admin API endpoint,
   the `uiRoutes` entry and a UI surface together.
+
+- **The scan sidecar's listener was the last one in the tree with no
+  supervision, and a sidecar that is not listening is the condition under which
+  the whole fleet forwards bodies UNSCANNED (CHAOS-113).** Culvert has four
+  listeners. Three carry a rebind ladder, an `up` gauge, bind counters, an
+  operator-contract row and an alert — the admin UI (CHAOS-57), SOCKS5
+  (CHAOS-66/102) and the Control-Plane gRPC listener (CHAOS-71). The fourth,
+  `-scan-svc-listen`, had one `logger.Printf` and a goroutine that returned.
+  Measured on the pre-fix tree: closing the listener under `Serve` returned
+  `accept tcp …: use of closed network connection`, the goroutine exited, the
+  PROCESS stayed up, and the sidecar's own address was FREE — nothing rebound
+  it, and no counter, gauge, health row or alert existed anywhere to say so; a
+  bind failure at boot was worse, one log line and then a process that would
+  serve nothing for its entire life, with no retry ever. For the other three
+  listeners that costs the availability of a surface. For this one it costs a
+  SECURITY CONTROL on every node pointed at the address, because
+  `internal/secscan`'s `remoteScanFail` is fail-OPEN (WK-2b) — correctly, since
+  CHAOS-52/53 made a merely SLOW scan fail CLOSED and left only genuine faults
+  on the open path. A second defect in the same file made a SIGTERM during
+  startup lie about itself: `ScanService.server` was written by the goroutine
+  running `Start()` and read by the shutdown hook, unsynchronised, and
+  `Shutdown`'s `if ss.server == nil { return nil }` reported SUCCESS when it
+  landed before that write, having closed nothing — `/health` then answered 200
+  after a `Shutdown` that returned nil, with the socket still held, and the
+  shutdown registry discards the error anyway. Under `-race`, 50 iterations
+  produced 3 data-race reports on that field (write `scan_svc.go:92` vs. reads
+  `:108`/`:111`). A third defect made the first two invisible end to end:
+  `remoteScanFail` gates on `alerts.HasSubscriber("scan_svc_down")`, so an
+  event with no way to subscribe is an event that NEVER FIRES — and a
+  differential over the tree found 13 production alert events fired with no
+  Alerts-panel checkbox, the scanning plane having one of four
+  (`scan_clam_error`), with `scan_svc_down` missing from the event registry too.
+  Drift in the other direction was zero, which makes it a process gap rather
+  than ten independent mistakes. Fixed: `superviseScanSvcListener` owns bind → serve →
+  rebind (1 s doubling to a 30 s ceiling, ±25% jitter, ladder reset after a 60 s
+  stable serve); the `http.Server` is built in `NewScanService` so a `Shutdown`
+  that precedes `Serve` is terminal and releases the port, and `Listen` refuses
+  afterwards; five `culvert_scan_svc_*` rows, the `scan_svc_listener`
+  operator-contract row beside its three siblings; the `/healthz` `scan_svc`
+  field beside the `socks5`/`admin_ui`/`cp_grpc` fields its siblings already
+  publish there, omitted entirely on a node that never asked for a sidecar and
+  carrying the posture only (the attempt count and bind reason class stay on the
+  role-gated diagnostics row, because `handleHealth` is unauthenticated on the
+  proxy port); the report-only `/ready` `scan_svc` row, which must NOT gate the
+  default verdict for the same reason `cp_grpc` does not — a node whose sidecar
+  cannot bind is proxying its own traffic perfectly, so ejecting it would turn a
+  scanning outage into a traffic outage, and report-only is a judgement about
+  this node's rotation rather than about whether unscanned traffic is acceptable;
+  a `scan_svc_listener_down`
+  alert fired once per episode with a bounded bind class as its detail; and four
+  new Alerts-panel checkboxes (`scan_svc_listener_down`, `scan_svc_down`,
+  `scan_timeout`, `scan_skipped`). The fail-open posture itself is UNCHANGED and
+  remains the recorded owner decision — what changed is that the condition which
+  triggers it is now observable and self-healing. `culvert_scan_svc_listener_up`
+  is the one gauge in `metrics.go` whose zero means a security control is off
+  rather than a surface being unavailable; it stays 1 while the sidecar is merely
+  rebinding inside the threshold, so an ordinary redeploy does not page. One
+  threshold governs both the never-bound and the lost-socket case — `EverBound`
+  chooses which fail row and remedy, never whether there is one. The first form
+  of this change got that wrong (`!EverBound && BindFailures > 0` as its own
+  fail arm, in the row and the gauge, paging on the FIRST failed bind at boot)
+  and it passed every other gate, because the only rebinding control drove a
+  sidecar that had already served; `ControlNeverBoundInsideThresholdDoesNotPage`
+  is the missing direction and two mutations reintroduce it. The ten
+  remaining GUI-unsubscribable events are recorded in EXECUTABLE form
+  (`scanAlertGUIKnownGaps`) behind two gates — one that stops a new event joining
+  the list, one that fails if an entry has since been fixed — rather than patched
+  from a scan-sidecar round. Closes the scan-sidecar half of the 2026-10-13
+  backlog's `L-5`. Full findings, measurements, the risk matrix and the mutation
+  table are in `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-07.md`.
 - **The GO-2026-6909 SAML fork namespace-qualified the fields that carry
   identity and left every field that decides whether an assertion is FOR this
   service provider and STILL VALID on its namespace-blind tag.** `encoding/xml`

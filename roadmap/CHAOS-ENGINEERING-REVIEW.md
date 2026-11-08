@@ -57,6 +57,36 @@ missing staleness alert and health row are recorded as the open half. Id claimed
 in a committed placeholder row before any code per the 2026-09-25 amendment,
 checked against `origin/main` at `3c5fab1`.
 
+The 2026-11-07 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-07.md)
+and summarised in §62 — CHAOS-113 (the SCAN SIDECAR LISTENER). Culvert has four
+listeners; three carry a rebind ladder, an `up` gauge, bind counters, an
+operator-contract row and an alert (CHAOS-57 admin UI, CHAOS-66/102 SOCKS5,
+CHAOS-71 Control-Plane gRPC). The fourth had one `logger.Printf` and a goroutine
+that returned. Measured: closing the listener under `Serve` left a LIVE process
+with no scanning plane and its own address FREE — no rebind, no counter, no
+gauge, no row, no alert; and a `Shutdown` landing before the serving goroutine's
+`ss.server` write returned **nil (success)** having closed nothing, after which
+`/health` answered **200**, with 3 DATA RACE reports in 50 `-race` iterations on
+the same field. What makes this the sharp instance rather than the leftover one
+is the far end: a sidecar that is not listening is exactly the condition under
+which `internal/secscan`'s `remoteScanFail` takes its fail-**OPEN** branch
+(WK-2b) and the fleet forwards bodies **UNSCANNED**. A third defect made the
+first two invisible end to end: `remoteScanFail` gates on
+`alerts.HasSubscriber("scan_svc_down")`, and a differential over the tree found
+**13 production alert events fired with no Alerts-panel checkbox** — the
+scanning plane had one of four — so the alert built for this condition could not
+fire on any deployment. Drift the other way: zero. Supervision, the five metric
+rows, the `scan_svc_listener` row, the `/healthz` `scan_svc` field and the
+report-only `/ready` `scan_svc` row beside the three fields and three rows its
+siblings already publish there, and four checkboxes are fixed; the ten other
+unsubscribable events are pinned in EXECUTABLE form rather than patched from a
+sidecar round. Closes the scan-sidecar half of the 2026-10-13 backlog's `L-5`.
+Id AND section claimed in a committed placeholder row before any code, checked
+against `origin/main` at `b05d649` **and the open-PR set** — `CHAOS-112`/§61 are
+held by open PR #1819, so this sweep took 113/§62 rather than the next free
+number after main's highest.
+
 The 2026-11-06 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-06.md)
 and summarised in §61 — CHAOS-112 (the PER-IP CONNECTION LIMITER'S
@@ -274,6 +304,33 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in silence. The durable fix is still the one recorded above (allocate the id
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
+
+**2026-11-07 — `CHAOS-113` CLAIMED (placeholder, commit one). Domain: the SCAN
+SIDECAR LISTENER — `-scan-svc-listen` is the one listener in the tree that got
+none of the lifecycle treatment the other three received, so what happens to a
+fleet's malware scanning when the socket it all depends on never binds, or dies
+after it did?** Id claimed in this committed row before any code was written,
+per the convention above, and checked against `origin/main` rather than the
+working tree, per the 2026-09-25 amendment: `CHAOS-111` is the highest id
+anywhere on `origin/main` (at `b05d649`), and **`CHAOS-112` is held by open PR
+#1819** (`claude/serene-cerf-it754q`, claimed 2026-11-06, the cluster per-IP-cap
+snapshot round) — which is exactly the case the amendment exists for, so this
+sweep did NOT take the next id after main's highest. Of the other open PRs
+(#1821, #1820, #1818, #1817, #1816, #1815, #1814, #1705, #1549, #1548, #1536,
+#1528, #1526) none is a chaos sweep. This sweep took 113 and will not move.
+
+Scope is the SIMULATE list's *SIGTERM* / *unexpected restart* / *unexpected
+startup order* / *ClamAV unavailable* rows aimed at the LAST listener in the
+tree with no supervision, and it closes the scan-sidecar half of the 2026-10-13
+backlog's `L-5` — the half that row recorded as `delegated` while its CP-gRPC
+half was closed by CHAOS-71. The class is not new: CHAOS-57 closed it for the
+admin UI, CHAOS-66/102 for SOCKS5, CHAOS-71 for the Control-Plane gRPC
+listener. Each of those three now has a rebind ladder, an `up` gauge, accept/bind
+counters and a health row. `scan_svc.go` has a `logger.Printf` and a goroutine
+that returns. What makes this the sharp instance rather than the leftover one is
+the far end: a sidecar that is not listening is the deployment in which
+`internal/secscan`'s `remoteScanFail` fails **OPEN** (WK-2b) — so the socket
+nothing watches is the socket that decides whether a fleet scans at all.
 
 **2026-11-06 — `CHAOS-112` CLAIMED (placeholder, commit one). Domain: the
 PER-IP CONNECTION LIMITER'S CONFIGURATION PLANE — `conn_limit_enabled` is the
@@ -20338,3 +20395,152 @@ SYNCHRONOUS, so no signal or exit loses a record, only a machine-level fault
 inside the writeback window does, and the sharpest instance is not `D-5`'s own
 example but the audited-but-deliberately-UNVERSIONED set (password change,
 logout, CDR hygiene/revoke) where the unsynced JSONL is the SOLE durable record.
+
+---
+
+## 62. CHAOS-113 — The scan sidecar listener: the one socket nobody watched is the socket that decides whether a fleet scans
+
+Findings, the executed fault injection, the risk matrix, the mutation table and
+the gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-07.md).
+Summarised here because three rows are load-bearing for later sweeps, and
+because this section **closes the scan-sidecar half of the 2026-10-13 backlog's
+`L-5`** — the half that row recorded as `delegated` while CHAOS-71 closed its
+Control-Plane-gRPC half.
+
+**Section number.** `§61` is held by open PR #1819 (`CHAOS-112`), which claimed
+it first; this sweep took `§62` rather than the next number after main's
+highest, for the same reason it took `CHAOS-113` rather than `CHAOS-112`. The
+register's own caution applies — *a merge-conflict resolver is not a substitute
+for allocating the id*, and it renumbers the SECTION while leaving the id
+colliding — so both were allocated here, together, against `origin/main` plus
+the open-PR set.
+
+**The entry point was an inventory, not a symptom.** Culvert has four
+listeners. Three carry a rebind ladder, an `up` gauge, bind/accept counters, an
+operator-contract row and an alert: the admin UI (CHAOS-57), SOCKS5
+(CHAOS-66/102) and the Control-Plane gRPC listener (CHAOS-71). The fourth,
+`-scan-svc-listen`, had **one `logger.Printf` and a goroutine that returned**.
+The register's standing lesson gains a variant: *a class is not closed until
+its last instance is, and the last instance is the one no round was named
+after.*
+
+- **`CHAOS-113` / SS-1 — THE FINDING. A serve loop that ended left a LIVE
+  process with no scanning plane, and nothing anywhere said so.** Measured:
+  closing the listener under `Serve` returned `accept tcp …: use of closed
+  network connection`, the goroutine exited, the process stayed up, and **the
+  sidecar's own address was FREE** — no rebind, ever. A bind failure at boot was
+  worse: one log line, then a process that would serve nothing for its entire
+  life. **Why this listener is the sharp instance rather than the leftover
+  one:** for the other three a dead listener costs the availability of that
+  surface; for this one it costs a SECURITY CONTROL on every other node, because
+  a sidecar that is not listening is exactly the condition under which
+  `internal/secscan`'s `remoteScanFail` takes its fail-**OPEN** branch (WK-2b)
+  and the fleet forwards bodies **UNSCANNED**. Fixed with
+  `superviseScanSvcListener`: bind → serve → rebind, 1 s doubling to a 30 s
+  ceiling, ±25% jitter (the `internal/feedsched` phase property applied to a
+  listener), ladder reset after a 60 s stable serve. **One threshold governs
+  both the never-bound and the lost-socket case**, which this round got wrong
+  first: `!EverBound && BindFailures > 0` as its own fail arm, in the row AND
+  the gauge, paged on the FIRST failed bind, i.e. on every ordinary redeploy in
+  which a draining predecessor still holds the port — the condition CHAOS-66
+  added the threshold for on SOCKS5, whose never-bound branch is likewise gated
+  on `BindUnavailable`. `EverBound` chooses WHICH fail row and remedy, never
+  WHETHER there is one. It passed every other gate because the only rebinding
+  control drove a sidecar that HAD served; found by re-reading this round's own
+  gate, not by a gate.
+
+- **`CHAOS-113` / SS-2 — `Shutdown` reported SUCCESS and did nothing, and the
+  field it read was a data race.** `ScanService.server` was written by the
+  goroutine running `Start()` and read by the shutdown hook
+  (`main_shutdown.go`), unsynchronised. `if ss.server == nil { return nil }`
+  returned success when it landed before that write, having closed nothing — and
+  the registry discards the error (`_ = s.scanSvc.Shutdown(ctx)`), so nothing
+  would have said otherwise. Measured: **`/health` answered 200 after a
+  `Shutdown` that returned `nil`**, with the socket still held; and 3 DATA RACE
+  reports in 50 iterations under `-race` (write `scan_svc.go:92` vs. reads
+  `:108`/`:111`). This is the orchestrator-cancel-during-startup case of the
+  backlog's `L-3`, on the one component whose "I stopped" was a LIE rather than
+  a missed flush. Fixed by REMOVING the window rather than reporting it — the
+  §36 rule CHAOS-71 applied to the same class: the `http.Server` is built in
+  `NewScanService`, so a `Shutdown` that precedes `Serve` marks it shut down and
+  net/http's own `Serve` returns `ErrServerClosed` with its deferred listener
+  close releasing the port. `Listen` refuses after a terminal `Shutdown`, so the
+  supervisor can never hold a socket nothing will accept on.
+
+- **`CHAOS-113` / SS-3 — the one alert that would have told anyone could not be
+  subscribed to, and the drift is ONE-WAY.** `remoteScanFail` gates on
+  `alerts.HasSubscriber("scan_svc_down")` — correct and deliberate, and its
+  consequence is that **an event with no way to subscribe is an event that never
+  fires**. Measured by differential over the tree: **13 production alert events
+  were fired with no checkbox in the Alerts panel**, the scanning plane had
+  **one of four** subscribable (`scan_clam_error`), and `scan_svc_down` was
+  absent from `internal/alerts/store.go`'s event registry too — so the string
+  was not discoverable from any surface the product exposes. The admin API does
+  not validate event names, so an operator who already KNEW the string could
+  POST it by hand; nothing told them it existed. Drift in the other direction:
+  **zero** — every event the panel offers is fired. A one-way leak is a process
+  gap, not ten mistakes. This round fixed the scanning plane's four and added
+  `scan_svc_listener_down`; **the other ten are recorded in EXECUTABLE form**
+  (`scanAlertGUIKnownGaps`) behind two gates, one that stops a new event joining
+  the list and one that fails if an entry has since been fixed — so the list can
+  only get shorter and cannot rot into a list of things that are fine.
+
+**What was already right, and must not be "fixed".** The client's three-way
+`verdict / budget-or-capacity / fault` split is the CHAOS-52/53 result: a scan
+that is merely SLOW fails **closed** against the process's own budget, and only
+an actual fault fails open. The fail-open branch is therefore reached by design,
+not by accident, and this round does **not** change it — converting a sidecar
+fault into a refusal is a posture change for every large download on every node
+and belongs to the owner. `culvert_remote_scan_fail_total`, the
+`degradedLogAllowed` rate limit, the bounded alert class (a transport error
+embeds the ephemeral local port and could not dedup), the affirmative-`Clean`
+requirement and the bounded replies are all correct and were left alone.
+
+**Found while watching this round's own PR CI, and recorded here because it is
+NOT this round's and belongs to another domain: the maintenance agent's sudoers
+file is REJECTED by `sudo-rs`. FIXED 2026-11-08 by PR #1825** (`fix(maint):
+replace sudoers argument wildcards with a validating wrapper`, merged as
+`aa39119`) — a validating wrapper (`packaging/culvert-maint/compose-cli`) that
+its author records as TIGHTER than the wildcards it replaces, with the recorded
+follow-up that `sudo-rs` matches arguments literally so the `[0-9a-f]`-class
+container-inspect and pinned pull/tag rules never match on such hosts and fail
+closed. Left below as first written, because the escalation and its answer are
+both worth keeping; the one correction is that the precise cause is Ubuntu
+26.04's `sudo-rs`, not a version bump of the C `sudo`.**
+`cmd/culvert-maint/internal/runner/templates_d16b.go` renders sudo rules
+containing `--older-than *` and `--keep-last *` — deliberately, its own comment
+calling it "one bounded wildcard token" with the agent's validator as "the only
+barrier between operator input and a sudo argv". A newer `sudo` refuses
+wildcards in command arguments outright (`syntax error: wildcards are not
+allowed in command arguments` / `visudo: invalid sudoers file`), so on such a
+host the sudoers file **the installer writes** is invalid and `culvert-maint`
+cannot be authorized for restore-leftover cleanup or upgrade. That is a
+deployment break that arrives with no change on Culvert's side as distros roll
+forward, not a drifting test expectation. Surfaced by the GitHub runner image
+rolling to Ubuntu 26.04 (which independently broke the Playwright-based
+`Admin-UI RBAC` job: no chromium for `ubuntu26.04-x64` on the pinned driver).
+Established as pre-existing rather than asserted: unrelated PR #1821 shows the
+identical failures an hour earlier, and PRs whose CI ran before the roll are
+clean. NOT fixed here — removing the wildcard has security consequences given
+that the validator is the stated barrier, and the alternatives are an owner
+decision. **It wants its own id and round.**
+
+Left open and attributed rather than fixed, in priority order: **closing the
+unavailability episode on a STABLE SERVE rather than on a bind** — the sharpest
+remaining gap and one this round's own design introduced, so it is stated rather
+than buried: `noteScanSvcBound` clears the episode and the alert latch at BIND
+time, so a socket that binds and dies immediately never accumulates 30 s and a
+FLAPPING sidecar pages nobody while every caller fails open (the ladder bounds
+the rate, not the condition; `culvert_scan_svc_serve_exits_total` is monotonic
+through a flap and is the signal to alert on meanwhile); **the ten
+remaining GUI-unsubscribable events** (pinned, not fixed — the highest-value
+remainder, and a sweep of its own); **the fail-open posture itself** (WK-2b,
+owner decision, now with a stronger case for a refusal tier because an operator
+would see it coming); **a caller-side `remote_scan` contract row** — this round
+gave the SIDECAR's process a health row, while the node that actually fails open
+still reports a clean diagnostics report; **converging the three identical
+bind-error classifiers** (`socks5`, `admin_ui` and this round's, including the
+same narrowed `net.Error`-must-be-a-timeout branch each had to learn
+separately); and **making the rebind ceiling and unavailability threshold
+operator settings**, which the Control-Plane listener does not do either.
