@@ -342,3 +342,7 @@ f2e4406ef9a5aa2df89111ee98431f6138e15730:chaos79_dp_sync_worker_panic_test.go:ge
 5f781e980c6cbd4417489a202ba8787cf061e6a0:install_script_session_secret_empty_env_test.go:generic-api-key:51
 # F. Prose in the chaos-engineering review (identifier and gate names). (1)
 aa278d95fe4b42ab874e2ff02b4b2db144a95d46:roadmap/CHAOS-ENGINEERING-REVIEW.md:generic-api-key:9257
+# G. 2026-11-08 classification (docs/appliance/evidence/combined/gitleaks-history-20261108.md):
+#    a public build digest (lab workflow) and a synthetic test identifier. (2)
+b63b43c0890c9257d17ed13811eb7ca527831225:internal/logstore/batchencode_test.go:generic-api-key:38
+e18277a48938537f68985dd55fc05ade3081f939:.github/workflows/appliance-lab.yml:generic-api-key:775

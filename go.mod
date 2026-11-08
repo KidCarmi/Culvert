@@ -26,7 +26,7 @@ replace github.com/KidCarmi/Culvert/releaseproof => ./pkg/releaseproof
 require (
 	github.com/KidCarmi/Culvert/releaseproof v0.0.0
 	github.com/KidCarmi/Sluice v0.2.1-0.20260902055746-d6d4394ab74f
-	github.com/andybalholm/brotli v1.2.6
+	github.com/andybalholm/brotli v1.2.7
 	github.com/beevik/etree v1.8.1
 	github.com/crewjam/saml v0.5.1
 	github.com/dgraph-io/badger/v4 v4.9.6
@@ -46,7 +46,7 @@ require (
 	go.etcd.io/etcd/client/v3 v3.7.2
 	go.etcd.io/etcd/server/v3 v3.7.2
 	golang.org/x/crypto v0.58.0
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/text v0.43.0
 	google.golang.org/grpc v1.84.0
