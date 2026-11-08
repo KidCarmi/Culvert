@@ -1344,8 +1344,12 @@ embed() { printf "echo '%s' | base64 -d > /run/culvert-lab-upd/%s; chmod 0644 /r
 #   6e/agent-restore-commit  POST /v1/restores/commit (stop -> restore -> start ->
 #                            health) succeeds; a rule added after the backup is
 #                            gone, the backup's rules are back, login 200, traffic
-#   6e/agent-cleanup-dryrun  POST /v1/cleanups (dry run) succeeds
-#   6e/agent-cleanup-commit  POST /v1/cleanups (confirm) succeeds
+#   6e/agent-cleanup-dryrun  POST /v1/cleanups (dry run) is dispatched through the
+#                            wrapper and completes
+#   6e/agent-cleanup-commit  POST /v1/cleanups (confirm) likewise. Restore leftovers
+#                            are minutes old and the bound is >= 1h, so these prove
+#                            the privileged path, not a deletion
+# Every operation PASS also requires the guest script's own exit status 0.
 # Opt-in (campaign control LAB_AGENT_PRIVPATH=1); a no-op otherwise.
 agent_privileged_path() {
   [[ "${LAB_AGENT_PRIVPATH:-0}" == 1 ]] || return 0
@@ -1392,7 +1396,7 @@ EOS
       "r=\$(agent -X POST -d \"{\\\"path\\\":\\\"\$A/$fn\\\",\\\"mode\\\":\\\"full\\\"}\" http://agent/v1/restores/dryrun); echo \"\$r\" | tail -c 400" \
       'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"'; } \
     | gpriv --timeout 1200 > "$EV/06e-agent-restore-dryrun.txt" 2>&1 || rc=$?
-  grep -qx 'op-state=succeeded' "$EV/06e-agent-restore-dryrun.txt" \
+  [[ $rc == 0 ]] && grep -qx 'op-state=succeeded' "$EV/06e-agent-restore-dryrun.txt" \
     && check 6e agent-restore-dryrun pass "agent socket -> sudo -> compose-cli restore (dry run) of $fn: op $(sed -n 's/^op=//p' "$EV/06e-agent-restore-dryrun.txt" | head -1) succeeded" \
     || check 6e agent-restore-dryrun fail "exit $rc: $(grep -E '^(op=|op-state=|HTTP)' "$EV/06e-agent-restore-dryrun.txt" | tr '\n' ' ') $(tail -3 "$EV/06e-agent-restore-dryrun.txt" | tr '\n' ' ' | head -c 300)"
   # Agent restore commit, with a change made after the backup as the oracle.
@@ -1407,7 +1411,7 @@ EOS
   rules="$(api GET /api/policy | body | python3 -c 'import json,sys;print(" ".join(r["name"] for r in json.load(sys.stdin)["rules"]))' 2>/dev/null || true)"
   ra="$(through_proxy http://example.com/) $(through_proxy http://example.net/)"
   printf 'post-backup-rule http %s\nlogin %s\nrules %s\ntraffic example.com/example.net %s\n' "$c" "$lc" "$rules" "$ra" >> "$EV/06e-agent-restore-commit.txt"
-  if grep -qx 'op-state=succeeded' "$EV/06e-agent-restore-commit.txt" && [[ "$c" == 200 && "$lc" == 200 && " $rules " == *" lab-allow-example "* && " $rules " != *" lab-post-backup-2 "* && "$ra" == "200 403" ]]; then
+  if [[ $rc == 0 ]] && grep -qx 'op-state=succeeded' "$EV/06e-agent-restore-commit.txt" && [[ "$c" == 200 && "$lc" == 200 && " $rules " == *" lab-allow-example "* && " $rules " != *" lab-post-backup-2 "* && "$ra" == "200 403" ]]; then
     check 6e agent-restore-commit pass "agent: stop -> compose-cli restore --confirm -> start -> health succeeded; login 200, backup rules back ($rules), post-backup rule gone, example.com 200 / example.net 403"
   else check 6e agent-restore-commit fail "exit $rc $(grep -E '^(op=|op-state=)' "$EV/06e-agent-restore-commit.txt" | tr '\n' ' ')post-backup-rule $c login $lc rules '$rules' traffic $ra"; STOP=1; return 0; fi
   # Agent cleanup of restore leftovers: dry run, then commit.
@@ -1418,8 +1422,8 @@ EOS
         "r=\$(agent -X POST -d '{\"older_than\":\"1h\",\"keep_last\":0,\"confirm\":$conf}' http://agent/v1/cleanups); echo \"\$r\" | tail -c 400" \
         'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"'; } \
       | gpriv --timeout 900 > "$EV/06e-agent-cleanup-$mode.txt" 2>&1 || rc=$?
-    grep -qx 'op-state=succeeded' "$EV/06e-agent-cleanup-$mode.txt" \
-      && check 6e "agent-cleanup-$mode" pass "agent socket -> sudo -> compose-cli cleanup --older-than 1h --keep-last 0$([[ $mode == commit ]] && echo ' --confirm'): op $(sed -n 's/^op=//p' "$EV/06e-agent-cleanup-$mode.txt" | head -1) succeeded" \
+    [[ $rc == 0 ]] && grep -qx 'op-state=succeeded' "$EV/06e-agent-cleanup-$mode.txt" \
+      && check 6e "agent-cleanup-$mode" pass "agent socket -> sudo -> compose-cli cleanup --older-than 1h --keep-last 0$([[ $mode == commit ]] && echo ' --confirm'): op $(sed -n 's/^op=//p' "$EV/06e-agent-cleanup-$mode.txt" | head -1) dispatched through the wrapper and completed (no leftover is older than 1h here, so no deletion is asserted)" \
       || check 6e "agent-cleanup-$mode" fail "exit $rc: $(grep -E '^(op=|op-state=|HTTP)' "$EV/06e-agent-cleanup-$mode.txt" | tr '\n' ' ') $(tail -3 "$EV/06e-agent-cleanup-$mode.txt" | tr '\n' ' ' | head -c 300)"
   done
 }

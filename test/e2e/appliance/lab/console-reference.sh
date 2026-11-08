@@ -18,7 +18,7 @@
 #   - every binary must carry vcs.revision=SHA, vcs.modified=false and the
 #     tag-free module version v0.0.0-<14 digits>-<SHA[:12]>, or nothing is printed.
 #
-# Output: OUTDIR/references.txt (and stdout): one "<sha256>  <name>" line per
+# Output, only once BOTH binaries pass: OUTDIR/references.txt (and stdout), one "<sha256>  <name>" line per
 # binary plus the module version and toolchain. Exit non-zero on any refusal.
 set -euo pipefail
 die() { echo "console-reference: $*" >&2; exit 1; }
@@ -38,21 +38,25 @@ git -C "$src" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
 [[ -z "$(git -C "$src" status --porcelain)" ]] || die "the reference checkout is not clean"
 
 want=$(awk '$1 == "toolchain" { print $2 }' "$src/go.mod")
-have=$(cd "$src" && GOENV=off GOWORK=off GOFLAGS= go env GOVERSION)
+have=$(cd "$src" && GOENV=off GOWORK=off GOFLAGS='' go env GOVERSION)
 [[ -n "$want" && "$want" == "$have" ]] || die "compiler is ${have:-none}, the source's go.mod toolchain is ${want:-unset}"
 
 (cd "$src" && bash -c '. appliance/build/console-bundle.sh && build_console_bundle "$1" "$2"' _ "$src" "$out/bundle")
 [[ -z "$(git -C "$src" status --porcelain)" ]] || die "the build modified the reference checkout"
 
-{
-  for b in culvert-console culvert-access; do
-    f="$out/bundle/$b"; [[ -f "$f" ]] || die "$b was not built"
-    info=$(go version -m "$f")
-    mod=$(awk '$1 == "mod" { print $3 }' <<<"$info")
-    [[ "$mod" =~ ^v0\.0\.0-[0-9]{14}-${sha:0:12}$ ]] || die "$b module version is '$mod', not the tag-free v0.0.0-<time>-${sha:0:12}"
-    grep -qx $'\tbuild\tvcs.revision='"$sha" <<<"$info" || die "$b vcs.revision is not $sha"
-    grep -qx $'\tbuild\tvcs.modified=false' <<<"$info" || die "$b is stamped vcs.modified=true"
-    printf '%s  %s\n' "$(sha256sum < "$f" | cut -d' ' -f1)" "$b"
-  done
-  echo "# source $sha tree $tree, module version $mod, $have, appliance/build/console-bundle.sh of that source, tag-free --depth=1 fetch"
-} | tee "$out/references.txt"
+# Validate BOTH binaries before anything is published (ASTRA R3): a refusal of
+# either prints no hash and leaves no references.txt.
+lines=""
+for b in culvert-console culvert-access; do
+  f="$out/bundle/$b"; [[ -f "$f" ]] || die "$b was not built"
+  info=$(go version -m "$f")
+  mod=$(awk '$1 == "mod" { print $3 }' <<<"$info")
+  [[ "$mod" =~ ^v0\.0\.0-[0-9]{14}-${sha:0:12}$ ]] || die "$b module version is '$mod', not the tag-free v0.0.0-<time>-${sha:0:12}"
+  grep -qx $'\tbuild\tvcs.revision='"$sha" <<<"$info" || die "$b vcs.revision is not $sha"
+  grep -qx $'\tbuild\tvcs.modified=false' <<<"$info" || die "$b is stamped vcs.modified=true"
+  lines+="$(sha256sum < "$f" | cut -d' ' -f1)  $b"$'\n'
+done
+lines+="# source $sha tree $tree, module version $mod, $have, appliance/build/console-bundle.sh of that source, tag-free --depth=1 fetch"$'\n'
+printf '%s' "$lines" > "$out/references.txt.tmp"
+mv -f "$out/references.txt.tmp" "$out/references.txt"
+cat "$out/references.txt"
