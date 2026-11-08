@@ -2195,6 +2195,9 @@ jobs:
           export LAB_OVA="$LAB_ROOT/ova/$OVA_NAME" LAB_OVA_SHA256="$OVA_SHA256" LAB_EXPECT_IMAGE_ID="$EXPECT_IMAGE_ID"
           export LAB_RECOVERY_REBOOTS="$Q7_REBOOTS" LAB_RECOVERY_PROFILES="$Q7_PROFILE" LAB_RECOVERY_VARIANTS=base LAB_Q7_FULL_JOINT=1
           export LAB_HISTORY=1 LAB_ENGINE_SURFACE=1 LAB_M2_HARDENING=1 LAB_M2_ONLY=0
+          # #1825 port (owner decision 8 Nov): requalify restore and cleanup through the
+          # agent's privileged path (step 6e), plus the wrapper's own refusals.
+          export LAB_AGENT_PRIVPATH=1
           export LAB_PRESSURE=0 LAB_FP2=0 LAB_LDAP=0 LAB_CACHEBYPASS=0
           # Owner stop conditions: the first failure latches the campaign stop.
           export LAB_FAIL_FAST=1 LAB_CAMPAIGN_STOP_FILE LAB_START_DEADLINE_EPOCH LAB_CAMPAIGN_CLOCK_FILE LAB_CAMPAIGN_WINDOW_S LAB_CAMPAIGN_STARTED_FILE
@@ -2302,6 +2305,8 @@ jobs:
               "8/backup-listed", "8/restore-persisted", "H/history-recorded", "H/history-export", "H/history-export-opaque", "H/history-backup", "H/history-source-destroyed",
               "H/history-gone-after-restore", "H/history-import-refused-while-running", "H/history-wrong-passphrase", "H/history-import-dry-run", "H/history-recovered",
               "H/allowlist-survived-recovery", "H/history-enforcement"],
+            "maintenance agent privileged path (#1825 wrapper)": ["6e/wrapper-installed", "6e/wrapper-refusals", "6e/agent-restore-dryrun",
+              "6e/agent-restore-commit", "6e/agent-cleanup-dryrun", "6e/agent-cleanup-commit"],
             "maintenance paths": ["6c/test-only-trust", "6c/unsigned-apply-refused", "6c/signed-apply", "6c/signed-rollback", "6d/support-bundle", "7/os-update", "7/reboot", "7/kernel", "7/docker-held",
               "8/stack-resumed", "8/support-persisted", "8/image-identity"],
             "Q7: three consecutive recoveries, FULL joint, 120 s deadline from authenticated acceptance": Q7,

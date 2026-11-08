@@ -1132,6 +1132,9 @@ EOS
     else check 6b restore-commit fail "exit $rc login $c rules '$rules' traffic $ra ($(grep -E '^(down|commit|up)-rc=' "$EV/06b-restore-offline.txt" | tr '\n' ' '))"; STOP=1; fi
   elif [[ $STOP == 0 ]]; then check 6b restore-commit not-run "no backup file"; fi
 
+  # Step 6e — the maintenance agent's privileged path after #1825 (opt-in).
+  [[ "${LAB_AGENT_PRIVPATH:-0}" == 1 ]] && gate 6e agent-privileged-path && agent_privileged_path
+
   # Step 6c — signed update and rollback through the maintenance agent, with
   # TEST-ONLY trust (LAB_UPDATE_DIR, prepared outside the OVA by the lab).
   if gate 6c signed-update; then
@@ -1323,6 +1326,104 @@ install -d -m 0755 /run/culvert-lab-upd
 # /run is tmpfs: the pressure phases fill the root disk, and a fixture staged
 # there could not be written (lab run 37948667525).
 embed() { printf "echo '%s' | base64 -d > /run/culvert-lab-upd/%s; chmod 0644 /run/culvert-lab-upd/%s\n" "$(base64 -w0 "$2")" "$1" "$1"; }
+# agent_privileged_path — #1528 FB1-R1 requalification of the maintenance
+# agent's privileged boundary after the #1825 port (owner decision 8 Nov:
+# requalify agent installation, backup, restore, cleanup and signed
+# update/rollback). Install, backup and signed update/rollback are covered by
+# steps 6 and 6c; this covers what they do not, through the REAL path (agent
+# socket as the proxy's peer identity -> sudo -> the root-owned compose-cli
+# wrapper -> the cli container), on the appliance's own classic sudo:
+#   6e/wrapper-installed     wrapper root:root 0755, its directory chain root-owned
+#                            and not group/world-writable, the rendered sudoers
+#                            grants it and passes visudo -c
+#   6e/wrapper-refusals      the wrapper itself (run as the agent user through its
+#                            own sudoers rule) refuses traversal, an unknown mode,
+#                            out-of-range cleanup bounds, a foreign pull reference
+#                            and an unknown subcommand with exit 64
+#   6e/agent-restore-dryrun  POST /v1/restores/dryrun of the step-6 backup succeeds
+#   6e/agent-restore-commit  POST /v1/restores/commit (stop -> restore -> start ->
+#                            health) succeeds; a rule added after the backup is
+#                            gone, the backup's rules are back, login 200, traffic
+#   6e/agent-cleanup-dryrun  POST /v1/cleanups (dry run) succeeds
+#   6e/agent-cleanup-commit  POST /v1/cleanups (confirm) succeeds
+# Opt-in (campaign control LAB_AGENT_PRIVPATH=1); a no-op otherwise.
+agent_privileged_path() {
+  [[ "${LAB_AGENT_PRIVPATH:-0}" == 1 ]] || return 0
+  local fn="${BACKUP_FILE:-}" rc pass c rules ra W=/usr/local/libexec/culvert-maint/compose-cli
+  pass="$(cat "$SEC/admin-pass")"
+  # Installation and ownership of the privileged wrapper.
+  rc=0; gpriv > "$EV/06e-wrapper-installed.txt" 2>&1 <<EOS || rc=$?
+stat -c 'wrapper %U:%G %a %n' $W
+for d in /usr/local/libexec/culvert-maint /usr/local/libexec /usr/local /usr; do stat -c 'dir %U:%G %a %n' "\$d"; done
+grep -c '^culvert-maint ALL=(root) NOPASSWD: $W\$' /etc/sudoers.d/culvert-maint | sed 's/^/wrapper-rules=/'
+grep -E '^[^#].*NOPASSWD:' /etc/sudoers.d/culvert-maint | awk -F'NOPASSWD:' '\$2 ~ /[*?]/' | sed 's/^/wildcard-rule: /'
+visudo -c -f /etc/sudoers.d/culvert-maint >/dev/null 2>&1; echo "visudo-rc=\$?"
+sudo -V | head -1
+EOS
+  if [[ $rc == 0 ]] && grep -qx "wrapper root:root 755 $W" "$EV/06e-wrapper-installed.txt" && grep -qx 'wrapper-rules=1' "$EV/06e-wrapper-installed.txt" \
+     && grep -qx 'visudo-rc=0' "$EV/06e-wrapper-installed.txt" && [[ "$(grep -c '^dir root:root ' "$EV/06e-wrapper-installed.txt")" == 4 ]] \
+     && ! grep -E '^dir ' "$EV/06e-wrapper-installed.txt" | awk '{print $3}' | grep -qE '[2367].$|.[2367]$'; then
+    check 6e wrapper-installed pass "$W root:root 0755, directory chain root-owned and not group/world-writable, one sudoers rule, visudo -c OK ($(grep -m1 '^Sudo version' "$EV/06e-wrapper-installed.txt")); $(grep -c '^wildcard-rule:' "$EV/06e-wrapper-installed.txt") trailing-* inspect rule(s) recorded"
+  else check 6e wrapper-installed fail "exit $rc: $(tr '\n' ' ' < "$EV/06e-wrapper-installed.txt" | head -c 400)"; fi
+  # The wrapper refuses, by itself, what its argument rules exclude (exit 64, nothing executed).
+  rc=0; gpriv > "$EV/06e-wrapper-refusals.txt" 2>&1 <<EOS || rc=$?
+z=\$(printf '0%.0s' \$(seq 1 64))
+t() { n=\$1; shift; sudo -u culvert-maint -- sudo -n $W "\$@" >/dev/null 2>&1; echo "\$n rc=\$?"; }
+t traversal restore /backup/../../etc/shadow --mode full
+t hidden-name restore /backup/.hidden --mode full
+t unknown-mode restore /backup/${fn:-x.tar.gz} --mode everything
+t extra-flag restore /backup/${fn:-x.tar.gz} --mode full --confirm --confirm
+t older-than-too-short cleanup --older-than 30m --keep-last 1
+t keep-last-too-many cleanup --older-than 1h --keep-last 101
+t foreign-pull pull evil.example/culvert@sha256:\$z
+t unknown-subcommand shell
+t no-arguments
+EOS
+  local nref; nref="$(grep -cE '^[a-z-]+ rc=64$' "$EV/06e-wrapper-refusals.txt")"
+  if [[ $rc == 0 && "$nref" == 9 ]]; then check 6e wrapper-refusals pass "9/9 refused by the wrapper with exit 64 under the appliance's sudo (traversal, hidden name, unknown mode, repeated flag, cleanup bounds x2, foreign pull, unknown subcommand, no arguments)"
+  else check 6e wrapper-refusals fail "exit $rc, $nref/9 refused with 64: $(tr '\n' ' ' < "$EV/06e-wrapper-refusals.txt" | head -c 400)"; fi
+  if [[ -z "$fn" ]]; then
+    for k in agent-restore-dryrun agent-restore-commit agent-cleanup-dryrun agent-cleanup-commit; do check 6e "$k" not-run "no step-6 backup file"; done
+    return 0
+  fi
+  local A; A='$(sed -n "s/^allowed_backup_dir *= *\"\(.*\)\".*/\1/p" "$CONF" | head -1)'
+  # Agent restore dry run.
+  rc=0; { printf '%s' "$AGENT_LIB"; printf '%s\n' "A=$A; A=\${A:-/backup}; echo \"allowed_backup_dir=\$A\"" \
+      "r=\$(agent -X POST -d \"{\\\"path\\\":\\\"\$A/$fn\\\",\\\"mode\\\":\\\"full\\\"}\" http://agent/v1/restores/dryrun); echo \"\$r\" | tail -c 400" \
+      'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"'; } \
+    | gpriv --timeout 1200 > "$EV/06e-agent-restore-dryrun.txt" 2>&1 || rc=$?
+  grep -qx 'op-state=succeeded' "$EV/06e-agent-restore-dryrun.txt" \
+    && check 6e agent-restore-dryrun pass "agent socket -> sudo -> compose-cli restore (dry run) of $fn: op $(sed -n 's/^op=//p' "$EV/06e-agent-restore-dryrun.txt" | head -1) succeeded" \
+    || check 6e agent-restore-dryrun fail "exit $rc: $(grep -E '^(op=|op-state=|HTTP)' "$EV/06e-agent-restore-dryrun.txt" | tr '\n' ' ') $(tail -3 "$EV/06e-agent-restore-dryrun.txt" | tr '\n' ' ' | head -c 300)"
+  # Agent restore commit, with a change made after the backup as the oracle.
+  c="$(api POST /api/policy '{"name":"lab-post-backup-2","priority":21,"action":"Allow","destFQDN":"example.org","sslAction":"Bypass","enabled":true}' | tee "$EV/06e-post-backup-rule.txt" | code)"
+  rc=0; { printf '%s' "$AGENT_LIB"; printf '%s\n' "A=$A; A=\${A:-/backup}" \
+      "r=\$(agent -X POST -d \"{\\\"path\\\":\\\"\$A/$fn\\\",\\\"mode\\\":\\\"full\\\"}\" http://agent/v1/restores/commit); echo \"\$r\" | tail -c 400" \
+      'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"'; } \
+    | gpriv --timeout 2400 > "$EV/06e-agent-restore-commit.txt" 2>&1 || rc=$?
+  local deadline=$(( $(date +%s) + 600 ))
+  until curl -fsS -m 3 "$P/health" >/dev/null 2>&1; do (( $(date +%s) < deadline )) || break; sleep 5; done
+  : > "$JAR"; local lc; lc="$(api POST /api/auth/login "{\"user\":\"$ADMIN_USER\",\"pass\":\"$pass\"}" | code)"
+  rules="$(api GET /api/policy | body | python3 -c 'import json,sys;print(" ".join(r["name"] for r in json.load(sys.stdin)["rules"]))' 2>/dev/null || true)"
+  ra="$(through_proxy http://example.com/) $(through_proxy http://example.net/)"
+  printf 'post-backup-rule http %s\nlogin %s\nrules %s\ntraffic example.com/example.net %s\n' "$c" "$lc" "$rules" "$ra" >> "$EV/06e-agent-restore-commit.txt"
+  if grep -qx 'op-state=succeeded' "$EV/06e-agent-restore-commit.txt" && [[ "$c" == 200 && "$lc" == 200 && " $rules " == *" lab-allow-example "* && " $rules " != *" lab-post-backup-2 "* && "$ra" == "200 403" ]]; then
+    check 6e agent-restore-commit pass "agent: stop -> compose-cli restore --confirm -> start -> health succeeded; login 200, backup rules back ($rules), post-backup rule gone, example.com 200 / example.net 403"
+  else check 6e agent-restore-commit fail "exit $rc $(grep -E '^(op=|op-state=)' "$EV/06e-agent-restore-commit.txt" | tr '\n' ' ')post-backup-rule $c login $lc rules '$rules' traffic $ra"; STOP=1; return 0; fi
+  # Agent cleanup of restore leftovers: dry run, then commit.
+  local mode
+  for mode in dryrun commit; do
+    local conf=false; [[ $mode == commit ]] && conf=true
+    rc=0; { printf '%s' "$AGENT_LIB"; printf '%s\n' \
+        "r=\$(agent -X POST -d '{\"older_than\":\"1h\",\"keep_last\":0,\"confirm\":$conf}' http://agent/v1/cleanups); echo \"\$r\" | tail -c 400" \
+        'op=$(printf "%s" "$r" | opid); echo "op=$op"; [ -n "$op" ] && wait_op "$op"'; } \
+      | gpriv --timeout 900 > "$EV/06e-agent-cleanup-$mode.txt" 2>&1 || rc=$?
+    grep -qx 'op-state=succeeded' "$EV/06e-agent-cleanup-$mode.txt" \
+      && check 6e "agent-cleanup-$mode" pass "agent socket -> sudo -> compose-cli cleanup --older-than 1h --keep-last 0$([[ $mode == commit ]] && echo ' --confirm'): op $(sed -n 's/^op=//p' "$EV/06e-agent-cleanup-$mode.txt" | head -1) succeeded" \
+      || check 6e "agent-cleanup-$mode" fail "exit $rc: $(grep -E '^(op=|op-state=|HTTP)' "$EV/06e-agent-cleanup-$mode.txt" | tr '\n' ' ') $(tail -3 "$EV/06e-agent-cleanup-$mode.txt" | tr '\n' ' ' | head -c 300)"
+  done
+}
+
 signed_update_rollback() {
   local U="$LAB_UPDATE_DIR" BASELINE_REF TARGET_REF REGISTRY_ADDR rc
   # shellcheck source=/dev/null
