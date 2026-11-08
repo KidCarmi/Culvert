@@ -46,19 +46,37 @@ func idpRegistrySnapshotCounts() (persisted bool, profiles int) {
 // empty slice into nil exactly as ReplaceAll's copy does) and write-normalized
 // (normalizeIdPProfileWriteInput), then JSON-encoded in list order. Order is
 // kept rather than sorted because ReplaceAll restores the snapshot's order and
-// routing reads the registry in that order. Secrets are part of the digest on
+// routing reads the registry in that order. The five OIDC endpoints discovery
+// writes back (copyDiscoveredOIDCEndpoints) are excluded: they are proxy-derived,
+// not configuration, and a restart re-derives them from the restored profile.
+// Secrets are part of the digest on
 // purpose — a local credential change is a divergence a restart would revert.
 // The digest stays in process memory; ok is false when encoding fails.
 func idpProfilesFingerprint(profiles []*IdPProfile) (fp [32]byte, ok bool) {
 	canonical := cloneIdPProfiles(profiles)
 	for _, p := range canonical {
 		normalizeIdPProfileWriteInput(p)
+		clearDiscoveredOIDCEndpoints(p)
 	}
 	data, err := json.Marshal(canonical)
 	if err != nil {
 		return fp, false
 	}
 	return sha256.Sum256(data), true
+}
+
+// clearDiscoveredOIDCEndpoints blanks, on a canonical copy, exactly the fields
+// copyDiscoveredOIDCEndpoints fills in from discovery. Configured OIDC fields
+// and secrets are left in place so a genuine local change still differs.
+func clearDiscoveredOIDCEndpoints(p *IdPProfile) {
+	if p == nil || p.OIDC == nil {
+		return
+	}
+	p.OIDC.AuthorizationEndpoint = ""
+	p.OIDC.TokenEndpoint = ""
+	p.OIDC.IntrospectionEndpoint = ""
+	p.OIDC.UserinfoEndpoint = ""
+	p.OIDC.JWKsURI = ""
 }
 
 // dpLastGoodSnapshotPersistsIdPProfiles reports whether this node is a data

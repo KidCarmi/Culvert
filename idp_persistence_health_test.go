@@ -203,6 +203,31 @@ func TestCheckIdPPersistence_DPLocalMutationInvalidatesLastGoodExemption(t *test
 	applyAndPersist(3, snapX)
 	expect("snapshot X re-applied and persisted", diagOK)
 
+	// Discovery writing endpoints back onto the stored profile (the compile
+	// path's copyDiscoveredOIDCEndpoints) is not a local configuration change:
+	// a restart re-derives them from the restored snapshot.
+	discovered := func(path string) string { return "https://idp.example.com/" + path + "-v2" }
+	r.mu.Lock()
+	for _, p := range r.profiles {
+		copyDiscoveredOIDCEndpoints(p, &IdPProfile{OIDC: &OIDCProfileConfig{
+			AuthorizationEndpoint: discovered("authorize"),
+			TokenEndpoint:         discovered("token"),
+			IntrospectionEndpoint: discovered("introspect"),
+			UserinfoEndpoint:      discovered("userinfo"),
+			JWKsURI:               discovered("jwks"),
+		}})
+	}
+	r.mu.Unlock()
+	expect("discovered OIDC endpoints written back after snapshot X", diagOK)
+
+	// A configured OIDC field still counts as a local change.
+	changed := profile("lg-a", "A")
+	changed.OIDC.ClientID = "lg-a-rotated"
+	mustDo("local OIDC client change", r.Upsert(changed))
+	expect("local OIDC configured-field change", diagWarn)
+	applyAndPersist(3, snapX)
+	expect("snapshot X re-applied after the OIDC change", diagOK)
+
 	// A persist failure still withdraws it even when the registry matches.
 	setDPLastGoodConfigSnapshotSaveError(4, errors.New("disk full"))
 	expect("matching registry but the latest persist failed", diagWarn)
