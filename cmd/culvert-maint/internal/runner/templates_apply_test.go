@@ -2,9 +2,11 @@ package runner
 
 import (
 	"context"
+	"os/exec"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 var pinnedRef = "ghcr.io/kidcarmi/culvert@sha256:" + strings.Repeat("c", 64)
@@ -91,11 +93,15 @@ func TestPinnedDigestRef_AcceptsRepoBoundDigest(t *testing.T) {
 	}
 }
 
-// Both P1.4 templates are state-changing with exactly one sudoers line each:
-// a repo-LITERAL ({proxy_repo}) + a 64-class hex digest with NO wildcard,
-// and the tag's destination is the fixed literal.
+// Both P1.4 templates are state-changing and, in sudo mode, run through the
+// compose-cli wrapper's `pull` / `tag` subcommands. Their only sudoers line is
+// the bare wrapper rule: the old `{proxy_repo}@sha256\:[0-9a-f]…` patterns
+// parse under sudo-rs but never match (it compares arguments literally), so
+// the repo literal and 64-hex digest are enforced by the wrapper instead
+// (TestWrapper_PinnedPullTag* in wrapper_test.go).
 func TestPinTemplates_Shape(t *testing.T) {
-	for _, id := range []TemplateID{TemplateImagePullDigest, TemplateImageTagPinned} {
+	wantWrapper := map[TemplateID]string{TemplateImagePullDigest: "pull", TemplateImageTagPinned: "tag"}
+	for id, sub := range wantWrapper {
 		tmpl := templateByID(id)
 		if tmpl == nil {
 			t.Fatalf("template %q missing from registry", id)
@@ -103,24 +109,75 @@ func TestPinTemplates_Shape(t *testing.T) {
 		if !tmpl.StateChanging {
 			t.Errorf("template %q must be state-changing", id)
 		}
-		if len(tmpl.SudoersLines) != 1 {
-			t.Fatalf("template %q must have exactly one sudoers line; got %d", id, len(tmpl.SudoersLines))
+		if len(tmpl.WrapperArgv) != 1 || tmpl.WrapperArgv[0] != sub {
+			t.Errorf("template %q must route through the wrapper subcommand %q; got %q", id, sub, tmpl.WrapperArgv)
 		}
-		line := tmpl.SudoersLines[0]
-		if strings.Contains(line, "*") {
-			t.Errorf("template %q sudoers line must contain NO wildcard (repo is a literal, digest is enumerated): %q", id, line)
-		}
-		// Colons are escaped (`\:`) for sudoers grammar; the repo literal +
-		// digest are bound.
-		if !strings.Contains(line, `{proxy_repo}@sha256\:`) {
-			t.Errorf("template %q sudoers line must bind the {proxy_repo} literal + escaped @sha256\\: digest: %q", id, line)
-		}
-		if n := strings.Count(line, "[0-9a-f]"); n != pinnedDigestHexLen {
-			t.Errorf("template %q digest must be exactly %d [0-9a-f] classes; got %d", id, pinnedDigestHexLen, n)
+		if len(tmpl.SudoersLines) != 1 || tmpl.SudoersLines[0] != ComposeCLIWrapperPath {
+			t.Errorf("template %q must declare exactly the wrapper sudoers line %q; got %q", id, ComposeCLIWrapperPath, tmpl.SudoersLines)
 		}
 	}
-	tag := templateByID(TemplateImageTagPinned)
-	if !strings.HasSuffix(tag.SudoersLines[0], ` culvert/proxy\:pinned`) {
-		t.Errorf("tag sudoers line must end with the fixed (colon-escaped) destination culvert/proxy\\:pinned: %q", tag.SudoersLines[0])
+}
+
+// In sudo mode the pinned pull/tag argv is `sudo -n <wrapper> pull|tag …` with
+// the SAME positional tail as the direct docker form; without sudo it is the
+// raw docker command (docker_group_lab is unchanged).
+func TestPinTemplates_SudoArgvUsesWrapper(t *testing.T) {
+	ref := "ghcr.io/kidcarmi/culvert@sha256:" + strings.Repeat("ab", 32)
+	for _, useSudo := range []bool{true, false} {
+		r, rec := recordingRunner(t, useSudo)
+		if _, err := r.ComposePullDigest(context.Background(), ref); err != nil {
+			t.Fatalf("ComposePullDigest: %v", err)
+		}
+		if _, err := r.ComposeTagPinned(context.Background(), ref); err != nil {
+			t.Fatalf("ComposeTagPinned: %v", err)
+		}
+		var want [][]string
+		if useSudo {
+			want = [][]string{
+				{"sudo", "-n", ComposeCLIWrapperPath, "pull", ref},
+				{"sudo", "-n", ComposeCLIWrapperPath, "tag", ref, pinnedProxyTag},
+			}
+		} else {
+			want = [][]string{
+				{"/usr/bin/docker", "pull", ref},
+				{"/usr/bin/docker", "tag", ref, pinnedProxyTag},
+			}
+		}
+		if !reflect.DeepEqual(rec.argvs, want) {
+			t.Errorf("useSudo=%v argv:\n got %q\nwant %q", useSudo, rec.argvs, want)
+		}
 	}
+}
+
+// argvRecorder captures every exec'd argv and env, in call order.
+type argvRecorder struct {
+	argvs [][]string
+	envs  [][]string
+}
+
+// recordingRunner is a Runner whose exec layer only records, with sudo on or
+// off. CULVERT_BACKUP_PASSPHRASE is allowlisted (not overlay-only), so an
+// ambient value would reach the child unless the template suppresses it.
+func recordingRunner(t *testing.T, useSudo bool) (*Runner, *argvRecorder) {
+	t.Helper()
+	r, err := New(Options{
+		ComposeProjectDir: "/srv/culvert",
+		ComposeFile:       "docker-compose.yml",
+		StageTimeout:      5 * time.Second,
+		EnvAllow:          []string{EnvCulvertBackupPassphrase},
+		DockerBinary:      "/usr/bin/docker",
+		UseSudo:           useSudo,
+		SudoBinary:        "sudo",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec := &argvRecorder{}
+	r.execStartFn = func(cmd *exec.Cmd) error {
+		rec.argvs = append(rec.argvs, append([]string(nil), cmd.Args...))
+		rec.envs = append(rec.envs, append([]string(nil), cmd.Env...))
+		return nil
+	}
+	r.execWaitFn = func(_ *exec.Cmd) error { return nil }
+	return r, rec
 }
