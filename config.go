@@ -696,7 +696,7 @@ func (fc *FileConfig) validateCluster() []string {
 	if r := fc.Cluster.Role; r != "" && r != "control-plane" {
 		errs = append(errs, fmt.Sprintf("cluster.role: must be \"control-plane\" or empty, got %q", r))
 	}
-	if fc.Cluster.Role == "control-plane" && fc.Cluster.GRPCAddr == "" {
+	if fc.Cluster.Role == "control-plane" && strings.TrimSpace(fc.Cluster.GRPCAddr) == "" {
 		errs = append(errs, "cluster.grpc_addr is required when cluster.role is \"control-plane\"")
 	}
 	// Validate cert/key/ca paths don't contain path traversal.

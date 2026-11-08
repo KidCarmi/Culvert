@@ -174,7 +174,16 @@ detect_distro() {
       # Try ID_LIKE as fallback
       if [[ "$DISTRO_LIKE" == *"debian"* || "$DISTRO_LIKE" == *"ubuntu"* ]]; then
         DISTRO_FAMILY="debian"
-        DISTRO_ID="ubuntu"
+        # Docker's apt repo path and codename must belong together: an
+        # Ubuntu derivative uses linux/ubuntu + its UBUNTU_CODENAME; a pure
+        # Debian derivative (e.g. raspbian) uses linux/debian + its own
+        # (Debian) VERSION_CODENAME, not linux/ubuntu/<debian-codename>.
+        if [[ "$DISTRO_LIKE" == *"ubuntu"* ]]; then
+          DISTRO_ID="ubuntu"
+          DISTRO_CODENAME="${UBUNTU_CODENAME:-$DISTRO_CODENAME}"
+        else
+          DISTRO_ID="debian"
+        fi
       elif [[ "$DISTRO_LIKE" == *"rhel"* || "$DISTRO_LIKE" == *"centos"* || "$DISTRO_LIKE" == *"fedora"* ]]; then
         DISTRO_FAMILY="rhel"
         DISTRO_ID="centos"
