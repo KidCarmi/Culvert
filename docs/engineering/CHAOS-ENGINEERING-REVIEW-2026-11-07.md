@@ -619,6 +619,30 @@ this SHA.
 
 ## 9.8 Found while watching this PR's CI — NOT this round's, and not a test problem
 
+> **RESOLVED 2026-11-08 — escalated, fixed by someone else, merged.** The
+> sudoers half below was fixed in **PR #1825** (`fix(maint): replace sudoers
+> argument wildcards with a validating wrapper`, merged to `main` as `aa39119`)
+> and that `main` has since been merged into this branch, so the failures it
+> caused here are gone. Two corrections to what is written below, kept rather
+> than rewritten so the escalation and its answer both stay legible:
+>
+> 1. **The precise cause is `sudo-rs`, not "a newer `sudo`".** Ubuntu 26.04
+>    ships the Rust implementation, which bans wildcards in command arguments
+>    outright. The substance below holds; the naming was imprecise.
+> 2. **The remedy chosen was a validating wrapper** (`packaging/culvert-maint/
+>    compose-cli`), not the enumerate-or-restructure options guessed at below —
+>    and its author records it as *tighter* than the wildcards it replaces,
+>    which is the better outcome than either guess. Their own recorded
+>    follow-up: `sudo-rs` matches arguments literally, so the `[0-9a-f]`-class
+>    container-inspect and pinned pull/tag rules never match on `sudo-rs` hosts
+>    and fail closed there.
+>
+> The judgement to escalate rather than fix it inside a scan-sidecar round was
+> the right one on the evidence available, and is recorded as such: the fix
+> touched 20 files, added a 313-line privileged wrapper and 800+ lines of tests,
+> and needed a security call about the barrier between operator input and a sudo
+> argv. None of that belonged in this PR.
+
 Several CI jobs went red on the PR. **One of them WAS this change's** — the
 CWD-relative read above, which appeared in `Race · root shard 3` and in
 `Deep · determinism`, and is fixed. Everything below is the remainder, which is

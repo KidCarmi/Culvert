@@ -20318,7 +20318,15 @@ requirement and the bounded replies are all correct and were left alone.
 
 **Found while watching this round's own PR CI, and recorded here because it is
 NOT this round's and belongs to another domain: the maintenance agent's sudoers
-file is REJECTED by newer `sudo`.**
+file is REJECTED by `sudo-rs`. FIXED 2026-11-08 by PR #1825** (`fix(maint):
+replace sudoers argument wildcards with a validating wrapper`, merged as
+`aa39119`) — a validating wrapper (`packaging/culvert-maint/compose-cli`) that
+its author records as TIGHTER than the wildcards it replaces, with the recorded
+follow-up that `sudo-rs` matches arguments literally so the `[0-9a-f]`-class
+container-inspect and pinned pull/tag rules never match on such hosts and fail
+closed. Left below as first written, because the escalation and its answer are
+both worth keeping; the one correction is that the precise cause is Ubuntu
+26.04's `sudo-rs`, not a version bump of the C `sudo`.**
 `cmd/culvert-maint/internal/runner/templates_d16b.go` renders sudo rules
 containing `--older-than *` and `--keep-last *` — deliberately, its own comment
 calling it "one bounded wildcard token" with the agent's validator as "the only
