@@ -306,8 +306,11 @@ func TestChaos113_ControlRebindingSidecarDoesNotPage(t *testing.T) {
 	scanSvcHealthNow = func() time.Time { return start.Add(time.Second) }
 
 	// A sidecar that HAS served and is now rebinding, inside the threshold.
+	// The `served` argument is CHAOS-114's: a generation that proved stable and
+	// then died is the one-off lost socket this supervisor exists to heal, and
+	// it must leave no flap-run state behind at all.
 	noteScanSvcBound()
-	noteScanSvcServeEnded("listen_failed", start)
+	noteScanSvcServeEnded("listen_failed", scanSvcServeStableAfter, start)
 
 	body := renderMetrics(t)
 	if !strings.Contains(body, "culvert_scan_svc_listener_up 1") {

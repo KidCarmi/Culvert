@@ -1412,16 +1412,36 @@ culvert_socks5_posture_refused_total %d
 		// made a sidecar whose port is briefly held at boot export up=0 on its
 		// FIRST failed bind, i.e. page on every ordinary redeploy — the exact
 		// asymmetry culvert_socks5_listener_up exists to avoid.
-		if sv.Unavailable() {
+		// CHAOS-114: a FLAP counts as down on these two gauges. A sidecar that
+		// binds and dies every few seconds is bound at the instant of about
+		// half the scrapes, so `Unavailable()` alone left the documented
+		// `up == 0` paging rule unable to see the fault at all — measured at
+		// up=1 in 20/20 mid-serve samples across ~10 minutes of flapping. The
+		// flap predicate needs three sub-stable serve generations over 30 s, so
+		// neither an ordinary redeploy (no serve exits) nor the one-off lost
+		// socket CHAOS-113 heals (one exit, then a lasting serve) can trip it.
+		flapping := 0
+		if sv.Flapping() {
+			flapping = 1
+		}
+		if sv.Unavailable() || sv.Flapping() {
 			up, down = 0, 1
 		}
-		_, _ = fmt.Fprintf(w, `# HELP culvert_scan_svc_listener_up 1 while the scan sidecar listener is bound and serving; 0 once it has never bound or has been unable to serve past the threshold
+		_, _ = fmt.Fprintf(w, `# HELP culvert_scan_svc_listener_up 1 while the scan sidecar listener is bound and serving stably; 0 once it has never bound, has been unable to serve past the threshold, or is flapping
 # TYPE culvert_scan_svc_listener_up gauge
 culvert_scan_svc_listener_up %d
 
-# HELP culvert_scan_svc_listener_down 1 while the scan sidecar has been unable to serve for longer than the threshold — callers fail OPEN and forward bodies unscanned
+# HELP culvert_scan_svc_listener_down 1 while the scan sidecar has been unable to serve for longer than the threshold or is flapping — callers fail OPEN and forward bodies unscanned
 # TYPE culvert_scan_svc_listener_down gauge
 culvert_scan_svc_listener_down %d
+
+# HELP culvert_scan_svc_listener_flapping 1 while the scan sidecar keeps binding and then dying before any serve generation proves stable — down and flapping distinguish a socket that will not come back from one that will not stay
+# TYPE culvert_scan_svc_listener_flapping gauge
+culvert_scan_svc_listener_flapping %d
+
+# HELP culvert_scan_svc_unstable_serves Serve generations in the CURRENT run of ones that died before proving stable; 0 once a generation lasts
+# TYPE culvert_scan_svc_unstable_serves gauge
+culvert_scan_svc_unstable_serves %d
 
 # HELP culvert_scan_svc_bind_failures_total Failed scan sidecar listener bind attempts since startup
 # TYPE culvert_scan_svc_bind_failures_total counter
@@ -1437,6 +1457,8 @@ culvert_scan_svc_bind_backoff_seconds %g
 `,
 			up,
 			down,
+			flapping,
+			sv.UnstableExits,
 			sv.BindFailures,
 			sv.ServeExits,
 			sv.Backoff.Seconds(),

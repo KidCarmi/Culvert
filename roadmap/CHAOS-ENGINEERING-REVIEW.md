@@ -57,6 +57,34 @@ missing staleness alert and health row are recorded as the open half. Id claimed
 in a committed placeholder row before any code per the 2026-09-25 amendment,
 checked against `origin/main` at `3c5fab1`.
 
+The 2026-11-08 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-08.md)
+and summarised in §63 — CHAOS-114 (THE SCAN SIDECAR THAT WILL NOT STAY). The
+round before this one supervised the sidecar listener and keyed every surface it
+added — `up` gauge, `scan_svc_listener` row, `/healthz` word, `/ready` row,
+alert — on one predicate: *not bound, for longer than the threshold*. That is
+the right predicate for a socket that will not come BACK and blind to one that
+will not STAY. A flapping sidecar binds successfully on every cycle, so the
+predicate short-circuits on `Bound` and reads healthy for the whole of every
+serve generation, and the alert's only call site is the bind-FAILURE path, which
+a flap never reaches. Measured on a sidecar whose serve died after 10 ms, 20
+cycles over ~10 minutes: **0 alerts**, `/healthz` = `ready` in 20/20 mid-serve
+samples, `culvert_scan_svc_listener_up` = 1 in 20/20, `ok` row in every
+mid-serve sample — while every caller forwarded bodies **UNSCANNED** on every
+gap (`remoteScanFail`, fail-open, WK-2b), which is what a ClamAV-socket failure,
+a YARA compile failure or an OOM kill looks like. Two findings are about the FIX
+rather than the defect, and both correct this register's own prescription:
+§8.7/§10.4 of the previous round prescribed moving the episode reset to the
+post-serve path, which measured as **nearly a no-op** (`Unavailable()`
+short-circuits before `firstFailure` is consulted), and the obvious step after
+it — dropping that `Bound` arm — pages **forever** on a slow redeploy
+(`row=fail up=0 healthz=down` an hour into a healthy serve after a 45 s port
+hold). The flap is therefore its own episode and `Unavailable()` is untouched.
+Closes the previous round's residual risk `4`, which that round called its own
+sharpest remaining gap. Id AND section claimed against `origin/main` at
+`902f3c9` (highest id 113/§62, both on main) and the open-PR set (#1827, #1826,
+#1705, #1549, #1548, #1536, #1528, #1526 — none a chaos sweep).
+
 The 2026-11-07 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-07.md)
 and summarised in §62 — CHAOS-113 (the SCAN SIDECAR LISTENER). Culvert has four
@@ -304,6 +332,24 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in silence. The durable fix is still the one recorded above (allocate the id
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
+
+**2026-11-08 — `CHAOS-114`/`§63` CLAIMED. Domain: the SCAN SIDECAR'S OWN
+SUPERVISION SURFACE — the round before this one shipped a supervisor, five
+metrics, a contract row, two endpoint fields and an alert for the sidecar
+listener, and recorded in its own §10.4 that a FLAPPING sidecar defeats all of
+them; so what does a signal built for a socket that will not come back actually
+report about one that will not stay?** Checked against `origin/main` at
+`902f3c9`, where `CHAOS-113`/`§62` is the highest of both and no id or section
+is held by an open PR (#1827, #1826, #1705, #1549, #1548, #1536, #1528, #1526 —
+none is a chaos sweep), so this sweep took the next free number of each rather
+than needing the 2026-09-25 amendment. **Deviation from the convention, stated
+rather than glossed:** this id was NOT allocated in a separate placeholder
+commit before the code, because the round's entry point was a named residual
+risk in the immediately preceding round rather than a search for a domain — the
+target and therefore the id were fixed before any investigation began. The
+convention's purpose (two sweeps silently taking one id) is served by the
+`origin/main`-plus-open-PR check above, and the risk it guards against was
+nil here: no other sweep was open. This sweep took 114/§63 and will not move.
 
 **2026-11-07 — `CHAOS-113` CLAIMED (placeholder, commit one). Domain: the SCAN
 SIDECAR LISTENER — `-scan-svc-listen` is the one listener in the tree that got
@@ -20544,3 +20590,136 @@ bind-error classifiers** (`socks5`, `admin_ui` and this round's, including the
 same narrowed `net.Error`-must-be-a-timeout branch each had to learn
 separately); and **making the rebind ceiling and unavailability threshold
 operator settings**, which the Control-Plane listener does not do either.
+
+---
+
+## 63. CHAOS-114 — The scan sidecar that will not stay: a flap is invisible to every signal built for a socket that will not come back
+
+Findings, the executed fault injection, the risk matrix, the mutation table and
+the gates are written up in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-08.md).
+Summarised here because two of its three findings are about this register's own
+prescription rather than about the product, and a later sweep that trusted §8.7
+of the previous round would ship a fix that changes nothing.
+
+**The entry point was §62's own residual risk `4`**, which that round stated
+plainly as "the sharpest remaining gap and it is in this round's own design".
+That is the register working as intended, and the round it produced is recorded
+here with the correction it also produced.
+
+**The defect.** §62 keyed every surface it added on one predicate:
+
+```go
+func (s scanSvcListenerSnapshot) Unavailable() bool {
+        if !s.Configured || s.Bound || s.Stopped { return false }
+        return s.FailingFor >= scanSvcUnavailableAfter
+}
+```
+
+*Not bound, for longer than the threshold.* Correct for a socket that will not
+come BACK; blind to one that will not STAY. A flapping sidecar binds
+**successfully on every cycle**, so the predicate short-circuits on `s.Bound`
+and reads healthy for the whole of every serve generation — and
+`maybeAlertScanSvcDown`'s only call site is `scanSvcBindOnce`'s **failure**
+path, which a flap never reaches at all. Replaying what the production
+supervisor does for a sidecar whose serve dies after 10 ms, 20 cycles across
+~10 minutes of virtual time:
+
+```
+alerts fired            = 0
+serve_exits             = 20
+/healthz word mid-serve = ready in 20/20 samples
+listener_up=1 mid-serve = 20/20 samples
+```
+
+and per cycle, sampling the row both inside the serve and inside the gap:
+
+```
+cycle 1-5  (backoff 1s..16s) | row mid-serve: ok | row in gap: warn | up: 1 | alerts: 0
+cycle 6+   (backoff 30s)     | row mid-serve: ok | row in gap: fail | up: 0 | alerts: 0
+```
+
+The `fail` from cycle 6 is **luck, not design**: it appears only because the
+30 s backoff ceiling happens to equal the 30 s unavailability threshold, and
+`jitterScanSvcBackoff` spreads the real gap over 22.5–37.5 s, so even at the
+ceiling the gap-sampled row is `warn` about half the time. The mid-serve column
+is `ok` in every row. The alert column is `0` in every row, forever.
+
+**Why it is a security row and not an availability one.** A sidecar that is not
+answering is exactly the condition under which `internal/secscan`'s
+`remoteScanFail` takes its fail-**OPEN** branch (WK-2b): the fleet forwards
+bodies **UNSCANNED**. So a sidecar crash-looping on a ClamAV socket, a YARA
+rule-compile failure or an OOM kill meant every node pointed at it forwarded
+unscanned traffic through every gap, indefinitely, while the sidecar's own host
+reported `ready`/`up 1`/`ok` to any scrape landing inside a serve and paged
+nobody. Same shape as §62's own Defect 3 — an alert that structurally could not
+fire — one level down: an alert that CAN be subscribed to, on a condition no
+code path evaluates.
+
+**Two rows that are load-bearing for later sweeps, because they correct this
+register.**
+
+1. **§8.7's prescription is nearly a no-op.** It read: move the
+   `firstFailure`/`alerted` reset out of `noteScanSvcBound` into the post-serve
+   path. Implemented alone and measured, a slow redeploy still read
+   `row=ok up=1 healthz=ready` an hour in and a flap still read healthy for the
+   whole of every serve generation — because `Unavailable()` short-circuits on
+   `s.Bound` before `firstFailure` is ever consulted. The reset was the visible
+   cause, not the operative one. A round that had implemented it and run only a
+   redeploy control would have shipped it green.
+2. **The obvious step after it pages forever.** Dropping the `s.Bound` arm so a
+   bound-but-unstable sidecar counts as unavailable, *together with* (1), gave
+   `row=fail up=0 healthz=down` **an hour into a perfectly healthy serve** after
+   a predecessor held the port for 45 s. That is the exact asymmetry
+   `scanSvcUnavailableAfter` was given a threshold for (CHAOS-66 on SOCKS5,
+   §62's own never-bound control), reintroduced through a different door. Note
+   that dropping the arm **alone** is a genuine no-op on this tree, so the
+   regression needs both halves — which is why a single-mutation proof showed
+   the slow-redeploy control passing and would have wrongly concluded it was not
+   load-bearing.
+
+**The fix.** The flap is its own episode, and `Unavailable()` is untouched (now
+with a comment recording the measurement above, so the `s.Bound` arm is not
+"simplified" away by a later round). `Flapping()` requires three consecutive
+serve generations that each died before lasting `scanSvcServeStableAfter`, over
+at least the same 30 s threshold the siblings use, and clears the moment a
+generation proves stable — *including while it is still running*, without which
+a sidecar that flapped five times and has since served three hours keeps paging
+for those three hours. The verdict is evaluated on the **serve-exit** path. The
+existing `culvert_scan_svc_listener_up == 0` paging rule now covers both shapes
+so an operator's alert starts working unedited;
+`culvert_scan_svc_listener_flapping` and `culvert_scan_svc_unstable_serves`
+route the page (the port vs. the process); `/healthz` gains `flapping`; the
+row names the rate, the fail-open consequence and a remedy pointing at the
+sidecar PROCESS — the bind remedies are wrong here, because the bind succeeded
+every time, and a wrong remedy on a fail-open control is worse than a vague one.
+No new alert event: the bounded detail `flapping` on the existing
+`scan_svc_listener_down`, because §62 §8.1 already measured what an
+unsubscribable event is worth.
+
+**Mutation testing found two of this round's own gates not load-bearing**, and
+both are recorded rather than quietly fixed. Lowering `scanSvcFlapMinExits` to 1
+**survived the whole suite**: the one-off-socket-loss control could not see it,
+because its long generation *clears* the run so the count is never exercised.
+Closed by adding a control that one short serve plus a five-minute stuck bind
+gets the **down** row and the **port-conflict** remedy rather than the flap row
+— which is what the count actually buys: not whether something is reported, but
+which of two FAIL rows and therefore which remedy. The second survivor is the
+no-op described above and is correct.
+
+Left open and attributed rather than fixed, in priority order: **a caller-side
+`remote_scan` contract row** — now the sharpest gap in this area, and unlike the
+one this round closed it is not in a surface this register introduced but in the
+one that bears the consequence: the node that actually fails open still reports a
+clean diagnostics report, so a fleet can be failing open with one red node and
+twenty green ones; **the fail-open posture itself** (WK-2b, owner decision,
+unchanged and now top of the residual list for the second round running); **the
+ten remaining GUI-unsubscribable events** (pinned, not fixed — this round
+deliberately added no eleventh event); **a flap detector keyed on accumulated
+downtime in a rolling window**, which would catch a sidecar whose generations
+last 59 s (just under stable) faster than three exits do — recorded with why
+~3 minutes is the right patience there; **plumbing the sidecar's exit REASON
+through**, without which a container orchestrator in a tight redeploy loop is
+indistinguishable from a crash loop except by reading the log line's new
+duration field; and **converging the three identical bind-error classifiers**,
+carried forward untouched from §62.

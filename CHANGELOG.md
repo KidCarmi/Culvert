@@ -23,6 +23,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A scan sidecar that kept binding and dying was invisible to every signal
+  built for one that would not come back, so a fleet failed open unheard
+  (CHAOS-114).** CHAOS-113 gave the sidecar listener a supervisor, an `up`
+  gauge, a `scan_svc_listener` diagnostics row, a `/healthz` word, a `/ready`
+  row and a subscribable alert — all keyed on one predicate, "not bound for
+  longer than the threshold". A FLAPPING sidecar binds successfully on every
+  cycle, so that predicate short-circuits on `Bound` and reads healthy for the
+  whole of every serve generation, and `maybeAlertScanSvcDown` is only called
+  from the bind-FAILURE path, which a flap never reaches at all. Measured on a
+  sidecar whose serve died after 10 ms, twenty cycles across ~10 minutes:
+  **0 alerts**, `/healthz` = `ready` in 20/20 mid-serve samples,
+  `culvert_scan_svc_listener_up` = 1 in 20/20, and an `ok` diagnostics row in
+  every mid-serve sample. Through all of it every caller pointed at that
+  address forwarded response bodies **UNSCANNED** on every gap
+  (`internal/secscan` `remoteScanFail`, fail-open, WK-2b) — the condition is
+  what a ClamAV-socket failure, a YARA rule-compile failure or an OOM kill
+  looks like, and nothing ended it. A flap is now tracked as its own episode:
+  three consecutive serve generations that each died before lasting
+  `scanSvcServeStableAfter`, over at least the same 30 s threshold the sibling
+  listeners use, cleared the moment a generation proves stable — including
+  while it is still running, so a sidecar that flapped and has since served
+  for hours does not keep paging. The verdict is evaluated on the SERVE-EXIT
+  path, which is the half of the defect no bind-failure path can see. The
+  existing `culvert_scan_svc_listener_up == 0` paging rule now covers both
+  shapes, so an alert on it starts catching this without being edited;
+  `culvert_scan_svc_listener_flapping` and `culvert_scan_svc_unstable_serves`
+  route the page (the port vs. the process); `/healthz` gains the word
+  `flapping`; and the diagnostics row names the rate, the fail-open
+  consequence and a remedy that points at the sidecar process rather than at
+  the address — the bind remedies are wrong here, because the bind succeeded
+  every time. The alert reuses the existing `scan_svc_listener_down` event
+  with the bounded detail `flapping`, so no new subscription surface is
+  needed; one page per episode, not per cycle. `Unavailable()` is deliberately
+  unchanged: its `Bound` short-circuit is what stops a slow redeploy from
+  paging forever, measured at `row=fail up=0 healthz=down` an hour into a
+  perfectly healthy serve when it is removed. New runbook:
+  `docs/operator/scan-svc-listener-health.md`, the fourth of the four
+  listeners to have one. Eleven gates in `scan_svc_flap_chaos_test.go`,
+  including controls that a one-off lost socket, a five-minute stuck bind, a
+  slow redeploy and a graceful stop are each reported as themselves and not as
+  a flap.
+
 - **Every clustered Data Plane enforced a per-source-IP connection cap nobody
   configured, and the one gate that refused the traffic reported nothing
   (CHAOS-112).** `conn_limit_enabled` is the one admission surface

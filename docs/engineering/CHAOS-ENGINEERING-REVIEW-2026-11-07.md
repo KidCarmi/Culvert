@@ -370,6 +370,28 @@ only has `/health`. Minor.
 
 ### 8.7 Close the unavailability episode on a STABLE SERVE, not on a bind (MED)
 
+> **RESOLVED 2026-11-08 by CHAOS-114** — see
+> [that round](CHAOS-ENGINEERING-REVIEW-2026-11-08.md). Two corrections to what
+> is written below, kept rather than rewritten so the prescription and its
+> answer both stay legible:
+>
+> 1. **The prescribed change is nearly a no-op on its own.** Implemented and
+>    measured, moving the reset to the post-serve path leaves every mid-serve
+>    reader reporting health, because `Unavailable()` short-circuits on
+>    `s.Bound` before `firstFailure` is ever consulted. The reset was the
+>    visible cause, not the operative one.
+> 2. **The step after it introduces a worse defect than the one it fixes.**
+>    Dropping that `s.Bound` arm so a bound-but-unstable sidecar counts as
+>    unavailable makes a SLOW REDEPLOY page forever — measured at `row=fail
+>    up=0 healthz=down` an hour into a perfectly healthy serve, after a
+>    predecessor held the port for 45 s.
+>
+> CHAOS-114 therefore tracked the flap as its own episode and left
+> `Unavailable()` untouched. The judgement to defer this rather than ship it
+> inside the round that created the surface is recorded as the right one: the
+> correct fix is not the one this section prescribes, and finding that out cost
+> a round's worth of measurement.
+
 The flapping-sidecar gap in §10.4. `noteScanSvcBound` clears `firstFailure` and
 the `alerted` latch when the bind succeeds, so a socket that binds and dies
 immediately resets the episode every cycle and never crosses the 30 s
@@ -697,7 +719,10 @@ roll are clean. The failures name components this diff does not touch
    diagnostics report. §8.3.
 3. **Ten alert events remain unsubscribable from the UI.** Pinned, not fixed.
    §8.1.
-4. **A FLAPPING sidecar does not page, and the flap can be sub-second.** This
+4. **A FLAPPING sidecar does not page, and the flap can be sub-second.**
+   **RESOLVED 2026-11-08 by CHAOS-114**; the prescription at the end of this
+   item is corrected in §8.7 above — it was necessary but not sufficient, and
+   the obvious step after it pages forever on a slow redeploy. This
    is the sharpest remaining gap and it is in this round's own design, so it is
    stated plainly rather than buried. `noteScanSvcBound` closes the
    unavailability episode — clearing `firstFailure` and the `alerted` latch — at

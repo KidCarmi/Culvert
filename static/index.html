@@ -20037,7 +20037,13 @@ function resetBlockPage() {
              gates on alerts.HasSubscriber("scan_svc_down"), so an event with no
              checkbox here is an event that never fires in practice.
              scan_svc_listener_down = this node's own sidecar listener cannot bind or
-             serve; scan_svc_down = the sidecar this node CALLS is faulting, content
+             serve. CHAOS-114: it carries TWO bounded details, because a socket that
+             will not come back and one that will not stay need different remedies —
+             a bind class (port_in_use, permission_denied, ...) for a listener that
+             cannot bind, and "flapping" for one that binds and then dies, which is
+             the shape a scanner-engine init failure or an OOM kill takes. Both mean
+             callers forward bodies unscanned while it lasts.
+             scan_svc_down = the sidecar this node CALLS is faulting, content
              forwarded unscanned (fail-open); scan_timeout = the scan did not finish
              in the budget, content BLOCKED (fail-closed); scan_skipped = the body
              ran past the scan window, forwarded unscanned (fail-open). -->
