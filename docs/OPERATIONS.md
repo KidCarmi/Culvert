@@ -135,6 +135,12 @@ for example, `policy_loaded` is **informational** in `/ready`
   the profile IDs and stable issue codes, never the warning text. It reads the
   in-memory state behind the PAC File page's degraded badge and clears when the
   profile next serves cleanly (not on elapsed time, not on edit).
+* **`pac_legacy_config_newer`.** `warn` row, present only when startup found a
+  legacy `pac_config.json` newer than the active PAC store (the signature of
+  edits made by a downgraded build, which the current build ignores). It
+  replaces a log-only warning; the message names no paths (the startup log
+  has them). It is a boot-time fact and clears at the next restart after the
+  files are reconciled.
 * **What `storage_path` does and does not check.** The `storage_path`
   row reports the result of a **one-shot writability probe** that runs
   once at startup against the configured data directory. The probe

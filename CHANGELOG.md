@@ -7,6 +7,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- **A stale legacy PAC file is now a Diagnostics row, not only a startup log
+  line.** When a legacy `pac_config.json` is newer than the active store (edits
+  made by a downgraded build), those edits are ignored and clients are steered
+  by older settings. That was visible only by grepping the startup log. The new
+  `pac_legacy_config_newer` row on Infrastructure → Diagnostics states it with
+  the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
+
 ### Security
 
 - **The maintenance agent could not be installed on Ubuntu 26.04: its sudoers
@@ -293,6 +302,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the tree already canonical.
 
 ### Fixed
+
+- **`scripts/install.sh` built a nonexistent Docker apt repo for Debian derivatives.**
+  The `ID_LIKE` fallback in `detect_distro` forced `DISTRO_ID=ubuntu` while keeping
+  the Debian codename (e.g. Raspberry Pi OS: `linux/ubuntu bookworm`), so
+  `apt-get update` failed. Pure Debian derivatives now use `linux/debian`; Ubuntu
+  derivatives use `UBUNTU_CODENAME`.
 
 - **The DPI scan engine's abandoned worker goroutines are now counted and
   capped, and the gateway no longer blocks clean traffic in proportion to its
