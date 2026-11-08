@@ -430,6 +430,78 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   per-shape allocation budget (`TestBuildMatchedConditions_AllocBudget`) rather
   than a timing threshold, because what the removed `mallocgc` calls are worth
   is hardware- and GC-state-dependent while the allocation count is not.
+- **JSON-mode request logging no longer allocates, so the per-record encoding
+  the async sink deliberately leaves on the request goroutine stops being a
+  per-request GC source.** `jsonLogWriter.Write` encodes one log line into one
+  JSON object, and `setupLogger` keeps that work on the CALLER's goroutine on
+  purpose: the async `internal/logsink` drain coalesces several queued lines
+  into one downstream write, which is correct for a byte stream but would fold
+  several records into a single object, so in JSON mode the encoding must happen
+  once per record, before the sink. The justification recorded for leaving it
+  there is that JSON marshalling is "pure CPU that scales with cores" — and
+  allocation is precisely what falsifies that, because the allocator and the
+  resulting GC are process-wide, not per-core. `handleRequest` emits one line
+  per proxied request, so every allocation here was paid once per request.
+  There were four sources, all avoidable and none of them the JSON structure:
+  `line := string(raw)` copied every log line onto the heap purely to obtain
+  string-typed helpers; `time.Now().UTC().Format(time.RFC3339)` allocated the
+  timestamp instead of appending it; and `json.Marshal` was called once for the
+  message and once PER promoted structured field, each call entering the
+  reflection encoder to marshal a plain string — at `memprofilerate=1` that
+  showed up as `reflect.unsafe_New` plus a `bytes.Clone` of each result,
+  together **55% of the allocated objects on the path**. The encoder is now
+  append-based end to end: it works on the incoming `[]byte` and never converts
+  it, the pool holds `*[]byte` instead of `*bytes.Buffer` so every field is
+  appended straight into the pooled bytes, the timestamp uses `AppendFormat`,
+  and printable-ASCII string values are encoded in place.
+  `encoding/json` is retained as the FALLBACK, not deleted: a value containing
+  a control byte or any byte >= 0x80 is handed to it whole, because the encoding
+  of a multi-byte sequence is not a per-byte function — it needs UTF-8
+  validation (invalid bytes become U+FFFD) and U+2028/U+2029 rewriting, and
+  reimplementing that is how a logging path starts emitting subtly different
+  bytes. The fast path deliberately covers the five escapes (`"`, `\`, `<`, `>`,
+  `&`) and not merely verbatim bytes: the proxy's own per-request decision lines
+  (`emitPolicyDecision`) embed `%q`-quoted rule names and hostnames, so a quote
+  appears in essentially every hot-path record, and a fast path that bailed out
+  on the first escape handed the hottest line in the process straight back to
+  the reflection encoder — which is what the first draft did, and what the
+  before/after numbers below would otherwise have hidden. The escape table is
+  DERIVED from `encoding/json` at init rather than written out as a byte range,
+  because the exact set is not obvious and the first draft's hand-written
+  `[0x20,0x7e]` was wrong: it excluded DEL (0x7f), which `encoding/json` in fact
+  emits verbatim. Measured on go1.27.3, linux/amd64, 4-vCPU, `-benchtime=20000x
+  -count=5`, medians, before → after: a `POLICY_ALLOW` record **1790 → 545
+  ns/op, 528 → 0 B/op, 14 → 0 allocs/op**; `POLICY_BLOCK` 1621 → 524 ns, 14 → 0
+  allocs; `IP_BLOCKED` 1177 → 298 ns, 11 → 0 allocs; a 26-alloc record with
+  eight promoted fields 2665 → 695 ns, 26 → 0 allocs; the same `POLICY_ALLOW`
+  record under `RunParallel` 608 → 222 ns. Every printable-ASCII record is now
+  zero-allocation; the non-ASCII records that still fall back keep their
+  `encoding/json` cost but are 45–60% faster anyway, because the record frame,
+  the level split and the field parse around it no longer allocate. Output is
+  BYTE-IDENTICAL: `logger_json_bench_test.go` keeps the pre-sweep encoder as a
+  differential oracle, and `logger_json_equiv_test.go` pins equivalence over a
+  corpus that includes the real per-request proxy lines and the escaping edge
+  cases, re-derives the escape table against `encoding/json` over all 256 byte
+  values, checks the multi-byte and invalid-UTF-8 sequences a per-byte walk
+  cannot, and fuzzes the two encoders against each other
+  (`FuzzJSONLogRecord_MatchesLegacy`, 1.4 M executions across two runs, no
+  divergence). A negative control asserts each record is still exactly one line
+  of valid JSON, since two encoders agreeing proves only that they match each
+  other. The allocation contract itself is now gated in the normal suite rather
+  than behind the `benchgate` tag, because an allocation COUNT is an exact
+  integer and machine-independent where a wall-clock ratio is not: 
+  `TestAllocGate_JSONLogRecordIsAllocationFree` requires zero allocations for
+  every printable-ASCII corpus record, with a companion bound on the fallback
+  arm and a check that the pooled buffer is actually reused through `Write`.
+  The pool now also declines to retain a buffer grown past 4x its starting
+  capacity, so one pathological line — a 64 KiB authority in an `INVALID_HOST`
+  refusal — cannot pin that capacity in the pool for the life of the process.
+  No log line's content, level, field promotion or ordering changes. Scope is
+  bounded and worth stating plainly: `log_format` defaults to `text` and is
+  startup-only, so this reaches only deployments that opt into
+  `log_format: json` — the realistic configuration when records are shipped to
+  a SIEM, but not the default one. The text path never constructed a
+  `jsonLogWriter` and is untouched.
 
 - **The leaf-certificate cache hit path no longer takes the process-wide CA
   lock, and no longer allocates.** `ca.Manager.GetCert` is the
