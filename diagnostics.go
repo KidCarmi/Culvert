@@ -256,6 +256,9 @@ func buildOperatorContract() OperatorContract {
 	// PAC profiles last served with compile warnings. Contributes nothing when
 	// every served profile compiled cleanly.
 	checks = append(checks, checkPACDegraded()...)
+	// Legacy PAC file newer than the active store at boot: edits being ignored.
+	// Contributes nothing unless startup found that state.
+	checks = append(checks, checkPACLegacyNewer()...)
 	// Enabled alert webhooks whose latest delivery failed. Contributes nothing
 	// when every enabled webhook's latest recorded attempt succeeded.
 	checks = append(checks, checkAlertDelivery()...)

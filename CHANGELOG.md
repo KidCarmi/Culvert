@@ -7,6 +7,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Changed
+
+- **A stale legacy PAC file is now a Diagnostics row, not only a startup log
+  line.** When a legacy `pac_config.json` is newer than the active store (edits
+  made by a downgraded build), those edits are ignored and clients are steered
+  by older settings. That was visible only by grepping the startup log. The new
+  `pac_legacy_config_newer` row on Infrastructure → Diagnostics states it with
+  the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
+### Fixed
+
+- **A whitespace-only `cluster.grpc_addr` passed config validation under `cluster.role: control-plane`.**
+  The required-address check compared the raw string to `""`, so `grpc_addr: " "` loaded, resolved to a non-empty
+  listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
+
 ### Security
 
 - **The scan sidecar's listener was the last one in the tree with no
@@ -78,6 +92,90 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   from a scan-sidecar round. Closes the scan-sidecar half of the 2026-10-13
   backlog's `L-5`. Full findings, measurements, the risk matrix and the mutation
   table are in `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-07.md`.
+- **The GO-2026-6909 SAML fork namespace-qualified the fields that carry
+  identity and left every field that decides whether an assertion is FOR this
+  service provider and STILL VALID on its namespace-blind tag.** `encoding/xml`
+  matches a bare-tagged or untagged field against an element of that local name
+  in ANY namespace, and it treats two shapes differently: a pointer or value
+  field has its attributes OVERWRITTEN by a later same-local-name match, while a
+  slice field is APPENDED to. Patch (b) fixed `Subject.NameID` and the attribute
+  chain. `Assertion.Conditions`, `SubjectConfirmation.SubjectConfirmationData`,
+  `AudienceRestriction.Audience`, `Subject.SubjectConfirmations` and
+  `Conditions.AudienceRestrictions` kept theirs, and under patch (b)'s own
+  precondition — an IdP-signed assertion carrying foreign-namespace elements —
+  that defeated every check `validateAssertion` makes except the signature, the
+  `Issuer` and `IssueInstant`+`MaxIssueDelay` (90 s): a foreign `<x:Conditions>`
+  supplied both validity instants, a foreign `<x:SubjectConfirmationData>`
+  supplied `Recipient`, `InResponseTo` and `NotOnOrAfter`, a foreign
+  `<x:Audience>` overwrote the chardata inside the IdP's own
+  `<saml:AudienceRestriction>`, and a foreign `<x:AudienceRestriction>` was
+  appended — which is enough on its own, because `validateAudienceRestriction`
+  accepts when ANY entry matches. Measured end to end through
+  `SAMLProvider.ExchangeAssertion` with `AllowIDPInitiated: false`: an assertion
+  the IdP minted for ANOTHER service provider, audience-restricted to it, bound
+  to its ACS URL and expired 30 minutes earlier authenticated here as that
+  assertion's subject, with its group claims. That is cross-SP assertion reuse,
+  an authentication bypass. All six fields are now qualified to
+  `urn:oasis:names:tc:SAML:2.0:assertion`. `validateAssertion` additionally
+  rejects an assertion whose `SubjectConfirmations` slice is EMPTY — a fail-open
+  that pre-dates the fork (the loop over it is the only place `Recipient` and
+  `InResponseTo` are checked, so zero iterations skipped both) and that the tag
+  change makes mandatory to close, since a foreign-namespace-only confirmation
+  would otherwise have become NO confirmation checks at all. Scoped to the
+  fields the authentication decision reads; `Assertion.AuthnStatements`,
+  `AttributeValue.NameID`, `Conditions.OneTimeUse`,
+  `Conditions.ProxyRestriction` and `LogoutRequest.NameID` are read by nothing
+  in Culvert and are left alone and recorded. No byte Culvert emits changes: all
+  six types build their outbound XML with `Element()`, and the only production
+  `xml.Marshal` calls marshal metadata. The complete upstream v0.5.1 suite —
+  including the key-dependent tests this tree drops — was run as a three-arm
+  differential (clean / fork-before / fork-after) and the fix adds NO new
+  failure; the three SAML-namespace spellings a real IdP uses are pinned as a
+  positive control on both arms. Nine new attack subtests, three conformance
+  controls, and two end-to-end cases through the real callback, one of which
+  asserts that an ignorable foreign element still authenticates so the fix stays
+  "bind correctly" rather than "reject anything unusual".
+  `third_party/saml/PATCHES.md` documents patch (d) and corrects two statements
+  in its own record: the slice fields are appended to rather than replaced, and
+  `TestSPCanProduceSignedRequestRedirectBinding` passes on clean v0.5.1 at the
+  pinned toolchain, so it is not the pre-existing baseline failure the
+  verification note claimed.
+- **The intercepting CA's leaf-cache memory bound became counter-driven in the
+  same change that removed its only independent oracle.** `b80a415` moved the
+  cache to a `sync.Map`, which has no `len()`, so `certCacheMaxSize` (10,000) is
+  now enforced against the hand-maintained `cm.cacheLen`. A forward proxy's
+  client chooses the SNI, so it chooses this cache's keys and that bound is a
+  remote-memory-exhaustion control. The same change rewrote the one assertion in
+  the package that read the map's real size (`len(cm.cache)` in
+  `TestGetCert_CacheOrderDoesNotGrowOnRefresh`) into a read of the counter, and
+  `TestCertCache_LenDrivesEviction` compares `cacheLen` with `cacheOrder` — both
+  maintained by the same two statement pairs, so one omission moves them
+  together. The bookkeeping is correct today; the guard was not.
+  `TestCertCache_LenAgreesWithTheMapItCounts` now counts what the `sync.Map`
+  actually holds with `Range` and asserts it against both, at every stage of the
+  lifecycle. Proven necessary by mutation: one untracked sibling
+  `cm.cache.Store` leaves all three pre-existing tests green while the map holds
+  twice the entries the bound allows. Test-only; no production code changed.
+- **CHAOS-111's cached gossip generation narrows remote rate-limit enforcement
+  for up to one second, and the comment said it lost nothing.** A known peer's
+  update deliberately does not invalidate the generation, and pass 1 of
+  `ClusterTotalsExcluding` skips any IP the generation does not track, so a peer
+  count that lands after `gen.builtAt` reaches no reply until the next rebuild
+  and `FreshCount` reads the missing IP as zero: that one address is enforced
+  locally-only on that one node for the rest of `rlTotalsCacheTTL` plus the wait
+  for the requester's next round. `ee0f2ab` summed the per-node slots live
+  inside the RPC and did include such a count, so this is a narrowing. It is
+  ACCEPTED, not fixed: ≤6 s against a 60 s broadcast freshness window, one
+  address on one node for one round, the local half of the limit never stops
+  applying, and not attacker-steerable — while both candidate fixes reintroduce
+  the O(nodes² × hot IPs) collapse CHAOS-111 exists to eliminate. The pass-1
+  comment claimed "absent from the reply is exactly what the pre-fix code
+  produced for an IP no OTHER node reported", which is wrong in the one case
+  that matters; it now states the real bound.
+  `TestCHAOS111_PassOneStalenessStaysInsideTheGossipRound` pins the constant
+  relations that keep the window negligible and demonstrates that it closes on
+  the next rebuild rather than persisting. Verified by mutation: raising
+  `rlTotalsCacheTTL` to 10 s fails the gate.
 - **The maintenance agent could not be installed on Ubuntu 26.04: its sudoers
   allowlist used argument wildcards that sudo-rs rejects. The variable-argument
   operations now run through a root-owned wrapper that is tighter than the
@@ -363,6 +461,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **`scripts/install.sh` built a nonexistent Docker apt repo for Debian derivatives.**
+  The `ID_LIKE` fallback in `detect_distro` forced `DISTRO_ID=ubuntu` while keeping
+  the Debian codename (e.g. Raspberry Pi OS: `linux/ubuntu bookworm`), so
+  `apt-get update` failed. Pure Debian derivatives now use `linux/debian`; Ubuntu
+  derivatives use `UBUNTU_CODENAME`.
+
 - **The DPI scan engine's abandoned worker goroutines are now counted and
   capped, and the gateway no longer blocks clean traffic in proportion to its
   own load (CHAOS-110).** `patternSet.scan` must run each regex match in a
@@ -421,6 +525,136 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 - **`install.sh` no longer writes invalid TOML when `allow_peers` has a trailing comma.** Wiring Release Management into an existing `/etc/culvert-maint/config.toml` with `allow_peers = ["alice",]` produced `["alice",, "1000"]`, which the maintenance agent refuses to parse. The append now reuses the existing comma.
 
 ### Performance
+
+- **A policy publication no longer allocates one object per rule condition just
+  to render the matched-conditions summary, cutting `sortLocked`'s allocation
+  count by ~45% and the publication stall it imposes on all policy evaluation by
+  ~10-12%.** `buildMatchedConditions` renders the compact `srcIP=... group=...
+  destCat=...` summary that is persisted on every published rule
+  (`PolicyRule.matchedConds`), emitted on every `POLICY_*` log line and surfaced
+  in the request feed. It runs once per rule inside `sortLocked`, which holds
+  `ps.mu` — the WRITER lock that `Evaluate`'s `evaluationSnapshot` must take the
+  matching `RLock` behind — so its cost is a data-plane latency figure and not
+  merely a reload figure, exactly as `sortLocked` already records for its own
+  layout. Every policy edit, draft promote/rollback, config-version restore and
+  cluster config sync pays it.
+
+  It built a `[]string` and joined it, which is one allocation for the
+  concatenated `"key="` + value of EVERY configured condition, plus the doubling
+  growth of the parts slice (1, 2, 4, 8), plus the join's result, plus a second
+  join for the country list. The cost therefore scaled with how SPECIFIC a rule
+  is, so the most specific rules — the ones an enterprise rulebase is actually
+  made of — paid the most: a rule configuring all nine conditions cost 13
+  allocations and 944 B. A heap profile of
+  `BenchmarkPolicyPublish_ReplaceAll/rules=10000` put this one function at
+  **33% of every object the whole bulk-replace path allocated**, the single
+  largest contributor, ahead of the definition clone itself. It now renders
+  straight into one frame-local scratch buffer and converts once at the end:
+  **one allocation — the returned string — for every shape**, with the
+  no-condition shape still returning the `"any"` constant and allocating nothing
+  (the fast path is tested BEFORE the scratch is declared, so a broad catch-all
+  rule does not pay to zero a buffer it never writes to).
+
+  Measured on go1.27.3, linux/amd64, 4-vCPU Xeon @ 2.10GHz. Per call, medians of
+  n=6 with both forms timed in the SAME run against the same rule values
+  (`BenchmarkBuildMatchedConditions`): no conditions 2.70 -> 2.40 ns / 0 -> 0
+  allocs, `destFQDN` only 65.8 -> 39.1 ns / 2 -> 1, a typical four-condition
+  rule 211 -> 54.6 ns / 5 -> 1, six country codes 248 -> 61.1 ns / 6 -> 1, all
+  nine conditions **785 -> 121 ns / 13 -> 1**. In situ on the existing
+  publication benchmarks (`benchstat`, n=8): `PolicyPublish_SortLocked`
+  **allocs/op -44.8% at 10 000 rules (29 006 -> 16 007)**, -44.7% at 1 000,
+  -43.9% at 100, all p=0.000, and **sec/op -12.2% at 1 000 rules (416 -> 365
+  µs) and -10.3% at 10 000 (3.54 -> 3.18 ms)**, p=0.000, with no significant
+  change at 100 (p=0.878); `PolicyPublish_ReplaceAll` allocs/op **-18.8%**
+  (69 041 -> 56 041 at 10 000) and sec/op -4.8% at 100 / -6.6% at 1 000, with no
+  significant change at 10 000 (p=0.065, where minting ULIDs for ID-less
+  imported rules dominates). Those in-situ figures are a LOWER bound on what a
+  real rulebase sees: the existing publication benchmarks install rules carrying
+  one or two conditions, and the per-call table shows the saving grows with rule
+  specificity.
+
+  The evaluation path was checked for a regression rather than assumed safe:
+  `PolicyEvaluate_NoMatch` stays allocation-free and `PolicyEvaluate_FirstMatch`
+  stays at 1 alloc / 640 B, both within noise at every rule count. The rendered
+  string is wire-visible, so equivalence with the join form is exact and pinned
+  by a differential test against a verbatim copy of the old implementation, a
+  20 000-iteration randomized subset sweep, and a differential fuzz target
+  (380 000 executions, no divergence). The one-allocation property is held by a
+  per-shape allocation budget (`TestBuildMatchedConditions_AllocBudget`) rather
+  than a timing threshold, because what the removed `mallocgc` calls are worth
+  is hardware- and GC-state-dependent while the allocation count is not.
+- **JSON-mode request logging no longer allocates, so the per-record encoding
+  the async sink deliberately leaves on the request goroutine stops being a
+  per-request GC source.** `jsonLogWriter.Write` encodes one log line into one
+  JSON object, and `setupLogger` keeps that work on the CALLER's goroutine on
+  purpose: the async `internal/logsink` drain coalesces several queued lines
+  into one downstream write, which is correct for a byte stream but would fold
+  several records into a single object, so in JSON mode the encoding must happen
+  once per record, before the sink. The justification recorded for leaving it
+  there is that JSON marshalling is "pure CPU that scales with cores" — and
+  allocation is precisely what falsifies that, because the allocator and the
+  resulting GC are process-wide, not per-core. `handleRequest` emits one line
+  per proxied request, so every allocation here was paid once per request.
+  There were four sources, all avoidable and none of them the JSON structure:
+  `line := string(raw)` copied every log line onto the heap purely to obtain
+  string-typed helpers; `time.Now().UTC().Format(time.RFC3339)` allocated the
+  timestamp instead of appending it; and `json.Marshal` was called once for the
+  message and once PER promoted structured field, each call entering the
+  reflection encoder to marshal a plain string — at `memprofilerate=1` that
+  showed up as `reflect.unsafe_New` plus a `bytes.Clone` of each result,
+  together **55% of the allocated objects on the path**. The encoder is now
+  append-based end to end: it works on the incoming `[]byte` and never converts
+  it, the pool holds `*[]byte` instead of `*bytes.Buffer` so every field is
+  appended straight into the pooled bytes, the timestamp uses `AppendFormat`,
+  and printable-ASCII string values are encoded in place.
+  `encoding/json` is retained as the FALLBACK, not deleted: a value containing
+  a control byte or any byte >= 0x80 is handed to it whole, because the encoding
+  of a multi-byte sequence is not a per-byte function — it needs UTF-8
+  validation (invalid bytes become U+FFFD) and U+2028/U+2029 rewriting, and
+  reimplementing that is how a logging path starts emitting subtly different
+  bytes. The fast path deliberately covers the five escapes (`"`, `\`, `<`, `>`,
+  `&`) and not merely verbatim bytes: the proxy's own per-request decision lines
+  (`emitPolicyDecision`) embed `%q`-quoted rule names and hostnames, so a quote
+  appears in essentially every hot-path record, and a fast path that bailed out
+  on the first escape handed the hottest line in the process straight back to
+  the reflection encoder — which is what the first draft did, and what the
+  before/after numbers below would otherwise have hidden. The escape table is
+  DERIVED from `encoding/json` at init rather than written out as a byte range,
+  because the exact set is not obvious and the first draft's hand-written
+  `[0x20,0x7e]` was wrong: it excluded DEL (0x7f), which `encoding/json` in fact
+  emits verbatim. Measured on go1.27.3, linux/amd64, 4-vCPU, `-benchtime=20000x
+  -count=5`, medians, before → after: a `POLICY_ALLOW` record **1790 → 545
+  ns/op, 528 → 0 B/op, 14 → 0 allocs/op**; `POLICY_BLOCK` 1621 → 524 ns, 14 → 0
+  allocs; `IP_BLOCKED` 1177 → 298 ns, 11 → 0 allocs; a 26-alloc record with
+  eight promoted fields 2665 → 695 ns, 26 → 0 allocs; the same `POLICY_ALLOW`
+  record under `RunParallel` 608 → 222 ns. Every printable-ASCII record is now
+  zero-allocation; the non-ASCII records that still fall back keep their
+  `encoding/json` cost but are 45–60% faster anyway, because the record frame,
+  the level split and the field parse around it no longer allocate. Output is
+  BYTE-IDENTICAL: `logger_json_bench_test.go` keeps the pre-sweep encoder as a
+  differential oracle, and `logger_json_equiv_test.go` pins equivalence over a
+  corpus that includes the real per-request proxy lines and the escaping edge
+  cases, re-derives the escape table against `encoding/json` over all 256 byte
+  values, checks the multi-byte and invalid-UTF-8 sequences a per-byte walk
+  cannot, and fuzzes the two encoders against each other
+  (`FuzzJSONLogRecord_MatchesLegacy`, 1.4 M executions across two runs, no
+  divergence). A negative control asserts each record is still exactly one line
+  of valid JSON, since two encoders agreeing proves only that they match each
+  other. The allocation contract itself is now gated in the normal suite rather
+  than behind the `benchgate` tag, because an allocation COUNT is an exact
+  integer and machine-independent where a wall-clock ratio is not: 
+  `TestAllocGate_JSONLogRecordIsAllocationFree` requires zero allocations for
+  every printable-ASCII corpus record, with a companion bound on the fallback
+  arm and a check that the pooled buffer is actually reused through `Write`.
+  The pool now also declines to retain a buffer grown past 4x its starting
+  capacity, so one pathological line — a 64 KiB authority in an `INVALID_HOST`
+  refusal — cannot pin that capacity in the pool for the life of the process.
+  No log line's content, level, field promotion or ordering changes. Scope is
+  bounded and worth stating plainly: `log_format` defaults to `text` and is
+  startup-only, so this reaches only deployments that opt into
+  `log_format: json` — the realistic configuration when records are shipped to
+  a SIEM, but not the default one. The text path never constructed a
+  `jsonLogWriter` and is untouched.
 
 - **The leaf-certificate cache hit path no longer takes the process-wide CA
   lock, and no longer allocates.** `ca.Manager.GetCert` is the

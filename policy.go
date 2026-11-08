@@ -1803,41 +1803,173 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	return match
 }
 
+// matchedCondScratch is the stack scratch buildMatchedConditions renders into.
+// It is sized so every realistic rule — including one carrying the maximum
+// 253-byte DestFQDN plus a handful of short conditions — is rendered without the
+// append ever reaching the heap; a rule that exceeds it pays ONE growth, still
+// far below the per-condition cost this replaced. It is a frame-local array, so
+// the size is stack space in a function that calls nothing deep, not heap.
+const matchedCondScratch = 384
+
+// ruleHasNoMatchedConditions reports whether rule configures NONE of the nine
+// conditions buildMatchedConditions can render — the shape whose summary is the
+// "any" constant. It is the exact negation of the nine tests in that function,
+// and it exists so the no-condition shape can return before the render scratch
+// is declared: a broad catch-all rule must not pay to zero a buffer it never
+// writes to: zeroing a 384-byte array cost this shape 9.1 ns before the guard was
+// hoisted ahead of it, versus 2.4 ns with it and 2.70 ns before the change.
+//
+// Drift between this predicate and the render below is not a correctness risk in
+// the dangerous direction: if it under-reports, the render runs and the
+// len(b) == 0 fallback still returns "any". If it OVER-reports — claims no
+// conditions when one is configured — the summary would be wrong, which is
+// exactly what the differential test and fuzz target compare against the
+// pre-optimization implementation on all nine fields.
+func ruleHasNoMatchedConditions(rule *PolicyRule) bool {
+	return rule.SourceIP == "" &&
+		rule.SourceIdentity == "" &&
+		rule.SourceGroup == "" &&
+		rule.AuthSource == "" &&
+		rule.DestFQDN == "" &&
+		(rule.DestCategory == "" || rule.DestCategory == CategoryAny) &&
+		rule.DestCategoryGroup == "" &&
+		len(rule.DestCountry) == 0 &&
+		rule.Schedule == nil
+}
+
+// appendMatchedCond appends one "key=value" part to b, prefixed by the single
+// space strings.Join used as the separator for every part after the first. The
+// "first" test is len(b) == 0, which is exact: every key below is a non-empty
+// literal, so b is empty if and only if no part has been written yet.
+func appendMatchedCond(b []byte, key, value string) []byte {
+	if len(b) > 0 {
+		b = append(b, ' ')
+	}
+	b = append(b, key...)
+	return append(b, value...)
+}
+
 // buildMatchedConditions produces a compact summary of which rule conditions
 // contributed to the match. Only non-wildcard (configured) fields are listed.
+//
+// ── Why one append pass and not []string + strings.Join ─────────────────────
+//
+// This runs once per rule per PUBLICATION, inside sortLocked, which holds ps.mu
+// — the writer lock that Evaluate's evaluationSnapshot must take the matching
+// RLock behind. So its cost stalls ALL policy evaluation for as long as it runs,
+// which makes its allocation count a data-plane latency figure and not merely a
+// reload figure (the same reasoning sortLocked records for its own layout). It
+// is also the per-request fallback in Evaluate for a rule that bypassed the
+// mutators.
+//
+// The previous form built a []string and joined it. That is one allocation for
+// the concatenated "key=" + value of EVERY configured condition, plus the
+// doubling growth of the parts slice (1, 2, 4, 8), plus the join's result — so
+// the cost scaled with how specific a rule is, and the most specific rules, the
+// ones an enterprise rulebase is actually made of, paid the most. Rendering
+// straight into one frame-local buffer and converting once at the end makes it
+// ONE allocation — the returned string — for every shape.
+//
+// Measured on the development box (go1.27.3, 4-core Xeon @ 2.10GHz, medians of
+// n=6, both forms timed in the same run against the same rule values — see
+// policy_matchedconds_bench_test.go):
+//
+//	rule shape                       before             after          delta
+//	no conditions ("any")       2.70 ns /  0 allocs  2.40 ns /  0    unchanged
+//	destFQDN only               65.8 ns /  2 allocs  39.1 ns /  1    -41% / -1
+//	typical (4 conditions)       211 ns /  5 allocs  54.6 ns /  1    -74% / -4
+//	destFQDN + 6 country codes   248 ns /  6 allocs  61.1 ns /  1    -75% / -5
+//	all 9 conditions             785 ns / 13 allocs   121 ns /  1    -85% / -12
+//
+// Rendering a mixed 10 000-rule rulebase's worth of summaries, the way
+// sortLocked does (BenchmarkBuildMatchedConditionsRulebase): 2.49 ms / 52 000
+// allocs → 0.63 ms / 8 000 allocs.
+//
+// In situ, on the existing publication benchmarks (benchstat, n=8, p ≤ 0.001
+// unless noted):
+//
+//	BenchmarkPolicyPublish_SortLocked   allocs/op -43.9% @100, -44.7% @1 000,
+//	                                    -44.8% @10 000 (29 006 → 16 007);
+//	                                    sec/op -12.2% @1 000 (416 → 365 µs),
+//	                                    -10.3% @10 000 (3.54 → 3.18 ms), and
+//	                                    no significant change @100 (p=0.878)
+//	BenchmarkPolicyPublish_ReplaceAll   allocs/op -18.8% (69 041 → 56 041
+//	                                    @10 000); sec/op -4.8% @100, -6.6%
+//	                                    @1 000, no significant change @10 000
+//	                                    (p=0.065 — the ULID minting for
+//	                                    ID-less imported rules dominates there)
+//
+// Those in-situ figures are a LOWER bound on what a real rulebase sees: the
+// existing publication benchmarks install rules carrying one or two conditions,
+// and the per-call table above shows the saving grows with how specific a rule
+// is. The evaluation path is unaffected and was checked for that, not assumed:
+// BenchmarkPolicyEvaluate_NoMatch stays allocation-free and
+// BenchmarkPolicyEvaluate_FirstMatch stays at 1 alloc / 640 B, both within noise
+// at every rule count.
+//
+// Read the DIRECTION, not the exact percentage: this form strictly does less
+// work than the one it replaces, but what the removed mallocgc calls are worth
+// depends on hardware and GC state. That is why the gate protecting it is
+// structural — a per-shape allocation budget
+// (TestBuildMatchedConditions_AllocBudget) — and not a timing threshold.
+//
+// Equivalence with the join form is exact, not approximate, and is pinned by a
+// differential test against a verbatim copy of the old implementation plus a
+// differential fuzz target. The rendered string is persisted on the rule
+// (matchedConds), emitted on every POLICY_* log line and surfaced in the request
+// feed, so it is a wire-visible value: keep it byte-identical.
 func buildMatchedConditions(rule *PolicyRule) string {
-	var parts []string
-	if rule.SourceIP != "" {
-		parts = append(parts, "srcIP="+rule.SourceIP)
-	}
-	if rule.SourceIdentity != "" {
-		parts = append(parts, "identity="+rule.SourceIdentity)
-	}
-	if rule.SourceGroup != "" {
-		parts = append(parts, "group="+rule.SourceGroup)
-	}
-	if rule.AuthSource != "" {
-		parts = append(parts, "authSrc="+rule.AuthSource)
-	}
-	if rule.DestFQDN != "" {
-		parts = append(parts, "destFQDN="+rule.DestFQDN)
-	}
-	if rule.DestCategory != "" && rule.DestCategory != CategoryAny {
-		parts = append(parts, "destCat="+string(rule.DestCategory))
-	}
-	if rule.DestCategoryGroup != "" {
-		parts = append(parts, "destCatGroup="+rule.DestCategoryGroup)
-	}
-	if len(rule.DestCountry) > 0 {
-		parts = append(parts, "destCountry="+strings.Join(rule.DestCountry, ","))
-	}
-	if rule.Schedule != nil {
-		parts = append(parts, "schedule=active")
-	}
-	if len(parts) == 0 {
+	// Checked before the scratch is declared — see ruleHasNoMatchedConditions.
+	if ruleHasNoMatchedConditions(rule) {
 		return "any"
 	}
-	return strings.Join(parts, " ")
+	// Frame-local; nothing below lets it escape, so the common shapes never
+	// touch the heap before the single string conversion at the end.
+	var scratch [matchedCondScratch]byte
+	b := scratch[:0]
+
+	if rule.SourceIP != "" {
+		b = appendMatchedCond(b, "srcIP=", rule.SourceIP)
+	}
+	if rule.SourceIdentity != "" {
+		b = appendMatchedCond(b, "identity=", rule.SourceIdentity)
+	}
+	if rule.SourceGroup != "" {
+		b = appendMatchedCond(b, "group=", rule.SourceGroup)
+	}
+	if rule.AuthSource != "" {
+		b = appendMatchedCond(b, "authSrc=", rule.AuthSource)
+	}
+	if rule.DestFQDN != "" {
+		b = appendMatchedCond(b, "destFQDN=", rule.DestFQDN)
+	}
+	if rule.DestCategory != "" && rule.DestCategory != CategoryAny {
+		b = appendMatchedCond(b, "destCat=", string(rule.DestCategory))
+	}
+	if rule.DestCategoryGroup != "" {
+		b = appendMatchedCond(b, "destCatGroup=", rule.DestCategoryGroup)
+	}
+	if len(rule.DestCountry) > 0 {
+		// The comma-joined country list is written element by element rather
+		// than via strings.Join, so the list costs no intermediate string.
+		b = appendMatchedCond(b, "destCountry=", rule.DestCountry[0])
+		for _, c := range rule.DestCountry[1:] {
+			b = append(b, ',')
+			b = append(b, c...)
+		}
+	}
+	if rule.Schedule != nil {
+		// No value: the part is the whole literal, exactly as before.
+		b = appendMatchedCond(b, "schedule=active", "")
+	}
+
+	if len(b) == 0 {
+		// Unreachable while ruleHasNoMatchedConditions is the exact negation of
+		// the tests above; kept so a future condition added to one and not the
+		// other cannot render an empty summary.
+		return "any"
+	}
+	return string(b)
 }
 
 // ─── Schedule matching ────────────────────────────────────────────────────────

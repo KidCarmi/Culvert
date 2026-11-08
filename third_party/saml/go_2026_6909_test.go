@@ -65,7 +65,7 @@ func go6909Assertion(sp *ServiceProvider, now time.Time) *Assertion {
 
 // go6909Validate calls validateAssertion and turns a panic into a test failure
 // so every case reports instead of aborting the test binary.
-func go6909Validate(t *testing.T, sp *ServiceProvider, a *Assertion, now time.Time) (err error) {
+func go6909Validate(t *testing.T, sp *ServiceProvider, a *Assertion, now time.Time, possibleRequestIDs ...string) (err error) {
 	t.Helper()
 	defer func() {
 		if r := recover(); r != nil {
@@ -73,7 +73,7 @@ func go6909Validate(t *testing.T, sp *ServiceProvider, a *Assertion, now time.Ti
 			err = nil
 		}
 	}()
-	return sp.validateAssertion(a, nil, now)
+	return sp.validateAssertion(a, possibleRequestIDs, now)
 }
 
 func TestGO20266909ValidateAssertionAcceptsWellFormedAssertion(t *testing.T) {
@@ -386,4 +386,245 @@ func TestGO20266909SignedAssertionPrefixRebindingDoesNotSpoofNameID(t *testing.T
 			t.Fatalf("Subject.NameID.Value = %q, want alice@example.com", got)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Fix (d): the elements validateAssertion READS to reach its verdict
+// ---------------------------------------------------------------------------
+//
+// (b) qualified the fields that carry identity. The fields that carry the
+// assertion's *validity* kept bare tags, and encoding/xml treats the two
+// shapes differently: a pointer or value field is overwritten in place by a
+// later same-local-name match (so a foreign <x:Conditions> hands over
+// NotBefore/NotOnOrAfter, and a foreign <x:SubjectConfirmationData> hands over
+// Recipient/InResponseTo/NotOnOrAfter), while a SLICE field is APPENDED to (so
+// a foreign <x:AudienceRestriction> adds an entry, and
+// validateAudienceRestriction accepts when ANY entry matches). Together those
+// defeat every check validateAssertion makes except the signature, the Issuer
+// and IssueInstant+MaxIssueDelay.
+
+// go6909ValidationDoc renders an assertion the IdP minted for ANOTHER service
+// provider and that already expired: its own <saml:SubjectConfirmationData>
+// names the other SP's ACS and a request ID this SP never issued, and its own
+// <saml:Conditions> closed at 11:30 and restricts the audience to the other SP.
+// The three extras are spliced in verbatim — inside the real
+// <saml:SubjectConfirmation>, inside the real <saml:AudienceRestriction>, and
+// as a sibling after the real <saml:Conditions> — plus one after the real
+// </saml:SubjectConfirmation>, so a test can place a foreign-namespace element
+// at each site that encoding/xml would bind.
+func go6909ValidationDoc(confirmationExtra, subjectExtra, audienceExtra, conditionsExtra string) string {
+	return `<saml:Assertion xmlns:saml="` + go6909AssertionNS + `" xmlns:x="urn:example:not-saml"` +
+		` ID="id-1" Version="2.0" IssueInstant="2026-11-06T12:00:00Z">` +
+		`<saml:Issuer>` + go6909IdPEntityID + `</saml:Issuer>` +
+		`<saml:Subject>` +
+		`<saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">admin@example.com</saml:NameID>` +
+		`<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">` +
+		`<saml:SubjectConfirmationData Recipient="https://other-sp.example.com/saml/acs"` +
+		` InResponseTo="id-another-sps-request" NotOnOrAfter="2026-11-06T11:30:00Z"/>` +
+		confirmationExtra +
+		`</saml:SubjectConfirmation>` +
+		subjectExtra +
+		`</saml:Subject>` +
+		`<saml:Conditions NotBefore="2026-11-06T11:00:00Z" NotOnOrAfter="2026-11-06T11:30:00Z">` +
+		`<saml:AudienceRestriction><saml:Audience>https://other-sp.example.com/saml/metadata</saml:Audience>` +
+		audienceExtra +
+		`</saml:AudienceRestriction>` +
+		`</saml:Conditions>` +
+		conditionsExtra +
+		`</saml:Assertion>`
+}
+
+const (
+	go6909ForeignSCD = `<x:SubjectConfirmationData Recipient="https://sp.example.com/saml/acs"` +
+		` InResponseTo="id-attackers-own-request" NotOnOrAfter="2099-01-01T00:00:00Z"/>`
+	go6909ForeignConditions = `<x:Conditions NotBefore="2026-11-06T11:00:00Z" NotOnOrAfter="2099-01-01T00:00:00Z">` +
+		`<x:AudienceRestriction><x:Audience>https://sp.example.com/saml/metadata</x:Audience></x:AudienceRestriction>` +
+		`</x:Conditions>`
+)
+
+// Fix (d), parse level: no foreign-namespace element reaches a field
+// validateAssertion reads.
+func TestGO20266909ValidationElementsRequireAssertionNamespace(t *testing.T) {
+	const foreignAudience = `<x:Audience>https://sp.example.com/saml/metadata</x:Audience>`
+	const foreignConfirmation = `<x:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">` +
+		go6909ForeignSCD + `</x:SubjectConfirmation>`
+	for _, tc := range []struct {
+		name              string
+		confirmationExtra string
+		subjectExtra      string
+		audienceExtra     string
+		conditionsExtra   string
+	}{
+		{name: "foreign SubjectConfirmationData after the real one", confirmationExtra: go6909ForeignSCD},
+		{name: "foreign SubjectConfirmation appended", subjectExtra: foreignConfirmation},
+		{name: "foreign Conditions after the real one", conditionsExtra: go6909ForeignConditions},
+		{name: "foreign Audience inside the real saml:AudienceRestriction", audienceExtra: foreignAudience},
+		{name: "all of them at once", confirmationExtra: go6909ForeignSCD, subjectExtra: foreignConfirmation,
+			audienceExtra: foreignAudience, conditionsExtra: go6909ForeignConditions},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := go6909Unmarshal(t, go6909ValidationDoc(tc.confirmationExtra, tc.subjectExtra, tc.audienceExtra, tc.conditionsExtra))
+
+			if a.Conditions == nil {
+				t.Fatal("Conditions is nil; the real saml:Conditions must still bind")
+			}
+			if got, want := a.Conditions.NotOnOrAfter.UTC().Format(time.RFC3339), "2026-11-06T11:30:00Z"; got != want {
+				t.Errorf("Conditions.NotOnOrAfter = %s, want the IdP's own %s", got, want)
+			}
+			if n := len(a.Conditions.AudienceRestrictions); n != 1 {
+				t.Fatalf("AudienceRestrictions = %d entries, want only the IdP's own 1", n)
+			}
+			if got, want := a.Conditions.AudienceRestrictions[0].Audience.Value,
+				"https://other-sp.example.com/saml/metadata"; got != want {
+				t.Errorf("Audience = %q, want the IdP's own %q", got, want)
+			}
+			if n := len(a.Subject.SubjectConfirmations); n != 1 {
+				t.Fatalf("SubjectConfirmations = %d entries, want only the IdP's own 1", n)
+			}
+			scd := a.Subject.SubjectConfirmations[0].SubjectConfirmationData
+			if scd == nil {
+				t.Fatal("SubjectConfirmationData is nil; the real one must still bind")
+			}
+			if got, want := scd.Recipient, "https://other-sp.example.com/saml/acs"; got != want {
+				t.Errorf("Recipient = %q, want the IdP's own %q", got, want)
+			}
+			if got, want := scd.InResponseTo, "id-another-sps-request"; got != want {
+				t.Errorf("InResponseTo = %q, want the IdP's own %q", got, want)
+			}
+			if got, want := scd.NotOnOrAfter.UTC().Format(time.RFC3339), "2026-11-06T11:30:00Z"; got != want {
+				t.Errorf("SubjectConfirmationData.NotOnOrAfter = %s, want the IdP's own %s", got, want)
+			}
+		})
+	}
+}
+
+// Fix (d), verdict level: the assertion above is an assertion the IdP minted
+// for ANOTHER service provider and that expired 30 minutes ago. It must be
+// rejected even though the attacker supplies this SP's ACS URL, this SP's
+// audience, their own in-flight request ID and a validity window that never
+// closes, and even though they know the request ID Culvert is holding.
+func TestGO20266909ValidateAssertionRejectsForeignNamespaceValidationElements(t *testing.T) {
+	sp := go6909ServiceProvider(t)
+	sp.AllowIDPInitiated = false // Culvert's setting: InResponseTo is checked
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	const attackerRequestID = "id-attackers-own-request"
+
+	a := go6909Unmarshal(t, go6909ValidationDoc(go6909ForeignSCD, "", "", go6909ForeignConditions))
+	err := go6909Validate(t, sp, a, now, attackerRequestID)
+	if err == nil {
+		t.Fatal("an assertion audience-restricted to another SP, bound to another SP's ACS and expired at 11:30 was accepted")
+	}
+	t.Logf("rejected: %v", err)
+
+	// Negative control: with the SAME document, the SAML-namespace values the
+	// IdP actually signed are what gets checked. Point the SP at them and the
+	// assertion validates, so the rejection above is the namespace binding and
+	// not an unrelated parse failure.
+	control := go6909ServiceProvider(t)
+	control.AllowIDPInitiated = false
+	control.EntityID = "https://other-sp.example.com/saml/metadata"
+	acs, perr := url.Parse("https://other-sp.example.com/saml/acs")
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	control.AcsURL = *acs
+	beforeExpiry := time.Date(2026, 11, 6, 11, 15, 0, 0, time.UTC)
+	if err := go6909Validate(t, control, go6909Unmarshal(t, go6909ValidationDoc(go6909ForeignSCD, "", "", go6909ForeignConditions)),
+		beforeExpiry, "id-another-sps-request"); err != nil {
+		t.Fatalf("control: the IdP's own signed values were rejected: %v", err)
+	}
+}
+
+// Fix (d): <saml:SubjectConfirmation> is mandatory in the Web Browser SSO
+// profile and the loop over it is the ONLY place Recipient and InResponseTo are
+// checked, so an empty slice must be an error. Without this, qualifying the
+// slice would turn a foreign-namespace-only confirmation into no checks at all.
+func TestGO20266909ValidateAssertionRequiresSubjectConfirmation(t *testing.T) {
+	t.Run("none at all", func(t *testing.T) {
+		sp := go6909ServiceProvider(t)
+		sp.AllowIDPInitiated = false
+		now := time.Now()
+		a := go6909Assertion(sp, now)
+		a.Subject.SubjectConfirmations = nil
+		err := go6909Validate(t, sp, a, now, "id-we-never-match")
+		if err == nil {
+			t.Fatal("assertion with no SubjectConfirmation accepted; Recipient and InResponseTo were never checked")
+		}
+		if !strings.Contains(err.Error(), "SubjectConfirmation") {
+			t.Fatalf("error %q does not name the missing SubjectConfirmation", err)
+		}
+	})
+
+	t.Run("foreign-namespace only", func(t *testing.T) {
+		sp := go6909ServiceProvider(t)
+		sp.AllowIDPInitiated = false
+		now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+		doc := `<saml:Assertion xmlns:saml="` + go6909AssertionNS + `" xmlns:x="urn:example:not-saml"` +
+			` ID="id-1" Version="2.0" IssueInstant="2026-11-06T12:00:00Z">` +
+			`<saml:Issuer>` + go6909IdPEntityID + `</saml:Issuer>` +
+			`<saml:Subject><saml:NameID>admin@example.com</saml:NameID>` +
+			`<x:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">` + go6909ForeignSCD +
+			`</x:SubjectConfirmation></saml:Subject>` +
+			`<saml:Conditions NotBefore="2026-11-06T11:00:00Z" NotOnOrAfter="2026-11-06T13:00:00Z">` +
+			`<saml:AudienceRestriction><saml:Audience>` + "https://sp.example.com/saml/metadata" +
+			`</saml:Audience></saml:AudienceRestriction></saml:Conditions></saml:Assertion>`
+		a := go6909Unmarshal(t, doc)
+		if n := len(a.Subject.SubjectConfirmations); n != 0 {
+			t.Fatalf("foreign-namespace SubjectConfirmation bound: %d entries", n)
+		}
+		err := go6909Validate(t, sp, a, now, "id-attackers-own-request")
+		if err == nil {
+			t.Fatal("assertion whose only SubjectConfirmation is foreign-namespace was accepted")
+		}
+		if !strings.Contains(err.Error(), "SubjectConfirmation") {
+			t.Fatalf("error %q does not name the missing SubjectConfirmation", err)
+		}
+	})
+}
+
+// Fix (d), positive controls: every spelling of the SAML assertion namespace a
+// real IdP uses still binds every field validateAssertion reads. These are the
+// cases the qualification must NOT break.
+func TestGO20266909ValidationElementsAcceptEverySAMLNamespaceSpelling(t *testing.T) {
+	const window = ` NotBefore="2026-11-06T11:00:00Z" NotOnOrAfter="2026-11-06T13:00:00Z"`
+	for _, tc := range []struct {
+		name string
+		doc  string
+	}{
+		{"prefix declared on the assertion", `<saml:Assertion xmlns:saml="` + go6909AssertionNS + `" ID="i" Version="2.0" IssueInstant="2026-11-06T12:00:00Z">` +
+			`<saml:Issuer>` + go6909IdPEntityID + `</saml:Issuer>` +
+			`<saml:Subject><saml:NameID>alice@example.com</saml:NameID>` +
+			`<saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">` +
+			`<saml:SubjectConfirmationData Recipient="https://sp.example.com/saml/acs" InResponseTo="id-req" NotOnOrAfter="2026-11-06T13:00:00Z"/>` +
+			`</saml:SubjectConfirmation></saml:Subject>` +
+			`<saml:Conditions` + window + `><saml:AudienceRestriction><saml:Audience>https://sp.example.com/saml/metadata</saml:Audience></saml:AudienceRestriction></saml:Conditions>` +
+			`</saml:Assertion>`},
+		{"default namespace on the assertion", `<Assertion xmlns="` + go6909AssertionNS + `" ID="i" Version="2.0" IssueInstant="2026-11-06T12:00:00Z">` +
+			`<Issuer>` + go6909IdPEntityID + `</Issuer>` +
+			`<Subject><NameID>alice@example.com</NameID>` +
+			`<SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">` +
+			`<SubjectConfirmationData Recipient="https://sp.example.com/saml/acs" InResponseTo="id-req" NotOnOrAfter="2026-11-06T13:00:00Z"/>` +
+			`</SubjectConfirmation></Subject>` +
+			`<Conditions` + window + `><AudienceRestriction><Audience>https://sp.example.com/saml/metadata</Audience></AudienceRestriction></Conditions>` +
+			`</Assertion>`},
+		{"prefix redeclared on each element", `<a:Assertion xmlns:a="` + go6909AssertionNS + `" ID="i" Version="2.0" IssueInstant="2026-11-06T12:00:00Z">` +
+			`<b:Issuer xmlns:b="` + go6909AssertionNS + `">` + go6909IdPEntityID + `</b:Issuer>` +
+			`<c:Subject xmlns:c="` + go6909AssertionNS + `"><c:NameID>alice@example.com</c:NameID>` +
+			`<d:SubjectConfirmation xmlns:d="` + go6909AssertionNS + `" Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">` +
+			`<e:SubjectConfirmationData xmlns:e="` + go6909AssertionNS + `" Recipient="https://sp.example.com/saml/acs" InResponseTo="id-req" NotOnOrAfter="2026-11-06T13:00:00Z"/>` +
+			`</d:SubjectConfirmation></c:Subject>` +
+			`<f:Conditions xmlns:f="` + go6909AssertionNS + `"` + window + `>` +
+			`<g:AudienceRestriction xmlns:g="` + go6909AssertionNS + `"><h:Audience xmlns:h="` + go6909AssertionNS + `">https://sp.example.com/saml/metadata</h:Audience></g:AudienceRestriction>` +
+			`</f:Conditions></a:Assertion>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := go6909ServiceProvider(t)
+			sp.AllowIDPInitiated = false
+			now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+			a := go6909Unmarshal(t, tc.doc)
+			if err := go6909Validate(t, sp, a, now, "id-req"); err != nil {
+				t.Fatalf("conforming assertion rejected: %v", err)
+			}
+		})
+	}
 }

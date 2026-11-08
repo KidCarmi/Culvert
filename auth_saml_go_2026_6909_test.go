@@ -197,3 +197,134 @@ func TestSAMLGO20266909MalformedSignedAssertionRejectedWithoutPanic(t *testing.T
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The elements that decide whether an assertion is FOR this SP and still valid
+// ---------------------------------------------------------------------------
+//
+// The same namespace-blind binding on Conditions, AudienceRestriction, Audience
+// and SubjectConfirmationData let a signed-but-hostile assertion keep the
+// values the IdP signed while handing validateAssertion attacker-chosen ones:
+// an assertion minted for ANOTHER service provider, and expired, authenticates
+// here. See third_party/saml/PATCHES.md (d).
+
+// go6909ReSpace returns a copy of el, and of every descendant, moved into
+// prefix:namespace. Copying first means the clone carries the values the IdP
+// actually signed, so the test never has to know this SP's own ACS URL,
+// audience or request ID.
+func go6909ReSpace(el *etree.Element, prefix, namespace string) *etree.Element {
+	clone := el.Copy()
+	var walk func(*etree.Element)
+	walk = func(e *etree.Element) {
+		e.Space = prefix
+		for _, child := range e.ChildElements() {
+			walk(child)
+		}
+	}
+	walk(clone)
+	clone.CreateAttr("xmlns:"+prefix, namespace)
+	return clone
+}
+
+const (
+	go6909PastInstant   = "2000-01-01T00:00:00Z"
+	go6909FutureInstant = "2099-01-01T00:00:00Z"
+	go6909OtherSPACS    = "https://other-sp.example/saml/acs"
+	go6909OtherSPEntity = "https://other-sp.example/saml/metadata"
+)
+
+// go6909RetargetAssertion rewrites the assertion so that the values the IdP
+// signs belong to ANOTHER service provider and have already expired, and
+// appends a foreign-namespace copy of each element carrying the values this SP
+// requires. withForeign == false leaves out the copies, which is the control
+// that shows the retargeting is what the library must notice.
+func go6909RetargetAssertion(t *testing.T, assertion *etree.Element, withForeign bool) {
+	t.Helper()
+
+	subject := go6909Child(t, assertion, "Subject")
+	confirmation := go6909Child(t, subject, "SubjectConfirmation")
+	realSCD := go6909Child(t, confirmation, "SubjectConfirmationData")
+	realConditions := go6909Child(t, assertion, "Conditions")
+	realAudience := go6909Child(t, go6909Child(t, realConditions, "AudienceRestriction"), "Audience")
+
+	if withForeign {
+		// Clone BEFORE retargeting: these carry this SP's ACS URL, this SP's
+		// audience and the in-flight request ID, straight from the IdP.
+		foreignSCD := go6909ReSpace(realSCD, "evil", go6909ForeignNS)
+		foreignSCD.CreateAttr("NotOnOrAfter", go6909FutureInstant)
+		confirmation.AddChild(foreignSCD)
+
+		foreignConditions := go6909ReSpace(realConditions, "evil", go6909ForeignNS)
+		foreignConditions.CreateAttr("NotBefore", go6909PastInstant)
+		foreignConditions.CreateAttr("NotOnOrAfter", go6909FutureInstant)
+		assertion.AddChild(foreignConditions)
+	}
+
+	// Retarget what the IdP signs: another SP's ACS, another SP's audience,
+	// and both validity windows closed long ago.
+	realSCD.CreateAttr("Recipient", go6909OtherSPACS)
+	realSCD.CreateAttr("NotOnOrAfter", go6909PastInstant)
+	realConditions.CreateAttr("NotBefore", go6909PastInstant)
+	realConditions.CreateAttr("NotOnOrAfter", go6909PastInstant)
+	realAudience.SetText(go6909OtherSPEntity)
+}
+
+func TestSAMLGO20266909ForeignNamespaceValidationElementsDoNotAuthenticate(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		withForeign bool
+	}{
+		{"foreign Conditions and SubjectConfirmationData supply this SP's values", true},
+		// Control: the same retargeted assertion with no foreign copies. It
+		// must be rejected for the same reason, which is what proves the case
+		// above is rejected on the IdP's own values and not on a parse failure.
+		{"retargeted with no foreign copies", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newSignedSAMLFixtureWithSession(t, signedSAMLFixtureOptions{
+				mutateAssertionEl: func(t *testing.T, a *etree.Element) {
+					go6909RetargetAssertion(t, a, tc.withForeign)
+				},
+			})
+			id, err := exchangeGO6909(t, fixture)
+			if err == nil {
+				t.Fatalf("an assertion audience-restricted to %s, bound to %s and expired in 2000 authenticated as %+v",
+					go6909OtherSPEntity, go6909OtherSPACS, id)
+			}
+			if id != nil {
+				t.Fatalf("rejected with an identity attached: %+v", id)
+			}
+			if !strings.Contains(err.Error(), "saml response validation:") {
+				t.Fatalf("error %q missing validation context", err)
+			}
+		})
+	}
+}
+
+// Positive control: a foreign-namespace Conditions and SubjectConfirmationData
+// added to an OTHERWISE VALID assertion are IGNORED, not grounds for rejecting
+// the response. The fix changes which element a field binds to; it does not
+// make a stray foreign element fail the login.
+func TestSAMLGO20266909ForeignNamespaceValidationElementsAreIgnoredNotFatal(t *testing.T) {
+	fixture := newSignedSAMLFixtureWithSession(t, signedSAMLFixtureOptions{
+		mutateAssertionEl: func(t *testing.T, a *etree.Element) {
+			confirmation := go6909Child(t, go6909Child(t, a, "Subject"), "SubjectConfirmation")
+			foreignSCD := go6909ReSpace(go6909Child(t, confirmation, "SubjectConfirmationData"), "evil", go6909ForeignNS)
+			foreignSCD.CreateAttr("Recipient", go6909OtherSPACS)
+			foreignSCD.CreateAttr("NotOnOrAfter", go6909PastInstant)
+			confirmation.AddChild(foreignSCD)
+
+			foreignConditions := go6909ReSpace(go6909Child(t, a, "Conditions"), "evil", go6909ForeignNS)
+			foreignConditions.CreateAttr("NotOnOrAfter", go6909PastInstant)
+			go6909Child(t, go6909Child(t, foreignConditions, "AudienceRestriction"), "Audience").SetText(go6909OtherSPEntity)
+			a.AddChild(foreignConditions)
+		},
+	})
+	id, err := exchangeGO6909(t, fixture)
+	if err != nil {
+		t.Fatalf("a valid assertion carrying ignorable foreign-namespace elements was rejected: %v", err)
+	}
+	if id.Sub != "alice@example.com" {
+		t.Fatalf("Sub = %q, want the IdP's real subject alice@example.com", id.Sub)
+	}
+}
