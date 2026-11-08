@@ -225,6 +225,50 @@ log "build-time upgrades: ${moved:-0} package(s) moved"
 log "installing pinned-snapshot early boot presentation packages"
 apt_snap -y -qq install --no-install-recommends \
   plymouth plymouth-theme-ubuntu-text plymouth-label fontconfig
+# perf/BPF diagnostic tooling (#1528 FB-1 remediation): the base image ships
+# a perf wrapper and the BPF tracing tools, which E/kernel-cve-assumptions
+# forbids and the appliance never uses. The purge is EXACT, never an
+# autoremove (see diagnostic-tooling-purge.txt): every listed package must be
+# installed, the simulated purge must remove exactly the list, and the
+# packages the appliance needs must survive it. Pinned at -1 like snapd so a
+# later OS update cannot bring the tooling back.
+purge_list="$(sed 's/#.*//' "$APPL/diagnostic-tooling-purge.txt" | awk 'NF{print $1}' | sort -u)"
+[[ "$(wc -l <<<"$purge_list")" -eq 12 ]] || { echo "diagnostic-tooling-purge.txt must list 12 packages, got: $(tr '\n' ' ' <<<"$purge_list")" >&2; exit 1; }
+for p in $purge_list; do
+  [[ "$(dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null)" == installed ]] \
+    || { echo "diagnostic-tooling-purge.txt lists $p, which is not installed: review the list against this base image" >&2; exit 1; }
+done
+# shellcheck disable=SC2086 # one package name per word
+would_purge="$(DEBIAN_FRONTEND=noninteractive apt_snap -s -qq purge $purge_list | awk '$1=="Purg" || $1=="Remv" {print $2}' | sort -u)"
+[[ "$would_purge" == "$purge_list" ]] || {
+  echo "the diagnostic-tooling purge would not remove exactly its list:" >&2
+  echo "  also removed: $(comm -13 <(echo "$purge_list") <(echo "$would_purge") | tr '\n' ' ')" >&2
+  echo "  not removed:  $(comm -23 <(echo "$purge_list") <(echo "$would_purge") | tr '\n' ' ')" >&2
+  exit 1
+}
+log "purging perf/BPF diagnostic tooling: $(tr '\n' ' ' <<<"$purge_list")"
+{ echo "# perf/BPF diagnostic tooling purged at build time (diagnostic-tooling-purge.txt): package version"
+  # shellcheck disable=SC2086 # one package name per word
+  dpkg-query -W -f='${Package} ${Version}\n' $purge_list | sort
+} > "$STATE/removed-diagnostic-tooling.txt"
+# shellcheck disable=SC2086 # one package name per word
+DEBIAN_FRONTEND=noninteractive apt_snap -y -qq purge $purge_list
+for p in $purge_list; do
+  if dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null | grep -qx installed; then echo "$p is still installed after the purge" >&2; exit 1; fi
+done
+# Product, kernel, guest-tools and maintenance packages: still installed.
+for keep in "$GUEST_KERNEL_META" "linux-image-${newest_kver}-generic" "linux-modules-${newest_kver}-generic" \
+  ubuntu-server open-vm-tools cloud-init unattended-upgrades openssh-server nftables apt python3 \
+  docker-ce docker-ce-cli containerd.io docker-compose-plugin plymouth plymouth-theme-ubuntu-text; do
+  [[ "$(dpkg-query -W -f='${db:Status-Status}' "$keep" 2>/dev/null)" == installed ]] \
+    || { echo "$keep is not installed after the diagnostic-tooling purge" >&2; exit 1; }
+done
+printf 'Package: linux-tools-* bpftrace bpfcc-tools python3-bpfcc libbpfcc ubuntu-kernel-accessories\nPin: release *\nPin-Priority: -1\n' \
+  > /etc/apt/preferences.d/culvert-no-diagnostic-tooling
+for p in linux-tools-common bpftrace bpfcc-tools ubuntu-kernel-accessories; do
+  [[ "$(apt_cache_snap policy "$p" | awk '/Candidate:/{print $2}')" == "(none)" ]] \
+    || { echo "the culvert-no-diagnostic-tooling pin does not block $p" >&2; exit 1; }
+done
 # Leave the snapshot behind: the deployed appliance updates from the live
 # archive (unattended-upgrades + culvert-os-update), never from a snapshot.
 # This is the ONLY apt call outside the pinned section, and it installs
@@ -417,6 +461,20 @@ bash "$APPL/boot-splash/install.sh"
 
 # ── 4. Evidence captured into the image for the SBOM/CVE record ─────────────
 dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' | sort > "$STATE/dpkg-list.txt"
+# Inventory gate, first of two (build-ova.sh repeats it from outside the
+# guest before packaging): no package, command or path forbidden by the
+# hardening criteria (forbidden-inventory.txt) is in the image.
+gate_present="$(mktemp)"
+for d in /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin; do
+  find "$d" -mindepth 1 -maxdepth 1 -printf "$d/%f\n" 2>/dev/null
+done > "$gate_present"
+awk '$1=="path"{print $2}' "$APPL/forbidden-inventory.txt" | while read -r p; do
+  if [[ -e "$p" || -L "$p" ]]; then echo "$p"; fi
+done >> "$gate_present"
+python3 -I "$APPL/inventory-gate.py" --rules "$APPL/forbidden-inventory.txt" \
+  --dpkg-list "$STATE/dpkg-list.txt" --present "$gate_present" --out "$STATE/inventory-gate.txt" \
+  || { rm -f "$gate_present"; echo "inventory gate failed in the guest (see above)" >&2; exit 1; }
+rm -f "$gate_present"
 {
   echo "docker-ce=$(dpkg-query -W -f='${Version}' docker-ce)"
   echo "docker-ce-cli=$(dpkg-query -W -f='${Version}' docker-ce-cli)"

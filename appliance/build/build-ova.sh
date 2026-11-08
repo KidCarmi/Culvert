@@ -447,6 +447,9 @@ mkdir -p "$OV/opt/culvert-appliance/bin"
 cp "$HERE/prepare-guest.sh" "$OV/opt/culvert-appliance/prepare-guest.sh"
 # The ONE APT entry point of the pinned section (FB-1), sourced by prepare-guest.sh.
 cp "$HERE/apt-snapshot.sh" "$OV/opt/culvert-appliance/apt-snapshot.sh"
+# The exact perf/BPF tooling purge list and the inventory gate (with its
+# rules), used by prepare-guest.sh; the gate runs again from outside below.
+cp "$HERE/diagnostic-tooling-purge.txt" "$HERE/forbidden-inventory.txt" "$HERE/inventory-gate.py" "$OV/opt/culvert-appliance/"
 
 # ── BUILD-HOST-ONLY accommodation: an intercepting HTTPS proxy ──────────────
 # A sandboxed build host may force outbound HTTPS through a local proxy
@@ -751,7 +754,27 @@ shadow_line="$(virt-cat -a "$DISK" /etc/shadow | grep '^culvert:' || true)"
 operator_shadow="$(virt-cat -a "$DISK" /etc/shadow | grep '^culvert-operator:' || true)"
 [[ "$operator_shadow" == culvert-operator:!* ]] || die "operator password is not locked in the image"
 if virt-ls -a "$DISK" /etc/ssh/culvert-authorized-keys/ | grep -q .; then die "operator keys leaked into image"; fi
-log "guest checks OK (pinned docker, empty machine-id, no host keys, no proxy/CA residue, console account locked)"
+# Inventory gate, second of two (prepare-guest.sh ran the first inside the
+# guest): from OUTSIDE the guest, on the finished disk, before the VMDK/OVA is
+# written. The installed inventory is the dpkg-list.txt read above; the PATH
+# directories and each forbidden path are listed from the disk itself.
+virt-cat -a "$DISK" /var/lib/culvert-appliance/inventory-gate.txt > "$OUT/inventory-gate-guest.txt" \
+  || die "the guest wrote no inventory-gate record (prepare-guest.sh section 4)"
+virt-cat -a "$DISK" /var/lib/culvert-appliance/removed-diagnostic-tooling.txt > "$OUT/removed-diagnostic-tooling.txt" \
+  || die "the guest wrote no removed-diagnostic-tooling record (prepare-guest.sh 1b)"
+gate_present="$WORK/inventory-present.txt"; : > "$gate_present"
+for d in /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin; do
+  virt-ls -a "$DISK" "$d" > "$WORK/inventory-ls.txt" || die "could not list $d on the disk for the inventory gate"
+  sed "s|^|$d/|" "$WORK/inventory-ls.txt" >> "$gate_present"
+done
+while read -r p; do
+  virt-ls -a "$DISK" "$(dirname "$p")" > "$WORK/inventory-ls.txt" || die "could not list $(dirname "$p") on the disk for the inventory gate"
+  if grep -qxF "$(basename "$p")" "$WORK/inventory-ls.txt"; then echo "$p" >> "$gate_present"; fi
+done < <(awk '$1=="path"{print $2}' "$HERE/forbidden-inventory.txt")
+python3 "$HERE/inventory-gate.py" --rules "$HERE/forbidden-inventory.txt" --dpkg-list "$OUT/dpkg-list.txt" \
+  --present "$gate_present" --out "$OUT/inventory-gate.txt" || die "inventory gate failed on the finished disk (see above); nothing is packaged"
+rm -f "$gate_present" "$WORK/inventory-ls.txt"
+log "guest checks OK (pinned docker, empty machine-id, no host keys, no proxy/CA residue, console account locked, inventory gate passed)"
 [[ "$STOP_AFTER" == "disk" ]] && { cp "$DISK" "$OUT/$OVA_BASENAME.qcow2"; log "stopped after disk: $OUT/$OVA_BASENAME.qcow2"; KEEP_WORK=1; exit 0; }
 
 # ── 6. VMDK + OVF + OVA ─────────────────────────────────────────────────────

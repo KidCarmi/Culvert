@@ -1,0 +1,28 @@
+# What the appliance image must NOT contain, checked by inventory-gate.py
+# twice before packaging: inside the guest at the end of prepare-guest.sh,
+# and by build-ova.sh from outside the guest on the finished disk, before the
+# VMDK/OVA is written. Any match stops the build.
+#
+# kind     pattern                 criterion
+#   package  dpkg package name (glob), matched against the installed inventory
+#   command  file name (glob) in a PATH directory (/usr/bin /usr/sbin
+#            /usr/local/bin /usr/local/sbin; /bin and /sbin are merged)
+#   path     absolute path that must not exist
+#
+# E/kernel-cve-assumptions (lab qualification; the kernel CVE dispositions in
+# docs/appliance/readiness-report.md section 3g rely on it): no perf tool.
+command  perf                      E/kernel-cve-assumptions: no perf tool
+package  linux-tools-*             E/kernel-cve-assumptions: no perf tool (the wrapper package and every versioned perf build)
+path     /usr/lib/linux-tools      E/kernel-cve-assumptions: no perf tool (where versioned perf builds live)
+# perf/BPF diagnostic tooling (#1528 FB-1 remediation, diagnostic-tooling-purge.txt)
+package  bpftrace                  BPF diagnostic tooling removed from the appliance
+package  bpfcc-tools               BPF diagnostic tooling removed from the appliance
+package  python3-bpfcc             BPF diagnostic tooling removed from the appliance
+package  libbpfcc                  BPF diagnostic tooling removed from the appliance
+package  ubuntu-kernel-accessories BPF diagnostic tooling removed from the appliance
+command  bpftrace                  BPF diagnostic tooling removed from the appliance
+command  bpftrace-*                BPF diagnostic tooling removed from the appliance
+command  *.bt                      BPF diagnostic tooling removed from the appliance (bpftrace scripts)
+command  *-bpfcc                   BPF diagnostic tooling removed from the appliance (BCC tools)
+# snapd: purged at build as an unused root daemon (prepare-guest.sh 1b).
+package  snapd                     unused root daemon purged at build

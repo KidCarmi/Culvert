@@ -1,0 +1,31 @@
+# perf/BPF diagnostic tooling the appliance never uses, purged at build time
+# by prepare-guest.sh (#1528 FB-1 remediation: QEMU campaign 2, run
+# 42402656551, stopped at E/kernel-cve-assumptions "perf tool installed").
+#
+# The base cloud image ships these as auto-installed packages that no other
+# installed package depends on. On the retained 0981ff3d OVA (680 packages)
+# nothing outside this list Depends on, Pre-Depends on or Recommends any
+# entry, and `apt-get -s purge` of exactly this list removes exactly this
+# list. The second group is the first group's exclusive dependency closure
+# (auto-installed, referenced only from inside the list).
+#
+# The purge is EXACT, never an autoremove: every entry must be installed, the
+# simulated purge must remove exactly these packages and nothing else, and
+# the packages prepare-guest.sh keeps must still be installed afterwards. A
+# base image or snapshot that changes any of that stops the build, and this
+# list is reviewed again.
+#
+# package                    why it goes
+linux-tools-common           # /usr/bin/perf (version-dispatch wrapper), cpupower, turbostat, usbip, x86_energy_perf_policy
+bpftrace                     # BPF tracing front-end and its *.bt scripts
+bpfcc-tools                  # BCC tracing tools (*-bpfcc)
+python3-bpfcc                # BCC Python bindings (bpfcc-tools only)
+libbpfcc                     # BCC runtime (bpftrace, python3-bpfcc only)
+ubuntu-kernel-accessories    # metapackage that only recommends bpftrace and bpfcc-tools
+# exclusive dependency closure of the above
+hwdata                       # linux-tools-common only
+python3-netaddr              # bpfcc-tools only
+ieee-data                    # python3-netaddr only
+libclang-cpp18               # libbpfcc only
+libclang1-18                 # bpftrace only
+libllvm18                    # bpftrace, libbpfcc, libclang-cpp18, libclang1-18 only
