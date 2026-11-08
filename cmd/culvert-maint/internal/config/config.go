@@ -203,8 +203,9 @@ const (
 // proxyRepoShapeRE bounds a repository reference: it must look like a
 // docker repo (optional registry host[:port], path segments), with no
 // whitespace, `@`, or tag — a bare repo only. This is the literal the
-// sudoers pull/tag pattern binds to, so a malformed value must never
-// reach the rendered allowlist.
+// compose-cli wrapper's pull/tag subcommands bind to (install.sh renders it
+// into the wrapper and enforces this same shape), so a malformed value must
+// never reach the privilege boundary.
 var proxyRepoShapeRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:-]{0,254}$`)
 
 // Load reads, parses, and validates the config at path. Returns the

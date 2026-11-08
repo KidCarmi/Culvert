@@ -10,9 +10,13 @@
 //     twice: the handler enforces the operator's image_allowlist regex
 //     (policy), and the runner enforces validateImageRefShape (argv
 //     safety — no whitespace, no shell metacharacters, no leading dash
-//     that docker could read as a flag). The sudoers entry uses a single
-//     bounded `*` wildcard for that one token, the same precedent as
-//     /backup/* for the backup/restore templates.
+//     that docker could read as a flag). The sudoers entry ends in a
+//     sole trailing `*` for that one token, the only argument wildcard
+//     sudo-rs accepts.
+//   - The upgrade-apply templates (container inspect, pinned pull,
+//     retag) carry per-call values sudoers cannot match without a glob,
+//     so in sudo mode they run through the compose-cli wrapper
+//     (WrapperArgv), like the backup/restore templates.
 //   - Both commands are READ-ONLY: `docker image inspect` reads the
 //     local image store; `docker manifest inspect` queries the registry.
 //     Neither mutates the host, the stack, or /data. They never acquire
@@ -56,9 +60,11 @@ const (
 	TemplateComposeContainerInspect TemplateID = "compose.container.inspect"
 	// TemplateImagePullDigest runs `docker pull <proxy_repo>@sha256:<digest>`
 	// — a RAW docker pull of a repo-bound, digest-pinned reference (P1.4).
-	// State-changing (mutates the local image store). The repo is a sudoers
-	// rendered literal ({proxy_repo}) and the digest is 64 enumerated hex
-	// classes, so the privilege boundary itself bounds what may be pulled.
+	// State-changing (mutates the local image store). In sudo mode it runs
+	// as the compose-cli wrapper's `pull` subcommand: the repo is a literal
+	// rendered into the root-owned wrapper and the digest must be exactly 64
+	// lowercase hex, so the privilege boundary itself bounds what may be
+	// pulled.
 	TemplateImagePullDigest TemplateID = "image.pull.digest"
 	// TemplateImageTagPinned runs
 	// `docker tag <proxy_repo>@sha256:<digest> culvert/proxy:pinned` —
@@ -73,7 +79,7 @@ const (
 // never pushed — it exists only as a local alias created by ComposeTagPinned
 // (or seeded at install). Nothing a caller supplies can change what
 // `docker compose up` resolves it to; the only writer is the repo-bound,
-// digest-pattern-matched `docker tag` command. This replaces the old
+// digest-validated `docker tag` command (the compose-cli wrapper's `tag`). This replaces the old
 // `${CULVERT_PROXY_IMAGE:-…}` interpolation as the image-selection mechanism
 // (P1.4 / D1.6c-pin-value-binding-plan.md).
 const pinnedProxyTag = "culvert/proxy:pinned"
@@ -91,14 +97,14 @@ const PinnedProxyTag = pinnedProxyTag
 const defaultProxyRepo = "ghcr.io/kidcarmi/culvert"
 
 // pinnedDigestHexLen is the exact length of a sha256 hex digest (and the
-// number of [0-9a-f] classes the sudoers pattern enumerates).
+// digest length the compose-cli wrapper's pull/tag subcommands require).
 const pinnedDigestHexLen = 64
 
 // pinnedDigestSuffixRE matches the `@sha256:<64 lowercase hex>` suffix of a
 // repo-bound pinned reference. The repo prefix is checked separately against
 // the runner's configured proxyRepo (a literal compare, not a regex, so a
 // repo containing `.`/`/` needs no escaping).
-var pinnedDigestSuffixRE = regexp.MustCompile(`^@sha256:[0-9a-f]{64}$`)
+var pinnedDigestSuffixRE = regexp.MustCompile(fmt.Sprintf(`^@sha256:[0-9a-f]{%d}$`, pinnedDigestHexLen))
 
 // imageRefShapeRE bounds the argv shape of an image reference,
 // INDEPENDENT of the operator-configured image_allowlist. It is the
@@ -137,10 +143,10 @@ func validateImageRefShape(ref string) error {
 }
 
 // containerIDMinLen / containerIDMaxLen bound a docker container id: a
-// short id (12 hex) through a full id (64 hex). These are the SINGLE
-// SOURCE OF TRUTH for both the argv-shape validator and the enumerated
-// sudoers allowlist (containerInspectSudoersLines), so the two can never
-// drift.
+// short id (12 hex) through a full id (64 hex). `docker compose ps
+// --format json` reports the 12-character short id. The compose-cli
+// wrapper's inspect-image subcommand enforces the same 12..64 bound at the
+// sudo boundary (pinned by wrapper_test.go).
 const (
 	containerIDMinLen = 12
 	containerIDMaxLen = 64
@@ -177,10 +183,12 @@ func validateContainerIDShape(id string) error {
 // Registry() after the D1.6b set.
 //
 // Sudoers strings are documentation-of-record; the parity test
-// cross-checks them against the on-disk sudoers file. The single `*`
-// wildcard in each line matches exactly one argv token — the
-// image_ref — which the agent validates against image_allowlist (policy)
-// and validateImageRefShape (argv safety) before sudo is ever invoked.
+// cross-checks them against the on-disk sudoers file. The image and
+// manifest inspect lines end in a sole trailing `*` (the one argument
+// wildcard sudo-rs accepts) for the image_ref, which the agent validates
+// against image_allowlist (policy) and validateImageRefShape (argv safety)
+// before sudo is ever invoked. The container inspect runs through the
+// compose-cli wrapper instead.
 func imageInspectTemplates() []Template {
 	return []Template{
 		{
@@ -201,76 +209,48 @@ func imageInspectTemplates() []Template {
 		},
 		{
 			// `docker inspect` is a DIFFERENT binary surface from
-			// `docker compose`. Its sudoers entries are ENUMERATED, not
-			// wildcarded: one fixed-length [0-9a-f] pattern per legal
-			// container-id length (12–64). There is NO trailing `*`, so
-			// sudo (whose `*` matches whitespace — and could otherwise
-			// admit a second `--format` to dump arbitrary Config.Env at
-			// root) cannot accept any extra argument after the validated
-			// id, and the `--format` value stays locked to
-			// `{{json .Image}}`. This mirrors the file's restore-flag
-			// enumeration: the privilege boundary is never broadened for
-			// readability. The `--format` value is double-quoted because
-			// `{{json .Image}}` is ONE argv token containing a space.
+			// `docker compose`. It used to be allowlisted as 53 enumerated
+			// `[0-9a-f]` patterns (one per id length) with a
+			// backslash-escaped space in `{{json\ .Image}}`; sudo-rs
+			// compares arguments literally, so none of them ever matched.
+			// In sudo mode it now runs as the compose-cli wrapper's
+			// `inspect-image` subcommand, which admits exactly one
+			// 12..64 lowercase-hex id and execs this BaseArgv + the id:
+			// nothing can follow the id (a second `--format
+			// {{json .Config.Env}}` would dump container secrets as root),
+			// and `--format` stays locked to `{{json .Image}}`.
 			ID:            TemplateComposeContainerInspect,
 			BaseArgv:      []string{"docker", "inspect", "--format", "{{json .Image}}"},
-			SudoersLines:  containerInspectSudoersLines(),
+			WrapperArgv:   []string{"inspect-image"},
+			SudoersLines:  []string{composeCLIWrapperSudoersLine},
 			StateChanging: false,
 		},
 	}
 }
 
-// containerInspectSudoersLines enumerates one sudoers allowlist line per
-// legal container-id length (containerIDMinLen..containerIDMaxLen), each
-// a fixed-length run of [0-9a-f] character classes with NO trailing
-// wildcard. This bounds the privilege boundary to exactly one hex id of
-// an allowed length and nothing more — see the template comment for why
-// a single trailing `*` is unsafe here. The set MUST stay in lock-step
-// with packaging/sudoers/culvert-maint (the parity test enforces it).
-func containerInspectSudoersLines() []string {
-	// The format value `{{json .Image}}` is ONE argv token that contains a
-	// space. sudo does NOT treat double quotes as argument grouping — a
-	// double-quoted `"{{json .Image}}"` is split on the space into two sudoers
-	// tokens, the arg count no longer matches, the rule silently misses, and
-	// `sudo -n` demands a password (verified on Amazon Linux 2023 sudo 1.9.x).
-	// Backslash-escape the space instead — the portable way to match a space in
-	// a sudoers command argument. fnmatch treats `{ } .` as literals, so the
-	// pattern matches exactly the argv token `{{json .Image}}` and nothing else.
-	const prefix = `/usr/bin/docker inspect --format {{json\ .Image}} `
-	lines := make([]string, 0, containerIDMaxLen-containerIDMinLen+1)
-	for n := containerIDMinLen; n <= containerIDMaxLen; n++ {
-		lines = append(lines, prefix+strings.Repeat("[0-9a-f]", n))
-	}
-	return lines
-}
-
 // composeApplyTemplates returns the D1.6c upgrade-apply image-selection
 // templates (P1.4). Both are RAW docker (not `docker compose`): a digest
-// pull and a retag to the fixed local tag. Their sudoers lines carry the
-// `{proxy_repo}` placeholder (rendered to a literal at install) plus a
-// 64-class hex digest pattern with NO trailing wildcard — so the privilege
-// boundary itself bounds the image to "<proxy_repo> @ some sha256 digest",
-// retagged only to the fixed `culvert/proxy:pinned` destination.
+// pull and a retag to the fixed local tag. In sudo mode both run through
+// the compose-cli wrapper (`pull`, `tag`), which binds the image to
+// "<proxy_repo> @ exactly 64 lowercase hex" (proxy_repo is a literal
+// rendered into the root-owned wrapper at install) and the retag
+// destination to the fixed `culvert/proxy:pinned`. They used to be direct
+// sudoers rules with a 64-class `[0-9a-f]` digest pattern, which sudo-rs
+// matches literally and therefore never matched.
 func composeApplyTemplates() []Template {
-	// Sudoers requires a literal colon in a command spec to be escaped
-	// (`\:`); an unescaped `:` is a syntax error to visudo. The escaping
-	// lives ONLY in this documentation-of-record (and the rendered file the
-	// parity test matches) — the runtime argv uses the plain colon (the real
-	// `repo@sha256:<hex>` ref and pinnedProxyTag), which sudo matches against
-	// the escaped pattern.
-	sudoersDigest := "{proxy_repo}@sha256\\:" + strings.Repeat("[0-9a-f]", pinnedDigestHexLen)
-	sudoersPinnedTag := strings.Replace(pinnedProxyTag, ":", "\\:", 1) // culvert/proxy\:pinned
 	return []Template{
 		{
 			ID:            TemplateImagePullDigest,
 			BaseArgv:      []string{"docker", "pull"},
-			SudoersLines:  []string{"/usr/bin/docker pull " + sudoersDigest},
+			WrapperArgv:   []string{"pull"},
+			SudoersLines:  []string{composeCLIWrapperSudoersLine},
 			StateChanging: true,
 		},
 		{
 			ID:            TemplateImageTagPinned,
 			BaseArgv:      []string{"docker", "tag"},
-			SudoersLines:  []string{"/usr/bin/docker tag " + sudoersDigest + " " + sudoersPinnedTag},
+			WrapperArgv:   []string{"tag"},
+			SudoersLines:  []string{composeCLIWrapperSudoersLine},
 			StateChanging: true,
 		},
 	}
@@ -278,7 +258,8 @@ func composeApplyTemplates() []Template {
 
 // validatePinnedDigestRef enforces that ref is a repo-bound, exact-digest
 // reference: `<proxyRepo>@sha256:<64 lowercase hex>`. This is the runner-side
-// mirror of the sudoers pattern (defense-in-depth) AND the §3.1
+// mirror of the compose-cli wrapper's pull/tag check (defense-in-depth) AND
+// the §3.1
 // repo-consistency gate: a ref whose repo differs from the configured
 // proxyRepo, or whose digest is not exactly 64 hex, is rejected before any
 // argv is built — so a foreign-repo or tag pin can never reach docker.
@@ -301,7 +282,7 @@ func validatePinnedDigestRef(ref, proxyRepo string) error {
 // — can re-apply the EXACT repo-bound exact-digest gate to a ref sourced from an
 // (unauthenticated) journal record before feeding it to a root docker action.
 // Sharing the one implementation keeps the reconcile trust gate anti-drift with
-// the sudoers pattern.
+// the compose-cli wrapper's pull/tag check.
 func ValidatePinnedDigestRef(ref, proxyRepo string) error {
 	return validatePinnedDigestRef(ref, proxyRepo)
 }
@@ -309,7 +290,8 @@ func ValidatePinnedDigestRef(ref, proxyRepo string) error {
 // ComposePullDigest runs `docker pull <proxy_repo>@sha256:<digest>`. The ref
 // is validated as a repo-bound exact-digest pin (validatePinnedDigestRef)
 // before any argv is built. State-changing; no env overlay — the image is
-// selected by the argv the sudo boundary pattern-matches, not by an env var.
+// selected by the argv the sudo boundary (the compose-cli wrapper) validates,
+// not by an env var.
 func (r *Runner) ComposePullDigest(ctx context.Context, ref string) (*Result, error) {
 	if err := validatePinnedDigestRef(ref, r.proxyRepo); err != nil {
 		return nil, err
@@ -348,10 +330,9 @@ func (r *Runner) ComposeTagPinned(ctx context.Context, ref string) (*Result, err
 //
 // The container_id is validated by validateContainerIDShape before any
 // argv is built, so sudo is never invoked with a malformed token. The
-// sudoers boundary is independently tightened: it enumerates a
-// fixed-length hex pattern per legal id length with no trailing
-// wildcard (containerInspectSudoersLines), so even a direct sudo call
-// from a compromised agent cannot append extra arguments.
+// sudo boundary is independent: the compose-cli wrapper's inspect-image
+// subcommand admits exactly one 12..64 lowercase-hex id, so even a direct
+// sudo call from a compromised agent cannot append extra arguments.
 func (r *Runner) ComposeContainerInspect(ctx context.Context, containerID string) (*Result, error) {
 	if err := validateContainerIDShape(containerID); err != nil {
 		return nil, err

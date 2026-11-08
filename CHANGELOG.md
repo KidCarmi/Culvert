@@ -7,6 +7,89 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **The maintenance agent could not be installed on Ubuntu 26.04: its sudoers
+  allowlist used argument wildcards that sudo-rs rejects. The variable-argument
+  operations now run through a root-owned wrapper that is tighter than the
+  wildcards it replaces.** sudo-rs, the default sudo on Ubuntu 26.04 (and on
+  GitHub's `ubuntu-latest` runners), refuses any `*` or `?` inside a sudoers
+  command argument except a sole trailing `*`, and `visudo -c` then rejects the
+  whole file. `packaging/sudoers/culvert-maint` had 30 such entries:
+  `--backup /backup/*` (encrypted and unencrypted backup), the 24 enumerated
+  `--restore /backup/* --mode …` restore lines, the
+  `--older-than * --keep-last *` cleanup pair, and the passphrase `Cmnd_Alias`.
+  `packaging/culvert-maint/install.sh` therefore aborted, and so did the QA
+  gate's `visudo -c` step and
+  `TestCulvertMaintInstall_SudoersRender_DefaultRepoStillValid`. Those 30
+  entries are replaced by ONE exact, argument-less rule for
+  `/usr/local/libexec/culvert-maint/compose-cli`. install.sh renders the
+  compose path into that wrapper (`packaging/culvert-maint/compose-cli`) and
+  installs it root:root 0755 before the sudoers file that grants it, after
+  checking that every directory above it is root-owned and not
+  group/world-writable. The wrapper accepts only the argv the agent's runner
+  emits: a `/backup/<name>` path that follows the agent's filename rules
+  (no `/`, no leading `.`, no whitespace, newline or metacharacter, at most 255
+  bytes), the 3 restore modes × 4 flag sets × {dry-run, commit} in canonical
+  order only, an `--older-than` value of the agent's shape between 1h and
+  8760h, and a canonical `--keep-last` of 0..100. It then execs the same
+  `docker compose` command, with a fixed PATH and locale, no `eval`, and every
+  expansion quoted. Classic sudo's `*` matched any characters, spaces
+  included, so the old `/backup/*` rule also admitted `/backup/../…` traversal
+  and extra appended flags; the wrapper refuses both. `CULVERT_BACKUP_PASSPHRASE`
+  stays command-scoped. The `env_keep` alias now names the wrapper, and the
+  wrapper unsets the variable for unencrypted backup and cleanup, so docker
+  receives it for exactly the two commands the old alias covered. In
+  `privilege_mode=sudoers` the runner calls
+  `sudo -n /usr/local/libexec/culvert-maint/compose-cli <subcommand> <args>`.
+  `docker_group_lab` still runs docker directly, and the fixed-argv
+  operations (`ps`, `--list-backups`, `down`, `up -d`) keep their exact
+  direct rules. **Upgrade note:** re-run `packaging/culvert-maint/install.sh`
+  (the quick-start installer does this) so the wrapper and the new sudoers
+  file are installed together with the new agent binary. A new agent with the
+  old sudoers file fails closed at sudo. Gates:
+  `TestSudoers_NoWildcardInCommandArguments` applies the sudo-rs argument rule
+  to the sudoers file and every template on any runner image, with negative
+  controls for the shapes that broke main. `wrapper_test.go` runs the real
+  wrapper under every available POSIX shell. It feeds the wrapper every
+  runner-emitted argv (158 calls, including all 24 restore combinations) and
+  requires the exact docker argv the runner would run without sudo. It also
+  checks more than 120 refused shapes, the passphrase forwarding, and a
+  differential oracle that the wrapper never accepts an `--older-than` value
+  the agent rejects. `install_script_maint_compose_cli_wrapper_test.go`
+  renders the wrapper with compose paths containing `$( )`, backticks,
+  backslashes, `&`, `;`, `:` and `,`, and requires docker to receive the path
+  byte-for-byte. **The upgrade path moved behind the same wrapper.** sudo-rs
+  also compares arguments literally, so the 53 enumerated
+  `docker inspect --format {{json\ .Image}} [0-9a-f]…` rules (one per
+  container-id length) and the digest-pinned
+  `docker pull`/`docker tag {proxy_repo}@sha256\:[0-9a-f]…` pair parsed but
+  never matched there: `[0-9a-f]` is five literal characters, and the
+  backslash-escaped space splits `{{json .Image}}` into two arguments. The
+  upgrade's capture, verify and pull were refused ("I'm afraid I can't do
+  that") on every sudo-rs host. Those 55 rules are removed, and the wrapper
+  gains three subcommands. `inspect-image <id>` accepts exactly one 12..64
+  lowercase-hex container id (the agent's own bound; `docker compose ps`
+  reports the 12-character short id) and execs
+  `docker inspect --format '{{json .Image}}' <id>`, so nothing can follow the
+  id and `--format` stays fixed. `pull <ref>` and
+  `tag <ref> culvert/proxy:pinned` accept only `<proxy_repo>@sha256:<64
+  lowercase hex>`, where `proxy_repo` is rendered into the wrapper by
+  install.sh and compared byte-for-byte. A tag, another or lookalike repo, a
+  digest of the wrong length or case, or a retag to any other destination is
+  refused. All three unset `CULVERT_BACKUP_PASSPHRASE`. install.sh refuses to
+  render a `proxy_repo` outside the agent's own shape (1..255 bytes,
+  alphanumeric first, then `[A-Za-z0-9._/:-]`). The runner calls
+  `sudo -n … compose-cli inspect-image|pull|tag` in sudo mode; the
+  `docker_group_lab` argv is unchanged. `TestSudoers_NoWildcardInCommandArguments`
+  now also flags glob character classes and backslash-escaped spaces in
+  arguments: it flagged exactly those 55 entries before this change. The
+  wrapper suite now covers 166 runner-emitted argvs and more than 200 refused
+  shapes. The install-lifecycle e2e verify-stage step now asserts that
+  `sudo -n /usr/local/libexec/culvert-maint/compose-cli inspect-image <id>`
+  escalates and returns the image config digest.
+
+
 ### On-prem appliance readiness (pilot)
 
 - **Restore commits in place and can therefore restore a mounted `/data`.**

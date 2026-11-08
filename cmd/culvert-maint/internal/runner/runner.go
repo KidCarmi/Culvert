@@ -87,16 +87,28 @@ type Template struct {
 	ID       TemplateID
 	BaseArgv []string
 
+	// WrapperArgv, when non-empty, routes the template through the
+	// root-owned compose-cli wrapper (ComposeCLIWrapperPath) in
+	// privilege_mode=sudoers: buildArgv emits
+	// `sudo -n <ComposeCLIWrapperPath> <WrapperArgv...>` instead of the
+	// BaseArgv docker command, and the typed method appends the SAME
+	// positional tail to either form. The wrapper validates that tail and
+	// execs exactly BaseArgv + tail. Used for every template whose argv
+	// carries a per-call value, because sudoers can no longer match those
+	// with an argument wildcard (sudo-rs rejects `*`/`?` in arguments).
+	// Without sudo (docker_group_lab) the BaseArgv form runs directly.
+	WrapperArgv []string
+
 	// SudoersLines is the documentation-of-record for what command
 	// lines must be allow-listed in /etc/sudoers.d/culvert-maint for
-	// this template. A simple template (e.g. compose.status,
-	// compose.cli.backup.list) has exactly one line. Templates with
-	// enumerable variation (e.g. restore: 3 modes × 4 optional-flag
-	// combos = 12 lines) have one entry per real combination — the
-	// agent never broadens the privilege boundary with a trailing
-	// wildcard. The static parity test asserts the union of every
-	// template's SudoersLines exactly matches the on-disk sudoers
-	// file (no missing, no dead entries).
+	// this template. A fixed-argv template (e.g. compose.status,
+	// compose.cli.backup.list) has its exact docker command line. A
+	// wrapper-routed template (non-empty WrapperArgv) has the single
+	// argument-less wrapper line. No line may carry a wildcard inside a
+	// command argument (TestSudoers_NoWildcardInCommandArguments). The
+	// static parity test asserts the union of every template's
+	// SudoersLines exactly matches the on-disk sudoers file (no missing,
+	// no dead entries).
 	SudoersLines []string
 
 	// StateChanging mirrors ops.IsStateChanging; included on the
@@ -390,12 +402,21 @@ func (r *Runner) ComposeStatus(ctx context.Context) (*Result, error) {
 // TemplateComposeUp) expands to `--no-build` when ComposeNoBuild is set. argv[0] is the executable; the
 // runner prepends `sudo -n` if useSudo.
 //
+// With useSudo, a template with a WrapperArgv expands to
+// `sudo -n <ComposeCLIWrapperPath> <WrapperArgv...>` instead: the
+// root-owned wrapper carries the compose path itself and execs the
+// BaseArgv docker command after validating the caller's positional tail.
+//
 // D1.6a templates have no operator-supplied positional args. D1.6b/c
 // expansions will accept validated args via additional methods.
 func (r *Runner) buildArgv(tmpl *Template) []string {
 	out := make([]string, 0, len(tmpl.BaseArgv)+4) // +2 sudo, +2 override; {compose_no_build} replaces its own slot
 	if r.useSudo {
 		out = append(out, r.sudoBinary, "-n")
+		if len(tmpl.WrapperArgv) > 0 {
+			out = append(out, ComposeCLIWrapperPath)
+			return append(out, tmpl.WrapperArgv...)
+		}
 	}
 	composePath := filepath.Join(r.composeProjectDir, r.composeFile)
 	for _, a := range tmpl.BaseArgv {
