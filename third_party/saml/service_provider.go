@@ -1195,6 +1195,14 @@ func (sp *ServiceProvider) validateAssertion(assertion *Assertion, possibleReque
 	if assertion.Subject == nil {
 		return errors.New("assertion has no Subject")
 	}
+	// Culvert fork (GO-2026-6909): the loop below is the only place Recipient
+	// and InResponseTo are checked, so an empty slice skipped both. The Web
+	// Browser SSO profile requires at least one bearer <saml:SubjectConfirmation>
+	// (saml-profiles-2.0-os §4.1.4.2), and now that the slice binds only to the
+	// assertion namespace a foreign-namespace-only confirmation leaves it empty.
+	if len(assertion.Subject.SubjectConfirmations) == 0 {
+		return errors.New("assertion Subject has no SubjectConfirmation")
+	}
 	for _, subjectConfirmation := range assertion.Subject.SubjectConfirmations {
 		if subjectConfirmation.SubjectConfirmationData == nil {
 			return errors.New("assertion SubjectConfirmation has no SubjectConfirmationData")
