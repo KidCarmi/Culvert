@@ -670,12 +670,17 @@ type dpLastGoodConfigSnapshotStatus struct {
 	// last-good file, withdraws the exemption. In-memory only: never
 	// serialized or reported.
 	IdPProfilesFingerprint [32]byte
+	// IdPProfileCount is how many profiles that on-disk snapshot restores at
+	// startup (0 when it carries none). Kept even when the set cannot be
+	// fingerprinted, and unchanged by a later failed persist (the write is
+	// atomic, so the older file stays in place).
+	IdPProfileCount int
 }
 
 // dpLastGoodConfigSnapshotLoadedStatus is the status of a last-good snapshot
 // that is now on disk (persisted or loaded).
 func dpLastGoodConfigSnapshotLoadedStatus(snap ConfigSnapshot) dpLastGoodConfigSnapshotStatus {
-	st := dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version, HasIdPProfiles: snap.IdPProfiles != nil}
+	st := dpLastGoodConfigSnapshotStatus{Loaded: true, SavedVersion: snap.Version, HasIdPProfiles: snap.IdPProfiles != nil, IdPProfileCount: len(snap.IdPProfiles)}
 	if st.HasIdPProfiles {
 		fp, ok := idpProfilesFingerprint(snap.IdPProfiles)
 		// An unfingerprintable set cannot be proven to match the registry, so

@@ -99,6 +99,20 @@ func dpLastGoodSnapshotPersistsIdPProfiles() bool {
 	return ok && current == st.IdPProfilesFingerprint
 }
 
+// dpLastGoodRestoredIdPProfiles reports how many IdP profiles this data
+// plane's on-disk last-known-good snapshot restores at startup: 0 off an
+// enrolled DP or before a snapshot is loaded or persisted.
+func dpLastGoodRestoredIdPProfiles() int {
+	if !audit.DPMode() || activeDPClient.Load() == nil {
+		return 0
+	}
+	st, _ := dpLastGoodConfigSnapshotState.Load().(dpLastGoodConfigSnapshotStatus)
+	if !st.Loaded {
+		return 0
+	}
+	return st.IdPProfileCount
+}
+
 func checkIdPPersistence() OperatorContractCheck {
 	const code = "idp_profiles_persistence"
 	persisted, n := idpRegistrySnapshotCounts()
@@ -110,6 +124,15 @@ func checkIdPPersistence() OperatorContractCheck {
 		return OperatorContractCheck{Code: code, Status: diagOK,
 			Message: "identity provider profiles are synced from the control plane and persisted in this data plane's last-known-good config snapshot"}
 	case n == 0:
+		if restored := dpLastGoodRestoredIdPProfiles(); restored > 0 {
+			// A local delete of the last provider empties the registry but not
+			// the last-good file, so a restart brings the profiles back.
+			return OperatorContractCheck{Code: code, Status: diagWarn,
+				Message: fmt.Sprintf("no identity provider profiles are configured in memory, but this data plane's last-known-good "+
+					"config snapshot holds %d profile(s) that a restart restores — the local deletion is not durable", restored),
+				OperatorAction: "Delete the provider(s) on the control plane so the next synced snapshot carries the change, " +
+					"or set -idp-profiles-file (a file in the persistent data directory) or proxy.idp_profiles_file in config.yaml, then restart."}
+		}
 		return OperatorContractCheck{Code: code, Status: diagOK,
 			Message: "no identity providers configured (profiles would not survive a restart: no idp profiles file is set)"}
 	}

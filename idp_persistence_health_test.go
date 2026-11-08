@@ -228,6 +228,19 @@ func TestCheckIdPPersistence_DPLocalMutationInvalidatesLastGoodExemption(t *test
 	applyAndPersist(3, snapX)
 	expect("snapshot X re-applied after the OIDC change", diagOK)
 
+	// Deleting every provider locally empties the registry, but the last-good
+	// file still restores snapshot X on restart: not durable, so warn.
+	mustDo("local delete lg-a", r.Delete("lg-a"))
+	mustDo("local delete lg-b", r.Delete("lg-b"))
+	expect("local delete of the last provider after snapshot X", diagWarn)
+	if c := checkIdPPersistence(); !strings.Contains(c.Message, "2 profile(s) that a restart restores") {
+		t.Fatalf("empty registry vs snapshot X: message %q does not name the restored profiles", c.Message)
+	}
+	applyAndPersist(3, []*IdPProfile{})
+	expect("empty registry matching an empty persisted snapshot", diagOK)
+	applyAndPersist(3, snapX)
+	expect("snapshot X persisted again", diagOK)
+
 	// A persist failure still withdraws it even when the registry matches.
 	setDPLastGoodConfigSnapshotSaveError(4, errors.New("disk full"))
 	expect("matching registry but the latest persist failed", diagWarn)
