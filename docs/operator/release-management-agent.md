@@ -24,7 +24,11 @@ Admin UI / API ──► Release Management API ──► culvert-maint agent /v
   container** and calls the agent over HTTP on a Unix-domain socket.
 - The agent authenticates every caller with `SO_PEERCRED` against `allow_peers`
   and performs Docker actions **only** through the path-locked sudoers allowlist
-  (`/etc/sudoers.d/culvert-maint`).
+  (`/etc/sudoers.d/culvert-maint`). Backup, restore and cleanup, whose
+  arguments vary per call, go through the root-owned wrapper that allowlist
+  grants (`/usr/local/libexec/culvert-maint/compose-cli`). The wrapper
+  validates the arguments and runs the fixed `docker compose` command. It
+  replaced sudoers argument wildcards, which sudo-rs on Ubuntu 26.04 rejects.
 - So reaching the agent grants the proxy the agent's **narrow allowlisted
   surface**, not the Docker daemon. A compromised proxy cannot exceed it.
 
