@@ -396,9 +396,21 @@ func (a *rateLimitAggregator) ClusterTotalsExcluding(excludeNode string) (remote
 
 	// Pass 1: the requester's own hot set, as it LATEST reported it. An IP
 	// newer than the generation has no requester contribution in gen.totals
-	// (own[ip] is zero), so its remainder is the peers' counts. Absent from the
-	// reply is exactly what the pre-fix code produced for an IP no OTHER node
-	// reported, and FreshCount reads a missing IP as zero.
+	// (own[ip] is zero), so its remainder is the peers' counts.
+	//
+	// The !tracked skip is "no node's GENERATION slot held this IP", which is
+	// not quite "no other node reported it": a known peer's refresh
+	// deliberately does not invalidate the generation (see Update), so a peer
+	// count that landed after gen.builtAt is invisible here for the rest of
+	// rlTotalsCacheTTL, and FreshCount reads the missing IP as zero. For an IP
+	// the generation does not track at all, pass 2 cannot supply it either, so
+	// that one address is enforced locally-only on that one node until the
+	// requester's next round. The pre-fix per-RPC sum did include such a count.
+	// This is the accepted cost of the cache: the exposure is bounded by
+	// rlTotalsCacheTTL + rlGossipInterval against a freshness window of the
+	// whole rate-limit window (clusterRemoteCountMaxAge), the local half of the
+	// limit never stops applying, and the alignment is not attacker-steerable.
+	// TestCHAOS111_PassOneStalenessStaysInsideTheGossipRound pins the bound.
 	latestTracked := 0 // requester IPs the generation tracks (part of gen.distinct)
 	for ip := range latest {
 		total, tracked := gen.totals[ip]

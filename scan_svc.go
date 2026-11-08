@@ -24,14 +24,37 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // ScanService is the HTTP sidecar server for remote scanning.
+//
+// LIFECYCLE OWNERSHIP (CHAOS-113). Every mutable field is guarded by mu, and
+// the http.Server is built in NewScanService rather than inside Start.
+//
+// Both are the same defect's two halves. `server` used to be assigned by the
+// goroutine running Start and read by the shutdown hook
+// (main_shutdown.go, "scan-svc-shutdown"), unsynchronised — a real data race
+// under `-race`, and worse than a race in its effect: Shutdown's `if ss.server
+// == nil { return nil }` reported SUCCESS to the shutdown registry when it
+// landed in the window before the assignment, having closed nothing. The
+// sidecar then went on to build a server and serve, so a SIGTERM arriving
+// during startup produced a process that had "shut the sidecar down" and was
+// answering /scan afterwards, with the listening socket still held.
+//
+// Building the server up front removes the window instead of reporting it
+// (the §36 rule CHAOS-71 applied to the same class on the Control-Plane
+// listener): a Shutdown that precedes Serve marks the server shut down, so
+// net/http's own `Serve` returns ErrServerClosed immediately and its deferred
+// listener close releases the socket. There is no state in which the sidecar
+// serves after Shutdown returned nil.
 type ScanService struct {
+	mu       sync.Mutex
 	listener net.Listener
 	server   *http.Server
+	stopped  bool
 	addr     string
 }
 
@@ -60,59 +83,159 @@ var lastScanSvcOversizeLog atomic.Int64
 const scanSvcOversizeLogInterval = time.Minute
 
 // NewScanService creates a scan sidecar server bound to addr.
+//
+// The http.Server is built HERE, not in Start — see the type comment. The mux
+// is immutable and shared by every serve generation the supervisor runs.
 func NewScanService(addr string) *ScanService {
-	return &ScanService{addr: addr}
+	ss := &ScanService{addr: addr}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/scan", ss.handleScan)
+	mux.HandleFunc("/health", ss.handleHealth)
+	mux.HandleFunc("/status", ss.handleStatus)
+	ss.server = &http.Server{
+		Handler:      mux,
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 60 * time.Second,
+	}
+	return ss
 }
 
 // Listen creates the TCP listener. Call this before Start() so the address is
 // available via Addr() without a data race.
-func (ss *ScanService) Listen() error {
-	ln, err := net.Listen("tcp", ss.addr)
+//
+// It is also the supervisor's per-attempt bind (CHAOS-113): a serve generation
+// that ended on a dead socket needs a fresh one, and an http.Server that has
+// NOT been shut down may serve a new listener. After Shutdown it refuses,
+// because a shut-down server can never serve again and a rebind would hold a
+// socket nothing will ever accept on.
+func (ss *ScanService) Listen() error { return ss.listen(context.Background()) }
+
+// listen is Listen with an explicit context, which is what the supervisor
+// calls so a bind is cancellable at shutdown.
+//
+// The context governs ADDRESS RESOLUTION, which is the part that can block:
+// `scan_svc.listen` may be given a `hostname:port` form, and the comment below
+// has always claimed Shutdown must not wait behind that. With
+// (*net.ListenConfig).Listen the claim is ENFORCED rather than hoped for — a
+// cancelled context aborts the resolution instead of leaving the supervisor
+// parked in the kernel while the drain budget runs out. It also satisfies the
+// `noctx` linter, whose finding on the old bare net.Listen was pre-existing
+// (byte-identical on main) and surfaced here only because reviewdog's
+// diff_context filter reports full-tree findings inside a rewritten function.
+// Fixed rather than deferred because this round rewrote the function around it
+// and the contextual-I/O rule is one of the repository's own conventions.
+func (ss *ScanService) listen(ctx context.Context) error {
+	ss.mu.Lock()
+	if ss.stopped {
+		ss.mu.Unlock()
+		return http.ErrServerClosed
+	}
+	ss.mu.Unlock()
+
+	if scanSvcListenHook != nil {
+		scanSvcListenHook()
+	}
+
+	// Bound OUTSIDE the lock: the bind can block (DNS on a hostname:port form,
+	// a slow kernel) and Shutdown must never wait behind it.
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", ss.addr)
 	if err != nil {
 		return err
 	}
+
+	ss.mu.Lock()
+	if ss.stopped {
+		// Shutdown won the race. Do not publish the socket — close it, so a
+		// bind that completed after the stop cannot leak the port.
+		ss.mu.Unlock()
+		_ = ln.Close() //nolint:errcheck // discarding a socket this call is abandoning
+		return http.ErrServerClosed
+	}
 	ss.listener = ln
+	ss.mu.Unlock()
 	return nil
 }
 
 // Start begins serving on the listener created by Listen(). Blocks until the
 // server is shut down. If Listen() was not called, Start calls it internally.
 func (ss *ScanService) Start() error {
-	if ss.listener == nil {
+	ss.mu.Lock()
+	needListen := ss.listener == nil
+	ss.mu.Unlock()
+	if needListen {
 		if err := ss.Listen(); err != nil {
 			return err
 		}
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/scan", ss.handleScan)
-	mux.HandleFunc("/health", ss.handleHealth)
-	mux.HandleFunc("/status", ss.handleStatus)
-
-	ss.server = &http.Server{
-		Handler:      mux,
-		ReadTimeout:  60 * time.Second,
-		WriteTimeout: 60 * time.Second,
+	ss.mu.Lock()
+	srv, ln, stopped := ss.server, ss.listener, ss.stopped
+	ss.mu.Unlock()
+	if stopped || ln == nil {
+		return http.ErrServerClosed
 	}
 
-	logger.Printf("ScanSvc: listening on %s", ss.listener.Addr())
+	logger.Printf("ScanSvc: listening on %s", ln.Addr())
 
-	if err := ss.server.Serve(ss.listener); err != nil && err != http.ErrServerClosed {
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
 }
 
+// scanSvcListenHook is fired after the pre-bind `stopped` check and before
+// net.Listen. A seam only for this package's white-box tests (same role as
+// internal/fileutil's openParentDir/syncDir), and nil in production.
+//
+// It exists because the window the POST-bind check guards cannot be reached
+// without one, which this round's own mutation sweep proved: removing the
+// post-bind check left every gate green, including a 200-iteration
+// Listen-vs-Shutdown race, because the PRE-bind check wins that race almost
+// every time. The seam holds Listen past the first check so the second one is
+// the only thing standing between a completed Shutdown and a published socket.
+var scanSvcListenHook func()
+
 // Shutdown gracefully stops the scan service with the given context deadline.
+//
+// It is terminal: the server can never serve again, which is what makes the
+// supervisor's rebind loop stop. The listener is closed EXPLICITLY as well as
+// by net/http, because a Shutdown that lands before Serve took the socket over
+// is exactly the window this function used to get wrong — net/http does not
+// know about a listener it was never handed.
 func (ss *ScanService) Shutdown(ctx context.Context) error {
-	if ss.server == nil {
-		return nil
+	ss.mu.Lock()
+	already := ss.stopped
+	ss.stopped = true
+	srv, ln := ss.server, ss.listener
+	ss.mu.Unlock()
+
+	if !already {
+		noteScanSvcListenerStopped()
 	}
-	return ss.server.Shutdown(ctx)
+	var err error
+	if srv != nil {
+		err = srv.Shutdown(ctx)
+	}
+	if ln != nil {
+		// Idempotent in effect: a second close returns an error that says the
+		// socket is already gone, which is the state we want.
+		_ = ln.Close() //nolint:errcheck // best-effort; net/http may already have closed it
+	}
+	return err
+}
+
+// stoppedByShutdown reports whether Shutdown has been called, so the
+// supervisor can tell a requested stop from a listener that died on its own.
+func (ss *ScanService) stoppedByShutdown() bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.stopped
 }
 
 // Addr returns the listener address (useful when binding to :0 for tests).
 func (ss *ScanService) Addr() string {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
 	if ss.listener != nil {
 		return ss.listener.Addr().String()
 	}

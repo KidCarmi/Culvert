@@ -1087,6 +1087,8 @@ culvert_upstream_direct_fallback_total %d
 		upFallbackTotal,
 	)
 
+	connLimitWritePrometheus(w)
+
 	// CHAOS-50: Layer-2 community category store boot health. `available` is 0
 	// both when the store is unconfigured and when it failed to open — the
 	// operator distinguishes them from the `category_feed_db` diagnostics row
@@ -1385,6 +1387,59 @@ culvert_socks5_posture_refused_total %d
 			// will have rotated long before anyone asks.
 			socks5PosturePendingGauge(),
 			socks5PostureRefusedTotal(),
+		)
+	}
+
+	// CHAOS-113: the scan sidecar listener. Emitted ONLY where the sidecar is
+	// configured, for the reason the SOCKS5 and cluster_ca gauges document:
+	// `up 0` on a node that never ran a sidecar is indistinguishable from a
+	// dead one, and the paging rule is `== 0`.
+	//
+	// `up` is 0 while the sidecar has been unable to serve for longer than
+	// scanSvcUnavailableAfter, or has never bound at all. A sidecar that is
+	// merely REBINDING inside the threshold stays up=1 — an ordinary redeploy
+	// in which a predecessor still holds the port must not page — which is the
+	// same asymmetry culvert_socks5_listener_up carries.
+	//
+	// This gauge is the one in this file whose zero means a SECURITY control is
+	// off rather than a surface being unavailable: every caller pointed at a
+	// sidecar that is not serving forwards bodies UNSCANNED (internal/secscan
+	// remoteScanFail, fail-open, WK-2b). Alert on it accordingly.
+	if sv := scanSvcListenerState(); sv.Configured {
+		up, down := 1, 0
+		// ONE threshold, Unavailable(), for both the never-bound and the
+		// lost-socket case. An extra `!EverBound && BindFailures > 0` arm here
+		// made a sidecar whose port is briefly held at boot export up=0 on its
+		// FIRST failed bind, i.e. page on every ordinary redeploy — the exact
+		// asymmetry culvert_socks5_listener_up exists to avoid.
+		if sv.Unavailable() {
+			up, down = 0, 1
+		}
+		_, _ = fmt.Fprintf(w, `# HELP culvert_scan_svc_listener_up 1 while the scan sidecar listener is bound and serving; 0 once it has never bound or has been unable to serve past the threshold
+# TYPE culvert_scan_svc_listener_up gauge
+culvert_scan_svc_listener_up %d
+
+# HELP culvert_scan_svc_listener_down 1 while the scan sidecar has been unable to serve for longer than the threshold — callers fail OPEN and forward bodies unscanned
+# TYPE culvert_scan_svc_listener_down gauge
+culvert_scan_svc_listener_down %d
+
+# HELP culvert_scan_svc_bind_failures_total Failed scan sidecar listener bind attempts since startup
+# TYPE culvert_scan_svc_bind_failures_total counter
+culvert_scan_svc_bind_failures_total %d
+
+# HELP culvert_scan_svc_serve_exits_total Scan sidecar serve generations that ended on their own (not via shutdown) since startup
+# TYPE culvert_scan_svc_serve_exits_total counter
+culvert_scan_svc_serve_exits_total %d
+
+# HELP culvert_scan_svc_bind_backoff_seconds Current scan sidecar rebind backoff; 0 when the listener is serving
+# TYPE culvert_scan_svc_bind_backoff_seconds gauge
+culvert_scan_svc_bind_backoff_seconds %g
+`,
+			up,
+			down,
+			sv.BindFailures,
+			sv.ServeExits,
+			sv.Backoff.Seconds(),
 		)
 	}
 

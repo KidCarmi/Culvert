@@ -30,7 +30,7 @@ func loadScanning(cfg scanningStartupConfig, ctx context.Context) *ScanService {
 		loadScanExclusions(cfg.ScanExclusionsPath)
 		startThreatFeedIfEnabled(cfg, ctx)
 	}
-	return startScanServiceSidecar(cfg.SvcListenAddr)
+	return startScanServiceSidecar(ctx, cfg.SvcListenAddr)
 }
 
 // loadScanExclusions loads the admin-managed scan allowlist. It runs in BOTH
@@ -86,21 +86,23 @@ func loadYARARules(yaraDir string) {
 
 // startScanServiceSidecar exposes the local scanners as an HTTP microservice
 // when a listen address is configured. Returns the service handle (non-nil
-// even on a Listen error, preserving pre-slice semantics — the shutdown path
+// even on a bind error, preserving pre-slice semantics — the shutdown path
 // tolerates a never-started service) or nil when disabled.
-func startScanServiceSidecar(listenAddr string) *ScanService {
+//
+// CHAOS-113: the bind and the serve loop are now owned by
+// superviseScanSvcListener, not performed here. What this function used to do
+// was bind ONCE, log one line on failure and return a service that would never
+// serve again, then `go svc.Start()` and log one line if the serve loop ever
+// ended. Neither outcome was counted, gauged, surfaced on a health row or
+// alerted, and neither was retried — so a port held by a predecessor at boot,
+// or a lost socket at hour nine, silently removed the scanning plane from
+// every node pointed at this address, which fails OPEN (internal/secscan
+// remoteScanFail, WK-2b).
+func startScanServiceSidecar(ctx context.Context, listenAddr string) *ScanService {
 	if listenAddr == "" {
 		return nil
 	}
 	svc := NewScanService(listenAddr)
-	if err := svc.Listen(); err != nil {
-		logger.Printf("ScanSvc: listen error: %v", err)
-		return svc
-	}
-	go func() {
-		if err := svc.Start(); err != nil {
-			logger.Printf("ScanSvc: error: %v", err)
-		}
-	}()
+	go superviseScanSvcListener(ctx, svc)
 	return svc
 }

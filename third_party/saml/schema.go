@@ -736,7 +736,11 @@ type Assertion struct {
 	Issuer       Issuer    `xml:"urn:oasis:names:tc:SAML:2.0:assertion Issuer"`
 	Signature    *etree.Element
 	Subject      *Subject
-	Conditions   *Conditions
+	// Culvert fork (GO-2026-6909): namespace-qualified. A bare tag matched
+	// <Conditions> in ANY namespace, and a later match overwrites NotBefore and
+	// NotOnOrAfter, so a foreign-namespace copy placed after the real one
+	// supplied the assertion's whole validity window.
+	Conditions *Conditions `xml:"urn:oasis:names:tc:SAML:2.0:assertion Conditions"`
 	// Advice *Advice
 	// Statements []Statement
 	AuthnStatements []AuthnStatement `xml:"AuthnStatement"`
@@ -803,7 +807,11 @@ type Subject struct {
 	// after the real one, overrode) the subject identity.
 	NameID *NameID `xml:"urn:oasis:names:tc:SAML:2.0:assertion NameID"`
 	// EncryptedID          *EncryptedID  ... TODO
-	SubjectConfirmations []SubjectConfirmation `xml:"SubjectConfirmation"`
+	// Culvert fork (GO-2026-6909): namespace-qualified. A bare tag appended a
+	// foreign-namespace <SubjectConfirmation> to this slice; validateAssertion
+	// then also requires the empty slice to be rejected, so a foreign-only
+	// confirmation cannot skip the Recipient and InResponseTo checks.
+	SubjectConfirmations []SubjectConfirmation `xml:"urn:oasis:names:tc:SAML:2.0:assertion SubjectConfirmation"`
 }
 
 // Element returns an etree.Element representing the object in XML form.
@@ -873,9 +881,14 @@ func (s *SessionIndex) Element() *etree.Element {
 type SubjectConfirmation struct {
 	Method string `xml:",attr"`
 	// BaseID               *BaseID  ... TODO
-	NameID *NameID
+	// Culvert fork (GO-2026-6909): namespace-qualified, see Subject.NameID.
+	NameID *NameID `xml:"urn:oasis:names:tc:SAML:2.0:assertion NameID"`
 	// EncryptedID          *EncryptedID  ... TODO
-	SubjectConfirmationData *SubjectConfirmationData
+	// Culvert fork (GO-2026-6909): a bare tag matched <SubjectConfirmationData>
+	// in ANY namespace, and a later match overwrites this struct's attributes.
+	// A foreign-namespace copy placed after the real one therefore supplied
+	// Recipient, InResponseTo and NotOnOrAfter to validateAssertion.
+	SubjectConfirmationData *SubjectConfirmationData `xml:"urn:oasis:names:tc:SAML:2.0:assertion SubjectConfirmationData"`
 }
 
 // Element returns an etree.Element representing the object in XML form.
@@ -956,9 +969,13 @@ func (s *SubjectConfirmationData) UnmarshalXML(d *xml.Decoder, start xml.StartEl
 //
 // See http://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf §2.5.1
 type Conditions struct {
-	NotBefore            time.Time             `xml:",attr"`
-	NotOnOrAfter         time.Time             `xml:",attr"`
-	AudienceRestrictions []AudienceRestriction `xml:"AudienceRestriction"`
+	NotBefore    time.Time `xml:",attr"`
+	NotOnOrAfter time.Time `xml:",attr"`
+	// Culvert fork (GO-2026-6909): namespace-qualified. A bare tag APPENDED a
+	// foreign-namespace <AudienceRestriction>, and validateAudienceRestriction
+	// accepts the assertion when ANY entry matches, so one appended entry
+	// defeated the audience restriction the IdP actually signed.
+	AudienceRestrictions []AudienceRestriction `xml:"urn:oasis:names:tc:SAML:2.0:assertion AudienceRestriction"`
 	OneTimeUse           *OneTimeUse
 	ProxyRestriction     *ProxyRestriction
 }
@@ -1021,7 +1038,10 @@ func (c *Conditions) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 //
 // See http://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf §2.5.1.4
 type AudienceRestriction struct {
-	Audience Audience
+	// Culvert fork (GO-2026-6909): namespace-qualified. This is a value field,
+	// so a foreign-namespace <Audience> after the real one overwrote its
+	// chardata inside the IdP's own <saml:AudienceRestriction>.
+	Audience Audience `xml:"urn:oasis:names:tc:SAML:2.0:assertion Audience"`
 }
 
 // Element returns an etree.Element representing the object in XML form.
