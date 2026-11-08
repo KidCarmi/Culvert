@@ -530,42 +530,50 @@ jobs:
             || { echo "FATAL: backup $FN not listed as non-empty by the agent"; exit 1; }
           echo "E2E PRIVILEGED OP OK: sudo docker compose backup succeeded through the sandboxed unit."
 
-      # Verify-stage sudoers grammar guard. The upgrade's capture/verify stage
-      # runs `docker inspect --format {{json .Image}} <cid>` via `sudo -n` AS the
-      # unprivileged culvert-maint user. `{{json .Image}}` is ONE argv token that
-      # contains a space; the sudoers rule MUST backslash-escape that space
-      # (`{{json\ .Image}}`). A double-quoted form silently misses, `sudo -n`
-      # demands a password, and EVERY upgrade dies at verify with "a password is
-      # required" — the exact field failure. The backup op above cannot catch it
-      # (different sudoers rule), so reproduce the verify call EXACTLY here,
-      # repo-independently (the inspect rule is a container-id wildcard, not
-      # repo-bound), and assert it escalates and returns the image config digest.
+      # Verify-stage sudoers guard. The upgrade's capture/verify stage reads the
+      # running proxy container's image config digest via `sudo -n` AS the
+      # unprivileged culvert-maint user. sudo-rs (Ubuntu 26.04's default sudo)
+      # compares sudoers arguments literally, so the old enumerated
+      # `docker inspect --format {{json\ .Image}} [0-9a-f]…` rules parsed but
+      # never matched. The call now goes through the root-owned compose-cli
+      # wrapper's `inspect-image` subcommand, granted by ONE exact sudoers rule;
+      # the wrapper admits a single 12–64 lowercase-hex id and execs
+      # `docker inspect --format '{{json .Image}}' <id>`. If the grant or the
+      # wrapper is wrong, `sudo -n` refuses and EVERY upgrade dies at
+      # capture/verify — the exact field failure. The backup op above uses a
+      # different wrapper subcommand, so reproduce the verify call EXACTLY here,
+      # repo-independently, and assert it escalates and returns the image
+      # config digest.
       - name: "Assert the verify-stage docker-inspect escalates through sudoers"
         run: |
           set -euxo pipefail
+          WRAPPER=/usr/local/libexec/culvert-maint/compose-cli
           # The proxy container `culvert` is up (install.sh ran `compose up`, with
-          # clamav stubbed by the override). Inspect the SAME identifier shape the
-          # agent uses: the full 64-hex container id (the sudoers rule covers 12–64).
+          # clamav stubbed by the override). Inspect with the full 64-hex id and
+          # with the 12-hex short id the agent actually sends (it reads the id
+          # from `docker compose ps --format json`); the wrapper admits 12–64.
           CID="$(sudo docker inspect --format '{{.Id}}' culvert)"
           echo "culvert container id: $CID"
           case "$CID" in [0-9a-f]*) : ;; *) echo "FATAL: unexpected container id '$CID'"; exit 1 ;; esac
-          # EXACT verify-stage call, as culvert-maint, non-interactive sudo. On a
-          # correct sudoers grammar this escalates NOPASSWD and prints the image
-          # config digest as a JSON string ("sha256:<64hex>"). On the broken
-          # double-quote grammar, `sudo -n` fails with a non-zero exit.
-          if ! OUT="$(sudo -u culvert-maint sudo -n /usr/bin/docker inspect --format '{{json .Image}}' "$CID" 2>&1)"; then
-            echo "FATAL: 'sudo -n docker inspect --format {{json .Image}}' did NOT escalate for culvert-maint."
-            echo "sudo output: $OUT"
-            echo "The sudoers container-inspect rule is not matching — it must backslash-escape the"
-            echo "space in {{json\\ .Image}} (containerInspectSudoersLines). This is the verify-stage"
-            echo "failure that breaks every upgrade with 'a password is required'."
-            echo "----- rendered sudoers drop-in -----"; sudo cat /etc/sudoers.d/culvert-maint 2>/dev/null || true
-            exit 1
-          fi
-          echo "inspect output: $OUT"
-          printf '%s\n' "$OUT" | grep -qE '^"sha256:[0-9a-f]{64}"$' \
-            || { echo "FATAL: verify inspect escalated but did not return an image config digest: $OUT"; exit 1; }
-          echo "VERIFY SUDOERS OK: culvert-maint runs the verify-stage docker inspect NOPASSWD and gets the image digest."
+          for ID in "$CID" "${CID:0:12}"; do
+            # EXACT verify-stage call, as culvert-maint, non-interactive sudo. On a
+            # correct grant this escalates NOPASSWD and prints the image config
+            # digest as a JSON string ("sha256:<64hex>"). Otherwise `sudo -n` (or
+            # the wrapper, exit 64) fails with a non-zero exit.
+            if ! OUT="$(sudo -u culvert-maint sudo -n "$WRAPPER" inspect-image "$ID" 2>&1)"; then
+              echo "FATAL: 'sudo -n $WRAPPER inspect-image <id>' did NOT escalate for culvert-maint (id $ID)."
+              echo "sudo output: $OUT"
+              echo "The sudoers grant for $WRAPPER is not matching, or the wrapper refused the id."
+              echo "This is the verify-stage failure that breaks every upgrade."
+              echo "----- rendered sudoers drop-in -----"; sudo cat /etc/sudoers.d/culvert-maint 2>/dev/null || true
+              echo "----- installed wrapper -----"; sudo ls -l "$WRAPPER" 2>/dev/null || true
+              exit 1
+            fi
+            echo "inspect output ($ID): $OUT"
+            printf '%s\n' "$OUT" | grep -qE '^"sha256:[0-9a-f]{64}"$' \
+              || { echo "FATAL: verify inspect escalated but did not return an image config digest: $OUT"; exit 1; }
+          done
+          echo "VERIFY SUDOERS OK: culvert-maint runs the verify-stage container inspect NOPASSWD (via the compose-cli wrapper) and gets the image digest."
 
       # Passwd-less health-probe guard. The Release-Management wiring verifies the
       # agent is reachable by impersonating the PROXY container's UID, which on
@@ -850,12 +858,12 @@ jobs:
           sudo visudo -c -f /etc/sudoers.d/culvert-maint || { echo "FATAL: sudoers drop-in fails visudo -c"; exit 1; }
           sudo grep -Eq '^proxy_repo = "127\.0\.0\.1:5000/culvert"' /etc/culvert-maint/config.toml \
             || { echo "FATAL: agent proxy_repo not bound to the local registry"; sudo grep -n proxy_repo /etc/culvert-maint/config.toml; exit 1; }
-          # The registry repo must be the sudoers pull/tag boundary literal. The
-          # port colon is backslash-escaped in the rendered sudoers (visudo treats
-          # a bare ':' as the Runas/Host separator), so match the escaped form.
-          sudo grep -Fq '127.0.0.1\:5000/culvert@sha256' /etc/sudoers.d/culvert-maint \
-            || { echo "FATAL: sudoers pull/tag rule not bound to the local registry repo (escaped-colon form)"; sudo grep -n 'docker pull' /etc/sudoers.d/culvert-maint; exit 1; }
-          echo "PRECONDITION OK: proxy on v1; agent installed; sudoers bound to the local registry."
+          # The registry repo is the pull/tag boundary literal of the root-owned
+          # compose-cli wrapper (sudo-rs cannot match the old digest-glob sudoers
+          # rules). It is a shell string there, so the colon is not escaped.
+          sudo grep -Fqx "PROXY_REPO='127.0.0.1:5000/culvert'" /usr/local/libexec/culvert-maint/compose-cli \
+            || { echo "FATAL: compose-cli wrapper pull/tag not bound to the local registry repo"; sudo grep -n '^PROXY_REPO=' /usr/local/libexec/culvert-maint/compose-cli; exit 1; }
+          echo "PRECONDITION OK: proxy on v1; agent installed; wrapper bound to the local registry."
 
       # Start the INSTALLED unit (install.sh leaves it stopped when wiring is
       # skipped). The socket is 0660 owned by the service user; connect as ROOT
