@@ -20029,6 +20029,22 @@ function resetBlockPage() {
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="state_file_corrupt"> State file corrupt</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cluster_node_reenrolled"> Node re-enrolled (expired cert)</label>
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_clam_error"> ClamAV scan error (fail-open)</label>
+        <!-- CHAOS-113: the scan plane's other three fail-open/fail-closed events.
+             scan_clam_error above was the ONLY subscribable scanning event, while
+             the code fires three more — so an operator running the process-isolated
+             (sidecar) deployment the CHAOS-52 runbook recommends had no way, from
+             this panel, to be told that body scanning had stopped. remoteScanFail
+             gates on alerts.HasSubscriber("scan_svc_down"), so an event with no
+             checkbox here is an event that never fires in practice.
+             scan_svc_listener_down = this node's own sidecar listener cannot bind or
+             serve; scan_svc_down = the sidecar this node CALLS is faulting, content
+             forwarded unscanned (fail-open); scan_timeout = the scan did not finish
+             in the budget, content BLOCKED (fail-closed); scan_skipped = the body
+             ran past the scan window, forwarded unscanned (fail-open). -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_svc_listener_down"> Scan sidecar listener down (this node cannot serve scans)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_svc_down"> Scan sidecar unreachable (bodies forwarded unscanned, fail-open)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_timeout"> Scan timeout (content blocked, fail-closed)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="scan_skipped"> Scan skipped — body past the scan window (fail-open)</label>
         <!-- CHAOS-11: all parent proxies down — chain bypassed, egress is direct. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="upstream_pool_down"> Upstream pool down (direct fallback)</label>
         <!-- CHAOS-45: a durable write to the data directory failed (volume went

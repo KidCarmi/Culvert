@@ -27,6 +27,15 @@ type healthReport struct {
 	// like a CP whose listener is down, which is the emission rule the socks5
 	// and cluster_ca gauges follow for the same reason.
 	CPGRPC string `json:"cp_grpc,omitempty" redact:"internal"`
+	// ScanSvc is the scan sidecar listener's posture (CHAOS-113), omitted
+	// entirely on a node that never requested a sidecar (-scan-svc-listen), for
+	// the same emission rule the cp_grpc field above follows: an always-present
+	// field would make every node look like a sidecar host whose listener is
+	// down. Fixed five-value enum (disabled/stopped/down/degraded/ready), and
+	// like its three siblings the RESOLUTION — attempt count, bind reason class,
+	// remedy — stays on the role-gated /api/diagnostics row, the alert and the
+	// logs, never on this unauthenticated surface.
+	ScanSvc string `json:"scan_svc,omitempty" redact:"internal"`
 	// MCP is the MCP Agent Security Gateway capability state (RISK-027). It is
 	// omitted entirely on a node that never requested MCP: an always-present field
 	// would make every node look like it has the capability.
@@ -111,7 +120,12 @@ func computeHealth() healthReport {
 		// probe against it reports nothing when it is down. Fixed 5-value
 		// enum; the attempt count and reason class stay on the role-gated
 		// /api/diagnostics row, the alert and the logs.
-		CPGRPC:            cpGRPCListenerStatus(),
+		CPGRPC: cpGRPCListenerStatus(),
+		// CHAOS-113. The fourth listener, and the only one whose "down" means a
+		// SECURITY control is off rather than a surface being unreachable:
+		// every caller pointed at a sidecar that is not serving forwards bodies
+		// UNSCANNED (internal/secscan remoteScanFail, fail-open, WK-2b).
+		ScanSvc:           scanSvcHealthFieldValue(),
 		ThreatFeedEntries: tfEntries,
 	}
 }
@@ -480,6 +494,17 @@ func computeReadiness() (report readinessReport, code int) {
 	// healthy gateway from rotation because the plane that serves config to
 	// OTHER nodes is down. Strict callers opt in via ?strict=1.
 	appendCPGRPCReadinessCheck(checks)
+
+	// 9b-iv. Scan sidecar listener (CHAOS-113) — REPORT-ONLY, absent entirely
+	// on a node that never asked for a sidecar. Same reasoning as cp_grpc: a
+	// node whose sidecar cannot bind is proxying its OWN traffic perfectly, so
+	// gating the default verdict would eject a healthy gateway because the
+	// plane that scans for OTHER nodes is down. Report-only is a judgement
+	// about THIS node's rotation, not about whether unscanned traffic is
+	// acceptable — that consequence is carried by the role-gated contract row,
+	// the alert and culvert_scan_svc_listener_up. Strict callers opt in via
+	// ?strict=1.
+	appendScanSvcReadinessCheck(checks)
 
 	// 9c. MCP gateway (RISK-027) — REPORT-ONLY, absent entirely when MCP was never
 	// requested. It must NEVER gate the default verdict: MCP is an optional,

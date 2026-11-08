@@ -203,6 +203,7 @@ func buildOperatorContract() OperatorContract {
 		checkSOCKS5Listener(),
 		checkAdminUIListener(),
 		checkCPGRPCListener(),
+		checkScanSvcListener(),
 		checkCPAddressList(),
 		checkDNSResolution(),
 		checkIdPMetadata(),

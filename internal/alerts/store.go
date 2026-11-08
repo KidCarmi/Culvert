@@ -23,6 +23,17 @@ package alerts
 //   "scan_timeout"          — ClamAV / YARA scan timeout (infrastructure issue)
 //   "scan_clam_error"       — ClamAV scan error mid-request: content forwarded unscanned (fail-open, CHAOS-10)
 //   "scan_skipped"          — response body exceeds scan size limit, forwarded unscanned
+//   "scan_svc_down"         — the scan SIDECAR this node calls is unreachable, erroring or
+//                             unintelligible: bodies are forwarded UNSCANNED (fail-open, WK-2b).
+//                             Detail carries a BOUNDED outcome class, never the transport error —
+//                             that text embeds the ephemeral local port, which made the dedup key
+//                             unique per request (internal/secscan remote.go remoteScanFail).
+//   "scan_svc_listener_down" — this node was asked to RUN a scan sidecar (-scan-svc-listen) and its
+//                             listener has never bound, or has been unable to serve for longer than
+//                             30 s (CHAOS-113). Every caller pointed at this address is forwarding
+//                             bodies unscanned, because the far end's fault posture is fail-open.
+//                             This node's own proxy keeps serving. Fired once per episode, never
+//                             per rebind attempt; detail carries a BOUNDED bind class.
 //   "upstream_pool_down"    — all parent proxies down: egress failing open to DIRECT (chain bypassed, CHAOS-11)
 //   "storage_write_failed"  — a durable write to the data directory failed: persisted state is being lost (CHAOS-45)
 //   "identity_backend_unreachable" — external identity backend (LDAP/OIDC) unreachable: authentication failing closed (CHAOS-47).
