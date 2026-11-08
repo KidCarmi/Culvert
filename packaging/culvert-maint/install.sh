@@ -126,6 +126,44 @@ sudoers_escape_colon() {
 # only [A-Za-z0-9._/:-]); a value outside it would make every pinned ref the
 # agent emits fail its own validation anyway. Both are sed-escaped only,
 # never sudoers-escaped: inside the wrapper they are shell strings, not Cmnds.
+# check_root_dir_chain DIR UID [TOP]: every component of the absolute path DIR,
+# from TOP (default /) down, that exists must be a REAL directory (not a symlink) owned by
+# UID and not group- or world-writable. A symlinked component is refused, not
+# resolved: whoever controls the parents of a symlink's target could later
+# rename or replace the directory that holds the sudo-granted wrapper, without
+# any install-time race (ASTRA R1 on the #1825 port). Components that do not
+# exist yet are allowed only below the last existing one, so the caller can
+# create them afterwards and check again. The installer passes UID 0 and no
+# TOP (so every component from / is checked); UID and TOP exist only so the
+# check can be exercised by an unprivileged test in a private directory tree.
+check_root_dir_chain() {
+    _ccd_dir=$1 _ccd_uid=$2 _ccd_top=${3:-/} _ccd_p="" _ccd_missing=0
+    case "$_ccd_dir" in /*) ;; *) die "check_root_dir_chain: $_ccd_dir is not an absolute path" ;; esac
+    case "$_ccd_top" in /) _ccd_rest=${_ccd_dir#/} ;;
+        /*) case "$_ccd_dir" in "${_ccd_top%/}"/*) _ccd_p=${_ccd_top%/}; _ccd_rest=${_ccd_dir#"$_ccd_p"/} ;;
+                *) die "check_root_dir_chain: $_ccd_dir is not below $_ccd_top" ;; esac ;;
+        *) die "check_root_dir_chain: $_ccd_top is not an absolute path" ;; esac
+    _ccd_first=1
+    while :; do
+        if [ "$_ccd_first" = 1 ]; then _ccd_first=0; [ -n "$_ccd_p" ] || _ccd_p=/; else
+            _ccd_c=${_ccd_rest%%/*}; _ccd_rest=${_ccd_rest#"$_ccd_c"}; _ccd_rest=${_ccd_rest#/}
+            [ -n "$_ccd_c" ] || break
+            case "$_ccd_c" in .|..) die "check_root_dir_chain: $_ccd_dir has a '.' or '..' component" ;; esac
+            _ccd_p="${_ccd_p%/}/$_ccd_c"
+        fi
+        if [ -L "$_ccd_p" ]; then
+            die "$_ccd_p is a symlink; every directory above the sudo-granted wrapper must be a real root-owned directory"
+        elif [ -e "$_ccd_p" ]; then
+            [ "$_ccd_missing" = 0 ] || die "check_root_dir_chain: $_ccd_p exists below a missing component"
+            [ -n "$(find "$_ccd_p" -maxdepth 0 -type d -uid "$_ccd_uid" ! -perm /022)" ] || \
+                die "$_ccd_p must be a directory owned by uid $_ccd_uid that is not group/world-writable (it is above the sudo-granted wrapper)"
+        else
+            _ccd_missing=1
+        fi
+        [ -n "$_ccd_rest" ] || break
+    done
+}
+
 render_compose_cli_wrapper() {
     _tmpl=$1
     _cpath=$2
@@ -651,11 +689,14 @@ fi
 # culvert-maint user (or anyone else) could replace what sudo runs as root.
 RENDERED_WRAPPER=$(mktemp)
 render_compose_cli_wrapper "$WRAPPER_TEMPLATE" "$COMPOSE_PATH" "$PROXY_REPO" "$RENDERED_WRAPPER"
+# Every component from / down is checked BEFORE anything is created through
+# the path (no symlink anywhere, root-owned, not group/world-writable), then
+# again once the wrapper directory exists; a symlinked wrapper file is refused.
+check_root_dir_chain "$WRAPPER_DIR" 0
 install -d -m 0755 -o root -g root "$WRAPPER_DIR"
-for _d in /usr/local /usr/local/libexec "$WRAPPER_DIR"; do
-    [ -n "$(find -H "$_d" -maxdepth 0 -type d -user root ! -perm /022)" ] || \
-        die "$_d must be a root-owned directory that is not group/world-writable (it holds the sudo-granted $WRAPPER_DEST)"
-done
+check_root_dir_chain "$WRAPPER_DIR" 0
+[ -e "$WRAPPER_DIR" ] || die "$WRAPPER_DIR was not created"
+if [ -L "$WRAPPER_DEST" ]; then die "$WRAPPER_DEST is a symlink; refusing to install the sudo-granted wrapper through it"; fi
 install -m 0755 -o root -g root "$RENDERED_WRAPPER" "$WRAPPER_DEST"
 log "rendered + installed $WRAPPER_DEST (compose_path=$COMPOSE_PATH, proxy_repo=$PROXY_REPO)"
 
