@@ -1601,9 +1601,26 @@ func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 		}
 	}
 
-	// Connection limits.
+	// Connection limits (CHAOS-112). The snapshot carries the CAP and no
+	// enablement decision, because `conn_limit_max_per_ip` is ClusterSynced in
+	// config_surfaces.go and `conn_limit_enabled` has no ConfigSnapshot
+	// binding there at all — enablement is node-local, owned by the startup
+	// resolver, the persisted admin settings, the admin API and config import.
+	//
+	// This used to call Enable, which writes both, so every Data Plane that
+	// applied any snapshot began enforcing a per-IP connection cap whether or
+	// not its operator had configured one. The field cannot be read as an
+	// enablement signal either: ConnLimiter.MaxPerIP() answers with a cap even
+	// while limiting is off, so the publisher
+	// (`snap.MaxConnsPerIP = connLimiter.MaxPerIP()`) can never emit the zero
+	// that the binding's recorded semSkipIfZero semantics would have skipped.
+	//
+	// SetMaxPerIP applies the cluster's cap and leaves the flag alone, so a
+	// node that has the limiter on adopts the fleet value and a node that has
+	// it off stays off — while still recording the cap, so enabling locally
+	// later adopts the fleet's number rather than this node's boot value.
 	if snap.MaxConnsPerIP > 0 {
-		connLimiter.Enable(snap.MaxConnsPerIP)
+		connLimiter.SetMaxPerIP(snap.MaxConnsPerIP)
 	}
 }
 

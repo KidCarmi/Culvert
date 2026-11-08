@@ -23,6 +23,114 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Every clustered Data Plane enforced a per-source-IP connection cap nobody
+  configured, and the one gate that refused the traffic reported nothing
+  (CHAOS-112).** `conn_limit_enabled` is the one admission surface
+  `config_surfaces.go` declares NOT cluster-synced; `conn_limit_max_per_ip`
+  beside it IS cluster-synced; and the Data Plane's only apply primitive was
+  `ConnLimiter.Enable`, which writes BOTH. So every node that applied any
+  configuration snapshot turned per-IP connection limiting on, at whatever cap
+  the field carried. This was the normal path on every clustered deployment, not
+  a fault case: the limiter ships disabled (register row `PX-6`), so "nobody
+  configured it" is the default state. The field could not be read as an
+  enablement signal either — `MaxPerIP()` answers with a cap while limiting is
+  off, deliberately, so an operator's value survives an off/on cycle and
+  `GET /api/connlimit` renders it rather than a misleading `0`, which means the
+  publisher `snap.MaxConnsPerIP = connLimiter.MaxPerIP()` can NEVER emit the
+  zero that the binding's recorded `semSkipIfZero` semantics would have skipped.
+  Measured through the real publisher and the real apply: a Control Plane whose
+  operator never configured the limiter publishes `max_conns_per_ip=1024`, and
+  the pre-fix apply left the Data Plane at `Enabled()=true`, cap 1024. Worse, an
+  operator who then turned the limiter OFF on the Control Plane published the
+  cap it was last configured with, and no CP→DP path calls `Disable` at all — so
+  their disable reached the fleet as "tighten the cap to 50 and stay on". The
+  enforcement error's direction is fail-CLOSED, which is exactly why it survived
+  unnoticed. `ConnLimiter.SetMaxPerIP` now applies the cluster cap and leaves
+  the flag alone: a node with limiting on adopts the fleet value, a node with it
+  off stays off while still RECORDING the cap, so enabling locally later adopts
+  the fleet's number rather than this node's boot value, and a non-positive cap
+  stays a no-op so an older Control Plane or an absent field still keeps live
+  state. **Upgrade note:** a Data Plane that had been silently enabled by the
+  pre-fix apply stops enforcing the cap once it applies a snapshot from the
+  fixed binary, unless its own node-local configuration asks for it. That is the
+  configured state, and the new `culvert_connlimit_enabled` gauge is what makes
+  it observable rather than another silent flip; an operator who wants the cap
+  enables it where enablement lives (startup configuration, admin settings, or
+  `POST /api/connlimit`). The SECOND half is why the first could run on a live
+  fleet: the per-IP connection-limit refusal in `handleRequest` was a bare
+  `http.Error` and a `return` — no request-history row, no `statBlocked`, no log
+  line, nothing in `/metrics`, `/healthz` or any alert. It was the only
+  front-door gate in that function with no per-event observability; the IP
+  filter and the rate limiter immediately below it each write a row AND a line,
+  and its own SOCKS5 twin, whose comment claims symmetry with this very path,
+  writes both. Measured over 200 refusals: `statBlocked` delta 0,
+  `CONN_LIMITED` rows 0, log lines 0 — so a node refusing traffic over a cap
+  nobody configured produced a `503` that appeared nowhere, and the only way to
+  find the cap was to poll that one node's viewer-gated API and notice it
+  contradicted the Control Plane. Every refusal now writes an ATTRIBUTED
+  `CONN_LIMITED` row and charges `statBlocked`, and the narrative log line is
+  rate-limited to one per minute carrying the number suppressed since the last
+  one — the asymmetry is deliberate, because `handleRequest` fires per REQUEST
+  rather than per session, `X-2` records `internal/logsink`'s queue as BLOCKING
+  the caller when full, and CHAOS-54 measured a per-event line at 7.68 M
+  attempts / 300 ms, ~40 MB/s into a 50 MB rotating log that erased its own
+  diagnostic history; the gate stamps with `monoNanos`, so a backwards NTP step
+  cannot latch it shut (CHAOS-83/84). `/metrics` gains the limiter's POSTURE as
+  well as its refusals —
+  `culvert_connlimit_{enabled,max_per_ip,active_ips,rejected_total,http_refused_total}`
+  — because "is any node in this fleet enforcing a per-IP connection cap, and at
+  what value?" previously had no fleet-wide answer at all. Reported and NOT
+  fixed, with measurements: whether enablement should be cluster-synced at all
+  (this round made the code match the registry, not the registry match an
+  operator's expectations); the shard maps' capacity, which is never reclaimed —
+  11.9 MiB retained after 500 000 distinct sources fully drained with
+  `ActiveIPs()` reading 0; and three adjacent findings in other domains,
+  the sharpest being that the dashboard's once-per-second tick schedules HTTP
+  Basic credential re-verification in LOCKSTEP across every live
+  `/api/events` stream. Full findings, the risk matrix and the eighteen mutation
+  runs are in `docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-06.md`.
+- **The public login endpoint's first-run bootstrap window minted a 30-day
+  trusted-IP authentication-bypass grant from a login it had not verified
+  (CHAOS-112 rider).** `POST /api/auth/login` is on `uiAuthMiddleware`'s public
+  allowlist. Inside the bootstrap window it forces its own verdict —
+  `role, ok = RoleAdmin, true`, with `cfg.VerifyUIUser`'s answer discarded — and
+  then called `loginLimiter.RecordSuccess`, one line above the branch that
+  deliberately refuses to issue a session because a pre-setup artifact must not
+  outlive the window. `RecordSuccess` mints a tier-2 trusted-IP grant: that IP
+  bypasses the account-wide lock for `TrustTTL` (30 days). Tier 2 is the only
+  backstop against distributed, IP-rotating brute force — tier 1 caps one
+  (IP, username) pair and cannot see a flood across addresses — so the grant is
+  an exemption from the one control that would stop one, and an unauthenticated
+  caller chose both of its map keys (the username from the POST body, the
+  address from the peer or, behind a configured trusted proxy, from
+  `X-Forwarded-For`). It outlived the window, because nothing in
+  `apiSetupComplete` resets the limiter, so grants minted before any roster
+  existed still bypassed tier 2 for the account the operator subsequently
+  created; it appeared in no operator surface, because `Snapshot()` reports
+  active LOCKS and not grants, so `GET /api/auth/lockouts` showed nothing; and
+  it was cleared by no operator action, because `ResetUser` — the explicit
+  unlock primitive — deliberately leaves the trusted set alone and `Cleanup`
+  prunes a grant only past its 30-day TTL. The only remedy was a process
+  restart, which `internal/lockout`'s own header designates as break-glass
+  rather than routine. The rule was already written down twice in this tree:
+  `apiSetupComplete` states it for itself ("there is no `RecordSuccess` here to
+  ever build a trust grant that would bypass it") and `ui_basic_auth.go`
+  enforces it for its own non-submission re-checks (SEC-BASICAUTH-5, which
+  guards the success record as the more serious half). `internal/lockout` gains
+  `ClearFailures`, which clears the pair's tier-1 counter and mints nothing, so
+  the bootstrap branch keeps the half it needs — a first-run operator who
+  fat-fingers the wizard must not lock themselves out of the window they are
+  standing in — and gets none of the bypass; `RecordSuccess` now states the
+  verified-credential precondition as a security precondition, and
+  `EntryCount`'s doc stops asserting a premise the code did not enforce. Lockout
+  state is in-memory only, so upgrading to the fixed binary is itself the
+  remediation for any grant a running process had already minted. Still open and
+  recorded: a trusted-IP grant is invisible and non-revocable even when EARNED,
+  so an admin whose workstation address is later compromised holds a tier-2
+  bypass for up to a month that no operator can revoke — a listing field plus a
+  revocation action, which under `conventions.md` means the admin API endpoint,
+  the `uiRoutes` entry and a UI surface together.
+
 - **The scan sidecar's listener was the last one in the tree with no
   supervision, and a sidecar that is not listening is the condition under which
   the whole fleet forwards bodies UNSCANNED (CHAOS-113).** Culvert has four

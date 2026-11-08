@@ -1087,6 +1087,8 @@ culvert_upstream_direct_fallback_total %d
 		upFallbackTotal,
 	)
 
+	connLimitWritePrometheus(w)
+
 	// CHAOS-50: Layer-2 community category store boot health. `available` is 0
 	// both when the store is unconfigured and when it failed to open — the
 	// operator distinguishes them from the `category_feed_db` diagnostics row
