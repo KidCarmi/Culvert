@@ -514,7 +514,36 @@ go test -race -run 'TestChaos114|TestChaos113|TestScanSvc' .      ok   45.9s
 go test -run 'Chaos83|Monotime' -count=1 .                        ok   (the
                                    monotonic-clock AST wall — see §2.4)
 python3 docs/agent-context/check.py                               ok
+golangci-lint run --timeout=20m --new-from-rev origin/main        0 issues
+golangci-lint run --timeout=20m          (full tree, HEAD)      174 issues
+golangci-lint run --timeout=20m          (full tree, base)      174 issues
 ```
+
+The linter is the version `pr-fast-gate.yml` installs (`v2.15.0`), built with
+this module's `go.mod` toolchain (`go1.27.3`) — not the container's, which is
+older than this module's language version and is the repository's recorded
+cause of "local lint is unavailable". The `--timeout` is the gate's own `10m`
+budget raised to `20m`, because a run that reports `Timeout exceeded` makes a
+clean result meaningless.
+
+**Both directions were measured, because `--new-from-rev` alone would not have
+been evidence.** `cyclop`, `funlen` and `gocognit` attribute to a function's
+DECLARATION line, so a `--new-from-rev` pass cannot see a function this change
+made more complex, and the same blind spot covers any finding on an unchanged
+line inside a rewritten function. The full-tree run on HEAD and on the base
+(`origin/main` at `902f3c9`, in a separate worktree, same binary, same config)
+return the **same 174 issues with a byte-identical per-linter breakdown**:
+
+```
+bodyclose 3   cyclop 24   dupl 4    errcheck 8   funlen 8   gocognit 24
+gocritic 40   gosec 15    nestif 8  noctx 17     staticcheck 14
+unconvert 2   unparam 7
+```
+
+So this change adds **zero** findings of any kind, including zero complexity
+findings — `scanSvcFlappingRow` was extracted precisely so `checkScanSvcListener`
+would gain a switch arm rather than grow, and the measurement confirms it stayed
+under the configured thresholds rather than merely looking as though it had.
 
 ### 9.3 Mutation testing — where the first version of this suite was not load-bearing
 
@@ -541,22 +570,19 @@ to overlap this change's surfaces — metrics rendering, diagnostics, `/healthz`
 readiness, the alert parity wall and the API-contract conformance suites, all of
 which the `Contract|Metric|Diagnostic|Health|Ready|Alert` filter reaches.
 
-**`golangci-lint` was not run locally.** The container's binary is older than
-this module's language version and panics on it — the repository's own recorded
-cause of "local lint is unavailable" — and installing the gate's pinned version
-built with the `go.mod` toolchain was not attempted in this round's budget. The
-changed code was written against the conventions the gate enforces, and the
-specific ones in reach here are: application `logger.Printf` (the one log line
-changed is already `logger.Printf` with `sanitizeLog` + `%q` on the address, both
-preserved); no new outbound I/O, so no SSRF guard or `noctx` surface; no new
-suppressions; `scanSvcFlappingRow` extracted so `checkScanSvcListener` gains one
-switch arm rather than growing (its cyclomatic complexity goes from ~6 to ~7
-against the configured threshold of 15). The `cyclop`/`funlen`/`gocognit`
-blind spot the conventions warn about — attribution to a function's
-**declaration** line, which `--new-from-rev` cannot see — applies to
-`noteScanSvcServeEnded` and `scanSvcListenerState`, both of which grew; both
-remain short and single-branch-depth, but **this is not measured locally and the
-hosted gate is what will measure it.**
+**`golangci-lint` WAS run**, both ways, and the results are in §9.2 rather than
+here. Recorded in this section anyway because the previous round could not run
+it and listed it under "not run": the container's own binary is older than this
+module's language version and panics on it, which is the repository's recorded
+cause of "local lint is unavailable", and the remedy is to install the gate's
+pinned version built with the `go.mod` toolchain — which works, takes about ten
+minutes per full-tree pass, and is worth the budget.
+
+The conventions the gate enforces, checked by hand against the diff as well:
+application `logger.Printf` (the one changed log line is already
+`logger.Printf` with `sanitizeLog` + `%q` on the address, both preserved); no
+new outbound I/O, so no SSRF guard or `noctx` surface; no new lint
+suppressions; no new `gosec` G117 secret-name surface.
 
 **No stress or long-duration run.** The flap condition is defined over tens of
 seconds of sidecar lifetime, and the gates drive a virtual clock to reach it.
