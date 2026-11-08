@@ -234,13 +234,13 @@ func TestValidateContainerID_ExportedWrapper(t *testing.T) {
 	}
 }
 
-// The container-inspect template must be read-only and enumerate one
-// fixed-length hex pattern per legal id length (12–64) — never a single
-// trailing `*` (which sudo would let match whitespace + extra args). It
-// must backslash-escape the space in the format token: sudo does not treat
-// double quotes as argument grouping, so a double-quoted `"{{json .Image}}"`
-// silently fails to match the agent's single-token argv (verified on AL2023).
-func TestContainerInspectTemplate_EnumeratedNoTrailingWildcard(t *testing.T) {
+// The container-inspect template must be read-only and, in sudo mode, run
+// through the compose-cli wrapper's `inspect-image` subcommand. It used to
+// enumerate 53 `[0-9a-f]` patterns with a backslash-escaped space in
+// `{{json\ .Image}}`; sudo-rs matches both literally, so none ever matched.
+// Its only sudoers line is now the bare wrapper rule; the wrapper admits one
+// 12..64 lowercase-hex id and nothing after it (wrapper_test.go).
+func TestContainerInspectTemplate_RoutesThroughWrapper(t *testing.T) {
 	tmpl := templateByID(TemplateComposeContainerInspect)
 	if tmpl == nil {
 		t.Fatal("TemplateComposeContainerInspect missing from registry")
@@ -248,28 +248,37 @@ func TestContainerInspectTemplate_EnumeratedNoTrailingWildcard(t *testing.T) {
 	if tmpl.StateChanging {
 		t.Error("container inspect template must be read-only")
 	}
-	wantN := containerIDMaxLen - containerIDMinLen + 1
-	if len(tmpl.SudoersLines) != wantN {
-		t.Fatalf("container inspect must enumerate %d sudoers lines (lengths %d–%d); got %d",
-			wantN, containerIDMinLen, containerIDMaxLen, len(tmpl.SudoersLines))
+	if !reflect.DeepEqual(tmpl.WrapperArgv, []string{"inspect-image"}) {
+		t.Errorf("container inspect must route through the wrapper subcommand inspect-image; got %q", tmpl.WrapperArgv)
 	}
-	for _, line := range tmpl.SudoersLines {
-		if strings.Contains(line, "*") {
-			t.Errorf("sudoers line must NOT contain a trailing wildcard (sudo `*` matches whitespace): %q", line)
-		}
-		if !strings.Contains(line, `--format {{json\ .Image}} `) {
-			t.Errorf("sudoers line must backslash-escape the space in the format token (double quotes do not match under sudo): %q", line)
-		}
-		if strings.Contains(line, `"{{json .Image}}"`) {
-			t.Errorf("sudoers line must NOT double-quote the format token (sudo splits it on the space and never matches): %q", line)
-		}
+	if !reflect.DeepEqual(tmpl.SudoersLines, []string{ComposeCLIWrapperPath}) {
+		t.Errorf("container inspect must declare exactly the wrapper sudoers line; got %q", tmpl.SudoersLines)
 	}
-	// Shortest and longest patterns must carry exactly min/max hex classes.
-	first, last := tmpl.SudoersLines[0], tmpl.SudoersLines[wantN-1]
-	if got := strings.Count(first, "[0-9a-f]"); got != containerIDMinLen {
-		t.Errorf("shortest line: got %d hex classes, want %d", got, containerIDMinLen)
+	// The direct (docker_group_lab) form keeps the format token as ONE argv
+	// element, byte-identical to what the wrapper execs.
+	if !reflect.DeepEqual(tmpl.BaseArgv, []string{"docker", "inspect", "--format", "{{json .Image}}"}) {
+		t.Errorf("container inspect BaseArgv changed: %q", tmpl.BaseArgv)
 	}
-	if got := strings.Count(last, "[0-9a-f]"); got != containerIDMaxLen {
-		t.Errorf("longest line: got %d hex classes, want %d", got, containerIDMaxLen)
+}
+
+// In sudo mode the container inspect argv is `sudo -n <wrapper> inspect-image
+// <id>`, for both a short and a full id, and an ambient passphrase is still
+// suppressed from the child env.
+func TestComposeContainerInspect_SudoArgvUsesWrapper(t *testing.T) {
+	t.Setenv(EnvCulvertBackupPassphrase, "ambient-secret")
+	for _, cid := range []string{"abcdef012345", strings.Repeat("0123456789abcdef", 4)} {
+		r, rec := recordingRunner(t, true)
+		if _, err := r.ComposeContainerInspect(context.Background(), cid); err != nil {
+			t.Fatalf("ComposeContainerInspect(%q): %v", cid, err)
+		}
+		want := [][]string{{"sudo", "-n", ComposeCLIWrapperPath, "inspect-image", cid}}
+		if !reflect.DeepEqual(rec.argvs, want) {
+			t.Errorf("argv:\n got %q\nwant %q", rec.argvs, want)
+		}
+		for _, e := range rec.envs[0] {
+			if strings.HasPrefix(e, EnvCulvertBackupPassphrase+"=") {
+				t.Errorf("container inspect must not forward %s", EnvCulvertBackupPassphrase)
+			}
+		}
 	}
 }
