@@ -1027,7 +1027,11 @@ jobs:
                                    row with the same SHA-256
             base-dpkg-status.txt   SHA-256 equals the pin and build-info's record
             build-upgrades.txt     names the snapshot ID and the four InRelease hashes
-            dpkg-list.txt          exactly one linux-image-<abi>, the approved kernel
+            dpkg-list.txt          exactly one linux-image-<abi>, the approved kernel;
+                                   EXPECT_PACKAGE_COUNT rows, none removed below, no
+                                   linux-tools-* (BOM-DELTA-FB1-R1)
+            removed-diagnostic-tooling.txt  exactly EXPECT_REMOVED_TOOLING
+            inventory-gate{,-guest}.txt     both pre-packaging gates PASS
             console binaries       culvert-console / culvert-access SHA-256 recorded and
                                    compared with the producer-reported expectations
 
@@ -1158,7 +1162,7 @@ jobs:
               acquired = [r for r in prov if r[8] == "acquired-verified"]
               inherited = [r for r in prov if r[8] == "inherited-base-image"]
               print(f"     observation (not checked; T5 decides): {len(prov)} packages, "
-                    f"acquired-verified={len(acquired)} inherited-base-image={len(inherited)} (prediction 680: 94 / 586)")
+                    f"acquired-verified={len(acquired)} inherited-base-image={len(inherited)} (prediction 668: 93 / 575, BOM-DELTA-FB1-R1)")
 
               # acquired-debs.tsv
               receipts = {}
@@ -1182,6 +1186,22 @@ jobs:
                   kern = [r for r in rows(p("dpkg-list.txt")) if r[0].startswith("linux-image-") and r[0][12:13].isdigit()]
                   check("linux-image-<abi> packages", [(r[0], r[1] if len(r) > 1 else None) for r in kern],
                         [(env["EXPECT_KERNEL"], env["EXPECT_KERNEL_VERSION"])])
+
+              # BOM-DELTA-FB1-R1: the exact perf/BPF tooling purge and both inventory gates
+              want_rm = sorted(env["EXPECT_REMOVED_TOOLING"].split())
+              if need("removed-diagnostic-tooling.txt", p("removed-diagnostic-tooling.txt")):
+                  got_rm = sorted(l.split()[0] for l in open(p("removed-diagnostic-tooling.txt"), encoding="utf-8")
+                                  if l.strip() and not l.startswith("#"))
+                  check("removed-diagnostic-tooling.txt is the reviewed set", got_rm, want_rm)
+              for gate in ("inventory-gate-guest.txt", "inventory-gate.txt"):
+                  if need(gate, p(gate)):
+                      check(f"{gate} verdict", open(p(gate), encoding="utf-8").read().splitlines()[-1:], ["inventory gate: PASS"])
+              if os.path.isfile(p("dpkg-list.txt")):
+                  inv = rows(p("dpkg-list.txt"))
+                  names = {r[0].split(":", 1)[0] for r in inv}
+                  check("dpkg-list.txt rows", len(inv), int(env["EXPECT_PACKAGE_COUNT"]))
+                  check("removed packages still installed", sorted(names & set(want_rm)), [])
+                  check("linux-tools-* installed", sorted(n for n in names if n.startswith("linux-tools-")), [])
 
               # Console binaries, measured from the overlay the build installed
               for name, var in (("culvert-console", "EXPECT_CONSOLE_SHA256"), ("culvert-access", "EXPECT_ACCESS_SHA256")):
@@ -1430,20 +1450,39 @@ jobs:
       - name: Harness self-test (a known-unavailable agent response must FAIL the agent oracle)
         run: test/e2e/appliance/lab/appliance-lab.sh selftest
       - name: Host preflight (KVM, RAM, disk) and lab directory
+        id: preflight
         run: |
           set -euo pipefail
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
-          { sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm; } || true  # best effort; preflight requires kvm below
-          [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "::error::/dev/kvm is not usable: this campaign is specified with KVM acceleration"; exit 1; }
-          nproc; free -m; df -h / /mnt 2>/dev/null || df -h /
+          # The lab directory and its environment come FIRST, before any check
+          # that can fail, so a preflight failure still leaves a lab root for
+          # the verdict and the evidence upload (campaign 2 attempt 1: the KVM
+          # check failed before LAB_ROOT existed, and no verdict was written).
           best=/
           if [ -d /mnt ] && [ "$(df -Pk /mnt | awk 'NR==2{print $4}')" -gt "$(df -Pk / | awk 'NR==2{print $4}')" ]; then best=/mnt; fi
-          sudo mkdir -p "$best/culvert-lab" && sudo chown "$(id -u):$(id -g)" "$best/culvert-lab"
+          sudo mkdir -p "$best/culvert-lab/preflight" && sudo chown -R "$(id -u):$(id -g)" "$best/culvert-lab"
           echo "LAB_ROOT=$best/culvert-lab" >> "$GITHUB_ENV"
           # Campaign-wide stop latch and clock anchor, shared by both guest legs.
           echo "LAB_CAMPAIGN_STOP_FILE=$best/culvert-lab/campaign.stop" >> "$GITHUB_ENV"
           echo "LAB_CAMPAIGN_CLOCK_FILE=$best/culvert-lab/campaign-clock.json" >> "$GITHUB_ENV"
           echo "LAB_CAMPAIGN_STARTED_FILE=$best/culvert-lab/campaign-started.json" >> "$GITHUB_ENV"
+          P="$best/culvert-lab/preflight"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          # trigger only queues the events; settle waits for the rule to apply.
+          { sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm && sudo udevadm settle --timeout=30; } || true  # best effort; preflight requires kvm below
+          # Host diagnostics, retained with the evidence whether or not a check below fails.
+          { echo "utc $(date -u +%FT%TZ)"; uname -a; echo "image ${ImageOS:-?} ${ImageVersion:-?}"
+            echo "== /dev/kvm"; ls -l /dev/kvm 2>&1 || true
+            echo "== kvm modules"; lsmod | grep -E '^kvm' || echo "(none loaded)"
+            echo "== cpu virtualization flags"; grep -oEw 'vmx|svm' /proc/cpuinfo | sort | uniq -c || echo "(none)"
+            echo "== udev"; udevadm info --name=/dev/kvm 2>&1 | head -20 || true
+            echo "== resources"; nproc; free -m; df -h / /mnt 2>/dev/null || df -h /
+            echo "== kernel log (kvm)"; sudo dmesg 2>/dev/null | grep -i kvm | tail -20 || true
+          } > "$P/host.txt" 2>&1
+          if ! { [ -r /dev/kvm ] && [ -w /dev/kvm ]; }; then
+            echo "/dev/kvm is not usable: this campaign is specified with KVM acceleration ($(ls -l /dev/kvm 2>&1))" > "$P/failure.txt"
+            echo "::error::$(cat "$P/failure.txt")"; exit 1
+          fi
+          nproc; free -m; df -h / /mnt 2>/dev/null || df -h /
       - name: Install lab tools
         timeout-minutes: 25
         run: |
@@ -2220,8 +2259,16 @@ jobs:
           OUTCOME_CAMPAIGN: ${{ steps.campaign.outcome }}
           OUTCOME_CONSOLE: ${{ steps.console.outcome }}
           OUTCOME_SHUTDOWN: ${{ steps.shutdown.outcome }}
+          OUTCOME_PREFLIGHT: ${{ steps.preflight.outcome }}
         run: |
           set -uo pipefail
+          # A failure before the host preflight created the lab root (route
+          # guard, harness self-test) still gets a verdict and an upload: the
+          # fallback root is exported for the upload step below.
+          if [ -z "${LAB_ROOT:-}" ]; then
+            LAB_ROOT="$RUNNER_TEMP/culvert-lab-early"
+            echo "LAB_ROOT=$LAB_ROOT" >> "$GITHUB_ENV"
+          fi
           mkdir -p "$LAB_ROOT/verdict"
           python3 -I - "$LAB_ROOT" "$LAB_ROOT/verdict" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import json, os, re, sys, time
@@ -2286,6 +2333,10 @@ jobs:
               o = e.get("OUTCOME_" + step, "")
               if o != "success":
                   problems.append(f"step {step.lower()} outcome {o or 'absent'!r}, not success")
+          if e.get("OUTCOME_PREFLIGHT", "") != "success":
+              why = os.path.join(root, "preflight", "failure.txt")
+              problems.append(f"step preflight outcome {e.get('OUTCOME_PREFLIGHT') or 'absent'!r}, not success"
+                              + (": " + open(why).read().strip()[:240] if os.path.exists(why) else ""))
           latch = os.path.join(root, "campaign.stop")
           if os.path.exists(latch):
               problems.append("campaign stop latched: " + open(latch).read().strip()[:240])
@@ -2429,6 +2480,7 @@ jobs:
             ${{ env.LAB_ROOT }}/receipt
             ${{ env.LAB_ROOT }}/containment
             ${{ env.LAB_ROOT }}/verdict
+            ${{ env.LAB_ROOT }}/preflight
             ${{ env.LAB_ROOT }}/ova-inputs.sha256
             ${{ env.LAB_ROOT }}/update/fixture.txt
             ${{ env.LAB_ROOT }}/campaign.stop
@@ -3221,22 +3273,23 @@ jobs:
   # the name obtain-image.sh already falls back to. No build, no boot.
   # Opt-in: [preserve-image].
   preserve-image:
-    name: "Lab · preserve candidate image tar (Deep run 41208642365, 0981ff3d)"
+    name: "Lab · preserve candidate image tar (Deep run 42489205084, fdcb02a5)"
     if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[preserve-image]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # FB-1c (31 Oct): the candidate of the FB-1 final SHA 0981ff3d. Earlier
-    # preservations: lab-source-image-41199359475 (4f56bdfc), -40523416237 (0648adeb).
+    # FB1-R1 (8 Nov): the candidate fdcb02a5 (perf/BPF tooling purge + inventory
+    # gate). Earlier preservations: lab-source-image-41208642365 (0981ff3d),
+    # -41199359475 (4f56bdfc), -40523416237 (0648adeb).
     env:
-      SOURCE_IMAGE_RUN_ID: "41208642365"
-      SOURCE_IMAGE_TAR_SHA256: c98564d4d86d99e61a0e86541aeea5331a6ecce704e7f146b507d8e818484a52
+      SOURCE_IMAGE_RUN_ID: "42489205084"
+      SOURCE_IMAGE_TAR_SHA256: 53f14d8b61673d0dd03862aedfcf8e13b868d53f272d3a07e38c9d7e1fae7728
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Obtain + verify (sha256, manifest digest, VERSION stamp)
         env:
           GH_TOKEN: ${{ github.token }}
-          WANT_MANIFEST: "sha256:d2ce15f1f7a99c2875579d0cf55f1fe51f0c6e993071eed4bc201eccba732d79"
-          WANT_VERSION: "v1.0.375-candidate.g0981ff3d037d"
+          WANT_MANIFEST: "sha256:eea7d0d981aba4f7aded3adf54cf966e3f3766db91f573164a00cf05d2213062"
+          WANT_VERSION: "v1.0.404-candidate.gfdcb02a57c13"
         run: |
           set -euo pipefail
           d="$RUNNER_TEMP/in"; from="$(test/e2e/appliance/lab/obtain-image.sh "$d")"
