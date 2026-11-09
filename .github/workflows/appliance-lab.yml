@@ -4045,19 +4045,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      # The ONE replacement INTERNAL-ONLY OVA (candidate-0648adeb, run
-      # 40555901182; ASTRA accepted the build, owner OK'd these exact-artifact
-      # scans, no rebuild). Every identity is read from the FINISHED OVA's own
-      # disk and must equal these pins, or the job stops:
-      #   OVA 325c142a (artifact 12756793569) -> .mf -> VMDK ->
-      #   build-info.json (source 0648adeb) -> baked app archive 4536f057
-      #   (application.baked_tar_sha256) -> index manifest 20b6abcb.
+      # The FB1-R1 replacement INTERNAL-ONLY OVA (candidate-6eead9a1, build-only
+      # run 42555980438, identity 63/63; ASTRA accepted ONE build of frozen
+      # 6eead9a1; these exact-artifact scans await ASTRA's route acceptance).
+      # Every identity is read from the FINISHED OVA's own disk and must equal
+      # these pins, or the job stops:
+      #   OVA f76b6e82 (artifact 13647493685, zip 0c18db83) -> .mf -> VMDK ->
+      #   build-info.json (source 6eead9a1) -> baked app archive d3644196
+      #   (application.baked_tar_sha256) -> index manifest 41d335aa.
       # The app scanned is the archive BAKED INTO THE OVA, not the CI tar.
-      OVA_ARTIFACT_ID: "12756793569"   # appliance-lab-ova-candidate-0648adeb, run 40555901182
-      OVA_SHA256: 325c142a7df441eb97dd5a5e688e0fb89979b8ee29680175d627fcf8556df96f
-      APP_ARCHIVE_SHA256: 4536f0572f6b940929bcdd16a193b1ff8698fdc70608f9d69463bf7be0ff35f6
-      IMAGE_ID: sha256:20b6abcbc17028e50aa7db1871dd3e6175a61d533afd961302cc7558dc5a8ed0
-      SRC_SHA: 0648adeba52e09f15505095ba1ff556304b9fcef
+      # Earlier scanned candidate: 0648adeb (OVA 325c142a, artifact 12756793569).
+      OVA_ARTIFACT_ID: "13647493685"   # appliance-lab-ova-candidate-6eead9a1, run 42555980438
+      OVA_SHA256: f76b6e82f63e8d6c7e196b34ea8e871f274012bbbcb60204259ad4fe1868fad4
+      APP_ARCHIVE_SHA256: d3644196bc463d36b60bdee17caae7b4bb5d111e5356819ed2d1ae7401631748
+      IMAGE_ID: sha256:41d335aa7fac6ae4019a5ec071c106d84631f7420ee578b067e1d1af030ecdce
+      SRC_SHA: 6eead9a1e9c1d0ba98f399f6d3815149b0c96fd4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Workspace + libguestfs
@@ -4153,7 +4155,7 @@ jobs:
           PY
           # the binaries' own version stamp names the frozen source
           # (no pipe: under pipefail an early-exiting grep would SIGPIPE strings)
-          for b in "$W/appbin/"*; do grep -qaF 'v1.0.360-candidate.g0648adeba52e' "$b" || { echo "::error::$b lacks the 0648adeb VERSION stamp"; exit 1; }; done
+          for b in "$W/appbin/"*; do grep -qaF 'v1.0.404-candidate.g6eead9a1e9c1' "$b" || { echo "::error::$b lacks the 6eead9a1 VERSION stamp"; exit 1; }; done
       - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.2.0
         with:
           version: v0.69.3
@@ -4227,7 +4229,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-exact-scan-0648adeb
+          name: appliance-lab-exact-scan-6eead9a1
           path: ${{ env.W }}/evidence/
           retention-days: 30
           if-no-files-found: warn
