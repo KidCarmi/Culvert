@@ -17,6 +17,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/upstream/backupstrip"
 )
 
 // backupSchemaVersion is the manifest envelope version. D1.3a writes 1.
@@ -384,7 +386,7 @@ func packOne(srcPath, tarPath string, info os.FileInfo, required bool, manifestF
 	// on disk is untouched; only the bytes being packed are rewritten, and
 	// the manifest checksum/size describe what the archive actually holds.
 	if tarPath == adminSettingsTarPath {
-		sanitized, stripped, serr := stripUpstreamCredentialsFromSettings(body)
+		sanitized, stripped, serr := backupstrip.Strip(body)
 		if serr != nil {
 			return fmt.Errorf("backup: sanitize %q: %w", tarPath, serr)
 		}

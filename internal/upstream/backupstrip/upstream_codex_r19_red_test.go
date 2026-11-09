@@ -1,4 +1,4 @@
-package main
+package backupstrip
 
 import (
 	"bytes"
@@ -33,7 +33,7 @@ func TestUpstreamR19_V2VerifierFoldsKeyCaseAtEveryDepth(t *testing.T) {
 		"nested object CREDENTIAL":  `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "meta": {"CREDENTIAL": "` + r19Canary + `"}}]}}`,
 		"array-nested Credential":   `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "list": [{"Credential": "` + r19Canary + `"}]}]}}`,
 	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, _, err := Strip([]byte(body))
 		if err == nil {
 			t.Errorf("%s: a case-variant sealed key inside the v2 document was accepted for archiving", name)
 		}
@@ -48,7 +48,7 @@ func TestUpstreamR19_V2VerifierFoldsKeyCaseAtEveryDepth(t *testing.T) {
 		"entry-level Credential (bound role)": `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "Credential": {"ciphertext": "` + r19Canary + `"}}]}}`,
 		"credential-level KeyId (bound role)": `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "credential": {"ciphertext": "x", "KeyId": "` + r19Canary + `", "authorityHash": "h"}}]}}`,
 	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, _, err := Strip([]byte(body))
 		if err == nil {
 			t.Errorf("control %s: accepted", name)
 		}
@@ -57,7 +57,7 @@ func TestUpstreamR19_V2VerifierFoldsKeyCaseAtEveryDepth(t *testing.T) {
 		}
 	}
 	sound := `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "host": "parent-a.example", "username": "Ciphertext", "note": "KeyId"}]}}`
-	if out, n, err := stripUpstreamCredentialsFromSettings([]byte(sound)); err != nil || n != 0 || string(out) != sound {
+	if out, n, err := Strip([]byte(sound)); err != nil || n != 0 || string(out) != sound {
 		t.Errorf("control sound values: got n=%d err=%v out=%q, want unchanged", n, err, out)
 	}
 }

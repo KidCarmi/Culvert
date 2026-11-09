@@ -1,4 +1,4 @@
-package main
+package backupstrip
 
 import (
 	"bytes"
@@ -30,7 +30,7 @@ func TestUpstreamR16_V2VerificationRunsWithoutAStrip(t *testing.T) {
 		"entry-level ciphertext, no credential object": `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "ciphertext": "` + r16Canary + `"}]}}`,
 		"nested unrelated object inside the document":  `{"upstream_proxies_v2": {"entries": [], "meta": {"ciphertext": "` + r16Canary + `"}}}`,
 	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, _, err := Strip([]byte(body))
 		if err == nil {
 			t.Errorf("%s: sealed material inside the v2 document was accepted for archiving", name)
 		}
@@ -44,7 +44,7 @@ func TestUpstreamR16_V2VerificationRunsWithoutAStrip(t *testing.T) {
 		"sound document, no credential": `{"upstream_proxies_v2": {"revision": 3, "entries": [{"id": "01HZZ", "host": "parent-a.example"}]}}`,
 		"names outside the document":    `{"upstream_proxies_v2": {"entries": []}, "otlp_headers": {"keyId": "x", "ciphertext": "y"}}`,
 	} {
-		out, n, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, n, err := Strip([]byte(body))
 		if err != nil || n != 0 || !bytes.Equal(out, []byte(body)) {
 			t.Errorf("control %s: must archive unchanged: n=%d err=%v", name, n, err)
 		}

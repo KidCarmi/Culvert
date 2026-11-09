@@ -1,4 +1,4 @@
-package main
+package backupstrip
 
 import (
 	"bytes"
@@ -8,7 +8,7 @@ import (
 // PR-C20 RED matrix — the eleventh Codex round on the Batch 2 PR head
 // (207ecb8a), written against that tree BEFORE any correction.
 //
-//   R11-A  stripUpstreamCredentialsFromSettings decoded the settings object
+//   R11-A  Strip decoded the settings object
 //          into a map, and encoding/json silently keeps only the LAST value
 //          of a repeated key. A single settings object that repeats
 //          `upstream_proxies` (a credential-bearing list first, an empty
@@ -31,7 +31,7 @@ func TestUpstreamR11_BackupStripRefusesDuplicateKeys(t *testing.T) {
 		"v2 document repeated":                  `{"upstream_proxies_v2": {"entries": [{"id": "a", "credential": {"ciphertext": "` + r11Canary + `"}}]}, "upstream_proxies_v2": {"entries": []}}`,
 		"duplicate inside an unrelated section": `{"upstream_proxies": [` + cred + `], "other": {"k": 1, "k": 2}, "upstream_proxies": []}`,
 	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, _, err := Strip([]byte(body))
 		if err == nil {
 			t.Errorf("%s: a settings object with a duplicate key was accepted for archiving", name)
 		}
@@ -41,7 +41,7 @@ func TestUpstreamR11_BackupStripRefusesDuplicateKeys(t *testing.T) {
 	}
 	// Control: the same key names in DIFFERENT objects are not duplicates.
 	body := `{"upstream_proxies": [{"url": "http://parent-a.example:3128"}, {"url": "http://parent-b.example:3128"}], "other": [{"k": 1}, {"k": 2}]}`
-	out, n, err := stripUpstreamCredentialsFromSettings([]byte(body))
+	out, n, err := Strip([]byte(body))
 	if err != nil || n != 0 || !bytes.Equal(out, []byte(body)) {
 		t.Errorf("control: a sound body must archive unchanged: n=%d err=%v", n, err)
 	}
