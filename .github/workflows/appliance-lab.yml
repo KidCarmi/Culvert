@@ -3305,27 +3305,28 @@ jobs:
   # the name obtain-image.sh already falls back to. No build, no boot.
   # Opt-in: [preserve-image].
   preserve-image:
-    name: "Lab · preserve candidate image tar (Deep run 42532741140, 6eead9a1)"
+    name: "Lab · preserve candidate image tar (Deep run 42653713925, a2b722c0)"
     if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[preserve-image]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # FB1-R1 (8 Nov), frozen source 6eead9a1: the #1825 port (5423c94b), the R1
-    # wrapper-ancestry fix (6f8c89e7) and the CI corrections (6eead9a1), on top
-    # of the perf/BPF purge + inventory gate (fdcb02a5). Deep run 42532741140
-    # is all green; its deep-gate-image artifact 13638346395 (zip sha256
-    # 38c81fcf…) expires 2026-11-09T22:59:19Z. Earlier preservations:
-    # lab-source-image-42489205084 (fdcb02a5), -41208642365 (0981ff3d),
-    # -41199359475 (4f56bdfc), -40523416237 (0648adeb).
+    # FB1-R2 (9 Nov), candidate a2b722c0: the apt snapshot raised to
+    # 20261105T000000Z (a0579aba, owner decision D4) and main's 76c2e4cc test
+    # timing fix ported (a2b722c0), on top of FB1-R1 6eead9a1. Deep run
+    # 42653713925 is all green (17/17); its deep-gate-image artifact
+    # 13690114703 (zip sha256 63f0eedb…) expires 2026-11-10T16:24:00Z. Earlier
+    # preservations: lab-source-image-42532741140 (6eead9a1), -42489205084
+    # (fdcb02a5), -41208642365 (0981ff3d), -41199359475 (4f56bdfc),
+    # -40523416237 (0648adeb).
     env:
-      SOURCE_IMAGE_RUN_ID: "42532741140"
-      SOURCE_IMAGE_TAR_SHA256: f011117d848cb2f1584da0c2dde8d9e694ee3ec6146a5c4a415ab76d303abf4e
+      SOURCE_IMAGE_RUN_ID: "42653713925"
+      SOURCE_IMAGE_TAR_SHA256: 13cbb41702bf657eb3b37ffafdced9d27c3fae28b62537df33b59ecd6546fe80
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Obtain + verify (sha256, manifest digest, VERSION stamp)
         env:
           GH_TOKEN: ${{ github.token }}
-          WANT_MANIFEST: "sha256:41d335aa7fac6ae4019a5ec071c106d84631f7420ee578b067e1d1af030ecdce"
-          WANT_VERSION: "v1.0.404-candidate.g6eead9a1e9c1"
+          WANT_MANIFEST: "sha256:08541c6701f108c21c2379ca93edb2c9cad568301ac77765aa4e6c3259df1fc3"
+          WANT_VERSION: "v1.0.404-candidate.ga2b722c0359e"
         run: |
           set -euo pipefail
           d="$RUNNER_TEMP/in"; from="$(test/e2e/appliance/lab/obtain-image.sh "$d")"
