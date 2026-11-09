@@ -52,7 +52,11 @@ permissions:
 jobs:
   ui-e2e:
     name: Admin-UI RBAC (playwright-go, headless Chromium)
-    runs-on: ubuntu-latest
+    # Pinned to 24.04: Playwright does not support chromium on ubuntu-26.04
+    # ("Playwright does not support chromium on ubuntu26.04-x64"), which is
+    # what ubuntu-latest now resolves to. Unpin when the pinned
+    # playwright-go driver supports 26.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Advisory: a failure here annotates the run but must not block the PR.
     continue-on-error: true
