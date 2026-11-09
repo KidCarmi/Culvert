@@ -3286,23 +3286,27 @@ jobs:
   # the name obtain-image.sh already falls back to. No build, no boot.
   # Opt-in: [preserve-image].
   preserve-image:
-    name: "Lab · preserve candidate image tar (Deep run 42489205084, fdcb02a5)"
+    name: "Lab · preserve candidate image tar (Deep run 42532741140, 6eead9a1)"
     if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[preserve-image]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # FB1-R1 (8 Nov): the candidate fdcb02a5 (perf/BPF tooling purge + inventory
-    # gate). Earlier preservations: lab-source-image-41208642365 (0981ff3d),
+    # FB1-R1 (8 Nov), frozen source 6eead9a1: the #1825 port (5423c94b), the R1
+    # wrapper-ancestry fix (6f8c89e7) and the CI corrections (6eead9a1), on top
+    # of the perf/BPF purge + inventory gate (fdcb02a5). Deep run 42532741140
+    # is all green; its deep-gate-image artifact 13638346395 (zip sha256
+    # 38c81fcf…) expires 2026-11-09T22:59:19Z. Earlier preservations:
+    # lab-source-image-42489205084 (fdcb02a5), -41208642365 (0981ff3d),
     # -41199359475 (4f56bdfc), -40523416237 (0648adeb).
     env:
-      SOURCE_IMAGE_RUN_ID: "42489205084"
-      SOURCE_IMAGE_TAR_SHA256: 53f14d8b61673d0dd03862aedfcf8e13b868d53f272d3a07e38c9d7e1fae7728
+      SOURCE_IMAGE_RUN_ID: "42532741140"
+      SOURCE_IMAGE_TAR_SHA256: f011117d848cb2f1584da0c2dde8d9e694ee3ec6146a5c4a415ab76d303abf4e
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Obtain + verify (sha256, manifest digest, VERSION stamp)
         env:
           GH_TOKEN: ${{ github.token }}
-          WANT_MANIFEST: "sha256:eea7d0d981aba4f7aded3adf54cf966e3f3766db91f573164a00cf05d2213062"
-          WANT_VERSION: "v1.0.404-candidate.gfdcb02a57c13"
+          WANT_MANIFEST: "sha256:41d335aa7fac6ae4019a5ec071c106d84631f7420ee578b067e1d1af030ecdce"
+          WANT_VERSION: "v1.0.404-candidate.g6eead9a1e9c1"
         run: |
           set -euo pipefail
           d="$RUNNER_TEMP/in"; from="$(test/e2e/appliance/lab/obtain-image.sh "$d")"
