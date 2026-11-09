@@ -1270,38 +1270,49 @@ jobs:
   # the "Campaign verdict" step: every required check must PASS; only the
   # declared residuals may be other than pass.
   qemu-retained:
-    name: "Lab · QEMU campaign on the retained FB-1 OVA f9d68540 (no build)"
+    name: "Lab · QEMU campaign on the FB1-R1 candidate OVA f76b6e82 (no build)"
     if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[adopted-scan]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[console-overlay]') && !contains(github.event.head_commit.message, '[fail-fast]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[preserve-image]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     env:
-      VARIANT: retained-f9d68540
+      VARIANT: candidate-6eead9a1
       # The ONE commit message that may start this job (an empty commit on the
       # reviewed head; reviewed by ASTRA, with its SHA, parent and tree, before
       # it is pushed).
-      # Campaign 2 (owner direction of 7 November 2026). Campaign 1 (trigger
-      # b93388e9, run 42267550172, evidence artifact 13528259883) is FAIL and
-      # preserved; its message no longer starts this job.
-      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 2 on the retained FB-1 OVA f9d68540 [qemu-retained]"
-      QEMU_CAMPAIGN: "2"
-      QEMU_PRIOR_CAMPAIGN: "1: trigger b93388e9eab5e675cf92d16369861782f61ef331, run 42267550172, evidence artifact 13528259883, verdict FAIL (route-induced stop at CP/idp-discover-public)"
-      # Owner direction 7 November 2026: first candidate boot no later than
-      # 2026-11-14T00:00:00Z.
+      # Campaign 3 (owner direction and decision of 8 November 2026): the FB1-R1
+      # replacement candidate. Campaigns 1 (trigger b93388e9, run 42267550172,
+      # evidence 13528259883) and 2 (trigger 6ac47d99, run 42402656551 attempt
+      # 2, evidence 13586389914) are FAIL and preserved; both booted the earlier
+      # OVA f9d68540, and neither message starts this job.
+      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 3 on the FB1-R1 candidate OVA f76b6e82 [qemu-retained]"
+      QEMU_CAMPAIGN: "3"
+      QEMU_PRIOR_CAMPAIGN: "2: trigger 6ac47d99cc7136d47c737a89794ffb62a71d1841, run 42402656551 attempt 2, evidence artifact 13586389914, verdict FAIL (stop at E/kernel-cve-assumptions: perf/BPF tooling on OVA f9d68540)"
+      # Start deadline (unchanged, reviewed for campaign 2): first candidate boot
+      # no later than 2026-11-14T00:00:00Z. With the 345-minute job limit and the
+      # daily-window rule the job ends by 2026-11-14T05:45Z, inside the owner's
+      # work window (ends 2026-11-15T00:00:00Z, decision of 8 November 2026).
       CAMPAIGN_START_DEADLINE: "2026-11-14T00:00:00Z"
       # The job's own limit; the daily-window guard reasons over it.
       CAMPAIGN_MAX_MINUTES: "345"
-      # The retained artifact (run 41838656879 attempt 3) and the OVA in it.
-      OVA_ARTIFACT_ID: "13442236115"
-      OVA_ARTIFACT_RUN: "41838656879"
-      OVA_ARTIFACT_NAME: appliance-lab-ova-candidate-0981ff3d-FAILED
-      OVA_ARTIFACT_ZIP_SHA256: 4a89dda75c6dc3abc36340d79e8c59526d500582831c3c238c0199d5e8d1843c
-      OVA_NAME: culvert-appliance-1.0.375-candidate.g0981ff3d037d-ubuntu-24.04.ova
-      OVA_SHA256: f9d685406ca49cfa667f96013e78df3517e21964a88b3d4d8ecd42811000c43b
+      # The FB1-R1 candidate artifact (build-only run 42555980438, identity
+      # 63/63; exact-byte scan run 42566672526) and the OVA in it.
+      OVA_ARTIFACT_ID: "13647493685"
+      OVA_ARTIFACT_RUN: "42555980438"
+      OVA_ARTIFACT_NAME: appliance-lab-ova-candidate-6eead9a1
+      OVA_ARTIFACT_ZIP_SHA256: 0c18db839fb98f7628385093ecd158141e9385b1a2019877be76b18cd413c731
+      OVA_NAME: culvert-appliance-1.0.404-candidate.g6eead9a1e9c1-ubuntu-24.04.ova
+      OVA_SHA256: f76b6e82f63e8d6c7e196b34ea8e871f274012bbbcb60204259ad4fe1868fad4
       # Its frozen source (the signed-update fixture is built from it) and the
       # image identity the guest must report.
-      APPLIANCE_SOURCE_SHA: 0981ff3d037dedcf08cf7686474c65ba6b3784bf
-      APPLIANCE_SOURCE_TREE: e8d4bf11078fb32bdc7ad135fafa816b659c37e7
-      EXPECT_IMAGE_ID: "sha256:d2ce15f1f7a99c2875579d0cf55f1fe51f0c6e993071eed4bc201eccba732d79"
+      APPLIANCE_SOURCE_SHA: 6eead9a1e9c1d0ba98f399f6d3815149b0c96fd4
+      APPLIANCE_SOURCE_TREE: 8ff6578edb5d10139a24cf8415bb90c07ba63596
+      EXPECT_IMAGE_ID: "sha256:41d335aa7fac6ae4019a5ec071c106d84631f7420ee578b067e1d1af030ecdce"
+      # Source citations below name 0981ff3d. Every cited file is byte-identical
+      # at 6eead9a1 (auth_oidc_flow.go dc1eb5b0, internal/ssrf/ssrf.go 9b4279c4,
+      # auth_saml.go 70bef4b8, internal/feedsync/feedsync.go b3695a9b,
+      # internal/threatfeed/threatfeed.go a24f7b9e, release_wiring.go fd71c436,
+      # scripts/install.sh 9eeb145e, internal/uitls/uitls.go 76554802), so the
+      # decoder fields, resolved fields and egress names carry over unchanged.
       EXPECT_KERNEL_RELEASE: 7.0.0-42-generic
       # Public HTTPS issuer for the changed OIDC discovery fetch (read-only GET,
       # no credential, nothing saved).
@@ -2125,7 +2136,7 @@ jobs:
                   missing.append(f"env {name}")
               return v
           r = {
-            "campaign": "retained-OVA QEMU campaign " + env("QEMU_CAMPAIGN") + ", owner decisions 2026-11-06 and 2026-11-07",
+            "campaign": "retained-OVA QEMU campaign " + env("QEMU_CAMPAIGN") + ", owner decisions 2026-11-06, 2026-11-07 and 2026-11-08",
             "prior_campaign": env("QEMU_PRIOR_CAMPAIGN"),
             "created_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "created_epoch": int(dt.datetime.now(dt.timezone.utc).timestamp()),
