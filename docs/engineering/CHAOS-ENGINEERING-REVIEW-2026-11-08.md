@@ -89,7 +89,8 @@ because no code path evaluates the alert when the bind succeeds.
 at the far end, firing on every gap. `internal/secscan`'s `remoteScanFail`
 classifies an unreachable sidecar as a transport fault and forwards the body
 **UNSCANNED** (WK-2b, the recorded owner decision). So a sidecar crash-looping
-on a ClamAV socket failure or an OOM kill means **every node pointed at it
+on a ClamAV socket failure (or, beyond the reach of the in-process signals
+added here, a whole-process OOM crash loop) means **every node pointed at it
 forwards unscanned traffic through every gap, indefinitely**, while the
 sidecar's own host reports `ready` on `/healthz`, `1` on
 `culvert_scan_svc_listener_up`, an `ok` diagnostics row and an `ok` `/ready`

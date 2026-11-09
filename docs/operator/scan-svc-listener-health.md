@@ -32,7 +32,7 @@ degraded surface.
 | | **Down** | **Flapping** |
 |---|---|---|
 | What the socket does | will not come back | will not stay |
-| Typical cause | another process holds the address; a typo'd `scan_svc.listen`; no permission to bind; descriptors exhausted | the sidecar process dies after binding: scanner-engine init failure (ClamAV socket, YARA rule compile), OOM kill, a container supervisor restart loop |
+| Typical cause | another process holds the address; a typo'd `scan_svc.listen`; no permission to bind; descriptors exhausted | the listener's serve loop keeps exiting inside one running process after binding, e.g. scanner-engine init failure (ClamAV socket, YARA rule compile). A process that is itself killed and restarted is not this shape: see [Process crash loops](#process-crash-loops-are-not-covered-here) |
 | `/healthz` `scan_svc` | `down` (or `degraded` inside the threshold) | `flapping` |
 | `culvert_scan_svc_listener_up` | `0` | `0` |
 | `culvert_scan_svc_listener_flapping` | `0` | `1` |
@@ -166,6 +166,33 @@ at a healthy sidecar, or switch them to in-process scanning. See
   healthy. The flap episode is tracked separately from the unavailability
   episode specifically so that a bind outage, however long, cannot be
   misreported as a crash loop.
+
+## Process crash loops are not covered here
+
+Every signal in this runbook is state inside the running Culvert process. The
+flap verdict counts serve generations that exit and return to the
+**still-running** supervisor. If the whole process dies (an OOM kill, a panic,
+a container supervisor restarting it in a loop), that history dies with it, and
+the replacement process starts with no record of the previous ones. A sidecar
+that binds successfully after every restart can therefore be scraped as
+`culvert_scan_svc_listener_up = 1` and `culvert_scan_svc_listener_flapping = 0`
+between crashes, and `scan_svc_listener_down` never fires, while callers fail
+open during every gap.
+
+Watch process and container restarts separately, on the sidecar host:
+
+```promql
+# The sidecar process restarted more than twice in 15 minutes (uptime fell).
+resets(culvert_uptime_seconds[15m]) > 2
+
+# The scrape itself failed: the process was not there to answer.
+up{job="<your culvert sidecar job>"} == 0
+```
+
+Add your orchestrator's restart count where you have one (for example
+`kube_pod_container_status_restarts_total`, or the container runtime's restart
+count), and route these with the same urgency as `culvert_scan_svc_listener_up
+== 0`: a crash-looping sidecar turns scanning off for the fleet just as surely.
 
 ## Residual risk
 

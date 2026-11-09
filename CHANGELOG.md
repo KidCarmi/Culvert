@@ -38,8 +38,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   every mid-serve sample. Through all of it every caller pointed at that
   address forwarded response bodies **UNSCANNED** on every gap
   (`internal/secscan` `remoteScanFail`, fail-open, WK-2b) — the condition is
-  what a ClamAV-socket failure, a YARA rule-compile failure or an OOM kill
-  looks like, and nothing ended it. A flap is now tracked as its own episode:
+  what a ClamAV-socket failure or a YARA rule-compile failure inside a running
+  sidecar looks like, and nothing ended it. (A whole-process crash loop, such
+  as repeated OOM kills, restarts with no history and is outside these
+  signals; the runbook names the process-restart signals to watch instead.) A flap is now tracked as its own episode:
   three consecutive serve generations that each died before lasting
   `scanSvcServeStableAfter`, over at least the same 30 s threshold the sibling
   listeners use, cleared the moment a generation proves stable — including
