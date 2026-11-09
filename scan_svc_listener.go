@@ -98,6 +98,12 @@ type scanSvcListenerHealth struct {
 	serveExits   int64 // cumulative serve generations that ended on their own
 	lastClass    string
 
+	// rebindFailures counts failed bind attempts since the last SUCCESSFUL
+	// bind. Non-zero means the current gap is a bind that is failing, not an
+	// ordinary backoff wait — the input Flapping() needs to tell a port
+	// conflict that follows a flap from the flap's own retry gaps.
+	rebindFailures int64
+
 	firstFailure time.Time // start of the current unavailability episode
 	lastFailure  time.Time
 	backoff      time.Duration
@@ -133,6 +139,9 @@ type scanSvcListenerSnapshot struct {
 	LastClass    string
 	FailingFor   time.Duration
 	Backoff      time.Duration
+
+	// RebindFailures is failed bind attempts since the last successful bind.
+	RebindFailures int64
 
 	// ServingFor is how long the current serve generation has lasted; 0 when
 	// not bound. UnstableFor / UnstableExits describe the current run of
@@ -184,6 +193,21 @@ func (s scanSvcListenerSnapshot) Unavailable() bool {
 //     arm a sidecar that flapped five times and has since served for three
 //     hours stays "flapping" for those three hours, because the run only
 //     resets when a generation ENDS.
+//   - the sidecar is not DOWN on a failing rebind. The flap run is history:
+//     nothing clears it while no generation serves, so without this arm three
+//     short serves followed by another process taking the port kept this
+//     verdict true for as long as the port stayed taken, and every surface
+//     sent the operator after the sidecar process ("not the port") for a port
+//     conflict. Once rebinds have failed (no successful bind since) and the
+//     outage has crossed the same Unavailable() threshold the down shape and
+//     the down alert use, the sustained bind failure is the CURRENT fault and
+//     wins. An ordinary backoff gap between short serves has no failed rebind
+//     — even a ceiling gap that is itself past the threshold — so it still
+//     reads as the flap. The run is deliberately NOT cleared: once the port
+//     frees, a serve that is still short reads as flapping again.
+//
+// Every surface — the contract row, /healthz, /ready and the gauges — reads
+// this one predicate, so the shape decision is made here and nowhere else.
 func (s scanSvcListenerSnapshot) Flapping() bool {
 	if !s.Configured || s.Stopped {
 		return false
@@ -192,6 +216,9 @@ func (s scanSvcListenerSnapshot) Flapping() bool {
 		return false
 	}
 	if s.Bound && s.ServingFor >= scanSvcServeStableAfter {
+		return false
+	}
+	if s.RebindFailures > 0 && s.Unavailable() {
 		return false
 	}
 	return true
@@ -250,6 +277,7 @@ func noteScanSvcBound() (recovered bool) {
 	scanSvcListener.backoff = 0
 	scanSvcListener.alerted = false
 	scanSvcListener.lastClass = ""
+	scanSvcListener.rebindFailures = 0
 	return recovered
 }
 
@@ -261,6 +289,7 @@ func noteScanSvcBindFailure(class string, backoff time.Duration, now time.Time) 
 	defer scanSvcListener.mu.Unlock()
 	scanSvcListener.bound = false
 	scanSvcListener.bindFailures++
+	scanSvcListener.rebindFailures++
 	scanSvcListener.lastClass = class
 	scanSvcListener.backoff = backoff
 	if scanSvcListener.firstFailure.IsZero() {
@@ -338,7 +367,8 @@ func scanSvcListenerState() scanSvcListenerSnapshot {
 		LastClass:    scanSvcListener.lastClass,
 		Backoff:      scanSvcListener.backoff,
 
-		UnstableExits: scanSvcListener.unstableExits,
+		RebindFailures: scanSvcListener.rebindFailures,
+		UnstableExits:  scanSvcListener.unstableExits,
 	}
 	// One clock read for every derived duration, so FailingFor, ServingFor and
 	// UnstableFor are all measured from the SAME instant. Three separate reads
@@ -374,6 +404,7 @@ func resetScanSvcHealthForTest() {
 	scanSvcListener.everBound = false
 	scanSvcListener.stopped = false
 	scanSvcListener.bindFailures = 0
+	scanSvcListener.rebindFailures = 0
 	scanSvcListener.serveExits = 0
 	scanSvcListener.lastClass = ""
 	scanSvcListener.firstFailure = time.Time{}

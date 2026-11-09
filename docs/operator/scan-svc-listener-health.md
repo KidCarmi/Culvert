@@ -36,7 +36,7 @@ degraded surface.
 | `/healthz` `scan_svc` | `down` (or `degraded` inside the threshold) | `flapping` |
 | `culvert_scan_svc_listener_up` | `0` | `0` |
 | `culvert_scan_svc_listener_flapping` | `0` | `1` |
-| Declared after | `30 s` of not serving | `3` serve generations that each died before lasting `60 s`, over at least `30 s` |
+| Declared after | `30 s` of not serving — including after a flap, once a rebind has failed and no bind has succeeded since | `3` serve generations that each died before lasting `60 s`, over at least `30 s`; an ordinary backoff gap between them stays `flapping` |
 | Where to look | the address: `ss -ltnp`, the config, the capabilities | the sidecar's own process log |
 
 **Why the distinction is worth a separate signal.** Until CHAOS-114 a flap had
@@ -166,6 +166,12 @@ at a healthy sidecar, or switch them to in-process scanning. See
   healthy. The flap episode is tracked separately from the unavailability
   episode specifically so that a bind outage, however long, cannot be
   misreported as a crash loop.
+- **A bind outage after a flap is not reported as a flap.** If the address
+  stops binding after a run of short serve generations, the flap history
+  stays, but once a rebind has failed and the sidecar has not served for
+  `30 s` every surface reports *down* with the bind class and its remedy.
+  When the address binds again, a serve that still dies early reads as
+  `flapping` again.
 
 ## Process crash loops are not covered here
 

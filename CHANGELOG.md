@@ -46,8 +46,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `scanSvcServeStableAfter`, over at least the same 30 s threshold the sibling
   listeners use, cleared the moment a generation proves stable — including
   while it is still running, so a sidecar that flapped and has since served
-  for hours does not keep paging. The verdict is evaluated on the SERVE-EXIT
-  path, which is the half of the defect no bind-failure path can see. The
+  for hours does not keep paging, and yielding to the down shape once a
+  rebind has failed (no successful bind since) and the outage has crossed
+  that threshold, so a port conflict that follows a flap is reported with the
+  port remedy rather than as a crash loop, while an ordinary backoff gap
+  between short serves still reads as flapping. The verdict is evaluated on
+  the SERVE-EXIT path, which is the half of the defect no bind-failure path
+  can see. The
   existing `culvert_scan_svc_listener_up == 0` paging rule now covers both
   shapes, so an alert on it starts catching this without being edited;
   `culvert_scan_svc_listener_flapping` and `culvert_scan_svc_unstable_serves`
@@ -62,10 +67,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   paging forever, measured at `row=fail up=0 healthz=down` an hour into a
   perfectly healthy serve when it is removed. New runbook:
   `docs/operator/scan-svc-listener-health.md`, the fourth of the four
-  listeners to have one. Eleven gates in `scan_svc_flap_chaos_test.go`,
-  including controls that a one-off lost socket, a five-minute stuck bind, a
-  slow redeploy and a graceful stop are each reported as themselves and not as
-  a flap.
+  listeners to have one. Thirteen gates in `scan_svc_flap_chaos_test.go`,
+  including controls that a one-off lost socket, a five-minute stuck bind
+  (after one short serve or after a flap), a slow redeploy and a graceful
+  stop are each reported as themselves and not as a flap, and that a retry
+  gap inside a flap still is one.
 
 - **Every clustered Data Plane enforced a per-source-IP connection cap nobody
   configured, and the one gate that refused the traffic reported nothing

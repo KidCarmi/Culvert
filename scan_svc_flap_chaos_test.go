@@ -406,6 +406,134 @@ func TestChaos114_ControlSingleExitThenAStuckBindIsNotAFlap(t *testing.T) {
 	}
 }
 
+// TestChaos114_SustainedRebindFailureAfterAFlapReadsDown is the gate for the
+// transition the stuck-bind control above cannot reach: the flap PREMISES are
+// met (three short serve generations, a run older than the threshold) and THEN
+// the address stops binding. The flap run is history — nothing clears it while
+// no generation serves — so before this gate `Flapping()` stayed true for as
+// long as the port stayed taken, and every surface told the operator "the
+// address binds … not the port" about a port conflict. A sustained run of
+// failed rebinds past the same threshold the down shape uses is the CURRENT
+// fault and takes precedence.
+func TestChaos114_SustainedRebindFailureAfterAFlapReadsDown(t *testing.T) {
+	scanSvcChaosSetup(t)
+	alerts := captureScanSvcAlerts()
+	noteScanSvcConfigured("127.0.0.1:8484")
+	c := newScanSvcFlapClock()
+
+	// Three short serve generations, then another process takes the port.
+	backoff := time.Duration(0)
+	for i := 0; i < scanSvcFlapMinExits; i++ {
+		backoff = flapOneCycle(c, backoff, 10*time.Millisecond)
+	}
+	start := c.now
+	for c.now.Sub(start) < 5*time.Minute {
+		backoff = nextScanSvcBindBackoff(backoff)
+		maybeAlertScanSvcDown("port_in_use", noteScanSvcBindFailure("port_in_use", backoff, c.now))
+		c.advance(backoff)
+	}
+
+	snap := scanSvcListenerState()
+	if snap.UnstableExits < scanSvcFlapMinExits || snap.UnstableFor < scanSvcUnavailableAfter {
+		t.Fatalf("the gate's premise is wrong: the flap run is exits=%d age=%s, which the flap verdict alone would not count",
+			snap.UnstableExits, snap.UnstableFor)
+	}
+	if !snap.Unavailable() {
+		t.Fatal("a five-minute stuck bind is not reported unavailable; the gate's premise is wrong")
+	}
+	if snap.Flapping() {
+		t.Errorf("five minutes of failed rebinds after %d short serves still reports Flapping() — the stale flap run hides a port conflict", snap.UnstableExits)
+	}
+	if got := scanSvcListenerStatus(); got != "down" {
+		t.Errorf("/healthz = %q, want down", got)
+	}
+	row := checkScanSvcListener()
+	if row.Status != diagFail {
+		t.Fatalf("contract row = %q, want %q", row.Status, diagFail)
+	}
+	if strings.Contains(row.Message, "FLAPPING") {
+		t.Errorf("a sustained bind failure gets the flap row: %q", row.Message)
+	}
+	if !strings.Contains(row.OperatorAction, "another process holds") {
+		t.Errorf("remedy does not name the port conflict: %q", row.OperatorAction)
+	}
+	body := renderMetrics(t)
+	for _, want := range []string{
+		"culvert_scan_svc_listener_up 0",
+		"culvert_scan_svc_listener_down 1",
+		"culvert_scan_svc_listener_flapping 0",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("sustained bind failure after a flap: /metrics is missing %q", want)
+		}
+	}
+	checks := map[string]*readinessCheck{}
+	appendScanSvcReadinessCheck(checks)
+	if got := checks["scan_svc"]; got == nil || got.Status != "fail" || strings.Contains(got.Detail, "flapping") {
+		t.Errorf("/ready scan_svc row = %+v, want the not-serving fail row", got)
+	}
+	if got := alerts.last(); got != "port_in_use" {
+		t.Errorf("last alert detail = %q, want the bind class %q", got, "port_in_use")
+	}
+
+	// The port is released and the sidecar binds again: the run of failed
+	// rebinds is over, the flap run is not, so a generation that is still
+	// short reads as flapping once more. The precedence is about the CURRENT
+	// shape, not an amnesty for the history.
+	noteScanSvcBound()
+	c.advance(10 * time.Millisecond)
+	if !scanSvcListenerState().Flapping() {
+		t.Error("a short serve after the port conflict cleared does not read as flapping again")
+	}
+}
+
+// TestChaos114_ControlRetryGapStaysFlapping is the control for the rule above:
+// an ordinary backoff gap between short serves is NOT a sustained bind
+// failure. At the 30 s ladder ceiling the gap alone reaches the unavailability
+// threshold with no bind attempt failing at all, and that must still read as
+// the flap it is — otherwise the verdict flickers to `down` and a port remedy
+// on every slow cycle.
+func TestChaos114_ControlRetryGapStaysFlapping(t *testing.T) {
+	scanSvcChaosSetup(t)
+	captureScanSvcAlerts()
+	noteScanSvcConfigured("127.0.0.1:8484")
+	c := newScanSvcFlapClock()
+
+	backoff := time.Duration(0)
+	for i := 0; i < 10; i++ {
+		backoff = flapOneCycle(c, backoff, 10*time.Millisecond)
+	}
+	// flapOneCycle ends after sleeping the backoff, i.e. at the next bind
+	// attempt — the far end of the gap, 30 s past the last exit.
+	snap := scanSvcListenerState()
+	if snap.Bound || !snap.Unavailable() {
+		t.Fatalf("the gate's premise is wrong: bound=%v failing_for=%s", snap.Bound, snap.FailingFor)
+	}
+	if !snap.Flapping() {
+		t.Error("a retry gap at the ladder ceiling between short serves no longer reads as flapping")
+	}
+	if got := scanSvcListenerStatus(); got != "flapping" {
+		t.Errorf("/healthz in a retry gap = %q, want flapping", got)
+	}
+	if row := checkScanSvcListener(); !strings.Contains(row.Message, "FLAPPING") {
+		t.Errorf("contract row in a retry gap is not the flap row: %q", row.Message)
+	}
+	if !strings.Contains(renderMetrics(t), "culvert_scan_svc_listener_flapping 1") {
+		t.Error("a retry gap exports listener_flapping 0")
+	}
+
+	// A failed rebind INSIDE the threshold is not yet sustained either: one
+	// more short generation, then a bind that fails a second after it ends.
+	noteScanSvcBound()
+	c.advance(10 * time.Millisecond)
+	noteScanSvcServeEnded("listen_failed", 10*time.Millisecond, c.now)
+	c.advance(time.Second)
+	maybeAlertScanSvcDown("port_in_use", noteScanSvcBindFailure("port_in_use", scanSvcBindBackoffMax, c.now))
+	if !scanSvcListenerState().Flapping() {
+		t.Error("one failed rebind a second into the gap already overrides the flap verdict — the threshold arm is missing")
+	}
+}
+
 // TestChaos114_ControlSlowRedeployNeverPages is the control for the REGRESSION
 // the obvious fix introduces. A draining predecessor that holds the port past
 // the unavailability threshold, followed by a serve that lasts, must be silent
