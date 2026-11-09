@@ -923,7 +923,7 @@ jobs:
       # running — and stayed downloadable if either then failed.
       - name: Stage complete signed catalog bundle on the draft Release (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           files: ${{ steps.pkg.outputs.bundle }}
@@ -1684,7 +1684,7 @@ jobs:
       # Staged as a DRAFT — see the note in catalog-pipeline. publish-release
       # is the only job that makes this release public.
       - name: Stage proxy release asset + signature bundle (draft)
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           files: |
@@ -1693,7 +1693,7 @@ jobs:
 
       - name: Stage culvert-maint release asset + signature bundle (draft, linux)
         if: matrix.goos == 'linux'
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           files: |
@@ -1707,7 +1707,7 @@ jobs:
       # the .sigstore.json is the in-toto attestation binding it to the binary.
       - name: Stage SBOMs + attestation bundles (draft, linux/amd64 leg)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           files: |
@@ -1942,7 +1942,7 @@ jobs:
           test -s "$PROV" || { echo "::error::${PROV} is missing or empty — refusing"; exit 1; }
           echo "attaching ${PROV} ($(stat -c%s "$PROV") bytes)"
       - name: Stage the attestation on the draft
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           files: ${{ needs.provenance.outputs.provenance-name }}
