@@ -18,8 +18,10 @@ import (
 func withFreshWriterLockState(t *testing.T) {
 	t.Helper()
 	origHandle, origNotice := dataDirWriterLockHandle, dataDirWriterLockNotice
+	origPosture, _ := dataDirWriterPosture.Load().(string)
 	dataDirWriterLockHandle, dataDirWriterLockNotice = nil, ""
 	t.Cleanup(func() {
+		dataDirWriterPosture.Store(origPosture)
 		if dataDirWriterLockHandle != nil && dataDirWriterLockHandle != origHandle {
 			_ = dataDirWriterLockHandle.Close()
 		}
