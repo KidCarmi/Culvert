@@ -741,37 +741,38 @@ jobs:
   # verify by exactly the BOM signer before the build starts. All operational
   # logic is inline in this job; no lab harness file is changed for it.
   build-only:
-    name: "Lab · build-only OVA (no boot): candidate-6eead9a1"
+    name: "Lab · build-only OVA (no boot): candidate-a2b722c0"
     if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && github.event_name == 'push' && contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[adopted-scan]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[console-overlay]') && !contains(github.event.head_commit.message, '[fail-fast]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[preserve-image]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
-      VARIANT: candidate-6eead9a1
+      VARIANT: candidate-a2b722c0
       # The ONE commit message that may start this job (an empty commit on the
-      # previous head). FB1-R1 (owner direction of 8 Nov 2026: OPUS owns the
-      # remediation builds; ASTRA accepts candidate and route before any
-      # qualification). Earlier builds: 0981ff3d (bf33a547, OVA f9d68540);
-      # interim fdcb02a5 (7f94441b, run 42491337301: identity 61/63 FAIL on the
-      # tagged-clone console references; artifact retained, never qualified).
-      BUILD_TRIGGER_MESSAGE: "lab: build the FB1-R1 internal candidate OVA from 6eead9a1 [build-only]"
-      # Source: review/1528-m1-engine-pins 6eead9a1, the frozen head: fdcb02a5
-      # (BOM-DELTA-FB1-R1) + f351f33f (advisory ports, gitleaks group G) +
-      # 5423c94b (#1825 port) + 6f8c89e7 (R1 wrapper ancestry) + 6eead9a1 (CI
-      # corrections). Fast/Deep/Console green: 42532738997/42532741140/42532743106.
-      APPLIANCE_SOURCE_SHA: 6eead9a1e9c1d0ba98f399f6d3815149b0c96fd4
-      APPLIANCE_SOURCE_TREE: 8ff6578edb5d10139a24cf8415bb90c07ba63596
-      # Its Deep PR Gate image (run 42532741140) via the copy lab run
-      # 42541934836 preserved (lab-source-image-42532741140, 90 days).
-      SOURCE_IMAGE_RUN_ID: "42532741140"
-      SOURCE_IMAGE_ARTIFACT_ID: "13642175139"
-      SOURCE_IMAGE_ARTIFACT_RUN: "42541934836"
-      SOURCE_IMAGE_TAR_SHA256: f011117d848cb2f1584da0c2dde8d9e694ee3ec6146a5c4a415ab76d303abf4e
+      # previous head). FB1-R2 (owner decision D4 of 9 Nov 2026: refresh the
+      # apt snapshot; OPUS owns the remediation builds; ASTRA accepts candidate
+      # and route before any qualification). Earlier builds: 6eead9a1 (d808dff3,
+      # run 42555980438, OVA f76b6e82, superseded by D4); 0981ff3d (bf33a547,
+      # OVA f9d68540); interim fdcb02a5 (7f94441b, run 42491337301: identity
+      # 61/63 FAIL on the tagged-clone console references; never qualified).
+      BUILD_TRIGGER_MESSAGE: "lab: build the FB1-R2 internal candidate OVA from a2b722c0 [build-only]"
+      # Source: review/1528-m1-engine-pins a2b722c0, the frozen head: FB1-R1
+      # 6eead9a1 + a0579aba (apt snapshot 20261105T000000Z, fb1-snapshot-20261105)
+      # + a2b722c0 (main's 76c2e4cc test-timing fix, test-only).
+      # Fast/Deep/Console green: 42653709058/42653713925/42653718603.
+      APPLIANCE_SOURCE_SHA: a2b722c0359ece9bd31708533ebcbc0192f42b0b
+      APPLIANCE_SOURCE_TREE: 697acdc094155c5403f8c2ab921e7914f85922a0
+      # Its Deep PR Gate image (run 42653713925) via the copy lab run
+      # 42667902719 preserved (lab-source-image-42653713925, 90 days).
+      SOURCE_IMAGE_RUN_ID: "42653713925"
+      SOURCE_IMAGE_ARTIFACT_ID: "13698031461"
+      SOURCE_IMAGE_ARTIFACT_RUN: "42667902719"
+      SOURCE_IMAGE_TAR_SHA256: 13cbb41702bf657eb3b37ffafdced9d27c3fae28b62537df33b59ecd6546fe80
       SOURCE_DATE_EPOCH_PIN: "1793096442"
-      EXPECT_IMAGE_ID: "sha256:41d335aa7fac6ae4019a5ec071c106d84631f7420ee578b067e1d1af030ecdce"
-      EXPECT_APP_VERSION: v1.0.404-candidate.g6eead9a1e9c1
+      EXPECT_IMAGE_ID: "sha256:08541c6701f108c21c2379ca93edb2c9cad568301ac77765aa4e6c3259df1fc3"
+      EXPECT_APP_VERSION: v1.0.404-candidate.ga2b722c0359e
       EXPECT_SIDECAR_ID: "sha256:91eae57526b246da28cb370bd824c45af51e245be0093afcc316bc3fbe941f9d"
       EXPECT_SIDECAR_ARCHIVE_SHA256: 6482ae8c2774b30913b69d3d26778da8005817bdfb4df051f324e74c93c3c8ad
-      EXPECT_APT_SNAPSHOT: 20261029T180000Z
+      EXPECT_APT_SNAPSHOT: 20261105T000000Z
       EXPECT_BASE_STATUS_SHA256: 3fde68c0b3bf65d2708cf0d263f9a28feeb64c75a4d42249ebd2d555b10dcc28
       EXPECT_KERNEL: linux-image-7.0.0-42-generic
       EXPECT_KERNEL_VERSION: 7.0.0-42.42~24.04.1
@@ -780,17 +781,17 @@ jobs:
       EXPECT_BASE_IMAGE_SHA256: 6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2
       EXPECT_BASE_IMAGE_NAME: ubuntu-24.04-server-cloudimg-amd64.img
       BASE_IMAGE_KEYRING: /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg
-      # Expected stamped console hashes of 6eead9a1, derived independently of
+      # Expected stamped console hashes of a2b722c0, derived independently of
       # the build by test/e2e/appliance/lab/console-reference.sh (fresh
       # tag-free --depth=1 checkout, go1.27.3 = go.mod toolchain, the source's
-      # own console-bundle.sh, module v0.0.0-20261108222256-6eead9a1e9c1) and
-      # independently reproduced by ASTRA before this route. Measured here,
+      # own console-bundle.sh, module v0.0.0-20261109162004-a2b722c0359e), to be
+      # independently reproduced by ASTRA before this route runs. Measured here,
       # before any boot, and compared. (The interim fdcb02a5 build's c327b387/
       # 7a2b3403 came from a tagged clone and failed identity; superseded.)
       # (The operator binary's variable avoids the word that made gitleaks
       # read the previous hash as an API key: fingerprint e18277a4…:775.)
-      EXPECT_CONSOLE_SHA256: e652d2c6ed95414ad3ee51fe7204c9ce79fb9472263df14451a72e20cbb6d056
-      EXPECT_OPERATOR_BINARY_SHA256: 7b889050468e70bf4f333b118831392d9b2f390006acda84c8d54585655927c3
+      EXPECT_CONSOLE_SHA256: 999f865b5340ea84d5d3c6ed2d788ad119f4cb09eb052f76e3546b1ff420a79e
+      EXPECT_OPERATOR_BINARY_SHA256: 36fe05957298b8090f5d6640332b9703e8bdde841a4621387b396d469691cbe7
       # BOM-DELTA-FB1-R1: the exact perf/BPF tooling purge and the package count.
       EXPECT_REMOVED_TOOLING: "bpfcc-tools bpftrace hwdata ieee-data libbpfcc libclang-cpp18 libclang1-18 libllvm18 linux-tools-common python3-bpfcc python3-netaddr ubuntu-kernel-accessories"
       EXPECT_PACKAGE_COUNT: "668"
@@ -1178,7 +1179,7 @@ jobs:
               acquired = [r for r in prov if r[8] == "acquired-verified"]
               inherited = [r for r in prov if r[8] == "inherited-base-image"]
               print(f"     observation (not checked; T5 decides): {len(prov)} packages, "
-                    f"acquired-verified={len(acquired)} inherited-base-image={len(inherited)} (prediction 668: 93 / 575, BOM-DELTA-FB1-R1)")
+                    f"acquired-verified={len(acquired)} inherited-base-image={len(inherited)} (prediction 668: 100 / 568, FB1-R2 fb1-snapshot-20261105: 7 base-image packages upgraded from the snapshot)")
 
               # acquired-debs.tsv
               receipts = {}
