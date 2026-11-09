@@ -238,19 +238,6 @@ func startBrokenBackend(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// deadTCPAddr returns an address with nothing listening (a closed listener),
-// so a dial to it is refused.
-func deadTCPAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	ln.Close()
-	return addr
-}
-
 // TestProxyStress_SlowUpstream drives many concurrent requests to a slow
 // upstream with a client timeout shorter than the upstream delay. Every request
 // gives up, and the proxy must not leak resources from the abandoned upstream

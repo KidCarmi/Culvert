@@ -38,6 +38,40 @@ func getRelayBuf() *[]byte {
 	return bp
 }
 
+// relayCopyReadsBuffer reports whether io.Copy/io.CopyBuffer would actually
+// READ the buffer handed to it for this dst/src pair, mirroring the dispatch in
+// io.copyBuffer EXACTLY: a src that is an io.WriterTo, or a dst that is an
+// io.ReaderFrom, takes a delegated path and the buffer argument is never
+// touched.
+//
+// This exists because the relay's buffer is 128 KB and is held for the whole
+// LIFETIME of a tunnel, not for the duration of one copy. On the CONNECT-bypass
+// path both ends are *net.TCPConn — which implements BOTH interfaces, so
+// io.CopyBuffer delegates to (*net.TCPConn).WriteTo and splices in the kernel —
+// and on the WebSocket path each src is a *bufio.Reader, which implements
+// io.WriterTo. Every production relay therefore delegated, and the pooled
+// buffer it checked out was dead weight pinned for as long as the tunnel stayed
+// open: 128 KiB of live heap per direction, ~256 KiB per tunnel, measured
+// (TestBenchGate_RelayBufferResidency). At 10k concurrent tunnels — an ordinary
+// gateway load — that is ~2.4 GiB of resident heap nothing ever reads.
+//
+// Taking the buffer only when the slow path will read it changes no dispatch
+// decision and no emitted byte: the predicate is the condition under which
+// io.copyBuffer reaches its own read loop, so a pair that delegates today still
+// delegates, and a pair that copies through a buffer today still gets a pooled
+// 128 KB one. Deliberately conservative in the costly direction — an unforeseen
+// pair that needs a buffer gets one.
+//
+// The pair is fixed for a relay's lifetime (both ends are captured once), so the
+// predicate is evaluated once per direction rather than per copy call.
+func relayCopyReadsBuffer(dst io.Writer, src io.Reader) bool {
+	if _, ok := src.(io.WriterTo); ok {
+		return false
+	}
+	_, ok := dst.(io.ReaderFrom)
+	return !ok
+}
+
 // isWebSocketUpgrade returns true when the request is an HTTP→WebSocket upgrade.
 func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
@@ -171,8 +205,10 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 // tunnelIdleTimeout bounds how long a raw tunnel relay may sit with zero bytes
 // flowing in EITHER direction before it is torn down (CHAOS-03). Half-open
 // peers that keep ACKing TCP keepalives but never send data previously pinned
-// 2 goroutines + 2 FDs + a pooled buffer indefinitely; a flood of such
-// connections exhausts the process. One hour is deliberately conservative:
+// 2 goroutines + 2 FDs indefinitely; a flood of such connections exhausts the
+// process. (Before relayCopyReadsBuffer they pinned a 128 KB pooled buffer per
+// direction too, which is why the window alone was not a sufficient bound on
+// what an idle tunnel costs.) One hour is deliberately conservative:
 // legitimate idle-but-alive tunnels (SSH, IMAP IDLE, WebSocket ping/pong) all
 // generate application bytes well inside that window, so only truly dead or
 // abusive tunnels are reaped. Var (not const) so tests can shorten it;
@@ -194,9 +230,11 @@ func newTunnelActivityStamp() *atomic.Int64 {
 	return s
 }
 
-// idleCopyCounted copies src→dst through a pooled relay buffer, arming a read
-// deadline on srcConn (the conn src ultimately reads — src itself may be a
-// bufio wrapper over it) so the copy wakes at least twice per idle window. A
+// idleCopyCounted copies src→dst — delegating to the kernel splice path, or
+// through a pooled relay buffer when the pair needs one (relayCopyReadsBuffer)
+// — arming a read deadline on srcConn (the conn src ultimately reads — src
+// itself may be a bufio wrapper over it) so the copy wakes at least twice per
+// idle window. A
 // deadline pop while the tunnel saw bytes in either direction (shared stamp
 // fresh) re-arms and resumes — safe because only read deadlines are used and
 // read-deadline timeouts are resumable on both *net.TCPConn and *tls.Conn
@@ -207,9 +245,10 @@ func newTunnelActivityStamp() *atomic.Int64 {
 // that only a close can unblock.
 //
 // Three deliberate mechanics:
-//   - Deadlines are armed AROUND io.CopyBuffer, not via a reader wrapper, so
+//   - Deadlines are armed AROUND the copy, not via a reader wrapper, so
 //     the ReaderFrom/WriterTo kernel-splice fast path on TCP↔TCP relays is
-//     preserved on the CONNECT-bypass hot path.
+//     preserved on the CONNECT-bypass hot path. Because that path never reads
+//     the buffer argument, no buffer is checked out for it at all.
 //   - The staleness check measures on the MONOTONIC clock (monoSince over a
 //     monoNanos stamp), so a wall-clock step cannot move the deadline. The
 //     wall-clock form this replaced — time.Since(time.Unix(0, stamp)) — read
@@ -228,12 +267,30 @@ func newTunnelActivityStamp() *atomic.Int64 {
 func idleCopyCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atomic.Int64) int64 {
 	timeout := tunnelIdleTimeout
 	armInterval := timeout / 2
-	bp := getRelayBuf()
-	defer relayBufPool.Put(bp)
+	// A pooled buffer is checked out ONLY for a pair whose copy will read it
+	// (relayCopyReadsBuffer). Every production relay delegates to a kernel
+	// splice or to bufio's own buffer instead, so this keeps 128 KB per
+	// direction off the heap for the whole life of the tunnel rather than
+	// pinning a buffer nothing reads.
+	var bp *[]byte
+	if relayCopyReadsBuffer(dst, src) {
+		bp = getRelayBuf()
+		defer relayBufPool.Put(bp)
+	}
 	var total int64
 	for {
 		srcConn.SetReadDeadline(time.Now().Add(armInterval)) //nolint:errcheck // a set failure on a closing conn surfaces as the next read error
-		n, err := io.CopyBuffer(dst, src, *bp)
+		// io.Copy IS io.CopyBuffer with a nil buffer, and takes the identical
+		// WriterTo/ReaderFrom fast path; the nil-buffer allocation inside it is
+		// unreachable here because bp is nil exactly when one of those two
+		// delegations applies.
+		var n int64
+		var err error
+		if bp != nil {
+			n, err = io.CopyBuffer(dst, src, *bp)
+		} else {
+			n, err = io.Copy(dst, src)
+		}
 		total += n
 		if n > 0 {
 			shared.Store(monoNanos())
@@ -254,9 +311,10 @@ func idleCopyCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atom
 	}
 }
 
-// relayCounted copies src→dst through a pooled relay buffer, adds the bytes
-// copied to *count, closes dst's write half so the peer sees EOF (B2 — without
-// interfering with the other direction's in-flight writes), and signals done.
+// relayCounted copies src→dst (see idleCopyCounted for the buffer decision),
+// adds the bytes copied to *count, closes dst's write half so the peer sees
+// EOF (B2 — without interfering with the other direction's in-flight writes),
+// and signals done.
 // srcConn is the conn src reads (idle-deadline anchor — see idleCopyCounted).
 // Shared by the WebSocket and CONNECT-bypass raw relays.
 func relayCounted(dst net.Conn, src io.Reader, srcConn net.Conn, shared *atomic.Int64, count *int64, done chan<- struct{}) {
