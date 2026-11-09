@@ -2804,9 +2804,18 @@ func classifyExemptRisks(exempt []*PolicyRule) exemptRiskBuckets {
 // apiDiagnostics serves the operator contract as JSON.
 //
 // Auth: viewer role is sufficient — the report intentionally omits secrets,
-// raw URLs, file paths, fingerprints, and IdP details. Any field added in
-// the future that could leak sensitive data must be redacted to admin-only
-// at the API layer before being returned here.
+// raw URLs, file paths and fingerprints. Any field added in the future that
+// could leak sensitive data must be redacted to admin-only at the API layer
+// before being returned here.
+//
+// "and IdP details" used to be in that list and no longer is. The IdP
+// persistence row (idp_persistence_health.go) reports whether the registry is
+// persisted and HOW MANY profiles it holds — viewer-level posture, already
+// readable at GET /api/idp (MinRole: RoleViewer), so there is no disclosure
+// delta — but it is an IdP detail, and leaving the blanket claim here would
+// make the next reviewer trust a guarantee the code stopped making. No
+// fingerprint is emitted: dpLastGoodConfigSnapshotStatus.IdPProfilesFingerprint
+// is unexported, carries no JSON tag and is never serialized or logged.
 func apiDiagnostics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

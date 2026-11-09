@@ -58,6 +58,43 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **An IdP-asserted identity could forge structured fields in — or invalidate —
+  every JSON policy-decision record (CWE-117).** In JSON log mode the encoder
+  promotes a decision line's trailing `{key=value …}` block to top-level JSON
+  fields: it finds the block at the LAST `" {"`, splits it on SPACE, and uses the
+  text before each token's first `=` as a key, which it appended UNESCAPED.
+  `emitPolicyDecision` renders `identity` into that block unquoted, guarded only
+  by `sanitizeLog`, which scrubs control bytes but not SPACE or `{` — the two
+  bytes that block's grammar is built from. `identity` is an OIDC/SAML
+  `sub`/`email` claim, so a federated user who can influence it chose those
+  bytes. Measured: `bob@corp.example severity=info verdict=clean` added
+  `"severity"` and `"verdict"` to the record as the gateway's own fields; a value
+  containing `action=allow` produced two `action` keys, and a first-wins SIEM
+  extractor reads the forged one on a line whose verdict was `block`; a value
+  containing `y"z=1` made the record UNPARSEABLE, so a strict shipper drops it
+  and that request's decision never reaches the SIEM; and a value containing
+  `" {"` re-anchored the block, taking `req_id` and `identity` out of the
+  structured record. The tree already stated this hazard for `reqID` and closed
+  it with an entry-point bound (SEC-REQID-1, "a SPACE forged extra key=value
+  tokens inside this very block"); the space-freedom argument had been made for
+  the bare set only, and the sibling field in the same block was left open.
+  Fixed on both sides: the encoder now escapes the promoted KEY through
+  `appendJSONString`, so a well-formed record is the encoder's own guarantee
+  rather than a property of every call site — byte-for-byte identical for every
+  key the tree emits, diverging only where the old append produced invalid JSON;
+  and `sanitizeLogFieldToken`/`foldLogFieldToken` fold SPACE and `{` to `_` for
+  the values that reach a field block bare, applied to `identity` and the
+  field-block `rule` in `emitPolicyDecision` plus the `BLOCKED`,
+  `POLICY_DEFAULT_DENY` and `POLICY_UNKNOWN_ACTION` emitters. The fold is a
+  no-op for any value without those bytes, so every line a parser already
+  consumes is unchanged. Present since the decision-line emitter landed; NOT
+  introduced by the logger performance sweep, which preserved it faithfully.
+  No policy decision changes — only the record of it. Gated by
+  `logger_json_field_injection_test.go`, whose end-to-end case drives five
+  hostile identities through the real emitter and the real encoder, and which
+  fails against the unfixed code. Reviewed in
+  `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-08.md`.
+
 - **Every clustered Data Plane enforced a per-source-IP connection cap nobody
   configured, and the one gate that refused the traffic reported nothing
   (CHAOS-112).** `conn_limit_enabled` is the one admission surface
