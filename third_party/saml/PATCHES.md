@@ -262,6 +262,20 @@ They were left unpatched to keep the fork minimal:
   pinned toolchain, so it is not a baseline failure, and the point of this
   section is to let a reader tell an introduced failure from a pre-existing one.
 
+## Module requirements aligned with the root module
+
+The fork's own `go.mod` originally kept upstream v0.5.1's requirements,
+including `github.com/russellhaering/goxmldsig v1.4.0` and
+`golang.org/x/crypto v0.33.0`. Those never reached the build (minimal version
+selection takes the root module's higher versions: goxmldsig v1.6.0, x/crypto
+v0.58.0), but source scanners such as Trivy read every `go.mod` and reported 13
+HIGH advisories against them. The requirements are raised to exactly the
+versions the root module already resolves (`beevik/etree` v1.8.1, `go-cmp`
+v0.7.0, `goxmldsig` v1.6.0, `x/crypto` v0.58.0, `clockwork` v0.5.0); `go mod
+tidy` raised the `go` line to 1.26.0 because x/crypto v0.58.0 requires it. The
+root `go.mod`/`go.sum` and therefore the built binary are unchanged. Keep these
+in step with the root module when either side bumps.
+
 ## Removal plan
 
 Upstream has not shipped a fix. When a `github.com/crewjam/saml` release fixes
