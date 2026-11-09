@@ -24,8 +24,6 @@ import (
 //          sanitizer reads, and every case-only collision, must fail the
 //          backup CLOSED.
 
-const r13Canary = "secret-R13-canary"
-
 func TestUpstreamR13_LoaderReadsCaseVariantKeys(t *testing.T) {
 	// Evidence, not a defect gate: the shapes below are what the loader
 	// accepts, which is why the sanitizer must refuse them.

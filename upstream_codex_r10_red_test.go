@@ -27,8 +27,6 @@ import (
 //          To4 test. IPv6 URL syntax (a colon) decides, To4() never does,
 //          and exactly one bracket pair is preserved.
 
-const r10Canary = "secret-R10-canary"
-
 func TestUpstreamR10_NormalizeBracketsIPv4MappedIPv6BySyntax(t *testing.T) {
 	for typed, want := range map[string]string{
 		"::ffff:192.0.2.1":   "[::ffff:192.0.2.1]",

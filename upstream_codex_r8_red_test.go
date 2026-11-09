@@ -24,8 +24,6 @@ import (
 //         Lookup profile (no DNS-length verification) and was persisted and
 //         published as an eligible parent that standard DNS cannot resolve.
 
-const r8Canary = "hunter2-R8-canary"
-
 func TestUpstreamR8_NormalizeEnforcesDNSLengths(t *testing.T) {
 	long := strings.Repeat("a", 64) + ".example"
 	if _, err := upstream.Normalize(upstream.Spec{Scheme: "http", Host: long, Port: 3128}); err == nil {

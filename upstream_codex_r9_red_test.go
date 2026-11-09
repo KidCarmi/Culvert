@@ -22,8 +22,6 @@ import (
 //         a working parent from the effective pool. Exactly one bracket
 //         pair is required.
 
-const r9Canary = "secret-R9-canary"
-
 func TestUpstreamR9_NormalizeRequiresExactlyOneBracketPair(t *testing.T) {
 	for _, h := range []string{"[[::1]]", "[[2001:db8::1]", "[2001:db8::1]]", "[]", "[[]]"} {
 		if _, err := upstream.Normalize(upstream.Spec{Scheme: "http", Host: h, Port: 3128}); err == nil {
