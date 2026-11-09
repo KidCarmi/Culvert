@@ -1014,9 +1014,19 @@ const policyLineCallDepth = 2
 // hazard the reqID entry below describes, and reqID is the field that got an
 // entry-point bound for it; identity, an IdP-asserted claim, never had one. So
 // those two take sanitizeLogFieldToken / foldLogFieldToken, which add the fold
-// of exactly those two grammar bytes. host, target and cond are %q-quoted in
-// the MESSAGE part, which the encoder escapes whole, and the real block always
-// follows them, so neither forging nor re-anchoring reaches them.
+// of exactly those two grammar bytes.
+//
+// host and target are %q-quoted in the MESSAGE part and cond is appended BARE
+// there, inside the `[…]` group — an earlier version of this comment said cond
+// was quoted too, and it is not (see the emitter below). The quoting is not
+// what makes any of the three safe, which is why the correction changes no
+// code: the encoder locates the field block at the LAST " {" on the line and
+// the real block is always the last thing emitted, so a " {" injected anywhere
+// in the MESSAGE part loses to it, and a SPACE there cannot create a token
+// because the split only runs on what follows that final anchor. Forging and
+// re-anchoring therefore reach none of the three regardless of quoting.
+// Pinned against hostile input for all of them, not just identity, by
+// TestPolicyDecisionLine_MessagePartCannotForgeJSONFields.
 //
 // verb, action, clientIP, hostSep and reqID reach the buffer BARE, and this is
 // the same set the Printf form passed bare through %s. Each has a reason that

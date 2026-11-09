@@ -2814,8 +2814,17 @@ func classifyExemptRisks(exempt []*PolicyRule) exemptRiskBuckets {
 // readable at GET /api/idp (MinRole: RoleViewer), so there is no disclosure
 // delta — but it is an IdP detail, and leaving the blanket claim here would
 // make the next reviewer trust a guarantee the code stopped making. No
-// fingerprint is emitted: dpLastGoodConfigSnapshotStatus.IdPProfilesFingerprint
-// is unexported, carries no JSON tag and is never serialized or logged.
+// fingerprint is emitted, and it is worth naming the invariant that actually
+// holds rather than the one this comment used to claim: the field
+// dpLastGoodConfigSnapshotStatus.IdPProfilesFingerprint is EXPORTED (an
+// exported field on an unexported struct type), so being unexported is not
+// what protects it. What protects it is that no value of that struct is ever
+// marshaled — every reader takes individual fields
+// (idp_persistence_health.go compares the fingerprint, diagnostics.go reads
+// SaveError/Loaded/SavedVersion) and the struct carries no JSON tags at all.
+// Serializing that struct whole would therefore emit the fingerprint as a
+// 32-element array under its Go field name, and no gate would catch it.
+// Keep reading it field by field.
 func apiDiagnostics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
