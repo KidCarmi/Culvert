@@ -7,7 +7,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Performance
+
+- **Every open tunnel held 128 KiB of relay buffer per direction that the relay
+  never read — ~256 KiB per tunnel of resident heap, or ~2.4 GiB at 10,000
+  concurrent tunnels.** `idleCopyCounted` took a pooled 128 KB buffer before its
+  copy loop and returned it on function exit, so the buffer was held for the
+  LIFETIME of the tunnel rather than for one copy. On every production relay
+  shape `io.CopyBuffer` never touched it: `io.copyBuffer` delegates to
+  `src.WriteTo(dst)` when `src` is an `io.WriterTo` and to `dst.ReadFrom(src)`
+  when `dst` is an `io.ReaderFrom`, and in both cases the buffer argument is
+  unused. Both ends of a CONNECT-bypass relay are `*net.TCPConn`, which
+  implements both interfaces (the kernel splice path the function's own comment
+  documents as deliberate), and each WebSocket relay's source is a
+  `*bufio.Reader`, which implements `io.WriterTo`. The buffer is now checked out
+  only for a pair whose copy will read it, using `io.copyBuffer`'s own dispatch
+  condition, so no dispatch decision and no relayed byte changes and a pair that
+  genuinely needs a buffer still gets a pooled 128 KB one. Measured over 48 idle
+  splice-path relay directions: live heap per direction 131,177 B to 70 B
+  (-99.95%), bytes allocated establishing the population 6.43 MB to 135 KB
+  (-98%), relay throughput unchanged at 2,460 MB/s against 2,483 MB/s before
+  (one spread, 2,337-2,851 MB/s across both arms), and the two interface
+  assertions cost 2.97 ns against the 11.45 ns `sync.Pool` round trip they
+  replace (0.81 ns against 2.81 ns at 4-way parallel). `allocs/op` could not see
+  any of this — a warm `sync.Pool` reports ~0 either way — so the new gates
+  measure residency directly, and a differential oracle asserts on every
+  production pair shape that the predicate still agrees with what
+  `io.CopyBuffer` actually does.
+
 ### Changed
+
+- **A data directory shared by two processes is now a Diagnostics row, not only a
+  startup log line.** Starting with `CULVERT_ALLOW_MULTIPLE_WRITERS=1` while
+  another process holds the data directory (or a volume that cannot report its
+  lock) was announced once in the startup log and then looked healthy. The new
+  `datadir_multiple_writers_override` and `datadir_writer_lock_unverified` rows
+  state it with the action to clear it. Report-only; the boot guard is unchanged.
 
 - **A stale legacy PAC file is now a Diagnostics row, not only a startup log
   line.** When a legacy `pac_config.json` is newer than the active store (edits
@@ -22,6 +57,43 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
+
+- **An IdP-asserted identity could forge structured fields in — or invalidate —
+  every JSON policy-decision record (CWE-117).** In JSON log mode the encoder
+  promotes a decision line's trailing `{key=value …}` block to top-level JSON
+  fields: it finds the block at the LAST `" {"`, splits it on SPACE, and uses the
+  text before each token's first `=` as a key, which it appended UNESCAPED.
+  `emitPolicyDecision` renders `identity` into that block unquoted, guarded only
+  by `sanitizeLog`, which scrubs control bytes but not SPACE or `{` — the two
+  bytes that block's grammar is built from. `identity` is an OIDC/SAML
+  `sub`/`email` claim, so a federated user who can influence it chose those
+  bytes. Measured: `bob@corp.example severity=info verdict=clean` added
+  `"severity"` and `"verdict"` to the record as the gateway's own fields; a value
+  containing `action=allow` produced two `action` keys, and a first-wins SIEM
+  extractor reads the forged one on a line whose verdict was `block`; a value
+  containing `y"z=1` made the record UNPARSEABLE, so a strict shipper drops it
+  and that request's decision never reaches the SIEM; and a value containing
+  `" {"` re-anchored the block, taking `req_id` and `identity` out of the
+  structured record. The tree already stated this hazard for `reqID` and closed
+  it with an entry-point bound (SEC-REQID-1, "a SPACE forged extra key=value
+  tokens inside this very block"); the space-freedom argument had been made for
+  the bare set only, and the sibling field in the same block was left open.
+  Fixed on both sides: the encoder now escapes the promoted KEY through
+  `appendJSONString`, so a well-formed record is the encoder's own guarantee
+  rather than a property of every call site — byte-for-byte identical for every
+  key the tree emits, diverging only where the old append produced invalid JSON;
+  and `sanitizeLogFieldToken`/`foldLogFieldToken` fold SPACE and `{` to `_` for
+  the values that reach a field block bare, applied to `identity` and the
+  field-block `rule` in `emitPolicyDecision` plus the `BLOCKED`,
+  `POLICY_DEFAULT_DENY` and `POLICY_UNKNOWN_ACTION` emitters. The fold is a
+  no-op for any value without those bytes, so every line a parser already
+  consumes is unchanged. Present since the decision-line emitter landed; NOT
+  introduced by the logger performance sweep, which preserved it faithfully.
+  No policy decision changes — only the record of it. Gated by
+  `logger_json_field_injection_test.go`, whose end-to-end case drives five
+  hostile identities through the real emitter and the real encoder, and which
+  fails against the unfixed code. Reviewed in
+  `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-08.md`.
 
 - **Every clustered Data Plane enforced a per-source-IP connection cap nobody
   configured, and the one gate that refused the traffic reported nothing

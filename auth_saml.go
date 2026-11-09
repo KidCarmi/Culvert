@@ -2,12 +2,27 @@ package main
 
 // SAMLProvider implements SAML 2.0 SP-initiated SSO using github.com/crewjam/saml.
 //
-// Security properties enforced by crewjam/saml:
+// Security properties enforced by the vendored crewjam/saml fork
+// (third_party/saml, bound by the go.mod replace directive; see
+// third_party/saml/PATCHES.md for the GO-2026-6909 patches):
 //   - XML signature on SAMLResponse validated against IdP certificate.
-//   - NotBefore / NotAfter / SessionNotOnOrAfter conditions enforced.
+//   - Conditions NotBefore / NotOnOrAfter and SubjectConfirmationData
+//     NotOnOrAfter enforced, each with MaxClockSkew tolerance, plus
+//     IssueInstant + MaxIssueDelay.
 //   - Audience restriction validated against the SP EntityID.
+//   - Recipient validated against the SP ACS URL.
 //   - In-response-to (request ID) prevents unsolicited responses.
 //   - Replay detection via one-time use of the assertion ID.
+//
+// NOT enforced, and listed here because this comment claimed it was:
+// SessionNotOnOrAfter. It is an <AuthnStatement> attribute, and neither
+// validateAssertion nor anything in this file reads Assertion.AuthnStatements —
+// so an IdP's requested session cap does NOT bound the Culvert session, whose
+// lifetime comes from the local session TTL alone. Do not start reading
+// AuthnStatements to change that without first namespace-qualifying
+// Assertion.AuthnStatements: it is the one validation-adjacent field the
+// GO-2026-6909 patch left on a bare tag (safe only BECAUSE it is unread), so a
+// foreign-namespace <x:AuthnStatement> is appended to that slice today.
 
 import (
 	"context"
