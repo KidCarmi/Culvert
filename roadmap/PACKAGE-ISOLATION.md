@@ -333,12 +333,12 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 |---|---|---|---|---|---|---|---|---|
 | IM-000 | Discovery: policy mapping, #1526 reconciliation, this program section | shipped (merged 2026-10-30, `5eef0c25`) | nightly shift | `main` | #1760 | — | this document | — |
 | IM-001 | `inspect_h2_alpn.go` → `internal/alpnpeek` (pilot 1 of ≤3) | **shipped** (merged 2026-10-31, `86c095a49`) | nightly shift | `main` | #1766 | IM-000 shipped | **packet** below; ADR-0042; moved `alpn.go`, `doc.go`, `boundary_test.go`, `alpn_test.go`; root inventory 8072 → 8070; assessment below | owner: accept continuation to IM-002 (map) or stop the pilot |
-| IM-002 | `saas_feed_floor.go` → `internal/feedfloor` | proposed | — | — | — | IM-001 assessment | lead (906 ln, 0 root deps, `fileutil`+`urlcatfeed`, 10 inbound; `var` block is error sentinels + CRC table) | map: callers, fsync/path ownership, F3 §B cross-check, the 9 referencing test files |
+| IM-002 | `saas_feed_floor.go` → `internal/feedfloor` | **mapped 2026-11-09: not ready** (see "IM-002 / IM-007 mapping") | — | — | — | owner acceptance of pilot continuation; a decision on the shared helper owner | **map** (906 ln, 1077-ln test file, 6 root production consumers, more than 8 exported names needed) | owner: accept/stop pilot continuation; if accepted, decide where `validGenerationID`/`validSHA256Hex`/`canonicalUTCSecond` live before any move |
 | IM-003 | `saas_feed_genstore.go` → same package | proposed | — | — | — | IM-002 | lead (539 ln; 2 deps, both in IM-002) | map after IM-002 |
 | IM-004 | `upstream_backup_strip.go` → `internal/upstream/backupstrip` | proposed | — | — | — | IM-001 assessment | lead (517 ln, 0 root deps, 2 inbound; 12 test files by grep, unclassified) | map: classify tests, define byte-identical output fixture |
 | IM-005 | `policy.go` leaf matchers (follow-up (a)) | **blocked** | — | — | — | IM-006 + accepted boundary | mapping above | none until IM-006 ships |
 | IM-006 | Policy evaluation lookup owners (ADR-0040 step 2) | blocked on #1526 disposition | owner decides | — | #1526 (design) | owner | ADR-0040, `policy-core-feasibility.md`, TSV | owner: merge/rebase/close #1526; then one ownership PR |
-| IM-007 | `realclientip.go` → `internal/realclientip` | proposed | — | — | — | — | lead (154 ln, 0 root deps, 15 inbound; `var` block unaudited) | map: is the `var` block trusted-proxy config (then instance owner first, ADR-0038 pattern) |
+| IM-007 | `realclientip.go` → `internal/realclientip` | **mapped 2026-11-09: instance owner first** | — | — | — | ADR-0038 pattern | **map**: package globals `trustedProxyNets`+RWMutex with `SetTrustedProxyCIDRs`/`ListTrustedProxyCIDRs`; 32 non-test references outside the file | decide: a `Resolver` instance constructed by main (separate ownership PR), then move; the XFF trust gate is the security argument and must not change |
 | IM-008 | `traffic_redaction.go` → `internal/redaction` | proposed | — | — | — | posture injection | lead (341 ln; reads `decRedactHosts`; atomic key state) | map: posture as construction input |
 | IM-009 | `mcp_evidence_readmodel.go`, `mcp_shadow_metrics.go` → `internal/mcp/…` | proposed | — | — | — | overlap check | lead (0 root deps; heavy open MCP PR traffic) | map only after an overlap check against open MCP PRs |
 | IM-010 | `proxy_path_bounds.go`, `proxy_host_bounds.go`, `request_tracing_bounds.go` | proposed | — | — | — | benchgate measurement | lead (hot path; cross-linked) | measure before mapping |
@@ -450,3 +450,41 @@ Baseline `174f157f`; source, both callers and the test file read in full.
   program mechanism (packet, review, inventory check, ADR, merge) on code
   whose behavior is fully pinned by its own tests and fuzz target. Its size is
   not the argument; its lack of state, callers and hidden dependencies is.
+
+### IM-002 / IM-007 mapping (MAP, 2026-11-09, main `09235d1`)
+
+Evidence only; no code moved. Nothing in the repository records the owner's
+acceptance of pilot continuation after the IM-001 assessment, so no further
+code PR was started.
+
+- **IM-002 (`saas_feed_floor.go`).** Source read. It is node-local durable
+  floor/commit-intent state with its own codec, CRC-32C, two-record write
+  quorum, selection, equivocation detection and recovery classification, and
+  already takes its filesystem through the narrow `floorFS` seam and
+  `fileutil.AtomicWrite`. That is a good engine. The obstacles are boundary,
+  not code quality: (1) six root production files consume it
+  (`saas_feed_activate`, `_activation`, `_checkpoint`, `_gc`, `_recover`,
+  `_runtime`) and seven root test files reference it, so aliases would carry a
+  wide surface (`floorRecord`, `floorStore`, `floorRecovery`, `floorHealth`,
+  `floorWatermark`, `floorFS`, `floorReadStatus`, `selectFloor`, ...), above the
+  8-identifier guideline; (2) its validators `validGenerationID`,
+  `validSHA256Hex` and `canonicalUTCSecond` are shared with three to five other
+  saas-feed root files, so they need a decided owner first (moving them into
+  `feedfloor` would make it a helper hub; duplicating them would fork a
+  validation rule); (3) `saas_feed_genstore.go` (IM-003) shares `fsyncDir` and
+  the generation-identity rules, so IM-002 alone splits one subsystem. The file
+  header states the subsystem is UNWIRED until F3b-3; verify current wiring in
+  `saas_feed_runtime.go` before design. Verdict: map IM-002 and IM-003 together
+  as one boundary only after the helper-owner decision; do not extract the
+  floor alone.
+- **IM-007 (`realclientip.go`).** Not a pure move. Trusted-proxy CIDRs are a
+  process global (`trustedProxyNets` under `trustedProxyNetsMu`) mutated by
+  `SetTrustedProxyCIDRs`; 32 non-test references sit outside the file. Per the
+  ADR-0038 pattern, an instance owner constructed in main must land first, then
+  the move. The trust gate (XFF honoured only from a configured trusted peer)
+  is the security contract and must stay byte-for-byte.
+- **Recommended next.** IM-004 (`upstream_backup_strip.go`, 517 ln, 0 root deps,
+  2 inbound) is the remaining stateless candidate. First step: read
+  `upstream_backup_strip.go` and classify its 12 referencing test files into
+  engine-only versus integration, and define the byte-identical output fixture.
+  IM-004 still needs the owner's pilot-continuation acceptance (2 of 3 code PRs).
