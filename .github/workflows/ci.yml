@@ -215,7 +215,7 @@ jobs:
           echo "image=ghcr.io/$LC" >> $GITHUB_OUTPUT
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -226,7 +226,7 @@ jobs:
 
       # cosign verifies candidate records in the plan step and signs below.
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           # Pin the cosign BINARY (installer default drifts across majors; the
           # 2.x→3.x jump dropped the detached cert/signature output flags on
@@ -474,7 +474,7 @@ jobs:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -558,7 +558,7 @@ jobs:
           echo "qualifying ${IMAGE}@${DIGEST} as ${VERSION} (compiler pin ${TOOLCHAIN})"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -702,7 +702,7 @@ jobs:
       # refuses a main candidate that lacks it (candidate-plan-tag.sh).
       - name: Install cosign
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: 'v3.0.6'
       - name: Record the qualification (signed)
@@ -823,7 +823,7 @@ jobs:
       # (@refs/tags/v*), so these steps never run on the main-push gate.
       - name: Install cosign
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: 'v3.0.6'
       - name: Sign catalog index keyless (cosign sign-blob → index.json.sigstore)
@@ -852,7 +852,7 @@ jobs:
       # release, and the verify below proves this run's signature landed.
       - name: Log in to GitHub Container Registry (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -923,7 +923,7 @@ jobs:
       # running — and stayed downloadable if either then failed.
       - name: Stage complete signed catalog bundle on the draft Release (tag path)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           files: ${{ steps.pkg.outputs.bundle }}
@@ -1032,7 +1032,7 @@ jobs:
           echo "channel tip: $TIP"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1072,7 +1072,7 @@ jobs:
 
       - name: Install cosign
         if: steps.promote.outputs.signed_tags != ''
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: 'v3.0.6'
 
@@ -1213,7 +1213,7 @@ jobs:
           echo "channel tip: $TIP"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1253,7 +1253,7 @@ jobs:
 
       - name: Install cosign
         if: steps.promote.outputs.signed_tags != ''
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: 'v3.0.6'
 
@@ -1374,7 +1374,7 @@ jobs:
           export CULVERT_RELEASE_SPEC_VERSION="${CULVERT_RELEASE_SPEC_VERSION#v}"
           go test -run '^TestReleaseResignGate$' -count=1 -v .
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: 'v3.0.6'
       - name: Sign re-signed index keyless (cosign sign-blob → index.json.sigstore)
@@ -1604,7 +1604,7 @@ jobs:
 
       # Install cosign for keyless signing via Sigstore OIDC (no secrets needed).
       - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: 'v3.0.6'
 
@@ -1684,7 +1684,7 @@ jobs:
       # Staged as a DRAFT — see the note in catalog-pipeline. publish-release
       # is the only job that makes this release public.
       - name: Stage proxy release asset + signature bundle (draft)
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           files: |
@@ -1693,7 +1693,7 @@ jobs:
 
       - name: Stage culvert-maint release asset + signature bundle (draft, linux)
         if: matrix.goos == 'linux'
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           files: |
@@ -1707,7 +1707,7 @@ jobs:
       # the .sigstore.json is the in-toto attestation binding it to the binary.
       - name: Stage SBOMs + attestation bundles (draft, linux/amd64 leg)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           files: |
@@ -1942,7 +1942,7 @@ jobs:
           test -s "$PROV" || { echo "::error::${PROV} is missing or empty — refusing"; exit 1; }
           echo "attaching ${PROV} ($(stat -c%s "$PROV") bytes)"
       - name: Stage the attestation on the draft
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: true
           files: ${{ needs.provenance.outputs.provenance-name }}

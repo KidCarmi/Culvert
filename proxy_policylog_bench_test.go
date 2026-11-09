@@ -115,29 +115,45 @@ func plLegacyAllowLine(rule string, priority int, clientIP, method, host, matche
 
 // plPrintfAllowLine freezes the shape this change replaces: one logger.Printf
 // with nine arguments. It is the baseline for the append-vs-Printf comparison.
+//
+// The four frozen templates below apply sanitizeLogFieldToken to identity and
+// foldLogFieldToken to the field-block rule, because the production emitters
+// now do. This oracle's job is to prove the APPEND rendering and the PRINTF
+// rendering agree byte for byte; it is not a frozen copy of the pre-fold
+// BYTES, and it must move with a deliberate change to the barrier or it stops
+// testing the thing it exists to test. The fold is a no-op for any value with
+// no SPACE and no '{', so every benign line a parser already consumes is
+// unchanged; the values it does change are exactly the ones that could forge a
+// structured field (see foldLogFieldToken in proxy.go). The fold's own
+// behaviour is pinned separately, against hostile input, by
+// TestLogFieldToken_* and TestPolicyDecisionLine_IdentityCannotForgeJSONFields.
 func plPrintfAllowLine(rule string, priority int, clientIP, method, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
 	logger.Printf(plPrintfAllowFmt,
 		safeRule, priority, clientIP, method, sanitizeLog(host),
-		sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+		sanitizeLog(matchedConditions), reqID, sanitizeLogFieldToken(identity),
+		foldLogFieldToken(safeRule))
 }
 
 func plPrintfDropLine(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
 	logger.Printf(plPrintfDropFmt, safeRule, priority, clientIP, sanitizeLog(host),
-		sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+		sanitizeLog(matchedConditions), reqID, sanitizeLogFieldToken(identity),
+		foldLogFieldToken(safeRule))
 }
 
 func plPrintfBlockLine(rule string, priority int, clientIP, host, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
 	logger.Printf(plPrintfBlockFmt, safeRule, priority, clientIP, sanitizeLog(host),
-		sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+		sanitizeLog(matchedConditions), reqID, sanitizeLogFieldToken(identity),
+		foldLogFieldToken(safeRule))
 }
 
 func plPrintfRedirectLine(rule string, priority int, clientIP, host, redirectURL, matchedConditions, reqID, identity string) {
 	safeRule := sanitizeLog(rule)
 	logger.Printf(plPrintfRedirectFmt, safeRule, priority, clientIP, sanitizeLog(host),
-		sanitizeLog(redirectURL), sanitizeLog(matchedConditions), reqID, sanitizeLog(identity), safeRule)
+		sanitizeLog(redirectURL), sanitizeLog(matchedConditions), reqID,
+		sanitizeLogFieldToken(identity), foldLogFieldToken(safeRule))
 }
 
 // plArgs is the representative argument set, held in variables rather than used
