@@ -3568,12 +3568,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # The ONE replacement INTERNAL-ONLY OVA (candidate-0648adeb, run
-      # 40555901182). The archive is read out of the FINISHED VMDK and must equal
-      # the frozen culvert.4 bytes: archive 6482ae8c, image id 91eae575 — also
-      # asserted against the guest's own manifest.env.
-      OVA_ARTIFACT_ID: "12756793569"   # appliance-lab-ova-candidate-0648adeb, run 40555901182
-      OVA_SHA256: 325c142a7df441eb97dd5a5e688e0fb89979b8ee29680175d627fcf8556df96f
+      # The FB1-R1 INTERNAL-ONLY candidate OVA (candidate-6eead9a1, build-only
+      # run 42555980438). The archive is read out of the FINISHED VMDK and must
+      # equal the frozen culvert.4 bytes: archive 6482ae8c, image id 91eae575 —
+      # also asserted against the guest's own manifest.env.
+      OVA_ARTIFACT_ID: "13647493685"   # appliance-lab-ova-candidate-6eead9a1, run 42555980438
+      OVA_SHA256: f76b6e82f63e8d6c7e196b34ea8e871f274012bbbcb60204259ad4fe1868fad4
       SIDECAR_ARCHIVE_SHA256: 6482ae8c2774b30913b69d3d26778da8005817bdfb4df051f324e74c93c3c8ad
       SIDECAR_INDEX: sha256:91eae57526b246da28cb370bd824c45af51e245be0093afcc316bc3fbe941f9d
     steps:
@@ -3664,7 +3664,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: appliance-lab-sidecar-scan-0648adeb
+          name: appliance-lab-sidecar-scan-6eead9a1
           path: ${{ env.W }}/evidence/
           if-no-files-found: warn
 
