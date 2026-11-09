@@ -37,6 +37,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A plain-HTTP admin UI is now a Diagnostics row.** When the self-signed
+  certificate could not be generated at startup the GUI fell back to cleartext
+  HTTP, announced only on the login banner and the Network page. The new
+  `ui_tls_fallback_http` row states it, with the action to clear it. Report-only;
+  TLS serving is unchanged and the raw error stays off the row.
+
 - **A data directory shared by two processes is now a Diagnostics row, not only a
   startup log line.** Starting with `CULVERT_ALLOW_MULTIPLE_WRITERS=1` while
   another process holds the data directory (or a volume that cannot report its
