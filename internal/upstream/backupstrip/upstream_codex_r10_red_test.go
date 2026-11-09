@@ -26,6 +26,7 @@ import (
 
 const r10Canary = "secret-R10-canary"
 
+// TestUpstreamR10_BackupStripRefusesTrailingDataAfterSettingsObject pins that data after the settings object is refused, with a sound-body control.
 func TestUpstreamR10_BackupStripRefusesTrailingDataAfterSettingsObject(t *testing.T) {
 	leading := `{"upstream_proxies_saved": true, "upstream_proxies": []}`
 	trailingURL := `{"upstream_proxies": [{"url": "http://svc:` + r10Canary + `@parent-a.example:3128"}]}`

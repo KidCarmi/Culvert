@@ -23,6 +23,7 @@ import (
 
 const r8Canary = "hunter2-R8-canary"
 
+// r8PreparedDowngradeSettings returns a settings body in the prepared-downgrade state, with a plaintext password in a legacy upstream URL.
 func r8PreparedDowngradeSettings() []byte {
 	return []byte(`{
   "upstream_proxies": [{"url": "http://svc:` + r8Canary + `@parent-a.example:3128"}],
@@ -31,6 +32,7 @@ func r8PreparedDowngradeSettings() []byte {
 }`)
 }
 
+// TestUpstreamR8_BackupStripRefusesPreparedDowngradeCredentials pins that a prepared-downgrade body carrying a legacy password is refused, never archived.
 func TestUpstreamR8_BackupStripRefusesPreparedDowngradeCredentials(t *testing.T) {
 	out, stripped, err := Strip(r8PreparedDowngradeSettings())
 	if err == nil {
@@ -41,6 +43,7 @@ func TestUpstreamR8_BackupStripRefusesPreparedDowngradeCredentials(t *testing.T)
 	}
 }
 
+// TestUpstreamR8_BackupStripRefusesLegacyPasswordWithoutMarker pins that a legacy URL password is refused even without the downgrade marker.
 func TestUpstreamR8_BackupStripRefusesLegacyPasswordWithoutMarker(t *testing.T) {
 	body := []byte(`{"upstream_proxies": [{"url": "http://svc:` + r8Canary + `@parent-a.example:3128"}], "upstream_proxies_saved": true}`)
 	out, _, err := Strip(body)
@@ -52,6 +55,7 @@ func TestUpstreamR8_BackupStripRefusesLegacyPasswordWithoutMarker(t *testing.T) 
 	}
 }
 
+// TestUpstreamR8_BackupStripKeepsPasswordFreeLegacyList is the control: a password-free legacy list archives unchanged.
 func TestUpstreamR8_BackupStripKeepsPasswordFreeLegacyList(t *testing.T) {
 	body := []byte(`{"upstream_proxies": [{"url": "http://svc@parent-a.example:3128"}], "upstream_proxies_saved": true}`)
 	out, stripped, err := Strip(body)

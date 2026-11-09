@@ -26,6 +26,7 @@ import (
 
 const r13Canary = "secret-R13-canary"
 
+// TestUpstreamR13_BackupStripRefusesCaseVariantKeys pins that case-variant spellings of keys the sanitizer reads fail the backup closed.
 func TestUpstreamR13_BackupStripRefusesCaseVariantKeys(t *testing.T) {
 	u := `http://svc:` + r13Canary + `@parent-a.example:3128`
 	sealed := `{"id": "01HZZ", "credential": {"ciphertext": "` + r13Canary + `", "keyId": "k-1", "authorityHash": "h"}}`

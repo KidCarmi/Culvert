@@ -24,6 +24,7 @@ import (
 
 const r9Canary = "secret-R9-canary"
 
+// TestUpstreamR9_BackupStripRefusesUnparseableLegacyURL pins that a legacy URL the gate cannot parse fails the backup closed.
 func TestUpstreamR9_BackupStripRefusesUnparseableLegacyURL(t *testing.T) {
 	for _, raw := range []string{
 		"http://svc:" + r9Canary + "%zz@parent-a.example:3128", // malformed escape: url.Parse fails

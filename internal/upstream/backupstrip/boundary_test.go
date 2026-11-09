@@ -23,6 +23,7 @@ var allowedPackageVars = map[string]bool{
 	"errUpstreamBackupPreparedDowngrade": true,
 }
 
+// boundaryViolations parses one production source file and reports imports, init funcs and package variables that would break the ADR-0043 boundary.
 func boundaryViolations(name string, source []byte) []string {
 	f, err := parser.ParseFile(token.NewFileSet(), name, source, 0)
 	if err != nil {
@@ -54,6 +55,7 @@ func boundaryViolations(name string, source []byte) []string {
 	return violations
 }
 
+// TestBackupstripBoundary_NoApplicationDependenciesOrSharedState applies boundaryViolations to every production file in the package.
 func TestBackupstripBoundary_NoApplicationDependenciesOrSharedState(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -78,6 +80,7 @@ func TestBackupstripBoundary_NoApplicationDependenciesOrSharedState(t *testing.T
 	}
 }
 
+// TestBackupstripBoundary_RejectsRegressions is the negative control: each deliberate violation must be reported by boundaryViolations.
 func TestBackupstripBoundary_RejectsRegressions(t *testing.T) {
 	for name, source := range map[string]string{
 		"logging":            `package backupstrip; import "log"`,
