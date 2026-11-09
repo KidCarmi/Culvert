@@ -37,6 +37,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A data directory shared by two processes is now a Diagnostics row, not only a
+  startup log line.** Starting with `CULVERT_ALLOW_MULTIPLE_WRITERS=1` while
+  another process holds the data directory (or a volume that cannot report its
+  lock) was announced once in the startup log and then looked healthy. The new
+  `datadir_multiple_writers_override` and `datadir_writer_lock_unverified` rows
+  state it with the action to clear it. Report-only; the boot guard is unchanged.
+
 - **A stale legacy PAC file is now a Diagnostics row, not only a startup log
   line.** When a legacy `pac_config.json` is newer than the active store (edits
   made by a downgraded build), those edits are ignored and clients are steered
