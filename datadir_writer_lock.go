@@ -58,6 +58,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 )
 
 // dataDirWriterLockName is the lock file's name inside the persisted-state root.
@@ -101,6 +102,17 @@ var dataDirWriterLockHandle *os.File
 // guard (which runs before the application logger exists) to the first log line
 // after initLogger. Empty when there is nothing to report.
 var dataDirWriterLockNotice string
+
+// dataDirWriterPosture is the boot-time outcome kept for the life of the process
+// so Diagnostics can show it after the one-shot log notice above is consumed.
+// Written once by checkDataDirSingleWriter before any listener starts; "" means
+// this process holds the lock (or the guard has not run).
+var dataDirWriterPosture atomic.Value // string: "" | dataDirPostureOverride | dataDirPostureUnverified
+
+const (
+	dataDirPostureOverride   = "override"
+	dataDirPostureUnverified = "unverified"
+)
 
 // acquireDataDirWriterLock takes the single-writer lock on dir.
 //
@@ -176,9 +188,11 @@ func checkDataDirSingleWriter(dir string) error {
 	switch verdict {
 	case dataDirWriterAcquired:
 		dataDirWriterLockNotice = ""
+		dataDirWriterPosture.Store("")
 		return nil
 	case dataDirWriterHeld:
 		if allowMultipleWriters() {
+			dataDirWriterPosture.Store(dataDirPostureOverride)
 			dataDirWriterLockNotice = fmt.Sprintf(
 				"DataDir: WARNING — another Culvert process holds the single-writer lock on %q, but %s is set, so this process is starting anyway. "+
 					"Two processes on one data directory overwrite each other's roster, policy, admin settings and config versions, and the second one keeps the "+
@@ -192,6 +206,7 @@ func checkDataDirSingleWriter(dir string) error {
 			"reported wrongly by your storage",
 			errDataDirWriterHeld, path, allowMultipleWritersEnv)
 	default:
+		dataDirWriterPosture.Store(dataDirPostureUnverified)
 		dataDirWriterLockNotice = fmt.Sprintf(
 			"DataDir: single-writer lock not established on %q (%v); a second Culvert process on this data directory "+
 				"would NOT be detected. Run one process per data directory.", path, cause)

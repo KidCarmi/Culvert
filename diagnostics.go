@@ -227,6 +227,9 @@ func buildOperatorContract() OperatorContract {
 	// Log disk guard: emergency minimal logging or pressure-forced early deletion.
 	// Contributes nothing until the guard has intervened.
 	checks = append(checks, checkLogDiskProtection()...)
+	// Single-writer data-directory lock overridden or not established at boot.
+	// Contributes nothing when this process holds the lock.
+	checks = append(checks, checkDataDirWriterPosture()...)
 	// Break-glass release-catalog signature mode (permissive/disabled).
 	// Contributes nothing in enforce mode or when release management is not
 	// composed on this node.
