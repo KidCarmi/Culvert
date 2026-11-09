@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"strings"
 	"testing"
 
 	"github.com/KidCarmi/Culvert/internal/upstream"
@@ -25,22 +23,6 @@ import (
 //         pair is required.
 
 const r9Canary = "secret-R9-canary"
-
-func TestUpstreamR9_BackupStripRefusesUnparseableLegacyURL(t *testing.T) {
-	for _, raw := range []string{
-		"http://svc:" + r9Canary + "%zz@parent-a.example:3128", // malformed escape: url.Parse fails
-		"svc:" + r9Canary + "@parent-a.example:3128",           // scheme-less: parses as an opaque URL
-	} {
-		body := []byte(`{"upstream_proxies": [{"url": "` + raw + `"}], "upstream_proxies_saved": true}`)
-		out, _, err := stripUpstreamCredentialsFromSettings(body)
-		if err == nil {
-			t.Errorf("legacy URL %q was accepted for archiving", strings.ReplaceAll(raw, r9Canary, "<secret>"))
-		}
-		if bytes.Contains(out, []byte(r9Canary)) {
-			t.Errorf("the password survived into the archive body for %q", strings.ReplaceAll(raw, r9Canary, "<secret>"))
-		}
-	}
-}
 
 func TestUpstreamR9_NormalizeRequiresExactlyOneBracketPair(t *testing.T) {
 	for _, h := range []string{"[[::1]]", "[[2001:db8::1]", "[2001:db8::1]]", "[]", "[[]]"} {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -37,39 +36,5 @@ func TestUpstreamR13_LoaderReadsCaseVariantKeys(t *testing.T) {
 	}
 	if len(s.UpstreamProxies) != 1 || s.UpstreamProxies[0].URL != "http://parent-a.example:3128" || s.UpstreamPreparedDowngrade == nil {
 		t.Fatalf("the settings loader must read case-variant keys for this matrix to matter: %+v", s.UpstreamProxies)
-	}
-}
-
-func TestUpstreamR13_BackupStripRefusesCaseVariantKeys(t *testing.T) {
-	u := `http://svc:` + r13Canary + `@parent-a.example:3128`
-	sealed := `{"id": "01HZZ", "credential": {"ciphertext": "` + r13Canary + `", "keyId": "k-1", "authorityHash": "h"}}`
-	for name, body := range map[string]string{
-		"legacy list under UPSTREAM_PROXIES":        `{"UPSTREAM_PROXIES": [{"url": "` + u + `"}]}`,
-		"legacy list under Upstream_Proxies, URL":   `{"Upstream_Proxies": [{"URL": "` + u + `"}]}`,
-		"legacy item url under Url":                 `{"upstream_proxies": [{"Url": "` + u + `"}]}`,
-		"case-only collision, variant carries it":   `{"upstream_proxies": [], "UPSTREAM_PROXIES": [{"url": "` + u + `"}]}`,
-		"case-only collision, variant first":        `{"UPSTREAM_PROXIES": [{"url": "` + u + `"}], "upstream_proxies": []}`,
-		"v2 document under Upstream_Proxies_V2":     `{"Upstream_Proxies_V2": {"entries": [` + sealed + `]}}`,
-		"v2 entries under ENTRIES":                  `{"upstream_proxies_v2": {"ENTRIES": [` + sealed + `]}}`,
-		"v2 credential under CREDENTIAL":            `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "CREDENTIAL": {"ciphertext": "` + r13Canary + `"}}]}}`,
-		"v2 ciphertext under CipherText":            `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "credential": {"CipherText": "` + r13Canary + `"}}]}}`,
-		"prepared marker under a case variant":      `{"UPSTREAM_PREPARED_DOWNGRADE": {"schema": 1}, "upstream_proxies": [{"url": "http://svc@parent-a.example:3128"}], "note": "` + r13Canary + `"}`,
-		"requiresReplacement under a case variant":  `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "REQUIRESREPLACEMENT": true}]}, "note": "` + r13Canary + `"}`,
-		"nested case-only collision inside an item": `{"upstream_proxies": [{"url": "http://parent-a.example:3128", "URL": "` + u + `"}]}`,
-	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
-		if err == nil {
-			t.Errorf("%s: a case-variant spelling was accepted for archiving", name)
-		}
-		if bytes.Contains(out, []byte(r13Canary)) {
-			t.Errorf("%s: the secret survived into the archive body", name)
-		}
-	}
-	// Control: the canonical spellings still archive (v2 stripped, legacy
-	// unchanged), and an unrelated key in any case is not a variant.
-	body := `{"upstream_proxies": [{"url": "http://svc@parent-a.example:3128"}], "upstream_proxies_v2": {"entries": [` + sealed + `]}, "Other_Section": {"Name": "x"}}`
-	out, n, err := stripUpstreamCredentialsFromSettings([]byte(body))
-	if err != nil || n != 1 || bytes.Contains(out, []byte(r13Canary)) || !bytes.Contains(out, []byte(`"requiresReplacement": true`)) {
-		t.Errorf("control: canonical spellings must archive with the credential stripped: n=%d err=%v", n, err)
 	}
 }

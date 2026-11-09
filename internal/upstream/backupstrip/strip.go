@@ -1,6 +1,6 @@
-package main
+package backupstrip
 
-// upstream_backup_strip.go — backup secret stripping + restore reporting
+// strip.go — backup secret stripping + restore reporting
 // for the Upstream v2 sealed credentials (2F-D, contract C5/C12).
 //
 // admin_settings.json is the ONLY portable artifact that carries the sealed
@@ -36,12 +36,12 @@ import (
 // may survive inside the archived v2 document (pinned by the RED matrix).
 var upstreamSettingsCredentialKeys = []string{`"ciphertext"`, `"keyId"`, `"authorityHash"`}
 
-// stripUpstreamCredentialsFromSettings returns the sanitized representation
+// Strip returns the sanitized representation
 // of an admin_settings.json body and the number of credentials removed. A
 // body without an upstream_proxies_v2 document is returned unchanged (0).
 // A body that is not a JSON object is an error (a corrupt settings file
 // must not be archived as if it were sound).
-func stripUpstreamCredentialsFromSettings(body []byte) (sanitized []byte, stripped int, err error) {
+func Strip(body []byte) (sanitized []byte, stripped int, err error) {
 	// PR-C20 R11-A: a repeated key is refused BEFORE the body is decoded
 	// into a map. encoding/json keeps only the LAST value of a repeated
 	// key, so a settings object that repeats `upstream_proxies` (a
@@ -418,10 +418,10 @@ func stripV2Credentials(root map[string]any) (int, error) {
 	return stripped, nil
 }
 
-// countUpstreamCredentialsRequiringReplacement counts the entries an
+// CountRequiringReplacement counts the entries an
 // archived admin_settings.json would boot into requiresReplacement (the
 // restore dry-run's exact count). A body without the document counts 0.
-func countUpstreamCredentialsRequiringReplacement(body []byte) int {
+func CountRequiringReplacement(body []byte) int {
 	var s struct {
 		V2 *struct {
 			Entries []struct {

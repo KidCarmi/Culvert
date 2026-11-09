@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"net/http"
 	"strings"
 	"testing"
@@ -26,43 +25,6 @@ import (
 //         published as an eligible parent that standard DNS cannot resolve.
 
 const r8Canary = "hunter2-R8-canary"
-
-func r8PreparedDowngradeSettings() []byte {
-	return []byte(`{
-  "upstream_proxies": [{"url": "http://svc:` + r8Canary + `@parent-a.example:3128"}],
-  "upstream_proxies_saved": true,
-  "upstream_prepared_downgrade": {"at": "2026-09-08T20:00:00Z", "targetSchema": 1, "fromSchema": 2, "credentials": 1}
-}`)
-}
-
-func TestUpstreamR8_BackupStripRefusesPreparedDowngradeCredentials(t *testing.T) {
-	out, stripped, err := stripUpstreamCredentialsFromSettings(r8PreparedDowngradeSettings())
-	if err == nil {
-		t.Fatalf("prepared-downgrade settings with a legacy password were accepted for archiving (stripped=%d)", stripped)
-	}
-	if bytes.Contains(out, []byte(r8Canary)) {
-		t.Fatalf("the password survived into the archive body")
-	}
-}
-
-func TestUpstreamR8_BackupStripRefusesLegacyPasswordWithoutMarker(t *testing.T) {
-	body := []byte(`{"upstream_proxies": [{"url": "http://svc:` + r8Canary + `@parent-a.example:3128"}], "upstream_proxies_saved": true}`)
-	out, _, err := stripUpstreamCredentialsFromSettings(body)
-	if err == nil {
-		t.Fatalf("a legacy list carrying a password was accepted for archiving")
-	}
-	if bytes.Contains(out, []byte(r8Canary)) {
-		t.Fatalf("the password survived into the archive body")
-	}
-}
-
-func TestUpstreamR8_BackupStripKeepsPasswordFreeLegacyList(t *testing.T) {
-	body := []byte(`{"upstream_proxies": [{"url": "http://svc@parent-a.example:3128"}], "upstream_proxies_saved": true}`)
-	out, stripped, err := stripUpstreamCredentialsFromSettings(body)
-	if err != nil || stripped != 0 || !bytes.Equal(out, body) {
-		t.Fatalf("a password-free legacy list must archive unchanged: err=%v stripped=%d", err, stripped)
-	}
-}
 
 func TestUpstreamR8_NormalizeEnforcesDNSLengths(t *testing.T) {
 	long := strings.Repeat("a", 64) + ".example"

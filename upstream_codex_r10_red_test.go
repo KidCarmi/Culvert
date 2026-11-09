@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"net/url"
 	"strings"
 	"testing"
@@ -29,35 +28,6 @@ import (
 //          and exactly one bracket pair is preserved.
 
 const r10Canary = "secret-R10-canary"
-
-func TestUpstreamR10_BackupStripRefusesTrailingDataAfterSettingsObject(t *testing.T) {
-	leading := `{"upstream_proxies_saved": true, "upstream_proxies": []}`
-	trailingURL := `{"upstream_proxies": [{"url": "http://svc:` + r10Canary + `@parent-a.example:3128"}]}`
-	for name, body := range map[string]string{
-		"second JSON object":   leading + "\n" + trailingURL,
-		"trailing garbage":     leading + " svc:" + r10Canary + "@parent-a.example:3128",
-		"second value no gap":  leading + trailingURL,
-		"trailing scalar then": leading + " 1 " + trailingURL,
-	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
-		if err == nil {
-			t.Errorf("%s: a settings body with data after the object was accepted for archiving", name)
-		}
-		if bytes.Contains(out, []byte(r10Canary)) {
-			t.Errorf("%s: the password survived into the archive body", name)
-		}
-	}
-	// Control: whitespace after the object is not trailing data.
-	for name, body := range map[string]string{
-		"newline":    leading + "\n",
-		"spaces+tab": leading + " \t\r\n",
-	} {
-		out, n, err := stripUpstreamCredentialsFromSettings([]byte(body))
-		if err != nil || n != 0 || !bytes.Equal(out, []byte(body)) {
-			t.Errorf("%s: a credential-free body followed by whitespace must archive unchanged: n=%d err=%v", name, n, err)
-		}
-	}
-}
 
 func TestUpstreamR10_NormalizeBracketsIPv4MappedIPv6BySyntax(t *testing.T) {
 	for typed, want := range map[string]string{

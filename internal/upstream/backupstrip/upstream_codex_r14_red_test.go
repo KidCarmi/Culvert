@@ -1,4 +1,4 @@
-package main
+package backupstrip
 
 import (
 	"bytes"
@@ -8,7 +8,7 @@ import (
 // PR-C23 RED matrix — the fourteenth Codex round on the Batch 2 PR head
 // (3ad9adbb), written against that tree BEFORE any correction.
 //
-//   R14-A  (P1) stripUpstreamCredentialsFromSettings asserted the v2
+//   R14-A  (P1) Strip asserted the v2
 //          document to an object and its `entries` to an array, and on
 //          any other shape RETURNED THE ORIGINAL BYTES unchanged — so an
 //          `entries` object (`{"entry": {"credential": {...}}}`), an
@@ -42,7 +42,7 @@ func TestUpstreamR14_BackupStripRefusesMalformedV2Container(t *testing.T) {
 		"credential is a string":   `{"upstream_proxies_v2": {"entries": [{"id": "a", "credential": "` + r14Canary + `"}]}}`,
 		"credential is an array":   `{"upstream_proxies_v2": {"entries": [{"id": "a", "credential": [` + cred + `]}]}}`,
 	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, _, err := Strip([]byte(body))
 		if err == nil {
 			t.Errorf("%s: a malformed v2 container was accepted for archiving", name)
 		}
@@ -56,7 +56,7 @@ func TestUpstreamR14_BackupStripRefusesMalformedV2Container(t *testing.T) {
 		"no entries key": `{"upstream_proxies_v2": {"revision": 3}}`,
 		"empty entries":  `{"upstream_proxies_v2": {"revision": 3, "entries": []}}`,
 	} {
-		out, n, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, n, err := Strip([]byte(body))
 		if err != nil || n != 0 || !bytes.Equal(out, []byte(body)) {
 			t.Errorf("control %s: must archive unchanged: n=%d err=%v", name, n, err)
 		}
@@ -77,7 +77,7 @@ func TestUpstreamR14_CaseChecksScopedToUpstreamStructures(t *testing.T) {
 		"unrelated section colliding by case":   `{"other_section": {"name": "a", "Name": "b"}, "upstream_proxies": [{"url": "http://parent-a.example:3128"}]}`,
 		"legacy item with an extra field cased": `{"upstream_proxies": [{"url": "http://parent-a.example:3128", "Interval": "30s"}]}`,
 	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, _, err := Strip([]byte(body))
 		if err != nil {
 			t.Errorf("%s: a sound body was refused: %v", name, err)
 			continue
@@ -98,7 +98,7 @@ func TestUpstreamR14_CaseChecksScopedToUpstreamStructures(t *testing.T) {
 		"v2 document alias":   `{"upstream_proxies_v2": {"ENTRIES": [` + sealed + `]}}`,
 		"root case collision": `{"upstream_proxies_v2": {"entries": []}, "Upstream_Proxies_V2": {"entries": [` + sealed + `]}}`,
 	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, _, err := Strip([]byte(body))
 		if err == nil {
 			t.Errorf("control %s: an upstream-bound case variant was accepted", name)
 		}

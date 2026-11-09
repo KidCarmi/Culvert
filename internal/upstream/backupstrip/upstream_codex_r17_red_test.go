@@ -1,4 +1,4 @@
-package main
+package backupstrip
 
 import (
 	"bytes"
@@ -31,7 +31,7 @@ func TestUpstreamR17_V2VerifierInspectsKeysNotValues(t *testing.T) {
 		"document-level value equal to a name": `{"upstream_proxies_v2": {"note": "ciphertext", "entries": []}}`,
 		"quoted name inside a longer value":    `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "username": "x\"keyId\"y"}]}}`,
 	} {
-		out, n, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, n, err := Strip([]byte(body))
 		if err != nil {
 			t.Errorf("%s: a sound body was refused: %v", name, err)
 			continue
@@ -50,7 +50,7 @@ func TestUpstreamR17_V2VerifierInspectsKeysNotValues(t *testing.T) {
 		"document-level ciphertext":   `{"upstream_proxies_v2": {"entries": [], "ciphertext": "` + r17Canary + `"}}`,
 		"nested object authorityHash": `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "meta": {"authorityHash": "` + r17Canary + `"}}]}}`,
 	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, _, err := Strip([]byte(body))
 		if err == nil {
 			t.Errorf("control %s: a sealed-record key inside the v2 document was accepted", name)
 		}

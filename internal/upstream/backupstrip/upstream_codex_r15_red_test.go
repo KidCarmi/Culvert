@@ -1,4 +1,4 @@
-package main
+package backupstrip
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ func TestUpstreamR15_PostStripCheckScopedToV2Structures(t *testing.T) {
 		"unrelated section carrying authorityHash":            `{"other_section": {"authorityHash": "not-upstream"}, "upstream_proxies_v2": {"entries": [` + sealed + `]}}`,
 		"unrelated section carrying all three":                `{"upstream_proxies_v2": {"entries": [` + sealed + `]}, "notes": {"ciphertext": "a", "keyId": "b", "authorityHash": "c"}}`,
 	} {
-		out, n, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, n, err := Strip([]byte(body))
 		if err != nil {
 			t.Errorf("%s: a sound body was refused after the strip: %v", name, err)
 			continue
@@ -50,7 +50,7 @@ func TestUpstreamR15_PostStripCheckScopedToV2Structures(t *testing.T) {
 		"entry-level ciphertext beside a credential": `{"upstream_proxies_v2": {"entries": [{"id": "01HZZ", "ciphertext": "` + r15Canary + `", "credential": {"ciphertext": "` + r15Canary + `"}}]}}`,
 		"document-level keyId beside a credential":   `{"upstream_proxies_v2": {"keyId": "k-1", "entries": [` + sealed + `]}}`,
 	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, _, err := Strip([]byte(body))
 		if err == nil {
 			t.Errorf("control %s: sealed material inside the v2 structures was accepted", name)
 		}

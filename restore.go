@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/ca"
+	"github.com/KidCarmi/Culvert/internal/upstream/backupstrip"
 )
 
 // restoreSchemaVersion is the manifest envelope version this PR accepts.
@@ -279,7 +280,7 @@ func validateBackup(tarPath, _ /*dataDir*/, passphrase, backupPassphrase string)
 	}
 	summary.CredentialsOmitted = manifest.CredentialsOmitted
 	if settings, ok := files[adminSettingsTarPath]; ok {
-		summary.CredentialsRequiringReplacement = countUpstreamCredentialsRequiringReplacement(settings)
+		summary.CredentialsRequiringReplacement = backupstrip.CountRequiringReplacement(settings)
 	}
 	// A node-local key must never be restored from an archive (it is never
 	// packed either; a hand-built tarball is refused rather than trusted).

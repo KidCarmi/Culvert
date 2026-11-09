@@ -1,4 +1,4 @@
-package main
+package backupstrip
 
 import (
 	"bytes"
@@ -39,7 +39,7 @@ func TestUpstreamR12_BackupStripRefusesMalformedLegacyContainer(t *testing.T) {
 		"container is null":           `{"upstream_proxies": null, "note": "` + u + `"}`,
 		"container is a number":       `{"upstream_proxies": 1, "note": "` + u + `"}`,
 	} {
-		out, _, err := stripUpstreamCredentialsFromSettings([]byte(body))
+		out, _, err := Strip([]byte(body))
 		if err == nil {
 			t.Errorf("%s: a malformed legacy upstream container was accepted for archiving", name)
 		}
@@ -50,13 +50,13 @@ func TestUpstreamR12_BackupStripRefusesMalformedLegacyContainer(t *testing.T) {
 	// Control: the persisted item shape (AdminSettings.UpstreamProxies is a
 	// list of objects carrying a `url` string) archives unchanged.
 	body := `{"upstream_proxies": [{"url": "http://parent-a.example:3128"}, {"url": "http://svc@parent-b.example:3128", "user": "svc"}], "upstream_proxies_saved": true}`
-	out, n, err := stripUpstreamCredentialsFromSettings([]byte(body))
+	out, n, err := Strip([]byte(body))
 	if err != nil || n != 0 || !bytes.Equal(out, []byte(body)) {
 		t.Errorf("control: a sound legacy list must archive unchanged: n=%d err=%v", n, err)
 	}
 	// Control: an absent key is not a malformed container.
 	body = `{"upstream_proxies_saved": false}`
-	if out, n, err := stripUpstreamCredentialsFromSettings([]byte(body)); err != nil || n != 0 || !bytes.Equal(out, []byte(body)) {
+	if out, n, err := Strip([]byte(body)); err != nil || n != 0 || !bytes.Equal(out, []byte(body)) {
 		t.Errorf("control: an absent legacy list must archive unchanged: n=%d err=%v", n, err)
 	}
 }
