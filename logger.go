@@ -333,9 +333,28 @@ func appendJSONLogRecord(dst, p []byte, now time.Time) []byte {
 	dst = append(dst, `","msg":`...)
 	dst = appendJSONString(dst, msg)
 
-	// Promote the structured fields to top-level JSON keys. Keys are appended
-	// unescaped, exactly as before: they come from the process's own format
-	// strings, never from request data.
+	// Promote the structured fields to top-level JSON keys.
+	//
+	// The KEY goes through appendJSONString like the value, rather than being
+	// appended raw. The raw append rested on the premise that keys "come from
+	// the process's own format strings, never from request data", and that
+	// premise is a property of every CALLER, not of this encoder: a key is
+	// whatever precedes the first '=' of a space-separated token, so any caller
+	// that renders an untrusted value bare inside the field block donates its
+	// bytes to a key. One such caller exists — emitPolicyDecision's `identity`,
+	// an IdP-asserted claim (proxy.go) — and a key carrying a '"' there made
+	// the whole record UNPARSEABLE, which a strict log shipper drops: the
+	// request's decision record disappears from the SIEM rather than arriving
+	// wrong. Escaping here makes a well-formed record the encoder's own
+	// guarantee, independent of how carefully each call site is written.
+	//
+	// This is byte-for-byte identical to the raw append for every key that
+	// needs no escaping, which is every key the tree actually emits (including
+	// non-ASCII ones — appendJSONString hands those to encoding/json, which
+	// emits valid UTF-8 verbatim). It diverges only where the raw append
+	// produced invalid JSON. Keeping an untrusted key OUT of the structured
+	// namespace is the call site's job, not this loop's; see
+	// sanitizeLogFieldToken in proxy.go.
 	for len(fields) > 0 {
 		tok := fields
 		if sp := bytes.IndexByte(fields, ' '); sp >= 0 {
@@ -344,9 +363,9 @@ func appendJSONLogRecord(dst, p []byte, now time.Time) []byte {
 			fields = nil
 		}
 		if eq := bytes.IndexByte(tok, '='); eq > 0 {
-			dst = append(dst, ',', '"')
-			dst = append(dst, tok[:eq]...)
-			dst = append(dst, '"', ':')
+			dst = append(dst, ',')
+			dst = appendJSONString(dst, tok[:eq])
+			dst = append(dst, ':')
 			dst = appendJSONString(dst, tok[eq+1:])
 		}
 	}

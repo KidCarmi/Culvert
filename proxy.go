@@ -689,7 +689,7 @@ func preDispatchBlocked(w http.ResponseWriter, r *http.Request, clientIP, host, 
 		atomic.AddInt64(&statBlocked, 1)
 		http.Error(w, "Forbidden by Culvert", http.StatusForbidden)
 		recordRequestAuth(clientIP, r.Method, r.Host, "BLOCKED", "blocklist", "", authenticatedIdentity, authLog)
-		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block source=blocklist}", clientIP, sanitizeLog(host), reqID, sanitizeLog(authenticatedIdentity))
+		logger.Printf("BLOCKED %s -> %q {req_id=%s identity=%s action=block source=blocklist}", clientIP, sanitizeLog(host), reqID, sanitizeLogFieldToken(authenticatedIdentity))
 		return "BLOCKED", true
 	}
 
@@ -802,8 +802,13 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 			atomic.AddInt64(&statBlocked, 1)
 			recordRequestAuthURI(clientIP, r.Method, r.Host, "POLICY_BLOCK", match.Rule.Name, string(match.Action), authenticatedIdentity, "", ruleURI, authLog)
 			logger.Printf("POLICY_UNKNOWN_ACTION %s %s %q {rule=%q priority=%d action=%q req_id=%s identity=%s action_taken=block}",
-				clientIP, r.Method, sanitizeLog(r.Host), sanitizeLog(match.Rule.Name), match.Rule.Priority,
-				sanitizeLog(string(match.Action)), reqID, sanitizeLog(authenticatedIdentity))
+				// rule and action sit INSIDE the field block, so %q alone does not
+				// protect them: the encoder splits the block on raw spaces before
+				// any quote is interpreted, so `rule="a x=y"` still donates a
+				// forged `x` key. They take the field fold for the same reason
+				// identity does (see foldLogFieldToken).
+				clientIP, r.Method, sanitizeLog(r.Host), sanitizeLogFieldToken(match.Rule.Name), match.Rule.Priority,
+				sanitizeLogFieldToken(string(match.Action)), reqID, sanitizeLogFieldToken(authenticatedIdentity))
 			serveBlockPage(w, r.Host, "Unknown Policy Action", match.Rule.Name)
 			return "POLICY_BLOCK", true
 		}
@@ -886,7 +891,7 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 		// end-users see a clear, branded explanation.
 		atomic.AddInt64(&statBlocked, 1)
 		recordRequestAuth(clientIP, r.Method, r.Host, "POLICY_DEFAULT_DENY", "", "", authenticatedIdentity, authLog)
-		logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLog(authenticatedIdentity))
+		logger.Printf("POLICY_DEFAULT_DENY %s %s %q {req_id=%s identity=%s action=deny}", clientIP, r.Method, sanitizeLog(r.Host), reqID, sanitizeLogFieldToken(authenticatedIdentity))
 		serveBlockPage(w, r.Host, "Default Deny", "No matching policy rule")
 		return "POLICY_DEFAULT_DENY", true
 	}
@@ -999,6 +1004,20 @@ const policyLineCallDepth = 2
 // CWE-117 barrier exactly where the Printf form had it — at the emitter, on the
 // value, before the sink.
 //
+// Two of those five land INSIDE the trailing `{req_id=… identity=… action=…}`
+// block unquoted — identity and the second rule — and for those sanitizeLog is
+// the record barrier only, not the whole barrier. The block has its own
+// grammar: the JSON encoder finds it at the LAST " {" on the line and splits it
+// on SPACE into key=value tokens it promotes to top-level JSON fields, so a
+// SPACE or a '{' in a bare value there forges STRUCTURED FIELDS (or re-anchors
+// the block and drops the real ones) without forging a record. That is the
+// hazard the reqID entry below describes, and reqID is the field that got an
+// entry-point bound for it; identity, an IdP-asserted claim, never had one. So
+// those two take sanitizeLogFieldToken / foldLogFieldToken, which add the fold
+// of exactly those two grammar bytes. host, target and cond are %q-quoted in
+// the MESSAGE part, which the encoder escapes whole, and the real block always
+// follows them, so neither forging nor re-anchoring reaches them.
+//
 // verb, action, clientIP, hostSep and reqID reach the buffer BARE, and this is
 // the same set the Printf form passed bare through %s. Each has a reason that
 // must still hold if it is ever re-sourced:
@@ -1094,9 +1113,9 @@ func emitPolicyDecision(d *policyDecision) {
 	b = append(b, "] {req_id="...)
 	b = append(b, d.reqID...)
 	b = append(b, " identity="...)
-	b = append(b, sanitizeLog(d.identity)...)
+	b = append(b, sanitizeLogFieldToken(d.identity)...)
 	b = append(b, " rule="...)
-	b = append(b, safeRule...)
+	b = append(b, foldLogFieldToken(safeRule)...)
 	b = append(b, " action="...)
 	b = append(b, d.action...)
 	b = append(b, '}')
@@ -1869,4 +1888,51 @@ func sanitizeLog(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// foldLogFieldToken folds the two bytes that carry GRAMMAR inside a decision
+// line's trailing `{key=value …}` block — SPACE and '{' — to '_'.
+//
+// sanitizeLog is the CWE-117 barrier for the bytes that forge a new log
+// RECORD, and it is not sufficient for a value rendered BARE inside that block,
+// because the block has a grammar of its own. The JSON log encoder
+// (appendJSONLogRecord in logger.go) locates the block at the LAST " {" on the
+// line, splits it on SPACE into key=value tokens, and promotes each key to a
+// top-level JSON field. So a bare value carrying a SPACE forges structured
+// fields a SIEM reads as the gateway's own, and one carrying " {" re-anchors
+// the block, taking req_id and identity out of the structured record entirely.
+// Neither byte forges a record, so neither is sanitizeLog's business.
+//
+// This is the same hazard SEC-REQID-1 closed for reqID, and the comment on
+// policyDecision's bare set states it: "a SPACE forged extra key=value tokens
+// inside this very `{req_id=… identity=… action=…}` block". reqID is bound at
+// the entry point instead (0x21..0x7E, no space — request_tracing_bounds.go).
+// identity has no equivalent bound: it is an IdP-asserted `sub`/`email` claim
+// (proxy.go's authOutcome), so a federated user who can influence that claim
+// chooses these bytes. It is folded here, at the single point the value reaches
+// the line, which is where this file keeps every other CWE-117 barrier.
+//
+// Folding to '_' matches sanitizeLog's own substitution, so the value stays
+// readable and the block stays one token per field. A benign identity or rule
+// name contains neither byte, so its bytes are unchanged and the line a parser
+// already consumes is unchanged with it.
+func foldLogFieldToken(s string) string {
+	if !strings.ContainsAny(s, " {") {
+		return s
+	}
+	b := []byte(s)
+	for i := 0; i < len(b); i++ {
+		if b[i] == ' ' || b[i] == '{' {
+			b[i] = '_'
+		}
+	}
+	return string(b)
+}
+
+// sanitizeLogFieldToken is sanitizeLog for a value that reaches a decision
+// line's trailing `{key=value …}` block unquoted: the control-byte scrub that
+// stops record forgery, then the field-grammar fold that stops field forgery.
+// See foldLogFieldToken.
+func sanitizeLogFieldToken(s string) string {
+	return foldLogFieldToken(sanitizeLog(s))
 }
