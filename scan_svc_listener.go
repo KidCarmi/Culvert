@@ -208,6 +208,19 @@ func (s scanSvcListenerSnapshot) Unavailable() bool {
 //
 // Every surface — the contract row, /healthz, /ready and the gauges — reads
 // this one predicate, so the shape decision is made here and nowhere else.
+// CurrentUnstableServes is the run of sub-stable serve generations as it
+// stands NOW, the value exported as culvert_scan_svc_unstable_serves. The
+// retained UnstableExits is history that only resets when a generation ends;
+// once the current generation has proven stable (the same test Flapping()
+// applies) the run is over even though no generation has ended yet, so a
+// recovered sidecar reads 0 for the whole of its healthy serve.
+func (s scanSvcListenerSnapshot) CurrentUnstableServes() int64 {
+	if s.Bound && s.ServingFor >= scanSvcServeStableAfter {
+		return 0
+	}
+	return s.UnstableExits
+}
+
 func (s scanSvcListenerSnapshot) Flapping() bool {
 	if !s.Configured || s.Stopped {
 		return false

@@ -606,6 +606,9 @@ func TestChaos114_ControlStableServeEndsTheFlap(t *testing.T) {
 	if !scanSvcListenerState().Flapping() {
 		t.Error("the flap verdict cleared before the serve generation proved stable")
 	}
+	if !strings.Contains(renderMetrics(t), "culvert_scan_svc_unstable_serves 10\n") {
+		t.Error("before the recovered generation proves stable, unstable_serves must still report the 10-serve run")
+	}
 
 	c.advance(2 * time.Second) // now past scanSvcServeStableAfter
 	if scanSvcListenerState().Flapping() {
@@ -621,9 +624,18 @@ func TestChaos114_ControlStableServeEndsTheFlap(t *testing.T) {
 		t.Error("a sidecar serving stably again exports listener_flapping 1")
 	}
 
+	// The run is over once this generation proved stable, although none has
+	// ended: the gauge the runbook graphs as "is it happening now" reads 0.
+	if !strings.Contains(renderMetrics(t), "culvert_scan_svc_unstable_serves 0\n") {
+		t.Error("a sidecar serving stably again still exports the old unstable_serves run")
+	}
+
 	c.advance(3 * time.Hour)
 	if scanSvcListenerState().Flapping() {
 		t.Error("three hours into a stable serve the sidecar still reports Flapping()")
+	}
+	if !strings.Contains(renderMetrics(t), "culvert_scan_svc_unstable_serves 0\n") {
+		t.Error("three hours into a stable serve unstable_serves is still nonzero")
 	}
 }
 

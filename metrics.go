@@ -1458,7 +1458,7 @@ culvert_scan_svc_bind_backoff_seconds %g
 			up,
 			down,
 			flapping,
-			sv.UnstableExits,
+			sv.CurrentUnstableServes(),
 			sv.BindFailures,
 			sv.ServeExits,
 			sv.Backoff.Seconds(),
