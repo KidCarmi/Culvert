@@ -9,6 +9,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Appliance guest packages: the OVA's Ubuntu archive snapshot moves to
+  `20261105T000000Z`, which ships the published security fixes for apt
+  (CVE-2026-109518, HIGH), bind9 client tools, pcre2, libmspack and
+  python3-twisted.** The previous pin `20261029T180000Z` predated them. The new
+  snapshot is the earliest whose `noble-security` lists all nine fixed
+  versions while `linux-image-virtual-hwe-24.04` still resolves to exactly the
+  approved kernel 7.0.0-42.42~24.04.1. Against the previous candidate's
+  installed inventory it moves exactly ten packages (those nine plus
+  `libsqlite3-0` from noble-updates), adds and removes none, and leaves the
+  Docker pins unchanged. Evidence:
+  `docs/appliance/evidence/combined/future-build/fb1-snapshot-20261105/`.
+
 - **The maintenance agent could not be installed on Ubuntu 26.04: its sudoers
   allowlist used argument wildcards that sudo-rs rejects. The variable-argument
   operations now run through a root-owned wrapper that is tighter than the

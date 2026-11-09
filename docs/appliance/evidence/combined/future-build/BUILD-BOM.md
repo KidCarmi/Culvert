@@ -48,8 +48,8 @@ The PR #1528 handoff that names the final SHA records them. Each of them must eq
 
 | | Value |
 |---|---|
-| **Ubuntu snapshot** | `20261029T180000Z` (`fb1-snapshot-20261029/README.md`) |
-| InRelease SHA-256 | noble `cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0` · noble-updates `1af76bea40c6b8ddbc51a51046c5a3e7912c9611536e97afc673a4b1c39d1886` · noble-security `d90e89008640e66a6eacc13ffaad0fbbd205877cc51acdd8d4f99f9d21fcfee0` · noble-backports `b6a0b10bb67d8da7ecb72a3f62dda5f408091d5a1abe8cbda2380f4af6b705cd` |
+| **Ubuntu snapshot** | `20261105T000000Z` (FB1-R2, owner decision D4: `fb1-snapshot-20261105/README.md`; previously `20261029T180000Z`, `fb1-snapshot-20261029/README.md`) |
+| InRelease SHA-256 | noble `cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0` · noble-updates `b82fcb2734d8a7a04efe6a7a19f8eb16692d3c64a5884fb2755ba6fd647aaa78` · noble-security `9798467b11460fac5c1015fc5b297c9b05d125d24a77b6953e8675de774cb866` · noble-backports `53907c41dd1f5f1ab0465119ee5175ca916a1dc2c64f1762097c5049c6ff7e6b` |
 | Authentication | gpgv Good signature, RSA key `F6ECB3762474EDA9D21B7022871920D1991BC93C`; two fetches byte-identical; 16 `Packages.xz` matched |
 | Build start | Recorded once by `build-ova.sh` before any fetch (`build-info.json` `apt_build_start`); the ID must be strictly earlier |
 | **Kernel** | `linux-image-virtual-hwe-24.04` → **7.0.0-42.42~24.04.1** (noble-updates). The four `-7.0.0-42-generic` packages (`linux-image`, `linux-modules`, `linux-main-modules-zfs`, `linux-main-modules-v4l2loopback`) are the approved kernel-42 identities. Their SHA-256 values are in `../esxi-325c142a/kernel-42/kernel-debs.tsv`; lab C6 re-acquired them under this pin and found them equal. |
@@ -89,7 +89,7 @@ A different ID or archive hash is **STOP/REPORT**, not a rerun. The sidecar's Al
 
 | Output | Requirement |
 |---|---|
-| `build-info.json` | `application.index_digest` = the candidate image ID; `apt_snapshot` = `20261029T180000Z`; `apt_build_start` later than it; git commit = the build commit, not dirty |
+| `build-info.json` | `application.index_digest` = the candidate image ID; `apt_snapshot` = `20261105T000000Z`; `apt_build_start` later than it; git commit = the build commit, not dirty |
 | `package-provenance.tsv` | 0 non-snapshot rows; every Docker row `acquired-verified` with the §4 SHA-256 |
 | `acquired-debs.tsv` | present; every row verified by the reconciler |
 | `base-dpkg-status.txt` | sha256 `3fde68c0…` (equals the committed fixture for serial 20260926); recorded in `build-info.json` `guest_os.base_dpkg_status_sha256` |

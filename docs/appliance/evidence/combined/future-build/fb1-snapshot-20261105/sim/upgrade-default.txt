@@ -1,0 +1,29 @@
+Reading package lists...
+Building dependency tree...
+Calculating upgrade...
+The following packages have been kept back:
+  docker-ce docker-ce-cli docker-compose-plugin
+The following packages will be upgraded:
+  apt apt-utils bind9-dnsutils bind9-host bind9-libs libapt-pkg6.0t64
+  libmspack0t64 libpcre2-8-0 libsqlite3-0 python3-twisted
+10 upgraded, 0 newly installed, 0 to remove and 3 not upgraded.
+Inst libapt-pkg6.0t64 [2.8.3] (2.8.4ubuntu0.1 Ubuntu:24.04/noble-security [amd64])
+Conf libapt-pkg6.0t64 (2.8.4ubuntu0.1 Ubuntu:24.04/noble-security [amd64])
+Inst apt [2.8.3] (2.8.4ubuntu0.1 Ubuntu:24.04/noble-security [amd64]) [apt-utils:amd64 ]
+Conf apt (2.8.4ubuntu0.1 Ubuntu:24.04/noble-security [amd64]) [apt-utils:amd64 ]
+Inst apt-utils [2.8.3] (2.8.4ubuntu0.1 Ubuntu:24.04/noble-security [amd64])
+Inst libpcre2-8-0 [10.42-4ubuntu2.1] (10.42-4ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf libpcre2-8-0 (10.42-4ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst libsqlite3-0 [3.45.1-1ubuntu2.8] (3.45.1-1ubuntu2.9 Ubuntu:24.04/noble-updates [amd64])
+Inst bind9-dnsutils [1:9.18.39-0ubuntu0.24.04.8] (1:9.18.39-0ubuntu0.24.04.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst bind9-host [1:9.18.39-0ubuntu0.24.04.8] (1:9.18.39-0ubuntu0.24.04.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst bind9-libs [1:9.18.39-0ubuntu0.24.04.8] (1:9.18.39-0ubuntu0.24.04.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst libmspack0t64 [0.11-1.1build1] (0.11-1.1ubuntu0.24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst python3-twisted [24.3.0-1ubuntu0.2] (24.3.0-1ubuntu0.3 Ubuntu:24.04/noble-security [all])
+Conf apt-utils (2.8.4ubuntu0.1 Ubuntu:24.04/noble-security [amd64])
+Conf libsqlite3-0 (3.45.1-1ubuntu2.9 Ubuntu:24.04/noble-updates [amd64])
+Conf bind9-dnsutils (1:9.18.39-0ubuntu0.24.04.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf bind9-host (1:9.18.39-0ubuntu0.24.04.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf bind9-libs (1:9.18.39-0ubuntu0.24.04.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf libmspack0t64 (0.11-1.1ubuntu0.24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf python3-twisted (24.3.0-1ubuntu0.3 Ubuntu:24.04/noble-security [all])

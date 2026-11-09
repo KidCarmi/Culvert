@@ -40,17 +40,17 @@ var fb1Suites = []string{"noble", "noble-updates", "noble-security", "noble-back
 
 var fb1Components = []string{"main", "restricted", "universe", "multiverse"}
 
-// The selected snapshot (31 Oct pin raise) and its reviewed InRelease hashes:
-// gpgv-verified, fetched twice byte-identical, and equal to the indexes the
-// approved kernel-42 transaction was evaluated against
-// (fb1-snapshot-20261029/authn.tsv, esxi-325c142a/kernel-42/apt-indexes.txt).
-const fb1PinnedSnapshot = "20261029T180000Z"
+// The selected snapshot (9 Nov FB1-R2 pin raise, owner decision D4) and its
+// reviewed InRelease hashes: gpgv-verified and fetched twice byte-identical
+// (fb1-snapshot-20261105/authn.tsv). The earliest snapshot carrying the nine
+// security fixes while still resolving the approved kernel 7.0.0-42.
+const fb1PinnedSnapshot = "20261105T000000Z"
 
 var fb1ReviewedPins = map[string]string{
 	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE":     "cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0",
-	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES":   "1af76bea40c6b8ddbc51a51046c5a3e7912c9611536e97afc673a4b1c39d1886",
-	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY":  "d90e89008640e66a6eacc13ffaad0fbbd205877cc51acdd8d4f99f9d21fcfee0",
-	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS": "b6a0b10bb67d8da7ecb72a3f62dda5f408091d5a1abe8cbda2380f4af6b705cd",
+	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES":   "b82fcb2734d8a7a04efe6a7a19f8eb16692d3c64a5884fb2755ba6fd647aaa78",
+	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY":  "9798467b11460fac5c1015fc5b297c9b05d125d24a77b6953e8675de774cb866",
+	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS": "53907c41dd1f5f1ab0465119ee5175ca916a1dc2c64f1762097c5049c6ff7e6b",
 }
 
 // The reviewed Docker .deb SHA-256 pins: read from Docker's gpgv-verified
@@ -317,7 +317,7 @@ func fb1Bash(t *testing.T, env []string, script string) (string, error) {
 // fb1PinEnv: the manifest pins with ID id and a recorded build start that is
 // after every ID the tests treat as valid (and long before "now" is relevant).
 func fb1PinEnv(id string) []string {
-	return fb1PinEnvAt(id, "20261031T120000Z")
+	return fb1PinEnvAt(id, "20261109T120000Z")
 }
 
 func fb1PinEnvAt(id, buildStart string) []string {
@@ -346,12 +346,12 @@ func TestAptSnapshotFB1_RequirePinsRefusesBadIDsAndPins(t *testing.T) {
 		"second 60":                     fb1PinEnv("20261029T235960Z"),
 		"day 00":                        fb1PinEnv("20261000T120000Z"),
 		"no Z":                          fb1PinEnv("20261029T180000"),
-		"leading space":                 fb1PinEnv(" 20261029T180000Z"),
+		"leading space":                 fb1PinEnv(" 20261105T000000Z"),
 		"malformed ID":                  fb1PinEnv("2026-10-02"),
 		"empty ID":                      fb1PinEnv(""),
 		"future ID (served as now, E6)": fb1PinEnv("20991231T000000Z"),
 		"ID equal to the build start":   fb1PinEnvAt("20261031T120000Z", "20261031T120000Z"),
-		"ID after the build start":      fb1PinEnvAt(fb1PinnedSnapshot, "20261029T175959Z"),
+		"ID after the build start":      fb1PinEnvAt(fb1PinnedSnapshot, "20261104T235959Z"),
 		"no recorded build start":       fb1PinEnvAt(fb1PinnedSnapshot, ""),
 		"impossible build start":        fb1PinEnvAt(fb1PinnedSnapshot, "20261131T000000Z"),
 		"missing InRelease pin":         append(fb1PinEnv(fb1PinnedSnapshot), "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY="),
@@ -379,7 +379,7 @@ func TestAptSnapshotFB1_RequirePinsUsesTheRecordedInstantNotTheClock(t *testing.
 	if err := os.WriteFile(filepath.Join(bin, "date"), []byte(stub), 0o700); err != nil { //nolint:gosec // executable test stub
 		t.Fatal(err)
 	}
-	env := append(fb1PinEnvAt(fb1PinnedSnapshot, "20261031T120000Z"), "PATH="+bin+":/usr/bin:/bin")
+	env := append(fb1PinEnvAt(fb1PinnedSnapshot, "20261109T120000Z"), "PATH="+bin+":/usr/bin:/bin")
 	if out, err := fb1Bash(t, env, "apt_snap_require_pins"); err != nil {
 		t.Errorf("an ID before the recorded build start was refused: %v %s", err, out)
 	}
@@ -389,16 +389,16 @@ func TestAptSnapshotFB1_RequirePinsUsesTheRecordedInstantNotTheClock(t *testing.
 	// 2026-02-30 over to 2026-03-02 and exits 0. The round trip (the
 	// normalized instant must equal the input) catches it.
 	norm := t.TempDir()
-	nstub := "#!/bin/sh\ncase \" $* \" in *\" -d \"*) case \"$*\" in *2026-02-30*) echo 20260302T120000Z; exit 0 ;; esac; exec /bin/date \"$@\" ;; esac\necho 20261031T120000Z\n"
+	nstub := "#!/bin/sh\ncase \" $* \" in *\" -d \"*) case \"$*\" in *2026-02-30*) echo 20260302T120000Z; exit 0 ;; esac; exec /bin/date \"$@\" ;; esac\necho 20261109T120000Z\n"
 	if err := os.WriteFile(filepath.Join(norm, "date"), []byte(nstub), 0o700); err != nil { //nolint:gosec // executable test stub
 		t.Fatal(err)
 	}
-	nenv := append(fb1PinEnvAt("20260230T120000Z", "20261031T120000Z"), "PATH="+norm+":/usr/bin:/bin")
+	nenv := append(fb1PinEnvAt("20260230T120000Z", "20261109T120000Z"), "PATH="+norm+":/usr/bin:/bin")
 	if out, err := fb1Bash(t, nenv, "apt_snap_require_pins"); err == nil || !strings.Contains(out, "20260230T120000Z") {
 		t.Errorf("an impossible ID was accepted because date normalized it: %v %s", err, out)
 	}
 	// Control: the same normalizing stub still accepts a real instant.
-	nenv = append(fb1PinEnvAt(fb1PinnedSnapshot, "20261031T120000Z"), "PATH="+norm+":/usr/bin:/bin")
+	nenv = append(fb1PinEnvAt(fb1PinnedSnapshot, "20261109T120000Z"), "PATH="+norm+":/usr/bin:/bin")
 	if out, err := fb1Bash(t, nenv, "apt_snap_require_pins"); err != nil {
 		t.Errorf("a real ID was refused under the normalizing date stub: %v %s", err, out)
 	}
@@ -535,9 +535,9 @@ func TestAptSnapshotFB1_HelpersPassTheSnapshotSelector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v %s", err, out)
 	}
-	want := "apt-get --snapshot 20261029T180000Z --error-on=any -qq update\n" +
-		"apt-get --snapshot 20261029T180000Z -o APT::Get::Always-Include-Phased-Updates=true -o APT::Keep-Downloaded-Packages=true install -y pigz\n" +
-		"apt-cache --snapshot 20261029T180000Z policy systemd\n"
+	want := "apt-get --snapshot 20261105T000000Z --error-on=any -qq update\n" +
+		"apt-get --snapshot 20261105T000000Z -o APT::Get::Always-Include-Phased-Updates=true -o APT::Keep-Downloaded-Packages=true install -y pigz\n" +
+		"apt-cache --snapshot 20261105T000000Z policy systemd\n"
 	if out != want {
 		t.Errorf("helper argv:\n%s\nwant:\n%s", out, want)
 	}
@@ -1423,38 +1423,49 @@ func TestAptSnapshotFB1_GuestReceiptAndDockerByteCheck(t *testing.T) {
 	}
 }
 
-const fb1SelectionEvidence = "docs/appliance/evidence/combined/future-build/fb1-snapshot-20261029"
+const (
+	fb1PreviousSelectionEvidence = "docs/appliance/evidence/combined/future-build/fb1-snapshot-20261029"
+	fb1SelectionEvidence         = "docs/appliance/evidence/combined/future-build/fb1-snapshot-20261105"
+)
 
-// The manifest pin is the one the selection evidence authenticated, that
-// evidence equals the indexes the approved kernel-42 transaction used, and
-// the committed 325c comparison has no downgrade, unknown origin or Docker
-// change, and resolves exactly the approved kernel.
-func TestAptSnapshotFB1_SelectedSnapshotMatchesItsEvidence(t *testing.T) {
-	m := fb1ManifestVars(t)
-	suiteVar := map[string]string{"noble": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE", "noble-updates": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES",
-		"noble-security": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY", "noble-backports": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS"}
-	seen := 0
-	for _, l := range strings.Split(strings.TrimSpace(fb1Read(t, filepath.Join(fb1SelectionEvidence, "authn.tsv"))), "\n") {
+var fb1SuiteVar = map[string]string{"noble": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE", "noble-updates": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES",
+	"noble-security": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY", "noble-backports": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS"}
+
+// fb1Authn reads an authn.tsv: suite -> InRelease SHA-256, requiring each row to
+// record two byte-identical fetches and a Good signature by the archive key.
+func fb1Authn(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(fb1Read(t, filepath.Join(dir, "authn.tsv"))), "\n") {
 		f := strings.Split(l, "\t")
-		if len(f) < 5 || suiteVar[f[0]] == "" {
-			t.Fatalf("authn.tsv row %q", l)
+		if len(f) < 5 || fb1SuiteVar[f[0]] == "" {
+			t.Fatalf("%s/authn.tsv row %q", dir, l)
 		}
-		seen++
-		if m[suiteVar[f[0]]] != f[1] || f[2] != "fetch2=identical" || !strings.Contains(f[3], "Good signature") ||
+		if f[2] != "fetch2=identical" || !strings.Contains(f[3], "Good signature") ||
 			!strings.HasSuffix(f[4], "F6ECB3762474EDA9D21B7022871920D1991BC93C") {
-			t.Errorf("%s: manifest %s, evidence %q", f[0], m[suiteVar[f[0]]], l)
+			t.Errorf("%s/authn.tsv: %q is not a twice-fetched, archive-key-verified index", dir, l)
 		}
+		got[f[0]] = f[1]
 	}
-	if seen != 4 {
-		t.Errorf("authn.tsv covers %d suites, want 4", seen)
+	if len(got) != 4 {
+		t.Errorf("%s/authn.tsv covers %d suites, want 4", dir, len(got))
 	}
+	return got
+}
+
+// History (FB-1, 31 Oct): the previous pin 20261029T180000Z equals the indexes
+// the approved kernel-42 transaction used, and its committed 325c comparison
+// has no downgrade, unknown origin or Docker change and resolves exactly the
+// approved kernel. Kept as evidence integrity; it no longer binds the manifest.
+func TestAptSnapshotFB1_PreviousSelectionEvidenceIsIntact(t *testing.T) {
+	prev := fb1Authn(t, fb1PreviousSelectionEvidence)
 	k42 := fb1Read(t, "docs/appliance/evidence/combined/esxi-325c142a/kernel-42/apt-indexes.txt")
-	for _, v := range suiteVar {
-		if !strings.Contains(k42, "sha256="+m[v]) {
-			t.Errorf("%s=%s is not an index the approved kernel-42 transaction used", v, m[v])
+	for suite, sum := range prev {
+		if !strings.Contains(k42, "sha256="+sum) {
+			t.Errorf("%s %s is not an index the approved kernel-42 transaction used", suite, sum)
 		}
 	}
-	rows := strings.Split(strings.TrimSpace(fb1Read(t, filepath.Join(fb1SelectionEvidence, "compare-325c142a.tsv"))), "\n")
+	rows := strings.Split(strings.TrimSpace(fb1Read(t, filepath.Join(fb1PreviousSelectionEvidence, "compare-325c142a.tsv"))), "\n")
 	classes := map[string]int{}
 	for _, l := range rows[1:] {
 		f := strings.Split(l, "\t")
@@ -1482,6 +1493,103 @@ func TestAptSnapshotFB1_SelectedSnapshotMatchesItsEvidence(t *testing.T) {
 	}
 	if len(rows)-1 != 684 || classes["unchanged"] != 671 || classes["docker-pinned"] != 4 || classes["upgrade"] != 1 ||
 		classes["added"] != 4 || classes["removed-kernel"] != 4 {
+		t.Errorf("comparison classes %v over %d rows", classes, len(rows)-1)
+	}
+}
+
+// The reviewed FB1-R2 package movement against the FB1-R1 inventory f76b6e82:
+// the nine packages of owner decision D4 at their fixed versions, plus the one
+// noble-updates change already published at the earliest qualifying snapshot.
+var fb1R2ReviewedUpgrades = map[string]string{
+	"apt":              "2.8.4ubuntu0.1",
+	"apt-utils":        "2.8.4ubuntu0.1",
+	"libapt-pkg6.0t64": "2.8.4ubuntu0.1",
+	"bind9-dnsutils":   "1:9.18.39-0ubuntu0.24.04.9",
+	"bind9-host":       "1:9.18.39-0ubuntu0.24.04.9",
+	"bind9-libs":       "1:9.18.39-0ubuntu0.24.04.9",
+	"libmspack0t64":    "0.11-1.1ubuntu0.24.04.1",
+	"libpcre2-8-0":     "10.42-4ubuntu2.2",
+	"python3-twisted":  "24.3.0-1ubuntu0.3",
+	"libsqlite3-0":     "3.45.1-1ubuntu2.9",
+}
+
+// The manifest pin is the one the FB1-R2 selection evidence authenticated; that
+// snapshot still resolves exactly the approved kernel 7.0.0-42 and lists all
+// nine fixed versions; and against the FB1-R1 inventory it moves exactly the
+// reviewed ten packages, with no addition, removal, downgrade, unknown origin
+// or Docker change.
+func TestAptSnapshotFB1_SelectedSnapshotMatchesItsEvidence(t *testing.T) {
+	m := fb1ManifestVars(t)
+	if m["GUEST_APT_SNAPSHOT"] != fb1PinnedSnapshot {
+		t.Fatalf("GUEST_APT_SNAPSHOT=%q, the selection evidence is for %s", m["GUEST_APT_SNAPSHOT"], fb1PinnedSnapshot)
+	}
+	for suite, sum := range fb1Authn(t, fb1SelectionEvidence) {
+		if m[fb1SuiteVar[suite]] != sum {
+			t.Errorf("%s=%s, the selection evidence authenticated %s", fb1SuiteVar[suite], m[fb1SuiteVar[suite]], sum)
+		}
+	}
+	fb1CheckWindowRow(t, m)
+	if k := fb1Read(t, filepath.Join(fb1SelectionEvidence, "sim", "kernel-meta-install.txt")); !strings.Contains(k, "linux-image-virtual-hwe-24.04 is already the newest version (7.0.0-42.42~24.04.1)") {
+		t.Errorf("the kernel meta does not stay at the approved 7.0.0-42:\n%s", k)
+	}
+	if fb1Read(t, filepath.Join(fb1SelectionEvidence, "sim", "upgrade-default.txt")) != fb1Read(t, filepath.Join(fb1SelectionEvidence, "sim", "upgrade-allphased.txt")) {
+		t.Error("the default and all-phased resolutions differ")
+	}
+	fb1CheckReviewedDelta(t)
+}
+
+// fb1CheckWindowRow: the window scan's row for the pin carries the pinned
+// noble-updates/noble-security InRelease hashes, a kernel meta of exactly
+// 7.0.0-42.42~24.04.1, and all nine fixed versions.
+func fb1CheckWindowRow(t *testing.T, m map[string]string) {
+	t.Helper()
+	for _, l := range strings.Split(fb1Read(t, filepath.Join(fb1SelectionEvidence, "kernel-window-scan.tsv")), "\n") {
+		f := strings.Split(l, "\t")
+		if len(f) < 7 || f[0] != fb1PinnedSnapshot {
+			continue
+		}
+		if f[2] != m["GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES"] || f[4] != m["GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY"] {
+			t.Errorf("window-scan row %q does not carry the pinned InRelease hashes", l)
+		}
+		if f[5] != "7.0.0-42.42~24.04.1," || f[6] != "9/9" {
+			t.Errorf("window-scan row %q: kernel meta must be exactly 7.0.0-42.42~24.04.1 and all nine fixes present", l)
+		}
+		return
+	}
+	t.Errorf("kernel-window-scan.tsv has no row for %s", fb1PinnedSnapshot)
+}
+
+// fb1CheckReviewedDelta: against the f76b6e82 inventory only unchanged rows,
+// the four Docker pins and exactly the reviewed ten upgrades.
+func fb1CheckReviewedDelta(t *testing.T) {
+	t.Helper()
+	rows := strings.Split(strings.TrimSpace(fb1Read(t, filepath.Join(fb1SelectionEvidence, "compare-f76b6e82.tsv"))), "\n")
+	classes, moved := map[string]int{}, map[string]string{}
+	for _, l := range rows[1:] {
+		f := strings.Split(l, "\t")
+		classes[f[4]]++
+		switch f[4] {
+		case "unchanged", "docker-pinned":
+			if f[2] != f[3] {
+				t.Errorf("%s classed %s but %s -> %s", f[0], f[4], f[2], f[3])
+			}
+		case "upgrade":
+			moved[f[0]] = f[3]
+		default:
+			t.Errorf("row %q: only unchanged, docker-pinned and the reviewed upgrades are allowed", l)
+		}
+	}
+	for name, want := range fb1R2ReviewedUpgrades {
+		if moved[name] != want {
+			t.Errorf("reviewed upgrade %s: predicted %q, want %s", name, moved[name], want)
+		}
+	}
+	for name, v := range moved {
+		if _, ok := fb1R2ReviewedUpgrades[name]; !ok {
+			t.Errorf("unreviewed upgrade %s -> %s", name, v)
+		}
+	}
+	if len(rows)-1 != 668 || classes["unchanged"] != 654 || classes["docker-pinned"] != 4 || classes["upgrade"] != 10 {
 		t.Errorf("comparison classes %v over %d rows", classes, len(rows)-1)
 	}
 }

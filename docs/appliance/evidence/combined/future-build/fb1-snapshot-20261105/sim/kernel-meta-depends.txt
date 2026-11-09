@@ -1,0 +1,2 @@
+linux-image-virtual-hwe-24.04
+  Depends: linux-image-7.0.0-42-generic
