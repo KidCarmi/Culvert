@@ -1280,10 +1280,18 @@ jobs:
       # The ONE commit message that may start this job (an empty commit on the
       # reviewed head; reviewed by ASTRA, with its SHA, parent and tree, before
       # it is pushed).
-      # Campaign 5 (owner direction and decision of 8 November 2026; D4 of 9
+      # Campaign 6 (owner direction and decision of 8 November 2026; D4 of 9
       # November 2026; owner clarification of 10 November 2026): the same FB1-R2
-      # candidate OVA e60620c3 as campaign 4, after a HARNESS fix. Campaign 4
-      # (trigger 3b584705, run 42780398896, evidence 13746914239) is FAIL and
+      # candidate OVA e60620c3, after a second HARNESS fix. Campaign 5 (trigger
+      # 2a171232, run 42815909646, evidence 13768571517) is FAIL and preserved:
+      # its main leg passed every scope, but the console leg stopped at
+      # M2H/console-firstboot-transcript (console-session exit 98) because the
+      # console leg's virtio console (hvc0) sustained only ~40 B/s and a ~60 KB
+      # transcript cannot cross it within 600 s. The console leg's privileged
+      # transfers are now gzip-compressed (console-session.py --gzip, verified
+      # by gzip's CRC; a broken stream fails closed, exit 90), and its M2 and
+      # package-set transfers get a 900 s deadline. The main leg is unchanged.
+      # Campaign 4 (trigger 3b584705, run 42780398896, evidence 13746914239) is FAIL and
       # preserved: it stopped at R/operator-capture-integrity-q7-1 because the
       # capture-integrity gate counted two probes that timed out with zero bytes
       # of output as "unparseable". capture_integrity in appliance-lab.sh now
@@ -1295,9 +1303,9 @@ jobs:
       # f9d68540. The campaign-3 route (84e05cd6, FB1-R1 OVA f76b6e82) was never
       # triggered: owner decision D4 retired that candidate. None of those
       # messages starts this job.
-      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 5 on the FB1-R2 candidate OVA e60620c3 [qemu-retained]"
-      QEMU_CAMPAIGN: "5"
-      QEMU_PRIOR_CAMPAIGN: "4: trigger 3b5847057d7532d7dc2346a60ac10f6716760973, run 42780398896 attempt 1, evidence artifact 13746914239, verdict FAIL (stop at R/operator-capture-integrity-q7-1: two no-output timeout probes counted as unparseable)"
+      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 6 on the FB1-R2 candidate OVA e60620c3 [qemu-retained]"
+      QEMU_CAMPAIGN: "6"
+      QEMU_PRIOR_CAMPAIGN: "5: trigger 2a1712320742902d8dc64d9c9a90295387d3fc14, run 42815909646 attempt 1, evidence artifact 13768571517, verdict FAIL (main leg passed every scope; console leg stop at M2H/console-firstboot-transcript: console-session exit 98, hvc0 too slow for the transcript)"
       # Start deadline (unchanged, reviewed for campaign 2): first candidate boot
       # no later than 2026-11-14T00:00:00Z. With the 345-minute job limit and the
       # daily-window rule the job ends by 2026-11-14T05:45Z, inside the owner's

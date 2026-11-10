@@ -281,9 +281,18 @@ gpriv() {
     # shellcheck disable=SC2086 # the adapter command is a word list by contract
     $LAB_PRIV_CMD "$@"
   else
+    # LAB_PRIV_GZIP=1 (set only by the console subcommand): compress the output
+    # for the transfer over the console leg's virtio console; see console-session.py.
+    local gz=(); [[ "${LAB_PRIV_GZIP:-0}" == 1 ]] && gz=(--gzip)
     python3 "$HERE/console-session.py" --sock "$SER_SOCK" --secrets "$SEC" --console-log "$WORK/console.log" \
-      --trace "$WORK/console-session-trace.txt" "$@"
+      --trace "$WORK/console-session-trace.txt" "${gz[@]}" "$@"
   fi; }
+# priv_bulk_timeout N — the deadline for a LARGE privileged transfer (the M2 and
+# package-set checkpoints): N, except 900 s on the console leg (LAB_PRIV_GZIP=1),
+# whose hvc0 sustained only ~40 B/s in campaign 5; even gzip-compressed, a
+# package-set transfer (~9.7 KB) needs ~240 s there. A transport deadline, not
+# an acceptance criterion.
+priv_bulk_timeout() { if [[ "${LAB_PRIV_GZIP:-0}" == 1 ]]; then echo 900; else echo "$1"; fi; }
 # groot 'command line' — one privileged command line (convenience over gpriv).
 groot() { printf '%s\n' "$1" | gpriv --timeout "${2:-600}"; }
 UI="https://$LAB_HOST:$LAB_UI_PORT"; P="http://$LAB_HOST:$LAB_PROXY_PORT"; JAR="$SEC/cookies"
@@ -356,6 +365,13 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   # never guess or fall back to another account.
   local hrc=0; printf 'id\n' | python3 "$HERE/console-session.py" --sock "$d/none.sock" --secrets "$d" --console-log "$d/none.log" --timeout 5 >/dev/null 2>&1 || hrc=$?
   if [[ $hrc == 99 || $hrc == 91 ]]; then log "selftest ok: console-session without a console/credential -> exit $hrc"; else log "selftest FAILED: console-session exit $hrc"; rc=1; fi
+  # The transfer path itself, against a fake guest (a real bash on a pty) with
+  # a throttled guest->host direction like the console leg's hvc0 (campaign 5):
+  # plain output misses the deadline, --gzip arrives byte-identical with its
+  # exit status, and a broken or truncated gzip stream fails closed (exit 90).
+  if python3 -I -B "$HERE/console-session-selftest.py" > "$d/cs-selftest.log" 2>&1; then
+    log "selftest ok: console-session transfer path ($(grep -c '^ok ' "$d/cs-selftest.log") cases: plain deadline, --gzip identical, status kept, fails closed)"
+  else log "selftest FAILED: console-session transfer path: $(grep -E 'FAILED|Error' "$d/cs-selftest.log" | head -3 | tr '\n' ' ')"; rc=1; fi
   # The bounded operator probe must EXECUTE ssh: against a closed port ssh
   # fails (255); 127 would mean timeout could not run the command at all.
   local prc=0; ( LAB_HOST=127.0.0.1; SSH_OPTS=(-p 1 -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=QUIET); gop_within 5 status-json ) >/dev/null 2>&1 || prc=$?
@@ -3308,7 +3324,7 @@ m2_checkpoint() { local tag="$1" f="$EV/M2H-$1.txt" sum pid rc=0 st name detail 
   # The guest script (m2-guest.sh) records every observation with its exit
   # status; the transport status is KEPT and judged with the transcript.
   { printf 'M2SUM=%q\nM2URL=%q\n' "$sum" "http://10.0.2.2:$LAB_M2PROBE_PORT/m2probe"; cat "$HERE/m2-guest.sh"; } \
-    | gpriv --timeout 600 > "$f" 2>&1 || rc=$?
+    | gpriv --timeout "$(priv_bulk_timeout 600)" > "$f" 2>&1 || rc=$?
   kill "$pid" 2>/dev/null || true
   # All verdicts come from m2-verdict.py, which fails closed: an observation
   # that was not acquired (rc) and parsed (shape + positive control) fails
@@ -4171,7 +4187,7 @@ PY
 # the build's own record (pkgset-verdict.py fails closed). No-op when unset.
 pkgset_checkpoint() { local tag="$1" f="$EV/K-$1-dpkg.txt" rc=0 st name detail n=0
   [[ -n "$LAB_EXPECT_DPKG" || -n "$LAB_EXPECT_KERNEL" ]] || return 0
-  gpriv --timeout 300 > "$f" 2>&1 <<'EOS' || rc=$?
+  gpriv --timeout "$(priv_bulk_timeout 300)" > "$f" 2>&1 <<'EOS' || rc=$?
 dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' 2>/dev/null; echo "LABRC=$?"
 echo "LABUNAME=$(uname -r)"
 EOS
@@ -4296,7 +4312,10 @@ case "${1:-}" in
   adoption) cmd_adoption; [[ "$(failures)" == 0 ]] ;;
   engine-surface) cmd_engine_surface; [[ "$(failures)" == 0 ]] ;;
   m2) cmd_m2; [[ "$(failures)" == 0 ]] ;;
-  console) trap 'LAB_IN_TRAP=1; cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
+  # The console leg's privileged transport is a virtio console (hvc0), which
+  # sustains only tens of bytes per second for large output (campaign 5, run
+  # 42815909646): its transfers are gzip-compressed (LAB_PRIV_GZIP=1).
+  console) LAB_PRIV_GZIP=1; trap 'LAB_IN_TRAP=1; cmd_collect || true; cmd_down || true' EXIT; cmd_console; [[ "$(failures)" == 0 ]] ;;
   fp2) cmd_fp2; [[ "$(failures)" == 0 ]] ;;
   cachebypass) cmd_cachebypass; [[ "$(failures)" == 0 ]] ;;
   ldap) cmd_ldap; [[ "$(failures)" == 0 ]] ;;
