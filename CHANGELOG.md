@@ -58,6 +58,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **One non-ASCII SAN downgraded the admin UI to plain HTTP.** The admin UI's
+  self-signed certificate is minted from every SAN source (`-ui-san`, the
+  network settings' `ui_sans`, `CULVERT_PUBLIC_IP`). A single name x509 cannot
+  encode as an IA5String — typically an IDN typed in Unicode, e.g.
+  `café.example.com`, instead of its `xn--` form — failed
+  `x509.CreateCertificate` for the whole certificate, and `startUI` treats a
+  self-sign failure as "serve HTTP", so the next start exposed the login page
+  and credentials in cleartext. The unencodable name is now dropped (and
+  logged) and the certificate is minted from the remaining SANs.
+
 - **A whitespace-only `cluster.grpc_addr` passed config validation under `cluster.role: control-plane`.**
   The required-address check compared the raw string to `""`, so `grpc_addr: " "` loaded, resolved to a non-empty
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
