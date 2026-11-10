@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -668,7 +669,10 @@ func captureSecscanLog(t *testing.T) func() []string {
 		lines = append(lines, line)
 		mu.Unlock()
 	})
-	t.Cleanup(func() { obs.SetSink(nil) })
+	// obs.SetSink ignores nil and has no getter, so restore the package
+	// default (stderr) explicitly, as conventions.md requires of a global a
+	// test changes (same pattern as feedsync's chaos109 test).
+	t.Cleanup(func() { obs.SetSink(func(line string) { fmt.Fprintln(os.Stderr, line) }) })
 	return func() []string {
 		mu.Lock()
 		defer mu.Unlock()
