@@ -22,13 +22,13 @@ func memberFixture(t *testing.T) *Store {
 
 // memberOf returns a probe answering membership from a fixed set, recording
 // every category it is asked about.
-func memberOf(cats ...string) (MemberFunc, *[]string) {
+func memberOf(cats ...string) (probe MemberFunc, asked *[]string) {
 	set := map[string]bool{}
 	for _, c := range cats {
 		set[CategoryKey(c)] = true
 	}
-	var asked []string
-	return func(c string) bool { asked = append(asked, c); return set[c] }, &asked
+	var calls []string
+	return func(c string) bool { calls = append(calls, c); return set[c] }, &calls
 }
 
 func TestMatchesMember_NonWinnerMembershipMatches(t *testing.T) {
