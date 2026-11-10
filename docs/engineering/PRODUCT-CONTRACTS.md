@@ -71,7 +71,9 @@ read from the base, so a change cannot add its own approver.
 |---|---|
 | Touches no contract code | None. The job passes in seconds |
 | Touches contract code, tests intact | None. Affected IDs are listed for review |
+| Adds a contract | None. Additions to the registry need no approval |
 | Changes a contract on purpose | One record in the registry plus one approval |
+| Edits the checker, the gate workflow, CODEOWNERS, the approver list | One approval |
 
 ## 3. Coverage matrix
 

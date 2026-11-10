@@ -25,9 +25,9 @@ approvers:
   - KidCarmi
 
 # Editing these needs the same approval as changing a contract. Also read from
-# the BASE revision.
+# the BASE revision. This file is not listed: adding an entry stays cheap, and
+# removing or rewording one is caught by the base comparison instead.
 protected:
-  - contracts/**
   - internal/contracts/**
   - cmd/contractcheck/**
   - .github/workflows/product-contracts.yml

@@ -284,6 +284,15 @@ func Assess(base, head *Registry, tree fs.FS, changed []string) Impact {
 			im.Touched = append(im.Touched, b.ID)
 		}
 	}
+	// The registry file is deliberately not a protected path: adding an entry
+	// must stay cheap. What must not change quietly is who can approve and
+	// what is protected.
+	if strings.Join(base.Approvers, ",") != strings.Join(head.Approvers, ",") {
+		im.NeedsApproval = append(im.NeedsApproval, "approvers list changed")
+	}
+	if len(covered(base.Protected, head.Protected)) > 0 {
+		im.NeedsApproval = append(im.NeedsApproval, "protected paths removed: "+strings.Join(covered(base.Protected, head.Protected), ", "))
+	}
 	for _, f := range changed {
 		if touches(base.Protected, []string{f}) {
 			im.NeedsApproval = append(im.NeedsApproval, "protected path changed: "+f)

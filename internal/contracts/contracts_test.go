@@ -26,7 +26,7 @@ func baseContract() Contract {
 }
 
 func reg(cs ...Contract) *Registry {
-	return &Registry{Version: 1, Approvers: []string{"owner"}, Protected: []string{"contracts/**"}, Contracts: cs}
+	return &Registry{Version: 1, Approvers: []string{"owner"}, Protected: []string{"internal/contracts/**"}, Contracts: cs}
 }
 
 var goodTree = tree(map[string]string{"policy.go": "package x\n", "policy_test.go": goodTest})
@@ -159,9 +159,29 @@ func TestAssess_RecordedChangeNeedsApprovalInsteadOfFailing(t *testing.T) {
 }
 
 func TestAssess_ProtectedPathNeedsApproval(t *testing.T) {
-	im := Assess(reg(baseContract()), reg(baseContract()), goodTree, []string{"contracts/registry.yaml"})
-	if len(im.NeedsApproval) != 1 || !strings.Contains(im.NeedsApproval[0], "contracts/registry.yaml") {
+	im := Assess(reg(baseContract()), reg(baseContract()), goodTree, []string{"internal/contracts/contracts.go"})
+	if len(im.NeedsApproval) != 1 || !strings.Contains(im.NeedsApproval[0], "internal/contracts/contracts.go") {
 		t.Fatalf("NeedsApproval = %v", im.NeedsApproval)
+	}
+}
+
+// Adding a contract is free; changing who approves, or what is protected, is not.
+func TestAssess_RegistryAdditionsAreFreeButGovernanceEditsAreNot(t *testing.T) {
+	added := baseContract()
+	added.ID = "POL-002"
+	im := Assess(reg(baseContract()), reg(baseContract(), added), goodTree, []string{"contracts/registry.yaml"})
+	if len(im.Weakened)+len(im.NeedsApproval) != 0 {
+		t.Fatalf("adding a contract must not need approval: %+v", im)
+	}
+	selfApprover := reg(baseContract())
+	selfApprover.Approvers = []string{"owner", "agent-bot"}
+	if im := Assess(reg(baseContract()), selfApprover, goodTree, nil); len(im.NeedsApproval) != 1 {
+		t.Fatalf("adding an approver must need approval: %+v", im)
+	}
+	unprotected := reg(baseContract())
+	unprotected.Protected = nil
+	if im := Assess(reg(baseContract()), unprotected, goodTree, nil); len(im.NeedsApproval) != 1 {
+		t.Fatalf("removing a protected path must need approval: %+v", im)
 	}
 }
 
