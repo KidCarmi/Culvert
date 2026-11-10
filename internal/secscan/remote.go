@@ -167,9 +167,34 @@ func remoteScanFail(class, cause string) {
 // existing scan_timeout alert — because it is the same decision. "The scan did
 // not finish in time" is one condition with one posture, and which of the two
 // scanning back ends happens to be deployed must not change it.
-func remoteScanRefused(hash string) *Result {
+//
+// THE LOG LINE IS THE ONE THING THAT MUST SPLIT, and until CHAOS-115 it did
+// not. The two callers are kept apart precisely because the operator action
+// differs — add capacity vs. fix the scanner (the distinction
+// statRemoteScanSaturated and internal/clamav's ErrQueueFull both exist to
+// preserve) — and this function then printed "did not complete within 10s" for
+// both. For a capacity refusal that sentence is false twice over: the round
+// trip completed, and it completed in five seconds, not ten. It was latent
+// while nothing in front of the sidecar emitted 429; CHAOS-115 gave the shipped
+// sidecar an admission gate, so this is now the line an operator reads in the
+// saturation regime, and it pointed at the wrong remedy.
+//
+// class is remoteOutcomeBudget or remoteOutcomeCapacity. Reason, Source and
+// both counters are IDENTICAL on the two paths and deliberately so: the posture
+// is one decision, the alert dedups on Reason, and the block page quotes it.
+// Only the operator-facing sentence and its rate gate differ.
+func remoteScanRefused(hash, class string) *Result {
 	atomic.AddInt64(&statScanTimeout, 1)
-	if degradedLogAllowed(&lastRemoteRefusalLog) {
+	// Its own gate per class, not one shared lastRemoteRefusalLog: sharing it
+	// would let a single budget line suppress the saturation line for a whole
+	// window, and an operator in a sustained capacity regime could then never
+	// see the sentence that names the remedy.
+	if class == remoteOutcomeCapacity {
+		if degradedLogAllowed(&lastRemoteCapacityLog) {
+			obs.Warnf("ScanSvc: sidecar reported itself at capacity for hash %s — blocking (fail-closed); the scanner is healthy and saturated, so add sidecar capacity rather than investigating a fault",
+				hash)
+		}
+	} else if degradedLogAllowed(&lastRemoteRefusalLog) {
 		obs.Warnf("ScanSvc: remote scan did not complete within %s for hash %s — blocking (fail-closed)",
 			scanBodyTimeout(), hash)
 	}
@@ -213,6 +238,7 @@ func remoteScanOversize() {
 var (
 	lastRemoteFailLog     atomic.Int64
 	lastRemoteRefusalLog  atomic.Int64
+	lastRemoteCapacityLog atomic.Int64
 	lastRemoteOversizeLog atomic.Int64
 )
 
@@ -277,10 +303,10 @@ func (rs *RemoteScanner) ScanBody(data []byte, contentType string) *Result {
 	case remoteOutcomeVerdict:
 		return result
 	case remoteOutcomeBudget:
-		return remoteScanRefused(hash)
+		return remoteScanRefused(hash, remoteOutcomeBudget)
 	case remoteOutcomeCapacity:
 		atomic.AddInt64(&statRemoteScanSaturated, 1)
-		return remoteScanRefused(hash)
+		return remoteScanRefused(hash, remoteOutcomeCapacity)
 	case remoteOutcomeOversize:
 		remoteScanOversize()
 		return nil // fail-open, counted as scan-skipped (Finding 4.2 posture)

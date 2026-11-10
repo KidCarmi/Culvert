@@ -56,6 +56,13 @@ type ScanService struct {
 	server   *http.Server
 	stopped  bool
 	addr     string
+
+	// admission is the bounded gate in front of handleScan's body read
+	// (CHAOS-115, scan_svc_admission.go). It is OUTSIDE mu's remit, and
+	// legitimately so: it is set once in NewScanService and never reassigned,
+	// and its own state is a channel. Every other field here is mutable and
+	// guarded, which is why this one says why it is not.
+	admission *scanSvcAdmission
 }
 
 // ScanRequest is the JSON envelope for a scan request.
@@ -87,7 +94,10 @@ const scanSvcOversizeLogInterval = time.Minute
 // The http.Server is built HERE, not in Start — see the type comment. The mux
 // is immutable and shared by every serve generation the supervisor runs.
 func NewScanService(addr string) *ScanService {
-	ss := &ScanService{addr: addr}
+	// The admission gate is derived from the window configured NOW, which is
+	// the same instant the handler would have read it from. See
+	// scan_svc_admission.go for why the bound is in bytes rather than requests.
+	ss := &ScanService{addr: addr, admission: newScanSvcAdmission(scanSvcWindow())}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scan", ss.handleScan)
 	mux.HandleFunc("/health", ss.handleHealth)
@@ -254,6 +264,20 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt64(&statScanSvcRequests, 1)
 	start := time.Now()
 
+	// ADMISSION BEFORE THE READ, and the ordering is the whole fix (CHAOS-115).
+	// readScanWindow buffers up to window+1 bytes; acquiring afterwards would
+	// bound only the ENGINE work and leave the heap exposure exactly where it
+	// was, at open_connections x (window+1). A request waiting for a slot holds
+	// a goroutine and a connection it already had, and its body stays in the
+	// kernel's socket buffer — which is where backpressure belongs, because TCP
+	// flow control then pushes it back to the caller for free.
+	release, admitted := ss.admission.acquire(r.Context())
+	if !admitted {
+		refuseScanAtCapacity(w, r, ss.admission.slots)
+		return
+	}
+	defer release()
+
 	maxBytes := scanSvcWindow()
 	data, truncated, err := readScanWindow(r.Body, maxBytes)
 	if err != nil {
@@ -393,6 +417,15 @@ func (ss *ScanService) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"requests":          atomic.LoadInt64(&statScanSvcRequests),
 		"oversize_refused":  atomic.LoadInt64(&statScanSvcOversize),
 		"scan_window_bytes": scanSvcWindow(),
+		// CHAOS-115. The sidecar is the only process that knows its own
+		// capacity, for the same reason it is the only one that knows its own
+		// window: both are derived HERE, from THIS process's configuration.
+		// scan_slots x scan_window_bytes is the buffered-body ceiling an
+		// operator must size the container against, so both numbers ride the
+		// same surface.
+		"scan_slots":          ss.admission.slots,
+		"scan_inflight":       scanSvcInflight.Load(),
+		"at_capacity_refused": atomic.LoadInt64(&statScanSvcAtCapacity),
 	})
 }
 

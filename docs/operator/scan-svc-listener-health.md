@@ -3,6 +3,12 @@
 **Applies to:** CHAOS-113 and CHAOS-114 (`scan_svc.go`, `scan_svc_listener.go`,
 `metrics.go`, `healthcheck.go`, `diagnostics.go`).
 
+**Not covered here:** a sidecar that is serving but **saturated**. Every signal
+below is about the socket. A sidecar whose admission slots are all busy binds
+and serves perfectly and reads `ready` on all of them, while refusing scans with
+HTTP 429 and blocking downloads fleet-wide. That is
+[`scan-capacity-and-timeouts.md` §6.2](scan-capacity-and-timeouts.md) (CHAOS-115).
+
 This is the fourth and last of the listener runbooks, after
 [`admin-ui-listener-recovery.md`](admin-ui-listener-recovery.md) (CHAOS-57),
 [`socks5-listener-health.md`](socks5-listener-health.md) (CHAOS-66/102) and

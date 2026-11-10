@@ -49,6 +49,11 @@ All are on `/metrics`, on `GET /api/security-scan/status`, and in the
 | `culvert_clam_scan_errors_total` | `stat_clam_scan_error` | *ClamAV scan errors* | A genuine daemon fault (unreachable, protocol error). Fires the `scan_clam_error` alert. Dual-emitted as `culvert_clamav_scan_errors_total` — same value, the canonical name that matches the `culvert_clamav_*` family (`culvert_clamav_blocked_total`); build new dashboards/alert rules against the `culvert_clamav_*` prefix, `culvert_clam_scan_errors_total` is kept only for existing consumers. |
 | `culvert_scan_decompress_bombs_total` | `stat_decompress_bombs` | *Decompression refused* | A compressed response expanded past the decompression ratio bound (§4, "a compressed download is always refused") and was refused. A property of the content, not of node capacity. |
 
+On a **sidecar host** three more series describe the sidecar's own admission
+plane — `culvert_scan_svc_slots`, `culvert_scan_svc_inflight` and
+`culvert_scan_svc_at_capacity_total`. They are emitted only where
+`scan_svc.listen` is configured; see §6.2.
+
 **Capacity and faults are deliberately separate.** `culvert_clam_saturated_total`
 does **not** raise `scan_clam_error`, because the response is different: add
 capacity, don't go looking at a daemon that is working.
@@ -253,6 +258,78 @@ structurally zero here, so page on:
   caller's. Unlike the local path, where this series means "the operator's own
   configured limit was exceeded", here it means the two windows disagree, which
   is a misconfiguration to fix rather than a cost to accept.
+
+### 6.2 The sidecar's admission plane (CHAOS-115)
+
+**Read this if you run a shared sidecar.** A sidecar is often pointed at by
+several proxies, so its concurrency is the **sum** over every node that calls
+it. Until CHAOS-115 nothing bounded that sum: `POST /scan` buffered up to
+`security.max_scan_mb + 1` bytes per request before doing anything else, and the
+number of requests inside that buffer at once was set by whatever the network
+delivered. Measured with a 1 MiB window, callers that stall mid-body: 192
+concurrent callers held 192 buffers and 244 MiB of sidecar heap — linear, at
+about 1.27x the window per request. Extrapolated to the shipped 5 MiB default
+that is ~1.2 GiB; to a 20 MiB fleet, ~4.9 GiB. The sidecar then OOMs, and
+**every node pointed at it fails open** (table in §6.1), which is a security
+control collapsing fleet-wide at the moment traffic is heaviest.
+
+The sidecar now admits a bounded number of concurrent scans and refuses the
+overflow with **HTTP 429**, which the caller has classified as capacity — and
+therefore **fail-closed** — since CHAOS-53.
+
+| Surface | Field / series | Meaning |
+|---|---|---|
+| `GET /health` on the sidecar | `scan_slots` | How many bodies this sidecar will buffer at once. |
+| `GET /health` on the sidecar | `scan_inflight` | How many it is buffering right now. |
+| `GET /health` on the sidecar | `at_capacity_refused` | Cumulative 429s. |
+| `/metrics` on the sidecar host | `culvert_scan_svc_slots` | Same as `scan_slots`. |
+| `/metrics` on the sidecar host | `culvert_scan_svc_inflight` | Same as `scan_inflight`; pinned at `slots` is the leading indicator. |
+| `/metrics` on the sidecar host | `culvert_scan_svc_at_capacity_total` | Same as `at_capacity_refused`. |
+| `/metrics` on each **caller** | `culvert_remote_scan_saturated_total` | The caller's side of the same event (already existed). |
+
+**Size the container against `scan_slots x scan_window_bytes.`** That product is
+the buffered-body ceiling this sidecar will hold, and both numbers are on the
+same `/health` reply so you never have to derive it:
+
+```sh
+curl -s http://scan-svc:8484/health | jq '{scan_slots, scan_inflight, scan_window_bytes, at_capacity_refused}'
+```
+
+The slot count is derived, not configured: it is a 256 MiB buffered-body budget
+divided by this process's own window, clamped to between 2 and 32. The ceiling
+of 32 is not about memory — ClamAV admits 4 concurrent scans, so slots far above
+that would only let the HTTP layer buffer work the engines cannot start. At the
+shipped 5 MiB window the count is 32; at 16 MiB it is 15; at 64 MiB it is 3.
+**Widening `security.max_scan_mb` therefore narrows concurrency rather than
+multiplying memory** — which is the direction that must not surprise you. It is
+read once per sidecar start, so a window changed at runtime takes effect on the
+next restart.
+
+**Refusals fail closed, so they are user-visible.** Sustained
+`culvert_scan_svc_at_capacity_total` means downloads are being **blocked** with
+`403 scan timeout`, not forwarded unscanned. That is the intended posture under
+genuine overload and §4's triage applies, but the remedy is capacity, not a
+scanner investigation:
+
+```promql
+# The sidecar is refusing scans. Users are seeing blocked downloads.
+rate(culvert_scan_svc_at_capacity_total[5m]) > 0
+
+# Leading indicator: every slot busy before refusals begin.
+culvert_scan_svc_inflight >= culvert_scan_svc_slots
+```
+
+The sidecar's log names the condition and the remedy once a minute while it
+lasts (`refused /scan from … all N scan slot(s) busy …`), and each **caller**
+logs `sidecar reported itself at capacity … add sidecar capacity rather than
+investigating a fault`. Before CHAOS-115 the caller printed `remote scan did not
+complete within 10s` for this, which pointed at a slow scanner when the scanner
+was healthy and saturated.
+
+To add capacity: run more sidecars behind a load balancer, give the sidecar more
+CPU and a ClamAV daemon that keeps up, or narrow `security.max_scan_mb` on the
+sidecar (which widens its slot count) if your objects are smaller than the
+window.
 
 **Scan exclusions.** Both lists (hosts and SHA-256 hashes) apply in sidecar mode
 and are consulted before the round trip. If you ran a sidecar deployment on a

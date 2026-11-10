@@ -57,6 +57,45 @@ missing staleness alert and health row are recorded as the open half. Id claimed
 in a committed placeholder row before any code per the 2026-09-25 amendment,
 checked against `origin/main` at `3c5fab1`.
 
+The 2026-11-09 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-09.md)
+and summarised in §64 — CHAOS-115 (THE SHARED SCANNER HAS NO ADMISSION PLANE).
+The two rounds before this one supervised the sidecar's SOCKET. This one looked
+at the resource its handler spends: `POST /scan` buffered up to `window+1` bytes
+via `readScanWindow` before doing anything else, and nothing bounded how many
+handlers were inside that call at once, so the sidecar's buffered-body exposure
+was `open_connections x (window+1)` — set by whatever the network delivered, not
+by any configured capacity, the engines' concurrency or a memory budget. It is
+the only listener in the tree with no admission control at all and the one whose
+per-request cost is the operator's whole scan window. Measured with a 1 MiB
+window and callers that stall one byte short of their declared Content-Length:
+64 callers → **64 concurrent buffers, 75.8 MiB**; 192 → **192, 244.5 MiB**;
+linear at ~1.27x the window (`io.ReadAll` doubles). Extrapolated: ~1.2 GiB at
+the shipped 5 MiB default, ~4.9 GiB on a 20 MiB fleet — and a SHARED sidecar's
+concurrency is the SUM over every node pointed at it. The cascade is what makes
+it sharp: OOM takes the PROCESS, so CHAOS-113's supervisor (which rebinds a
+socket inside a living process) cannot help, every caller takes the fail-OPEN
+branch (`remoteScanFail`, WK-2b) and forwards bodies UNSCANNED fleet-wide at
+peak traffic, and the restart meets the same storm — the crash-loop shape
+CHAOS-114 pages for with a remedy that names an OOM kill but cannot name its
+cause. **The fix needed no new posture and no caller change, because the
+caller's half was complete, tested and unreachable**: `scanOnce` has classified
+HTTP 429 as `remoteOutcomeCapacity` → fail CLOSED since CHAOS-52, and its own
+comment says "the shipped sidecar never emits 429 today". It does now, from a
+byte-budgeted gate acquired BEFORE the read (32 stalled callers through 4 slots:
+4 buffers and 5.0 MiB, against 32 and 36.4 MiB unfixed). A SECOND defect was found
+by the fix's own test and fixed in the same round: `remoteScanRefused` printed
+"did not complete within 10s" for a capacity refusal that arrived in 5.26 s,
+collapsing the add-capacity/fix-the-scanner split the counters preserve into the
+one surface a human reads. A THIRD finding corrects this round's own first
+design — it claimed the caller's deadline bounds the slot wait, and an HTTP
+request carries no deadline over the wire. Narrows, rather than closes,
+CHAOS-114's residual risk `2` / §8.1: see §7.1 of the dated review for why
+stopping the fail-open beat narrating it. Id AND section claimed against
+`origin/main` at `d11ed3a` (highest id 114/§63, both on main) and the open-PR
+set (#1848, #1847, #1846, #1845, #1844, #1705, #1549, #1548, #1536, #1528,
+#1526 — none a chaos sweep).
+
 The 2026-11-08 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-08.md)
 and summarised in §63 — CHAOS-114 (THE SCAN SIDECAR THAT WILL NOT STAY). The
@@ -332,6 +371,24 @@ everything else is triaged below with a suggested PR and required tests for foll
 > in silence. The durable fix is still the one recorded above (allocate the id
 > in a committed placeholder row at the START of a sweep), and at six
 > occurrences it is well past overdue.
+
+**2026-11-09 — `CHAOS-115`/`§64` CLAIMED. Domain: the SCAN SIDECAR'S
+ADMISSION PLANE — two rounds supervised the socket; what bounds the RESOURCE its
+handler spends, given that `/scan` buffers a whole scan window per request and
+a shared sidecar's concurrency is the sum over the fleet?** Checked against
+`origin/main` at `d11ed3a`, where `CHAOS-114`/`§63` is the highest of both and
+no id or section is held by an open PR (#1848, #1847, #1846, #1845, #1844,
+#1705, #1549, #1548, #1536, #1528, #1526 — none is a chaos sweep), so this
+sweep took the next free number of each. **Deviation from the convention,
+stated rather than glossed:** as in the round before it, the id was NOT
+allocated in a separate placeholder commit ahead of the code. Unlike that round
+the target was not handed over by a named residual risk — it was found by
+reading the caller/sidecar pair for the SIMULATE list's connection-storm and
+OOM rows — so the convention's purpose was served only by the
+`origin/main`-plus-open-PR check above rather than by timing. That check is
+sufficient here because no other sweep is open, and the risk the convention
+guards (two sweeps silently taking one id) was nil; it would NOT have been
+sufficient had one been. This sweep took 115/§64 and will not move.
 
 **2026-11-08 — `CHAOS-114`/`§63` CLAIMED. Domain: the SCAN SIDECAR'S OWN
 SUPERVISION SURFACE — the round before this one shipped a supervisor, five
@@ -20723,3 +20780,162 @@ through**, without which a container orchestrator in a tight redeploy loop is
 indistinguishable from a crash loop except by reading the log line's new
 duration field; and **converging the three identical bind-error classifiers**,
 carried forward untouched from §62.
+
+---
+
+## 64. CHAOS-115 — The shared scanner has no admission plane: the sidecar's heap is sized by the network, and when it dies the whole fleet fails open
+
+Recorded in full in
+[CHAOS-ENGINEERING-REVIEW-2026-11-09.md](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-09.md).
+Id and section claimed against `origin/main` at `d11ed3a`; see the claim row
+above, including the stated deviation from the placeholder-commit convention.
+
+§62 and §63 are about the sidecar's SOCKET — one that will not come back, one
+that will not stay. This section is about the resource its handler spends once
+the socket is fine.
+
+- **`CHAOS-115` / SS-4 — THE FINDING. `/scan` buffered a whole scan window per
+  request, with nothing bounding how many requests were inside that buffer at
+  once.** `handleScan` opened with
+  `readScanWindow(r.Body, scanSvcWindow())`, which reads up to `window+1` bytes
+  into the heap. Exposure was therefore `open_connections x (window+1)`, set by
+  whatever the network delivered. It is the only listener in the tree with no
+  admission control of any kind in front of it, and the one whose per-request
+  cost is the operator's entire `security.max_scan_mb`.
+
+  **Measured on the pre-fix tree** (1 MiB window; callers that declare a
+  `Content-Length` then stall one byte short, so each handler parks inside
+  `readScanWindow` holding what it buffered — the *network latency* / *packet
+  loss* shape, and the cheapest way to hold a handler open without an engine
+  seam):
+
+  ```
+  slow callers | handlers buffering concurrently | sidecar heap delta
+            64 |                              64 |           75.8 MiB
+           192 |                             192 |          244.5 MiB
+  ```
+
+  Linear at ~1.27x the window per request (`io.ReadAll` grows by doubling, so a
+  request transiently holds both buffers). Those are the two sizes measured, not
+  a ceiling approached. Extrapolated: ~1.2 GiB at the shipped 5 MiB default and
+  ~4.9 GiB on a 20 MiB fleet — and no malice is needed, because a SHARED
+  sidecar's concurrency is the sum over every node pointed at it, and
+  `scan_svc.go`'s own doc comment offers shared scanning as a reason to deploy
+  it. `internal/clamav` has had a four-slot semaphore for exactly this reason
+  since long before any of it; the HTTP layer in front spent an unbounded
+  resource before reaching it.
+
+  **Why it is worse than an ordinary memory bug: the security control is what
+  collapses.** OOM takes the PROCESS, so §62's supervisor — which rebinds a dead
+  socket inside a living process — cannot help. Every node pointed at the
+  address takes `internal/secscan`'s fail-OPEN branch (`remoteScanFail`, WK-2b)
+  and forwards bodies **UNSCANNED**, fleet-wide, at the moment traffic is
+  heaviest. The restart meets the same queued storm, which is the crash-loop
+  shape §63's flap detector pages for with a remedy that names an OOM kill among
+  the causes but cannot name what caused it. So scanning switched itself off,
+  under load, **by succeeding at accepting work**.
+
+  **The fix needed no new posture and no caller change, because the caller's
+  half was already complete, tested — and unreachable.** `scanOnce` has
+  classified HTTP 429 as `remoteOutcomeCapacity` since CHAOS-52: fail CLOSED,
+  counted as saturation rather than as a fault, reusing the local path's timeout
+  vocabulary and the existing `scan_timeout` alert, gated by
+  `TestChaos_SidecarCapacityRefusalFailsClosed`. Its comment: *"The shipped
+  sidecar never emits 429 today; a load balancer or a third-party scanner in
+  front of it can, and classifying it correctly costs nothing."* This round
+  makes the shipped sidecar emit it, from a gate acquired **before** the read.
+  Post-fix, 32 stalled callers through 4 slots: **4** buffers and **8.9 MiB**,
+  against 32 and 47.4 MiB with the ordering reversed.
+
+  The bound is in BYTES, not requests: a 256 MiB buffered-body budget divided by
+  this process's own window, clamped to `[2, 32]`. A fixed request count would
+  have silently multiplied the exposure of anyone who WIDENED the window, which
+  is the one direction that must not surprise; the derived count narrows
+  instead. The ceiling of 32 is not about memory — `clamMaxConcurrent` is 4, so
+  slots far above it buy no throughput and only let the HTTP layer buffer work
+  the engines cannot start. 429 and not 503 is load-bearing in another package:
+  any other non-200 is a FAULT at the caller, which fails OPEN, so the wrong
+  status would have turned the fix into a fleet-wide fail-open under exactly the
+  load it exists to survive (mutation 4 reports
+  `got <nil> — content was forwarded UNSCANNED`).
+
+- **`CHAOS-115` / SS-5 — the caller's refusal log named the wrong remedy, and
+  this round is what made the line reachable.** `remoteScanRefused` serves both
+  fail-closed outcomes and printed one sentence for both: *"remote scan did not
+  complete within 10s"*. For a capacity refusal that is false twice over — the
+  round trip completed, and it completed in 5.26 s measured — and it sends an
+  operator after a slow scanner when the scanner is healthy and saturated. The
+  whole reason `remoteOutcomeCapacity` is kept apart from `remoteOutcomeBudget`
+  is the one `internal/clamav`'s `ErrQueueFull` doc states: *add capacity vs.
+  fix the daemon*. The counters preserved that split; the only surface a human
+  reads unprompted collapsed it. Latent while nothing emitted 429, so SS-4 is
+  what makes it the line read in the saturation regime — hence same round, not
+  deferred. The split is narrow by design: `Reason`, `Source` and both counters
+  stay identical (one posture, and the alert dedups on `Reason`). The rate GATES
+  had to split too, or a single budget line would suppress the saturation line
+  for a whole `degradedLogInterval` and the remedy sentence might never be seen.
+
+- **`CHAOS-115` / SS-6 — a claim this round made about its own fix, retracted
+  by its own test.** The first form asserted that
+  `context.WithTimeout(r.Context(), scanSvcQueueWait)` lets the CALLER's budget
+  cut the slot wait short. An HTTP request carries no deadline over the wire, so
+  the server's `r.Context()` has none to keep; and `net/http` did not deliver
+  even the cancellation before the handler had started reading the body — a
+  client that aborted at 400 ms left its waiter parked until the 5 s backstop.
+  `scanSvcQueueWait` is the operative bound and effectively the only one, which
+  is recorded in `acquire`'s comment rather than hoped for. The test is kept,
+  re-aimed at the property that does hold and matters more: a refused request
+  never takes a slot. A slot leaked per client abort would narrow the gate
+  permanently until the sidecar refused everything — and refusals fail CLOSED,
+  so that is a fleet-wide download outage assembled out of ordinary client
+  timeouts (mutation 5).
+
+**Verification.** Five mutations, each applied to the fixed tree and reverted.
+Removing the gate is caught by four gates but only because it also removes the
+instrumentation; widening the semaphore 1000x while keeping the gauge is caught
+by the overshoot assertion; acquiring after the read is caught by the
+`peak < slots` arm (a stalled caller never finishes its read, so it never
+reaches a gate placed after it) AND by the heap measurement. **The heap oracle
+began as an always-on assertion and the full suite retired it**: `HeapAlloc` is
+process-wide, so with ~140 live goroutines from unrelated tests the same bounded
+sidecar measured 37 MiB against a 16 MiB ceiling while the gauge correctly read
+4. It now sits under the `benchgate` tag, the division CHAOS-111's wall-clock
+budgets took. A second harness bug was fixed with it, of the kind that makes a
+number look fine while meaning nothing: the test builds its payloads in the SAME
+process as the sidecar it measures, and a per-caller 1 MiB buffer put 32 MiB of
+client garbage on the heap under test. Shared, the measurement is 5.0 MiB on
+three consecutive runs against a 16 MiB ceiling. Thirteen gates added (10 in `main`, 3 in `internal/secscan`), including the
+negative control that matters most for customers — ordinary traffic below the
+bound is never refused, because a refusal blocks a download — and a CHAOS-101
+regression control, since admission was inserted immediately before the one
+place in this handler where ordering is a correctness argument.
+
+**Posture change, stated plainly rather than buried:** under genuine overload
+downloads are now BLOCKED where they were previously forwarded unscanned until
+the sidecar died. That is the documented posture for capacity and the register's
+own "prefer fail closed", but it is customer-visible, and an operator who was
+unknowingly relying on the fail-open will meet the fix as new blocking.
+`docs/operator/scan-capacity-and-timeouts.md` §6.2 leads with it.
+
+**Narrows rather than closes** §63's residual risk `2` / §8.1 ("the caller is
+still silent"), and not in the shape that round proposed: for a sidecar
+OVERWHELMED rather than absent, the right answer was not a row narrating a
+fail-open but to stop failing open. A row remains the right answer for the
+shapes that are still genuinely fail-open — unreachable, 5xx, no verdict,
+oversize — and the missing piece there is RECENCY, since
+`culvert_remote_scan_fail_total` is monotonic and cannot tell twenty faults
+three days ago from twenty in the last minute.
+
+**Open, carried forward:** the caller contract row for the remaining fail-open
+shapes (now specific: RECENCY state, not a row — and the same missing ingredient
+is why this round added no saturation row on the SIDECAR side either:
+`inflight >= slots` flickers across diagnostics polls and the cumulative refusal
+count pins the row to `warn` forever after one burst); `scan_svc_degraded`'s blindness
+to a 200-without-a-verdict, where the reassuring surface is the one an operator
+looks at; `MaxConnsPerHost` unset on the caller's transport, which with the
+server gate in place costs descriptors rather than heap; a runtime window change
+not retuning a running gate; the 256 MiB budget being a chosen number rather
+than a cgroup limit read; and the unenforced ordering between
+`scanSvcQueueWait` (5 s) and `ScanBodyTimeout` (10 s), which if inverted
+silently reclassifies every capacity refusal as a budget expiry with no test
+failing.

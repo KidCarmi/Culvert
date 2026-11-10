@@ -64,6 +64,73 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The scan sidecar had no admission control, so its heap was sized by the
+  network and an OOM failed the whole fleet open (CHAOS-115).** `POST /scan`
+  buffered up to `security.max_scan_mb + 1` bytes per request before doing
+  anything else, and nothing bounded how many handlers were inside that buffer
+  at once: the exposure was `open_connections x (window+1)`, set by whatever
+  the network delivered rather than by any configured capacity, the engines'
+  concurrency or a memory budget. Measured with a 1 MiB window and callers that
+  declare a `Content-Length` then stall one byte short, so every handler parks
+  mid-read: **64 callers held 64 concurrent buffers and 75.8 MiB; 192 held 192
+  and 244.5 MiB** — linear at ~1.27x the window per request, because
+  `io.ReadAll` grows by doubling. That extrapolates to ~1.2 GiB at the shipped
+  5 MiB default and ~4.9 GiB on a 20 MiB fleet, and no malice is required: a
+  SHARED sidecar's concurrency is the sum over every node pointed at it, which
+  is a deployment `scan_svc.go` itself offers as a reason to run one. The
+  cascade is the point — an OOM takes the PROCESS, so CHAOS-113's supervisor
+  (which rebinds a socket inside a living process) cannot help; every caller
+  then takes the fail-OPEN branch (`remoteScanFail`, WK-2b) and forwards bodies
+  **UNSCANNED** fleet-wide at peak traffic; and the restart meets the same
+  queued storm. Scanning switched itself off, under load, by succeeding at
+  accepting work.
+
+  The sidecar now admits a bounded number of concurrent scans — a 256 MiB
+  buffered-body budget divided by this process's own window, clamped to
+  `[2, 32]` — and refuses the overflow with **HTTP 429** after a 5 s queue wait,
+  so a transient burst is waited out rather than refused on sight. The gate is
+  acquired BEFORE the body read, which is the whole fix: a queued request holds
+  a goroutine and a connection it already had and no buffer, leaving its body in
+  the kernel's socket buffer where TCP flow control pushes back for free.
+  32 stalled callers through 4 slots now hold 4 buffers and 5.0 MiB, against 32
+  and 36.4 MiB before. The bound is in BYTES rather than requests so that
+  widening `security.max_scan_mb` narrows concurrency instead of multiplying
+  memory; the ceiling of 32 is 8x ClamAV's own `clamMaxConcurrent` of 4, so the
+  gate cannot be the bottleneck on a healthy deployment.
+
+  **No caller change was needed, and that is the reason this shape was chosen:**
+  `internal/secscan`'s `scanOnce` has classified HTTP 429 as capacity — fail
+  **CLOSED**, counted as `culvert_remote_scan_saturated_total` rather than as a
+  fault — since CHAOS-52, with its own test; the shipped sidecar simply never
+  emitted it. 429 and not 503 is therefore load-bearing: any other non-200 is a
+  FAULT at the caller, which fails OPEN.
+
+  **Posture change operators can see.** Under genuine overload, downloads are
+  now BLOCKED (`403 scan timeout`) where they were previously forwarded
+  unscanned until the sidecar died. That is the documented posture for capacity,
+  but an operator who was unknowingly relying on the fail-open will meet this as
+  new blocking. New surfaces: `culvert_scan_svc_inflight`,
+  `culvert_scan_svc_slots` and `culvert_scan_svc_at_capacity_total` on the
+  sidecar host (behind the same `Configured` guard as the listener gauges), and
+  `scan_slots` / `scan_inflight` / `at_capacity_refused` on the sidecar's
+  `/health` beside `scan_window_bytes`, because the ceiling to size the
+  container against is their product.
+  `docs/operator/scan-capacity-and-timeouts.md` §6.2 is the runbook.
+
+- **A sidecar at capacity was logged by its callers as a slow scan, sending
+  operators after a healthy scanner (CHAOS-115).** `remoteScanRefused` serves
+  both fail-closed remote outcomes and printed one sentence for both: "remote
+  scan did not complete within 10s". For a capacity refusal that is false twice
+  over — the round trip completed, and it completed in 5.26 s measured — and it
+  collapses the add-capacity/fix-the-scanner split that
+  `statRemoteScanSaturated` and `internal/clamav`'s `ErrQueueFull` both exist to
+  preserve, in the one surface a human reads unprompted. The two classes now
+  have their own sentence and their own rate gate, so a sustained saturation
+  regime cannot be silenced by a single budget line. `Reason`, `Source` and both
+  counters are unchanged: the posture is one decision and the alert dedups on
+  `Reason`. Latent until the fix above gave the shipped sidecar a way to emit
+  429.
+
 - **The decision line's structured-field barrier was proven for `identity` and
   only ASSERTED for every other value on the line, in a comment that got the
   supporting detail wrong.** The 2026-11-08 fix folded SPACE and `{` in the two

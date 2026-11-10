@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
 	"github.com/KidCarmi/Culvert/internal/hashcache"
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // newRemoteAt builds a client pointed at url. Init installs the production
@@ -175,10 +177,12 @@ func resetRemoteLogGates(t *testing.T) {
 	t.Helper()
 	lastRemoteFailLog.Store(0)
 	lastRemoteRefusalLog.Store(0)
+	lastRemoteCapacityLog.Store(0)
 	lastRemoteOversizeLog.Store(0)
 	t.Cleanup(func() {
 		lastRemoteFailLog.Store(0)
 		lastRemoteRefusalLog.Store(0)
+		lastRemoteCapacityLog.Store(0)
 		lastRemoteOversizeLog.Store(0)
 	})
 }
@@ -648,5 +652,142 @@ func TestChaos_DisabledScannerDoesNothing(t *testing.T) {
 	}
 	if err := rs.Health(); err == nil {
 		t.Fatal("Health on a disabled scanner must report not configured")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHAOS-115 — the sentence a saturated fleet reads
+// ─────────────────────────────────────────────────────────────────────────────
+
+// captureSecscanLog installs an obs sink and returns the lines it collected.
+func captureSecscanLog(t *testing.T) func() []string {
+	t.Helper()
+	var mu sync.Mutex
+	var lines []string
+	obs.SetSink(func(line string) {
+		mu.Lock()
+		lines = append(lines, line)
+		mu.Unlock()
+	})
+	// obs.SetSink ignores nil and has no getter, so restore the package
+	// default (stderr) explicitly, as conventions.md requires of a global a
+	// test changes (same pattern as feedsync's chaos109 test).
+	t.Cleanup(func() { obs.SetSink(func(line string) { fmt.Fprintln(os.Stderr, line) }) })
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), lines...)
+	}
+}
+
+// TestChaos115_CapacityRefusalLogNamesCapacityNotTheClock pins the split
+// CHAOS-115 added to remoteScanRefused.
+//
+// The counters already told these two outcomes apart; the LOG did not. A
+// sidecar refusing for capacity produced "remote scan did not complete within
+// 10s", which is false twice over — the round trip completed, and it completed
+// in whatever time the refusal took — and it sends an operator to investigate a
+// slow scanner when the scanner is healthy and saturated. The line was latent
+// while nothing in front of the sidecar emitted 429; CHAOS-115 gave the shipped
+// sidecar an admission gate, so it is now the line read in the saturation
+// regime.
+func TestChaos115_CapacityRefusalLogNamesCapacityNotTheClock(t *testing.T) {
+	resetRemoteLogGates(t)
+	lines := captureSecscanLog(t)
+	srv := sidecar(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "busy", http.StatusTooManyRequests)
+	})
+	rs := newRemoteAt(t, srv.URL)
+
+	if res := rs.ScanBody([]byte("payload"), ""); res == nil || !res.Blocked {
+		t.Fatalf("a sidecar at capacity must fail closed, got %+v", res)
+	}
+
+	var capacity, clock int
+	for _, l := range lines() {
+		if strings.Contains(l, "at capacity") {
+			capacity++
+		}
+		if strings.Contains(l, "did not complete within") {
+			clock++
+		}
+	}
+	if capacity != 1 {
+		t.Errorf("capacity sentences = %d, want 1; lines: %q", capacity, lines())
+	}
+	if clock != 0 {
+		t.Errorf("the budget sentence fired %d time(s) for a capacity refusal: it names the wrong remedy (fix the scanner, not add capacity); lines: %q", clock, lines())
+	}
+}
+
+// TestChaos115_BudgetRefusalKeepsItsOwnSentence is the negative control: the
+// split must not have moved the ordinary budget refusal onto the capacity line.
+func TestChaos115_BudgetRefusalKeepsItsOwnSentence(t *testing.T) {
+	resetRemoteLogGates(t)
+	withScanBudget(t, 100*time.Millisecond)
+	lines := captureSecscanLog(t)
+	srv := sidecar(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+	})
+	rs := newRemoteAt(t, srv.URL)
+
+	if res := rs.ScanBody([]byte("payload"), ""); res == nil || !res.Blocked {
+		t.Fatalf("an exceeded budget must fail closed, got %+v", res)
+	}
+
+	var capacity, clock int
+	for _, l := range lines() {
+		if strings.Contains(l, "at capacity") {
+			capacity++
+		}
+		if strings.Contains(l, "did not complete within") {
+			clock++
+		}
+	}
+	if clock != 1 {
+		t.Errorf("budget sentences = %d, want 1; lines: %q", clock, lines())
+	}
+	if capacity != 0 {
+		t.Errorf("the capacity sentence fired %d time(s) for a budget refusal; lines: %q", capacity, lines())
+	}
+}
+
+// TestChaos115_TheTwoRefusalLinesDoNotSuppressEachOther pins the separate rate
+// gates. One shared gate let a single budget line silence the saturation line
+// for a whole degradedLogInterval, so an operator in a sustained capacity
+// regime could never see the sentence naming the remedy.
+func TestChaos115_TheTwoRefusalLinesDoNotSuppressEachOther(t *testing.T) {
+	resetRemoteLogGates(t)
+	lines := captureSecscanLog(t)
+
+	// A budget refusal first, claiming its own gate.
+	remoteScanRefused("hash-budget", remoteOutcomeBudget)
+	// Then a capacity refusal, immediately, inside the same interval.
+	remoteScanRefused("hash-capacity", remoteOutcomeCapacity)
+
+	var capacity, clock int
+	for _, l := range lines() {
+		if strings.Contains(l, "at capacity") {
+			capacity++
+		}
+		if strings.Contains(l, "did not complete within") {
+			clock++
+		}
+	}
+	if clock != 1 || capacity != 1 {
+		t.Errorf("budget=%d capacity=%d, want 1 and 1: the two classes share a rate gate; lines: %q", clock, capacity, lines())
+	}
+
+	// And the gates still suppress WITHIN a class, which is the property they
+	// exist for: this fires once per proxied response while a sidecar is unwell.
+	remoteScanRefused("hash-capacity-2", remoteOutcomeCapacity)
+	capacity = 0
+	for _, l := range lines() {
+		if strings.Contains(l, "at capacity") {
+			capacity++
+		}
+	}
+	if capacity != 1 {
+		t.Errorf("capacity sentences = %d after a second refusal inside the interval, want 1: the rate gate is not suppressing", capacity)
 	}
 }
