@@ -12,6 +12,8 @@ package main
 // Also reports a saved-but-not-yet-serving uploaded pair (pending restart),
 // including a replacement uploaded while an earlier upload is serving.
 //
+// Also reports the plain-HTTP fallback after a self-sign failure.
+//
 // Report-only: derived from the same state GET /api/settings/network already
 // returns plus a read of the saved certificate file to fingerprint its chain,
 // no change to TLS serving. Contributes nothing for the auto
@@ -28,6 +30,20 @@ const uiTLSCertWarnDays = 30
 // checkAdminUITLSCert returns zero or more rows for the admin UI certificate.
 func checkAdminUITLSCert() []OperatorContractCheck {
 	var rows []OperatorContractCheck
+	// startUI could not mint the self-signed certificate and degraded to plain
+	// HTTP, so the admin panel — login included — is served in cleartext. The
+	// fact was on the login banner and the Network page only. The raw crypto
+	// error stays off this row: it is viewer-gated on /api/settings/network.
+	if uiTLSFallbackActive {
+		rows = append(rows, OperatorContractCheck{
+			Code:   "ui_tls_fallback_http",
+			Status: diagWarn,
+			Message: "the admin UI could not generate its self-signed certificate at startup and is being served over plain HTTP — " +
+				"credentials and session cookies cross the network unencrypted",
+			OperatorAction: "Upload a valid certificate and matching private key under Certificates → Upload Custom Certificate (Target: Management UI), " +
+				"then restart; the failure reason is on Settings → Network. Until then reach the GUI only from a trusted network.",
+		})
+	}
 	if uiCustomTLSCorrupt {
 		rows = append(rows, OperatorContractCheck{
 			Code:   "ui_tls_cert_corrupt",
