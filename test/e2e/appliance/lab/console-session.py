@@ -17,23 +17,14 @@ The script is sent base64-encoded and run as root through `sudo` (or as
 `culvert` with --as-user); its combined output comes back base64-encoded
 between split markers, so serial echo, prompts and kernel console messages are
 never mistaken for output. Exit status = the script's exit status; 90-99 are
-helper failures (no login, no marker, timeout; 90 = --gzip output that does not
-decompress, e.g. truncated or corrupted).
-
---gzip compresses the captured output on the guest (gzip -9 -n) before base64
-and decompresses it here. The bytes written to stdout are identical; only the
-transfer is smaller. It exists for the console leg's virtio console (hvc0),
-which sustains only tens of bytes per second for large output (QEMU campaign 5,
-run 42815909646: a ~60 KB M2 transcript cannot cross it within 600 s). gzip's
-own CRC32 and length check make a truncated or altered transfer fail (exit 90)
-instead of yielding partial output.
+helper failures (no login, no marker, timeout).
 """
 import argparse
 import base64
-import gzip
 import os
 import re
 import secrets
+import select
 import socket
 import string
 import sys
@@ -77,7 +68,16 @@ class Console:
         return self.buf
 
     def _pump(self, wait):
-        time.sleep(wait)
+        # Wait UP TO `wait` for data, then drain everything available. Reading
+        # as soon as bytes arrive is load-bearing: QEMU's virtio console (the
+        # console leg's hvc0, a socket chardev) stops forwarding for good once
+        # its socket backs up between reads. Campaign 5 (run 42815909646): the
+        # old sleep-then-drain loop received 10,661 bytes per connection and
+        # then nothing, while QEMU's logfile shows the guest sent the complete
+        # output. Reproduced on QEMU 8.2.2 with the console leg's flags: a
+        # reader that sleeps 0.3 s stalls after ~21 KB; one that waits on
+        # select() receives 99 KB byte-identical in about half a second.
+        select.select([self.s], [], [], wait)
         try:
             while True:
                 chunk = self.s.recv(65536)
@@ -224,15 +224,12 @@ def run(c, args, script, timeout, root, quiet=False, nowait=False):
         c.send(b64[i:i + 76] + "\r")
     c.send("LABEOF\r")
     runner = ("sudo -p '%s' bash" % SUDO) if root else "bash"
-    # getattr: q7-probe-session.py calls run() with its own argument namespace.
-    gz = bool(getattr(args, "gzip", False))
-    dump = ("gzip -9 -n -c \"$L/o%s\" | base64 -w 76" if gz else "base64 -w 76 \"$L/o%s\"") % tag
     if nowait:
         c.send("%s \"$L/c%s\"\r" % (runner, tag))
     else:
         c.send(("%s \"$L/c%s\" > \"$L/o%s\" 2>&1 < /dev/null; r=$?; printf 'LAB%%s%%s\\n' BEGIN %s; "
-                "%s; printf 'LAB%%s%%s %%s\\n' END %s \"$r\"; rm -f \"$L/c%s\" \"$L/o%s\"\r")
-               % (runner, tag, tag, tag, dump, tag, tag, tag))
+                "base64 -w 76 \"$L/o%s\"; printf 'LAB%%s%%s %%s\\n' END %s \"$r\"; rm -f \"$L/c%s\" \"$L/o%s\"\r")
+               % (runner, tag, tag, tag, tag, tag, tag, tag))
     end_re = re.compile(r"LABEND%s (\d+)" % tag)
     # A --nowait script that prints LABACCEPT <guest epoch> (as root, i.e.
     # after PAM login AND sudo succeeded) is ACCEPTED at that moment: return
@@ -267,21 +264,9 @@ def run(c, args, script, timeout, root, quiet=False, nowait=False):
             body = c.buf[begin + len("LABBEGIN" + tag):m.start()] if begin >= 0 else ""
             lines = [l.strip() for l in body.split("\n")]
             data = "".join(l for l in lines if re.fullmatch(r"[A-Za-z0-9+/=]+", l))
-            if gz or not quiet:
-                raw = base64.b64decode(data + "=" * (-len(data) % 4))
-                if gz:
-                    # Even an empty file gzips to a stream starting 1f 8b: no
-                    # magic means the guest's gzip did not run (an empty
-                    # transfer would otherwise decompress to b"" silently).
-                    if not raw.startswith(b"\x1f\x8b"):
-                        raise SystemExit(90)
-                    try:
-                        raw = gzip.decompress(raw)
-                    except Exception:
-                        raise SystemExit(90)
-                if not quiet:
-                    sys.stdout.buffer.write(raw)
-                    sys.stdout.flush()
+            if not quiet:
+                sys.stdout.buffer.write(base64.b64decode(data + "=" * (-len(data) % 4)))
+                sys.stdout.flush()
             return int(m.group(1))
         c._pump(0.3)
     raise SystemExit(98)
@@ -295,7 +280,6 @@ def main():
     p.add_argument("--as-user", action="store_true", help="run as culvert, without sudo")
     p.add_argument("--timeout", type=int, default=600)
     p.add_argument("--nowait", action="store_true", help="start the script and return (reboot)")
-    p.add_argument("--gzip", action="store_true", help="compress the output on the guest for the transfer (console leg)")
     p.add_argument("--trace", help="append the raw session (prompts only, no secrets typed are echoed) here")
     args = p.parse_args()
     script = sys.stdin.read()

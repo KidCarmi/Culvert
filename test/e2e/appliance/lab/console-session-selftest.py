@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Self-test of console-session.py's transfer path against a fake guest.
+"""Self-test of console-session.py's receive loop and transfer path.
 
-The fake guest is a real bash on a pty behind an AF_UNIX socket (the shape of
-QEMU's chardev socket). Its guest->host direction can be throttled to a byte
-rate, reproducing the console leg's virtio console (hvc0), which sustained only
-tens of bytes per second for large output in QEMU campaign 5 (run 42815909646):
-the ~60 KB M2 transcript could not cross it within 600 s.
+Campaign 5 (run 42815909646) lost the console leg to the helper's receive loop:
+it slept 0.3 s before each drain, and QEMU's virtio console (hvc0, a socket
+chardev) stops forwarding for good once its socket backs up between reads. The
+helper received 10,661 bytes per connection and then nothing, although QEMU's
+logfile shows the guest sent everything. The fix waits on select() and drains
+as soon as bytes arrive. QEMU itself cannot run here, so this test checks the
+property the fix rests on, plus the end-to-end transfer against a fake guest:
 
-Cases, at 10x the real rate and 1/40 of the real deadline (2000 B/s, 15 s):
-  plain 60 KB, throttled       -> exit 98 (deadline), as campaign 5 saw
-  --gzip 60 KB, throttled      -> exit 0, stdout byte-identical to the file
-  --gzip, script exit 7        -> exit 7, output intact (status preserved)
-  --gzip, guest gzip broken    -> exit 90, no output (fails closed)
-  --gzip, gzip stream truncated -> exit 90, no output (CRC/length check)
-  --gzip, script prints nothing -> exit 0, empty output (valid empty stream)
-  plain small, unthrottled     -> exit 0, identical (default path unchanged)
-Usage: console-session-selftest.py   (stdlib only; needs bash, gzip, base64)
+  drain-prompt   _pump(5) returns as soon as data arrives (< 2 s), not after 5 s
+  settle-kept    read_for(1) still waits the full second (settle semantics)
+  plain-60k      60 KB through a real bash on a pty: exit 0, byte-identical
+  status-kept    script exit 7: helper exit 7, output intact
+  plain-small    a one-line script: exit 0, identical
+Usage: console-session-selftest.py   (stdlib only; needs bash)
 """
+import importlib.util
 import os
 import pty
 import random
@@ -30,17 +30,16 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HELPER = os.path.join(HERE, "console-session.py")
+_spec = importlib.util.spec_from_file_location("lab_console_session_selftest", HELPER)
+cs = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cs)
 
 
 def transcript(path, size=60000):
-    # M2-shaped text: repetitive keys, varying values (gzip ratio about 8:1,
-    # like the real transcripts).
     r = random.Random(1528)
     out, n = [], 0
     while n < size:
         l = "m2-out host netns-census| ns net:[%d] %d\n" % (4026531833 + r.randrange(4), r.randrange(4000))
-        if r.random() < 0.2:
-            l = "m2-obs host %s rc=0 lines=%d\n" % (r.choice(["sysctl", "ordering", "mdb", "nics", "fds"]), r.randrange(200))
         out.append(l)
         n += len(l)
     data = "".join(out).encode()
@@ -49,20 +48,18 @@ def transcript(path, size=60000):
 
 
 class FakeGuest:
-    """bash on a pty; one client at a time on SOCK; guest->host throttled."""
+    """A real bash on a pty, one client at a time on SOCK (QEMU chardev shape)."""
 
-    def __init__(self, sock, rate=None, path_prefix=None):
-        self.sock, self.rate = sock, rate
-        env = {"PATH": (path_prefix + ":" if path_prefix else "") + os.environ["PATH"], "PS1": "", "PS2": "",
-               "HOME": tempfile.gettempdir(), "TERM": "dumb", "LANG": "C.UTF-8"}
+    def __init__(self, sock):
+        env = {"PATH": os.environ["PATH"], "PS1": "", "PS2": "", "HOME": tempfile.gettempdir(),
+               "TERM": "dumb", "LANG": "C.UTF-8"}
         pid, fd = pty.fork()
         if pid == 0:
             os.execve("/bin/bash", ["bash", "--norc", "--noprofile", "-c", "stty -echo; exec bash --norc --noprofile -i"], env)
-        self.pid, self.fd = pid, fd
+        self.pid, self.fd, self.stop = pid, fd, False
         self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.srv.bind(sock)
         self.srv.listen(1)
-        self.stop = False
         threading.Thread(target=self.serve, daemon=True).start()
 
     def serve(self):
@@ -71,7 +68,6 @@ class FakeGuest:
                 conn, _ = self.srv.accept()
             except OSError:
                 return
-            budget, t0 = 0.0, time.time()
             while not self.stop:
                 rl, _, _ = select.select([conn, self.fd], [], [], 0.05)
                 if conn in rl:
@@ -80,19 +76,8 @@ class FakeGuest:
                         break
                     os.write(self.fd, b)
                 if self.fd in rl:
-                    if self.rate:
-                        budget = min(self.rate, budget + (time.time() - t0) * self.rate)
-                        t0 = time.time()
-                        n = int(budget)
-                        if n <= 0:
-                            time.sleep(0.05)
-                            continue
-                        b = os.read(self.fd, n)
-                        budget -= len(b)
-                    else:
-                        b = os.read(self.fd, 65536)
                     try:
-                        conn.sendall(b)
+                        conn.sendall(os.read(self.fd, 65536))
                     except OSError:
                         break
             conn.close()
@@ -106,53 +91,56 @@ class FakeGuest:
             pass
 
 
-def helper(sock, d, script, timeout, gz):
-    cmd = [sys.executable, "-I", HELPER, "--sock", sock, "--secrets", d, "--console-log", d + "/console.log",
-           "--as-user", "--timeout", str(timeout)] + (["--gzip"] if gz else [])
-    p = subprocess.run(cmd, input=script.encode(), capture_output=True, timeout=timeout + 60)
-    return p.returncode, p.stdout
-
-
 def main():
     d = tempfile.mkdtemp(prefix="cs-selftest-")
-    big = d + "/big.txt"
-    want = transcript(big)
-    stub = d + "/stub"
-    os.mkdir(stub)
-    open(stub + "/gzip", "w").write("#!/bin/sh\nexit 1\n")
-    os.chmod(stub + "/gzip", 0o755)
-    # A gzip that emits only the first half of the real stream.
-    trunc = d + "/trunc"
-    os.mkdir(trunc)
-    real = subprocess.run(["sh", "-c", "command -v gzip"], capture_output=True, text=True).stdout.strip()
-    open(trunc + "/gzip", "w").write('#!/bin/sh\n%s "$@" > "$0.out"; n=$(wc -c < "$0.out"); head -c $((n / 2)) "$0.out"\n' % real)
-    os.chmod(trunc + "/gzip", 0o755)
     bad = 0
 
-    def case(name, rate, prefix, script, timeout, gz, want_rc, want_out):
+    def report(ok, name, detail):
         nonlocal bad
+        bad += not ok
+        print("%s console-session %s: %s" % ("ok" if ok else "FAILED", name, detail))
+
+    # drain-prompt / settle-kept: the receive loop itself.
+    path = d + "/pump.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+    c = cs.Console(path, None)
+    conn, _ = srv.accept()
+    threading.Timer(0.1, lambda: conn.sendall(b"x" * 1000)).start()
+    t = time.time()
+    c._pump(5.0)
+    el = time.time() - t
+    report(el < 2.0 and len(c.buf) == 1000, "drain-prompt", "_pump(5) returned after %.2fs with %d bytes" % (el, len(c.buf)))
+    t = time.time()
+    c.read_for(1.0)
+    el = time.time() - t
+    report(el >= 1.0, "settle-kept", "read_for(1) took %.2fs" % el)
+    conn.close()
+    srv.close()
+
+    # End to end through the real helper against a fake guest.
+    big = d + "/big.txt"
+    want = transcript(big)
+
+    def case(name, script, want_rc, want_out):
         sock = "%s/%s.sock" % (d, name)
-        g = FakeGuest(sock, rate, prefix)
+        g = FakeGuest(sock)
         try:
             t = time.time()
-            rc, out = helper(sock, d, script, timeout, gz)
+            p = subprocess.run([sys.executable, "-I", HELPER, "--sock", sock, "--secrets", d,
+                                "--console-log", d + "/console.log", "--as-user", "--timeout", "30"],
+                               input=script.encode(), capture_output=True, timeout=90)
             el = time.time() - t
         finally:
             g.close()
-        ok = rc == want_rc and (want_out is None or out == want_out)
-        bad += not ok
-        print("%s console-session %s: exit %d (want %d), %d bytes out%s, %.1fs" % (
-            "ok" if ok else "FAILED", name, rc, want_rc, len(out),
-            "" if want_out is None else (" identical" if out == want_out else " DIFFERENT"), el))
+        ok = p.returncode == want_rc and p.stdout == want_out
+        report(ok, name, "exit %d (want %d), %d bytes out%s, %.1fs" % (
+            p.returncode, want_rc, len(p.stdout), " identical" if p.stdout == want_out else " DIFFERENT", el))
 
-    rate, tmo = 2000, 15
-    case("plain-throttled", rate, None, "cat %s\n" % big, tmo, False, 98, None)
-    case("gzip-throttled", rate, None, "cat %s\n" % big, tmo, True, 0, want)
-    case("gzip-status", rate, None, "cat %s; exit 7\n" % big, tmo, True, 7, want)
-    case("gzip-broken", rate, stub, "cat %s\n" % big, tmo, True, 90, b"")
-    case("gzip-truncated", rate, trunc, "cat %s\n" % big, tmo, True, 90, b"")
-    case("gzip-empty", rate, None, "true\n", tmo, True, 0, b"")
-    case("plain-small", None, None, "printf 'hello\\n'\n", tmo, False, 0, b"hello\n")
+    case("plain-60k", "cat %s\n" % big, 0, want)
+    case("status-kept", "cat %s; exit 7\n" % big, 7, want)
+    case("plain-small", "printf 'hello\\n'\n", 0, b"hello\n")
     print("console-session selftest: %s" % ("PASS" if bad == 0 else "%d FAILED" % bad))
     return 1 if bad else 0
 
