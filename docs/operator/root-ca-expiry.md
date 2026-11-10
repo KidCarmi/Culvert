@@ -94,10 +94,11 @@ loaded, so these rules do not fire on nodes that never do SSL inspection.
 
 ## 5. Dual-CA overlap (what normal rotation looks like)
 
-An automatic rotation inside the 30-day window is **not** an outage. Culvert keeps the old CA
-as a *secondary* for the remainder of its original lifetime and includes it in the chain, so
+An automatic rotation inside the 30-day window is **not** an outage. It is a *renewal*: the
+new root certificate keeps the old one's key and subject and only extends the validity, so
 clients trusting either the old or the new root keep validating while you roll the new root
-out. The CA Management panel shows the overlap window and its end date. Use that window to
+out. (To replace the key itself, use the manual `POST /api/ca/rotate`, which does break trust
+until the new root is distributed.) The CA Management panel shows the overlap window and its end date. Use that window to
 redistribute; once it closes, only the new root works.
 
 ## 6. The other failure: the Root CA never LOADED

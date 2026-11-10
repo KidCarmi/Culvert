@@ -58,6 +58,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **Automatic Root CA rotation broke inspected HTTPS for every client until the
+  new root was distributed, despite the documented dual-CA overlap.** The
+  rotation minted a new KEY, so a client trusting only the old root could not
+  validate the new leaves; sending the old root in the chain could not change
+  that. Rotation now renews the certificate under the same key and subject, so
+  both the old and the new root validate a leaf until the old one expires, and
+  the overlap also survives a restart. Replacing the key remains the manual
+  `POST /api/ca/rotate`. (`TestDualCAOverlap_ClientTrustingOnlyOldRootValidates`)
+
 - **A whitespace-only `cluster.grpc_addr` passed config validation under `cluster.role: control-plane`.**
   The required-address check compared the raw string to `""`, so `grpc_addr: " "` loaded, resolved to a non-empty
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.

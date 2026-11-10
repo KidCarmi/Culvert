@@ -66,7 +66,7 @@ Cert-pinned apps, banking, healthcare, and mTLS-protected origins must bypass in
 
 ## 5. Rotation & expiry
 
-- **Automatic:** a 24h loop rotates when the CA is ≤30 days from expiry, with **dual-CA overlap** (old CA retained as secondary; leaves chain both so clients trusting either validate).
+- **Automatic:** a 24h loop rotates when the CA is ≤30 days from expiry, with **dual-CA overlap** (the root certificate is renewed under the same key and subject, so clients trusting either the old or the new certificate validate).
 - **Manual:** `POST /api/ca/rotate` (admin; two-step confirmation token). Warning: invalidates all leaf certs; clients must trust the new CA.
 - **Distribution window:** leaves are valid 24h, so distribute the new root before the old leaves expire. Set a `cert_expiry` webhook alert.
 
