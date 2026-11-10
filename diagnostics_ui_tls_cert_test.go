@@ -265,3 +265,26 @@ func TestAdminUITLSCertPendingAfterChainOnlyChange(t *testing.T) {
 		t.Fatalf("serving the new chain must clear the pending row, got %+v", rows)
 	}
 }
+
+func TestAdminUITLSFallbackDiagnostics(t *testing.T) {
+	prev := uiTLSFallbackActive
+	t.Cleanup(func() { uiTLSFallbackActive = prev })
+
+	uiTLSFallbackActive = false
+	for _, r := range checkAdminUITLSCert() {
+		if r.Code == "ui_tls_fallback_http" {
+			t.Fatalf("no fallback must add no ui_tls_fallback_http row, got %+v", r)
+		}
+	}
+	uiTLSFallbackActive = true
+	var got *OperatorContractCheck
+	rows := checkAdminUITLSCert()
+	for i := range rows {
+		if rows[i].Code == "ui_tls_fallback_http" {
+			got = &rows[i]
+		}
+	}
+	if got == nil || got.Status != diagWarn || got.OperatorAction == "" || !strings.Contains(got.Message, "plain HTTP") {
+		t.Fatalf("fallback must warn with an action, got %+v", rows)
+	}
+}

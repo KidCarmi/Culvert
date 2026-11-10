@@ -37,6 +37,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A plain-HTTP admin UI is now a Diagnostics row.** When the self-signed
+  certificate could not be generated at startup the GUI fell back to cleartext
+  HTTP, announced only on the login banner and the Network page. The new
+  `ui_tls_fallback_http` row states it, with the action to clear it. Report-only;
+  TLS serving is unchanged and the raw error stays off the row.
+
 - **A data directory shared by two processes is now a Diagnostics row, not only a
   startup log line.** Starting with `CULVERT_ALLOW_MULTIPLE_WRITERS=1` while
   another process holds the data directory (or a volume that cannot report its
@@ -124,6 +130,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   counters are unchanged: the posture is one decision and the alert dedups on
   `Reason`. Latent until the fix above gave the shipped sidecar a way to emit
   429.
+
+- **The decision line's structured-field barrier was proven for `identity` and
+  only ASSERTED for every other value on the line, in a comment that got the
+  supporting detail wrong.** The 2026-11-08 fix folded SPACE and `{` in the two
+  values rendered bare inside the `{req_id=… identity=… action=…}` block, and
+  left `rule`, `host`, `cond` and `clientIP` alone on the argument that the JSON
+  encoder's `LAST " {"` anchor protects them structurally — the real block is
+  always emitted last, so a `" {"` injected earlier in the message loses the
+  anchor race and a SPACE there never reaches the token split. The argument is
+  correct. The comment stating it said `cond` was `%q`-quoted like `host` and
+  `target`, and it is not: `emitPolicyDecision` appends it bare inside the `[…]`
+  group, so the sentence named quoting as the protection when quoting is not
+  what protects any of the three. Driven through the real emitter and the real
+  encoder, 32 hostile values across those four slots produced the correct key
+  set every time — exactly one `"action":` key in the bytes a first-wins SIEM
+  extractor reads, `req_id` and `identity` intact — as did 10 hostile
+  `X-Request-Id` values that the SEC-REQID-1 charset bound actually admits. That
+  bound permits `{` (0x7b) and excludes SPACE, and the reqID slot's safety is
+  conjunctive on the exclusion: re-anchoring needs the two-byte `" {"`, and
+  inside a space-free value the byte before any `{` is a value byte or the `=`
+  of `req_id=`. All three claims are now executable gates
+  (`TestPolicyDecisionLine_MessagePartCannotForgeJSONFields`,
+  `TestPolicyDecisionLine_BoundedReqIDCannotForgeJSONFields`,
+  `TestTracingHeaderBound_StillExcludesTheGrammarSpace`), and the last is
+  mutation-tested: widening the bound to admit SPACE fails it with the remedy in
+  the message. The comment is corrected. No behaviour changed — the barrier was
+  already closed on every slot; what was missing was anything that would notice
+  if it stopped being. (CWE-117, CWE-93, CWE-1059; OWASP A09:2021.)
+- **`apiDiagnostics` named the wrong protection for the IdP profile
+  fingerprint.** The viewer-role disclosure note said
+  `dpLastGoodConfigSnapshotStatus.IdPProfilesFingerprint` "is unexported". It is
+  **exported** — a capitalised field on an unexported struct type — so that is
+  not what keeps it out of the response. What does is that no value of the
+  struct is ever marshaled: every reader takes individual fields, and the struct
+  carries no JSON tags at all. A future handler returning the status struct
+  whole, which is the natural thing to do if you believe the sensitive field is
+  unexported, would serialise a deterministic digest of the tenant's
+  canonicalised IdP profile set as a 32-element array under its Go field name,
+  to the lowest authenticated role, with no gate catching it. Not exploitable
+  today and no behaviour changed; the comment now states the invariant that
+  holds and what breaking it would leak. (CWE-1059, would-be CWE-200; OWASP
+  A09:2021, A01:2021 if the enabling change lands.)
 
 - **Category-group rules failed open when an admin category overlapped a
   built-in one: a Block rule on a group stopped matching a host that a

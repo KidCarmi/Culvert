@@ -257,3 +257,149 @@ func TestJSONLogRecord_MalformedFieldBlockStaysParseable(t *testing.T) {
 		}
 	}
 }
+
+// ── The parameters that are NOT identity ────────────────────────────────────
+
+// The gates above fuzz `identity`, because it is the one value on the decision
+// line a federated user chooses. The barrier's correctness, though, rests on a
+// claim about every OTHER string the emitter renders, and that claim was stated
+// in a comment rather than tested: that the MESSAGE-part values (rule, host,
+// target, cond, clientIP) cannot forge a structured field because the real
+// `{…}` block is always the last thing on the line, so the encoder's LAST " {"
+// anchor beats anything injected ahead of it.
+//
+// That reasoning is sound but it is not self-evident, and the comment it lived
+// in got the supporting detail wrong twice (it described cond as %q-quoted when
+// the emitter appends it bare). A claim that load-bearing belongs in a test, so
+// these two gates assert it against the same hostile corpus, for every slot.
+//
+// Severity note for a future reader: none of these slots is request-chosen the
+// way identity is — rule and cond come from policy configuration, host from the
+// parsed destination, clientIP from the connection. The gates exist because the
+// BARRIER's shape depends on them, not because a client can drive them.
+
+// hostileFieldSlotValues are the shapes that forge a field, re-anchor the block,
+// or break the record, if a value's grammar bytes ever reach the encoder's
+// token split.
+var hostileFieldSlotValues = []string{
+	`x severity=info verdict=clean`,
+	`x {attacker=owns_the_block`,
+	`x action=allow`,
+	`x" y=1`,
+	`x} z=1`,
+	`x=1 {y=2`,
+	"x\ty=1 {z=2",
+	`} {forged=1`,
+}
+
+// assertDecisionRecordIntact parses the record a SIEM would receive and asserts
+// it carries the gateway's own fields and only those.
+func assertDecisionRecordIntact(t *testing.T, rec []byte, slot, value string) {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(rec, &m); err != nil {
+		t.Fatalf("%s=%q produced an unparseable record (a strict shipper DROPS it, so the decision never reaches the SIEM): %v\nrecord: %s", slot, value, err, rec)
+	}
+	for _, forged := range []string{"severity", "verdict", "attacker", "forged", "y", "z"} {
+		if v, ok := m[forged]; ok {
+			t.Errorf("%s=%q forged the structured field %q = %v\nrecord: %s", slot, value, forged, v, rec)
+		}
+	}
+	if m["action"] != "block" {
+		t.Errorf("%s=%q: action = %v, want \"block\" (the real verdict)\nrecord: %s", slot, value, m["action"], rec)
+	}
+	// encoding/json is last-wins, so a forged key emitted BEFORE the real one
+	// parses away above while still being present in the bytes a first-wins
+	// SIEM field extractor reads. Count what the shipper sees.
+	if n := bytes.Count(rec, []byte(`"action":`)); n != 1 {
+		t.Errorf("%s=%q: record carries %d action keys, want 1 — a first-wins parser would read the forged one\nrecord: %s", slot, value, n, rec)
+	}
+	if _, ok := m["req_id"]; !ok {
+		t.Errorf("%s=%q: req_id vanished from the record (the field block was re-anchored)\nrecord: %s", slot, value, rec)
+	}
+	if _, ok := m["identity"]; !ok {
+		t.Errorf("%s=%q: identity vanished from the record (the field block was re-anchored)\nrecord: %s", slot, value, rec)
+	}
+}
+
+// TestPolicyDecisionLine_MessagePartCannotForgeJSONFields drives the hostile
+// corpus through each MESSAGE-part slot of the real emitter and the real
+// encoder. It is the executable form of the "the real block always follows
+// them" claim on policyDecision's bare set.
+func TestPolicyDecisionLine_MessagePartCannotForgeJSONFields(t *testing.T) {
+	for _, slot := range []string{"rule", "host", "cond", "clientIP"} {
+		for _, h := range hostileFieldSlotValues {
+			t.Run(slot+"/"+h, func(t *testing.T) {
+				rule, host, cond, clientIP := plRule, plHost, plCond, plClientIP
+				switch slot {
+				case "rule":
+					rule = h
+				case "host":
+					host = h
+				case "cond":
+					cond = h
+				case "clientIP":
+					clientIP = h
+				}
+				line := plCapture(func() {
+					logPolicyBlock(rule, 7, clientIP, host, cond, plReqID, "alice@corp.example")
+				})
+				rec := appendJSONLogRecord(nil, []byte(strings.TrimRight(line, "\n")), pinnedLogClock)
+				assertDecisionRecordIntact(t, rec, slot, h)
+			})
+		}
+	}
+}
+
+// TestPolicyDecisionLine_BoundedReqIDCannotForgeJSONFields closes the one slot
+// whose safety is NOT structural. reqID is rendered bare inside the field block
+// like identity, but it took an entry-point charset bound instead of the fold
+// (SEC-REQID-1, request_tracing_bounds.go), so the two defences have to be read
+// together to see that the slot is closed.
+//
+// The bound admits 0x21..0x7e, which INCLUDES '{' (0x7b) — only SPACE is
+// excluded. So the question the fold answers for identity is answered for reqID
+// by the absence of a space: re-anchoring needs the two-byte sequence " {", and
+// inside a value with no space the byte before any '{' is another value byte or
+// the '=' of `req_id=`, never a space. This gate feeds only values the bound
+// actually ADMITS, so it tests the system rather than an unreachable input, and
+// it fails if the bound is ever widened to let SPACE through.
+func TestPolicyDecisionLine_BoundedReqIDCannotForgeJSONFields(t *testing.T) {
+	for _, id := range []string{
+		`abc{`,
+		`{`,
+		`abc{attacker=owns_the_block`,
+		`}{forged=1`,
+		`a=1`,
+		`a"b`,
+		`}`,
+		`{req_id=x`,
+		`abc{identity=root`,
+		strings.Repeat("{", 64),
+	} {
+		t.Run(id, func(t *testing.T) {
+			if !acceptableTracingHeaderValue(id, maxClientRequestIDLen) {
+				t.Fatalf("%q is not admissible as an X-Request-Id, so this case tests an input the wire cannot deliver; pick another or re-read the bound", id)
+			}
+			line := plCapture(func() {
+				logPolicyBlock(plRule, 7, plClientIP, plHost, plCond, id, "alice@corp.example")
+			})
+			rec := appendJSONLogRecord(nil, []byte(strings.TrimRight(line, "\n")), pinnedLogClock)
+			assertDecisionRecordIntact(t, rec, "reqID", id)
+		})
+	}
+}
+
+// TestTracingHeaderBound_StillExcludesTheGrammarSpace is the negative control
+// for the gate above: it states, as an assertion rather than a comment, the one
+// property of acceptableTracingHeaderValue the reqID slot's safety depends on.
+// '{' being admitted is deliberate and recorded; SPACE being admitted would
+// reopen the re-anchor vector that the fold closes for identity.
+func TestTracingHeaderBound_StillExcludesTheGrammarSpace(t *testing.T) {
+	if acceptableTracingHeaderValue("a b", maxClientRequestIDLen) {
+		t.Error("a SPACE is admissible in an X-Request-Id: the id is rendered bare inside the `{req_id=… identity=… action=…}` block, so it can now forge structured fields and re-anchor the block — give it the foldLogFieldToken treatment identity has, or keep the bound")
+	}
+	if !acceptableTracingHeaderValue("a{b", maxClientRequestIDLen) {
+		t.Error("'{' is no longer admissible: that is a tightening, not a defect, but TestPolicyDecisionLine_BoundedReqIDCannotForgeJSONFields now tests unreachable inputs and should be re-pointed")
+	}
+}
