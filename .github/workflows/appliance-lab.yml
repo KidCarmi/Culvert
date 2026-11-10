@@ -1286,11 +1286,14 @@ jobs:
       # c87da9e3, run 42865896238, evidence 13788313092) is FAIL and preserved:
       # its main leg passed every scope and its console transfers completed, but
       # the console leg stopped at M2H/console-final-clamav-ready: /ready was
-      # sampled once about 27 s after the V5 boot's containers started, while
-      # clamd already answered EICAR. The proxy's ClamAV row caches any result
-      # for 30 s (internal/secscan clamStatusTTL). vwait_clamav_ready now waits
-      # (5 s polls, at most Q7's 120 s budget, every /ready body kept) before the
-      # V5 final checkpoint, and fails the campaign if ClamAV never turns ready.
+      # sampled once about 36 s after the V5 power-on and said not ok while clamd
+      # answered EICAR in the same checkpoint (the failing body was not kept).
+      # Its required V2 splash checks could not pass either: tesseract was not
+      # installed in this job. Now: vwait_clamav_ready waits for /ready ClamAV ok
+      # within one 120 s monotonic deadline (each request bounded by the time
+      # remaining; a late answer does not count; every attempt recorded) before
+      # the V5 final checkpoint, which also keeps its own /ready sample; and this
+      # job installs tesseract-ocr and proves OCR capability before any boot.
       # Campaign 6 (owner direction and decision of 8 November 2026; D4 of 9
       # November 2026; owner clarification of 10 November 2026): the same FB1-R2
       # candidate OVA e60620c3, after a second HARNESS fix. Campaign 5 (trigger
@@ -1319,7 +1322,7 @@ jobs:
       # messages starts this job.
       QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 7 on the FB1-R2 candidate OVA e60620c3 [qemu-retained]"
       QEMU_CAMPAIGN: "7"
-      QEMU_PRIOR_CAMPAIGN: "6: trigger c87da9e377cc60134207c162a81025cabca74448, run 42865896238 attempt 1, evidence artifact 13788313092, verdict FAIL (main leg passed every scope; console leg stop at M2H/console-final-clamav-ready: /ready sampled once ~27 s after the V5 boot, inside the proxy's 30 s ClamAV status cache)"
+      QEMU_PRIOR_CAMPAIGN: "6: trigger c87da9e377cc60134207c162a81025cabca74448, run 42865896238 attempt 1, evidence artifact 13788313092, verdict FAIL (main leg passed every scope; console leg stop at M2H/console-final-clamav-ready: one /ready sample ~36 s after the V5 power-on said not ok while clamd answered EICAR; V2 OCR checks could not pass: no tesseract)"
       # Start deadline (unchanged, reviewed for campaign 2): first candidate boot
       # no later than 2026-11-14T00:00:00Z. With the 345-minute job limit and the
       # daily-window rule the job ends by 2026-11-14T05:45Z, inside the owner's
@@ -1552,12 +1555,28 @@ jobs:
           printf 'Acquire::Retries "2";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/99-lab-net >/dev/null
           for _ in 1 2; do
             sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-              libguestfs-tools qemu-utils qemu-system-x86 genisoimage isc-dhcp-client nftables skopeo imagemagick dnsmasq-base && break
+              libguestfs-tools qemu-utils qemu-system-x86 genisoimage isc-dhcp-client nftables skopeo imagemagick dnsmasq-base \
+              tesseract-ocr fonts-dejavu-mono && break
             sleep 15
           done
-          for t in guestfish qemu-img qemu-system-x86_64 genisoimage nft skopeo convert ssh dnsmasq; do
+          for t in guestfish qemu-img qemu-system-x86_64 genisoimage nft skopeo convert ssh dnsmasq tesseract; do
             command -v "$t" >/dev/null || { echo "::error::$t is not installed"; exit 1; }
           done
+          # OCR capability BEFORE any candidate boot (campaign 6: the console leg's
+          # required V2 splash checks read the VGA frames with tesseract, which
+          # this job did not install, so they could never pass). Render a known
+          # console line and require tesseract to read it back; a blank image
+          # must not read as text (negative control).
+          o="$(mktemp -d)"
+          convert -size 640x32 xc:black -fill white -font DejaVu-Sans-Mono -pointsize 18 -annotate +8+22 'Starting system services' "$o/line.png"
+          convert -size 640x32 xc:black "$o/blank.png"
+          # Output captured first, matched in-shell: no pipe, so pipefail cannot turn an early grep exit into a SIGPIPE failure.
+          ocr="$(tesseract "$o/line.png" - 2>/dev/null)" || { echo "::error::tesseract failed on a rendered console line"; exit 1; }
+          [[ "$ocr" == *'Starting system services'* ]] || { echo "::error::tesseract cannot read a rendered console line (read: ${ocr:0:80})"; exit 1; }
+          ocr="$(tesseract "$o/blank.png" - 2>/dev/null)" || { echo "::error::tesseract failed on the blank negative control"; exit 1; }
+          if [[ "$ocr" == *'Starting system services'* ]]; then echo "::error::OCR negative control read text from a blank image"; exit 1; fi
+          echo "OCR capability: $(tesseract --version 2>&1 | head -1) reads a rendered console line; blank negative control clean"
+          rm -rf "$o"
           # libguestfs (read-only reads of the retained disk) needs the host kernel readable.
           sudo chmod 0644 /boot/vmlinuz-*
           if dpkg -s passt >/dev/null 2>&1; then sudo apt-get remove -y -q passt; fi

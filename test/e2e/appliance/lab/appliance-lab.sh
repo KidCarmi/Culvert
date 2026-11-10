@@ -359,31 +359,37 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   # The receive loop must drain as soon as bytes arrive (campaign 5: a
   # sleep-then-drain loop stalled QEMU's virtio console for good), and the
   # transfer must stay byte-identical with the script's exit status kept.
-  # vwait_clamav_ready against a fake /ready (campaign 6: the V5 final
-  # checkpoint sampled /ready once while the proxy's 30 s ClamAV cache still
-  # said "unreachable"). cwr NAME NOT_OK_ANSWERS LIMIT WANT(pass|fail); -1 = never ok.
-  cwr() { local name="$1" k="$2" lim="$3" want="$4" port pid got
+  # vwait_clamav_ready against a fake /ready (campaign 6: /ready sampled once
+  # while it still said not ok). cwr NAME NOT_OK_ANSWERS DELAY_S LIMIT WANT
+  # (-1 = never ok). A ready answer completing after the deadline must FAIL.
+  cwr() { local name="$1" k="$2" dly="$3" lim="$4" want="$5" port pid gpid got
     port=$(( 20000 + RANDOM % 20000 ))
-    python3 -I -c 'import http.server, json, sys
-port, k = int(sys.argv[1]), int(sys.argv[2]); n = [0]
+    python3 -I -c 'import http.server, json, sys, time
+port, k, dly = int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3]); n = [0]
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        n[0] += 1; ok = k >= 0 and n[0] > k
+        n[0] += 1; ok = k >= 0 and n[0] > k; time.sleep(dly)
         b = json.dumps({"status": "ok" if ok else "fail", "checks": {"clamav": {"status": "ok" if ok else "fail"}}}).encode()
         self.send_response(200 if ok else 503); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
-http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()' "$port" "$k" > /dev/null 2>&1 &
-    pid=$!; sleep 0.7
+http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()' "$port" "$k" "$dly" > /dev/null 2>&1 &
+    pid=$!; sleep 300 & gpid=$!; sleep 0.7
     got="$( P="http://127.0.0.1:$port"; EV="$d/cwr-$name"; WORK="$d/cwr-$name"; JSONL="$d/cwr-$name.jsonl"; LAB_CAMPAIGN_STOP_FILE=
-            mkdir -p "$EV"; : > "$JSONL"; qemu_alive() { return 0; }
-            vwait_clamav_ready V5 "$lim" > /dev/null 2>&1
-            python3 -I -c 'import json,sys; r=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1]); print(r["result"], r["check"], len([l for l in open(sys.argv[2]) if l.startswith("{")]))' "$JSONL" "$EV/V5-clamav-ready.log" 2>/dev/null )"
-    kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
-    if [[ "${got%% *}" == "$want" && "$got" == *clamav-ready-before-final* ]]; then log "selftest ok: clamav-ready wait $name -> $got"
+            mkdir -p "$EV"; : > "$JSONL"; echo "$gpid" > "$WORK/qemu.pid"
+            vwait_clamav_ready V5 "$lim" > /dev/null 2>&1 || true
+            python3 -I -c 'import json,sys
+r=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1])
+recs=[json.loads(l) for l in open(sys.argv[2])]
+need={"attempt","start_s","end_s","timeout_s","http","error","parse","clamav","ready","after_deadline","body"}
+print(r["result"], r["check"], len(recs), "fields-ok" if recs and all(need <= set(x) for x in recs) else "fields-MISSING")' "$JSONL" "$EV/V5-clamav-ready.jsonl" 2>/dev/null )"
+    kill "$pid" "$gpid" 2>/dev/null || true; wait "$pid" "$gpid" 2>/dev/null || true
+    if [[ "${got%% *}" == "$want" && "$got" == *clamav-ready-before-final* && "$got" == *fields-ok ]]; then log "selftest ok: clamav-ready wait $name -> $got"
     else log "selftest FAILED: clamav-ready wait $name -> '$got', want $want"; rc=1; fi; }
-  cwr ready-at-once 0 20 pass
-  cwr late 2 30 pass
-  cwr never -1 8 fail
+  cwr ready-at-once 0 0 20 pass
+  cwr late 2 0 30 pass
+  cwr never -1 0 8 fail
+  cwr ready-after-limit 2 0 7 fail
+  cwr slow-ok-past-limit 0 1.5 1 fail
   unset -f cwr
   if python3 -I -B "$HERE/console-session-selftest.py" > "$d/cs-selftest.log" 2>&1; then
     log "selftest ok: console-session receive loop and transfer ($(grep -c '^ok ' "$d/cs-selftest.log") cases: prompt drain, settle kept, 60 KB identical, status kept)"
@@ -1640,7 +1646,10 @@ eicar_verdict() { local out c u
   c="$(tail -n1 <<<"$out")"
   if [[ "$c" == 403 ]] && grep -q 'Blocked by CLAMAV scan' <<<"$out"; then echo av; else echo "$c:$(head -c 60 <<<"$out" | tr -d '\n')"; fi; }
 ready_clamav_ok() { local code cv
+  # Fresh per call: a failed request must not leave an older body behind.
+  rm -f "$WORK/rec-ready.json"
   code="$(curl -sS -m 2 -o "$WORK/rec-ready.json" -w '%{http_code}' "$P/ready" 2>/dev/null || echo 000)"
+  printf '%s\n' "$code" > "$WORK/rec-ready.code"
   cv="$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); c=d.get("checks",d).get("clamav",{})
 print(c.get("status") if isinstance(c,dict) else c)' "$WORK/rec-ready.json" 2>/dev/null || true)"
@@ -3350,8 +3359,11 @@ m2_checkpoint() { local tag="$1" f="$EV/M2H-$1.txt" sum pid rc=0 st name detail 
   done < <(python3 -I "$HERE/m2-verdict.py" "$f" "$tag" "$rc" 2>"$EV/M2H-$tag-verdict.err" || true)
   [[ $n -ge 6 ]] || check M2H "$tag-verdict" fail "the verdict evaluator produced $n checks: $(head -c 300 "$EV/M2H-$tag-verdict.err")"
   # Runner side of the ClamAV regression: the proxy reports the sidecar ready.
-  if ready_clamav_ok; then check M2H "$tag-clamav-ready" pass "/ready clamav ok"
-  else check M2H "$tag-clamav-ready" fail "/ready clamav not ok"; fi
+  local rok=0; ready_clamav_ok || rok=$?
+  # This checkpoint's OWN /ready sample (HTTP code + body), kept as evidence.
+  { printf 'http=%s\n' "$(cat "$WORK/rec-ready.code" 2>/dev/null || echo none)"; cat "$WORK/rec-ready.json" 2>/dev/null || echo '(no body)'; } > "$EV/M2H-$tag-ready.txt"
+  if [[ $rok == 0 ]]; then check M2H "$tag-clamav-ready" pass "/ready clamav ok"
+  else check M2H "$tag-clamav-ready" fail "/ready clamav not ok (M2H-$tag-ready.txt)"; fi
 }
 
 # ── engine-surface: who can reach the container engine on the booted guest ──
@@ -3853,24 +3865,76 @@ vplymouth_check() { local r; r="$(sed -n 's/^Result=//p' "$3" | head -1)"
   else vcheck "$1" "$2" fail "plymouth-start Result='${r:-unread}', want $4 ($(tr '\n' ' ' < "$3" | cut -c1-200))"; fi; }
 vstray() { sed -n '/^---vcs1$/,/^---vcs12$/p' "$1" | grep -E '^\[ *[0-9]+\.[0-9]+\]|\[ *(OK|FAILED|DEPEND) *\]|LAB-|br-[0-9a-f]{6,}|veth[0-9a-f]|cloud-init|culvert-firstboot:|^ *Start(ing|ed) [A-Za-z].*\.(service|socket|target|mount|timer)' | head -20; }
 # vwait_clamav_ready STEP SECONDS — wait until the proxy's /ready reports
-# ClamAV ok, polling every 5 s for at most SECONDS, keeping every /ready body
-# in $EV/STEP-clamav-ready.log. Records STEP/clamav-ready-before-final pass
-# (seconds taken) or fail (which latches the campaign stop). The proxy's
-# ClamAV row lags the daemon by design: Scanner.ClamAVStatus() caches ANY
-# result, failures included, for 30 s (internal/secscan clamStatusTTL) and
-# reports a quarantine after an engine fault. Campaign 6 (run 42865896238)
-# sampled it once about 27 s after the V5 boot's containers started: clamd
-# answered EICAR, /ready said not ok. 120 s is Q7's post-reboot readiness
-# budget, which every main-leg checkpoint already sits behind.
-vwait_clamav_ready() { local st="$1" lim="$2" t0 n=0
-  t0="$(date +%s)"; : > "$EV/$st-clamav-ready.log"
-  until ready_clamav_ok; do
-    n=$((n+1)); { date -u +%Y-%m-%dT%H:%M:%SZ; cat "$WORK/rec-ready.json" 2>/dev/null; echo; } >> "$EV/$st-clamav-ready.log"
-    if (( $(date +%s) - t0 >= lim )) || ! qemu_alive; then
-      vcheck "$st" clamav-ready-before-final fail "/ready clamav not ok within ${lim}s ($n not-ok samples; bodies in $st-clamav-ready.log)"; return 1; fi
-    sleep 5; done
-  { date -u +%Y-%m-%dT%H:%M:%SZ; cat "$WORK/rec-ready.json" 2>/dev/null; echo; } >> "$EV/$st-clamav-ready.log"
-  vcheck "$st" clamav-ready-before-final pass "/ready clamav ok after $(( $(date +%s) - t0 ))s ($n earlier not-ok samples; bodies in $st-clamav-ready.log)"; }
+# ClamAV ok (HTTP 200 and checks.clamav.status == "ok", ready_clamav_ok's own
+# test) within a deadline, recording every attempt.
+# Timing contract: ONE deadline of SECONDS on the host's CLOCK_MONOTONIC,
+# counted from the start of this wait (in V5: after vwait_ready, its 10 s
+# settle and the serial checks; it is NOT Q7 and measures nothing about Q7).
+# Each request's timeout is min(2 s, time remaining); a response that completes
+# after the deadline does not count; between attempts it sleeps min(5 s, time
+# remaining). It stops early if the guest's QEMU process is gone.
+# Evidence: $EV/STEP-clamav-ready.jsonl, one record per attempt (start/end
+# offsets, timeout, HTTP code or error, the FRESH body or null, the parse
+# outcome, the clamav status, ready, after_deadline). Result: the check
+# STEP/clamav-ready-before-final (pass with seconds and attempts; fail latches
+# the campaign stop). Why it exists: the proxy's ClamAV row can lag the daemon
+# (Scanner.ClamAVStatus() caches computed results for 30 s and reports a
+# quarantine after an engine fault); campaign 6 sampled it once ~36 s after
+# the V5 power-on and got "not ok" while clamd answered EICAR.
+vwait_clamav_ready() { local st="$1" lim="$2" out rc=0 verdict n el
+  out="$(python3 -I - "$P/ready" "$lim" "$WORK/qemu.pid" "$EV/$st-clamav-ready.jsonl" <<'PY'
+import json, os, sys, time, urllib.error, urllib.request
+url, lim, pidf, log = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4]
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+t0 = time.monotonic(); deadline = t0 + lim; n = 0
+def alive():
+    try:
+        os.kill(int(open(pidf).read().strip()), 0); return True
+    except Exception:
+        return False
+with open(log, "w") as f:
+    while True:
+        rem = deadline - time.monotonic()
+        if rem <= 0:
+            print("fail deadline %d %.1f" % (n, time.monotonic() - t0)); break
+        if not alive():
+            print("fail guest-gone %d %.1f" % (n, time.monotonic() - t0)); break
+        n += 1; tmo = min(2.0, rem); s = time.monotonic()
+        rec = {"attempt": n, "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "start_s": round(s - t0, 3), "timeout_s": round(tmo, 3)}
+        code = body = err = None
+        try:
+            with opener.open(url, timeout=tmo) as r:
+                code, body = r.status, r.read(65536)
+        except urllib.error.HTTPError as e:
+            code, body = e.code, e.read(65536)
+        except Exception as e:
+            err = repr(e)[:300]
+        end = time.monotonic()
+        cv = None
+        if body is None:
+            parse = "no-response"
+        else:
+            try:
+                d = json.loads(body); c = d.get("checks", d).get("clamav", {})
+                cv = c.get("status") if isinstance(c, dict) else c; parse = "ok"
+            except Exception as e:
+                parse = "error: " + repr(e)[:120]
+        ok = code == 200 and cv == "ok"; late = end > deadline
+        rec.update(end_s=round(end - t0, 3), http=code, error=err, parse=parse, clamav=cv, ready=ok, after_deadline=late,
+                   body=body.decode("utf-8", "replace") if body is not None else None)
+        f.write(json.dumps(rec, sort_keys=True) + "\n"); f.flush()
+        if ok and not late:
+            print("pass ok %d %.1f" % (n, end - t0)); break
+        rem = deadline - time.monotonic()
+        if rem > 0:
+            time.sleep(min(5.0, rem))
+PY
+)" || rc=$?
+  read -r verdict _ n el <<<"$out"
+  if [[ $rc == 0 && "$verdict" == pass ]]; then
+    vcheck "$st" clamav-ready-before-final pass "/ready clamav ok ${el}s into a ${lim}s monotonic deadline (attempt $n; every attempt in $st-clamav-ready.jsonl)"
+  else
+    vcheck "$st" clamav-ready-before-final fail "/ready clamav not ok within ${lim}s (${out:-waiter rc $rc}; every attempt in $st-clamav-ready.jsonl)"; return 1; fi; }
 vwait_ready() { local deadline=$(( $(date +%s) + ${1:-1800} ))
   until gop status-json > "$WORK/status-json.tmp" 2>/dev/null && [[ " $(recorded_steps "$WORK/status-json.tmp") " == *" complete "* ]] \
         && curl -fsS -m 3 "$P/health" >/dev/null 2>&1; do
