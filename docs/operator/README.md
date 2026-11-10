@@ -74,7 +74,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 
 ## Security scanning and threat intelligence
 
-- [`scan-capacity-and-timeouts.md`](scan-capacity-and-timeouts.md) — content-scan (ClamAV/YARA/remote sidecar) capacity, timeouts, and posture.
+- [`scan-capacity-and-timeouts.md`](scan-capacity-and-timeouts.md) — content-scan (ClamAV/YARA/remote sidecar) capacity, timeouts, and posture, including the sidecar's own admission plane and how to size it (CHAOS-115, §6.2).
 - [`scan-svc-listener-health.md`](scan-svc-listener-health.md) — the scan sidecar's own listener: down vs. flapping, what to alert on, and why both mean the fleet is failing open (CHAOS-113/114).
 - [`threat-feed-freshness.md`](threat-feed-freshness.md) — threat-feed sync cadence, staleness detection, and recovery.
 - [`threat-feed-domain-allowlist.md`](threat-feed-domain-allowlist.md) — managing the threat-feed domain allowlist.

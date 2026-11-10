@@ -1454,6 +1454,18 @@ culvert_scan_svc_serve_exits_total %d
 # HELP culvert_scan_svc_bind_backoff_seconds Current scan sidecar rebind backoff; 0 when the listener is serving
 # TYPE culvert_scan_svc_bind_backoff_seconds gauge
 culvert_scan_svc_bind_backoff_seconds %g
+
+# HELP culvert_scan_svc_inflight Scan requests currently holding an admission slot, i.e. currently permitted to buffer a body
+# TYPE culvert_scan_svc_inflight gauge
+culvert_scan_svc_inflight %d
+
+# HELP culvert_scan_svc_slots Admission slots on this sidecar; slots x the scan window is the buffered-body ceiling this process will hold
+# TYPE culvert_scan_svc_slots gauge
+culvert_scan_svc_slots %d
+
+# HELP culvert_scan_svc_at_capacity_total Scan requests refused because every admission slot was busy — saturation, not a fault; callers fail CLOSED on these
+# TYPE culvert_scan_svc_at_capacity_total counter
+culvert_scan_svc_at_capacity_total %d
 `,
 			up,
 			down,
@@ -1462,6 +1474,16 @@ culvert_scan_svc_bind_backoff_seconds %g
 			sv.BindFailures,
 			sv.ServeExits,
 			sv.Backoff.Seconds(),
+			// CHAOS-115. `inflight` pinned at `slots` is the leading indicator
+			// of the refusal regime, and the pair is what makes the refusal
+			// counter readable: `at_capacity_total` rising while `inflight <
+			// slots` would mean the gate is misbuilt, not that the sidecar is
+			// busy. They ride the same `Configured` guard as the listener
+			// gauges above, because a node that never ran a sidecar must not
+			// export a sidecar's saturation plane at all.
+			scanSvcInflight.Load(),
+			scanSvcSlots.Load(),
+			atomic.LoadInt64(&statScanSvcAtCapacity),
 		)
 	}
 
