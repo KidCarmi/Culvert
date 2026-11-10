@@ -48,6 +48,20 @@ def test_oracle():
           oracle.evaluate(intent, {"scheme": "http", "host": "social.example.test", "client_ip": "127.0.0.1"}).disposition == oracle.BLOCK_PAGE)
     check("oracle.default_deny",
           oracle.evaluate(intent, {"scheme": "http", "host": "unknown.corp.local", "client_ip": "127.0.0.1"}).disposition == oracle.BLOCK_PAGE)
+    # Category-group MEMBERSHIP: news.example.test is 'news' (exact) AND 'webmail'
+    # (parent suffix example.test); a group holding either must match it, a group
+    # holding neither must not.
+    mi = {"default_action": "allow", "objects": {
+              "categories": {"news": ["news.example.test"], "webmail": ["example.test"],
+                             "streaming": ["media.corp.local"]},
+              "category_groups": {"g_news": ["social-media", "news"], "g_mail": ["webmail"],
+                                  "g_stream": ["streaming"]}},
+          "rules": []}
+    nv = {"scheme": "http", "host": "news.example.test", "client_ip": "127.0.0.1"}
+    check("oracle.group_membership_exact", oracle._host_in_group(mi, nv["host"], "g_news"))
+    check("oracle.group_membership_parent_suffix", oracle._host_in_group(mi, nv["host"], "g_mail"))
+    check("oracle.group_membership_non_member", not oracle._host_in_group(mi, nv["host"], "g_stream"))
+    check("oracle.group_membership_uncategorised", not oracle._host_in_group(mi, "app.corp.local", "g_mail"))
     check("oracle.wildcard_bare_implies_sub", oracle.match_fqdn("corp.local", "app.corp.local"))
     check("oracle.wildcard_no_over_match", not oracle.match_fqdn("*.corp.local", "example.test"))
 
