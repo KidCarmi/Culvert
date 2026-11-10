@@ -2445,13 +2445,16 @@ func matchDestNorm(rule *PolicyRule, host, normHost string, sc *hostCatScratch) 
 	if catSet && !sc.matchesCategory(rule.DestCategory) {
 		return false
 	}
-	// Category group check — host must be in ANY category within the group.
-	// Amortized O(1) per rule: the host→category fusion is resolved ONCE per
-	// scan (hostCatScratch) and each of its halves is itself indexed — the
-	// urlcat reverse index answers host→category in O(labels) map probes
-	// (urlcat.Store.LookupHost), and the group resolution plus membership check
-	// are two map probes off catgroup's lock-free published view (catgroup
-	// readView), with no per-rule lock on the group store.
+	// Category group check — host must be in ANY category within the group
+	// (MEMBERSHIP, the same semantics as the single-category check above; see
+	// categoryGroupMatchesHostScratch). The host→category fusion is resolved
+	// ONCE per scan (hostCatScratch) and each of its halves is itself indexed —
+	// the urlcat reverse index answers host→category in O(labels) map probes
+	// (urlcat.Store.LookupHost) — and the group resolution plus the
+	// classification-winner probe are two map probes off catgroup's lock-free
+	// published view (catgroup readView), with no per-rule lock on the group
+	// store. Only when the winner is not in the group does the rule pay one
+	// single-category membership probe per remaining group category.
 	if catGroupSet && !categoryGroupMatchesHostScratch(rule, sc) {
 		return false
 	}
