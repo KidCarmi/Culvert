@@ -438,6 +438,25 @@ The payload is now built once and shared, after which the measurement is 5.0 MiB
 on three consecutive runs against a 16 MiB ceiling — a 3.2x margin below and 7x
 below the unbounded regime, which is what makes it a measurement.
 
+**Lint, measured in both directions** (the repository's own rule: `cyclop`,
+`funlen` and `gocognit` attribute to a function's DECLARATION line, so
+`--new-from-rev` cannot see a function made more complex). golangci-lint
+`v2.15.0`, the version `pr-fast-gate.yml` installs, built with the `go.mod`
+toolchain:
+
+- The gate's own command, `run --timeout=10m --new-from-rev origin/main`:
+  **0 issues**.
+- Full tree on this branch: **174 issues**, all pre-existing. Exactly three land
+  in a file this change touches, and none names a function it adds:
+  `metrics.go:823` errcheck (600 lines above the edit), `scan_svc.go:439`
+  gocritic `whyNoLint` (`handleStatus`'s `//nolint:errcheck`, at line 414 before
+  this change shifted it), and `handleMetrics` gocognit 51. Because the
+  full-tree run is on THIS branch, any finding the change introduced would be
+  among those 174; the only open question was whether a declaration-attributed
+  one got worse, so it was measured directly with `gocognit` against
+  `origin/main`'s `metrics.go`: **51 on both**, identical, because the three new
+  series added arguments and no branches.
+
 **Gates added.**
 
 Package `main`, `scan_svc_admission_chaos_test.go` (10):
