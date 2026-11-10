@@ -16,6 +16,8 @@ import (
 
 	"github.com/crewjam/saml"
 	"golang.org/x/net/html"
+
+	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
 func TestSimpleSAMLphpInterop_CompilesProviderFromMetadataURL(t *testing.T) {
@@ -24,6 +26,14 @@ func TestSimpleSAMLphpInterop_CompilesProviderFromMetadataURL(t *testing.T) {
 		t.Skip("set CULVERT_SIMPLESAML_METADATA_URL to run SimpleSAMLphp interop test")
 	}
 
+	// The SimpleSAMLphp fixture listens on loopback. fetchSAMLMetadata guards
+	// the metadata host twice: a pre-flight isPrivateHostContext verdict
+	// (CHAOS-87) and the connect-time ssrfSafeDialContext. Relax both, the
+	// pre-flight through the guard's own test seam, so the interop run
+	// exercises the real fetch path instead of stopping at the SSRF refusal.
+	t.Cleanup(ssrf.AllowLoopbackForTest())
+	ssrf.CacheReset()
+	t.Cleanup(ssrf.CacheReset)
 	origDial := ssrfSafeDialContext
 	ssrfSafeDialContext = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
 	t.Cleanup(func() { ssrfSafeDialContext = origDial })

@@ -99,6 +99,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   today and no behaviour changed; the comment now states the invariant that
   holds and what breaking it would leak. (CWE-1059, would-be CWE-200; OWASP
   A09:2021, A01:2021 if the enabling change lands.)
+
+- **Category-group rules failed open when an admin category overlapped a
+  built-in one: a Block rule on a group stopped matching a host that a
+  single-category rule on the same category still blocked.** A category-group
+  rule decided "is this host in ANY category of the group?" from the ONE
+  category the host classifies as, not from the categories it belongs to.
+  Since the signed-feed source-aware resolution (`603e3401e`, F3b-4) put
+  admin-created categories first on the effective-view path — which is armed
+  on every startup — an admin category covering a host by PARENT suffix (admin
+  `webmail` = `example.test`) wins that classification over a built-in EXACT
+  entry (`News` = `news.example.test`), so a Block rule on the group
+  `{Social Media, News}` let `news.example.test` through to whatever rule or
+  default came next, while `destCategory=News` still blocked it. The same
+  shape dropped every non-winning category of a many-to-many built-in host on
+  both paths. Category-group rules now match on MEMBERSHIP — the host matches
+  when it belongs to any category in the group — using the same primitive
+  single-category rules use (finding F-1), for every scan that evaluates a
+  destination: access policy and the Policy Tester, CDR policy, and Stage-1
+  auth rules. The classification winner and the admin → SaaS → community
+  resolution order are unchanged (decision logs and the URL-lookup API still
+  report one category). **Behaviour change:** a group rule now also matches
+  hosts that belong to one of its categories without classifying as it — for
+  example a `{webmail}` group now matches `news.example.test` when `webmail`
+  covers `example.test` — which widens Allow rules, and rules carrying an SSL
+  bypass or inspect action, keyed on such groups the same way. The scan stays allocation-free; a
+  categorized host whose classification is not in a group pays one
+  single-category membership probe per remaining group category.
+
 - **A scan sidecar that kept binding and dying was invisible to every signal
   built for one that would not come back, so a fleet failed open unheard
   (CHAOS-114).** CHAOS-113 gave the sidecar listener a supervisor, an `up`
