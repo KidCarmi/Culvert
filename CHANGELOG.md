@@ -59,13 +59,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 ### Fixed
 
 - **Automatic Root CA rotation broke inspected HTTPS for every client until the
-  new root was distributed, despite the documented dual-CA overlap.** The
-  rotation minted a new KEY, so a client trusting only the old root could not
-  validate the new leaves; sending the old root in the chain could not change
-  that. Rotation now renews the certificate under the same key and subject, so
-  both the old and the new root validate a leaf until the old one expires, and
-  the overlap also survives a restart. Replacing the key remains the manual
-  `POST /api/ca/rotate`. (`TestDualCAOverlap_ClientTrustingOnlyOldRootValidates`)
+  new root was distributed, and silently replaced imported CAs.** The rotation
+  minted a new key, so a client trusting only the old root could not validate
+  the new leaves, and it did this to any CA near expiry, including a customer
+  root or an enterprise-issued intermediate. Now:
+  - A root Culvert generated is *renewed* under the same key and subject, so
+    the old and the new certificate both validate a leaf until the old one
+    expires. Replacing the key remains the manual `POST /api/ca/rotate`.
+  - An imported CA is never renewed or replaced. A `cert_expiry` alert fires
+    daily inside the 30-day window; at expiry inspection is refused, not
+    bypassed.
+  - An imported intermediate is now served with every forged leaf, so a client
+    trusting only the enterprise root can build the path.
+  - **Upgrade note:** bundles from earlier releases carry no provenance record
+    and are not renewed until classified with the new startup-only
+    `CULVERT_CA_PROVENANCE` (`culvert-managed` or `imported`). The record is a
+    separate PEM block that older builds skip, so a downgrade still loads the
+    bundle. See `docs/operator/root-ca-expiry.md` §5.
 
 - **A whitespace-only `cluster.grpc_addr` passed config validation under `cluster.role: control-plane`.**
   The required-address check compared the raw string to `""`, so `grpc_addr: " "` loaded, resolved to a non-empty
