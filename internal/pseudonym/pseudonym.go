@@ -202,6 +202,23 @@ func hostByteClass(b byte) bool {
 		(b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
+// asciiLower lowercases A-Z only and returns a string of exactly len(s) bytes,
+// so an index into the result is an index into s.
+func asciiLower(s string) string {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 'A' && c <= 'Z' {
+			b := []byte(s)
+			for k := i; k < len(b); k++ {
+				if b[k] >= 'A' && b[k] <= 'Z' {
+					b[k] += 'a' - 'A'
+				}
+			}
+			return string(b)
+		}
+	}
+	return s
+}
+
 // ReplaceHostFold replaces every WHOLE-hostname (case-insensitive) occurrence of
 // host in s with tok. "Whole" = not flanked by another host-label byte, so
 // "ex.com" does not match inside "complex.com". The unmatched remainder keeps
@@ -210,7 +227,13 @@ func ReplaceHostFold(s, host, tok string) string {
 	if host == "" {
 		return s
 	}
-	ls, lh := strings.ToLower(s), strings.ToLower(host)
+	// Fold ASCII only. strings.ToLower is not length-preserving (U+023A is 2
+	// bytes, its lowercase 3; an invalid UTF-8 byte becomes 3-byte U+FFFD), and
+	// the match index found in the folded copy is used to slice s: any byte
+	// that grows before the host shifts every later offset, which left the host
+	// in plaintext or indexed past the end. Hosts on the wire are ASCII
+	// (IDNA/punycode), so byte-wise ASCII folding loses no match that matters.
+	ls, lh := asciiLower(s), asciiLower(host)
 	var b strings.Builder
 	last := 0
 	for {
