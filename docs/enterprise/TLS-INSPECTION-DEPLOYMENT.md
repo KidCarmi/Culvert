@@ -29,7 +29,7 @@ You *can* upload an internal-PKI intermediate via **Certificates → Upload Cust
 
 > **⛔ GAP-PKI-01 — not persisted.** The GUI upload sets the CA in memory only; there is **no `SaveCA`**. On restart the proxy reverts to the on-disk `ca.bundle`. Verified by adversarial review. Workaround: stage the EC PEM bundle (cert + `EC PRIVATE KEY` concatenated) at `-ca-path` on disk so `LoadCA`/`ImportBundle` picks it up durably — this requires host access and is EC-only.
 
-> **⛔ GAP-PKI-03 — auto-rotation overwrites it.** At the 30-day-before-expiry mark, auto-rotation calls `InitCA` and generates a fresh **Culvert-generated** root, silently replacing your imported CA. There is no opt-out flag. Workaround: import with long validity, monitor expiry externally, and plan a manual re-import.
+> **⛔ GAP-PKI-03 — auto-rotation overwrites it.** At the 30-day-before-expiry mark, auto-rotation replaces your imported CA certificate with a **self-signed** certificate that keeps the same key and subject. Clients keep validating through your imported certificate until it expires; after that they must trust the self-signed replacement directly, which your enterprise root did not issue. There is no opt-out flag. Workaround: import with long validity, monitor expiry externally, and plan a manual re-import.
 
 **Accepted formats:** PEM only; no PKCS#12/DER (GAP-PKI-04 — convert with `openssl pkcs12 -nodes` off-box). The private key must be supplied (the CA forges leaves).
 
