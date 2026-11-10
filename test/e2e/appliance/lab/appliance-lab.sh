@@ -433,7 +433,30 @@ sys.exit(0 if ok else 1)
 PY
   }
   if overflowcase; then log "selftest ok: >64KiB status flags overflow=true + parses=false (capture-integrity gate catches it)"; else log "selftest FAILED: oversize status did not flag overflow as a capture failure"; rc=1; fi
-  unset -f cpcase bigstatus overflowcase
+  # Capture-integrity gate over records made by the real rec_classify_probe
+  # (campaign 4 stopped on two empty timeout probes counted as unparseable).
+  # capgate NAME WANT_COUNTS WANT_GATE(pass|fail) RC:STDOUT ... — each RC:STDOUT
+  # becomes one probe record; the counts and the gate decision must both match.
+  capgate() { local nm="$1" want="$2" wantg="$3" out="$d/cg-$1.jsonl" k=0 spec got g; shift 3; : > "$out"
+    for spec in "$@"; do k=$((k+1))
+      printf '%s' "${spec#*:}" > "$d/cg.json"; : > "$d/cg.err"
+      LAB_HOST=10.9.9.9 rec_classify_probe "$d/cg.json" "$d/cg.err" "${spec%%:*}" 3000.0 "$k" "$k.0" 10.9.9.9 "$out" >/dev/null
+    done
+    got="$(capture_integrity "$out")"; if capture_gate "$got"; then g=pass; else g=fail; fi
+    if [ "$got" = "$want" ] && [ "$g" = "$wantg" ]; then log "selftest ok: capture gate $nm -> $got $g"
+    else log "selftest FAILED: capture gate $nm -> '$got' $g, want '$want' $wantg"; rc=1; fi
+  }
+  local cg_ready='{"phase":"ready","reason":"HEALTH_CHECKS_PASSED"}'
+  capgate c4-shape   "3 1 2 0 0" pass "124:" "124:" "0:$cg_ready"
+  capgate ssh-fault  "2 1 1 0 0" pass "255:" "0:$cg_ready"
+  capgate exit0-empty "2 2 0 0 1" fail "0:" "0:$cg_ready"
+  capgate timeout-partial "2 2 0 0 1" fail '124:{"phase":' "0:$cg_ready"
+  capgate only-faults "2 0 2 0 0" fail "124:" "255:"
+  capgate bad-json   "2 2 0 0 1" fail "0:not json" "0:$cg_ready"
+  got="$(capture_integrity "$d/cp-ovf.jsonl")"; if capture_gate "$got"; then g=pass; else g=fail; fi
+  if [ "$got" = "1 1 0 1 1" ] && [ "$g" = fail ]; then log "selftest ok: capture gate overflow -> $got $g"
+  else log "selftest FAILED: capture gate overflow -> '$got' $g, want '1 1 0 1 1' fail"; rc=1; fi
+  unset -f cpcase bigstatus overflowcase capgate
   # The console-marks watcher runs in the background for up to an hour; the
   # caller captures its pid with $(...), which must return at once (run
   # 37363074909 lost ~60 min per reboot waiting for the watcher to exit).
@@ -1745,6 +1768,40 @@ with open(out, "a") as o:
 print("%s\t%s\t%s" % (klass, phase or "-", reason or "-"))
 PY
 }
+# capture_integrity FILE — counts for the capture-integrity gate, printed as
+# "records captured no_output_faults overflow unparseable".
+# A record is a NO-OUTPUT TRANSPORT FAULT only when ALL of these hold: the probe
+# exited non-zero (timeout 124, ssh 255 or another command error), it produced
+# ZERO bytes of stdout (raw and redacted), and nothing overflowed. Such a probe
+# captured nothing, so there is no payload to be complete or to reparse; it is
+# already counted as a transport fault by the probe summary, and the sample is
+# never counted as healthy. EVERY other record is "captured" and must reparse
+# and must not overflow, exactly as before: a clean exit with empty stdout, or a
+# timeout that left partial output, is still unparseable. The gate also fails
+# when nothing at all was captured.
+capture_integrity() { python3 - "$1" <<'PY'
+import json, sys
+try: rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+except FileNotFoundError: rows = []
+def no_output_fault(r):
+    return (isinstance(r.get("exit_code"), int) and r["exit_code"] != 0
+            and r.get("stdout_len") == 0 and r.get("stdout_redacted_len") == 0
+            and r.get("stdout_redacted") == "" and r.get("stdout_overflow") is False)
+none = [r for r in rows if no_output_fault(r)]
+cap = [r for r in rows if not no_output_fault(r)]
+ovf = sum(1 for r in rows if r.get("stdout_overflow") is True)
+nonp = sum(1 for r in cap if r.get("stdout_redacted_parses") is not True)
+print("%d %d %d %d %d" % (len(rows), len(cap), len(none), ovf, nonp))
+PY
+}
+# capture_gate "COUNTS" — the gate's pass rule over capture_integrity's output:
+# at least one captured record, no overflow, and every captured record reparses.
+capture_gate() { local n c none ovf nonp
+  read -r n c none ovf nonp <<EOF
+$1
+EOF
+  [ "${c:-0}" -gt 0 ] && [ "${ovf:-0}" -eq 0 ] && [ "${nonp:-0}" -eq 0 ]
+}
 rec_operator_probe() { local tag="$1" sample="$2" off="$3" rc=0 t_a t_b ems
   t_a="$(mono_raw)"
   gop_within 3 status-json > "$WORK/rec-status.json" 2> "$WORK/rec-status.err" || rc=$?
@@ -1948,23 +2005,19 @@ PY
   # own right — independent of, and separate from, the product-readiness class
   # the probe reports. Metadata flags alone are not failure handling, so this is
   # a real pass/fail check, not an INFO line.
-  local capint; capint="$(python3 - "$EV/$tag-operator-probe.jsonl" <<'PY'
-import json, sys
-try: rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
-except FileNotFoundError: rows = []
-ovf = sum(1 for r in rows if r.get("stdout_overflow") is True)
-nonp = sum(1 for r in rows if r.get("stdout_redacted_parses") is not True)
-print("%d %d %d" % (len(rows), ovf, nonp))
-PY
-)"
-  local cap_n cap_ovf cap_nonp
-  read -r cap_n cap_ovf cap_nonp <<EOF
+  # Campaign 4 (run 42780398896) stopped here on two probes that TIMED OUT while
+  # the guest was still booting (exit 124, zero bytes of stdout): they captured
+  # nothing, so there was no payload to be complete or to reparse, yet the old
+  # rule counted them as "unparseable". capture_integrity separates them; see it.
+  local capint; capint="$(capture_integrity "$EV/$tag-operator-probe.jsonl")"
+  local cap_n cap_c cap_none cap_ovf cap_nonp
+  read -r cap_n cap_c cap_none cap_ovf cap_nonp <<EOF
 $capint
 EOF
-  if [ "${cap_n:-0}" -gt 0 ] && [ "${cap_ovf:-0}" -eq 0 ] && [ "${cap_nonp:-0}" -eq 0 ]; then
-    check R "operator-capture-integrity-$name-$i" pass "$cap_n sanitized records, all complete and reparse (overflow=0 unparseable=0)"
+  if capture_gate "$capint"; then
+    check R "operator-capture-integrity-$name-$i" pass "$cap_n sanitized records: $cap_c captured, all complete and reparse; $cap_none transport faults with no output (nothing to retain) (overflow=0 unparseable=0)"
   else
-    check R "operator-capture-integrity-$name-$i" fail "capture integrity: records=${cap_n:-0} overflow=${cap_ovf:-0} unparseable=${cap_nonp:-0} — overflow or invalid retained JSON is a capture failure, separate from product readiness"
+    check R "operator-capture-integrity-$name-$i" fail "capture integrity: records=${cap_n:-0} captured=${cap_c:-0} no-output-faults=${cap_none:-0} overflow=${cap_ovf:-0} unparseable=${cap_nonp:-0} — overflow, invalid retained JSON or no captured record is a capture failure, separate from product readiness"
   fi
   # The recovery verdict is recorded BEFORE its consequence (no backup
   # listing without a healthy joint sample), so a stop latch names the cause.

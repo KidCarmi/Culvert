@@ -1280,16 +1280,24 @@ jobs:
       # The ONE commit message that may start this job (an empty commit on the
       # reviewed head; reviewed by ASTRA, with its SHA, parent and tree, before
       # it is pushed).
-      # Campaign 4 (owner direction and decision of 8 November 2026; D4 of 9
-      # November 2026): the FB1-R2 replacement candidate. Campaigns 1 (trigger
-      # b93388e9, run 42267550172, evidence 13528259883) and 2 (trigger
-      # 6ac47d99, run 42402656551 attempt 2, evidence 13586389914) are FAIL and
-      # preserved; both booted the earlier OVA f9d68540. The campaign-3 route
-      # (84e05cd6, FB1-R1 OVA f76b6e82) was never triggered: owner decision D4
-      # retired that candidate. None of those messages starts this job.
-      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 4 on the FB1-R2 candidate OVA e60620c3 [qemu-retained]"
-      QEMU_CAMPAIGN: "4"
-      QEMU_PRIOR_CAMPAIGN: "2: trigger 6ac47d99cc7136d47c737a89794ffb62a71d1841, run 42402656551 attempt 2, evidence artifact 13586389914, verdict FAIL (stop at E/kernel-cve-assumptions: perf/BPF tooling on OVA f9d68540)"
+      # Campaign 5 (owner direction and decision of 8 November 2026; D4 of 9
+      # November 2026; owner clarification of 10 November 2026): the same FB1-R2
+      # candidate OVA e60620c3 as campaign 4, after a HARNESS fix. Campaign 4
+      # (trigger 3b584705, run 42780398896, evidence 13746914239) is FAIL and
+      # preserved: it stopped at R/operator-capture-integrity-q7-1 because the
+      # capture-integrity gate counted two probes that timed out with zero bytes
+      # of output as "unparseable". capture_integrity in appliance-lab.sh now
+      # separates such no-output transport faults; every captured record must
+      # still reparse. No candidate, criterion or other harness change.
+      # Campaigns 1 (trigger b93388e9, run 42267550172, evidence 13528259883)
+      # and 2 (trigger 6ac47d99, run 42402656551 attempt 2, evidence
+      # 13586389914) are FAIL and preserved; both booted the earlier OVA
+      # f9d68540. The campaign-3 route (84e05cd6, FB1-R1 OVA f76b6e82) was never
+      # triggered: owner decision D4 retired that candidate. None of those
+      # messages starts this job.
+      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 5 on the FB1-R2 candidate OVA e60620c3 [qemu-retained]"
+      QEMU_CAMPAIGN: "5"
+      QEMU_PRIOR_CAMPAIGN: "4: trigger 3b5847057d7532d7dc2346a60ac10f6716760973, run 42780398896 attempt 1, evidence artifact 13746914239, verdict FAIL (stop at R/operator-capture-integrity-q7-1: two no-output timeout probes counted as unparseable)"
       # Start deadline (unchanged, reviewed for campaign 2): first candidate boot
       # no later than 2026-11-14T00:00:00Z. With the 345-minute job limit and the
       # daily-window rule the job ends by 2026-11-14T05:45Z, inside the owner's
