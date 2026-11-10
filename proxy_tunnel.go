@@ -985,6 +985,80 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	runH1InspectLoop(r, clientTLS, upstreamTLS, hostOnly, match, id, decBlock)
 }
 
+// inspectLoopReadBufSize is the bufio.Reader size runH1InspectLoop gives EACH
+// leg of a decrypted HTTP/1.1 tunnel. It was two bare 32*1024 literals with no
+// recorded reason; it is named here because it turns out to be LOAD-BEARING,
+// and in a way that is not visible from this file.
+//
+// IT BOUNDS THE CHUNKED-TRAILER BLOCK THE TUNNEL WILL ACCEPT. net/http reads a
+// chunked body's trailers through the same bufio.Reader, and guards against an
+// unbounded trailer with a hack that Peeks "up to the bufio.Reader's max size"
+// looking for the terminating double CRLF — net/http/transfer.go, readTrailer
+// and seeUpcomingDoubleCRLF, whose own comment reads "This limits the trailer to
+// the underlying buffer size, typically 4kB." A trailer block that does not fit
+// fails with "http: suspiciously long trailer after chunked body". Measured
+// against the real stdlib at the pinned toolchain, trailer block vs reader size:
+//
+//	block ~3,800 B │ accepted at 4K, 8K, 16K, 32K
+//	block ~4,090 B │ REJECTED at 4K      · accepted at 8K, 16K, 32K
+//	block ~8,000 B │ REJECTED at 4K      · accepted at 8K, 16K, 32K
+//	block ~20,000 B│ REJECTED at 4K/8K/16K · accepted at 32K
+//	block ~40,000 B│ rejected at every size
+//
+// So shrinking this constant SILENTLY NARROWS the traffic an inspected tunnel
+// accepts, on both legs: a chunked response with a 4-32 KiB trailer block that
+// is delivered today would be refused, and with scanning enabled the refusal
+// tears the tunnel down (scanInspectBody -> scanReadError -> exDeliverError).
+// That would make enabling inspection reject responses that pass with it off —
+// the plain-HTTP forward path reads through http.Transport, whose
+// ReadBufferSize is 64 KiB here (upstream_transport.go), so its window is
+// already WIDER than this one. TestInspectLoopReadBuf_TrailerWindowIsLoadBearing
+// pins the dependency by execution so a future shrink fails with the reason
+// attached instead of silently dropping trailered traffic.
+//
+// What the size COSTS, measured, so both sides of the trade are on the record:
+// both readers are built at tunnel establishment and live until it closes, so
+// this is 65,747-65,748 B of resident heap per concurrent inspected tunnel over
+// 48 live tunnels (~627 MiB at 10k) — and on an inspecting gateway that is the
+// dominant concurrent connection class. A hypothetical 4 KiB pair measures
+// 8,403 B/tunnel, so the trailer window costs ~57 KiB per tunnel. See
+// proxy_tunnel_inspectbuf_bench_test.go, and
+// TestBenchGate_InspectReadBufResidency for the ceiling that keeps an INCREASE
+// deliberate.
+//
+// It is NOT bought with throughput, which is worth recording so the next reader
+// does not re-measure it: these readers sit on a *tls.Conn and tls.Conn.Read
+// returns at most one TLS record, so a larger buffer absorbs no more per fill,
+// and a consumer reading at least the buffer size bypasses the buffer entirely
+// (bufio.Reader.Read's "Large read, empty buffer" branch). Measured on a real
+// handshaked TLS pair, this size against 4 KiB, -benchtime=2s -count=3:
+// inner-request parse 3677-3944 against 3692-3834 ns/op with identical
+// allocations (1944 B, 21 allocs) on both; read-through at 1 KiB consumer reads
+// 1772-2056 against 1878-2082 MB/s. One spread, no ordering either way — so the
+// size is not a throughput knob in EITHER direction, and a future change to it
+// will be about the trailer window and the memory, nothing else.
+//
+// Changing it in either direction is therefore a decision about which traffic an
+// inspected tunnel accepts, owned by the proxy/inspection contract — not a
+// performance tuning knob. Lowering it needs an explicit decision that the
+// narrower trailer window is acceptable; raising it to match the forward path's
+// 64 KiB costs ~63 KiB more per concurrent inspected tunnel.
+const inspectLoopReadBufSize = 32 * 1024
+
+// newInspectLoopReaders builds the two buffered readers runH1InspectLoop parses
+// inner requests and upstream responses through.
+//
+// It exists as a named constructor rather than two inline calls so the contract
+// above can be pinned on the PRODUCTION pair rather than on a copy of it:
+// TestInspectLoopReaders_UseTheConfiguredSize asserts both readers' sizes, and
+// the residency benchmarks build their population through this function, so an
+// inline bufio.NewReaderSize with a different size is not silently outside what
+// the tests and gates measure.
+func newInspectLoopReaders(clientTLS, upstreamTLS io.Reader) (clientBR, upstreamBR *bufio.Reader) {
+	return bufio.NewReaderSize(clientTLS, inspectLoopReadBufSize),
+		bufio.NewReaderSize(upstreamTLS, inspectLoopReadBufSize)
+}
+
 // runH1InspectLoop drives the HTTP/1.1 keep-alive inspection loop over a decrypted
 // tunnel: it parses each client request, runs the protocol-neutral inspection
 // pipeline (runInspectExchange) with H1 transport hooks, and tears the tunnel down
@@ -999,8 +1073,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 // may be nil (the native-ALPN caller passes nil until that sub-path builds its own block
 // — a documented follow-up), in which case the entries carry no dec block.
 func runH1InspectLoop(r *http.Request, clientTLS, upstreamTLS *tls.Conn, hostOnly string, match *PolicyMatch, id ProxyIdentity, decBlock *DecryptionBlock) {
-	clientBR := bufio.NewReaderSize(clientTLS, 32*1024)
-	upstreamBR := bufio.NewReaderSize(upstreamTLS, 32*1024)
+	clientBR, upstreamBR := newInspectLoopReaders(clientTLS, upstreamTLS)
 
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 
