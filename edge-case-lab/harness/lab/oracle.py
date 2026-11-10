@@ -157,14 +157,34 @@ def _host_category(intent: dict, host: str) -> Optional[str]:
     return None
 
 
+def _host_categories(intent: dict, host: str) -> list:
+    """Every category the host is a MEMBER of (exact or parent-suffix), not just
+    the first one _host_category classifies it as. A host can belong to several
+    categories at once — e.g. news.example.test is 'news' (exact) AND 'webmail'
+    (parent suffix example.test)."""
+    host = _norm_host(host)
+    out = []
+    for cat, hosts in (intent.get("objects", {}).get("categories") or {}).items():
+        for h in hosts:
+            h = _norm_host(h)
+            if host == h or host.endswith("." + h):
+                out.append(cat)
+                break
+    return out
+
+
 def _host_in_group(intent: dict, host: str, group: str) -> bool:
-    cat = _host_category(intent, host)
-    if cat is None:
-        return False  # fail-closed: uncategorised host never matches a category group
+    # MEMBERSHIP semantics (owner decision, category-group fail-open fix): a
+    # category-group rule matches when the host belongs to ANY category in the
+    # group — the same semantics Culvert's single-category rules use (finding
+    # F-1). The previous single-winner form (first classified category only)
+    # encoded the fail-open the fix closes. See
+    # EDGE-CASE-FINDING-RECLASSIFICATION.md, Finding 6.
     members = (intent.get("objects", {}).get("category_groups") or {}).get(group)
     if members is None:
         return False
-    return cat in members
+    # fail-closed: an uncategorised host is a member of nothing, so never matches
+    return any(c in members for c in _host_categories(intent, host))
 
 
 # ---- Rule matching ----------------------------------------------------------

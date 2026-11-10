@@ -1095,6 +1095,84 @@ func (s *Store) MatchesCategoryKey(groupName, catKey string) bool {
 	return g.catSet[catKey]
 }
 
+// MemberFunc reports whether the destination host belongs to the named
+// category (a MEMBERSHIP question, not a classification). It receives each of
+// a group's normalized (lowercase) category names in turn.
+type MemberFunc func(category string) bool
+
+// MatchesMemberKeyByID is MatchesCategoryKeyByID with MEMBERSHIP semantics: the
+// group matches when the host belongs to ANY category in it, not only when its
+// single classification winner (catKey) is one of them. Same ID-authoritative
+// resolved/matched contract as MatchesCategoryKeyByID.
+//
+// WHY. A host can belong to several categories at once — the shipped taxonomy
+// is many-to-many, and an admin category whose PARENT-suffix pattern covers a
+// built-in category's exact host makes the host a member of both — while
+// classification answers with exactly one of them. Deciding the group from the
+// winner alone dropped every other category the host belongs to, so a Block
+// rule on a group holding a non-winning category stopped matching (fail-open)
+// while a single-category rule on that same category, which already used
+// membership, still blocked.
+//
+// catKey is the classification winner's key (CategoryKey of the caller's
+// resolved category). It is probed first, O(1), off the catSet: the winner is
+// always a member, so this is a pure fast path, and it is also what guarantees
+// no host that matched under the old winner-only semantics stops matching. Only
+// when it misses is member consulted, once per remaining group category. An
+// empty catKey (an UNCATEGORIZED host) is in no category, so it never matches
+// and member is never called — the same shape MatchesCategoryKeyByID has.
+//
+// Lock-free like every matcher here (one view load, one byID probe). member
+// must not retain its argument; it is called synchronously and does not escape,
+// so a caller's closure stays on the caller's stack.
+func (s *Store) MatchesMemberKeyByID(id, catKey string, member MemberFunc) (matched, resolved bool) {
+	if id == "" {
+		return false, false
+	}
+	g := s.readState().byID[id]
+	if g == nil {
+		return false, false
+	}
+	return g.matchesMember(catKey, member), true
+}
+
+// MatchesMemberKey is MatchesMemberKeyByID on the denormalized-NAME fallback
+// leg (un-migrated rules with no group ID), with MatchesCategoryKey's
+// unknown-group-fails-closed contract.
+func (s *Store) MatchesMemberKey(groupName, catKey string, member MemberFunc) bool {
+	if catKey == "" {
+		return false
+	}
+	g := s.readState().byName[strings.ToLower(groupName)]
+	if g == nil {
+		return false
+	}
+	return g.matchesMember(catKey, member)
+}
+
+// matchesMember is the shared body of the membership matchers. g.Categories is
+// normCats output on every install path (Load, Add, Update, UpdateByID,
+// ReplaceAll, and restoreSnapshot from a List of those), so each entry is
+// already its own catSet key; the winner key was probed via the catSet and is
+// skipped rather than asked twice.
+func (g *Group) matchesMember(catKey string, member MemberFunc) bool {
+	if catKey == "" {
+		return false
+	}
+	if g.catSet[catKey] {
+		return true
+	}
+	if member == nil {
+		return false
+	}
+	for _, c := range g.Categories {
+		if c != "" && c != catKey && member(c) {
+			return true
+		}
+	}
+	return false
+}
+
 // Names returns all group names (for UI dropdowns).
 func (s *Store) Names() []string {
 	s.mu.RLock()
