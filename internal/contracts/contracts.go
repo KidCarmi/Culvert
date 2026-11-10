@@ -284,24 +284,32 @@ func Assess(base, head *Registry, tree fs.FS, changed []string) Impact {
 			im.Touched = append(im.Touched, b.ID)
 		}
 	}
-	// The registry file is deliberately not a protected path: adding an entry
-	// must stay cheap. What must not change quietly is who can approve and
-	// what is protected.
-	if strings.Join(base.Approvers, ",") != strings.Join(head.Approvers, ",") {
-		im.NeedsApproval = append(im.NeedsApproval, "approvers list changed")
-	}
-	if len(covered(base.Protected, head.Protected)) > 0 {
-		im.NeedsApproval = append(im.NeedsApproval, "protected paths removed: "+strings.Join(covered(base.Protected, head.Protected), ", "))
-	}
-	for _, f := range changed {
-		if touches(base.Protected, []string{f}) {
-			im.NeedsApproval = append(im.NeedsApproval, "protected path changed: "+f)
-		}
-	}
+	im.NeedsApproval = append(im.NeedsApproval, governanceEdits(base, head, changed)...)
 	sort.Strings(im.Touched)
 	sort.Strings(im.Weakened)
 	sort.Strings(im.NeedsApproval)
 	return im
+}
+
+// governanceEdits lists changes to who can approve and what is protected.
+//
+// The registry file is deliberately not a protected path: adding an entry must
+// stay cheap. What must not change quietly is the approver list, the protected
+// list, and the protected files themselves.
+func governanceEdits(base, head *Registry, changed []string) []string {
+	var out []string
+	if strings.Join(base.Approvers, ",") != strings.Join(head.Approvers, ",") {
+		out = append(out, "approvers list changed")
+	}
+	if gone := covered(base.Protected, head.Protected); len(gone) > 0 {
+		out = append(out, "protected paths removed: "+strings.Join(gone, ", "))
+	}
+	for _, f := range changed {
+		if touches(base.Protected, []string{f}) {
+			out = append(out, "protected path changed: "+f)
+		}
+	}
+	return out
 }
 
 // weakening lists the ways head no longer upholds base contract b.
