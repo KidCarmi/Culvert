@@ -458,8 +458,14 @@ jobs:
     # (timeout-minutes 50 / go test -timeout=40m): the suite outgrew the
     # previous 25m / 15m pair on 2026-08-28 and every main push since then
     # died at the per-binary 15m timeout, which require-gate.sh then turned
-    # into a refused Auto-Tag Release.
-    timeout-minutes: 50
+    # into a refused Auto-Tag Release. Raised again to 70m / 60m on 2026-11-10:
+    # the same unsharded suite ran 26-33 min every week to 2026-11-02 and then
+    # passed the 40m go test budget on both ubuntu-26.04 (weekly run,
+    # 2026-11-09) and ubuntu-24.04 (v1.0.404 tag run, 2026-11-09), with the
+    # tests common to both runs ~1.5x slower (spread across the suite, not one
+    # test; new tests added ~75s). Re-measure, or shard via
+    # qa-race-shards.yml as the Fast PR Gate does, before lowering it again.
+    timeout-minutes: 70
     # Retirement step 6 (roadmap/CI-REDESIGN.md): PR-time run superseded by the
     # Fast/Deep PR Gates. Stage 2B additionally delegates the MAIN-PUSH run to
     # qa-gate.yml; tags, the weekly schedule and manual dispatch still run here.
@@ -467,11 +473,11 @@ jobs:
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-    # Pinned to 24.04, not ubuntu-latest: when ubuntu-latest moved to 26.04 the
-    # same unsharded suite went from 26-33 min (every weekly run 2026-09-28..
-    # 2026-11-02 on 24.04) to past the 40m go test budget on 2026-11-09, slower
-    # across existing tests rather than in any one test. Unpin once the run is
-    # sharded like qa-race-shards.yml or the budget is re-measured on 26.04.
+    # Pinned to 24.04, the image every weekly run through 2026-11-02 was
+    # measured on, so run times stay comparable. The pin alone did not fix the
+    # 2026-11-09 timeout (the v1.0.404 tag run also passed 40m on 24.04); the
+    # budget above did. Unpin once the run is sharded like qa-race-shards.yml
+    # or the budget is re-measured on ubuntu-latest.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -484,7 +490,7 @@ jobs:
       - name: Run tests with race detector
         env:
           TEST_SEED: "20260421"   # same seed as the other gates — reproducible reruns
-        run: go test -v -race -count=1 -timeout=40m -coverprofile=coverage.out ./...
+        run: go test -v -race -count=1 -timeout=60m -coverprofile=coverage.out ./...
 
       - name: Check coverage threshold (≥ 55%)
         run: |
