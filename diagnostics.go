@@ -2016,11 +2016,37 @@ func checkCDR() OperatorContractCheck {
 			Message:        "enabled-degraded: CDR is connected but missing fail-mode or default profile",
 			OperatorAction: "Set a fail-mode and default profile under CDR → Configuration.",
 		}
-	default:
+	}
+	return checkCDRCapacity()
+}
+
+// checkCDRCapacity reports an enabled, configured, available CDR pool. The
+// availability gate above only asks "can ANY instance scan?", so a pool with
+// some breakers tripped used to read enabled-healthy. Read-only: breaker
+// state is loaded, never reserved or advanced.
+func checkCDRCapacity() OperatorContractCheck {
+	tripped, total := cdrPool.trippedCount()
+	switch {
+	case tripped == 0:
+		return OperatorContractCheck{Code: "cdr", Status: diagOK, Message: "enabled-healthy"}
+	case tripped >= total:
+		// Every breaker is open-past-timeout or half-open: only recovery
+		// probes reach Sluice; the remaining documents get fail_mode.
 		return OperatorContractCheck{
-			Code:    "cdr",
-			Status:  diagOK,
-			Message: "enabled-healthy",
+			Code:           "cdr",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("enabled-recovering: all %d Sluice instances have a tripped circuit breaker and are being probed for recovery", total),
+			OperatorAction: "Check Sluice reachability under CDR → Instances. Until a probe succeeds, documents beyond the probe budget are refused (fail_mode closed) or delivered unsanitized (fail_mode open).",
+		}
+	default:
+		// Some, but not all, instances are out of rotation. Documents are
+		// still sanitized by the rest, so this is a capacity and redundancy
+		// warning, not an outage: one more failure makes it enabled-dark.
+		return OperatorContractCheck{
+			Code:           "cdr",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("enabled-reduced: %d of %d Sluice instances are out of rotation (circuit breaker open or recovering); the rest are scanning", tripped, total),
+			OperatorAction: "Open CDR → Instances to see which instance is tripped and its last health result, then restore its reachability. Scanning continues on the remaining instances with reduced capacity and no redundancy margin.",
 		}
 	}
 }
