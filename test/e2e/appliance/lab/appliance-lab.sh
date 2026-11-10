@@ -359,6 +359,32 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   # The receive loop must drain as soon as bytes arrive (campaign 5: a
   # sleep-then-drain loop stalled QEMU's virtio console for good), and the
   # transfer must stay byte-identical with the script's exit status kept.
+  # vwait_clamav_ready against a fake /ready (campaign 6: the V5 final
+  # checkpoint sampled /ready once while the proxy's 30 s ClamAV cache still
+  # said "unreachable"). cwr NAME NOT_OK_ANSWERS LIMIT WANT(pass|fail); -1 = never ok.
+  cwr() { local name="$1" k="$2" lim="$3" want="$4" port pid got
+    port=$(( 20000 + RANDOM % 20000 ))
+    python3 -I -c 'import http.server, json, sys
+port, k = int(sys.argv[1]), int(sys.argv[2]); n = [0]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        n[0] += 1; ok = k >= 0 and n[0] > k
+        b = json.dumps({"status": "ok" if ok else "fail", "checks": {"clamav": {"status": "ok" if ok else "fail"}}}).encode()
+        self.send_response(200 if ok else 503); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()' "$port" "$k" > /dev/null 2>&1 &
+    pid=$!; sleep 0.7
+    got="$( P="http://127.0.0.1:$port"; EV="$d/cwr-$name"; WORK="$d/cwr-$name"; JSONL="$d/cwr-$name.jsonl"; LAB_CAMPAIGN_STOP_FILE=
+            mkdir -p "$EV"; : > "$JSONL"; qemu_alive() { return 0; }
+            vwait_clamav_ready V5 "$lim" > /dev/null 2>&1
+            python3 -I -c 'import json,sys; r=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1]); print(r["result"], r["check"], len([l for l in open(sys.argv[2]) if l.startswith("{")]))' "$JSONL" "$EV/V5-clamav-ready.log" 2>/dev/null )"
+    kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+    if [[ "${got%% *}" == "$want" && "$got" == *clamav-ready-before-final* ]]; then log "selftest ok: clamav-ready wait $name -> $got"
+    else log "selftest FAILED: clamav-ready wait $name -> '$got', want $want"; rc=1; fi; }
+  cwr ready-at-once 0 20 pass
+  cwr late 2 30 pass
+  cwr never -1 8 fail
+  unset -f cwr
   if python3 -I -B "$HERE/console-session-selftest.py" > "$d/cs-selftest.log" 2>&1; then
     log "selftest ok: console-session receive loop and transfer ($(grep -c '^ok ' "$d/cs-selftest.log") cases: prompt drain, settle kept, 60 KB identical, status kept)"
   else log "selftest FAILED: console-session receive loop/transfer: $(grep -E 'FAILED|Error' "$d/cs-selftest.log" | head -3 | tr '\n' ' ')"; rc=1; fi
@@ -3826,6 +3852,25 @@ vplymouth_check() { local r; r="$(sed -n 's/^Result=//p' "$3" | head -1)"
   if [[ "$r" == "$4" ]]; then vcheck "$1" "$2" pass "plymouth-start Result=$r ($(sed -n 's/^rc=//p' "$3" | head -1 | sed 's/^/has-display rc=/'))"
   else vcheck "$1" "$2" fail "plymouth-start Result='${r:-unread}', want $4 ($(tr '\n' ' ' < "$3" | cut -c1-200))"; fi; }
 vstray() { sed -n '/^---vcs1$/,/^---vcs12$/p' "$1" | grep -E '^\[ *[0-9]+\.[0-9]+\]|\[ *(OK|FAILED|DEPEND) *\]|LAB-|br-[0-9a-f]{6,}|veth[0-9a-f]|cloud-init|culvert-firstboot:|^ *Start(ing|ed) [A-Za-z].*\.(service|socket|target|mount|timer)' | head -20; }
+# vwait_clamav_ready STEP SECONDS — wait until the proxy's /ready reports
+# ClamAV ok, polling every 5 s for at most SECONDS, keeping every /ready body
+# in $EV/STEP-clamav-ready.log. Records STEP/clamav-ready-before-final pass
+# (seconds taken) or fail (which latches the campaign stop). The proxy's
+# ClamAV row lags the daemon by design: Scanner.ClamAVStatus() caches ANY
+# result, failures included, for 30 s (internal/secscan clamStatusTTL) and
+# reports a quarantine after an engine fault. Campaign 6 (run 42865896238)
+# sampled it once about 27 s after the V5 boot's containers started: clamd
+# answered EICAR, /ready said not ok. 120 s is Q7's post-reboot readiness
+# budget, which every main-leg checkpoint already sits behind.
+vwait_clamav_ready() { local st="$1" lim="$2" t0 n=0
+  t0="$(date +%s)"; : > "$EV/$st-clamav-ready.log"
+  until ready_clamav_ok; do
+    n=$((n+1)); { date -u +%Y-%m-%dT%H:%M:%SZ; cat "$WORK/rec-ready.json" 2>/dev/null; echo; } >> "$EV/$st-clamav-ready.log"
+    if (( $(date +%s) - t0 >= lim )) || ! qemu_alive; then
+      vcheck "$st" clamav-ready-before-final fail "/ready clamav not ok within ${lim}s ($n not-ok samples; bodies in $st-clamav-ready.log)"; return 1; fi
+    sleep 5; done
+  { date -u +%Y-%m-%dT%H:%M:%SZ; cat "$WORK/rec-ready.json" 2>/dev/null; echo; } >> "$EV/$st-clamav-ready.log"
+  vcheck "$st" clamav-ready-before-final pass "/ready clamav ok after $(( $(date +%s) - t0 ))s ($n earlier not-ok samples; bodies in $st-clamav-ready.log)"; }
 vwait_ready() { local deadline=$(( $(date +%s) + ${1:-1800} ))
   until gop status-json > "$WORK/status-json.tmp" 2>/dev/null && [[ " $(recorded_steps "$WORK/status-json.tmp") " == *" complete "* ]] \
         && curl -fsS -m 3 "$P/health" >/dev/null 2>&1; do
@@ -4093,6 +4138,8 @@ EOS
   else vcheck V5 serial-only-boot fail "serial log incomplete (kernel=$(grep -ac 'Linux version' "$EV/V5-serial.log") ok=$(grep -acE 'OK .*(Started|Finished|Reached)' "$EV/V5-serial.log") login=$(grep -ac 'login:' "$EV/V5-serial.log"))"; fi
   # Shutdown on serial: with no display no Plymouth shutdown splash either, so
   # systemd's stop lines and the kernel's last line reach the serial console.
+  # The final checkpoint samples /ready once: wait first (campaign 6).
+  vwait_clamav_ready V5 120 || return 1
   [[ "${LAB_M2_HARDENING:-0}" == 1 ]] && m2_checkpoint console-final
   pkgset_checkpoint console-final
   local off; off="$(wc -c < "$WORK/console.log")"
