@@ -117,6 +117,33 @@ but the headline is **misleading** — one finding (SOCKS5) is upgraded to **SEC
   rule is saved).
 - **Repro:** create redirect rule → `redirectURL:http://external/…` → request → 403 (SWG-0215).
 
+## Finding 6 — Category-group rules fail open on overlapping admin categories (SWG-0005 / SWG-0046)
+**Campaign class:** PRODUCT_BUG → **Held: PRODUCT_BUG (security, fixed)** · Severity **High (fail-open on Block rules)** · Confidence **High**
+
+- **Contract.** Owner decision: a category-group rule matches when the host belongs to **any**
+  category in the group — the same membership semantics single-category rules already use
+  (finding F-1, `hostCatScratch.matchesCategory`).
+- **Code evidence.** `categoryGroupMatchesHostScratch` (`categorygroup.go`) compared only the
+  host's single classification winner (`hostCatScratch.fusion`) against the group. Since F3b-4
+  (`603e3401e`) the armed effective-view path classifies admin-created categories first, so the
+  lab's admin `webmail` (`example.test`, parent suffix) wins over the built-in `News` exact entry
+  for `news.example.test`; the group `{social-media, news}` then did not match `news.example.test`
+  (SWG-0005 v1, SWG-0046 b1: expected block, actual allow) while `destCategory=news` still blocked.
+- **Fix.** The group matcher now asks the membership primitive for each group category
+  (winner probed first). Classification order and winner are unchanged (logging, URL-lookup API).
+- **Oracle change (harness).** `oracle._host_in_group` used the same single-winner shape
+  (`_host_category` = first category in dict order), so it encoded the fail-open and disagreed with
+  the owner decision. It now uses `_host_categories` (every category the host is a member of,
+  exact or parent suffix). Across the whole generated campaign this changes exactly **one**
+  expectation: **SWG-0048 a0** (`news.example.test` under group `personal-comms` =
+  `{webmail, social-media}`) goes `allow` → `block_page`, because `news.example.test` is a member of
+  `webmail` by parent suffix. That is the intended contract, not a hidden failure: the product
+  blocked it before the fix too (via the winner) and the old oracle called that a PRODUCT_BUG. The
+  single-category oracle check (`match.category`) is untouched; its known parent-suffix divergence
+  stays recorded as the SWG-0190 fixture triage.
+- **Repro:** `python3 edge-case-lab/harness/repro_one.py SWG-0005` — v1 `news.example.test`
+  blocked after the fix (allowed before).
+
 ---
 
 ## Reclassification summary
@@ -128,8 +155,10 @@ but the headline is **misleading** — one finding (SOCKS5) is upgraded to **SEC
 | 3 priority 0 reassigned | CONFIG_CONTRACT_GAP | **DOCUMENTATION_GAP / CONFIG_CONTRACT_GAP** | Low–Med | ↔ softened (documented) |
 | 4 permissive = strict | CONFIG_CONTRACT_GAP | **CONFIG_CONTRACT_GAP** (fail-closed) | Low | ↔ held |
 | 5 external redirect reject | CONFIG_CONTRACT_GAP | **EXPECTED_LIMITATION** | Info/Low | ⬇ downgraded (correct behavior) |
+| 6 category-group fail-open | PRODUCT_BUG | **PRODUCT_BUG** (fixed; oracle → membership) | High | ↔ held, closed |
 
 **Confirmed strict PRODUCT_BUGs after review: 0.** **Confirmed SECURITY_BYPASS: 1 (SOCKS5, opt-in).**
+(Finding 6 was added after this review: a category-group fail-open PRODUCT_BUG, now fixed.)
 The single most important correction is that the campaign under-classified SOCKS5 as a "missing
 capability" when the evidence supports a security-relevant enforcement-boundary bypass on an
 advertised interface.
