@@ -228,9 +228,11 @@ The policy engine evaluates rules in **priority order and stops at the first mat
 3. **IdP group membership**
 4. **Auth source** (OIDC / SAML / LDAP / local)
 5. **Destination FQDN** - exact + wildcard
-6. **URL category** (UT1 + curated: Social, Streaming, Gambling, Malicious, Adult, …)
+6. **URL category or category group** (UT1 + curated: Social, Streaming, Gambling, Malicious, Adult, …; a group is a named set of categories)
 7. **Destination country** (GeoIP; **fail-closed** - unknown country does not match)
 8. **Time schedule** - day-of-week + time window + IANA timezone
+
+**Category matching is by membership.** A host can belong to several categories (a built-in entry can carry more than one, and an admin-created category can cover it by parent domain). A URL-category rule matches when the host belongs to that category; a category-group rule matches when it belongs to **any** category in the group. An uncategorized host, or a group that no longer exists, matches neither. The URL Lookup tool (`GET /api/urlcat/lookup`) and the Policy Tester report **one** category: the first hit in the order admin-created → signed category feed → community (UT1) feed. A rule on a different category the host also belongs to still matches, so do not read that single category as the full list.
 
 **Actions:** `Allow`, `Drop`, `Block Page`, `Redirect`. Every rule also carries a **TLS action** - `Inspect` (full MITM) or `Bypass` (transparent tunnel).
 
