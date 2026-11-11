@@ -100,6 +100,38 @@ func init() {
 	ca.UnusableObserver = noteCAUnusable
 	ca.RotationPersistFailureObserver = noteCARotationPersistFailure
 	ca.RotationPersistSuccessObserver = noteCARotationPersisted
+	ca.RenewalWithheldObserver = noteCARenewalWithheld
+}
+
+// caProvenanceEnv names the startup-only classification of a CA bundle that
+// carries no provenance record ("culvert-managed" or "imported"). Startup-only
+// by design, like the passphrase: it asserts who owns a trust anchor, so it is
+// not a runtime-mutable admin setting.
+const caProvenanceEnv = "CULVERT_CA_PROVENANCE"
+
+// caAutoRenewed reports whether Culvert is the lifecycle authority for the
+// active inspection CA and will renew it on its own.
+func caAutoRenewed() bool { return certMgr.Provenance() == ca.ProvenanceManaged }
+
+// noteCARenewalWithheld tells the operator that the inspection CA is inside its
+// renewal window and Culvert will NOT renew it, because Culvert is not its
+// lifecycle authority (internal/ca/provenance.go). Fired once per rotation
+// round (24h cadence), so it is bounded by construction.
+func noteCARenewalWithheld(p ca.Provenance, expiry time.Time) {
+	action := "obtain a renewed CA certificate from the issuing PKI and upload it (CA Management, custom CA) before that date"
+	if p == ca.ProvenanceUnknown {
+		action = "classify it by setting " + caProvenanceEnv + "=culvert-managed (Culvert generated it and may renew it) " +
+			"or =imported (your PKI issued it) and restarting"
+		p = "unknown"
+	}
+	detail := fmt.Sprintf("inspection CA (provenance: %s) expires %s and is NOT renewed automatically: %s. "+
+		"At expiry inspected HTTPS is refused, not bypassed.", p, expiry.UTC().Format("2006-01-02"), action)
+	if logger != nil {
+		logger.Printf("CA: %s", detail)
+	}
+	if globalAlertStore.HasSubscriber("cert_expiry") {
+		go fireAlert("cert_expiry", AlertPayload{Host: "culvert-ca", Detail: detail, Source: "ca"})
+	}
 }
 
 // noteCAUnusable is the engine observer for a refused leaf sign. It runs

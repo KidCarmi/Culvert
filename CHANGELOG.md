@@ -114,6 +114,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **Automatic Root CA rotation broke inspected HTTPS for every client until the
+  new root was distributed, and silently replaced imported CAs.** The rotation
+  minted a new key, so a client trusting only the old root could not validate
+  the new leaves, and it did this to any CA near expiry, including a customer
+  root or an enterprise-issued intermediate. Now:
+  - A root Culvert generated is *renewed* under the same key and subject, so
+    the old and the new certificate both validate a leaf until the old one
+    expires. Replacing the key remains the manual `POST /api/ca/rotate`.
+  - An imported CA is never renewed or replaced. A `cert_expiry` alert fires
+    daily inside the 30-day window; at expiry inspection is refused, not
+    bypassed.
+  - An imported intermediate is now served with every forged leaf, so a client
+    trusting only the enterprise root can build the path.
+  - **Upgrade note:** bundles from earlier releases carry no provenance record
+    and are not renewed until classified with the new startup-only
+    `CULVERT_CA_PROVENANCE` (`culvert-managed` or `imported`). The record is a
+    separate PEM block that older builds skip, so a downgrade still loads the
+    bundle. See `docs/operator/root-ca-expiry.md` §5.
+
 - **One non-ASCII SAN downgraded the admin UI to plain HTTP.** The admin UI's
   self-signed certificate is minted from every SAN source (`-ui-san`, the
   network settings' `ui_sans`, `CULVERT_PUBLIC_IP`). A single name x509 cannot

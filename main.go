@@ -910,10 +910,9 @@ func initBlocklist(s *startupState) {
 // (rootca_startup*.go). The passphrase is read from env HERE (never CLI —
 // shift-left secret hygiene) and passed as a param so the resolver stays pure.
 func initRootCA(s *startupState) {
-	loadRootCA(
-		resolveRootCAStartupConfig(s.fc, *s.caPath, os.Getenv(caPassphraseEnv)),
-		appLifecycleCtx,
-	)
+	cfg := resolveRootCAStartupConfig(s.fc, *s.caPath, os.Getenv(caPassphraseEnv))
+	cfg.LegacyProvenance = os.Getenv(caProvenanceEnv)
+	loadRootCA(cfg, appLifecycleCtx)
 }
 
 // initPolicy loads the policy rules file into the global policy store.

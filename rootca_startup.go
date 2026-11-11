@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
+
+	"github.com/KidCarmi/Culvert/internal/ca"
 )
 
 // sslInspectionLoadError records a Root-CA load/init failure at startup
@@ -45,7 +47,7 @@ func noteSSLInspectionUnavailable(path string, err error) {
 // pre-existing unsynchronised global flagged by ARCH_DISCOVERY — moved
 // verbatim; hardening it is a separate, out-of-scope change.
 func loadRootCA(cfg rootCAStartupConfig, ctx context.Context) {
-	initInspectionCA(cfg)
+	initInspectionCAWithProvenance(cfg)
 	// Store CA runtime config for API-driven rotation.
 	caRuntime.path = cfg.Path
 	caRuntime.passphrase = cfg.Passphrase
@@ -76,6 +78,21 @@ func loadRootCA(cfg rootCAStartupConfig, ctx context.Context) {
 	// A recorded load failure gets a bounded retry campaign (rootca_recovery.go).
 	// No-op on a healthy boot.
 	startInspectionCARecoveryLoop(ctx, cfg)
+}
+
+// initInspectionCAWithProvenance applies the operator's classification for a
+// record-less bundle and then loads the CA. The classification is set BEFORE
+// the load so the startup load and every later recovery re-load agree.
+func initInspectionCAWithProvenance(cfg rootCAStartupConfig) {
+	legacy, ok := ca.ParseProvenance(cfg.LegacyProvenance)
+	if !ok && cfg.LegacyProvenance != "" {
+		logger.Printf("Warning: %s=%q is not recognised (want culvert-managed or imported) — ignored", caProvenanceEnv, sanitizeLog(cfg.LegacyProvenance))
+	}
+	certMgr.SetLegacyProvenance(legacy)
+	initInspectionCA(cfg)
+	if certMgr.Ready() && certMgr.Provenance() == ca.ProvenanceUnknown {
+		logger.Printf("SSLCA: Root CA provenance is unknown (bundle predates provenance tracking) — it will NOT be renewed automatically; set %s=culvert-managed or =imported", caProvenanceEnv)
+	}
 }
 
 // caRotationLoopDone is closed when the auto-rotation loop started by the most
