@@ -618,6 +618,20 @@ func (ss *Scanner) startClamStatusProbe(clam ClamScanner) <-chan struct{} {
 	return ch
 }
 
+// WaitStatusProbe blocks until the ClamAV status probe in flight, if any, has
+// finished. Init and status reads start the probe on a goroutine that logs
+// through the shared obs sink; a caller that is about to replace that sink or
+// this scanner (test cleanup, an orderly reconfigure) waits here so the probe
+// cannot outlive it. It starts nothing and returns at once when no probe runs.
+func (ss *Scanner) WaitStatusProbe() {
+	ss.clamProbeMu.Lock()
+	ch := ss.clamProbeDone
+	ss.clamProbeMu.Unlock()
+	if ch != nil {
+		<-ch
+	}
+}
+
 // runClamStatusProbe performs one status ping and stores the observation.
 //
 // clamStatusProbeBudget, not the client's scan timeout: this is a liveness

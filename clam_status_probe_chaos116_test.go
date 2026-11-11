@@ -65,10 +65,15 @@ func withSilentClamScanner(t *testing.T) *silentClam {
 	t.Helper()
 	clam := newSilentClam()
 	prev := globalSecScanner
-	globalSecScanner = secscan.New(secscan.Deps{Clam: clam, Cache: newHashCache(16, time.Minute)})
+	sc := secscan.New(secscan.Deps{Clam: clam, Cache: newHashCache(16, time.Minute)})
+	globalSecScanner = sc
 	t.Cleanup(func() {
-		globalSecScanner = prev
+		// Release the blocked ping, then wait for the probe to finish (it
+		// logs through the process logger) before restoring the global, so
+		// it cannot outlive this test.
 		close(clam.release)
+		sc.WaitStatusProbe()
+		globalSecScanner = prev
 	})
 	return clam
 }

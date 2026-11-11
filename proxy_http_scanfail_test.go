@@ -46,9 +46,13 @@ func (e *erroringBody) Close() error { return nil }
 func withBodyScanScanner(t *testing.T) {
 	t.Helper()
 	orig := globalSecScanner
-	globalSecScanner = secscan.New(secscan.Deps{Clam: cleanClam{}})
+	sc := secscan.New(secscan.Deps{Clam: cleanClam{}})
+	globalSecScanner = sc
 	globalSecScanner.Init("", 0, nil)
 	t.Cleanup(func() { globalSecScanner = orig })
+	// Wait for Init's ClamAV status probe (it logs through the process
+	// logger) before the restore, so it cannot outlive this test.
+	t.Cleanup(sc.WaitStatusProbe)
 }
 
 func TestScanHTTPResponseBody_ReadErrorFailsClosed(t *testing.T) {
