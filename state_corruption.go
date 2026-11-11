@@ -65,6 +65,7 @@ type stateCorruptionRecord struct {
 	Residual         bool   // true when detected via a prior boot's leftover quarantine file(s)
 	ReadFailed       bool   // true when an EXISTING file could not be read (EACCES/EIO); never quarantined
 	ResidualCount    int    // number of unreconciled quarantine siblings, when Residual
+	DroppedEntries   int    // records dropped as unusable from a file that PARSED; never quarantined
 }
 
 // stateCorruptionRecordsSnapshot returns a copy of the recorded (path-free)
@@ -149,6 +150,41 @@ func noteStateFileUnreadable(kind, path string) {
 
 	stateCorruptionMu.Lock()
 	stateCorruptionRecordByKind[kind] = stateCorruptionRecord{ReadFailed: true}
+	stateCorruptionMu.Unlock()
+
+	deferStartupAlert("state_file_corrupt", AlertPayload{Detail: detail, Source: "storage"})
+}
+
+// noteStateFileEntriesDropped records that a state file PARSED cleanly but
+// carried individual records that could not be honoured, and that those
+// records were dropped (CHAOS-117: `{"nodes":{"dp-1":null}}` in cluster.json).
+//
+// This is deliberately NOT a quarantine. The parse succeeded, so the rest of
+// the document — in cluster.json's case every healthy node and the whole
+// revoked-certificate list — is intact and usable; renaming the file aside
+// would discard that good state to punish one bad record, which is strictly
+// worse than the defect. Like noteStateFileUnreadable it therefore leaves
+// stateCorruptionByKind alone, so the unauthenticated /ready probe and its
+// strict gating are unchanged: this is a degradation to report, not a reason
+// to hold a fleet out of service.
+//
+// It is the LEAST severe record of this plane (the file is readable, parseable
+// and still largely correct), so it never overwrites a quarantine, a
+// quarantine failure, an unreadable file or an unreconciled residual recorded
+// for the same kind this boot — those name a worse state and a different
+// operator action. The log line and the kind's counter still carry every
+// occurrence.
+func noteStateFileEntriesDropped(kind, path string, dropped int) {
+	if dropped <= 0 {
+		return
+	}
+	detail := fmt.Sprintf("%s state file %s parsed but contained %d unusable record(s), which were dropped — the file was NOT moved or modified, and the records it still holds are in effect; the dropped entries must be re-created", kind, path, dropped)
+	logger.Printf("StateCorruption: %q", sanitizeLog(detail))
+
+	stateCorruptionMu.Lock()
+	if _, already := stateCorruptionRecordByKind[kind]; !already {
+		stateCorruptionRecordByKind[kind] = stateCorruptionRecord{DroppedEntries: dropped}
+	}
 	stateCorruptionMu.Unlock()
 
 	deferStartupAlert("state_file_corrupt", AlertPayload{Detail: detail, Source: "storage"})
@@ -306,6 +342,14 @@ func checkStateFileIntegrity() []OperatorContractCheck {
 				Message: fmt.Sprintf("%s: %d unreconciled quarantined copy/copies remain from a prior corrupt load; the state they held may not have been restored on this node",
 					kind, rec.ResidualCount),
 				OperatorAction: "Restore the quarantined copy or a backup on this node's data volume, then restart; once reconciled, remove the leftover quarantine file(s) to clear this row.",
+			})
+		case rec.DroppedEntries > 0:
+			checks = append(checks, OperatorContractCheck{
+				Code:   "state_file_" + kind,
+				Status: diagWarn,
+				Message: fmt.Sprintf("%s state file loaded, but %d unusable record(s) in it were dropped; whatever they held is not in effect on this node",
+					kind, rec.DroppedEntries),
+				OperatorAction: "Re-create the dropped entries (for cluster state: re-enrol the affected nodes and re-issue any pending enrollment tokens). The file was not modified; see the server log for the entries by name.",
 			})
 		case rec.QuarantineFailed:
 			checks = append(checks, OperatorContractCheck{
