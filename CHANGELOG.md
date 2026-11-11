@@ -37,6 +37,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A partially tripped CDR pool is now a Diagnostics warning.** The `cdr`
+  row only asked whether ANY Sluice instance could scan, so a pool with one of
+  two instances' circuit breakers open still read `enabled-healthy`, and the
+  lost capacity and redundancy were visible only by opening CDR → Instances.
+  The row now reports `enabled-reduced` (N of M instances out of rotation) and,
+  when every breaker has tripped and only recovery probes reach Sluice,
+  `enabled-recovering`. Breaker state is read, never reserved or advanced; the
+  row names no instance; CDR enforcement, fail mode and the `enabled-dark` /
+  `enabled-broken` FAIL rows are unchanged.
+
 - **A plain-HTTP admin UI is now a Diagnostics row.** When the self-signed
   certificate could not be generated at startup the GUI fell back to cleartext
   HTTP, announced only on the login banner and the Network page. The new
