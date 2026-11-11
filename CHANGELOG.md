@@ -84,6 +84,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Security regression review 2026-11-10 (`d11ed3a..ac4e223`, PRs #1844-#1853):
+  no regression; three Low findings, all corrected here.** Full record in
+  `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-10.md`. (1) The
+  category-group membership fix's upgrade note enumerated the widened rule
+  actions as Allow and SSL bypass/inspect and omitted the one that removes an
+  identity requirement: a Stage-1 auth `Exempt` rule keyed on a category group
+  now WAIVES proxy authentication for destinations that belong to one of its
+  categories without classifying as it. The matcher is correct and already
+  gated; the note now names that direction, states that `CredentialRequired`
+  widens fail-closed instead, and points at the rule surfaces and the Policy
+  Tester. (2) `scanOnce`'s HTTP 429 branch still read "the shipped sidecar never
+  emits 429 today" after CHAOS-115 made it do exactly that. 429 and 413 are the
+  only non-200 statuses that branch classifies as something other than a fault,
+  and a fault fails OPEN — so a future cleanup acting on that comment would
+  convert a fail-CLOSED capacity refusal into a fleet-wide unscanned forward
+  under the load the gate exists to survive. The comment now says the branch is
+  live and what reclassifying it costs. (3) The IM-008 pseudonymizer extraction
+  left the id-only mint expressed through `MintPair`, which mints a 32-byte key
+  the caller discards and whose failure leg returns the EMPTY id — the exact
+  value `KeyID()` reports for "no key installed", which beside a valid key is
+  the state the 2E-B generation identity exists to rule out. No reachable
+  behaviour regressed, because since Go 1.24 `crypto/rand.Read` never returns an
+  error and crashes the process instead, so that leg (and `mintID`'s counter
+  fallback, and the error returns on `Rotate`/`Ensure`/`MintPair`) cannot fire
+  on the pinned toolchain. `Pseudonymizer.MintID()` now serves id-only callers,
+  and `mintID` records the dead branch rather than advertising a guarantee the
+  runtime will not honour. No posture, default, validation or dependency change.
+
 - **The scan sidecar had no admission control, so its heap was sized by the
   network and an OOM failed the whole fleet open (CHAOS-115).** `POST /scan`
   buffered up to `security.max_scan_mb + 1` bytes per request before doing
@@ -216,7 +244,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   hosts that belong to one of its categories without classifying as it — for
   example a `{webmail}` group now matches `news.example.test` when `webmail`
   covers `example.test` — which widens Allow rules, and rules carrying an SSL
-  bypass or inspect action, keyed on such groups the same way. The scan stays allocation-free; a
+  bypass or inspect action, keyed on such groups the same way. **Audit
+  category-group-scoped Stage-1 auth rules before upgrading:** the same widening
+  reaches the authentication boundary, so an `Exempt` auth rule keyed on a
+  category group now WAIVES proxy authentication for destinations that belong to
+  one of its categories without classifying as it — the directions listed above
+  widen what is allowed or left uninspected, this one widens what is
+  unauthenticated. `CredentialRequired` widens in the fail-closed direction
+  (more destinations challenged). Review group-scoped Allow, SSL-bypass/inspect
+  and `Exempt` rules in Policy → Rules, and use the Policy Tester, which
+  evaluates the same matcher. The scan stays allocation-free; a
   categorized host whose classification is not in a group pays one
   single-category membership probe per remaining group category.
 
