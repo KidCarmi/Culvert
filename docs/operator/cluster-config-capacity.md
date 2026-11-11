@@ -154,11 +154,6 @@ Suggested Prometheus alert rules:
   for: 10m
   labels: { severity: warning }
 
-# The fleet is frozen: the CP rejected its own publish.
-- alert: CulvertConfigPublishRejected
-  expr: increase(culvert_alert_fired_total{event="config_snapshot_rejected"}[15m]) > 0
-  labels: { severity: critical }
-
 # A DP is WAN-starved: poll latency in the slow tail.
 - alert: CulvertDPPollSlow
   expr: histogram_quantile(0.9, rate(culvert_dp_poll_duration_seconds_bucket[10m])) > 30
@@ -166,11 +161,29 @@ Suggested Prometheus alert rules:
   labels: { severity: warning }
 ```
 
-(Adjust `culvert_alert_fired_total` to your alert-delivery metric; the
-`config_snapshot_rejected` webhook is the authoritative signal.)
+**A frozen fleet has no Prometheus metric.** `/metrics` exposes no counter or
+gauge for a rejected publish, so no PromQL rule can page on it; a rule written
+against an alert-delivery metric such as `culvert_alert_fired_total` matches
+nothing and never fires. Page on the frozen fleet through the surfaces listed
+under [Commit-time validation](#commit-time-validation-why-the-fleet-fails-safe):
+
+- **Webhook (recommended for paging):** subscribe an alert webhook to the
+  `config_snapshot_rejected` event (Alerts panel → *Config publish rejected
+  (over cap)*).
+- **Polling:** `GET /api/stats` (viewer role) returns a non-empty
+  `configPublishRejected` string and `configPublishRejectedAt` timestamp while
+  the fleet is frozen. This is the field the dashboard banner reads.
+- **On demand:** `POST /api/diagnose/config` returns `publish_rejected` and
+  `publish_rejected_at`.
+
+The slice-cap rule above is the early warning; it fires before a publish is
+rejected.
 
 ## Related
 
 - `docs/operator/ha-lease-failover.md` — HA failover; a rejected publish now
   fails HA resync closed (a standby will not mark sync-OK on a dropped config).
-- `CLAUDE.md` → *Key Environment Variables* — `CULVERT_CLUSTER_GRPC_COMPRESSION`.
+- `CULVERT_CLUSTER_GRPC_COMPRESSION` is documented under
+  [Rollout order](#gzip-compression--cp-first-if-you-enable-it-at-all) above.
+  It is read once at startup. `GET /api/cluster/status` reports the resolved
+  value as `grpcCompressionEnabled`.
