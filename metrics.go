@@ -1463,9 +1463,9 @@ culvert_scan_svc_inflight %d
 # TYPE culvert_scan_svc_slots gauge
 culvert_scan_svc_slots %d
 
-# HELP culvert_scan_svc_at_capacity_total Scan requests refused because every admission slot was busy — saturation, not a fault; callers fail CLOSED on these
-# TYPE culvert_scan_svc_at_capacity_total counter
-culvert_scan_svc_at_capacity_total %d
+# HELP culvert_scan_svc_saturated_total Scan requests refused because every admission slot was busy — saturation, not a fault; callers fail CLOSED on these
+# TYPE culvert_scan_svc_saturated_total counter
+culvert_scan_svc_saturated_total %d
 `,
 			up,
 			down,
@@ -1476,7 +1476,7 @@ culvert_scan_svc_at_capacity_total %d
 			sv.Backoff.Seconds(),
 			// CHAOS-115. `inflight` pinned at `slots` is the leading indicator
 			// of the refusal regime, and the pair is what makes the refusal
-			// counter readable: `at_capacity_total` rising while `inflight <
+			// counter readable: `saturated_total` rising while `inflight <
 			// slots` would mean the gate is misbuilt, not that the sidecar is
 			// busy. They ride the same `Configured` guard as the listener
 			// gauges above, because a node that never ran a sidecar must not

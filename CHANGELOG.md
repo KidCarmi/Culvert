@@ -110,7 +110,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unscanned until the sidecar died. That is the documented posture for capacity,
   but an operator who was unknowingly relying on the fail-open will meet this as
   new blocking. New surfaces: `culvert_scan_svc_inflight`,
-  `culvert_scan_svc_slots` and `culvert_scan_svc_at_capacity_total` on the
+  `culvert_scan_svc_slots` and `culvert_scan_svc_saturated_total` on the
   sidecar host (behind the same `Configured` guard as the listener gauges), and
   `scan_slots` / `scan_inflight` / `at_capacity_refused` on the sidecar's
   `/health` beside `scan_window_bytes`, because the ceiling to size the
