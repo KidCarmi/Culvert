@@ -176,8 +176,8 @@ under [Commit-time validation](#commit-time-validation-why-the-fleet-fails-safe)
 - **On demand:** `POST /api/diagnose/config` returns `publish_rejected` and
   `publish_rejected_at`.
 
-The slice-cap rule above is the early warning; it fires before a publish is
-rejected.
+The slice-cap rule above warns before a count cap rejects a publish. It does not
+cover the 120 MiB byte budget.
 
 ## Related
 
