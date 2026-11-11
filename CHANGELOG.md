@@ -64,6 +64,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The OIDC browser login merged a userinfo response into the session without
+  checking whose it was.** `enrichFromUserinfo` filled the session's email, name
+  and groups from the userinfo endpoint and never compared its `sub` with the ID
+  token's, which OIDC Core §5.3.2 requires. A userinfo answer about a different
+  subject therefore donated its groups, which group-scoped policy matches on, to
+  the session being minted. A response whose `sub` is missing or different is now
+  discarded and the login proceeds on the signed ID token's claims alone.
+  Behaviour change: an IdP whose userinfo response carries no `sub` no longer
+  contributes groups; put the groups claim in the ID token instead.
+
 - **The scan sidecar had no admission control, so its heap was sized by the
   network and an OOM failed the whole fleet open (CHAOS-115).** `POST /scan`
   buffered up to `security.max_scan_mb + 1` bytes per request before doing
