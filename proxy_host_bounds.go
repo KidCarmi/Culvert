@@ -29,9 +29,12 @@ import (
 //     reverse host index. The index is non-empty on any deployment (the shipped
 //     default taxonomy is 657 patterns), so each probe hashes its whole suffix:
 //     Σ suffix lengths ≈ L²/4.
-//   - internal/catdb `CommunityDB.Lookup` walks parent domains and opens ONE
-//     BadgerDB read transaction per label. `-cat-feed-db /data/catfeeddb` is
-//     enabled by DEFAULT in the shipped docker-compose.
+//   - internal/catdb `CommunityDB.Lookup` walks parent domains, one BadgerDB
+//     point read per label. (It used to open one read TRANSACTION per label as
+//     well; that is now one per lookup — see catdb.Lookup. The walk is still
+//     O(labels) point reads, so the bound below is unchanged; only the constant
+//     shrank.) `-cat-feed-db /data/catfeeddb` is enabled by DEFAULT in the
+//     shipped docker-compose.
 //
 // Measured on a 4-core box through the REAL handleRequest, with one ordinary
 // DestCategoryGroup rule and the Layer-2 feed present:
