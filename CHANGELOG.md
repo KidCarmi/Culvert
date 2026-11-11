@@ -37,6 +37,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A partially tripped CDR pool is now a Diagnostics warning.** The `cdr`
+  row only asked whether ANY Sluice instance could scan, so a pool with one of
+  two instances' circuit breakers open still read `enabled-healthy`, and the
+  lost capacity and redundancy were visible only by opening CDR → Instances.
+  The row now reports `enabled-reduced` (N of M instances out of rotation) and,
+  when every breaker has tripped and only recovery probes reach Sluice,
+  `enabled-recovering`. Breaker state is read, never reserved or advanced; the
+  row names no instance; CDR enforcement, fail mode and the `enabled-dark` /
+  `enabled-broken` FAIL rows are unchanged.
+
 - **A plain-HTTP admin UI is now a Diagnostics row.** When the self-signed
   certificate could not be generated at startup the GUI fell back to cleartext
   HTTP, announced only on the login banner and the Network page. The new
@@ -57,6 +67,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `pac_legacy_config_newer` row on Infrastructure → Diagnostics states it with
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
+
+- **One non-ASCII SAN downgraded the admin UI to plain HTTP.** The admin UI's
+  self-signed certificate is minted from every SAN source (`-ui-san`, the
+  network settings' `ui_sans`, `CULVERT_PUBLIC_IP`). A single name x509 cannot
+  encode as an IA5String — typically an IDN typed in Unicode, e.g.
+  `café.example.com`, instead of its `xn--` form — failed
+  `x509.CreateCertificate` for the whole certificate, and `startUI` treats a
+  self-sign failure as "serve HTTP", so the next start exposed the login page
+  and credentials in cleartext. The unencodable name is now dropped (and
+  logged) and the certificate is minted from the remaining SANs.
 
 - **A whitespace-only `cluster.grpc_addr` passed config validation under `cluster.role: control-plane`.**
   The required-address check compared the raw string to `""`, so `grpc_addr: " "` loaded, resolved to a non-empty
@@ -138,7 +158,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unscanned until the sidecar died. That is the documented posture for capacity,
   but an operator who was unknowingly relying on the fail-open will meet this as
   new blocking. New surfaces: `culvert_scan_svc_inflight`,
-  `culvert_scan_svc_slots` and `culvert_scan_svc_at_capacity_total` on the
+  `culvert_scan_svc_slots` and `culvert_scan_svc_saturated_total` on the
   sidecar host (behind the same `Configured` guard as the listener gauges), and
   `scan_slots` / `scan_inflight` / `at_capacity_refused` on the sidecar's
   `/health` beside `scan_window_bytes`, because the ceiling to size the

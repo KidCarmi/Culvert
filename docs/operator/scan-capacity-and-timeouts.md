@@ -51,7 +51,7 @@ All are on `/metrics`, on `GET /api/security-scan/status`, and in the
 
 On a **sidecar host** three more series describe the sidecar's own admission
 plane — `culvert_scan_svc_slots`, `culvert_scan_svc_inflight` and
-`culvert_scan_svc_at_capacity_total`. They are emitted only where
+`culvert_scan_svc_saturated_total`. They are emitted only where
 `scan_svc.listen` is configured; see §6.2.
 
 **Capacity and faults are deliberately separate.** `culvert_clam_saturated_total`
@@ -284,7 +284,7 @@ therefore **fail-closed** — since CHAOS-53.
 | `GET /health` on the sidecar | `at_capacity_refused` | Cumulative 429s. |
 | `/metrics` on the sidecar host | `culvert_scan_svc_slots` | Same as `scan_slots`. |
 | `/metrics` on the sidecar host | `culvert_scan_svc_inflight` | Same as `scan_inflight`; pinned at `slots` is the leading indicator. |
-| `/metrics` on the sidecar host | `culvert_scan_svc_at_capacity_total` | Same as `at_capacity_refused`. |
+| `/metrics` on the sidecar host | `culvert_scan_svc_saturated_total` | Same as `at_capacity_refused`. |
 | `/metrics` on each **caller** | `culvert_remote_scan_saturated_total` | The caller's side of the same event (already existed). |
 
 **Size the container against `scan_slots x scan_window_bytes.`** That product is
@@ -306,14 +306,14 @@ read once per sidecar start, so a window changed at runtime takes effect on the
 next restart.
 
 **Refusals fail closed, so they are user-visible.** Sustained
-`culvert_scan_svc_at_capacity_total` means downloads are being **blocked** with
+`culvert_scan_svc_saturated_total` means downloads are being **blocked** with
 `403 scan timeout`, not forwarded unscanned. That is the intended posture under
 genuine overload and §4's triage applies, but the remedy is capacity, not a
 scanner investigation:
 
 ```promql
 # The sidecar is refusing scans. Users are seeing blocked downloads.
-rate(culvert_scan_svc_at_capacity_total[5m]) > 0
+rate(culvert_scan_svc_saturated_total[5m]) > 0
 
 # Leading indicator: every slot busy before refusals begin.
 culvert_scan_svc_inflight >= culvert_scan_svc_slots
