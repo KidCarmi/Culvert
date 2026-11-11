@@ -37,6 +37,7 @@ func SelfSigned(extraSANs []string) (*tls.Config, error) {
 	}
 
 	ips, dns := collectSANs(extraSANs)
+	dns = encodableDNSSANs(dns)
 
 	// Log SANs so admins can verify what the cert covers.
 	// Sanitize DNS names (may contain user-provided SANs via --ui-san).
@@ -130,6 +131,25 @@ func collectSANs(extraSANs []string) (ips []net.IP, dns []string) {
 
 	// Deduplicate.
 	return deduplicateIPs(ips), deduplicateStrings(dns)
+}
+
+// encodableDNSSANs drops DNS SANs that x509 cannot encode as an IA5String
+// (any byte above 0x7F — typically a Unicode IDN typed as-is instead of its
+// punycode "xn--" form). x509.CreateCertificate rejects the WHOLE certificate
+// for one such name, and the admin UI treats a self-sign failure as "serve
+// plain HTTP", so a single operator typo in -ui-san, the network settings'
+// ui_sans or CULVERT_PUBLIC_IP would otherwise downgrade the admin UI to
+// cleartext on the next start. The rest of the SAN set still applies.
+func encodableDNSSANs(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, d := range in {
+		if strings.IndexFunc(d, func(r rune) bool { return r > 0x7F }) >= 0 {
+			obs.Printf("UITLS: dropping SAN %q from the self-signed cert: not ASCII (use its punycode xn-- form)", d)
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // appendEnvPublicIPs folds the CULVERT_PUBLIC_IP env var (comma-separated
