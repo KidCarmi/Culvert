@@ -130,6 +130,59 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **An unauthenticated request could make this node dial ClamAV, and enough of
+  them could make the daemon stop answering real scans — which this node
+  forwards UNSCANNED (CHAOS-116).** `Scanner.ClamAVStatus` served a cache miss
+  with an INLINE `clam.Ping()` on the caller's own goroutine: no single-flight,
+  no concurrency cap, a budget of ~2x the 30 s scan timeout (the client applies
+  it to the dial and again to the read), and `context.Background()`, so neither
+  a deadline nor a client disconnect could end it. Its callers are `/health` and
+  `/ready`, which `routeProxyListenerBuiltin` dispatches on the **proxy**
+  listener ahead of `handleRequest` — therefore ahead of the IP filter, the rate
+  limiter and the connection limiter. `handleHealth`'s own comment states the
+  exposure: "every client that can use the gateway can read whatever is written
+  here." And `clamav.clamSem` bounds concurrent **scans** "to prevent
+  overwhelming the daemon" while `Ping` takes no slot, so this was the one path
+  that could open unbounded connections to the daemon that semaphore protects.
+  Measured on the pre-fix tree: **48 unauthenticated `/health` requests produced
+  48 concurrent dials, and not one of them returned** while a daemon that
+  accepts and does not answer stayed silent. Two consequences follow, and the
+  second is the security one: the documented liveness endpoint stops answering
+  inside any orchestrator's probe timeout, so a **healthy** gateway is
+  restarted; and the ping flood fills the daemon's own connection queue, so real
+  scans fail, which `internal/secscan` classifies as an engine fault and
+  forwards **UNSCANNED** (`statClamScanError`, fail-open). `Init` made the
+  window permanent rather than rare — it deliberately clears the status cache,
+  so every boot and every reconfigure reopened it — and `Init`'s own ping held
+  the scanner's **write lock** across that dial: **measured 30.03 s of startup
+  delay** against a silent daemon, before the proxy listener came up at all.
+
+  The dial now happens on one probe goroutine at a time, under its own 5 s
+  budget, and never on a caller's context — so no caller's disconnect can cancel
+  a probe the remaining callers are waiting on, which would otherwise hand any
+  unauthenticated client a way to keep the status permanently unobserved. A
+  caller waits at most 750 ms and is then answered from the previous observation
+  (stale-while-revalidate, so a healthy row cannot flap at every TTL expiry) or,
+  only before any observation exists at all, with a value that reads as
+  unreachable on every surface that consumes it: `coarseClamAVStatus` collapses
+  it and `computeReadiness` takes its failing branch, which is the conservative
+  verdict for a security control this node has not been able to reach. The probe
+  is panic-guarded (`obs.SafeCall`) because it is now a detached goroutine, per
+  the CHAOS-24 contract. `Init` starts the same probe instead of pinging inline,
+  which is what removes the startup stall.
+
+  Preserved: a cache miss still triggers a real ping, a fresh hit is still a pure
+  memory read, and the unauthenticated surface still publishes only the coarse
+  enum. New: the probe logs the status **transition**, closing the gap
+  `healthcheck.go`'s readiness comment records — "ClamAVStatus caches it and logs
+  nothing", so a daemon that died at runtime produced a failing row with no
+  corresponding log line anywhere. `culvert_clamav_status_probes_total`,
+  `culvert_clamav_status_probe_coalesced_total` (the amplification that no longer
+  reaches the daemon) and `culvert_clamav_status_stale_total` say which regime a
+  node is in. `clamav.PingContext` is the bounded ping, reusing the scan path's
+  own `effectiveDeadline`/`watchCancel` helpers; `Ping()` delegates to it with
+  `context.Background()` and is behaviourally unchanged.
+
 - **Security regression review 2026-11-10 (`d11ed3a..ac4e223`, PRs #1844-#1853):
   no regression; three Low findings, all corrected here.** Full record in
   `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-10.md`. (1) The
