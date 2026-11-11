@@ -9,6 +9,52 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The Layer-2 community-category domain walk opened a separate BadgerDB read
+  transaction for every label of the destination authority — multiplying a
+  process-wide serialization point by the host's label count, on the request
+  path.** `catdb.Lookup` walks the host most-specific-first
+  (`a.b.c.cdn.example.com`, then `b.c.cdn.example.com`, …, stopping before a
+  bare TLD) and each probe called `db.View`, so each probe allocated a
+  `*badger.Txn`, took badger's process-wide oracle mutex for a read timestamp,
+  and sent **twice** on the single `WaterMark.process` goroutine's channel
+  (`readMark.Begin`, then `Discard` → `doneRead` → `readMark.Done`). Every
+  concurrent lookup in the process funnels through that one goroutine, so a
+  5-label host cost 5 transactions, 5 oracle acquisitions and 10 sends where one
+  answer needs one of each — and an uncategorised host, the overwhelmingly
+  common outcome since the feed covers a small slice of the namespace, always
+  runs the walk to completion. The cost was invisible to the policy benchmarks
+  that drive it: `policy_hostcat.go` correctly memoizes the lookup once per rule
+  scan, so the contention sat inside a single opaque call, on a resource shared
+  with every other goroutine. The walk now runs on ONE transaction, armed by
+  `Lookup` for exactly the reason CHAOS-74 already arms fault containment once
+  for the whole walk, and the key is built once and re-sliced per label (every
+  parent domain is a suffix of the normalized host) instead of converted per
+  label. Measured on a 5-label uncategorised host (medians of `-count=6`, both
+  shapes in the same run): wall clock 6,334 ns to 3,342 ns at 4-way parallel
+  (-47%) and 4,214 ns to 2,912 ns single-threaded (-31%), with the negative
+  scaling largely gone — the per-label shape got
+  **slower** as goroutines were added (+50% from 1 to 4), the one-transaction
+  shape costs +15%; allocations 35 to 27/op (-23%), bytes 2,048 to 1,456 B/op
+  (-29%); mutex delay over 300,000 lookups at 4-way 1,763 ms to 675 ms (-62%),
+  and block delay in `oracle.readTs` 1.54 s to 0.579 s (-62%). Behaviour is
+  unchanged and asserted to be: a differential oracle runs 20 host shapes
+  through the shipped walk and through a frozen in-tree copy of the per-label
+  walk and requires identical answers AND identical `LookupFaults` deltas (the
+  answer alone cannot tell "not in the feed" from "the store failed to answer",
+  because `Lookup` returns `("", false)` from all three of its error arms), a
+  depth-precedence test stores a distinct category at every depth of one chain
+  so an answer taken from the wrong label is detectable, a structural wall in
+  the CHAOS-74 guard-wall idiom requires exactly one badger transaction opened
+  in `Lookup` and none in `walk`/`getExact` counting every constructor and not
+  just `View`, and a `-race` test runs 2,000 lookups against 200 concurrent
+  `BulkWrite`s to pin that a walk is never torn. Each guard was validated by the
+  mutation it exists to catch; an independent review found two of the three
+  vacuous as first written — the wall passed a `NewTransaction`-per-label
+  regression and the oracle passed a store error collapsed into a clean miss —
+  and both fixes are validated by those mutations. Collapsing the transaction also makes every label of one
+  categorisation read at one read timestamp, so a feed `BulkWrite` landing
+  mid-walk can no longer be half-visible to a single answer.
+
 - **Every open tunnel held 128 KiB of relay buffer per direction that the relay
   never read — ~256 KiB per tunnel of resident heap, or ~2.4 GiB at 10,000
   concurrent tunnels.** `idleCopyCounted` took a pooled 128 KB buffer before its

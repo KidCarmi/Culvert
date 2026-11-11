@@ -16,9 +16,13 @@ package main
 //     O(total host patterns) scan; it has since gained a reverse index
 //     (urlcat hostIndex, O(labels) probes) — the two changes compose, and the
 //     measurements below predate that index (they bound the worst case).
-//   - communityDB.Lookup opens a BadgerDB read transaction per domain label. On
-//     a feed-backed deployment that is a transaction, and a trip through
-//     Badger's read-timestamp oracle, per rule per request.
+//   - communityDB.Lookup issues a BadgerDB point read per domain label. At the
+//     time of this hoist it also opened a read TRANSACTION per label, so a
+//     feed-backed deployment paid a transaction and a trip through Badger's
+//     read-timestamp oracle per label per rule per request; the hoist removed
+//     the per-RULE multiplication and catdb.Lookup has since removed the
+//     per-LABEL one (one transaction for the whole walk). Both reductions
+//     compose, and the measurements below predate the second.
 //
 // Measured before this hoist (12 categories / 480 host patterns, no feed DB,
 // uncategorized destination — the case that forces every tier to run to
