@@ -664,7 +664,7 @@ func (ss *Scanner) runClamStatusProbe(clam ClamScanner) {
 		at = fmt.Sprintf(" at %q", obs.Sanitize(addr))
 	}
 	if err != nil {
-		obs.Printf("SecurityScan: ClamAV unreachable%s (%s) — content this node cannot reach the daemon for is forwarded UNSCANNED (fail-open)",
+		obs.Printf("SecurityScan: ClamAV unreachable%s (%q) — content this node cannot reach the daemon for is forwarded UNSCANNED (fail-open)",
 			at, obs.Sanitize(err.Error()))
 		return
 	}
