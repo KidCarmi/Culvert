@@ -149,6 +149,56 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The CHAOS-116 status probe could publish the PREVIOUS ClamAV daemon's
+  observation as the current one, so `/ready` reported a healthy scanner on a
+  node whose scans were failing open (2026-11-11 security regression review,
+  finding A).** The single flight had no notion of configuration generation.
+  `Scanner.Init` clears the status cache precisely so "the next status read
+  reflects the daemon configured now, never the previous one", then warms it
+  with the same single-flight probe — and a probe already dialing the OLD daemon
+  was a flight in progress, so the warm-up JOINED it. Two consequences at once:
+  the newly configured address was never probed at all, and when the old daemon
+  answered, its observation was stored under the new configuration with a full
+  30 s TTL and logged with the NEW address, because `runClamStatusProbe` reads
+  `clamStatusAddr` at store time. Reproduced as
+  `SecurityScan: ClamAV connected at "127.0.0.1:1"` for a port nothing listens
+  on. The `connected` direction is the one that matters: `coarseClamAVStatus`
+  passes it through to the unauthenticated `/health`, `computeReadiness`'s
+  `clamav` row takes its ok branch, and a ClamAV connection failure is
+  classified as an engine fault that forwards content **UNSCANNED**
+  (`statClamScanError`) — so an orchestrator kept a node in rotation whose
+  malware scanning was down.
+
+  `Scanner.clamStatusGen` is the fix. `Init` bumps it beside the cache clears;
+  `startClamStatusProbe` coalesces only onto a flight of the SAME generation, so
+  a reconfiguring caller starts its own probe for the daemon configured now, and
+  the flight cleanup clears the handle only if it still owns it, so a superseded
+  probe finishing later cannot erase the current flight. `runClamStatusProbe`
+  compares the generation before storing and DISCARDS a superseded observation
+  without storing or logging it: callers fall back to `clamStatusUnknown`, which
+  fails readiness, until a probe for the configured daemon lands. Fail-closed in
+  the uncertain direction, and the dial rate stays bounded by the reconfigure
+  rate, not the request rate — the negative control
+  (`TestChaos116_SameGenerationReadersStillShareOneProbe`) pins that 32
+  concurrent readers at a steady configuration still produce exactly one dial.
+
+  **Latent, not live:** `loadScanning` is `Scanner.Init`'s only caller and runs
+  once at startup, so no shipped deployment could reach the window. `Init`'s own
+  comment anticipates the runtime reconfigure caller that would make it live,
+  which is why it is fixed rather than recorded. Gates:
+  `internal/secscan/clam_status_probe_reconfigure_test.go` (regression, boundary,
+  negative control, and a `-race` concurrency case), each verified to fail with
+  the guards neutered.
+
+- **`CULVERT_CA_PROVENANCE` was missing from the README environment-variable
+  reference** (same review, finding B). The control that restores automatic
+  inspection-CA renewal on an upgraded install was documented in
+  `docs/operator/root-ca-expiry.md` §5 and here, but not in the canonical table
+  an operator reads when writing a deployment manifest — so a manifest reviewed
+  against that table could not be found incomplete, and the slow, announced
+  failure it leads to (a root that is never renewed, and inspected HTTPS refused
+  at its expiry) had no entry pointing at the fix.
+
 - **An unauthenticated request could make this node dial ClamAV, and enough of
   them could make the daemon stop answering real scans — which this node
   forwards UNSCANNED (CHAOS-116).** `Scanner.ClamAVStatus` served a cache miss

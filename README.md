@@ -206,6 +206,7 @@ Less common flags (the full list is `culvert -h`). Unless noted, a non-empty / n
 | Variable | Purpose |
 |---|---|
 | `CULVERT_CA_PASSPHRASE` | CA private-key encryption passphrase (**required** for TLS inspection) |
+| `CULVERT_CA_PROVENANCE` | Classifies an inspection-CA bundle that carries no provenance record (every bundle written before the record existed): `culvert-managed` (Culvert generated the root, so Culvert may renew it) or `imported` (your PKI issued it; never renewed automatically). Startup-only, and deliberately not an admin-API/UI setting: it asserts who owns a trust anchor. An unrecognised or unset value leaves the CA unclassified, which fails toward *not* renewing. See [root-ca-expiry](docs/operator/root-ca-expiry.md) §5. |
 | `CULVERT_LOG_PASSPHRASE` | Encryption-at-rest passphrase for the persistent log store. Falls back to `CULVERT_CA_PASSPHRASE` if unset; empty (both unset) = encryption off. |
 | `CULVERT_SESSION_SECRET` | Hex-encoded session-cookie HMAC key (≥ 64 hex chars). Set the same value on every node behind a load balancer so sessions are valid cluster-wide; takes priority over `session_secret` in the config file. A random per-start key is used only when neither this nor a valid `session_secret` is set. An invalid value here aborts startup. |
 | `CULVERT_C2_ENFORCE` | Admin RBAC enforcement mode. Default `enforce` (fail-closed); set `false`/`0`/`no`/`off` for shadow (log-only). Read once at startup. |
