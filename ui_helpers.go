@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -241,6 +243,42 @@ func validateAccessRule(rule PolicyRule) error {
 		if !isSafeRedirectURL(rule.RedirectURL) {
 			return fmt.Errorf("redirectURL must be an absolute http/https URL")
 		}
+	}
+	return nil
+}
+
+// validateAccessRuleIngress is validateRuleShape plus the checks that apply
+// only where an operator SUBMITS an access rule (apiPolicyCreate, apiPolicyUpdate,
+// apiPolicyUpdateByID), where there is a caller to tell. The bulk and restore
+// paths (config rollback, backup import, draft publish, PolicyStore.Load and
+// ReplaceAll) deliberately do not run these: a rule already on disk or in a
+// version keeps loading, and Load warns about it instead (warnInertSourceIP).
+func validateAccessRuleIngress(rule PolicyRule) error {
+	if err := validateRuleShape(rule); err != nil {
+		return err
+	}
+	return validateRuleSourceIP(rule.SourceIP)
+}
+
+// validateRuleSourceIP reports whether a SourceIP is one the matcher can ever
+// match: empty (any source), a CIDR net.ParseCIDR accepts (the form
+// PolicyStore.sortLocked and matchIPOrCIDR parse), or a single address
+// netip.ParseAddr accepts (zoned literals included; they keep their exact
+// string comparison). Anything else (" 10.0.0.5", "10.0.0.1-10.0.0.9",
+// "10.0.0.0/33") was accepted and never matched, which is fail-open for a Drop
+// rule under first-match-wins.
+func validateRuleSourceIP(sourceIP string) error {
+	if sourceIP == "" {
+		return nil
+	}
+	if strings.Contains(sourceIP, "/") {
+		if _, _, err := net.ParseCIDR(sourceIP); err != nil {
+			return fmt.Errorf("sourceIP %q is not a valid CIDR", sourceIP)
+		}
+		return nil
+	}
+	if _, err := netip.ParseAddr(sourceIP); err != nil {
+		return fmt.Errorf("sourceIP %q must be a single IP address or a CIDR", sourceIP)
 	}
 	return nil
 }

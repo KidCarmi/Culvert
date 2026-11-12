@@ -227,6 +227,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The policy API refuses a `sourceIP` the matcher can never match.**
+  `POST /api/policy`, `PUT /api/policy` and `PUT /api/policy?id=` accepted any
+  string, so a value that is neither an address nor a CIDR (`" 10.0.0.5"`,
+  `"10.0.0.1-10.0.0.9"`, `"10.0.0.0/33"`) was stored and then never matched:
+  fail-open for a Drop rule above a broader Allow. Those requests now get a 400
+  naming the field. The bulk and restore paths (policy file load, config
+  rollback, backup import, draft publish, cluster snapshot) are unchanged, so an
+  existing configuration keeps loading; `PolicyStore.Load` keeps such a rule and
+  logs a `WARN` naming it on every load until it is fixed. Owner decision on
+  PR #1873.
+
 - **The OIDC browser login merged a userinfo response into the session without
   checking whose it was.** `enrichFromUserinfo` filled the session's email, name
   and groups from the userinfo endpoint and never compared its `sub` with the ID

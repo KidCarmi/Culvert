@@ -438,6 +438,20 @@ func (ps *PolicyStore) ensureVersionAbove(floor int64) {
 
 var policyStore = &PolicyStore{}
 
+// warnInertSourceIP logs an access rule whose SourceIP the matcher can never
+// match (see validateRuleSourceIP). The rule is KEPT: refusing it on load would
+// stop an existing policy file from loading, and an inert rule already behaves
+// as it always has. The API refuses such a value on write; this makes the ones
+// already on disk visible. Re-warned on each load until the operator fixes it.
+func warnInertSourceIP(r *PolicyRule) {
+	if ruleTypeOf(r) == ruleTypeAuth {
+		return
+	}
+	if err := validateRuleSourceIP(r.SourceIP); err != nil {
+		logWarnf("Policy: rule %q never matches any client — %s; fix or remove it", sanitizeLog(r.Name), sanitizeLog(err.Error()))
+	}
+}
+
 // Load reads rules from a JSON file. Missing file is treated as empty ruleset.
 //
 // ps.path is adopted ONLY on a definite outcome — a successful adopt-write
@@ -529,6 +543,7 @@ func (ps *PolicyStore) Load(path string) error {
 			dropped.add(name)
 			continue
 		}
+		warnInertSourceIP(r)
 		kept = append(kept, r)
 	}
 	rules = kept
