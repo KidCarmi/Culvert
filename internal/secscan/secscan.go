@@ -296,6 +296,28 @@ type Scanner struct {
 	// without waiting behind that store.
 	clamProbeMu   sync.Mutex
 	clamProbeDone chan struct{}
+	// clamProbeGen is the configuration generation the in-flight probe was
+	// started under. Guarded by clamProbeMu, beside the handle it describes.
+	clamProbeGen uint64
+
+	// clamStatusGen is the ClamAV CONFIGURATION generation. Init bumps it, and
+	// a probe publishes its observation only if the generation it started under
+	// is still current.
+	//
+	// Without that, the single flight is wrong across a reconfigure, in both
+	// halves at once: a probe already dialing the PREVIOUS daemon is the flight
+	// a reconfiguring Init joins, so no probe is ever sent to the newly
+	// configured address, and when the old one answers it lands in the cache
+	// Init just cleared — with a full TTL, and named with the NEW address in
+	// the transition log line, which reads it at store time. The "connected"
+	// direction is the one that matters: coarseClamAVStatus and
+	// computeReadiness both treat it as healthy, so /ready would keep a node in
+	// rotation whose ClamAV scans are failing OPEN (statClamScanError forwards
+	// content UNSCANNED). Pinned by clam_status_probe_reconfigure_test.go.
+	//
+	// Atomic rather than mu-guarded because Init starts the probe while holding
+	// mu and the probe takes mu to store its result.
+	clamStatusGen atomic.Uint64
 
 	// clamStatusAddr is the configured ClamAV address, kept so the probe can
 	// name it in the transition log line Init used to own. Written under mu by
@@ -445,6 +467,11 @@ func (ss *Scanner) Init(clamAddr string, maxBytes int64, cache *hashcache.HashCa
 	// paying for it.
 	ss.clamStatusVal = ""
 	ss.clamStatusExpiry = time.Time{}
+	// Supersede any probe already in flight against the PREVIOUS daemon. The
+	// clears above are not enough on their own: that probe would otherwise be
+	// the flight the warm-up below JOINS (leaving the new address unprobed) and
+	// would then re-populate what was just cleared. See clamStatusGen.
+	ss.clamStatusGen.Add(1)
 	// Same for the VERSION cache — a reconfigured daemon may report a
 	// different engine/signature set.
 	ss.clamVerOK = false
@@ -595,25 +622,37 @@ func (ss *Scanner) clamStatusSnapshot() (clam ClamScanner, val string, fresh boo
 // flight is cleared before the handle is closed, so a caller woken by the close
 // never observes a flight that has already finished.
 func (ss *Scanner) startClamStatusProbe(clam ClamScanner) <-chan struct{} {
+	gen := ss.clamStatusGen.Load()
 	ss.clamProbeMu.Lock()
-	if ch := ss.clamProbeDone; ch != nil {
+	// Join an existing flight only if it is asking THIS caller's question. A
+	// flight started before the last Init is dialing a daemon that is no longer
+	// configured, so joining it would leave the configured address unprobed. It
+	// is left to finish — and to be discarded on store — while a fresh flight
+	// starts here. Only a reconfigure can produce that, so the dial rate stays
+	// bounded by the request-independent TTL, not by the request rate.
+	if ch := ss.clamProbeDone; ch != nil && ss.clamProbeGen == gen {
 		ss.clamProbeMu.Unlock()
 		atomic.AddInt64(&statClamStatusCoalesced, 1)
 		return ch
 	}
 	ch := make(chan struct{})
 	ss.clamProbeDone = ch
+	ss.clamProbeGen = gen
 	ss.clamProbeMu.Unlock()
 	atomic.AddInt64(&statClamStatusProbes, 1)
 
 	go func() {
 		defer func() {
 			ss.clamProbeMu.Lock()
-			ss.clamProbeDone = nil
+			// Only the flight that still OWNS the handle clears it: a
+			// superseded probe finishing later must not erase the current one.
+			if ss.clamProbeDone == ch {
+				ss.clamProbeDone = nil
+			}
 			ss.clamProbeMu.Unlock()
 			close(ch)
 		}()
-		obs.SafeCall("clamav-status-probe", func() { ss.runClamStatusProbe(clam) })
+		obs.SafeCall("clamav-status-probe", func() { ss.runClamStatusProbe(clam, gen) })
 	}()
 	return ch
 }
@@ -623,6 +662,11 @@ func (ss *Scanner) startClamStatusProbe(clam ClamScanner) <-chan struct{} {
 // through the shared obs sink; a caller that is about to replace that sink or
 // this scanner (test cleanup, an orderly reconfigure) waits here so the probe
 // cannot outlive it. It starts nothing and returns at once when no probe runs.
+//
+// It waits for the CURRENT flight. A probe a reconfigure superseded may still
+// be dialing, which is safe for that purpose: it returns before it reaches the
+// shared sink, because a superseded observation is discarded without being
+// stored or logged (see clamStatusGen).
 func (ss *Scanner) WaitStatusProbe() {
 	ss.clamProbeMu.Lock()
 	ch := ss.clamProbeDone
@@ -640,7 +684,11 @@ func (ss *Scanner) WaitStatusProbe() {
 // ClamScanner that does not implement PingContext (test fakes do not; the
 // shipped *clamav.Client does) keeps the unbounded call, the same optional-
 // capability shape as clamVersioner.
-func (ss *Scanner) runClamStatusProbe(clam ClamScanner) {
+//
+// gen is the configuration generation this probe was started under; an
+// observation taken for a daemon a later Init replaced is discarded rather than
+// published (see clamStatusGen).
+func (ss *Scanner) runClamStatusProbe(clam ClamScanner, gen uint64) {
 	ctx, cancel := context.WithTimeout(context.Background(), clamStatusProbeBudget)
 	defer cancel()
 
@@ -656,6 +704,15 @@ func (ss *Scanner) runClamStatusProbe(clam ClamScanner) {
 	}
 
 	ss.mu.Lock()
+	if ss.clamStatusGen.Load() != gen {
+		// A reconfigure superseded this probe while it was dialing. The answer
+		// describes the PREVIOUS daemon, so it is neither stored nor logged:
+		// storing it would publish it under the address configured NOW, and
+		// callers are better served by clamStatusUnknown — which fails
+		// readiness — until a probe for the configured daemon lands.
+		ss.mu.Unlock()
+		return
+	}
 	prev, addr := ss.clamStatusVal, ss.clamStatusAddr
 	ss.clamStatusVal = val
 	ss.clamStatusExpiry = time.Now().Add(clamStatusTTL)
