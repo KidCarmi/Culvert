@@ -118,7 +118,7 @@ func caAutoRenewed() bool { return certMgr.Provenance() == ca.ProvenanceManaged 
 // lifecycle authority (internal/ca/provenance.go). Fired once per rotation
 // round (24h cadence), so it is bounded by construction.
 func noteCARenewalWithheld(p ca.Provenance, expiry time.Time) {
-	action := "obtain a renewed CA certificate from the issuing PKI and upload it (CA Management, custom CA) before that date"
+	action := "obtain a renewed CA certificate from the issuing PKI and upload it (Certificates → Upload Custom Certificate, target MITM / SSL Inspection Engine) before that date"
 	if p == ca.ProvenanceUnknown {
 		action = "classify it by setting " + caProvenanceEnv + "=culvert-managed (Culvert generated it and may renew it) " +
 			"or =imported (your PKI issued it) and restarting"

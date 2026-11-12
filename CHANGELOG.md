@@ -83,6 +83,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A refused upstream-pool configuration is now a Diagnostics row.** When the
+  stored managed upstream document failed validation at load, the config.yaml
+  upstream seed was refused whole, or the one-time legacy pool migration was
+  abandoned, the configured parent proxies were not in use. That showed only as
+  a banner on Network → Upstream Proxies and a startup log line, so the
+  Diagnostics report stayed green. The new `upstream_pool_config` WARN row names
+  each latched condition with its bounded reason and count and the action that
+  clears it. It is report-only: it reads the same state as `/api/upstream`, and
+  pool loading, validation and egress are unchanged. It carries no authority,
+  URL or credential.
+
 - **A partially tripped CDR pool is now a Diagnostics warning.** The `cdr`
   row only asked whether ANY Sluice instance could scan, so a pool with one of
   two instances' circuit breakers open still read `enabled-healthy`, and the

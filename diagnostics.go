@@ -275,6 +275,10 @@ func buildOperatorContract() OperatorContract {
 	// Remote blocklist feeds whose latest sync failed. Contributes nothing when
 	// no feed is configured or every feed's latest attempt succeeded.
 	checks = append(checks, checkBlocklistFeeds()...)
+	// Upstream pool managed document / config.yaml seed refused, or legacy
+	// migration abandoned: configured parents unpublished. Contributes nothing
+	// when none of the three is latched.
+	checks = append(checks, checkUpstreamPoolConfig()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
