@@ -18,8 +18,8 @@
 package catdb
 
 import (
+	"bytes"
 	"errors"
-	"strings"
 	"sync/atomic"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -198,6 +198,25 @@ func (c *CommunityDB) Close() error {
 // defer/recover cost several times per request to protect against a fault that
 // makes all of them equally hopeless. A store that has already latched degraded
 // is refused by access without arming anything at all.
+//
+// The badger READ TRANSACTION is armed once for the same reason, and the
+// argument is the stronger one of the two because the cost is not local. Each
+// db.View allocates a *badger.Txn, takes the process-wide oracle mutex for a
+// read timestamp, and SENDS ON THE WATERMARK GOROUTINE'S SINGLE CHANNEL twice —
+// once in readMark.Begin, once in Discard → doneRead → readMark.Done. One
+// transaction per LABEL multiplied a process-wide serialization point by the
+// destination's label count, and that term does not amortize: measured on a
+// 5-label uncategorised host (the common outcome, since the feed covers a small
+// slice of the namespace) the per-label shape got SLOWER with concurrency —
+// 4.21 µs at -cpu 1, 6.33 µs at -cpu 4 — which is negative scaling, not cache
+// pressure. One transaction measures 2.91 µs and 3.34 µs for the same walk, and
+// drops badger's mutex delay over 300k lookups from 1,763 ms to 675 ms. See
+// catdb_lookup_txn_bench_test.go for the frozen comparison.
+//
+// Collapsing to one transaction is also a small consistency improvement, the
+// same kind the policy scan's effective-view and clock hoists make: every label
+// of one categorisation decision is now read at ONE read timestamp, so a feed
+// BulkWrite landing mid-walk can no longer be half-visible to a single answer.
 func (c *CommunityDB) Lookup(host string) (string, bool) {
 	if c.degraded.Load() {
 		return "", false // fast path: skip host normalisation on a dead store
@@ -208,9 +227,13 @@ func (c *CommunityDB) Lookup(host string) (string, bool) {
 		found bool
 	)
 	err := c.access(func() error {
-		var walkErr error
-		cat, found, walkErr = c.walk(host)
-		return walkErr
+		// ONE read transaction for the whole walk, for the same reason
+		// containment is armed once: see the note above this function.
+		return c.db.View(func(txn *badger.Txn) error {
+			var walkErr error
+			cat, found, walkErr = c.walk(txn, host)
+			return walkErr
+		})
 	})
 	switch {
 	case err == nil:
@@ -246,7 +269,8 @@ func (c *CommunityDB) recordFault(cause error) {
 	}
 }
 
-// walk performs the domain walk, stopping at the first real store error.
+// walk performs the domain walk on the caller's transaction, stopping at the
+// first real store error.
 //
 // A miss is not an error here: getExact reports badger.ErrKeyNotFound as a
 // clean ("", false, nil), because a host that is not in the community feed is
@@ -254,32 +278,52 @@ func (c *CommunityDB) recordFault(cause error) {
 // Anything else aborts the walk and is returned for classification by the
 // caller — continuing to walk a store that just failed to answer would turn one
 // fault into four.
-func (c *CommunityDB) walk(host string) (category string, found bool, err error) {
+//
+// The key is built ONCE. Every parent domain the walk probes is a SUFFIX of the
+// normalized host, so stripping the leftmost label is a re-slice of the same
+// backing array rather than another []byte(string) conversion — which is what
+// the per-label shape paid, once per label, on the data path.
+//
+// Why that is safe, stated precisely, because the obvious half of the answer is
+// the wrong half: y.KeyWithTs does copy, but it copies only the SEEK key that
+// reaches the LSM tree. Txn.Get separately retains the caller's slice as
+// item.key, so the Item DOES alias this array. What makes the reuse safe is the
+// other two facts: the Item is local to getExact and never outlives the
+// iteration that produced it (the value is copied out with string(val) inside
+// item.Value's callback, which is required anyway — for a value-log read that
+// callback's buffer is an mmap region valid only while badger holds a logFile
+// read lock), and the walk only ever NARROWS the slice — it never writes a byte
+// of the array. A future change that wrote into the key in place would break
+// this, and y.KeyWithTs would not save it.
+func (c *CommunityDB) walk(txn *badger.Txn, host string) (category string, found bool, err error) {
+	key := []byte(host)
 	for {
-		cat, hit, lookupErr := c.getExact(host)
+		cat, hit, lookupErr := c.getExact(txn, key)
 		if lookupErr != nil {
 			return "", false, lookupErr
 		}
 		if hit {
 			return cat, true, nil
 		}
-		dot := strings.Index(host, ".")
+		dot := bytes.IndexByte(key, '.')
 		if dot < 0 {
 			break
 		}
-		parent := host[dot+1:]
+		parent := key[dot+1:]
 		// Stop before querying a bare TLD (e.g. "com", "uk").
-		if !strings.Contains(parent, ".") {
+		if bytes.IndexByte(parent, '.') < 0 {
 			break
 		}
-		host = parent
+		key = parent
 	}
 	return "", false, nil
 }
 
-// getExact performs a single BadgerDB point lookup for the given domain. It
-// touches badger directly and is therefore reachable ONLY through walk, inside
-// Lookup's access closure (enforced by TestCommunityDB_EveryBadgerAccessIsGuarded).
+// getExact performs a single BadgerDB point lookup for the given domain on the
+// walk's transaction. It is reachable ONLY through walk, inside Lookup's access
+// closure (enforced by TestCommunityDB_EveryBadgerAccessIsGuarded); it no
+// longer reaches c.db at all, because the transaction it reads on is now opened
+// once by Lookup and handed down.
 //
 // CHAOS-74. This used to end in `if err != nil { return "", false }`, which
 // collapsed three different things into one answer: a clean miss, a store that
@@ -295,26 +339,22 @@ func (c *CommunityDB) walk(host string) (category string, found bool, err error)
 // the gateway's decision on the data path, which is a different decision with a
 // different blast radius and is not this fix's to make. What changed is that
 // the degradation is bounded, survivable and visible.
-func (c *CommunityDB) getExact(domain string) (category string, found bool, err error) {
-	var cat string
-	viewErr := c.db.View(func(txn *badger.Txn) error {
-		item, getErr := txn.Get([]byte(domain))
-		if getErr != nil {
-			return getErr
-		}
-		return item.Value(func(val []byte) error {
-			cat = string(val)
-			return nil
-		})
-	})
-	switch {
-	case viewErr == nil:
-		return cat, true, nil
-	case errors.Is(viewErr, badger.ErrKeyNotFound):
-		return "", false, nil
-	default:
-		return "", false, viewErr
+func (c *CommunityDB) getExact(txn *badger.Txn, domain []byte) (category string, found bool, err error) {
+	item, getErr := txn.Get(domain)
+	if errors.Is(getErr, badger.ErrKeyNotFound) {
+		return "", false, nil // clean miss: the host is not in the feed
 	}
+	if getErr != nil {
+		return "", false, getErr // the store is answering badly; the caller counts it
+	}
+	var cat string
+	if valErr := item.Value(func(val []byte) error {
+		cat = string(val)
+		return nil
+	}); valErr != nil {
+		return "", false, valErr
+	}
+	return cat, true, nil
 }
 
 // BulkWrite atomically writes a batch of domain→category pairs into BadgerDB.

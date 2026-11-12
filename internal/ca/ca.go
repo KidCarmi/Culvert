@@ -93,6 +93,13 @@ type Manager struct {
 	caCert      *x509.Certificate
 	caKey       *ecdsa.PrivateKey
 	keyProvider KeyProvider // optional external HSM/KMS signer
+	// provenance is who may renew caCert; legacyProvenance is the operator's
+	// classification for bundles that carry no record; caChainRaw is caCert's
+	// DER when it is an intermediate that must be served with every leaf.
+	// See provenance.go. All guarded by mu.
+	provenance       Provenance
+	legacyProvenance Provenance
+	caChainRaw       []byte
 	// leafKey is the process-wide key reused by EVERY forged leaf (perf F3).
 	// Generated once, lazily, on first sign; independent of the CA, so it
 	// survives CA rotation unchanged. Sharing one key removes a P-256 keygen
@@ -176,11 +183,10 @@ type Manager struct {
 	// outside its own validity window (CHAOS-28). Lock-free; no identity data.
 	signRefusals atomic.Int64
 
-	// Dual-CA overlap: secondary (old) CA kept during rotation window.
-	// Leaf certs include both CAs in the chain so clients trusting either
-	// CA can validate. Secondary is cleared after overlap window expires.
+	// Dual-CA overlap: secondary (old) CA certificate kept during the rotation
+	// window. It shares the primary's key and subject (see RotateIfNeeded), so
+	// a leaf validates for clients trusting either. Cleared when it expires.
 	secondaryCACert *x509.Certificate
-	secondaryCAKey  *ecdsa.PrivateKey
 	secondaryExpiry time.Time // when to stop using the secondary CA
 }
 
@@ -199,6 +205,9 @@ func New() *Manager {
 type caBundle struct {
 	certPEM []byte
 	keyPEM  []byte
+	// provenancePEM is the provenance record block; empty when unknown, so a
+	// legacy bundle re-saved without a classification stays a legacy bundle.
+	provenancePEM []byte
 }
 
 // caMagic is a 4-byte file header so we can detect format errors early.
@@ -221,6 +230,14 @@ func (cm *Manager) InitCA() error {
 	if err != nil {
 		return err
 	}
+	return cm.installSelfSignedCA(key, nil)
+}
+
+// installSelfSignedCA issues a 10-year self-signed Root CA certificate for key
+// and installs it as the active CA. rawSubject, when set, is reused verbatim as
+// the subject DN (renewal — see RotateIfNeeded); nil means the default
+// "Culvert Root CA" name.
+func (cm *Manager) installSelfSignedCA(key *ecdsa.PrivateKey, rawSubject []byte) error {
 	// RFC 5280 requires unique serial numbers per CA. Use 128-bit random
 	// serial to avoid collisions across CA rotations and multiple instances.
 	caSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
@@ -229,6 +246,7 @@ func (cm *Manager) InitCA() error {
 	}
 	template := &x509.Certificate{
 		SerialNumber: caSerial,
+		RawSubject:   rawSubject,
 		Subject: pkix.Name{
 			Organization: []string{"Culvert"},
 			CommonName:   "Culvert Root CA",
@@ -248,9 +266,7 @@ func (cm *Manager) InitCA() error {
 		return err
 	}
 	cm.mu.Lock()
-	cm.caCert = cert
-	cm.caKey = key
-	cm.resetLeafCacheLocked()
+	cm.installCALocked(cert, key, ProvenanceManaged)
 	cm.mu.Unlock()
 	if CAChangedObserver != nil {
 		CAChangedObserver()
@@ -287,6 +303,7 @@ func (cm *Manager) SaveCA(path, passphrase string) error {
 		return err
 	}
 	plaintext := append(bundle.certPEM, bundle.keyPEM...) //nolint:gocritic
+	plaintext = append(plaintext, bundle.provenancePEM...)
 
 	var data []byte
 	if passphrase == "" {
@@ -346,16 +363,21 @@ func (cm *Manager) exportBundle() (caBundle, error) {
 	if err != nil {
 		return caBundle{}, err
 	}
-	return caBundle{
+	b := caBundle{
 		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cm.caCert.Raw}),
 		keyPEM:  pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
-	}, nil
+	}
+	if cm.provenance != ProvenanceUnknown {
+		b.provenancePEM = pem.EncodeToMemory(&pem.Block{Type: provenancePEMType, Bytes: []byte(cm.provenance)})
+	}
+	return b, nil
 }
 
 // ImportBundle parses a PEM bundle (CERTIFICATE + EC PRIVATE KEY blocks) and
 // installs the CA into the Manager, clearing the leaf cache.
 func (cm *Manager) ImportBundle(data []byte) error {
 	var certDER, keyDER []byte
+	recorded := ProvenanceUnknown
 	rest := data
 	for {
 		var block *pem.Block
@@ -368,6 +390,8 @@ func (cm *Manager) ImportBundle(data []byte) error {
 			certDER = block.Bytes
 		case "EC PRIVATE KEY":
 			keyDER = block.Bytes
+		case provenancePEMType:
+			recorded, _ = ParseProvenance(string(block.Bytes))
 		}
 	}
 	if certDER == nil || keyDER == nil {
@@ -386,9 +410,10 @@ func (cm *Manager) ImportBundle(data []byte) error {
 		return fmt.Errorf("CA bundle: certificate expired at %s", cert.NotAfter)
 	}
 	cm.mu.Lock()
-	cm.caCert = cert
-	cm.caKey = key
-	cm.resetLeafCacheLocked()
+	if recorded == ProvenanceUnknown {
+		recorded = cm.legacyProvenance
+	}
+	cm.installCALocked(cert, key, recorded)
 	cm.mu.Unlock()
 	return nil
 }
@@ -544,9 +569,7 @@ func (cm *Manager) LoadCustomCA(certPEM, keyPEM []byte) error {
 		return errors.New("only ECDSA private keys are supported for MITM CA")
 	}
 	cm.mu.Lock()
-	cm.caCert = x509Cert
-	cm.caKey = ecKey
-	cm.resetLeafCacheLocked()
+	cm.installCALocked(x509Cert, ecKey, ProvenanceImported)
 	cm.mu.Unlock()
 	if CAChangedObserver != nil {
 		CAChangedObserver()
@@ -571,10 +594,20 @@ func (cm *Manager) CAExpiry() time.Time {
 	return cm.caCert.NotAfter
 }
 
-// RotateIfNeeded checks whether the CA cert is nearing expiry and generates
-// a new one with dual-CA overlap: the old CA is kept as secondary for the
-// remaining lifetime of its certificate, so leaf certs signed by either CA
-// remain valid during the transition. Returns true if rotation occurred.
+// RotateIfNeeded checks whether the CA cert is nearing expiry and RENEWS it:
+// a new self-signed certificate with a fresh validity window is issued for the
+// SAME key and subject, and the old certificate is kept as secondary until it
+// expires. Returns true if rotation occurred.
+//
+// Keeping the key is what makes the overlap real. A leaf names its issuer by
+// subject and is verified with the issuer's public key, so one leaf chains to
+// the old root AND the new one only if both carry the same name and key. A
+// fresh key (what this did before) left every client that had not yet
+// installed the new root — all of them, since it had not existed until that
+// moment — rejecting every inspected connection, and sending the old root in
+// the chain could not help. Pinned by
+// TestDualCAOverlap_ClientTrustingOnlyOldRootValidates. Replacing the KEY is
+// the manual force-rotate (InitCA), which is documented as trust-breaking.
 func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 	expiry := cm.CAExpiry()
 	if expiry.IsZero() {
@@ -588,11 +621,23 @@ func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 	cm.mu.Lock()
 	oldCert := cm.caCert
 	oldKey := cm.caKey
+	prov := cm.provenance
 	cm.mu.Unlock()
+
+	// Only a CA Culvert generated is Culvert's to renew. An imported or
+	// unclassified CA keeps signing until it expires; replacing it with a
+	// self-signed certificate would end a trust relationship the operator owns
+	// (provenance.go). The operator is told instead.
+	if prov != ProvenanceManaged {
+		if RenewalWithheldObserver != nil {
+			RenewalWithheldObserver(prov, expiry)
+		}
+		return false
+	}
 
 	obs.Printf("CA auto-rotation: cert expires %s (<%d days) — generating new CA with dual-CA overlap",
 		expiry.Format("2006-01-02"), int(caRotationOverlap.Hours()/24))
-	if err := cm.InitCA(); err != nil {
+	if err := cm.installSelfSignedCA(oldKey, oldCert.RawSubject); err != nil {
 		obs.Printf("CA auto-rotation: init failed: %v", err)
 		return false
 	}
@@ -600,7 +645,6 @@ func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 	// Install old CA as secondary, valid until its original expiry.
 	cm.mu.Lock()
 	cm.secondaryCACert = oldCert
-	cm.secondaryCAKey = oldKey
 	cm.secondaryExpiry = expiry
 	cm.mu.Unlock()
 
@@ -686,7 +730,6 @@ func (cm *Manager) CleanupSecondaryCA() {
 	if cm.secondaryCACert != nil && time.Now().After(cm.secondaryExpiry) {
 		obs.Printf("CA dual-overlap: secondary CA expired, removing")
 		cm.secondaryCACert = nil
-		cm.secondaryCAKey = nil
 		cm.secondaryExpiry = time.Time{}
 	}
 }
@@ -964,6 +1007,7 @@ func (cm *Manager) signLeaf(host string) (*tls.Certificate, error) {
 	cm.mu.RLock()
 	caCert := cm.caCert
 	caKey := cm.caKey
+	caChainRaw := cm.caChainRaw
 	secondaryCert := cm.secondaryCACert
 	secondaryActive := secondaryCert != nil && time.Now().Before(cm.secondaryExpiry)
 	var secondaryCertRaw []byte
@@ -1020,11 +1064,15 @@ func (cm *Manager) signLeaf(host string) (*tls.Certificate, error) {
 	// Assemble the tls.Certificate directly from DER (perf F3) instead of
 	// round-tripping through PEM + tls.X509KeyPair, which would re-marshal the
 	// key, PEM-encode the chain, then parse it all back. The chain is leaf +
-	// (optional) secondary CA; the primary CA is a trust anchor the client
-	// already has, so it is intentionally not sent. PublicKey ↔ PrivateKey
+	// (optional) secondary CA. A self-signed primary CA is a trust anchor the
+	// client already has, so it is not sent; an intermediate primary is
+	// (caChainRaw), because the client's anchor is its issuer. PublicKey ↔ PrivateKey
 	// consistency is guaranteed by construction (the template was signed with
 	// leafKey.PublicKey), so skipping X509KeyPair's key-match check is safe.
 	chain := [][]byte{certDER}
+	if len(caChainRaw) > 0 {
+		chain = append(chain, caChainRaw)
+	}
 	if len(secondaryCertRaw) > 0 {
 		chain = append(chain, secondaryCertRaw)
 	}
@@ -1039,11 +1087,14 @@ func (cm *Manager) signLeaf(host string) (*tls.Certificate, error) {
 // These exist so package main's whitebox tests can seed CA/cache state the
 // engine keeps unexported. Test-only; not used on any production path.
 
-// SetCAForTest installs a Root CA cert+key directly, bypassing generation.
+// SetCAForTest installs a Root CA cert+key directly, bypassing generation. It
+// stands in for a Culvert-generated root, so it is recorded as managed; tests
+// of other provenances go through LoadCustomCA / ImportBundle.
 func (cm *Manager) SetCAForTest(cert *x509.Certificate, key *ecdsa.PrivateKey) {
 	cm.mu.Lock()
 	cm.caCert = cert
 	cm.caKey = key
+	cm.provenance = ProvenanceManaged
 	cm.mu.Unlock()
 }
 

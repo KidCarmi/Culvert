@@ -88,6 +88,27 @@ var (
 	// fail-CLOSED (they also increment statScanTimeout); statRemoteScanFail is
 	// fail-OPEN.
 	statRemoteScanSaturated int64
+
+	// ClamAV status-probe accounting (CHAOS-116). The status ping used to run
+	// INLINE on whatever goroutine asked — including the unauthenticated
+	// /health and /ready probes on the proxy listener — with no single-flight
+	// and no cap, so a blackholed daemon turned one request into one parked
+	// goroutine + socket for up to 2x the 30 s scan timeout, and N requests
+	// into N dials to a daemon that clamSem exists to protect from exactly
+	// that. These three say which regime a node is in:
+	//
+	//   Probes     — pings actually dialed. Bounded by one per clamStatusTTL
+	//                per process while the daemon answers.
+	//   Coalesced  — callers that found a probe already in flight and dialed
+	//                nothing. Under a probe storm this is the whole storm, and
+	//                the ratio to Probes is the amplification that was removed.
+	//   Stale      — callers served a PREVIOUS observation because the probe
+	//                had not landed within their own bound. Rising means the
+	//                daemon is answering slower than clamStatusWait, which is
+	//                the leading indicator of the unreachable regime.
+	statClamStatusProbes    int64
+	statClamStatusCoalesced int64
+	statClamStatusStale     int64
 )
 
 // scanInflight counts body scans currently running, INCLUDING scans whose
@@ -147,6 +168,14 @@ type CounterSnapshot struct {
 	// scanning signal at all.
 	RemoteScanSaturated int64
 	RemoteScanInflight  int64
+
+	// ClamAV status probe (CHAOS-116). See the counters' own comment: Probes
+	// is the dial rate, Coalesced is the amplification that no longer reaches
+	// the daemon, and Stale is callers answered from the previous observation
+	// because the probe outran their bound.
+	ClamStatusProbes    int64
+	ClamStatusCoalesced int64
+	ClamStatusStale     int64
 }
 
 // Counters returns a snapshot of all scan counters.
@@ -168,6 +197,10 @@ func Counters() CounterSnapshot {
 
 		RemoteScanSaturated: atomic.LoadInt64(&statRemoteScanSaturated),
 		RemoteScanInflight:  remoteScanInflight.Load(),
+
+		ClamStatusProbes:    atomic.LoadInt64(&statClamStatusProbes),
+		ClamStatusCoalesced: atomic.LoadInt64(&statClamStatusCoalesced),
+		ClamStatusStale:     atomic.LoadInt64(&statClamStatusStale),
 	}
 }
 
@@ -256,6 +289,19 @@ type Scanner struct {
 	clamStatusVal    string
 	clamStatusExpiry time.Time
 
+	// clamProbeDone is the single-flight handle for the status ping
+	// (CHAOS-116): non-nil exactly while one probe is in flight, closed when it
+	// lands. It has its OWN mutex rather than riding mu, because the probe
+	// takes mu to store its result and callers must be able to join a flight
+	// without waiting behind that store.
+	clamProbeMu   sync.Mutex
+	clamProbeDone chan struct{}
+
+	// clamStatusAddr is the configured ClamAV address, kept so the probe can
+	// name it in the transition log line Init used to own. Written under mu by
+	// Init only.
+	clamStatusAddr string
+
 	// ClamAV VERSION cache. Signature databases update at most a few times a
 	// day, so this is cached far longer than the ping status.
 	clamVerVal    clamav.Version
@@ -282,6 +328,49 @@ type Scanner struct {
 
 // clamStatusTTL is how long a successful ClamAV ping result is considered fresh.
 const clamStatusTTL = 30 * time.Second
+
+// clamStatusProbeBudget bounds ONE status probe (CHAOS-116), and it is chosen
+// against the question the probe answers rather than against the scan path.
+// clamav.Client's own timeout is 30 s, applied to the dial and again to the
+// read, because a SCAN is worth waiting that long for. A liveness probe is not:
+// /health is the documented liveness endpoint and an orchestrator's probe
+// timeout is typically 1 s, so a dial that runs for a minute does not produce a
+// late answer, it produces a restarted gateway. 5 s is three orders of
+// magnitude above a healthy ping (a Unix socket or loopback answers in well
+// under a millisecond) and well inside any monitoring budget.
+const clamStatusProbeBudget = 5 * time.Second
+
+// clamStatusWait bounds how long a CALLER waits for an in-flight probe before
+// being answered from the previous observation.
+//
+// It is deliberately shorter than clamStatusProbeBudget: the probe may outlive
+// the caller that started it, which is what makes the dial rate independent of
+// the request rate. It is also deliberately inside a typical 1 s orchestrator
+// probe timeout — the point of this fix is that no request waits on the AV
+// daemon's network path — while staying generous enough that the FIRST status
+// read after a cold Init on a healthy daemon is answered with a real
+// observation rather than clamStatusUnknown.
+const clamStatusWait = 750 * time.Millisecond
+
+// clamStatusUnknown is the status before any observation exists: a probe is in
+// flight and has not landed within clamStatusWait, and nothing was ever
+// observed to fall back on.
+//
+// It must not read as healthy, and by construction it does not: coarseClamAVStatus
+// collapses everything that is neither "disabled" nor "connected" to
+// "unreachable" on the unauthenticated surface, and computeReadiness's switch
+// takes its default branch — the clamav row FAILS readiness. "Not yet observed"
+// is the conservative verdict for a security control, and it self-clears within
+// one probe.
+const clamStatusUnknown = "unknown: ClamAV status not yet observed"
+
+// pingContexter is the optional bounded-ping capability. *clamav.Client
+// implements it; test fakes need not, so it is type-asserted rather than folded
+// into the required ClamScanner interface — the same shape as clamVersioner
+// below, and for the same reason.
+type pingContexter interface {
+	PingContext(ctx context.Context) error
+}
 
 // clamVersionTTL is how long a ClamAV VERSION reply is cached. Definitions
 // change a few times a day at most, so a 10-minute cache is plenty and keeps
@@ -347,15 +436,13 @@ func (ss *Scanner) Init(clamAddr string, maxBytes int64, cache *hashcache.HashCa
 	}
 	if clamAddr != "" {
 		ss.clam = clamav.New(clamAddr)
-		if err := ss.clam.Ping(); err != nil {
-			obs.Printf("SecurityScan: ClamAV unreachable at %q (%v) — retrying per request", clamAddr, err)
-		} else {
-			obs.Printf("SecurityScan: ClamAV connected at %q", clamAddr)
-		}
+		ss.clamStatusAddr = clamAddr
 	}
 	ss.enabled.Store(true)
-	// Tier 2.3: Invalidate any cached clam status so the first admin poll
-	// after reconfiguration runs a real ping.
+	// Tier 2.3: Invalidate any cached clam status so the next status read
+	// reflects the daemon configured now, never the previous one. The warm-up
+	// probe below is what makes that observation arrive without a caller
+	// paying for it.
 	ss.clamStatusVal = ""
 	ss.clamStatusExpiry = time.Time{}
 	// Same for the VERSION cache — a reconfigured daemon may report a
@@ -370,6 +457,21 @@ func (ss *Scanner) Init(clamAddr string, maxBytes int64, cache *hashcache.HashCa
 	// strand a verdict that outlives its own definitions.
 	ss.sigGen = ""
 	ss.sigGenKnown = false
+
+	// Warm the status cache OFF this goroutine (CHAOS-116). Init used to ping
+	// inline, holding mu across a dial whose budget is the 30 s scan timeout —
+	// so a blackholed daemon delayed startup by up to a minute before the proxy
+	// listener ever came up, and Init's own doc comment anticipates a runtime
+	// reconfigure caller, which would have frozen every in-flight scan for the
+	// same minute behind the same write lock. The probe is the same
+	// single-flight one every status read uses; it reports the outcome in the
+	// transition line this used to log, and it blocks nothing. Started while mu
+	// is held, which is safe: it only takes clamProbeMu here, and its result
+	// store waits for this function to return, so it cannot be erased by the
+	// cache clears above.
+	if ss.clam != nil {
+		ss.startClamStatusProbe(ss.clam)
+	}
 }
 
 // Enabled reports whether the scanner has been initialised.
@@ -403,33 +505,184 @@ func (ss *Scanner) MaxBytes() int64 {
 // ClamAVStatus returns a human-readable daemon connectivity string.
 // Tier 2.3: Result is cached for clamStatusTTL to avoid hammering the ClamAV
 // daemon on every admin dashboard poll. Cache is invalidated on Init().
+//
+// WHAT CHANGED AND WHY (CHAOS-116). The cache miss used to be served by an
+// INLINE `clam.Ping()` on the caller's own goroutine, with no single-flight and
+// no concurrency cap. Three facts made that a fleet-wide fail-open rather than a
+// slow endpoint:
+//
+//   - This function is on the UNAUTHENTICATED surface. /health and /ready are
+//     dispatched by routeProxyListenerBuiltin on the PROXY listener, ahead of
+//     handleRequest and therefore ahead of the IP filter, the rate limiter and
+//     the connection limiter (pac.go, main.go). handleHealth's own comment says
+//     it: "every client that can use the gateway can read whatever is written
+//     here."
+//   - Ping's budget was ~2x the 30 s scan timeout (dial, then read) and it
+//     dialed with context.Background(), so a client's disconnect could not end
+//     it. A blackholed or saturated daemon therefore parked one goroutine and
+//     one socket per request for up to a minute.
+//   - clamav.clamSem bounds concurrent SCANS "to prevent overwhelming the
+//     daemon". Ping takes no slot. So the probe path was the one way to open
+//     unbounded connections to the daemon that semaphore protects — and a
+//     daemon whose connection queue is full fails real scans, which
+//     internal/secscan classifies as an engine fault and forwards UNSCANNED
+//     (statClamScanError, "fail-open"). An unauthenticated request flood could
+//     suppress malware scanning node-wide.
+//
+// The dial now happens on ONE probe goroutine at a time (startClamStatusProbe),
+// under its own budget, and the caller waits at most clamStatusWait for it.
+// Callers are never the probe, so no caller's disconnect can cancel a probe
+// another caller is waiting on, and N concurrent callers produce one dial.
+//
+// The documented behaviour an operator depends on is preserved: a cache miss
+// still triggers a real ping (healthcheck.go's readiness comment points
+// operators at the admin surface "which re-pings on cache miss"), and a fresh
+// hit is still a pure memory read. What a caller no longer does is wait on the
+// network for longer than its own bound: past that it is answered from the
+// previous observation — stale-while-revalidate, so a healthy node's row cannot
+// flap at every TTL expiry — or, only before any observation exists at all,
+// with clamStatusUnknown.
 func (ss *Scanner) ClamAVStatus() string {
-	ss.mu.RLock()
-	clam := ss.clam
+	clam, val, fresh := ss.clamStatusSnapshot()
 	if clam == nil {
-		ss.mu.RUnlock()
 		return "disabled"
 	}
-	// Cache hit: return stored status without pinging.
-	if ss.clamStatusVal != "" && time.Now().Before(ss.clamStatusExpiry) {
-		v := ss.clamStatusVal
-		ss.mu.RUnlock()
-		return v
+	if fresh {
+		return val
 	}
-	ss.mu.RUnlock()
 
-	// Cache miss or expired — ping outside any lock, then cache result.
-	var val string
-	if err := clam.Ping(); err != nil {
-		val = fmt.Sprintf("unreachable: %v", err)
-	} else {
-		val = "connected"
+	done := ss.startClamStatusProbe(clam)
+	select {
+	case <-done:
+		if _, v, _ := ss.clamStatusSnapshot(); v != "" {
+			return v
+		}
+	case <-time.After(clamStatusWait):
 	}
+
+	// The probe outran this caller's bound (or panicked and stored nothing).
+	// A previous observation is the honest answer; it is at most one probe
+	// behind, and every surface that consumes this re-reads it.
+	if val != "" {
+		atomic.AddInt64(&statClamStatusStale, 1)
+		return val
+	}
+	return clamStatusUnknown
+}
+
+// clamStatusSnapshot reads the collaborator and the cached observation under
+// one RLock: the value is returned whether or not it is still fresh, because a
+// caller the probe outruns prefers a stale observation to none.
+func (ss *Scanner) clamStatusSnapshot() (clam ClamScanner, val string, fresh bool) {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	return ss.clam, ss.clamStatusVal,
+		ss.clamStatusVal != "" && time.Now().Before(ss.clamStatusExpiry)
+}
+
+// startClamStatusProbe returns the handle of the in-flight status probe,
+// starting one iff none is running.
+//
+// The probe runs on its own goroutine under its own context, NOT a caller's.
+// That is deliberate in both directions: a caller cannot be made to wait for a
+// dial longer than clamStatusWait, and a caller that goes away cannot cancel
+// the probe the remaining callers are waiting on — which would hand any
+// unauthenticated client a way to keep the status permanently unobserved.
+//
+// The guard is obs.SafeCall, per the CHAOS-24 contract for a detached
+// goroutine: this one is started from an HTTP handler's goroutine, so an
+// unrecovered panic here would terminate an in-line security gateway. The
+// flight is cleared before the handle is closed, so a caller woken by the close
+// never observes a flight that has already finished.
+func (ss *Scanner) startClamStatusProbe(clam ClamScanner) <-chan struct{} {
+	ss.clamProbeMu.Lock()
+	if ch := ss.clamProbeDone; ch != nil {
+		ss.clamProbeMu.Unlock()
+		atomic.AddInt64(&statClamStatusCoalesced, 1)
+		return ch
+	}
+	ch := make(chan struct{})
+	ss.clamProbeDone = ch
+	ss.clamProbeMu.Unlock()
+	atomic.AddInt64(&statClamStatusProbes, 1)
+
+	go func() {
+		defer func() {
+			ss.clamProbeMu.Lock()
+			ss.clamProbeDone = nil
+			ss.clamProbeMu.Unlock()
+			close(ch)
+		}()
+		obs.SafeCall("clamav-status-probe", func() { ss.runClamStatusProbe(clam) })
+	}()
+	return ch
+}
+
+// WaitStatusProbe blocks until the ClamAV status probe in flight, if any, has
+// finished. Init and status reads start the probe on a goroutine that logs
+// through the shared obs sink; a caller that is about to replace that sink or
+// this scanner (test cleanup, an orderly reconfigure) waits here so the probe
+// cannot outlive it. It starts nothing and returns at once when no probe runs.
+func (ss *Scanner) WaitStatusProbe() {
+	ss.clamProbeMu.Lock()
+	ch := ss.clamProbeDone
+	ss.clamProbeMu.Unlock()
+	if ch != nil {
+		<-ch
+	}
+}
+
+// runClamStatusProbe performs one status ping and stores the observation.
+//
+// clamStatusProbeBudget, not the client's scan timeout: this is a liveness
+// question, and the answer an operator needs within seconds is "the daemon did
+// not answer", not a dial that runs for a minute in the hope that it will. A
+// ClamScanner that does not implement PingContext (test fakes do not; the
+// shipped *clamav.Client does) keeps the unbounded call, the same optional-
+// capability shape as clamVersioner.
+func (ss *Scanner) runClamStatusProbe(clam ClamScanner) {
+	ctx, cancel := context.WithTimeout(context.Background(), clamStatusProbeBudget)
+	defer cancel()
+
+	var err error
+	if pc, ok := clam.(pingContexter); ok {
+		err = pc.PingContext(ctx)
+	} else {
+		err = clam.Ping()
+	}
+	val := "connected"
+	if err != nil {
+		val = fmt.Sprintf("unreachable: %v", err)
+	}
+
 	ss.mu.Lock()
+	prev, addr := ss.clamStatusVal, ss.clamStatusAddr
 	ss.clamStatusVal = val
 	ss.clamStatusExpiry = time.Now().Add(clamStatusTTL)
 	ss.mu.Unlock()
-	return val
+
+	// Log the TRANSITION, including the first observation. This is the line
+	// healthcheck.go's readiness comment records as missing — "ClamAVStatus
+	// caches it and logs nothing", so "a daemon that dies at RUNTIME ... produces
+	// a failing row with no corresponding log line at all" and the row has to
+	// send operators to the admin UI instead. Only on a change, because the
+	// producer's rate is the TTL and a steady state needs no line.
+	if prev == val {
+		return
+	}
+	// The address is empty for an injected scanner (Deps.Clam without Init), so
+	// it is rendered only when there is one to render: "at %!q(nil)" would be
+	// noise on the one line an operator reads during an AV outage.
+	at := ""
+	if addr != "" {
+		at = fmt.Sprintf(" at %q", obs.Sanitize(addr))
+	}
+	if err != nil {
+		obs.Printf("SecurityScan: ClamAV unreachable%s (%q) — content this node cannot reach the daemon for is forwarded UNSCANNED (fail-open)",
+			at, obs.Sanitize(err.Error()))
+		return
+	}
+	obs.Printf("SecurityScan: ClamAV connected%s", at)
 }
 
 // ClamAVVersion returns the ClamAV engine + signature database version, so
