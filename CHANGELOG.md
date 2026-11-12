@@ -9,6 +9,73 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The identity-result cache on the proxy credential path chose its eviction
+  victim by scanning every bucket, so a cached verdict cost one hashed map
+  lookup per distinct client address — under the cache's single mutex, once per
+  insertion, for as long as the cache sat at its cap.** `identcache`'s
+  `evictOneLocked` answered both of its questions ("is any bucket front
+  expired?" and "which front is the fairness victim?") by iterating
+  `c.buckets` and calling `frontLocked` on each, and `frontLocked`'s cost is a
+  `c.entries[k]` lookup on a string key. The fairness key is the client's own
+  address (`clientFairnessKey`), so the scan was linear in the number of active
+  clients, and at `maxAuthCacheSize` (5,000) a full cache is the steady state of
+  any deployment with a few thousand of them — `clients=5000` at a 5,000 cap is
+  one cached verdict per client, the ordinary shape, and the case where every
+  bucket ties on live count so the scan had to visit all of them. Two things
+  made this more than CPU time: the work is lock-held on the credential path, so
+  it is also a latency floor for every concurrent `Get` queued behind the same
+  mutex; and the term it is linear in is attacker-influenced, because these
+  caches are populated by unauthenticated requests over a caller-supplied key
+  space (ADR-0041/CHAOS-76), so the cost of the fairness policy grew with the
+  very flood the policy exists to survive. Both answers now come from the root
+  of a heap maintained incrementally as buckets change — `victims`, ordered by
+  the same exported `BetterVictim` predicate the scan applied, and `expiries`,
+  ordered by front deadline — over a front memoised on the bucket, with
+  `bumpLiveLocked` keeping `frontLocked`'s map lookup off the common path where
+  only the live count moved. The heaps are hand-rolled because this package's
+  import surface is `sync` and `time` only, pinned by its boundary test.
+  Measured at the real 5,000 cap (`benchstat`, `-count=6`): one insertion at the
+  cap 275.9 us to 1.095 us at 5,000 clients (**-99.6%**), 44.5 us to 733 ns at
+  1,000 (-98.4%), 4.25 us to 579 ns at 100 (-86.4%); the flood shape (one client
+  holding most of the cache) 253.5 us to 686 ns (-99.7%); the concurrent
+  credential path with one store in four 85.6 us to 659 ns per operation at
+  5,000 clients (-99.2%) and 5.74 us to 290 ns with one in sixty-four (-94.9%),
+  measured separately at `-count=8` with each goroutine counting locally, since
+  a shared atomic inside the measured loop adds contention to a benchmark whose
+  subject is contention; insertion over already-expired entries 154.4 us to
+  1.46 us (-99.1%).
+  Allocations per insertion are unchanged (`~`/`all samples equal` on every
+  shape but one). The read path is untouched and measured so: `BenchmarkGetHit`
+  is 123.1 ns to 122.4 ns (`p=0.781`, no change). One path is deliberately
+  slower: re-verifying a credential the cache already holds moves the bucket's
+  live count down and straight back up, and each move repositions it in the
+  fairness heap, costing +362 ns (439 ns to 801 ns at 1,000 clients) where the
+  old code did almost nothing because removing the existing key takes the count
+  below the cap and the eviction loop then never runs. It is left alone on
+  purpose: collapsing the two moves means deferring an index fixup past the
+  eviction loop on the strength of a cross-function invariant inside a security
+  control, bought for 362 ns on a path that runs once per cached credential per
+  TTL and exists to avoid a millisecond-scale directory bind. Selection
+  behaviour is unchanged and asserted to be: a differential oracle keeps the old
+  scan as an executable reference and, over six randomised workloads of 4,000
+  steps each, requires the index to drop exactly the entry the scan would have
+  dropped — and on every step re-checks the heap order, the recorded positions,
+  one-bucket-one-slot, and that each memo still describes its bucket's real
+  front. The one deliberate refinement is that an expired front is now taken
+  earliest-deadline-first where the scan took whichever one Go's randomised map
+  iteration reached first; both satisfy the documented policy and the new choice
+  is reproducible, which is the property `BetterVictim` exists to give the live
+  path. Guards were validated by mutation: inverting the fairness ordering and
+  dropping the live-count fixup each fail the oracle, and the new
+  `TestBenchGate_EvictionAtCapIsFlatInClientCount` ratio gate measures 81.7x
+  against the pre-change scan versus 1.59x after, against a 10x bound. A
+  load-independent AST wall (`TestChaos76_WallNoBucketScanSurvivesInEviction`)
+  fails the build if `evictOneLocked` iterates `c.buckets` again, so the
+  regression cannot return even on a runner too loaded to time. `BetterVictim`
+  is untouched, so `store.go`'s local credential cache keeps the shared
+  definition. No wire, persistence or API change. `./internal/identcache` is
+  registered in the three `benchgate` commands that run such gates.
+
 - **The Layer-2 community-category domain walk opened a separate BadgerDB read
   transaction for every label of the destination authority — multiplying a
   process-wide serialization point by the host's label count, on the request
@@ -83,6 +150,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A refused upstream-pool configuration is now a Diagnostics row.** When the
+  stored managed upstream document failed validation at load, the config.yaml
+  upstream seed was refused whole, or the one-time legacy pool migration was
+  abandoned, the configured parent proxies were not in use. That showed only as
+  a banner on Network → Upstream Proxies and a startup log line, so the
+  Diagnostics report stayed green. The new `upstream_pool_config` WARN row names
+  each latched condition with its bounded reason and count and the action that
+  clears it. It is report-only: it reads the same state as `/api/upstream`, and
+  pool loading, validation and egress are unchanged. It carries no authority,
+  URL or credential.
+
 - **A partially tripped CDR pool is now a Diagnostics warning.** The `cdr`
   row only asked whether ANY Sluice instance could scan, so a pool with one of
   two instances' circuit breakers open still read `enabled-healthy`, and the
@@ -148,6 +226,50 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
+
+- **One `null` in a persisted JSON map was a permanent, self-reinstating
+  denial of service of the Control Plane — and the HA leader handed it to every
+  standby (CHAOS-117).** `{"nodes":{"dp-1":null}}` is valid JSON, so CHAOS-07's
+  quarantine-don't-overwrite response — which fires on a `json.Unmarshal`
+  FAILURE — never saw it, and `ClusterStore.Load` normalised nil **maps**
+  without normalising nil map **values**, publishing a nil `*EnrolledNode` to
+  every consumer. The first consumer to touch it is `checkNodeLiveness`, on
+  `StartHeartbeatMonitor`'s **detached, unguarded** 30 s ticker started at
+  control-plane activation: Go terminates the process on an unrecovered panic
+  in any goroutine, so the gateway exited — dropping every in-flight tunnel —
+  and because nothing repaired the file it exited again 30 s after every
+  restart, with restart supervision guaranteeing the next iteration.
+  `ImportFullState` carried a copy of the same one-level-too-shallow defence
+  and then **persisted what it imported**, so a standby that resynced from a
+  damaged leader wrote the record to its own `cluster.json` and inherited a
+  crash loop that outlived the leader. This was the third instance of a class
+  the repository already tracked twice (the top-level nil maps, and
+  `CARotation.RenewedNodes`, whose own test calls it "a second nil-map class
+  defect"); it recurred because each ingestion boundary hand-rolled its own
+  normalisation and the second was never deepened when the first was. Both
+  boundaries now route through one `normalizeClusterState`, which DROPS a null
+  record rather than zero-filling it — a zero node has no `NodeID` and no
+  certificate serial, so materialising one would invent a nameless node in the
+  admin roster and the CA-rotation count, while dropping cannot lose
+  revocation evidence (`st.Revoked` is a slice of values) and leaves a dropped
+  node to re-enrol rather than be trusted on a record that proves nothing. The
+  file is deliberately **not** quarantined: it parsed, so every healthy node
+  and the whole revoked-certificate list in it are usable, and renaming it
+  aside would trade a one-node repair for a fleet re-enrolment; `/ready` is
+  likewise unchanged, matching the posture `noteStateFileUnreadable` already
+  records for a survivable degradation. The heartbeat round additionally runs
+  under `runGuarded` per ITERATION, paired in the same change with converting
+  `checkHeartbeats`' and `ImportFullState`'s trailing `cs.mu.Unlock()` to
+  `defer` — the guard alone would have contained the panic into a permanently
+  held `ClusterStore` lock, wedging every enrollment, heartbeat and admin
+  cluster read forever with no crash, no restart and no alert, which is
+  strictly worse than the crash it replaces. The repair is reported on
+  `culvert_cluster_state_nil_entries_dropped_total`, a sanitised log line
+  naming the dropped node IDs (token hashes are counted, never named, per the
+  CL-9 contract), a viewer-safe `state_file_cluster` diagnostics row carrying
+  the re-enrol action, and one `state_file_corrupt` alert — latched once per
+  process on the replication path, since a standby resyncs on a timer and a
+  persistently damaged leader must not page on every round.
 
 - **An unauthenticated request could make this node dial ClamAV, and enough of
   them could make the daemon stop answering real scans — which this node
