@@ -603,7 +603,54 @@ func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, T
 		logger.Printf("Enrollment: rejected node %q: %v", sanitizeLog(req.NodeID), err)
 		return req, TokenInfo{}, nil, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
 	}
+	// CHAOS-117 follow-up: this node ID had a record until a null one was
+	// dropped at an ingestion boundary, so the guard above found nothing to
+	// supersede and this enrolment would otherwise be indistinguishable from a
+	// first one. Recorded AFTER the token is consumed, so an unauthenticated
+	// prober cannot drive the audit entry or the alert. The decision is not
+	// changed — the token was valid and the enrolment proceeds.
+	if priorNode == nil && globalClusterStore.NodeRecordWasDropped(req.NodeID) {
+		recordDroppedNodeReenrollment(req.NodeID, sourceIP)
+	}
 	return req, tokInfo, priorNode, nil
+}
+
+// recordDroppedNodeReenrollment audits and alerts an enrolment under a node ID
+// whose record was dropped as unusable earlier in this process (CHAOS-117).
+//
+// It cannot do what recordExpiredNodeReenrollment does for an EXPIRED node —
+// add the superseded certificate to the CRL — because the dropped record was
+// the only thing that named that serial. The predecessor certificate therefore
+// stays valid until its own expiry and cannot be revoked by node ID. That is
+// irreversible, so the one thing that can still be done is to say so, loudly
+// and once per enrolment, instead of letting the identity swap pass silently.
+// sourceIP is admitEnrollment's already-resolved peer address (it needs it for
+// the rate limiter), so unlike recordExpiredNodeReenrollment this takes the
+// value rather than re-deriving it from the context.
+func recordDroppedNodeReenrollment(nodeID, sourceIP string) {
+	if sourceIP == "" {
+		sourceIP = "unknown"
+	}
+	detail := "enrolled under a node ID whose stored record was earlier dropped as an unusable null entry; " +
+		"the predecessor certificate's serial was lost with that record, so it could NOT be added to the CRL and " +
+		"stays valid until it expires — confirm this enrolment was expected, and verify the control plane's cluster.json"
+	logger.Printf("Enrollment: node %q RE-ENROLLED over a DROPPED record from %q — %s",
+		sanitizeLog(nodeID), sanitizeLog(sourceIP), detail)
+	now := time.Now()
+	auditAdd(AuditEntry{
+		TS:     now.UnixMilli(),
+		Time:   now.Format("2006-01-02 15:04:05"),
+		Actor:  strings.ReplaceAll(sourceIP, `"`, ""),
+		Action: "cluster.node.reenroll-dropped",
+		Object: strings.ReplaceAll(nodeID, `"`, ""),
+		Detail: detail,
+	})
+	enrollAlertFire("cluster_node_reenrolled", AlertPayload{
+		Actor:  sourceIP,
+		Host:   nodeID,
+		Detail: detail,
+		Source: "cluster",
+	})
 }
 
 // clusterCAIssuancePrecondition reports whether the cluster CA can issue a
