@@ -104,7 +104,7 @@ func TestCAProvenance_WithheldRenewalMessageIsActionable(t *testing.T) {
 
 	noteCARenewalWithheld(ca.ProvenanceImported, expiry)
 	got := logs.String()
-	for _, want := range []string{"2030-01-02", "NOT renewed automatically", "issuing PKI", "refused, not bypassed"} {
+	for _, want := range []string{"2030-01-02", "NOT renewed automatically", "issuing PKI", "Upload Custom Certificate", "refused, not bypassed"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("imported message lacks %q: %s", want, got)
 		}

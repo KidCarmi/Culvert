@@ -442,9 +442,24 @@ if ! sudo systemctl start docker 2>/dev/null; then
   fi
 fi
 
+# user_in_docker_group USER — true when USER is a member of the group named
+# exactly "docker". Not `groups USER | grep -qw docker`: `groups` prints the
+# username itself first, and grep -w splits on `-`/`.`, so a user named
+# docker-ops or a member of docker-users read as already in the group and was
+# never added (the closing "log out and back in" note was suppressed too).
+# No pipe into `grep -q`: under pipefail its early exit can SIGPIPE the writer.
+user_in_docker_group() {
+  local g gs=()
+  read -ra gs <<<"$(id -nG "$1" 2>/dev/null || true)"
+  for g in "${gs[@]}"; do
+    [[ "$g" == "docker" ]] && return 0
+  done
+  return 1
+}
+
 CURRENT_USER="$(id -un)"
 if [[ "$CURRENT_USER" != "root" ]]; then
-  if ! groups "$CURRENT_USER" | grep -qw docker; then
+  if ! user_in_docker_group "$CURRENT_USER"; then
     info "Adding '$CURRENT_USER' to the docker group..."
     sudo usermod -aG docker "$CURRENT_USER"
     warn "Group change takes effect after re-login. Using sudo for now."
@@ -2992,7 +3007,7 @@ echo "    docker compose ps               # check service status"
 echo "    docker compose down             # stop everything"
 echo "    docker compose up -d            # (re)start everything"
 echo ""
-if [[ "$CURRENT_USER" != "root" ]] && ! groups "$CURRENT_USER" | grep -qw docker; then
+if [[ "$CURRENT_USER" != "root" ]] && ! user_in_docker_group "$CURRENT_USER"; then
   echo -e "${YELLOW}  NOTE: Log out and back in to use 'docker' without sudo.${NC}"
   echo ""
 fi
