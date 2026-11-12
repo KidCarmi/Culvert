@@ -227,6 +227,50 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **One `null` in a persisted JSON map was a permanent, self-reinstating
+  denial of service of the Control Plane — and the HA leader handed it to every
+  standby (CHAOS-117).** `{"nodes":{"dp-1":null}}` is valid JSON, so CHAOS-07's
+  quarantine-don't-overwrite response — which fires on a `json.Unmarshal`
+  FAILURE — never saw it, and `ClusterStore.Load` normalised nil **maps**
+  without normalising nil map **values**, publishing a nil `*EnrolledNode` to
+  every consumer. The first consumer to touch it is `checkNodeLiveness`, on
+  `StartHeartbeatMonitor`'s **detached, unguarded** 30 s ticker started at
+  control-plane activation: Go terminates the process on an unrecovered panic
+  in any goroutine, so the gateway exited — dropping every in-flight tunnel —
+  and because nothing repaired the file it exited again 30 s after every
+  restart, with restart supervision guaranteeing the next iteration.
+  `ImportFullState` carried a copy of the same one-level-too-shallow defence
+  and then **persisted what it imported**, so a standby that resynced from a
+  damaged leader wrote the record to its own `cluster.json` and inherited a
+  crash loop that outlived the leader. This was the third instance of a class
+  the repository already tracked twice (the top-level nil maps, and
+  `CARotation.RenewedNodes`, whose own test calls it "a second nil-map class
+  defect"); it recurred because each ingestion boundary hand-rolled its own
+  normalisation and the second was never deepened when the first was. Both
+  boundaries now route through one `normalizeClusterState`, which DROPS a null
+  record rather than zero-filling it — a zero node has no `NodeID` and no
+  certificate serial, so materialising one would invent a nameless node in the
+  admin roster and the CA-rotation count, while dropping cannot lose
+  revocation evidence (`st.Revoked` is a slice of values) and leaves a dropped
+  node to re-enrol rather than be trusted on a record that proves nothing. The
+  file is deliberately **not** quarantined: it parsed, so every healthy node
+  and the whole revoked-certificate list in it are usable, and renaming it
+  aside would trade a one-node repair for a fleet re-enrolment; `/ready` is
+  likewise unchanged, matching the posture `noteStateFileUnreadable` already
+  records for a survivable degradation. The heartbeat round additionally runs
+  under `runGuarded` per ITERATION, paired in the same change with converting
+  `checkHeartbeats`' and `ImportFullState`'s trailing `cs.mu.Unlock()` to
+  `defer` — the guard alone would have contained the panic into a permanently
+  held `ClusterStore` lock, wedging every enrollment, heartbeat and admin
+  cluster read forever with no crash, no restart and no alert, which is
+  strictly worse than the crash it replaces. The repair is reported on
+  `culvert_cluster_state_nil_entries_dropped_total`, a sanitised log line
+  naming the dropped node IDs (token hashes are counted, never named, per the
+  CL-9 contract), a viewer-safe `state_file_cluster` diagnostics row carrying
+  the re-enrol action, and one `state_file_corrupt` alert — latched once per
+  process on the replication path, since a standby resyncs on a timer and a
+  persistently damaged leader must not page on every round.
+
 - **An unauthenticated request could make this node dial ClamAV, and enough of
   them could make the daemon stop answering real scans — which this node
   forwards UNSCANNED (CHAOS-116).** `Scanner.ClamAVStatus` served a cache miss
