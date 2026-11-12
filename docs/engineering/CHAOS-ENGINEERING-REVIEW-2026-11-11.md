@@ -256,11 +256,28 @@ an explicit message, not as a hung test binary. A silent stall must be
 - `TEST_SEED=20260421 go test ./... -count=1 -timeout=40m` — **119 packages,
   0 failures** (root ok in 522 s) after the one gate noted below.
 - `TEST_SEED=20260421 go test -count=2 -shuffle=on -timeout=40m ./...` — the
-  Deep determinism command; see §9 for its recorded result.
+  Deep determinism command — **117 packages ok, 0 failures**.
 - `go test -race -count=2 -shuffle=on -timeout=20m -run 'TestCHAOS117|TestCHAOS105|TestCHAOS07|TestClusterStore|StateFile|Heartbeat|TestHA_|TestChaos' .`
   — ok (779 s).
+- `go test -tags benchgate -run 'TestBenchGate_' -count=1 -p 1 -timeout=10m`
+  over all nine benchgate-owning packages (root, `internal/admission`,
+  `internal/threatfeed`, `internal/catgroup`, `internal/session`,
+  `internal/decryptprofile`, `internal/catoverride`, `internal/secscan`,
+  `internal/catdb`) — ok, on an otherwise idle machine (root 216 s). This
+  change touches no benchmarked path; the run is a control.
 - `python3 docs/agent-context/check.py` — passes (run as a control; no
   `AGENTS.md`, `CLAUDE.md` or skill changed).
+
+**Not run, and why.** The frontend tree (`frontend/npm run verify`) and the
+`cmd/culvert-maint` module: neither is touched by this change, and neither
+consumes `ClusterStore`. `make api-verify` was not run because no route,
+OpenAPI operation or `uiRoutes` entry changed — the new diagnostics row is a
+VALUE inside the existing `/api/diagnostics` operator-contract array, whose
+conformance tests are in the root package and passed in both full runs above.
+Hosted CI (`Fast PR Gate`, `Deep PR Gate`) has not run on this revision at the
+time of writing; a local pass is not aggregate CI approval, and the sharded
+race lanes plus the privileged mount-point regression are only reproducible
+there.
 
 **One gate caught a real defect in this round's own test.** The first full-suite
 run failed `TestTestFileReadsAreCWDIndependent`
