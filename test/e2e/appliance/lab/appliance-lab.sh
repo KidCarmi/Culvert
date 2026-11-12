@@ -488,7 +488,52 @@ FRAMEPY
   rco not-ok normal -1 1 http=503 decision_code=503 curl_rc=0 body_state=complete parse=ok clamav=fail
   rco stalled-body stall200 0 1 http=200 decision_code=200000 curl_rc=28 body_state=absent clamav=none
   rco refused none 0 1 http=000 decision_code=000000 curl_rc=7 body_state=absent clamav=none
-  unset -f cwr cwr_fake rco
+  # wait_app_after_complete against a fake guest status-json (a fake `ssh`
+  # first on PATH; campaign 7: complete recorded while the recreated proxy was
+  # still starting). rac NAME MODE LIMIT WANT EXPECT — the wait's verdict, its
+  # record count, every field in every record, the FIRST record's outcome, the
+  # LAST record's ready flag, and every call ending within LIMIT + 0.5 s.
+  rac() { local name="$1" mode="$2" lim="$3" want="$4" exp="$5" got gpid r="$d/rac-$1"
+    mkdir -p "$r/bin"; printf '0\n' > "$r/n"; printf '%s\n' "$mode" > "$r/mode"
+    cat > "$r/bin/ssh" <<'FAKESSH'
+#!/usr/bin/env python3
+import json, os, sys, time
+d = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+mode = open(os.path.join(d, "mode")).read().strip()
+nf = os.path.join(d, "n"); n = int(open(nf).read()) + 1; open(nf, "w").write("%d\n" % n)
+if mode == "hang": time.sleep(60)
+if mode == "bad-json" and n == 1: print("{not json"); sys.exit(0)
+if mode == "ssh-fail" and n == 1: sys.stderr.write("ssh: connect to host refused\n"); sys.exit(255)
+up = {"at-once": True, "late": n > 2, "never": False, "mgmt-down": False}.get(mode, n > 1)
+print(json.dumps({"application_responding": up or mode == "mgmt-down", "management_available": up,
+                  "reason": "SETUP_REQUIRED" if up else "APPLICATION_UNAVAILABLE",
+                  "setup_status": "pending" if up else "unknown", "observed_at": "2026-01-01T00:00:%02dZ" % n}))
+FAKESSH
+    chmod +x "$r/bin/ssh"; sleep 300 & gpid=$!
+    got="$( PATH="$r/bin:$PATH"; EV="$r"; WORK="$r"; JSONL="$r.jsonl"; LAB_CAMPAIGN_STOP_FILE=
+            : > "$JSONL"; echo "$gpid" > "$WORK/qemu.pid"
+            wait_app_after_complete "$lim" > /dev/null 2>&1 || true
+            python3 -I -c 'import json,sys
+r=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1])
+recs=[json.loads(l) for l in open(sys.argv[2])]; lim=float(sys.argv[3])
+need={"attempt","utc","start_s","end_s","timeout_s","rc","error","stderr","parse","application_responding","management_available","reason","setup_status","observed_at","status_json","ready","after_deadline"}
+a=recs[0] if recs else {}; z=recs[-1] if recs else {}
+first="rc=%s/parse=%s/%s" % (a.get("rc"), (a.get("parse") or "").split(":")[0], "killed" if "killed" in (a.get("error") or "") else "nokill")
+print(r["result"], r["check"], len(recs), "fields-ok" if recs and all(need <= set(x) for x in recs) else "fields-MISSING",
+      "first=" + first, "last_ready=%s" % z.get("ready"),
+      "bound=%s" % ("bounded" if recs and max(x["end_s"] for x in recs) <= lim + 0.5 else "OVERRUN"))' "$JSONL" "$r/02-ready-after-complete.jsonl" "$lim" 2>/dev/null )"
+    kill "$gpid" 2>/dev/null || true; wait "$gpid" 2>/dev/null || true
+    # shellcheck disable=SC2053
+    if [[ "${got%% *}" == "$want" && "$got" == *app-ready-after-complete* && "$got" == *fields-ok* && "$got" == $exp ]]; then log "selftest ok: app-ready-after-complete $name -> $got"
+    else log "selftest FAILED: app-ready-after-complete $name -> '$got', want $want and $exp"; rc=1; fi; }
+  rac at-once at-once 20 pass '* 1 fields-ok first=rc=0/parse=ok/nokill last_ready=True bound=bounded'
+  rac late late 30 pass '* 3 fields-ok first=rc=0/parse=ok/nokill last_ready=True bound=bounded'
+  rac never never 5 fail '* 2 fields-ok first=rc=0/parse=ok/nokill last_ready=False bound=bounded'
+  rac mgmt-down mgmt-down 5 fail '* 2 fields-ok first=rc=0/parse=ok/nokill last_ready=False bound=bounded'
+  rac hang hang 3 fail '* 1 fields-ok first=rc=None/parse=not-attempted/killed last_ready=False bound=bounded'
+  rac bad-json bad-json 20 pass '* 2 fields-ok first=rc=0/parse=error/nokill last_ready=True bound=bounded'
+  rac ssh-fail ssh-fail 20 pass '* 2 fields-ok first=rc=255/parse=not-attempted/nokill last_ready=True bound=bounded'
+  unset -f cwr cwr_fake rco rac
   if python3 -I -B "$HERE/console-session-selftest.py" > "$d/cs-selftest.log" 2>&1; then
     log "selftest ok: console-session receive loop and transfer ($(grep -c '^ok ' "$d/cs-selftest.log") cases: prompt drain, settle kept, 60 KB identical, status kept)"
   else log "selftest FAILED: console-session receive loop/transfer: $(grep -E 'FAILED|Error' "$d/cs-selftest.log" | head -3 | tr '\n' ' ')"; rc=1; fi
@@ -818,6 +863,85 @@ engine_overlay() { local disk="$1" fmt="$2" d="${LAB_ENGINE_DEBS:-}" want v
   save_state ENGINE_EXPECT "$want"
   check 1 engine-overlay pass "LAB-ONLY: ${want} installed (dpkg ii/hi) + held in the disposable disk BEFORE first boot; DEB sha256s verified; the booted disk is NOT the OVA's disk"
 }
+# wait_app_after_complete SECONDS — after first boot records `complete`, wait
+# for the product's OWN readiness flags in status-json (application_responding
+# AND management_available both true) within ONE deadline of SECONDS on the
+# host's CLOCK_MONOTONIC, counted from when `complete` was observed.
+# Why: first boot records `complete` right after it RECREATES the proxy to
+# mount the maintenance-agent socket (candidate scripts/install.sh, `docker
+# compose ... up -d` without --wait, after the --wait start), so the
+# application can still be starting when `complete` first appears. Campaign 7
+# (run 43322272548): complete at 22:51:23, application and management not
+# responding at 22:51:24-26, step 3 read setup_status=unknown. This wait does
+# NOT replace or change step 3's single setup_status sample.
+# Each status-json call is bounded by min(10 s, time remaining) and killed when
+# it expires; between calls it sleeps min(3 s, time remaining); it stops early
+# if the guest's QEMU process is gone. Evidence: $EV/02-ready-after-complete.jsonl,
+# one record for EVERY started call, written whatever happens (start/end
+# offsets, timeout, ssh exit or timeout, stderr, parse outcome, the two flags,
+# reason, setup_status, observed_at, the status-json received, ready,
+# after_deadline). Result: check 2/app-ready-after-complete, pass with the
+# seconds taken, or fail (latching the campaign stop).
+wait_app_after_complete() { local lim="$1" out rc=0 verdict n el
+  out="$(python3 -I - "$lim" "$WORK/qemu.pid" "$EV/02-ready-after-complete.jsonl" ssh "${SSH_OPTS[@]}" "culvert-operator@$LAB_HOST" status-json <<'PY'
+import json, os, subprocess, sys, time
+lim, pidf, log, cmd = float(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4:]
+t0 = time.monotonic(); deadline = t0 + lim; n = 0
+def alive():
+    try:
+        os.kill(int(open(pidf).read().strip()), 0); return True
+    except Exception:
+        return False
+with open(log, "w") as f:
+    while True:
+        rem = deadline - time.monotonic()
+        if rem <= 0:
+            print("fail deadline %d %.1f" % (n, time.monotonic() - t0)); break
+        if not alive():
+            print("fail guest-gone %d %.1f" % (n, time.monotonic() - t0)); break
+        n += 1; tmo = min(10.0, rem); s = time.monotonic()
+        rec = {"attempt": n, "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "start_s": round(s - t0, 3),
+               "timeout_s": round(tmo, 3), "rc": None, "error": None, "stderr": None, "parse": "not-attempted",
+               "application_responding": None, "management_available": None, "reason": None, "setup_status": None,
+               "observed_at": None, "status_json": None, "ready": False, "after_deadline": False}
+        ok = False
+        try:
+            try:
+                p = subprocess.run(cmd, capture_output=True, timeout=tmo, stdin=subprocess.DEVNULL)
+                rec["rc"] = p.returncode; out = p.stdout; rec["stderr"] = p.stderr.decode("utf-8", "replace")[:300] or None
+            except subprocess.TimeoutExpired as e:
+                rec["error"] = "status-json call exceeded %.3f s (killed)" % tmo; out = e.stdout or b""
+            rec["status_json"] = out.decode("utf-8", "replace")[:65536] if out else None
+            if rec["rc"] == 0:
+                try:
+                    d = json.loads(out)
+                    for k in ("application_responding", "management_available", "reason", "setup_status", "observed_at"):
+                        rec[k] = d.get(k)
+                    rec["parse"] = "ok"
+                except Exception as e:
+                    rec["parse"] = "error: " + repr(e)[:120]
+            elif rec["error"] is None:
+                rec["error"] = "status-json exited %s" % rec["rc"]
+            ok = rec["parse"] == "ok" and rec["application_responding"] is True and rec["management_available"] is True
+        except Exception as e:
+            rec["error"] = (rec["error"] or "") + " | waiter: " + repr(e)[:200]
+        finally:
+            end = time.monotonic()
+            rec["end_s"] = round(end - t0, 3); rec["after_deadline"] = end > deadline
+            rec["ready"] = bool(ok and not rec["after_deadline"])
+            f.write(json.dumps(rec, sort_keys=True) + "\n"); f.flush()
+        if rec["ready"]:
+            print("pass ok %d %.1f" % (n, end - t0)); break
+        rem = deadline - time.monotonic()
+        if rem > 0:
+            time.sleep(min(3.0, rem))
+PY
+)" || rc=$?
+  read -r verdict _ n el <<<"$out"
+  if [[ $rc == 0 && "$verdict" == pass ]]; then
+    check 2 app-ready-after-complete pass "status-json application_responding and management_available true ${el}s after complete was observed (call $n; every call in 02-ready-after-complete.jsonl)"
+  else
+    check 2 app-ready-after-complete fail "application/management not ready within ${lim}s of complete (${out:-waiter rc $rc}; every call in 02-ready-after-complete.jsonl)"; return 1; fi; }
 cmd_up() {
   [[ -n "${ACCEL:-}" ]] || die "run preflight first"
   local ova="${LAB_OVA:?LAB_OVA=path to the .ova}" want="${LAB_OVA_SHA256:?LAB_OVA_SHA256=expected sha256}"
@@ -915,6 +1039,9 @@ PY
     sleep 15; done
   cp "$WORK/status-json.tmp" "$EV/02-status-json-complete.json"
   check 2 firstboot-complete pass "status-json: complete recorded, phase $(status_field "$EV/02-status-json-complete.json" phase), $(( $(date +%s) - t0 ))s from power-on"
+  # complete can precede the recreated proxy answering (campaign 7): wait for
+  # the product's own readiness flags first; step 3 below is unchanged.
+  wait_app_after_complete 120 || return 1
 }
 
 # ── qualify: vsphere-qualification.md steps 3–8 ─────────────────────────────

@@ -1280,6 +1280,20 @@ jobs:
       # The ONE commit message that may start this job (an empty commit on the
       # reviewed head; reviewed by ASTRA, with its SHA, parent and tree, before
       # it is pushed).
+      # Campaign 8 (owner direction and decision of 8 November 2026; D4 of 9
+      # November 2026; owner clarifications of 10 and 12 November 2026): the same
+      # FB1-R2 candidate OVA e60620c3, after a fourth HARNESS fix. Campaign 7
+      # (trigger 549f6b19, run 43322272548, evidence 13991003696) is FAIL and
+      # preserved: it stopped at 3/status-setup-pending (setup_status=unknown),
+      # 1 s after first boot recorded complete. The guest journal shows first boot
+      # recreating the proxy container (to mount the maintenance-agent socket;
+      # candidate scripts/install.sh, `compose up -d` without --wait) at 22:51:21
+      # and recording complete at 22:51:23, while status-json still reported
+      # application_responding=false and management_available=false at 22:51:24-26.
+      # Campaigns 4-6 sampled just after the proxy answered. Now:
+      # wait_app_after_complete waits for those two status-json flags within one
+      # 120 s monotonic deadline (every call recorded) as its own check,
+      # 2/app-ready-after-complete; step 3's single setup_status sample is unchanged.
       # Campaign 7 (owner direction and decision of 8 November 2026; D4 of 9
       # November 2026; owner clarification of 10 November 2026): the same FB1-R2
       # candidate OVA e60620c3, after a third HARNESS fix. Campaign 6 (trigger
@@ -1320,9 +1334,9 @@ jobs:
       # f9d68540. The campaign-3 route (84e05cd6, FB1-R1 OVA f76b6e82) was never
       # triggered: owner decision D4 retired that candidate. None of those
       # messages starts this job.
-      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 7 on the FB1-R2 candidate OVA e60620c3 [qemu-retained]"
-      QEMU_CAMPAIGN: "7"
-      QEMU_PRIOR_CAMPAIGN: "6: trigger c87da9e377cc60134207c162a81025cabca74448, run 42865896238 attempt 1, evidence artifact 13788313092, verdict FAIL (main leg passed every scope; console leg stop at M2H/console-final-clamav-ready: one /ready sample ~36 s after the V5 power-on said not ok while clamd answered EICAR; V2 OCR checks could not pass: no tesseract)"
+      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 8 on the FB1-R2 candidate OVA e60620c3 [qemu-retained]"
+      QEMU_CAMPAIGN: "8"
+      QEMU_PRIOR_CAMPAIGN: "7: trigger 549f6b19f550c1d8766235d47be76bf5e237a672, run 43322272548 attempt 1, evidence artifact 13991003696, verdict FAIL (stop at 3/status-setup-pending: setup_status=unknown 1 s after first boot recorded complete, while status-json reported application_responding=false and management_available=false after first boot recreated the proxy container)"
       # Start deadline (unchanged, reviewed for campaign 2): first candidate boot
       # no later than 2026-11-14T00:00:00Z. With the 345-minute job limit and the
       # daily-window rule the job ends by 2026-11-14T05:45Z, inside the owner's
