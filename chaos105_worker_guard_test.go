@@ -139,6 +139,11 @@ var chaos105Workers = []struct {
 	{"support_upload_worker.go", "startSupportUploadWorker", "crashComponentSupportUpload"},
 	{"support_debug_level.go", "startDebugLevelWatchdog", "crashComponentSupportDebugLevel"},
 	{"ui_support.go", "startSupportRetentionJanitor", "crashComponentSupportRetention"},
+	// Added by CHAOS-117. This one is not observability: the heartbeat monitor
+	// is the ONLY writer of node liveness, it is detached on control-plane
+	// activation, and a panic in its round (a null record in a persisted
+	// cluster.json was one) killed the gateway 30 s after every restart.
+	{"enrollment.go", "StartHeartbeatMonitor", "crashComponentClusterHeartbeat"},
 }
 
 func TestCHAOS105_EveryRegisteredWorkerRoundIsGuarded(t *testing.T) {

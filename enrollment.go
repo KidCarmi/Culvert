@@ -36,6 +36,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -147,6 +148,59 @@ func (cs *ClusterStore) Load(path string) error {
 		quarantineCorruptStateFile("cluster", path, err)
 		return fmt.Errorf("parse cluster state: %w", err)
 	}
+	// CHAOS-117: normalise nil maps AND nil map VALUES before publishing.
+	// `{"nodes":{"dp-1":null}}` is valid JSON, so the CHAOS-07 quarantine
+	// above — which fires on a PARSE failure — never sees it, and every
+	// consumer that dereferences a *EnrolledNode / *EnrollToken out of these
+	// maps then nil-derefs. The worst consumer is the detached heartbeat
+	// ticker, which is process-fatal and re-reads this same file after every
+	// restart: a crash loop from one null in a persisted document.
+	repair := normalizeClusterState(&st)
+	if !repair.empty() {
+		statClusterStateNilEntriesDropped.Add(int64(repair.count()))
+		logger.Printf("Enrollment: cluster state %q contained %d unusable null record(s) — dropped %d node(s) %q and %d token(s); a null record carries no node ID, certificate serial or expiry, so it cannot be honoured",
+			sanitizeLog(path), repair.count(), len(repair.NilNodes), sanitizeLog(strings.Join(repair.NilNodes, ",")), repair.NilTokens)
+		noteStateFileEntriesDropped("cluster", path, repair.count())
+	}
+	cs.st = st
+	return nil
+}
+
+// ─── Decoded-state normalisation (CHAOS-117) ─────────────────────────────────
+
+// clusterStateRepair reports what normalizeClusterState had to drop. Node IDs
+// are carried for the log line (they are operator-facing and name what was
+// lost); token map keys are SHA-256 token hashes, so only a COUNT is carried —
+// the CL-9 contract keeps hashes out of logs and metrics alike.
+type clusterStateRepair struct {
+	NilNodes  []string
+	NilTokens int
+}
+
+func (r clusterStateRepair) empty() bool { return len(r.NilNodes) == 0 && r.NilTokens == 0 }
+func (r clusterStateRepair) count() int  { return len(r.NilNodes) + r.NilTokens }
+
+// normalizeClusterState repairs a freshly decoded ClusterState in place so that
+// no consumer can observe a nil map OR a nil map value, and reports what it
+// dropped. It is the single normalisation point for both ingestion boundaries
+// (Load from disk, ImportFullState from an HA leader): the pre-CHAOS-117 code
+// duplicated a one-level-too-shallow version of this in each, which is how the
+// nil-VALUE class survived two prior fixes of the nil-MAP class.
+//
+// A null record is DROPPED rather than replaced with a zero value. A zero
+// *EnrolledNode has no NodeID and no CertSerial, so materialising one would
+// invent a nameless node in the admin roster and in the CA-rotation node count;
+// a zero *EnrollToken has a zero ExpiresAt and Used=false, which is an
+// already-expired token that nothing can consume. Dropping cannot lose
+// security state: st.Revoked is a slice of VALUES, so the revoked-certificate
+// list — the half CHAOS-07 identified as security-relevant — is untouched, and
+// a dropped node must re-enrol (an availability cost) rather than being trusted
+// on a record that proves nothing.
+//
+// Deleting from a map during range is defined behaviour in Go; entries deleted
+// during iteration are simply not produced.
+func normalizeClusterState(st *ClusterState) clusterStateRepair {
+	var repair clusterStateRepair
 	if st.Nodes == nil {
 		st.Nodes = make(map[string]*EnrolledNode)
 	}
@@ -156,6 +210,19 @@ func (cs *ClusterStore) Load(path string) error {
 	if st.Revoked == nil {
 		st.Revoked = []RevokedCert{}
 	}
+	for id, node := range st.Nodes {
+		if node == nil {
+			delete(st.Nodes, id)
+			repair.NilNodes = append(repair.NilNodes, id)
+		}
+	}
+	sort.Strings(repair.NilNodes) // deterministic log line and test oracle
+	for hash, tok := range st.Tokens {
+		if tok == nil {
+			delete(st.Tokens, hash)
+			repair.NilTokens++
+		}
+	}
 	// If a CA rotation was in progress at shutdown and the JSON payload
 	// omits or nils out renewed_nodes, RecordNodeRenewed will panic with
 	// "assignment to entry in nil map" when the first node reports back.
@@ -163,8 +230,7 @@ func (cs *ClusterStore) Load(path string) error {
 	if st.CARotation != nil && st.CARotation.RenewedNodes == nil {
 		st.CARotation.RenewedNodes = make(map[string]string)
 	}
-	cs.st = st
-	return nil
+	return repair
 }
 
 // Save persists cluster state to disk.
@@ -635,7 +701,22 @@ const (
 	heartbeatCheckEvery = 30 * time.Second
 )
 
+// crashComponentClusterHeartbeat names the heartbeat monitor in the crash
+// record / culvert_crash_records_total{component} series, so an operator can
+// tell WHICH background round failed (CHAOS-24 plane, CHAOS-117 enrolment).
+const crashComponentClusterHeartbeat = "cluster_heartbeat"
+
 // StartHeartbeatMonitor runs a background loop that checks node health.
+//
+// The round is guarded per ITERATION (CHAOS-105 contract): this goroutine is
+// detached and nothing else watches it, so pre-CHAOS-117 any panic inside
+// checkHeartbeats — a nil record in a persisted cluster.json was one, and it
+// recurred 30 s after every restart — terminated the whole gateway, dropping
+// every in-flight tunnel on a Control Plane. Guarding the ITERATION keeps the
+// monitor alive so a transient fault costs one 30 s interval and self-heals;
+// guarding the goroutine instead would let it return and node liveness would
+// silently never be evaluated again. checkHeartbeats releases cs.mu with a
+// defer so a contained panic cannot leave the ClusterStore locked.
 func (cs *ClusterStore) StartHeartbeatMonitor(done <-chan struct{}) {
 	go func() {
 		ticker := time.NewTicker(heartbeatCheckEvery)
@@ -645,7 +726,7 @@ func (cs *ClusterStore) StartHeartbeatMonitor(done <-chan struct{}) {
 			case <-done:
 				return
 			case <-ticker.C:
-				cs.checkHeartbeats()
+				runGuarded(crashComponentClusterHeartbeat, cs.checkHeartbeats)
 			}
 		}
 	}()
@@ -653,6 +734,13 @@ func (cs *ClusterStore) StartHeartbeatMonitor(done <-chan struct{}) {
 
 func (cs *ClusterStore) checkHeartbeats() {
 	cs.mu.Lock()
+	// DEFERRED, not a trailing Unlock (CHAOS-117): the round now runs under
+	// runGuarded, so a panic here no longer kills the process — and a
+	// contained panic that left cs.mu held would wedge every enrollment,
+	// heartbeat and admin cluster read FOREVER, with no crash, no restart and
+	// no alert. That silent stall is strictly worse than the crash it
+	// replaces, so the guard and this defer are one change, never two.
+	defer cs.mu.Unlock()
 	now := time.Now()
 	changed := cs.checkNodeLiveness(now)
 	if cs.gcExpiredTokens(now) {
@@ -666,7 +754,6 @@ func (cs *ClusterStore) checkHeartbeats() {
 	if changed {
 		_ = cs.saveLocked() //nolint:errcheck // best-effort periodic persistence
 	}
-	cs.mu.Unlock()
 }
 
 // checkNodeLiveness marks unreachable nodes as disconnected. Caller holds mu.
@@ -740,24 +827,37 @@ func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
 	if err := json.Unmarshal(data, &st); err != nil {
 		return fmt.Errorf("parse replicated state: %w", err)
 	}
-	if st.Nodes == nil {
-		st.Nodes = make(map[string]*EnrolledNode)
-	}
-	if st.Tokens == nil {
-		st.Tokens = make(map[string]*EnrollToken)
-	}
-	// Same nil-map defence as Load() — a follower that replays replicated
-	// state while a CA rotation is in progress would otherwise panic on the
-	// first RecordNodeRenewed call if renewed_nodes was null/missing.
-	if st.CARotation != nil && st.CARotation.RenewedNodes == nil {
-		st.CARotation.RenewedNodes = make(map[string]string)
+	// Same normalisation as Load(), through the SAME helper — this boundary is
+	// the propagation path for CHAOS-117: pre-fix, a leader holding one null
+	// node record replicated it to every standby, which then PERSISTED it to
+	// its own cluster.json, so one poisoned document became a fleet-wide crash
+	// loop that outlived the leader. A follower must not adopt a record it
+	// cannot evaluate.
+	repair := normalizeClusterState(&st)
+	if !repair.empty() {
+		statClusterStateNilEntriesDropped.Add(int64(repair.count()))
+		logger.Printf("HA: replicated cluster state contained %d unusable null record(s) — dropped %d node(s) %q and %d token(s); the leader's state file is likely damaged",
+			repair.count(), len(repair.NilNodes), sanitizeLog(strings.Join(repair.NilNodes, ",")), repair.NilTokens)
+		// Once per process: a standby resyncs on a timer, so a persistently
+		// damaged leader would otherwise page on every round. The log line and
+		// the counter above carry every occurrence; the alert carries the fact.
+		replicatedNilEntryAlertOnce.Do(func() {
+			deferStartupAlert("state_file_corrupt", AlertPayload{
+				Detail: fmt.Sprintf("replicated cluster state from the HA leader contained %d null record(s), which were dropped on this node; inspect the LEADER's cluster.json — enrolled nodes present only as null records must re-enrol", repair.count()),
+				Source: "storage",
+			})
+		})
 	}
 	cs.mu.Lock()
+	defer cs.mu.Unlock() // deferred: saveLocked must not leak the lock on a panic
 	cs.st = st
-	_ = cs.saveLocked()
-	cs.mu.Unlock()
+	_ = cs.saveLocked() //nolint:errcheck // best-effort; the in-memory import stands either way
 	return nil
 }
+
+// replicatedNilEntryAlertOnce latches the ImportFullState alert. See the call
+// site: the condition repeats on every standby resync round.
+var replicatedNilEntryAlertOnce sync.Once
 
 // ─── Cluster CA (separate from MITM CA) ──────────────────────────────────────
 // The cluster CA signs node certificates for mTLS enrollment.

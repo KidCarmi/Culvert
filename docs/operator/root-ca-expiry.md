@@ -48,7 +48,7 @@ Any one of these is conclusive:
 1. **Check the clock first.** If the log says `not valid until <timestamp> (system clock may
    have rolled back)`, this is an NTP/RTC problem, not a certificate problem. Fix time sync;
    inspection resumes on its own with no certificate work at all.
-2. **Otherwise, rotate the Root CA** — Admin UI → *CA Management* → *Force Rotation*, or
+2. **Otherwise, rotate the Root CA** — Admin UI → *CA Management* → *Force Rotate Now*, or
    `POST /api/ca/rotate` (admin role, confirmation-token flow). Culvert also checks for a
    needed rotation at every startup and every 24 hours, and rotates automatically inside the
    30-day pre-expiry window.
@@ -61,7 +61,7 @@ Any one of these is conclusive:
    writes; `culvert_ca_rotation_persist_failures_total` is a cumulative counter and does not.
 4. **Redistribute the new Root CA to clients.** This step cannot be automated from inside the
    gateway: a new root is untrusted by definition. Download it from *CA Management → Download
-   CA*, or `GET /api/ca/download`, and push it through your existing trust-store channel
+   CA Cert (PEM)*, or `GET /api/ca/download`, and push it through your existing trust-store channel
    (MDM, group policy, configuration management).
 5. **Verify.** `culvert_ca_usable` returns to `1` and `/health` returns to
    `"ssl_inspection": "ready"`. Culvert clears the degraded state only after it has actually
@@ -114,7 +114,9 @@ new root is distributed.
 
 An imported or unknown CA keeps signing until it expires. At expiry inspected HTTPS is
 **refused** (§1), never bypassed, and the CA is never swapped for a self-signed one. Replace an
-imported CA by uploading the certificate your PKI re-issued.
+imported CA by uploading the certificate your PKI re-issued (Admin UI → *Certificates* →
+*Upload Custom Certificate*, target *MITM / SSL Inspection Engine*, or `POST /api/certs/upload`
+with `target=mitm`).
 
 **Upgrading an existing install.** Bundles written by earlier releases carry no record, so they
 load as *unknown* and are not renewed until you classify them. Set
