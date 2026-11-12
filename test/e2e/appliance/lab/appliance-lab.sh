@@ -359,38 +359,80 @@ cmd_selftest() { local d rc=0 got; d="$(mktemp -d)"
   # The receive loop must drain as soon as bytes arrive (campaign 5: a
   # sleep-then-drain loop stalled QEMU's virtio console for good), and the
   # transfer must stay byte-identical with the script's exit status kept.
-  # vwait_clamav_ready against a fake /ready (campaign 6: /ready sampled once
-  # while it still said not ok). cwr NAME NOT_OK_ANSWERS DELAY_S LIMIT WANT
-  # (-1 = never ok). A ready answer completing after the deadline must FAIL.
-  cwr() { local name="$1" k="$2" dly="$3" lim="$4" want="$5" port pid gpid got
-    port=$(( 20000 + RANDOM % 20000 ))
-    python3 -I -c 'import http.server, json, sys, time
-port, k, dly = int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3]); n = [0]
+  # vwait_clamav_ready and ready_clamav_ok against a fake /ready (campaign 6:
+  # /ready sampled once while it still said not ok). The fake answers K not-ok
+  # replies, then ok, each after DELAY_S, in MODE: normal; trickle (a healthy
+  # 200 body sent 5 bytes every 0.1 s); stall503 / stall200 (headers with a
+  # Content-Length, then no body). K = -1: never ok.
+  cwr_fake() { python3 -I -c 'import http.server, json, sys, time
+port, k, dly, mode = int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3]), sys.argv[4]; n = [0]
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         n[0] += 1; ok = k >= 0 and n[0] > k; time.sleep(dly)
         b = json.dumps({"status": "ok" if ok else "fail", "checks": {"clamav": {"status": "ok" if ok else "fail"}}}).encode()
-        self.send_response(200 if ok else 503); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        code = {"stall503": 503, "stall200": 200, "trickle": 200}.get(mode, 200 if ok else 503)
+        self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.flush()
+        if mode.startswith("stall"):
+            time.sleep(60); return
+        if mode == "trickle":
+            for i in range(0, len(b), 5):
+                self.wfile.write(b[i:i + 5]); self.wfile.flush(); time.sleep(0.1)
+            return
+        self.wfile.write(b)
     def log_message(self, *a): pass
-http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()' "$port" "$k" "$dly" > /dev/null 2>&1 &
+http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()' "$@" > /dev/null 2>&1 & }
+  # cwr NAME MODE K DELAY_S LIMIT WANT(pass|fail) EXPECT — the wait's verdict,
+  # its record count, every required field in every record, the LAST record's
+  # HTTP status / body state / parse outcome, and whether every attempt ended
+  # within LIMIT + 0.25 s (bounded) or not (OVERRUN).
+  cwr() { local name="$1" mode="$2" k="$3" dly="$4" lim="$5" want="$6" exp="$7" port pid gpid got
+    port=$(( 20000 + RANDOM % 20000 )); cwr_fake "$port" "$k" "$dly" "$mode"
     pid=$!; sleep 300 & gpid=$!; sleep 0.7
     got="$( P="http://127.0.0.1:$port"; EV="$d/cwr-$name"; WORK="$d/cwr-$name"; JSONL="$d/cwr-$name.jsonl"; LAB_CAMPAIGN_STOP_FILE=
             mkdir -p "$EV"; : > "$JSONL"; echo "$gpid" > "$WORK/qemu.pid"
             vwait_clamav_ready V5 "$lim" > /dev/null 2>&1 || true
             python3 -I -c 'import json,sys
 r=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1])
-recs=[json.loads(l) for l in open(sys.argv[2])]
-need={"attempt","start_s","end_s","timeout_s","http","error","parse","clamav","ready","after_deadline","body"}
-print(r["result"], r["check"], len(recs), "fields-ok" if recs and all(need <= set(x) for x in recs) else "fields-MISSING")' "$JSONL" "$EV/V5-clamav-ready.jsonl" 2>/dev/null )"
+recs=[json.loads(l) for l in open(sys.argv[2])]; lim=float(sys.argv[3])
+need={"attempt","utc","start_s","end_s","timeout_s","phase","http","status_line","error","content_length","chunked","body_state","body_bytes","body","parse","clamav","ready","after_deadline"}
+last=recs[-1] if recs else {}
+print(r["result"], r["check"], len(recs), "fields-ok" if recs and all(need <= set(x) for x in recs) else "fields-MISSING",
+      "http=%s" % last.get("http"), "body=%s" % last.get("body_state"), "parse=%s" % last.get("parse"),
+      "bound=%s" % ("bounded" if recs and max(x["end_s"] for x in recs) <= lim + 0.25 else "OVERRUN"))' "$JSONL" "$EV/V5-clamav-ready.jsonl" "$lim" 2>/dev/null )"
     kill "$pid" "$gpid" 2>/dev/null || true; wait "$pid" "$gpid" 2>/dev/null || true
-    if [[ "${got%% *}" == "$want" && "$got" == *clamav-ready-before-final* && "$got" == *fields-ok ]]; then log "selftest ok: clamav-ready wait $name -> $got"
-    else log "selftest FAILED: clamav-ready wait $name -> '$got', want $want"; rc=1; fi; }
-  cwr ready-at-once 0 0 20 pass
-  cwr late 2 0 30 pass
-  cwr never -1 0 8 fail
-  cwr ready-after-limit 2 0 7 fail
-  cwr slow-ok-past-limit 0 1.5 1 fail
-  unset -f cwr
+    # shellcheck disable=SC2053
+    if [[ "${got%% *}" == "$want" && "$got" == *clamav-ready-before-final* && "$got" == *fields-ok* && "$got" == $exp ]]; then log "selftest ok: clamav-ready wait $name -> $got"
+    else log "selftest FAILED: clamav-ready wait $name -> '$got', want $want and $exp"; rc=1; fi; }
+  cwr ready-at-once normal 0 0 20 pass '* 1 fields-ok http=200 body=complete parse=ok bound=bounded'
+  cwr late normal 2 0 30 pass '* 3 fields-ok http=200 body=complete parse=ok bound=bounded'
+  cwr never normal -1 0 8 fail '* fields-ok http=503 body=complete parse=ok bound=bounded'
+  cwr ready-after-limit normal 2 0 7 fail '* 2 fields-ok http=503 *bound=bounded'
+  cwr slow-ok-past-limit normal 0 1.5 1 fail '* 1 fields-ok http=None body=absent parse=no-complete-body bound=bounded'
+  # ASTRA's R7-T1 control: a healthy 200 trickled past the limit must stop AT
+  # the limit with the partial attempt kept, not run on until the body ends.
+  cwr trickle-past-limit trickle 0 0 0.25 fail '* 1 fields-ok http=200 body=partial parse=no-complete-body bound=bounded'
+  cwr trickle-in-time trickle 0 0 3 pass '* 1 fields-ok http=200 body=complete parse=ok bound=bounded'
+  # ASTRA's R7-E1 controls: headers then a stalled body must still leave one
+  # record per attempt, with the status that DID arrive.
+  cwr stall-503 stall503 0 0 1 fail '* 1 fields-ok http=503 body=absent parse=no-complete-body bound=bounded'
+  cwr stall-200 stall200 0 0 1 fail '* 1 fields-ok http=200 body=absent parse=no-complete-body bound=bounded'
+  # rco NAME MODE K WANT_RC EXPECT... — ready_clamav_ok (the final M2 sample's
+  # own transport, curl -m 2) keeps its decision and records its provenance.
+  rco() { local name="$1" mode="$2" k="$3" wrc="$4" port pid r=0 meta; shift 4
+    port=$(( 20000 + RANDOM % 20000 ))
+    if [[ "$mode" != none ]]; then cwr_fake "$port" "$k" 0 "$mode"; pid=$!; sleep 0.7; fi
+    mkdir -p "$d/rco-$name"
+    ( P="http://127.0.0.1:$port"; WORK="$d/rco-$name"; ready_clamav_ok ) || r=$?
+    [[ -n "${pid:-}" ]] && { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
+    meta="$(tr '\n' ' ' < "$d/rco-$name/rec-ready.meta" 2>/dev/null)"; local e okm=1
+    for e in "$@"; do [[ " $meta" == *" $e "* ]] || okm=0; done
+    if [[ $r == "$wrc" && $okm == 1 ]]; then log "selftest ok: ready_clamav_ok $name -> rc=$r ${meta:0:160}"
+    else log "selftest FAILED: ready_clamav_ok $name -> rc=$r (want $wrc) meta='${meta:0:300}' want: $*"; rc=1; fi; }
+  rco ok normal 0 0 http=200 curl_rc=0 body_state=complete parse=ok clamav=ok
+  rco not-ok normal -1 1 http=503 curl_rc=0 body_state=complete parse=ok clamav=fail
+  rco stalled-body stall200 0 1 http=200000 curl_rc=28 body_state=absent clamav=none
+  rco refused none 0 1 http=000000 curl_rc=7 body_state=absent clamav=none
+  unset -f cwr cwr_fake rco
   if python3 -I -B "$HERE/console-session-selftest.py" > "$d/cs-selftest.log" 2>&1; then
     log "selftest ok: console-session receive loop and transfer ($(grep -c '^ok ' "$d/cs-selftest.log") cases: prompt drain, settle kept, 60 KB identical, status kept)"
   else log "selftest FAILED: console-session receive loop/transfer: $(grep -E 'FAILED|Error' "$d/cs-selftest.log" | head -3 | tr '\n' ' ')"; rc=1; fi
@@ -1645,14 +1687,22 @@ eicar_verdict() { local out c u
   out="$(curl -sS -m 4 -x "$P" -w '\n%{http_code}' "$u" 2>/dev/null || printf '\n000')"
   c="$(tail -n1 <<<"$out")"
   if [[ "$c" == 403 ]] && grep -q 'Blocked by CLAMAV scan' <<<"$out"; then echo av; else echo "$c:$(head -c 60 <<<"$out" | tr -d '\n')"; fi; }
-ready_clamav_ok() { local code cv
+ready_clamav_ok() { local code cv crc=0 prc=0 bytes=0 bst
   # Fresh per call: a failed request must not leave an older body behind.
-  rm -f "$WORK/rec-ready.json"
-  code="$(curl -sS -m 2 -o "$WORK/rec-ready.json" -w '%{http_code}' "$P/ready" 2>/dev/null || echo 000)"
+  rm -f "$WORK/rec-ready.json" "$WORK/rec-ready.err" "$WORK/rec-ready.perr"
+  # Same decision as before: curl's own 2 s limit bounds the whole request, and
+  # any curl failure appends 000 so the code can never read as a bare 200.
+  code="$(curl -sS -m 2 -o "$WORK/rec-ready.json" -w '%{http_code}' "$P/ready" 2>"$WORK/rec-ready.err")" || { crc=$?; code="${code}000"; }
   printf '%s\n' "$code" > "$WORK/rec-ready.code"
   cv="$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); c=d.get("checks",d).get("clamav",{})
-print(c.get("status") if isinstance(c,dict) else c)' "$WORK/rec-ready.json" 2>/dev/null || true)"
+print(c.get("status") if isinstance(c,dict) else c)' "$WORK/rec-ready.json" 2>"$WORK/rec-ready.perr")" || { prc=$?; cv=""; }
+  # Provenance of THIS sample (transport and parse outcome), kept beside the body.
+  [[ -f "$WORK/rec-ready.json" ]] && bytes="$(wc -c < "$WORK/rec-ready.json")"
+  if (( bytes == 0 )); then bst=absent; elif [[ $crc == 0 ]]; then bst=complete; else bst=partial; fi
+  printf 'transport=curl -m 2\nhttp=%s\ncurl_rc=%s\ncurl_err=%s\nbody_state=%s\nbody_bytes=%s\nparse=%s\nclamav=%s\n' \
+    "$code" "$crc" "$(tr '\n' ' ' < "$WORK/rec-ready.err" 2>/dev/null | cut -c1-300)" "$bst" "$bytes" \
+    "$([[ $prc == 0 ]] && echo ok || echo "error rc=$prc: $(tail -n1 "$WORK/rec-ready.perr" 2>/dev/null | cut -c1-200)")" "${cv:-none}" > "$WORK/rec-ready.meta"
   [[ "$code" == 200 && "$cv" == ok ]]; }
 # rec_state_snapshot FILE — normalized persisted state the reboots must preserve.
 rec_state_snapshot() { local out="$1" c pol f img ag
@@ -3360,8 +3410,9 @@ m2_checkpoint() { local tag="$1" f="$EV/M2H-$1.txt" sum pid rc=0 st name detail 
   [[ $n -ge 6 ]] || check M2H "$tag-verdict" fail "the verdict evaluator produced $n checks: $(head -c 300 "$EV/M2H-$tag-verdict.err")"
   # Runner side of the ClamAV regression: the proxy reports the sidecar ready.
   local rok=0; ready_clamav_ok || rok=$?
-  # This checkpoint's OWN /ready sample (HTTP code + body), kept as evidence.
-  { printf 'http=%s\n' "$(cat "$WORK/rec-ready.code" 2>/dev/null || echo none)"; cat "$WORK/rec-ready.json" 2>/dev/null || echo '(no body)'; } > "$EV/M2H-$tag-ready.txt"
+  # This checkpoint's OWN /ready sample: its transport outcome (HTTP code, curl
+  # exit and error, body state), its parse outcome, then the body it received.
+  { cat "$WORK/rec-ready.meta" 2>/dev/null || echo 'meta=none'; echo '---body'; cat "$WORK/rec-ready.json" 2>/dev/null || echo '(no body)'; } > "$EV/M2H-$tag-ready.txt"
   if [[ $rok == 0 ]]; then check M2H "$tag-clamav-ready" pass "/ready clamav ok"
   else check M2H "$tag-clamav-ready" fail "/ready clamav not ok (M2H-$tag-ready.txt)"; fi
 }
@@ -3870,28 +3921,112 @@ vstray() { sed -n '/^---vcs1$/,/^---vcs12$/p' "$1" | grep -E '^\[ *[0-9]+\.[0-9]
 # Timing contract: ONE deadline of SECONDS on the host's CLOCK_MONOTONIC,
 # counted from the start of this wait (in V5: after vwait_ready, its 10 s
 # settle and the serial checks; it is NOT Q7 and measures nothing about Q7).
-# Each request's timeout is min(2 s, time remaining); a response that completes
-# after the deadline does not count; between attempts it sleeps min(5 s, time
-# remaining). It stops early if the guest's QEMU process is gone.
-# Evidence: $EV/STEP-clamav-ready.jsonl, one record per attempt (start/end
-# offsets, timeout, HTTP code or error, the FRESH body or null, the parse
-# outcome, the clamav status, ready, after_deadline). Result: the check
+# Each attempt has ONE request deadline, min(2 s, time remaining), that bounds
+# the WHOLE request: connect, send, status line, headers and body. Every
+# blocking socket call waits at most the time left before it, and the socket
+# is closed when it runs out, so a stalled or trickling answer cannot hold the
+# wait past its bound (a per-call timeout alone resets on every byte). A
+# response that completes after the wait's deadline does not count; between
+# attempts it sleeps min(5 s, time remaining); it stops early if the guest's
+# QEMU process is gone.
+# Evidence: $EV/STEP-clamav-ready.jsonl, one record for EVERY started attempt,
+# written whatever happens in it: start/end offsets, request timeout, the
+# phase reached, the HTTP status as soon as the status line arrived (before
+# any body byte), the error or timeout, the body state (complete, partial or
+# absent) with its byte count and the bytes received, the parse outcome, the
+# clamav status, ready, after_deadline. Result: the check
 # STEP/clamav-ready-before-final (pass with seconds and attempts; fail latches
 # the campaign stop). Why it exists: the proxy's ClamAV row can lag the daemon
 # (Scanner.ClamAVStatus() caches computed results for 30 s and reports a
 # quarantine after an engine fault); campaign 6 sampled it once ~36 s after
-# the V5 power-on and got "not ok" while clamd answered EICAR.
+# the V5 power-on and got "not ok" while clamd answered EICAR. The final M2
+# checkpoint still takes its OWN sample through ready_clamav_ok (curl), which
+# this wait does not replace.
 vwait_clamav_ready() { local st="$1" lim="$2" out rc=0 verdict n el
   out="$(python3 -I - "$P/ready" "$lim" "$WORK/qemu.pid" "$EV/$st-clamav-ready.jsonl" <<'PY'
-import json, os, sys, time, urllib.error, urllib.request
+import json, os, socket, sys, time, urllib.parse
 url, lim, pidf, log = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4]
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+u = urllib.parse.urlsplit(url); host, port = u.hostname, u.port or 80
+req = ("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: lab-clamav-ready\r\nAccept: application/json\r\n"
+       "Connection: close\r\n\r\n" % (u.path or "/", u.netloc)).encode()
+CAP = 1 << 20
 t0 = time.monotonic(); deadline = t0 + lim; n = 0
 def alive():
     try:
         os.kill(int(open(pidf).read().strip()), 0); return True
     except Exception:
         return False
+def dechunk(b):
+    out, i = b"", 0
+    while True:
+        j = b.find(b"\r\n", i)
+        if j < 0: return None
+        try: size = int(b[i:j].split(b";")[0].strip(), 16)
+        except ValueError: return None
+        if size == 0: return out
+        if len(b) < j + 2 + size + 2: return None
+        out += b[j + 2:j + 2 + size]; i = j + 2 + size + 2
+def probe(rd, rec):
+    # One request bounded by the monotonic request deadline rd. Fills rec as it
+    # goes so a failure at any phase still leaves what was received.
+    sock, buf, hend, clen, chunked, eof = None, b"", None, None, False, False
+    def left(phase):
+        rec["phase"] = phase; r = rd - time.monotonic()
+        if r <= 0: raise TimeoutError("request deadline reached in %s" % phase)
+        return r
+    try:
+        sock = socket.create_connection((host, port), timeout=left("connect"))
+        sock.settimeout(left("send")); sock.sendall(req)
+        while True:
+            sock.settimeout(left("headers" if hend is None else "body"))
+            chunk = sock.recv(65536)
+            if not chunk:
+                eof = True; break
+            buf += chunk
+            if len(buf) > CAP: raise ValueError("response larger than %d bytes" % CAP)
+            if rec["http"] is None and b"\r\n" in buf:
+                line = buf.split(b"\r\n", 1)[0].decode("latin-1")
+                parts = line.split(" ", 2)
+                rec["status_line"] = line[:200]
+                rec["http"] = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+            if hend is None and b"\r\n\r\n" in buf:
+                hend = buf.index(b"\r\n\r\n") + 4
+                for h in buf[:hend].decode("latin-1").split("\r\n")[1:]:
+                    k, _, v = h.partition(":"); k = k.strip().lower(); v = v.strip()
+                    if k == "content-length" and v.isdigit(): clen = int(v)
+                    if k == "transfer-encoding" and "chunked" in v.lower(): chunked = True
+                rec["content_length"] = clen; rec["chunked"] = chunked
+            if hend is not None:
+                got = buf[hend:]
+                if chunked and dechunk(got) is not None: break
+                if not chunked and clen is not None and len(got) >= clen: break
+        rec["phase"] = "done"
+    except Exception as e:
+        rec["error"] = repr(e)[:300]
+    finally:
+        if sock is not None:
+            try: sock.close()
+            except Exception: pass
+    raw = buf[hend:] if hend is not None else b""
+    body, state = raw, "absent"
+    if hend is not None and rec["error"] is None:
+        if chunked:
+            body = dechunk(raw); state = "complete" if body is not None else "partial"
+            if body is None: body = raw
+        elif clen is not None:
+            state = "complete" if len(raw) >= clen else ("partial" if raw else "absent")
+            body = raw[:clen] if len(raw) >= clen else raw
+        else:
+            state = "complete" if eof else ("partial" if raw else "absent")
+    elif raw:
+        state = "partial"
+    if hend is None and rec["error"] is None and buf:
+        rec["error"] = "connection closed before the headers ended"
+    if not buf and rec["error"] is None:
+        rec["error"] = "connection closed with no response"
+    rec["body_state"] = state; rec["body_bytes"] = len(body)
+    rec["body"] = body.decode("utf-8", "replace") if (hend is not None and body) else None
+    return body if state == "complete" else None
 with open(log, "w") as f:
     while True:
         rem = deadline - time.monotonic()
@@ -3900,30 +4035,30 @@ with open(log, "w") as f:
         if not alive():
             print("fail guest-gone %d %.1f" % (n, time.monotonic() - t0)); break
         n += 1; tmo = min(2.0, rem); s = time.monotonic()
-        rec = {"attempt": n, "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "start_s": round(s - t0, 3), "timeout_s": round(tmo, 3)}
-        code = body = err = None
+        rec = {"attempt": n, "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "start_s": round(s - t0, 3),
+               "timeout_s": round(tmo, 3), "phase": "start", "http": None, "status_line": None, "error": None,
+               "content_length": None, "chunked": False, "body_state": "absent", "body_bytes": 0, "body": None,
+               "parse": "not-attempted", "clamav": None, "ready": False, "after_deadline": False}
+        ok = False
         try:
-            with opener.open(url, timeout=tmo) as r:
-                code, body = r.status, r.read(65536)
-        except urllib.error.HTTPError as e:
-            code, body = e.code, e.read(65536)
+            body = probe(s + tmo, rec)
+            if body is None:
+                rec["parse"] = "no-complete-body"
+            else:
+                try:
+                    d = json.loads(body); c = d.get("checks", d).get("clamav", {})
+                    rec["clamav"] = c.get("status") if isinstance(c, dict) else c; rec["parse"] = "ok"
+                except Exception as e:
+                    rec["parse"] = "error: " + repr(e)[:120]
+            ok = rec["http"] == 200 and rec["parse"] == "ok" and rec["clamav"] == "ok"
         except Exception as e:
-            err = repr(e)[:300]
-        end = time.monotonic()
-        cv = None
-        if body is None:
-            parse = "no-response"
-        else:
-            try:
-                d = json.loads(body); c = d.get("checks", d).get("clamav", {})
-                cv = c.get("status") if isinstance(c, dict) else c; parse = "ok"
-            except Exception as e:
-                parse = "error: " + repr(e)[:120]
-        ok = code == 200 and cv == "ok"; late = end > deadline
-        rec.update(end_s=round(end - t0, 3), http=code, error=err, parse=parse, clamav=cv, ready=ok, after_deadline=late,
-                   body=body.decode("utf-8", "replace") if body is not None else None)
-        f.write(json.dumps(rec, sort_keys=True) + "\n"); f.flush()
-        if ok and not late:
+            rec["error"] = (rec["error"] or "") + " | waiter: " + repr(e)[:200]
+        finally:
+            end = time.monotonic()
+            rec["end_s"] = round(end - t0, 3); rec["after_deadline"] = end > deadline
+            rec["ready"] = bool(ok and not rec["after_deadline"])
+            f.write(json.dumps(rec, sort_keys=True) + "\n"); f.flush()
+        if rec["ready"]:
             print("pass ok %d %.1f" % (n, end - t0)); break
         rem = deadline - time.monotonic()
         if rem > 0:
