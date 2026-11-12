@@ -217,6 +217,10 @@ type PolicyRule struct {
 	// the authority whenever srcPrefix is invalid. Same fallback discipline as
 	// normFQDN/srcIPNet — a rule that bypassed the mutators simply takes the
 	// slower path, so correctness never depends on this being populated.
+	//
+	// A bare-IP SourceIP also gets one (the /32 or /128 of that address, see
+	// sourceLiteralPrefix) with srcIPNet left nil, so the literal form matches
+	// on the address rather than on its spelling.
 	srcPrefix netip.Prefix
 
 	// matchedConds is the buildMatchedConditions summary, precomputed by
@@ -1434,6 +1438,10 @@ func (ps *PolicyStore) sortLocked() {
 					r.srcPrefix = p
 				}
 			}
+		} else if p, ok := sourceLiteralPrefix(r.SourceIP); ok {
+			// A single-IP SourceIP decides on the ADDRESS, like the CIDR form
+			// above, not on how the operator spelled it.
+			r.srcPrefix = p
 		}
 		r.matchedConds = buildMatchedConditions(r)
 		// Stage-1 (auth-rule) subject CIDRs, same contract: parse once here so
@@ -2405,7 +2413,41 @@ func matchIPOrCIDR(cidrOrIP, clientIP string) bool {
 		ip := net.ParseIP(clientIP)
 		return ip != nil && ipNet.Contains(ip)
 	}
-	return cidrOrIP == clientIP
+	if cidrOrIP == clientIP {
+		return true
+	}
+	// Same address, different spelling (see sourceLiteralPrefix). This is the
+	// path for a rule that never reached sortLocked; published rules carry the
+	// prefix already and do not come here.
+	p, ok := sourceLiteralPrefix(cidrOrIP)
+	if !ok {
+		return false
+	}
+	addr, err := netip.ParseAddr(clientIP)
+	return err == nil && addr.Zone() == "" && p.Contains(addr.Unmap())
+}
+
+// sourceLiteralPrefix returns the single-address prefix for a bare-IP SourceIP
+// ("10.0.0.5" → 10.0.0.5/32, "2001:DB8::10" → 2001:db8::10/128).
+//
+// The literal form used to be compared as a STRING against the peer address,
+// so a valid address the operator wrote in any spelling other than the one Go
+// prints (upper case, expanded zeros, 4-in-6) never matched, while the same
+// text with "/128" appended did. Nothing validates SourceIP on write, so such a
+// rule was accepted and silently inert — fail-open for a Drop rule.
+//
+// The address is Unmapped, the pairing prefixFromIPNet and clientSource apply
+// to the CIDR form. A ZONED literal and anything unparseable report false and
+// keep the exact-string comparison they always had, so no rule that matched
+// before stops matching: a parseable literal equal to the client string parses
+// to the same address.
+func sourceLiteralPrefix(sourceIP string) (netip.Prefix, bool) {
+	addr, err := netip.ParseAddr(sourceIP)
+	if err != nil || addr.Zone() != "" {
+		return netip.Prefix{}, false
+	}
+	addr = addr.Unmap()
+	return netip.PrefixFrom(addr, addr.BitLen()), true
 }
 
 // matchIPOrCIDRAddr is matchIPOrCIDR with the client IP pre-parsed. clientAddr

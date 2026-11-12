@@ -1291,6 +1291,15 @@ func (p *OIDCFlowProvider) enrichFromUserinfo(id *Identity, accessToken string) 
 		return err
 	}
 
+	// OIDC Core §5.3.2: the userinfo `sub` MUST exactly match the ID token's,
+	// and a response that does not match MUST NOT be used. The ID token is the
+	// only signed statement about who logged in; without this comparison a
+	// userinfo answer about another subject donates its groups — which policy
+	// matches on — to this session. The values are not echoed into the error.
+	if uiSub, _ := claims["sub"].(string); uiSub == "" || uiSub != id.Sub {
+		return errors.New("userinfo sub does not match id_token sub; response discarded")
+	}
+
 	if id.Email == "" {
 		id.Email, _ = claims["email"].(string)
 	}
