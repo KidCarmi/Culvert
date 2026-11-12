@@ -34,6 +34,18 @@ var (
 	statClusterStoreSaves    atomic.Int64
 )
 
+// statClusterStateNilEntriesDropped counts unusable NULL records dropped while
+// normalising a decoded ClusterState (CHAOS-117), at BOTH ingestion boundaries:
+// ClusterStore.Load (a damaged cluster.json on this node) and ImportFullState
+// (a damaged document replicated from the HA leader). Pre-fix each such record
+// was a nil pointer dereference in the detached heartbeat ticker, which is
+// process-fatal and recurs after every restart because the poison is on disk.
+// A non-zero, non-decreasing value here means enrolled nodes or enrollment
+// tokens silently vanished from this node's roster and must be re-created;
+// unlabelled, per the CL-9 contract (node IDs and token hashes stay in the log
+// line, never in a metric).
+var statClusterStateNilEntriesDropped atomic.Int64
+
 // HA failover counter (CL-9 PR3). Incremented only on a successful standby→
 // leader promotion (HAState.promote); the initial EnableAsLeader and failed
 // promotions are not counted.
@@ -93,6 +105,10 @@ func clusterWritePrometheus(w *strings.Builder) {
 	w.WriteString("\n# HELP culvert_heartbeat_disconnects_total Node connected→disconnected transitions detected by the heartbeat monitor\n")
 	w.WriteString("# TYPE culvert_heartbeat_disconnects_total counter\n")
 	fmt.Fprintf(w, "culvert_heartbeat_disconnects_total %d\n", statHeartbeatDisconnects.Load())
+
+	w.WriteString("\n# HELP culvert_cluster_state_nil_entries_dropped_total Unusable null node/token records dropped while loading or importing cluster state\n")
+	w.WriteString("# TYPE culvert_cluster_state_nil_entries_dropped_total counter\n")
+	fmt.Fprintf(w, "culvert_cluster_state_nil_entries_dropped_total %d\n", statClusterStateNilEntriesDropped.Load())
 
 	w.WriteString("\n# HELP culvert_cluster_store_saves_total Successful ClusterStore persistence operations\n")
 	w.WriteString("# TYPE culvert_cluster_store_saves_total counter\n")
