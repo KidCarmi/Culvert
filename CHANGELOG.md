@@ -227,6 +227,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The OIDC browser login merged a userinfo response into the session without
+  checking whose it was.** `enrichFromUserinfo` filled the session's email, name
+  and groups from the userinfo endpoint and never compared its `sub` with the ID
+  token's, which OIDC Core §5.3.2 requires. A userinfo answer about a different
+  subject therefore donated its groups, which group-scoped policy matches on, to
+  the session being minted. A response whose `sub` is missing or different is now
+  discarded and the login proceeds on the signed ID token's claims alone.
+  Behaviour change: an IdP whose userinfo response carries no `sub` no longer
+  contributes groups; put the groups claim in the ID token instead.
+
 - **The CHAOS-116 status probe could publish the PREVIOUS ClamAV daemon's
   observation as the current one, so `/ready` reported a healthy scanner on a
   node whose scans were failing open (2026-11-11 security regression review,
