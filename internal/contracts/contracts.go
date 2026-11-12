@@ -257,23 +257,25 @@ func Assess(base, head *Registry, tree fs.FS, changed []string) Impact {
 	for i := range head.Contracts {
 		headByID[head.Contracts[i].ID] = &head.Contracts[i]
 	}
-	recorded := map[string]bool{}
-	for _, rec := range append(append([]Record{}, head.Amended...), head.Retired...) {
-		recorded[rec.ID] = true
-	}
-	baseRecorded := map[string]bool{}
+	// Records already in the base were written for earlier, already-approved
+	// changes. Only one this change ADDS (a new id+reason pair) explains it, so
+	// kept history neither excuses a new weakening nor blocks a later one.
+	inBase := map[Record]bool{}
 	for _, rec := range append(append([]Record{}, base.Amended...), base.Retired...) {
-		baseRecorded[rec.ID] = true
+		inBase[rec] = true
+	}
+	newRecord := map[string]bool{}
+	for _, rec := range append(append([]Record{}, head.Amended...), head.Retired...) {
+		if !inBase[rec] {
+			newRecord[rec.ID] = true
+		}
 	}
 	for i := range base.Contracts {
 		b := &base.Contracts[i]
 		why := weakening(b, headByID[b.ID], tree)
-		// Only a record ADDED by this change explains it. One left over from an
-		// earlier, already-approved change must not excuse a new weakening.
-		newRecord := recorded[b.ID] && !baseRecorded[b.ID]
 		switch {
 		case len(why) == 0:
-		case newRecord:
+		case newRecord[b.ID]:
 			im.NeedsApproval = append(im.NeedsApproval, b.ID+": "+strings.Join(why, "; "))
 		default:
 			for _, w := range why {
@@ -332,6 +334,17 @@ func weakening(b, h *Contract, tree fs.FS) []string {
 	}
 	if len(covered(b.Code, h.Code)) > 0 {
 		why = append(why, "code paths dropped: "+strings.Join(covered(b.Code, h.Code), ", "))
+	}
+	// Dropping a test from the list is a weakening even while the function
+	// still exists: once unlisted, a later change could delete it unseen.
+	listed := map[TestRef]bool{}
+	for _, t := range h.Tests {
+		listed[t] = true
+	}
+	for _, t := range b.Tests {
+		if !listed[t] {
+			why = append(why, fmt.Sprintf("test %s (%s) dropped from the contract", t.Name, t.File))
+		}
 	}
 	// The BASE test list is the reference: every test that protected the
 	// contract before must still exist and run, whatever head's list says.

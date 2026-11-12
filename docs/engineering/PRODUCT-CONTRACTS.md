@@ -57,7 +57,7 @@ an enforced entry with no test.
 | Finding | Meaning | Result |
 |---|---|---|
 | Touched | The change edits a contract's code paths; its tests are intact | Pass. Listed in the job summary for the reviewer |
-| Weakened | A base contract was removed, downgraded, reworded, lost a code path, or a base-registered test is gone or skippable, with no new record | **Fail** |
+| Weakened | A base contract was removed, downgraded, reworded, lost a code path, or a base-registered test is gone, skippable or dropped from the contract's list, with no new record | **Fail** |
 | Needs approval | The same, but with a new `amended` / `retired` record; or an edit to a protected path | **Fail until** a listed approver who is not the author approves the current commit |
 
 The base registry is the reference. Deleting a test and removing it from the registry
