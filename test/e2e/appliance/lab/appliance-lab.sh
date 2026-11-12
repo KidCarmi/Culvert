@@ -371,6 +371,16 @@ class H(http.server.BaseHTTPRequestHandler):
         n[0] += 1; ok = k >= 0 and n[0] > k; time.sleep(dly)
         b = json.dumps({"status": "ok" if ok else "fail", "checks": {"clamav": {"status": "ok" if ok else "fail"}}}).encode()
         code = {"stall503": 503, "stall200": 200, "trickle": 200}.get(mode, 200 if ok else 503)
+        if mode.startswith("chunk"):
+            pre = b"zz" if mode == "chunkbadsize" else b"%x" % len(b)
+            tail = {"chunkok": b"\r\n0\r\n\r\n", "chunktrail": b"\r\n0\r\nX-Lab: 1\r\n\r\n", "chunknoterm": b"\r\n0\r\n",
+                    "chunkbaddelim": b"XX0\r\n\r\n", "chunkbadsize": b"\r\n0\r\n\r\n"}[mode]
+            self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Transfer-Encoding", "chunked"); self.end_headers(); self.wfile.flush()
+            self.wfile.write(pre + b"\r\n" + b + tail); self.wfile.flush()
+            if mode == "chunknoterm": time.sleep(0.8)
+            return
+        if mode == "clshort":
+            self.send_response(code); self.send_header("Content-Length", str(len(b) + 10)); self.end_headers(); self.wfile.write(b); return
         self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.flush()
         if mode.startswith("stall"):
             time.sleep(60); return
@@ -394,7 +404,7 @@ http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()' "$@" > 
             python3 -I -c 'import json,sys
 r=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1])
 recs=[json.loads(l) for l in open(sys.argv[2])]; lim=float(sys.argv[3])
-need={"attempt","utc","start_s","end_s","timeout_s","phase","http","status_line","error","content_length","chunked","body_state","body_bytes","body","parse","clamav","ready","after_deadline"}
+need={"attempt","utc","start_s","end_s","timeout_s","phase","http","status_line","error","content_length","chunked","framing","raw_bytes","body_state","body_bytes","body","parse","clamav","ready","after_deadline"}
 last=recs[-1] if recs else {}
 print(r["result"], r["check"], len(recs), "fields-ok" if recs and all(need <= set(x) for x in recs) else "fields-MISSING",
       "http=%s" % last.get("http"), "body=%s" % last.get("body_state"), "parse=%s" % last.get("parse"),
@@ -416,6 +426,52 @@ print(r["result"], r["check"], len(recs), "fields-ok" if recs and all(need <= se
   # record per attempt, with the status that DID arrive.
   cwr stall-503 stall503 0 0 1 fail '* 1 fields-ok http=503 body=absent parse=no-complete-body bound=bounded'
   cwr stall-200 stall200 0 0 1 fail '* 1 fields-ok http=200 body=absent parse=no-complete-body bound=bounded'
+  # ASTRA's framing controls: only a correctly framed and TERMINATED body may
+  # pass; incomplete or malformed framing fails closed with what arrived kept.
+  cwr chunk-valid chunkok 0 0 3 pass '* 1 fields-ok http=200 body=complete parse=ok bound=bounded'
+  cwr chunk-trailer chunktrail 0 0 3 pass '* 1 fields-ok http=200 body=complete parse=ok bound=bounded'
+  cwr chunk-no-final-crlf chunknoterm 0 0 0.25 fail '* 1 fields-ok http=200 body=partial parse=no-complete-body bound=bounded'
+  cwr chunk-no-final-crlf-eof chunknoterm 0 0 2 fail '* 1 fields-ok http=200 body=partial parse=no-complete-body bound=bounded'
+  cwr chunk-bad-delimiter chunkbaddelim 0 0 1 fail '* 1 fields-ok http=200 body=invalid parse=no-complete-body bound=bounded'
+  cwr chunk-bad-size chunkbadsize 0 0 1 fail '* 1 fields-ok http=200 body=invalid parse=no-complete-body bound=bounded'
+  cwr content-length-short clshort 0 0 2 fail '* 1 fields-ok http=200 body=partial parse=no-complete-body bound=bounded'
+  # The framing functions themselves, from this file, on exact byte strings
+  # (no sockets, so no dependence on how TCP splits the writes).
+  if python3 -I -B - "$HERE/appliance-lab.sh" > "$d/frame.log" 2>&1 <<'FRAMEPY'
+import re, sys
+src = open(sys.argv[1]).read()
+a = re.search(r"^# --- framing \(RFC 9112\)", src, re.M).start(); b = src.index("\n# --- end framing ---", a)
+ns = {"re": re}; exec(src[a:b], ns); fc, fr = ns["frame_chunked"], ns["frame"]
+B = b'{"checks":{"clamav":{"status":"ok"}}}'; H = b"%x" % len(B)
+cases = [
+  ("astra-valid", fc(H + b"\r\n" + B + b"\r\n0\r\n\r\n"), "complete", B),
+  ("astra-no-final-crlf", fc(H + b"\r\n" + B + b"\r\n0\r\n"), "incomplete", None),
+  ("astra-bad-delimiter", fc(H + b"\r\n" + B + b"XX0\r\n\r\n"), "invalid", None),
+  ("two-chunks-ext-trailer", fc(b"5;x=1\r\n" + B[:5] + b"\r\n" + b"%x" % (len(B) - 5) + b"\r\n" + B[5:] + b"\r\n0\r\nX-A: 1\r\n\r\n"), "complete", B),
+  ("upper-hex", fc(b"%X" % len(B) + b"\r\n" + B + b"\r\n0\r\n\r\n"), "complete", B),
+  ("size-0x-prefix", fc(b"0x" + H + b"\r\n" + B + b"\r\n0\r\n\r\n"), "invalid", None),
+  ("size-plus-sign", fc(b"+" + H + b"\r\n" + B + b"\r\n0\r\n\r\n"), "invalid", None),
+  ("size-not-hex", fc(b"zz\r\n" + B + b"\r\n0\r\n\r\n"), "invalid", None),
+  ("data-short", fc(H + b"\r\n" + B[:10]), "incomplete", None),
+  ("delimiter-half", fc(H + b"\r\n" + B + b"\r"), "incomplete", None),
+  ("delimiter-wrong", fc(H + b"\r\n" + B + b"\rX"), "invalid", None),
+  ("bytes-after-end", fc(H + b"\r\n" + B + b"\r\n0\r\n\r\nX"), "invalid", None),
+  ("trailer-no-colon", fc(H + b"\r\n" + B + b"\r\n0\r\nbad\r\n\r\n"), "invalid", None),
+  ("no-last-chunk", fc(H + b"\r\n" + B + b"\r\n"), "incomplete", None),
+  ("cl-exact", fr(B, False, len(B), False), "complete", B),
+  ("cl-short", fr(B[:-1], False, len(B), True), "incomplete", None),
+  ("cl-excess", fr(B + b"X", False, len(B), False), "invalid", None),
+  ("close-delimited-eof", fr(B, False, None, True), "complete", B),
+  ("close-delimited-open", fr(B, False, None, False), "incomplete", None),
+]
+bad = 0
+for name, (st, data, why), want, wdata in cases:
+    ok = st == want and (wdata is None or data == wdata) and (st == "complete") == (why is None)
+    bad += not ok; print("%s frame %s: %s (%s)" % ("ok" if ok else "FAILED", name, st, why))
+print("frame cases: %d, failed: %d" % (len(cases), bad)); sys.exit(1 if bad else 0)
+FRAMEPY
+  then log "selftest ok: /ready framing ($(grep -c '^ok frame' "$d/frame.log") byte-exact cases: ASTRA's valid / no-final-CRLF / bad-delimiter, chunk-size forms, delimiters, trailers, Content-Length)"
+  else log "selftest FAILED: /ready framing: $(grep -E 'FAILED|Error' "$d/frame.log" | head -3 | tr '\n' ' ')"; rc=1; fi
   # rco NAME MODE K WANT_RC EXPECT... — ready_clamav_ok (the final M2 sample's
   # own transport, curl -m 2) keeps its decision and records its provenance.
   rco() { local name="$1" mode="$2" k="$3" wrc="$4" port pid r=0 meta; shift 4
@@ -428,10 +484,10 @@ print(r["result"], r["check"], len(recs), "fields-ok" if recs and all(need <= se
     for e in "$@"; do [[ " $meta" == *" $e "* ]] || okm=0; done
     if [[ $r == "$wrc" && $okm == 1 ]]; then log "selftest ok: ready_clamav_ok $name -> rc=$r ${meta:0:160}"
     else log "selftest FAILED: ready_clamav_ok $name -> rc=$r (want $wrc) meta='${meta:0:300}' want: $*"; rc=1; fi; }
-  rco ok normal 0 0 http=200 curl_rc=0 body_state=complete parse=ok clamav=ok
-  rco not-ok normal -1 1 http=503 curl_rc=0 body_state=complete parse=ok clamav=fail
-  rco stalled-body stall200 0 1 http=200000 curl_rc=28 body_state=absent clamav=none
-  rco refused none 0 1 http=000000 curl_rc=7 body_state=absent clamav=none
+  rco ok normal 0 0 http=200 decision_code=200 curl_rc=0 body_state=complete parse=ok clamav=ok
+  rco not-ok normal -1 1 http=503 decision_code=503 curl_rc=0 body_state=complete parse=ok clamav=fail
+  rco stalled-body stall200 0 1 http=200 decision_code=200000 curl_rc=28 body_state=absent clamav=none
+  rco refused none 0 1 http=000 decision_code=000000 curl_rc=7 body_state=absent clamav=none
   unset -f cwr cwr_fake rco
   if python3 -I -B "$HERE/console-session-selftest.py" > "$d/cs-selftest.log" 2>&1; then
     log "selftest ok: console-session receive loop and transfer ($(grep -c '^ok ' "$d/cs-selftest.log") cases: prompt drain, settle kept, 60 KB identical, status kept)"
@@ -1687,21 +1743,24 @@ eicar_verdict() { local out c u
   out="$(curl -sS -m 4 -x "$P" -w '\n%{http_code}' "$u" 2>/dev/null || printf '\n000')"
   c="$(tail -n1 <<<"$out")"
   if [[ "$c" == 403 ]] && grep -q 'Blocked by CLAMAV scan' <<<"$out"; then echo av; else echo "$c:$(head -c 60 <<<"$out" | tr -d '\n')"; fi; }
-ready_clamav_ok() { local code cv crc=0 prc=0 bytes=0 bst
+ready_clamav_ok() { local code cv crc=0 prc=0 bytes=0 bst hraw
   # Fresh per call: a failed request must not leave an older body behind.
   rm -f "$WORK/rec-ready.json" "$WORK/rec-ready.err" "$WORK/rec-ready.perr"
   # Same decision as before: curl's own 2 s limit bounds the whole request, and
   # any curl failure appends 000 so the code can never read as a bare 200.
   code="$(curl -sS -m 2 -o "$WORK/rec-ready.json" -w '%{http_code}' "$P/ready" 2>"$WORK/rec-ready.err")" || { crc=$?; code="${code}000"; }
   printf '%s\n' "$code" > "$WORK/rec-ready.code"
+  # The literal HTTP code curl saw, kept apart from the decision code (which
+  # carries 000 appended on any curl failure).
+  hraw="$code"; [[ $crc == 0 ]] || hraw="${code%000}"
   cv="$(python3 -c 'import json,sys
 d=json.load(open(sys.argv[1])); c=d.get("checks",d).get("clamav",{})
 print(c.get("status") if isinstance(c,dict) else c)' "$WORK/rec-ready.json" 2>"$WORK/rec-ready.perr")" || { prc=$?; cv=""; }
   # Provenance of THIS sample (transport and parse outcome), kept beside the body.
   [[ -f "$WORK/rec-ready.json" ]] && bytes="$(wc -c < "$WORK/rec-ready.json")"
   if (( bytes == 0 )); then bst=absent; elif [[ $crc == 0 ]]; then bst=complete; else bst=partial; fi
-  printf 'transport=curl -m 2\nhttp=%s\ncurl_rc=%s\ncurl_err=%s\nbody_state=%s\nbody_bytes=%s\nparse=%s\nclamav=%s\n' \
-    "$code" "$crc" "$(tr '\n' ' ' < "$WORK/rec-ready.err" 2>/dev/null | cut -c1-300)" "$bst" "$bytes" \
+  printf 'transport=curl -m 2\nhttp=%s\ndecision_code=%s\ncurl_rc=%s\ncurl_err=%s\nbody_state=%s\nbody_bytes=%s\nparse=%s\nclamav=%s\n' \
+    "$hraw" "$code" "$crc" "$(tr '\n' ' ' < "$WORK/rec-ready.err" 2>/dev/null | cut -c1-300)" "$bst" "$bytes" \
     "$([[ $prc == 0 ]] && echo ok || echo "error rc=$prc: $(tail -n1 "$WORK/rec-ready.perr" 2>/dev/null | cut -c1-200)")" "${cv:-none}" > "$WORK/rec-ready.meta"
   [[ "$code" == 200 && "$cv" == ok ]]; }
 # rec_state_snapshot FILE — normalized persisted state the reboots must preserve.
@@ -3944,7 +4003,7 @@ vstray() { sed -n '/^---vcs1$/,/^---vcs12$/p' "$1" | grep -E '^\[ *[0-9]+\.[0-9]
 # this wait does not replace.
 vwait_clamav_ready() { local st="$1" lim="$2" out rc=0 verdict n el
   out="$(python3 -I - "$P/ready" "$lim" "$WORK/qemu.pid" "$EV/$st-clamav-ready.jsonl" <<'PY'
-import json, os, socket, sys, time, urllib.parse
+import json, os, re, socket, sys, time, urllib.parse
 url, lim, pidf, log = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4]
 u = urllib.parse.urlsplit(url); host, port = u.hostname, u.port or 80
 req = ("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: lab-clamav-ready\r\nAccept: application/json\r\n"
@@ -3956,20 +4015,51 @@ def alive():
         os.kill(int(open(pidf).read().strip()), 0); return True
     except Exception:
         return False
-def dechunk(b):
+# --- framing (RFC 9112): pure functions; the harness self-test unit-tests them from this file ---
+HEXSIZE = re.compile(rb"[0-9A-Fa-f]{1,16}")
+def frame_chunked(b):
+    # chunk = size [;ext] CRLF data CRLF ... last-chunk = 0 [;ext] CRLF, trailer
+    # fields, then the empty line that ends the message. Returns (state, data,
+    # why): complete only when every delimiter is CRLF and the final empty line
+    # has arrived; incomplete while more bytes are needed; invalid on any
+    # framing error (fail closed).
     out, i = b"", 0
     while True:
         j = b.find(b"\r\n", i)
-        if j < 0: return None
-        try: size = int(b[i:j].split(b";")[0].strip(), 16)
-        except ValueError: return None
-        if size == 0: return out
-        if len(b) < j + 2 + size + 2: return None
-        out += b[j + 2:j + 2 + size]; i = j + 2 + size + 2
+        if j < 0:
+            if len(b) - i > 4096: return "invalid", out, "chunk-size line longer than 4096 bytes"
+            return "incomplete", out, "chunk-size line not ended"
+        tok = b[i:j].split(b";", 1)[0].strip(b" \t")
+        if not HEXSIZE.fullmatch(tok): return "invalid", out, "bad chunk-size line %r" % b[i:j][:40]
+        size, i = int(tok, 16), j + 2
+        if size == 0:
+            while True:
+                k = b.find(b"\r\n", i)
+                if k < 0: return "incomplete", out, "last chunk seen, trailer section not ended by an empty line"
+                if k == i:
+                    if k + 2 == len(b): return "complete", out, None
+                    return "invalid", out, "%d bytes after the end of the chunked message" % (len(b) - k - 2)
+                if b":" not in b[i:k]: return "invalid", out, "bad trailer line %r" % b[i:k][:40]
+                i = k + 2
+        end = i + size
+        if len(b) < end: return "incomplete", out + b[i:], "chunk data %d of %d bytes" % (len(b) - i, size)
+        delim = b[end:end + 2]
+        if delim != b"\r\n"[:len(delim)]: return "invalid", out + b[i:end], "chunk data not followed by CRLF (%r)" % delim
+        if len(delim) < 2: return "incomplete", out + b[i:end], "chunk delimiter not complete"
+        out += b[i:end]; i = end + 2
+def frame(raw, chunked, clen, eof):
+    if chunked: return frame_chunked(raw)
+    if clen is not None:
+        if len(raw) > clen: return "invalid", raw, "%d bytes beyond Content-Length %d" % (len(raw) - clen, clen)
+        if len(raw) == clen: return "complete", raw, None
+        return "incomplete", raw, "%d of %d Content-Length bytes" % (len(raw), clen)
+    if eof: return "complete", raw, None
+    return "incomplete", raw, "no Content-Length and the connection did not close"
+# --- end framing ---
 def probe(rd, rec):
     # One request bounded by the monotonic request deadline rd. Fills rec as it
     # goes so a failure at any phase still leaves what was received.
-    sock, buf, hend, clen, chunked, eof = None, b"", None, None, False, False
+    sock, buf, hend, clen, chunked, eof, bad = None, b"", None, None, False, False, None
     def left(phase):
         rec["phase"] = phase; r = rd - time.monotonic()
         if r <= 0: raise TimeoutError("request deadline reached in %s" % phase)
@@ -3991,15 +4081,24 @@ def probe(rd, rec):
                 rec["http"] = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
             if hend is None and b"\r\n\r\n" in buf:
                 hend = buf.index(b"\r\n\r\n") + 4
+                cls, tes = set(), []
                 for h in buf[:hend].decode("latin-1").split("\r\n")[1:]:
                     k, _, v = h.partition(":"); k = k.strip().lower(); v = v.strip()
-                    if k == "content-length" and v.isdigit(): clen = int(v)
-                    if k == "transfer-encoding" and "chunked" in v.lower(): chunked = True
+                    if k == "content-length": cls.add(v)
+                    if k == "transfer-encoding": tes.append(v.lower())
+                chunked = bool(tes)
+                if tes and [t.strip() for t in ",".join(tes).split(",")] != ["chunked"]:
+                    bad = "unsupported Transfer-Encoding %r" % ",".join(tes)[:60]
+                elif not tes and cls:
+                    if len(cls) > 1 or not next(iter(cls)).isdigit(): bad = "bad Content-Length %r" % sorted(cls)[:3]
+                    else: clen = int(next(iter(cls)))
                 rec["content_length"] = clen; rec["chunked"] = chunked
+                if bad: raise ValueError("invalid framing: " + bad)
             if hend is not None:
-                got = buf[hend:]
-                if chunked and dechunk(got) is not None: break
-                if not chunked and clen is not None and len(got) >= clen: break
+                st, _, why = frame(buf[hend:], chunked, clen, False)
+                if st == "complete": break
+                if st == "invalid":
+                    bad = why; raise ValueError("invalid framing: " + why)
         rec["phase"] = "done"
     except Exception as e:
         rec["error"] = repr(e)[:300]
@@ -4008,24 +4107,26 @@ def probe(rd, rec):
             try: sock.close()
             except Exception: pass
     raw = buf[hend:] if hend is not None else b""
-    body, state = raw, "absent"
-    if hend is not None and rec["error"] is None:
-        if chunked:
-            body = dechunk(raw); state = "complete" if body is not None else "partial"
-            if body is None: body = raw
-        elif clen is not None:
-            state = "complete" if len(raw) >= clen else ("partial" if raw else "absent")
-            body = raw[:clen] if len(raw) >= clen else raw
+    body, state, why = b"", "absent", None
+    if hend is not None:
+        if bad:
+            state, why = "invalid", bad
+            if not chunked and clen is None: body = raw
+            else: _, body, _ = frame(raw, chunked, clen, eof)
         else:
-            state = "complete" if eof else ("partial" if raw else "absent")
-    elif raw:
-        state = "partial"
-    if hend is None and rec["error"] is None and buf:
+            st, body, why = frame(raw, chunked, clen, eof)
+            if st == "complete" and rec["error"] is None: state = "complete"
+            elif st == "invalid": state = "invalid"
+            else: state = "partial" if body else "absent"
+        if state != "complete" and rec["error"] is None:
+            rec["error"] = "response ended early: " + (why or "incomplete body")
+    elif buf and rec["error"] is None:
         rec["error"] = "connection closed before the headers ended"
     if not buf and rec["error"] is None:
         rec["error"] = "connection closed with no response"
+    rec["framing"] = why; rec["raw_bytes"] = len(raw)
     rec["body_state"] = state; rec["body_bytes"] = len(body)
-    rec["body"] = body.decode("utf-8", "replace") if (hend is not None and body) else None
+    rec["body"] = body.decode("utf-8", "replace") if body else None
     return body if state == "complete" else None
 with open(log, "w") as f:
     while True:
@@ -4037,7 +4138,8 @@ with open(log, "w") as f:
         n += 1; tmo = min(2.0, rem); s = time.monotonic()
         rec = {"attempt": n, "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "start_s": round(s - t0, 3),
                "timeout_s": round(tmo, 3), "phase": "start", "http": None, "status_line": None, "error": None,
-               "content_length": None, "chunked": False, "body_state": "absent", "body_bytes": 0, "body": None,
+               "content_length": None, "chunked": False, "framing": None, "raw_bytes": 0,
+               "body_state": "absent", "body_bytes": 0, "body": None,
                "parse": "not-attempted", "clamav": None, "ready": False, "after_deadline": False}
         ok = False
         try:
