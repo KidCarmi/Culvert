@@ -976,7 +976,7 @@ func (c *Config) SetAuth(user, pass string) error {
 	c.passHash = hash
 	c.authRevision++
 	// Mirror into the RBAC user roster so the RBAC path works immediately.
-	// SEC-TOTP-1: preserve an existing TOTP enrolment for this username, for
+	// SEC-TOTP-1: preserve an existing TOTP enrollment for this username, for
 	// the same reason SetUIUser does. This path is not boot-only — POST
 	// /api/settings/auth (ui_config.go) reaches it at runtime, and the wipe it
 	// used to perform was persisted by the next SaveUIUsersFile any other
@@ -1495,7 +1495,7 @@ func (c *Config) SetUIUser(username, password string, role UIRole) error {
 		// A NEW record is constructed rather than mutating the stored one in
 		// place: VerifyUIUser takes the entry pointer under RLock and reads
 		// passHash after releasing it, so an in-place credential write would be
-		// a data race on the authentication hot path. De-enrolment stays the
+		// a data race on the authentication hot path. De-enrollment stays the
 		// job of the explicit ClearTOTP primitive.
 		//
 		// SEC-RBAC-ROLE-1: SetUIUser is an EXPLICIT role assignment (the admin
@@ -1520,7 +1520,7 @@ func (c *Config) SetUIUser(username, password string, role UIRole) error {
 
 // ChangeUIUserPassword is the SELF-SERVICE credential write (POST
 // /api/auth/change-password): it replaces only the password hash, keeping the
-// account's effective role, its TOTP enrolment and — SEC-RBAC-ROLE-1 — the
+// account's effective role, its TOTP enrollment and — SEC-RBAC-ROLE-1 — the
 // persisted raw role a newer build assigned, so a password change on a
 // downgraded build never destroys that assignment. A password change is not a
 // role assignment. fallbackRole is used only when the account is absent from
@@ -1555,7 +1555,7 @@ func (c *Config) ChangeUIUserPassword(username, password string, fallbackRole UI
 }
 
 // newUIAdminUserPreservingTOTP builds the replacement roster record for a
-// credential write: the new password hash and role, plus every TOTP enrolment
+// credential write: the new password hash and role, plus every TOTP enrollment
 // field carried over verbatim from prior (nil for a brand-new account, which
 // therefore starts un-enrolled). Callers must hold c.mu for writing.
 //
@@ -2305,8 +2305,8 @@ func (c *Config) GetTOTPSecret(username string) string {
 //
 // The three-way decision is ordered by which way each case must FAIL. Keeping a
 // counter that should have been reset costs at most a step or two of delay on a
-// genuine re-enrolment (counters are time-derived, so a counter from a past
-// enrolment is already in the past); zeroing one that should have been kept
+// genuine re-enrollment (counters are time-derived, so a counter from a past
+// enrollment is already in the past); zeroing one that should have been kept
 // reopens a replay window on a live key. So the counter is reset ONLY on
 // positive evidence that the key changed.
 func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bool {
@@ -2340,11 +2340,11 @@ func (c *Config) SetTOTPSecret(username, secret string, backupCodes []string) bo
 // ClearTOTP removes TOTP enrollment for a user — secret, backup codes AND the
 // replay counter.
 //
-// SEC-TOTP-1: the counter is part of the enrolment, not a separate durable
+// SEC-TOTP-1: the counter is part of the enrollment, not a separate durable
 // fact. It used to be left behind, which was harmless only because SetUIUser
 // replaced the whole record on the very next credential write and zeroed it as
-// a side effect. Now that a credential write PRESERVES the enrolment, a
-// counter left here survives de-enrolment and locks out the re-enrolment the
+// a side effect. Now that a credential write PRESERVES the enrollment, a
+// counter left here survives de-enrollment and locks out the re-enrollment the
 // `--reset-password` break-glass explicitly tells the operator to perform
 // (Codex review, PR #1429). With no secret installed the value protects
 // nothing, so keeping it can only cost availability.

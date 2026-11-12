@@ -40,7 +40,7 @@ import (
 // failure mode this replaces is an operator believing a revocation took effect.
 const msgRosterNotPersisted = "the change was NOT applied: the admin roster could not be written to disk " +
 	"(check disk space and the data volume's permissions, then retry). " +
-	"Nothing was changed — no account, role, password or TOTP enrolment was modified."
+	"Nothing was changed — no account, role, password or TOTP enrollment was modified."
 
 var (
 	// rosterPersistRefused counts admin-roster mutations rolled back and
