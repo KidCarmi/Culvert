@@ -361,6 +361,15 @@ func (t *telemetryRuntime) drainPartition(ctx context.Context, part evmodel.Part
 	}
 }
 
+// crashComponentMCPTelemetryFlush / crashComponentMCPTelemetryExport name the two
+// MCP telemetry background loops in the crash plane, separately, so an operator
+// reading culvert_crash_records_total{component=...} can tell a denial-flush
+// fault from an archive-export fault.
+const (
+	crashComponentMCPTelemetryFlush  = "mcp_telemetry_flush"
+	crashComponentMCPTelemetryExport = "mcp_telemetry_export"
+)
+
 // flushLoop periodically commits closed denial-aggregate windows into P-DEN so they
 // become durable + exportable. FlushDenials never blocks or touches the critical
 // track.
@@ -373,7 +382,15 @@ func (t *telemetryRuntime) flushLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			t.mgr.FlushDenials(evmodel.CapGateway)
+			// CHAOS-118: per-ROUND guard. This loop is `go`-detached from
+			// Start, so an unrecovered panic while committing a denial window
+			// terminated the gateway — an evidence-pipeline fault taking down
+			// the data plane it collects evidence for. Keep-going is safe: a
+			// failed flush leaves the window uncommitted and the next tick
+			// retries it, and the final force-flush in Close still runs.
+			runGuarded(crashComponentMCPTelemetryFlush, func() {
+				t.mgr.FlushDenials(evmodel.CapGateway)
+			})
 		}
 	}
 }
@@ -389,7 +406,17 @@ func (t *telemetryRuntime) exportLoop(ctx context.Context, part evmodel.Partitio
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			t.exportStep(ctx, part)
+			// CHAOS-118: per-ROUND guard, one per partition. `go`-detached, so
+			// a panic in an export step (it reads the encrypted spool and
+			// calls out to the archive exporter, both fed by data this process
+			// does not author) killed the gateway. Keep-going is safe and is
+			// the existing failure semantics: exportStep advances the durable
+			// cursor ONLY after the archive accepts the whole batch, so a
+			// contained panic leaves the cursor unadvanced and the spool
+			// intact, and the next tick retries the same batch.
+			runGuarded(crashComponentMCPTelemetryExport, func() {
+				t.exportStep(ctx, part)
+			})
 		}
 	}
 }
