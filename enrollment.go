@@ -241,19 +241,19 @@ func (cs *ClusterStore) NodeRecordWasDropped(nodeID string) bool {
 // already-expired token that nothing can consume. Dropping cannot lose
 // security state: st.Revoked is a slice of VALUES, so the revoked-certificate
 // list — the half CHAOS-07 identified as security-relevant — is untouched, and
-// a dropped node must re-enrol rather than being trusted on a record that
+// a dropped node must re-enroll rather than being trusted on a record that
 // proves nothing.
 //
-// Re-enrolment is not a pure availability cost, which an earlier wording here
+// Re-enrollment is not a pure availability cost, which an earlier wording here
 // claimed. The dropped record carried the node's certificate serial, so that
 // serial can never be added to the CRL afterwards, and admitEnrollment's
 // duplicate-identity denial keys on the record existing — so the same node ID
 // becomes re-enrollable on a fresh token with no predecessor to supersede. The
 // admit decision is unchanged (a single-use admin token is still required);
 // what the drop costs is revocability and the evidence trail. The node ID is
-// therefore retained in ClusterStore.droppedNodeIDs so that re-enrolment is
+// therefore retained in ClusterStore.droppedNodeIDs so that re-enrollment is
 // audited and alerted as a replacement instead of looking like a first
-// enrolment. See recordDroppedNodeReenrollment.
+// enrollment. See recordDroppedNodeReenrollment.
 //
 // Deleting from a map during range is defined behaviour in Go; entries deleted
 // during iteration are simply not produced.
@@ -761,7 +761,7 @@ const (
 
 // crashComponentClusterHeartbeat names the heartbeat monitor in the crash
 // record / culvert_crash_records_total{component} series, so an operator can
-// tell WHICH background round failed (CHAOS-24 plane, CHAOS-117 enrolment).
+// tell WHICH background round failed (CHAOS-24 plane, CHAOS-117 enrollment).
 const crashComponentClusterHeartbeat = "cluster_heartbeat"
 
 // StartHeartbeatMonitor runs a background loop that checks node health.
@@ -901,7 +901,7 @@ func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
 		// the counter above carry every occurrence; the alert carries the fact.
 		replicatedNilEntryAlertOnce.Do(func() {
 			deferStartupAlert("state_file_corrupt", AlertPayload{
-				Detail: fmt.Sprintf("replicated cluster state from the HA leader contained %d null record(s), which were dropped on this node; inspect the LEADER's cluster.json — enrolled nodes present only as null records must re-enrol", repair.count()),
+				Detail: fmt.Sprintf("replicated cluster state from the HA leader contained %d null record(s), which were dropped on this node; inspect the LEADER's cluster.json — enrolled nodes present only as null records must re-enroll", repair.count()),
 				Source: "storage",
 			})
 		})

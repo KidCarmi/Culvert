@@ -730,32 +730,53 @@ func commitSyslogDegradation(snap syslogFeedSnapshot) {
 		return
 	}
 
-	syslogHealth.mu.Lock()
-	// The record may have been REPLACED since this snapshot was taken — an
-	// admin re-point (noteSyslogWriterInstalled) or a disable
-	// (noteSyslogForwardingDisabled), both of which reset the latch.
-	// Committing here would page about the old feed and, worse, leave the NEW
-	// record latched — silencing its first real outage. The replacement's own
-	// evaluation reports it.
+	// CHAOS-118: the latch transition is a SCOPED critical section whose
+	// release is deferred, not a Lock with a trailing Unlock. The watchdog
+	// round that reaches here is now panic-guarded (runGuarded), and a guard
+	// over a trailing Unlock is strictly worse than the crash it replaces: the
+	// panic would be contained into a permanently held `syslogHealth.mu`,
+	// which the drop observer on the LOGGING path, `/healthz` and every
+	// diagnostics surface all take — no crash, no restart, no alert, and no
+	// recovery path. The lock must therefore survive a panic anywhere in the
+	// section, including syslogHealthNow (an injected clock in tests).
 	//
-	// Compared by GENERATION, not by writer pointer: a boot dial that failed
-	// and a disabled feed both leave `writer == nil`, so the pointer form was
-	// blind to precisely the transition an operator makes to REMEDIATE an
-	// unreachable collector (Codex P2, PR #1494) — see syslogHealthRecord.gen.
-	if syslogHealth.gen != snap.gen {
-		syslogHealth.mu.Unlock()
+	// The scope is a closure rather than a function-level defer BECAUSE the
+	// work below it must NOT hold the lock: it formats operator prose and
+	// calls Dispatch, which reaches a webhook. Promoting this to a
+	// function-level defer would hold the health lock across that I/O and
+	// invert the CHAOS-50 rule against holding one subsystem's lock into
+	// another's call. The released-before-alert boundary is unchanged.
+	shouldLog, alertNow, current := func() (shouldLog, alertNow, current bool) {
+		syslogHealth.mu.Lock()
+		defer syslogHealth.mu.Unlock()
+		// The record may have been REPLACED since this snapshot was taken — an
+		// admin re-point (noteSyslogWriterInstalled) or a disable
+		// (noteSyslogForwardingDisabled), both of which reset the latch.
+		// Committing here would page about the old feed and, worse, leave the NEW
+		// record latched — silencing its first real outage. The replacement's own
+		// evaluation reports it.
+		//
+		// Compared by GENERATION, not by writer pointer: a boot dial that failed
+		// and a disabled feed both leave `writer == nil`, so the pointer form was
+		// blind to precisely the transition an operator makes to REMEDIATE an
+		// unreachable collector (Codex P2, PR #1494) — see syslogHealthRecord.gen.
+		if syslogHealth.gen != snap.gen {
+			return false, false, false
+		}
+		now := syslogHealthNow()
+		shouldLog = syslogHealth.logAt.IsZero() || now.Sub(syslogHealth.logAt) >= syslogLogInterval
+		if shouldLog {
+			syslogHealth.logAt = now
+		} else {
+			syslogHealth.suppressed++
+		}
+		alertNow = !syslogHealth.alerted
+		syslogHealth.alerted = true
+		return shouldLog, alertNow, true
+	}()
+	if !current {
 		return
 	}
-	now := syslogHealthNow()
-	shouldLog := syslogHealth.logAt.IsZero() || now.Sub(syslogHealth.logAt) >= syslogLogInterval
-	if shouldLog {
-		syslogHealth.logAt = now
-	} else {
-		syslogHealth.suppressed++
-	}
-	alertNow := !syslogHealth.alerted
-	syslogHealth.alerted = true
-	syslogHealth.mu.Unlock()
 
 	// An UNMET intent gets its own sentence. The general one dates the outage
 	// from the last delivery and names a drop count; with no Writer there has
@@ -937,6 +958,11 @@ func noteSyslogDeliveryRecovered() {
 // itself is one snapshot of atomics and a comparison.
 const syslogWatchdogInterval = 30 * time.Second
 
+// crashComponentSyslogHealth names the syslog/SIEM feed health watchdog in the
+// crash plane (culvert_crash_records_total{component="syslog_health"}), so an
+// operator can tell which background round failed.
+const crashComponentSyslogHealth = "syslog_health"
+
 // startSyslogHealthWatchdog re-evaluates the degradation transition on a timer.
 // Started from the background-services slice, parented to the lifecycle ctx.
 //
@@ -952,7 +978,15 @@ func startSyslogHealthWatchdog(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			evaluateSyslogDegradation()
+			// CHAOS-118: per-ROUND guard, never per-goroutine. Go terminates
+			// the process on an unrecovered panic in ANY goroutine and this
+			// loop is `go`-detached from the background-services slice, so a
+			// fault in one evaluation of a DETECTION-ONLY SIEM health check
+			// was a total outage of the gateway it reports on — every
+			// in-flight tunnel dropped. Keep-going is the safe answer here:
+			// the round owns no lease and no durable queue, so a transient
+			// fault costs one interval and self-heals on the next tick.
+			runGuarded(crashComponentSyslogHealth, evaluateSyslogDegradation)
 		}
 	}
 }
@@ -1120,36 +1154,69 @@ func syslogFeedIsUDP(described *syslogWriter, caveatTarget string) bool {
 // Writer lock — pure atomic loads. See CumulativeStats on why nothing here may
 // take one: the engine's delivery observer needs syslogHealth.mu itself.
 func syslogFeedState() syslogFeedSnapshot {
-	syslogHealth.mu.Lock()
-	// The ONLY read of the retired totals, so the ONLY settle point: a
-	// displaced Writer's final flush lands after its first fold, and without
-	// this the exported drop total silently loses it (see retiredDrops).
-	settleRetiredSyslogWritersLocked()
-	configured := syslogHealth.configured
-	installedAt := syslogHealth.installedAt
-	target := syslogHealth.target
-	described := syslogHealth.writer
-	gen := syslogHealth.gen
-	intendedTarget := syslogHealth.intendedTarget
-	intentAt := syslogHealth.intentAt
-	// Captured with the rest of the record: the deadline and the intent it
-	// governs must come from ONE generation, or a re-point between two reads
-	// pairs a fresh intent with an expired grace (round 9a's rule).
-	dialVerdictBy := syslogHealth.dialVerdictBy
-	retiredDelivered := syslogHealth.retiredDelivered
-	retiredDrops := syslogHealth.retiredDrops
-	retiredPanics := syslogHealth.retiredPanics
-	// Captured here, NOT after the unlock: see "Everything it reports comes
-	// from ONE generation" above. A non-nil `described` captured under this
-	// lock is provably not yet retired, so none of its losses can also be in
-	// lateDrops.
-	var liveStats syslogStats
-	if described != nil {
-		liveStats = described.Stats()
-	}
-	lateDrops := syslogLateDrops()
-	skippedNoWriter := syslogSkippedNoWriter.Load()
-	syslogHealth.mu.Unlock()
+	var (
+		configured       bool
+		installedAt      time.Time
+		target           string
+		described        *syslogWriter
+		gen              uint64
+		intendedTarget   string
+		intentAt         time.Time
+		dialVerdictBy    time.Time
+		retiredDelivered uint64
+		retiredDrops     uint64
+		retiredPanics    uint64
+		liveStats        syslogStats
+		lateDrops        uint64
+		skippedNoWriter  uint64
+	)
+	// CHAOS-118: a SCOPED critical section with a deferred release, not a Lock
+	// with a trailing Unlock. This function is reached from the (now
+	// panic-guarded) watchdog round via evaluateSyslogDegradation, and a guard
+	// over a trailing Unlock contains the panic into a permanently held
+	// `syslogHealth.mu` — which the engine's delivery observer on the LOGGING
+	// path, `/healthz` and the diagnostics surfaces all take. That is a silent
+	// unrecoverable wedge in place of a loud crash. Two calls in this section
+	// can panic for reasons this function does not control:
+	// settleRetiredSyslogWritersLocked walks the retirement list, and
+	// described.Stats() is a method on a Writer handle.
+	//
+	// The capture variables are declared OUTSIDE so the post-unlock work below
+	// is unchanged and still runs with the lock released: it calls
+	// syslogFeedIsUDP, applyLiveWriterStats and finishUnmetSyslogIntent, and
+	// holding the health lock across them would invert this file's own rule
+	// that nothing here may take a Writer lock while holding `mu`.
+	func() {
+		syslogHealth.mu.Lock()
+		defer syslogHealth.mu.Unlock()
+		// The ONLY read of the retired totals, so the ONLY settle point: a
+		// displaced Writer's final flush lands after its first fold, and without
+		// this the exported drop total silently loses it (see retiredDrops).
+		settleRetiredSyslogWritersLocked()
+		configured = syslogHealth.configured
+		installedAt = syslogHealth.installedAt
+		target = syslogHealth.target
+		described = syslogHealth.writer
+		gen = syslogHealth.gen
+		intendedTarget = syslogHealth.intendedTarget
+		intentAt = syslogHealth.intentAt
+		// Captured with the rest of the record: the deadline and the intent it
+		// governs must come from ONE generation, or a re-point between two reads
+		// pairs a fresh intent with an expired grace (round 9a's rule).
+		dialVerdictBy = syslogHealth.dialVerdictBy
+		retiredDelivered = syslogHealth.retiredDelivered
+		retiredDrops = syslogHealth.retiredDrops
+		retiredPanics = syslogHealth.retiredPanics
+		// Captured here, NOT after the unlock: see "Everything it reports comes
+		// from ONE generation" above. A non-nil `described` captured under this
+		// lock is provably not yet retired, so none of its losses can also be in
+		// lateDrops.
+		if described != nil {
+			liveStats = described.Stats()
+		}
+		lateDrops = syslogLateDrops()
+		skippedNoWriter = syslogSkippedNoWriter.Load()
+	}()
 
 	// The caveat describes the transport the operator ASKED for when nothing
 	// is installed — there is no Writer whose scheme could be reported.

@@ -445,7 +445,7 @@ func TestAPIAuthLogin_TOTPFailureRecordsLockout(t *testing.T) {
 	const pass = "CorrectHorseBattery9!"
 	const secret = "JBSWY3DPEHPK3PXP"
 
-	// Enable auth, create user, enrol TOTP, reset lockout state.
+	// Enable auth, create user, enroll TOTP, reset lockout state.
 	if err := cfg.SetUIUser(user, pass, RoleAdmin); err != nil {
 		t.Fatalf("SetUIUser: %v", err)
 	}

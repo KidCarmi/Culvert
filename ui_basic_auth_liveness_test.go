@@ -170,7 +170,7 @@ func TestSECBASIC5_Control_RevalidationStillCutsAnInvalidStream(t *testing.T) {
 	secBasicUser(t, enrolled, enrolledPass, RoleAdmin, false)
 	stream := secBasicStream(enrolled, enrolledPass)
 	if !sseAuthStillValid(stream) {
-		t.Fatal("precondition: the stream is valid before TOTP enrolment")
+		t.Fatal("precondition: the stream is valid before TOTP enrollment")
 	}
 	cfg.SetTOTPSecret(enrolled, "JBSWY3DPEHPK3PXP", []string{"backup-code-1"})
 	if sseAuthStillValid(stream) {

@@ -279,6 +279,9 @@ func buildOperatorContract() OperatorContract {
 	// migration abandoned: configured parents unpublished. Contributes nothing
 	// when none of the three is latched.
 	checks = append(checks, checkUpstreamPoolConfig()...)
+	// Configured parent-proxy pool with zero eligible parents: plain-HTTP egress
+	// fails open to DIRECT. Contributes nothing with no pool or ≥1 eligible parent.
+	checks = append(checks, checkUpstreamEgress()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
