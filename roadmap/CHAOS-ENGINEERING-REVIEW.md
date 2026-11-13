@@ -8,6 +8,16 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**CHAOS-119 — CLAIMED 2026-11-13, placeholder row (round in progress).** Scope:
+the panic-containment plane's REPORTING boundary — the detached shutdown-drain
+goroutine that is outside it entirely, and the background rounds that are
+contained by a bespoke `recover()` the crash plane cannot see. Recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-13.md).
+Takes up §7.1 and §7.2 of the 2026-11-12 round and its residual risk `4`. Id
+checked against `origin/main` at `feb11e8` (highest id anywhere on main:
+`CHAOS-118`) and against the open-PR set (#1884, #1883, #1855, #1705, #1549,
+#1548, #1536, #1528, #1526 — none a chaos sweep).
+
 **Later rounds:** the 2026-10-13 round is recorded separately in
 [CHAOS-REVIEW-2026-10-13.md](CHAOS-REVIEW-2026-10-13.md) — CHAOS-89 (the DP→CP
 backoff ladder), CHAOS-90 (the unbounded unenrolled-pull map) and CHAOS-91 (the
