@@ -104,6 +104,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### On-prem appliance readiness (pilot)
 
+- **First boot records `complete` only after the application and management
+  answer.** It used to write `complete.done` as soon as the installer
+  returned, but the installer recreates the proxy late (Release Management
+  wiring: `compose up -d` without `--wait`), so `complete` could be on record
+  while the application did not answer yet (QEMU campaign 7, PR #1528). The
+  finish step now waits, at most 300 s, until `GET /health` on
+  127.0.0.1:8080 returns 200 **and** `GET /api/setup/status` on
+  127.0.0.1:9090 returns 200 with a boolean `needsSetup` (the conditions the
+  console's status-json reports), in two consecutive checks, so an answer
+  from just before a recreate does not count. On timeout nothing is recorded
+  complete: the reason is kept in `state/readiness.failed` and shown by
+  `culvert-status`, the log carries `docker compose ps` and the proxy's last
+  log lines, and the step fails into the unit's existing bounded retry.
 - **Restore commits in place and can therefore restore a mounted `/data`.**
   The commit used to rename the data directory itself, which `rename(2)`
   refuses for a mount point; every Docker volume is one, so the documented

@@ -27,6 +27,13 @@ Power on and watch the VM console. Boot sequence:
 2. `culvert-firstboot.service` runs (after cloud-init and Docker):
    `console` → `access` → `ovf` → `images` → `install` → `agent` →
    `complete`, each recorded in `/var/lib/culvert-appliance/state/<step>.done`.
+   `complete` is recorded only after the application answers
+   `GET http://127.0.0.1:8080/health` (200) **and** management answers
+   `GET https://127.0.0.1:9090/api/setup/status` (200, JSON `needsSetup`
+   true/false) in two consecutive checks, within a 300 s bound. Running
+   containers alone are not enough: the installer recreates the proxy late
+   (Release Management wiring), so the stack can be up before the
+   application answers.
    The local recovery credential and the read-only operator keys come first
    because neither needs the network and an operator may need them to repair
    it. A static network (`culvert.net.*`) that `culvert-net` refuses — for
@@ -213,6 +220,15 @@ first-boot service sets (`CULVERT_DIR=/srv/culvert`,
   Completed steps are never repeated and established secrets never regenerated.
 * Common cause: no outbound HTTPS (ClamAV download → compose `--wait` timeout).
   Fix egress, then restart the service.
+* **Services not ready** (`culvert-status` → `Provisioning: … services not
+  ready at the last first-boot check: application /health: http 000;
+  management /api/setup/status: …`): installation finished, but the
+  application or management did not answer within the 300 s bound, so
+  completion was **not** recorded. The reason is kept in
+  `state/readiness.failed`; the log (`/var/log/culvert-firstboot.log`) carries
+  `docker compose ps` and the proxy's last 40 log lines. The service retries
+  this check on its own; once both answer, it records `complete` and clears
+  the record. Retry at once with `sudo systemctl restart culvert-firstboot`.
 * **Maintenance agent not installed** (`culvert-status` → `Maintenance agent:
   NOT installed (<reason>)`; Release Management shows *Agent unreachable*): the
   proxy is complete, but `install.sh` could not verify the image signature it

@@ -71,6 +71,31 @@ func newFBHarness(t *testing.T) *fbHarness {
 	// culvert-issue-update is invoked best-effort by the finish/repair paths.
 	h.writeExec(filepath.Join(h.bin, "culvert-issue-update"), "#!/usr/bin/env bash\nexit 0\n")
 	h.writeExec(filepath.Join(h.bin, "culvert-status"), "#!/usr/bin/env bash\necho 'stub status'\n")
+	// The finish step's readiness probes (CULVERT_FB_READY_CURL). Each
+	// endpoint replays $FB_HARNESS/<health|setup>.seq one line per call (the
+	// last line repeats); with no file it answers ready. A setup line is
+	// "<code> <body>". "000" is a transport failure, as curl reports it.
+	h.writeExec(filepath.Join(h.root, "readycurl"), `#!/usr/bin/env bash
+url="${!#}"
+case "$url" in
+  *:8080/health) f=health ;;
+  *:9090/api/setup/status) f=setup ;;
+  *) exit 7 ;;
+esac
+printf 'readycurl %s\n' "$f" >> "$FB_HARNESS/calls.log"
+n=$(( $(cat "$FB_HARNESS/$f.n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FB_HARNESS/$f.n"
+line=""
+if [[ -f "$FB_HARNESS/$f.seq" ]]; then
+  line="$(sed -n "${n}p" "$FB_HARNESS/$f.seq")"
+  [[ -n "$line" ]] || line="$(tail -n 1 "$FB_HARNESS/$f.seq")"
+fi
+if [[ "$f" == health ]]; then line="${line:-200}"; printf '%s' "$line"; [[ "$line" == 000 ]] && exit 7; exit 0; fi
+[[ -n "$line" ]] || line='200 {"needsSetup":true}'
+code="${line%% *}"; body=""; [[ "$line" == *" "* ]] && body="${line#* }"
+printf '%s\n%s' "$body" "$code"
+[[ "$code" == 000 ]] && exit 7
+exit 0
+`)
 	h.writeExec(filepath.Join(h.bin, "culvert-console"), "#!/usr/bin/env bash\n[[ $* == --host=bootstrap-commit ]] && exit 0\n[[ $* == --host=bootstrap-record ]] || exit 2\ncat > \"$FB_HARNESS/bootstrap.in\"\n")
 	// Account/system tools: record and succeed. getent answers from a file
 	// the test controls (the simulated shadow field).
@@ -135,6 +160,8 @@ func (h *fbHarness) env() []string {
 		"CULVERT_FB_LOG="+filepath.Join(h.root, "firstboot.log"),
 		"CULVERT_FB_MAINT_UNIT="+filepath.Join(h.root, "culvert-maint.service"),
 		"CULVERT_FB_CLOUD_INIT_DISABLED="+filepath.Join(h.root, "cloud-init.disabled"),
+		"CULVERT_FB_READY_CURL="+filepath.Join(h.root, "readycurl"),
+		"CULVERT_FB_READY_INTERVAL_S=1",
 		"APP_IMAGE_REPO=ghcr.io/kidcarmi/culvert", "APP_IMAGE_TAG=v0.0.0-test",
 	)
 }

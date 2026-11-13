@@ -30,6 +30,12 @@ if [[ -f "$STATE/complete.done" ]]; then prov="complete"
 elif systemctl is-failed --quiet culvert-firstboot.service 2>/dev/null; then prov="FAILED (journalctl -u culvert-firstboot; restart with: sudo systemctl restart culvert-firstboot)"
 elif systemctl is-active --quiet culvert-firstboot.service 2>/dev/null; then prov="running"
 fi
+# First boot records completion only after the application and management
+# answered (culvert-firstboot readiness gate). A bounded wait that ran out
+# leaves its reason in readiness.failed; show it until completion is recorded.
+if [[ "$prov" != "complete" && -f "$STATE/readiness.failed" ]]; then
+  prov="$prov; services not ready at the last first-boot check: $(cut -d' ' -f2- "$STATE/readiness.failed" 2>/dev/null | head -c 300)"
+fi
 
 # Maintenance agent: first boot records a verified install (agent.done) or a
 # degraded one (agent.pending, with the reason); the repair verb clears it on

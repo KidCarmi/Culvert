@@ -18,7 +18,10 @@
 #              image, with a per-instance first-admin SETUP TOKEN
 #   agent      VERIFY the maintenance agent landed; otherwise record it as a
 #              degraded capability (state/agent.pending) — never claim it
-#   done       console banner + status
+#   done       bounded readiness gate (application /health AND management
+#              /api/setup/status, confirmed twice), then console banner +
+#              status + complete.done; on timeout NOTHING is recorded
+#              complete (state/readiness.failed carries the reason)
 #
 # Modes:
 #   culvert-firstboot                 the systemd oneshot (all steps)
@@ -386,9 +389,101 @@ repair_agent() {
   return 1
 }
 
+# ── readiness gate: `complete` is recorded only on evidence ─────────────────
+# Provisioning is complete only when the two conditions the console's
+# status-json reports (internal/applianceconsole: application_responding,
+# management_available) hold: the application answers GET /health with 200 on
+# 127.0.0.1:8080, AND management answers GET /api/setup/status with 200 and a
+# JSON boolean needsSetup on 127.0.0.1:9090. Container startup is not evidence:
+# install.sh recreates the proxy late (Release Management wiring, `compose up
+# -d` without --wait), so the stack can be up while the application does not
+# answer yet (QEMU campaign 7, PR #1528). Both must hold in READY_CONFIRM
+# consecutive checks, so an answer from just before a recreate does not count.
+# The wait is bounded (READY_TIMEOUT_S, and a check-count cap). On timeout,
+# completion is NOT recorded: the reason goes to state/readiness.failed, the
+# log gets compose diagnostics, the console says what to do, and the step
+# fails, so the unit's bounded retry (Restart=on-failure) runs it again.
+READY_TIMEOUT_S="${CULVERT_FB_READY_TIMEOUT_S:-300}"
+READY_INTERVAL_S="${CULVERT_FB_READY_INTERVAL_S:-2}"
+READY_CONFIRM="${CULVERT_FB_READY_CONFIRM:-2}"
+READY_CURL="${CULVERT_FB_READY_CURL:-curl}"
+APP_HEALTH_URL="http://127.0.0.1:8080/health"
+MGMT_SETUP_URL="https://127.0.0.1:9090/api/setup/status"
+[[ "$READY_TIMEOUT_S" =~ ^[1-9][0-9]{0,4}$ ]] || READY_TIMEOUT_S=300
+[[ "$READY_INTERVAL_S" =~ ^[1-9][0-9]{0,2}$ ]] || READY_INTERVAL_S=2
+[[ "$READY_CONFIRM" =~ ^[1-9]$ ]] || READY_CONFIRM=2
+
+# probe_application → "ok" | "http <code>" (000 = no answer within 3 s)
+probe_application() {
+  local code
+  code="$("$READY_CURL" -s -o /dev/null -w '%{http_code}' --max-time 3 "$APP_HEALTH_URL" 2>/dev/null || true)"
+  if [[ "$code" == 200 ]]; then echo ok; else echo "http ${code:-000}"; fi
+}
+
+# probe_management → "ok" | reason. -k: the management certificate is
+# self-signed at first boot; this reads one boolean from the local process.
+probe_management() {
+  local out code body
+  out="$("$READY_CURL" -sk --max-time 3 -w '\n%{http_code}' "$MGMT_SETUP_URL" 2>/dev/null || true)"
+  if [[ "$out" == *$'\n'* ]]; then code="${out##*$'\n'}"; body="${out%$'\n'*}"; else code=000; body=""; fi
+  if [[ "$code" != 200 ]]; then echo "http ${code:-000}"; return 0; fi
+  if printf '%s' "$body" | python3 -c 'import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and isinstance(d.get("needsSetup"), bool) else 1)' 2>/dev/null; then
+    echo ok
+  else
+    echo "http 200 without a boolean needsSetup"
+  fi
+}
+
+# readiness_diagnostics — bounded, best-effort evidence for the log on timeout.
+readiness_diagnostics() {
+  {
+    echo "readiness diagnostics ($(date -u +%FT%TZ)):"
+    (cd "$STACK_DIR" && timeout 20 docker compose ps 2>&1) || echo "  docker compose ps: unavailable"
+    (cd "$STACK_DIR" && timeout 20 docker compose logs --no-color --tail 40 proxy 2>&1) || echo "  docker compose logs proxy: unavailable"
+  } | head -c 65536 || true
+}
+
+# wait_for_readiness → 0 once both conditions held in READY_CONFIRM
+# consecutive checks; 1 (with state/readiness.failed) at the bound.
+wait_for_readiness() {
+  local start=$SECONDS deadline rounds=0 max_rounds streak=0 app="not checked" mgmt="not checked" why
+  deadline=$(( SECONDS + READY_TIMEOUT_S ))
+  max_rounds=$(( READY_TIMEOUT_S / READY_INTERVAL_S + READY_CONFIRM + 1 ))
+  log "readiness: waiting up to ${READY_TIMEOUT_S}s for the application (${APP_HEALTH_URL}) and management (${MGMT_SETUP_URL})"
+  while (( rounds < max_rounds )); do
+    rounds=$(( rounds + 1 ))
+    app="$(probe_application)"
+    mgmt="$(probe_management)"
+    if [[ "$app" == ok && "$mgmt" == ok ]]; then
+      streak=$(( streak + 1 ))
+      if (( streak >= READY_CONFIRM )); then
+        rm -f "$STATE/readiness.failed"
+        log "readiness: application and management answered in ${streak} consecutive checks ($(( SECONDS - start ))s, check ${rounds})"
+        return 0
+      fi
+    else
+      streak=0
+    fi
+    (( SECONDS < deadline )) || break
+    sleep "$READY_INTERVAL_S"
+  done
+  why="application /health: ${app}; management /api/setup/status: ${mgmt}; waited $(( SECONDS - start ))s, ${rounds} checks"
+  printf '%s %s\n' "$(date -u +%FT%TZ)" "$why" > "$STATE/readiness.failed"
+  log "ERROR: services not ready within ${READY_TIMEOUT_S}s; provisioning NOT recorded complete (${why})"
+  readiness_diagnostics
+  console "culvert-firstboot: services not ready within ${READY_TIMEOUT_S}s (${why}). Provisioning is NOT complete and retries automatically. Check: sudo culvert-status; sudo journalctl -u culvert-firstboot. Retry now: sudo systemctl restart culvert-firstboot"
+  return 1
+}
+
 # ── step: done ──────────────────────────────────────────────────────────────
 step_finish() {
   step_done complete && return 0
+  wait_for_readiness || return 1
   "$BIN_DIR/culvert-issue-update" || true
   console ""
   console "$("$BIN_DIR/culvert-status" --brief 2>/dev/null || echo 'Culvert appliance: provisioning complete')"
