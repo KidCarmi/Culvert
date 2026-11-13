@@ -155,6 +155,42 @@ func TestEnroll_DroppedRecordEvidenceRequiresAValidToken(t *testing.T) {
 	}
 }
 
+// ── 3b. ... nor by an enrolment that fails after the token is spent ─────────
+
+// A valid token reaches past admission, but the request can still fail at CSR
+// validation, before anything is signed or registered. The audit entry and the
+// alert say an identity replacement COMPLETED, so a failed enrolment must not
+// emit either (Codex review on PR #1879).
+func TestEnroll_DroppedRecordEvidenceRequiresASuccessfulEnrolment(t *testing.T) {
+	loadStateWithNullNode(t, "dp-dropped")
+	alerts := enrollAlertCapture(t)
+
+	token, err := globalClusterStore.GenerateToken("", "", "admin", time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	raw, err := json.Marshal(EnrollRequest{Token: token, NodeID: "dp-dropped", CSR: "not a PEM"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	baseline := time.Now().UnixMilli()
+	srv := &controlPlaneServer{}
+	if _, err := srv.Enroll(context.Background(), raw); err == nil {
+		t.Fatal("enrolment with a malformed CSR must be refused")
+	}
+
+	if _, ok := auditHasDroppedReenroll(t, baseline, "dp-dropped"); ok {
+		t.Error("a failed enrolment must not write the replacement audit entry")
+	}
+	if len(*alerts) != 0 {
+		t.Errorf("a failed enrolment must raise no alert, got %+v", *alerts)
+	}
+	if _, ok := globalClusterStore.GetNode("dp-dropped"); ok {
+		t.Error("a failed enrolment must not register the node")
+	}
+}
+
 // ── 4. both ingestion boundaries record, and only what they dropped ─────────
 
 func TestClusterStore_DroppedNodeIDsRecordedAtBothIngestionBoundaries(t *testing.T) {

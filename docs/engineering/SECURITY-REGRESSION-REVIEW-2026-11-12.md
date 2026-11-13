@@ -314,9 +314,11 @@ set out to remove. What was missing is evidence, so evidence is what was added.
   through `NodeRecordWasDropped` under the read lock. It is evidence, not state:
   deliberately **not persisted**, and it accumulates for the life of the process
   because the serial a drop took with it never becomes revocable again.
-- `admitEnrollment` consults it only when `priorNode == nil`, and **after**
-  `ValidateAndConsumeToken` has succeeded — so an unauthenticated prober cannot
-  drive an audit entry or an alert by guessing node IDs.
+- `Enroll` consults it only when `priorNode == nil`, which is reachable only
+  **after** `ValidateAndConsumeToken` has succeeded — so an unauthenticated
+  prober cannot drive an audit entry or an alert by guessing node IDs — and
+  records only once the node is registered, so a token holder whose CSR is then
+  refused cannot either (`TestEnroll_DroppedRecordEvidenceRequiresASuccessfulEnrolment`).
 - `recordDroppedNodeReenrollment` logs (`logger.Printf`, `sanitizeLog` + `%q`),
   writes a `cluster.node.reenroll-dropped` audit entry, and fires the existing
   `cluster_node_reenrolled` alert. Its detail states the thing an operator
@@ -481,7 +483,7 @@ Changed by this review:
 | `policy.go` | Finding A fix: `matchIPOrCIDRAddr` compares a bare-IP subject on the address via `sourceLiteralPrefix`, both sides `Unmap()`ed, zoned literals unchanged. |
 | `authpolicy_subject_literal_test.go` | **New.** Finding A oracle, negative controls, and the named Exempt direction. |
 | `enrollment.go` | Finding B fix: `ClusterStore.droppedNodeIDs`, `rememberDroppedNodesLocked`, `NodeRecordWasDropped`; recorded at both ingestion boundaries; overstated `normalizeClusterState` comment corrected. |
-| `controlplane_server.go` | Finding B fix: `admitEnrollment` records a dropped-record re-enrolment after token consumption; `recordDroppedNodeReenrollment` logs, audits and alerts. |
+| `controlplane_server.go` | Finding B fix: `Enroll` records a dropped-record re-enrolment once the node is registered (moved from `admitEnrollment`, where a later CSR refusal still left the signal behind; Codex review); `recordDroppedNodeReenrollment` logs, audits and alerts. |
 | `enroll_dropped_record_reenroll_test.go` | **New.** Finding B positive, negative control, authentication, boundary and concurrency tests. |
 | `docs/agent-context/workflows/verification.md` | Stale toolchain prose corrected: the pin is `go1.27.4` and the language minimum `go 1.27.0` (#1864 moved the toolchain last window; the prose still said `go1.27.3` / `go 1.26.6`). |
 | `CHANGELOG.md` | Both fixes recorded. |

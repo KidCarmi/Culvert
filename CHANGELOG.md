@@ -275,8 +275,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `cluster.node.reenroll-dropped` audit entry and fires the existing
   `cluster_node_reenrolled` alert, whose detail states that the predecessor's
   serial was lost with the record and so stays valid until it expires. Recorded
-  AFTER the token is consumed, so an unauthenticated prober cannot drive the
-  audit entry or the alert by guessing node IDs. The CRL leg is unfixable by
+  only once the node is registered, so neither an unauthenticated prober
+  guessing node IDs nor a token holder whose CSR is then refused can drive the
+  audit entry or the alert. The CRL leg is unfixable by
   construction and is recorded as a residual risk. Found by the 2026-11-12
   security regression review.
 

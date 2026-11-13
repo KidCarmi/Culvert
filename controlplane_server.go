@@ -515,10 +515,23 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 			node.Status = "draining"
 		}
 	}
+	// CHAOS-117 follow-up: this node ID had a record until a null one was
+	// dropped at an ingestion boundary, so admitEnrollment found nothing to
+	// supersede and this enrolment would otherwise be indistinguishable from a
+	// first one. Only reachable after the token was consumed (an
+	// unauthenticated prober cannot drive it) and RECORDED only once the node
+	// is registered, like the expired-node case below: a request that then
+	// fails CSR validation or signing must not claim a replacement happened.
+	// The decision is not changed — the token was valid and the enrolment
+	// proceeded.
+	droppedReenroll := priorNode == nil && globalClusterStore.NodeRecordWasDropped(req.NodeID)
 	globalClusterStore.RegisterNode(node)
 
 	if priorNode != nil {
 		recordExpiredNodeReenrollment(ctx, priorNode, node)
+	}
+	if droppedReenroll {
+		recordDroppedNodeReenrollment(req.NodeID, enrollPeerHost(ctx))
 	}
 
 	logger.Printf("Enrollment: node %q enrolled (serial=%s, expires=%s)", req.NodeID, serial, expiry.Format("2006-01-02"))
@@ -603,15 +616,10 @@ func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, T
 		logger.Printf("Enrollment: rejected node %q: %v", sanitizeLog(req.NodeID), err)
 		return req, TokenInfo{}, nil, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
 	}
-	// CHAOS-117 follow-up: this node ID had a record until a null one was
-	// dropped at an ingestion boundary, so the guard above found nothing to
-	// supersede and this enrolment would otherwise be indistinguishable from a
-	// first one. Recorded AFTER the token is consumed, so an unauthenticated
-	// prober cannot drive the audit entry or the alert. The decision is not
-	// changed — the token was valid and the enrolment proceeds.
-	if priorNode == nil && globalClusterStore.NodeRecordWasDropped(req.NodeID) {
-		recordDroppedNodeReenrollment(req.NodeID, sourceIP)
-	}
+	// CHAOS-117 follow-up: a re-enrolment over a DROPPED record is recorded by
+	// Enroll, after the node is registered, not here: the CSR has not been
+	// validated or signed yet, and a failure past this point must not leave a
+	// "completed identity replacement" audit entry and alert behind.
 	return req, tokInfo, priorNode, nil
 }
 
@@ -624,9 +632,8 @@ func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, T
 // stays valid until its own expiry and cannot be revoked by node ID. That is
 // irreversible, so the one thing that can still be done is to say so, loudly
 // and once per enrolment, instead of letting the identity swap pass silently.
-// sourceIP is admitEnrollment's already-resolved peer address (it needs it for
-// the rate limiter), so unlike recordExpiredNodeReenrollment this takes the
-// value rather than re-deriving it from the context.
+// sourceIP is the caller's peer address (enrollPeerHost); "" is logged as
+// "unknown".
 func recordDroppedNodeReenrollment(nodeID, sourceIP string) {
 	if sourceIP == "" {
 		sourceIP = "unknown"
@@ -651,6 +658,17 @@ func recordDroppedNodeReenrollment(nodeID, sourceIP string) {
 		Detail: detail,
 		Source: "cluster",
 	})
+}
+
+// enrollPeerHost returns the gRPC peer's host for an enrolment, or "" when the
+// context carries no usable peer address.
+func enrollPeerHost(ctx context.Context) string {
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		if host, _, err := net.SplitHostPort(p.Addr.String()); err == nil {
+			return host
+		}
+	}
+	return ""
 }
 
 // clusterCAIssuancePrecondition reports whether the cluster CA can issue a
