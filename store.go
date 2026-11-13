@@ -2214,6 +2214,19 @@ func (c *Config) UIUserExists(username string) bool {
 	return c.uiUsers[username] != nil
 }
 
+// UIUserRole returns the named user's CURRENT roster role, and false when the
+// user is not in the roster. Used to cap a live session cookie at the role the
+// roster grants now (SEC-UISESS-DEMOTE-1).
+func (c *Config) UIUserRole(username string) (UIRole, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	u := c.uiUsers[username]
+	if u == nil {
+		return "", false
+	}
+	return u.role, true
+}
+
 // LoginNameConfigured reports whether username names an account VerifyUIUser
 // could authenticate — the roster, or the legacy single user.
 //
