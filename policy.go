@@ -2462,7 +2462,24 @@ func matchIPOrCIDRAddr(cidrOrIP, clientIP string, clientAddr net.IP) bool {
 		}
 		return clientAddr != nil && ipNet.Contains(clientAddr)
 	}
-	return cidrOrIP == clientIP
+	if cidrOrIP == clientIP {
+		return true
+	}
+	// Same address, different spelling — the Stage-1 subject predicate decides
+	// on the ADDRESS, exactly like matchIPOrCIDR and like the CIDR branch
+	// above. validateCIDROrIP accepts every spelling net.ParseIP accepts, so
+	// without this a CredentialRequired/SSORequired rule written
+	// "2001:DB8::10" or "::ffff:10.0.0.5" was accepted on write and then never
+	// matched the client it names: resolveAuthOutcomeFrom fell through to the
+	// global default and the client was never challenged. A zoned literal keeps
+	// the exact-string comparison (see sourceLiteralPrefix) because a link-local
+	// peer address carries its zone in clientIP too.
+	p, ok := sourceLiteralPrefix(cidrOrIP)
+	if !ok {
+		return false
+	}
+	addr, err := netip.ParseAddr(clientIP)
+	return err == nil && addr.Zone() == "" && p.Contains(addr.Unmap())
 }
 
 // ─── Destination matching ─────────────────────────────────────────────────────

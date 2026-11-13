@@ -35,6 +35,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -144,6 +145,17 @@ var chaos105Workers = []struct {
 	// activation, and a panic in its round (a null record in a persisted
 	// cluster.json was one) killed the gateway 30 s after every restart.
 	{"enrollment.go", "StartHeartbeatMonitor", "crashComponentClusterHeartbeat"},
+	// Added by CHAOS-118, closing CHAOS-116 §8.2. These were the last five
+	// `go`-detached rounds outside the guard. Two of them are not
+	// observability: the IdP watchdog ENFORCES the metadata staleness ceiling
+	// and is the supervisor that re-arms IdP recovery, and the Root CA
+	// recovery loop is the only thing that re-enables SSL inspection after a
+	// failed bundle load.
+	{"syslog_health.go", "startSyslogHealthWatchdog", "crashComponentSyslogHealth"},
+	{"idp_metadata_health.go", "runIdPMetadataDegradationWatchdog", "crashComponentIdPMetadataWatchdog"},
+	{"rootca_recovery.go", "runInspectionCARecoveryLoop", "crashComponentInspectionCARecovery"},
+	{"mcp_telemetry.go", "flushLoop", "crashComponentMCPTelemetryFlush"},
+	{"mcp_telemetry.go", "exportLoop", "crashComponentMCPTelemetryExport"},
 }
 
 func TestCHAOS105_EveryRegisteredWorkerRoundIsGuarded(t *testing.T) {
@@ -183,14 +195,23 @@ func TestCHAOS105_RetentionJanitorBootSweepIsGuarded(t *testing.T) {
 // funcSource returns the source text of the named top-level func or method in
 // file. Methods are matched on name alone, which is unambiguous for the
 // inventory above.
+//
+// The read is anchored to pkgSourceDir(), NOT the process working directory
+// (CHAOS-116 §8.1, closed by CHAOS-118 because this round extends the registry
+// that depends on it). Reading a bare name made every CHAOS-105, CHAOS-117 and
+// CHAOS-118 source gate fail for the wrong reason if another test ran a
+// concurrent os.Chdir — the exact flake class TestTestFileReadsAreCWDIndependent
+// exists to prevent, which its regex could not see here because the path was a
+// variable rather than a string literal.
 func funcSource(t *testing.T, file, name string) string {
 	t.Helper()
+	path := filepath.Join(pkgSourceDir(), file)
 	fset := token.NewFileSet()
-	parsed, err := parser.ParseFile(fset, file, nil, 0)
+	parsed, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
 		t.Fatalf("parse %s: %v", file, err)
 	}
-	raw, err := os.ReadFile(file)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", file, err)
 	}

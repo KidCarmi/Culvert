@@ -112,6 +112,28 @@ type ClusterStore struct {
 	st             ClusterState
 	path           string // JSON file path for persistence
 	heartbeatCount int    // counter for periodic save in UpdateNodeSeen
+
+	// droppedNodeIDs names every node whose record normalizeClusterState had
+	// to drop at an ingestion boundary this process. It is NOT cluster state —
+	// it is evidence, and it is deliberately not persisted.
+	//
+	// A dropped record carried that node's certificate serial, so the serial
+	// goes with it: the CP can never afterwards add it to the CRL, because
+	// nothing left on the CP names it. That is irreversible by construction.
+	//
+	// What it is read for: admitEnrollment's duplicate-identity denial is keyed
+	// on the record EXISTING (GetNode's ok), so after a drop the same node ID
+	// is re-enrollable on a fresh token with NO prior record to supersede. The
+	// admit decision is correct and unchanged — an admin-issued single-use
+	// token is still required — but without this set the identity replacement
+	// is indistinguishable from a first enrollment: no audit entry, no alert,
+	// and the un-revocable predecessor certificate never named. The
+	// normalisation comment used to call a drop a pure "availability cost";
+	// that is the half of it that is true.
+	//
+	// Accumulates for the life of the process: the serial a drop took with it
+	// never becomes revocable again, so the entry never stops being relevant.
+	droppedNodeIDs map[string]bool
 }
 
 var globalClusterStore = &ClusterStore{
@@ -161,6 +183,7 @@ func (cs *ClusterStore) Load(path string) error {
 		logger.Printf("Enrollment: cluster state %q contained %d unusable null record(s) — dropped %d node(s) %q and %d token(s); a null record carries no node ID, certificate serial or expiry, so it cannot be honoured",
 			sanitizeLog(path), repair.count(), len(repair.NilNodes), sanitizeLog(strings.Join(repair.NilNodes, ",")), repair.NilTokens)
 		noteStateFileEntriesDropped("cluster", path, repair.count())
+		cs.rememberDroppedNodesLocked(repair)
 	}
 	cs.st = st
 	return nil
@@ -180,6 +203,30 @@ type clusterStateRepair struct {
 func (r clusterStateRepair) empty() bool { return len(r.NilNodes) == 0 && r.NilTokens == 0 }
 func (r clusterStateRepair) count() int  { return len(r.NilNodes) + r.NilTokens }
 
+// rememberDroppedNodesLocked unions repair's dropped node IDs into the evidence
+// set. The caller holds cs.mu for writing. See ClusterStore.droppedNodeIDs.
+func (cs *ClusterStore) rememberDroppedNodesLocked(repair clusterStateRepair) {
+	if len(repair.NilNodes) == 0 {
+		return
+	}
+	if cs.droppedNodeIDs == nil {
+		cs.droppedNodeIDs = make(map[string]bool, len(repair.NilNodes))
+	}
+	for _, id := range repair.NilNodes {
+		cs.droppedNodeIDs[id] = true
+	}
+}
+
+// NodeRecordWasDropped reports whether this node ID was lost to a null record
+// at an ingestion boundary this process, so a re-enrollment under it is an
+// identity REPLACEMENT whose predecessor can no longer be revoked rather than a
+// first enrollment. See ClusterStore.droppedNodeIDs.
+func (cs *ClusterStore) NodeRecordWasDropped(nodeID string) bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.droppedNodeIDs[nodeID]
+}
+
 // normalizeClusterState repairs a freshly decoded ClusterState in place so that
 // no consumer can observe a nil map OR a nil map value, and reports what it
 // dropped. It is the single normalisation point for both ingestion boundaries
@@ -194,8 +241,19 @@ func (r clusterStateRepair) count() int  { return len(r.NilNodes) + r.NilTokens 
 // already-expired token that nothing can consume. Dropping cannot lose
 // security state: st.Revoked is a slice of VALUES, so the revoked-certificate
 // list — the half CHAOS-07 identified as security-relevant — is untouched, and
-// a dropped node must re-enroll (an availability cost) rather than being trusted
-// on a record that proves nothing.
+// a dropped node must re-enroll rather than being trusted on a record that
+// proves nothing.
+//
+// Re-enrollment is not a pure availability cost, which an earlier wording here
+// claimed. The dropped record carried the node's certificate serial, so that
+// serial can never be added to the CRL afterwards, and admitEnrollment's
+// duplicate-identity denial keys on the record existing — so the same node ID
+// becomes re-enrollable on a fresh token with no predecessor to supersede. The
+// admit decision is unchanged (a single-use admin token is still required);
+// what the drop costs is revocability and the evidence trail. The node ID is
+// therefore retained in ClusterStore.droppedNodeIDs so that re-enrollment is
+// audited and alerted as a replacement instead of looking like a first
+// enrollment. See recordDroppedNodeReenrollment.
 //
 // Deleting from a map during range is defined behaviour in Go; entries deleted
 // during iteration are simply not produced.
@@ -850,6 +908,7 @@ func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
 	}
 	cs.mu.Lock()
 	defer cs.mu.Unlock() // deferred: saveLocked must not leak the lock on a panic
+	cs.rememberDroppedNodesLocked(repair)
 	cs.st = st
 	_ = cs.saveLocked() //nolint:errcheck // best-effort; the in-memory import stands either way
 	return nil
