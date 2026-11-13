@@ -169,7 +169,7 @@ func TestSECBootstrapHost1_ForwardedHostIsUnconstrained(t *testing.T) {
 
 // TestSECBootstrapHost1_LegitimateHostsStillServe is the CONTROL. The cheapest
 // way to pass every gate above is to refuse every request, which would remove
-// one-click DP enrolment from the product; this proves the endpoint still works
+// one-click DP enrollment from the product; this proves the endpoint still works
 // for the authorities a real Control Plane presents, and that the values it
 // interpolates are single-quoted.
 func TestSECBootstrapHost1_LegitimateHostsStillServe(t *testing.T) {

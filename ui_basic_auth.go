@@ -50,7 +50,7 @@ package main
 // ORDER IS LOAD-BEARING, and the TOTP refusal comes AFTER the password check.
 // Refusing on "this account has TOTP" before verifying the password would
 // answer a question an unauthenticated caller may not ask: it turns the
-// endpoint into an enrolment oracle that distinguishes a real account with 2FA
+// endpoint into an enrollment oracle that distinguishes a real account with 2FA
 // from an unknown name, for free. Checking the password first means only a
 // caller who ALREADY holds the correct credential learns that the account is
 // enrolled, which tells them nothing they could not confirm by logging in.

@@ -349,7 +349,7 @@ func checkStateFileIntegrity() []OperatorContractCheck {
 				Status: diagWarn,
 				Message: fmt.Sprintf("%s state file loaded, but %d unusable record(s) in it were dropped; whatever they held is not in effect on this node",
 					kind, rec.DroppedEntries),
-				OperatorAction: "Re-create the dropped entries (for cluster state: re-enrol the affected nodes and re-issue any pending enrollment tokens). The file was not modified; see the server log for the entries by name.",
+				OperatorAction: "Re-create the dropped entries (for cluster state: re-enroll the affected nodes and re-issue any pending enrollment tokens). The file was not modified; see the server log for the entries by name.",
 			})
 		case rec.QuarantineFailed:
 			checks = append(checks, OperatorContractCheck{

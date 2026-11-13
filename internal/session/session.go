@@ -257,6 +257,95 @@ func (r *RevocationList) Revoke(token string, exp time.Time) bool {
 func (r *RevocationList) IsRevoked(token string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.tokenRevokedLocked(token)
+}
+
+// StatusFor answers BOTH revocation questions — is this cookie revoked, and is
+// this account revoked — under ONE acquisition of the list mutex.
+//
+// ── Why this exists ─────────────────────────────────────────────────────────
+//
+// Decode runs on the PROXY authentication hot path, not just the admin UI: the
+// signed session cookie is the first credential arm resolveRequestAuth tries,
+// so every authenticated request runs it, and it used to consult this list
+// TWICE — IsRevoked(b64), then IsUserRevoked(s.Sub). Both take the same
+// exclusive mutex over a single map lookup, so the two checks serialised the
+// authentication path against itself at twice the necessary rate.
+//
+// Measured on this package's own BenchmarkDecodeParallel (Go 1.27.4,
+// linux/amd64, 4 cores, -mutexprofile) with an EMPTY revocation list — so the
+// contention is purely on the lock and not on anything under it:
+//
+//	source of mutex delay          share of the whole run
+//	IsUserRevoked                  42.4%
+//	IsRevoked                      30.9%
+//	everything else                26.7%
+//
+// In the CPU profile of the same run the two checks were 9.4% of cycles, with a
+// further ~8% in runtime.procyield / futex / osyield / tgkill — spinning and
+// parking on that one mutex. Halving the acquisitions halves that, and the
+// saving grows with core count because the contention does.
+//
+// An empty `username` is answered false without a lookup, which is the guard
+// Decode's call site used to apply itself (`s.Sub != ""`).
+//
+// It is the preferred entry point for ANY caller that needs both answers;
+// IsRevoked and IsUserRevoked remain for callers that need only one.
+//
+// ── What was measured and rejected, so it is not retried blind ──────────────
+//
+// Making the READ path lock-free would be worth more than halving the
+// acquisitions, and three shapes were built and measured first. None of them
+// can be had at this size, and the reasons are recorded here rather than
+// rediscovered:
+//
+//  1. AN RWMUTEX on this field was ~20% SLOWER under contention, not faster
+//     (~326 ns/op vs ~275 ns/op for two checks at 4 cores, measured on a
+//     4096-entry list). The critical section is one map lookup, which is
+//     shorter than the lock protocol around it: RLock/RUnlock are two atomic
+//     read-modify-writes on the SAME cache line, so the line still ping-pongs
+//     between cores, with more total atomics and more branches than the mutex.
+//     An RWMutex is the right answer for a long read section; this is not one.
+//
+//  2. AN IMMUTABLE COPY-ON-WRITE VIEW published through an atomic.Pointer —
+//     the repository's usual idiom — delivered the read win (2.8x at 4 cores)
+//     and cost a full map copy per revocation: Revoke went from 0.6 us to
+//     750 us with 787 KB of garbage at 4096 entries, O(n) per insert. Not
+//     affordable HERE: the local MAC-verified path is deliberately uncapped
+//     (refusing to revoke a real session is the one failure this control may
+//     not have), so n reaches tens of thousands inside one 7-day TTL, and the
+//     logout path that would pay it is the same path CHAOS-73 recorded
+//     QUADRATIC write amplification on. Adding an O(n) term per insert there is
+//     adding to a multiplier that already has an incident.
+//
+//  3. A sync.Map MIRROR BESIDE the authoritative maps keeps writes O(1) and
+//     reads lock-free, and is structurally unsafe at this size: it makes the
+//     authoritative map no longer authoritative for the read path, so any
+//     writer — including the 47 existing test sites that populate
+//     `tokens`/`users` directly under the lock — is silently ineffective.
+//
+// The lock-free read is still the right end state; it needs the STORE itself to
+// become concurrent (a sync.Map as the sole store, with a maintained count for
+// MaxRevocationEntries and the sweep/export ranges rebuilt over it), which is a
+// redesign of a security-critical structure and belongs in its own reviewed
+// change rather than in a performance pass. These benchmarks
+// (revocation_readpath_bench_test.go) are the harness it should be measured on.
+func (r *RevocationList) StatusFor(token, username string) (tokenRevoked, userRevoked bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	tokenRevoked = r.tokenRevokedLocked(token)
+	if username != "" {
+		userRevoked = r.userRevokedLocked(username)
+	}
+	return tokenRevoked, userRevoked
+}
+
+// tokenRevokedLocked is IsRevoked's body. Caller holds r.mu.
+//
+// Extracted so the single-question and both-questions entry points cannot drift
+// into two dialects for one decision — the CHAOS-73 trap, and the reason
+// sweepLocked is shared by every surface that evicts.
+func (r *RevocationList) tokenRevokedLocked(token string) bool {
 	exp, ok := r.tokens[token]
 	if !ok {
 		return false
@@ -285,6 +374,12 @@ func (r *RevocationList) RevokeUser(username string) {
 func (r *RevocationList) IsUserRevoked(username string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.userRevokedLocked(username)
+}
+
+// userRevokedLocked is IsUserRevoked's body. Caller holds r.mu. See
+// tokenRevokedLocked for why both are extracted.
+func (r *RevocationList) userRevokedLocked(username string) bool {
 	exp, ok := r.users[username]
 	if !ok {
 		return false
@@ -1059,11 +1154,6 @@ func Decode(raw string) (*Session, error) {
 		return nil, fmt.Errorf("session: invalid signature")
 	}
 
-	// Revocation check (explicit logout).
-	if Revoked.IsRevoked(b64) {
-		return nil, fmt.Errorf("session: revoked")
-	}
-
 	payload, err := base64.RawURLEncoding.DecodeString(b64)
 	if err != nil {
 		return nil, fmt.Errorf("session: base64 decode: %w", err)
@@ -1072,11 +1162,44 @@ func Decode(raw string) (*Session, error) {
 	if err := json.Unmarshal(payload, &s); err != nil {
 		return nil, fmt.Errorf("session: json decode: %w", err)
 	}
+
+	// ── Both revocation questions, ONE lock acquisition ─────────────────────
+	//
+	// The explicit-logout check (the b64 payload) and the account-deletion
+	// check (the subject) take the same exclusive mutex over a single map
+	// lookup each, and this function runs on the proxy authentication hot path,
+	// so asking twice serialised authentication against itself at twice the
+	// necessary rate. StatusFor answers both under one acquisition; see the
+	// measurement and the rejected alternatives there.
+	//
+	// The REJECTION ORDER below is unchanged — revoked, then expired, then
+	// user-revoked — so every error this function can return, and the
+	// precedence between them, is exactly what it was. What moved is that a
+	// revoked cookie now pays the base64 and JSON decode before being refused,
+	// and that is unobservable: the MAC above verifies the payload itself, so a
+	// cookie that reaches this point was encoded by this appliance and its
+	// payload always decodes. An input contrived to be MAC-valid AND malformed
+	// is refused either way, with a different message and no caller branching
+	// on which (TestDecode_RejectionOrderIsUnchanged).
+	//
+	// One further difference, stated rather than left to be found: because the
+	// account question is now asked BEFORE the expiry test, an EXPIRED cookie
+	// whose subject happens to hold an already-expired account revocation now
+	// lazily evicts that entry where it previously would not. Dropping an
+	// expired entry is SEC-REVEXP-1's own test — the sweep would drop it
+	// anyway — so no verdict changes; only the moment an already-dead entry
+	// stops occupying the map, and only for a cookie that is being refused.
+	tokenRevoked, userRevoked := Revoked.StatusFor(b64, s.Sub)
+
+	// Revocation check (explicit logout).
+	if tokenRevoked {
+		return nil, fmt.Errorf("session: revoked")
+	}
 	if time.Now().Unix() > s.Exp {
 		return nil, fmt.Errorf("session: expired")
 	}
 	// User-level revocation (account deleted while session was active).
-	if s.Sub != "" && Revoked.IsUserRevoked(s.Sub) {
+	if userRevoked {
 		return nil, fmt.Errorf("session: user revoked")
 	}
 	return &s, nil

@@ -28,7 +28,7 @@ import (
 // authentication factor for the admin plane: apiAuthLogin refuses to issue a
 // session for an enrolled user until verifyLoginTOTP accepts a code
 // (ui_auth.go). Its whole purpose is to SURVIVE a password compromise, so the
-// only thing that may remove it is an explicit, audited de-enrolment.
+// only thing that may remove it is an explicit, audited de-enrollment.
 //
 // These gates pin that invariant against every credential-write primitive that
 // reaches the roster. The DEFECT they were written against: Config.SetUIUser
@@ -37,7 +37,7 @@ import (
 // factor — and reset totpLastCounter to 0, reopening the OTP replay window
 // that SetTOTPLastCounter exists to close.
 
-// enrolTOTPUser seeds a user with a password and a full TOTP enrolment.
+// enrolTOTPUser seeds a user with a password and a full TOTP enrollment.
 func enrolTOTPUser(t *testing.T, c *Config, user, pass string, role UIRole) {
 	t.Helper()
 	if err := c.SetUIUser(user, pass, role); err != nil {
@@ -51,12 +51,12 @@ func enrolTOTPUser(t *testing.T, c *Config, user, pass string, role UIRole) {
 	}
 }
 
-// assertTOTPIntact fails when any part of the enrolment seeded by
+// assertTOTPIntact fails when any part of the enrollment seeded by
 // enrolTOTPUser is missing.
 func assertTOTPIntact(t *testing.T, c *Config, user, where string) {
 	t.Helper()
 	if !c.UserHasTOTP(user) {
-		t.Errorf("%s: TOTP enrolment was destroyed — the account silently dropped to single-factor", where)
+		t.Errorf("%s: TOTP enrollment was destroyed — the account silently dropped to single-factor", where)
 	}
 	if got := c.GetTOTPSecret(user); got != "JBSWY3DPEHPK3PXP" {
 		t.Errorf("%s: TOTP secret = %q, want the seeded secret", where, got)
@@ -139,7 +139,7 @@ func TestSetUIUser_NewUserHasNoTOTP(t *testing.T) {
 
 // TestSetAuth_PreservesTOTPOfMirroredUser pins the second primitive: SetAuth
 // mirrors the legacy -user/-pass credential into the RBAC roster and must not
-// clobber an enrolment already held for that username. Reachable at runtime
+// clobber an enrollment already held for that username. Reachable at runtime
 // from POST /api/settings/auth (ui_config.go), not just at boot.
 func TestSetAuth_PreservesTOTPOfMirroredUser(t *testing.T) {
 	c := newTestConfig()
@@ -217,7 +217,7 @@ func TestAPIChangePassword_PreservesTOTP(t *testing.T) {
 
 // TestAPIAuthUsers_AdminPasswordSetPreservesTOTP drives the admin roster
 // handler: an admin resetting another account's password must not silently
-// de-enrol that account's second factor.
+// de-enroll that account's second factor.
 func TestAPIAuthUsers_AdminPasswordSetPreservesTOTP(t *testing.T) {
 	snapshotAuthGlobals(t)
 	ensureAuthStartupTestLogger(t)
@@ -303,7 +303,7 @@ func TestSetUIUser_ConcurrentWithTOTPMutators(t *testing.T) {
 			c.SetTOTPLastCounter("judy", int64(1_000_000+i))
 		}
 	}()
-	go func() { // enrolment reader
+	go func() { // enrollment reader
 		defer wg.Done()
 		for i := 0; i < iterations; i++ {
 			_ = c.UserHasTOTP("judy")
@@ -320,7 +320,7 @@ func TestSetUIUser_ConcurrentWithTOTPMutators(t *testing.T) {
 	wg.Wait()
 
 	if !c.UserHasTOTP("judy") {
-		t.Fatal("enrolment lost under concurrent credential writes")
+		t.Fatal("enrollment lost under concurrent credential writes")
 	}
 	// The counter is monotonic by SetTOTPLastCounter's own contract; a
 	// credential write must never drag it backwards below the seed.
@@ -376,7 +376,7 @@ func TestRunResetPasswordCommand_ClearsTOTPExplicitlyAndSaysSo(t *testing.T) {
 		t.Fatalf("reload: %v", err)
 	}
 	if reloaded.UserHasTOTP("kate") {
-		t.Error("TOTP enrolment survived the break-glass reset on disk")
+		t.Error("TOTP enrollment survived the break-glass reset on disk")
 	}
 }
 
@@ -558,7 +558,7 @@ func TestClearTOTP_ResetsReplayCounter(t *testing.T) {
 	}
 }
 
-// TestSetTOTPSecret_NewSecretResetsCounter covers re-enrolment: a different
+// TestSetTOTPSecret_NewSecretResetsCounter covers re-enrollment: a different
 // secret must start from a clean counter, or its first code is refused.
 func TestSetTOTPSecret_NewSecretResetsCounter(t *testing.T) {
 	c := newTestConfig()
@@ -592,7 +592,7 @@ func TestSetTOTPSecret_SameSecretKeepsCounter(t *testing.T) {
 }
 
 // TestRunResetPasswordCommand_LeavesNoStaleReplayCounter is the end-to-end
-// gate on the break-glass path: the account must be ready to re-enrol, which
+// gate on the break-glass path: the account must be ready to re-enroll, which
 // is exactly what the warning the command prints tells the operator to do.
 func TestRunResetPasswordCommand_LeavesNoStaleReplayCounter(t *testing.T) {
 	restoreGlobalRosterPath(t)
@@ -621,7 +621,7 @@ func TestRunResetPasswordCommand_LeavesNoStaleReplayCounter(t *testing.T) {
 
 	if got := cfg.GetTOTPLastCounter("peggy"); got != 0 {
 		t.Errorf("totpLastCounter = %d after the break-glass reset, want 0 — the account cannot "+
-			"re-enrol an authenticator until wall-clock time passes a counter from the device the "+
+			"re-enroll an authenticator until wall-clock time passes a counter from the device the "+
 			"operator no longer has", got)
 	}
 	// And durably: the stale counter must not come back from disk.

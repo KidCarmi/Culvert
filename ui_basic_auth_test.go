@@ -72,7 +72,7 @@ func secBasicUser(t *testing.T, user, pass string, role UIRole, totp bool) {
 	if totp {
 		cfg.SetTOTPSecret(user, "JBSWY3DPEHPK3PXP", []string{"backup-code-1"})
 		if !cfg.UserHasTOTP(user) {
-			t.Fatalf("precondition: TOTP enrolment did not take for %q", user)
+			t.Fatalf("precondition: TOTP enrollment did not take for %q", user)
 		}
 	}
 	t.Cleanup(func() { loginLimiter.ResetUser(user) })
@@ -111,7 +111,7 @@ func TestSECBASIC1_TOTPEnrolledAccountCannotUseBasic_DefectProof(t *testing.T) {
 			code, role)
 	}
 	if code != http.StatusUnauthorized {
-		t.Errorf("refusal status = %d, want 401 (uniform with a wrong password, so the response is not an enrolment oracle)", code)
+		t.Errorf("refusal status = %d, want 401 (uniform with a wrong password, so the response is not an enrollment oracle)", code)
 	}
 }
 

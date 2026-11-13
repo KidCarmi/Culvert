@@ -9,6 +9,53 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **Session-cookie decoding consulted the revocation list twice per
+  authenticated request, taking the same exclusive mutex each time, so the
+  proxy authentication path serialised against itself at twice the necessary
+  rate.** `session.Decode` runs on the proxy credential path and not only the
+  admin UI — the signed cookie is the first arm `resolveRequestAuth` tries — and
+  it called `IsRevoked(payload)` and then `IsUserRevoked(subject)`, each of
+  which locks `RevocationList.mu` over a single map lookup. Measured on
+  `BenchmarkDecodeParallel` (Go 1.27.4, linux/amd64, 4 cores, `-mutexprofile`)
+  with an EMPTY revocation list, so the contention is purely on the lock:
+  `IsUserRevoked` was 42.4% and `IsRevoked` 30.9% of all mutex delay in the
+  run. `StatusFor` now answers both questions under one acquisition, and
+  `Decode` asks once. The two checks' own cost falls 1.49x serial (44.4 ->
+  29.8 ns for the pair) and 1.70x under contention (255 -> 150 ns at 4 cores),
+  and the mutex delay they account for falls 64% per op (193 -> 69 ns).
+  End-to-end `Decode` throughput at 4 cores is UNCHANGED (711 -> 709 ns/op):
+  at this core count the lock is only a few percent utilised and is not yet the
+  limiter, so what the change buys is headroom — halving the lock time per
+  request doubles the core count at which this mutex becomes the authentication
+  path's throughput ceiling, which a 4-core runner cannot demonstrate. Decode's
+  rejection order (invalid signature, revoked, expired, user revoked) and every
+  error it can return are unchanged; what moved is that a revoked cookie now
+  pays the base64 and JSON decode before refusal, which is unobservable because
+  the MAC verified above covers the payload, so a cookie reaching that point was
+  encoded by this appliance and always decodes. Read-path benchmarks and a
+  structural acquisition-count gate are new
+  (`internal/session/revocation_readpath_bench_test.go`,
+  `revocation_readpath_benchgate_test.go`); the gate is structural rather than a
+  timing ratio for the reason this repository has now recorded four times — the
+  size of a contention win is hardware- and core-count-dependent, so a bound
+  loose enough to be safe everywhere catches nothing. Three lock-free read
+  designs were built, measured and rejected before this one, and the reasons are
+  recorded on `StatusFor` so they are not retried blind: an **RWMutex** on this
+  field measured ~20% SLOWER under contention (~326 vs ~275 ns/op), because the
+  critical section is one map lookup and `RLock`/`RUnlock` are two atomic writes
+  to the same cache line; an **immutable copy-on-write view** published through
+  an `atomic.Pointer` delivered the read win (2.8x) and cost a full map copy per
+  revocation (`Revoke` 0.6 us -> 750 us, 787 KB/op at 4096 entries), which is
+  unaffordable on a list the local MAC-verified path deliberately leaves
+  uncapped and on the same logout path CHAOS-73 recorded quadratic write
+  amplification; and a **`sync.Map` mirror beside the authoritative maps** keeps
+  writes O(1) but makes the authoritative map no longer authoritative for the
+  read path, so any writer that does not update the mirror — including the 47
+  existing test sites that populate `tokens`/`users` directly — is silently
+  ineffective. The lock-free read remains the right end state and needs the
+  store itself to become concurrent, which is a redesign of a security-critical
+  structure and belongs in its own reviewed change.
+
 - **The identity-result cache on the proxy credential path chose its eviction
   victim by scanning every bucket, so a cached verdict cost one hashed map
   lookup per distinct client address — under the cache's single mutex, once per
@@ -149,6 +196,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `io.CopyBuffer` actually does.
 
 ### Changed
+
+- **A parent-proxy chain with no eligible parent is now a Diagnostics row.**
+  When every configured parent proxy is unhealthy, circuit-open or
+  credential-ineligible, plain-HTTP requests fail open to DIRECT egress. That
+  was visible only as the `upstream_pool_down` alert, a log line, the
+  `culvert_upstream_direct_fallback_active` metric and the effective mode on
+  Network → Upstream Proxies, so the Diagnostics report stayed green while the
+  configured chain was bypassed. The new `upstream_egress` WARN row names the
+  mode (`no_eligible_parent` or `direct_fallback`), the configured count and the
+  fallback total, and points to the Upstream page. It is report-only: it reads
+  the same in-memory eligibility and fallback latch, never probes, and
+  selection, fail-open behavior and alerting are unchanged. Counts only; no
+  authority, URL or credential.
 
 - **A refused upstream-pool configuration is now a Diagnostics row.** When the
   stored managed upstream document failed validation at load, the config.yaml

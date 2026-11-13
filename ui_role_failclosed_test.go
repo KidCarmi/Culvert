@@ -593,7 +593,7 @@ func TestRosterLoad_ActiveClampCountClearsAfterRepair(t *testing.T) {
 // TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP pins that the
 // SEC-TOTP-1 record constructor and the persisted-role carry compose: a
 // password change on a clamped account keeps BOTH the raw role a newer build
-// assigned and the account's TOTP enrolment (secret + replay counter).
+// assigned and the account's TOTP enrollment (secret + replay counter).
 func TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP(t *testing.T) {
 	path, _ := seedRosterWithRole(t, "auditor")
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
@@ -603,7 +603,7 @@ func TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP(t *testing.T) {
 	}
 	const secret = "JBSWY3DPEHPK3PXP" // #nosec G101 -- RFC 6238 example TOTP seed, test fixture
 	if !c.SetTOTPSecret("bob", secret, []string{"code-one"}) {
-		t.Fatal("precondition: enrol TOTP")
+		t.Fatal("precondition: enroll TOTP")
 	}
 	if !c.SetTOTPLastCounter("bob", 42) {
 		t.Fatal("precondition: set counter")
