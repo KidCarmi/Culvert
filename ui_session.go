@@ -123,6 +123,17 @@ func classifyUISession(sess *Session) (UIRole, uiSessionVerdict) {
 		// A signed session naming a role this build does not enroll.
 		return "", uiSessionRefused
 	}
+	// SEC-UISESS-DEMOTE-1: the cookie's role is a copy of what the roster
+	// granted at LOGIN. The roster is the authority, so it is a ceiling on
+	// every request: a demotion takes effect on sessions already held instead
+	// of at their expiry. Never a source — a promotion still needs a new login.
+	rosterRole, exists := cfg.UIUserRole(sess.Sub)
+	if !exists {
+		return "", uiSessionRefused // deleted between the two roster reads
+	}
+	if !rosterRole.HasRole(role) {
+		role = rosterRole
+	}
 	return role, uiSessionValid
 }
 
