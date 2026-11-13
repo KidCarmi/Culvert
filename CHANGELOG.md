@@ -352,6 +352,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The dropped-record re-enrollment alert shared ONE dedup key across every
+  node, so a batch of identity replacements delivered one webhook and silently
+  dropped the rest.** `recordDroppedNodeReenrollment` is the only operator-facing
+  signal that a node ID whose stored record was dropped as an unusable null
+  entry has been re-enrolled under a certificate whose predecessor can never
+  reach the CRL, and its contract is to fire once per enrollment. The webhook
+  path did not keep that contract: `internal/alerts` suppresses a duplicate on
+  `event + ":" + Detail` within 30 s, and the producer's detail was a CONSTANT —
+  the node ID lived only in `Host` and the audit record's `Object`, neither of
+  which is part of the dedup key. The multi-node batch is the NORMAL shape of
+  this event, not an edge case: one corrupt `cluster.json` drops every null
+  record it holds in a single normalisation pass, and the documented remediation
+  is to re-issue tokens and let those nodes re-enroll together, so an operator
+  was told about one replacement and nothing about the others. The detail now
+  names the node, which makes the dedup key per-node — the same property
+  `recordExpiredNodeReenrollment` has only incidentally, through its per-node
+  serials. The node ID is client-supplied, so it passes `sanitizeLog` before
+  entering the detail (CWE-117) and is printed with `%q`. Nothing else changes:
+  not the admit decision (a single-use admin-issued token is still required),
+  not the audit action, `Object` or ring behaviour (never deduplicated), not the
+  alert event, `Host`, `Actor` or `Source`, and not the recording point, which
+  is still after the node is registered so a failed enrollment claims nothing.
+  The fix can only cause MORE deliveries, never fewer. Detection gap only: no
+  policy, privilege or persistence behaviour is affected.
+
 - **A Stage-1 auth rule's bare-IP subject decided on the SPELLING, so a
   `CredentialRequired` rule could be accepted and then never challenge anyone.**
   An auth rule's typed CIDR subject predicate accepts "a valid IP or a CIDR"
