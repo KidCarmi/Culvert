@@ -1280,6 +1280,17 @@ jobs:
       # The ONE commit message that may start this job (an empty commit on the
       # reviewed head; reviewed by ASTRA, with its SHA, parent and tree, before
       # it is pushed).
+      # Campaign 9 (owner direction and decision of 8 November 2026; D4 of 9
+      # November 2026; owner clarifications of 10 and 12 November 2026): the same
+      # FB1-R2 candidate OVA e60620c3, after a containment-proof correction.
+      # Campaign 8 (trigger f43162ab, run 43384560604, evidence 14018186899) is
+      # NOT STARTED and preserved: the pre-boot containment proof failed (22 of 23):
+      # in the guest cgroup `getent ahostsv4 www.wikipedia.org` succeeded with no
+      # query reaching the allowlisting resolver, so no receipt, boot or candidate
+      # code ran. The local path that answered was not recorded. Now the step
+      # records the resolver set-up, pins NSS hosts to files+dns (the guest's own
+      # DNS path is resolv.conf -> redirect -> allowlisting resolver), and requires
+      # each DNS proof to have been answered BY that resolver (5 more proof rows).
       # Campaign 8 (owner direction and decision of 8 November 2026; D4 of 9
       # November 2026; owner clarifications of 10 and 12 November 2026): the same
       # FB1-R2 candidate OVA e60620c3, after a fourth HARNESS fix. Campaign 7
@@ -1337,9 +1348,9 @@ jobs:
       # f9d68540. The campaign-3 route (84e05cd6, FB1-R1 OVA f76b6e82) was never
       # triggered: owner decision D4 retired that candidate. None of those
       # messages starts this job.
-      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 8 on the FB1-R2 candidate OVA e60620c3 [qemu-retained]"
-      QEMU_CAMPAIGN: "8"
-      QEMU_PRIOR_CAMPAIGN: "7: trigger 549f6b19f550c1d8766235d47be76bf5e237a672, run 43322272548 attempt 1, evidence artifact 13991003696, verdict FAIL (stop at 3/status-setup-pending: setup_status=unknown 1 s after first boot recorded complete, while status-json reported application_responding=false and management_available=false after first boot recreated the proxy container)"
+      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 9 on the FB1-R2 candidate OVA e60620c3 [qemu-retained]"
+      QEMU_CAMPAIGN: "9"
+      QEMU_PRIOR_CAMPAIGN: "8: trigger f43162abe180c711e235541b8900efd51ecc169a, run 43384560604 attempt 1, evidence artifact 14018186899, verdict NOT STARTED (pre-boot containment proof failed: getent answered www.wikipedia.org in the guest cgroup with no query reaching the allowlisting resolver; no receipt, boot or candidate execution)"
       # Start deadline (unchanged, reviewed for campaign 2): first candidate boot
       # no later than 2026-11-14T00:00:00Z. With the 345-minute job limit and the
       # daily-window rule the job ends by 2026-11-14T05:45Z, inside the owner's
@@ -1957,6 +1968,25 @@ jobs:
           C="$LAB_ROOT/containment"; mkdir -p "$C"; date +%s > "$LAB_ROOT/job-start.epoch"
           [ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ] || { echo "::error::cgroup v2 is required for the guest egress policy"; exit 1; }
           sudo mkdir -p "/sys/fs/cgroup/$GUEST_CGROUP"
+          # Name resolution for processes in the guest cgroup must be the path
+          # the guest's own DNS takes: the resolver in /etc/resolv.conf, which
+          # the nft rule below redirects to the allowlisting resolver. Campaign 8
+          # (run 43384560604): getent answered www.wikipedia.org with no query
+          # reaching that resolver, and the runner's resolver set-up was not
+          # recorded. Record it now, then pin NSS hosts to files+dns (written in
+          # place, so a bind-mounted file works too).
+          { echo "== /etc/resolv.conf"; ls -l /etc/resolv.conf; cat /etc/resolv.conf
+            echo "== nsswitch hosts (before)"; grep -E '^hosts:' /etc/nsswitch.conf || echo "(no hosts line)"
+            echo "== /etc/hosts lines naming a DNS proof name"; grep -nE 'wikipedia|checkip|googleapis|raw\.githubusercontent' /etc/hosts || echo "(none)"
+            echo "== services"; for u in systemd-resolved nscd; do printf '%s %s\n' "$u" "$(systemctl is-active "$u" 2>&1 || true)"; done
+          } > "$C/resolver-env.txt" 2>&1
+          sudo python3 -I -c 'import re,sys
+          p="/etc/nsswitch.conf"; t=open(p).read()
+          n=re.sub(r"(?m)^hosts:.*$", "hosts:          files dns", t) if re.search(r"(?m)^hosts:", t) else t + "hosts:          files dns\n"
+          open(p, "w").write(n)'
+          { echo "== nsswitch hosts (after)"; grep -E '^hosts:' /etc/nsswitch.conf; } >> "$C/resolver-env.txt"
+          [ "$(grep -E '^hosts:' /etc/nsswitch.conf | tr -s ' ')" = "hosts: files dns" ] || { echo "::error::could not pin NSS hosts to files dns"; cat "$C/resolver-env.txt"; exit 1; }
+          cat "$C/resolver-env.txt"
           # The guest's resolver: allowlisted names only (NXDOMAIN otherwise);
           # every answer for an allowed name is added to its destination set.
           names="$(printf '%s\n' $EGRESS_ALLOW_NAMES | sort -u | paste -sd/ -)"
@@ -2050,9 +2080,19 @@ jobs:
           # every A/AAAA answer judged by the candidate's rule and TLS, then the
           # discovery path itself (HTTP 200, no redirect, manifest-bound).
           echo 'python3 -I "$LAB_ROOT/oidc-check.py" guest "$LAB_ROOT/containment/oidc-guest.json"' >> "$C/proof.sh"
-          proof_rows=$((15 + 2 + 2 * $(wc -w <<<"$OIDC_REVIEWED_RESOLVED_HOSTS")))
+          proof_rows=$((15 + 2 + 2 * $(wc -w <<<"$OIDC_REVIEWED_RESOLVED_HOSTS") + 5))
           bash -c 'echo $$ | sudo tee "/sys/fs/cgroup/'"$GUEST_CGROUP"'/cgroup.procs" >/dev/null; grep -qx "0::/'"$GUEST_CGROUP"'" /proc/self/cgroup && exec bash "$0"' "$C/proof.sh" > "$C/proof.tsv"
           kill "$h1" "$h2" 2>/dev/null || true
+          # Each DNS proof must have been answered BY the allowlisting resolver:
+          # dnsmasq's own NXDOMAIN for every refused name, and a query it
+          # received for the allowed one. An answer from anywhere else (hosts
+          # file, a caching service, another resolver) fails here, naming the path.
+          for n in www.wikipedia.org checkip.amazonaws.com "$OIDC_UNRESOLVED_CONTROL" googleapis.com; do
+            if grep -qF " config $n is NXDOMAIN" "$C/dnsmasq.log"; then r=PASS; else r=FAIL; fi
+            printf '%s\t%s\t%s\n' "$r" refused "dns path: $n answered NXDOMAIN by the allowlisting resolver itself" >> "$C/proof.tsv"
+          done
+          if grep -qF " query[A] raw.githubusercontent.com from " "$C/dnsmasq.log"; then r=PASS; else r=FAIL; fi
+          printf '%s\t%s\t%s\n' "$r" allowed "dns path: raw.githubusercontent.com was resolved through the allowlisting resolver" >> "$C/proof.tsv"
           printf '%s\t%s\t%s\n' "$(curl -fsS -m 15 -o /dev/null https://api.github.com/zen && echo PASS || echo FAIL)" allowed "runner control plane outside the guest cgroup (api.github.com)" >> "$C/proof.tsv"
           cat "$C/proof.tsv" | tee -a "$GITHUB_STEP_SUMMARY"
           [ "$(grep -c . "$C/proof.tsv")" -eq "$proof_rows" ] && ! grep -qv '^PASS' "$C/proof.tsv" || { echo "::error::egress preflight proof failed ($proof_rows rows expected)"; exit 1; }
