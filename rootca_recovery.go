@@ -337,6 +337,10 @@ func startInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig)
 	go runInspectionCARecoveryLoop(ctx, cfg, sched)
 }
 
+// crashComponentInspectionCARecovery names the Root CA recovery loop in the
+// crash plane (culvert_crash_records_total{component="inspection_ca_recovery"}).
+const crashComponentInspectionCARecovery = "inspection_ca_recovery"
+
 func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, sched caRetrySchedule) {
 	backoff := sched.initial
 	for attempt := 1; attempt <= sched.budget; attempt++ {
@@ -348,7 +352,33 @@ func runInspectionCARecoveryLoop(ctx context.Context, cfg rootCAStartupConfig, s
 
 		// The attempt, the "already fixed by hand?" check and the latch clear all
 		// happen together under caMutationMu — see tryInspectionCARecovery.
-		attempted, err := tryInspectionCARecovery(cfg, attempt)
+		//
+		// CHAOS-118: the attempt is panic-guarded because this loop is
+		// `go`-detached, so an unrecovered panic in it terminated the gateway
+		// rather than leaving SSL inspection disabled. The §8.2a lock audit is
+		// clean here, unlike the syslog and IdP watchdogs: tryInspectionCARecovery
+		// takes caMutationMu with `defer caMutationMu.Unlock()`, and
+		// caLoadRecovery.update defers its own release, so containing a panic
+		// cannot wedge either lock.
+		//
+		// Keep-going is NOT the default answer for this round, because both of
+		// its exits are terminal: `!attempted` means an operator already fixed
+		// the CA and `err == nil` means recovery succeeded. A panicked attempt
+		// is neither, and inheriting a zero value would pick one of them —
+		// abandoning retries, or declaring SSL inspection recovered while it
+		// stays disabled. So a contained panic is charged as a FAILED attempt
+		// and the loop retries on backoff until the budget is spent, which is
+		// the fail-closed reading: inspection stays off and the give-up log
+		// still fires.
+		var attempted bool
+		var err error
+		if runGuarded(crashComponentInspectionCARecovery, func() {
+			attempted, err = tryInspectionCARecovery(cfg, attempt)
+		}) {
+			attempted = true
+			err = fmt.Errorf("recovery attempt %d panicked (contained; see culvert_crash_records_total{component=%q})",
+				attempt, crashComponentInspectionCARecovery)
+		}
 		if !attempted {
 			return // an operator recovered it (force-rotate / custom-CA upload)
 		}

@@ -2799,15 +2799,31 @@ func TestChaos87_WatchdogEnforcesTheCeilingAndReArmsRecovery(t *testing.T) {
 		t.Fatalf("read health plane: %v", err)
 	}
 	body := string(src)
-	start := strings.Index(body, "func runIdPMetadataDegradationWatchdog(")
-	if start < 0 {
-		t.Fatal("watchdog not found — rename it and this wall must be updated with it")
+	extract := func(decl string) string {
+		t.Helper()
+		start := strings.Index(body, decl)
+		if start < 0 {
+			t.Fatalf("%s not found — rename it and this wall must be updated with it", decl)
+		}
+		end := strings.Index(body[start:], "\n}\n")
+		if end < 0 {
+			t.Fatalf("could not delimit the body of %s", decl)
+		}
+		return body[start : start+end]
 	}
-	end := strings.Index(body[start:], "\n}\n")
-	if end < 0 {
-		t.Fatal("could not delimit the watchdog body")
+
+	// CHAOS-118 split the tick body into idpMetadataDegradationWatchdogRound so
+	// the detached loop has a single panic-guarded call (an unrecovered panic in
+	// any goroutine terminates the gateway). The enforcement therefore lives in
+	// the ROUND, and the loop's job is to keep calling it — so this wall pins
+	// the whole chain rather than one function, which is stricter than before:
+	// moving the calls out of the round no longer satisfies it, and neither does
+	// a loop that stops invoking the round.
+	loop := extract("func runIdPMetadataDegradationWatchdog(")
+	if !strings.Contains(loop, "idpMetadataDegradationWatchdogRound(") {
+		t.Error("the watchdog loop no longer invokes its round — the ticker would run no enforcement at all")
 	}
-	fn := body[start : start+end]
+	fn := extract("func idpMetadataDegradationWatchdogRound(")
 
 	for _, must := range []string{
 		"idpMetadataDegradationSweep(", // still alerts
@@ -2817,7 +2833,7 @@ func TestChaos87_WatchdogEnforcesTheCeilingAndReArmsRecovery(t *testing.T) {
 		"idpArmRecovery(",              // gives a retired provider a way back
 	} {
 		if !strings.Contains(fn, must) {
-			t.Errorf("the watchdog no longer calls %s — detection without enforcement is what round 8 found, "+
+			t.Errorf("the watchdog round no longer calls %s — detection without enforcement is what round 8 found, "+
 				"and a retirement without re-arming leaves SSO down with nothing retrying it", must)
 		}
 	}

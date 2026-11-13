@@ -192,6 +192,56 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **A panic in any of the last five `go`-detached background rounds terminated
+  the whole gateway, and guarding two of them without also fixing how they
+  release their locks would have been worse than the crash.** Go terminates the
+  process on an unrecovered panic in ANY goroutine, so a fault in one round of
+  the syslog/SIEM health watchdog, the IdP metadata degradation watchdog, the
+  Root CA recovery loop, or either MCP telemetry loop (denial flush and
+  per-partition archive export) dropped every in-flight tunnel on an in-line
+  security gateway. Three of the five exist for observability, so a
+  non-essential reporting feature could kill the thing it reports on. All five
+  rounds now go through `runGuarded`, reporting under their own
+  `culvert_crash_records_total{component=…}` value, so a transient fault costs
+  one interval and self-heals instead of costing the node.
+  The paired half is the reason this took a round of its own. Four critical
+  sections reached from those rounds held a mutex across work they do not
+  control and released it with a TRAILING, non-deferred `Unlock`:
+  `commitSyslogDegradation` and `syslogFeedState` (`syslogHealth.mu`, also taken
+  by the drop observer on the logging path, `/healthz` and diagnostics),
+  `idpMetadataDegradationSweep` (`idpMetadata.mu`) and `idpStaleCeilingSweep`
+  (`idpServedMu`, also taken by every IdP metadata publish and by retirement). A
+  guard over that shape contains the panic into a PERMANENTLY held lock — no
+  crash, no restart, no alert and no recovery path, which is strictly worse than
+  the crash it replaces. A function-level `defer` is also wrong: all four do work
+  after the release that must not hold the lock (`commitSyslogDegradation`
+  dispatches an alert that reaches a webhook; `idpStaleCeilingSweep`'s result is
+  acted on with its lock released because retirement takes the registry write
+  lock — the CHAOS-50 rule). Each section is therefore SCOPED, with a deferred
+  release inside the scope, and every released-before-alert boundary and lock
+  hold is unchanged.
+  The Root CA recovery loop needed the opposite decision, because its caller
+  BRANCHES on the round's result and both exits are terminal: `!attempted` means
+  an operator already fixed the CA and `err == nil` means recovery succeeded. A
+  contained panic inheriting those zero values would silently abandon the retry
+  budget, or declare SSL inspection recovered while it stays disabled and
+  inspect-matched TLS is forwarded UNINSPECTED. A panicked attempt is now
+  charged as a FAILED attempt and retried on backoff, with the give-up log
+  unchanged. No wire, persistence, API or configuration change; the five new
+  crash components are label values on an existing series. Every gate was
+  validated by mutation, including that reverting each rescoped section is
+  caught, and the syslog lock-wedge test injects its fault INSIDE the critical
+  section because a panic after the release — or one contained by a
+  function-level defer, which still runs while a panic unwinds — cannot
+  distinguish the fix from the defect. Two existing gates were corrected and are
+  now stricter: CHAOS-81's retirement-lock wall resolves a deferred release's
+  real boundary (the owning scope's closing brace) instead of comparing against
+  the `Unlock` call's source position, and CHAOS-87's watchdog-enforcement wall
+  pins the whole loop→round→five-calls chain after the tick body was split out
+  for guarding. `funcSource` now anchors its reads to `pkgSourceDir()` so a
+  concurrent `os.Chdir` cannot flake the CHAOS-105/117/118 source gates. See
+  [the review](docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-12.md).
+
 - **Automatic Root CA rotation broke inspected HTTPS for every client until the
   new root was distributed, and silently replaced imported CAs.** The rotation
   minted a new key, so a client trusting only the old root could not validate
