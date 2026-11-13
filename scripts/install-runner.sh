@@ -42,13 +42,22 @@ require_cmd() { command -v "$1" &>/dev/null || error "'$1' not found. Install it
 # 0. Validate runner token
 ###############################################################################
 if [[ -z "$RUNNER_TOKEN" ]]; then
+  # Under the documented `curl ... | bash`, stdin IS this script: a bare
+  # `read` consumes the script's own next line as the token. Prompt on the
+  # terminal instead, and refuse when there is none.
+  TOKEN_INPUT=/dev/stdin
+  if [[ ! -t 0 ]]; then
+    { : </dev/tty; } 2>/dev/null \
+      || error "RUNNER_TOKEN is not set and there is no terminal to prompt on. Re-run with RUNNER_TOKEN=<token> ... | bash"
+    TOKEN_INPUT=/dev/tty
+  fi
   echo ""
   echo "  A runner registration token is required."
   echo ""
   echo "  Get one at:"
   echo "    https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/settings/actions/runners/new"
   echo ""
-  read -rp "  Paste the token here: " RUNNER_TOKEN
+  read -rp "  Paste the token here: " RUNNER_TOKEN <"$TOKEN_INPUT" || true
   [[ -z "$RUNNER_TOKEN" ]] && error "Token cannot be empty."
 fi
 
