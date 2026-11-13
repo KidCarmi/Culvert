@@ -246,8 +246,11 @@ than papered over.
   satisfies it, and neither does a loop that stops calling the round.
 
 The full Deep determinism command
-(`TEST_SEED=20260421 go test -count=2 -shuffle=on -timeout=20m ./...`) was
-launched; its result is recorded in §8. **Not run:** the `-race` coverage
+(`TEST_SEED=20260421 go test -count=2 -shuffle=on -timeout=20m ./...`) **passes**
+on the committed tree: exit 0, zero `FAIL` lines, 117 packages `ok` and 3 with
+no test files, with the root package — which owns every change in this diff —
+green at `961.443s`. No shuffle seed is quoted because the seed is printed only
+on failure. **Not run:** the `-race` coverage
 diagnostic, the `benchgate` lane (no gate added or touched), `make api-verify`
 (no API change), the frontend tree, and `cmd/culvert-maint` — none is reached by
 this diff. A passing local selection is not a passing hosted gate.
