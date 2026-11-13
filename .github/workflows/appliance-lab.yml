@@ -1289,8 +1289,11 @@ jobs:
       # query reaching the allowlisting resolver, so no receipt, boot or candidate
       # code ran. The local path that answered was not recorded. Now the step
       # records the resolver set-up, pins NSS hosts to files+dns (the guest's own
-      # DNS path is resolv.conf -> redirect -> allowlisting resolver), and requires
-      # each DNS proof to have been answered BY that resolver (5 more proof rows).
+      # DNS path is resolv.conf -> redirect -> allowlisting resolver), and judges
+      # each DNS proof on its own attempt: getent bounded to 5 s with exit/output
+      # kept, plus the resolver's record of THIS attempt's query and response
+      # (same serial and client, log written after the attempt started, observed
+      # for at most 2 s). Every proof attempt is recorded; the row count is unchanged.
       # Campaign 8 (owner direction and decision of 8 November 2026; D4 of 9
       # November 2026; owner clarifications of 10 and 12 November 2026): the same
       # FB1-R2 candidate OVA e60620c3, after a fourth HARNESS fix. Campaign 7
@@ -2057,14 +2060,99 @@ jobs:
           python3 -m http.server 18999 --bind 127.0.0.1 >/dev/null 2>&1 & h1=$!
           python3 -m http.server 18431 --bind 127.0.0.1 >/dev/null 2>&1 & h2=$!
           sleep 1
+          # One DNS proof attempt, judged on its OWN evidence: getent (bounded, recorded)
+          # and the resolver's record of this attempt's query and response, matched by
+          # query serial and client in the log written after it started (R9-P1/E1/T1).
+          cat > "$C/dnsproof.py" <<'DNSPROOF'
+          import json, os, re, subprocess, sys, time
+          # dnsproof.py WANT LABEL NAME RESOLVER_LOG ATTEMPTS_JSONL — one DNS proof attempt
+          # from inside the guest cgroup, judged on THIS attempt's own evidence only:
+          # getent's own result (bounded, recorded) AND the allowlisting resolver's
+          # record of the query this attempt sent and the response it gave (read from
+          # the log written after this attempt started, matched by query serial and
+          # client). Prints one proof row; appends one JSON record whatever happens.
+          want, label, name, log, out = sys.argv[1:6]
+          GETENT_S, OBSERVE_S = 5.0, 2.0
+          def size():
+              try: return os.path.getsize(log)
+              except OSError: return -1
+          rec = {"want": want, "label": label, "name": name, "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                 "cmd": ["getent", "ahostsv4", name], "timeout_s": GETENT_S, "rc": None, "stdout": None, "stderr": None,
+                 "error": None, "elapsed_s": None, "log_offset": None, "resolver": None, "verdict": "FAIL", "reason": None}
+          ok, why = False, "not evaluated"
+          try:
+              off = size(); rec["log_offset"] = off
+              m0 = time.monotonic()
+              try:
+                  p = subprocess.run(rec["cmd"], capture_output=True, timeout=GETENT_S, stdin=subprocess.DEVNULL)
+                  rec["rc"], so, se = p.returncode, p.stdout, p.stderr
+              except subprocess.TimeoutExpired as e:
+                  so, se = e.stdout or b"", e.stderr or b""; rec["error"] = "getent exceeded %.1f s (killed)" % GETENT_S
+              rec["elapsed_s"] = round(time.monotonic() - m0, 3)
+              rec["stdout"] = so.decode("utf-8", "replace")[:2000]; rec["stderr"] = se.decode("utf-8", "replace")[:500]
+              addrs = sorted({l.split()[0] for l in rec["stdout"].splitlines() if l.split()})
+              # The resolver's record of THIS attempt: lines written after `off` only.
+              n = re.escape(name); res = {"queries": [], "nxdomain": False, "replies": [], "other": []}
+              q_re = re.compile(r"dnsmasq\[\d+\]: (\d+) (\S+)/(\d+) query\[A\] " + n + r" from (\S+)$", re.M)
+              deadline = time.monotonic() + OBSERVE_S
+              while True:
+                  seg = ""
+                  if off >= 0 and os.path.exists(log):
+                      with open(log, errors="replace") as f:
+                          f.seek(off); seg = f.read(262144)
+                  res = {"queries": [], "nxdomain": False, "replies": [], "other": []}
+                  for serial, client, port, frm in q_re.findall(seg):
+                      res["queries"].append("%s %s/%s" % (serial, client, port))
+                      pre = r"dnsmasq\[\d+\]: " + serial + " " + re.escape(client) + "/" + port + " "
+                      if re.search(pre + r"config " + n + r" is NXDOMAIN$", seg, re.M): res["nxdomain"] = True
+                      res["replies"] += re.findall(pre + r"(?:reply|cached) " + n + r" is (\d+\.\d+\.\d+\.\d+)$", seg, re.M)
+                      res["other"] += [l[:160] for l in re.findall(pre + r"(?:reply|cached|config) " + n + r" is (?!NXDOMAIN$)(?!\d+\.\d+\.\d+\.\d+$)(.*)$", seg, re.M)]
+                  done = (want == "refused" and res["nxdomain"]) or (want == "allowed" and res["replies"])
+                  if done or time.monotonic() >= deadline: break
+                  time.sleep(0.1)
+              res["replies"] = sorted(set(res["replies"])); rec["resolver"] = res
+              if off < 0:
+                  why = "resolver log unreadable"
+              elif rec["error"]:
+                  why = rec["error"] + " (a timeout is not a refusal proof)"
+              elif not res["queries"]:
+                  why = "no query from this attempt reached the allowlisting resolver (getent rc=%s)" % rec["rc"]
+              elif want == "refused":
+                  if rec["rc"] != 2: why = "getent rc=%s, not 2 (name not found)" % rec["rc"]
+                  elif not res["nxdomain"]: why = "the resolver gave this attempt no NXDOMAIN (%s)" % (res["other"] or "no response within %.0f s" % OBSERVE_S)
+                  elif res["replies"]: why = "the resolver answered an address for a refused name: %s" % res["replies"]
+                  else: ok, why = True, "rc=2 and the resolver's own NXDOMAIN for query %s" % res["queries"][0]
+              else:
+                  if rec["rc"] != 0 or not addrs: why = "getent rc=%s, addresses %s" % (rec["rc"], addrs)
+                  elif not res["replies"]: why = "the resolver recorded no answer for this attempt's query (%s)" % (res["other"] or "none")
+                  elif not set(addrs) <= set(res["replies"]): why = "getent returned %s, the resolver answered %s" % (addrs, res["replies"])
+                  else: ok, why = True, "rc=0 and every address answered by the resolver for query %s" % res["queries"][0]
+          except Exception as e:
+              why = "proof error: " + repr(e)[:200]
+          finally:
+              rec["verdict"] = "PASS" if ok else "FAIL"; rec["reason"] = why
+              try:
+                  with open(out, "a") as f: f.write(json.dumps(rec, sort_keys=True) + "\n")
+              except Exception as e:
+                  ok = False; why += " | record not written: " + repr(e)[:120]
+              print("%s\t%s\t%s%s" % ("PASS" if ok else "FAIL", want, label, "" if ok else " [" + why[:220] + "]"))
+          DNSPROOF
           cat > "$C/proof.sh" <<'P'
-          t() { local want="$1" name="$2"; shift 2; if "$@" >/dev/null 2>&1; then got=allowed; else got=refused; fi
+          # Every attempt is recorded (command, exit status, timing, bounded output);
+          # each non-DNS probe carries its own explicit time bound.
+          t() { local want="$1" name="$2" o e rc=0 s0; shift 2; o="$(mktemp)"; e="$(mktemp)"; s0="$(date +%s.%N)"
+                "$@" >"$o" 2>"$e" || rc=$?
+                if [ "$rc" -eq 0 ]; then got=allowed; else got=refused; fi
+                python3 -I -c 'import json,sys; a=sys.argv; print(json.dumps({"name": a[1], "want": a[2], "got": a[3], "rc": int(a[4]), "start": a[5], "end": a[6], "stdout": open(a[7], errors="replace").read()[:500], "stderr": open(a[8], errors="replace").read()[:500], "cmd": a[9:]}))' \
+                  "$name" "$want" "$got" "$rc" "$s0" "$(date +%s.%N)" "$o" "$e" "$@" >> "$LAB_ROOT/containment/proof-attempts.jsonl" || true
+                rm -f "$o" "$e"
                 printf '%s\t%s\t%s\n' "$([ "$got" = "$want" ] && echo PASS || echo FAIL)" "$want" "$name"; }
-          t allowed "dns: allowlisted name resolves (raw.githubusercontent.com)" getent ahostsv4 raw.githubusercontent.com
+          d() { python3 -I "$LAB_ROOT/containment/dnsproof.py" "$1" "$2" "$3" "$LAB_ROOT/containment/dnsmasq.log" "$LAB_ROOT/containment/dns-attempts.jsonl"; }
+          d allowed "dns: allowlisted name resolves (raw.githubusercontent.com)" raw.githubusercontent.com
           t allowed "https: allowlisted destination (the SAML fixture)" curl -fsS -m 15 -o /dev/null "$LAB_SAML_METADATA_URL"
           t allowed "https: first-boot trust dependency (tuf-repo-cdn.sigstore.dev)" curl -sS -m 15 -o /dev/null https://tuf-repo-cdn.sigstore.dev/
-          t refused "dns: unrelated name (www.wikipedia.org) answers NXDOMAIN" getent ahostsv4 www.wikipedia.org
-          t refused "dns: a non-necessary product default (checkip.amazonaws.com) answers NXDOMAIN" getent ahostsv4 checkip.amazonaws.com
+          d refused "dns: unrelated name (www.wikipedia.org) answers NXDOMAIN" www.wikipedia.org
+          d refused "dns: a non-necessary product default (checkip.amazonaws.com) answers NXDOMAIN" checkip.amazonaws.com
           t refused "https: unrelated destination by address (1.1.1.1:443)" curl -sS -m 8 -k -o /dev/null https://1.1.1.1/
           t refused "dns-over-tls to a public resolver (1.1.1.1:853)" timeout 8 bash -c 'exec 3<>/dev/tcp/1.1.1.1/853'
           t refused "platform metadata 169.254.169.254:80" curl -sS -m 5 -o /dev/null http://169.254.169.254/
@@ -2072,27 +2160,17 @@ jobs:
           t refused "private network 10.1.0.1:80" curl -sS -m 5 -o /dev/null http://10.1.0.1/
           t refused "loopback service not named for the guest (127.0.0.1:18999)" curl -sS -m 5 -o /dev/null http://127.0.0.1:18999/
           t allowed "named loopback test service (127.0.0.1:18431)" curl -sS -m 5 -o /dev/null http://127.0.0.1:18431/
-          t refused "dns: an OIDC host the candidate does not resolve ($OIDC_UNRESOLVED_CONTROL) answers NXDOMAIN" getent ahostsv4 "$OIDC_UNRESOLVED_CONTROL"
-          t refused "dns: the parent domain googleapis.com is not allowlisted (NXDOMAIN)" getent ahostsv4 googleapis.com
+          d refused "dns: an OIDC host the candidate does not resolve ($OIDC_UNRESOLVED_CONTROL) answers NXDOMAIN" "$OIDC_UNRESOLVED_CONTROL"
+          d refused "dns: the parent domain googleapis.com is not allowlisted (NXDOMAIN)" googleapis.com
           P
           # The OIDC proof through the enforced guest route (oidc-check.py from
           # the pre-boot step): manifest consistency, then per reviewed host
           # every A/AAAA answer judged by the candidate's rule and TLS, then the
           # discovery path itself (HTTP 200, no redirect, manifest-bound).
           echo 'python3 -I "$LAB_ROOT/oidc-check.py" guest "$LAB_ROOT/containment/oidc-guest.json"' >> "$C/proof.sh"
-          proof_rows=$((15 + 2 + 2 * $(wc -w <<<"$OIDC_REVIEWED_RESOLVED_HOSTS") + 5))
+          proof_rows=$((15 + 2 + 2 * $(wc -w <<<"$OIDC_REVIEWED_RESOLVED_HOSTS")))
           bash -c 'echo $$ | sudo tee "/sys/fs/cgroup/'"$GUEST_CGROUP"'/cgroup.procs" >/dev/null; grep -qx "0::/'"$GUEST_CGROUP"'" /proc/self/cgroup && exec bash "$0"' "$C/proof.sh" > "$C/proof.tsv"
           kill "$h1" "$h2" 2>/dev/null || true
-          # Each DNS proof must have been answered BY the allowlisting resolver:
-          # dnsmasq's own NXDOMAIN for every refused name, and a query it
-          # received for the allowed one. An answer from anywhere else (hosts
-          # file, a caching service, another resolver) fails here, naming the path.
-          for n in www.wikipedia.org checkip.amazonaws.com "$OIDC_UNRESOLVED_CONTROL" googleapis.com; do
-            if grep -qF " config $n is NXDOMAIN" "$C/dnsmasq.log"; then r=PASS; else r=FAIL; fi
-            printf '%s\t%s\t%s\n' "$r" refused "dns path: $n answered NXDOMAIN by the allowlisting resolver itself" >> "$C/proof.tsv"
-          done
-          if grep -qF " query[A] raw.githubusercontent.com from " "$C/dnsmasq.log"; then r=PASS; else r=FAIL; fi
-          printf '%s\t%s\t%s\n' "$r" allowed "dns path: raw.githubusercontent.com was resolved through the allowlisting resolver" >> "$C/proof.tsv"
           printf '%s\t%s\t%s\n' "$(curl -fsS -m 15 -o /dev/null https://api.github.com/zen && echo PASS || echo FAIL)" allowed "runner control plane outside the guest cgroup (api.github.com)" >> "$C/proof.tsv"
           cat "$C/proof.tsv" | tee -a "$GITHUB_STEP_SUMMARY"
           [ "$(grep -c . "$C/proof.tsv")" -eq "$proof_rows" ] && ! grep -qv '^PASS' "$C/proof.tsv" || { echo "::error::egress preflight proof failed ($proof_rows rows expected)"; exit 1; }
