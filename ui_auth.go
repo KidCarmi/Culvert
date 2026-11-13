@@ -415,7 +415,7 @@ func apiAuthUsers(w http.ResponseWriter, r *http.Request) {
 		// CHAOS-70: durable-or-refused. Deleting an account is how an
 		// operator revokes a compromised or departing administrator. A 204
 		// over a failed write means the account — password hash, role, TOTP
-		// enrolment intact — returns at the next restart, with the audit trail
+		// enrollment intact — returns at the next restart, with the audit trail
 		// recording the revocation as successful.
 		if err := cfg.mutateRosterDurably(func() error {
 			return cfg.DeleteUIUser(username)

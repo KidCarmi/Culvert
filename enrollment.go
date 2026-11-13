@@ -194,7 +194,7 @@ func (r clusterStateRepair) count() int  { return len(r.NilNodes) + r.NilTokens 
 // already-expired token that nothing can consume. Dropping cannot lose
 // security state: st.Revoked is a slice of VALUES, so the revoked-certificate
 // list — the half CHAOS-07 identified as security-relevant — is untouched, and
-// a dropped node must re-enrol (an availability cost) rather than being trusted
+// a dropped node must re-enroll (an availability cost) rather than being trusted
 // on a record that proves nothing.
 //
 // Deleting from a map during range is defined behaviour in Go; entries deleted
@@ -703,7 +703,7 @@ const (
 
 // crashComponentClusterHeartbeat names the heartbeat monitor in the crash
 // record / culvert_crash_records_total{component} series, so an operator can
-// tell WHICH background round failed (CHAOS-24 plane, CHAOS-117 enrolment).
+// tell WHICH background round failed (CHAOS-24 plane, CHAOS-117 enrollment).
 const crashComponentClusterHeartbeat = "cluster_heartbeat"
 
 // StartHeartbeatMonitor runs a background loop that checks node health.
@@ -843,7 +843,7 @@ func (cs *ClusterStore) ImportFullState(data json.RawMessage) error {
 		// the counter above carry every occurrence; the alert carries the fact.
 		replicatedNilEntryAlertOnce.Do(func() {
 			deferStartupAlert("state_file_corrupt", AlertPayload{
-				Detail: fmt.Sprintf("replicated cluster state from the HA leader contained %d null record(s), which were dropped on this node; inspect the LEADER's cluster.json — enrolled nodes present only as null records must re-enrol", repair.count()),
+				Detail: fmt.Sprintf("replicated cluster state from the HA leader contained %d null record(s), which were dropped on this node; inspect the LEADER's cluster.json — enrolled nodes present only as null records must re-enroll", repair.count()),
 				Source: "storage",
 			})
 		})

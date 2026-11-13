@@ -197,6 +197,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A parent-proxy chain with no eligible parent is now a Diagnostics row.**
+  When every configured parent proxy is unhealthy, circuit-open or
+  credential-ineligible, plain-HTTP requests fail open to DIRECT egress. That
+  was visible only as the `upstream_pool_down` alert, a log line, the
+  `culvert_upstream_direct_fallback_active` metric and the effective mode on
+  Network → Upstream Proxies, so the Diagnostics report stayed green while the
+  configured chain was bypassed. The new `upstream_egress` WARN row names the
+  mode (`no_eligible_parent` or `direct_fallback`), the configured count and the
+  fallback total, and points to the Upstream page. It is report-only: it reads
+  the same in-memory eligibility and fallback latch, never probes, and
+  selection, fail-open behavior and alerting are unchanged. Counts only; no
+  authority, URL or credential.
+
 - **A refused upstream-pool configuration is now a Diagnostics row.** When the
   stored managed upstream document failed validation at load, the config.yaml
   upstream seed was refused whole, or the one-time legacy pool migration was

@@ -286,7 +286,7 @@ func TestChaos70_Control_MutationErrorIsNotMaskedAsPersistFailure(t *testing.T) 
 
 // TestChaos70_RollbackRestoresTheWholeAccount proves the rollback is exact.
 // A partial restore is worse than no rollback: an account left without its
-// password hash, role or TOTP enrolment is an account its owner can no longer
+// password hash, role or TOTP enrollment is an account its owner can no longer
 // use and an operator cannot see is broken. This is why the primitive snapshots
 // the roster wholesale instead of asking each caller for an inverse operation.
 func TestChaos70_RollbackRestoresTheWholeAccount(t *testing.T) {
@@ -316,7 +316,7 @@ func TestChaos70_RollbackRestoresTheWholeAccount(t *testing.T) {
 		t.Errorf("refused delete must leave the credential and role intact; ok=%v role=%q", ok, role)
 	}
 	if got := cfg.GetTOTPSecret("doomed"); got != "JBSWY3DPEHPK3PXP" {
-		t.Errorf("refused delete must leave TOTP enrolment intact; secret = %q", got)
+		t.Errorf("refused delete must leave TOTP enrollment intact; secret = %q", got)
 	}
 	if got := cfg.GetTOTPLastCounter("doomed"); got != 4242 {
 		t.Errorf("refused delete must leave the TOTP replay counter intact; got %d", got)

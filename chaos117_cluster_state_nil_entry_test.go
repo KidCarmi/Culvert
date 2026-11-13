@@ -403,7 +403,7 @@ func TestCHAOS117_DroppedRecordsAreVisibleToAnOperator(t *testing.T) {
 	}
 
 	// The /ready probe must be UNCHANGED: this degradation is survivable
-	// (re-enrol), and holding a fleet out of service for it is worse.
+	// (re-enroll), and holding a fleet out of service for it is worse.
 	if got := stateCorruptionSnapshot(); len(got) != 0 {
 		t.Errorf("the dropped-record repair gated /ready (%v); only an unparseable file does that", got)
 	}

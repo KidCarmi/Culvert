@@ -309,7 +309,7 @@ func (c *configMarshalCache) reset() {
 // response.
 //
 // Unlike verifyNodeCert this is a POSITIVE check (caller must prove
-// enrolment) — a missing peer cert or missing TLS info yields false, so
+// enrollment) — a missing peer cert or missing TLS info yields false, so
 // unauthenticated bootstrap callers are correctly treated as unenrolled.
 func callerIsEnrolledNode(ctx context.Context) bool {
 	p, ok := peer.FromContext(ctx)
