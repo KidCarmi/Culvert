@@ -2072,13 +2072,14 @@ jobs:
           # the log written after this attempt started, matched by query serial and
           # client). Prints one proof row; appends one JSON record whatever happens.
           want, label, name, log, out = sys.argv[1:6]
-          GETENT_S, OBSERVE_S = 5.0, 2.0
+          GETENT_S, OBSERVE_S, OUT_MAX = 5.0, 2.0, 65536
           def size():
               try: return os.path.getsize(log)
               except OSError: return -1
           rec = {"want": want, "label": label, "name": name, "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                  "cmd": ["getent", "ahostsv4", name], "timeout_s": GETENT_S, "rc": None, "stdout": None, "stderr": None,
-                 "error": None, "elapsed_s": None, "log_offset": None, "resolver": None, "verdict": "FAIL", "reason": None}
+                 "error": None, "elapsed_s": None, "total_s": None, "stdout_bytes": None, "log_offset": None, "resolver": None,
+                 "verdict": "FAIL", "reason": None}
           ok, why = False, "not evaluated"
           try:
               off = size(); rec["log_offset"] = off
@@ -2089,8 +2090,11 @@ jobs:
               except subprocess.TimeoutExpired as e:
                   so, se = e.stdout or b"", e.stderr or b""; rec["error"] = "getent exceeded %.1f s (killed)" % GETENT_S
               rec["elapsed_s"] = round(time.monotonic() - m0, 3)
-              rec["stdout"] = so.decode("utf-8", "replace")[:2000]; rec["stderr"] = se.decode("utf-8", "replace")[:500]
-              addrs = sorted({l.split()[0] for l in rec["stdout"].splitlines() if l.split()})
+              # Addresses come from the COMPLETE output (bounded); the record keeps a
+              # display copy only. Output beyond the bound fails closed below.
+              rec["stdout_bytes"] = len(so); full = so.decode("utf-8", "replace")
+              rec["stdout"] = full[:2000]; rec["stderr"] = se.decode("utf-8", "replace")[:500]
+              addrs = sorted({l.split()[0] for l in full.splitlines() if l.split()})
               # The resolver's record of THIS attempt: lines written after `off` only.
               n = re.escape(name); res = {"queries": [], "nxdomain": False, "replies": [], "other": []}
               q_re = re.compile(r"dnsmasq\[\d+\]: (\d+) (\S+)/(\d+) query\[A\] " + n + r" from (\S+)$", re.M)
@@ -2106,27 +2110,34 @@ jobs:
                       pre = r"dnsmasq\[\d+\]: " + serial + " " + re.escape(client) + "/" + port + " "
                       if re.search(pre + r"config " + n + r" is NXDOMAIN$", seg, re.M): res["nxdomain"] = True
                       res["replies"] += re.findall(pre + r"(?:reply|cached) " + n + r" is (\d+\.\d+\.\d+\.\d+)$", seg, re.M)
-                      res["other"] += [l[:160] for l in re.findall(pre + r"(?:reply|cached|config) " + n + r" is (?!NXDOMAIN$)(?!\d+\.\d+\.\d+\.\d+$)(.*)$", seg, re.M)]
+                      res["other"] += [l[:160] for l in re.findall(pre + r"(?:reply|cached|config) " + n + r" is (?!NXDOMAIN$)(?!<CNAME>$)(?!\d+\.\d+\.\d+\.\d+$)(.*)$", seg, re.M)]
                   done = (want == "refused" and res["nxdomain"]) or (want == "allowed" and res["replies"])
                   if done or time.monotonic() >= deadline: break
                   time.sleep(0.1)
-              res["replies"] = sorted(set(res["replies"])); rec["resolver"] = res
+              res["replies"] = sorted(set(res["replies"])); rec["resolver"] = res; rec["total_s"] = round(time.monotonic() - m0, 3)
               if off < 0:
                   why = "resolver log unreadable"
+              elif rec["stdout_bytes"] > OUT_MAX:
+                  why = "getent output %d bytes exceeds the %d-byte bound" % (rec["stdout_bytes"], OUT_MAX)
               elif rec["error"]:
                   why = rec["error"] + " (a timeout is not a refusal proof)"
               elif not res["queries"]:
                   why = "no query from this attempt reached the allowlisting resolver (getent rc=%s)" % rec["rc"]
               elif want == "refused":
+                  # Unambiguous only: NXDOMAIN, and no address and no other outcome for
+                  # any query this attempt sent (a mixed outcome is not a proof).
                   if rec["rc"] != 2: why = "getent rc=%s, not 2 (name not found)" % rec["rc"]
                   elif not res["nxdomain"]: why = "the resolver gave this attempt no NXDOMAIN (%s)" % (res["other"] or "no response within %.0f s" % OBSERVE_S)
-                  elif res["replies"]: why = "the resolver answered an address for a refused name: %s" % res["replies"]
-                  else: ok, why = True, "rc=2 and the resolver's own NXDOMAIN for query %s" % res["queries"][0]
+                  elif res["replies"]: why = "ambiguous: NXDOMAIN and an address %s for this attempt" % res["replies"]
+                  elif res["other"]: why = "ambiguous: NXDOMAIN and another outcome %s for this attempt" % res["other"]
+                  else: ok, why = True, "rc=2 and only the resolver's own NXDOMAIN for query %s" % ", ".join(res["queries"])
               else:
                   if rec["rc"] != 0 or not addrs: why = "getent rc=%s, addresses %s" % (rec["rc"], addrs)
                   elif not res["replies"]: why = "the resolver recorded no answer for this attempt's query (%s)" % (res["other"] or "none")
+                  elif res["nxdomain"]: why = "ambiguous: addresses %s and NXDOMAIN for this attempt" % res["replies"]
+                  elif res["other"]: why = "ambiguous: addresses %s and another outcome %s for this attempt" % (res["replies"], res["other"])
                   elif not set(addrs) <= set(res["replies"]): why = "getent returned %s, the resolver answered %s" % (addrs, res["replies"])
-                  else: ok, why = True, "rc=0 and every address answered by the resolver for query %s" % res["queries"][0]
+                  else: ok, why = True, "rc=0 and every address answered by the resolver for query %s" % ", ".join(res["queries"])
           except Exception as e:
               why = "proof error: " + repr(e)[:200]
           finally:
@@ -2140,12 +2151,14 @@ jobs:
           cat > "$C/proof.sh" <<'P'
           # Every attempt is recorded (command, exit status, timing, bounded output);
           # each non-DNS probe carries its own explicit time bound.
-          t() { local want="$1" name="$2" o e rc=0 s0; shift 2; o="$(mktemp)"; e="$(mktemp)"; s0="$(date +%s.%N)"
+          t() { local want="$1" name="$2" o e rc=0 s0 rec=ok; shift 2; o="$(mktemp)"; e="$(mktemp)"; s0="$(date +%s.%N)"
                 "$@" >"$o" 2>"$e" || rc=$?
                 if [ "$rc" -eq 0 ]; then got=allowed; else got=refused; fi
                 python3 -I -c 'import json,sys; a=sys.argv; print(json.dumps({"name": a[1], "want": a[2], "got": a[3], "rc": int(a[4]), "start": a[5], "end": a[6], "stdout": open(a[7], errors="replace").read()[:500], "stderr": open(a[8], errors="replace").read()[:500], "cmd": a[9:]}))' \
-                  "$name" "$want" "$got" "$rc" "$s0" "$(date +%s.%N)" "$o" "$e" "$@" >> "$LAB_ROOT/containment/proof-attempts.jsonl" || true
+                  "$name" "$want" "$got" "$rc" "$s0" "$(date +%s.%N)" "$o" "$e" "$@" >> "$LAB_ROOT/containment/proof-attempts.jsonl" 2>/dev/null || rec=fail
                 rm -f "$o" "$e"
+                # A proof whose attempt record could not be written is not a proof.
+                if [ "${rec:-ok}" = fail ]; then printf 'FAIL\t%s\t%s [attempt record not written: proof-attempts.jsonl]\n' "$want" "$name"; rec=ok; return 0; fi
                 printf '%s\t%s\t%s\n' "$([ "$got" = "$want" ] && echo PASS || echo FAIL)" "$want" "$name"; }
           d() { python3 -I "$LAB_ROOT/containment/dnsproof.py" "$1" "$2" "$3" "$LAB_ROOT/containment/dnsmasq.log" "$LAB_ROOT/containment/dns-attempts.jsonl"; }
           d allowed "dns: allowlisted name resolves (raw.githubusercontent.com)" raw.githubusercontent.com
