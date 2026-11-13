@@ -506,9 +506,10 @@ Run at this SHA with the pinned toolchain. `go env GOVERSION` = `go1.27.4`,
 | Finding-B tests, `-race` | pass (5/5) |
 | `go test -tags benchgate -run 'TestBenchGate_' -count=1 -p 1` over all ten benchgate packages (root + `admission`, `threatfeed`, `catgroup`, `session`, `decryptprofile`, `catoverride`, `secscan`, `catdb`, `identcache`) | pass |
 | `python3 docs/agent-context/check.py` | pass |
-| `golangci-lint` v2.15.0, `--new-from-rev origin/main` (the gate's own command) | **2 issues in this review's own code, both fixed, re-run clean** |
+| `golangci-lint` v2.15.0, `--new-from-rev origin/main` (the gate's own command) | 2 issues in this review's own code, both **fixed, not suppressed**; re-run reports **`0 issues.`** |
 | `golangci-lint` v2.15.0, full-tree | 176 issues, all pre-existing; none in a function this review touched |
-| `go test -race -count=1 -timeout=40m .` (root, full) | see note |
+| `go test -race -count=1 -timeout=40m .` (root, full) | **pass** — `ok github.com/KidCarmi/Culvert 2311.003s` |
+| `go test -race -count=1` over the affected tests at the committed tree `a783870` | pass — see note |
 
 **Linter findings in this review's own code.** The diff-scoped run — the command
 the Fast PR Gate actually runs — reported two issues introduced here, and both
@@ -534,6 +535,15 @@ go1.26.11 while the module's language version is 1.27 — exactly the trap
 `docs/agent-context/conventions.md` records as repeatedly mis-filed as "local
 lint is unavailable". Rebuilt with `GOTOOLCHAIN=go1.27.4 go install …@v2.15.0`
 it loads the module correctly. Results recorded in the pull request.
+
+**Race-run revision note.** The 38-minute full root `-race` suite was started
+before the two linter fixes landed, so its verdict is for a tree that differs
+from the committed one by exactly those two edits: an unused `context.Context`
+parameter removed, and a test helper's loop changed to index-based. Neither
+alters behaviour, but rather than claim the full run covers the committed tree,
+the affected tests were re-run under `-race` at the committed revision
+(`a783870`, clean worktree) and pass. The full-suite result is therefore
+reported for the substantively identical predecessor, not for `a783870`.
 
 **Scope of these results.** These are focused and local checks at this
 revision. They are **not** aggregate CI approval: the required
