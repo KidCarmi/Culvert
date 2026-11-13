@@ -92,7 +92,7 @@ func runImpact(args []string) error {
 	if err != nil {
 		return err
 	}
-	changed, err := gitLines("diff", "--name-only", *base, "--")
+	changed, err := changedFiles(*base)
 	if err != nil {
 		return err
 	}
@@ -149,12 +149,29 @@ func loadBase(rev string) (*contracts.Registry, error) {
 	return contracts.Parse(out)
 }
 
-func gitLines(args ...string) ([]string, error) {
-	out, err := exec.CommandContext(context.Background(), "git", args...).Output() // #nosec G204 -- fixed binary, caller-built arguments
+// changedFiles lists every path that differs between rev and the working tree.
+//
+// Two flags are load-bearing for the protected-path check:
+//
+//   - --no-renames: with rename detection (git's default) a moved file is
+//     reported under its NEW path only, so moving the gate workflow or
+//     CODEOWNERS out of a protected path would not name the protected path.
+//     Without it a move is a delete of the old path plus an add of the new one.
+//   - -z: without it git C-quotes a path holding non-ASCII bytes
+//     ("dir/z\303\251.go"), which no longer matches its protected glob. NUL
+//     separation prints every path verbatim, spaces included.
+func changedFiles(rev string) ([]string, error) {
+	out, err := exec.CommandContext(context.Background(), "git", "diff", "--name-only", "--no-renames", "-z", rev, "--").Output() // #nosec G204 -- fixed binary; rev is the CI-resolved base
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return nil, fmt.Errorf("git diff %s: %w", rev, err)
 	}
-	return strings.Fields(string(out)), nil
+	var files []string
+	for _, f := range strings.Split(string(out), "\x00") {
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	return files, nil
 }
 
 func loadReviews(file string) ([]contracts.Review, error) {
