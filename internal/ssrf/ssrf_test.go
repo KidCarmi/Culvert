@@ -77,21 +77,26 @@ func TestControl(t *testing.T) {
 }
 
 func TestCacheCleanup_EvictsExpired(t *testing.T) {
-	dnsCache.mu.Lock()
-	dnsCache.entries["stale.test"] = cacheEntry{private: true, expires: time.Now().Add(-time.Minute)}
-	dnsCache.entries["fresh.test"] = cacheEntry{private: false, expires: time.Now().Add(time.Hour)}
-	dnsCache.mu.Unlock()
-	t.Cleanup(func() {
-		CacheDelete("stale.test")
-		CacheDelete("fresh.test")
-	})
+	c := newResultCache(cacheGenCap)
+	c.cur["stale.test"] = cacheEntry{private: true, expires: time.Now().Add(-time.Minute)}
+	c.cur["fresh.test"] = cacheEntry{private: false, expires: time.Now().Add(time.Hour)}
+	orig := dnsCache
+	dnsCache = c
+	t.Cleanup(func() { dnsCache = orig })
 
 	CacheCleanup()
 
 	if _, found := dnsCache.Lookup("stale.test"); found {
-		t.Error("expired entry must be evicted")
+		t.Error("expired entry must never be served")
 	}
 	if _, found := dnsCache.Lookup("fresh.test"); !found {
-		t.Error("fresh entry must survive cleanup")
+		t.Error("fresh entry must survive one cleanup")
+	}
+	// fresh.test was promoted back into cur by the Lookup above; the stale
+	// entry is gone once its generation is dropped.
+	CacheCleanup()
+	CacheCleanup()
+	if n := dnsCache.len(); n != 0 {
+		t.Errorf("an idle cache must drain to empty after rotations, retained %d", n)
 	}
 }

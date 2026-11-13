@@ -9,6 +9,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The SSRF guard's DNS verdict cache was unbounded and its 5-minute sweep
+  stalled all CONNECT/SOCKS5 traffic.** The cache key is the client-named
+  destination host, so a wildcard-DNS domain lets one client mint unlimited
+  keys; entries were reclaimed only by a sweep that walked the whole map under
+  the exclusive lock every CONNECT/SOCKS5 pre-flight check also takes, and the
+  map never shrank afterwards. Measured on 1M keys (Go 1.27.4, linux/amd64):
+  ~158 MiB live, a ~200 ms reader stall during the sweep, ~112 MiB still
+  retained after it. `internal/ssrf` now keeps two bounded generations
+  (16,384 keys each): a full generation rotates out and the oldest is dropped
+  whole, and the periodic cleanup is the same O(1) rotation. Same 1M-key
+  workload: ~2.8 MiB live, ~3 µs cleanup, ~0.1 MiB retained. Verdicts, the
+  30 s maximum freshness, no caching of resolution failures and the dial-time
+  rebinding check are unchanged; live hits in the retiring generation are
+  promoted with their original expiry so hot hosts survive a key flood.
+
 - **Session-cookie decoding consulted the revocation list twice per
   authenticated request, taking the same exclusive mutex each time, so the
   proxy authentication path serialised against itself at twice the necessary
