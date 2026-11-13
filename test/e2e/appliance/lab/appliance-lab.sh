@@ -490,10 +490,13 @@ FRAMEPY
   rco refused none 0 1 http=000 decision_code=000000 curl_rc=7 body_state=absent clamav=none
   # wait_app_after_complete against a fake guest status-json (a fake `ssh`
   # first on PATH; campaign 7: complete recorded while the recreated proxy was
-  # still starting). rac NAME MODE LIMIT WANT EXPECT — the wait's verdict, its
-  # record count, every field in every record, the FIRST record's outcome, the
-  # LAST record's ready flag, and every call ending within LIMIT + 0.5 s.
-  rac() { local name="$1" mode="$2" lim="$3" want="$4" exp="$5" got gpid r="$d/rac-$1"
+  # still starting). rac NAME MODE LIMIT WANT EXPECT [PRE_DELAY_S] — the anchor
+  # (`complete` observed) is taken, then PRE_DELAY_S passes before the call.
+  # Reported: verdict, record count, every field in every record, the FIRST
+  # record's outcome and whether it kept stderr, the LAST record's ready flag,
+  # every call ending within anchor + LIMIT + 0.5 s, offsets measured from the
+  # anchor (first start >= PRE_DELAY_S), and whether entry was already expired.
+  rac() { local name="$1" mode="$2" lim="$3" want="$4" exp="$5" pre="${6:-0}" got gpid r="$d/rac-$1"
     mkdir -p "$r/bin"; printf '0\n' > "$r/n"; printf '%s\n' "$mode" > "$r/mode"
     cat > "$r/bin/ssh" <<'FAKESSH'
 #!/usr/bin/env python3
@@ -501,6 +504,7 @@ import json, os, sys, time
 d = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 mode = open(os.path.join(d, "mode")).read().strip()
 nf = os.path.join(d, "n"); n = int(open(nf).read()) + 1; open(nf, "w").write("%d\n" % n)
+if mode == "hang-stderr": sys.stderr.write("ssh: guest stalled after banner\n"); sys.stderr.flush(); time.sleep(60)
 if mode == "hang": time.sleep(60)
 if mode == "bad-json" and n == 1: print("{not json"); sys.exit(0)
 if mode == "ssh-fail" and n == 1: sys.stderr.write("ssh: connect to host refused\n"); sys.exit(255)
@@ -512,27 +516,39 @@ FAKESSH
     chmod +x "$r/bin/ssh"; sleep 300 & gpid=$!
     got="$( PATH="$r/bin:$PATH"; EV="$r"; WORK="$r"; JSONL="$r.jsonl"; LAB_CAMPAIGN_STOP_FILE=
             : > "$JSONL"; echo "$gpid" > "$WORK/qemu.pid"
-            wait_app_after_complete "$lim" > /dev/null 2>&1 || true
+            tc="$(mono)"; sleep "$pre"
+            wait_app_after_complete "$tc" "$lim" > /dev/null 2>&1 || true
             python3 -I -c 'import json,sys
 r=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1])
-recs=[json.loads(l) for l in open(sys.argv[2])]; lim=float(sys.argv[3])
+recs=[json.loads(l) for l in open(sys.argv[2])]; lim=float(sys.argv[3]); pre=float(sys.argv[4])
 need={"attempt","utc","start_s","end_s","timeout_s","rc","error","stderr","parse","application_responding","management_available","reason","setup_status","observed_at","status_json","ready","after_deadline"}
 a=recs[0] if recs else {}; z=recs[-1] if recs else {}
 first="rc=%s/parse=%s/%s" % (a.get("rc"), (a.get("parse") or "").split(":")[0], "killed" if "killed" in (a.get("error") or "") else "nokill")
-print(r["result"], r["check"], len(recs), "fields-ok" if recs and all(need <= set(x) for x in recs) else "fields-MISSING",
-      "first=" + first, "last_ready=%s" % z.get("ready"),
-      "bound=%s" % ("bounded" if recs and max(x["end_s"] for x in recs) <= lim + 0.5 else "OVERRUN"))' "$JSONL" "$r/02-ready-after-complete.jsonl" "$lim" 2>/dev/null )"
+print(r["result"], r["check"], len(recs), "fields-ok" if recs and all(need <= set(x) for x in recs) else ("no-calls" if not recs else "fields-MISSING"),
+      "first=" + first, "stderr=%s" % ("kept" if a.get("stderr") else "none"), "last_ready=%s" % z.get("ready"),
+      "bound=%s" % ("bounded" if all(x["end_s"] <= lim + 0.5 for x in recs) else "OVERRUN"),
+      "anchored=%s" % ("yes" if all(x["start_s"] >= pre - 0.05 for x in recs) else "NO"),
+      "entry=%s" % ("expired" if "expired-at-entry" in r.get("detail", "") else "ok"))' "$JSONL" "$r/02-ready-after-complete.jsonl" "$lim" "$pre" 2>/dev/null )"
     kill "$gpid" 2>/dev/null || true; wait "$gpid" 2>/dev/null || true
     # shellcheck disable=SC2053
-    if [[ "${got%% *}" == "$want" && "$got" == *app-ready-after-complete* && "$got" == *fields-ok* && "$got" == $exp ]]; then log "selftest ok: app-ready-after-complete $name -> $got"
+    if [[ "${got%% *}" == "$want" && "$got" == *app-ready-after-complete* && "$got" == $exp ]]; then log "selftest ok: app-ready-after-complete $name -> $got"
     else log "selftest FAILED: app-ready-after-complete $name -> '$got', want $want and $exp"; rc=1; fi; }
-  rac at-once at-once 20 pass '* 1 fields-ok first=rc=0/parse=ok/nokill last_ready=True bound=bounded'
-  rac late late 30 pass '* 3 fields-ok first=rc=0/parse=ok/nokill last_ready=True bound=bounded'
-  rac never never 5 fail '* 2 fields-ok first=rc=0/parse=ok/nokill last_ready=False bound=bounded'
-  rac mgmt-down mgmt-down 5 fail '* 2 fields-ok first=rc=0/parse=ok/nokill last_ready=False bound=bounded'
-  rac hang hang 3 fail '* 1 fields-ok first=rc=None/parse=not-attempted/killed last_ready=False bound=bounded'
-  rac bad-json bad-json 20 pass '* 2 fields-ok first=rc=0/parse=error/nokill last_ready=True bound=bounded'
-  rac ssh-fail ssh-fail 20 pass '* 2 fields-ok first=rc=255/parse=not-attempted/nokill last_ready=True bound=bounded'
+  rac at-once at-once 20 pass '* 1 fields-ok first=rc=0/parse=ok/nokill stderr=none last_ready=True bound=bounded anchored=yes entry=ok'
+  rac late late 30 pass '* 3 fields-ok first=rc=0/parse=ok/nokill stderr=none last_ready=True bound=bounded anchored=yes entry=ok'
+  rac never never 5 fail '* 2 fields-ok first=rc=0/parse=ok/nokill stderr=none last_ready=False bound=bounded anchored=yes entry=ok'
+  rac mgmt-down mgmt-down 5 fail '* 2 fields-ok first=rc=0/parse=ok/nokill stderr=none last_ready=False bound=bounded anchored=yes entry=ok'
+  rac hang hang 3 fail '* 1 fields-ok first=rc=None/parse=not-attempted/killed stderr=none last_ready=False bound=bounded anchored=yes entry=ok'
+  rac bad-json bad-json 20 pass '* 2 fields-ok first=rc=0/parse=error/nokill stderr=none last_ready=True bound=bounded anchored=yes entry=ok'
+  rac ssh-fail ssh-fail 20 pass '* 2 fields-ok first=rc=255/parse=not-attempted/nokill stderr=kept last_ready=True bound=bounded anchored=yes entry=ok'
+  # ASTRA's R8-E1 control: a call that wrote stderr and then hung keeps that
+  # stderr in its (killed) record.
+  rac hang-stderr hang-stderr 3 fail '* 1 fields-ok first=rc=None/parse=not-attempted/killed stderr=kept last_ready=False bound=bounded anchored=yes entry=ok'
+  # ASTRA's R8-T1 controls: the deadline is anchored where `complete` was
+  # observed, not at entry. 0.300 s before entry with a 0.250 s budget fails at
+  # entry with no call; time spent before entry is counted against the budget.
+  rac pre-entry-expired at-once 0.25 fail '* 0 no-calls first=rc=None/parse=/nokill stderr=none last_ready=None bound=bounded anchored=yes entry=expired' 0.3
+  rac pre-entry-in-budget late 30 pass '* 3 fields-ok first=rc=0/parse=ok/nokill stderr=none last_ready=True bound=bounded anchored=yes entry=ok' 1
+  rac pre-entry-near-limit never 3 fail '* 1 fields-ok first=rc=0/parse=ok/nokill stderr=none last_ready=False bound=bounded anchored=yes entry=ok' 2.5
   unset -f cwr cwr_fake rco rac
   if python3 -I -B "$HERE/console-session-selftest.py" > "$d/cs-selftest.log" 2>&1; then
     log "selftest ok: console-session receive loop and transfer ($(grep -c '^ok ' "$d/cs-selftest.log") cases: prompt drain, settle kept, 60 KB identical, status kept)"
@@ -863,10 +879,13 @@ engine_overlay() { local disk="$1" fmt="$2" d="${LAB_ENGINE_DEBS:-}" want v
   save_state ENGINE_EXPECT "$want"
   check 1 engine-overlay pass "LAB-ONLY: ${want} installed (dpkg ii/hi) + held in the disposable disk BEFORE first boot; DEB sha256s verified; the booted disk is NOT the OVA's disk"
 }
-# wait_app_after_complete SECONDS — after first boot records `complete`, wait
-# for the product's OWN readiness flags in status-json (application_responding
-# AND management_available both true) within ONE deadline of SECONDS on the
-# host's CLOCK_MONOTONIC, counted from when `complete` was observed.
+# wait_app_after_complete T_COMPLETE SECONDS — after first boot records
+# `complete`, wait for the product's OWN readiness flags in status-json
+# (application_responding AND management_available both true) within ONE
+# deadline on the host's CLOCK_MONOTONIC: T_COMPLETE + SECONDS, where
+# T_COMPLETE is the monotonic time cmd_up observed `complete` (passed in, not
+# this function's entry). A deadline already passed at entry fails at once
+# ("expired-at-entry"); the entry delay is recorded in the check.
 # Why: first boot records `complete` right after it RECREATES the proxy to
 # mount the maintenance-agent socket (candidate scripts/install.sh, `docker
 # compose ... up -d` without --wait, after the --wait start), so the
@@ -878,15 +897,18 @@ engine_overlay() { local disk="$1" fmt="$2" d="${LAB_ENGINE_DEBS:-}" want v
 # it expires; between calls it sleeps min(3 s, time remaining); it stops early
 # if the guest's QEMU process is gone. Evidence: $EV/02-ready-after-complete.jsonl,
 # one record for EVERY started call, written whatever happens (start/end
-# offsets, timeout, ssh exit or timeout, stderr, parse outcome, the two flags,
+# offsets from T_COMPLETE, timeout, ssh exit or timeout, stdout and stderr
+# (kept on a timeout too), parse outcome, the two flags,
 # reason, setup_status, observed_at, the status-json received, ready,
 # after_deadline). Result: check 2/app-ready-after-complete, pass with the
 # seconds taken, or fail (latching the campaign stop).
-wait_app_after_complete() { local lim="$1" out rc=0 verdict n el
-  out="$(python3 -I - "$lim" "$WORK/qemu.pid" "$EV/02-ready-after-complete.jsonl" ssh "${SSH_OPTS[@]}" "culvert-operator@$LAB_HOST" status-json <<'PY'
+wait_app_after_complete() { local tc="$1" lim="$2" out rc=0 verdict n el ent
+  out="$(python3 -I - "$tc" "$lim" "$WORK/qemu.pid" "$EV/02-ready-after-complete.jsonl" ssh "${SSH_OPTS[@]}" "culvert-operator@$LAB_HOST" status-json <<'PY'
 import json, os, subprocess, sys, time
-lim, pidf, log, cmd = float(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4:]
-t0 = time.monotonic(); deadline = t0 + lim; n = 0
+t0, lim, pidf, log, cmd = float(sys.argv[1]), float(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5:]
+deadline = t0 + lim; n = 0; entry = time.monotonic() - t0
+if time.monotonic() >= deadline:
+    open(log, "w").close(); print("fail expired-at-entry 0 %.3f" % entry); sys.exit(0)
 def alive():
     try:
         os.kill(int(open(pidf).read().strip()), 0); return True
@@ -911,6 +933,7 @@ with open(log, "w") as f:
                 rec["rc"] = p.returncode; out = p.stdout; rec["stderr"] = p.stderr.decode("utf-8", "replace")[:300] or None
             except subprocess.TimeoutExpired as e:
                 rec["error"] = "status-json call exceeded %.3f s (killed)" % tmo; out = e.stdout or b""
+                rec["stderr"] = (e.stderr or b"").decode("utf-8", "replace")[:300] or None
             rec["status_json"] = out.decode("utf-8", "replace")[:65536] if out else None
             if rec["rc"] == 0:
                 try:
@@ -931,15 +954,15 @@ with open(log, "w") as f:
             rec["ready"] = bool(ok and not rec["after_deadline"])
             f.write(json.dumps(rec, sort_keys=True) + "\n"); f.flush()
         if rec["ready"]:
-            print("pass ok %d %.1f" % (n, end - t0)); break
+            print("pass ok %d %.1f %.3f" % (n, end - t0, entry)); break
         rem = deadline - time.monotonic()
         if rem > 0:
             time.sleep(min(3.0, rem))
 PY
 )" || rc=$?
-  read -r verdict _ n el <<<"$out"
+  read -r verdict _ n el ent <<<"$out"
   if [[ $rc == 0 && "$verdict" == pass ]]; then
-    check 2 app-ready-after-complete pass "status-json application_responding and management_available true ${el}s after complete was observed (call $n; every call in 02-ready-after-complete.jsonl)"
+    check 2 app-ready-after-complete pass "status-json application_responding and management_available true ${el}s after complete was observed (entered ${ent}s after it; call $n; every call in 02-ready-after-complete.jsonl)"
   else
     check 2 app-ready-after-complete fail "application/management not ready within ${lim}s of complete (${out:-waiter rc $rc}; every call in 02-ready-after-complete.jsonl)"; return 1; fi; }
 cmd_up() {
@@ -1030,6 +1053,7 @@ PY
     (( $(date +%s) < deadline )) || { screendump 02-screen-no-ssh; check 2 operator-ssh-up fail "no culvert-operator SSH within ${LAB_FIRSTBOOT_TIMEOUT}s"; return 1; }
     sleep 10; done
   check 2 operator-ssh-up pass "culvert-operator SSH (OVF-delivered key, status-json) after $(( $(date +%s) - t0 ))s"
+  local t_complete
   until gop status-json > "$WORK/status-json.tmp" 2>/dev/null && [[ " $(recorded_steps "$WORK/status-json.tmp") " == *" complete "* ]]; do
     # systemd deletes a unit's start job to break an ordering cycle: first boot
     # will then never run, so report it now rather than after the full bound.
@@ -1037,11 +1061,12 @@ PY
       check 2 firstboot-complete fail "systemd skipped culvert-firstboot.service (ordering cycle; see console.log)"; return 1; fi
     (( $(date +%s) < deadline )) || { check 2 firstboot-complete fail "first boot not complete within ${LAB_FIRSTBOOT_TIMEOUT}s ($(status_field "$WORK/status-json.tmp" phase))"; return 1; }
     sleep 15; done
+  t_complete="$(mono)"   # the monotonic moment `complete` was observed: the readiness wait's origin
   cp "$WORK/status-json.tmp" "$EV/02-status-json-complete.json"
   check 2 firstboot-complete pass "status-json: complete recorded, phase $(status_field "$EV/02-status-json-complete.json" phase), $(( $(date +%s) - t0 ))s from power-on"
   # complete can precede the recreated proxy answering (campaign 7): wait for
   # the product's own readiness flags first; step 3 below is unchanged.
-  wait_app_after_complete 120 || return 1
+  wait_app_after_complete "$t_complete" 120 || return 1
 }
 
 # ── qualify: vsphere-qualification.md steps 3–8 ─────────────────────────────

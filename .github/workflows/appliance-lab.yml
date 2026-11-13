@@ -1294,6 +1294,9 @@ jobs:
       # wait_app_after_complete waits for those two status-json flags within one
       # 120 s monotonic deadline (every call recorded) as its own check,
       # 2/app-ready-after-complete; step 3's single setup_status sample is unchanged.
+      # Its deadline starts where complete was observed, not at the wait's entry.
+      # That check and V5/clamav-ready-before-final are mandatory scope evidence
+      # (cold boot and console rows): absent or not passed fails the row.
       # Campaign 7 (owner direction and decision of 8 November 2026; D4 of 9
       # November 2026; owner clarification of 10 November 2026): the same FB1-R2
       # candidate OVA e60620c3, after a third HARNESS fix. Campaign 6 (trigger
@@ -2376,7 +2379,7 @@ jobs:
           Q7 = [f"R/{c}-q7-{i}" for i in (1, 2, 3) for c in ("recovery", "backup-list", "state", "operator-capture-integrity")] + ["R/clamav-evidence", "R/recovery-cases", "R/operator-hostkey-pinned"]
           SCOPE = {
             "cold boot / provisioning": ["P/tools", "P/memory", "P/disk", "P/accel", "1/ova-sha256", "1/ova-manifest", "1/disk-chain", "2/campaign-clock-main", "2/boot-started", "2/kernel-started",
-              "2/operator-ssh-up", "2/firstboot-complete", "3/status-setup-pending", "3/firstboot-steps", "3a/console-onetime-printed", "3a/console-login",
+              "2/operator-ssh-up", "2/firstboot-complete", "2/app-ready-after-complete", "3/status-setup-pending", "3/firstboot-steps", "3a/console-onetime-printed", "3a/console-login",
               "3a/password-changed", "3/culvert-status-setup-pending", "3/image-identity", "3/setup-token", "3e/recovery-secrets", "8/firstboot-not-rerun", "8/state-files"],
             "admin and agent access": ["3/operator-observe", "3c/operator-commands-refused", "3c/forwarding-refused", "3c/file-transfer-refused", "3c/local-admin-ssh-refused",
               "3c/sshd-effective", "3c/local-admin-sudo-needs-password", "4a/bootstrap-api-needs-token", "4/setup-without-token", "4/setup-with-token", "4/admin-login",
@@ -2398,7 +2401,7 @@ jobs:
             "console display (QEMU evidence)": ["V/campaign-clock-console-v1", "V/ova-sha256", "V/ova-manifest", "V1/tty1-after-first-boot", "V1/tty1-text-mode", "V1/splash-on-display", "V2/tty1-after-reboot-with-failures",
               "V2/tty1-text-mode", "V2/splash-before-esc", "V2/esc-shows-boot-messages", "V2/esc-one-way", "V2/splash-healthy-control", "V2/splash-names-failed-unit",
               "V3/tty1-after-postboot-writes", "V4/tty1-after-clean-reboot", "V4/tty1-text-mode", "V4/no-graphics-after-splash", "V4/console-build-identity",
-              "V5/campaign-clock-console-v5", "V5/no-splash-without-display", "V5/serial-only-boot", "V5/serial-shutdown"],
+              "V5/campaign-clock-console-v5", "V5/no-splash-without-display", "V5/serial-only-boot", "V5/clamav-ready-before-final", "V5/serial-shutdown"],
             "final M2 and engine surface (main leg)": [f"M2H/{t}-{n}" for t in CP for n in M2 if not n.startswith("clamav")] + ["E/kernel-is-the-only-installed", "E/snapd-absent",
               "E/engine-no-tcp-listener", "E/containerd-socket-root-only", "E/docker-socket-root-only", "E/dockerd-no-tcp-host", "E/containerd-cri-disabled", "E/kernel-modules-denied",
               "E/kernel-hwe", "E/drm-root-only", "E/kernel-cve-assumptions", "E/m2-hardening", "E/ext4-no-ea-inode", "E/extra-modules-unloadable", "E/containerd-tracing-off"],
