@@ -337,6 +337,60 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A Stage-1 auth rule's bare-IP subject decided on the SPELLING, so a
+  `CredentialRequired` rule could be accepted and then never challenge anyone.**
+  An auth rule's typed CIDR subject predicate accepts "a valid IP or a CIDR"
+  (`validateCIDROrIP`, i.e. anything `net.ParseIP` accepts). The CIDR form was
+  parsed, so it decided on the address; the bare-IP form was compared as a
+  STRING against the peer address the proxy derives with
+  `net.SplitHostPort(r.RemoteAddr)` — the canonical form Go prints. A rule
+  scoped to `2001:DB8::10`, `2001:0db8:0000:0000:0000:0000:0000:0010` or
+  `::ffff:10.0.0.5` was therefore stored, listed, shown in the dry-run, and
+  silently inert: `matchSubjectAddr` returned false,
+  `resolveAuthOutcomeFrom` fell through to the global default auth outcome, and
+  the client was never asked for a credential. Of seven spellings the API
+  accepts for two addresses, five could never match. This is the same defect
+  PR #1873 fixed for an access rule's `SourceIP`; the authentication path kept
+  the string comparison, where the fail-open direction is a missing credential
+  challenge rather than a missing deny. `matchIPOrCIDRAddr` now falls back to
+  the same `sourceLiteralPrefix` helper and compares `netip.Addr` values with
+  both sides unmapped. The exact-string comparison is still tried first, so no
+  rule that matched before stops matching, and a ZONED literal keeps the string
+  comparison because a link-local peer address carries its zone in the client
+  string too. Behaviour change in the other direction, named deliberately: an
+  `Exempt` auth rule with a non-canonical bare-IP subject was inert and is now
+  live, so it waives authentication for the address it names — review
+  `Outcome: Exempt` rules with bare-IP subjects, and `Action: Allow` access
+  rules with bare-IP `SourceIP`, when upgrading across this change. The Exempt
+  kill switch still suppresses a subject matched by address.
+
+- **A dropped cluster node record made the same node ID re-enrollable with no
+  CRL entry, no carried-forward maintenance state and no audit.** CHAOS-117
+  drops a null node record instead of crash-looping the control plane, and the
+  normalisation comment called that a pure "availability cost". It is not: the
+  dropped record was the only thing on the control plane naming that node's
+  certificate serial, and `admitEnrollment`'s anti-identity-takeover denial keys
+  on `GetNode(...)` returning `ok`. After a drop the same node ID was
+  re-enrollable on a fresh token with no predecessor to supersede, so the
+  superseded certificate never reached the CRL, the operator-set `draining`
+  status and admin labels were not carried forward, and no audit entry or alert
+  distinguished the identity replacement from a first enrolment. The admit
+  DECISION is unchanged — a single-use admin-issued token is still required,
+  and refusing would re-brick a node whose record was damaged by disk
+  corruption — but the replacement is now evidence-producing:
+  `ClusterStore.droppedNodeIDs` retains what `normalizeClusterState` dropped at
+  both ingestion boundaries (deliberately not persisted; it accumulates for the
+  life of the process because the lost serial never becomes revocable again),
+  and an enrolment under such an ID logs, writes a
+  `cluster.node.reenroll-dropped` audit entry and fires the existing
+  `cluster_node_reenrolled` alert, whose detail states that the predecessor's
+  serial was lost with the record and so stays valid until it expires. Recorded
+  only once the node is registered, so neither an unauthenticated prober
+  guessing node IDs nor a token holder whose CSR is then refused can drive the
+  audit entry or the alert. The CRL leg is unfixable by
+  construction and is recorded as a residual risk. Found by the 2026-11-12
+  security regression review.
+
 - **The policy API refuses a `sourceIP` the matcher can never match.**
   `POST /api/policy`, `PUT /api/policy` and `PUT /api/policy?id=` accepted any
   string, so a value that is neither an address nor a CIDR (`" 10.0.0.5"`,
