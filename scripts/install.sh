@@ -1556,6 +1556,25 @@ env_put() {
     warn "Set $var manually in $file if you need it, then restart the stack."
     return 0
   fi
+  # The lock file and the staging file live BESIDE $file, so owning $file is not
+  # enough when the stack dir itself belongs to another user: a first install
+  # under sudo/cloud-init provisions $INSTALL_DIR root-owned, and an
+  # unprivileged re-run reuses it as-is. Opening a root-owned (or uncreatable)
+  # "$file.lock" then failed with EACCES and aborted the whole re-run under
+  # `set -euo pipefail`. Take the lock the same way as $file, and degrade the
+  # same way if sudo cannot.
+  local lock="$file.lock" dir
+  dir="$(dirname "$file")"
+  if [[ -e "$lock" && ! -w "$lock" ]]; then
+    sudo chown "$(id -un)" "$lock" 2>/dev/null || true
+  elif [[ ! -e "$lock" && ! -w "$dir" ]]; then
+    sudo touch "$lock" 2>/dev/null && sudo chown "$(id -un)" "$lock" 2>/dev/null || true
+  fi
+  if [[ ! -w "$lock" && ( -e "$lock" || ! -w "$dir" ) ]]; then
+    warn "Cannot lock $file ($lock is owned by another user and sudo could not take it) — leaving it unchanged."
+    warn "Set $var manually in $file if you need it, then restart the stack."
+    return 0
+  fi
   # The full read (grep) / write (mv|rm) / append sequence below must run as
   # ONE atomic transaction — install.sh is designed to be safely re-run
   # against an existing deployment (e.g. an automation retry racing a
@@ -1580,13 +1599,25 @@ env_put() {
     # as benign and promote the filtered file; a real error (e.g. ENOSPC
     # while writing $tmp) gets a higher exit code and must NOT clobber the
     # existing $file with a truncated/empty temp file.
-    tmp="$(mktemp "${file}.XXXXXX" 2>/dev/null)" || tmp="${file}.tmp.$$"
+    # A stack dir we cannot write to (see the lock note above) allows neither
+    # creating the staging file beside $file nor renaming it over $file. Stage
+    # in the default temp dir (mktemp: mode 600) and rewrite $file in place.
+    inplace=0
+    if [[ -w "$dir" ]]; then
+      tmp="$(mktemp "${file}.XXXXXX" 2>/dev/null)" || tmp="${file}.tmp.$$"
+    else
+      tmp="$(mktemp)"
+      inplace=1
+    fi
     rc=0
     # LC_ALL=C + -a: under a UTF-8 locale grep treats a line with invalid UTF-8
     # (a Latin-1 comment/value in a hand-edited .env) as binary and drops it
     # from -v output, silently deleting the operator's line.
     LC_ALL=C grep -avE "^${var}=" "$file" > "$tmp" 2>/dev/null && rc=0 || rc=$?
-    if [[ $rc -eq 0 || $rc -eq 1 ]]; then
+    if [[ $inplace -eq 1 && ( $rc -eq 0 || $rc -eq 1 ) ]]; then
+      cat "$tmp" > "$file"
+      rm -f "$tmp"
+    elif [[ $rc -eq 0 || $rc -eq 1 ]]; then
       mv "$tmp" "$file"
     else
       rm -f "$tmp"
