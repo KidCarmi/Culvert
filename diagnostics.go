@@ -20,11 +20,12 @@ import (
 // OperatorContract is the aggregated, operator-visible health verdict for
 // the running node. It is a side-effect-free read of process state via the
 // safe accessors that already exist on each subsystem; the handler does no
-// disk writes, no network probes, and triggers no fresh ClamAV/health pings.
-// One bounded read of the latest config-version envelope is performed per
-// call (see configVersionSummary) so the rollback-readiness checks reflect
-// the current on-disk state — that read is read-only and never modifies
-// /data/config_versions.
+// disk writes. One bounded read of the latest config-version envelope is
+// performed per call (see configVersionSummary) so the rollback-readiness
+// checks reflect the current on-disk state — that read is read-only and never
+// modifies /data/config_versions. checkClamAVScan reads ClamAVStatus: a memory
+// read while the cached observation is fresh, otherwise one coalesced daemon
+// ping the caller waits on for a bounded time.
 //
 // The shape is intentionally extensible: future PRs add checks by appending
 // to the Checks slice. Field names are stable JSON keys so the SPA and
@@ -154,8 +155,15 @@ func sessionSecretSet() bool {
 // buildOperatorContract assembles the full diagnostics report.
 //
 // Side-effect contract:
-//   - reads cached / atomic / RLock-protected state only
-//   - never opens files, sockets, or pings external daemons
+//   - never writes to disk and never mutates configuration or runtime state
+//   - reads cached / atomic / RLock-protected state, plus bounded read-only
+//     file access: the config-versions directory and latest envelope
+//     (summarizeLatestConfigVersion), os.Stat of key-at-rest backups
+//     (checkPlaintextKeyBackups) and the shared roster probe
+//     (readRosterDurabilityFacts)
+//   - checkClamAVScan reads ClamAVStatus, which on a stale cache starts at
+//     most one coalesced ClamAV ping and waits a bounded time for it (see
+//     diagnostics_clamav_scan.go)
 //   - safe to call concurrently from the admin API
 func buildOperatorContract() OperatorContract {
 	// One read of the roster facts, and so at most one bounded wait on the
