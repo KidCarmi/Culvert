@@ -278,6 +278,9 @@ func buildOperatorContract() OperatorContract {
 	// Remote blocklist feeds whose latest sync failed. Contributes nothing when
 	// no feed is configured or every feed's latest attempt succeeded.
 	checks = append(checks, checkBlocklistFeeds()...)
+	// OTLP export enabled but its latest push was not delivered. Contributes
+	// nothing when export is off or the latest attempt succeeded.
+	checks = append(checks, checkOTLPExport()...)
 	// Upstream pool managed document / config.yaml seed refused, or legacy
 	// migration abandoned: configured parents unpublished. Contributes nothing
 	// when none of the three is latched.
