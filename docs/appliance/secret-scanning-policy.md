@@ -73,7 +73,10 @@ fingerprints: these 25, plus the 274 classified on 2026-10-30
 module checksums and file digests in archived evidence, and synthetic test
 fixtures across all fetched refs; none is a credential), plus 2 classified on
 2026-11-08 (`evidence/combined/gitleaks-history-20261108.md`: a public build
-digest and a synthetic test identifier; neither is a credential). It suppresses neither whole historical
+digest and a synthetic test identifier; neither is a credential), plus 2
+classified on 2026-11-13 (`evidence/combined/gitleaks-history-20261113.md`:
+the RFC 6455 example WebSocket key and a synthetic test key, both in test
+files on `main`; neither is a credential). It suppresses neither whole historical
 commits nor future findings in those files. The policy regression rejects
 non-fingerprint entries. Additional historical findings remain subject to review;
 this list does not claim that every other local or remote Git ref was audited.

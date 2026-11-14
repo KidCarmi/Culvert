@@ -346,3 +346,7 @@ aa278d95fe4b42ab874e2ff02b4b2db144a95d46:roadmap/CHAOS-ENGINEERING-REVIEW.md:gen
 #    a public build digest (lab workflow) and a synthetic test identifier. (2)
 b63b43c0890c9257d17ed13811eb7ca527831225:internal/logstore/batchencode_test.go:generic-api-key:38
 e18277a48938537f68985dd55fc05ade3081f939:.github/workflows/appliance-lab.yml:generic-api-key:775
+# H. 2026-11-13 classification (docs/appliance/evidence/combined/gitleaks-history-20261113.md):
+#    the RFC 6455 example WebSocket key and a synthetic test key, both on main. (2)
+62aa116ca3778dcff4dc83ed368cf00ed2a06bb7:proxy_tunnel_inspectbuf_test.go:generic-api-key:296
+e9283034790031d77983224445c039f359504991:internal/pseudonym/pseudonym_test.go:generic-api-key:14
