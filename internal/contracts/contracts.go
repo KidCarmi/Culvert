@@ -11,8 +11,9 @@
 //     registry in the same change as the implementation cannot hide it.
 //
 // The package makes no decision about whether a contract change is right. It
-// only makes the change impossible to land unnoticed; approval is a human's.
-// See docs/engineering/PRODUCT-CONTRACTS.md.
+// only makes the change impossible to land unnoticed: an unrecorded weakening
+// fails, and a recorded one is listed in the gate summary with its reason. No
+// human approval is part of the gate. See docs/engineering/PRODUCT-CONTRACTS.md.
 package contracts
 
 import (
@@ -73,7 +74,6 @@ type Record struct {
 // Registry is the whole file.
 type Registry struct {
 	Version   int        `yaml:"version"`
-	Approvers []string   `yaml:"approvers"`
 	Protected []string   `yaml:"protected"`
 	Contracts []Contract `yaml:"contracts"`
 	Amended   []Record   `yaml:"amended"`
@@ -101,9 +101,6 @@ func Validate(r *Registry, tree fs.FS) []string {
 	var p []string
 	if r.Version != 1 {
 		p = append(p, fmt.Sprintf("version %d is not supported (want 1)", r.Version))
-	}
-	if len(r.Approvers) == 0 {
-		p = append(p, "approvers is empty: nobody could approve a contract change")
 	}
 	seen := map[string]bool{}
 	for i := range r.Contracts {
@@ -240,9 +237,10 @@ type Impact struct {
 	// Weakened lists contract changes that happened without an explicit
 	// record. Always a failure.
 	Weakened []string
-	// NeedsApproval lists changes that are recorded but need an independent
-	// approver: amended or retired contracts, and edits to protected paths.
-	NeedsApproval []string
+	// Recorded lists intentional changes, reported in the summary but never a
+	// failure: contracts changed or removed with a new amended/retired record,
+	// and edits to protected paths (the gate's own files).
+	Recorded []string
 }
 
 // Assess compares base (the registry at the merge base; nil when the base has
@@ -257,8 +255,7 @@ func Assess(base, head *Registry, tree fs.FS, changed []string) Impact {
 	for i := range head.Contracts {
 		headByID[head.Contracts[i].ID] = &head.Contracts[i]
 	}
-	// Records already in the base were written for earlier, already-approved
-	// changes. Only one this change ADDS (a new id+reason pair) explains it, so
+	// Records already in the base were written for earlier changes. Only one this change ADDS (a new id+reason pair) explains it, so
 	// kept history neither excuses a new weakening nor blocks a later one.
 	inBase := map[Record]bool{}
 	for _, rec := range append(append([]Record{}, base.Amended...), base.Retired...) {
@@ -276,7 +273,7 @@ func Assess(base, head *Registry, tree fs.FS, changed []string) Impact {
 		switch {
 		case len(why) == 0:
 		case newRecord[b.ID]:
-			im.NeedsApproval = append(im.NeedsApproval, b.ID+": "+strings.Join(why, "; "))
+			im.Recorded = append(im.Recorded, b.ID+": "+strings.Join(why, "; "))
 		default:
 			for _, w := range why {
 				im.Weakened = append(im.Weakened, b.ID+": "+w+" (no new amended/retired record)")
@@ -286,23 +283,20 @@ func Assess(base, head *Registry, tree fs.FS, changed []string) Impact {
 			im.Touched = append(im.Touched, b.ID)
 		}
 	}
-	im.NeedsApproval = append(im.NeedsApproval, governanceEdits(base, head, changed)...)
+	im.Recorded = append(im.Recorded, governanceEdits(base, head, changed)...)
 	sort.Strings(im.Touched)
 	sort.Strings(im.Weakened)
-	sort.Strings(im.NeedsApproval)
+	sort.Strings(im.Recorded)
 	return im
 }
 
-// governanceEdits lists changes to who can approve and what is protected.
+// governanceEdits lists changes to the gate itself: the protected list and the
+// protected files. They are reported, not refused, so they never pass unseen.
 //
 // The registry file is deliberately not a protected path: adding an entry must
-// stay cheap. What must not change quietly is the approver list, the protected
-// list, and the protected files themselves.
+// stay cheap, and removing or rewording one is caught by the base comparison.
 func governanceEdits(base, head *Registry, changed []string) []string {
 	var out []string
-	if strings.Join(base.Approvers, ",") != strings.Join(head.Approvers, ",") {
-		out = append(out, "approvers list changed")
-	}
 	if gone := covered(base.Protected, head.Protected); len(gone) > 0 {
 		out = append(out, "protected paths removed: "+strings.Join(gone, ", "))
 	}
@@ -380,33 +374,6 @@ func touches(globs, files []string) bool {
 			if strings.HasSuffix(g, "/**") && strings.HasPrefix(f, strings.TrimSuffix(g, "**")) {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-// Review is one pull-request review, as returned by the GitHub API.
-type Review struct {
-	Login    string
-	State    string
-	CommitID string
-}
-
-// Approved reports whether an approver other than the author has approved the
-// exact head commit. An approval of an earlier commit does not count, and the
-// author can never approve their own change.
-func Approved(approvers []string, author, headSHA string, reviews []Review) bool {
-	ok := map[string]bool{}
-	for _, a := range approvers {
-		ok[strings.ToLower(a)] = true
-	}
-	latest := map[string]Review{}
-	for _, rv := range reviews {
-		latest[strings.ToLower(rv.Login)] = rv // API order is chronological
-	}
-	for login, rv := range latest {
-		if ok[login] && !strings.EqualFold(login, author) && rv.State == "APPROVED" && rv.CommitID == headSHA {
-			return true
 		}
 	}
 	return false

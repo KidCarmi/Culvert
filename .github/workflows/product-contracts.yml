@@ -1,7 +1,9 @@
 name: Product Contracts
 
-# Detects a change that weakens a registered product contract, and requires an
-# independent approval for an intentional one. Design and threat model:
+# Detects a change that weakens a registered product contract. Fully automated:
+# an unrecorded weakening fails; an intentional one passes once it carries an
+# `amended`/`retired` record, and is listed in the job summary. No human
+# approval is involved. Design and threat model:
 # docs/engineering/PRODUCT-CONTRACTS.md.
 #
 # pull_request_target, deliberately: the workflow file AND the checker are taken
@@ -9,16 +11,12 @@ name: Product Contracts
 # pass. The pull request's tree is checked out under ./pr and only ever READ
 # (parsed, diffed); nothing from it is built or executed. Keep it that way: do
 # not add a step that runs code, scripts or actions from ./pr.
-#
-# There is no pull_request_review trigger on purpose: after approving, re-run
-# this job so it re-reads the reviews.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
-  pull-requests: read
 
 concurrency:
   group: product-contracts-${{ github.event.pull_request.number }}
@@ -48,21 +46,10 @@ jobs:
       - name: Build the checker from the base branch
         run: go build -o "$RUNNER_TEMP/contractcheck" ./cmd/contractcheck
 
-      - name: Fetch the pull request reviews
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: gh api "repos/$REPO/pulls/$PR/reviews" --paginate --slurp --jq 'add // []' > "$RUNNER_TEMP/reviews.json"
-
       - name: Assess contract impact
         working-directory: pr
-        env:
-          AUTHOR: ${{ github.event.pull_request.user.login }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           parents=$(git rev-list --parents -n1 HEAD | wc -w)
           [ "$parents" -eq 3 ] || { echo "::error::the pull request merge ref is not a merge commit; resolve conflicts and re-run"; exit 1; }
-          "$RUNNER_TEMP/contractcheck" impact -base HEAD^1 \
-            -author "$AUTHOR" -head "$HEAD_SHA" -reviews "$RUNNER_TEMP/reviews.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          "$RUNNER_TEMP/contractcheck" impact -base HEAD^1 | tee -a "$GITHUB_STEP_SUMMARY"

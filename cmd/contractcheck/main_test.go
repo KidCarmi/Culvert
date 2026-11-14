@@ -16,7 +16,6 @@ import (
 var protected = []string{
 	"internal/contracts/**",
 	".github/workflows/product-contracts.yml",
-	".github/CODEOWNERS",
 }
 
 func git(t *testing.T, args ...string) {
@@ -46,23 +45,22 @@ func repoWithBase(t *testing.T) {
 	// A body long enough that git's rename detection pairs a moved copy.
 	body := strings.Repeat("a line of the protected file\n", 20)
 	write(t, ".github/workflows/product-contracts.yml", body+"workflow\n")
-	write(t, ".github/CODEOWNERS", body+"owners\n")
 	write(t, "internal/contracts/contracts.go", "package contracts\n")
 	write(t, "docs/readme.md", "docs\n")
 	git(t, "add", "-A")
 	git(t, "commit", "-q", "-m", "base")
 }
 
-// needsApproval runs the same two steps runImpact does: list the changed files,
+// listedEdits runs the same two steps runImpact does: list the changed files,
 // then assess them against a base registry that protects the gate's own files.
-func needsApproval(t *testing.T) []string {
+func listedEdits(t *testing.T) []string {
 	t.Helper()
 	changed, err := changedFiles("HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg := &contracts.Registry{Version: 1, Approvers: []string{"owner"}, Protected: protected}
-	return contracts.Assess(reg, reg, os.DirFS("."), changed).NeedsApproval
+	reg := &contracts.Registry{Version: 1, Protected: protected}
+	return contracts.Assess(reg, reg, os.DirFS("."), changed).Recorded
 }
 
 func wantFlagged(t *testing.T, got []string, path string) {
@@ -80,11 +78,9 @@ func wantFlagged(t *testing.T, got []string, path string) {
 func TestChangedFiles_MovingAProtectedFileIsReported(t *testing.T) {
 	repoWithBase(t)
 	git(t, "mv", ".github/workflows/product-contracts.yml", "docs/old-gate.yml")
-	git(t, "mv", ".github/CODEOWNERS", "docs/OLD-CODEOWNERS")
 
-	got := needsApproval(t)
+	got := listedEdits(t)
 	wantFlagged(t, got, ".github/workflows/product-contracts.yml")
-	wantFlagged(t, got, ".github/CODEOWNERS")
 }
 
 // A file added to the checker package can change the checker (an init() that
@@ -97,19 +93,19 @@ func TestChangedFiles_NonASCIIAndSpacedNamesAreReportedVerbatim(t *testing.T) {
 	write(t, spaced, "package contracts\n")
 	git(t, "add", "-A")
 
-	got := needsApproval(t)
+	got := listedEdits(t)
 	wantFlagged(t, got, accented)
 	wantFlagged(t, got, spaced)
 }
 
-// Negative control: a change outside every protected path asks for nothing.
-func TestChangedFiles_UnprotectedChangeNeedsNoApproval(t *testing.T) {
+// Negative control: a change outside every protected path lists nothing.
+func TestChangedFiles_UnprotectedChangeIsNotListed(t *testing.T) {
 	repoWithBase(t)
 	write(t, "docs/readme.md", "docs, edited\n")
 	write(t, "docs/new.md", "new\n")
 	git(t, "add", "-A")
 
-	if got := needsApproval(t); len(got) != 0 {
+	if got := listedEdits(t); len(got) != 0 {
 		t.Errorf("an unprotected change was reported: %q", got)
 	}
 	changed, err := changedFiles("HEAD")

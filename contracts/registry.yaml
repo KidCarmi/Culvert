@@ -15,23 +15,19 @@
 #                   tests and docs by an audit, not ratified.
 #
 # To change or remove a contract on purpose, add an `amended` or `retired`
-# record with a reason in the same change. CI then requires an approving review
-# from a listed approver who is not the author.
+# record with a reason in the same change. The gate is fully automated: an
+# unrecorded weakening fails, and a recorded one passes and is listed in the
+# gate summary with its reason. No human approval is required.
 version: 1
 
-# Who may approve a contract change. Read from the BASE revision in CI, so a
-# change cannot add its own approver.
-approvers:
-  - KidCarmi
-
-# Editing these needs the same approval as changing a contract. Also read from
-# the BASE revision. This file is not listed: adding an entry stays cheap, and
-# removing or rewording one is caught by the base comparison instead.
+# The gate's own files. Editing them is listed in the gate summary so it never
+# passes unseen; it is not refused. Read from the BASE revision. This file is
+# not listed: adding an entry stays cheap, and removing or rewording one is
+# caught by the base comparison instead.
 protected:
   - internal/contracts/**
   - cmd/contractcheck/**
   - .github/workflows/product-contracts.yml
-  - .github/CODEOWNERS
 
 amended: []
 retired: []

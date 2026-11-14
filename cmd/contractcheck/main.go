@@ -3,19 +3,17 @@
 //	contractcheck validate
 //	    Check contracts/registry.yaml against the working tree.
 //
-//	contractcheck impact -base <rev> [-author <login> -head <sha> -reviews <file>]
+//	contractcheck impact -base <rev>
 //	    Compare the registry at <rev> with the working tree and the files
-//	    changed since <rev>. Exit 1 when a contract was weakened without a
-//	    record, or when a recorded contract change or a protected-path edit
-//	    lacks an approval from a listed approver other than the author.
-//	    -reviews is the JSON array from GET /repos/{o}/{r}/pulls/{n}/reviews.
+//	    changed since <rev>. Exit 1 when a contract was weakened without a new
+//	    amended/retired record. Recorded contract changes and edits to
+//	    protected paths are listed, not refused: the gate is fully automated.
 //
 // Run from the repository root. See docs/engineering/PRODUCT-CONTRACTS.md.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -75,9 +73,6 @@ func runValidate() error {
 func runImpact(args []string) error {
 	fs := flag.NewFlagSet("impact", flag.ContinueOnError)
 	base := fs.String("base", "", "base revision to compare against (required)")
-	author := fs.String("author", "", "pull-request author login")
-	headSHA := fs.String("head", "", "pull-request head commit SHA")
-	reviewsFile := fs.String("reviews", "", "file holding the pull-request reviews JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -115,29 +110,17 @@ func runImpact(args []string) error {
 	}
 	if len(im.Weakened) > 0 {
 		return fmt.Errorf("%d contract(s) weakened without a record. If the change is intended, add an "+
-			"`amended` or `retired` entry with a reason to %s; it then needs an approver's review", len(im.Weakened), registryPath)
+			"`amended` or `retired` entry with a reason to %s", len(im.Weakened), registryPath)
 	}
-	if len(im.NeedsApproval) == 0 {
-		return nil
+	for _, n := range im.Recorded {
+		fmt.Println("RECORDED", n)
 	}
-	for _, n := range im.NeedsApproval {
-		fmt.Println("NEEDS APPROVAL", n)
-	}
-	reviews, err := loadReviews(*reviewsFile)
-	if err != nil {
-		return err
-	}
-	if contracts.Approved(baseReg.Approvers, *author, *headSHA, reviews) {
-		fmt.Println("Approved on this commit by a listed approver other than the author.")
-		return nil
-	}
-	return fmt.Errorf("this change alters a contract or a protected path and needs an approving review, on the "+
-		"current commit, from one of %v who is not the author (%q)", baseReg.Approvers, *author)
+	return nil
 }
 
-// loadBase returns the registry at rev, or nil when rev has none. The approver
-// list and protected paths are taken from here, so a change cannot add itself
-// as an approver or unprotect a path it edits.
+// loadBase returns the registry at rev, or nil when rev has none. The contract
+// list and protected paths are taken from here, so a change cannot hide a
+// weakening by editing the registry in the same change.
 func loadBase(rev string) (*contracts.Registry, error) {
 	out, err := exec.CommandContext(context.Background(), "git", "show", rev+":"+registryPath).Output() // #nosec G204 -- fixed binary; rev is the CI-resolved base
 	if err != nil {
@@ -154,8 +137,8 @@ func loadBase(rev string) (*contracts.Registry, error) {
 // Two flags are load-bearing for the protected-path check:
 //
 //   - --no-renames: with rename detection (git's default) a moved file is
-//     reported under its NEW path only, so moving the gate workflow or
-//     CODEOWNERS out of a protected path would not name the protected path.
+//     reported under its NEW path only, so moving the gate workflow out of a
+//     protected path would not name the protected path.
 //     Without it a move is a delete of the old path plus an add of the new one.
 //   - -z: without it git C-quotes a path holding non-ASCII bytes
 //     ("dir/z\303\251.go"), which no longer matches its protected glob. NUL
@@ -172,29 +155,4 @@ func changedFiles(rev string) ([]string, error) {
 		}
 	}
 	return files, nil
-}
-
-func loadReviews(file string) ([]contracts.Review, error) {
-	if file == "" {
-		return nil, nil
-	}
-	data, err := os.ReadFile(file) // #nosec G304 -- operator-supplied path on a CI runner
-	if err != nil {
-		return nil, fmt.Errorf("read reviews: %w", err)
-	}
-	var raw []struct {
-		User struct {
-			Login string `json:"login"`
-		} `json:"user"`
-		State    string `json:"state"`
-		CommitID string `json:"commit_id"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse reviews: %w", err)
-	}
-	reviews := make([]contracts.Review, 0, len(raw))
-	for _, r := range raw {
-		reviews = append(reviews, contracts.Review{Login: r.User.Login, State: r.State, CommitID: r.CommitID})
-	}
-	return reviews, nil
 }

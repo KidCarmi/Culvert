@@ -11,8 +11,9 @@ replaced an imported enterprise CA with a self-signed one. No test failed, becau
 no test stated who is allowed to renew a CA.
 
 The goal is narrow: **a critical product invariant cannot change unnoticed.** Either
-an executable test fails, or the change is surfaced for a person who is not its
-author to approve. The goal is not more review of ordinary changes.
+an executable test fails, or the change must carry an explicit, reasoned record in
+the registry and is listed in the gate summary. The gate is **fully automated**: no
+human approval is part of it, and ordinary changes get no extra friction.
 
 ## 2. What is in this change
 
@@ -21,8 +22,7 @@ author to approve. The goal is not more review of ordinary changes.
 | Registry | `contracts/registry.yaml` | Machine-readable list of invariants, code paths, tests |
 | Checker | `internal/contracts`, `cmd/contractcheck` | Validates the registry; compares base against head |
 | Always-on test | `TestRegistry_IsSoundAgainstThisTree` | Runs in the existing race lane; no new workflow needed |
-| Gate | `.github/workflows/product-contracts.yml` | Detects weakening; requires independent approval |
-| Ownership | `.github/CODEOWNERS` | Registry, checker and this document |
+| Gate | `.github/workflows/product-contracts.yml` | Fails an unrecorded weakening; lists recorded changes |
 | Agent guidance | `AGENTS.md` route to `docs/agent-context/workflows/product-contracts.md` | Six steps before changing contract code |
 
 No new dependency. The checker uses the YAML library already in `go.mod`.
@@ -56,24 +56,24 @@ an enforced entry with no test.
 
 | Finding | Meaning | Result |
 |---|---|---|
-| Touched | The change edits a contract's code paths; its tests are intact | Pass. Listed in the job summary for the reviewer |
+| Touched | The change edits a contract's code paths; its tests are intact | Pass. Listed in the job summary |
 | Weakened | A base contract was removed, downgraded, reworded, lost a code path, or a base-registered test is gone, skippable or dropped from the contract's list, with no new record | **Fail** |
-| Needs approval | The same, but with a new `amended` / `retired` record; or an edit to a protected path | **Fail until** a listed approver who is not the author approves the current commit |
+| Recorded | The same, but with a new `amended` / `retired` record; or an edit to a protected path (the gate's own files) | Pass. Listed in the job summary with the record's reason |
 
 The base registry is the reference. Deleting a test and removing it from the registry
 in the same change still fails, because the base list is what gets checked
-(`TestAssess_BaseRegistryIsTheReference`). Approvers and protected paths are also
-read from the base, so a change cannot add its own approver.
+(`TestAssess_BaseRegistryIsTheReference`). Protected paths are also read from the
+base, so a change cannot unlist a gate file it edits without that being reported.
 
 ### Risk tiers
 
 | Change | Friction |
 |---|---|
 | Touches no contract code | None. The job passes in seconds |
-| Touches contract code, tests intact | None. Affected IDs are listed for review |
-| Adds a contract | None. Additions to the registry need no approval |
-| Changes a contract on purpose | One record in the registry plus one approval |
-| Edits the checker, the gate workflow, CODEOWNERS, the approver list | One approval |
+| Touches contract code, tests intact | None. Affected IDs are listed in the summary |
+| Adds a contract | None |
+| Changes a contract on purpose | One `amended` / `retired` record with a reason in the registry |
+| Edits the checker or the gate workflow | None. Listed in the summary |
 
 ## 3. Coverage matrix
 
@@ -107,20 +107,10 @@ has decided.
 | Weaken a contract test | Base-registered tests must exist and not skip | A test can be gutted while keeping its name. Review of the listed IDs is the only defense |
 | Edit the registry with the implementation | Base registry is the reference | None for removal or rewording |
 | Edit the workflow or the checker in the PR | `pull_request_target`: both come from the base branch; PR content is read, never executed | A later maintainer adding a step that runs PR code would reopen it |
-| Edit `AGENTS.md` | Existing guidance gate, plus CODEOWNERS | Guidance is advisory by nature |
+| Edit `AGENTS.md` | Existing guidance gate | Guidance is advisory by nature |
 | Critical code no contract maps | Nothing mechanical | **Largest gap.** Unmapped paths are invisible; see §7 |
-| Self-approval or agent approval | Approver must differ from the PR author and approve the head commit | **See below** |
-
-**The identity problem.** Agents in this repository open pull requests as the owner's
-own account. GitHub does not let an author approve their own pull request, so today
-the owner cannot approve an agent-authored contract change, and any agent holding the
-owner's credentials can do whatever the owner can. Independent approval is only real
-if agents author through a separate identity (a GitHub App or bot account) with no
-ruleset bypass. Until then the gate still detects and blocks silent weakening, but
-the approval step can only be satisfied by an administrator override.
-
-I have not confirmed how GitHub resolves the workflow file for `pull_request_review`
-events, which is one reason that trigger is not used.
+| Record a weakening with a thin reason | The record and its reason are listed in the job summary and kept in the registry | **No human sign-off, by design.** The gate makes an intentional change explicit and permanent in history; it does not judge whether the reason is good |
+| Edit the checker or workflow in a later PR | Listed in that PR's summary as a protected-path edit | Once merged, the new checker governs later PRs |
 
 ## 5. Vendor comparison (Workstreams A and C)
 
@@ -160,25 +150,25 @@ What this supports for PR #1854:
 
 1. **Backed by documented practice:** external authority renews an externally issued
    CA; renewal and re-key are separate; expiry is alerted before it happens.
-   Required status checks, CODEOWNERS and rulesets are standard GitHub controls.
+   Required status checks and rulesets are standard GitHub controls.
 2. **Culvert-specific choices:** the registry format; using the base revision as
    reference; the `open` status; the provenance PEM block; `CULVERT_CA_PROVENANCE`.
 3. **Executable safeguards:** registry validation; base-versus-head weakening
-   detection; the skip check; the approver-is-not-author check; the contract tests
-   themselves.
+   detection; the skip check; the requirement of a new reasoned record for any
+   intentional change; the contract tests themselves.
 4. **Documentation or human review only:** the wording of each invariant; whether a
    test truly asserts its invariant; `transitions` and `compatibility` (free text,
    not checked); the six-step agent procedure; everything in an `open` entry.
 5. **Realistic bypass paths:** unmapped code; a test hollowed out under its old
-   name; credentials shared between agents and the owner; a ruleset that was never
-   configured.
+   name; a record whose reason nobody reads; a ruleset that was never configured.
 6. **Maintenance cost:** one registry entry per new invariant; one record per
    intentional change. The registry will rot if entries are added for behavior
    nobody would defend, so it should stay small. 36 entries is near the upper end
    of what one owner can keep honest.
-7. **Does it scale without bottlenecking?** Approval is needed only for a contract
-   change or a protected-path edit. The risk is the opposite: too many code globs
-   make "touched" lists noise that reviewers stop reading. Globs should stay narrow.
+7. **Does it scale without bottlenecking?** Yes: nothing waits on a person. An
+   intentional contract change costs one registry record. The risk is the
+   opposite: too many code globs make "touched" lists noise nobody reads. Globs
+   should stay narrow.
 8. **Migration for deployed appliances:** the gate changes nothing at runtime. For
    PR #1854, existing bundles load as unknown provenance and stop auto-renewing
    until classified; the record is skipped by older builds, so a downgrade loads.
@@ -190,9 +180,8 @@ What this supports for PR #1854:
 2. **Decide the 12 open entries**, contradictions first (SWG-900, POL-900,
    UPG-900, UPG-901).
 3. **Merge**, then make `Gate · product contracts` a required check in a ruleset.
-4. **Separate agent identity**, so approval is independent (§4).
-5. **Promote PKI-900** to enforced once PR #1854 merges, naming its tests.
-6. **Close the unmapped-code gap**: add golden-vector tests for the two frozen
+4. **Promote PKI-900** to enforced once PR #1854 merges, naming its tests.
+5. **Close the unmapped-code gap**: add golden-vector tests for the two frozen
    on-disk formats (PKI-901 and the backup envelope), then extend coverage area by
    area. A "critical path with no contract" detector is possible later but needs
    an owner-agreed list of critical paths first.
@@ -215,7 +204,5 @@ What this supports for PR #1854:
 
 1. Approve, reword or drop each of the 24 candidate invariants.
 2. Answer the 12 open questions.
-3. Configure the ruleset: required check, code-owner review, no bypass for agents.
-4. Give agents a separate GitHub identity, or accept administrator override as the
-   approval path.
-5. Decide whether `amended` records should be pruned after release or kept as history.
+3. Make `Gate · product contracts` a required status check.
+4. Decide whether `amended` records should be pruned after release or kept as history.

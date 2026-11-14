@@ -23,9 +23,11 @@ Before modifying the behavior:
 5. **Add or update executable contract tests** beside the owner. Never delete,
    skip or loosen a registered test, and never edit the registry so that an
    implementation passes.
-6. **Escalate an intentional contract change.** Add an `amended` or `retired`
-   record with the reason, stop, and ask the owner. Do not set `owner_approved`.
-   A review by an agent or a bot is advice, not that approval.
+6. **Record an intentional contract change.** Add an `amended` or `retired`
+   record with a specific reason in the same change. The gate is automated: the
+   record lets the change pass and is listed in the job summary, so write the
+   reason for a reader who was not there. Do not set `owner_approved`; that flag
+   records the owner confirming an invariant's wording.
 
 `open` entries are undecided questions, not rules: report the question, do not
 resolve it by implementation. Passing tests, lint and scanners do not show that

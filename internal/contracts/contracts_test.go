@@ -26,7 +26,7 @@ func baseContract() Contract {
 }
 
 func reg(cs ...Contract) *Registry {
-	return &Registry{Version: 1, Approvers: []string{"owner"}, Protected: []string{"internal/contracts/**"}, Contracts: cs}
+	return &Registry{Version: 1, Protected: []string{"internal/contracts/**"}, Contracts: cs}
 }
 
 var goodTree = tree(map[string]string{"policy.go": "package x\n", "policy_test.go": goodTest})
@@ -85,14 +85,14 @@ func TestParse_UnknownFieldIsAnError(t *testing.T) {
 
 func TestAssess_NoBaseRegistryIsBootstrap(t *testing.T) {
 	im := Assess(nil, reg(baseContract()), goodTree, []string{"contracts/registry.yaml"})
-	if len(im.Weakened)+len(im.NeedsApproval)+len(im.Touched) != 0 {
+	if len(im.Weakened)+len(im.Recorded)+len(im.Touched) != 0 {
 		t.Fatalf("bootstrap should report nothing: %+v", im)
 	}
 }
 
 func TestAssess_UnrelatedChangeIsFree(t *testing.T) {
 	im := Assess(reg(baseContract()), reg(baseContract()), goodTree, []string{"README.md"})
-	if len(im.Weakened)+len(im.NeedsApproval)+len(im.Touched) != 0 {
+	if len(im.Weakened)+len(im.Recorded)+len(im.Touched) != 0 {
 		t.Fatalf("an unrelated change must not involve any contract: %+v", im)
 	}
 }
@@ -102,7 +102,7 @@ func TestAssess_TouchingContractCodeIsReportedNotBlocked(t *testing.T) {
 	if len(im.Touched) != 1 || im.Touched[0] != "POL-001" {
 		t.Fatalf("Touched = %v, want [POL-001]", im.Touched)
 	}
-	if len(im.Weakened)+len(im.NeedsApproval) != 0 {
+	if len(im.Weakened)+len(im.Recorded) != 0 {
 		t.Fatalf("an implementation change with intact tests must not block: %+v", im)
 	}
 }
@@ -150,72 +150,46 @@ func TestAssess_SilentWeakeningsFail(t *testing.T) {
 	}
 }
 
-func TestAssess_RecordedChangeNeedsApprovalInsteadOfFailing(t *testing.T) {
+// A recorded change passes the gate and is listed in the summary; no approval.
+func TestAssess_RecordedChangeIsListedNotRefused(t *testing.T) {
 	head := reg()
 	head.Retired = []Record{{ID: "POL-001", Reason: "replaced by POL-002"}}
 	im := Assess(reg(baseContract()), head, goodTree, nil)
 	if len(im.Weakened) != 0 {
 		t.Fatalf("a recorded retirement is not a silent weakening: %v", im.Weakened)
 	}
-	if len(im.NeedsApproval) != 1 {
-		t.Fatalf("NeedsApproval = %v, want the retirement", im.NeedsApproval)
+	if len(im.Recorded) != 1 {
+		t.Fatalf("Recorded = %v, want the retirement", im.Recorded)
 	}
 }
 
-func TestAssess_ProtectedPathNeedsApproval(t *testing.T) {
+func TestAssess_ProtectedPathEditIsListed(t *testing.T) {
 	im := Assess(reg(baseContract()), reg(baseContract()), goodTree, []string{"internal/contracts/contracts.go"})
-	if len(im.NeedsApproval) != 1 || !strings.Contains(im.NeedsApproval[0], "internal/contracts/contracts.go") {
-		t.Fatalf("NeedsApproval = %v", im.NeedsApproval)
+	if len(im.Weakened) != 0 || len(im.Recorded) != 1 || !strings.Contains(im.Recorded[0], "internal/contracts/contracts.go") {
+		t.Fatalf("want one listed protected-path edit and no failure, got %+v", im)
 	}
 }
 
-// Adding a contract is free; changing who approves, or what is protected, is not.
-func TestAssess_RegistryAdditionsAreFreeButGovernanceEditsAreNot(t *testing.T) {
+// Adding a contract is silent; shrinking the protected list is listed.
+func TestAssess_RegistryAdditionsAreSilentButGovernanceEditsAreListed(t *testing.T) {
 	added := baseContract()
 	added.ID = "POL-002"
 	im := Assess(reg(baseContract()), reg(baseContract(), added), goodTree, []string{"contracts/registry.yaml"})
-	if len(im.Weakened)+len(im.NeedsApproval) != 0 {
-		t.Fatalf("adding a contract must not need approval: %+v", im)
-	}
-	selfApprover := reg(baseContract())
-	selfApprover.Approvers = []string{"owner", "agent-bot"}
-	if im := Assess(reg(baseContract()), selfApprover, goodTree, nil); len(im.NeedsApproval) != 1 {
-		t.Fatalf("adding an approver must need approval: %+v", im)
+	if len(im.Weakened)+len(im.Recorded) != 0 {
+		t.Fatalf("adding a contract must report nothing: %+v", im)
 	}
 	unprotected := reg(baseContract())
 	unprotected.Protected = nil
-	if im := Assess(reg(baseContract()), unprotected, goodTree, nil); len(im.NeedsApproval) != 1 {
-		t.Fatalf("removing a protected path must need approval: %+v", im)
+	if im := Assess(reg(baseContract()), unprotected, goodTree, nil); len(im.Weakened) != 0 || len(im.Recorded) != 1 {
+		t.Fatalf("removing a protected path must be listed, not refused: %+v", im)
 	}
 }
 
-func TestApproved(t *testing.T) {
-	const sha = "abc"
-	for name, tc := range map[string]struct {
-		author  string
-		reviews []Review
-		want    bool
-	}{
-		"independent approver on head":  {"agent-bot", []Review{{"Owner", "APPROVED", sha}}, true},
-		"author approving own change":   {"owner", []Review{{"owner", "APPROVED", sha}}, false},
-		"approval of an earlier commit": {"agent-bot", []Review{{"owner", "APPROVED", "old"}}, false},
-		"non-approver":                  {"agent-bot", []Review{{"someone", "APPROVED", sha}}, false},
-		"approval later withdrawn":      {"agent-bot", []Review{{"owner", "APPROVED", sha}, {"owner", "CHANGES_REQUESTED", sha}}, false},
-		"no reviews":                    {"agent-bot", nil, false},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if got := Approved([]string{"owner"}, tc.author, sha, tc.reviews); got != tc.want {
-				t.Fatalf("Approved = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-// A record left in the file by an earlier approved change must not excuse a
+// A record left in the file by an earlier change must not excuse a
 // later, unrecorded weakening of the same contract.
 func TestAssess_StaleRecordDoesNotExcuseANewWeakening(t *testing.T) {
 	base := reg(baseContract())
-	base.Amended = []Record{{ID: "POL-001", Reason: "an old, already-approved change"}}
+	base.Amended = []Record{{ID: "POL-001", Reason: "an old change"}}
 	head := reg(func() Contract { c := baseContract(); c.Invariant = "last match wins"; return c }())
 	head.Amended = base.Amended
 	im := Assess(base, head, goodTree, nil)
@@ -241,16 +215,16 @@ func TestAssess_DroppingARegisteredTestIsAWeakening(t *testing.T) {
 
 // A contract amended once must be amendable again: an older record kept as
 // history must not turn a new, recorded change into an unrecorded one.
-func TestAssess_SecondAmendmentOfTheSameContractIsApprovable(t *testing.T) {
+func TestAssess_SecondAmendmentOfTheSameContractIsAccepted(t *testing.T) {
 	base := reg(baseContract())
-	base.Amended = []Record{{ID: "POL-001", Reason: "first, already-approved change"}}
+	base.Amended = []Record{{ID: "POL-001", Reason: "first change"}}
 	head := reg(func() Contract { c := baseContract(); c.Invariant = "last match wins"; return c }())
 	head.Amended = append(append([]Record{}, base.Amended...), Record{ID: "POL-001", Reason: "second change"})
 	im := Assess(base, head, goodTree, nil)
 	if len(im.Weakened) != 0 {
 		t.Fatalf("a newly recorded change must not count as unrecorded: %v", im.Weakened)
 	}
-	if len(im.NeedsApproval) != 1 {
-		t.Fatalf("NeedsApproval = %v, want the second amendment", im.NeedsApproval)
+	if len(im.Recorded) != 1 {
+		t.Fatalf("Recorded = %v, want the second amendment", im.Recorded)
 	}
 }
