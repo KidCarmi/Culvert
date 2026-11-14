@@ -51,7 +51,12 @@ func loadObservability(cfg observabilityStartupConfig) {
 			// the intent is unmet NOW, so every read surface may say so
 			// without waiting the grace out.
 			noteSyslogDialResolved()
-			logger.Printf("Syslog: connect failed (%v) — continuing without syslog", err)
+			logger.Printf("Syslog: connect failed (%v) — continuing without syslog; the connection is retried automatically in the background", err)
+			// The intent stands and this dial is safe to repeat: hand it to
+			// the background retry so a collector that was merely late (or
+			// unresolvable while DNS was still coming up) does not stay dark
+			// until an operator re-saves the target or restarts the node.
+			armSyslogIntentRetry(cfg.SyslogAddr, cfg.SyslogFormat)
 		}
 	}
 

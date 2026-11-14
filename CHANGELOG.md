@@ -305,6 +305,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **A SIEM/syslog collector that was unreachable while the node booted stayed
+  unserved until an operator re-saved the target or restarted.** Both boot
+  paths tolerate a failed connect and keep proxying, but nothing dialled
+  again: the engine's reconnect belongs to a writer, and a failed boot dial
+  produces none. A collector that came up a minute after the gateway (or
+  whose name did not resolve until DNS was up) therefore lost every audit and
+  request event for the life of the process. The failed boot dial is now
+  retried in the background — about 10 s after the failure, doubling to one
+  bounded attempt every 2 minutes, with jitter — until it connects, the
+  operator disables or re-points forwarding, or the node shuts down. It dials
+  the same configured target with the same format and publishes through the
+  same transition as `InitSyslog`; a retry whose dial was in flight when the
+  operator changed the target is discarded. Unchanged: the feed is still
+  reported down immediately (`culvert_syslog_up 0`, `syslog_feed`,
+  `syslog_feed_down`) until a writer exists, lost events are still counted and
+  never replayed, a refused live re-point (400) still changes nothing, and no
+  settings write or configuration version is produced. The automatic connect
+  is logged and audited as `settings.syslog.auto_connect` with actor `system`.
+  The alert Detail, the `syslog_feed` operator action and
+  `docs/operator/siem-feed-delivery.md` no longer say "nothing retries".
+
 - **A panic in the MCP telemetry shutdown drain killed the process from a
   shutdown hook that runs before every durability flush, so a "graceful"
   shutdown skipped the tunnel drain and every log/audit store close.**

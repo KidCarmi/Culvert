@@ -527,6 +527,10 @@ func applyAdminServices(s *AdminSettings) {
 		// the health plane is the reporter (see dialVerdictBy).
 		if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err != nil {
 			noteSyslogDialResolved()
+			// Same as loadObservability: the persisted target is still what
+			// the operator asked for, so the failed boot dial is retried in
+			// the background instead of staying down until a re-save.
+			armSyslogIntentRetry(s.SyslogAddr, s.SyslogFormat)
 		}
 	}
 	if s.OTLPEndpoint != "" {
