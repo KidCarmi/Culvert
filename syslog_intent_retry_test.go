@@ -358,7 +358,7 @@ func TestSyslogIntentRetry_CompletesASupersededBootTarget(t *testing.T) {
 
 	persistedAddr := reserveClosedSyslogAddr(t)
 	persisted := "tcp://" + persistedAddr
-	applyAdminServices(&AdminSettings{SyslogAddr: persisted, SyslogFormat: "rfc5424"})
+	applyAdminSyslog(&AdminSettings{SyslogAddr: persisted, SyslogFormat: "rfc5424"})
 	if _, intended, sw := syslogConfiguredSnapshot(); intended != persisted || sw == nil {
 		t.Fatalf("precondition: want intent %q served by the previous writer; intended=%q writer=%v", persisted, intended, sw)
 	}
