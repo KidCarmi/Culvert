@@ -2002,7 +2002,7 @@ func checkCDR() OperatorContractCheck {
 			Code:           "cdr",
 			Status:         diagFail,
 			Message:        "enabled-broken: CDR is enabled but no Sluice instance is connected",
-			OperatorAction: "Enrol at least one Sluice instance under CDR, or disable CDR if not in use.",
+			OperatorAction: "Enroll at least one Sluice instance under CDR, or disable CDR if not in use.",
 		}
 	case !cdrAnyInstanceAvailable():
 		// Keyed on AVAILABILITY, not pool length: an enrolled instance whose
