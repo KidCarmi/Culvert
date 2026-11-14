@@ -305,6 +305,56 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **A panic in the MCP telemetry shutdown drain killed the process from a
+  shutdown hook that runs before every durability flush, so a "graceful"
+  shutdown skipped the tunnel drain and every log/audit store close.**
+  `telemetryRuntime.Close` performed its final denial flush, its full export
+  drain and its manager close inside a bare `go func()`. The drain calls the
+  same `exportStep` the periodic export loop has guarded since the previous
+  release — reading the encrypted spool and calling the archive exporter, both
+  fed by data the process does not author — so the identical fault was contained
+  on the periodic path and fatal on the shutdown path. The hook is registered at
+  shutdown order 66, which left orders 67-140 unrun: the tunnel establish-fence,
+  the HTTP/2 GOAWAY wave, the in-flight tunnel drain, and the syslog, community
+  DB, log store, request log and audit log closes. Because the goroutine is
+  detached while `Close` waits on the shutdown budget, a hook abandoned on its
+  deadline left the goroutine running, so the crash could instead land inside an
+  unrelated later hook. The drain is now three independently guarded stages, so
+  one partition's fault costs only that partition's pending batches and the
+  manager close — the step that performs the final per-domain flush and releases
+  the spool — always runs; the hook always answers, so it can no longer consume
+  the budget it exists to honour; and a drain that died is reported as a failure
+  rather than a clean shutdown. Committed events stay durable in the encrypted
+  spool and export on the next start.
+
+- **Five background rounds contained their panics without reporting them, so a
+  round that failed on every tick was indistinguishable from one that was
+  healthy.** The release catalog refresh tick, the catalog stale-watchdog tick,
+  the SaaS feed refresh tick, the Control-Plane address republish retry and the
+  HA leadership-resume retry each recovered their own panic and wrote a log
+  line, which moved no `culvert_crash_records_total{component}` series, stored
+  no crash record for the support bundle or health surface, and wrote no audit
+  entry. The sharpest case states its own cost in its own log line: a panic in
+  the leadership-resume retry permanently ends the only retry of the persisted
+  HA intent, leaving the node serving with no write authority until it is
+  restarted. All five now report into the crash plane under their own component
+  while keeping their existing containment, log lines and outcome semantics.
+  `Refresher.RunTicker`, a catalog verify/persist/publish round loop with no
+  containment and no production caller yet, is guarded before it acquires one.
+
+- **The crash sink's component-label cap was smaller than its own fixed label
+  set, so past 32 distinct components a recovered panic lost its record, its log
+  line and its audit entry entirely.** `maxCrashLabels` was 32 while the tree
+  declares 56 fixed component labels. The cap exists to fail closed on
+  dynamically-derived labels, and Culvert has none — every call site passes a
+  compile-time constant. Past the cap the metrics counter folds a label into
+  `component="other"` (attribution lost, series intact) but the throttle
+  suppresses the record, the log line and the audit entry outright, and slots
+  are first-crash-wins and never pruned — so they went to the frequent
+  request-path components while the rare, high-severity background rounds lost
+  their evidence. The cap is now 128, with a test that enumerates the labels
+  from source and fails when a future change crosses it again.
+
 - **A panic in any of the last five `go`-detached background rounds terminated
   the whole gateway, and guarding two of them without also fixing how they
   release their locks would have been worse than the crash.** Go terminates the

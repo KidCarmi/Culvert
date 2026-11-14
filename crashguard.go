@@ -51,10 +51,32 @@ func init() {
 }
 
 const (
-	crashMsgMax        = 512         // bound the (attacker-shaped) panic value
-	crashStackMax      = 4096        // bound debug.Stack()
-	crashCorrIDMax     = 128         // bound the client-supplied X-Request-ID correlation id
-	maxCrashLabels     = 32          // component-label cardinality cap
+	crashMsgMax    = 512  // bound the (attacker-shaped) panic value
+	crashStackMax  = 4096 // bound debug.Stack()
+	crashCorrIDMax = 128  // bound the client-supplied X-Request-ID correlation id
+	// maxCrashLabels is the component-label cardinality cap. It exists for
+	// DYNAMIC labels — crashThrottleAllow fails closed past it so a caller that
+	// derived a component name from request data cannot grow the throttle map
+	// without bound.
+	//
+	// CHAOS-119 raised it from 32 because Culvert has no dynamic labels and the
+	// FIXED set had outgrown the cap. crashRecord.Component calls itself a
+	// "fixed enum" and it is: every sink call site passes a compile-time
+	// constant or literal, and a source enumeration counted 62 distinct ones
+	// (TestCHAOS119_FixedCrashLabelSetFitsTheCardinalityCap, which now holds
+	// this invariant and fails when a future round crosses it again).
+	//
+	// Below the cap, the two overflow behaviours are not equivalent and that is
+	// what made 32 a reporting defect rather than a metrics nicety. The counter
+	// FOLDS an overflowing label into "other", so the series survives and only
+	// attribution is lost; crashThrottleAllow SUPPRESSES it, so the crash
+	// record, the crash log line and the system-actor audit entry are never
+	// written at all. Slots are first-crash-wins and never pruned, so the 32
+	// went to whichever components crashed first — in practice the frequent
+	// request-path ones — and the rare, high-severity background rounds that
+	// CHAOS-105/116/117/118/119 added were the ones that lost their record.
+	// That is exactly inverted from what an operator needs.
+	maxCrashLabels     = 128
 	crashThrottleEvery = time.Second // min interval per component for the floodable sinks
 )
 
