@@ -8,6 +8,20 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**CHAOS-120 — CLAIMED 2026-11-14, placeholder row (round in progress).** Scope:
+the panic-containment plane's NOTIFICATION boundary — the question one step past
+CHAOS-119. That round asked what an operator can SEE after a contained crash and
+built the counter, the record and the audit entry. This one asks who TELLS them,
+and what survives long enough to debug with: the crash sink fires no alert on any
+component (`ha_sync_panic` is the lone contained-panic producer and its own doc
+comment states the general rule), and the stack-bearing crash record is a single
+last-write-wins slot. Closes the residual recorded by CHAOS-116 `4`, CHAOS-117
+`5`, CHAOS-118 `1` and CHAOS-119 `3`. Recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-14.md).
+Id checked against `origin/main` at `de0b6d1` (highest id anywhere on main:
+`CHAOS-119`) and against the open-PR set (#1894, #1893, #1883, #1855, #1705,
+#1549, #1548, #1536, #1528, #1526 — none a chaos sweep).
+
 The 2026-11-13 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-13.md) —
 CHAOS-119 (THE CONTAINMENT PLANE'S REPORTING BOUNDARY). Five rounds of this
