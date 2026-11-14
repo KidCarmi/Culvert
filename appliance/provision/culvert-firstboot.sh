@@ -394,85 +394,153 @@ repair_agent() {
 # status-json reports (internal/applianceconsole: application_responding,
 # management_available) hold: the application answers GET /health with 200 on
 # 127.0.0.1:8080, AND management answers GET /api/setup/status with 200 and a
-# JSON boolean needsSetup on 127.0.0.1:9090. Container startup is not evidence:
-# install.sh recreates the proxy late (Release Management wiring, `compose up
-# -d` without --wait), so the stack can be up while the application does not
-# answer yet (QEMU campaign 7, PR #1528). Both must hold in READY_CONFIRM
-# consecutive checks, so an answer from just before a recreate does not count.
-# The wait is bounded (READY_TIMEOUT_S, and a check-count cap). On timeout,
-# completion is NOT recorded: the reason goes to state/readiness.failed, the
-# log gets compose diagnostics, the console says what to do, and the step
-# fails, so the unit's bounded retry (Restart=on-failure) runs it again.
+# JSON boolean needsSetup on 127.0.0.1:9090. Both handlers answer before any
+# administrator exists and neither depends on complete.done (pac.go /health,
+# ui_auth.go apiSetupStatus), so the gate cannot wait on itself. Container
+# startup is not evidence: install.sh recreates the proxy late (Release
+# Management wiring, `compose up -d` without --wait), so the stack can be up
+# while the application does not answer yet (QEMU campaign 7, PR #1528).
+#
+# Both must hold in READY_CONFIRM consecutive checks, so an answer from just
+# before a recreate does not count. The bound is MONOTONIC (/proc/uptime):
+# every command — each probe, each body parse, each pause — gets at most the
+# time left (and at most 3 s), so the decision is reached within
+# READY_TIMEOUT_S plus a 0.5 s kill grace and the last record writes (each
+# bounded to 2 s); a check-count cap bounds it again. Every started probe
+# appends one JSON record (READY_RECORDS: check, endpoint, monotonic start/end,
+# timeout, rc, HTTP code, outcome, killed, bounded body and stderr); a record
+# that cannot be written makes that check fail. On timeout NOTHING is recorded
+# complete: the reason goes to state/readiness.failed, bounded diagnostics go
+# to the log, the console says what to do, and the step fails into the unit's
+# bounded retry (Restart=on-failure). An interrupted wait records nothing; the
+# next start resumes at this step and waits again.
 READY_TIMEOUT_S="${CULVERT_FB_READY_TIMEOUT_S:-300}"
 READY_INTERVAL_S="${CULVERT_FB_READY_INTERVAL_S:-2}"
 READY_CONFIRM="${CULVERT_FB_READY_CONFIRM:-2}"
 READY_CURL="${CULVERT_FB_READY_CURL:-curl}"
+READY_RECORDS="${CULVERT_FB_READY_RECORDS:-$STATE_DIR/readiness-attempts.jsonl}"
 APP_HEALTH_URL="http://127.0.0.1:8080/health"
 MGMT_SETUP_URL="https://127.0.0.1:9090/api/setup/status"
 [[ "$READY_TIMEOUT_S" =~ ^[1-9][0-9]{0,4}$ ]] || READY_TIMEOUT_S=300
 [[ "$READY_INTERVAL_S" =~ ^[1-9][0-9]{0,2}$ ]] || READY_INTERVAL_S=2
 [[ "$READY_CONFIRM" =~ ^[1-9]$ ]] || READY_CONFIRM=2
 
-# probe_application → "ok" | "http <code>" (000 = no answer within 3 s)
-probe_application() {
-  local code
-  code="$("$READY_CURL" -s -o /dev/null -w '%{http_code}' --max-time 3 "$APP_HEALTH_URL" 2>/dev/null || true)"
-  if [[ "$code" == 200 ]]; then echo ok; else echo "http ${code:-000}"; fi
+# mono_ms — monotonic milliseconds (CLOCK_BOOTTIME via /proc/uptime); wall
+# clock steps (NTP, a manual date) cannot stretch or shorten the wait.
+mono_ms() {
+  local up
+  read -r up _ < /proc/uptime
+  echo $(( 10#${up%.*} * 1000 + 10#${up#*.} * 10 ))
 }
 
-# probe_management → "ok" | reason. -k: the management certificate is
-# self-signed at first boot; this reads one boolean from the local process.
-probe_management() {
-  local out code body
-  out="$("$READY_CURL" -sk --max-time 3 -w '\n%{http_code}' "$MGMT_SETUP_URL" 2>/dev/null || true)"
-  if [[ "$out" == *$'\n'* ]]; then code="${out##*$'\n'}"; body="${out%$'\n'*}"; else code=000; body=""; fi
-  if [[ "$code" != 200 ]]; then echo "http ${code:-000}"; return 0; fi
-  if printf '%s' "$body" | python3 -c 'import json, sys
+# budget MS_LEFT CAP_MS → seconds with ms precision: min(MS_LEFT, CAP_MS).
+budget() {
+  local ms=$(( $1 < $2 ? $1 : $2 ))
+  (( ms < 1 )) && ms=1
+  printf '%d.%03d' $(( ms / 1000 )) $(( ms % 1000 ))
+}
+
+# record_attempt CHECK ENDPOINT URL T0 T1 TIMEOUT RC CODE OUTCOME DIR — one
+# JSON line; non-zero if it could not be written.
+record_attempt() {
+  timeout -k 0.5 2 python3 -c 'import json, sys
+a = sys.argv[1:]
+def rd(p, n):
+    try:
+        with open(p, "rb") as f:
+            return f.read(n).decode("utf-8", "replace")
+    except OSError:
+        return None
+rec = {"run": a[10], "check": int(a[0]), "endpoint": a[1], "url": a[2],
+       "started_ms": int(a[3]), "ended_ms": int(a[4]), "elapsed_ms": int(a[4]) - int(a[3]),
+       "timeout_s": float(a[5]), "rc": int(a[6]), "http_code": a[7], "outcome": a[8],
+       "killed": a[6] in ("124", "137"), "body": rd(a[9] + "/body", 2000), "stderr": rd(a[9] + "/err", 500)}
+with open(a[11], "a") as f:
+    f.write(json.dumps(rec, sort_keys=True) + "\n")' "$@" "$READY_RUN" "$READY_RECORDS" 2>/dev/null
+}
+
+# probe ENDPOINT CHECK → prints "ok" or the reason; records the attempt.
+probe() {
+  local ep="$1" n="$2" url left tmo rc=0 prc=0 t0 t1 code outcome tmp
+  case "$ep" in
+    application) url="$APP_HEALTH_URL" ;;
+    management) url="$MGMT_SETUP_URL" ;;
+  esac
+  left=$(( READY_DEADLINE_MS - $(mono_ms) ))
+  if (( left <= 0 )); then echo "not started: deadline reached"; return 0; fi
+  tmo="$(budget "$left" 3000)"
+  tmp="$(mktemp -d)"
+  t0="$(mono_ms)"
+  # -k: management's certificate is self-signed at first boot (loopback only).
+  timeout -k 0.5 "$tmo" "$READY_CURL" -sk --max-time "$tmo" --max-filesize 65536 \
+    -o "$tmp/body" -w '%{http_code}' "$url" > "$tmp/code" 2> "$tmp/err" || rc=$?
+  t1="$(mono_ms)"
+  code="$(head -c 3 "$tmp/code" 2>/dev/null || true)"
+  [[ "$code" =~ ^[0-9]{3}$ ]] || code=000
+  if (( rc == 124 || rc == 137 )); then
+    outcome="killed at ${tmo}s (http $code)"
+  elif [[ "$code" != 200 ]]; then
+    outcome="http $code"
+  elif [[ "$ep" == application ]]; then
+    outcome=ok
+  else
+    left=$(( READY_DEADLINE_MS - $(mono_ms) ))
+    timeout -k 0.5 "$(budget "$left" 3000)" python3 -c 'import json, sys
 try:
-    d = json.loads(sys.stdin.read())
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = json.load(f)
 except Exception:
     sys.exit(1)
-sys.exit(0 if isinstance(d, dict) and isinstance(d.get("needsSetup"), bool) else 1)' 2>/dev/null; then
-    echo ok
-  else
-    echo "http 200 without a boolean needsSetup"
+sys.exit(0 if isinstance(d, dict) and isinstance(d.get("needsSetup"), bool) else 1)' "$tmp/body" 2>/dev/null || prc=$?
+    if (( prc == 0 )); then outcome=ok; else outcome="http 200 without a boolean needsSetup"; fi
   fi
+  record_attempt "$n" "$ep" "$url" "$t0" "$t1" "$tmo" "$rc" "$code" "$outcome" "$tmp" \
+    || outcome="attempt record not written ($outcome)"
+  rm -rf -- "${tmp:?}"
+  echo "$outcome"
 }
 
-# readiness_diagnostics — bounded, best-effort evidence for the log on timeout.
+# readiness_diagnostics — bounded, best-effort evidence for the log, run only
+# after the decision (each command at most 10 s, 64 KiB in total).
 readiness_diagnostics() {
   {
     echo "readiness diagnostics ($(date -u +%FT%TZ)):"
-    (cd "$STACK_DIR" && timeout 20 docker compose ps 2>&1) || echo "  docker compose ps: unavailable"
-    (cd "$STACK_DIR" && timeout 20 docker compose logs --no-color --tail 40 proxy 2>&1) || echo "  docker compose logs proxy: unavailable"
+    (cd "$STACK_DIR" && timeout -k 1 10 docker compose ps 2>&1) || echo "  docker compose ps: unavailable"
+    (cd "$STACK_DIR" && timeout -k 1 10 docker compose logs --no-color --tail 40 proxy 2>&1) || echo "  docker compose logs proxy: unavailable"
   } | head -c 65536 || true
 }
 
 # wait_for_readiness → 0 once both conditions held in READY_CONFIRM
 # consecutive checks; 1 (with state/readiness.failed) at the bound.
 wait_for_readiness() {
-  local start=$SECONDS deadline rounds=0 max_rounds streak=0 app="not checked" mgmt="not checked" why
-  deadline=$(( SECONDS + READY_TIMEOUT_S ))
+  local start rounds=0 max_rounds streak=0 app="not checked" mgmt="not checked" a m left why
+  start="$(mono_ms)"
+  READY_DEADLINE_MS=$(( start + READY_TIMEOUT_S * 1000 ))
+  READY_RUN="$(date -u +%FT%TZ)/${start}"
   max_rounds=$(( READY_TIMEOUT_S / READY_INTERVAL_S + READY_CONFIRM + 1 ))
-  log "readiness: waiting up to ${READY_TIMEOUT_S}s for the application (${APP_HEALTH_URL}) and management (${MGMT_SETUP_URL})"
-  while (( rounds < max_rounds )); do
+  log "readiness: waiting up to ${READY_TIMEOUT_S}s (monotonic) for the application (${APP_HEALTH_URL}) and management (${MGMT_SETUP_URL}); every check recorded in ${READY_RECORDS}"
+  while (( rounds < max_rounds )) && (( READY_DEADLINE_MS > $(mono_ms) )); do
     rounds=$(( rounds + 1 ))
-    app="$(probe_application)"
-    mgmt="$(probe_management)"
-    if [[ "$app" == ok && "$mgmt" == ok ]]; then
+    a="$(probe application "$rounds")"
+    m="$(probe management "$rounds")"
+    # The reason names each endpoint's last STARTED check.
+    [[ "$a" == "not started"* ]] || app="$a"
+    [[ "$m" == "not started"* ]] || mgmt="$m"
+    if [[ "$a" == ok && "$m" == ok ]]; then
       streak=$(( streak + 1 ))
       if (( streak >= READY_CONFIRM )); then
         rm -f "$STATE/readiness.failed"
-        log "readiness: application and management answered in ${streak} consecutive checks ($(( SECONDS - start ))s, check ${rounds})"
+        log "readiness: application and management answered in ${streak} consecutive checks ($(( ($(mono_ms) - start) / 1000 ))s, check ${rounds})"
         return 0
       fi
     else
       streak=0
     fi
-    (( SECONDS < deadline )) || break
-    sleep "$READY_INTERVAL_S"
+    left=$(( READY_DEADLINE_MS - $(mono_ms) ))
+    (( left > 0 )) || break
+    sleep "$(budget "$left" $(( READY_INTERVAL_S * 1000 )))"
   done
-  why="application /health: ${app}; management /api/setup/status: ${mgmt}; waited $(( SECONDS - start ))s, ${rounds} checks"
+  why="application /health: ${app}; management /api/setup/status: ${mgmt}; waited $(( ($(mono_ms) - start) / 1000 ))s, ${rounds} checks"
   printf '%s %s\n' "$(date -u +%FT%TZ)" "$why" > "$STATE/readiness.failed"
   log "ERROR: services not ready within ${READY_TIMEOUT_S}s; provisioning NOT recorded complete (${why})"
   readiness_diagnostics

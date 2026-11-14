@@ -73,13 +73,17 @@ func newFBHarness(t *testing.T) *fbHarness {
 	h.writeExec(filepath.Join(h.bin, "culvert-status"), "#!/usr/bin/env bash\necho 'stub status'\n")
 	// The finish step's readiness probes (CULVERT_FB_READY_CURL). Each
 	// endpoint replays $FB_HARNESS/<health|setup>.seq one line per call (the
-	// last line repeats); with no file it answers ready. A setup line is
-	// "<code> <body>". "000" is a transport failure, as curl reports it.
+	// last line repeats); with no file it answers ready. A line is
+	// "<code> [<body>]": the body goes to curl's -o file and the code to
+	// stdout, as `-o FILE -w '%{http_code}'` would. "000" is a transport
+	// failure (exit 7, as curl reports it); "hang" never answers.
 	h.writeExec(filepath.Join(h.root, "readycurl"), `#!/usr/bin/env bash
+out=/dev/null; args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do [[ "${args[i]}" == -o ]] && out="${args[i+1]}"; done
 url="${!#}"
 case "$url" in
-  *:8080/health) f=health ;;
-  *:9090/api/setup/status) f=setup ;;
+  *:8080/health) f=health; dflt='200 {"status":"ok"}' ;;
+  *:9090/api/setup/status) f=setup; dflt='200 {"needsSetup":true}' ;;
   *) exit 7 ;;
 esac
 printf 'readycurl %s\n' "$f" >> "$FB_HARNESS/calls.log"
@@ -89,10 +93,12 @@ if [[ -f "$FB_HARNESS/$f.seq" ]]; then
   line="$(sed -n "${n}p" "$FB_HARNESS/$f.seq")"
   [[ -n "$line" ]] || line="$(tail -n 1 "$FB_HARNESS/$f.seq")"
 fi
-if [[ "$f" == health ]]; then line="${line:-200}"; printf '%s' "$line"; [[ "$line" == 000 ]] && exit 7; exit 0; fi
-[[ -n "$line" ]] || line='200 {"needsSetup":true}'
+line="${line:-$dflt}"
+[[ "$line" == hang ]] && exec sleep 60
 code="${line%% *}"; body=""; [[ "$line" == *" "* ]] && body="${line#* }"
-printf '%s\n%s' "$body" "$code"
+printf '%s' "$body" > "$out"
+echo "stub stderr for $f check $n" >&2
+printf '%s' "$code"
 [[ "$code" == 000 ]] && exit 7
 exit 0
 `)

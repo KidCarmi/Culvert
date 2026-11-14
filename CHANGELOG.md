@@ -113,10 +113,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   127.0.0.1:8080 returns 200 **and** `GET /api/setup/status` on
   127.0.0.1:9090 returns 200 with a boolean `needsSetup` (the conditions the
   console's status-json reports), in two consecutive checks, so an answer
-  from just before a recreate does not count. On timeout nothing is recorded
-  complete: the reason is kept in `state/readiness.failed` and shown by
-  `culvert-status`, the log carries `docker compose ps` and the proxy's last
-  log lines, and the step fails into the unit's existing bounded retry.
+  from just before a recreate does not count. The bound is monotonic
+  (`/proc/uptime`): every probe and body check is killed at the time left,
+  and a check-count cap bounds the wait again. Every started check is
+  recorded in `readiness-attempts.jsonl` (timing, exit status, HTTP code,
+  outcome, bounded body and stderr); a check whose record cannot be written
+  does not count. On timeout nothing is recorded complete: the reason is kept
+  in `state/readiness.failed` and shown by `culvert-status`, the log carries
+  `docker compose ps` and the proxy's last log lines, and the step fails into
+  the unit's existing bounded retry.
 - **Restore commits in place and can therefore restore a mounted `/data`.**
   The commit used to rename the data directory itself, which `rename(2)`
   refuses for a mount point; every Docker volume is one, so the documented
