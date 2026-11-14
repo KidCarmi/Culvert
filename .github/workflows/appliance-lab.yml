@@ -3587,28 +3587,33 @@ jobs:
   # the name obtain-image.sh already falls back to. No build, no boot.
   # Opt-in: [preserve-image].
   preserve-image:
-    name: "Lab · preserve candidate image tar (Deep run 42653713925, a2b722c0)"
+    name: "Lab · preserve candidate image tar (Deep run 43578137735, 1f670e3f)"
     if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[preserve-image]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # FB1-R2 (9 Nov), candidate a2b722c0: the apt snapshot raised to
-    # 20261105T000000Z (a0579aba, owner decision D4) and main's 76c2e4cc test
-    # timing fix ported (a2b722c0), on top of FB1-R1 6eead9a1. Deep run
-    # 42653713925 is all green (17/17); its deep-gate-image artifact
-    # 13690114703 (zip sha256 63f0eedb…) expires 2026-11-10T16:24:00Z. Earlier
-    # preservations: lab-source-image-42532741140 (6eead9a1), -42489205084
-    # (fdcb02a5), -41208642365 (0981ff3d), -41199359475 (4f56bdfc),
-    # -40523416237 (0648adeb).
+    # R10 (owner remediation authorization, 13 Nov), candidate 1f670e3f on
+    # review/1528-m1-engine-pins: the first-boot readiness gate (22182186),
+    # go1.27.4 for GO-2026-6859 (69d6a91d, owner decision 14 Nov) and the
+    # gitleaks classification (de096692, 1f670e3f), on top of FB1-R2 a2b722c0.
+    # Fast/Deep/Console green on 1f670e3f: 43578136142/43578137735/43578139483.
+    # Deep run 43578137735's deep-gate-image artifact 14107087051 (zip sha256
+    # be28819c…) expires 2026-11-15T08:59:15Z. Its tar sha256, manifest digest
+    # and VERSION stamp below were measured from that artifact before this
+    # route. VERSION v1.0.433-candidate.g1f670e3f874d: the next patch after the
+    # latest release tag at build time (v1.0.432; .github/scripts/
+    # pr-candidate-version.sh). Earlier preservations: lab-source-image-
+    # 42653713925 (a2b722c0), -42532741140 (6eead9a1), -42489205084 (fdcb02a5),
+    # -41208642365 (0981ff3d), -41199359475 (4f56bdfc), -40523416237 (0648adeb).
     env:
-      SOURCE_IMAGE_RUN_ID: "42653713925"
-      SOURCE_IMAGE_TAR_SHA256: 13cbb41702bf657eb3b37ffafdced9d27c3fae28b62537df33b59ecd6546fe80
+      SOURCE_IMAGE_RUN_ID: "43578137735"
+      SOURCE_IMAGE_TAR_SHA256: ef72db95537b25d03a653d66af48c54fdfaaafa451cf8d7ee751c977688cdffd
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Obtain + verify (sha256, manifest digest, VERSION stamp)
         env:
           GH_TOKEN: ${{ github.token }}
-          WANT_MANIFEST: "sha256:08541c6701f108c21c2379ca93edb2c9cad568301ac77765aa4e6c3259df1fc3"
-          WANT_VERSION: "v1.0.404-candidate.ga2b722c0359e"
+          WANT_MANIFEST: "sha256:51adc297769bfe85622b4d7115a3d88fc46ed93ce6127eb0c4d05478da30bc55"
+          WANT_VERSION: "v1.0.433-candidate.g1f670e3f874d"
         run: |
           set -euo pipefail
           d="$RUNNER_TEMP/in"; from="$(test/e2e/appliance/lab/obtain-image.sh "$d")"
