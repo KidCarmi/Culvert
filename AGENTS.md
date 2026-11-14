@@ -54,6 +54,10 @@ whose contract the change affects; filename matches are examples, not an exhaust
 - React frontend or legacy UI → [frontend route](docs/agent-context/README.md#frontend).
 - MCP or policy learning → [MCP and learning](docs/agent-context/README.md#mcp-and-policy-learning).
   MCP listener fairness and execution admission are not the core IP limiter.
+- Any behavior under a `code` path in [contracts/registry.yaml](contracts/registry.yaml)
+  (`go run ./cmd/contractcheck impact -base origin/main` lists them) →
+  [product contracts](docs/agent-context/workflows/product-contracts.md). An
+  intentional contract change needs the owner's approval, never an agent's.
 - Architecture advice, unknown ownership or cross-domain work →
   [full task index](docs/agent-context/README.md) and relevant ADRs. The
   [Engineering Constitution](docs/engineering/ENGINEERING-CONSTITUTION.md)

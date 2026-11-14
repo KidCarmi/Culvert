@@ -1,0 +1,660 @@
+# Product contracts registry.
+#
+# Each entry is a customer-observable invariant, the code that implements it and
+# the tests that must fail if it breaks. Checked by internal/contracts
+# (TestRegistry_IsSoundAgainstThisTree, in the ordinary test suite) and by
+# `go run ./cmd/contractcheck impact` in CI, which compares against the BASE
+# revision of this file. Design: docs/engineering/PRODUCT-CONTRACTS.md.
+#
+# status: enforced  the listed tests exist, run, and guard the invariant.
+#         open      recorded because it matters, but contradictory, undecided or
+#                   pending; `question` says what the owner has to decide. An
+#                   open entry is NOT an approved rule.
+# owner_approved    false until the product owner has confirmed the wording.
+#                   Every seed entry is false: they were derived from code,
+#                   tests and docs by an audit, not ratified.
+#
+# To change or remove a contract on purpose, add an `amended` or `retired`
+# record with a reason in the same change. CI then requires an approving review
+# from a listed approver who is not the author.
+version: 1
+
+# Who may approve a contract change. Read from the BASE revision in CI, so a
+# change cannot add its own approver.
+approvers:
+  - KidCarmi
+
+# Editing these needs the same approval as changing a contract. Also read from
+# the BASE revision. This file is not listed: adding an entry stays cheap, and
+# removing or rewording one is caught by the base comparison instead.
+protected:
+  - internal/contracts/**
+  - cmd/contractcheck/**
+  - .github/workflows/product-contracts.yml
+  - .github/CODEOWNERS
+
+amended: []
+retired: []
+
+contracts:
+  - id: SWG-001
+    area: swg-enforcement
+    status: enforced
+    owner_approved: false
+    invariant: "A CONNECT to a private, loopback or link-local destination is refused before any dial, and re-checked at connect time."
+    authority: "Proxy request path (package main); address classification in internal/ssrf."
+    code:
+      - "proxy_tunnel.go"
+      - "security.go"
+      - "internal/ssrf/*.go"
+    configs: []
+    transitions:
+      permitted:
+        - "CONNECT to a public destination proceeds to policy"
+      forbidden:
+        - "dialing a private destination for a CONNECT"
+        - "removing the connect-time re-check"
+    tests:
+      - {file: "proxy_test.go", name: TestUNAUTH_CONNECT_SSRFBlocksLoopback}
+    validation: integration
+    compatibility: "Operators rely on this as the SSRF boundary for tunnels; loosening it is a security-posture change."
+
+  - id: SWG-002
+    area: swg-enforcement
+    status: enforced
+    owner_approved: false
+    invariant: "On an inspected tunnel, an inner request whose Host or :authority differs from the CONNECT host is blocked before the upstream is contacted."
+    authority: "Inspection pipeline (inspect_host_pin.go)."
+    code:
+      - "inspect_host_pin.go"
+      - "proxy_tunnel.go"
+    configs: []
+    transitions:
+      permitted:
+        - "inner host equal to the CONNECT host after canonicalization"
+        - "any inner host when the CONNECT target is an IP literal"
+      forbidden:
+        - "forwarding an inner request for a host policy never evaluated"
+        - "forwarding a request with no Host"
+    tests:
+      - {file: "inspect_host_pin_test.go", name: TestInnerHostPin_MismatchIsRefusedBeforeTheUpstreamIsContacted}
+    validation: integration
+    compatibility: "Clients that reuse a tunnel for another origin receive 403; that is the intended behaviour."
+
+  - id: POL-001
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "Enabled access rules are evaluated in priority order and the first match decides; no match returns no decision."
+    authority: "Policy engine (policy.go)."
+    code:
+      - "policy.go"
+    configs: []
+    transitions:
+      permitted:
+        - "reordering by changing rule priority"
+      forbidden:
+        - "a later rule overriding an earlier match"
+        - "a disabled rule deciding a request"
+    tests:
+      - {file: "policy_test.go", name: TestPolicyStore_Evaluate_FirstMatch}
+      - {file: "policy_flow_e2e_test.go", name: TestPolicyFlow_PriorityFirstMatchWins}
+    validation: integration
+    compatibility: "Every stored rulebase depends on this order; changing it changes the meaning of existing customer policies."
+
+  - id: POL-002
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "At startup an explicit default action is honoured; an empty one resolves to allow with zero configured rules and to deny with any configured rule."
+    authority: "Startup resolution (rewrite_default_action_startup.go)."
+    code:
+      - "rewrite_default_action_startup.go"
+      - "proxy.go"
+    configs:
+      - "default_action"
+      - "CULVERT_DEFAULT_ACTION"
+    transitions:
+      permitted:
+        - "explicit allow or deny chosen by the operator"
+      forbidden:
+        - "an empty default resolving to allow while rules are configured"
+    tests:
+      - {file: "rewrite_default_action_startup_test.go", name: TestLoadRewriteAndDefaultAction_EmptyWithRulesDefaultsDeny}
+      - {file: "rewrite_default_action_startup_test.go", name: TestLoadRewriteAndDefaultAction_EmptyWithNoRulesDefaultsAllow}
+    validation: unit
+    compatibility: "Existing installs with no explicit value get their posture from this rule; see POL-900 for the runtime gap."
+
+  - id: POL-003
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "A request that matches no rule under default deny receives a block response, not a forwarded request."
+    authority: "Proxy request path (proxy.go)."
+    code:
+      - "proxy.go"
+    configs:
+      - "default_action"
+    transitions:
+      permitted:
+        - "allow when the operator set default allow"
+      forbidden:
+        - "forwarding a no-match request under default deny"
+    tests:
+      - {file: "proxy_test.go", name: TestHandleRequest_DefaultDeny_NoRules}
+    validation: integration
+    compatibility: "Default-deny deployments rely on this as their fail-closed baseline."
+
+  - id: POL-004
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "A matched rule with an unrecognised action blocks the request and is terminal."
+    authority: "Policy dispatch (proxy.go, authpolicy.go)."
+    code:
+      - "proxy.go"
+      - "authpolicy.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a new recognised action together with its dispatch"
+      forbidden:
+        - "an unrecognised action falling through to allow"
+    tests:
+      - {file: "policy_unknown_action_test.go", name: TestSECPOLICYACTION1_UnknownActionBlocksAndIsTerminal}
+    validation: integration
+    compatibility: "A rulebase written by a newer release must not become permissive on an older one."
+
+  - id: AUTH-001
+    area: authn-authz
+    status: enforced
+    owner_approved: false
+    invariant: "An admin handler returns 403 to a role below its required minimum, whatever the route metadata says."
+    authority: "Admin control plane (ui_rbac.go, store.go)."
+    code:
+      - "ui_rbac.go"
+      - "store.go"
+    configs: []
+    transitions:
+      permitted:
+        - "raising a handler's required role"
+      forbidden:
+        - "a viewer or operator reaching an admin-only handler"
+        - "removing a handler-level requireRole check"
+    tests:
+      - {file: "d0_rbac_safety_test.go", name: TestD0_AdminOnly_RejectsViewerAndOperator}
+    validation: integration
+    compatibility: "Role names and their ordering are persisted in the user roster."
+
+  - id: AUTH-002
+    area: authn-authz
+    status: enforced
+    owner_approved: false
+    invariant: "A required role that is not an enrolled role is unsatisfiable by every user."
+    authority: "Role model (store.go)."
+    code:
+      - "store.go"
+    configs: []
+    transitions:
+      permitted: []
+      forbidden:
+        - "an unknown or empty required role being treated as satisfied"
+    tests:
+      - {file: "ui_role_failclosed_test.go", name: TestRoleFailClosed_UnenrolledRequirementIsUnsatisfiable}
+    validation: unit
+    compatibility: "Fail-closed default for any future role or typo."
+
+  - id: AUTH-003
+    area: authn-authz
+    status: enforced
+    owner_approved: false
+    invariant: "A session token issued for the proxy plane is not accepted as an admin UI session."
+    authority: "Session audience (ui_middleware.go, ui_session.go)."
+    code:
+      - "ui_middleware.go"
+      - "ui_session.go"
+    configs: []
+    transitions:
+      permitted: []
+      forbidden:
+        - "a proxy-plane token authenticating an admin request"
+        - "falling back to another credential after a refused cookie"
+    tests:
+      - {file: "ui_session_audience_test.go", name: TestSECUISESS1_ProxyIssuedTokenIsNotAnAdminSession}
+    validation: integration
+    compatibility: "Existing admin sessions without the audience must re-authenticate."
+
+  - id: AUTH-004
+    area: authn-authz
+    status: enforced
+    owner_approved: false
+    invariant: "Logging out revokes the presented session so it no longer authenticates."
+    authority: "Session revocation (internal/session and its callers)."
+    code:
+      - "internal/session/*.go"
+      - "ui_auth.go"
+    configs: []
+    transitions:
+      permitted: []
+      forbidden:
+        - "a logged-out session remaining valid"
+    tests:
+      - {file: "auth_logout_revocation_test.go", name: TestSECREVOKE1_GenuineLogoutStillRevokes}
+    validation: integration
+    compatibility: "Revocations are persisted and synchronised to HA peers."
+
+  - id: TLS-001
+    area: tls-inspection
+    status: enforced
+    owner_approved: false
+    invariant: "The upstream leg of an inspected tunnel verifies the origin certificate against the trust roots with a TLS 1.2 floor unless a rule explicitly opts out."
+    authority: "Inspection upstream config (proxy_tunnel.go)."
+    code:
+      - "proxy_tunnel.go"
+    configs:
+      - "tlsSkipVerify per rule"
+      - "decryption profile verify mode"
+    transitions:
+      permitted:
+        - "per-rule skip-verify chosen by an admin, logged per tunnel"
+      forbidden:
+        - "skipping origin verification by default"
+        - "lowering the TLS floor"
+    tests:
+      - {file: "proxy_tlsconfig_test.go", name: TestUpstreamInspectTLSConfig_VerifyDefaults}
+    validation: unit
+    compatibility: "Loosening this silently removes origin authentication for all inspected traffic."
+
+  - id: TLS-002
+    area: tls-inspection
+    status: enforced
+    owner_approved: false
+    invariant: "With an expired or not-yet-valid inspection CA, an inspect-matched CONNECT is refused; it is never bypassed uninspected."
+    authority: "Tunnel dispatch (proxy_tunnel.go); CA validity in internal/ca."
+    code:
+      - "proxy_tunnel.go"
+      - "internal/ca/validity.go"
+      - "ca_health.go"
+    configs: []
+    transitions:
+      permitted:
+        - "inspection resumes when a valid CA is installed"
+      forbidden:
+        - "forwarding inspect-matched traffic uninspected because the CA is unusable"
+    tests:
+      - {file: "ca_expiry_failclosed_test.go", name: TestHandleTunnel_ExpiredCAFailsClosedNotBypass}
+    validation: integration
+    compatibility: "The opposite posture applies when the CA never loaded; see TLS-900."
+
+  - id: UPG-001
+    area: upgrade
+    status: enforced
+    owner_approved: false
+    invariant: "A release catalog whose schema major version is unsupported is rejected."
+    authority: "Release catalog (release_catalog.go)."
+    code:
+      - "release_catalog.go"
+    configs: []
+    transitions:
+      permitted:
+        - "unknown additive fields are ignored"
+      forbidden:
+        - "loading a catalog with an unsupported major version"
+    tests:
+      - {file: "release_catalog_test.go", name: TestCompat_UnsupportedMajorRejected}
+    validation: unit
+    compatibility: "Catalogs published for newer releases must not be half-understood by older ones."
+
+  - id: UPG-002
+    area: upgrade
+    status: enforced
+    owner_approved: false
+    invariant: "A catalog older than the persisted version floor is refused and the floor is left unchanged."
+    authority: "Catalog freshness (release_catalog_freshness.go)."
+    code:
+      - "release_catalog_freshness.go"
+    configs: []
+    transitions:
+      permitted:
+        - "advancing the floor on a newer verified catalog"
+      forbidden:
+        - "accepting a rolled-back catalog"
+        - "resetting the floor to zero on error"
+    tests:
+      - {file: "release_catalog_freshness_test.go", name: TestApply_PersistsAndRefusesDowngrade}
+    validation: unit
+    compatibility: "The floor file is persisted state on deployed appliances."
+
+  - id: BKP-001
+    area: backup-restore
+    status: enforced
+    owner_approved: false
+    invariant: "Restore rejects a backup manifest with an unsupported schema version without touching the data directory."
+    authority: "Restore (restore.go)."
+    code:
+      - "restore.go"
+      - "backup.go"
+    configs: []
+    transitions:
+      permitted:
+        - "restoring a manifest of the supported schema"
+      forbidden:
+        - "partially applying an unsupported backup"
+    tests:
+      - {file: "restore_test.go", name: TestRestore_DryRun_UnsupportedSchemaVersion}
+    validation: integration
+    compatibility: "Backups already taken by customers are schema 1; a new schema needs a migration path first."
+
+  - id: BKP-002
+    area: backup-restore
+    status: enforced
+    owner_approved: false
+    invariant: "A restore that fails validation leaves the data directory unchanged, with no leftover staging or backup directory."
+    authority: "Restore commit (restore.go)."
+    code:
+      - "restore.go"
+    configs: []
+    transitions:
+      permitted:
+        - "an atomic swap after validation passes"
+      forbidden:
+        - "a data directory modified by a failed restore"
+    tests:
+      - {file: "restore_test.go", name: TestRestoreCommit_ValidationFailure_NoSwap}
+    validation: integration
+    compatibility: "Operators rely on a failed restore being safe to retry."
+
+  - id: BKP-003
+    area: backup-restore
+    status: enforced
+    owner_approved: false
+    invariant: "No key-encryption-key material is ever written into a backup archive."
+    authority: "Backup collection (backup.go)."
+    code:
+      - "backup.go"
+    configs: []
+    transitions:
+      permitted: []
+      forbidden:
+        - "including a KEK artifact in an archive"
+    tests:
+      - {file: "backup_kek_exclusion_test.go", name: TestBackup_NoKEKBytesInArchive}
+    validation: integration
+    compatibility: "A backup must not be sufficient on its own to decrypt data at rest."
+
+  - id: AGT-001
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "The maintenance agent runs one state-changing operation at a time; a second is refused with a conflict naming the holder."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module)."
+    code:
+      - "cmd/culvert-maint/internal/ops/*.go"
+    configs: []
+    transitions:
+      permitted:
+        - "read-only operations concurrently"
+      forbidden:
+        - "two state-changing operations running together"
+    tests:
+      - {file: "cmd/culvert-maint/internal/ops/ops_test.go", name: TestManager_SecondStateChangingOpReturnsConflict}
+    validation: unit
+    compatibility: "Upgrade and backup must not interleave on an appliance."
+
+  - id: CFG-001
+    area: config-compatibility
+    status: enforced
+    owner_approved: false
+    invariant: "Every rollback-surface setting survives capture, apply and re-capture of a configuration version unchanged."
+    authority: "Configuration versioning (configversion.go, config_surfaces.go)."
+    code:
+      - "configversion.go"
+      - "config_surfaces.go"
+      - "internal/configver/*.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a surface together with its capture and apply"
+      forbidden:
+        - "a setting lost or altered by a rollback round trip"
+    tests:
+      - {file: "config_surfaces_test.go", name: TestConfigSurfaces_RollbackRoundTrip}
+    validation: integration
+    compatibility: "Stored configuration versions on customer disks must keep applying."
+
+  - id: CFG-002
+    area: config-compatibility
+    status: enforced
+    owner_approved: false
+    invariant: "A configuration file containing an unknown key fails to load."
+    authority: "Configuration loading (config.go)."
+    code:
+      - "config.go"
+    configs: []
+    transitions:
+      permitted: []
+      forbidden:
+        - "silently ignoring an unknown or misspelled key"
+    tests:
+      - {file: "config_empty_file_test.go", name: TestLoadFileConfig_UnknownFieldStillErrors}
+    validation: unit
+    compatibility: "A binary rollback after a newer release added a key will not start; see CFG-900."
+
+  - id: CLU-001
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "A data-plane node rejects configuration from a control plane with a stale epoch before applying any of it."
+    authority: "Data-plane client (controlplane_client.go)."
+    code:
+      - "controlplane_client.go"
+    configs: []
+    transitions:
+      permitted:
+        - "applying configuration from the current epoch"
+      forbidden:
+        - "applying configuration from a fenced control plane"
+    tests:
+      - {file: "controlplane_delta_apply_test.go", name: TestDataPlaneClient_DeltaFencedRejected}
+    validation: integration
+    compatibility: "Split-brain protection for every clustered deployment."
+
+  - id: CLU-002
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "After a restart the control plane publishes configuration versions strictly above any it published before."
+    authority: "Control-plane snapshot store (controlplane_snapshot.go)."
+    code:
+      - "controlplane_snapshot.go"
+    configs: []
+    transitions:
+      permitted: []
+      forbidden:
+        - "a restarted control plane reusing or going below an earlier version"
+    tests:
+      - {file: "controlplane_version_persist_test.go", name: TestConfigStoreVersion_SurvivesRestart}
+    validation: integration
+    compatibility: "Data planes ignore versions they have already seen."
+
+  - id: REC-001
+    area: failure-recovery
+    status: enforced
+    owner_approved: false
+    invariant: "Recovery from a failed inspection-CA load never generates a new root in place of a configured bundle."
+    authority: "CA recovery (rootca_recovery.go)."
+    code:
+      - "rootca_recovery.go"
+      - "rootca_startup.go"
+    configs: []
+    transitions:
+      permitted:
+        - "re-reading the configured bundle"
+        - "re-persisting a loaded CA"
+      forbidden:
+        - "minting a new trust anchor because the bundle is missing or unreadable"
+    tests:
+      - {file: "rootca_recovery_test.go", name: TestChaos50_RecoveryNeverMintsANewRoot}
+    validation: integration
+    compatibility: "Client trust stores hold the configured root; a silent replacement breaks every inspected connection."
+
+  - id: REC-002
+    area: failure-recovery
+    status: enforced
+    owner_approved: false
+    invariant: "A shutdown hook that panics does not prevent later hooks from running."
+    authority: "Shutdown registry (internal/shutdown)."
+    code:
+      - "internal/shutdown/*.go"
+    configs: []
+    transitions:
+      permitted: []
+      forbidden:
+        - "one failing hook aborting the shutdown sequence"
+    tests:
+      - {file: "internal/shutdown/watchdog_test.go", name: TestChaos56_HookPanicDoesNotAbortTheSequence}
+    validation: unit
+    compatibility: "Durability of queued logs and state at shutdown depends on later hooks running."
+
+  - id: SWG-900
+    area: swg-enforcement
+    status: open
+    owner_approved: false
+    invariant: "Every outbound dial is refused for a private destination, including plain-HTTP forwarding."
+    authority: "Proxy request path."
+    code:
+      - "proxy_http.go"
+      - "upstream_transport.go"
+    question: "CONTRADICTION: README states every outbound dial is SSRF-guarded, but the plain-HTTP forward path has no guard and existing tests reach loopback backends through it. Should plain HTTP refuse private destinations?"
+    compatibility: "Undecided; see question."
+
+  - id: SWG-901
+    area: swg-enforcement
+    status: open
+    owner_approved: false
+    invariant: "SOCKS5 traffic is subject to the same policy evaluation as HTTP and CONNECT."
+    authority: "SOCKS5 listener (socks5.go)."
+    code:
+      - "socks5.go"
+    question: "UNDEFINED: SOCKS5 applies admission, auth, blocklist and SSRF checks but never calls the policy engine. Is SOCKS5 inside the managed policy boundary, or an explicitly unmanaged interface?"
+    compatibility: "Undecided; see question."
+
+  - id: POL-900
+    area: policy
+    status: open
+    owner_approved: false
+    invariant: "The default action is deny whenever any rule exists, at runtime as well as at startup."
+    authority: "Default-action resolution and admin settings."
+    code:
+      - "rewrite_default_action_startup.go"
+      - "admin_settings.go"
+    question: "CONTRADICTION: docs say deny is enforced once any rule exists, but the derivation runs only at boot, and saved admin settings may persist a derived allow as explicit. Which is the contract? (Not verified end to end.)"
+    compatibility: "Undecided; see question."
+
+  - id: POL-901
+    area: policy
+    status: open
+    owner_approved: false
+    invariant: "A rule with an empty action is refused at load."
+    authority: "Policy action canonicalization (authpolicy.go)."
+    code:
+      - "authpolicy.go"
+    question: "UNDEFINED: a rule with an empty action currently installs and resolves to allow. Require an explicit action?"
+    compatibility: "Undecided; see question."
+
+  - id: TLS-900
+    area: tls-inspection
+    status: open
+    owner_approved: false
+    invariant: "Inspect-matched traffic is never forwarded uninspected because the inspection CA is unavailable."
+    authority: "Tunnel dispatch (proxy_tunnel.go)."
+    code:
+      - "proxy_tunnel.go"
+      - "rootca_startup.go"
+    tests:
+      - {file: "rootca_recovery_test.go", name: TestChaos50_InspectMatchedBypassIsCounted}
+    question: "UNDEFINED: a CA that never loaded forwards inspect-matched traffic uninspected (counted and alerted), the opposite of TLS-002. Flip to fail-closed?"
+    compatibility: "Undecided; see question."
+
+  - id: TLS-901
+    area: tls-inspection
+    status: open
+    owner_approved: false
+    invariant: "Revocation checking covers the origins of inspected HTTPS connections."
+    authority: "OCSP (ocsp.go, internal/ocsp)."
+    code:
+      - "ocsp.go"
+      - "ocsp_coverage.go"
+    question: "UNDEFINED: enabling OCSP covers only the shared upstream transport, not inspected origins. Is that the intended scope?"
+    compatibility: "Undecided; see question."
+
+  - id: PKI-900
+    area: pki
+    status: open
+    owner_approved: false
+    invariant: "The inspection CA is renewed only by its lifecycle authority; an imported or unclassified CA is never replaced."
+    authority: "Inspection CA engine (internal/ca)."
+    code:
+      - "internal/ca/*.go"
+    question: "PENDING: implemented and tested in PR #1854. Promote to enforced, naming its tests, when that PR merges."
+    compatibility: "Undecided; see question."
+
+  - id: PKI-901
+    area: pki
+    status: open
+    owner_approved: false
+    invariant: "The PSCA bundle envelope bytes never change."
+    authority: "Inspection CA engine (internal/ca)."
+    code:
+      - "internal/ca/ca.go"
+    question: "IMPLICIT: declared frozen in comments, but only round-trip tests exist; changing encrypt and decrypt together passes the suite. Add a golden-vector test?"
+    compatibility: "Undecided; see question."
+
+  - id: UPG-900
+    area: upgrade
+    status: open
+    owner_approved: false
+    invariant: "An upgrade from a version below a release's min_upgrade_from is refused."
+    authority: "Release dispatch (release_dispatch.go)."
+    code:
+      - "release_catalog.go"
+      - "release_dispatch.go"
+    question: "CONTRADICTION: the plan says the control plane refuses the jump; the field is parsed and never read on main. Enforce it, or state that it is advisory?"
+    compatibility: "Undecided; see question."
+
+  - id: UPG-901
+    area: upgrade
+    status: open
+    owner_approved: false
+    invariant: "The upgrade health gate fails when the new image is degraded."
+    authority: "Maintenance agent health gate; readiness endpoint."
+    code:
+      - "healthcheck.go"
+      - "cmd/culvert-maint/internal/config/*.go"
+    tests:
+      - {file: "readyz_dp_health_test.go", name: TestHandleReady_StrictGatesFailRows}
+    question: "CONTRADICTION: /ready returns 200 while report-only rows fail (only ?strict=1 gates), the Dockerfile comment says otherwise, and the agent polls non-strict /ready. Which readiness does an upgrade require?"
+    compatibility: "Undecided; see question."
+
+  - id: AGT-900
+    area: agent-lifecycle
+    status: open
+    owner_approved: false
+    invariant: "After a crash during an image change, the agent returns Docker to a known-good image at startup."
+    authority: "Maintenance agent (cmd/culvert-maint)."
+    code:
+      - "cmd/culvert-maint/main.go"
+    question: "UNDEFINED: the reconcile decision logic exists and is tested but has no production caller on main. Who ships it, and what does the operator do meanwhile?"
+    compatibility: "Undecided; see question."
+
+  - id: CFG-900
+    area: config-compatibility
+    status: open
+    owner_approved: false
+    invariant: "A documented version-skew and downgrade policy exists for configuration, control plane and data plane."
+    authority: "Configuration and cluster owners."
+    code:
+      - "config.go"
+      - "controlplane_client.go"
+    question: "UNDEFINED: no stated policy for binary downgrade (unknown config keys fail to load) or control-plane/data-plane version skew. Define supported skew?"
+    compatibility: "Undecided; see question."

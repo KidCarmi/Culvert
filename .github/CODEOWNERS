@@ -49,3 +49,11 @@ docs/adr/0018-openapi-contract.md @KidCarmi
 internal/apicontract/       @KidCarmi
 cmd/apibundle/              @KidCarmi
 ui_routes_meta.go           @KidCarmi
+
+# ── Product contracts — the registry, its checker and its gate ───────────────
+# Changing what counts as a product invariant, or how it is enforced, needs the
+# product owner. See docs/engineering/PRODUCT-CONTRACTS.md.
+contracts/                  @KidCarmi
+internal/contracts/         @KidCarmi
+cmd/contractcheck/          @KidCarmi
+docs/engineering/PRODUCT-CONTRACTS.md @KidCarmi
