@@ -74,9 +74,12 @@ func newFBHarness(t *testing.T) *fbHarness {
 	// The finish step's readiness probes (CULVERT_FB_READY_CURL). Each
 	// endpoint replays $FB_HARNESS/<health|setup>.seq one line per call (the
 	// last line repeats); with no file it answers ready. A line is
-	// "<code> [<body>]": the body goes to curl's -o file and the code to
-	// stdout, as `-o FILE -w '%{http_code}'` would. "000" is a transport
-	// failure (exit 7, as curl reports it); "hang" never answers.
+	// "[rcN:]<code> [<body>]": the body goes to curl's -o file and the code to
+	// stdout, as `-o FILE -w '%{http_code}'` would; "rcN:" makes curl exit N
+	// after writing them (28 timeout, 18 partial, 63 size cap). "000" is a
+	// transport failure (exit 7, as curl reports it); "hang" never answers.
+	// $FB_HARNESS/advance.<health|setup>, when present, is copied into
+	// $FB_HARNESS/clock before answering (a test's fake monotonic clock).
 	h.writeExec(filepath.Join(h.root, "readycurl"), `#!/usr/bin/env bash
 out=/dev/null; args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do [[ "${args[i]}" == -o ]] && out="${args[i+1]}"; done
@@ -94,13 +97,15 @@ if [[ -f "$FB_HARNESS/$f.seq" ]]; then
   [[ -n "$line" ]] || line="$(tail -n 1 "$FB_HARNESS/$f.seq")"
 fi
 line="${line:-$dflt}"
+[[ -f "$FB_HARNESS/advance.$f" ]] && cp "$FB_HARNESS/advance.$f" "$FB_HARNESS/clock"
 [[ "$line" == hang ]] && exec sleep 60
+xrc=0; if [[ "$line" =~ ^rc([0-9]+):(.*)$ ]]; then xrc="${BASH_REMATCH[1]}"; line="${BASH_REMATCH[2]}"; fi
 code="${line%% *}"; body=""; [[ "$line" == *" "* ]] && body="${line#* }"
 printf '%s' "$body" > "$out"
 echo "stub stderr for $f check $n" >&2
 printf '%s' "$code"
 [[ "$code" == 000 ]] && exit 7
-exit 0
+exit "$xrc"
 `)
 	h.writeExec(filepath.Join(h.bin, "culvert-console"), "#!/usr/bin/env bash\n[[ $* == --host=bootstrap-commit ]] && exit 0\n[[ $* == --host=bootstrap-record ]] || exit 2\ncat > \"$FB_HARNESS/bootstrap.in\"\n")
 	// Account/system tools: record and succeed. getent answers from a file

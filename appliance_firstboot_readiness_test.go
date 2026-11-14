@@ -14,6 +14,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +57,7 @@ const setupPending = `200 {"needsSetup":true}`
 
 // readinessRecord is one line of the gate's per-attempt record.
 type readinessRecord struct {
+	Phase     string  `json:"phase"`
 	Run       string  `json:"run"`
 	Check     int     `json:"check"`
 	Endpoint  string  `json:"endpoint"`
@@ -68,9 +70,59 @@ type readinessRecord struct {
 	Killed    bool    `json:"killed"`
 	Body      *string `json:"body"`
 	Stderr    *string `json:"stderr"`
+	// The body check's own outcome (management only; null when not run).
+	ParseRC        *int     `json:"parse_rc"`
+	ParseKilled    bool     `json:"parse_killed"`
+	ParseOutcome   string   `json:"parse_outcome"`
+	ParseElapsedMS *int64   `json:"parse_elapsed_ms"`
+	ParseTimeoutS  *float64 `json:"parse_timeout_s"`
 }
 
+// readinessRecords returns the phase=ended records (one per finished check).
 func (h *fbHarness) readinessRecords() []readinessRecord {
+	h.t.Helper()
+	all := h.readinessAll()
+	var ended []readinessRecord
+	for i := range all {
+		if all[i].Phase == "ended" {
+			ended = append(ended, all[i])
+		}
+	}
+	return ended
+}
+
+// reasonOnRecord reports whether the failure reason, or any finished check's
+// "<endpoint label>: <outcome>", names want. The reason names each endpoint's
+// LAST started check, which under load can be one cut short by the deadline
+// (correctly refused); the records keep every check's own outcome.
+func (h *fbHarness) reasonOnRecord(want string) bool {
+	h.t.Helper()
+	if strings.Contains(h.readinessFailed(), want) {
+		return true
+	}
+	label := map[string]string{"application": "application /health: ", "management": "management /api/setup/status: "}
+	ended := h.readinessRecords()
+	for i := range ended {
+		if strings.Contains(label[ended[i].Endpoint]+ended[i].Outcome, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// readinessPhase counts records of one phase, optionally for one endpoint.
+func (h *fbHarness) readinessPhase(phase, endpoint string) int {
+	n := 0
+	all := h.readinessAll()
+	for i := range all {
+		if all[i].Phase == phase && (endpoint == "" || all[i].Endpoint == endpoint) {
+			n++
+		}
+	}
+	return n
+}
+
+func (h *fbHarness) readinessAll() []readinessRecord {
 	h.t.Helper()
 	b, err := os.ReadFile(filepath.Join(h.state, "readiness-attempts.jsonl"))
 	if err != nil {
@@ -117,8 +169,8 @@ func TestFirstBoot_Readiness_DelayedApplicationAndManagement(t *testing.T) {
 	// Every started attempt is recorded: 4 checks x 2 endpoints, one run,
 	// monotonic timing, rc/code/outcome and the bounded stdout/stderr.
 	recs := h.readinessRecords()
-	if len(recs) != 8 {
-		t.Fatalf("records = %d, want 8 (every started attempt)", len(recs))
+	if len(recs) != 8 || h.readinessPhase("started", "") != 8 {
+		t.Fatalf("ended records = %d, started = %d, want 8 and 8 (every started attempt, recorded before and after)", len(recs), h.readinessPhase("started", ""))
 	}
 	var last int64
 	for i, r := range recs {
@@ -130,7 +182,7 @@ func TestFirstBoot_Readiness_DelayedApplicationAndManagement(t *testing.T) {
 			t.Fatalf("record %d lacks stdout/stderr: %+v", i, r)
 		}
 	}
-	if recs[0].Endpoint != "application" || recs[0].HTTPCode != "000" || recs[0].RC != 7 || recs[0].Outcome != "http 000" {
+	if recs[0].Endpoint != "application" || recs[0].HTTPCode != "000" || recs[0].RC != 7 || recs[0].Outcome != "transport error rc=7 (http 000)" {
 		t.Fatalf("first application record = %+v, want a recorded transport failure", recs[0])
 	}
 	if recs[3].Endpoint != "management" || recs[3].HTTPCode != "503" || *recs[3].Body != "{}" || recs[3].Outcome != "http 503" {
@@ -198,6 +250,34 @@ func TestFirstBoot_Readiness_UnrecordedCheckDoesNotCount(t *testing.T) {
 	if rf := h.readinessFailed(); !strings.Contains(rf, "attempt record not written") {
 		t.Fatalf("readiness.failed = %q", rf)
 	}
+	// The started record lands, the ended one cannot: a passing check whose
+	// result is not on record does not count. A python3 wrapper first on PATH
+	// fails exactly the first phase=ended write of the application check, so
+	// with every service up completion needs checks 2 and 3, not 1 and 2.
+	mid := newFBHarness(t)
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrap := filepath.Join(mid.root, "wrap")
+	if err := os.MkdirAll(wrap, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	mid.writeExec(filepath.Join(wrap, "python3"), `#!/usr/bin/env bash
+e=; ap=; for a in "$@"; do [[ "$a" == phase=ended ]] && e=1; [[ "$a" == endpoint=application ]] && ap=1; done
+if [[ -n $e && -n $ap && ! -f "$FB_HARNESS/ended-broken-once" ]]; then touch "$FB_HARNESS/ended-broken-once"; exit 1; fi
+exec `+py+` "$@"
+`)
+	out, code = mid.run("PATH=" + wrap + ":$PATH; READY_TIMEOUT_S=30; step_finish")
+	if code != 0 || !mid.exists("appliance/state/complete.done") {
+		t.Fatalf("step_finish (%d):\n%s", code, out)
+	}
+	if hc := mid.readyCalls("health"); hc != 3 {
+		t.Fatalf("health checks = %d, want 3: the first check's result was not on record and must not count", hc)
+	}
+	if s, e := mid.readinessPhase("started", "application"), mid.readinessPhase("ended", "application"); s != 3 || e != 2 {
+		t.Fatalf("application records: started %d, ended %d; want 3 and 2 (the unrecorded end is visible as a started-only check)", s, e)
+	}
 }
 
 // After completion a later run of the step re-checks nothing (complete.done
@@ -243,7 +323,7 @@ func TestFirstBoot_Readiness_PermanentFailureNeverRecordsComplete(t *testing.T) 
 		t.Fatalf("the wait is not bounded: %v for a 3 s bound", elapsed)
 	}
 	rf := h.readinessFailed()
-	for _, want := range []string{"application /health: http 000", "management /api/setup/status: http 000", "checks"} {
+	for _, want := range []string{"application /health: transport error rc=7 (http 000)", "management /api/setup/status: transport error rc=7 (http 000)", "checks"} {
 		if !strings.Contains(rf, want) {
 			t.Fatalf("readiness.failed lacks %q: %q", want, rf)
 		}
@@ -296,11 +376,11 @@ func TestFirstBoot_Readiness_BothConditionsAreRequired(t *testing.T) {
 		health, setup []string
 		reason        string
 	}{
-		{"application only", []string{"200"}, []string{"000"}, "management /api/setup/status: http 000"},
+		{"application only", []string{"200"}, []string{"000"}, "management /api/setup/status: transport error rc=7 (http 000)"},
 		{"management only", []string{"503"}, []string{setupPending}, "application /health: http 503"},
-		{"management 200 without needsSetup", []string{"200"}, []string{"200 {}"}, "http 200 without a boolean needsSetup"},
-		{"management needsSetup not a boolean", []string{"200"}, []string{`200 {"needsSetup":"yes"}`}, "without a boolean needsSetup"},
-		{"management body not JSON", []string{"200"}, []string{"200 <html>starting</html>"}, "without a boolean needsSetup"},
+		{"management 200 without needsSetup", []string{"200"}, []string{"200 {}"}, "http 200, body check invalid (no boolean needsSetup)"},
+		{"management needsSetup not a boolean", []string{"200"}, []string{`200 {"needsSetup":"yes"}`}, "no boolean needsSetup"},
+		{"management body not JSON", []string{"200"}, []string{"200 <html>starting</html>"}, "no boolean needsSetup"},
 		{"management 503", []string{"200"}, []string{"503 {}"}, "management /api/setup/status: http 503"},
 	}
 	for _, tc := range cases {
@@ -311,8 +391,8 @@ func TestFirstBoot_Readiness_BothConditionsAreRequired(t *testing.T) {
 			if code == 0 || h.exists("appliance/state/complete.done") {
 				t.Fatalf("completion recorded with only partial readiness (%d):\n%s", code, out)
 			}
-			if rf := h.readinessFailed(); !strings.Contains(rf, tc.reason) {
-				t.Fatalf("readiness.failed = %q, want it to name %q", rf, tc.reason)
+			if h.readinessFailed() == "" || !h.reasonOnRecord(tc.reason) {
+				t.Fatalf("readiness.failed = %q and no check's outcome names %q", h.readinessFailed(), tc.reason)
 			}
 		})
 	}
@@ -363,6 +443,161 @@ func TestFirstBoot_Readiness_CompleteHasOneGatedWriter(t *testing.T) {
 	gate, rec := strings.Index(fin, "wait_for_readiness || return 1"), strings.Index(fin, "done_step complete")
 	if gate < 0 || rec < 0 || gate > rec {
 		t.Fatal("step_finish must run the readiness gate before recording completion")
+	}
+}
+
+// R10-R1: an HTTP 200 (with a valid body) whose transport failed is not an
+// answer: curl timeout (28), partial transfer (18) and size cap (63) each
+// keep completion unrecorded, and the record keeps the transport status.
+func TestFirstBoot_Readiness_TransportErrorWith200NeverCounts(t *testing.T) {
+	cases := []struct {
+		name          string
+		health, setup []string
+		endpoint      string
+		rc            int
+	}{
+		{"application 200 after a curl timeout", []string{"rc28:200 {}"}, nil, "application", 28},
+		{"management 200 with a partial transfer", nil, []string{`rc18:200 {"needsSetup":true}`}, "management", 18},
+		{"management 200 over the size cap", nil, []string{`rc63:200 {"needsSetup":true}`}, "management", 63},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFBHarness(t)
+			h.setReadiness(tc.health, tc.setup)
+			out, code := h.run("READY_TIMEOUT_S=2; step_finish")
+			if code == 0 || h.exists("appliance/state/complete.done") {
+				t.Fatalf("completion recorded on a failed transport (%d):\n%s", code, out)
+			}
+			want := fmt.Sprintf("transport error rc=%d (http 200)", tc.rc)
+			if h.readinessFailed() == "" || !h.reasonOnRecord(want) {
+				t.Fatalf("readiness.failed = %q and no check's outcome names %q", h.readinessFailed(), want)
+			}
+			// Every finished check of that endpoint is this transport error, or
+			// one cut short by the deadline; none is ok.
+			ended, seen := h.readinessRecords(), false
+			for i := range ended {
+				r := &ended[i]
+				if r.Endpoint != tc.endpoint {
+					continue
+				}
+				switch {
+				case r.Outcome == want && r.RC == tc.rc && r.HTTPCode == "200":
+					seen = true
+				case strings.HasPrefix(r.Outcome, "transport killed at"):
+				default:
+					t.Fatalf("record %+v, want rc %d http 200 outcome %q", *r, tc.rc, want)
+				}
+			}
+			if !seen {
+				t.Fatalf("no %s record shows %q", tc.endpoint, want)
+			}
+		})
+	}
+}
+
+// R10-T1 on a deterministic monotonic clock (mono_ms reads $FB_HARNESS/clock;
+// start 100000, deadline 110000): work that FINISHES after the deadline is
+// never accepted, and no work starts once the budget is spent.
+func TestFirstBoot_Readiness_DeadlineIsTerminal(t *testing.T) {
+	clock := `mono_ms() { cat "$FB_HARNESS/clock"; }; echo 100000 > "$FB_HARNESS/clock"; READY_TIMEOUT_S=10; `
+	t.Run("management answers after the deadline", func(t *testing.T) {
+		h := newFBHarness(t)
+		h.writeExec(filepath.Join(h.root, "advance.setup"), "110001\n")
+		out, code := h.run(clock + "step_finish")
+		if code == 0 || h.exists("appliance/state/complete.done") {
+			t.Fatalf("an answer after the deadline was accepted (%d):\n%s", code, out)
+		}
+		if rf := h.readinessFailed(); !strings.Contains(rf, "answered after the deadline (http 200)") {
+			t.Fatalf("readiness.failed = %q", rf)
+		}
+	})
+	t.Run("body check finishes after the deadline", func(t *testing.T) {
+		h := newFBHarness(t)
+		parse := filepath.Join(h.root, "late-parse")
+		h.writeExec(parse, "#!/usr/bin/env bash\necho 110001 > \"$FB_HARNESS/clock\"\nexec python3 \"$@\"\n")
+		out, code := h.run(clock + "READY_PARSE=" + parse + "; step_finish")
+		if code == 0 || h.exists("appliance/state/complete.done") {
+			t.Fatalf("a body check finished after the deadline was accepted (%d):\n%s", code, out)
+		}
+		if rf := h.readinessFailed(); !strings.Contains(rf, "body check finished after the deadline") {
+			t.Fatalf("readiness.failed = %q", rf)
+		}
+	})
+	t.Run("confirmation after the deadline is not accepted", func(t *testing.T) {
+		// Checks 1 and 2 pass in time; the clock passes the deadline while
+		// check 2's management result is being recorded, before acceptance.
+		h := newFBHarness(t)
+		py, err := exec.LookPath("python3")
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrap := filepath.Join(h.root, "wrap")
+		if err := os.MkdirAll(wrap, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		h.writeExec(filepath.Join(wrap, "python3"), `#!/usr/bin/env bash
+e=; m=; c=; for a in "$@"; do [[ "$a" == phase=ended ]] && e=1; [[ "$a" == endpoint=management ]] && m=1; [[ "$a" == check=2 ]] && c=1; done
+`+py+` "$@"; rc=$?
+[[ -n $e && -n $m && -n $c ]] && echo 110001 > "$FB_HARNESS/clock"
+exit $rc
+`)
+		out, code := h.run(clock + "PATH=" + wrap + ":$PATH; step_finish")
+		if code == 0 || h.exists("appliance/state/complete.done") {
+			t.Fatalf("a confirmation reached after the deadline was accepted (%d):\n%s", code, out)
+		}
+		if rf := h.readinessFailed(); !strings.Contains(rf, "confirmed after the deadline") {
+			t.Fatalf("readiness.failed = %q", rf)
+		}
+	})
+	t.Run("no check starts with no budget left", func(t *testing.T) {
+		h := newFBHarness(t)
+		h.writeExec(filepath.Join(h.root, "advance.health"), "110000\n")
+		out, code := h.run(clock + "step_finish")
+		if code == 0 || h.exists("appliance/state/complete.done") {
+			t.Fatalf("completion recorded with the budget spent (%d):\n%s", code, out)
+		}
+		if n := h.readinessPhase("started", "management"); n != 0 {
+			t.Fatalf("%d management checks started with no time left; a spent budget must not become a fresh 1 ms", n)
+		}
+		if rf := h.readinessFailed(); !strings.Contains(rf, "management /api/setup/status: not checked") {
+			t.Fatalf("readiness.failed = %q", rf)
+		}
+	})
+}
+
+// R10-E1: a body check that hangs is killed and recorded as a timeout with its
+// own status and duration; invalid JSON is recorded as invalid, not killed.
+func TestFirstBoot_Readiness_BodyCheckOutcomeIsRecorded(t *testing.T) {
+	h := newFBHarness(t)
+	parse := filepath.Join(h.root, "hung-parse")
+	h.writeExec(parse, "#!/usr/bin/env bash\nexec sleep 30\n")
+	out, code := h.run("READY_TIMEOUT_S=3; READY_PARSE=" + parse + "; step_finish")
+	if code == 0 || h.exists("appliance/state/complete.done") {
+		t.Fatalf("a hung body check completed provisioning (%d):\n%s", code, out)
+	}
+	var mg *readinessRecord
+	for _, r := range h.readinessRecords() {
+		if r.Endpoint == "management" {
+			r := r
+			mg = &r
+			break
+		}
+	}
+	if mg == nil || mg.RC != 0 || mg.ParseRC == nil || *mg.ParseRC != 124 || !mg.ParseKilled ||
+		mg.ParseElapsedMS == nil || *mg.ParseElapsedMS < 500 || mg.ParseTimeoutS == nil ||
+		!strings.Contains(mg.ParseOutcome, "killed at") || !strings.Contains(mg.Outcome, "http 200, body check killed at") {
+		t.Fatalf("hung body check record = %+v", mg)
+	}
+
+	inv := newFBHarness(t)
+	inv.setReadiness(nil, []string{"200 <html>starting</html>"})
+	if _, code := inv.run("READY_TIMEOUT_S=2; step_finish"); code == 0 {
+		t.Fatal("invalid JSON completed provisioning")
+	}
+	for _, r := range inv.readinessRecords() {
+		if r.Endpoint == "management" && (r.ParseRC == nil || *r.ParseRC != 3 || r.ParseKilled || r.ParseOutcome != "invalid (no boolean needsSetup)") {
+			t.Fatalf("invalid-JSON record = %+v", r)
+		}
 	}
 }
 

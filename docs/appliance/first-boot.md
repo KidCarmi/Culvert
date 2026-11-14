@@ -224,7 +224,7 @@ first-boot service sets (`CULVERT_DIR=/srv/culvert`,
 * Common cause: no outbound HTTPS (ClamAV download → compose `--wait` timeout).
   Fix egress, then restart the service.
 * **Services not ready** (`culvert-status` → `Provisioning: … services not
-  ready at the last first-boot check: application /health: http 000;
+  ready at the last first-boot check: application /health: transport error rc=7 (http 000);
   management /api/setup/status: …`): installation finished, but the
   application or management did not answer within the 300 s bound, so
   completion was **not** recorded. The reason is kept in

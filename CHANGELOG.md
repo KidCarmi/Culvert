@@ -123,11 +123,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   127.0.0.1:9090 returns 200 with a boolean `needsSetup` (the conditions the
   console's status-json reports), in two consecutive checks, so an answer
   from just before a recreate does not count. The bound is monotonic
-  (`/proc/uptime`): every probe and body check is killed at the time left,
-  and a check-count cap bounds the wait again. Every started check is
-  recorded in `readiness-attempts.jsonl` (timing, exit status, HTTP code,
-  outcome, bounded body and stderr); a check whose record cannot be written
-  does not count. On timeout nothing is recorded complete: the reason is kept
+  (`/proc/uptime`) and terminal: no work starts once it is reached, every
+  probe and body check is killed at the time left, an answer or body check
+  that finishes after it never counts, and a check-count cap bounds the wait
+  again. A check counts only when its transport succeeded (curl exit 0): an
+  HTTP 200 after a curl timeout, partial transfer or size cap is not an
+  answer. Every started check is recorded twice in `readiness-attempts.jsonl`
+  (`started` before it runs, so an interrupted check stays visible; `ended`
+  with the transport's and the body check's own exit status, timing and
+  killed flag, the outcome, and bounded body and stderr); a check whose record
+  cannot be written does not count. On timeout nothing is recorded complete: the reason is kept
   in `state/readiness.failed` and shown by `culvert-status`, the log carries
   `docker compose ps` and the proxy's last log lines, and the step fails into
   the unit's existing bounded retry.

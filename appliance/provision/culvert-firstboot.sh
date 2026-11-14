@@ -406,10 +406,16 @@ repair_agent() {
 # every command — each probe, each body parse, each pause — gets at most the
 # time left (and at most 3 s), so the decision is reached within
 # READY_TIMEOUT_S plus a 0.5 s kill grace and the last record writes (each
-# bounded to 2 s); a check-count cap bounds it again. Every started probe
-# appends one JSON record (READY_RECORDS: check, endpoint, monotonic start/end,
-# timeout, rc, HTTP code, outcome, killed, bounded body and stderr); a record
-# that cannot be written makes that check fail. On timeout NOTHING is recorded
+# bounded to 2 s); a check-count cap bounds it again. The deadline is
+# terminal: no work starts once it is reached, and a transport answer, a body
+# check or a confirmation that finishes after it never counts. A check counts
+# only when its transport succeeded (curl exit 0) with HTTP 200 and, for
+# management, a body check that returned a boolean needsSetup. Every started
+# check is recorded twice in READY_RECORDS: phase=started before it runs (an
+# interrupted check stays visible) and phase=ended with transport rc/HTTP
+# code/timing/killed, the body check's own rc/timing/killed/outcome, the
+# outcome and bounded body and stderr; a record that cannot be written makes
+# that check fail. On timeout NOTHING is recorded
 # complete: the reason goes to state/readiness.failed, bounded diagnostics go
 # to the log, the console says what to do, and the step fails into the unit's
 # bounded retry (Restart=on-failure). An interrupted wait records nothing; the
@@ -418,6 +424,7 @@ READY_TIMEOUT_S="${CULVERT_FB_READY_TIMEOUT_S:-300}"
 READY_INTERVAL_S="${CULVERT_FB_READY_INTERVAL_S:-2}"
 READY_CONFIRM="${CULVERT_FB_READY_CONFIRM:-2}"
 READY_CURL="${CULVERT_FB_READY_CURL:-curl}"
+READY_PARSE="${CULVERT_FB_READY_PARSE:-python3}"
 READY_RECORDS="${CULVERT_FB_READY_RECORDS:-$STATE_DIR/readiness-attempts.jsonl}"
 APP_HEALTH_URL="http://127.0.0.1:8080/health"
 MGMT_SETUP_URL="https://127.0.0.1:9090/api/setup/status"
@@ -434,34 +441,55 @@ mono_ms() {
 }
 
 # budget MS_LEFT CAP_MS → seconds with ms precision: min(MS_LEFT, CAP_MS).
+# Callers never pass MS_LEFT <= 0: no new work starts once the deadline is
+# reached (R10-T1), so a spent budget is never rounded up into a fresh one.
 budget() {
   local ms=$(( $1 < $2 ? $1 : $2 ))
-  (( ms < 1 )) && ms=1
   printf '%d.%03d' $(( ms / 1000 )) $(( ms % 1000 ))
 }
 
-# record_attempt CHECK ENDPOINT URL T0 T1 TIMEOUT RC CODE OUTCOME DIR — one
-# JSON line; non-zero if it could not be written.
-record_attempt() {
+# record_json KEY=VALUE... — append one JSON line to READY_RECORDS (bounded to
+# 2 s). Integer keys (*_ms, rc, parse_rc, check) and float keys (*timeout_s)
+# are typed; "-" is null; body_file/stderr_file are read bounded (2000/500
+# bytes) into body/stderr. Non-zero if the line could not be written.
+record_json() {
   timeout -k 0.5 2 python3 -c 'import json, sys
-a = sys.argv[1:]
-def rd(p, n):
-    try:
-        with open(p, "rb") as f:
-            return f.read(n).decode("utf-8", "replace")
-    except OSError:
-        return None
-rec = {"run": a[10], "check": int(a[0]), "endpoint": a[1], "url": a[2],
-       "started_ms": int(a[3]), "ended_ms": int(a[4]), "elapsed_ms": int(a[4]) - int(a[3]),
-       "timeout_s": float(a[5]), "rc": int(a[6]), "http_code": a[7], "outcome": a[8],
-       "killed": a[6] in ("124", "137"), "body": rd(a[9] + "/body", 2000), "stderr": rd(a[9] + "/err", 500)}
-with open(a[11], "a") as f:
-    f.write(json.dumps(rec, sort_keys=True) + "\n")' "$@" "$READY_RUN" "$READY_RECORDS" 2>/dev/null
+out, rec = sys.argv[1], {}
+INT = {"check", "started_ms", "ended_ms", "deadline_ms", "rc", "parse_rc", "parse_started_ms", "parse_ended_ms"}
+FLT = {"timeout_s", "parse_timeout_s"}
+for kv in sys.argv[2:]:
+    k, _, v = kv.partition("=")
+    if v == "-":
+        rec[k] = None
+    elif k in INT:
+        rec[k] = int(v)
+    elif k in FLT:
+        rec[k] = float(v)
+    elif k in ("body_file", "stderr_file"):
+        try:
+            with open(v, "rb") as f:
+                rec[k[:-5]] = f.read(2000 if k == "body_file" else 500).decode("utf-8", "replace")
+        except OSError:
+            rec[k[:-5]] = None
+    else:
+        rec[k] = v
+for a, b, c in (("started_ms", "ended_ms", "elapsed_ms"), ("parse_started_ms", "parse_ended_ms", "parse_elapsed_ms")):
+    if isinstance(rec.get(a), int) and isinstance(rec.get(b), int):
+        rec[c] = rec[b] - rec[a]
+if "rc" in rec:
+    rec["killed"] = rec["rc"] in (124, 137)
+if "parse_rc" in rec:
+    rec["parse_killed"] = rec["parse_rc"] in (124, 137)
+with open(out, "a") as f:
+    f.write(json.dumps(rec, sort_keys=True) + "\n")' "$READY_RECORDS" "run=$READY_RUN" "$@" 2>/dev/null
 }
 
-# probe ENDPOINT CHECK → prints "ok" or the reason; records the attempt.
+# probe ENDPOINT CHECK → prints "ok" or the reason. Every started check is on
+# record twice: phase=started BEFORE it runs (an interrupted check stays
+# visible) and phase=ended with the transport and body-check outcomes.
 probe() {
-  local ep="$1" n="$2" url left tmo rc=0 prc=0 t0 t1 code outcome tmp
+  local ep="$1" n="$2" url left tmo rc=0 t0 t1 code outcome tmp
+  local prc=- pt0=- pt1=- ptmo=- pout=not-run
   case "$ep" in
     application) url="$APP_HEALTH_URL" ;;
     management) url="$MGMT_SETUP_URL" ;;
@@ -471,30 +499,59 @@ probe() {
   tmo="$(budget "$left" 3000)"
   tmp="$(mktemp -d)"
   t0="$(mono_ms)"
+  if ! record_json phase=started "check=$n" "endpoint=$ep" "url=$url" "started_ms=$t0" "timeout_s=$tmo" "deadline_ms=$READY_DEADLINE_MS"; then
+    rm -rf -- "${tmp:?}"; echo "attempt record not written (check not started)"; return 0
+  fi
   # -k: management's certificate is self-signed at first boot (loopback only).
   timeout -k 0.5 "$tmo" "$READY_CURL" -sk --max-time "$tmo" --max-filesize 65536 \
     -o "$tmp/body" -w '%{http_code}' "$url" > "$tmp/code" 2> "$tmp/err" || rc=$?
   t1="$(mono_ms)"
   code="$(head -c 3 "$tmp/code" 2>/dev/null || true)"
   [[ "$code" =~ ^[0-9]{3}$ ]] || code=000
+  # A check counts only when the transport itself succeeded (R10-R1): an HTTP
+  # 200 with a curl timeout (28), partial transfer (18) or size cap (63) is not
+  # an answer, whatever bytes arrived.
   if (( rc == 124 || rc == 137 )); then
-    outcome="killed at ${tmo}s (http $code)"
+    outcome="transport killed at ${tmo}s (http $code)"
+  elif (( rc != 0 )); then
+    outcome="transport error rc=$rc (http $code)"
   elif [[ "$code" != 200 ]]; then
     outcome="http $code"
+  elif (( t1 > READY_DEADLINE_MS )); then
+    outcome="answered after the deadline (http $code)"
   elif [[ "$ep" == application ]]; then
     outcome=ok
   else
     left=$(( READY_DEADLINE_MS - $(mono_ms) ))
-    timeout -k 0.5 "$(budget "$left" 3000)" python3 -c 'import json, sys
+    if (( left <= 0 )); then
+      outcome="deadline reached before the body check"
+    else
+      # The body check keeps its own status and timing (R10-E1): a parser that
+      # is killed is a timeout, not invalid JSON.
+      ptmo="$(budget "$left" 3000)"; prc=0; pt0="$(mono_ms)"
+      timeout -k 0.5 "$ptmo" "$READY_PARSE" -c 'import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
         d = json.load(f)
 except Exception:
-    sys.exit(1)
-sys.exit(0 if isinstance(d, dict) and isinstance(d.get("needsSetup"), bool) else 1)' "$tmp/body" 2>/dev/null || prc=$?
-    if (( prc == 0 )); then outcome=ok; else outcome="http 200 without a boolean needsSetup"; fi
+    sys.exit(3)
+sys.exit(0 if isinstance(d, dict) and isinstance(d.get("needsSetup"), bool) else 3)' "$tmp/body" 2>/dev/null || prc=$?
+      pt1="$(mono_ms)"
+      case "$prc" in
+        0) pout=ok ;;
+        124|137) pout="killed at ${ptmo}s" ;;
+        3) pout="invalid (no boolean needsSetup)" ;;
+        *) pout="error rc=$prc" ;;
+      esac
+      if [[ "$pout" != ok ]]; then outcome="http 200, body check $pout"
+      elif (( pt1 > READY_DEADLINE_MS )); then outcome="body check finished after the deadline"
+      else outcome=ok; fi
+    fi
   fi
-  record_attempt "$n" "$ep" "$url" "$t0" "$t1" "$tmo" "$rc" "$code" "$outcome" "$tmp" \
+  record_json phase=ended "check=$n" "endpoint=$ep" "url=$url" "started_ms=$t0" "ended_ms=$t1" \
+    "timeout_s=$tmo" "deadline_ms=$READY_DEADLINE_MS" "rc=$rc" "http_code=$code" \
+    "parse_rc=$prc" "parse_started_ms=$pt0" "parse_ended_ms=$pt1" "parse_timeout_s=$ptmo" "parse_outcome=$pout" \
+    "outcome=$outcome" "body_file=$tmp/body" "stderr_file=$tmp/err" \
     || outcome="attempt record not written ($outcome)"
   rm -rf -- "${tmp:?}"
   echo "$outcome"
@@ -519,6 +576,10 @@ wait_for_readiness() {
   READY_RUN="$(date -u +%FT%TZ)/${start}"
   max_rounds=$(( READY_TIMEOUT_S / READY_INTERVAL_S + READY_CONFIRM + 1 ))
   log "readiness: waiting up to ${READY_TIMEOUT_S}s (monotonic) for the application (${APP_HEALTH_URL}) and management (${MGMT_SETUP_URL}); every check recorded in ${READY_RECORDS}"
+  # An interrupted wait (stop, reboot, the unit's timeout) records nothing
+  # complete; each check already left phase=started before it ran, and this
+  # best-effort marker names the interruption.
+  trap 'record_json phase=interrupted "ended_ms=$(mono_ms)" "deadline_ms=$READY_DEADLINE_MS" || true; exit 143' TERM INT HUP
   while (( rounds < max_rounds )) && (( READY_DEADLINE_MS > $(mono_ms) )); do
     rounds=$(( rounds + 1 ))
     a="$(probe application "$rounds")"
@@ -529,6 +590,9 @@ wait_for_readiness() {
     if [[ "$a" == ok && "$m" == ok ]]; then
       streak=$(( streak + 1 ))
       if (( streak >= READY_CONFIRM )); then
+        # Accept only while the deadline holds (R10-T1).
+        if (( $(mono_ms) > READY_DEADLINE_MS )); then app="confirmed after the deadline"; mgmt="$app"; break; fi
+        trap - TERM INT HUP
         rm -f "$STATE/readiness.failed"
         log "readiness: application and management answered in ${streak} consecutive checks ($(( ($(mono_ms) - start) / 1000 ))s, check ${rounds})"
         return 0
@@ -540,6 +604,7 @@ wait_for_readiness() {
     (( left > 0 )) || break
     sleep "$(budget "$left" $(( READY_INTERVAL_S * 1000 )))"
   done
+  trap - TERM INT HUP
   why="application /health: ${app}; management /api/setup/status: ${mgmt}; waited $(( ($(mono_ms) - start) / 1000 ))s, ${rounds} checks"
   printf '%s %s\n' "$(date -u +%FT%TZ)" "$why" > "$STATE/readiness.failed"
   log "ERROR: services not ready within ${READY_TIMEOUT_S}s; provisioning NOT recorded complete (${why})"
