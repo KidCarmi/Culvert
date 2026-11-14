@@ -8,6 +8,50 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+The 2026-11-13 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-13.md) —
+CHAOS-119 (THE CONTAINMENT PLANE'S REPORTING BOUNDARY). Five rounds of this
+family established that every detached background round is CONTAINED. This one
+asked what an operator sees afterwards, and the answer was "nothing", three
+different ways. (a) `telemetryRuntime.Close` ran its final flush, its full
+export drain and its manager close in a bare `go func()` — calling the SAME
+`exportStep` that `exportLoop` has guarded under
+`crashComponentMCPTelemetryExport` since CHAOS-118, "fed by data this process
+does not author". The identical call was contained on the periodic path and
+process-fatal on the shutdown path, from a hook at order **66**, which skipped
+(not abandoned) orders 67..140: the tunnel establish-fence, the H2 GOAWAY wave,
+the whole **tunnel drain**, and every hook above `shutdownFlushBoundary` —
+syslog, the community DB, the log store, the request log and the **audit log**,
+the hooks CHAOS-56 carved a reserve for because "abandoning one costs
+durability". And because the goroutine is DETACHED while `Close` selects on the
+budget, an abandoned hook leaves it running, so the crash lands inside an
+unrelated LATER hook and is attributed to whatever was running. Measured by
+reverting the fix: `SIGSEGV`. (b) FIVE background rounds were contained by a
+bespoke `recover()` that logs, so they moved no
+`culvert_crash_records_total{component}`, stored no record and wrote no audit
+entry — CHAOS-118 residual `1` says "the crash counters ARE the signal", and
+these rounds never reached it. Two are WORKER-level recovers, the CHAOS-105
+anti-pattern, and the sharpest says its own cost in its own log line: "the node
+stays HA-gated until restarted". (c) The gate written for (d) then found that
+even a correctly reported component could be dropped: `maxCrashLabels` was
+**32** against **56** distinct FIXED labels at the base revision, and past the
+cap the counter FOLDS to `component="other"` while `crashThrottleAllow`
+SUPPRESSES outright — no record, no log line, no audit entry. Slots are
+first-crash-wins and never pruned, so they go to the frequent request-path
+components and the rare high-severity background rounds this family keeps
+adding are the ones that lose their record. (d) CHAOS-118 §7.2's MECHANICAL
+discovery gate is built: 36 round loops discovered from the AST, failing both
+ways, with its own negative control. It justified itself twice — it found
+`Refresher.RunTicker`, a round loop over third-party catalog bytes with no
+containment and no production caller (a trap armed for whoever wires it), and
+its own first draft, which searched the loop TEXT for `ticker.C`, missed
+THIRTEEN loops that name their ticker `t`. Closes CHAOS-118 §7.1, §7.2 and
+residual risk `4`; §7.3 and §7.4 stay open with reasons. Id claimed in a
+committed placeholder row as commit one, before any code, checked against
+`origin/main` at `feb11e8` (highest id anywhere on main: `CHAOS-118`) and the
+open-PR set (#1884, #1883, #1855, #1705, #1549, #1548, #1536, #1528, #1526 —
+none a chaos sweep).
+
 **Later rounds:** the 2026-10-13 round is recorded separately in
 [CHAOS-REVIEW-2026-10-13.md](CHAOS-REVIEW-2026-10-13.md) — CHAOS-89 (the DP→CP
 backoff ladder), CHAOS-90 (the unbounded unenrolled-pull map) and CHAOS-91 (the
