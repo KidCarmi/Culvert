@@ -1435,6 +1435,13 @@ func TestApiDiagnostics_SyslogFeedFail(t *testing.T) {
 // path. UDP construction never blocks on a handshake, so it stands in for a
 // live feed without a real collector.
 func TestApiDiagnostics_SyslogFeedOK(t *testing.T) {
+	// The delivery half of the row reads the syslog HEALTH record, whose drop
+	// counters are process-lifetime by design. A test that installed a record
+	// and lost an event, and ran earlier in a shuffled order, left this one
+	// reading "configured, N dropped" and reporting warn. This test asserts a
+	// clean feed, so it owns that precondition instead of inheriting it.
+	resetSyslogHealthForTest()
+	t.Cleanup(resetSyslogHealthForTest)
 	prevAddr, prevOK, prevSW := syslogConfiguredAddr, syslogConfigured, syslogHandle()
 	t.Cleanup(func() {
 		if sw := syslogHandle(); sw != nil && sw != prevSW {
