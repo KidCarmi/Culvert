@@ -517,12 +517,12 @@ func (s *controlPlaneServer) Enroll(ctx context.Context, raw json.RawMessage) (j
 	}
 	// CHAOS-117 follow-up: this node ID had a record until a null one was
 	// dropped at an ingestion boundary, so admitEnrollment found nothing to
-	// supersede and this enrolment would otherwise be indistinguishable from a
+	// supersede and this enrollment would otherwise be indistinguishable from a
 	// first one. Only reachable after the token was consumed (an
 	// unauthenticated prober cannot drive it) and RECORDED only once the node
 	// is registered, like the expired-node case below: a request that then
 	// fails CSR validation or signing must not claim a replacement happened.
-	// The decision is not changed — the token was valid and the enrolment
+	// The decision is not changed — the token was valid and the enrollment
 	// proceeded.
 	droppedReenroll := priorNode == nil && globalClusterStore.NodeRecordWasDropped(req.NodeID)
 	globalClusterStore.RegisterNode(node)
@@ -616,14 +616,14 @@ func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, T
 		logger.Printf("Enrollment: rejected node %q: %v", sanitizeLog(req.NodeID), err)
 		return req, TokenInfo{}, nil, status.Errorf(codes.PermissionDenied, "enrollment denied: %v", err)
 	}
-	// CHAOS-117 follow-up: a re-enrolment over a DROPPED record is recorded by
+	// CHAOS-117 follow-up: a re-enrollment over a DROPPED record is recorded by
 	// Enroll, after the node is registered, not here: the CSR has not been
 	// validated or signed yet, and a failure past this point must not leave a
 	// "completed identity replacement" audit entry and alert behind.
 	return req, tokInfo, priorNode, nil
 }
 
-// recordDroppedNodeReenrollment audits and alerts an enrolment under a node ID
+// recordDroppedNodeReenrollment audits and alerts an enrollment under a node ID
 // whose record was dropped as unusable earlier in this process (CHAOS-117).
 //
 // It cannot do what recordExpiredNodeReenrollment does for an EXPIRED node —
@@ -631,18 +631,36 @@ func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, T
 // the only thing that named that serial. The predecessor certificate therefore
 // stays valid until its own expiry and cannot be revoked by node ID. That is
 // irreversible, so the one thing that can still be done is to say so, loudly
-// and once per enrolment, instead of letting the identity swap pass silently.
+// and once per enrollment, instead of letting the identity swap pass silently.
 // sourceIP is the caller's peer address (enrollPeerHost); "" is logged as
 // "unknown".
+//
+// The detail NAMES THE NODE, and that is load-bearing rather than cosmetic:
+// internal/alerts.Store.Dispatch suppresses a duplicate on `event + ":" +
+// Detail` within dedupTTL, so a CONSTANT detail gives every node's replacement
+// ONE dedup key and delivers only the first of a batch. The batch is the normal
+// shape — a single corrupt cluster.json drops every null record it holds in one
+// normalizeClusterState pass, and the remediation is to re-issue tokens and let
+// those nodes re-enroll together — so "once per enrollment" was in practice
+// once per 30 s across the whole fleet, with the un-revocable predecessor
+// certificates of the rest never reported. recordExpiredNodeReenrollment
+// escapes the same trap only incidentally, by embedding per-node serials.
+// Pinned by TestEnroll_DroppedRecordAlertsAreDistinctPerNode.
+//
+// nodeID is CLIENT-SUPPLIED (EnrollRequest.NodeID), so it is sanitized BEFORE
+// it enters the detail: the detail reaches logger.Printf, an audit record and a
+// webhook body, and a raw CR/LF in any of those is CWE-117.
 func recordDroppedNodeReenrollment(nodeID, sourceIP string) {
 	if sourceIP == "" {
 		sourceIP = "unknown"
 	}
-	detail := "enrolled under a node ID whose stored record was earlier dropped as an unusable null entry; " +
-		"the predecessor certificate's serial was lost with that record, so it could NOT be added to the CRL and " +
-		"stays valid until it expires — confirm this enrolment was expected, and verify the control plane's cluster.json"
-	logger.Printf("Enrollment: node %q RE-ENROLLED over a DROPPED record from %q — %s",
-		sanitizeLog(nodeID), sanitizeLog(sourceIP), detail)
+	safeNodeID := sanitizeLog(nodeID)
+	detail := fmt.Sprintf("node %q enrolled under a node ID whose stored record was earlier dropped as an unusable "+
+		"null entry; the predecessor certificate's serial was lost with that record, so it could NOT be added to the "+
+		"CRL and stays valid until it expires — confirm this enrollment was expected, and verify the control plane's "+
+		"cluster.json", safeNodeID)
+	logger.Printf("Enrollment: RE-ENROLLED over a DROPPED record from %q — %s",
+		sanitizeLog(sourceIP), detail)
 	now := time.Now()
 	auditAdd(AuditEntry{
 		TS:     now.UnixMilli(),
@@ -660,7 +678,7 @@ func recordDroppedNodeReenrollment(nodeID, sourceIP string) {
 	})
 }
 
-// enrollPeerHost returns the gRPC peer's host for an enrolment, or "" when the
+// enrollPeerHost returns the gRPC peer's host for an enrollment, or "" when the
 // context carries no usable peer address.
 func enrollPeerHost(ctx context.Context) string {
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {

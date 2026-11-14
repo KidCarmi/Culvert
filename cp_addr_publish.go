@@ -575,6 +575,10 @@ func (s *ConfigStore) pageCPAddrRejection(episode uint64, err error) {
 	fireAlert("config_snapshot_rejected", payload)
 }
 
+// crashComponentCPAddrPublishRetry names a contained CP-address republish-retry
+// death in the crash plane (CHAOS-119).
+const crashComponentCPAddrPublishRetry = "cp_addr_publish_retry"
+
 // retryCPAddrPublish republishes from the store's live source until the
 // pending state clears. The exit decision is taken under addrPubMu, the lock
 // a new failure latches under, so a failure that lands while the loop is
@@ -582,6 +586,15 @@ func (s *ConfigStore) pageCPAddrRejection(episode uint64, err error) {
 func (s *ConfigStore) retryCPAddrPublish(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
+			// CHAOS-119: this recover is at the top of the WORKER, not around
+			// one round, so a single panic ends republication for the whole
+			// episode — the CHAOS-105 shape, kept deliberately here because
+			// the loop's exit contract is to clear `retrying` so a LATER
+			// failure can start a fresh loop. What was missing is the signal:
+			// the pending state stays reported, but nothing recorded that the
+			// retry stopped because it died rather than because it succeeded.
+			// recordCrash makes the two distinguishable.
+			recordCrash(crashComponentCPAddrPublishRetry, "", r)
 			logger.Printf("ControlPlane: CP address list retry loop panicked (contained): %v", r)
 			s.addrPubMu.Lock()
 			s.addrPub.retrying = false

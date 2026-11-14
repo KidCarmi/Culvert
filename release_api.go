@@ -233,6 +233,13 @@ func currentReleaseManager() *releaseManager {
 const (
 	crashComponentReleaseDispatch = "release_dispatch"
 	crashComponentReleaseResume   = "release_resume"
+	// CHAOS-119: the two periodic catalog loops contain their own ticks
+	// (CHAOS-R1/CHAOS-23) but reported nothing into the crash plane. Named
+	// separately so an operator can tell a refresh fault (fetch/verify/reload)
+	// from a freshness-watchdog fault — only the second one is the loop that
+	// exists to page about staleness.
+	crashComponentReleaseCatalogRefresh = "release_catalog_refresh"
+	crashComponentReleaseCatalogStale   = "release_catalog_stale"
 
 	// detailDispatchWorkerPanicAfterApply marks the status record when the watch
 	// goroutine died after the agent accepted the apply. The op is LIVE on the

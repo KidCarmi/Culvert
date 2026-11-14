@@ -535,7 +535,7 @@ func TestWall_PublicAllowlistRoutesAreDeclaredPublic(t *testing.T) {
 // ── Replay counter lifecycle (Codex review, PR #1429) ─────────────────────
 //
 // The counter belongs to the SECRET. Preserving it across a credential write
-// is the whole point of SEC-TOTP-1, but preserving it across DE-ENROLMENT is a
+// is the whole point of SEC-TOTP-1, but preserving it across DE-ENROLLMENT is a
 // lockout: VerifyTOTPReturnCounter skips every candidate with
 // `candidate <= lastCounter`, so a counter left behind by the previous
 // authenticator refuses the next one until wall-clock time passes it — and
@@ -783,13 +783,13 @@ func TestSetTOTPSecret_UnusableSecretKeepsCounter(t *testing.T) {
 	}
 }
 
-// TestSetTOTPSecret_FreshEnrolmentOverUnusableSecretResets is the other
+// TestSetTOTPSecret_FreshEnrollmentOverUnusableSecretResets is the other
 // direction, and it is the availability half: when the account held no usable
 // key, installing one is a genuinely new binding. A counter carried into it
 // refuses the new device until wall-clock time passes the stale value, and
 // indefinitely after a clock rollback — the lockout the previous correction
 // round closed on ClearTOTP.
-func TestSetTOTPSecret_FreshEnrolmentOverUnusableSecretResets(t *testing.T) {
+func TestSetTOTPSecret_FreshEnrollmentOverUnusableSecretResets(t *testing.T) {
 	c := newTestConfig()
 	enrolTOTPUser(t, c, "sybil", "Passw0rd1", RoleAdmin)
 

@@ -526,7 +526,7 @@ The `cdr` check on the Diagnostics page surfaces six states beyond
   profile is missing. Set them under CDR → Configuration; otherwise
   CDR cannot make safe decisions on unmatched files.
 * **`enabled-broken`** — CDR is enabled but no Sluice instance is
-  connected. Either enrol an instance under CDR → Instances or disable
+  connected. Either enroll an instance under CDR → Instances or disable
   CDR until you can.
 * **`enabled-dark`** — instances are enrolled but every one's circuit
   breaker is open, so none can scan a document. Documents are handled

@@ -123,6 +123,12 @@ func (s *saasFeedScheduler) Wake() {
 	}
 }
 
+// crashComponentSaaSFeedRefresh names a contained SaaS-feed refresh tick in the
+// crash plane (CHAOS-119). The tick was already panic-contained and charged as a
+// failed round; what it did not do was report, so a deterministically panicking
+// refresh looked exactly like an unreachable origin.
+const crashComponentSaaSFeedRefresh = "saas_feed_refresh"
+
 // run is the loop. It performs the FIRST refresh only when woken or after the first
 // (jittered) interval — startup recovery + the startup seed handle t=0, so the loop's
 // first natural tick is one interval out (mirrors the release-refresh loop). Exits on
@@ -163,6 +169,14 @@ func (s *saasFeedScheduler) runTick(ctx context.Context) (outcome saasFeedRefres
 	defer func() {
 		if r := recover(); r != nil {
 			outcome = refreshFailed
+			// CHAOS-119: charge the panic to the crash plane as well as the
+			// log. Charging it as refreshFailed already makes the loop back
+			// off instead of hot-looping (that part was right); what was
+			// missing is that nothing COUNTED it, so a feed whose parse
+			// panics every round backs off to its ceiling and stays there
+			// with no counter, no record and no audit entry to distinguish it
+			// from a feed origin that is merely unreachable.
+			recordCrash(crashComponentSaaSFeedRefresh, "", r)
 			if logger != nil {
 				logger.Printf("SaaSFeed: refresh tick panicked (recovered, loop continues): %v", r)
 			}

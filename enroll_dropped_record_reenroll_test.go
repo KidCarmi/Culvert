@@ -1,6 +1,6 @@
 package main
 
-// CHAOS-117 follow-up — re-enrolment over a DROPPED node record.
+// CHAOS-117 follow-up — re-enrollment over a DROPPED node record.
 //
 // CHAOS-117 stopped a null node record from crash-looping the control plane by
 // DROPPING it. That trade has a second half the normalisation comment first
@@ -13,11 +13,11 @@ package main
 //   - the predecessor's serial can never be added to the CRL (it is gone), so
 //     the legitimate holder's certificate stays valid until it expires,
 //   - and none of that was audited, alerted or logged — the identity swap was
-//     indistinguishable from a first enrolment.
+//     indistinguishable from a first enrollment.
 //
 // The admit DECISION is correct and deliberately unchanged here: an
 // admin-issued single-use token is still required, and a token holder can
-// already enrol a new node. What was missing is the evidence trail for the
+// already enroll a new node. What was missing is the evidence trail for the
 // replacement, which is what these tests pin.
 
 import (
@@ -78,17 +78,17 @@ func TestEnroll_DroppedRecordReenrollmentIsAuditedAndAlerted(t *testing.T) {
 	srv := &controlPlaneServer{}
 	resp, err := srv.Enroll(context.Background(), enrollRequestJSON(t, token, "dp-dropped"))
 	if err != nil {
-		t.Fatalf("enrolment with a valid token must still succeed (the decision is unchanged): %v", err)
+		t.Fatalf("enrollment with a valid token must still succeed (the decision is unchanged): %v", err)
 	}
 	var er EnrollResponse
 	if err := json.Unmarshal(resp, &er); err != nil || er.CertPEM == "" {
-		t.Fatalf("enrolment response missing cert: err=%v resp=%s", err, resp)
+		t.Fatalf("enrollment response missing cert: err=%v resp=%s", err, resp)
 	}
 
 	entry, ok := auditHasDroppedReenroll(t, baseline, "dp-dropped")
 	if !ok {
 		t.Fatal("no cluster.node.reenroll-dropped audit entry — an identity replacement " +
-			"over a dropped record is indistinguishable from a first enrolment")
+			"over a dropped record is indistinguishable from a first enrollment")
 	}
 	// The entry must say the predecessor could NOT be revoked; that is the
 	// part an operator cannot infer and cannot fix after the fact.
@@ -102,7 +102,7 @@ func TestEnroll_DroppedRecordReenrollmentIsAuditedAndAlerted(t *testing.T) {
 	}
 }
 
-// ── 2. negative control: an ordinary first enrolment is not flagged ──────────
+// ── 2. negative control: an ordinary first enrollment is not flagged ──────────
 
 func TestEnroll_FirstEnrollmentIsNotFlaggedAsDroppedReenrollment(t *testing.T) {
 	swapEnrollFixture(t)
@@ -115,7 +115,7 @@ func TestEnroll_FirstEnrollmentIsNotFlaggedAsDroppedReenrollment(t *testing.T) {
 	baseline := time.Now().UnixMilli()
 	srv := &controlPlaneServer{}
 	if _, err := srv.Enroll(context.Background(), enrollRequestJSON(t, token, "dp-brand-new")); err != nil {
-		t.Fatalf("first enrolment must succeed: %v", err)
+		t.Fatalf("first enrollment must succeed: %v", err)
 	}
 
 	if _, ok := auditHasDroppedReenroll(t, baseline, "dp-brand-new"); ok {
@@ -123,7 +123,7 @@ func TestEnroll_FirstEnrollmentIsNotFlaggedAsDroppedReenrollment(t *testing.T) {
 			"(false positives would make the real signal unreadable)")
 	}
 	if len(*alerts) != 0 {
-		t.Errorf("a first enrolment must raise no re-enrolment alert, got %+v", *alerts)
+		t.Errorf("a first enrollment must raise no re-enrollment alert, got %+v", *alerts)
 	}
 }
 
@@ -140,28 +140,28 @@ func TestEnroll_DroppedRecordEvidenceRequiresAValidToken(t *testing.T) {
 	baseline := time.Now().UnixMilli()
 	srv := &controlPlaneServer{}
 	if _, err := srv.Enroll(context.Background(), enrollRequestJSON(t, "not-a-real-token", "dp-dropped")); err == nil {
-		t.Fatal("enrolment with an invalid token must be denied")
+		t.Fatal("enrollment with an invalid token must be denied")
 	}
 
 	if _, ok := auditHasDroppedReenroll(t, baseline, "dp-dropped"); ok {
-		t.Error("a rejected enrolment must not write the replacement audit entry — " +
+		t.Error("a rejected enrollment must not write the replacement audit entry — " +
 			"an unauthenticated prober could otherwise forge the signal at will")
 	}
 	if len(*alerts) != 0 {
-		t.Errorf("a rejected enrolment must raise no alert, got %+v", *alerts)
+		t.Errorf("a rejected enrollment must raise no alert, got %+v", *alerts)
 	}
 	if _, ok := globalClusterStore.GetNode("dp-dropped"); ok {
-		t.Error("a rejected enrolment must not register the node")
+		t.Error("a rejected enrollment must not register the node")
 	}
 }
 
-// ── 3b. ... nor by an enrolment that fails after the token is spent ─────────
+// ── 3b. ... nor by an enrollment that fails after the token is spent ─────────
 
 // A valid token reaches past admission, but the request can still fail at CSR
 // validation, before anything is signed or registered. The audit entry and the
-// alert say an identity replacement COMPLETED, so a failed enrolment must not
+// alert say an identity replacement COMPLETED, so a failed enrollment must not
 // emit either (Codex review on PR #1879).
-func TestEnroll_DroppedRecordEvidenceRequiresASuccessfulEnrolment(t *testing.T) {
+func TestEnroll_DroppedRecordEvidenceRequiresASuccessfulEnrollment(t *testing.T) {
 	loadStateWithNullNode(t, "dp-dropped")
 	alerts := enrollAlertCapture(t)
 
@@ -177,17 +177,17 @@ func TestEnroll_DroppedRecordEvidenceRequiresASuccessfulEnrolment(t *testing.T) 
 	baseline := time.Now().UnixMilli()
 	srv := &controlPlaneServer{}
 	if _, err := srv.Enroll(context.Background(), raw); err == nil {
-		t.Fatal("enrolment with a malformed CSR must be refused")
+		t.Fatal("enrollment with a malformed CSR must be refused")
 	}
 
 	if _, ok := auditHasDroppedReenroll(t, baseline, "dp-dropped"); ok {
-		t.Error("a failed enrolment must not write the replacement audit entry")
+		t.Error("a failed enrollment must not write the replacement audit entry")
 	}
 	if len(*alerts) != 0 {
-		t.Errorf("a failed enrolment must raise no alert, got %+v", *alerts)
+		t.Errorf("a failed enrollment must raise no alert, got %+v", *alerts)
 	}
 	if _, ok := globalClusterStore.GetNode("dp-dropped"); ok {
-		t.Error("a failed enrolment must not register the node")
+		t.Error("a failed enrollment must not register the node")
 	}
 }
 

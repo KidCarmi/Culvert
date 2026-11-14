@@ -189,12 +189,28 @@ func resumeLeadershipIfStillPersisted() {
 	haIntentRetrySpawn(retryLeadershipResume)
 }
 
+// crashComponentHALeadershipResume names a contained death of the persisted-HA-
+// intent resume retry in the crash plane (CHAOS-119). A node that reaches this
+// stays HA-gated until it is restarted, so the record is the operator's only
+// durable evidence of why write authority never came back.
+const crashComponentHALeadershipResume = "ha_leadership_resume"
+
 // retryLeadershipResume re-runs resumeLeadershipAttempt with capped backoff
 // until it decides, or the HA shutdown latch interrupts it (the gate then
 // stays set: a node going away serves nothing leader-gated).
 func retryLeadershipResume() {
 	defer func() {
 		if r := recover(); r != nil {
+			// CHAOS-119: a worker-level recover whose own log line states the
+			// cost — "the node stays HA-gated until restarted". That is the
+			// sharpest case in this family: the panic PERMANENTLY ends the
+			// only retry of the persisted HA intent, so the node serves with
+			// no write authority until an operator restarts it, and before
+			// this the only trace was one log line. It now moves a counter,
+			// stores a record and writes an audit entry under its own
+			// component, so the condition is visible on the surfaces an
+			// operator actually watches.
+			recordCrash(crashComponentHALeadershipResume, "", r)
 			logErrorf("HA: the leadership-resume retry panicked (contained): %v — the node stays HA-gated until restarted", r)
 		}
 	}()
