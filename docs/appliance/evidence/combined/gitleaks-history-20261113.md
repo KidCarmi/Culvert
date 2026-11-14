@@ -7,11 +7,11 @@ This follows the procedure of `gitleaks-history-20261030.md` and
 - exceptions are exact `commit:path:rule:line` fingerprints only;
 - no rule, path or commit-wide suppression;
 - `.gitleaks.toml` is unchanged;
-- no secret value is reproduced beyond what identifies a public constant;
+- no matched value is reproduced;
 - ASTRA reviews.
 
 **Verdict: neither finding is a credential.** Two fingerprints are appended to
-`.gitleaksignore` (group H).
+`.gitleaksignore` (group H), plus a third: see "Correction" below.
 
 ## How they surfaced
 
@@ -41,10 +41,21 @@ last green dispatch on this line (`a2b722c0`, run 42653709058, 9 Nov
 
 | Fingerprint | Commit / branch | What the matched value is | Class |
 |---|---|---|---|
-| `62aa116ca3778dcff4dc83ed368cf00ed2a06bb7:proxy_tunnel_inspectbuf_test.go:generic-api-key:296` | `main`, 10 Nov (tunnel inspect-buffer test corpus) | `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==` in a request fixture. It base64-decodes to "the sample nonce": the example key from RFC 6455 §1.3, published in the standard. The rule matched the word "Key" in the header name. | public test vector |
+| `62aa116ca3778dcff4dc83ed368cf00ed2a06bb7:proxy_tunnel_inspectbuf_test.go:generic-api-key:296` | `main`, 10 Nov (tunnel inspect-buffer test corpus) | A `Sec-WebSocket-Key` header value in a request fixture: the example key from RFC 6455 §1.3, published in the standard (it base64-decodes to "the sample nonce"). The rule matched the word "Key" in the header name. | public test vector |
 | `e9283034790031d77983224445c039f359504991:internal/pseudonym/pseudonym_test.go:generic-api-key:14` | `main`, 9 Nov (pseudonymizer tests) | `const testKey = "<the hex digits 0-f, twice>" // 32 bytes`. It is a synthetic HMAC key for unit tests, the literal digit sequence. The rule matched the identifier `testKey`. | synthetic test fixture |
 
-**Effect.** After the two fingerprints are added, `check_gitleaks_policy.py`
-passes (five canary checks), and the line's own history is unchanged. The
-two suppressions name exact commits on `main`. They do not cover any future
-finding in those files.
+**Effect.** After the fingerprints are added, `check_gitleaks_policy.py`
+passes (five canary checks). The two suppressions above name exact commits on
+`main`, and the third (below) one exact line of one commit of this note. None
+covers any future finding in those files.
+
+## Correction (14 Nov)
+
+The first version of this note (commit `de096692`) quoted the RFC 6455
+example key itself in the table above, against this procedure's rule. The
+Fast gate's full-history scan reads that commit, so the quotation is a
+finding of its own:
+`de096692947cfedf894b7f509ad95072ab2a6e49:docs/appliance/evidence/combined/gitleaks-history-20261113.md:generic-api-key:44`.
+It is the same public test vector, quoted by mistake, so it is classified
+the same way and added to group H as an exact fingerprint. The table now
+describes the value without reproducing it.
