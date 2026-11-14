@@ -238,6 +238,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **An unreachable ClamAV daemon is now a Diagnostics row.** With antivirus
+  scanning configured, a daemon that cannot be reached is fail-open: content is
+  forwarded without an antivirus verdict. That was visible on `/ready`,
+  `/health`, `/metrics`, the `scan_clam_error` alert and the Security Scanning
+  panel, while the one-page report read as healthy. A new `clamav_scan` WARN
+  row (additive, report-only; no row when ClamAV is not configured, is
+  answering, or body scanning is delegated to the remote scan service) states
+  the consequence and carries a fixed message, never the daemon address or
+  probe error. It reads the same cached, single-flight status `/health` and
+  `/ready` already read. Scanning, readiness and fail-open behavior are
+  unchanged.
+
 - **A parent-proxy chain with no eligible parent is now a Diagnostics row.**
   When every configured parent proxy is unhealthy, circuit-open or
   credential-ineligible, plain-HTTP requests fail open to DIRECT egress. That
