@@ -254,6 +254,9 @@ func buildOperatorContract() OperatorContract {
 	// Upstream mTLS client certificate failed to load or is expired/expiring.
 	// Contributes nothing when no client certificate is configured.
 	checks = append(checks, checkUpstreamMTLSClientCert()...)
+	// ClamAV configured but unreachable: content is forwarded without an antivirus
+	// verdict (fail-open). Contributes nothing when ClamAV is off or answering.
+	checks = append(checks, checkClamAVScan()...)
 	// MCP gateway enabled but not serving (failed to start, degraded or stopped).
 	// Contributes nothing when MCP was never requested or is healthy.
 	checks = append(checks, checkMCPGateway()...)
