@@ -155,10 +155,13 @@ func TestSyslogIntentRetry_ConnectsACollectorThatWasDownAtBoot(t *testing.T) {
 	if got := syslogRetryPendingSnapshot(); got != (syslogRetryIntent{}) {
 		t.Errorf("the pending record survived the install: %+v", got)
 	}
-	// The recovery is attributed to the system, never to an admin.
-	if !hasMatchingAuditEntry(auditGet(), "system", "settings.syslog.auto_connect", target, startTS) {
-		t.Error("no system-attributed audit entry records the automatic connect")
-	}
+	// The recovery is attributed to the system, never to an admin. WAITED
+	// for, not read once: the retry goroutine releases the publication lock
+	// before it logs and audits, so the published writer observed above does
+	// not order this entry before the assertion.
+	waitSyslogCondition(t, "a system-attributed audit entry for the automatic connect", func() bool {
+		return hasMatchingAuditEntry(auditGet(), "system", "settings.syslog.auto_connect", target, startTS)
+	})
 	// The init-time branch of the contract row no longer fails. (The delivery
 	// branch may still add a warning for events lost while the feed was down;
 	// that loss is real and is deliberately not erased.)
