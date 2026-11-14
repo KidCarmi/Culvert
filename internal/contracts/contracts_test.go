@@ -161,6 +161,11 @@ func TestAssess_RecordedChangeIsListedNotRefused(t *testing.T) {
 	if len(im.Recorded) != 1 {
 		t.Fatalf("Recorded = %v, want the retirement", im.Recorded)
 	}
+	// The automated gate replaces a reviewer with the record's reason, so the
+	// summary line must carry it.
+	if !strings.Contains(im.Recorded[0], "reason: replaced by POL-002") {
+		t.Fatalf("Recorded = %q, want the record's reason in the summary line", im.Recorded[0])
+	}
 }
 
 func TestAssess_ProtectedPathEditIsListed(t *testing.T) {

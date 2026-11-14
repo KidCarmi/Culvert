@@ -261,10 +261,13 @@ func Assess(base, head *Registry, tree fs.FS, changed []string) Impact {
 	for _, rec := range append(append([]Record{}, base.Amended...), base.Retired...) {
 		inBase[rec] = true
 	}
-	newRecord := map[string]bool{}
+	// newReasons maps a contract ID to the reasons of the records this change
+	// adds for it. The reason is printed with the change, so the summary says
+	// why a weakening was accepted, not only what changed.
+	newReasons := map[string][]string{}
 	for _, rec := range append(append([]Record{}, head.Amended...), head.Retired...) {
 		if !inBase[rec] {
-			newRecord[rec.ID] = true
+			newReasons[rec.ID] = append(newReasons[rec.ID], strings.TrimSpace(rec.Reason))
 		}
 	}
 	for i := range base.Contracts {
@@ -272,8 +275,9 @@ func Assess(base, head *Registry, tree fs.FS, changed []string) Impact {
 		why := weakening(b, headByID[b.ID], tree)
 		switch {
 		case len(why) == 0:
-		case newRecord[b.ID]:
-			im.Recorded = append(im.Recorded, b.ID+": "+strings.Join(why, "; "))
+		case len(newReasons[b.ID]) > 0:
+			im.Recorded = append(im.Recorded, b.ID+": "+strings.Join(why, "; ")+
+				" (reason: "+strings.Join(newReasons[b.ID], "; ")+")")
 		default:
 			for _, w := range why {
 				im.Weakened = append(im.Weakened, b.ID+": "+w+" (no new amended/retired record)")
