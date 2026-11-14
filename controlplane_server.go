@@ -634,15 +634,33 @@ func admitEnrollment(ctx context.Context, raw json.RawMessage) (EnrollRequest, T
 // and once per enrollment, instead of letting the identity swap pass silently.
 // sourceIP is the caller's peer address (enrollPeerHost); "" is logged as
 // "unknown".
+//
+// The detail NAMES THE NODE, and that is load-bearing rather than cosmetic:
+// internal/alerts.Store.Dispatch suppresses a duplicate on `event + ":" +
+// Detail` within dedupTTL, so a CONSTANT detail gives every node's replacement
+// ONE dedup key and delivers only the first of a batch. The batch is the normal
+// shape — a single corrupt cluster.json drops every null record it holds in one
+// normalizeClusterState pass, and the remediation is to re-issue tokens and let
+// those nodes re-enroll together — so "once per enrollment" was in practice
+// once per 30 s across the whole fleet, with the un-revocable predecessor
+// certificates of the rest never reported. recordExpiredNodeReenrollment
+// escapes the same trap only incidentally, by embedding per-node serials.
+// Pinned by TestEnroll_DroppedRecordAlertsAreDistinctPerNode.
+//
+// nodeID is CLIENT-SUPPLIED (EnrollRequest.NodeID), so it is sanitized BEFORE
+// it enters the detail: the detail reaches logger.Printf, an audit record and a
+// webhook body, and a raw CR/LF in any of those is CWE-117.
 func recordDroppedNodeReenrollment(nodeID, sourceIP string) {
 	if sourceIP == "" {
 		sourceIP = "unknown"
 	}
-	detail := "enrolled under a node ID whose stored record was earlier dropped as an unusable null entry; " +
-		"the predecessor certificate's serial was lost with that record, so it could NOT be added to the CRL and " +
-		"stays valid until it expires — confirm this enrollment was expected, and verify the control plane's cluster.json"
-	logger.Printf("Enrollment: node %q RE-ENROLLED over a DROPPED record from %q — %s",
-		sanitizeLog(nodeID), sanitizeLog(sourceIP), detail)
+	safeNodeID := sanitizeLog(nodeID)
+	detail := fmt.Sprintf("node %q enrolled under a node ID whose stored record was earlier dropped as an unusable "+
+		"null entry; the predecessor certificate's serial was lost with that record, so it could NOT be added to the "+
+		"CRL and stays valid until it expires — confirm this enrollment was expected, and verify the control plane's "+
+		"cluster.json", safeNodeID)
+	logger.Printf("Enrollment: RE-ENROLLED over a DROPPED record from %q — %s",
+		sanitizeLog(sourceIP), detail)
 	now := time.Now()
 	auditAdd(AuditEntry{
 		TS:     now.UnixMilli(),
