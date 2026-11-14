@@ -9,6 +9,32 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **`BenchmarkHTTPForward_HandleHTTP` overstated the plain-HTTP forward path's
+  memory by ~3.7x, against its own stated purpose of reporting "the real
+  per-request total".** No production behavior changes: the inflation was in
+  the measurement only. `handleHTTP` ends in `io.Copy(w, resp.Body)`, which
+  takes `dst`'s `io.ReaderFrom` fast path when one exists — and the
+  `*http.response` serving every production request has one, copying through
+  net/http's *pooled* 32 KiB buffer. The benchmark passed a bare
+  `httptest.ResponseRecorder`, which has no `ReadFrom`, so `io.Copy` fell back
+  to its generic path and allocated a **fresh 32 KiB buffer on every
+  iteration** — a cost production never pays. Measured (Go 1.27.4,
+  linux/amd64, `-benchtime 3000x -count 5`): 44,685 B/op and 95 allocs/op
+  before, 11,966 B/op and 94 allocs/op after, a 32,719 B/op drop that matches
+  the 32 KiB buffer. The corrected total now sits just above the
+  forward-step-only `BenchmarkHTTPForward_Direct` (10,734 B/op), as it should.
+  The benchmark now writes through a `readerFromRecorder` that implements
+  `ReadFrom` over a pooled buffer, modelling the production copy path while
+  keeping the in-process isolation. `TestBenchGate_HTTPForwardAllocs` was never
+  affected (it copies to `io.Discard`) and is unchanged at 82 allocs/op against
+  its bound of 85. New `proxy_http_readerfrom_test.go` pins the load-bearing
+  production property — that the forward path's `ResponseWriter` implements
+  `io.ReaderFrom` — so that wrapping the proxy-plane writer the way
+  `trackedRW` (admin plane) wraps its own, which masks `ReadFrom` behind the
+  three promoted interface methods, is caught as the 32 KiB-per-response
+  throughput regression it would be rather than passing as an invisible
+  no-op at the `io.Copy` call site.
+
 - **The SSRF guard's DNS verdict cache was unbounded and its 5-minute sweep
   stalled all CONNECT/SOCKS5 traffic.** The cache key is the client-named
   destination host, so a wildcard-DNS domain lets one client mint unlimited
@@ -211,6 +237,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `io.CopyBuffer` actually does.
 
 ### Changed
+
+- **An unreachable ClamAV daemon is now a Diagnostics row.** With antivirus
+  scanning configured, a daemon that cannot be reached is fail-open: content is
+  forwarded without an antivirus verdict. That was visible on `/ready`,
+  `/health`, `/metrics`, the `scan_clam_error` alert and the Security Scanning
+  panel, while the one-page report read as healthy. A new `clamav_scan` WARN
+  row (additive, report-only; no row when ClamAV is not configured, is
+  answering, or body scanning is delegated to the remote scan service) states
+  the consequence and carries a fixed message, never the daemon address or
+  probe error. It reads the same cached, single-flight status `/health` and
+  `/ready` already read. Scanning, readiness and fail-open behavior are
+  unchanged.
 
 - **A parent-proxy chain with no eligible parent is now a Diagnostics row.**
   When every configured parent proxy is unhealthy, circuit-open or
