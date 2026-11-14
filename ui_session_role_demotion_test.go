@@ -140,3 +140,30 @@ func TestSessionRole_RosterIsACeilingNotASource(t *testing.T) {
 		}
 	}
 }
+
+// CONTROL. A pre-RBAC roster record carries an EMPTY role, which means admin
+// (loadedRosterRole keeps it verbatim and VerifyUIUser hands it to the login).
+// The ceiling must read it as admin, not as "below viewer": pre-fix of this
+// control the legacy administrator was capped at viewer on every request.
+func TestSessionRole_LegacyEmptyRosterRoleIsAnAdminCeiling(t *testing.T) {
+	withSessionKey(t)
+	prev := cfg
+	t.Cleanup(func() { cfg = prev })
+	cfg = &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
+	if err := cfg.SetUIUser("bob", "Sup3rSecret!x", RoleAdmin); err != nil {
+		t.Fatalf("seed roster: %v", err)
+	}
+	cfg.mu.Lock()
+	cfg.uiUsers["bob"].role = "" // what a bare-array pre-RBAC roster loads as
+	cfg.mu.Unlock()
+
+	for _, minted := range []string{"", string(RoleAdmin)} {
+		code, got, reached := driveMiddleware(t, minted)
+		if !reached || code != http.StatusOK {
+			t.Fatalf("session minted %q refused: status=%d reached=%v", minted, code, reached)
+		}
+		if got != RoleAdmin {
+			t.Fatalf("session minted %q under a legacy empty roster role injected as %q, want admin", minted, got)
+		}
+	}
+}
