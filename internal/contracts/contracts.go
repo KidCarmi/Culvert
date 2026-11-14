@@ -18,6 +18,9 @@ package contracts
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"path"
 	"regexp"
@@ -202,31 +205,52 @@ func checkTest(tree fs.FS, t TestRef) string {
 	if err != nil {
 		return fmt.Sprintf("test file %q is missing", t.File)
 	}
-	body, ok := funcBody(string(src), t.Name)
-	if !ok {
+	// Parse the file rather than search its text: a test wrapped in a block
+	// comment, or named only in a string, still matches a text search but is
+	// not a test that runs.
+	file, err := parser.ParseFile(token.NewFileSet(), t.File, src, parser.SkipObjectResolution)
+	if err != nil {
+		return fmt.Sprintf("test file %q does not parse: %v", t.File, err)
+	}
+	decl := testDecl(file, t.Name)
+	if decl == nil {
 		return fmt.Sprintf("test %s is not defined in %s", t.Name, t.File)
 	}
-	if skipCall.MatchString(body) {
+	if callsSkip(decl) {
 		return fmt.Sprintf("test %s in %s can skip itself (t.Skip): a contract test must run", t.Name, t.File)
 	}
 	return ""
 }
 
-var skipCall = regexp.MustCompile(`\.Skip(f|Now)?\(`)
+// testDecl returns the top-level function (not method) called name that has a
+// body, or nil.
+func testDecl(file *ast.File, name string) *ast.FuncDecl {
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == name && fd.Body != nil {
+			return fd
+		}
+	}
+	return nil
+}
 
-// funcBody returns the source of the top-level function name, up to the next
-// top-level declaration. gofmt guarantees top-level funcs start at column 0.
-func funcBody(src, name string) (string, bool) {
-	marker := "\nfunc " + name + "("
-	i := strings.Index("\n"+src, marker)
-	if i < 0 {
-		return "", false
-	}
-	rest := ("\n" + src)[i+len(marker):]
-	if j := strings.Index(rest, "\nfunc "); j >= 0 {
-		rest = rest[:j]
-	}
-	return rest, true
+// callsSkip reports whether the function body calls a Skip, Skipf or SkipNow
+// method anywhere, including inside a closure or subtest.
+func callsSkip(fd *ast.FuncDecl) bool {
+	found := false
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return !found
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			switch sel.Sel.Name {
+			case "Skip", "Skipf", "SkipNow":
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // Impact is the result of comparing a base registry with the head tree.

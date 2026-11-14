@@ -233,3 +233,40 @@ func TestAssess_SecondAmendmentOfTheSameContractIsAccepted(t *testing.T) {
 		t.Fatalf("Recorded = %v, want the second amendment", im.Recorded)
 	}
 }
+
+// A registered test that is disabled without being deleted: the text
+// "func TestGuard(" is still in the file, but nothing by that name runs.
+func TestCheckTest_DisabledDeclarationsAreNotTests(t *testing.T) {
+	for name, src := range map[string]string{
+		"wrapped in a block comment": "package x\n\n/*\nfunc TestGuard(t *testing.T) {\n\tt.Fatal(\"x\")\n}\n*/\n",
+		"named only in a string":     "package x\n\nvar s = `\nfunc TestGuard(t *testing.T) {}\n`\n",
+		"turned into a method":       "package x\n\ntype T struct{}\n\nfunc (T) TestGuard(t *testing.T) {}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			tr := tree(map[string]string{"policy.go": "package x\n", "policy_test.go": src})
+			ref := TestRef{File: "policy_test.go", Name: "TestGuard"}
+			if msg := checkTest(tr, ref); !strings.Contains(msg, "is not defined") {
+				t.Fatalf("checkTest = %q, want the test reported as not defined", msg)
+			}
+			// And through the gate: base registered it, head disabled it.
+			im := Assess(reg(baseContract()), reg(baseContract()), tr, []string{"policy_test.go"})
+			if len(im.Weakened) == 0 {
+				t.Fatal("disabling a registered test was not reported as a weakening")
+			}
+		})
+	}
+}
+
+// A skip call that is itself commented out does not make a test skippable; one
+// inside a subtest closure does.
+func TestCheckTest_SkipDetectionReadsCodeNotText(t *testing.T) {
+	ref := TestRef{File: "policy_test.go", Name: "TestGuard"}
+	commented := tree(map[string]string{"policy_test.go": "package x\n\nfunc TestGuard(t *testing.T) {\n\t// t.Skip(\"old\")\n\tt.Fatal(\"x\")\n}\n"})
+	if msg := checkTest(commented, ref); msg != "" {
+		t.Errorf("a commented-out skip was reported: %q", msg)
+	}
+	nested := tree(map[string]string{"policy_test.go": "package x\n\nfunc TestGuard(t *testing.T) {\n\tt.Run(\"a\", func(t *testing.T) { t.SkipNow() })\n}\n"})
+	if msg := checkTest(nested, ref); !strings.Contains(msg, "can skip itself") {
+		t.Errorf("a skip inside a subtest was missed: %q", msg)
+	}
+}
