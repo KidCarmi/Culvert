@@ -34,6 +34,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -140,9 +141,48 @@ func benchForwardParallel(b *testing.B, fwd func(*http.Transport, *http.Request)
 	})
 }
 
+// benchCopyBufPool mirrors net/http's internal copy-buffer pool (the 32 KiB
+// buffer its (*response).ReadFrom borrows per response), so the benchmark
+// charges the same per-request cost production does: none.
+var benchCopyBufPool = sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }}
+
+// readerFromRecorder is httptest.ResponseRecorder PLUS the io.ReaderFrom that
+// the real *http.response implements.
+//
+// It exists for measurement fidelity, not speed. handleHTTP ends in
+// io.Copy(w, resp.Body) (proxy_http.go). io.Copy takes dst's ReaderFrom fast
+// path when dst has one, and the *http.response serving every production
+// request does: net/http's ReadFrom copies through a POOLED 32 KiB buffer, so
+// the shipped forward step allocates NO copy buffer per request. A bare
+// ResponseRecorder has no ReadFrom, so io.Copy fell back to its generic path
+// and allocated a fresh 32 KiB buffer on every iteration — one allocation and
+// ~32 KB/op that production never pays, which inflated this benchmark's B/op
+// from ~12 KB to ~44.7 KB. That is ~3.7x the "real per-request total" the
+// benchmark exists to report, and it diluted any genuine B/op regression
+// against a 32 KB constant.
+//
+// Implementing ReaderFrom over a pooled buffer restores the production shape
+// while keeping the in-process isolation that makes this benchmark cheap and
+// deterministic. The end-to-end number through a real listener (where w is a
+// true *http.response) is BenchmarkPerfQual_ProxyHTTPForward.
+type readerFromRecorder struct{ *httptest.ResponseRecorder }
+
+func (w readerFromRecorder) ReadFrom(src io.Reader) (int64, error) {
+	bp := benchCopyBufPool.Get().(*[]byte)
+	defer benchCopyBufPool.Put(bp)
+	// The embedded *httptest.ResponseRecorder is passed, never w itself, so
+	// the copy cannot recurse back into this method. The recorder has no
+	// ReaderFrom of its own, so io.CopyBuffer uses the pooled buffer.
+	return io.CopyBuffer(w.ResponseRecorder, src, *bp)
+}
+
 // BenchmarkHTTPForward_HandleHTTP measures the whole shipped handler, so the
 // forward-step saving above can be read against the real per-request total
 // rather than in isolation.
+//
+// The ResponseWriter is readerFromRecorder, not a bare httptest recorder, so
+// the response-body copy takes the same pooled-buffer path it takes in
+// production; see that type for why a bare recorder overstated B/op by ~32 KB.
 func BenchmarkHTTPForward_HandleHTTP(b *testing.B) {
 	origin := benchForwardOrigin(b)
 
@@ -154,7 +194,7 @@ func BenchmarkHTTPForward_HandleHTTP(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		rr := httptest.NewRecorder()
-		handleHTTP(rr, benchForwardRequest(origin.URL+"/some/path"), ProxyIdentity{})
+		handleHTTP(readerFromRecorder{rr}, benchForwardRequest(origin.URL+"/some/path"), ProxyIdentity{})
 		if rr.Code != http.StatusOK {
 			b.Fatalf("status %d", rr.Code)
 		}

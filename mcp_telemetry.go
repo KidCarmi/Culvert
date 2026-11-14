@@ -325,15 +325,64 @@ func (t *telemetryRuntime) Close(ctx context.Context) error {
 	done := make(chan error, 1)
 	go func() {
 		t.wg.Wait()
+		// CHAOS-119: every stage below is guarded, and the guard is per STAGE
+		// rather than around the whole sequence, for two reasons that are
+		// specific to a shutdown drain.
+		//
+		// Why guarded at all: this goroutine is `go`-detached, so an
+		// unrecovered panic in it terminated the PROCESS — from a hook at
+		// order 66, with orders 67..140 still unrun. That is the tunnel
+		// establish-fence, the H2 GOAWAY wave and the whole tunnel drain
+		// (every in-flight client connection severed rather than drained),
+		// plus every hook above shutdownFlushBoundary: syslog, the community
+		// DB, the log store, the request log and the audit log. CHAOS-56
+		// carved a reserve for exactly those because "abandoning one costs
+		// durability or leaves a store the next boot has to quarantine" — and
+		// a panic here did not abandon them, it skipped them. The fault is not
+		// hypothetical: drainPartition calls the SAME exportStep that
+		// exportLoop has guarded under crashComponentMCPTelemetryExport since
+		// CHAOS-118, reading the encrypted spool and calling out to the
+		// archive exporter, "both fed by data this process does not author".
+		// The identical call was contained on the periodic path and fatal on
+		// the shutdown path.
+		//
+		// Why per stage: mgr.Close() is the durability-critical step — it does
+		// its own final per-domain flush and closes the spool — so a fault in
+		// the force-flush or in one partition's drain must not skip it. One
+		// guard around the whole sequence would have. The CHAOS-105
+		// whole-worker-recover objection does not apply: this is a ONE-SHOT
+		// terminating sequence, not a loop that must keep ticking, so there is
+		// no stall to convert a crash into.
+		//
 		// Force-flush here (unlike the periodic loop) so the still-open current denial
 		// window becomes durable BEFORE the export drain runs — otherwise it would
 		// commit only inside mgr.Close(), after this drain, and stay unarchived until
 		// the next start.
-		t.mgr.FlushDenialsForce(evmodel.CapGateway)
+		drainPanicked := runGuarded(crashComponentMCPTelemetryDrain, func() {
+			t.mgr.FlushDenialsForce(evmodel.CapGateway)
+		})
 		for _, part := range gatewayPartitions {
-			t.drainPartition(ctx, part)
+			// One partition's fault costs that partition's pending batches,
+			// which stay committed in the encrypted spool and export on the
+			// next start; it does not cost the other partitions' drains.
+			if runGuarded(crashComponentMCPTelemetryDrain, func() { t.drainPartition(ctx, part) }) {
+				drainPanicked = true
+			}
 		}
-		done <- t.mgr.Close()
+		var closeErr error
+		if runGuarded(crashComponentMCPTelemetryDrain, func() { closeErr = t.mgr.Close() }) {
+			closeErr = errTelemetry("manager close panicked (contained); committed events stay durable in the encrypted spool")
+		} else if drainPanicked && closeErr == nil {
+			// Never report a clean shutdown for a drain that died: the caller
+			// logs this, and the crash record names the component. The events
+			// themselves are not lost — the spool is durable and the cursor
+			// advances only on a durable archive acknowledgement.
+			closeErr = errTelemetry("shutdown drain panicked (contained); pending batches export on the next start")
+		}
+		// Always answer, on every path: Close selects on this channel, and a
+		// stage that panicked without sending would leave the hook waiting out
+		// the entire shutdown budget it exists to honour.
+		done <- closeErr
 	}()
 	select {
 	case err := <-done:
@@ -368,6 +417,13 @@ func (t *telemetryRuntime) drainPartition(ctx context.Context, part evmodel.Part
 const (
 	crashComponentMCPTelemetryFlush  = "mcp_telemetry_flush"
 	crashComponentMCPTelemetryExport = "mcp_telemetry_export"
+	// crashComponentMCPTelemetryDrain names the SHUTDOWN drain separately from
+	// the two periodic loops (CHAOS-119). An operator reading
+	// culvert_crash_records_total{component=...} needs to tell a fault that
+	// cost one tick of a running node from one that landed inside a graceful
+	// shutdown, because the second is the one that leaves pending evidence
+	// unexported and a spool for the next boot to reopen.
+	crashComponentMCPTelemetryDrain = "mcp_telemetry_drain"
 )
 
 // flushLoop periodically commits closed denial-aggregate windows into P-DEN so they

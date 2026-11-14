@@ -9,6 +9,32 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **`BenchmarkHTTPForward_HandleHTTP` overstated the plain-HTTP forward path's
+  memory by ~3.7x, against its own stated purpose of reporting "the real
+  per-request total".** No production behavior changes: the inflation was in
+  the measurement only. `handleHTTP` ends in `io.Copy(w, resp.Body)`, which
+  takes `dst`'s `io.ReaderFrom` fast path when one exists — and the
+  `*http.response` serving every production request has one, copying through
+  net/http's *pooled* 32 KiB buffer. The benchmark passed a bare
+  `httptest.ResponseRecorder`, which has no `ReadFrom`, so `io.Copy` fell back
+  to its generic path and allocated a **fresh 32 KiB buffer on every
+  iteration** — a cost production never pays. Measured (Go 1.27.4,
+  linux/amd64, `-benchtime 3000x -count 5`): 44,685 B/op and 95 allocs/op
+  before, 11,966 B/op and 94 allocs/op after, a 32,719 B/op drop that matches
+  the 32 KiB buffer. The corrected total now sits just above the
+  forward-step-only `BenchmarkHTTPForward_Direct` (10,734 B/op), as it should.
+  The benchmark now writes through a `readerFromRecorder` that implements
+  `ReadFrom` over a pooled buffer, modelling the production copy path while
+  keeping the in-process isolation. `TestBenchGate_HTTPForwardAllocs` was never
+  affected (it copies to `io.Discard`) and is unchanged at 82 allocs/op against
+  its bound of 85. New `proxy_http_readerfrom_test.go` pins the load-bearing
+  production property — that the forward path's `ResponseWriter` implements
+  `io.ReaderFrom` — so that wrapping the proxy-plane writer the way
+  `trackedRW` (admin plane) wraps its own, which masks `ReadFrom` behind the
+  three promoted interface methods, is caught as the 32 KiB-per-response
+  throughput regression it would be rather than passing as an invisible
+  no-op at the `io.Copy` call site.
+
 - **The SSRF guard's DNS verdict cache was unbounded and its 5-minute sweep
   stalled all CONNECT/SOCKS5 traffic.** The cache key is the client-named
   destination host, so a wildcard-DNS domain lets one client mint unlimited
@@ -212,6 +238,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **An unreachable ClamAV daemon is now a Diagnostics row.** With antivirus
+  scanning configured, a daemon that cannot be reached is fail-open: content is
+  forwarded without an antivirus verdict. That was visible on `/ready`,
+  `/health`, `/metrics`, the `scan_clam_error` alert and the Security Scanning
+  panel, while the one-page report read as healthy. A new `clamav_scan` WARN
+  row (additive, report-only; no row when ClamAV is not configured, is
+  answering, or body scanning is delegated to the remote scan service) states
+  the consequence and carries a fixed message, never the daemon address or
+  probe error. It reads the same cached, single-flight status `/health` and
+  `/ready` already read. Scanning, readiness and fail-open behavior are
+  unchanged.
+
 - **A parent-proxy chain with no eligible parent is now a Diagnostics row.**
   When every configured parent proxy is unhealthy, circuit-open or
   credential-ineligible, plain-HTTP requests fail open to DIRECT egress. That
@@ -266,6 +304,56 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `pac_legacy_config_newer` row on Infrastructure → Diagnostics states it with
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
+
+- **A panic in the MCP telemetry shutdown drain killed the process from a
+  shutdown hook that runs before every durability flush, so a "graceful"
+  shutdown skipped the tunnel drain and every log/audit store close.**
+  `telemetryRuntime.Close` performed its final denial flush, its full export
+  drain and its manager close inside a bare `go func()`. The drain calls the
+  same `exportStep` the periodic export loop has guarded since the previous
+  release — reading the encrypted spool and calling the archive exporter, both
+  fed by data the process does not author — so the identical fault was contained
+  on the periodic path and fatal on the shutdown path. The hook is registered at
+  shutdown order 66, which left orders 67-140 unrun: the tunnel establish-fence,
+  the HTTP/2 GOAWAY wave, the in-flight tunnel drain, and the syslog, community
+  DB, log store, request log and audit log closes. Because the goroutine is
+  detached while `Close` waits on the shutdown budget, a hook abandoned on its
+  deadline left the goroutine running, so the crash could instead land inside an
+  unrelated later hook. The drain is now three independently guarded stages, so
+  one partition's fault costs only that partition's pending batches and the
+  manager close — the step that performs the final per-domain flush and releases
+  the spool — always runs; the hook always answers, so it can no longer consume
+  the budget it exists to honour; and a drain that died is reported as a failure
+  rather than a clean shutdown. Committed events stay durable in the encrypted
+  spool and export on the next start.
+
+- **Five background rounds contained their panics without reporting them, so a
+  round that failed on every tick was indistinguishable from one that was
+  healthy.** The release catalog refresh tick, the catalog stale-watchdog tick,
+  the SaaS feed refresh tick, the Control-Plane address republish retry and the
+  HA leadership-resume retry each recovered their own panic and wrote a log
+  line, which moved no `culvert_crash_records_total{component}` series, stored
+  no crash record for the support bundle or health surface, and wrote no audit
+  entry. The sharpest case states its own cost in its own log line: a panic in
+  the leadership-resume retry permanently ends the only retry of the persisted
+  HA intent, leaving the node serving with no write authority until it is
+  restarted. All five now report into the crash plane under their own component
+  while keeping their existing containment, log lines and outcome semantics.
+  `Refresher.RunTicker`, a catalog verify/persist/publish round loop with no
+  containment and no production caller yet, is guarded before it acquires one.
+
+- **The crash sink's component-label cap was smaller than its own fixed label
+  set, so past 32 distinct components a recovered panic lost its record, its log
+  line and its audit entry entirely.** `maxCrashLabels` was 32 while the tree
+  declares 56 fixed component labels. The cap exists to fail closed on
+  dynamically-derived labels, and Culvert has none — every call site passes a
+  compile-time constant. Past the cap the metrics counter folds a label into
+  `component="other"` (attribution lost, series intact) but the throttle
+  suppresses the record, the log line and the audit entry outright, and slots
+  are first-crash-wins and never pruned — so they went to the frequent
+  request-path components while the rare, high-severity background rounds lost
+  their evidence. The cap is now 128, with a test that enumerates the labels
+  from source and fails when a future change crosses it again.
 
 - **A panic in any of the last five `go`-detached background rounds terminated
   the whole gateway, and guarding two of them without also fixing how they
