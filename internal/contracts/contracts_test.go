@@ -270,3 +270,35 @@ func TestCheckTest_SkipDetectionReadsCodeNotText(t *testing.T) {
 		t.Errorf("a skip inside a subtest was missed: %q", msg)
 	}
 }
+
+// A registered test whose file the default build excludes never runs, even
+// though its declaration and assertions are untouched.
+func TestCheckTest_BuildExcludedFilesAreNotRun(t *testing.T) {
+	body := "package x\n\nfunc TestGuard(t *testing.T) {\n\tt.Fatal(\"x\")\n}\n"
+	for name, tc := range map[string]struct {
+		file, src string
+		excluded  bool
+	}{
+		"go:build ignore":       {"policy_test.go", "//go:build ignore\n\n" + body, true},
+		"custom tag":            {"policy_test.go", "//go:build benchgate\n\n" + body, true},
+		"legacy +build line":    {"policy_test.go", "// +build ignore\n\n" + body, true},
+		"other-OS filename":     {"policy_windows_test.go", body, true},
+		"negated custom tag":    {"policy_test.go", "//go:build !benchgate\n\n" + body, false},
+		"linux-only constraint": {"policy_test.go", "//go:build linux\n\n" + body, false},
+		"no constraint":         {"policy_test.go", body, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tr := tree(map[string]string{tc.file: tc.src})
+			msg := checkTest(tr, TestRef{File: tc.file, Name: "TestGuard"})
+			if got := strings.Contains(msg, "excluded from the default build"); got != tc.excluded {
+				t.Fatalf("excluded = %v, want %v (checkTest = %q)", got, tc.excluded, msg)
+			}
+		})
+	}
+	// Through the gate: base registered the test, head tagged its file out.
+	tr := tree(map[string]string{"policy.go": "package x\n", "policy_test.go": "//go:build ignore\n\n" + body})
+	im := Assess(reg(baseContract()), reg(baseContract()), tr, []string{"policy_test.go"})
+	if len(im.Weakened) == 0 {
+		t.Fatal("excluding a registered test's file from the build was not reported as a weakening")
+	}
+}

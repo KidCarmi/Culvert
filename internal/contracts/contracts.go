@@ -19,8 +19,10 @@ package contracts
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/fs"
 	"path"
 	"regexp"
@@ -205,6 +207,14 @@ func checkTest(tree fs.FS, t TestRef) string {
 	if err != nil {
 		return fmt.Sprintf("test file %q is missing", t.File)
 	}
+	// A file the default build leaves out (a //go:build constraint such as
+	// "ignore" or a custom tag, or an OS/arch filename suffix) holds tests that
+	// the ordinary test run never executes.
+	if ok, err := inDefaultBuild(tree, t.File); err != nil {
+		return fmt.Sprintf("test file %q: %v", t.File, err)
+	} else if !ok {
+		return fmt.Sprintf("test file %q is excluded from the default build (build constraint or filename suffix): its tests do not run", t.File)
+	}
 	// Parse the file rather than search its text: a test wrapped in a block
 	// comment, or named only in a string, still matches a text search but is
 	// not a test that runs.
@@ -220,6 +230,18 @@ func checkTest(tree fs.FS, t TestRef) string {
 		return fmt.Sprintf("test %s in %s can skip itself (t.Skip): a contract test must run", t.Name, t.File)
 	}
 	return ""
+}
+
+// inDefaultBuild reports whether the go tool would compile file in the build
+// CI tests with: linux/amd64, cgo on, no extra tags. It defers to go/build so
+// //go:build lines, legacy +build lines and _GOOS/_GOARCH filename suffixes are
+// all judged exactly as the toolchain judges them.
+func inDefaultBuild(tree fs.FS, file string) (bool, error) {
+	ctx := build.Default
+	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled, ctx.BuildTags = "linux", "amd64", true, nil
+	ctx.JoinPath = path.Join
+	ctx.OpenFile = func(name string) (io.ReadCloser, error) { return tree.Open(name) }
+	return ctx.MatchFile(path.Dir(file), path.Base(file))
 }
 
 // testDecl returns the top-level function (not method) called name that has a
