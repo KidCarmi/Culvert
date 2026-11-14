@@ -184,6 +184,7 @@ func TestSECUISESS1_ForeignProviderUISessionRefused(t *testing.T) {
 func TestSECUISESS1_LocalEmptyRoleCompatSurvives(t *testing.T) {
 	withSessionKey(t)
 	configuredCfg(t)
+	seedRosterRole(t, RoleAdmin) // the role a role-less legacy cookie resolves to
 
 	code, role, reached := driveUISessionMiddleware(t, &Session{
 		Sub: "bob", Provider: "local", Role: "",
@@ -205,6 +206,7 @@ func TestSECUISESS1_LocalEnrolledRolesPassThrough(t *testing.T) {
 
 	for _, want := range []UIRole{RoleViewer, RoleOperator, RoleAdmin} {
 		t.Run(string(want), func(t *testing.T) {
+			seedRosterRole(t, want)
 			code, got, reached := driveUISessionMiddleware(t, &Session{
 				Sub: "bob", Provider: "local", Role: string(want),
 				Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
@@ -330,6 +332,7 @@ func TestSECUISESS1_StatusReportsLocalSessions(t *testing.T) {
 		{"admin", string(RoleAdmin), RoleAdmin},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			seedRosterRole(t, tc.want)
 			body := statusFor(t, &Session{
 				Sub: "bob", Provider: "local", Role: tc.role,
 				Exp: time.Now().Add(time.Hour).Unix(), Jti: newSessionJti(),
