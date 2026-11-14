@@ -114,10 +114,18 @@ It counts dropped null records only. A quarantine does not move it.
 
 1. **If the row is `fail`** (quarantine failed), copy `cluster.json` off the
    volume by hand first. The next cluster-state save will overwrite it.
-2. **Restore the state.** Repair the quarantined copy and move it back to the
-   `-cluster-db` path, or restore `cluster.json` from a backup (see
-   [`docker-compose-backup-restore.md`](docker-compose-backup-restore.md)),
-   then restart the node.
+2. **Stop the node, restore the state, then start it.** Repair the quarantined
+   copy and move it back to the `-cluster-db` path, or restore `cluster.json`
+   from a backup (see
+   [`docker-compose-backup-restore.md`](docker-compose-backup-restore.md)).
+   Replace the file only while the node is **stopped**: a running node writes
+   its in-memory state on the next cluster-state save, and that state is the
+   empty one it started with, so it would overwrite the file you restored.
+   **On an HA standby, fix the leader first.** A standby imports and saves the
+   leader's full cluster state every few seconds, so restoring only the standby
+   lasts until its next sync. Make sure the leader's roster and revocation
+   list are correct (restore them there first if the leader is affected too)
+   before you start the standby again.
 3. **Remove the leftover `cluster.json.corrupt.*` files** once reconciled. The
    `warn` row, the `/ready` row and the alert return on every start until they
    are gone.
