@@ -9,6 +9,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Go toolchain go1.27.3 → go1.27.4 for GO-2026-6859 (net/http: an HTTP/1
+  server crash from a `MaxBytesReader` header race), reachable from the
+  proxy's HTTP paths.** Ported from main (`bfed5ac4`): the `go.mod`
+  `toolchain` line and the three `golang:1.27.4-alpine` builder `FROM` lines
+  (manifest-list digest `0a5f7fe7…`, linux/amd64 and linux/arm64 present)
+  move together, as the toolchain consistency tests require. Owner decision
+  (PR #1528, 14 Nov) for the appliance replacement candidate. No module
+  dependency, `go` line or GODEBUG default changes.
+
 - **Appliance guest packages: the OVA's Ubuntu archive snapshot moves to
   `20261105T000000Z`, which ships the published security fixes for apt
   (CVE-2026-109518, HIGH), bind9 client tools, pcre2, libmspack and
