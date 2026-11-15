@@ -56,12 +56,57 @@ done
 exit 0
 `
 
-func TestInstallScript_RHELCleanup_KeepsInstallerDockerCEOnRerun(t *testing.T) {
+// runRHELCleanupArm runs the cleanup step's `rhel|fedora)` arm from
+// scripts/install.sh for the given distro family against a host with the
+// given packages installed, and returns the packages still installed
+// afterwards plus the dnf invocations made.
+func runRHELCleanupArm(t *testing.T, family string, installed []string) (left map[string]bool, calls string) {
+	t.Helper()
 	// The body of the cleanup step's `rhel|fedora)` arm, up to the next arm.
 	body := extractShellLines(t, "scripts/install.sh", "# Remove distro-packaged Docker/Podman", "  amzn)")
 	harness := "set -euo pipefail\ninfo() { :; }\nsudo() { \"$@\"; }\n" +
 		"case \"$FIXTURE_FAMILY\" in\n  rhel|fedora)\n" + body + "\nesac\necho FRAGMENT_OK\n"
 
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, src := range map[string]string{"rpm": rhelRpmShim, "dnf": rhelDnfRemoveShim} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(src), 0o700); err != nil { //nolint:gosec // test-owned shim
+			t.Fatal(err)
+		}
+	}
+	db := filepath.Join(dir, "rpmdb")
+	if err := os.WriteFile(db, []byte(strings.Join(installed, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logFile := filepath.Join(dir, "dnf.log")
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", harness) //nolint:gosec // fixed harness built from repo script
+	cmd.Env = append(os.Environ(),
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FIXTURE_FAMILY="+family,
+		"RPM_DB="+db,
+		"DNF_LOG="+logFile,
+	)
+	out, err := cmd.CombinedOutput()
+	rawCalls, _ := os.ReadFile(logFile) //nolint:gosec // test-owned path
+	calls = string(rawCalls)
+	if err != nil || !strings.Contains(string(out), "FRAGMENT_OK") {
+		t.Fatalf("cleanup step aborted: %v\noutput:\n%s\ndnf calls:\n%s", err, out, calls)
+	}
+	raw, err := os.ReadFile(db) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatal(err)
+	}
+	left = map[string]bool{}
+	for _, p := range strings.Fields(string(raw)) {
+		left[p] = true
+	}
+	return left, calls
+}
+
+func TestInstallScript_RHELCleanup_KeepsInstallerDockerCEOnRerun(t *testing.T) {
 	dockerCE := []string{"docker-ce", "docker-ce-cli", "containerd.io", "docker-compose-plugin"}
 	cases := []struct {
 		name, family string
@@ -77,45 +122,10 @@ func TestInstallScript_RHELCleanup_KeepsInstallerDockerCEOnRerun(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			bin := filepath.Join(dir, "bin")
-			if err := os.Mkdir(bin, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			for name, src := range map[string]string{"rpm": rhelRpmShim, "dnf": rhelDnfRemoveShim} {
-				if err := os.WriteFile(filepath.Join(bin, name), []byte(src), 0o700); err != nil { //nolint:gosec // test-owned shim
-					t.Fatal(err)
-				}
-			}
-			db := filepath.Join(dir, "rpmdb")
-			if err := os.WriteFile(db, []byte(strings.Join(tc.installed, "\n")+"\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			logFile := filepath.Join(dir, "dnf.log")
-			cmd := exec.CommandContext(t.Context(), "bash", "-c", harness) //nolint:gosec // fixed harness built from repo script
-			cmd.Env = append(os.Environ(),
-				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
-				"FIXTURE_FAMILY="+tc.family,
-				"RPM_DB="+db,
-				"DNF_LOG="+logFile,
-			)
-			out, err := cmd.CombinedOutput()
-			calls, _ := os.ReadFile(logFile) //nolint:gosec // test-owned path
-			if err != nil || !strings.Contains(string(out), "FRAGMENT_OK") {
-				t.Fatalf("cleanup step aborted: %v\noutput:\n%s\ndnf calls:\n%s", err, out, calls)
-			}
-			raw, err := os.ReadFile(db) //nolint:gosec // test-owned path
-			if err != nil {
-				t.Fatal(err)
-			}
-			left := map[string]bool{}
-			for _, p := range strings.Fields(string(raw)) {
-				left[p] = true
-			}
+			left, calls := runRHELCleanupArm(t, tc.family, tc.installed)
 			for _, p := range tc.wantKept {
 				if !left[p] {
-					t.Errorf("cleanup uninstalled %s; installed after the step: %q\ndnf calls:\n%s",
-						p, strings.Fields(string(raw)), calls)
+					t.Errorf("cleanup uninstalled %s; installed after the step: %v\ndnf calls:\n%s", p, left, calls)
 				}
 			}
 			for _, p := range tc.wantRemoved {
