@@ -80,9 +80,14 @@ func newFBHarness(t *testing.T) *fbHarness {
 	// transport failure (exit 7, as curl reports it); "hang" never answers.
 	// $FB_HARNESS/advance.<health|setup>, when present, is copied into
 	// $FB_HARNESS/clock before answering (a test's fake monotonic clock).
+	// Every call appends "<endpoint> <--max-time value>" to
+	// $FB_HARNESS/maxtime.log: the budget the request was actually given.
 	h.writeExec(filepath.Join(h.root, "readycurl"), `#!/usr/bin/env bash
 out=/dev/null; args=("$@")
-for ((i = 0; i < ${#args[@]}; i++)); do [[ "${args[i]}" == -o ]] && out="${args[i+1]}"; done
+mt=-; for ((i = 0; i < ${#args[@]}; i++)); do
+  [[ "${args[i]}" == -o ]] && out="${args[i+1]}"
+  [[ "${args[i]}" == --max-time ]] && mt="${args[i+1]}"
+done
 url="${!#}"
 case "$url" in
   *:8080/health) f=health; dflt='200 {"status":"ok"}' ;;
@@ -90,6 +95,7 @@ case "$url" in
   *) exit 7 ;;
 esac
 printf 'readycurl %s\n' "$f" >> "$FB_HARNESS/calls.log"
+printf '%s %s\n' "$f" "$mt" >> "$FB_HARNESS/maxtime.log"
 n=$(( $(cat "$FB_HARNESS/$f.n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FB_HARNESS/$f.n"
 line=""
 if [[ -f "$FB_HARNESS/$f.seq" ]]; then

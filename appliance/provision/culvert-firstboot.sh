@@ -407,8 +407,10 @@ repair_agent() {
 # time left (and at most 3 s), so the decision is reached within
 # READY_TIMEOUT_S plus a 0.5 s kill grace and the last record writes (each
 # bounded to 2 s); a check-count cap bounds it again. The deadline is
-# terminal: no work starts once it is reached, and a transport answer, a body
-# check or a confirmation that finishes after it never counts. A check counts
+# terminal: no work starts once it is reached — every blocking step's budget
+# is recomputed immediately before it launches, after any record write — and
+# a transport answer, a body check or a confirmation that finishes after it
+# never counts. A check counts
 # only when its transport succeeded (curl exit 0) with HTTP 200 and, for
 # management, a body check that returned a boolean needsSetup. Every started
 # check is recorded twice in READY_RECORDS: phase=started before it runs (an
@@ -418,8 +420,9 @@ repair_agent() {
 # that check fail. On timeout NOTHING is recorded
 # complete: the reason goes to state/readiness.failed, bounded diagnostics go
 # to the log, the console says what to do, and the step fails into the unit's
-# bounded retry (Restart=on-failure). An interrupted wait records nothing; the
-# next start resumes at this step and waits again.
+# bounded retry (Restart=on-failure). An interrupted wait records no
+# completion (each check already left its started record); the next start
+# resumes at this step and waits again.
 READY_TIMEOUT_S="${CULVERT_FB_READY_TIMEOUT_S:-300}"
 READY_INTERVAL_S="${CULVERT_FB_READY_INTERVAL_S:-2}"
 READY_CONFIRM="${CULVERT_FB_READY_CONFIRM:-2}"
@@ -449,14 +452,15 @@ budget() {
 }
 
 # record_json KEY=VALUE... — append one JSON line to READY_RECORDS (bounded to
-# 2 s). Integer keys (*_ms, rc, parse_rc, check) and float keys (*timeout_s)
-# are typed; "-" is null; body_file/stderr_file are read bounded (2000/500
+# 2 s). Integer keys (*_ms, rc, parse_rc, check), float keys (*timeout_s) and
+# boolean keys (launched) are typed; "-" is null; body_file/stderr_file are read bounded (2000/500
 # bytes) into body/stderr. Non-zero if the line could not be written.
 record_json() {
   timeout -k 0.5 2 python3 -c 'import json, sys
 out, rec = sys.argv[1], {}
-INT = {"check", "started_ms", "ended_ms", "deadline_ms", "rc", "parse_rc", "parse_started_ms", "parse_ended_ms"}
+INT = {"check", "started_ms", "launch_ms", "ended_ms", "deadline_ms", "rc", "parse_rc", "parse_started_ms", "parse_ended_ms"}
 FLT = {"timeout_s", "parse_timeout_s"}
+BOOL = {"launched"}
 for kv in sys.argv[2:]:
     k, _, v = kv.partition("=")
     if v == "-":
@@ -465,6 +469,8 @@ for kv in sys.argv[2:]:
         rec[k] = int(v)
     elif k in FLT:
         rec[k] = float(v)
+    elif k in BOOL:
+        rec[k] = v == "true"
     elif k in ("body_file", "stderr_file"):
         try:
             with open(v, "rb") as f:
@@ -473,7 +479,8 @@ for kv in sys.argv[2:]:
             rec[k[:-5]] = None
     else:
         rec[k] = v
-for a, b, c in (("started_ms", "ended_ms", "elapsed_ms"), ("parse_started_ms", "parse_ended_ms", "parse_elapsed_ms")):
+for a, b, c in (("started_ms", "ended_ms", "elapsed_ms"), ("started_ms", "launch_ms", "launch_wait_ms"),
+                ("parse_started_ms", "parse_ended_ms", "parse_elapsed_ms")):
     if isinstance(rec.get(a), int) and isinstance(rec.get(b), int):
         rec[c] = rec[b] - rec[a]
 if "rc" in rec:
@@ -488,7 +495,7 @@ with open(out, "a") as f:
 # record twice: phase=started BEFORE it runs (an interrupted check stays
 # visible) and phase=ended with the transport and body-check outcomes.
 probe() {
-  local ep="$1" n="$2" url left tmo rc=0 t0 t1 code outcome tmp
+  local ep="$1" n="$2" url left tmo rc=0 t0 tl t1 code outcome tmp
   local prc=- pt0=- pt1=- ptmo=- pout=not-run
   case "$ep" in
     application) url="$APP_HEALTH_URL" ;;
@@ -496,12 +503,26 @@ probe() {
   esac
   left=$(( READY_DEADLINE_MS - $(mono_ms) ))
   if (( left <= 0 )); then echo "not started: deadline reached"; return 0; fi
-  tmo="$(budget "$left" 3000)"
   tmp="$(mktemp -d)"
   t0="$(mono_ms)"
-  if ! record_json phase=started "check=$n" "endpoint=$ep" "url=$url" "started_ms=$t0" "timeout_s=$tmo" "deadline_ms=$READY_DEADLINE_MS"; then
+  if ! record_json phase=started "check=$n" "endpoint=$ep" "url=$url" "started_ms=$t0" "deadline_ms=$READY_DEADLINE_MS"; then
     rm -rf -- "${tmp:?}"; echo "attempt record not written (check not started)"; return 0
   fi
+  # The start-record write blocks (up to 2 s), so the transport budget is
+  # computed only now, immediately before curl launches (R10-T1): a write that
+  # spent the budget means no request; one that spent part shortens it.
+  tl="$(mono_ms)"
+  left=$(( READY_DEADLINE_MS - tl ))
+  if (( left <= 0 )); then
+    outcome="not executed: deadline reached after the start record"
+    record_json phase=ended "check=$n" "endpoint=$ep" "url=$url" "started_ms=$t0" "ended_ms=$tl" \
+      "deadline_ms=$READY_DEADLINE_MS" launched=false "outcome=$outcome" \
+      || outcome="attempt record not written ($outcome)"
+    rm -rf -- "${tmp:?}"
+    echo "$outcome"
+    return 0
+  fi
+  tmo="$(budget "$left" 3000)"
   # -k: management's certificate is self-signed at first boot (loopback only).
   timeout -k 0.5 "$tmo" "$READY_CURL" -sk --max-time "$tmo" --max-filesize 65536 \
     -o "$tmp/body" -w '%{http_code}' "$url" > "$tmp/code" 2> "$tmp/err" || rc=$?
@@ -529,6 +550,7 @@ probe() {
       # The body check keeps its own status and timing (R10-E1): a parser that
       # is killed is a timeout, not invalid JSON.
       ptmo="$(budget "$left" 3000)"; prc=0; pt0="$(mono_ms)"
+      # Nothing blocks between this budget and the launch below.
       timeout -k 0.5 "$ptmo" "$READY_PARSE" -c 'import json, sys
 try:
     with open(sys.argv[1], encoding="utf-8") as f:
@@ -549,7 +571,7 @@ sys.exit(0 if isinstance(d, dict) and isinstance(d.get("needsSetup"), bool) else
     fi
   fi
   record_json phase=ended "check=$n" "endpoint=$ep" "url=$url" "started_ms=$t0" "ended_ms=$t1" \
-    "timeout_s=$tmo" "deadline_ms=$READY_DEADLINE_MS" "rc=$rc" "http_code=$code" \
+    launched=true "launch_ms=$tl" "timeout_s=$tmo" "deadline_ms=$READY_DEADLINE_MS" "rc=$rc" "http_code=$code" \
     "parse_rc=$prc" "parse_started_ms=$pt0" "parse_ended_ms=$pt1" "parse_timeout_s=$ptmo" "parse_outcome=$pout" \
     "outcome=$outcome" "body_file=$tmp/body" "stderr_file=$tmp/err" \
     || outcome="attempt record not written ($outcome)"

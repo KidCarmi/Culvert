@@ -31,8 +31,10 @@ Power on and watch the VM console. Boot sequence:
    `GET http://127.0.0.1:8080/health` (200) **and** management answers
    `GET https://127.0.0.1:9090/api/setup/status` (200, JSON `needsSetup`
    true/false) in two consecutive checks, within a 300 s monotonic bound
-   (every probe is killed at the time left). Every check is recorded in
-   `/var/lib/culvert-appliance/readiness-attempts.jsonl` (timing, exit
+   (each probe gets only the time left when it launches and is killed at
+   it; once the bound is reached nothing new starts). Every check is
+   recorded in `/var/lib/culvert-appliance/readiness-attempts.jsonl`
+   (timing, whether and when the request launched and its budget, exit
    status, HTTP code, outcome, bounded body and stderr). Running
    containers alone are not enough: the installer recreates the proxy late
    (Release Management wiring), so the stack can be up before the

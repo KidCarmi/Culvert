@@ -64,12 +64,17 @@ type readinessRecord struct {
 	StartedMS int64   `json:"started_ms"`
 	EndedMS   int64   `json:"ended_ms"`
 	TimeoutS  float64 `json:"timeout_s"`
-	RC        int     `json:"rc"`
-	HTTPCode  string  `json:"http_code"`
-	Outcome   string  `json:"outcome"`
-	Killed    bool    `json:"killed"`
-	Body      *string `json:"body"`
-	Stderr    *string `json:"stderr"`
+	// Whether the request was launched after the start record, when, and
+	// how long the start-record write took (R10-T1).
+	Launched     *bool   `json:"launched"`
+	LaunchMS     *int64  `json:"launch_ms"`
+	LaunchWaitMS *int64  `json:"launch_wait_ms"`
+	RC           int     `json:"rc"`
+	HTTPCode     string  `json:"http_code"`
+	Outcome      string  `json:"outcome"`
+	Killed       bool    `json:"killed"`
+	Body         *string `json:"body"`
+	Stderr       *string `json:"stderr"`
 	// The body check's own outcome (management only; null when not run).
 	ParseRC        *int     `json:"parse_rc"`
 	ParseKilled    bool     `json:"parse_killed"`
@@ -563,6 +568,143 @@ exit $rc
 			t.Fatalf("readiness.failed = %q", rf)
 		}
 	})
+}
+
+// slowStartRecord makes ONE start-record write slow on the fake monotonic
+// clock: after the record for <endpoint> check <check> is written, the clock
+// reads <to>, as if the write had blocked until then. It returns the PATH
+// prefix that puts the wrapping python3 (record_json's interpreter) first.
+func (h *fbHarness) slowStartRecord(endpoint string, check int, to int64) string {
+	h.t.Helper()
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	wrap := filepath.Join(h.root, "slow-record")
+	if err := os.MkdirAll(wrap, 0o750); err != nil {
+		h.t.Fatal(err)
+	}
+	h.writeExec(filepath.Join(wrap, "python3"), fmt.Sprintf(`#!/usr/bin/env bash
+s=; e=; c=; for a in "$@"; do [[ "$a" == phase=started ]] && s=1; [[ "$a" == endpoint=%s ]] && e=1; [[ "$a" == check=%d ]] && c=1; done
+`+py+` "$@"; rc=$?
+[[ -n $s && -n $e && -n $c ]] && echo %d > "$FB_HARNESS/clock"
+exit $rc
+`, endpoint, check, to))
+	return "PATH=" + wrap + ":$PATH; "
+}
+
+func (h *fbHarness) maxTimes(endpoint string) []string {
+	h.t.Helper()
+	b, _ := os.ReadFile(filepath.Join(h.root, "maxtime.log"))
+	var out []string
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if ep, mt, ok := strings.Cut(l, " "); ok && ep == endpoint {
+			out = append(out, mt)
+		}
+	}
+	return out
+}
+
+func (h *fbHarness) endedRecord(endpoint string, check int) *readinessRecord {
+	h.t.Helper()
+	recs := h.readinessRecords()
+	for i := range recs {
+		if recs[i].Endpoint == endpoint && recs[i].Check == check {
+			return &recs[i]
+		}
+	}
+	return nil
+}
+
+// R10-T1 (ASTRA, 961e89ab): the start-record write blocks, so the request's
+// budget must be computed AFTER it. Fake monotonic clock: start 100000,
+// deadline 110000; the write for one check moves the clock as a slow write
+// would.
+const fakeClock10s = `mono_ms() { cat "$FB_HARNESS/clock"; }; echo 100000 > "$FB_HARNESS/clock"; READY_TIMEOUT_S=10; `
+
+// A start-record write that exhausts the budget: no request starts.
+func TestFirstBoot_Readiness_StartRecordWrite_ExhaustedBudgetLaunchesNothing(t *testing.T) {
+	clock := fakeClock10s
+	{
+		h := newFBHarness(t)
+		out, code := h.run(clock + h.slowStartRecord("application", 1, 110001) + "step_finish")
+		if code == 0 || h.exists("appliance/state/complete.done") {
+			t.Fatalf("completion recorded with the budget spent by the start record (%d):\n%s", code, out)
+		}
+		if n := h.readyCalls("health"); n != 0 {
+			t.Fatalf("%d health requests launched after the start record spent the budget", n)
+		}
+		r := h.endedRecord("application", 1)
+		if r == nil || r.Launched == nil || *r.Launched || r.LaunchMS != nil || r.EndedMS != 110001 ||
+			r.Outcome != "not executed: deadline reached after the start record" {
+			t.Fatalf("application check 1 record = %+v, want a terminal not-executed record", r)
+		}
+		if h.readinessPhase("started", "application") != 1 || h.readinessPhase("started", "management") != 0 {
+			t.Fatalf("started records: application %d, management %d; want 1 and 0",
+				h.readinessPhase("started", "application"), h.readinessPhase("started", "management"))
+		}
+		if rf := h.readinessFailed(); !strings.Contains(rf, "application /health: not executed: deadline reached after the start record") {
+			t.Fatalf("readiness.failed = %q", rf)
+		}
+	}
+}
+
+// A start-record write that spends part of the budget: the request gets only
+// the rest. 200 ms remain after the write; the request hangs and must be cut
+// at 0.200 s, not at the 3 s it would have had before the write.
+func TestFirstBoot_Readiness_StartRecordWrite_ShortensTheRequest(t *testing.T) {
+	clock := fakeClock10s
+	{
+		h := newFBHarness(t)
+		h.setReadiness([]string{"hang", "000"}, nil)
+		began := time.Now()
+		out, code := h.run(clock + h.slowStartRecord("application", 1, 109800) + "step_finish")
+		if code == 0 || h.exists("appliance/state/complete.done") {
+			t.Fatalf("completion recorded without two good checks (%d):\n%s", code, out)
+		}
+		if mt := h.maxTimes("health"); len(mt) == 0 || mt[0] != "0.200" {
+			t.Fatalf("health --max-time values = %v, want the first to be 0.200 (the budget left after the write)", mt)
+		}
+		r := h.endedRecord("application", 1)
+		if r == nil || r.Launched == nil || !*r.Launched || r.LaunchMS == nil || *r.LaunchMS != 109800 ||
+			r.LaunchWaitMS == nil || *r.LaunchWaitMS != 9800 || r.TimeoutS != 0.2 || !r.Killed ||
+			r.Outcome != "transport killed at 0.200s (http 000)" {
+			t.Fatalf("application check 1 record = %+v, want launched at 109800 with 0.2 s and killed", r)
+		}
+		if d := time.Since(began); d > 20*time.Second {
+			t.Fatalf("the wait took %s; a hung request must be cut at the remaining budget", d)
+		}
+	}
+}
+
+// Late health never records complete after a slow start record.
+func TestFirstBoot_Readiness_StartRecordWrite_LateHealthNeverCompletes(t *testing.T) {
+	clock := fakeClock10s
+	{
+		// (a) The write leaves 200 ms; the answer arrives after the deadline.
+		h := newFBHarness(t)
+		h.writeExec(filepath.Join(h.root, "advance.health"), "110001\n")
+		out, code := h.run(clock + h.slowStartRecord("application", 1, 109800) + "step_finish")
+		if code == 0 || h.exists("appliance/state/complete.done") {
+			t.Fatalf("a late answer after a slow start record was accepted (%d):\n%s", code, out)
+		}
+		if rf := h.readinessFailed(); !strings.Contains(rf, "answered after the deadline (http 200)") {
+			t.Fatalf("readiness.failed = %q", rf)
+		}
+		// (b) Check 1 passes in time; the confirming check's start record
+		// spends the budget, so the confirmation is never made.
+		h2 := newFBHarness(t)
+		out, code = h2.run(clock + h2.slowStartRecord("application", 2, 110001) + "step_finish")
+		if code == 0 || h2.exists("appliance/state/complete.done") {
+			t.Fatalf("completion recorded although the confirming check never ran (%d):\n%s", code, out)
+		}
+		if n := h2.readyCalls("health"); n != 1 {
+			t.Fatalf("health requests = %d, want 1 (the confirming request must not launch)", n)
+		}
+		if r := h2.endedRecord("application", 2); r == nil || r.Launched == nil || *r.Launched {
+			t.Fatalf("application check 2 record = %+v, want not launched", r)
+		}
+	}
 }
 
 // R10-E1: a body check that hangs is killed and recorded as a timeout with its
