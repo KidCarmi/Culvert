@@ -77,7 +77,9 @@ func newFBHarness(t *testing.T) *fbHarness {
 	// "[rcN:]<code> [<body>]": the body goes to curl's -o file and the code to
 	// stdout, as `-o FILE -w '%{http_code}'` would; "rcN:" makes curl exit N
 	// after writing them (28 timeout, 18 partial, 63 size cap). "000" is a
-	// transport failure (exit 7, as curl reports it); "hang" never answers.
+	// transport failure (exit 7, as curl reports it); "hang" never answers;
+	// "sleepN:<line>" answers <line> only after N seconds, so whether the
+	// timeout wrapper cut it shows the budget it was really given.
 	// $FB_HARNESS/advance.<health|setup>, when present, is copied into
 	// $FB_HARNESS/clock before answering (a test's fake monotonic clock).
 	// Every call appends "<endpoint> <--max-time value>" to
@@ -105,6 +107,7 @@ fi
 line="${line:-$dflt}"
 [[ -f "$FB_HARNESS/advance.$f" ]] && cp "$FB_HARNESS/advance.$f" "$FB_HARNESS/clock"
 [[ "$line" == hang ]] && exec sleep 60
+if [[ "$line" =~ ^sleep([0-9]+):(.*)$ ]]; then sleep "${BASH_REMATCH[1]}"; line="${BASH_REMATCH[2]}"; fi
 xrc=0; if [[ "$line" =~ ^rc([0-9]+):(.*)$ ]]; then xrc="${BASH_REMATCH[1]}"; line="${BASH_REMATCH[2]}"; fi
 code="${line%% *}"; body=""; [[ "$line" == *" "* ]] && body="${line#* }"
 printf '%s' "$body" > "$out"

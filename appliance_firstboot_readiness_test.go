@@ -650,14 +650,15 @@ func TestFirstBoot_Readiness_StartRecordWrite_ExhaustedBudgetLaunchesNothing(t *
 }
 
 // A start-record write that spends part of the budget: the request gets only
-// the rest. 200 ms remain after the write; the request hangs and must be cut
-// at 0.200 s, not at the 3 s it would have had before the write.
+// the rest. 200 ms remain after the write. The request answers 200 only after
+// 2 s: cut by the timeout wrapper at the refreshed 0.200 s it is a transport
+// kill; with the 3 s it would have had before the write it would complete and
+// count. No wall-clock bound: the outcome itself shows the budget used.
 func TestFirstBoot_Readiness_StartRecordWrite_ShortensTheRequest(t *testing.T) {
 	clock := fakeClock10s
 	{
 		h := newFBHarness(t)
-		h.setReadiness([]string{"hang", "000"}, nil)
-		began := time.Now()
+		h.setReadiness([]string{`sleep2:200 {"status":"ok"}`, "000"}, nil)
 		out, code := h.run(clock + h.slowStartRecord("application", 1, 109800) + "step_finish")
 		if code == 0 || h.exists("appliance/state/complete.done") {
 			t.Fatalf("completion recorded without two good checks (%d):\n%s", code, out)
@@ -670,9 +671,6 @@ func TestFirstBoot_Readiness_StartRecordWrite_ShortensTheRequest(t *testing.T) {
 			r.LaunchWaitMS == nil || *r.LaunchWaitMS != 9800 || r.TimeoutS != 0.2 || !r.Killed ||
 			r.Outcome != "transport killed at 0.200s (http 000)" {
 			t.Fatalf("application check 1 record = %+v, want launched at 109800 with 0.2 s and killed", r)
-		}
-		if d := time.Since(began); d > 20*time.Second {
-			t.Fatalf("the wait took %s; a hung request must be cut at the remaining budget", d)
 		}
 	}
 }
