@@ -52,7 +52,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the next line. `TestBenchGate_SyslogLineAllocs` bounds allocs/op and B/op for
   every arm and additionally asserts each is cheaper than the shape it
   replaced, so reinstating the intermediate slice or the string copy fails even
-  if the absolute bound is generous. NOT addressed, and left measurable: the
+  if the absolute bound is generous; it sits behind the `benchgate` tag like
+  every other allocation gate in the tree, and `internal/syslog` is added to
+  the explicit package list the three benchgate runners iterate — a gate on no
+  runner's list never runs. NOT addressed, and left measurable: the
   reflective encode itself is ~1.6 µs of the ~2.4 µs that remains, and closing
   it needs a hand-written encoder for a type this stdlib-only leaf package
   deliberately cannot name — a different change, behind the same differential
