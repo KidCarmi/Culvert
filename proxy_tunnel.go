@@ -92,7 +92,7 @@ func dialWebSocketUpstream(w http.ResponseWriter, r *http.Request) (net.Conn, bo
 	if !strings.Contains(host, ":") {
 		host += ":80"
 	}
-	if err := isPrivateHost(host); err != nil {
+	if err := isPrivateHostBounded(r.Context(), host); err != nil {
 		logger.Printf("WS SSRF block %q: %v", sanitizeLog(host), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return nil, false
@@ -526,7 +526,7 @@ func applyUpstreamProxy() {
 // (e.g. an ADR-0009 client-cert rescue); "" for an ordinary policy bypass. dec is the
 // ADR-0011 decryption outcome for the close record (nil ⇒ no dec block).
 func handleTunnelBypass(w http.ResponseWriter, r *http.Request, match *PolicyMatch, id ProxyIdentity, bypassReason string, dec *DecryptionOutcome) {
-	if err := isPrivateHost(r.Host); err != nil {
+	if err := isPrivateHostBounded(r.Context(), r.Host); err != nil {
 		logger.Printf("CONNECT SSRF block %q: %v", sanitizeLog(r.Host), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
@@ -734,7 +734,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	hostOnly, _, _ := net.SplitHostPort(targetHost)
 
 	// 1. Connect to the upstream server over plain TCP.
-	if err := isPrivateHost(targetHost); err != nil {
+	if err := isPrivateHostBounded(r.Context(), targetHost); err != nil {
 		logger.Printf("inspect SSRF block %q: %v", sanitizeLog(targetHost), err)
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
