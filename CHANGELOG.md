@@ -314,6 +314,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **An automatically renewed Root CA could change its key identifier, so
+  OpenSSL-based clients holding only the old root rejected every inspected
+  connection during the overlap window.** Renewal keeps the key and subject
+  (#1854), but the renewed certificate's Subject Key Identifier was left for
+  the Go toolchain to derive, and that derivation changed in Go 1.25 (SHA-1 to
+  truncated SHA-256). A root issued by an older build, or any managed root
+  whose identifier is not today's derivation, was renewed under a different
+  one; each new leaf then named it in its Authority Key Identifier, which
+  OpenSSL (curl, Python, git) treats as "not issued by the old root". Go's own
+  verifier only uses the identifier as a hint, which is why the existing
+  overlap test passed. Renewal now carries the old root's identifier over
+  verbatim. A freshly generated root is unchanged.
+
 - **`scripts/install.sh` aborted on every supported Fedora release before
   Docker was installed.** The Fedora branch registered Docker's repository with
   `dnf config-manager --add-repo <url>`. Fedora 41 replaced dnf4 with dnf5,
