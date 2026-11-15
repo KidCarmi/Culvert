@@ -141,9 +141,35 @@ func (p *Pseudonymizer) MintPair() (key []byte, id string, err error) {
 	return k, p.mintID(), nil
 }
 
-// mintID mints a random 16-hex id independent of any key material. If entropy
-// fails it falls back to a monotonic counter id so an install never loses its
-// observable generation.
+// MintID mints a generation id ALONE, for the caller that needs an id without a
+// key — the legacy-upgrade path in package main, where a persisted key carries
+// no persisted id and must be given one without disturbing the key.
+//
+// It exists because expressing that through MintPair is wrong in two ways.
+// MintPair reads a 32-byte KEY the caller then discards, which spends entropy on
+// nothing; and its signature forces an id-only caller to carry an error it
+// cannot act on, which the only such caller in the tree answered by dropping it
+// and returning MintPair's zero id. The EMPTY id is not a degraded id: it is the
+// exact value KeyID reports for "no key is installed", so publishing it beside a
+// VALID key would make an active node read as keyless on the admin API and give
+// a client resolving an unknown-outcome rotation nothing to compare. On the
+// pinned toolchain that leg is unreachable (see mintID), so nothing regressed —
+// but a signature whose only correct use depends on a stdlib branch that cannot
+// fire is the wrong shape for the contract, and this is the right one.
+func (p *Pseudonymizer) MintID() string { return p.mintID() }
+
+// mintID mints a random 16-hex id independent of any key material.
+//
+// The counter fallback is kept and is DEAD CODE on the pinned toolchain, which
+// is worth saying rather than leaving as an implied guarantee: as of Go 1.24
+// crypto/rand.Read "never returns an error" — it crashes the program
+// irrecoverably through crypto/rand.fatal instead (go.dev/issue/66821). Neither
+// this branch nor the error returns on Rotate, Ensure and MintPair can
+// therefore be reached. That posture is the right one for a gateway — a node
+// with no entropy must not keep deriving tokens — and the branch costs nothing,
+// so it stays as the behaviour for a future source that does report failure.
+// What must not happen is a caller reasoning that "the fallback protects me" or
+// that "the error tells me": on this toolchain neither fires.
 func (p *Pseudonymizer) mintID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {

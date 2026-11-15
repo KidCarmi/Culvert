@@ -72,6 +72,17 @@ func runCatalogRefreshLoop(ctx context.Context, interval time.Duration, getRM fu
 func refreshLoopTick(ctx context.Context, getRM func() *releaseManager) {
 	defer func() {
 		if r := recover(); r != nil {
+			// CHAOS-119: report into the crash plane, not only the log. The
+			// containment below has been correct since CHAOS-R1, but a log
+			// line is not a signal: before this, a tick that panicked moved
+			// no culvert_crash_records_total{component} series, stored no
+			// lastCrash record and wrote no audit entry, so a loop that
+			// panicked on EVERY tick — leaving this appliance's catalog
+			// refresh and its staleness watchdog permanently frozen — was
+			// indistinguishable on every operator surface from one that was
+			// simply up to date. recordCrash is re-panic-proof and
+			// per-component throttled, so it is safe on a deterministic fault.
+			recordCrash(crashComponentReleaseCatalogRefresh, "", r)
 			if logger != nil {
 				logger.Printf("release catalog: periodic refresh tick panicked (recovered, loop continues): %v", r)
 			}
@@ -123,6 +134,13 @@ func runCatalogStaleWatchdogLoop(ctx context.Context, interval time.Duration, ge
 func staleWatchdogTick(getRM func() *releaseManager) {
 	defer func() {
 		if r := recover(); r != nil {
+			// CHAOS-119: see refreshLoopTick. This loop is the SOLE runtime
+			// driver of stale-alerting on a disabled-fetch (air-gapped) or
+			// break-glass appliance, so a silently panicking tick is the exact
+			// condition under which release_catalog_stale never fires — the
+			// defect CHAOS-23 created this loop to fix, reachable again
+			// through a fault nothing counted.
+			recordCrash(crashComponentReleaseCatalogStale, "", r)
 			if logger != nil {
 				logger.Printf("release catalog: stale-watchdog tick panicked (recovered, loop continues): %v", r)
 			}

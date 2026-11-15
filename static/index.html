@@ -958,7 +958,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
        returns to every role; which accounts are held stays admin-only. -->
   <div id="roster-clamp-viewer-banner" class="banner warn" role="status" style="display:none;margin:14px 28px 0">
     <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg>
-    <span>Some console accounts are held at the viewer role because the saved user file names a role this version does not recognise (for example after restoring a backup from a newer version). If your account should have more access, ask an administrator to choose its role. If no administrator can sign in, recover from the host shell with --reset-password username:newpassword, which restores the admin role (and removes that account's two-factor enrolment).</span>
+    <span>Some console accounts are held at the viewer role because the saved user file names a role this version does not recognise (for example after restoring a backup from a newer version). If your account should have more access, ask an administrator to choose its role. If no administrator can sign in, recover from the host shell with --reset-password username:newpassword, which restores the admin role (and removes that account's two-factor enrollment).</span>
   </div>
 
   <div class="content">
@@ -8700,7 +8700,7 @@ async function fetchStats() {
           ' held at the viewer role: the saved user file names a role this version does not recognise ' +
           '(for example after restoring a backup from a newer version). Those accounts are marked "held at viewer" in the list below: edit each one and choose a role to restore its access. ' +
           'If no administrator can still sign in, recover from the host shell with --reset-password username:newpassword, ' +
-          'which restores the admin role (and removes that account\'s two-factor enrolment).';
+          'which restores the admin role (and removes that account\'s two-factor enrollment).';
         rcHint.style.display = '';
       } else {
         rcHint.style.display = 'none';

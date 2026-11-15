@@ -293,6 +293,17 @@ func configuredCfg(t *testing.T) {
 	}
 }
 
+// seedRosterRole re-seeds bob's roster entry at role. The roster is the ceiling
+// on a live session's role (SEC-UISESS-DEMOTE-1, owner decision on PR #1883),
+// so a control asserting that a session keeps the role its cookie claims must
+// have the roster grant that role, as a real login would.
+func seedRosterRole(t *testing.T, role UIRole) {
+	t.Helper()
+	if err := cfg.SetUIUser("bob", "Sup3rSecret!x", role); err != nil {
+		t.Fatalf("seed roster role %q: %v", role, err)
+	}
+}
+
 // driveMiddleware runs one /api request carrying a session with sessionRole and
 // reports the status and the role the middleware injected (or "" if the inner
 // handler was never reached).
@@ -342,6 +353,7 @@ func TestSessionRole_UnenrolledSessionIsRefusedNotPromoted(t *testing.T) {
 func TestSessionRole_EmptyRoleStillResolvesToAdmin(t *testing.T) {
 	withSessionKey(t)
 	configuredCfg(t)
+	seedRosterRole(t, RoleAdmin) // the role a role-less legacy cookie resolves to
 	code, role, reached := driveMiddleware(t, "")
 	if !reached || code != http.StatusOK {
 		t.Fatalf("legacy role-less session refused: status=%d reached=%v", code, reached)
@@ -356,6 +368,7 @@ func TestSessionRole_EnrolledRolesPassThroughUnchanged(t *testing.T) {
 	withSessionKey(t)
 	configuredCfg(t)
 	for _, r := range []UIRole{RoleViewer, RoleOperator, RoleAdmin} {
+		seedRosterRole(t, r)
 		code, got, reached := driveMiddleware(t, string(r))
 		if !reached || code != http.StatusOK {
 			t.Fatalf("session role %q refused: status=%d reached=%v", r, code, reached)
@@ -593,7 +606,7 @@ func TestRosterLoad_ActiveClampCountClearsAfterRepair(t *testing.T) {
 // TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP pins that the
 // SEC-TOTP-1 record constructor and the persisted-role carry compose: a
 // password change on a clamped account keeps BOTH the raw role a newer build
-// assigned and the account's TOTP enrolment (secret + replay counter).
+// assigned and the account's TOTP enrollment (secret + replay counter).
 func TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP(t *testing.T) {
 	path, _ := seedRosterWithRole(t, "auditor")
 	c := &Config{cache: authCacheStore{entries: map[string]*authCacheEntry{}}}
@@ -603,7 +616,7 @@ func TestRosterLoad_PasswordChangeKeepsPersistedRoleAndTOTP(t *testing.T) {
 	}
 	const secret = "JBSWY3DPEHPK3PXP" // #nosec G101 -- RFC 6238 example TOTP seed, test fixture
 	if !c.SetTOTPSecret("bob", secret, []string{"code-one"}) {
-		t.Fatal("precondition: enrol TOTP")
+		t.Fatal("precondition: enroll TOTP")
 	}
 	if !c.SetTOTPLastCounter("bob", 42) {
 		t.Fatal("precondition: set counter")

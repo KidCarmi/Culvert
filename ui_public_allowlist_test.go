@@ -13,7 +13,7 @@ import (
 // The failure mode this file closes is a FORWARD-LOOKING entry rather than a
 // wrong one. The list carried `/api/auth/totp` as a PREFIX while no route by
 // that name existed, so the entry did nothing today and would silently have
-// made the first TOTP enrolment/disable handler somebody wrote reachable with
+// made the first TOTP enrollment/disable handler somebody wrote reachable with
 // no authentication: an anonymous caller could have bound their own second
 // factor to an admin account, or stripped an existing one. A prefix that
 // pre-authorises endpoints which do not exist yet is an authentication bypass

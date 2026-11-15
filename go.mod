@@ -9,7 +9,7 @@ go 1.27.0
 // disagreement. The `go` line above is the module's minimum language version,
 // not the build compiler, and is not raised to match. Upgrade procedure:
 // roadmap/CI-REDESIGN.md §20.
-toolchain go1.27.3
+toolchain go1.27.4
 
 // GODEBUG pins: compatibility defaults this gateway's posture depends on.
 //

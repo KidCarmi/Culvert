@@ -63,7 +63,7 @@ The refusal body names the remedy and states plainly that nothing was modified:
 ```
 the change was NOT applied: the admin roster could not be written to disk
 (check disk space and the data volume's permissions, then retry).
-Nothing was changed — no account, role, password or TOTP enrolment was modified.
+Nothing was changed — no account, role, password or TOTP enrollment was modified.
 ```
 
 The refusal is also written to the audit log as `<action>.refused` (for example
@@ -77,7 +77,7 @@ Before this change, an operator responding to an incident on a node whose data
 volume had gone read-only or full would:
 
 - **delete a compromised administrator** and receive `204 No Content`. The
-  account — password hash, role and TOTP enrolment intact — returned at the next
+  account — password hash, role and TOTP enrollment intact — returned at the next
   restart.
 - **downgrade a role** from admin to viewer and receive `{"ok":true}`. The
   privilege was restored at the next restart.

@@ -234,7 +234,7 @@ func isSameOrigin(r *http.Request, origin string) bool {
 // PREFIX that matched no registered route — dead today and a landmine
 // tomorrow. The first `/api/auth/totp/enroll` or `.../disable` handler anyone
 // added would have been born UNAUTHENTICATED, and since SEC-BASIC-1 TOTP
-// enrolment decides whether an account may use HTTP Basic at all
+// enrollment decides whether an account may use HTTP Basic at all
 // (cfg.UserHasTOTP, ui_basic_auth.go), an anonymous caller could have bound
 // their own second factor to an admin account or stripped one. The shipped
 // second factor is verified inside apiAuthLogin's credential-gated exchange,

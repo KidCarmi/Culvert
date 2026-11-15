@@ -75,13 +75,39 @@ func New(addr string) *Client {
 
 // Ping verifies the ClamAV daemon is reachable and responding correctly.
 // Returns nil on success, error otherwise.
-func (c *Client) Ping() error {
-	conn, err := (&net.Dialer{Timeout: c.timeout}).DialContext(context.Background(), c.network, c.addr)
+//
+// Unbounded by any caller: the budget is this client's own timeout, applied
+// twice (dial, then read), so one Ping can hold a goroutine and a socket for up
+// to 2x it. Callers that need a tighter bound, or that must be able to end the
+// probe, use PingContext.
+func (c *Client) Ping() error { return c.PingContext(context.Background()) }
+
+// PingContext is Ping bounded by ctx as well as by this client's timeout.
+//
+// WHY IT EXISTS (CHAOS-116). `timeout` is sized for a SCAN — 30 s by default —
+// and Ping applies it to the dial and then again to the read. That is the right
+// budget for an operator-initiated scan and the wrong one for a liveness probe,
+// and the probe path had no way to say so: Ping dials with context.Background(),
+// so neither a caller's deadline nor a client's disconnect could end it. The
+// unauthenticated /health and /ready probes reached this function through
+// secscan.Scanner.ClamAVStatus, which means a blackholed daemon could park a
+// gateway goroutine and socket per request for up to a minute.
+//
+// The deadline applied is the EARLIER of ctx's and now+timeout, so this can
+// only ever tighten Ping's existing bound, never loosen it. A ctx that is
+// CANCELLED rather than expiring closes the connection, because a blocking Read
+// cannot be interrupted any other way: the read then fails at once instead of
+// sitting on its deadline.
+func (c *Client) PingContext(ctx context.Context) error {
+	conn, err := (&net.Dialer{Timeout: c.timeout}).DialContext(ctx, c.network, c.addr)
 	if err != nil {
 		return fmt.Errorf("clamav: connect failed: %w", err)
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(c.timeout)) //nolint:errcheck // a failed deadline set is surfaced by the subsequent read/write
+	conn.SetDeadline(c.effectiveDeadline(ctx)) //nolint:errcheck // a failed deadline set is surfaced by the subsequent read/write
+	// Cancellation (as opposed to expiry) has to close the socket to unblock the
+	// Read below; the same reason, and the same helper, as the scan path.
+	defer c.watchCancel(ctx, conn)()
 
 	if _, err := fmt.Fprintf(conn, "zPING\x00"); err != nil {
 		return fmt.Errorf("clamav: ping write: %w", err)
@@ -90,6 +116,12 @@ func (c *Client) Ping() error {
 	n, _ := conn.Read(buf)
 	resp := strings.TrimRight(string(buf[:n]), "\x00\n\r ")
 	if resp != "PONG" {
+		// A cancelled or expired probe reads zero bytes, which would otherwise
+		// be reported as an empty "unexpected response" — true but useless. The
+		// ctx error names what actually happened.
+		if ctxErr := ctx.Err(); ctxErr != nil && resp == "" {
+			return fmt.Errorf("clamav: ping: %w", ctxErr)
+		}
 		return fmt.Errorf("clamav: unexpected ping response: %q", resp)
 	}
 	return nil

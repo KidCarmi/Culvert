@@ -364,9 +364,20 @@ func (rs *RemoteScanner) scanOnce(ctx context.Context, client *http.Client, base
 		if resp.StatusCode == http.StatusTooManyRequests {
 			// The sidecar is telling us it is full. That is capacity, not a
 			// fault, and CHAOS-52 settled the posture for capacity: the outer
-			// budget decides, and it decides fail-closed. The shipped sidecar
-			// never emits 429 today; a load balancer or a third-party scanner
-			// in front of it can, and classifying it correctly costs nothing.
+			// budget decides, and it decides fail-closed.
+			//
+			// THIS BRANCH IS LIVE. Until CHAOS-115 this comment read "the
+			// shipped sidecar never emits 429 today", which is no longer true:
+			// scan_svc_admission.go gives the shipped sidecar a bounded
+			// admission gate whose refusal IS a 429 (refuseScanAtCapacity), so
+			// this is the branch a saturated fleet takes. The distinction is
+			// load-bearing in one direction — any status other than 429 and 413
+			// falls through to "sidecar returned HTTP %d", which is a FAULT and
+			// fails OPEN (remoteScanFail, WK-2b). Reclassifying or removing
+			// this case as dead would therefore convert a fail-CLOSED capacity
+			// refusal into a fleet-wide unscanned forward under exactly the
+			// load the gate exists to survive. A load balancer or third-party
+			// scanner in front of the sidecar can emit 429 as well.
 			return nil, remoteOutcomeCapacity, "HTTP 429"
 		}
 		if resp.StatusCode == http.StatusRequestEntityTooLarge {

@@ -718,7 +718,12 @@ Diagnostics**) summarises the same state per node: `disabled`,
 handled per `fail_mode`), `enabled-degraded` (connected, but the active config
 has an empty fail mode or default profile — `cdr.fail_mode` or
 `cdr.default_profile` left unset, or the zero-valued config a runtime enable
-runs on, see **Enabling it**) and `enabled-healthy`.
+runs on, see **Enabling it**), `enabled-recovering` (every breaker tripped;
+only recovery probes reach Sluice), `enabled-reduced` (N of M instances out of
+rotation, the rest scanning) and `enabled-healthy`. `enabled-broken` and
+`enabled-dark` are FAIL; `enabled-degraded`, `enabled-recovering` and
+`enabled-reduced` are WARN. The row reads breaker state without reserving a
+probe and names no instance; per-instance state is on **CDR → Instances**.
 
 **`bytes_in_total` is currently inert — it reads zero on every node.** Its
 backing counter, `statCDRBytesIn`, is declared and exposed by

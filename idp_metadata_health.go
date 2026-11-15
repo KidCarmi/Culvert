@@ -838,7 +838,14 @@ func checkIdPMetadata() OperatorContractCheck {
 // precedent, where a detection-only ticker keeps a staleness alert live when
 // the thing that would have produced it has stopped happening.
 func idpMetadataDegradationSweep(now time.Time) []idpMetadataOutcome {
+	// CHAOS-118: deferred release. The watchdog round that calls this is now
+	// panic-guarded, and a guard over a trailing Unlock would contain the panic
+	// into a permanently held `idpMetadata.mu` — the lock every metadata-health
+	// surface and the fetch path itself take, so SSO observability would wedge
+	// silently instead of crashing loudly. Nothing here runs after the release
+	// (the only post-section work is the return), so the scope is the function.
 	idpMetadata.mu.Lock()
+	defer idpMetadata.mu.Unlock()
 	var fire []idpMetadataOutcome
 	for _, ep := range idpMetadata.episodes {
 		if ep == nil || ep.alerted || ep.firstFailure.IsZero() {
@@ -850,7 +857,6 @@ func idpMetadataDegradationSweep(now time.Time) []idpMetadataOutcome {
 		ep.alerted = true
 		fire = append(fire, ep.lastOutcome)
 	}
-	idpMetadata.mu.Unlock()
 	return fire
 }
 
@@ -890,35 +896,51 @@ type idpStaleCeilingVictim struct {
 // subsystem's lock across another's call is the CHAOS-50 cluster-CA rule.
 func idpStaleCeilingSweep(now time.Time) []idpStaleCeilingVictim {
 	var out []idpStaleCeilingVictim
-	idpServedMu.Lock()
-	for id, sd := range idpServed {
-		age := now.Sub(sd.fetchedAt)
-		// A NEGATIVE age is EXPIRED, not fresh (Codex round 13). idpmeta.Get
-		// already refuses a negative age for exactly this reason — the store's
-		// own rule, CHAOS-61's "a negative age is stale, never maximally fresh"
-		// — and this sweep is the LIVE-PROVIDER half of the same ceiling. Read
-		// naively, a wall clock stepping backwards after a provider started
-		// serving cache puts the age comfortably under StaleMaxAge, so the
-		// provider keeps trusting possibly-withdrawn SAML signing material until
-		// the clock catches up: the rule enforced on the compile path and not on
-		// the path that decides whether a LIVE provider may keep serving.
-		//
-		// The ceiling is min(StaleMaxAge, the document's own validUntil):
-		// SAML metadata the IdP itself declared expired is not served from
-		// cache however young the copy is (idpServedDoc.expired).
-		if !sd.expired(now) {
-			continue
+	// CHAOS-118: a SCOPED critical section with a deferred release. The
+	// watchdog round that calls this is now panic-guarded, and a guard over the
+	// previous trailing Unlock would contain a panic into a permanently held
+	// `idpServedMu` — held by idpNotePublishedGeneration on the publish path
+	// and by idpClaimStaleServe at retirement, so every later IdP metadata
+	// publish and every retirement would block forever with no crash and no
+	// alert. sd.expired(now) is a method call inside the loop.
+	//
+	// The scope is a closure, not a function-level defer, because the sort
+	// below must stay OUTSIDE it: this sweep's contract is that it releases
+	// idpServedMu before the caller retires anything (retirement takes the
+	// registry write lock), which is the CHAOS-50 rule against holding one
+	// subsystem's lock into another's call. A function-level defer would also
+	// hold this lock across the sort for no reason.
+	func() {
+		idpServedMu.Lock()
+		defer idpServedMu.Unlock()
+		for id, sd := range idpServed {
+			age := now.Sub(sd.fetchedAt)
+			// A NEGATIVE age is EXPIRED, not fresh (Codex round 13). idpmeta.Get
+			// already refuses a negative age for exactly this reason — the store's
+			// own rule, CHAOS-61's "a negative age is stale, never maximally fresh"
+			// — and this sweep is the LIVE-PROVIDER half of the same ceiling. Read
+			// naively, a wall clock stepping backwards after a provider started
+			// serving cache puts the age comfortably under StaleMaxAge, so the
+			// provider keeps trusting possibly-withdrawn SAML signing material until
+			// the clock catches up: the rule enforced on the compile path and not on
+			// the path that decides whether a LIVE provider may keep serving.
+			//
+			// The ceiling is min(StaleMaxAge, the document's own validUntil):
+			// SAML metadata the IdP itself declared expired is not served from
+			// cache however young the copy is (idpServedDoc.expired).
+			if !sd.expired(now) {
+				continue
+			}
+			withinAge := age >= 0 && age < idpmeta.StaleMaxAge
+			out = append(out, idpStaleCeilingVictim{profileID: id, source: sd.source, age: age, servedAt: sd.fetchedAt,
+				validUntilPassed: withinAge})
+			// The evidence is NOT destroyed here. Selecting is not adjudicating:
+			// this sweep releases idpServedMu before the retirement takes r.mu,
+			// and a publish landing in that window replaces the generation. The
+			// stamp is CLAIMED instead, atomically, by idpClaimStaleServe at
+			// retirement time (Codex round 10).
 		}
-		withinAge := age >= 0 && age < idpmeta.StaleMaxAge
-		out = append(out, idpStaleCeilingVictim{profileID: id, source: sd.source, age: age, servedAt: sd.fetchedAt,
-			validUntilPassed: withinAge})
-		// The evidence is NOT destroyed here. Selecting is not adjudicating:
-		// this sweep releases idpServedMu before the retirement takes r.mu,
-		// and a publish landing in that window replaces the generation. The
-		// stamp is CLAIMED instead, atomically, by idpClaimStaleServe at
-		// retirement time (Codex round 10).
-	}
-	idpServedMu.Unlock()
+	}()
 	// Deterministic order so a multi-profile sweep logs and retires the same way
 	// every run — the test-determinism class the repo's shuffle gate catches.
 	sort.Slice(out, func(i, j int) bool { return out[i].profileID < out[j].profileID })
@@ -971,6 +993,10 @@ var idpAnyProfileDark = func() bool {
 	return idpRegistry.hasDarkEnabledProfile() || idpRegistry.hasCacheServingProfile()
 }
 
+// crashComponentIdPMetadataWatchdog names the IdP metadata degradation watchdog
+// in the crash plane (culvert_crash_records_total{component="idp_metadata_watchdog"}).
+const crashComponentIdPMetadataWatchdog = "idp_metadata_watchdog"
+
 func runIdPMetadataDegradationWatchdog(ctx context.Context) {
 	t := time.NewTicker(idpMetadataWatchdogInterval)
 	defer t.Stop()
@@ -979,48 +1005,68 @@ func runIdPMetadataDegradationWatchdog(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			now := time.Now()
-			for _, outcome := range idpMetadataDegradationSweep(now) {
-				fireIdPMetadataAlert(fmt.Sprintf(
-					"IdP metadata/discovery document unreachable for over %s (outcome: %s)",
-					idpMetadataDegradedAfter, outcome))
-			}
-			// ENFORCE THE CEILING, do not merely report it. Store.Get refuses a
-			// document past idpmeta.StaleMaxAge, but it is reached only from a
-			// compile, and a steady-state node never recompiles — so without
-			// this a provider stayed live forever on an expired document while
-			// the runbook promised it would stop being usable (Codex round 8).
-			// Retiring makes it DARK, which is exactly the state a fresh boot
-			// past the ceiling would produce, and hands it to the recovery loop.
-			for _, v := range idpStaleCeilingSweep(now) {
-				if !idpRetireStaleProvider(v.profileID, v.source, v.servedAt) {
-					continue
-				}
-				// Retirement is NOT revocation: the profile stays enabled and
-				// stored, so sessions already issued through it are untouched
-				// (owner decision on #1485/#1564 — only an explicit delete or
-				// disable revokes). What stops is NEW browser SSO through it.
-				if v.validUntilPassed {
-					logger.Printf("IDP_METADATA_EXPIRED idp=%q — the cached document it was serving is past its own validUntil (fetched %s ago); the provider is no longer live and new browser SSO through it is unavailable until a document is fetched successfully (existing sessions are not revoked)",
-						sanitizeLog(v.profileID), v.age.Round(time.Minute))
-					fireIdPMetadataAlert("IdP metadata document expired past its own validUntil; the provider is no longer live")
-					continue
-				}
-				logger.Printf("IDP_METADATA_EXPIRED idp=%q — the cached document it was serving is %s old, past the %s ceiling; the provider is no longer live and new browser SSO through it is unavailable until a document is fetched successfully (existing sessions are not revoked)",
-					sanitizeLog(v.profileID), v.age.Round(time.Minute), idpmeta.StaleMaxAge)
-				fireIdPMetadataAlert(fmt.Sprintf(
-					"IdP metadata/discovery document expired past the %s staleness ceiling; the provider is no longer live",
-					idpmeta.StaleMaxAge))
-			}
-			// The recovery loop RETURNS once nothing is dark and is started
-			// once at boot, so a retirement (or any later transition into dark)
-			// would otherwise have nothing retrying it — SSO down with no way
-			// back short of a restart, strictly worse than the defect above.
-			// Re-arming every tick makes the watchdog the supervisor and closes
-			// the arm/exit race by repetition rather than by a lock.
-			if idpAnyProfileDark() {
-				idpArmRecovery(ctx)
-			}
+			// CHAOS-118: per-ROUND guard, never per-goroutine. This loop is
+			// `go`-detached, so an unrecovered panic in one round terminated
+			// the whole gateway. It is also the one worker here that is NOT
+			// merely observability: it enforces the staleness ceiling (making
+			// an expired provider dark) and it is the SUPERVISOR that re-arms
+			// the recovery loop, so a recover at the top of the goroutine
+			// would be strictly worse than the crash — SSO would stay down
+			// with nothing retrying it and every surface still green. Guarding
+			// the body keeps the supervisor alive: a transient fault costs one
+			// interval and the next tick re-arms recovery again.
+			runGuarded(crashComponentIdPMetadataWatchdog, func() {
+				idpMetadataDegradationWatchdogRound(ctx)
+			})
 		}
+	}
+}
+
+// idpMetadataDegradationWatchdogRound is one round of the watchdog, split out so
+// it can be driven directly by a test and so the detached loop above has a
+// single guarded call. See runIdPMetadataDegradationWatchdog for why this round
+// must not be allowed to kill the process or to stop running.
+func idpMetadataDegradationWatchdogRound(ctx context.Context) {
+	now := time.Now()
+	for _, outcome := range idpMetadataDegradationSweep(now) {
+		fireIdPMetadataAlert(fmt.Sprintf(
+			"IdP metadata/discovery document unreachable for over %s (outcome: %s)",
+			idpMetadataDegradedAfter, outcome))
+	}
+	// ENFORCE THE CEILING, do not merely report it. Store.Get refuses a
+	// document past idpmeta.StaleMaxAge, but it is reached only from a
+	// compile, and a steady-state node never recompiles — so without
+	// this a provider stayed live forever on an expired document while
+	// the runbook promised it would stop being usable (Codex round 8).
+	// Retiring makes it DARK, which is exactly the state a fresh boot
+	// past the ceiling would produce, and hands it to the recovery loop.
+	for _, v := range idpStaleCeilingSweep(now) {
+		if !idpRetireStaleProvider(v.profileID, v.source, v.servedAt) {
+			continue
+		}
+		// Retirement is NOT revocation: the profile stays enabled and
+		// stored, so sessions already issued through it are untouched
+		// (owner decision on #1485/#1564 — only an explicit delete or
+		// disable revokes). What stops is NEW browser SSO through it.
+		if v.validUntilPassed {
+			logger.Printf("IDP_METADATA_EXPIRED idp=%q — the cached document it was serving is past its own validUntil (fetched %s ago); the provider is no longer live and new browser SSO through it is unavailable until a document is fetched successfully (existing sessions are not revoked)",
+				sanitizeLog(v.profileID), v.age.Round(time.Minute))
+			fireIdPMetadataAlert("IdP metadata document expired past its own validUntil; the provider is no longer live")
+			continue
+		}
+		logger.Printf("IDP_METADATA_EXPIRED idp=%q — the cached document it was serving is %s old, past the %s ceiling; the provider is no longer live and new browser SSO through it is unavailable until a document is fetched successfully (existing sessions are not revoked)",
+			sanitizeLog(v.profileID), v.age.Round(time.Minute), idpmeta.StaleMaxAge)
+		fireIdPMetadataAlert(fmt.Sprintf(
+			"IdP metadata/discovery document expired past the %s staleness ceiling; the provider is no longer live",
+			idpmeta.StaleMaxAge))
+	}
+	// The recovery loop RETURNS once nothing is dark and is started
+	// once at boot, so a retirement (or any later transition into dark)
+	// would otherwise have nothing retrying it — SSO down with no way
+	// back short of a restart, strictly worse than the defect above.
+	// Re-arming every tick makes the watchdog the supervisor and closes
+	// the arm/exit race by repetition rather than by a lock.
+	if idpAnyProfileDark() {
+		idpArmRecovery(ctx)
 	}
 }

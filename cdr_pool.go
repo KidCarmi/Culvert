@@ -249,6 +249,22 @@ func (p *cdrClientPool) anyAvailable() bool {
 	return false
 }
 
+// trippedCount reports how many pooled instances have a breaker that is not
+// closed (open, or half-open while it probes recovery). Read-only and
+// lock-free on each breaker: it never reserves a half-open probe or advances
+// the state machine. Diagnostics uses it to show reduced scanning capacity
+// that anyAvailable alone hides while at least one instance still serves.
+func (p *cdrClientPool) trippedCount() (tripped, total int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, c := range p.clients {
+		if c.Breaker.State() != cbStateClosed {
+			tripped++
+		}
+	}
+	return tripped, len(p.clients)
+}
+
 // cdrAnyInstanceAvailable is the hot path's non-consuming liveness gate. Use
 // it for "is CDR usable at all?"; only the sanitize RPC path reserves
 // (cdrPickPooledReserved), because only the caller that issues the RPC can

@@ -908,6 +908,18 @@ culvert_scan_decompress_bombs_total %d
 # TYPE culvert_scan_sigdb_invalidations_total counter
 culvert_scan_sigdb_invalidations_total %d
 
+# HELP culvert_clamav_status_probes_total Total ClamAV status pings actually dialed (one in flight at a time; bounded by the status TTL while the daemon answers)
+# TYPE culvert_clamav_status_probes_total counter
+culvert_clamav_status_probes_total %d
+
+# HELP culvert_clamav_status_probe_coalesced_total Total ClamAV status reads served without dialing because a probe was already in flight (the amplification the unauthenticated /health and /ready probes no longer send to the daemon)
+# TYPE culvert_clamav_status_probe_coalesced_total counter
+culvert_clamav_status_probe_coalesced_total %d
+
+# HELP culvert_clamav_status_stale_total Total ClamAV status reads answered from the previous observation because the probe outran the caller's bound (rising means the daemon answers slower than the status wait)
+# TYPE culvert_clamav_status_stale_total counter
+culvert_clamav_status_stale_total %d
+
 # HELP culvert_remote_scan_fail_total Total remote scan-sidecar faults that forwarded content UNSCANNED (fail-open)
 # TYPE culvert_remote_scan_fail_total counter
 culvert_remote_scan_fail_total %d
@@ -992,6 +1004,9 @@ culvert_auth_sso_required_total %d
 		// the sidecar's own fail-open counter reached only the admin JSON API,
 		// so the paging rules in the scan-capacity runbook were silently dead
 		// on exactly the deployment that runbook recommends.
+		scanCounters.ClamStatusProbes,
+		scanCounters.ClamStatusCoalesced,
+		scanCounters.ClamStatusStale,
 		scanCounters.RemoteScanFail,
 		scanCounters.RemoteScanSaturated,
 		scanCounters.RemoteScanInflight,
@@ -1463,9 +1478,9 @@ culvert_scan_svc_inflight %d
 # TYPE culvert_scan_svc_slots gauge
 culvert_scan_svc_slots %d
 
-# HELP culvert_scan_svc_at_capacity_total Scan requests refused because every admission slot was busy — saturation, not a fault; callers fail CLOSED on these
-# TYPE culvert_scan_svc_at_capacity_total counter
-culvert_scan_svc_at_capacity_total %d
+# HELP culvert_scan_svc_saturated_total Scan requests refused because every admission slot was busy — saturation, not a fault; callers fail CLOSED on these
+# TYPE culvert_scan_svc_saturated_total counter
+culvert_scan_svc_saturated_total %d
 `,
 			up,
 			down,
@@ -1476,7 +1491,7 @@ culvert_scan_svc_at_capacity_total %d
 			sv.Backoff.Seconds(),
 			// CHAOS-115. `inflight` pinned at `slots` is the leading indicator
 			// of the refusal regime, and the pair is what makes the refusal
-			// counter readable: `at_capacity_total` rising while `inflight <
+			// counter readable: `saturated_total` rising while `inflight <
 			// slots` would mean the gate is misbuilt, not that the sidecar is
 			// busy. They ride the same `Configured` guard as the listener
 			// gauges above, because a node that never ran a sidecar must not

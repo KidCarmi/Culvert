@@ -51,11 +51,13 @@ package main
 // `culvert_remote_scan_saturated_total`), the local path's timeout vocabulary
 // and the existing `scan_timeout` alert — and with a test,
 // TestChaos_SidecarCapacityRefusalFailsClosed. scanOnce's comment on that
-// branch says the quiet part out loud:
-//
-//	"The shipped sidecar never emits 429 today; a load balancer or a
-//	 third-party scanner in front of it can, and classifying it correctly
-//	 costs nothing."
+// branch used to say the quiet part out loud — "The shipped sidecar never emits
+// 429 today; a load balancer or a third-party scanner in front of it can" — and
+// that sentence is what this file falsifies, so it has been corrected in place
+// (internal/secscan/remote.go) rather than left to tell the next reader that
+// the branch is dead. It is not: it is now the branch a saturated fleet takes,
+// and anything that reclassified it would drop the refusal through to
+// "sidecar returned HTTP %d", which is a FAULT and fails OPEN.
 //
 // The caller's half of this contract was complete, tested and unreachable. This
 // file reaches it. No wire field, no new alert event and no caller change.

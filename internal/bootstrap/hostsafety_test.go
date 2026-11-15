@@ -15,7 +15,7 @@ package bootstrap
 // Every defect gate below was verified FAILING against the pre-fix tree
 // (unvalidated BaseURL/EnrollmentAddr + the double-quoted template) and passing
 // after. The CONTROLS exist because the cheapest way to pass every defect gate
-// is to refuse everything, which would take one-click DP enrolment away
+// is to refuse everything, which would take one-click DP enrollment away
 // entirely — a worse outcome than the defect.
 
 import (
@@ -130,7 +130,7 @@ func bytesGoAcceptsInHostHeader(t *testing.T) []byte {
 func TestSafeAuthority_Accepts(t *testing.T) {
 	// CONTROL: every authority a real Control Plane can legitimately present.
 	// A validator that refused these would pass every defect gate below while
-	// breaking one-click DP enrolment on every deployment.
+	// breaking one-click DP enrollment on every deployment.
 	tests := []struct{ in, want string }{
 		{"cp.example.com", "cp.example.com"},
 		{"cp.example.com:9090", "cp.example.com:9090"},

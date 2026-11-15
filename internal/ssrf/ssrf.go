@@ -281,8 +281,31 @@ func SafeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 // Avoids repeated DNS lookups in PrivateHost() for the same host within a
 // short window. Entries expire after cacheTTL. Negative results (DNS errors)
 // are NOT cached so that transient failures remain fail-closed.
-
-const cacheTTL = 30 * time.Second
+//
+// Bounded two-generation design. The host key is CLIENT-CONTROLLED on the
+// CONNECT and SOCKS5 paths (every distinct destination a client names becomes
+// a key), so a wildcard-DNS domain lets one client mint unlimited keys. The
+// original single map grew without bound between 5-minute sweeps, and the
+// sweep walked every entry under the exclusive lock that every CONNECT/SOCKS5
+// pre-flight check also takes: measured on 1M keys, a ~200 ms stall for all
+// proxied traffic, and ~112 MiB still retained afterwards because a Go map
+// never shrinks its bucket array after deletes.
+//
+// Now each generation holds at most cacheGenCap keys. When the current
+// generation fills it becomes the previous one and the old previous one is
+// dropped whole, so the cache never holds more than 2×cacheGenCap keys and a
+// dropped generation's memory is returned to the GC. CacheCleanup performs the
+// same O(1) rotation on the periodic tick, so an idle cache drains to empty
+// within two ticks.
+//
+// Dropping an entry early is always safe: the cache is only an optimisation,
+// and a miss re-resolves (fresher, never staler). The per-entry expiry is
+// still checked on every Lookup, so no verdict is ever served past cacheTTL,
+// whichever generation holds it.
+const (
+	cacheTTL    = 30 * time.Second
+	cacheGenCap = 16384 // keys per generation; at most 2× this are retained
+)
 
 type cacheEntry struct {
 	private bool // true if any resolved IP was private
@@ -290,20 +313,48 @@ type cacheEntry struct {
 }
 
 type resultCache struct {
-	mu      sync.RWMutex
-	entries map[string]cacheEntry
+	mu     sync.RWMutex
+	cur    map[string]cacheEntry // receives every Store
+	prev   map[string]cacheEntry // read-only except promotion-out and CacheDelete
+	genCap int                   // per-generation key cap
 }
 
-var dnsCache = &resultCache{entries: make(map[string]cacheEntry)}
+func newResultCache(genCap int) *resultCache {
+	return &resultCache{cur: make(map[string]cacheEntry), genCap: genCap}
+}
+
+var dnsCache = newResultCache(cacheGenCap)
 
 // Lookup returns (isPrivate, found). If found is false the caller must do a
 // live DNS lookup and call Store.
+//
+// A live hit in the previous generation is promoted into the current one so a
+// hot host survives rotation driven by a flood of one-off keys; the promoted
+// entry keeps its ORIGINAL expiry, so promotion never extends freshness.
 func (c *resultCache) Lookup(host string) (private, found bool) {
+	now := time.Now()
 	c.mu.RLock()
-	e, ok := c.entries[host]
+	e, ok := c.cur[host]
+	inPrev := false
+	if !ok {
+		e, ok = c.prev[host]
+		inPrev = ok
+	}
 	c.mu.RUnlock()
-	if !ok || time.Now().After(e.expires) {
+	if !ok || now.After(e.expires) {
 		return false, false
+	}
+	if inPrev {
+		c.mu.Lock()
+		// Re-check under the write lock: a concurrent Store may have written a
+		// newer verdict into cur, or a rotation may have dropped prev; never
+		// overwrite the newer entry with the older one.
+		if _, newer := c.cur[host]; !newer {
+			if pe, still := c.prev[host]; still && pe.private == e.private && pe.expires.Equal(e.expires) {
+				c.storeLocked(host, e)
+			}
+		}
+		c.mu.Unlock()
 	}
 	return e.private, true
 }
@@ -311,23 +362,44 @@ func (c *resultCache) Lookup(host string) (private, found bool) {
 // Store records a positive (resolved) result. DNS errors are not stored.
 func (c *resultCache) Store(host string, private bool) {
 	c.mu.Lock()
-	c.entries[host] = cacheEntry{
-		private: private,
-		expires: time.Now().Add(cacheTTL),
-	}
+	c.storeLocked(host, cacheEntry{private: private, expires: time.Now().Add(cacheTTL)})
 	c.mu.Unlock()
 }
 
-// CacheCleanup evicts expired entries (called periodically from the main
-// tick loop, connlimit_startup.go).
+// storeLocked writes e under host into the current generation, rotating first
+// when the current generation is full. Caller holds c.mu for writing.
+func (c *resultCache) storeLocked(host string, e cacheEntry) {
+	if _, exists := c.cur[host]; !exists && len(c.cur) >= c.genCap {
+		c.rotateLocked()
+	}
+	c.cur[host] = e
+	// A key lives in at most one generation, so a fresh Store always wins over
+	// a stale previous-generation verdict and CacheDelete cannot resurrect one.
+	delete(c.prev, host)
+}
+
+// rotateLocked retires the current generation to previous and drops the old
+// previous generation whole (its memory becomes garbage). O(1).
+func (c *resultCache) rotateLocked() {
+	c.prev = c.cur
+	c.cur = make(map[string]cacheEntry)
+}
+
+// len reports the total retained keys across both generations (tests).
+func (c *resultCache) len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.cur) + len(c.prev)
+}
+
+// CacheCleanup ages the cache by one generation (called periodically from
+// the main tick loop, connlimit_startup.go). Constant time under the lock: the
+// previous generation is dropped whole rather than swept entry by entry, and
+// the current generation's still-live entries remain readable as the new
+// previous generation. Expired entries are never served in the meantime.
 func CacheCleanup() {
 	dnsCache.mu.Lock()
-	now := time.Now()
-	for k, e := range dnsCache.entries {
-		if now.After(e.expires) {
-			delete(dnsCache.entries, k)
-		}
-	}
+	dnsCache.rotateLocked()
 	dnsCache.mu.Unlock()
 }
 
@@ -339,7 +411,8 @@ func CacheStore(host string, private bool) { dnsCache.Store(host, private) }
 // CacheDelete removes a host's cached verdict (test support).
 func CacheDelete(host string) {
 	dnsCache.mu.Lock()
-	delete(dnsCache.entries, host)
+	delete(dnsCache.cur, host)
+	delete(dnsCache.prev, host)
 	dnsCache.mu.Unlock()
 }
 
@@ -348,7 +421,8 @@ func CacheDelete(host string) {
 // guard-table swap).
 func CacheReset() {
 	dnsCache.mu.Lock()
-	dnsCache.entries = make(map[string]cacheEntry)
+	dnsCache.cur = make(map[string]cacheEntry)
+	dnsCache.prev = nil
 	dnsCache.mu.Unlock()
 }
 

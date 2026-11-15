@@ -15,7 +15,8 @@ import "testing"
 // policyStore.Evaluate runs on every proxied request. The fusion that resolves a
 // destination to its URL category depends only on the HOST, but it used to run
 // once per category-group rule — and on a feed-backed deployment
-// communityDB.Lookup opens a BadgerDB read transaction per domain label, so the
+// communityDB.Lookup then opened a BadgerDB read transaction per domain label
+// (it now opens one for the whole walk), so the
 // per-rule multiplication was measured at 205 µs / 1.01 ms / 4.03 ms for
 // 10/50/200 rules per request. hostCatScratch (policy_hostcat.go) resolves the
 // fusion once per scan.

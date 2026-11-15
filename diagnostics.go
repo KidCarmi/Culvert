@@ -254,6 +254,9 @@ func buildOperatorContract() OperatorContract {
 	// Upstream mTLS client certificate failed to load or is expired/expiring.
 	// Contributes nothing when no client certificate is configured.
 	checks = append(checks, checkUpstreamMTLSClientCert()...)
+	// ClamAV configured but unreachable: content is forwarded without an antivirus
+	// verdict (fail-open). Contributes nothing when ClamAV is off or answering.
+	checks = append(checks, checkClamAVScan()...)
 	// MCP gateway enabled but not serving (failed to start, degraded or stopped).
 	// Contributes nothing when MCP was never requested or is healthy.
 	checks = append(checks, checkMCPGateway()...)
@@ -275,6 +278,13 @@ func buildOperatorContract() OperatorContract {
 	// Remote blocklist feeds whose latest sync failed. Contributes nothing when
 	// no feed is configured or every feed's latest attempt succeeded.
 	checks = append(checks, checkBlocklistFeeds()...)
+	// Upstream pool managed document / config.yaml seed refused, or legacy
+	// migration abandoned: configured parents unpublished. Contributes nothing
+	// when none of the three is latched.
+	checks = append(checks, checkUpstreamPoolConfig()...)
+	// Configured parent-proxy pool with zero eligible parents: plain-HTTP egress
+	// fails open to DIRECT. Contributes nothing with no pool or ≥1 eligible parent.
+	checks = append(checks, checkUpstreamEgress()...)
 	// Auth Exempt risk diagnostics (Slice 8): WARN-only rows for risky Stage-1
 	// exemption postures. Contributes nothing when no exempt rules exist.
 	checks = append(checks, authExemptDiagnostics(policyStore.List(), policyActionFromDefault())...)
@@ -1995,7 +2005,7 @@ func checkCDR() OperatorContractCheck {
 			Code:           "cdr",
 			Status:         diagFail,
 			Message:        "enabled-broken: CDR is enabled but no Sluice instance is connected",
-			OperatorAction: "Enrol at least one Sluice instance under CDR, or disable CDR if not in use.",
+			OperatorAction: "Enroll at least one Sluice instance under CDR, or disable CDR if not in use.",
 		}
 	case !cdrAnyInstanceAvailable():
 		// Keyed on AVAILABILITY, not pool length: an enrolled instance whose
@@ -2016,11 +2026,37 @@ func checkCDR() OperatorContractCheck {
 			Message:        "enabled-degraded: CDR is connected but missing fail-mode or default profile",
 			OperatorAction: "Set a fail-mode and default profile under CDR → Configuration.",
 		}
-	default:
+	}
+	return checkCDRCapacity()
+}
+
+// checkCDRCapacity reports an enabled, configured, available CDR pool. The
+// availability gate above only asks "can ANY instance scan?", so a pool with
+// some breakers tripped used to read enabled-healthy. Read-only: breaker
+// state is loaded, never reserved or advanced.
+func checkCDRCapacity() OperatorContractCheck {
+	tripped, total := cdrPool.trippedCount()
+	switch {
+	case tripped == 0:
+		return OperatorContractCheck{Code: "cdr", Status: diagOK, Message: "enabled-healthy"}
+	case tripped >= total:
+		// Every breaker is open-past-timeout or half-open: only recovery
+		// probes reach Sluice; the remaining documents get fail_mode.
 		return OperatorContractCheck{
-			Code:    "cdr",
-			Status:  diagOK,
-			Message: "enabled-healthy",
+			Code:           "cdr",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("enabled-recovering: all %d Sluice instances have a tripped circuit breaker and are being probed for recovery", total),
+			OperatorAction: "Check Sluice reachability under CDR → Instances. Until a probe succeeds, documents beyond the probe budget are refused (fail_mode closed) or delivered unsanitized (fail_mode open).",
+		}
+	default:
+		// Some, but not all, instances are out of rotation. Documents are
+		// still sanitized by the rest, so this is a capacity and redundancy
+		// warning, not an outage: one more failure makes it enabled-dark.
+		return OperatorContractCheck{
+			Code:           "cdr",
+			Status:         diagWarn,
+			Message:        fmt.Sprintf("enabled-reduced: %d of %d Sluice instances are out of rotation (circuit breaker open or recovering); the rest are scanning", tripped, total),
+			OperatorAction: "Open CDR → Instances to see which instance is tripped and its last health result, then restore its reachability. Scanning continues on the remaining instances with reduced capacity and no redundancy margin.",
 		}
 	}
 }

@@ -1560,7 +1560,8 @@ func apiCAStatus(w http.ResponseWriter, r *http.Request) {
 	info["cacheMax"] = 10_000
 	info["cacheTTL"] = "1h"
 	info["leafValidity"] = "24h"
-	info["autoRotation"] = true
+	// Only a CA Culvert generated is renewed automatically (internal/ca/provenance.go).
+	info["autoRotation"] = caAutoRenewed()
 	info["rotationOverlapDays"] = 30
 	info["keyProvider"] = certMgr.KeyProviderName()
 	expiry := certMgr.CAExpiry()

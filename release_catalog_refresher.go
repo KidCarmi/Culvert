@@ -149,6 +149,11 @@ func (r *Refresher) Refresh() error {
 	return r.refreshFromSource()
 }
 
+// crashComponentReleaseCatalogTicker names a contained Refresher.RunTicker
+// round in the crash plane (CHAOS-119), separately from the two
+// loadReleaseManagement loops: this one owns the verify/persist/publish cycle.
+const crashComponentReleaseCatalogTicker = "release_catalog_ticker"
+
 // RunTicker blocks, refreshing on the configured interval (+ jitter) until ctx
 // is cancelled. It is a no-op when the ticker is disabled (interval <= 0). The
 // CALLER decides whether to run it in a goroutine; the Refresher spawns none
@@ -164,7 +169,20 @@ func (r *Refresher) RunTicker(ctx context.Context) {
 			timer.Stop()
 			return
 		case <-timer.C:
-			_ = r.Refresh() // errors are recorded in meta; keep ticking
+			// CHAOS-119: guard the ROUND. This loop has no production caller
+			// today — its own doc says "the CALLER decides whether to run it in
+			// a goroutine" — so the guard changes no current behaviour. It is
+			// here because the mechanical registry gate
+			// (TestCHAOS119_EveryBackgroundRoundLoopIsRegistered) found this
+			// loop as a round loop with no containment, and the moment someone
+			// detaches it, a panic inside the source → verify → persist →
+			// publish cycle it drives (third-party catalog bytes, signature
+			// verification) would terminate the gateway. Arming it now costs
+			// nothing and removes the trap; a failed round already keeps the
+			// current catalog, so keep-going is the established semantics.
+			runGuarded(crashComponentReleaseCatalogTicker, func() {
+				_ = r.Refresh() // errors are recorded in meta; keep ticking
+			})
 		}
 	}
 }

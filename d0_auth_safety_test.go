@@ -19,10 +19,10 @@ import (
 //   - PAC file (Windows clients cannot send credentials)
 //   - non-/api/ paths (e.g. /healthz) bypass the API gate entirely
 //
-// SEC-PUBLICPATH-1 (RISK-033) removed a sixth category, "TOTP enrolment
+// SEC-PUBLICPATH-1 (RISK-033) removed a sixth category, "TOTP enrollment
 // (prefix /api/auth/totp)", and the two paths that pinned it. No such route
 // has ever been registered; the prefix only pre-authorised handlers nobody
-// had written yet, so the first enrol/disable endpoint would have been born
+// had written yet, so the first enroll/disable endpoint would have been born
 // unauthenticated. The former path now sits in d0NonPublicAPISample.
 var d0PublicPaths = []string{
 	"/api/setup/status",

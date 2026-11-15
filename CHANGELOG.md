@@ -9,6 +9,207 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **`BenchmarkHTTPForward_HandleHTTP` overstated the plain-HTTP forward path's
+  memory by ~3.7x, against its own stated purpose of reporting "the real
+  per-request total".** No production behavior changes: the inflation was in
+  the measurement only. `handleHTTP` ends in `io.Copy(w, resp.Body)`, which
+  takes `dst`'s `io.ReaderFrom` fast path when one exists — and the
+  `*http.response` serving every production request has one, copying through
+  net/http's *pooled* 32 KiB buffer. The benchmark passed a bare
+  `httptest.ResponseRecorder`, which has no `ReadFrom`, so `io.Copy` fell back
+  to its generic path and allocated a **fresh 32 KiB buffer on every
+  iteration** — a cost production never pays. Measured (Go 1.27.4,
+  linux/amd64, `-benchtime 3000x -count 5`): 44,685 B/op and 95 allocs/op
+  before, 11,966 B/op and 94 allocs/op after, a 32,719 B/op drop that matches
+  the 32 KiB buffer. The corrected total now sits just above the
+  forward-step-only `BenchmarkHTTPForward_Direct` (10,734 B/op), as it should.
+  The benchmark now writes through a `readerFromRecorder` that implements
+  `ReadFrom` over a pooled buffer, modelling the production copy path while
+  keeping the in-process isolation. `TestBenchGate_HTTPForwardAllocs` was never
+  affected (it copies to `io.Discard`) and is unchanged at 82 allocs/op against
+  its bound of 85. New `proxy_http_readerfrom_test.go` pins the load-bearing
+  production property — that the forward path's `ResponseWriter` implements
+  `io.ReaderFrom` — so that wrapping the proxy-plane writer the way
+  `trackedRW` (admin plane) wraps its own, which masks `ReadFrom` behind the
+  three promoted interface methods, is caught as the 32 KiB-per-response
+  throughput regression it would be rather than passing as an invisible
+  no-op at the `io.Copy` call site.
+
+- **The SSRF guard's DNS verdict cache was unbounded and its 5-minute sweep
+  stalled all CONNECT/SOCKS5 traffic.** The cache key is the client-named
+  destination host, so a wildcard-DNS domain lets one client mint unlimited
+  keys; entries were reclaimed only by a sweep that walked the whole map under
+  the exclusive lock every CONNECT/SOCKS5 pre-flight check also takes, and the
+  map never shrank afterwards. Measured on 1M keys (Go 1.27.4, linux/amd64):
+  ~158 MiB live, a ~200 ms reader stall during the sweep, ~112 MiB still
+  retained after it. `internal/ssrf` now keeps two bounded generations
+  (16,384 keys each): a full generation rotates out and the oldest is dropped
+  whole, and the periodic cleanup is the same O(1) rotation. Same 1M-key
+  workload: ~2.8 MiB live, ~3 µs cleanup, ~0.1 MiB retained. Verdicts, the
+  30 s maximum freshness, no caching of resolution failures and the dial-time
+  rebinding check are unchanged; live hits in the retiring generation are
+  promoted with their original expiry so hot hosts survive a key flood.
+
+- **Session-cookie decoding consulted the revocation list twice per
+  authenticated request, taking the same exclusive mutex each time, so the
+  proxy authentication path serialised against itself at twice the necessary
+  rate.** `session.Decode` runs on the proxy credential path and not only the
+  admin UI — the signed cookie is the first arm `resolveRequestAuth` tries — and
+  it called `IsRevoked(payload)` and then `IsUserRevoked(subject)`, each of
+  which locks `RevocationList.mu` over a single map lookup. Measured on
+  `BenchmarkDecodeParallel` (Go 1.27.4, linux/amd64, 4 cores, `-mutexprofile`)
+  with an EMPTY revocation list, so the contention is purely on the lock:
+  `IsUserRevoked` was 42.4% and `IsRevoked` 30.9% of all mutex delay in the
+  run. `StatusFor` now answers both questions under one acquisition, and
+  `Decode` asks once. The two checks' own cost falls 1.49x serial (44.4 ->
+  29.8 ns for the pair) and 1.70x under contention (255 -> 150 ns at 4 cores),
+  and the mutex delay they account for falls 64% per op (193 -> 69 ns).
+  End-to-end `Decode` throughput at 4 cores is UNCHANGED (711 -> 709 ns/op):
+  at this core count the lock is only a few percent utilised and is not yet the
+  limiter, so what the change buys is headroom — halving the lock time per
+  request doubles the core count at which this mutex becomes the authentication
+  path's throughput ceiling, which a 4-core runner cannot demonstrate. Decode's
+  rejection order (invalid signature, revoked, expired, user revoked) and every
+  error it can return are unchanged; what moved is that a revoked cookie now
+  pays the base64 and JSON decode before refusal, which is unobservable because
+  the MAC verified above covers the payload, so a cookie reaching that point was
+  encoded by this appliance and always decodes. Read-path benchmarks and a
+  structural acquisition-count gate are new
+  (`internal/session/revocation_readpath_bench_test.go`,
+  `revocation_readpath_benchgate_test.go`); the gate is structural rather than a
+  timing ratio for the reason this repository has now recorded four times — the
+  size of a contention win is hardware- and core-count-dependent, so a bound
+  loose enough to be safe everywhere catches nothing. Three lock-free read
+  designs were built, measured and rejected before this one, and the reasons are
+  recorded on `StatusFor` so they are not retried blind: an **RWMutex** on this
+  field measured ~20% SLOWER under contention (~326 vs ~275 ns/op), because the
+  critical section is one map lookup and `RLock`/`RUnlock` are two atomic writes
+  to the same cache line; an **immutable copy-on-write view** published through
+  an `atomic.Pointer` delivered the read win (2.8x) and cost a full map copy per
+  revocation (`Revoke` 0.6 us -> 750 us, 787 KB/op at 4096 entries), which is
+  unaffordable on a list the local MAC-verified path deliberately leaves
+  uncapped and on the same logout path CHAOS-73 recorded quadratic write
+  amplification; and a **`sync.Map` mirror beside the authoritative maps** keeps
+  writes O(1) but makes the authoritative map no longer authoritative for the
+  read path, so any writer that does not update the mirror — including the 47
+  existing test sites that populate `tokens`/`users` directly — is silently
+  ineffective. The lock-free read remains the right end state and needs the
+  store itself to become concurrent, which is a redesign of a security-critical
+  structure and belongs in its own reviewed change.
+
+- **The identity-result cache on the proxy credential path chose its eviction
+  victim by scanning every bucket, so a cached verdict cost one hashed map
+  lookup per distinct client address — under the cache's single mutex, once per
+  insertion, for as long as the cache sat at its cap.** `identcache`'s
+  `evictOneLocked` answered both of its questions ("is any bucket front
+  expired?" and "which front is the fairness victim?") by iterating
+  `c.buckets` and calling `frontLocked` on each, and `frontLocked`'s cost is a
+  `c.entries[k]` lookup on a string key. The fairness key is the client's own
+  address (`clientFairnessKey`), so the scan was linear in the number of active
+  clients, and at `maxAuthCacheSize` (5,000) a full cache is the steady state of
+  any deployment with a few thousand of them — `clients=5000` at a 5,000 cap is
+  one cached verdict per client, the ordinary shape, and the case where every
+  bucket ties on live count so the scan had to visit all of them. Two things
+  made this more than CPU time: the work is lock-held on the credential path, so
+  it is also a latency floor for every concurrent `Get` queued behind the same
+  mutex; and the term it is linear in is attacker-influenced, because these
+  caches are populated by unauthenticated requests over a caller-supplied key
+  space (ADR-0041/CHAOS-76), so the cost of the fairness policy grew with the
+  very flood the policy exists to survive. Both answers now come from the root
+  of a heap maintained incrementally as buckets change — `victims`, ordered by
+  the same exported `BetterVictim` predicate the scan applied, and `expiries`,
+  ordered by front deadline — over a front memoised on the bucket, with
+  `bumpLiveLocked` keeping `frontLocked`'s map lookup off the common path where
+  only the live count moved. The heaps are hand-rolled because this package's
+  import surface is `sync` and `time` only, pinned by its boundary test.
+  Measured at the real 5,000 cap (`benchstat`, `-count=6`): one insertion at the
+  cap 275.9 us to 1.095 us at 5,000 clients (**-99.6%**), 44.5 us to 733 ns at
+  1,000 (-98.4%), 4.25 us to 579 ns at 100 (-86.4%); the flood shape (one client
+  holding most of the cache) 253.5 us to 686 ns (-99.7%); the concurrent
+  credential path with one store in four 85.6 us to 659 ns per operation at
+  5,000 clients (-99.2%) and 5.74 us to 290 ns with one in sixty-four (-94.9%),
+  measured separately at `-count=8` with each goroutine counting locally, since
+  a shared atomic inside the measured loop adds contention to a benchmark whose
+  subject is contention; insertion over already-expired entries 154.4 us to
+  1.46 us (-99.1%).
+  Allocations per insertion are unchanged (`~`/`all samples equal` on every
+  shape but one). The read path is untouched and measured so: `BenchmarkGetHit`
+  is 123.1 ns to 122.4 ns (`p=0.781`, no change). One path is deliberately
+  slower: re-verifying a credential the cache already holds moves the bucket's
+  live count down and straight back up, and each move repositions it in the
+  fairness heap, costing +362 ns (439 ns to 801 ns at 1,000 clients) where the
+  old code did almost nothing because removing the existing key takes the count
+  below the cap and the eviction loop then never runs. It is left alone on
+  purpose: collapsing the two moves means deferring an index fixup past the
+  eviction loop on the strength of a cross-function invariant inside a security
+  control, bought for 362 ns on a path that runs once per cached credential per
+  TTL and exists to avoid a millisecond-scale directory bind. Selection
+  behaviour is unchanged and asserted to be: a differential oracle keeps the old
+  scan as an executable reference and, over six randomised workloads of 4,000
+  steps each, requires the index to drop exactly the entry the scan would have
+  dropped — and on every step re-checks the heap order, the recorded positions,
+  one-bucket-one-slot, and that each memo still describes its bucket's real
+  front. The one deliberate refinement is that an expired front is now taken
+  earliest-deadline-first where the scan took whichever one Go's randomised map
+  iteration reached first; both satisfy the documented policy and the new choice
+  is reproducible, which is the property `BetterVictim` exists to give the live
+  path. Guards were validated by mutation: inverting the fairness ordering and
+  dropping the live-count fixup each fail the oracle, and the new
+  `TestBenchGate_EvictionAtCapIsFlatInClientCount` ratio gate measures 81.7x
+  against the pre-change scan versus 1.59x after, against a 10x bound. A
+  load-independent AST wall (`TestChaos76_WallNoBucketScanSurvivesInEviction`)
+  fails the build if `evictOneLocked` iterates `c.buckets` again, so the
+  regression cannot return even on a runner too loaded to time. `BetterVictim`
+  is untouched, so `store.go`'s local credential cache keeps the shared
+  definition. No wire, persistence or API change. `./internal/identcache` is
+  registered in the three `benchgate` commands that run such gates.
+
+- **The Layer-2 community-category domain walk opened a separate BadgerDB read
+  transaction for every label of the destination authority — multiplying a
+  process-wide serialization point by the host's label count, on the request
+  path.** `catdb.Lookup` walks the host most-specific-first
+  (`a.b.c.cdn.example.com`, then `b.c.cdn.example.com`, …, stopping before a
+  bare TLD) and each probe called `db.View`, so each probe allocated a
+  `*badger.Txn`, took badger's process-wide oracle mutex for a read timestamp,
+  and sent **twice** on the single `WaterMark.process` goroutine's channel
+  (`readMark.Begin`, then `Discard` → `doneRead` → `readMark.Done`). Every
+  concurrent lookup in the process funnels through that one goroutine, so a
+  5-label host cost 5 transactions, 5 oracle acquisitions and 10 sends where one
+  answer needs one of each — and an uncategorised host, the overwhelmingly
+  common outcome since the feed covers a small slice of the namespace, always
+  runs the walk to completion. The cost was invisible to the policy benchmarks
+  that drive it: `policy_hostcat.go` correctly memoizes the lookup once per rule
+  scan, so the contention sat inside a single opaque call, on a resource shared
+  with every other goroutine. The walk now runs on ONE transaction, armed by
+  `Lookup` for exactly the reason CHAOS-74 already arms fault containment once
+  for the whole walk, and the key is built once and re-sliced per label (every
+  parent domain is a suffix of the normalized host) instead of converted per
+  label. Measured on a 5-label uncategorised host (medians of `-count=6`, both
+  shapes in the same run): wall clock 6,334 ns to 3,342 ns at 4-way parallel
+  (-47%) and 4,214 ns to 2,912 ns single-threaded (-31%), with the negative
+  scaling largely gone — the per-label shape got
+  **slower** as goroutines were added (+50% from 1 to 4), the one-transaction
+  shape costs +15%; allocations 35 to 27/op (-23%), bytes 2,048 to 1,456 B/op
+  (-29%); mutex delay over 300,000 lookups at 4-way 1,763 ms to 675 ms (-62%),
+  and block delay in `oracle.readTs` 1.54 s to 0.579 s (-62%). Behaviour is
+  unchanged and asserted to be: a differential oracle runs 20 host shapes
+  through the shipped walk and through a frozen in-tree copy of the per-label
+  walk and requires identical answers AND identical `LookupFaults` deltas (the
+  answer alone cannot tell "not in the feed" from "the store failed to answer",
+  because `Lookup` returns `("", false)` from all three of its error arms), a
+  depth-precedence test stores a distinct category at every depth of one chain
+  so an answer taken from the wrong label is detectable, a structural wall in
+  the CHAOS-74 guard-wall idiom requires exactly one badger transaction opened
+  in `Lookup` and none in `walk`/`getExact` counting every constructor and not
+  just `View`, and a `-race` test runs 2,000 lookups against 200 concurrent
+  `BulkWrite`s to pin that a walk is never torn. Each guard was validated by the
+  mutation it exists to catch; an independent review found two of the three
+  vacuous as first written — the wall passed a `NewTransaction`-per-label
+  regression and the oracle passed a store error collapsed into a clean miss —
+  and both fixes are validated by those mutations. Collapsing the transaction also makes every label of one
+  categorisation read at one read timestamp, so a feed `BulkWrite` landing
+  mid-walk can no longer be half-visible to a single answer.
+
 - **Every open tunnel held 128 KiB of relay buffer per direction that the relay
   never read — ~256 KiB per tunnel of resident heap, or ~2.4 GiB at 10,000
   concurrent tunnels.** `idleCopyCounted` took a pooled 128 KB buffer before its
@@ -37,6 +238,52 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **An unreachable ClamAV daemon is now a Diagnostics row.** With antivirus
+  scanning configured, a daemon that cannot be reached is fail-open: content is
+  forwarded without an antivirus verdict. That was visible on `/ready`,
+  `/health`, `/metrics`, the `scan_clam_error` alert and the Security Scanning
+  panel, while the one-page report read as healthy. A new `clamav_scan` WARN
+  row (additive, report-only; no row when ClamAV is not configured, is
+  answering, or body scanning is delegated to the remote scan service) states
+  the consequence and carries a fixed message, never the daemon address or
+  probe error. It reads the same cached, single-flight status `/health` and
+  `/ready` already read. Scanning, readiness and fail-open behavior are
+  unchanged.
+
+- **A parent-proxy chain with no eligible parent is now a Diagnostics row.**
+  When every configured parent proxy is unhealthy, circuit-open or
+  credential-ineligible, plain-HTTP requests fail open to DIRECT egress. That
+  was visible only as the `upstream_pool_down` alert, a log line, the
+  `culvert_upstream_direct_fallback_active` metric and the effective mode on
+  Network → Upstream Proxies, so the Diagnostics report stayed green while the
+  configured chain was bypassed. The new `upstream_egress` WARN row names the
+  mode (`no_eligible_parent` or `direct_fallback`), the configured count and the
+  fallback total, and points to the Upstream page. It is report-only: it reads
+  the same in-memory eligibility and fallback latch, never probes, and
+  selection, fail-open behavior and alerting are unchanged. Counts only; no
+  authority, URL or credential.
+
+- **A refused upstream-pool configuration is now a Diagnostics row.** When the
+  stored managed upstream document failed validation at load, the config.yaml
+  upstream seed was refused whole, or the one-time legacy pool migration was
+  abandoned, the configured parent proxies were not in use. That showed only as
+  a banner on Network → Upstream Proxies and a startup log line, so the
+  Diagnostics report stayed green. The new `upstream_pool_config` WARN row names
+  each latched condition with its bounded reason and count and the action that
+  clears it. It is report-only: it reads the same state as `/api/upstream`, and
+  pool loading, validation and egress are unchanged. It carries no authority,
+  URL or credential.
+
+- **A partially tripped CDR pool is now a Diagnostics warning.** The `cdr`
+  row only asked whether ANY Sluice instance could scan, so a pool with one of
+  two instances' circuit breakers open still read `enabled-healthy`, and the
+  lost capacity and redundancy were visible only by opening CDR → Instances.
+  The row now reports `enabled-reduced` (N of M instances out of rotation) and,
+  when every breaker has tripped and only recovery probes reach Sluice,
+  `enabled-recovering`. Breaker state is read, never reserved or advanced; the
+  row names no instance; CDR enforcement, fail mode and the `enabled-dark` /
+  `enabled-broken` FAIL rows are unchanged.
+
 - **A plain-HTTP admin UI is now a Diagnostics row.** When the self-signed
   certificate could not be generated at startup the GUI fell back to cleartext
   HTTP, announced only on the login banner and the Network page. The new
@@ -58,11 +305,415 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **A panic in the MCP telemetry shutdown drain killed the process from a
+  shutdown hook that runs before every durability flush, so a "graceful"
+  shutdown skipped the tunnel drain and every log/audit store close.**
+  `telemetryRuntime.Close` performed its final denial flush, its full export
+  drain and its manager close inside a bare `go func()`. The drain calls the
+  same `exportStep` the periodic export loop has guarded since the previous
+  release — reading the encrypted spool and calling the archive exporter, both
+  fed by data the process does not author — so the identical fault was contained
+  on the periodic path and fatal on the shutdown path. The hook is registered at
+  shutdown order 66, which left orders 67-140 unrun: the tunnel establish-fence,
+  the HTTP/2 GOAWAY wave, the in-flight tunnel drain, and the syslog, community
+  DB, log store, request log and audit log closes. Because the goroutine is
+  detached while `Close` waits on the shutdown budget, a hook abandoned on its
+  deadline left the goroutine running, so the crash could instead land inside an
+  unrelated later hook. The drain is now three independently guarded stages, so
+  one partition's fault costs only that partition's pending batches and the
+  manager close — the step that performs the final per-domain flush and releases
+  the spool — always runs; the hook always answers, so it can no longer consume
+  the budget it exists to honour; and a drain that died is reported as a failure
+  rather than a clean shutdown. Committed events stay durable in the encrypted
+  spool and export on the next start.
+
+- **Five background rounds contained their panics without reporting them, so a
+  round that failed on every tick was indistinguishable from one that was
+  healthy.** The release catalog refresh tick, the catalog stale-watchdog tick,
+  the SaaS feed refresh tick, the Control-Plane address republish retry and the
+  HA leadership-resume retry each recovered their own panic and wrote a log
+  line, which moved no `culvert_crash_records_total{component}` series, stored
+  no crash record for the support bundle or health surface, and wrote no audit
+  entry. The sharpest case states its own cost in its own log line: a panic in
+  the leadership-resume retry permanently ends the only retry of the persisted
+  HA intent, leaving the node serving with no write authority until it is
+  restarted. All five now report into the crash plane under their own component
+  while keeping their existing containment, log lines and outcome semantics.
+  `Refresher.RunTicker`, a catalog verify/persist/publish round loop with no
+  containment and no production caller yet, is guarded before it acquires one.
+
+- **The crash sink's component-label cap was smaller than its own fixed label
+  set, so past 32 distinct components a recovered panic lost its record, its log
+  line and its audit entry entirely.** `maxCrashLabels` was 32 while the tree
+  declares 56 fixed component labels. The cap exists to fail closed on
+  dynamically-derived labels, and Culvert has none — every call site passes a
+  compile-time constant. Past the cap the metrics counter folds a label into
+  `component="other"` (attribution lost, series intact) but the throttle
+  suppresses the record, the log line and the audit entry outright, and slots
+  are first-crash-wins and never pruned — so they went to the frequent
+  request-path components while the rare, high-severity background rounds lost
+  their evidence. The cap is now 128, with a test that enumerates the labels
+  from source and fails when a future change crosses it again.
+
+- **A panic in any of the last five `go`-detached background rounds terminated
+  the whole gateway, and guarding two of them without also fixing how they
+  release their locks would have been worse than the crash.** Go terminates the
+  process on an unrecovered panic in ANY goroutine, so a fault in one round of
+  the syslog/SIEM health watchdog, the IdP metadata degradation watchdog, the
+  Root CA recovery loop, or either MCP telemetry loop (denial flush and
+  per-partition archive export) dropped every in-flight tunnel on an in-line
+  security gateway. Three of the five exist for observability, so a
+  non-essential reporting feature could kill the thing it reports on. All five
+  rounds now go through `runGuarded`, reporting under their own
+  `culvert_crash_records_total{component=…}` value, so a transient fault costs
+  one interval and self-heals instead of costing the node.
+  The paired half is the reason this took a round of its own. Four critical
+  sections reached from those rounds held a mutex across work they do not
+  control and released it with a TRAILING, non-deferred `Unlock`:
+  `commitSyslogDegradation` and `syslogFeedState` (`syslogHealth.mu`, also taken
+  by the drop observer on the logging path, `/healthz` and diagnostics),
+  `idpMetadataDegradationSweep` (`idpMetadata.mu`) and `idpStaleCeilingSweep`
+  (`idpServedMu`, also taken by every IdP metadata publish and by retirement). A
+  guard over that shape contains the panic into a PERMANENTLY held lock — no
+  crash, no restart, no alert and no recovery path, which is strictly worse than
+  the crash it replaces. A function-level `defer` is also wrong: all four do work
+  after the release that must not hold the lock (`commitSyslogDegradation`
+  dispatches an alert that reaches a webhook; `idpStaleCeilingSweep`'s result is
+  acted on with its lock released because retirement takes the registry write
+  lock — the CHAOS-50 rule). Each section is therefore SCOPED, with a deferred
+  release inside the scope, and every released-before-alert boundary and lock
+  hold is unchanged.
+  The Root CA recovery loop needed the opposite decision, because its caller
+  BRANCHES on the round's result and both exits are terminal: `!attempted` means
+  an operator already fixed the CA and `err == nil` means recovery succeeded. A
+  contained panic inheriting those zero values would silently abandon the retry
+  budget, or declare SSL inspection recovered while it stays disabled and
+  inspect-matched TLS is forwarded UNINSPECTED. A panicked attempt is now
+  charged as a FAILED attempt and retried on backoff, with the give-up log
+  unchanged. No wire, persistence, API or configuration change; the five new
+  crash components are label values on an existing series. Every gate was
+  validated by mutation, including that reverting each rescoped section is
+  caught, and the syslog lock-wedge test injects its fault INSIDE the critical
+  section because a panic after the release — or one contained by a
+  function-level defer, which still runs while a panic unwinds — cannot
+  distinguish the fix from the defect. Two existing gates were corrected and are
+  now stricter: CHAOS-81's retirement-lock wall resolves a deferred release's
+  real boundary (the owning scope's closing brace) instead of comparing against
+  the `Unlock` call's source position, and CHAOS-87's watchdog-enforcement wall
+  pins the whole loop→round→five-calls chain after the tick body was split out
+  for guarding. `funcSource` now anchors its reads to `pkgSourceDir()` so a
+  concurrent `os.Chdir` cannot flake the CHAOS-105/117/118 source gates. See
+  [the review](docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-12.md).
+
+- **Automatic Root CA rotation broke inspected HTTPS for every client until the
+  new root was distributed, and silently replaced imported CAs.** The rotation
+  minted a new key, so a client trusting only the old root could not validate
+  the new leaves, and it did this to any CA near expiry, including a customer
+  root or an enterprise-issued intermediate. Now:
+  - A root Culvert generated is *renewed* under the same key and subject, so
+    the old and the new certificate both validate a leaf until the old one
+    expires. Replacing the key remains the manual `POST /api/ca/rotate`.
+  - An imported CA is never renewed or replaced. A `cert_expiry` alert fires
+    daily inside the 30-day window; at expiry inspection is refused, not
+    bypassed.
+  - An imported intermediate is now served with every forged leaf, so a client
+    trusting only the enterprise root can build the path.
+  - **Upgrade note:** bundles from earlier releases carry no provenance record
+    and are not renewed until classified with the new startup-only
+    `CULVERT_CA_PROVENANCE` (`culvert-managed` or `imported`). The record is a
+    separate PEM block that older builds skip, so a downgrade still loads the
+    bundle. See `docs/operator/root-ca-expiry.md` §5.
+
+- **One non-ASCII SAN downgraded the admin UI to plain HTTP.** The admin UI's
+  self-signed certificate is minted from every SAN source (`-ui-san`, the
+  network settings' `ui_sans`, `CULVERT_PUBLIC_IP`). A single name x509 cannot
+  encode as an IA5String — typically an IDN typed in Unicode, e.g.
+  `café.example.com`, instead of its `xn--` form — failed
+  `x509.CreateCertificate` for the whole certificate, and `startUI` treats a
+  self-sign failure as "serve HTTP", so the next start exposed the login page
+  and credentials in cleartext. The unencodable name is now dropped (and
+  logged) and the certificate is minted from the remaining SANs.
+
 - **A whitespace-only `cluster.grpc_addr` passed config validation under `cluster.role: control-plane`.**
   The required-address check compared the raw string to `""`, so `grpc_addr: " "` loaded, resolved to a non-empty
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
+
+- **The dropped-record re-enrollment alert shared ONE dedup key across every
+  node, so a batch of identity replacements delivered one webhook and silently
+  dropped the rest.** `recordDroppedNodeReenrollment` is the only operator-facing
+  signal that a node ID whose stored record was dropped as an unusable null
+  entry has been re-enrolled under a certificate whose predecessor can never
+  reach the CRL, and its contract is to fire once per enrollment. The webhook
+  path did not keep that contract: `internal/alerts` suppresses a duplicate on
+  `event + ":" + Detail` within 30 s, and the producer's detail was a CONSTANT —
+  the node ID lived only in `Host` and the audit record's `Object`, neither of
+  which is part of the dedup key. The multi-node batch is the NORMAL shape of
+  this event, not an edge case: one corrupt `cluster.json` drops every null
+  record it holds in a single normalisation pass, and the documented remediation
+  is to re-issue tokens and let those nodes re-enroll together, so an operator
+  was told about one replacement and nothing about the others. The detail now
+  names the node, which makes the dedup key per-node — the same property
+  `recordExpiredNodeReenrollment` has only incidentally, through its per-node
+  serials. The node ID is client-supplied, so it passes `sanitizeLog` before
+  entering the detail (CWE-117) and is printed with `%q`. Nothing else changes:
+  not the admit decision (a single-use admin-issued token is still required),
+  not the audit action, `Object` or ring behaviour (never deduplicated), not the
+  alert event, `Host`, `Actor` or `Source`, and not the recording point, which
+  is still after the node is registered so a failed enrollment claims nothing.
+  The fix can only cause MORE deliveries, never fewer. Detection gap only: no
+  policy, privilege or persistence behaviour is affected.
+
+- **A Stage-1 auth rule's bare-IP subject decided on the SPELLING, so a
+  `CredentialRequired` rule could be accepted and then never challenge anyone.**
+  An auth rule's typed CIDR subject predicate accepts "a valid IP or a CIDR"
+  (`validateCIDROrIP`, i.e. anything `net.ParseIP` accepts). The CIDR form was
+  parsed, so it decided on the address; the bare-IP form was compared as a
+  STRING against the peer address the proxy derives with
+  `net.SplitHostPort(r.RemoteAddr)` — the canonical form Go prints. A rule
+  scoped to `2001:DB8::10`, `2001:0db8:0000:0000:0000:0000:0000:0010` or
+  `::ffff:10.0.0.5` was therefore stored, listed, shown in the dry-run, and
+  silently inert: `matchSubjectAddr` returned false,
+  `resolveAuthOutcomeFrom` fell through to the global default auth outcome, and
+  the client was never asked for a credential. Of seven spellings the API
+  accepts for two addresses, five could never match. This is the same defect
+  PR #1873 fixed for an access rule's `SourceIP`; the authentication path kept
+  the string comparison, where the fail-open direction is a missing credential
+  challenge rather than a missing deny. `matchIPOrCIDRAddr` now falls back to
+  the same `sourceLiteralPrefix` helper and compares `netip.Addr` values with
+  both sides unmapped. The exact-string comparison is still tried first, so no
+  rule that matched before stops matching, and a ZONED literal keeps the string
+  comparison because a link-local peer address carries its zone in the client
+  string too. Behaviour change in the other direction, named deliberately: an
+  `Exempt` auth rule with a non-canonical bare-IP subject was inert and is now
+  live, so it waives authentication for the address it names — review
+  `Outcome: Exempt` rules with bare-IP subjects, and `Action: Allow` access
+  rules with bare-IP `SourceIP`, when upgrading across this change. The Exempt
+  kill switch still suppresses a subject matched by address.
+
+- **A dropped cluster node record made the same node ID re-enrollable with no
+  CRL entry, no carried-forward maintenance state and no audit.** CHAOS-117
+  drops a null node record instead of crash-looping the control plane, and the
+  normalisation comment called that a pure "availability cost". It is not: the
+  dropped record was the only thing on the control plane naming that node's
+  certificate serial, and `admitEnrollment`'s anti-identity-takeover denial keys
+  on `GetNode(...)` returning `ok`. After a drop the same node ID was
+  re-enrollable on a fresh token with no predecessor to supersede, so the
+  superseded certificate never reached the CRL, the operator-set `draining`
+  status and admin labels were not carried forward, and no audit entry or alert
+  distinguished the identity replacement from a first enrolment. The admit
+  DECISION is unchanged — a single-use admin-issued token is still required,
+  and refusing would re-brick a node whose record was damaged by disk
+  corruption — but the replacement is now evidence-producing:
+  `ClusterStore.droppedNodeIDs` retains what `normalizeClusterState` dropped at
+  both ingestion boundaries (deliberately not persisted; it accumulates for the
+  life of the process because the lost serial never becomes revocable again),
+  and an enrolment under such an ID logs, writes a
+  `cluster.node.reenroll-dropped` audit entry and fires the existing
+  `cluster_node_reenrolled` alert, whose detail states that the predecessor's
+  serial was lost with the record and so stays valid until it expires. Recorded
+  only once the node is registered, so neither an unauthenticated prober
+  guessing node IDs nor a token holder whose CSR is then refused can drive the
+  audit entry or the alert. The CRL leg is unfixable by
+  construction and is recorded as a residual risk. Found by the 2026-11-12
+  security regression review.
+
+- **The policy API refuses a `sourceIP` the matcher can never match.**
+  `POST /api/policy`, `PUT /api/policy` and `PUT /api/policy?id=` accepted any
+  string, so a value that is neither an address nor a CIDR (`" 10.0.0.5"`,
+  `"10.0.0.1-10.0.0.9"`, `"10.0.0.0/33"`) was stored and then never matched:
+  fail-open for a Drop rule above a broader Allow. Those requests now get a 400
+  naming the field. The bulk and restore paths (policy file load, config
+  rollback, backup import, draft publish, cluster snapshot) are unchanged, so an
+  existing configuration keeps loading; `PolicyStore.Load` keeps such a rule and
+  logs a `WARN` naming it on every load until it is fixed. Owner decision on
+  PR #1873.
+
+- **The OIDC browser login merged a userinfo response into the session without
+  checking whose it was.** `enrichFromUserinfo` filled the session's email, name
+  and groups from the userinfo endpoint and never compared its `sub` with the ID
+  token's, which OIDC Core §5.3.2 requires. A userinfo answer about a different
+  subject therefore donated its groups, which group-scoped policy matches on, to
+  the session being minted. A response whose `sub` is missing or different is now
+  discarded and the login proceeds on the signed ID token's claims alone.
+  Behaviour change: an IdP whose userinfo response carries no `sub` no longer
+  contributes groups; put the groups claim in the ID token instead.
+
+- **The CHAOS-116 status probe could publish the PREVIOUS ClamAV daemon's
+  observation as the current one, so `/ready` reported a healthy scanner on a
+  node whose scans were failing open (2026-11-11 security regression review,
+  finding A).** The single flight had no notion of configuration generation.
+  `Scanner.Init` clears the status cache precisely so "the next status read
+  reflects the daemon configured now, never the previous one", then warms it
+  with the same single-flight probe — and a probe already dialing the OLD daemon
+  was a flight in progress, so the warm-up JOINED it. Two consequences at once:
+  the newly configured address was never probed at all, and when the old daemon
+  answered, its observation was stored under the new configuration with a full
+  30 s TTL and logged with the NEW address, because `runClamStatusProbe` reads
+  `clamStatusAddr` at store time. Reproduced as
+  `SecurityScan: ClamAV connected at "127.0.0.1:1"` for a port nothing listens
+  on. The `connected` direction is the one that matters: `coarseClamAVStatus`
+  passes it through to the unauthenticated `/health`, `computeReadiness`'s
+  `clamav` row takes its ok branch, and a ClamAV connection failure is
+  classified as an engine fault that forwards content **UNSCANNED**
+  (`statClamScanError`) — so an orchestrator kept a node in rotation whose
+  malware scanning was down.
+
+  `Scanner.clamStatusGen` is the fix. `Init` bumps it beside the cache clears;
+  `startClamStatusProbe` coalesces only onto a flight of the SAME generation, so
+  a reconfiguring caller starts its own probe for the daemon configured now, and
+  the flight cleanup clears the handle only if it still owns it, so a superseded
+  probe finishing later cannot erase the current flight. `runClamStatusProbe`
+  compares the generation before storing and DISCARDS a superseded observation
+  without storing or logging it: callers fall back to `clamStatusUnknown`, which
+  fails readiness, until a probe for the configured daemon lands. Fail-closed in
+  the uncertain direction, and the dial rate stays bounded by the reconfigure
+  rate, not the request rate — the negative control
+  (`TestChaos116_SameGenerationReadersStillShareOneProbe`) pins that 32
+  concurrent readers at a steady configuration still produce exactly one dial.
+
+  **Latent, not live:** `loadScanning` is `Scanner.Init`'s only caller and runs
+  once at startup, so no shipped deployment could reach the window. `Init`'s own
+  comment anticipates the runtime reconfigure caller that would make it live,
+  which is why it is fixed rather than recorded. Gates:
+  `internal/secscan/clam_status_probe_reconfigure_test.go` (regression, boundary,
+  negative control, and a `-race` concurrency case), each verified to fail with
+  the guards neutered.
+
+- **`CULVERT_CA_PROVENANCE` was missing from the README environment-variable
+  reference** (same review, finding B). The control that restores automatic
+  inspection-CA renewal on an upgraded install was documented in
+  `docs/operator/root-ca-expiry.md` §5 and here, but not in the canonical table
+  an operator reads when writing a deployment manifest — so a manifest reviewed
+  against that table could not be found incomplete, and the slow, announced
+  failure it leads to (a root that is never renewed, and inspected HTTPS refused
+  at its expiry) had no entry pointing at the fix.
+
+- **One `null` in a persisted JSON map was a permanent, self-reinstating
+  denial of service of the Control Plane — and the HA leader handed it to every
+  standby (CHAOS-117).** `{"nodes":{"dp-1":null}}` is valid JSON, so CHAOS-07's
+  quarantine-don't-overwrite response — which fires on a `json.Unmarshal`
+  FAILURE — never saw it, and `ClusterStore.Load` normalised nil **maps**
+  without normalising nil map **values**, publishing a nil `*EnrolledNode` to
+  every consumer. The first consumer to touch it is `checkNodeLiveness`, on
+  `StartHeartbeatMonitor`'s **detached, unguarded** 30 s ticker started at
+  control-plane activation: Go terminates the process on an unrecovered panic
+  in any goroutine, so the gateway exited — dropping every in-flight tunnel —
+  and because nothing repaired the file it exited again 30 s after every
+  restart, with restart supervision guaranteeing the next iteration.
+  `ImportFullState` carried a copy of the same one-level-too-shallow defence
+  and then **persisted what it imported**, so a standby that resynced from a
+  damaged leader wrote the record to its own `cluster.json` and inherited a
+  crash loop that outlived the leader. This was the third instance of a class
+  the repository already tracked twice (the top-level nil maps, and
+  `CARotation.RenewedNodes`, whose own test calls it "a second nil-map class
+  defect"); it recurred because each ingestion boundary hand-rolled its own
+  normalisation and the second was never deepened when the first was. Both
+  boundaries now route through one `normalizeClusterState`, which DROPS a null
+  record rather than zero-filling it — a zero node has no `NodeID` and no
+  certificate serial, so materialising one would invent a nameless node in the
+  admin roster and the CA-rotation count, while dropping cannot lose
+  revocation evidence (`st.Revoked` is a slice of values) and leaves a dropped
+  node to re-enrol rather than be trusted on a record that proves nothing. The
+  file is deliberately **not** quarantined: it parsed, so every healthy node
+  and the whole revoked-certificate list in it are usable, and renaming it
+  aside would trade a one-node repair for a fleet re-enrolment; `/ready` is
+  likewise unchanged, matching the posture `noteStateFileUnreadable` already
+  records for a survivable degradation. The heartbeat round additionally runs
+  under `runGuarded` per ITERATION, paired in the same change with converting
+  `checkHeartbeats`' and `ImportFullState`'s trailing `cs.mu.Unlock()` to
+  `defer` — the guard alone would have contained the panic into a permanently
+  held `ClusterStore` lock, wedging every enrollment, heartbeat and admin
+  cluster read forever with no crash, no restart and no alert, which is
+  strictly worse than the crash it replaces. The repair is reported on
+  `culvert_cluster_state_nil_entries_dropped_total`, a sanitised log line
+  naming the dropped node IDs (token hashes are counted, never named, per the
+  CL-9 contract), a viewer-safe `state_file_cluster` diagnostics row carrying
+  the re-enrol action, and one `state_file_corrupt` alert — latched once per
+  process on the replication path, since a standby resyncs on a timer and a
+  persistently damaged leader must not page on every round.
+
+- **An unauthenticated request could make this node dial ClamAV, and enough of
+  them could make the daemon stop answering real scans — which this node
+  forwards UNSCANNED (CHAOS-116).** `Scanner.ClamAVStatus` served a cache miss
+  with an INLINE `clam.Ping()` on the caller's own goroutine: no single-flight,
+  no concurrency cap, a budget of ~2x the 30 s scan timeout (the client applies
+  it to the dial and again to the read), and `context.Background()`, so neither
+  a deadline nor a client disconnect could end it. Its callers are `/health` and
+  `/ready`, which `routeProxyListenerBuiltin` dispatches on the **proxy**
+  listener ahead of `handleRequest` — therefore ahead of the IP filter, the rate
+  limiter and the connection limiter. `handleHealth`'s own comment states the
+  exposure: "every client that can use the gateway can read whatever is written
+  here." And `clamav.clamSem` bounds concurrent **scans** "to prevent
+  overwhelming the daemon" while `Ping` takes no slot, so this was the one path
+  that could open unbounded connections to the daemon that semaphore protects.
+  Measured on the pre-fix tree: **48 unauthenticated `/health` requests produced
+  48 concurrent dials, and not one of them returned** while a daemon that
+  accepts and does not answer stayed silent. Two consequences follow, and the
+  second is the security one: the documented liveness endpoint stops answering
+  inside any orchestrator's probe timeout, so a **healthy** gateway is
+  restarted; and the ping flood fills the daemon's own connection queue, so real
+  scans fail, which `internal/secscan` classifies as an engine fault and
+  forwards **UNSCANNED** (`statClamScanError`, fail-open). `Init` made the
+  window permanent rather than rare — it deliberately clears the status cache,
+  so every boot and every reconfigure reopened it — and `Init`'s own ping held
+  the scanner's **write lock** across that dial: **measured 30.03 s of startup
+  delay** against a silent daemon, before the proxy listener came up at all.
+
+  The dial now happens on one probe goroutine at a time, under its own 5 s
+  budget, and never on a caller's context — so no caller's disconnect can cancel
+  a probe the remaining callers are waiting on, which would otherwise hand any
+  unauthenticated client a way to keep the status permanently unobserved. A
+  caller waits at most 750 ms and is then answered from the previous observation
+  (stale-while-revalidate, so a healthy row cannot flap at every TTL expiry) or,
+  only before any observation exists at all, with a value that reads as
+  unreachable on every surface that consumes it: `coarseClamAVStatus` collapses
+  it and `computeReadiness` takes its failing branch, which is the conservative
+  verdict for a security control this node has not been able to reach. The probe
+  is panic-guarded (`obs.SafeCall`) because it is now a detached goroutine, per
+  the CHAOS-24 contract. `Init` starts the same probe instead of pinging inline,
+  which is what removes the startup stall.
+
+  Preserved: a cache miss still triggers a real ping, a fresh hit is still a pure
+  memory read, and the unauthenticated surface still publishes only the coarse
+  enum. New: the probe logs the status **transition**, closing the gap
+  `healthcheck.go`'s readiness comment records — "ClamAVStatus caches it and logs
+  nothing", so a daemon that died at runtime produced a failing row with no
+  corresponding log line anywhere. `culvert_clamav_status_probes_total`,
+  `culvert_clamav_status_probe_coalesced_total` (the amplification that no longer
+  reaches the daemon) and `culvert_clamav_status_stale_total` say which regime a
+  node is in. `clamav.PingContext` is the bounded ping, reusing the scan path's
+  own `effectiveDeadline`/`watchCancel` helpers; `Ping()` delegates to it with
+  `context.Background()` and is behaviourally unchanged.
+
+- **Security regression review 2026-11-10 (`d11ed3a..ac4e223`, PRs #1844-#1853):
+  no regression; three Low findings, all corrected here.** Full record in
+  `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-10.md`. (1) The
+  category-group membership fix's upgrade note enumerated the widened rule
+  actions as Allow and SSL bypass/inspect and omitted the one that removes an
+  identity requirement: a Stage-1 auth `Exempt` rule keyed on a category group
+  now WAIVES proxy authentication for destinations that belong to one of its
+  categories without classifying as it. The matcher is correct and already
+  gated; the note now names that direction, states that `CredentialRequired`
+  widens fail-closed instead, and points at the rule surfaces and the Policy
+  Tester. (2) `scanOnce`'s HTTP 429 branch still read "the shipped sidecar never
+  emits 429 today" after CHAOS-115 made it do exactly that. 429 and 413 are the
+  only non-200 statuses that branch classifies as something other than a fault,
+  and a fault fails OPEN — so a future cleanup acting on that comment would
+  convert a fail-CLOSED capacity refusal into a fleet-wide unscanned forward
+  under the load the gate exists to survive. The comment now says the branch is
+  live and what reclassifying it costs. (3) The IM-008 pseudonymizer extraction
+  left the id-only mint expressed through `MintPair`, which mints a 32-byte key
+  the caller discards and whose failure leg returns the EMPTY id — the exact
+  value `KeyID()` reports for "no key installed", which beside a valid key is
+  the state the 2E-B generation identity exists to rule out. No reachable
+  behaviour regressed, because since Go 1.24 `crypto/rand.Read` never returns an
+  error and crashes the process instead, so that leg (and `mintID`'s counter
+  fallback, and the error returns on `Rotate`/`Ensure`/`MintPair`) cannot fire
+  on the pinned toolchain. `Pseudonymizer.MintID()` now serves id-only callers,
+  and `mintID` records the dead branch rather than advertising a guarantee the
+  runtime will not honour. No posture, default, validation or dependency change.
 
 - **The scan sidecar had no admission control, so its heap was sized by the
   network and an OOM failed the whole fleet open (CHAOS-115).** `POST /scan`
@@ -110,7 +761,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unscanned until the sidecar died. That is the documented posture for capacity,
   but an operator who was unknowingly relying on the fail-open will meet this as
   new blocking. New surfaces: `culvert_scan_svc_inflight`,
-  `culvert_scan_svc_slots` and `culvert_scan_svc_at_capacity_total` on the
+  `culvert_scan_svc_slots` and `culvert_scan_svc_saturated_total` on the
   sidecar host (behind the same `Configured` guard as the listener gauges), and
   `scan_slots` / `scan_inflight` / `at_capacity_refused` on the sidecar's
   `/health` beside `scan_window_bytes`, because the ceiling to size the
@@ -196,7 +847,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   hosts that belong to one of its categories without classifying as it — for
   example a `{webmail}` group now matches `news.example.test` when `webmail`
   covers `example.test` — which widens Allow rules, and rules carrying an SSL
-  bypass or inspect action, keyed on such groups the same way. The scan stays allocation-free; a
+  bypass or inspect action, keyed on such groups the same way. **Audit
+  category-group-scoped Stage-1 auth rules before upgrading:** the same widening
+  reaches the authentication boundary, so an `Exempt` auth rule keyed on a
+  category group now WAIVES proxy authentication for destinations that belong to
+  one of its categories without classifying as it — the directions listed above
+  widen what is allowed or left uninspected, this one widens what is
+  unauthenticated. `CredentialRequired` widens in the fail-closed direction
+  (more destinations challenged). Review group-scoped Allow, SSL-bypass/inspect
+  and `Exempt` rules in Policy → Rules, and use the Policy Tester, which
+  evaluates the same matcher. The scan stays allocation-free; a
   categorized host whose classification is not in a group pays one
   single-category membership probe per remaining group category.
 

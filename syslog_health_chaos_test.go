@@ -4172,6 +4172,83 @@ func syslogFirstCallPos(fd *ast.FuncDecl, name string) token.Pos {
 	return at
 }
 
+// syslogLockReleasePos returns the position at which fd RELEASES the lock via
+// the named release call — which is not always where that call appears.
+//
+// A `defer mu.Unlock()` releases at the END of the function scope that owns the
+// defer, not at its own source position. Comparing reads against the call site
+// therefore reports every read in a deferred-release critical section as
+// happening after the release, which is how this wall first read CHAOS-118's
+// rescoping of syslogFeedState: the section was moved into a closure with a
+// deferred release (so a contained panic cannot leak syslogHealth.mu — the
+// CHAOS-117 §8.2a rule), and the counter reads are provably still under the
+// lock, but they now sit after the `defer` line.
+//
+// So model the real semantics. For a deferred release the boundary is the
+// closing brace of the func that owns the defer — the closure, when the
+// section was scoped into one; for a bare call it is the call itself. This
+// makes the wall STRICTER, not looser: a read moved OUT of the critical
+// section is still after the boundary either way, and that is the defect the
+// wall exists to catch.
+func syslogLockReleasePos(fd *ast.FuncDecl, name string) token.Pos {
+	var stack []ast.Node
+	var at token.Pos
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		if n == nil {
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+			return true
+		}
+		if call, ok := n.(*ast.CallExpr); ok && !at.IsValid() && syslogCallNamed(call, name) {
+			// `stack` holds the ancestors: n has not been pushed yet.
+			at = syslogReleaseBoundary(call, stack, fd.Body.Rbrace)
+		}
+		stack = append(stack, n)
+		return true
+	})
+	return at
+}
+
+// syslogReleaseBoundary resolves where the release call takes effect: its own
+// position when called directly, or the end of the scope that owns it when
+// deferred. fnEnd is the fallback scope end (the whole function).
+func syslogReleaseBoundary(call *ast.CallExpr, stack []ast.Node, fnEnd token.Pos) token.Pos {
+	if !syslogCallIsDeferred(stack) {
+		return call.Pos()
+	}
+	if end, ok := syslogInnermostFuncLitEnd(stack); ok {
+		return end
+	}
+	return fnEnd
+}
+
+// syslogCallIsDeferred reports whether the node whose ancestors are stack sits
+// inside a defer statement. The walk stops at a nested func boundary, which a
+// defer cannot span.
+func syslogCallIsDeferred(stack []ast.Node) bool {
+	for i := len(stack) - 1; i >= 0; i-- {
+		if _, ok := stack[i].(*ast.DeferStmt); ok {
+			return true
+		}
+		if _, ok := stack[i].(*ast.FuncLit); ok {
+			return false
+		}
+	}
+	return false
+}
+
+// syslogInnermostFuncLitEnd returns the closing brace of the nearest enclosing
+// function literal, which is the scope a defer inside it runs at the end of.
+func syslogInnermostFuncLitEnd(stack []ast.Node) (token.Pos, bool) {
+	for i := len(stack) - 1; i >= 0; i-- {
+		if lit, ok := stack[i].(*ast.FuncLit); ok {
+			return lit.Body.Rbrace, true
+		}
+	}
+	return token.NoPos, false
+}
+
 // syslogForbidCounterReads fails if fd calls any of names.
 func syslogForbidCounterReads(t *testing.T, fset *token.FileSet, fd *ast.FuncDecl, what string, names ...string) {
 	t.Helper()
@@ -4192,7 +4269,9 @@ func TestChaos81_TheLiveCountersAreCapturedUnderTheRetirementLock(t *testing.T) 
 		t.Fatal("syslogFeedState is gone; this wall names a function that no longer exists")
 	}
 
-	unlockAt := syslogFirstCallPos(fd, "Unlock")
+	// The RELEASE BOUNDARY, not the Unlock call site: see syslogLockReleasePos
+	// on why a deferred release makes those two different positions.
+	unlockAt := syslogLockReleasePos(fd, "Unlock")
 	// CONTROL: the matcher must SEE the lock release, or a broken AST walk
 	// returns NoPos for everything and this wall passes forever. The required
 	// reads below are not a control — their absence IS the defect, and they

@@ -51,10 +51,22 @@ func setTrafficPseudonymKeyPair(k []byte, id string) { trafficPseudonymizer.SetP
 func getTrafficPseudonymKeyID() string { return trafficPseudonymizer.KeyID() }
 
 // mintTrafficKeyID mints a random generation id independent of key material.
-func mintTrafficKeyID() string {
-	_, id, _ := trafficPseudonymizer.MintPair()
-	return id
-}
+//
+// It routes through MintID, not MintPair: MintPair also reads a 32-byte KEY that
+// this caller discards, and its error leg returns an EMPTY id — which
+// getTrafficPseudonymKeyID and the admin redaction surface cannot tell apart
+// from "no key is installed". The only caller is applyAdminTrafficPseudonym's
+// legacy-upgrade leg (a persisted key with no persisted id), where publishing an
+// empty id beside a VALID key is exactly the state the 2E-B generation identity
+// exists to rule out.
+//
+// No observable behaviour changed by this: crypto/rand.Read cannot return an
+// error on the pinned toolchain (it crashes the process instead —
+// go.dev/issue/66821), so MintPair's zero-id leg was unreachable too. The point
+// is the shape of the contract, not a live bug: an id-only caller should not be
+// one stdlib change away from publishing the keyless sentinel, and should not
+// spend a key to get an id.
+func mintTrafficKeyID() string { return trafficPseudonymizer.MintID() }
 
 // getTrafficPseudonymKey returns the active key (nil if unset); read-only.
 func getTrafficPseudonymKey() []byte { return trafficPseudonymizer.Key() }

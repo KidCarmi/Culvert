@@ -48,10 +48,15 @@ const testScanLimit = 64
 func withScanLimit(t *testing.T, limit int64) {
 	t.Helper()
 	origSec, origDPI := globalSecScanner, dpiScanner
-	globalSecScanner = secscan.New(secscan.Deps{Clam: cleanClam{}})
+	sc := secscan.New(secscan.Deps{Clam: cleanClam{}})
+	globalSecScanner = sc
 	globalSecScanner.Init("", limit, nil)
 	dpiScanner = scanner.New(limit)
 	t.Cleanup(func() { globalSecScanner, dpiScanner = origSec, origDPI })
+	// Init starts the ClamAV status probe on a goroutine that logs through the
+	// process logger; wait for it (cleanups run LIFO, so before the restore)
+	// so it cannot race a later test that swaps the logger.
+	t.Cleanup(sc.WaitStatusProbe)
 }
 
 // scanSkippedDelta runs fn and reports how many scan_skipped events it

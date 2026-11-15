@@ -432,7 +432,7 @@ func TestChaos115_HeapCeilingIsStatedNotImplied(t *testing.T) {
 
 // TestChaos115_SaturationSeriesRideTheConfiguredGuard pins where the three new
 // series may appear. A node that never ran a sidecar must not export a
-// sidecar's saturation plane at all — `at_capacity_total 0` and
+// sidecar's saturation plane at all — `saturated_total 0` and
 // `inflight 0` on an ordinary proxy are indistinguishable from a healthy
 // sidecar host, which is the asymmetry the CHAOS-113 listener gauges already
 // carry and the reason the paging rules in the runbook are expressed against
@@ -441,7 +441,7 @@ func TestChaos115_SaturationSeriesRideTheConfiguredGuard(t *testing.T) {
 	series := []string{
 		"culvert_scan_svc_inflight",
 		"culvert_scan_svc_slots",
-		"culvert_scan_svc_at_capacity_total",
+		"culvert_scan_svc_saturated_total",
 	}
 
 	scanSvcChaosSetup(t)

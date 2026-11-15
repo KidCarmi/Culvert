@@ -20,6 +20,11 @@ type rootCAStartupConfig struct {
 	// read from env in the shim so it never appears in CLI history).
 	// Empty = unencrypted / in-memory.
 	Passphrase string
+
+	// LegacyProvenance classifies a bundle that carries no provenance record
+	// (CULVERT_CA_PROVENANCE, read from env in the shim). Empty or
+	// unrecognised = unclassified: the CA keeps signing but is never renewed.
+	LegacyProvenance string
 }
 
 // resolveRootCAStartupConfig applies the CLI-over-config path precedence.

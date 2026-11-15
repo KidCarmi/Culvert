@@ -517,7 +517,7 @@ For routine releases:
 
 ## 6. CDR (Sluice) recovery
 
-The `cdr` check on the Diagnostics page surfaces four states beyond
+The `cdr` check on the Diagnostics page surfaces six states beyond
 `disabled`:
 
 * **`enabled-healthy`** — pool is connected, fail-mode and default
@@ -526,12 +526,19 @@ The `cdr` check on the Diagnostics page surfaces four states beyond
   profile is missing. Set them under CDR → Configuration; otherwise
   CDR cannot make safe decisions on unmatched files.
 * **`enabled-broken`** — CDR is enabled but no Sluice instance is
-  connected. Either enrol an instance under CDR → Instances or disable
+  connected. Either enroll an instance under CDR → Instances or disable
   CDR until you can.
 * **`enabled-dark`** — instances are enrolled but every one's circuit
   breaker is open, so none can scan a document. Documents are handled
   per `fail_mode` (refused with `cdr_unavailable` when closed, delivered
   unsanitized when open) until an instance recovers.
+* **`enabled-reduced`** (WARN) — N of M instances have a tripped
+  circuit breaker (open or half-open); the rest are still scanning, with
+  reduced capacity and no redundancy margin. Open CDR → Instances to find
+  the tripped instance and restore its reachability.
+* **`enabled-recovering`** (WARN) — every instance's breaker has
+  tripped and only recovery probes reach Sluice; documents beyond the
+  probe budget are handled per `fail_mode`, as for `enabled-dark`.
 
 If Sluice is enrolled but reporting unhealthy:
 

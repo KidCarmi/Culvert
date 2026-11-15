@@ -72,7 +72,7 @@ func secBasicUser(t *testing.T, user, pass string, role UIRole, totp bool) {
 	if totp {
 		cfg.SetTOTPSecret(user, "JBSWY3DPEHPK3PXP", []string{"backup-code-1"})
 		if !cfg.UserHasTOTP(user) {
-			t.Fatalf("precondition: TOTP enrolment did not take for %q", user)
+			t.Fatalf("precondition: TOTP enrollment did not take for %q", user)
 		}
 	}
 	t.Cleanup(func() { loginLimiter.ResetUser(user) })
@@ -111,14 +111,14 @@ func TestSECBASIC1_TOTPEnrolledAccountCannotUseBasic_DefectProof(t *testing.T) {
 			code, role)
 	}
 	if code != http.StatusUnauthorized {
-		t.Errorf("refusal status = %d, want 401 (uniform with a wrong password, so the response is not an enrolment oracle)", code)
+		t.Errorf("refusal status = %d, want 401 (uniform with a wrong password, so the response is not an enrollment oracle)", code)
 	}
 }
 
-// TestSECBASIC1_TOTPRefusalIsNotAnEnrolmentOracle pins the ORDER: the refusal
+// TestSECBASIC1_TOTPRefusalIsNotAnEnrollmentOracle pins the ORDER: the refusal
 // must be indistinguishable from a wrong password, so an unauthenticated
 // caller cannot use it to learn which accounts exist or which carry 2FA.
-func TestSECBASIC1_TOTPRefusalIsNotAnEnrolmentOracle(t *testing.T) {
+func TestSECBASIC1_TOTPRefusalIsNotAnEnrollmentOracle(t *testing.T) {
 	secBasicEnv(t)
 	secBasicUser(t, "totp-admin", "Correct-Horse-Battery-1!", RoleAdmin, true)
 
@@ -510,7 +510,7 @@ func TestSECBASIC1_ConcurrentWaveCannotExceedTheFailureBudget(t *testing.T) {
 // password for a TOTP-enrolled account — the compromised-first-factor case —
 // cannot be replayed without bound: each refusal costs a bcrypt and a durable
 // audit line, so it consumes the per-IP budget (while still never locking the
-// account, see TestSECBASIC1_TOTPRefusalIsNotAnEnrolmentOracle).
+// account, see TestSECBASIC1_TOTPRefusalIsNotAnEnrollmentOracle).
 func TestSECBASIC1_TOTPRefusalsAreChargedToTheIPBudget(t *testing.T) {
 	secBasicEnv(t)
 	const user, pass = "totp-replayed", "Correct-Horse-Battery-21!"
