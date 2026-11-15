@@ -63,7 +63,7 @@ The same validation guards:
 
 - `GET /api/cluster/bootstrap/{token}` — the install script
 - `GET /api/cluster/bootstrap/{token}/compose` — the compose document
-- `POST /api/cluster/token` — the `bootstrap_cmd` one-liner returned to the
+- `POST /api/cluster/tokens` — the `bootstrap_cmd` one-liner returned to the
   admin UI (validated **before** the token is minted, so a refusal never burns a
   persisted enrollment token)
 
