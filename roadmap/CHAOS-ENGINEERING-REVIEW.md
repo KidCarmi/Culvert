@@ -8,63 +8,57 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
-**CHAOS-120 — CLAIMED 2026-11-14, placeholder row (round in progress).** Scope:
-the panic-containment plane's NOTIFICATION boundary — the question one step past
-CHAOS-119. That round asked what an operator can SEE after a contained crash and
-built the counter, the record and the audit entry. This one asks who TELLS them,
-and what survives long enough to debug with: the crash sink fires no alert on any
-component (`ha_sync_panic` is the lone contained-panic producer and its own doc
-comment states the general rule), and the stack-bearing crash record is a single
-last-write-wins slot. Closes the residual recorded by CHAOS-116 `4`, CHAOS-117
-`5`, CHAOS-118 `1` and CHAOS-119 `3`. Recorded in
-[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-14.md).
-Id checked against `origin/main` at `de0b6d1` (highest id anywhere on main:
-`CHAOS-119`) and against the open-PR set (#1894, #1893, #1883, #1855, #1705,
-#1549, #1548, #1536, #1528, #1526 — none a chaos sweep).
-
-The 2026-11-13 round is recorded in
-[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-13.md) —
-CHAOS-119 (THE CONTAINMENT PLANE'S REPORTING BOUNDARY). Five rounds of this
-family established that every detached background round is CONTAINED. This one
-asked what an operator sees afterwards, and the answer was "nothing", three
-different ways. (a) `telemetryRuntime.Close` ran its final flush, its full
-export drain and its manager close in a bare `go func()` — calling the SAME
-`exportStep` that `exportLoop` has guarded under
-`crashComponentMCPTelemetryExport` since CHAOS-118, "fed by data this process
-does not author". The identical call was contained on the periodic path and
-process-fatal on the shutdown path, from a hook at order **66**, which skipped
-(not abandoned) orders 67..140: the tunnel establish-fence, the H2 GOAWAY wave,
-the whole **tunnel drain**, and every hook above `shutdownFlushBoundary` —
-syslog, the community DB, the log store, the request log and the **audit log**,
-the hooks CHAOS-56 carved a reserve for because "abandoning one costs
-durability". And because the goroutine is DETACHED while `Close` selects on the
-budget, an abandoned hook leaves it running, so the crash lands inside an
-unrelated LATER hook and is attributed to whatever was running. Measured by
-reverting the fix: `SIGSEGV`. (b) FIVE background rounds were contained by a
-bespoke `recover()` that logs, so they moved no
-`culvert_crash_records_total{component}`, stored no record and wrote no audit
-entry — CHAOS-118 residual `1` says "the crash counters ARE the signal", and
-these rounds never reached it. Two are WORKER-level recovers, the CHAOS-105
-anti-pattern, and the sharpest says its own cost in its own log line: "the node
-stays HA-gated until restarted". (c) The gate written for (d) then found that
-even a correctly reported component could be dropped: `maxCrashLabels` was
-**32** against **56** distinct FIXED labels at the base revision, and past the
-cap the counter FOLDS to `component="other"` while `crashThrottleAllow`
-SUPPRESSES outright — no record, no log line, no audit entry. Slots are
-first-crash-wins and never pruned, so they go to the frequent request-path
-components and the rare high-severity background rounds this family keeps
-adding are the ones that lose their record. (d) CHAOS-118 §7.2's MECHANICAL
-discovery gate is built: 36 round loops discovered from the AST, failing both
-ways, with its own negative control. It justified itself twice — it found
-`Refresher.RunTicker`, a round loop over third-party catalog bytes with no
-containment and no production caller (a trap armed for whoever wires it), and
-its own first draft, which searched the loop TEXT for `ticker.C`, missed
-THIRTEEN loops that name their ticker `t`. Closes CHAOS-118 §7.1, §7.2 and
-residual risk `4`; §7.3 and §7.4 stay open with reasons. Id claimed in a
-committed placeholder row as commit one, before any code, checked against
-`origin/main` at `feb11e8` (highest id anywhere on main: `CHAOS-118`) and the
-open-PR set (#1884, #1883, #1855, #1705, #1549, #1548, #1536, #1528, #1526 —
-none a chaos sweep).
+The 2026-11-14 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-14.md) —
+CHAOS-120 (THE CONTAINMENT PLANE'S NOTIFICATION BOUNDARY). CHAOS-119 asked what
+an operator can SEE after a contained panic and built the counter, the record,
+the log line and the audit entry. This round asked who TELLS them, and found no
+one, in two independent planes. (a) `recordCrash` is the single sink every
+recovered panic funnels into — proxy plane, admin plane, `runGuarded`,
+`recoverGoroutine`, and every `internal/*` round through `obs.SetPanicSink` —
+and it fired **no alert for 62 of the 63** component labels the tree declares.
+The 63rd alerted itself, from `HAState.notePanicRound`, whose doc comment states
+the rule the other 62 were missing: "without them the containment would trade a
+loud crash for a silent one, **which is the failure class the guard exists to
+remove**". `guardedTick` names the same reporting triple — record, counter,
+fire-once alert — and three of its four signals were sink-wide while the alert
+was not. This is the residual FOUR consecutive rounds recorded and none closed
+(CHAOS-116 `4`, CHAOS-117 `5`, CHAOS-118 `1`, CHAOS-119 `3`, the last of which
+wrote "that it keeps being recorded rather than fixed is itself the finding").
+Closed in the sink, as `panic_contained`, so it covers every component and every
+round that adds one; component + crash id only, never the panic value, because
+that value can embed a credential and a webhook is an egress; latched one per
+component per hour, magnitude-compared per CHAOS-84; the alert plane excluded
+from alerting about itself, which both cannot work and would loop through
+`fireAlert`'s own recover forever. (b) **Ten events were fired with no way to
+subscribe to them from the Alerts panel, and four could never be delivered at
+all** — `admin_ui_unavailable`, `cdr_unavailable`, `dns_failure` and
+`yara_degraded` gate on `HasSubscriber`, so with no checkbox they were dark by
+construction for any UI-configured deployment; the other six, including both HA
+states that do not clear on their own, were deliverable only by hand-POSTing the
+event name. CHAOS-113 recorded all ten in `scanAlertGUIKnownGaps` because a
+scan-sidecar round was the wrong owner; this round's scope IS the notification
+boundary, so it emptied the list (29 → 40 subscribable events). (c) The round's
+most useful product is a **near-miss**: the obvious implementation — gate on
+`HasSubscriber` before the `go`, as every other fault-driven producer does —
+would have put `globalAlertStore`'s mutex on the crash-sink path, and
+`internal/alerts` releases it with a **bare trailing `Unlock`** in
+`Add`/`Update`/`Delete`. That is the CHAOS-118 §7.4 shape and, unlike §7.4's own
+examples, reachable from a guard: a panic inside one of those critical sections
+strands `as.mu`, unwinds to `withAdminPanicRecovery` and re-enters `recordCrash`
+— so the sink would have blocked FOREVER on a lock the panic itself stranded.
+The gate moved inside the goroutine and the invariant is now an AST gate with a
+negative control. Also records, NOT fixed: the crash record's `Summary` and
+`Stack` are collected, bounded and scrubbed and then readable by **nobody** (the
+only export masks both to salted tokens; neither the log line nor the audit
+entry carries them), which is a redaction-POSTURE decision and not a chaos
+round's to take; and the single-slot `lastCrash`, which this round investigated,
+**falsified down to LOW** and deliberately did not fix, because the crash INDEX
+is already multi-entry and readable in the audit plane, so a ring would have
+retained data with no reader. Id claimed in a committed placeholder row as
+commit one, before any code, checked against `origin/main` at `de0b6d1`
+(highest id anywhere on main: `CHAOS-119`) and the open-PR set (#1894, #1893,
+#1883, #1855, #1705, #1549, #1548, #1536, #1528, #1526 — none a chaos sweep).
 
 **Later rounds:** the 2026-10-13 round is recorded separately in
 [CHAOS-REVIEW-2026-10-13.md](CHAOS-REVIEW-2026-10-13.md) — CHAOS-89 (the DP→CP
