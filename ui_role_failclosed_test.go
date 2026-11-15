@@ -293,6 +293,17 @@ func configuredCfg(t *testing.T) {
 	}
 }
 
+// seedRosterRole re-seeds bob's roster entry at role. The roster is the ceiling
+// on a live session's role (SEC-UISESS-DEMOTE-1, owner decision on PR #1883),
+// so a control asserting that a session keeps the role its cookie claims must
+// have the roster grant that role, as a real login would.
+func seedRosterRole(t *testing.T, role UIRole) {
+	t.Helper()
+	if err := cfg.SetUIUser("bob", "Sup3rSecret!x", role); err != nil {
+		t.Fatalf("seed roster role %q: %v", role, err)
+	}
+}
+
 // driveMiddleware runs one /api request carrying a session with sessionRole and
 // reports the status and the role the middleware injected (or "" if the inner
 // handler was never reached).
@@ -342,6 +353,7 @@ func TestSessionRole_UnenrolledSessionIsRefusedNotPromoted(t *testing.T) {
 func TestSessionRole_EmptyRoleStillResolvesToAdmin(t *testing.T) {
 	withSessionKey(t)
 	configuredCfg(t)
+	seedRosterRole(t, RoleAdmin) // the role a role-less legacy cookie resolves to
 	code, role, reached := driveMiddleware(t, "")
 	if !reached || code != http.StatusOK {
 		t.Fatalf("legacy role-less session refused: status=%d reached=%v", code, reached)
@@ -356,6 +368,7 @@ func TestSessionRole_EnrolledRolesPassThroughUnchanged(t *testing.T) {
 	withSessionKey(t)
 	configuredCfg(t)
 	for _, r := range []UIRole{RoleViewer, RoleOperator, RoleAdmin} {
+		seedRosterRole(t, r)
 		code, got, reached := driveMiddleware(t, string(r))
 		if !reached || code != http.StatusOK {
 			t.Fatalf("session role %q refused: status=%d reached=%v", r, code, reached)

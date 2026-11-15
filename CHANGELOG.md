@@ -314,6 +314,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **`scripts/install.sh` aborted on every supported Fedora release before
+  Docker was installed.** The Fedora branch registered Docker's repository with
+  `dnf config-manager --add-repo <url>`. Fedora 41 replaced dnf4 with dnf5,
+  whose config-manager dropped that option: it exits 2 with `Unknown argument
+  "--add-repo" for command "config-manager"`, and under the script's
+  `set -euo pipefail` the install stopped there on a host with no Docker yet.
+  The branch now uses dnf5's `config-manager addrepo --overwrite
+  --from-repofile=<url>` when `dnf --version` reports dnf5 (`--overwrite` so a
+  re-run after a partial install does not fail on the repo file the first run
+  wrote), and keeps the legacy form on dnf4. Reproduced and verified against
+  dnf5 5.4.6 in `fedora:latest`; pinned by
+  `TestInstallScript_FedoraDockerRepo_WorksOnDnf5AndDnf4`. The RHEL-family
+  branch (`yum-config-manager`, dnf4) is unchanged.
+
 - **A panic in the MCP telemetry shutdown drain killed the process from a
   shutdown hook that runs before every durability flush, so a "graceful"
   shutdown skipped the tunnel drain and every log/audit store close.**
