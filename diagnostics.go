@@ -278,6 +278,9 @@ func buildOperatorContract() OperatorContract {
 	// Remote blocklist feeds whose latest sync failed. Contributes nothing when
 	// no feed is configured or every feed's latest attempt succeeded.
 	checks = append(checks, checkBlocklistFeeds()...)
+	// Configuration changes applied without a rollback point (version capture
+	// refused or failed). Contributes nothing when the latest capture succeeded.
+	checks = append(checks, checkConfigVersionCapture()...)
 	// OTLP export enabled but its latest push was not delivered. Contributes
 	// nothing when export is off or the latest attempt succeeded.
 	checks = append(checks, checkOTLPExport()...)

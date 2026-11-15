@@ -189,9 +189,11 @@ var errConfigVersionRefused = errors.New("config version capture refused")
 // learn whether a version was actually written, instead of assuming it. The
 // logging and every gate are unchanged; the compatibility wrapper above keeps
 // every best-effort caller as it was.
-func saveConfigVersionNoteResult(actor, action, note string) error {
+func saveConfigVersionNoteResult(actor, action, note string) (err error) {
 	saveConfigVersionMu.Lock()
 	defer saveConfigVersionMu.Unlock()
+	// Report-only: lets Diagnostics show a change applied without a rollback point.
+	defer func() { noteConfigVersionCapture(err) }()
 
 	// While the rewrite management-identity degradation is latched,
 	// captureConfigBackup would record the KNOWN-ephemeral StableIDs into a
