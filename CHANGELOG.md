@@ -9,6 +9,55 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The syslog/SIEM request sink was the one request-log sink still paying a
+  reflective `json.Marshal` plus three redundant copies per record, on the
+  request goroutine.** Delivery was already asynchronous — a slow collector
+  costs a caller a channel send and nothing more — but the part that BUILDS the
+  line stayed on the caller, and for `WriteRequest` that caller is a proxy
+  request goroutine, once per logged request, on every protocol. It boxed the
+  352-byte `logstore.Entry` into an `any`, marshalled it into a fresh slice,
+  copied that slice into a string for `send`, and then built the header with a
+  `time.Format` plus a `fmt.Sprintf` and concatenated three strings; the drain
+  goroutine then put the finished line on the socket through `fmt.Fprint`. The
+  same record's two OTHER sinks already serialize with no per-record allocation
+  at all (`internal/reqlog/persist.go`'s retained `Encoder` over a
+  `bufio.Writer`, `internal/logstore/batchencode.go`'s retained encoder over
+  one batch buffer); this sink was simply the third and had not been given the
+  same treatment. One pooled buffer per line now carries both header and body:
+  the header is appended with `strconv`/`AppendFormat`, a structured body is
+  JSON-encoded straight into that buffer by a retained `json.Encoder`, the line
+  is converted to a string exactly once, and the drain borrows a buffer from
+  the same pool to write it. Measured on a real-shaped record (25 fields,
+  ~375 bytes of JSON; Go 1.27.4, linux/amd64, 4 vCPU Xeon @2.10GHz,
+  `-benchtime=2s`, medians), with the before row produced by running the SAME
+  new benchmark arm against the parent commit in a worktree: 10 allocs /
+  1,665 B / 3,420 ns per record before, **2 allocs / 768 B / 2,421 ns** after —
+  80% fewer allocations and 54% less garbage inside the request goroutine
+  wherever a SIEM collector is configured. Stage arms, both in one binary:
+  header assembly 6 → 1 allocs (rfc3164) and 7 → 1 (rfc5424); the drain's
+  per-line write 1 → 0. For scale, the whole in-process plain-HTTP forward path
+  is 94 allocs and 11.9 KB per request, so this sink alone was adding ~11% to
+  the per-request allocation count and ~14% to its garbage. No wire change:
+  `json.Encoder.Encode` emits exactly `json.Marshal`'s compact bytes plus the
+  one terminator the text path appended itself, and the new
+  `TestLineFormat_ByteIdentity_*` tests compare every assembled line — header,
+  body, terminator and the body offset a format handoff re-encodes from —
+  against the retained `fmt.Sprintf` + `json.Marshal` implementation across
+  both wire formats, HTML-escapable runes, U+2028/9, invalid UTF-8, a nil body
+  and the zero record. The preserved failure contract is pinned too: a body
+  `json` cannot serialize is still dropped silently rather than sent truncated,
+  and is still not charged as a collector drop. The pool is bounded (a line
+  above 16 KiB is sent and its buffer dropped rather than parked) and buffers
+  are reset on acquisition, so a record abandoned mid-assembly cannot leak into
+  the next line. `TestBenchGate_SyslogLineAllocs` bounds allocs/op and B/op for
+  every arm and additionally asserts each is cheaper than the shape it
+  replaced, so reinstating the intermediate slice or the string copy fails even
+  if the absolute bound is generous. NOT addressed, and left measurable: the
+  reflective encode itself is ~1.6 µs of the ~2.4 µs that remains, and closing
+  it needs a hand-written encoder for a type this stdlib-only leaf package
+  deliberately cannot name — a different change, behind the same differential
+  oracle.
+
 - **`BenchmarkHTTPForward_HandleHTTP` overstated the plain-HTTP forward path's
   memory by ~3.7x, against its own stated purpose of reporting "the real
   per-request total".** No production behavior changes: the inflation was in
