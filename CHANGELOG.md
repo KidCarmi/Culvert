@@ -238,6 +238,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the OpenTelemetry (OTLP) export is failing.**
+  The push-loop failure count and last error were shown only under Settings →
+  OpenTelemetry (OTLP); the one-page report read as healthy while the collector
+  received nothing and the external dashboards built on this node's telemetry
+  went quiet. A new `otlp_export` WARN row (additive, report-only, absent when
+  export is off or the latest push was delivered) names the failing signal
+  (metrics, traces or both) and never the endpoint, auth header or error text.
+  Push, retry and buffering behavior are unchanged.
+
 - **An unreachable ClamAV daemon is now a Diagnostics row.** With antivirus
   scanning configured, a daemon that cannot be reached is fail-open: content is
   forwarded without an antivirus verdict. That was visible on `/ready`,
