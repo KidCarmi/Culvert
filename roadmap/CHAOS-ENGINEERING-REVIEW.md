@@ -8,17 +8,69 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
-**2026-11-16 — `CHAOS-121` CLAIMED (placeholder, commit one). Domain: the
-DEPLOYMENT ARTIFACTS the resilience work is delivered through — every rule the
-last 120 rounds built into the binary is only as good as the compose file that
-starts and stops it, and `docker-compose.ha.yml` is the one shipped artifact no
-CI job has ever brought up.** Id claimed in this committed row before any code
-was written, per the convention below and checked against `origin/main` rather
-than the working tree per the 2026-09-25 amendment: `CHAOS-120` is the highest
-id anywhere on `origin/main` (at `51996b9`). Of the open PRs (#1922, #1921,
-#1920, #1917, #1916, #1915, #1914, #1913, #1911, #1904, #1901, #1705, #1549,
-#1548, #1536, #1528, #1526) none is a chaos sweep claiming a NEW id — #1911 is
-a rider on `CHAOS-120`, not a claim. This sweep took 121 and will not move.
+The 2026-11-16 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-16.md) —
+CHAOS-121 (THE DEPLOYMENT ARTIFACT). Every round in this family so far has
+reasoned about the binary. This one asked whether the artifacts that ship it
+honour what it enforces, and found that `docker-compose.ha.yml` — the shipped
+Control Plane + standby + Data Plane topology, and the one compose file no CI
+job has ever brought up — **never handed the binary its flags, and had never
+done so in any revision.** (a) The image declares exec-form
+`ENTRYPOINT ["./culvert"]` and Docker APPENDS a container command to it, so the
+`proxy` and `dp` services' `command: > sh -c '…'` made the real argv
+`./culvert sh -c '<the script>'`. Go's flag package stops at the first non-flag
+token, `main.go` has no `flag.NArg()` guard and `handleOneShotCommands`
+dispatches on flags only — so every flag was silently discarded and both
+services booted with ALL DEFAULTS while still passing `/health`: no `-ca-path`
+(a fresh Root CA every boot, so every client's trust anchor breaks on restart),
+no `-policy` (the Dockerfile's own comment: "CRITICAL: without this, rules are
+lost on restart"), no `-audit-log`, no `-cluster-db`, no `-clamav-addr` (no AV
+leg at all), no `-cp-grpc-addr` (the CP listener never opens), no
+`--ha-join`/`--ha-token` and no `--enroll`. **The sharpest part is that the file
+already contained a guard against the consequence:** the `exit 1` added by Codex
+review on PR #1337, whose comment says an empty `--ha-token` must not let the
+node "come up HEALTHY as an independent, ACTIVE Control Plane … (a silent
+split-brain, worse than the crash it replaces)" — a guard living inside a script
+that never executed, so the failure it prevents was the file's unconditional
+behaviour. Two root tests DO extract that script and run it under `sh -c` to
+assert its argv; they validated the script's contents while assuming the premise
+that the script runs. (b) Neither service declared `stop_grace_period`, so
+Docker's DEFAULT 10s applied against the 51s envelope CHAOS-56 enforces —
+SIGKILL inside the EARLY phase, skipping the drain (order 100: every in-flight
+tunnel severed) and the ENTIRE durability reserve (110-140: syslog, community
+DB, log store, request log, AUDIT log, log closer), which is the harm
+`docker-compose.yml`'s own comment names on the very line the HA file lacked,
+and an unclean badger close MANUFACTURES the torn `MANIFEST` CHAOS-50's
+boot-path quarantine exists for. CHAOS-56's cross-artifact gate pins
+`docker-compose.yml`, **by name** — naming one file was the gap. (c) Both used
+short-form `depends_on: [clamav]`, which waits for the container to start and
+not for its healthcheck; ClamAV's `start_period` is 300s and an unreachable
+ClamAV is FAIL-OPEN, so every HA/DP boot and reboot forwarded bodies with no
+antivirus verdict. **The finding behind the three findings:** every one of these
+contracts already existed in `docker-compose.yml`, each with a comment
+explaining the failure it prevents, and none reached the HA file — the third
+recorded instance of this exact drift between this pair of files
+(`docker_compose_ha_session_secret_test.go`'s header records the
+`CULVERT_SESSION_SECRET` one in the same words), and **each previous instance
+was fixed by naming the file, never by gating the class.** So the three gates
+DISCOVER compose artifacts rather than naming them, carry a
+registered-exception map whose stale entries are themselves failures (it caught
+one on this round's first draft), and are mutation-verified against the real
+artifact: reverting `docker-compose.ha.yml` alone fails all three with six named
+violations and prints the `./culvert sh -c '…'` argv. Records, NOT fixed: a
+`flag.NArg()` guard in `main` would have turned the silent misconfiguration into
+a loud crash loop and is the right change, but it is a startup-behaviour change
+needing its own audit of every invocation shape (`cli`, `compose run`, the
+maintenance agent's allowlist, the appliance tree) and belongs in its own round;
+an HA smoke CI job, which is the real remedy for "no job has ever brought this
+file up"; the e2e fixtures running at the 10s default while testing an upgrade
+restart; `backup-e2e.yml`'s `cli: command: []`, the shape `docker-compose.yml`
+was fixed away from; and HA/DP nodes keeping no request log. Id claimed in a
+committed placeholder row as commit one, before any code, checked against
+`origin/main` at `51996b9` (highest id anywhere on main: `CHAOS-120`) and the
+open-PR set (#1922, #1921, #1920, #1917, #1916, #1915, #1914, #1913, #1911,
+#1904, #1901, #1705, #1549, #1548, #1536, #1528, #1526 — #1911 is a rider on
+CHAOS-120, not a claim).
 
 The 2026-11-14 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-14.md) —

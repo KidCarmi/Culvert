@@ -41,6 +41,61 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The HA compose file never handed the binary its flags, so every Control
+  Plane, standby and Data Plane node booted with all defaults while reporting
+  healthy (CHAOS-121).** The image declares exec-form
+  `ENTRYPOINT ["./culvert"]`, and Docker **appends** a container's `command:` to
+  an exec-form entrypoint rather than replacing it. `docker-compose.ha.yml`'s
+  `proxy` and `dp` services passed `command: > sh -c '…'`, so the real container
+  argv was `./culvert sh -c '<the script>'`. Go's flag package stops parsing at
+  the first token that does not begin with `-`, `main.go` has no `flag.NArg()`
+  guard, and `handleOneShotCommands` dispatches on flags only — so nothing
+  matched, nothing errored, and the process fell through into normal startup
+  with every flag at its zero default: no `-ca-path` (a fresh Root CA every
+  boot, so every client's installed trust anchor breaks on restart), no
+  `-policy` (the Dockerfile's own comment calls this "CRITICAL: without this,
+  rules are lost on restart"), no `-audit-log`, no `-cluster-db`, no
+  `-clamav-addr` (no antivirus leg at all), no `-cp-grpc-addr` (the Control
+  Plane gRPC listener never opened, so no Data Plane could reach it), no
+  `--ha-join`/`--ha-token` (a standby came up as an independent **ACTIVE**
+  Control Plane — the silent split-brain this file's own inline guard was
+  written to prevent, inside a script that never executed) and no `--enroll` (a
+  Data Plane never enrolled). `/health` returned 200 throughout, because
+  `/health` is liveness and the process was alive. The shell now lives in
+  `entrypoint:` and still `exec`s the binary, so culvert remains PID 1 and
+  receives the SIGTERM the whole shutdown sequence depends on.
+- **The HA and Data Plane containers had no stop grace, so Docker SIGKILLed them
+  at 10s against the 51s enforced shutdown envelope (CHAOS-121).** CHAOS-56 made
+  the sequence bounded end to end and pinned it to the container's
+  `stop_grace_period` with a cross-artifact gate — which reads
+  `docker-compose.yml` **by name**. `docker-compose.ha.yml` declared no grace at
+  all, so Docker's 10s default applied and the kill landed inside the *early*
+  phase: the drain never ran (order 100 — every in-flight client tunnel severed
+  instead of drained) and neither did the entire durability reserve (orders
+  110-140 — syslog, community DB, log store, request log, **audit log**, log
+  closer). An unclean badger close is the torn `MANIFEST` CHAOS-50's boot-path
+  quarantine exists to survive, so the missing grace manufactured the corruption
+  an earlier round had to build recovery for — on the nodes that hold the
+  cluster store and the audit log, on every `compose restart`, node reboot and
+  out-of-band HA upgrade.
+- **HA and Data Plane nodes started before ClamAV was healthy, so every boot had
+  an unscanned window (CHAOS-121).** Both services used the short-form
+  `depends_on: [clamav]`, which waits only for the sidecar container to *start*.
+  `docker-compose.yml` already used the long form with
+  `condition: service_healthy` and a comment explaining why it is required;
+  ClamAV's healthcheck carries `start_period: 300s` for the first-boot signature
+  download, and an unreachable ClamAV is **fail-open** — bodies forwarded with
+  no antivirus verdict.
+- Three gates now hold these contracts over **every** compose artifact in the
+  repository, discovered by a glob and a directory walk rather than named, so a
+  new deployment file is in scope the moment it is added — which is the only
+  shape of fix this defect has: each of the three contracts already existed in
+  `docker-compose.yml`, with a comment explaining the failure it prevents, and
+  none had reached the HA file. Registered exceptions carry a written reason and
+  a stale entry is itself a failure. Mutation-verified against the real
+  artifact: reverting `docker-compose.ha.yml` alone fails all three gates with
+  six named violations.
+
 - **Ten alert events were fired by production code with no way to subscribe to
   them from the Alerts panel, and four of them could never be delivered at all
   (CHAOS-120).** The panel's checkbox list is the only place Culvert's alert

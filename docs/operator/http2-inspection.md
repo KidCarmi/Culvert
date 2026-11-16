@@ -116,7 +116,8 @@ sibling streams.
   deterministic teardown instead of relying on the container SIGKILL grace. The
   compose `proxy` service sets `stop_grace_period: 60s` to cover the full envelope —
   **keep it ≥ the drain envelope or the orchestrator will SIGKILL mid-drain and the
-  GOAWAY becomes cosmetic.** Observability: `culvert_h2_inspect_active` (gauge),
+  GOAWAY becomes cosmetic.** (`docker-compose.ha.yml` carried no grace at all until
+  CHAOS-121, so on HA and Data Plane nodes the GOAWAY *was* cosmetic.) Observability: `culvert_h2_inspect_active` (gauge),
   `culvert_h2_inspect_drain_goaway_total` (tunnels active when the drain started),
   `culvert_h2_inspect_drain_forced_total` (backstop closes). `goaway − forced`
   *approximates* how many drained gracefully — treat it as a heuristic, not an exact
