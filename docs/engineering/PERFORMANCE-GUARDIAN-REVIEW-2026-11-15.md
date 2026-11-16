@@ -108,13 +108,18 @@ the rest of this policy is built on.
 
 ### Trade-offs, measured rather than asserted
 
-- **The expired-front path got slower, knowingly.** It used to return at the
-  first bucket map iteration reached, which is O(1); it now reads a heap root
-  and pays O(log clients) of heap maintenance in `removeLocked`. Measured
-  (`BenchmarkAuthCacheSetAtCapExpired`): flat at 1 and 1,000 clients
-  (p=0.234, p=0.161), **+42.70%** at 5,000 (1.377 → 1.965 µs). An arm that is
-  still under 2 µs is the right place to spend a fifth of a microsecond to take
-  326 µs off the arm next to it.
+- **The expired-front path, corrected.** It now reads a heap root and pays
+  O(log clients) of heap maintenance in `removeLocked`. The first measurement
+  of `BenchmarkAuthCacheSetAtCapExpired` reported **+42.70%** at 5,000 clients
+  (1.377 → 1.965 µs), but that control did not hold its premise: aging entries
+  in place left the index's memoised front expiries stale, and each timed
+  insertion replaced an expired entry with a live one, so most iterations
+  measured live-entry eviction (Codex review on #1910). With the benchmark
+  fixed (it resyncs every bucket after aging and re-ages, timer stopped,
+  before the expired supply runs out), median of 5 at 20,000 insertions:
+  1 client 1.56 → 1.58 µs (flat), 1,000 clients 4.18 → 2.08 µs, 5,000 clients
+  8.62 → 2.55 µs. The scan was not O(1) here after all, so the trade-off this
+  section first described does not exist: the expired arm is faster too.
 - **The flood shape at a small client count.** `Skewed/others=10` measured
   **+45.40%** (1.581 → 2.298 µs, p=0.041, and ±38% spread on the after arm —
   the weakest signal in this review). The same shape at 100 and 1,000 others is

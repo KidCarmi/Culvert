@@ -75,27 +75,57 @@ func BenchmarkAuthCacheSetAtCapSkewed(b *testing.B) {
 	}
 }
 
-// BenchmarkAuthCacheSetAtCapExpired is the control: every entry is already
-// expired, so evictOneLocked returns at the FIRST bucket it looks at via the
-// free expired-front path and never runs the fairness comparison. If the
-// sweeps above are flat here but not above, the cost is the selection and not
-// the insertion machinery around it.
+// BenchmarkAuthCacheSetAtCapExpired is the control: every candidate front is
+// already expired, so evictOneLocked takes the free expired-front path and
+// never runs the fairness comparison. If the sweeps above are flat here but
+// not above, the cost is the selection and not the insertion machinery around
+// it.
+//
+// Two things keep the control honest (Codex review on PR #1910):
+//
+//   - Aging an entry's expiry in place does not reach the index: the heaps are
+//     ordered on each bucket's MEMOISED front expiry, which only
+//     syncBucketLocked writes. ageAuthCacheForBench resyncs every bucket after
+//     aging, so the very first measured insertion already sees expired fronts.
+//   - Every measured insertion evicts one expired entry and adds a LIVE one, so
+//     a single aging lasts maxAuthCacheSize insertions. The loop re-ages, with
+//     the timer stopped, before that supply runs out, so every timed insertion
+//     takes the expired path rather than drifting into live-entry eviction.
 func BenchmarkAuthCacheSetAtCapExpired(b *testing.B) {
 	for _, clients := range []int{1, 1000, 5000} {
 		b.Run("clients="+strconv.Itoa(clients), func(b *testing.B) {
 			a := benchAuthCacheAtCap(clients)
-			a.mu.Lock()
-			past := time.Now().Add(-time.Hour)
-			for _, e := range a.entries {
-				e.expiry = past
-			}
-			a.mu.Unlock()
+			ageAuthCacheForBench(b, a)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
+				if i > 0 && i%(maxAuthCacheSize-1) == 0 {
+					b.StopTimer()
+					ageAuthCacheForBench(b, a)
+					b.StartTimer()
+				}
 				a.set("client-"+strconv.Itoa(i%clients), "user", "new-"+strconv.Itoa(i), true)
 			}
 		})
+	}
+}
+
+// ageAuthCacheForBench expires every entry and resyncs every bucket's memoised
+// front, then checks that the expiry heap's root really is expired, so the
+// control cannot silently measure the live path again.
+func ageAuthCacheForBench(b *testing.B, a *authCacheStore) {
+	b.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	past := time.Now().Add(-time.Hour)
+	for _, e := range a.entries {
+		e.expiry = past
+	}
+	for client, bk := range a.buckets {
+		a.syncBucketLocked(client, bk)
+	}
+	if root := authHeapPeek(a.expiries); root == nil || !time.Now().After(root.frontExpiry) {
+		b.Fatal("ageAuthCacheForBench: the expiry heap's root is not expired; the control would measure the live path")
 	}
 }
 

@@ -37,9 +37,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   applied — with one deliberate refinement: an expired front is now chosen by
   earliest deadline rather than by Go's randomised map order, which is
   deterministic. Costs, measured: `authCacheBucket` grows 40 → 136 bytes (the
-  memoised front plus two heap positions, ~560 KB at the cap) and the
-  expired-front arm pays +42.70% at 5,000 clients (1.377 → 1.965 µs) for the
-  heap maintenance it used to skip. Held by a differential oracle against the
+  memoised front plus two heap positions, ~560 KB at the cap). The
+  expired-front arm is flat at 1 client and FASTER at scale (median of 5:
+  1,000 clients 4.18 → 2.08 µs, 5,000 clients 8.62 → 2.55 µs). An earlier
+  draft reported it +42.70% slower; that figure came from a control benchmark
+  that did not keep its entries expired (Codex review), and the benchmark now
+  resyncs the index and re-ages its entries so every timed insertion takes the
+  expired path. Held by a differential oracle against the
   scan it replaced (6 seeds × 1,500 randomised steps, all five guards
   mutation-tested), an AST wall over `evictOneLocked`, and a machine-independent
   `TestBenchGate_` ratio gate (1.00x indexed, 62.31x with the scan reverted,
