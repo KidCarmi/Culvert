@@ -378,6 +378,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when a configuration change was applied without a
+  rollback point.** Version capture after a configuration change is
+  best-effort: when the version file cannot be written, or capture is refused
+  while rewrite-rule identity is not durable, the change stays applied, the
+  admin UI reports success and the only trace was one process-log line. Config
+  Versions simply gained no entry and every `config_versions_*` row stayed OK,
+  so the missing rollback point was discovered only when a rollback was needed.
+  A new `config_version_capture` WARN row (additive, report-only, absent while
+  the latest capture succeeded) gives the number of changes without a rollback
+  point, the time of the first one and a fixed cause class, never the error
+  text or a path. It clears on the next recorded version, which captures the
+  full current configuration. Capture, refusal and the mutation paths are
+  unchanged.
+
 - **Diagnostics now warns when the OpenTelemetry (OTLP) export is failing.**
   The push-loop failure count and last error were shown only under Settings →
   OpenTelemetry (OTLP); the one-page report read as healthy while the collector
