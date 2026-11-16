@@ -286,6 +286,9 @@ func buildOperatorContract() OperatorContract {
 	// Remote blocklist feeds whose latest sync failed. Contributes nothing when
 	// no feed is configured or every feed's latest attempt succeeded.
 	checks = append(checks, checkBlocklistFeeds()...)
+	// OTLP export enabled but its latest push was not delivered. Contributes
+	// nothing when export is off or the latest attempt succeeded.
+	checks = append(checks, checkOTLPExport()...)
 	// Upstream pool managed document / config.yaml seed refused, or legacy
 	// migration abandoned: configured parents unpublished. Contributes nothing
 	// when none of the three is latched.
@@ -1968,7 +1971,7 @@ func checkSyslogFeed() OperatorContractCheck {
 			Code:           "syslog_feed",
 			Status:         diagFail,
 			Message:        "configured but failed to connect — remote syslog/SIEM forwarding is silently down, events are not reaching the collector" + lost,
-			OperatorAction: "Verify the collector host/port and network path, then re-save the syslog target (POST /api/syslog) or restart the proxy; use POST /api/syslog/test to confirm connectivity. Events lost while the collector was unreachable are not replayed.",
+			OperatorAction: "Verify the collector host/port and network path. A collector that was unreachable at startup is retried automatically and forwarding starts on its own once it accepts a connection — no re-save or restart is needed for that. If the address itself is wrong, re-save the syslog target (POST /api/syslog); use POST /api/syslog/test to confirm connectivity. Events lost while the collector was unreachable are not replayed.",
 		}
 	}
 	// CHAOS-81: everything above decides on state fixed at INIT time, and was
