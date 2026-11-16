@@ -397,14 +397,22 @@ runs rather than what the file hoped it ran.
 
 - **A `flag.NArg()` guard in `main`.** `./culvert <positional>` could refuse to
   start, which would have turned 121a from a silent misconfiguration into a
-  crash loop — loud, and far better. It is deliberately **not** done here:
-  it is a runtime-behaviour change to the startup path, outside the scope of a
-  deployment-artifact round, it would need its own audit of every invocation
-  shape (the `cli` service, `compose run`, the maintenance agent's allowlisted
-  commands, the appliance tree in #1528), and the artifact gate removes the
-  defect at the source rather than making it survivable. Recommended as its own
-  change, with that audit; recorded here so the next round does not have to
-  rediscover the argument.
+  loud crash loop, and — unlike the artifact gate — would hold for **any**
+  orchestrator, including the systemd unit and Kubernetes manifest §7.4 notes do
+  not yet exist. It is the fail-closed answer to the class and it is recommended
+  as its own change. It is deliberately **not** done here, and the reason is
+  concrete rather than scope-shaped: **positional arguments are legitimately
+  load-bearing on one path.** `runPrepareDowngradeCommand`
+  (`upstream_downgrade.go:273`) reads `flag.Args()` to take the
+  `--confirm <word>` token for the prepare-downgrade one-shot. So a blanket
+  guard breaks a shipped command, and a correct guard must be conditional on
+  the invocation mode — which needs an audit of every shape (`cli` with `-h`,
+  `compose run --rm cli <flags>`, the maintenance agent's sudoers allowlist,
+  prepare-downgrade, the appliance tree in #1528) and a decision about where
+  the check sits relative to `handleOneShotCommands`. That is a startup-path
+  change with its own failure modes, not a rider on a compose fix. Recorded
+  here with the decisive fact, so the round that takes it does not have to
+  rediscover why the one-line version is wrong.
 - **A smoke CI job that brings `docker-compose.ha.yml` up.** The real remedy for
   "no CI job has ever brought this file up" is a CI job that does. It is a
   separate build with its own cost and its own flake surface (two CPs, a DP, a
@@ -417,7 +425,36 @@ runs rather than what the file hoped it ran.
   the `command: []` fixture shape (§7.1). Wire-compatibility change; out of
   scope.
 
-## 11. Residual risk
+## 11. Verification
+
+Commands and results at the final tree, with the base `origin/main` `51996b9`.
+
+| Check | Command | Result |
+|---|---|---|
+| New gates | `go test -run TestChaos121 -count=1 .` | 6/6 pass |
+| **Mutation** | `git checkout -- docker-compose.ha.yml` then the above | **all three gates FAIL, 6 named violations** (two services × three contracts); the 121a message prints the full `./culvert sh -c '…'` argv |
+| Pre-existing artifact gates | `go test -run 'TestDockerCompose\|TestChaos56' -count=1 .` | pass, including the two that extract and execute the HA script |
+| Root package | `go test -count=1 .` | `ok … 411.987s` |
+| Whole module | `go test -count=1 ./...` | `ok` in 120 packages, 0 failures |
+| Artifact resolves | `docker compose -f docker-compose.ha.yml config` and `… --profile dp config` | both resolve; `entrypoint: [/bin/sh, -c]`, `stop_grace_period: 1m0s`, `condition: service_healthy` on `proxy` **and** `dp` |
+| Lint, gate's own command | `GOTOOLCHAIN=go1.27.4 go install …golangci-lint@v2.15.0` then `golangci-lint run --new-from-rev origin/main` | `0 issues` (one `gocritic` builtin-shadow was found on the first pass and fixed) |
+| Guidance checker | `python3 docs/agent-context/check.py` | exit 0 |
+
+**Not run, and why.** No container was built or started: this environment has no
+Docker daemon (the compose *client* resolves artifacts, which is what gates 1-3
+and the `config` checks above use). So the argv composition, the resolved grace
+and the resolved dependency condition are verified from the artifacts and from
+Docker's documented ENTRYPOINT/CMD semantics — not from a running container. §10
+and residual risk `1` say what that leaves open: the gate proves the flags reach
+`flag.Parse`, not that the HA stack converges. A full-tree `golangci-lint` pass
+compared against the same measurement on the base was not run; the diff adds one
+new test file and edits comments plus one regex in another, and every function
+whose complexity could be attributed is a **new declaration**, which
+`--new-from-rev` does see.
+
+A passing local check is not a passing hosted review or merge gate.
+
+## 12. Residual risk
 
 1. **Gate 1 proves the argv, not the boot.** It asserts that the flags reach
    `flag.Parse`; it cannot assert that the resulting node converges into a

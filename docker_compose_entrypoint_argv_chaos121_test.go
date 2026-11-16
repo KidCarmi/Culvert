@@ -88,6 +88,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -403,6 +404,17 @@ var chaos121GraceKnownGaps = map[string]string{
 	"test/e2e/catalog-update/docker-compose.catalog-e2e.yml:proxy": "CI fixture whose scenario deliberately SIGKILLs the dispatcher mid-flight (the file's own header says so), so a grace would change what it tests",
 }
 
+// parseComposeDuration accepts both spellings Compose allows for a duration
+// field: a Go-style "60s" and a bare number, which Compose reads as SECONDS.
+// Rejecting the bare form would report a legal artifact as unparseable and
+// train the next reader to distrust the gate.
+func parseComposeDuration(v string) (time.Duration, error) {
+	if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+		return time.Duration(n) * time.Second, nil
+	}
+	return time.ParseDuration(v)
+}
+
 // checkStopGrace returns one violation per supervised culvert service whose
 // declared stop grace does not strictly exceed the worst-case envelope, plus
 // one per stale known-gap entry.
@@ -417,7 +429,12 @@ func checkStopGrace(svcs []composeService, worst time.Duration) []string {
 		if !ok {
 			if reason, excused := chaos121GraceKnownGaps[s.id()]; excused {
 				seen[s.id()] = true
-				_ = reason
+				if strings.TrimSpace(reason) == "" {
+					// An entry with no reason is the shape this map exists to
+					// prevent: a container allowed to be SIGKILLed mid-drain
+					// because someone silenced the gate rather than decided.
+					viol = append(viol, fmt.Sprintf("chaos121GraceKnownGaps excuses %q with an empty reason — state what the SIGKILL costs, or remove the entry", s.id()))
+				}
 				continue
 			}
 			viol = append(viol, fmt.Sprintf(
@@ -427,9 +444,9 @@ func checkStopGrace(svcs []composeService, worst time.Duration) []string {
 			continue
 		}
 		seen[s.id()] = true
-		grace, err := time.ParseDuration(fmt.Sprint(rawGrace))
+		grace, err := parseComposeDuration(fmt.Sprint(rawGrace))
 		if err != nil {
-			viol = append(viol, fmt.Sprintf("%s: stop_grace_period %q does not parse as a duration", s.id(), rawGrace))
+			viol = append(viol, fmt.Sprintf("%s: stop_grace_period %q does not parse as a duration: %v", s.id(), rawGrace, err))
 			continue
 		}
 		if grace <= worst {
@@ -482,19 +499,37 @@ func TestChaos121_StopGraceCheckRejectsTheDockerDefault(t *testing.T) {
 		t.Error("a 30s grace was accepted against a 51s envelope")
 	}
 
+	// Compose also accepts a bare number, read as seconds. Both spellings must
+	// be compared, not reported as unparseable — a gate that cries wolf on a
+	// legal artifact is a gate the next reader disables.
+	for spelling, want := range map[string]bool{"60": true, "30": false} {
+		svc := composeService{file: "synthetic", name: "proxy", raw: map[string]any{
+			"build": ".", "restart": "unless-stopped", "stop_grace_period": spelling,
+		}}
+		var unexcused []string
+		for _, v := range checkStopGrace([]composeService{svc}, worst) {
+			if !strings.Contains(v, "chaos121GraceKnownGaps names") {
+				unexcused = append(unexcused, v)
+			}
+		}
+		if accepted := len(unexcused) == 0; accepted != want {
+			t.Errorf("bare-seconds grace %q: accepted=%v, want %v (%v)", spelling, accepted, want, unexcused)
+		}
+	}
+
 	enough := composeService{file: "synthetic", name: "proxy", raw: map[string]any{
 		"build": ".", "restart": "unless-stopped", "stop_grace_period": "60s",
 	}}
 	// Filter the stale-entry violations the synthetic input necessarily
 	// produces: this control is about the grace comparison, not the map.
-	var real []string
+	var unexcused []string
 	for _, v := range checkStopGrace([]composeService{enough}, worst) {
 		if !strings.Contains(v, "chaos121GraceKnownGaps names") {
-			real = append(real, v)
+			unexcused = append(unexcused, v)
 		}
 	}
-	if len(real) != 0 {
-		t.Errorf("a 60s grace was rejected against a 51s envelope: %v", real)
+	if len(unexcused) != 0 {
+		t.Errorf("a 60s grace was rejected against a 51s envelope: %v", unexcused)
 	}
 
 	// Control: a one-shot service is not supervised and needs no grace.
