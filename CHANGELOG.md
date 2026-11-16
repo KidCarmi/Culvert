@@ -41,6 +41,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The HA compose file's `proxy` and `dp` services never ran their startup
+  script.** `docker-compose.ha.yml` sets `command: sh -c '... exec ./culvert
+  $$ARGS'` on images built from the repo Dockerfile, whose ENTRYPOINT is
+  `./culvert`. Compose prepends the ENTRYPOINT, so the container ran
+  `./culvert sh -c ...`; flag parsing stopped at `sh` and the node booted
+  HEALTHY (the healthcheck probes the default `:8080`) with every flag at its
+  default — in-memory roster, CA and policy (nothing persisted to the `/data`
+  volume), no ClamAV/YARA, no cluster DB, a standby that never used
+  `HA_JOIN`/`HA_TOKEN` (and skipped the empty-token refusal), and DPs that
+  never enrolled. Both services now set `entrypoint: []` so the script is the
+  container process; a contract test derives the effective argv from the
+  Dockerfile ENTRYPOINT and the compose service.
+
 - **Ten alert events were fired by production code with no way to subscribe to
   them from the Alerts panel, and four of them could never be delivered at all
   (CHAOS-120).** The panel's checkbox list is the only place Culvert's alert
