@@ -65,6 +65,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The pre-flight SSRF guard on every tunnel path resolved DNS with no
+  deadline and no link to the client, so the 10 s dial bound behind it was
+  unreachable during a resolver outage.** CONNECT (bypass and inspect),
+  WebSocket and SOCKS5 each bound their upstream dial at 10 s, but ran
+  `isPrivateHost` in front of it under `context.Background()`. On a verdict
+  cache miss that is a second, unbounded resolution of the same name: a
+  resolver that stops answering held each request goroutine — with its client
+  connection, descriptor and per-IP connection-limiter slot — for the OS
+  resolver's whole budget (timeout × attempts × nameservers, multiplied again
+  by search domains), and kept holding it after the client hung up. Measured
+  against a resolver that never answers (Go 1.27.4, a two-nameserver
+  `timeout:2 attempts:3` resolv.conf): the guard returned after **12.0 s**
+  with the client long gone; with glibc defaults and three nameservers the
+  same arithmetic is 30 s before search domains. The guard now goes through
+  `ssrf.PrivateHostBudget`: the lookup is cancelled when the request context
+  ends (returned in 100 ms in the same experiment) and is capped at
+  `tunnelGuardBudget` (10 s — the dial's own allowance for the same
+  resolution, so no destination that could have been dialled is newly
+  refused). Verdicts, the 30 s verdict cache, "failures are never cached" and
+  the connect-time `ssrfControl` re-check are unchanged, and an undetermined
+  destination still fails closed with the same 403 / SOCKS5 `0x02`; a budget
+  overrun wraps the new `ssrf.ErrLookupBudget` and, like every resolver
+  failure, never `ssrf.ErrBlocked`. The timer is created only on a cache
+  miss, so a cached verdict — the per-request hot path — allocates exactly
+  what it did before (pinned by
+  `TestPrivateHostBudget_CacheHitPaysNothingForTheBound`). New
+  `tunnel_guard_bound_test.go` pins all four call sites by the cancellation
+  *cause* the resolver observes rather than by elapsed time. Not changed: the
+  SOCKS5 dial still runs under `context.Background()` (bounded by its 10 s
+  dialer timeout, but not cancelled by a client hang-up), and concurrent
+  misses for one host are not single-flighted.
+
 - **The syslog/SIEM request sink was the one request-log sink still paying a
   reflective `json.Marshal` plus three redundant copies per record, on the
   request goroutine.** Delivery was already asynchronous — a slow collector
