@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	"time"
 
 	"github.com/KidCarmi/Culvert/internal/hostutil"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
@@ -44,6 +45,24 @@ func isPrivateHost(hostport string) error { return ssrf.PrivateHost(hostport) }
 // step in a bounded operation.
 func isPrivateHostContext(ctx context.Context, hostport string) error {
 	return ssrf.PrivateHostContext(ctx, hostport)
+}
+
+// tunnelGuardBudget caps the pre-flight guard's DNS lookup on the data-plane
+// tunnel paths (CONNECT bypass/inspect, WebSocket, SOCKS5). It equals the 10 s
+// those paths already allow their upstream dial — which re-resolves the same
+// name — so no destination that could have been dialled is newly refused. A
+// var (not const) so tests can shrink it; production never reassigns it.
+var tunnelGuardBudget = 10 * time.Second
+
+// isPrivateHostBounded is isPrivateHostContext with the miss-path lookup also
+// capped at tunnelGuardBudget. The tunnel paths previously called
+// isPrivateHost, whose lookup runs under context.Background(): a resolver that
+// stopped answering held each request goroutine (plus its client connection
+// and connection-limiter slot) for the OS resolver budget, past the 10 s dial
+// bound behind it and past the client hanging up. Same verdicts, same cache,
+// same fail-closed result; see ssrf.PrivateHostBudget.
+func isPrivateHostBounded(ctx context.Context, hostport string) error {
+	return ssrf.PrivateHostBudget(ctx, hostport, tunnelGuardBudget)
 }
 
 // ssrfControl is the connect-time guard (net.Dialer.Control) — rejects dials

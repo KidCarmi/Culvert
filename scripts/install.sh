@@ -1552,7 +1552,23 @@ env_put() {
   # whole install under `set -euo pipefail`. Take ownership via sudo when we
   # can't write it (no-op — and no sudo call — when we already can, so the
   # extracted-function tests on a user-owned temp file are unaffected).
-  if [[ -e "$file" && ! -w "$file" ]]; then
+  #
+  # SEC-INSTALL-ENVLINK-1 (owner decision on PR #1898/#1909): $file may be a
+  # symlink — operators do link their env file — but `sudo` must never act
+  # THROUGH one. `sudo touch` on a DANGLING link creates its target as root
+  # (`-e` is false for it, so only `-L` sees the case), and `sudo chown` on a
+  # live link hands the TARGET to the invoking sudoer (`.env -> /etc/shadow`).
+  # Whoever can write the stack dir can plant either. So: a dangling link is
+  # refused outright; a live link is used only if it is already writable, and
+  # otherwise degrades through the warn-and-skip below instead of escalating.
+  # A regular $file keeps the ownership-taking path unchanged.
+  if [[ -L "$file" && ! -e "$file" ]]; then
+    warn "Refusing to use $file: it is a symlink to a path that does not exist — leaving it unchanged."
+    warn "Point it at the real env file (or replace it with one), then re-run or set $var manually."
+    return 0
+  elif [[ -L "$file" ]]; then
+    : # a live link: never handed to sudo; the writability check below decides
+  elif [[ -e "$file" && ! -w "$file" ]]; then
     sudo chown "$(id -un)" "$file" 2>/dev/null || true
   elif [[ ! -e "$file" && ! -w "$(dirname "$file")" ]]; then
     sudo touch "$file" 2>/dev/null && sudo chown "$(id -un)" "$file" 2>/dev/null || true
@@ -1575,6 +1591,31 @@ env_put() {
   # same way if sudo cannot.
   local lock="$file.lock" dir
   dir="$(dirname "$file")"
+  # SEC-INSTALL-LOCKLINK-1: never follow a link at the lock path. All three
+  # users of it follow symlinks — the two sudo calls below and the
+  # `9>"$file.lock"` redirection that opens the transaction — so a symlink
+  # planted at "$file.lock" by whoever owns the stack dir redirects them onto
+  # an arbitrary path. That is reachable in exactly the topology this block
+  # exists to support (a stack dir belonging to ANOTHER user), and the sudo
+  # pair makes it privileged: `sudo touch` CREATES the link's target as root
+  # and `sudo chown` hands it to the invoking sudoer — /etc/sudoers.d/x or
+  # /etc/cron.d/x from an installer re-run. `.env.lock` is the sharp case
+  # because, unlike `.env`, it normally does not exist, so the creation branch
+  # is live on an upgrade and not just on a first install.
+  #
+  # `-e` is FALSE for a dangling symlink, so it cannot see the create case and
+  # `-L` is the only guard that can. A lock file has no legitimate reason to be
+  # a link or a device/FIFO (a planted FIFO would also hang `9>` forever), so
+  # refuse anything that is not a regular file and degrade exactly as the two
+  # blocks above do. This closes the planted-link case, not a same-instant
+  # swap between this check and the `sudo touch` below: the shell cannot open
+  # with O_NOFOLLOW, and planting still requires write access to the stack dir.
+  if [[ -L "$lock" || ( -e "$lock" && ! -f "$lock" ) ]]; then
+    warn "Refusing to use $lock: it is a symlink or not a regular file — leaving $file unchanged."
+    warn "Remove $lock (and check who owns $dir) if this is unexpected, then re-run."
+    warn "Set $var manually in $file if you need it, then restart the stack."
+    return 0
+  fi
   if [[ -e "$lock" && ! -w "$lock" ]]; then
     sudo chown "$(id -un)" "$lock" 2>/dev/null || true
   elif [[ ! -e "$lock" && ! -w "$dir" ]]; then
@@ -1635,6 +1676,38 @@ env_put() {
     printf '%s=%s\n' "$var" "$val" >> "$file"
     chmod 600 "$file"
   ) 9>"$file.lock"
+}
+
+# env_put_required VAR VALUE FILE — env_put for a value whose ABSENCE is a
+# security downgrade, not an inconvenience. Fails the install if it did not land.
+#
+# env_put deliberately DEGRADES to success (warn + `return 0`) when it cannot
+# take $file or $file.lock from another user, so that a re-run in a stack dir a
+# first `sudo`/cloud-init install left root-owned still reaches `docker compose
+# up` instead of aborting on `env_put CULVERT_INSTALL_CHANNEL …`. That trade is
+# right for a channel name, a catalog URL or a GID — and wrong for the three
+# at-rest secrets, because a passphrase that never reaches .env is not "unset
+# until the operator fixes it": `docker compose up` resolves
+# ${CULVERT_CA_PASSPHRASE:-} to EMPTY and the proxy persists the SSL-inspection
+# Root CA private key, and saved request logs, UNENCRYPTED — while this script
+# goes on to print "Stored in: $envfile" and "Encryption passphrase already
+# configured". The operator is told at-rest encryption is on while it is off,
+# and the CA key is the one secret a later re-run can never re-encrypt in place.
+#
+# So verify, with the same shared predicate every caller here uses to decide
+# whether a value is configured, that the write actually took effect — and
+# fail closed via error() exactly as this file already does for every OTHER way
+# the operator's encryption intent could be dropped (a short passphrase, a
+# charset that compose would re-interpolate, a degraded generator). Only a
+# value that genuinely did not land can abort: a successful env_put is
+# unchanged, so the normal path has no new failure mode.
+env_put_required() {
+  local var="$1" val="$2" file="$3" rc=0
+  env_put "$var" "$val" "$file"
+  env_file_value_set "$var" "$file" || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    error "Could not persist $var into $file (verification exit $rc) — refusing to continue with it silently unset. 'docker compose up' would resolve it to EMPTY, which means encryption at rest OFF (the SSL-inspection CA key and saved logs stored in the clear) or, for the session secret, every node on its own signing key. Fix the file's ownership/permissions ($file and its directory must be writable by $(id -un), the directory because the lock and staging files live beside it), or set $var in $file yourself, then re-run."
+  fi
 }
 
 gen_passphrase() {
@@ -1766,7 +1839,7 @@ persist_host_env_session_secret() {
   if [[ ! "$trimmed" =~ ^[0-9a-fA-F]{64,}$ || $(( ${#trimmed} % 2 )) -ne 0 ]]; then
     error "CULVERT_SESSION_SECRET (host environment) must be at least 64 hex characters (32 bytes) — got ${#trimmed}. Fix it before the stack starts, or every node will fall back to its own random signing key."
   fi
-  env_put CULVERT_SESSION_SECRET "$trimmed" "$envfile"
+  env_put_required CULVERT_SESSION_SECRET "$trimmed" "$envfile"
   info "Persisted CULVERT_SESSION_SECRET from the host environment into $envfile so the running container can use it."
 }
 
@@ -1813,7 +1886,7 @@ setup_at_rest_encryption() {
   # `export VAR=""` matches `=.+` but compose resolves it empty.
   if [[ -n "${CULVERT_LOG_PASSPHRASE:-}" ]] && ! env_file_value_set CULVERT_LOG_PASSPHRASE "$envfile"; then
     validate_passphrase_for_env_file "CULVERT_LOG_PASSPHRASE" "$CULVERT_LOG_PASSPHRASE"
-    env_put CULVERT_LOG_PASSPHRASE "$CULVERT_LOG_PASSPHRASE" "$envfile"
+    env_put_required CULVERT_LOG_PASSPHRASE "$CULVERT_LOG_PASSPHRASE" "$envfile"
   fi
 
   local log_set=0 ca_set=0
@@ -1844,7 +1917,7 @@ setup_at_rest_encryption() {
     # entry such as `export VAR=""` must not suppress the write.
     if [[ -n "${CULVERT_CA_PASSPHRASE:-}" ]] && ! env_file_value_set CULVERT_CA_PASSPHRASE "$envfile"; then
       validate_passphrase_for_env_file "CULVERT_CA_PASSPHRASE" "$CULVERT_CA_PASSPHRASE"
-      env_put CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
+      env_put_required CULVERT_CA_PASSPHRASE "$CULVERT_CA_PASSPHRASE" "$envfile"
     fi
     info "Encryption passphrase already configured — keeping existing values."
     return
@@ -1911,7 +1984,7 @@ setup_at_rest_encryption() {
     # actually used as CULVERT_LOG_PASSPHRASE, so CA and log encryption keys
     # would diverge instead of matching as intended.
     if [[ -n "$existing_pass" ]] && ! printf '%s' "$existing_pass" | LC_ALL=C grep -q '[^A-Za-z0-9._@%^!*()+=:,-]'; then
-      env_put CULVERT_CA_PASSPHRASE "$existing_pass" "$envfile"
+      env_put_required CULVERT_CA_PASSPHRASE "$existing_pass" "$envfile"
       info "Fresh deployment — also encrypting the SSL-inspection CA key with the existing CULVERT_LOG_PASSPHRASE."
     elif [[ -n "$existing_pass" ]]; then
       warn "CULVERT_LOG_PASSPHRASE contains characters that are not safe to persist verbatim in $envfile"
@@ -1971,9 +2044,9 @@ setup_at_rest_encryption() {
       ;;
   esac
 
-  env_put CULVERT_LOG_PASSPHRASE "$pass" "$envfile"
+  env_put_required CULVERT_LOG_PASSPHRASE "$pass" "$envfile"
   if [[ "$fresh" == 1 ]]; then
-    env_put CULVERT_CA_PASSPHRASE "$pass" "$envfile"
+    env_put_required CULVERT_CA_PASSPHRASE "$pass" "$envfile"
     info "Fresh deployment — also encrypting the SSL-inspection CA key with this passphrase."
   else
     info "Existing deployment — set the saved-log passphrase only (left the CA key untouched to"

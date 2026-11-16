@@ -43,7 +43,7 @@ var globalAlertStore = &AlertStore{}
 // suppressed" even though the producer did everything right. Mirrors the same
 // seam rationale as startupAlertFire below.
 var fireAlert = func(event string, payload AlertPayload) {
-	defer recoverGoroutine("alert") // fired via `go fireAlert(...)` from the proxy hot path
+	defer recoverGoroutine(crashComponentAlert) // fired via `go fireAlert(...)` from the proxy hot path
 	globalAlertStore.Dispatch(event, payload)
 }
 

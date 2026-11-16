@@ -126,9 +126,39 @@ for example, `policy_loaded` is **informational** in `/ready`
   operator is responsible for, each as a `code / status / message /
   operator_action` row, with a top-level rolled-up verdict
   (`ok` / `warn` / `fail`).
-* **Side-effect-free**: reading it never opens files, dials sockets, or
-  pings ClamAV. It is safe to poll.
+* **Read-only and safe to poll.** Reading it never writes to disk and never
+  changes configuration or runtime state. It is not free of I/O, and each
+  access below is bounded:
+  * *Config versions.* Every read lists the config-versions directory and
+    parses the latest `v{N}.json` (rows `config_versions_present`,
+    `config_versions_readable`, `config_rollback_validation`). The full-history
+    scan behind `config_versions_integrity` is cached and is not repeated on
+    every read.
+  * *Key-at-rest backups.* `plaintext_key_backup` checks whether the plaintext
+    backup files exist (`stat` only); it never opens them.
+  * *Admin roster.* When `-ui-users-file` is configured, the roster row uses a
+    shared, cached, read-only probe of that file with a bounded wait.
+  * *ClamAV.* When antivirus scanning is configured, the `clamav_scan` check
+    reads the same cached daemon status as `/health` and `/ready`. The status
+    is fresh for 30 seconds. A read that finds it older starts at most one
+    shared ping of the daemon, however many callers are waiting, and waits up
+    to 750 ms for the result before answering from the previous observation.
+    Polling Diagnostics therefore produces at most one ClamAV ping per
+    30 seconds.
 * Visible in the GUI under **Infrastructure → Diagnostics**.
+* **`clamav_scan`.** `warn` row, present only while ClamAV is configured and
+  the last status observation is *unreachable*. In that state content is
+  forwarded **without an antivirus verdict** (fail-open); YARA rules and threat
+  feeds still apply. The same condition is a gating `fail` on the `/ready`
+  `clamav` row, so `/ready` returns `503` at the same time. The row is
+  absent when ClamAV is not configured, when the daemon answers, before the
+  first status observation has landed, and when body scanning is delegated to
+  the remote scan service (`-scan-svc-url`), whose reachability the Security
+  Scanning panel reports. The message is fixed text and never names the daemon
+  address or the probe error; the Security Scanning panel shows both. The row
+  clears within about 30 seconds of the daemon answering, with no restart. See
+  [scan capacity and timeouts](operator/scan-capacity-and-timeouts.md) for the
+  fail-open posture and triage.
 * **`pac_profile_degraded`.** `warn` row, present only while at least one
   PAC profile (including `default`) was last served with compile warnings
   (dropped rule, unresolvable pool reference, secure-mode conflict). It names
@@ -145,9 +175,9 @@ for example, `policy_loaded` is **informational** in `/ready`
   row reports the result of a **one-shot writability probe** that runs
   once at startup against the configured data directory. The probe
   creates a small temp file, writes a few bytes, then deletes it; the
-  outcome is cached for the lifetime of the process. The handler reads
-  only the cache — no disk I/O happens at request time, and the probe
-  is **not** retried. This means:
+  outcome is cached for the lifetime of the process. For this row the
+  handler reads only the cache — the row does no disk I/O at request
+  time, and the probe is **not** retried. This means:
   * `ok` — the directory was writable at startup.
   * `fail` — the directory was not writable at startup; persistence is
     broken until you fix permissions / mount and restart.
