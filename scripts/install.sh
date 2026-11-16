@@ -1552,7 +1552,23 @@ env_put() {
   # whole install under `set -euo pipefail`. Take ownership via sudo when we
   # can't write it (no-op — and no sudo call — when we already can, so the
   # extracted-function tests on a user-owned temp file are unaffected).
-  if [[ -e "$file" && ! -w "$file" ]]; then
+  #
+  # SEC-INSTALL-ENVLINK-1 (owner decision on PR #1898/#1909): $file may be a
+  # symlink — operators do link their env file — but `sudo` must never act
+  # THROUGH one. `sudo touch` on a DANGLING link creates its target as root
+  # (`-e` is false for it, so only `-L` sees the case), and `sudo chown` on a
+  # live link hands the TARGET to the invoking sudoer (`.env -> /etc/shadow`).
+  # Whoever can write the stack dir can plant either. So: a dangling link is
+  # refused outright; a live link is used only if it is already writable, and
+  # otherwise degrades through the warn-and-skip below instead of escalating.
+  # A regular $file keeps the ownership-taking path unchanged.
+  if [[ -L "$file" && ! -e "$file" ]]; then
+    warn "Refusing to use $file: it is a symlink to a path that does not exist — leaving it unchanged."
+    warn "Point it at the real env file (or replace it with one), then re-run or set $var manually."
+    return 0
+  elif [[ -L "$file" ]]; then
+    : # a live link: never handed to sudo; the writability check below decides
+  elif [[ -e "$file" && ! -w "$file" ]]; then
     sudo chown "$(id -un)" "$file" 2>/dev/null || true
   elif [[ ! -e "$file" && ! -w "$(dirname "$file")" ]]; then
     sudo touch "$file" 2>/dev/null && sudo chown "$(id -un)" "$file" 2>/dev/null || true

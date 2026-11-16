@@ -591,6 +591,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **`install.sh`'s `env_put` no longer acts through a symlink at `.env` with
+  `sudo`.** This is the `.env` half of the link-following issue #1909 closed
+  for `.env.lock` (residual R1 of the 2026-11-15 review). A DANGLING `.env`
+  link was treated as a missing file (`-e` is false for it), so the installer
+  created its target, as root through `sudo touch` when the stack directory
+  was not writable. A LIVE link the invoker could not write went to
+  `sudo chown`, which follows the link and hands the target to the invoking
+  sudoer (`.env -> /etc/shadow`). A dangling `.env` link is now refused with a
+  warning. A live one is never handed to `sudo`: it is used when it is already
+  writable, and otherwise `env_put` warns and skips, as it does for any `.env`
+  it cannot take. Symlinked `.env` files the installing user can write keep
+  working (owner decision on #1898/#1909). CWE-59/CWE-61.
+
 - **An installer re-run in a stack directory it could not write started the
   stack with encryption at rest silently DISABLED, while reporting it as
   configured.** `env_put` deliberately degrades to success (warn +
