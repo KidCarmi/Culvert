@@ -112,7 +112,7 @@ func TestInstallScript_GenPassphrase_NormalOpensslProduces40Chars(t *testing.T) 
 func runSetupAtRestEncryptionAutoGenerate(t *testing.T, genPass string) (output string, exitCode int, envContent string) {
 	t.Helper()
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 	validateFn := extractShellFunction(t, "scripts/install.sh", "validate_passphrase_for_env_file")
 
 	dir := t.TempDir()
