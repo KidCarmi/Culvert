@@ -24,7 +24,6 @@ package syslog
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -505,14 +504,26 @@ func (s *Writer) drainLoop() {
 // here after it was closed; the line then follows the successor link to the
 // Writer that replaced it (formatted in THAT writer's format) instead of being
 // dropped invisibly against a displaced writer no surface reads any more.
-func (s *Writer) send(pri int, msg string) {
+func (s *Writer) send(pri int, msg string) { s.sendBody(pri, textBody(msg)) }
+
+// sendBody is send over a body that may still need encoding (see msgBody). The
+// delivery walk below is shared by both body kinds so the drop/handoff
+// accounting has exactly one implementation.
+func (s *Writer) sendBody(pri int, body msgBody) {
 	if s.queue == nil {
-		s.writeMsg(pri, msg)
+		s.writeBody(pri, body)
 		return
 	}
 	w := s
 	for hop := 0; ; hop++ {
-		switch w.tryEnqueue(w.formatLine(pri, msg, time.Now())) {
+		item, ok := w.formatBody(pri, body, time.Now())
+		if !ok {
+			// An unserializable body is dropped silently, exactly as the
+			// json.Marshal form did at the WriteRequest/WriteAudit call site.
+			// No writer refused it, so nothing is charged to one.
+			return
+		}
+		switch w.tryEnqueue(item) {
 		case enqClosed, enqDisplaced:
 			// Both mean "this writer is not the one to use": sealed, or
 			// replaced and already backed up. Neither is counted here, so
@@ -810,21 +821,13 @@ func (s *Writer) Write(p []byte) (int, error) {
 // severity=5 (notice), which most SIEMs map to a security-relevant priority.
 // The entry is only JSON-marshalled, so any serializable value is accepted.
 func (s *Writer) WriteAudit(e any) {
-	b, err := json.Marshal(e)
-	if err != nil {
-		return
-	}
-	s.send(13, string(b)) // PRI=13: facility=1 severity=5 (notice)
+	s.sendBody(13, jsonBody(e)) // PRI=13: facility=1 severity=5 (notice)
 }
 
 // WriteRequest sends a structured request-log entry as a JSON syslog message at
 // PRI=14 (facility=1 user-level, severity=6 informational).
 func (s *Writer) WriteRequest(e any) {
-	b, err := json.Marshal(e)
-	if err != nil {
-		return
-	}
-	s.send(14, string(b)) // PRI=14: facility=1 severity=6 (informational)
+	s.sendBody(14, jsonBody(e)) // PRI=14: facility=1 severity=6 (informational)
 }
 
 // formatMsg builds a syslog line in the configured format.
@@ -835,39 +838,72 @@ func (s *Writer) formatMsg(pri int, msg string) string {
 // formatLine builds a syslog line in the configured format, stamped with the
 // event time at, and records where the message body starts so a handoff can
 // re-encode it for a successor with a different format.
+//
+// This is the string-bodied case of formatBody (lineformat.go), which cannot
+// fail: only a structured body can refuse to encode.
 func (s *Writer) formatLine(pri int, msg string, at time.Time) queuedLine {
-	var hdr string
-	format := s.format
-	switch format {
-	case "rfc5424":
-		// RFC 5424: <PRI>VERSION SP TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP MSGID SP STRUCTURED-DATA SP MSG
-		hdr = fmt.Sprintf("<%d>1 %s %s %s %s - - ", pri, at.Format(time.RFC3339Nano), s.host, s.tag, s.pid)
-	default: // rfc3164
-		format = "rfc3164"
-		hdr = fmt.Sprintf("<%d>%s %s %s: ", pri, at.Format("Jan 02 15:04:05"), s.host, s.tag)
-	}
-	return queuedLine{line: hdr + msg + "\n", format: format, pri: pri, hdr: len(hdr), at: at}
+	item, _ := s.formatBody(pri, textBody(msg), at)
+	return item
 }
 
 // writeTimeout bounds each conn write: a TCP collector that accepts but stops
 // draining (SIEM overload, half-open peer) would otherwise fill the kernel
-// send buffer and block fmt.Fprint forever — while holding s.mu, stalling
+// send buffer and block the write forever — while holding s.mu, stalling
 // every request/audit-log caller proxy-wide.
 const writeTimeout = 5 * time.Second
 
 // writeLine sends one formatted line on the current conn with the write
 // deadline armed. Caller must hold s.mu and guarantee s.conn is non-nil.
+//
+// The line reaches the socket through a pooled byte buffer rather than
+// fmt.Fprint. With a single string operand fmt.Fprint writes exactly that
+// string — no separators are inserted — so the bytes are identical, but it
+// gets there by boxing the operand into an []any and running the formatter,
+// which measured 2 allocations per line; io.WriteString on a net.Conn (no
+// WriteString method) is one allocation, because it converts the whole line to
+// a fresh []byte. Both are paid by the DRAIN goroutine, the single goroutine
+// that has to keep up with the whole gateway's entry rate before tryEnqueue
+// starts counting drops, so its per-line cost is what decides when a healthy
+// collector still loses lines. Borrowing the same buffer the line was
+// assembled in makes the conversion free in the steady state: the drain is one
+// goroutine, so it keeps one buffer warm.
+//
+// net.Conn.Write does not retain p, so the buffer is safe to return as soon as
+// it returns.
 func (s *Writer) writeLine(line string) error {
 	s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck // best-effort; a failed deadline set surfaces on the write itself
-	_, err := fmt.Fprint(s.conn, line)
+	lb := getLineBuf()
+	lb.buf.WriteString(line)
+	_, err := s.conn.Write(lb.buf.Bytes())
+	putLineBuf(lb)
 	return err
 }
 
 // writeMsg formats and delivers one message synchronously. Production traffic
 // reaches deliverLine via the drain goroutine instead; this remains the
 // zero-value-Writer path and the unit under the deadline/backoff tests.
+//
+// Every remaining caller passes pri=14 — the structured senders reach the
+// synchronous path through writeBody now, so the pri=13 audit caller this
+// function used to have is gone. The parameter is kept rather than folded into
+// a constant because it is half of the pair (writeMsg / writeBody) the
+// deadline, backoff and stats tests drive, and a seam that silently hard-codes
+// a priority the production path parameterizes is the kind of divergence those
+// tests exist to catch.
+//
+//nolint:unparam // test-facing seam; see above — pri stays parameterized deliberately
 func (s *Writer) writeMsg(pri int, msg string) {
-	s.deliverLine(s.formatMsg(pri, msg))
+	s.writeBody(pri, textBody(msg))
+}
+
+// writeBody is writeMsg over a body that may still need encoding. An
+// unserializable body delivers nothing, matching the queued path.
+func (s *Writer) writeBody(pri int, body msgBody) {
+	item, ok := s.formatBody(pri, body, time.Now())
+	if !ok {
+		return
+	}
+	s.deliverLine(item.line)
 }
 
 // deliverLine sends one pre-formatted line, holding s.mu across the write and

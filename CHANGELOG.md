@@ -65,6 +65,109 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **Every successful IdP document fetch left its connection open.**
+  `fetchOIDCDiscoveryOverNetwork` and `fetchSAMLMetadataOverNetwork` each build
+  an `http.Transport` for one request and drop it on return. A zero-value
+  transport keeps connections alive and has no idle timeout, and a pool nobody
+  holds can be neither reused nor closed, so each fetch parked one TCP
+  connection, its file descriptor and the transport's two loop goroutines until
+  the IdP hung up: for the life of the process against an IdP or load balancer
+  that does not time idle connections out. A fetch runs on every provider
+  compile of a remote-document profile (boot, an IdP profile write, a CP->DP
+  snapshot apply, and the recovery and revalidation loops). Both transports now
+  set `DisableKeepAlives`. Measured in-process over 200 fetches against a
+  keep-alive server with no idle timeout (Go 1.27.4): 200 connections still
+  open and +600 goroutines (two per connection in the transport, one in the
+  test server) before; 0 and +0 after. No connection reuse is given up, because
+  none was possible. The request now carries `Connection: close`; the URL
+  guards, the SSRF dialer, the shared fetch budget and the returned document
+  are unchanged. New `idp_fetch_conn_release_test.go` counts connections on the
+  server side.
+
+- **The pre-flight SSRF guard on every tunnel path resolved DNS with no
+  deadline and no link to the client, so the 10 s dial bound behind it was
+  unreachable during a resolver outage.** CONNECT (bypass and inspect),
+  WebSocket and SOCKS5 each bound their upstream dial at 10 s, but ran
+  `isPrivateHost` in front of it under `context.Background()`. On a verdict
+  cache miss that is a second, unbounded resolution of the same name: a
+  resolver that stops answering held each request goroutine — with its client
+  connection, descriptor and per-IP connection-limiter slot — for the OS
+  resolver's whole budget (timeout × attempts × nameservers, multiplied again
+  by search domains), and kept holding it after the client hung up. Measured
+  against a resolver that never answers (Go 1.27.4, a two-nameserver
+  `timeout:2 attempts:3` resolv.conf): the guard returned after **12.0 s**
+  with the client long gone; with glibc defaults and three nameservers the
+  same arithmetic is 30 s before search domains. The guard now goes through
+  `ssrf.PrivateHostBudget`: the lookup is cancelled when the request context
+  ends (returned in 100 ms in the same experiment) and is capped at
+  `tunnelGuardBudget` (10 s — the dial's own allowance for the same
+  resolution, so no destination that could have been dialled is newly
+  refused). Verdicts, the 30 s verdict cache, "failures are never cached" and
+  the connect-time `ssrfControl` re-check are unchanged, and an undetermined
+  destination still fails closed with the same 403 / SOCKS5 `0x02`; a budget
+  overrun wraps the new `ssrf.ErrLookupBudget` and, like every resolver
+  failure, never `ssrf.ErrBlocked`. The timer is created only on a cache
+  miss, so a cached verdict — the per-request hot path — allocates exactly
+  what it did before (pinned by
+  `TestPrivateHostBudget_CacheHitPaysNothingForTheBound`). New
+  `tunnel_guard_bound_test.go` pins all four call sites by the cancellation
+  *cause* the resolver observes rather than by elapsed time. Not changed: the
+  SOCKS5 dial still runs under `context.Background()` (bounded by its 10 s
+  dialer timeout, but not cancelled by a client hang-up), and concurrent
+  misses for one host are not single-flighted.
+
+- **The syslog/SIEM request sink was the one request-log sink still paying a
+  reflective `json.Marshal` plus three redundant copies per record, on the
+  request goroutine.** Delivery was already asynchronous — a slow collector
+  costs a caller a channel send and nothing more — but the part that BUILDS the
+  line stayed on the caller, and for `WriteRequest` that caller is a proxy
+  request goroutine, once per logged request, on every protocol. It boxed the
+  352-byte `logstore.Entry` into an `any`, marshalled it into a fresh slice,
+  copied that slice into a string for `send`, and then built the header with a
+  `time.Format` plus a `fmt.Sprintf` and concatenated three strings; the drain
+  goroutine then put the finished line on the socket through `fmt.Fprint`. The
+  same record's two OTHER sinks already serialize with no per-record allocation
+  at all (`internal/reqlog/persist.go`'s retained `Encoder` over a
+  `bufio.Writer`, `internal/logstore/batchencode.go`'s retained encoder over
+  one batch buffer); this sink was simply the third and had not been given the
+  same treatment. One pooled buffer per line now carries both header and body:
+  the header is appended with `strconv`/`AppendFormat`, a structured body is
+  JSON-encoded straight into that buffer by a retained `json.Encoder`, the line
+  is converted to a string exactly once, and the drain borrows a buffer from
+  the same pool to write it. Measured on a real-shaped record (25 fields,
+  ~375 bytes of JSON; Go 1.27.4, linux/amd64, 4 vCPU Xeon @2.10GHz,
+  `-benchtime=2s`, medians), with the before row produced by running the SAME
+  new benchmark arm against the parent commit in a worktree: 10 allocs /
+  1,665 B / 3,420 ns per record before, **2 allocs / 768 B / 2,421 ns** after —
+  80% fewer allocations and 54% less garbage inside the request goroutine
+  wherever a SIEM collector is configured. Stage arms, both in one binary:
+  header assembly 6 → 1 allocs (rfc3164) and 7 → 1 (rfc5424); the drain's
+  per-line write 1 → 0. For scale, the whole in-process plain-HTTP forward path
+  is 94 allocs and 11.9 KB per request, so this sink alone was adding ~11% to
+  the per-request allocation count and ~14% to its garbage. No wire change:
+  `json.Encoder.Encode` emits exactly `json.Marshal`'s compact bytes plus the
+  one terminator the text path appended itself, and the new
+  `TestLineFormat_ByteIdentity_*` tests compare every assembled line — header,
+  body, terminator and the body offset a format handoff re-encodes from —
+  against the retained `fmt.Sprintf` + `json.Marshal` implementation across
+  both wire formats, HTML-escapable runes, U+2028/9, invalid UTF-8, a nil body
+  and the zero record. The preserved failure contract is pinned too: a body
+  `json` cannot serialize is still dropped silently rather than sent truncated,
+  and is still not charged as a collector drop. The pool is bounded (a line
+  above 16 KiB is sent and its buffer dropped rather than parked) and buffers
+  are reset on acquisition, so a record abandoned mid-assembly cannot leak into
+  the next line. `TestBenchGate_SyslogLineAllocs` bounds allocs/op and B/op for
+  every arm and additionally asserts each is cheaper than the shape it
+  replaced, so reinstating the intermediate slice or the string copy fails even
+  if the absolute bound is generous; it sits behind the `benchgate` tag like
+  every other allocation gate in the tree, and `internal/syslog` is added to
+  the explicit package list the three benchgate runners iterate — a gate on no
+  runner's list never runs. NOT addressed, and left measurable: the
+  reflective encode itself is ~1.6 µs of the ~2.4 µs that remains, and closing
+  it needs a hand-written encoder for a type this stdlib-only leaf package
+  deliberately cannot name — a different change, behind the same differential
+  oracle.
+
 - **`BenchmarkHTTPForward_HandleHTTP` overstated the plain-HTTP forward path's
   memory by ~3.7x, against its own stated purpose of reporting "the real
   per-request total".** No production behavior changes: the inflation was in
@@ -316,6 +419,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   method, so neither can be fixed while the other stays silent, and a configured
   `OnPanic` still owns the report rather than double-counting the crash counter.
 
+- **Diagnostics now warns when a configuration change was applied without a
+  rollback point.** Version capture after a configuration change is
+  best-effort: when the version file cannot be written, or capture is refused
+  while rewrite-rule identity is not durable, the change stays applied, the
+  admin UI reports success and the only trace was one process-log line. Config
+  Versions simply gained no entry and every `config_versions_*` row stayed OK,
+  so the missing rollback point was discovered only when a rollback was needed.
+  A new `config_version_capture` WARN row (additive, report-only, absent while
+  the latest capture succeeded) gives the number of changes without a rollback
+  point, the time of the first one and a fixed cause class, never the error
+  text or a path. It clears on the next recorded version, which captures the
+  full current configuration. Capture, refusal and the mutation paths are
+  unchanged.
+
 - **Diagnostics now warns when the OpenTelemetry (OTLP) export is failing.**
   The push-loop failure count and last error were shown only under Settings →
   OpenTelemetry (OTLP); the one-page report read as healthy while the collector
@@ -391,6 +508,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `pac_legacy_config_newer` row on Infrastructure → Diagnostics states it with
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
+
+- **Re-running `scripts/install.sh` on RHEL, CentOS, Rocky, Alma, Oracle Linux
+  or Fedora uninstalled the Docker Engine the first run had installed, took
+  the proxy down and then aborted.** The "Cleaning up old Docker
+  installations" step removed `containerd.io` along with the distro packages,
+  but `containerd.io` is Docker CE's own runtime (installed by the script from
+  download.docker.com) and `docker-ce` requires it, so `dnf remove -y
+  containerd.io` removed `docker-ce` as a dependent package — stopping the
+  daemon and every Culvert container. The run could not recover:
+  `docker-ce-cli` and `docker-compose-plugin` survive the removal, so the
+  install step read "Docker with Compose v2 already installed" and was
+  skipped, `docker.service` no longer existed, and the recovery path's `dnf
+  reinstall` only reinstalls packages that are still installed. Measured
+  against the real dnf in `rockylinux:9` with Docker CE 29.9.3 /
+  containerd.io 2.4.2. The step no longer removes `containerd.io`; distro
+  `docker`, `podman-docker` and `runc` are still removed. New
+  `install_script_rhel_rerun_keeps_docker_ce_test.go` fails before the change
+  and passes after. Debian-family hosts were never affected (that arm removes
+  the distro `containerd`, not `containerd.io`).
+
 
 - **A SIEM/syslog collector that was unreachable while the node booted stayed
   unserved until an operator re-saved the target or restarted.** Both boot
@@ -560,6 +697,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
+
+- **`install.sh`'s `env_put` no longer acts through a symlink at `.env` with
+  `sudo`.** This is the `.env` half of the link-following issue #1909 closed
+  for `.env.lock` (residual R1 of the 2026-11-15 review). A DANGLING `.env`
+  link was treated as a missing file (`-e` is false for it), so the installer
+  created its target, as root through `sudo touch` when the stack directory
+  was not writable. A LIVE link the invoker could not write went to
+  `sudo chown`, which follows the link and hands the target to the invoking
+  sudoer (`.env -> /etc/shadow`). A dangling `.env` link is now refused with a
+  warning. A live one is never handed to `sudo`: it is used when it is already
+  writable, and otherwise `env_put` warns and skips, as it does for any `.env`
+  it cannot take. Symlinked `.env` files the installing user can write keep
+  working (owner decision on #1898/#1909). CWE-59/CWE-61.
 
 - **An installer re-run in a stack directory it could not write started the
   stack with encryption at rest silently DISABLED, while reporting it as
