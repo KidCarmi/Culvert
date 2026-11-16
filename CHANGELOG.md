@@ -65,6 +65,51 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **Every response Culvert decrypted took a process-wide reader lock to ask an
+  empty map a question (PERF-SCANEXCL-1).** `scanexcl.Store.IsHostExcluded` is
+  called from `scanInspectBody` UNCONDITIONALLY — ahead of the content-type
+  gate, with no "is any scanner enabled" guard — for every response on the
+  SSL-inspection path, which is the primary SWG path; again from
+  `scanHTTPResponseBody` for every plain-HTTP response whenever a body scanner
+  is on; and the sibling `IsHashExcluded` runs once per body scan. All three
+  took `sync.RWMutex.RLock`, which is two atomic read-modify-writes on ONE
+  process-wide word, so every inspected response wrote the same cache line
+  purely to read a map that in steady state never changes — and in the default
+  posture, to read a map that is EMPTY, because the exclusion lists are an admin
+  opt-in for known-good internal mirrors. Both maps are now published as one
+  immutable view behind an `atomic.Pointer`; readers take one atomic pointer
+  load (a shared-line READ, which scales) and no lock, and a store with nothing
+  configured answers from a length check without paying the port strip or the
+  case fold the lock used to be taken around. `mu` survives, guarding only the
+  persistence path and serialising writers. Measured with the verbatim RWMutex
+  arm in the same interleaved invocation (go1.27.4, 4-vCPU Xeon @2.10GHz,
+  `-benchtime=2s`, RunParallel so ns/op is wall time across all workers): host
+  check with nothing configured 41.7/141/154 ns at P=1/2/4 -> 3.52/1.75/0.889 ns
+  (11.8x at one core, 173x at four); configured miss 50.2/156/171 ->
+  42.1/23.0/12.6; hash check with nothing configured 79.0/88.2/96.6 ->
+  2.62/1.37/0.651. The SIGN is the finding: adding cores subtracted throughput
+  in every posture (1->4 = 0.27x) and now adds it in every posture (3.3-4.0x).
+  Serially, the shapes that still do the full lookup lose the `RLock`/`RUnlock`
+  pair and its deferred unlock: configured host hit 45.7 -> 40.5 ns, configured
+  hash hit 93.0 -> 79.9 ns. This is the fourth instance of the identical
+  reader-lock ceiling in this tree (`internal/threatfeed`,
+  `internal/connlimit`, the IP filter and the top-hosts counter all record the
+  same finding and the same answer) and the first on the inspection path. The
+  change is held differentially, not by timing: `legacyStore` in
+  `scanexcl_bench_test.go` is a verbatim copy of the pre-change implementation
+  and both arms are asked a corpus of case, space, port, bracketed/bare IPv6,
+  trailing-dot, empty and malformed-digest inputs under nine list
+  configurations; the empty-posture shortcut is pinned by an allocation budget;
+  the never-mutate-a-published-view invariant is pinned by pointer identity and
+  under `-race`. One `IsHostExcluded` call is ~41 ns against a CONNECT this box
+  serves in ~200 µs, so no end-to-end benchmark moves and none is claimed to:
+  what was removed is a non-scaling term on a per-request path, and the removal
+  makes the code simpler rather than more complex. Full round record in
+  `docs/engineering/PERFORMANCE-GUARDIAN-REVIEW-2026-11-16.md`, which also
+  records the two end-to-end paths profiled and found already at their floor,
+  and confirms `internal/reqlog`'s `ringMu` has now met its own
+  written-down trigger for a sharded-ring pass on appliance hardware.
+
 - **Victim selection in the local credential cache was a scan over every active
   client, under the mutex every credential verification needs
   (PERF-AUTHCACHE-1).** `authCacheStore.evictOneLocked` answered both of its
