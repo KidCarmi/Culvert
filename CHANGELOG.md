@@ -294,6 +294,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the OpenTelemetry (OTLP) export is failing.**
+  The push-loop failure count and last error were shown only under Settings →
+  OpenTelemetry (OTLP); the one-page report read as healthy while the collector
+  received nothing and the external dashboards built on this node's telemetry
+  went quiet. A new `otlp_export` WARN row (additive, report-only, absent when
+  export is off or the latest push was delivered) names the failing signal
+  (metrics, traces or both) and never the endpoint, auth header or error text.
+  Push, retry and buffering behavior are unchanged.
+
 - **An unreachable ClamAV daemon is now a Diagnostics row.** With antivirus
   scanning configured, a daemon that cannot be reached is fail-open: content is
   forwarded without an antivirus verdict. That was visible on `/ready`,
@@ -360,6 +369,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `pac_legacy_config_newer` row on Infrastructure → Diagnostics states it with
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
+
+- **`scripts/install.sh` aborted on every supported Fedora release before
+  Docker was installed.** The Fedora branch registered Docker's repository with
+  `dnf config-manager --add-repo <url>`. Fedora 41 replaced dnf4 with dnf5,
+  whose config-manager dropped that option: it exits 2 with `Unknown argument
+  "--add-repo" for command "config-manager"`, and under the script's
+  `set -euo pipefail` the install stopped there on a host with no Docker yet.
+  The branch now uses dnf5's `config-manager addrepo --overwrite
+  --from-repofile=<url>` when `dnf --version` reports dnf5 (`--overwrite` so a
+  re-run after a partial install does not fail on the repo file the first run
+  wrote), and keeps the legacy form on dnf4. Reproduced and verified against
+  dnf5 5.4.6 in `fedora:latest`; pinned by
+  `TestInstallScript_FedoraDockerRepo_WorksOnDnf5AndDnf4`. The RHEL-family
+  branch (`yum-config-manager`, dnf4) is unchanged.
 
 - **A panic in the MCP telemetry shutdown drain killed the process from a
   shutdown hook that runs before every durability flush, so a "graceful"
@@ -495,6 +518,71 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
+
+- **An installer re-run in a stack directory it could not write started the
+  stack with encryption at rest silently DISABLED, while reporting it as
+  configured.** `env_put` deliberately degrades to success (warn +
+  `return 0`) when it cannot take `.env` or `.env.lock` from another user, so a
+  re-run in a `/srv/culvert` that a first `sudo`/cloud-init install left
+  root-owned reaches `docker compose up` instead of aborting on
+  `env_put CULVERT_INSTALL_CHANNEL …` under `set -euo pipefail`. That trade is
+  right for a channel name, a catalog URL or a GID. It was also applied to the
+  three at-rest secrets, because `env_put` is one function and no caller checked
+  its status — and a `CULVERT_CA_PASSPHRASE` that never reaches `.env` is not
+  "unset until the operator fixes it": `docker compose up` resolves
+  `${CULVERT_CA_PASSPHRASE:-}` to EMPTY and the proxy persists its
+  SSL-inspection **Root CA private key unencrypted**, saved request logs lose
+  at-rest encryption, and a missing `CULVERT_SESSION_SECRET` sends every node
+  back to its own random per-process signing key. `setup_at_rest_encryption`
+  then printed `IMPORTANT — SAVE YOUR ENCRYPTION PASSPHRASE … Stored in:
+  $envfile (chmod 600)`, or `Encryption passphrase already configured`, for a
+  value that was nowhere. The CA key is the one secret a later re-run cannot
+  re-encrypt in place. Executed at both revisions: before the lock-file fix this
+  state aborted the installer (exit 1, `.env.lock: Permission denied`); after
+  it, `env_put` returned 0 with no `.env` written at all — so the loud failure
+  became a silent downgrade. `env_put` keeps its degrade contract unchanged; a
+  new `env_put_required` wrapper verifies through the shared
+  `env_file_value_set` predicate that the write actually landed and otherwise
+  exits via `error()`, naming the variable and the remediation — the same
+  fail-closed posture this script already enforces on a short passphrase, an
+  unsafe charset and a degraded generator. The six secret call sites use it; the
+  non-secret ones keep the degrade, so the re-run fix is preserved and only a
+  value that genuinely did not land can abort. CWE-311 via CWE-636 (and CWE-392
+  for the false report), OWASP A02:2021, Medium. New
+  `install_script_env_put_required_test.go` covers the degrade (must fail
+  closed), the writable-directory positive control, the root-owned-directory
+  re-run where the secret DOES land (so the abort is not reintroduced), an
+  empty-resolving value, and a source gate asserting no secret is ever written
+  through the degrading `env_put`.
+
+- **`install.sh`'s `env_put` followed a symlink planted at its lock file, with
+  `sudo`, turning an installer re-run into an arbitrary root-owned file
+  creation.** `env_put` serializes its read/modify/write transaction on
+  `"$file.lock"` beside the stack's `.env`, and three users of that path follow
+  symlinks: `sudo touch "$lock"` CREATES the link's target as root,
+  `sudo chown "$(id -un)" "$lock"` then hands it to the invoking sudoer, and the
+  `9>"$file.lock"` redirection TRUNCATES whatever it points at with the
+  invoker's own privileges on every call. The two `sudo` calls were added so a
+  re-run against a stack directory owned by ANOTHER user would stop aborting —
+  which is exactly the topology in which someone else can plant the link. A
+  group-writable or foreign-owned `/srv/culvert` therefore let that account aim
+  `.env.lock` at, say, an absent `/etc/sudoers.d/zz-local` and wait for a
+  routine upgrade: `-e` is FALSE for a dangling symlink, so the creation branch
+  fired and the operator's own sudo created the file and gave it away.
+  `.env.lock` is the sharp path precisely because, unlike `.env`, it normally
+  does NOT exist, so the creation branch was live on an ordinary upgrade rather
+  than only on a first install. The lock path is now refused outright when it is
+  a symlink or any non-regular file — `-L` is the only test that sees a dangling
+  link — degrading through the warn-and-skip path `env_put` already has, so the
+  installer neither aborts under `set -euo pipefail` nor follows the link. A
+  non-regular file is refused too, not only a link: a planted FIFO makes `9>`
+  block forever, wedging the installer rather than aborting it. The identical
+  pre-existing pattern on `$file` itself is deliberately unchanged, because
+  operators do legitimately symlink an env file and narrowing that would be a
+  functional regression. New `install_script_env_put_lock_symlink_test.go`
+  covers the truncation, the privileged creation and the FIFO wedge, plus a
+  positive control proving the guard refuses links and not the foreign-owned
+  re-run it sits in front of. CWE-59/CWE-61.
 
 - **The dropped-record re-enrollment alert shared ONE dedup key across every
   node, so a batch of identity replacements delivered one webhook and silently

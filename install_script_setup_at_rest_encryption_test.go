@@ -44,7 +44,7 @@ import (
 func runSetupAtRestEncryptionChoice2(t *testing.T, passphrase string) (output string, exitCode int, envContent string) {
 	t.Helper()
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 	validateFn := extractShellFunction(t, "scripts/install.sh", "validate_passphrase_for_env_file")
 
 	// setup_at_rest_encryption only reaches the "own passphrase" branch when
@@ -138,7 +138,7 @@ func TestInstallScript_SetupAtRestEncryption_AcceptsStrongPassphrase(t *testing.
 // CA-at-rest encryption is a documented security surface, see CLAUDE.md).
 func TestInstallScript_SetupAtRestEncryption_FreshDeployWithPriorLogPassphraseStillEncryptsCA(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 
 	dir := t.TempDir()
@@ -200,7 +200,7 @@ is_fresh_deployment() { return 0; }
 // against for a different trigger (a re-run landing in a new stack dir).
 func TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseIsPersisted(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 
 	dir := t.TempDir()
@@ -249,7 +249,7 @@ export CULVERT_CA_PASSPHRASE='` + hostCAPass + `'
 // intended shared key into two different ones.
 func TestInstallScript_SetupAtRestEncryption_FreshDeployWithUnsafeHostLogPassphraseSkipsCA(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 
 	dir := t.TempDir()
@@ -299,7 +299,7 @@ export CULVERT_LOG_PASSPHRASE='` + unsafeLogPass + `'
 // PR #1156). The check must treat the whole value as one unit (`grep -z`).
 func TestInstallScript_SetupAtRestEncryption_HostEnvOnlyCAPassphraseWithEmbeddedNewlineRejected(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 	validateFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "validate_passphrase_for_env_file")
 
@@ -361,7 +361,7 @@ export CULVERT_CA_PASSPHRASE=$'abcdefgh\nijklmnop'
 // claims are shared actually match.
 func TestInstallScript_SetupAtRestEncryption_ReuseForCAMatchesPersistedLogPassphrase(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 
 	dir := t.TempDir()
@@ -431,7 +431,7 @@ export CULVERT_LOG_PASSPHRASE='` + divergentHostLogPass + `'
 // ran. Caught by automated PR review (chatgpt-codex-connector).
 func TestInstallScript_SetupAtRestEncryption_ReuseBranchSurvivesMissingEnvEntry(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, ".env")
