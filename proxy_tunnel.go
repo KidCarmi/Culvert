@@ -194,6 +194,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		logger.Printf("WS: upstream declined upgrade for %q (status %d)", sanitizeLog(host), resp.StatusCode)
 		relayDeclinedUpgrade(w, r, resp, match, id)
+		// Close the connection BEFORE the deferred resp.Body.Close(): on a
+		// keep-alive answer that Close drains the unread body, so a blocked
+		// download would still be fetched in full and a stalled origin would
+		// hold this handler. The connection is never reused.
+		destConn.Close() //nolint:errcheck // best-effort; the deferred Close is then a no-op
 		return
 	}
 

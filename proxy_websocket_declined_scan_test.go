@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,5 +92,66 @@ func TestWebSocketUpgradeHeaders_DoNotBypassPlainHTTPFileBlock(t *testing.T) {
 				t.Fatalf("Upgrade-dressed GET status = %d, want 403 block page", code)
 			}
 		})
+	}
+}
+
+// A blocked declined-upgrade answer must not be read to its end. The origin
+// here answers keep-alive, declares a 1 MB body, sends ten bytes and stalls;
+// http.ReadResponse's body drains on Close for a keep-alive response, so a
+// block that closed the body before the connection waited on the origin
+// forever (Codex P2 on PR #1917).
+func TestHandleWebSocket_BlockedDeclinedUpgradeDoesNotDrainUpstream(t *testing.T) {
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close() //nolint:errcheck // test cleanup
+	release := make(chan struct{})
+	defer close(release)
+	go func() {
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck // test cleanup
+		br := bufio.NewReader(conn)
+		for {
+			line, rerr := br.ReadString('\n')
+			if rerr != nil || line == "\r\n" {
+				break
+			}
+		}
+		_, _ = io.WriteString(conn,
+			"HTTP/1.1 200 OK\r\nContent-Type: application/x-msdownload\r\nContent-Length: 1000000\r\n\r\nMZ-partial")
+		<-release // stall with the body unfinished
+	}()
+
+	allowLoopbackTunnel(t)
+	setupProxyTest(t)
+	isolateLogRing(t)
+	orig := fileBlocker
+	fb := fileblock.NewBlocker()
+	for _, ext := range fileblock.DefaultBlockedExts {
+		fb.Add(ext)
+	}
+	fileBlocker = fb
+	t.Cleanup(func() { fileBlocker = orig })
+
+	r := makeRequest("http://"+ln.Addr().String()+"/download", map[string]string{
+		"Upgrade": "websocket", "Connection": "Upgrade",
+	})
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handleWebSocket(w, r, nil, ProxyIdentity{ClientIP: "192.0.2.99"})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleWebSocket did not return after blocking: it is draining the stalled upstream body")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 block page", w.Code)
 	}
 }
