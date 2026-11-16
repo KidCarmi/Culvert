@@ -7,6 +7,62 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Added
+
+- **A contained panic now tells an operator (CHAOS-120).** `recordCrash` is the
+  single sink every recovered panic funnels into — the proxy plane, the admin
+  plane, `runGuarded`/`recoverGoroutine`, and every `internal/*` background
+  round through `obs.SetPanicSink`. It incremented
+  `culvert_crash_records_total{component}`, stored a bounded record, wrote one
+  ERROR line and one audit entry, and fired **no alert**, for 62 of the 63
+  component labels the tree declares. The 63rd alerted itself from
+  `HAState.notePanicRound`, whose doc comment states the rule the others were
+  missing: "without them the containment would trade a loud crash for a silent
+  one, which is the failure class the guard exists to remove". Four consecutive
+  rounds recorded this as residual risk (CHAOS-116 `4`, CHAOS-117 `5`,
+  CHAOS-118 `1`, CHAOS-119 `3`) without closing it. The new `panic_contained`
+  event fires from the sink, so it covers every component and every round that
+  adds one. The payload carries the component and the crash id and **nothing
+  else** — a recovered panic value can embed a credential, `sanitizeLog` scrubs
+  control characters rather than masking secrets, and a webhook is an egress.
+  Latched to one alert per component per hour (the counter carries the repeat
+  rate); magnitude-compared so a backward clock step costs one window, not a
+  whole step (CHAOS-84). The alert-delivery plane is excluded from alerting
+  about itself: it cannot deliver news of its own failure, and firing from
+  there re-enters the sink through `fireAlert`'s own recover in a loop that
+  never terminates. The subscriber gate deliberately sits INSIDE the dispatch
+  goroutine, not before it as every other fault-driven producer does, because
+  `internal/alerts` releases its store mutex with a bare trailing `Unlock` in
+  `Add`/`Update`/`Delete` — so a panic inside one of those critical sections
+  strands the mutex and re-enters the sink, and a gate on the sink path would
+  have blocked the sink forever on a lock the panic itself stranded. A new AST
+  gate holds the invariant: no function on the sink's synchronous path may
+  touch a lock owned by another plane.
+
+### Fixed
+
+- **Ten alert events were fired by production code with no way to subscribe to
+  them from the Alerts panel, and four of them could never be delivered at all
+  (CHAOS-120).** The panel's checkbox list is the only place Culvert's alert
+  vocabulary is discoverable. `admin_ui_unavailable`, `cdr_unavailable`,
+  `dns_failure` and `yara_degraded` gate on `alerts.HasSubscriber` before
+  building a payload — correct for a producer whose rate is set by a fault, and
+  it means an event with no way to subscribe is an event that never fires, so
+  for any deployment configured through Culvert's own UI those four were dark by
+  construction: admin-UI access lost, CDR sanitisation unavailable, destination
+  DNS failing, and YARA forwarding bodies with no verdict. `disk_critical`,
+  `pac_profile_degraded`, `ha_self_fenced`, `ha_lease_reacquired`,
+  `ha_resume_unfenced` and `ha_manual_failover_required` were deliverable only
+  by POSTing the event string to `/api/alerts/webhooks` by hand — including the
+  two HA states that do not clear on their own and say so in their own log
+  lines ("operator action required", "only an operator can promote it").
+  CHAOS-113 found and recorded all ten in `scanAlertGUIKnownGaps` rather than
+  fixing ten operator-facing panels from a scan-sidecar round; this round's
+  scope is the notification boundary, so it closes them. The panel goes from 29
+  subscribable events to 40 and the known-gaps map is now empty — kept as an
+  empty map, because an entry added back is a new event shipping
+  unsubscribable and needs its reason recorded.
+
 ### Performance
 
 - **`BenchmarkHTTPForward_HandleHTTP` overstated the plain-HTTP forward path's
@@ -482,6 +538,71 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
+
+- **An installer re-run in a stack directory it could not write started the
+  stack with encryption at rest silently DISABLED, while reporting it as
+  configured.** `env_put` deliberately degrades to success (warn +
+  `return 0`) when it cannot take `.env` or `.env.lock` from another user, so a
+  re-run in a `/srv/culvert` that a first `sudo`/cloud-init install left
+  root-owned reaches `docker compose up` instead of aborting on
+  `env_put CULVERT_INSTALL_CHANNEL …` under `set -euo pipefail`. That trade is
+  right for a channel name, a catalog URL or a GID. It was also applied to the
+  three at-rest secrets, because `env_put` is one function and no caller checked
+  its status — and a `CULVERT_CA_PASSPHRASE` that never reaches `.env` is not
+  "unset until the operator fixes it": `docker compose up` resolves
+  `${CULVERT_CA_PASSPHRASE:-}` to EMPTY and the proxy persists its
+  SSL-inspection **Root CA private key unencrypted**, saved request logs lose
+  at-rest encryption, and a missing `CULVERT_SESSION_SECRET` sends every node
+  back to its own random per-process signing key. `setup_at_rest_encryption`
+  then printed `IMPORTANT — SAVE YOUR ENCRYPTION PASSPHRASE … Stored in:
+  $envfile (chmod 600)`, or `Encryption passphrase already configured`, for a
+  value that was nowhere. The CA key is the one secret a later re-run cannot
+  re-encrypt in place. Executed at both revisions: before the lock-file fix this
+  state aborted the installer (exit 1, `.env.lock: Permission denied`); after
+  it, `env_put` returned 0 with no `.env` written at all — so the loud failure
+  became a silent downgrade. `env_put` keeps its degrade contract unchanged; a
+  new `env_put_required` wrapper verifies through the shared
+  `env_file_value_set` predicate that the write actually landed and otherwise
+  exits via `error()`, naming the variable and the remediation — the same
+  fail-closed posture this script already enforces on a short passphrase, an
+  unsafe charset and a degraded generator. The six secret call sites use it; the
+  non-secret ones keep the degrade, so the re-run fix is preserved and only a
+  value that genuinely did not land can abort. CWE-311 via CWE-636 (and CWE-392
+  for the false report), OWASP A02:2021, Medium. New
+  `install_script_env_put_required_test.go` covers the degrade (must fail
+  closed), the writable-directory positive control, the root-owned-directory
+  re-run where the secret DOES land (so the abort is not reintroduced), an
+  empty-resolving value, and a source gate asserting no secret is ever written
+  through the degrading `env_put`.
+
+- **`install.sh`'s `env_put` followed a symlink planted at its lock file, with
+  `sudo`, turning an installer re-run into an arbitrary root-owned file
+  creation.** `env_put` serializes its read/modify/write transaction on
+  `"$file.lock"` beside the stack's `.env`, and three users of that path follow
+  symlinks: `sudo touch "$lock"` CREATES the link's target as root,
+  `sudo chown "$(id -un)" "$lock"` then hands it to the invoking sudoer, and the
+  `9>"$file.lock"` redirection TRUNCATES whatever it points at with the
+  invoker's own privileges on every call. The two `sudo` calls were added so a
+  re-run against a stack directory owned by ANOTHER user would stop aborting —
+  which is exactly the topology in which someone else can plant the link. A
+  group-writable or foreign-owned `/srv/culvert` therefore let that account aim
+  `.env.lock` at, say, an absent `/etc/sudoers.d/zz-local` and wait for a
+  routine upgrade: `-e` is FALSE for a dangling symlink, so the creation branch
+  fired and the operator's own sudo created the file and gave it away.
+  `.env.lock` is the sharp path precisely because, unlike `.env`, it normally
+  does NOT exist, so the creation branch was live on an ordinary upgrade rather
+  than only on a first install. The lock path is now refused outright when it is
+  a symlink or any non-regular file — `-L` is the only test that sees a dangling
+  link — degrading through the warn-and-skip path `env_put` already has, so the
+  installer neither aborts under `set -euo pipefail` nor follows the link. A
+  non-regular file is refused too, not only a link: a planted FIFO makes `9>`
+  block forever, wedging the installer rather than aborting it. The identical
+  pre-existing pattern on `$file` itself is deliberately unchanged, because
+  operators do legitimately symlink an env file and narrowing that would be a
+  functional regression. New `install_script_env_put_lock_symlink_test.go`
+  covers the truncation, the privileged creation and the FIFO wedge, plus a
+  positive control proving the guard refuses links and not the foreign-owned
+  re-run it sits in front of. CWE-59/CWE-61.
 
 - **The dropped-record re-enrollment alert shared ONE dedup key across every
   node, so a batch of identity replacements delivered one webhook and silently
