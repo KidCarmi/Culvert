@@ -8,6 +8,18 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-16 — `CHAOS-121` CLAIMED (placeholder, commit one). Domain: the
+DEPLOYMENT ARTIFACTS the resilience work is delivered through — every rule the
+last 120 rounds built into the binary is only as good as the compose file that
+starts and stops it, and `docker-compose.ha.yml` is the one shipped artifact no
+CI job has ever brought up.** Id claimed in this committed row before any code
+was written, per the convention below and checked against `origin/main` rather
+than the working tree per the 2026-09-25 amendment: `CHAOS-120` is the highest
+id anywhere on `origin/main` (at `51996b9`). Of the open PRs (#1922, #1921,
+#1920, #1917, #1916, #1915, #1914, #1913, #1911, #1904, #1901, #1705, #1549,
+#1548, #1536, #1528, #1526) none is a chaos sweep claiming a NEW id — #1911 is
+a rider on `CHAOS-120`, not a claim. This sweep took 121 and will not move.
+
 The 2026-11-14 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-14.md) —
 CHAOS-120 (THE CONTAINMENT PLANE'S NOTIFICATION BOUNDARY). CHAOS-119 asked what
