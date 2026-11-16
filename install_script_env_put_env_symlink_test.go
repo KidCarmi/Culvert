@@ -124,9 +124,9 @@ func TestInstallScript_EnvPut_LiveEnvSymlink_TargetIsNeverChownedThroughSudo(t *
 	}
 	stack, outside, scratch := envSymlinkDirs(t)
 	envFile := filepath.Join(stack, ".env")
-	target := filepath.Join(outside, "root-owned-secret")
-	const secret = "root's content, which env_put must neither take nor change\n"
-	if err := os.WriteFile(target, []byte(secret), 0o600); err != nil {
+	target := filepath.Join(outside, "root-owned-original")
+	const original = "root's content, which env_put must neither take nor change\n"
+	if err := os.WriteFile(target, []byte(original), 0o600); err != nil {
 		t.Fatalf("seed target: %v", err)
 	}
 	if err := os.Chown(target, 0, 0); err != nil { // stays root-owned: unwritable for the dropped uid
@@ -146,7 +146,7 @@ func TestInstallScript_EnvPut_LiveEnvSymlink_TargetIsNeverChownedThroughSudo(t *
 	if err != nil {
 		t.Fatalf("read target: %v", err)
 	}
-	if string(got) != secret {
+	if string(got) != original {
 		t.Fatalf("env_put changed the link target %s:\n%s", target, got)
 	}
 	if !strings.Contains(out, "Cannot write") {
