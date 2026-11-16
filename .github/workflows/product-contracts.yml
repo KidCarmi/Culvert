@@ -1,0 +1,55 @@
+name: Product Contracts
+
+# Detects a change that weakens a registered product contract. Fully automated:
+# an unrecorded weakening fails; an intentional one passes once it carries an
+# `amended`/`retired` record, and is listed in the job summary. No human
+# approval is involved. Design and threat model:
+# docs/engineering/PRODUCT-CONTRACTS.md.
+#
+# pull_request_target, deliberately: the workflow file AND the checker are taken
+# from the BASE branch, so a pull request cannot edit either to make itself
+# pass. The pull request's tree is checked out under ./pr and only ever READ
+# (parsed, diffed); nothing from it is built or executed. Keep it that way: do
+# not add a step that runs code, scripts or actions from ./pr.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: product-contracts-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: "Gate · product contracts"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the base branch (trusted checker)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out the pull request merge result (data only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          path: pr
+          fetch-depth: 2    # HEAD^1 is the base tip the merge was computed against
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-go-cache
+
+      - name: Build the checker from the base branch
+        run: go build -o "$RUNNER_TEMP/contractcheck" ./cmd/contractcheck
+
+      - name: Assess contract impact
+        working-directory: pr
+        run: |
+          set -euo pipefail
+          parents=$(git rev-list --parents -n1 HEAD | wc -w)
+          [ "$parents" -eq 3 ] || { echo "::error::the pull request merge ref is not a merge commit; resolve conflicts and re-run"; exit 1; }
+          "$RUNNER_TEMP/contractcheck" impact -base HEAD^1 | tee -a "$GITHUB_STEP_SUMMARY"

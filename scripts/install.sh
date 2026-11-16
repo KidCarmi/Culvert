@@ -348,7 +348,17 @@ else
     fedora)
       info "Installing from Docker's official dnf repository..."
       sudo dnf install -y dnf-plugins-core
-      sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+      # dnf5 (Fedora 41+) dropped `config-manager --add-repo URL` — it exits 2
+      # with 'Unknown argument "--add-repo"', which under `set -e` aborted the
+      # install before Docker was installed. Its replacement is the `addrepo`
+      # subcommand; --overwrite keeps a re-run after a partial install from
+      # failing on the repo file the first run already wrote. dnf4 (which
+      # prints a bare version, not "dnf5 version ...") keeps the legacy form.
+      if [[ "$(dnf --version 2>/dev/null || true)" == dnf5* ]]; then
+        sudo dnf config-manager addrepo --overwrite --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo
+      else
+        sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+      fi
       sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
       ;;
 
@@ -1565,6 +1575,31 @@ env_put() {
   # same way if sudo cannot.
   local lock="$file.lock" dir
   dir="$(dirname "$file")"
+  # SEC-INSTALL-LOCKLINK-1: never follow a link at the lock path. All three
+  # users of it follow symlinks — the two sudo calls below and the
+  # `9>"$file.lock"` redirection that opens the transaction — so a symlink
+  # planted at "$file.lock" by whoever owns the stack dir redirects them onto
+  # an arbitrary path. That is reachable in exactly the topology this block
+  # exists to support (a stack dir belonging to ANOTHER user), and the sudo
+  # pair makes it privileged: `sudo touch` CREATES the link's target as root
+  # and `sudo chown` hands it to the invoking sudoer — /etc/sudoers.d/x or
+  # /etc/cron.d/x from an installer re-run. `.env.lock` is the sharp case
+  # because, unlike `.env`, it normally does not exist, so the creation branch
+  # is live on an upgrade and not just on a first install.
+  #
+  # `-e` is FALSE for a dangling symlink, so it cannot see the create case and
+  # `-L` is the only guard that can. A lock file has no legitimate reason to be
+  # a link or a device/FIFO (a planted FIFO would also hang `9>` forever), so
+  # refuse anything that is not a regular file and degrade exactly as the two
+  # blocks above do. This closes the planted-link case, not a same-instant
+  # swap between this check and the `sudo touch` below: the shell cannot open
+  # with O_NOFOLLOW, and planting still requires write access to the stack dir.
+  if [[ -L "$lock" || ( -e "$lock" && ! -f "$lock" ) ]]; then
+    warn "Refusing to use $lock: it is a symlink or not a regular file — leaving $file unchanged."
+    warn "Remove $lock (and check who owns $dir) if this is unexpected, then re-run."
+    warn "Set $var manually in $file if you need it, then restart the stack."
+    return 0
+  fi
   if [[ -e "$lock" && ! -w "$lock" ]]; then
     sudo chown "$(id -un)" "$lock" 2>/dev/null || true
   elif [[ ! -e "$lock" && ! -w "$dir" ]]; then
