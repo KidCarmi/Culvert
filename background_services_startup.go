@@ -37,6 +37,12 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// configured.
 	go startSyslogHealthWatchdog(ctx)
 
+	// The SIEM feed's boot-dial retry: a collector that could not be
+	// connected at startup is re-dialled on a bounded backoff until it
+	// connects, the operator changes or disables the target, or the node
+	// shuts down. Idle (no timer, no dial) unless a boot dial failed.
+	go startSyslogIntentRetry(ctx)
+
 	// CHAOS-107: the ClamAV signature-generation observer. ClamAV definitions
 	// change out-of-process (freshclam), so the verdict cache can only be
 	// reconciled against them by ASKING on a cadence; nothing else in the
