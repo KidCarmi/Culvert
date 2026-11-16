@@ -100,9 +100,11 @@ magnitude lives in the counter, not in the log.
 2. The rejections themselves need no action — nothing was written, no lockout
    state was created, and the audit log recorded each attempt at constant size.
 3. Treat it as reconnaissance against the admin plane. If the admin UI is
-   reachable from an untrusted network, the durable fix is the IP filter
-   (`/api/ip-filter`) or a network-level restriction, not a change to this
-   limit.
+   reachable from an untrusted network, the durable fix is the admin-UI IP
+   allowlist (`-ui-allow-ip` at startup, `POST /api/ui-allow-ips` at runtime)
+   or a network-level restriction, not a change to this limit. The proxy IP
+   filter (`-ip-filter-mode`) does not apply here: it gates the proxy and
+   SOCKS5 listeners, not the admin plane.
 
 ## Related
 

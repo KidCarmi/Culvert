@@ -174,7 +174,7 @@ refused on length.
 
 ### One behaviour change on the admin surfaces
 
-**URL-category lookup** (`GET /api/url-categories/lookup`) and the **policy
+**URL-category lookup** (`GET /api/urlcat/lookup`) and the **policy
 tester** accept a host you type by hand, so they have to split host from port
 themselves. Both now strip the port before matching — the same strip the proxy
 performs on every request — which means:
