@@ -108,7 +108,190 @@ var (
 
 	crashThrottleMu   sync.Mutex
 	crashThrottleLast = map[string]int64{} // component -> last heavy-emit UnixNano
+
+	crashAlertMu   sync.Mutex
+	crashAlertLast = map[string]int64{} // component -> last panic_contained emit UnixNano
 )
+
+// CHAOS-120: the crash plane's NOTIFICATION boundary.
+//
+// CHAOS-116/117/118/119 each closed a hole in what an operator can SEE after a
+// contained panic, and each one ended by recording the same residual: nothing
+// TELLS them. The sink below writes a counter, a log line and an audit entry,
+// and until this round it fired no alert for any of the 63 components that
+// funnel into it. Exactly one contained-panic round alerted, and it did so
+// itself rather than through the sink — HAState.notePanicRound, whose own
+// doc comment states the general rule this round generalises:
+//
+//	without them the containment would trade a loud crash for a silent one,
+//	which is the failure class the guard exists to remove
+//
+// guardedTick says the same thing from the other side: "the cost of not
+// counting is that a permanently panicking standby never escalates on its own,
+// so the containment is reported instead: crash record + counter + the
+// sync_panics status field, and a fire-once ha_sync_panic alert". Three of
+// those four signals were sink-wide. The alert was not.
+const (
+	// alertEventPanicContained is the operator-facing event for ANY contained
+	// panic. Deliberately plane-neutral: the sink serves the proxy, admin and
+	// detached-goroutine planes alike, and the component is in the payload
+	// rather than in the event name, so a subscriber gets one row to tick
+	// instead of 63 and the vocabulary cannot drift as rounds add components.
+	alertEventPanicContained = "panic_contained"
+
+	// crashAlertRearm latches one alert per component, then re-arms. The sink's
+	// own crashThrottleEvery is ONE SECOND, which is the right bound for a log
+	// line and the wrong one for a webhook: a deterministically crash-looping
+	// round would deliver 86,400 alerts a day and the operator would mute the
+	// event, which is the same outcome as not shipping it. An hour is long
+	// enough that a crash loop is one page, and short enough that a recurrence
+	// the next day is new information rather than a swallowed repeat. The
+	// REPEAT RATE is not lost by latching — culvert_crash_records_total
+	// {component} counts every occurrence, including the latched ones.
+	crashAlertRearm = time.Hour
+)
+
+// crashComponentAlert and crashComponentAlertsRetry label the alert-DELIVERY
+// plane's own contained panics (alerts.go's fireAlert recover, and
+// internal/alerts' retry-loop SafeCall). They are constants rather than
+// literals because notePanicContained has to name them: see crashAlertExcluded.
+const (
+	crashComponentAlert       = "alert"
+	crashComponentAlertsRetry = "alerts_retry"
+)
+
+// crashAlertExcluded reports whether a component must never raise
+// panic_contained.
+//
+// The alert-delivery plane excludes itself, for two independent reasons.
+//
+//  1. It cannot work. An alert saying "the thing that delivers alerts just
+//     panicked" is dispatched BY the thing that just panicked. There is no
+//     delivery path left to carry it.
+//  2. It feeds back. fireAlert's own recover is recoverGoroutine("alert"), so
+//     a dispatch that panics re-enters this sink as component "alert". Firing
+//     from there would spawn another dispatch, which panics again, which
+//     re-enters the sink — a self-sustaining loop clocked by crashThrottleEvery
+//     at one iteration per second, forever, each iteration a fresh goroutine
+//     and a fresh webhook attempt. The crashAlertRearm latch alone would bound
+//     it to one extra hop, which is survivable; the exclusion makes it zero,
+//     which is correct.
+//
+// The loss is accepted and it is not silent: a broken alert plane still shows
+// up as culvert_crash_records_total{component="alert"}, a PANIC_RECOVERED log
+// line and a system-actor audit entry. An operator cannot be PAGED about their
+// pager being down by their pager.
+func crashAlertExcluded(component string) bool {
+	return component == crashComponentAlert || component == crashComponentAlertsRetry
+}
+
+// crashAlertAllow is the per-component fire-once latch, re-arming after
+// crashAlertRearm.
+//
+// CHAOS-84's lesson applies here exactly as it does to crashThrottleAllow: the
+// comparison is on MAGNITUDE, so a backward wall-clock step suppresses for one
+// window in either direction instead of latching the component out until the
+// clock catches up.
+//
+// The map cannot grow past the sink's label cap, and the cap can never be the
+// binding constraint on this path: recordCrash only reaches here when
+// crashThrottleAllow has already admitted the component, so crashAlertLast's
+// key set is a subset of crashThrottleLast's. The bound is restated anyway —
+// it is one comparison, and a later caller that reaches this helper directly
+// must not be able to grow the map without limit.
+func crashAlertAllow(component string) bool {
+	now := time.Now().UnixNano()
+	crashAlertMu.Lock()
+	defer crashAlertMu.Unlock()
+	last, ok := crashAlertLast[component]
+	if ok && time.Duration(now-last).Abs() < crashAlertRearm {
+		return false
+	}
+	if !ok && len(crashAlertLast) >= maxCrashLabels {
+		return false
+	}
+	crashAlertLast[component] = now
+	return true
+}
+
+// firePanicContainedAlert dispatches ONE panic_contained alert. A package-level
+// seam for the reason fireAdminUIListenerAlert is one: a test observes the
+// dispatch DECISION synchronously instead of racing the process-global sink.
+//
+// The subscriber gate is INSIDE the goroutine, and that placement is the
+// finding this round made against its own first design. Every other
+// fault-driven producer gates before the `go`, to keep a degraded node from
+// spawning a goroutine per request in the default posture. Doing that here
+// would put globalAlertStore's mutex on the crash-sink path, and the alert
+// store releases it with a BARE trailing Unlock in Add/Update/Delete —
+// deliberately, so the fsync lands outside the lock, and it is the CHAOS-118
+// §7.4 shape. A panic inside one of those critical sections strands as.mu
+// held, unwinds to withAdminPanicRecovery, and re-enters recordCrash: a gate
+// on the sink path would then block the sink FOREVER on a mutex the panic
+// itself stranded, hanging the admin request and losing the one crash record
+// that explains it. The sink must acquire no lock owned by a plane that may
+// have panicked while holding it (TestCHAOS120_CrashSinkTakesNoForeignLock
+// pins this). The gate's usual rationale does not apply anyway: this producer
+// is latched to one dispatch per component per hour, not one per request.
+//
+// The payload carries the component and the crash id and NOTHING ELSE. The
+// panic value is never included, for the reason the ERROR log line gives: it
+// can embed a credential (panic(cfg.SessionHMAC)), sanitizeLog scrubs control
+// characters rather than masking secrets, and a webhook is an EGRESS to a
+// third party. The crash id is the join key to the local evidence.
+// It dispatches through globalAlertStore directly rather than through main's
+// fireAlert wrapper, because routing it through that var closes a package-level
+// initialization CYCLE the compiler rejects outright: fireAlert refers to
+// recoverGoroutine, which refers to recordCrash, which now refers back here.
+// The two are otherwise identical — fireAlert is `recover` + the same Dispatch
+// — and this goroutine carries that recover itself, on the line below.
+//
+// The subscriber gate names its event as a LITERAL on purpose. CHAOS-113's
+// differential oracle discovers the alert vocabulary by scanning the tree for
+// exactly these call shapes with a quoted event, and resolves no constants, so
+// a constant here would make that gate pass VACUOUSLY for this event — the one
+// gate whose whole job is to prove an operator can subscribe to it.
+func dispatchPanicContainedAlert(component, crashID string) {
+	go func() {
+		defer recoverGoroutine(crashComponentAlert)
+		if !globalAlertStore.HasSubscriber("panic_contained") {
+			return
+		}
+		globalAlertStore.Dispatch(alertEventPanicContained, AlertPayload{
+			Event:  alertEventPanicContained,
+			Actor:  "system",
+			Host:   component,
+			Detail: "a panic was recovered and contained in component " + component + " (crash_id=" + crashID + "); this component's round did not complete and may be degraded until the node is restarted — see culvert_crash_records_total{component} for the repeat rate",
+			Source: "crashguard",
+		})
+	}()
+}
+
+// firePanicContainedAlert is the seam tests replace. It is assigned in init
+// rather than in its declaration because a declaration initializer referring
+// to dispatchPanicContainedAlert closes the same package-level initialization
+// cycle described above (var -> dispatch -> recoverGoroutine -> recordCrash ->
+// notePanicContained -> var); an init body is not part of that graph.
+var firePanicContainedAlert func(component, crashID string)
+
+func init() { firePanicContainedAlert = dispatchPanicContainedAlert }
+
+// notePanicContained decides whether a contained panic raises an alert. Called
+// from recordCrash AFTER the record, log line and audit entry are committed, so
+// the notification can never delay or displace the durable evidence.
+func notePanicContained(component, crashID string) {
+	if crashAlertExcluded(component) || !crashAlertAllow(component) {
+		return
+	}
+	// Fails toward DELIVERY, for the reason alerts.HasSubscriber does: a seam
+	// left nil by a test that forgot to restore it must not be able to silence
+	// a real alert in a later test, and must not nil-deref the sink.
+	if fn := firePanicContainedAlert; fn != nil {
+		fn(component, crashID)
+		return
+	}
+	dispatchPanicContainedAlert(component, crashID)
+}
 
 // recordCrash is the single sink: bound → scrub → meter (always) → [throttle] →
 // stack/store/log/audit. It NEVER touches an http.ResponseWriter (safe pre/post-
@@ -176,6 +359,10 @@ func recordCrash(component, correlationID string, v any) {
 		Action: "panic_recovered", Object: component,
 		Detail: fmt.Sprintf("crash_id=%s corr=%s (value redacted)", rec.ID, sanitizeLog(correlationID)),
 	})
+
+	// CHAOS-120: and TELL someone. Last, so the durable evidence above is
+	// already committed; non-blocking, so a webhook cannot slow the sink.
+	notePanicContained(component, rec.ID)
 }
 
 // crashThrottleAllow is a token-per-interval gate per component. The first hit of
@@ -373,6 +560,9 @@ func resetCrashGuardStateForTest() {
 	crashThrottleMu.Lock()
 	crashThrottleLast = map[string]int64{}
 	crashThrottleMu.Unlock()
+	crashAlertMu.Lock()
+	crashAlertLast = map[string]int64{}
+	crashAlertMu.Unlock()
 	lastCrashMu.Lock()
 	lastCrash = nil
 	lastCrashMu.Unlock()
