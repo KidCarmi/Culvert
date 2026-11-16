@@ -287,7 +287,13 @@ case "$DISTRO_FAMILY" in
     ;;
   rhel|fedora)
     # Remove distro-packaged Docker/Podman
-    for pkg in docker podman-docker containerd.io runc; do
+    # NOT containerd.io: that is Docker CE's own runtime, installed by this
+    # script, and docker-ce requires it — `dnf remove containerd.io` takes
+    # docker-ce with it. On a re-run that uninstalled the working engine
+    # (stopping every Culvert container) and left docker-ce-cli + the compose
+    # plugin behind, so the install step below was skipped as "already
+    # installed" and the run died on "Docker daemon could not be started".
+    for pkg in docker podman-docker runc; do
       if rpm -q "$pkg" &>/dev/null; then
         info "Removing $pkg..."
         sudo dnf remove -y "$pkg" 2>/dev/null || sudo yum remove -y "$pkg" 2>/dev/null || true

@@ -487,6 +487,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **Re-running `scripts/install.sh` on RHEL, CentOS, Rocky, Alma, Oracle Linux
+  or Fedora uninstalled the Docker Engine the first run had installed, took
+  the proxy down and then aborted.** The "Cleaning up old Docker
+  installations" step removed `containerd.io` along with the distro packages,
+  but `containerd.io` is Docker CE's own runtime (installed by the script from
+  download.docker.com) and `docker-ce` requires it, so `dnf remove -y
+  containerd.io` removed `docker-ce` as a dependent package — stopping the
+  daemon and every Culvert container. The run could not recover:
+  `docker-ce-cli` and `docker-compose-plugin` survive the removal, so the
+  install step read "Docker with Compose v2 already installed" and was
+  skipped, `docker.service` no longer existed, and the recovery path's `dnf
+  reinstall` only reinstalls packages that are still installed. Measured
+  against the real dnf in `rockylinux:9` with Docker CE 29.9.3 /
+  containerd.io 2.4.2. The step no longer removes `containerd.io`; distro
+  `docker`, `podman-docker` and `runc` are still removed. New
+  `install_script_rhel_rerun_keeps_docker_ce_test.go` fails before the change
+  and passes after. Debian-family hosts were never affected (that arm removes
+  the distro `containerd`, not `containerd.io`).
+
+
 - **A SIEM/syslog collector that was unreachable while the node booted stayed
   unserved until an operator re-saved the target or restarted.** Both boot
   paths tolerate a failed connect and keep proxying, but nothing dialled
