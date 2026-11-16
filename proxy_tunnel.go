@@ -112,6 +112,43 @@ func dialWebSocketUpstream(w http.ResponseWriter, r *http.Request) (net.Conn, bo
 	return destConn, true
 }
 
+// relayDeclinedUpgrade relays the origin's answer to an upgrade request it did
+// NOT upgrade. That answer is an ordinary plain-HTTP response, so it gets the
+// plain-HTTP checks before a byte reaches the client: the Upgrade/Connection
+// headers are client-chosen, and an origin that ignores them (any static file
+// server) answers 200 with the file. isWebSocketUpgrade(r) exempted the request
+// from the URL checks in preDispatchBlocked and applyPolicyDecision, so they
+// are applied here, followed by handleHTTP's two response checks.
+func relayDeclinedUpgrade(w http.ResponseWriter, r *http.Request, resp *http.Response, match *PolicyMatch, id ProxyIdentity) {
+	if globalSecScanner.Enabled() {
+		if result := globalSecScanner.CheckRequestURL(r.URL); result != nil {
+			cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequestAuth(cip, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, id.Identity, AuthLogFields{AuthSource: id.AuthSource})
+			logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", cip, sanitizeLog(r.Host), sanitizeLog(result.Reason))
+			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
+			return
+		}
+	}
+	if ext := fileBlocker.CheckPath(r.URL.Path); ext != "" {
+		serveHTTPFileBlock(w, r, ext, "declined upgrade", id)
+		return
+	}
+	if match != nil && match.Rule != nil && match.Rule.FileProfileBlocked(r.URL.Path) {
+		serveHTTPFileBlock(w, r, string(match.Rule.FileProfile), "declined upgrade, policy profile", id)
+		return
+	}
+	if blockedByResponseHeaders(w, r, resp, id) {
+		return
+	}
+	if handled, _ := scanHTTPResponseBody(w, r, resp, id); handled {
+		return
+	}
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body) //nolint:errcheck // best-effort relay; the client may have gone away
+}
+
 func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch, id ProxyIdentity) {
 	host := r.Host
 	if !strings.Contains(host, ":") {
@@ -156,9 +193,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 	// requests are subject to. The SSL-inspected path already gates on this.
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		logger.Printf("WS: upstream declined upgrade for %q (status %d)", sanitizeLog(host), resp.StatusCode)
-		copyHeaders(w.Header(), resp.Header)
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body) //nolint:errcheck // best-effort copy of block-page body to client
+		relayDeclinedUpgrade(w, r, resp, match, id)
 		return
 	}
 

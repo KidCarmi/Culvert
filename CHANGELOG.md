@@ -463,6 +463,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Adding `Upgrade: websocket` and `Connection: Upgrade` to a plain-HTTP
+  download bypassed file blocking and response scanning.** The two headers
+  exempted the request from the URL checks, and when the origin ignored them
+  and answered 200, `handleWebSocket` relayed the body with none of
+  `handleHTTP`'s response checks. A non-101 answer now gets the plain-HTTP
+  checks before it is relayed (`relayDeclinedUpgrade`). Real WebSocket
+  sessions (101) are unchanged. Proven by
+  `TestWebSocketUpgradeHeaders_DoNotBypassPlainHTTPFileBlock`.
+
 - **The dropped-record re-enrollment alert shared ONE dedup key across every
   node, so a batch of identity replacements delivered one webhook and silently
   dropped the rest.** `recordDroppedNodeReenrollment` is the only operator-facing
