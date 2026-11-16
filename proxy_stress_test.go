@@ -337,6 +337,11 @@ func TestProxyStress_BrokenUpstream(t *testing.T) {
 					Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 					Timeout:   5 * time.Second,
 				}
+				// Each goroutine owns its client, so flushProxyConnPools below
+				// cannot reach it: close its idle keep-alive connection here, or
+				// the client's read/write loops and the proxy's serving goroutine
+				// for that connection outlive the request and read as a leak.
+				defer client.CloseIdleConnections()
 				resp, err := client.Get(backend.URL + "/")
 				if err != nil {
 					atomic.AddInt64(&bad, 1) // transport error is an acceptable fail-closed signal
