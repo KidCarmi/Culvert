@@ -59,6 +59,13 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid webhook URL: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// SEC-ALERTS-EVENTNAME-1: the subscribed names are persisted and then
+		// rendered in the Alerts panel, so they are validated at ingress like
+		// the URL above rather than trusted because the caller holds a role.
+		if err := validateWebhookEvents(h.Events); err != nil {
+			http.Error(w, "invalid webhook events: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		h.Enabled = true
 		created := globalAlertStore.Add(h)
 		auditEvent(r, "alert.webhook.create", created.ID, h.URL)
@@ -83,6 +90,12 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "invalid webhook URL: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+		}
+		// SEC-ALERTS-EVENTNAME-1: an update re-supplies the whole event list,
+		// so it is the same ingress as the create above.
+		if err := validateWebhookEvents(h.Events); err != nil {
+			http.Error(w, "invalid webhook events: "+err.Error(), http.StatusBadRequest)
+			return
 		}
 		if !globalAlertStore.Update(id, h) {
 			http.Error(w, "not found", http.StatusNotFound)

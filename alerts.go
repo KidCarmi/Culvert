@@ -99,6 +99,10 @@ func fireDNSFailureAlert(host string, err error) {
 // shape check; the SSRF check stays at delivery time).
 var validateWebhookURL = alerts.ValidateURL
 
+// validateWebhookEvents is re-exposed for the admin API handlers
+// (SEC-ALERTS-EVENTNAME-1 shape check at ingress; see alerts.ValidateEventNames).
+var validateWebhookEvents = alerts.ValidateEventNames
+
 // startAlertRetryLoop runs the F16 retry loop against the current
 // process-wide store (resolved on every pass).
 func startAlertRetryLoop(ctx context.Context) {
