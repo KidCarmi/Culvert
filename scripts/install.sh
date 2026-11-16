@@ -348,7 +348,17 @@ else
     fedora)
       info "Installing from Docker's official dnf repository..."
       sudo dnf install -y dnf-plugins-core
-      sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+      # dnf5 (Fedora 41+) dropped `config-manager --add-repo URL` — it exits 2
+      # with 'Unknown argument "--add-repo"', which under `set -e` aborted the
+      # install before Docker was installed. Its replacement is the `addrepo`
+      # subcommand; --overwrite keeps a re-run after a partial install from
+      # failing on the repo file the first run already wrote. dnf4 (which
+      # prints a bare version, not "dnf5 version ...") keeps the legacy form.
+      if [[ "$(dnf --version 2>/dev/null || true)" == dnf5* ]]; then
+        sudo dnf config-manager addrepo --overwrite --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo
+      else
+        sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+      fi
       sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
       ;;
 

@@ -238,6 +238,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Diagnostics now warns when the OpenTelemetry (OTLP) export is failing.**
+  The push-loop failure count and last error were shown only under Settings →
+  OpenTelemetry (OTLP); the one-page report read as healthy while the collector
+  received nothing and the external dashboards built on this node's telemetry
+  went quiet. A new `otlp_export` WARN row (additive, report-only, absent when
+  export is off or the latest push was delivered) names the failing signal
+  (metrics, traces or both) and never the endpoint, auth header or error text.
+  Push, retry and buffering behavior are unchanged.
+
 - **An unreachable ClamAV daemon is now a Diagnostics row.** With antivirus
   scanning configured, a daemon that cannot be reached is fail-open: content is
   forwarded without an antivirus verdict. That was visible on `/ready`,
@@ -304,6 +313,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `pac_legacy_config_newer` row on Infrastructure → Diagnostics states it with
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
+
+- **`scripts/install.sh` aborted on every supported Fedora release before
+  Docker was installed.** The Fedora branch registered Docker's repository with
+  `dnf config-manager --add-repo <url>`. Fedora 41 replaced dnf4 with dnf5,
+  whose config-manager dropped that option: it exits 2 with `Unknown argument
+  "--add-repo" for command "config-manager"`, and under the script's
+  `set -euo pipefail` the install stopped there on a host with no Docker yet.
+  The branch now uses dnf5's `config-manager addrepo --overwrite
+  --from-repofile=<url>` when `dnf --version` reports dnf5 (`--overwrite` so a
+  re-run after a partial install does not fail on the repo file the first run
+  wrote), and keeps the legacy form on dnf4. Reproduced and verified against
+  dnf5 5.4.6 in `fedora:latest`; pinned by
+  `TestInstallScript_FedoraDockerRepo_WorksOnDnf5AndDnf4`. The RHEL-family
+  branch (`yum-config-manager`, dnf4) is unchanged.
 
 - **A panic in the MCP telemetry shutdown drain killed the process from a
   shutdown hook that runs before every durability flush, so a "graceful"
