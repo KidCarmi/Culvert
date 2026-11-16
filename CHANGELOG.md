@@ -463,6 +463,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **`install.sh`'s `env_put` followed a symlink planted at its lock file, with
+  `sudo`, turning an installer re-run into an arbitrary root-owned file
+  creation.** `env_put` serializes its read/modify/write transaction on
+  `"$file.lock"` beside the stack's `.env`, and three users of that path follow
+  symlinks: `sudo touch "$lock"` CREATES the link's target as root,
+  `sudo chown "$(id -un)" "$lock"` then hands it to the invoking sudoer, and the
+  `9>"$file.lock"` redirection TRUNCATES whatever it points at with the
+  invoker's own privileges on every call. The two `sudo` calls were added so a
+  re-run against a stack directory owned by ANOTHER user would stop aborting —
+  which is exactly the topology in which someone else can plant the link. A
+  group-writable or foreign-owned `/srv/culvert` therefore let that account aim
+  `.env.lock` at, say, an absent `/etc/sudoers.d/zz-local` and wait for a
+  routine upgrade: `-e` is FALSE for a dangling symlink, so the creation branch
+  fired and the operator's own sudo created the file and gave it away.
+  `.env.lock` is the sharp path precisely because, unlike `.env`, it normally
+  does NOT exist, so the creation branch was live on an ordinary upgrade rather
+  than only on a first install. The lock path is now refused outright when it is
+  a symlink or any non-regular file — `-L` is the only test that sees a dangling
+  link — degrading through the warn-and-skip path `env_put` already has, so the
+  installer neither aborts under `set -euo pipefail` nor follows the link. A
+  non-regular file is refused too, not only a link: a planted FIFO makes `9>`
+  block forever, wedging the installer rather than aborting it. The identical
+  pre-existing pattern on `$file` itself is deliberately unchanged, because
+  operators do legitimately symlink an env file and narrowing that would be a
+  functional regression. New `install_script_env_put_lock_symlink_test.go`
+  covers the truncation, the privileged creation and the FIFO wedge, plus a
+  positive control proving the guard refuses links and not the foreign-owned
+  re-run it sits in front of. CWE-59/CWE-61.
+
 - **The dropped-record re-enrollment alert shared ONE dedup key across every
   node, so a batch of identity replacements delivered one webhook and silently
   dropped the rest.** `recordDroppedNodeReenrollment` is the only operator-facing
