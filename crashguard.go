@@ -62,17 +62,24 @@ func init() {
 	// that would now page THROUGH it. The indirection is what makes the two
 	// planes separable; the exclusion set is what makes the remaining edge safe.
 	//
-	// Reading fireAlert inside the closure (not capturing it) is also what keeps
-	// the documented test-reassignment tolerance: a test that swaps fireAlert to
-	// observe the dispatch decision sees this producer's pages too.
-	crashAlertPage = func(component string) {
+	// The store and fireAlert arrive in `to`, read on the SINK'S STACK at crash
+	// time (fireComponentPanicAlert), so a test that swaps fireAlert before the
+	// panic still observes this producer's pages, and this closure itself reads
+	// no package global.
+	crashAlertPage = func(component string, to crashPageTarget) {
 		// The subscriber probe is INSIDE this closure, which only ever runs on a
-		// detached goroutine, because it takes globalAlertStore's RWMutex — see
+		// detached goroutine, because it takes the store's RWMutex — see
 		// fireComponentPanicAlert for why that must never be on the sink's stack.
-		if !globalAlertStore.HasSubscriber(alertEventComponentPanic) {
+		if !to.store.HasSubscriber(alertEventComponentPanic) {
 			return
 		}
-		fireAlert(alertEventComponentPanic, crashAlertPayload(component))
+		to.fire(alertEventComponentPanic, crashAlertPayload(component))
+	}
+	// Bound here, not referenced from fireComponentPanicAlert, for the same
+	// initialization-cycle reason as crashAlertPage above: a direct reference to
+	// fireAlert from the sink closes fireAlert → recordCrash → fireAlert.
+	crashAlertCapture = func() crashPageTarget {
+		return crashPageTarget{store: globalAlertStore, fire: fireAlert}
 	}
 }
 
@@ -455,7 +462,29 @@ const crashAlertDetailComponentMax = 64
 // that reads main's fireAlert at CALL time. See that init for why it is not a
 // var initializer, and fireComponentPanicAlert for why everything in it runs on
 // a detached goroutine.
-var crashAlertPage func(component string)
+var crashAlertPage func(component string, to crashPageTarget)
+
+// crashPageTarget is what one page dispatches through: the alert store whose
+// subscribers it probes and the fireAlert it calls. Both are read on the sink's
+// stack when the crash is recorded and handed to the detached page, so the page
+// goroutine reads no package global.
+//
+// That is what makes the detached page safe against a test that later swaps
+// globalAlertStore or fireAlert. A page outlives the test that produced it by
+// design, so if it read the globals itself, every later test that replaced
+// them would race it with no happen-before edge, and `-race` reports that even
+// for a goroutine that finished long before (Codex review on PR #1911: a page
+// from TestAdminGuard_Clean500WhenUnwritten racing chaos120Harness's store
+// swap under a shuffled order). Reads on the sink's stack are ordered by the
+// test that panicked, which finishes before the next test starts.
+// crashAlertCapture reads the current crashPageTarget. Bound in this file's
+// init (see there) and called on the sink's stack.
+var crashAlertCapture func() crashPageTarget
+
+type crashPageTarget struct {
+	store *AlertStore
+	fire  func(event string, payload AlertPayload)
+}
 
 // crashAlertPageBarrier is a TEST-ONLY seam. Production leaves it nil (one nil
 // check, no behavior), mirroring internal/alerts' saveBarrier.
@@ -557,8 +586,15 @@ func fireComponentPanicAlert(component string) {
 	if page == nil {
 		return
 	}
-	// Both seam reads happen HERE, on the sink's stack, not inside the goroutine:
-	// a read inside it would be the very race the barrier exists to remove.
+	// Every global the page needs is read HERE, on the sink's stack, not inside
+	// the goroutine: the seams, and the store and fireAlert it dispatches
+	// through (see crashPageTarget). A read inside it would race whatever later
+	// replaces them. Plain pointer and func reads; neither takes a lock.
+	capture := crashAlertCapture
+	if capture == nil {
+		return
+	}
+	to := capture()
 	var done func()
 	if barrier := crashAlertPageBarrier; barrier != nil {
 		done = barrier()
@@ -567,7 +603,7 @@ func fireComponentPanicAlert(component string) {
 		if done != nil {
 			defer done()
 		}
-		page(component)
+		page(component, to)
 	}()
 }
 

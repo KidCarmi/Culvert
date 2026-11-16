@@ -451,7 +451,7 @@ func TestCHAOS120_TheSinkNeverBlocksOnTheAlertPlane(t *testing.T) {
 		return inflight.Done
 	}
 	prev := crashAlertPage
-	crashAlertPage = func(string) { <-release }
+	crashAlertPage = func(string, crashPageTarget) { <-release }
 	t.Cleanup(func() {
 		// Release the blocked page, join it, then restore: the goroutine reads
 		// crashAlertPage, so restoring it while one is parked inside would be
