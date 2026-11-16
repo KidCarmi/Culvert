@@ -490,9 +490,31 @@ type authCacheEntry struct {
 // index of the first key not yet consumed; live is how many of this client's
 // keys are still present in the map.
 type authCacheBucket struct {
+	// client is the fairness key this bucket belongs under. It duplicates the
+	// a.buckets map key because the eviction heaps hold *authCacheBucket
+	// directly and their ordering reads it (authVictimLess), so a comparison
+	// must not need a reverse lookup.
+	client string
+
 	keys []string
 	head int
 	live int
+
+	// frontKey, frontAdded and frontExpiry memoise what frontLocked returns:
+	// the client's oldest still-present entry. They are re-established by
+	// syncBucketLocked after ANY change to keys, head, live or the entry map,
+	// and they are what the two heaps below are ordered on.
+	//
+	// The memo exists because the eviction scan used to call frontLocked for
+	// every bucket, and frontLocked's cost is a map lookup on a string key.
+	// See evictOneLocked.
+	frontKey    string
+	frontAdded  time.Time
+	frontExpiry time.Time
+
+	// pos is this bucket's index in each eviction heap, or -1 when absent. A
+	// bucket is in both heaps exactly while it holds a live entry.
+	pos [2]int
 }
 
 type authCacheStore struct {
@@ -504,6 +526,23 @@ type authCacheStore struct {
 	// operator's only signal that cached credentials are being displaced —
 	// every eviction costs somebody a full ~80 ms bcrypt on their next request.
 	evictions uint64
+
+	// victims and expiries are the eviction index: binary heaps over the
+	// buckets that hold a live entry, ordered by authVictimLess and
+	// authExpiryLess respectively. They answer the only two questions
+	// evictOneLocked asks — "is any bucket front expired?" and "which front is
+	// the fairness victim?" — at the root, in place of a scan over every
+	// bucket (PERF-AUTHCACHE-1).
+	//
+	// Both hold the same *authCacheBucket values and are maintained together
+	// by syncBucketLocked. Their length tracks the live bucket count exactly,
+	// so the backing arrays peak at the cap and do not grow with request count
+	// (the trap compactLocked documents for authCacheBucket.keys).
+	//
+	// The zero authCacheStore is usable: both are nil slices and authHeapPush
+	// appends. Every test that builds a Config literal relies on that.
+	victims  []*authCacheBucket
+	expiries []*authCacheBucket
 }
 
 func (a *authCacheStore) get(user, pass string) (ok, hit bool) {
@@ -575,52 +614,84 @@ func (a *authCacheStore) set(client, user, pass string, ok bool) {
 	a.entries[k] = &authCacheEntry{ok: ok, expiry: now.Add(authCacheTTL), client: client, added: now}
 	b := a.buckets[client]
 	if b == nil {
-		b = &authCacheBucket{}
+		b = &authCacheBucket{client: client, pos: [2]int{-1, -1}}
 		a.buckets[client] = b
 	}
 	b.keys = append(b.keys, k)
 	b.live++
+	// Compaction resets head and rebuilds keys, but it preserves the order of
+	// the keys it keeps, so the bucket's front is still the same entry and the
+	// memo still describes it.
 	a.compactLocked(client, b)
-}
-
-// evictOneLocked drops exactly one entry: an already-expired one if any is
-// found, otherwise the oldest live entry of the client holding the most.
-//
-// Only bucket FRONTS are examined, which is both cheap (O(active clients), not
-// O(cache)) and sufficient: entries within a bucket are in insertion order and
-// every entry carries the same TTL, so a bucket's front is its oldest and
-// therefore the first to expire. An expired entry is preferred wherever it is
-// found because dropping it costs nobody anything — it would have been a cache
-// miss anyway — so the fairness ordering only has to arbitrate between LIVE
-// entries, which is the case it exists for.
-func (a *authCacheStore) evictOneLocked(now time.Time) {
-	var (
-		victimKey    string
-		victimClient string
-		victimLive   int
-		victimAdded  time.Time
-		found        bool
-	)
-	for client, b := range a.buckets {
-		k, e, okFront := a.frontLocked(client, b)
-		if !okFront {
-			continue
-		}
-		// An expired entry is free to drop and is always the better victim.
-		if now.After(e.expiry) {
-			a.removeLocked(k)
-			a.evictions++
-			return
-		}
-		if !found || betterAuthCacheVictim(b.live, e.added, client, victimLive, victimAdded, victimClient) {
-			victimKey, victimClient, victimLive, victimAdded, found = k, client, b.live, e.added, true
-		}
-	}
-	if !found {
+	if b.live > 1 && b.pos[authSlotVictim] >= 0 {
+		// The bucket already held a live entry, so it is already in both heaps
+		// with a valid memo, and the key just appended is younger than its
+		// front. Only the live term of its fairness key moved.
+		a.bumpLiveLocked(b)
 		return
 	}
-	a.removeLocked(victimKey)
-	a.evictions++
+	// A bucket that was empty — or new — takes its front from this entry and
+	// enters both heaps here.
+	a.syncBucketLocked(client, b)
+}
+
+// evictOneLocked drops exactly one entry: an already-expired one if a bucket
+// front holds one, otherwise the oldest live entry of the client holding the
+// most.
+//
+// Only bucket FRONTS are candidates, which is sufficient: entries within a
+// bucket are in insertion order and every entry carries the same TTL, so a
+// bucket's front is its oldest and therefore the first to expire. An expired
+// entry is preferred wherever it is found because dropping it costs nobody
+// anything — it would have been a cache miss anyway — so the fairness ordering
+// only has to arbitrate between LIVE entries, which is the case it exists for.
+//
+// # Why this is an index lookup and not a scan (PERF-AUTHCACHE-1)
+//
+// This runs under a.mu on the local bcrypt credential path, once per insertion
+// for as long as the cache is at its cap — which, at maxAuthCacheSize of 5,000
+// and a fairness key that is the client's own address (clientFairnessKey), is
+// the steady state of any deployment with a few thousand active client
+// addresses. The previous implementation answered both questions above by
+// iterating every bucket and calling frontLocked on each, so each insertion
+// cost one map lookup per DISTINCT CLIENT:
+//
+//	BenchmarkAuthCacheSetAtCap  clients=1        1,474 ns/op
+//	                            clients=100      6,898 ns/op
+//	                            clients=1000    56,586 ns/op
+//	                            clients=5000   345,745 ns/op
+//
+// 345 µs of lock-held work per cached credential is both a throughput ceiling
+// on the credential path and a latency floor for every concurrent get() waiting
+// on the same mutex, and the shape is linear in a number an UNAUTHENTICATED
+// client contributes to: this cache is populated by unauthenticated requests
+// (see set), so the cost of the fairness policy grew with the very flood the
+// policy exists to survive — the same defect, with the same root cause, that
+// PERF-IDENTCACHE-1 fixed in the identity-result cache next door.
+//
+// Both answers are now heap roots, maintained incrementally by
+// syncBucketLocked, which makes an insertion at the cap O(log clients) instead
+// of O(clients) and removes the client-count term from the measurement
+// entirely. The selection is unchanged: a.victims is ordered by the same
+// betterAuthCacheVictim predicate the scan applied, so it yields the same entry.
+//
+// One deliberate refinement. The scan evicted whichever expired front Go's
+// randomised map iteration reached first; this takes the EARLIEST-expiring one.
+// Both satisfy "an already-expired one if a bucket front holds one" and the new
+// choice is deterministic, which is the property the rest of this policy is
+// built on (betterAuthCacheVictim exists so the victim never depends on map
+// order).
+func (a *authCacheStore) evictOneLocked(now time.Time) {
+	// An expired entry is free to drop and is always the better victim.
+	if b := authHeapPeek(a.expiries); b != nil && now.After(b.frontExpiry) {
+		a.removeLocked(b.frontKey)
+		a.evictions++
+		return
+	}
+	if b := authHeapPeek(a.victims); b != nil {
+		a.removeLocked(b.frontKey)
+		a.evictions++
+	}
 }
 
 // betterAuthCacheVictim reports whether candidate (live, added, client) is a
@@ -633,6 +704,184 @@ func (a *authCacheStore) evictOneLocked(now time.Time) {
 // identity caches cannot drift apart on what "better victim" means.
 func betterAuthCacheVictim(live int, added time.Time, client string, bestLive int, bestAdded time.Time, bestClient string) bool {
 	return identcache.BetterVictim(live, added, client, bestLive, bestAdded, bestClient)
+}
+
+// ─── Eviction-index heaps (PERF-AUTHCACHE-1) ─────────────────────────────────
+//
+// These mirror internal/identcache's heaps function for function, because this
+// cache's eviction policy is deliberately identcache's policy (see set) and the
+// two must stay recognisably the same code: betterAuthCacheVictim already
+// delegates to identcache.BetterVictim so the caches cannot drift apart on what
+// "better victim" means, and the index that predicate is applied through should
+// not drift either.
+//
+// They are duplicated rather than imported because identcache's bucket is an
+// unexported type coupled to its generic entry, and the only way to share the
+// heaps would be to re-express them over an interface or a method-bearing type
+// constraint. Both make every comparison an indirect call, in identcache's hot
+// path as well as this one — and identcache's insertion cost is held by a
+// wall-clock ratio gate (identcache_evict_shape_benchgate_test.go). Slowing a
+// gated owner to de-duplicate 90 lines is the wrong trade; sharing the index
+// behind an exported, non-dispatching seam is a follow-up, not this change.
+//
+// A hand-rolled binary heap rather than container/heap: each bucket carries its
+// own index per heap (authCacheBucket.pos), so a bucket whose front or live
+// count changed is repositioned in place instead of being searched for, and
+// container/heap's interface cannot express that without a second lookup.
+
+// The two eviction heaps a bucket is tracked in. Both are ordered on the
+// bucket's memoised front, so a bucket occupies one slot in each.
+const (
+	authSlotVictim = 0 // ordered by authVictimLess: root is the fairness victim
+	authSlotExpiry = 1 // ordered by authExpiryLess: root expires soonest
+)
+
+// authVictimLess reports whether a is a better eviction victim than b, under
+// the betterAuthCacheVictim ordering applied to the two buckets' memoised
+// fronts. It is the heap ordering for a.victims, so that heap's root is exactly
+// the entry the old full scan over a.buckets used to select.
+func authVictimLess(x, y *authCacheBucket) bool {
+	return betterAuthCacheVictim(x.live, x.frontAdded, x.client, y.live, y.frontAdded, y.client)
+}
+
+// authExpiryLess orders a.expiries by front deadline, so its root is the front
+// that expires soonest. The client key breaks exact ties, keeping the order
+// total and independent of insertion history.
+func authExpiryLess(x, y *authCacheBucket) bool {
+	if !x.frontExpiry.Equal(y.frontExpiry) {
+		return x.frontExpiry.Before(y.frontExpiry)
+	}
+	return x.client < y.client
+}
+
+// authHeapSwap exchanges two slots and keeps both buckets' recorded index
+// correct.
+func authHeapSwap(h []*authCacheBucket, slot, i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].pos[slot] = i
+	h[j].pos[slot] = j
+}
+
+// authHeapUp sifts the bucket at i towards the root and returns where it came
+// to rest.
+func authHeapUp(h []*authCacheBucket, slot int, less func(x, y *authCacheBucket) bool, i int) int {
+	for i > 0 {
+		parent := (i - 1) / 2
+		if !less(h[i], h[parent]) {
+			break
+		}
+		authHeapSwap(h, slot, i, parent)
+		i = parent
+	}
+	return i
+}
+
+// authHeapDown sifts the bucket at i away from the root.
+func authHeapDown(h []*authCacheBucket, slot int, less func(x, y *authCacheBucket) bool, i int) {
+	n := len(h)
+	for {
+		left := 2*i + 1
+		if left >= n {
+			return
+		}
+		best := left
+		if right := left + 1; right < n && less(h[right], h[left]) {
+			best = right
+		}
+		if !less(h[best], h[i]) {
+			return
+		}
+		authHeapSwap(h, slot, i, best)
+		i = best
+	}
+}
+
+// authHeapPush inserts b, which must not already be in this heap.
+func authHeapPush(h *[]*authCacheBucket, slot int, less func(x, y *authCacheBucket) bool, b *authCacheBucket) {
+	*h = append(*h, b)
+	b.pos[slot] = len(*h) - 1
+	authHeapUp(*h, slot, less, len(*h)-1)
+}
+
+// authHeapRemove takes b out of this heap. It is a no-op when b is absent, so a
+// bucket that never held a live entry can be removed unconditionally.
+func authHeapRemove(h *[]*authCacheBucket, slot int, less func(x, y *authCacheBucket) bool, b *authCacheBucket) {
+	i := b.pos[slot]
+	if i < 0 {
+		return
+	}
+	last := len(*h) - 1
+	if i != last {
+		authHeapSwap(*h, slot, i, last)
+	}
+	(*h)[last] = nil // drop the reference so an evicted bucket can be collected
+	*h = (*h)[:last]
+	b.pos[slot] = -1
+	if i < len(*h) {
+		if authHeapUp(*h, slot, less, i) == i {
+			authHeapDown(*h, slot, less, i)
+		}
+	}
+}
+
+// authHeapFix repositions b after its ordering key changed. It is a no-op when
+// b is absent.
+func authHeapFix(h []*authCacheBucket, slot int, less func(x, y *authCacheBucket) bool, b *authCacheBucket) {
+	i := b.pos[slot]
+	if i < 0 {
+		return
+	}
+	if authHeapUp(h, slot, less, i) == i {
+		authHeapDown(h, slot, less, i)
+	}
+}
+
+// authHeapPeek returns the root bucket, or nil when the heap is empty.
+func authHeapPeek(h []*authCacheBucket) *authCacheBucket {
+	if len(h) == 0 {
+		return nil
+	}
+	return h[0]
+}
+
+// syncBucketLocked re-establishes b's memoised front and its place in both
+// eviction heaps. It must be called after anything that can change the bucket's
+// front entry, its key slice, its head or its live count, and it is the ONLY
+// writer of the memo the heaps are ordered on.
+//
+// A bucket with no live entry left is removed from both heaps: the heaps hold
+// exactly the buckets eviction may choose from, which is why evictOneLocked can
+// trust its two roots without re-validating them.
+func (a *authCacheStore) syncBucketLocked(client string, b *authCacheBucket) {
+	k, e, ok := a.frontLocked(client, b)
+	if !ok {
+		authHeapRemove(&a.victims, authSlotVictim, authVictimLess, b)
+		authHeapRemove(&a.expiries, authSlotExpiry, authExpiryLess, b)
+		b.frontKey, b.frontAdded, b.frontExpiry = "", time.Time{}, time.Time{}
+		return
+	}
+	b.frontKey, b.frontAdded, b.frontExpiry = k, e.added, e.expiry
+	if b.pos[authSlotVictim] < 0 {
+		authHeapPush(&a.victims, authSlotVictim, authVictimLess, b)
+	} else {
+		authHeapFix(a.victims, authSlotVictim, authVictimLess, b)
+	}
+	if b.pos[authSlotExpiry] < 0 {
+		authHeapPush(&a.expiries, authSlotExpiry, authExpiryLess, b)
+	} else {
+		authHeapFix(a.expiries, authSlotExpiry, authExpiryLess, b)
+	}
+}
+
+// bumpLiveLocked repositions b after ONLY its live count changed — appending a
+// key to a bucket that already had a front, or removing a key that was not the
+// front. The front entry is untouched, so the memo stays correct and
+// authExpiryLess, which reads only the deadline and the client, is unaffected:
+// just the fairness ordering's leading term moved.
+//
+// It exists to keep the map lookup inside frontLocked off the common path.
+func (a *authCacheStore) bumpLiveLocked(b *authCacheBucket) {
+	authHeapFix(a.victims, authSlotVictim, authVictimLess, b)
 }
 
 // frontLocked returns the client's oldest still-present entry, advancing head
@@ -664,7 +913,20 @@ func (a *authCacheStore) removeLocked(k string) {
 	b.live--
 	if b.live <= 0 {
 		delete(a.buckets, e.client)
+		// Leaving a.buckets must also leave the eviction index, or a root
+		// would name an entry that is no longer reachable.
+		authHeapRemove(&a.victims, authSlotVictim, authVictimLess, b)
+		authHeapRemove(&a.expiries, authSlotExpiry, authExpiryLess, b)
+		return
 	}
+	if k != b.frontKey {
+		// The bucket survives and its front entry is untouched, so only the
+		// live term of its fairness key moved.
+		a.bumpLiveLocked(b)
+		return
+	}
+	// The front itself went: recompute it and reposition in both heaps.
+	a.syncBucketLocked(e.client, b)
 }
 
 // compactLocked drops consumed positions once a bucket's backing slice has
@@ -690,6 +952,8 @@ func (a *authCacheStore) compactLocked(client string, b *authCacheBucket) {
 	b.head = 0
 	if len(b.keys) == 0 {
 		delete(a.buckets, client)
+		authHeapRemove(&a.victims, authSlotVictim, authVictimLess, b)
+		authHeapRemove(&a.expiries, authSlotExpiry, authExpiryLess, b)
 	}
 }
 
@@ -705,6 +969,11 @@ func (a *authCacheStore) clear() {
 	a.mu.Lock()
 	a.entries = map[string]*authCacheEntry{}
 	a.buckets = map[string]*authCacheBucket{}
+	// The index holds exactly the buckets eviction may choose from, so it must
+	// be emptied with them: a retained root would name an entry that is no
+	// longer reachable, and this runs on every credential change.
+	a.victims = nil
+	a.expiries = nil
 	a.mu.Unlock()
 }
 

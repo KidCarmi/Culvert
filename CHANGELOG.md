@@ -65,6 +65,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **Victim selection in the local credential cache was a scan over every active
+  client, under the mutex every credential verification needs
+  (PERF-AUTHCACHE-1).** `authCacheStore.evictOneLocked` answered both of its
+  questions — "is any bucket front expired?" and "which front is the fairness
+  victim?" — by iterating `a.buckets` and calling `frontLocked` on each, whose
+  cost is a hashed map lookup on a string key. The fairness key is
+  `clientFairnessKey`, so that was one lookup per ACTIVE CLIENT per insertion,
+  for as long as the cache sat at its 5,000 cap — which, with a 5-minute TTL, is
+  the steady state of any deployment with a few thousand active addresses. The
+  cost was linear in a number an UNAUTHENTICATED client contributes to: the
+  cache is populated by unauthenticated requests, negative results included
+  (CHAOS-57), so the fairness policy got more expensive with the very flood it
+  exists to survive. One insertion at the cap, `benchstat` n=8 (Go 1.27.4,
+  linux/amd64, 4 vCPU Xeon @ 2.10 GHz): **1.352 µs at 1 client, 5.522 µs at
+  100, 58.802 µs at 1,000, 328.280 µs at 5,000** → **1.426 / 1.760 / 1.596 /
+  2.007 µs** (−68.12%, −97.29%, **−99.39%**; geomean −71.59%), flat in client
+  count instead of linear. On a realistic 31:1 read:write mix at 4-way
+  parallelism — almost all reads, which could not start while an insertion held
+  the mutex — average operation cost fell **−10.17% / −56.91% / −89.30%** at
+  100 / 1,000 / 5,000 clients (geomean −65.40%). The fix is
+  `internal/identcache`'s, whose eviction policy this cache already shares: two
+  binary heaps over the buckets holding a live entry, maintained incrementally,
+  so both questions are heap roots and an insertion at the cap is
+  O(log clients). The selection is unchanged — `a.victims` is ordered by the
+  same `betterAuthCacheVictim`/`identcache.BetterVictim` predicate the scan
+  applied — with one deliberate refinement: an expired front is now chosen by
+  earliest deadline rather than by Go's randomised map order, which is
+  deterministic. Costs, measured: `authCacheBucket` grows 40 → 136 bytes (the
+  memoised front plus two heap positions, ~560 KB at the cap). The
+  expired-front arm is flat at 1 client and FASTER at scale (median of 5:
+  1,000 clients 4.18 → 2.08 µs, 5,000 clients 8.62 → 2.55 µs). An earlier
+  draft reported it +42.70% slower; that figure came from a control benchmark
+  that did not keep its entries expired (Codex review), and the benchmark now
+  resyncs the index and re-ages its entries so every timed insertion takes the
+  expired path. Held by a differential oracle against the
+  scan it replaced (6 seeds × 1,500 randomised steps, all five guards
+  mutation-tested), an AST wall over `evictOneLocked`, and a machine-independent
+  `TestBenchGate_` ratio gate (1.00x indexed, 62.31x with the scan reverted,
+  bound 10x).
+
 - **Every successful IdP document fetch left its connection open.**
   `fetchOIDCDiscoveryOverNetwork` and `fetchSAMLMetadataOverNetwork` each build
   an `http.Transport` for one request and drop it on return. A zero-value
