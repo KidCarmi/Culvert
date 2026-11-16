@@ -1,5 +1,15 @@
 # Chaos Engineering Review — 2026-11-15
 
+> **Merge note (2026-11-16, owner decision).** This round and PR #1900 both
+> implemented the CHAOS-120 page. #1900 merged first with the `panic_contained`
+> event, so this PR's `component_panic` event, its crash-sink producer
+> (`fireComponentPanicAlert`), its Alerts-panel entry and its root tests were
+> **dropped** to avoid paging twice for one panic. What shipped from this round
+> is the `internal/feedsched` half: feed-round panics now reach the crash sink
+> (and therefore #1900's `panic_contained` page), and a panicking cold-start
+> predicate is contained instead of killing the process. Sections below that
+> describe `component_panic` record the design as written, not what is on `main`.
+
 ## CHAOS-120 — Six rounds taught the gateway to survive a panicking background round. Nobody taught it to tell anyone.
 
 **Scope.** The SIMULATE list's *Silent failures*, *Recovery failures*,
