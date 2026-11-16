@@ -62,18 +62,18 @@ var guiEventRe = regexp.MustCompile(`class="wh-event" value="([a-z0-9_]+)"`)
 //
 // REMOVING an entry from this list is the fix. Adding one requires explaining
 // why a new event ships unsubscribable.
-var scanAlertGUIKnownGaps = map[string]string{
-	"admin_ui_unavailable":        "CHAOS-57 admin UI listener plane",
-	"cdr_unavailable":             "CDR sanitisation plane",
-	"disk_critical":               "log-disk guard plane",
-	"dns_failure":                 "destination-DNS resolution plane",
-	"ha_lease_reacquired":         "HA lease plane",
-	"ha_manual_failover_required": "HA lease plane",
-	"ha_resume_unfenced":          "HA lease plane",
-	"ha_self_fenced":              "HA lease plane",
-	"pac_profile_degraded":        "PAC profile plane",
-	"yara_degraded":               "YARA engine plane",
-}
+// EMPTIED BY CHAOS-120. That round's scope WAS the operator-notification
+// boundary, which makes it the owner the paragraph above was waiting for: all
+// ten now have a checkbox, worded from their producer's own posture. Four of
+// them were live defects rather than discoverability gaps, because they gate on
+// a subscriber before building the payload — admin_ui_unavailable
+// (admin_ui_health.go), cdr_unavailable (cdr_proxy.go), dns_failure (alerts.go
+// and dns_health.go) and yara_degraded (internal/yara) could never be delivered
+// to an operator who configures Culvert through its own UI.
+//
+// The map stays, empty, because it is the mechanism: an entry added here is a
+// new event shipping unsubscribable, and it needs the reason written down.
+var scanAlertGUIKnownGaps = map[string]string{}
 
 // TestChaos113_EveryFiredAlertIsSubscribableInTheGUI is the differential
 // oracle. It reads the two sides out of the tree rather than restating either,

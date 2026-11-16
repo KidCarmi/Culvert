@@ -7,7 +7,115 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Added
+
+- **A contained panic now tells an operator (CHAOS-120).** `recordCrash` is the
+  single sink every recovered panic funnels into — the proxy plane, the admin
+  plane, `runGuarded`/`recoverGoroutine`, and every `internal/*` background
+  round through `obs.SetPanicSink`. It incremented
+  `culvert_crash_records_total{component}`, stored a bounded record, wrote one
+  ERROR line and one audit entry, and fired **no alert**, for 62 of the 63
+  component labels the tree declares. The 63rd alerted itself from
+  `HAState.notePanicRound`, whose doc comment states the rule the others were
+  missing: "without them the containment would trade a loud crash for a silent
+  one, which is the failure class the guard exists to remove". Four consecutive
+  rounds recorded this as residual risk (CHAOS-116 `4`, CHAOS-117 `5`,
+  CHAOS-118 `1`, CHAOS-119 `3`) without closing it. The new `panic_contained`
+  event fires from the sink, so it covers every component and every round that
+  adds one. The payload carries the component and the crash id and **nothing
+  else** — a recovered panic value can embed a credential, `sanitizeLog` scrubs
+  control characters rather than masking secrets, and a webhook is an egress.
+  Latched to one alert per component per hour (the counter carries the repeat
+  rate); magnitude-compared so a backward clock step costs one window, not a
+  whole step (CHAOS-84). The alert-delivery plane is excluded from alerting
+  about itself: it cannot deliver news of its own failure, and firing from
+  there re-enters the sink through `fireAlert`'s own recover in a loop that
+  never terminates. The subscriber gate deliberately sits INSIDE the dispatch
+  goroutine, not before it as every other fault-driven producer does, because
+  `internal/alerts` releases its store mutex with a bare trailing `Unlock` in
+  `Add`/`Update`/`Delete` — so a panic inside one of those critical sections
+  strands the mutex and re-enters the sink, and a gate on the sink path would
+  have blocked the sink forever on a lock the panic itself stranded. A new AST
+  gate holds the invariant: no function on the sink's synchronous path may
+  touch a lock owned by another plane.
+
+### Fixed
+
+- **Ten alert events were fired by production code with no way to subscribe to
+  them from the Alerts panel, and four of them could never be delivered at all
+  (CHAOS-120).** The panel's checkbox list is the only place Culvert's alert
+  vocabulary is discoverable. `admin_ui_unavailable`, `cdr_unavailable`,
+  `dns_failure` and `yara_degraded` gate on `alerts.HasSubscriber` before
+  building a payload — correct for a producer whose rate is set by a fault, and
+  it means an event with no way to subscribe is an event that never fires, so
+  for any deployment configured through Culvert's own UI those four were dark by
+  construction: admin-UI access lost, CDR sanitisation unavailable, destination
+  DNS failing, and YARA forwarding bodies with no verdict. `disk_critical`,
+  `pac_profile_degraded`, `ha_self_fenced`, `ha_lease_reacquired`,
+  `ha_resume_unfenced` and `ha_manual_failover_required` were deliverable only
+  by POSTing the event string to `/api/alerts/webhooks` by hand — including the
+  two HA states that do not clear on their own and say so in their own log
+  lines ("operator action required", "only an operator can promote it").
+  CHAOS-113 found and recorded all ten in `scanAlertGUIKnownGaps` rather than
+  fixing ten operator-facing panels from a scan-sidecar round; this round's
+  scope is the notification boundary, so it closes them. The panel goes from 29
+  subscribable events to 40 and the known-gaps map is now empty — kept as an
+  empty map, because an entry added back is a new event shipping
+  unsubscribable and needs its reason recorded.
+
 ### Performance
+
+- **The syslog/SIEM request sink was the one request-log sink still paying a
+  reflective `json.Marshal` plus three redundant copies per record, on the
+  request goroutine.** Delivery was already asynchronous — a slow collector
+  costs a caller a channel send and nothing more — but the part that BUILDS the
+  line stayed on the caller, and for `WriteRequest` that caller is a proxy
+  request goroutine, once per logged request, on every protocol. It boxed the
+  352-byte `logstore.Entry` into an `any`, marshalled it into a fresh slice,
+  copied that slice into a string for `send`, and then built the header with a
+  `time.Format` plus a `fmt.Sprintf` and concatenated three strings; the drain
+  goroutine then put the finished line on the socket through `fmt.Fprint`. The
+  same record's two OTHER sinks already serialize with no per-record allocation
+  at all (`internal/reqlog/persist.go`'s retained `Encoder` over a
+  `bufio.Writer`, `internal/logstore/batchencode.go`'s retained encoder over
+  one batch buffer); this sink was simply the third and had not been given the
+  same treatment. One pooled buffer per line now carries both header and body:
+  the header is appended with `strconv`/`AppendFormat`, a structured body is
+  JSON-encoded straight into that buffer by a retained `json.Encoder`, the line
+  is converted to a string exactly once, and the drain borrows a buffer from
+  the same pool to write it. Measured on a real-shaped record (25 fields,
+  ~375 bytes of JSON; Go 1.27.4, linux/amd64, 4 vCPU Xeon @2.10GHz,
+  `-benchtime=2s`, medians), with the before row produced by running the SAME
+  new benchmark arm against the parent commit in a worktree: 10 allocs /
+  1,665 B / 3,420 ns per record before, **2 allocs / 768 B / 2,421 ns** after —
+  80% fewer allocations and 54% less garbage inside the request goroutine
+  wherever a SIEM collector is configured. Stage arms, both in one binary:
+  header assembly 6 → 1 allocs (rfc3164) and 7 → 1 (rfc5424); the drain's
+  per-line write 1 → 0. For scale, the whole in-process plain-HTTP forward path
+  is 94 allocs and 11.9 KB per request, so this sink alone was adding ~11% to
+  the per-request allocation count and ~14% to its garbage. No wire change:
+  `json.Encoder.Encode` emits exactly `json.Marshal`'s compact bytes plus the
+  one terminator the text path appended itself, and the new
+  `TestLineFormat_ByteIdentity_*` tests compare every assembled line — header,
+  body, terminator and the body offset a format handoff re-encodes from —
+  against the retained `fmt.Sprintf` + `json.Marshal` implementation across
+  both wire formats, HTML-escapable runes, U+2028/9, invalid UTF-8, a nil body
+  and the zero record. The preserved failure contract is pinned too: a body
+  `json` cannot serialize is still dropped silently rather than sent truncated,
+  and is still not charged as a collector drop. The pool is bounded (a line
+  above 16 KiB is sent and its buffer dropped rather than parked) and buffers
+  are reset on acquisition, so a record abandoned mid-assembly cannot leak into
+  the next line. `TestBenchGate_SyslogLineAllocs` bounds allocs/op and B/op for
+  every arm and additionally asserts each is cheaper than the shape it
+  replaced, so reinstating the intermediate slice or the string copy fails even
+  if the absolute bound is generous; it sits behind the `benchgate` tag like
+  every other allocation gate in the tree, and `internal/syslog` is added to
+  the explicit package list the three benchgate runners iterate — a gate on no
+  runner's list never runs. NOT addressed, and left measurable: the
+  reflective encode itself is ~1.6 µs of the ~2.4 µs that remains, and closing
+  it needs a hand-written encoder for a type this stdlib-only leaf package
+  deliberately cannot name — a different change, behind the same differential
+  oracle.
 
 - **`BenchmarkHTTPForward_HandleHTTP` overstated the plain-HTTP forward path's
   memory by ~3.7x, against its own stated purpose of reporting "the real
@@ -314,6 +422,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **A SIEM/syslog collector that was unreachable while the node booted stayed
+  unserved until an operator re-saved the target or restarted.** Both boot
+  paths tolerate a failed connect and keep proxying, but nothing dialled
+  again: the engine's reconnect belongs to a writer, and a failed boot dial
+  produces none. A collector that came up a minute after the gateway (or
+  whose name did not resolve until DNS was up) therefore lost every audit and
+  request event for the life of the process. The failed boot dial is now
+  retried in the background — about 10 s after the failure, doubling to one
+  bounded attempt every 2 minutes, with jitter — until it connects, the
+  operator disables or re-points forwarding, or the node shuts down. It dials
+  the same configured target with the same format and publishes through the
+  same transition as `InitSyslog`; a retry whose dial was in flight when the
+  operator changed the target is discarded. Unchanged: the feed is still
+  reported down immediately (`culvert_syslog_up 0`, `syslog_feed`,
+  `syslog_feed_down`) until a writer exists, lost events are still counted and
+  never replayed, a refused live re-point (400) still changes nothing, and no
+  settings write or configuration version is produced. The automatic connect
+  is logged and audited as `settings.syslog.auto_connect` with actor `system`.
+  The alert Detail, the `syslog_feed` operator action and
+  `docs/operator/siem-feed-delivery.md` no longer say "nothing retries".
 - **`scripts/install.sh` aborted on every supported Fedora release before
   Docker was installed.** The Fedora branch registered Docker's repository with
   `dnf config-manager --add-repo <url>`. Fedora 41 replaced dnf4 with dnf5,
