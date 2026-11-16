@@ -462,10 +462,18 @@ func fetchSAMLMetadataOverNetwork(src idpRemoteURL) ([]byte, error) {
 	// Use an SSRF-safe transport that rejects private/internal IPs at
 	// the dial level — even if DNS changes between validation and
 	// connection, the transport blocks the request.
+	//
+	// DisableKeepAlives: the transport is built for ONE request and dropped on
+	// return, so a kept-alive connection can never be reused and nothing holds
+	// the transport to close it. A zero-value Transport has no idle timeout, so
+	// without this every successful fetch parked a connection, its descriptor
+	// and two transport goroutines until the IdP hung up
+	// (TestIdPDocumentFetch_ReleasesItsConnection).
 	client := &http.Client{
 		Timeout: samlMetadataFetchBudget,
 		Transport: &http.Transport{
-			DialContext: ssrfSafeDialContext,
+			DialContext:       ssrfSafeDialContext,
+			DisableKeepAlives: true,
 		},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL.String(), http.NoBody)

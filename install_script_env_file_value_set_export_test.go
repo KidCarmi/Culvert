@@ -60,7 +60,7 @@ func envFileValueSetVerdict(t *testing.T, fn, content string) bool {
 // proxy persists the CA key unencrypted.
 func TestInstallScript_SetupAtRestEncryption_ReuseBranchReadsExportedLogPassphrase(t *testing.T) {
 	setupFn := extractShellFunctionBraceAware(t, "scripts/install.sh", "setup_at_rest_encryption")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 	secretFn := installSharedEnvPredicate(t) + "\n" + extractShellFunction(t, "scripts/install.sh", "secret_already_set")
 
 	for _, line := range []string{
