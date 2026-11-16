@@ -44,7 +44,7 @@ import (
 func runPersistHostEnvSessionSecret(t *testing.T, dir, envSetup string) (output string, exitCode int, envContent string) {
 	t.Helper()
 	fn := installSharedEnvPredicate(t) + "\n" + extractShellFunctionBraceAware(t, "scripts/install.sh", "persist_host_env_session_secret")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 
 	stubs := `
 info() { :; }
@@ -81,7 +81,7 @@ error() { echo "ERROR: $*" >&2; exit 7; }
 func runPersistHostEnvSessionSecretWithStub(t *testing.T, dir, envSetup, stubbedBuiltins string) (output string, exitCode int, envContent string) {
 	t.Helper()
 	fn := installSharedEnvPredicate(t) + "\n" + extractShellFunctionBraceAware(t, "scripts/install.sh", "persist_host_env_session_secret")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 
 	stubs := `
 info() { :; }

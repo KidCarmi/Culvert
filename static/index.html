@@ -20099,6 +20099,64 @@ function resetBlockPage() {
              timer so it does not depend on /healthz being scraped. Absent entirely
              on the default disabled-MCP deployment. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="mcp_gateway_down"> MCP gateway not serving (enabled but down)</label>
+        <!-- CHAOS-120: the alert vocabulary below this line was fired by production
+             code with no way to subscribe to it from this panel. Four of the ten
+             GATE on a subscriber before building the payload, so with no checkbox
+             they could never be delivered to an operator who configures Culvert
+             through its own UI: admin_ui_unavailable, cdr_unavailable, dns_failure
+             and yara_degraded. The remaining six were deliverable only by POSTing
+             the event string to /api/alerts/webhooks by hand. Recorded in
+             CHAOS-113's scanAlertGUIKnownGaps, which this round empties. -->
+        <!-- CHAOS-120: a panic was recovered and contained ANYWHERE in the process —
+             proxy, admin plane or a detached background round. The round that
+             panicked did not complete, and a background one may stay degraded
+             until the node restarts. The component is in the payload; the panic
+             value never is (it can embed a credential). Latched to one alert per
+             component per hour — culvert_crash_records_total{component} carries
+             the repeat rate. The alert-delivery plane is excluded: it cannot
+             deliver news of its own failure. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="panic_contained"> Contained panic (a component crashed and recovered)</label>
+        <!-- CHAOS-57: the admin UI listener has been unable to bind or serve for a
+             sustained period, or stopped while still configured. The proxy keeps
+             serving; what is lost is operator ACCESS, which is also how an operator
+             would normally notice anything else. Gated on a subscriber. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="admin_ui_unavailable"> Admin UI listener down (operator access lost, proxy still serving)</label>
+        <!-- The CDR sanitisation sidecar could not be called. The posture decides the
+             traffic outcome: fail-open forwards the unsanitised file, fail-closed
+             blocks it. Either way the control is not running as configured. Gated
+             on a subscriber, debounced per interval. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="cdr_unavailable"> CDR sanitisation unavailable (posture decides: forwarded or blocked)</label>
+        <!-- Destination DNS resolution is failing, so requests cannot be resolved to
+             an upstream. Gated on a subscriber precisely because a resolver fault
+             puts EVERY request on this path. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="dns_failure"> DNS resolution failing (destinations unresolvable)</label>
+        <!-- The YARA engine is degraded: concurrent-match saturation under the
+             fail_open_with_alert posture, so bodies are forwarded WITHOUT a YARA
+             verdict. Gated on a subscriber and on the degraded-alert setting. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="yara_degraded"> YARA engine degraded (bodies forwarded without a YARA verdict)</label>
+        <!-- The log-disk guard engaged EMERGENCY minimal logging after cleanup could
+             not free enough space: access/traffic logs are no longer recorded
+             (security events still are). A compliance-record gap, not a traffic
+             fault. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="disk_critical"> Log disk critical (minimal logging — access logs not recorded)</label>
+        <!-- A PAC profile compiled with warnings and was published degraded, which can
+             flip that profile's whole fleet to fail-closed or re-steer it. Once per
+             profile, re-armed when the profile is changed. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="pac_profile_degraded"> PAC profile degraded (fleet steering may have changed)</label>
+        <!-- ADR-0005 HA fencing-lease transitions. self_fenced: this leader LOST the
+             lease and demoted itself to read-only standby — writes are refused here
+             until it recovers. reacquired: it got the lease back and write authority
+             returned (the recovery half of the same episode). resume_unfenced:
+             another node holds the lease and no resync target is recorded, so this
+             node stays read-only and has STOPPED trying — operator action required.
+             manual_failover_required: the leader is unreachable while automatic
+             failover is disabled, so this standby stays read-only on purpose and
+             only an operator can promote it. The last two are the HA states that do
+             not clear on their own. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_self_fenced"> HA leader self-fenced (demoted to read-only standby)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_lease_reacquired"> HA fencing lease re-acquired (write authority restored)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_resume_unfenced"> HA node read-only and not recovering (operator action required)</label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_manual_failover_required"> HA manual failover required (leader unreachable, auto-failover off)</label>
       </div>
     </div>
     <div class="form-group">

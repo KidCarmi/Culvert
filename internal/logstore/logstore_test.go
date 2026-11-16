@@ -37,6 +37,21 @@ func drainLogStore(t *testing.T, s *Store, want int) []Entry {
 	}
 }
 
+// waitBytesUsedAbove waits until the store's tracked logical size exceeds floor,
+// or fails after the same deadline drainLogStore uses. The writer credits the
+// counter just after the batch becomes queryable, so a test that reads the
+// size cap's counter must wait for it separately.
+func waitBytesUsedAbove(t *testing.T, s *Store, floor int64) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for s.BytesUsed() <= floor {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for BytesUsed > %d; have %d", floor, s.BytesUsed())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestLowPriority(t *testing.T) {
 	for _, l := range []string{"INFO", "DEBUG", ""} {
 		if !LowPriority(l) {
@@ -243,6 +258,12 @@ func TestLogStore_SizeRetentionPrunesOldest(t *testing.T) {
 		s.Add(Entry{TS: base + int64(i), Host: "h", Status: "OK"})
 	}
 	drainLogStore(t, s, 50)
+	// Visible is not yet accounted: flushBatch makes a batch queryable at
+	// wb.Flush() and credits bytesUsed only after it, so a writer descheduled
+	// between the two (the race lane's CPU saturation does it) leaves the
+	// counter at 0. RunRetention then sees used <= maxBytes and prunes
+	// nothing. Wait for the accounting the size cap actually reads.
+	waitBytesUsedAbove(t, s, 1)
 
 	before := Pruned()
 	_, count, _ := s.RunRetention()

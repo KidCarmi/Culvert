@@ -156,6 +156,9 @@ var chaos105Workers = []struct {
 	{"rootca_recovery.go", "runInspectionCARecoveryLoop", "crashComponentInspectionCARecovery"},
 	{"mcp_telemetry.go", "flushLoop", "crashComponentMCPTelemetryFlush"},
 	{"mcp_telemetry.go", "exportLoop", "crashComponentMCPTelemetryExport"},
+	// The SIEM boot-dial retry: `go`-detached from the background-services
+	// slice, and its round dials and publishes a writer.
+	{"syslog_intent_retry.go", "runSyslogIntentRetry", "crashComponentSyslogRetry"},
 }
 
 func TestCHAOS105_EveryRegisteredWorkerRoundIsGuarded(t *testing.T) {

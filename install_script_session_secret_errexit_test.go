@@ -16,7 +16,7 @@ import (
 
 func TestInstallScript_PersistSessionSecret_UnderErrexit_ExistingEnvWithoutSecret(t *testing.T) {
 	fn := installSharedEnvPredicate(t) + "\n" + extractShellFunctionBraceAware(t, "scripts/install.sh", "persist_host_env_session_secret")
-	envPutFn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	envPutFn := installEnvPutFunctions(t)
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("CULVERT_LOG_PASSPHRASE=abcdefghijklmnop\n"), 0o600); err != nil {

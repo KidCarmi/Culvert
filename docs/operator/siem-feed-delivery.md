@@ -47,11 +47,13 @@ below is `== 0`.
 succeeded". If the collector cannot be reached at boot, Culvert logs
 `Syslog: connect failed … continuing without syslog` and keeps serving traffic
 — and the series are still exported, reporting `culvert_syslog_up 0` /
-`culvert_syslog_degraded 1` from the moment the intent is recorded. Nothing
-retries a failed connect, so this state is terminal until you re-save the
-target (`POST /api/syslog`) or restart; it is reported down immediately rather
-than after the five-minute degradation window, because there is no transient
-to wait out. The `syslog_feed` contract row has always reported this case as
+`culvert_syslog_degraded 1` from the moment the intent is recorded. The node
+then **retries the connection on its own** (see
+[Automatic retry of a failed boot connect](#automatic-retry-of-a-failed-boot-connect)),
+so a collector that was merely late needs no action; until it connects the
+feed is reported down immediately rather than after the five-minute
+degradation window, because there is no writer whose transient could be
+waited out. The `syslog_feed` contract row has always reported this case as
 `fail` ("configured but failed to connect"); until CHAOS-81's P1-F round the
 metrics plane did not, so the documented `culvert_syslog_up == 0` rule could
 not fire for precisely the feed that never came up.
@@ -117,13 +119,14 @@ events"). The Detail carries a bounded reason class (`connect_failed`,
 never the collector address or a transport error.
 
 An **unmet intent** — a collector you configured that this node could not
-connect — pages immediately rather than after the five-minute window, because
-nothing retries a failed `InitSyslog` and there is no transient to wait out.
+connect — pages immediately rather than after the five-minute window: the connection
+is retried automatically, but until it succeeds no writer exists and every
+event is being lost, so there is no transient to wait out.
 Two sentences are possible and they mean different things:
 
 | Detail says | What is true | Where your events are |
 | --- | --- | --- |
-| *no connection was ever established … and nothing retries it* | no collector has ever been reached on this node | nowhere — every event since boot is lost, and the count is in `culvert_syslog_drops_total` |
+| *no connection was ever established … the node is retrying automatically* | no collector has ever been reached on this node | nowhere — every event since boot is lost, and the count is in `culvert_syslog_drops_total` |
 | *events are still being delivered to the PREVIOUS target* | an earlier collector connected and is still serving; the newly configured one could not be dialled | reaching the **previous** collector, not the one now configured |
 
 The second case is **not** counted in `culvert_syslog_drops_total`: those
@@ -167,7 +170,8 @@ Two independent conditions report the feed as degraded. The loss-based one is
 the subject of this section; the other, an **unmet intent**, is described under
 [Alert](#alert) above and needs neither half of the rule below — a configured
 collector with no writer, or one superseded by a re-point whose dial failed, is
-degraded immediately and with zero losses, because nothing retries it.
+degraded immediately and with zero losses, and stays so until the automatic
+retry (or a re-save) installs a writer for the configured collector.
 
 The loss-based rule:
 
@@ -353,7 +357,8 @@ collector. Both limits are properties of the protocols, not of this node.
    and those count against the cap.
 3. **Re-save the target** (`POST /api/syslog`) or restart the proxy if the
    address itself is wrong. Re-saving reconnects immediately and resets the
-   episode.
+   episode. A collector that was only unreachable at boot does not need
+   this: the node reconnects by itself.
 4. **Confirm with `POST /api/syslog/test`.** For `tcp://` look for `outcome:
    "delivered"`; for `udp://` — the default when the address omits a scheme —
    look for `outcome: "sent"`, which is as much as UDP can report. Both return
@@ -379,12 +384,44 @@ being no Writer, and the compliance-loss series read `0` throughout the outage.
 If you are reading a series from an older build, treat `0` here as *unknown*,
 not as *nothing was lost*.
 
-Nothing retries a failed boot dial, so this state does not clear on its own —
-fix the address or the path and re-save the target (`POST /api/syslog`), which
-reconnects immediately. The same count appears as `syslogDrops` on `/healthz`
+This state clears on its own once the collector is reachable: the node keeps
+re-dialling the configured target (next section). If the address or the path
+is wrong, fix it and re-save the target (`POST /api/syslog`), which reconnects
+immediately. The same count appears as `syslogDrops` on `/healthz`
 and as `culvert_syslog_drops_total`; if you turn forwarding **off** instead,
 counting stops there and the node reports the feature as absent again rather
 than accruing losses it is not incurring.
+
+### Automatic retry of a failed boot connect
+
+A collector that cannot be connected while the node starts — it boots after
+the gateway, or its hostname does not resolve until DNS is up — is re-dialled
+in the background. Nothing needs to be re-saved and no restart is needed.
+
+- **What is retried.** Only the target the node was configured with at
+  startup (YAML/flags, or the persisted admin setting), with its configured
+  format. This covers both shapes of an unmet target: no writer at all, and a
+  persisted target that failed while the YAML collector keeps serving.
+- **Cadence.** First retry about 10 seconds after the failed boot dial, then
+  doubling to one attempt every 2 minutes, each with up to 25% jitter. Each
+  attempt is one connect bounded at 5 seconds. There is no attempt limit; the
+  retry runs for as long as that target stays configured and unreachable.
+- **When it stops.** When the connection succeeds; when you disable
+  forwarding; when you re-point it (`POST /api/syslog`) at a collector that
+  connects; at shutdown. A retry that was mid-dial when you did any of these
+  is discarded and never overrides your change.
+- **What you see.** While it is retrying the feed stays reported down on
+  every surface (`culvert_syslog_up 0`, the `syslog_feed` row, the
+  `syslog_feed_down` alert) and the process log notes the first failed
+  attempt and every tenth after it. On success the log reads
+  `Syslog: the configured collector … became reachable — forwarding
+  established automatically`, and an audit event `settings.syslog.auto_connect`
+  with actor `system` is recorded. That event is also the first one the
+  collector receives, so it marks where the gap in the SIEM record ends.
+- **What it does not do.** It does not replay the events lost meanwhile
+  (they stay counted in `culvert_syslog_drops_total`), does not write
+  settings or create a configuration version, and does not retry a live
+  re-point that was refused with a 400 — that request changed nothing.
 
 ### If you are comparing drop counts across a re-point or a disable
 

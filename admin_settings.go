@@ -506,29 +506,41 @@ func applySessionTimeoutHours(hours int) {
 	}
 }
 
+// applyAdminSyslog applies the persisted syslog/SIEM target. Split out of
+// applyAdminServices unchanged so the boot-dial retry gates can drive this
+// exact path without applying every other admin service to process globals.
+func applyAdminSyslog(s *AdminSettings) {
+	if s.SyslogAddr == "" {
+		return
+	}
+	// Record intent even if the connect fails so checkSyslogFeed surfaces a
+	// silently-down SIEM feed (see syslogConfiguredAddr).
+	noteSyslogConfiguredIntent(s.SyslogAddr)
+	// See loadObservability: the health plane needs the intent under its
+	// own mutex so a persisted target that will not connect is still
+	// exported as down (CHAOS-81 P1-F).
+	noteSyslogIntent(s.SyslogAddr)
+	// syslogConfigured is published by InitSyslog with the writer itself
+	// (one critical section); the intent above survives a failed dial.
+	//
+	// The error is not discarded any more: noteSyslogIntent opened a
+	// PENDING-DIAL grace so a watchdog tick landing inside this dial
+	// cannot page an outage for a collector that is about to connect, and
+	// the failure branch is what closes that grace early. The log line
+	// stays with loadObservability, which owns the YAML/flag path; here
+	// the health plane is the reporter (see dialVerdictBy).
+	if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err != nil {
+		noteSyslogDialResolved()
+		// Same as loadObservability: the persisted target is still what
+		// the operator asked for, so the failed boot dial is retried in
+		// the background instead of staying down until a re-save.
+		armSyslogIntentRetry(s.SyslogAddr, s.SyslogFormat)
+	}
+}
+
 // applyAdminServices applies logging, monitoring, and session settings.
 func applyAdminServices(s *AdminSettings) {
-	if s.SyslogAddr != "" {
-		// Record intent even if the connect fails so checkSyslogFeed surfaces a
-		// silently-down SIEM feed (see syslogConfiguredAddr).
-		noteSyslogConfiguredIntent(s.SyslogAddr)
-		// See loadObservability: the health plane needs the intent under its
-		// own mutex so a persisted target that will not connect is still
-		// exported as down (CHAOS-81 P1-F).
-		noteSyslogIntent(s.SyslogAddr)
-		// syslogConfigured is published by InitSyslog with the writer itself
-		// (one critical section); the intent above survives a failed dial.
-		//
-		// The error is not discarded any more: noteSyslogIntent opened a
-		// PENDING-DIAL grace so a watchdog tick landing inside this dial
-		// cannot page an outage for a collector that is about to connect, and
-		// the failure branch is what closes that grace early. The log line
-		// stays with loadObservability, which owns the YAML/flag path; here
-		// the health plane is the reporter (see dialVerdictBy).
-		if err := InitSyslog(s.SyslogAddr, s.SyslogFormat); err != nil {
-			noteSyslogDialResolved()
-		}
-	}
+	applyAdminSyslog(s)
 	if s.OTLPEndpoint != "" {
 		globalOTLP.Configure(s.OTLPEndpoint, s.OTLPHeaders)
 		globalOTLPTraces.Configure(s.OTLPEndpoint, s.OTLPHeaders)
