@@ -7,6 +7,62 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Added
+
+- **A contained panic now tells an operator (CHAOS-120).** `recordCrash` is the
+  single sink every recovered panic funnels into — the proxy plane, the admin
+  plane, `runGuarded`/`recoverGoroutine`, and every `internal/*` background
+  round through `obs.SetPanicSink`. It incremented
+  `culvert_crash_records_total{component}`, stored a bounded record, wrote one
+  ERROR line and one audit entry, and fired **no alert**, for 62 of the 63
+  component labels the tree declares. The 63rd alerted itself from
+  `HAState.notePanicRound`, whose doc comment states the rule the others were
+  missing: "without them the containment would trade a loud crash for a silent
+  one, which is the failure class the guard exists to remove". Four consecutive
+  rounds recorded this as residual risk (CHAOS-116 `4`, CHAOS-117 `5`,
+  CHAOS-118 `1`, CHAOS-119 `3`) without closing it. The new `panic_contained`
+  event fires from the sink, so it covers every component and every round that
+  adds one. The payload carries the component and the crash id and **nothing
+  else** — a recovered panic value can embed a credential, `sanitizeLog` scrubs
+  control characters rather than masking secrets, and a webhook is an egress.
+  Latched to one alert per component per hour (the counter carries the repeat
+  rate); magnitude-compared so a backward clock step costs one window, not a
+  whole step (CHAOS-84). The alert-delivery plane is excluded from alerting
+  about itself: it cannot deliver news of its own failure, and firing from
+  there re-enters the sink through `fireAlert`'s own recover in a loop that
+  never terminates. The subscriber gate deliberately sits INSIDE the dispatch
+  goroutine, not before it as every other fault-driven producer does, because
+  `internal/alerts` releases its store mutex with a bare trailing `Unlock` in
+  `Add`/`Update`/`Delete` — so a panic inside one of those critical sections
+  strands the mutex and re-enters the sink, and a gate on the sink path would
+  have blocked the sink forever on a lock the panic itself stranded. A new AST
+  gate holds the invariant: no function on the sink's synchronous path may
+  touch a lock owned by another plane.
+
+### Fixed
+
+- **Ten alert events were fired by production code with no way to subscribe to
+  them from the Alerts panel, and four of them could never be delivered at all
+  (CHAOS-120).** The panel's checkbox list is the only place Culvert's alert
+  vocabulary is discoverable. `admin_ui_unavailable`, `cdr_unavailable`,
+  `dns_failure` and `yara_degraded` gate on `alerts.HasSubscriber` before
+  building a payload — correct for a producer whose rate is set by a fault, and
+  it means an event with no way to subscribe is an event that never fires, so
+  for any deployment configured through Culvert's own UI those four were dark by
+  construction: admin-UI access lost, CDR sanitisation unavailable, destination
+  DNS failing, and YARA forwarding bodies with no verdict. `disk_critical`,
+  `pac_profile_degraded`, `ha_self_fenced`, `ha_lease_reacquired`,
+  `ha_resume_unfenced` and `ha_manual_failover_required` were deliverable only
+  by POSTing the event string to `/api/alerts/webhooks` by hand — including the
+  two HA states that do not clear on their own and say so in their own log
+  lines ("operator action required", "only an operator can promote it").
+  CHAOS-113 found and recorded all ten in `scanAlertGUIKnownGaps` rather than
+  fixing ten operator-facing panels from a scan-sidecar round; this round's
+  scope is the notification boundary, so it closes them. The panel goes from 29
+  subscribable events to 40 and the known-gaps map is now empty — kept as an
+  empty map, because an entry added back is a new event shipping
+  unsubscribable and needs its reason recorded.
+
 ### Performance
 
 - **`BenchmarkHTTPForward_HandleHTTP` overstated the plain-HTTP forward path's
