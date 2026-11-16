@@ -186,15 +186,39 @@ type Config struct {
 	Jitter func(time.Duration) time.Duration
 
 	// OnPanic is invoked when a round panics, before it is charged as a
-	// failure. Nil falls back to a WARN line naming the feed.
+	// failure. Nil reports the panic to the shared crash sink (obs.ReportPanic)
+	// under crashComponentFeedschedRound AND logs a WARN line naming the feed.
 	//
 	// In production both feeds additionally wrap their round body in
 	// obs.SafeCall, so a panic in the FEED reaches the crash-recording plane
 	// (metric + audit + log) and never gets this far. This recover is the
 	// second layer, covering a panic in the Run closure itself; it exists so
 	// that layer can never turn into a dead loop or a process kill.
+	//
+	// CHAOS-120 (CHAOS-119 §5.1): the nil fallback used to be the WARN line
+	// ALONE, and a tree-wide search found ZERO production call sites setting
+	// this field — so the second layer was real containment with no reporting.
+	// obs.Warnf does not reach the panic sink, so a panic caught here produced
+	// no crash record, no culvert_crash_records_total increment, no
+	// panic_recovered audit entry and (since CHAOS-120) no page: one WARN line,
+	// in a loop that then backed off and looked healthy. That was a latent seam
+	// rather than a live defect only because both shipped feeds wrap their own
+	// body; it becomes live the moment a feed is added without that wrapper,
+	// which is exactly how CHAOS-108 found blocklistfeed outside the scheduler
+	// this package's doc claimed covered it. The fallback now reports, so a feed
+	// added without its own wrapper is contained AND visible by default.
 	OnPanic func(v any)
 }
+
+// crashComponentFeedschedRound is the crash-plane component label for a panic
+// this package contains itself. Deliberately ONE FIXED label rather than one
+// per feed: the sink's component set is capped (maxCrashLabels) and past the cap
+// crashThrottleAllow fails closed — no record, no log, no audit, no page — so a
+// label derived from Config.Name would be an unbounded label in a bounded map,
+// and would not be resolvable by the source enumerator that holds that cap
+// (TestCHAOS119_FixedCrashLabelSetFitsTheCardinalityCap). The FEED's identity is
+// carried by the WARN line beside the report, where cardinality costs nothing.
+const crashComponentFeedschedRound = "feedsched_round"
 
 const (
 	// DefaultBackoffMin is the first retry delay after a failed round. Chosen
@@ -336,7 +360,7 @@ func (s *Scheduler) backoffDelay(failures int) time.Duration {
 // Run drives the loop until ctx is cancelled. It blocks; callers own the
 // goroutine.
 func (s *Scheduler) Run(ctx context.Context) {
-	if s.cfg.RunNow != nil && s.cfg.RunNow() {
+	if s.runNow() {
 		if ctx.Err() != nil {
 			return
 		}
@@ -344,6 +368,45 @@ func (s *Scheduler) Run(ctx context.Context) {
 		return
 	}
 	s.loop(ctx, s.jitter(s.interval()))
+}
+
+// runNow evaluates the cold-start predicate under the SAME containment as a
+// round, and answers false if it panics.
+//
+// CHAOS-120 (CHAOS-119 §5.2): this call used to be bare, inside a Run that
+// internal/threatfeed launches with a plain `go` statement
+// (threatfeed.go `go feedsched.New(tf.schedulerConfig()).Run(ctx)`), and
+// internal/feedsync launches it in a bare goroutine whose only wrapper is a
+// sync.WaitGroup Done (feedsync.go Start). Both feeds' guards live INSIDE
+// Config.Run — obs.SafeCall wraps the round body — so nothing covered the
+// predicate, and the predicate is not a trivial read: feedsync's is
+// `fs.db.Stats() == 0`, a BadgerDB call on a handle this package does not own.
+// Go terminates the process on an unrecovered panic in any goroutine, so a
+// corrupt or already-closed store would have taken the gateway down from the
+// one line in the loop nobody was guarding — at startup, before the first
+// round, on the path whose whole purpose is cold-start recovery.
+//
+// Answering FALSE on a panic is the graceful choice and not the only defensible
+// one. The alternative — treat it as a failed round and enter backoff — charges
+// a failure for work that never ran and starts the ladder from a fault that is
+// not the feed origin's. Falling through to the interval loop keeps the loop
+// alive, runs a REAL round at the first tick, and lets that round report its own
+// outcome through the health plane the operator already watches. The cost is
+// explicit: on a node whose store is empty AND whose predicate panics, the
+// immediate cold-start sync is skipped, so the first sync waits one interval —
+// the pre-feedsched bare-ticker behaviour, for one window, now reported instead
+// of fatal.
+func (s *Scheduler) runNow() (now bool) {
+	if s.cfg.RunNow == nil {
+		return false
+	}
+	defer func() {
+		if v := recover(); v != nil {
+			now = false
+			s.reportPanic(v, "RunNow cold-start predicate")
+		}
+	}()
+	return s.cfg.RunNow()
 }
 
 // scheduleAfter continues the loop with the delay implied by an outcome that
@@ -377,16 +440,34 @@ func (s *Scheduler) round(ctx context.Context) (ok bool) {
 	defer func() {
 		if v := recover(); v != nil {
 			ok = false
-			if s.cfg.OnPanic != nil {
-				s.cfg.OnPanic(v)
-			} else {
-				obs.Warnf("feedsched: %s round panicked (recovered, charged as a failed round): %s",
-					obs.Sanitize(s.cfg.Name), obs.Sanitize(fmt.Sprint(v)))
-			}
+			s.reportPanic(v, "round")
 		}
 	}()
 	if s.cfg.Run == nil {
 		return true
 	}
 	return s.cfg.Run(ctx)
+}
+
+// reportPanic is the single reporting path for a panic this package contains,
+// shared by round and runNow so neither can be reported and the other silent.
+//
+// A configured OnPanic OWNS the report: a caller that installed one has said how
+// it wants its panics handled, and double-reporting would double-count the
+// crash counter. With none installed the panic goes to the shared sink (crash
+// record + culvert_crash_records_total + panic_recovered audit entry + the
+// CHAOS-120 page) AND to a WARN line, because the sink's label is fixed by
+// design and the line is the only place the FEED is named.
+func (s *Scheduler) reportPanic(v any, where string) {
+	if s.cfg.OnPanic != nil {
+		s.cfg.OnPanic(v)
+		return
+	}
+	obs.ReportPanic(crashComponentFeedschedRound, v)
+	// The line names WHERE, and deliberately does not claim an outcome: a
+	// panicking round is charged as a failure, a panicking predicate is not
+	// (runNow falls through to the interval instead). One shared sentence that
+	// asserted either would be wrong on one of the two paths.
+	obs.Warnf("feedsched: %s %s panicked (recovered and contained): %s",
+		obs.Sanitize(s.cfg.Name), obs.Sanitize(where), obs.Sanitize(fmt.Sprint(v)))
 }

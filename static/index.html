@@ -20069,6 +20069,19 @@ function resetBlockPage() {
              replication from the leader is stalled and this node deliberately
              will NOT auto-promote on its own fault (manual promotion available). -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="ha_sync_panic"> HA standby sync fault (replication stalled)</label>
+        <!-- CHAOS-120: ANY component recovered a panic and contained it. This is the
+             generic form of the event above: since CHAOS-24 every detached background
+             round runs under a panic guard, so a round that panics on every pass no
+             longer kills the process — it leaves the node up, every probe green, and
+             its work permanently undone (a feed that never refreshes, a CA that never
+             rotates, an HA resume that never completes). The counter, the log line and
+             the panic_recovered audit entry all record it; this is the only sink that
+             reaches an operator who is not already looking. Detail names the COMPONENT,
+             never the panic value (it can embed a secret) and never the crash id (it is
+             unique per crash and would defeat the 30 s dedup) — correlate through the
+             audit entry. Deduped and throttled per component, so a round panicking
+             every window pages once per window, not once per panic. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="component_panic" title="Fires when any component recovers and contains a panic. The node keeps running and reporting healthy; the work in flight was abandoned. Correlate with the panic_recovered audit entry and culvert_crash_records_total{component}."> Contained panic in a component (work abandoned, node still healthy)</label>
         <!-- CHAOS-54: the SOCKS5 accept loop has been unable to accept connections
              for a sustained period (descriptor exhaustion — it retries and recovers
              on its own) or has stopped entirely (the listening socket is gone —

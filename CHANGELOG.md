@@ -238,6 +238,61 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A contained panic now pages the operator.** Since CHAOS-24 every detached
+  background round in Culvert runs under a panic guard, so a round that panics
+  on every pass no longer kills the process — it leaves the node up, every probe
+  green, and that round's work permanently undone (a threat feed that never
+  refreshes while traffic is enforced against frozen intelligence, a cluster
+  heartbeat that never evaluates liveness, an HA resume that leaves the node
+  HA-gated until someone restarts it). The crash sink recorded every one of
+  those: a `culvert_crash_records_total{component}` series, a `PANIC_RECOVERED`
+  log line, a `panic_recovered` entry in the bounded 500-slot audit ring and a
+  single-slot `lastCrash` a support bundle reads. All four are pull, not push,
+  and none of them paged — recorded as residual risk by four consecutive chaos
+  rounds. A new **`component_panic`** webhook event (additive, unsubscribed by
+  default, subscribable from the Alerts panel) fires from that single sink, so a
+  component added by a future round inherits the page instead of needing its own.
+  `ha_sync_panic` is unchanged and stays as the HA plane's narrower page, which
+  also names the suppressed failover and the manual remedy. The page carries the
+  **component label only** — never the panic value (`recover()`'s value can embed
+  a credential), never the stack, and never the crash id, which is unique per
+  crash and would defeat the 30 s delivery dedup and flood the retry queue where
+  it evicts real threat alerts; correlate through the `panic_recovered` audit
+  entry, which carries the id. It is fired inside the sink's existing
+  per-component throttle and behind the `HasSubscriber` gate, so a
+  request-triggered panic cannot fan out a delivery per request — and the whole
+  outbound step, the subscriber probe included, runs on a detached goroutine, so
+  neither a slow webhook nor a leaked alert-store lock can block the crash sink.
+  That last part is a correctness requirement, not a latency preference: the sink
+  runs inside `runGuarded`, so a sink that blocks turns a contained round back
+  into the permanently stalled loop the guard exists to prevent, and on the admin
+  plane it would hang the request before the 500 is written. The alert plane's own components
+  (`alert`, `alerts_retry`) are excluded by construction: paging through the
+  delivery path that just panicked would be a non-terminating loop. No retry,
+  backoff, cadence, fail-open or fail-closed decision changes anywhere.
+
+- **A panicking feed round in `internal/feedsched` now reaches the crash plane,
+  and the cold-start predicate can no longer kill the process.** The scheduler's
+  `Config.OnPanic` seam was defined, documented and set by no production caller,
+  so every panic the package contained itself fell to a single WARN line —
+  containment with no reporting: no crash record, no counter increment, no audit
+  entry and no page. The nil fallback now reports to the shared panic sink under
+  one fixed `feedsched_round` label (one label, not one per feed: the sink's
+  component set is capped and fails closed past the cap, so a per-feed label
+  would be an unbounded label in a bounded map; the feed's name rides the WARN
+  line beside it). Separately, `Run` consulted `Config.RunNow()` outside every
+  guard, while both shipped feeds' guards sit inside `Config.Run` and
+  `internal/threatfeed` launches `Run` with a bare `go` statement — and
+  `feedsync`'s predicate is `fs.db.Stats() == 0`, a BadgerDB call on a handle the
+  scheduler does not own. A corrupt or already-closed store therefore killed the
+  **gateway** at startup from the one line in the cold-start path nobody guarded.
+  The predicate is now contained and answers "do not run now", so the loop falls
+  through to its normal cadence and a real round reports its own outcome at the
+  first tick; the stated cost is that such a node's first sync waits one interval
+  instead of running immediately. Both containment paths report through one
+  method, so neither can be fixed while the other stays silent, and a configured
+  `OnPanic` still owns the report rather than double-counting the crash counter.
+
 - **Diagnostics now warns when the OpenTelemetry (OTLP) export is failing.**
   The push-loop failure count and last error were shown only under Settings →
   OpenTelemetry (OTLP); the one-page report read as healthy while the collector

@@ -44,6 +44,20 @@ package alerts
 //   "cluster_node_reenrolled" — expired-but-registered node re-enrolled with a fresh token (CHAOS-12)
 //   "ha_sync_panic"         — a standby HA sync round panicked and was contained: state replication
 //                             is stalled and this node's automatic failover is suppressed (CHAOS-25)
+//   "component_panic"       — ANY component recovered and contained a panic (CHAOS-120). The generic
+//                             form of ha_sync_panic: since CHAOS-24 every detached background round
+//                             runs under a panic guard, so a round that panics on every pass no longer
+//                             kills the process — the node stays up, every probe stays green, and that
+//                             round's work is never done. Fired from the single crash sink
+//                             (package main crashguard.go), so a component added by a later round
+//                             inherits the page. Detail carries a BOUNDED component label, never the
+//                             panic value (it can embed a secret) and never the crash id (unique per
+//                             crash, so it would defeat this window's dedup — the CHAOS-64 defect);
+//                             correlate through the panic_recovered audit entry. Throttled at the sink
+//                             to one per component per second and deduped per component here, so a
+//                             permanently panicking round pages per window, not per panic. The alert
+//                             plane's OWN components are excluded by construction: a page about a
+//                             panicking delivery path would re-enter the path that just panicked.
 //   "auth_verify_saturated" — the credential-verification cost governor has been refusing
 //                             authentication attempts for a sustained period: proxy auth is
 //                             failing CLOSED and valid credentials may be denied (CHAOS-57).
