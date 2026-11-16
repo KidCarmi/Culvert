@@ -93,6 +93,18 @@ package alerts
 //                             configured (RISK-027). Fired once per episode, never per request.
 //                             MCP is REPORT-ONLY for SWG readiness — this alert says the MCP
 //                             capability is down, never that the proxy is.
+//   "panic_contained"       — a panic was recovered and CONTAINED somewhere in the process: the
+//                             proxy plane, the admin plane, or any detached background round
+//                             (CHAOS-120). The round that panicked did not complete; a background
+//                             one may stay degraded until the node is restarted, which is the
+//                             recovery path for several of them. Fired by the crash sink itself
+//                             (crashguard.go), so it covers every component that funnels into
+//                             culvert_crash_records_total{component} rather than one plane.
+//                             Payload carries the component and the crash id and NOTHING else —
+//                             a recovered panic value can embed a credential and a webhook is an
+//                             egress. Latched to one alert per component per hour; the counter
+//                             carries the repeat rate. The alert-delivery plane itself is
+//                             excluded, because it cannot deliver news of its own failure.
 //
 // Each webhook is stored in an in-memory list backed by a JSON file.
 // Delivery is async, never blocks the request path.

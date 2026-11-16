@@ -830,16 +830,16 @@ func commitSyslogDegradation(snap syslogFeedSnapshot) {
 		// CURRENTLY INTENDED SIEM" would conflate delivery-elsewhere with
 		// destruction on the one series that measures compliance loss.
 		if snap.writer != nil {
-			logLine = fmt.Sprintf("WARN syslog: SIEM forwarding is serving a SUPERSEDED target — the collector configured %s ago could not be connected and nothing retries, so audit and request events are still going to the PREVIOUS collector, not the configured one",
+			logLine = fmt.Sprintf("WARN syslog: SIEM forwarding is serving a SUPERSEDED target — the collector configured %s ago could not be connected (the connection is retried automatically), so audit and request events are still going to the PREVIOUS collector, not the configured one",
 				snap.Age.Round(time.Second))
 			detail = fmt.Sprintf(
-				"remote syslog/SIEM forwarding could not connect to the configured collector (%s ago) and nothing retries it; events are still being delivered to the PREVIOUS target, so they are reaching a collector but not the one now configured",
+				"remote syslog/SIEM forwarding could not connect to the configured collector (%s ago) and is retrying automatically; events are still being delivered to the PREVIOUS target, so they are reaching a collector but not the one now configured",
 				snap.Age.Round(time.Second))
 		} else {
-			logLine = fmt.Sprintf("WARN syslog: SIEM forwarding is configured but NOTHING is serving it — the collector could not be connected %s ago and nothing retries; audit and request events are NOT reaching the SIEM",
+			logLine = fmt.Sprintf("WARN syslog: SIEM forwarding is configured but NOTHING is serving it — the collector could not be connected %s ago (the connection is retried automatically); audit and request events are NOT reaching the SIEM",
 				snap.Age.Round(time.Second))
 			detail = fmt.Sprintf(
-				"remote syslog/SIEM forwarding is configured but no connection was ever established (%s ago) and nothing retries it; audit and request events are not reaching the collector while the node keeps proxying normally",
+				"remote syslog/SIEM forwarding is configured but no connection was ever established (%s ago); the node is retrying automatically, and audit and request events are not reaching the collector while it keeps proxying normally",
 				snap.Age.Round(time.Second))
 		}
 	}
@@ -1006,8 +1006,9 @@ type syslogFeedSnapshot struct {
 	// IntentUnmet is true when a collector is configured and nothing is
 	// serving it — either no Writer at all (the boot dial failed), or a Writer
 	// still pointing at a PREVIOUS target because a later re-point failed.
-	// Nothing retries either case, so it is terminal until an operator acts:
-	// it is reported as degraded immediately rather than after the window,
+	// A failed boot dial is retried in the background (syslog_intent_retry.go),
+	// but there is no Writer whose transient could be waited out meanwhile: it
+	// is reported as degraded immediately rather than after the window,
 	// which is also what the `syslog_feed` contract row has always done for
 	// the same condition.
 	IntentUnmet bool
@@ -1663,6 +1664,11 @@ func resetSyslogHealthForTest() {
 	syslogHealth.mu.Unlock()
 	syslogIntentArmedWithoutWriter.Store(false)
 	syslogSkippedNoWriter.Store(0)
+	// A boot dial a gate left pending would be picked up by the next gate
+	// that runs the retry loop. Taken AFTER the health lock is released:
+	// production takes syslogPublishMu and then syslogHealth.mu, never the
+	// reverse.
+	resetSyslogIntentRetryForTest()
 	// A claim left set would make every later gate's drop a no-op — the
 	// fence-pollution class this sweep has already been bitten by twice. It
 	// cannot leak through the production path (the release is deferred), but
