@@ -203,6 +203,66 @@ func PrivateHost(hostport string) error {
 // otherwise identical, cache included; PrivateHost delegates here with a
 // background context so every existing caller is byte-identical.
 func PrivateHostContext(ctx context.Context, hostport string) error {
+	return privateHost(ctx, hostport, 0)
+}
+
+// ErrLookupBudget is the cancellation cause PrivateHostBudget attaches to its
+// miss-path lookup, and is wrapped by the error it returns when that budget —
+// rather than the caller's own context — is what ended the lookup. It is NOT
+// ErrBlocked: a resolver that did not answer in time demonstrated nothing
+// about the destination.
+var ErrLookupBudget = errors.New("ssrf pre-flight: DNS lookup exceeded its budget")
+
+// PrivateHostBudget is PrivateHostContext with the miss-path DNS lookup
+// additionally capped at budget.
+//
+// It exists for the data-plane tunnel paths (CONNECT bypass, CONNECT inspect,
+// WebSocket, SOCKS5). Each of them bounds its upstream dial at 10 s, but ran
+// this guard in front of that dial under context.Background(): the guard
+// resolves the same name with no deadline and no link to the client, so a
+// resolver that stops answering held every such request goroutine — with its
+// client connection, descriptor and per-IP connection-limiter slot — for the
+// OS resolver's full budget (timeout × attempts × nameservers, × search
+// domains; 12 s measured against a two-nameserver resolv.conf, 30 s+ with
+// glibc defaults and three), even after the client had hung up. The dial
+// bound was unreachable because the unbounded step ran first.
+//
+// The timer is created only on a cache MISS, so the per-request hot path — a
+// cached verdict — pays nothing for the bound. Verdicts, caching (failures
+// are still never cached) and fail-closed behaviour are identical to
+// PrivateHostContext; only how long a lookup may take changes. budget <= 0
+// means no additional bound.
+func PrivateHostBudget(ctx context.Context, hostport string, budget time.Duration) error {
+	return privateHost(ctx, hostport, budget)
+}
+
+// lookupHostFn, when set, replaces net.DefaultResolver.LookupHost on the miss
+// path. Test seam only (SetLookupHostForTest): swapping the process-global
+// net.DefaultResolver instead would race any goroutine an earlier test left
+// dialing.
+var lookupHostFn atomic.Pointer[func(ctx context.Context, host string) ([]string, error)]
+
+func lookupHost(ctx context.Context, host string) ([]string, error) {
+	if fn := lookupHostFn.Load(); fn != nil {
+		return (*fn)(ctx, host)
+	}
+	return net.DefaultResolver.LookupHost(ctx, host)
+}
+
+// SetLookupHostForTest replaces the resolver the guard's miss path uses and
+// returns a restore func. Test support — never call from production code. The
+// DNS verdict cache is reset on both swap and restore so a verdict produced by
+// one resolver is never served under the other.
+func SetLookupHostForTest(fn func(ctx context.Context, host string) ([]string, error)) (restore func()) {
+	prev := lookupHostFn.Swap(&fn)
+	CacheReset()
+	return func() {
+		lookupHostFn.Store(prev)
+		CacheReset()
+	}
+}
+
+func privateHost(ctx context.Context, hostport string, budget time.Duration) error {
 	host, _, err := net.SplitHostPort(hostport)
 	if err != nil {
 		host = hostport // no port
@@ -214,7 +274,12 @@ func PrivateHostContext(ctx context.Context, hostport string) error {
 		}
 		return nil
 	}
-	ips, err := net.DefaultResolver.LookupHost(ctx, host)
+	if budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, budget, ErrLookupBudget)
+		defer cancel()
+	}
+	ips, err := lookupHost(ctx, host)
 	if err != nil {
 		// Fail closed: unresolvable hosts are rejected to prevent DNS-rebinding
 		// attacks where the check resolves to a public IP but Dial resolves to
@@ -223,6 +288,9 @@ func PrivateHostContext(ctx context.Context, hostport string) error {
 		// Deliberately NOT wrapped in ErrBlocked: the destination is refused,
 		// but nothing was demonstrated about it. A caller that counts SSRF
 		// refusals must not charge one for a resolver outage.
+		if errors.Is(context.Cause(ctx), ErrLookupBudget) {
+			return fmt.Errorf("destination %s: DNS resolution failed: %w: %w", host, ErrLookupBudget, err)
+		}
 		return fmt.Errorf("destination %s: DNS resolution failed: %w", host, err)
 	}
 	for _, ipStr := range ips {

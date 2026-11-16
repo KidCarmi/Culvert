@@ -153,9 +153,15 @@ func fetchOIDCDiscoveryOverNetwork(src idpRemoteURL) ([]byte, error) {
 		// private verdict is a policy refusal and is not (idpFetchUnavailable).
 		return nil, idpFetchUnavailable(fmt.Errorf("oidc discovery: host refused: %w", err))
 	}
+	// DisableKeepAlives: this transport is built for ONE request and dropped on
+	// return, so a kept-alive connection can never be reused, and nothing holds
+	// the transport to close it. A zero-value Transport has no idle timeout, so
+	// without this every successful fetch parked a connection, its descriptor
+	// and two transport goroutines until the IdP hung up
+	// (TestIdPDocumentFetch_ReleasesItsConnection).
 	client := &http.Client{
 		Timeout:   oidcDiscoveryFetchBudget,
-		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
+		Transport: &http.Transport{DialContext: ssrfSafeDialContext, DisableKeepAlives: true},
 	}
 	// The request is built from the PARSED url, as the SAML sibling is: the
 	// guard above checked u, so fetching the raw string would be validating

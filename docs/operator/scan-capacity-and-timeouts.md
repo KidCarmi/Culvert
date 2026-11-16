@@ -92,7 +92,10 @@ rate(culvert_clam_scan_errors_total[5m]) > 0
      was in fact clean and the engine is simply too slow right now.
 2. Check **`culvert_clam_scan_errors_total`**. Rising means a real daemon fault —
    a down daemon still fails **open** (content is forwarded unscanned, counted
-   and alerted). Fix the daemon.
+   and alerted). Fix the daemon. While the daemon is unreachable,
+   **Infrastructure → Diagnostics** shows a `clamav_scan` warning and the
+   `/ready` `clamav` row fails; both are described in the
+   [Operations Guide](../OPERATIONS.md#apidiagnostics--operator-contract).
 3. A refusal is remembered for **30 seconds** (`scanTimeoutCooldown`) so a burst
    of requests for one hot object does not each start a doomed scan. After that
    the object is rescanned by whatever engine is healthy. **You do not need to

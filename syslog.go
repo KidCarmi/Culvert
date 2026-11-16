@@ -154,6 +154,21 @@ func noteSyslogConfiguredIntent(addr string) {
 	syslogPublishMu.Unlock()
 }
 
+// syslogIntentIsLocked reports whether addr is the collector the operator
+// currently asks for. Caller holds syslogPublishMu. It lives here, with the
+// variables, because nothing outside this file may name them
+// (TestChaos81_ConfigMetadataIsReadOnlyThroughItsAccessors).
+func syslogIntentIsLocked(addr string) bool {
+	return addr != "" && syslogConfiguredAddr == addr
+}
+
+// syslogIntentUnservedLocked reports whether addr is the operator's current
+// intent AND no writer has been installed for it — the one state the
+// automatic boot-dial retry acts on. Caller holds syslogPublishMu.
+func syslogIntentUnservedLocked(addr string) bool {
+	return syslogIntentIsLocked(addr) && syslogConfigured != addr
+}
+
 // disableActiveSyslog clears the active writer and the health record as one
 // serialized transition, releasing the writer it displaced.
 func disableActiveSyslog() {
@@ -169,6 +184,11 @@ func disableActiveSyslog() {
 	// (Codex P2, PR #1494).
 	syslogConfigured = ""
 	syslogConfiguredAddr = ""
+	// The intent is withdrawn, so there is nothing left for the automatic
+	// boot-dial retry to establish. Cleared in the SAME transition: a retry
+	// whose dial is in flight re-reads this under the lock before it
+	// publishes, and must find the operator's "off" already recorded.
+	syslogRetryPending = syslogRetryIntent{}
 	syslogPublishMu.Unlock()
 	if old != nil {
 		old.SetDeliveryObserver(nil)
@@ -187,25 +207,40 @@ func InitSyslog(addr, syslogFmt string) error {
 	if addr == "" {
 		return nil
 	}
-	network := "udp"
-	target := addr
-	switch {
-	case strings.HasPrefix(addr, "tcp://"):
-		network = "tcp"
-		target = strings.TrimPrefix(addr, "tcp://")
-	case strings.HasPrefix(addr, "udp://"):
-		target = strings.TrimPrefix(addr, "udp://")
-	}
+	network, target := splitSyslogAddr(addr)
 	sw, err := newSyslogWriter(network, target, syslogFmt)
 	if err != nil {
 		return err
 	}
+	syslogPublishMu.Lock()
+	publishSyslogWriterLocked(sw, addr)
+	syslogPublishMu.Unlock()
+	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
+	return nil
+}
+
+// splitSyslogAddr resolves an operator-supplied collector address into the
+// dial network and target. UDP is the default when the scheme is omitted.
+func splitSyslogAddr(addr string) (network, target string) {
+	switch {
+	case strings.HasPrefix(addr, "tcp://"):
+		return "tcp", strings.TrimPrefix(addr, "tcp://")
+	case strings.HasPrefix(addr, "udp://"):
+		return "udp", strings.TrimPrefix(addr, "udp://")
+	}
+	return "udp", addr
+}
+
+// publishSyslogWriterLocked makes sw the active writer for addr: the handle,
+// the health record and the config metadata move as ONE transition. Caller
+// holds syslogPublishMu. Shared by InitSyslog and the automatic boot-dial
+// retry (syslog_intent_retry.go) so the two cannot publish differently.
+func publishSyslogWriterLocked(sw *syslogWriter, addr string) {
 	// Swap, not load-then-store: two concurrent admin re-points would
 	// otherwise both read the same predecessor (one of them closing a writer
 	// the other is about to leak) or clobber each other's publication. The
 	// swap makes "publish the new one and hand me exactly the one I displaced"
 	// a single step, so every displaced writer is released exactly once.
-	syslogPublishMu.Lock()
 	releaseReplacedSyslogWriter(setSyslogHandle(sw), sw)
 	noteSyslogWriterInstalled(sw, addr)
 	// Published with the writer, not by the caller afterwards — see
@@ -215,9 +250,9 @@ func InitSyslog(addr, syslogFmt string) error {
 	// dial that never produces a writer.
 	syslogConfigured = addr
 	syslogConfiguredAddr = addr
-	syslogPublishMu.Unlock()
-	logger.Printf("Syslog: forwarding to %s://%q (format=%s)", network, sanitizeLog(target), sanitizeLog(sw.Format()))
-	return nil
+	// An installed writer IS the met intent, whoever installed it: any boot
+	// dial still waiting to be retried has been overtaken.
+	syslogRetryPending = syslogRetryIntent{}
 }
 
 // releaseReplacedSyslogWriter closes the Writer that InitSyslog is about to

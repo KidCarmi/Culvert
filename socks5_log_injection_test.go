@@ -402,15 +402,15 @@ func renderExpr(t *testing.T, fset *token.FileSet, e ast.Expr) string {
 // less than it appears to — the same lesson as "sanitising one argument of a
 // call does not sanitise the call", one level up.
 var destinationSinks = map[string]string{
-	"normalizeHostStrict": "pure canonicalisation in internal/hostutil; logs nothing",
-	"IsBlocked":           "internal/blocklist; its own host log lines already route through obs.Sanitize",
-	"pluginDecision":      "plugin.Decide sanitises the destination before obs.Printf (SEC-SOCKS5-LOG-1 round 2)",
-	"isPrivateHost":       "internal/ssrf; contains no logging at all",
-	"recordRequest":       "structured JSONL — the encoder escapes control bytes",
-	"socks5Relay":         "byte relay; its only destination sink is recordTunnelClose — structured JSONL",
-	"JoinHostPort":        "net; string construction only",
-	"DialContext":         "net.Dialer; the error it returns is sanitised at the log site",
-	"sanitizeLog":         "the sanitiser itself",
+	"normalizeHostStrict":  "pure canonicalisation in internal/hostutil; logs nothing",
+	"IsBlocked":            "internal/blocklist; its own host log lines already route through obs.Sanitize",
+	"pluginDecision":       "plugin.Decide sanitises the destination before obs.Printf (SEC-SOCKS5-LOG-1 round 2)",
+	"isPrivateHostBounded": "security.go wrapper over internal/ssrf.PrivateHostBudget; neither contains any logging — the destination reaches only the resolver and the returned error, which is sanitised at the log site",
+	"recordRequest":        "structured JSONL — the encoder escapes control bytes",
+	"socks5Relay":          "byte relay; its only destination sink is recordTunnelClose — structured JSONL",
+	"JoinHostPort":         "net; string construction only",
+	"DialContext":          "net.Dialer; the error it returns is sanitised at the log site",
+	"sanitizeLog":          "the sanitiser itself",
 	// CHAOS-69 destination-authority bound. All three receive the destination
 	// only to MEASURE it, which is the whole design decision behind the bound's
 	// log line: the LENGTH is what an operator needs to tell a probe from a
