@@ -9,6 +9,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **Every successful IdP document fetch left its connection open.**
+  `fetchOIDCDiscoveryOverNetwork` and `fetchSAMLMetadataOverNetwork` each build
+  an `http.Transport` for one request and drop it on return. A zero-value
+  transport keeps connections alive and has no idle timeout, and a pool nobody
+  holds can be neither reused nor closed, so each fetch parked one TCP
+  connection, its file descriptor and the transport's two loop goroutines until
+  the IdP hung up: for the life of the process against an IdP or load balancer
+  that does not time idle connections out. A fetch runs on every provider
+  compile of a remote-document profile (boot, an IdP profile write, a CP->DP
+  snapshot apply, and the recovery and revalidation loops). Both transports now
+  set `DisableKeepAlives`. Measured in-process over 200 fetches against a
+  keep-alive server with no idle timeout (Go 1.27.4): 200 connections still
+  open and +600 goroutines (two per connection in the transport, one in the
+  test server) before; 0 and +0 after. No connection reuse is given up, because
+  none was possible. The request now carries `Connection: close`; the URL
+  guards, the SSRF dialer, the shared fetch budget and the returned document
+  are unchanged. New `idp_fetch_conn_release_test.go` counts connections on the
+  server side.
+
 - **`BenchmarkHTTPForward_HandleHTTP` overstated the plain-HTTP forward path's
   memory by ~3.7x, against its own stated purpose of reporting "the real
   per-request total".** No production behavior changes: the inflation was in
