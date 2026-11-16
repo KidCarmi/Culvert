@@ -56,13 +56,22 @@ func extractHAProxyCommandScript(t *testing.T) string {
 	}
 	s := string(data)
 
-	// Isolate the proxy service's `command: >` folded shell script — from
-	// just after the "command: >" line to the next same-indent "healthcheck:"
-	// key that terminates it.
-	cmdRE := regexp.MustCompile(`(?s)\n {4}command: >\n(.*?)\n {4}healthcheck:`)
+	// Isolate the proxy service's shell script — a one-element `command:`
+	// sequence holding a `|` literal block, from just after the "- |" line to
+	// the next same-indent "healthcheck:" key that terminates it.
+	//
+	// CHAOS-121 changed this shape. The script used to be a `command: >`
+	// folded scalar that began with its own `sh -c '` wrapper, which was
+	// APPENDED to the image's exec-form `ENTRYPOINT ["./culvert"]` — so the
+	// container really ran `./culvert sh -c '<script>'` and the shell never
+	// executed at all. The service now overrides `entrypoint:` to
+	// ["/bin/sh","-c"] and passes the bare script as the single argv token
+	// that entrypoint consumes, which is exactly what this helper's own
+	// `sh -c script` invocation below has always simulated.
+	cmdRE := regexp.MustCompile(`(?s)\n {4}command:\n {6}- \|\n(.*?)\n {4}healthcheck:`)
 	m := cmdRE.FindStringSubmatch(s)
 	if m == nil {
-		t.Fatal("docker-compose.ha.yml: could not isolate the proxy service's `command: >` script — update this test if the file's shape changed")
+		t.Fatal("docker-compose.ha.yml: could not isolate the proxy service's `command:` script block — update this test if the file's shape changed")
 	}
 	return strings.ReplaceAll(m[1], "$$", "$")
 }
