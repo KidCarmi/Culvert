@@ -3598,36 +3598,36 @@ jobs:
   # the name obtain-image.sh already falls back to. No build, no boot.
   # Opt-in: [preserve-image].
   preserve-image:
-    name: "Lab · preserve candidate image tar (Deep run 43766339080, 2f01acc5)"
+    name: "Lab · preserve candidate image tar (Deep run 44142848354, 9025e13a)"
     if: ${{ !contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && (contains(github.event.head_commit.message, '[preserve-image]')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # R10 (owner remediation authorization, 13 Nov), candidate 2f01acc5 on
-    # review/1528-m1-engine-pins: the first-boot readiness gate with ASTRA's
-    # R10-R1/T1/E1 corrections (961e89ab, 8b16677b; 2f01acc5 changes only the
-    # 8b16677b regression's assertion), go1.27.4 (69d6a91d) and the gitleaks
-    # classification (de096692, 1f670e3f), on top of FB1-R2 a2b722c0. Deep run
-    # 43766339080's deep-gate-image artifact 14182860238 (zip sha256
-    # d63f687e…, equal to the API digest) expires 2026-11-16T21:57:39Z. Its
-    # tar sha256, manifest digest and VERSION stamp below were measured from
-    # that artifact before this route (every blob checked against its
-    # digest). VERSION v1.0.441-candidate.g2f01acc502bf: the next patch after
-    # the latest release tag at build time (.github/scripts/
-    # pr-candidate-version.sh). Earlier preservations: lab-source-image-
-    # 43760226406 (8b16677b, Fast red on a test assertion), -43578137735
+    # R10 replacement (owner decision 17 Nov), candidate 9025e13a on
+    # review/1528-m1-engine-pins: 2f01acc5 + c3e24c2a (apt snapshot
+    # 20261113T000000Z / kernel 7.0.0-43, Docker 29.10.0 / containerd.io
+    # 2.4.2-4 / Compose 5.7.1, otel v1.47.0) + 9025e13a (go.sum tidy, gitleaks
+    # classification). Deep run 44142848354's deep-gate-image artifact
+    # 14355622216 (zip sha256 603735bb…, equal to the API digest) expires
+    # 2026-11-18T18:05:45Z. Its tar sha256, manifest digest and VERSION stamp
+    # below were measured from that artifact before this route (config and
+    # all 12 layers checked against their digests). VERSION
+    # v1.0.455-candidate.g9025e13abf2d: the next patch after the latest
+    # release tag at build time (.github/scripts/pr-candidate-version.sh).
+    # Earlier preservations: lab-source-image-43766339080 (2f01acc5, built as
+    # OVA 9e31f226), -43760226406 (8b16677b, Fast red on a test assertion), -43578137735
     # (1f670e3f, held), -42653713925 (a2b722c0),
     # -42532741140 (6eead9a1), -42489205084 (fdcb02a5), -41208642365
     # (0981ff3d), -41199359475 (4f56bdfc), -40523416237 (0648adeb).
     env:
-      SOURCE_IMAGE_RUN_ID: "43766339080"
-      SOURCE_IMAGE_TAR_SHA256: 59a49713dd390e0ec382a8fc3aec116377fea08005feb9b99a2ecf3a7604a967
+      SOURCE_IMAGE_RUN_ID: "44142848354"
+      SOURCE_IMAGE_TAR_SHA256: 4d799b799ddb924e1815f3f205f9cce48028e9542c1670de57edd231af4bd91a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Obtain + verify (sha256, manifest digest, VERSION stamp)
         env:
           GH_TOKEN: ${{ github.token }}
-          WANT_MANIFEST: "sha256:d591d1cd5be86c90740a4328ed4d7432a1c4ef9e4ae52473c86cd84cbafee507"
-          WANT_VERSION: "v1.0.441-candidate.g2f01acc502bf"
+          WANT_MANIFEST: "sha256:c79b82663133566d0923c0c0da066a0cc59dbd30dd60192fdedc66d858e49c77"
+          WANT_VERSION: "v1.0.455-candidate.g9025e13abf2d"
         run: |
           set -euo pipefail
           d="$RUNNER_TEMP/in"; from="$(test/e2e/appliance/lab/obtain-image.sh "$d")"
