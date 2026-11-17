@@ -24,6 +24,7 @@ package scanexcl
 // cores are added and one that serialises on a shared word rises.
 
 import (
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -237,7 +238,10 @@ func benchHostParallel(b *testing.B, f func(string) bool) {
 			sink = f(benchHosts[i%len(benchHosts)])
 			i++
 		}
-		benchSink = sink
+		// Worker-local: a shared sink written by every worker is itself a
+		// data race (fails -race) and a shared write in a benchmark that
+		// measures the absence of one.
+		runtime.KeepAlive(sink)
 	})
 }
 
@@ -249,6 +253,6 @@ func benchOneHostParallel(b *testing.B, v string, f func(string) bool) {
 		for pb.Next() {
 			sink = f(v)
 		}
-		benchSink = sink
+		runtime.KeepAlive(sink) // worker-local; see benchHostParallel
 	})
 }
