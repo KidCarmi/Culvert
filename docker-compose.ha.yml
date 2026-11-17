@@ -58,8 +58,17 @@ services:
     build: .
     container_name: culvert
     restart: unless-stopped
+    # Long-form `condition: service_healthy` is REQUIRED here, as it is in
+    # docker-compose.yml: the short-form list (`- clamav`) waits only for the
+    # clamav container to START, not for its healthcheck to pass. ClamAV's own
+    # healthcheck carries start_period: 300s for the first-boot signature
+    # download, and an unreachable ClamAV is FAIL-OPEN (see
+    # diagnostics_clamav_scan.go — "scanned content is being forwarded WITHOUT
+    # an antivirus verdict"), so the short form forwarded bodies unscanned for
+    # minutes on every HA/DP boot and node reboot. CHAOS-121.
     depends_on:
-      - clamav
+      clamav:
+        condition: service_healthy
     ports:
       - "8080:8080"   # HTTP/HTTPS proxy
       - "1080:1080"   # SOCKS5 proxy (optional)
@@ -86,12 +95,34 @@ services:
       # (docs/OPERATIONS.md §3); leave unset to let each node generate its
       # own (sessions will not carry over between nodes/restarts).
       - CULVERT_SESSION_SECRET=${CULVERT_SESSION_SECRET:-}
-    # The image ENTRYPOINT is ./culvert; Compose prepends it to `command`, which
-    # would run `./culvert sh -c ...` and ignore every flag below. Clear it so
-    # the shell script itself is the container process.
-    entrypoint: []
-    command: >
-      sh -c '
+    # The image's ENTRYPOINT is exec-form `["./culvert"]` (Dockerfile), so a
+    # `command:` is APPENDED TO IT as argv — it does not replace the process.
+    # Without the override below the container therefore ran
+    #   ./culvert sh -c '<the script>'
+    # and Go's flag package stops parsing at the first non-flag token, so "sh"
+    # and everything after it landed in flag.Args() and EVERY flag the script
+    # builds was silently discarded. main.go has no flag.NArg() guard and no
+    # one-shot command matches, so the process fell straight through into
+    # normal startup with ALL FLAG DEFAULTS (empty -ca-path, -policy,
+    # -audit-log, -cluster-db, -cp-grpc-addr, --ha-join/--ha-token, --enroll,
+    # -clamav-addr) and still passed its /health check. Every other compose
+    # file in this repo hands the entrypoint a FLAG LIST for exactly this
+    # reason; this file is the one that embeds a shell, so it is the one that
+    # must move the shell into the entrypoint. CHAOS-121.
+    entrypoint: ["/bin/sh", "-c"]
+    # Graceful-shutdown envelope — the same cross-artifact contract
+    # docker-compose.yml carries, which this file never received (CHAOS-121).
+    # defaultShutdownBudget (main_shutdown.go) is Total 45s and the worst case
+    # adds one shutdownHookGrace per late phase: 45 + 2x3 = 51s. Docker's
+    # DEFAULT grace is 10s, which SIGKILLs the node inside the EARLY phase and
+    # skips the whole drain plus the entire durability reserve — the cluster
+    # store flush, the request-log queue drain, a clean badger close (an
+    # unclean one is what CHAOS-50's boot-path quarantine exists for) and the
+    # audit-log close. TestChaos121_ComposeStopGraceCoversTheShutdownEnvelope
+    # pins every culvert service in every compose file to that worst case.
+    stop_grace_period: 60s
+    command:
+      - |
         ARGS="-port 8080
           -ui-port 9090
           -ca-path /data/ca.bundle
@@ -127,7 +158,7 @@ services:
           # the crash it replaces). Refuse to start rather than let that
           # happen silently (Codex review, PR #1337).
           if [ -z "$$HA_TOKEN" ]; then
-            echo "ERROR: HA_JOIN is set but HA_TOKEN is empty — refusing to start (would silently come up as an independent Control Plane instead of joining as a standby). Set HA_TOKEN from Server A'"'"'s \"Enable HA\" deploy command." >&2
+            echo "ERROR: HA_JOIN is set but HA_TOKEN is empty — refusing to start (would silently come up as an independent Control Plane instead of joining as a standby). Set HA_TOKEN from Server A's 'Enable HA' deploy command." >&2
             exit 1
           fi
           # --ha-token uses the =value form (not a separate word): unquoted
@@ -142,7 +173,6 @@ services:
         fi
 
         exec ./culvert $$ARGS
-      '
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
@@ -165,8 +195,17 @@ services:
     container_name: culvert-dp
     restart: unless-stopped
     profiles: ["dp"]
+    # Long-form `condition: service_healthy` is REQUIRED here, as it is in
+    # docker-compose.yml: the short-form list (`- clamav`) waits only for the
+    # clamav container to START, not for its healthcheck to pass. ClamAV's own
+    # healthcheck carries start_period: 300s for the first-boot signature
+    # download, and an unreachable ClamAV is FAIL-OPEN (see
+    # diagnostics_clamav_scan.go — "scanned content is being forwarded WITHOUT
+    # an antivirus verdict"), so the short form forwarded bodies unscanned for
+    # minutes on every HA/DP boot and node reboot. CHAOS-121.
     depends_on:
-      - clamav
+      clamav:
+        condition: service_healthy
     ports:
       - "8080:8080"
       - "1080:1080"
@@ -175,12 +214,34 @@ services:
     environment:
       - TZ=UTC
       - ENROLL_URL=${ENROLL_URL:-}
-    # The image ENTRYPOINT is ./culvert; Compose prepends it to `command`, which
-    # would run `./culvert sh -c ...` and ignore every flag below. Clear it so
-    # the shell script itself is the container process.
-    entrypoint: []
-    command: >
-      sh -c '
+    # The image's ENTRYPOINT is exec-form `["./culvert"]` (Dockerfile), so a
+    # `command:` is APPENDED TO IT as argv — it does not replace the process.
+    # Without the override below the container therefore ran
+    #   ./culvert sh -c '<the script>'
+    # and Go's flag package stops parsing at the first non-flag token, so "sh"
+    # and everything after it landed in flag.Args() and EVERY flag the script
+    # builds was silently discarded. main.go has no flag.NArg() guard and no
+    # one-shot command matches, so the process fell straight through into
+    # normal startup with ALL FLAG DEFAULTS (empty -ca-path, -policy,
+    # -audit-log, -cluster-db, -cp-grpc-addr, --ha-join/--ha-token, --enroll,
+    # -clamav-addr) and still passed its /health check. Every other compose
+    # file in this repo hands the entrypoint a FLAG LIST for exactly this
+    # reason; this file is the one that embeds a shell, so it is the one that
+    # must move the shell into the entrypoint. CHAOS-121.
+    entrypoint: ["/bin/sh", "-c"]
+    # Graceful-shutdown envelope — the same cross-artifact contract
+    # docker-compose.yml carries, which this file never received (CHAOS-121).
+    # defaultShutdownBudget (main_shutdown.go) is Total 45s and the worst case
+    # adds one shutdownHookGrace per late phase: 45 + 2x3 = 51s. Docker's
+    # DEFAULT grace is 10s, which SIGKILLs the node inside the EARLY phase and
+    # skips the whole drain plus the entire durability reserve — the cluster
+    # store flush, the request-log queue drain, a clean badger close (an
+    # unclean one is what CHAOS-50's boot-path quarantine exists for) and the
+    # audit-log close. TestChaos121_ComposeStopGraceCoversTheShutdownEnvelope
+    # pins every culvert service in every compose file to that worst case.
+    stop_grace_period: 60s
+    command:
+      - |
         ARGS="-port 8080
           -ca-path /data/ca.bundle
           -blocklist /data/blocklist.txt
@@ -200,7 +261,6 @@ services:
         fi
 
         exec ./culvert $$ARGS
-      '
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s

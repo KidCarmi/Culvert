@@ -99,6 +99,16 @@ stop grace. If you raise the envelope you must raise
 `stop_grace_period` with it — `TestChaos56_EnvelopeFitsTheContainerStopGrace`
 fails the build if the two drift apart.
 
+That gate names `docker-compose.yml`. **CHAOS-121 found that naming one file was
+the gap:** `docker-compose.ha.yml` — the Control Plane, standby and Data Plane
+topology, the nodes that hold the cluster store, the audit log and the lease —
+declared no `stop_grace_period` at all, so Docker's **default 10s** applied and
+every HA stop was a SIGKILL inside the *early* phase. That skips the drain and
+the entire durability reserve this page describes, on the nodes where it matters
+most. `TestChaos121_ComposeStopGraceCoversTheShutdownEnvelope` now applies the
+same contract to **every** compose artifact in the repository, discovered rather
+than listed, with a registered-exception map for CI fixtures.
+
 If you run Culvert under something other than the shipped compose file
 (systemd, Kubernetes), set the equivalent grace above **51s**:
 

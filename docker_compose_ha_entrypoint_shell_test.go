@@ -4,8 +4,8 @@ package main
 // for docker-compose.ha.yml.
 //
 // The HA `proxy` and `dp` services build the repo Dockerfile (`build: .`) and
-// carry their whole startup contract in a `command: sh -c '... exec ./culvert
-// $$ARGS'` script: the /data persistence flags, the ClamAV/YARA wiring, the
+// carry their whole startup contract in a shell script that ends in
+// `exec ./culvert $$ARGS`: the /data persistence flags, the ClamAV/YARA wiring, the
 // cluster DB, the HA_JOIN/HA_TOKEN standby join (and its empty-token refusal),
 // the DP --enroll URL and the enterprise gRPC TLS flags.
 //
@@ -18,9 +18,12 @@ package main
 // in-memory roster/CA/policy, no AV, and a standby that never joins Server A.
 //
 // The effective argv[0] (entrypoint, else the image ENTRYPOINT, followed by
-// command) must therefore be the shell itself.
+// command) must therefore be the shell itself. The shell may sit in either
+// key: `entrypoint: []` with `command: sh -c '...'`, or (the shape CHAOS-121
+// settled on) `entrypoint: ["/bin/sh", "-c"]` with the script as `command`.
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -52,7 +55,7 @@ func TestDockerComposeHA_ShellCommandRunsAsShell(t *testing.T) {
 		Services map[string]struct {
 			Build      any       `yaml:"build"`
 			Entrypoint *[]string `yaml:"entrypoint"`
-			Command    string    `yaml:"command"`
+			Command    any       `yaml:"command"`
 		} `yaml:"services"`
 	}
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
@@ -67,19 +70,44 @@ func TestDockerComposeHA_ShellCommandRunsAsShell(t *testing.T) {
 		if svc.Build == nil {
 			t.Fatalf("service %q no longer builds the repo Dockerfile; update this contract", name)
 		}
-		cmd := strings.Fields(svc.Command)
-		if len(cmd) < 2 || cmd[0] != "sh" || cmd[1] != "-c" {
-			t.Fatalf("service %q command is no longer `sh -c ...`; update this contract", name)
-		}
 		entry := imageEntrypoint
 		if svc.Entrypoint != nil {
 			entry = *svc.Entrypoint
 		}
-		argv := append(append([]string{}, entry...), cmd[:2]...)
-		if argv[0] != "sh" && argv[0] != "/bin/sh" {
-			t.Errorf("service %q runs as %q: the image ENTRYPOINT is prepended to the `sh -c` command, "+
-				"so the startup script never runs and every flag in it is ignored; set `entrypoint: []`",
-				name, argv)
+		argv := append(append([]string{}, entry...), composeArgv(svc.Command)...)
+		shellAt := -1
+		for i := 0; i+1 < len(argv); i++ {
+			if (argv[i] == "sh" || argv[i] == "/bin/sh") && argv[i+1] == "-c" {
+				shellAt = i
+				break
+			}
 		}
+		if shellAt < 0 {
+			t.Fatalf("service %q no longer runs a `sh -c` script; update this contract", name)
+		}
+		if shellAt != 0 {
+			t.Errorf("service %q runs as %q: the image ENTRYPOINT is prepended to the `sh -c` command, "+
+				"so the startup script never runs and every flag in it is ignored; "+
+				"set `entrypoint: [\"/bin/sh\", \"-c\"]` (or `entrypoint: []`)",
+				name, argv[:shellAt+2])
+		}
+	}
+}
+
+// composeArgv normalizes a Compose `command` to argv: a string is shell-form,
+// which Compose word-splits (only the leading tokens matter here, so a
+// whitespace split is sufficient); a list is exec-form, one element per arg.
+func composeArgv(v any) []string {
+	switch c := v.(type) {
+	case string:
+		return strings.Fields(c)
+	case []any:
+		out := make([]string, 0, len(c))
+		for _, e := range c {
+			out = append(out, fmt.Sprint(e))
+		}
+		return out
+	default:
+		return nil
 	}
 }
