@@ -101,6 +101,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **Concurrent SSRF guard misses for one host now share one DNS lookup.**
+  `ssrf.PrivateHost*` resolved through `net.Resolver.LookupHost`, which —
+  unlike `LookupIPAddr` — does not merge concurrent calls, so every CONNECT,
+  WebSocket and SOCKS5 pre-flight check that missed the verdict cache for the
+  same host issued its own A + AAAA lookup. A herd forms whenever a busy host's
+  30 s verdict expires, and it grows with resolver latency × arrival rate, so
+  a slow resolver received the most duplicate queries. Misses are now
+  single-flighted per host: 64 concurrent cold checks cost 64 lookups before
+  and 1 after (`BenchmarkPrivateHostBudget_ColdHerd`). Each caller still waits
+  under its own context and budget and gets the same error as before. The
+  shared lookup is cancelled, with the last caller's cause, only once every
+  caller has left. Verdicts, the never-cache-failures rule and the connect-time
+  re-check are unchanged.
+
 - **Victim selection in the local credential cache was a scan over every active
   client, under the mutex every credential verification needs
   (PERF-AUTHCACHE-1).** `authCacheStore.evictOneLocked` answered both of its

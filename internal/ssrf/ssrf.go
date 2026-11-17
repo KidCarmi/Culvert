@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/obs"
 )
 
 // ErrBlocked is the sentinel every SSRF REFUSAL wraps — the connect-time
@@ -279,8 +281,17 @@ func privateHost(ctx context.Context, hostport string, budget time.Duration) err
 		ctx, cancel = context.WithTimeoutCause(ctx, budget, ErrLookupBudget)
 		defer cancel()
 	}
-	ips, err := lookupHost(ctx, host)
-	if err != nil {
+	if ctx.Err() != nil {
+		return lookupAbandoned(ctx, host)
+	}
+	f := flights.join(host)
+	select {
+	case <-f.done:
+	case <-ctx.Done():
+		flights.leave(host, f, context.Cause(ctx))
+		return lookupAbandoned(ctx, host)
+	}
+	if f.err != nil {
 		// Fail closed: unresolvable hosts are rejected to prevent DNS-rebinding
 		// attacks where the check resolves to a public IP but Dial resolves to
 		// a private one after TTL expiry. DNS errors are NOT cached.
@@ -288,19 +299,170 @@ func privateHost(ctx context.Context, hostport string, budget time.Duration) err
 		// Deliberately NOT wrapped in ErrBlocked: the destination is refused,
 		// but nothing was demonstrated about it. A caller that counts SSRF
 		// refusals must not charge one for a resolver outage.
-		if errors.Is(context.Cause(ctx), ErrLookupBudget) {
-			return fmt.Errorf("destination %s: DNS resolution failed: %w: %w", host, ErrLookupBudget, err)
-		}
-		return fmt.Errorf("destination %s: DNS resolution failed: %w", host, err)
+		return fmt.Errorf("destination %s: DNS resolution failed: %w", host, f.err)
 	}
-	for _, ipStr := range ips {
-		if ip := net.ParseIP(ipStr); ip != nil && PrivateIP(ip) {
-			dnsCache.Store(host, true)
-			return fmt.Errorf("%w: destination %s resolves to private address %s", ErrBlocked, host, ipStr)
-		}
+	if f.privateIP != "" {
+		return fmt.Errorf("%w: destination %s resolves to private address %s", ErrBlocked, host, f.privateIP)
 	}
-	dnsCache.Store(host, false)
 	return nil
+}
+
+// lookupAbandoned is the error for a guard check whose own context ended
+// before the resolution answered. It names the budget when the budget — not
+// the caller — ended the wait, and is never ErrBlocked.
+func lookupAbandoned(ctx context.Context, host string) error {
+	if errors.Is(context.Cause(ctx), ErrLookupBudget) {
+		return fmt.Errorf("destination %s: DNS resolution failed: %w: %w", host, ErrLookupBudget, ctx.Err())
+	}
+	return fmt.Errorf("destination %s: DNS resolution failed: %w", host, ctx.Err())
+}
+
+// errLookupPanicked fails a shared lookup closed when the resolver panicked.
+var errLookupPanicked = errors.New("ssrf pre-flight: DNS lookup panicked")
+
+// ─── Miss-path single-flight ────────────────────────────────────────────────
+// Concurrent guard checks that miss the cache for the SAME host share one
+// resolution. net.Resolver.LookupHost does not merge concurrent calls (only
+// LookupIPAddr does), so before this every request in a herd — a cold host,
+// or a hot host in the instant its 30 s verdict expires — issued its own A +
+// AAAA lookup. The herd grows with resolver latency × arrival rate, so a
+// SLOW resolver received the MOST duplicate queries: the amplification landed
+// exactly when the resolver could least absorb it.
+//
+// Per-caller semantics are unchanged. Each caller still waits under its own
+// context and budget and leaves alone when either ends, with the same error
+// it got before. The shared lookup runs on its own goroutine under a context
+// of its own, and is cancelled — with the
+// last leaver's cause — only when every waiter has left, so the resolver is
+// never kept busy for nobody, and one caller's hang-up never fails the others.
+// The verdict is cached (failures still never are) BEFORE the flight is
+// unregistered, so a caller arriving afterwards hits the cache rather than
+// starting a second lookup.
+
+type lookupFlight struct {
+	done      chan struct{} // closed once err/privateIP are final
+	err       error         // resolution failure; never cached
+	privateIP string        // first private address found, "" if public
+	waiters   int           // callers still waiting; guarded by flightGroup.mu
+	cancel    context.CancelCauseFunc
+}
+
+type flightGroup struct {
+	mu   sync.Mutex
+	m    map[string]*lookupFlight
+	peak int // largest len(m) since m was last allocated
+}
+
+// flightMapShrinkAt: once the in-flight map drains to empty after having held
+// more than this many hosts, it is reallocated, so a burst of distinct cold
+// hosts does not leave its bucket array retained (a Go map never shrinks).
+const flightMapShrinkAt = 1024
+
+var flights = flightGroup{m: make(map[string]*lookupFlight)}
+
+// join returns the in-progress flight for host, starting one if none exists.
+// The caller must either receive from f.done or call leave.
+func (g *flightGroup) join(host string) *lookupFlight {
+	g.mu.Lock()
+	if f, ok := g.m[host]; ok {
+		f.waiters++
+		g.mu.Unlock()
+		return f
+	}
+	// Not derived from ctx at all: the lookup is shared, so no single caller's
+	// cancellation, deadline or values (trace hooks, request state) may reach
+	// it or be retained by it. Its only ending is leave's or run's cancel.
+	fctx, cancel := context.WithCancelCause(context.Background())
+	f := &lookupFlight{done: make(chan struct{}), waiters: 1, cancel: cancel}
+	g.m[host] = f
+	if len(g.m) > g.peak {
+		g.peak = len(g.m)
+	}
+	g.mu.Unlock()
+	go g.run(fctx, host, f)
+	return f
+}
+
+// run performs the shared resolution, caches the verdict while the flight is
+// still registered, unregisters it and publishes the result.
+func (g *flightGroup) run(ctx context.Context, host string, f *lookupFlight) {
+	defer f.cancel(nil)
+	var ips []string
+	err := errLookupPanicked
+	// Contained: the lookup used to run on the request goroutine, inside the
+	// HTTP server's per-connection recovery. On its own goroutine an escaped
+	// panic would end the process, so it is reported and fails closed instead.
+	obs.SafeCall("ssrf_lookup", func() { ips, err = lookupHost(ctx, host) })
+	if err == nil {
+		for _, ipStr := range ips {
+			if ip := net.ParseIP(ipStr); ip != nil && PrivateIP(ip) {
+				f.privateIP = ipStr
+				break
+			}
+		}
+	}
+	f.err = err
+	g.mu.Lock()
+	// Store only while registered: a flight every waiter abandoned, or one
+	// orphaned by CacheReset (a resolver/guard-table swap), must not write a
+	// verdict into the cache. Lock order is flightGroup.mu → dnsCache.mu.
+	if g.m[host] == f {
+		if err == nil {
+			dnsCache.Store(host, f.privateIP != "")
+		}
+		g.removeLocked(host)
+	}
+	g.mu.Unlock()
+	close(f.done)
+}
+
+// leave records that one waiter stopped waiting before the flight finished.
+// The last one out unregisters the flight and cancels its lookup with cause.
+func (g *flightGroup) leave(host string, f *lookupFlight, cause error) {
+	g.mu.Lock()
+	f.waiters--
+	last := f.waiters == 0
+	if last && g.m[host] == f {
+		g.removeLocked(host)
+	}
+	g.mu.Unlock()
+	if last {
+		f.cancel(cause)
+	}
+}
+
+func (g *flightGroup) removeLocked(host string) {
+	delete(g.m, host)
+	if len(g.m) == 0 && g.peak > flightMapShrinkAt {
+		g.m = make(map[string]*lookupFlight)
+		g.peak = 0
+	}
+}
+
+// reset orphans every in-progress flight: they finish, but publish only to
+// their existing waiters and never to the cache, and new callers start fresh.
+func (g *flightGroup) reset() {
+	g.mu.Lock()
+	g.m = make(map[string]*lookupFlight)
+	g.peak = 0
+	g.mu.Unlock()
+}
+
+// inFlight reports how many hosts have a lookup in progress (tests).
+func (g *flightGroup) inFlight() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.m)
+}
+
+// waitersFor reports how many callers wait on host's flight (tests).
+func (g *flightGroup) waitersFor(host string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if f, ok := g.m[host]; ok {
+		return f.waiters
+	}
+	return 0
 }
 
 // ─── SSRF-safe dialer ────────────────────────────────────────────────────────
@@ -488,6 +650,7 @@ func CacheDelete(host string) {
 // pairs with AllowLoopbackForTest so stale verdicts don't leak across the
 // guard-table swap).
 func CacheReset() {
+	flights.reset()
 	dnsCache.mu.Lock()
 	dnsCache.cur = make(map[string]cacheEntry)
 	dnsCache.prev = nil
