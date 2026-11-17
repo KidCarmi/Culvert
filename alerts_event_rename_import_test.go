@@ -30,11 +30,11 @@ import (
 // Init("") leaves the replacement non-persisting, so nothing touches disk.
 func swapAlertStoreForImport(t *testing.T) *alerts.Store {
 	t.Helper()
-	orig := globalAlertStore
-	t.Cleanup(func() { globalAlertStore = orig })
+	orig := alertStore()
+	t.Cleanup(func() { alertStoreRef.Store(orig) })
 	as := &alerts.Store{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 	return as
 }
 

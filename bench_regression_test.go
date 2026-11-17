@@ -766,11 +766,11 @@ func TestBenchGate_PolicyEvalScheduledAllocs(t *testing.T) {
 func TestBenchGate_BlockPathAlertAllocs(t *testing.T) {
 	const maxAllocs int64 = 0 // steady state 0; pre-fix 2-3
 
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 	as := &AlertStore{}
 	as.Init("") // no webhooks — the default posture
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	for _, status := range []string{"POLICY_BLOCK", "POLICY_DROP", "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED"} {
 		res := testing.Benchmark(func(b *testing.B) {
@@ -797,11 +797,11 @@ func TestBenchGate_BlockPathAlertAllocs(t *testing.T) {
 func TestBenchGate_DNSFailureAlertAllocs(t *testing.T) {
 	const maxAllocs int64 = 0 // steady state 0; the err.Error() format alone was 1
 
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	err := errTestDNS{}
 	res := testing.Benchmark(func(b *testing.B) {

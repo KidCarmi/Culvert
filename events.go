@@ -300,7 +300,7 @@ func liveFeedWritePrometheus(w *strings.Builder) {
 	fmt.Fprintf(w, "\n# HELP culvert_alert_dedup_evictions_total Alert dedup keys evicted at the cap (CHAOS-27). Non-zero means the alert key space is being flooded with unique details (scanning wave) and duplicate suppression is degraded — alerts may deliver more than once per window, never fewer\n")
 	fmt.Fprintf(w, "# TYPE culvert_alert_dedup_evictions_total counter\nculvert_alert_dedup_evictions_total %d\n", alerts.DedupEvictionsTotal())
 	fmt.Fprintf(w, "\n# HELP culvert_alert_dedup_tracked Alert dedup keys currently tracked inside the suppression window (bounded by the cap)\n")
-	fmt.Fprintf(w, "# TYPE culvert_alert_dedup_tracked gauge\nculvert_alert_dedup_tracked %d\n", globalAlertStore.DedupTracked())
+	fmt.Fprintf(w, "# TYPE culvert_alert_dedup_tracked gauge\nculvert_alert_dedup_tracked %d\n", alertStore().DedupTracked())
 
 	// Interactive-login state stores (OIDC PKCE / SAML AuthnRequest). These are
 	// populated by UNAUTHENTICATED requests, so a rising eviction counter is the

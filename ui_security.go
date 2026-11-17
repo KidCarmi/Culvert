@@ -30,6 +30,42 @@ var pendingCARotation struct {
 
 // ── Alert Webhooks ─────────────────────────────────────────────────────────
 
+// webhookPayloadRejected validates the caller-supplied parts of a webhook and
+// writes the 400 itself, reporting whether the request was refused.
+//
+// It exists so the create and update arms share ONE definition of an
+// acceptable payload. They had two, which is how the event names came to be
+// validated in neither: a check added to one arm is silently absent from the
+// other, and `PUT` re-supplies the whole webhook, so an update is the same
+// ingress as a create.
+//
+// urlRequired is the one real difference between the arms: a create must carry
+// a URL, while an empty URL on an update preserves the stored one (see
+// Store.Update), so it is a parameter rather than two copies of the walk.
+//
+// SEC-ALERTS-EVENTNAME-1: the subscribed event names are persisted and then
+// rendered in the Alerts panel, so they are validated here at ingress rather
+// than trusted because the caller holds a role. The authoritative fix for that
+// sink is the escaping in static/index.html; this keeps the value from reaching
+// the webhook file, a support bundle or any other consumer at all.
+func webhookPayloadRejected(w http.ResponseWriter, h AlertWebhook, urlRequired bool) bool {
+	if urlRequired && h.URL == "" {
+		http.Error(w, "url required", http.StatusBadRequest)
+		return true
+	}
+	if h.URL != "" {
+		if err := validateWebhookURL(h.URL); err != nil {
+			http.Error(w, "invalid webhook URL: "+err.Error(), http.StatusBadRequest)
+			return true
+		}
+	}
+	if err := validateWebhookEvents(h.Events); err != nil {
+		http.Error(w, "invalid webhook events: "+err.Error(), http.StatusBadRequest)
+		return true
+	}
+	return false
+}
+
 // GET  /api/alerts/webhooks      → list webhooks (secrets redacted)
 // POST /api/alerts/webhooks      → create webhook
 // PUT  /api/alerts/webhooks?id=X → update webhook
@@ -40,7 +76,7 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, map[string]any{"webhooks": globalAlertStore.List()})
+		jsonOK(w, map[string]any{"webhooks": alertStore().List()})
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {
@@ -51,16 +87,11 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if h.URL == "" {
-			http.Error(w, "url required", http.StatusBadRequest)
-			return
-		}
-		if err := validateWebhookURL(h.URL); err != nil {
-			http.Error(w, "invalid webhook URL: "+err.Error(), http.StatusBadRequest)
+		if webhookPayloadRejected(w, h, true) {
 			return
 		}
 		h.Enabled = true
-		created := globalAlertStore.Add(h)
+		created := alertStore().Add(h)
 		auditEvent(r, "alert.webhook.create", created.ID, h.URL)
 		jsonOK(w, created)
 
@@ -78,13 +109,10 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if h.URL != "" {
-			if err := validateWebhookURL(h.URL); err != nil {
-				http.Error(w, "invalid webhook URL: "+err.Error(), http.StatusBadRequest)
-				return
-			}
+		if webhookPayloadRejected(w, h, false) {
+			return
 		}
-		if !globalAlertStore.Update(id, h) {
+		if !alertStore().Update(id, h) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -100,7 +128,7 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "id required", http.StatusBadRequest)
 			return
 		}
-		if !globalAlertStore.Delete(id) {
+		if !alertStore().Delete(id) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -126,7 +154,7 @@ func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id required", http.StatusBadRequest)
 		return
 	}
-	h, ok := globalAlertStore.GetByID(id)
+	h, ok := alertStore().GetByID(id)
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -140,7 +168,7 @@ func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
 		Detail:    "This is a test alert from Culvert",
 		Source:    "test",
 	}
-	ok2 := globalAlertStore.Deliver(h, payload)
+	ok2 := alertStore().Deliver(h, payload)
 	jsonOK(w, map[string]any{"ok": ok2, "delivered": ok2})
 }
 
@@ -156,7 +184,7 @@ func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"deliveries":            globalAlertStore.DeliveryHistory(),
+		"deliveries":            alertStore().DeliveryHistory(),
 		"retry_queue_depth":     alerts.RetryQueueDepth(),
 		"retry_exhausted_total": alerts.RetryExhaustedTotal(),
 		"retry_dropped_total":   alerts.RetryDroppedTotal(),
@@ -164,7 +192,7 @@ func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
 		// being flooded with unique details, so duplicate suppression is
 		// degraded (more deliveries, never fewer) — the operator-visible
 		// signature of a scanning wave reaching the alert plane.
-		"dedup_tracked":         globalAlertStore.DedupTracked(),
+		"dedup_tracked":         alertStore().DedupTracked(),
 		"dedup_evictions_total": alerts.DedupEvictionsTotal(),
 	})
 }

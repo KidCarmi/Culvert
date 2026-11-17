@@ -58,7 +58,7 @@ func scanSvcChaosSetup(t *testing.T) {
 }
 
 // captureScanSvcAlerts replaces the alert seam and returns the recorded
-// details. The seam, not globalAlertStore: these gates are about WHEN the
+// details. The seam, not alertStore(): these gates are about WHEN the
 // alert fires and how often, not about webhook delivery.
 func captureScanSvcAlerts() *scanSvcAlertLog {
 	log := &scanSvcAlertLog{}

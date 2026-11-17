@@ -348,7 +348,7 @@ func setSyslogHealthNowForTest(fn func() time.Time) {
 // defeat the dedup window by construction and evict real threat alerts from the
 // 500-entry retry queue (WK-12/RS-5).
 var fireSyslogFeedDownAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("syslog_feed_down") {
+	if !alertStore().HasSubscriber("syslog_feed_down") {
 		return
 	}
 	go fireAlert("syslog_feed_down", AlertPayload{

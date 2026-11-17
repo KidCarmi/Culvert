@@ -14,6 +14,7 @@ import (
 // instead of hanging the package.
 type wedgedResolver struct {
 	entered chan struct{}
+	exited  chan struct{} // one send per lookup, after cause is recorded
 	release chan struct{}
 	cause   atomic.Pointer[error]
 	hadDL   atomic.Bool
@@ -21,7 +22,7 @@ type wedgedResolver struct {
 
 func newWedgedResolver(t *testing.T) *wedgedResolver {
 	t.Helper()
-	w := &wedgedResolver{entered: make(chan struct{}, 8), release: make(chan struct{})}
+	w := &wedgedResolver{entered: make(chan struct{}, 8), exited: make(chan struct{}, 8), release: make(chan struct{})}
 	restore := SetLookupHostForTest(w.lookup)
 	t.Cleanup(func() {
 		close(w.release)
@@ -34,6 +35,7 @@ func (w *wedgedResolver) lookup(ctx context.Context, _ string) ([]string, error)
 	_, has := ctx.Deadline()
 	w.hadDL.Store(has)
 	w.entered <- struct{}{}
+	defer func() { w.exited <- struct{}{} }()
 	select {
 	case <-ctx.Done():
 		c := context.Cause(ctx)
@@ -67,6 +69,14 @@ func TestPrivateHostBudget_EndsWedgedLookup(t *testing.T) {
 	}
 	if errors.Is(err, ErrBlocked) {
 		t.Fatalf("a resolver timeout is not an SSRF verdict; must not wrap ErrBlocked: %v", err)
+	}
+	// The shared lookup runs on its own goroutine (miss-path single-flight):
+	// its context is cancelled before the guard returns, but the resolver
+	// observes that asynchronously, so wait for it to exit before asserting.
+	select {
+	case <-w.exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the abandoned lookup was never cancelled")
 	}
 	if got := w.observedCause(); !errors.Is(got, ErrLookupBudget) {
 		t.Fatalf("resolver's context ended with cause %v, want ErrLookupBudget", got)
