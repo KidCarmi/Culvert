@@ -1001,7 +1001,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
       <!-- C2 shadow-mode warning - hidden unless admin-API RBAC enforcement is log-only -->
       <div id="c2-shadow-banner" data-click="switchView" data-arg="governance" role="button" tabindex="0"
            style="display:none;padding:10px 14px;border-radius:6px;margin-bottom:14px;font-size:.85rem;font-weight:500;cursor:pointer;background:rgba(255,193,7,.15);border:1px solid rgba(255,193,7,.4);color:#b8860b">
-        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Admin-API RBAC enforcement is in shadow (log-only) mode - role checks are not blocking. Click for details on the Governance page.
+        <svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> Admin-API RBAC enforcement is in shadow (log-only) mode - the route-level role gate does not block; each handler's own role check still applies. Click for details on the Governance page.
       </div>
 
       <!-- Getting Started banner - shown when no traffic yet -->
