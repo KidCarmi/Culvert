@@ -76,7 +76,7 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, map[string]any{"webhooks": globalAlertStore.List()})
+		jsonOK(w, map[string]any{"webhooks": alertStore().List()})
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {
@@ -91,7 +91,7 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.Enabled = true
-		created := globalAlertStore.Add(h)
+		created := alertStore().Add(h)
 		auditEvent(r, "alert.webhook.create", created.ID, h.URL)
 		jsonOK(w, created)
 
@@ -112,7 +112,7 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 		if webhookPayloadRejected(w, h, false) {
 			return
 		}
-		if !globalAlertStore.Update(id, h) {
+		if !alertStore().Update(id, h) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -128,7 +128,7 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "id required", http.StatusBadRequest)
 			return
 		}
-		if !globalAlertStore.Delete(id) {
+		if !alertStore().Delete(id) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -154,7 +154,7 @@ func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id required", http.StatusBadRequest)
 		return
 	}
-	h, ok := globalAlertStore.GetByID(id)
+	h, ok := alertStore().GetByID(id)
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -168,7 +168,7 @@ func apiAlertsWebhookTest(w http.ResponseWriter, r *http.Request) {
 		Detail:    "This is a test alert from Culvert",
 		Source:    "test",
 	}
-	ok2 := globalAlertStore.Deliver(h, payload)
+	ok2 := alertStore().Deliver(h, payload)
 	jsonOK(w, map[string]any{"ok": ok2, "delivered": ok2})
 }
 
@@ -184,7 +184,7 @@ func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]any{
-		"deliveries":            globalAlertStore.DeliveryHistory(),
+		"deliveries":            alertStore().DeliveryHistory(),
 		"retry_queue_depth":     alerts.RetryQueueDepth(),
 		"retry_exhausted_total": alerts.RetryExhaustedTotal(),
 		"retry_dropped_total":   alerts.RetryDroppedTotal(),
@@ -192,7 +192,7 @@ func apiAlertsDeliveryHist(w http.ResponseWriter, r *http.Request) {
 		// being flooded with unique details, so duplicate suppression is
 		// degraded (more deliveries, never fewer) — the operator-visible
 		// signature of a scanning wave reaching the alert plane.
-		"dedup_tracked":         globalAlertStore.DedupTracked(),
+		"dedup_tracked":         alertStore().DedupTracked(),
 		"dedup_evictions_total": alerts.DedupEvictionsTotal(),
 	})
 }

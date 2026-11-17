@@ -604,7 +604,7 @@ func noteCDRCallError(err error) {
 	// a goroutine, a payload build and a round trip through the process-wide
 	// dedup mutex from every inspected response of a node that is already
 	// degraded.
-	if !globalAlertStore.HasSubscriber("cdr_unavailable") {
+	if !alertStore().HasSubscriber("cdr_unavailable") {
 		return
 	}
 	go fireAlert("cdr_unavailable", AlertPayload{

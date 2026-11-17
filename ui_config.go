@@ -834,7 +834,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.PACPools = nonNilPools(profCfg.Pools)
 		filename = "culvert-pac"
 	case "alerts":
-		b.AlertWebhooks = globalAlertStore.List()
+		b.AlertWebhooks = alertStore().List()
 		filename = "culvert-alerts"
 	case "blockpage":
 		b.BlockPageHTML = getBlockPageHTML()
@@ -870,7 +870,7 @@ func apiConfigExport(w http.ResponseWriter, r *http.Request) {
 		b.PACProfiles = nonNilProfiles(fullProfCfg.Profiles)
 		b.PACPools = nonNilPools(fullProfCfg.Pools)
 		// Alert webhooks (secrets excluded by List()).
-		b.AlertWebhooks = globalAlertStore.List()
+		b.AlertWebhooks = alertStore().List()
 		// Block page template.
 		if html := getBlockPageHTML(); html != "" {
 			b.BlockPageHTML = html
@@ -1025,7 +1025,7 @@ func buildImportPreview(b *configBackup, replaceMode bool, planned *upstreamImpo
 		fmt.Sprintf("add %d to %d existing", len(b.RateLimitExempt), rlExemptCur),
 		"import always appends exemptions (mode-independent)")
 	add("PAC Exclusions", len(b.PACExclusions), len(pacStore.Get().Exclusions), "")
-	add("Alert Webhooks", len(b.AlertWebhooks), len(globalAlertStore.List()), "")
+	add("Alert Webhooks", len(b.AlertWebhooks), len(alertStore().List()), "")
 	// Upstream proxies (2F-D): the row is derived from the whole-file plan
 	// (counts only); the plan itself travels beside the sections.
 	if planned != nil && planned.Plan != nil {
@@ -1504,12 +1504,12 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if len(b.AlertWebhooks) > 0 {
 		if replaceMode {
 			// Clear existing webhooks before importing.
-			for _, wh := range globalAlertStore.List() {
-				globalAlertStore.Delete(wh.ID)
+			for _, wh := range alertStore().List() {
+				alertStore().Delete(wh.ID)
 			}
 		}
 		for _, wh := range b.AlertWebhooks {
-			globalAlertStore.Add(wh)
+			alertStore().Add(wh)
 		}
 	}
 

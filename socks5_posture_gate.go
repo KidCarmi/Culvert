@@ -24,7 +24,7 @@ package main
 //
 // The window is not nothing. `loadPersistentAdminState` runs
 // `probeStorageWritability` (create + write + fsync + unlink of a probe file),
-// `initConfigVersioning`, three store constructions, `globalAlertStore.Init`,
+// `initConfigVersioning`, three store constructions, `alertStore().Init`,
 // `loadHitCounters` + `RestoreHitCounts` and a `saveHitCounters` fsync BEFORE
 // it reaches `LoadAdminSettings` — milliseconds on a healthy volume, far
 // longer on a slow, contended or failing `/data`. Every item on that list is

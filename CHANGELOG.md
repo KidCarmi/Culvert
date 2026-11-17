@@ -55,6 +55,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Diagnostics now flags the admin-route authorization break-glass (Product
+  Experience).** Setting `CULVERT_C2_ENFORCE` to a false-ish value puts the
+  admin-route metadata gate in shadow (log and count, never block). That was
+  visible only in the startup environment and on the admin-only Governance
+  page, whose `governance_health` still reads `healthy` in shadow, so a node
+  left in break-glass after an incident looked identical to a healthy one on
+  `/api/diagnostics`. A new report-only `admin_route_enforcement_shadow` WARN
+  row names the switch, states that each handler's own role check still
+  applies, carries the would-deny count and tells the operator to remove the
+  variable and restart. No row in the default enforce mode; enforcement, the
+  mode and the counters are unchanged.
+
 - **A contained panic now tells an operator (CHAOS-120).** `recordCrash` is the
   single sink every recovered panic funnels into — the proxy plane, the admin
   plane, `runGuarded`/`recoverGoroutine`, and every `internal/*` background
@@ -87,6 +99,30 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The process-wide alert store is now read and swapped atomically, removing
+  an intermittent data race from the race test lanes.** Alert delivery runs on
+  detached goroutines (a dozen `go fireAlert(...)` / `go alerts.Fire(...)`
+  producers) that read the store after the code that started them returned.
+  Tests swap the store, so a goroutine left over from one test raced the next
+  test's swap, and the race detector failed the root race shards under some
+  shuffled orders (seen on #1911). `globalAlertStore` is replaced by an
+  `atomic.Pointer` read through `alertStore()`. Production publishes the store
+  once, so there is no behaviour change; a goroutine that already loaded the
+  old store finishes against it.
+
+- **The HA compose file's `proxy` and `dp` services never ran their startup
+  script.** `docker-compose.ha.yml` sets `command: sh -c '... exec ./culvert
+  $$ARGS'` on images built from the repo Dockerfile, whose ENTRYPOINT is
+  `./culvert`. Compose prepends the ENTRYPOINT, so the container ran
+  `./culvert sh -c ...`; flag parsing stopped at `sh` and the node booted
+  HEALTHY (the healthcheck probes the default `:8080`) with every flag at its
+  default — in-memory roster, CA and policy (nothing persisted to the `/data`
+  volume), no ClamAV/YARA, no cluster DB, a standby that never used
+  `HA_JOIN`/`HA_TOKEN` (and skipped the empty-token refusal), and DPs that
+  never enrolled. Both services now set `entrypoint: []` so the script is the
+  container process; a contract test derives the effective argv from the
+  Dockerfile ENTRYPOINT and the compose service.
+
 - **Ten alert events were fired by production code with no way to subscribe to
   them from the Alerts panel, and four of them could never be delivered at all
   (CHAOS-120).** The panel's checkbox list is the only place Culvert's alert
@@ -110,6 +146,60 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unsubscribable and needs its reason recorded.
 
 ### Performance
+
+- **Concurrent SSRF guard misses for one host now share one DNS lookup.**
+  `ssrf.PrivateHost*` resolved through `net.Resolver.LookupHost`, which —
+  unlike `LookupIPAddr` — does not merge concurrent calls, so every CONNECT,
+  WebSocket and SOCKS5 pre-flight check that missed the verdict cache for the
+  same host issued its own A + AAAA lookup. A herd forms whenever a busy host's
+  30 s verdict expires, and it grows with resolver latency × arrival rate, so
+  a slow resolver received the most duplicate queries. Misses are now
+  single-flighted per host: 64 concurrent cold checks cost 64 lookups before
+  and 1 after (`BenchmarkPrivateHostBudget_ColdHerd`). Each caller still waits
+  under its own context and budget and gets the same error as before. The
+  shared lookup is cancelled, with the last caller's cause, only once every
+  caller has left. Verdicts, the never-cache-failures rule and the connect-time
+  re-check are unchanged.
+
+- **Victim selection in the local credential cache was a scan over every active
+  client, under the mutex every credential verification needs
+  (PERF-AUTHCACHE-1).** `authCacheStore.evictOneLocked` answered both of its
+  questions — "is any bucket front expired?" and "which front is the fairness
+  victim?" — by iterating `a.buckets` and calling `frontLocked` on each, whose
+  cost is a hashed map lookup on a string key. The fairness key is
+  `clientFairnessKey`, so that was one lookup per ACTIVE CLIENT per insertion,
+  for as long as the cache sat at its 5,000 cap — which, with a 5-minute TTL, is
+  the steady state of any deployment with a few thousand active addresses. The
+  cost was linear in a number an UNAUTHENTICATED client contributes to: the
+  cache is populated by unauthenticated requests, negative results included
+  (CHAOS-57), so the fairness policy got more expensive with the very flood it
+  exists to survive. One insertion at the cap, `benchstat` n=8 (Go 1.27.4,
+  linux/amd64, 4 vCPU Xeon @ 2.10 GHz): **1.352 µs at 1 client, 5.522 µs at
+  100, 58.802 µs at 1,000, 328.280 µs at 5,000** → **1.426 / 1.760 / 1.596 /
+  2.007 µs** (−68.12%, −97.29%, **−99.39%**; geomean −71.59%), flat in client
+  count instead of linear. On a realistic 31:1 read:write mix at 4-way
+  parallelism — almost all reads, which could not start while an insertion held
+  the mutex — average operation cost fell **−10.17% / −56.91% / −89.30%** at
+  100 / 1,000 / 5,000 clients (geomean −65.40%). The fix is
+  `internal/identcache`'s, whose eviction policy this cache already shares: two
+  binary heaps over the buckets holding a live entry, maintained incrementally,
+  so both questions are heap roots and an insertion at the cap is
+  O(log clients). The selection is unchanged — `a.victims` is ordered by the
+  same `betterAuthCacheVictim`/`identcache.BetterVictim` predicate the scan
+  applied — with one deliberate refinement: an expired front is now chosen by
+  earliest deadline rather than by Go's randomised map order, which is
+  deterministic. Costs, measured: `authCacheBucket` grows 40 → 136 bytes (the
+  memoised front plus two heap positions, ~560 KB at the cap). The
+  expired-front arm is flat at 1 client and FASTER at scale (median of 5:
+  1,000 clients 4.18 → 2.08 µs, 5,000 clients 8.62 → 2.55 µs). An earlier
+  draft reported it +42.70% slower; that figure came from a control benchmark
+  that did not keep its entries expired (Codex review), and the benchmark now
+  resyncs the index and re-ages its entries so every timed insertion takes the
+  expired path. Held by a differential oracle against the
+  scan it replaced (6 seeds × 1,500 randomised steps, all five guards
+  mutation-tested), an AST wall over `evictOneLocked`, and a machine-independent
+  `TestBenchGate_` ratio gate (1.00x indexed, 62.31x with the scan reverted,
+  bound 10x).
 
 - **Every successful IdP document fetch left its connection open.**
   `fetchOIDCDiscoveryOverNetwork` and `fetchSAMLMetadataOverNetwork` each build
@@ -443,6 +533,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A panicking feed round in `internal/feedsched` now reaches the crash plane,
+  and the cold-start predicate can no longer kill the process.** The scheduler's
+  `Config.OnPanic` seam was defined, documented and set by no production caller,
+  so every panic the package contained itself fell to a single WARN line —
+  containment with no reporting: no crash record, no counter increment, no audit
+  entry and no page. The nil fallback now reports to the shared panic sink under
+  one fixed `feedsched_round` label (one label, not one per feed: the sink's
+  component set is capped and fails closed past the cap, so a per-feed label
+  would be an unbounded label in a bounded map; the feed's name rides the WARN
+  line beside it). Separately, `Run` consulted `Config.RunNow()` outside every
+  guard, while both shipped feeds' guards sit inside `Config.Run` and
+  `internal/threatfeed` launches `Run` with a bare `go` statement — and
+  `feedsync`'s predicate is `fs.db.Stats() == 0`, a BadgerDB call on a handle the
+  scheduler does not own. A corrupt or already-closed store therefore killed the
+  **gateway** at startup from the one line in the cold-start path nobody guarded.
+  The predicate is now contained and answers "do not run now", so the loop falls
+  through to its normal cadence and a real round reports its own outcome at the
+  first tick; the stated cost is that such a node's first sync waits one interval
+  instead of running immediately. Both containment paths report through one
+  method, so neither can be fixed while the other stays silent, and a configured
+  `OnPanic` still owns the report rather than double-counting the crash counter.
+
 - **Diagnostics now warns when a configuration change was applied without a
   rollback point.** Version capture after a configuration change is
   best-effort: when the version file cannot be written, or capture is refused
@@ -721,6 +833,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
+
+- **An SSL-inspect rule no longer relays a non-TLS client into the proxy's own
+  TLS session to the origin.** On the default strip-ALPN inspect path, a client
+  that did not start TLS had its plaintext request raw-relayed into the
+  already-established upstream TLS connection. It reached the HTTPS origin with
+  no inner-host pin, file block, DPI, scan or per-request log row, and could
+  reach any vhost on a shared front end through a tunnel authorized for another.
+  The fallback existed for SSH/RDP but could not serve them: those origins fail
+  the upstream TLS handshake before the peek. Such a client is now refused: both
+  legs close and a `DECRYPT_FAILED` entry records a client-hello protocol
+  failure. The auto-exclusion learner is deliberately not fed, so the refusal
+  cannot turn into a bypass on the next connection. The native-ALPN
+  plaintext-to-plaintext fallback is unchanged. Owner decision on #1929.
 
 - **`install.sh`'s `env_put` no longer acts through a symlink at `.env` with
   `sudo`.** This is the `.env` half of the link-following issue #1909 closed

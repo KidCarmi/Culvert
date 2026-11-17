@@ -483,9 +483,9 @@ func TestStorageWriteAlert_NoGoroutineWithoutSubscriber(t *testing.T) {
 
 	// The PRODUCTION gate, deliberately not swapped: this test is about what
 	// the real one does. Only the launcher under it is recorded.
-	prevStore := globalAlertStore
-	globalAlertStore = &AlertStore{}
-	t.Cleanup(func() { globalAlertStore = prevStore })
+	prevStore := alertStore()
+	alertStoreRef.Store(&AlertStore{})
+	t.Cleanup(func() { alertStoreRef.Store(prevStore) })
 	var mu sync.Mutex
 	var launched []string
 	prevGo := goStorageWriteAlert
@@ -509,10 +509,10 @@ func TestStorageWriteAlert_NoGoroutineWithoutSubscriber(t *testing.T) {
 
 	// CONTROL: with a subscriber the same failure launches a delivery. The rate
 	// gate is reopened first so the second failure is alertable.
-	globalAlertStore.Add(AlertWebhook{
+	alertStore().Add(AlertWebhook{
 		URL: "https://alerts.invalid/hook", Enabled: true, Events: []string{"storage_write_failed"},
 	})
-	if !globalAlertStore.HasSubscriber("storage_write_failed") {
+	if !alertStore().HasSubscriber("storage_write_failed") {
 		t.Fatal("setup: webhook not registered as a subscriber")
 	}
 	resetStorageWriteHealthForTest()
@@ -588,9 +588,9 @@ func TestStorageWriteAlertGoroutineProbe(t *testing.T) {
 		t.Skip("child process for TestStorageWriteAlert_NoGoroutineWithoutSubscriber")
 	}
 	withCleanStorageWriteHealth(t)
-	prevStore := globalAlertStore
-	globalAlertStore = &AlertStore{}
-	t.Cleanup(func() { globalAlertStore = prevStore })
+	prevStore := alertStore()
+	alertStoreRef.Store(&AlertStore{})
+	t.Cleanup(func() { alertStoreRef.Store(prevStore) })
 	switch mode {
 	case storageProbeProduction:
 		// The real gate and the real launcher.
