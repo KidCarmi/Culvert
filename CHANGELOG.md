@@ -7,7 +7,65 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **`SEC-INSTALL-ENVLINK-1` is now honoured at every privileged site on the
+  `.env` path, not only the last one.** The contract landed as a guard inside
+  `env_put`: `sudo` must never act THROUGH a symlink at `$INSTALL_DIR/.env`,
+  because `sudo chown <me> "$file"` follows the link and hands the invoking
+  sudoer the TARGET (`.env -> /etc/shadow`), and whoever can write the stack dir
+  can plant one. Two other functions take ownership of the SAME path with the
+  same primitive — `setup_at_rest_encryption` and
+  `persist_host_env_session_secret` — guarded only by `-e`/`! -r`, which both
+  FOLLOW links. Both run BEFORE the first `env_put` at top level, so the guard
+  that existed was unreachable as a mitigation: the escalation completed first,
+  and `setup_at_rest_encryption`'s own "Cannot read" warning no longer fired
+  because the `chown` had just made the file readable. An unprivileged owner of
+  the stack dir could therefore take ownership of any root-owned file on an
+  ordinary installer re-run, with no race to win. A third site,
+  `carry_forward_prior_secrets`, early-returns on `-f`, which is FALSE for a
+  DANGLING link, so a planted `.env -> /etc/cron.d/x` fell through to
+  `sudo install`, which opens its destination `O_CREAT|O_TRUNC` and wrote the
+  prior stack's secrets through the link as root to a planter-chosen path. All
+  three now test `-L` first; a link is left alone and the existing
+  warn-and-degrade paths take over, so the self-heal still repairs a REGULAR
+  unreadable `.env` (pinned by a positive control). CWE-59/CWE-61 → CWE-269.
+- **Webhook event names can no longer carry markup into the Alerts panel
+  (`SEC-ALERTS-EVENTNAME-1`).** `POST`/`PUT /api/alerts/webhooks` needs only
+  `RoleOperator` and validated the URL but never the subscribed event names;
+  `normalizeEventNames` only migrates retired names and de-dupes, so `Add`/
+  `Update` persisted whatever was sent. The admin UI then rendered those names
+  into the webhook table through `innerHTML` with no escaping, while the `name`
+  and `url` cells beside them both used `escHtml` — so an operator could store
+  `<img src=x onerror=…>` that executed in the session of every viewer,
+  operator and ADMIN who opened the panel: a privilege escalation out of the
+  operator role, since an admin session carries full configuration and RBAC
+  authority. Both halves are closed: the cell renders through `escHtml` (which
+  also protects a name already on disk from before), and the two
+  operator-reachable endpoints reject a malformed name with 400 so it never
+  reaches the webhook file, a support bundle or any other consumer. The check is
+  a character class, not an allowlist of known events — the catalog grows as
+  rounds add alerts and is discovered by a differential oracle rather than
+  declared in one list, so an allowlist would silently unsubscribe a legitimate
+  new event. The `*` catch-all is admitted as a WHOLE name, never as a
+  character inside one, because refusing it would cause exactly the detection
+  loss `normalizeEventNames` exists to prevent. `Init` (disk) deliberately does
+  not validate, so a persisted name keeps dispatching rather than being dropped
+  on load; the escaped sink is what makes that safe. CWE-79, OWASP A03.
+
 ### Added
+
+- **Diagnostics now flags the admin-route authorization break-glass (Product
+  Experience).** Setting `CULVERT_C2_ENFORCE` to a false-ish value puts the
+  admin-route metadata gate in shadow (log and count, never block). That was
+  visible only in the startup environment and on the admin-only Governance
+  page, whose `governance_health` still reads `healthy` in shadow, so a node
+  left in break-glass after an incident looked identical to a healthy one on
+  `/api/diagnostics`. A new report-only `admin_route_enforcement_shadow` WARN
+  row names the switch, states that each handler's own role check still
+  applies, carries the would-deny count and tells the operator to remove the
+  variable and restart. No row in the default enforce mode; enforcement, the
+  mode and the counters are unchanged.
 
 - **A contained panic now tells an operator (CHAOS-120).** `recordCrash` is the
   single sink every recovered panic funnels into — the proxy plane, the admin
@@ -40,6 +98,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   touch a lock owned by another plane.
 
 ### Fixed
+
+- **A configured audit log that could not be opened at startup no longer needs
+  a restart.** When `audit_log_file` / `-audit-log` failed to open at boot (a
+  missing directory, wrong ownership, a volume not yet writable), the trail
+  fell back to the 500-entry in-memory ring for the life of the process and
+  the `audit_log_persistence` row said to fix the path *and restart*. Every
+  entry recorded in between never reached the durable record. Culvert now
+  re-attempts the same configured path automatically (10 s doubling to a
+  2-minute cap, with jitter, no attempt limit) and, once it opens, writes the
+  entries recorded meanwhile in order and ahead of any newer one (up to the
+  newest 500; anything evicted is charged to `culvert_audit_write_errors_total`),
+  then records a `system`-attributed `audit.persistence.auto_open` entry. It
+  never chooses another path, never replaces a live sink, does nothing after
+  the shutdown hook has closed the trail, and is not armed by the one-shot
+  `prepare-downgrade` command, which still refuses when its audit sink cannot
+  be opened. No configuration, settings or version change.
+
+- **The process-wide alert store is now read and swapped atomically, removing
+  an intermittent data race from the race test lanes.** Alert delivery runs on
+  detached goroutines (a dozen `go fireAlert(...)` / `go alerts.Fire(...)`
+  producers) that read the store after the code that started them returned.
+  Tests swap the store, so a goroutine left over from one test raced the next
+  test's swap, and the race detector failed the root race shards under some
+  shuffled orders (seen on #1911). `globalAlertStore` is replaced by an
+  `atomic.Pointer` read through `alertStore()`. Production publishes the store
+  once, so there is no behaviour change; a goroutine that already loaded the
+  old store finishes against it.
+
+- **The HA compose file's `proxy` and `dp` services never ran their startup
+  script.** `docker-compose.ha.yml` sets `command: sh -c '... exec ./culvert
+  $$ARGS'` on images built from the repo Dockerfile, whose ENTRYPOINT is
+  `./culvert`. Compose prepends the ENTRYPOINT, so the container ran
+  `./culvert sh -c ...`; flag parsing stopped at `sh` and the node booted
+  HEALTHY (the healthcheck probes the default `:8080`) with every flag at its
+  default — in-memory roster, CA and policy (nothing persisted to the `/data`
+  volume), no ClamAV/YARA, no cluster DB, a standby that never used
+  `HA_JOIN`/`HA_TOKEN` (and skipped the empty-token refusal), and DPs that
+  never enrolled. Both services now set `entrypoint: []` so the script is the
+  container process; a contract test derives the effective argv from the
+  Dockerfile ENTRYPOINT and the compose service.
 
 - **Ten alert events were fired by production code with no way to subscribe to
   them from the Alerts panel, and four of them could never be delivered at all
@@ -109,6 +207,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   records the two end-to-end paths profiled and found already at their floor,
   and confirms `internal/reqlog`'s `ringMu` has now met its own
   written-down trigger for a sharded-ring pass on appliance hardware.
+
+- **Concurrent SSRF guard misses for one host now share one DNS lookup.**
+  `ssrf.PrivateHost*` resolved through `net.Resolver.LookupHost`, which —
+  unlike `LookupIPAddr` — does not merge concurrent calls, so every CONNECT,
+  WebSocket and SOCKS5 pre-flight check that missed the verdict cache for the
+  same host issued its own A + AAAA lookup. A herd forms whenever a busy host's
+  30 s verdict expires, and it grows with resolver latency × arrival rate, so
+  a slow resolver received the most duplicate queries. Misses are now
+  single-flighted per host: 64 concurrent cold checks cost 64 lookups before
+  and 1 after (`BenchmarkPrivateHostBudget_ColdHerd`). Each caller still waits
+  under its own context and budget and gets the same error as before. The
+  shared lookup is cancelled, with the last caller's cause, only once every
+  caller has left. Verdicts, the never-cache-failures rule and the connect-time
+  re-check are unchanged.
 
 - **Victim selection in the local credential cache was a scan over every active
   client, under the mutex every credential verification needs
@@ -482,6 +594,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A panicking feed round in `internal/feedsched` now reaches the crash plane,
+  and the cold-start predicate can no longer kill the process.** The scheduler's
+  `Config.OnPanic` seam was defined, documented and set by no production caller,
+  so every panic the package contained itself fell to a single WARN line —
+  containment with no reporting: no crash record, no counter increment, no audit
+  entry and no page. The nil fallback now reports to the shared panic sink under
+  one fixed `feedsched_round` label (one label, not one per feed: the sink's
+  component set is capped and fails closed past the cap, so a per-feed label
+  would be an unbounded label in a bounded map; the feed's name rides the WARN
+  line beside it). Separately, `Run` consulted `Config.RunNow()` outside every
+  guard, while both shipped feeds' guards sit inside `Config.Run` and
+  `internal/threatfeed` launches `Run` with a bare `go` statement — and
+  `feedsync`'s predicate is `fs.db.Stats() == 0`, a BadgerDB call on a handle the
+  scheduler does not own. A corrupt or already-closed store therefore killed the
+  **gateway** at startup from the one line in the cold-start path nobody guarded.
+  The predicate is now contained and answers "do not run now", so the loop falls
+  through to its normal cadence and a real round reports its own outcome at the
+  first tick; the stated cost is that such a node's first sync waits one interval
+  instead of running immediately. Both containment paths report through one
+  method, so neither can be fixed while the other stays silent, and a configured
+  `OnPanic` still owns the report rather than double-counting the crash counter.
+
 - **Diagnostics now warns when a configuration change was applied without a
   rollback point.** Version capture after a configuration change is
   best-effort: when the version file cannot be written, or capture is refused
@@ -572,6 +706,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **An automatically renewed Root CA could change its key identifier, so
+  OpenSSL-based clients holding only the old root rejected every inspected
+  connection during the overlap window.** Renewal keeps the key and subject
+  (#1854), but the renewed certificate's Subject Key Identifier was left for
+  the Go toolchain to derive, and that derivation changed in Go 1.25 (SHA-1 to
+  truncated SHA-256). A root issued by an older build, or any managed root
+  whose identifier is not today's derivation, was renewed under a different
+  one; each new leaf then named it in its Authority Key Identifier, which
+  OpenSSL (curl, Python, git) treats as "not issued by the old root". Go's own
+  verifier only uses the identifier as a hint, which is why the existing
+  overlap test passed. Renewal now carries the old root's identifier over
+  verbatim. A freshly generated root is unchanged.
+
 - **Re-running `scripts/install.sh` on RHEL, CentOS, Rocky, Alma, Oracle Linux
   or Fedora uninstalled the Docker Engine the first run had installed, took
   the proxy down and then aborted.** The "Cleaning up old Docker
@@ -612,6 +759,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   is logged and audited as `settings.syslog.auto_connect` with actor `system`.
   The alert Detail, the `syslog_feed` operator action and
   `docs/operator/siem-feed-delivery.md` no longer say "nothing retries".
+
 - **`scripts/install.sh` aborted on every supported Fedora release before
   Docker was installed.** The Fedora branch registered Docker's repository with
   `dnf config-manager --add-repo <url>`. Fedora 41 replaced dnf4 with dnf5,
@@ -760,6 +908,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
+
+- **Adding `Upgrade: websocket` and `Connection: Upgrade` to a plain-HTTP
+  download bypassed file blocking and response scanning.** The two headers
+  exempted the request from the URL checks, and when the origin ignored them
+  and answered 200, `handleWebSocket` relayed the body with none of
+  `handleHTTP`'s response checks. A non-101 answer now gets the plain-HTTP
+  checks before it is relayed (`relayDeclinedUpgrade`). Real WebSocket
+  sessions (101) are unchanged. Proven by
+  `TestWebSocketUpgradeHeaders_DoNotBypassPlainHTTPFileBlock`.
+
+- **An SSL-inspect rule no longer relays a non-TLS client into the proxy's own
+  TLS session to the origin.** On the default strip-ALPN inspect path, a client
+  that did not start TLS had its plaintext request raw-relayed into the
+  already-established upstream TLS connection. It reached the HTTPS origin with
+  no inner-host pin, file block, DPI, scan or per-request log row, and could
+  reach any vhost on a shared front end through a tunnel authorized for another.
+  The fallback existed for SSH/RDP but could not serve them: those origins fail
+  the upstream TLS handshake before the peek. Such a client is now refused: both
+  legs close and a `DECRYPT_FAILED` entry records a client-hello protocol
+  failure. The auto-exclusion learner is deliberately not fed, so the refusal
+  cannot turn into a bypass on the next connection. The native-ALPN
+  plaintext-to-plaintext fallback is unchanged. Owner decision on #1929.
 
 - **`install.sh`'s `env_put` no longer acts through a symlink at `.env` with
   `sudo`.** This is the `.env` half of the link-following issue #1909 closed

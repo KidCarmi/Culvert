@@ -504,18 +504,29 @@ curl -k https://control-plane:9090/api/ca/download -o culvert-ca.pem
 
 ### CA Auto-Rotation
 
-Culvert checks the CA expiry daily and auto-rotates **30 days before
-expiry**. When rotation happens:
+Culvert checks the inspection CA's expiry at startup and every 24 hours. Inside
+the **30-day pre-expiry window**, what happens depends on the CA's provenance
+(see [root-ca-expiry §5](operator/root-ca-expiry.md#5-dual-ca-overlap-what-normal-rotation-looks-like)):
 
-1. A `cert_expiry` webhook alert fires (configure under Security > Alert Webhooks)
-2. The new CA is saved to the bundle path (`-ca-path`)
-3. All cached leaf certs are invalidated
-4. **You must distribute the new CA cert to endpoints before the old leaf certs expire (24h)**
+- **Culvert-generated root (`culvert-managed`)** — renewed automatically. The
+  new root certificate keeps the old one's **key and subject** and only extends
+  the validity, so endpoints that trust only the old root keep validating
+  inspected connections **until the old root's own expiry date**. When renewal
+  is persisted:
+  1. A `cert_expiry` webhook alert fires (configure under Security > Alert Webhooks)
+  2. The renewed CA is saved to the bundle path (`-ca-path`)
+  3. Cached leaf certs are invalidated and re-signed on demand
+- **Imported or unclassified CA** — **not** renewed. A `cert_expiry` alert and a
+  log line repeat every 24h until you upload the re-issued certificate or
+  classify the bundle with `CULVERT_CA_PROVENANCE`.
 
 Recommended workflow:
 - Set up a webhook alert for `cert_expiry`
-- When notified, download the new CA cert and push via MDM/GPO
-- Leaf certs are valid 24 hours, so you have up to 24h to distribute
+- When notified of a renewal, download the new CA cert and push it via MDM/GPO
+  before the old root's expiry date (shown in CA Management as the overlap end)
+- A manual **Force Rotate** (`POST /api/ca/rotate`) replaces the key and breaks
+  trust immediately for endpoints that do not yet have the new root; the 24-hour
+  leaf validity does not extend that deadline
 
 ---
 

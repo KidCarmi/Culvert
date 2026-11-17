@@ -112,6 +112,43 @@ func dialWebSocketUpstream(w http.ResponseWriter, r *http.Request) (net.Conn, bo
 	return destConn, true
 }
 
+// relayDeclinedUpgrade relays the origin's answer to an upgrade request it did
+// NOT upgrade. That answer is an ordinary plain-HTTP response, so it gets the
+// plain-HTTP checks before a byte reaches the client: the Upgrade/Connection
+// headers are client-chosen, and an origin that ignores them (any static file
+// server) answers 200 with the file. isWebSocketUpgrade(r) exempted the request
+// from the URL checks in preDispatchBlocked and applyPolicyDecision, so they
+// are applied here, followed by handleHTTP's two response checks.
+func relayDeclinedUpgrade(w http.ResponseWriter, r *http.Request, resp *http.Response, match *PolicyMatch, id ProxyIdentity) {
+	if globalSecScanner.Enabled() {
+		if result := globalSecScanner.CheckRequestURL(r.URL); result != nil {
+			cip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			atomic.AddInt64(&statBlocked, 1)
+			recordRequestAuth(cip, r.Method, r.Host, "THREAT_BLOCKED", result.Source, result.Reason, id.Identity, AuthLogFields{AuthSource: id.AuthSource})
+			logger.Printf("THREAT_BLOCKED url %s -> %q (%q)", cip, sanitizeLog(r.Host), sanitizeLog(result.Reason))
+			serveBlockPage(w, r.Host, "Threat Intelligence", result.Reason)
+			return
+		}
+	}
+	if ext := fileBlocker.CheckPath(r.URL.Path); ext != "" {
+		serveHTTPFileBlock(w, r, ext, "declined upgrade", id)
+		return
+	}
+	if match != nil && match.Rule != nil && match.Rule.FileProfileBlocked(r.URL.Path) {
+		serveHTTPFileBlock(w, r, string(match.Rule.FileProfile), "declined upgrade, policy profile", id)
+		return
+	}
+	if blockedByResponseHeaders(w, r, resp, id) {
+		return
+	}
+	if handled, _ := scanHTTPResponseBody(w, r, resp, id); handled {
+		return
+	}
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body) //nolint:errcheck // best-effort relay; the client may have gone away
+}
+
 func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch, id ProxyIdentity) {
 	host := r.Host
 	if !strings.Contains(host, ":") {
@@ -156,9 +193,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 	// requests are subject to. The SSL-inspected path already gates on this.
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		logger.Printf("WS: upstream declined upgrade for %q (status %d)", sanitizeLog(host), resp.StatusCode)
-		copyHeaders(w.Header(), resp.Header)
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body) //nolint:errcheck // best-effort copy of block-page body to client
+		relayDeclinedUpgrade(w, r, resp, match, id)
+		// Close the connection BEFORE the deferred resp.Body.Close(): on a
+		// keep-alive answer that Close drains the unread body, so a blocked
+		// download would still be fetched in full and a stalled origin would
+		// hold this handler. The connection is never reused.
+		destConn.Close() //nolint:errcheck // best-effort; the deferred Close is then a no-op
 		return
 	}
 
@@ -898,50 +938,26 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		return
 	}
 	if firstByte[0] != 0x16 { // not a TLS handshake record
+		// SEC-INSPECT-PLAINTEXT-1 (owner decision on PR #1929): REFUSE, never
+		// relay. This rule says the session is inspected, and the upstream leg is
+		// already OUR TLS session to the origin, so relaying the client's
+		// plaintext into it delivered an uninspected request to an HTTPS origin:
+		// no inner-host pin, file block, DPI, scan or per-request log row, and
+		// any vhost on a shared front end reachable through a tunnel authorized
+		// for another. The fallback could not serve what it was written for:
+		// SSH/RDP origins do not speak TLS, so they fail the upstream handshake
+		// above and are 502'd before this peek.
+		//
+		// Recorded as a client-hello protocol failure through the ADR-0011
+		// taxonomy. maybeFailOpenClient is deliberately NOT consulted: learning
+		// an auto-exclusion here would bypass inspection for the host on the next
+		// connection, recreating the hole this closes.
 		proto := detectProtocolName(firstByte[0])
-		logger.Printf("SSL_INSPECT non-TLS protocol detected for %q (first byte=0x%02x, proto=%s) — falling back to raw relay",
+		rawClient.Close()   //nolint:errcheck // refusing: close both legs
+		upstreamTLS.Close() //nolint:errcheck // refusing: close both legs
+		recordDecryptFailureEntry(clientInspectFailureOutcome(errInspectNonTLSClient, hostOnly, dec, match), id, hostOnly, match, decRedactHosts())
+		logger.Printf("SSL_INSPECT refused a non-TLS client for %q (first byte=0x%02x, proto=%s): an inspect rule requires TLS",
 			sanitizeLog(hostOnly), firstByte[0], sanitizeLog(proto))
-		// Raw relay: splice the peeked reader (client) ↔ upstream (already
-		// TLS-connected). This is a non-TLS tunnel that bypasses HTTP-level
-		// inspection, so — like the CONNECT-bypass / WebSocket / SOCKS5 relays —
-		// account its bytes and lifetime in the request log (Finding 11.1).
-		// Teardown is unchanged: wait for one side to EOF, then Close both to
-		// unblock the other. Each direction's count is written by exactly one
-		// goroutine before its done-send and read only after both done-receives
-		// (channel happens-before), so no atomics are needed. Both directions
-		// share an idle stamp (idleCopyCounted) so a half-open peer cannot pin
-		// the tunnel forever; the client direction reads through peekBuf, so
-		// its deadline anchors on the underlying rawClient conn.
-		// CHAOS-57: this relay was invisible to the shutdown drain — the strip
-		// path's recordActiveConn sits after the client TLS handshake, which this
-		// branch returns before, so an SSH-over-CONNECT session on an inspect rule
-		// was severed with zero grace and lost its TUNNEL_CLOSED accounting.
-		releaseDrain := registerDrainableTunnel(tunnelClassInspectFallback, rawClient, upstreamTLS)
-		defer releaseDrain()
-		start := time.Now()
-		var toUpstream, toClient int64
-		shared := newTunnelActivityStamp()
-		done := make(chan struct{}, 2)
-		relay := func(dst net.Conn, src io.Reader, srcConn net.Conn, count *int64) {
-			defer func() {
-				if v := recover(); v != nil {
-					recordCrash("tunnel-relay", "", v)
-					_ = dst.Close()
-					if srcConn != nil {
-						_ = srcConn.Close()
-					}
-				}
-				done <- struct{}{} // sole sender
-			}()
-			*count = idleCopyCounted(dst, src, srcConn, shared)
-		}
-		go relay(upstreamTLS, peekBuf, rawClient, &toUpstream)   // client → upstream
-		go relay(rawClient, upstreamTLS, upstreamTLS, &toClient) // upstream → client
-		<-done
-		rawClient.Close()   //nolint:errcheck // force the peer relay to unblock
-		upstreamTLS.Close() //nolint:errcheck // force the peer relay to unblock
-		<-done
-		recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUpstream, toClient, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), decRedactHosts())
 		return
 	}
 

@@ -36,11 +36,11 @@ import (
 // benchNoSubscriber installs an empty alert store — the default posture.
 func benchNoSubscriber(b *testing.B) {
 	b.Helper()
-	orig := globalAlertStore
-	b.Cleanup(func() { globalAlertStore = orig })
+	orig := alertStore()
+	b.Cleanup(func() { alertStoreRef.Store(orig) })
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 }
 
 // benchWithSubscriber installs a store with a live subscriber for event, so the
@@ -57,12 +57,12 @@ func benchWithSubscriber(b *testing.B, event string) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	b.Cleanup(srv.Close)
-	orig := globalAlertStore
-	b.Cleanup(func() { globalAlertStore = orig })
+	orig := alertStore()
+	b.Cleanup(func() { alertStoreRef.Store(orig) })
 	as := &AlertStore{}
 	as.Init("")
 	as.Add(AlertWebhook{Name: "b", URL: srv.URL, Events: []string{event}, Enabled: true})
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 }
 
 // BenchmarkAlertGate_Block is the headline: a policy-blocked request with

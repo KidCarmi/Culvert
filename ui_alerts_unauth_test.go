@@ -29,11 +29,11 @@ func adminRequest(method, path, body string) *http.Request {
 // ── apiAlertsWebhooks ─────────────────────────────────────────────────────────
 
 func TestAPIAlertsWebhooks_GET(t *testing.T) {
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	req := adminRequest(http.MethodGet, "/api/alerts/webhooks", "")
 	w := httptest.NewRecorder()
@@ -52,11 +52,11 @@ func TestAPIAlertsWebhooks_GET(t *testing.T) {
 }
 
 func TestAPIAlertsWebhooks_POST(t *testing.T) {
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	body := `{"name":"test","url":"http://example.com/hook","events":["threat_detected"]}`
 	req := adminRequest(http.MethodPost, "/api/alerts/webhooks", body)
@@ -72,11 +72,11 @@ func TestAPIAlertsWebhooks_POST(t *testing.T) {
 }
 
 func TestAPIAlertsWebhooks_POST_MissingURL(t *testing.T) {
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	req := adminRequest(http.MethodPost, "/api/alerts/webhooks", `{"name":"no-url"}`)
 	w := httptest.NewRecorder()
@@ -88,11 +88,11 @@ func TestAPIAlertsWebhooks_POST_MissingURL(t *testing.T) {
 }
 
 func TestAPIAlertsWebhooks_PUT(t *testing.T) {
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	// Create a webhook first.
 	created := as.Add(AlertWebhook{Name: "orig", URL: "http://a.com", Events: []string{"*"}, Enabled: true})
@@ -108,10 +108,10 @@ func TestAPIAlertsWebhooks_PUT(t *testing.T) {
 }
 
 func TestAPIAlertsWebhooks_PUT_MissingID(t *testing.T) {
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
-	globalAlertStore = &AlertStore{}
-	globalAlertStore.Init("")
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
+	alertStoreRef.Store(&AlertStore{})
+	alertStore().Init("")
 
 	req := adminRequest(http.MethodPut, "/api/alerts/webhooks", `{"name":"x","url":"http://x.com"}`)
 	w := httptest.NewRecorder()
@@ -123,11 +123,11 @@ func TestAPIAlertsWebhooks_PUT_MissingID(t *testing.T) {
 }
 
 func TestAPIAlertsWebhooks_DELETE(t *testing.T) {
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	created := as.Add(AlertWebhook{Name: "del", URL: "http://del.com", Events: []string{"*"}, Enabled: true})
 
@@ -151,11 +151,11 @@ func TestAPIAlertsWebhooks_DELETE(t *testing.T) {
 // endpoint surfaces retry-queue depth and exhausted/dropped counters, so an
 // admin can see alerting degradation from the GUI instead of grepping logs.
 func TestAPIAlertsDeliveryHist_RetryHealth(t *testing.T) {
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	req := adminRequest(http.MethodGet, "/api/alerts/webhooks/history", "")
 	w := httptest.NewRecorder()

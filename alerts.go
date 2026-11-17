@@ -8,12 +8,13 @@ package main
 // retry queue, and the RISK-003 secret encryption-at-rest. main keeps the
 // process-wide singleton, the fireAlert wrapper every producer calls (also
 // installed as the alerts.Fire sink), and the startup shim for the retry
-// loop — the wrapper and the loop's store provider read globalAlertStore at
+// loop — the wrapper and the loop's store provider read alertStore() at
 // call time, preserving the test-reassignment tolerance of the original.
 
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
 )
@@ -26,8 +27,23 @@ type (
 	AlertPayload  = alerts.Payload
 )
 
-// globalAlertStore is the process-wide webhook store.
-var globalAlertStore = &AlertStore{}
+// alertStoreRef holds the process-wide alert store; read it through
+// alertStore(). It is an atomic pointer rather than a plain variable because
+// alert delivery runs on detached goroutines (`go fireAlert(...)`,
+// `go alerts.Fire(...)` from a dozen producers) that read the store after the
+// code that started them has returned. Production publishes the store once,
+// but tests swap it, and a plain variable gave every such swap a data race
+// with any alert goroutine left over from an earlier test (seen intermittently
+// on the race lanes). Load/Store make the swap race-free; a goroutine that
+// already loaded the old store simply finishes against it.
+var alertStoreRef = func() *atomic.Pointer[AlertStore] {
+	p := &atomic.Pointer[AlertStore]{}
+	p.Store(&AlertStore{})
+	return p
+}()
+
+// alertStore returns the current process-wide alert store.
+func alertStore() *AlertStore { return alertStoreRef.Load() }
 
 // fireAlert dispatches payload to all enabled webhooks matching event via the
 // process-wide store. Installed as the alerts.Fire sink at init so internal
@@ -44,7 +60,7 @@ var globalAlertStore = &AlertStore{}
 // seam rationale as startupAlertFire below.
 var fireAlert = func(event string, payload AlertPayload) {
 	defer recoverGoroutine(crashComponentAlert) // fired via `go fireAlert(...)` from the proxy hot path
-	globalAlertStore.Dispatch(event, payload)
+	alertStore().Dispatch(event, payload)
 }
 
 func init() {
@@ -54,7 +70,7 @@ func init() {
 	// publish-once lifecycle as the sink; the probe reads the same
 	// process-wide store the dispatch does.
 	alerts.SetSubscriberProbe(func(event string) bool {
-		return globalAlertStore.HasSubscriber(event)
+		return alertStore().HasSubscriber(event)
 	})
 }
 
@@ -85,7 +101,7 @@ func init() {
 // lost. Host stays as-is — it is a separate field and does not enter the dedup
 // key, and knowing which destination failed is the point of the alert.
 func fireDNSFailureAlert(host string, err error) {
-	if !globalAlertStore.HasSubscriber("dns_failure") {
+	if !alertStore().HasSubscriber("dns_failure") {
 		return
 	}
 	go fireAlert("dns_failure", AlertPayload{
@@ -99,10 +115,14 @@ func fireDNSFailureAlert(host string, err error) {
 // shape check; the SSRF check stays at delivery time).
 var validateWebhookURL = alerts.ValidateURL
 
+// validateWebhookEvents is re-exposed for the admin API handlers
+// (SEC-ALERTS-EVENTNAME-1 shape check at ingress; see alerts.ValidateEventNames).
+var validateWebhookEvents = alerts.ValidateEventNames
+
 // startAlertRetryLoop runs the F16 retry loop against the current
 // process-wide store (resolved on every pass).
 func startAlertRetryLoop(ctx context.Context) {
-	alerts.StartRetryLoop(ctx, func() *alerts.Store { return globalAlertStore })
+	alerts.StartRetryLoop(ctx, alertStore)
 }
 
 // ── Deferred startup alerts ──────────────────────────────────────────────────
@@ -171,7 +191,7 @@ func startupAlertsFlushed() bool {
 }
 
 // flushStartupAlerts delivers every queued startup alert. Called once from
-// loadPersistentAdminState after globalAlertStore.Init has loaded the
+// loadPersistentAdminState after alertStore().Init has loaded the
 // persisted webhooks.
 func flushStartupAlerts() {
 	startupAlertMu.Lock()

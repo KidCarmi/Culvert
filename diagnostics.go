@@ -242,6 +242,9 @@ func buildOperatorContract() OperatorContract {
 	// Contributes nothing in enforce mode or when release management is not
 	// composed on this node.
 	checks = append(checks, checkReleaseVerifyPosture()...)
+	// Break-glass admin-route metadata gate in shadow (CULVERT_C2_ENFORCE=false).
+	// Contributes nothing in the default enforce mode.
+	checks = append(checks, checkAdminRouteEnforcement()...)
 	// CHAOS-05/07 state-file quarantine, authenticated + path-free. Contributes
 	// nothing when every state file on this node loaded cleanly.
 	checks = append(checks, checkStateFileIntegrity()...)
@@ -1036,7 +1039,7 @@ func checkAuditPersistence() OperatorContractCheck {
 			Code:           "audit_log_persistence",
 			Status:         diagFail,
 			Message:        "configured but failed to open — audit trail has silently fallen back to the in-memory ring (last 500 events, lost on restart)",
-			OperatorAction: "Fix permissions/mount on the configured audit log path, then restart the proxy to restore durable audit persistence.",
+			OperatorAction: "Fix permissions/mount on the configured audit log path. No restart is needed: Culvert re-attempts the path automatically (at least every 2 minutes) and writes the entries recorded meanwhile (up to the newest 500) once it opens.",
 		}
 	}
 	return OperatorContractCheck{
@@ -1805,7 +1808,7 @@ func checkInteractiveLoginState() OperatorContractCheck {
 // Counts only; no webhook name, URL or secret material reaches this VIEWER-role
 // surface.
 func checkAlertWebhookSigning() OperatorContractCheck {
-	degraded := globalAlertStore.SigningDegradedCount()
+	degraded := alertStore().SigningDegradedCount()
 	if degraded == 0 {
 		return OperatorContractCheck{
 			Code:    "alert_webhook_signing",
