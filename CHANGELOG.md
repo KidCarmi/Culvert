@@ -55,6 +55,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Diagnostics now warns before an SSL inspection Root CA that Culvert will
+  not renew expires (Product Experience).** Only a Culvert-generated CA is
+  auto-rotated. An imported CA, or a legacy bundle with no provenance record,
+  keeps signing until it expires, and then every inspected HTTPS connection is
+  refused. Inside the 30-day renewal window the only signals were a daily log
+  line and a `cert_expiry` alert that fires only if a webhook subscribes to it.
+  `root_ca` kept reading "root CA initialised" until the outage. A new
+  report-only `inspection_ca_renewal` WARN row gives the days left and the
+  provenance class, and names the GUI remedy (upload a renewed CA under
+  Certificates, or classify an unknown bundle with `CULVERT_CA_PROVENANCE`). No
+  row for a managed CA, for a CA with more than 30 days left, or for an expired
+  CA, which `root_ca` already fails. Rotation, signing and trust are unchanged.
+
 - **Diagnostics now flags the admin-route authorization break-glass (Product
   Experience).** Setting `CULVERT_C2_ENFORCE` to a false-ish value puts the
   admin-route metadata gate in shadow (log and count, never block). That was
