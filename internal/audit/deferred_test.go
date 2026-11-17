@@ -297,3 +297,43 @@ func TestDeferredOpen_ConcurrentAddsAndAttemptsWriteEachEntryOnce(t *testing.T) 
 		}
 	}
 }
+
+// A deferred open publishes persistPath from a background goroutine while the
+// admin API reads the file-backed trail; under -race this caught an unlocked
+// read in GetPersistent (Codex review, PR #1928).
+func TestDeferredOpen_ConcurrentPersistentReadsAreRaceFree(t *testing.T) {
+	isolateDeferred(t)
+	dir, path := unopenablePath(t)
+	if !ArmDeferredOpen(path) {
+		t.Fatal("arm refused")
+	}
+	Add(entry(0))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 50; i++ {
+				_, _ = GetPersistent(0, 10, 0, 0)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		if _, ok, err := TryDeferredOpen(); !ok || err != nil {
+			t.Errorf("deferred open: ok=%v err=%v", ok, err)
+		}
+	}()
+	close(start)
+	wg.Wait()
+	if page, _ := GetPersistent(0, 10, 0, 0); len(page) != 1 || page[0].Object != "obj-0" {
+		t.Fatalf("persistent read after the open = %+v, want the backfilled entry", page)
+	}
+}

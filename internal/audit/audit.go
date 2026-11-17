@@ -353,11 +353,16 @@ func GetMemory(offset, limit int, fromTS, toTS int64) (page []Entry, total int) 
 // Returns entries newest-first. If from/to are non-zero, filters by
 // timestamp. Falls back to the in-memory ring if no file is configured.
 func GetPersistent(offset, limit int, fromTS, toTS int64) (page []Entry, total int) {
-	if persistPath == "" {
+	// Snapshot under mu: a deferred open (deferred.go) publishes the path
+	// from a background goroutine while admin handlers are serving.
+	mu.Lock()
+	path := persistPath
+	mu.Unlock()
+	if path == "" {
 		return GetMemory(offset, limit, fromTS, toTS)
 	}
 
-	data, err := os.ReadFile(persistPath) // #nosec G304 -- operator-configured path
+	data, err := os.ReadFile(path) // #nosec G304 -- operator-configured path
 	if err != nil {
 		return Get(), 0
 	}
