@@ -210,7 +210,7 @@ func Init(path string) error {
 			ring = ring[len(ring)-MaxRing:]
 		}
 	}
-	rf, err := fileutil.NewRotatingFile(path, 50) // 50 MB max before rotation
+	rf, err := fileutil.NewRotatingFile(path, rotateMaxMB) // 50 MB max before rotation
 	if err != nil {
 		return fmt.Errorf("audit log open %s: %w", path, err)
 	}
@@ -222,11 +222,19 @@ func Init(path string) error {
 
 // Close releases the persistent file handle (best-effort; shutdown hook).
 // Safe when persistence was never initialised.
+//
+// It also ends any pending deferred open (deferred.go): after the shutdown
+// hook has run, no later attempt may publish a file that nothing would close.
 func Close() error {
-	if persistC == nil {
+	mu.Lock()
+	closed = true
+	deferredPath, backlog, backlogDropped = "", nil, 0
+	c := persistC
+	mu.Unlock()
+	if c == nil {
 		return nil
 	}
-	err := persistC.Close()
+	err := c.Close()
 	return err
 }
 
@@ -298,6 +306,12 @@ func Add(e Entry) {
 	}
 	f := persist
 	path := persistPath
+	if f == nil {
+		// Decided in the same critical section that reads the sink, so an
+		// entry is either backlogged for a pending deferred open or written
+		// by this Add after it — never both, never neither.
+		backlogLocked(e)
+	}
 	mu.Unlock()
 
 	// Persist to JSONL file (outside the lock to avoid blocking callers).
@@ -509,11 +523,14 @@ func Requeue(events []Entry) {
 func ResetForTest() (restore func()) {
 	mu.Lock()
 	oldRing, oldW, oldC, oldPath := ring, persist, persistC, persistPath
+	oldDeferred, oldBacklog, oldDropped, oldClosed := deferredPath, backlog, backlogDropped, closed
 	ring, persist, persistC, persistPath = nil, nil, nil, ""
+	resetDeferredLocked()
 	mu.Unlock()
 	return func() {
 		mu.Lock()
 		ring, persist, persistC, persistPath = oldRing, oldW, oldC, oldPath
+		deferredPath, backlog, backlogDropped, closed = oldDeferred, oldBacklog, oldDropped, oldClosed
 		mu.Unlock()
 	}
 }
