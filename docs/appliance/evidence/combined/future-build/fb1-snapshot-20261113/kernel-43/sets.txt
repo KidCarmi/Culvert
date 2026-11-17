@@ -1,0 +1,5 @@
+# sha256 of the sorted module path lists (ABI string removed) and of the set net-autoload lists
+modules-7.0.0-42 6900 ad75e00e47637c9fc046d8786b7b307f9b0198436f58c43a27be025cafc0b090
+netload-7.0.0-42 61 756555a4bd962a32cef786ea13b3fcb0e29338465731aea89ed1ccde21873fcc
+modules-7.0.0-43 6900 ad75e00e47637c9fc046d8786b7b307f9b0198436f58c43a27be025cafc0b090
+netload-7.0.0-43 61 756555a4bd962a32cef786ea13b3fcb0e29338465731aea89ed1ccde21873fcc

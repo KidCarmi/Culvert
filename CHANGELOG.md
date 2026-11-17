@@ -9,6 +9,40 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Appliance guest packages: the Ubuntu archive snapshot moves to
+  `20261113T000000Z` and the guest kernel to 7.0.0-43.43~24.04.1 (owner
+  decision, PR #1528, 17 Nov).** It ships the published fixes for glibc
+  2.39-0ubuntu8.12 (including CVE-2026-86805, a dynamic-loader race allowing
+  local privilege escalation, and CVE-2026-84243, code execution through
+  `LANGUAGE`), perl, python3-pyasn1 and the kernel (all 4 CRITICAL and 50 of
+  59 HIGH rows the previous candidate's scan held against 7.0.0-42). It is
+  the earliest snapshot listing all thirteen fixed versions while resolving
+  exactly kernel 7.0.0-43. Against the previous candidate's own disk it moves
+  15 packages plus the same four kernel packages at the new ABI, with no
+  downgrade; kernel 7.0.0-43 has the same upstream (7.0.14), config, module
+  set and network-autoload surface as 7.0.0-42, checked with the build's own
+  module-policy checks. Evidence:
+  `docs/appliance/evidence/combined/future-build/fb1-snapshot-20261113/`.
+
+- **Appliance container engine: Docker Engine/CLI 29.9.2 → 29.10.0,
+  containerd.io 2.4.2-3 → 2.4.2-4 and the Compose plugin 5.6.1 → 5.7.1
+  (owner decision, PR #1528, 17 Nov).** All eight engine binaries are now
+  built with go1.27.4, the fix for GO-2026-6859 / CVE-2026-97054 that the
+  previous candidate's scan reported in each of them; dockerd also moves to
+  OpenTelemetry v1.47.0 (CVE-2026-128085). Each package is pinned by version
+  and `.deb` SHA-256 from Docker's signed index; dependencies, conffiles,
+  systemd units and the containerd configuration are unchanged. Not
+  zero-finding: containerd, ctr and Compose still carry OpenTelemetry
+  v1.46.0. Evidence: `docs/appliance/evidence/combined/r10-engine-pins/`.
+
+- **OpenTelemetry v1.46.0/v1.45.0 → v1.47.0 for CVE-2026-128085 (attribute
+  truncation bypass) in the proxy and the maintenance agent.** Only the
+  modules the binaries link or the advisory names move (`otel`, `otel/metric`,
+  `otel/trace`, `otel/sdk`), plus `otel/log`, which `otel` v1.47.0 now
+  imports; the maintenance agent's module also takes `go.yaml.in/yaml/v3`
+  v3.0.5, the minimum `otel` v1.47.0 requires and the version the root module
+  already uses.
+
 - **Go toolchain go1.27.3 → go1.27.4 for GO-2026-6859 (net/http: an HTTP/1
   server crash from a `MaxBytesReader` header race), reachable from the
   proxy's HTTP paths.** Ported from main (`bfed5ac4`): the `go.mod`

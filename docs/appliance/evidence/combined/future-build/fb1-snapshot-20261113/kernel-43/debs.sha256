@@ -1,0 +1,9 @@
+# kernel packages fetched from snapshot.ubuntu.com and checked against the snapshot's Packages SHA256 (sha256sum -c)
+92a0665c03d1906c40fdb3a373c95e28e33e0d2b56201f8a0af43ce132d2d72c  linux-image-7.0.0-42-generic_7.0.0-42.42~24.04.1_amd64.deb
+b38d981cab20da80b19cb84fe093a380551939cdfbdd57d85d0843e13ecd209f  linux-image-7.0.0-43-generic_7.0.0-43.43~24.04.1_amd64.deb
+34eefa097dbb0e4bea1e87a8db5299791cf48c0a4750ece484e8de8c3c0369df  linux-main-modules-v4l2loopback-7.0.0-42-generic_7.0.0-42.42~24.04.1_amd64.deb
+b43aa7b4afaccd4701c1a0f5e2f7879cf9d7b37a6adf429b31b53dafc90b3b26  linux-main-modules-v4l2loopback-7.0.0-43-generic_7.0.0-43.43~24.04.1_amd64.deb
+11dda212f48136201130ffaaa06858f6fec1fcd64b51785016eeb8627dae5832  linux-main-modules-zfs-7.0.0-42-generic_7.0.0-42.42~24.04.1_amd64.deb
+7472898e7fd3fddcf2dbf5fad6e9f7b4e9dcfab6a416aa57d6eb2589a356905b  linux-main-modules-zfs-7.0.0-43-generic_7.0.0-43.43~24.04.1_amd64.deb
+c59cd39101398113ca84a813f43c21058f17a2fc0810ccb7f0fd15c804ffd3a0  linux-modules-7.0.0-42-generic_7.0.0-42.42~24.04.1_amd64.deb
+e4ee6578c9279c3886233da1b28907b5597ccc7fd3dd54fe633aa86c8e9c31ff  linux-modules-7.0.0-43-generic_7.0.0-43.43~24.04.1_amd64.deb

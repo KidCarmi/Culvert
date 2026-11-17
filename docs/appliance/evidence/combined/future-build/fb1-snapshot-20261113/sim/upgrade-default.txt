@@ -1,0 +1,54 @@
+Reading package lists...
+Building dependency tree...
+Calculating upgrade...
+The following NEW packages will be installed:
+  linux-image-7.0.0-43-generic
+  linux-main-modules-v4l2loopback-7.0.0-43-generic
+  linux-main-modules-zfs-7.0.0-43-generic linux-modules-7.0.0-43-generic
+The following packages have been kept back:
+  containerd.io docker-ce docker-ce-cli docker-compose-plugin
+The following packages will be upgraded:
+  ca-certificates distro-info libc-bin libc-dev-bin libc-devtools libc6
+  libc6-dev libperl5.38t64 linux-image-virtual-hwe-24.04 linux-libc-dev
+  locales perl perl-base perl-modules-5.38 python3-distro-info python3-pyasn1
+16 upgraded, 4 newly installed, 0 to remove and 4 not upgraded.
+Inst libperl5.38t64 [5.38.2-3.2ubuntu0.6] (5.38.2-3.2ubuntu0.7 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) [perl:amd64 ]
+Inst perl [5.38.2-3.2ubuntu0.6] (5.38.2-3.2ubuntu0.7 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst perl-base [5.38.2-3.2ubuntu0.6] (5.38.2-3.2ubuntu0.7 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Conf perl-base (5.38.2-3.2ubuntu0.7 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst perl-modules-5.38 [5.38.2-3.2ubuntu0.6] (5.38.2-3.2ubuntu0.7 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Inst libc-devtools [2.39-0ubuntu8.9] (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst libc6-dev [2.39-0ubuntu8.9] (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst libc-dev-bin [2.39-0ubuntu8.9] (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst linux-libc-dev [6.8.0-147.147] (6.8.0-149.149 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst libc6 [2.39-0ubuntu8.9] (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf libc6 (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst libc-bin [2.39-0ubuntu8.9] (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf libc-bin (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst ca-certificates [20260816ubuntu0.24.04.1] (20260816ubuntu0.24.04.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Inst distro-info [1.7build1] (1.7ubuntu0.1 Ubuntu:24.04/noble-updates [amd64])
+Inst locales [2.39-0ubuntu8.9] (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Inst python3-distro-info [1.7build1] (1.7ubuntu0.1 Ubuntu:24.04/noble-updates [all])
+Inst linux-main-modules-zfs-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst linux-main-modules-v4l2loopback-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst linux-modules-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst linux-image-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst linux-image-virtual-hwe-24.04 [7.0.0-42.42~24.04.1] (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst python3-pyasn1 [0.4.8-4ubuntu0.3] (0.4.8-4ubuntu0.4 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Conf libperl5.38t64 (5.38.2-3.2ubuntu0.7 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf perl (5.38.2-3.2ubuntu0.7 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf perl-modules-5.38 (5.38.2-3.2ubuntu0.7 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Conf libc-devtools (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf libc6-dev (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf libc-dev-bin (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf linux-libc-dev (6.8.0-149.149 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf ca-certificates (20260816ubuntu0.24.04.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Conf distro-info (1.7ubuntu0.1 Ubuntu:24.04/noble-updates [amd64])
+Conf locales (2.39-0ubuntu8.12 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Conf python3-distro-info (1.7ubuntu0.1 Ubuntu:24.04/noble-updates [all])
+Conf linux-main-modules-zfs-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf linux-main-modules-v4l2loopback-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf linux-modules-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf linux-image-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf linux-image-virtual-hwe-24.04 (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf python3-pyasn1 (0.4.8-4ubuntu0.4 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])

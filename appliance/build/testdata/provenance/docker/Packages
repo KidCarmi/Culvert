@@ -33,3 +33,27 @@ Architecture: amd64
 Version: 5.6.1-1~ubuntu.24.04~noble
 Filename: dists/noble/pool/stable/amd64/docker-compose-plugin_5.6.1-1~ubuntu.24.04~noble_amd64.deb
 SHA256: 9725be1df7fd5ccc6b21ac24112885896c8d134345e3f4aa20b3c2064ef4620e
+
+Package: docker-ce
+Architecture: amd64
+Version: 5:29.10.0-1~ubuntu.24.04~noble
+Filename: dists/noble/pool/stable/amd64/docker-ce_29.10.0-1~ubuntu.24.04~noble_amd64.deb
+SHA256: 85abe031338e48e9cb157238732b2c40aeb4f1741d399f64042abcca2950c951
+
+Package: docker-ce-cli
+Architecture: amd64
+Version: 5:29.10.0-1~ubuntu.24.04~noble
+Filename: dists/noble/pool/stable/amd64/docker-ce-cli_29.10.0-1~ubuntu.24.04~noble_amd64.deb
+SHA256: a9d3801c3efd3c78786948e8dd1c023796c9145aca8c882818664e79402578f1
+
+Package: containerd.io
+Architecture: amd64
+Version: 2.4.2-4~ubuntu.24.04~noble
+Filename: dists/noble/pool/stable/amd64/containerd.io_2.4.2-4~ubuntu.24.04~noble_amd64.deb
+SHA256: 15cc3d6c64422ed278f60cb3c9a5df760a3de38055affc335c6ee40c12411b75
+
+Package: docker-compose-plugin
+Architecture: amd64
+Version: 5.7.1-1~ubuntu.24.04~noble
+Filename: dists/noble/pool/stable/amd64/docker-compose-plugin_5.7.1-1~ubuntu.24.04~noble_amd64.deb
+SHA256: c2f6549958ca64466da9e31a6d488e19f5a1bf475a4425df9e4c3a010d5950ac

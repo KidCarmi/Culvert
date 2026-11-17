@@ -1,0 +1,17 @@
+package	binary	sha256	go	otel/sdk	otel/trace	(*maxBytesReader) funcs	(*Server).Serve funcs
+docker-ce_29.9.2	docker-proxy	06098190f07be3c7e89d4ae2072dacb6d1c1ace2dc9712853e9a34c1814c7d16	go1.26.10	-	-	0	0
+docker-ce_29.9.2	dockerd	cc8ad1a14ab54b5b23d14e013d5c7a9c594e586ed299d3533ed712d65939cb10	go1.26.10	v1.46.0	v1.46.0	2	5
+docker-ce-cli_29.9.2	docker	b6f5521ba1c355ea6f8943241435f494963b0840388543b2fca1a4062913da8f	go1.26.10	-	-	0	0
+containerd.io_2.4.2-3	containerd	fc185d75979d92a4f8de99b76293dca7fe81142e9c5fd01d7da59f786f0fc8d1	go1.27.3	v1.46.0	v1.46.0	2	6
+containerd.io_2.4.2-3	containerd-shim-runc-v2	ca4c4b5919655332666dda634338b826d73a12cdd3b6633627e95d1ab4bc138a	go1.27.3	-	-	0	0
+containerd.io_2.4.2-3	ctr	f0c5d12710e6980d7de93096fc24d858b610d6892f2f886f467df305fc6b21f4	go1.27.3	-	v1.46.0	0	0
+containerd.io_2.4.2-3	runc	1248fee8f9a0dc5382f888990d669e2bd225045869b9246f848a1681161abc96	go1.27.3	-	-	0	0
+docker-compose-plugin_5.6.1	docker-compose	47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0	go1.26.10	v1.46.0	v1.46.0	2	0
+docker-ce_29.10.0	docker-proxy	bd6546a42c4eec78e040002151617702ec31756985d3bc50fd999476171d779e	go1.27.4	-	-	0	0
+docker-ce_29.10.0	dockerd	961d4c7074f01b3bdd3eaf714298a24cff642e675490737e43865bad916944f6	go1.27.4	v1.47.0	v1.47.0	2	5
+docker-ce-cli_29.10.0	docker	feae2898f107d430c4cc8cca0f0155876c0cf95f63ba6efeed203b4a9b304caa	go1.27.4	-	-	0	0
+containerd.io_2.4.2-4	containerd	b772d4cc7f5822b80ac837c4897b39ac310539c08c055a69b5f6559ec4a16e6e	go1.27.4	v1.46.0	v1.46.0	2	6
+containerd.io_2.4.2-4	containerd-shim-runc-v2	dc2e7f659178401a196fc9431ec70c9e29bc46f22a1969342b21b979cb113228	go1.27.4	-	-	0	0
+containerd.io_2.4.2-4	ctr	53704d2e95487ee3593017e8e70634b6ba9f8c19917e49cbf6820cf0cd4deab1	go1.27.4	-	v1.46.0	0	0
+containerd.io_2.4.2-4	runc	9c1d6487f5139f4d71113e3a3eef1a4c881d7714b39ee47ed22bff9aba856b4d	go1.27.4	-	-	0	0
+docker-compose-plugin_5.7.1	docker-compose	af426722a8af5de812fcee30cc1c39f0639f5f723cbadefb25e5d4db054064cf	go1.27.4	v1.46.0	v1.46.0	2	0

@@ -230,8 +230,9 @@ verifies on import.
   kernel's packages are purged and the build refuses unless exactly one
   kernel is in `/boot`. The kernel series is Ubuntu's supported **HWE
   kernel** (`GUEST_KERNEL_META=linux-image-virtual-hwe-24.04`,
-  7.0.0-42.42~24.04.1 in the current snapshot `20261105T000000Z` — the
-  owner-approved kernel-42 disposition, `evidence/combined/esxi-325c142a/kernel-42/`;
+  7.0.0-43.43~24.04.1 in the current snapshot `20261113T000000Z` — the
+  owner's R10 decision of 17 Nov, `evidence/combined/future-build/fb1-snapshot-20261113/`,
+  after the kernel-42 disposition `evidence/combined/esxi-325c142a/kernel-42/`;
   the 26.04 kernel backported to 24.04 and supported for the rest of 24.04's
   life). Against Canonical's CVE tracker at the 7c7b29ee scan the GA 6.8.0
   kernel had 5 CRITICAL and 138 HIGH CVEs open with no fixed 6.8.0 package;

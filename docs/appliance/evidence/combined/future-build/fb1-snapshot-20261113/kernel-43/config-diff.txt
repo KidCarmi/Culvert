@@ -1,0 +1,8 @@
+# diff config-7.0.0-42-generic config-7.0.0-43-generic (from the linux-modules debs)
+61c61
+< CONFIG_VERSION_SIGNATURE="Ubuntu 7.0.0-42.42~24.04.1-generic 7.0.14"
+---
+> CONFIG_VERSION_SIGNATURE="Ubuntu 7.0.0-43.43~24.04.1-generic 7.0.14"
+# sha256
+8da949fb637f675c8a1170a2bfc5f029b2642f54e0efe8dbb54ca95c6324cf8d  7.0.0-42/boot/config-7.0.0-42-generic
+c749f4dead0b9a7f3d949fbb716508e04ff80599441364c148a87254d0120f5a  7.0.0-43/boot/config-7.0.0-43-generic
