@@ -9,6 +9,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Diagnostics now flags the admin-route authorization break-glass (Product
+  Experience).** Setting `CULVERT_C2_ENFORCE` to a false-ish value puts the
+  admin-route metadata gate in shadow (log and count, never block). That was
+  visible only in the startup environment and on the admin-only Governance
+  page, whose `governance_health` still reads `healthy` in shadow, so a node
+  left in break-glass after an incident looked identical to a healthy one on
+  `/api/diagnostics`. A new report-only `admin_route_enforcement_shadow` WARN
+  row names the switch, states that each handler's own role check still
+  applies, carries the would-deny count and tells the operator to remove the
+  variable and restart. No row in the default enforce mode; enforcement, the
+  mode and the counters are unchanged.
+
 - **A contained panic now tells an operator (CHAOS-120).** `recordCrash` is the
   single sink every recovered panic funnels into — the proxy plane, the admin
   plane, `runGuarded`/`recoverGoroutine`, and every `internal/*` background
@@ -51,6 +63,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `atomic.Pointer` read through `alertStore()`. Production publishes the store
   once, so there is no behaviour change; a goroutine that already loaded the
   old store finishes against it.
+
+- **The HA compose file's `proxy` and `dp` services never ran their startup
+  script.** `docker-compose.ha.yml` sets `command: sh -c '... exec ./culvert
+  $$ARGS'` on images built from the repo Dockerfile, whose ENTRYPOINT is
+  `./culvert`. Compose prepends the ENTRYPOINT, so the container ran
+  `./culvert sh -c ...`; flag parsing stopped at `sh` and the node booted
+  HEALTHY (the healthcheck probes the default `:8080`) with every flag at its
+  default — in-memory roster, CA and policy (nothing persisted to the `/data`
+  volume), no ClamAV/YARA, no cluster DB, a standby that never used
+  `HA_JOIN`/`HA_TOKEN` (and skipped the empty-token refusal), and DPs that
+  never enrolled. Both services now set `entrypoint: []` so the script is the
+  container process; a contract test derives the effective argv from the
+  Dockerfile ENTRYPOINT and the compose service.
 
 - **Ten alert events were fired by production code with no way to subscribe to
   them from the Alerts panel, and four of them could never be delivered at all

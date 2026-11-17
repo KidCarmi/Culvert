@@ -68,7 +68,7 @@ Cert-pinned apps, banking, healthcare, and mTLS-protected origins must bypass in
 
 - **Automatic:** a 24h loop rotates when the CA is ≤30 days from expiry, **for a Culvert-generated root only**, with **dual-CA overlap** (the root certificate is renewed under the same key and subject, so clients trusting either the old or the new certificate validate until the old one expires). Imported CAs and bundles of unknown provenance are not renewed; see [`root-ca-expiry.md` §5](../operator/root-ca-expiry.md).
 - **Manual:** `POST /api/ca/rotate` (admin; two-step confirmation token). Warning: invalidates all leaf certs; clients must trust the new CA.
-- **Distribution window:** leaves are valid 24h, so distribute the new root before the old leaves expire. Set a `cert_expiry` webhook alert.
+- **Distribution window:** after an automatic renewal, distribute the new root before the **old root's own expiry date** (the overlap end shown in CA Management). After a manual rotation there is no window: the key changes, so endpoints without the new root fail at once; the 24h leaf validity does not extend either deadline. Set a `cert_expiry` webhook alert.
 
 > **GAP-PKI-05 — expiry watchdog drift.** The `cert_expiry` alert fires only *when rotation occurs*; the documented "startup alert if ≤30 days" is not implemented. In an in-memory-only CA posture there is no independent expiry warning — poll `GET /api/ca/status` (`expiresIn`) from external monitoring.
 
