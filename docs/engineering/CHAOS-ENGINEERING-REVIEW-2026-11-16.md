@@ -34,6 +34,15 @@ topology — neither was true, and it had never been true.
 binary. Every flag it declares was silently discarded, and the container still
 reported healthy.**
 
+> **Scope, as merged.** main fixed the argv defect independently in
+> `dfe25e2a0`, shipped in **v1.0.420**, by clearing the image entrypoint
+> (`entrypoint: []`) so `command: sh -c '…'` ran as written. A deployment on
+> v1.0.420's `docker-compose.ha.yml` already received every flag below. The
+> exposure described here is real for compose files **through v1.0.419**, which
+> declare no `entrypoint:`. What this round adds on top is the shell-entrypoint
+> shape with its cross-artifact gate (121a), the stop grace (121b) and the
+> ClamAV health dependency (121c).
+
 The image declares an exec-form entrypoint (`Dockerfile:200`):
 
 ```dockerfile
@@ -199,7 +208,7 @@ it is added — which is the only form of fix this particular defect has.
 
 | Finding | Likelihood | Blast radius | Severity | Status |
 |---|---|---|---|---|
-| 121a — command never reaches the binary | **certain** (unconditional, every HA/DP deployment) | whole node: security posture, persistence, cluster membership | **CRITICAL** | fixed |
+| 121a — command never reaches the binary | **certain** (unconditional, every HA/DP deployment) | whole node: security posture, persistence, cluster membership | **CRITICAL** | fixed (first in v1.0.420, `dfe25e2a0`; gated here) |
 | 121a′ — split brain via the unreachable `HA_TOKEN` guard | certain, given an HA standby | cluster: two active Control Planes | **CRITICAL** | fixed with 121a |
 | 121b — no stop grace on HA/DP | certain, every stop | durability + in-flight tunnels, per node | **HIGH** | fixed |
 | 121c — ClamAV not awaited | certain, every boot | one node, bounded by `start_period` | **MEDIUM** | fixed |
@@ -223,7 +232,11 @@ first clean one. For 121a the recovery is not complete even then — a node that
 has been running without `-ca-path` has been issuing leaf certificates from a
 Root CA that exists only in memory, so the operator must redistribute the trust
 anchor after the fix, and any `/data` the node wrote is not the state the file
-intended it to write.
+intended it to write. That trust and state recovery applies **only** to a node
+whose `docker-compose.ha.yml` predates v1.0.420 (no `entrypoint:` on `proxy`/
+`dp`). A node already on v1.0.420's file has run with its flags, its Root CA
+persisted under `/data`; moving the shell into `entrypoint:` changes nothing it
+stored, so it needs only the container recreate that picks up 121b and 121c.
 
 **Detectability before this round: zero.** Not "poor" — zero. No metric, no log
 line, no diagnostics row and no health signal distinguishes a node that dropped

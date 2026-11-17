@@ -75,7 +75,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   Data Plane never enrolled). `/health` returned 200 throughout, because
   `/health` is liveness and the process was alive. The shell now lives in
   `entrypoint:` and still `exec`s the binary, so culvert remains PID 1 and
-  receives the SIGTERM the whole shutdown sequence depends on.
+  receives the SIGTERM the whole shutdown sequence depends on. Scope: v1.0.420
+  already cleared the image entrypoint (`entrypoint: []`), so only deployments
+  whose compose file predates v1.0.420 lost their flags and need to
+  redistribute the Root CA trust anchor; a v1.0.420 deployment only recreates
+  its containers to pick up the stop grace and ClamAV wait below.
 - **The HA and Data Plane containers had no stop grace, so Docker SIGKILLed them
   at 10s against the 51s enforced shutdown envelope (CHAOS-121).** CHAOS-56 made
   the sequence bounded end to end and pinned it to the container's
