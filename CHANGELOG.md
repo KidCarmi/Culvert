@@ -774,6 +774,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **An SSL-inspect rule no longer relays a non-TLS client into the proxy's own
+  TLS session to the origin.** On the default strip-ALPN inspect path, a client
+  that did not start TLS had its plaintext request raw-relayed into the
+  already-established upstream TLS connection. It reached the HTTPS origin with
+  no inner-host pin, file block, DPI, scan or per-request log row, and could
+  reach any vhost on a shared front end through a tunnel authorized for another.
+  The fallback existed for SSH/RDP but could not serve them: those origins fail
+  the upstream TLS handshake before the peek. Such a client is now refused: both
+  legs close and a `DECRYPT_FAILED` entry records a client-hello protocol
+  failure. The auto-exclusion learner is deliberately not fed, so the refusal
+  cannot turn into a bypass on the next connection. The native-ALPN
+  plaintext-to-plaintext fallback is unchanged. Owner decision on #1929.
+
 - **`install.sh`'s `env_put` no longer acts through a symlink at `.env` with
   `sudo`.** This is the `.env` half of the link-following issue #1909 closed
   for `.env.lock` (residual R1 of the 2026-11-15 review). A DANGLING `.env`

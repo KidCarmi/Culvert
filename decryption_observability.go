@@ -422,6 +422,11 @@ func classifyClientFailure(err error) (decryptobs.FailStage, decryptobs.FailCate
 	return decryptobs.FailStageClientHello, decryptobs.FailCategoryOther
 }
 
+// errInspectNonTLSClient is the failure recorded when a client on an inspect
+// rule sends non-TLS bytes (SEC-INSPECT-PLAINTEXT-1). Its text classifies as a
+// client-hello protocol failure in classifyClientFailure ("unexpected message").
+var errInspectNonTLSClient = errors.New("tls: unexpected message: client sent non-TLS bytes on an inspect tunnel")
+
 // nonTLSFallbackOutcome builds the ADR-0011 DecryptionOutcome for a CONNECT that reached
 // the inspect path but whose CLIENT sent a non-TLS protocol (SSH/RDP/raw), so Culvert
 // could not MITM and fell back to a raw byte relay. The session was NOT decrypted; the
