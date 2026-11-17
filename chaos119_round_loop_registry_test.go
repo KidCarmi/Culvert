@@ -87,6 +87,7 @@ var chaos119KnownRoundLoops = []chaos119RoundLoop{
 	{file: "metrics.go", fn: "startHitCounterPersistence", guard: "runGuarded(", detached: false,
 		why: "the loop is inline in the go func() this function detaches"},
 	{file: "rootca_recovery.go", fn: "runInspectionCARecoveryLoop", guard: "runGuarded(", detached: true},
+	{file: "audit_persist_retry.go", fn: "runAuditOpenRetry", guard: "runGuarded(", detached: true},
 	{file: "support_debug_level.go", fn: "startDebugLevelWatchdog", guard: "runGuarded(", detached: true},
 	{file: "support_upload_worker.go", fn: "startSupportUploadWorker", guard: "runGuarded(", detached: true},
 	// Discovered by the structural pass, and already guarded — these three are
