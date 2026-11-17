@@ -287,7 +287,13 @@ case "$DISTRO_FAMILY" in
     ;;
   rhel|fedora)
     # Remove distro-packaged Docker/Podman
-    for pkg in docker podman-docker containerd.io runc; do
+    # NOT containerd.io: that is Docker CE's own runtime, installed by this
+    # script, and docker-ce requires it — `dnf remove containerd.io` takes
+    # docker-ce with it. On a re-run that uninstalled the working engine
+    # (stopping every Culvert container) and left docker-ce-cli + the compose
+    # plugin behind, so the install step below was skipped as "already
+    # installed" and the run died on "Docker daemon could not be started".
+    for pkg in docker podman-docker runc; do
       if rpm -q "$pkg" &>/dev/null; then
         info "Removing $pkg..."
         sudo dnf remove -y "$pkg" 2>/dev/null || sudo yum remove -y "$pkg" 2>/dev/null || true
@@ -501,6 +507,16 @@ fi
 # CA/log passphrases survive the move. Best-effort; never fatal.
 carry_forward_prior_secrets() {
   [[ -f "$INSTALL_DIR/.env" ]] && return 0   # a .env already here — never overwrite
+  # SEC-INSTALL-ENVLINK-1: `-f` above is FALSE for a DANGLING symlink, so a
+  # planted `.env -> /etc/cron.d/x` falls through to the `sudo install` below,
+  # which opens its destination O_CREAT|O_TRUNC and so writes the prior stack's
+  # secrets THROUGH the link, as root, to a path the planter chose. Refuse any
+  # link here: this function only ever creates a .env that is absent.
+  if [[ -L "$INSTALL_DIR/.env" ]]; then
+    warn "Refusing to carry secrets forward into $INSTALL_DIR/.env: it is a symlink."
+    warn "Replace it with a real file (or remove it) and re-run if the prior secrets are needed."
+    return 0
+  fi
   local prior=""
   # 1. The dir the currently/most-recently deployed proxy container ran from.
   prior="$(sudo docker inspect culvert \
@@ -1552,7 +1568,23 @@ env_put() {
   # whole install under `set -euo pipefail`. Take ownership via sudo when we
   # can't write it (no-op — and no sudo call — when we already can, so the
   # extracted-function tests on a user-owned temp file are unaffected).
-  if [[ -e "$file" && ! -w "$file" ]]; then
+  #
+  # SEC-INSTALL-ENVLINK-1 (owner decision on PR #1898/#1909): $file may be a
+  # symlink — operators do link their env file — but `sudo` must never act
+  # THROUGH one. `sudo touch` on a DANGLING link creates its target as root
+  # (`-e` is false for it, so only `-L` sees the case), and `sudo chown` on a
+  # live link hands the TARGET to the invoking sudoer (`.env -> /etc/shadow`).
+  # Whoever can write the stack dir can plant either. So: a dangling link is
+  # refused outright; a live link is used only if it is already writable, and
+  # otherwise degrades through the warn-and-skip below instead of escalating.
+  # A regular $file keeps the ownership-taking path unchanged.
+  if [[ -L "$file" && ! -e "$file" ]]; then
+    warn "Refusing to use $file: it is a symlink to a path that does not exist — leaving it unchanged."
+    warn "Point it at the real env file (or replace it with one), then re-run or set $var manually."
+    return 0
+  elif [[ -L "$file" ]]; then
+    : # a live link: never handed to sudo; the writability check below decides
+  elif [[ -e "$file" && ! -w "$file" ]]; then
     sudo chown "$(id -un)" "$file" 2>/dev/null || true
   elif [[ ! -e "$file" && ! -w "$(dirname "$file")" ]]; then
     sudo touch "$file" 2>/dev/null && sudo chown "$(id -un)" "$file" 2>/dev/null || true
@@ -1788,7 +1820,17 @@ validate_passphrase_for_env_file() {
 persist_host_env_session_secret() {
   local envfile="$INSTALL_DIR/.env"
   [[ -n "${CULVERT_SESSION_SECRET:-}" ]] || return 0
-  if [[ -e "$envfile" && ! -r "$envfile" ]]; then
+  # SEC-INSTALL-ENVLINK-1 (see env_put): `sudo chown` must never act THROUGH a
+  # symlink. On a LIVE link it hands the TARGET to the invoking sudoer
+  # (`.env -> /etc/shadow`), and whoever can write the stack dir can plant one.
+  # `-e`/`-r` both FOLLOW links, so only `-L` sees the case. This self-heal runs
+  # BEFORE the first env_put (see the top-level call order), so env_put's own
+  # guard cannot cover it; the contract has to be honoured at every privileged
+  # site on this path, not just the last one. A link is left alone and the
+  # unreadable check below then degrades instead of escalating.
+  if [[ -L "$envfile" ]]; then
+    :
+  elif [[ -e "$envfile" && ! -r "$envfile" ]]; then
     sudo chown "$(id -un)" "$envfile" 2>/dev/null || true
   fi
   if [[ -f "$envfile" ]]; then
@@ -1842,7 +1884,17 @@ setup_at_rest_encryption() {
   # orphaning the encrypted CA bundle and saved logs. Self-heal ownership first
   # (as persist_host_env_session_secret does); if it is still unreadable, leave
   # it alone.
-  if [[ -e "$envfile" && ! -r "$envfile" ]]; then
+  # SEC-INSTALL-ENVLINK-1 (see env_put): `sudo chown` must never act THROUGH a
+  # symlink. On a LIVE link it hands the TARGET to the invoking sudoer
+  # (`.env -> /etc/shadow`), and whoever can write the stack dir can plant one.
+  # `-e`/`-r` both FOLLOW links, so only `-L` sees the case. This self-heal runs
+  # BEFORE the first env_put (see the top-level call order), so env_put's own
+  # guard cannot cover it; the contract has to be honoured at every privileged
+  # site on this path, not just the last one. A link is left alone and the
+  # unreadable check below then degrades instead of escalating.
+  if [[ -L "$envfile" ]]; then
+    :
+  elif [[ -e "$envfile" && ! -r "$envfile" ]]; then
     sudo chown "$(id -un)" "$envfile" 2>/dev/null || true
   fi
   if [[ -e "$envfile" && ! -r "$envfile" ]]; then

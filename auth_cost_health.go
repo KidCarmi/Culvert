@@ -167,7 +167,7 @@ var (
 // default posture, and the state of every test binary — this must not spawn a
 // goroutine at all.
 var fireAuthCostAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("auth_verify_saturated") {
+	if !alertStore().HasSubscriber("auth_verify_saturated") {
 		return
 	}
 	go fireAlert("auth_verify_saturated", AlertPayload{

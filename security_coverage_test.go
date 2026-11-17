@@ -26,7 +26,7 @@ import (
 // deterministic alert tests. The dedup window is per-Store since the
 // internal/alerts extraction, so this resets the current global store's.
 func resetAlertDedup() {
-	globalAlertStore.ResetDedupForTest()
+	alertStore().ResetDedupForTest()
 }
 
 // ── AlertStore ────────────────────────────────────────────────────────────────
@@ -141,12 +141,12 @@ func TestFireAlert_EnabledAndDisabled(t *testing.T) {
 	defer restore()
 
 	// Save and restore the global store.
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	// Add an enabled webhook with HMAC secret.
 	as.Add(AlertWebhook{
@@ -216,12 +216,12 @@ func TestFireAlert_WildcardEvent(t *testing.T) {
 	restore := ssrf.AllowLoopbackForTest()
 	defer restore()
 
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	as.Add(AlertWebhook{
 		Name:    "wildcard",
@@ -242,11 +242,11 @@ func TestFireAlert_WildcardEvent(t *testing.T) {
 
 func TestFireAlert_TimestampAutoFilled(t *testing.T) {
 	// fireAlert should auto-fill Timestamp when empty — just ensure no panic.
-	orig := globalAlertStore
-	defer func() { globalAlertStore = orig }()
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 	// No hooks — just test that the function runs without panic.
 	fireAlert("auth_lockout", AlertPayload{}) // Timestamp intentionally empty
 }

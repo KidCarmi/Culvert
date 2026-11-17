@@ -51,7 +51,12 @@ func loadObservability(cfg observabilityStartupConfig) {
 			// the intent is unmet NOW, so every read surface may say so
 			// without waiting the grace out.
 			noteSyslogDialResolved()
-			logger.Printf("Syslog: connect failed (%v) — continuing without syslog", err)
+			logger.Printf("Syslog: connect failed (%v) — continuing without syslog; the connection is retried automatically in the background", err)
+			// The intent stands and this dial is safe to repeat: hand it to
+			// the background retry so a collector that was merely late (or
+			// unresolvable while DNS was still coming up) does not stay dark
+			// until an operator re-saves the target or restarts the node.
+			armSyslogIntentRetry(cfg.SyslogAddr, cfg.SyslogFormat)
 		}
 	}
 
@@ -67,6 +72,10 @@ func loadObservability(cfg observabilityStartupConfig) {
 		auditLogConfiguredPath = cfg.AuditLogPath
 		if err := InitAuditLog(cfg.AuditLogPath); err != nil {
 			logger.Printf("Audit: log file error (%v) — falling back to in-memory", err)
+			// The configured path stays the operator's intent: the
+			// background-services slice re-attempts it and the entries
+			// recorded meanwhile are kept for it (audit_persist_retry.go).
+			armAuditDeferredOpen(cfg.AuditLogPath)
 		} else {
 			logger.Printf("Audit: persisting to %s", cfg.AuditLogPath)
 		}

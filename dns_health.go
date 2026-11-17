@@ -175,7 +175,7 @@ type dnsResolveSnapshot struct {
 // fireStorageWriteAlert: with no webhook configured — the default posture, and
 // the state of every test binary — this must not spawn a goroutine at all.
 var fireDNSResolveAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("dns_failure") {
+	if !alertStore().HasSubscriber("dns_failure") {
 		return
 	}
 	go fireAlert("dns_failure", AlertPayload{

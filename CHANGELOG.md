@@ -7,7 +7,65 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **`SEC-INSTALL-ENVLINK-1` is now honoured at every privileged site on the
+  `.env` path, not only the last one.** The contract landed as a guard inside
+  `env_put`: `sudo` must never act THROUGH a symlink at `$INSTALL_DIR/.env`,
+  because `sudo chown <me> "$file"` follows the link and hands the invoking
+  sudoer the TARGET (`.env -> /etc/shadow`), and whoever can write the stack dir
+  can plant one. Two other functions take ownership of the SAME path with the
+  same primitive — `setup_at_rest_encryption` and
+  `persist_host_env_session_secret` — guarded only by `-e`/`! -r`, which both
+  FOLLOW links. Both run BEFORE the first `env_put` at top level, so the guard
+  that existed was unreachable as a mitigation: the escalation completed first,
+  and `setup_at_rest_encryption`'s own "Cannot read" warning no longer fired
+  because the `chown` had just made the file readable. An unprivileged owner of
+  the stack dir could therefore take ownership of any root-owned file on an
+  ordinary installer re-run, with no race to win. A third site,
+  `carry_forward_prior_secrets`, early-returns on `-f`, which is FALSE for a
+  DANGLING link, so a planted `.env -> /etc/cron.d/x` fell through to
+  `sudo install`, which opens its destination `O_CREAT|O_TRUNC` and wrote the
+  prior stack's secrets through the link as root to a planter-chosen path. All
+  three now test `-L` first; a link is left alone and the existing
+  warn-and-degrade paths take over, so the self-heal still repairs a REGULAR
+  unreadable `.env` (pinned by a positive control). CWE-59/CWE-61 → CWE-269.
+- **Webhook event names can no longer carry markup into the Alerts panel
+  (`SEC-ALERTS-EVENTNAME-1`).** `POST`/`PUT /api/alerts/webhooks` needs only
+  `RoleOperator` and validated the URL but never the subscribed event names;
+  `normalizeEventNames` only migrates retired names and de-dupes, so `Add`/
+  `Update` persisted whatever was sent. The admin UI then rendered those names
+  into the webhook table through `innerHTML` with no escaping, while the `name`
+  and `url` cells beside them both used `escHtml` — so an operator could store
+  `<img src=x onerror=…>` that executed in the session of every viewer,
+  operator and ADMIN who opened the panel: a privilege escalation out of the
+  operator role, since an admin session carries full configuration and RBAC
+  authority. Both halves are closed: the cell renders through `escHtml` (which
+  also protects a name already on disk from before), and the two
+  operator-reachable endpoints reject a malformed name with 400 so it never
+  reaches the webhook file, a support bundle or any other consumer. The check is
+  a character class, not an allowlist of known events — the catalog grows as
+  rounds add alerts and is discovered by a differential oracle rather than
+  declared in one list, so an allowlist would silently unsubscribe a legitimate
+  new event. The `*` catch-all is admitted as a WHOLE name, never as a
+  character inside one, because refusing it would cause exactly the detection
+  loss `normalizeEventNames` exists to prevent. `Init` (disk) deliberately does
+  not validate, so a persisted name keeps dispatching rather than being dropped
+  on load; the escaped sink is what makes that safe. CWE-79, OWASP A03.
+
 ### Added
+
+- **Diagnostics now flags the admin-route authorization break-glass (Product
+  Experience).** Setting `CULVERT_C2_ENFORCE` to a false-ish value puts the
+  admin-route metadata gate in shadow (log and count, never block). That was
+  visible only in the startup environment and on the admin-only Governance
+  page, whose `governance_health` still reads `healthy` in shadow, so a node
+  left in break-glass after an incident looked identical to a healthy one on
+  `/api/diagnostics`. A new report-only `admin_route_enforcement_shadow` WARN
+  row names the switch, states that each handler's own role check still
+  applies, carries the would-deny count and tells the operator to remove the
+  variable and restart. No row in the default enforce mode; enforcement, the
+  mode and the counters are unchanged.
 
 - **A contained panic now tells an operator (CHAOS-120).** `recordCrash` is the
   single sink every recovered panic funnels into — the proxy plane, the admin
@@ -41,6 +99,46 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A configured audit log that could not be opened at startup no longer needs
+  a restart.** When `audit_log_file` / `-audit-log` failed to open at boot (a
+  missing directory, wrong ownership, a volume not yet writable), the trail
+  fell back to the 500-entry in-memory ring for the life of the process and
+  the `audit_log_persistence` row said to fix the path *and restart*. Every
+  entry recorded in between never reached the durable record. Culvert now
+  re-attempts the same configured path automatically (10 s doubling to a
+  2-minute cap, with jitter, no attempt limit) and, once it opens, writes the
+  entries recorded meanwhile in order and ahead of any newer one (up to the
+  newest 500; anything evicted is charged to `culvert_audit_write_errors_total`),
+  then records a `system`-attributed `audit.persistence.auto_open` entry. It
+  never chooses another path, never replaces a live sink, does nothing after
+  the shutdown hook has closed the trail, and is not armed by the one-shot
+  `prepare-downgrade` command, which still refuses when its audit sink cannot
+  be opened. No configuration, settings or version change.
+
+- **The process-wide alert store is now read and swapped atomically, removing
+  an intermittent data race from the race test lanes.** Alert delivery runs on
+  detached goroutines (a dozen `go fireAlert(...)` / `go alerts.Fire(...)`
+  producers) that read the store after the code that started them returned.
+  Tests swap the store, so a goroutine left over from one test raced the next
+  test's swap, and the race detector failed the root race shards under some
+  shuffled orders (seen on #1911). `globalAlertStore` is replaced by an
+  `atomic.Pointer` read through `alertStore()`. Production publishes the store
+  once, so there is no behaviour change; a goroutine that already loaded the
+  old store finishes against it.
+
+- **The HA compose file's `proxy` and `dp` services never ran their startup
+  script.** `docker-compose.ha.yml` sets `command: sh -c '... exec ./culvert
+  $$ARGS'` on images built from the repo Dockerfile, whose ENTRYPOINT is
+  `./culvert`. Compose prepends the ENTRYPOINT, so the container ran
+  `./culvert sh -c ...`; flag parsing stopped at `sh` and the node booted
+  HEALTHY (the healthcheck probes the default `:8080`) with every flag at its
+  default — in-memory roster, CA and policy (nothing persisted to the `/data`
+  volume), no ClamAV/YARA, no cluster DB, a standby that never used
+  `HA_JOIN`/`HA_TOKEN` (and skipped the empty-token refusal), and DPs that
+  never enrolled. Both services now set `entrypoint: []` so the script is the
+  container process; a contract test derives the effective argv from the
+  Dockerfile ENTRYPOINT and the compose service.
+
 - **Ten alert events were fired by production code with no way to subscribe to
   them from the Alerts panel, and four of them could never be delivered at all
   (CHAOS-120).** The panel's checkbox list is the only place Culvert's alert
@@ -64,6 +162,163 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unsubscribable and needs its reason recorded.
 
 ### Performance
+
+- **Concurrent SSRF guard misses for one host now share one DNS lookup.**
+  `ssrf.PrivateHost*` resolved through `net.Resolver.LookupHost`, which —
+  unlike `LookupIPAddr` — does not merge concurrent calls, so every CONNECT,
+  WebSocket and SOCKS5 pre-flight check that missed the verdict cache for the
+  same host issued its own A + AAAA lookup. A herd forms whenever a busy host's
+  30 s verdict expires, and it grows with resolver latency × arrival rate, so
+  a slow resolver received the most duplicate queries. Misses are now
+  single-flighted per host: 64 concurrent cold checks cost 64 lookups before
+  and 1 after (`BenchmarkPrivateHostBudget_ColdHerd`). Each caller still waits
+  under its own context and budget and gets the same error as before. The
+  shared lookup is cancelled, with the last caller's cause, only once every
+  caller has left. Verdicts, the never-cache-failures rule and the connect-time
+  re-check are unchanged.
+
+- **Victim selection in the local credential cache was a scan over every active
+  client, under the mutex every credential verification needs
+  (PERF-AUTHCACHE-1).** `authCacheStore.evictOneLocked` answered both of its
+  questions — "is any bucket front expired?" and "which front is the fairness
+  victim?" — by iterating `a.buckets` and calling `frontLocked` on each, whose
+  cost is a hashed map lookup on a string key. The fairness key is
+  `clientFairnessKey`, so that was one lookup per ACTIVE CLIENT per insertion,
+  for as long as the cache sat at its 5,000 cap — which, with a 5-minute TTL, is
+  the steady state of any deployment with a few thousand active addresses. The
+  cost was linear in a number an UNAUTHENTICATED client contributes to: the
+  cache is populated by unauthenticated requests, negative results included
+  (CHAOS-57), so the fairness policy got more expensive with the very flood it
+  exists to survive. One insertion at the cap, `benchstat` n=8 (Go 1.27.4,
+  linux/amd64, 4 vCPU Xeon @ 2.10 GHz): **1.352 µs at 1 client, 5.522 µs at
+  100, 58.802 µs at 1,000, 328.280 µs at 5,000** → **1.426 / 1.760 / 1.596 /
+  2.007 µs** (−68.12%, −97.29%, **−99.39%**; geomean −71.59%), flat in client
+  count instead of linear. On a realistic 31:1 read:write mix at 4-way
+  parallelism — almost all reads, which could not start while an insertion held
+  the mutex — average operation cost fell **−10.17% / −56.91% / −89.30%** at
+  100 / 1,000 / 5,000 clients (geomean −65.40%). The fix is
+  `internal/identcache`'s, whose eviction policy this cache already shares: two
+  binary heaps over the buckets holding a live entry, maintained incrementally,
+  so both questions are heap roots and an insertion at the cap is
+  O(log clients). The selection is unchanged — `a.victims` is ordered by the
+  same `betterAuthCacheVictim`/`identcache.BetterVictim` predicate the scan
+  applied — with one deliberate refinement: an expired front is now chosen by
+  earliest deadline rather than by Go's randomised map order, which is
+  deterministic. Costs, measured: `authCacheBucket` grows 40 → 136 bytes (the
+  memoised front plus two heap positions, ~560 KB at the cap). The
+  expired-front arm is flat at 1 client and FASTER at scale (median of 5:
+  1,000 clients 4.18 → 2.08 µs, 5,000 clients 8.62 → 2.55 µs). An earlier
+  draft reported it +42.70% slower; that figure came from a control benchmark
+  that did not keep its entries expired (Codex review), and the benchmark now
+  resyncs the index and re-ages its entries so every timed insertion takes the
+  expired path. Held by a differential oracle against the
+  scan it replaced (6 seeds × 1,500 randomised steps, all five guards
+  mutation-tested), an AST wall over `evictOneLocked`, and a machine-independent
+  `TestBenchGate_` ratio gate (1.00x indexed, 62.31x with the scan reverted,
+  bound 10x).
+
+- **Every successful IdP document fetch left its connection open.**
+  `fetchOIDCDiscoveryOverNetwork` and `fetchSAMLMetadataOverNetwork` each build
+  an `http.Transport` for one request and drop it on return. A zero-value
+  transport keeps connections alive and has no idle timeout, and a pool nobody
+  holds can be neither reused nor closed, so each fetch parked one TCP
+  connection, its file descriptor and the transport's two loop goroutines until
+  the IdP hung up: for the life of the process against an IdP or load balancer
+  that does not time idle connections out. A fetch runs on every provider
+  compile of a remote-document profile (boot, an IdP profile write, a CP->DP
+  snapshot apply, and the recovery and revalidation loops). Both transports now
+  set `DisableKeepAlives`. Measured in-process over 200 fetches against a
+  keep-alive server with no idle timeout (Go 1.27.4): 200 connections still
+  open and +600 goroutines (two per connection in the transport, one in the
+  test server) before; 0 and +0 after. No connection reuse is given up, because
+  none was possible. The request now carries `Connection: close`; the URL
+  guards, the SSRF dialer, the shared fetch budget and the returned document
+  are unchanged. New `idp_fetch_conn_release_test.go` counts connections on the
+  server side.
+
+- **The pre-flight SSRF guard on every tunnel path resolved DNS with no
+  deadline and no link to the client, so the 10 s dial bound behind it was
+  unreachable during a resolver outage.** CONNECT (bypass and inspect),
+  WebSocket and SOCKS5 each bound their upstream dial at 10 s, but ran
+  `isPrivateHost` in front of it under `context.Background()`. On a verdict
+  cache miss that is a second, unbounded resolution of the same name: a
+  resolver that stops answering held each request goroutine — with its client
+  connection, descriptor and per-IP connection-limiter slot — for the OS
+  resolver's whole budget (timeout × attempts × nameservers, multiplied again
+  by search domains), and kept holding it after the client hung up. Measured
+  against a resolver that never answers (Go 1.27.4, a two-nameserver
+  `timeout:2 attempts:3` resolv.conf): the guard returned after **12.0 s**
+  with the client long gone; with glibc defaults and three nameservers the
+  same arithmetic is 30 s before search domains. The guard now goes through
+  `ssrf.PrivateHostBudget`: the lookup is cancelled when the request context
+  ends (returned in 100 ms in the same experiment) and is capped at
+  `tunnelGuardBudget` (10 s — the dial's own allowance for the same
+  resolution, so no destination that could have been dialled is newly
+  refused). Verdicts, the 30 s verdict cache, "failures are never cached" and
+  the connect-time `ssrfControl` re-check are unchanged, and an undetermined
+  destination still fails closed with the same 403 / SOCKS5 `0x02`; a budget
+  overrun wraps the new `ssrf.ErrLookupBudget` and, like every resolver
+  failure, never `ssrf.ErrBlocked`. The timer is created only on a cache
+  miss, so a cached verdict — the per-request hot path — allocates exactly
+  what it did before (pinned by
+  `TestPrivateHostBudget_CacheHitPaysNothingForTheBound`). New
+  `tunnel_guard_bound_test.go` pins all four call sites by the cancellation
+  *cause* the resolver observes rather than by elapsed time. Not changed: the
+  SOCKS5 dial still runs under `context.Background()` (bounded by its 10 s
+  dialer timeout, but not cancelled by a client hang-up), and concurrent
+  misses for one host are not single-flighted.
+
+- **The syslog/SIEM request sink was the one request-log sink still paying a
+  reflective `json.Marshal` plus three redundant copies per record, on the
+  request goroutine.** Delivery was already asynchronous — a slow collector
+  costs a caller a channel send and nothing more — but the part that BUILDS the
+  line stayed on the caller, and for `WriteRequest` that caller is a proxy
+  request goroutine, once per logged request, on every protocol. It boxed the
+  352-byte `logstore.Entry` into an `any`, marshalled it into a fresh slice,
+  copied that slice into a string for `send`, and then built the header with a
+  `time.Format` plus a `fmt.Sprintf` and concatenated three strings; the drain
+  goroutine then put the finished line on the socket through `fmt.Fprint`. The
+  same record's two OTHER sinks already serialize with no per-record allocation
+  at all (`internal/reqlog/persist.go`'s retained `Encoder` over a
+  `bufio.Writer`, `internal/logstore/batchencode.go`'s retained encoder over
+  one batch buffer); this sink was simply the third and had not been given the
+  same treatment. One pooled buffer per line now carries both header and body:
+  the header is appended with `strconv`/`AppendFormat`, a structured body is
+  JSON-encoded straight into that buffer by a retained `json.Encoder`, the line
+  is converted to a string exactly once, and the drain borrows a buffer from
+  the same pool to write it. Measured on a real-shaped record (25 fields,
+  ~375 bytes of JSON; Go 1.27.4, linux/amd64, 4 vCPU Xeon @2.10GHz,
+  `-benchtime=2s`, medians), with the before row produced by running the SAME
+  new benchmark arm against the parent commit in a worktree: 10 allocs /
+  1,665 B / 3,420 ns per record before, **2 allocs / 768 B / 2,421 ns** after —
+  80% fewer allocations and 54% less garbage inside the request goroutine
+  wherever a SIEM collector is configured. Stage arms, both in one binary:
+  header assembly 6 → 1 allocs (rfc3164) and 7 → 1 (rfc5424); the drain's
+  per-line write 1 → 0. For scale, the whole in-process plain-HTTP forward path
+  is 94 allocs and 11.9 KB per request, so this sink alone was adding ~11% to
+  the per-request allocation count and ~14% to its garbage. No wire change:
+  `json.Encoder.Encode` emits exactly `json.Marshal`'s compact bytes plus the
+  one terminator the text path appended itself, and the new
+  `TestLineFormat_ByteIdentity_*` tests compare every assembled line — header,
+  body, terminator and the body offset a format handoff re-encodes from —
+  against the retained `fmt.Sprintf` + `json.Marshal` implementation across
+  both wire formats, HTML-escapable runes, U+2028/9, invalid UTF-8, a nil body
+  and the zero record. The preserved failure contract is pinned too: a body
+  `json` cannot serialize is still dropped silently rather than sent truncated,
+  and is still not charged as a collector drop. The pool is bounded (a line
+  above 16 KiB is sent and its buffer dropped rather than parked) and buffers
+  are reset on acquisition, so a record abandoned mid-assembly cannot leak into
+  the next line. `TestBenchGate_SyslogLineAllocs` bounds allocs/op and B/op for
+  every arm and additionally asserts each is cheaper than the shape it
+  replaced, so reinstating the intermediate slice or the string copy fails even
+  if the absolute bound is generous; it sits behind the `benchgate` tag like
+  every other allocation gate in the tree, and `internal/syslog` is added to
+  the explicit package list the three benchgate runners iterate — a gate on no
+  runner's list never runs. NOT addressed, and left measurable: the
+  reflective encode itself is ~1.6 µs of the ~2.4 µs that remains, and closing
+  it needs a hand-written encoder for a type this stdlib-only leaf package
+  deliberately cannot name — a different change, behind the same differential
+  oracle.
 
 - **`BenchmarkHTTPForward_HandleHTTP` overstated the plain-HTTP forward path's
   memory by ~3.7x, against its own stated purpose of reporting "the real
@@ -294,6 +549,42 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A panicking feed round in `internal/feedsched` now reaches the crash plane,
+  and the cold-start predicate can no longer kill the process.** The scheduler's
+  `Config.OnPanic` seam was defined, documented and set by no production caller,
+  so every panic the package contained itself fell to a single WARN line —
+  containment with no reporting: no crash record, no counter increment, no audit
+  entry and no page. The nil fallback now reports to the shared panic sink under
+  one fixed `feedsched_round` label (one label, not one per feed: the sink's
+  component set is capped and fails closed past the cap, so a per-feed label
+  would be an unbounded label in a bounded map; the feed's name rides the WARN
+  line beside it). Separately, `Run` consulted `Config.RunNow()` outside every
+  guard, while both shipped feeds' guards sit inside `Config.Run` and
+  `internal/threatfeed` launches `Run` with a bare `go` statement — and
+  `feedsync`'s predicate is `fs.db.Stats() == 0`, a BadgerDB call on a handle the
+  scheduler does not own. A corrupt or already-closed store therefore killed the
+  **gateway** at startup from the one line in the cold-start path nobody guarded.
+  The predicate is now contained and answers "do not run now", so the loop falls
+  through to its normal cadence and a real round reports its own outcome at the
+  first tick; the stated cost is that such a node's first sync waits one interval
+  instead of running immediately. Both containment paths report through one
+  method, so neither can be fixed while the other stays silent, and a configured
+  `OnPanic` still owns the report rather than double-counting the crash counter.
+
+- **Diagnostics now warns when a configuration change was applied without a
+  rollback point.** Version capture after a configuration change is
+  best-effort: when the version file cannot be written, or capture is refused
+  while rewrite-rule identity is not durable, the change stays applied, the
+  admin UI reports success and the only trace was one process-log line. Config
+  Versions simply gained no entry and every `config_versions_*` row stayed OK,
+  so the missing rollback point was discovered only when a rollback was needed.
+  A new `config_version_capture` WARN row (additive, report-only, absent while
+  the latest capture succeeded) gives the number of changes without a rollback
+  point, the time of the first one and a fixed cause class, never the error
+  text or a path. It clears on the next recorded version, which captures the
+  full current configuration. Capture, refusal and the mutation paths are
+  unchanged.
+
 - **Diagnostics now warns when the OpenTelemetry (OTLP) export is failing.**
   The push-loop failure count and last error were shown only under Settings →
   OpenTelemetry (OTLP); the one-page report read as healthy while the collector
@@ -369,6 +660,60 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `pac_legacy_config_newer` row on Infrastructure → Diagnostics states it with
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
+
+- **An automatically renewed Root CA could change its key identifier, so
+  OpenSSL-based clients holding only the old root rejected every inspected
+  connection during the overlap window.** Renewal keeps the key and subject
+  (#1854), but the renewed certificate's Subject Key Identifier was left for
+  the Go toolchain to derive, and that derivation changed in Go 1.25 (SHA-1 to
+  truncated SHA-256). A root issued by an older build, or any managed root
+  whose identifier is not today's derivation, was renewed under a different
+  one; each new leaf then named it in its Authority Key Identifier, which
+  OpenSSL (curl, Python, git) treats as "not issued by the old root". Go's own
+  verifier only uses the identifier as a hint, which is why the existing
+  overlap test passed. Renewal now carries the old root's identifier over
+  verbatim. A freshly generated root is unchanged.
+
+- **Re-running `scripts/install.sh` on RHEL, CentOS, Rocky, Alma, Oracle Linux
+  or Fedora uninstalled the Docker Engine the first run had installed, took
+  the proxy down and then aborted.** The "Cleaning up old Docker
+  installations" step removed `containerd.io` along with the distro packages,
+  but `containerd.io` is Docker CE's own runtime (installed by the script from
+  download.docker.com) and `docker-ce` requires it, so `dnf remove -y
+  containerd.io` removed `docker-ce` as a dependent package — stopping the
+  daemon and every Culvert container. The run could not recover:
+  `docker-ce-cli` and `docker-compose-plugin` survive the removal, so the
+  install step read "Docker with Compose v2 already installed" and was
+  skipped, `docker.service` no longer existed, and the recovery path's `dnf
+  reinstall` only reinstalls packages that are still installed. Measured
+  against the real dnf in `rockylinux:9` with Docker CE 29.9.3 /
+  containerd.io 2.4.2. The step no longer removes `containerd.io`; distro
+  `docker`, `podman-docker` and `runc` are still removed. New
+  `install_script_rhel_rerun_keeps_docker_ce_test.go` fails before the change
+  and passes after. Debian-family hosts were never affected (that arm removes
+  the distro `containerd`, not `containerd.io`).
+
+
+- **A SIEM/syslog collector that was unreachable while the node booted stayed
+  unserved until an operator re-saved the target or restarted.** Both boot
+  paths tolerate a failed connect and keep proxying, but nothing dialled
+  again: the engine's reconnect belongs to a writer, and a failed boot dial
+  produces none. A collector that came up a minute after the gateway (or
+  whose name did not resolve until DNS was up) therefore lost every audit and
+  request event for the life of the process. The failed boot dial is now
+  retried in the background — about 10 s after the failure, doubling to one
+  bounded attempt every 2 minutes, with jitter — until it connects, the
+  operator disables or re-points forwarding, or the node shuts down. It dials
+  the same configured target with the same format and publishes through the
+  same transition as `InitSyslog`; a retry whose dial was in flight when the
+  operator changed the target is discarded. Unchanged: the feed is still
+  reported down immediately (`culvert_syslog_up 0`, `syslog_feed`,
+  `syslog_feed_down`) until a writer exists, lost events are still counted and
+  never replayed, a refused live re-point (400) still changes nothing, and no
+  settings write or configuration version is produced. The automatic connect
+  is logged and audited as `settings.syslog.auto_connect` with actor `system`.
+  The alert Detail, the `syslog_feed` operator action and
+  `docs/operator/siem-feed-delivery.md` no longer say "nothing retries".
 
 - **`scripts/install.sh` aborted on every supported Fedora release before
   Docker was installed.** The Fedora branch registered Docker's repository with
@@ -527,6 +872,32 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   checks before it is relayed (`relayDeclinedUpgrade`). Real WebSocket
   sessions (101) are unchanged. Proven by
   `TestWebSocketUpgradeHeaders_DoNotBypassPlainHTTPFileBlock`.
+
+- **An SSL-inspect rule no longer relays a non-TLS client into the proxy's own
+  TLS session to the origin.** On the default strip-ALPN inspect path, a client
+  that did not start TLS had its plaintext request raw-relayed into the
+  already-established upstream TLS connection. It reached the HTTPS origin with
+  no inner-host pin, file block, DPI, scan or per-request log row, and could
+  reach any vhost on a shared front end through a tunnel authorized for another.
+  The fallback existed for SSH/RDP but could not serve them: those origins fail
+  the upstream TLS handshake before the peek. Such a client is now refused: both
+  legs close and a `DECRYPT_FAILED` entry records a client-hello protocol
+  failure. The auto-exclusion learner is deliberately not fed, so the refusal
+  cannot turn into a bypass on the next connection. The native-ALPN
+  plaintext-to-plaintext fallback is unchanged. Owner decision on #1929.
+
+- **`install.sh`'s `env_put` no longer acts through a symlink at `.env` with
+  `sudo`.** This is the `.env` half of the link-following issue #1909 closed
+  for `.env.lock` (residual R1 of the 2026-11-15 review). A DANGLING `.env`
+  link was treated as a missing file (`-e` is false for it), so the installer
+  created its target, as root through `sudo touch` when the stack directory
+  was not writable. A LIVE link the invoker could not write went to
+  `sudo chown`, which follows the link and hands the target to the invoking
+  sudoer (`.env -> /etc/shadow`). A dangling `.env` link is now refused with a
+  warning. A live one is never handed to `sudo`: it is used when it is already
+  writable, and otherwise `env_put` warns and skips, as it does for any `.env`
+  it cannot take. Symlinked `.env` files the installing user can write keep
+  working (owner decision on #1898/#1909). CWE-59/CWE-61.
 
 - **An installer re-run in a stack directory it could not write started the
   stack with encryption at rest silently DISABLED, while reporting it as

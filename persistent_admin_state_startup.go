@@ -45,7 +45,7 @@ func loadPersistentAdminState(cfg persistentAdminStateStartupConfig, ctx context
 	initConfigVersioning()
 	globalNodeGroups = NewNodeGroupStore(cfg.NodeGroupsPath)
 	globalBandwidth = NewBandwidthManager(cfg.BandwidthPath)
-	globalAlertStore.Init(cfg.AlertWebhooksPath)
+	alertStore().Init(cfg.AlertWebhooksPath)
 	// Load the persisted baseline, then merge it into the per-rule counter cells
 	// (RestoreHitCounts) BEFORE starting the periodic/shutdown saver. Starting
 	// the saver first would let a save racing the load→restore window (e.g. ctx

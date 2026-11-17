@@ -43,10 +43,10 @@ import (
 // dedup state.
 func withCDRAlertStore(t *testing.T) *AlertStore {
 	t.Helper()
-	old := globalAlertStore
+	old := alertStore()
 	fresh := &AlertStore{}
-	globalAlertStore = fresh
-	t.Cleanup(func() { globalAlertStore = old })
+	alertStoreRef.Store(fresh)
+	t.Cleanup(func() { alertStoreRef.Store(old) })
 	return fresh
 }
 
@@ -101,12 +101,12 @@ func (r *fireAlertRecorder) wait(t *testing.T, n int, event string) []string {
 // real dispatch, so the alert store's dedup accounting stays exercised.
 //
 // THE ORDER IS THE SYNCHRONISATION, not a style choice. The real fireAlert reads
-// the globalAlertStore var, and withCDRAlertStore's cleanup WRITES it — so a
+// the alertStore() var, and withCDRAlertStore's cleanup WRITES it — so a
 // recorder that appended BEFORE delegating let wait() return while the delegated
 // Dispatch was still running, and the test's cleanup then raced it. The race
 // detector caught exactly that (Race · root shard 3 on 96dcc0c):
 //
-//	Write  withCDRAlertStore.func1  (cleanup restoring globalAlertStore)
+//	Write  withCDRAlertStore.func1  (cleanup restoring alertStore())
 //	Read   alerts.go:47 fireAlert   (reached from this wrapper's delegation)
 //
 // Delegating FIRST makes an observed record proof that the dispatch behind it has
@@ -276,7 +276,7 @@ func TestNoteCDRCallError_NoSubscriberNoDispatch(t *testing.T) {
 	// goroutine the loop spawned has had at least as long to land too.
 	//
 	// SYNCHRONOUS on purpose: a `go fireAlert(...)` here would still be inside
-	// Dispatch — reading globalAlertStore — when the test returned and its
+	// Dispatch — reading alertStore() — when the test returned and its
 	// cleanup restored that var, which is the data race this gate first shipped
 	// with. Firing inline leaves nothing in flight at cleanup and is a stronger
 	// barrier besides.
@@ -331,7 +331,7 @@ func TestNoteCDRCallError_SubscribedFiresOneDedupKey(t *testing.T) {
 	// The store dedups on exactly "event:detail", so the recorded content above
 	// IS this producer's key set; pin the one key to the bounded status class.
 	// Do NOT count store.DedupTracked() instead: the store is reachable through
-	// globalAlertStore by every `go fireAlert(...)` still in flight from an
+	// alertStore() by every `go fireAlert(...)` still in flight from an
 	// EARLIER test, and Dispatch records a key before it matches any hook. Under
 	// -shuffle 1793004681587733862 the two decryption_autoexclude promotions of
 	// TestADR0008_ClientPinnedRequiresAuthenticatedIdentity landed here and

@@ -44,7 +44,7 @@ import (
 // forms are the whole surface: main's fireAlert, the package's own
 // alerts.Fire, the store method, and the HasSubscriber gate (which names an
 // event even where the Fire is built elsewhere).
-var alertFireRe = regexp.MustCompile(`(?:fireAlert|alerts\.Fire|globalAlertStore\.Fire|HasSubscriber)\(\s*"([a-z0-9_]+)"`)
+var alertFireRe = regexp.MustCompile(`(?:fireAlert|alerts\.Fire|alertStore\(\)\.Fire|HasSubscriber)\(\s*"([a-z0-9_]+)"`)
 
 // guiEventRe finds a subscribable event in the Alerts panel.
 var guiEventRe = regexp.MustCompile(`class="wh-event" value="([a-z0-9_]+)"`)
