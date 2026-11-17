@@ -220,7 +220,7 @@ share; a real blocked request does other work between calls.
   `scheduleClock` memo and a `hostCatScratch` reused across conditions. The
   `//nolint:gocognit` on it is explicit that the zero-alloc contract forbids
   extraction. Correctly left alone.
-- **`persistLogEntry`** (`store.go:2932`) — one clock read per record, the
+- **`persistLogEntry`** (`store.go:2933`) — one clock read per record, the
   human-readable stamp memoised per wall-clock second, destination pseudonymised
   once and threaded into the URI redactor so the HMAC runs a single time. Already
   allocation-free on the per-request path.
