@@ -549,7 +549,11 @@ func handleSOCKS5(conn net.Conn) {
 	}
 
 	// ── SSRF guard: block private/internal destinations ───────────────────────
-	if err := isPrivateHost(target); err != nil {
+	// Bounded (tunnelGuardBudget): there is no request context on this path,
+	// and the 30 s negotiation deadline governs socket I/O only, not the
+	// resolver — unbounded, a wedged resolver pinned this goroutine, the client
+	// socket and its connLimiter slot for the OS resolver budget.
+	if err := isPrivateHostBounded(context.Background(), target); err != nil {
 		socks5Reply(conn, 0x02) // Connection not allowed by ruleset
 		// The error embeds the destination, so it carries the same client-chosen
 		// bytes the target does and is sanitised for the same reason.
