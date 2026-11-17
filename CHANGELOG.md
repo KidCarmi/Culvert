@@ -222,6 +222,76 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The alert gate that exists to protect a degraded node was itself a
+  throughput ceiling on the degraded node (PERF-ALERTGATE-1).**
+  `alerts.Store.HasSubscriber` answers "will firing this event reach anyone?", so
+  a producer can skip the goroutine spawn, the payload allocation and the round
+  trip through the process-wide dedup mutex needed to deliver an alert to nobody.
+  Every producer behind it is FAULT-driven — its rate is set by an attack or an
+  outage, not by an operator: `recordStats` calls it per BLOCKED request
+  (`threat_detected`, `policy_block`), `fireDNSFailureAlert` calls it per request
+  from four dial sites (`proxy_http.go`, three in `proxy_tunnel.go`),
+  `internal/secscan` per oversized body and per scan error, `cdr_proxy.go` per
+  CDR submission. It took `sync.RWMutex.RLock`, which is two atomic
+  read-modify-WRITES on ONE process-wide word, so every blocked request wrote the
+  same cache line purely to read a webhook list that changes only when an
+  operator edits it — and in the default posture, to iterate a list that is
+  EMPTY, which is also the state of every test binary. Both the function's own
+  doc comment ("Cheap: one RLock, no allocation") and the block path's
+  ("The gate is a pure fast path") asserted the opposite; `hostCounter` in
+  `store.go` already carried the refutation verbatim ("It used to take mu.RLock
+  around the map read, on the reasoning that a reader lock is cheap. It is
+  not."). The subscription answer is now derived once per mutation and published
+  as an immutable value behind an `atomic.Pointer`: a steady-state read is one
+  atomic pointer LOAD (a shared-line read, which scales), a bool test for the
+  `"*"` catch-all hoisted out of the map, and at most one lookup in a small
+  `map[string]struct{}`. `mu` still owns `hooks` and is still the only way to
+  mutate it; it is no longer taken by the read path. A second, independent defect
+  went with it: the scan was `O(hooks × events)` and ran to COMPLETION on a miss
+  — the common answer, since a hook subscribed to `cert_expiry` is asked about
+  `policy_block` on every blocked request — so an operator fanning alerts to a
+  large collector set paid for their own fan-out on the block path. Complexity is
+  now `O(1)` in the hook count. Measured with the verbatim RWMutex arm compiled
+  into the SAME binary (go1.27.4, 4-vCPU Xeon @2.30GHz, n=5 medians, RunParallel
+  so ns/op is wall time across all workers): default posture 13.07/96.35/101.70
+  ns at P=1/2/4 -> 2.06/1.02/0.52 (6x at one core, 197x at four); 3 hooks
+  subscribed 13.87/122.30/129.50 -> 7.76/3.66/1.82 (71x at four); 5 hooks not
+  subscribed 17.76/163.60/193.80 -> 9.08/4.54/2.28 (85x at four); 50 hooks not
+  subscribed 200.80/352.20/335.10 -> 9.17/4.63/2.30 (146x at four). The SIGN is
+  the finding: adding cores SUBTRACTED throughput in every posture (1->4 =
+  0.09-0.13x, so four cores delivered a ninth of one core's) and now adds it in
+  every posture (3.98-4.27x). State the cost honestly too: at P=1 with a handful
+  of hooks the win is only ~2x, because an uncontended `RLock` is genuinely cheap
+  and a map lookup is not free — the case is the concurrency curve, not the
+  single-core constant. This is the FIFTH instance of the identical reader-lock
+  ceiling in this tree (`internal/threatfeed`, `internal/connlimit`, the IP
+  filter, the top-hosts counter and `internal/scanexcl` all record the same
+  finding and the same answer) and the first on an alert-producer gate. The
+  failure mode that matters is not slowness but a stale index silently
+  UNSUBSCRIBING a configured webhook — nothing reports a skipped alert — so the
+  change is held differentially, not by timing: `hasSubscriberScan` in
+  `subscriptions_test.go` is a verbatim copy of the pre-change implementation and
+  both arms are asked 16 hook configurations against every event name mentioned
+  in each, including the two queries that probe the catch-all encoding itself;
+  `Add`/`Update`/`Delete`/`Init` are each pinned to republish (this test found a
+  real gap during the pass — `Init` returns early when no `alert_webhooks.json`
+  exists, leaving the fast path unarmed in exactly the default posture that
+  matters most, now fixed on every `Init` exit with disk I/O still off `mu`); the
+  partial-`Unmarshal` path and 4 readers against 50 add/update/delete cycles are
+  covered under `-race`. The pre-existing `TestHasSubscriber` contract test is
+  untouched. One `HasSubscriber` call is ~13 ns against a CONNECT this box serves
+  in ~200 µs, so no end-to-end benchmark moves and none is claimed to: what was
+  removed is a non-scaling term on a fault-driven per-request path, and the
+  removal makes the code simpler rather than more complex. No contract code path,
+  API, UI, audit or persistence behavior changes, and the on-disk
+  `alert_webhooks.json` format is untouched. Full round record in
+  `docs/engineering/PERFORMANCE-GUARDIAN-REVIEW-2026-11-17.md`, which also
+  records `handleRequest`'s front door, policy evaluation, `persistLogEntry` and
+  a whole-tree in-function `regexp.Compile` sweep as measured and already
+  appropriate, and flags `Store.Dispatch`'s per-fire `[]Webhook` copy — now
+  reachable under a flood because this gate stopped being the bottleneck — as
+  the next thing to measure.
+
 - **Every response Culvert decrypted took a process-wide reader lock to ask an
   empty map a question (PERF-SCANEXCL-1).** `scanexcl.Store.IsHostExcluded` is
   called from `scanInspectBody` UNCONDITIONALLY — ahead of the content-type
