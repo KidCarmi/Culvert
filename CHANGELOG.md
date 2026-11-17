@@ -41,6 +41,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The process-wide alert store is now read and swapped atomically, removing
+  an intermittent data race from the race test lanes.** Alert delivery runs on
+  detached goroutines (a dozen `go fireAlert(...)` / `go alerts.Fire(...)`
+  producers) that read the store after the code that started them returned.
+  Tests swap the store, so a goroutine left over from one test raced the next
+  test's swap, and the race detector failed the root race shards under some
+  shuffled orders (seen on #1911). `globalAlertStore` is replaced by an
+  `atomic.Pointer` read through `alertStore()`. Production publishes the store
+  once, so there is no behaviour change; a goroutine that already loaded the
+  old store finishes against it.
+
 - **Ten alert events were fired by production code with no way to subscribe to
   them from the Alerts panel, and four of them could never be delivered at all
   (CHAOS-120).** The panel's checkbox list is the only place Culvert's alert
