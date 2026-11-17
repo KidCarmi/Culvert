@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,14 +29,16 @@ import (
 // roleRequest builds an admin-API request carrying an explicit role, so the
 // authorization arm can drive a non-admin caller.
 func roleRequest(method, path, body string, role UIRole) *http.Request {
-	var r *http.Request
+	ctx := context.WithValue(context.Background(), uiRoleKey{}, role)
+	var rdr io.Reader = http.NoBody
 	if body != "" {
-		r, _ = http.NewRequest(method, path, strings.NewReader(body))
-		r.Header.Set("Content-Type", "application/json")
-	} else {
-		r, _ = http.NewRequest(method, path, nil)
+		rdr = strings.NewReader(body)
 	}
-	return r.WithContext(context.WithValue(r.Context(), uiRoleKey{}, role))
+	r, _ := http.NewRequestWithContext(ctx, method, path, rdr)
+	if body != "" {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	return r
 }
 
 func withEmptyAlertStore(t *testing.T) *AlertStore {

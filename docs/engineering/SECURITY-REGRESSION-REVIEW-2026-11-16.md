@@ -222,9 +222,17 @@ enforcement, the roster and the stored secrets its endpoints expose.
   its sibling cells. This is the authoritative fix, and the only one that helps
   a name **already persisted** before today.
 - **Ingress:** `alerts.ValidateEventNames` (new,
-  `internal/alerts/store.go`) is applied at both operator-reachable endpoints
-  (`ui_security.go`, `POST` and `PUT`), returning 400, so the value never
-  reaches the webhook file, a support bundle or any other consumer.
+  `internal/alerts/store.go`) is applied at both operator-reachable endpoints,
+  returning 400, so the value never reaches the webhook file, a support bundle
+  or any other consumer.
+- **The two arms now share one definition of an acceptable payload.** The
+  create and update arms each carried their own validation walk, which is
+  *how* the event names came to be validated in neither: a check added to one
+  is silently absent from the other, and `PUT` re-supplies the whole webhook,
+  so an update is the same ingress as a create. Both now call
+  `webhookPayloadRejected`, with the one real difference between them
+  (`urlRequired`) as a parameter. That also makes the handler **simpler than it
+  was at base** rather than more complex — see *Verification*.
 
 Two deliberate design decisions in the validator, both recorded because the
 obvious stricter choice is the wrong one here:
@@ -256,7 +264,7 @@ obvious stricter choice is the wrong one here:
 | `static/index.html` | webhook events cell rendered through `escHtml` |
 | `internal/alerts/store.go` | new `ValidateEventNames`, `maxEventNameLen`, `catchAllEvent` |
 | `alerts.go` | `validateWebhookEvents` re-exposed for the admin handlers |
-| `ui_security.go` | event-name validation on `POST` and `PUT /api/alerts/webhooks` |
+| `ui_security.go` | new `webhookPayloadRejected` — one shared payload validation for the create and update arms, now including the event names |
 | `install_script_env_selfheal_symlink_test.go` | new — Finding A |
 | `alerts_webhook_eventname_injection_test.go` | new — Finding B |
 | `internal/alerts/eventname_validation_test.go` | new — Finding B, white-box |
@@ -344,17 +352,47 @@ Run at `881abf0` plus the changes above, with the `go.mod` `toolchain`
 - `go test ./internal/alerts/` — pass, full package.
 - `go test . -run 'InstallScript'` — pass.
 - `go test . -run 'Alert|Webhook|Syslog|GUIParity|Parity'` — pass.
-- `go test .` (full root package) — see the PR body for the result at the pushed
-  SHA.
+- `go test ./...` — **all 120 packages pass** (exit 0), root package included.
+- One **pre-existing flake** was observed and is recorded rather than hidden:
+  `TestInstallScript_EnvPut_ConcurrentDistinctVars_NoCorruptionOrDeadlock`
+  failed once during a full-suite run (one of 8 concurrent `env_put` processes
+  lost its write) and passed in the next full-suite run. It is not this change:
+  the test extracts and exercises `env_put` alone, and `env_put` is
+  **byte-identical** to `origin/main` here (verified by extracting the function
+  from both revisions and diffing — 133 lines, no difference). It also passed 30
+  consecutive isolated runs, 25 of them under 8x CPU contention, so it
+  reproduces only under whole-suite resource pressure.
 
-**Not run, and why:** `golangci-lint` is not run locally — the container's
-binary is older than this module's language version and refuses it, which is the
-recorded "local lint is unavailable" condition; the gate installs its own pinned
-version built with the `go.mod` toolchain. CodeQL, the race suite and the
-hosted aggregate gates run in CI. A passing local check is not a passing hosted
-review or merge gate. `docs/agent-context/check.py` was not run because
-`docs/engineering/*` is not a guidance path in the Fast PR Gate's classifier —
-only `AGENTS.md`/`CLAUDE.md`/skill/`docs/agent-context/*` paths are.
+- `golangci-lint` **was** run, at the version the gate pins (`v2.15.0`)
+  installed with the `go.mod` toolchain, which is the recorded way around the
+  container's older binary:
+  - the gate's own command, `run --new-from-rev origin/main` — **0 issues**.
+  - a **full-tree pass measured against the same pass on the base**, because
+    `cyclop`/`funlen`/`gocognit` attribute to a function's DECLARATION line and
+    so cannot be seen by `--new-from-rev`. This matters here: the fix adds
+    validation to `apiAlertsWebhooks`, a handler that was ALREADY over
+    threshold. Measured with `--max-issues-per-linter=0 --max-same-issues=0
+    --uniq-by-line=false` (without the last flag only one finding per line is
+    shown, which silently hid the comparison):
+
+    | `apiAlertsWebhooks` | base `881abf0` | with this change |
+    |---|---|---|
+    | `cyclop` (max 15) | **20** | **18** |
+    | `funlen` (max 50 statements) | **56** | not reported (≤50) |
+    | `gocognit` (max 30) | not reported | not reported |
+
+    Extracting `webhookPayloadRejected` is what buys that: the handler ends up
+    strictly simpler than base on every declaration-attributed metric while
+    gaining a security control. Whole-tree totals are unchanged at 162 issues
+    on both trees — the tree is not lint-clean under a full run by design
+    (`pr-fast-gate.yml` records ~137 legacy findings), which is why the gate is
+    diff-scoped.
+
+**Not run, and why:** CodeQL, the race suite and the hosted aggregate gates run
+in CI. A passing local check is not a passing hosted review or merge gate.
+`docs/agent-context/check.py` was not run because `docs/engineering/*` is not a
+guidance path in the Fast PR Gate's classifier — only
+`AGENTS.md`/`CLAUDE.md`/skill/`docs/agent-context/*` paths are.
 
 ## Residual risk
 

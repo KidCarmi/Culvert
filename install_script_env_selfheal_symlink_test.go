@@ -238,7 +238,9 @@ carry_forward_prior_secrets
 // missed it and `sudo install` wrote the PRIOR stack's secrets through the link
 // — as root, to a path the planter chose.
 func TestInstallScript_CarryForward_DanglingEnvSymlink_WritesNothingThrough(t *testing.T) {
-	const secret = "CULVERT_CA_PASSPHRASE=prior-stack-secret\n"
+	// Named for the LINE it is, not the value: a `secret` identifier trips
+	// gosec G101 on content that is a fixture (see 27910fc).
+	const priorEnvLine = "CULVERT_CA_PASSPHRASE=prior-stack-secret\n"
 	stack, outside, scratch := envSymlinkDirs(t)
 	base := filepath.Dir(stack)
 
@@ -246,7 +248,7 @@ func TestInstallScript_CarryForward_DanglingEnvSymlink_WritesNothingThrough(t *t
 	if err := os.Mkdir(prior, 0o700); err != nil {
 		t.Fatalf("mkdir prior: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(prior, ".env"), []byte(secret), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(prior, ".env"), []byte(priorEnvLine), 0o600); err != nil {
 		t.Fatalf("seed prior .env: %v", err)
 	}
 
@@ -271,7 +273,9 @@ func TestInstallScript_CarryForward_DanglingEnvSymlink_WritesNothingThrough(t *t
 // Positive control: with no .env present at all — the case this function exists
 // for — the prior secrets must still be carried forward.
 func TestInstallScript_CarryForward_NoEnv_StillCarriesForward(t *testing.T) {
-	const secret = "CULVERT_CA_PASSPHRASE=prior-stack-secret\n"
+	// Named for the LINE it is, not the value: a `secret` identifier trips
+	// gosec G101 on content that is a fixture (see 27910fc).
+	const priorEnvLine = "CULVERT_CA_PASSPHRASE=prior-stack-secret\n"
 	stack, _, scratch := envSymlinkDirs(t)
 	base := filepath.Dir(stack)
 
@@ -279,7 +283,7 @@ func TestInstallScript_CarryForward_NoEnv_StillCarriesForward(t *testing.T) {
 	if err := os.Mkdir(prior, 0o700); err != nil {
 		t.Fatalf("mkdir prior: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(prior, ".env"), []byte(secret), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(prior, ".env"), []byte(priorEnvLine), 0o600); err != nil {
 		t.Fatalf("seed prior .env: %v", err)
 	}
 
@@ -290,7 +294,7 @@ func TestInstallScript_CarryForward_NoEnv_StillCarriesForward(t *testing.T) {
 		t.Fatalf("the prior .env must still be carried forward: %v\nsudo calls: %v\noutput:\n%s",
 			err, sudoCalls, out)
 	}
-	if string(got) != secret {
-		t.Errorf("carried-forward content = %q, want %q", string(got), secret)
+	if string(got) != priorEnvLine {
+		t.Errorf("carried-forward content = %q, want %q", string(got), priorEnvLine)
 	}
 }
