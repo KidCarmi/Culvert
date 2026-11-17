@@ -1805,7 +1805,7 @@ func checkInteractiveLoginState() OperatorContractCheck {
 // Counts only; no webhook name, URL or secret material reaches this VIEWER-role
 // surface.
 func checkAlertWebhookSigning() OperatorContractCheck {
-	degraded := globalAlertStore.SigningDegradedCount()
+	degraded := alertStore().SigningDegradedCount()
 	if degraded == 0 {
 		return OperatorContractCheck{
 			Code:    "alert_webhook_signing",

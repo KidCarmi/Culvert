@@ -474,9 +474,9 @@ func TestScanLimitSignal_ConcurrentResponsesEachCountedOnce(t *testing.T) {
 // recorder deliberately does NOT delegate to Dispatch, so no webhook delivery
 // is ever attempted and the gate needs no network.
 func TestScanSkipped_ProducerIsSubscriberGated(t *testing.T) {
-	oldStore := globalAlertStore
-	globalAlertStore = &AlertStore{}
-	t.Cleanup(func() { globalAlertStore = oldStore })
+	oldStore := alertStore()
+	alertStoreRef.Store(&AlertStore{})
+	t.Cleanup(func() { alertStoreRef.Store(oldStore) })
 
 	// This invocation's events are told apart by HOST and ACTOR, not by a raw
 	// tally: logScanLimitExceeded dispatches with `go alerts.Fire(...)`, and
@@ -530,13 +530,13 @@ func TestScanSkipped_ProducerIsSubscriberGated(t *testing.T) {
 	// "did not wait long enough": dispatch one alert of another name through
 	// the same seam and require the store to have recorded it.
 	//
-	// SYNCHRONOUS: this test swaps globalAlertStore and restores it in cleanup,
+	// SYNCHRONOUS: this test swaps alertStore() and restores it in cleanup,
 	// so a `go fireAlert(...)` control could still be inside Dispatch — reading
 	// that var — when the restore writes it. Firing inline leaves nothing in
 	// flight, and Dispatch having returned is itself the proof the control asks
 	// for, so no polling is needed either.
 	fireAlert("scan_skipped_control", AlertPayload{Detail: "control"})
-	if globalAlertStore.DedupTracked() == 0 {
+	if alertStore().DedupTracked() == 0 {
 		t.Fatal("the control alert never reached Dispatch; the negative below proves nothing")
 	}
 	if got := count(); got != 0 {
@@ -553,7 +553,7 @@ func TestScanSkipped_ProducerIsSubscriberGated(t *testing.T) {
 	// outlives the test. 127.0.0.1:1 is refused at the SSRF dial guard with no
 	// lookup and no egress. No drain is needed: waitFor(20) already proves
 	// every dispatch this test started has reached the recorder.
-	globalAlertStore.Add(AlertWebhook{URL: "http://127.0.0.1:1/h", Events: []string{"scan_skipped"}, Enabled: true})
+	alertStore().Add(AlertWebhook{URL: "http://127.0.0.1:1/h", Events: []string{"scan_skipped"}, Enabled: true})
 	if delta = fire(); delta != 20 {
 		t.Errorf("ScanSkipped counter delta = %d, want 20 while subscribed", delta)
 	}

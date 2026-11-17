@@ -148,7 +148,7 @@ var threatFeedNow = time.Now
 // and evict real threat alerts from the 500-entry retry queue. The verbose
 // cause stays on the role-gated admin API and in the log.
 var fireThreatFeedStaleAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("threat_feed_stale") {
+	if !alertStore().HasSubscriber("threat_feed_stale") {
 		return
 	}
 	go fireAlert("threat_feed_stale", AlertPayload{

@@ -86,7 +86,7 @@ var fireCAUnusableAlert = func(detail string) {
 	// goroutine. This producer is driven by an external fault and fires from
 	// the request path, which is exactly where the per-request alert-producer
 	// contract applies (see the HasSubscriber gate documented in CLAUDE.md).
-	if !globalAlertStore.HasSubscriber("cert_expiry") {
+	if !alertStore().HasSubscriber("cert_expiry") {
 		return
 	}
 	go fireAlert("cert_expiry", AlertPayload{
@@ -129,7 +129,7 @@ func noteCARenewalWithheld(p ca.Provenance, expiry time.Time) {
 	if logger != nil {
 		logger.Printf("CA: %s", detail)
 	}
-	if globalAlertStore.HasSubscriber("cert_expiry") {
+	if alertStore().HasSubscriber("cert_expiry") {
 		go fireAlert("cert_expiry", AlertPayload{Host: "culvert-ca", Detail: detail, Source: "ca"})
 	}
 }
@@ -204,7 +204,7 @@ func noteCARotationPersistFailure(reason string) {
 		logger.Printf("CA: auto-rotation generated a new Root CA but could NOT persist it (%d since boot): %q "+
 			"— the new CA is in memory only and will be LOST on restart", n, safe)
 	}
-	if globalAlertStore.HasSubscriber("cert_expiry") {
+	if alertStore().HasSubscriber("cert_expiry") {
 		go fireAlert("cert_expiry", AlertPayload{
 			Host: "culvert-ca",
 			Detail: fmt.Sprintf("Root CA rotated but NOT persisted (%d failures since boot): %s — "+

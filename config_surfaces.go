@@ -262,7 +262,7 @@ var configSurfaces = []configSurfaceRow{
 		Bindings: []surfaceBinding{
 			{Struct: "configBackup", Field: "PACPools", Apply: semNilSkipEmptyWipe},
 			{Struct: "ConfigSnapshot", Field: "PACPools", Apply: semNilSkipEmptyWipe}}},
-	{ID: "alert_webhooks", Kind: kindConfig, RollbackExclusion: "a faithful snapshot would have to store the webhook HMAC signing secrets in plaintext config-version files, and restoring would drop those secrets and renumber webhooks (Finding 10.3)", Owner: "globalAlertStore",
+	{ID: "alert_webhooks", Kind: kindConfig, RollbackExclusion: "a faithful snapshot would have to store the webhook HMAC signing secrets in plaintext config-version files, and restoring would drop those secrets and renumber webhooks (Finding 10.3)", Owner: "alertStore",
 		Export: true, Import: true, Sensitive: true,
 		Note:     "export via List() which strips HMAC secrets; off the rollback surface by design (Finding 10.3)",
 		Bindings: []surfaceBinding{{Struct: "configBackup", Field: "AlertWebhooks", Redacted: true}}},
