@@ -118,7 +118,7 @@ var validateWebhookURL = alerts.ValidateURL
 // startAlertRetryLoop runs the F16 retry loop against the current
 // process-wide store (resolved on every pass).
 func startAlertRetryLoop(ctx context.Context) {
-	alerts.StartRetryLoop(ctx, func() *alerts.Store { return alertStore() })
+	alerts.StartRetryLoop(ctx, alertStore)
 }
 
 // ── Deferred startup alerts ──────────────────────────────────────────────────
