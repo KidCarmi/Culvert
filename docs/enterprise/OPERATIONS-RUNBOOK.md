@@ -75,7 +75,7 @@ Interfaces referenced:
 
 - **Trigger:** CA ≤30 days to expiry.
 - **Diagnosis:** `GET /api/ca/status` `expiresIn`; `cert_expiry` webhook (fires on rotation — GAP-PKI-05).
-- **Recovery:** auto-rotation handles it with dual-CA overlap; or `POST /api/ca/rotate` (admin, 2-step). **Distribute the new root** to endpoints within the 24h leaf window.
+- **Recovery:** auto-rotation handles it with dual-CA overlap; or `POST /api/ca/rotate` (admin, 2-step). **Distribute the new root** to endpoints before the old root's expiry (auto-renewal overlap end); after a manual rotate, before relying on inspection at all. Imported CAs are never auto-renewed — upload the re-issued certificate ([root-ca-expiry §5](../operator/root-ca-expiry.md)).
 - **Verification:** `/api/ca/status` shows `dualCAActive`; pilot endpoint trusts new leaves.
 
 ## DNS failure
