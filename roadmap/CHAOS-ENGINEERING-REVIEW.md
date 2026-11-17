@@ -8,6 +8,20 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-17 — `CHAOS-122` CLAIMED (placeholder, commit one). Domain: the
+ARGV CONTRACT of the binary itself — CHAOS-121 found that
+`docker-compose.ha.yml` silently discarded every flag it declared because Go's
+`flag` package stops at the first non-flag token, fixed that ONE artifact, and
+recorded the generic guard as the right change belonging to its own round
+because it needs an audit of every invocation shape. This is that round: does
+`main` refuse argv it cannot parse, or boot with all defaults and report
+healthy?** Id claimed in this committed row before any code was written, per
+the convention below and checked against `origin/main` rather than the working
+tree per the 2026-09-25 amendment: `CHAOS-121` is the highest id anywhere on
+`origin/main` (at `84b1b4c`). Of the open PRs (#1931, #1705, #1549, #1548,
+#1536, #1528, #1526) none is a chaos sweep and none claims a chaos id. This
+sweep took 122 and will not move.
+
 The 2026-11-16 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-16.md) —
 CHAOS-121 (THE DEPLOYMENT ARTIFACT). Every round in this family so far has
