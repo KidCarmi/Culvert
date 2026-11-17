@@ -50,9 +50,9 @@ func seedRestoredWebhookStore(t *testing.T) *AlertStore {
 
 func withAlertStore(t *testing.T, as *AlertStore) {
 	t.Helper()
-	orig := globalAlertStore
-	t.Cleanup(func() { globalAlertStore = orig })
-	globalAlertStore = as
+	orig := alertStore()
+	t.Cleanup(func() { alertStoreRef.Store(orig) })
+	alertStoreRef.Store(as)
 }
 
 // TestDiagnostics_AlertWebhookSigningRow_OKWhenHealthy is the negative control:

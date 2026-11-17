@@ -169,7 +169,7 @@ var authBackendHealth authBackendHealthRecord
 // every test binary — would spawn a delivery goroutine per request for an alert
 // with no recipient, adding goroutine churn on top of the outage.
 var fireIdentityBackendUnreachableAlert = func(backend, detail string) {
-	if !globalAlertStore.HasSubscriber("identity_backend_unreachable") {
+	if !alertStore().HasSubscriber("identity_backend_unreachable") {
 		return
 	}
 	go fireAlert("identity_backend_unreachable", AlertPayload{

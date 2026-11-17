@@ -92,7 +92,7 @@ var fireClusterCAAlert = func(detail string) {
 	// Nobody subscribed → do nothing at all, and in particular do not spawn a
 	// goroutine (the per-request alert-producer contract in CLAUDE.md; this
 	// producer is reached from the enrollment RPC path).
-	if !globalAlertStore.HasSubscriber("cert_expiry") {
+	if !alertStore().HasSubscriber("cert_expiry") {
 		return
 	}
 	go fireAlert("cert_expiry", AlertPayload{
@@ -187,7 +187,7 @@ func noteClusterCARotationFailure(reason string) {
 		logger.Printf("ClusterCA: auto-rotation FAILED (%d since boot): %q — the cluster CA is not being "+
 			"replaced. At its expiry every enrolled node loses mTLS trust with the control plane.", n, safe)
 	}
-	if globalAlertStore.HasSubscriber("cert_expiry") {
+	if alertStore().HasSubscriber("cert_expiry") {
 		go fireAlert("cert_expiry", AlertPayload{
 			Host: clusterCAAlertHost,
 			Detail: fmt.Sprintf("Cluster CA auto-rotation failed (%d failures since boot): %s — "+

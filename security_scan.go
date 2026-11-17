@@ -257,7 +257,7 @@ func logScanLimitExceeded(host, clientIP string, maxBytes int64) {
 	// default posture (no webhooks configured). The Detail was already bounded,
 	// so the dedup window suppresses the deliveries; the gate removes the work
 	// done before the window is ever consulted.
-	if !globalAlertStore.HasSubscriber("scan_skipped") {
+	if !alertStore().HasSubscriber("scan_skipped") {
 		return
 	}
 	go alerts.Fire("scan_skipped", alerts.Payload{

@@ -53,6 +53,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The process-wide alert store is now read and swapped atomically, removing
+  an intermittent data race from the race test lanes.** Alert delivery runs on
+  detached goroutines (a dozen `go fireAlert(...)` / `go alerts.Fire(...)`
+  producers) that read the store after the code that started them returned.
+  Tests swap the store, so a goroutine left over from one test raced the next
+  test's swap, and the race detector failed the root race shards under some
+  shuffled orders (seen on #1911). `globalAlertStore` is replaced by an
+  `atomic.Pointer` read through `alertStore()`. Production publishes the store
+  once, so there is no behaviour change; a goroutine that already loaded the
+  old store finishes against it.
+
 - **The HA compose file's `proxy` and `dp` services never ran their startup
   script.** `docker-compose.ha.yml` sets `command: sh -c '... exec ./culvert
   $$ARGS'` on images built from the repo Dockerfile, whose ENTRYPOINT is

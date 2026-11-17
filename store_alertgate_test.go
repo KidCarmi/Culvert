@@ -34,16 +34,16 @@ import (
 func alertGateHarness(t *testing.T) (store *AlertStore, dispatched chan string) {
 	t.Helper()
 
-	origStore := globalAlertStore
+	origStore := alertStore()
 	origFire := fireAlert
 	t.Cleanup(func() {
-		globalAlertStore = origStore
+		alertStoreRef.Store(origStore)
 		fireAlert = origFire
 	})
 
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 
 	events := make(chan string, 8)
 	fireAlert = func(event string, payload AlertPayload) {

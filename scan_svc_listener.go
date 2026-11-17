@@ -245,7 +245,7 @@ func (s scanSvcListenerSnapshot) Flapping() bool {
 // records — a key that cannot dedup, fanning out into the 500-entry retry
 // queue where a scanner fault evicts real threat alerts.
 var fireScanSvcListenerAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("scan_svc_listener_down") {
+	if !alertStore().HasSubscriber("scan_svc_listener_down") {
 		return
 	}
 	go fireAlert("scan_svc_listener_down", AlertPayload{

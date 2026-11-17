@@ -222,7 +222,7 @@ func crashAlertAllow(component string) bool {
 // finding this round made against its own first design. Every other
 // fault-driven producer gates before the `go`, to keep a degraded node from
 // spawning a goroutine per request in the default posture. Doing that here
-// would put globalAlertStore's mutex on the crash-sink path, and the alert
+// would put alertStore()'s mutex on the crash-sink path, and the alert
 // store releases it with a BARE trailing Unlock in Add/Update/Delete —
 // deliberately, so the fsync lands outside the lock, and it is the CHAOS-118
 // §7.4 shape. A panic inside one of those critical sections strands as.mu
@@ -239,7 +239,7 @@ func crashAlertAllow(component string) bool {
 // can embed a credential (panic(cfg.SessionHMAC)), sanitizeLog scrubs control
 // characters rather than masking secrets, and a webhook is an EGRESS to a
 // third party. The crash id is the join key to the local evidence.
-// It dispatches through globalAlertStore directly rather than through main's
+// It dispatches through alertStore() directly rather than through main's
 // fireAlert wrapper, because routing it through that var closes a package-level
 // initialization CYCLE the compiler rejects outright: fireAlert refers to
 // recoverGoroutine, which refers to recordCrash, which now refers back here.
@@ -254,10 +254,10 @@ func crashAlertAllow(component string) bool {
 func dispatchPanicContainedAlert(component, crashID string) {
 	go func() {
 		defer recoverGoroutine(crashComponentAlert)
-		if !globalAlertStore.HasSubscriber("panic_contained") {
+		if !alertStore().HasSubscriber("panic_contained") {
 			return
 		}
-		globalAlertStore.Dispatch(alertEventPanicContained, AlertPayload{
+		alertStore().Dispatch(alertEventPanicContained, AlertPayload{
 			Event:  alertEventPanicContained,
 			Actor:  "system",
 			Host:   component,
