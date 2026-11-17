@@ -173,6 +173,68 @@ func ValidateURL(raw string) error {
 	return nil
 }
 
+// maxEventNameLen bounds one subscribed event name. The longest name in the
+// catalog is well under this; the bound exists so a client cannot persist an
+// unbounded string into the webhook file (CWE-770).
+const maxEventNameLen = 64
+
+// catchAllEvent is the subscription that matches every event, including ones
+// added after the webhook was created (HasSubscriber and the dispatch walk both
+// treat it specially).
+const catchAllEvent = "*"
+
+// ValidateEventNames checks the shape of a webhook's subscribed event names.
+//
+// SEC-ALERTS-EVENTNAME-1. Nothing used to constrain these: the admin API
+// accepted any JSON string, normalizeEventNames only maps retired names and
+// de-dupes, and Add/Update persist what they are given. The admin UI then
+// rendered the stored names into the webhook table, so an operator-role client
+// could persist markup that executed in the browser of every viewer, operator
+// and ADMIN who opened the Alerts panel — a privilege escalation out of the
+// operator role (CWE-79). The render sink is escaped now; this is the other
+// half, so the value never reaches the file, the support bundle or any other
+// consumer in the first place.
+//
+// The check is a CHARACTER CLASS, not an allowlist of known events, on
+// purpose. The catalog grows as rounds add alerts and is discovered by a
+// differential oracle rather than declared in one list, so an allowlist here
+// would reject a legitimate new event the moment it shipped — a silent
+// subscription loss, which is the one failure normalizeEventNames exists to
+// prevent. Every name in the catalog (and every legacy alias) is lowercase
+// ASCII with underscores, so the class admits all of them and no markup,
+// quote, angle bracket, control byte or newline.
+//
+// Applied at the ADMIN API ingress only. Init (disk) deliberately does not
+// validate: a name already persisted must keep dispatching rather than be
+// dropped on load, and the escaped render sink is what makes that safe.
+//
+// The "*" catch-all is admitted as a WHOLE name. It is a real subscription
+// shape, matched by HasSubscriber and the dispatch walk, and it is how an
+// operator subscribes to everything including events added later — refusing it
+// would cause exactly the silent detection loss this package warns about. It
+// is allowed only as the entire name, never as a character inside one, so it
+// cannot smuggle a glob or markup into a longer string.
+func ValidateEventNames(events []string) error {
+	for _, ev := range events {
+		if ev == "" {
+			return fmt.Errorf("event name must not be empty")
+		}
+		if ev == catchAllEvent {
+			continue
+		}
+		if len(ev) > maxEventNameLen {
+			return fmt.Errorf("event name %q is longer than %d characters", ev, maxEventNameLen)
+		}
+		for _, r := range ev {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+				continue
+			}
+			return fmt.Errorf("event name %q must use only lowercase letters, digits and underscores", ev)
+		}
+	}
+	return nil
+}
+
 // ── Data types ────────────────────────────────────────────────────────────────
 
 // Webhook describes a single webhook endpoint.

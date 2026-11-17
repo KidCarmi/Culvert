@@ -7,6 +7,52 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **`SEC-INSTALL-ENVLINK-1` is now honoured at every privileged site on the
+  `.env` path, not only the last one.** The contract landed as a guard inside
+  `env_put`: `sudo` must never act THROUGH a symlink at `$INSTALL_DIR/.env`,
+  because `sudo chown <me> "$file"` follows the link and hands the invoking
+  sudoer the TARGET (`.env -> /etc/shadow`), and whoever can write the stack dir
+  can plant one. Two other functions take ownership of the SAME path with the
+  same primitive — `setup_at_rest_encryption` and
+  `persist_host_env_session_secret` — guarded only by `-e`/`! -r`, which both
+  FOLLOW links. Both run BEFORE the first `env_put` at top level, so the guard
+  that existed was unreachable as a mitigation: the escalation completed first,
+  and `setup_at_rest_encryption`'s own "Cannot read" warning no longer fired
+  because the `chown` had just made the file readable. An unprivileged owner of
+  the stack dir could therefore take ownership of any root-owned file on an
+  ordinary installer re-run, with no race to win. A third site,
+  `carry_forward_prior_secrets`, early-returns on `-f`, which is FALSE for a
+  DANGLING link, so a planted `.env -> /etc/cron.d/x` fell through to
+  `sudo install`, which opens its destination `O_CREAT|O_TRUNC` and wrote the
+  prior stack's secrets through the link as root to a planter-chosen path. All
+  three now test `-L` first; a link is left alone and the existing
+  warn-and-degrade paths take over, so the self-heal still repairs a REGULAR
+  unreadable `.env` (pinned by a positive control). CWE-59/CWE-61 → CWE-269.
+- **Webhook event names can no longer carry markup into the Alerts panel
+  (`SEC-ALERTS-EVENTNAME-1`).** `POST`/`PUT /api/alerts/webhooks` needs only
+  `RoleOperator` and validated the URL but never the subscribed event names;
+  `normalizeEventNames` only migrates retired names and de-dupes, so `Add`/
+  `Update` persisted whatever was sent. The admin UI then rendered those names
+  into the webhook table through `innerHTML` with no escaping, while the `name`
+  and `url` cells beside them both used `escHtml` — so an operator could store
+  `<img src=x onerror=…>` that executed in the session of every viewer,
+  operator and ADMIN who opened the panel: a privilege escalation out of the
+  operator role, since an admin session carries full configuration and RBAC
+  authority. Both halves are closed: the cell renders through `escHtml` (which
+  also protects a name already on disk from before), and the two
+  operator-reachable endpoints reject a malformed name with 400 so it never
+  reaches the webhook file, a support bundle or any other consumer. The check is
+  a character class, not an allowlist of known events — the catalog grows as
+  rounds add alerts and is discovered by a differential oracle rather than
+  declared in one list, so an allowlist would silently unsubscribe a legitimate
+  new event. The `*` catch-all is admitted as a WHOLE name, never as a
+  character inside one, because refusing it would cause exactly the detection
+  loss `normalizeEventNames` exists to prevent. `Init` (disk) deliberately does
+  not validate, so a persisted name keeps dispatching rather than being dropped
+  on load; the escaped sink is what makes that safe. CWE-79, OWASP A03.
+
 ### Added
 
 - **Diagnostics now flags the admin-route authorization break-glass (Product

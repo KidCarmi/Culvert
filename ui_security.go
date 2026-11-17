@@ -30,6 +30,42 @@ var pendingCARotation struct {
 
 // ── Alert Webhooks ─────────────────────────────────────────────────────────
 
+// webhookPayloadRejected validates the caller-supplied parts of a webhook and
+// writes the 400 itself, reporting whether the request was refused.
+//
+// It exists so the create and update arms share ONE definition of an
+// acceptable payload. They had two, which is how the event names came to be
+// validated in neither: a check added to one arm is silently absent from the
+// other, and `PUT` re-supplies the whole webhook, so an update is the same
+// ingress as a create.
+//
+// urlRequired is the one real difference between the arms: a create must carry
+// a URL, while an empty URL on an update preserves the stored one (see
+// Store.Update), so it is a parameter rather than two copies of the walk.
+//
+// SEC-ALERTS-EVENTNAME-1: the subscribed event names are persisted and then
+// rendered in the Alerts panel, so they are validated here at ingress rather
+// than trusted because the caller holds a role. The authoritative fix for that
+// sink is the escaping in static/index.html; this keeps the value from reaching
+// the webhook file, a support bundle or any other consumer at all.
+func webhookPayloadRejected(w http.ResponseWriter, h AlertWebhook, urlRequired bool) bool {
+	if urlRequired && h.URL == "" {
+		http.Error(w, "url required", http.StatusBadRequest)
+		return true
+	}
+	if h.URL != "" {
+		if err := validateWebhookURL(h.URL); err != nil {
+			http.Error(w, "invalid webhook URL: "+err.Error(), http.StatusBadRequest)
+			return true
+		}
+	}
+	if err := validateWebhookEvents(h.Events); err != nil {
+		http.Error(w, "invalid webhook events: "+err.Error(), http.StatusBadRequest)
+		return true
+	}
+	return false
+}
+
 // GET  /api/alerts/webhooks      → list webhooks (secrets redacted)
 // POST /api/alerts/webhooks      → create webhook
 // PUT  /api/alerts/webhooks?id=X → update webhook
@@ -51,12 +87,7 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if h.URL == "" {
-			http.Error(w, "url required", http.StatusBadRequest)
-			return
-		}
-		if err := validateWebhookURL(h.URL); err != nil {
-			http.Error(w, "invalid webhook URL: "+err.Error(), http.StatusBadRequest)
+		if webhookPayloadRejected(w, h, true) {
 			return
 		}
 		h.Enabled = true
@@ -78,11 +109,8 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if h.URL != "" {
-			if err := validateWebhookURL(h.URL); err != nil {
-				http.Error(w, "invalid webhook URL: "+err.Error(), http.StatusBadRequest)
-				return
-			}
+		if webhookPayloadRejected(w, h, false) {
+			return
 		}
 		if !alertStore().Update(id, h) {
 			http.Error(w, "not found", http.StatusNotFound)

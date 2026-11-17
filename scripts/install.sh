@@ -507,6 +507,16 @@ fi
 # CA/log passphrases survive the move. Best-effort; never fatal.
 carry_forward_prior_secrets() {
   [[ -f "$INSTALL_DIR/.env" ]] && return 0   # a .env already here — never overwrite
+  # SEC-INSTALL-ENVLINK-1: `-f` above is FALSE for a DANGLING symlink, so a
+  # planted `.env -> /etc/cron.d/x` falls through to the `sudo install` below,
+  # which opens its destination O_CREAT|O_TRUNC and so writes the prior stack's
+  # secrets THROUGH the link, as root, to a path the planter chose. Refuse any
+  # link here: this function only ever creates a .env that is absent.
+  if [[ -L "$INSTALL_DIR/.env" ]]; then
+    warn "Refusing to carry secrets forward into $INSTALL_DIR/.env: it is a symlink."
+    warn "Replace it with a real file (or remove it) and re-run if the prior secrets are needed."
+    return 0
+  fi
   local prior=""
   # 1. The dir the currently/most-recently deployed proxy container ran from.
   prior="$(sudo docker inspect culvert \
@@ -1810,7 +1820,17 @@ validate_passphrase_for_env_file() {
 persist_host_env_session_secret() {
   local envfile="$INSTALL_DIR/.env"
   [[ -n "${CULVERT_SESSION_SECRET:-}" ]] || return 0
-  if [[ -e "$envfile" && ! -r "$envfile" ]]; then
+  # SEC-INSTALL-ENVLINK-1 (see env_put): `sudo chown` must never act THROUGH a
+  # symlink. On a LIVE link it hands the TARGET to the invoking sudoer
+  # (`.env -> /etc/shadow`), and whoever can write the stack dir can plant one.
+  # `-e`/`-r` both FOLLOW links, so only `-L` sees the case. This self-heal runs
+  # BEFORE the first env_put (see the top-level call order), so env_put's own
+  # guard cannot cover it; the contract has to be honoured at every privileged
+  # site on this path, not just the last one. A link is left alone and the
+  # unreadable check below then degrades instead of escalating.
+  if [[ -L "$envfile" ]]; then
+    :
+  elif [[ -e "$envfile" && ! -r "$envfile" ]]; then
     sudo chown "$(id -un)" "$envfile" 2>/dev/null || true
   fi
   if [[ -f "$envfile" ]]; then
@@ -1864,7 +1884,17 @@ setup_at_rest_encryption() {
   # orphaning the encrypted CA bundle and saved logs. Self-heal ownership first
   # (as persist_host_env_session_secret does); if it is still unreadable, leave
   # it alone.
-  if [[ -e "$envfile" && ! -r "$envfile" ]]; then
+  # SEC-INSTALL-ENVLINK-1 (see env_put): `sudo chown` must never act THROUGH a
+  # symlink. On a LIVE link it hands the TARGET to the invoking sudoer
+  # (`.env -> /etc/shadow`), and whoever can write the stack dir can plant one.
+  # `-e`/`-r` both FOLLOW links, so only `-L` sees the case. This self-heal runs
+  # BEFORE the first env_put (see the top-level call order), so env_put's own
+  # guard cannot cover it; the contract has to be honoured at every privileged
+  # site on this path, not just the last one. A link is left alone and the
+  # unreadable check below then degrades instead of escalating.
+  if [[ -L "$envfile" ]]; then
+    :
+  elif [[ -e "$envfile" && ! -r "$envfile" ]]; then
     sudo chown "$(id -un)" "$envfile" 2>/dev/null || true
   fi
   if [[ -e "$envfile" && ! -r "$envfile" ]]; then
