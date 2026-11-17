@@ -9,6 +9,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Diagnostics now flags the admin-route authorization break-glass (Product
+  Experience).** Setting `CULVERT_C2_ENFORCE` to a false-ish value puts the
+  admin-route metadata gate in shadow (log and count, never block). That was
+  visible only in the startup environment and on the admin-only Governance
+  page, whose `governance_health` still reads `healthy` in shadow, so a node
+  left in break-glass after an incident looked identical to a healthy one on
+  `/api/diagnostics`. A new report-only `admin_route_enforcement_shadow` WARN
+  row names the switch, states that each handler's own role check still
+  applies, carries the would-deny count and tells the operator to remove the
+  variable and restart. No row in the default enforce mode; enforcement, the
+  mode and the counters are unchanged.
+
 - **A contained panic now tells an operator (CHAOS-120).** `recordCrash` is the
   single sink every recovered panic funnels into — the proxy plane, the admin
   plane, `runGuarded`/`recoverGoroutine`, and every `internal/*` background
@@ -449,6 +461,28 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `io.CopyBuffer` actually does.
 
 ### Changed
+
+- **A panicking feed round in `internal/feedsched` now reaches the crash plane,
+  and the cold-start predicate can no longer kill the process.** The scheduler's
+  `Config.OnPanic` seam was defined, documented and set by no production caller,
+  so every panic the package contained itself fell to a single WARN line —
+  containment with no reporting: no crash record, no counter increment, no audit
+  entry and no page. The nil fallback now reports to the shared panic sink under
+  one fixed `feedsched_round` label (one label, not one per feed: the sink's
+  component set is capped and fails closed past the cap, so a per-feed label
+  would be an unbounded label in a bounded map; the feed's name rides the WARN
+  line beside it). Separately, `Run` consulted `Config.RunNow()` outside every
+  guard, while both shipped feeds' guards sit inside `Config.Run` and
+  `internal/threatfeed` launches `Run` with a bare `go` statement — and
+  `feedsync`'s predicate is `fs.db.Stats() == 0`, a BadgerDB call on a handle the
+  scheduler does not own. A corrupt or already-closed store therefore killed the
+  **gateway** at startup from the one line in the cold-start path nobody guarded.
+  The predicate is now contained and answers "do not run now", so the loop falls
+  through to its normal cadence and a real round reports its own outcome at the
+  first tick; the stated cost is that such a node's first sync waits one interval
+  instead of running immediately. Both containment paths report through one
+  method, so neither can be fixed while the other stays silent, and a configured
+  `OnPanic` still owns the report rather than double-counting the crash counter.
 
 - **Diagnostics now warns when a configuration change was applied without a
   rollback point.** Version capture after a configuration change is
