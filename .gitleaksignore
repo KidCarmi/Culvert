@@ -352,3 +352,11 @@ e18277a48938537f68985dd55fc05ade3081f939:.github/workflows/appliance-lab.yml:gen
 62aa116ca3778dcff4dc83ed368cf00ed2a06bb7:proxy_tunnel_inspectbuf_test.go:generic-api-key:296
 e9283034790031d77983224445c039f359504991:internal/pseudonym/pseudonym_test.go:generic-api-key:14
 de096692947cfedf894b7f509ad95072ab2a6e49:docs/appliance/evidence/combined/gitleaks-history-20261113.md:generic-api-key:44
+# I. 2026-11-17 classification (docs/appliance/evidence/combined/gitleaks-history-20261117.md):
+#    public Go module checksums (h1:) in the go version -m record of the R10 engine pins. (6)
+c3e24c2ab488f90ce7b143c36f1867db2a6b9969:docs/appliance/evidence/combined/r10-engine-pins/raw/go-version-m.txt:generic-api-key:656
+c3e24c2ab488f90ce7b143c36f1867db2a6b9969:docs/appliance/evidence/combined/r10-engine-pins/raw/go-version-m.txt:generic-api-key:669
+c3e24c2ab488f90ce7b143c36f1867db2a6b9969:docs/appliance/evidence/combined/r10-engine-pins/raw/go-version-m.txt:generic-api-key:695
+c3e24c2ab488f90ce7b143c36f1867db2a6b9969:docs/appliance/evidence/combined/r10-engine-pins/raw/go-version-m.txt:generic-api-key:1435
+c3e24c2ab488f90ce7b143c36f1867db2a6b9969:docs/appliance/evidence/combined/r10-engine-pins/raw/go-version-m.txt:generic-api-key:1448
+c3e24c2ab488f90ce7b143c36f1867db2a6b9969:docs/appliance/evidence/combined/r10-engine-pins/raw/go-version-m.txt:generic-api-key:1476
