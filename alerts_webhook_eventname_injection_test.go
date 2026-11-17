@@ -43,11 +43,11 @@ func roleRequest(method, path, body string, role UIRole) *http.Request {
 
 func withEmptyAlertStore(t *testing.T) *AlertStore {
 	t.Helper()
-	orig := globalAlertStore
-	t.Cleanup(func() { globalAlertStore = orig })
+	orig := alertStoreRef.Load()
+	t.Cleanup(func() { alertStoreRef.Store(orig) })
 	as := &AlertStore{}
 	as.Init("")
-	globalAlertStore = as
+	alertStoreRef.Store(as)
 	return as
 }
 
