@@ -9,6 +9,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Diagnostics now flags the admin-route authorization break-glass (Product
+  Experience).** Setting `CULVERT_C2_ENFORCE` to a false-ish value puts the
+  admin-route metadata gate in shadow (log and count, never block). That was
+  visible only in the startup environment and on the admin-only Governance
+  page, whose `governance_health` still reads `healthy` in shadow, so a node
+  left in break-glass after an incident looked identical to a healthy one on
+  `/api/diagnostics`. A new report-only `admin_route_enforcement_shadow` WARN
+  row names the switch, states that each handler's own role check still
+  applies, carries the would-deny count and tells the operator to remove the
+  variable and restart. No row in the default enforce mode; enforcement, the
+  mode and the counters are unchanged.
+
 - **A contained panic now tells an operator (CHAOS-120).** `recordCrash` is the
   single sink every recovered panic funnels into — the proxy plane, the admin
   plane, `runGuarded`/`recoverGoroutine`, and every `internal/*` background
@@ -41,6 +53,30 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The process-wide alert store is now read and swapped atomically, removing
+  an intermittent data race from the race test lanes.** Alert delivery runs on
+  detached goroutines (a dozen `go fireAlert(...)` / `go alerts.Fire(...)`
+  producers) that read the store after the code that started them returned.
+  Tests swap the store, so a goroutine left over from one test raced the next
+  test's swap, and the race detector failed the root race shards under some
+  shuffled orders (seen on #1911). `globalAlertStore` is replaced by an
+  `atomic.Pointer` read through `alertStore()`. Production publishes the store
+  once, so there is no behaviour change; a goroutine that already loaded the
+  old store finishes against it.
+
+- **The HA compose file's `proxy` and `dp` services never ran their startup
+  script.** `docker-compose.ha.yml` sets `command: sh -c '... exec ./culvert
+  $$ARGS'` on images built from the repo Dockerfile, whose ENTRYPOINT is
+  `./culvert`. Compose prepends the ENTRYPOINT, so the container ran
+  `./culvert sh -c ...`; flag parsing stopped at `sh` and the node booted
+  HEALTHY (the healthcheck probes the default `:8080`) with every flag at its
+  default — in-memory roster, CA and policy (nothing persisted to the `/data`
+  volume), no ClamAV/YARA, no cluster DB, a standby that never used
+  `HA_JOIN`/`HA_TOKEN` (and skipped the empty-token refusal), and DPs that
+  never enrolled. Both services now set `entrypoint: []` so the script is the
+  container process; a contract test derives the effective argv from the
+  Dockerfile ENTRYPOINT and the compose service.
+
 - **Ten alert events were fired by production code with no way to subscribe to
   them from the Alerts panel, and four of them could never be delivered at all
   (CHAOS-120).** The panel's checkbox list is the only place Culvert's alert
@@ -64,6 +100,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unsubscribable and needs its reason recorded.
 
 ### Performance
+
+- **Concurrent SSRF guard misses for one host now share one DNS lookup.**
+  `ssrf.PrivateHost*` resolved through `net.Resolver.LookupHost`, which —
+  unlike `LookupIPAddr` — does not merge concurrent calls, so every CONNECT,
+  WebSocket and SOCKS5 pre-flight check that missed the verdict cache for the
+  same host issued its own A + AAAA lookup. A herd forms whenever a busy host's
+  30 s verdict expires, and it grows with resolver latency × arrival rate, so
+  a slow resolver received the most duplicate queries. Misses are now
+  single-flighted per host: 64 concurrent cold checks cost 64 lookups before
+  and 1 after (`BenchmarkPrivateHostBudget_ColdHerd`). Each caller still waits
+  under its own context and budget and gets the same error as before. The
+  shared lookup is cancelled, with the last caller's cause, only once every
+  caller has left. Verdicts, the never-cache-failures rule and the connect-time
+  re-check are unchanged.
 
 - **Victim selection in the local credential cache was a scan over every active
   client, under the mutex every credential verification needs
@@ -751,6 +801,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
+
+- **An SSL-inspect rule no longer relays a non-TLS client into the proxy's own
+  TLS session to the origin.** On the default strip-ALPN inspect path, a client
+  that did not start TLS had its plaintext request raw-relayed into the
+  already-established upstream TLS connection. It reached the HTTPS origin with
+  no inner-host pin, file block, DPI, scan or per-request log row, and could
+  reach any vhost on a shared front end through a tunnel authorized for another.
+  The fallback existed for SSH/RDP but could not serve them: those origins fail
+  the upstream TLS handshake before the peek. Such a client is now refused: both
+  legs close and a `DECRYPT_FAILED` entry records a client-hello protocol
+  failure. The auto-exclusion learner is deliberately not fed, so the refusal
+  cannot turn into a bypass on the next connection. The native-ALPN
+  plaintext-to-plaintext fallback is unchanged. Owner decision on #1929.
 
 - **`install.sh`'s `env_put` no longer acts through a symlink at `.env` with
   `sudo`.** This is the `.env` half of the link-following issue #1909 closed

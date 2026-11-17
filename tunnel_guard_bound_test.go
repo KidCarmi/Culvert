@@ -25,15 +25,17 @@ import (
 
 type wedgedGuardResolver struct {
 	entered chan struct{}
+	exited  chan struct{} // one send per lookup, after cause is recorded
 	release chan struct{}
 	cause   atomic.Pointer[error]
 }
 
 func installWedgedGuardResolver(t *testing.T) *wedgedGuardResolver {
 	t.Helper()
-	w := &wedgedGuardResolver{entered: make(chan struct{}, 8), release: make(chan struct{})}
+	w := &wedgedGuardResolver{entered: make(chan struct{}, 8), exited: make(chan struct{}, 8), release: make(chan struct{})}
 	restore := ssrf.SetLookupHostForTest(func(ctx context.Context, _ string) ([]string, error) {
 		w.entered <- struct{}{}
+		defer func() { w.exited <- struct{}{} }()
 		select {
 		case <-ctx.Done():
 			c := context.Cause(ctx)
@@ -47,7 +49,17 @@ func installWedgedGuardResolver(t *testing.T) *wedgedGuardResolver {
 	return w
 }
 
+// observedCause waits for the lookup to exit, then reports why its context
+// ended. The guard shares one lookup per host across concurrent callers
+// (ssrf miss-path single-flight), so the lookup runs on its own goroutine: its
+// context is cancelled before the guard returns, but the resolver observes
+// that asynchronously.
 func (w *wedgedGuardResolver) observedCause() error {
+	select {
+	case <-w.exited:
+	case <-time.After(5 * time.Second):
+		return errors.New("the guard's lookup never exited: its context was not cancelled")
+	}
 	if p := w.cause.Load(); p != nil {
 		return *p
 	}

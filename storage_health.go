@@ -99,7 +99,7 @@ var fireStorageWriteAlert = func(detail string) {
 	// churn into every node that has no webhooks configured — the default
 	// posture, and the state of every test binary, where it shows up as
 	// spurious failures in guardrails that sample runtime.NumGoroutine().
-	if !globalAlertStore.HasSubscriber("storage_write_failed") {
+	if !alertStore().HasSubscriber("storage_write_failed") {
 		return
 	}
 	goStorageWriteAlert(detail, func() {
