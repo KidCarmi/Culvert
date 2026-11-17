@@ -230,14 +230,22 @@ func (cm *Manager) InitCA() error {
 	if err != nil {
 		return err
 	}
-	return cm.installSelfSignedCA(key, nil)
+	return cm.installSelfSignedCA(key, nil, nil)
 }
 
 // installSelfSignedCA issues a 10-year self-signed Root CA certificate for key
 // and installs it as the active CA. rawSubject, when set, is reused verbatim as
 // the subject DN (renewal — see RotateIfNeeded); nil means the default
 // "Culvert Root CA" name.
-func (cm *Manager) installSelfSignedCA(key *ecdsa.PrivateKey, rawSubject []byte) error {
+//
+// subjectKeyID, when set, is likewise reused verbatim (renewal). Left nil,
+// x509.CreateCertificate derives one, and that derivation belongs to the
+// toolchain rather than the key (SHA-1 through Go 1.24, truncated SHA-256
+// since). Every leaf copies its issuer's identifier into its Authority Key
+// Identifier, and OpenSSL refuses an issuer whose identifier differs, so a
+// renewed root must keep the one its predecessor carried. Pinned by
+// TestRenewal_LeafKeyIDStillNamesOldRoot.
+func (cm *Manager) installSelfSignedCA(key *ecdsa.PrivateKey, rawSubject, subjectKeyID []byte) error {
 	// RFC 5280 requires unique serial numbers per CA. Use 128-bit random
 	// serial to avoid collisions across CA rotations and multiple instances.
 	caSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
@@ -247,6 +255,7 @@ func (cm *Manager) installSelfSignedCA(key *ecdsa.PrivateKey, rawSubject []byte)
 	template := &x509.Certificate{
 		SerialNumber: caSerial,
 		RawSubject:   rawSubject,
+		SubjectKeyId: subjectKeyID,
 		Subject: pkix.Name{
 			Organization: []string{"Culvert"},
 			CommonName:   "Culvert Root CA",
@@ -606,7 +615,9 @@ func (cm *Manager) CAExpiry() time.Time {
 // installed the new root — all of them, since it had not existed until that
 // moment — rejecting every inspected connection, and sending the old root in
 // the chain could not help. Pinned by
-// TestDualCAOverlap_ClientTrustingOnlyOldRootValidates. Replacing the KEY is
+// TestDualCAOverlap_ClientTrustingOnlyOldRootValidates. The old root's Subject
+// Key Identifier is carried over for the same reason (installSelfSignedCA).
+// Replacing the KEY is
 // the manual force-rotate (InitCA), which is documented as trust-breaking.
 func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 	expiry := cm.CAExpiry()
@@ -637,7 +648,7 @@ func (cm *Manager) RotateIfNeeded(caPath, passphrase string) bool {
 
 	obs.Printf("CA auto-rotation: cert expires %s (<%d days) — generating new CA with dual-CA overlap",
 		expiry.Format("2006-01-02"), int(caRotationOverlap.Hours()/24))
-	if err := cm.installSelfSignedCA(oldKey, oldCert.RawSubject); err != nil {
+	if err := cm.installSelfSignedCA(oldKey, oldCert.RawSubject, oldCert.SubjectKeyId); err != nil {
 		obs.Printf("CA auto-rotation: init failed: %v", err)
 		return false
 	}
