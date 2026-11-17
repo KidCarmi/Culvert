@@ -355,7 +355,7 @@ func TestOCSPDisable(t *testing.T) {
 // ─── logScanLimitExceeded (Finding 4.2) ──────────────────────────────────────
 
 func TestLogScanLimitExceeded(_ *testing.T) {
-	// Just ensure it doesn't panic. No need to swap globalAlertStore since
+	// Just ensure it doesn't panic. No need to swap alertStore() since
 	// logScanLimitExceeded fires the alert via go fireAlert() which captures
 	// the store pointer internally.
 	logScanLimitExceeded("example.com", "10.0.0.1", 5<<20)

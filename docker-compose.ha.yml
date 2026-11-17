@@ -86,6 +86,10 @@ services:
       # (docs/OPERATIONS.md §3); leave unset to let each node generate its
       # own (sessions will not carry over between nodes/restarts).
       - CULVERT_SESSION_SECRET=${CULVERT_SESSION_SECRET:-}
+    # The image ENTRYPOINT is ./culvert; Compose prepends it to `command`, which
+    # would run `./culvert sh -c ...` and ignore every flag below. Clear it so
+    # the shell script itself is the container process.
+    entrypoint: []
     command: >
       sh -c '
         ARGS="-port 8080
@@ -171,6 +175,10 @@ services:
     environment:
       - TZ=UTC
       - ENROLL_URL=${ENROLL_URL:-}
+    # The image ENTRYPOINT is ./culvert; Compose prepends it to `command`, which
+    # would run `./culvert sh -c ...` and ignore every flag below. Clear it so
+    # the shell script itself is the container process.
+    entrypoint: []
     command: >
       sh -c '
         ARGS="-port 8080
