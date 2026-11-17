@@ -247,7 +247,7 @@ type idpMetadataSnapshot struct {
 // fireStorageWriteAlert: with no webhook configured — the default posture, and
 // the state of every test binary — this must not spawn a goroutine at all.
 var fireIdPMetadataAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("identity_backend_unreachable") {
+	if !alertStore().HasSubscriber("identity_backend_unreachable") {
 		return
 	}
 	go fireAlert("identity_backend_unreachable", AlertPayload{

@@ -2,7 +2,7 @@ package main
 
 // ha_alert_lock_chaos_test.go — CHAOS-71: no alert is dispatched, or queued
 // for the startup flush, while HAState.mu is held (CodeRabbit 4315714615 on
-// #1645). fireAlert runs globalAlertStore.Dispatch synchronously: it takes the
+// #1645). fireAlert runs alertStore().Dispatch synchronously: it takes the
 // store's dedup mutex and can run an O(n) expiry scan, so a page sent under
 // h.mu can delay lease renewal and every HA status reader. An HA producer
 // records its episode and builds the page under h.mu, and dispatches it only
@@ -73,7 +73,7 @@ func (h *HAState) cpInjectedHelper() { deferStartupAlertWhile("x", AlertPayload{
 func (h *HAState) cpInjectedDeferredUnlock() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	globalAlertStore.Dispatch("x", AlertPayload{})
+	alertStore().Dispatch("x", AlertPayload{})
 }
 var cpInjectedSeam = func() { startupAlertFire("x", AlertPayload{}) }
 func (h *HAState) cpInjectedSeamCaller() {

@@ -336,7 +336,7 @@ func TestCHAOS120_ANilNotifierFailsTowardDelivery(t *testing.T) {
 // Every other fault-driven alert producer gates on alerts.HasSubscriber BEFORE
 // the `go`, to keep a degraded node from spawning a goroutine per request in
 // the default posture, and the obvious thing to do here was the same. That
-// would put globalAlertStore's mutex on the crash-sink path — and the alert
+// would put alertStore()'s mutex on the crash-sink path — and the alert
 // store releases that mutex with a BARE trailing Unlock in Add, Update and
 // Delete (deliberately, so the fsync lands outside the lock). That is the
 // CHAOS-118 §7.4 lock-pairing shape, and unlike §7.4's examples it IS reachable
@@ -423,15 +423,15 @@ func chaos120TopLevelFuncs(t *testing.T) map[string]*ast.FuncDecl {
 
 // chaos120ForeignLocksOutsideGo reports which process-wide stores fn touches
 // outside a `go` statement. Selector bases count
-// (globalAlertStore.HasSubscriber reports "globalAlertStore"), because it is
+// (alertStore().HasSubscriber reports "alertStore"), because it is
 // the lock acquisition that matters rather than which method takes it.
 func chaos120ForeignLocksOutsideGo(fn *ast.FuncDecl) []string {
-	// Locks owned by another plane. globalAlertStore is the one this round
+	// Locks owned by another plane. alertStore() is the one this round
 	// nearly added; the others are process-wide stores whose critical sections
 	// a panicking caller could equally strand.
 	foreign := map[string]bool{
-		"globalAlertStore": true,
-		"configVersions":   true,
+		"alertStore":     true,
+		"configVersions": true,
 	}
 	var hits []string
 	seen := map[string]bool{}

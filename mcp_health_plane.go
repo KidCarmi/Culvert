@@ -262,7 +262,7 @@ var mcpAlertState struct {
 // fireStorageWriteAlert: with no webhook configured — the default posture, and the
 // state of every test binary — this must not spawn a goroutine at all.
 var fireMCPGatewayAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("mcp_gateway_down") {
+	if !alertStore().HasSubscriber("mcp_gateway_down") {
 		return
 	}
 	go fireAlert("mcp_gateway_down", AlertPayload{

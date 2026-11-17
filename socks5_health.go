@@ -273,7 +273,7 @@ type socks5ListenerSnapshot struct {
 // fireStorageWriteAlert: with no webhook configured — the default posture, and
 // the state of every test binary — this must not spawn a goroutine at all.
 var fireSOCKS5ListenerAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("socks5_listener_down") {
+	if !alertStore().HasSubscriber("socks5_listener_down") {
 		return
 	}
 	go fireAlert("socks5_listener_down", AlertPayload{
