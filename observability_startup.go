@@ -72,6 +72,10 @@ func loadObservability(cfg observabilityStartupConfig) {
 		auditLogConfiguredPath = cfg.AuditLogPath
 		if err := InitAuditLog(cfg.AuditLogPath); err != nil {
 			logger.Printf("Audit: log file error (%v) — falling back to in-memory", err)
+			// The configured path stays the operator's intent: the
+			// background-services slice re-attempts it and the entries
+			// recorded meanwhile are kept for it (audit_persist_retry.go).
+			armAuditDeferredOpen(cfg.AuditLogPath)
 		} else {
 			logger.Printf("Audit: persisting to %s", cfg.AuditLogPath)
 		}

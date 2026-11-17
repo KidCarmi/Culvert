@@ -99,6 +99,22 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A configured audit log that could not be opened at startup no longer needs
+  a restart.** When `audit_log_file` / `-audit-log` failed to open at boot (a
+  missing directory, wrong ownership, a volume not yet writable), the trail
+  fell back to the 500-entry in-memory ring for the life of the process and
+  the `audit_log_persistence` row said to fix the path *and restart*. Every
+  entry recorded in between never reached the durable record. Culvert now
+  re-attempts the same configured path automatically (10 s doubling to a
+  2-minute cap, with jitter, no attempt limit) and, once it opens, writes the
+  entries recorded meanwhile in order and ahead of any newer one (up to the
+  newest 500; anything evicted is charged to `culvert_audit_write_errors_total`),
+  then records a `system`-attributed `audit.persistence.auto_open` entry. It
+  never chooses another path, never replaces a live sink, does nothing after
+  the shutdown hook has closed the trail, and is not armed by the one-shot
+  `prepare-downgrade` command, which still refuses when its audit sink cannot
+  be opened. No configuration, settings or version change.
+
 - **The process-wide alert store is now read and swapped atomically, removing
   an intermittent data race from the race test lanes.** Alert delivery runs on
   detached goroutines (a dozen `go fireAlert(...)` / `go alerts.Fire(...)`
