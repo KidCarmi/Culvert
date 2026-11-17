@@ -864,6 +864,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Adding `Upgrade: websocket` and `Connection: Upgrade` to a plain-HTTP
+  download bypassed file blocking and response scanning.** The two headers
+  exempted the request from the URL checks, and when the origin ignored them
+  and answered 200, `handleWebSocket` relayed the body with none of
+  `handleHTTP`'s response checks. A non-101 answer now gets the plain-HTTP
+  checks before it is relayed (`relayDeclinedUpgrade`). Real WebSocket
+  sessions (101) are unchanged. Proven by
+  `TestWebSocketUpgradeHeaders_DoNotBypassPlainHTTPFileBlock`.
+
 - **An SSL-inspect rule no longer relays a non-TLS client into the proxy's own
   TLS session to the origin.** On the default strip-ALPN inspect path, a client
   that did not start TLS had its plaintext request raw-relayed into the
