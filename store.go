@@ -2801,13 +2801,13 @@ func recordStats(ip, host, status, ruleMatched, actionTaken string) {
 	// the dispatch below is byte-identical.
 	switch status {
 	case "THREAT_BLOCKED", "SCAN_BLOCKED", "DPI_BLOCKED":
-		if globalAlertStore.HasSubscriber("threat_detected") {
+		if alertStore().HasSubscriber("threat_detected") {
 			go fireAlert("threat_detected", AlertPayload{
 				Actor: ip, Host: redactedHost, Detail: ruleMatched + " " + actionTaken, Source: ruleMatched,
 			})
 		}
 	case "POLICY_BLOCK", "POLICY_DROP":
-		if globalAlertStore.HasSubscriber("policy_block") {
+		if alertStore().HasSubscriber("policy_block") {
 			go fireAlert("policy_block", AlertPayload{
 				Actor: ip, Host: redactedHost, Detail: ruleMatched, Source: "policy",
 			})

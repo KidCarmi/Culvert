@@ -20,7 +20,7 @@ import "fmt"
 // recorded delivery attempt failed.
 func checkAlertDelivery() []OperatorContractCheck {
 	enabled := map[string]bool{}
-	for _, h := range globalAlertStore.List() {
+	for _, h := range alertStore().List() {
 		if h.Enabled {
 			enabled[h.ID] = true
 		}
@@ -31,7 +31,7 @@ func checkAlertDelivery() []OperatorContractCheck {
 	seen := map[string]bool{}
 	failing := 0
 	// DeliveryHistory is newest first, so the first record per webhook is its latest.
-	for _, d := range globalAlertStore.DeliveryHistory() {
+	for _, d := range alertStore().DeliveryHistory() {
 		if !enabled[d.WebhookID] || seen[d.WebhookID] {
 			continue
 		}

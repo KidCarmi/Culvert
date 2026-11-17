@@ -130,14 +130,14 @@ func inspectRule(tlsSkipVerify bool) {
 	})
 }
 
-// TestMITM_NonTLSFallbackRecordsTunnelClose proves that when a non-TLS
-// protocol (SSH/RDP/etc.) is sent through an inspect-marked CONNECT, the proxy
-// falls back to raw relay AND records a TUNNEL_CLOSED accounting entry
-// (SSLAction=inspect, byte counts) — the Finding 11.1 observability contract
-// extended to the last raw-relay path. The upstream is a plain TLS echo
-// listener (the proxy connects to it over TLS and relays the client's raw
-// non-TLS bytes into that connection).
-func TestMITM_NonTLSFallbackRecordsTunnelClose(t *testing.T) {
+// TestMITM_NonTLSClientOnInspectRuleIsRefused pins SEC-INSPECT-PLAINTEXT-1
+// (owner decision on PR #1929). It replaces the test that pinned the old
+// behaviour: a client sending non-TLS bytes through an inspect-marked CONNECT
+// used to be raw-relayed into the proxy's own TLS session to the origin,
+// delivering an uninspected request to an HTTPS origin. It is now refused: the
+// client gets nothing back, the origin receives none of its bytes, and a
+// DECRYPT_FAILED entry records the refusal.
+func TestMITM_NonTLSClientOnInspectRuleIsRefused(t *testing.T) {
 	t.Cleanup(reqlog.SwapRingForTest())
 	allowLoopbackTunnel(t)
 	setupInspectCA(t) // makes certMgr.Ready() true so the inspect path is taken
@@ -153,13 +153,16 @@ func TestMITM_NonTLSFallbackRecordsTunnelClose(t *testing.T) {
 	}
 	ln := tls.NewListener(rawLn, &tls.Config{Certificates: []tls.Certificate{upCert}}) // #nosec G402 -- test upstream
 	t.Cleanup(func() { _ = ln.Close() })
+	received := make(chan int64, 1)
 	go func() {
 		c, aerr := ln.Accept()
 		if aerr != nil {
+			received <- 0
 			return
 		}
-		defer c.Close()      //nolint:errcheck // test cleanup
-		_, _ = io.Copy(c, c) // echo the relayed client bytes back
+		defer c.Close() //nolint:errcheck // test cleanup
+		n, _ := io.Copy(io.Discard, c)
+		received <- n
 	}()
 
 	proxyURL := startTestProxy(t)
@@ -180,33 +183,36 @@ func TestMITM_NonTLSFallbackRecordsTunnelClose(t *testing.T) {
 		t.Fatalf("CONNECT: %v", err)
 	}
 
-	// Send a NON-TLS first byte ('S', 0x53 — an SSH-style banner) + payload in
-	// one write, so the proxy's protocol peek takes the raw-relay fallback.
+	// A NON-TLS first byte ('S', 0x53, an SSH-style banner) plus a payload.
 	const payload = "SSH-2.0-nonTLS-probe-through-inspect"
 	if _, err := conn.Write([]byte(payload)); err != nil {
 		t.Fatalf("write payload: %v", err)
 	}
-	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("read echo through raw relay: %v", err)
+	if n, _ := io.ReadFull(conn, make([]byte, len(payload))); n != 0 {
+		t.Fatalf("the client read %d bytes back: a non-TLS client on an inspect rule must be refused, not relayed", n)
 	}
-	if string(got) != payload {
-		t.Fatalf("echo = %q, want %q (raw relay must splice bytes verbatim)", got, payload)
-	}
-	_ = conn.Close() // trigger teardown → TUNNEL_CLOSED
 
-	entry := findTunnelClose("127.0.0.1")
-	if entry == nil {
-		t.Fatal("no TUNNEL_CLOSED entry for the non-TLS inspect fallback")
+	select {
+	case n := <-received:
+		if n != 0 {
+			t.Fatalf("the origin received %d of the client's plaintext bytes: they must never be relayed (SEC-INSPECT-PLAINTEXT-1)", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the origin leg was not closed after the refusal")
 	}
-	if entry.SSLAction != "inspect" {
-		t.Errorf("SSLAction = %q, want inspect", entry.SSLAction)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, ok := findDecFailEntry(t, "127.0.0.1"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no DECRYPT_FAILED entry recorded for the refused non-TLS client")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if entry.BytesSent < int64(len(payload)) {
-		t.Errorf("BytesSent = %d, want >= %d (client→upstream)", entry.BytesSent, len(payload))
-	}
-	if entry.BytesRecv < int64(len(payload)) {
-		t.Errorf("BytesRecv = %d, want >= %d (upstream→client echo)", entry.BytesRecv, len(payload))
+	if entry := findTunnelClose("127.0.0.1"); entry != nil {
+		t.Errorf("a TUNNEL_CLOSED relay entry was recorded (%+v): nothing may have been relayed", *entry)
 	}
 }
 

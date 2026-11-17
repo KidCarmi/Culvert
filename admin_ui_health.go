@@ -226,7 +226,7 @@ type adminUIListenerSnapshot struct {
 // posture, and the state of every test binary — this must not spawn a goroutine
 // at all.
 var fireAdminUIListenerAlert = func(detail string) {
-	if !globalAlertStore.HasSubscriber("admin_ui_unavailable") {
+	if !alertStore().HasSubscriber("admin_ui_unavailable") {
 		return
 	}
 	go fireAlert("admin_ui_unavailable", AlertPayload{

@@ -898,50 +898,26 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		return
 	}
 	if firstByte[0] != 0x16 { // not a TLS handshake record
+		// SEC-INSPECT-PLAINTEXT-1 (owner decision on PR #1929): REFUSE, never
+		// relay. This rule says the session is inspected, and the upstream leg is
+		// already OUR TLS session to the origin, so relaying the client's
+		// plaintext into it delivered an uninspected request to an HTTPS origin:
+		// no inner-host pin, file block, DPI, scan or per-request log row, and
+		// any vhost on a shared front end reachable through a tunnel authorized
+		// for another. The fallback could not serve what it was written for:
+		// SSH/RDP origins do not speak TLS, so they fail the upstream handshake
+		// above and are 502'd before this peek.
+		//
+		// Recorded as a client-hello protocol failure through the ADR-0011
+		// taxonomy. maybeFailOpenClient is deliberately NOT consulted: learning
+		// an auto-exclusion here would bypass inspection for the host on the next
+		// connection, recreating the hole this closes.
 		proto := detectProtocolName(firstByte[0])
-		logger.Printf("SSL_INSPECT non-TLS protocol detected for %q (first byte=0x%02x, proto=%s) — falling back to raw relay",
+		rawClient.Close()   //nolint:errcheck // refusing: close both legs
+		upstreamTLS.Close() //nolint:errcheck // refusing: close both legs
+		recordDecryptFailureEntry(clientInspectFailureOutcome(errInspectNonTLSClient, hostOnly, dec, match), id, hostOnly, match, decRedactHosts())
+		logger.Printf("SSL_INSPECT refused a non-TLS client for %q (first byte=0x%02x, proto=%s): an inspect rule requires TLS",
 			sanitizeLog(hostOnly), firstByte[0], sanitizeLog(proto))
-		// Raw relay: splice the peeked reader (client) ↔ upstream (already
-		// TLS-connected). This is a non-TLS tunnel that bypasses HTTP-level
-		// inspection, so — like the CONNECT-bypass / WebSocket / SOCKS5 relays —
-		// account its bytes and lifetime in the request log (Finding 11.1).
-		// Teardown is unchanged: wait for one side to EOF, then Close both to
-		// unblock the other. Each direction's count is written by exactly one
-		// goroutine before its done-send and read only after both done-receives
-		// (channel happens-before), so no atomics are needed. Both directions
-		// share an idle stamp (idleCopyCounted) so a half-open peer cannot pin
-		// the tunnel forever; the client direction reads through peekBuf, so
-		// its deadline anchors on the underlying rawClient conn.
-		// CHAOS-57: this relay was invisible to the shutdown drain — the strip
-		// path's recordActiveConn sits after the client TLS handshake, which this
-		// branch returns before, so an SSH-over-CONNECT session on an inspect rule
-		// was severed with zero grace and lost its TUNNEL_CLOSED accounting.
-		releaseDrain := registerDrainableTunnel(tunnelClassInspectFallback, rawClient, upstreamTLS)
-		defer releaseDrain()
-		start := time.Now()
-		var toUpstream, toClient int64
-		shared := newTunnelActivityStamp()
-		done := make(chan struct{}, 2)
-		relay := func(dst net.Conn, src io.Reader, srcConn net.Conn, count *int64) {
-			defer func() {
-				if v := recover(); v != nil {
-					recordCrash("tunnel-relay", "", v)
-					_ = dst.Close()
-					if srcConn != nil {
-						_ = srcConn.Close()
-					}
-				}
-				done <- struct{}{} // sole sender
-			}()
-			*count = idleCopyCounted(dst, src, srcConn, shared)
-		}
-		go relay(upstreamTLS, peekBuf, rawClient, &toUpstream)   // client → upstream
-		go relay(rawClient, upstreamTLS, upstreamTLS, &toClient) // upstream → client
-		<-done
-		rawClient.Close()   //nolint:errcheck // force the peer relay to unblock
-		upstreamTLS.Close() //nolint:errcheck // force the peer relay to unblock
-		<-done
-		recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUpstream, toClient, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), decRedactHosts())
 		return
 	}
 

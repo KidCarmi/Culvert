@@ -293,7 +293,7 @@ var fireCPGRPCListenerAlert = func(detail string, episode uint64) {
 		deferStartupAlertWhile("cp_grpc_listener_down", payload, func() bool { return cpGRPCEpisodeOpen(episode) })
 		return
 	}
-	if !globalAlertStore.HasSubscriber("cp_grpc_listener_down") {
+	if !alertStore().HasSubscriber("cp_grpc_listener_down") {
 		return
 	}
 	go fireAlert("cp_grpc_listener_down", payload)
