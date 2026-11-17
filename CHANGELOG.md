@@ -7,6 +7,52 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Security
+
+- **`SEC-INSTALL-ENVLINK-1` is now honoured at every privileged site on the
+  `.env` path, not only the last one.** The contract landed as a guard inside
+  `env_put`: `sudo` must never act THROUGH a symlink at `$INSTALL_DIR/.env`,
+  because `sudo chown <me> "$file"` follows the link and hands the invoking
+  sudoer the TARGET (`.env -> /etc/shadow`), and whoever can write the stack dir
+  can plant one. Two other functions take ownership of the SAME path with the
+  same primitive — `setup_at_rest_encryption` and
+  `persist_host_env_session_secret` — guarded only by `-e`/`! -r`, which both
+  FOLLOW links. Both run BEFORE the first `env_put` at top level, so the guard
+  that existed was unreachable as a mitigation: the escalation completed first,
+  and `setup_at_rest_encryption`'s own "Cannot read" warning no longer fired
+  because the `chown` had just made the file readable. An unprivileged owner of
+  the stack dir could therefore take ownership of any root-owned file on an
+  ordinary installer re-run, with no race to win. A third site,
+  `carry_forward_prior_secrets`, early-returns on `-f`, which is FALSE for a
+  DANGLING link, so a planted `.env -> /etc/cron.d/x` fell through to
+  `sudo install`, which opens its destination `O_CREAT|O_TRUNC` and wrote the
+  prior stack's secrets through the link as root to a planter-chosen path. All
+  three now test `-L` first; a link is left alone and the existing
+  warn-and-degrade paths take over, so the self-heal still repairs a REGULAR
+  unreadable `.env` (pinned by a positive control). CWE-59/CWE-61 → CWE-269.
+- **Webhook event names can no longer carry markup into the Alerts panel
+  (`SEC-ALERTS-EVENTNAME-1`).** `POST`/`PUT /api/alerts/webhooks` needs only
+  `RoleOperator` and validated the URL but never the subscribed event names;
+  `normalizeEventNames` only migrates retired names and de-dupes, so `Add`/
+  `Update` persisted whatever was sent. The admin UI then rendered those names
+  into the webhook table through `innerHTML` with no escaping, while the `name`
+  and `url` cells beside them both used `escHtml` — so an operator could store
+  `<img src=x onerror=…>` that executed in the session of every viewer,
+  operator and ADMIN who opened the panel: a privilege escalation out of the
+  operator role, since an admin session carries full configuration and RBAC
+  authority. Both halves are closed: the cell renders through `escHtml` (which
+  also protects a name already on disk from before), and the two
+  operator-reachable endpoints reject a malformed name with 400 so it never
+  reaches the webhook file, a support bundle or any other consumer. The check is
+  a character class, not an allowlist of known events — the catalog grows as
+  rounds add alerts and is discovered by a differential oracle rather than
+  declared in one list, so an allowlist would silently unsubscribe a legitimate
+  new event. The `*` catch-all is admitted as a WHOLE name, never as a
+  character inside one, because refusing it would cause exactly the detection
+  loss `normalizeEventNames` exists to prevent. `Init` (disk) deliberately does
+  not validate, so a persisted name keeps dispatching rather than being dropped
+  on load; the escaped sink is what makes that safe. CWE-79, OWASP A03.
+
 ### Added
 
 - **Diagnostics now flags the admin-route authorization break-glass (Product
@@ -112,6 +158,22 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   artifact: reverting `docker-compose.ha.yml` alone fails all three gates with
   six named violations.
 
+- **A configured audit log that could not be opened at startup no longer needs
+  a restart.** When `audit_log_file` / `-audit-log` failed to open at boot (a
+  missing directory, wrong ownership, a volume not yet writable), the trail
+  fell back to the 500-entry in-memory ring for the life of the process and
+  the `audit_log_persistence` row said to fix the path *and restart*. Every
+  entry recorded in between never reached the durable record. Culvert now
+  re-attempts the same configured path automatically (10 s doubling to a
+  2-minute cap, with jitter, no attempt limit) and, once it opens, writes the
+  entries recorded meanwhile in order and ahead of any newer one (up to the
+  newest 500; anything evicted is charged to `culvert_audit_write_errors_total`),
+  then records a `system`-attributed `audit.persistence.auto_open` entry. It
+  never chooses another path, never replaces a live sink, does nothing after
+  the shutdown hook has closed the trail, and is not armed by the one-shot
+  `prepare-downgrade` command, which still refuses when its audit sink cannot
+  be opened. No configuration, settings or version change.
+
 - **The process-wide alert store is now read and swapped atomically, removing
   an intermittent data race from the race test lanes.** Alert delivery runs on
   detached goroutines (a dozen `go fireAlert(...)` / `go alerts.Fire(...)`
@@ -159,6 +221,51 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unsubscribable and needs its reason recorded.
 
 ### Performance
+
+- **Every response Culvert decrypted took a process-wide reader lock to ask an
+  empty map a question (PERF-SCANEXCL-1).** `scanexcl.Store.IsHostExcluded` is
+  called from `scanInspectBody` UNCONDITIONALLY — ahead of the content-type
+  gate, with no "is any scanner enabled" guard — for every response on the
+  SSL-inspection path, which is the primary SWG path; again from
+  `scanHTTPResponseBody` for every plain-HTTP response whenever a body scanner
+  is on; and the sibling `IsHashExcluded` runs once per body scan. All three
+  took `sync.RWMutex.RLock`, which is two atomic read-modify-writes on ONE
+  process-wide word, so every inspected response wrote the same cache line
+  purely to read a map that in steady state never changes — and in the default
+  posture, to read a map that is EMPTY, because the exclusion lists are an admin
+  opt-in for known-good internal mirrors. Both maps are now published as one
+  immutable view behind an `atomic.Pointer`; readers take one atomic pointer
+  load (a shared-line READ, which scales) and no lock, and a store with nothing
+  configured answers from a length check without paying the port strip or the
+  case fold the lock used to be taken around. `mu` survives, guarding only the
+  persistence path and serialising writers. Measured with the verbatim RWMutex
+  arm in the same interleaved invocation (go1.27.4, 4-vCPU Xeon @2.10GHz,
+  `-benchtime=2s`, RunParallel so ns/op is wall time across all workers): host
+  check with nothing configured 41.7/141/154 ns at P=1/2/4 -> 3.52/1.75/0.889 ns
+  (11.8x at one core, 173x at four); configured miss 50.2/156/171 ->
+  42.1/23.0/12.6; hash check with nothing configured 79.0/88.2/96.6 ->
+  2.62/1.37/0.651. The SIGN is the finding: adding cores subtracted throughput
+  in every posture (1->4 = 0.27x) and now adds it in every posture (3.3-4.0x).
+  Serially, the shapes that still do the full lookup lose the `RLock`/`RUnlock`
+  pair and its deferred unlock: configured host hit 45.7 -> 40.5 ns, configured
+  hash hit 93.0 -> 79.9 ns. This is the fourth instance of the identical
+  reader-lock ceiling in this tree (`internal/threatfeed`,
+  `internal/connlimit`, the IP filter and the top-hosts counter all record the
+  same finding and the same answer) and the first on the inspection path. The
+  change is held differentially, not by timing: `legacyStore` in
+  `scanexcl_bench_test.go` is a verbatim copy of the pre-change implementation
+  and both arms are asked a corpus of case, space, port, bracketed/bare IPv6,
+  trailing-dot, empty and malformed-digest inputs under nine list
+  configurations; the empty-posture shortcut is pinned by an allocation budget;
+  the never-mutate-a-published-view invariant is pinned by pointer identity and
+  under `-race`. One `IsHostExcluded` call is ~41 ns against a CONNECT this box
+  serves in ~200 µs, so no end-to-end benchmark moves and none is claimed to:
+  what was removed is a non-scaling term on a per-request path, and the removal
+  makes the code simpler rather than more complex. Full round record in
+  `docs/engineering/PERFORMANCE-GUARDIAN-REVIEW-2026-11-16.md`, which also
+  records the two end-to-end paths profiled and found already at their floor,
+  and confirms `internal/reqlog`'s `ringMu` has now met its own
+  written-down trigger for a sharded-ring pass on appliance hardware.
 
 - **Concurrent SSRF guard misses for one host now share one DNS lookup.**
   `ssrf.PrivateHost*` resolved through `net.Resolver.LookupHost`, which —
@@ -658,6 +765,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   the remedy. Report-only: PAC loading, serving and enforcement are unchanged.
 ### Fixed
 
+- **An automatically renewed Root CA could change its key identifier, so
+  OpenSSL-based clients holding only the old root rejected every inspected
+  connection during the overlap window.** Renewal keeps the key and subject
+  (#1854), but the renewed certificate's Subject Key Identifier was left for
+  the Go toolchain to derive, and that derivation changed in Go 1.25 (SHA-1 to
+  truncated SHA-256). A root issued by an older build, or any managed root
+  whose identifier is not today's derivation, was renewed under a different
+  one; each new leaf then named it in its Authority Key Identifier, which
+  OpenSSL (curl, Python, git) treats as "not issued by the old root". Go's own
+  verifier only uses the identifier as a hint, which is why the existing
+  overlap test passed. Renewal now carries the old root's identifier over
+  verbatim. A freshly generated root is unchanged.
+
 - **Re-running `scripts/install.sh` on RHEL, CentOS, Rocky, Alma, Oracle Linux
   or Fedora uninstalled the Docker Engine the first run had installed, took
   the proxy down and then aborted.** The "Cleaning up old Docker
@@ -698,6 +818,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   is logged and audited as `settings.syslog.auto_connect` with actor `system`.
   The alert Detail, the `syslog_feed` operator action and
   `docs/operator/siem-feed-delivery.md` no longer say "nothing retries".
+
 - **`scripts/install.sh` aborted on every supported Fedora release before
   Docker was installed.** The Fedora branch registered Docker's repository with
   `dnf config-manager --add-repo <url>`. Fedora 41 replaced dnf4 with dnf5,
@@ -846,6 +967,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   listen address and the node tried to bind a blank address instead of failing at load. The check now trims first.
 
 ### Security
+
+- **Adding `Upgrade: websocket` and `Connection: Upgrade` to a plain-HTTP
+  download bypassed file blocking and response scanning.** The two headers
+  exempted the request from the URL checks, and when the origin ignored them
+  and answered 200, `handleWebSocket` relayed the body with none of
+  `handleHTTP`'s response checks. A non-101 answer now gets the plain-HTTP
+  checks before it is relayed (`relayDeclinedUpgrade`). Real WebSocket
+  sessions (101) are unchanged. Proven by
+  `TestWebSocketUpgradeHeaders_DoNotBypassPlainHTTPFileBlock`.
 
 - **An SSL-inspect rule no longer relays a non-TLS client into the proxy's own
   TLS session to the origin.** On the default strip-ALPN inspect path, a client

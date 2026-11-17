@@ -43,6 +43,12 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// shuts down. Idle (no timer, no dial) unless a boot dial failed.
 	go startSyslogIntentRetry(ctx)
 
+	// The audit log's deferred open: a configured audit_log_file that could
+	// not be opened at startup is re-attempted on a bounded backoff until it
+	// opens (entries recorded meanwhile are written first), or the node shuts
+	// down. Returns at once unless the startup open failed.
+	go startAuditOpenRetry(ctx)
+
 	// CHAOS-107: the ClamAV signature-generation observer. ClamAV definitions
 	// change out-of-process (freshclam), so the verdict cache can only be
 	// reconciled against them by ASKING on a cadence; nothing else in the
