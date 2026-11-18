@@ -85,6 +85,10 @@ func loadObservability(cfg observabilityStartupConfig) {
 		requestLogConfiguredPath = cfg.RequestLogPath
 		if err := initRequestLog(cfg.RequestLogPath, cfg.RequestLogMaxMB); err != nil {
 			logger.Printf("RequestLog: file error (%v) — falling back to in-memory only", err)
+			// The configured path stays the operator's intent: the
+			// background-services slice re-attempts it with the same
+			// rotation size (request_log_persist_retry.go).
+			armRequestLogDeferredOpen(cfg.RequestLogPath, cfg.RequestLogMaxMB)
 		} else {
 			logger.Printf("RequestLog: persisting to %s (max %d MB)", cfg.RequestLogPath, cfg.RequestLogMaxMB)
 		}

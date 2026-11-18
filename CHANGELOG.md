@@ -337,6 +337,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   artifact: reverting `docker-compose.ha.yml` alone fails all three gates with
   six named violations.
 
+- **A configured request log that could not be opened at startup no longer
+  needs a restart.** When `request_log_file` / `-request-log` failed to open at
+  boot (a missing directory, wrong ownership, a volume not yet writable), the
+  traffic log stayed in the 5000-entry in-memory ring for the life of the
+  process and the `request_log_persistence` row said to fix the path *and
+  restart*. Culvert now re-attempts the same configured path, with the same
+  rotation size, on the audit log's cadence (10 s doubling to a 2-minute cap,
+  with jitter, no attempt limit) and records a `system`-attributed
+  `request_log.persistence.auto_open` audit entry once it opens. Entries
+  recorded before the open are not replayed into the file (they stay in the
+  ring), which is what a restart would also have produced. It never chooses
+  another path, never replaces a live sink and does nothing after the shutdown
+  hook has closed the log. No configuration, settings or version change.
+
 - **A configured audit log that could not be opened at startup no longer needs
   a restart.** When `audit_log_file` / `-audit-log` failed to open at boot (a
   missing directory, wrong ownership, a volume not yet writable), the trail

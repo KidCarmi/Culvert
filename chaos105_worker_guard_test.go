@@ -162,6 +162,8 @@ var chaos105Workers = []struct {
 	// The deferred audit-log open: `go`-detached from the background-services
 	// slice, and its round opens a file and publishes the audit sink.
 	{"audit_persist_retry.go", "runAuditOpenRetry", "crashComponentAuditOpenRetry"},
+	// The deferred request-log open: same shape as the audit-log open.
+	{"request_log_persist_retry.go", "runRequestLogOpenRetry", "crashComponentRequestLogOpenRetry"},
 }
 
 func TestCHAOS105_EveryRegisteredWorkerRoundIsGuarded(t *testing.T) {

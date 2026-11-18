@@ -147,6 +147,9 @@ func Init(path string, maxMB int) error {
 // It drains the persistence queue first, so entries still in flight at
 // shutdown reach the file rather than being discarded with the goroutine.
 func Close() error {
+	// Before stopping persistence: a deferred open (deferred.go) in flight
+	// now must not publish a sink behind the shutdown hook.
+	closedForDeferred.Store(true)
 	stopPersist()
 	writerMu.Lock()
 	defer writerMu.Unlock()
@@ -340,6 +343,7 @@ func SetFilePathForTest(path string) (restore func()) {
 // left wired (so a re-init inside the test cannot leak) before reinstating
 // the snapshot.
 func SwapPersistenceForTest() (restore func()) {
+	resetDeferredForTest()
 	stopPersist()
 	writerMu.Lock()
 	oldW, oldC, oldP := writer, closer, filePath
@@ -353,6 +357,7 @@ func SwapPersistenceForTest() (restore func()) {
 		}
 		writer, closer, filePath = oldW, oldC, oldP
 		writerMu.Unlock()
+		resetDeferredForTest()
 	}
 }
 
@@ -361,6 +366,7 @@ func SwapPersistenceForTest() (restore func()) {
 // or not persistence was initialised. (No restore — mirrors the
 // pre-extraction resetRequestLogState helper's exact semantics.)
 func ResetForTest() {
+	resetDeferredForTest()
 	stopPersist()
 	writerMu.Lock()
 	defer writerMu.Unlock()
