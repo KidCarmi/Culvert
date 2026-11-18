@@ -1288,15 +1288,28 @@ jobs:
   # the "Campaign verdict" step: every required check must PASS; only the
   # declared residuals may be other than pass.
   qemu-retained:
-    name: "Lab · QEMU campaign on the FB1-R2 candidate OVA e60620c3 (no build)"
+    name: "Lab · QEMU campaign on the R10 replacement candidate OVA aea0845a (no build)"
     if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[adopted-scan]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[console-overlay]') && !contains(github.event.head_commit.message, '[fail-fast]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[preserve-image]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     env:
-      VARIANT: candidate-a2b722c0
+      VARIANT: candidate-9025e13a
       # The ONE commit message that may start this job (an empty commit on the
       # reviewed head; reviewed by ASTRA, with its SHA, parent and tree, before
       # it is pushed).
+      # Campaign 10 (owner R10 remediation authorization of 14 November 2026 and
+      # decision of 17 November 2026): the R10 replacement candidate OVA aea0845a
+      # (source 9025e13a: the provisioning-completion fix, apt snapshot 20261113,
+      # kernel 7.0.0-43, Docker 29.10.0 / containerd.io 2.4.2-4 / Compose 5.7.1,
+      # otel 1.47.0; ONE ASTRA-accepted build-only run 44337877188 under the
+      # owner's one-build CI exception, identity 63/63). New direct check
+      # 2/complete-not-premature: first boot is sampled every 2 s and `complete`
+      # must never be on record while application_responding or
+      # management_available is false (no later ready sample excuses an earlier
+      # one), and the serial log must show the readiness gate's line before
+      # `step complete: done`. Campaign 9 (trigger 79765c11, run 43454894877,
+      # evidence 14054833509) PASSED WITH RESIDUALS on OVA e60620c3 only; it
+      # qualifies nothing here, and its history stands.
       # Campaign 9 (owner direction and decision of 8 November 2026; D4 of 9
       # November 2026; owner clarifications of 10 and 12 November 2026): the same
       # FB1-R2 candidate OVA e60620c3, after a containment-proof correction.
@@ -1368,36 +1381,40 @@ jobs:
       # f9d68540. The campaign-3 route (84e05cd6, FB1-R1 OVA f76b6e82) was never
       # triggered: owner decision D4 retired that candidate. None of those
       # messages starts this job.
-      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 9 on the FB1-R2 candidate OVA e60620c3 [qemu-retained]"
-      QEMU_CAMPAIGN: "9"
-      QEMU_PRIOR_CAMPAIGN: "8: trigger f43162abe180c711e235541b8900efd51ecc169a, run 43384560604 attempt 1, evidence artifact 14018186899, verdict NOT STARTED (pre-boot containment proof failed: getent answered www.wikipedia.org in the guest cgroup with no query reaching the allowlisting resolver; no receipt, boot or candidate execution)"
-      # Start deadline (unchanged, reviewed for campaign 2): first candidate boot
-      # no later than 2026-11-14T00:00:00Z. With the 345-minute job limit and the
-      # daily-window rule the job ends by 2026-11-14T05:45Z, inside the owner's
-      # work window (ends 2026-11-15T00:00:00Z, decision of 8 November 2026).
-      CAMPAIGN_START_DEADLINE: "2026-11-14T00:00:00Z"
+      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 10 on the R10 replacement candidate OVA aea0845a [qemu-retained]"
+      QEMU_CAMPAIGN: "10"
+      QEMU_PRIOR_CAMPAIGN: "9: trigger 79765c11b70344c348e01d7c4221f95ac67b4ee3, run 43454894877 attempt 1, evidence artifact 14054833509, verdict PASS WITH RESIDUALS (all 14 scopes; 221 PASS / 12 INFO / 1 BLOCKED) on the FB1-R2 candidate OVA e60620c3 only"
+      # Start deadline (owner direction of 14 November 2026): first candidate
+      # boot strictly before 2026-11-20T00:00:00Z. With the 345-minute job limit
+      # and the daily-window rule the job ends by 2026-11-20T05:45Z, inside the
+      # owner's work window (all execution before 2026-11-21T00:00:00Z).
+      CAMPAIGN_START_DEADLINE: "2026-11-20T00:00:00Z"
       # The job's own limit; the daily-window guard reasons over it.
       CAMPAIGN_MAX_MINUTES: "345"
-      # The FB1-R2 candidate artifact (build-only run 42676483837, identity
-      # 63/63, owner-approved single build) and the OVA in it.
-      OVA_ARTIFACT_ID: "13700808343"
-      OVA_ARTIFACT_RUN: "42676483837"
-      OVA_ARTIFACT_NAME: appliance-lab-ova-candidate-a2b722c0
-      OVA_ARTIFACT_ZIP_SHA256: 10e6156f5a78d71a61755d273f45bc232009af324f245eb25814d6a2f554ae22
-      OVA_NAME: culvert-appliance-1.0.404-candidate.ga2b722c0359e-ubuntu-24.04.ova
-      OVA_SHA256: e60620c3f9a225dea74b55ee70226cc4be38ef5a5e6bbc3226b76164af41fef4
+      # The R10 replacement candidate artifact (build-only run 44337877188,
+      # identity 63/63, the ONE accepted build) and the OVA in it.
+      OVA_ARTIFACT_ID: "14442199990"
+      OVA_ARTIFACT_RUN: "44337877188"
+      OVA_ARTIFACT_NAME: appliance-lab-ova-candidate-9025e13a
+      OVA_ARTIFACT_ZIP_SHA256: 817c236e63facbdfdb523573de4bc0b079cd893352a211d293d22c4d55c61c71
+      OVA_NAME: culvert-appliance-1.0.455-candidate.g9025e13abf2d-ubuntu-24.04.ova
+      OVA_SHA256: aea0845a4a3a576a45d5ca7e5e666f7b257a4e07a808f87364054db5528b6965
       # Its frozen source (the signed-update fixture is built from it) and the
       # image identity the guest must report.
-      APPLIANCE_SOURCE_SHA: a2b722c0359ece9bd31708533ebcbc0192f42b0b
-      APPLIANCE_SOURCE_TREE: 697acdc094155c5403f8c2ab921e7914f85922a0
-      EXPECT_IMAGE_ID: "sha256:08541c6701f108c21c2379ca93edb2c9cad568301ac77765aa4e6c3259df1fc3"
+      APPLIANCE_SOURCE_SHA: 9025e13abf2da873512c32875e98d6f8e8edb806
+      APPLIANCE_SOURCE_TREE: a2c04f3130c81a4dc941a8ddb4dd411182e8e023
+      EXPECT_IMAGE_ID: "sha256:c79b82663133566d0923c0c0da066a0cc59dbd30dd60192fdedc66d858e49c77"
       # Source citations below name 0981ff3d. Every cited file is byte-identical
-      # at 6eead9a1 and at a2b722c0 (auth_oidc_flow.go dc1eb5b0, internal/ssrf/ssrf.go 9b4279c4,
+      # at 6eead9a1, a2b722c0 and 9025e13a (auth_oidc_flow.go dc1eb5b0, internal/ssrf/ssrf.go 9b4279c4,
       # auth_saml.go 70bef4b8, internal/feedsync/feedsync.go b3695a9b,
       # internal/threatfeed/threatfeed.go a24f7b9e, release_wiring.go fd71c436,
       # scripts/install.sh 9eeb145e, internal/uitls/uitls.go 76554802), so the
       # decoder fields, resolved fields and egress names carry over unchanged.
-      EXPECT_KERNEL_RELEASE: 7.0.0-42-generic
+      # (docs/appliance/first-boot.md gained R10 text; its sigstore/ghcr rows
+      # are unchanged, now at lines 201-202 of 9025e13a.) 9025e13a builds with
+      # go1.27.4: its encoding/json, strings, bytes, unicode and unicode/utf8
+      # sources are byte-identical to go1.27.3's, so the decoder notes below hold.
+      EXPECT_KERNEL_RELEASE: 7.0.0-43-generic
       # Public HTTPS issuer for the changed OIDC discovery fetch (read-only GET,
       # no credential, nothing saved).
       OIDC_PUBLIC_ISSUER: https://accounts.google.com
@@ -1435,10 +1452,10 @@ jobs:
       # (name:read_ms:write_ms:budget_s).
       Q7_PROFILE: "q7:0:0:120"
       Q7_REBOOTS: "3"
-      # Start deadline as an epoch (2026-11-14T00:00:00Z), rechecked by the
+      # Start deadline as an epoch (2026-11-20T00:00:00Z), rechecked by the
       # harness immediately before the first candidate boot; the campaign
       # window (24 h) runs from that boot's UTC/monotonic anchor.
-      LAB_START_DEADLINE_EPOCH: "1794614400"
+      LAB_START_DEADLINE_EPOCH: "1795132800"
       LAB_CAMPAIGN_WINDOW_S: "86400"
       # Changed SAML metadata fetch: synthetic IdP metadata served from THIS
       # commit's public URL, bytes pinned.
@@ -2609,7 +2626,7 @@ jobs:
           Q7 = [f"R/{c}-q7-{i}" for i in (1, 2, 3) for c in ("recovery", "backup-list", "state", "operator-capture-integrity")] + ["R/clamav-evidence", "R/recovery-cases", "R/operator-hostkey-pinned"]
           SCOPE = {
             "cold boot / provisioning": ["P/tools", "P/memory", "P/disk", "P/accel", "1/ova-sha256", "1/ova-manifest", "1/disk-chain", "2/campaign-clock-main", "2/boot-started", "2/kernel-started",
-              "2/operator-ssh-up", "2/firstboot-complete", "2/app-ready-after-complete", "3/status-setup-pending", "3/firstboot-steps", "3a/console-onetime-printed", "3a/console-login",
+              "2/operator-ssh-up", "2/firstboot-complete", "2/app-ready-after-complete", "2/complete-not-premature", "3/status-setup-pending", "3/firstboot-steps", "3a/console-onetime-printed", "3a/console-login",
               "3a/password-changed", "3/culvert-status-setup-pending", "3/image-identity", "3/setup-token", "3e/recovery-secrets", "8/firstboot-not-rerun", "8/state-files"],
             "admin and agent access": ["3/operator-observe", "3c/operator-commands-refused", "3c/forwarding-refused", "3c/file-transfer-refused", "3c/local-admin-ssh-refused",
               "3c/sshd-effective", "3c/local-admin-sudo-needs-password", "4a/bootstrap-api-needs-token", "4/setup-without-token", "4/setup-with-token", "4/admin-login",

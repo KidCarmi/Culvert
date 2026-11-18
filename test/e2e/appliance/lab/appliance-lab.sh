@@ -549,7 +549,136 @@ print(r["result"], r["check"], len(recs), "fields-ok" if recs and all(need <= se
   rac pre-entry-expired at-once 0.25 fail '* 0 no-calls first=rc=None/parse=/nokill stderr=none last_ready=None bound=bounded anchored=yes entry=expired' 0.3
   rac pre-entry-in-budget late 30 pass '* 3 fields-ok first=rc=0/parse=ok/nokill stderr=none last_ready=True bound=bounded anchored=yes entry=ok' 1
   rac pre-entry-near-limit never 3 fail '* 1 fields-ok first=rc=0/parse=ok/nokill stderr=none last_ready=False bound=bounded anchored=yes entry=ok' 2.5
-  unset -f cwr cwr_fake rco rac
+  # complete_not_premature (R10 direct check) on fixtures. cnp NAME WANT
+  # SAMPLES READY CONSOLE FRAGMENT: SAMPLES/READY are ";"-separated
+  # "steps|app|mgmt" items (steps "c" = complete recorded, "-" = not; app/mgmt
+  # 1/0); a SAMPLES item "e" is an unobserved sample (rc 124, no output); READY
+  # items "t" (timed out), "p" (rc 0, unparseable) and "r" (non-zero rc) are
+  # failed post-complete calls; READY "MISSING" writes no file. CONSOLE is a
+  # ","-separated list of r (the gate's readiness line), c (step complete: done)
+  # and x (any other line). The reported reason must contain FRAGMENT.
+  cnp() { local name="$1" want="$2" r="$d/cnp-$1" got
+    mkdir -p "$r/s"
+    python3 -I - "$r" "$3" "$4" "$5" "${7:-}" <<'PY'
+import hashlib, json, os, sys
+r, smp, rdy, con, mut = sys.argv[1:6]
+def items(s):
+    return [x.split("|") for x in s.split(";") if x]
+E = hashlib.sha256(b"").hexdigest()
+recs = []
+if True:
+    for i, it in enumerate(items(smp)):
+        rec = {"attempt": i + 1, "start_mono": 10.0 + 2 * i, "end_mono": 10.5 + 2 * i, "stdout": "%04d.stdout" % (i + 1),
+               "stdout_bytes": 0, "stdout_sha256": E, "stderr": "%04d.stderr" % (i + 1), "stderr_bytes": 0,
+               "stderr_sha256": E, "stderr_head": None}
+        if it == ["e"]:
+            rec.update(rc=124, parse="not-attempted", steps=None, application_responding=None,
+                       management_available=None, phase=None, reason=None)
+        else:
+            st, a, m = it
+            rec.update(rc=0, parse="ok", steps=["install", "agent"] + (["complete"] if st == "c" else []),
+                       application_responding=a == "1", management_available=m == "1",
+                       phase="provisioned" if st == "c" else "running", reason="x")
+        open(r + "/s/" + rec["stdout"], "w").close(); open(r + "/s/" + rec["stderr"], "w").close()
+        recs.append(rec)
+if mut == "sample-gap" and len(recs) > 2:
+    del recs[1]; [os.remove(r + "/s/0002." + k) for k in ("stdout", "stderr")]
+    for j, x in enumerate(recs[1:], 2): os.rename(r + "/s/%04d.stdout" % (j + 1), r + "/s/%04d.stdout" % j); os.rename(r + "/s/%04d.stderr" % (j + 1), r + "/s/%04d.stderr" % j)
+if mut == "sample-unordered" and len(recs) > 1: recs[1]["start_mono"] = recs[0]["start_mono"] - 5
+if mut == "sample-nan" and recs: recs[0]["end_mono"] = float("nan")
+if mut == "raw-missing" and recs: os.remove(r + "/s/" + recs[0]["stdout"])
+if mut == "raw-mismatch" and recs: open(r + "/s/" + recs[0]["stderr"], "w").write("tampered")
+cnt = len(recs)
+if mut == "trailing-record-lost" and recs: recs.pop()
+if mut == "raw-extra": open(r + "/s/%04d.stdout" % (cnt + 1), "w").close()
+if mut == "attempt-float" and recs: recs[0]["attempt"] = 1.0
+if mut != "count-missing": open(r + "/s.count", "w").write(json.dumps({"attempts": cnt}) + "\n")
+with open(r + "/s.jsonl", "w") as f:
+    for rec in recs: f.write(json.dumps(rec) + "\n")
+if rdy != "MISSING":
+    prs = []
+    if True:
+        for i, it in enumerate(items(rdy)):
+            rec = {"attempt": i + 1, "utc": "2026-11-18T00:00:%02dZ" % i, "start_s": float(i), "timeout_s": 10.0,
+                   "rc": 0, "error": None, "parse": "ok", "after_deadline": False}
+            if it == ["t"]:
+                rec.update(rc=None, error="status-json call exceeded 10.000 s (killed)", parse="not-attempted",
+                           application_responding=None, management_available=None)
+            elif it == ["p"]:
+                rec.update(parse="error: JSONDecodeError", application_responding=None, management_available=None)
+            elif it == ["r"]:
+                rec.update(rc=255, error="status-json exited 255", parse="not-attempted",
+                           application_responding=None, management_available=None)
+            else:
+                st, a, m = it
+                rec.update(application_responding=a == "1", management_available=m == "1")
+            prs.append(rec)
+    if mut == "post-gap" and len(prs) > 2: del prs[1]
+    if mut == "post-unordered" and len(prs) > 1: prs[1]["start_s"] = -1.0
+    pcnt = len(prs)
+    if mut == "post-trailing-lost" and prs: prs.pop()
+    if mut == "post-attempt-float" and prs: prs[0]["attempt"] = 1.0
+    if mut != "done-missing": open(r + "/r.done", "w").write(json.dumps({"attempts": pcnt, "waiter_rc": 0, "verdict": "pass"}) + "\n")
+    with open(r + "/r.jsonl", "w") as f:
+        for rec in prs: f.write(json.dumps(rec) + "\n")
+L = {"r": "[   47.9] culvert-firstboot[1]: Z culvert-firstboot: readiness: application and management answered in 2 consecutive checks (2s, check 2)",
+     "c": "[   48.5] culvert-firstboot[1]: Z culvert-firstboot: step complete: done",
+     "x": "[   40.0] systemd[1]: Started something."}
+open(r + "/console.log", "w").write("\n".join(L[k] for k in con.split(",") if k) + "\n")
+PY
+    got="$( JSONL="$r/checks.jsonl"; EV="$r"; WORK="$r"; LAB_CAMPAIGN_STOP_FILE=; : > "$JSONL"
+            complete_not_premature "$r/s.jsonl" "$r/r.jsonl" "$r/console.log" > /dev/null 2>&1 || true
+            python3 -I -c 'import json,sys; x=json.loads(open(sys.argv[1]).read().strip().splitlines()[-1]); print(x["result"], x["check"], x["detail"])' "$JSONL" 2>/dev/null )"
+    if [[ "${got%% *}" == "$want" && "$got" == *complete-not-premature* && "$got" == *"$6"* ]]; then log "selftest ok: complete-not-premature $name -> ${got:0:160}"
+    else log "selftest FAILED: complete-not-premature $name -> '${got:0:300}', want $want and '$6'"; rc=1; fi; }
+  cnp fixed-build pass '-|0|0;-|1|0;c|1|1' 'c|1|1' 'x,r,c,x' 'readiness at [47.9] before step complete at [48.5]'
+  cnp admin-enrolled-later pass 'c|1|1' 'c|1|1;c|1|1' 'r,c' '2 post-complete calls, every one rc 0'
+  cnp pre-complete-gap-bounded pass 'e;-|0|0;e;c|1|1' 'c|1|1' 'r,c' '2 sample(s) unobserved (rc/parse failure) before complete: claims cover the 2 observed samples only'
+  cnp campaign7-shape fail 'c|0|1;c|1|1' 'c|1|1' 'x,c' 'shows complete with application_responding=False'
+  cnp later-ready-does-not-mask fail '-|0|0;c|1|0;c|1|1' 'c|1|1;c|1|1' 'r,c' 'management_available=False'
+  cnp post-complete-drop fail 'c|1|1' 'c|1|1;c|0|1' 'r,c' 'post-complete call 2'
+  cnp post-timeout-then-healthy fail 'c|1|1' 't;c|1|1' 'r,c' 'post-complete call 1 at +0.0s: rc=None error=status-json call exceeded'
+  cnp post-parse-error-then-healthy fail 'c|1|1' 'p;c|1|1' 'r,c' 'post-complete call 1 at +0.0s: rc=0 error=None parse=error'
+  cnp post-rc-then-healthy fail 'c|1|1' 'r;c|1|1' 'r,c' 'post-complete call 1 at +0.0s: rc=255'
+  cnp post-record-missing fail 'c|1|1' 'MISSING' 'r,c' 'post-complete readiness record missing or unreadable'
+  cnp post-record-empty fail 'c|1|1' '' 'r,c' 'post-complete readiness record is empty'
+  cnp old-script-no-gate-line fail 'c|1|1' 'c|1|1' 'x,c' 'not preceded by the readiness gate'
+  cnp gate-line-after-complete fail 'c|1|1' 'c|1|1' 'c,r' 'not preceded by the readiness gate'
+  cnp never-complete fail '-|1|1;-|1|1' 'c|1|1' 'x' 'no first-boot sample shows complete'
+  cnp only-unobserved fail 'e;e' 'c|1|1' 'r,c' 'no first-boot sample shows complete (2 samples, 2 unobserved)'
+  cnp serial-missing-complete fail 'c|1|1' 'c|1|1' 'r,x' "no 'step complete: done'"
+  cnp sample-attempt-missing fail '-|0|0;-|1|1;c|1|1' 'c|1|1' 'r,c' 'first-boot sample attempts are not contiguous integers: record 2 has attempt 3' sample-gap
+  cnp sample-timing-unordered fail '-|0|0;c|1|1' 'c|1|1' 'r,c' 'first-boot sample 2 has invalid or unordered timing' sample-unordered
+  cnp sample-timing-nan fail 'c|1|1' 'c|1|1' 'r,c' 'first-boot sample 1 has invalid or unordered timing' sample-nan
+  cnp sample-raw-missing fail 'c|1|1' 'c|1|1' 'r,c' 'first-boot sample 1: raw stdout 0001.stdout is missing' raw-missing
+  cnp sample-raw-mismatch fail 'c|1|1' 'c|1|1' 'r,c' 'first-boot sample 1: raw stderr 0001.stderr does not match its record' raw-mismatch
+  cnp post-attempt-missing fail 'c|1|1' 'c|1|1;c|1|1;c|1|1' 'r,c' 'post-complete attempts are not contiguous integers: record 2 has attempt 3' post-gap
+  cnp post-timing-unordered fail 'c|1|1' 'c|1|1;c|1|1' 'r,c' 'post-complete call 2 has invalid or unordered timing' post-unordered
+  cnp trailing-record-lost fail '-|0|0;c|1|1' 'c|1|1' 'r,c' 'the writer completed 2 attempts but 1 records survive' trailing-record-lost
+  cnp raw-extra fail 'c|1|1' 'c|1|1' 'r,c' "first-boot raw files do not match the 1 completed attempts (extra ['0002.stdout']" raw-extra
+  cnp count-missing fail 'c|1|1' 'c|1|1' 'r,c' 'first-boot samples completion record s.count missing or invalid' count-missing
+  cnp attempt-float fail 'c|1|1' 'c|1|1' 'r,c' 'not contiguous integers: record 1 has attempt 1.0' attempt-float
+  cnp post-trailing-lost fail 'c|1|1' 'c|1|1;c|1|1' 'r,c' 'the waiter reported 2 attempts but 1 records survive' post-trailing-lost
+  cnp post-attempt-float fail 'c|1|1' 'c|1|1' 'r,c' 'post-complete attempts are not contiguous integers: record 1 has attempt 1.0' post-attempt-float
+  cnp done-missing fail 'c|1|1' 'c|1|1' 'r,c' 'post-complete calls completion record r.done missing or invalid' done-missing
+  # sample_firstboot (C10-E1) with a stubbed probe: raw stdout/stderr kept per
+  # attempt (partial output of a timed-out probe too), and any failure to keep
+  # the evidence returns 90 with no silent success.
+  sfb() { local name="$1" want="$2" r="$d/sfb-$1" out="$3" stub="$4" got
+    mkdir -p "$r"
+    got="$( WORK="$r"; gop_within() { eval "$stub"; }; mono() { echo 1.000; }
+            sample_firstboot "$out" > /dev/null 2>&1; echo "rc=$?" )"
+    if [[ "$got" == "rc=$want" ]] && eval "$5"; then log "selftest ok: sample_firstboot $name -> $got"
+    else log "selftest FAILED: sample_firstboot $name -> '$got', want rc=$want and [$5]"; rc=1; fi; }
+  sfb kept 0 "$d/sfb-kept/s.jsonl" "echo '{\"steps\":[{\"id\":\"complete\",\"state\":\"recorded\"}],\"application_responding\":true,\"management_available\":true}'; echo warn >&2" \
+    'python3 -I -c "import json,sys; x=json.loads(open(sys.argv[1]).read()); sys.exit(not (x[\"attempt\"]==1 and x[\"parse\"]==\"ok\" and x[\"stderr_bytes\"]==5 and x[\"steps\"]==[\"complete\"]))" "$d/sfb-kept/s.jsonl" && grep -qx warn "$d/sfb-kept/s/0001.stderr" && grep -qxF "{\"attempts\": 1}" "$d/sfb-kept/s.count"'
+  sfb timeout-partial 124 "$d/sfb-timeout-partial/s.jsonl" "printf '{\"ste'; echo late >&2; return 124" \
+    'python3 -I -c "import json,sys; x=json.loads(open(sys.argv[1]).read()); sys.exit(not (x[\"rc\"]==124 and x[\"parse\"]==\"not-attempted\" and x[\"stdout_bytes\"]==5))" "$d/sfb-timeout-partial/s.jsonl" && [[ "$(cat "$d/sfb-timeout-partial/s/0001.stdout")" == "{\"ste" ]]'
+  : > "$d/sfb-blocker"
+  sfb dir-unusable 90 "$d/sfb-blocker/x/s.jsonl" "echo '{}'" '[[ ! -e "$d/sfb-blocker/x" ]]'
+  mkdir -p "$d/sfb-append-fails/s.jsonl"
+  sfb append-fails 90 "$d/sfb-append-fails/s.jsonl" "echo '{}'" '[[ -d "$d/sfb-append-fails/s.jsonl" ]]'
+  unset -f cwr cwr_fake rco rac cnp sfb
   if python3 -I -B "$HERE/console-session-selftest.py" > "$d/cs-selftest.log" 2>&1; then
     log "selftest ok: console-session receive loop and transfer ($(grep -c '^ok ' "$d/cs-selftest.log") cases: prompt drain, settle kept, 60 KB identical, status kept)"
   else log "selftest FAILED: console-session receive loop/transfer: $(grep -E 'FAILED|Error' "$d/cs-selftest.log" | head -3 | tr '\n' ' ')"; rc=1; fi
@@ -879,6 +1008,191 @@ engine_overlay() { local disk="$1" fmt="$2" d="${LAB_ENGINE_DEBS:-}" want v
   save_state ENGINE_EXPECT "$want"
   check 1 engine-overlay pass "LAB-ONLY: ${want} installed (dpkg ii/hi) + held in the disposable disk BEFORE first boot; DEB sha256s verified; the booted disk is NOT the OVA's disk"
 }
+# sample_firstboot OUT — one bounded (10 s) status-json sample of first boot.
+# Every attempt keeps its raw stdout and stderr (partial output of a timed-out
+# probe included) as OUT-dir/NNNN.stdout/.stderr, and appends ONE JSON record to
+# OUT: attempt, monotonic start/end, rc, parse outcome, the steps recorded, both
+# readiness flags, phase, reason, and the two files' names, sizes and sha256;
+# then atomically rewrites OUT-base.count = {"attempts": N}, the writer's own
+# completion record that the check reconciles against (trailing loss).
+# Copies stdout to $WORK/status-json.tmp for the caller. Returns the probe's rc,
+# or 90 when the evidence itself cannot be kept (directory, copy, serialization
+# or append failure): the caller must then fail closed and stop.
+sample_firstboot() { local out="$1" dir n t0 t1 rc=0
+  dir="${out%.jsonl}"
+  mkdir -p "$dir" 2>/dev/null && [[ -d "$dir" && -w "$dir" ]] || return 90
+  n="$(find "$dir" -maxdepth 1 -name '*.stdout' 2>/dev/null | wc -l)" || return 90
+  n="$(printf '%04d' "$(( n + 1 ))")"
+  t0="$(mono)"; gop_within 10 status-json > "$dir/$n.stdout" 2> "$dir/$n.stderr" || rc=$?; t1="$(mono)"
+  cp "$dir/$n.stdout" "$WORK/status-json.tmp" 2>/dev/null || return 90
+  python3 -I -c 'import hashlib, json, os, sys
+out, d, n, t0, t1, rc = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4]), float(sys.argv[5]), int(sys.argv[6])
+so, se = os.path.join(d, n + ".stdout"), os.path.join(d, n + ".stderr")
+rawo, rawe = open(so, "rb").read(), open(se, "rb").read()
+rec = {"attempt": int(n), "start_mono": t0, "end_mono": t1, "rc": rc, "parse": "not-attempted", "steps": None,
+       "application_responding": None, "management_available": None, "phase": None, "reason": None,
+       "stdout": os.path.basename(so), "stdout_bytes": len(rawo), "stdout_sha256": hashlib.sha256(rawo).hexdigest(),
+       "stderr": os.path.basename(se), "stderr_bytes": len(rawe), "stderr_sha256": hashlib.sha256(rawe).hexdigest(),
+       "stderr_head": rawe[:300].decode("utf-8", "replace") or None}
+if rc == 0:
+    try:
+        doc = json.loads(rawo); rec["parse"] = "ok"
+        rec["steps"] = sorted(s["id"] for s in doc.get("steps", []) if s.get("state") == "recorded")
+        for k in ("application_responding", "management_available", "phase", "reason"): rec[k] = doc.get(k)
+    except Exception as e:
+        rec["parse"] = "error: " + repr(e)[:160]
+line = json.dumps(rec, sort_keys=True) + "\n"
+fd = os.open(out, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+try:
+    if os.write(fd, line.encode()) != len(line.encode()): sys.exit(3)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+cnt = os.path.splitext(out)[0] + ".count"
+with open(cnt + ".tmp", "w") as c:
+    c.write(json.dumps({"attempts": int(n)}) + "\n"); c.flush(); os.fsync(c.fileno())
+os.replace(cnt + ".tmp", cnt)' "$out" "$dir" "$n" "$t0" "$t1" "$rc" 2>/dev/null || return 90
+  return "$rc"; }
+
+# complete_not_premature SAMPLES READY CONSOLE — the direct check that first
+# boot never records `complete` before the application and management answer
+# (owner direction, R10). Fails when:
+#   - no sample shows `complete`;
+#   - ANY status-json sample that shows `complete` (SAMPLES: first boot, every
+#     2 s; READY: every call of the post-complete readiness wait) lacks
+#     application_responding or management_available — a later ready sample
+#     does not excuse an earlier one, so a post-complete retry cannot mask it;
+#   - the guest's serial log (CONSOLE, timestamped by the kernel) lacks the
+#     gate's "readiness: application and management answered" line before the
+#     first "step complete: done".
+complete_not_premature() { local out
+  out="$(python3 -I - "$1" "$2" "$3" <<'PY'
+import hashlib, json, math, os, re, sys
+samples, ready, console = sys.argv[1:4]
+bad = []
+fin = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+def load(p, what):
+    try:
+        lines = [l for l in open(p, encoding="utf-8") if l.strip()]
+    except OSError as e:
+        bad.append("%s missing or unreadable (%s)" % (what, e.__class__.__name__)); return []
+    if not lines:
+        bad.append("%s is empty" % what); return []
+    out = []
+    for i, l in enumerate(lines, 1):
+        try:
+            r = json.loads(l)
+            if not isinstance(r, dict): raise ValueError("not an object")
+            out.append(r)
+        except Exception as e:
+            bad.append("%s line %d is not a JSON record (%s)" % (what, i, repr(e)[:60])); return []
+    return out
+SKEYS = {"attempt", "start_mono", "end_mono", "rc", "parse", "steps", "application_responding",
+         "management_available", "phase", "reason", "stdout", "stdout_bytes", "stdout_sha256",
+         "stderr", "stderr_bytes", "stderr_sha256"}
+smp = load(samples, "first-boot samples")
+raw = os.path.splitext(samples)[0]
+prev_end = None
+for i, r in enumerate(smp, 1):
+    miss = SKEYS - set(r)
+    if miss:
+        bad.append("first-boot sample record %d lacks %s" % (i, sorted(miss))); break
+    if type(r["attempt"]) is not int or r["attempt"] != i:
+        bad.append("first-boot sample attempts are not contiguous integers: record %d has attempt %r" % (i, r["attempt"])); break
+    if not (fin(r["start_mono"]) and fin(r["end_mono"]) and r["end_mono"] >= r["start_mono"]
+            and (prev_end is None or r["start_mono"] >= prev_end)) or not isinstance(r["rc"], int) or isinstance(r["rc"], bool):
+        bad.append("first-boot sample %d has invalid or unordered timing/rc (start %r end %r after %r, rc %r)"
+                   % (i, r["start_mono"], r["end_mono"], prev_end, r["rc"])); break
+    prev_end = r["end_mono"]
+    for k in ("stdout", "stderr"):
+        p = os.path.join(raw, os.path.basename(str(r[k])))
+        try:
+            b = open(p, "rb").read()
+        except OSError:
+            bad.append("first-boot sample %d: raw %s %s is missing" % (i, k, r[k])); break
+        if len(b) != r[k + "_bytes"] or hashlib.sha256(b).hexdigest() != r[k + "_sha256"]:
+            bad.append("first-boot sample %d: raw %s %s does not match its record" % (i, k, r[k])); break
+    if bad: break
+def meta(p, what):
+    try:
+        m = json.loads(open(p, encoding="utf-8").read())
+        a = m.get("attempts")
+        if type(a) is not int or a < 0: raise ValueError("attempts %r" % (a,))
+        return a
+    except Exception as e:
+        bad.append("%s completion record %s missing or invalid (%s)" % (what, os.path.basename(p), repr(e)[:60])); return None
+if smp and not bad:
+    want = meta(os.path.splitext(samples)[0] + ".count", "first-boot samples")
+    if want is not None and want != len(smp):
+        bad.append("first-boot samples: the writer completed %d attempts but %d records survive" % (want, len(smp)))
+    if want is not None:
+        exp = {"%04d.%s" % (i, k) for i in range(1, want + 1) for k in ("stdout", "stderr")}
+        try:
+            have = set(os.listdir(raw))
+        except OSError:
+            have = set()
+        if have != exp:
+            bad.append("first-boot raw files do not match the %d completed attempts (extra %s, missing %s)"
+                       % (want, sorted(have - exp)[:4], sorted(exp - have)[:4]))
+ok_smp = [s for s in smp if s.get("rc") == 0 and s.get("parse") == "ok"]
+gaps = [s for s in smp if not (s.get("rc") == 0 and s.get("parse") == "ok")]
+comp = [s for s in ok_smp if "complete" in (s.get("steps") or [])]
+if smp and not comp:
+    bad.append("no first-boot sample shows complete (%d samples, %d unobserved)" % (len(smp), len(gaps)))
+for s in comp:
+    if s.get("application_responding") is not True or s.get("management_available") is not True:
+        bad.append("sample %s at mono %.3f shows complete with application_responding=%s management_available=%s (%s)"
+                   % (s.get("attempt"), s["start_mono"], s.get("application_responding"), s.get("management_available"), s.get("reason")))
+        break
+RKEYS = {"attempt", "utc", "start_s", "timeout_s", "rc", "error", "parse", "application_responding",
+         "management_available", "after_deadline"}
+post = load(ready, "post-complete readiness record")
+prev = None
+for i, r in enumerate(post, 1):
+    miss = RKEYS - set(r)
+    if miss:
+        bad.append("post-complete record %d lacks %s" % (i, sorted(miss))); break
+    if type(r["attempt"]) is not int or r["attempt"] != i:
+        bad.append("post-complete attempts are not contiguous integers: record %d has attempt %r" % (i, r["attempt"])); break
+    if not (fin(r["start_s"]) and fin(r["timeout_s"]) and r["timeout_s"] > 0 and (prev is None or r["start_s"] >= prev)
+            and isinstance(r["utc"], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", r["utc"])):
+        bad.append("post-complete call %d has invalid or unordered timing (start_s %r after %r, timeout_s %r, utc %r)"
+                   % (i, r["start_s"], prev, r["timeout_s"], r["utc"])); break
+    prev = r["start_s"]
+    if not (r.get("rc") == 0 and r.get("error") is None and r.get("parse") == "ok" and r.get("after_deadline") is False
+            and r.get("application_responding") is True and r.get("management_available") is True):
+        bad.append("post-complete call %s at +%ss: rc=%s error=%s parse=%s application_responding=%s management_available=%s after_deadline=%s"
+                   % (r.get("attempt"), r.get("start_s"), r.get("rc"), r.get("error"), r.get("parse"),
+                      r.get("application_responding"), r.get("management_available"), r.get("after_deadline")))
+        break
+if post and not any("post-complete" in b for b in bad):
+    pw = meta(os.path.splitext(ready)[0] + ".done", "post-complete calls")
+    if pw is not None and pw != len(post):
+        bad.append("post-complete calls: the waiter reported %d attempts but %d records survive" % (pw, len(post)))
+try:
+    lines = open(console, encoding="utf-8", errors="replace").read().splitlines()
+except OSError:
+    lines = []
+ri = next((i for i, l in enumerate(lines) if "culvert-firstboot: readiness: application and management answered" in l), None)
+ci = next((i for i, l in enumerate(lines) if "culvert-firstboot: step complete: done" in l), None)
+if ci is None:
+    bad.append("serial log has no 'step complete: done'")
+elif ri is None or ri > ci:
+    bad.append("serial log: 'step complete: done' (line %d) is not preceded by the readiness gate's line" % (ci + 1))
+if bad:
+    print("FAIL\t" + "; ".join(bad))
+else:
+    ts = lambda i: (re.search(r"\[\s*([0-9.]+)\]", lines[i]) or [None, "?"])[1]
+    gap = ("; %d sample(s) unobserved (rc/parse failure) before complete: claims cover the %d observed samples only"
+           % (len(gaps), len(ok_smp))) if gaps else ""
+    print("PASS\t%d first-boot samples (%d observed, %d showing complete, each with application and management up)%s; "
+          "%d post-complete calls, every one rc 0, parsed and up; serial: readiness at [%s] before step complete at [%s]"
+          % (len(smp), len(ok_smp), len(comp), gap, len(post), ts(ri), ts(ci)))
+PY
+)" || out="FAIL	the check itself failed"
+  if [[ "${out%%$'\t'*}" == PASS ]]; then check 2 complete-not-premature pass "${out#*$'\t'}"
+  else check 2 complete-not-premature fail "${out#*$'\t'}"; return 1; fi; }
+
 # wait_app_after_complete T_COMPLETE SECONDS — after first boot records
 # `complete`, wait for the product's OWN readiness flags in status-json
 # (application_responding AND management_available both true) within ONE
@@ -961,6 +1275,13 @@ with open(log, "w") as f:
 PY
 )" || rc=$?
   read -r verdict _ n el ent <<<"$out"
+  # The waiter's own attempt count, kept beside its records for reconciliation.
+  python3 -I -c 'import json, os, sys
+p = sys.argv[1]; n = sys.argv[2]
+with open(p + ".tmp", "w") as f:
+    f.write(json.dumps({"attempts": int(n) if n.isdigit() else None, "waiter_rc": int(sys.argv[3]), "verdict": sys.argv[4]}) + "\n"); f.flush(); os.fsync(f.fileno())
+os.replace(p + ".tmp", p)' "$EV/02-ready-after-complete.done" "${n:-}" "$rc" "${verdict:-none}" 2>/dev/null \
+    || { check 2 app-ready-after-complete fail "the waiter's completion record could not be written: fail closed"; return 1; }
   if [[ $rc == 0 && "$verdict" == pass ]]; then
     check 2 app-ready-after-complete pass "status-json application_responding and management_available true ${el}s after complete was observed (entered ${ent}s after it; call $n; every call in 02-ready-after-complete.jsonl)"
   else
@@ -1054,19 +1375,30 @@ PY
     sleep 10; done
   check 2 operator-ssh-up pass "culvert-operator SSH (OVF-delivered key, status-json) after $(( $(date +%s) - t0 ))s"
   local t_complete
-  until gop status-json > "$WORK/status-json.tmp" 2>/dev/null && [[ " $(recorded_steps "$WORK/status-json.tmp") " == *" complete "* ]]; do
+  # Every first-boot sample is recorded (02-firstboot-samples.jsonl), every 2 s,
+  # for the direct no-premature-complete check below.
+  local srt
+  while :; do
+    srt=0; sample_firstboot "$EV/02-firstboot-samples.jsonl" || srt=$?
+    if (( srt == 90 )); then
+      check 2 firstboot-samples fail "a first-boot sample's evidence could not be kept (02-firstboot-samples/): fail closed"; return 1; fi
+    (( srt == 0 )) && [[ " $(recorded_steps "$WORK/status-json.tmp") " == *" complete "* ]] && break
     # systemd deletes a unit's start job to break an ordering cycle: first boot
     # will then never run, so report it now rather than after the full bound.
     if grep -qa 'Ordering cycle found, skipping.*culvert-firstboot' "$WORK/console.log" 2>/dev/null; then
       check 2 firstboot-complete fail "systemd skipped culvert-firstboot.service (ordering cycle; see console.log)"; return 1; fi
     (( $(date +%s) < deadline )) || { check 2 firstboot-complete fail "first boot not complete within ${LAB_FIRSTBOOT_TIMEOUT}s ($(status_field "$WORK/status-json.tmp" phase))"; return 1; }
-    sleep 15; done
+    sleep 2; done
   t_complete="$(mono)"   # the monotonic moment `complete` was observed: the readiness wait's origin
   cp "$WORK/status-json.tmp" "$EV/02-status-json-complete.json"
   check 2 firstboot-complete pass "status-json: complete recorded, phase $(status_field "$EV/02-status-json-complete.json" phase), $(( $(date +%s) - t0 ))s from power-on"
   # complete can precede the recreated proxy answering (campaign 7): wait for
   # the product's own readiness flags first; step 3 below is unchanged.
   wait_app_after_complete "$t_complete" 120 || return 1
+  # Direct check (R10): `complete` never on record before readiness, from every
+  # sample and the guest's own serial log; run after the wait so a later ready
+  # sample cannot mask an earlier premature one.
+  complete_not_premature "$EV/02-firstboot-samples.jsonl" "$EV/02-ready-after-complete.jsonl" "$WORK/console.log" || return 1
 }
 
 # ── qualify: vsphere-qualification.md steps 3–8 ─────────────────────────────
