@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -1687,8 +1688,13 @@ func refuseNonTLSInspectClient(clientLeg, upstreamLeg net.Conn, firstByte byte, 
 	clientLeg.Close()   //nolint:errcheck // refusing: close both legs
 	upstreamLeg.Close() //nolint:errcheck // refusing: close both legs
 	recordDecryptFailureEntry(clientInspectFailureOutcome(errInspectNonTLSClient, hostOnly, dec, match), id, hostOnly, match, decRedactHosts())
-	logger.Printf("SSL_INSPECT%s refused a non-TLS client for %q (first byte=0x%02x, proto=%s): an inspect rule requires TLS",
-		pathLabel, sanitizeLog(hostOnly), firstByte, sanitizeLog(proto))
+	// pathLabel and the hex byte cannot carry a newline, but they reach this
+	// shared helper as parameters, so the CWE-117 barrier is inlined here where
+	// CodeQL can see it (conventions: inline ReplaceAll for values it cannot trace).
+	logLabel := strings.ReplaceAll(pathLabel, "\n", "_")
+	logByte := strings.ReplaceAll(fmt.Sprintf("0x%02x", firstByte), "\n", "_")
+	logger.Printf("SSL_INSPECT%s refused a non-TLS client for %q (first byte=%s, proto=%s): an inspect rule requires TLS",
+		logLabel, sanitizeLog(hostOnly), logByte, sanitizeLog(proto))
 }
 
 func copyHeaders(dst, src http.Header) {
