@@ -5,7 +5,7 @@ package main
 // PR-UX-6 production validation: drives the REAL Production Qualification evidence
 // card (inside the Rollout screen) and the REAL unified approvals experience in
 // headless Chromium against the REAL admin handler. Evidence fixtures are generated
-// from the REAL buildMCPEvidenceDTO (so the wire shape can never drift from the
+// from the REAL evidenceview.Build (so the wire shape can never drift from the
 // server), and approval fixtures use the real ApprovalView shape. Nothing asserts a
 // fabricated state - only what a real response would carry.
 
@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/mcp/evidenceview"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 	"github.com/playwright-community/playwright-go"
 )
@@ -24,7 +25,7 @@ import (
 const ux6AsOf = int64(1722690000000000000)
 
 func ux6EvidenceJSON(cap string, ev rollout.EvidenceSummary) string {
-	b, _ := json.Marshal(buildMCPEvidenceDTO(cap, "shadow", ev, time.Unix(1_000_000_000, 0), ux6AsOf))
+	b, _ := json.Marshal(evidenceview.Build(cap, "shadow", ev, time.Unix(1_000_000_000, 0), ux6AsOf))
 	return string(b)
 }
 
