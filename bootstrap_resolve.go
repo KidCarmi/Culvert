@@ -115,6 +115,20 @@ func runBootstrapResolve(argv []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(argv); err != nil {
 		return 2 // flag package already wrote usage to stderr
 	}
+	// CHAOS-122: this FlagSet has the same stop-at-the-first-positional
+	// behaviour as the global one, and the same consequence — a stray token
+	// discards every flag after it. Here the discarded flag that matters most
+	// is --data-dir, which carries the ANTI-ROLLBACK FLOOR the installer stages
+	// from a surviving proxy-data volume (scripts/install.sh stage_rollback_floor):
+	// without it the resolve runs with floor 0 and a mirror-replayed old catalog
+	// is accepted, which is the downgrade this flag exists to close. The
+	// subcommand takes no positional operands at all, so any tail is a refusal.
+	if fs.NArg() > 0 {
+		bfprintf(stderr, "bootstrap-resolve: unexpected argument(s) %q; this subcommand takes flags only, and the flag "+
+			"package discards every flag after a non-flag token (--data-dir carries the anti-rollback floor). Nothing was resolved.\n",
+			sanitizeLog(strings.Join(fs.Args(), " ")))
+		return 2
+	}
 	if !validBootstrapPrint(*printFlag) {
 		bfprintf(stderr, "bootstrap-resolve: --print %q is not one of json|image_ref|digest|version_id|repo|catalog_version\n", *printFlag)
 		return 2

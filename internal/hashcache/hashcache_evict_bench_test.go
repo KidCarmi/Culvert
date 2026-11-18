@@ -1,6 +1,7 @@
 package hashcache
 
 import (
+	"container/heap"
 	"encoding/binary"
 	"encoding/hex"
 	"runtime"
@@ -17,12 +18,14 @@ import (
 // miss, so its Set path sits behind every ClamAV/YARA verdict. evictLocked runs
 // there synchronously under the EXCLUSIVE write lock whenever the map is full,
 // which makes its duration a stall for every concurrent verdict lookup rather
-// than a cost to the one caller that tripped it. Nothing measured that before
-// this file; see the cost table on evictLocked for what it found and for the
-// part of the shape that a layout change does not fix.
+// than a cost to the one caller that tripped it. evictLocked used to sweep the
+// whole map there (O(cache_size) per call); it is now O(log cache_size) per
+// evicted entry with a constant batch bound. BenchmarkSetIntoFull_* in
+// hashcache_hold_bench_test.go reports the per-Set lock hold (max and p99.9)
+// that both shapes are compared on.
 //
-// Run: go test ./internal/hashcache/ -run XXX -bench Evict -benchtime 1s
-// (the 1 000 000-entry case is skipped under -short).
+// Run: go test ./internal/hashcache/ -run XXX -bench . -benchtime 400000x
+// (the 1 000 000-entry cases are skipped under -short).
 
 // ── Production-shaped keys ───────────────────────────────────────────────────
 //
@@ -81,9 +84,9 @@ func seqKey(ns byte, i uint64) string {
 }
 
 // fillCache seeds a cache to exactly len(keys) entries, the first expiredFrac
-// of them already expired. It writes c.entries directly: going through Set
-// would trip eviction partway and leave the map in a shape the benchmark did
-// not ask for.
+// of them already expired. It writes the map and expiry heap directly: going
+// through Set would trip eviction partway and leave the cache in a shape the
+// benchmark did not ask for.
 func fillCache(keys []string, expiredFrac float64) *HashCache {
 	maxSize := len(keys)
 	res := ScanCacheResult{Clean: true, Source: "clean", ScannedAt: time.Now()}
@@ -95,8 +98,11 @@ func fillCache(keys []string, expiredFrac float64) *HashCache {
 		if j < nExpired {
 			expiresAt = now.Add(-time.Minute)
 		}
-		c.entries[keys[j]] = &hashCacheEntry{result: res, expiresAt: expiresAt}
+		e := &hashCacheEntry{result: res, expiresAt: expiresAt, key: keys[j], idx: j}
+		c.entries[keys[j]] = e
+		c.byExpiry = append(c.byExpiry, e)
 	}
+	heap.Init(&c.byExpiry)
 	return c
 }
 
@@ -105,7 +111,7 @@ func fillCache(keys []string, expiredFrac float64) *HashCache {
 // before timing, and those allocations can leave a concurrent GC cycle running
 // into the timed region. The pointer layout allocates one object per entry and
 // the by-value candidate does not, so that GC would bias the layout A/B
-// unevenly (Codex, PR #1604). benchEvictLocked does the same per iteration.
+// unevenly (Codex, PR #1604).
 // In the contention benchmarks the writer keeps allocating after this point,
 // and the GC it causes is part of the workload being measured.
 func startTimedAfterGC(b *testing.B) {
@@ -114,83 +120,10 @@ func startTimedAfterGC(b *testing.B) {
 	b.ResetTimer()
 }
 
-// benchEvictLocked times ONE evictLocked call on a full cache. Each iteration
-// needs a fresh full cache, because an evicted one is no longer at capacity.
-//
-// The fixture is rebuilt inside the loop with the timer stopped, so exactly one
-// cache is live at a time. Building all b.N of them up front instead would
-// retain b.N x maxSize entries, and b.N grows with -benchtime: at the
-// -benchtime 1s suggested above that is ~2 GB for the 10 000 case and ~1.3 GB
-// for the 100 000 one, which exhausts a constrained runner before the first
-// timed call. The StopTimer/StartTimer pair is tiny next to an eviction over
-// thousands of entries, so it does not move the figures.
-//
-// Building a fixture allocates maxSize entries, which can leave a concurrent
-// GC cycle running into the timed call and charge its work to evictLocked
-// (Codex, PR #1604). runtime.GC() after each build, with the timer stopped,
-// finishes that cycle before timing starts.
-func benchEvictLocked(b *testing.B, maxSize int, expiredFrac float64) {
-	b.StopTimer()
-	keys := keyTable("k", maxSize) // once per benchmark run, outside the b.N loop
-	for i := 0; i < b.N; i++ {
-		c := fillCache(keys, expiredFrac)
-		runtime.GC()
-		b.StartTimer()
-		c.evictLocked()
-		b.StopTimer()
-	}
-}
-
-// The stall, by configured cache size, in the busy steady state (nothing
-// expired): the cache is full and nothing has expired yet, so the sweep looks
-// at every entry and finds nothing to drop. It is NOT the worst case. A full
-// cache left idle past its TTL and then hit by one Set expires everything at
-// once, and that costs more (AllExpired below). Its growth with cache_size
-// matters because cache_size is floored by config validation and never capped.
-func BenchmarkEvictLocked_NothingExpired_10k(b *testing.B)  { benchEvictLocked(b, 10_000, 0) }
-func BenchmarkEvictLocked_NothingExpired_100k(b *testing.B) { benchEvictLocked(b, 100_000, 0) }
-
-// The operator cliff the roadmap note and the evictLocked comment quote:
-// cache_size: 1000000, which config validation accepts. Each iteration rebuilds
-// a million-entry fixture with the timer stopped, so a run takes several
-// seconds of wall time; it is skipped under -short.
-func BenchmarkEvictLocked_NothingExpired_1M(b *testing.B) {
-	if testing.Short() {
-		b.Skip("1 000 000-entry fixture; skipped under -short")
-	}
-	benchEvictLocked(b, 1_000_000, 0)
-}
-
-// Eviction cost RISES with how reclaimable the cache is: a sweep that finds
-// expired entries also deletes them, and at 100 % it deletes the whole map
-// instead of the 25 % the capacity drop would have taken. Worth pinning so the
-// relationship stays visible — it is the opposite of the intuitive direction.
-//
-// All-expired is the realistic WORST case: a full cache idle past its TTL,
-// then one Set. The 100 000 and 1 000 000 cases exist so an idle-host run can
-// bound it at larger sizes. Like the other large
-// fixtures they are skipped under -short.
-func BenchmarkEvictLocked_HalfExpired_10k(b *testing.B) { benchEvictLocked(b, 10_000, 0.5) }
-func BenchmarkEvictLocked_AllExpired_10k(b *testing.B)  { benchEvictLocked(b, 10_000, 1.0) }
-
-func BenchmarkEvictLocked_AllExpired_100k(b *testing.B) {
-	if testing.Short() {
-		b.Skip("100 000-entry all-expired fixture; skipped under -short")
-	}
-	benchEvictLocked(b, 100_000, 1.0)
-}
-
-func BenchmarkEvictLocked_AllExpired_1M(b *testing.B) {
-	if testing.Short() {
-		b.Skip("1 000 000-entry all-expired fixture; skipped under -short")
-	}
-	benchEvictLocked(b, 1_000_000, 1.0)
-}
-
 // Amortized Set cost at steady-state churn above capacity — the throughput
-// number, as opposed to the lock-hold spike above. Every maxSize/4 inserts pay
-// one eviction between them, so this is where a regression in the amortized
-// shape would show. ReportAllocs covers the per-Set allocations: the key string
+// number, as opposed to the per-Set lock hold BenchmarkSetIntoFull_* reports.
+// At capacity every insert evicts one entry, so this is where a regression in
+// the amortized shape would show. ReportAllocs covers the per-Set allocations: the key string
 // and the hashCacheEntry itself. Folding the entry into the map by value
 // removes one of them. Whether to adopt it is undecided pending re-measurement
 // with the current harness; see roadmap/SCAN-CACHE-EVICTION-COST.md.
@@ -306,16 +239,16 @@ const minContendedWindow = 50 * time.Millisecond
 //
 // Two guarantees the timed window depends on (Codex, PR #1604):
 //
-//   - An eviction lands INSIDE the window, not only before it. The handshake
-//     Set evicts, which leaves maxSize/4 free slots. Without help, a short run
-//     or a high GOMAXPROCS could time only ordinary Set locking. So, before
-//     announcing ready, the writer tops the cache back up to exactly maxSize.
-//     Its next Set, the first one that can land in the window, evicts.
+//   - An eviction lands INSIDE the window, not only before it. Before
+//     announcing ready, the writer makes sure the cache is at exactly
+//     maxSize, so its next Set, the first one that can land in the window,
+//     evicts.
 //   - Evictions are COUNTED without touching the read path or hashcache.go.
 //     The writer is the only mutator, its keys are unique and nothing expires
 //     (TTL 1 h), so it tracks the map size itself. A Set at size >= maxSize
-//     evicts exactly maxSize/4 entries. halt cross-checks that model against
-//     the real size and fails the benchmark if they ever disagree.
+//     evicts exactly one entry (the one closest to expiry). halt cross-checks
+//     that model against the real size and fails the benchmark if they ever
+//     disagree.
 type evictingWriter struct {
 	stop      chan struct{}
 	done      sync.WaitGroup
@@ -335,7 +268,7 @@ func startEvictingWriter(c *HashCache, maxSize int, res ScanCacheResult) *evicti
 			evicts := w.size >= maxSize
 			c.Set(key, res)
 			if evicts {
-				w.size -= maxSize / 4
+				w.size--           // exactly one live entry is dropped
 				w.evictions.Add(1) // counted once the evicting Set has returned
 			}
 			w.size++
@@ -393,8 +326,9 @@ func assertContended(b *testing.B, writes, evictions int64) {
 // that makes the lock hold a system-wide cost rather than a local one.
 //
 // Read %hit against BenchmarkGet_Parallel's before drawing a ratio from the
-// two. The writer runs for the whole benchmark and each eviction drops 25 % of
-// the map, so the seeded keys are steadily displaced by the writer's own keys.
+// two. The writer runs for the whole benchmark and each of its Sets evicts the
+// entry closest to expiry, so the seeded keys are steadily displaced by the
+// writer's own keys.
 // This benchmark therefore reads far fewer hits than the uncontended one, and
 // fewer the longer it runs. Because a miss is cheaper than a hit, the changed
 // mix makes the contended side cheaper per read. The pair cannot isolate

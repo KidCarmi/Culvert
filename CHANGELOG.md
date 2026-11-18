@@ -9,6 +9,77 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A non-TLS client can no longer opt out of HTTP/2 TLS inspection
+  (`SEC-INSPECT-PLAINTEXT-1`, native-ALPN leg).** The strip-ALPN inspect path
+  began refusing a client whose first byte is not a TLS handshake record; the
+  native-ALPN leg — the one an `InspectHTTP2` decryption profile or an explicit
+  `stripAlpn: false` rule selects — kept its raw-relay fallback, and its comment
+  still called itself a mirror of the strip path's. A client that issued
+  `CONNECT`, waited for the `200` and sent any first byte other than `0x16`
+  therefore received a raw TCP tunnel instead of an inspected session: no
+  inner-host pin, no file block, no file-profile block, no DPI, no malware scan
+  and no per-request log row, on a destination an operator had explicitly marked
+  for inspection — and recorded as a benign `non_tls_fallback` rather than as a
+  refusal. It was the MORE reachable of the two legs: the strip path handshakes
+  the origin before it peeks, so its fallback needed a TLS-speaking origin and a
+  non-TLS client, whereas the native leg must wait for the client's ALPN offer,
+  so the upstream handshake is still ahead of the peek and the client alone
+  decided — against any origin, TLS or not (proven against a plain-TCP origin,
+  which the strip path would have `502`'d). The native leg now refuses and closes
+  both legs, recording the refusal through the ADR-0011 taxonomy, and the two
+  refusals are ONE function (`refuseNonTLSInspectClient`), because the drift
+  between them was the vulnerability. `maybeFailOpenClient` is deliberately not
+  consulted: learning an auto-exclusion here would bypass inspection for the host
+  on the next connection. CWE-693, with CWE-350 for the unpinned inner host.
+  **Behaviour change:** a genuine non-TLS protocol over `CONNECT` (SSH, RDP) to a
+  host matched by an `InspectHTTP2` rule is now refused rather than tunneled —
+  unlike the strip path, that case was reachable here. Give such a destination an
+  explicit Bypass rule, which is auditable; a silent per-connection opt-out
+  chosen by the client is not.
+- **The HA join token no longer travels in culvert's command line
+  (`SEC-HA-TOKEN-ARGV-1`).** CHAOS-121 fixed an HA compose whose startup script
+  was never executed — the image's `ENTRYPOINT ["./culvert"]` received the script
+  text as argv, so `$HA_TOKEN` was never expanded. Making the script run expanded
+  it into culvert's argv for the first time, and `-ha-token` was the binary's
+  only channel. `/proc/<pid>/cmdline` is readable by any account in the PID
+  namespace while `/proc/<pid>/environ` is restricted to the process owner, and
+  this token is not merely a join bearer: it is the AES-256-GCM key-wrapping
+  passphrase for the CLUSTER CA private key in the HA state bundle
+  (`CAKeyEncrypted`, its only transport), so an unprivileged local reader could
+  join as a standby, pull the bundle and mint node certificates. Root or
+  docker-socket access was always sufficient via `docker inspect`, so the new
+  exposure was specifically to unprivileged local readers. `CULVERT_HA_TOKEN`
+  is now the env channel — mirroring `CULVERT_CA_PASSPHRASE` and
+  `CULVERT_LOG_PASSPHRASE`, whose own comments state this preference — and the
+  shipped compose uses it. The leader's "Enable HA" panel was a second route to
+  the same exposure: the deploy command it generates for the admin to paste on
+  the standby emitted `--ha-token <value>`, putting the token in that node's
+  argv for the life of the process. It now emits
+  `CULVERT_HA_TOKEN=<value> ./culvert …`, which the shell passes in the child's
+  environment rather than as an argv word. The operator deployment guide and
+  `config.example.yaml` say which channel to use and why. `-ha-token` is kept and still wins when both are set,
+  so an operator invoking culvert directly is unaffected. The env value is
+  whitespace-trimmed (a token copied out of a deploy command easily acquires a
+  trailing newline) while the flag value is passed through verbatim; a
+  whitespace-only env value resolves to empty so the compose's split-brain guard
+  still fires. CWE-214 → CWE-522. The DP service's `--enroll` URL shares this
+  channel and is recorded as residual risk.
+- **A config-backup import now validates alert webhooks
+  (`SEC-ALERTS-EVENTNAME-1`, second ingress).** `POST`/`PUT
+  /api/alerts/webhooks` share one definition of an acceptable payload, credited
+  with keeping an unvalidated value from reaching the webhook file or a support
+  bundle at all. `POST /api/config/import` reconstructed every webhook straight
+  through `Store.Add` and ran neither the URL nor the event-name check, so a
+  backup carrying `events: ["<img src=x onerror=…>"]` and `url: "javascript:…"`
+  installed with a `200`. The downstream sinks hold — the Alerts panel escapes,
+  and a bad URL is refused at egress by the scheme barrier plus
+  `ssrf.SafeDialContext` — and the route is `RoleAdmin`, so this was defence in
+  depth rather than a live XSS or SSRF; but the character class and the 64-byte
+  bound exist so the value never reaches the file, and a control enforced at one
+  of two ingresses is the shape of defect that produced the original finding.
+  The incoming section is now validated in the import's pre-validation block
+  beside the URL-category and PAC gates, so a bad backup is refused WHOLE rather
+  than partially applied. CWE-20.
 - **`SEC-INSTALL-ENVLINK-1` is now honoured at every privileged site on the
   `.env` path, not only the last one.** The contract landed as a guard inside
   `env_put`: `sudo` must never act THROUGH a symlink at `$INSTALL_DIR/.env`,
@@ -55,6 +126,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Diagnostics now warns before an SSL inspection Root CA that Culvert will
+  not renew expires (Product Experience).** Only a Culvert-generated CA is
+  auto-rotated. An imported CA, or a legacy bundle with no provenance record,
+  keeps signing until it expires, and then every inspected HTTPS connection is
+  refused. Inside the 30-day renewal window the only signals were a daily log
+  line and a `cert_expiry` alert that fires only if a webhook subscribes to it.
+  `root_ca` kept reading "root CA initialised" until the outage. A new
+  report-only `inspection_ca_renewal` WARN row gives the days left and the
+  provenance class, and names the GUI remedy (upload a renewed CA under
+  Certificates, or classify an unknown bundle with `CULVERT_CA_PROVENANCE`). No
+  row for a managed CA, for a CA with more than 30 days left, or for an expired
+  CA, which `root_ca` already fails. Rotation, signing and trust are unchanged.
+
 - **Diagnostics now flags the admin-route authorization break-glass (Product
   Experience).** Setting `CULVERT_C2_ENFORCE` to a false-ish value puts the
   admin-route metadata gate in shadow (log and count, never block). That was
@@ -98,6 +182,101 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   touch a lock owned by another plane.
 
 ### Fixed
+
+- **An unauthenticated request stream can no longer stall the admin plane
+  through the audit-log recovery.** The deferred open charged each evicted
+  backlog entry one at a time inside the critical section holding the
+  process-wide audit mutex, and the drop count is bounded only by how many audit
+  entries arrive while the configured log is unwritable — `auth.lockout` is
+  audited on every blocked login at `/api/auth/login`, before anyone is
+  authenticated. When the operator fixed the mount, the recovery spun that many
+  iterations under the lock, each allocating an error and taking the observer's
+  own mutex, stalling every `auditEvent` and every audit read behind it.
+  `countWriteErrorsN` now charges the batch once: `WriteErrors` still moves by
+  exactly the number of entries lost — it is the operator's count of what is
+  missing from the durable trail — while the degraded observer, a latch plus an
+  off-goroutine alert, is called once. CWE-400/CWE-770.
+
+- **`culvert` accepted command lines it could not parse and booted anyway, with
+  every flag after the first unparsed token at its default (CHAOS-122).** Go's
+  `flag` package stops at the first argument that does not begin with `-` and
+  leaves it, and everything after it, in `flag.Args()`. `main` called
+  `flag.Parse()` with no `flag.NArg()` guard, and `handleOneShotCommands`
+  dispatches on flags only, so an argv with an unparsed tail was not an error:
+  the process fell through into normal startup. CHAOS-121 found this through one
+  instance — `docker-compose.ha.yml`'s shell `command:` appended to the image's
+  exec-form `ENTRYPOINT ["./culvert"]` — fixed that artifact, and recorded the
+  generic guard as needing its own audit of every invocation shape. This is that
+  guard, and it holds for orchestrators the repository does not ship (a systemd
+  unit, a Kubernetes manifest, a hand-written `docker run`, or an operator
+  pasting a documented command line into a `command:` key) which no static gate
+  over the compose files can reach. **The partial case is the sharper one,
+  because the surface still looks configured:** measured on the real binary,
+  `-port 18080 -ui-port 19090 STRAY -policy <f> -audit-log <f> -ca-path <f>`
+  brought the proxy and admin UI up on the expected ports with `/health`
+  reporting `{"status":"ok", …, "ssl_inspection":"ready"}`, created none of the
+  three files, and logged `Policy: default action: allow` where the same argv
+  without `STRAY` logged `deny` — so discarding `-policy` does not merely lose
+  rules, it **inverts the posture**, per the documented configured-vs-empty rule.
+  The stray token was never named in any log line, on stdout or on stderr. The
+  per-subsystem degradation *is* logged (`Policy: in-memory only`, `SSLCA: Root
+  CA ready in-memory`), which is why this was a legibility failure rather than a
+  dark one: those lines are identical to the ones a deliberately minimal
+  deployment emits, so they cannot distinguish "the operator did not set
+  `-policy`" from "the orchestrator discarded the operator's `-policy`". `main`
+  now refuses such an argv with exit 2 (the flag package's own usage-error code)
+  and a message naming the rejected tail, the discarded-flag consequence and the
+  exec-form-ENTRYPOINT cause. The check runs **before** the one-shot dispatch and
+  therefore before `checkInterruptedRestore`, `checkDataDirSingleWriter` and
+  anything that writes to the persisted-state root, so a rejected argv changes
+  nothing on disk; the ordering is pinned by a gate, because the refusal and its
+  no-effect guarantee are separable. The audit behind it found exactly two
+  positional consumers in the shipped surface: `culvert bootstrap-resolve …`,
+  dispatched before the global flag set is defined and therefore never reaching
+  this check, and `--prepare-downgrade … --confirm <word>`, which is the single
+  exception — `--confirm` is an `IsBoolFlag`, so the Tier-3 word lands in
+  `flag.Args()`, and `prepareDowngradeConfirmWord` already validates that tail
+  itself, so the guard defers to it rather than adding a second, weaker owner.
+  Everything else in the tree passes flags only: the Dockerfile `CMD`, every
+  compose `command:` (the `cli` service's `["-h"]` included), the maintenance
+  agent's compose-run templates, `scripts/install.sh` and the operator runbooks.
+  **Deliberate behaviour change:** `--restore <archive> --confirm <word>`
+  previously committed the restore and silently ignored `<word>`; it is now
+  refused. The documented bare `--confirm` commit form is unaffected, as is the
+  maintenance agent, which appends a bare `--confirm`.
+- **The same defect in `bootstrap-resolve`'s own FlagSet discarded the
+  anti-rollback floor (CHAOS-122b).** The subcommand parses into its own
+  `flag.FlagSet` and had no `NArg()` check either. The flag that matters most
+  there is `--data-dir`, which carries the rollback floor `scripts/install.sh`
+  stages from a surviving `proxy-data` volume (`stage_rollback_floor`) so a
+  reinstall cannot be silently downgraded below the version the host last
+  accepted — exactly the mirror-replay downgrade the flag exists to close. A
+  stray token ahead of it would have resolved with floor 0 and still printed a
+  well-formed `image_ref`, so the installer's strict output-shape gate would not
+  have caught it. The subcommand takes no positional operands and now refuses
+  any tail with exit 2 and an empty stdout. The installer's own argv is
+  correctly quoted and conditional, so it was not itself exposed; the hand-run
+  form in the runbook was.
+- **The privileged maintenance agent had it too (CHAOS-122c).**
+  `cmd/culvert-maint` would have silently dropped `--config`, which selects the
+  config file and through it the journal, the compose path and the command
+  allowlist the agent runs under, and run against the built-in default path
+  instead. The shipped systemd unit passes a `--config` equal to that default,
+  so it was unaffected either way; a deployment whose config lives elsewhere was
+  not. The agent takes no positional operands and now refuses any tail before
+  the config is read or the socket is bound.
+
+- **The maintenance agent no longer starts on a `compose_file` its own
+  installer refuses.** `packaging/culvert-maint/install.sh` rejects
+  `compose_file = "."`/`".."` and any value with whitespace, quotes, `|` or
+  control characters before it renders the sudoers allowlist, but the agent's
+  `config.Load` checked only for a path separator. A hand-edited
+  `/etc/culvert-maint/config.toml` holding `".."` loaded cleanly and the runner
+  joined it under `compose_project_dir` as the PARENT directory (`-f /srv`);
+  whitespace or quotes split or broke the sudoers argument match. Every later
+  operation then failed at sudo/compose instead of the agent failing closed at
+  startup. `config.Load` now applies the installer's exact acceptance set
+  (`cmd/culvert-maint/internal/config/config_compose_file_parity_test.go`).
 
 - **The HA compose file never handed the binary its flags, so every Control
   Plane, standby and Data Plane node booted with all defaults while reporting
@@ -235,6 +414,100 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unsubscribable and needs its reason recorded.
 
 ### Performance
+
+- **A scan-result cache insert at capacity stalled every concurrent verdict
+  lookup for O(`cache_size`) (PERF-SCANCACHE-1).** `internal/hashcache` is the
+  SHA-256 ClamAV/YARA verdict cache consulted before every body scan. When full,
+  the inserting `Set` swept the WHOLE map for expired entries and then dropped
+  an arbitrary 25 %, synchronously, under the exclusive lock every `Get` also
+  needs. `cache_size` is an operator knob that is floored but never capped, so
+  the stall grew with configuration: measured on an idle 4-vCPU host, the worst
+  single insert held the lock ~10–16 ms at 100 000 entries, ~110 ms at
+  1 000 000, and ~205 ms at 1 000 000 when the cache had sat idle past its TTL
+  (the sweep is slowest when it has the most to delete). Entries are now also
+  held in a min-heap ordered by expiry: an insert at capacity reaps at most 64
+  expired entries from the root, or, if none has expired, drops the single
+  entry closest to expiry. Each insert is O(log n) under the lock independent of
+  `cache_size` (worst single insert, same workload: 0.5–2.4 ms at 100 000,
+  1.3–6 ms at 1 000 000, residual being GC/scheduler noise both designs show).
+  Verdicts, TTLs, the "a live entry is never dropped while an expired one
+  remains" rule, the tighten-only `SetTTLUnless` and the `SetIfGeneration`
+  epoch are unchanged; the cache now stays full instead of falling to 75 %, and
+  an overwrite no longer evicts. Cost: ~32 B more per entry and ~15–25 % on the
+  amortized at-capacity `Set` (~+200 ns beside a scan measured in ms);
+  `Get` is unchanged. Gates: `TestEvict_*`, `TestHeap_RandomOpsKeepInvariants`,
+  `TestConcurrent_GetDuringOverwriteAndEviction` (`-race`), and
+  `BenchmarkSetIntoFull_*` for the lock hold.
+
+- **The alert gate that exists to protect a degraded node was itself a
+  throughput ceiling on the degraded node (PERF-ALERTGATE-1).**
+  `alerts.Store.HasSubscriber` answers "will firing this event reach anyone?", so
+  a producer can skip the goroutine spawn, the payload allocation and the round
+  trip through the process-wide dedup mutex needed to deliver an alert to nobody.
+  Every producer behind it is FAULT-driven — its rate is set by an attack or an
+  outage, not by an operator: `recordStats` calls it per BLOCKED request
+  (`threat_detected`, `policy_block`), `fireDNSFailureAlert` calls it per request
+  from four dial sites (`proxy_http.go`, three in `proxy_tunnel.go`),
+  `internal/secscan` per oversized body and per scan error, `cdr_proxy.go` per
+  CDR submission. It took `sync.RWMutex.RLock`, which is two atomic
+  read-modify-WRITES on ONE process-wide word, so every blocked request wrote the
+  same cache line purely to read a webhook list that changes only when an
+  operator edits it — and in the default posture, to iterate a list that is
+  EMPTY, which is also the state of every test binary. Both the function's own
+  doc comment ("Cheap: one RLock, no allocation") and the block path's
+  ("The gate is a pure fast path") asserted the opposite; `hostCounter` in
+  `store.go` already carried the refutation verbatim ("It used to take mu.RLock
+  around the map read, on the reasoning that a reader lock is cheap. It is
+  not."). The subscription answer is now derived once per mutation and published
+  as an immutable value behind an `atomic.Pointer`: a steady-state read is one
+  atomic pointer LOAD (a shared-line read, which scales), a bool test for the
+  `"*"` catch-all hoisted out of the map, and at most one lookup in a small
+  `map[string]struct{}`. `mu` still owns `hooks` and is still the only way to
+  mutate it; it is no longer taken by the read path. A second, independent defect
+  went with it: the scan was `O(hooks × events)` and ran to COMPLETION on a miss
+  — the common answer, since a hook subscribed to `cert_expiry` is asked about
+  `policy_block` on every blocked request — so an operator fanning alerts to a
+  large collector set paid for their own fan-out on the block path. Complexity is
+  now `O(1)` in the hook count. Measured with the verbatim RWMutex arm compiled
+  into the SAME binary (go1.27.4, 4-vCPU Xeon @2.30GHz, n=5 medians, RunParallel
+  so ns/op is wall time across all workers): default posture 13.07/96.35/101.70
+  ns at P=1/2/4 -> 2.06/1.02/0.52 (6x at one core, 197x at four); 3 hooks
+  subscribed 13.87/122.30/129.50 -> 7.76/3.66/1.82 (71x at four); 5 hooks not
+  subscribed 17.76/163.60/193.80 -> 9.08/4.54/2.28 (85x at four); 50 hooks not
+  subscribed 200.80/352.20/335.10 -> 9.17/4.63/2.30 (146x at four). The SIGN is
+  the finding: adding cores SUBTRACTED throughput in every posture (1->4 =
+  0.09-0.13x, so four cores delivered a ninth of one core's) and now adds it in
+  every posture (3.98-4.27x). State the cost honestly too: at P=1 with a handful
+  of hooks the win is only ~2x, because an uncontended `RLock` is genuinely cheap
+  and a map lookup is not free — the case is the concurrency curve, not the
+  single-core constant. This is the FIFTH instance of the identical reader-lock
+  ceiling in this tree (`internal/threatfeed`, `internal/connlimit`, the IP
+  filter, the top-hosts counter and `internal/scanexcl` all record the same
+  finding and the same answer) and the first on an alert-producer gate. The
+  failure mode that matters is not slowness but a stale index silently
+  UNSUBSCRIBING a configured webhook — nothing reports a skipped alert — so the
+  change is held differentially, not by timing: `hasSubscriberScan` in
+  `subscriptions_test.go` is a verbatim copy of the pre-change implementation and
+  both arms are asked 16 hook configurations against every event name mentioned
+  in each, including the two queries that probe the catch-all encoding itself;
+  `Add`/`Update`/`Delete`/`Init` are each pinned to republish (this test found a
+  real gap during the pass — `Init` returns early when no `alert_webhooks.json`
+  exists, leaving the fast path unarmed in exactly the default posture that
+  matters most, now fixed on every `Init` exit with disk I/O still off `mu`); the
+  partial-`Unmarshal` path and 4 readers against 50 add/update/delete cycles are
+  covered under `-race`. The pre-existing `TestHasSubscriber` contract test is
+  untouched. One `HasSubscriber` call is ~13 ns against a CONNECT this box serves
+  in ~200 µs, so no end-to-end benchmark moves and none is claimed to: what was
+  removed is a non-scaling term on a fault-driven per-request path, and the
+  removal makes the code simpler rather than more complex. No contract code path,
+  API, UI, audit or persistence behavior changes, and the on-disk
+  `alert_webhooks.json` format is untouched. Full round record in
+  `docs/engineering/PERFORMANCE-GUARDIAN-REVIEW-2026-11-17.md`, which also
+  records `handleRequest`'s front door, policy evaluation, `persistLogEntry` and
+  a whole-tree in-function `regexp.Compile` sweep as measured and already
+  appropriate, and flags `Store.Dispatch`'s per-fire `[]Webhook` copy — now
+  reachable under a flood because this gate stopped being the bottleneck — as
+  the next thing to measure.
 
 - **Every response Culvert decrypted took a process-wide reader lock to ask an
   empty map a question (PERF-SCANEXCL-1).** `scanexcl.Store.IsHostExcluded` is

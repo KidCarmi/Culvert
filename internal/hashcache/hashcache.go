@@ -9,13 +9,17 @@
 // window, dramatically reducing CPU load on busy proxies.
 //
 // Design:
-//   - Fixed-capacity map with TTL expiry.
-//   - On capacity overflow: expired entries are evicted first; if still full,
-//     ~25 % of entries are dropped (simple, avoids per-entry LRU bookkeeping).
+//   - Fixed-capacity map with TTL expiry, plus a min-heap of the same entries
+//     ordered by expiry.
+//   - On capacity overflow: expired entries are reaped from the heap root first
+//     (a bounded batch per insert); if none is expired, the single entry
+//     closest to expiry is dropped. Every insert is O(log n) under the lock,
+//     independent of capacity (see evictLocked).
 //   - All operations are mutex-protected; hit/miss counters use atomic int64.
 package hashcache
 
 import (
+	"container/heap"
 	"crypto/sha256"
 	"encoding/hex"
 	"sync"
@@ -32,19 +36,58 @@ type ScanCacheResult struct {
 }
 
 // hashCacheEntry wraps a result with an absolute expiry timestamp.
+//
+// result and expiresAt are immutable once the entry is published in the map:
+// Get reads result AFTER releasing the read lock, so an overwrite always
+// installs a new entry rather than mutating the old one. key and idx are
+// heap bookkeeping, written only under the write lock and never read by Get.
 type hashCacheEntry struct {
 	result    ScanCacheResult
 	expiresAt time.Time
+	key       string
+	idx       int // position in HashCache.byExpiry
+}
+
+// expiryHeap is a min-heap of entries ordered by expiresAt (container/heap).
+type expiryHeap []*hashCacheEntry
+
+func (h expiryHeap) Len() int           { return len(h) }
+func (h expiryHeap) Less(i, j int) bool { return h[i].expiresAt.Before(h[j].expiresAt) }
+func (h expiryHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].idx = i
+	h[j].idx = j
+}
+
+// Push implements heap.Interface; it records the entry's slot.
+func (h *expiryHeap) Push(x any) {
+	e := x.(*hashCacheEntry)
+	e.idx = len(*h)
+	*h = append(*h, e)
+}
+
+// Pop implements heap.Interface.
+func (h *expiryHeap) Pop() any {
+	old := *h
+	n := len(old) - 1
+	e := old[n]
+	old[n] = nil // do not retain the dropped entry through the backing array
+	*h = old[:n]
+	return e
 }
 
 // HashCache is a size-bounded, TTL-evicting cache of SHA-256 scan results.
 type HashCache struct {
 	mu      sync.RWMutex
 	entries map[string]*hashCacheEntry
-	maxSize int
-	ttl     time.Duration
-	hits    atomic.Int64
-	misses  atomic.Int64
+	// byExpiry holds exactly the entries in the map, ordered by expiresAt, so
+	// eviction finds an expired entry — or the one closest to expiry — at the
+	// root instead of sweeping the whole map under the write lock.
+	byExpiry expiryHeap
+	maxSize  int
+	ttl      time.Duration
+	hits     atomic.Int64
+	misses   atomic.Int64
 
 	// gen is the invalidation epoch: Clear advances it, under mu held for
 	// writing, so "no Clear happened since generation g was read" is exactly
@@ -113,14 +156,7 @@ func (c *HashCache) SetTTL(hash string, result ScanCacheResult, ttl time.Duratio
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if len(c.entries) >= c.maxSize {
-		c.evictLocked()
-	}
-	c.entries[hash] = &hashCacheEntry{
-		result:    result,
-		expiresAt: time.Now().Add(ttl),
-	}
+	c.storeLocked(hash, result, ttl)
 }
 
 // SetTTLUnless stores result under hash with the given lifetime unless keep
@@ -143,13 +179,7 @@ func (c *HashCache) SetTTLUnless(hash string, result ScanCacheResult, ttl time.D
 	if e, ok := c.entries[hash]; ok && keep != nil && !time.Now().After(e.expiresAt) && keep(e.result) {
 		return false
 	}
-	if len(c.entries) >= c.maxSize {
-		c.evictLocked()
-	}
-	c.entries[hash] = &hashCacheEntry{
-		result:    result,
-		expiresAt: time.Now().Add(ttl),
-	}
+	c.storeLocked(hash, result, ttl)
 	return true
 }
 
@@ -177,14 +207,38 @@ func (c *HashCache) SetIfGeneration(hash string, result ScanCacheResult, gen uin
 	if c.gen.Load() != gen {
 		return false
 	}
-	if len(c.entries) >= c.maxSize {
-		c.evictLocked()
-	}
-	c.entries[hash] = &hashCacheEntry{
-		result:    result,
-		expiresAt: time.Now().Add(c.ttl),
-	}
+	c.storeLocked(hash, result, c.ttl)
 	return true
+}
+
+// storeLocked installs result under hash with the given lifetime. Caller holds
+// c.mu for writing.
+//
+// An overwrite REPLACES the entry object in its heap slot (see hashCacheEntry
+// for why it never mutates the published one) and needs no eviction: the key
+// count does not change. Only a new key at capacity evicts.
+func (c *HashCache) storeLocked(hash string, result ScanCacheResult, ttl time.Duration) {
+	now := time.Now()
+	ne := &hashCacheEntry{result: result, expiresAt: now.Add(ttl), key: hash}
+	if old, ok := c.entries[hash]; ok {
+		ne.idx = old.idx
+		c.byExpiry[ne.idx] = ne
+		c.entries[hash] = ne
+		heap.Fix(&c.byExpiry, ne.idx)
+		return
+	}
+	if len(c.entries) >= c.maxSize {
+		c.evictLocked(now)
+	}
+	c.entries[hash] = ne
+	heap.Push(&c.byExpiry, ne)
+}
+
+// removeLocked drops e from both the map and the heap. Caller holds c.mu for
+// writing; e must currently be in the cache.
+func (c *HashCache) removeLocked(e *hashCacheEntry) {
+	delete(c.entries, e.key)
+	heap.Remove(&c.byExpiry, e.idx)
 }
 
 // Stats returns (hits, misses, currentSize) for Prometheus / admin UI.
@@ -199,9 +253,9 @@ func (c *HashCache) Stats() (hits, misses int64, currentSize int) {
 // Returns true if the entry existed (regardless of expiry).
 func (c *HashCache) Evict(hash string) bool {
 	c.mu.Lock()
-	_, ok := c.entries[hash]
+	e, ok := c.entries[hash]
 	if ok {
-		delete(c.entries, hash)
+		c.removeLocked(e)
 	}
 	c.mu.Unlock()
 	return ok
@@ -219,56 +273,50 @@ func (c *HashCache) Invalidate() (dropped int) {
 	c.mu.Lock()
 	dropped = len(c.entries)
 	c.entries = make(map[string]*hashCacheEntry, c.maxSize)
+	c.byExpiry = nil
 	c.gen.Add(1)
 	c.mu.Unlock()
 	return dropped
 }
 
-// evictLocked removes all expired entries.  If the map is still at capacity
-// afterward, it drops approximately 25 % of the remaining entries.
-// Must be called with c.mu held for writing.
+// evictExpiredBatch caps how many expired entries one eviction reaps. Reaping
+// is O(log n) per entry, so this bounds the worst single lock hold — a full
+// cache left idle past its TTL and then hit by one Set — to a constant number
+// of heap operations instead of one per cached entry. Expired entries beyond
+// the batch are never served (Get checks expiry) and are reaped by later
+// evictions; each reap frees a slot, so they are consumed before any live
+// entry is dropped.
+const evictExpiredBatch = 64
+
+// evictLocked makes room for one new key in a full cache. Must be called with
+// c.mu held for writing.
 //
-// Cost shape (behaviour only; measurements live in
-// roadmap/SCAN-CACHE-EVICTION-COST.md, not here, so they cannot go stale in
-// a production comment):
+// Policy, in order:
 //
-//   - It runs on the Set path, synchronously, under the EXCLUSIVE write lock,
-//     on whichever Set arrives when the map is full. While it runs, every
-//     concurrent Get (hits included) waits, not just that one caller.
-//   - The expiry sweep is O(maxSize): proving no entry is expired means
-//     looking at all of them. The 25 % drop then makes room for maxSize/4
-//     inserts, over which one call's cost amortizes.
-//   - It gets SLOWER the more of the cache has expired, because a sweep that
-//     finds expired entries also deletes them. A full cache left idle past its
-//     TTL and then hit by one Set is therefore the worst case, not the busy
-//     steady state.
-//   - cache_size is an operator YAML knob that config validation only FLOORS
-//     (non-positive → 10 000) and never caps, so the lock hold grows with it
-//     and nothing warns the operator.
+//  1. Reap up to evictExpiredBatch expired entries from the heap root. The
+//     heap is ordered by expiry, so expired entries are exactly a prefix of
+//     its pop order: a LIVE entry is never dropped while an expired one
+//     remains (the invariant TestSet_EvictsExpiredFirst pins).
+//  2. If nothing was expired, drop the single live entry closest to expiry —
+//     the one with the least remaining value. A short-lived scan-timeout
+//     cooldown therefore goes before an hour-long content verdict.
 //
-// Bounding the hold independently of maxSize means either giving up the "no
-// expired entry survives an eviction" invariant that TestSet_EvictsExpiredFirst
-// pins (an early exit cannot know what it did not look at) or sharding the map.
-// Both change observable behaviour and need their own change and review. A
-// by-value entry layout was measured once with a since-corrected harness;
-// whether to adopt it is undecided pending re-measurement (see the roadmap
-// note).
-func (c *HashCache) evictLocked() {
-	now := time.Now()
-	for k, e := range c.entries {
-		if now.After(e.expiresAt) {
-			delete(c.entries, k)
-		}
+// Cost: O(log maxSize) per evicted entry, at most evictExpiredBatch of them.
+// This replaces a full-map expiry sweep plus a 25 % arbitrary drop that ran on
+// the Set path under this same exclusive lock, stalling every concurrent Get
+// for O(cache_size): measured on an idle 4-vCPU host, ~100 ms per call at
+// cache_size 1 000 000 with nothing expired and ~200 ms with everything
+// expired. cache_size is an operator knob that is floored but never capped,
+// so that stall grew with configuration; this one does not. See
+// roadmap/SCAN-CACHE-EVICTION-COST.md and BenchmarkSetIntoFull_*.
+//
+// Dropping a verdict early is never a security change: a miss re-scans, and
+// an entry is never served past its own expiry.
+func (c *HashCache) evictLocked(now time.Time) {
+	for n := 0; n < evictExpiredBatch && len(c.byExpiry) > 0 && now.After(c.byExpiry[0].expiresAt); n++ {
+		c.removeLocked(c.byExpiry[0])
 	}
-	// If we're still over capacity, drop 25 % of current entries.
-	if len(c.entries) >= c.maxSize {
-		toDrop := c.maxSize / 4
-		for k := range c.entries {
-			delete(c.entries, k)
-			toDrop--
-			if toDrop <= 0 {
-				break
-			}
-		}
+	if len(c.entries) >= c.maxSize && len(c.byExpiry) > 0 {
+		c.removeLocked(c.byExpiry[0])
 	}
 }
