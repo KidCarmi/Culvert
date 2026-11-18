@@ -139,7 +139,7 @@ func mcpShadowStatus() map[string]any {
 		"preflight": evaluateShadowNodeReadiness(rollout.CapabilityGateway),
 	}
 	if snap := mcpShadowMetricsSnapshotOrNil(); snap != nil {
-		m["metrics"] = snap.snapshot()
+		m["metrics"] = snap.Snapshot()
 	}
 	return m
 }
