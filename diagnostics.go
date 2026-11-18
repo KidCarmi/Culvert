@@ -1632,7 +1632,7 @@ func checkRequestLogPersistence() OperatorContractCheck {
 			Code:           "request_log_persistence",
 			Status:         diagFail,
 			Message:        "configured but failed to open — request log has silently fallen back to the in-memory ring, lost on restart",
-			OperatorAction: "Fix permissions/mount on the configured request log path, then restart the proxy to restore durable request-log persistence.",
+			OperatorAction: "Fix permissions/mount on the configured request log path. Culvert retries the open automatically (at least every 2.5 minutes) and resumes durable request-log persistence without a restart; entries recorded before it opens stay in the in-memory ring only.",
 		}
 	}
 	return OperatorContractCheck{

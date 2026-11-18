@@ -49,6 +49,12 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// down. Returns at once unless the startup open failed.
 	go startAuditOpenRetry(ctx)
 
+	// The request log's deferred open: a configured request_log_file that
+	// could not be opened at startup is re-attempted on the same bounded
+	// backoff until it opens, or the node shuts down. Returns at once unless
+	// the startup open failed.
+	go startRequestLogOpenRetry(ctx)
+
 	// CHAOS-107: the ClamAV signature-generation observer. ClamAV definitions
 	// change out-of-process (freshclam), so the verdict cache can only be
 	// reconciled against them by ASKING on a cadence; nothing else in the
