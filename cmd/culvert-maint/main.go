@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,6 +41,18 @@ func main() {
 		printVer   = flag.Bool("version", false, "Print version and exit")
 	)
 	flag.Parse()
+	// CHAOS-122: the flag package stops at the first non-flag token and silently
+	// drops every flag after it. For this agent the flag that would be dropped
+	// is --config, so a mangled argv runs the PRIVILEGED maintenance agent
+	// against the DEFAULT config path instead of the operator's — a different
+	// journal, a different compose path and a different allowlist, chosen
+	// silently. The agent takes no positional operands, so any tail is refused
+	// before the config is read or the socket is bound.
+	if flag.NArg() > 0 {
+		log.Fatalf("culvert-maint: unexpected argument(s) %q; this agent takes flags only, and the flag package "+
+			"discards every flag after a non-flag token (--config selects the config, journal and allowlist). "+
+			"Nothing was started.", strings.Join(flag.Args(), " "))
+	}
 
 	if *printVer {
 		fmt.Println(server.Version)

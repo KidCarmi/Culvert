@@ -198,6 +198,18 @@ func main() {
 
 	s := &startupState{}
 	parseFlags(s)
+	// CHAOS-122: refuse an argv flag.Parse could not fully consume. Go's flag
+	// package stops at the first non-flag token and silently drops every flag
+	// after it, so this is the difference between a loud refusal and a process
+	// that boots with those settings at their defaults while reporting healthy
+	// (CHAOS-121a was one instance of the class). BEFORE the one-shot dispatch
+	// and therefore before anything touches dataDir: a rejected argv changes
+	// nothing on disk. Exit 2 is the flag package's own usage-error code, which
+	// runBootstrapResolve already returns for the same class. See argv_guard.go.
+	if err := checkPositionalArgs(s); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(2)
+	}
 	handleOneShotCommands(s)
 	// RISK-005: refuse to boot on a data dir left missing by a restore commit
 	// that was killed mid-rename (would otherwise start empty + silently lose
