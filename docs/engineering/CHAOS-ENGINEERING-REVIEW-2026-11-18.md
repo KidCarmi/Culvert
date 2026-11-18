@@ -371,8 +371,11 @@ passes, so a dropped call site fails here.
 | `golangci-lint run` full tree | 174 issues — identical to the base count at `348a2cf`, so nothing new attributed to a declaration line |
 | `go run ./cmd/contractcheck impact -base origin/main` | no contract code paths touched |
 | `python3 docs/agent-context/check.py` | pass |
-| `go test ./internal/...` | pass |
-| `go test .` (full root package) | see the PR body — a local pass is not a hosted gate |
+| `go test ./internal/...` | pass — 116 packages, exit 0 |
+| `go test .` (full root package, 25 m budget) | pass — `ok github.com/KidCarmi/Culvert 512.133s` |
+
+A passing local run is not a passing hosted review or merge gate; the Fast PR
+Gate and CodeQL have not run at the time of writing.
 
 ---
 
