@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -952,12 +953,7 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		// taxonomy. maybeFailOpenClient is deliberately NOT consulted: learning
 		// an auto-exclusion here would bypass inspection for the host on the next
 		// connection, recreating the hole this closes.
-		proto := detectProtocolName(firstByte[0])
-		rawClient.Close()   //nolint:errcheck // refusing: close both legs
-		upstreamTLS.Close() //nolint:errcheck // refusing: close both legs
-		recordDecryptFailureEntry(clientInspectFailureOutcome(errInspectNonTLSClient, hostOnly, dec, match), id, hostOnly, match, decRedactHosts())
-		logger.Printf("SSL_INSPECT refused a non-TLS client for %q (first byte=0x%02x, proto=%s): an inspect rule requires TLS",
-			sanitizeLog(hostOnly), firstByte[0], sanitizeLog(proto))
+		refuseNonTLSInspectClient(rawClient, upstreamTLS, firstByte[0], "", hostOnly, dec, match, id)
 		return
 	}
 
@@ -1667,6 +1663,38 @@ func removeHopHeaders(h http.Header) {
 	for _, hdr := range hopByHopHeaderNames {
 		h.Del(hdr)
 	}
+}
+
+// refuseNonTLSInspectClient is the SEC-INSPECT-PLAINTEXT-1 refusal, shared by
+// the strip path (handleTunnelInspect, above) and the native-ALPN path
+// (handleInspectNativeALPN in proxy_tunnel_h2.go).
+//
+// It is ONE function because the two already drifted apart once, and that drift
+// was the vulnerability: the strip path began refusing while the native leg
+// kept raw-relaying, leaving the bypass open on the more reachable of the two
+// (the native leg has not handshaked the origin yet when it peeks, so the
+// client alone decided, against any origin). A future change to this decision
+// now reaches both legs or neither.
+//
+// pathLabel distinguishes the two in the log line ("" and "(native)") and is
+// the only thing that differs between them. Both legs are closed, and the
+// refusal is recorded through the ADR-0011 taxonomy as a client-hello protocol
+// failure. maybeFailOpenClient is deliberately NOT consulted: learning an
+// auto-exclusion here would bypass inspection for the host on the next
+// connection, recreating the hole this closes.
+func refuseNonTLSInspectClient(clientLeg, upstreamLeg net.Conn, firstByte byte, pathLabel, hostOnly string,
+	dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
+	proto := detectProtocolName(firstByte)
+	clientLeg.Close()   //nolint:errcheck // refusing: close both legs
+	upstreamLeg.Close() //nolint:errcheck // refusing: close both legs
+	recordDecryptFailureEntry(clientInspectFailureOutcome(errInspectNonTLSClient, hostOnly, dec, match), id, hostOnly, match, decRedactHosts())
+	// pathLabel and the hex byte cannot carry a newline, but they reach this
+	// shared helper as parameters, so the CWE-117 barrier is inlined here where
+	// CodeQL can see it (conventions: inline ReplaceAll for values it cannot trace).
+	logLabel := strings.ReplaceAll(pathLabel, "\n", "_")
+	logByte := strings.ReplaceAll(fmt.Sprintf("0x%02x", firstByte), "\n", "_")
+	logger.Printf("SSL_INSPECT%s refused a non-TLS client for %q (first byte=%s, proto=%s): an inspect rule requires TLS",
+		logLabel, sanitizeLog(hostOnly), logByte, sanitizeLog(proto))
 }
 
 func copyHeaders(dst, src http.Header) {

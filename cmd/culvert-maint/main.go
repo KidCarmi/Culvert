@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,6 +41,21 @@ func main() {
 		printVer   = flag.Bool("version", false, "Print version and exit")
 	)
 	flag.Parse()
+	// CHAOS-122: the flag package stops at the first non-flag token and silently
+	// drops every flag after it. For this agent the flag that would be dropped
+	// is --config, so a mangled argv runs the PRIVILEGED maintenance agent
+	// against the DEFAULT config path instead of the operator's — a different
+	// journal, a different compose path and a different allowlist, chosen
+	// silently. The agent takes no positional operands, so any tail is refused
+	// before the config is read or the socket is bound.
+	// Only the first token and the discarded flag NAMES are echoed: a value in
+	// the tail may be a credential, and the journal collects stderr.
+	if flag.NArg() > 0 {
+		log.Fatalf("culvert-maint: unexpected argument(s) beginning with %q (discarded after it, values redacted: %q); "+
+			"this agent takes flags only, and the flag package discards every flag after a non-flag token "+
+			"(--config selects the config, journal and allowlist). Nothing was started.",
+			flag.Arg(0), redactArgValues(flag.Args()[1:]))
+	}
 
 	if *printVer {
 		fmt.Println(server.Version)
@@ -243,4 +259,22 @@ func startOpLogRetention(ctx context.Context, stateDir string, retentionDays int
 			}
 		}
 	}()
+}
+
+// redactArgValues keeps each flag NAME in an argv tail and replaces every value
+// — a token that is not a flag, or the part of `-flag=value` after "=" — with
+// <value>, so a refusal says what was discarded without printing a secret.
+func redactArgValues(args []string) string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if len(a) < 2 || a[0] != '-' {
+			out = append(out, "<value>")
+			continue
+		}
+		if name, _, ok := strings.Cut(a, "="); ok {
+			a = name + "=<value>"
+		}
+		out = append(out, a)
+	}
+	return strings.Join(out, " ")
 }

@@ -19,7 +19,7 @@ they are the ones a restart can interrupt.
 |---|---|
 | `connect_bypass` | `CONNECT` tunnel on a rule that does not inspect |
 | `connect_inspect` | `CONNECT` tunnel under SSL inspection (both the strip and native-ALPN paths) |
-| `inspect_fallback` | a non-TLS protocol (SSH, RDP, …) found inside a `CONNECT` on an inspect rule, relayed raw |
+| `inspect_fallback` | a non-TLS protocol (SSH, RDP, …) found inside a `CONNECT` on a native-HTTP/2 inspect rule, relayed raw. The default strip-ALPN path refuses such a client instead, so it never creates this class |
 | `websocket` | a `101 Switching Protocols` upgrade proxied end to end |
 | `socks5` | a SOCKS5 session |
 
