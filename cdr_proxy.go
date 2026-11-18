@@ -698,6 +698,7 @@ func cdrErrorOutcome(reason, profile, mode string, ms int64, cfg CDRConfig) *cdr
 	atomic.AddInt64(&statCDRErrors, 1)
 	if cfg.CDRFailOpen() {
 		atomic.AddInt64(&statCDRFailOpen, 1)
+		noteCDRFailOpenPassthrough()
 		return &cdrRunResult{
 			Outcome:     cdrPass,
 			Status:      "ERROR",
