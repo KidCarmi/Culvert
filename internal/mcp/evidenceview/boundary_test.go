@@ -55,23 +55,29 @@ func exportedTopLevel(source []byte) ([]string, error) {
 				names = append(names, d.Name.Name)
 			}
 		case *ast.GenDecl:
-			for _, s := range d.Specs {
-				switch sp := s.(type) {
-				case *ast.TypeSpec:
-					if sp.Name.IsExported() {
-						names = append(names, sp.Name.Name)
-					}
-				case *ast.ValueSpec:
-					for _, n := range sp.Names {
-						if n.IsExported() {
-							names = append(names, n.Name)
-						}
-					}
+			names = append(names, exportedSpecNames(d.Specs)...)
+		}
+	}
+	return names, nil
+}
+
+func exportedSpecNames(specs []ast.Spec) []string {
+	var names []string
+	for _, s := range specs {
+		switch sp := s.(type) {
+		case *ast.TypeSpec:
+			if sp.Name.IsExported() {
+				names = append(names, sp.Name.Name)
+			}
+		case *ast.ValueSpec:
+			for _, n := range sp.Names {
+				if n.IsExported() {
+					names = append(names, n.Name)
 				}
 			}
 		}
 	}
-	return names, nil
+	return names
 }
 
 func TestEvidenceViewBoundary_NoAppImportsOrSharedState(t *testing.T) {
