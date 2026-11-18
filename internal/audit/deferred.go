@@ -164,9 +164,15 @@ func TryDeferredOpen() (DeferredOpenResult, bool, error) {
 	for i := range backlog {
 		persistEntry(rf, path, backlog[i])
 	}
-	for i := 0; i < backlogDropped; i++ {
-		countWriteError(path, fmt.Errorf("audit entry evicted from the %d-entry backlog before the configured log could be opened", MaxRing))
-	}
+	// ONE charge for the whole batch, never a loop: backlogDropped is bounded
+	// only by how many audit entries arrived while the log was unopenable, and
+	// /api/auth/login audits auth.lockout unauthenticated, so a request stream
+	// inflates it without bound. A per-entry charge would run that many
+	// allocations and observer-mutex acquisitions right here, under the
+	// process-wide audit mu, stalling every auditEvent and every audit read
+	// behind the recovery (CWE-400/CWE-770). countWriteErrorsN keeps the
+	// counter exact and calls the degraded observer once.
+	countWriteErrorsN(path, backlogDropped, fmt.Errorf("%d audit entries were evicted from the %d-entry backlog before the configured log could be opened", backlogDropped, MaxRing))
 	persist, persistC, persistPath = rf, rf, path
 	deferredPath, backlog, backlogDropped = "", nil, 0
 	mu.Unlock()

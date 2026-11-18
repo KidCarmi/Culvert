@@ -24,7 +24,7 @@ func checkAdminRouteEnforcement() []OperatorContractCheck {
 	return []OperatorContractCheck{{
 		Code:   adminRouteEnforcementCode,
 		Status: diagWarn,
-		Message: fmt.Sprintf("admin-route authorization metadata is in SHADOW mode (break-glass, %s is false) — the route-level "+
+		Message: fmt.Sprintf("Admin-API RBAC enforcement is in SHADOW mode (break-glass, %s is false) — the route-level "+
 			"role gate logs but does not block; each admin handler's own role check still applies. %d request(s) the route "+
 			"gate would have refused were let through to that handler check since startup", c2EnforceEnvVar, wouldDeny),
 		OperatorAction: "Break-glass is meant to be temporary. Remove " + c2EnforceEnvVar + " from the proxy environment (or set it to " +

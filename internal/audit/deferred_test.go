@@ -3,10 +3,12 @@ package audit
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -335,5 +337,79 @@ func TestDeferredOpen_ConcurrentPersistentReadsAreRaceFree(t *testing.T) {
 	wg.Wait()
 	if page, _ := GetPersistent(0, 10, 0, 0); len(page) != 1 || page[0].Object != "obj-0" {
 		t.Fatalf("persistent read after the open = %+v, want the backfilled entry", page)
+	}
+}
+
+// TestDeferredOpen_EvictedBacklogIsChargedInOneBatch is the DoS gate behind
+// countWriteErrorsN. The recovery publishes the reopened sink while holding the
+// process-wide audit mu, and the number of entries it has to charge for is
+// bounded only by how many audit entries arrived while the log was unopenable —
+// /api/auth/login audits auth.lockout before authenticating anyone, so a
+// request stream inflates it without bound. Charging per entry put that many
+// allocations and observer-mutex acquisitions inside mu, stalling every
+// auditEvent and every audit read behind the recovery (CWE-400/CWE-770).
+//
+// The counter must stay EXACT (it is the operator's count of entries missing
+// from the durable trail) while the observer — a degraded latch plus an
+// off-goroutine alert — is called ONCE. Asserting both together is the point:
+// collapsing the loop by under-counting WriteErrors would hide the loss.
+func TestDeferredOpen_EvictedBacklogIsChargedInOneBatch(t *testing.T) {
+	isolateDeferred(t)
+	t.Cleanup(ResetWriteErrorsForTest())
+
+	var observerCalls int64
+	SetWriteFailureObserver(func(string, error) { atomic.AddInt64(&observerCalls, 1) })
+	t.Cleanup(func() { SetWriteFailureObserver(nil) })
+
+	dir, path := unopenablePath(t)
+	if !ArmDeferredOpen(path) {
+		t.Fatal("arm refused")
+	}
+	// Far more evictions than a batch charge would ever need, so a per-entry
+	// loop is unmistakable in the call count rather than a close call.
+	const extra = 500
+	for i := 0; i < MaxRing+extra; i++ {
+		Add(entry(i))
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := atomic.LoadInt64(&observerCalls)
+	res, ok, err := TryDeferredOpen()
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if res.Dropped != extra {
+		t.Fatalf("dropped = %d, want %d", res.Dropped, extra)
+	}
+	// Exactness first: the loss must still be fully counted.
+	if WriteErrors() != extra {
+		t.Errorf("WriteErrors = %d, want %d: a batched charge must not lose the count", WriteErrors(), extra)
+	}
+	// Then the bound: one call for the batch, regardless of its size.
+	if got := atomic.LoadInt64(&observerCalls) - before; got != 1 {
+		t.Errorf("the write-failure observer was called %d times for %d evicted entries, want 1: the charge "+
+			"runs under the process-wide audit mu and its cost must not scale with an attacker-inflatable "+
+			"backlog (CWE-400/CWE-770)", got, extra)
+	}
+}
+
+// TestCountWriteErrorsN_ZeroAndNegativeAreNoOps is the boundary case: the
+// common path has nothing to charge, and must neither move the counter nor
+// wake the observer.
+func TestCountWriteErrorsN_ZeroAndNegativeAreNoOps(t *testing.T) {
+	t.Cleanup(ResetWriteErrorsForTest())
+	var calls int64
+	SetWriteFailureObserver(func(string, error) { atomic.AddInt64(&calls, 1) })
+	t.Cleanup(func() { SetWriteFailureObserver(nil) })
+
+	for _, n := range []int{0, -1, -500} {
+		countWriteErrorsN("/tmp/does-not-matter", n, errors.New("boundary"))
+	}
+	if WriteErrors() != 0 {
+		t.Errorf("WriteErrors = %d, want 0 for n <= 0", WriteErrors())
+	}
+	if got := atomic.LoadInt64(&calls); got != 0 {
+		t.Errorf("observer called %d times for n <= 0, want 0", got)
 	}
 }

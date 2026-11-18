@@ -69,8 +69,15 @@ func TestSECHATOKEN1_NonAdminRolesNeverSeeTheJoinToken(t *testing.T) {
 			if strings.Contains(body, haProbeSentinel) {
 				t.Errorf("DEFECT: role %q obtained the live HA join token.\nbody=%s", role, body)
 			}
-			if strings.Contains(body, "--ha-token") {
-				t.Errorf("DEFECT: role %q obtained the deploy command (it embeds --ha-token).\nbody=%s", role, body)
+			// The sentinel check above is the load-bearing one: it is on the
+			// token VALUE, so it holds whichever channel deploy_cmd uses. This
+			// one looks for the command's recognizable marker, updated from
+			// "--ha-token" when SEC-HA-TOKEN-ARGV-1 moved the handover into
+			// CULVERT_HA_TOKEN — left as the flag it would now be vacuously
+			// true, and a vacuous assertion in a redaction gate is worse than
+			// none.
+			if strings.Contains(body, haTokenEnv+"=") {
+				t.Errorf("DEFECT: role %q obtained the deploy command (it embeds the join token).\nbody=%s", role, body)
 			}
 			var resp map[string]any
 			if err := json.Unmarshal([]byte(body), &resp); err != nil {
@@ -104,8 +111,14 @@ func TestSECHATOKEN1_AdminStillReceivesTheDeployCommand(t *testing.T) {
 	if cmd == "" {
 		t.Fatal("admin lost deploy_cmd — the fix over-narrowed")
 	}
-	if !strings.Contains(cmd, "--ha-token "+haProbeSentinel) {
+	// SEC-HA-TOKEN-ARGV-1 changed the CHANNEL, not whether the admin gets the
+	// token: it is now a CULVERT_HA_TOKEN assignment prefixing the command
+	// rather than an --ha-token flag, so it never reaches the standby's argv.
+	if !strings.Contains(cmd, haTokenEnv+"="+haProbeSentinel) {
 		t.Errorf("admin deploy_cmd does not carry the join token: %q", cmd)
+	}
+	if strings.Contains(cmd, "--ha-token") {
+		t.Errorf("admin deploy_cmd passes the token as a flag, putting it in the standby's argv: %q", cmd)
 	}
 }
 

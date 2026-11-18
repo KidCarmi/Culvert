@@ -154,9 +154,32 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	}
 	peekBuf := clientBuf.Reader
 
-	// Non-TLS over CONNECT (SSH/RDP/etc.): we cannot MITM; the upstream TLS
-	// handshake has not happened yet, so raw-relay the plaintext client to the
-	// plaintext upstream TCP conn — mirrors the strip path's non-TLS fallback.
+	// Non-TLS over CONNECT: we cannot MITM, so SEC-INSPECT-PLAINTEXT-1 applies
+	// here exactly as it does on the strip path (proxy_tunnel.go) — REFUSE,
+	// never relay. This leg used to raw-relay the client to the plaintext
+	// upstream conn and called itself a mirror of the strip path's fallback; it
+	// outlived that twin. The rule says the session is inspected, and a raw
+	// relay delivers the opposite: no inner-host pin, file block, DPI, scan or
+	// per-request log row, on a destination an operator marked for inspection.
+	//
+	// It was also the MORE reachable of the two. The strip path handshakes the
+	// origin BEFORE this peek, so its fallback needed an origin that speaks TLS
+	// and a client that does not; here the upstream handshake is still ahead of
+	// us (it needs the client's ALPN offer), so the client alone decided — any
+	// first byte that is not 0x16 turned an inspect rule into a bypass for any
+	// origin, TLS or not.
+	//
+	// Recorded as a client-hello protocol failure through the ADR-0011
+	// taxonomy, and maybeFailOpenClient is deliberately NOT consulted: learning
+	// an auto-exclusion here would bypass inspection for the host on the next
+	// connection, recreating the hole this closes. The 200 is already sent, so
+	// the refusal is both legs closed rather than a 502 — the same shape the
+	// upstream-handshake failure below uses.
+	//
+	// A genuine non-TLS protocol over CONNECT (SSH/RDP) to a host matched by an
+	// InspectHTTP2 rule is now refused rather than tunneled. That case is an
+	// explicit Bypass rule for the destination, which is auditable; a silent
+	// per-connection opt-out chosen by the client is not.
 	firstByte, ferr := peekBuf.Peek(1)
 	if ferr != nil {
 		rawClient.Close()   //nolint:errcheck // best-effort cleanup
@@ -164,8 +187,7 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 		return
 	}
 	if firstByte[0] != 0x16 {
-		logger.Printf("SSL_INSPECT(native) non-TLS first byte 0x%02x for %q — raw relay", firstByte[0], sanitizeLog(hostOnly))
-		relayPlaintextInspectFallback(rawClient, peekBuf, rawUpstream, hostOnly, match, id)
+		refuseNonTLSInspectClient(rawClient, rawUpstream, firstByte[0], "(native)", hostOnly, dec, match, id)
 		return
 	}
 
@@ -238,52 +260,6 @@ func dispatchNativeInspect(r *http.Request, clientTLS, upstreamTLS *tls.Conn, up
 	// Both legs HTTP/1.1 (origin declined h2, or client offered only h1) — reuse the
 	// shared H1 inspection loop. One enforcement path for both protocols.
 	runH1InspectLoop(r, clientTLS, upstreamTLS, hostOnly, match, id, decBlock)
-}
-
-// relayPlaintextInspectFallback raw-relays a non-TLS CONNECT client to the
-// plaintext upstream TCP conn (idle-bounded) and records a TUNNEL_CLOSED entry —
-// the native-path equivalent of the strip path's non-TLS fallback.
-func relayPlaintextInspectFallback(rawClient net.Conn, peekBuf io.Reader, rawUpstream net.Conn, hostOnly string, match *PolicyMatch, id ProxyIdentity) {
-	// CHAOS-57: the native path's non-TLS fallback was invisible to the shutdown
-	// drain for the same reason as its strip-path twin — the recordActiveConn call
-	// sits after the client handshake this branch returns before.
-	defer registerDrainableTunnel(tunnelClassInspectFallback, rawClient, rawUpstream)()
-	start := time.Now()
-	var toUp, toCl int64
-	shared := newTunnelActivityStamp()
-	done := make(chan struct{}, 2)
-	// PX-4 residual (CHAOS-57): this was the ONE relay goroutine in the tree with no
-	// panic guard — every other raw relay (relayCounted, the strip-path fallback,
-	// rawRelay, socks5Relay) has carried one since CHAOS-24. A panic inside
-	// idleCopyCounted here propagated to the runtime and killed an in-line security
-	// appliance, dropping every other in-flight tunnel with it. Containing it is
-	// strictly fail-closed: a relay goroutine holds no authority the recovery could
-	// extend (the CHAOS-24 objection), and closing BOTH legs unblocks the peer relay,
-	// which may be parked in a deadline-less Write that only a close can end.
-	relay := func(dst net.Conn, src io.Reader, srcConn net.Conn, count *int64) {
-		defer func() {
-			if v := recover(); v != nil {
-				recordCrash("tunnel-relay", "", v)
-				_ = dst.Close()
-				if srcConn != nil {
-					_ = srcConn.Close()
-				}
-			}
-			done <- struct{}{} // sole sender
-		}()
-		*count = idleCopyCounted(dst, src, srcConn, shared)
-	}
-	go relay(rawUpstream, peekBuf, rawClient, &toUp)
-	go relay(rawClient, rawUpstream, rawUpstream, &toCl)
-	<-done
-	rawClient.Close()   //nolint:errcheck // force peer unblock
-	rawUpstream.Close() //nolint:errcheck // force peer unblock
-	<-done
-	// ADR-0011: the client spoke a non-TLS protocol, so no MITM happened — record the
-	// not_decrypted/non_tls_fallback outcome. Unlike the native path's inspected block
-	// (a documented follow-up needing the h2 leg's TLS state), this outcome is pure
-	// sentinels + host, so it is populated now for parity with the strip path.
-	recordTunnelCloseGatedDec(match, id, "CONNECT", hostOnly, toUp, toCl, start, "inspect", "", nonTLSFallbackOutcome(hostOnly), decRedactHosts())
 }
 
 // handshakeUpstreamALPN performs the upstream inspect-leg TLS handshake offering
