@@ -8,6 +8,26 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-18 — `CHAOS-123` CLAIMED (placeholder, commit one). Domain: the
+OPERATOR-CONFIGURED REMOTE BLOCKLIST FEED's FRESHNESS PLANE — CHAOS-108 fixed
+that feed's cadence (a failed round no longer costs a full 24 h interval, the
+phase is jittered, the fetch is cancellable) and recorded the rest in
+`internal/blocklistfeed`'s own package doc as the open half, in these words:
+"NOT fixed here, and recorded as the open half: this feed still has no
+staleness alert or health row… Adding an alert type is an owner decision with
+GUI/API parity consequences, not a drive-by rider on a scheduling fix." This is
+that round. The feed is a DENY control whose imports are merge-only and
+persisted, so entry count is not a freshness proxy: a node whose feed has not
+fetched in three weeks exports byte-identical metrics to one that synced ten
+minutes ago — the same shape WK-5/CHAOS-59 closed for the threat feed.** Id
+claimed in this committed row before any code was written, per the convention
+below and checked against `origin/main` rather than the working tree per the
+2026-09-25 amendment: `CHAOS-122` is the highest id anywhere on `origin/main`
+(at `348a2cf`). Of the open PRs (#1944, #1943, #1942, #1941, #1705, #1549,
+#1548, #1536, #1528, #1526) none is a chaos sweep and none claims a chaos id.
+This sweep took 123 and will not move.
+
+
 The 2026-11-17 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-17.md) —
 CHAOS-122 (THE ARGV CONTRACT). CHAOS-121 found that `docker-compose.ha.yml`
