@@ -390,9 +390,18 @@ to **CWE-522**. **OWASP A02:2021 — Cryptographic Failures.**
 **Severity: Medium on a shared host, Low on a dedicated appliance. Regression
 risk of the fix: low** — the flag still wins when set.
 
+**A second route to the same exposure, also fixed.** The leader's "Enable HA"
+panel generates the standby's deploy command (`haDeployCommand`), and it emitted
+`--ha-token <value>` — a string the operator copies into a shell on the standby,
+which then carries the token in that node's argv for the whole life of the
+process. It now emits `CULVERT_HA_TOKEN=<value> ./culvert …`: as a variable
+assignment prefixing the command, the shell places the value in the child's
+environment and does not pass it as an argv word.
+
 **Fix.** `CULVERT_HA_TOKEN` (`haTokenEnv`) is the env channel, mirroring the two
 passphrases that already take this env-only startup-secret exception, and the
-shipped compose uses it instead of a flag. `-ha-token` is kept and still wins
+shipped compose, the GUI deploy command, the operator deployment guide and
+`config.example.yaml` all use it instead of a flag. `-ha-token` is kept and still wins
 when both are set, so an operator invoking culvert directly is unaffected. The
 env value is whitespace-trimmed (a token copied out of a deploy command easily
 acquires a trailing newline, and the resulting failure reads as a wrong token);
@@ -408,13 +417,33 @@ against `haJoinMode()`), `TestHATokenEnv_IsReadAndNotLogged` (the wiring exists
 and no source file logs the token), and
 `TestDockerComposeHA_TokenReachesCulvertThroughTheEnvironment` (the proxy
 service exports it — without this, removing the flag would silently stop
-standbys joining).
+standbys joining), and
+`TestHADeployCommand_HandsTheTokenOverByEnvironment` (the GUI handover carries
+no `--ha-token`, puts the assignment FIRST so the shell exports it rather than
+passing an argv word, and keeps its `--ha-join` target).
 
-**A pre-existing gate was deliberately inverted.**
-`TestDockerComposeHA_JoinWithTokenYieldsValidArgv` required
-`--ha-token=<value>` *in* argv. It now asserts the opposite: the token must not
-appear in argv at all. That assertion is annotated with why, so the reversal is
-not mistaken for a weakened test.
+**Pre-existing assertions deliberately changed — stated explicitly, because
+three of them live in security gates.**
+
+- `TestDockerComposeHA_JoinWithTokenYieldsValidArgv` required
+  `--ha-token=<value>` *in* argv. It now asserts the opposite: the token must
+  not appear in argv at all.
+- `TestSECHATOKEN1_AdminStillReceivesTheDeployCommand` (the positive control of
+  the **SEC-HATOKEN-1** role gate) asserted `--ha-token <sentinel>`; it now
+  asserts the `CULVERT_HA_TOKEN=<sentinel>` form **and** that no `--ha-token`
+  remains. The admin still receives the token; only the channel changed.
+- `TestSECHATOKEN1_NonAdminRolesNeverSeeTheJoinToken` (the **defect gate**:
+  a viewer or operator must never obtain the token) checked both the token
+  VALUE and the string `"--ha-token"`. The value check is the load-bearing one
+  and is channel-independent, so the gate never stopped working — but the
+  second check would have become **vacuously true**, and a vacuous assertion in
+  a redaction gate is worse than none. It now looks for the command's new
+  marker. Verified by running the whole `TestSECHATOKEN1_*` family.
+- `TestAPIClusterHA_Enable` asserted the flag form on the enable path; updated
+  the same way.
+
+Each change is annotated at the assertion with why, so none of them reads as a
+test weakened to accommodate a fix.
 
 **Same channel, lower value, NOT fixed:** the DP service passes
 `--enroll $ENROLL_URL`, putting the single-use, fingerprint-bound enrollment

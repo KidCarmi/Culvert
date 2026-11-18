@@ -51,7 +51,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   exposure was specifically to unprivileged local readers. `CULVERT_HA_TOKEN`
   is now the env channel — mirroring `CULVERT_CA_PASSPHRASE` and
   `CULVERT_LOG_PASSPHRASE`, whose own comments state this preference — and the
-  shipped compose uses it. `-ha-token` is kept and still wins when both are set,
+  shipped compose uses it. The leader's "Enable HA" panel was a second route to
+  the same exposure: the deploy command it generates for the admin to paste on
+  the standby emitted `--ha-token <value>`, putting the token in that node's
+  argv for the life of the process. It now emits
+  `CULVERT_HA_TOKEN=<value> ./culvert …`, which the shell passes in the child's
+  environment rather than as an argv word. The operator deployment guide and
+  `config.example.yaml` say which channel to use and why. `-ha-token` is kept and still wins when both are set,
   so an operator invoking culvert directly is unaffected. The env value is
   whitespace-trimmed (a token copied out of a deploy command easily acquires a
   trailing newline) while the flag value is passed through verbatim; a
