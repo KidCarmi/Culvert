@@ -20085,6 +20085,13 @@ function resetBlockPage() {
              keep being enforced throughout — this is degraded freshness, not a dark
              control. Fires once per episode, cleared by an observed clean sync. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="threat_feed_stale"> Threat feed stale (intelligence not refreshing)</label>
+        <!-- CHAOS-123: an auto-synced remote blocklist feed has not synced successfully
+             for over 2x its configured interval, or has never synced on this node. The
+             blocklist keeps its already-imported entries (the merge never deletes), so
+             this is degraded freshness on a deny control, not a dark one — but the
+             destinations added since the last good sync are NOT being blocked. Fires
+             once per episode, cleared only when every auto-synced feed is fresh again. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="blocklist_feed_stale"> Blocklist feed stale (remote deny list not refreshing)</label>
         <!-- CHAOS-57: the credential-verification cost governor has been refusing
              authentication attempts for a sustained period. bcrypt costs ~80 ms of a
              core and runs on the per-request proxy-auth path, so verification is

@@ -47,13 +47,19 @@
 // feed added through the admin API is still picked up within one tick and no
 // goroutine is created per feed.
 //
-// NOT fixed here, and recorded as the open half: this feed still has no
-// staleness alert or health row. internal/threatfeed has both (a
-// threat_feed_stale alert, plus a deferred startup variant); a blocklist feed
-// that has never synced, or is arbitrarily stale, raises neither and is
-// visible only as LastError in the admin API and one log line per attempt.
-// Adding an alert type is an owner decision with GUI/API parity consequences,
-// not a drive-by rider on a scheduling fix.
+// That open half — "this feed still has no staleness alert or health row" —
+// was closed by CHAOS-123, in package main's blocklist_feed_health.go: the
+// culvert_blocklist_feed_* series, the extended `blocklist_feed` diagnostics
+// row and the `blocklist_feed_stale` alert. What this package owes that plane
+// is in observer.go (SetSyncObserver) and in the Feed snapshot's LastAttempt /
+// ConsecutiveFailures fields; the thresholds and the operator vocabulary are
+// main's, beside the other health planes.
+//
+// Still open, and recorded as such: a BOUNDED reason class on SyncOutcome, so
+// the alert can say WHY rather than only what and for how long. It needs
+// sentinel errors threaded through fetchFeedLines (whose messages embed the
+// feed URL, which routinely embeds a token), which is a change to the fetch
+// path, not to the observability plane. See observer.go for the full reason.
 package blocklistfeed
 
 import (
@@ -104,6 +110,19 @@ type Feed struct {
 	LastSync      time.Time     // last successful sync (zero = never)
 	LastError     string        // error from the most recent attempt ("" = ok)
 	ImportedCount int64         // cumulative new domains merged from this feed
+
+	// LastAttempt is the most recent round, success or failure (zero =
+	// never attempted). It is what distinguishes "this feed has never been
+	// tried" from "this feed was tried and failed", which LastError alone
+	// cannot: a feed with auto-sync disabled (Interval == 0) is never tried
+	// at all, so its LastError stays empty forever (CHAOS-123).
+	LastAttempt time.Time
+	// ConsecutiveFailures is the retry ladder's failure count for this feed,
+	// reset by the first success. Not persisted, so it reads 0 after a
+	// restart even for a feed that is known to be failing — read LastError
+	// for the authoritative "is the latest round bad" signal, the same rule
+	// internal/threatfeed's Health.LastRoundOK carries.
+	ConsecutiveFailures int
 }
 
 // feedState is the internal mutable state of one feed. Every field is
@@ -276,13 +295,20 @@ func (bs *Syncer) Feeds() []Feed {
 	defer bs.mu.RUnlock()
 	out := make([]Feed, 0, len(bs.feeds))
 	for feedURL, st := range bs.feeds {
-		out = append(out, Feed{
+		f := Feed{
 			URL:           feedURL,
 			Interval:      st.interval,
 			LastSync:      st.lastSync,
 			LastError:     st.lastError,
 			ImportedCount: st.importedCount,
-		})
+			LastAttempt:   st.lastAttempt,
+		}
+		// sched is built lazily by scheduleNextLocked, so it is nil until
+		// this feed has completed its first round.
+		if st.sched != nil {
+			f.ConsecutiveFailures = st.sched.Failures()
+		}
+		out = append(out, f)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].URL < out[j].URL })
 	return out
@@ -386,6 +412,7 @@ func (bs *Syncer) SyncFeedContext(ctx context.Context, feedURL string) (int, err
 	if err != nil {
 		st.lastError = err.Error()
 		failures := st.sched.Failures()
+		lastSync, interval := st.lastSync, st.interval
 		bs.mu.Unlock()
 		// Neither the error nor any request-derived value reaches this sink:
 		// the URL is operator-configured and sanitized with %q, and the
@@ -393,21 +420,33 @@ func (bs *Syncer) SyncFeedContext(ctx context.Context, feedURL string) (int, err
 		// error detail is already logged, at its own sink, by fetchFeedLines.
 		obs.Printf("BlocklistFeed: sync %q failed (%d consecutive) — retrying in %s, not at the configured interval",
 			obs.Sanitize(feedURL), failures, delay.Round(time.Second))
+		// CHAOS-123: outside the lock — the observer may call Feeds().
+		notifySyncObserver(SyncOutcome{ConsecutiveFailures: failures, LastSync: lastSync, Interval: interval})
 		return 0, err
 	}
 	bs.mu.Unlock()
 
 	added := bs.bl.MergeFromLines(lines, feedURL)
 
+	var okSync time.Time
+	var okInterval time.Duration
 	bs.mu.Lock()
 	if st, ok := bs.feeds[feedURL]; ok {
-		st.lastSync = time.Now()
+		// bs.timeNow(), not time.Now(): lastAttempt one branch up already
+		// reads the seam, and a success path that bypassed it left the one
+		// field the freshness plane measures from (CHAOS-123) undrivable by
+		// a fake clock, so the staleness contract could only be asserted by
+		// sleeping past a 24-hour threshold.
+		st.lastSync = bs.timeNow()
 		st.lastError = ""
 		st.importedCount += int64(added)
+		okSync, okInterval = st.lastSync, st.interval
 	}
 	bs.mu.Unlock()
 
 	obs.Printf("BlocklistFeed: synced %q — added %d new entries", obs.Sanitize(feedURL), added)
+	// CHAOS-123: outside the lock — the observer may call Feeds().
+	notifySyncObserver(SyncOutcome{OK: true, LastSync: okSync, Interval: okInterval})
 	return added, nil
 }
 

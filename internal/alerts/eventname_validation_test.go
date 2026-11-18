@@ -24,7 +24,8 @@ import (
 // webhook, which is the failure normalizeEventNames exists to prevent.
 func TestValidateEventNames_AcceptsCatalogShapes(t *testing.T) {
 	catalog := []string{
-		"admin_ui_unavailable", "auth_verify_saturated", "cdr_unavailable",
+		"admin_ui_unavailable", "auth_verify_saturated", "blocklist_feed_stale",
+		"cdr_unavailable",
 		"cert_expiry", "cp_grpc_listener_down", "dns_failure",
 		"identity_backend_unreachable", "idp_unreachable", "mcp_gateway_down",
 		"panic_contained", "policy_block", "scan_clam_error", "scan_skipped",

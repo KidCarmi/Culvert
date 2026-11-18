@@ -39,6 +39,12 @@ func loadBlocklist(cfg blocklistStartupConfig, ctx context.Context) {
 		logger.Printf("BlocklistFeed: syncing from %s every %s", cfg.FeedURL, cfg.FeedInterval)
 	}
 	blFeedSyncer.Start(ctx)
+	// CHAOS-123: arm the freshness plane AFTER Start, so its process-start
+	// anchor and its sync observer are both in place before the immediate
+	// boot pass can complete a round. Armed unconditionally, like Start
+	// itself, because feeds arrive later through the admin API and through
+	// LoadAdminSettings' restore.
+	noteBlocklistFeedConfigured()
 }
 
 // tryLoadBlocklistFile applies the pre-extraction file-load semantics
