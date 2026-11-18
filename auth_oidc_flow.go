@@ -1007,13 +1007,22 @@ func (p *OIDCFlowProvider) ResolveIdentityFrom(client, _ string, token string) (
 		return nil, false
 	}
 
-	// Try JWT validation first (browser flow — token is an ID token).
-	// No nonce check here: non-browser clients submit access tokens, not ID tokens.
-	if id, err := p.validateIDToken(token, ""); err == nil {
-		if id.Sub == "" {
-			return nil, false // reject empty subject
+	// A JWT that validates locally against the JWKS is accepted without a round
+	// trip — but ONLY when no enforcement filter is configured. requiredScope
+	// and requiredAudience are evaluated on the introspection response alone
+	// (identityFromIntrospectionClaims), so this shortcut cannot answer them,
+	// and letting it answer first made both filters a no-op for any token the
+	// IdP signed for this client id (an ID token carries no scope at all). With
+	// a filter set, introspection is the only path that may say yes; with none
+	// reachable, nothing is admitted.
+	// No nonce check here: there is no browser flow to bind one to.
+	if p.cfg.RequiredScope == "" && p.cfg.RequiredAudience == "" {
+		if id, err := p.validateIDToken(token, ""); err == nil {
+			if id.Sub == "" {
+				return nil, false // reject empty subject
+			}
+			return id, true
 		}
-		return id, true
 	}
 
 	// Fallback: RFC 7662 introspection (non-browser / access token flow).

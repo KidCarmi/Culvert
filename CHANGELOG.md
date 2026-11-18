@@ -9,6 +9,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **An OIDC profile's `requiredScope` / `requiredAudience` are now enforced for
+  every token presented as a proxy credential.** The registry OIDC provider
+  accepted a JWT that validated locally against the JWKS before it consulted
+  introspection, and the two filters are evaluated on the introspection
+  response only — so any token the IdP had signed for the profile's client id
+  (an ID token, which carries no scope at all) authenticated on the
+  `Proxy-Authorization` path whatever the filters said. With either filter
+  set, the local shortcut is now skipped and introspection is the only path
+  that can admit; a profile with a filter and no introspection endpoint admits
+  nothing on that path. Profiles with neither filter, the browser SSO flow and
+  the legacy single-provider backend are unchanged
+  (`TestOIDCFlowCredential_RequiredFiltersApplyToLocallyValidJWT`).
+
 - **`SEC-INSTALL-ENVLINK-1` is now honoured at every privileged site on the
   `.env` path, not only the last one.** The contract landed as a guard inside
   `env_put`: `sudo` must never act THROUGH a symlink at `$INSTALL_DIR/.env`,
