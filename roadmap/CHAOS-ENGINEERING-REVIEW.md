@@ -8,19 +8,88 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
-**2026-11-17 — `CHAOS-122` CLAIMED (placeholder, commit one). Domain: the
-ARGV CONTRACT of the binary itself — CHAOS-121 found that
-`docker-compose.ha.yml` silently discarded every flag it declared because Go's
-`flag` package stops at the first non-flag token, fixed that ONE artifact, and
-recorded the generic guard as the right change belonging to its own round
-because it needs an audit of every invocation shape. This is that round: does
-`main` refuse argv it cannot parse, or boot with all defaults and report
-healthy?** Id claimed in this committed row before any code was written, per
-the convention below and checked against `origin/main` rather than the working
-tree per the 2026-09-25 amendment: `CHAOS-121` is the highest id anywhere on
-`origin/main` (at `84b1b4c`). Of the open PRs (#1931, #1705, #1549, #1548,
-#1536, #1528, #1526) none is a chaos sweep and none claims a chaos id. This
-sweep took 122 and will not move.
+The 2026-11-17 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-17.md) —
+CHAOS-122 (THE ARGV CONTRACT). CHAOS-121 found that `docker-compose.ha.yml`
+silently discarded every flag it declared, fixed that one artifact, and recorded
+the generic guard in its §10 as the right change belonging to its own round,
+because "positional arguments are legitimately load-bearing on one path" and a
+correct guard needs an audit of every invocation shape. This round did that
+audit and shipped the guard. (a) `main.go:387` called the package-level
+`flag.Parse()` with **no `flag.NArg()` guard**, and `handleOneShotCommands`
+dispatches on FLAGS only, so an argv carrying a token that does not begin with
+`-` was not an error: the process fell through into normal startup with every
+flag AFTER that token at its zero default. **The partial case is sharper than
+the total one, because the surface still looks configured** — measured on the
+real binary, `-port 18080 -ui-port 19090 STRAY -policy <f> -audit-log <f>
+-ca-path <f>` came up on the expected ports with `/health` reporting
+`{"status":"ok", …,"ssl_inspection":"ready"}`, created NONE of the three files,
+and logged `Policy: default action: allow` where the same argv without `STRAY`
+logged `deny`. So discarding `-policy` does not merely lose rules, it **inverts
+the default action**, per the documented configured-vs-empty rule in
+[errata](../docs/agent-context/errata.md). The stray token was never named in
+any log line, on stdout or on stderr. **This was a LEGIBILITY failure, not a
+dark one, and that is the finding**: the per-subsystem degradation IS logged
+(`Policy: in-memory only`, `SSLCA: Root CA ready in-memory`), but those lines
+are IDENTICAL to the ones a deliberately minimal deployment emits, so nothing
+distinguishes "the operator did not set `-policy`" from "the orchestrator
+discarded the operator's `-policy`" — which is why the fix is a refusal rather
+than another warning. The guard holds for orchestrators the repository does not
+ship (a systemd unit, a Kubernetes manifest, a hand-written `docker run`, an
+operator pasting a documented command line into a `command:` key), which
+CHAOS-121's static compose gate cannot reach. It runs BEFORE the one-shot
+dispatch and therefore before `checkInterruptedRestore`,
+`checkDataDirSingleWriter` and anything that writes to the persisted-state root,
+so a rejected argv changes nothing on disk (verified: 0 entries); that ordering
+is pinned by its own gate, because the refusal and its no-effect guarantee are
+separable. **The audit found the §10 note's premise right and its count one
+short:** there are TWO positional consumers, not one. `--prepare-downgrade …
+--confirm <word>` is the single exception (`--confirm` is an `IsBoolFlag`, so
+the Tier-3 word lands in `flag.Args()`), and the guard DEFERS to
+`prepareDowngradeConfirmWord` rather than adding a second, weaker owner of that
+tail — with a gate pinning that the validator still rejects an over-long tail,
+since the exception is only safe while that holds. The second is
+`culvert bootstrap-resolve …`, dispatched from `main.go:192` BEFORE the global
+flag set exists and `os.Exit`ing, so it never reaches the check — the reason the
+guard needed no second exception. (b) That subcommand's OWN FlagSet
+(`bootstrap_resolve.go:102`) had the same defect, and the flag it would discard
+is `--data-dir`, which carries the ANTI-ROLLBACK FLOOR `scripts/install.sh`
+stages from a surviving `proxy-data` volume (`stage_rollback_floor`, `:928`) so
+a reinstall cannot be silently downgraded below the version the host last
+accepted. A stray token ahead of it resolves with floor 0 and **still prints a
+well-formed `image_ref`**, so the installer's strict output-shape gate would not
+fire: the fail-closed property there belonged to the CALLER, not the parser.
+Honest likelihood: the installer's own argv is correctly quoted and conditional,
+so it was not exposed; the runbook's hand-run form was. (c) The privileged
+maintenance agent (`cmd/culvert-maint/main.go:42`) had it too — it would have
+silently dropped `--config`, which selects the config and through it the
+journal, the compose path and the command allowlist; the shipped systemd unit
+passes a `--config` equal to the built-in default, so it was unaffected either
+way, a deployment whose config lives elsewhere was not. **Deliberate behaviour
+change:** `--restore <archive> --confirm <word>` previously committed the
+restore and silently IGNORED `<word>`; it is now refused (the documented bare
+`--confirm` form, and the agent which appends a bare `--confirm`, are
+unaffected). All five mutations verified red, and **one of them exposed a defect
+in this round's own gate**: the real-binary test first used an unbounded
+`CombinedOutput()`, so under the mutation — where the binary does not exit, it
+becomes a running proxy — the gate HUNG instead of failing; it now runs under a
+deadline and reports the non-exit as the failure. A repository invariant also
+caught a first-party slip: `TestTestFileReadsAreCWDIndependent` rejected the
+ordering gate's CWD-relative `os.ReadFile("main.go")`, now anchored to
+`pkgSourceDir()`. Records, NOT fixed: the no-arguments shape (`command: []`,
+still live in `backup-e2e.yml`) produces ZERO positionals, so this guard cannot
+see it and the `cli` service's `["-h"]` remains the only mitigation — the real
+remedy is CHAOS-121 §10's `culvert daemon` subcommand, a wire-compatibility
+change; `/ready`'s `policy_loaded` row reported `fail` while the envelope
+reported `ready`, because it is report-only unless `?strict=1`, so the readiness
+surface carried the evidence and did not gate on it (a posture decision, not a
+chaos round's to take); and `cmd/mcp-observe-acceptance` and `cmd/apibundle`
+share the unguarded `flag.Parse()` but are developer tools holding no security
+posture, recorded to enumerate the class. Id claimed in a committed placeholder
+row as commit one, before any code, checked against `origin/main` at `84b1b4c`
+(highest id anywhere on main: `CHAOS-121`) and the open-PR set (#1931, #1705,
+#1549, #1548, #1536, #1528, #1526 — none a chaos sweep, none claiming a chaos
+id).
 
 The 2026-11-16 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-16.md) —
