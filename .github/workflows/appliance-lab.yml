@@ -1385,12 +1385,30 @@ jobs:
       QEMU_CAMPAIGN: "10"
       QEMU_PRIOR_CAMPAIGN: "9: trigger 79765c11b70344c348e01d7c4221f95ac67b4ee3, run 43454894877 attempt 1, evidence artifact 14054833509, verdict PASS WITH RESIDUALS (all 14 scopes; 221 PASS / 12 INFO / 1 BLOCKED) on the FB1-R2 candidate OVA e60620c3 only"
       # Start deadline (owner direction of 14 November 2026): first candidate
-      # boot strictly before 2026-11-20T00:00:00Z. With the 345-minute job limit
-      # and the daily-window rule the job ends by 2026-11-20T05:45Z, inside the
-      # owner's work window (all execution before 2026-11-21T00:00:00Z).
+      # boot strictly before 2026-11-20T00:00:00Z. With the 345-minute job limit,
+      # the teardown allowance and the daily-window rule the job ends by
+      # 2026-11-20T05:50Z, inside the owner's work window (all execution before
+      # 2026-11-21T00:00:00Z, checked explicitly below).
       CAMPAIGN_START_DEADLINE: "2026-11-20T00:00:00Z"
+      EXECUTION_EXPIRY: "2026-11-21T00:00:00Z"
       # The job's own limit; the daily-window guard reasons over it.
       CAMPAIGN_MAX_MINUTES: "345"
+      # Teardown allowance (C10-S1): timeout-minutes only STARTS cancellation;
+      # always() steps (safe shutdown, verdict, evidence upload) then run and
+      # GitHub force-terminates a job still running 5 minutes later. 10 minutes
+      # (5 documented + 5 margin) is added to every span this guard proves.
+      CAMPAIGN_TEARDOWN_MINUTES: "10"
+      # C10-S1 changed supervision contract (ASTRA classification of 18 Nov:
+      # in-scope technical remediation). The job must START within
+      # START_BOUND_MINUTES of the push, enforced HERE (GitHub), not by an
+      # operator process. T_push = the earlier of the push event's
+      # repository.pushed_at and this run's created_at (both required, within
+      # PUSH_REF_SKEW_S of each other, neither after the guard's clock + 60 s).
+      # Bound: end <= T_push + 12 + 345 + 5 = T_push + 362 min; the operator's
+      # pre-push clock T is <= T_push and its push is bounded to 95 s, so the
+      # end also lies before T + 365 (the retrospective timing judge's test).
+      START_BOUND_MINUTES: "12"
+      PUSH_REF_SKEW_S: "300"
       # The R10 replacement candidate artifact (build-only run 44337877188,
       # identity 63/63, the ONE accepted build) and the OVA in it.
       OVA_ARTIFACT_ID: "14442199990"
@@ -1500,10 +1518,13 @@ jobs:
           GUARD_REF: ${{ github.ref }}
           GUARD_MESSAGE: ${{ github.event.head_commit.message }}
           GUARD_BEFORE: ${{ github.event.before }}
+          GUARD_PUSHED_AT: ${{ github.event.repository.pushed_at }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ] || { echo "::error::checkout is not $GITHUB_SHA"; exit 1; }
+          # This run as GitHub records it (bounded; an unreadable answer is refused below).
+          GUARD_RUN="$(timeout -k 5 30 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq '[.id, .head_sha, .event, .head_branch, .path, .workflow_id, .run_attempt, .created_at] | map(tostring) | join(" ")' </dev/null)" || GUARD_RUN="UNREAD"
           # A root or merge commit is refused by the check below with a reason.
           GUARD_PARENTS="$(git rev-list --parents -n 1 HEAD | cut -s -d' ' -f2-)"
           GUARD_HEAD_TREE="$(git rev-parse 'HEAD^{tree}')"
@@ -1517,7 +1538,7 @@ jobs:
             # an attempt that failed before its receipt may upload nothing).
             GUARD_PRIOR="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" --jq '"COUNT=\(.total_count)", .artifacts[].name' | tr '\n' ' ')" || GUARD_PRIOR="LISTING-FAILED"
           fi
-          export GUARD_PARENTS GUARD_HEAD_TREE GUARD_PARENT_TREE GUARD_NOW GUARD_PRIOR
+          export GUARD_PARENTS GUARD_HEAD_TREE GUARD_PARENT_TREE GUARD_NOW GUARD_PRIOR GUARD_RUN
           python3 -I - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import datetime as dt, os, re, sys
           e = os.environ
@@ -1546,17 +1567,58 @@ jobs:
               bad.append(f"start {e['GUARD_NOW']} is not before the owner's start deadline {e['CAMPAIGN_START_DEADLINE']}")
           if str(int(deadline.timestamp())) != e.get("LAB_START_DEADLINE_EPOCH", ""):
               bad.append(f"LAB_START_DEADLINE_EPOCH {e.get('LAB_START_DEADLINE_EPOCH')!r} is not the deadline {e['CAMPAIGN_START_DEADLINE']}")
+          # C10-S1: this run is exactly the push's run, and it starts within
+          # START_BOUND_MINUTES of the push (missing, malformed, foreign or
+          # future references are refused; the earlier reference is used).
+          iso = r"20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"
+          run = e.get("GUARD_RUN", "").split(" ")
+          refs = []
+          if len(run) != 8:
+              bad.append(f"this run's record is unreadable: {e.get('GUARD_RUN', '')[:120]!r}")
+          else:
+              rid, rsha, rev, rbr, rpath, rwf, ratt, rcr = run
+              want = {"id": (rid, e["GITHUB_RUN_ID"]), "head_sha": (rsha, e["GITHUB_SHA"]), "event": (rev, "push"),
+                      "head_branch": (rbr, "test/appliance-lab"), "path": (rpath, ".github/workflows/appliance-lab.yml"),
+                      "run_attempt": (ratt, e.get("GITHUB_RUN_ATTEMPT", "1"))}
+              for k, (got, exp) in want.items():
+                  if got != exp:
+                      bad.append(f"this run's {k} is {got!r}, not {exp!r}")
+              if re.fullmatch(iso, rcr):
+                  refs.append(("run created_at", z(rcr)))
+              else:
+                  bad.append(f"this run's created_at is malformed: {rcr!r}")
+          pa = e.get("GUARD_PUSHED_AT", "")
+          if re.fullmatch(r"[0-9]{10}", pa):
+              refs.append(("push pushed_at", dt.datetime.fromtimestamp(int(pa), dt.timezone.utc)))
+          elif re.fullmatch(iso, pa):
+              refs.append(("push pushed_at", z(pa)))
+          else:
+              bad.append(f"the push time (repository.pushed_at) is missing or malformed: {pa!r}")
+          for name, t in refs:
+              if t > now + dt.timedelta(seconds=60):
+                  bad.append(f"{name} {t:%Y-%m-%dT%H:%M:%SZ} is in the future of this guard's clock {e['GUARD_NOW']}")
+          if len(refs) == 2:
+              skew = abs((refs[0][1] - refs[1][1]).total_seconds())
+              if skew > int(e["PUSH_REF_SKEW_S"]):
+                  bad.append(f"push time and run creation differ by {skew:.0f} s (> {e['PUSH_REF_SKEW_S']} s)")
+              t_push = min(t for _, t in refs)
+              if now >= t_push + dt.timedelta(minutes=int(e["START_BOUND_MINUTES"])):
+                  bad.append(f"start {e['GUARD_NOW']} is not within {e['START_BOUND_MINUTES']} min of the push {t_push:%Y-%m-%dT%H:%M:%SZ}")
+          elif not bad:
+              bad.append("both push-time references are required")
           # The guest runs Ubuntu's apt-daily-upgrade.timer (06:00 UTC +
           # RandomizedDelaySec 60 min) with the security pocket allowed: a run
           # inside that window could change the package set mid-campaign. The
-          # whole job span (start + CAMPAIGN_MAX_MINUTES) must avoid
+          # whole job span (start + CAMPAIGN_MAX_MINUTES + CAMPAIGN_TEARDOWN_MINUTES) must avoid
           # [05:50, 07:10] UTC on every day it touches.
-          end = now + dt.timedelta(minutes=int(e["CAMPAIGN_MAX_MINUTES"]))
+          end = now + dt.timedelta(minutes=int(e["CAMPAIGN_MAX_MINUTES"]) + int(e["CAMPAIGN_TEARDOWN_MINUTES"]))
+          if end >= z(e["EXECUTION_EXPIRY"]):
+              bad.append(f"the job span (with teardown) ends {end:%Y-%m-%dT%H:%MZ}, not strictly before {e['EXECUTION_EXPIRY']}")
           day = now.replace(hour=0, minute=0, second=0)
           while day <= end:
               w0, w1 = day.replace(hour=5, minute=50), day.replace(hour=7, minute=10)
               if now < w1 and end > w0:
-                  bad.append(f"the job span {now:%H:%M}-{end:%H:%M} UTC meets the guest's daily upgrade window {w0:%Y-%m-%d %H:%M}-{w1:%H:%M}; start between 07:10 and 00:05 UTC")
+                  bad.append(f"the job span {now:%H:%M}-{end:%H:%M} UTC meets the guest's daily upgrade window {w0:%Y-%m-%d %H:%M}-{w1:%H:%M}; start between 07:10 and 23:55 UTC")
               day += dt.timedelta(days=1)
           attempt = e.get("GITHUB_RUN_ATTEMPT", "1")
           if attempt != "1":
@@ -1573,7 +1635,7 @@ jobs:
               print(f"::error::QEMU campaign route refused: {p}")
           if bad:
               sys.exit(1)
-          print(f"QEMU campaign route: {e['GITHUB_SHA']} = one empty commit on {parents[0]} (tree {ht}), message exactly the reviewed trigger; start {e['GUARD_NOW']} < {e['CAMPAIGN_START_DEADLINE']}; span to {end:%Y-%m-%dT%H:%MZ} clear of the daily upgrade window; attempt {attempt}")
+          print(f"QEMU campaign route: {e['GITHUB_SHA']} = one empty commit on {parents[0]} (tree {ht}), message exactly the reviewed trigger; start {e['GUARD_NOW']} < {e['CAMPAIGN_START_DEADLINE']} and < push + {e['START_BOUND_MINUTES']} min; span (incl. {e['CAMPAIGN_TEARDOWN_MINUTES']} min teardown) to {end:%Y-%m-%dT%H:%MZ} clear of the daily upgrade window; attempt {attempt}")
           PY
       - name: Harness self-test (a known-unavailable agent response must FAIL the agent oracle)
         run: test/e2e/appliance/lab/appliance-lab.sh selftest
