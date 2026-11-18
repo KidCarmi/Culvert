@@ -28,6 +28,80 @@ below and checked against `origin/main` rather than the working tree per the
 This sweep took 123 and will not move.
 
 
+The 2026-11-18 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-18.md) —
+CHAOS-123 (THE DENY CONTROL NOBODY COULD WATCH). CHAOS-108 fixed the
+operator-configured remote blocklist feed's CADENCE and recorded the rest in
+`internal/blocklistfeed`'s own package doc as the open half — "this feed still
+has no staleness alert or health row… Adding an alert type is an owner decision
+with GUI/API parity consequences, not a drive-by rider on a scheduling fix."
+This round is that decision, and the audit found the note's description of the
+gap one shape short. (a) There were **no `culvert_blocklist_feed_*` series at
+all** at the base revision: not a stale gauge, not a last-success timestamp, not
+a failure counter — the family did not exist, so an operator running Prometheus
+and Alertmanager, which is how an enterprise SWG is actually watched, had
+nothing to scrape and nothing to page on. The gauge that looks like it would
+help is the one that hides the problem: feed imports are MERGE-ONLY
+(`blocklist.MergeFromLines` adds, never deletes, then `Save()`s), so
+`culvert_blocklist_size` holds its last-good value and a feed dead for three
+weeks reports the same number as one that synced ten minutes ago — a restart
+reloads the same entries from disk, so not even a reboot moves it. **This is the
+identical mechanism WK-5/CHAOS-59 closed for the threat feed**, where
+`threatfeed_health.go` records that the carry-forward fix was correct and "also
+removed the only signal an operator had"; the blocklist feed never had the loud
+phase, because merge-only was its design from the start, so it has always been
+in the state the threat feed only reached AFTER its fix and nobody noticed the
+same remedy was owed. What degrades is specific and is not a cache: the
+destinations added to the origin since the last clean round are exactly the ones
+the operator configured the feed to block. (b) The ONE surface that existed, the
+`blocklist_feed` diagnostics row, was gated on `LastError != ""` and is
+therefore blind to the two states in which **nothing is attempted at all**. A
+feed with auto-sync `off` (`ui_policy.go` maps it to interval 0; `dueURLs` skips
+`interval <= 0`) is NEVER attempted, so it records no error and the report said
+the node was healthy while a configured deny control contributed nothing — not
+for an interval, FOREVER, until somebody clicked Sync Now. And
+`applyBlocklistFeeds` restores settings as `ClearFeeds()` + `SetFeed()`, which
+builds fresh feed states, so a persistently failing feed's `LastError` is wiped
+and the WARN row DISAPPEARS until the next round; the window is correctly
+bounded to one 60 s tick, but during it the only failure signal the product had
+reported green. (c) Nothing paged: there was no alert type, and a report-only
+row does not reach anybody who is not already looking. Against
+`internal/threatfeed` — alert, deferred startup variant, five series, row — this
+feed had one of the four surfaces and the weakest one. **What was already right
+is left alone:** CHAOS-108's ladder, jitter and cancellable fetch, its status
+gate, CHAOS-109's byte/line budgets, the inline per-sync SSRF guard and
+round-level panic containment all hold and this round depends on them — the gap
+was that none of it was observable. Shipped: ten unlabelled series emitted only
+when a feed is configured, the row extended to the stale/never-synced/auto-sync-off
+shapes with the failing-attempt row unchanged verbatim, and a
+`blocklist_feed_stale` alert fired once per episode and cleared only on OBSERVED
+evidence from every auto-sync feed (a node with one healthy and one dead feed
+would otherwise page in a loop). **Refused, each with its reason in the file
+comment:** no `/readyz` row (a stale feed is a fully serving gateway; ejecting
+it trades a degraded control for lost capacity), no fail-closed toggle (it would
+convert the origin's outage into the customer's), no per-feed label (a feed URL
+routinely embeds a token and `/metrics` is commonly scraped unauthenticated when
+`metricsToken` is unset, and cardinality would become a function of how many
+feeds an admin adds), and **no durable last-success timestamp** — which is the
+one that is a real loss: `lastSync` is in-memory only, so long-horizon staleness
+across restarts is not recoverable from this node's state. It was refused
+because the only durable store the feed set lives in is `AdminSettings`, which
+configuration versioning CAPTURES, so a timestamp advancing on every successful
+sync would turn each round into an apparent configuration change — a
+config-surface owner's decision, the same shape as the credential and
+CDR-hygiene paths that must explicitly NOT create versions. Also open: a bounded
+reason class on `SyncOutcome` so the alert can say WHY (it needs sentinel errors
+threaded through `fetchFeedLines`, whose messages embed the URL). The round also
+notes that this is the SECOND time this family has found the same class in a
+feed loop `internal/feedsched`'s doc does not enumerate — the doc counts three
+loops and the tree has more — and recommends a gate over every periodic remote
+fetch rather than retiring the class one feed at a time. Id claimed in a
+committed placeholder row as commit one, before any code, checked against
+`origin/main` rather than the working tree per the 2026-09-25 amendment:
+`CHAOS-122` was the highest id anywhere on `origin/main` at `348a2cf`, and none
+of the open PRs (#1944, #1943, #1942, #1941, #1705, #1549, #1548, #1536, #1528,
+#1526) is a chaos sweep or claims a chaos id.
+
 The 2026-11-17 round is recorded in
 [the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-17.md) —
 CHAOS-122 (THE ARGV CONTRACT). CHAOS-121 found that `docker-compose.ha.yml`
