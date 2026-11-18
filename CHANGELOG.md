@@ -112,6 +112,75 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **`culvert` accepted command lines it could not parse and booted anyway, with
+  every flag after the first unparsed token at its default (CHAOS-122).** Go's
+  `flag` package stops at the first argument that does not begin with `-` and
+  leaves it, and everything after it, in `flag.Args()`. `main` called
+  `flag.Parse()` with no `flag.NArg()` guard, and `handleOneShotCommands`
+  dispatches on flags only, so an argv with an unparsed tail was not an error:
+  the process fell through into normal startup. CHAOS-121 found this through one
+  instance — `docker-compose.ha.yml`'s shell `command:` appended to the image's
+  exec-form `ENTRYPOINT ["./culvert"]` — fixed that artifact, and recorded the
+  generic guard as needing its own audit of every invocation shape. This is that
+  guard, and it holds for orchestrators the repository does not ship (a systemd
+  unit, a Kubernetes manifest, a hand-written `docker run`, or an operator
+  pasting a documented command line into a `command:` key) which no static gate
+  over the compose files can reach. **The partial case is the sharper one,
+  because the surface still looks configured:** measured on the real binary,
+  `-port 18080 -ui-port 19090 STRAY -policy <f> -audit-log <f> -ca-path <f>`
+  brought the proxy and admin UI up on the expected ports with `/health`
+  reporting `{"status":"ok", …, "ssl_inspection":"ready"}`, created none of the
+  three files, and logged `Policy: default action: allow` where the same argv
+  without `STRAY` logged `deny` — so discarding `-policy` does not merely lose
+  rules, it **inverts the posture**, per the documented configured-vs-empty rule.
+  The stray token was never named in any log line, on stdout or on stderr. The
+  per-subsystem degradation *is* logged (`Policy: in-memory only`, `SSLCA: Root
+  CA ready in-memory`), which is why this was a legibility failure rather than a
+  dark one: those lines are identical to the ones a deliberately minimal
+  deployment emits, so they cannot distinguish "the operator did not set
+  `-policy`" from "the orchestrator discarded the operator's `-policy`". `main`
+  now refuses such an argv with exit 2 (the flag package's own usage-error code)
+  and a message naming the rejected tail, the discarded-flag consequence and the
+  exec-form-ENTRYPOINT cause. The check runs **before** the one-shot dispatch and
+  therefore before `checkInterruptedRestore`, `checkDataDirSingleWriter` and
+  anything that writes to the persisted-state root, so a rejected argv changes
+  nothing on disk; the ordering is pinned by a gate, because the refusal and its
+  no-effect guarantee are separable. The audit behind it found exactly two
+  positional consumers in the shipped surface: `culvert bootstrap-resolve …`,
+  dispatched before the global flag set is defined and therefore never reaching
+  this check, and `--prepare-downgrade … --confirm <word>`, which is the single
+  exception — `--confirm` is an `IsBoolFlag`, so the Tier-3 word lands in
+  `flag.Args()`, and `prepareDowngradeConfirmWord` already validates that tail
+  itself, so the guard defers to it rather than adding a second, weaker owner.
+  Everything else in the tree passes flags only: the Dockerfile `CMD`, every
+  compose `command:` (the `cli` service's `["-h"]` included), the maintenance
+  agent's compose-run templates, `scripts/install.sh` and the operator runbooks.
+  **Deliberate behaviour change:** `--restore <archive> --confirm <word>`
+  previously committed the restore and silently ignored `<word>`; it is now
+  refused. The documented bare `--confirm` commit form is unaffected, as is the
+  maintenance agent, which appends a bare `--confirm`.
+- **The same defect in `bootstrap-resolve`'s own FlagSet discarded the
+  anti-rollback floor (CHAOS-122b).** The subcommand parses into its own
+  `flag.FlagSet` and had no `NArg()` check either. The flag that matters most
+  there is `--data-dir`, which carries the rollback floor `scripts/install.sh`
+  stages from a surviving `proxy-data` volume (`stage_rollback_floor`) so a
+  reinstall cannot be silently downgraded below the version the host last
+  accepted — exactly the mirror-replay downgrade the flag exists to close. A
+  stray token ahead of it would have resolved with floor 0 and still printed a
+  well-formed `image_ref`, so the installer's strict output-shape gate would not
+  have caught it. The subcommand takes no positional operands and now refuses
+  any tail with exit 2 and an empty stdout. The installer's own argv is
+  correctly quoted and conditional, so it was not itself exposed; the hand-run
+  form in the runbook was.
+- **The privileged maintenance agent had it too (CHAOS-122c).**
+  `cmd/culvert-maint` would have silently dropped `--config`, which selects the
+  config file and through it the journal, the compose path and the command
+  allowlist the agent runs under, and run against the built-in default path
+  instead. The shipped systemd unit passes a `--config` equal to that default,
+  so it was unaffected either way; a deployment whose config lives elsewhere was
+  not. The agent takes no positional operands and now refuses any tail before
+  the config is read or the socket is bound.
+
 - **The maintenance agent no longer starts on a `compose_file` its own
   installer refuses.** `packaging/culvert-maint/install.sh` rejects
   `compose_file = "."`/`".."` and any value with whitespace, quotes, `|` or

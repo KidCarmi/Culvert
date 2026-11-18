@@ -197,6 +197,16 @@ EXPOSE 8080 9090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD ["/bin/sh", "-c", "wget -qO- http://localhost:8080/health || exit 1"]
 
+# Exec-form entrypoint: Docker APPENDS a container's `command:` to it, it does
+# NOT replace it. So a service that writes `command: sh -c '...'` produces the
+# argv `./culvert sh -c '...'`, and Go's flag package stops at the first token
+# that does not begin with "-". Every flag after it used to be discarded
+# silently, leaving a gateway with no persisted Root CA, no policy and no audit
+# log that still reported healthy (CHAOS-121a). The binary now REFUSES such an
+# argv with exit 2 (CHAOS-122), so this misconfiguration is a crash loop with a
+# diagnostic rather than a silently unpoliced proxy. A service that genuinely
+# needs a shell must put it in `entrypoint:` and `exec ./culvert` from there, so
+# culvert is still PID 1 and still receives SIGTERM — see docker-compose.ha.yml.
 ENTRYPOINT ["./culvert"]
 # All persistent state lives in /data (mount as a Docker volume):
 #   -ca-path        → Root CA bundle (ssl inspection)
