@@ -144,6 +144,29 @@ func TestChaos122_RefusalSanitizesTheArgvItEchoes(t *testing.T) {
 	}
 }
 
+// TestChaos122_RefusalRedactsTheDiscardedValues — the discarded tail can carry
+// credential flags, and the refusal goes to stderr, which every orchestrator
+// collects. The flag NAMES stay (they say what was dropped); no value may.
+func TestChaos122_RefusalRedactsTheDiscardedValues(t *testing.T) {
+	err := refusePositionalArgs(false, []string{
+		"STRAY", "-pass", "review-secret", "-metrics-token=review-token", "--ha-token", "ha-secret",
+	})
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	msg := err.Error()
+	for _, secret := range []string{"review-secret", "review-token", "ha-secret"} {
+		if strings.Contains(msg, secret) {
+			t.Errorf("the refusal echoed the credential value %q to stderr:\n%s", secret, msg)
+		}
+	}
+	for _, want := range []string{`"STRAY"`, "-pass <value>", "-metrics-token=<value>", "--ha-token <value>"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal must still name %q so the operator sees what was discarded; got:\n%s", want, msg)
+		}
+	}
+}
+
 // ─── The ordering invariant: refuse BEFORE anything touches the data dir ──────
 
 // TestChaos122_GuardRunsBeforeTheOneShotDispatch pins the position of the call

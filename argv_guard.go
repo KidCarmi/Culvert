@@ -103,16 +103,38 @@ type errPositionalArgs struct {
 func (e *errPositionalArgs) Error() string {
 	// argv is operator-supplied and reaches stderr, so it goes through the
 	// CWE-117 barrier and is printed with %q (docs/agent-context/conventions.md).
+	// Only the first token and the NAMES of the discarded flags are echoed: the
+	// tail can carry credential flags (-pass, -metrics-token, …) and stderr is
+	// collected by every orchestrator, so their values must not be printed.
 	first := sanitizeLog(e.args[0])
-	all := sanitizeLog(strings.Join(e.args, " "))
-	return fmt.Sprintf("refusing to start: %d unparsed command-line argument(s) beginning with %q (full tail: %q). "+
+	rest := sanitizeLog(redactArgValues(e.args[1:]))
+	return fmt.Sprintf("refusing to start: %d unparsed command-line argument(s) beginning with %q (discarded after it, values redacted: %q). "+
 		"Go's flag package stops at the first argument that does not begin with \"-\", so EVERY flag after it was "+
 		"discarded — which would have started this process with those settings at their defaults (no persisted Root "+
 		"CA, no policy file, no audit log) while still reporting healthy. Nothing was started and nothing on disk was "+
 		"changed. The usual cause is a container command handed to the image's exec-form ENTRYPOINT [\"./culvert\"], "+
 		"which Docker APPENDS rather than replaces: a service that needs a shell must put it in `entrypoint:` and "+
 		"`exec ./culvert` from there, so culvert is still PID 1 and still receives SIGTERM. CHAOS-122",
-		len(e.args), first, all)
+		len(e.args), first, rest)
+}
+
+// redactArgValues keeps each flag NAME in an argv tail and replaces every value
+// — a token that is not a flag, or the part of `-flag=value` after "=" — with
+// <value>. The names alone say which settings were discarded; a value may be a
+// password or token.
+func redactArgValues(args []string) string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if len(a) < 2 || a[0] != '-' {
+			out = append(out, "<value>")
+			continue
+		}
+		if name, _, ok := strings.Cut(a, "="); ok {
+			a = name + "=<value>"
+		}
+		out = append(out, a)
+	}
+	return strings.Join(out, " ")
 }
 
 // refusePositionalArgs reports an argv that flag.Parse could not fully consume.
