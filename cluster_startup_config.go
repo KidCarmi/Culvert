@@ -1,5 +1,7 @@
 package main
 
+import "strings"
+
 // cluster_startup_config.go — resolved config for the cluster slice (Control
 // Plane / Data Plane gRPC + the HA boot flow). Pure DTO + a single
 // side-effect-free resolver invoked from the initCluster shim. CLI flag
@@ -98,4 +100,28 @@ func resolveClusterStartupConfig(fc *FileConfig, flags clusterCLIFlags) clusterS
 		DPKey:           flags.DPKey,
 		DPCA:            flags.DPCA,
 	}
+}
+
+// resolveHATokenInput picks the HA standby join token from the -ha-token flag
+// and the CULVERT_HA_TOKEN environment variable. Side-effect-free, like the
+// rest of this file: the shim reads the environment and passes the value in.
+//
+// The flag wins when both are set, so an existing deployment that passes
+// -ha-token keeps working unchanged. The env var exists because the flag is
+// argv: the token wraps the cluster CA private key in the HA state bundle, and
+// /proc/<pid>/cmdline is readable by any account in the PID namespace while
+// /proc/<pid>/environ is not (CWE-214). The shipped HA compose uses the env
+// var; see haTokenEnv in main.go.
+//
+// Whitespace is trimmed from the env value only. A token arriving through the
+// environment has usually been copied out of the leader's deploy command or a
+// .env line, where a trailing newline or space is easy to acquire and the
+// failure it causes — a standby that cannot authenticate — reads as a wrong
+// token rather than a stray byte. The flag value is left exactly as given, so
+// no existing invocation's behaviour changes.
+func resolveHATokenInput(flagToken, envToken string) string {
+	if flagToken != "" {
+		return flagToken
+	}
+	return strings.TrimSpace(envToken)
 }

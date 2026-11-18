@@ -165,8 +165,52 @@ func TestDockerComposeHA_JoinWithTokenYieldsValidArgv(t *testing.T) {
 	if !argvContains(argv, "--ha-join") || !argvContains(argv, "server-a.internal:50051") {
 		t.Fatalf("expected --ha-join server-a.internal:50051 in argv, got: %v", argv)
 	}
-	if !argvContains(argv, "--ha-token=a3f8c1d2") {
-		t.Fatalf("expected --ha-token=a3f8c1d2 in argv, got: %v", argv)
+	// SEC-HA-TOKEN-ARGV-1. This assertion is the INVERSE of what it was: it
+	// used to require --ha-token=<value> in argv. CHAOS-121 made this script
+	// actually execute, which expanded the token into culvert's argv for the
+	// first time — and /proc/<pid>/cmdline is readable by any account in the
+	// PID namespace, while /proc/<pid>/environ is restricted to the process
+	// owner. The token is the key-wrapping passphrase for the CLUSTER CA
+	// private key in the HA state bundle (controlplane_server.go,
+	// CAKeyEncrypted), so an unprivileged local reader could join as a standby
+	// and unwrap it. It now travels in CULVERT_HA_TOKEN instead.
+	//
+	// The -ha-token FLAG still exists and still wins when set (operators
+	// invoking culvert directly are unaffected); what is pinned here is that
+	// the shipped compose does not use it.
+	for _, a := range argv {
+		if strings.Contains(a, "a3f8c1d2") {
+			t.Errorf("the HA join token appears in argv as %q: it must reach culvert through "+
+				"CULVERT_HA_TOKEN, never the command line (CWE-214). Full argv: %v", a, argv)
+		}
+		if strings.HasPrefix(a, "--ha-token") || strings.HasPrefix(a, "-ha-token") {
+			t.Errorf("the compose still passes %q: the token must come from the environment", a)
+		}
+	}
+}
+
+// TestDockerComposeHA_TokenReachesCulvertThroughTheEnvironment is the other
+// half of SEC-HA-TOKEN-ARGV-1: removing the flag is only safe if the value
+// still arrives. The `proxy` service — the only one that joins; `dp` enrolls
+// through ENROLL_URL instead — must export CULVERT_HA_TOKEN, the name
+// haTokenEnv declares, from the same ${HA_TOKEN} the operator sets. Without it
+// a standby silently stops joining and comes up as an independent Control
+// Plane: the split-brain the fail-fast guard above exists to prevent, which
+// that guard would NOT catch, because it only checks that HA_TOKEN is set in
+// the environment, not that culvert is given it.
+func TestDockerComposeHA_TokenReachesCulvertThroughTheEnvironment(t *testing.T) {
+	raw, err := os.ReadFile("docker-compose.ha.yml")
+	if err != nil {
+		t.Fatalf("read compose: %v", err)
+	}
+	body := string(raw)
+	if haTokenEnv != "CULVERT_HA_TOKEN" { // #nosec G101 -- env-var name, not a credential (same suppression as its declaration in main.go)
+		t.Fatalf("haTokenEnv = %q: this test and the compose name the variable literally", haTokenEnv)
+	}
+	want := haTokenEnv + "=${HA_TOKEN:-}"
+	if n := strings.Count(body, want); n != 1 {
+		t.Errorf("docker-compose.ha.yml exports %q %d time(s), want 1 (the proxy service): culvert reads "+
+			"the token from %s, so without that export a standby cannot authenticate its join", want, n, haTokenEnv)
 	}
 }
 

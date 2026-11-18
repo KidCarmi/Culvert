@@ -1785,8 +1785,18 @@ func haDeployCommand() string {
 	autoFailover := globalHA.autoFailover
 	globalHA.mu.RUnlock()
 
-	cmd := fmt.Sprintf("./culvert --cp-grpc-addr %s --ha-join %s --ha-token %s",
-		grpcAddr, leaderAddr, token)
+	// SEC-HA-TOKEN-ARGV-1: the token is handed over in CULVERT_HA_TOKEN, as a
+	// variable assignment prefixing the command, NOT as --ha-token. This string
+	// is meant to be copied into a shell on the standby, and a flag value ends
+	// up in that process's argv, where any account in the PID namespace can
+	// read it from /proc/<pid>/cmdline for as long as the node runs;
+	// /proc/<pid>/environ is restricted to the process owner. The token is the
+	// key-wrapping passphrase for the cluster CA private key in the HA state
+	// bundle (CAKeyEncrypted), so that read is enough to join as a standby and
+	// unwrap the key. The variable-assignment form puts it in the child's
+	// environment only — the shell does not pass it as an argument.
+	cmd := fmt.Sprintf("CULVERT_HA_TOKEN=%s ./culvert --cp-grpc-addr %s --ha-join %s",
+		token, grpcAddr, leaderAddr)
 
 	// Include enterprise TLS paths so standby uses the same cert setup.
 	if certFile != "" {
