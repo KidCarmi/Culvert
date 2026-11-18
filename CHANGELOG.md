@@ -9,6 +9,71 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A non-TLS client can no longer opt out of HTTP/2 TLS inspection
+  (`SEC-INSPECT-PLAINTEXT-1`, native-ALPN leg).** The strip-ALPN inspect path
+  began refusing a client whose first byte is not a TLS handshake record; the
+  native-ALPN leg — the one an `InspectHTTP2` decryption profile or an explicit
+  `stripAlpn: false` rule selects — kept its raw-relay fallback, and its comment
+  still called itself a mirror of the strip path's. A client that issued
+  `CONNECT`, waited for the `200` and sent any first byte other than `0x16`
+  therefore received a raw TCP tunnel instead of an inspected session: no
+  inner-host pin, no file block, no file-profile block, no DPI, no malware scan
+  and no per-request log row, on a destination an operator had explicitly marked
+  for inspection — and recorded as a benign `non_tls_fallback` rather than as a
+  refusal. It was the MORE reachable of the two legs: the strip path handshakes
+  the origin before it peeks, so its fallback needed a TLS-speaking origin and a
+  non-TLS client, whereas the native leg must wait for the client's ALPN offer,
+  so the upstream handshake is still ahead of the peek and the client alone
+  decided — against any origin, TLS or not (proven against a plain-TCP origin,
+  which the strip path would have `502`'d). The native leg now refuses and closes
+  both legs, recording the refusal through the ADR-0011 taxonomy, and the two
+  refusals are ONE function (`refuseNonTLSInspectClient`), because the drift
+  between them was the vulnerability. `maybeFailOpenClient` is deliberately not
+  consulted: learning an auto-exclusion here would bypass inspection for the host
+  on the next connection. CWE-693, with CWE-350 for the unpinned inner host.
+  **Behaviour change:** a genuine non-TLS protocol over `CONNECT` (SSH, RDP) to a
+  host matched by an `InspectHTTP2` rule is now refused rather than tunneled —
+  unlike the strip path, that case was reachable here. Give such a destination an
+  explicit Bypass rule, which is auditable; a silent per-connection opt-out
+  chosen by the client is not.
+- **The HA join token no longer travels in culvert's command line
+  (`SEC-HA-TOKEN-ARGV-1`).** CHAOS-121 fixed an HA compose whose startup script
+  was never executed — the image's `ENTRYPOINT ["./culvert"]` received the script
+  text as argv, so `$HA_TOKEN` was never expanded. Making the script run expanded
+  it into culvert's argv for the first time, and `-ha-token` was the binary's
+  only channel. `/proc/<pid>/cmdline` is readable by any account in the PID
+  namespace while `/proc/<pid>/environ` is restricted to the process owner, and
+  this token is not merely a join bearer: it is the AES-256-GCM key-wrapping
+  passphrase for the CLUSTER CA private key in the HA state bundle
+  (`CAKeyEncrypted`, its only transport), so an unprivileged local reader could
+  join as a standby, pull the bundle and mint node certificates. Root or
+  docker-socket access was always sufficient via `docker inspect`, so the new
+  exposure was specifically to unprivileged local readers. `CULVERT_HA_TOKEN`
+  is now the env channel — mirroring `CULVERT_CA_PASSPHRASE` and
+  `CULVERT_LOG_PASSPHRASE`, whose own comments state this preference — and the
+  shipped compose uses it. `-ha-token` is kept and still wins when both are set,
+  so an operator invoking culvert directly is unaffected. The env value is
+  whitespace-trimmed (a token copied out of a deploy command easily acquires a
+  trailing newline) while the flag value is passed through verbatim; a
+  whitespace-only env value resolves to empty so the compose's split-brain guard
+  still fires. CWE-214 → CWE-522. The DP service's `--enroll` URL shares this
+  channel and is recorded as residual risk.
+- **A config-backup import now validates alert webhooks
+  (`SEC-ALERTS-EVENTNAME-1`, second ingress).** `POST`/`PUT
+  /api/alerts/webhooks` share one definition of an acceptable payload, credited
+  with keeping an unvalidated value from reaching the webhook file or a support
+  bundle at all. `POST /api/config/import` reconstructed every webhook straight
+  through `Store.Add` and ran neither the URL nor the event-name check, so a
+  backup carrying `events: ["<img src=x onerror=…>"]` and `url: "javascript:…"`
+  installed with a `200`. The downstream sinks hold — the Alerts panel escapes,
+  and a bad URL is refused at egress by the scheme barrier plus
+  `ssrf.SafeDialContext` — and the route is `RoleAdmin`, so this was defence in
+  depth rather than a live XSS or SSRF; but the character class and the 64-byte
+  bound exist so the value never reaches the file, and a control enforced at one
+  of two ingresses is the shape of defect that produced the original finding.
+  The incoming section is now validated in the import's pre-validation block
+  beside the URL-category and PAC gates, so a bad backup is refused WHOLE rather
+  than partially applied. CWE-20.
 - **`SEC-INSTALL-ENVLINK-1` is now honoured at every privileged site on the
   `.env` path, not only the last one.** The contract landed as a guard inside
   `env_put`: `sudo` must never act THROUGH a symlink at `$INSTALL_DIR/.env`,
@@ -99,6 +164,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **An unauthenticated request stream can no longer stall the admin plane
+  through the audit-log recovery.** The deferred open charged each evicted
+  backlog entry one at a time inside the critical section holding the
+  process-wide audit mutex, and the drop count is bounded only by how many audit
+  entries arrive while the configured log is unwritable — `auth.lockout` is
+  audited on every blocked login at `/api/auth/login`, before anyone is
+  authenticated. When the operator fixed the mount, the recovery spun that many
+  iterations under the lock, each allocating an error and taking the observer's
+  own mutex, stalling every `auditEvent` and every audit read behind it.
+  `countWriteErrorsN` now charges the batch once: `WriteErrors` still moves by
+  exactly the number of entries lost — it is the operator's count of what is
+  missing from the durable trail — while the degraded observer, a latch plus an
+  off-goroutine alert, is called once. CWE-400/CWE-770.
 - **The HA compose file never handed the binary its flags, so every Control
   Plane, standby and Data Plane node booted with all defaults while reporting
   healthy (CHAOS-121).** The image declares exec-form

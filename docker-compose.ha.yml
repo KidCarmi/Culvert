@@ -83,7 +83,10 @@ services:
       # ── HA Standby (set these on Server B only) ────────────────
       # Get these values from the GUI "Enable HA" deploy command.
       - HA_JOIN=${HA_JOIN:-}         # e.g. server-a.internal:50051
-      - HA_TOKEN=${HA_TOKEN:-}       # e.g. a3f8c1d2...
+      - HA_TOKEN=${HA_TOKEN:-}       # e.g. a3f8c1d2... (startup script's guard reads this)
+      # The same value, under the name culvert itself reads (haTokenEnv). It is
+      # passed by ENVIRONMENT and never as a flag: see the standby arm below.
+      - CULVERT_HA_TOKEN=${HA_TOKEN:-}
       # ── Enterprise TLS (optional) ─────────────────────────────
       - CP_CERT=${CP_CERT:-}         # e.g. /certs/grpc-cert.pem
       - CP_KEY=${CP_KEY:-}           # e.g. /certs/grpc-key.pem
@@ -161,15 +164,21 @@ services:
             echo "ERROR: HA_JOIN is set but HA_TOKEN is empty — refusing to start (would silently come up as an independent Control Plane instead of joining as a standby). Set HA_TOKEN from Server A's 'Enable HA' deploy command." >&2
             exit 1
           fi
-          # --ha-token uses the =value form (not a separate word): unquoted
-          # word-splitting on `exec $$ARGS` would otherwise drop an empty
-          # $$HA_TOKEN expansion entirely, leaving a dangling `--ha-token`
-          # with no value as the last argv token and making `./culvert`
-          # exit on "flag needs an argument: -ha-token" — the guard above
-          # now catches that case first, but the =value form is kept as
-          # defense in depth for any other way this string could end up
-          # empty here.
-          ARGS="$$ARGS -cp-grpc-addr :50051 --ha-join $$HA_JOIN --ha-token=$$HA_TOKEN"
+          # The token is NOT put on the command line. It reaches culvert
+          # through CULVERT_HA_TOKEN (haTokenEnv in main.go), which this
+          # service exports below, for the reason the CA and log passphrases
+          # do the same: argv is world-readable inside the PID namespace via
+          # /proc/<pid>/cmdline, while /proc/<pid>/environ is restricted to
+          # the process owner, and this token is the key-wrapping passphrase
+          # for the CLUSTER CA private key in the HA state bundle
+          # (controlplane_server.go, CAKeyEncrypted) — a reader can join as a
+          # standby and unwrap that key. CHAOS-121 made this script actually
+          # run, which is what first expanded the value into argv; moving it
+          # to the environment is what keeps the fix from costing the secret.
+          #
+          # -ha-token still exists and still wins when set, so an operator
+          # invoking culvert directly is unaffected.
+          ARGS="$$ARGS -cp-grpc-addr :50051 --ha-join $$HA_JOIN"
         fi
 
         exec ./culvert $$ARGS

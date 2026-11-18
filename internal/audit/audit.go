@@ -147,10 +147,33 @@ func WriteErrors() int64 { return atomic.LoadInt64(&writeErrors) }
 // notifies the observer. Never panics on a panicking observer: audit loss must
 // not take down the admin plane it is recording.
 //
-// Unlike internal/reqlog's batched equivalent, this always charges exactly one:
-// audit persistence is per-entry and unbuffered, so there is no batch to lose.
-func countWriteError(path string, err error) {
-	atomic.AddInt64(&writeErrors, 1)
+// The live write path is per-entry and unbuffered, so it always charges one.
+// The deferred open's evicted backlog is the one batch that CAN be lost, and it
+// uses countWriteErrorsN below rather than calling this in a loop.
+func countWriteError(path string, err error) { countWriteErrorsN(path, 1, err) }
+
+// countWriteErrorsN charges n lost entries with ONE observer call.
+//
+// The counter stays exact — WriteErrors is the operator's count of entries
+// missing from the durable trail, surfaced on /api/stats, /healthz and
+// /metrics. The observer is not a counter: it latches "this node's durable
+// writes are failing" and hands an alert to a goroutine, so one call carries
+// the same signal as n.
+//
+// Charging in a loop instead is a denial-of-service lever, which is why this
+// exists. n is the number of audit entries that arrived while the configured
+// log was unopenable (TryDeferredOpen), the caller holds the process-wide audit
+// mu across the charge, and n is bounded only by the attacker's request budget:
+// auth.lockout is audited on every blocked login at the UNAUTHENTICATED
+// /api/auth/login, so a request stream inflates n without bound and the whole
+// cost — an allocation and the observer's own mutex per entry — lands under mu
+// the moment the operator fixes the mount, stalling every auditEvent and every
+// audit read behind it (CWE-400/CWE-770).
+func countWriteErrorsN(path string, n int, err error) {
+	if n <= 0 {
+		return
+	}
+	atomic.AddInt64(&writeErrors, int64(n))
 	if writeErrLogged.CompareAndSwap(false, true) {
 		// CWE-117: the error text embeds the operator-configured path and, for
 		// a wrapped syscall error, arbitrary OS-supplied bytes. Sanitise it
