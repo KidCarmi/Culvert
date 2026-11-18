@@ -222,6 +222,30 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **A scan-result cache insert at capacity stalled every concurrent verdict
+  lookup for O(`cache_size`) (PERF-SCANCACHE-1).** `internal/hashcache` is the
+  SHA-256 ClamAV/YARA verdict cache consulted before every body scan. When full,
+  the inserting `Set` swept the WHOLE map for expired entries and then dropped
+  an arbitrary 25 %, synchronously, under the exclusive lock every `Get` also
+  needs. `cache_size` is an operator knob that is floored but never capped, so
+  the stall grew with configuration: measured on an idle 4-vCPU host, the worst
+  single insert held the lock ~10–16 ms at 100 000 entries, ~110 ms at
+  1 000 000, and ~205 ms at 1 000 000 when the cache had sat idle past its TTL
+  (the sweep is slowest when it has the most to delete). Entries are now also
+  held in a min-heap ordered by expiry: an insert at capacity reaps at most 64
+  expired entries from the root, or, if none has expired, drops the single
+  entry closest to expiry. Each insert is O(log n) under the lock independent of
+  `cache_size` (worst single insert, same workload: 0.5–2.4 ms at 100 000,
+  1.3–6 ms at 1 000 000, residual being GC/scheduler noise both designs show).
+  Verdicts, TTLs, the "a live entry is never dropped while an expired one
+  remains" rule, the tighten-only `SetTTLUnless` and the `SetIfGeneration`
+  epoch are unchanged; the cache now stays full instead of falling to 75 %, and
+  an overwrite no longer evicts. Cost: ~32 B more per entry and ~15–25 % on the
+  amortized at-capacity `Set` (~+200 ns beside a scan measured in ms);
+  `Get` is unchanged. Gates: `TestEvict_*`, `TestHeap_RandomOpsKeepInvariants`,
+  `TestConcurrent_GetDuringOverwriteAndEviction` (`-race`), and
+  `BenchmarkSetIntoFull_*` for the lock hold.
+
 - **Every response Culvert decrypted took a process-wide reader lock to ask an
   empty map a question (PERF-SCANEXCL-1).** `scanexcl.Store.IsHostExcluded` is
   called from `scanInspectBody` UNCONDITIONALLY — ahead of the content-type
