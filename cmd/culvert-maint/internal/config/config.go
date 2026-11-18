@@ -200,6 +200,28 @@ func readFile(path string) (*rawConfig, error) {
 	return &raw, nil
 }
 
+// validateComposeFile enforces the acceptance set packaging/culvert-maint/
+// install.sh applies to compose_file before rendering the sudoers allowlist:
+// a bare filename (no '/' or '\\'), not "." or ".." (the runner joins it under
+// compose_project_dir, so those would name the dir itself or its parent), and
+// none of reject_unsafe's characters (control chars, space, tab, quotes, '|').
+// Kept byte-identical to the installer so a hand-edit the installer would
+// refuse also fails here, at Load, instead of at every later sudo/compose call.
+func validateComposeFile(cf string) error {
+	if cf != filepath.Base(cf) || strings.ContainsAny(cf, "/\\") || cf == "." || cf == ".." {
+		return fmt.Errorf("config: compose_file must be a bare filename, got %q", cf)
+	}
+	for _, r := range cf {
+		if r == ' ' || r == '\t' || unicode.IsControl(r) {
+			return fmt.Errorf("config: compose_file must not contain whitespace or control characters, got %q", cf)
+		}
+	}
+	if strings.ContainsAny(cf, "\"'|") {
+		return fmt.Errorf("config: compose_file must not contain quotes or '|', got %q", cf)
+	}
+	return nil
+}
+
 // validate applies defaults and runs all fail-closed checks. Many
 // independent checks live here; splitting per field would scatter the
 // "this key, this rule" logic without making it more readable.
@@ -223,8 +245,8 @@ func validate(raw *rawConfig) (*Config, error) {
 	if cf == "" {
 		cf = defaultComposeFile
 	}
-	if cf != filepath.Base(cf) || strings.ContainsAny(cf, "/\\") {
-		return nil, fmt.Errorf("config: compose_file must be a bare filename, got %q", cf)
+	if err := validateComposeFile(cf); err != nil {
+		return nil, err
 	}
 	cfg.ComposeFile = cf
 
