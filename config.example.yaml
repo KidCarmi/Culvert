@@ -246,7 +246,14 @@ cluster:
   ca_file: ""         # CA cert for client validation (optional)
   state_db: ""        # Path to cluster.json (default: "cluster.json")
   # HA leader/standby pairing is configured at runtime from the admin GUI
-  # (Enable HA) or via --ha-join/--ha-token on the standby.
+  # (Enable HA) or via --ha-join plus the join token on the standby.
+  #
+  # The token is NOT a YAML field. Supply it in CULVERT_HA_TOKEN, not with
+  # --ha-token: it is the key-wrapping passphrase for the cluster CA private
+  # key in the HA state bundle, and a flag value is readable by any account in
+  # the PID namespace via /proc/<pid>/cmdline, while the environment is not
+  # (SEC-HA-TOKEN-ARGV-1). --ha-token still works and takes priority when both
+  # are set. Read once at startup.
   #
   # etcd fencing lease (ADR-0005) — enables SAFE automatic failover.
   # When etcd_endpoints is set, every path to HA leadership is arbitrated by

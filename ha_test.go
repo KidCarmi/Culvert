@@ -453,8 +453,13 @@ func TestAPIClusterHA_Enable(t *testing.T) {
 	if !strings.Contains(cmd, "--ha-join") {
 		t.Errorf("deploy_cmd should contain --ha-join: %s", cmd)
 	}
-	if !strings.Contains(cmd, "--ha-token") {
-		t.Errorf("deploy_cmd should contain --ha-token: %s", cmd)
+	// SEC-HA-TOKEN-ARGV-1: the token is handed over in CULVERT_HA_TOKEN, not as
+	// a flag, so it never lands in the standby's argv.
+	if !strings.Contains(cmd, haTokenEnv+"=") {
+		t.Errorf("deploy_cmd should hand the token over in %s: %s", haTokenEnv, cmd)
+	}
+	if strings.Contains(cmd, "--ha-token") {
+		t.Errorf("deploy_cmd must not pass the token as a flag: %s", cmd)
 	}
 
 	if !globalHA.IsLeader() {

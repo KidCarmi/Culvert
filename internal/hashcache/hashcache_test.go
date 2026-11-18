@@ -71,26 +71,40 @@ func TestEvictAndClear(t *testing.T) {
 }
 
 // TestSet_EvictsUnderCapacity exercises evictLocked: filling past maxSize with
-// non-expired entries must drop ~25 % rather than grow unbounded.
+// non-expired entries must never grow the cache, and must drop exactly one
+// entry — the one closest to expiry — rather than a large arbitrary batch.
 func TestSet_EvictsUnderCapacity(t *testing.T) {
 	const capacity = 8
 	c := New(capacity, time.Hour)
 	for i := 0; i < capacity; i++ {
-		c.Set(string(rune('a'+i)), ScanCacheResult{Clean: true})
+		// Distinct lifetimes; "c" expires soonest.
+		ttl := time.Duration(10+i) * time.Minute
+		if i == 2 {
+			ttl = time.Minute
+		}
+		c.SetTTL(string(rune('a'+i)), ScanCacheResult{Clean: true}, ttl)
 	}
 	if _, _, size := c.Stats(); size != capacity {
 		t.Fatalf("size at capacity = %d, want %d", size, capacity)
 	}
-	// One more Set triggers evictLocked; with no expired entries it drops
-	// maxSize/4 (=2), then inserts the new key.
 	c.Set("overflow", ScanCacheResult{Clean: true})
-	_, _, size := c.Stats()
-	if size > capacity {
-		t.Errorf("size after overflow = %d, must not exceed maxSize %d", size, capacity)
+	if _, _, size := c.Stats(); size != capacity {
+		t.Errorf("size after overflow = %d, want %d (one dropped, one inserted)", size, capacity)
 	}
-	if size != capacity-(capacity/4)+1 {
-		t.Errorf("size after overflow = %d, want %d (dropped maxSize/4 then inserted 1)", size, capacity-(capacity/4)+1)
+	if _, ok := c.Get("c"); ok {
+		t.Error("the entry closest to expiry must be the one evicted")
 	}
+	for i := 0; i < capacity; i++ {
+		if k := string(rune('a' + i)); k != "c" {
+			if _, ok := c.Get(k); !ok {
+				t.Errorf("live entry %q dropped although a sooner-expiring one existed", k)
+			}
+		}
+	}
+	if _, ok := c.Get("overflow"); !ok {
+		t.Error("the inserted entry must be present")
+	}
+	checkInvariants(t, c)
 }
 
 func TestSet_EvictsExpiredFirst(t *testing.T) {

@@ -28,6 +28,21 @@ const caPassphraseEnv = "CULVERT_CA_PASSPHRASE" // #nosec G101 -- env-var name, 
 
 const logStorePassphraseEnv = "CULVERT_LOG_PASSPHRASE" // #nosec G101 -- env-var name, not a credential
 
+// haTokenEnv supplies the HA standby join token, for the same reason
+// caPassphraseEnv exists: the token is the AES-256-GCM key-wrapping passphrase
+// for the CLUSTER CA private key in the HA state bundle (see
+// controlplane_server.go CAKeyEncrypted), so a reader of it can join as a
+// standby, pull the bundle and unwrap that key.
+//
+// -ha-token was the only channel, which put the value in argv:
+// /proc/<pid>/cmdline is readable by any account in the PID namespace, while
+// /proc/<pid>/environ is restricted to the process owner. The flag is kept for
+// compatibility and still wins when both are set; the env var is what the
+// shipped HA compose uses. This is an env-only startup secret with no admin
+// API or GUI surface, the same recorded exception the two passphrases above
+// take (conventions.md, "UI, configuration and API changes").
+const haTokenEnv = "CULVERT_HA_TOKEN" // #nosec G101 -- env-var name, not a credential
+
 var logger *log.Logger
 
 // appLifecycleCtx is the lifecycle context for all background goroutines.
@@ -198,6 +213,18 @@ func main() {
 
 	s := &startupState{}
 	parseFlags(s)
+	// CHAOS-122: refuse an argv flag.Parse could not fully consume. Go's flag
+	// package stops at the first non-flag token and silently drops every flag
+	// after it, so this is the difference between a loud refusal and a process
+	// that boots with those settings at their defaults while reporting healthy
+	// (CHAOS-121a was one instance of the class). BEFORE the one-shot dispatch
+	// and therefore before anything touches dataDir: a rejected argv changes
+	// nothing on disk. Exit 2 is the flag package's own usage-error code, which
+	// runBootstrapResolve already returns for the same class. See argv_guard.go.
+	if err := checkPositionalArgs(s); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(2)
+	}
 	handleOneShotCommands(s)
 	// RISK-005: refuse to boot on a data dir left missing by a restore commit
 	// that was killed mid-rename (would otherwise start empty + silently lose
@@ -862,7 +889,7 @@ func initCluster(s *startupState) {
 			CPGRPCKey:       *s.cpGRPCKey,
 			CPGRPCCA:        *s.cpGRPCCA,
 			HAJoin:          *s.haJoin,
-			HAToken:         *s.haToken,
+			HAToken:         resolveHATokenInput(*s.haToken, os.Getenv(haTokenEnv)),
 			HAAutoFailover:  *s.haAutoFailover,
 			HAEtcdEndpoints: *s.haEtcdEndpoints,
 			HAEtcdCert:      *s.haEtcdCert,

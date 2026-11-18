@@ -301,13 +301,25 @@ type Store struct {
 	hooks    []Webhook
 	filePath string
 
+	// subs is the atomically published subscription index that HasSubscriber
+	// reads INSTEAD of taking mu. mu still owns hooks and is still the only way
+	// to mutate it; every site that writes hooks must call
+	// publishSubscriptionsLocked before releasing mu. See subscriptions.go for
+	// the contention measurements that made this necessary.
+	subs atomic.Pointer[subscriptions]
+
 	// saveMu serializes persistence so that disk I/O happens with mu RELEASED.
-	// mu guards the in-memory hook set that HasSubscriber reads on the proxy
-	// request path; save() fsyncs both the file and its directory, so holding mu
-	// across it would stall every blocked request and DNS-failure subscriber
-	// check for the duration of a disk write — unbounded on a degraded volume.
-	// saveMu is taken only AFTER mu is released, so a mutation never waits on an
-	// in-flight fsync while holding the lock readers need either.
+	// save() fsyncs both the file and its directory, so holding mu across it
+	// would stall every concurrent reader for the duration of a disk write —
+	// unbounded on a degraded volume. saveMu is taken only AFTER mu is released,
+	// so a mutation never waits on an in-flight fsync while holding the lock
+	// readers need either.
+	//
+	// This split used to be stated in terms of HasSubscriber, which is no longer
+	// one of those readers: it answers from the published subs index and takes no
+	// lock at all (subscriptions.go). The split still matters, because Dispatch
+	// DOES read the hook set under mu.RLock on the fire path, and so do List,
+	// GetByID and SigningDegradedCount on the admin path.
 	//
 	// Letting writers reach the disk out of order is the price of that: each
 	// snapshot carries a monotonic sequence number (saveSeq, guarded by mu) and
@@ -424,9 +436,17 @@ func normalizeEventNames(events []string) []string {
 }
 
 // Init sets the persistence path and loads any persisted webhooks.
+//
+// It publishes the subscription index on EVERY exit, including the two that load
+// nothing. Those are not the uninteresting cases: "no alert_webhooks.json on
+// disk" is the DEFAULT posture of a fresh install and the state of every test
+// binary, so it is the one that most needs HasSubscriber's fast path armed rather
+// than left to the first blocked request to derive. Disk I/O stays off mu — the
+// read happens before the lock is taken, exactly as before.
 func (as *Store) Init(path string) {
 	as.filePath = path
 	if path == "" {
+		as.publishSubscriptions()
 		return
 	}
 	data, err := os.ReadFile(path) // #nosec G304 -- operator-configured path
@@ -434,10 +454,15 @@ func (as *Store) Init(path string) {
 		if !os.IsNotExist(err) {
 			obs.Printf("AlertStore: load %s: %v", path, err)
 		}
+		as.publishSubscriptions()
 		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	// Deferred (LIFO: runs before the Unlock above) so EVERY exit from here on
+	// republishes — including the Unmarshal failure below, which can leave
+	// as.hooks partially written, and the decrypt loop's continue branches.
+	defer as.publishSubscriptionsLocked()
 	if err := json.Unmarshal(data, &as.hooks); err != nil {
 		obs.Printf("AlertStore: parse %s: %v", path, err)
 		return
@@ -615,7 +640,11 @@ func (as *Store) SigningDegradedCount() int {
 }
 
 // HasSubscriber reports whether any ENABLED webhook is subscribed to event
-// (directly or via the "*" catch-all). Cheap: one RLock, no allocation.
+// (directly or via the "*" catch-all). Answered from the atomically published
+// subscription index: one atomic pointer load, no lock, no allocation, and — the
+// property that matters on the block path — no read-modify-write on any shared
+// word, so the check scales WITH core count instead of against it. It used to
+// take mu.RLock; subscriptions.go records what that cost and why.
 //
 // It lets a producer skip the work of firing an alert nobody will receive —
 // including, for producers that dispatch asynchronously, skipping the
@@ -624,19 +653,11 @@ func (as *Store) SigningDegradedCount() int {
 // into every process that has no webhooks configured at all, which is the
 // default posture and the state of every test binary.
 func (as *Store) HasSubscriber(event string) bool {
-	as.mu.RLock()
-	defer as.mu.RUnlock()
-	for i := range as.hooks {
-		if !as.hooks[i].Enabled {
-			continue
-		}
-		for _, ev := range as.hooks[i].Events {
-			if ev == event || ev == "*" {
-				return true
-			}
-		}
+	s := as.subs.Load()
+	if s == nil {
+		s = as.armSubscriptions()
 	}
-	return false
+	return s.has(event)
 }
 
 // Add stores a new webhook and returns it (secret redacted).
@@ -651,6 +672,7 @@ func (as *Store) Add(h Webhook) Webhook {
 	h.ID = fmt.Sprintf("%d", time.Now().UnixNano())
 	as.mu.Lock()
 	as.hooks = append(as.hooks, h)
+	as.publishSubscriptionsLocked()
 	persist := as.beginSaveLocked()
 	as.mu.Unlock()
 	persist() // fsync-backed disk I/O, deliberately outside mu
@@ -688,6 +710,7 @@ func (as *Store) Update(id string, upd Webhook) bool {
 			upd.sealedSecret = ""
 		}
 		as.hooks[i] = upd
+		as.publishSubscriptionsLocked()
 		persist, ok = as.beginSaveLocked(), true
 		break
 	}
@@ -703,6 +726,7 @@ func (as *Store) Delete(id string) bool {
 	for i := range as.hooks {
 		if as.hooks[i].ID == id {
 			as.hooks = append(as.hooks[:i], as.hooks[i+1:]...)
+			as.publishSubscriptionsLocked()
 			persist, ok = as.beginSaveLocked(), true
 			break
 		}

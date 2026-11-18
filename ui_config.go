@@ -1272,6 +1272,33 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Alert-webhook pre-validation (before ANY store mutation), same posture as
+	// the two gates above: the whole import is refused, never partially
+	// applied.
+	//
+	// SEC-ALERTS-EVENTNAME-1 is enforced at apiAlertsWebhooks'
+	// webhookPayloadRejected, which its comment calls the one definition of an
+	// acceptable payload and credits with keeping an unvalidated value "from
+	// reaching the webhook file, a support bundle or any other consumer at
+	// all". This handler was the second write ingress and ran neither check,
+	// so a backup carrying an arbitrary event name or a non-http(s) URL landed
+	// in the store with a 200. The sinks downstream hold (the Alerts panel
+	// escapes, and ssrf.SafeDialContext plus the scheme barrier refuse a bad
+	// URL at egress), which is why this is defence in depth rather than a live
+	// XSS or SSRF — but the bound and the character class exist so the value
+	// never reaches the file, and only validating one of two ingresses is the
+	// shape of gap that produced the original finding.
+	for i := range b.AlertWebhooks {
+		if err := validateWebhookURL(b.AlertWebhooks[i].URL); err != nil {
+			http.Error(w, fmt.Sprintf("invalid alert webhook %d: %s", i+1, sanitizeLog(err.Error())), http.StatusBadRequest)
+			return
+		}
+		if err := validateWebhookEvents(b.AlertWebhooks[i].Events); err != nil {
+			http.Error(w, fmt.Sprintf("invalid alert webhook %d events: %s", i+1, sanitizeLog(err.Error())), http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Blocker B (exclusive side): from here down the import both REMOVES
 	// shared objects (replace mode) and INSTALLS references wholesale, so the
 	// whole apply region holds the reference-integrity gate exclusively —

@@ -323,50 +323,14 @@ func TestChaos57_DrainDeadlineForceClosesEveryClass(t *testing.T) {
 	}
 }
 
-// TestChaos57_NativeInspectFallbackRelayContainsAPanic closes the PX-4 residual this
-// sweep found: relayPlaintextInspectFallback was the ONE relay goroutine in the tree
-// without a panic guard, so a panic inside it propagated to the runtime and killed an
-// in-line security appliance — dropping every OTHER in-flight tunnel with it. The
-// panic is injected through the conn, which is where a real one would come from.
-func TestChaos57_NativeInspectFallbackRelayContainsAPanic(t *testing.T) {
-	isolateDrainRegistry(t)
-	t.Cleanup(reqlog.SwapRingForTest())
-
-	clientA, clientB := tcpPair(t)
-	upA, upB := tcpPair(t)
-	_ = clientA
-	_ = upB
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		relayPlaintextInspectFallback(
-			panicOnReadConn{Conn: clientB},
-			panicReader{},
-			upA,
-			"chaos57-native-fallback.test",
-			nil,
-			ProxyIdentity{ClientIP: "203.0.113.9"},
-		)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("relayPlaintextInspectFallback did not return after a relay panic")
-	}
-}
-
-// panicReader panics on the first Read, standing in for any panic raised beneath
-// idleCopyCounted.
-type panicReader struct{}
-
-func (panicReader) Read([]byte) (int, error) { panic("chaos57: injected relay panic") }
-
-// panicOnReadConn is a net.Conn whose Read panics; the peer direction needs a conn,
-// not just a reader.
-type panicOnReadConn struct{ net.Conn }
-
-func (c panicOnReadConn) Read([]byte) (int, error) { panic("chaos57: injected relay panic") }
+// SEC-INSPECT-PLAINTEXT-1 removed this round's subject. The native-ALPN
+// inspect leg no longer raw-relays a non-TLS client (handleInspectNativeALPN
+// refuses and closes both legs), so relayPlaintextInspectFallback — and with it
+// the CHAOS-57/PX-4 residual that it was the one relay goroutine without a
+// panic guard — no longer exists. The guard contract itself is still pinned for
+// every relay that DOES survive, by
+// TestChaos57_EveryDrainClassForceClosesItsPeer above and by the strip path's
+// own relay tests; nothing here was weakened, the code it covered was deleted.
 
 // TestChaos57_FenceRefusesATunnelTheDrainCouldNotAccount closes the window Codex
 // review of PR #1288 found in the fix itself. socks5Server.Stop waits only for the

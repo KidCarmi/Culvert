@@ -6,7 +6,8 @@ under Method (GC quiescing before timing, guaranteed and counted in-window
 evictions). Re-measure on an idle host with the current harness before using any
 of them for a design decision. None of them is a current measurement.
 
-> Status: **BENCHMARKS ADDED; NO BEHAVIOUR CHANGE; NO DECISION (2026-10-11,
+> Status: **SUPERSEDED 2026-11-18 by bounded heap eviction (see Update below).**
+> Original status: **BENCHMARKS ADDED; NO BEHAVIOUR CHANGE; NO DECISION (2026-10-11,
 > revised 2026-10-16).** By construction, the scan cache's eviction runs under
 > the exclusive lock and its sweep is O(`cache_size`). Historical, pre-harness-fix runs put one busy
 > steady-state call at roughly 150-300 ms at `cache_size: 1000000`; the
@@ -20,6 +21,34 @@ of them for a design decision. None of them is a current measurement.
 > frequent Get and Set paths" and later as "mixed"; both rejections are
 > withdrawn. This change ships only the missing benchmarks and this record. It
 > changes no behaviour in `internal/hashcache` and takes no decision.
+
+## Update 2026-11-18 — bounded eviction shipped (PERF-SCANCACHE-1)
+
+The O(`cache_size`) sweep this note measured is gone. `internal/hashcache` now
+keeps an expiry-ordered min-heap beside the map; an insert at capacity reaps at
+most `evictExpiredBatch` (64) expired entries from the root, or drops the one
+entry closest to expiry, so every insert is O(log n) under the lock. This
+supersedes the "early exit vs sharding" framing on the old `evictLocked`
+comment: the heap keeps the meaningful half of `TestSet_EvictsExpiredFirst`
+(no live entry is dropped while an expired one remains) without a full scan.
+The by-value layout question below is moot for the sweep (there is no sweep).
+
+Measured on an idle 4-vCPU host (load < 1), identical workload both sides
+(`BenchmarkSetIntoFull_*`, `-benchtime 400000x -count 3`, worst single `Set`):
+
+| fixture | before (max hold) | after (max hold) |
+|---|---|---|
+| 100 000, nothing expired | 9.9–10.7 ms | 0.5–1.5 ms |
+| 100 000, all expired | 12.5–16.1 ms | 0.5–2.4 ms |
+| 1 000 000, nothing expired | 101–113 ms | 1.3–3.8 ms |
+| 1 000 000, all expired | 194–214 ms | 1.7–6.3 ms |
+
+The after-fix maxima are wall-clock and include GC/scheduler pauses (p99.9 is
+17–61 µs). Amortized at-capacity `Set` rose ~15–25 % (e.g. 10k churn
+~510 → ~770 ns); `Get` paths are unchanged. The `BenchmarkEvictLocked_*`
+per-call benchmarks were removed: a single eviction is now O(log n), so a
+benchmark rebuilding a full fixture per call can no longer converge. The
+historical sections below describe the old implementation.
 
 ## Question
 

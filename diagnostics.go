@@ -232,6 +232,9 @@ func buildOperatorContract() OperatorContract {
 	// Cluster (enrollment) CA — CHAOS-50. Contributes nothing on a node with no
 	// cluster CA, so it never adds a row to a single-node appliance's report.
 	checks = append(checks, checkClusterCA()...)
+	// SSL inspection CA near expiry that Culvert will not renew (imported or
+	// unclassified provenance). Contributes nothing for a managed CA.
+	checks = append(checks, checkInspectionCARenewal()...)
 	// Log disk guard: emergency minimal logging or pressure-forced early deletion.
 	// Contributes nothing until the guard has intervened.
 	checks = append(checks, checkLogDiskProtection()...)
@@ -1632,7 +1635,7 @@ func checkRequestLogPersistence() OperatorContractCheck {
 			Code:           "request_log_persistence",
 			Status:         diagFail,
 			Message:        "configured but failed to open — request log has silently fallen back to the in-memory ring, lost on restart",
-			OperatorAction: "Fix permissions/mount on the configured request log path, then restart the proxy to restore durable request-log persistence.",
+			OperatorAction: "Fix permissions/mount on the configured request log path. Culvert retries the open automatically (at least every 2.5 minutes) and resumes durable request-log persistence without a restart; entries recorded before it opens stay in the in-memory ring only.",
 		}
 	}
 	return OperatorContractCheck{
