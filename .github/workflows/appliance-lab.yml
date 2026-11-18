@@ -1404,9 +1404,12 @@ jobs:
       # operator process. T_push = the earlier of the push event's
       # repository.pushed_at and this run's created_at (both required, within
       # PUSH_REF_SKEW_S of each other, neither after the guard's clock + 60 s).
-      # Bound: end <= T_push + 12 + 345 + 5 = T_push + 362 min; the operator's
-      # pre-push clock T is <= T_push and its push is bounded to 95 s, so the
-      # end also lies before T + 365 (the retrospective timing judge's test).
+      # Bound: end <= T_push + 12 + 345 + 5 = T_push + 362 min. The timing
+      # verdict does NOT rely on any T-vs-T_push assumption: the retrospective
+      # judge tests the job's own recorded started_at/completed_at against the
+      # operator's pre-push clock T, and a push whose client did not confirm it
+      # (timeout, error) is PUSH-UNCERTAIN, never compliant, even if the server
+      # completes it later.
       START_BOUND_MINUTES: "12"
       PUSH_REF_SKEW_S: "300"
       # The R10 replacement candidate artifact (build-only run 44337877188,
@@ -1571,6 +1574,11 @@ jobs:
           # START_BOUND_MINUTES of the push (missing, malformed, foreign or
           # future references are refused; the earlier reference is used).
           iso = r"20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"
+          def zsafe(v):  # a real calendar date in exactly this format, else None
+              try:
+                  return z(v) if re.fullmatch(iso, v) else None
+              except ValueError:
+                  return None
           run = e.get("GUARD_RUN", "").split(" ")
           refs = []
           if len(run) != 8:
@@ -1579,21 +1587,21 @@ jobs:
               rid, rsha, rev, rbr, rpath, rwf, ratt, rcr = run
               want = {"id": (rid, e["GITHUB_RUN_ID"]), "head_sha": (rsha, e["GITHUB_SHA"]), "event": (rev, "push"),
                       "head_branch": (rbr, "test/appliance-lab"), "path": (rpath, ".github/workflows/appliance-lab.yml"),
-                      "run_attempt": (ratt, e.get("GITHUB_RUN_ATTEMPT", "1"))}
+                      "workflow_id": (rwf, "374042653"), "run_attempt": (ratt, e.get("GITHUB_RUN_ATTEMPT", "1"))}
               for k, (got, exp) in want.items():
                   if got != exp:
                       bad.append(f"this run's {k} is {got!r}, not {exp!r}")
-              if re.fullmatch(iso, rcr):
-                  refs.append(("run created_at", z(rcr)))
+              if zsafe(rcr) is not None:
+                  refs.append(("run created_at", zsafe(rcr)))
               else:
-                  bad.append(f"this run's created_at is malformed: {rcr!r}")
+                  bad.append(f"this run's created_at is malformed or not a real date: {rcr!r}")
           pa = e.get("GUARD_PUSHED_AT", "")
           if re.fullmatch(r"[0-9]{10}", pa):
               refs.append(("push pushed_at", dt.datetime.fromtimestamp(int(pa), dt.timezone.utc)))
-          elif re.fullmatch(iso, pa):
-              refs.append(("push pushed_at", z(pa)))
+          elif zsafe(pa) is not None:
+              refs.append(("push pushed_at", zsafe(pa)))
           else:
-              bad.append(f"the push time (repository.pushed_at) is missing or malformed: {pa!r}")
+              bad.append(f"the push time (repository.pushed_at) is missing, malformed or not a real date: {pa!r}")
           for name, t in refs:
               if t > now + dt.timedelta(seconds=60):
                   bad.append(f"{name} {t:%Y-%m-%dT%H:%M:%SZ} is in the future of this guard's clock {e['GUARD_NOW']}")
