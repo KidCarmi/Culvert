@@ -1293,15 +1293,23 @@ jobs:
   # the "Campaign verdict" step: every required check must PASS; only the
   # declared residuals may be other than pass.
   qemu-retained:
-    name: "Lab · QEMU campaign on the R10 replacement candidate OVA aea0845a (no build)"
+    name: "Lab · QEMU campaign on the R11 candidate OVA 6a457282 (no build)"
     if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[qemu-retained]') && !contains(github.event.head_commit.message, '[build-only]') && !contains(github.event.head_commit.message, '[adopted-scan]') && !contains(github.event.head_commit.message, '[agent-identity]') && !contains(github.event.head_commit.message, '[boot-console]') && !contains(github.event.head_commit.message, '[cache-bypass]') && !contains(github.event.head_commit.message, '[console-overlay]') && !contains(github.event.head_commit.message, '[fail-fast]') && !contains(github.event.head_commit.message, '[fdisk-only]') && !contains(github.event.head_commit.message, '[fp2-isolated]') && !contains(github.event.head_commit.message, '[fp2-repro]') && !contains(github.event.head_commit.message, '[fp2-source]') && !contains(github.event.head_commit.message, '[lab-skip]') && !contains(github.event.head_commit.message, '[ldap-ad]') && !contains(github.event.head_commit.message, '[midimport-kill]') && !contains(github.event.head_commit.message, '[preserve-image]') && !contains(github.event.head_commit.message, '[pressure-only]') && !contains(github.event.head_commit.message, '[recovery-ab]') && !contains(github.event.head_commit.message, '[saml-replay]') && !contains(github.event.head_commit.message, '[scan-candidate]') && !contains(github.event.head_commit.message, '[sidecar-exact]') && !contains(github.event.head_commit.message, '[sidecar-repro]') && !contains(github.event.head_commit.message, '[sidecar-scan]') && !contains(github.event.head_commit.message, '[snapshot-pin-check]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 345
     env:
-      VARIANT: candidate-9025e13a
+      VARIANT: candidate-64805874
       # The ONE commit message that may start this job (an empty commit on the
       # reviewed head; reviewed by ASTRA, with its SHA, parent and tree, before
       # it is pushed).
+      # Campaign 11 (owner delivery authorization of 19 November 2026): the R11
+      # candidate OVA 6a457282 (source 64805874 = 9025e13a + the guest apt snapshot
+      # raise to 20261118T000000Z: needrestart 3.6-7ubuntu4.6 and sosreport
+      # 4.11.2-0ubuntu0~24.04.2, kernel still 7.0.0-43, no other input changed;
+      # ONE ASTRA-accepted build-only run 44617840301). Every Campaign 10 criterion,
+      # scope, negative control, containment proof, Q7 limit and verdict is
+      # unchanged. Campaign 10 (trigger 6ec49f33, run 44537757702, PASS WITH
+      # RESIDUALS) qualifies OVA aea0845a only; it qualifies nothing here.
       # Campaign 10 (owner R10 remediation authorization of 14 November 2026 and
       # decision of 17 November 2026): the R10 replacement candidate OVA aea0845a
       # (source 9025e13a: the provisioning-completion fix, apt snapshot 20261113,
@@ -1386,16 +1394,16 @@ jobs:
       # f9d68540. The campaign-3 route (84e05cd6, FB1-R1 OVA f76b6e82) was never
       # triggered: owner decision D4 retired that candidate. None of those
       # messages starts this job.
-      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 10 on the R10 replacement candidate OVA aea0845a [qemu-retained]"
-      QEMU_CAMPAIGN: "10"
-      QEMU_PRIOR_CAMPAIGN: "9: trigger 79765c11b70344c348e01d7c4221f95ac67b4ee3, run 43454894877 attempt 1, evidence artifact 14054833509, verdict PASS WITH RESIDUALS (all 14 scopes; 221 PASS / 12 INFO / 1 BLOCKED) on the FB1-R2 candidate OVA e60620c3 only"
-      # Start deadline (owner direction of 14 November 2026): first candidate
-      # boot strictly before 2026-11-20T00:00:00Z. With the 345-minute job limit,
+      QEMU_TRIGGER_MESSAGE: "lab: QEMU campaign 11 on the R11 candidate OVA 6a457282 [qemu-retained]"
+      QEMU_CAMPAIGN: "11"
+      QEMU_PRIOR_CAMPAIGN: "10: trigger 6ec49f33e86e2868ad5d978b47f5b30c3ff7d65e, run 44537757702 attempt 1, verdict PASS WITH RESIDUALS (all 14 scopes; 222 PASS / 12 INFO / 1 BLOCKED / 0 FAIL) on the R10 replacement candidate OVA aea0845a only"
+      # Start deadline (owner direction of 19 November 2026): first candidate
+      # boot strictly before 2026-11-27T00:00:00Z. With the 345-minute job limit,
       # the teardown allowance and the daily-window rule the job ends by
-      # 2026-11-20T05:50Z, inside the owner's work window (all execution before
-      # 2026-11-21T00:00:00Z, checked explicitly below).
-      CAMPAIGN_START_DEADLINE: "2026-11-20T00:00:00Z"
-      EXECUTION_EXPIRY: "2026-11-21T00:00:00Z"
+      # 2026-11-27T05:50Z, inside the owner's work window (all execution before
+      # 2026-11-28T00:00:00Z, checked explicitly below).
+      CAMPAIGN_START_DEADLINE: "2026-11-27T00:00:00Z"
+      EXECUTION_EXPIRY: "2026-11-28T00:00:00Z"
       # The job's own limit; the daily-window guard reasons over it.
       CAMPAIGN_MAX_MINUTES: "345"
       # Teardown allowance (C10-S1): timeout-minutes only STARTS cancellation;
@@ -1417,21 +1425,21 @@ jobs:
       # completes it later.
       START_BOUND_MINUTES: "12"
       PUSH_REF_SKEW_S: "300"
-      # The R10 replacement candidate artifact (build-only run 44337877188,
-      # identity 63/63, the ONE accepted build) and the OVA in it.
-      OVA_ARTIFACT_ID: "14442199990"
-      OVA_ARTIFACT_RUN: "44337877188"
-      OVA_ARTIFACT_NAME: appliance-lab-ova-candidate-9025e13a
-      OVA_ARTIFACT_ZIP_SHA256: 817c236e63facbdfdb523573de4bc0b079cd893352a211d293d22c4d55c61c71
-      OVA_NAME: culvert-appliance-1.0.455-candidate.g9025e13abf2d-ubuntu-24.04.ova
-      OVA_SHA256: aea0845a4a3a576a45d5ca7e5e666f7b257a4e07a808f87364054db5528b6965
+      # The R11 candidate artifact (build-only run 44617840301, the ONE accepted
+      # build) and the OVA in it.
+      OVA_ARTIFACT_ID: "14576004317"
+      OVA_ARTIFACT_RUN: "44617840301"
+      OVA_ARTIFACT_NAME: appliance-lab-ova-candidate-64805874
+      OVA_ARTIFACT_ZIP_SHA256: 8cd91c88ea9954e1b4dc8ac6480bc10ec2102942f2efa35976d515cdb96f60ce
+      OVA_NAME: culvert-appliance-1.0.478-candidate.g64805874c54c-ubuntu-24.04.ova
+      OVA_SHA256: 6a457282a0c46369196530169cecf93ac05a059a0bdaec13a7228c659dae3f00
       # Its frozen source (the signed-update fixture is built from it) and the
       # image identity the guest must report.
-      APPLIANCE_SOURCE_SHA: 9025e13abf2da873512c32875e98d6f8e8edb806
-      APPLIANCE_SOURCE_TREE: a2c04f3130c81a4dc941a8ddb4dd411182e8e023
-      EXPECT_IMAGE_ID: "sha256:c79b82663133566d0923c0c0da066a0cc59dbd30dd60192fdedc66d858e49c77"
+      APPLIANCE_SOURCE_SHA: 64805874c54cfcdcec34d1c5d59d1e698489d93a
+      APPLIANCE_SOURCE_TREE: e39df37a7f581defb09bec2fa5041894ec090307
+      EXPECT_IMAGE_ID: "sha256:7551e5d7cd0a40902512fd604d22dfd00ea75edb30ecd6633b1b6bbf3af1dd6f"
       # Source citations below name 0981ff3d. Every cited file is byte-identical
-      # at 6eead9a1, a2b722c0 and 9025e13a (auth_oidc_flow.go dc1eb5b0, internal/ssrf/ssrf.go 9b4279c4,
+      # at 6eead9a1, a2b722c0, 9025e13a and 64805874 (auth_oidc_flow.go dc1eb5b0, internal/ssrf/ssrf.go 9b4279c4,
       # auth_saml.go 70bef4b8, internal/feedsync/feedsync.go b3695a9b,
       # internal/threatfeed/threatfeed.go a24f7b9e, release_wiring.go fd71c436,
       # scripts/install.sh 9eeb145e, internal/uitls/uitls.go 76554802), so the
@@ -1440,6 +1448,8 @@ jobs:
       # are unchanged, now at lines 201-202 of 9025e13a.) 9025e13a builds with
       # go1.27.4: its encoding/json, strings, bytes, unicode and unicode/utf8
       # sources are byte-identical to go1.27.3's, so the decoder notes below hold.
+      # 64805874 changes only manifest.env, one FB1 test, docs and CHANGELOG
+      # against 9025e13a (first-boot.md blob 105a3e62 unchanged).
       EXPECT_KERNEL_RELEASE: 7.0.0-43-generic
       # Public HTTPS issuer for the changed OIDC discovery fetch (read-only GET,
       # no credential, nothing saved).
@@ -1478,10 +1488,10 @@ jobs:
       # (name:read_ms:write_ms:budget_s).
       Q7_PROFILE: "q7:0:0:120"
       Q7_REBOOTS: "3"
-      # Start deadline as an epoch (2026-11-20T00:00:00Z), rechecked by the
+      # Start deadline as an epoch (2026-11-27T00:00:00Z), rechecked by the
       # harness immediately before the first candidate boot; the campaign
       # window (24 h) runs from that boot's UTC/monotonic anchor.
-      LAB_START_DEADLINE_EPOCH: "1795132800"
+      LAB_START_DEADLINE_EPOCH: "1795737600"
       LAB_CAMPAIGN_WINDOW_S: "86400"
       # Changed SAML metadata fetch: synthetic IdP metadata served from THIS
       # commit's public URL, bytes pinned.
