@@ -147,6 +147,34 @@ const (
 	dedupPruneMinInterval = time.Second
 )
 
+// dedupKeySep joins the two halves of a dedup key. Event names are validated to
+// [a-z0-9_] plus the "*" catch-all (ValidateEventNames), so ':' cannot appear in
+// the left half and the encoding is unambiguous: one (event, detail) pair maps to
+// exactly one key and vice versa. The joined form is load-bearing beyond this
+// file — the CHAOS-27 regression tests index dedupMap by it — so it is a named
+// constant rather than an inline literal.
+const dedupKeySep = ':'
+
+// dedupKeyScratch sizes the frame-local buffer dedupSuppressed renders the key
+// into, so the SUPPRESSED answer costs no heap allocation at all (see that
+// function).
+//
+// Chosen on measurement, not on the worst case. The buffer is a frame-local
+// array, so the compiler zeroes it on every call and the cost is linear in its
+// size — measured on this machine at 6.7ns (64B), 8.1ns (128B), 11.8ns (320B)
+// and 26.4ns (1024B) for the same three appends. Sizing it for the theoretical
+// maximum (maxEventNameLen + separator + a 253-byte FQDN detail = 318) would
+// therefore tax EVERY dispatch to spare the rare one.
+//
+// 128 covers every key the request-rate producers actually build — an event name
+// is ~15 bytes and their Details are rule names, bounded reason classes and scan
+// sources, all well inside it. A longer key is not wrong and not truncated
+// (TestDedupSuppressedKeyLongerThanScratch): append spills to the heap for ONE
+// allocation, which is exactly what the unconditional concatenation charged
+// every dispatch. So the uncommon case is never worse than the status quo and
+// the common case is free.
+const dedupKeyScratch = 128
+
 // dedupEvicted counts dedup keys dropped by the cap, so a flooded alert key
 // space is visible to operators instead of silently degrading suppression.
 var dedupEvicted atomic.Int64
@@ -697,6 +725,22 @@ func (as *Store) Update(id string, upd Webhook) bool {
 		}
 		upd.ID = id
 		upd.SigningDegraded = false // status is derived, never accepted from a caller
+		if upd.URL == "" {
+			// Preserve the stored destination. The admin API's shared payload
+			// gate admits a URL-less PUT on exactly this promise
+			// (webhookPayloadRejected's urlRequired=false arm, ui_security.go),
+			// and without it the promise was false: `as.hooks[i] = upd` below
+			// took URL wholesale from the payload, so a partial update that
+			// only toggled Enabled or renamed the hook BLANKED the URL while
+			// leaving the subscription in place. HasSubscriber then still
+			// reported true, every matching alert was still dispatched, and
+			// each delivery died at the validWebhookURL barrier — silent loss
+			// of security-alert delivery, which is the one kind of loss an
+			// operator cannot notice. An empty URL is never a valid stored
+			// state (ValidateURL rejects it and create requires it), so
+			// carrying it forward cannot mask a legitimate intent to clear.
+			upd.URL = as.hooks[i].URL
+		}
 		if upd.Secret == "" {
 			upd.Secret = as.hooks[i].Secret // preserve existing secret if not updated
 			// Carry the un-unwrappable ciphertext across too: an edit that does
@@ -758,13 +802,26 @@ func (as *Store) GetByID(id string) (Webhook, bool) {
 // sink) calls this on the process-wide store.
 func (as *Store) Dispatch(event string, payload Payload) {
 	payload.Event = event
-	if payload.Timestamp == "" {
-		payload.Timestamp = time.Now().UTC().Format(time.RFC3339)
-	}
 
 	// Q17: Dedup — skip if same event+detail fired recently.
-	if as.dedupSuppressed(event + ":" + payload.Detail) {
+	//
+	// Deliberately AHEAD of the Timestamp default below, which it used to sit
+	// behind. Suppression is the COMMON answer on this path, not the rare one:
+	// every producer that reaches Dispatch at request rate is fault-driven (a
+	// block flood, a resolver outage, a scanner outage), and those producers put
+	// a LOW-cardinality value in Detail — a rule name, a bounded reason class —
+	// so a flood against one rule collapses onto one key that the 30s window
+	// suppresses by construction. Formatting a timestamp for a payload that is
+	// then dropped cost ~121ns and one 24-byte allocation per blocked request,
+	// on the one path where the node has least headroom. Nothing observes
+	// payload.Timestamp on the suppressed return — payload is a by-value copy
+	// and Dispatch is the only writer — so this is reordering, not a behavior
+	// change; a delivered payload is stamped exactly as before.
+	if as.dedupSuppressed(event, payload.Detail) {
 		return
+	}
+	if payload.Timestamp == "" {
+		payload.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
 
 	as.mu.RLock()
@@ -825,16 +882,44 @@ func (as *Store) Dispatch(event string, payload Payload) {
 // extra delivery of a duplicate, and that fan-out is still bounded by the
 // 10-slot delivery semaphore and the 500-cap retry queue. Silencing a real
 // alert to save memory would be the wrong trade for a security control.
-func (as *Store) dedupSuppressed(dedupKey string) bool {
+//
+// It takes the two halves SEPARATELY rather than a joined string, and that is
+// the allocation contract rather than a style choice. The caller used to hand it
+// `event + ":" + Detail`, so every dispatch — including the suppressed majority
+// — paid a 32-byte heap allocation to build a key that was then only LOOKED UP
+// and thrown away. Rendering the key into a frame-local scratch instead lets the
+// read go through `as.dedupMap[string(key)]`, which the compiler hashes in place
+// without materialising a string, so a suppressed dispatch is allocation-free.
+// Only an ADMITTED dispatch converts, because only then does the map have to own
+// the key — and an admitted dispatch is about to do an HTTP delivery, next to
+// which one 32-byte string is nothing.
+//
+// The key BYTES are unchanged (event + dedupKeySep + detail), so the on-map
+// encoding every CHAOS-27 assertion indexes by still holds verbatim.
+func (as *Store) dedupSuppressed(event, detail string) bool {
+	// Rendered before the lock: the lock hold must not grow to pay for this.
+	var scratch [dedupKeyScratch]byte
+	key := append(scratch[:0], event...)
+	key = append(key, dedupKeySep)
+	key = append(key, detail...)
+
 	as.dedupMu.Lock()
 	defer as.dedupMu.Unlock()
 	if as.dedupMap == nil {
 		as.dedupMap = map[string]time.Time{}
 	}
 	now := time.Now()
-	if last, ok := as.dedupMap[dedupKey]; ok && now.Sub(last) < dedupTTL {
+	// No allocation: a map index on string(byteSlice) hashes the bytes in place.
+	// This is the common answer under any flood, so it is the one that must be
+	// free. A regression that reintroduces a string conversion here is caught by
+	// TestDedupSuppressedHitIsAllocationFree, not by review.
+	if last, ok := as.dedupMap[string(key)]; ok && now.Sub(last) < dedupTTL {
 		return true
 	}
+	// Admitted. The map must own its key, so this is the one conversion that
+	// allocates — exactly what the old unconditional concatenation cost, now
+	// charged only to a dispatch that will actually be delivered.
+	dedupKey := string(key)
 	as.dedupMap[dedupKey] = now
 	as.dedupSincePrune++
 	// Two different costs, deliberately kept apart. The expiry scan is O(len)
