@@ -248,6 +248,9 @@ func buildOperatorContract() OperatorContract {
 	// Break-glass admin-route metadata gate in shadow (CULVERT_C2_ENFORCE=false).
 	// Contributes nothing in the default enforce mode.
 	checks = append(checks, checkAdminRouteEnforcement()...)
+	// CDR fail-open passthroughs (engine error under fail_mode open) in the last 24h.
+	// Contributes nothing unless a fail-open passthrough actually happened.
+	checks = append(checks, checkCDRFailOpenPassthrough()...)
 	// CHAOS-05/07 state-file quarantine, authenticated + path-free. Contributes
 	// nothing when every state file on this node loaded cleanly.
 	checks = append(checks, checkStateFileIntegrity()...)
