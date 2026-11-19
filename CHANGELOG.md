@@ -218,6 +218,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **A remote blocklist feed that has stopped being refreshed is now visible and
+  pages (CHAOS-123).** Operator-configured feeds (Policy → Blocklist → Feeds)
+  are a deny control whose imports are merge-only and persisted, so
+  `culvert_blocklist_size` holds its last-good value: a node whose feed has not
+  fetched in three weeks exported byte-identical metrics to one that synced ten
+  minutes ago. There were no `culvert_blocklist_feed_*` series at all, so
+  Prometheus and Alertmanager could not see feed freshness in any form, and
+  nothing paged — the only surface was one diagnostics row gated on
+  `LastError != ""`, which cannot see a feed that is never attempted. Two such
+  states existed: a feed with auto-sync set to `off`, which `dueURLs` skips, so
+  it recorded no error and the report stayed green forever while the feed
+  contributed nothing; and the window after a settings restore, where
+  `applyBlocklistFeeds` rebuilds each feed's state and clears `LastError`, so a
+  persistently failing feed's row disappeared until the next round. Added: ten
+  unlabelled `culvert_blocklist_feed_*` series (configured, auto-sync enabled,
+  manual-never-synced, failing, never-synced, stale, stale age, oldest-success
+  timestamp, sync-ok, consecutive failures), emitted only when at least one feed
+  is configured; the `blocklist_feed` diagnostics row extended to the stale,
+  never-synced and auto-sync-off shapes with the pre-existing failing-attempt
+  row unchanged; and a `blocklist_feed_stale` alert, subscribable from the
+  Alerts panel, fired once per episode and cleared only when every auto-synced
+  feed is observed fresh. No series carries a per-feed label and no surface
+  carries a feed URL or the fetch error — a feed URL routinely embeds a token
+  and `/metrics` is commonly scraped unauthenticated. Enforcement, cadence,
+  persisted state and wire formats are unchanged; staleness deliberately does
+  not fail readiness. Runbook:
+  `docs/operator/blocklist-feed-freshness.md`
+  (`TestChaos123_*`, 19 tests).
+
 - **Diagnostics now warns when CDR has recently fallen open (Product
   Experience).** Under `cdr.fail_mode: open` (the default), a Sanitize call
   that errors (engine `ERROR`, timeout, transport fault) passes the original

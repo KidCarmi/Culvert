@@ -66,6 +66,18 @@ package alerts
 //                             means no threat-feed coverage at all and says so. Fired once per
 //                             episode, never per failed round; cleared only by an observed clean
 //                             sync. Detail carries a BOUNDED source class, never the fetch error.
+//   "blocklist_feed_stale"  — an operator-configured remote blocklist feed with auto-sync enabled has
+//                             not synced successfully for over 2x its configured interval, or has never
+//                             synced on this node (CHAOS-123). blocklist.MergeFromLines never deletes
+//                             and the store is persisted, so the already-imported entries keep being
+//                             enforced — this is degraded FRESHNESS on a deny control, and the
+//                             destinations added to the origin since the last good sync are the ones
+//                             not being blocked. A feed with auto-sync turned OFF is deliberately NOT
+//                             alerted on (the operator disabled the schedule); it gets a diagnostics
+//                             row and a gauge instead. Fired once per episode, never per failed round;
+//                             cleared only when every auto-synced feed is observed fresh again. Detail
+//                             carries counts, an age and an interval — never a feed URL (which
+//                             routinely embeds a token) or the fetch error.
 //   "syslog_feed_down"      — the remote syslog/SIEM feed has lost events and delivered nothing for
 //                             the degradation window (CHAOS-66): audit and request events are not
 //                             reaching the collector and are NOT replayed. The node keeps proxying

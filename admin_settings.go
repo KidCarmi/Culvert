@@ -595,6 +595,9 @@ func applyBlocklistFeeds(s *AdminSettings) {
 		return // pre-feature settings file with no feed config — keep startup seed
 	}
 	blFeedSyncer.ClearFeeds()
+	// Every monitored feed was just removed; end any stale-alert episode
+	// latched on them so a feed in the restored list can page (CHAOS-123).
+	noteBlocklistFeedsRemoved()
 	for i := range feeds {
 		if feeds[i].URL == "" {
 			continue

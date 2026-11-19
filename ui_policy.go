@@ -335,7 +335,7 @@ func blocklistFeedUpsert(w http.ResponseWriter, r *http.Request) {
 	} else {
 		interval = blFeedDefaultInterval
 	}
-	blFeedSyncer.SetFeed(body.URL, interval)
+	applyBlocklistFeedUpsert(body.URL, interval) // ends a stale-alert episode on auto-sync → off
 	auditEvent(r, "blocklist.feed.set", body.URL, "")
 	adminSettingsSave()
 	jsonOK(w, map[string]any{"ok": true, "url": body.URL, "interval": interval.String()})
@@ -353,6 +353,9 @@ func blocklistFeedDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "feed not found", http.StatusNotFound)
 		return
 	}
+	// The removed feed may be the one the stale alert latched on; end that
+	// episode so a different feed's outage can page (CHAOS-123).
+	noteBlocklistFeedsRemoved()
 	purged := 0
 	if r.URL.Query().Get("purge") == "entries" {
 		purged = bl.RemoveByFeedSource(feedURL)
