@@ -55,7 +55,7 @@ const TRAFFIC_STATUS: Readonly<Record<string, TrafficStatusInfo>> = {
   CDR_ERROR: {
     tone: "warn",
     meaning:
-      "CDR could not process this content; it was delivered unmodified (fail-open). This is not a block.",
+      "CDR could not process this content and passed it on unmodified (fail-open) to the remaining inspection, which may still have blocked it. This row is not a block; clear the status filter to see a later DPI or antivirus block for the same request.",
   },
   DECRYPT_FAILED: {
     tone: "warn",

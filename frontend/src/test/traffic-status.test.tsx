@@ -148,7 +148,10 @@ it("states what the status means, and never invents a meaning for an unknown sta
   expect(container.textContent).toContain("content scan");
   open(0);
   open(6); // CDR_ERROR
-  expect(container.textContent).toContain("delivered unmodified");
+  expect(container.textContent).toContain("passed it on unmodified");
+  // Fail-open hands the original bytes to DPI and AV, which can still block
+  // them: the explanation must not assert the content reached the client.
+  expect(container.textContent).not.toContain("delivered");
   open(6);
   open(9); // unknown
   expect(container.textContent).not.toContain("Status meaning");
