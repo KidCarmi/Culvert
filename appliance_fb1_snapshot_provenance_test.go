@@ -40,18 +40,18 @@ var fb1Suites = []string{"noble", "noble-updates", "noble-security", "noble-back
 
 var fb1Components = []string{"main", "restricted", "universe", "multiverse"}
 
-// The selected snapshot (17 Nov R10-F1 pin raise, owner decision of 17 Nov,
-// which also moved the kernel 7.0.0-42 -> 7.0.0-43) and its reviewed InRelease
-// hashes: gpgv-verified and fetched twice byte-identical
-// (fb1-snapshot-20261113/authn.tsv). The earliest snapshot carrying the
-// thirteen R10-F1 fixed versions while resolving exactly kernel 7.0.0-43.
-const fb1PinnedSnapshot = "20261113T000000Z"
+// The selected snapshot (19 Nov R11-F1 pin raise, owner direction of 19 Nov:
+// the needrestart and sosreport fixes, kernel unchanged at 7.0.0-43) and its
+// reviewed InRelease hashes: gpgv-verified and fetched twice byte-identical
+// (fb1-snapshot-20261118/authn.tsv). The earliest snapshot carrying both
+// R11-F1 fixed versions while resolving exactly kernel 7.0.0-43.
+const fb1PinnedSnapshot = "20261118T000000Z"
 
 var fb1ReviewedPins = map[string]string{
 	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE":     "cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0",
-	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES":   "bb3362859b0a0285bc8f2d4a23b026f1780e96a21b4c695df0a999c505b2c461",
-	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY":  "32a96f18660f01f41f46a13555f0b546b917f24c92216db86bec1f1fe478e8e1",
-	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS": "78a500b79a5e1da2e2a75a912cbe4692baeecede6bdafa2223e26d23b0869b27",
+	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES":   "95fabe7ae86391dc2d76d40d06e0d248862f5997b99fd100bd736a8ca82273a4",
+	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_SECURITY":  "0dcbc7c8460be3ecec2578aa1cb8d22cebe2d5d4e70b8bf069dc61315724e649",
+	"GUEST_APT_SNAPSHOT_INRELEASE_SHA256_BACKPORTS": "a853769b1583a20dfbc2a5488f3c7ba80cad91fdca180ce9555c979177a1023d",
 }
 
 // The reviewed Docker pins (owner decision of 17 Nov, R10): versions and the
@@ -344,7 +344,7 @@ func fb1Bash(t *testing.T, env []string, script string) (string, error) {
 // fb1PinEnv: the manifest pins with ID id and a recorded build start that is
 // after every ID the tests treat as valid (and long before "now" is relevant).
 func fb1PinEnv(id string) []string {
-	return fb1PinEnvAt(id, "20261117T120000Z")
+	return fb1PinEnvAt(id, "20261119T120000Z")
 }
 
 func fb1PinEnvAt(id, buildStart string) []string {
@@ -406,7 +406,7 @@ func TestAptSnapshotFB1_RequirePinsUsesTheRecordedInstantNotTheClock(t *testing.
 	if err := os.WriteFile(filepath.Join(bin, "date"), []byte(stub), 0o700); err != nil { //nolint:gosec // executable test stub
 		t.Fatal(err)
 	}
-	env := append(fb1PinEnvAt(fb1PinnedSnapshot, "20261117T120000Z"), "PATH="+bin+":/usr/bin:/bin")
+	env := append(fb1PinEnvAt(fb1PinnedSnapshot, "20261119T120000Z"), "PATH="+bin+":/usr/bin:/bin")
 	if out, err := fb1Bash(t, env, "apt_snap_require_pins"); err != nil {
 		t.Errorf("an ID before the recorded build start was refused: %v %s", err, out)
 	}
@@ -416,16 +416,16 @@ func TestAptSnapshotFB1_RequirePinsUsesTheRecordedInstantNotTheClock(t *testing.
 	// 2026-02-30 over to 2026-03-02 and exits 0. The round trip (the
 	// normalized instant must equal the input) catches it.
 	norm := t.TempDir()
-	nstub := "#!/bin/sh\ncase \" $* \" in *\" -d \"*) case \"$*\" in *2026-02-30*) echo 20260302T120000Z; exit 0 ;; esac; exec /bin/date \"$@\" ;; esac\necho 20261117T120000Z\n"
+	nstub := "#!/bin/sh\ncase \" $* \" in *\" -d \"*) case \"$*\" in *2026-02-30*) echo 20260302T120000Z; exit 0 ;; esac; exec /bin/date \"$@\" ;; esac\necho 20261119T120000Z\n"
 	if err := os.WriteFile(filepath.Join(norm, "date"), []byte(nstub), 0o700); err != nil { //nolint:gosec // executable test stub
 		t.Fatal(err)
 	}
-	nenv := append(fb1PinEnvAt("20260230T120000Z", "20261117T120000Z"), "PATH="+norm+":/usr/bin:/bin")
+	nenv := append(fb1PinEnvAt("20260230T120000Z", "20261119T120000Z"), "PATH="+norm+":/usr/bin:/bin")
 	if out, err := fb1Bash(t, nenv, "apt_snap_require_pins"); err == nil || !strings.Contains(out, "20260230T120000Z") {
 		t.Errorf("an impossible ID was accepted because date normalized it: %v %s", err, out)
 	}
 	// Control: the same normalizing stub still accepts a real instant.
-	nenv = append(fb1PinEnvAt(fb1PinnedSnapshot, "20261117T120000Z"), "PATH="+norm+":/usr/bin:/bin")
+	nenv = append(fb1PinEnvAt(fb1PinnedSnapshot, "20261119T120000Z"), "PATH="+norm+":/usr/bin:/bin")
 	if out, err := fb1Bash(t, nenv, "apt_snap_require_pins"); err != nil {
 		t.Errorf("a real ID was refused under the normalizing date stub: %v %s", err, out)
 	}
@@ -1462,7 +1462,8 @@ func TestAptSnapshotFB1_GuestReceiptAndDockerByteCheck(t *testing.T) {
 const (
 	fb1PreviousSelectionEvidence = "docs/appliance/evidence/combined/future-build/fb1-snapshot-20261029"
 	fb1R2SelectionEvidence       = "docs/appliance/evidence/combined/future-build/fb1-snapshot-20261105"
-	fb1SelectionEvidence         = "docs/appliance/evidence/combined/future-build/fb1-snapshot-20261113"
+	fb1R10SelectionEvidence      = "docs/appliance/evidence/combined/future-build/fb1-snapshot-20261113"
+	fb1SelectionEvidence         = "docs/appliance/evidence/combined/future-build/fb1-snapshot-20261118"
 )
 
 var fb1SuiteVar = map[string]string{"noble": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_NOBLE", "noble-updates": "GUEST_APT_SNAPSHOT_INRELEASE_SHA256_UPDATES",
@@ -1567,7 +1568,7 @@ var fb1R2Selection = fb1Selection{
 // packages already published at the earliest qualifying snapshot; the kernel
 // moves 7.0.0-42 -> 7.0.0-43 (same four packages at the new ABI).
 var fb1R10Selection = fb1Selection{
-	dir: fb1SelectionEvidence, pin: fb1PinnedSnapshot, kernel: "7.0.0-43.43~24.04.1", fixes: "13/13",
+	dir: fb1R10SelectionEvidence, pin: "20261113T000000Z", kernel: "7.0.0-43.43~24.04.1", fixes: "13/13",
 	kmeta:   "Inst linux-image-virtual-hwe-24.04 [7.0.0-42.42~24.04.1] (7.0.0-43.43~24.04.1 ",
 	compare: "compare-9e31f226.tsv",
 	upgrades: map[string]string{
@@ -1582,11 +1583,25 @@ var fb1R10Selection = fb1Selection{
 	rows: 672, unchanged: 644,
 }
 
-// The manifest pin is the one the R10-F1 selection evidence authenticated; that
-// snapshot resolves exactly the approved kernel 7.0.0-43 and lists all thirteen
-// fixed versions; and against the 9e31f226 disk it moves exactly the reviewed
-// packages plus the 42 -> 43 kernel swap, with no other addition, removal,
-// downgrade, unknown origin or Docker change.
+// R11-F1 (19 Nov, owner direction of 19 Nov): the two Campaign 10 pre-pilot
+// blockers at their fixed versions, nothing else; the kernel stays at the
+// approved 7.0.0-43 (no kernel package added or removed). Evaluated against the
+// aea0845a disk's own dpkg status and APT preferences.
+var fb1R11Selection = fb1Selection{
+	dir: fb1SelectionEvidence, pin: fb1PinnedSnapshot, kernel: "7.0.0-43.43~24.04.1", fixes: "2/2",
+	kmeta:   "linux-image-virtual-hwe-24.04 is already the newest version (7.0.0-43.43~24.04.1)",
+	compare: "compare-aea0845a.tsv",
+	upgrades: map[string]string{
+		"needrestart": "3.6-7ubuntu4.6", "sosreport": "4.11.2-0ubuntu0~24.04.2",
+	},
+	rows: 668, unchanged: 662,
+}
+
+// The manifest pin is the one the R11-F1 selection evidence authenticated; that
+// snapshot resolves exactly the approved kernel 7.0.0-43 and lists both fixed
+// versions; and against the aea0845a disk it moves exactly the two reviewed
+// packages, with no addition, removal, downgrade, unknown origin, kernel or
+// Docker change.
 func TestAptSnapshotFB1_SelectedSnapshotMatchesItsEvidence(t *testing.T) {
 	m := fb1ManifestVars(t)
 	if m["GUEST_APT_SNAPSHOT"] != fb1PinnedSnapshot {
@@ -1597,6 +1612,13 @@ func TestAptSnapshotFB1_SelectedSnapshotMatchesItsEvidence(t *testing.T) {
 			t.Errorf("%s=%s, the selection evidence authenticated %s", fb1SuiteVar[suite], m[fb1SuiteVar[suite]], sum)
 		}
 	}
+	fb1CheckSelection(t, fb1R11Selection)
+}
+
+// History (R10-F1, 17 Nov): the superseded 20261113T000000Z selection stays
+// internally consistent. Kept as evidence integrity; it no longer binds the
+// manifest.
+func TestAptSnapshotFB1_R10SelectionEvidenceIsIntact(t *testing.T) {
 	fb1CheckSelection(t, fb1R10Selection)
 }
 

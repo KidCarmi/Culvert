@@ -1,0 +1,5 @@
+# package	version	suite-component	Filename	Size	SHA256 (from the gpgv-verified 20261118T000000Z index)
+needrestart	3.6-7ubuntu4.6	noble-security-main	pool/main/n/needrestart/needrestart_3.6-7ubuntu4.6_all.deb	49228	f6ad8a277fa0f6d22550fff4c4733c9662e9a4a9affa806c44921c1da6efd04d
+sosreport	4.11.2-0ubuntu0~24.04.2	noble-security-main	pool/main/s/sosreport/sosreport_4.11.2-0ubuntu0~24.04.2_amd64.deb	408076	a72edc62c8b809cd7c5cf5066e0b66f889c3b36ee2060d77cfb4fb4080f13c28
+needrestart	3.6-7ubuntu4.6	noble-updates-main	pool/main/n/needrestart/needrestart_3.6-7ubuntu4.6_all.deb	49228	f6ad8a277fa0f6d22550fff4c4733c9662e9a4a9affa806c44921c1da6efd04d
+sosreport	4.11.2-0ubuntu0~24.04.2	noble-updates-main	pool/main/s/sosreport/sosreport_4.11.2-0ubuntu0~24.04.2_amd64.deb	408076	a72edc62c8b809cd7c5cf5066e0b66f889c3b36ee2060d77cfb4fb4080f13c28

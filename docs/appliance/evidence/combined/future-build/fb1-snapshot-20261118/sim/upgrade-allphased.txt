@@ -1,0 +1,12 @@
+Reading package lists...
+Building dependency tree...
+Calculating upgrade...
+The following packages have been kept back:
+  docker-compose-plugin
+The following packages will be upgraded:
+  needrestart sosreport
+2 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.
+Inst needrestart [3.6-7ubuntu4.5] (3.6-7ubuntu4.6 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Inst sosreport [4.11.2-0ubuntu0~24.04.1] (4.11.2-0ubuntu0~24.04.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf needrestart (3.6-7ubuntu4.6 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Conf sosreport (4.11.2-0ubuntu0~24.04.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])

@@ -1,0 +1,3 @@
+Package: linux-tools-* bpftrace bpfcc-tools python3-bpfcc libbpfcc ubuntu-kernel-accessories
+Pin: release *
+Pin-Priority: -1

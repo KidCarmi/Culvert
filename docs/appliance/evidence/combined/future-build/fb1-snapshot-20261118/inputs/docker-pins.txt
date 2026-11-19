@@ -1,0 +1,4 @@
+containerd.io=2.4.2-4~ubuntu.24.04~noble
+docker-ce-cli=5:29.10.0-1~ubuntu.24.04~noble
+docker-ce=5:29.10.0-1~ubuntu.24.04~noble
+docker-compose-plugin=5.7.1-1~ubuntu.24.04~noble

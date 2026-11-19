@@ -10,6 +10,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 ### Security
 
 - **Appliance guest packages: the Ubuntu archive snapshot moves to
+  `20261118T000000Z` for the needrestart and sosreport fixes (owner
+  direction, PR #1528, 19 Nov).** needrestart 3.6-7ubuntu4.6 fixes
+  CVE-2026-124757, a local privilege escalation through its root apt/dpkg
+  hook; sosreport 4.11.2-0ubuntu0~24.04.2 fixes CVE-2026-79655 (`sos clean`
+  following out-of-tree tar members). It is the earliest snapshot listing both
+  fixed versions; the kernel stays at 7.0.0-43.43~24.04.1. Against the
+  previous candidate's own disk and APT preferences it moves exactly these two
+  packages, with nothing added, removed or downgraded. Evidence:
+  `docs/appliance/evidence/combined/future-build/fb1-snapshot-20261118/`.
+
+- **Appliance guest packages: the Ubuntu archive snapshot moves to
   `20261113T000000Z` and the guest kernel to 7.0.0-43.43~24.04.1 (owner
   decision, PR #1528, 17 Nov).** It ships the published fixes for glibc
   2.39-0ubuntu8.12 (including CVE-2026-86805, a dynamic-loader race allowing

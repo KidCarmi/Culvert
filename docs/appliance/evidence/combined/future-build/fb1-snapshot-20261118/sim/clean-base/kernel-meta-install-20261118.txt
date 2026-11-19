@@ -1,0 +1,27 @@
+Reading package lists...
+Building dependency tree...
+The following additional packages will be installed:
+  linux-image-7.0.0-43-generic
+  linux-main-modules-v4l2loopback-7.0.0-43-generic
+  linux-main-modules-zfs-7.0.0-43-generic linux-modules-7.0.0-43-generic
+  wireless-regdb
+Suggested packages:
+  linux-hwe-7.0-tools linux-headers-7.0.0-43-generic
+The following NEW packages will be installed:
+  linux-image-7.0.0-43-generic linux-image-virtual-hwe-24.04
+  linux-main-modules-v4l2loopback-7.0.0-43-generic
+  linux-main-modules-zfs-7.0.0-43-generic linux-modules-7.0.0-43-generic
+  wireless-regdb
+0 upgraded, 6 newly installed, 0 to remove and 92 not upgraded.
+Inst linux-main-modules-zfs-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst linux-main-modules-v4l2loopback-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst wireless-regdb (2026.05.30-0ubuntu1~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all]) []
+Inst linux-modules-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64]) []
+Inst linux-image-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst linux-image-virtual-hwe-24.04 (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf linux-main-modules-zfs-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf linux-main-modules-v4l2loopback-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf wireless-regdb (2026.05.30-0ubuntu1~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Conf linux-modules-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf linux-image-7.0.0-43-generic (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf linux-image-virtual-hwe-24.04 (7.0.0-43.43~24.04.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
