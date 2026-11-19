@@ -105,7 +105,7 @@ func TestChaos27_DedupMapIsBounded(t *testing.T) {
 	as := &Store{}
 	const floods = maxDedupEntries * 3
 	for i := 0; i < floods; i++ {
-		as.dedupSuppressed(fmt.Sprintf("policy_block:scan-host-%d.example", i))
+		as.dedupSuppressed("policy_block", fmt.Sprintf("scan-host-%d.example", i))
 	}
 
 	as.dedupMu.Lock()
@@ -131,7 +131,7 @@ func TestChaos27_DedupPruneIsAmortised(t *testing.T) {
 	as := &Store{}
 	const inserts = maxDedupEntries * 3
 	for i := 0; i < inserts; i++ {
-		as.dedupSuppressed(fmt.Sprintf("policy_block:scan-host-%d.example", i))
+		as.dedupSuppressed("policy_block", fmt.Sprintf("scan-host-%d.example", i))
 	}
 
 	as.dedupMu.Lock()
@@ -150,12 +150,12 @@ func TestChaos27_DedupPruneIsAmortised(t *testing.T) {
 func BenchmarkDedupSuppressedUnderFlood(b *testing.B) {
 	as := &Store{}
 	for i := 0; i < maxDedupEntries; i++ {
-		as.dedupSuppressed(fmt.Sprintf("policy_block:warm-%d.example", i))
+		as.dedupSuppressed("policy_block", fmt.Sprintf("warm-%d.example", i))
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		as.dedupSuppressed(fmt.Sprintf("policy_block:flood-%d.example", i))
+		as.dedupSuppressed("policy_block", fmt.Sprintf("flood-%d.example", i))
 	}
 }
 
@@ -174,7 +174,7 @@ func BenchmarkDedupSuppressedUnderFlood(b *testing.B) {
 func TestChaos27_QuietPeriodCountsNoPhantomEvictions(t *testing.T) {
 	as := &Store{}
 	for i := 0; i < maxDedupEntries; i++ {
-		as.dedupSuppressed(fmt.Sprintf("policy_block:flood-%d.example", i))
+		as.dedupSuppressed("policy_block", fmt.Sprintf("flood-%d.example", i))
 	}
 
 	// The flood ends and the window passes with no traffic. Real elapsed time
@@ -189,7 +189,7 @@ func TestChaos27_QuietPeriodCountsNoPhantomEvictions(t *testing.T) {
 	as.dedupMu.Unlock()
 
 	before := DedupEvictionsTotal()
-	if as.dedupSuppressed("cert_expiry:ca") {
+	if as.dedupSuppressed("cert_expiry", "ca") {
 		t.Fatal("a fresh key was reported as a duplicate")
 	}
 
@@ -214,13 +214,13 @@ func TestChaos27_QuietPeriodCountsNoPhantomEvictions(t *testing.T) {
 // still suppressed, and a distinct one is not.
 func TestChaos27_DedupStillSuppressesDuplicates(t *testing.T) {
 	as := &Store{}
-	if as.dedupSuppressed("policy_block:evil.example") {
+	if as.dedupSuppressed("policy_block", "evil.example") {
 		t.Fatal("first fire of a key was suppressed")
 	}
-	if !as.dedupSuppressed("policy_block:evil.example") {
+	if !as.dedupSuppressed("policy_block", "evil.example") {
 		t.Fatal("duplicate inside the dedup window was NOT suppressed")
 	}
-	if as.dedupSuppressed("policy_block:other.example") {
+	if as.dedupSuppressed("policy_block", "other.example") {
 		t.Fatal("a distinct detail was suppressed")
 	}
 }
@@ -230,13 +230,13 @@ func TestChaos27_DedupStillSuppressesDuplicates(t *testing.T) {
 // again rather than being silenced forever.
 func TestChaos27_DedupPrunesExpiredEntries(t *testing.T) {
 	as := &Store{}
-	as.dedupSuppressed("cert_expiry:ca")
+	as.dedupSuppressed("cert_expiry", "ca")
 
 	as.dedupMu.Lock()
 	as.dedupMap["cert_expiry:ca"] = time.Now().Add(-2 * dedupTTL)
 	as.dedupMu.Unlock()
 
-	if as.dedupSuppressed("cert_expiry:ca") {
+	if as.dedupSuppressed("cert_expiry", "ca") {
 		t.Fatal("an entry older than dedupTTL still suppressed its alert — alerts silenced permanently")
 	}
 }

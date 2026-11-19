@@ -52,17 +52,30 @@ func TestSave_DoesNotHoldMuDuringIO(t *testing.T) {
 	<-entered // persistence is now in flight and parked
 
 	// mu MUST already be released, so a reader has to complete promptly.
-	done := make(chan bool, 1)
-	go func() { done <- as.HasSubscriber("e") }()
+	//
+	// The probe is List, NOT HasSubscriber. HasSubscriber answers from the
+	// atomically published subscription index and takes no lock at all
+	// (subscriptions.go), so it completes promptly whether or not mu is held
+	// and cannot observe this invariant — when it was the only probe here, an
+	// implementation that persisted under mu passed both tests in this file.
+	// List takes mu.RLock, so it is the reader that still proves the point;
+	// the lock-free answer is asserted separately below.
+	done := make(chan int, 1)
+	go func() { done <- len(as.List()) }()
 
 	select {
 	case got := <-done:
-		if !got {
-			t.Error("HasSubscriber returned false for a subscribed event")
+		if got == 0 {
+			t.Error("List returned no webhooks while one was seeded")
 		}
 	case <-time.After(5 * time.Second):
-		t.Error("HasSubscriber blocked while a save was in flight — persistence is holding mu across disk I/O, " +
+		t.Error("List blocked while a save was in flight — persistence is holding mu across disk I/O, " +
 			"which stalls the proxy block and DNS-failure request paths")
+	}
+
+	// The index reader must also still answer, and must answer without mu.
+	if !as.HasSubscriber("e") {
+		t.Error("HasSubscriber returned false for a subscribed event")
 	}
 
 	close(release)
@@ -102,6 +115,13 @@ func TestSave_ReadersProceedDuringConcurrentMutations(t *testing.T) {
 			case <-stop:
 				return
 			default:
+			}
+			// List takes mu.RLock, so this arm starves if a mutation holds mu
+			// across its fsync; HasSubscriber alone would not (see
+			// TestSave_DoesNotHoldMuDuringIO for why).
+			if len(as.List()) == 0 {
+				t.Error("List saw no webhooks during concurrent mutation")
+				return
 			}
 			if !as.HasSubscriber("e") {
 				t.Error("seed subscriber vanished during concurrent mutation")

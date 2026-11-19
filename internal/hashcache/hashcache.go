@@ -44,8 +44,16 @@ type ScanCacheResult struct {
 type hashCacheEntry struct {
 	result    ScanCacheResult
 	expiresAt time.Time
-	key       string
-	idx       int // position in HashCache.byExpiry
+	// lifetime is the TTL this entry was stored with. It distinguishes an
+	// ordinary content verdict (lifetime == the cache's configured TTL) from a
+	// SetTTL entry that is about the SCANNER rather than the content — a
+	// fail-closed scan-timeout cooldown — which carries a deliberately much
+	// shorter lifetime. evictLocked needs that distinction: ordering purely by
+	// absolute expiry makes the short-lived entry the standing victim, which
+	// destroys the anti-stampede guard first (see liveVictimLocked).
+	lifetime time.Duration
+	key      string
+	idx      int // position in HashCache.byExpiry
 }
 
 // expiryHeap is a min-heap of entries ordered by expiresAt (container/heap).
@@ -219,7 +227,7 @@ func (c *HashCache) SetIfGeneration(hash string, result ScanCacheResult, gen uin
 // count does not change. Only a new key at capacity evicts.
 func (c *HashCache) storeLocked(hash string, result ScanCacheResult, ttl time.Duration) {
 	now := time.Now()
-	ne := &hashCacheEntry{result: result, expiresAt: now.Add(ttl), key: hash}
+	ne := &hashCacheEntry{result: result, expiresAt: now.Add(ttl), lifetime: ttl, key: hash}
 	if old, ok := c.entries[hash]; ok {
 		ne.idx = old.idx
 		c.byExpiry[ne.idx] = ne
@@ -297,9 +305,12 @@ const evictExpiredBatch = 64
 //     heap is ordered by expiry, so expired entries are exactly a prefix of
 //     its pop order: a LIVE entry is never dropped while an expired one
 //     remains (the invariant TestSet_EvictsExpiredFirst pins).
-//  2. If nothing was expired, drop the single live entry closest to expiry —
-//     the one with the least remaining value. A short-lived scan-timeout
-//     cooldown therefore goes before an hour-long content verdict.
+//  2. If nothing was expired, drop a live entry chosen by liveVictimLocked:
+//     the one closest to expiry AMONG entries carrying the full configured
+//     lifetime. Ordering live victims purely by absolute expiry made a
+//     short-lived scan-timeout cooldown the standing victim ahead of every
+//     hour-long content verdict, which is not a neutral choice — see
+//     liveVictimLocked.
 //
 // Cost: O(log maxSize) per evicted entry, at most evictExpiredBatch of them.
 // This replaces a full-map expiry sweep plus a 25 % arbitrary drop that ran on
@@ -310,13 +321,64 @@ const evictExpiredBatch = 64
 // so that stall grew with configuration; this one does not. See
 // roadmap/SCAN-CACHE-EVICTION-COST.md and BenchmarkSetIntoFull_*.
 //
-// Dropping a verdict early is never a security change: a miss re-scans, and
-// an entry is never served past its own expiry.
+// Dropping a content VERDICT early is never a security change: a miss
+// re-scans, and an entry is never served past its own expiry. That reasoning
+// does not extend to every entry — see liveVictimLocked.
 func (c *HashCache) evictLocked(now time.Time) {
 	for n := 0; n < evictExpiredBatch && len(c.byExpiry) > 0 && now.After(c.byExpiry[0].expiresAt); n++ {
 		c.removeLocked(c.byExpiry[0])
 	}
 	if len(c.entries) >= c.maxSize && len(c.byExpiry) > 0 {
-		c.removeLocked(c.byExpiry[0])
+		c.removeLocked(c.liveVictimLocked())
 	}
+}
+
+// evictVictimScan bounds how many heap slots liveVictimLocked inspects. The
+// eviction path runs under the exclusive lock on every insert into a full
+// cache, so the choice must stay O(1); eight slots are the heap's top three
+// levels, i.e. the entries already nearest the minimum expiry.
+const evictVictimScan = 8
+
+// liveVictimLocked picks which LIVE entry to sacrifice for a new key. Caller
+// holds c.mu for writing and has established that nothing is expired.
+//
+// "Closest to expiry" is the right victim among content verdicts, which all
+// carry the cache's configured TTL. It is the wrong victim once SetTTL entries
+// are in the same cache: those describe the SCANNER, not the content, and are
+// deliberately given a far shorter lifetime (secscan's scanTimeoutCooldown is
+// 30s against a default 1h content TTL). A pure minimum-expiry rule therefore
+// makes the cooldown the standing heap root, so at capacity it is evicted by
+// the very next insert of a new key — the fail-closed anti-stampede guard is
+// gone in exactly the regime it exists for, because its whole job is to absorb
+// a burst of requests for one hot object while the scanner is unhealthy. The
+// "a miss just re-scans" argument that makes dropping a verdict harmless is
+// what makes dropping this entry harmful: the re-scan IS the stampede.
+//
+// So the victim is the earliest-expiring entry that carries the full
+// configured lifetime, and a shorter-lived entry is chosen only when the
+// scanned slots offer no alternative — a cache dominated by cooldowns still
+// evicts cooldowns rather than growing past its bound.
+func (c *HashCache) liveVictimLocked() *hashCacheEntry {
+	root := c.byExpiry[0]
+	if root.lifetime >= c.ttl {
+		return root
+	}
+	n := len(c.byExpiry)
+	if n > evictVictimScan {
+		n = evictVictimScan
+	}
+	var best *hashCacheEntry
+	for i := 1; i < n; i++ {
+		e := c.byExpiry[i]
+		if e.lifetime < c.ttl {
+			continue
+		}
+		if best == nil || e.expiresAt.Before(best.expiresAt) {
+			best = e
+		}
+	}
+	if best == nil {
+		return root
+	}
+	return best
 }
