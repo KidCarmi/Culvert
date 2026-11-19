@@ -70,6 +70,11 @@ type hostCatScratch struct {
 	normHostSet bool
 	normHostVal string
 
+	// fqdnHost memoizes canonicalDestLiteral(normHost): the host the FQDN
+	// pattern check compares, once per scan. See fqdnHost() below.
+	fqdnHostSet bool
+	fqdnHostVal string
+
 	viewSet bool
 	view    *effectiveCategoryView
 
@@ -96,6 +101,23 @@ type hostCatScratch struct {
 // request; the non-scan callers (matchDest, the admin URL-lookup API) build a
 // throwaway one and are byte-identical to the pre-hoist behaviour.
 func newHostCatScratch(host string) hostCatScratch { return hostCatScratch{host: host} }
+
+// fqdnHost returns the host a rule's precomputed normFQDN is compared with:
+// normHost with an IP literal rewritten to its one canonical spelling
+// (canonicalDestLiteral), derived at most once per scan.
+//
+// It is deliberately NOT what the category, category-group and country checks
+// receive. Those match the host text their own data was configured with (a
+// custom category listing "2001:db8:0::1" is keyed by that spelling), so they
+// keep sc.host / normHost untouched; only the FQDN comparison is by address.
+// Every scan entry point (Stage-2, Stage-1 auth, CDR) reaches the FQDN check
+// through matchDestNorm with a scratch, so they share this one definition.
+func (sc *hostCatScratch) fqdnHost(normHost string) string {
+	if !sc.fqdnHostSet {
+		sc.fqdnHostVal, sc.fqdnHostSet = canonicalDestLiteral(normHost), true
+	}
+	return sc.fqdnHostVal
+}
 
 // newHostCatScratchNorm is newHostCatScratch for the callers that ALREADY hold
 // normalizeHost(host), which every scan entry point does: PolicyStore.Evaluate

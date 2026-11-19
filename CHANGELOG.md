@@ -9,6 +9,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A policy rule on an IP-literal destination now matches every spelling of
+  that address.** `destFqdn` literals were compared as text, so a Block/Drop
+  rule on `192.0.2.7` did not match `[::ffff:192.0.2.7]`, and one on
+  `2001:db8::1` did not match `2001:db8:0::1` or the bracketed `[2001:db8::1]`
+  of a port-less request; the request took a lower rule or the default action
+  and was forwarded to the address the rule names. Both the rule pattern and
+  the request host are now compared by address. Hostname and wildcard rules
+  are unchanged; an Allow rule on a literal likewise now covers the other
+  spellings of the same address
+  (`TestPolicyFlow_BlockedIPv4LiteralNotBypassedByMappedSpelling`).
 - **A fail-closed scan-timeout cooldown is no longer the scan cache's standing
   eviction victim (`SEC-SCANCACHE-VICTIM-1`).** The new heap eviction dropped
   the live entry closest to absolute expiry, which is the right victim among
