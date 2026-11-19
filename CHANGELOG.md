@@ -9,6 +9,65 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A fail-closed scan-timeout cooldown is no longer the scan cache's standing
+  eviction victim (`SEC-SCANCACHE-VICTIM-1`).** The new heap eviction dropped
+  the live entry closest to absolute expiry, which is the right victim among
+  content verdicts (all at the configured TTL) and the wrong one once
+  `SetTTL` entries share the cache: `internal/secscan`'s 30 s fail-closed
+  scan-timeout cooldown was always the heap root against a 1 h content TTL, so
+  at capacity it survived exactly **one** insert of any new key. The
+  anti-stampede guard — whose job is to absorb a burst of requests for one hot
+  object while the scanner is unhealthy — was therefore inert in the regime it
+  exists for, and each rescan it failed to suppress evicted another verdict in
+  turn. "A miss just re-scans" is what makes dropping a verdict harmless and
+  what makes dropping this entry harmful. `evictLocked` now defers to
+  `liveVictimLocked`: the victim is the earliest-expiring entry carrying the
+  full configured lifetime, and a shorter-lived one is chosen only when a
+  bounded 8-slot scan offers no alternative, so the bound stays exact and the
+  path stays O(log n). Uniform-TTL behaviour is unchanged
+  (`TestLiveEviction_ShortLivedEntrySurvivesNewKeyChurn`).
+- **A webhook update that omits the URL no longer blanks the stored
+  destination.** The admin API's shared payload gate admits a URL-less `PUT`
+  on the stated promise that "an empty URL on an update preserves the stored
+  one (see `Store.Update`)" — and `Store.Update` assigned the payload
+  wholesale, so a partial update that only renamed a hook or toggled it
+  cleared the URL while leaving the subscription in place. The subscription
+  index then still reported a subscriber, every matching alert was dispatched,
+  and each delivery died at the URL barrier: security alerts stopped arriving
+  with nothing failing loudly. `Store.Update` now carries the stored URL
+  forward, mirroring the existing `Secret` branch; an empty URL is never a
+  valid stored state, so no intent to clear is masked
+  (`TestUpdate_PreservesStoredURLWhenPayloadOmitsIt`).
+- **The `internal/alerts` "persistence never runs under `mu`" gate detects
+  again.** `HasSubscriber` became lock-free with the subscription index, and it
+  was the only reader probe in both regression tests for that invariant — so
+  an implementation that fsynced under `mu` passed the whole package. Both
+  probes now use `List`, which still takes `mu.RLock`, with the lock-free
+  answer asserted separately.
+- **Startup audit/request-log fallback lines sanitise their error text**
+  (CWE-117). Both printed `%v` on an error embedding the operator-configured
+  path and, for a wrapped syscall error, arbitrary OS-supplied bytes, while
+  the deferred-open retry code in the same block already applied the barrier.
+- **The deferred request-log open releases `writerMu` by `defer`.** The unlock
+  was explicit and straddled `startPersist()`, so a panic there left the lock
+  held for the process's life while the guarded retry loop recovered and
+  carried on — no crash, no alert, and every reader of the sink blocked. Since
+  the persistence queue blocks rather than load-sheds, a full queue would then
+  wedge every proxied request in `reqlog.Add`. Not reachable at the previous
+  revision; the invariant the retry loop documents now actually holds.
+- **`culvert-maint` rejects `.` and `..` as `ComposeFile` at the runner layer
+  too**, matching the installer and the config loader rather than leaving the
+  runner's copy of that acceptance set as the weakest of the three.
+- **`requiredScope` / `requiredAudience` are documented as credential-path
+  only** (`auth_oidc.go`, `config.example.yaml`). Both are evaluated on the
+  introspection response, so the browser SSO flow — which receives an ID token
+  carrying no scope claim, with its audience already pinned to the client id —
+  is not gated by them, and the captive-portal path must be restricted with
+  group/claim mapping. Documented rather than changed: enforcing it needs the
+  authorization request and the token-response check changed together, and
+  RFC 6749 §5.1 makes the response's `scope` optional, so getting either half
+  wrong locks every SSO user out. See `SEC-OIDC-FILTER-SCOPE-1` in
+  `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-18.md`.
 - **An OIDC profile's `requiredScope` / `requiredAudience` are now enforced for
   every token presented as a proxy credential.** The registry OIDC provider
   accepted a JWT that validated locally against the JWKS before it consulted

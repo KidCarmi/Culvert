@@ -50,6 +50,35 @@ per-call benchmarks were removed: a single eviction is now O(log n), so a
 benchmark rebuilding a full fixture per call can no longer converge. The
 historical sections below describe the old implementation.
 
+### Retention changed even though the TTLs did not (SEC-SCANCACHE-VICTIM-1)
+
+The commit message recorded "Verdicts, TTLs … are unchanged", which is true of
+each entry's own lifetime and not of **which** entry survives. Two consequences
+were found in the 2026-11-18 security regression review and are recorded here as
+reviewed trade-offs; see
+`docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-18.md`.
+
+1. **Fixed.** "Drop the entry closest to absolute expiry" made the 30 s
+   fail-closed scan-timeout cooldown (`internal/secscan`) the standing victim
+   ahead of every 1 h content verdict, so at capacity it survived exactly **one**
+   new-key insert — the anti-stampede guard was inert in the regime it exists
+   for. `evictLocked` now defers to `liveVictimLocked`, which picks the
+   earliest-expiring entry *carrying the full configured lifetime* and falls back
+   to a shorter-lived one only when a bounded scan of `evictVictimScan` (8) heap
+   slots offers no alternative. The cost shape above is unaffected: O(1) extra
+   comparisons plus the same O(log n) removal.
+2. **Accepted, not changed.** With a uniform TTL the policy is exactly FIFO, so a
+   cache flush now costs an attacker exactly `cache_size` distinct-content
+   fetches (deterministic) rather than ~4× that (the old 25 % arbitrary drop gave
+   each honest verdict repeated survival chances). FIFO is a defensible policy
+   and the performance win is real, so this stands as a decision. If
+   randomisation is wanted back, pick the live victim from a small random sample
+   of near-root candidates (power-of-k-choices) rather than the root itself.
+
+Open, not addressed: `Stats()` exposes only hits/misses/size, so eviction thrash
+is invisible in production. An eviction counter — as `auth_identity_cache.go`
+already carries — is what would make either behaviour observable outside a test.
+
 ## Question
 
 `internal/hashcache` is the SHA-256 scan-result cache consulted once per scanned
