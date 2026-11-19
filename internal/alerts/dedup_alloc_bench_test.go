@@ -336,7 +336,7 @@ func TestDispatchStampsTimestampOnDeliveredPayload(t *testing.T) {
 	snapshotRetryQueue(t)
 	snapshotRetryCounters(t)
 	saturateWebhookSem(t)
-	withRetryStateDir(t)
+	retryQueueInTempDir(t) // the default path is absolute; a Chdir would not redirect it
 
 	as := &Store{hooks: []Webhook{{
 		ID: "h1", Enabled: true, Events: []string{"policy_block"},
@@ -364,7 +364,7 @@ func TestDispatchPreservesCallerTimestamp(t *testing.T) {
 	snapshotRetryQueue(t)
 	snapshotRetryCounters(t)
 	saturateWebhookSem(t)
-	withRetryStateDir(t)
+	retryQueueInTempDir(t) // the default path is absolute; a Chdir would not redirect it
 
 	const stamp = "2020-01-02T03:04:05Z"
 	as := &Store{hooks: []Webhook{{
@@ -386,7 +386,7 @@ func TestDispatchSuppressedDeliversNothing(t *testing.T) {
 	snapshotRetryQueue(t)
 	snapshotRetryCounters(t)
 	saturateWebhookSem(t)
-	withRetryStateDir(t)
+	retryQueueInTempDir(t) // the default path is absolute; a Chdir would not redirect it
 
 	as := &Store{hooks: []Webhook{{
 		ID: "h1", Enabled: true, Events: []string{"policy_block"},
@@ -427,13 +427,6 @@ func saturateWebhookSem(t *testing.T) {
 			return
 		}
 	}
-}
-
-// withRetryStateDir points the retry queue's persistence at a temp directory so
-// these tests do not write the real state file.
-func withRetryStateDir(t *testing.T) {
-	t.Helper()
-	t.Chdir(t.TempDir())
 }
 
 // soleRetryPayload returns the single queued payload, failing if the count is
