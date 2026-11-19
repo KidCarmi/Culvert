@@ -8,6 +8,37 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-19 — `CHAOS-124` CLAIMED. Domain: the FIFTH BODY OF SECURITY
+INTELLIGENCE — the ClamAV SIGNATURE DATABASE's freshness plane. CHAOS-123
+closed the operator-configured blocklist feed's freshness gap and handed the
+CLASS forward in these words: "Apply the same audit to the remaining optional
+feeds… The doc counts THREE loops; the tree has more." This round is that
+audit, and what it found is not a feed: Culvert's four periodic feed loops
+(`internal/feedsync`, `internal/threatfeed`, `internal/saasfeed`,
+`internal/blocklistfeed`) now each export a last-success timestamp or an age,
+but the fifth body of intelligence this gateway enforces is the ClamAV
+signature database, which `freshclam` updates OUT OF PROCESS in a container
+Culvert does not supervise. Because there is no loop in this repository, there
+was no freshness surface in this repository — and the node already learns the
+build date on every five-minute `VERSION` poll (CHAOS-107) and discards it into
+an opaque cache key. A daemon with six-month-old definitions is reachable,
+answers PING and VERSION, scans every body and returns CLEAN: `/ready`'s
+`clamav` row, the `clamav_scan` diagnostics row, the `scan_clam_error` alert
+and compose's own `clamdscan --ping 3` all pass, forever, and a persistent
+`clamav-db` volume means a restart reloads the same stale database. The metric
+that looks like it covers this —
+`culvert_scan_sigdb_invalidations_total` — counts CHANGES, so a node whose
+updater died three weeks ago and a node that is current but quiet for an hour
+export a byte-identical value: the same mechanism WK-5/CHAOS-59 closed for the
+threat feed and CHAOS-123 closed for `culvert_blocklist_size`.** Id claimed in
+this committed row before the implementation commit, per the convention below
+and checked against `origin/main` rather than the working tree per the
+2026-09-25 amendment: `CHAOS-123` is the highest id anywhere on `origin/main`
+(at `491b963`). Of the open PRs (#1958, #1957, #1956, #1955, #1705, #1549,
+#1548, #1536, #1528, #1526) none is a chaos sweep and none claims a chaos id.
+This sweep took 124 and will not move.
+
+
 **2026-11-18 — `CHAOS-123` CLAIMED (placeholder, commit one). Domain: the
 OPERATOR-CONFIGURED REMOTE BLOCKLIST FEED's FRESHNESS PLANE — CHAOS-108 fixed
 that feed's cadence (a failed round no longer costs a full 24 h interval, the
