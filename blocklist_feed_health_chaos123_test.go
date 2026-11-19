@@ -645,3 +645,53 @@ func TestChaos123_SeriesAreRegisteredOnTheScrapeEndpoint(t *testing.T) {
 		}
 	}
 }
+
+// TestChaos123_SwitchingTheAlertedFeedToManualEndsTheEpisode — the third way a
+// feed leaves the monitored auto-sync set: an upsert to interval "off". It
+// stays configured (manual Sync Now only), so it is no longer measured, and
+// the episode it latched must end as it does on delete or restore.
+func TestChaos123_SwitchingTheAlertedFeedToManualEndsTheEpisode(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	fired := captureStaleAlert(t)
+	const a = "https://a.example.com/deny.txt"
+	const b = "https://b.example.com/deny.txt"
+	bs.SetFeed(a, time.Hour)
+	bs.seedStatus(a, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
+	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 1, Interval: time.Hour})
+	if len(*fired) != 1 {
+		t.Fatalf("feed A must page once, got %d: %v", len(*fired), *fired)
+	}
+
+	applyBlocklistFeedUpsert(a, 0) // the handler's path for interval "off"
+	blFeedSyncer.SetFeed(b, time.Hour)
+
+	blocklistFeedNow = func() time.Time { return now.Add(blocklistFeedNeverSyncedGrace + time.Minute) }
+	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 1, Interval: time.Hour})
+	if len(*fired) != 2 {
+		t.Fatalf("feed B's outage must page after the alerted feed A was switched to manual, got %d: %v", len(*fired), *fired)
+	}
+}
+
+// TestChaos123_RetimingAnAutoSyncFeedKeepsTheEpisode is the control: a feed
+// that stays auto-synced (one interval to another) is still monitored, so its
+// open episode must NOT end — that would re-page an outage already paged.
+func TestChaos123_RetimingAnAutoSyncFeedKeepsTheEpisode(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	fired := captureStaleAlert(t)
+	const a = "https://a.example.com/deny.txt"
+	bs.SetFeed(a, time.Hour)
+	bs.seedStatus(a, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
+	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 1, Interval: time.Hour})
+	if len(*fired) != 1 {
+		t.Fatalf("feed A must page once, got %d: %v", len(*fired), *fired)
+	}
+
+	applyBlocklistFeedUpsert(a, 2*time.Hour)
+	bs.seedStatus(a, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
+	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 2, Interval: 2 * time.Hour})
+	if len(*fired) != 1 {
+		t.Fatalf("re-timing a still-monitored feed must not re-page its open episode, got %d: %v", len(*fired), *fired)
+	}
+}

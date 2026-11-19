@@ -335,7 +335,7 @@ func blocklistFeedUpsert(w http.ResponseWriter, r *http.Request) {
 	} else {
 		interval = blFeedDefaultInterval
 	}
-	blFeedSyncer.SetFeed(body.URL, interval)
+	applyBlocklistFeedUpsert(body.URL, interval) // ends a stale-alert episode on auto-sync → off
 	auditEvent(r, "blocklist.feed.set", body.URL, "")
 	adminSettingsSave()
 	jsonOK(w, map[string]any{"ok": true, "url": body.URL, "interval": interval.String()})

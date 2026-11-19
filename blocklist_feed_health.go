@@ -301,6 +301,26 @@ func noteBlocklistFeedsRemoved() {
 	}
 }
 
+// applyBlocklistFeedUpsert applies an admin feed upsert. Switching an auto-sync
+// feed to manual (interval 0, "off") takes it out of the monitored set exactly
+// as a removal does, so it ends the alert episode the same way: otherwise a
+// latch set by that feed would suppress a different feed's later outage.
+// Changing between two auto-sync intervals keeps the feed monitored and leaves
+// the episode alone.
+func applyBlocklistFeedUpsert(feedURL string, interval time.Duration) {
+	wasAutoSync := false
+	for _, f := range blFeedSyncer.Feeds() {
+		if f.URL == feedURL {
+			wasAutoSync = f.Interval > 0
+			break
+		}
+	}
+	blFeedSyncer.SetFeed(feedURL, interval)
+	if wasAutoSync && interval == 0 {
+		noteBlocklistFeedsRemoved()
+	}
+}
+
 // evaluateBlocklistFeedStaleness fires the stale alert at most once per
 // episode.
 func evaluateBlocklistFeedStaleness() {
