@@ -1721,7 +1721,9 @@ func evalAccessRules(rules []*PolicyRule, rows []policyScanRow, in *accessEvalIn
 	// The prefilter skips rules whose 16-byte packed row already PROVES a
 	// destination mismatch, so their definitions are never streamed; it can
 	// prove nothing else. See policy_scanindex.go.
-	pre := newDestPrefilter(rows, len(rules), in.normHost, trace != nil)
+	// It compares against the published patterns, so it takes the same
+	// address-canonical host the FQDN check does (hostCatScratch.fqdnHost).
+	pre := newDestPrefilter(rows, len(rules), catScratch.fqdnHost(in.normHost), trace != nil)
 	for i := range rules {
 		if pre.rejectsAt(i) {
 			continue
@@ -1785,10 +1787,6 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	// (CHAOS-60: geo.LookupCached is cache-only and warms off-path), but the
 	// release stays load-bearing for the category half.
 	rules := ps.evaluationSnapshot()
-
-	// An IP-literal destination is decided by ADDRESS, not spelling. Rewritten
-	// before `in` is built so in.normHost stays normalizeHost(in.host).
-	host = canonicalDestLiteral(host)
 
 	// Enforcement path: the canonical core with the wall clock and no trace (the
 	// nil-trace branch is allocation-free). Normalize the destination host ONCE
@@ -2513,7 +2511,7 @@ func matchDestNorm(rule *PolicyRule, host, normHost string, sc *hostCatScratch) 
 	// depends on normFQDN having been precomputed.
 	if fqdnSet {
 		if rule.normFQDN != "" {
-			if !matchFQDNNorm(rule.normFQDN, normHost) {
+			if !matchFQDNNorm(rule.normFQDN, sc.fqdnHost(normHost)) {
 				return false
 			}
 		} else if !matchFQDN(rule.DestFQDN, host) {

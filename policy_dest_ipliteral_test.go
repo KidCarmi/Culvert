@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/urlcat"
 )
 
 // A rule whose DestFQDN is an IP literal names an ADDRESS. The proxy dials the
@@ -128,5 +130,39 @@ func TestPolicyFlow_BlockedIPv4LiteralNotBypassedByMappedSpelling(t *testing.T) 
 	}
 	if got := ruleHitCount("block-v4-literal"); got != 1 {
 		t.Errorf("block rule hit count = %d, want 1", got)
+	}
+}
+
+// TestPolicyDestLiteral_CategoryAndOtherScansKeepTheirHost pins the scope of
+// the canonicalization: it is an FQDN-comparison rule only. The category
+// matcher compares the configured host text, so the host it is handed must not
+// be rewritten (a category listing "2001:db8:0::1" has to keep matching the
+// request that spells it that way), and the Stage-1 / CDR scans, which call
+// matchDestNorm with their own normalized host, must agree with a published
+// pattern in any spelling.
+func TestPolicyDestLiteral_CategoryAndOtherScansKeepTheirHost(t *testing.T) {
+	const cat = "literal-spelling-cat"
+	orig := catStore
+	catStore = urlcat.New([]*urlcat.Entry{{Name: cat, Hosts: []string{"2001:db8:0::1"}}})
+	t.Cleanup(func() { catStore = orig })
+
+	ps := &PolicyStore{}
+	ps.Add(PolicyRule{Priority: 1, Name: "drop-cat", DestCategory: URLCategory(cat), Action: ActionDrop})
+	if !matchCategory(URLCategory(cat), "2001:db8:0::1") {
+		t.Fatal("precondition: the category matcher does not match its own configured host")
+	}
+	if ps.Evaluate("10.0.0.1", "", "", "2001:db8:0::1", nil) == nil {
+		t.Error("category rule stopped matching the host spelling its category lists")
+	}
+
+	// A published literal pattern, reached the way Stage-1 and CDR reach it.
+	ps = &PolicyStore{}
+	ps.Add(PolicyRule{Priority: 1, Name: "drop-literal", DestFQDN: "[2001:DB8::1]", Action: ActionDrop})
+	rule := ps.evaluationSnapshot()[0]
+	for _, host := range []string{"[2001:db8::1]", "2001:db8::1", "2001:db8:0::1"} {
+		sc := newHostCatScratch(host)
+		if !matchDestNorm(rule, host, normalizeHost(host), &sc) {
+			t.Errorf("matchDestNorm(published %q, %q) = false, want true", rule.DestFQDN, host)
+		}
 	}
 }

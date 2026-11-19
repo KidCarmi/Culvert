@@ -14,8 +14,10 @@ import (
 // "2001:db8::1" did not match "2001:db8:0::1" or the bracketed "[2001:db8::1]"
 // that r.Host carries on a port-less absolute-URI request — the request fell
 // through to a lower rule or the default action and was forwarded to the
-// address the rule names. It is applied to BOTH sides (the published pattern
-// and the request host), so the operator's spelling does not matter either.
+// address the rule names. It is applied to BOTH sides of the FQDN comparison
+// (the published pattern in sortLocked, the request host in
+// hostCatScratch.fqdnHost), so the operator's spelling does not matter either.
+// It is NOT applied to the host the category and country checks receive.
 //
 // The canonical form is the bare netip text with a 4-in-6 address unmapped:
 // exactly the shape the common "[v6]:port" and dotted-quad paths already hand
