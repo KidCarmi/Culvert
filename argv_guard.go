@@ -98,6 +98,9 @@ import (
 // It is a distinct type so tests can assert the refusal rather than a string.
 type errPositionalArgs struct {
 	args []string
+	// isBoolFlag reports whether a flag name is a defined boolean flag, so the
+	// redaction knows which flags do NOT consume the following token.
+	isBoolFlag func(name string) bool
 }
 
 func (e *errPositionalArgs) Error() string {
@@ -107,7 +110,7 @@ func (e *errPositionalArgs) Error() string {
 	// tail can carry credential flags (-pass, -metrics-token, …) and stderr is
 	// collected by every orchestrator, so their values must not be printed.
 	first := sanitizeLog(e.args[0])
-	rest := sanitizeLog(redactArgValues(e.args[1:]))
+	rest := sanitizeLog(redactArgValuesWith(e.args[1:], e.isBoolFlag))
 	return fmt.Sprintf("refusing to start: %d unparsed command-line argument(s) beginning with %q (discarded after it, values redacted: %q). "+
 		"Go's flag package stops at the first argument that does not begin with \"-\", so EVERY flag after it was "+
 		"discarded — which would have started this process with those settings at their defaults (no persisted Root "+
@@ -118,23 +121,51 @@ func (e *errPositionalArgs) Error() string {
 		len(e.args), first, rest)
 }
 
-// redactArgValues keeps each flag NAME in an argv tail and replaces every value
-// — a token that is not a flag, or the part of `-flag=value` after "=" — with
-// <value>. The names alone say which settings were discarded; a value may be a
-// password or token.
-func redactArgValues(args []string) string {
+// redactArgValuesWith keeps each flag NAME in an argv tail and replaces every
+// value — a token that is not a flag, the part of `-flag=value` after "=", or
+// the token that FOLLOWS a `-flag` written without "=" — with <value>. The
+// names alone say which settings were discarded; a value may be a password or
+// token.
+//
+// A value is identified by POSITION, not by its first byte: the flag package
+// hands a non-boolean flag the next token whatever it starts with, so in
+// `-pass -Hunter2` the "-Hunter2" is the password. Only a defined boolean flag
+// (isBoolFlag) leaves the next token unconsumed. An unknown name is treated as
+// taking a value, so an ambiguous token is redacted rather than printed.
+func redactArgValuesWith(args []string, isBoolFlag func(name string) bool) string {
 	out := make([]string, 0, len(args))
+	valueNext := false
 	for _, a := range args {
+		if valueNext {
+			out = append(out, "<value>")
+			valueNext = false
+			continue
+		}
 		if len(a) < 2 || a[0] != '-' {
 			out = append(out, "<value>")
 			continue
 		}
 		if name, _, ok := strings.Cut(a, "="); ok {
-			a = name + "=<value>"
+			out = append(out, name+"=<value>")
+			continue
 		}
+		valueNext = isBoolFlag == nil || !isBoolFlag(strings.TrimPrefix(a[1:], "-"))
 		out = append(out, a)
 	}
 	return strings.Join(out, " ")
+}
+
+// boolFlagIn reports, for fs, whether name is a defined boolean flag (the
+// flag package's own IsBoolFlag test).
+func boolFlagIn(fs *flag.FlagSet) func(name string) bool {
+	return func(name string) bool {
+		f := fs.Lookup(name)
+		if f == nil {
+			return false
+		}
+		b, ok := f.Value.(interface{ IsBoolFlag() bool })
+		return ok && b.IsBoolFlag()
+	}
 }
 
 // refusePositionalArgs reports an argv that flag.Parse could not fully consume.
@@ -150,7 +181,7 @@ func refusePositionalArgs(prepareDowngrade bool, args []string) error {
 	if prepareDowngrade {
 		return nil
 	}
-	return &errPositionalArgs{args: args}
+	return &errPositionalArgs{args: args, isBoolFlag: boolFlagIn(flag.CommandLine)}
 }
 
 // checkPositionalArgs is the main() seam: it reads the real global flag set.
