@@ -91,6 +91,11 @@ const (
 	// against a cadence the scheduler cannot deliver (CHAOS-123).
 	TickInterval = 60 * time.Second
 
+	// jitterFrac is the ±fraction of the per-feed stable jitter offset. Named
+	// here, not left to feedsched's default, because MaxHealthyGap must bound
+	// the same cadence the scheduler is configured with.
+	jitterFrac = feedsched.DefaultJitterFrac
+
 	maxRedirects = 5
 
 	// DefaultInterval is the fallback auto-sync interval when none is
@@ -194,7 +199,8 @@ func (bs *Syncer) newFeedScheduler(st *feedState) *feedsched.Scheduler {
 		// nil in production, so feedsched draws one StableJitter offset per
 		// feed: spread across the fleet and across this node's own feeds,
 		// chosen once rather than re-rolled per tick.
-		Jitter: bs.jitter,
+		Jitter:     bs.jitter,
+		JitterFrac: jitterFrac,
 	})
 }
 
@@ -214,6 +220,27 @@ func (bs *Syncer) scheduleNextLocked(st *feedState, ok bool) time.Duration {
 	d := st.sched.NextDelay(ok)
 	st.nextAttempt = st.lastAttempt.Add(d)
 	return d
+}
+
+// MaxHealthyGap is the longest a feed whose every round succeeds can go
+// between the starts of two consecutive auto-sync attempts at interval.
+//
+// Two things stretch the configured interval. The stable jitter offset can add
+// up to jitterFrac of it, and a feed becomes due between ticks but is only
+// fetched on the next one, which Start arms TickInterval after the previous
+// round ENDS. So a 60 s feed with +5% jitter misses the tick at 60 s (due at
+// 63 s) and is fetched on the one after: about 120 s apart, not 60 s.
+//
+// The round's own duration is not included: it is unbounded here (many feeds,
+// each up to httpTimeout) and a caller measuring freshness should absorb it
+// with a margin, the way package main's stale factor does. Exported for that
+// freshness plane, which must not measure staleness against a cadence the
+// scheduler cannot deliver (CHAOS-123).
+func MaxHealthyGap(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return TickInterval
+	}
+	return interval + time.Duration(float64(interval)*jitterFrac) + TickInterval
 }
 
 // New creates an empty syncer for bl. Feeds are added via SetFeed (startup

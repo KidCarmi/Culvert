@@ -529,6 +529,40 @@ func TestChaos123_SubTickIntervalIsMeasuredAgainstTheSchedulerTick(t *testing.T)
 	}
 }
 
+// TestChaos123_JitteredTickRoundingIsNotStale — a 60 s feed with a positive
+// stable jitter offset is due just after the tick at 60 s, so it is fetched on
+// the tick after: about 120 s from the previous success, plus the fetch. A
+// bound of 2x max(interval, tick) = 120 s read that healthy feed stale for the
+// length of every fetch, flapping culvert_blocklist_feed_sync_ok to 0.
+func TestChaos123_JitteredTickRoundingIsNotStale(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	fired := captureStaleAlert(t)
+	const feed = "https://feeds.example.com/deny.txt"
+	const interval = time.Minute
+	bs.SetFeed(feed, interval)
+	// Two ticks plus a 10 s fetch since the last success: the healthy cadence.
+	last := now.Add(-(2*blocklistfeed.TickInterval + 10*time.Second))
+	bs.seedStatus(feed, last, last, "")
+
+	if snap := blocklistFeedState(); snap.StaleFeeds != 0 {
+		t.Fatalf("a 60s feed fetched on the second tick is on its jittered cadence, got %+v", snap)
+	}
+	evaluateBlocklistFeedStaleness()
+	if len(*fired) != 0 {
+		t.Fatalf("a feed on its jittered cadence must not page, got %v", *fired)
+	}
+	wantSeries(t, blFeedMetrics(), "culvert_blocklist_feed_sync_ok", 1)
+
+	// Negative control: the floor is the healthy cadence plus one tick, not a
+	// blanket allowance. Past it the feed is stale.
+	bound := blocklistfeed.MaxHealthyGap(interval) + blocklistfeed.TickInterval
+	blocklistFeedNow = func() time.Time { return last.Add(bound) }
+	if snap := blocklistFeedState(); snap.StaleFeeds != 1 {
+		t.Fatalf("a 60s feed with no success for %v is stale, got %+v", bound, snap)
+	}
+}
+
 // ─── group 3: containment ────────────────────────────────────────────────────
 
 // TestChaos123_NoSurfaceCarriesTheFeedURL is the leak gate.
@@ -697,14 +731,14 @@ func TestChaos123_RetimingAnAutoSyncFeedKeepsTheEpisode(t *testing.T) {
 }
 
 // TestChaos123_NeverSyncedFeedInGraceDoesNotRelabelAStaleOne — Codex's case:
-// three minutes after startup, feed A (1m interval) synced once and is now
-// stale, while feed B has never synced but is still inside the 15-minute
+// seven minutes after startup, feed A (1m interval) synced once and is now
+// stale (past its ~3m stale bound), while feed B has never synced but is still inside the 15-minute
 // grace, so it is NOT stale. Both raw counters are 1. The stale feed did sync,
 // so the alert and the diagnostics row must say "stale", not "NEVER synced".
 func TestChaos123_NeverSyncedFeedInGraceDoesNotRelabelAStaleOne(t *testing.T) {
 	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
 	bs := blFeedHealthTest(t, start)
-	now := start.Add(3 * time.Minute)
+	now := start.Add(7 * time.Minute)
 	blocklistFeedNow = func() time.Time { return now }
 	const a = "https://a.example.com/deny.txt"
 	const b = "https://b.example.com/deny.txt"

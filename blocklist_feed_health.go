@@ -113,7 +113,8 @@ import (
 const (
 	// blocklistFeedStaleFactor is how many of a feed's own configured
 	// intervals of no successful sync make it STALE. Two, matching
-	// threatFeedStaleFactor and the register's recommendation.
+	// threatFeedStaleFactor and the register's recommendation. Floored by
+	// blocklistFeedStaleAfter for intervals near the scheduler tick.
 	//
 	// One interval would page on a single missed window, which is exactly the
 	// transient CHAOS-108's backoff ladder exists to absorb: that ladder is
@@ -483,22 +484,27 @@ func (snap *blocklistFeedSnapshot) accumulateAutoSync(f *blocklistfeed.Feed, sta
 		age = 0
 	}
 	snap.noteAge(age)
-	if age >= time.Duration(blocklistFeedStaleFactor)*blocklistFeedEffectiveInterval(f.Interval) {
+	if age >= blocklistFeedStaleAfter(f.Interval) {
 		snap.StaleFeeds++
 	}
 }
 
-// blocklistFeedEffectiveInterval is the cadence a feed can actually be synced
-// at: its configured interval, but never finer than the scheduler's tick.
+// blocklistFeedStaleAfter is how long an auto-sync feed may go without a
+// successful sync before it reads stale: blocklistFeedStaleFactor intervals,
+// but never less than the longest gap the scheduler gives a HEALTHY feed plus
+// one tick of margin for the round itself.
 //
-// The admin API accepts any positive interval (a wire/config contract this
-// plane does not narrow), while the scheduler only checks for due feeds once
-// per blocklistfeed.TickInterval. Measured against 2x a 10 s interval, a feed
-// that succeeds on every round the scheduler gives it would read stale for most
-// of each tick and page a healthy node; measured against the tick it reads
-// stale only after two whole ticks with no success.
-func blocklistFeedEffectiveInterval(interval time.Duration) time.Duration {
-	return max(interval, blocklistfeed.TickInterval)
+// The floor matters only near the tick. The admin API accepts any positive
+// interval (a wire/config contract this plane does not narrow), while the
+// scheduler fetches only on its tick and adds a stable jitter offset, so a
+// 10 s feed is synced once per tick and a 60 s feed with positive jitter is
+// due just after one tick and fetched on the next: about 120 s apart. Against
+// a bare 2x interval, a feed succeeding on every round it is given would read
+// stale for part of each cycle and page a healthy node. For longer intervals
+// 2x already clears that gap and the documented threshold is unchanged.
+func blocklistFeedStaleAfter(interval time.Duration) time.Duration {
+	return max(time.Duration(blocklistFeedStaleFactor)*interval,
+		blocklistfeed.MaxHealthyGap(interval)+blocklistfeed.TickInterval)
 }
 
 // noteAge keeps WorstAge at the largest age seen.

@@ -49,10 +49,15 @@ ever sync it. See [Auto-sync off](#the-auto-sync-off-case) below.
 | Body/line budget | bounded; an origin that overruns it fails the round rather than importing a truncated list |
 
 The interval is per feed, so the staleness threshold below is per feed too.
-An interval shorter than the 60 s tick is accepted, but the feed is still only
-synced once per tick, so its staleness is measured against the tick: such a
-feed reads stale after 2 minutes with no success, not after 2× its configured
-interval.
+A feed is stale after 2× its configured interval with no success, with one
+floor near the 60 s tick. The scheduler fetches only on its tick and adds the
+jitter offset (up to +10%), so a short interval cannot be delivered exactly: a
+10 s feed is synced once per tick, and a 60 s feed with positive jitter is due
+just after one tick and fetched on the next, about 2 minutes apart. Such a feed
+reads stale only after its interval plus jitter plus two ticks (roughly 2–3
+minutes), so a feed that succeeds on every round it is given never pages. From
+an interval of about 2¼ minutes up, 2× the interval is the larger bound and
+applies unchanged.
 
 Jitter and the sub-interval retry ceiling are both deliberate. Without jitter,
 every node in a fleet that booted together would fetch from the same origin at
@@ -79,7 +84,7 @@ scraped unauthenticated. Per-feed detail is on the role-gated
 | `culvert_blocklist_feed_manual_never_synced` | Feeds with auto-sync **off** that have never synced — configured, contributing nothing, and nothing will sync them |
 | `culvert_blocklist_feed_failing` | Feeds whose most recent *attempt* failed |
 | `culvert_blocklist_feed_never_synced` | Auto-synced feeds with no successful sync on this node |
-| `culvert_blocklist_feed_stale` | Auto-synced feeds with no success for over 2× their interval (or never, past the 15-minute startup grace) |
+| `culvert_blocklist_feed_stale` | Auto-synced feeds with no success for over 2× their interval, floored near the tick (or never, past the 15-minute startup grace) |
 | `culvert_blocklist_feed_stale_seconds` | Age of the **oldest** auto-synced feed; measured from startup when it has never succeeded |
 | `culvert_blocklist_feed_oldest_success_timestamp_seconds` | Unix time of the oldest last-success (**0** = at least one feed has never synced) |
 | `culvert_blocklist_feed_sync_ok` | 1 when every feed's latest attempt succeeded and none is stale |
@@ -142,7 +147,7 @@ at once, because the operator actions differ:
 | Row | Condition |
 |---|---|
 | *(no row)* | No feed configured, or every feed fresh and succeeding |
-| **warn** — "are stale" / "have NEVER synced" | Auto-synced feed past 2× its interval, or past the startup grace with no success |
+| **warn** — "are stale" / "have NEVER synced" | Auto-synced feed past 2× its interval (floored near the tick), or past the startup grace with no success |
 | **warn** — "failed their latest sync" | The most recent attempt failed; already-imported entries still enforced |
 | **warn** — "auto-sync turned off and have never been synced" | Configured but unscheduled — see below |
 
