@@ -695,3 +695,42 @@ func TestChaos123_RetimingAnAutoSyncFeedKeepsTheEpisode(t *testing.T) {
 		t.Fatalf("re-timing a still-monitored feed must not re-page its open episode, got %d: %v", len(*fired), *fired)
 	}
 }
+
+// TestChaos123_NeverSyncedFeedInGraceDoesNotRelabelAStaleOne — Codex's case:
+// three minutes after startup, feed A (1m interval) synced once and is now
+// stale, while feed B has never synced but is still inside the 15-minute
+// grace, so it is NOT stale. Both raw counters are 1. The stale feed did sync,
+// so the alert and the diagnostics row must say "stale", not "NEVER synced".
+func TestChaos123_NeverSyncedFeedInGraceDoesNotRelabelAStaleOne(t *testing.T) {
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, start)
+	now := start.Add(3 * time.Minute)
+	blocklistFeedNow = func() time.Time { return now }
+	const a = "https://a.example.com/deny.txt"
+	const b = "https://b.example.com/deny.txt"
+	bs.SetFeed(a, time.Minute)
+	bs.SetFeed(b, time.Hour)
+	bs.seedStatus(a, start.Add(30*time.Second), now.Add(-time.Second), "fetch: connection refused")
+
+	snap := blocklistFeedState()
+	if snap.StaleFeeds != 1 || snap.NeverSyncedFeeds != 1 || snap.StaleNeverSyncedFeeds != 0 {
+		t.Fatalf("want 1 stale (A), 1 never-synced in grace (B), 0 both; got %+v", snap)
+	}
+	if d := blocklistFeedAlertDetail(snap); strings.Contains(d, "NEVER") || !strings.Contains(d, "are stale") {
+		t.Errorf("alert must describe A's stale imports, got %q", d)
+	}
+	var row *OperatorContractCheck
+	for _, c := range checkBlocklistFeeds() {
+		// A also failed its latest attempt, which is its own row; the
+		// staleness row is the one about auto-synced feeds.
+		if c.Code == "blocklist_feed" && strings.Contains(c.Message, "auto-synced") {
+			row = &c
+		}
+	}
+	if row == nil {
+		t.Fatal("no blocklist_feed staleness row for the stale feed")
+	}
+	if strings.Contains(row.Message, "NEVER") || !strings.Contains(row.Message, "are stale") {
+		t.Errorf("diagnostics row must describe A's stale imports, got %q", row.Message)
+	}
+}

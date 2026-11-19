@@ -340,10 +340,10 @@ func evaluateBlocklistFeedStaleness() {
 
 // blocklistFeedAlertDetail renders the bounded alert detail.
 func blocklistFeedAlertDetail(snap blocklistFeedSnapshot) string {
-	if snap.NeverSyncedFeeds == snap.StaleFeeds {
+	if snap.StaleNeverSyncedFeeds == snap.StaleFeeds {
 		return fmt.Sprintf(
 			"%d of %d auto-synced remote blocklist feed(s) have NEVER synced successfully on this node (%s since startup); those feeds contribute no entries at all, so the destinations they were added to block are not being blocked",
-			snap.NeverSyncedFeeds, snap.AutoSyncFeeds, snap.WorstAge.Round(time.Minute))
+			snap.StaleNeverSyncedFeeds, snap.AutoSyncFeeds, snap.WorstAge.Round(time.Minute))
 	}
 	return fmt.Sprintf(
 		"%d of %d auto-synced remote blocklist feed(s) are stale: the oldest successful sync was %s ago, over %dx its configured interval; the blocklist keeps its already-imported entries but is not receiving new ones",
@@ -369,9 +369,13 @@ type blocklistFeedSnapshot struct {
 	// not survive a restart.
 	FailingFeeds int
 	// NeverSyncedFeeds and StaleFeeds count AUTO-SYNC feeds only.
-	// NeverSyncedFeeds is a subset of StaleFeeds once the grace has elapsed.
-	NeverSyncedFeeds int
-	StaleFeeds       int
+	// NeverSyncedFeeds includes feeds still inside the startup grace, so it is
+	// NOT a subset of StaleFeeds; StaleNeverSyncedFeeds is the intersection
+	// (never synced AND past the grace), the count that decides whether the
+	// stale feeds are all never-synced ones.
+	NeverSyncedFeeds      int
+	StaleFeeds            int
+	StaleNeverSyncedFeeds int
 	// WorstAge is the largest age among auto-sync feeds: time since that
 	// feed's last success, or since this plane was armed for one that has
 	// never succeeded.
@@ -463,6 +467,7 @@ func (snap *blocklistFeedSnapshot) accumulateAutoSync(f *blocklistfeed.Feed, sta
 		snap.noteAge(age)
 		if age >= blocklistFeedNeverSyncedGrace {
 			snap.StaleFeeds++
+			snap.StaleNeverSyncedFeeds++
 		}
 		return
 	}
@@ -528,9 +533,9 @@ func checkBlocklistFeeds() []OperatorContractCheck {
 	if snap.StaleFeeds > 0 {
 		msg := fmt.Sprintf("%d of %d auto-synced blocklist feed(s) are stale — the oldest successful sync was %s ago (over %dx its configured interval); the blocklist keeps its already-imported entries but is not receiving new ones",
 			snap.StaleFeeds, snap.AutoSyncFeeds, snap.WorstAge.Round(time.Minute), blocklistFeedStaleFactor)
-		if snap.NeverSyncedFeeds == snap.StaleFeeds {
+		if snap.StaleNeverSyncedFeeds == snap.StaleFeeds {
 			msg = fmt.Sprintf("%d of %d auto-synced blocklist feed(s) have NEVER synced successfully on this node (%s since startup) — those feeds contribute no entries at all, so the destinations they were added to block are not being blocked",
-				snap.NeverSyncedFeeds, snap.AutoSyncFeeds, snap.WorstAge.Round(time.Minute))
+				snap.StaleNeverSyncedFeeds, snap.AutoSyncFeeds, snap.WorstAge.Round(time.Minute))
 		}
 		rows = append(rows, OperatorContractCheck{
 			Code:           "blocklist_feed",
