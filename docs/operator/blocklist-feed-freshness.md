@@ -49,6 +49,10 @@ ever sync it. See [Auto-sync off](#the-auto-sync-off-case) below.
 | Body/line budget | bounded; an origin that overruns it fails the round rather than importing a truncated list |
 
 The interval is per feed, so the staleness threshold below is per feed too.
+An interval shorter than the 60 s tick is accepted, but the feed is still only
+synced once per tick, so its staleness is measured against the tick: such a
+feed reads stale after 2 minutes with no success, not after 2× its configured
+interval.
 
 Jitter and the sub-interval retry ceiling are both deliberate. Without jitter,
 every node in a fleet that booted together would fetch from the same origin at
@@ -114,6 +118,12 @@ staleness threshold, not on every failed round — and does not fire again until
 every auto-synced feed has been *observed* fresh. Elapsed time never clears it:
 a feed that has stopped reporting failures because nothing is running looks
 identical to a healthy one.
+
+Removing feeds — deleting one in the GUI/API, or a settings restore that
+replaces the feed list — also ends the episode, because a removed feed never
+reports again. Any feed that is still stale alerts again on its next failed
+round, so a different feed that is broken from its first attempt is not
+silenced by the removed feed's earlier page.
 
 Its detail carries counts, an age and an interval. It deliberately carries **no
 feed URL and no error text**: the URL routinely embeds a token, and the error

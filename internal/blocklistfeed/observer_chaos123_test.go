@@ -222,14 +222,37 @@ func TestChaos123_NilObserverIsTheDefaultAndClearable(t *testing.T) {
 	}
 }
 
-func TestChaos123_SeedFeedStatusForTestRequiresAConfiguredFeed(t *testing.T) {
+// seedFeedStatus overwrites one configured feed's status fields, white-box.
+//
+// Test-only and unexported on purpose: the status fields are owned by
+// SyncFeedContext, so production exports no mutator for them. Package main's
+// freshness tests present seeded status through that plane's own snapshot
+// seam (blocklistFeedSnapshots) instead. Returns false when no such feed is
+// configured.
+func seedFeedStatus(bs *Syncer, feedURL string, lastSync, lastAttempt time.Time, lastError string) bool {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	st, ok := bs.feeds[feedURL]
+	if !ok {
+		return false
+	}
+	st.lastSync = lastSync
+	st.lastAttempt = lastAttempt
+	st.lastError = lastError
+	return true
+}
+
+// TestChaos123_FeedsSnapshotReflectsEngineStatus is the read contract the
+// freshness plane is built on: Feeds() must carry the engine's own LastSync,
+// LastAttempt and LastError, and only for a feed that is configured.
+func TestChaos123_FeedsSnapshotReflectsEngineStatus(t *testing.T) {
 	bs := New(&stubMerger{})
-	if bs.SeedFeedStatusForTest("https://absent.example.com/f.txt", time.Now(), time.Now(), "") {
+	if seedFeedStatus(bs, "https://absent.example.com/f.txt", time.Now(), time.Now(), "") {
 		t.Error("seeding an unconfigured feed must report false")
 	}
 	bs.SetFeed(loopbackFeed, time.Hour)
 	when := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	if !bs.SeedFeedStatusForTest(loopbackFeed, when, when, "boom") {
+	if !seedFeedStatus(bs, loopbackFeed, when, when, "boom") {
 		t.Fatal("seeding a configured feed must report true")
 	}
 	fs := bs.Feeds()

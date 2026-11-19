@@ -1,7 +1,12 @@
 package blocklistfeed
 
-// observer.go — the sync observer seam, and the status seed used to drive the
-// freshness plane's thresholds from a test without sleeping (CHAOS-123).
+// observer.go — the sync observer seam the freshness plane depends on
+// (CHAOS-123).
+//
+// This package exports no mutator for a feed's status fields: they are owned
+// by SyncFeedContext. Package main's freshness tests present seeded status
+// through that plane's own snapshot seam, and white-box status setup stays in
+// this package's tests.
 //
 // # Why the seam exists
 //
@@ -104,26 +109,4 @@ func notifySyncObserver(outcome SyncOutcome) {
 		}
 	}()
 	(*fn)(outcome)
-}
-
-// SeedFeedStatusForTest overwrites one configured feed's status fields.
-//
-// Test support for the freshness plane: staleness is measured against 2x the
-// feed's own interval, which defaults to 24 h, so the only alternative to this
-// seam is sleeping past a day. Mirrors saasfeed.SeedStats, which exists for the
-// same reason. Returns false when no such feed is configured.
-//
-// Production code never calls this; the status fields are owned by
-// SyncFeedContext.
-func (bs *Syncer) SeedFeedStatusForTest(feedURL string, lastSync, lastAttempt time.Time, lastError string) bool {
-	bs.mu.Lock()
-	defer bs.mu.Unlock()
-	st, ok := bs.feeds[feedURL]
-	if !ok {
-		return false
-	}
-	st.lastSync = lastSync
-	st.lastAttempt = lastAttempt
-	st.lastError = lastError
-	return true
 }

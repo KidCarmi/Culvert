@@ -13,6 +13,10 @@ package main
 //      all on a node that does not use the feature.
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,21 +25,64 @@ import (
 	"github.com/KidCarmi/Culvert/internal/blocklistfeed"
 )
 
+// blFeedFixture is a real feed syncer plus per-feed status overlays, presented
+// to the freshness plane through its blocklistFeedSnapshots seam.
+//
+// The syncer stays authoritative for WHICH feeds are configured and at what
+// interval (SetFeed / RemoveFeed / ClearFeeds act on the real engine, and so
+// does the ladder count). Only the three status fields a test cannot reach
+// without sleeping past a multi-hour threshold — LastSync, LastAttempt,
+// LastError — are overlaid, and only for a feed that is still configured. The
+// engine exports no mutator for them; see blocklistFeedSnapshots.
+type blFeedFixture struct {
+	*BlocklistSyncer
+	t      *testing.T
+	status map[string]blocklistfeed.Feed
+}
+
+// seedStatus overlays one configured feed's status fields.
+func (fx *blFeedFixture) seedStatus(feedURL string, lastSync, lastAttempt time.Time, lastError string) {
+	fx.t.Helper()
+	for _, f := range fx.Feeds() {
+		if f.URL == feedURL {
+			fx.status[feedURL] = blocklistfeed.Feed{LastSync: lastSync, LastAttempt: lastAttempt, LastError: lastError}
+			return
+		}
+	}
+	fx.t.Fatalf("seedStatus: feed %q is not configured", feedURL)
+}
+
+// snapshots is the injected status source: the engine's snapshot with the
+// seeded overlays applied.
+func (fx *blFeedFixture) snapshots() []blocklistfeed.Feed {
+	feeds := fx.Feeds()
+	for i := range feeds {
+		if o, ok := fx.status[feeds[i].URL]; ok {
+			feeds[i].LastSync, feeds[i].LastAttempt, feeds[i].LastError = o.LastSync, o.LastAttempt, o.LastError
+		}
+	}
+	return feeds
+}
+
 // blFeedHealthTest arms the plane on a fixed clock with a fresh syncer, and
 // restores every global it touches.
-func blFeedHealthTest(t *testing.T, now time.Time) *BlocklistSyncer {
+func blFeedHealthTest(t *testing.T, now time.Time) *blFeedFixture {
 	t.Helper()
 	bs := newTestBlocklistSyncer(t)
 	swapFeedSyncer(t, bs)
+	fx := &blFeedFixture{BlocklistSyncer: bs, t: t, status: map[string]blocklistfeed.Feed{}}
 	prevFire := fireBlocklistFeedStaleAlert
+	prevSnapshots := blocklistFeedSnapshots
 	t.Cleanup(func() {
 		fireBlocklistFeedStaleAlert = prevFire
+		blocklistFeedSnapshots = prevSnapshots
 		resetBlocklistFeedHealthForTest()
 	})
 	resetBlocklistFeedHealthForTest()
+	blocklistFeedSnapshots = fx.snapshots
 	blocklistFeedNow = func() time.Time { return now }
 	noteBlocklistFeedConfigured()
-	return bs
+	return fx
 }
 
 // captureStaleAlert replaces the alert sink with a recorder, so transitions are
@@ -84,7 +131,7 @@ func TestChaos123_FreshFeedIsGreen(t *testing.T) {
 	bs := blFeedHealthTest(t, now)
 	const feed = "https://feeds.example.com/deny.txt"
 	bs.SetFeed(feed, 24*time.Hour)
-	bs.SeedFeedStatusForTest(feed, now.Add(-30*time.Minute), now.Add(-30*time.Minute), "")
+	bs.seedStatus(feed, now.Add(-30*time.Minute), now.Add(-30*time.Minute), "")
 
 	snap := blocklistFeedState()
 	if snap.StaleFeeds != 0 || snap.FailingFeeds != 0 || snap.NeverSyncedFeeds != 0 {
@@ -113,7 +160,7 @@ func TestChaos123_StaleBeyondTwoIntervalsIsReportedAndPaged(t *testing.T) {
 	const feed = "https://feeds.example.com/deny.txt"
 	bs.SetFeed(feed, 6*time.Hour)
 	// 13 h with a 6 h interval: past 2x, and with NO error recorded.
-	bs.SeedFeedStatusForTest(feed, now.Add(-13*time.Hour), now.Add(-13*time.Hour), "")
+	bs.seedStatus(feed, now.Add(-13*time.Hour), now.Add(-13*time.Hour), "")
 
 	snap := blocklistFeedState()
 	if snap.StaleFeeds != 1 || snap.FailingFeeds != 0 {
@@ -242,7 +289,7 @@ func TestChaos123_ManualOnlyFeedThatNeverSyncedIsReportedButNotPaged(t *testing.
 
 	// Once it HAS been synced manually, the row goes away: the operator's
 	// configuration is then coherent and this plane has no opinion on it.
-	bs.SeedFeedStatusForTest(feed, now, now, "")
+	bs.seedStatus(feed, now, now, "")
 	if rows := checkBlocklistFeeds(); len(rows) != 0 {
 		t.Errorf("a manually-synced feed contributes no row, got %+v", rows)
 	}
@@ -258,12 +305,19 @@ func TestChaos123_ManualOnlyFeedThatNeverSyncedIsReportedButNotPaged(t *testing.
 // DISAPPEARS until the next round completes. The window is bounded (the feed
 // is due on the next 60 s tick) but during it the only failure signal the
 // product had said "healthy". The never-synced gauge and row cover it.
+//
+// Because what is measured is the ENGINE's behaviour, the failure is a real
+// round rather than a seeded overlay: the loopback origin is refused by the
+// inline SSRF guard in the fetch path, so the round fails deterministically
+// with no network access, and LastError is whatever the engine recorded.
 func TestChaos123_SettingsRestoreResetsTheOnlyPreRoundFailureSignal(t *testing.T) {
 	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
 	bs := blFeedHealthTest(t, now)
-	const feed = "https://feeds.example.com/deny.txt"
+	const feed = "http://127.0.0.1:1/chaos123-restore.txt"
 	bs.SetFeed(feed, time.Hour)
-	bs.SeedFeedStatusForTest(feed, time.Time{}, now.Add(-time.Minute), "fetch: connection refused")
+	if _, err := bs.SyncFeed(feed); err == nil {
+		t.Fatal("expected the loopback feed's round to fail")
+	}
 
 	if snap := blocklistFeedState(); snap.FailingFeeds != 1 {
 		t.Fatalf("before the restore the failure is visible: %+v", snap)
@@ -299,7 +353,7 @@ func TestChaos123_AlertFiresOncePerEpisode(t *testing.T) {
 	fired := captureStaleAlert(t)
 	const feed = "https://feeds.example.com/deny.txt"
 	bs.SetFeed(feed, time.Hour)
-	bs.SeedFeedStatusForTest(feed, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
+	bs.seedStatus(feed, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
 
 	for i := 0; i < 5; i++ {
 		noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: i + 1, Interval: time.Hour})
@@ -324,8 +378,8 @@ func TestChaos123_RecoveryNeedsObservedEvidenceFromEveryAutoSyncFeed(t *testing.
 	const dead = "https://dead.example.com/deny.txt"
 	bs.SetFeed(good, time.Hour)
 	bs.SetFeed(dead, time.Hour)
-	bs.SeedFeedStatusForTest(good, now.Add(-10*time.Minute), now.Add(-10*time.Minute), "")
-	bs.SeedFeedStatusForTest(dead, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
+	bs.seedStatus(good, now.Add(-10*time.Minute), now.Add(-10*time.Minute), "")
+	bs.seedStatus(dead, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
 
 	// The dead feed pages once.
 	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 1, Interval: time.Hour})
@@ -344,11 +398,11 @@ func TestChaos123_RecoveryNeedsObservedEvidenceFromEveryAutoSyncFeed(t *testing.
 	}
 
 	// Now the dead feed recovers. Only observed evidence clears the latch.
-	bs.SeedFeedStatusForTest(dead, now, now, "")
+	bs.seedStatus(dead, now, now, "")
 	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{OK: true, LastSync: now, Interval: time.Hour})
 
 	// A fresh episode may page again.
-	bs.SeedFeedStatusForTest(dead, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
+	bs.seedStatus(dead, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
 	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 1, Interval: time.Hour})
 	if len(*fired) != 2 {
 		t.Fatalf("a new episode after an observed recovery must page again, got %d: %v", len(*fired), *fired)
@@ -364,7 +418,7 @@ func TestChaos123_ClockRollbackReportsFreshNotStale(t *testing.T) {
 	const feed = "https://feeds.example.com/deny.txt"
 	bs.SetFeed(feed, time.Hour)
 	// A last success in the FUTURE relative to the plane's clock.
-	bs.SeedFeedStatusForTest(feed, now.Add(48*time.Hour), now.Add(48*time.Hour), "")
+	bs.seedStatus(feed, now.Add(48*time.Hour), now.Add(48*time.Hour), "")
 
 	snap := blocklistFeedState()
 	if snap.StaleFeeds != 0 {
@@ -374,6 +428,105 @@ func TestChaos123_ClockRollbackReportsFreshNotStale(t *testing.T) {
 		t.Errorf("a negative age must be clamped to zero, got %v", snap.WorstAge)
 	}
 	wantSeries(t, blFeedMetrics(), "culvert_blocklist_feed_stale_seconds", 0)
+}
+
+// assertRemovalEndsTheEpisode is the shape behind both removal paths: feed A
+// pages, the operator removes A, and a DIFFERENT feed B that fails from its
+// very first attempt must page for its own outage. A latch left set by the
+// removed feed's episode would suppress B until some feed happened to sync
+// cleanly or the process restarted.
+func assertRemovalEndsTheEpisode(t *testing.T, replace func(t *testing.T, removed, added string)) {
+	t.Helper()
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	fired := captureStaleAlert(t)
+	swapAdminSettingsPath(t, "") // disable background settings writes
+	const a = "https://a.example.com/deny.txt"
+	const b = "https://b.example.com/deny.txt"
+	bs.SetFeed(a, time.Hour)
+	bs.seedStatus(a, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
+
+	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 1, Interval: time.Hour})
+	if len(*fired) != 1 {
+		t.Fatalf("feed A must page once, got %d: %v", len(*fired), *fired)
+	}
+
+	replace(t, a, b)
+	if fs := blFeedSyncer.Feeds(); len(fs) != 1 || fs[0].URL != b {
+		t.Fatalf("want only feed B configured after the removal, got %+v", fs)
+	}
+
+	// B has never synced and the node is past the never-synced grace, so B
+	// is stale from its first failed round.
+	blocklistFeedNow = func() time.Time { return now.Add(blocklistFeedNeverSyncedGrace + time.Minute) }
+	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 1, Interval: time.Hour})
+	if len(*fired) != 2 {
+		t.Fatalf("feed B's outage must page after the alerted feed A was removed, got %d: %v", len(*fired), *fired)
+	}
+	if !strings.Contains((*fired)[1], "NEVER synced") {
+		t.Errorf("the second page describes feed B's never-synced outage, got %q", (*fired)[1])
+	}
+}
+
+// TestChaos123_DeletingTheAlertedFeedEndsTheEpisode drives the admin API's
+// DELETE /api/blocklist/feed, which is blocklistFeedDelete → RemoveFeed.
+func TestChaos123_DeletingTheAlertedFeedEndsTheEpisode(t *testing.T) {
+	assertRemovalEndsTheEpisode(t, func(t *testing.T, removed, added string) {
+		t.Helper()
+		r := adminCtx(httptest.NewRequestWithContext(context.Background(), http.MethodDelete,
+			"/api/blocklist/feed?url="+url.QueryEscape(removed), http.NoBody))
+		w := httptest.NewRecorder()
+		apiBlocklistFeed(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("DELETE: status = %d; want 200 (%s)", w.Code, w.Body.String())
+		}
+		blFeedSyncer.SetFeed(added, time.Hour)
+	})
+}
+
+// TestChaos123_SettingsRestoreThatDropsTheAlertedFeedEndsTheEpisode drives
+// applyBlocklistFeeds, which is ClearFeeds + SetFeed.
+func TestChaos123_SettingsRestoreThatDropsTheAlertedFeedEndsTheEpisode(t *testing.T) {
+	assertRemovalEndsTheEpisode(t, func(t *testing.T, _, added string) {
+		t.Helper()
+		applyBlocklistFeeds(&AdminSettings{
+			BlocklistFeedsSaved: true,
+			BlocklistFeeds:      []BlocklistFeedSetting{{URL: added, Interval: "1h"}},
+		})
+	})
+}
+
+// TestChaos123_SubTickIntervalIsMeasuredAgainstTheSchedulerTick — the admin
+// API accepts any positive interval (10s included), but the scheduler only
+// checks for due feeds once per blocklistfeed.TickInterval. Measured against
+// 2x the configured 10 s, a feed that succeeds on EVERY round it can actually
+// get would be stale for most of each tick and page on a healthy node.
+func TestChaos123_SubTickIntervalIsMeasuredAgainstTheSchedulerTick(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	fired := captureStaleAlert(t)
+	const feed = "https://feeds.example.com/deny.txt"
+	bs.SetFeed(feed, 10*time.Second)
+	// Synced on the previous tick, plus some grace for the round itself:
+	// far past 2x the configured 10 s, well inside 2x the tick.
+	last := now.Add(-(blocklistfeed.TickInterval + 30*time.Second))
+	bs.seedStatus(feed, last, last, "")
+
+	if snap := blocklistFeedState(); snap.StaleFeeds != 0 {
+		t.Fatalf("a 10s feed that synced on the last tick is fresh, got %+v", snap)
+	}
+	evaluateBlocklistFeedStaleness()
+	if len(*fired) != 0 {
+		t.Fatalf("a feed synced on the last tick must not page, got %v", *fired)
+	}
+	wantSeries(t, blFeedMetrics(), "culvert_blocklist_feed_sync_ok", 1)
+
+	// Negative control: the clamp is a floor, not an exemption. Two whole
+	// ticks with no success is stale.
+	blocklistFeedNow = func() time.Time { return now.Add(2 * blocklistfeed.TickInterval) }
+	if snap := blocklistFeedState(); snap.StaleFeeds != 1 {
+		t.Fatalf("a 10s feed with no success for over two ticks is stale, got %+v", snap)
+	}
 }
 
 // ─── group 3: containment ────────────────────────────────────────────────────
@@ -392,7 +545,7 @@ func TestChaos123_NoSurfaceCarriesTheFeedURL(t *testing.T) {
 	const secret = "token-abc123"
 	feed := "https://feeds.example.com/deny.txt?key=" + secret
 	bs.SetFeed(feed, time.Hour)
-	bs.SeedFeedStatusForTest(feed, now.Add(-10*time.Hour), now.Add(-time.Minute),
+	bs.seedStatus(feed, now.Add(-10*time.Hour), now.Add(-time.Minute),
 		"fetch "+feed+": dial tcp 203.0.113.9:443: connect: connection refused")
 
 	surfaces := map[string]string{"metrics": blFeedMetrics()}
@@ -469,7 +622,7 @@ func TestChaos123_SeriesAreRegisteredOnTheScrapeEndpoint(t *testing.T) {
 	bs := blFeedHealthTest(t, now)
 	const feed = "https://feeds.example.com/deny.txt"
 	bs.SetFeed(feed, time.Hour)
-	bs.SeedFeedStatusForTest(feed, now.Add(-time.Minute), now.Add(-time.Minute), "")
+	bs.seedStatus(feed, now.Add(-time.Minute), now.Add(-time.Minute), "")
 
 	out := blFeedMetrics()
 	for _, series := range []string{

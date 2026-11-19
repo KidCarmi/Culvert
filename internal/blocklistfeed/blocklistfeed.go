@@ -8,7 +8,7 @@
 // API handler (blocklist_feed.go shim).
 //
 // Multi-feed: each feed has its own URL, sync interval, and status. A single
-// scheduler goroutine (Start) wakes every tickInterval and syncs every feed
+// scheduler goroutine (Start) wakes every TickInterval and syncs every feed
 // that is due. The scheduler is ALWAYS started at startup — feeds added later
 // via the admin API are picked up on the next tick without a restart.
 //
@@ -84,7 +84,13 @@ import (
 const (
 	httpTimeout = 30 * time.Second
 
-	tickInterval = 60 * time.Second
+	// TickInterval is how often Start's scheduler checks for due feeds, and
+	// so the finest cadence any feed is actually synced at: a configured
+	// interval shorter than this is still synced once per tick. Exported for
+	// package main's freshness plane, which must not measure staleness
+	// against a cadence the scheduler cannot deliver (CHAOS-123).
+	TickInterval = 60 * time.Second
+
 	maxRedirects = 5
 
 	// DefaultInterval is the fallback auto-sync interval when none is
@@ -315,7 +321,7 @@ func (bs *Syncer) Feeds() []Feed {
 }
 
 // Start launches the background scheduler. It runs an immediate pass, then
-// wakes every tickInterval and syncs each feed whose interval has elapsed
+// wakes every TickInterval and syncs each feed whose interval has elapsed
 // since its last attempt. Feeds with interval 0 are skipped.
 func (bs *Syncer) Start(ctx context.Context) {
 	round := func() { bs.syncDue(ctx) }
@@ -335,7 +341,7 @@ func (bs *Syncer) Start(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(tickInterval):
+			case <-time.After(TickInterval):
 				obs.SafeCall("blocklistfeed", round)
 			}
 		}

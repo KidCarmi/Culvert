@@ -155,8 +155,9 @@ type blocklistFeedHealthRecord struct {
 	startedAt time.Time
 
 	// alerted latches the stale alert for one episode, so a feed that stays
-	// down does not re-page every round. Cleared only by an OBSERVED clean
-	// round on every auto-sync feed.
+	// down does not re-page every round. Cleared by an OBSERVED clean round
+	// on every auto-sync feed, or when feeds are removed from the monitored
+	// configuration (noteBlocklistFeedsRemoved) — never by elapsed time.
 	alerted bool
 
 	// logAt / suppressed drive the rate-limited log line.
@@ -169,6 +170,17 @@ var blocklistFeedHealth blocklistFeedHealthRecord
 // blocklistFeedNow is the clock seam. Tests drive staleness deterministically
 // instead of sleeping past 48 hours.
 var blocklistFeedNow = time.Now
+
+// blocklistFeedSnapshots is the status source this plane reads: the feed
+// engine's own read-only Feeds() snapshot in production.
+//
+// It is a seam so the root tests can present a feed whose last success was
+// 13 hours ago without sleeping past a 24-hour threshold AND without the feed
+// engine exporting a mutator for its own status fields. The engine's state is
+// owned by its sync round; a test that wants a white-box view of that state
+// belongs in internal/blocklistfeed. Read through blFeedSyncer at call time, so
+// the nil-receiver contract (Feeds() on a nil syncer is empty) still applies.
+var blocklistFeedSnapshots = func() []blocklistfeed.Feed { return blFeedSyncer.Feeds() }
 
 // fireBlocklistFeedStaleAlert delivers the `blocklist_feed_stale` alert.
 //
@@ -261,6 +273,34 @@ func noteBlocklistFeedRoundRecovered() {
 	}
 }
 
+// noteBlocklistFeedsRemoved ends the current alert episode because feeds were
+// removed from the monitored configuration: an admin delete (RemoveFeed) or a
+// settings restore (ClearFeeds, then the persisted list re-added).
+//
+// The latch is otherwise cleared only by an observed clean round with nothing
+// stale, and a removed feed never reports again. Without this, deleting the
+// one feed that paged left the latch set, and a DIFFERENT feed that then
+// failed from its first attempt was suppressed until some feed happened to
+// sync cleanly or the process restarted — the new outage never paged.
+//
+// Ending the episode unconditionally, rather than only when nothing stale
+// remains, is deliberate: the page that was sent described a feed set that no
+// longer exists, and the cost is at most one re-page per operator removal for
+// a feed that is still down, never a flapping loop. Any feed still stale pages
+// again on its next failed round, with a Detail describing the current set.
+func noteBlocklistFeedsRemoved() {
+	blocklistFeedHealth.mu.Lock()
+	wasAlerted := blocklistFeedHealth.alerted
+	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.logAt = time.Time{}
+	blocklistFeedHealth.suppressed = 0
+	blocklistFeedHealth.mu.Unlock()
+
+	if wasAlerted && logger != nil {
+		logger.Printf("BlocklistFeed: stale-feed alert episode ended because feeds were removed from the configuration; any feed that is still stale alerts again on its next failed round")
+	}
+}
+
 // evaluateBlocklistFeedStaleness fires the stale alert at most once per
 // episode.
 func evaluateBlocklistFeedStaleness() {
@@ -338,7 +378,7 @@ func blocklistFeedState() blocklistFeedSnapshot {
 	blocklistFeedHealth.mu.Unlock()
 
 	snap := blocklistFeedSnapshot{Armed: armed}
-	feeds := blFeedSyncer.Feeds() // nil-receiver safe
+	feeds := blocklistFeedSnapshots() // nil-receiver safe in production
 	snap.Feeds = len(feeds)
 	now := blocklistFeedNow()
 	anyNeverSynced := false
@@ -418,9 +458,22 @@ func (snap *blocklistFeedSnapshot) accumulateAutoSync(f *blocklistfeed.Feed, sta
 		age = 0
 	}
 	snap.noteAge(age)
-	if age >= time.Duration(blocklistFeedStaleFactor)*f.Interval {
+	if age >= time.Duration(blocklistFeedStaleFactor)*blocklistFeedEffectiveInterval(f.Interval) {
 		snap.StaleFeeds++
 	}
+}
+
+// blocklistFeedEffectiveInterval is the cadence a feed can actually be synced
+// at: its configured interval, but never finer than the scheduler's tick.
+//
+// The admin API accepts any positive interval (a wire/config contract this
+// plane does not narrow), while the scheduler only checks for due feeds once
+// per blocklistfeed.TickInterval. Measured against 2x a 10 s interval, a feed
+// that succeeds on every round the scheduler gives it would read stale for most
+// of each tick and page a healthy node; measured against the tick it reads
+// stale only after two whole ticks with no success.
+func blocklistFeedEffectiveInterval(interval time.Duration) time.Duration {
+	return max(interval, blocklistfeed.TickInterval)
 }
 
 // noteAge keeps WorstAge at the largest age seen.
