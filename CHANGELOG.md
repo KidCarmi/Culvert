@@ -429,6 +429,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **A scan-timeout cooldown hit no longer spawns an alert goroutine per request
+  when nobody subscribes to `scan_timeout` (PERF-SCANTIMEOUT-ALERT-1).** The two
+  per-response scan sites (plain-HTTP inspect and the CONNECT-inspect leg)
+  fired `go fireAlert("scan_timeout", …)` without the `HasSubscriber` gate every
+  other fault-driven request-path producer uses. The assumption that a timeout
+  is rate-limited by the multi-second scan budget does not hold: inside the 30 s
+  timeout cooldown a refused object is answered from the scan cache without a
+  scan, still with Source `timeout`, so every request for it paid a goroutine
+  spawn, a payload build and a round trip through the alert dedup mutex on a
+  node whose scanner is already stalled. Both sites now call one gated helper,
+  `fireScanTimeoutAlert`; with a subscriber the dispatch is byte-identical.
+  Measured on one binary (4 vCPU): ungated ~1.8 µs / 2 allocs per call
+  (~1.0 µs / 2–3 allocs at `-cpu=4`), gated ~3 ns / 0 allocs. Held by
+  `TestBenchGate_ScanTimeoutAlertAllocs` (bound 0) and the
+  `TestFireScanTimeoutAlert_*` dispatch tests; the premise is pinned by
+  `TestChaos_TimeoutCooldownHitIsServedWithoutAScan`.
+
 - **A scan-result cache insert at capacity stalled every concurrent verdict
   lookup for O(`cache_size`) (PERF-SCANCACHE-1).** `internal/hashcache` is the
   SHA-256 ClamAV/YARA verdict cache consulted before every body scan. When full,
