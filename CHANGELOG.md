@@ -9,6 +9,14 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The CHAOS-122 argv refusal no longer prints a credential that begins with
+  `-`.** Its "values redacted" tail decided what was a value by the leading
+  dash alone, so `culvert STRAY -pass -Hunter2` echoed `-Hunter2` to stderr,
+  which every orchestrator collects. A value is now identified by position: the
+  token after any `-flag` written without `=` is redacted unless that flag is a
+  defined boolean flag, which is how the flag package itself consumes it
+  (`TestChaos122_RefusalRedactsADashLeadingValue`).
+
 - **An OIDC profile's `requiredScope` / `requiredAudience` are now enforced for
   every token presented as a proxy credential.** The registry OIDC provider
   accepted a JWT that validated locally against the JWKS before it consulted
