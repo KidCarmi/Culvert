@@ -338,10 +338,11 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-004 | `upstream_backup_strip.go` → `internal/upstream/backupstrip` (pilot 2 of ≤3) | **shipped** (merged 2026-11-09, #1842) | nightly shift | `main` | #1842 | IM-001 shipped | **packet** in ADR-0043; 2 exported names (`Strip`, `CountRequiringReplacement`); callers `backup.go`, `restore.go`; 15 engine-only tests moved with names unchanged, 5 neighbouring tests stay root | review PR; owner decides pilot continuation to a third code PR |
 | IM-005 | `policy.go` leaf matchers (follow-up (a)) | **blocked** | — | — | — | IM-006 + accepted boundary | mapping above | none until IM-006 ships |
 | IM-006 | Policy evaluation lookup owners (ADR-0040 step 2) | blocked on #1526 disposition | owner decides | — | #1526 (design) | owner | ADR-0040, `policy-core-feasibility.md`, TSV | owner: merge/rebase/close #1526; then one ownership PR |
-| IM-007 | `realclientip.go` → `internal/realclientip` | **implementation under review** | nightly shift | `main` | #1892 | ADR-0038 pattern | ADR-0045; 4 exported names (`Resolver`, `SetTrustedProxies`, `TrustedProxies`, `ClientIP`); instance owner and move in one PR because root keeps the three wrapper names, so no caller changed; root globals 2 → 1 (`clientIPResolver`); root `realclientip_test.go` untouched | review PR; owner: accept the combined ownership+move, or ask for the split the map proposed |
-| IM-008 | `traffic_redaction.go` → `internal/pseudonym` | **implementation under review** | nightly shift | `main` | pending | IM-007 not required (posture stays in main) | ADR-0044; 6 exported names; engine split from the `decRedactHosts` posture gate; root keeps wrapper names so no caller changed; 6 engine tests moved with names unchanged | review PR; next: IM-009 overlap check |
-| IM-009 | `mcp_evidence_readmodel.go`, `mcp_shadow_metrics.go` → `internal/mcp/…` | proposed | — | — | — | overlap check | lead (0 root deps; heavy open MCP PR traffic) | map only after an overlap check against open MCP PRs |
+| IM-007 | `realclientip.go` → `internal/realclientip` | **shipped** (merged 2026-11-15, `de0b6d1`) | nightly shift | `main` | #1892 | ADR-0038 pattern | ADR-0045; 4 exported names (`Resolver`, `SetTrustedProxies`, `TrustedProxies`, `ClientIP`); instance owner and move in one PR because root keeps the three wrapper names, so no caller changed; root globals 2 → 1 (`clientIPResolver`); root `realclientip_test.go` untouched | — |
+| IM-008 | `traffic_redaction.go` → `internal/pseudonym` | **shipped** (merged 2026-11-10, `168040c`) | nightly shift | `main` | #1845 | IM-007 not required (posture stays in main) | ADR-0044; 6 exported names; engine split from the `decRedactHosts` posture gate; root keeps wrapper names so no caller changed; 6 engine tests moved with names unchanged | — |
+| IM-009 | `mcp_evidence_readmodel.go` → `internal/mcp/evidenceview` | **implementation under review** | nightly shift | `main` | #1941 | overlap check passed 2026-11-18 (no open MCP PR) | ADR-0046; 5 exported names (`Build`, `View`, `Requirement`, `Summary`, `State`); 1 production caller + 1 `uie2e` fixture call updated, no root alias; shared category slice → per-call slice; wire bytes pinned by golden + 5-case before/after comparison; 5 engine tests moved with names unchanged, 2 handler tests stay root | review PR |
 | IM-010 | `proxy_path_bounds.go`, `proxy_host_bounds.go`, `request_tracing_bounds.go` | proposed | — | — | — | benchgate measurement | lead (hot path; cross-linked) | measure before mapping |
+| IM-011 | `mcp_shadow_metrics.go` → `internal/mcp/…` (split from IM-009) | discovered 2026-11-18 | — | — | — | instance owner in main first (ADR-0038 pattern) | lead: `sync.Once` process singleton (`globalMCPShadowMetrics`) whose nil-ness gates `/metrics` emission; implements `execution.Metrics`; consumers `mcp_shadow_startup.go`, `mcp_live_startup.go`, `metrics.go`; 4 root test files read `shadowMetricsView` | map: read `mcp_shadow_startup.go` construction and `shadow_soak_test.go` delta assertions; decide whether the singleton stays in main with the counter type + Prometheus writer moved |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -451,6 +452,25 @@ Baseline `174f157f`; source, both callers and the test file read in full.
   whose behavior is fully pinned by its own tests and fuzz target. Its size is
   not the argument; its lack of state, callers and hidden dependencies is.
 
+### IM-011 extraction (EXTRACT, 2026-11-18, main `348a2cf`)
+
+IM-011 is the Shadow metrics sink split from IM-009 (its table row lands with
+#1941). Status: **implementation under review** (PR pending).
+
+- **Moved:** the `Sink` engine (counters, outcome bucketing, `View`, the
+  `culvert_mcp_shadow_*` serializer) to `internal/mcp/shadowmetrics`
+  (ADR-0047); 2 exported names. **Stays main:** the `sync.Once` instance, the
+  never-armed nil gate on `/metrics` and status, and the live-executor reuse.
+  Root keeps the two type names as aliases, so no caller changed beyond two
+  `snapshot()` → `Snapshot()` sites.
+- **Constraint found:** the execution-posture wall scans all module production
+  files, so the package cannot import `internal/mcp/execution`; conformance is
+  a test-file assertion.
+- **Next:** IM-010 needs its benchgate measurement first (hot path). Before
+  that, re-check IM-002/IM-003: decide the shared saas-feed validator owner by
+  reading `validateFloorRecord`/`validateFloorFields` (`saas_feed_floor.go`)
+  and the `fsyncDir` callers (`saas_feed_genstore.go`, `saas_feed_runtime.go`).
+
 ### IM-002 / IM-007 mapping (MAP, 2026-11-09, main `09235d1`)
 
 Evidence only; no code moved. Nothing in the repository records the owner's
@@ -488,3 +508,24 @@ code PR was started.
   `upstream_backup_strip.go` and classify its 12 referencing test files into
   engine-only versus integration, and define the byte-identical output fixture.
   IM-004 still needs the owner's pilot-continuation acceptance (2 of 3 code PRs).
+
+### IM-009 extraction and next selection (EXTRACT, 2026-11-18, main `348a2cf`)
+
+- **Reconciled.** IM-007 (#1892) and IM-008 (#1845) are merged; their rows
+  said "under review". Open PRs: #1526 (policy design, IM-006), the appliance
+  set (#1528, #1536, #1548, #1549, #1705). None touches MCP code, so the IM-009
+  overlap check passed.
+- **Split.** IM-009 named two files with different responsibilities. The
+  evidence read model is a pure projection over `rollout.EvidenceSummary` and
+  moved (ADR-0046). The Shadow metrics sink is a process singleton and is now
+  IM-011.
+- **Recommended next: IM-011.** It is the remaining MCP root file with a
+  narrow owner (`internal/mcp/execution.Metrics` is the interface it
+  implements) and no open-PR overlap. Prerequisite: an instance owner in main;
+  the singleton's nil-ness is a contract (`/metrics` emits nothing on a node
+  that never armed Shadow), so it must survive byte-for-byte. First step: read
+  `newMCPShadowMetrics` callers in `mcp_shadow_startup.go` and
+  `mcp_live_startup.go`, and the `shadowMetricsView` delta assertions in
+  `shadow_soak_test.go`. IM-002/IM-003 stay mapped-not-ready until the shared
+  saas-feed validator owner is decided; IM-010 still needs a benchgate
+  measurement before mapping.

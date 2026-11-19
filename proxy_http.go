@@ -395,12 +395,7 @@ func scanHTTPResponseBody(w http.ResponseWriter, r *http.Request, resp *http.Res
 		atomic.AddInt64(&statBlocked, 1)
 		// Fire scan_timeout alert for infrastructure monitoring (Finding 8.3).
 		if scanResult.Source == "timeout" {
-			go fireAlert("scan_timeout", AlertPayload{
-				Actor:  cip,
-				Host:   r.Host,
-				Detail: scanResult.Reason,
-				Source: "scan_timeout",
-			})
+			fireScanTimeoutAlert(cip, r.Host, scanResult.Reason)
 		}
 		recordRequestAuthURI(cip, r.Method, r.Host, "SCAN_BLOCKED", scanResult.Source, scanResult.Reason, id.Identity, "inspect", "", AuthLogFields{AuthSource: id.AuthSource})
 		logger.Printf("SCAN_BLOCKED %s -> %q (%q: %q)", cip, sanitizeLog(r.Host), sanitizeLog(scanResult.Source), sanitizeLog(scanResult.Reason))

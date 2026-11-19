@@ -1637,7 +1637,19 @@ env_put() {
   elif [[ ! -e "$lock" && ! -w "$dir" ]]; then
     sudo touch "$lock" 2>/dev/null && sudo chown "$(id -un)" "$lock" 2>/dev/null || true
   fi
-  if [[ ! -w "$lock" && ( -e "$lock" || ! -w "$dir" ) ]]; then
+  # Decide on ONE observation of whether the lock exists. The previous compound
+  # test, `! -w "$lock" && ( -e "$lock" || ! -w "$dir" )`, read the lock twice:
+  # a concurrent env_put creating it (the `9>` below) between the two reads made
+  # "not there yet" look like "exists and is not writable", so this call warned
+  # "owned by another user" and skipped its update — a silent lost update when
+  # two installer runs race on a fresh stack dir.
+  local lock_blocked=0
+  if [[ -e "$lock" ]]; then
+    [[ -w "$lock" ]] || lock_blocked=1
+  elif [[ ! -w "$dir" ]]; then
+    lock_blocked=1
+  fi
+  if [[ $lock_blocked -eq 1 ]]; then
     warn "Cannot lock $file ($lock is owned by another user and sudo could not take it) — leaving it unchanged."
     warn "Set $var manually in $file if you need it, then restart the stack."
     return 0

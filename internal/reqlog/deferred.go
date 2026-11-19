@@ -68,6 +68,33 @@ func DeferredOpenPending() string {
 // disarmLocked clears the armed intent. Caller holds deferredMu.
 func disarmLocked() { deferredPath, deferredMaxMB = "", 0 }
 
+// publishDeferredSink installs rf as the live request-log sink and starts the
+// drain, reporting false when it must not publish (Close ran, or another Init
+// already wired a sink). Caller holds deferredMu.
+//
+// It exists so writerMu is released by DEFER. The unlock used to be explicit
+// and straddled startPersist, which is the one claim the retry loop makes about
+// this owner — "the owner releases its locks by defer/explicit unlock, so a
+// recovered round simply counts as a failed attempt"
+// (request_log_persist_retry.go). That did not hold for a panic: runGuarded
+// recovers the round and keeps retrying, so a panic in here left writerMu
+// write-locked for the life of the process with no crash and no alert. Every
+// reader of the sink (FilePath, PersistActive, Sync, the admin
+// ReadPersistent) then blocks, the persistence queue is deliberately blocking
+// rather than load-shedding, and once it fills every proxied request wedges in
+// reqlog.Add — a silent proxy-wide hang. The publish order is unchanged; only
+// the unlock is now unconditional.
+func publishDeferredSink(rf *fileutil.RotatingFile, path string) bool {
+	writerMu.Lock()
+	defer writerMu.Unlock()
+	if closedForDeferred.Load() || closer != nil {
+		return false
+	}
+	writer, closer, filePath = rf, rf, path
+	startPersist()
+	return true
+}
+
 // TryDeferredOpen makes one attempt to open the armed path. It returns
 // opened=true with the path once the sink is published. opened=false with a
 // nil error means nothing is pending any more (never armed, a sink already
@@ -92,18 +119,13 @@ func TryDeferredOpen() (path string, opened bool, err error) {
 		return path, false, fmt.Errorf("request log open %s: %w", path, err)
 	}
 
-	writerMu.Lock()
-	if closedForDeferred.Load() || closer != nil {
+	if !publishDeferredSink(rf, path) {
 		// Close ran, or another Init wired a sink, while the open was in
 		// flight: never replace it and never publish behind the shutdown hook.
-		writerMu.Unlock()
 		_ = rf.Close()
 		disarmLocked()
 		return path, false, nil
 	}
-	writer, closer, filePath = rf, rf, path
-	startPersist()
-	writerMu.Unlock()
 	disarmLocked()
 	// Close may have marked the log closed after the check above and run its
 	// stopPersist BEFORE the startPersist just made, which would leave a drain

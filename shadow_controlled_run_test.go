@@ -241,7 +241,7 @@ func approveToUsable(t *testing.T, cat *catalog.Catalog, serverID, tool string) 
 // shadowSnap reads the process-wide shadow metric singleton (nil-safe).
 func shadowSnap() shadowMetricsView {
 	if m := mcpShadowMetricsSnapshotOrNil(); m != nil {
-		return m.snapshot()
+		return m.Snapshot()
 	}
 	return shadowMetricsView{}
 }

@@ -41,6 +41,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 
 - [`identity-backend-availability.md`](identity-backend-availability.md) — LDAP / OIDC / JWKS backend availability, caching, and fail-closed behavior.
 - [`ldap-identity-provider.md`](ldap-identity-provider.md) — configuring LDAP / Active Directory as an identity provider.
+- [`oidc-proxy-credentials.md`](oidc-proxy-credentials.md) — OIDC tokens as proxy credentials: local JWT vs introspection, and what `requiredScope` / `requiredAudience` require (an introspection endpoint) and do not cover (browser SSO).
 - [`ldap-directory-stalls.md`](ldap-directory-stalls.md) — what happens when a directory accepts a connection and then stops answering.
 - [`credential-verification-cost.md`](credential-verification-cost.md) — the bounded credential-verification governor and the `auth_verify_saturated` alert.
 - [`admin-login-input-bounds.md`](admin-login-input-bounds.md) — why the admin login endpoint bounds the submitted username, and what it protects.
