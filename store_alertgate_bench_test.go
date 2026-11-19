@@ -162,3 +162,27 @@ func BenchmarkAlertGate_DNSFailureParallel(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkAlertGate_ScanTimeout is a scan-timeout cooldown hit with nobody
+// subscribed: every request for an object refused during a scanner stall is
+// answered from the memo and reaches this producer at request rate.
+func BenchmarkAlertGate_ScanTimeout(b *testing.B) {
+	benchNoSubscriber(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		fireScanTimeoutAlert("203.0.113.7", "scan-timeout.example.com", "scan timeout")
+	}
+}
+
+// BenchmarkAlertGate_ScanTimeoutParallel mirrors a scanner stall across cores.
+func BenchmarkAlertGate_ScanTimeoutParallel(b *testing.B) {
+	benchNoSubscriber(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			fireScanTimeoutAlert("203.0.113.7", "scan-timeout.example.com", "scan timeout")
+		}
+	})
+}
