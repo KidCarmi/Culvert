@@ -87,9 +87,19 @@ type OIDCConfig struct {
 
 	// RequiredScope is a space-separated scope that must appear in the token.
 	// Example: "proxy:access". Empty = no scope check.
+	//
+	// SCOPE OF ENFORCEMENT: both filters below are evaluated on the
+	// INTROSPECTION response, i.e. on a token presented as a proxy credential
+	// (Proxy-Authorization). The browser SSO flow is NOT gated by them: it
+	// receives an ID token, which carries no scope claim at all, and its
+	// audience is already pinned to ClientID by validateIDToken. An operator
+	// who needs the captive-portal path restricted must use group/claim
+	// mapping, not these fields. See SEC-OIDC-FILTER-SCOPE-1 in
+	// docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-18.md.
 	RequiredScope string `yaml:"required_scope"`
 
-	// RequiredAudience is an optional audience ("aud") claim check.
+	// RequiredAudience is an optional audience ("aud") claim check. Credential
+	// path only — see RequiredScope above.
 	RequiredAudience string `yaml:"required_audience"`
 
 	// CacheTTL is how long an introspection result is cached (default 2 min).

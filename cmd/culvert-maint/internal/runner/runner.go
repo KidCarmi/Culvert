@@ -281,17 +281,34 @@ func resolveEnvSets(allow, overlayOnly []string) (envAllow []string, overlayOnly
 	return envAllow, overlayOnlySet, nil
 }
 
-// validateComposeFilenames checks ComposeFile (required, bare filename) and
+// validateComposeFileName checks ComposeFile: required, and a bare filename.
+//
+// "." and ".." pass the Base check (filepath.Base("..") == "..") and the runner
+// JOINS this under composeProjectDir, so they name the project dir itself or
+// its PARENT rather than a file in it. config.validate rejects them at Load and
+// is the only production feeder, so rejecting them here is defence in depth —
+// but it keeps the three copies of this acceptance set (installer, config,
+// runner) from drifting with the runner's as the weakest. Split out of
+// validateComposeFilenames to keep that function inside the cyclop threshold.
+func validateComposeFileName(composeFile string) error {
+	if composeFile == "" {
+		return errors.New("runner: ComposeFile required")
+	}
+	if composeFile != filepath.Base(composeFile) || strings.ContainsAny(composeFile, "/\\") ||
+		composeFile == "." || composeFile == ".." {
+		return fmt.Errorf("runner: ComposeFile must be a bare filename, got %q", composeFile)
+	}
+	return nil
+}
+
+// validateComposeFilenames checks ComposeFile (via validateComposeFileName) and
 // ComposeOverrideFile (optional; when set, a bare filename that rejects "." /
 // ".." and must differ from ComposeFile — it flows into a sudoers literal, so it
 // is validated STRICTER than ComposeFile). Kept out of New to bound New's
 // cyclomatic complexity.
 func validateComposeFilenames(composeFile, overrideFile string) error {
-	if composeFile == "" {
-		return errors.New("runner: ComposeFile required")
-	}
-	if composeFile != filepath.Base(composeFile) || strings.ContainsAny(composeFile, "/\\") {
-		return fmt.Errorf("runner: ComposeFile must be a bare filename, got %q", composeFile)
+	if err := validateComposeFileName(composeFile); err != nil {
+		return err
 	}
 	if overrideFile == "" {
 		return nil

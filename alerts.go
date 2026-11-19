@@ -111,6 +111,35 @@ func fireDNSFailureAlert(host string, err error) {
 	})
 }
 
+// fireScanTimeoutAlert reports a fail-closed scan timeout from the two
+// per-response scan sites (plain-HTTP inspect in proxy_http.go and the
+// CONNECT-inspect leg in proxy_tunnel.go). It is the single producer for the
+// "scan_timeout" event and applies the HasSubscriber contract
+// fireDNSFailureAlert documents: this producer's rate is set by a FAULT (a
+// saturated or dark scan engine), not by the operator.
+//
+// The gate matters more here than its rarity suggests. A timed-out scan writes
+// a short cooldown memo (secscan.scanTimeoutCooldown) so that a hot object does
+// not launch a stampede of doomed scans; every later request for that object
+// inside the cooldown is answered from the memo WITHOUT scanning, and the memo
+// still carries Source "timeout". Ungated, each of those requests paid a
+// goroutine spawn, a payload build and a round trip through the alert store's
+// dedup mutex to deliver an alert to nobody — the default posture is no
+// webhooks configured — on the one node that is already degraded. When a
+// subscriber exists the dispatch is byte-identical to the previous inline
+// calls: same event, same payload fields, still detached.
+func fireScanTimeoutAlert(actor, host, detail string) {
+	if !alertStore().HasSubscriber("scan_timeout") {
+		return
+	}
+	go fireAlert("scan_timeout", AlertPayload{
+		Actor:  actor,
+		Host:   host,
+		Detail: detail,
+		Source: "scan_timeout",
+	})
+}
+
 // validateWebhookURL is re-exposed for the admin API handlers (config-time
 // shape check; the SSRF check stays at delivery time).
 var validateWebhookURL = alerts.ValidateURL
