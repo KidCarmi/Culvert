@@ -725,6 +725,22 @@ func (as *Store) Update(id string, upd Webhook) bool {
 		}
 		upd.ID = id
 		upd.SigningDegraded = false // status is derived, never accepted from a caller
+		if upd.URL == "" {
+			// Preserve the stored destination. The admin API's shared payload
+			// gate admits a URL-less PUT on exactly this promise
+			// (webhookPayloadRejected's urlRequired=false arm, ui_security.go),
+			// and without it the promise was false: `as.hooks[i] = upd` below
+			// took URL wholesale from the payload, so a partial update that
+			// only toggled Enabled or renamed the hook BLANKED the URL while
+			// leaving the subscription in place. HasSubscriber then still
+			// reported true, every matching alert was still dispatched, and
+			// each delivery died at the validWebhookURL barrier — silent loss
+			// of security-alert delivery, which is the one kind of loss an
+			// operator cannot notice. An empty URL is never a valid stored
+			// state (ValidateURL rejects it and create requires it), so
+			// carrying it forward cannot mask a legitimate intent to clear.
+			upd.URL = as.hooks[i].URL
+		}
 		if upd.Secret == "" {
 			upd.Secret = as.hooks[i].Secret // preserve existing secret if not updated
 			// Carry the un-unwrappable ciphertext across too: an edit that does
