@@ -540,3 +540,34 @@ func TestChaos_TimeoutAccountingIsExactWhicheverArmWins(t *testing.T) {
 		t.Fatalf("engine consulted %d times, want %d", got, n)
 	}
 }
+
+// TestChaos_TimeoutCooldownHitIsServedWithoutAScan pins the property the
+// package-main scan_timeout alert producer has to be designed around: inside
+// the cooldown a request for the refused object gets a Source "timeout"
+// verdict straight from the memo — no engine call, no new timeout count, no
+// scan budget spent. A "scan_timeout" result is therefore NOT rate-limited by
+// the multi-second scan budget; its rate is the request rate for whatever hot
+// objects were refused, which is why fireScanTimeoutAlert must be
+// HasSubscriber-gated like every other fault-driven request-path producer.
+func TestChaos_TimeoutCooldownHitIsServedWithoutAScan(t *testing.T) {
+	withCooldown(t, time.Minute)
+	clam := &saturatedClam{}
+	ss := newSlowScanner(t, clam, time.Hour)
+	data := []byte("a hot object that was refused during a scanner stall")
+	ss.cacheTimeoutCooldown(hashcache.SHA256Hex(data))
+
+	timeoutsBefore := atomic.LoadInt64(&statScanTimeout)
+	const hits = 50
+	for i := 0; i < hits; i++ {
+		res := ss.ScanBody(data)
+		if res == nil || !res.Blocked || res.Source != "timeout" || res.Reason != "scan timeout" {
+			t.Fatalf("hit %d: a cooldown hit must still be the fail-closed timeout verdict, got %+v", i, res)
+		}
+	}
+	if n := clam.calls.Load(); n != 0 {
+		t.Fatalf("cooldown hits consulted the engine %d times; they must be served from the memo", n)
+	}
+	if d := atomic.LoadInt64(&statScanTimeout) - timeoutsBefore; d != 0 {
+		t.Fatalf("cooldown hits counted %d new scan timeouts; the counter counts scans, not hits", d)
+	}
+}

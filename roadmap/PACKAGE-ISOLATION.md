@@ -451,6 +451,25 @@ Baseline `174f157f`; source, both callers and the test file read in full.
   whose behavior is fully pinned by its own tests and fuzz target. Its size is
   not the argument; its lack of state, callers and hidden dependencies is.
 
+### IM-011 extraction (EXTRACT, 2026-11-18, main `348a2cf`)
+
+IM-011 is the Shadow metrics sink split from IM-009 (its table row lands with
+#1941). Status: **implementation under review** (PR pending).
+
+- **Moved:** the `Sink` engine (counters, outcome bucketing, `View`, the
+  `culvert_mcp_shadow_*` serializer) to `internal/mcp/shadowmetrics`
+  (ADR-0047); 2 exported names. **Stays main:** the `sync.Once` instance, the
+  never-armed nil gate on `/metrics` and status, and the live-executor reuse.
+  Root keeps the two type names as aliases, so no caller changed beyond two
+  `snapshot()` → `Snapshot()` sites.
+- **Constraint found:** the execution-posture wall scans all module production
+  files, so the package cannot import `internal/mcp/execution`; conformance is
+  a test-file assertion.
+- **Next:** IM-010 needs its benchgate measurement first (hot path). Before
+  that, re-check IM-002/IM-003: decide the shared saas-feed validator owner by
+  reading `validateFloorRecord`/`validateFloorFields` (`saas_feed_floor.go`)
+  and the `fsyncDir` callers (`saas_feed_genstore.go`, `saas_feed_runtime.go`).
+
 ### IM-002 / IM-007 mapping (MAP, 2026-11-09, main `09235d1`)
 
 Evidence only; no code moved. Nothing in the repository records the owner's

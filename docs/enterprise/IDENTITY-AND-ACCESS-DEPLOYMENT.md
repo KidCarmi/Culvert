@@ -33,7 +33,7 @@ Configure via admin UI → IdP profiles (persisted to `idp_profiles.json`). Mult
 | Provider | Misconfig / outage behaviour | Evidence |
 |---|---|---|
 | LDAP/AD | **Fail-closed** — dial/bind/search error ⇒ auth denied | `auth_ldap.go:132-180` |
-| OIDC introspection (RFC 7662) | **Fail-closed** — any HTTP/parse error or `active:false` ⇒ denied | `auth_oidc.go:145-176` |
+| OIDC token as proxy credential (local JWT / RFC 7662 introspection) | **Fail-closed** — any HTTP/parse error or `active:false` ⇒ denied; with `requiredScope`/`requiredAudience` set, only introspection can admit ([reference](../operator/oidc-proxy-credentials.md)) | `OIDCFlowProvider.ResolveIdentityFrom` (`auth_oidc_flow.go`); legacy `OIDCAuth.introspect` (`auth_oidc.go`) |
 | OIDC Auth-Code + PKCE | **Fail-closed** — discovery/token/state errors ⇒ denied | `auth_oidc_flow.go` |
 | SAML 2.0 SP | **Fail-closed** — invalid metadata ⇒ profile excluded from the live registry; signature/conditions/replay enforced; IdP-initiated disabled | `auth_saml.go:45-88`, `auth_idp.go:159-165` |
 

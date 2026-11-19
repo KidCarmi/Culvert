@@ -71,26 +71,31 @@ func loadObservability(cfg observabilityStartupConfig) {
 		// apart from a configured path that silently failed to open.
 		auditLogConfiguredPath = cfg.AuditLogPath
 		if err := InitAuditLog(cfg.AuditLogPath); err != nil {
-			logger.Printf("Audit: log file error (%v) — falling back to in-memory", err)
+			// CWE-117: the error text embeds the operator-configured path and,
+			// for a wrapped syscall error, arbitrary OS-supplied bytes. Same
+			// barrier the retry path 15 lines downstream already applies
+			// (request_log_persist_retry.go) and that internal/audit states for
+			// this exact value.
+			logger.Printf("Audit: log file error (%q) — falling back to in-memory", sanitizeLog(err.Error()))
 			// The configured path stays the operator's intent: the
 			// background-services slice re-attempts it and the entries
 			// recorded meanwhile are kept for it (audit_persist_retry.go).
 			armAuditDeferredOpen(cfg.AuditLogPath)
 		} else {
-			logger.Printf("Audit: persisting to %s", cfg.AuditLogPath)
+			logger.Printf("Audit: persisting to %q", sanitizeLog(cfg.AuditLogPath))
 		}
 	}
 
 	if cfg.RequestLogPath != "" {
 		requestLogConfiguredPath = cfg.RequestLogPath
 		if err := initRequestLog(cfg.RequestLogPath, cfg.RequestLogMaxMB); err != nil {
-			logger.Printf("RequestLog: file error (%v) — falling back to in-memory only", err)
+			logger.Printf("RequestLog: file error (%q) — falling back to in-memory only", sanitizeLog(err.Error()))
 			// The configured path stays the operator's intent: the
 			// background-services slice re-attempts it with the same
 			// rotation size (request_log_persist_retry.go).
 			armRequestLogDeferredOpen(cfg.RequestLogPath, cfg.RequestLogMaxMB)
 		} else {
-			logger.Printf("RequestLog: persisting to %s (max %d MB)", cfg.RequestLogPath, cfg.RequestLogMaxMB)
+			logger.Printf("RequestLog: persisting to %q (max %d MB)", sanitizeLog(cfg.RequestLogPath), cfg.RequestLogMaxMB)
 		}
 	}
 }

@@ -159,6 +159,52 @@ func TestFireDNSFailureAlert_SilentWithoutSubscriber(t *testing.T) {
 	awaitDispatch(t, dispatched, "", "dns_failure without subscriber")
 }
 
+// TestFireScanTimeoutAlert_FiresWithSubscriber pins that moving the two inline
+// scan_timeout producers (proxy_http.go, proxy_tunnel.go) behind one gated
+// helper did not silence them, and that the subscribed dispatch carries the
+// exact payload the inline literals built.
+func TestFireScanTimeoutAlert_FiresWithSubscriber(t *testing.T) {
+	as, _ := alertGateHarness(t)
+	subscribe(t, as, "scan_timeout")
+	got := make(chan AlertPayload, 8)
+	fireAlert = func(event string, payload AlertPayload) {
+		if event != "scan_timeout" || payload.Actor != "198.51.100.71" {
+			return // a straggler from a sibling test, not this invocation
+		}
+		got <- payload
+	}
+	fireScanTimeoutAlert("198.51.100.71", "scan-timeout-gate.example", "scan timeout")
+	want := AlertPayload{Actor: "198.51.100.71", Host: "scan-timeout-gate.example", Detail: "scan timeout", Source: "scan_timeout"}
+	select {
+	case p := <-got:
+		if p != want {
+			t.Fatalf("scan_timeout payload changed:\n got %+v\nwant %+v", p, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("scan_timeout with a subscriber was never dispatched — the gate swallowed a real alert")
+	}
+}
+
+// TestFireScanTimeoutAlert_FiresForCatchAll proves a "*" subscriber still
+// receives scan_timeout through the gate.
+func TestFireScanTimeoutAlert_FiresForCatchAll(t *testing.T) {
+	as, dispatched := alertGateHarness(t)
+	subscribe(t, as, "*")
+	fireScanTimeoutAlert("198.51.100.72", "scan-timeout-gate.example", "scan timeout")
+	awaitDispatch(t, dispatched, "scan_timeout", "scan_timeout with catch-all subscriber")
+}
+
+// TestFireScanTimeoutAlert_SilentWithoutSubscriber pins the skip: a cooldown
+// hit (secscan TestChaos_TimeoutCooldownHitIsServedWithoutAScan) returns a
+// timeout verdict per request without scanning, so an ungated producer would
+// spawn a goroutine per request on a degraded node to alert nobody.
+func TestFireScanTimeoutAlert_SilentWithoutSubscriber(t *testing.T) {
+	as, dispatched := alertGateHarness(t)
+	subscribe(t, as, "policy_block") // a subscriber, but not for scan_timeout
+	fireScanTimeoutAlert("198.51.100.73", "scan-timeout-gate.example", "scan timeout")
+	awaitDispatch(t, dispatched, "", "scan_timeout without subscriber")
+}
+
 type errTestDNS struct{}
 
 func (errTestDNS) Error() string { return "lookup dns-fail.example.com: no such host" }
