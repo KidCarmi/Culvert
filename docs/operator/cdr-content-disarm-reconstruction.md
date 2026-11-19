@@ -520,6 +520,34 @@ dialed successfully. A missing `instance` label is not evidence of health;
 cross-check the `_pool_*` series against your enrolled-instance inventory
 (`GET /api/cdr/instances`) or the `CDR: pool: skipping "<name>"` startup/
 reconfigure log line to catch a member that never made it into the pool.
+
+**A skipped member is re-dialled automatically; fix the cause, don't
+restart.** On a node where CDR was enabled at boot, the 15-second health
+poll re-tries every enabled enrolled instance that is missing from the live
+pool. It uses the same bundle load and dial a pool build uses, and backs off
+from 10 seconds to at most 2 minutes (plus jitter) between attempts, for as
+long as the instance stays missing. So once you restore the mount or the
+ownership of its credential bundle
+(`<dataDir>/integrations/sluice/<name>/`), the instance joins the pool
+within about 2.5 minutes at most. The log then shows `CDR: re-dialled "<name>" into the pool
+automatically`, and the audit log records a `cdr.pool.auto_redial` entry
+attributed to `system`.
+
+The re-dial only adds the missing members:
+
+- Members already serving keep their connections and circuit-breaker state.
+- `fail_mode`, the default profile and mode, the timeout and the size limits
+  are left exactly as configured. This is unlike the runtime disable/enable
+  toggle described above.
+- No configuration version is written.
+
+It does nothing while CDR is disabled in the active configuration, after
+the shutdown hook, or for an instance that is disabled, deleted or revoked
+in the meantime. While a member is still missing, the log repeats
+`CDR: N enrolled instance(s) still missing from the pool` on the first
+failed attempt and every tenth. A node whose CDR was enabled at runtime
+rather than at boot runs no health poll, so it has no automatic re-dial
+either; there, a restart is still the way to rebuild the pool.
 `GET /api/cdr/instances` is also the right surface for ad hoc inspection,
 since it carries per-instance health and breaker state.
 `GET /api/cdr/health` does **not** — it returns only the

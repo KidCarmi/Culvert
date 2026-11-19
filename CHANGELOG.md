@@ -197,6 +197,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **CDR re-dials a Sluice instance whose credential bundle was unreadable
+  when the pool was built, without a restart.** If an enrolled instance's
+  `ca.pem` / `client.pem` / `client.key` cannot be loaded when the pool is
+  built (volume not yet mounted, wrong ownership, at-rest key unavailable),
+  the instance is skipped. Before this fix nothing ever tried it again: the
+  health poll only probes members already in the pool, and the runbook said
+  to restart, because the runtime toggle zeroes `fail_mode`. Until then, an
+  empty pool refused every inspected document (`fail_mode: closed`) or
+  delivered it unsanitized (`open`), and a partial pool scanned with reduced
+  capacity.
+
+  Now the 15-second health poll re-dials missing enabled instances, using the
+  same bundle load and dial as a pool build, with a 10s→2m backoff. It
+  appends each instance that dials and records a `system`-attributed
+  `cdr.pool.auto_redial` audit entry.
+
+  What is unchanged:
+  - Live members keep their clients and breakers.
+  - The active CDR config, registry, lineage and enable sentinel are not
+    touched.
+  - No configuration version is written.
+
+  When it does not act:
+  - CDR is disabled in the active config.
+  - The shutdown hook has run.
+  - The lifecycle has been cancelled.
+  - An instance was disabled, deleted or re-pointed meanwhile: it is
+    re-validated before and after publishing.
+
+  `initCDRClient`, `shutdownCDRClient` and the re-dial now serialize on one
+  lifecycle mutex (`TestCDRRedial_*`).
+
 - **An unauthenticated request stream can no longer stall the admin plane
   through the audit-log recovery.** The deferred open charged each evicted
   backlog entry one at a time inside the critical section holding the

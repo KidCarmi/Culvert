@@ -422,6 +422,15 @@ func normaliseFingerprint(fp string) string {
 var (
 	cdrClientMu  sync.RWMutex
 	cdrActiveCfg CDRConfig
+
+	// cdrPoolLifecycleMu serializes every whole-pool transition: a rebuild
+	// (initCDRClient), a teardown (shutdownCDRClient) and the automatic
+	// re-dial of a missing member (reconcileCDRPool, cdr_pool_reconcile.go).
+	// Without it, a re-dial that read "enabled" could publish clients after
+	// a concurrent disable had already torn the pool down. Lock order:
+	// cdrPoolLifecycleMu before cdrClientMu, the registry lock and the pool
+	// lock; none of those is ever held while taking it.
+	cdrPoolLifecycleMu sync.Mutex
 )
 
 // cdrRuntimeEnabledPath is the sentinel file whose existence indicates
@@ -514,8 +523,16 @@ func cdrActiveConfig() CDRConfig {
 // own circuit breaker.  Phase 2c's single-client behaviour is preserved
 // when the registry has exactly one enabled instance.
 func initCDRClient(cfg CDRConfig) error {
+	cdrPoolLifecycleMu.Lock()
+	defer cdrPoolLifecycleMu.Unlock()
+	return initCDRClientLocked(cfg)
+}
+
+// initCDRClientLocked is initCDRClient's body; the caller holds
+// cdrPoolLifecycleMu.
+func initCDRClientLocked(cfg CDRConfig) error {
 	if !cfg.Enabled {
-		shutdownCDRClient()
+		shutdownCDRClientLocked()
 		return nil
 	}
 
@@ -574,6 +591,14 @@ func initCDRClient(cfg CDRConfig) error {
 // config.  Safe to call when no pool was ever built.  Invoked from
 // main.go's graceful shutdown.
 func shutdownCDRClient() {
+	cdrPoolLifecycleMu.Lock()
+	defer cdrPoolLifecycleMu.Unlock()
+	shutdownCDRClientLocked()
+}
+
+// shutdownCDRClientLocked is shutdownCDRClient's body; the caller holds
+// cdrPoolLifecycleMu.
+func shutdownCDRClientLocked() {
 	cdrClientMu.Lock()
 	cdrActiveCfg = CDRConfig{}
 	cdrClientMu.Unlock()
