@@ -81,7 +81,7 @@ no scope — was admitted regardless of the filters
 | Surface | Status |
 |---|---|
 | Admin UI (**Objects → Identity Providers**) | **Not editable.** The OIDC form carries both values in hidden inputs so an edit preserves what is stored, but offers no control to set or clear them. |
-| Admin API | `PUT /api/idp/{id}` (Admin role) with the profile body; `POST /api/idp` on create. Send the full profile as returned by `GET /api/idp` with the `oidc.requiredScope` / `oidc.requiredAudience` fields changed — an omitted field is stored empty. `clientSecret` may be omitted; the stored secret is preserved. |
+| Admin API | `PUT /api/idp/{id}` (Admin role) with the profile body; `POST /api/idp` on create. Send the full profile as returned by `GET /api/idp` with the `oidc.requiredScope` / `oidc.requiredAudience` fields changed — an omitted field is stored empty. **Remove `oidc.clientSecret` from that body before sending it** unless you mean to replace the secret: `GET` returns it as `""`, and an explicit empty value clears the stored secret (breaking introspection and the browser token exchange for a confidential client); only an absent field preserves it. |
 | Legacy YAML (`oidc.required_scope`, `oidc.required_audience`) | The legacy backend is introspection-only, so it has always applied both filters to every token. |
 
 Changes take effect without a restart: the registry recompiles the profile and
