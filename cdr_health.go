@@ -91,6 +91,10 @@ func startCDRHealthPoller(ctx context.Context) {
 // members are failing.  Queue depth is the minimum observed (most
 // conservative backpressure signal).
 func probeCDRHealth(ctx context.Context) {
+	// Re-dial an enrolled instance a previous pool build had to skip (its
+	// credential bundle was unreadable) BEFORE listing members, so an empty
+	// pool can recover in this same round (cdr_pool_reconcile.go).
+	maybeRedialMissingCDRMembers(ctx)
 	members := cdrPool.List()
 	if len(members) == 0 {
 		clearCDRHealth()
