@@ -457,10 +457,10 @@ func TestScanLimitSignal_ConcurrentResponsesEachCountedOnce(t *testing.T) {
 // TestScanSkipped_ProducerIsSubscriberGated pins the request-path alert
 // contract for logScanLimitExceeded.
 //
-// Unlike scan_timeout — whose rate is bounded by construction, since every fire
-// costs a multi-second scan budget — this producer's rate is set by TRAFFIC: an
-// origin chooses its own response size, so a client can put every request on
-// this path. Ungated, each one paid a goroutine, a payload build, an RFC3339
+// Like scan_timeout (fireScanTimeoutAlert: a timeout cooldown hit is served
+// from the memo without a scan, so that producer runs at request rate too),
+// this producer's rate is set by TRAFFIC: an origin chooses its own response
+// size, so a client can put every request on this path. Ungated, each one paid a goroutine, a payload build, an RFC3339
 // format and a round trip through the process-wide dedup mutex to deliver an
 // alert to nobody, which is the default posture (no webhooks configured).
 //

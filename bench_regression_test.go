@@ -819,6 +819,34 @@ func TestBenchGate_DNSFailureAlertAllocs(t *testing.T) {
 	}
 }
 
+// TestBenchGate_ScanTimeoutAlertAllocs is the same contract for the scan_timeout
+// producer. Its rate is NOT bounded by the scan budget: inside the timeout
+// cooldown a refused object is answered from the memo with no scan, so every
+// request for it reaches fireScanTimeoutAlert.
+func TestBenchGate_ScanTimeoutAlertAllocs(t *testing.T) {
+	const maxAllocs int64 = 0 // steady state 0; ungated it spawned a goroutine per call
+
+	orig := alertStore()
+	defer func() { alertStoreRef.Store(orig) }()
+	as := &AlertStore{}
+	as.Init("")
+	alertStoreRef.Store(as)
+
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			fireScanTimeoutAlert("203.0.113.7", "scan-timeout.example.com", "scan timeout")
+		}
+	})
+	allocs := res.AllocsPerOp()
+	t.Logf("fireScanTimeoutAlert (no subscriber): %d allocs/op (bound %d), %d ns/op", allocs, maxAllocs, res.NsPerOp())
+	if allocs > maxAllocs {
+		t.Errorf("REGRESSION: fireScanTimeoutAlert allocates %d/op with NO webhook subscribed, exceeds bound %d — "+
+			"the HasSubscriber gate has been bypassed; a scanner stall will now spawn a goroutine per request. "+
+			"See alerts.go fireScanTimeoutAlert.", allocs, maxAllocs)
+	}
+}
+
 // TestBenchGate_RequestLogEntryAllocs locks in the allocation-free per-request
 // request-log record. persistLogEntry is the chokepoint every logged request
 // flows through — HTTP, CONNECT, WebSocket, SOCKS5, TUNNEL_CLOSED accounting
