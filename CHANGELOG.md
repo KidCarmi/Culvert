@@ -9,6 +9,49 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A stale blocklist-feed alert that reached nobody no longer consumes the
+  node's one page for that episode (`SEC-BLFEED-STALE-LATCH-1`).** The
+  CHAOS-123 freshness plane fires `blocklist_feed_stale` at most once per
+  episode, and the episode clears only on an observed clean sync, a feed
+  removal or a restart — never on elapsed time. The latch was set before the
+  alert was dispatched, while the sink drops the alert when nothing subscribes,
+  which is the default posture. So an appliance that booted with an unreachable
+  feed origin burned the episode on the first failed round after the grace, and
+  an operator who added the `blocklist_feed_stale` webhook afterwards was never
+  paged while the deny list went on not refreshing for the life of the process.
+  The latch now tracks DELIVERY: it is consumed only by a dispatched alert, with
+  the decision still inside the lock so concurrent failed rounds page at most
+  once. Detection was degraded rather than dark throughout — the
+  `blocklist_feed` WARN row and the `culvert_blocklist_feed_stale*` gauges are
+  derived on read and stayed correct — but the push surface the feature exists
+  for was lost (`TestChaos123_UndeliveredStaleAlertDoesNotConsumeTheEpisode`).
+- **A withdrawn CDR pool member is unpublished before its connection is closed
+  (`SEC-CDR-REDIAL-CLOSE-ORDER-1`).** The automatic re-dial publishes the
+  members it dialled and then re-validates them, withdrawing any whose registry
+  entry disappeared in between. That post-publish pass closed a withdrawn
+  member's connection while the member was STILL in the published pool, and
+  nothing filters a closed client out of selection: `cdrClientPool.pick`
+  selects on breaker state alone and `CDRClient.closedAt` is written by `Close`
+  and read by nothing. A concurrent `PickReserved` could therefore hand a dead
+  connection to a sanitize RPC, and under `fail_mode: open` the document it was
+  drawn for passed CDR unsanitized. The decision and the teardown are now
+  separate: the pass reports what to withdraw, `cdrPool.replace` unpublishes it,
+  and `replace` — which already closes exactly the clients not carried over —
+  does the closing afterwards
+  (`TestCDRRedial_WithdrawnMemberIsUnpublishedBeforeItIsClosed`).
+- **`bootstrap-resolve`'s positional-argument refusal no longer prints flag
+  values.** The refusal echoed the whole discarded tail; `sanitizeLog`
+  neutralizes newlines but does not redact values, and that FlagSet owns
+  `--catalog-url`, an operator-supplied origin that can carry userinfo
+  credentials. Since `scripts/install.sh` collects this stderr into the install
+  log, a mirror credential landed in a file that is routinely attached to
+  support bundles. The refusal now echoes only the first token and the flag
+  NAMES, through the same position-based `redactArgValuesWith` the main binary's
+  CHAOS-122 refusal uses — so a dash-leading secret is redacted too and an
+  unknown flag name is treated as taking a value. `--data-dir` still appears by
+  name, so the operator can still see that the anti-rollback floor was among the
+  discarded flags. Pre-existing; the main binary's copy was fixed separately
+  (`TestChaos122_BootstrapResolveRefusalRedactsFlagValues`).
 - **A policy rule on an IP-literal destination now matches every spelling of
   that address.** `destFqdn` literals were compared as text, so a Block/Drop
   rule on `192.0.2.7` did not match `[::ffff:192.0.2.7]`, and one on

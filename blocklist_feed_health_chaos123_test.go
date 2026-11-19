@@ -91,7 +91,7 @@ func blFeedHealthTest(t *testing.T, now time.Time) *blFeedFixture {
 func captureStaleAlert(t *testing.T) *[]string {
 	t.Helper()
 	var fired []string
-	fireBlocklistFeedStaleAlert = func(detail string) { fired = append(fired, detail) }
+	fireBlocklistFeedStaleAlert = func(detail string) bool { fired = append(fired, detail); return true }
 	return &fired
 }
 
@@ -804,5 +804,68 @@ func TestChaos123_NeverSyncedFeedInGraceDoesNotRelabelAStaleOne(t *testing.T) {
 	}
 	if strings.Contains(row.Message, "NEVER") || !strings.Contains(row.Message, "are stale") {
 		t.Errorf("diagnostics row must describe A's stale imports, got %q", row.Message)
+	}
+}
+
+// TestChaos123_UndeliveredStaleAlertDoesNotConsumeTheEpisode is
+// SEC-BLFEED-STALE-LATCH-1.
+//
+// The stale alert fires at most once per episode, and the episode clears only
+// on an OBSERVED clean sync, a feed removal or a restart — never on elapsed
+// time. So consuming the latch for an alert that was never dispatched spends
+// the node's one page on nobody. The reachable shape is the DEFAULT posture:
+// no webhook is configured, a node boots with an unreachable feed origin, the
+// grace elapses, and the first failed round burns the episode. The operator
+// subscribes to blocklist_feed_stale afterwards and is never paged, while the
+// deny list goes on not refreshing for as long as the process lives.
+//
+// The latch must therefore track DELIVERY, not the attempt.
+func TestChaos123_UndeliveredStaleAlertDoesNotConsumeTheEpisode(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	const feed = "https://feeds.example.com/deny.txt"
+	bs.SetFeed(feed, 6*time.Hour)
+	bs.seedStatus(feed, now.Add(-13*time.Hour), now.Add(-13*time.Hour), "")
+
+	// Phase 1: nothing subscribes, so the sink dispatches nothing.
+	var attempts, delivered int
+	subscribed := false
+	prevFire := fireBlocklistFeedStaleAlert
+	fireBlocklistFeedStaleAlert = func(string) bool {
+		attempts++
+		if !subscribed {
+			return false
+		}
+		delivered++
+		return true
+	}
+	t.Cleanup(func() { fireBlocklistFeedStaleAlert = prevFire })
+
+	for i := 1; i <= 3; i++ {
+		noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: i, Interval: 6 * time.Hour})
+	}
+	if attempts == 0 {
+		t.Fatal("precondition: the stale evaluation never reached the alert sink")
+	}
+	if delivered != 0 {
+		t.Fatalf("delivered = %d with no subscriber, want 0", delivered)
+	}
+
+	// Phase 2: the operator adds the webhook. The feed is still stale and the
+	// episode was never delivered, so the next failed round must page.
+	subscribed = true
+	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 4, Interval: 6 * time.Hour})
+	if delivered != 1 {
+		t.Fatalf("delivered = %d after the webhook was added, want 1: the episode was consumed by an "+
+			"alert that reached nobody, so a feed that is still stale never pages (SEC-BLFEED-STALE-LATCH-1)", delivered)
+	}
+
+	// And the latch still holds once delivery HAS happened: further failed
+	// rounds in the same episode must not re-page.
+	for i := 5; i <= 7; i++ {
+		noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: i, Interval: 6 * time.Hour})
+	}
+	if delivered != 1 {
+		t.Errorf("delivered = %d, want 1: a delivered episode must still page only once", delivered)
 	}
 }
