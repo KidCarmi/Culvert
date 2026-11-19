@@ -140,19 +140,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
-- **Diagnostics now warns when CDR has recently delivered documents
-  unsanitized (Product Experience).** Under `cdr.fail_mode: open` (the
-  default), a Sanitize call that errors (engine `ERROR`, timeout, transport
-  fault) delivers the original document. The `cdr` row reports pool
-  availability, so with every instance reachable it read `enabled-healthy`
-  while files were reaching endpoints unsanitized. The only signals were
-  `culvert_cdr_fail_open_total` on `/metrics` and per-request `CDR_ERROR` rows;
-  the CDR page shows the fail-open posture, not that it fired. A new
-  report-only `cdr_unsanitized_delivery` WARN row gives the count since startup
-  and how long ago the latest one happened, points at the `CDR_ERROR` request-log
-  filter and the `fail_mode` setting, and clears 24h after the last one. No row
-  when CDR is off, under `fail_mode: closed`, or when nothing fell open. Fail
-  mode, outcomes and counters are unchanged.
+- **Diagnostics now warns when CDR has recently fallen open (Product
+  Experience).** Under `cdr.fail_mode: open` (the default), a Sanitize call
+  that errors (engine `ERROR`, timeout, transport fault) passes the original
+  document on unsanitized; DPI and ClamAV/YARA still run after it and may
+  block it. The `cdr` row reports pool availability, so with every instance
+  reachable it read `enabled-healthy` while documents were passing CDR
+  unsanitized. The only signals were `culvert_cdr_fail_open_total` on
+  `/metrics` and per-request `CDR_ERROR` rows; the CDR page shows the
+  fail-open posture, not that it fired. A new report-only
+  `cdr_fail_open_recent` WARN row gives the count since startup and how
+  long ago the latest one happened (on the monotonic clock), points at the
+  `CDR_ERROR` request-log filter and the `fail_mode` setting, and clears 24h
+  after the last one. No row when CDR is off, under `fail_mode: closed`, or
+  when nothing fell open. Fail mode, outcomes and counters are unchanged.
 
 - **Diagnostics now warns before an SSL inspection Root CA that Culvert will
   not renew expires (Product Experience).** Only a Culvert-generated CA is
