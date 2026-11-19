@@ -407,6 +407,14 @@ func blocklistFeedState() blocklistFeedSnapshot {
 	snap.Feeds = len(feeds)
 	now := blocklistFeedNow()
 	anyNeverSynced := false
+	// The stale bound depends on how many feeds share a scheduler round, so it
+	// is counted before any feed is measured.
+	autoSync := 0
+	for i := range feeds {
+		if feeds[i].Interval > 0 {
+			autoSync++
+		}
+	}
 
 	for i := range feeds {
 		f := &feeds[i]
@@ -419,7 +427,7 @@ func blocklistFeedState() blocklistFeedSnapshot {
 		if f.LastSync.IsZero() {
 			anyNeverSynced = true
 		}
-		snap.accumulateAutoSync(f, startedAt, now)
+		snap.accumulateAutoSync(f, startedAt, now, autoSync)
 	}
 	if anyNeverSynced {
 		// One feed with no success makes the fleet-wide "oldest success"
@@ -458,7 +466,7 @@ func (snap *blocklistFeedSnapshot) accumulateManualOnly(f *blocklistfeed.Feed) {
 
 // accumulateAutoSync folds in a scheduled feed: its age, the freshness floor it
 // contributes, and whether it is stale against its OWN interval.
-func (snap *blocklistFeedSnapshot) accumulateAutoSync(f *blocklistfeed.Feed, startedAt, now time.Time) {
+func (snap *blocklistFeedSnapshot) accumulateAutoSync(f *blocklistfeed.Feed, startedAt, now time.Time, autoSyncFeeds int) {
 	if f.LastSync.IsZero() {
 		snap.NeverSyncedFeeds++
 		age := time.Duration(0)
@@ -484,27 +492,29 @@ func (snap *blocklistFeedSnapshot) accumulateAutoSync(f *blocklistfeed.Feed, sta
 		age = 0
 	}
 	snap.noteAge(age)
-	if age >= blocklistFeedStaleAfter(f.Interval) {
+	if age >= blocklistFeedStaleAfter(f.Interval, autoSyncFeeds) {
 		snap.StaleFeeds++
 	}
 }
 
 // blocklistFeedStaleAfter is how long an auto-sync feed may go without a
 // successful sync before it reads stale: blocklistFeedStaleFactor intervals,
-// but never less than the longest gap the scheduler gives a HEALTHY feed plus
-// one tick of margin for the round itself.
+// but never less than the longest gap the scheduler gives a HEALTHY feed
+// (blocklistfeed.MaxHealthyGap, for this node's autoSyncFeeds) plus one tick
+// of margin for merging what was fetched.
 //
-// The floor matters only near the tick. The admin API accepts any positive
-// interval (a wire/config contract this plane does not narrow), while the
-// scheduler fetches only on its tick and adds a stable jitter offset, so a
-// 10 s feed is synced once per tick and a 60 s feed with positive jitter is
-// due just after one tick and fetched on the next: about 120 s apart. Against
-// a bare 2x interval, a feed succeeding on every round it is given would read
-// stale for part of each cycle and page a healthy node. For longer intervals
-// 2x already clears that gap and the documented threshold is unchanged.
-func blocklistFeedStaleAfter(interval time.Duration) time.Duration {
+// The floor matters only for short intervals. The admin API accepts any
+// positive interval (a wire/config contract this plane does not narrow),
+// while the scheduler fetches only on its tick, adds a stable jitter offset
+// and fetches a round's due feeds one after another. So a 10 s feed is synced
+// once per tick, a 60 s feed with positive jitter about 120 s apart, and six
+// 60 s feeds that each take 29 s about 205 s apart. Against a bare 2x
+// interval, feeds succeeding on every round they are given would read stale
+// for part of each cycle and page a healthy node. For longer intervals 2x
+// already clears that gap and the documented threshold is unchanged.
+func blocklistFeedStaleAfter(interval time.Duration, autoSyncFeeds int) time.Duration {
 	return max(time.Duration(blocklistFeedStaleFactor)*interval,
-		blocklistfeed.MaxHealthyGap(interval)+blocklistfeed.TickInterval)
+		blocklistfeed.MaxHealthyGap(interval, autoSyncFeeds)+blocklistfeed.TickInterval)
 }
 
 // noteAge keeps WorstAge at the largest age seen.

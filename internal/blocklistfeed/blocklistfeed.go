@@ -223,24 +223,32 @@ func (bs *Syncer) scheduleNextLocked(st *feedState, ok bool) time.Duration {
 }
 
 // MaxHealthyGap is the longest a feed whose every round succeeds can go
-// between the starts of two consecutive auto-sync attempts at interval.
+// between two consecutive successful auto-syncs at interval, on a node with
+// autoSyncFeeds auto-synced feeds in total.
 //
-// Two things stretch the configured interval. The stable jitter offset can add
-// up to jitterFrac of it, and a feed becomes due between ticks but is only
-// fetched on the next one, which Start arms TickInterval after the previous
-// round ENDS. So a 60 s feed with +5% jitter misses the tick at 60 s (due at
-// 63 s) and is fetched on the one after: about 120 s apart, not 60 s.
+// Three things stretch the configured interval:
+//   - the stable jitter offset, up to jitterFrac of it;
+//   - tick rounding: a feed becomes due between ticks but is only fetched on
+//     the next one, which Start arms TickInterval after the previous round
+//     ENDS. A 60 s feed with +5% jitter misses the tick at 60 s (due at 63 s)
+//     and is fetched on the one after, about 120 s apart;
+//   - round length: a round fetches its due feeds one after another, so two
+//     successes of one feed bracket the rest of the round it last synced in
+//     and the start of the round that syncs it next. Each fetch is bounded by
+//     httpTimeout, so each of those two rounds is bounded by autoSyncFeeds
+//     fetches. Six 60 s feeds at 29 s each make a ~174 s round.
 //
-// The round's own duration is not included: it is unbounded here (many feeds,
-// each up to httpTimeout) and a caller measuring freshness should absorb it
-// with a margin, the way package main's stale factor does. Exported for that
-// freshness plane, which must not measure staleness against a cadence the
-// scheduler cannot deliver (CHAOS-123).
-func MaxHealthyGap(interval time.Duration) time.Duration {
-	if interval <= 0 {
-		return TickInterval
+// The static per-fetch bound is used rather than a measured round length so a
+// stalled scheduler cannot widen its own freshness bound. Merging a fetched
+// list is not bounded here; a caller measuring freshness should keep a margin
+// for it. Exported for package main's freshness plane, which must not measure
+// staleness against a cadence the scheduler cannot deliver (CHAOS-123).
+func MaxHealthyGap(interval time.Duration, autoSyncFeeds int) time.Duration {
+	gap := TickInterval + time.Duration(2*max(autoSyncFeeds, 1))*httpTimeout
+	if interval > 0 {
+		gap += interval + time.Duration(float64(interval)*jitterFrac)
 	}
-	return interval + time.Duration(float64(interval)*jitterFrac) + TickInterval
+	return gap
 }
 
 // New creates an empty syncer for bl. Feeds are added via SetFeed (startup

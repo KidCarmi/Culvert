@@ -49,15 +49,17 @@ ever sync it. See [Auto-sync off](#the-auto-sync-off-case) below.
 | Body/line budget | bounded; an origin that overruns it fails the round rather than importing a truncated list |
 
 The interval is per feed, so the staleness threshold below is per feed too.
-A feed is stale after 2× its configured interval with no success, with one
-floor near the 60 s tick. The scheduler fetches only on its tick and adds the
-jitter offset (up to +10%), so a short interval cannot be delivered exactly: a
-10 s feed is synced once per tick, and a 60 s feed with positive jitter is due
-just after one tick and fetched on the next, about 2 minutes apart. Such a feed
-reads stale only after its interval plus jitter plus two ticks (roughly 2–3
-minutes), so a feed that succeeds on every round it is given never pages. From
-an interval of about 2¼ minutes up, 2× the interval is the larger bound and
-applies unchanged.
+A feed is stale after 2× its configured interval with no success, with a
+floor for short intervals. The scheduler fetches only on its tick, adds the
+jitter offset (up to +10%), and fetches a round's due feeds one after another,
+so a short interval cannot be delivered exactly: a 10 s feed is synced once per
+tick, a 60 s feed with positive jitter about 2 minutes apart, and six 60 s
+feeds that each take 29 s about 3½ minutes apart. The floor is the interval
+plus jitter, plus two ticks, plus two rounds' worth of fetches at the 30 s
+fetch timeout per auto-synced feed (about 4 minutes for one 60 s feed). A feed
+that succeeds on every round it is given therefore never pages. For a single
+feed, 2× the interval is the larger bound from about a 3⅓-minute interval up,
+and for typical intervals (hours) the documented 2× applies unchanged.
 
 Jitter and the sub-interval retry ceiling are both deliberate. Without jitter,
 every node in a fleet that booted together would fetch from the same origin at

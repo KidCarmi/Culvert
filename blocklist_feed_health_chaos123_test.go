@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -556,9 +557,46 @@ func TestChaos123_JitteredTickRoundingIsNotStale(t *testing.T) {
 
 	// Negative control: the floor is the healthy cadence plus one tick, not a
 	// blanket allowance. Past it the feed is stale.
-	bound := blocklistfeed.MaxHealthyGap(interval) + blocklistfeed.TickInterval
+	bound := blocklistfeed.MaxHealthyGap(interval, 1) + blocklistfeed.TickInterval
 	blocklistFeedNow = func() time.Time { return last.Add(bound) }
 	if snap := blocklistFeedState(); snap.StaleFeeds != 1 {
+		t.Fatalf("a 60s feed with no success for %v is stale, got %+v", bound, snap)
+	}
+}
+
+// TestChaos123_SerialSlowRoundIsNotStale — Codex's case: six 60 s feeds whose
+// fetches each take 29 s are synced one after another, so the round runs to
+// ~174 s and, a tick later, the second feed's last success is ~205 s old
+// before the next round reaches it. A floor of jitter plus two ticks (186 s)
+// paged that healthy node every cycle; the bound now counts the feeds that
+// share the round.
+func TestChaos123_SerialSlowRoundIsNotStale(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	fired := captureStaleAlert(t)
+	const interval = time.Minute
+	feeds := make([]string, 6)
+	for i := range feeds {
+		feeds[i] = fmt.Sprintf("https://feeds%d.example.com/deny.txt", i)
+		bs.SetFeed(feeds[i], interval)
+		fresh := now.Add(-time.Duration(i) * 29 * time.Second)
+		bs.seedStatus(feeds[i], fresh, fresh, "")
+	}
+	slow := now.Add(-205 * time.Second)
+	bs.seedStatus(feeds[1], slow, slow, "")
+
+	if snap := blocklistFeedState(); snap.StaleFeeds != 0 {
+		t.Fatalf("six 29s feeds on a serial round are on their cadence, got %+v", snap)
+	}
+	evaluateBlocklistFeedStaleness()
+	if len(*fired) != 0 {
+		t.Fatalf("a serial slow round must not page, got %v", *fired)
+	}
+
+	// Negative control: past the round-aware bound the feed is stale.
+	bound := blocklistfeed.MaxHealthyGap(interval, len(feeds)) + blocklistfeed.TickInterval
+	blocklistFeedNow = func() time.Time { return slow.Add(bound) }
+	if snap := blocklistFeedState(); snap.StaleFeeds == 0 {
 		t.Fatalf("a 60s feed with no success for %v is stale, got %+v", bound, snap)
 	}
 }
@@ -732,7 +770,7 @@ func TestChaos123_RetimingAnAutoSyncFeedKeepsTheEpisode(t *testing.T) {
 
 // TestChaos123_NeverSyncedFeedInGraceDoesNotRelabelAStaleOne — Codex's case:
 // seven minutes after startup, feed A (1m interval) synced once and is now
-// stale (past its ~3m stale bound), while feed B has never synced but is still inside the 15-minute
+// stale (past its ~5m stale bound), while feed B has never synced but is still inside the 15-minute
 // grace, so it is NOT stale. Both raw counters are 1. The stale feed did sync,
 // so the alert and the diagnostics row must say "stale", not "NEVER synced".
 func TestChaos123_NeverSyncedFeedInGraceDoesNotRelabelAStaleOne(t *testing.T) {
