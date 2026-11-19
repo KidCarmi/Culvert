@@ -95,6 +95,10 @@ oidc:
   introspection_url: ""  # e.g. "https://your-domain.okta.com/oauth2/default/v1/introspect"
   client_id: ""
   client_secret: ""
+  # Both filters are checked on the INTROSPECTION response, i.e. only for a
+  # token presented as a proxy credential. The browser SSO flow receives an ID
+  # token (no scope claim; audience already pinned to client_id) and is NOT
+  # gated by them — restrict that path with group/claim mapping instead.
   # required_scope: "proxy:access"
   # required_audience: ""
   # login_url: ""         # OIDC authorization endpoint for browser redirect

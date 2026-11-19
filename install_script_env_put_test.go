@@ -144,7 +144,11 @@ func runEnvPutProcess(t *testing.T, fn, envFile, varName, val string) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	script := fn + "\n" + `env_put "$1" "$2" "$3"`
+	// warn is install.sh's own helper, which the extracted function calls on
+	// every skip path. Define it so a skip is VISIBLE: in a writable temp dir
+	// none of those paths may fire, and one that does is a skipped update that
+	// would otherwise surface only as a missing var.
+	script := `warn() { printf 'WARN: %s\n' "$*" >&2; }` + "\n" + fn + "\n" + `env_put "$1" "$2" "$3"`
 	cmd := exec.CommandContext(ctx, "bash", "-c", script, "env_put_concurrency_test", varName, val, envFile) // #nosec G204 -- fixed test script content, not external/user input
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
@@ -152,6 +156,9 @@ func runEnvPutProcess(t *testing.T, fn, envFile, varName, val string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("env_put %s=%s failed: %w: %s", varName, val, err, out)
+	}
+	if strings.Contains(string(out), "WARN:") {
+		return fmt.Errorf("env_put %s=%s skipped its update in a writable dir: %s", varName, val, out)
 	}
 	return nil
 }

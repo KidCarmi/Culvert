@@ -23,7 +23,6 @@ import {
   Skeleton,
   StatusBadge,
 } from "../../design-system/primitives";
-import type { Status } from "../../design-system/primitives";
 import { InputField, SelectField } from "../../design-system/forms";
 import { SnapshotBar } from "../../shared/snapshot";
 import {
@@ -33,6 +32,11 @@ import {
   resolveWindow,
 } from "./timeRange";
 import type { TimePreset } from "./timeRange";
+import {
+  TRAFFIC_STATUS_FILTERS,
+  trafficStatusMeaning,
+  trafficStatusTone,
+} from "./trafficStatus";
 import styles from "./monitor.module.css";
 
 interface AppliedQuery {
@@ -62,16 +66,7 @@ function fromSearch(sp: URLSearchParams): AppliedQuery {
 }
 
 function statusBadge(s: string): JSX.Element {
-  const map: Record<string, Status> = {
-    OK: "ok",
-    BLOCKED: "critical",
-    POLICY_BLOCK: "critical",
-    POLICY_DEFAULT_DENY: "critical",
-    AUTH_FAIL: "warn",
-    RATE_LIMITED: "warn",
-    IP_BLOCKED: "critical",
-  };
-  return <StatusBadge status={map[s] ?? "neutral"}>{s}</StatusBadge>;
+  return <StatusBadge status={trafficStatusTone(s)}>{s}</StatusBadge>;
 }
 
 function fmtBytes(n: number): string {
@@ -82,7 +77,9 @@ function fmtBytes(n: number): string {
 }
 
 function RowDetail({ e }: { e: TrafficEntry }): JSX.Element {
+  const meaning = trafficStatusMeaning(e.status);
   const items: Array<readonly [string, JSX.Element | string]> = [
+    ...(meaning === "" ? [] : [["Status meaning", meaning] as const]),
     ["Rule", e.ruleMatched === "" ? "—" : e.ruleMatched],
     [
       "Rule ID",
@@ -314,15 +311,7 @@ export function TrafficPage(): JSX.Element {
           onChange={(e) => set({ status: e.target.value })}
         >
           <option value="">Any</option>
-          {[
-            "OK",
-            "BLOCKED",
-            "POLICY_BLOCK",
-            "POLICY_DEFAULT_DENY",
-            "AUTH_FAIL",
-            "RATE_LIMITED",
-            "IP_BLOCKED",
-          ].map((s) => (
+          {TRAFFIC_STATUS_FILTERS.map((s) => (
             <option key={s} value={s}>
               {s}
             </option>

@@ -1423,7 +1423,8 @@ func (ps *PolicyStore) sortLocked() {
 	for i := range next {
 		r := next[i]
 		if r.DestFQDN != "" {
-			r.normFQDN = normalizeHost(r.DestFQDN)
+			// An IP-literal pattern is compared by ADDRESS (canonicalDestLiteral).
+			r.normFQDN = canonicalDestLiteral(normalizeHost(r.DestFQDN))
 		} else {
 			r.normFQDN = ""
 		}
@@ -1720,7 +1721,9 @@ func evalAccessRules(rules []*PolicyRule, rows []policyScanRow, in *accessEvalIn
 	// The prefilter skips rules whose 16-byte packed row already PROVES a
 	// destination mismatch, so their definitions are never streamed; it can
 	// prove nothing else. See policy_scanindex.go.
-	pre := newDestPrefilter(rows, len(rules), in.normHost, trace != nil)
+	// It compares against the published patterns, so it takes the same
+	// address-canonical host the FQDN check does (hostCatScratch.fqdnHost).
+	pre := newDestPrefilter(rows, len(rules), catScratch.fqdnHost(in.normHost), trace != nil)
 	for i := range rules {
 		if pre.rejectsAt(i) {
 			continue
@@ -2508,7 +2511,7 @@ func matchDestNorm(rule *PolicyRule, host, normHost string, sc *hostCatScratch) 
 	// depends on normFQDN having been precomputed.
 	if fqdnSet {
 		if rule.normFQDN != "" {
-			if !matchFQDNNorm(rule.normFQDN, normHost) {
+			if !matchFQDNNorm(rule.normFQDN, sc.fqdnHost(normHost)) {
 				return false
 			}
 		} else if !matchFQDN(rule.DestFQDN, host) {
@@ -2680,7 +2683,11 @@ func matchFileExt(urlPath string, exts []string) bool {
 // policy_bypass_security_test.go. Wrapper FUNCTIONS (not func vars) so the
 // per-rule call in Evaluate's hot path stays direct and inlinable.
 
-func matchFQDN(pattern, host string) bool { return hostutil.MatchFQDN(pattern, host) }
+// matchFQDN is the fallback for a rule that never reached sortLocked, so it
+// applies the same IP-literal canonicalization publication and Evaluate do.
+func matchFQDN(pattern, host string) bool {
+	return hostutil.MatchFQDNNorm(canonicalDestLiteral(normalizeHost(pattern)), canonicalDestLiteral(normalizeHost(host)))
+}
 
 func matchFQDNNorm(pattern, host string) bool { return hostutil.MatchFQDNNorm(pattern, host) }
 
