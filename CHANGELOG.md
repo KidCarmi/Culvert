@@ -265,6 +265,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Two installer runs racing on a fresh stack dir could silently skip a
+  `.env` update.** `env_put` checked its lock file with one compound test that
+  read it twice; a concurrent `env_put` creating the lock between the two reads
+  made it look like a lock "owned by another user", so the call warned and
+  skipped its variable. The check now decides on a single observation of
+  whether the lock exists. Reproduced at about 1 in 200 runs of eight
+  concurrent `env_put` processes; 0 in 600 after the fix. The concurrency
+  tests now fail on any skip warning instead of reporting only a missing var.
+
 - **An unauthenticated request stream can no longer stall the admin plane
   through the audit-log recovery.** The deferred open charged each evicted
   backlog entry one at a time inside the critical section holding the
