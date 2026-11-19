@@ -68,6 +68,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   RFC 6749 §5.1 makes the response's `scope` optional, so getting either half
   wrong locks every SSO user out. See `SEC-OIDC-FILTER-SCOPE-1` in
   `docs/engineering/SECURITY-REGRESSION-REVIEW-2026-11-18.md`.
+
+- **The CHAOS-122 argv refusal no longer prints a credential that begins with
+  `-`.** Its "values redacted" tail decided what was a value by the leading
+  dash alone, so `culvert STRAY -pass -Hunter2` echoed `-Hunter2` to stderr,
+  which every orchestrator collects. A value is now identified by position: the
+  token after any `-flag` written without `=` is redacted unless that flag is a
+  defined boolean flag, which is how the flag package itself consumes it
+  (`TestChaos122_RefusalRedactsADashLeadingValue`).
+
 - **An OIDC profile's `requiredScope` / `requiredAudience` are now enforced for
   every token presented as a proxy credential.** The registry OIDC provider
   accepted a JWT that validated locally against the JWKS before it consulted
@@ -487,6 +496,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   unsubscribable and needs its reason recorded.
 
 ### Performance
+
+- **A scan-timeout cooldown hit no longer spawns an alert goroutine per request
+  when nobody subscribes to `scan_timeout` (PERF-SCANTIMEOUT-ALERT-1).** The two
+  per-response scan sites (plain-HTTP inspect and the CONNECT-inspect leg)
+  fired `go fireAlert("scan_timeout", …)` without the `HasSubscriber` gate every
+  other fault-driven request-path producer uses. The assumption that a timeout
+  is rate-limited by the multi-second scan budget does not hold: inside the 30 s
+  timeout cooldown a refused object is answered from the scan cache without a
+  scan, still with Source `timeout`, so every request for it paid a goroutine
+  spawn, a payload build and a round trip through the alert dedup mutex on a
+  node whose scanner is already stalled. Both sites now call one gated helper,
+  `fireScanTimeoutAlert`; with a subscriber the dispatch is byte-identical.
+  Measured on one binary (4 vCPU): ungated ~1.8 µs / 2 allocs per call
+  (~1.0 µs / 2–3 allocs at `-cpu=4`), gated ~3 ns / 0 allocs. Held by
+  `TestBenchGate_ScanTimeoutAlertAllocs` (bound 0) and the
+  `TestFireScanTimeoutAlert_*` dispatch tests; the premise is pinned by
+  `TestChaos_TimeoutCooldownHitIsServedWithoutAScan`.
 
 - **A scan-result cache insert at capacity stalled every concurrent verdict
   lookup for O(`cache_size`) (PERF-SCANCACHE-1).** `internal/hashcache` is the

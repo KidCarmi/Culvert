@@ -1591,7 +1591,7 @@ func scanInspectBody(r, req *http.Request, resp *http.Response, br blockResponde
 	}
 	if scanResult != nil {
 		if scanResult.Source == "timeout" {
-			go fireAlert("scan_timeout", AlertPayload{Actor: id.ClientIP, Host: hostOnly, Detail: scanResult.Reason, Source: "scan_timeout"})
+			fireScanTimeoutAlert(id.ClientIP, hostOnly, scanResult.Reason)
 		}
 		origBody.Close()
 		atomic.AddInt64(&statBlocked, 1)
