@@ -497,6 +497,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **An alert the dedup window was about to drop still paid two heap allocations
+  and a process-wide mutex round trip to find that out (PERF-ALERTDEDUP-1).**
+  `alerts.Store.Dispatch` is reached at REQUEST rate by fault-driven producers —
+  `recordStats` per blocked request, `fireDNSFailureAlert` from four dial sites,
+  `internal/secscan` per scan error, `cdr_proxy.go` per CDR submission — and
+  those producers put a LOW-cardinality value in `Detail` (a rule name, a
+  bounded reason class), so a flood against one rule collapses onto ONE dedup
+  key that the 30 s window suppresses by construction. Suppression is therefore
+  the COMMON answer on this path, not the rare one, and it was the expensive
+  one: `payload.Timestamp` was defaulted BEFORE the dedup gate, so a dispatch
+  about to be dropped formatted an RFC3339 stamp (~121 ns, one 24-byte
+  allocation) nothing would ever read; and the gate was handed
+  `event + ":" + Detail`, a 32-byte allocation built only to be looked up. The
+  stamp now happens after the gate, and the key is rendered into a frame-local
+  scratch so the read goes through `map[string(key)]`, which the compiler hashes
+  in place. A suppressed dispatch is now **allocation-free**: measured on a
+  4-core Xeon @ 2.10 GHz (n=5 medians, `RunParallel`, both shapes in ONE binary
+  via the `_Legacy` controls), 240.5 → 91.3 ns at P=1, 286.1 → 131.0 ns at P=2,
+  360.0 → 217.0 ns at P=4, and 2 allocations / 56 B → 0. The key BYTES are
+  unchanged (`event` + `:` + `detail`), so every CHAOS-27 assertion that indexes
+  `dedupMap` by that spelling still holds; event names are validated to
+  `[a-z0-9_]` so the encoding stays unambiguous. A key longer than the 128-byte
+  scratch is not truncated — it spills to the heap for the one allocation the
+  old code charged every dispatch, so the uncommon case is never worse.
+  Suppression semantics, the TTL, the `maxDedupEntries` cap, the amortised
+  expiry scan and the delivered payload's stamp are all unchanged. Gates:
+  `TestDedupSuppressedHitIsAllocationFree`,
+  `TestDispatchSuppressedIsAllocationFree` with its
+  `_LegacyIsNot` negative control, `TestDedupKeyEncodingUnchanged`,
+  `TestDedupSuppressedKeyLongerThanScratch`,
+  `TestDispatchStampsTimestampOnDeliveredPayload`,
+  `TestDispatchPreservesCallerTimestamp`, and the
+  `BenchmarkDispatchSuppressed*` / `_Legacy` pairs for the curve. The dedup
+  MUTEX itself still does not scale (93.0 ns at P=1 → 195.4 ns at P=4) and is
+  deliberately left alone: it runs on a detached goroutine rather than the
+  request goroutine, and sharding buys nothing when a flood collapses onto one
+  key.
+
 - **A scan-timeout cooldown hit no longer spawns an alert goroutine per request
   when nobody subscribes to `scan_timeout` (PERF-SCANTIMEOUT-ALERT-1).** The two
   per-response scan sites (plain-HTTP inspect and the CONNECT-inspect leg)
