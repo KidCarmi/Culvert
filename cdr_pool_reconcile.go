@@ -24,8 +24,10 @@ package main
 //   - WHAT is dialled: exactly the set a pool build dials — every ENABLED
 //     registry instance that is not in the live pool, through the same
 //     dialEnrolledInstance (or, with an empty registry, the same
-//     dialSingleFromConfig bootstrap, only when a certs dir is configured: a
-//     bootstrap with no files to read cannot fail transiently).
+//     dialSingleFromConfig bootstrap, only when the last pool build was that
+//     bootstrap and it failed, and only with a certs dir configured: a
+//     bootstrap with no files to read cannot fail transiently, and a registry
+//     emptied by an admin delete must not switch the bootstrap client on).
 //   - HOW it is published: the live members are kept as they are (same
 //     clients, same breakers, no connection closed) and the newly dialled
 //     ones are appended. Nothing is removed and nothing else is rebuilt.
@@ -188,6 +190,9 @@ func reconcileCDRPool(ctx context.Context) cdrRedialResult {
 	next = append(next, live...)
 	next = append(next, dialed...)
 	cdrPool.replace(next) // every live client is carried over: none is closed
+	if bootstrap {
+		cdrBootstrapRedialArmed = false
+	}
 
 	// And once more AFTER publishing. A delete/revoke handler removes the
 	// registry entry and THEN asks cdrActiveClient() whether a pool exists to
@@ -219,7 +224,10 @@ func cdrMissingPoolMembers(cfg CDRConfig, live []*cdrPooledClient) ([]CDREnrolle
 		// Same preconditions bootstrapPoolFromConfig enforces, plus a certs
 		// dir: without one the bootstrap reads no file, so its failure is
 		// deterministic and a retry could never change the outcome.
-		return nil, len(live) == 0 && cfg.Endpoint != "" && cfg.ServerFingerprint != "" && cfg.CertsDir != ""
+		// And only when the last pool build WAS that bootstrap and failed:
+		// a registry emptied by an admin delete never activates it.
+		return nil, cdrBootstrapRedialArmed && len(live) == 0 &&
+			cfg.Endpoint != "" && cfg.ServerFingerprint != "" && cfg.CertsDir != ""
 	}
 	inPool := make(map[string]struct{}, len(live))
 	for _, pc := range live {

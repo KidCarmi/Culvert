@@ -431,6 +431,10 @@ var (
 	// cdrPoolLifecycleMu before cdrClientMu, the registry lock and the pool
 	// lock; none of those is ever held while taking it.
 	cdrPoolLifecycleMu sync.Mutex
+
+	// cdrBootstrapRedialArmed records that the last pool build was the
+	// empty-registry bootstrap and it failed. Guarded by cdrPoolLifecycleMu.
+	cdrBootstrapRedialArmed bool
 )
 
 // cdrRuntimeEnabledPath is the sentinel file whose existence indicates
@@ -536,9 +540,16 @@ func initCDRClientLocked(cfg CDRConfig) error {
 		return nil
 	}
 
+	// The re-dial may retry the empty-registry bootstrap client only when THIS
+	// build tried it and failed (cdr_pool_reconcile.go). Any other build, and
+	// every teardown, disarms it, so a registry emptied later by an admin
+	// delete never turns the bootstrap client on behind the operator.
+	cdrBootstrapRedialArmed = false
+	bootstrapBuild := len(cdrInstances.SnapshotView()) == 0
 	oldPool := cdrPool.List()
 	newPool, err := buildCDRPoolFromRegistry(cfg, oldPool)
 	if err != nil && len(newPool) == 0 {
+		cdrBootstrapRedialArmed = bootstrapBuild
 		// Complete failure — every instance failed to dial, or none is
 		// enrolled. PUBLISH THE CONFIG ANYWAY, then report the error.
 		//
@@ -599,6 +610,7 @@ func shutdownCDRClient() {
 // shutdownCDRClientLocked is shutdownCDRClient's body; the caller holds
 // cdrPoolLifecycleMu.
 func shutdownCDRClientLocked() {
+	cdrBootstrapRedialArmed = false
 	cdrClientMu.Lock()
 	cdrActiveCfg = CDRConfig{}
 	cdrClientMu.Unlock()

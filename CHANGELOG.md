@@ -225,6 +225,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   - The lifecycle has been cancelled.
   - An instance was disabled, deleted or re-pointed meanwhile: it is
     re-validated before and after publishing.
+  - The registry was emptied by an admin delete: the empty-registry
+    bootstrap client is retried only when the last pool build itself tried
+    it and failed.
 
   `initCDRClient`, `shutdownCDRClient` and the re-dial now serialize on one
   lifecycle mutex (`TestCDRRedial_*`).

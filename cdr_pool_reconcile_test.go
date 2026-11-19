@@ -12,6 +12,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -408,5 +410,41 @@ func TestCDRRedial_BootstrapCertsDirRecovers(t *testing.T) {
 
 	if _, boot := cdrMissingPoolMembers(CDRConfig{Enabled: true, Endpoint: "e", ServerFingerprint: redialTestPin}, nil); boot {
 		t.Fatal("bootstrap without a certs dir would be retried")
+	}
+}
+
+// TestCDRRedial_DeletingLastSkippedInstanceNeverActivatesBootstrap is the
+// Codex P2 regression: the config also carries a valid bootstrap endpoint,
+// pin and certs dir; the only enrolled instance was skipped (bundle
+// unreadable); the admin DELETEs it from an already-empty pool, so the
+// handler has no client to shut down and CDR stays enabled. The emptied
+// registry must not read as "bootstrap client missing" — the last build was
+// a registry build, not a failed bootstrap — so no client appears.
+func TestCDRRedial_DeletingLastSkippedInstanceNeverActivatesBootstrap(t *testing.T) {
+	resetCDRState(t)
+	withRedialGate(t)
+	certs := filepath.Join(t.TempDir(), "bootstrap-certs")
+	writeRedialBundle(t, certs) // the bootstrap WOULD dial if it were tried
+	dir := filepath.Join(t.TempDir(), "unreadable")
+	enrollRedialInstance(t, "only", dir, true)
+
+	cfg := redialClosedCfg()
+	cfg.Endpoint, cfg.ServerFingerprint, cfg.CertsDir = "127.0.0.1:1", redialTestPin, certs
+	if err := initCDRClient(cfg); err == nil {
+		t.Fatal("setup: registry build succeeded with an unreadable bundle")
+	}
+
+	w := httptest.NewRecorder()
+	apiCDRInstances(w, newAdminRequest(http.MethodDelete, "/api/cdr/instances?name=only", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete: status %d body=%s", w.Code, w.Body.String())
+	}
+	if !cdrActiveConfig().Enabled {
+		t.Fatal("setup: expected CDR to stay enabled after deleting from an empty pool")
+	}
+
+	maybeRedialMissingCDRMembers(context.Background())
+	if res := reconcileCDRPool(context.Background()); res.attempted || cdrPool.Len() != 0 {
+		t.Fatalf("bootstrap client activated after an admin delete: attempted=%v pool=%v", res.attempted, redialPoolNames())
 	}
 }
