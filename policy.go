@@ -1423,7 +1423,8 @@ func (ps *PolicyStore) sortLocked() {
 	for i := range next {
 		r := next[i]
 		if r.DestFQDN != "" {
-			r.normFQDN = normalizeHost(r.DestFQDN)
+			// An IP-literal pattern is compared by ADDRESS (canonicalDestLiteral).
+			r.normFQDN = canonicalDestLiteral(normalizeHost(r.DestFQDN))
 		} else {
 			r.normFQDN = ""
 		}
@@ -1784,6 +1785,10 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	// (CHAOS-60: geo.LookupCached is cache-only and warms off-path), but the
 	// release stays load-bearing for the category half.
 	rules := ps.evaluationSnapshot()
+
+	// An IP-literal destination is decided by ADDRESS, not spelling. Rewritten
+	// before `in` is built so in.normHost stays normalizeHost(in.host).
+	host = canonicalDestLiteral(host)
 
 	// Enforcement path: the canonical core with the wall clock and no trace (the
 	// nil-trace branch is allocation-free). Normalize the destination host ONCE
@@ -2680,7 +2685,11 @@ func matchFileExt(urlPath string, exts []string) bool {
 // policy_bypass_security_test.go. Wrapper FUNCTIONS (not func vars) so the
 // per-rule call in Evaluate's hot path stays direct and inlinable.
 
-func matchFQDN(pattern, host string) bool { return hostutil.MatchFQDN(pattern, host) }
+// matchFQDN is the fallback for a rule that never reached sortLocked, so it
+// applies the same IP-literal canonicalization publication and Evaluate do.
+func matchFQDN(pattern, host string) bool {
+	return hostutil.MatchFQDNNorm(canonicalDestLiteral(normalizeHost(pattern)), canonicalDestLiteral(normalizeHost(host)))
+}
 
 func matchFQDNNorm(pattern, host string) bool { return hostutil.MatchFQDNNorm(pattern, host) }
 

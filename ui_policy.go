@@ -2772,6 +2772,7 @@ func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, hos
 		ptrs[i] = &rules[i]
 	}
 	trace := make([]policyTestTrace, 0, len(rules))
+	host = canonicalDestLiteral(host) // same rewrite as PolicyStore.Evaluate
 	in := accessEvalInput{
 		clientIP:   sourceIP,
 		identity:   identity,
