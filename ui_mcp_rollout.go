@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/mcp/evidenceview"
 	"github.com/KidCarmi/Culvert/internal/mcp/rollout"
 )
 
@@ -176,7 +177,7 @@ func apiMCPRolloutEvidence(w http.ResponseWriter, r *http.Request) {
 	st := getMCPRollout().stateFor(capab)
 	ev := st.Evidence()
 	now := time.Now()
-	jsonOK(w, buildMCPEvidenceDTO(capab.String(), st.CurrentMode().String(), ev, now, now.UnixNano()))
+	jsonOK(w, evidenceview.Build(capab.String(), st.CurrentMode().String(), ev, now, now.UnixNano()))
 }
 
 // apiMCPRolloutEmergency engages the capability-local kill switch (immediate
