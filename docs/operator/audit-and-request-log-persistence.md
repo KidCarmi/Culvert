@@ -21,10 +21,21 @@ not. The SIEM/syslog copy of the same streams is covered separately in
   earlier `<path>.1` is deleted. Older data survives only if you collect it
   (SIEM forwarding, or an external log shipper).
 - Neither is on by default in the binary: with no path set, both streams live
-  only in the in-memory ring and are lost on restart. The shipped
-  `Dockerfile` and `docker-compose.yml` set `-audit-log /data/audit.jsonl` and
-  `-request-log /data/requests.jsonl`; `docker-compose.ha.yml` sets only
-  `-audit-log`.
+  only in the in-memory ring and are lost on restart. The shipped defaults
+  differ by how you deploy:
+
+  | Deployment | Audit log | Request log |
+  |---|---|---|
+  | `docker-compose.yml` | `/data/audit.jsonl` | `/data/requests.jsonl` |
+  | `docker-compose.ha.yml` | `/data/audit.jsonl` | not set — in memory only |
+  | The image run directly (`docker run`, Kubernetes, any orchestrator using the image `CMD`) | `/data/audit.jsonl` | not set — in memory only |
+
+  The image `CMD` in the `Dockerfile` sets `-audit-log` but not
+  `-request-log`; only the single-node Compose file adds it. If you run the
+  image directly or on the HA Compose file and need durable request records,
+  add `-request-log /data/requests.jsonl` (or set `request_log_file`)
+  yourself. Overriding the command replaces the whole `CMD`, so carry its
+  other flags across too.
 - Both paths are read at startup only. Changing the path needs a restart.
 - At startup the audit log's existing lines are loaded into the ring, so the
   admin UI shows recent history across a restart. `GET /api/audit?source=file`
