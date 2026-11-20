@@ -20092,6 +20092,14 @@ function resetBlockPage() {
              destinations added since the last good sync are NOT being blocked. Fires
              once per episode, cleared only when every auto-synced feed is fresh again. -->
         <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="blocklist_feed_stale"> Blocklist feed stale (remote deny list not refreshing)</label>
+        <!-- CHAOS-124: the ClamAV virus-definition database in use is more than 48h
+             old. freshclam updates it OUT OF PROCESS, in the ClamAV container, so
+             Culvert can only observe the build date clamd reports. The daemon stays
+             reachable, answers every probe and keeps returning CLEAN verdicts
+             throughout — malware published since the database was built is simply not
+             detected, and those downloads are reported to users as clean. Fires once
+             per episode, cleared only by an observed newer database. -->
+        <label style="display:flex;align-items:center;gap:5px;font-size:.84rem"><input type="checkbox" class="wh-event" value="clamav_signature_stale"> ClamAV definitions stale (virus signatures not updating)</label>
         <!-- CHAOS-57: the credential-verification cost governor has been refusing
              authentication attempts for a sustained period. bcrypt costs ~80 ms of a
              core and runs on the per-request proxy-auth path, so verification is
