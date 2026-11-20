@@ -9,6 +9,22 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The installer now creates the secret `.env` file private from the start
+  (`SEC-INSTALL-ENVUMASK-1`).** `install.sh` sets no umask, and `env_put`
+  created a fresh env file with a plain `touch` (mode `0666 & ~umask`) before
+  narrowing it with `chmod 600`. Under a lax operator umask a local user could
+  open the file read-only in that window, keep the descriptor, and read the
+  secrets written into that inode afterwards (CWE-367); the
+  `"${file}.tmp.$$"` fallback staging file, which copies every existing secret
+  and is renamed over the env file, had the same window. Both are now created
+  under `umask 077` scoped to env_put's locked subshell, so the rest of the
+  installer keeps the operator's umask. In a stack dir the invoking user
+  cannot write, the file was created by `sudo touch` under sudo's own umask
+  (022 by default, world-readable), which no caller umask can change; it is
+  now created by `sudo install -m 600 -o <user> /dev/null`, which opens it
+  `0600` and hands it over in one call. The `chmod 600` stays as
+  belt-and-braces and an existing file's mode handling is unchanged
+  (`TestInstallScript_EnvPut_CreatesFilePrivateUnderLaxUmask`).
 - **A policy rule on an IP-literal destination now matches every spelling of
   that address.** `destFqdn` literals were compared as text, so a Block/Drop
   rule on `192.0.2.7` did not match `[::ffff:192.0.2.7]`, and one on
