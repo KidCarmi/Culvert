@@ -902,8 +902,22 @@ func (ss *Scanner) noteSignatureGenLocked(v clamav.Version) sigReconcile {
 // 10-minute VERSION cache means a tick that lands inside the previous window is
 // free.
 func (ss *Scanner) RefreshSignatures() bool {
-	_, ok := ss.ClamAVVersion()
+	_, ok := ss.ObserveSignatures()
 	return ok
+}
+
+// ObserveSignatures is RefreshSignatures plus the identity it observed, for the
+// caller that needs the signature-database BUILD DATE as well as the
+// reconciliation (CHAOS-124's freshness plane).
+//
+// It exists so that caller does not have to follow RefreshSignatures with its
+// own ClamAVVersion call. On a healthy daemon the second call would be a cache
+// hit and free, but on a DOWN one it would not: the error branch caches
+// "not available" and the next call re-queries, so the pair would cost two
+// dials to a daemon that is already failing, on every poll. One entry point
+// returning both keeps a down daemon at one attempt per poll.
+func (ss *Scanner) ObserveSignatures() (clamav.Version, bool) {
+	return ss.ClamAVVersion()
 }
 
 // SignatureGeneration reports the signature identity the cached verdicts were

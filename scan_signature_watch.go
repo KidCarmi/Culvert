@@ -52,7 +52,7 @@ const scanSigPollInterval = 5 * time.Minute
 // flushes it, since those entries have no provenance — but winning it is why a
 // healthy boot shows no flush at all.
 func startScanSignatureWatch(ctx context.Context) {
-	runGuarded(crashComponentScanSigWatch, func() { globalSecScanner.RefreshSignatures() })
+	runGuarded(crashComponentScanSigWatch, observeScanSignatures)
 
 	tick := time.NewTicker(scanSigPollInterval)
 	defer tick.Stop()
@@ -67,7 +67,32 @@ func startScanSignatureWatch(ctx context.Context) {
 			// disarming the observer for the lifetime of the process — which
 			// would reintroduce exactly the stale-clean window this exists to
 			// close, with the dashboard still green.
-			runGuarded(crashComponentScanSigWatch, func() { globalSecScanner.RefreshSignatures() })
+			runGuarded(crashComponentScanSigWatch, observeScanSignatures)
 		}
 	}
+}
+
+// observeScanSignatures is one poll: reconcile the verdict cache against the
+// live signature identity (CHAOS-107) and record that identity's build date for
+// the freshness plane (CHAOS-124).
+//
+// One call into the scanner, not two. ObserveSignatures returns the identity
+// that RefreshSignatures would have discarded, so a down daemon still costs one
+// dial per poll rather than two — see internal/secscan.ObserveSignatures.
+//
+// The nil guard is defensive, not load-bearing: globalSecScanner is assigned
+// at package initialisation (security_scan.go) and is never nil in production.
+// It mirrors the same guard on the sibling surfaces (diagnostics_clamav_scan.go,
+// checkClamAVSignatures) and keeps this helper safe to call from a test binary
+// that has not stood the scanner up. The no-op-when-nothing-to-observe
+// contract of this worker is unchanged and still lives where it did: a scanner
+// with no ClamAV configured, scanning disabled, or a client without the
+// VERSION capability all make ObserveSignatures report not-ok, and a not-ok
+// observation records nothing.
+func observeScanSignatures() {
+	if globalSecScanner == nil {
+		return
+	}
+	v, ok := globalSecScanner.ObserveSignatures()
+	noteClamAVSignatureObservation(v, ok)
 }

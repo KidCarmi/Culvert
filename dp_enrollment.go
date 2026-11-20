@@ -144,7 +144,11 @@ func generateCSR(nodeID string) (*ecdsa.PrivateKey, []byte, error) {
 // callEnrollRPC connects to the CP and calls the Enroll gRPC method.
 // If caFingerprint is non-empty, the CP's TLS cert is verified against it.
 func callEnrollRPC(cpAddr, token, nodeID string, csrPEM []byte) (*EnrollResponse, error) {
-	conn, err := grpc.NewClient(cpAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// The cluster call options carry the raw JSON codec the ConfigService
+	// speaks (controlplane_codec.go); without them gRPC's default proto codec
+	// refuses the json.RawMessage request and enrollment can never succeed.
+	conn, err := grpc.NewClient(cpAddr, grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(clusterClientCallOptions()...))
 	if err != nil {
 		return nil, fmt.Errorf("connect to CP: %w", err)
 	}

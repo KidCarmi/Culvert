@@ -380,7 +380,7 @@ func TestCDRRedial_DropsMembersNoLongerEnrolledAsDialled(t *testing.T) {
 	if _, err := cdrInstances.RemoveByName("removed"); err != nil {
 		t.Fatal(err)
 	}
-	kept, dropped := dropInvalidRedialed(context.Background(), dialed, targets, false)
+	kept, dropped := dropInvalidRedialed(context.Background(), dialed, targets, false, true)
 	if len(kept) != 1 || kept[0].Name != "kept" || len(dropped) != 1 || dropped[0] != "removed" {
 		t.Fatalf("kept=%d dropped=%v, want [kept] / [removed]", len(kept), dropped)
 	}
@@ -447,4 +447,95 @@ func TestCDRRedial_DeletingLastSkippedInstanceNeverActivatesBootstrap(t *testing
 	if res := reconcileCDRPool(context.Background()); res.attempted || cdrPool.Len() != 0 {
 		t.Fatalf("bootstrap client activated after an admin delete: attempted=%v pool=%v", res.attempted, redialPoolNames())
 	}
+}
+
+// cancelOnPublishedCtx reports Canceled exactly once the re-dial has
+// PUBLISHED into cdrPool, which is how this test reaches the post-publish
+// withdrawal branch without racing a registry mutation: reconcileCDRPool's
+// own entry check and the pre-publish re-validation both run against an empty
+// pool and so see a live context, and only the post-publish re-validation
+// sees the cancellation. Keyed off the pool's contents rather than a call
+// count so it does not silently stop reaching that branch if the number of
+// ctx.Err() checks ever changes.
+type cancelOnPublishedCtx struct{ context.Context }
+
+func (cancelOnPublishedCtx) Err() error {
+	if len(cdrPool.List()) > 0 {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestCDRRedial_WithdrawnMemberIsUnpublishedBeforeItIsClosed pins the
+// ordering the post-publish withdrawal depends on.
+//
+// SEC-CDR-REDIAL-CLOSE-ORDER-1. reconcileCDRPool publishes the members it
+// dialled and then re-validates them, withdrawing any whose authority
+// disappeared in between. cdrClientPool.pick selects on breaker state alone —
+// CDRClient.closedAt is written by Close and read by nothing — so a client
+// whose connection is closed while it is STILL in the published pool is still
+// selectable, and the sanitize RPC that draws it fails. Under
+// fail_mode: open that one document passes CDR UNSANITIZED.
+//
+// The window is invisible in the end state: either order ends with the member
+// closed and out of the pool. So the assertion is made at the only point that
+// can tell them apart, between the withdrawal decision and the unpublish.
+func TestCDRRedial_WithdrawnMemberIsUnpublishedBeforeItIsClosed(t *testing.T) {
+	resetCDRState(t)
+	withRedialGate(t)
+	dir := filepath.Join(t.TempDir(), "v")
+	writeRedialBundle(t, dir)
+	enrollRedialInstance(t, "withdrawn", dir, true)
+	cdrClientMu.Lock()
+	cdrActiveCfg = redialClosedCfg()
+	cdrClientMu.Unlock()
+
+	var (
+		sawWithdrawn  []string
+		publishedThen []string
+		closedThen    bool
+	)
+	prevHook := cdrRedialWithdrawHook
+	cdrRedialWithdrawHook = func(withdrawn []string) {
+		sawWithdrawn = append([]string(nil), withdrawn...)
+		publishedThen = redialPoolNames()
+		for _, pc := range cdrPool.List() {
+			if pc.Name == "withdrawn" && pc.Client != nil &&
+				pc.Client.conn.GetState().String() == "SHUTDOWN" {
+				closedThen = true
+			}
+		}
+	}
+	t.Cleanup(func() { cdrRedialWithdrawHook = prevHook })
+
+	res := reconcileCDRPool(cancelOnPublishedCtx{context.Background()})
+
+	// Preconditions: the branch under test was actually reached.
+	if len(sawWithdrawn) != 1 || sawWithdrawn[0] != "withdrawn" {
+		t.Fatalf("precondition: post-publish withdrawal not reached (withdrawn=%v); the test no longer exercises the ordering", sawWithdrawn)
+	}
+	if len(publishedThen) != 1 || publishedThen[0] != "withdrawn" {
+		t.Fatalf("precondition: the member was not published before the withdrawal decision (pool=%v)", publishedThen)
+	}
+
+	// The invariant.
+	if closedThen {
+		t.Error("a withdrawn member's connection was closed while it was STILL in the published pool: " +
+			"cdrPool.pick can hand that dead client to a sanitize RPC, and under fail_mode: open the document " +
+			"it was drawn for passes CDR unsanitized (SEC-CDR-REDIAL-CLOSE-ORDER-1)")
+	}
+
+	// And the teardown still happens: unpublished, then closed.
+	if got := redialPoolNames(); len(got) != 0 {
+		t.Errorf("pool = %v after the withdrawal, want empty", got)
+	}
+	if len(res.added) != 0 {
+		t.Errorf("res.added = %v, want none (the member was withdrawn)", res.added)
+	}
+	for _, name := range res.missing {
+		if name == "withdrawn" {
+			return
+		}
+	}
+	t.Errorf("res.missing = %v, want it to report the withdrawn member", res.missing)
 }

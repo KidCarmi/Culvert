@@ -18,6 +18,117 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   only `scheme://host`; delivery errors and the audit entry never carry the
   URL. Operators and admins still read the full URL in the listing
   (`TestAlertWebhookURL_NotReadableBelowOperator`).
+
+- **The installer now creates the secret `.env` file private from the start
+  (`SEC-INSTALL-ENVUMASK-1`).** `install.sh` sets no umask, and `env_put`
+  created a fresh env file with a plain `touch` (mode `0666 & ~umask`) before
+  narrowing it with `chmod 600`. Under a lax operator umask a local user could
+  open the file read-only in that window, keep the descriptor, and read the
+  secrets written into that inode afterwards (CWE-367); the
+  `"${file}.tmp.$$"` fallback staging file, which copies every existing secret
+  and is renamed over the env file, had the same window. Both are now created
+  under `umask 077` scoped to env_put's locked subshell, so the rest of the
+  installer keeps the operator's umask. In a stack dir the invoking user
+  cannot write, the file was created by `sudo touch` under sudo's own umask
+  (022 by default, world-readable), which no caller umask can change; it is
+  now created by a privileged `sh -c 'umask 077 && set -C && : > FILE'`,
+  which opens it `0600` with `O_EXCL` and never truncates a file a concurrent
+  installer created after the existence check, then handed over with
+  `chown` as before. The `chmod 600` stays as belt-and-braces and an existing
+  file's mode handling is unchanged
+  (`TestInstallScript_EnvPut_CreatesFilePrivateUnderLaxUmask`,
+  `TestInstallScript_EnvPut_PrivilegedCreateDoesNotClobberAConcurrentWriter`).
+
+- **The audit, request and process log files no longer follow a symlink, or
+  block on a FIFO, planted at the log path (CWE-59/CWE-61).**
+  `fileutil.NewRotatingFile`, and the reopen it makes after each rotation, opened
+  the path with `O_CREATE|O_WRONLY|O_APPEND` only. A symlink at the final path
+  component was followed, so the log was created at or appended to the file the
+  link named. A FIFO there blocked the open until a reader appeared, which hung
+  startup or the request-path `Write` that holds the writer's lock. Both open
+  sites now share one guarded open. On Unix-like platforms it adds `O_NOFOLLOW`
+  and `O_NONBLOCK`, fstats the descriptor, refuses anything that is not a
+  regular file, and then clears `O_NONBLOCK` so writes block normally. Directory
+  components of the path are still resolved, so a symlinked log directory keeps
+  working. A log path whose last component is itself a symlink is now refused,
+  so point the flag at the real file instead. Platforms without `O_NOFOLLOW`
+  (the Windows convenience build) keep the previous open and only gain the
+  regular-file check
+  (`TestNewRotatingFile_RefusesSymlinkToExistingFile`,
+  `TestNewRotatingFile_FIFOWithoutReaderReturnsPromptly`).
+
+- **A ClamAV signature database that has stopped updating is now observable
+  (`CHAOS-124`).** Culvert does not fetch virus definitions — `freshclam` does,
+  out of process, in a container Culvert neither starts nor supervises — so a
+  daemon whose definitions froze stayed invisible to every surface the product
+  had: it remained reachable, answered `PING` and `VERSION`, scanned every body
+  and returned `CLEAN`, so the `clamav` readiness row, the `clamav_scan`
+  diagnostics row, the `scan_clam_error` alert and Compose's own
+  `clamdscan --ping 3` healthcheck all passed, indefinitely, while malware
+  published since the database was built went undetected and those downloads
+  were reported to users as clean. A persistent `clamav-db` volume and
+  `restart: unless-stopped` meant a restart reloaded the same stale database,
+  so not even a reboot moved any of it. The node already learned the build date
+  on every five-minute `VERSION` poll (`CHAOS-107`) and discarded it into an
+  opaque cache key; the one metric that looked relevant,
+  `culvert_scan_sigdb_invalidations_total`, counts *changes*, so a node whose
+  updater died three weeks ago and a node that is current but quiet for an hour
+  exported a byte-identical value — the mechanism `WK-5`/`CHAOS-59` closed for
+  the threat feed and `CHAOS-123` closed for `culvert_blocklist_size`. The
+  build date is now parsed into a time (`clamav.Version.DBTime`) and surfaced as
+  the unlabelled `culvert_clamav_signature_*` family, a `clamav_signatures`
+  diagnostics row, and a `clamav_signature_stale` alert fired once per episode
+  and cleared only by an observed newer database. An unreadable build date and
+  one dated ahead of this node's clock are reported as their own states and
+  deliberately do **not** page: each is an inability to measure, not evidence of
+  staleness, and neither may clear a live episode. Posture is unchanged —
+  report-only, never gating, no dial from a `/metrics` scrape. Runbook:
+  [`docs/operator/clamav-definition-freshness.md`](docs/operator/clamav-definition-freshness.md).
+
+
+- **A stale blocklist-feed alert that reached nobody no longer consumes the
+  node's one page for that episode (`SEC-BLFEED-STALE-LATCH-1`).** The
+  CHAOS-123 freshness plane fires `blocklist_feed_stale` at most once per
+  episode, and the episode clears only on an observed clean sync, a feed
+  removal or a restart — never on elapsed time. The latch was set before the
+  alert was dispatched, while the sink drops the alert when nothing subscribes,
+  which is the default posture. So an appliance that booted with an unreachable
+  feed origin burned the episode on the first failed round after the grace, and
+  an operator who added the `blocklist_feed_stale` webhook afterwards was never
+  paged while the deny list went on not refreshing for the life of the process.
+  The latch now tracks DELIVERY: it is consumed only by a dispatched alert, with
+  the decision still inside the lock so concurrent failed rounds page at most
+  once. Detection was degraded rather than dark throughout — the
+  `blocklist_feed` WARN row and the `culvert_blocklist_feed_stale*` gauges are
+  derived on read and stayed correct — but the push surface the feature exists
+  for was lost (`TestChaos123_UndeliveredStaleAlertDoesNotConsumeTheEpisode`).
+- **A withdrawn CDR pool member is unpublished before its connection is closed
+  (`SEC-CDR-REDIAL-CLOSE-ORDER-1`).** The automatic re-dial publishes the
+  members it dialled and then re-validates them, withdrawing any whose registry
+  entry disappeared in between. That post-publish pass closed a withdrawn
+  member's connection while the member was STILL in the published pool, and
+  nothing filters a closed client out of selection: `cdrClientPool.pick`
+  selects on breaker state alone and `CDRClient.closedAt` is written by `Close`
+  and read by nothing. A concurrent `PickReserved` could therefore hand a dead
+  connection to a sanitize RPC, and under `fail_mode: open` the document it was
+  drawn for passed CDR unsanitized. The decision and the teardown are now
+  separate: the pass reports what to withdraw, `cdrPool.replace` unpublishes it,
+  and `replace` — which already closes exactly the clients not carried over —
+  does the closing afterwards
+  (`TestCDRRedial_WithdrawnMemberIsUnpublishedBeforeItIsClosed`).
+- **`bootstrap-resolve`'s positional-argument refusal no longer prints flag
+  values.** The refusal echoed the whole discarded tail; `sanitizeLog`
+  neutralizes newlines but does not redact values, and that FlagSet owns
+  `--catalog-url`, an operator-supplied origin that can carry userinfo
+  credentials. Since `scripts/install.sh` collects this stderr into the install
+  log, a mirror credential landed in a file that is routinely attached to
+  support bundles. The refusal now echoes only the first token and the flag
+  NAMES, through the same position-based `redactArgValuesWith` the main binary's
+  CHAOS-122 refusal uses — so a dash-leading secret is redacted too and an
+  unknown flag name is treated as taking a value. `--data-dir` still appears by
+  name, so the operator can still see that the anti-rollback floor was among the
+  discarded flags. Pre-existing; the main binary's copy was fixed separately
+  (`TestChaos122_BootstrapResolveRefusalRedactsFlagValues`).
 - **A policy rule on an IP-literal destination now matches every spelling of
   that address.** `destFqdn` literals were compared as text, so a Block/Drop
   rule on `192.0.2.7` did not match `[::ffff:192.0.2.7]`, and one on
@@ -341,6 +452,32 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Enabling CDR at runtime now starts the CDR health poller, without a
+  restart.** Only `loadCDR` started the 15-second poller, and only when CDR
+  was enabled at boot. A node that turned CDR on from the admin toggle
+  (`PUT /api/cdr/config {"enabled": true}`) or through a first enrollment's
+  auto-enable sent documents through the pool, but ran no health probes, no
+  client-certificate auto-renewal, no server-fingerprint rotation and no
+  automatic re-dial. Its client certificate would expire unrenewed unless an
+  operator restarted the process. Both runtime enable paths now arm the same
+  poller after the pool build (even a failed one, as at boot), under the
+  process lifecycle context. `ensureCDRHealthPoller` keeps it to one poller
+  per process: repeated enables, disable/enable cycles and a boot-enabled
+  node toggled again never add a second. Nothing is armed on a disable, on an
+  auto-enable whose sentinel write failed, or once shutdown has cancelled the
+  lifecycle. Pool build, `fail_mode`, audit (`cdr.config.toggle`,
+  `cdr.instance.enroll`) and the no-config-version contract are unchanged
+  (`TestCDRRuntimePoller_*`).
+
+- **`culvert --enroll` can enroll a Data Plane node again.** The enrollment
+  client dialed the Control Plane without the cluster's raw JSON gRPC codec,
+  so gRPC's default protobuf codec refused the request on the node itself
+  (`proto: failed to marshal, message is jsontext.Value`) and the node exited
+  with `Enrollment failed`. Every enrollment path was affected: the GUI's
+  enroll command, the bootstrap compose document and `docker-compose.ha.yml`'s
+  `dp` service. The token was never sent, so nothing was spent on the Control
+  Plane (`TestRunEnrollment_EnrollsOverRealGRPCWire`).
+
 - **CDR re-dials a Sluice instance whose credential bundle was unreadable
   when the pool was built, without a restart.** If an enrolled instance's
   `ca.pem` / `client.pem` / `client.key` cannot be loaded when the pool is
@@ -617,6 +754,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **A SOCKS5 client that hangs up during the connect phase now releases its
+  slot at once (`PERF-SOCKS5-HANGUP-1`).** The SOCKS5 pre-flight SSRF guard and
+  the upstream dial ran under `context.Background()`, so a client that closed
+  its connection while the resolver was slow kept the handler goroutine, its
+  descriptor and its per-IP connection-limiter slot for the full 10 s guard
+  budget (measured: 10.0 s) and then up to another 10 s in the dial. SOCKS5 now
+  gets what HTTP CONNECT has from `r.Context()`: a background read on the client
+  connection cancels the guard and the dial on EOF or reset. A byte a client
+  sends early is kept and forwarded to the destination ahead of the relay, and a
+  connection that cannot honour read deadlines keeps the previous behaviour.
+  Verdicts are unchanged (an undetermined destination still fails closed, and
+  `ssrfControl` still checks at connect time); a hang-up mid-check is logged
+  instead of being recorded as an SSRF `BLOCKED`
+  (`TestSOCKS5_ClientHangupReleasesWedgedGuardLookup`,
+  `TestSOCKS5_OptimisticDataReachesDestination`).
 - **An alert the dedup window was about to drop still paid two heap allocations
   and a process-wide mutex round trip to find that out (PERF-ALERTDEDUP-1).**
   `alerts.Store.Dispatch` is reached at REQUEST rate by fault-driven producers —
