@@ -78,13 +78,14 @@ func startTestServer(t *testing.T, status StatusProvider, mgr *ops.Manager, audi
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx) }()
 
-	// Wait for the socket to appear.
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(sockPath); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	// Wait until the server ACCEPTS a connection, not merely until the socket
+	// file exists. Serve listens in its own goroutine, and net.Listen creates
+	// the socket file at bind(2), before listen(2): a client that only saw the
+	// file appear could connect in that window and get ECONNREFUSED, which
+	// failed whichever test ran first on a loaded runner. A server that never
+	// becomes ready fails the test here, rather than as a confusing dial error
+	// in the test body.
+	waitForServer(t, sockPath)
 
 	stop = func() {
 		cancel()
@@ -92,6 +93,27 @@ func startTestServer(t *testing.T, status StatusProvider, mgr *ops.Manager, audi
 		_ = al.Close()
 	}
 	return sockPath, stop
+}
+
+// waitForServer blocks until a dial to sock succeeds, failing the test after
+// a generous deadline.
+func waitForServer(t *testing.T, sock string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var d net.Dialer
+	for {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		conn, err := d.DialContext(ctx, "unix", sock)
+		cancel()
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("agent socket %s never accepted a connection: %v", sock, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // udsClient returns an http.Client that dials the given UDS path.
