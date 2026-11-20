@@ -131,6 +131,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -224,6 +225,32 @@ func ValidateURL(raw string) error {
 		return fmt.Errorf("URL must include a host")
 	}
 	return nil
+}
+
+// URLOrigin reduces a webhook URL to scheme://host — where alerts go, without
+// the part that authorises posting there. Slack/Teams/PagerDuty-style receivers
+// authenticate by a token in the path or query (and some by userinfo), so the
+// full URL is a credential: it is shown only to the role that manages webhooks
+// (operator) and never written to the viewer-readable audit log or delivery
+// history. Unparseable input yields "" rather than being echoed back.
+func URLOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// deliveryErrText renders a delivery error without the request URL. net/http
+// wraps transport failures in *url.Error, whose text quotes the full URL (only
+// a userinfo password is masked), and that text reaches the delivery history
+// and the process log. The operation and the underlying cause are kept.
+func deliveryErrText(err error) string {
+	var uerr *url.Error
+	if errors.As(err, &uerr) && uerr.Err != nil {
+		return uerr.Op + ": " + uerr.Err.Error()
+	}
+	return err.Error()
 }
 
 // maxEventNameLen bounds one subscribed event name. The longest name in the
@@ -1152,8 +1179,8 @@ func (as *Store) deliverAttemptContext(parent context.Context, h Webhook, payloa
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
-		obs.Printf("Alert webhook %q: build request error: %v", obs.Sanitize(h.Name), err)
-		record.Error = err.Error()
+		obs.Printf("Alert webhook %q: build request error: %s", obs.Sanitize(h.Name), deliveryErrText(err))
+		record.Error = deliveryErrText(err)
 		as.RecordDelivery(record)
 		return false
 	}
@@ -1170,8 +1197,8 @@ func (as *Store) deliverAttemptContext(parent context.Context, h Webhook, payloa
 	// attempt — see deliveryClient).
 	resp, err := deliveryClient.Do(req)
 	if err != nil {
-		obs.Printf("Alert webhook %q: delivery error: %v", h.Name, err)
-		record.Error = err.Error()
+		obs.Printf("Alert webhook %q: delivery error: %s", h.Name, deliveryErrText(err))
+		record.Error = deliveryErrText(err)
 		as.RecordDelivery(record)
 		return false
 	}
