@@ -180,6 +180,9 @@ jobs:
             case "$f" in
               frontend/*) frontend=true ;;
               ui_frontend_v2*) frontend=true ;;
+              # The embedded-artifact validator moved out of ui_frontend_v2.go
+              # (ADR-0050); a change to it is still a frontend-surface change.
+              internal/frontendbundle/*) frontend=true ;;
               api/openapi/openapi.json) frontend=true ;;
               .github/workflows/frontend-verify.yml) frontend=true ;;
               .github/workflows/pr-fast-gate.yml) frontend=true ;;
