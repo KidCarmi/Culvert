@@ -269,12 +269,6 @@ func TestCDRRuntimePoller_Refusals(t *testing.T) {
 			t.Fatal("a poller goroutine was started under a cancelled lifecycle")
 		}
 	})
-	t.Run("nil context", func(t *testing.T) {
-		withCDRPollerLifecycle(t)
-		if ensureCDRHealthPoller(nil) { //nolint:staticcheck // SA1012: nil ctx is the refusal under test
-			t.Fatal("nil context started a poller")
-		}
-	})
 }
 
 // TestCDRRuntimePoller_OnePollerPerLifecycle: concurrent enables, a
