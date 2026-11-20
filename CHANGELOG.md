@@ -332,6 +332,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **`culvert --enroll` can enroll a Data Plane node again.** The enrollment
+  client dialed the Control Plane without the cluster's raw JSON gRPC codec,
+  so gRPC's default protobuf codec refused the request on the node itself
+  (`proto: failed to marshal, message is jsontext.Value`) and the node exited
+  with `Enrollment failed`. Every enrollment path was affected: the GUI's
+  enroll command, the bootstrap compose document and `docker-compose.ha.yml`'s
+  `dp` service. The token was never sent, so nothing was spent on the Control
+  Plane (`TestRunEnrollment_EnrollsOverRealGRPCWire`).
+
 - **CDR re-dials a Sluice instance whose credential bundle was unreadable
   when the pool was built, without a restart.** If an enrolled instance's
   `ca.pem` / `client.pem` / `client.key` cannot be loaded when the pool is
