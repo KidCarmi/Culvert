@@ -9,6 +9,54 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A viewer can no longer read alert webhook URLs.** For Slack, Teams and
+  PagerDuty-style receivers the URL is the credential (a token in the path or
+  query), and it was returned in full to any viewer by
+  `GET /api/alerts/webhooks`, quoted inside failed-delivery errors in
+  `GET /api/alerts/webhooks/history`, and stored as the detail of the
+  `alert.webhook.create` audit entry. Below operator the listing now carries
+  only `scheme://host`; delivery errors and the audit entry never carry the
+  URL. Operators and admins still read the full URL in the listing
+  (`TestAlertWebhookURL_NotReadableBelowOperator`).
+
+- **The installer now creates the secret `.env` file private from the start
+  (`SEC-INSTALL-ENVUMASK-1`).** `install.sh` sets no umask, and `env_put`
+  created a fresh env file with a plain `touch` (mode `0666 & ~umask`) before
+  narrowing it with `chmod 600`. Under a lax operator umask a local user could
+  open the file read-only in that window, keep the descriptor, and read the
+  secrets written into that inode afterwards (CWE-367); the
+  `"${file}.tmp.$$"` fallback staging file, which copies every existing secret
+  and is renamed over the env file, had the same window. Both are now created
+  under `umask 077` scoped to env_put's locked subshell, so the rest of the
+  installer keeps the operator's umask. In a stack dir the invoking user
+  cannot write, the file was created by `sudo touch` under sudo's own umask
+  (022 by default, world-readable), which no caller umask can change; it is
+  now created by a privileged `sh -c 'umask 077 && set -C && : > FILE'`,
+  which opens it `0600` with `O_EXCL` and never truncates a file a concurrent
+  installer created after the existence check, then handed over with
+  `chown` as before. The `chmod 600` stays as belt-and-braces and an existing
+  file's mode handling is unchanged
+  (`TestInstallScript_EnvPut_CreatesFilePrivateUnderLaxUmask`,
+  `TestInstallScript_EnvPut_PrivilegedCreateDoesNotClobberAConcurrentWriter`).
+
+- **The audit, request and process log files no longer follow a symlink, or
+  block on a FIFO, planted at the log path (CWE-59/CWE-61).**
+  `fileutil.NewRotatingFile`, and the reopen it makes after each rotation, opened
+  the path with `O_CREATE|O_WRONLY|O_APPEND` only. A symlink at the final path
+  component was followed, so the log was created at or appended to the file the
+  link named. A FIFO there blocked the open until a reader appeared, which hung
+  startup or the request-path `Write` that holds the writer's lock. Both open
+  sites now share one guarded open. On Unix-like platforms it adds `O_NOFOLLOW`
+  and `O_NONBLOCK`, fstats the descriptor, refuses anything that is not a
+  regular file, and then clears `O_NONBLOCK` so writes block normally. Directory
+  components of the path are still resolved, so a symlinked log directory keeps
+  working. A log path whose last component is itself a symlink is now refused,
+  so point the flag at the real file instead. Platforms without `O_NOFOLLOW`
+  (the Windows convenience build) keep the previous open and only gain the
+  regular-file check
+  (`TestNewRotatingFile_RefusesSymlinkToExistingFile`,
+  `TestNewRotatingFile_FIFOWithoutReaderReturnsPromptly`).
+
 - **A ClamAV signature database that has stopped updating is now observable
   (`CHAOS-124`).** Culvert does not fetch virus definitions — `freshclam` does,
   out of process, in a container Culvert neither starts nor supervises — so a
@@ -423,6 +471,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   touch a lock owned by another plane.
 
 ### Fixed
+
+- **Enabling CDR at runtime now starts the CDR health poller, without a
+  restart.** Only `loadCDR` started the 15-second poller, and only when CDR
+  was enabled at boot. A node that turned CDR on from the admin toggle
+  (`PUT /api/cdr/config {"enabled": true}`) or through a first enrollment's
+  auto-enable sent documents through the pool, but ran no health probes, no
+  client-certificate auto-renewal, no server-fingerprint rotation and no
+  automatic re-dial. Its client certificate would expire unrenewed unless an
+  operator restarted the process. Both runtime enable paths now arm the same
+  poller after the pool build (even a failed one, as at boot), under the
+  process lifecycle context. `ensureCDRHealthPoller` keeps it to one poller
+  per process: repeated enables, disable/enable cycles and a boot-enabled
+  node toggled again never add a second. Nothing is armed on a disable, on an
+  auto-enable whose sentinel write failed, or once shutdown has cancelled the
+  lifecycle. Pool build, `fail_mode`, audit (`cdr.config.toggle`,
+  `cdr.instance.enroll`) and the no-config-version contract are unchanged
+  (`TestCDRRuntimePoller_*`).
 
 - **`culvert --enroll` can enroll a Data Plane node again.** The enrollment
   client dialed the Control Plane without the cluster's raw JSON gRPC codec,

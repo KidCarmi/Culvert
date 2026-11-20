@@ -152,7 +152,8 @@ Accepted. Exit: this round.
 > `dist/`, `src/`) is in the tree at the pins recorded in ADR-FE-001. The frontend
 > verification/drift lane is wired as `frontend-verify.yml`, invoked as the `frontend` gate
 > job of `pr-fast-gate.yml` (path-classified on `frontend/*`, `ui_frontend_v2*`,
-> `api/openapi/openapi.json`, and the two workflow files themselves). This entry is
+> `internal/frontendbundle/*`, `api/openapi/openapi.json`, and the two workflow
+> files themselves). This entry is
 > evidenced by the two files, not asserted from the phase objective below.
 - **Objective**: `frontend/` scaffold with the exact ADR baseline pins; strict TypeScript;
   ESLint rules (incl. the contract §4 inline-style bans and §7 no-cast rules); generated +
@@ -170,7 +171,8 @@ Accepted. Exit: this round.
 
 > **Implemented contract (FE-1B round).** Engine: `ui_frontend_v2.go`
 > (`//go:embed all:frontend/dist`, validation-once at init, status model
-> disabled/ready/invalid). Flag: `CULVERT_EXPERIMENTAL_UI` (opt-in parser per
+> disabled/ready/invalid); the artifact validator itself is
+> `internal/frontendbundle` (ADR-0050). Flag: `CULVERT_EXPERIMENTAL_UI` (opt-in parser per
 > the `CULVERT_CLUSTER_GRPC_COMPRESSION` convention; read once, never
 > per-request). Routes `/app`, `/app/`, `/assets/` are registered
 > unconditionally (deterministic C1/D0 walls, counts 229→232) with the

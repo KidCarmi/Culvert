@@ -32,106 +32,47 @@ package main
 //
 // The real recovery is rotation (auto, at 30 days, or a manual ImportCA), which
 // does not go through this gate.
+//
+// The validity POLICY (the predicate, the sentinels, the kind classifier and
+// its remediation text, the issuer clamp and the shared renewal window) is
+// owned by internal/clusterca (ADR-0048, IM-013). This file is main's binding:
+// the root names below delegate to the package so no caller changed, and the
+// clusterCA methods that read the instance's certificate under its lock stay
+// here with the instance (enrollment.go).
 
 import (
 	"crypto/x509"
-	"errors"
-	"fmt"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/clusterca"
 )
 
-// clusterCARenewalWindow is the horizon inside which a cluster CA is treated as
-// expiring soon. It is deliberately the SAME 30 days as clusterCARotateWithin
-// (RotateIfNeeded) and as the DP-side certNeedsRenewal window, so "the CA is
-// inside its rotation window" and "node certs clamped by this CA are inside
-// their renewal window" are one condition rather than three that drift apart.
-const clusterCARenewalWindow = 30 * 24 * time.Hour
+// clusterCARenewalWindow binds clusterca.RenewalWindow: the SAME 30 days as
+// clusterCARotateWithin (RotateIfNeeded) and the DP-side certNeedsRenewal
+// window.
+const clusterCARenewalWindow = clusterca.RenewalWindow
 
 // errClusterCAUnusable is the sentinel returned by clusterCA.Usable and by
 // SignCSR when the cluster CA cannot produce a node certificate that any peer
-// in the cluster will accept. Callers match it with errors.Is; the wrapped text
-// carries the operator-actionable detail (which bound was violated, and when)
-// and contains no key material.
-var errClusterCAUnusable = errors.New("cluster CA unusable")
+// accepts (clusterca.ErrUnusable; the same error value, so errors.Is matches
+// either name). The expiry-versus-clock-fault sentinels that are wrapped
+// alongside it (ported from the competing CHAOS-50 implementation on PR #1179)
+// are read only through clusterCAUnusableKind, so main binds no name for them.
+var errClusterCAUnusable = clusterca.ErrUnusable
 
-// errClusterCAExpired / errClusterCANotYetValid are wrapped ALONGSIDE the
-// unusable sentinel so callers can tell a genuine expiry (recovery: rotate or
-// import a new trust root) from a CLOCK fault (recovery: fix NTP — rotating
-// would churn the fleet's trust root for nothing). Ported from the competing
-// CHAOS-50 implementation on PR #1179, where the distinction originated.
-var (
-	errClusterCAExpired     = errors.New("expired")
-	errClusterCANotYetValid = errors.New("not yet valid")
-)
+// clusterCAUnusableKind binds clusterca.UnusableKind: "expired",
+// "not_yet_valid", "unavailable", or "" for nil.
+func clusterCAUnusableKind(err error) string { return clusterca.UnusableKind(err) }
 
-// clusterCAUnusableKind classifies an Usable() error into a stable, machine-
-// readable kind for metrics/health surfaces: "expired", "not_yet_valid", or
-// "unavailable" (no CA loaded / anything else). Empty for nil.
-func clusterCAUnusableKind(err error) string {
-	switch {
-	case err == nil:
-		return ""
-	case errors.Is(err, errClusterCAExpired):
-		return "expired"
-	case errors.Is(err, errClusterCANotYetValid):
-		return "not_yet_valid"
-	default:
-		return "unavailable"
-	}
-}
+// clusterCAUnusableRemediation binds clusterca.Remediation: a clock fault must
+// NOT be answered with a fleet-wide trust-root rotation.
+func clusterCAUnusableRemediation(kind string) string { return clusterca.Remediation(kind) }
 
-// clusterCAUnusableRemediation returns the operator action that actually fixes
-// the given kind. Kept next to the classifier so the two can never drift; a
-// clock fault must NOT be answered with a fleet-wide trust-root rotation.
-func clusterCAUnusableRemediation(kind string) string {
-	if kind == "not_yet_valid" {
-		return "Correct this Control Plane's system clock (NTP) — the cluster CA is not yet valid. Do NOT rotate the CA; the trust root is fine."
-	}
-	return "Rotate or import a cluster CA (Cluster → CA) to restore enrollment."
-}
-
-// clusterCAUsable is the pure validity predicate, split out from the method so
-// tests can drive it with an explicit clock instead of waiting ten years for a
-// CA to expire.
+// clusterCAUsable binds the pure validity predicate (clusterca.Usable). NotBefore
+// is checked strictly, with no future-skew tolerance; the package documents why
+// the cluster CA diverges from the inspection CA's caClockSkewTolerance here.
 func clusterCAUsable(cert *x509.Certificate, now time.Time) error {
-	if cert == nil {
-		return fmt.Errorf("%w: no cluster CA loaded", errClusterCAUnusable)
-	}
-	if now.After(cert.NotAfter) {
-		return fmt.Errorf("%w: %w at %s (%s ago)", errClusterCAUnusable, errClusterCAExpired,
-			cert.NotAfter.UTC().Format(time.RFC3339),
-			now.Sub(cert.NotAfter).Round(time.Second))
-	}
-	// NotBefore is checked STRICTLY — no future-skew tolerance. This is the one
-	// place the cluster CA deliberately diverges from the inspection CA's
-	// caClockSkewTolerance, and the reason is that the verifier which rejects the
-	// certificate lives on THIS node, using THIS clock.
-	//
-	// The inspection CA's tolerance absorbs disagreement between two machines: a
-	// CA generated seconds ago on a peer with a faster clock should not take the
-	// gateway down. Here the CP verifies DP client certs against this very CA
-	// (buildServerTLS's ClientCAs pool), so tolerating a future NotBefore makes
-	// the node contradict ITSELF — its signer says "fine" while its own x509
-	// verifier says "not yet valid". clampNodeCertValidity then pins the leaf's
-	// NotBefore to the CA's, so the issued certificate is unusable for the whole
-	// skew window, on the node that just issued it. That is precisely the
-	// issue-something-that-cannot-work behaviour this file exists to remove;
-	// tolerating it here would have reintroduced it in miniature.
-	//
-	// Refusing instead costs a bounded, self-clearing delay that the DP's
-	// reconnect backoff already handles, and it produces a counted, alerted,
-	// operator-readable reason naming the clock. Clock ROLLBACK lands in the same
-	// branch and the same verdict is correct for it: if this node believes the
-	// current time precedes the CA's start, its own verifier will reject
-	// everything the CA signs, so "unusable" is the honest report.
-	//
-	// Self-generated CAs are unaffected: RotateIfNeeded backdates NotBefore by an
-	// hour, so only an imported or replicated CA can reach this branch.
-	if now.Before(cert.NotBefore) {
-		return fmt.Errorf("%w: %w until %s (system clock may have rolled back, or the CA was issued by a host whose clock is ahead)",
-			errClusterCAUnusable, errClusterCANotYetValid, cert.NotBefore.UTC().Format(time.RFC3339))
-	}
-	return nil
+	return clusterca.Usable(cert, now)
 }
 
 // Usable reports whether the cluster CA can currently sign a node certificate
@@ -164,40 +105,10 @@ func (ca *clusterCA) Expiry() time.Time {
 	return ca.cert.NotAfter
 }
 
-// clampNodeCertValidity narrows a proposed node-certificate window so the cert
-// can never outlive — or predate — the cluster CA that issued it.
-//
-// Unclamped, this was materially worse than the leaf case CHAOS-28 fixed. A
-// forged inspection leaf claimed 24h it might not have; a node cert claims a
-// FULL YEAR, so in ordinary operation a node enrolled at any point in the CA's
-// final year holds a certificate whose stated expiry is months past its
-// issuer's. That is the state that makes a cluster trust incident hardest to
-// diagnose: `GET /api/cluster/nodes` reports every node's cert as valid for
-// months, the node's own checkDPCertExpiry agrees, and yet every handshake
-// fails — because RFC 5280 path validation evaluates the whole chain at the
-// time of use, and the root is dead. Nothing in the fleet was looking at the
-// only date that mattered.
-//
-// Clamping does not shorten any window that would otherwise have worked; it
-// makes the certificate state honest about when trust actually ends. The
-// downstream effect is intentional and is the point: a clamped cert inside the
-// DP's 30-day renewal window puts the node into renewal, which is exactly the
-// behaviour that turns a silent cliff into visible pressure. Because the clamp
-// horizon and the CA's own rotation window are both 30 days
-// (clusterCARenewalWindow), a healthy CP rotates before any clamp is reachable,
-// so on a healthy fleet this function is inert.
+// clampNodeCertValidity binds clusterca.ClampNodeValidity: a node certificate
+// can never outlive — or predate — the cluster CA that issued it. On a healthy
+// fleet it is inert, because the clamp horizon and the CA's rotation window are
+// both clusterCARenewalWindow.
 func clampNodeCertValidity(notBefore, notAfter time.Time, ca *x509.Certificate) (leafNotBefore, leafNotAfter time.Time, clampedToIssuer bool) {
-	if ca == nil {
-		return notBefore, notAfter, false
-	}
-	clamped := false
-	if notBefore.Before(ca.NotBefore) {
-		notBefore = ca.NotBefore
-		clamped = true
-	}
-	if notAfter.After(ca.NotAfter) {
-		notAfter = ca.NotAfter
-		clamped = true
-	}
-	return notBefore, notAfter, clamped
+	return clusterca.ClampNodeValidity(notBefore, notAfter, ca)
 }
