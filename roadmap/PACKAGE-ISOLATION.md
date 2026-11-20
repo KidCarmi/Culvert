@@ -346,7 +346,7 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-012 | saas-feed wire field grammar: root `canonicalUTCSecond`/`validSHA256Hex` → bindings to `internal/urlcatfeed` | **shipped** (merged 2026-11-20, `949d650`) | nightly shift | `main` | #1955 | — | duplicate-rule removal: `urlcatfeed.parseCanonicalRFC3339`/`isSHA256Hex` were byte-equivalent private copies of the root validators; now exported (`ParseCanonicalRFC3339`, `IsSHA256Hex`) and the root names delegate, so 0 root callers changed; differential test with frozen root oracles + 2 mutation negative controls; see "IM-012" below | — |
 | IM-013 | `cluster_ca_validity.go` policy → `internal/clusterca` | **shipped** (merged 2026-11-20, `398a889`) | nightly shift | `main` | #1965 | — | ADR-0048; see "IM-013" below | — |
 | IM-015 | `revocation_sync_budget.go` planner → `internal/session/revsync` | **shipped** (merged 2026-11-20, `ff8bc28`) | nightly shift | `main` | #1966 | — | ADR-0049; 4 exported names; see "IM-015" below | — |
-| IM-016 | `scan_svc_admission.go` gate → `internal/secscan/sidecargate` | **implementation under review** | nightly shift | `main` | pending | — | ADR-0051; 8 exported names; see "IM-016" below | review PR |
+| IM-016 | `scan_svc_admission.go` gate → `internal/secscan/sidecargate` | **implementation under review** | nightly shift | `main` | #1975 | — | ADR-0051; 8 exported names; see "IM-016" below | review PR |
 | IM-017 | `ui_frontend_v2.go` artifact validator → `internal/frontendbundle` | **shipped** (merged 2026-11-20, `631750a`) | nightly shift | `main` | #1972 | — | ADR-0050; 3 exported names; see "IM-017" below | — |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
