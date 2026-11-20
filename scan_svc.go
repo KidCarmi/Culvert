@@ -27,6 +27,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan/sidecargate"
 )
 
 // ScanService is the HTTP sidecar server for remote scanning.
@@ -62,7 +64,7 @@ type ScanService struct {
 	// legitimately so: it is set once in NewScanService and never reassigned,
 	// and its own state is a channel. Every other field here is mutable and
 	// guarded, which is why this one says why it is not.
-	admission *scanSvcAdmission
+	admission *sidecargate.Gate
 }
 
 // ScanRequest is the JSON envelope for a scan request.
@@ -96,7 +98,8 @@ const scanSvcOversizeLogInterval = time.Minute
 func NewScanService(addr string) *ScanService {
 	// The admission gate is derived from the window configured NOW, which is
 	// the same instant the handler would have read it from. See
-	// scan_svc_admission.go for why the bound is in bytes rather than requests.
+	// internal/secscan/sidecargate for why the bound is in bytes rather than
+	// requests, and scan_svc_admission.go for the composition around the gate.
 	ss := &ScanService{addr: addr, admission: newScanSvcAdmission(scanSvcWindow())}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/scan", ss.handleScan)
@@ -271,9 +274,9 @@ func (ss *ScanService) handleScan(w http.ResponseWriter, r *http.Request) {
 	// a goroutine and a connection it already had, and its body stays in the
 	// kernel's socket buffer — which is where backpressure belongs, because TCP
 	// flow control then pushes it back to the caller for free.
-	release, admitted := ss.admission.acquire(r.Context())
+	release, admitted := ss.admission.Acquire(r.Context())
 	if !admitted {
-		refuseScanAtCapacity(w, r, ss.admission.slots)
+		refuseScanAtCapacity(w, r, ss.admission.Slots())
 		return
 	}
 	defer release()
@@ -423,7 +426,7 @@ func (ss *ScanService) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// scan_slots x scan_window_bytes is the buffered-body ceiling an
 		// operator must size the container against, so both numbers ride the
 		// same surface.
-		"scan_slots":          ss.admission.slots,
+		"scan_slots":          ss.admission.Slots(),
 		"scan_inflight":       scanSvcInflight.Load(),
 		"at_capacity_refused": atomic.LoadInt64(&statScanSvcAtCapacity),
 	})

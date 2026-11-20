@@ -68,49 +68,27 @@ package main
 // so an operator can tell "at capacity, add capacity" from "the engine
 // faulted". This is that function, one layer out, for the resource the HTTP
 // layer spends before any engine is reached.
+//
+// WHERE THE ENGINE LIVES. The slot arithmetic, the semaphore, the bounded wait
+// and the gauge-before-slot release order are internal/secscan/sidecargate
+// (IM-016, ADR-0051). This file is the sidecar's composition around it: the
+// process gauges /metrics and /health read, the test seam that forces a slot
+// count, the 429 and its counter, and the throttled refusal line.
 
 import (
-	"context"
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/secscan/sidecargate"
 )
 
 const (
-	// scanSvcHeapBudget is the buffered-body heap the sidecar is willing to
-	// hold at once. It is the only number here chosen rather than derived, and
-	// it is deliberately a budget in BYTES: what runs out under load is memory,
-	// and the per-request cost is the operator's `security.max_scan_mb`, so a
-	// fixed REQUEST count would silently multiply the exposure of anyone who
-	// widens the window — the one direction that must not surprise.
-	scanSvcHeapBudget = 256 << 20
-
-	// scanSvcMinSlots keeps a pathologically wide window from serialising the
-	// sidecar completely. At or below this floor the budget is advisory: an
-	// operator who sets a 512 MiB window has chosen a sidecar that holds two of
-	// them, and the `/health` and `/metrics` surfaces say so.
-	scanSvcMinSlots = 2
-
-	// scanSvcMaxSlots is the ceiling, and it is NOT about memory. The engines
-	// behind this handler have their own, much smaller concurrency: ClamAV
-	// admits internal/clamav's clamMaxConcurrent = 4 at a time. Slots far above
-	// that buy no throughput — they only let the HTTP layer buffer work the
-	// engines cannot start, which is the defect. 32 is 8x the ClamAV limit,
-	// chosen so the gate cannot be the bottleneck on any healthy deployment.
-	scanSvcMaxSlots = 32
-
-	// scanSvcQueueWait bounds how long a request waits for a slot, and it is
-	// chosen AGAINST THE CALLER'S BUDGET rather than for its own sake.
-	//
-	// internal/secscan's ScanBodyTimeout is 10 s. Waiting past that would let
-	// the caller's own deadline fire first, and the caller would then classify
-	// a capacity refusal as `remoteOutcomeBudget` — fail-closed either way, but
-	// counted as a timeout and pointing an operator at a slow scanner rather
-	// than at a saturated one. Answering 429 at 5 s keeps the classification,
-	// and therefore the operator action ("add capacity"), correct.
-	//
-	// Same value and same role as internal/clamav's clamQueueWaitFallback.
-	scanSvcQueueWait = 5 * time.Second
+	// scanSvcQueueWait is how long a request waits for a slot before the
+	// handler answers 429. The value and the reason it is chosen against the
+	// caller's budget are sidecargate.QueueWait's; the name stays here for the
+	// refusal line and the tests that bound the handler by it.
+	scanSvcQueueWait = sidecargate.QueueWait
 
 	// scanSvcCapacityLogInterval throttles the refusal line. The producer's
 	// rate is set by TRAFFIC, so the same discipline refuseTruncatedScan and
@@ -133,7 +111,8 @@ var lastScanSvcCapacityLog atomic.Int64
 // scanSvcInflight is the number of /scan handlers currently holding a slot —
 // i.e. currently permitted to buffer a body. Package-level because /metrics and
 // /healthz read it without a ScanService handle, and there is one sidecar per
-// process.
+// process. Every gate newScanSvcAdmission builds is handed this gauge and is
+// its only writer.
 //
 // It is the sidecar-side sibling of the caller's culvert_remote_scan_inflight:
 // a value pinned at the slot count means requests are queueing for a slot,
@@ -144,39 +123,6 @@ var scanSvcInflight atomic.Int64
 // Written once per NewScanService, read by /metrics, /health and the tests.
 var scanSvcSlots atomic.Int64
 
-// scanSvcAdmissionSlots derives the slot count from a scan window.
-//
-// Exposure is slots x (window+1) bytes of buffered body, so the slot count is
-// the budget divided by the per-request cost, clamped at both ends for the
-// reasons the two constants give. Pure, so the arithmetic is testable without
-// a listener.
-func scanSvcAdmissionSlots(window int64) int {
-	if window <= 0 {
-		return scanSvcMaxSlots
-	}
-	slots := scanSvcHeapBudget / (window + 1)
-	if slots > scanSvcMaxSlots {
-		return scanSvcMaxSlots
-	}
-	if slots < scanSvcMinSlots {
-		return scanSvcMinSlots
-	}
-	return int(slots)
-}
-
-// scanSvcAdmission is the bounded gate in front of readScanWindow.
-//
-// Immutable after construction — the channel and the count are both set in
-// newScanSvcAdmission and never reassigned — which is why ScanService can hold
-// one without extending its mutex's remit. A window changed at runtime does not
-// retune an already-built gate; that is recorded rather than fixed, because a
-// resizable semaphore is materially more machinery than this fault needs and
-// the derived count is re-read on every sidecar start.
-type scanSvcAdmission struct {
-	sem   chan struct{}
-	slots int
-}
-
 // scanSvcSlotsOverride forces the slot count. A seam only for this package's
 // white-box tests (same role as scanSvcListenHook), and 0 — ignored — in
 // production: the derived count is 32 at the shipped 5 MiB default and still 12
@@ -186,61 +132,15 @@ type scanSvcAdmission struct {
 // wait-bound gates need a FULL gate rather than a large one.
 var scanSvcSlotsOverride atomic.Int64
 
-// newScanSvcAdmission builds the gate for the window configured now.
-func newScanSvcAdmission(window int64) *scanSvcAdmission {
-	slots := scanSvcAdmissionSlots(window)
+// newScanSvcAdmission builds the gate for the window configured now, publishes
+// its slot count and binds it to the process in-flight gauge.
+func newScanSvcAdmission(window int64) *sidecargate.Gate {
+	slots := sidecargate.Slots(window)
 	if forced := scanSvcSlotsOverride.Load(); forced > 0 {
 		slots = int(forced)
 	}
 	scanSvcSlots.Store(int64(slots))
-	return &scanSvcAdmission{sem: make(chan struct{}, slots), slots: slots}
-}
-
-// acquire books one slot. The returned release is nil when admission failed and
-// is always safe to defer otherwise.
-//
-// Two selects, not one: the uncontended path must not allocate a timer, and on
-// a sidecar that is not saturated that is every request.
-//
-// WHAT BOUNDS THE WAIT, precisely, because the obvious reading is wrong and
-// this round's own test caught it. scanSvcQueueWait is the operative bound and
-// effectively the only one. An HTTP request carries no deadline over the wire,
-// so `r.Context()` on the SERVER side has no deadline either, however short the
-// caller's own budget is — that is exactly why scanSvcQueueWait is chosen
-// against internal/secscan's ScanBodyTimeout rather than left to the caller.
-// `r.Context()` contributes CANCELLATION only, and net/http does not reliably
-// deliver even that before the handler has started reading the body: measured
-// here, a client that aborted at 400 ms left its waiter parked until the 5 s
-// backstop. Passing it is still right — a cancellation that does arrive frees
-// the waiter early, and a handler must not outlive its request — but the
-// guarantee is the backstop, not the caller.
-//
-// A parked waiter costs a goroutine and a connection it already had, and no
-// buffer at all, which is the entire point of acquiring before the read.
-func (a *scanSvcAdmission) acquire(ctx context.Context) (release func(), ok bool) {
-	select {
-	case a.sem <- struct{}{}:
-		scanSvcInflight.Add(1)
-		return a.release, true
-	default:
-	}
-
-	waitCtx, cancel := context.WithTimeout(ctx, scanSvcQueueWait)
-	defer cancel()
-	select {
-	case a.sem <- struct{}{}:
-		scanSvcInflight.Add(1)
-		return a.release, true
-	case <-waitCtx.Done():
-		return nil, false
-	}
-}
-
-// release returns the slot. The gauge is decremented BEFORE the channel receive
-// so the gauge can never read above the slot count.
-func (a *scanSvcAdmission) release() {
-	scanSvcInflight.Add(-1)
-	<-a.sem
+	return sidecargate.New(sidecargate.Options{Slots: slots, Inflight: &scanSvcInflight})
 }
 
 // refuseScanAtCapacity answers 429 for a request that could not get a slot.

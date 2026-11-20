@@ -375,56 +375,9 @@ func TestChaos115_TruncationContractSurvivesAdmission(t *testing.T) {
 // The arithmetic
 // ─────────────────────────────────────────────────────────────────────────────
 
-// TestChaos115_SlotArithmetic pins the derivation directly, so no gate above
-// has to fill a 32-slot sidecar to cover it.
-func TestChaos115_SlotArithmetic(t *testing.T) {
-	cases := []struct {
-		name   string
-		window int64
-		want   int
-	}{
-		// A narrow window is capped by the engines' own concurrency, not by
-		// memory: slots far above ClamAV's 4 buy no throughput.
-		{"tiny window hits the ceiling", 4096, scanSvcMaxSlots},
-		{"shipped 5 MiB default hits the ceiling", 5 << 20, scanSvcMaxSlots},
-		// The budget starts binding once the window is wide enough that
-		// 32 of them would exceed it.
-		{"16 MiB window is budget-bound", 16 << 20, 15},
-		{"64 MiB window is budget-bound", 64 << 20, 3},
-		// A pathological window must not serialise the sidecar completely.
-		{"512 MiB window hits the floor", 512 << 20, scanSvcMinSlots},
-		// Defensive: a zero/absent window must not divide by zero or return 0
-		// slots, which would refuse every request and fail the fleet CLOSED.
-		{"zero window hits the ceiling", 0, scanSvcMaxSlots},
-		{"negative window hits the ceiling", -1, scanSvcMaxSlots},
-	}
-	for _, tc := range cases {
-		if got := scanSvcAdmissionSlots(tc.window); got != tc.want {
-			t.Errorf("%s: scanSvcAdmissionSlots(%d) = %d, want %d", tc.name, tc.window, got, tc.want)
-		}
-	}
-	for _, tc := range cases {
-		if got := scanSvcAdmissionSlots(tc.window); got < scanSvcMinSlots {
-			t.Errorf("%s: %d slots is below the floor — a sidecar that admits nothing blocks every download in the fleet", tc.name, got)
-		}
-	}
-}
-
-// TestChaos115_HeapCeilingIsStatedNotImplied pins the budget arithmetic the
-// /health and /metrics surfaces publish: slots x (window+1) must stay within
-// the stated budget wherever the ceiling is not the binding constraint.
-func TestChaos115_HeapCeilingIsStatedNotImplied(t *testing.T) {
-	for _, window := range []int64{8 << 20, 16 << 20, 32 << 20, 64 << 20, 128 << 20} {
-		slots := int64(scanSvcAdmissionSlots(window))
-		if slots == scanSvcMaxSlots || slots == scanSvcMinSlots {
-			continue // a clamped count is a stated choice, not the budget
-		}
-		if ceiling := slots * (window + 1); ceiling > scanSvcHeapBudget {
-			t.Errorf("window %d: %d slots x %d bytes = %d, over the %d-byte budget",
-				window, slots, window+1, ceiling, int64(scanSvcHeapBudget))
-		}
-	}
-}
+// TestChaos115_SlotArithmetic and TestChaos115_HeapCeilingIsStatedNotImplied
+// pin the derivation directly and live beside it, in
+// internal/secscan/sidecargate (IM-016), under the same names.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The surfaces
