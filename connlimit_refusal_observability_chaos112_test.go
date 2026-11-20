@@ -141,7 +141,12 @@ func TestCHAOS112_ConnLimitRefusalLogIsRateLimited(t *testing.T) {
 func TestCHAOS112_ConnLimitRefusalLogResumesAfterTheInterval(t *testing.T) {
 	chaos112IsolateRefusals(t)
 	buf := chaos112CaptureLog(t)
-	connLimitRefusalLogInterval = time.Millisecond
+	// The suppression half runs under an interval no test can outlast: with
+	// 1ms here, four refusals that took longer than a millisecond (the race
+	// detector on a loaded runner) reopened the gate mid-assertion and failed a
+	// gate that was working. The gate compares elapsed time against the
+	// interval on every call, so the recovery half below shortens it instead.
+	connLimitRefusalLogInterval = time.Hour
 
 	const clientIP = "203.0.113.116"
 	connLimiter.Enable(1)
@@ -169,6 +174,7 @@ func TestCHAOS112_ConnLimitRefusalLogResumesAfterTheInterval(t *testing.T) {
 	}
 
 	// Let the interval elapse, then refuse once more.
+	connLimitRefusalLogInterval = time.Millisecond
 	deadline := time.Now().Add(2 * time.Second)
 	for strings.Count(buf.String(), "CONN_LIMITED") < 2 && time.Now().Before(deadline) {
 		time.Sleep(2 * time.Millisecond)
