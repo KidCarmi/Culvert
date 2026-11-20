@@ -689,6 +689,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **A SOCKS5 client that hangs up during the connect phase now releases its
+  slot at once (`PERF-SOCKS5-HANGUP-1`).** The SOCKS5 pre-flight SSRF guard and
+  the upstream dial ran under `context.Background()`, so a client that closed
+  its connection while the resolver was slow kept the handler goroutine, its
+  descriptor and its per-IP connection-limiter slot for the full 10 s guard
+  budget (measured: 10.0 s) and then up to another 10 s in the dial. SOCKS5 now
+  gets what HTTP CONNECT has from `r.Context()`: a background read on the client
+  connection cancels the guard and the dial on EOF or reset. A byte a client
+  sends early is kept and forwarded to the destination ahead of the relay, and a
+  connection that cannot honour read deadlines keeps the previous behaviour.
+  Verdicts are unchanged (an undetermined destination still fails closed, and
+  `ssrfControl` still checks at connect time); a hang-up mid-check is logged
+  instead of being recorded as an SSRF `BLOCKED`
+  (`TestSOCKS5_ClientHangupReleasesWedgedGuardLookup`,
+  `TestSOCKS5_OptimisticDataReachesDestination`).
 - **An alert the dedup window was about to drop still paid two heap allocations
   and a process-wide mutex round trip to find that out (PERF-ALERTDEDUP-1).**
   `alerts.Store.Dispatch` is reached at REQUEST rate by fault-driven producers —
