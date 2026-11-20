@@ -21,7 +21,6 @@ package main
 //     TestAU50_ControlFixedPrefixStarvesTheTail demonstrates.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -164,64 +163,11 @@ func TestAU50_RevocationListOverTheRequestCapStillSyncs(t *testing.T) {
 	}
 }
 
-// The planner's own contract at a small budget: local first, every tick inside
-// the budget, full coverage, including when the LOCAL class alone overflows.
-func TestAU50_PlannerSendsLocalFirstAndRotatesEveryEntry(t *testing.T) {
-	exp := time.Now().Add(time.Hour).Unix()
-	for _, tc := range []struct {
-		name           string
-		localN, otherN int
-	}{
-		{"local fits the prefix", 5, 120},
-		{"local alone overflows the budget", 120, 40},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			local := au50Learned("loc", tc.localN, 40, exp)
-			for i := range local {
-				local[i].Expiry -= int64(i) // distinct ages, newest first
-			}
-			other := au50Learned("oth", tc.otherN, 40, exp+10)
-			acct := "au50-acct"
-			other = append(other, RevocationEntry{Token: fmt.Sprintf("user:%s", acct), User: acct, Expiry: exp})
-			reached := au50RunPlanner(t, local, other, 1500)
-			for _, e := range append(append([]RevocationEntry{}, local...), other...) {
-				if _, ok := reached[e.Token]; !ok {
-					t.Fatalf("entry %q was never sent; the rotation starved it", e.Token)
-				}
-			}
-		})
-	}
-}
-
-// au50RunPlanner drives buildRevocationSyncRequest tick by tick until every
-// entry has been sent (or 50 ticks pass), checking the per-tick invariants,
-// and returns the tokens that were sent.
-func au50RunPlanner(t *testing.T, local, other []RevocationEntry, budget int) map[string]struct{} {
-	t.Helper()
-	total := len(local) + len(other)
-	var cur revSyncCursor
-	reached := map[string]struct{}{}
-	for tick := 0; tick < 50 && len(reached) < total; tick++ {
-		b, deferred, err := buildRevocationSyncRequest("n1", local, other, budget, &cur)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(b) > budget {
-			t.Fatalf("tick %d: %d bytes over the %d budget", tick, len(b), budget)
-		}
-		req := au50DecodeRequest(t, b)
-		if deferred != total-len(req.Entries) {
-			t.Fatalf("tick %d: deferred=%d does not account for the %d entries left out", tick, deferred, total-len(req.Entries))
-		}
-		if tick == 0 && req.Entries[0].Token != local[0].Token {
-			t.Fatalf("first entry of the first tick is %q, want this node's newest logout %q", req.Entries[0].Token, local[0].Token)
-		}
-		for _, e := range req.Entries {
-			reached[e.Token] = struct{}{}
-		}
-	}
-	return reached
-}
+// The planner's own contract tests (TestAU50_PlannerSendsLocalFirstAndRotatesEveryEntry,
+// TestAU50_ControlFittingListIsSentWholeAndUnchanged) moved with the planner
+// to internal/session/revsync (IM-015), names unchanged. The gates that stay
+// here are the ones that need the application: the real gRPC limits, the
+// session store, the aggregator and the HA trim this control compares against.
 
 // NEGATIVE CONTROL: why the planner rotates rather than trimming. The HA
 // bundle's fixed priority prefix, applied to the same backlog tick after tick,
@@ -238,29 +184,6 @@ func TestAU50_ControlFixedPrefixStarvesTheTail(t *testing.T) {
 	}
 	if len(reached) == len(entries) {
 		t.Fatal("a fixed prefix covered the whole backlog; this control no longer demonstrates why rotation is needed")
-	}
-}
-
-// CONTROL: a list that fits is sent byte-identically to the pre-fix request,
-// with nothing deferred and no cursor retained — the common case is unchanged
-// on the wire and pays one marshal.
-func TestAU50_ControlFittingListIsSentWholeAndUnchanged(t *testing.T) {
-	local := au50Learned("fit-l", 3, 30, 2_000_000_000)
-	other := au50Learned("fit-o", 3, 30, 2_000_000_000)
-	cur := revSyncCursor{set: true, last: revSyncKey{token: "stale"}}
-	b, deferred, err := buildRevocationSyncRequest("n1", local, other, maxRevocationSyncRequestBytes, &cur)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, _ := json.Marshal(struct {
-		NodeID  string            `json:"node_id"`
-		Entries []RevocationEntry `json:"entries"`
-	}{"n1", append(append([]RevocationEntry{}, local...), other...)})
-	if !bytes.Equal(b, want) {
-		t.Fatalf("a fitting request changed on the wire:\n got %s\nwant %s", b, want)
-	}
-	if deferred != 0 || cur.set {
-		t.Fatalf("deferred=%d cursor=%+v, want 0 and cleared", deferred, cur)
 	}
 }
 
