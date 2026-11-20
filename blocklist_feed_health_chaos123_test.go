@@ -869,3 +869,54 @@ func TestChaos123_UndeliveredStaleAlertDoesNotConsumeTheEpisode(t *testing.T) {
 		t.Errorf("delivered = %d, want 1: a delivered episode must still page only once", delivered)
 	}
 }
+
+// TestChaos123_EpisodeEndBetweenVerdictAndLatchIsNotOverwritten — the
+// blocklist plane reads its staleness verdict outside the lock, so an episode
+// end (a feed removal here; an observed recovery is the same) can land
+// between the verdict and the latch decision. Latching after it set the latch
+// straight back for an episode that was over — the exact state
+// noteBlocklistFeedsRemoved exists to clear, because it suppresses a
+// different feed's later outage. The shared latch rule now skips when the
+// episode generation read before the verdict is no longer current.
+func TestChaos123_EpisodeEndBetweenVerdictAndLatchIsNotOverwritten(t *testing.T) {
+	now := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	const feed = "https://feeds.example.com/latch-race.txt"
+	bs.SetFeed(feed, 6*time.Hour)
+	bs.seedStatus(feed, now.Add(-13*time.Hour), now.Add(-13*time.Hour), "")
+	fired := captureStaleAlert(t)
+
+	// The episode ends after the verdict has read the feed snapshots and
+	// before the latch decision: blocklistFeedState reads the snapshots after
+	// releasing the plane's lock.
+	inner := blocklistFeedSnapshots
+	ended := false
+	blocklistFeedSnapshots = func() []blocklistfeed.Feed {
+		feeds := inner()
+		if !ended {
+			ended = true
+			noteBlocklistFeedsRemoved()
+		}
+		return feeds
+	}
+	evaluateBlocklistFeedStaleness()
+	if !ended {
+		t.Fatal("precondition: the episode-end hook did not run inside the verdict")
+	}
+	if len(*fired) != 0 {
+		t.Errorf("paged %v for an episode that ended before the latch decision", *fired)
+	}
+	blocklistFeedHealth.mu.Lock()
+	latched := blocklistFeedHealth.alerted
+	blocklistFeedHealth.mu.Unlock()
+	if latched {
+		t.Fatal("a latch decided after the episode ended re-latched it")
+	}
+
+	// The feed is still stale, so the next evaluation is a new episode and pages.
+	blocklistFeedSnapshots = inner
+	evaluateBlocklistFeedStaleness()
+	if len(*fired) != 1 {
+		t.Fatalf("pages = %d after the episode ended, want 1 for the next one", len(*fired))
+	}
+}

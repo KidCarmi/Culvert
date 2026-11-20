@@ -411,7 +411,7 @@ func TestThreatFeedSyncOK_SurvivesARestartFromAFailedSync(t *testing.T) {
 	reloaded.Init(path, time.Hour)
 	globalThreatFeed = reloaded
 	fireThreatFeedStaleAlert = func(string) bool { return false }
-	deferThreatFeedStaleAlert = func(string) {}
+	deferThreatFeedStaleAlert = func(string, uint64) {}
 	noteThreatFeedConfigured()
 	t.Cleanup(func() {
 		resetThreatFeedHealthForTest()
@@ -456,7 +456,7 @@ func TestThreatFeedStale_EvaluatedAtStartupForAWarmButStaleDatabase(t *testing.T
 	feed.SeedSyncSuccessForTest(time.Now().Add(-72 * time.Hour)) // three days stale
 	globalThreatFeed = feed
 	fireThreatFeedStaleAlert = func(d string) bool { mu.Lock(); direct = append(direct, d); mu.Unlock(); return true }
-	deferThreatFeedStaleAlert = func(d string) { mu.Lock(); deferred = append(deferred, d); mu.Unlock() }
+	deferThreatFeedStaleAlert = func(d string, _ uint64) { mu.Lock(); deferred = append(deferred, d); mu.Unlock() }
 	t.Cleanup(func() {
 		resetThreatFeedHealthForTest()
 		globalThreatFeed = prevFeed
@@ -503,7 +503,7 @@ func TestThreatFeedStale_StartupIsSilentForAFreshOrHealthyNode(t *testing.T) {
 			feed.Init("", time.Hour)
 			tc.seed(feed)
 			globalThreatFeed = feed
-			deferThreatFeedStaleAlert = func(d string) { mu.Lock(); deferred = append(deferred, d); mu.Unlock() }
+			deferThreatFeedStaleAlert = func(d string, _ uint64) { mu.Lock(); deferred = append(deferred, d); mu.Unlock() }
 			fireThreatFeedStaleAlert = func(string) bool { return false }
 			t.Cleanup(func() {
 				resetThreatFeedHealthForTest()
@@ -695,6 +695,43 @@ type tfStartupHarness struct {
 	flushTo []string // details the flush handed to Dispatch, tagged with whether anyone subscribed
 	feed    *threatfeed.Feed
 	now     time.Time
+
+	// recoverOnNow arms a one-shot recovery inside the NEXT threatFeedNow
+	// call: a clean round lands after a staleness verdict has read the feed's
+	// health but before the latch decision. threatFeedState reads the clock
+	// after the health and without the plane's lock, so this is exactly the
+	// window SEC-TFEED-STALE-LATCH-1's generation guard closes. Arm it only
+	// immediately before a direct threatFeedState caller: noteThreatFeedSync
+	// and noteThreatFeedConfigured read the clock under the plane's lock.
+	recoverOnNow  bool
+	recoveryFired bool
+}
+
+func (h *tfStartupHarness) armRecovery() {
+	h.mu.Lock()
+	h.recoverOnNow = true
+	h.mu.Unlock()
+}
+
+func (h *tfStartupHarness) recovered() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.recoveryFired
+}
+
+// recoverNow drives a clean round through the production observer.
+func (h *tfStartupHarness) recoverNow() {
+	h.mu.Lock()
+	now := h.now
+	h.mu.Unlock()
+	h.feed.SeedSyncSuccessForTest(now)
+	noteThreatFeedSync(threatfeed.SyncOutcome{OK: true, LastSuccess: now})
+}
+
+func (h *tfStartupHarness) runtimePages() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.runtime)
 }
 
 func newTFStartupHarness(t *testing.T, flushed bool) *tfStartupHarness {
@@ -745,8 +782,16 @@ func newTFStartupHarness(t *testing.T, flushed bool) *tfStartupHarness {
 	}
 	threatFeedNow = func() time.Time {
 		h.mu.Lock()
-		defer h.mu.Unlock()
-		return h.now
+		now, recoverNow := h.now, h.recoverOnNow
+		h.recoverOnNow = false
+		if recoverNow {
+			h.recoveryFired = true
+		}
+		h.mu.Unlock()
+		if recoverNow {
+			h.recoverNow()
+		}
+		return now
 	}
 
 	h.feed = threatfeed.New()
@@ -902,12 +947,15 @@ func TestThreatFeedStale_FlushRacingFailedRoundsPagesOnce(t *testing.T) {
 	}
 }
 
-// TestThreatFeedStale_StartupAlertForARecoveredEpisodeConsumesNothing — a clean
-// round that lands before the flush ends the episode. The queued boot-time
-// alert is still delivered as the fact it reports (the behaviour before
-// SEC-TFEED-STALE-LATCH-1), but it must not latch: there is no open episode,
-// and a latch set now would silence the next real one.
-func TestThreatFeedStale_StartupAlertForARecoveredEpisodeConsumesNothing(t *testing.T) {
+// TestThreatFeedStale_StartupAlertForARecoveredEpisodeIsDropped — a clean
+// round that lands before the flush ends the episode the boot-time alert was
+// raised in. The flush runs after Start launched the scheduler, so this is
+// reachable. The queued copy says the gateway "is enforcing against stale
+// intelligence until the feed resyncs", and the episode generation proves it
+// has resynced: it is dropped (the CHAOS-71 "condition cleared" rule) and,
+// above all, it must not latch — a latch set now would silence the next real
+// episode until another clean sync.
+func TestThreatFeedStale_StartupAlertForARecoveredEpisodeIsDropped(t *testing.T) {
 	h := newTFStartupHarness(t, false)
 	noteThreatFeedConfigured()
 
@@ -919,8 +967,8 @@ func TestThreatFeedStale_StartupAlertForARecoveredEpisodeConsumesNothing(t *test
 
 	tfSwapAlertStore(t, true)
 	flushStartupAlerts()
-	if got := h.flushed(); len(got) != 1 || !strings.Contains(got[0], "stale at startup") {
-		t.Fatalf("flush delivered %v, want the queued boot-time alert", got)
+	if got := h.flushed(); len(got) != 0 {
+		t.Fatalf("flush delivered %v for an episode that recovered before it, want the queued copy dropped", got)
 	}
 	if tfAlerted() {
 		t.Fatal("a startup alert for an episode that recovered before the flush latched the plane")
@@ -931,8 +979,8 @@ func TestThreatFeedStale_StartupAlertForARecoveredEpisodeConsumesNothing(t *test
 	h.now = h.now.Add(3 * time.Hour)
 	h.mu.Unlock()
 	h.fail(1)
-	if got := h.pages(); len(got) != 2 || !strings.Contains(got[0], "tflatch-src-startup") {
-		t.Fatalf("pages = %v, want the new episode's page and the boot-time fact", got)
+	if got := h.pages(); len(got) != 1 || !strings.Contains(got[0], "tflatch-src-startup") {
+		t.Fatalf("pages = %v, want exactly the new episode's page", got)
 	}
 }
 
@@ -958,5 +1006,77 @@ func TestThreatFeedStale_ArmedAfterTheFlushLatchesOnDelivery(t *testing.T) {
 	h.fail(2)
 	if got := h.pages(); len(got) != 1 || !strings.Contains(got[0], "tflatch-src-startup") {
 		t.Fatalf("pages = %v, want exactly one page once a subscriber exists", got)
+	}
+}
+
+// ── Recovery between the verdict and the latch (Codex P2 on #1971) ────────────
+
+// TestThreatFeedStale_RecoveryBetweenVerdictAndLatchIsNotOverwritten — the
+// staleness verdict is read outside the plane's lock (reading it under the lock
+// would invert the order with the feed, whose observer takes it). A clean round
+// that lands between the verdict and the latch decision clears the latch and
+// ends the episode; latching after it set the latch straight back for an
+// episode that was over, and the NEXT episode could not page until another
+// clean sync. Feed.Sync (the admin manual sync) runs concurrently with the
+// scheduler's rounds, so the interleaving is reachable at runtime.
+func TestThreatFeedStale_RecoveryBetweenVerdictAndLatchIsNotOverwritten(t *testing.T) {
+	h := newTFStartupHarness(t, true) // steady state: the startup flush is long done
+	noteThreatFeedConfigured()        // stale at boot, nobody subscribed: nothing latched
+	tfSwapAlertStore(t, true)
+	h.feed.SeedSyncFailureForTest("tflatch-src-startup")
+
+	h.armRecovery()
+	evaluateThreatFeedStaleness()
+	if !h.recovered() {
+		t.Fatal("precondition: the recovery hook did not run inside the staleness verdict")
+	}
+	if got := h.pages(); len(got) != 0 {
+		t.Errorf("paged %v for an episode that recovered before the latch decision", got)
+	}
+	if tfAlerted() {
+		t.Fatal("a latch decided after a recovery re-latched the episode that recovery ended")
+	}
+
+	// The next real episode must page.
+	h.mu.Lock()
+	h.now = h.now.Add(3 * time.Hour)
+	h.mu.Unlock()
+	h.fail(1)
+	if got := h.pages(); len(got) != 1 || !strings.Contains(got[0], "tflatch-src-startup") {
+		t.Fatalf("pages = %v, want exactly the next episode's page: a stale latch silenced it", got)
+	}
+}
+
+// TestThreatFeedStale_RecoveryAroundTheFlushClaimIsNotOverwritten — the same
+// interleaving on the startup path. The flush runs after Start launched the
+// scheduler, so a clean round can land while the claim decides. The recovery
+// is armed for the first clock read the flush makes; if the claim makes none
+// (it decides on the generation captured with the boot-time verdict, so there
+// is no verdict to read at the flush), the recovery lands right after the
+// claim instead. Whichever order, the episode the recovery ended must not stay
+// latched, and the next episode must page.
+func TestThreatFeedStale_RecoveryAroundTheFlushClaimIsNotOverwritten(t *testing.T) {
+	h := newTFStartupHarness(t, false)
+	noteThreatFeedConfigured()
+	tfSwapAlertStore(t, true)
+
+	h.armRecovery()
+	flushStartupAlerts()
+	if !h.recovered() {
+		h.mu.Lock()
+		h.recoverOnNow = false
+		h.mu.Unlock()
+		h.recoverNow()
+	}
+	if tfAlerted() {
+		t.Fatal("the flush claim latched an episode that a concurrent recovery ended")
+	}
+
+	h.mu.Lock()
+	h.now = h.now.Add(3 * time.Hour)
+	h.mu.Unlock()
+	h.fail(1)
+	if n := h.runtimePages(); n != 1 {
+		t.Fatalf("the next episode paged %d times, want 1: a stale latch silenced it (pages %v)", n, h.pages())
 	}
 }

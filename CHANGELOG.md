@@ -41,10 +41,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   not re-sent, one that reaches nobody leaves the episode open, and one whose
   episode was already paged between the webhook load and the flush is dropped.
   The fire-once rule is now one helper, `latchOncePerEpisodeOnDelivery`, shared
-  with the blocklist plane so the two copies cannot drift. The `threat_feed`
-  WARN row and the `culvert_threat_feed_*` gauges were unaffected throughout
-  (`TestThreatFeedStale_UndeliveredAlertDoesNotConsumeTheEpisode`,
-  `TestThreatFeedStale_StartupAlertFlushedToNobodyDoesNotConsumeTheEpisode`).
+  with the blocklist plane so the two copies cannot drift. It also closes a
+  narrower race in both planes: the staleness verdict is read outside the
+  plane's lock, so a clean round (or, for the blocklist, a feed removal) that
+  ended the episode between the verdict and the latch decision was overwritten
+  by a latch for the episode it had just ended, silencing the NEXT episode until
+  another clean sync. Every episode end now bumps a generation under the lock,
+  the verdict carries the generation read before it, and a decision for an
+  ended episode neither pages nor latches; a queued boot-time alert whose
+  episode recovered before the flush is dropped rather than delivered late. The
+  `threat_feed` WARN row and the `culvert_threat_feed_*` gauges were unaffected
+  throughout (`TestThreatFeedStale_UndeliveredAlertDoesNotConsumeTheEpisode`,
+  `TestThreatFeedStale_StartupAlertFlushedToNobodyDoesNotConsumeTheEpisode`,
+  `TestThreatFeedStale_RecoveryBetweenVerdictAndLatchIsNotOverwritten`,
+  `TestChaos123_EpisodeEndBetweenVerdictAndLatchIsNotOverwritten`).
 - **A withdrawn CDR pool member is unpublished before its connection is closed
   (`SEC-CDR-REDIAL-CLOSE-ORDER-1`).** The automatic re-dial publishes the
   members it dialled and then re-validates them, withdrawing any whose registry

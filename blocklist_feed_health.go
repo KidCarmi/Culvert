@@ -161,6 +161,13 @@ type blocklistFeedHealthRecord struct {
 	// configuration (noteBlocklistFeedsRemoved) — never by elapsed time.
 	alerted bool
 
+	// episode is the alert-episode generation, bumped under mu wherever the
+	// episode ends (the clears of alerted above, and a re-arm). The staleness
+	// verdict is read outside mu, and latchOncePerEpisodeOnDelivery latches
+	// only while the generation read before that verdict is current, so a
+	// recovery or a feed removal that lands in between is not overwritten.
+	episode uint64
+
 	// logAt / suppressed drive the rate-limited log line.
 	logAt      time.Time
 	suppressed int64
@@ -217,6 +224,7 @@ func noteBlocklistFeedConfigured() {
 	blocklistFeedHealth.armed = true
 	blocklistFeedHealth.startedAt = blocklistFeedNow()
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
 	blocklistFeedHealth.mu.Unlock()
@@ -269,6 +277,7 @@ func noteBlocklistFeedRoundRecovered() {
 	wasAlerted := blocklistFeedHealth.alerted
 	suppressed := blocklistFeedHealth.suppressed
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
 	blocklistFeedHealth.mu.Unlock()
@@ -297,6 +306,7 @@ func noteBlocklistFeedsRemoved() {
 	blocklistFeedHealth.mu.Lock()
 	wasAlerted := blocklistFeedHealth.alerted
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
 	blocklistFeedHealth.mu.Unlock()
@@ -350,8 +360,10 @@ func evaluateBlocklistFeedStaleness() {
 	// at most once per episode. Nothing blocking runs under it: the sink only
 	// probes the lock-free subscription index and hands off to a goroutine.
 	// The rule is shared with the threat-feed plane, so the two copies cannot
-	// drift: see latchOncePerEpisodeOnDelivery.
-	latchOncePerEpisodeOnDelivery(&blocklistFeedHealth.mu, &blocklistFeedHealth.alerted,
+	// drift: see latchOncePerEpisodeOnDelivery. snap.episode makes it skip if
+	// a recovery or a feed removal ended the episode after the verdict above
+	// was read, instead of latching an episode that is already over.
+	latchOncePerEpisodeOnDelivery(&blocklistFeedHealth.mu, &blocklistFeedHealth.alerted, &blocklistFeedHealth.episode, snap.episode,
 		func() bool { return fireBlocklistFeedStaleAlert(detail) })
 }
 
@@ -402,6 +414,10 @@ type blocklistFeedSnapshot struct {
 	OldestSuccess time.Time
 	// MaxConsecutiveFailures is the largest ladder count among all feeds.
 	MaxConsecutiveFailures int
+
+	// episode is the alert-episode generation, read under the plane's lock
+	// BEFORE the feed snapshots: see blocklistFeedHealthRecord.episode.
+	episode uint64
 }
 
 // blocklistFeedState derives the current posture from the feed engine's own
@@ -416,9 +432,13 @@ func blocklistFeedState() blocklistFeedSnapshot {
 	blocklistFeedHealth.mu.Lock()
 	armed := blocklistFeedHealth.armed
 	startedAt := blocklistFeedHealth.startedAt
+	episode := blocklistFeedHealth.episode
 	blocklistFeedHealth.mu.Unlock()
 
-	snap := blocklistFeedSnapshot{Armed: armed}
+	// The feed snapshots are read AFTER the generation: the syncer updates a
+	// feed's state before notifying the observer, so a recovery either shows
+	// below or bumps the generation after it was read.
+	snap := blocklistFeedSnapshot{Armed: armed, episode: episode}
 	feeds := blocklistFeedSnapshots() // nil-receiver safe in production
 	snap.Feeds = len(feeds)
 	now := blocklistFeedNow()
@@ -670,6 +690,7 @@ func resetBlocklistFeedHealthForTest() {
 	blocklistFeedHealth.armed = false
 	blocklistFeedHealth.startedAt = time.Time{}
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
 	blocklistFeedHealth.mu.Unlock()

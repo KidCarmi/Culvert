@@ -123,6 +123,14 @@ type threatFeedHealthRecord struct {
 	// OBSERVED clean sync or a restart.
 	alerted bool
 
+	// episode is the alert-episode generation, bumped under mu whenever an
+	// episode ends (an observed clean sync, a re-arm). A staleness verdict is
+	// read outside mu; latchOncePerEpisodeOnDelivery latches only if the
+	// generation read before that verdict is still current, so a recovery
+	// that lands in between cannot be overwritten by a latch for the episode
+	// it just ended.
+	episode uint64
+
 	// logAt / suppressed drive the rate-limited log line.
 	logAt      time.Time
 	suppressed int64
@@ -178,6 +186,7 @@ func noteThreatFeedConfigured() {
 	threatFeedHealth.configured = true
 	threatFeedHealth.startedAt = threatFeedNow()
 	threatFeedHealth.alerted = false
+	threatFeedHealth.episode++
 	threatFeedHealth.logAt = time.Time{}
 	threatFeedHealth.suppressed = 0
 	threatFeedHealth.mu.Unlock()
@@ -216,7 +225,7 @@ func evaluateThreatFeedStalenessAtStartup() {
 	}
 	deferThreatFeedStaleAlert(fmt.Sprintf(
 		"threat intelligence was already stale at startup: last successful sync was %s ago (over %dx the %s interval); the gateway is enforcing against stale intelligence until the feed resyncs",
-		snap.Age.Round(time.Minute), threatFeedStaleFactor, snap.SyncInterval))
+		snap.Age.Round(time.Minute), threatFeedStaleFactor, snap.SyncInterval), snap.episode)
 }
 
 // deferThreatFeedStaleAlert routes the boot-time stale alert through the
@@ -234,31 +243,40 @@ func evaluateThreatFeedStalenessAtStartup() {
 //
 // Whether a queued alert reaches anyone is only knowable at the flush, after
 // the webhook store has loaded. claimThreatFeedStartupAlert therefore decides
-// the latch THERE, under the plane's lock. After the flush the queue degrades
-// to a passthrough that would skip that claim, so the post-flush case takes the
-// runtime path's gated sink instead. The flushed-check and the enqueue are not
-// atomic, but production arms this plane in the scanning slice, strictly before
-// loadPersistentAdminState flushes on the same goroutine; the residual (an
-// unlatched delivered page) only fails toward one extra page.
-var deferThreatFeedStaleAlert = func(detail string) {
+// the latch THERE, under the plane's lock, for the episode generation the
+// boot-time verdict was read in (episode). The flush runs after Start has
+// launched the scheduler, so a clean round can land before it: the generation
+// is what keeps that recovery from being overwritten. After the flush the
+// queue degrades to a passthrough that would skip that claim, so the
+// post-flush case takes the runtime path's gated sink instead. The
+// flushed-check and the enqueue are not atomic, but production arms this
+// plane in the scanning slice, strictly before loadPersistentAdminState
+// flushes on the same goroutine; the residual (an unlatched delivered page)
+// only fails toward one extra page.
+var deferThreatFeedStaleAlert = func(detail string, episode uint64) {
 	if startupAlertsFlushed() {
-		latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted,
+		latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.episode, episode,
 			func() bool { return fireThreatFeedStaleAlert(detail) })
 		return
 	}
 	deferStartupAlertWhile("threat_feed_stale", AlertPayload{
 		Detail: detail,
 		Source: "threatfeed",
-	}, claimThreatFeedStartupAlert)
+	}, func() bool { return claimThreatFeedStartupAlert(episode) })
 }
 
 // claimThreatFeedStartupAlert runs at the startup flush, without
-// startupAlertMu held, and decides whether the queued boot-time alert is sent
-// and whether it consumes the episode:
+// startupAlertMu held, and decides — in one critical section under the
+// plane's lock — whether the queued boot-time alert is sent and whether it
+// consumes the episode it was raised in (episode):
 //
-//   - the feed is no longer stale (a clean round landed before the flush): the
-//     alert is delivered as the boot-time fact it reports, exactly as before
-//     this rule, and consumes nothing — there is no open episode to latch.
+//   - that episode has ENDED (a clean round landed before the flush, which can
+//     happen because the flush runs after Start launched the scheduler): the
+//     queued copy is dropped and nothing is latched. Its text says the gateway
+//     "is enforcing against stale intelligence until the feed resyncs", and the
+//     generation proves the feed has resynced, so delivering it would be the
+//     late false page the queue's validity check exists to prevent (CHAOS-71),
+//     and latching would silence the NEXT episode until another clean sync.
 //   - the episode was already paged (a failed round dispatched it after the
 //     webhooks loaded but before the flush): the queued copy is dropped, so the
 //     episode pages once.
@@ -266,14 +284,9 @@ var deferThreatFeedStaleAlert = func(detail string) {
 //     subscriber exists. With none, Dispatch reaches nobody — as it always did
 //     — and the episode stays open, so the next failed round pages whoever has
 //     subscribed by then.
-//
-// threatFeedState takes threatFeedHealth.mu itself, so it is read before the
-// latch decision, as on the runtime path.
-func claimThreatFeedStartupAlert() bool {
-	if !threatFeedState().Stale {
-		return true
-	}
-	return !latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, threatFeedStaleSubscribed)
+func claimThreatFeedStartupAlert(episode uint64) bool {
+	return !latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.episode, episode,
+		threatFeedStaleSubscribed)
 }
 
 // noteThreatFeedSync is the sync observer: one call per completed round,
@@ -315,6 +328,7 @@ func noteThreatFeedSyncRecovered() {
 	wasAlerted := threatFeedHealth.alerted
 	suppressed := threatFeedHealth.suppressed
 	threatFeedHealth.alerted = false
+	threatFeedHealth.episode++ // a verdict read before this point is for the episode that just ended
 	threatFeedHealth.logAt = time.Time{}
 	threatFeedHealth.suppressed = 0
 	threatFeedHealth.mu.Unlock()
@@ -336,9 +350,12 @@ func evaluateThreatFeedStaleness() {
 		return
 	}
 	// Rendered before the lock: threatFeedState above takes
-	// threatFeedHealth.mu itself.
+	// threatFeedHealth.mu itself. snap.episode was read before the feed state
+	// the verdict came from, so a clean round (Feed.Sync can run concurrently
+	// with the scheduler's) that ends the episode before the decision below
+	// makes it skip rather than latch an ended episode.
 	detail := threatFeedStaleDetail(snap)
-	latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted,
+	latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.episode, snap.episode,
 		func() bool { return fireThreatFeedStaleAlert(detail) })
 }
 
@@ -381,6 +398,10 @@ type threatFeedSnapshot struct {
 	FailedSources       string
 	ErrSummary          string
 	Entries             int64
+
+	// episode is the alert-episode generation, read under the plane's lock
+	// BEFORE the feed's health: see threatFeedHealthRecord.episode.
+	episode uint64
 }
 
 // threatFeedState derives the current posture from the feed's own health
@@ -389,9 +410,13 @@ func threatFeedState() threatFeedSnapshot {
 	threatFeedHealth.mu.Lock()
 	configured := threatFeedHealth.configured
 	startedAt := threatFeedHealth.startedAt
+	episode := threatFeedHealth.episode
 	threatFeedHealth.mu.Unlock()
 
-	snap := threatFeedSnapshot{Configured: configured}
+	// The feed's health is read AFTER the generation: the feed updates its
+	// state before notifying the observer, so a recovery either shows in the
+	// health below or bumps the generation after it was read.
+	snap := threatFeedSnapshot{Configured: configured, episode: episode}
 	if !configured || globalThreatFeed == nil {
 		return snap
 	}
@@ -543,6 +568,7 @@ func resetThreatFeedHealthForTest() {
 	threatFeedHealth.configured = false
 	threatFeedHealth.startedAt = time.Time{}
 	threatFeedHealth.alerted = false
+	threatFeedHealth.episode++
 	threatFeedHealth.logAt = time.Time{}
 	threatFeedHealth.suppressed = 0
 	threatFeedHealth.mu.Unlock()

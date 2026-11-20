@@ -151,19 +151,32 @@ func fireScanTimeoutAlert(actor, host, detail string) {
 // and an operator who subscribed afterwards was never paged
 // (SEC-BLFEED-STALE-LATCH-1, and the same shape in the threat-feed plane).
 //
-// mu must be the lock that guards *latched, and the caller must not hold it.
-// The decision runs entirely under mu, so concurrent producers in one episode
-// page at most once. delivered reports whether the alert was (or, for a queued
-// startup alert, is about to be) dispatched to a subscriber; it runs under mu,
-// so it must not block or take mu itself — the planes' sinks only probe the
-// lock-free subscription index (HasSubscriber) and hand delivery to a
-// goroutine. delivered is not called when the episode is already latched.
+// mu must be the lock that guards *latched and *episode, and the caller must
+// not hold it. The decision runs entirely under mu, so concurrent producers in
+// one episode page at most once. delivered reports whether the alert was (or,
+// for a queued startup alert, is about to be) dispatched to a subscriber; it
+// runs under mu, so it must not block or take mu itself — the planes' sinks
+// only probe the lock-free subscription index (HasSubscriber) and hand
+// delivery to a goroutine.
 //
-// It reports whether the episode was ALREADY latched on entry.
-func latchOncePerEpisodeOnDelivery(mu *sync.Mutex, latched *bool, delivered func() bool) (alreadyLatched bool) {
+// observed is the episode generation the caller read, under mu, BEFORE the
+// feed state its staleness verdict came from. Every end of an episode (an
+// observed recovery, a removal, a re-arm) bumps *episode under mu. The verdict
+// is taken outside mu — reading it under mu would invert the lock order with
+// the feed, whose observer takes mu — so a recovery can land between the
+// verdict and this decision. Without the check, the recovery cleared the latch
+// and this call set it straight back for an episode that had ended, and the
+// NEXT episode could not page until another clean sync. A changed generation
+// therefore skips without dispatching: the alert describes a condition already
+// observed to have cleared. (A recovery that lands after this decision clears
+// the latch itself, so either order ends correctly.)
+//
+// delivered is not called when the episode is already latched or has ended.
+// It reports whether it SKIPPED for either reason.
+func latchOncePerEpisodeOnDelivery(mu *sync.Mutex, latched *bool, episode *uint64, observed uint64, delivered func() bool) (skipped bool) {
 	mu.Lock()
 	defer mu.Unlock()
-	if *latched {
+	if *latched || *episode != observed {
 		return true
 	}
 	if delivered() {
@@ -218,7 +231,8 @@ type queuedStartupAlert struct {
 	// CLAIM its episode at the flush (claimThreatFeedStartupAlert): it is the
 	// only point at which the webhook store is real, so it is the only point at
 	// which "will this page reach a subscriber" has an answer. It then returns
-	// false when its producer already paged the episode by another route.
+	// false when its producer already paged the episode by another route, or
+	// when the episode it was raised for has since recovered.
 	stillValid func() bool
 }
 
