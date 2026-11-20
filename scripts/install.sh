@@ -1587,7 +1587,17 @@ env_put() {
   elif [[ -e "$file" && ! -w "$file" ]]; then
     sudo chown "$(id -un)" "$file" 2>/dev/null || true
   elif [[ ! -e "$file" && ! -w "$(dirname "$file")" ]]; then
-    sudo touch "$file" 2>/dev/null && sudo chown "$(id -un)" "$file" 2>/dev/null || true
+    # SEC-INSTALL-ENVUMASK-1 (see the transaction below): `sudo touch` created
+    # this file under sudo's own umask (022 by default: world-readable) until
+    # the later chmod, and our umask cannot fix that because sudo/PAM replace
+    # it. So the umask is set INSIDE the privileged shell, and `set -C` makes
+    # the redirection O_CREAT|O_EXCL: it creates the file 0600 when absent and
+    # FAILS rather than truncates when a concurrent installer created (and
+    # perhaps already filled) it after our existence check above — `touch`
+    # never truncated, and neither may its replacement. The chown then hands
+    # the file to us either way, exactly as the old `touch && chown` did.
+    sudo sh -c 'umask 077 && set -C && : > "$1"' sh "$file" 2>/dev/null || true
+    sudo chown "$(id -un)" "$file" 2>/dev/null || true
   fi
   # If ownership still can't be taken (sudo genuinely denied), DEGRADE — warn
   # and skip rather than let the unguarded touch/append below abort the whole
@@ -1670,6 +1680,17 @@ env_put() {
   # queue, so this reasons about $file exactly as a sequential caller would.
   (
     flock -x 9
+    # SEC-INSTALL-ENVUMASK-1 (CWE-367): create $file — and the fallback staging
+    # file below — private from the start. The installer sets no umask, so
+    # under a lax operator umask `touch` created a fresh $file 0666 & ~umask
+    # and the chmod only narrowed it afterwards: a local user could open it
+    # read-only in that window and keep the fd. The in-place rewrite and the
+    # append then write the secrets into that same inode, and the
+    # "${file}.tmp.$$" fallback (a copy of every existing secret, renamed over
+    # $file) had the same window. Scoped to this subshell, so the rest of the
+    # installer keeps the caller's umask; an existing $file is unaffected by
+    # umask, and the chmod 600 stays as belt-and-braces for it.
+    umask 077
     touch "$file"; chmod 600 "$file"
     sed -i 's/\r$//' "$file" 2>/dev/null || true # normalize to LF so compose parses cleanly
     # grep -v exits 1 (not just erroring) whenever EVERY line matched the

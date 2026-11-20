@@ -142,25 +142,36 @@ func TestInstallScript_EnvPut_PreservesFileOnRealGrepFailure(t *testing.T) {
 // real, separate processes racing on a real lock file, not a simulation.
 func runEnvPutProcess(t *testing.T, fn, envFile, varName, val string) error {
 	t.Helper()
+	_, err := runEnvPutProcessWith(t, "", "", fn, envFile, varName, val)
+	return err
+}
+
+// runEnvPutProcessWith is runEnvPutProcess with fixed, test-authored shell
+// text run in the same process before the env_put definition (prelude: e.g. a
+// umask or a stub shadowing a command) and after the call (epilogue: e.g. a
+// probe of the calling shell's state). It also returns the combined output.
+func runEnvPutProcessWith(t *testing.T, prelude, epilogue, fn, envFile, varName, val string) (string, error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	// warn is install.sh's own helper, which the extracted function calls on
 	// every skip path. Define it so a skip is VISIBLE: in a writable temp dir
 	// none of those paths may fire, and one that does is a skipped update that
 	// would otherwise surface only as a missing var.
-	script := `warn() { printf 'WARN: %s\n' "$*" >&2; }` + "\n" + fn + "\n" + `env_put "$1" "$2" "$3"`
+	script := `warn() { printf 'WARN: %s\n' "$*" >&2; }` + "\n" + prelude + "\n" + fn + "\n" + `env_put "$1" "$2" "$3"` + "\n" + epilogue
 	cmd := exec.CommandContext(ctx, "bash", "-c", script, "env_put_concurrency_test", varName, val, envFile) // #nosec G204 -- fixed test script content, not external/user input
-	out, err := cmd.CombinedOutput()
+	raw, err := cmd.CombinedOutput()
+	out := string(raw)
 	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("env_put %s=%s timed out (likely deadlocked): %s", varName, val, out)
+		return out, fmt.Errorf("env_put %s=%s timed out (likely deadlocked): %s", varName, val, out)
 	}
 	if err != nil {
-		return fmt.Errorf("env_put %s=%s failed: %w: %s", varName, val, err, out)
+		return out, fmt.Errorf("env_put %s=%s failed: %w: %s", varName, val, err, out)
 	}
-	if strings.Contains(string(out), "WARN:") {
-		return fmt.Errorf("env_put %s=%s skipped its update in a writable dir: %s", varName, val, out)
+	if strings.Contains(out, "WARN:") {
+		return out, fmt.Errorf("env_put %s=%s skipped its update in a writable dir: %s", varName, val, out)
 	}
-	return nil
+	return out, nil
 }
 
 // TestInstallScript_EnvPut_ConcurrentDistinctVars_NoCorruptionOrDeadlock
@@ -268,5 +279,99 @@ func TestInstallScript_EnvPut_ConcurrentSameVar_NoLostUpdateOrDuplicate(t *testi
 	}
 	if !strings.Contains(content, "EXISTING=original") {
 		t.Errorf("pre-existing EXISTING var lost to the concurrent env_put race; .env content:\n%s", content)
+	}
+}
+
+// TestInstallScript_EnvPut_CreatesFilePrivateUnderLaxUmask is the regression
+// test for SEC-INSTALL-ENVUMASK-1 (CWE-367). install.sh sets no umask, and
+// env_put used to create a fresh .env with a plain `touch` (mode
+// 0666 & ~umask) and narrow it with `chmod 600` only afterwards. Under a lax
+// operator umask a local user could open the file read-only in that window,
+// keep the descriptor, and read every secret later written into that inode.
+//
+// The test runs env_put under `umask 000` with `chmod` shadowed by a no-op
+// that records its target's mode at the moment the chmod WOULD have run, so
+// the post-hoc chmod cannot mask the creation mode. Every recorded mode and
+// the final mode must be 0600: creation itself has to be private.
+//
+// On the normal path the final mode alone proves nothing, because the mktemp
+// staging file (always 0600) is renamed over the touched file; the first
+// recorded mode (taken right after `touch`) is the load-bearing check. The
+// "mktemp fails" case forces the "${file}.tmp.$$" fallback staging file,
+// which a plain redirection creates and env_put renames over $file, so there
+// the final mode also fails without the fix.
+//
+// The epilogue checks that the umask stays scoped to env_put's subshell: the
+// rest of the installer must keep the operator's umask.
+func TestInstallScript_EnvPut_CreatesFilePrivateUnderLaxUmask(t *testing.T) {
+	fn := extractShellFunction(t, "scripts/install.sh", "env_put")
+	if _, err := exec.LookPath("stat"); err != nil {
+		t.Fatalf("stat(1) is required to observe the creation mode: %v", err)
+	}
+
+	cases := []struct {
+		name, stub string
+	}{
+		{name: "mktemp staging", stub: ""},
+		{name: "mktemp fails", stub: `mktemp() { return 1; }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertEnvPutCreatesPrivateUnderUmask000(t, fn, tc.stub)
+		})
+	}
+}
+
+// assertEnvPutCreatesPrivateUnderUmask000 runs env_put once on a fresh .env
+// under `umask 000`, with chmod replaced by a probe and the given extra stub,
+// and asserts every mode the probe saw, the final mode, the written value and
+// the caller's unchanged umask.
+func assertEnvPutCreatesPrivateUnderUmask000(t *testing.T, fn, stub string) {
+	t.Helper()
+	// A no-op chmod that appends `stat -c %a` of its target to "<target>.modes".
+	const chmodProbe = `chmod() { stat -c '%a' -- "$2" >> "$2.modes"; }`
+	envFile := filepath.Join(t.TempDir(), ".env")
+	prelude := "umask 000\n" + chmodProbe + "\n" + stub
+	epilogue := `printf 'UMASK_AFTER=%s\n' "$(umask)"`
+
+	out, err := runEnvPutProcessWith(t, prelude, epilogue, fn, envFile, "CULVERT_SESSION_SECRET", "s3cret")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(envFile + ".modes")
+	if err != nil {
+		t.Fatalf("read chmod probe log (env_put never reached its chmod?): %v\noutput:\n%s", err, out)
+	}
+	modes := strings.Fields(string(raw))
+	if len(modes) == 0 {
+		t.Fatalf("chmod probe recorded no modes; output:\n%s", out)
+	}
+	for i, m := range modes {
+		if m != "600" {
+			t.Errorf("chmod #%d found %s at mode %s, want 600: the file was readable by others before "+
+				"the chmod narrowed it (creation under umask 000 must already be private); all: %v",
+				i+1, envFile, m, modes)
+		}
+	}
+
+	fi, err := os.Stat(envFile)
+	if err != nil {
+		t.Fatalf("stat %s: %v", envFile, err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("final mode of %s is %#o with chmod disabled, want 0600", envFile, perm)
+	}
+
+	got, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("read %s: %v", envFile, err)
+	}
+	if !strings.Contains(string(got), "CULVERT_SESSION_SECRET=s3cret") {
+		t.Errorf("value did not land; .env content:\n%s", got)
+	}
+
+	if !strings.Contains(out, "UMASK_AFTER=0000") {
+		t.Errorf("env_put changed the calling shell's umask (it must stay scoped to its subshell); output:\n%s", out)
 	}
 }
