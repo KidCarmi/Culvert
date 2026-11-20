@@ -9,6 +9,24 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The audit, request and process log files no longer follow a symlink, or
+  block on a FIFO, planted at the log path (CWE-59/CWE-61).**
+  `fileutil.NewRotatingFile`, and the reopen it makes after each rotation, opened
+  the path with `O_CREATE|O_WRONLY|O_APPEND` only. A symlink at the final path
+  component was followed, so the log was created at or appended to the file the
+  link named. A FIFO there blocked the open until a reader appeared, which hung
+  startup or the request-path `Write` that holds the writer's lock. Both open
+  sites now share one guarded open. On Unix-like platforms it adds `O_NOFOLLOW`
+  and `O_NONBLOCK`, fstats the descriptor, refuses anything that is not a
+  regular file, and then clears `O_NONBLOCK` so writes block normally. Directory
+  components of the path are still resolved, so a symlinked log directory keeps
+  working. A log path whose last component is itself a symlink is now refused,
+  so point the flag at the real file instead. Platforms without `O_NOFOLLOW`
+  (the Windows convenience build) keep the previous open and only gain the
+  regular-file check
+  (`TestNewRotatingFile_RefusesSymlinkToExistingFile`,
+  `TestNewRotatingFile_FIFOWithoutReaderReturnsPromptly`).
+
 - **A ClamAV signature database that has stopped updating is now observable
   (`CHAOS-124`).** Culvert does not fetch virus definitions — `freshclam` does,
   out of process, in a container Culvert neither starts nor supervises — so a
