@@ -196,14 +196,18 @@ var blocklistFeedSnapshots = func() []blocklistfeed.Feed { return blFeedSyncer.F
 // the error embeds the URL, and Dispatch dedups on event+Detail, so a
 // per-attempt-unique Detail would defeat the dedup window by construction. See
 // internal/blocklistfeed/observer.go for the whole rule.
-var fireBlocklistFeedStaleAlert = func(detail string) {
+// It reports whether the alert was DISPATCHED. The caller consumes the
+// once-per-episode latch only on a true return: see
+// evaluateBlocklistFeedStaleness.
+var fireBlocklistFeedStaleAlert = func(detail string) bool {
 	if !alertStore().HasSubscriber("blocklist_feed_stale") {
-		return
+		return false
 	}
 	go fireAlert("blocklist_feed_stale", AlertPayload{
 		Detail: detail,
 		Source: "blocklistfeed",
 	})
+	return true
 }
 
 // noteBlocklistFeedConfigured arms the plane and installs the sync observer.
@@ -329,14 +333,30 @@ func evaluateBlocklistFeedStaleness() {
 	if snap.StaleFeeds == 0 {
 		return
 	}
+	// Rendered before the lock: blocklistFeedState above takes
+	// blocklistFeedHealth.mu itself.
+	detail := blocklistFeedAlertDetail(snap)
+
+	// SEC-BLFEED-STALE-LATCH-1: the episode is consumed only by a DISPATCHED
+	// alert. Latching first and firing afterwards burned the episode even when
+	// nothing was subscribed — which is the DEFAULT posture, no webhooks
+	// configured — and the latch clears only on an observed clean sync, a feed
+	// removal or a restart. So a node that booted with an unreachable feed
+	// origin consumed its one page before any webhook existed, and an operator
+	// who added the webhook afterwards was never paged while the deny list went
+	// on not refreshing.
+	//
+	// The decision stays INSIDE the lock so concurrent failed rounds still page
+	// at most once per episode. Nothing blocking runs under it: the sink only
+	// probes the lock-free subscription index and hands off to a goroutine.
 	blocklistFeedHealth.mu.Lock()
-	alertNow := !blocklistFeedHealth.alerted
-	blocklistFeedHealth.alerted = true
-	blocklistFeedHealth.mu.Unlock()
-	if !alertNow {
+	defer blocklistFeedHealth.mu.Unlock()
+	if blocklistFeedHealth.alerted {
 		return
 	}
-	fireBlocklistFeedStaleAlert(blocklistFeedAlertDetail(snap))
+	if fireBlocklistFeedStaleAlert(detail) {
+		blocklistFeedHealth.alerted = true
+	}
 }
 
 // blocklistFeedAlertDetail renders the bounded alert detail.
