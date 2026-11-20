@@ -9,6 +9,24 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The alert-webhook store is capped at 100 webhooks (`alerts.MaxWebhooks`,
+  CWE-770).** `POST /api/config/import` accepted an unbounded `alertWebhooks`
+  list, and each webhook's `Add` rewrites and fsyncs the whole webhook file, so
+  one admin request cost O(N²) fsync'd I/O: tens of thousands of minimal
+  objects fit under the 1 MiB body cap, and the import holds the
+  reference-integrity lock while it applies. The admin API's create arm
+  (`POST /api/alerts/webhooks`) had no limit either. Both now refuse with a
+  `400` before any mutation: the create arm when the store already holds 100,
+  and the import when the count after import would exceed 100 (incoming plus
+  existing in merge mode, incoming alone in replace mode). The whole import is
+  refused, never partially applied, and a refusal is neither audited nor
+  versioned. A webhook file already over the limit is grandfathered: it loads
+  in full with one warning, and existing webhooks can still be updated and
+  deleted, but new ones are refused until fewer than 100 remain. Merge-mode
+  import still appends rather than upserting webhooks, so re-importing the
+  same backup duplicates them and counts against the limit
+  (`TestConfigImport_WebhookCap`, `TestAlertWebhookCreate_RefusedAtCap`,
+  `TestStore_Init_OverMaxWebhooksIsGrandfathered`).
 - **A policy rule on an IP-literal destination now matches every spelling of
   that address.** `destFqdn` literals were compared as text, so a Block/Drop
   rule on `192.0.2.7` did not match `[::ffff:192.0.2.7]`, and one on

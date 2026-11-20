@@ -218,6 +218,22 @@ func ValidateURL(raw string) error {
 // unbounded string into the webhook file (CWE-770).
 const maxEventNameLen = 64
 
+// MaxWebhooks bounds how many webhooks the store accepts through its write
+// ingresses: the admin API's create arm and `POST /api/config/import` (CWE-770).
+//
+// Real deployments configure a handful (chat, paging, a SIEM or two), so 100 is
+// ample headroom and sits alongside the PAC caps of 64 profiles and 64 pools.
+// The upper bound matters because delivery fans out per webhook: at 500 hooks,
+// one alert to a dead endpoint fills the whole retry queue (retryQueueMax), and
+// every Add rewrites and fsyncs the whole file, so an unbounded import cost
+// O(N²) I/O.
+//
+// Callers enforce it before Add; the store itself does not. A file already over
+// the limit is grandfathered: Init loads every webhook and warns, and updates and
+// deletes keep working, but new webhooks are refused until the count drops below
+// the limit.
+const MaxWebhooks = 100
+
 // catchAllEvent is the subscription that matches every event, including ones
 // added after the webhook was created (HasSubscriber and the dispatch walk both
 // treat it specially).
@@ -515,6 +531,7 @@ func (as *Store) Init(path string) {
 	for i := range as.hooks {
 		as.hooks[i].Events = normalizeEventNames(as.hooks[i].Events)
 	}
+	warnOverCap(len(as.hooks))
 	// RISK-003: secrets are AES-GCM encrypted at rest. Decrypt into the
 	// in-memory cleartext form used for HMAC signing. Legacy cleartext (no
 	// enc prefix) passes through unchanged and is migrated on the next save.
@@ -548,6 +565,16 @@ func (as *Store) Init(path string) {
 		as.hooks[i].sealedSecret = ""
 		as.hooks[i].Secret = pt
 	}
+}
+
+// warnOverCap logs, once per load, that a persisted store holds more than
+// MaxWebhooks. Nothing is dropped or refused: the file predates the limit (or
+// was hand-edited), and losing a configured webhook would silently lose alerts.
+func warnOverCap(n int) {
+	if n <= MaxWebhooks {
+		return
+	}
+	obs.Warnf("AlertStore: %d webhooks loaded, over the limit of %d; all are kept, but new webhooks will be refused until fewer than %d remain", n, MaxWebhooks, MaxWebhooks)
 }
 
 // noopSave is the persistence step for a mutation that had nothing to write
@@ -657,6 +684,14 @@ func (as *Store) List() []Webhook {
 		out[i] = h
 	}
 	return out
+}
+
+// Len returns how many webhooks the store holds, for the MaxWebhooks checks at
+// the write ingresses (cheaper than len(List()), which copies every hook).
+func (as *Store) Len() int {
+	as.mu.RLock()
+	defer as.mu.RUnlock()
+	return len(as.hooks)
 }
 
 // SigningDegradedCount returns how many webhooks were configured with a signing

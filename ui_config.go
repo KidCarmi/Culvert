@@ -1274,29 +1274,9 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 
 	// Alert-webhook pre-validation (before ANY store mutation), same posture as
 	// the two gates above: the whole import is refused, never partially
-	// applied.
-	//
-	// SEC-ALERTS-EVENTNAME-1 is enforced at apiAlertsWebhooks'
-	// webhookPayloadRejected, which its comment calls the one definition of an
-	// acceptable payload and credits with keeping an unvalidated value "from
-	// reaching the webhook file, a support bundle or any other consumer at
-	// all". This handler was the second write ingress and ran neither check,
-	// so a backup carrying an arbitrary event name or a non-http(s) URL landed
-	// in the store with a 200. The sinks downstream hold (the Alerts panel
-	// escapes, and ssrf.SafeDialContext plus the scheme barrier refuse a bad
-	// URL at egress), which is why this is defence in depth rather than a live
-	// XSS or SSRF — but the bound and the character class exist so the value
-	// never reaches the file, and only validating one of two ingresses is the
-	// shape of gap that produced the original finding.
-	for i := range b.AlertWebhooks {
-		if err := validateWebhookURL(b.AlertWebhooks[i].URL); err != nil {
-			http.Error(w, fmt.Sprintf("invalid alert webhook %d: %s", i+1, sanitizeLog(err.Error())), http.StatusBadRequest)
-			return
-		}
-		if err := validateWebhookEvents(b.AlertWebhooks[i].Events); err != nil {
-			http.Error(w, fmt.Sprintf("invalid alert webhook %d events: %s", i+1, sanitizeLog(err.Error())), http.StatusBadRequest)
-			return
-		}
+	// applied. See importAlertWebhooksRejected.
+	if importAlertWebhooksRejected(w, &b, replaceMode) {
+		return
 	}
 
 	// Blocker B (exclusive side): from here down the import both REMOVES
@@ -1604,6 +1584,57 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		resp["pac_profiles_not_applied"] = pacProfilesNotApplied
 	}
 	jsonOK(w, resp)
+}
+
+// importAlertWebhooksRejected is apiConfigImport's alert-webhook
+// pre-validation gate. It runs before ANY store mutation and before the
+// reference-integrity lock: the whole import is refused with a 400, never
+// partially applied, and a refusal is neither audited nor versioned (the audit
+// and the config version are written only once the import has succeeded).
+//
+// Count (CWE-770): the store holds at most maxAlertWebhooks, the same limit
+// the admin API's create arm enforces. The effective count is the one the
+// apply step would leave: replace mode clears the live webhooks before adding
+// the incoming ones, so only the incoming ones count; merge mode appends every
+// incoming webhook to the live ones (Add assigns a fresh ID, so nothing is
+// upserted). Each Add rewrites and fsyncs the whole webhook file, so an
+// unbounded list made one request O(N²) fsync'd I/O.
+//
+// Shape: SEC-ALERTS-EVENTNAME-1 is enforced at apiAlertsWebhooks'
+// webhookPayloadRejected, which its comment calls the one definition of an
+// acceptable payload and credits with keeping an unvalidated value "from
+// reaching the webhook file, a support bundle or any other consumer at
+// all". The import was the second write ingress and ran neither check,
+// so a backup carrying an arbitrary event name or a non-http(s) URL landed
+// in the store with a 200. The sinks downstream hold (the Alerts panel
+// escapes, and ssrf.SafeDialContext plus the scheme barrier refuse a bad
+// URL at egress), which is why this is defence in depth rather than a live
+// XSS or SSRF — but the bound and the character class exist so the value
+// never reaches the file, and only validating one of two ingresses is the
+// shape of gap that produced the original finding.
+func importAlertWebhooksRejected(w http.ResponseWriter, b *configBackup, replaceMode bool) bool {
+	if len(b.AlertWebhooks) == 0 {
+		return false // section absent: import never wipes, nothing to judge
+	}
+	effective := len(b.AlertWebhooks)
+	if !replaceMode {
+		effective += alertStore().Len()
+	}
+	if effective > maxAlertWebhooks {
+		http.Error(w, fmt.Sprintf("import refused: %d alert webhooks after import, the limit is %d", effective, maxAlertWebhooks), http.StatusBadRequest)
+		return true
+	}
+	for i := range b.AlertWebhooks {
+		if err := validateWebhookURL(b.AlertWebhooks[i].URL); err != nil {
+			http.Error(w, fmt.Sprintf("invalid alert webhook %d: %s", i+1, sanitizeLog(err.Error())), http.StatusBadRequest)
+			return true
+		}
+		if err := validateWebhookEvents(b.AlertWebhooks[i].Events); err != nil {
+			http.Error(w, fmt.Sprintf("invalid alert webhook %d events: %s", i+1, sanitizeLog(err.Error())), http.StatusBadRequest)
+			return true
+		}
+	}
+	return false
 }
 
 // importPACPreValidationOK strictly validates the PAC fields of an import
