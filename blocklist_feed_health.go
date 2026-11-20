@@ -80,6 +80,33 @@ package main
 // function of how many feeds an admin adds. The per-feed detail stays on the
 // role-gated /api/blocklist/feed endpoint, which already carries it.
 //
+// # A truncated feed is its own shape, not a stale one
+//
+// A feed body that reaches internal/blocklistfeed's line cap is deliberately
+// TRUNCATED, not failed (see maxFeedLines there): the round imports the first
+// entries and succeeds, so LastSync advances and LastError clears. Read through
+// the freshness lens alone, that is a clean, fresh sync of a deny list whose
+// tail was silently not imported (2026-11-19 security regression review). The
+// engine now records it as Feed.Truncated, and this plane reports it as its own
+// gauge (culvert_blocklist_feed_truncated) and its own WARN row.
+//
+// It deliberately does NOT move culvert_blocklist_feed_sync_ok and does NOT
+// page through blocklist_feed_stale:
+//
+//   - sync_ok's documented meaning and paging rule (`== 0`, "something is
+//     failing right now") is about rounds failing or going stale. A truncating
+//     round succeeded by design, and truncation is a standing property of the
+//     origin's size rather than an outage: no retry, backoff or recovery will
+//     clear it, so folding it in would hold the paging signal at 0 for as long
+//     as the list is oversized and mask a real failure behind it.
+//   - blocklist_feed_stale's contract is freshness — "not refreshing", cleared
+//     only by an observed clean round. A truncated feed IS refreshing, and
+//     every clean round it completes would otherwise both "recover" and
+//     re-trip the episode.
+//
+// The operator action is a configuration change (split or trim the list), so
+// the row and the gauge, with its own suggested alert rule, are the surface.
+//
 // **No /readyz row and no /healthz failure.** A node with a stale blocklist
 // feed is a fully serving gateway: policy, categories, DPI, AV, CDR and the
 // threat feed are unaffected, and the feed's already-imported entries are still
@@ -161,6 +188,13 @@ type blocklistFeedHealthRecord struct {
 	// configuration (noteBlocklistFeedsRemoved) — never by elapsed time.
 	alerted bool
 
+	// episode is the alert-episode generation, bumped under mu wherever the
+	// episode ends (the clears of alerted above, and a re-arm). The staleness
+	// verdict is read outside mu, and latchOncePerEpisodeOnDelivery latches
+	// only while the generation read before that verdict is current, so a
+	// recovery or a feed removal that lands in between is not overwritten.
+	episode uint64
+
 	// logAt / suppressed drive the rate-limited log line.
 	logAt      time.Time
 	suppressed int64
@@ -217,6 +251,7 @@ func noteBlocklistFeedConfigured() {
 	blocklistFeedHealth.armed = true
 	blocklistFeedHealth.startedAt = blocklistFeedNow()
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
 	blocklistFeedHealth.mu.Unlock()
@@ -269,6 +304,7 @@ func noteBlocklistFeedRoundRecovered() {
 	wasAlerted := blocklistFeedHealth.alerted
 	suppressed := blocklistFeedHealth.suppressed
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
 	blocklistFeedHealth.mu.Unlock()
@@ -297,6 +333,7 @@ func noteBlocklistFeedsRemoved() {
 	blocklistFeedHealth.mu.Lock()
 	wasAlerted := blocklistFeedHealth.alerted
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
 	blocklistFeedHealth.mu.Unlock()
@@ -349,14 +386,12 @@ func evaluateBlocklistFeedStaleness() {
 	// The decision stays INSIDE the lock so concurrent failed rounds still page
 	// at most once per episode. Nothing blocking runs under it: the sink only
 	// probes the lock-free subscription index and hands off to a goroutine.
-	blocklistFeedHealth.mu.Lock()
-	defer blocklistFeedHealth.mu.Unlock()
-	if blocklistFeedHealth.alerted {
-		return
-	}
-	if fireBlocklistFeedStaleAlert(detail) {
-		blocklistFeedHealth.alerted = true
-	}
+	// The rule is shared with the threat-feed plane, so the two copies cannot
+	// drift: see latchOncePerEpisodeOnDelivery. snap.episode makes it skip if
+	// a recovery or a feed removal ended the episode after the verdict above
+	// was read, instead of latching an episode that is already over.
+	latchOncePerEpisodeOnDelivery(&blocklistFeedHealth.mu, &blocklistFeedHealth.alerted, &blocklistFeedHealth.episode, snap.episode,
+		func() bool { return fireBlocklistFeedStaleAlert(detail) })
 }
 
 // blocklistFeedAlertDetail renders the bounded alert detail.
@@ -406,6 +441,14 @@ type blocklistFeedSnapshot struct {
 	OldestSuccess time.Time
 	// MaxConsecutiveFailures is the largest ladder count among all feeds.
 	MaxConsecutiveFailures int
+	// TruncatedFeeds counts feeds, scheduled or not, whose latest successful
+	// sync was cut short at the engine's line cap (Feed.Truncated). Reported
+	// on its own surfaces only: it does not make a feed stale or failing.
+	TruncatedFeeds int
+
+	// episode is the alert-episode generation, read under the plane's lock
+	// BEFORE the feed snapshots: see blocklistFeedHealthRecord.episode.
+	episode uint64
 }
 
 // blocklistFeedState derives the current posture from the feed engine's own
@@ -420,9 +463,13 @@ func blocklistFeedState() blocklistFeedSnapshot {
 	blocklistFeedHealth.mu.Lock()
 	armed := blocklistFeedHealth.armed
 	startedAt := blocklistFeedHealth.startedAt
+	episode := blocklistFeedHealth.episode
 	blocklistFeedHealth.mu.Unlock()
 
-	snap := blocklistFeedSnapshot{Armed: armed}
+	// The feed snapshots are read AFTER the generation: the syncer updates a
+	// feed's state before notifying the observer, so a recovery either shows
+	// below or bumps the generation after it was read.
+	snap := blocklistFeedSnapshot{Armed: armed, episode: episode}
 	feeds := blocklistFeedSnapshots() // nil-receiver safe in production
 	snap.Feeds = len(feeds)
 	now := blocklistFeedNow()
@@ -465,9 +512,15 @@ func blocklistFeedState() blocklistFeedSnapshot {
 // right now" signal: the ladder count is not persisted, so after a restart it
 // reads zero for a feed that is known to be failing. Same rule
 // internal/threatfeed's Health.LastRoundOK carries.
+//
+// Truncated is per-feed and schedule-independent too: a manual Sync Now can cut
+// a list short exactly as the scheduler can.
 func (snap *blocklistFeedSnapshot) accumulateAttempt(f *blocklistfeed.Feed) {
 	if f.LastError != "" {
 		snap.FailingFeeds++
+	}
+	if f.Truncated {
+		snap.TruncatedFeeds++
 	}
 	if f.ConsecutiveFailures > snap.MaxConsecutiveFailures {
 		snap.MaxConsecutiveFailures = f.ConsecutiveFailures
@@ -556,6 +609,9 @@ func (snap *blocklistFeedSnapshot) noteAge(age time.Duration) {
 //   - latest attempt failed → WARN, the pre-existing row, unchanged in wording.
 //   - manual-only feed that has never synced → WARN, its own row, because the
 //     operator action is different: nothing is broken, nothing will ever run.
+//   - feed whose latest successful sync was truncated at the line cap → WARN,
+//     its own row: the sync is fresh and succeeding, but part of the list is
+//     not enforced, and the action is to split the list, not to fix a network.
 //
 // Report-only, and carrying counts only — never a feed URL (which may embed a
 // token) or the raw error text.
@@ -567,18 +623,7 @@ func checkBlocklistFeeds() []OperatorContractCheck {
 	var rows []OperatorContractCheck
 
 	if snap.StaleFeeds > 0 {
-		msg := fmt.Sprintf("%d of %d auto-synced blocklist feed(s) are stale — the oldest successful sync was %s ago (over %dx its configured interval); the blocklist keeps its already-imported entries but is not receiving new ones",
-			snap.StaleFeeds, snap.AutoSyncFeeds, snap.WorstAge.Round(time.Minute), blocklistFeedStaleFactor)
-		if snap.StaleNeverSyncedFeeds == snap.StaleFeeds {
-			msg = fmt.Sprintf("%d of %d auto-synced blocklist feed(s) have NEVER synced successfully on this node (%s since startup) — those feeds contribute no entries at all, so the destinations they were added to block are not being blocked",
-				snap.StaleNeverSyncedFeeds, snap.AutoSyncFeeds, snap.WorstAge.Round(time.Minute))
-		}
-		rows = append(rows, OperatorContractCheck{
-			Code:           "blocklist_feed",
-			Status:         diagWarn,
-			Message:        msg,
-			OperatorAction: "Check outbound HTTPS reachability to the feed origins from this node (including any upstream proxy), then open Policy → Blocklist → Feeds and use Sync Now to confirm recovery; the feed also retries automatically with backoff.",
-		})
+		rows = append(rows, blocklistFeedStaleRow(snap))
 	}
 
 	if snap.FailingFeeds > 0 {
@@ -600,7 +645,40 @@ func checkBlocklistFeeds() []OperatorContractCheck {
 			OperatorAction: "Open Policy → Blocklist → Feeds and either use Sync Now for each one or set a sync interval so the scheduler keeps it refreshed.",
 		})
 	}
+
+	if snap.TruncatedFeeds > 0 {
+		rows = append(rows, blocklistFeedTruncatedRow(snap))
+	}
 	return rows
+}
+
+// blocklistFeedStaleRow renders the stale / never-synced row.
+func blocklistFeedStaleRow(snap blocklistFeedSnapshot) OperatorContractCheck {
+	msg := fmt.Sprintf("%d of %d auto-synced blocklist feed(s) are stale — the oldest successful sync was %s ago (over %dx its configured interval); the blocklist keeps its already-imported entries but is not receiving new ones",
+		snap.StaleFeeds, snap.AutoSyncFeeds, snap.WorstAge.Round(time.Minute), blocklistFeedStaleFactor)
+	if snap.StaleNeverSyncedFeeds == snap.StaleFeeds {
+		msg = fmt.Sprintf("%d of %d auto-synced blocklist feed(s) have NEVER synced successfully on this node (%s since startup) — those feeds contribute no entries at all, so the destinations they were added to block are not being blocked",
+			snap.StaleNeverSyncedFeeds, snap.AutoSyncFeeds, snap.WorstAge.Round(time.Minute))
+	}
+	return OperatorContractCheck{
+		Code:           "blocklist_feed",
+		Status:         diagWarn,
+		Message:        msg,
+		OperatorAction: "Check outbound HTTPS reachability to the feed origins from this node (including any upstream proxy), then open Policy → Blocklist → Feeds and use Sync Now to confirm recovery; the feed also retries automatically with backoff.",
+	}
+}
+
+// blocklistFeedTruncatedRow renders the line-cap truncation row. Counts only:
+// it never names the oversized feed, whose URL may embed a token.
+func blocklistFeedTruncatedRow(snap blocklistFeedSnapshot) OperatorContractCheck {
+	return OperatorContractCheck{
+		Code:   "blocklist_feed",
+		Status: diagWarn,
+		Message: fmt.Sprintf("%d of %d blocklist feed(s) exceed the %d-line feed cap — their latest sync succeeded but was TRUNCATED, so entries past the cap are not imported and the destinations those entries list are not being blocked",
+			snap.TruncatedFeeds, snap.Feeds, blocklistfeed.MaxFeedLines()),
+		OperatorAction: fmt.Sprintf("Split each oversized list into several feeds of fewer than %d entries each (or trim it at the source); the cap is fixed, and retrying or Sync Now will not import the missing entries. Already-imported entries stay enforced.",
+			blocklistfeed.MaxFeedLines()),
+	}
 }
 
 // blocklistFeedWritePrometheus appends the culvert_blocklist_feed_* series.
@@ -655,6 +733,12 @@ func blocklistFeedWritePrometheus(w *strings.Builder) {
 	w.WriteString("# TYPE culvert_blocklist_feed_oldest_success_timestamp_seconds gauge\n")
 	fmt.Fprintf(w, "culvert_blocklist_feed_oldest_success_timestamp_seconds %d\n", unixOrZero(snap.OldestSuccess))
 
+	// Its own series, deliberately NOT folded into sync_ok: see the file
+	// comment on why a truncated feed is its own shape.
+	w.WriteString("\n# HELP culvert_blocklist_feed_truncated Blocklist feeds whose latest successful sync reached the feed line cap and was truncated, so entries past the cap are not enforced\n")
+	w.WriteString("# TYPE culvert_blocklist_feed_truncated gauge\n")
+	fmt.Fprintf(w, "culvert_blocklist_feed_truncated %d\n", snap.TruncatedFeeds)
+
 	w.WriteString("\n# HELP culvert_blocklist_feed_sync_ok 1 when every configured blocklist feed's latest attempt succeeded and none is stale, 0 otherwise\n")
 	w.WriteString("# TYPE culvert_blocklist_feed_sync_ok gauge\n")
 	fmt.Fprintf(w, "culvert_blocklist_feed_sync_ok %d\n", boolGauge(snap.FailingFeeds == 0 && snap.StaleFeeds == 0))
@@ -674,6 +758,7 @@ func resetBlocklistFeedHealthForTest() {
 	blocklistFeedHealth.armed = false
 	blocklistFeedHealth.startedAt = time.Time{}
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
 	blocklistFeedHealth.mu.Unlock()

@@ -118,9 +118,18 @@ type threatFeedHealthRecord struct {
 	startedAt time.Time
 
 	// alerted latches the stale alert for the duration of one episode, so a
-	// feed that stays down does not re-page every round. Cleared only by an
-	// OBSERVED clean sync.
+	// feed that stays down does not re-page every round. Set only by a
+	// DISPATCHED alert (latchOncePerEpisodeOnDelivery) and cleared only by an
+	// OBSERVED clean sync or a restart.
 	alerted bool
+
+	// episode is the alert-episode generation, bumped under mu whenever an
+	// episode ends (an observed clean sync, a re-arm). A staleness verdict is
+	// read outside mu; latchOncePerEpisodeOnDelivery latches only if the
+	// generation read before that verdict is still current, so a recovery
+	// that lands in between cannot be overwritten by a latch for the episode
+	// it just ended.
+	episode uint64
 
 	// logAt / suppressed drive the rate-limited log line.
 	logAt      time.Time
@@ -147,14 +156,27 @@ var threatFeedNow = time.Now
 // so a per-attempt-unique Detail would defeat the dedup window by construction
 // and evict real threat alerts from the 500-entry retry queue. The verbose
 // cause stays on the role-gated admin API and in the log.
-var fireThreatFeedStaleAlert = func(detail string) {
-	if !alertStore().HasSubscriber("threat_feed_stale") {
-		return
+//
+// It reports whether the alert was DISPATCHED. The caller consumes the
+// once-per-episode latch only on a true return: see
+// latchOncePerEpisodeOnDelivery.
+var fireThreatFeedStaleAlert = func(detail string) bool {
+	if !threatFeedStaleSubscribed() {
+		return false
 	}
 	go fireAlert("threat_feed_stale", AlertPayload{
 		Detail: detail,
 		Source: "threatfeed",
 	})
+	return true
+}
+
+// threatFeedStaleSubscribed reports whether a dispatch of `threat_feed_stale`
+// would reach anyone: one lock-free load of the published subscription index.
+// It is the plane's single definition of "delivered", shared by the runtime
+// sink above and the startup flush claim below.
+func threatFeedStaleSubscribed() bool {
+	return alertStore().HasSubscriber("threat_feed_stale")
 }
 
 // noteThreatFeedConfigured records that the threat feed was started, and
@@ -164,6 +186,7 @@ func noteThreatFeedConfigured() {
 	threatFeedHealth.configured = true
 	threatFeedHealth.startedAt = threatFeedNow()
 	threatFeedHealth.alerted = false
+	threatFeedHealth.episode++
 	threatFeedHealth.logAt = time.Time{}
 	threatFeedHealth.suppressed = 0
 	threatFeedHealth.mu.Unlock()
@@ -178,17 +201,19 @@ func noteThreatFeedConfigured() {
 	// succeeds, no alert ever fires for the window in which the gateway was
 	// enforcing against stale intelligence (PR #1305 review).
 	//
-	// Routed through deferStartupAlert because the webhook store is loaded by a
-	// LATER startup slice: firing directly here would fan out to an empty
-	// subscriber list and vanish, which is the exact failure that queue exists
-	// to prevent. It degrades to a passthrough if the flush already happened,
-	// so it is safe from any init order.
+	// Routed through the startup-alert queue because the webhook store is
+	// loaded by a LATER startup slice: firing directly here would fan out to an
+	// empty subscriber list and vanish, which is the exact failure that queue
+	// exists to prevent. deferThreatFeedStaleAlert takes the runtime sink if
+	// the flush already happened, so it is safe from any init order.
 	evaluateThreatFeedStalenessAtStartup()
 }
 
-// evaluateThreatFeedStalenessAtStartup fires the stale alert once at boot if
-// the PERSISTED state is already stale. Latches the same fire-once flag as the
-// runtime path, so a subsequent failed round does not double-page.
+// evaluateThreatFeedStalenessAtStartup raises the stale alert once at boot if
+// the PERSISTED state is already stale. It shares the runtime path's fire-once
+// latch, so the episode pages once whichever path delivers it; the latch is
+// decided when the alert is DISPATCHED, not when it is raised (see
+// deferThreatFeedStaleAlert).
 func evaluateThreatFeedStalenessAtStartup() {
 	snap := threatFeedState()
 	// The never-synced branch is deliberately NOT evaluated here: at startup
@@ -198,26 +223,70 @@ func evaluateThreatFeedStalenessAtStartup() {
 	if !snap.Stale || snap.NeverSynced {
 		return
 	}
-	threatFeedHealth.mu.Lock()
-	alertNow := !threatFeedHealth.alerted
-	threatFeedHealth.alerted = true
-	threatFeedHealth.mu.Unlock()
-	if !alertNow {
-		return
-	}
 	deferThreatFeedStaleAlert(fmt.Sprintf(
 		"threat intelligence was already stale at startup: last successful sync was %s ago (over %dx the %s interval); the gateway is enforcing against stale intelligence until the feed resyncs",
-		snap.Age.Round(time.Minute), threatFeedStaleFactor, snap.SyncInterval))
+		snap.Age.Round(time.Minute), threatFeedStaleFactor, snap.SyncInterval), snap.episode)
 }
 
-// deferThreatFeedStaleAlert queues the stale alert through the startup-alert
-// queue. Package-level seam for the same synchronous-observation reason as
-// fireThreatFeedStaleAlert.
-var deferThreatFeedStaleAlert = func(detail string) {
-	deferStartupAlert("threat_feed_stale", AlertPayload{
+// deferThreatFeedStaleAlert routes the boot-time stale alert through the
+// startup-alert queue. Package-level seam for the same synchronous-observation
+// reason as fireThreatFeedStaleAlert.
+//
+// SEC-TFEED-STALE-LATCH-1 (the threat-feed sibling of SEC-BLFEED-STALE-LATCH-1):
+// this path used to latch the episode BEFORE queueing. Being accepted into the
+// queue is not delivery: the queue is flushed through fireAlert → Dispatch,
+// which fans out to whatever webhooks are loaded at the flush and silently
+// delivers nothing when none subscribes — the default posture. So a node that
+// booted already stale with no webhook spent its one page on nobody, and an
+// operator who subscribed afterwards was never paged while the gateway went on
+// enforcing against stale intelligence.
+//
+// Whether a queued alert reaches anyone is only knowable at the flush, after
+// the webhook store has loaded. claimThreatFeedStartupAlert therefore decides
+// the latch THERE, under the plane's lock, for the episode generation the
+// boot-time verdict was read in (episode). The flush runs after Start has
+// launched the scheduler, so a clean round can land before it: the generation
+// is what keeps that recovery from being overwritten. After the flush the
+// queue degrades to a passthrough that would skip that claim, so the
+// post-flush case takes the runtime path's gated sink instead. The
+// flushed-check and the enqueue are not atomic, but production arms this
+// plane in the scanning slice, strictly before loadPersistentAdminState
+// flushes on the same goroutine; the residual (an unlatched delivered page)
+// only fails toward one extra page.
+var deferThreatFeedStaleAlert = func(detail string, episode uint64) {
+	if startupAlertsFlushed() {
+		latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.episode, episode,
+			func() bool { return fireThreatFeedStaleAlert(detail) })
+		return
+	}
+	deferStartupAlertWhile("threat_feed_stale", AlertPayload{
 		Detail: detail,
 		Source: "threatfeed",
-	})
+	}, func() bool { return claimThreatFeedStartupAlert(episode) })
+}
+
+// claimThreatFeedStartupAlert runs at the startup flush, without
+// startupAlertMu held, and decides — in one critical section under the
+// plane's lock — whether the queued boot-time alert is sent and whether it
+// consumes the episode it was raised in (episode):
+//
+//   - that episode has ENDED (a clean round landed before the flush, which can
+//     happen because the flush runs after Start launched the scheduler): the
+//     queued copy is dropped and nothing is latched. Its text says the gateway
+//     "is enforcing against stale intelligence until the feed resyncs", and the
+//     generation proves the feed has resynced, so delivering it would be the
+//     late false page the queue's validity check exists to prevent (CHAOS-71),
+//     and latching would silence the NEXT episode until another clean sync.
+//   - the episode was already paged (a failed round dispatched it after the
+//     webhooks loaded but before the flush): the queued copy is dropped, so the
+//     episode pages once.
+//   - otherwise the alert is delivered, and the latch is consumed only if a
+//     subscriber exists. With none, Dispatch reaches nobody — as it always did
+//     — and the episode stays open, so the next failed round pages whoever has
+//     subscribed by then.
+func claimThreatFeedStartupAlert(episode uint64) bool {
+	return !latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.episode, episode,
+		threatFeedStaleSubscribed)
 }
 
 // noteThreatFeedSync is the sync observer: one call per completed round,
@@ -259,6 +328,7 @@ func noteThreatFeedSyncRecovered() {
 	wasAlerted := threatFeedHealth.alerted
 	suppressed := threatFeedHealth.suppressed
 	threatFeedHealth.alerted = false
+	threatFeedHealth.episode++ // a verdict read before this point is for the episode that just ended
 	threatFeedHealth.logAt = time.Time{}
 	threatFeedHealth.suppressed = 0
 	threatFeedHealth.mu.Unlock()
@@ -269,27 +339,36 @@ func noteThreatFeedSyncRecovered() {
 }
 
 // evaluateThreatFeedStaleness fires the stale alert at most once per episode.
+//
+// SEC-TFEED-STALE-LATCH-1: the episode is consumed only by a DISPATCHED alert,
+// with the decision inside the plane's lock so concurrent failed rounds page at
+// most once — the rule latchOncePerEpisodeOnDelivery shares with the blocklist
+// plane. See deferThreatFeedStaleAlert for the startup path's half.
 func evaluateThreatFeedStaleness() {
 	snap := threatFeedState()
 	if !snap.Stale {
 		return
 	}
-	threatFeedHealth.mu.Lock()
-	alertNow := !threatFeedHealth.alerted
-	threatFeedHealth.alerted = true
-	threatFeedHealth.mu.Unlock()
-	if !alertNow {
-		return
-	}
+	// Rendered before the lock: threatFeedState above takes
+	// threatFeedHealth.mu itself. snap.episode was read before the feed state
+	// the verdict came from, so a clean round (Feed.Sync can run concurrently
+	// with the scheduler's) that ends the episode before the decision below
+	// makes it skip rather than latch an ended episode.
+	detail := threatFeedStaleDetail(snap)
+	latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.episode, snap.episode,
+		func() bool { return fireThreatFeedStaleAlert(detail) })
+}
+
+// threatFeedStaleDetail renders the runtime stale alert's bounded detail.
+func threatFeedStaleDetail(snap threatFeedSnapshot) string {
 	if snap.NeverSynced {
-		fireThreatFeedStaleAlert(fmt.Sprintf(
+		return fmt.Sprintf(
 			"threat intelligence has NEVER synced successfully on this node (%s since startup, failing sources: %s); the gateway is enforcing with no threat-feed coverage",
-			snap.Age.Round(time.Minute), reasonOrUnknown(snap.FailedSources)))
-		return
+			snap.Age.Round(time.Minute), reasonOrUnknown(snap.FailedSources))
 	}
-	fireThreatFeedStaleAlert(fmt.Sprintf(
+	return fmt.Sprintf(
 		"threat intelligence has not synced successfully for %s (over %dx the %s sync interval, failing sources: %s); the gateway is enforcing against stale intelligence",
-		snap.Age.Round(time.Minute), threatFeedStaleFactor, snap.SyncInterval, reasonOrUnknown(snap.FailedSources)))
+		snap.Age.Round(time.Minute), threatFeedStaleFactor, snap.SyncInterval, reasonOrUnknown(snap.FailedSources))
 }
 
 // reasonOrUnknown renders the bounded reason class, defending against an empty
@@ -319,6 +398,10 @@ type threatFeedSnapshot struct {
 	FailedSources       string
 	ErrSummary          string
 	Entries             int64
+
+	// episode is the alert-episode generation, read under the plane's lock
+	// BEFORE the feed's health: see threatFeedHealthRecord.episode.
+	episode uint64
 }
 
 // threatFeedState derives the current posture from the feed's own health
@@ -327,9 +410,13 @@ func threatFeedState() threatFeedSnapshot {
 	threatFeedHealth.mu.Lock()
 	configured := threatFeedHealth.configured
 	startedAt := threatFeedHealth.startedAt
+	episode := threatFeedHealth.episode
 	threatFeedHealth.mu.Unlock()
 
-	snap := threatFeedSnapshot{Configured: configured}
+	// The feed's health is read AFTER the generation: the feed updates its
+	// state before notifying the observer, so a recovery either shows in the
+	// health below or bumps the generation after it was read.
+	snap := threatFeedSnapshot{Configured: configured, episode: episode}
 	if !configured || globalThreatFeed == nil {
 		return snap
 	}
@@ -481,6 +568,7 @@ func resetThreatFeedHealthForTest() {
 	threatFeedHealth.configured = false
 	threatFeedHealth.startedAt = time.Time{}
 	threatFeedHealth.alerted = false
+	threatFeedHealth.episode++
 	threatFeedHealth.logAt = time.Time{}
 	threatFeedHealth.suppressed = 0
 	threatFeedHealth.mu.Unlock()

@@ -134,6 +134,17 @@ type Feed struct {
 	// for the authoritative "is the latest round bad" signal, the same rule
 	// internal/threatfeed's Health.LastRoundOK carries.
 	ConsecutiveFailures int
+	// Truncated reports that the latest SUCCESSFUL sync reached the
+	// maxFeedLines cap, so only the first maxFeedLines entries of the body
+	// were imported and anything past them is not enforced. Reaching the cap
+	// is deliberately a truncation, not a failure (see maxFeedLines), which is
+	// exactly why it needs its own bit: LastSync advances and LastError clears
+	// for such a round, so without this the freshness plane read a deny list
+	// that was silently cut short as a clean, fresh sync (2026-11-19 security
+	// regression review). Set only by a successful round and reset by the next
+	// successful round that is not truncated; a failed round leaves it as the
+	// last success left it. Not persisted, like the other status fields.
+	Truncated bool
 }
 
 // feedState is the internal mutable state of one feed. Every field is
@@ -150,6 +161,7 @@ type feedState struct {
 	nextAttempt   time.Time
 	lastError     string
 	importedCount int64
+	truncated     bool // latest successful sync hit maxFeedLines (see Feed.Truncated)
 
 	// sched owns this feed's retry ladder and its stable jitter offset. It is
 	// used purely as a DELAY CALCULATOR (feedsched.Scheduler.NextDelay), never
@@ -343,6 +355,7 @@ func (bs *Syncer) Feeds() []Feed {
 			LastError:     st.lastError,
 			ImportedCount: st.importedCount,
 			LastAttempt:   st.lastAttempt,
+			Truncated:     st.truncated,
 		}
 		// sched is built lazily by scheduleNextLocked, so it is nil until
 		// this feed has completed its first round.
@@ -436,7 +449,7 @@ func (bs *Syncer) SyncFeedContext(ctx context.Context, feedURL string) (int, err
 		return 0, fmt.Errorf("feed not configured: %s", feedURL)
 	}
 
-	lines, err := bs.fetchFeedLines(ctx, feedURL)
+	lines, truncated, err := bs.fetchFeedLines(ctx, feedURL)
 
 	bs.mu.Lock()
 	st, still := bs.feeds[feedURL]
@@ -467,6 +480,14 @@ func (bs *Syncer) SyncFeedContext(ctx context.Context, feedURL string) (int, err
 	}
 	bs.mu.Unlock()
 
+	return bs.recordSuccess(feedURL, lines, truncated), nil
+}
+
+// recordSuccess merges a successful round's lines and records the round on the
+// feed's status, then notifies the observer. Returns the number of newly added
+// entries. Caller MUST NOT hold bs.mu: the merge runs unlocked and the observer
+// may call Feeds().
+func (bs *Syncer) recordSuccess(feedURL string, lines []string, truncated bool) int {
 	added := bs.bl.MergeFromLines(lines, feedURL)
 
 	var okSync time.Time
@@ -481,14 +502,26 @@ func (bs *Syncer) SyncFeedContext(ctx context.Context, feedURL string) (int, err
 		st.lastSync = bs.timeNow()
 		st.lastError = ""
 		st.importedCount += int64(added)
+		// Assigned, not OR-ed: a later round that fits under the cap is the
+		// evidence that the feed is no longer cut short.
+		st.truncated = truncated
 		okSync, okInterval = st.lastSync, st.interval
 	}
 	bs.mu.Unlock()
 
+	if truncated {
+		// Once per truncating round, and deliberately WITHOUT the feed URL:
+		// it is operator-configured and routinely embeds a token (the rule
+		// observer.go records for the alert/metric plane). Only the cap, a
+		// value computed here, reaches the sink. The per-feed mark is
+		// Feed.Truncated, not this line.
+		obs.Warnf("BlocklistFeed: a feed body reached the %d-line cap and was TRUNCATED: only its first %d entries were imported this round, and entries past the cap are not enforced. Already merged hosts are unaffected (the merge never deletes); split the list into several feeds below the cap.",
+			maxFeedLines, maxFeedLines)
+	}
 	obs.Printf("BlocklistFeed: synced %q — added %d new entries", obs.Sanitize(feedURL), added)
 	// CHAOS-123: outside the lock — the observer may call Feeds().
 	notifySyncObserver(SyncOutcome{OK: true, LastSync: okSync, Interval: okInterval})
-	return added, nil
+	return added
 }
 
 // SyncAll syncs every configured feed (manual "Refresh All Now"), regardless
@@ -506,24 +539,26 @@ func (bs *Syncer) SyncAll() (int, error) {
 	return total, firstErr
 }
 
-// fetchFeedLines downloads the feed body and returns its non-empty lines.
+// fetchFeedLines downloads the feed body and returns its non-empty lines, and
+// whether they were cut short at the maxFeedLines cap (truncated is only ever
+// true alongside a nil error).
 // The SSRF guard runs inline at this call site (not only at admin-API save
 // time) so every sync — scheduler, manual, or settings-restored feed — is
 // re-checked, closing the gap where a feed host starts resolving to a
 // private address after it was saved.
-func (bs *Syncer) fetchFeedLines(ctx context.Context, feedURL string) ([]string, error) {
+func (bs *Syncer) fetchFeedLines(ctx context.Context, feedURL string) (lines []string, truncated bool, err error) {
 	if !urlPattern.MatchString(feedURL) {
-		return nil, fmt.Errorf("feed URL must be an absolute http(s) URL")
+		return nil, false, fmt.Errorf("feed URL must be an absolute http(s) URL")
 	}
 	u, err := url.Parse(feedURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid feed URL: %w", err)
+		return nil, false, fmt.Errorf("invalid feed URL: %w", err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("feed URL scheme %q must be http or https", u.Scheme)
+		return nil, false, fmt.Errorf("feed URL scheme %q must be http or https", u.Scheme)
 	}
 	if err := ssrf.PrivateHost(u.Hostname()); err != nil {
-		return nil, fmt.Errorf("feed URL blocked by SSRF guard: %w", err)
+		return nil, false, fmt.Errorf("feed URL blocked by SSRF guard: %w", err)
 	}
 
 	// Derived from the caller's context (the scheduler's lifecycle ctx, or
@@ -533,13 +568,13 @@ func (bs *Syncer) fetchFeedLines(ctx context.Context, feedURL string) ([]string,
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, http.NoBody)
 	if err != nil {
-		return nil, fmt.Errorf("build request for %s: %w", feedURL, err)
+		return nil, false, fmt.Errorf("build request for %s: %w", feedURL, err)
 	}
 	client := feedHTTPClient()
 	resp, err := client.Do(req) // #nosec G107 -- operator-configured URL; scheme + ssrf.PrivateHost guard above
 	if err != nil {
 		obs.Printf("BlocklistFeed: fetch %q failed: %v", obs.Sanitize(feedURL), err)
-		return nil, fmt.Errorf("fetch %s: %w", feedURL, err)
+		return nil, false, fmt.Errorf("fetch %s: %w", feedURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -559,30 +594,45 @@ func (bs *Syncer) fetchFeedLines(ctx context.Context, feedURL string) ([]string,
 	//     ladder added above, so backoff would never engage for the single
 	//     most common feed outage mode.
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, feedURL)
+		return nil, false, fmt.Errorf("HTTP %d from %s", resp.StatusCode, feedURL)
 	}
 
-	var lines []string
+	lines, truncated, err = readFeedLines(resp.Body)
+	if err != nil {
+		obs.Printf("BlocklistFeed: read error from %q: %v", obs.Sanitize(feedURL), err)
+		return nil, false, fmt.Errorf("read %s: %w", feedURL, err)
+	}
+	return lines, truncated, nil
+}
+
+// readFeedLines reads a feed body under the CHAOS-109 budgets and returns its
+// non-empty lines. A spent BYTE budget is an error; reaching the LINE cap stops
+// the read and reports truncated (see maxFeedLines for why the two differ).
+//
+// A body of exactly maxFeedLines non-empty lines also reads as truncated: the
+// read stops at the cap without probing for more, so it cannot tell the two
+// apart. That errs toward reporting, which is the safe side for a deny list.
+func readFeedLines(body io.Reader) (lines []string, truncated bool, err error) {
 	// CHAOS-109: read under a byte budget. A spent budget must NOT look like a
 	// clean end of body, or an origin that overran it would be recorded as a
 	// successful short feed — the same "success meant the transport returned
 	// bytes" mistake CHAOS-108 fixed one layer up.
-	scanner := bufio.NewScanner(&boundedReader{r: resp.Body, what: "feed body", limit: maxFeedBodyBytes})
+	scanner := bufio.NewScanner(&boundedReader{r: body, what: "feed body", limit: maxFeedBodyBytes})
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" {
 			lines = append(lines, line)
 		}
 		if len(lines) >= maxFeedLines {
-			obs.Printf("BlocklistFeed: line cap of %d reached for %q; this round is TRUNCATED. Already merged hosts are unaffected (the merge never deletes).", maxFeedLines, obs.Sanitize(feedURL))
-			return lines, nil
+			// Truncated, not failed. The caller records it on the feed's
+			// status and logs it once per round, without the feed URL.
+			return lines, true, nil
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		obs.Printf("BlocklistFeed: read error from %q: %v", obs.Sanitize(feedURL), err)
-		return nil, fmt.Errorf("read %s: %w", feedURL, err)
+		return nil, false, err
 	}
-	return lines, nil
+	return lines, false, nil
 }
 
 func feedHTTPClient() *http.Client {
@@ -687,6 +737,13 @@ var (
 	// matches internal/threatfeed's cap of the same name so the two loops agree
 	// on the posture. Reaching it TRUNCATES rather than failing: the merge is
 	// merge-only and persisted, so a short round adds fewer new hosts and
-	// removes none.
+	// removes none. A truncating round is still a success, so it is recorded
+	// on Feed.Truncated rather than LastError, and package main's freshness
+	// plane reports it on its own gauge and diagnostics row.
 	maxFeedLines = 1_000_000
 )
+
+// MaxFeedLines is the per-round line cap past which a feed body is truncated
+// (see maxFeedLines). Exported for package main's freshness plane, whose
+// truncation row tells the operator the size to split a list below.
+func MaxFeedLines() int { return maxFeedLines }

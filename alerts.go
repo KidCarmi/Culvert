@@ -140,6 +140,51 @@ func fireScanTimeoutAlert(actor, host, detail string) {
 	})
 }
 
+// latchOncePerEpisodeOnDelivery is the fire-once-per-episode rule shared by
+// the feed-freshness planes (threatfeed_health.go, blocklist_feed_health.go).
+//
+// The episode is consumed only by an alert that was DISPATCHED. Latching first
+// and firing afterwards burned the episode whenever nothing subscribed — the
+// DEFAULT posture, no webhooks configured — and these latches clear only on
+// observed evidence (a clean sync) or a restart, never on elapsed time. So a
+// node that went stale before any webhook existed spent its one page on nobody,
+// and an operator who subscribed afterwards was never paged
+// (SEC-BLFEED-STALE-LATCH-1, and the same shape in the threat-feed plane).
+//
+// mu must be the lock that guards *latched and *episode, and the caller must
+// not hold it. The decision runs entirely under mu, so concurrent producers in
+// one episode page at most once. delivered reports whether the alert was (or,
+// for a queued startup alert, is about to be) dispatched to a subscriber; it
+// runs under mu, so it must not block or take mu itself — the planes' sinks
+// only probe the lock-free subscription index (HasSubscriber) and hand
+// delivery to a goroutine.
+//
+// observed is the episode generation the caller read, under mu, BEFORE the
+// feed state its staleness verdict came from. Every end of an episode (an
+// observed recovery, a removal, a re-arm) bumps *episode under mu. The verdict
+// is taken outside mu — reading it under mu would invert the lock order with
+// the feed, whose observer takes mu — so a recovery can land between the
+// verdict and this decision. Without the check, the recovery cleared the latch
+// and this call set it straight back for an episode that had ended, and the
+// NEXT episode could not page until another clean sync. A changed generation
+// therefore skips without dispatching: the alert describes a condition already
+// observed to have cleared. (A recovery that lands after this decision clears
+// the latch itself, so either order ends correctly.)
+//
+// delivered is not called when the episode is already latched or has ended.
+// It reports whether it SKIPPED for either reason.
+func latchOncePerEpisodeOnDelivery(mu *sync.Mutex, latched *bool, episode *uint64, observed uint64, delivered func() bool) (skipped bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	if *latched || *episode != observed {
+		return true
+	}
+	if delivered() {
+		*latched = true
+	}
+	return false
+}
+
 // validateWebhookURL is re-exposed for the admin API handlers (config-time
 // shape check; the SSRF check stays at delivery time).
 var validateWebhookURL = alerts.ValidateURL
@@ -186,7 +231,12 @@ type queuedStartupAlert struct {
 	// the webhooks loaded) is DROPPED rather than delivered late as a false
 	// page (Codex review of #1556). Nil means the alert reports a FACT that
 	// stays true once it happened (a file was quarantined, a load failed at
-	// boot) and is always delivered.
+	// boot) and is always delivered. A fire-once producer may also use it to
+	// CLAIM its episode at the flush (claimThreatFeedStartupAlert): it is the
+	// only point at which the webhook store is real, so it is the only point at
+	// which "will this page reach a subscriber" has an answer. It then returns
+	// false when its producer already paged the episode by another route, or
+	// when the episode it was raised for has since recovered.
 	stillValid func() bool
 }
 
@@ -234,7 +284,7 @@ func flushStartupAlerts() {
 	startupAlertMu.Unlock()
 	for _, q := range queued {
 		if q.stillValid != nil && !q.stillValid() {
-			logger.Printf("Alerts: dropping queued startup alert %q — its condition cleared before the alert webhooks loaded", q.event)
+			logger.Printf("Alerts: dropping queued startup alert %q — its condition cleared, or its producer already reported it, before the alert webhooks loaded", q.event)
 			continue
 		}
 		startupAlertFire(q.event, q.payload)

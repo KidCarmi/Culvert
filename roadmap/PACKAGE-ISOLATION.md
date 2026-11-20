@@ -343,7 +343,9 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-009 | `mcp_evidence_readmodel.go` → `internal/mcp/evidenceview` | **shipped** (merged 2026-11-19, `19b2ee8`) | nightly shift | `main` | #1941 | overlap check passed 2026-11-18 (no open MCP PR) | ADR-0046; 5 exported names (`Build`, `View`, `Requirement`, `Summary`, `State`); 1 production caller + 1 `uie2e` fixture call updated, no root alias; shared category slice → per-call slice; wire bytes pinned by golden + 5-case before/after comparison; 5 engine tests moved with names unchanged, 2 handler tests stay root | — |
 | IM-010 | `proxy_path_bounds.go`, `proxy_host_bounds.go`, `request_tracing_bounds.go` | proposed | — | — | — | benchgate measurement | lead (hot path; cross-linked) | measure before mapping |
 | IM-011 | `mcp_shadow_metrics.go` → `internal/mcp/shadowmetrics` (split from IM-009) | **shipped** (merged 2026-11-19, `babaf34`) | nightly shift | `main` | #1944 | — | ADR-0047; 2 exported names; the `sync.Once` instance and the never-armed nil gate on `/metrics` stay main; see "IM-011 extraction" below | — |
-| IM-012 | saas-feed wire field grammar: root `canonicalUTCSecond`/`validSHA256Hex` → bindings to `internal/urlcatfeed` | **implementation under review** | nightly shift | `main` | #1955 | — | duplicate-rule removal: `urlcatfeed.parseCanonicalRFC3339`/`isSHA256Hex` were byte-equivalent private copies of the root validators; now exported (`ParseCanonicalRFC3339`, `IsSHA256Hex`) and the root names delegate, so 0 root callers changed; differential test with frozen root oracles + 2 mutation negative controls; see "IM-012" below | review PR |
+| IM-012 | saas-feed wire field grammar: root `canonicalUTCSecond`/`validSHA256Hex` → bindings to `internal/urlcatfeed` | **shipped** (merged 2026-11-20, `949d650`) | nightly shift | `main` | #1955 | — | duplicate-rule removal: `urlcatfeed.parseCanonicalRFC3339`/`isSHA256Hex` were byte-equivalent private copies of the root validators; now exported (`ParseCanonicalRFC3339`, `IsSHA256Hex`) and the root names delegate, so 0 root callers changed; differential test with frozen root oracles + 2 mutation negative controls; see "IM-012" below | — |
+| IM-013 | `cluster_ca_validity.go` policy → `internal/clusterca` | **shipped** (merged 2026-11-20, `398a889`) | nightly shift | `main` | #1965 | — | ADR-0048; see "IM-013" below | — |
+| IM-015 | `revocation_sync_budget.go` planner → `internal/session/revsync` | **implementation under review** | nightly shift | `main` | #1966 | — | ADR-0049; 4 exported names; see "IM-015" below | review PR |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -524,6 +526,56 @@ IM-011 is the Shadow metrics sink split from IM-009 (its table row lands with
   reading `validateFloorRecord`/`validateFloorFields` (`saas_feed_floor.go`)
   and the `fsyncDir` callers (`saas_feed_genstore.go`, `saas_feed_runtime.go`).
 
+### IM-015 SyncRevocations budget planner (EXTRACT, 2026-11-20, main `530445b`)
+
+Task record (the table row was added on 2026-11-20 after #1955 and #1965
+merged; IM-014 is the release-catalog lead recorded under IM-013):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-015: `revocation_sync_budget.go` planner → `internal/session/revsync` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR touches `revocation_sync_budget.go`, its test file or `internal/session`; the long-lived appliance branches do not contain the file) |
+| Evidence | ADR-0049; 4 exported names (`Cursor`, `Request`, `BuildRequest`, `BuildResponse`); root keeps four binding names, so the two call sites (`controlplane_client.go`, `controlplane_server.go`) and all root tests are untouched; one line changed in `controlplane.go` (`!c.set` → `!c.Active()`); 2 engine tests moved with names unchanged, 3 integration tests stay root; both legs' bytes pinned by digests captured from main before the move |
+| Risks | the planner is a security rule (deferred, never dropped): a wrong order or a jammed rotation delays or starves a revocation. Pinned by the moved coverage tests, the digests and three mutation checks |
+| Next action | review PR |
+
+- **Reconciled.** At selection time #1955 (IM-012) and #1965 (IM-013) were
+  open with green checks and no review threads; both have since merged, so
+  IM-002/IM-003 no longer overlap an open PR. IM-005/IM-006 stay blocked on #1526. IM-014 (release catalog) is a
+  lead recorded in #1965.
+- **Why this file.** A parse-level walk of the 464 root production files for
+  cohesive engines with few root dependencies. The planner references one
+  root name (`RevocationEntry`, already a `session` alias), has two call
+  sites, and its state was already an instance value owned by its callers.
+- **Moved:** priority classes and order, prefix + rotating window, byte
+  accounting, the request envelope. **Stays main:** the budgets (derived from
+  the cluster gRPC limits), the budget variables, the deferral counters,
+  `/metrics` text, the log line, the cursors' owners and the RPC. No ADR-0002
+  conflict: `controlplane.go` is not moved.
+- **Program rule.** Opened as a third program PR beside #1955 and #1965,
+  sharing no source file with either; both merged on 2026-11-20, so this is
+  again the only open program PR.
+- **Assessed, correctly located, no change:** `pac_fence.go` (HTTP refusal
+  adapter shared by root handlers), `ocsp_coverage.go` (constant claims about
+  root TLS wiring, pinned against root configs).
+- **Discovered: IM-016 lead, scan-sidecar admission gate.**
+  `scan_svc_admission.go` (273 ln): `scanSvcAdmissionSlots` (pure) and the
+  `scanSvcAdmission` semaphore with its bounded wait are an engine; the
+  process gauges (`scanSvcInflight`, `scanSvcSlots`), the 429 writer and the
+  log throttle are composition. Blocked for now: `/metrics` reads the gauges
+  in `metrics.go`, which open #1962 and #1963 edit. First step once they
+  merge: read the gauge readers in `metrics.go` and `healthcheck.go` and
+  decide whether the gate owns its in-flight count (instance method) with
+  main publishing it, keeping the decrement-before-release order.
+- **Discovered: smaller lead.** `ha_failover_ring.go` holds a bounded
+  transition ring behind a process pointer set in `init()`; the ring type is
+  about 45 lines. Too small to justify a package alone; revisit with
+  `ha_fencing.go`/`ha_intent.go` if an HA state owner is mapped.
+- **Next.** IM-002+IM-003 as one boundary (first step in the IM-012 note),
+  now unblocked. Then IM-014 mapping (first step in the IM-013 note) and
+  IM-016 as above.
+
 ### IM-002 / IM-007 mapping (MAP, 2026-11-09, main `09235d1`)
 
 Evidence only; no code moved. Nothing in the repository records the owner's
@@ -561,6 +613,72 @@ code PR was started.
   `upstream_backup_strip.go` and classify its 12 referencing test files into
   engine-only versus integration, and define the byte-identical output fixture.
   IM-004 still needs the owner's pilot-continuation acceptance (2 of 3 code PRs).
+
+### IM-017 frontend artifact validator (EXTRACT, 2026-11-20, main `5333aab`)
+
+Task record (kept out of the table because open #1955 edits those rows; open
+#1965 and #1966 add their records at other anchors, so the four PRs do not
+conflict textually; the row is added once they merge):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-017: `ui_frontend_v2.go` embedded-artifact validator → `internal/frontendbundle` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR touches `ui_frontend_v2.go` or its test file; the six long-lived branches carry the same blobs as main for both) |
+| Evidence | ADR-0050; 3 exported names (`Validate`, `Asset`, `ManifestEntry`); root keeps `validateFrontendV2` as a binding and `frontendV2Asset` as an alias, so the one caller and the handlers are unchanged apart from `asset.ContentType`; 7 validator tests moved with names unchanged, the real-dist half of `TestFE1B_ShellManifestBinding` stays root under the same name; 53-tree verdict table captured from main before the move; root file 727 → 273 lines |
+| Risks | the error text decides ready versus 503 and reaches the log; content types are served under `nosniff`. Both are pinned byte for byte by the verdict table and the content-type oracle |
+| Next action | review PR |
+
+- **Reconciled.** #1955 (IM-012), #1965 (IM-013) and #1966 (IM-015) are open
+  with passing or still-running checks and nothing to fix. IM-002/IM-003 still
+  overlap #1955; IM-005/IM-006 stay blocked on #1526.
+- **Why this file.** A per-function walk of the 465 root production files for
+  functions that reference no other root file. `ui_frontend_v2.go` held about
+  450 lines of validator whose only root references were `sanitizeLog` and a
+  MIME table nothing else read.
+- **ADR-0002.** It lists `ui_*.go` as main-owned. That stays true for the
+  routes, handlers, gate and published state, which did not move. ADR-0050
+  narrows it for the validator only.
+- **Gate surface kept.** `pr-fast-gate.yml` classifies `ui_frontend_v2*` as
+  frontend surface. The PR adds `internal/frontendbundle/*` to the same `case`
+  so a validator change still runs the frontend job. Nothing is removed.
+- **Program rule.** This is a fourth open program PR. It shares no source file
+  with the other three.
+- **Assessed and blocked: IM-018 lead, CDR circuit breaker.**
+  `cdr_breaker.go` (607 ln) is a real state machine with an instance-owned
+  lock and injected clocks, and production callers use only its exported
+  methods. It cannot move yet: root integration tests install a clock on a
+  pool-built breaker after construction (`b.setNowFn` in
+  `cdr_breaker_nonrpc_probe_test.go`, `cdr_breaker_wedge_chaos_test.go`,
+  `cdr_rpc_reservation_wall_test.go`) and read `halfOpenTried`, `staleProbes`
+  and `cfg.*` directly (also `cdr_fail_closed_unavailable_test.go`,
+  `diagnostics_cdr_capacity_test.go`, `cdr_breaker_overflow_test.go`). Moving
+  the type would need exported setters and accessors for tests only, which the
+  program's stop rule forbids. `withDefaults` also reads the published CDR
+  config (`cdrEffectivePerFileDeadline`). Prerequisite, in main first: the pool
+  takes its breaker clock at construction, the fallback deadline is resolved
+  by the pool before it builds a breaker, and those tests assert through
+  `Stats()` and behavior. #1963 (which edited `cdr_ui.go`, `cdr_health.go` and
+  `cdr_startup.go`) merged on 2026-11-20, so no open PR overlaps it now.
+- **IM-016 is unblocked.** #1962 and #1963 merged and neither left an open
+  edit to `metrics.go`. The gate can take its in-flight observer as constructor
+  options so the two process gauges and their readers stay in main.
+- **Next.** IM-016 (first step: read the `scanSvcInflight` and `scanSvcSlots`
+  readers in `metrics.go:1499` and `scan_svc.go:427`, and the override seam in
+  `scan_svc_admission_chaos_test.go`). After #1955 merges: IM-002+IM-003 as one
+  boundary. Then the IM-018 prerequisite above.
+- **Discovered, not fixed here.** A full root run
+  (`go test -race -count=1 -shuffle=1795175878818164299 .`, 2,324 s) reported
+  21 data races, all the same one: `TestLoadUIAccessPolicy_IdPProfilesMissingFileIsNonFatal`
+  (`ui_access_policy_startup_test.go:179`) reaches
+  `go runIdPMetadataDegradationWatchdog(resolveLifecycleCtx())`
+  (`ui_access_policy_startup.go:116`), which nothing stops when the test ends;
+  every 2.5 minutes its round reads `idpRegistry`
+  (`idp_metadata_health.go:993`) while later tests swap that global
+  (`withTestIdPRegistry`, `chaos87Env`, `startAuthProxy`, ...). Test isolation
+  only, and it needs a run longer than the tick to show. None of those files
+  is in this change. The fix belongs in the test: give it a cancellable
+  lifecycle context and join the watchdog.
 
 ### IM-009 extraction and next selection (EXTRACT, 2026-11-18, main `348a2cf`)
 

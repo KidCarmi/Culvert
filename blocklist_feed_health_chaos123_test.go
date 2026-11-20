@@ -53,6 +53,19 @@ func (fx *blFeedFixture) seedStatus(feedURL string, lastSync, lastAttempt time.T
 	fx.t.Fatalf("seedStatus: feed %q is not configured", feedURL)
 }
 
+// markTruncated overlays Truncated on a feed whose status was already seeded:
+// the engine sets it only on a round that reached its line cap, which a root
+// test cannot lower (internal/blocklistfeed's own gates drive the real path).
+func (fx *blFeedFixture) markTruncated(feedURL string) {
+	fx.t.Helper()
+	o, ok := fx.status[feedURL]
+	if !ok {
+		fx.t.Fatalf("markTruncated: seed feed %q's status first", feedURL)
+	}
+	o.Truncated = true
+	fx.status[feedURL] = o
+}
+
 // snapshots is the injected status source: the engine's snapshot with the
 // seeded overlays applied.
 func (fx *blFeedFixture) snapshots() []blocklistfeed.Feed {
@@ -60,6 +73,7 @@ func (fx *blFeedFixture) snapshots() []blocklistfeed.Feed {
 	for i := range feeds {
 		if o, ok := fx.status[feeds[i].URL]; ok {
 			feeds[i].LastSync, feeds[i].LastAttempt, feeds[i].LastError = o.LastSync, o.LastAttempt, o.LastError
+			feeds[i].Truncated = o.Truncated
 		}
 	}
 	return feeds
@@ -144,6 +158,7 @@ func TestChaos123_FreshFeedIsGreen(t *testing.T) {
 	wantSeries(t, out, "culvert_blocklist_feed_configured", 1)
 	wantSeries(t, out, "culvert_blocklist_feed_autosync_enabled", 1)
 	wantSeries(t, out, "culvert_blocklist_feed_stale_seconds", 1800)
+	wantSeries(t, out, "culvert_blocklist_feed_truncated", 0)
 	if rows := checkBlocklistFeeds(); len(rows) != 0 {
 		t.Errorf("a fresh feed contributes no row, got %+v", rows)
 	}
@@ -619,10 +634,17 @@ func TestChaos123_NoSurfaceCarriesTheFeedURL(t *testing.T) {
 	bs.SetFeed(feed, time.Hour)
 	bs.seedStatus(feed, now.Add(-10*time.Hour), now.Add(-time.Minute),
 		"fetch "+feed+": dial tcp 203.0.113.9:443: connect: connection refused")
+	// Truncated too, so the truncation row and gauge are under the same gate.
+	bs.markTruncated(feed)
 
 	surfaces := map[string]string{"metrics": blFeedMetrics()}
+	sawTruncatedRow := false
 	for i, row := range checkBlocklistFeeds() {
 		surfaces["diagnostics row "+strconv.Itoa(i)] = row.Message + " " + row.OperatorAction
+		sawTruncatedRow = sawTruncatedRow || strings.Contains(row.Message, "TRUNCATED")
+	}
+	if !sawTruncatedRow {
+		t.Fatal("expected the truncation row, so its text is actually under test")
 	}
 	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 1, Interval: time.Hour})
 	for i, d := range *fired {
@@ -706,6 +728,7 @@ func TestChaos123_SeriesAreRegisteredOnTheScrapeEndpoint(t *testing.T) {
 		"culvert_blocklist_feed_stale",
 		"culvert_blocklist_feed_stale_seconds",
 		"culvert_blocklist_feed_oldest_success_timestamp_seconds",
+		"culvert_blocklist_feed_truncated",
 		"culvert_blocklist_feed_sync_ok",
 		"culvert_blocklist_feed_consecutive_sync_failures",
 	} {
@@ -867,5 +890,56 @@ func TestChaos123_UndeliveredStaleAlertDoesNotConsumeTheEpisode(t *testing.T) {
 	}
 	if delivered != 1 {
 		t.Errorf("delivered = %d, want 1: a delivered episode must still page only once", delivered)
+	}
+}
+
+// TestChaos123_EpisodeEndBetweenVerdictAndLatchIsNotOverwritten — the
+// blocklist plane reads its staleness verdict outside the lock, so an episode
+// end (a feed removal here; an observed recovery is the same) can land
+// between the verdict and the latch decision. Latching after it set the latch
+// straight back for an episode that was over — the exact state
+// noteBlocklistFeedsRemoved exists to clear, because it suppresses a
+// different feed's later outage. The shared latch rule now skips when the
+// episode generation read before the verdict is no longer current.
+func TestChaos123_EpisodeEndBetweenVerdictAndLatchIsNotOverwritten(t *testing.T) {
+	now := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	const feed = "https://feeds.example.com/latch-race.txt"
+	bs.SetFeed(feed, 6*time.Hour)
+	bs.seedStatus(feed, now.Add(-13*time.Hour), now.Add(-13*time.Hour), "")
+	fired := captureStaleAlert(t)
+
+	// The episode ends after the verdict has read the feed snapshots and
+	// before the latch decision: blocklistFeedState reads the snapshots after
+	// releasing the plane's lock.
+	inner := blocklistFeedSnapshots
+	ended := false
+	blocklistFeedSnapshots = func() []blocklistfeed.Feed {
+		feeds := inner()
+		if !ended {
+			ended = true
+			noteBlocklistFeedsRemoved()
+		}
+		return feeds
+	}
+	evaluateBlocklistFeedStaleness()
+	if !ended {
+		t.Fatal("precondition: the episode-end hook did not run inside the verdict")
+	}
+	if len(*fired) != 0 {
+		t.Errorf("paged %v for an episode that ended before the latch decision", *fired)
+	}
+	blocklistFeedHealth.mu.Lock()
+	latched := blocklistFeedHealth.alerted
+	blocklistFeedHealth.mu.Unlock()
+	if latched {
+		t.Fatal("a latch decided after the episode ended re-latched it")
+	}
+
+	// The feed is still stale, so the next evaluation is a new episode and pages.
+	blocklistFeedSnapshots = inner
+	evaluateBlocklistFeedStaleness()
+	if len(*fired) != 1 {
+		t.Fatalf("pages = %d after the episode ended, want 1 for the next one", len(*fired))
 	}
 }

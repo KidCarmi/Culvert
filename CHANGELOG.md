@@ -105,6 +105,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   [`docs/operator/clamav-definition-freshness.md`](docs/operator/clamav-definition-freshness.md).
 
 
+- **A blocklist feed truncated at the line cap is no longer reported as a clean,
+  fresh sync.** A feed body that reaches the 1,000,000-line cap is deliberately
+  truncated rather than failed — the merge is merge-only, so failing would
+  freeze the list the first time a legitimate feed outgrew the cap — but the
+  round then advanced `last_sync` and cleared `last_error` like any other, and
+  the CHAOS-123 freshness plane asserted "fresh" over a deny list whose tail was
+  never imported (2026-11-19 security regression review, "Reported, not
+  fixed"). The engine now records the latest successful round's truncation per
+  feed (`Feed.Truncated`, cleared by the next round that fits under the cap) and
+  logs it once per round without the feed URL; the plane reports it on its own
+  unlabelled gauge, `culvert_blocklist_feed_truncated`, and its own
+  `blocklist_feed` WARN diagnostics row telling the operator to split the list.
+  Truncation deliberately moves neither `culvert_blocklist_feed_sync_ok` nor the
+  `blocklist_feed_stale` alert: both mean "failing or not refreshing", and an
+  oversized list is neither — folding it in would hold the paging signal at 0
+  for as long as the list stays oversized. The per-feed `/api/blocklist/feed`
+  response does not carry the mark yet (an API schema change, left open). The
+  truncation itself, and the 64 MiB byte budget that fails the round, are
+  unchanged (`TestTruncatedSyncIsRecordedOnTheFeedAndClearedByAFullOne`,
+  `TestTruncatedFeedIsReportedOnItsOwnSurfaces`).
 - **A stale blocklist-feed alert that reached nobody no longer consumes the
   node's one page for that episode (`SEC-BLFEED-STALE-LATCH-1`).** The
   CHAOS-123 freshness plane fires `blocklist_feed_stale` at most once per
@@ -121,6 +141,36 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `blocklist_feed` WARN row and the `culvert_blocklist_feed_stale*` gauges are
   derived on read and stayed correct — but the push surface the feature exists
   for was lost (`TestChaos123_UndeliveredStaleAlertDoesNotConsumeTheEpisode`).
+- **A stale threat-feed alert that reached nobody no longer consumes the node's
+  one page for that episode (`SEC-TFEED-STALE-LATCH-1`).** The threat-feed
+  staleness plane had the same shape as `SEC-BLFEED-STALE-LATCH-1` on both of
+  its paths. A failed round latched `threat_feed_stale` before the sink, which
+  drops the alert when nothing subscribes; and a node that booted with an
+  already-stale database latched when the alert was accepted into the startup
+  queue, although the flush hands it to `Dispatch`, which reaches nobody when
+  no webhook is loaded — the default posture. Either way an operator who
+  subscribed afterwards was never paged while the gateway went on enforcing
+  against intelligence that was not refreshing. The runtime path now latches
+  only on a dispatched alert, and the startup path decides at the flush — the
+  only point at which the webhook store is real — under the same lock: a
+  queued alert that reaches a subscriber counts as the episode's page and is
+  not re-sent, one that reaches nobody leaves the episode open, and one whose
+  episode was already paged between the webhook load and the flush is dropped.
+  The fire-once rule is now one helper, `latchOncePerEpisodeOnDelivery`, shared
+  with the blocklist plane so the two copies cannot drift. It also closes a
+  narrower race in both planes: the staleness verdict is read outside the
+  plane's lock, so a clean round (or, for the blocklist, a feed removal) that
+  ended the episode between the verdict and the latch decision was overwritten
+  by a latch for the episode it had just ended, silencing the NEXT episode until
+  another clean sync. Every episode end now bumps a generation under the lock,
+  the verdict carries the generation read before it, and a decision for an
+  ended episode neither pages nor latches; a queued boot-time alert whose
+  episode recovered before the flush is dropped rather than delivered late. The
+  `threat_feed` WARN row and the `culvert_threat_feed_*` gauges were unaffected
+  throughout (`TestThreatFeedStale_UndeliveredAlertDoesNotConsumeTheEpisode`,
+  `TestThreatFeedStale_StartupAlertFlushedToNobodyDoesNotConsumeTheEpisode`,
+  `TestThreatFeedStale_RecoveryBetweenVerdictAndLatchIsNotOverwritten`,
+  `TestChaos123_EpisodeEndBetweenVerdictAndLatchIsNotOverwritten`).
 - **A withdrawn CDR pool member is unpublished before its connection is closed
   (`SEC-CDR-REDIAL-CLOSE-ORDER-1`).** The automatic re-dial publishes the
   members it dialled and then re-validates them, withdrawing any whose registry
