@@ -612,8 +612,11 @@ enrolled instances — manual action is a fallback, not the normal path:
   boot or health poll rather than left in an ambiguous state, and the
   previous credential keeps working until its own expiry, so a Sluice outage
   during the 30-day window doesn't cause a gap. Re-enrolling manually is only
-  needed if automatic renewal has been failing (check the log for `RenewCert
-  failed`) or the instance was never successfully enrolled.
+  needed if automatic renewal has been failing or the instance was never
+  successfully enrolled. With CDR enabled, Diagnostics raises a
+  `cdr_client_cert` WARN row once any enabled instance's client certificate
+  has fewer than 14 days left or has expired (counts only; CDR → Instances
+  → **Cert expires** shows which one); the log line is `RenewCert failed`.
 - **Server certificate (Sluice's own cert, TOFU-pinned by
   `cdr.server_fingerprint`):** **on the Culvert side**, if Sluice's `Health`
   response advertises a rotation in progress (`rotated_fingerprint` +
