@@ -345,7 +345,9 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-011 | `mcp_shadow_metrics.go` → `internal/mcp/shadowmetrics` (split from IM-009) | **shipped** (merged 2026-11-19, `babaf34`) | nightly shift | `main` | #1944 | — | ADR-0047; 2 exported names; the `sync.Once` instance and the never-armed nil gate on `/metrics` stay main; see "IM-011 extraction" below | — |
 | IM-012 | saas-feed wire field grammar: root `canonicalUTCSecond`/`validSHA256Hex` → bindings to `internal/urlcatfeed` | **shipped** (merged 2026-11-20, `949d650`) | nightly shift | `main` | #1955 | — | duplicate-rule removal: `urlcatfeed.parseCanonicalRFC3339`/`isSHA256Hex` were byte-equivalent private copies of the root validators; now exported (`ParseCanonicalRFC3339`, `IsSHA256Hex`) and the root names delegate, so 0 root callers changed; differential test with frozen root oracles + 2 mutation negative controls; see "IM-012" below | — |
 | IM-013 | `cluster_ca_validity.go` policy → `internal/clusterca` | **shipped** (merged 2026-11-20, `398a889`) | nightly shift | `main` | #1965 | — | ADR-0048; see "IM-013" below | — |
-| IM-015 | `revocation_sync_budget.go` planner → `internal/session/revsync` | **implementation under review** | nightly shift | `main` | #1966 | — | ADR-0049; 4 exported names; see "IM-015" below | review PR |
+| IM-015 | `revocation_sync_budget.go` planner → `internal/session/revsync` | **shipped** (merged 2026-11-20, `ff8bc28`) | nightly shift | `main` | #1966 | — | ADR-0049; 4 exported names; see "IM-015" below | — |
+| IM-016 | `scan_svc_admission.go` gate → `internal/secscan/sidecargate` | **implementation under review** | nightly shift | `main` | #1975 | — | ADR-0051; 8 exported names; see "IM-016" below | review PR |
+| IM-017 | `ui_frontend_v2.go` artifact validator → `internal/frontendbundle` | **shipped** (merged 2026-11-20, `631750a`) | nightly shift | `main` | #1972 | — | ADR-0050; 3 exported names; see "IM-017" below | — |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -679,6 +681,40 @@ conflict textually; the row is added once they merge):
   only, and it needs a run longer than the tick to show. None of those files
   is in this change. The fix belongs in the test: give it a cancellable
   lifecycle context and join the watchdog.
+
+### IM-016 scan-sidecar admission gate (EXTRACT, 2026-11-20, main `28de730`)
+
+- **Reconciled.** No program PR is open: IM-012 (#1955), IM-013 (#1965),
+  IM-015 (#1966) and IM-017 (#1972) all merged on 2026-11-20; the IM-015 row
+  is updated and the IM-017 row added. Open PRs are #1526 (IM-006) and the
+  appliance set (#1528, #1536, #1548, #1549, #1705). Their six branches
+  predate CHAOS-115 and do not contain `scan_svc_admission.go` or its test
+  file; `metrics.go` is not edited here.
+- **Moved:** the slot arithmetic, the semaphore, the bounded wait and the
+  gauge-before-slot release (`gate.go`, 8 exported names: `HeapBudget`,
+  `MinSlots`, `MaxSlots`, `QueueWait`, `Slots`, `Options`, `Gate`, `New`).
+  **Stays main:** the process gauges `scanSvcInflight`/`scanSvcSlots` and
+  their readers (`metrics.go`, `/health`), the slot-count test seam, the 429
+  and its counter, the refusal line. Root file 273 → 173 lines; `scan_svc.go`
+  changed on four lines plus the import.
+- **Gauge ownership, decided.** The lead asked whether the gate should own its
+  in-flight count. It takes the gauge as `Options.Inflight`
+  (`*atomic.Int64`): main hands it `&scanSvcInflight`, so every reader and
+  root test is unchanged and the gate is the gauge's only writer. A gate
+  built without one counts privately.
+- **Tests.** 2 arithmetic tests moved with names unchanged; 8 handler-level
+  `TestChaos115_*` tests and the `benchgate` heap measurement stay root,
+  unedited. 11 new engine tests plus the boundary pair. Root inventory:
+  2 fewer top-level tests, as the rootshard comparison is expected to show.
+- **ADR-0002.** No conflict: the sidecar files are not on its list.
+- **Next.** IM-002+IM-003 as one boundary. Nothing open overlaps
+  `saas_feed_*.go` now. First step: list the names `saas_feed_activate.go`,
+  `saas_feed_recover.go`, `saas_feed_gc.go` and `saas_feed_runtime.go` use
+  from `saas_feed_floor.go` and `saas_feed_genstore.go`, and count the
+  surface a combined floor+genstore package would export; if it is above 8,
+  record the API pressure and decide between two packages (floor record
+  codec, generation store) and one. After that: the IM-018 prerequisite
+  (pool-supplied breaker clock) and IM-014 mapping.
 
 ### IM-009 extraction and next selection (EXTRACT, 2026-11-18, main `348a2cf`)
 
