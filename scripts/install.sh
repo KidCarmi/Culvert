@@ -1590,9 +1590,14 @@ env_put() {
     # SEC-INSTALL-ENVUMASK-1 (see the transaction below): `sudo touch` created
     # this file under sudo's own umask (022 by default: world-readable) until
     # the later chmod, and our umask cannot fix that because sudo/PAM replace
-    # it. `install -m 600` creates it 0600 (O_CREAT|O_EXCL) and hands it to us
-    # in the same privileged call, as carry_forward_prior_secrets already does.
-    sudo install -m 600 -o "$(id -un)" /dev/null "$file" 2>/dev/null || true
+    # it. So the umask is set INSIDE the privileged shell, and `set -C` makes
+    # the redirection O_CREAT|O_EXCL: it creates the file 0600 when absent and
+    # FAILS rather than truncates when a concurrent installer created (and
+    # perhaps already filled) it after our existence check above — `touch`
+    # never truncated, and neither may its replacement. The chown then hands
+    # the file to us either way, exactly as the old `touch && chown` did.
+    sudo sh -c 'umask 077 && set -C && : > "$1"' sh "$file" 2>/dev/null || true
+    sudo chown "$(id -un)" "$file" 2>/dev/null || true
   fi
   # If ownership still can't be taken (sudo genuinely denied), DEGRADE — warn
   # and skip rather than let the unguarded touch/append below abort the whole

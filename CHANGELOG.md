@@ -21,10 +21,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   installer keeps the operator's umask. In a stack dir the invoking user
   cannot write, the file was created by `sudo touch` under sudo's own umask
   (022 by default, world-readable), which no caller umask can change; it is
-  now created by `sudo install -m 600 -o <user> /dev/null`, which opens it
-  `0600` and hands it over in one call. The `chmod 600` stays as
-  belt-and-braces and an existing file's mode handling is unchanged
-  (`TestInstallScript_EnvPut_CreatesFilePrivateUnderLaxUmask`).
+  now created by a privileged `sh -c 'umask 077 && set -C && : > FILE'`,
+  which opens it `0600` with `O_EXCL` and never truncates a file a concurrent
+  installer created after the existence check, then handed over with
+  `chown` as before. The `chmod 600` stays as belt-and-braces and an existing
+  file's mode handling is unchanged
+  (`TestInstallScript_EnvPut_CreatesFilePrivateUnderLaxUmask`,
+  `TestInstallScript_EnvPut_PrivilegedCreateDoesNotClobberAConcurrentWriter`).
 - **A policy rule on an IP-literal destination now matches every spelling of
   that address.** `destFqdn` literals were compared as text, so a Block/Drop
   rule on `192.0.2.7` did not match `[::ffff:192.0.2.7]`, and one on
