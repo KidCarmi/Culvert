@@ -53,6 +53,19 @@ func (fx *blFeedFixture) seedStatus(feedURL string, lastSync, lastAttempt time.T
 	fx.t.Fatalf("seedStatus: feed %q is not configured", feedURL)
 }
 
+// markTruncated overlays Truncated on a feed whose status was already seeded:
+// the engine sets it only on a round that reached its line cap, which a root
+// test cannot lower (internal/blocklistfeed's own gates drive the real path).
+func (fx *blFeedFixture) markTruncated(feedURL string) {
+	fx.t.Helper()
+	o, ok := fx.status[feedURL]
+	if !ok {
+		fx.t.Fatalf("markTruncated: seed feed %q's status first", feedURL)
+	}
+	o.Truncated = true
+	fx.status[feedURL] = o
+}
+
 // snapshots is the injected status source: the engine's snapshot with the
 // seeded overlays applied.
 func (fx *blFeedFixture) snapshots() []blocklistfeed.Feed {
@@ -60,6 +73,7 @@ func (fx *blFeedFixture) snapshots() []blocklistfeed.Feed {
 	for i := range feeds {
 		if o, ok := fx.status[feeds[i].URL]; ok {
 			feeds[i].LastSync, feeds[i].LastAttempt, feeds[i].LastError = o.LastSync, o.LastAttempt, o.LastError
+			feeds[i].Truncated = o.Truncated
 		}
 	}
 	return feeds
@@ -144,6 +158,7 @@ func TestChaos123_FreshFeedIsGreen(t *testing.T) {
 	wantSeries(t, out, "culvert_blocklist_feed_configured", 1)
 	wantSeries(t, out, "culvert_blocklist_feed_autosync_enabled", 1)
 	wantSeries(t, out, "culvert_blocklist_feed_stale_seconds", 1800)
+	wantSeries(t, out, "culvert_blocklist_feed_truncated", 0)
 	if rows := checkBlocklistFeeds(); len(rows) != 0 {
 		t.Errorf("a fresh feed contributes no row, got %+v", rows)
 	}
@@ -619,10 +634,17 @@ func TestChaos123_NoSurfaceCarriesTheFeedURL(t *testing.T) {
 	bs.SetFeed(feed, time.Hour)
 	bs.seedStatus(feed, now.Add(-10*time.Hour), now.Add(-time.Minute),
 		"fetch "+feed+": dial tcp 203.0.113.9:443: connect: connection refused")
+	// Truncated too, so the truncation row and gauge are under the same gate.
+	bs.markTruncated(feed)
 
 	surfaces := map[string]string{"metrics": blFeedMetrics()}
+	sawTruncatedRow := false
 	for i, row := range checkBlocklistFeeds() {
 		surfaces["diagnostics row "+strconv.Itoa(i)] = row.Message + " " + row.OperatorAction
+		sawTruncatedRow = sawTruncatedRow || strings.Contains(row.Message, "TRUNCATED")
+	}
+	if !sawTruncatedRow {
+		t.Fatal("expected the truncation row, so its text is actually under test")
 	}
 	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 1, Interval: time.Hour})
 	for i, d := range *fired {
@@ -706,6 +728,7 @@ func TestChaos123_SeriesAreRegisteredOnTheScrapeEndpoint(t *testing.T) {
 		"culvert_blocklist_feed_stale",
 		"culvert_blocklist_feed_stale_seconds",
 		"culvert_blocklist_feed_oldest_success_timestamp_seconds",
+		"culvert_blocklist_feed_truncated",
 		"culvert_blocklist_feed_sync_ok",
 		"culvert_blocklist_feed_consecutive_sync_failures",
 	} {
