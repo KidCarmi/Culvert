@@ -8,6 +8,33 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-20 — `CHAOS-125` CLAIMED (placeholder, commit one). Domain: the
+INSPECTED TUNNEL'S PRE-HANDSHAKE WINDOW — the interval between the
+`200 Connection Established` and the forged-leaf handshake, on both SSL-inspect
+dispatches. `http.Hijacker.Hijack()` calls `rwc.SetDeadline(time.Time{})`
+(`net/http/server.go` `hijackLocked`), so the proxy listener's
+`ReadTimeout: 30s` is DISCARDED at the moment the handler takes the socket —
+and every read in the window that follows (`peekBuf.Peek(1)`, the native leg's
+`Peek(5+recLen)`, `clientTLS.HandshakeContext(r.Context())` on a context that
+no client disconnect cancels) is therefore unbounded. The tunnel is not yet in
+the drain registry (`registerDrainableTunnel` is deferred AFTER both
+handshakes) and not yet counted, so nothing can end the wait and nothing
+reports it. The upstream leg is already spent by then: the strip path holds a
+COMPLETED origin TLS session, the native path a dialled origin TCP conn.
+Culvert's own posture one step either side of this window is explicit — the
+bypass relay is idle-bounded (`tunnelIdleTimeout`) and registers with the drain
+immediately after its 200, and the inner loop arms a 60 s read deadline with
+the comment "so a slow client cannot hold the connection open indefinitely by
+trickling bytes" — so the only unbounded phase of an inspected tunnel's life is
+the one in the middle. This is the round that closes `CHAOS-32`, found
+2026-07-07, sized "S", never implemented, and since DUPLICATED into the
+native-ALPN leg added after it.** Id claimed in this committed row before any
+code was written, per the convention below and checked against `origin/main`
+rather than the working tree per the 2026-09-25 amendment: `CHAOS-124` is the
+highest id anywhere on `origin/main` (at `0fe4578`). Of the open PRs (#1977,
+#1705, #1549, #1548, #1536, #1528, #1526) none is a chaos sweep and none claims
+a chaos id. This sweep took 125 and will not move.
+
 **2026-11-19 — `CHAOS-124` CLAIMED. Domain: the FIFTH BODY OF SECURITY
 INTELLIGENCE — the ClamAV SIGNATURE DATABASE's freshness plane. CHAOS-123
 closed the operator-configured blocklist feed's freshness gap and handed the
