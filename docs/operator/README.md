@@ -79,6 +79,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 - [`scan-capacity-and-timeouts.md`](scan-capacity-and-timeouts.md) — content-scan (ClamAV/YARA/remote sidecar) capacity, timeouts, and posture, including the sidecar's own admission plane and how to size it (CHAOS-115, §6.2).
 - [`scan-svc-listener-health.md`](scan-svc-listener-health.md) — the scan sidecar's own listener: down vs. flapping, what to alert on, and why both mean the fleet is failing open (CHAOS-113/114).
 - [`blocklist-feed-freshness.md`](blocklist-feed-freshness.md) — operator-configured remote blocklist feeds: sync cadence, staleness detection, the auto-sync-off case, and recovery.
+- [`clamav-definition-freshness.md`](clamav-definition-freshness.md) — ClamAV virus definitions: how Culvert observes their age, why a stale database is invisible from every liveness probe, and the freshclam-side checklist (Culvert does not update them).
 - [`threat-feed-freshness.md`](threat-feed-freshness.md) — threat-feed sync cadence, staleness detection, and recovery.
 - [`threat-feed-domain-allowlist.md`](threat-feed-domain-allowlist.md) — managing the threat-feed domain allowlist.
 - [`policy-learning-mode.md`](policy-learning-mode.md) — Policy Learning Mode: observation, aggregation, and recommendation generation.

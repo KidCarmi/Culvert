@@ -39,6 +39,46 @@ and checked against `origin/main` rather than the working tree per the
 This sweep took 124 and will not move.
 
 
+The 2026-11-19 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-19.md) —
+CHAOS-124 (THE INTELLIGENCE WITH NO LOOP). The audit CHAOS-123 §9.4 handed
+forward found the four feed loops already covered and the gap one domain wider
+than "a feed the doc did not count": the ClamAV signature database, which
+`freshclam` updates OUT OF PROCESS in a container Culvert does not supervise.
+Four freshness rounds walked past it because every one of them found its gap by
+auditing a loop, and this intelligence has no loop in this repository. The node
+already read the build date every five minutes (CHAOS-107) and discarded it
+into an opaque cache key — `grep DBDate` over non-test Go found one consumer,
+`secscan.go:844`'s change-detection key. A daemon with month-old definitions is
+reachable, answers PING and VERSION, scans every body and returns CLEAN, so the
+`clamav` readiness row, the `clamav_scan` row, the `scan_clam_error` alert and
+compose's `clamdscan --ping 3` all pass indefinitely, and a persistent
+`clamav-db` volume means a restart reloads the same database. The one series
+that looked relevant, `culvert_scan_sigdb_invalidations_total`, counts CHANGES
+and is therefore byte-identical on a node whose updater died three weeks ago
+and one that is current but quiet — the mechanism WK-5/CHAOS-59 closed for the
+threat feed and CHAOS-123 for `culvert_blocklist_size`. Shipped: `DBDate`
+parsed into a time behind `clamav.Version.DBTime`, six unlabelled
+`culvert_clamav_signature_*` series, a `clamav_signatures` diagnostics row in
+three shapes, and a `clamav_signature_stale` alert fired once per episode and
+cleared only by an OBSERVED newer database. **Fail-safe direction of the
+unmeasurable states is the round's second finding:** an absent/unparseable
+build date and one dated ahead of this node's clock are each their own reported
+state and deliberately do NOT page (an inability to measure is not evidence of
+staleness), and neither may clear a live episode — the future-dated clearing
+path was a real defect found and fixed inside the round, with a test verified
+to fail without the guard. **Refused, each with its reason in the file
+comment:** no fail-closed toggle and no readiness change (a stale-definition
+node is a fully serving gateway, and ejecting it would convert a third-party
+updater's lapse into the customer's outage); no engine/DB-version metric labels
+(cardinality churn on every update, i.e. a cost borne by healthy nodes); no
+dial from a `/metrics` scrape (every surface reads the five-minute watcher's
+cached observation); no operator-settable threshold. Left open and recorded:
+sidecar deployments have no signature identity in the `/scan` protocol, and the
+class-ending gate should enumerate every body of security intelligence rather
+than every periodic fetch.
+
+
 **2026-11-18 — `CHAOS-123` CLAIMED (placeholder, commit one). Domain: the
 OPERATOR-CONFIGURED REMOTE BLOCKLIST FEED's FRESHNESS PLANE — CHAOS-108 fixed
 that feed's cadence (a failed round no longer costs a full 24 h interval, the

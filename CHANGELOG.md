@@ -9,6 +9,34 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A ClamAV signature database that has stopped updating is now observable
+  (`CHAOS-124`).** Culvert does not fetch virus definitions — `freshclam` does,
+  out of process, in a container Culvert neither starts nor supervises — so a
+  daemon whose definitions froze stayed invisible to every surface the product
+  had: it remained reachable, answered `PING` and `VERSION`, scanned every body
+  and returned `CLEAN`, so the `clamav` readiness row, the `clamav_scan`
+  diagnostics row, the `scan_clam_error` alert and Compose's own
+  `clamdscan --ping 3` healthcheck all passed, indefinitely, while malware
+  published since the database was built went undetected and those downloads
+  were reported to users as clean. A persistent `clamav-db` volume and
+  `restart: unless-stopped` meant a restart reloaded the same stale database,
+  so not even a reboot moved any of it. The node already learned the build date
+  on every five-minute `VERSION` poll (`CHAOS-107`) and discarded it into an
+  opaque cache key; the one metric that looked relevant,
+  `culvert_scan_sigdb_invalidations_total`, counts *changes*, so a node whose
+  updater died three weeks ago and a node that is current but quiet for an hour
+  exported a byte-identical value — the mechanism `WK-5`/`CHAOS-59` closed for
+  the threat feed and `CHAOS-123` closed for `culvert_blocklist_size`. The
+  build date is now parsed into a time (`clamav.Version.DBTime`) and surfaced as
+  the unlabelled `culvert_clamav_signature_*` family, a `clamav_signatures`
+  diagnostics row, and a `clamav_signature_stale` alert fired once per episode
+  and cleared only by an observed newer database. An unreadable build date and
+  one dated ahead of this node's clock are reported as their own states and
+  deliberately do **not** page: each is an inability to measure, not evidence of
+  staleness, and neither may clear a live episode. Posture is unchanged —
+  report-only, never gating, no dial from a `/metrics` scrape. Runbook:
+  [`docs/operator/clamav-definition-freshness.md`](docs/operator/clamav-definition-freshness.md).
+
 - **A policy rule on an IP-literal destination now matches every spelling of
   that address.** `destFqdn` literals were compared as text, so a Block/Drop
   rule on `192.0.2.7` did not match `[::ffff:192.0.2.7]`, and one on
