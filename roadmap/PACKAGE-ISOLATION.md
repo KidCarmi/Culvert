@@ -452,6 +452,58 @@ Baseline `174f157f`; source, both callers and the test file read in full.
   whose behavior is fully pinned by its own tests and fuzz target. Its size is
   not the argument; its lack of state, callers and hidden dependencies is.
 
+### IM-013 cluster CA validity policy (EXTRACT, 2026-11-20, main `491b963`)
+
+Task record (its table row lands after #1955, which edits the same table rows,
+so the two PRs do not conflict textually):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-013: `cluster_ca_validity.go` policy → `internal/clusterca` |
+| Status | **implementation under review** (PR on `claude/modest-bell-p29x58`) |
+| Depends on | — (no open PR touches `cluster_ca_validity.go` or the root test files that exercise it; #1528 edits `enrollment.go`, `healthcheck.go`, `controlplane_server.go`, which this change leaves untouched) |
+| Evidence | ADR-0048; 8 exported names (`Usable`, `ClampNodeValidity`, `UnusableKind`, `Remediation`, `RenewalWindow`, `ErrUnusable`, `ErrExpired`, `ErrNotYetValid`); root keeps six one-line bindings so 0 callers and 0 tests changed; frozen-oracle differential test over a clock matrix + mutation controls; boundary test with negative controls; root test inventory 8516 → 8516 |
+| Risks | message bytes are operator-visible (pinned by the oracle); the strict-`NotBefore` divergence from `internal/ca` is the security property (pinned twice) |
+| Next action | review PR; add this row to the table once #1955 merges |
+
+- **Reconciled.** IM-009 (#1941) and IM-011 (#1944) merged 2026-11-19; their
+  table rows are corrected by open #1955 (IM-012), which also owns the
+  saas-feed files, so IM-002/IM-003 cannot start without overlapping it.
+  IM-010 still needs a benchgate measurement. IM-005/IM-006 stay blocked on
+  #1526. A parse-level walk of all 463 root production files found
+  `cluster_ca_validity.go` with 2 root dependencies (`clusterCA`, the type its
+  two methods hang off) and a pure policy inside it.
+- **Program rule.** The "one open program PR at a time" rule was already
+  exceeded by #1941 and #1944, both merged by the owner; this PR runs beside
+  #1955 on the same basis because the two share no source file. If the owner
+  wants strict serialisation, this PR can wait for #1955 unchanged.
+- **Moved:** the predicate, sentinels, kind classifier, remediation text,
+  issuer clamp and renewal window. **Stays main:** the `clusterCA` instance
+  (`enrollment.go`, `ha.go`), its `Usable`/`Expiry` lock reads, and every
+  caller. No ADR-0002 conflict: the file is not on its list, and its
+  cluster/HA row admits a separately mapped piece that is not a hub.
+- **Discovered, not fixed here (pre-existing on main `491b963`).**
+  `go test -race -run 'Chaos50|…' -shuffle=1795165242677438098 .` fails
+  identically on unmodified main: `TestChaos50_RecoveryIsBounded`
+  (`rootca_recovery_test.go:244`) reaches `StartCAAutoRotation` through
+  `loadRootCA`, whose first `checkRound` reads `globalClusterCA` (`ca.go:112`);
+  nothing joins that goroutine's `done` channel before the test returns, so a
+  later `installClusterCA` write (`cluster_ca_chaos_test.go:98`) races it.
+  Test isolation only; the fix belongs in the CA-recovery test helpers.
+- **Discovered: IM-014 lead, release catalog trust kernel.**
+  `release_catalog.go` (2 root dependencies, `oNoFollow` and `version`; 34
+  inbound production files), `release_catalog_verify.go`, `_freshness.go`,
+  `_sigstore.go`, `_bundle.go` total 1,638 lines and already speak exported
+  types (`Catalog`, `TrustStore`, `CatalogSource`). Too large for one PR, and
+  ADR-0002/the release row say map agent/catalog effects first. First step:
+  list `Catalog`'s unexported-field readers outside `release_catalog*.go`
+  (`release_dispatch*.go`, `release_api.go`) to see whether the loader +
+  freshness + verify trio can move with `Catalog` as one boundary.
+- **Next.** After #1955 merges: IM-002+IM-003 as one boundary (first step
+  unchanged from the IM-012 note: read `saas_feed_genstore.go` exports used by
+  `saas_feed_activate.go`, `_recover.go`, `_gc.go`, `_runtime.go` and count
+  the alias surface). Independent of #1955: IM-014 mapping as above.
+
 ### IM-011 extraction (EXTRACT, 2026-11-18, main `348a2cf`)
 
 IM-011 is the Shadow metrics sink split from IM-009 (its table row lands with
