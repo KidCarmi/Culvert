@@ -66,6 +66,18 @@ const cdrRedialLogEvery = 10
 // waits.
 var cdrRedialDelay = auditOpenRetryDelay
 
+// cdrRedialWithdrawHook runs after the post-publish re-validation has DECIDED
+// which published members to withdraw and before cdrPool.replace unpublishes
+// them. Production leaves it nil.
+//
+// It exists because the ordering it brackets is the whole invariant: a
+// withdrawn member must be unpublished BEFORE its connection is closed, and
+// that window is not observable from the end state (both orders end with the
+// member closed and out of the pool). This is the only point at which a test
+// can catch the inversion. See
+// TestCDRRedial_WithdrawnMemberIsUnpublishedBeforeItIsClosed.
+var cdrRedialWithdrawHook func(withdrawn []string)
+
 // cdrRedialGate is the poller-side backoff state. Only the health-poller
 // goroutine calls maybeRedialMissingCDRMembers in production; the mutex keeps
 // tests (and a second poller from a repeated startCDRHealthPoller) race-free.
@@ -181,7 +193,9 @@ func reconcileCDRPool(ctx context.Context) cdrRedialResult {
 
 	// Re-validate immediately before publishing: CDR still enabled, the
 	// lifecycle still running, each instance still enrolled as dialled.
-	dialed, dropped := dropInvalidRedialed(ctx, dialed, targets, bootstrap)
+	// Nothing here is published yet, so this pass owns the teardown of what it
+	// drops (closeDropped=true).
+	dialed, dropped := dropInvalidRedialed(ctx, dialed, targets, bootstrap, true)
 	res.missing = append(res.missing, dropped...)
 	if len(dialed) == 0 {
 		return res
@@ -200,7 +214,17 @@ func reconcileCDRPool(ctx context.Context) cdrRedialResult {
 	// shutdownCDRClient, waiting on cdrPoolLifecycleMu, tears it down after
 	// this returns), or the removal happened before this re-check and the
 	// member is withdrawn here. No interleaving leaves it in the pool.
-	kept, withdrawn := dropInvalidRedialed(ctx, dialed, targets, bootstrap)
+	// closeDropped=false: these clients are PUBLISHED now, and cdrPool.pick
+	// filters only on breaker state — CDRClient.closedAt is written by Close
+	// and read by nothing — so a client closed while still in the pool is
+	// still selectable, and the sanitize RPC that drew it fails. Under
+	// fail_mode: open that one document passes CDR UNSANITIZED. So decide
+	// here, unpublish first, and let cdrPool.replace do the closing: it
+	// already closes exactly the clients not carried over, after the swap.
+	kept, withdrawn := dropInvalidRedialed(ctx, dialed, targets, bootstrap, false)
+	if cdrRedialWithdrawHook != nil {
+		cdrRedialWithdrawHook(withdrawn)
+	}
 	if len(withdrawn) > 0 {
 		// A fresh slice: next is now the pool's published backing array.
 		trimmed := make([]*cdrPooledClient, 0, len(live)+len(kept))
@@ -247,12 +271,19 @@ func cdrMissingPoolMembers(cfg CDRConfig, live []*cdrPooledClient) ([]CDREnrolle
 }
 
 // dropInvalidRedialed keeps the dialled members that may still be published
-// and closes the rest. A member stays valid while CDR is enabled in the
+// and reports the rest. A member stays valid while CDR is enabled in the
 // active config, ctx is live, and its registry entry still exists, is
 // enabled and names the same endpoint, credential files and server pin it
 // was dialled with. A bootstrap member stays valid while the registry is
 // still empty.
-func dropInvalidRedialed(ctx context.Context, dialed []*cdrPooledClient, targets []CDREnrolledInstance, bootstrap bool) (kept []*cdrPooledClient, dropped []string) {
+//
+// closeDropped says whether THIS pass owns the teardown of what it drops, and
+// is exactly "are these clients still unpublished?". Before the pool swap they
+// are reachable by nobody, so closing them here is the only thing that would:
+// pass true. After the swap they are in the published pool, where closing one
+// before it is unpublished hands a live picker a dead connection (see the call
+// site): pass false and let cdrPool.replace close them once they are out.
+func dropInvalidRedialed(ctx context.Context, dialed []*cdrPooledClient, targets []CDREnrolledInstance, bootstrap bool, closeDropped bool) (kept []*cdrPooledClient, dropped []string) {
 	stillOn := ctx.Err() == nil && cdrActiveConfig().Enabled
 	byName := make(map[string]*CDREnrolledInstance, len(targets))
 	for i := range targets {
@@ -264,7 +295,7 @@ func dropInvalidRedialed(ctx context.Context, dialed []*cdrPooledClient, targets
 			continue
 		}
 		dropped = append(dropped, pc.Name)
-		if pc.Client != nil {
+		if closeDropped && pc.Client != nil {
 			_ = pc.Client.Close()
 		}
 	}

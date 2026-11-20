@@ -251,6 +251,9 @@ func buildOperatorContract() OperatorContract {
 	// CDR fail-open passthroughs (engine error under fail_mode open) in the last 24h.
 	// Contributes nothing unless a fail-open passthrough actually happened.
 	checks = append(checks, checkCDRFailOpenPassthrough()...)
+	// Sluice client certificates expired or near expiry (renewal failing).
+	// Contributes nothing while CDR is disabled or every certificate is healthy.
+	checks = append(checks, checkCDRClientCertExpiry()...)
 	// CHAOS-05/07 state-file quarantine, authenticated + path-free. Contributes
 	// nothing when every state file on this node loaded cleanly.
 	checks = append(checks, checkStateFileIntegrity()...)
