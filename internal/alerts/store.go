@@ -78,6 +78,19 @@ package alerts
 //                             cleared only when every auto-synced feed is observed fresh again. Detail
 //                             carries counts, an age and an interval — never a feed URL (which
 //                             routinely embeds a token) or the fetch error.
+//   "clamav_signature_stale" — the ClamAV virus-definition database the local daemon reports is more
+//                             than 48h old (CHAOS-124). Culvert does not fetch definitions: freshclam
+//                             does, out of process, so this is an OBSERVATION of the build date clamd
+//                             reports in its VERSION reply, not the outcome of a sync this process
+//                             ran. The daemon stays reachable and keeps returning CLEAN verdicts, so
+//                             no other surface moves — malware published since the database was built
+//                             is simply not detected. An UNREADABLE or future-dated build date is
+//                             deliberately NOT paged (it is an inability to measure, not evidence of
+//                             staleness); it gets a diagnostics row and a gauge instead. Fired once
+//                             per episode; cleared only by an observed newer database, never by
+//                             elapsed time. Detail carries an age and a build date, never the engine
+//                             string or the raw reply (both change on every upgrade and would weaken
+//                             the event+Detail dedup window).
 //   "syslog_feed_down"      — the remote syslog/SIEM feed has lost events and delivered nothing for
 //                             the degradation window (CHAOS-66): audit and request events are not
 //                             reaching the collector and are NOT replayed. The node keeps proxying
@@ -118,6 +131,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -211,6 +225,32 @@ func ValidateURL(raw string) error {
 		return fmt.Errorf("URL must include a host")
 	}
 	return nil
+}
+
+// URLOrigin reduces a webhook URL to scheme://host — where alerts go, without
+// the part that authorises posting there. Slack/Teams/PagerDuty-style receivers
+// authenticate by a token in the path or query (and some by userinfo), so the
+// full URL is a credential: it is shown only to the role that manages webhooks
+// (operator) and never written to the viewer-readable audit log or delivery
+// history. Unparseable input yields "" rather than being echoed back.
+func URLOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// deliveryErrText renders a delivery error without the request URL. net/http
+// wraps transport failures in *url.Error, whose text quotes the full URL (only
+// a userinfo password is masked), and that text reaches the delivery history
+// and the process log. The operation and the underlying cause are kept.
+func deliveryErrText(err error) string {
+	var uerr *url.Error
+	if errors.As(err, &uerr) && uerr.Err != nil {
+		return uerr.Op + ": " + uerr.Err.Error()
+	}
+	return err.Error()
 }
 
 // maxEventNameLen bounds one subscribed event name. The longest name in the
@@ -1174,8 +1214,8 @@ func (as *Store) deliverAttemptContext(parent context.Context, h Webhook, payloa
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(body))
 	if err != nil {
-		obs.Printf("Alert webhook %q: build request error: %v", obs.Sanitize(h.Name), err)
-		record.Error = err.Error()
+		obs.Printf("Alert webhook %q: build request error: %s", obs.Sanitize(h.Name), deliveryErrText(err))
+		record.Error = deliveryErrText(err)
 		as.RecordDelivery(record)
 		return false
 	}
@@ -1192,8 +1232,8 @@ func (as *Store) deliverAttemptContext(parent context.Context, h Webhook, payloa
 	// attempt — see deliveryClient).
 	resp, err := deliveryClient.Do(req)
 	if err != nil {
-		obs.Printf("Alert webhook %q: delivery error: %v", h.Name, err)
-		record.Error = err.Error()
+		obs.Printf("Alert webhook %q: delivery error: %s", h.Name, deliveryErrText(err))
+		record.Error = deliveryErrText(err)
 		as.RecordDelivery(record)
 		return false
 	}

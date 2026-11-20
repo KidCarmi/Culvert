@@ -85,8 +85,8 @@ func cdrClientCertExpiryRows(insts []CDREnrolledInstance, now time.Time) []Opera
 		OperatorAction: fmt.Sprintf("Open CDR → Instances; the Cert expires column shows each instance's remaining validity. "+
 			"Culvert renews these certificates automatically over the Sluice connection once fewer than %d days remain, "+
 			"so a certificate this close to (or past) expiry means renewal is failing or not running: confirm the instance "+
-			"is reachable and healthy there, and note that the renewal poller starts only when CDR is enabled at startup "+
-			"(a node that enabled CDR at runtime renews nothing until it restarts). If it still does not renew, Revoke "+
+			"is reachable and healthy there and that the log shows no `RenewCert failed` line (the renewal poller runs "+
+			"whenever CDR is enabled, at startup or at runtime). If it still does not renew, Revoke "+
 			"the instance and re-enroll it with a fresh token and fingerprint from the Sluice admin.", cdrRenewWindow),
 	}}
 }

@@ -60,12 +60,62 @@ func cdrHealthLastSeenAt() time.Time {
 	return cdrHealthLastSeen
 }
 
-// startCDRHealthPoller launches the background goroutine.  Safe to call
-// multiple times — each call spawns one additional goroutine that honours
-// the given context, so callers using a per-boot lifecycle context get
-// clean shutdown for free.  Returns immediately.
-func startCDRHealthPoller(ctx context.Context) {
+// cdrHealthPollerMu guards cdrHealthPollerCtx, the lifecycle context of the
+// poller ensureCDRHealthPoller last started (nil when none was started), and
+// cdrHealthPollerDone, closed when that poller's goroutine has returned.
+var (
+	cdrHealthPollerMu   sync.Mutex
+	cdrHealthPollerCtx  context.Context
+	cdrHealthPollerDone <-chan struct{}
+)
+
+// ensureCDRHealthPoller starts the health poller unless one is already
+// running under a live context, and reports whether it started one. It is the
+// single entry point for every enable path: loadCDR at boot, and the runtime
+// enables (the admin toggle and first-enrollment auto-enable) through
+// armCDRHealthPollerAtRuntime. Before it existed only the boot path started a
+// poller, so a node whose CDR was turned on at runtime ran no health probes,
+// no client-certificate auto-renewal, no server-pin rotation and no re-dial
+// until a restart (docs/operator/cdr-content-disarm-reconstruction.md).
+//
+// One poller per lifecycle: a second enable, a disable-then-enable cycle, or a
+// boot-enabled node toggled again never adds a goroutine. The poller keeps
+// running across a runtime disable exactly as the boot-started one always
+// has; every round is a no-op on an empty pool. A cancelled ctx starts
+// nothing, so a request that lands after shutdown began cannot arm one.
+func ensureCDRHealthPoller(ctx context.Context) bool {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	cdrHealthPollerMu.Lock()
+	defer cdrHealthPollerMu.Unlock()
+	if cdrHealthPollerCtx != nil && cdrHealthPollerCtx.Err() == nil {
+		return false
+	}
+	cdrHealthPollerCtx = ctx
+	cdrHealthPollerDone = startCDRHealthPoller(ctx)
+	return true
+}
+
+// armCDRHealthPollerAtRuntime starts the poller, under the process lifecycle
+// context, after a runtime enable. Before the lifecycle context is wired
+// (appLifecycleCtx nil: handler-level tests, never a serving process, since
+// initLifecycleContext runs before any listener) it does nothing rather than
+// detach a poller nobody can stop.
+func armCDRHealthPollerAtRuntime() {
+	if ensureCDRHealthPoller(appLifecycleCtx) {
+		logger.Printf("CDR: health poller started after a runtime enable (health probes, certificate auto-renewal and pool re-dial now active)")
+	}
+}
+
+// startCDRHealthPoller launches the background goroutine and returns
+// immediately with a channel closed when it exits. Each call spawns one
+// goroutine that honours ctx; callers go through ensureCDRHealthPoller so a
+// lifecycle runs exactly one.
+func startCDRHealthPoller(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		t := time.NewTicker(cdrHealthInterval)
 		defer t.Stop()
 		// Fire once right away so the GUI has data before the first tick.
@@ -83,6 +133,7 @@ func startCDRHealthPoller(ctx context.Context) {
 			}
 		}
 	}()
+	return done
 }
 
 // probeCDRHealth issues one Health RPC per pool member and updates the

@@ -167,6 +167,64 @@ type Version struct {
 	Raw       string `json:"raw"`                  // full unparsed reply
 }
 
+// dbDateLayouts are the layouts a clamd VERSION reply's third field has been
+// observed in. clamd formats it with strftime("%a %b %d %H:%M:%S %Y"), which
+// zero-pads the day, but the padding and the presence of a zone abbreviation
+// both vary across builds and across the several daemons that answer this
+// command (clamd, a clamd-compatible sidecar, a proxying frontend), so the
+// parse tries each in order rather than assuming one.
+//
+// Order is not correctness-critical, and that was MEASURED rather than
+// assumed: time.Parse against an unzoned layout does not silently truncate a
+// zoned value, it fails on it ("cannot parse \"UTC 2025\" as \"2006\"",
+// because the year still has to match), so a wrong guess falls through to the
+// next layout instead of returning a shifted instant. The zoned forms are
+// listed first only so the zoned case costs one attempt instead of four.
+var dbDateLayouts = []string{
+	time.UnixDate,                  // Mon Jan _2 15:04:05 MST 2006
+	"Mon Jan 02 15:04:05 MST 2006", // zero-padded day, zoned
+	time.ANSIC,                     // Mon Jan _2 15:04:05 2006
+	"Mon Jan 02 15:04:05 2006",     // zero-padded day (clamd's strftime %d)
+	"Mon Jan 2 15:04:05 2006",      // single-space, unpadded day
+}
+
+// DBTime parses DBDate into the signature database's build time, reporting
+// false when there is no date to parse or when none of the known layouts
+// matches.
+//
+// The boolean is load-bearing and callers must not collapse it to a zero
+// Time: an unparseable or absent date means the age of the signature set is
+// UNKNOWN, and unknown is not the same as current. Reporting an unknown date
+// as a zero time would make it the oldest possible signature set (alerting on
+// every daemon whose reply this parse does not understand), and reporting it
+// as time.Now() would make it permanently fresh (alerting on none of them).
+// Both are wrong in a way the caller cannot detect, so the decision belongs to
+// the freshness plane, which reports "unknown" as its own state.
+//
+// A reply with no "/" fields — an older or minimally-configured daemon, or one
+// with no database loaded at all — carries an empty DBDate and lands on the
+// same false.
+//
+// The zone is whatever the layout supplied: an unzoned reply parses as UTC,
+// because clamd formats with localtime and does not say which zone that was.
+// A daemon in a non-UTC zone therefore skews the computed age by at most the
+// zone offset, under 15 hours, which is far below any staleness threshold an
+// operator would set on a signature set that upstream refreshes several times
+// a day. The skew is recorded rather than corrected: there is no field in the
+// reply to correct it from.
+func (v Version) DBTime() (time.Time, bool) {
+	raw := strings.TrimSpace(v.DBDate)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range dbDateLayouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // parseClamVersion splits a VERSION reply into its "/"-separated fields. A
 // reply with no "/" (engine only) leaves DBVersion/DBDate empty.
 func parseClamVersion(raw string) Version {

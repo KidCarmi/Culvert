@@ -85,6 +85,22 @@ func webhookCreateRejected(w http.ResponseWriter, h AlertWebhook) bool {
 	return false
 }
 
+// webhooksForRole lists the webhooks as role may read them. The URL is itself
+// a credential for most receivers (a token in the path or query), so only the
+// role that manages webhooks (operator) reads it back; below that the listing
+// says where alerts go, not how to post there. List returns a copy with the
+// signing secrets already blanked.
+func webhooksForRole(role UIRole) []AlertWebhook {
+	hooks := alertStore().List()
+	if role.HasRole(RoleOperator) {
+		return hooks
+	}
+	for i := range hooks {
+		hooks[i].URL = alerts.URLOrigin(hooks[i].URL)
+	}
+	return hooks
+}
+
 // GET  /api/alerts/webhooks      → list webhooks (secrets redacted)
 // POST /api/alerts/webhooks      → create webhook
 // PUT  /api/alerts/webhooks?id=X → update webhook
@@ -95,7 +111,7 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 		if !requireRole(w, r, RoleViewer) {
 			return
 		}
-		jsonOK(w, map[string]any{"webhooks": alertStore().List()})
+		jsonOK(w, map[string]any{"webhooks": webhooksForRole(uiRole(r))})
 
 	case http.MethodPost:
 		if !requireRole(w, r, RoleOperator) {
@@ -111,7 +127,8 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 		}
 		h.Enabled = true
 		created := alertStore().Add(h)
-		auditEvent(r, "alert.webhook.create", created.ID, h.URL)
+		// Origin only: the audit log is viewer-readable and outlives the webhook.
+		auditEvent(r, "alert.webhook.create", created.ID, alerts.URLOrigin(h.URL))
 		jsonOK(w, created)
 
 	case http.MethodPut:
