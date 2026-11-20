@@ -25,6 +25,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `blocklist_feed` WARN row and the `culvert_blocklist_feed_stale*` gauges are
   derived on read and stayed correct — but the push surface the feature exists
   for was lost (`TestChaos123_UndeliveredStaleAlertDoesNotConsumeTheEpisode`).
+- **A stale threat-feed alert that reached nobody no longer consumes the node's
+  one page for that episode (`SEC-TFEED-STALE-LATCH-1`).** The threat-feed
+  staleness plane had the same shape as `SEC-BLFEED-STALE-LATCH-1` on both of
+  its paths. A failed round latched `threat_feed_stale` before the sink, which
+  drops the alert when nothing subscribes; and a node that booted with an
+  already-stale database latched when the alert was accepted into the startup
+  queue, although the flush hands it to `Dispatch`, which reaches nobody when
+  no webhook is loaded — the default posture. Either way an operator who
+  subscribed afterwards was never paged while the gateway went on enforcing
+  against intelligence that was not refreshing. The runtime path now latches
+  only on a dispatched alert, and the startup path decides at the flush — the
+  only point at which the webhook store is real — under the same lock: a
+  queued alert that reaches a subscriber counts as the episode's page and is
+  not re-sent, one that reaches nobody leaves the episode open, and one whose
+  episode was already paged between the webhook load and the flush is dropped.
+  The fire-once rule is now one helper, `latchOncePerEpisodeOnDelivery`, shared
+  with the blocklist plane so the two copies cannot drift. The `threat_feed`
+  WARN row and the `culvert_threat_feed_*` gauges were unaffected throughout
+  (`TestThreatFeedStale_UndeliveredAlertDoesNotConsumeTheEpisode`,
+  `TestThreatFeedStale_StartupAlertFlushedToNobodyDoesNotConsumeTheEpisode`).
 - **A withdrawn CDR pool member is unpublished before its connection is closed
   (`SEC-CDR-REDIAL-CLOSE-ORDER-1`).** The automatic re-dial publishes the
   members it dialled and then re-validates them, withdrawing any whose registry

@@ -349,14 +349,10 @@ func evaluateBlocklistFeedStaleness() {
 	// The decision stays INSIDE the lock so concurrent failed rounds still page
 	// at most once per episode. Nothing blocking runs under it: the sink only
 	// probes the lock-free subscription index and hands off to a goroutine.
-	blocklistFeedHealth.mu.Lock()
-	defer blocklistFeedHealth.mu.Unlock()
-	if blocklistFeedHealth.alerted {
-		return
-	}
-	if fireBlocklistFeedStaleAlert(detail) {
-		blocklistFeedHealth.alerted = true
-	}
+	// The rule is shared with the threat-feed plane, so the two copies cannot
+	// drift: see latchOncePerEpisodeOnDelivery.
+	latchOncePerEpisodeOnDelivery(&blocklistFeedHealth.mu, &blocklistFeedHealth.alerted,
+		func() bool { return fireBlocklistFeedStaleAlert(detail) })
 }
 
 // blocklistFeedAlertDetail renders the bounded alert detail.

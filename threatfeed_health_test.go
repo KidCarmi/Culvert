@@ -25,15 +25,22 @@ import (
 // tfHealthHarness isolates the process-global feed + health record and captures
 // alerts synchronously through the package-level seam (never the real sink —
 // that is the -count/-shuffle determinism class the CI gate catches).
+//
+// The seam mirrors the production sink's contract: it reports DISPATCHED only
+// while subscribed is true (the default, so the long-standing gates keep their
+// "a page was sent" meaning), and records every attempt separately so a gate
+// can tell "never reached the sink" from "reached it, but nobody subscribed".
 type tfHealthHarness struct {
-	mu     sync.Mutex
-	alerts []string
-	now    time.Time
+	mu         sync.Mutex
+	alerts     []string // dispatched pages only
+	attempts   int
+	subscribed bool
+	now        time.Time
 }
 
 func newTFHealthHarness(t *testing.T, interval time.Duration) (*tfHealthHarness, *threatfeed.Feed) {
 	t.Helper()
-	h := &tfHealthHarness{now: time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)}
+	h := &tfHealthHarness{now: time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC), subscribed: true}
 
 	prevFeed := globalThreatFeed
 	prevAlert := fireThreatFeedStaleAlert
@@ -48,10 +55,15 @@ func newTFHealthHarness(t *testing.T, interval time.Duration) (*tfHealthHarness,
 		defer h.mu.Unlock()
 		return h.now
 	}
-	fireThreatFeedStaleAlert = func(detail string) {
+	fireThreatFeedStaleAlert = func(detail string) bool {
 		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.attempts++
+		if !h.subscribed {
+			return false
+		}
 		h.alerts = append(h.alerts, detail)
-		h.mu.Unlock()
+		return true
 	}
 	noteThreatFeedConfigured()
 
@@ -398,7 +410,7 @@ func TestThreatFeedSyncOK_SurvivesARestartFromAFailedSync(t *testing.T) {
 	reloaded := threatfeed.New()
 	reloaded.Init(path, time.Hour)
 	globalThreatFeed = reloaded
-	fireThreatFeedStaleAlert = func(string) {}
+	fireThreatFeedStaleAlert = func(string) bool { return false }
 	deferThreatFeedStaleAlert = func(string) {}
 	noteThreatFeedConfigured()
 	t.Cleanup(func() {
@@ -443,7 +455,7 @@ func TestThreatFeedStale_EvaluatedAtStartupForAWarmButStaleDatabase(t *testing.T
 	feed.Init("", time.Hour)
 	feed.SeedSyncSuccessForTest(time.Now().Add(-72 * time.Hour)) // three days stale
 	globalThreatFeed = feed
-	fireThreatFeedStaleAlert = func(d string) { mu.Lock(); direct = append(direct, d); mu.Unlock() }
+	fireThreatFeedStaleAlert = func(d string) bool { mu.Lock(); direct = append(direct, d); mu.Unlock(); return true }
 	deferThreatFeedStaleAlert = func(d string) { mu.Lock(); deferred = append(deferred, d); mu.Unlock() }
 	t.Cleanup(func() {
 		resetThreatFeedHealthForTest()
@@ -492,7 +504,7 @@ func TestThreatFeedStale_StartupIsSilentForAFreshOrHealthyNode(t *testing.T) {
 			tc.seed(feed)
 			globalThreatFeed = feed
 			deferThreatFeedStaleAlert = func(d string) { mu.Lock(); deferred = append(deferred, d); mu.Unlock() }
-			fireThreatFeedStaleAlert = func(string) {}
+			fireThreatFeedStaleAlert = func(string) bool { return false }
 			t.Cleanup(func() {
 				resetThreatFeedHealthForTest()
 				globalThreatFeed = prevFeed
@@ -508,5 +520,443 @@ func TestThreatFeedStale_StartupIsSilentForAFreshOrHealthyNode(t *testing.T) {
 				t.Fatalf("startup alerted on a %s node: %v", tc.name, deferred)
 			}
 		})
+	}
+}
+
+// ── SEC-TFEED-STALE-LATCH-1: the episode is consumed only by a delivered page ──
+
+// tfAlerted reads the plane's fire-once latch.
+func tfAlerted() bool {
+	threatFeedHealth.mu.Lock()
+	defer threatFeedHealth.mu.Unlock()
+	return threatFeedHealth.alerted
+}
+
+// TestThreatFeedStale_UndeliveredAlertDoesNotConsumeTheEpisode is the runtime
+// half of SEC-TFEED-STALE-LATCH-1, the threat-feed sibling of
+// SEC-BLFEED-STALE-LATCH-1.
+//
+// The stale alert fires at most once per episode, and the episode clears only
+// on an OBSERVED clean sync or a restart — never on elapsed time. The latch
+// used to be set before the sink ran, and the sink drops the alert when
+// nothing subscribes, which is the DEFAULT posture. So the first stale round
+// spent the node's one page on nobody, and an operator who subscribed to
+// threat_feed_stale afterwards was never paged while the gateway went on
+// enforcing against intelligence that was not refreshing.
+func TestThreatFeedStale_UndeliveredAlertDoesNotConsumeTheEpisode(t *testing.T) {
+	h, feed := newTFHealthHarness(t, 6*time.Hour)
+	h.syncOK(feed)
+	h.advance(13 * time.Hour) // past 2x the 6h interval
+
+	// Phase 1: nothing subscribes, so the sink dispatches nothing.
+	h.mu.Lock()
+	h.subscribed = false
+	h.mu.Unlock()
+	for i := 1; i <= 3; i++ {
+		h.syncFail(feed, "tflatch-src-before", i)
+		h.advance(time.Hour)
+	}
+	h.mu.Lock()
+	attempts := h.attempts
+	h.mu.Unlock()
+	if attempts == 0 {
+		t.Fatal("precondition: the stale evaluation never reached the alert sink")
+	}
+	if got := h.fired(); len(got) != 0 {
+		t.Fatalf("pages dispatched with no subscriber: %v", got)
+	}
+
+	// Phase 2: the operator adds the webhook. The feed is still stale and the
+	// episode was never delivered, so the next failed round must page.
+	h.mu.Lock()
+	h.subscribed = true
+	h.mu.Unlock()
+	h.syncFail(feed, "tflatch-src-after", 4)
+	got := h.fired()
+	if len(got) != 1 {
+		t.Fatalf("pages after the webhook was added = %d, want 1: the episode was consumed by an alert "+
+			"that reached nobody, so a feed that is still stale never pages (SEC-TFEED-STALE-LATCH-1)", len(got))
+	}
+	if !strings.Contains(got[0], "tflatch-src-after") {
+		t.Errorf("page %q is not the post-subscription round's alert", got[0])
+	}
+
+	// And the latch still holds once delivery HAS happened.
+	for i := 5; i <= 8; i++ {
+		h.advance(time.Hour)
+		h.syncFail(feed, "tflatch-src-later", i)
+	}
+	if got := h.fired(); len(got) != 1 {
+		t.Errorf("pages = %d after further failed rounds, want 1: a delivered episode must still page only once", len(got))
+	}
+}
+
+// TestThreatFeedStale_ConcurrentRoundsPageOncePerEpisode — the latch decision
+// stays inside the plane's lock, so concurrent failed rounds racing to report
+// the same episode dispatch exactly one page. Probing the subscription outside
+// the lock and latching afterwards would reopen a double-page window. Run with
+// -race.
+func TestThreatFeedStale_ConcurrentRoundsPageOncePerEpisode(t *testing.T) {
+	h, feed := newTFHealthHarness(t, time.Hour)
+	h.syncOK(feed)
+	h.advance(5 * time.Hour)
+	feed.SeedSyncFailureForTest("tflatch-src-concurrent")
+
+	const rounds = 32
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < rounds; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			noteThreatFeedSync(threatfeed.SyncOutcome{FailedSources: "tflatch-src-concurrent", ConsecutiveFailures: i + 1})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	got := h.fired()
+	if len(got) != 1 {
+		t.Fatalf("%d concurrent failed rounds dispatched %d pages, want exactly 1", rounds, len(got))
+	}
+	if !strings.Contains(got[0], "tflatch-src-concurrent") {
+		t.Errorf("page %q does not name the failing source", got[0])
+	}
+	h.mu.Lock()
+	attempts := h.attempts
+	h.mu.Unlock()
+	if attempts != 1 {
+		t.Errorf("the sink ran %d times, want 1: once delivered, the latch must short-circuit before the sink", attempts)
+	}
+}
+
+// TestThreatFeedStale_SinkReportsDispatchOnlyWithASubscriber pins the
+// production sink's half of the contract: with no subscriber it reports false
+// and dispatches nothing; with one it dispatches and reports true.
+func TestThreatFeedStale_SinkReportsDispatchOnlyWithASubscriber(t *testing.T) {
+	tfSwapAlertStore(t, false)
+	dispatched := make(chan string, 4)
+	prevFire := fireAlert
+	fireAlert = func(event string, p AlertPayload) {
+		if event == "threat_feed_stale" {
+			dispatched <- p.Detail
+		}
+	}
+	t.Cleanup(func() { fireAlert = prevFire })
+
+	if fireThreatFeedStaleAlert("tflatch-sink-nobody") {
+		t.Fatal("the sink reported a dispatch with no threat_feed_stale subscriber")
+	}
+
+	tfSwapAlertStore(t, true)
+	if !fireThreatFeedStaleAlert("tflatch-sink-subscribed") {
+		t.Fatal("the sink reported no dispatch with a threat_feed_stale subscriber")
+	}
+	select {
+	case d := <-dispatched:
+		if d != "tflatch-sink-subscribed" {
+			t.Fatalf("dispatched %q, want the subscribed call's detail (the no-subscriber call must dispatch nothing)", d)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sink reported a dispatch but none arrived")
+	}
+}
+
+// ── The deferred startup path ─────────────────────────────────────────────────
+
+// tfSwapAlertStore installs a fresh process-wide alert store, with or without
+// an enabled threat_feed_stale webhook, and restores the previous one at
+// cleanup. Delivery is never reached: every gate below captures the sinks.
+func tfSwapAlertStore(t *testing.T, subscribed bool) {
+	t.Helper()
+	orig := alertStore()
+	t.Cleanup(func() { alertStoreRef.Store(orig) })
+	as := &AlertStore{}
+	as.Init("")
+	if subscribed {
+		as.Add(AlertWebhook{Name: "tflatch", URL: "https://alerts.example.invalid/hook", Events: []string{"threat_feed_stale"}, Enabled: true})
+	}
+	alertStoreRef.Store(as)
+}
+
+// tfStartupHarness is a node whose persisted threat DB is warm but three days
+// stale, booting with the startup-alert queue isolated (flushed says whether
+// the flush has already happened) and the process-wide alert store empty, as
+// it is before loadPersistentAdminState loads the webhooks.
+//
+// Both sinks are captured synchronously: the flush's startupAlertFire, and the
+// runtime sink, replaced by a mirror of the production gate that probes the
+// REAL subscription index (threatFeedStaleSubscribed) instead of spawning the
+// delivery goroutine.
+type tfStartupHarness struct {
+	mu      sync.Mutex
+	runtime []string // runtime-sink pages (always to a subscriber)
+	flushTo []string // details the flush handed to Dispatch, tagged with whether anyone subscribed
+	feed    *threatfeed.Feed
+	now     time.Time
+}
+
+func newTFStartupHarness(t *testing.T, flushed bool) *tfStartupHarness {
+	t.Helper()
+	h := &tfStartupHarness{now: time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)}
+
+	startupAlertMu.Lock()
+	prevQueue, prevFlushed := startupAlertQueue, startupAlertFlushed
+	startupAlertQueue, startupAlertFlushed = nil, flushed
+	startupAlertMu.Unlock()
+	prevStartupFire := startupAlertFire
+	prevFeed := globalThreatFeed
+	prevAlert := fireThreatFeedStaleAlert
+	prevDefer := deferThreatFeedStaleAlert
+	resetThreatFeedHealthForTest()
+	t.Cleanup(func() {
+		startupAlertMu.Lock()
+		startupAlertQueue, startupAlertFlushed = prevQueue, prevFlushed
+		startupAlertMu.Unlock()
+		startupAlertFire = prevStartupFire
+		resetThreatFeedHealthForTest()
+		globalThreatFeed = prevFeed
+		fireThreatFeedStaleAlert = prevAlert
+		deferThreatFeedStaleAlert = prevDefer
+	})
+	tfSwapAlertStore(t, false)
+
+	startupAlertFire = func(event string, p AlertPayload) {
+		if event != "threat_feed_stale" {
+			return
+		}
+		tag := "nobody: "
+		if threatFeedStaleSubscribed() {
+			tag = "subscriber: "
+		}
+		h.mu.Lock()
+		h.flushTo = append(h.flushTo, tag+p.Detail)
+		h.mu.Unlock()
+	}
+	fireThreatFeedStaleAlert = func(detail string) bool {
+		if !threatFeedStaleSubscribed() {
+			return false
+		}
+		h.mu.Lock()
+		h.runtime = append(h.runtime, detail)
+		h.mu.Unlock()
+		return true
+	}
+	threatFeedNow = func() time.Time {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.now
+	}
+
+	h.feed = threatfeed.New()
+	h.feed.Init("", time.Hour)
+	h.feed.SeedSyncSuccessForTest(h.now.Add(-72 * time.Hour))
+	globalThreatFeed = h.feed
+	return h
+}
+
+func (h *tfStartupHarness) queued() int {
+	startupAlertMu.Lock()
+	defer startupAlertMu.Unlock()
+	return len(startupAlertQueue)
+}
+
+// pages is every page that reached a subscriber, from either path.
+func (h *tfStartupHarness) pages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := append([]string(nil), h.runtime...)
+	for _, d := range h.flushTo {
+		if strings.HasPrefix(d, "subscriber: ") {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func (h *tfStartupHarness) flushed() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.flushTo...)
+}
+
+func (h *tfStartupHarness) fail(n int) {
+	h.feed.SeedSyncFailureForTest("tflatch-src-startup")
+	noteThreatFeedSync(threatfeed.SyncOutcome{FailedSources: "tflatch-src-startup", ConsecutiveFailures: n})
+}
+
+// TestThreatFeedStale_StartupAlertQueuedThenFlushedPagesOnce — the boot-time
+// alert queued before the webhooks load is delivered once at the flush and
+// counts as the episode's page: later failed rounds do not re-send it.
+func TestThreatFeedStale_StartupAlertQueuedThenFlushedPagesOnce(t *testing.T) {
+	h := newTFStartupHarness(t, false)
+	noteThreatFeedConfigured()
+	if n := h.queued(); n != 1 {
+		t.Fatalf("startup queued %d alerts for a 3-day-stale warm DB, want 1", n)
+	}
+	if tfAlerted() {
+		t.Fatal("the episode was latched at ENQUEUE — before anything could know whether the page reaches a subscriber")
+	}
+
+	tfSwapAlertStore(t, true) // loadPersistentAdminState: alertStore().Init loads a subscribed webhook
+	flushStartupAlerts()
+	got := h.pages()
+	if len(got) != 1 || !strings.Contains(got[0], "stale at startup") {
+		t.Fatalf("pages after the flush = %v, want exactly the boot-time stale alert", got)
+	}
+	if !tfAlerted() {
+		t.Fatal("a delivered startup page did not consume the episode")
+	}
+
+	for i := 1; i <= 4; i++ {
+		h.fail(i)
+	}
+	if got := h.pages(); len(got) != 1 {
+		t.Fatalf("pages = %v after failed rounds following the flush, want only the startup page (no re-send)", got)
+	}
+}
+
+// TestThreatFeedStale_StartupAlertFlushedToNobodyDoesNotConsumeTheEpisode is
+// the startup half of SEC-TFEED-STALE-LATCH-1, and the review's scenario: a
+// node boots with stale threat intelligence and no webhook. Being accepted
+// into the queue is not delivery — the flush hands the alert to Dispatch,
+// which reaches nobody — so the episode must stay open for the operator who
+// subscribes afterwards.
+func TestThreatFeedStale_StartupAlertFlushedToNobodyDoesNotConsumeTheEpisode(t *testing.T) {
+	h := newTFStartupHarness(t, false)
+	noteThreatFeedConfigured()
+	flushStartupAlerts() // the store loaded with no webhooks: the default posture
+
+	if got := h.flushed(); len(got) != 1 || !strings.HasPrefix(got[0], "nobody: ") {
+		t.Fatalf("flush handed %v to Dispatch, want the one queued alert, with no subscriber", got)
+	}
+
+	tfSwapAlertStore(t, true) // the operator adds the threat_feed_stale webhook
+	h.fail(1)
+	got := h.pages()
+	if len(got) != 1 {
+		t.Fatalf("pages after the webhook was added = %v, want exactly 1: a node that booted stale with no "+
+			"webhook must still page the operator who subscribes later (SEC-TFEED-STALE-LATCH-1)", got)
+	}
+	if !strings.Contains(got[0], "tflatch-src-startup") {
+		t.Errorf("page %q is not the post-subscription round's alert", got[0])
+	}
+	h.fail(2)
+	if got := h.pages(); len(got) != 1 {
+		t.Errorf("pages = %v, want 1: the delivered episode must page only once", got)
+	}
+}
+
+// TestThreatFeedStale_RoundBetweenWebhookLoadAndFlushPagesOnce — a failed
+// round that runs after alertStore().Init but before the flush pages the
+// episode itself; the queued copy must then be dropped, not sent as a second
+// page.
+func TestThreatFeedStale_RoundBetweenWebhookLoadAndFlushPagesOnce(t *testing.T) {
+	h := newTFStartupHarness(t, false)
+	noteThreatFeedConfigured()
+	tfSwapAlertStore(t, true)
+	h.fail(1)
+	if got := h.pages(); len(got) != 1 {
+		t.Fatalf("the round after the webhooks loaded paged %v, want 1", got)
+	}
+	flushStartupAlerts()
+	if got := h.flushed(); len(got) != 0 {
+		t.Errorf("the flush re-sent the already-paged episode: %v", got)
+	}
+	if got := h.pages(); len(got) != 1 {
+		t.Errorf("pages = %v, want exactly 1 for the episode", got)
+	}
+}
+
+// TestThreatFeedStale_FlushRacingFailedRoundsPagesOnce — the flush claim and
+// the runtime rounds decide under the same lock, so a flush racing concurrent
+// failed rounds still pages the episode exactly once. Run with -race.
+func TestThreatFeedStale_FlushRacingFailedRoundsPagesOnce(t *testing.T) {
+	h := newTFStartupHarness(t, false)
+	noteThreatFeedConfigured()
+	tfSwapAlertStore(t, true)
+	h.feed.SeedSyncFailureForTest("tflatch-src-startup")
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			noteThreatFeedSync(threatfeed.SyncOutcome{FailedSources: "tflatch-src-startup", ConsecutiveFailures: i + 1})
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		flushStartupAlerts()
+	}()
+	close(start)
+	wg.Wait()
+
+	if got := h.pages(); len(got) != 1 {
+		t.Fatalf("a flush racing failed rounds paged %d times, want exactly 1: %v", len(got), got)
+	}
+}
+
+// TestThreatFeedStale_StartupAlertForARecoveredEpisodeConsumesNothing — a clean
+// round that lands before the flush ends the episode. The queued boot-time
+// alert is still delivered as the fact it reports (the behaviour before
+// SEC-TFEED-STALE-LATCH-1), but it must not latch: there is no open episode,
+// and a latch set now would silence the next real one.
+func TestThreatFeedStale_StartupAlertForARecoveredEpisodeConsumesNothing(t *testing.T) {
+	h := newTFStartupHarness(t, false)
+	noteThreatFeedConfigured()
+
+	h.mu.Lock()
+	now := h.now
+	h.mu.Unlock()
+	h.feed.SeedSyncSuccessForTest(now)
+	noteThreatFeedSync(threatfeed.SyncOutcome{OK: true, LastSuccess: now})
+
+	tfSwapAlertStore(t, true)
+	flushStartupAlerts()
+	if got := h.flushed(); len(got) != 1 || !strings.Contains(got[0], "stale at startup") {
+		t.Fatalf("flush delivered %v, want the queued boot-time alert", got)
+	}
+	if tfAlerted() {
+		t.Fatal("a startup alert for an episode that recovered before the flush latched the plane")
+	}
+
+	// The next real episode still pages.
+	h.mu.Lock()
+	h.now = h.now.Add(3 * time.Hour)
+	h.mu.Unlock()
+	h.fail(1)
+	if got := h.pages(); len(got) != 2 || !strings.Contains(got[0], "tflatch-src-startup") {
+		t.Fatalf("pages = %v, want the new episode's page and the boot-time fact", got)
+	}
+}
+
+// TestThreatFeedStale_ArmedAfterTheFlushLatchesOnDelivery — after the flush the
+// queue is a passthrough that never consults the claim, so a plane armed late
+// takes the runtime sink: no subscriber leaves the episode open, a subscriber
+// is paged once.
+func TestThreatFeedStale_ArmedAfterTheFlushLatchesOnDelivery(t *testing.T) {
+	h := newTFStartupHarness(t, true)
+	noteThreatFeedConfigured()
+	if n := h.queued(); n != 0 {
+		t.Fatalf("a post-flush arm queued %d alerts, want 0", n)
+	}
+	if got := h.flushed(); len(got) != 0 {
+		t.Fatalf("a post-flush arm went through the unlatched passthrough: %v", got)
+	}
+	if tfAlerted() {
+		t.Fatal("a post-flush boot alert with no subscriber consumed the episode")
+	}
+
+	tfSwapAlertStore(t, true)
+	h.fail(1)
+	h.fail(2)
+	if got := h.pages(); len(got) != 1 || !strings.Contains(got[0], "tflatch-src-startup") {
+		t.Fatalf("pages = %v, want exactly one page once a subscriber exists", got)
 	}
 }
