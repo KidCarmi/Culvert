@@ -507,7 +507,7 @@ func (a *revocationAggregator) responseCursor(nodeID string) revSyncCursor {
 func (a *revocationAggregator) setResponseCursor(nodeID string, c revSyncCursor) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if !c.set {
+	if !c.Active() {
 		delete(a.respCursor, nodeID)
 		return
 	}

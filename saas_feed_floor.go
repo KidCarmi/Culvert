@@ -286,16 +286,16 @@ func validateFloorRecord(rec floorRecord) error {
 
 // canonicalUTCSecond parses s and requires it to be a whole-second UTC RFC3339
 // timestamp whose canonical re-format is byte-identical (rejects sub-seconds, a
-// numeric offset instead of 'Z', and any non-canonical form).
+// numeric offset instead of 'Z', and any non-canonical form). The grammar is
+// owned by the feed protocol (urlcatfeed.ParseCanonicalRFC3339), which verifies
+// the same manifest timestamps these node-local records bind; this is the
+// root's boolean binding, not a second copy of the rule.
 func canonicalUTCSecond(s string) (time.Time, bool) {
-	t, err := time.Parse(time.RFC3339, s)
+	t, err := urlcatfeed.ParseCanonicalRFC3339(s)
 	if err != nil {
 		return time.Time{}, false
 	}
-	if t.UTC().Format(time.RFC3339) != s {
-		return time.Time{}, false
-	}
-	return t.UTC(), true
+	return t, true
 }
 
 // validGenerationID requires a safe, non-empty single path segment (no separators, no
@@ -322,7 +322,9 @@ func validGenerationID(id string) bool {
 	return true
 }
 
-func validSHA256Hex(s string) bool { return isLowerHex(s, 64) }
+// validSHA256Hex binds the feed protocol's digest grammar
+// (urlcatfeed.IsSHA256Hex: exactly 64 lowercase hex digits).
+func validSHA256Hex(s string) bool { return urlcatfeed.IsSHA256Hex(s) }
 func validCRC32Hex(s string) bool  { return isLowerHex(s, 8) }
 
 func isLowerHex(s string, n int) bool {
