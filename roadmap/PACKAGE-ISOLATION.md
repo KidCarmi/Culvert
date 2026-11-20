@@ -553,15 +553,27 @@ conflict textually; the row is added once they merge):
   config (`cdrEffectivePerFileDeadline`). Prerequisite, in main first: the pool
   takes its breaker clock at construction, the fallback deadline is resolved
   by the pool before it builds a breaker, and those tests assert through
-  `Stats()` and behavior. Open #1963 edits `cdr_ui.go`, `cdr_health.go` and
-  `cdr_startup.go`, so wait for it.
-- **IM-016 is unblocked.** #1962 merged and #1963 no longer touches
-  `metrics.go`. The gate can take its in-flight observer as constructor
+  `Stats()` and behavior. #1963 (which edited `cdr_ui.go`, `cdr_health.go` and
+  `cdr_startup.go`) merged on 2026-11-20, so no open PR overlaps it now.
+- **IM-016 is unblocked.** #1962 and #1963 merged and neither left an open
+  edit to `metrics.go`. The gate can take its in-flight observer as constructor
   options so the two process gauges and their readers stay in main.
 - **Next.** IM-016 (first step: read the `scanSvcInflight` and `scanSvcSlots`
   readers in `metrics.go:1499` and `scan_svc.go:427`, and the override seam in
   `scan_svc_admission_chaos_test.go`). After #1955 merges: IM-002+IM-003 as one
-  boundary. After #1963 merges: the IM-018 prerequisite above.
+  boundary. Then the IM-018 prerequisite above.
+- **Discovered, not fixed here.** A full root run
+  (`go test -race -count=1 -shuffle=1795175878818164299 .`, 2,324 s) reported
+  21 data races, all the same one: `TestLoadUIAccessPolicy_IdPProfilesMissingFileIsNonFatal`
+  (`ui_access_policy_startup_test.go:179`) reaches
+  `go runIdPMetadataDegradationWatchdog(resolveLifecycleCtx())`
+  (`ui_access_policy_startup.go:116`), which nothing stops when the test ends;
+  every 2.5 minutes its round reads `idpRegistry`
+  (`idp_metadata_health.go:993`) while later tests swap that global
+  (`withTestIdPRegistry`, `chaos87Env`, `startAuthProxy`, ...). Test isolation
+  only, and it needs a run longer than the tick to show. None of those files
+  is in this change. The fix belongs in the test: give it a cancellable
+  lifecycle context and join the watchdog.
 
 ### IM-009 extraction and next selection (EXTRACT, 2026-11-18, main `348a2cf`)
 
