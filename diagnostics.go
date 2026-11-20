@@ -251,6 +251,9 @@ func buildOperatorContract() OperatorContract {
 	// CDR fail-open passthroughs (engine error under fail_mode open) in the last 24h.
 	// Contributes nothing unless a fail-open passthrough actually happened.
 	checks = append(checks, checkCDRFailOpenPassthrough()...)
+	// Sluice client certificates expired or near expiry (renewal failing).
+	// Contributes nothing while CDR is disabled or every certificate is healthy.
+	checks = append(checks, checkCDRClientCertExpiry()...)
 	// CHAOS-05/07 state-file quarantine, authenticated + path-free. Contributes
 	// nothing when every state file on this node loaded cleanly.
 	checks = append(checks, checkStateFileIntegrity()...)
@@ -274,6 +277,11 @@ func buildOperatorContract() OperatorContract {
 	// ClamAV configured but unreachable: content is forwarded without an antivirus
 	// verdict (fail-open). Contributes nothing when ClamAV is off or answering.
 	checks = append(checks, checkClamAVScan()...)
+	// CHAOS-124: ClamAV reachable and scanning but its virus definitions have
+	// stopped being updated by freshclam (or their age cannot be read). A pure
+	// memory read of the signature watcher's last observation; never dials.
+	// Contributes nothing when ClamAV is off, in sidecar mode, or current.
+	checks = append(checks, checkClamAVSignatures()...)
 	// MCP gateway enabled but not serving (failed to start, degraded or stopped).
 	// Contributes nothing when MCP was never requested or is healthy.
 	checks = append(checks, checkMCPGateway()...)

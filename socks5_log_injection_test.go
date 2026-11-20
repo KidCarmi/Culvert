@@ -301,18 +301,20 @@ func TestSOCKS5_DestinationLogsStillNameTheHost(t *testing.T) {
 // either clientIP (a net.SplitHostPort product of the kernel-supplied peer
 // address — never client-chosen bytes) or a value routed through sanitizeLog.
 func TestSOCKS5_EveryDestinationLogSiteSanitises(t *testing.T) {
-	fset, fn := parseHandleSOCKS5(t)
+	fset, fns := parseHandleSOCKS5(t)
 
 	checked := 0
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || !isLoggerCall(call) {
+	for _, fn := range fns {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || !isLoggerCall(call) {
+				return true
+			}
+			checked++
+			assertLogArgsSanitised(t, fset, call)
 			return true
-		}
-		checked++
-		assertLogArgsSanitised(t, fset, call)
-		return true
-	})
+		})
+	}
 
 	// A selector typo that matched nothing would let this wall pass forever.
 	if checked < 4 {
@@ -320,26 +322,38 @@ func TestSOCKS5_EveryDestinationLogSiteSanitises(t *testing.T) {
 	}
 }
 
-// parseHandleSOCKS5 returns the AST of the handler both walls read.
-func parseHandleSOCKS5(t *testing.T) (*token.FileSet, *ast.FuncDecl) {
+// socks5WalledFuncs are the functions both walls read: handleSOCKS5 and every
+// helper it hands the raw destination to that itself logs or forwards it.
+// socks5GuardAndDial holds the SSRF-guard and dial log sites (moved out of
+// handleSOCKS5 by PERF-SOCKS5-HANGUP-1), so it is walled exactly like the
+// handler rather than trusted as a registered sink.
+var socks5WalledFuncs = []string{"handleSOCKS5", "socks5GuardAndDial"}
+
+// parseHandleSOCKS5 returns the ASTs of socks5WalledFuncs, in that order.
+func parseHandleSOCKS5(t *testing.T) (*token.FileSet, []*ast.FuncDecl) {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "socks5.go", nil, parser.ParseComments)
 	if err != nil {
 		t.Fatalf("parse socks5.go: %v", err)
 	}
-	var fn *ast.FuncDecl
+	byName := map[string]*ast.FuncDecl{}
 	ast.Inspect(file, func(n ast.Node) bool {
-		if d, ok := n.(*ast.FuncDecl); ok && d.Name.Name == "handleSOCKS5" {
-			fn = d
+		if d, ok := n.(*ast.FuncDecl); ok {
+			byName[d.Name.Name] = d
 			return false
 		}
 		return true
 	})
-	if fn == nil {
-		t.Fatal("handleSOCKS5 not found in socks5.go — these walls must be re-aimed, not deleted")
+	fns := make([]*ast.FuncDecl, 0, len(socks5WalledFuncs))
+	for _, name := range socks5WalledFuncs {
+		fn := byName[name]
+		if fn == nil {
+			t.Fatalf("%s not found in socks5.go — these walls must be re-aimed, not deleted", name)
+		}
+		fns = append(fns, fn)
 	}
-	return fset, fn
+	return fset, fns
 }
 
 // isLoggerCall reports whether call is logger.Printf / logger.Println.
@@ -408,6 +422,8 @@ var destinationSinks = map[string]string{
 	"isPrivateHostBounded": "security.go wrapper over internal/ssrf.PrivateHostBudget; neither contains any logging — the destination reaches only the resolver and the returned error, which is sanitised at the log site",
 	"recordRequest":        "structured JSONL — the encoder escapes control bytes",
 	"socks5Relay":          "byte relay; its only destination sink is recordTunnelClose — structured JSONL",
+	"socks5RelayPrefixed":  "socks5Relay's body (socks5Relay delegates to it); its only destination sink is recordTunnelClose — structured JSONL",
+	"socks5GuardAndDial":   "walled itself: it is in socks5WalledFuncs, so both walls inspect its log sites and its own destination sinks",
 	"JoinHostPort":         "net; string construction only",
 	"DialContext":          "net.Dialer; the error it returns is sanitised at the log site",
 	"sanitizeLog":          "the sanitiser itself",
@@ -428,7 +444,7 @@ var destinationSinks = map[string]string{
 // audit call, another middleware hop — then fails the build until somebody
 // states why those attacker-chosen bytes are safe in it.
 func TestSOCKS5_EveryDestinationSinkIsAudited(t *testing.T) {
-	fset, fn := parseHandleSOCKS5(t)
+	fset, fns := parseHandleSOCKS5(t)
 	// The normalized destination counts as raw. normalizeHostStrict is NOT a log
 	// sanitiser — TestNormalizeHostStrict_IsNotALogSanitiser pins that as a FACT —
 	// so normSOCKS5Host can still carry the control characters that forge a log
@@ -440,23 +456,26 @@ func TestSOCKS5_EveryDestinationSinkIsAudited(t *testing.T) {
 	raw := map[string]bool{"host": true, "target": true, "normSOCKS5Host": true}
 
 	seen := 0
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || isLoggerCall(call) { // log calls are the FIRST wall's business
+	for _, fn := range fns {
+		fnName := fn.Name.Name
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || isLoggerCall(call) { // log calls are the FIRST wall's business
+				return true
+			}
+			if !callForwardsAny(call, raw) {
+				return true
+			}
+			seen++
+			name := calleeName(call)
+			if _, audited := destinationSinks[name]; !audited {
+				t.Errorf("%s (%s): %s() receives the raw client-chosen destination but is not in destinationSinks.\n"+
+					"Establish that it cannot emit those bytes unsanitised (CWE-117), then record the reason there.",
+					fnName, fset.Position(call.Pos()), name)
+			}
 			return true
-		}
-		if !callForwardsAny(call, raw) {
-			return true
-		}
-		seen++
-		name := calleeName(call)
-		if _, audited := destinationSinks[name]; !audited {
-			t.Errorf("handleSOCKS5 (%s): %s() receives the raw client-chosen destination but is not in destinationSinks.\n"+
-				"Establish that it cannot emit those bytes unsanitised (CWE-117), then record the reason there.",
-				fset.Position(call.Pos()), name)
-		}
-		return true
-	})
+		})
+	}
 
 	if seen < 5 {
 		t.Fatalf("the sink wall matched only %d forwarding calls; it is no longer finding them", seen)

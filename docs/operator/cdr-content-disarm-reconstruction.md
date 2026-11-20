@@ -545,9 +545,9 @@ It does nothing while CDR is disabled in the active configuration, after
 the shutdown hook, or for an instance that is disabled, deleted or revoked
 in the meantime. While a member is still missing, the log repeats
 `CDR: N enrolled instance(s) still missing from the pool` on the first
-failed attempt and every tenth. A node whose CDR was enabled at runtime
-rather than at boot runs no health poll, so it has no automatic re-dial
-either; there, a restart is still the way to rebuild the pool.
+failed attempt and every tenth. This applies equally to a node whose CDR
+was enabled at runtime (the toggle or a first enrollment), because a runtime
+enable now starts the same health poll; see below.
 `GET /api/cdr/instances` is also the right surface for ad hoc inspection,
 since it carries per-instance health and breaker state.
 `GET /api/cdr/health` does **not** — it returns only the
@@ -586,21 +586,19 @@ responsible for replacing the files under `cdr.certs_dir` and updating
 least one instance through the API is the only way to get the automatic
 behavior described below.
 
-**The automatic renewal below depends on the 15-second health poller, and
-the poller is only started once, at boot, and only if CDR is already
-enabled at that point.** `loadCDR` returns before calling
-`startCDRHealthPoller` whenever CDR boots disabled — the default — and
-there is no other call site for it: neither the runtime enable toggle
-(`PUT /api/cdr/config {"enabled": true}`) nor enrolling an instance through
-the API calls it, both only reach `initCDRClient` (which (re)builds the
-connection pool). So on a node that starts with CDR disabled and is enabled
-purely at runtime, the pool exists and requests flow through it, but no
-certificate-expiry check, `RenewCert` call, or server-fingerprint rotation
-check runs until the process is restarted with CDR enabled at boot (via
-`-cdr-enabled` / `cdr.enabled: true`, or the `cdr_enabled` sentinel already
-being present from a prior enable). If you enable CDR at runtime only,
-schedule a restart to arm the poller, or start the node with CDR enabled in
-the first place.
+**The automatic renewal below depends on the 15-second health poller, which
+starts whenever CDR is enabled, whether at boot or at runtime.** At boot,
+`loadCDR` starts it when CDR is enabled (`-cdr-enabled` / `cdr.enabled:
+true`, or the `cdr_enabled` sentinel). A runtime enable, through the toggle
+(`PUT /api/cdr/config {"enabled": true}`) or a first enrollment that
+auto-enables CDR, starts the same poller after it (re)builds the pool, even
+when that build failed. The log shows `CDR: health poller started after a
+runtime enable`. A process runs at most one poller: toggling CDR again, or
+disabling and re-enabling it, never adds a second one. After a runtime
+disable the poller keeps running, as it always has on a boot-enabled node,
+and does nothing while the pool is empty. No restart is needed to arm
+certificate-expiry checks, `RenewCert` calls or server-fingerprint rotation
+checks.
 
 Both directions of the mTLS relationship renew themselves automatically for
 enrolled instances — manual action is a fallback, not the normal path:
@@ -614,8 +612,11 @@ enrolled instances — manual action is a fallback, not the normal path:
   boot or health poll rather than left in an ambiguous state, and the
   previous credential keeps working until its own expiry, so a Sluice outage
   during the 30-day window doesn't cause a gap. Re-enrolling manually is only
-  needed if automatic renewal has been failing (check the log for `RenewCert
-  failed`) or the instance was never successfully enrolled.
+  needed if automatic renewal has been failing or the instance was never
+  successfully enrolled. With CDR enabled, Diagnostics raises a
+  `cdr_client_cert` WARN row once any enabled instance's client certificate
+  has fewer than 14 days left or has expired (counts only; CDR → Instances
+  → **Cert expires** shows which one); the log line is `RenewCert failed`.
 - **Server certificate (Sluice's own cert, TOFU-pinned by
   `cdr.server_fingerprint`):** **on the Culvert side**, if Sluice's `Health`
   response advertises a rotation in progress (`rotated_fingerprint` +
