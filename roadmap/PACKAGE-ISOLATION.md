@@ -471,6 +471,56 @@ IM-011 is the Shadow metrics sink split from IM-009 (its table row lands with
   reading `validateFloorRecord`/`validateFloorFields` (`saas_feed_floor.go`)
   and the `fsyncDir` callers (`saas_feed_genstore.go`, `saas_feed_runtime.go`).
 
+### IM-015 SyncRevocations budget planner (EXTRACT, 2026-11-20, main `530445b`)
+
+Task record (kept out of the table because open #1955 edits those rows and
+open #1965 adds its own record above; the row is added once they merge):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-015: `revocation_sync_budget.go` planner → `internal/session/revsync` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR touches `revocation_sync_budget.go`, its test file or `internal/session`; the long-lived appliance branches do not contain the file) |
+| Evidence | ADR-0049; 4 exported names (`Cursor`, `Request`, `BuildRequest`, `BuildResponse`); root keeps four binding names, so the two call sites (`controlplane_client.go`, `controlplane_server.go`) and all root tests are untouched; one line changed in `controlplane.go` (`!c.set` → `!c.Active()`); 2 engine tests moved with names unchanged, 3 integration tests stay root; both legs' bytes pinned by digests captured from main before the move |
+| Risks | the planner is a security rule (deferred, never dropped): a wrong order or a jammed rotation delays or starves a revocation. Pinned by the moved coverage tests, the digests and three mutation checks |
+| Next action | review PR |
+
+- **Reconciled.** #1955 (IM-012) and #1965 (IM-013) are open with green
+  checks and no review threads; nothing to fix. IM-002/IM-003 still overlap
+  #1955. IM-005/IM-006 stay blocked on #1526. IM-014 (release catalog) is a
+  lead recorded in #1965.
+- **Why this file.** A parse-level walk of the 464 root production files for
+  cohesive engines with few root dependencies. The planner references one
+  root name (`RevocationEntry`, already a `session` alias), has two call
+  sites, and its state was already an instance value owned by its callers.
+- **Moved:** priority classes and order, prefix + rotating window, byte
+  accounting, the request envelope. **Stays main:** the budgets (derived from
+  the cluster gRPC limits), the budget variables, the deferral counters,
+  `/metrics` text, the log line, the cursors' owners and the RPC. No ADR-0002
+  conflict: `controlplane.go` is not moved.
+- **Program rule.** This is a third open program PR beside #1955 and #1965;
+  it shares no source file with either. All three add to this document at
+  different anchors.
+- **Assessed, correctly located, no change:** `pac_fence.go` (HTTP refusal
+  adapter shared by root handlers), `ocsp_coverage.go` (constant claims about
+  root TLS wiring, pinned against root configs).
+- **Discovered: IM-016 lead, scan-sidecar admission gate.**
+  `scan_svc_admission.go` (273 ln): `scanSvcAdmissionSlots` (pure) and the
+  `scanSvcAdmission` semaphore with its bounded wait are an engine; the
+  process gauges (`scanSvcInflight`, `scanSvcSlots`), the 429 writer and the
+  log throttle are composition. Blocked for now: `/metrics` reads the gauges
+  in `metrics.go`, which open #1962 and #1963 edit. First step once they
+  merge: read the gauge readers in `metrics.go` and `healthcheck.go` and
+  decide whether the gate owns its in-flight count (instance method) with
+  main publishing it, keeping the decrement-before-release order.
+- **Discovered: smaller lead.** `ha_failover_ring.go` holds a bounded
+  transition ring behind a process pointer set in `init()`; the ring type is
+  about 45 lines. Too small to justify a package alone; revisit with
+  `ha_fencing.go`/`ha_intent.go` if an HA state owner is mapped.
+- **Next.** After #1955 merges: IM-002+IM-003 as one boundary (first step in
+  the IM-012 note). Independent of it: IM-014 mapping (first step in the
+  IM-013 note), then IM-016 as above.
+
 ### IM-002 / IM-007 mapping (MAP, 2026-11-09, main `09235d1`)
 
 Evidence only; no code moved. Nothing in the repository records the owner's
