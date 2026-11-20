@@ -1956,6 +1956,7 @@ culvert_decrypt_autoexclude_surge_total %d
 	urlcatWritePrometheus(&ruleMetBuf)
 	threatFeedWritePrometheus(&ruleMetBuf)    // culvert_threat_feed_* freshness (WK-5 staleness plane)
 	blocklistFeedWritePrometheus(&ruleMetBuf) // culvert_blocklist_feed_* freshness (CHAOS-123; emitted only when a feed is configured)
+	clamavSigWritePrometheus(&ruleMetBuf)     // culvert_clamav_signature_* freshness (CHAOS-124; emitted only once a VERSION observation has landed)
 	syslogWritePrometheus(&ruleMetBuf)        // culvert_syslog_* SIEM delivery (CHAOS-81; emitted only when configured)
 	caWritePrometheus(&ruleMetBuf)
 	ocspWritePrometheus(&ruleMetBuf) // culvert_ocsp_* (CHAOS-65 revocation plane; emitted only when enabled)

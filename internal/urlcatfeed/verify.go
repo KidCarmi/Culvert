@@ -254,7 +254,7 @@ func validateManifestConstants(m *ManifestPayload) error {
 	if m.ArtifactSigPath != m.ArtifactPath+".sigstore" {
 		return fmt.Errorf("%w: artifact_sig_path %q != %q", ErrPayload, m.ArtifactSigPath, m.ArtifactPath+".sigstore")
 	}
-	if !isSHA256Hex(m.ArtifactSHA256) {
+	if !IsSHA256Hex(m.ArtifactSHA256) {
 		return fmt.Errorf("%w: artifact_sha256 %q", ErrPayload, m.ArtifactSHA256)
 	}
 	if m.ArtifactSize <= 0 || m.ArtifactSize > MaxArtifactSize {
@@ -269,11 +269,11 @@ func validateManifestConstants(m *ManifestPayload) error {
 // validateManifestTiming checks canonical timestamps, ordering, the 30-day
 // validity ceiling, and the artifact-path shape invariant.
 func validateManifestTiming(m *ManifestPayload) error {
-	gen, err := parseCanonicalRFC3339(m.GeneratedAt)
+	gen, err := ParseCanonicalRFC3339(m.GeneratedAt)
 	if err != nil {
 		return fmt.Errorf("%w: generated_at %q: %v", ErrPayload, m.GeneratedAt, err)
 	}
-	exp, err := parseCanonicalRFC3339(m.ExpiresAt)
+	exp, err := ParseCanonicalRFC3339(m.ExpiresAt)
 	if err != nil {
 		return fmt.Errorf("%w: expires_at %q: %v", ErrPayload, m.ExpiresAt, err)
 	}
@@ -291,11 +291,15 @@ func validateManifestTiming(m *ManifestPayload) error {
 	return nil
 }
 
-// parseCanonicalRFC3339 parses s and requires it to already be in the canonical
+// ParseCanonicalRFC3339 parses s and requires it to already be in the canonical
 // form the producer emits: UTC, whole seconds, "Z" offset. A same-instant string
 // with a numeric offset or fractional seconds re-formats differently and is
 // rejected, so a signed payload cannot smuggle a non-canonical timestamp.
-func parseCanonicalRFC3339(s string) (time.Time, error) {
+//
+// It is the single owner of the feed's timestamp grammar: package main's
+// node-local F3 records (floor, activation, checkpoint) bind the same manifest
+// timestamps and validate them through this function rather than a copy.
+func ParseCanonicalRFC3339(s string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
 		return time.Time{}, err
@@ -349,7 +353,7 @@ func validateArtifactHeader(a *ArtifactPayload) error {
 	if a.FeedVersion < 1 {
 		return fmt.Errorf("%w: feed_version %d", ErrPayload, a.FeedVersion)
 	}
-	if _, e := parseCanonicalRFC3339(a.GeneratedAt); e != nil {
+	if _, e := ParseCanonicalRFC3339(a.GeneratedAt); e != nil {
 		return fmt.Errorf("%w: generated_at %q: %v", ErrPayload, a.GeneratedAt, e)
 	}
 	if len(a.Categories) == 0 {
@@ -426,8 +430,10 @@ func safeRelKey(k string) bool {
 	return true
 }
 
-// isSHA256Hex reports whether s is exactly 64 lowercase hex digits.
-func isSHA256Hex(s string) bool {
+// IsSHA256Hex reports whether s is exactly 64 lowercase hex digits. It is the
+// single owner of the feed's digest grammar; package main's node-local records
+// that bind manifest/artifact digests validate through it rather than a copy.
+func IsSHA256Hex(s string) bool {
 	if len(s) != 64 {
 		return false
 	}
