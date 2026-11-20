@@ -9,6 +9,24 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **The audit, request and process log files no longer follow a symlink, or
+  block on a FIFO, planted at the log path (CWE-59/CWE-61).**
+  `fileutil.NewRotatingFile`, and the reopen it makes after each rotation, opened
+  the path with `O_CREATE|O_WRONLY|O_APPEND` only. A symlink at the final path
+  component was followed, so the log was created at or appended to the file the
+  link named. A FIFO there blocked the open until a reader appeared, which hung
+  startup or the request-path `Write` that holds the writer's lock. Both open
+  sites now share one guarded open. On Unix-like platforms it adds `O_NOFOLLOW`
+  and `O_NONBLOCK`, fstats the descriptor, refuses anything that is not a
+  regular file, and then clears `O_NONBLOCK` so writes block normally. Directory
+  components of the path are still resolved, so a symlinked log directory keeps
+  working. A log path whose last component is itself a symlink is now refused,
+  so point the flag at the real file instead. Platforms without `O_NOFOLLOW`
+  (the Windows convenience build) keep the previous open and only gain the
+  regular-file check
+  (`TestNewRotatingFile_RefusesSymlinkToExistingFile`,
+  `TestNewRotatingFile_FIFOWithoutReaderReturnsPromptly`).
+
 - **A ClamAV signature database that has stopped updating is now observable
   (`CHAOS-124`).** Culvert does not fetch virus definitions — `freshclam` does,
   out of process, in a container Culvert neither starts nor supervises — so a
@@ -404,6 +422,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Enabling CDR at runtime now starts the CDR health poller, without a
+  restart.** Only `loadCDR` started the 15-second poller, and only when CDR
+  was enabled at boot. A node that turned CDR on from the admin toggle
+  (`PUT /api/cdr/config {"enabled": true}`) or through a first enrollment's
+  auto-enable sent documents through the pool, but ran no health probes, no
+  client-certificate auto-renewal, no server-fingerprint rotation and no
+  automatic re-dial. Its client certificate would expire unrenewed unless an
+  operator restarted the process. Both runtime enable paths now arm the same
+  poller after the pool build (even a failed one, as at boot), under the
+  process lifecycle context. `ensureCDRHealthPoller` keeps it to one poller
+  per process: repeated enables, disable/enable cycles and a boot-enabled
+  node toggled again never add a second. Nothing is armed on a disable, on an
+  auto-enable whose sentinel write failed, or once shutdown has cancelled the
+  lifecycle. Pool build, `fail_mode`, audit (`cdr.config.toggle`,
+  `cdr.instance.enroll`) and the no-config-version contract are unchanged
+  (`TestCDRRuntimePoller_*`).
+
 - **`culvert --enroll` can enroll a Data Plane node again.** The enrollment
   client dialed the Control Plane without the cluster's raw JSON gRPC codec,
   so gRPC's default protobuf codec refused the request on the node itself
@@ -689,6 +724,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **A SOCKS5 client that hangs up during the connect phase now releases its
+  slot at once (`PERF-SOCKS5-HANGUP-1`).** The SOCKS5 pre-flight SSRF guard and
+  the upstream dial ran under `context.Background()`, so a client that closed
+  its connection while the resolver was slow kept the handler goroutine, its
+  descriptor and its per-IP connection-limiter slot for the full 10 s guard
+  budget (measured: 10.0 s) and then up to another 10 s in the dial. SOCKS5 now
+  gets what HTTP CONNECT has from `r.Context()`: a background read on the client
+  connection cancels the guard and the dial on EOF or reset. A byte a client
+  sends early is kept and forwarded to the destination ahead of the relay, and a
+  connection that cannot honour read deadlines keeps the previous behaviour.
+  Verdicts are unchanged (an undetermined destination still fails closed, and
+  `ssrfControl` still checks at connect time); a hang-up mid-check is logged
+  instead of being recorded as an SSRF `BLOCKED`
+  (`TestSOCKS5_ClientHangupReleasesWedgedGuardLookup`,
+  `TestSOCKS5_OptimisticDataReachesDestination`).
 - **An alert the dedup window was about to drop still paid two heap allocations
   and a process-wide mutex round trip to find that out (PERF-ALERTDEDUP-1).**
   `alerts.Store.Dispatch` is reached at REQUEST rate by fault-driven producers —
