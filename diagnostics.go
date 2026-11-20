@@ -254,6 +254,9 @@ func buildOperatorContract() OperatorContract {
 	// Sluice client certificates expired or near expiry (renewal failing).
 	// Contributes nothing while CDR is disabled or every certificate is healthy.
 	checks = append(checks, checkCDRClientCertExpiry()...)
+	// Enabled SSL-inspection rules that skip origin certificate verification,
+	// inline or through a decryption profile. Contributes nothing when all verify.
+	checks = append(checks, checkInspectUpstreamVerify(policyStore.List())...)
 	// CHAOS-05/07 state-file quarantine, authenticated + path-free. Contributes
 	// nothing when every state file on this node loaded cleanly.
 	checks = append(checks, checkStateFileIntegrity()...)
