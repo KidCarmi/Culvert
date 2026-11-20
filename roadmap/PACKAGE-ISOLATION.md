@@ -614,6 +614,72 @@ code PR was started.
   engine-only versus integration, and define the byte-identical output fixture.
   IM-004 still needs the owner's pilot-continuation acceptance (2 of 3 code PRs).
 
+### IM-017 frontend artifact validator (EXTRACT, 2026-11-20, main `5333aab`)
+
+Task record (kept out of the table because open #1955 edits those rows; open
+#1965 and #1966 add their records at other anchors, so the four PRs do not
+conflict textually; the row is added once they merge):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-017: `ui_frontend_v2.go` embedded-artifact validator → `internal/frontendbundle` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR touches `ui_frontend_v2.go` or its test file; the six long-lived branches carry the same blobs as main for both) |
+| Evidence | ADR-0050; 3 exported names (`Validate`, `Asset`, `ManifestEntry`); root keeps `validateFrontendV2` as a binding and `frontendV2Asset` as an alias, so the one caller and the handlers are unchanged apart from `asset.ContentType`; 7 validator tests moved with names unchanged, the real-dist half of `TestFE1B_ShellManifestBinding` stays root under the same name; 53-tree verdict table captured from main before the move; root file 727 → 273 lines |
+| Risks | the error text decides ready versus 503 and reaches the log; content types are served under `nosniff`. Both are pinned byte for byte by the verdict table and the content-type oracle |
+| Next action | review PR |
+
+- **Reconciled.** #1955 (IM-012), #1965 (IM-013) and #1966 (IM-015) are open
+  with passing or still-running checks and nothing to fix. IM-002/IM-003 still
+  overlap #1955; IM-005/IM-006 stay blocked on #1526.
+- **Why this file.** A per-function walk of the 465 root production files for
+  functions that reference no other root file. `ui_frontend_v2.go` held about
+  450 lines of validator whose only root references were `sanitizeLog` and a
+  MIME table nothing else read.
+- **ADR-0002.** It lists `ui_*.go` as main-owned. That stays true for the
+  routes, handlers, gate and published state, which did not move. ADR-0050
+  narrows it for the validator only.
+- **Gate surface kept.** `pr-fast-gate.yml` classifies `ui_frontend_v2*` as
+  frontend surface. The PR adds `internal/frontendbundle/*` to the same `case`
+  so a validator change still runs the frontend job. Nothing is removed.
+- **Program rule.** This is a fourth open program PR. It shares no source file
+  with the other three.
+- **Assessed and blocked: IM-018 lead, CDR circuit breaker.**
+  `cdr_breaker.go` (607 ln) is a real state machine with an instance-owned
+  lock and injected clocks, and production callers use only its exported
+  methods. It cannot move yet: root integration tests install a clock on a
+  pool-built breaker after construction (`b.setNowFn` in
+  `cdr_breaker_nonrpc_probe_test.go`, `cdr_breaker_wedge_chaos_test.go`,
+  `cdr_rpc_reservation_wall_test.go`) and read `halfOpenTried`, `staleProbes`
+  and `cfg.*` directly (also `cdr_fail_closed_unavailable_test.go`,
+  `diagnostics_cdr_capacity_test.go`, `cdr_breaker_overflow_test.go`). Moving
+  the type would need exported setters and accessors for tests only, which the
+  program's stop rule forbids. `withDefaults` also reads the published CDR
+  config (`cdrEffectivePerFileDeadline`). Prerequisite, in main first: the pool
+  takes its breaker clock at construction, the fallback deadline is resolved
+  by the pool before it builds a breaker, and those tests assert through
+  `Stats()` and behavior. #1963 (which edited `cdr_ui.go`, `cdr_health.go` and
+  `cdr_startup.go`) merged on 2026-11-20, so no open PR overlaps it now.
+- **IM-016 is unblocked.** #1962 and #1963 merged and neither left an open
+  edit to `metrics.go`. The gate can take its in-flight observer as constructor
+  options so the two process gauges and their readers stay in main.
+- **Next.** IM-016 (first step: read the `scanSvcInflight` and `scanSvcSlots`
+  readers in `metrics.go:1499` and `scan_svc.go:427`, and the override seam in
+  `scan_svc_admission_chaos_test.go`). After #1955 merges: IM-002+IM-003 as one
+  boundary. Then the IM-018 prerequisite above.
+- **Discovered, not fixed here.** A full root run
+  (`go test -race -count=1 -shuffle=1795175878818164299 .`, 2,324 s) reported
+  21 data races, all the same one: `TestLoadUIAccessPolicy_IdPProfilesMissingFileIsNonFatal`
+  (`ui_access_policy_startup_test.go:179`) reaches
+  `go runIdPMetadataDegradationWatchdog(resolveLifecycleCtx())`
+  (`ui_access_policy_startup.go:116`), which nothing stops when the test ends;
+  every 2.5 minutes its round reads `idpRegistry`
+  (`idp_metadata_health.go:993`) while later tests swap that global
+  (`withTestIdPRegistry`, `chaos87Env`, `startAuthProxy`, ...). Test isolation
+  only, and it needs a run longer than the tick to show. None of those files
+  is in this change. The fix belongs in the test: give it a cancellable
+  lifecycle context and join the watchdog.
+
 ### IM-009 extraction and next selection (EXTRACT, 2026-11-18, main `348a2cf`)
 
 - **Reconciled.** IM-007 (#1892) and IM-008 (#1845) are merged; their rows
