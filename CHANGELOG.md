@@ -9,6 +9,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A viewer can no longer read alert webhook URLs.** For Slack, Teams and
+  PagerDuty-style receivers the URL is the credential (a token in the path or
+  query), and it was returned in full to any viewer by
+  `GET /api/alerts/webhooks`, quoted inside failed-delivery errors in
+  `GET /api/alerts/webhooks/history`, and stored as the detail of the
+  `alert.webhook.create` audit entry. Below operator the listing now carries
+  only `scheme://host`; delivery errors and the audit entry never carry the
+  URL. Operators and admins still read the full URL in the listing
+  (`TestAlertWebhookURL_NotReadableBelowOperator`).
+
 - **The installer now creates the secret `.env` file private from the start
   (`SEC-INSTALL-ENVUMASK-1`).** `install.sh` sets no umask, and `env_put`
   created a fresh env file with a plain `touch` (mode `0666 & ~umask`) before
