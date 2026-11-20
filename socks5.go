@@ -439,7 +439,8 @@ func socks5SourceDenied(clientIP string) bool {
 func handleSOCKS5(conn net.Conn) {
 	defer recoverGoroutine("socks5") // the whole SOCKS5 chain runs in its own goroutine
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck // deadline is best-effort; a set failure still yields a bounded relay via peer close
+	negotiationDeadline := time.Now().Add(30 * time.Second)
+	conn.SetDeadline(negotiationDeadline) //nolint:errcheck // deadline is best-effort; a set failure still yields a bounded relay via peer close
 
 	clientIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 
@@ -548,27 +549,9 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 
-	// ── SSRF guard: block private/internal destinations ───────────────────────
-	// Bounded (tunnelGuardBudget): there is no request context on this path,
-	// and the 30 s negotiation deadline governs socket I/O only, not the
-	// resolver — unbounded, a wedged resolver pinned this goroutine, the client
-	// socket and its connLimiter slot for the OS resolver budget.
-	if err := isPrivateHostBounded(context.Background(), target); err != nil {
-		socks5Reply(conn, 0x02) // Connection not allowed by ruleset
-		// The error embeds the destination, so it carries the same client-chosen
-		// bytes the target does and is sanitised for the same reason.
-		logger.Printf("SOCKS5 SSRF block %s -> %q: %q", clientIP, sanitizeLog(target), sanitizeLog(err.Error()))
-		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "", "")
-		return
-	}
-
-	// ── Dial target ───────────────────────────────────────────────────────────
-	// Use Dialer.Control so the final connect() is rejected when DNS rebinding
-	// flipped the target to a private IP between isPrivateHost and here.
-	destConn, err := (&net.Dialer{Timeout: 10 * time.Second, Control: ssrfControl}).DialContext(context.Background(), "tcp", target)
-	if err != nil {
-		socks5Reply(conn, 0x05)
-		logger.Printf("SOCKS5 dial error %q: %q", sanitizeLog(target), sanitizeLog(err.Error()))
+	// ── SSRF guard + dial, cancelled if the client hangs up ──────────────────
+	destConn, early, ok := socks5GuardAndDial(conn, clientIP, host, target, negotiationDeadline)
+	if !ok {
 		return
 	}
 	defer destConn.Close()
@@ -598,7 +581,60 @@ func handleSOCKS5(conn net.Conn) {
 	recordRequest(clientIP, "SOCKS5", host, "OK", "", "", "", "")
 	logger.Printf("SOCKS5 OK %s -> %q", clientIP, sanitizeLog(target))
 
-	socks5Relay(conn, destConn, clientIP, host)
+	socks5RelayPrefixed(conn, destConn, early, clientIP, host)
+}
+
+// socks5GuardAndDial runs the pre-flight SSRF guard and the upstream dial under
+// a context that ends when the client hangs up (socks5HangupWatch), and replies
+// to the client on every failure. On success it returns the connected
+// destination and any byte the client sent early, which the caller must
+// forward before relaying. The watcher is always stopped before this returns,
+// so the caller is the only reader of conn afterwards.
+//
+// Verdicts are unchanged: an undetermined destination still fails closed (no
+// dial), and ssrfControl still re-checks the resolved address at connect time.
+// The only new outcome is a client that left mid-check — it is logged, not
+// recorded as an SSRF BLOCKED, because nothing was decided about the
+// destination (the same reason ssrf.ErrLookupBudget is not ErrBlocked).
+func socks5GuardAndDial(conn net.Conn, clientIP, host, target string, readDeadline time.Time) (net.Conn, []byte, bool) {
+	ctx, watch := watchSOCKS5Hangup(conn, readDeadline)
+
+	// ── SSRF guard: block private/internal destinations ───────────────────────
+	// Bounded by tunnelGuardBudget AND by the client: the 30 s negotiation
+	// deadline governs socket I/O only, not the resolver — unbounded, a wedged
+	// resolver pinned this goroutine, the client socket and its connLimiter slot
+	// for the OS resolver budget, even after the client had gone.
+	if err := isPrivateHostBounded(ctx, target); err != nil {
+		watch.stop(readDeadline)
+		// A demonstrated private destination is ALWAYS recorded, even if the
+		// client left in the same instant: only an undecided check is waived.
+		if socks5ClientGone(ctx) && !errors.Is(err, errSSRFBlocked) {
+			logger.Printf("SOCKS5 client closed during SSRF pre-flight %s -> %q", clientIP, sanitizeLog(target))
+			return nil, nil, false
+		}
+		socks5Reply(conn, 0x02) // Connection not allowed by ruleset
+		// The error embeds the destination, so it carries the same client-chosen
+		// bytes the target does and is sanitised for the same reason.
+		logger.Printf("SOCKS5 SSRF block %s -> %q: %q", clientIP, sanitizeLog(target), sanitizeLog(err.Error()))
+		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "", "")
+		return nil, nil, false
+	}
+
+	// ── Dial target ───────────────────────────────────────────────────────────
+	// Use Dialer.Control so the final connect() is rejected when DNS rebinding
+	// flipped the target to a private IP between isPrivateHost and here.
+	destConn, err := (&net.Dialer{Timeout: 10 * time.Second, Control: ssrfControl}).DialContext(ctx, "tcp", target)
+	early := watch.stop(readDeadline)
+	if err != nil {
+		if socks5ClientGone(ctx) && !errors.Is(err, errSSRFBlocked) {
+			logger.Printf("SOCKS5 client closed during dial %s -> %q", clientIP, sanitizeLog(target))
+			return nil, nil, false
+		}
+		socks5Reply(conn, 0x05)
+		logger.Printf("SOCKS5 dial error %q: %q", sanitizeLog(target), sanitizeLog(err.Error()))
+		return nil, nil, false
+	}
+	return destConn, early, true
 }
 
 // socks5Relay bidirectionally copies between the client and destination conns,
@@ -609,6 +645,13 @@ func handleSOCKS5(conn net.Conn) {
 // entry (byte counts + lifetime); log-only — the OK request-log entry already
 // ran the stats fan-out for this connection.
 func socks5Relay(client, dest net.Conn, clientIP, host string) {
+	socks5RelayPrefixed(client, dest, nil, clientIP, host)
+}
+
+// socks5RelayPrefixed is socks5Relay that first delivers early — bytes the
+// client sent during the connect phase, captured by socks5HangupWatch — to the
+// destination, counting them toward the upstream byte total.
+func socks5RelayPrefixed(client, dest net.Conn, early []byte, clientIP, host string) {
 	// CHAOS-57: SOCKS5 sessions were the drain's largest blind spot. `Stop` waits
 	// only for the ACCEPT LOOP — every session runs in a detached
 	// `go handleSOCKS5(conn)` — so nothing in the shutdown sequence waited for or
@@ -637,6 +680,14 @@ func socks5Relay(client, dest net.Conn, clientIP, host string) {
 			done <- struct{}{} // sole sender
 		}()
 		*count = idleCopyCounted(dst, src, src, shared)
+	}
+	if len(early) > 0 {
+		n, err := dest.Write(early)
+		toDest += int64(n)
+		if err != nil {
+			recordTunnelClose(clientIP, "SOCKS5", host, "", "", "", toDest, toClient, start, "")
+			return
+		}
 	}
 	go relay(dest, client, &toDest)
 	go relay(client, dest, &toClient)
