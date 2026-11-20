@@ -356,6 +356,7 @@ func (r *applyRig) waitOp(t *testing.T, opID string) map[string]interface{} {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if op := pollOpOnce(cli, opID); op != nil {
+			waitTerminalAudit(t, r.auditPath, opID)
 			return op
 		}
 		time.Sleep(20 * time.Millisecond)
