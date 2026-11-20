@@ -290,6 +290,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `docs/operator/blocklist-feed-freshness.md`
   (`TestChaos123_*`, 19 tests).
 
+- **Diagnostics now warns when a Sluice client certificate is about to
+  expire without renewing (Product Experience).** Culvert renews each
+  enrolled instance's CDR client certificate once fewer than 30 days remain,
+  but a renewal that keeps failing (or never runs, because the poller is only
+  armed when CDR is enabled at startup) was visible only as a `RenewCert
+  failed` log line and a badge in CDR → Instances. Diagnostics stayed green
+  until the certificate expired and the instance stopped authenticating. A
+  new report-only `cdr_client_cert` WARN row counts enabled instances whose
+  certificate has expired or has fewer than 14 days left and points at the
+  Cert expires column and the revoke/re-enroll fallback. No row when CDR is
+  off or every certificate is healthy; renewal, enrollment and CDR
+  enforcement are unchanged.
+
 - **Diagnostics now warns when CDR has recently fallen open (Product
   Experience).** Under `cdr.fail_mode: open` (the default), a Sanitize call
   that errors (engine `ERROR`, timeout, transport fault) passes the original
@@ -361,6 +374,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   touch a lock owned by another plane.
 
 ### Fixed
+
+- **`culvert --enroll` can enroll a Data Plane node again.** The enrollment
+  client dialed the Control Plane without the cluster's raw JSON gRPC codec,
+  so gRPC's default protobuf codec refused the request on the node itself
+  (`proto: failed to marshal, message is jsontext.Value`) and the node exited
+  with `Enrollment failed`. Every enrollment path was affected: the GUI's
+  enroll command, the bootstrap compose document and `docker-compose.ha.yml`'s
+  `dp` service. The token was never sent, so nothing was spent on the Control
+  Plane (`TestRunEnrollment_EnrollsOverRealGRPCWire`).
 
 - **CDR re-dials a Sluice instance whose credential bundle was unreadable
   when the pool was built, without a restart.** If an enrolled instance's
