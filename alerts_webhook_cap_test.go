@@ -81,6 +81,19 @@ func auditHas(action, detail string) bool {
 	return false
 }
 
+// auditHasObject reports whether an entry with action, object and detail is in
+// the audit ring. The create arm records the new webhook's ID as the object,
+// which is unique per created webhook, so another test's entry cannot match.
+func auditHasObject(action, object, detail string) bool {
+	entries := auditGet()
+	for i := range entries {
+		if entries[i].Action == action && entries[i].Object == object && entries[i].Detail == detail {
+			return true
+		}
+	}
+	return false
+}
+
 func configVersionSaved(action string) bool {
 	for _, m := range configVersions.List() {
 		if m.Action == action {
@@ -104,7 +117,7 @@ func TestAlertWebhookCreate_AcceptedBelowCap(t *testing.T) {
 	as := swapAlertStoreForImport(t)
 	seedCapHooks(t, as, "api-below", maxAlertWebhooks-1)
 
-	url := "https://new.example.invalid/api-below/last"
+	url := "https://api-below-cap.example.invalid/hook/last"
 	w := createWebhookViaAPI(t, url)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create at %d existing = %d, want 200; body %s", maxAlertWebhooks-1, w.Code, w.Body.String())
@@ -116,7 +129,10 @@ func TestAlertWebhookCreate_AcceptedBelowCap(t *testing.T) {
 	if !storeFingerprint(as)[created.ID+" "+url] {
 		t.Errorf("created webhook %s with URL %q is not in the store", created.ID, url)
 	}
-	if !auditHas("alert.webhook.create", url) {
+	// The create audit records the webhook's ID and only the URL's origin (the
+	// path and query routinely carry the receiver's token), so the entry is
+	// matched on the new webhook's unique ID.
+	if !auditHasObject("alert.webhook.create", created.ID, alerts.URLOrigin(url)) {
 		t.Error("an accepted create was not audited")
 	}
 }
@@ -126,7 +142,10 @@ func TestAlertWebhookCreate_RefusedAtCap(t *testing.T) {
 	seedCapHooks(t, as, "api-at", maxAlertWebhooks)
 	before := storeFingerprint(as)
 
-	url := "https://new.example.invalid/api-at/refused"
+	// A host no other test uses: the create audit carries only the URL's
+	// origin, so the origin is what must be unique to make the refusal check
+	// below able to fail.
+	url := "https://api-refused-at-cap.example.invalid/hook/refused"
 	w := createWebhookViaAPI(t, url)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("create at %d existing = %d, want 400; body %s", maxAlertWebhooks, w.Code, w.Body.String())
@@ -138,7 +157,7 @@ func TestAlertWebhookCreate_RefusedAtCap(t *testing.T) {
 	if storeHasURL(as, url) {
 		t.Fatal("the refused webhook was installed")
 	}
-	if auditHas("alert.webhook.create", url) {
+	if auditHas("alert.webhook.create", alerts.URLOrigin(url)) {
 		t.Error("a refused create was audited")
 	}
 }
