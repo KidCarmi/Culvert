@@ -333,16 +333,17 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 |---|---|---|---|---|---|---|---|---|
 | IM-000 | Discovery: policy mapping, #1526 reconciliation, this program section | shipped (merged 2026-10-30, `5eef0c25`) | nightly shift | `main` | #1760 | — | this document | — |
 | IM-001 | `inspect_h2_alpn.go` → `internal/alpnpeek` (pilot 1 of ≤3) | **shipped** (merged 2026-10-31, `86c095a49`) | nightly shift | `main` | #1766 | IM-000 shipped | **packet** below; ADR-0042; moved `alpn.go`, `doc.go`, `boundary_test.go`, `alpn_test.go`; root inventory 8072 → 8070; assessment below | owner: accept continuation to IM-002 (map) or stop the pilot |
-| IM-002 | `saas_feed_floor.go` → `internal/feedfloor` | **mapped 2026-11-09: not ready** (see "IM-002 / IM-007 mapping") | — | — | — | owner acceptance of pilot continuation; a decision on the shared helper owner | **map** (906 ln, 1077-ln test file, 6 root production consumers, more than 8 exported names needed) | owner: accept/stop pilot continuation; if accepted, decide where `validGenerationID`/`validSHA256Hex`/`canonicalUTCSecond` live before any move |
+| IM-002 | `saas_feed_floor.go` → `internal/feedfloor` | **mapped 2026-11-09: not ready**; helper-owner question narrowed 2026-11-19 (IM-012) | — | — | — | IM-012 merged; owner for `validGenerationID`/`validCRC32Hex`; map with IM-003 as one boundary | **map** (906 ln, 1077-ln test file, 6 root production consumers, more than 8 exported names needed) | after IM-012: decide whether `validGenerationID` (node-local path-segment identity, consumers `saas_feed_activation`/`_gc`/`_reverify`) moves with the floor+genstore engine; then size the IM-002+IM-003 alias surface |
 | IM-003 | `saas_feed_genstore.go` → same package | proposed | — | — | — | IM-002 | lead (539 ln; 2 deps, both in IM-002) | map after IM-002 |
 | IM-004 | `upstream_backup_strip.go` → `internal/upstream/backupstrip` (pilot 2 of ≤3) | **shipped** (merged 2026-11-09, #1842) | nightly shift | `main` | #1842 | IM-001 shipped | **packet** in ADR-0043; 2 exported names (`Strip`, `CountRequiringReplacement`); callers `backup.go`, `restore.go`; 15 engine-only tests moved with names unchanged, 5 neighbouring tests stay root | review PR; owner decides pilot continuation to a third code PR |
 | IM-005 | `policy.go` leaf matchers (follow-up (a)) | **blocked** | — | — | — | IM-006 + accepted boundary | mapping above | none until IM-006 ships |
 | IM-006 | Policy evaluation lookup owners (ADR-0040 step 2) | blocked on #1526 disposition | owner decides | — | #1526 (design) | owner | ADR-0040, `policy-core-feasibility.md`, TSV | owner: merge/rebase/close #1526; then one ownership PR |
 | IM-007 | `realclientip.go` → `internal/realclientip` | **shipped** (merged 2026-11-15, `de0b6d1`) | nightly shift | `main` | #1892 | ADR-0038 pattern | ADR-0045; 4 exported names (`Resolver`, `SetTrustedProxies`, `TrustedProxies`, `ClientIP`); instance owner and move in one PR because root keeps the three wrapper names, so no caller changed; root globals 2 → 1 (`clientIPResolver`); root `realclientip_test.go` untouched | — |
 | IM-008 | `traffic_redaction.go` → `internal/pseudonym` | **shipped** (merged 2026-11-10, `168040c`) | nightly shift | `main` | #1845 | IM-007 not required (posture stays in main) | ADR-0044; 6 exported names; engine split from the `decRedactHosts` posture gate; root keeps wrapper names so no caller changed; 6 engine tests moved with names unchanged | — |
-| IM-009 | `mcp_evidence_readmodel.go` → `internal/mcp/evidenceview` | **implementation under review** | nightly shift | `main` | #1941 | overlap check passed 2026-11-18 (no open MCP PR) | ADR-0046; 5 exported names (`Build`, `View`, `Requirement`, `Summary`, `State`); 1 production caller + 1 `uie2e` fixture call updated, no root alias; shared category slice → per-call slice; wire bytes pinned by golden + 5-case before/after comparison; 5 engine tests moved with names unchanged, 2 handler tests stay root | review PR |
+| IM-009 | `mcp_evidence_readmodel.go` → `internal/mcp/evidenceview` | **shipped** (merged 2026-11-19, `19b2ee8`) | nightly shift | `main` | #1941 | overlap check passed 2026-11-18 (no open MCP PR) | ADR-0046; 5 exported names (`Build`, `View`, `Requirement`, `Summary`, `State`); 1 production caller + 1 `uie2e` fixture call updated, no root alias; shared category slice → per-call slice; wire bytes pinned by golden + 5-case before/after comparison; 5 engine tests moved with names unchanged, 2 handler tests stay root | — |
 | IM-010 | `proxy_path_bounds.go`, `proxy_host_bounds.go`, `request_tracing_bounds.go` | proposed | — | — | — | benchgate measurement | lead (hot path; cross-linked) | measure before mapping |
-| IM-011 | `mcp_shadow_metrics.go` → `internal/mcp/…` (split from IM-009) | discovered 2026-11-18 | — | — | — | instance owner in main first (ADR-0038 pattern) | lead: `sync.Once` process singleton (`globalMCPShadowMetrics`) whose nil-ness gates `/metrics` emission; implements `execution.Metrics`; consumers `mcp_shadow_startup.go`, `mcp_live_startup.go`, `metrics.go`; 4 root test files read `shadowMetricsView` | map: read `mcp_shadow_startup.go` construction and `shadow_soak_test.go` delta assertions; decide whether the singleton stays in main with the counter type + Prometheus writer moved |
+| IM-011 | `mcp_shadow_metrics.go` → `internal/mcp/shadowmetrics` (split from IM-009) | **shipped** (merged 2026-11-19, `babaf34`) | nightly shift | `main` | #1944 | — | ADR-0047; 2 exported names; the `sync.Once` instance and the never-armed nil gate on `/metrics` stay main; see "IM-011 extraction" below | — |
+| IM-012 | saas-feed wire field grammar: root `canonicalUTCSecond`/`validSHA256Hex` → bindings to `internal/urlcatfeed` | **implementation under review** | nightly shift | `main` | #1955 | — | duplicate-rule removal: `urlcatfeed.parseCanonicalRFC3339`/`isSHA256Hex` were byte-equivalent private copies of the root validators; now exported (`ParseCanonicalRFC3339`, `IsSHA256Hex`) and the root names delegate, so 0 root callers changed; differential test with frozen root oracles + 2 mutation negative controls; see "IM-012" below | review PR |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -529,3 +530,31 @@ code PR was started.
   `shadow_soak_test.go`. IM-002/IM-003 stay mapped-not-ready until the shared
   saas-feed validator owner is decided; IM-010 still needs a benchgate
   measurement before mapping.
+
+### IM-012 saas-feed field grammar owner (ORGANIZE, 2026-11-19, main `491b963`)
+
+- **Reconciled.** IM-009 (#1941) and IM-011 (#1944) merged on 2026-11-19; rows
+  updated. Open PRs: #1526 (IM-006) and the appliance set (#1528, #1536,
+  #1548, #1549, #1705); none touches `saas_feed_*.go` or `internal/urlcatfeed`.
+- **Finding.** The IM-002 blocker "where do `validGenerationID`,
+  `validSHA256Hex`, `canonicalUTCSecond` live" was partly a duplicate-rule
+  problem: `internal/urlcatfeed/verify.go` (the feed protocol's trust kernel)
+  already carried private copies of the timestamp and digest rules, and the
+  node-local F3 records bind exactly those manifest values. The protocol is
+  the owner. IM-012 exports them (`ParseCanonicalRFC3339`, `IsSHA256Hex`) and
+  makes the root names one-line bindings; no root caller changed. The rune vs
+  byte loop difference is not observable at length 64 (any non-ASCII byte or
+  `RuneError` falls outside `[0-9a-f]`); the frozen-oracle differential test
+  covers that case and invalid UTF-8.
+- **Not moved.** `validGenerationID` is not wire grammar (no `generation_id`
+  field in `urlcatfeed`); it is the node-local generation store's path-segment
+  identity and belongs with the IM-002+IM-003 engine. `validCRC32Hex` is
+  floor-record-only and moves with the floor. `fsyncDir` stays a genstore/gc
+  concern (`cmd/culvert-maint` has its own).
+- **Next.** IM-002+IM-003 as one boundary. First step: read
+  `saas_feed_genstore.go` exports used by `saas_feed_activate.go`,
+  `_recover.go`, `_gc.go` and `_runtime.go`, and count the alias surface the
+  combined floor+genstore package would need (the 8-name guideline was the
+  other IM-002 blocker). IM-010 still needs a benchgate measurement; its
+  three files are mostly process-global atomics, log throttles and HTTP
+  writers, so only the pure bound predicates are candidates.
