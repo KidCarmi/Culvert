@@ -124,9 +124,19 @@ func runBootstrapResolve(argv []string, stdout, stderr io.Writer) int {
 	// is accepted, which is the downgrade this flag exists to close. The
 	// subcommand takes no positional operands at all, so any tail is a refusal.
 	if fs.NArg() > 0 {
-		bfprintf(stderr, "bootstrap-resolve: unexpected argument(s) %q; this subcommand takes flags only, and the flag "+
-			"package discards every flag after a non-flag token (--data-dir carries the anti-rollback floor). Nothing was resolved.\n",
-			sanitizeLog(strings.Join(fs.Args(), " ")))
+		// Only the first token and the NAMES of the discarded flags are
+		// echoed. The tail reaches stderr, which scripts/install.sh collects,
+		// and --catalog-url is an operator-supplied origin that can carry
+		// userinfo credentials (the same class argv_guard.go redacts for the
+		// main binary's refusal; this copy had not been given the same
+		// treatment). redactArgValuesWith identifies a value by POSITION, so a
+		// dash-leading secret is redacted too, and an unknown name is treated
+		// as taking a value.
+		bfprintf(stderr, "bootstrap-resolve: unexpected argument(s) beginning with %q (discarded after it, values "+
+			"redacted: %q); this subcommand takes flags only, and the flag package discards every flag after a "+
+			"non-flag token (--data-dir carries the anti-rollback floor). Nothing was resolved.\n",
+			sanitizeLog(fs.Arg(0)),
+			sanitizeLog(redactArgValuesWith(fs.Args()[1:], boolFlagIn(fs))))
 		return 2
 	}
 	if !validBootstrapPrint(*printFlag) {

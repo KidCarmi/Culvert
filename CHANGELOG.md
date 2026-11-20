@@ -9,6 +9,78 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A ClamAV signature database that has stopped updating is now observable
+  (`CHAOS-124`).** Culvert does not fetch virus definitions — `freshclam` does,
+  out of process, in a container Culvert neither starts nor supervises — so a
+  daemon whose definitions froze stayed invisible to every surface the product
+  had: it remained reachable, answered `PING` and `VERSION`, scanned every body
+  and returned `CLEAN`, so the `clamav` readiness row, the `clamav_scan`
+  diagnostics row, the `scan_clam_error` alert and Compose's own
+  `clamdscan --ping 3` healthcheck all passed, indefinitely, while malware
+  published since the database was built went undetected and those downloads
+  were reported to users as clean. A persistent `clamav-db` volume and
+  `restart: unless-stopped` meant a restart reloaded the same stale database,
+  so not even a reboot moved any of it. The node already learned the build date
+  on every five-minute `VERSION` poll (`CHAOS-107`) and discarded it into an
+  opaque cache key; the one metric that looked relevant,
+  `culvert_scan_sigdb_invalidations_total`, counts *changes*, so a node whose
+  updater died three weeks ago and a node that is current but quiet for an hour
+  exported a byte-identical value — the mechanism `WK-5`/`CHAOS-59` closed for
+  the threat feed and `CHAOS-123` closed for `culvert_blocklist_size`. The
+  build date is now parsed into a time (`clamav.Version.DBTime`) and surfaced as
+  the unlabelled `culvert_clamav_signature_*` family, a `clamav_signatures`
+  diagnostics row, and a `clamav_signature_stale` alert fired once per episode
+  and cleared only by an observed newer database. An unreadable build date and
+  one dated ahead of this node's clock are reported as their own states and
+  deliberately do **not** page: each is an inability to measure, not evidence of
+  staleness, and neither may clear a live episode. Posture is unchanged —
+  report-only, never gating, no dial from a `/metrics` scrape. Runbook:
+  [`docs/operator/clamav-definition-freshness.md`](docs/operator/clamav-definition-freshness.md).
+
+
+- **A stale blocklist-feed alert that reached nobody no longer consumes the
+  node's one page for that episode (`SEC-BLFEED-STALE-LATCH-1`).** The
+  CHAOS-123 freshness plane fires `blocklist_feed_stale` at most once per
+  episode, and the episode clears only on an observed clean sync, a feed
+  removal or a restart — never on elapsed time. The latch was set before the
+  alert was dispatched, while the sink drops the alert when nothing subscribes,
+  which is the default posture. So an appliance that booted with an unreachable
+  feed origin burned the episode on the first failed round after the grace, and
+  an operator who added the `blocklist_feed_stale` webhook afterwards was never
+  paged while the deny list went on not refreshing for the life of the process.
+  The latch now tracks DELIVERY: it is consumed only by a dispatched alert, with
+  the decision still inside the lock so concurrent failed rounds page at most
+  once. Detection was degraded rather than dark throughout — the
+  `blocklist_feed` WARN row and the `culvert_blocklist_feed_stale*` gauges are
+  derived on read and stayed correct — but the push surface the feature exists
+  for was lost (`TestChaos123_UndeliveredStaleAlertDoesNotConsumeTheEpisode`).
+- **A withdrawn CDR pool member is unpublished before its connection is closed
+  (`SEC-CDR-REDIAL-CLOSE-ORDER-1`).** The automatic re-dial publishes the
+  members it dialled and then re-validates them, withdrawing any whose registry
+  entry disappeared in between. That post-publish pass closed a withdrawn
+  member's connection while the member was STILL in the published pool, and
+  nothing filters a closed client out of selection: `cdrClientPool.pick`
+  selects on breaker state alone and `CDRClient.closedAt` is written by `Close`
+  and read by nothing. A concurrent `PickReserved` could therefore hand a dead
+  connection to a sanitize RPC, and under `fail_mode: open` the document it was
+  drawn for passed CDR unsanitized. The decision and the teardown are now
+  separate: the pass reports what to withdraw, `cdrPool.replace` unpublishes it,
+  and `replace` — which already closes exactly the clients not carried over —
+  does the closing afterwards
+  (`TestCDRRedial_WithdrawnMemberIsUnpublishedBeforeItIsClosed`).
+- **`bootstrap-resolve`'s positional-argument refusal no longer prints flag
+  values.** The refusal echoed the whole discarded tail; `sanitizeLog`
+  neutralizes newlines but does not redact values, and that FlagSet owns
+  `--catalog-url`, an operator-supplied origin that can carry userinfo
+  credentials. Since `scripts/install.sh` collects this stderr into the install
+  log, a mirror credential landed in a file that is routinely attached to
+  support bundles. The refusal now echoes only the first token and the flag
+  NAMES, through the same position-based `redactArgValuesWith` the main binary's
+  CHAOS-122 refusal uses — so a dash-leading secret is redacted too and an
+  unknown flag name is treated as taking a value. `--data-dir` still appears by
+  name, so the operator can still see that the anti-rollback floor was among the
+  discarded flags. Pre-existing; the main binary's copy was fixed separately
+  (`TestChaos122_BootstrapResolveRefusalRedactsFlagValues`).
 - **A policy rule on an IP-literal destination now matches every spelling of
   that address.** `destFqdn` literals were compared as text, so a Block/Drop
   rule on `192.0.2.7` did not match `[::ffff:192.0.2.7]`, and one on
@@ -247,6 +319,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `docs/operator/blocklist-feed-freshness.md`
   (`TestChaos123_*`, 19 tests).
 
+- **Diagnostics now warns when a Sluice client certificate is about to
+  expire without renewing (Product Experience).** Culvert renews each
+  enrolled instance's CDR client certificate once fewer than 30 days remain,
+  but a renewal that keeps failing (or never runs, because the poller is only
+  armed when CDR is enabled at startup) was visible only as a `RenewCert
+  failed` log line and a badge in CDR → Instances. Diagnostics stayed green
+  until the certificate expired and the instance stopped authenticating. A
+  new report-only `cdr_client_cert` WARN row counts enabled instances whose
+  certificate has expired or has fewer than 14 days left and points at the
+  Cert expires column and the revoke/re-enroll fallback. No row when CDR is
+  off or every certificate is healthy; renewal, enrollment and CDR
+  enforcement are unchanged.
+
 - **Diagnostics now warns when CDR has recently fallen open (Product
   Experience).** Under `cdr.fail_mode: open` (the default), a Sanitize call
   that errors (engine `ERROR`, timeout, transport fault) passes the original
@@ -318,6 +403,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   touch a lock owned by another plane.
 
 ### Fixed
+
+- **`culvert --enroll` can enroll a Data Plane node again.** The enrollment
+  client dialed the Control Plane without the cluster's raw JSON gRPC codec,
+  so gRPC's default protobuf codec refused the request on the node itself
+  (`proto: failed to marshal, message is jsontext.Value`) and the node exited
+  with `Enrollment failed`. Every enrollment path was affected: the GUI's
+  enroll command, the bootstrap compose document and `docker-compose.ha.yml`'s
+  `dp` service. The token was never sent, so nothing was spent on the Control
+  Plane (`TestRunEnrollment_EnrollsOverRealGRPCWire`).
 
 - **CDR re-dials a Sluice instance whose credential bundle was unreadable
   when the pool was built, without a restart.** If an enrolled instance's

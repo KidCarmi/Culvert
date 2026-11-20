@@ -78,6 +78,19 @@ package alerts
 //                             cleared only when every auto-synced feed is observed fresh again. Detail
 //                             carries counts, an age and an interval — never a feed URL (which
 //                             routinely embeds a token) or the fetch error.
+//   "clamav_signature_stale" — the ClamAV virus-definition database the local daemon reports is more
+//                             than 48h old (CHAOS-124). Culvert does not fetch definitions: freshclam
+//                             does, out of process, so this is an OBSERVATION of the build date clamd
+//                             reports in its VERSION reply, not the outcome of a sync this process
+//                             ran. The daemon stays reachable and keeps returning CLEAN verdicts, so
+//                             no other surface moves — malware published since the database was built
+//                             is simply not detected. An UNREADABLE or future-dated build date is
+//                             deliberately NOT paged (it is an inability to measure, not evidence of
+//                             staleness); it gets a diagnostics row and a gauge instead. Fired once
+//                             per episode; cleared only by an observed newer database, never by
+//                             elapsed time. Detail carries an age and a build date, never the engine
+//                             string or the raw reply (both change on every upgrade and would weaken
+//                             the event+Detail dedup window).
 //   "syslog_feed_down"      — the remote syslog/SIEM feed has lost events and delivered nothing for
 //                             the degradation window (CHAOS-66): audit and request events are not
 //                             reaching the collector and are NOT replayed. The node keeps proxying
