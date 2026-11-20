@@ -518,10 +518,8 @@ func TestChaos71_Wall_EveryLeaseGrantIsInstalledOrCleared(t *testing.T) {
 	var takers []string
 	for name, decls := range funcs {
 		for _, fn := range decls {
-			for _, c := range cpCallees(fn) {
-				if c == "Acquire" && name != "acquireLeaseAttempt" && !leaseCallsConnLimiter(fn) {
-					t.Errorf("%s calls a lease Acquire directly — acquire through acquireLeaseAttempt", name)
-				}
+			if name != "acquireLeaseAttempt" && leaseCallsDirectAcquire(fn) {
+				t.Errorf("%s calls a lease Acquire directly — acquire through acquireLeaseAttempt", name)
 			}
 			if leaseAcquireHelpers[name] {
 				continue
@@ -542,17 +540,45 @@ func TestChaos71_Wall_EveryLeaseGrantIsInstalledOrCleared(t *testing.T) {
 	}
 }
 
-// leaseCallsConnLimiter: the only other production Acquire is the
-// connection limiter's.
-func leaseCallsConnLimiter(fn *ast.FuncDecl) bool {
+// leaseNonLeaseAcquirers are receivers whose Acquire is NOT a fencing-lease
+// acquisition: the per-IP connection limiter (connLimiter.Acquire) and the
+// scan sidecar's admission gate (<scan service>.admission.Acquire, a slot
+// semaphore since IM-016 moved it to internal/secscan/sidecargate). The wall is
+// lexical, so it must tell these apart by receiver.
+//
+// It judges each Acquire call, not the whole function: a function that admits
+// through one of these AND takes a lease directly still fails, which the
+// previous whole-function exemption for connLimiter would have hidden.
+func leaseCallsDirectAcquire(fn *ast.FuncDecl) bool {
 	found := false
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Acquire" {
-			if id, ok := sel.X.(*ast.Ident); ok && id.Name == "connLimiter" {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return !found
+		}
+		switch f := call.Fun.(type) {
+		case *ast.Ident:
+			if f.Name == "Acquire" {
+				found = true
+			}
+		case *ast.SelectorExpr:
+			if f.Sel.Name == "Acquire" && !leaseNonLeaseAcquirer(f.X) {
 				found = true
 			}
 		}
 		return !found
 	})
 	return found
+}
+
+// leaseNonLeaseAcquirer reports whether recv is one of leaseCallsDirectAcquire's
+// known non-lease Acquire receivers.
+func leaseNonLeaseAcquirer(recv ast.Expr) bool {
+	switch r := recv.(type) {
+	case *ast.Ident:
+		return r.Name == "connLimiter"
+	case *ast.SelectorExpr:
+		return r.Sel.Name == "admission"
+	}
+	return false
 }
