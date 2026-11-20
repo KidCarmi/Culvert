@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/reqlog"
 	"github.com/KidCarmi/Culvert/internal/ssrf"
 )
 
@@ -221,5 +222,43 @@ func TestSOCKS5HangupWatch_NoDeadlineSupportIsInert(t *testing.T) {
 	}
 	if socks5ClientGone(ctx) {
 		t.Fatal("inert watch reported a hang-up")
+	}
+}
+
+// The early byte is part of the upstream byte total: TUNNEL_CLOSED BytesSent
+// must count it, not just the bytes the relay copied afterwards.
+func TestSOCKS5RelayPrefixed_CountsEarlyBytes(t *testing.T) {
+	isolateDrainRegistry(t)
+	t.Cleanup(reqlog.SwapRingForTest())
+	clientA, clientB := tcpPair(t)
+	destA, destB := tcpPair(t)
+	const host = "early-count-socks5.test:443"
+
+	relayDone := make(chan struct{})
+	go func() {
+		defer close(relayDone)
+		socks5RelayPrefixed(clientB, destA, []byte("A"), "203.0.113.20", host)
+	}()
+	if _, err := clientA.Write([]byte("B")); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 2)
+	_ = destB.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(destB, got); err != nil || string(got) != "AB" {
+		t.Fatalf("destination read %q, %v; want %q", got, err, "AB")
+	}
+	_ = clientA.Close()
+	_ = destB.Close()
+	select {
+	case <-relayDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("relay did not finish after both peers closed")
+	}
+	entry := findTunnelClose(host)
+	if entry == nil {
+		t.Fatal("no TUNNEL_CLOSED entry recorded")
+	}
+	if entry.BytesSent != 2 {
+		t.Fatalf("BytesSent = %d, want 2 (early byte + relayed byte)", entry.BytesSent)
 	}
 }

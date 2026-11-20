@@ -679,7 +679,7 @@ func socks5RelayPrefixed(client, dest net.Conn, early []byte, clientIP, host str
 			}
 			done <- struct{}{} // sole sender
 		}()
-		*count = idleCopyCounted(dst, src, src, shared)
+		*count += idleCopyCounted(dst, src, src, shared) // += keeps the early-byte prefix in toDest
 	}
 	if len(early) > 0 {
 		n, err := dest.Write(early)
