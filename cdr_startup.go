@@ -67,7 +67,7 @@ func loadCDR(cfg cdrStartupConfig, ctx context.Context) {
 		logger.Printf("CDR: initial client dial failed, CDR effectively disabled: %v", sanitizeLog(err.Error()))
 	}
 
-	startCDRHealthPoller(ctx)
+	ensureCDRHealthPoller(ctx)
 
 	logger.Printf("CDR: enabled — endpoint=%q profile=%q mode=%q %s (Phase 2c: client + policy engine + proxy wiring + admin API live)",
 		sanitizeLog(cdrCfg.Endpoint), sanitizeLog(profile), sanitizeLog(mode), failSafe)

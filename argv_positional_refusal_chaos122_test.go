@@ -224,3 +224,35 @@ func TestChaos122_BootstrapResolveRefusesAPositionalTail(t *testing.T) {
 		t.Fatalf("a flags-only argv must pass the guard; got %q", err2.String())
 	}
 }
+
+// TestChaos122_BootstrapResolveRefusalRedactsFlagValues. The refusal above
+// echoes the tail it discarded, and that tail reaches stderr, which
+// scripts/install.sh collects into its install log. --catalog-url is an
+// operator-supplied origin and can carry userinfo credentials, so the refusal
+// must print the flag NAMES and not their values — the treatment
+// argv_guard.go already gives the main binary's refusal (fa8c906), which this
+// FlagSet's own copy had not been given.
+func TestChaos122_BootstrapResolveRefusalRedactsFlagValues(t *testing.T) {
+	const secret = "s3cr3t-catalog-token"
+	var out, errBuf strings.Builder
+	code := runBootstrapResolve([]string{
+		"stray",
+		"--catalog-url", "https://user:" + secret + "@mirror.example.com/catalog.json",
+		"--data-dir", "/var/lib/culvert",
+	}, &out, &errBuf)
+	if code == 0 {
+		t.Fatal("a positional tail must fail closed")
+	}
+	got := errBuf.String()
+	if strings.Contains(got, secret) {
+		t.Errorf("the discarded tail's values reached stderr verbatim, so a catalog credential lands in the "+
+			"installer log: %q", got)
+	}
+	// The names must survive: they are what tells the operator which settings
+	// were discarded (--data-dir is the anti-rollback floor).
+	for _, want := range []string{"stray", "--catalog-url", "--data-dir", "<value>"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("refusal must still name %q so the operator can see what was discarded; got %q", want, got)
+		}
+	}
+}
