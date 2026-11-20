@@ -247,6 +247,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `docs/operator/blocklist-feed-freshness.md`
   (`TestChaos123_*`, 19 tests).
 
+- **Diagnostics now warns when a Sluice client certificate is about to
+  expire without renewing (Product Experience).** Culvert renews each
+  enrolled instance's CDR client certificate once fewer than 30 days remain,
+  but a renewal that keeps failing (or never runs, because the poller is only
+  armed when CDR is enabled at startup) was visible only as a `RenewCert
+  failed` log line and a badge in CDR → Instances. Diagnostics stayed green
+  until the certificate expired and the instance stopped authenticating. A
+  new report-only `cdr_client_cert` WARN row counts enabled instances whose
+  certificate has expired or has fewer than 14 days left and points at the
+  Cert expires column and the revoke/re-enroll fallback. No row when CDR is
+  off or every certificate is healthy; renewal, enrollment and CDR
+  enforcement are unchanged.
+
 - **Diagnostics now warns when CDR has recently fallen open (Product
   Experience).** Under `cdr.fail_mode: open` (the default), a Sanitize call
   that errors (engine `ERROR`, timeout, transport fault) passes the original
