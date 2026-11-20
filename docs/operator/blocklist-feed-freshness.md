@@ -36,6 +36,10 @@ persists.
 **One case does not self-heal: a feed with auto-sync turned off.** Nothing will
 ever sync it. See [Auto-sync off](#the-auto-sync-off-case) below.
 
+**Nor does a feed larger than the line cap.** It syncs successfully and stays
+fresh, but only its first 1,000,000 entries are imported. See
+[A truncated feed](#a-truncated-feed) below.
+
 ---
 
 ## Cadence
@@ -46,7 +50,8 @@ ever sync it. See [Auto-sync off](#the-auto-sync-off-case) below.
 | Scheduler tick | 60 s — a feed added or edited at runtime is picked up within one tick |
 | Retry after a failed round | bounded exponential backoff, clamped **below** the feed's own interval |
 | Jitter | a stable per-feed offset, chosen once |
-| Body/line budget | bounded; an origin that overruns it fails the round rather than importing a truncated list |
+| Body budget | 64 MiB per round; an origin that overruns it **fails** the round rather than importing a partial list |
+| Line cap | 1,000,000 non-empty lines per round; a longer body is **truncated** — the round succeeds with the first 1,000,000 entries and is reported as truncated (see [below](#a-truncated-feed)) |
 
 The interval is per feed, so the staleness threshold below is per feed too.
 A feed is stale after 2× its configured interval with no success, with a
@@ -89,7 +94,8 @@ scraped unauthenticated. Per-feed detail is on the role-gated
 | `culvert_blocklist_feed_stale` | Auto-synced feeds with no success for over 2× their interval, floored near the tick (or never, past the 15-minute startup grace) |
 | `culvert_blocklist_feed_stale_seconds` | Age of the **oldest** auto-synced feed; measured from startup when it has never succeeded |
 | `culvert_blocklist_feed_oldest_success_timestamp_seconds` | Unix time of the oldest last-success (**0** = at least one feed has never synced) |
-| `culvert_blocklist_feed_sync_ok` | 1 when every feed's latest attempt succeeded and none is stale |
+| `culvert_blocklist_feed_truncated` | Feeds whose latest successful sync reached the 1,000,000-line cap and was truncated — entries past the cap are not enforced |
+| `culvert_blocklist_feed_sync_ok` | 1 when every feed's latest attempt succeeded and none is stale (truncation does **not** move it — see [below](#a-truncated-feed)) |
 | `culvert_blocklist_feed_consecutive_sync_failures` | Largest consecutive-failure count across feeds (not persisted across restart) |
 
 > **Note on `culvert_blocklist_size`.** This gauge is *not* a freshness signal.
@@ -112,6 +118,9 @@ culvert_blocklist_feed_sync_ok == 0
 
 # Configured but unscheduled: nothing will ever sync these.
 culvert_blocklist_feed_manual_never_synced > 0
+
+# A feed is larger than the line cap: part of the list is not enforced.
+culvert_blocklist_feed_truncated > 0
 ```
 
 `culvert_blocklist_feed_stale_seconds` is an absolute age across feeds with
@@ -152,6 +161,7 @@ at once, because the operator actions differ:
 | **warn** — "are stale" / "have NEVER synced" | Auto-synced feed past 2× its interval (floored near the tick), or past the startup grace with no success |
 | **warn** — "failed their latest sync" | The most recent attempt failed; already-imported entries still enforced |
 | **warn** — "auto-sync turned off and have never been synced" | Configured but unscheduled — see below |
+| **warn** — "exceed the 1000000-line feed cap … TRUNCATED" | The latest successful sync of a feed was cut short at the line cap; entries past it are not enforced — see below |
 
 ### Not on `/readyz`
 
@@ -178,6 +188,48 @@ why it is deliberately **not** alerted on: you turned the schedule off, so
 paging would be paging on your own configuration.
 
 If you did not intend it, set an interval.
+
+---
+
+## A truncated feed
+
+Each round reads at most **1,000,000** non-empty lines of a feed body
+(comment lines included). A
+longer body is deliberately **truncated**, not failed: the round imports the
+first 1,000,000 entries and succeeds. Failing it instead would freeze the whole
+list the first time a legitimate aggregated feed outgrew the cap, and because
+feed merges never delete, a truncated round un-blocks nothing that was already
+imported. (The separate 64 MiB byte budget *does* fail the round.)
+
+The cost is that everything past the cap is **not imported, so the destinations
+it lists are not blocked** — while the sync itself looks healthy: `last_sync`
+advances, `last_error` stays empty and the feed is not stale. That is why it has
+its own gauge (`culvert_blocklist_feed_truncated`), its own diagnostics row and
+one WARN log line per truncating round, rather than being folded into
+freshness.
+
+It deliberately does **not** set `culvert_blocklist_feed_sync_ok` to 0 and does
+**not** fire `blocklist_feed_stale`. Both mean "rounds are failing or the list
+is not refreshing"; a truncated feed is refreshing, and its size is a standing
+property of the origin that no retry will change, so folding it in would hold
+the paging signal at 0 for as long as the list is oversized and hide a real
+outage behind it. Alert on `culvert_blocklist_feed_truncated > 0` if you want a
+notification.
+
+**What to do:** split the list into several feeds of fewer than 1,000,000
+entries each, or trim it at the source. Sync Now will not help — the cap is
+fixed. The truncation mark clears on the first successful round whose body
+fits under the cap. It is in-memory, like the rest of the feed status, so it
+reads clear after a restart or settings restore until the feed's next round.
+
+The log line and the diagnostics row deliberately name no feed (URLs routinely
+embed tokens), and `/api/blocklist/feed` does not yet carry the truncation mark
+per feed. To find the oversized feed, count each origin's non-empty lines from
+the node — comment lines count toward the cap too:
+
+```
+curl -s <the feed URL> | grep -c '[^[:space:]]'
+```
 
 ---
 

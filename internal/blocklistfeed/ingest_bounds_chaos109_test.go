@@ -59,7 +59,7 @@ func TestOverrunIsRefusedAndNotMergedAsAShortFeed(t *testing.T) {
 	srv := hostListServer(t, 5_000) // comfortably over 1 KiB
 
 	bs := New(&fakeMerger{})
-	lines, err := bs.fetchFeedLines(context.Background(), srv.URL)
+	lines, truncated, err := bs.fetchFeedLines(context.Background(), srv.URL)
 	if err == nil {
 		t.Fatalf("an origin that overran its byte budget was accepted as a %d-line feed; "+
 			"the prefix would be merged into a deny control and the round recorded healthy",
@@ -74,6 +74,9 @@ func TestOverrunIsRefusedAndNotMergedAsAShortFeed(t *testing.T) {
 	if lines != nil {
 		t.Errorf("a refused round must return no lines to merge, got %d", len(lines))
 	}
+	if truncated {
+		t.Error("a refused round must not also report truncation: the byte budget fails, it does not truncate")
+	}
 	t.Logf("refused as expected: %v", err)
 }
 
@@ -87,12 +90,15 @@ func TestLineCapTruncatesRatherThanFails(t *testing.T) {
 	srv := hostListServer(t, 1_000)
 
 	bs := New(&fakeMerger{})
-	lines, err := bs.fetchFeedLines(context.Background(), srv.URL)
+	lines, truncated, err := bs.fetchFeedLines(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("reaching the line cap must not fail the round, got: %v", err)
 	}
 	if len(lines) != maxFeedLines {
 		t.Errorf("expected exactly the cap (%d) lines, got %d", maxFeedLines, len(lines))
+	}
+	if !truncated {
+		t.Error("a round cut short at the line cap must report truncated")
 	}
 }
 
@@ -101,12 +107,15 @@ func TestLineCapTruncatesRatherThanFails(t *testing.T) {
 func TestLegitimateFeedWithinBothBudgetsIsUnaffected(t *testing.T) {
 	srv := hostListServer(t, 2_000)
 	bs := New(&fakeMerger{})
-	lines, err := bs.fetchFeedLines(context.Background(), srv.URL)
+	lines, truncated, err := bs.fetchFeedLines(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("a 2000-line feed is well inside both budgets, got: %v", err)
 	}
 	if len(lines) != 2_000 {
 		t.Errorf("expected all 2000 lines through, got %d", len(lines))
+	}
+	if truncated {
+		t.Error("a feed inside both budgets must not report truncated")
 	}
 }
 
