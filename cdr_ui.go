@@ -167,6 +167,9 @@ func apiCDRConfigToggle(w http.ResponseWriter, r *http.Request) {
 			logger.Printf("CDR: runtime toggle → enabled but init failed: %q",
 				sanitizeLog(rerr.Error()))
 		}
+		// Like loadCDR at boot, arm the poller whether or not the pool
+		// dialled: its re-dial is what recovers a failed build.
+		armCDRHealthPollerAtRuntime()
 	} else {
 		shutdownCDRClient()
 	}
@@ -524,6 +527,10 @@ func apiCDREnroll(w http.ResponseWriter, r *http.Request) {
 				sanitizeLog(rerr.Error()))
 			initErr = sanitizeLog(rerr.Error())
 		}
+		// A first enrollment that auto-enabled CDR is a runtime enable:
+		// without this the new instance's client certificate would never
+		// auto-renew until a restart. No-op when CDR was already on.
+		armCDRHealthPollerAtRuntime()
 	}
 
 	auditEventDiff(r, "cdr.instance.enroll", req.Name,

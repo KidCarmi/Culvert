@@ -147,7 +147,8 @@ func TestTunnelGuard_BudgetBoundsWedgedLookup(t *testing.T) {
 	}
 }
 
-// SOCKS5 has no request context at all, so the budget is the only bound.
+// SOCKS5 has no request context; with a client that stays connected, the
+// budget is the bound (a hang-up is covered by socks5_hangup_test.go).
 func TestTunnelGuard_SOCKS5BudgetBoundsWedgedLookup(t *testing.T) {
 	setupProxyTest(t)
 	shrinkTunnelGuardBudget(t)

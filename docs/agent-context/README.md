@@ -204,6 +204,7 @@ to this checkout, not to an unmerged branch.
 [package scripts](../../frontend/package.json),
 [verification workflow](../../.github/workflows/frontend-verify.yml),
 [embedded serving](../../ui_frontend_v2.go),
+[artifact validator](../../internal/frontendbundle/doc.go),
 [original project map](history/project-map.md#claude-main-l006-l091).
 Respect generated-output checks, legacy-versus-experimental route separation,
 CSP and API/GUI parity. Follow admin/auth routes for the corresponding backend.

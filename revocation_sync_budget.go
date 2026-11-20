@@ -1,8 +1,9 @@
 package main
 
 // revocation_sync_budget.go — AU-50 / AU-71. Byte budgets for the two legs of
-// SyncRevocations, and the planner that keeps a list larger than a leg's
-// budget propagating instead of failing the whole plane.
+// SyncRevocations, the deferral accounting, and main's bindings to the planner
+// (internal/session/revsync) that keeps a list larger than a leg's budget
+// propagating instead of failing the whole plane.
 //
 // THE FAILURE. SyncRevocations is bidirectional and its legs are capped
 // differently: a Data Plane's REQUEST rides maxClusterInboundMsgSize (16 MiB —
@@ -48,12 +49,12 @@ package main
 // sent unchanged when it fits. The planner runs only on the over-budget path.
 
 import (
-	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/session/revsync"
 )
 
 // revocationSyncFrameReserve is the margin between each leg's byte budget and
@@ -84,212 +85,30 @@ var (
 	revocationSyncResponseBudget = maxRevocationSyncResponseBytes
 )
 
-// Priority classes, lowest first.
-const (
-	revSyncClassLocal   = iota // a token this node MAC-verified itself
-	revSyncClassAccount        // an account revocation, any origin
-	revSyncClassLearned        // a token learned from the fleet
-)
+// The planner itself — the priority order, the rotating window and the request
+// wire envelope — is owned by internal/session/revsync (IM-015, ADR-0049).
+// The names below are main's bindings to it: main owns the budgets above, the
+// cursor INSTANCES (DataPlaneClient.revSyncCursor and the Control Plane
+// aggregator's per-node respCursor), the deferral accounting below and the
+// RPC, and passes the budget and cursor into every call.
 
-// revSyncKey is an entry's position in the priority order. Token is unique
-// within one list (it is the map key on the DP, and the dedup key of the CP's
-// merge), so the order is total and never depends on map iteration.
-type revSyncKey struct {
-	class  int
-	expiry int64
-	token  string
-}
-
-func (a revSyncKey) less(b revSyncKey) bool {
-	if a.class != b.class {
-		return a.class < b.class
-	}
-	if a.expiry != b.expiry {
-		return a.expiry > b.expiry // latest expiry first
-	}
-	return a.token < b.token
-}
-
-// revSyncCursor is where the rotating window stopped. It is a KEY rather than
-// an index, so entries that expire or arrive between ticks do not shift the
-// resume point onto entries that were already sent.
-type revSyncCursor struct {
-	last revSyncKey
-	set  bool
-}
-
-type revSyncItem struct {
-	key  revSyncKey
-	e    RevocationEntry
-	cost int // marshalled bytes, without the separating comma
-}
-
-// revSyncItems ranks entries for planRevocationSync. classOf assigns the
-// class; it is the only thing that differs between the two legs.
-func revSyncItems(entries []RevocationEntry, classOf func(RevocationEntry) int) ([]revSyncItem, error) {
-	items := make([]revSyncItem, 0, len(entries))
-	for i := range entries {
-		b, err := json.Marshal(entries[i])
-		if err != nil {
-			return nil, fmt.Errorf("measure revocation entry: %w", err)
-		}
-		items = append(items, revSyncItem{
-			key:  revSyncKey{class: classOf(entries[i]), expiry: entries[i].Expiry, token: entries[i].Token},
-			e:    entries[i],
-			cost: len(b),
-		})
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].key.less(items[j].key) })
-	return items, nil
-}
-
-// planRevocationSync chooses the entries whose marshalled JSON ARRAY fits
-// arrayBudget bytes: a priority prefix of up to half the budget, then a
-// rotating window over the remainder that resumes after cur. items must be
-// sorted by revSyncKey.less. It returns the chosen entries (prefix first) and
-// how many were deferred to a later tick, and advances cur.
-//
-// Nothing here removes anything from anywhere: "deferred" entries are simply
-// not in this tick's message.
-func planRevocationSync(items []revSyncItem, arrayBudget int, cur *revSyncCursor) (send []RevocationEntry, deferred int) {
-	used := len("[]")
-	send = make([]RevocationEntry, 0, min(len(items), 1024))
-	fits := func(cost, limit int) bool {
-		if len(send) > 0 {
-			cost++ // the separating comma
-		}
-		return used+cost <= limit
-	}
-	take := func(it revSyncItem) {
-		if len(send) > 0 {
-			used++
-		}
-		used += it.cost
-		send = append(send, it.e)
-	}
-
-	// 1. The priority prefix, strict, up to half the budget.
-	h := 0
-	for h < len(items) && fits(items[h].cost, arrayBudget/2) {
-		take(items[h])
-		h++
-	}
-	rest := items[h:]
-	if len(rest) == 0 {
-		*cur = revSyncCursor{}
-		return send, 0
-	}
-
-	// 2. The rotating window, resuming strictly after the last entry the
-	// previous tick's window carried (wrapping to the start).
-	start := 0
-	if cur.set {
-		start = sort.Search(len(rest), func(i int) bool { return cur.last.less(rest[i].key) })
-		if start == len(rest) {
-			start = 0
-		}
-	}
-	carried := 0
-	var last revSyncKey
-	advanced := false
-	for k := range len(rest) {
-		it := rest[(start+k)%len(rest)]
-		if !fits(it.cost, arrayBudget) {
-			if carried == 0 {
-				// An entry larger than the entire window can never ride; step
-				// the cursor past it so it cannot jam the rotation for every
-				// entry behind it. Unreachable for any entry a cookie can
-				// produce (the window is at least half the budget, megabytes),
-				// but a jammed rotation would be a silent total stop.
-				last, advanced = it.key, true
-				continue
-			}
-			break
-		}
-		take(it)
-		carried++
-		last, advanced = it.key, true
-	}
-	if carried == len(rest) {
-		*cur = revSyncCursor{} // everything went out; the next backlog starts fresh
-	} else if advanced {
-		*cur = revSyncCursor{last: last, set: true}
-	}
-	return send, len(items) - len(send)
-}
-
-// marshalWithinBudget marshals envelope(entries) and, when that exceeds
-// budget, re-marshals it carrying the planned subset. It reports how many
-// entries were deferred. The envelope's own bytes are measured (an empty
-// array in place of the entries), so the array budget is exact.
-func marshalWithinBudget(entries []RevocationEntry, budget int, cur *revSyncCursor,
-	classOf func(RevocationEntry) int, envelope func([]RevocationEntry) any,
-) (body []byte, deferred int, err error) {
-	body, err = json.Marshal(envelope(entries))
-	if err != nil {
-		return nil, 0, fmt.Errorf("marshal revocation sync: %w", err)
-	}
-	if len(body) <= budget {
-		*cur = revSyncCursor{}
-		return body, 0, nil
-	}
-	empty, err := json.Marshal(envelope([]RevocationEntry{}))
-	if err != nil {
-		return nil, 0, fmt.Errorf("measure revocation sync envelope: %w", err)
-	}
-	items, err := revSyncItems(entries, classOf)
-	if err != nil {
-		return nil, 0, err
-	}
-	send, deferred := planRevocationSync(items, budget-(len(empty)-len("[]")), cur)
-	if body, err = json.Marshal(envelope(send)); err != nil {
-		return nil, 0, fmt.Errorf("marshal budgeted revocation sync: %w", err)
-	}
-	return body, deferred, nil
-}
+// revSyncCursor is where a leg's rotating window stopped.
+type revSyncCursor = revsync.Cursor
 
 // revocationSyncRequest is the DP→CP SyncRevocations body. The field names
 // are the wire contract the CP handler decodes.
-type revocationSyncRequest struct {
-	NodeID  string            `json:"node_id"`
-	Entries []RevocationEntry `json:"entries"`
-}
+type revocationSyncRequest = revsync.Request
 
 // buildRevocationSyncRequest marshals this node's revocation request within
 // budget, local logouts first. local and other are ExportRevocationsByOrigin.
 func buildRevocationSyncRequest(nodeID string, local, other []RevocationEntry, budget int, cur *revSyncCursor) (body []byte, deferred int, err error) {
-	all := make([]RevocationEntry, 0, len(local)+len(other))
-	all = append(all, local...)
-	all = append(all, other...)
-	isLocal := make(map[string]struct{}, len(local))
-	for i := range local {
-		isLocal[local[i].Token] = struct{}{}
-	}
-	classOf := func(e RevocationEntry) int {
-		if _, ok := isLocal[e.Token]; ok {
-			return revSyncClassLocal
-		}
-		if e.User != "" {
-			return revSyncClassAccount
-		}
-		return revSyncClassLearned
-	}
-	envelope := func(es []RevocationEntry) any { return revocationSyncRequest{NodeID: nodeID, Entries: es} }
-	return marshalWithinBudget(all, budget, cur, classOf, envelope)
+	return revsync.BuildRequest(nodeID, local, other, budget, cur)
 }
 
-// buildRevocationSyncResponse marshals the CP's reply within budget (AU-71).
-// Every entry is remote to the requester, so the classes are account first
-// (one entry withdraws every session an identity holds), then tokens.
+// buildRevocationSyncResponse marshals the CP's reply within budget (AU-71),
+// account revocations first, then tokens.
 func buildRevocationSyncResponse(entries []RevocationEntry, budget int, cur *revSyncCursor) (body []byte, deferred int, err error) {
-	classOf := func(e RevocationEntry) int {
-		if e.User != "" {
-			return revSyncClassAccount
-		}
-		return revSyncClassLearned
-	}
-	envelope := func(es []RevocationEntry) any { return map[string]any{"entries": es} }
-	return marshalWithinBudget(entries, budget, cur, classOf, envelope)
+	return revsync.BuildResponse(entries, budget, cur)
 }
 
 // Deferral accounting. Cumulative entry counts per leg — a deferral is a
