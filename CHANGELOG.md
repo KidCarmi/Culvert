@@ -404,6 +404,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Enabling CDR at runtime now starts the CDR health poller, without a
+  restart.** Only `loadCDR` started the 15-second poller, and only when CDR
+  was enabled at boot. A node that turned CDR on from the admin toggle
+  (`PUT /api/cdr/config {"enabled": true}`) or through a first enrollment's
+  auto-enable sent documents through the pool, but ran no health probes, no
+  client-certificate auto-renewal, no server-fingerprint rotation and no
+  automatic re-dial. Its client certificate would expire unrenewed unless an
+  operator restarted the process. Both runtime enable paths now arm the same
+  poller after the pool build (even a failed one, as at boot), under the
+  process lifecycle context. `ensureCDRHealthPoller` keeps it to one poller
+  per process: repeated enables, disable/enable cycles and a boot-enabled
+  node toggled again never add a second. Nothing is armed on a disable, on an
+  auto-enable whose sentinel write failed, or once shutdown has cancelled the
+  lifecycle. Pool build, `fail_mode`, audit (`cdr.config.toggle`,
+  `cdr.instance.enroll`) and the no-config-version contract are unchanged
+  (`TestCDRRuntimePoller_*`).
+
 - **`culvert --enroll` can enroll a Data Plane node again.** The enrollment
   client dialed the Control Plane without the cluster's raw JSON gRPC codec,
   so gRPC's default protobuf codec refused the request on the node itself
