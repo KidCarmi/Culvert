@@ -66,6 +66,25 @@ func webhookPayloadRejected(w http.ResponseWriter, h AlertWebhook, urlRequired b
 	return false
 }
 
+// webhookCreateRejected is the create arm's gate: the shared payload checks,
+// then the store-wide MaxWebhooks limit. Writes the 400 itself and reports
+// whether the request was refused; a refusal touches no state and is not
+// audited, like every other payload refusal.
+//
+// The limit is judged against the live count, so a store loaded over the limit
+// (grandfathered by Init) refuses creates until it is below it, while updates
+// and deletes of the existing webhooks are unaffected.
+func webhookCreateRejected(w http.ResponseWriter, h AlertWebhook) bool {
+	if webhookPayloadRejected(w, h, true) {
+		return true
+	}
+	if n := alertStore().Len(); n >= maxAlertWebhooks {
+		http.Error(w, fmt.Sprintf("too many webhooks: %d configured, the limit is %d", n, maxAlertWebhooks), http.StatusBadRequest)
+		return true
+	}
+	return false
+}
+
 // webhooksForRole lists the webhooks as role may read them. The URL is itself
 // a credential for most receivers (a token in the path or query), so only the
 // role that manages webhooks (operator) reads it back; below that the listing
@@ -103,7 +122,7 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if webhookPayloadRejected(w, h, true) {
+		if webhookCreateRejected(w, h) {
 			return
 		}
 		h.Enabled = true
