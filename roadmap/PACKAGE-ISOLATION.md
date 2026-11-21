@@ -351,7 +351,7 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-019 | `inspect_host_pin.go` predicate → `internal/hostpin` | **shipped** (merged 2026-11-21, `2421870`) | nightly shift | `main` | #1981 | — | ADR-0052; 1 exported name (`Pinned`); root keeps `innerHostPinnedToTunnel` as a binding, so `proxy_tunnel.go` is not edited; see "IM-019" below | — |
 | IM-020 | saas-feed node-local record codec → `internal/urlcatfeed/noderecord` | **shipped** (merged 2026-11-21, `58f4a44`) | nightly shift | `main` | #1985 | — | ADR-0053; 4 exported names; see "IM-020" below | — |
 | IM-021 | `keyedMutex` in `saas_feed_genstore.go` → `internal/keyedmutex` | **shipped** (merged 2026-11-21, `c5674f2`) | nightly shift | `main` | #1988 | — | ADR-0054; 2 exported names; see "IM-021" below | — |
-| IM-022 | directory-fsync rule (`fsyncDir`, `isBenignDirSyncErr`, the copy in `support_durable_write.go`) → `internal/fileutil` | **implementation under review** | nightly shift | `main` | pending | — | 2 exported names (`SyncDir`, `DirSyncUnsupported`); see "IM-022" below | review PR |
+| IM-022 | directory-fsync rule (`fsyncDir`, `isBenignDirSyncErr`, the copy in `support_durable_write.go`) → `internal/fileutil` | **implementation under review** | nightly shift | `main` | #1989 | — | 2 exported names (`SyncDir`, `DirSyncUnsupported`); see "IM-022" below | review PR |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
