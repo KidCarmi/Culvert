@@ -10,7 +10,8 @@ import "github.com/KidCarmi/Culvert/internal/geoip"
 // startupState (for startAdminUI) directly from the resolved config.
 
 // loadGeoIP opens the GeoIP database at cfg.DBPath. Failures are logged as
-// "GeoIP disabled" warnings and startup continues.
+// "GeoIP disabled" warnings and startup continues; a failed open of a
+// configured path is armed for the background retry.
 func loadGeoIP(cfg geoIPStartupConfig) {
 	if cfg.DBPath == "" {
 		logger.Printf("GeoIP: disabled (no -geoip-db set; destCountry rules will be skipped)")
@@ -18,6 +19,9 @@ func loadGeoIP(cfg geoIPStartupConfig) {
 	}
 	if err := geoip.InitGeoDB(cfg.DBPath); err != nil {
 		logger.Printf("GeoIP: failed to open %s (%v) — GeoIP disabled", cfg.DBPath, err)
+		// The path stays the operator's intent: retry it in the background
+		// (geoip_load_retry.go) instead of requiring a restart.
+		armGeoIPDeferredLoad(cfg.DBPath)
 		return
 	}
 	logger.Printf("GeoIP: loaded %s", cfg.DBPath)

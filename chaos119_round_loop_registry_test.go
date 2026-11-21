@@ -89,6 +89,7 @@ var chaos119KnownRoundLoops = []chaos119RoundLoop{
 	{file: "rootca_recovery.go", fn: "runInspectionCARecoveryLoop", guard: "runGuarded(", detached: true},
 	{file: "audit_persist_retry.go", fn: "runAuditOpenRetry", guard: "runGuarded(", detached: true},
 	{file: "request_log_persist_retry.go", fn: "runRequestLogOpenRetry", guard: "runGuarded(", detached: true},
+	{file: "geoip_load_retry.go", fn: "runGeoIPLoadRetry", guard: "runGuarded(", detached: true},
 	{file: "support_debug_level.go", fn: "startDebugLevelWatchdog", guard: "runGuarded(", detached: true},
 	{file: "support_upload_worker.go", fn: "startSupportUploadWorker", guard: "runGuarded(", detached: true},
 	// Discovered by the structural pass, and already guarded — these three are

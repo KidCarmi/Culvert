@@ -164,6 +164,9 @@ var chaos105Workers = []struct {
 	{"audit_persist_retry.go", "runAuditOpenRetry", "crashComponentAuditOpenRetry"},
 	// The deferred request-log open: same shape as the audit-log open.
 	{"request_log_persist_retry.go", "runRequestLogOpenRetry", "crashComponentRequestLogOpenRetry"},
+	// The deferred GeoIP database load: same shape; its round opens a file and
+	// publishes the reader country rules match against.
+	{"geoip_load_retry.go", "runGeoIPLoadRetry", "crashComponentGeoIPLoadRetry"},
 }
 
 func TestCHAOS105_EveryRegisteredWorkerRoundIsGuarded(t *testing.T) {
