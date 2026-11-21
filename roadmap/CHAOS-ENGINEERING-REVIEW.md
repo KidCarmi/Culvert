@@ -7515,6 +7515,15 @@ them **before** any reload path is added.
 **Owner action:** treat "add a GeoIP reload" as blocked on the reader-lifetime
 fix, not as a standalone feature.
 
+**Later note (deferred startup load).** `internal/geoip.TryDeferredLoad` now
+loads a configured database whose STARTUP load failed, while the proxy serves.
+It is not a reload and does not reach this hazard: it publishes only while no
+reader is loaded (re-checked under `geoDBMu` at publication), so it never
+replaces or closes a published reader. `InitGeoDB` still has one production
+caller, at startup. The owner action above is unchanged
+(`TestDeferredLoad_NeverReplacesALoadedDatabase`,
+`TestGeoIPLoadRetry_NeverReplacesALoadedDatabase`).
+
 ---
 
 ## 35. CHAOS-65 — The OCSP revocation path

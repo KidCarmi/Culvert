@@ -113,11 +113,39 @@ Recovery is reported on **observed evidence** — a warm that actually got a slo
    order, so one dead server in front costs every lookup its full timeout.
 3. **Is the MaxMind database loaded and current?** `GET /api/geoip` reports
    `dbBuildDate` / `dbAgeDays` and any load error. An unloaded database means
-   none of these series exist at all and country rules never match.
+   none of these series exist at all and country rules never match. See
+   "A database that failed to load at startup" below.
 4. **Are the rules the ones you think?** A country-scoped rule that is not
    matching shows a zero hit count, which reads identically to "no traffic
    matched this rule". `culvert_geo_policy_unresolved_total` is what
    distinguishes the two.
+
+## A database that failed to load at startup
+
+If the configured `.mmdb` cannot be opened when Culvert starts (the file is
+missing, unreadable, truncated, or its volume is not mounted yet), Culvert
+starts with GeoIP disabled and **retries the same path in the background**:
+after 10 s, then doubling up to once every two minutes, with jitter and no
+attempt limit. When the file opens, GeoIP is enabled and destination-country
+rules start matching. No restart is needed.
+
+- The remedy is to put a readable, valid database at the configured path.
+  Replace it by rename (write a temporary file, then `mv`), not by copying over
+  it in place.
+- `GET /api/geoip` keeps reporting `lastError` / `lastErrorAt` from the most
+  recent failed attempt until the load succeeds.
+- The load is recorded in the audit trail as `geoip.database.auto_load`, actor
+  `system`, and in the process log.
+- Until it loads, country rules do not match. That is unchanged, and the
+  `geoip_database_for_rules` Diagnostics row keeps warning.
+
+What the retry does **not** do:
+
+- It does not reload a database that is already loaded. Picking up a newer
+  `.mmdb` on a node whose database loaded still needs a restart.
+- It does not try any other path. Changing `-geoip-db` / `proxy.geoip_db` is a
+  startup setting and needs a restart.
+- It does nothing when no database is configured.
 
 ## What this cannot tell you
 

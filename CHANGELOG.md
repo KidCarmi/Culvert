@@ -555,6 +555,24 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A GeoIP database that could not be opened at startup is now loaded
+  automatically once it becomes readable, without a restart.** When the
+  configured `-geoip-db` / `proxy.geoip_db` file was missing, unreadable or
+  truncated at boot (a volume not mounted yet, a download that had not
+  finished, wrong ownership), GeoIP stayed disabled for the life of the
+  process. Destination-country rules cannot match without a database, so an
+  enabled country block rule stopped blocking, and the
+  `geoip_database_for_rules` Diagnostics row said to fix the file *and
+  restart*. Culvert now re-attempts the same configured path on the deferred
+  audit-log cadence (10 s doubling to a 2-minute cap, with jitter, no attempt
+  limit) and records a `system`-attributed `geoip.database.auto_load` audit
+  entry when it loads. Country rules then match exactly as after a restart.
+  It is not a reload: it publishes only while no database is loaded, so it
+  never replaces or closes a live reader (GEO-1 is unchanged, and a newer
+  `.mmdb` on a node whose database loaded still needs a restart). It never
+  tries another path and does nothing when no database is configured. No
+  configuration, settings or version change.
+
 - **The maintenance-agent installer no longer aborts on a double-quoted
   `image_allowlist`.** `extract_toml_string` in
   `packaging/culvert-maint/install.sh` copied a TOML basic (`"..."`) string's

@@ -55,6 +55,12 @@ func loadBackgroundServices(cfg backgroundServicesStartupConfig, ctx context.Con
 	// the startup open failed.
 	go startRequestLogOpenRetry(ctx)
 
+	// The GeoIP database's deferred load: a configured geoip_db that could not
+	// be opened at startup is re-attempted on the same bounded backoff until
+	// it loads, or the node shuts down. It never reloads a loaded database.
+	// Returns at once unless the startup load failed.
+	go startGeoIPLoadRetry(ctx)
+
 	// CHAOS-107: the ClamAV signature-generation observer. ClamAV definitions
 	// change out-of-process (freshclam), so the verdict cache can only be
 	// reconciled against them by ASKING on a cadence; nothing else in the
