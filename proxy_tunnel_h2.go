@@ -152,7 +152,14 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 		logger.Printf("SSL_INSPECT(native) hijack error: %v", err)
 		return
 	}
-	peekBuf := clientBuf.Reader
+	// CHAOS-125: adopting the leg re-arms the deadline Hijack cleared. This leg
+	// has MORE unbounded reads ahead of it than the strip path does — the
+	// first-byte peek, peekClientALPN's two record peeks, and the forged-leaf
+	// handshake, all of them AHEAD of the origin handshake, so a silent client
+	// here pins a dialled origin socket too. The origin leg's own window was
+	// armed by the caller (handleTunnelInspect, right after the dial); both are
+	// cleared once the tunnel is established.
+	peekBuf := adoptHijackedInspectLeg(rawClient, clientBuf)
 
 	// Non-TLS over CONNECT: we cannot MITM, so SEC-INSPECT-PLAINTEXT-1 applies
 	// here exactly as it does on the strip path (proxy_tunnel.go) — REFUSE,
@@ -184,6 +191,11 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	if ferr != nil {
 		rawClient.Close()   //nolint:errcheck // best-effort cleanup
 		rawUpstream.Close() //nolint:errcheck // best-effort cleanup
+		// CHAOS-125: this branch used to return in COMPLETE silence — no log
+		// line, no metric, no drill-down row — so the native leg's share of the
+		// stall this round bounds (and of every ordinary client that disconnects
+		// after the 200) left no trace anywhere.
+		recordInspectClientHelloFailure(ferr, "(native)", hostOnly, dec, match, id)
 		return
 	}
 	if firstByte[0] != 0x16 {
@@ -225,6 +237,13 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 		logger.Printf("SSL_INSPECT(native) client TLS handshake %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}
+
+	// CHAOS-125: tunnel established — end the setup window on both legs before
+	// either enforcement loop starts. On this path the H2 server owns the client
+	// leg's deadlines from here (IdleTimeout/WriteByteTimeout, proxy_tunnel_h2_drain.go)
+	// and a left-over setup WRITE deadline would kill a long-lived inspected H2
+	// connection 30 s in.
+	clearInspectSetupDeadline(rawClient, rawUpstream)
 
 	down := clientTLS.ConnectionState().NegotiatedProtocol
 	recordInspectUpstreamALPN(up)
