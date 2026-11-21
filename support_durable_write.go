@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
@@ -128,11 +127,10 @@ func mkdirDurableSupport(dir string, perm os.FileMode) error {
 // returns nil for the two conditions AtomicWrite also treats as "nothing more
 // this filesystem can offer", and the real error otherwise.
 //
-// internal/fileutil carries a byte-equivalent syncDirTolerant for
-// WriteFileExclusive's parent sync, but it is unexported. Consolidating the two
-// behind one exported fileutil primitive is the right end state and is left as
-// a follow-up: it is that package's API decision, not something to decide here
-// to settle a lint finding.
+// The "cannot fsync a directory at all" codes are fileutil.DirSyncUnsupported,
+// the one owner of that rule (IM-022). This function keeps what is its own: an
+// unopenable directory is skipped, the read-only handle's close result is not
+// a signal, and a real failure is logged before it is returned.
 func syncDirEntry(dir string) error {
 	// #nosec G703 -- not reachable traversal, and the gate is not local to this
 	// line, so it is traced here rather than asserted. dir is always
@@ -154,10 +152,7 @@ func syncDirEntry(dir string) error {
 	}
 	syncErr := d.Sync()
 	_ = d.Close() //nolint:errcheck // read-only handle; Sync above is the signal
-	if syncErr != nil &&
-		!errors.Is(syncErr, syscall.EINVAL) &&
-		!errors.Is(syncErr, syscall.ENOTSUP) &&
-		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
+	if syncErr != nil && !fileutil.DirSyncUnsupported(syncErr) {
 		logger.Printf("Support: directory fsync failed for %q: %v", sanitizeLog(filepath.Base(dir)), sanitizeLog(syncErr.Error()))
 		return syncErr
 	}
