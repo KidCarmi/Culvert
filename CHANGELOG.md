@@ -471,6 +471,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Adding to the blocklist now reports what the gateway actually stored
+  (Product Experience).** The admin UI's "Added N host(s)" / "Imported N hosts"
+  toast counted the lines it sent, not what `POST /api/blocklist` did with them.
+  Three outcomes were invisible: an entry longer than 253 characters was dropped
+  with only a log line; a repeat of an existing admin entry was a silent no-op;
+  and an entry that can never equal a destination hostname — a URL pasted from
+  an incident ticket (`https://evil.example/login`), a `host:port`, a trailing
+  dot, a Unicode IDN — was stored, listed in the table and enforced nothing,
+  because the blocklist is probed with the bare, normalized destination host.
+  The operator saw a success toast and a row, and the destination stayed
+  reachable (or, in allowlist mode, stayed blocked). The response now adds
+  `unchanged`, `skipped_count`/`skipped` and `warning_count`/`warnings`
+  (per-entry detail capped at 50, counts exact) next to the unchanged `added`,
+  and the Blocklist panel shows the server's count plus a persistent, dismissible
+  notice naming each affected entry and its reason. Description only: what is
+  accepted, stored, audited, versioned and matched is unchanged, and the
+  additions are fields on a response whose schema is an open object
+  (`TestBlocklistEntryMatchWarning_AgreesWithTheMatcher`, a differential check
+  against the real store, `TestBlocklistAdd_ReportsWhatActuallyHappened`,
+  `TestBlocklistAdd_FeedbackIsBounded`).
+
 - **Diagnostics now warns when SSL inspection does not verify origin
   certificates (Product Experience).** On an inspected tunnel the client sees
   only the certificate Culvert forges, so Culvert's check of the origin
