@@ -1006,3 +1006,70 @@ textually, and the row's status is updated once #1981 merges):
   `Generation`; it is a decryption-redaction test and shares no file with
   this change. It passes under other orders, so it depends on what ran
   before it. Not diagnosed further here.
+
+### IM-023 qualification inventory document (EXTRACT, 2026-11-21, main `6795ec63a`)
+
+Task record (the table is edited by open #1989 and #1990, so the IM-023 row
+is added once one of them merges; this section sits at the end of the file,
+an anchor neither touches):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-023: the QUAL-2 inventory read, decode, validation and seeding in `mcp_inventory.go` → `internal/mcp/qualinventory` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR changes `mcp_inventory*.go`, `mcp_peer_refresh_wall_test.go`, `internal/mcp/catalog` or `internal/mcp/registry`; the appliance branches carry no MCP edit) |
+| Evidence | ADR-0055; 7 exported names (`ReadFile`, `Decode`, `Seed`, `Doc`, `ServerEntry`, `ToolEntry`, `MaxFileBytes`); bodies moved with only the names substituted; root keeps three bindings and one alias, so `loadQualificationInventory` and the ten root test files that build fixtures through them are unedited; 3 engine tests moved with names unchanged, 18 `TestInventory_*` tests stay root; 87-document verdict table whose digest was captured from main before the move |
+| Risks | the engine decides which operator inventory file is accepted and what lands in the registry the Gateway resolves against. Pinned by the verdict table (error phrase, both revisions, every stamped field and fingerprint) and the unedited activation tests |
+| Next action | review PR |
+
+- **Reconciled.** IM-019 (#1981), IM-020 (#1985) and IM-021 (#1988) merged on
+  2026-11-21; their table rows still say "under review" or are missing, and
+  #1989 corrects them. **Two open PRs implement IM-022**, #1989 and #1990,
+  from two sessions started minutes apart; they edit the same four files
+  (`saas_feed_genstore.go`, `saas_feed_gc.go`, `internal/fileutil/fileutil.go`,
+  a new `syncdir.go`) and cannot both merge. Both have passing checks and no
+  review thread, so there is nothing to fix in either; which one stays is the
+  owner's call. #1989 is the wider one (it also binds
+  `support_durable_write.go` and `AtomicWrite` to the shared predicate and
+  updates the table). IM-005/IM-006 stay blocked on #1526.
+- **Why this file.** A per-function walk of the 468 root production files
+  for functions that read no name from another root file.
+  `mcp_inventory.go` had about 350 such lines: an input engine for an
+  operator-supplied file, with four `internal/mcp` imports and nothing else.
+- **Moved:** the bounded read, the strict decode, the three document shapes,
+  the opaque-field and route-safe-id rules, the capability and
+  destination-class vocabularies, the Register → VerifyIdentity → Ingest →
+  optional-disable seeding and the bounded error phrases. **Stays main:**
+  `loadQualificationInventory` (reads the startup config, returns the state),
+  the state type, the published holder, the Admin API adapters and the
+  status view. Root file 604 → 261 lines.
+- **The provenance wall moved with the code.**
+  `TestPeerWall_SeedReachesOnlyTheSeededEntrypoint` names the one production
+  function allowed to call `catalog.Ingest` by `file:Func`. The entry is now
+  `internal/mcp/qualinventory/inventory.go:seedTools`, as the wall's own
+  failure text instructs for a moved path, and its converse check
+  (`IngestObserved` must not be named by the provisioning path) covers the
+  root file and the new package. This is the one edit to an existing test
+  beyond removing the three moved ones; it needs a reviewer's eye.
+- **ADR-0002.** No conflict: MCP composition stays in main, and the engine
+  was not composition.
+- **Program rule.** This is a third open program PR beside the two IM-022
+  PRs. It shares no file with either except this document, at a different
+  anchor.
+- **Not done.** `fuzz-nightly.yml` is a hand-maintained matrix; adding
+  `{ target: FuzzDecodeSeed, pkg: "./internal/mcp/qualinventory" }` is a
+  workflow edit left to the owner, as for IM-001.
+- **Discovered: IM-024 lead, qualification archive exporter.**
+  `mcp_telemetry.go` (915 lines) ends with `qualArchiveExporter`,
+  `telemetryCursorStore`, `validateBatch` and `buildArchiveBatch` (about 330
+  lines from line 585). Only `mcp_telemetry.go` and `mcp_telemetry_test.go`
+  name them. They write files, so unlike IM-023 the package would own
+  durable output: map the fsync and rename rules and the `events.Exporter`
+  interface it implements before sizing.
+- **Next.** IM-024. First step: read `mcp_telemetry.go:585-915`, list which
+  `mcp_telemetry_test.go` tests reach unexported exporter or cursor fields,
+  and check whether `internal/mcp/events` already has a home for a file
+  exporter (then it is a move into an existing package, not a new one). It
+  has no prerequisite and no open-PR overlap today. After it: the IM-018
+  prerequisite (pool-supplied breaker clock), the single strict decoder for
+  the three F3 records, then IM-014 mapping.

@@ -278,7 +278,7 @@ func acquireProductionKEK(path string) (*secret.Provider, error) {
 // pool is the CA pool for a server WITHOUT a pinned identity; Identity nil ⇒ the default
 // spkiVerifier compares the leaf's base64 SHA-256 SPKI against the registry's PinnedIdentity
 // when one is present. In the current inventory contract EVERY registered server MUST carry a
-// nonempty PinnedIdentity (mcp_inventory.go), so in practice the client always takes the
+// nonempty PinnedIdentity (internal/mcp/qualinventory), so in practice the client always takes the
 // pinned branch and the system-roots-only path is not reached for a real server — the
 // per-server SPKI pin is the trust anchor, not a public chain. Two documented formats are
 // therefore NOT yet consumable by this client and are part of the remaining pre-Canary

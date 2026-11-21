@@ -467,15 +467,17 @@ func TestPeerWall_DiscoverHasExactlyOneProductionCaller(t *testing.T) {
 // they came from — and why this wall checks the CALL rather than inspecting the data.
 func TestPeerWall_SeedReachesOnlyTheSeededEntrypoint(t *testing.T) {
 	assertExactCallers(t, "Ingest", map[string]string{
-		"mcp_inventory.go:seedTools": "" +
+		"internal/mcp/qualinventory/inventory.go:seedTools": "" +
 			"Operator-declared provisioning. It has dialed nobody, so it must produce records " +
 			"with no observation — which is exactly what the seeded entrypoint does.",
 	})
 
 	// And the converse, stated explicitly rather than left to be inferred from the map above:
-	// nothing in the inventory/provisioning file may reach the observed entrypoint.
+	// nothing in the inventory/provisioning files may reach the observed entrypoint. That is
+	// the seeding engine (internal/mcp/qualinventory, where seedTools moved in IM-023) and the
+	// root file that binds it.
 	for _, s := range findCallsites(t, "IngestObserved") {
-		if strings.HasPrefix(s.File, "mcp_inventory.go") {
+		if strings.HasPrefix(s.File, "mcp_inventory.go") || strings.HasPrefix(s.File, "internal/mcp/qualinventory/") {
 			t.Errorf("%s:%d — the operator provisioning path must never mint peer evidence.", s.File, s.Line)
 		}
 	}

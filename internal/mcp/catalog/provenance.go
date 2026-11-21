@@ -9,7 +9,7 @@ import (
 // Provenance records HOW a catalog record's fingerprint came to be known.
 //
 // It exists because the two ways a record can appear are NOT equally good evidence and were,
-// until this type, indistinguishable. `seedTools` (mcp_inventory.go) re-encodes operator-declared
+// until this type, indistinguishable. `seedTools` (internal/mcp/qualinventory) re-encodes operator-declared
 // JSON into a synthetic tools/list result and feeds it through the SAME ingest path a real
 // discovery uses, so a seeded record and a genuinely peer-observed one were byte-identical in the
 // catalog. Nothing downstream — `ToolStillCurrent`, the activation preflight, the reviewed binding
