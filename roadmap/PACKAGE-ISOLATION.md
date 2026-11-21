@@ -846,6 +846,7 @@ added once they merge; this section sits at a third anchor neither touches):
 | Depends on | — (no open PR changes `admin_ui_health.go`, `socks5_health.go`, `scan_svc_listener.go` or `cp_grpc_health.go`; the appliance branches edit `socks5_bind.go` and `admin_ui_listener_chaos_test.go`, which this change does not touch) |
 | Evidence | ADR-0058; 3 exported names (`Reason`, `ErrnoReason`, `TimedOut`); the four root functions stay as bindings, so no call site and no existing test is edited; a 2,597-error verdict table over all four classifiers whose digest and per-listener class counts were captured from main before the move; a 20,492-error differential test against a frozen copy of the pre-move switch; 8 mutation checks, each failing a test |
 | Risks | the class is the alert dedup key and a viewer-role diagnostics value. Every verdict is pinned per listener, including the two listeners whose tag order differs |
+| PR | #1997 |
 | Next action | review PR |
 
 - **Reconciled.** #1992 (IM-024): every non-skipped check passed, no review
