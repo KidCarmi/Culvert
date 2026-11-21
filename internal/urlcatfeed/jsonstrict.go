@@ -45,6 +45,12 @@ func canonicalJSON(v any) ([]byte, error) {
 	return append([]byte(nil), b...), nil
 }
 
+// CanonicalJSON is the exported form of the one canonical encoder, for the
+// node-local records that bind signed feed values and are stored in the same
+// canonical form (internal/urlcatfeed/noderecord). It is the same function the
+// producer and the verifier use, not a second encoder.
+func CanonicalJSON(v any) ([]byte, error) { return canonicalJSON(v) }
+
 // strictUnmarshal decodes exactly one JSON value into v with: unknown fields
 // rejected, duplicate object keys rejected (any depth), and a required EOF after
 // the single value (no trailing data). It does NOT enforce canonical byte form —
