@@ -109,6 +109,17 @@ schema tweak.
 > is upgraded (it then migrates its own stored copy and serves `strict`). Upgrade
 > the Control Plane first.
 
+## Seeing which rules do not verify origins
+
+The rule list's "TLS certificate verification disabled" badge reflects only the
+rule's inline **Skip TLS Verify** toggle. A profile overrides it in both
+directions: `skip` turns verification off for every rule bound to the profile
+(no badge), and `strict` turns it on even when the rule's toggle is set (badge
+still shown). **Diagnostics** reports the effective state: the
+`ssl_inspect_upstream_verify` WARN row counts enabled SSL-inspection rules that
+do not verify the origin certificate and says how many skip through their
+profile. The row is absent when every enabled inspect rule verifies.
+
 ## Deferred (coming soon)
 
 - `OnUnsupported: fail-open` (bypass out of inspection) — a "relax safety" behavior
