@@ -600,6 +600,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The CI-runner installer adds the runner account to the `docker` group
+  even when a lookalike name is present.** `scripts/install-runner.sh` decided
+  membership with `groups "$u" | grep -qw docker`, which also matches a
+  username such as `docker-ops` or an unrelated group such as `docker-users`
+  or `svc.docker`. The script then skipped `usermod -aG docker`, suppressed
+  the closing re-login note and reported success, while every job on the
+  runner failed with "permission denied" on the Docker socket. Both checks now
+  use the exact-name `user_in_docker_group` helper `scripts/install.sh`
+  already uses. Pinned by `install_runner_docker_group_membership_test.go`.
+
 - **A GeoIP database that could not be opened at startup is now loaded
   automatically once it becomes readable, without a restart.** When the
   configured `-geoip-db` / `proxy.geoip_db` file was missing, unreadable or
