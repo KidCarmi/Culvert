@@ -9,6 +9,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **An inspected tunnel's setup window is bounded on both legs
+  (`CHAOS-125`, closing `CHAOS-32`).** Between the `200 Connection Established`
+  an SSL-inspect rule sends and the established tunnel its enforcement loop
+  owns, nothing had a deadline: `net/http`'s `Hijack` clears the proxy
+  listener's `ReadTimeout` from the socket (`rwc.SetDeadline(time.Time{})`), and
+  `r.Context()` is cancelled when the handler returns, not when a hijacked
+  client goes quiet. A client that completed CONNECT to an inspect-marked host,
+  read the 200 and then sent nothing held the hijacked client socket, the origin
+  socket and its handler goroutine indefinitely — on the strip path that origin
+  socket is a COMPLETED TLS session, so the cheapest possible client also spent
+  the gateway's handshake CPU and an origin connection slot. The concurrency was
+  uncapped (`MaxConnsPerIP` is `0` by default) and uncounted
+  (`registerDrainableTunnel`, which owns the `activeConns` increment and the
+  drain's force-close handles, is only reached after both handshakes), so the
+  first operator-visible symptom was descriptor exhaustion across the whole
+  listener. A blackholing origin pinned the handler and the client's connection
+  the same way, with no `502` ever delivered. Both dispatches (strip and
+  native-ALPN) now arm `sslInspectSetupTimeout` (30 s — the listener's own
+  `ReadTimeout`, restored for the window `Hijack` cleared it for) on the origin
+  leg at the dial and on the client leg at the hijack, and clear BOTH at
+  establishment, because the armed deadline is a write deadline too and would
+  otherwise abort a healthy tunnel's response delivery one window later. The
+  client-leg failure is now recorded through the existing ADR-0011 taxonomy cell
+  (`client_hello`, `timeout`) — the native leg's peek failure previously
+  returned with no log line, no metric and no row at all — and deliberately
+  learns no auto-exclusion, so a client-side stall can never teach the gateway
+  to stop inspecting a host. No new metric, alert or configuration surface
+  (`TestChaos125_SilentClientOnStripInspectLegIsReaped`,
+  `TestChaos125_SilentClientOnNativeInspectLegIsReaped`,
+  `TestChaos125_StalledOriginHandshakeDoesNotPinTheClientLeg`,
+  `TestChaos125_EstablishedInspectedTunnelOutlivesTheSetupWindow`).
+
 - **The alert-webhook store is capped at 100 webhooks (`alerts.MaxWebhooks`,
   CWE-770).** `POST /api/config/import` accepted an unbounded `alertWebhooks`
   list, and each webhook's `Add` rewrites and fsyncs the whole webhook file, so
