@@ -198,22 +198,8 @@ func TestInventory_MissingFileFailsClosed(t *testing.T) {
 	}
 }
 
-func TestInventory_TraversalPathRejected(t *testing.T) {
-	if _, err := readInventoryFile("../../etc/passwd"); err == nil {
-		t.Fatal("path traversal must be rejected")
-	}
-}
-
-func TestInventory_OversizedFileRejected(t *testing.T) {
-	big := make([]byte, maxInventoryFileBytes+1)
-	for i := range big {
-		big[i] = ' '
-	}
-	p := writeInv(t, string(big))
-	if _, err := readInventoryFile(p); err == nil {
-		t.Fatal("oversized inventory file must be rejected")
-	}
-}
+// TestInventory_TraversalPathRejected and TestInventory_OversizedFileRejected moved
+// with the bounded read to internal/mcp/qualinventory (IM-023), names unchanged.
 
 // ── atomicity ────────────────────────────────────────────────────────────────
 
@@ -253,42 +239,8 @@ func TestInventory_OneBadToolRejectsWhole(t *testing.T) {
 	}
 }
 
-func TestInventory_Deterministic(t *testing.T) {
-	// Two documents with the same servers in DIFFERENT order must produce identical
-	// registry revisions and identical tool fingerprints (order-independent seeding).
-	a := `{"schema_version":1,"tenant":"qualification","servers":[
-	  {"server_id":"a","endpoint":"ea","pinned_identity":"ida","tools":[{"name":"t","input_schema":{"type":"object"}}]},
-	  {"server_id":"b","endpoint":"eb","pinned_identity":"idb"}
-	]}`
-	b := `{"schema_version":1,"tenant":"qualification","servers":[
-	  {"server_id":"b","endpoint":"eb","pinned_identity":"idb"},
-	  {"server_id":"a","endpoint":"ea","pinned_identity":"ida","tools":[{"name":"t","input_schema":{"type":"object"}}]}
-	]}`
-	docA, err := decodeInventory([]byte(a))
-	if err != nil {
-		t.Fatalf("decode a: %v", err)
-	}
-	docB, err := decodeInventory([]byte(b))
-	if err != nil {
-		t.Fatalf("decode b: %v", err)
-	}
-	regA, catA, err := seedInventory(docA, limits.DefaultCatalog())
-	if err != nil {
-		t.Fatalf("seed a: %v", err)
-	}
-	regB, catB, err := seedInventory(docB, limits.DefaultCatalog())
-	if err != nil {
-		t.Fatalf("seed b: %v", err)
-	}
-	if regA.Current().Revision() != regB.Current().Revision() {
-		t.Fatalf("registry revisions differ: %d vs %d", regA.Current().Revision(), regB.Current().Revision())
-	}
-	fpA, _ := catA.Current().Get(catalog.ToolKey{Server: "a", Name: "t"})
-	fpB, _ := catB.Current().Get(catalog.ToolKey{Server: "a", Name: "t"})
-	if fpA.Fingerprint.Sum() != fpB.Fingerprint.Sum() {
-		t.Fatal("tool fingerprints differ across input order")
-	}
-}
+// TestInventory_Deterministic moved with the seeding to internal/mcp/qualinventory
+// (IM-023), name unchanged.
 
 // ── runtime composition (single source + no execution) ───────────────────────
 
