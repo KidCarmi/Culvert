@@ -35,9 +35,22 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (`client_hello`, `timeout`) — the native leg's peek failure previously
   returned with no log line, no metric and no row at all — and deliberately
   learns no auto-exclusion, so a client-side stall can never teach the gateway
-  to stop inspecting a host. No new metric, alert or configuration surface
+  to stop inspecting a host. That attribution also covers a native-leg client
+  that sends the `0x16` opening a ClientHello and then stalls: the deadline
+  expires inside `peekClientALPN`, which used to swallow the read error as its
+  "no ALPN offer" HTTP/1.1 fallback, so the gateway went on to handshake the
+  origin for a dead client and charged the stall to the origin as
+  (`upstream_handshake`, `other`). `peekClientALPN` now returns read failures
+  (timeout, EOF, reset) as errors, which are recorded on the client leg exactly
+  like a first-byte stall, with no origin handshake. A ClientHello that is
+  delivered but carries no usable ALPN offer still falls back to HTTP/1.1 as
+  before. No new metric, alert or configuration surface
   (`TestChaos125_SilentClientOnStripInspectLegIsReaped`,
   `TestChaos125_SilentClientOnNativeInspectLegIsReaped`,
+  `TestChaos125_PartialClientHelloOnNativeLegIsAClientStall`,
+  `TestChaos125_PeekClientALPNFallbackIsNotAFailure`,
+  `TestChaos125_PeekClientALPNSurfacesClientReadFailures`,
+  `TestChaos125_NativeLegClientWithoutALPNStillInspectsOverHTTP1`,
   `TestChaos125_StalledOriginHandshakeDoesNotPinTheClientLeg`,
   `TestChaos125_EstablishedInspectedTunnelOutlivesTheSetupWindow`).
 

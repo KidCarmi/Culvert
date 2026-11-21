@@ -161,49 +161,13 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	// cleared once the tunnel is established.
 	peekBuf := adoptHijackedInspectLeg(rawClient, clientBuf)
 
-	// Non-TLS over CONNECT: we cannot MITM, so SEC-INSPECT-PLAINTEXT-1 applies
-	// here exactly as it does on the strip path (proxy_tunnel.go) — REFUSE,
-	// never relay. This leg used to raw-relay the client to the plaintext
-	// upstream conn and called itself a mirror of the strip path's fallback; it
-	// outlived that twin. The rule says the session is inspected, and a raw
-	// relay delivers the opposite: no inner-host pin, file block, DPI, scan or
-	// per-request log row, on a destination an operator marked for inspection.
-	//
-	// It was also the MORE reachable of the two. The strip path handshakes the
-	// origin BEFORE this peek, so its fallback needed an origin that speaks TLS
-	// and a client that does not; here the upstream handshake is still ahead of
-	// us (it needs the client's ALPN offer), so the client alone decided — any
-	// first byte that is not 0x16 turned an inspect rule into a bypass for any
-	// origin, TLS or not.
-	//
-	// Recorded as a client-hello protocol failure through the ADR-0011
-	// taxonomy, and maybeFailOpenClient is deliberately NOT consulted: learning
-	// an auto-exclusion here would bypass inspection for the host on the next
-	// connection, recreating the hole this closes. The 200 is already sent, so
-	// the refusal is both legs closed rather than a 502 — the same shape the
-	// upstream-handshake failure below uses.
-	//
-	// A genuine non-TLS protocol over CONNECT (SSH/RDP) to a host matched by an
-	// InspectHTTP2 rule is now refused rather than tunneled. That case is an
-	// explicit Bypass rule for the destination, which is auditable; a silent
-	// per-connection opt-out chosen by the client is not.
-	firstByte, ferr := peekBuf.Peek(1)
-	if ferr != nil {
-		rawClient.Close()   //nolint:errcheck // best-effort cleanup
-		rawUpstream.Close() //nolint:errcheck // best-effort cleanup
-		// CHAOS-125: this branch used to return in COMPLETE silence — no log
-		// line, no metric, no drill-down row — so the native leg's share of the
-		// stall this round bounds (and of every ordinary client that disconnects
-		// after the 200) left no trace anywhere.
-		recordInspectClientHelloFailure(ferr, "(native)", hostOnly, dec, match, id)
+	// CHAOS-125: every way the client can stop short of an ALPN offer (silence,
+	// a partial ClientHello, a non-TLS first byte) ends here, on the client leg,
+	// before the origin is handshaked.
+	clientOffer, delivered := readNativeClientOffer(peekBuf, rawClient, rawUpstream, hostOnly, dec, match, id)
+	if !delivered {
 		return
 	}
-	if firstByte[0] != 0x16 {
-		refuseNonTLSInspectClient(rawClient, rawUpstream, firstByte[0], "(native)", hostOnly, dec, match, id)
-		return
-	}
-
-	clientOffer := peekClientALPN(peekBuf)
 
 	// Upstream ALPN offer, bounded by the client offer so up ∈ client's set.
 	upstreamProtos := []string{"http/1.1"}
@@ -260,6 +224,78 @@ func handleInspectNativeALPN(w http.ResponseWriter, r *http.Request, rawUpstream
 	dispatchNativeInspect(r, clientTLS, upstreamTLS, up, down, hostOnly, dec, match, id, effectiveSkip)
 }
 
+// readNativeClientOffer reads the native leg's client up to its ALPN offer: the
+// first-byte peek, then peekClientALPN. Every way that can end short of an
+// offer is a CLIENT-leg outcome reached before the origin is handshaked, so it
+// closes both legs, records the outcome and returns false, and the caller
+// returns without touching the origin.
+//
+// Non-TLS over CONNECT: we cannot MITM, so SEC-INSPECT-PLAINTEXT-1 applies
+// here exactly as it does on the strip path (proxy_tunnel.go) — REFUSE,
+// never relay. This leg used to raw-relay the client to the plaintext
+// upstream conn and called itself a mirror of the strip path's fallback; it
+// outlived that twin. The rule says the session is inspected, and a raw
+// relay delivers the opposite: no inner-host pin, file block, DPI, scan or
+// per-request log row, on a destination an operator marked for inspection.
+//
+// It was also the MORE reachable of the two. The strip path handshakes the
+// origin BEFORE this peek, so its fallback needed an origin that speaks TLS
+// and a client that does not; here the upstream handshake is still ahead of
+// us (it needs the client's ALPN offer), so the client alone decided — any
+// first byte that is not 0x16 turned an inspect rule into a bypass for any
+// origin, TLS or not.
+//
+// Recorded as a client-hello protocol failure through the ADR-0011
+// taxonomy, and maybeFailOpenClient is deliberately NOT consulted: learning
+// an auto-exclusion here would bypass inspection for the host on the next
+// connection, recreating the hole this closes. The 200 is already sent, so
+// the refusal is both legs closed rather than a 502 — the same shape
+// handleInspectNativeALPN's upstream-handshake failure uses.
+//
+// A genuine non-TLS protocol over CONNECT (SSH/RDP) to a host matched by an
+// InspectHTTP2 rule is now refused rather than tunneled. That case is an
+// explicit Bypass rule for the destination, which is auditable; a silent
+// per-connection opt-out chosen by the client is not.
+func readNativeClientOffer(peekBuf *bufio.Reader, rawClient, rawUpstream net.Conn, hostOnly string, dec sslResolution, match *PolicyMatch, id ProxyIdentity) ([]string, bool) {
+	firstByte, ferr := peekBuf.Peek(1)
+	if ferr != nil {
+		// CHAOS-125: this branch used to return in COMPLETE silence — no log
+		// line, no metric, no drill-down row — so the native leg's share of the
+		// stall this round bounds (and of every ordinary client that disconnects
+		// after the 200) left no trace anywhere.
+		failNativeClientHello(ferr, rawClient, rawUpstream, hostOnly, dec, match, id)
+		return nil, false
+	}
+	if firstByte[0] != 0x16 {
+		refuseNonTLSInspectClient(rawClient, rawUpstream, firstByte[0], "(native)", hostOnly, dec, match, id)
+		return nil, false
+	}
+
+	// CHAOS-125: a client that sent 0x16 and then stalled passed the first-byte
+	// peek above, and the setup deadline expires here instead. That is the same
+	// client-leg failure, so it is recorded the same way and the origin is never
+	// handshaked for it. Only a read failure lands here; a buffered ClientHello
+	// with no usable ALPN offer still returns the HTTP/1.1 fallback.
+	clientOffer, perr := peekClientALPN(peekBuf)
+	if perr != nil {
+		failNativeClientHello(perr, rawClient, rawUpstream, hostOnly, dec, match, id)
+		return nil, false
+	}
+	return clientOffer, true
+}
+
+// failNativeClientHello ends a native-ALPN tunnel whose client failed to deliver
+// its ClientHello, at the first-byte peek or inside peekClientALPN. Both legs
+// are closed (the 200 is already sent, so there is no 502 to send), and the
+// failure is recorded on the CLIENT leg through recordInspectClientHelloFailure,
+// which never consults the auto-exclusion learner. The origin has been dialled
+// but not handshaked, and it is not handshaked now.
+func failNativeClientHello(err error, rawClient, rawUpstream net.Conn, hostOnly string, dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
+	_ = rawClient.Close()   // best-effort cleanup; the failure being recorded is the one that matters
+	_ = rawUpstream.Close() // best-effort cleanup
+	recordInspectClientHelloFailure(err, "(native)", hostOnly, dec, match, id)
+}
+
 // dispatchNativeInspect finalises an established native-ALPN inspected tunnel: it builds
 // the ADR-0011 inspected outcome ONCE from the completed origin TLS state, counts the
 // session (both the H2 and H1-fallback dispatches are inspect-success terminals that never
@@ -302,28 +338,50 @@ func handshakeUpstreamALPN(ctx context.Context, rawUpstream net.Conn, hostOnly s
 
 // peekClientALPN reads the client's offered ALPN protocols from the buffered
 // ClientHello WITHOUT consuming it (tls.Server re-reads the same bytes via
-// readerConn). Fail-closed: any short/oversized/malformed ClientHello returns
-// ["http/1.1"], so the tunnel degrades to the fully-inspected HTTP/1.1 path
-// rather than mis-negotiating. The parser itself is bounds-checked and fuzzed
-// (alpnpeek.Parse).
-func peekClientALPN(br *bufio.Reader) []string {
+// readerConn). It has two outcomes, and they must not be confused:
+//
+//   - The record is in the buffer, but it offers no ALPN, does not parse, or is
+//     larger than the buffered window: it returns ["http/1.1"] and a nil error.
+//     That is a protocol decision, and it is fail-closed: the tunnel degrades to
+//     the fully-inspected HTTP/1.1 path rather than mis-negotiating. The parser
+//     itself is bounds-checked and fuzzed (alpnpeek.Parse).
+//   - Reading the record failed (the setup deadline expired, the client went
+//     away, the connection was reset): it returns the read error. The client
+//     never delivered a ClientHello, so there is nothing to decide. The caller
+//     records a client-hello failure and does not start an origin handshake.
+//     Before CHAOS-125's follow-up this case returned the HTTP/1.1 fallback, so
+//     a client that sent 0x16 and then stalled was charged to the origin
+//     handshake instead of the client leg.
+func peekClientALPN(br *bufio.Reader) ([]string, error) {
 	fallback := []string{"http/1.1"}
 	hdr, err := br.Peek(5)
-	if err != nil || hdr[0] != 0x16 {
-		return fallback
-	}
-	recLen := int(hdr[3])<<8 | int(hdr[4])
-	full, err := br.Peek(5 + recLen)
 	if err != nil {
+		return nil, err
+	}
+	if hdr[0] != 0x16 {
+		return fallback, nil
+	}
+	want := 5 + (int(hdr[3])<<8 | int(hdr[4]))
+	if want > br.Size() {
 		// ClientHello larger than the buffered window (rare): the real handshake
-		// still succeeds (reads from the conn), but we cannot read ALPN here —
-		// downgrade the decision to http/1.1.
-		return fallback
+		// still succeeds (reads from the conn), but we cannot read ALPN here, so
+		// the decision downgrades to http/1.1. Filling the window first is what
+		// Peek(want) did here before, and it keeps a stall during that fill a
+		// client failure rather than a silent downgrade: bufio reports an
+		// over-sized Peek as ErrBufferFull even when the fill hit a read error.
+		if _, err := br.Peek(br.Size()); err != nil {
+			return nil, err
+		}
+		return fallback, nil
+	}
+	full, err := br.Peek(want)
+	if err != nil {
+		return nil, err
 	}
 	if protos, ok := alpnpeek.Parse(full); ok {
-		return protos
+		return protos, nil
 	}
-	return fallback
+	return fallback, nil
 }
 
 // newMITMClientConfigForALPN builds a per-connection forged-leaf TLS config that

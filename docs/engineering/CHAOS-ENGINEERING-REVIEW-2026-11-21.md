@@ -125,14 +125,25 @@ the listener accepting; the gateway stops forwarding traffic for everybody.
 **S2 — the same, one byte in.** The client sends `0x16` and stops, so the
 first-byte peek succeeds and the stall lands in the forged-leaf handshake (strip
 leg) or in `peekClientALPN`'s record peek (native leg). Same cost before, same
-bound now — the window covers the whole phase, not one call in it.
+bound now — the window covers the whole phase, not one call in it. On the
+native leg the bound alone was not enough for attribution: `peekClientALPN`
+treated the expired read as "no ALPN offer" and returned its HTTP/1.1
+fallback, so the gateway handshook the origin for a dead client and recorded
+(`upstream_handshake`, `other`). It now returns read failures as errors, which
+are recorded as (`client_hello`, `timeout`) with no origin handshake
+(`TestChaos125_PartialClientHelloOnNativeLegIsAClientStall`); a delivered
+ClientHello without a usable offer still falls back to HTTP/1.1
+(`TestChaos125_PeekClientALPNFallbackIsNotAFailure`).
 
 **S3 — a declared-but-undelivered ClientHello record (native leg).** The client
 writes a 5-byte header declaring a record length and then sends fewer bytes.
-`Peek(5+recLen)` with `recLen > 4091` returns `ErrBufferFull` immediately (the
-hijacked `bufio.Reader` is the server's 4 KiB buffer), so there is no memory
-amplification here — but for any `recLen` inside the buffer the read blocked
-exactly as in S1. Bounded now.
+`Peek(5+recLen)` with `recLen > 4091` returns `ErrBufferFull` (the hijacked
+`bufio.Reader` is the server's 4 KiB buffer), so there is no memory
+amplification here. It is not immediate, though: bufio fills the whole window
+before it reports the over-sized peek, and reports `ErrBufferFull` even when
+that fill hit a read error. So the read blocked exactly as in S1 for every
+`recLen`. Bounded now, and `peekClientALPN` peeks the window explicitly so a
+stall during the fill is a client failure, not a silent HTTP/1.1 downgrade.
 
 **S4 — a blackholing origin.** An origin that completes the TCP handshake and
 then never speaks TLS. The dialer's `Timeout: 10 * time.Second` covers the dial

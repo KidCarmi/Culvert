@@ -35,8 +35,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -65,7 +67,20 @@ func shortenInspectSetupWindow(t *testing.T, d time.Duration) {
 // peek (so the origin fixture must speak TLS and the stall holds a COMPLETED
 // origin TLS session), while the native leg peeks first (so a plain TCP origin
 // is enough and the stall holds a dialled origin socket).
-func silentInspectClientProbe(t *testing.T, native bool, window time.Duration) (clientHeld time.Duration, clientReleased, originReleased bool) {
+//
+// preamble, when non-empty, is written right after the 200 and BEFORE the
+// silence: it lets a test stall the client part-way into its ClientHello rather
+// than before its first byte.
+func silentInspectClientProbe(t *testing.T, native bool, window time.Duration, preamble []byte) (clientHeld time.Duration, clientReleased, originReleased bool) {
+	clientHeld, clientReleased, originReleased, _ = silentInspectClientProbeRx(t, native, window, preamble)
+	return clientHeld, clientReleased, originReleased
+}
+
+// silentInspectClientProbeRx is silentInspectClientProbe that also reports how
+// many bytes the origin fixture received before the gateway released it. On the
+// native leg the origin is plain TCP, so any byte at all is the gateway starting
+// an origin TLS handshake.
+func silentInspectClientProbeRx(t *testing.T, native bool, window time.Duration, preamble []byte) (clientHeld time.Duration, clientReleased, originReleased bool, originRx int64) {
 	t.Helper()
 	t.Cleanup(reqlog.SwapRingForTest())
 	allowLoopbackTunnel(t)
@@ -80,15 +95,15 @@ func silentInspectClientProbe(t *testing.T, native bool, window time.Duration) (
 
 	ln := inspectProbeOriginListener(t, rawLn, native)
 
-	originGone := make(chan struct{})
+	originGone := make(chan int64, 1)
 	go func() {
 		c, aerr := ln.Accept()
 		if aerr != nil {
 			return
 		}
 		defer c.Close() //nolint:errcheck // test cleanup
-		_, _ = io.Copy(io.Discard, c)
-		close(originGone) // the gateway let the origin leg go
+		n, _ := io.Copy(io.Discard, c)
+		originGone <- n // the gateway let the origin leg go
 	}()
 
 	proxyURL := startTestProxy(t)
@@ -111,6 +126,11 @@ func silentInspectClientProbe(t *testing.T, native bool, window time.Duration) (
 	if err := readCONNECT200(conn); err != nil {
 		t.Fatalf("CONNECT: %v", err)
 	}
+	if len(preamble) > 0 {
+		if _, err := conn.Write(preamble); err != nil {
+			t.Fatalf("write preamble: %v", err)
+		}
+	}
 
 	// Admitted, and now silent. Before CHAOS-125 this read never returned.
 	start := time.Now()
@@ -120,11 +140,11 @@ func silentInspectClientProbe(t *testing.T, native bool, window time.Duration) (
 	clientReleased = rerr != nil && !isNetTimeout(rerr)
 
 	select {
-	case <-originGone:
+	case originRx = <-originGone:
 		originReleased = true
 	case <-time.After(5 * time.Second):
 	}
-	return clientHeld, clientReleased, originReleased
+	return clientHeld, clientReleased, originReleased, originRx
 }
 
 // inspectProbeOriginListener returns the origin fixture each dispatch needs: a
@@ -180,7 +200,7 @@ func requireClientHelloTimeoutRow(t *testing.T) {
 // quiet after the 200 spends the origin's handshake and then holds both legs.
 func TestChaos125_SilentClientOnStripInspectLegIsReaped(t *testing.T) {
 	const window = 600 * time.Millisecond
-	held, clientReleased, originReleased := silentInspectClientProbe(t, false, window)
+	held, clientReleased, originReleased := silentInspectClientProbe(t, false, window, nil)
 
 	if !clientReleased {
 		t.Fatalf("the gateway held a silent admitted client's leg for %v with no sign of releasing it: "+
@@ -207,7 +227,7 @@ func TestChaos125_SilentClientOnStripInspectLegIsReaped(t *testing.T) {
 // here, which is exactly the extra reachability this leg added.
 func TestChaos125_SilentClientOnNativeInspectLegIsReaped(t *testing.T) {
 	const window = 600 * time.Millisecond
-	held, clientReleased, originReleased := silentInspectClientProbe(t, true, window)
+	held, clientReleased, originReleased := silentInspectClientProbe(t, true, window, nil)
 
 	if !clientReleased {
 		t.Fatalf("the gateway held a silent admitted client's leg for %v with no sign of releasing it: "+
@@ -340,5 +360,195 @@ func TestChaos125_EstablishedInspectedTunnelOutlivesTheSetupWindow(t *testing.T)
 		if resp.StatusCode != http.StatusOK || string(body) != "still-here" {
 			t.Fatalf("%s: status=%d body=%q, want 200 still-here", label, resp.StatusCode, body)
 		}
+	}
+}
+
+// TestChaos125_PartialClientHelloOnNativeLegIsAClientStall: the native leg's
+// stall window does not end at the first byte. A client that sends the 0x16
+// that opens a TLS handshake record and then goes quiet passes the first-byte
+// peek, and the setup deadline then expires INSIDE peekClientALPN's record
+// peeks. That read failure is the same client-side stall as a silent client and
+// must be recorded as one, (client_hello, timeout), not swallowed as an
+// ordinary "no ALPN offer" downgrade: that downgrade went on to start an origin
+// TLS handshake for a dead client and recorded the stall as
+// (upstream_handshake, ...), charging a client's silence to a healthy origin in
+// Decryption Health.
+func TestChaos125_PartialClientHelloOnNativeLegIsAClientStall(t *testing.T) {
+	const window = 600 * time.Millisecond
+	held, clientReleased, originReleased, originRx := silentInspectClientProbeRx(t, true, window, []byte{0x16})
+
+	if !clientReleased {
+		t.Fatalf("the gateway held a client stalled mid-ClientHello for %v with no sign of releasing it", held)
+	}
+	if held < window/2 {
+		t.Errorf("the client leg was released after %v, less than half the %v window", held, window)
+	}
+	if !originReleased {
+		t.Error("the ORIGIN leg survived the reaped setup window on a partial ClientHello")
+	}
+	requireClientHelloTimeoutRow(t)
+	if originRx != 0 {
+		t.Errorf("the gateway sent the origin %d byte(s) for a client that never delivered its ClientHello: "+
+			"it started an origin TLS handshake for a stalled client", originRx)
+	}
+	if n := autoExclude().Len(); n != 0 {
+		t.Errorf("SECURITY: a partial-ClientHello stall learned %d auto-exclusion(s)", n)
+	}
+}
+
+// captureClientHelloRecord returns the first TLS record a real crypto/tls client
+// sends (its ClientHello) for the given ALPN offer, so the peek tests run
+// against wire bytes rather than a hand-built approximation.
+func captureClientHelloRecord(t *testing.T, nextProtos []string) []byte {
+	t.Helper()
+	cli, srv := net.Pipe()
+	defer func() { _ = srv.Close() }()
+	go func() {
+		tc := tls.Client(cli, &tls.Config{ServerName: "peek.test", NextProtos: nextProtos, MinVersion: tls.VersionTLS12})
+		_ = tc.HandshakeContext(context.Background()) // fails once srv closes; only its first record matters
+		_ = cli.Close()
+	}()
+	_ = srv.SetReadDeadline(time.Now().Add(5 * time.Second))
+	hdr := make([]byte, 5)
+	if _, err := io.ReadFull(srv, hdr); err != nil {
+		t.Fatalf("read ClientHello record header: %v", err)
+	}
+	body := make([]byte, int(hdr[3])<<8|int(hdr[4]))
+	if _, err := io.ReadFull(srv, body); err != nil {
+		t.Fatalf("read ClientHello record body: %v", err)
+	}
+	return append(hdr, body...)
+}
+
+// inspectPeekReader wraps src the way the native leg sees the hijacked client:
+// a bufio.Reader of net/http's connection-reader size.
+func inspectPeekReader(src io.Reader) *bufio.Reader { return bufio.NewReaderSize(src, 4<<10) }
+
+// TestChaos125_PeekClientALPNFallbackIsNotAFailure pins the half of
+// peekClientALPN's contract the partial-ClientHello fix must not disturb: when
+// the client's record IS delivered but yields no usable ALPN offer, the answer
+// is the HTTP/1.1 fallback with NO error, so the tunnel goes on to be inspected
+// over HTTP/1.1 exactly as before rather than being recorded as a client-hello
+// failure. The positive control proves the parser is actually reached.
+func TestChaos125_PeekClientALPNFallbackIsNotAFailure(t *testing.T) {
+	noALPN := captureClientHelloRecord(t, nil)
+	withALPN := captureClientHelloRecord(t, []string{"h2", "http/1.1"})
+	garbage := append([]byte{0x16, 0x03, 0x01, 0x00, 0x08}, []byte("notahelo")...)
+	oversized := append([]byte{0x16, 0x03, 0x01, 0xff, 0xff}, make([]byte, 0xffff)...)
+
+	cases := []struct {
+		name string
+		in   []byte
+		want []string
+	}{
+		{"complete ClientHello with no ALPN extension", noALPN, []string{"http/1.1"}},
+		{"complete handshake record that does not parse", garbage, []string{"http/1.1"}},
+		{"record larger than the buffered window", oversized, []string{"http/1.1"}},
+		{"non-handshake record type", []byte{0x17, 0x03, 0x03, 0x00, 0x00}, []string{"http/1.1"}},
+		{"positive control: the client's real offer", withALPN, []string{"h2", "http/1.1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := peekClientALPN(inspectPeekReader(bytes.NewReader(tc.in)))
+			if err != nil {
+				t.Fatalf("peekClientALPN returned %v for a delivered record: a legitimate HTTP/1.1 fallback "+
+					"would be recorded as a client-hello failure and the tunnel refused", err)
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("offer = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestChaos125_PeekClientALPNSurfacesClientReadFailures is the other half: a
+// ClientHello the client never finished delivering is a read failure, and it
+// must come back as an error the caller records on the client leg, never as
+// the HTTP/1.1 fallback that sends the tunnel on to an origin handshake. The
+// over-sized case matters because bufio reports an over-sized Peek as
+// ErrBufferFull even when the fill underneath it failed.
+func TestChaos125_PeekClientALPNSurfacesClientReadFailures(t *testing.T) {
+	hello := captureClientHelloRecord(t, []string{"h2", "http/1.1"})
+	cases := map[string][]byte{
+		"only the record type byte":            {0x16},
+		"a truncated record header":            {0x16, 0x03, 0x01},
+		"a truncated ClientHello body":         hello[:len(hello)/2],
+		"an over-sized record cut short early": append([]byte{0x16, 0x03, 0x01, 0xff, 0xff}, make([]byte, 100)...),
+	}
+	for name, in := range cases {
+		t.Run(name+" then EOF", func(t *testing.T) {
+			got, err := peekClientALPN(inspectPeekReader(bytes.NewReader(in)))
+			if err == nil {
+				t.Fatalf("offer = %q, nil error: a client that went away mid-ClientHello was treated as an ALPN fallback", got)
+			}
+			if errors.Is(err, bufio.ErrBufferFull) {
+				t.Fatalf("error = %v: the read failure was masked as a full buffer", err)
+			}
+		})
+	}
+
+	t.Run("a stall that reaches the read deadline", func(t *testing.T) {
+		cli, srv := net.Pipe()
+		defer func() { _ = cli.Close() }()
+		defer func() { _ = srv.Close() }()
+		go func() { _, _ = cli.Write([]byte{0x16}) }()
+		_ = srv.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		got, err := peekClientALPN(inspectPeekReader(srv))
+		if err == nil {
+			t.Fatalf("offer = %q, nil error: a stalled client was treated as an ALPN fallback", got)
+		}
+		if !isNetTimeout(err) {
+			t.Fatalf("error = %v, want the deadline's timeout so it classifies as (client_hello, timeout)", err)
+		}
+		if stage, cat := classifyClientFailure(err); stage != "client_hello" || cat != "timeout" {
+			t.Fatalf("classifyClientFailure = (%q, %q), want (client_hello, timeout)", stage, cat)
+		}
+	})
+}
+
+// TestChaos125_NativeLegClientWithoutALPNStillInspectsOverHTTP1 pins the
+// fallback end to end on the native dispatch: a client whose ClientHello
+// carries no ALPN extension at all is a legitimate client, not a stall. It must
+// complete the forged-leaf handshake, be served through the HTTP/1.1 inspect
+// loop (the origin is offered http/1.1 only, even though it speaks h2), and
+// leave no DECRYPT_FAILED row behind.
+func TestChaos125_NativeLegClientWithoutALPNStillInspectsOverHTTP1(t *testing.T) {
+	t.Cleanup(reqlog.SwapRingForTest())
+	allowLoopbackTunnel(t)
+	_, proxyRoots := setupInspectCA(t)
+
+	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Origin-Proto", r.Proto)
+		_, _ = io.WriteString(w, "no-alpn-ok")
+	}))
+	origin.EnableHTTP2 = true // an h2-capable origin, so an h1 upstream leg is the fallback's doing
+	origin.StartTLS()
+	defer origin.Close()
+
+	proxyURL := startTestProxy(t)
+	inspectRuleNative()
+
+	tc, proto := connectTLSWithProto(t, proxyURL.Host, origin.Listener.Addr().String(), "origin.test", proxyRoots, nil)
+	if proto != "" {
+		t.Fatalf("downstream ALPN = %q for a client that offered none", proto)
+	}
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://origin.test/no-alpn", http.NoBody)
+	if err := req.Write(tc); err != nil {
+		t.Fatalf("write h1 request: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(tc), req)
+	if err != nil {
+		t.Fatalf("read h1 response through the native leg: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "no-alpn-ok" {
+		t.Fatalf("body = %q, want the origin's response", body)
+	}
+	if p := resp.Header.Get("X-Origin-Proto"); p != "HTTP/1.1" {
+		t.Fatalf("upstream leg proto = %q, want HTTP/1.1 (the no-ALPN fallback)", p)
+	}
+	if e, ok := findDecFailEntry(t, "127.0.0.1"); ok {
+		t.Fatalf("a client with no ALPN offer recorded a DECRYPT_FAILED row (%+v): the fallback became a failure", e.Dec)
 	}
 }
