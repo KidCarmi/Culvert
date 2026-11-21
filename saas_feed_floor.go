@@ -32,7 +32,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -41,6 +40,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/urlcatfeed"
+	"github.com/KidCarmi/Culvert/internal/urlcatfeed/noderecord"
 )
 
 // ─── constants ──────────────────────────────────────────────────────────────────
@@ -137,31 +137,19 @@ type floorRecordSansCRC struct {
 	ArtifactSHA256 string `json:"artifact_sha256"`
 }
 
-// floorCRCTable is CRC-32/Castagnoli (§B.3). A checksum is CORRUPTION DETECTION, NOT
-// authenticity — any local writer can recompute a valid crc32c. Content authenticity
-// comes solely from the Sigstore signatures a later slice re-verifies (§B.9).
-var floorCRCTable = crc32.MakeTable(crc32.Castagnoli)
-
 // floorCanonicalBytes encodes v with the shared canonical scheme (§B.3 / F1): compact,
-// HTML-escaping DISABLED, fixed struct field order, no trailing newline.
-func floorCanonicalBytes(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil, fmt.Errorf("saas feed floor: canonical encode: %w", err)
-	}
-	b := buf.Bytes()
-	if n := len(b); n > 0 && b[n-1] == '\n' { // Encoder appends exactly one '\n'.
-		b = b[:n-1]
-	}
-	return append([]byte(nil), b...), nil
-}
+// HTML-escaping DISABLED, fixed struct field order, no trailing newline. The scheme
+// and the CRC-32C seal below are owned by internal/urlcatfeed/noderecord (ADR-0053),
+// which the floor, activation, authority and generation-metadata records all bind;
+// this is the root's name for it, not a second encoder.
+func floorCanonicalBytes(v any) ([]byte, error) { return noderecord.Canonical(v) }
 
 // floorComputeCRC derives the crc32c string (8 lowercase hex) over the crc-omitted
-// canonical bytes.
+// canonical bytes. A checksum is CORRUPTION DETECTION, NOT authenticity — any local
+// writer can recompute a valid crc32c. Content authenticity comes solely from the
+// Sigstore signatures a later slice re-verifies (§B.9).
 func floorComputeCRC(rec floorRecord) (string, error) {
-	sans := floorRecordSansCRC{
+	return noderecord.Seal(floorRecordSansCRC{
 		SchemaVersion:  rec.SchemaVersion,
 		Protocol:       rec.Protocol,
 		Feed:           rec.Feed,
@@ -170,12 +158,7 @@ func floorComputeCRC(rec floorRecord) (string, error) {
 		GenerationID:   rec.GenerationID,
 		ManifestSHA256: rec.ManifestSHA256,
 		ArtifactSHA256: rec.ArtifactSHA256,
-	}
-	b, err := floorCanonicalBytes(sans)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%08x", crc32.Checksum(b, floorCRCTable)), nil
+	})
 }
 
 // encodeFloorRecord (re)computes crc32c and returns the full canonical bytes.
@@ -325,23 +308,10 @@ func validGenerationID(id string) bool {
 // validSHA256Hex binds the feed protocol's digest grammar
 // (urlcatfeed.IsSHA256Hex: exactly 64 lowercase hex digits).
 func validSHA256Hex(s string) bool { return urlcatfeed.IsSHA256Hex(s) }
-func validCRC32Hex(s string) bool  { return isLowerHex(s, 8) }
 
-func isLowerHex(s string, n int) bool {
-	if len(s) != n {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if !isHexByte(s[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func isHexByte(c byte) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
-}
+// validCRC32Hex binds the node-local records' checksum form
+// (noderecord.ValidChecksum: exactly 8 lowercase hex digits).
+func validCRC32Hex(s string) bool { return noderecord.ValidChecksum(s) }
 
 // ─── filesystem seam (injectable durability) ─────────────────────────────────────
 

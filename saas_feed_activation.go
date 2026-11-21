@@ -27,12 +27,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strconv"
 
 	"github.com/KidCarmi/Culvert/internal/urlcatfeed"
+	"github.com/KidCarmi/Culvert/internal/urlcatfeed/noderecord"
 )
 
 // ─── constants ──────────────────────────────────────────────────────────────────
@@ -158,13 +158,9 @@ func (r activationRecord) sansCRC() activationRecordSansCRC {
 }
 
 // activationComputeCRC derives the crc32c string (8 lowercase hex) over the crc-omitted
-// canonical bytes (reuses the F3b-1 canonical encoder + Castagnoli table).
+// canonical bytes (the node-local record seal, internal/urlcatfeed/noderecord).
 func activationComputeCRC(r activationRecord) (string, error) {
-	b, err := floorCanonicalBytes(r.sansCRC())
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%08x", crc32.Checksum(b, floorCRCTable)), nil
+	return noderecord.Seal(r.sansCRC())
 }
 
 // encodeActivationRecord (re)computes crc32c and returns the full canonical bytes.

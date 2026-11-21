@@ -210,6 +210,7 @@ Less common flags (the full list is `culvert -h`). Unless noted, a non-empty / n
 | `CULVERT_LOG_PASSPHRASE` | Encryption-at-rest passphrase for the persistent log store. Falls back to `CULVERT_CA_PASSPHRASE` if unset; empty (both unset) = encryption off. |
 | `CULVERT_SESSION_SECRET` | Hex-encoded session-cookie HMAC key (≥ 64 hex chars). Set the same value on every node behind a load balancer so sessions are valid cluster-wide; takes priority over `session_secret` in the config file. A random per-start key is used only when neither this nor a valid `session_secret` is set. An invalid value here aborts startup. |
 | `CULVERT_C2_ENFORCE` | Admin-API RBAC enforcement mode. Default `enforce` (fail-closed); set `false`/`0`/`no`/`off` for shadow (log-only). Read once at startup. |
+| `CULVERT_AUTHBYPASS_DISABLE` | Authentication kill switch. `1`/`true`/`yes`/`on` forces every Auth Policy `Exempt` rule and the Open default to require authentication; it never disables authentication. Read once at startup, per node. See [`docs/operator/authentication-kill-switch.md`](docs/operator/authentication-kill-switch.md). |
 | `CULVERT_RELEASE_PROXY_REPO` | Bare image repository allowed for release dispatch (default `ghcr.io/kidcarmi/culvert`; no tag/digest). |
 | `CULVERT_MAINT_AGENT_URL` | Local maintenance-agent endpoint (default Unix socket `/run/culvert-maint/culvert-maint.sock`). |
 | `CULVERT_RELEASE_CATALOG_TRUST_KEYS` | JSON array of **public** Ed25519 catalog trust roots. Public keys only. |

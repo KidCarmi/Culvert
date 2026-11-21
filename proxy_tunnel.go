@@ -256,6 +256,105 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 // production never mutates it (configurability is a recorded deferral).
 var tunnelIdleTimeout = 1 * time.Hour
 
+// sslInspectSetupTimeout bounds an INSPECTED tunnel's SETUP window — the phases
+// between the origin dial and the established, enforcement-loop-owned tunnel:
+// the origin TLS handshake, the client first-byte peek, the native leg's
+// ClientHello peek, and the forged-leaf client handshake (CHAOS-125, closing
+// CHAOS-32 of 2026-07-07).
+//
+// It exists because the bound the window LOOKS like it has is discarded before
+// the window opens. The proxy listener sets ReadTimeout: 30 s (main.go), but
+// net/http's hijackLocked calls rwc.SetDeadline(time.Time{}) on the way out, so
+// the socket the inspect path takes ownership of carries NO deadline at all;
+// r.Context() is not a substitute, because the server cancels it when the
+// handler returns, not when a hijacked client goes silent. Measured before this
+// bound existed: a client that completed CONNECT to an inspect-marked host, read
+// the 200 and then sent one byte of nothing held the hijacked client socket, the
+// origin socket (a COMPLETED origin TLS session on the strip path, a dialled TCP
+// conn on the native one) and its handler goroutine for as long as it cared to —
+// 2 FDs and 1 goroutine per connection, with no per-IP cap in the default
+// configuration (connlimit's MaxConnsPerIP is 0 = off) and no series counting
+// them, because registerDrainableTunnel — which owns the activeConns increment
+// and hands the drain its force-close handles — is only reached AFTER both
+// handshakes.
+//
+// Culvert's posture on either side of this window was already explicit, which is
+// what makes the gap a gap rather than a decision: the bypass relay registers
+// with the drain immediately after its own 200 and is idle-bounded by
+// tunnelIdleTimeout, and runH1InspectLoop arms a 60 s read deadline per
+// iteration "so a slow client cannot hold the connection open indefinitely by
+// trickling bytes". Only the setup phase in between was unbounded.
+//
+// 30 s is not a new budget: it is the listener's own ReadTimeout, restored to the
+// socket for the window Hijack cleared it for. Each leg carries its own absolute
+// deadline, armed when that leg becomes this tunnel's to hold, so the worst-case
+// setup window is one budget per leg rather than one for the pair — bounded
+// either way, which is the property that was missing. Both legs are cleared the
+// moment the tunnel is established, because the enforcement loops own their own
+// deadlines from there (and a stale WRITE deadline would break a long-lived
+// tunnel's response delivery). Var (not const) so tests can shorten it;
+// production never mutates it (configurability is a recorded deferral — this is
+// a security boundary, not an operator setting, and the window is orders of
+// magnitude longer than any real handshake).
+var sslInspectSetupTimeout = 30 * time.Second
+
+// adoptHijackedInspectLeg takes ownership of a freshly hijacked client
+// connection for an inspected tunnel's setup window. It returns the buffered
+// reader every subsequent read MUST go through — the HTTP server may already
+// have buffered client bytes (a pipelined ClientHello) into it, and reading the
+// raw conn would strand them — and arms the setup deadline that Hijack cleared.
+//
+// The two live together in one function on purpose: both SSL-inspect dispatches
+// bind this reader, and binding it without re-arming a deadline is exactly the
+// unbounded window CHAOS-125 closed, so a third dispatch cannot acquire the one
+// without the other.
+func adoptHijackedInspectLeg(rawClient net.Conn, clientBuf *bufio.ReadWriter) *bufio.Reader {
+	armInspectSetupDeadline(rawClient)
+	return clientBuf.Reader
+}
+
+// recordInspectClientHelloFailure records a CLIENT-leg setup failure — a client
+// that was admitted to an inspected tunnel (it has its 200) and then stalled or
+// vanished before its ClientHello could be read — through the ADR-0011 failure
+// taxonomy, and logs it. classifyClientFailure maps the setup window's
+// "i/o timeout" to (client_hello, timeout), the cell this belongs in; a client
+// that simply went away records as (client_hello, other). Either way the phase
+// stops being invisible: before CHAOS-125 the strip leg left a log line and no
+// metric or drill-down row, and the native leg left nothing at all.
+//
+// maybeFailOpenClient is deliberately NOT consulted, for the same reason the
+// non-TLS refusal does not consult it: learning an auto-exclusion from a
+// client-side stall would let anything able to open a CONNECT and go quiet TEACH
+// the gateway to stop inspecting the host on the next connection.
+func recordInspectClientHelloFailure(err error, leg, hostOnly string, dec sslResolution, match *PolicyMatch, id ProxyIdentity) {
+	recordDecryptFailureEntry(clientInspectFailureOutcome(err, hostOnly, dec, match), id, hostOnly, match, decRedactHosts())
+	logger.Printf("SSL_INSPECT%s client-hello peek %q: %v", leg, sanitizeLog(hostOnly), err)
+}
+
+// armInspectSetupDeadline arms the sslInspectSetupTimeout window on one leg of an
+// inspected tunnel. Call it the moment that leg becomes this handler's to hold:
+// the origin leg right after the dial, the client leg right after the hijack.
+func armInspectSetupDeadline(c net.Conn) {
+	if c == nil {
+		return
+	}
+	c.SetDeadline(time.Now().Add(sslInspectSetupTimeout)) //nolint:errcheck // a set failure on a closing conn surfaces as the next read error, which is the same teardown this deadline exists to cause
+}
+
+// clearInspectSetupDeadline removes the setup window from every leg of an
+// established inspected tunnel, handing deadline ownership to the enforcement
+// loop (runH1InspectLoop's per-iteration read deadline, or the H2 server's own
+// idle/write-byte timeouts). It MUST run before either loop starts: a left-over
+// write deadline would abort a legitimate long-lived tunnel 30 s in.
+func clearInspectSetupDeadline(legs ...net.Conn) {
+	for _, c := range legs {
+		if c == nil {
+			continue
+		}
+		c.SetDeadline(time.Time{}) //nolint:errcheck // best-effort disarm; a failure here means the conn is already closing
+	}
+}
+
 // newTunnelActivityStamp returns the shared last-activity stamp for one
 // tunnel's two relay directions, seeded to now so a tunnel that never moves a
 // byte is reaped one idle window after establishment.
@@ -807,6 +906,14 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		return
 	}
 
+	// CHAOS-125: arm the setup window on the origin leg the moment it is ours.
+	// This site is BEFORE the native/strip split, so both dispatches inherit it;
+	// each clears it when its tunnel is established. Until this existed, a
+	// blackholing origin that completed the TCP handshake and then stalled its
+	// TLS one pinned this handler goroutine and the client socket indefinitely
+	// (HandshakeContext's ctx is r.Context(), which nothing cancels here).
+	armInspectSetupDeadline(rawUpstream)
+
 	// Native-ALPN dispatch (opt-in per rule; StripALPN==false). The default and
 	// every pre-feature rule resolve to strip=true and fall through to the
 	// byte-for-byte-unchanged HTTP/1.1 path below. The native path needs the
@@ -930,12 +1037,14 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 	// bytes (a pipelined ClientHello) into it, and reading the raw conn would
 	// strand them — breaking protocol detection / the client handshake. Same
 	// class of bug as the CONNECT bypass path.
-	peekBuf := clientBuf.Reader
+	// CHAOS-125: adopting the leg also re-arms the deadline Hijack cleared, which
+	// bounds this peek AND the forged-leaf handshake below.
+	peekBuf := adoptHijackedInspectLeg(rawClient, clientBuf)
 	firstByte, err := peekBuf.Peek(1)
 	if err != nil {
 		rawClient.Close()   //nolint:errcheck // best-effort cleanup on peek failure
 		upstreamTLS.Close() //nolint:errcheck // best-effort cleanup on peek failure
-		logger.Printf("SSL_INSPECT peek error for %q: %v", sanitizeLog(hostOnly), err)
+		recordInspectClientHelloFailure(err, "", hostOnly, dec, match, id)
 		return
 	}
 	if firstByte[0] != 0x16 { // not a TLS handshake record
@@ -970,6 +1079,13 @@ func handleTunnelInspect(w http.ResponseWriter, r *http.Request, dec sslResoluti
 		logger.Printf("SSL_INSPECT client TLS handshake error for %q: %v", sanitizeLog(hostOnly), err)
 		return
 	}
+
+	// CHAOS-125: the tunnel is established, so the setup window ends here and
+	// deadline ownership passes to runH1InspectLoop (per-iteration read deadline)
+	// and the relay. Clearing is mandatory, not hygiene: the armed deadline is a
+	// WRITE deadline too, and leaving it on would abort a legitimate tunnel's
+	// response delivery 30 s after setup.
+	clearInspectSetupDeadline(rawClient, rawUpstream)
 
 	logger.Printf("SSLInspect: tunnel %q", sanitizeLog(targetHost))
 	// CHAOS-57: this tunnel was already counted, but held by no registry — so the

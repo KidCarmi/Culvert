@@ -931,21 +931,111 @@ func NormalizeLine(raw string) (string, bool) {
 	return line, true
 }
 
+// mergeChunk bounds how many entries MergeFromLines examines or applies per
+// lock acquisition. The write lock excludes every IsBlocked, so its hold time
+// is a stall paid by every request in flight; at this size one hold is a few
+// hundred microseconds instead of growing with the feed (PERF-BLOCKLIST-MERGE-1).
+const mergeChunk = 1024
+
 // MergeFromLines adds all valid host entries from lines to the blocklist and
 // saves it. Existing entries are NOT removed — safe to call on a live
 // blocklist. Lines starting with '#' or empty are skipped; /etc/hosts-format
 // lines are normalized to their hostname (see NormalizeLine). source is the
 // feed URL recorded as per-entry attribution ("" = none). Returns the number
 // of newly-added entries.
+//
+// The feed syncer calls this on every successful sync with up to a million
+// lines, while IsBlocked runs on every proxied destination, so the write lock
+// is held only for work that needs it (PERF-BLOCKLIST-MERGE-1):
+//
+//  1. Parsing (NormalizeLine is pure) runs under no lock.
+//  2. Entries the store already holds with the right attribution are dropped
+//     under the COLD read lock, which no request-path reader waits on. An
+//     unchanged feed, the steady state, therefore never takes the write lock.
+//  3. What is left is applied under the write lock in mergeChunk-sized holds,
+//     so readers run between chunks.
+//
+// The merge is consequently not one atomic step: a concurrent reader can see
+// part of a feed listed before the rest. That is safe because the merge only
+// ever ADDS entries and attribution, each entry is independent of the others,
+// and step 3 re-checks every entry under the write lock, so a writer that
+// interleaves (Remove, AddManual, ReplaceFeedEntries) is never overwritten by
+// a stale decision from step 2.
 func (b *Store) MergeFromLines(lines []string, source string) int {
+	entries := normalizeMergeLines(lines)
+	entries = b.mergePending(entries, source)
 	added := 0
 	attributed := false
-	b.mu.Lock()
+	for len(entries) > 0 {
+		n := min(len(entries), mergeChunk)
+		a, attr := b.mergeApply(entries[:n], source)
+		added += a
+		attributed = attributed || attr
+		entries = entries[n:]
+	}
+	// attributed alone must also save: a re-sync that only stamps
+	// attribution on already-listed hosts (e.g. entries repaired by Load
+	// or imported before the .sources sidecar existed) would otherwise
+	// hold the attribution in memory only and lose it on restart
+	// (Codex P2, PR #438).
+	if added > 0 || attributed {
+		b.Save()
+	}
+	return added
+}
+
+// normalizeMergeLines returns the blockable host of every line that has one,
+// in input order. It never modifies lines.
+func normalizeMergeLines(lines []string) []string {
+	entries := make([]string, 0, len(lines))
 	for _, raw := range lines {
-		line, ok := NormalizeLine(raw)
-		if !ok {
-			continue
+		if line, ok := NormalizeLine(raw); ok {
+			entries = append(entries, line)
 		}
+	}
+	return entries
+}
+
+// mergePending filters entries, in place, down to those a merge from source
+// would change. It holds only the cold read lock, re-taken every mergeChunk
+// entries so a waiting writer is never queued behind the whole feed. The
+// answer is advisory: mergeApply decides again under the write lock.
+func (b *Store) mergePending(entries []string, source string) []string {
+	pending := entries[:0]
+	for len(entries) > 0 {
+		n := min(len(entries), mergeChunk)
+		b.mu.RLock()
+		for _, line := range entries[:n] {
+			if b.mergeWouldChangeLocked(line, source) {
+				pending = append(pending, line)
+			}
+		}
+		b.mu.RUnlock()
+		entries = entries[n:]
+	}
+	return pending
+}
+
+// mergeWouldChangeLocked reports whether merging line from source would add
+// the entry or restamp its attribution. Callers MUST hold b.mu (read or write).
+// It is the read-only mirror of mergeApply's loop body; the two must agree.
+func (b *Store) mergeWouldChangeLocked(line, source string) bool {
+	if strings.HasPrefix(line, "*.") {
+		if !b.wildcards[line[1:]] {
+			return true
+		}
+	} else if !b.exact[line] {
+		return true
+	}
+	return source != "" && !b.manual[line] && b.feedSrc[line] != source
+}
+
+// mergeApply merges one chunk of normalized entries under the write lock and
+// reports how many were newly added and whether any attribution changed.
+func (b *Store) mergeApply(entries []string, source string) (added int, attributed bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, line := range entries {
 		if strings.HasPrefix(line, "*.") {
 			key := line[1:] // ".example.com"
 			if !b.wildcards[key] {
@@ -972,14 +1062,5 @@ func (b *Store) MergeFromLines(lines []string, source string) int {
 			}
 		}
 	}
-	b.mu.Unlock()
-	// attributed alone must also save: a re-sync that only stamps
-	// attribution on already-listed hosts (e.g. entries repaired by Load
-	// or imported before the .sources sidecar existed) would otherwise
-	// hold the attribution in memory only and lose it on restart
-	// (Codex P2, PR #438).
-	if added > 0 || attributed {
-		b.Save()
-	}
-	return added
+	return added, attributed
 }

@@ -9,6 +9,51 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **An inspected tunnel's setup window is bounded on both legs
+  (`CHAOS-125`, closing `CHAOS-32`).** Between the `200 Connection Established`
+  an SSL-inspect rule sends and the established tunnel its enforcement loop
+  owns, nothing had a deadline: `net/http`'s `Hijack` clears the proxy
+  listener's `ReadTimeout` from the socket (`rwc.SetDeadline(time.Time{})`), and
+  `r.Context()` is cancelled when the handler returns, not when a hijacked
+  client goes quiet. A client that completed CONNECT to an inspect-marked host,
+  read the 200 and then sent nothing held the hijacked client socket, the origin
+  socket and its handler goroutine indefinitely — on the strip path that origin
+  socket is a COMPLETED TLS session, so the cheapest possible client also spent
+  the gateway's handshake CPU and an origin connection slot. The concurrency was
+  uncapped (`MaxConnsPerIP` is `0` by default) and uncounted
+  (`registerDrainableTunnel`, which owns the `activeConns` increment and the
+  drain's force-close handles, is only reached after both handshakes), so the
+  first operator-visible symptom was descriptor exhaustion across the whole
+  listener. A blackholing origin pinned the handler and the client's connection
+  the same way, with no `502` ever delivered. Both dispatches (strip and
+  native-ALPN) now arm `sslInspectSetupTimeout` (30 s — the listener's own
+  `ReadTimeout`, restored for the window `Hijack` cleared it for) on the origin
+  leg at the dial and on the client leg at the hijack, and clear BOTH at
+  establishment, because the armed deadline is a write deadline too and would
+  otherwise abort a healthy tunnel's response delivery one window later. The
+  client-leg failure is now recorded through the existing ADR-0011 taxonomy cell
+  (`client_hello`, `timeout`) — the native leg's peek failure previously
+  returned with no log line, no metric and no row at all — and deliberately
+  learns no auto-exclusion, so a client-side stall can never teach the gateway
+  to stop inspecting a host. That attribution also covers a native-leg client
+  that sends the `0x16` opening a ClientHello and then stalls: the deadline
+  expires inside `peekClientALPN`, which used to swallow the read error as its
+  "no ALPN offer" HTTP/1.1 fallback, so the gateway went on to handshake the
+  origin for a dead client and charged the stall to the origin as
+  (`upstream_handshake`, `other`). `peekClientALPN` now returns read failures
+  (timeout, EOF, reset) as errors, which are recorded on the client leg exactly
+  like a first-byte stall, with no origin handshake. A ClientHello that is
+  delivered but carries no usable ALPN offer still falls back to HTTP/1.1 as
+  before. No new metric, alert or configuration surface
+  (`TestChaos125_SilentClientOnStripInspectLegIsReaped`,
+  `TestChaos125_SilentClientOnNativeInspectLegIsReaped`,
+  `TestChaos125_PartialClientHelloOnNativeLegIsAClientStall`,
+  `TestChaos125_PeekClientALPNFallbackIsNotAFailure`,
+  `TestChaos125_PeekClientALPNSurfacesClientReadFailures`,
+  `TestChaos125_NativeLegClientWithoutALPNStillInspectsOverHTTP1`,
+  `TestChaos125_StalledOriginHandshakeDoesNotPinTheClientLeg`,
+  `TestChaos125_EstablishedInspectedTunnelOutlivesTheSetupWindow`).
+
 - **A stale-ClamAV-signature page is no longer burned on an empty subscriber
   list.** The `clamav_signature_stale` alert (CHAOS-124) latched its
   once-per-episode flag before dispatching, and that latch clears only on an
@@ -886,6 +931,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **A blocklist feed sync no longer stalls every request while it parses the
+  feed (`PERF-BLOCKLIST-MERGE-1`).** `blocklist.Store.MergeFromLines` parsed
+  and merged the whole feed (up to 1,000,000 lines) inside one hold of the
+  blocklist write lock, which excludes the `IsBlocked` check every proxied
+  destination makes (HTTP, CONNECT, WebSocket and SOCKS5). It did so on every
+  successful sync, including a re-sync of an unchanged feed. Measured on a
+  4-vCPU host, the longest single `IsBlocked` during a merge was 640-710 ms for
+  an unchanged 1M-line feed and 1.4-1.5 s for its first sync (49-67 ms and
+  78-79 ms at 100k lines). The merge now parses under no lock, drops entries the
+  store already holds under the cold read lock that request-path readers never
+  wait on, and applies what is left in 1,024-entry write-lock holds. An
+  unchanged feed takes no write lock at all (1-6 ms worst reader, which is
+  scheduler and GC noise), and a first 1M-line sync measured 45-49 ms. The
+  entries, attribution, return count and save behaviour are unchanged; the one
+  difference is that a concurrent reader can see part of a feed listed before
+  the rest, which is safe because a merge only adds
+  (`TestMergeFromLines_MatchesSingleHoldReference`,
+  `TestMergeFromLines_SteadyStateResyncTakesNoWriteLock`,
+  `BenchmarkMergeFromLines_ReaderStall_*`).
+- **The Control Plane's centralized audit ring no longer churns the heap on
+  every Data Plane push (`PERF-CLUSTERAUDIT-1`).** `clusterAuditLog`, which every
+  Data Plane's `PushAuditEvents` RPC funnels through under one mutex, was a
+  growing slice re-sliced down to its 5000-entry window rather than a ring:
+  each trim advanced the slice start by one entry, so append periodically had to
+  reallocate and memmove the entire 760 kB live window with the mutex held.
+  It is now a fixed-capacity circular buffer, allocated once on the first push.
+  Measured on a 4-core Xeon @2.10GHz at the production size: a single-event
+  push went from 562-719 ns and 655 B/op to 33-41 ns and 0 B/op, a saturated
+  1000-event push from 309-328 us and 676 kB/op to 15.9-19.1 us and 0 B/op, and
+  the contended fleet shape (concurrent pushes plus admin-UI reads) from
+  13.8-15.9 us to 1.80-1.90 us per op. Resident memory for the saturated window
+  fell from 999 kB to 762 kB. The window the admin UI reads is unchanged: a
+  differential test against the frozen pre-change implementation checks
+  `Count()` and every `Recent(n)` width across randomized push sequences. A
+  negative ring size now disables the log instead of panicking
+  (`TestClusterAuditLog_MatchesLegacy`, `TestClusterAuditLog_BufferNeverGrows`,
+  `TestBenchGate_ClusterAuditAppendIsAllocationFree`,
+  `TestBenchGate_ClusterAuditAppendBeatsLegacy`).
 - **A SOCKS5 client that hangs up during the connect phase now releases its
   slot at once (`PERF-SOCKS5-HANGUP-1`).** The SOCKS5 pre-flight SSRF guard and
   the upstream dial ran under `context.Background()`, so a client that closed

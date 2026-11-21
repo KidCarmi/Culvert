@@ -8,6 +8,79 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-20 — `CHAOS-125` CLAIMED (placeholder, commit one). Domain: the
+INSPECTED TUNNEL'S PRE-HANDSHAKE WINDOW — the interval between the
+`200 Connection Established` and the forged-leaf handshake, on both SSL-inspect
+dispatches. `http.Hijacker.Hijack()` calls `rwc.SetDeadline(time.Time{})`
+(`net/http/server.go` `hijackLocked`), so the proxy listener's
+`ReadTimeout: 30s` is DISCARDED at the moment the handler takes the socket —
+and every read in the window that follows (`peekBuf.Peek(1)`, the native leg's
+`Peek(5+recLen)`, `clientTLS.HandshakeContext(r.Context())` on a context that
+no client disconnect cancels) is therefore unbounded. The tunnel is not yet in
+the drain registry (`registerDrainableTunnel` is deferred AFTER both
+handshakes) and not yet counted, so nothing can end the wait and nothing
+reports it. The upstream leg is already spent by then: the strip path holds a
+COMPLETED origin TLS session, the native path a dialled origin TCP conn.
+Culvert's own posture one step either side of this window is explicit — the
+bypass relay is idle-bounded (`tunnelIdleTimeout`) and registers with the drain
+immediately after its 200, and the inner loop arms a 60 s read deadline with
+the comment "so a slow client cannot hold the connection open indefinitely by
+trickling bytes" — so the only unbounded phase of an inspected tunnel's life is
+the one in the middle. This is the round that closes `CHAOS-32`, found
+2026-07-07, sized "S", never implemented, and since DUPLICATED into the
+native-ALPN leg added after it.** Id claimed in this committed row before any
+code was written, per the convention below and checked against `origin/main`
+rather than the working tree per the 2026-09-25 amendment: `CHAOS-124` is the
+highest id anywhere on `origin/main` (at `0fe4578`). Of the open PRs (#1977,
+#1705, #1549, #1548, #1536, #1528, #1526) none is a chaos sweep and none claims
+a chaos id. This sweep took 125 and will not move.
+
+The 2026-11-20/21 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-21.md) —
+CHAOS-125 (THE WINDOW BETWEEN THE 200 AND THE HANDSHAKE). An inspected tunnel's
+life has three phases; Culvert bounds the first and the third in its own
+comments (the bypass relay registers with the drain at its 200 and is reaped by
+`tunnelIdleTimeout`; `runH1InspectLoop` arms 60 s per iteration "so a slow
+client cannot hold the connection open indefinitely by trickling bytes") and the
+middle one — origin handshake, first-byte peek, the native leg's ClientHello
+peeks, forged-leaf handshake — was bounded by NOTHING on either leg of either
+dispatch, because `Hijack` deletes the listener's `ReadTimeout` from the socket
+and `r.Context()` is cancelled when the handler RETURNS, not when a hijacked
+client goes quiet. Measured: a client that read its 200 and then said nothing
+held both legs for as long as the probe was willing to wait (8 s, 15 s — the
+path has no timer at any length), and 100 of them held 2 sockets and 1 goroutine
+each in the gateway, uncapped (`MaxConnsPerIP` is 0 by default, CHAOS-112) and
+uncounted (`registerDrainableTunnel`, which owns the `activeConns` increment and
+the drain's force-close handles, is only reached AFTER both handshakes). On the
+strip leg that origin socket is a COMPLETED TLS session, so the cheapest
+possible client also spends Culvert's handshake CPU. **The house already had the
+pattern**: `handleSOCKS5` has armed a 30 s negotiation deadline on accept and
+cleared it at streaming since long before this review series — the
+CONNECT-inspect path never got it, and when the native-ALPN dispatch was added
+the gap was copied rather than noticed. Shipped: one named budget
+(`sslInspectSetupTimeout` = 30 s, the listener's own `ReadTimeout` restored to
+the socket for the window `Hijack` cleared it for), armed on the origin leg at
+the dial and on the client leg at the hijack, cleared on BOTH legs at
+establishment — the clear is the dangerous half, since an armed absolute
+deadline is a WRITE deadline and would abort a healthy tunnel's delivery one
+window later, so a gate serves two requests across two idle windows to pin it.
+Acquisition and arming are now one function so a third dispatch cannot take the
+buffered reader without the deadline. **The window was also silent** — the
+native leg's peek failure returned with no log line, no metric and no row at
+all — and is now recorded through the ADR-0011 cell that already existed and had
+never been written, (`client_hello`, `timeout`), with NO `maybeFailOpenClient`:
+learning an auto-exclusion from a client-side stall would let anything able to
+open a CONNECT and go quiet teach the gateway to stop inspecting the host.
+**Refused, with reasons in the file comments:** no alert (a client leaving
+mid-handshake is not an incident, and a threshold on its normal background rate
+is noise), no operator setting (a security boundary whose budget is three orders
+of magnitude above a real handshake), and no gauge of in-window occupancy — that
+needs the drain's accounting contract and is handed to the round that takes it.
+This round CLOSES `CHAOS-32` (2026-07-07, MED, sized "S", ranked twelfth, never
+implemented), and re-rates it HIGH on two facts that round did not have: the
+native-ALPN leg has since doubled the surface and made the window longer, and
+the per-IP limiter that would have blunted it is off by default.
+
 **2026-11-19 — `CHAOS-124` CLAIMED. Domain: the FIFTH BODY OF SECURITY
 INTELLIGENCE — the ClamAV SIGNATURE DATABASE's freshness plane. CHAOS-123
 closed the operator-configured blocklist feed's freshness gap and handed the
