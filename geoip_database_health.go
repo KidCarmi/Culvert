@@ -50,7 +50,7 @@ func checkGeoDatabaseForRules(rules []PolicyRule) []OperatorContractCheck {
 	action := "Configure a MaxMind GeoLite2-Country database (-geoip-db / the GeoIP setting) and restart, or remove the country condition from these rules. Until then they never match."
 	if msg, _, ok := geoip.LoadError(); ok {
 		reason = "the configured GeoIP database failed to load (" + sanitizeLog(msg) + ")"
-		action = "Fix the database path or replace the corrupt/expired .mmdb file shown under the GeoIP settings, then restart. Until then these rules never match."
+		action = "Put a readable, valid .mmdb file at the path shown under the GeoIP settings. Culvert retries that path automatically (every two minutes at most) and loads it without a restart; a different path still needs the setting changed and a restart. Until it loads these rules never match."
 	}
 	return []OperatorContractCheck{{
 		Code:   "geoip_database_for_rules",

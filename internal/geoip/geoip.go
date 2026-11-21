@@ -29,6 +29,11 @@ var (
 // LoadError and left for the caller to log; it is cleared by a subsequent
 // successful call so a fixed path stops reporting a stale error.
 //
+// The one runtime load that exists is TryDeferredLoad (deferred.go), which
+// completes a load that FAILED at startup. It never reaches the hazard below:
+// it publishes only while no reader is loaded, so it replaces and closes
+// nothing. It is not a reload path, and GEO-1 still gates one.
+//
 // GEO-1 (CHAOS-64). This function used to claim that "subsequent calls replace
 // the open reader atomically". The POINTER swap is atomic; the CLOSE is not
 // safe, and the difference is a process kill rather than an error. geoCache.lookup
@@ -60,11 +65,7 @@ func InitGeoDB(path string) error {
 		geoDBMu.Unlock()
 		return err
 	}
-	epoch := r.Metadata().BuildEpoch
-	if epoch > math.MaxInt64 {
-		epoch = math.MaxInt64 // implausible (year 292e9); clamp for the G115 conversion bound
-	}
-	built := time.Unix(int64(epoch), 0).UTC() // #nosec G115 -- clamped above
+	built := readerBuildTime(r)
 	geoDBMu.Lock()
 	old := geoDB
 	geoDB = r
@@ -78,7 +79,17 @@ func InitGeoDB(path string) error {
 	return nil
 }
 
-// LoadError reports the most recent InitGeoDB failure and when it occurred.
+// readerBuildTime returns the MaxMind build timestamp embedded in r's metadata.
+func readerBuildTime(r *geoip2.Reader) time.Time {
+	epoch := r.Metadata().BuildEpoch
+	if epoch > math.MaxInt64 {
+		epoch = math.MaxInt64 // implausible (year 292e9); clamp for the G115 conversion bound
+	}
+	return time.Unix(int64(epoch), 0).UTC() // #nosec G115 -- clamped above
+}
+
+// LoadError reports the most recent failed load (InitGeoDB, or a
+// TryDeferredLoad attempt) and when it occurred.
 // ok is false when no database was ever configured, or the last attempt (if
 // any) succeeded — i.e. there is nothing for an operator to act on.
 func LoadError() (msg string, at time.Time, ok bool) {
