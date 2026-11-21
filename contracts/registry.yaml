@@ -63,6 +63,7 @@ contracts:
     authority: "Inspection pipeline (inspect_host_pin.go)."
     code:
       - "inspect_host_pin.go"
+      - "internal/hostpin/pin.go"
       - "proxy_tunnel.go"
     configs: []
     transitions:
