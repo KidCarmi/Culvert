@@ -348,8 +348,10 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-015 | `revocation_sync_budget.go` planner → `internal/session/revsync` | **shipped** (merged 2026-11-20, `ff8bc28`) | nightly shift | `main` | #1966 | — | ADR-0049; 4 exported names; see "IM-015" below | — |
 | IM-016 | `scan_svc_admission.go` gate → `internal/secscan/sidecargate` | **shipped** (merged 2026-11-20, `0fe4578`) | nightly shift | `main` | #1975 | — | ADR-0051; 8 exported names; see "IM-016" below | — |
 | IM-017 | `ui_frontend_v2.go` artifact validator → `internal/frontendbundle` | **shipped** (merged 2026-11-20, `631750a`) | nightly shift | `main` | #1972 | — | ADR-0050; 3 exported names; see "IM-017" below | — |
-| IM-019 | `inspect_host_pin.go` predicate → `internal/hostpin` | **implementation under review** | nightly shift | `main` | #1981 | — | ADR-0052; 1 exported name (`Pinned`); root keeps `innerHostPinnedToTunnel` as a binding, so `proxy_tunnel.go` is not edited; see "IM-019" below | review PR |
-| IM-020 | saas-feed canonical record codec (`floorCanonicalBytes`, `floorCRCTable`, `isLowerHex`/`validCRC32Hex` in `saas_feed_floor.go`) → one owner | discovered | — | — | — | — | lead: `floorCanonicalBytes` is called from 6 other root production files, so the floor file is the F3 records' codec owner by accident | read the 6 callers and decide between `internal/urlcatfeed` (as IM-012) and a small record-codec package |
+| IM-019 | `inspect_host_pin.go` predicate → `internal/hostpin` | **shipped** (merged 2026-11-21, `2421870`) | nightly shift | `main` | #1981 | — | ADR-0052; 1 exported name (`Pinned`); root keeps `innerHostPinnedToTunnel` as a binding, so `proxy_tunnel.go` is not edited; see "IM-019" below | — |
+| IM-020 | saas-feed node-local record codec → `internal/urlcatfeed/noderecord` | **shipped** (merged 2026-11-21, `58f4a44`) | nightly shift | `main` | #1985 | — | ADR-0053; 4 exported names; see "IM-020" below | — |
+| IM-021 | `keyedMutex` in `saas_feed_genstore.go` → `internal/keyedmutex` | **shipped** (merged 2026-11-21, `c5674f2`) | nightly shift | `main` | #1988 | — | ADR-0054; 2 exported names; see "IM-021" below | — |
+| IM-022 | directory-fsync rule (`fsyncDir`, `isBenignDirSyncErr`, the copy in `support_durable_write.go`) → `internal/fileutil` | **implementation under review** | nightly shift | `main` | #1989 | — | 2 exported names (`SyncDir`, `DirSyncUnsupported`); see "IM-022" below | review PR |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -637,6 +639,61 @@ conflict textually, and the IM-021 row is added once they merge):
   identically on unmodified main (`decryption_2eb_red_test.go:186`, same
   `key_id` before and after rotation). The selection matched it only through
   the word `Generation`. Still undiagnosed.
+
+### IM-022 directory fsync rule (ORGANIZE, 2026-11-21, main `c5674f2`)
+
+- **Reconciled.** IM-019 (#1981), IM-020 (#1985) and IM-021 (#1988) all
+  merged on 2026-11-21; their rows are updated or added. No program PR was
+  open. Open PRs are #1526 (IM-006), #1987 (geoip) and the appliance set
+  (#1528, #1536, #1548, #1549, #1705); none changes `saas_feed_genstore.go`,
+  `saas_feed_gc.go`, `support_durable_write.go` or `internal/fileutil`.
+- **Finding.** The rule "fsync a directory, treat EINVAL/ENOTSUP/EOPNOTSUPP
+  as a filesystem that cannot do it, report the close error only after a
+  good fsync" was written four times: `fsyncDir` + `isBenignDirSyncErr`
+  (root, generation store and GC), `syncDirTolerant` and
+  `syncParentAfterRename` (`internal/fileutil`), and `syncDirEntry`
+  (`support_durable_write.go`, whose comment already named a single exported
+  `fileutil` primitive as the right end state).
+- **Organized.** `internal/fileutil/syncdir.go` owns the rule:
+  `DirSyncUnsupported(err)` is the errno set and `SyncDir(dir)` is the strict
+  form. `fsyncDir` and `isBenignDirSyncErr` are deleted from root; the two
+  production seams (`osGenFS`, `osGCFS`) name `fileutil.SyncDir`. `AtomicWrite`
+  and `syncDirEntry` keep their own structure and call the predicate.
+- **What was deliberately not merged.** Whether an unopenable directory is a
+  failure stays each caller's decision: the generation store and GC fail
+  (strict), `AtomicWrite`/`WriteFileExclusive` skip it, and `syncDirEntry`
+  skips it, ignores the read-only handle's close result and logs. None of
+  those outcomes changed.
+- **Evidence.** Both former decision bodies are frozen in
+  `syncdir_test.go` and compared, by returned error identity, with the shared
+  rule over 196 (sync, close) outcome pairs; open-failure behavior is pinned
+  on a real missing path for both forms; a file-scoped boundary test with
+  negative controls keeps `syncdir.go` free of package state and of imports
+  beyond `errors`, `os`, `syscall`, and fails if another `fileutil` production
+  file spells the errno set again. Six mutation checks; one (dropping
+  `ENOTSUP`) is an equivalent mutant on Linux, where it equals `EOPNOTSUPP`.
+- **Size.** 4 production files edited (−68/+10 lines), 1 new production
+  file, 1 new test file. No existing test moved or edited; test inventory
+  13,831 → 13,838 (7 new, none removed). No ADR: no new package and no
+  ownership decision beyond the one `support_durable_write.go` recorded.
+- **Effect on IM-003.** Two more names leave the genstore file's outward
+  surface (`fsyncDir`; `isBenignDirSyncErr` was file-local). IM-002/IM-003
+  stay blocked on the store's own surface.
+- **Left alone, with reasons.** `internal/mcp/events/spool.syncDir` returns
+  the close error even after an unsupported fsync, so it is not the same
+  rule; `internal/storeguard.syncDir` has no tolerance at all (deliberate for
+  the fault marker); `cmd/culvert-maint/internal/journal` is a separate
+  binary's owner. The spool difference looks accidental rather than decided
+  and is worth one question to its owner, not a silent change.
+- **Next.** The IM-018 prerequisite, in main and needing no package: the CDR
+  pool supplies its breaker's clock at construction and resolves the
+  fallback deadline before it builds a breaker. First step: read
+  `newCDRBreaker`'s callers and the three test files that call `b.setNowFn`
+  on a pool-built breaker (`cdr_breaker_nonrpc_probe_test.go`,
+  `cdr_breaker_wedge_chaos_test.go`, `cdr_rpc_reservation_wall_test.go`).
+  Independent and smaller: one strict decoder for the three F3 records
+  (differential test over `TestFloor_StrictDecode_Rejections`). Then IM-014
+  mapping.
 
 ### IM-002 / IM-007 mapping (MAP, 2026-11-09, main `09235d1`)
 

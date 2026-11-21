@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 )
 
 // ── Durable-write failure observability (CHAOS-45) ───────────────────────────
@@ -234,10 +233,7 @@ func syncParentAfterRename(path, dir string, res WriteResult) (WriteResult, erro
 	}
 	syncErr := syncDir(d)
 	closeErr := d.Close()
-	if syncErr != nil &&
-		!errors.Is(syncErr, syscall.EINVAL) &&
-		!errors.Is(syncErr, syscall.ENOTSUP) &&
-		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
+	if syncErr != nil && !DirSyncUnsupported(syncErr) {
 		// Post-rename failure: the target already carries the new content —
 		// mark it so compensating-rollback callers can tell (see
 		// ErrReplacedNotSynced).
@@ -357,26 +353,3 @@ func exclusiveFail(path, stage string, cause error) error {
 // before reporting success. A package var so a test can observe that it
 // runs and that its failure fails the write closed.
 var exclusiveSyncDir = syncDirTolerant
-
-// syncDirTolerant fsyncs dir. Opening a directory for sync is not portable,
-// so an open failure is best-effort (same as AtomicWrite), and a filesystem
-// that does not support directory fsync (EINVAL/ENOTSUP/EOPNOTSUPP) is
-// treated as success.
-func syncDirTolerant(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return nil
-	}
-	syncErr := d.Sync()
-	closeErr := d.Close()
-	if syncErr != nil &&
-		!errors.Is(syncErr, syscall.EINVAL) &&
-		!errors.Is(syncErr, syscall.ENOTSUP) &&
-		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
-		return syncErr
-	}
-	if syncErr == nil && closeErr != nil {
-		return closeErr
-	}
-	return nil
-}
