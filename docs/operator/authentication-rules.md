@@ -218,8 +218,6 @@ the open default), `culvert_auth_credential_required_total`,
   to the destinations those clients need.
 - Give every `Exempt` rule a destination and an `expiresAt`. Avoid
   `broadExemption` and sources wider than `/24`.
-- Use `CredentialRequired` for service clients and `SSORequired` with
-  `protocol: "http"` for browsers.
 - After each change, run the Policy Tester for one client that should match and
   one that should not, and clear the Diagnostics rows in §6.
 
@@ -231,7 +229,6 @@ the open default), `culvert_auth_credential_required_total`,
 | An exempt device gets a block page | The exemption worked. Stage 2 denied the request; add or fix the access rule. |
 | `403 Forbidden: destination requires interactive SSO` | An `SSORequired` rule matched a non-browser or `CONNECT` request, or no eligible provider remains. |
 | `407` that no credential satisfies | `auth_cr_no_credential_provider`: add a local account, an LDAP or OIDC provider, or remove the rule. |
-| A write returns `409` | The rulebase changed since `ifVersion` was read. Reload and retry. |
 | A Data Plane node behaves differently for unmatched traffic | The default authentication behavior is per node (§5). |
 
 ## References
@@ -245,5 +242,4 @@ the open default), `culvert_auth_credential_required_total`,
 - Design records: `roadmap/AUTHENTICATION-POLICY-SPEC.md`,
   `roadmap/AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md`.
 - Related: [`authentication-kill-switch.md`](authentication-kill-switch.md),
-  [`identity-backend-availability.md`](identity-backend-availability.md),
-  [`identity-provider-revocation.md`](identity-provider-revocation.md).
+  [`identity-backend-availability.md`](identity-backend-availability.md).
