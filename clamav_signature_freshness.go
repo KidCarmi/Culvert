@@ -294,14 +294,19 @@ func clamavSigStateLocked() clamavSigSnapshot {
 // engine string and no raw reply: Dispatch dedups on event+Detail, and the raw
 // reply changes on every engine upgrade, so putting it in the Detail would
 // weaken the dedup window for no operator benefit.
-var fireClamAVSignatureStaleAlert = func(detail string) {
+//
+// It reports whether the alert was DISPATCHED, and the caller consumes the
+// once-per-episode latch only on a true return
+// (SEC-CLAMSIG-STALE-LATCH-1, see noteClamAVSignatureObservation).
+var fireClamAVSignatureStaleAlert = func(detail string) bool {
 	if !alertStore().HasSubscriber("clamav_signature_stale") {
-		return
+		return false
 	}
 	go fireAlert("clamav_signature_stale", AlertPayload{
 		Detail: detail,
 		Source: "clamav",
 	})
+	return true
 }
 
 // noteClamAVSignatureObservation records one VERSION observation and evaluates
@@ -329,7 +334,6 @@ func noteClamAVSignatureObservation(v clamav.Version, ok bool) {
 	snap := clamavSigStateLocked()
 
 	var (
-		fireDetail string
 		shouldLog  bool
 		recovered  bool
 		suppressed int64
@@ -337,9 +341,36 @@ func noteClamAVSignatureObservation(v clamav.Version, ok bool) {
 	switch {
 	case snap.Stale:
 		if !clamavSigHealth.alerted {
-			clamavSigHealth.alerted = true
-			fireDetail = fmt.Sprintf("ClamAV signature database is %s old (built %s); freshclam is not updating it",
+			// SEC-CLAMSIG-STALE-LATCH-1 (the sibling of
+			// SEC-BLFEED-STALE-LATCH-1 and SEC-TFEED-STALE-LATCH-1, the rule
+			// latchOncePerEpisodeOnDelivery carries for the two feed planes):
+			// the episode is consumed only by a DISPATCHED alert.
+			//
+			// Latching first and firing afterwards burned the episode whenever
+			// nothing subscribed — the DEFAULT posture, no webhooks configured
+			// — and this latch clears only on an OBSERVED newer database,
+			// never on elapsed time. Worse, the watcher's immediate poll
+			// (startScanSignatureWatch) runs from initBackgroundServices,
+			// BEFORE initPersistentAdminState loads the webhook store, so even
+			// a node with the webhook configured on disk had no subscriber yet
+			// at its first observation. A node that booted with month-old
+			// definitions therefore spent its one page on nobody and never
+			// paged again, while clamd stayed reachable and went on returning
+			// CLEAN for malware published since the database was built.
+			//
+			// Not dispatching leaves the episode OPEN, so the next poll (five
+			// minutes) re-attempts: that is what makes this plane need no
+			// startup-alert queue and no episode generation. The verdict
+			// (snap) is computed in this same critical section rather than
+			// outside it, which is the window the feed planes' generation
+			// counter exists to close; the sink is safe to call under the lock
+			// for the same reason their delivered() is — it only probes the
+			// lock-free subscription index and hands delivery to a goroutine.
+			detail := fmt.Sprintf("ClamAV signature database is %s old (built %s); freshclam is not updating it",
 				clamavSigRoundAge(snap.Age), snap.DBTime.UTC().Format(time.RFC3339))
+			if fireClamAVSignatureStaleAlert(detail) {
+				clamavSigHealth.alerted = true
+			}
 		}
 		now := clamavSigNow()
 		if clamavSigHealth.logAt.IsZero() || now.Sub(clamavSigHealth.logAt) >= clamavSigLogInterval {
@@ -368,9 +399,6 @@ func noteClamAVSignatureObservation(v clamav.Version, ok bool) {
 	age := snap.Age
 	clamavSigHealth.mu.Unlock()
 
-	if fireDetail != "" {
-		fireClamAVSignatureStaleAlert(fireDetail)
-	}
 	if shouldLog && logger != nil {
 		logger.Printf("SecurityScan: ClamAV signature database is %s old — the daemon is healthy and scanning, but malware published since it was built is NOT being detected; check freshclam in the ClamAV container",
 			clamavSigRoundAge(age))

@@ -44,13 +44,36 @@ func versionWithDate(dbTime time.Time) clamav.Version {
 }
 
 // captureSigAlerts redirects the alert seam and returns the collected details.
+// The stand-in reports DISPATCHED, which is the subscribed posture: the
+// once-per-episode latch is consumed only by a delivered alert
+// (SEC-CLAMSIG-STALE-LATCH-1), so a stand-in that reported false would leave
+// every episode open and make the fire-once gates below vacuous.
 func captureSigAlerts(t *testing.T) *[]string {
 	t.Helper()
 	var fired []string
 	prev := fireClamAVSignatureStaleAlert
-	fireClamAVSignatureStaleAlert = func(detail string) { fired = append(fired, detail) }
+	fireClamAVSignatureStaleAlert = func(detail string) bool {
+		fired = append(fired, detail)
+		return true
+	}
 	t.Cleanup(func() { fireClamAVSignatureStaleAlert = prev })
 	return &fired
+}
+
+// captureUndeliveredSigAlerts is captureSigAlerts for the UNSUBSCRIBED
+// posture: the sink is reached but dispatches nothing, exactly as the real
+// HasSubscriber-gated sink does with no webhook configured (and as it does at
+// boot, before the webhook store has loaded).
+func captureUndeliveredSigAlerts(t *testing.T) *int {
+	t.Helper()
+	attempts := 0
+	prev := fireClamAVSignatureStaleAlert
+	fireClamAVSignatureStaleAlert = func(string) bool {
+		attempts++
+		return false
+	}
+	t.Cleanup(func() { fireClamAVSignatureStaleAlert = prev })
+	return &attempts
 }
 
 // ── 1. the shape nothing could see ───────────────────────────────────────────
@@ -336,6 +359,76 @@ func TestFutureDatedReadingDoesNotClearAnEpisode(t *testing.T) {
 	noteClamAVSignatureObservation(versionWithDate(now.Add(-10*24*time.Hour)), true)
 	if len(*fired) != 1 {
 		t.Fatalf("a future-dated reading cleared the episode and the same unresolved fault paged again (fired %d): %q", len(*fired), *fired)
+	}
+}
+
+// TestStaleEpisodeSurvivesAnUndeliveredPage is SEC-CLAMSIG-STALE-LATCH-1's
+// gate. The default posture is NO webhook configured, and this plane's latch
+// clears only on an OBSERVED newer database — never on elapsed time. So if the
+// latch were consumed by an alert that reached nobody, the operator who
+// subscribes afterwards would never be paged for as long as freshclam stayed
+// broken, which is precisely the condition the alert exists to report.
+func TestStaleEpisodeSurvivesAnUndeliveredPage(t *testing.T) {
+	now := time.Date(2026, time.November, 19, 12, 0, 0, 0, time.UTC)
+	clamavSigTestClock(t, now)
+
+	stale := versionWithDate(now.Add(-10 * 24 * time.Hour))
+
+	// Polls while nothing subscribes: the sink is reached every time and
+	// dispatches nothing, so no episode may be consumed.
+	attempts := captureUndeliveredSigAlerts(t)
+	for range 3 {
+		noteClamAVSignatureObservation(stale, true)
+	}
+	if *attempts != 3 {
+		t.Fatalf("sink reached %d times across 3 unsubscribed polls, want 3: a consumed latch stopped re-attempting", *attempts)
+	}
+
+	// The operator now adds the webhook. The next poll must page.
+	fired := captureSigAlerts(t)
+	noteClamAVSignatureObservation(stale, true)
+	if len(*fired) != 1 {
+		t.Fatalf("after subscribing, the still-stale database paged %d times, want 1: the episode was burned on an undelivered alert", len(*fired))
+	}
+	if d := (*fired)[0]; !strings.Contains(d, "10d") {
+		t.Fatalf("alert Detail %q does not carry the age an operator needs", d)
+	}
+
+	// And it is still once per episode from there.
+	noteClamAVSignatureObservation(stale, true)
+	if len(*fired) != 1 {
+		t.Fatalf("delivered alert did not consume the episode (fired %d): %q", len(*fired), *fired)
+	}
+}
+
+// TestStaleAlertAtBootPagesOnceTheWebhookStoreHasLoaded pins the ORDERING that
+// made the latch-before-dispatch bug certain rather than merely likely.
+// startScanSignatureWatch's immediate poll runs from initBackgroundServices,
+// before initPersistentAdminState loads the webhook store, so the first
+// observation of a node that booted with stale definitions always sees an
+// empty subscription index — even when the webhook is configured on disk.
+// Delivery at the next poll is what makes the page survive that.
+func TestStaleAlertAtBootPagesOnceTheWebhookStoreHasLoaded(t *testing.T) {
+	now := time.Date(2026, time.November, 19, 12, 0, 0, 0, time.UTC)
+	clamavSigTestClock(t, now)
+
+	stale := versionWithDate(now.Add(-45 * 24 * time.Hour))
+
+	// The watcher's immediate poll, before the webhook store exists.
+	bootAttempts := captureUndeliveredSigAlerts(t)
+	noteClamAVSignatureObservation(stale, true)
+	if *bootAttempts != 1 {
+		t.Fatalf("boot poll reached the sink %d times, want 1", *bootAttempts)
+	}
+	if snap := clamavSigState(); !snap.Stale {
+		t.Fatalf("boot observation did not record staleness: %+v", snap)
+	}
+
+	// loadPersistentAdminState has now run and the subscription is live.
+	fired := captureSigAlerts(t)
+	noteClamAVSignatureObservation(stale, true)
+	if len(*fired) != 1 {
+		t.Fatalf("a node that booted with 45-day-old definitions paged %d times after the webhook store loaded, want 1", len(*fired))
 	}
 }
 

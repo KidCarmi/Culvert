@@ -333,8 +333,8 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 |---|---|---|---|---|---|---|---|---|
 | IM-000 | Discovery: policy mapping, #1526 reconciliation, this program section | shipped (merged 2026-10-30, `5eef0c25`) | nightly shift | `main` | #1760 | — | this document | — |
 | IM-001 | `inspect_h2_alpn.go` → `internal/alpnpeek` (pilot 1 of ≤3) | **shipped** (merged 2026-10-31, `86c095a49`) | nightly shift | `main` | #1766 | IM-000 shipped | **packet** below; ADR-0042; moved `alpn.go`, `doc.go`, `boundary_test.go`, `alpn_test.go`; root inventory 8072 → 8070; assessment below | owner: accept continuation to IM-002 (map) or stop the pilot |
-| IM-002 | `saas_feed_floor.go` → `internal/feedfloor` | **mapped 2026-11-09: not ready**; helper-owner question narrowed 2026-11-19 (IM-012) | — | — | — | IM-012 merged; owner for `validGenerationID`/`validCRC32Hex`; map with IM-003 as one boundary | **map** (906 ln, 1077-ln test file, 6 root production consumers, more than 8 exported names needed) | after IM-012: decide whether `validGenerationID` (node-local path-segment identity, consumers `saas_feed_activation`/`_gc`/`_reverify`) moves with the floor+genstore engine; then size the IM-002+IM-003 alias surface |
-| IM-003 | `saas_feed_genstore.go` → same package | proposed | — | — | — | IM-002 | lead (539 ln; 2 deps, both in IM-002) | map after IM-002 |
+| IM-002 | `saas_feed_floor.go` → `internal/feedfloor` | **blocked 2026-11-20: surface measured, 23 names** (see "IM-019" below) | — | — | — | IM-020 (shared record codec owner) | **map** (908 ln, 1077-ln test file; 23 top-level names read by 10 other root production files, before struct fields and methods) | IM-020 first; then re-count what is left for the floor |
+| IM-003 | `saas_feed_genstore.go` → same package | **blocked 2026-11-20: 16 names** (see "IM-019" below) | — | — | — | IM-002; `keyedMutex` owner (`cdr_lineage.go` also uses it) | **map** (539 ln; 16 top-level names read by 4 other root production files) | after IM-020 |
 | IM-004 | `upstream_backup_strip.go` → `internal/upstream/backupstrip` (pilot 2 of ≤3) | **shipped** (merged 2026-11-09, #1842) | nightly shift | `main` | #1842 | IM-001 shipped | **packet** in ADR-0043; 2 exported names (`Strip`, `CountRequiringReplacement`); callers `backup.go`, `restore.go`; 15 engine-only tests moved with names unchanged, 5 neighbouring tests stay root | review PR; owner decides pilot continuation to a third code PR |
 | IM-005 | `policy.go` leaf matchers (follow-up (a)) | **blocked** | — | — | — | IM-006 + accepted boundary | mapping above | none until IM-006 ships |
 | IM-006 | Policy evaluation lookup owners (ADR-0040 step 2) | blocked on #1526 disposition | owner decides | — | #1526 (design) | owner | ADR-0040, `policy-core-feasibility.md`, TSV | owner: merge/rebase/close #1526; then one ownership PR |
@@ -346,8 +346,10 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-012 | saas-feed wire field grammar: root `canonicalUTCSecond`/`validSHA256Hex` → bindings to `internal/urlcatfeed` | **shipped** (merged 2026-11-20, `949d650`) | nightly shift | `main` | #1955 | — | duplicate-rule removal: `urlcatfeed.parseCanonicalRFC3339`/`isSHA256Hex` were byte-equivalent private copies of the root validators; now exported (`ParseCanonicalRFC3339`, `IsSHA256Hex`) and the root names delegate, so 0 root callers changed; differential test with frozen root oracles + 2 mutation negative controls; see "IM-012" below | — |
 | IM-013 | `cluster_ca_validity.go` policy → `internal/clusterca` | **shipped** (merged 2026-11-20, `398a889`) | nightly shift | `main` | #1965 | — | ADR-0048; see "IM-013" below | — |
 | IM-015 | `revocation_sync_budget.go` planner → `internal/session/revsync` | **shipped** (merged 2026-11-20, `ff8bc28`) | nightly shift | `main` | #1966 | — | ADR-0049; 4 exported names; see "IM-015" below | — |
-| IM-016 | `scan_svc_admission.go` gate → `internal/secscan/sidecargate` | **implementation under review** | nightly shift | `main` | #1975 | — | ADR-0051; 8 exported names; see "IM-016" below | review PR |
+| IM-016 | `scan_svc_admission.go` gate → `internal/secscan/sidecargate` | **shipped** (merged 2026-11-20, `0fe4578`) | nightly shift | `main` | #1975 | — | ADR-0051; 8 exported names; see "IM-016" below | — |
 | IM-017 | `ui_frontend_v2.go` artifact validator → `internal/frontendbundle` | **shipped** (merged 2026-11-20, `631750a`) | nightly shift | `main` | #1972 | — | ADR-0050; 3 exported names; see "IM-017" below | — |
+| IM-019 | `inspect_host_pin.go` predicate → `internal/hostpin` | **implementation under review** | nightly shift | `main` | #1981 | — | ADR-0052; 1 exported name (`Pinned`); root keeps `innerHostPinnedToTunnel` as a binding, so `proxy_tunnel.go` is not edited; see "IM-019" below | review PR |
+| IM-020 | saas-feed canonical record codec (`floorCanonicalBytes`, `floorCRCTable`, `isLowerHex`/`validCRC32Hex` in `saas_feed_floor.go`) → one owner | discovered | — | — | — | — | lead: `floorCanonicalBytes` is called from 6 other root production files, so the floor file is the F3 records' codec owner by accident | read the 6 callers and decide between `internal/urlcatfeed` (as IM-012) and a small record-codec package |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -715,6 +717,73 @@ conflict textually; the row is added once they merge):
   record the API pressure and decide between two packages (floor record
   codec, generation store) and one. After that: the IM-018 prerequisite
   (pool-supplied breaker clock) and IM-014 mapping.
+
+### IM-019 inner-host pin predicate (EXTRACT, 2026-11-20, main `0fe4578`)
+
+- **Reconciled.** IM-016 (#1975) merged on 2026-11-20; its row is updated. No
+  program PR was open. Open PRs are #1526 (IM-006) and the appliance set
+  (#1528, #1536, #1548, #1549, #1705); none changes `inspect_host_pin.go`,
+  its test file or `internal/hostutil`. #1528 and #1705 edit
+  `proxy_tunnel.go`, which this change does not touch.
+- **IM-002+IM-003 measured and blocked.** The first step recorded under
+  IM-016 was done: other root production files read 23 top-level names from
+  `saas_feed_floor.go` (among them `floorRecord`, `floorStore`,
+  `floorRecovery`, `floorWatermark`, `floorFS`, `floorHealth` and three of
+  its values, `floorReadStatus` and three of its values, `selectFloor`,
+  `readBothFloorRecords`, `floorSchemaVersion`) and 16 from
+  `saas_feed_genstore.go` (the candidate, meta and store types, seven file
+  and schema constants, `sha256Hex`, `fsyncDir`, `newKeyedMutex`). That is 39
+  names before any struct field or method, against a guideline of 8, and
+  root test files also reach unexported floor names (`floorFileA`/`B` in
+  five). Two packages do not help: the split leaves the floor alone at 23.
+  The real boundary is the F3 node-local store as a whole (`saas_feed_floor`,
+  `_genstore`, `_activation`, `_authority`, `_gc`, `_reverify`, `_recover`,
+  `_activate`: about 3,600 lines in 8 files), which is over the program's
+  size bound for one change. Two smaller owners fall out of the count:
+  IM-020 (the canonical record codec, which six files outside the floor
+  call) and `keyedMutex`, a generic per-key lock declared in the genstore
+  file and also used by `cdr_lineage.go`.
+- **Why this file instead.** The parse-level walk of the 466 root production
+  files showed `inspect_host_pin.go` reading four root names, all of them in
+  its gate half (`logger`, `sanitizeLog`, `statBlocked`, `blockResponder`).
+  The predicate half read none.
+- **Moved:** `innerHostPinnedToTunnel`, `innerAuthorityAsSent` and
+  `innerAuthorityBracketsValid` with their comments, as `hostpin.Pinned` and
+  two unexported helpers. **Stays main:** the refusal counter and its
+  `/metrics` series, `blockInnerHostMismatch` (log line and 403), the scope
+  statement, and the call in `runInspectExchange`. Root file 368 → 136
+  lines.
+- **Tests.** 3 predicate tests moved with names unchanged; 8
+  `TestInnerHostPin_*` tests stay root, unedited, including the SWG-002
+  contract test. New in the package: a 1,386-pair verdict table whose digest
+  was captured from main before the move, a fuzz target over the wire
+  oracle, a concurrent-call test and the boundary pair.
+- **Product contract.** SWG-002 lists `inspect_host_pin.go`; the registry
+  gains `internal/hostpin/pin.go` as a further code path so the contract
+  follows the predicate. No entry is reworded and no test is dropped.
+- **ADR-0002.** No conflict: the request path stays in main and the file is
+  not on its list.
+- **Next.** IM-020: read the six callers of `floorCanonicalBytes`
+  (`saas_feed_activation.go`, `_authority.go`, `_client.go`, `_gc.go`,
+  `_genstore.go`, `_reverify.go`) and the two of `floorCRCTable`, and decide
+  whether the codec is feed-protocol grammar (then `internal/urlcatfeed`,
+  as IM-012) or a node-local record format (then its own small package).
+  It has no prerequisite and no open-PR overlap. After it: the IM-018
+  prerequisite (pool-supplied breaker clock), then IM-014 mapping.
+- **Discovered, not fixed here (pre-existing on main `0fe4578`).** Under CPU
+  load, `go test -race -count=2 -shuffle=on -run
+  'InnerHostPin|Tunnel|Inspect|H2|PlaintextFallback' .` failed 2 of 8 runs on
+  unmodified main (seeds 1795216508587846871 and 1795216666073957688) and 0
+  of 8 on this change. One race: `setTunnelIdleTimeout`
+  (`proxy_tunnel_idle_test.go:24`) writes the package variable
+  `tunnelIdleTimeout` while a relay goroutine left running by an earlier test
+  reads it (`idleCopyCounted`, `proxy_tunnel.go:309`); `swapMonoNanos`
+  (`monotime_chaos_test.go:42`) has the same shape for `monoNanos`, read at
+  `proxy_tunnel.go:270`. It surfaced in
+  `TestChaos83_TunnelReaperFiresOnMonotonicElapsed` and
+  `TestTunnelIdle_ActiveDirectionKeepsSilentDirectionAlive`. Test isolation
+  only. The fix belongs in those tests: join the relay goroutines before the
+  cleanup restores the variable.
 
 ### IM-009 extraction and next selection (EXTRACT, 2026-11-18, main `348a2cf`)
 
