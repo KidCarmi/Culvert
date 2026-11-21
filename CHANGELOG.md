@@ -9,6 +9,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A stale-ClamAV-signature page is no longer burned on an empty subscriber
+  list.** The `clamav_signature_stale` alert (CHAOS-124) latched its
+  once-per-episode flag before dispatching, and that latch clears only on an
+  OBSERVED newer signature database, never on elapsed time. The signature
+  watcher's immediate poll runs from `initBackgroundServices`, before
+  `initPersistentAdminState` loads the webhook store, so a node that booted
+  with month-old definitions always fired into an empty subscription index —
+  even with the webhook configured on disk — consumed its one page, and never
+  paged again for as long as freshclam stayed broken. `clamd` stays reachable
+  and keeps returning CLEAN throughout, so no other surface moves and malware
+  published since the database was built is reported to users as clean. The
+  sink now reports whether it DISPATCHED and the episode is consumed only on
+  delivery, so the next five-minute poll re-attempts and an operator who
+  subscribes afterwards is paged. Same rule as the blocklist- and threat-feed
+  planes' `latchOncePerEpisodeOnDelivery`; this plane needs no episode
+  generation because its verdict is computed in the same critical section as
+  the decision (`TestStaleEpisodeSurvivesAnUndeliveredPage`,
+  `TestStaleAlertAtBootPagesOnceTheWebhookStoreHasLoaded`).
+
 - **The alert-webhook store is capped at 100 webhooks (`alerts.MaxWebhooks`,
   CWE-770).** `POST /api/config/import` accepted an unbounded `alertWebhooks`
   list, and each webhook's `Add` rewrites and fsyncs the whole webhook file, so
@@ -407,6 +426,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Diagnostics now warns when SSL inspection does not verify origin
+  certificates (Product Experience).** On an inspected tunnel the client sees
+  only the certificate Culvert forges, so Culvert's check of the origin
+  certificate is the only one made. A rule can turn it off inline
+  (`tlsSkipVerify`) or through a decryption profile whose certificate
+  verification is `skip`; users keep a valid padlock and the only trace was a
+  per-connection log line. The rule list badges the inline toggle only, so a
+  rule that skips through its profile looked verified. A new report-only
+  `ssl_inspect_upstream_verify` WARN row counts enabled SSL-inspection rules
+  whose effective verification is off, says how many skip through a profile,
+  and points at the rule badge and the Decryption Profiles list. It uses the
+  resolver the tunnel path uses. No row when every enabled inspect rule
+  verifies; inspection, verification and policy evaluation are unchanged
+  (`TestInspectUpstreamVerifyRows`).
+
 - **A remote blocklist feed that has stopped being refreshed is now visible and
   pages (CHAOS-123).** Operator-configured feeds (Policy → Blocklist → Feeds)
   are a deny control whose imports are merge-only and persisted, so
@@ -520,6 +554,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   touch a lock owned by another plane.
 
 ### Fixed
+
+- **The maintenance-agent installer no longer aborts on a double-quoted
+  `image_allowlist`.** `extract_toml_string` in
+  `packaging/culvert-maint/install.sh` copied a TOML basic (`"..."`) string's
+  bytes verbatim, so `image_allowlist = "^ghcr\\.io/..."` (valid TOML that the
+  agent decodes to `^ghcr\.io/...`) reached the installer's cross-check with
+  both backslashes and failed it: the install died with "proxy_repo ... is not
+  matched by image_allowlist" for a config the agent itself accepts. Basic
+  strings now end at the first unescaped quote and decode `\\` and `\"`;
+  literal (`'...'`) strings and backslash-free values read exactly as before
+  (`TestCulvertMaintInstall_ExtractTomlString_BasicStringEscapes`).
 
 - **Enabling CDR at runtime now starts the CDR health poller, without a
   restart.** Only `loadCDR` started the 15-second poller, and only when CDR
@@ -823,6 +868,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The Control Plane's centralized audit ring no longer churns the heap on
+  every Data Plane push (`PERF-CLUSTERAUDIT-1`).** `clusterAuditLog`, which every
+  Data Plane's `PushAuditEvents` RPC funnels through under one mutex, was a
+  growing slice re-sliced down to its 5000-entry window rather than a ring:
+  each trim advanced the slice start by one entry, so append periodically had to
+  reallocate and memmove the entire 760 kB live window with the mutex held.
+  It is now a fixed-capacity circular buffer, allocated once on the first push.
+  Measured on a 4-core Xeon @2.10GHz at the production size: a single-event
+  push went from 562-719 ns and 655 B/op to 33-41 ns and 0 B/op, a saturated
+  1000-event push from 309-328 us and 676 kB/op to 15.9-19.1 us and 0 B/op, and
+  the contended fleet shape (concurrent pushes plus admin-UI reads) from
+  13.8-15.9 us to 1.80-1.90 us per op. Resident memory for the saturated window
+  fell from 999 kB to 762 kB. The window the admin UI reads is unchanged: a
+  differential test against the frozen pre-change implementation checks
+  `Count()` and every `Recent(n)` width across randomized push sequences. A
+  negative ring size now disables the log instead of panicking
+  (`TestClusterAuditLog_MatchesLegacy`, `TestClusterAuditLog_BufferNeverGrows`,
+  `TestBenchGate_ClusterAuditAppendIsAllocationFree`,
+  `TestBenchGate_ClusterAuditAppendBeatsLegacy`).
 - **A SOCKS5 client that hangs up during the connect phase now releases its
   slot at once (`PERF-SOCKS5-HANGUP-1`).** The SOCKS5 pre-flight SSRF guard and
   the upstream dial ran under `context.Background()`, so a client that closed
