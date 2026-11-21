@@ -34,10 +34,9 @@ behavior.
 
 ## Checks performed
 
-- Every field, status code, audit action, Diagnostics code, log line, request-log status
-  and metric name in the new page was read from the files listed above at this revision.
-- The no-backend statements were checked against `TestS3_NoBackend_DefaultInert_ExemptScopedFires`
-  and the kill-switch page §3; the two pages agree.
+- Every field, status code, audit action, Diagnostics code, log line and metric name in the
+  new page was read from the files above at this revision. The no-backend statements agree
+  with `TestS3_NoBackend_DefaultInert_ExemptScopedFires` and the kill-switch page §3.
 - `python3 docs/agent-context/check.py` passes.
 
 ## Not assessed / documentation debt
@@ -46,11 +45,9 @@ behavior.
   requests "would be challenged (407) indefinitely". With the `Default` setting and no
   backend at all, Stage 1 is skipped and they are not challenged. This is product text, not
   documentation, and was left for the owner.
-- **Low, new:** `ui_routes_meta.go` lists `POST /api/authpolicy/killswitch`, which
-  `apiAuthPolicyKillSwitch` answers with `405`. Not confirmed as a defect; not documented.
+- **Low, new:** `ui_routes_meta.go` lists `POST /api/authpolicy/killswitch`; the handler
+  answers `405`. Not confirmed as a defect.
 - Not verified, so not documented: how `priority` is assigned when a create omits it, and
   whether `destCountry` narrows an authentication rule.
-- Carried: `CULVERT_MCP_LIVE_CREDENTIAL_KEK`; no single environment-variable reference; no
-  catalog of Diagnostics row codes or subscribable alert events; GAP-PKI-05 wording.
-- Hand-written admin API route documentation, GUI screenshots and the enterprise guides were
-  not re-audited in this pass.
+- Carried: `CULVERT_MCP_LIVE_CREDENTIAL_KEK`; no environment-variable reference; no catalog
+  of Diagnostics codes or alert events; GAP-PKI-05 wording. Enterprise guides not re-audited.
