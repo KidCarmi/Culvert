@@ -833,6 +833,73 @@ conflict textually; the row is added once they merge):
   codec, generation store) and one. After that: the IM-018 prerequisite
   (pool-supplied breaker clock) and IM-014 mapping.
 
+### IM-026 listener fault reason rules (ORGANIZE, 2026-11-21, main `ef9431189`)
+
+Task record (open #1992 edits the task table and appends at the end of this
+file, and open #1993 inserts before the IM-023 section, so the IM-026 row is
+added once they merge; this section sits at a third anchor neither touches):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-026: the errno classes and the timeout rule repeated in `classifyAdminUIListenError`, `classifySOCKS5BindError`, `classifyScanSvcBindError` and `classifyCPGRPCBindError` → `internal/listenfault` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR changes `admin_ui_health.go`, `socks5_health.go`, `scan_svc_listener.go` or `cp_grpc_health.go`; the appliance branches edit `socks5_bind.go` and `admin_ui_listener_chaos_test.go`, which this change does not touch) |
+| Evidence | ADR-0058; 3 exported names (`Reason`, `ErrnoReason`, `TimedOut`); the four root functions stay as bindings, so no call site and no existing test is edited; a 2,597-error verdict table over all four classifiers whose digest and per-listener class counts were captured from main before the move; a 20,492-error differential test against a frozen copy of the pre-move switch; 8 mutation checks, each failing a test |
+| Risks | the class is the alert dedup key and a viewer-role diagnostics value. Every verdict is pinned per listener, including the two listeners whose tag order differs |
+| Next action | review PR |
+
+- **Reconciled.** #1992 (IM-024): every non-skipped check passed, no review
+  thread. #1993 (IM-025): checks were still running when this run started,
+  none failed, no review thread. Nothing to fix in either. IM-005/IM-006 stay
+  blocked on #1526.
+- **Why this.** A walk of the 468 root production files for declarations
+  that read no name from another root file ranked `cp_grpc_health.go`,
+  `scan_svc_listener.go`, `socks5_health.go` and `admin_ui_health.go` second
+  to fifth. Their self-contained parts are four copies of one classifier.
+  The scan-sidecar copy's own comment recorded the convergence as "the open
+  half". This is duplicate-rule removal (the IM-012 and IM-022 shape), not a
+  new engine.
+- **Moved:** which errno is which class, and the rule that `network_error`
+  needs `Timeout()` to be true. **Stays main:** the four classifier
+  functions, each listener's stage tags and the order it tests them in, the
+  health records, supervisors, alerts, log lines and remedy texts.
+- **Size.** 4 root production files edited (+46/−103 lines), 2 new
+  production files (91 lines, 34 of them the package comment). Root test
+  inventory 8,601 → 8,602 (the verdict table); package 10 tests.
+- **The Control Plane table keeps its rows.** `TestChaos71_CPGRPCReasonTable`
+  walks `cpGRPCReasonRules` and requires a case per row, so the table was
+  not collapsed into one call; its four errno rows ask
+  `listenfault.ErrnoReason` for the class.
+- **ADR-0002.** No conflict: `*_health.go` probe adapters stay in main, and
+  what moved was not a probe.
+- **Program rule.** This is a third open program PR beside #1992 and #1993.
+  It shares no source file with either; all three edit this document at
+  different anchors.
+- **Found, not changed (pre-existing on main `ef9431189`).** The admin UI
+  classifier tests the errno before its certificate tag, so an unreadable
+  `-tls-key` (`EACCES` under `errAdminUITLSMaterial`) is reported as
+  `permission_denied`, whose runbook remedy is `CAP_NET_BIND_SERVICE`; the
+  runbook files that fault under `tls_certificate`. The Control Plane
+  classifier had the same order and was corrected in the review of #1556.
+  The fix is to test the tag first in `classifyAdminUIListenError`; it
+  changes a reported class, so it is the owner's to ask for. The verdict
+  table's admin UI counts (`tls_certificate` 509 against the Control Plane's
+  522) are that difference.
+- **Next.** IM-027, the retry-sleep rules the same four supervisors repeat:
+  the doubling ladder (`nextCPGRPCBindBackoff`, `nextSOCKS5BindBackoff`,
+  `nextScanSvcBindBackoff`) and the clamp that keeps a sleep from straddling
+  the unavailability threshold (`clampCPGRPCBindSleep`,
+  `clampSOCKS5BindSleep`). They would join `internal/listenfault` or a
+  sibling as pure functions taking the initial, ceiling, threshold and floor.
+  First step: read `scan_svc_listener.go`'s supervisor for how it bounds its
+  sleep without a clamp function, and compare `nextSOCKS5AcceptBackoff`
+  (`cur == 0`) with the bind ladders (`cur <= 0`) before assuming one
+  function serves all. Prerequisite: `socks5_bind.go` is edited by three
+  open appliance branches, so the SOCKS5 ladder waits for their disposition;
+  the two clamps are in files no open PR touches and can go first.
+  Independent alternatives, unchanged: `mcp_rollout_execdeps.go` after #1993,
+  one strict decoder for the three F3 records, then IM-014 mapping.
+
 ### IM-019 inner-host pin predicate (EXTRACT, 2026-11-20, main `0fe4578`)
 
 - **Reconciled.** IM-016 (#1975) merged on 2026-11-20; its row is updated. No

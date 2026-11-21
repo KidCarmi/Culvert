@@ -79,11 +79,11 @@ package main
 import (
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/listenfault"
 )
 
 const (
@@ -263,18 +263,12 @@ func classifyAdminUIListenError(err error) string {
 	if err == nil {
 		return "none"
 	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		switch errno {
-		case syscall.EADDRINUSE:
-			return "port_in_use"
-		case syscall.EACCES, syscall.EPERM:
-			return "permission_denied"
-		case syscall.EADDRNOTAVAIL:
-			return "address_unavailable"
-		case syscall.EMFILE, syscall.ENFILE:
-			return "descriptors_exhausted"
-		}
+	// The errno classes and the timeout rule are internal/listenfault's
+	// (ADR-0058). The ORDER is this listener's own and is unchanged: the
+	// errno is tested before the certificate tag, which is not the order
+	// classifyCPGRPCBindError uses for its tags.
+	if reason, ok := listenfault.ErrnoReason(err); ok {
+		return reason
 	}
 	if errors.Is(err, errAdminUITLSMaterial) {
 		return "tls_certificate"
@@ -288,8 +282,7 @@ func classifyAdminUIListenError(err error) string {
 	// `listen_failed` unreachable for any error the net package produced. The
 	// original gate passed only a bare errors.New, which is the one shape that
 	// does reach `listen_failed`, so the branch looked correct.
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
+	if listenfault.TimedOut(err) {
 		return "network_error"
 	}
 	return "listen_failed"
