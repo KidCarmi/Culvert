@@ -100,10 +100,17 @@ The effect depends on which authentication backends the node has
 | A credential provider or SSO provider is loaded | Must authenticate: a `407` challenge or an SSO redirect, as for any `Default` traffic. Clients that cannot authenticate (devices, scripts) stop working. |
 | An OIDC/LDAP profile is enabled but failed to load | Are challenged, but nothing can validate what they send. Fix the profile under Identity Providers; the startup log names the error. |
 | The admin roster holds accounts but no usable administrator, and no provider is enabled | Get a `407` that nothing can satisfy; every such request is refused. Restore an administrator with the `--reset-password` break-glass. |
-| No credential or SSO provider at all | Are **not** made to authenticate. No challenge is sent; the request falls through to Stage-2 policy, so only your access rules and default action decide it (`TestKillSwitchNoBackend_NoRule_InertStage2`). |
+| No credential or SSO provider at all | Depends on the authentication rules that remain once exemptions are skipped. A request that now resolves to `Default` is **not** made to authenticate: no challenge is sent, and it falls through to Stage-2 policy, so only your access rules and default action decide it (`TestKillSwitchNoBackend_NoRule_InertStage2`). A request that now matches a `CredentialRequired` rule, one the skipped `Exempt` rule used to mask, gets a `407` that nothing on this node can satisfy, and is refused (`TestKillSwitchNoBackend_ScopedCR_Challenges407`). |
 
-The last row matters: on a gateway with no authentication backend the switch
-does not block formerly exempt traffic. Block it with a Stage-2 rule instead.
+The last row matters in two ways. On a gateway with no authentication backend,
+the switch does not by itself block formerly exempt traffic that resolves to
+`Default`; block that with a Stage-2 rule instead. But it does cut off any
+formerly exempt client whose destination a lower-priority `CredentialRequired`
+rule covers. Before engaging the switch on such a node, look in the
+authentication rules for a `CredentialRequired` rule below each `Exempt` rule
+that covers the same clients and destinations: those clients stop working while
+the switch is engaged. Once it is engaged, the Policy Tester (§4) shows the
+outcome each request now resolves to.
 
 ## 4. Signals
 
