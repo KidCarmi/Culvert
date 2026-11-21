@@ -353,7 +353,7 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-021 | `keyedMutex` in `saas_feed_genstore.go` → `internal/keyedmutex` | **shipped** (merged 2026-11-21, `c5674f2`) | nightly shift | `main` | #1988 | — | ADR-0054; 2 exported names; see "IM-021" below | — |
 | IM-022 | directory-fsync rule (`fsyncDir`, `isBenignDirSyncErr`, the copy in `support_durable_write.go`) → `internal/fileutil` | **shipped** (merged 2026-11-21, `ad886a2`) | nightly shift | `main` | #1989 | — | 2 exported names (`SyncDir`, `DirSyncUnsupported`); see "IM-022" below | — |
 | IM-023 | `mcp_inventory.go` inventory engine → `internal/mcp/qualinventory` | **shipped** (merged 2026-11-21, `ef94311`) | nightly shift | `main` | #1991 | — | ADR-0055; 7 exported names; see "IM-023" below | — |
-| IM-024 | `mcp_telemetry.go` archive exporter and export cursors → `internal/mcp/events/qualarchive` | **implementation under review** | nightly shift | `main` | pending | — | ADR-0056; 6 exported names; see "IM-024" below | review PR |
+| IM-024 | `mcp_telemetry.go` archive exporter and export cursors → `internal/mcp/events/qualarchive` | **implementation under review** | nightly shift | `main` | #1992 | — | ADR-0056; 6 exported names; see "IM-024" below | review PR |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
