@@ -1007,6 +1007,69 @@ textually, and the row's status is updated once #1981 merges):
   this change. It passes under other orders, so it depends on what ran
   before it. Not diagnosed further here.
 
+### IM-025 MCP live-tier lifecycle (EXTRACT, 2026-11-21, main `ef9431189`)
+
+Task record (open #1992 edits the task table and appends at the end of this
+file, so the IM-025 row is added once it merges; this section sits before
+the IM-023 one, an anchor #1992 does not touch):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-025: the live-execution tier state machine in `mcp_live_tier.go`, and its drain wait in `mcp_live_arming.go` → `internal/mcp/livetier` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR changes `mcp_live_*.go`, `mcp_rollout*.go` or the two walls; #1992 edits `mcp_telemetry*.go` only) |
+| Evidence | ADR-0057; 10 exported names (`State` and its four values, two sentinel errors, `Tier`, `Options`, `New`), above the usual 8 and stated in the boundary test; method bodies moved with only names substituted; 13 root files change on renamed method calls only (checked by reversing the renames against main); 1 white-box test moved, 11 engine tests and a boundary pair added; 13 mutation checks, each failing a new test |
+| Risks | the tier decides live-execution admission and when the readiness bit the rollout commit gate reads is set. Lock order (commit lock → tier lock), the per-call resolution of the commit lock and the write-under-lock rule are pinned in the package; the root arming, gate, quiesce and race tests run unedited apart from the renames |
+| Next action | review PR |
+
+- **Reconciled.** #1991 (IM-023) merged on 2026-11-21. #1992 (IM-024) is
+  open with no failed check and no review thread; nothing to fix in it.
+  IM-005/IM-006 stay blocked on #1526.
+- **IM-018 (CDR breaker) re-read and still blocked, with a wider reason than
+  recorded.** The earlier note names three test files that install a clock
+  after construction. The coupling is larger: the six `cdr_breaker_*_test.go`
+  files (1,731 lines) interleave engine tests with pool, admin-handler and
+  sanitize-path tests that read `halfOpenTried`, `consecFails`, `staleProbes`
+  and `cfg.*` on a pool-built breaker (`cdr_breaker_nonrpc_probe_test.go`
+  alone has 18 such lines), and `TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath`
+  is an AST wall keyed on the root type name. Moving the type needs either
+  exported accessors that exist only for tests or a rewrite of fail-open
+  regression assertions into behavioral ones. Neither is a structural move.
+  The clock-at-construction prerequisite is necessary and not sufficient;
+  the breaker is correctly located until its integration tests stop reading
+  counters. Not scheduled.
+- **Why this file.** A parse-level walk of root production files of 120
+  lines or more that read at most six names from other root files.
+  `mcp_live_tier.go` read three, all replaceable by constructor options, and
+  was already an instance with its own lock.
+- **Moved:** the four states, both sentinel errors, the state and admission
+  rules, the in-flight count, the quiesce revocation and its lock order, the
+  bounded drain wait (from `mcp_live_arming.go`), and the status row.
+  **Stays main:** the two process tiers and `mcpLiveTierFor`, the wiring of
+  the readiness registry and `durableMu`, node-readiness evaluation, the
+  side-effect gate, composition and the log lines. Root file 424 → 83 lines.
+- **Two walls.** The execution-posture wall is unedited and passes; what it
+  proves narrows to the wiring, and the package pins the rest. The
+  credential-matrix allowlist entry for the not-ready error text moves to the
+  new path. Both are described in ADR-0057 and the second is an edit to an
+  existing test.
+- **ADR-0002 / ADR-0035.** No conflict: no composition moved and the
+  lifecycle is unchanged.
+- **Program rule.** This is a second open program PR beside #1992. They
+  share no source file; both edit this document at different anchors.
+- **Not done.** A typed status row in place of `map[string]any`; removing
+  the root bindings by naming the package at their uses.
+- **Next.** `mcp_rollout_execdeps.go` (156 lines, reads no root name) is the
+  registry this tier writes: two readiness tiers as four `atomic.Bool`s
+  behind `modeExecReady`. It is a candidate to join `internal/mcp/rollout`
+  as an instance-owned registry, which would let `modeExecReady` be tested
+  with its mode vocabulary beside it. First step: read
+  `mcp_execution_posture_test.go`'s `armingHookFile` wall and the 20 root
+  test files that name its functions, and decide whether the wall can key on
+  the package path. Prerequisite: this PR's disposition, since both touch
+  `mcp_live_tier.go`'s bindings. Independent alternatives, unchanged: one
+  strict decoder for the three F3 records, then IM-014 mapping.
+
 ### IM-023 qualification inventory document (EXTRACT, 2026-11-21, main `6795ec63a`)
 
 Task record (the table is edited by open #1989 and #1990, so the IM-023 row
