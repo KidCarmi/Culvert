@@ -9,6 +9,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A stale-ClamAV-signature page is no longer burned on an empty subscriber
+  list.** The `clamav_signature_stale` alert (CHAOS-124) latched its
+  once-per-episode flag before dispatching, and that latch clears only on an
+  OBSERVED newer signature database, never on elapsed time. The signature
+  watcher's immediate poll runs from `initBackgroundServices`, before
+  `initPersistentAdminState` loads the webhook store, so a node that booted
+  with month-old definitions always fired into an empty subscription index —
+  even with the webhook configured on disk — consumed its one page, and never
+  paged again for as long as freshclam stayed broken. `clamd` stays reachable
+  and keeps returning CLEAN throughout, so no other surface moves and malware
+  published since the database was built is reported to users as clean. The
+  sink now reports whether it DISPATCHED and the episode is consumed only on
+  delivery, so the next five-minute poll re-attempts and an operator who
+  subscribes afterwards is paged. Same rule as the blocklist- and threat-feed
+  planes' `latchOncePerEpisodeOnDelivery`; this plane needs no episode
+  generation because its verdict is computed in the same critical section as
+  the decision (`TestStaleEpisodeSurvivesAnUndeliveredPage`,
+  `TestStaleAlertAtBootPagesOnceTheWebhookStoreHasLoaded`).
+
 - **The alert-webhook store is capped at 100 webhooks (`alerts.MaxWebhooks`,
   CWE-770).** `POST /api/config/import` accepted an unbounded `alertWebhooks`
   list, and each webhook's `Add` rewrites and fsyncs the whole webhook file, so
@@ -849,6 +868,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The Control Plane's centralized audit ring no longer churns the heap on
+  every Data Plane push (`PERF-CLUSTERAUDIT-1`).** `clusterAuditLog`, which every
+  Data Plane's `PushAuditEvents` RPC funnels through under one mutex, was a
+  growing slice re-sliced down to its 5000-entry window rather than a ring:
+  each trim advanced the slice start by one entry, so append periodically had to
+  reallocate and memmove the entire 760 kB live window with the mutex held.
+  It is now a fixed-capacity circular buffer, allocated once on the first push.
+  Measured on a 4-core Xeon @2.10GHz at the production size: a single-event
+  push went from 562-719 ns and 655 B/op to 33-41 ns and 0 B/op, a saturated
+  1000-event push from 309-328 us and 676 kB/op to 15.9-19.1 us and 0 B/op, and
+  the contended fleet shape (concurrent pushes plus admin-UI reads) from
+  13.8-15.9 us to 1.80-1.90 us per op. Resident memory for the saturated window
+  fell from 999 kB to 762 kB. The window the admin UI reads is unchanged: a
+  differential test against the frozen pre-change implementation checks
+  `Count()` and every `Recent(n)` width across randomized push sequences. A
+  negative ring size now disables the log instead of panicking
+  (`TestClusterAuditLog_MatchesLegacy`, `TestClusterAuditLog_BufferNeverGrows`,
+  `TestBenchGate_ClusterAuditAppendIsAllocationFree`,
+  `TestBenchGate_ClusterAuditAppendBeatsLegacy`).
 - **A SOCKS5 client that hangs up during the connect phase now releases its
   slot at once (`PERF-SOCKS5-HANGUP-1`).** The SOCKS5 pre-flight SSRF guard and
   the upstream dial ran under `context.Background()`, so a client that closed
