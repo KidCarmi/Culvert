@@ -8,6 +8,41 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-21 — `CHAOS-126` CLAIMED (placeholder, commit one). Domain: the
+OBSERVABILITY PLANE'S OWN LOSS ACCOUNTING — the OTLP SPAN BUFFER at a
+collector failure and at a restart. `SpanExporter.push` DRAINS the ring buffer
+as its FIRST statement (`internal/otlp/spans.go:199`) and discards the batch on
+any error, so a collector that is down, slow or returning 5xx destroys every
+span it was handed — and because the buffer is emptied on every tick whatever
+the outcome, it can never FILL, which makes `droppedSpans` (documented as
+"ring-buffer overwrites (collector unreachable + buffer full)",
+`internal/otlp/spans.go:71`) structurally incapable of seeing the one scenario
+its comment names. Measured on the production path: 2000 spans recorded against
+a 502 collector — 0 delivered, 0 still buffered, `droppedSpans = 0`. The buffer
+cap's stated purpose ("prevents OOM when the collector is down",
+`spans.go:12`) is therefore vacuous. Separately, `pushLoop`'s `ctx.Done()`
+branch is commented "Final flush on shutdown" and CANNOT flush on shutdown: no
+shutdown hook stops the exporters (`main_shutdown.go` flushes syslog, logstore,
+reqlog, audit, cluster and policy-learning and NOT OTLP), and the only two
+callers that do cancel the loop are `Stop()`, which clears the endpoint FIRST so
+the flush drains the buffer and returns at `endpoint == ""` — measured: 5 spans
+buffered, 0 requests reaching the collector, `droppedSpans = 0` — and
+`Configure(new)`, whose flush posts the OLD collector's spans to the NEW one.
+The asymmetry the design missed is that METRICS are a cumulative snapshot and a
+lost push self-heals on the next tick, while SPANS are a one-shot stream with
+nothing to re-derive them from.** Id claimed in this committed row before any
+code was written, per the convention below and checked against `origin/main`
+rather than the working tree per the 2026-09-25 amendment: `CHAOS-125` is the
+highest id anywhere on `origin/main` (at `ef94311`). Of the open PRs (#1994,
+#1993, #1992, #1705, #1549, #1548, #1536, #1528, #1526) none is a chaos sweep
+and none claims a chaos id. This sweep took 126 and will not move. It NARROWS
+`OBS-2` (which checked this domain and recorded the export engines as "sound:
+bounded queues with counted non-blocking drops … drain-before-post"): the
+drain-before-post it credited for lock hygiene is the same statement that
+destroys an undelivered batch, and exporting `droppedSpans` to the scrape
+surface — OBS-2's remaining ask — would have published a counter that reads 0
+through a total outage.
+
 **2026-11-20 — `CHAOS-125` CLAIMED (placeholder, commit one). Domain: the
 INSPECTED TUNNEL'S PRE-HANDSHAKE WINDOW — the interval between the
 `200 Connection Established` and the forged-leaf handshake, on both SSL-inspect
