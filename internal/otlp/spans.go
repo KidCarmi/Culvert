@@ -263,6 +263,11 @@ func (e *SpanExporter) requeue(batch []SpanRecord) {
 		e.droppedSpans.Add(int64(len(batch)))
 		return
 	}
+	// One transient slice of at most 2×spanBufferCap records (≈1.3 MB),
+	// allocated at most once per push interval on the failure path only.
+	// Rotating in place would avoid it and would be considerably harder to
+	// read for a buffer this size; the memory bound that matters is the
+	// RESIDENT one below, which is still exactly spanBufferCap.
 	merged := make([]SpanRecord, 0, len(batch)+e.count)
 	merged = append(merged, batch...)
 	start := e.head - e.count
