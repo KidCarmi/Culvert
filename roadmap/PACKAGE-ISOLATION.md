@@ -578,6 +578,63 @@ merged; IM-014 is the release-catalog lead recorded under IM-013):
   now unblocked. Then IM-014 mapping (first step in the IM-013 note) and
   IM-016 as above.
 
+### IM-021 per-key lock (EXTRACT, 2026-11-21, main `8090fdf`)
+
+Task record (the table is edited by open #1981 and the end of this file by
+open #1985; this section sits at a third anchor so the three PRs do not
+conflict textually, and the IM-021 row is added once they merge):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-021: `keyedMutex` in `saas_feed_genstore.go` → `internal/keyedmutex` |
+| Status | **implementation under review** |
+| Depends on | — (#1981 touches `inspect_host_pin*.go` and `internal/hostpin`; #1985 touches `saas_feed_floor.go`, `_activation.go`, `_authority.go` and `internal/urlcatfeed`; no open PR changes `saas_feed_genstore.go`, `cdr_lineage.go`, `cdr_ui.go` or `cdr_health.go`) |
+| Evidence | ADR-0054; 2 exported names (`New`, `Mutex`) and one method (`Lock`); body moved statement for statement; 9 call sites in 4 root files name the package, no root binding; no existing test named the type, so none moved or changed; 6 new engine tests, boundary test with 9 negative controls, 4 mutation checks |
+| Risks | the lock orders CDR renew/revoke/delete/enroll and same-id generation persists. The algorithm is unchanged and the root tests of both owners pass unedited |
+| Next action | review PR |
+
+- **Reconciled.** #1981 (IM-019) and #1985 (IM-020) are open; on both, every
+  non-skipped check passed and there is no review thread, so there was
+  nothing to fix. IM-005/IM-006 stay blocked on #1526.
+- **Why this.** The IM-019 count named `keyedMutex` as an owner that falls
+  out of the IM-003 surface: a generic lock declared in the generation store
+  file and also used by the CDR control plane (`cdrLifecycle`). It read no
+  root symbol and no test reached into it, so it could move whole.
+- **Moved:** the `keyedMutex` and `keyedEntry` types, the constructor and
+  `lock`, as `keyedmutex.Mutex`, an unexported `entry`, `New` and `Lock`.
+  **Stays main:** the `cdrLifecycle` instance and its key vocabulary, the
+  generation store and its per-id use of the lock.
+- **Size.** 4 root production files edited (−52/+13 lines;
+  `saas_feed_genstore.go` 539 → 499), 2 new production files (63 lines with
+  the package comment). Root test inventory unchanged (8,590 entries on
+  main and on this change); package 8 tests.
+- **Effect on IM-003.** One name fewer read from the genstore file (16 → 15)
+  and the `keyedMutex` owner question is closed. IM-003 stays blocked on the
+  store's own surface.
+- **Discovered: IM-022 lead, directory fsync.** `fsyncDir` and
+  `isBenignDirSyncErr` in `saas_feed_genstore.go` repeat
+  `fileutil.syncDirTolerant` (same EINVAL/ENOTSUP/EOPNOTSUPP tolerance, same
+  close-error rule) with one real difference: `fsyncDir` returns the
+  directory-open error and `fileutil` swallows it. `fsyncDir` is called from
+  `saas_feed_genstore.go` and `saas_feed_reverify.go`;
+  `cmd/culvert-maint/internal/journal` has its own. Not a blind merge: the
+  strict open is a durability decision of the generation store and must be
+  kept.
+- **Next.** IM-022. First step: read `fileutil.syncDirTolerant` and its
+  callers, `fsyncDir`'s callers, and `TestF3b2_*` cases that inject a
+  dir-sync failure through `genFS`, and decide whether `fileutil` exports one
+  strict directory sync (open failure returned) that the tolerant form
+  calls, with a differential test against a frozen copy of `fsyncDir`. It has
+  no prerequisite and no open-PR overlap today. After it: the IM-018
+  prerequisite (pool-supplied breaker clock), the single strict decoder for
+  the three F3 records once #1985 merges, then IM-014 mapping.
+- **Seen again, not fixed here (pre-existing on main `8090fdf`).** The
+  order-dependent `TestDec2EB_RotationChangesObservableGeneration` failure
+  recorded under IM-020 (#1985) reproduced: seed 1795248876535768401 fails it
+  identically on unmodified main (`decryption_2eb_red_test.go:186`, same
+  `key_id` before and after rotation). The selection matched it only through
+  the word `Generation`. Still undiagnosed.
+
 ### IM-002 / IM-007 mapping (MAP, 2026-11-09, main `09235d1`)
 
 Evidence only; no code moved. Nothing in the repository records the owner's

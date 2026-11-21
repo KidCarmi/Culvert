@@ -45,10 +45,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
 	"syscall"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
+	"github.com/KidCarmi/Culvert/internal/keyedmutex"
 	"github.com/KidCarmi/Culvert/internal/urlcatfeed"
 )
 
@@ -278,7 +278,7 @@ type generationStore struct {
 	fs   genFS
 	root string // <dataDir>/saas_feed/generations
 	// locks serialize in-process writers per generation id.
-	locks *keyedMutex
+	locks *keyedmutex.Mutex
 }
 
 func newGenerationStore(root string) (*generationStore, error) {
@@ -289,7 +289,7 @@ func newGenerationStoreFS(fs genFS, root string) (*generationStore, error) {
 	if root == "" {
 		return nil, errGenRoot
 	}
-	return &generationStore{fs: fs, root: root, locks: newKeyedMutex()}, nil
+	return &generationStore{fs: fs, root: root, locks: keyedmutex.New()}, nil
 }
 
 // genPersistOutcome classifies the durable result.
@@ -330,7 +330,7 @@ func (s *generationStore) Persist(ctx context.Context, cand generationCandidate)
 	// Serialize in-process writers of the same id so concurrent acquisitions of the
 	// SAME generation converge (idempotent) instead of racing two stagings into one
 	// rename target.
-	unlock := s.locks.lock(cand.GenerationID)
+	unlock := s.locks.Lock(cand.GenerationID)
 	defer unlock()
 
 	if err := ctx.Err(); err != nil {
@@ -495,45 +495,5 @@ func (c generationCandidate) files() []genFile {
 		{genFileArtifactBundle, c.BundleBytes},
 		{genFileSnapshotNormalized, c.SnapshotBytes},
 		{genFileMeta, metaBytes},
-	}
-}
-
-// ─── keyed mutex ─────────────────────────────────────────────────────────────────
-
-// keyedMutex serializes work per string key without holding a global lock during the
-// critical section. Used to serialize in-process writers of the SAME generation id.
-type keyedMutex struct {
-	mu sync.Mutex
-	m  map[string]*keyedEntry
-}
-
-type keyedEntry struct {
-	mu   sync.Mutex
-	refs int
-}
-
-func newKeyedMutex() *keyedMutex { return &keyedMutex{m: make(map[string]*keyedEntry)} }
-
-// lock acquires the per-key mutex and returns an unlock func that releases it and
-// garbage-collects the entry when no waiters remain.
-func (k *keyedMutex) lock(key string) func() {
-	k.mu.Lock()
-	e := k.m[key]
-	if e == nil {
-		e = &keyedEntry{}
-		k.m[key] = e
-	}
-	e.refs++
-	k.mu.Unlock()
-
-	e.mu.Lock()
-	return func() {
-		e.mu.Unlock()
-		k.mu.Lock()
-		e.refs--
-		if e.refs == 0 {
-			delete(k.m, key)
-		}
-		k.mu.Unlock()
 	}
 }
