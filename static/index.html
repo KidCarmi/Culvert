@@ -11512,9 +11512,15 @@ function renderOTLPHealth(enabled, metricsHealth, tracesHealth) {
         label + ' push failing - ' + fmt(h.failureCount) + ' failure(s)' + since + '<br>' +
         '<span style="opacity:.75">' + escHtml(h.lastError || 'unknown error') + '</span></div>');
     }
+    // CHAOS-126: the cause attribution was wrong in the one case it named.
+    // The counter now means "never delivered", and the exporter RETAINS a
+    // batch the collector could not take - so a non-zero value means the
+    // buffer overflowed, the collector rejected a batch outright, or export
+    // was disabled/repointed while spans were held. It no longer implies a
+    // collector outage (an outage alone loses nothing until the cap).
     if (h.droppedSpans > 0) {
       rows.push('<div style="color:var(--red)"><svg class="ico" aria-hidden="true"><use href="#i-alert-triangle"/></svg> ' +
-        fmt(h.droppedSpans) + ' trace span(s) dropped (buffer full - collector unreachable)</div>');
+        fmt(h.droppedSpans) + ' trace span(s) never delivered (buffer overflow, a rejected batch, or export disabled while spans were held)</div>');
     }
   });
   if (!enabled || rows.length === 0) {

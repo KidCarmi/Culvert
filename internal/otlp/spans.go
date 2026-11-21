@@ -7,6 +7,14 @@ package otlp
 // (one mutex-guarded append per request ≈ nanoseconds). A background
 // goroutine batch-flushes them to the collector every push interval.
 // The buffer cap (spanBufferCap) prevents OOM when the collector is down.
+//
+// CHAOS-126 — a span is a ONE-SHOT record. The metrics exporter beside this
+// one pushes a cumulative snapshot, so a failed push costs resolution and
+// the next tick re-derives everything; nothing re-derives a span. push()
+// therefore does not destroy a batch the collector declined: an undelivered
+// batch goes back to the FRONT of the ring (requeue), which is what makes
+// the cap above a real bound and droppedSpans a real count during an outage
+// rather than the 0 it used to read while every span was being lost.
 
 import (
 	"bytes"
@@ -24,8 +32,16 @@ import (
 )
 
 // spanBufferCap is the maximum number of spans held in memory before the
-// oldest are silently dropped. 4096 spans × ~512 bytes ≈ 2 MB peak.
+// oldest are dropped (counted in droppedSpans — never silently).
+// 4096 spans × ~512 bytes ≈ 2 MB peak.
 const spanBufferCap = 4096
+
+// spanFinalFlushTimeout bounds the flush the push loop makes when its
+// context is cancelled (a reconfigure or a disable) and the flush the
+// shutdown sequence asks for. The client's own 10 s timeout is the wrong
+// bound for either: a reconfigure must not block on a dead collector, and a
+// shutdown flush runs inside the flush reserve every durable closer shares.
+const spanFinalFlushTimeout = 5 * time.Second
 
 // SpanRecord holds the data collected per proxied request. Allocated on the
 // stack in handleRequest and copied into the ring buffer — no heap escape
@@ -67,11 +83,19 @@ type SpanExporter struct {
 	lastErr       atomic.Value // string
 	lastErrAt     atomic.Int64 // UnixNano; 0 = never
 	lastSuccessAt atomic.Int64 // UnixNano; 0 = never
-	droppedSpans  atomic.Int64 // ring-buffer overwrites (collector unreachable + buffer full)
+	// droppedSpans counts spans THAT WERE NEVER DELIVERED, whatever ended
+	// them: a ring-buffer overwrite, a batch the collector rejected outright
+	// (a 4xx that re-posting cannot change), and the buffer a disable or an
+	// endpoint change throws away. It used to count overwrites alone — a
+	// state the running push loop could not reach, because the loop emptied
+	// the ring on every tick whether or not the collector took it, so the
+	// counter read 0 through a total outage (CHAOS-126).
+	droppedSpans atomic.Int64
 }
 
 // Health returns the current push-loop diagnostic snapshot, including spans
-// dropped by ring-buffer overflow.
+// that were never delivered (DroppedSpans — see the field's comment for
+// what ends a span's life).
 func (e *SpanExporter) Health() PushHealth {
 	h := PushHealth{
 		FailureCount: e.pushFailures.Load(),
@@ -107,15 +131,34 @@ func NewSpans() *SpanExporter {
 
 // Configure sets the OTLP endpoint and starts the push loop.
 func (e *SpanExporter) Configure(endpoint string, headers map[string]string) {
+	// CHAOS-126: normalise FIRST, then derive both the active flag and the
+	// start decision from the normalised value. Deriving them from the raw
+	// argument let Configure("/") store an empty endpoint while reporting
+	// Enabled() == true and starting a loop that could never post.
+	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
+
 	e.mu.Lock()
 	if e.cancel != nil {
 		e.cancel()
 	}
-	e.endpoint = strings.TrimRight(endpoint, "/")
+	// CHAOS-126: spans buffered for the PREVIOUS collector are not shipped
+	// to a different one. A SpanRecord carries the client IP, the target
+	// host and the enforcement decision; an operator who repoints the
+	// gateway did not choose that destination for the window already
+	// collected. Dropped here explicitly and counted, where the cancelled
+	// loop's "final flush" used to deliver them to the new endpoint.
+	dropped := 0
+	if e.endpoint != "" && e.endpoint != endpoint {
+		dropped = e.discardBufferedLocked()
+	}
+	e.endpoint = endpoint
 	e.headers = headers
 	e.active.Store(endpoint != "")
 	e.mu.Unlock()
 
+	if dropped > 0 {
+		obs.Printf("OTLP traces: dropped %d buffered span(s) on an endpoint change", dropped)
+	}
 	if endpoint == "" {
 		return
 	}
@@ -136,7 +179,26 @@ func (e *SpanExporter) Stop() {
 	}
 	e.endpoint = ""
 	e.active.Store(false)
+	// CHAOS-126: disabling trace export ends the buffered spans' chance of
+	// delivery, so they are dropped HERE — explicitly and counted. The
+	// cancelled loop's "final flush" cannot do it: Stop clears the endpoint
+	// first, so that flush used to drain the ring and only then discover it
+	// had nowhere to post it, losing the batch with droppedSpans still 0.
+	dropped := e.discardBufferedLocked()
 	e.mu.Unlock()
+	if dropped > 0 {
+		obs.Printf("OTLP traces: dropped %d buffered span(s) on disable", dropped)
+	}
+}
+
+// Flush makes ONE bounded delivery attempt for everything buffered right now.
+// The shutdown sequence calls it (main_shutdown.go,
+// shutdownOrderOTLPTracesFlush) because nothing else can: no caller cancels
+// the push loop at process exit, so the loop's own ctx.Done() flush — the one
+// its comment called "Final flush on shutdown" — has never run on a shutdown
+// in this binary's life (CHAOS-126). A no-op when export is disabled.
+func (e *SpanExporter) Flush(ctx context.Context) error {
+	return e.push(ctx)
 }
 
 // Enabled returns whether trace export is active (lock-free fast path).
@@ -159,7 +221,10 @@ func (e *SpanExporter) RecordSpan(s SpanRecord) {
 	e.mu.Unlock()
 }
 
-// drain returns all buffered spans and resets the buffer.
+// drain returns all buffered spans and resets the buffer. The caller OWNS
+// the returned batch: it must either deliver it or hand it back through
+// requeue/discard, because nothing else holds a reference to it any more
+// (CHAOS-126).
 func (e *SpanExporter) drain() []SpanRecord {
 	e.mu.Lock()
 	if e.count == 0 {
@@ -178,14 +243,98 @@ func (e *SpanExporter) drain() []SpanRecord {
 	return out
 }
 
+// requeue returns an undelivered batch to the FRONT of the ring buffer,
+// ahead of spans recorded while the push was in flight, and counts whatever
+// no longer fits as dropped.
+//
+// This is RETENTION, not a retry ladder: the next tick makes one attempt
+// with whatever the buffer then holds, so a collector that stays down costs
+// a bounded 4096 spans of memory, one request per interval, and a counted
+// overflow — the behaviour spanBufferCap and droppedSpans were documented to
+// have. A batch whose exporter was stopped or repointed mid-push has nothing
+// left to be retained FOR, so it is counted and let go.
+func (e *SpanExporter) requeue(batch []SpanRecord) {
+	if len(batch) == 0 {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.endpoint == "" {
+		e.droppedSpans.Add(int64(len(batch)))
+		return
+	}
+	merged := make([]SpanRecord, 0, len(batch)+e.count)
+	merged = append(merged, batch...)
+	start := e.head - e.count
+	for i := 0; i < e.count; i++ {
+		merged = append(merged, e.buf[(start+i)%spanBufferCap])
+	}
+	// Ring semantics are unchanged: on overflow the OLDEST lose.
+	if over := len(merged) - spanBufferCap; over > 0 {
+		e.droppedSpans.Add(int64(over))
+		merged = merged[over:]
+	}
+	copy(e.buf, merged)
+	e.head = len(merged)
+	e.count = len(merged)
+}
+
+// discard counts a batch that will never be delivered and says why. Every
+// span that leaves this exporter without reaching a collector passes through
+// here or through requeue's overflow arm, so droppedSpans can be read as
+// total undelivered (CHAOS-126).
+func (e *SpanExporter) discard(spans []SpanRecord, reason string) {
+	if len(spans) == 0 {
+		return
+	}
+	e.droppedSpans.Add(int64(len(spans)))
+	obs.Printf("OTLP traces: discarded %d span(s) — %s", len(spans), reason)
+}
+
+// discardBufferedLocked empties the ring, counting what it throws away, and
+// returns that count. Caller holds e.mu.
+func (e *SpanExporter) discardBufferedLocked() int {
+	n := e.count
+	if n == 0 {
+		return 0
+	}
+	e.droppedSpans.Add(int64(n))
+	e.count = 0
+	e.head = 0
+	return n
+}
+
+// retryableCollectorStatus reports whether a status code describes a
+// condition that can change on its own — the collector is overloaded,
+// restarting or behind a proxy that is. Any OTHER 4xx is the collector
+// rejecting THIS batch (its shape, its size, its credentials, its path), and
+// re-posting the identical bytes every interval cannot change that answer,
+// so such a batch is discarded and counted rather than retained at the
+// expense of spans that could still be delivered.
+func retryableCollectorStatus(code int) bool {
+	return code >= 500 ||
+		code == http.StatusRequestTimeout ||
+		code == http.StatusTooManyRequests
+}
+
 func (e *SpanExporter) pushLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			// Final flush on shutdown.
-			e.push(context.Background()) //nolint:errcheck // best-effort final flush
+			// CHAOS-126: this is the flush on RECONFIGURE or DISABLE, and
+			// it is NOT a shutdown flush — nothing cancels this loop at
+			// process exit, which is why the shutdown sequence calls
+			// Flush() directly. Bounded, so a repoint onto a blackholed
+			// collector cannot keep a dead loop alive for the client's full
+			// 10 s timeout. After Stop() it is a no-op by design: Stop has
+			// already counted and released the buffer.
+			flushCtx, cancel := context.WithTimeout(context.Background(), spanFinalFlushTimeout)
+			if err := e.push(flushCtx); err != nil {
+				obs.Printf("OTLP traces final flush error: %s", obs.Sanitize(err.Error()))
+			}
+			cancel()
 			return
 		case <-ticker.C:
 			if err := e.push(ctx); err != nil {
@@ -195,44 +344,69 @@ func (e *SpanExporter) pushLoop(ctx context.Context) {
 	}
 }
 
-func (e *SpanExporter) push(ctx context.Context) (err error) {
-	spans := e.drain()
-	if len(spans) == 0 {
-		return nil
-	}
-
+func (e *SpanExporter) push(ctx context.Context) error {
 	e.mu.Lock()
 	endpoint := e.endpoint
 	headers := e.headers
 	e.mu.Unlock()
 
+	// CHAOS-126: the endpoint is read BEFORE the drain. Draining first meant
+	// a disabled exporter destroyed its buffer and only then discovered it
+	// had nowhere to send it — the exact path Stop() took the loop down.
 	if endpoint == "" {
 		return nil
 	}
-	defer func() {
-		if err != nil {
-			e.pushFailures.Add(1)
-			e.lastErr.Store(err.Error())
-			e.lastErrAt.Store(time.Now().UnixNano())
-		} else {
-			e.lastSuccessAt.Store(time.Now().UnixNano())
-		}
-	}()
-
+	// Regexp barrier: CodeQL recognises Regexp.MatchString as an SSRF
+	// sanitiser, breaking the taint chain on endpoint (go/request-forgery).
+	//
+	// CHAOS-126: no drain on this arm either. An unpostable endpoint is a
+	// configuration fault, not a delivery attempt; the ring holds (and
+	// counts its own overflow) until a reconfigure makes delivery possible.
 	if !validEndpoint.MatchString(endpoint) {
-		return fmt.Errorf("invalid OTLP endpoint URL: %q", endpoint)
+		err := fmt.Errorf("invalid OTLP endpoint URL: %q", endpoint)
+		e.recordPushFailure(err)
+		return err
 	}
+
+	spans := e.drain()
+	if len(spans) == 0 {
+		return nil
+	}
+	if err := e.deliver(ctx, endpoint, headers, spans); err != nil {
+		e.recordPushFailure(err)
+		return err
+	}
+	e.lastSuccessAt.Store(time.Now().UnixNano())
+	return nil
+}
+
+// recordPushFailure stamps the diagnostic trio an operator reads. Split out
+// of push's deferred closure so the "nothing was buffered" and "export is
+// off" arms cannot stamp a SUCCESS for a push that never happened.
+func (e *SpanExporter) recordPushFailure(err error) {
+	e.pushFailures.Add(1)
+	e.lastErr.Store(err.Error())
+	e.lastErrAt.Store(time.Now().UnixNano())
+}
+
+// deliver POSTs one batch and decides what becomes of it when the POST does
+// not succeed. CHAOS-126: the batch is RETAINED whenever the collector did
+// not take it for a reason that can change (a transport error, a 408, a 429,
+// any 5xx) and DISCARDED-AND-COUNTED when the collector rejected the batch
+// itself or the payload could not be built. It is never simply dropped.
+func (e *SpanExporter) deliver(ctx context.Context, endpoint string, headers map[string]string, spans []SpanRecord) error {
 	tracesURL := strings.TrimRight(endpoint, "/") + "/v1/traces"
 
-	payload := buildTracePayload(spans)
-	body, err := json.Marshal(payload)
+	body, err := json.Marshal(buildTracePayload(spans))
 	if err != nil {
+		e.discard(spans, "payload could not be marshalled")
 		return fmt.Errorf("marshal: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		tracesURL, bytes.NewReader(body))
 	if err != nil {
+		e.requeue(spans)
 		return fmt.Errorf("request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -242,10 +416,16 @@ func (e *SpanExporter) push(ctx context.Context) (err error) {
 
 	resp, err := e.client.Do(req)
 	if err != nil {
+		e.requeue(spans)
 		return fmt.Errorf("post: %w", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode >= 400 {
+		if retryableCollectorStatus(resp.StatusCode) {
+			e.requeue(spans)
+		} else {
+			e.discard(spans, fmt.Sprintf("collector rejected the batch with status %d", resp.StatusCode))
+		}
 		return fmt.Errorf("OTLP collector returned %d", resp.StatusCode)
 	}
 	return nil

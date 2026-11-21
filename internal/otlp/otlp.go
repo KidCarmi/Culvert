@@ -65,7 +65,7 @@ type PushHealth struct {
 	LastError     string `json:"lastError,omitempty"`
 	LastErrorAt   string `json:"lastErrorAt,omitempty"`   // RFC3339 UTC; empty = never
 	LastSuccessAt string `json:"lastSuccessAt,omitempty"` // RFC3339 UTC; empty = never
-	DroppedSpans  int64  `json:"droppedSpans,omitempty"`  // trace exporter only
+	DroppedSpans  int64  `json:"droppedSpans,omitempty"`  // trace exporter only: spans never delivered
 }
 
 // Health returns the current push-loop diagnostic snapshot.
@@ -127,6 +127,16 @@ func (o *MetricsExporter) Stop() {
 	}
 	o.endpoint = ""
 	o.mu.Unlock()
+}
+
+// Flush makes one bounded delivery attempt for the current metric snapshot.
+// The shutdown sequence calls it alongside the span exporter's Flush: a
+// cumulative counter's TERMINAL value is the one an operator wants at a
+// restart boundary, and the next process starts those counters at zero, so
+// the last interval's increments are otherwise unobservable for good
+// (CHAOS-126). A no-op when export is disabled.
+func (o *MetricsExporter) Flush(ctx context.Context) error {
+	return o.push(ctx)
 }
 
 // Enabled returns whether OTLP export is active.
