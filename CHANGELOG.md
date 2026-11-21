@@ -9,6 +9,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A stale-ClamAV-signature page is no longer burned on an empty subscriber
+  list.** The `clamav_signature_stale` alert (CHAOS-124) latched its
+  once-per-episode flag before dispatching, and that latch clears only on an
+  OBSERVED newer signature database, never on elapsed time. The signature
+  watcher's immediate poll runs from `initBackgroundServices`, before
+  `initPersistentAdminState` loads the webhook store, so a node that booted
+  with month-old definitions always fired into an empty subscription index —
+  even with the webhook configured on disk — consumed its one page, and never
+  paged again for as long as freshclam stayed broken. `clamd` stays reachable
+  and keeps returning CLEAN throughout, so no other surface moves and malware
+  published since the database was built is reported to users as clean. The
+  sink now reports whether it DISPATCHED and the episode is consumed only on
+  delivery, so the next five-minute poll re-attempts and an operator who
+  subscribes afterwards is paged. Same rule as the blocklist- and threat-feed
+  planes' `latchOncePerEpisodeOnDelivery`; this plane needs no episode
+  generation because its verdict is computed in the same critical section as
+  the decision (`TestStaleEpisodeSurvivesAnUndeliveredPage`,
+  `TestStaleAlertAtBootPagesOnceTheWebhookStoreHasLoaded`).
+
 - **The alert-webhook store is capped at 100 webhooks (`alerts.MaxWebhooks`,
   CWE-770).** `POST /api/config/import` accepted an unbounded `alertWebhooks`
   list, and each webhook's `Add` rewrites and fsyncs the whole webhook file, so
