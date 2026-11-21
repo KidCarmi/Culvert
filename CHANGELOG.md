@@ -868,6 +868,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **A blocklist feed sync no longer stalls every request while it parses the
+  feed (`PERF-BLOCKLIST-MERGE-1`).** `blocklist.Store.MergeFromLines` parsed
+  and merged the whole feed (up to 1,000,000 lines) inside one hold of the
+  blocklist write lock, which excludes the `IsBlocked` check every proxied
+  destination makes (HTTP, CONNECT, WebSocket and SOCKS5). It did so on every
+  successful sync, including a re-sync of an unchanged feed. Measured on a
+  4-vCPU host, the longest single `IsBlocked` during a merge was 640-710 ms for
+  an unchanged 1M-line feed and 1.4-1.5 s for its first sync (49-67 ms and
+  78-79 ms at 100k lines). The merge now parses under no lock, drops entries the
+  store already holds under the cold read lock that request-path readers never
+  wait on, and applies what is left in 1,024-entry write-lock holds. An
+  unchanged feed takes no write lock at all (1-6 ms worst reader, which is
+  scheduler and GC noise), and a first 1M-line sync measured 45-49 ms. The
+  entries, attribution, return count and save behaviour are unchanged; the one
+  difference is that a concurrent reader can see part of a feed listed before
+  the rest, which is safe because a merge only adds
+  (`TestMergeFromLines_MatchesSingleHoldReference`,
+  `TestMergeFromLines_SteadyStateResyncTakesNoWriteLock`,
+  `BenchmarkMergeFromLines_ReaderStall_*`).
 - **A SOCKS5 client that hangs up during the connect phase now releases its
   slot at once (`PERF-SOCKS5-HANGUP-1`).** The SOCKS5 pre-flight SSRF guard and
   the upstream dial ran under `context.Background()`, so a client that closed
