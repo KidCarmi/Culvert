@@ -158,15 +158,24 @@ Things that differ from authentication rules:
   it sends, for information only; a Data Plane node does not apply it
   (`config_surfaces.go`, `default_auth_outcome`). Each node uses its own stored
   value.
-- **A node that cannot verify anything skips Stage 1.** With `Default`, no
-  credential provider, no working SSO provider and no admin account, a challenge
-  could never be satisfied. Stage 1 is not entered: no authentication rule is
+- **A node with nothing to verify and no accounts skips Stage 1.** With
+  `Default`, no credential provider, no working SSO provider and no account at
+  all in the admin roster (`ui_users.json`), a challenge could never be
+  satisfied. Stage 1 is not entered: no authentication rule is
   evaluated, including `CredentialRequired` and `SSORequired` rules, and every
   request continues to Stage 2 as `unauth` (`authRequired` in
   `resolveRequestAuth`). Only access rules and the default action protect such
   a node. Under `Exempt` the same node does evaluate rules, and a
   `CredentialRequired` rule then answers `407`
   (`TestS3_NoBackend_DefaultInert_ExemptScopedFires`).
+- **A roster with accounts but nothing to verify them fails closed.** If the
+  roster still holds accounts but none can be verified (for example, a restored
+  roster whose only admin role was clamped to viewer, or a legacy roster with an
+  empty role) and there is no credential or SSO provider, Stage 1 is still
+  entered. A request that matches no rule gets a `407` that nothing can satisfy
+  (`rosterWithoutVerifier` in `resolveRequestAuth`;
+  `TestAuthEnabled_ClampedAdminRosterHTTPProxyRefused`). Authentication is not
+  bypassed: the node refuses that traffic until an admin account is restored.
 
 ## 6. Signals
 
