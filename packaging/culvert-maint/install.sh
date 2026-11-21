@@ -187,6 +187,23 @@ extract_toml_string() {
                 line = substr(line, 2)
                 idx = index(line, q)
                 if (idx > 0) line = substr(line, 1, idx - 1)
+            } else if (substr(line, 1, 1) == "\"") {
+                # Basic string: ends at the first UNESCAPED quote, and \\ and
+                # \" decode to one backslash / one quote, as the agent TOML
+                # decoder reads them (a regex written "^ghcr\\.io/..." must
+                # not keep both backslashes). Other escapes stay verbatim.
+                out = ""
+                for (i = 2; i <= length(line); i++) {
+                    c = substr(line, i, 1)
+                    if (c == "\"") break
+                    if (c == "\\") {
+                        n = substr(line, i + 1, 1)
+                        if (n == "\\" || n == "\"") { c = n } else { c = c n }
+                        i++
+                    }
+                    out = out c
+                }
+                line = out
             } else {
                 sub(/^"/, "", line)
                 sub(/".*$/, "", line)

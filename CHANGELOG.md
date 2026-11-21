@@ -536,6 +536,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The maintenance-agent installer no longer aborts on a double-quoted
+  `image_allowlist`.** `extract_toml_string` in
+  `packaging/culvert-maint/install.sh` copied a TOML basic (`"..."`) string's
+  bytes verbatim, so `image_allowlist = "^ghcr\\.io/..."` (valid TOML that the
+  agent decodes to `^ghcr\.io/...`) reached the installer's cross-check with
+  both backslashes and failed it: the install died with "proxy_repo ... is not
+  matched by image_allowlist" for a config the agent itself accepts. Basic
+  strings now end at the first unescaped quote and decode `\\` and `\"`;
+  literal (`'...'`) strings and backslash-free values read exactly as before
+  (`TestCulvertMaintInstall_ExtractTomlString_BasicStringEscapes`).
+
 - **Enabling CDR at runtime now starts the CDR health poller, without a
   restart.** Only `loadCDR` started the 15-second poller, and only when CDR
   was enabled at boot. A node that turned CDR on from the admin toggle
