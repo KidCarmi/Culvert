@@ -57,35 +57,39 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync/atomic"
+
+	"github.com/KidCarmi/Culvert/internal/writerlock"
 )
 
-// dataDirWriterLockName is the lock file's name inside the persisted-state root.
-// It lives IN the volume rather than beside it so it travels with a bind mount,
-// a docker volume and an NFS export — the three ways two processes actually end
-// up sharing one `/data`. It is not in backup.go's manifest, so it is neither
-// archived nor restored.
-const dataDirWriterLockName = ".culvert-writer.lock"
+// The lock itself (the file name, the three verdicts, the directory creation
+// and the flock) is owned by internal/writerlock (ADR-0058). The names below
+// are main's bindings to it; what a verdict means for the boot is decided in
+// this file.
+
+// dataDirWriterLockName is the lock file's name inside the persisted-state
+// root. It is not in backup.go's manifest, so it is neither archived nor
+// restored.
+const dataDirWriterLockName = writerlock.FileName
 
 // allowMultipleWritersEnv names the escape hatch described in the file comment.
 const allowMultipleWritersEnv = "CULVERT_ALLOW_MULTIPLE_WRITERS"
 
 // dataDirWriterVerdict is the outcome of one acquisition attempt.
-type dataDirWriterVerdict int
+type dataDirWriterVerdict = writerlock.Verdict
 
 const (
 	// dataDirWriterAcquired — this process is the single writer. The lock is
 	// held for the life of the process.
-	dataDirWriterAcquired dataDirWriterVerdict = iota
+	dataDirWriterAcquired = writerlock.Acquired
 	// dataDirWriterHeld — a LIVE process holds the lock. The only refusing
 	// verdict.
-	dataDirWriterHeld
+	dataDirWriterHeld = writerlock.Held
 	// dataDirWriterUndetermined — the lock state could not be established
 	// (no path configured, the file could not be created, the platform has no
 	// advisory locking, the lock call failed). Boot proceeds; the caller
 	// reports it.
-	dataDirWriterUndetermined
+	dataDirWriterUndetermined = writerlock.Undetermined
 )
 
 // errDataDirWriterHeld is the sentinel the boot guard wraps so callers and tests
@@ -96,7 +100,7 @@ var errDataDirWriterHeld = errors.New("another Culvert process is already using 
 // process. The flock is tied to the open file description, so the handle must
 // outlive acquisition — dropping it would release the lock at the next GC and
 // re-open the window this file exists to close. Released by the kernel on exit.
-var dataDirWriterLockHandle *os.File
+var dataDirWriterLockHandle *writerlock.Lock
 
 // dataDirWriterLockNotice carries an undetermined verdict's cause from the boot
 // guard (which runs before the application logger exists) to the first log line
@@ -114,56 +118,19 @@ const (
 	dataDirPostureUnverified = "unverified"
 )
 
-// acquireDataDirWriterLock takes the single-writer lock on dir.
+// acquireDataDirWriterLock takes the single-writer lock on dir and, when it is
+// acquired, keeps it in dataDirWriterLockHandle for the life of the process.
 //
 // It returns the verdict, the lock path it used (empty when it never got that
-// far) and the underlying cause for a non-acquiring verdict. It writes nothing
-// but the zero-byte lock file itself and never blocks: a live holder is reported
-// immediately rather than waited for, because waiting would turn a
-// misconfiguration into a hang.
+// far) and the underlying cause for a non-acquiring verdict. The acquisition
+// creates the data root when it is absent and never blocks; see
+// writerlock.Take.
 func acquireDataDirWriterLock(dir string) (dataDirWriterVerdict, string, error) {
-	if dir == "" {
-		return dataDirWriterUndetermined, "", errors.New("no persisted-state root configured")
+	got := writerlock.Take(dir)
+	if got.Lock != nil {
+		dataDirWriterLockHandle = got.Lock
 	}
-	// The data root may not exist yet on a genuine fresh install, and the guard
-	// runs long before the statement that would otherwise create it (initPAC →
-	// loadPAC's own MkdirAll). Opening the lock file first would return ENOENT,
-	// degrade, and leave the process holding NOTHING for its whole life — while
-	// startup then created the directory, so a second process could take the
-	// lock and boot alongside it. On a healthy filesystem. Creating the root
-	// here is what makes the guard real on a first boot; a creation that
-	// genuinely fails (read-only volume, no permission, a root that is a file)
-	// still degrades below, which is the CHAOS-05/07 posture.
-	//
-	// 0o700 matches loadPAC, the statement that creates this directory today.
-	// MkdirAll is a no-op on an existing directory and never changes its mode,
-	// so an operator's 0o750 volume is left exactly as it is.
-	if err := os.MkdirAll(dir, 0o700); err != nil { // #nosec G304 G703 -- the operator-configured persisted-state root itself; no request input reaches it
-		return dataDirWriterUndetermined, filepath.Join(dir, dataDirWriterLockName), err
-	}
-	path := filepath.Join(dir, dataDirWriterLockName)
-	// O_CREATE without O_EXCL by design: the lock file is expected to survive
-	// across boots and is meaningless on its own — the flock is the state, the
-	// file is only something to hold it on. Mode 0600 matches every other file
-	// this process creates on the volume.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 G703 -- operator-configured persisted-state root joined with a compile-time basename; no request input reaches this path
-	if err != nil {
-		// A read-only or permission-denied volume is an existing, documented
-		// degraded mode (CHAOS-05/07), not a reason to refuse a boot that would
-		// otherwise serve.
-		return dataDirWriterUndetermined, path, err
-	}
-	held, lockErr := flockExclusiveNonBlocking(f)
-	if lockErr != nil {
-		_ = f.Close()
-		return dataDirWriterUndetermined, path, lockErr
-	}
-	if !held {
-		_ = f.Close()
-		return dataDirWriterHeld, path, nil
-	}
-	dataDirWriterLockHandle = f
-	return dataDirWriterAcquired, path, nil
+	return got.Verdict, got.Path, got.Cause
 }
 
 // checkDataDirSingleWriter is main's boot guard. It returns a non-nil error
