@@ -250,7 +250,7 @@ func apiCDRInstances(w http.ResponseWriter, r *http.Request) {
 		// 2E-C R7: the removal is serialized against a renewal / revoke /
 		// enroll of the same instance, so a renewal decided before this
 		// commit observes the removal under the lock.
-		unlock := cdrLifecycle.lock(name)
+		unlock := cdrLifecycle.Lock(name)
 		defer unlock()
 		inst, found := cdrInstances.GetCopy(name)
 		if !found {
@@ -420,7 +420,7 @@ func apiCDREnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2E-C R7: serialized with delete/revoke/renewal of the same name.
-	unlock := cdrLifecycle.lock(req.Name)
+	unlock := cdrLifecycle.Lock(req.Name)
 	defer unlock()
 
 	// Reject duplicates early — better UX than a write failure halfway
@@ -438,7 +438,7 @@ func apiCDREnroll(w http.ResponseWriter, r *http.Request) {
 	//    create-if-absent under the store lock, additionally serialized on
 	//    the operation id, so concurrent dispatches cannot both create.
 	//    The receipt carries NO token or key material.
-	opUnlock := cdrLifecycle.lock("op:" + req.OperationID)
+	opUnlock := cdrLifecycle.Lock("op:" + req.OperationID)
 	if prior, ok := cdrEnrollReceipts.Get(req.OperationID); ok {
 		opUnlock()
 		http.Error(w, fmt.Sprintf("operation %s already exists (state %s, bound to %s at %s); the enrollment was NOT re-dispatched — resolve it via %s or mint a new operation id",
@@ -973,7 +973,7 @@ func apiCDRRevokeRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	unlock := cdrLifecycle.lock(name)
+	unlock := cdrLifecycle.Lock(name)
 	defer unlock()
 	target, found := cdrInstances.GetCopy(name)
 	if !found {

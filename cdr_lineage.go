@@ -45,6 +45,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/keyedmutex"
 	"github.com/KidCarmi/Sluice/pkg/sluiceauth"
 	pb "github.com/KidCarmi/Sluice/proto/sluicev1"
 )
@@ -107,7 +108,7 @@ func mintCDROperationID() string {
 // instance name. Held for the whole ceremony, including the RPC, so a
 // renewal that was DECIDED before a removal observes the removal when it
 // re-validates the instance under the lock.
-var cdrLifecycle = newKeyedMutex()
+var cdrLifecycle = keyedmutex.New()
 
 var (
 	errCDRRenewalInProgress = errors.New("cdr lineage: a renewal is already in progress for this instance")
@@ -373,7 +374,7 @@ func reconcileCredentialLineage() {
 // finishStagedRenewal completes (or abandons) one staged generation
 // against the on-disk state. Under the instance's lifecycle lock.
 func finishStagedRenewal(inst CDREnrolledInstance, g CDRCredentialGeneration) {
-	unlock := cdrLifecycle.lock(inst.Name)
+	unlock := cdrLifecycle.Lock(inst.Name)
 	defer unlock()
 	certTmp, keyTmp := inst.ClientCertPath+".tmp", inst.ClientKeyPath+".tmp"
 	diskFP, _ := loadCertFingerprint(inst.ClientCertPath)

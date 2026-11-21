@@ -288,7 +288,7 @@ func maybeRenewExpiringClients(members []*cdrPooledClient) {
 // keeps working until its NotAfter, giving cdrRenewWindow days of retries.
 func runRenewFor(pc *cdrPooledClient, inst CDREnrolledInstance) {
 	defer pc.renewInFlight.Store(0)
-	unlock := cdrLifecycle.lock(inst.Name)
+	unlock := cdrLifecycle.Lock(inst.Name)
 	defer unlock()
 
 	cur, ok := cdrInstances.GetCopy(inst.Name)
@@ -434,7 +434,7 @@ func reconcilePendingRenewals(members []*cdrPooledClient) {
 }
 
 func resolveRenewingGeneration(pc *cdrPooledClient, inst CDREnrolledInstance, g CDRCredentialGeneration) {
-	unlock := cdrLifecycle.lock(inst.Name)
+	unlock := cdrLifecycle.Lock(inst.Name)
 	defer unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), cdrHealthProbeDeadline)
 	defer cancel()
