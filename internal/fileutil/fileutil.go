@@ -369,14 +369,5 @@ func syncDirTolerant(dir string) error {
 	}
 	syncErr := d.Sync()
 	closeErr := d.Close()
-	if syncErr != nil &&
-		!errors.Is(syncErr, syscall.EINVAL) &&
-		!errors.Is(syncErr, syscall.ENOTSUP) &&
-		!errors.Is(syncErr, syscall.EOPNOTSUPP) {
-		return syncErr
-	}
-	if syncErr == nil && closeErr != nil {
-		return closeErr
-	}
-	return nil
+	return dirSyncResult(syncErr, closeErr)
 }

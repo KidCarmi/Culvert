@@ -25,6 +25,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // gcTombstonePrefix marks a directory owned by an in-flight two-step deletion. A leftover
@@ -54,7 +56,7 @@ func osGCFS() gcFS {
 		readFile:  os.ReadFile, // #nosec G304 -- fixed constructed paths under the generations root
 		rename:    os.Rename,
 		removeAll: os.RemoveAll,
-		syncDir:   fsyncDir,
+		syncDir:   fileutil.SyncDir,
 	}
 }
 

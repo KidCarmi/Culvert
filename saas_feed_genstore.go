@@ -45,7 +45,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"syscall"
 
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/keyedmutex"
@@ -234,38 +233,11 @@ func osGenFS() genFS {
 		mkdirTemp:   os.MkdirTemp,
 		atomicWrite: fileutil.AtomicWrite,
 		rename:      os.Rename,
-		syncDir:     fsyncDir,
-		readFile:    os.ReadFile, // #nosec G304 -- fixed constructed paths under the generations root
+		syncDir:     fileutil.SyncDir, // strict: an unopenable directory is an error
+		readFile:    os.ReadFile,      // #nosec G304 -- fixed constructed paths under the generations root
 		stat:        os.Stat,
 		removeAll:   os.RemoveAll,
 	}
-}
-
-// isBenignDirSyncErr reports whether a directory fsync error is one of the portable
-// "this FS does not support directory fsync" codes that fileutil.AtomicWrite also
-// tolerates (EINVAL / ENOTSUP / EOPNOTSUPP).
-func isBenignDirSyncErr(err error) bool {
-	return errors.Is(err, syscall.EINVAL) ||
-		errors.Is(err, syscall.ENOTSUP) ||
-		errors.Is(err, syscall.EOPNOTSUPP)
-}
-
-// fsyncDir opens dir and fsyncs it (best-effort like fileutil's parent-dir sync:
-// EINVAL/ENOTSUP are tolerated because directory fsync is not portable).
-func fsyncDir(dir string) error {
-	d, err := os.Open(dir) // #nosec G304 -- fixed constructed dir under the generations root
-	if err != nil {
-		return err
-	}
-	syncErr := d.Sync()
-	closeErr := d.Close()
-	if syncErr != nil && !isBenignDirSyncErr(syncErr) {
-		return syncErr
-	}
-	if closeErr != nil && syncErr == nil {
-		return closeErr
-	}
-	return nil
 }
 
 // ─── the generation store ────────────────────────────────────────────────────────

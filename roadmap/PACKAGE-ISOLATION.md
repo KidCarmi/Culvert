@@ -638,6 +638,36 @@ conflict textually, and the IM-021 row is added once they merge):
   `key_id` before and after rotation). The selection matched it only through
   the word `Generation`. Still undiagnosed.
 
+### IM-022 directory fsync (EXTRACT, 2026-11-21, main `c5674f2`)
+
+IM-022: `fsyncDir` and `isBenignDirSyncErr` in `saas_feed_genstore.go` →
+`fileutil.SyncDir`. Status: **implementation under review**. No open PR
+touches `saas_feed_genstore.go`, `saas_feed_gc.go` or `internal/fileutil`
+(#1987 is GeoIP only). No new package and no ADR: `internal/fileutil` already
+owned the same rule.
+
+- **Moved:** the strict directory sync (open failure returned) as one
+  exported name, `SyncDir`. Its tolerance and close-error rule is now the
+  single unexported `dirSyncResult`, which `syncDirTolerant` also calls, so
+  the EINVAL/ENOTSUP/EOPNOTSUPP rule exists once in `fileutil` instead of
+  twice in the tree. **Stays main:** the `genFS`/`gcFS` seams and the choice
+  of the strict form.
+- **Correction to the IM-021 note:** the second caller is `saas_feed_gc.go`,
+  not `saas_feed_reverify.go`.
+- **Evidence:** `TestDirSyncResult_MatchesBothFrozenOriginals` compares the
+  shared rule with frozen copies of both originals over 64 sync/close error
+  pairs; `TestSyncDir_UnopenableDirectoryIsAnError` pins the strict/tolerant
+  difference; root `TestSaaSFeedDirSyncBinding_UnopenableDirectoryIsAnError`
+  pins both production bindings. Four mutations of `syncdir.go` each fail a
+  test. A fifth (dropping only EOPNOTSUPP) is equivalent on Linux, where it
+  is the same errno as ENOTSUP.
+- **Not merged:** `support_durable_write.go` `syncDirEntry` (drops the close
+  error and logs), `internal/storeguard` and `internal/mcp/events/spool`
+  `syncDir` (different close/tolerance rules), `cmd/culvert-maint` (separate
+  binary). Each differs in behavior, so each is its owner's decision.
+- **Next.** Unchanged from the IM-021 note: the IM-018 prerequisite, the
+  single strict decoder for the three F3 records, then IM-014 mapping.
+
 ### IM-002 / IM-007 mapping (MAP, 2026-11-09, main `09235d1`)
 
 Evidence only; no code moved. Nothing in the repository records the owner's
