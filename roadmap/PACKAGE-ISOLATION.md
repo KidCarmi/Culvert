@@ -351,7 +351,9 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-019 | `inspect_host_pin.go` predicate → `internal/hostpin` | **shipped** (merged 2026-11-21, `2421870`) | nightly shift | `main` | #1981 | — | ADR-0052; 1 exported name (`Pinned`); root keeps `innerHostPinnedToTunnel` as a binding, so `proxy_tunnel.go` is not edited; see "IM-019" below | — |
 | IM-020 | saas-feed node-local record codec → `internal/urlcatfeed/noderecord` | **shipped** (merged 2026-11-21, `58f4a44`) | nightly shift | `main` | #1985 | — | ADR-0053; 4 exported names; see "IM-020" below | — |
 | IM-021 | `keyedMutex` in `saas_feed_genstore.go` → `internal/keyedmutex` | **shipped** (merged 2026-11-21, `c5674f2`) | nightly shift | `main` | #1988 | — | ADR-0054; 2 exported names; see "IM-021" below | — |
-| IM-022 | directory-fsync rule (`fsyncDir`, `isBenignDirSyncErr`, the copy in `support_durable_write.go`) → `internal/fileutil` | **implementation under review** | nightly shift | `main` | #1989 | — | 2 exported names (`SyncDir`, `DirSyncUnsupported`); see "IM-022" below | review PR |
+| IM-022 | directory-fsync rule (`fsyncDir`, `isBenignDirSyncErr`, the copy in `support_durable_write.go`) → `internal/fileutil` | **shipped** (merged 2026-11-21, `ad886a2`) | nightly shift | `main` | #1989 | — | 2 exported names (`SyncDir`, `DirSyncUnsupported`); see "IM-022" below | — |
+| IM-023 | `mcp_inventory.go` inventory engine → `internal/mcp/qualinventory` | **shipped** (merged 2026-11-21, `ef94311`) | nightly shift | `main` | #1991 | — | ADR-0055; 7 exported names; see "IM-023" below | — |
+| IM-024 | `mcp_telemetry.go` archive exporter and export cursors → `internal/mcp/events/qualarchive` | **implementation under review** | nightly shift | `main` | pending | — | ADR-0056; 6 exported names; see "IM-024" below | review PR |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -1073,3 +1075,44 @@ an anchor neither touches):
   has no prerequisite and no open-PR overlap today. After it: the IM-018
   prerequisite (pool-supplied breaker clock), the single strict decoder for
   the three F3 records, then IM-014 mapping.
+
+### IM-024 qualification archive and export cursors (EXTRACT, 2026-11-21, main `ef94311`)
+
+- **Reconciled.** #1989 (IM-022) and #1991 (IM-023) merged on 2026-11-21 and
+  their rows above now say so. #1990, the second IM-022 PR, is no longer
+  open. No program PR was open at the start of this run. IM-005/IM-006 stay
+  blocked on #1526; no open PR touches `mcp_telemetry*.go` or
+  `internal/mcp/events`.
+- **Moved** (`mcp_telemetry.go:578-915`, 338 lines): `qualArchiveExporter`,
+  `archiveBatch`, `archiveStats`, `validateBatch`, `buildArchiveBatch`,
+  `telemetryCursorStore`, `telemPartitionName`, `telemCapabilityName`,
+  `itoaLen`, `dirSize`. **Stays main:** configuration validation, the KEK
+  provider, the events manager, the holder, the flush and export loops,
+  `exportStep` (which decides when a cursor advances), the shutdown drain,
+  `errClass` and `gatewayPartitions`. Root file 915 → 573 lines.
+- **First-step answers from the IM-023 note.** Durable writes go through
+  `fileutil.AtomicWrite` only, so the package adds no fsync or rename rule of
+  its own. Four tests reached unexported exporter or cursor names and moved;
+  one root test read `exporter.stats()` and now reads `Stats()`.
+  `internal/mcp/events/export` was not used as the home: it is the read
+  contract and the pump and has no filesystem dependency (ADR-0056).
+- **Format evidence.** The names and tree digest of seven files were captured
+  from the root functions on main before the move and are pinned in
+  `TestOnDiskFormat_UnchangedByTheMove`.
+- **One contract crosses the boundary by text.** Main's `errClass` matches
+  the archive's error phrases by substring. The phrases are pinned in the
+  package and a new root test runs real archive errors through `errClass`.
+  Typed errors would replace both; that is a behavior-adjacent change left
+  for the owner to ask for.
+- **ADR-0002.** No conflict: no composition moved.
+- **Not done.** No fuzz target: the engine's only parsed input is its own
+  batch and cursor files, read with `json.Unmarshal` into fixed shapes.
+- **Next.** The IM-018 prerequisite, unchanged from the IM-020 note and still
+  with no open-PR overlap: the CDR pool supplies its breaker's clock at
+  construction. First step: read `newCDRBreaker`'s callers and the three
+  test files that call `b.setNowFn` on a pool-built breaker
+  (`cdr_breaker_nonrpc_probe_test.go`, `cdr_breaker_wedge_chaos_test.go`,
+  `cdr_rpc_reservation_wall_test.go`). It matters because the breaker is the
+  one remaining small state machine whose extraction is blocked by a test
+  seam and not by surface. After it: one strict decoder for the three F3
+  records, then IM-014 mapping.
