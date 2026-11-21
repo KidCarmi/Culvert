@@ -1016,7 +1016,7 @@ the IM-023 one, an anchor #1992 does not touch):
 | Field | Value |
 |---|---|
 | ID / task | IM-025: the live-execution tier state machine in `mcp_live_tier.go`, and its drain wait in `mcp_live_arming.go` → `internal/mcp/livetier` |
-| Status | **implementation under review** |
+| Status | **implementation under review** (#1993) |
 | Depends on | — (no open PR changes `mcp_live_*.go`, `mcp_rollout*.go` or the two walls; #1992 edits `mcp_telemetry*.go` only) |
 | Evidence | ADR-0057; 10 exported names (`State` and its four values, two sentinel errors, `Tier`, `Options`, `New`), above the usual 8 and stated in the boundary test; method bodies moved with only names substituted; 13 root files change on renamed method calls only (checked by reversing the renames against main); 1 white-box test moved, 11 engine tests and a boundary pair added; 13 mutation checks, each failing a new test |
 | Risks | the tier decides live-execution admission and when the readiness bit the rollout commit gate reads is set. Lock order (commit lock → tier lock), the per-call resolution of the commit lock and the write-under-lock rule are pinned in the package; the root arming, gate, quiesce and race tests run unedited apart from the renames |
