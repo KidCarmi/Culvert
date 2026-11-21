@@ -64,6 +64,10 @@ var canonicalLateShutdownHooks = []struct {
 	{"log-store-close", shutdownOrderLogStoreClose},
 	{"request-log-close", shutdownOrderRequestLogClose},
 	{"audit-log-close", shutdownOrderAuditLogClose},
+	// CHAOS-126: the OTLP exporters' only flush. After every durable closer
+	// (an off-box collector must not spend their reserve) and before the log
+	// closer (so its own diagnostics still reach the log file).
+	{"otlp-flush", shutdownOrderOTLPFlush},
 	{"log-closer", shutdownOrderLogCloser},
 }
 

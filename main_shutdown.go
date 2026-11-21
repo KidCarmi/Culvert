@@ -216,7 +216,17 @@ const (
 	shutdownOrderLogStoreClose    = 125
 	shutdownOrderRequestLogClose  = 130
 	shutdownOrderAuditLogClose    = 135
-	shutdownOrderLogCloser        = 140
+	// CHAOS-126: flush the OTLP exporters LAST among the flush hooks. The
+	// span exporter holds up to one push interval of request spans in a RAM
+	// ring buffer and nothing else — no caller cancelled its push loop at
+	// exit, so its own "final flush on shutdown" branch never ran on a
+	// shutdown and every graceful restart lost the window silently. It runs
+	// after every DURABLE closer (and is itself bounded to
+	// otlpShutdownFlushBudget) so an off-box collector that blackholes can
+	// never spend reserve the local stores need; it runs before the log
+	// closer so the result still reaches the operator's log file.
+	shutdownOrderOTLPFlush = 138
+	shutdownOrderLogCloser = 140
 )
 
 // registerEarlyShutdownHooks registers the pre-budget shutdown hooks: HA,
@@ -278,6 +288,12 @@ func registerEarlyShutdownHooks(reg *shutdownRegistry, s *startupState) {
 // Var (not const) so a test can shorten it, matching tunnelIdleTimeout's
 // convention; production never mutates it.
 var tunnelDrainWindow = 15 * time.Second
+
+// otlpShutdownFlushBudget caps the terminal OTLP flush (CHAOS-126). Var, not
+// const, so a test can shorten it; production never mutates it. Sized well
+// under the flush reserve because this hook is the last one and must not be
+// able to borrow from a durable closer that misbehaved earlier.
+var otlpShutdownFlushBudget = 2 * time.Second
 
 // drainActiveTunnels drains in-flight CONNECT/WebSocket tunnels after the
 // proxy server's HTTP listener has shut down. proxySrv.Shutdown only closes
@@ -361,6 +377,38 @@ func drainActiveTunnels(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// flushOTLPExporters is the OTLP exporters' only flush (CHAOS-126). The span
+// exporter's whole state is a RAM ring buffer, and nothing cancelled its push
+// loop at process exit, so the loop's own "Final flush on shutdown" branch
+// never ran on a shutdown and every graceful restart lost up to one push
+// interval of request spans with no counter and no log line. The metrics
+// exporter is flushed with it because a cumulative counter's TERMINAL value
+// is the one an operator wants at a restart boundary and the next process
+// starts those counters at zero.
+//
+// Bounded to otlpShutdownFlushBudget so a blackholed collector costs a known
+// 2s at the very end of the sequence rather than the client's 10s timeout
+// inside a 10s reserve shared with every durable closer — the OTLP hook runs
+// AFTER all of them for the same reason. Both calls are no-ops when OTLP
+// export is disabled, which is the shipped default.
+//
+// A named function rather than an inline closure, for the reason
+// drainActiveTunnels is one: it keeps registerLateShutdownHooks' cognitive
+// complexity where it was (measured — inline, the closure took it from 37
+// to 41 against golangci-lint's gocognit threshold of 30, a function the
+// linter already flags and a diff-scoped run cannot re-flag).
+func flushOTLPExporters(ctx context.Context) error {
+	flushCtx, cancel := context.WithTimeout(ctx, otlpShutdownFlushBudget)
+	defer cancel()
+	if err := globalOTLPTraces.Flush(flushCtx); err != nil {
+		logger.Printf("OTLP traces shutdown flush error: %v", err)
+	}
+	if err := globalOTLP.Flush(flushCtx); err != nil {
+		logger.Printf("OTLP metrics shutdown flush error: %v", err)
+	}
+	return nil
 }
 
 // registerLateShutdownHooks registers the budget-bound shutdown hooks: scan
@@ -494,6 +542,7 @@ func registerLateShutdownHooks(reg *shutdownRegistry, s *startupState, proxySrv 
 		_ = audit.Close() // best-effort FD release
 		return nil
 	})
+	reg.Register("otlp-flush", shutdownOrderOTLPFlush, flushOTLPExporters)
 	reg.Register("log-closer", shutdownOrderLogCloser, func(context.Context) error {
 		if s.logCloser != nil {
 			_ = s.logCloser.Close()
