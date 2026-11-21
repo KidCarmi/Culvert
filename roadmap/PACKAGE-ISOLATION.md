@@ -591,6 +591,7 @@ conflict textually, and the IM-021 row is added once they merge):
 | Depends on | — (#1981 touches `inspect_host_pin*.go` and `internal/hostpin`; #1985 touches `saas_feed_floor.go`, `_activation.go`, `_authority.go` and `internal/urlcatfeed`; no open PR changes `saas_feed_genstore.go`, `cdr_lineage.go`, `cdr_ui.go` or `cdr_health.go`) |
 | Evidence | ADR-0054; 2 exported names (`New`, `Mutex`) and one method (`Lock`); body moved statement for statement; 9 call sites in 4 root files name the package, no root binding; no existing test named the type, so none moved or changed; 6 new engine tests, boundary test with 9 negative controls, 4 mutation checks |
 | Risks | the lock orders CDR renew/revoke/delete/enroll and same-id generation persists. The algorithm is unchanged and the root tests of both owners pass unedited |
+| PR | #1988 |
 | Next action | review PR |
 
 - **Reconciled.** #1981 (IM-019) and #1985 (IM-020) are open; on both, every
