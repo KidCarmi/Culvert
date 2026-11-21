@@ -46,11 +46,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 
 	"github.com/KidCarmi/Culvert/internal/catoverride"
+	"github.com/KidCarmi/Culvert/internal/urlcatfeed/noderecord"
 )
 
 // ─── constants ──────────────────────────────────────────────────────────────────
@@ -148,13 +148,9 @@ func (r saasFeedAuthorityRecord) sansCRC() saasFeedAuthorityRecordSansCRC {
 }
 
 // saasFeedAuthorityComputeCRC derives the crc32c string (8 lowercase hex) over the
-// crc-omitted canonical bytes (reuses the F3b-1 canonical encoder + Castagnoli table).
+// crc-omitted canonical bytes (the node-local record seal, internal/urlcatfeed/noderecord).
 func saasFeedAuthorityComputeCRC(r saasFeedAuthorityRecord) (string, error) {
-	b, err := floorCanonicalBytes(r.sansCRC())
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%08x", crc32.Checksum(b, floorCRCTable)), nil
+	return noderecord.Seal(r.sansCRC())
 }
 
 // encodeSaaSFeedAuthorityRecord (re)computes crc32c and returns the full canonical bytes.

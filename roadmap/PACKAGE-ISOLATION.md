@@ -833,3 +833,61 @@ conflict textually; the row is added once they merge):
   other IM-002 blocker). IM-010 still needs a benchgate measurement; its
   three files are mostly process-global atomics, log throttles and HTTP
   writers, so only the pure bound predicates are candidates.
+
+### IM-020 saas-feed node-local record codec (EXTRACT, 2026-11-21, main `0fe4578`)
+
+Task record (the IM-020 table row is added by open #1981, which edits the
+table; this section sits at a different anchor so the two PRs do not conflict
+textually, and the row's status is updated once #1981 merges):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-020: canonical bytes + CRC-32C seal of the F3 node-local records → `internal/urlcatfeed/noderecord` |
+| Status | **implementation under review** |
+| Depends on | — (#1981 touches `inspect_host_pin*.go` and `internal/hostpin` only; no open PR changes `saas_feed_*.go` or `internal/urlcatfeed`) |
+| Evidence | ADR-0053; 4 exported names (`Canonical`, `Checksum`, `Seal`, `ValidChecksum`); `urlcatfeed` exports its one encoder as `CanonicalJSON`; root keeps `floorCanonicalBytes` and `validCRC32Hex` as bindings, so the six calling files and every existing root test are unchanged; frozen-oracle differential tests, RFC 3720 vectors, fuzz target, boundary test with negative controls; activation and authority record bytes captured from main before the bind |
+| Risks | the bytes and the checksum decide whether a record already on disk is accepted after an upgrade. Pinned by the three records' full-byte goldens and six mutation checks |
+| Next action | review PR |
+
+- **Reconciled.** #1981 (IM-019) is open with every non-skipped check passed
+  and no review thread, so there was nothing to fix. IM-016 (#1975) is merged.
+  IM-005/IM-006 stay blocked on #1526. The appliance set (#1528, #1536,
+  #1548, #1549, #1705) does not contain the saas-feed files' current blobs.
+- **The lead's question, answered.** "Feed-protocol grammar or node-local
+  format" was both, in two parts. `floorCanonicalBytes` was a second copy of
+  `urlcatfeed.canonicalJSON` (the same finding as IM-012), so the byte form
+  is the protocol's and there is now one encoder. The CRC-32C seal is
+  node-local corruption detection and is not authenticity, so it does not
+  belong in the protocol's trust kernel; it is the new subpackage's.
+- **Moved:** the encoder copy (deleted, bound to the protocol's), the
+  Castagnoli seal and its `%08x` form, the 8-lowercase-hex predicate.
+  `floorCRCTable`, `isLowerHex` and `isHexByte` are gone from root.
+  **Stays main:** the four record types, their field validation, strict
+  decoders, sentinel errors, files, the floor quorum and `validGenerationID`.
+- **Size.** 3 root production files edited (−58/+26 lines), 1 line-group
+  added to `internal/urlcatfeed/jsonstrict.go`, 2 new production files. No
+  existing test moved or edited; root inventory 8,352 → 8,354 (2 new tests, none removed), package 12 entries.
+- **Effect on IM-002.** Modest and stated as such: other root files now read
+  22 names from `saas_feed_floor.go`, not 23 (`floorCRCTable` is gone);
+  `floorCanonicalBytes` leaves the count only when its six callers name the
+  package. IM-002 and IM-003 stay blocked on surface.
+- **Next.** The IM-018 prerequisite, which is in main and needs no package:
+  the CDR pool supplies its breaker's clock at construction and resolves the
+  fallback deadline before it builds a breaker. First step: read
+  `newCDRBreaker`'s callers and the three test files that call `b.setNowFn`
+  on a pool-built breaker (`cdr_breaker_nonrpc_probe_test.go`,
+  `cdr_breaker_wedge_chaos_test.go`, `cdr_rpc_reservation_wall_test.go`), and
+  decide whether a pool option carries the clock. Smaller and independent:
+  one strict decoder for the three F3 records (same shape, different
+  sentinels; needs a differential test over the rejection table in
+  `TestFloor_StrictDecode_Rejections`). Then IM-014 mapping.
+- **Discovered, not fixed here (pre-existing on main `0fe4578`).**
+  `go test -race -count=2 -shuffle=1795244492712948356 -run
+  'IM020|Floor|F3b|F3c|Activation|Authority|SaaSFeed|SaasFeed|Genstore|GenStore|Generation|Reverify|ADRNumbering|Urlcat|URLCat' .`
+  fails identically on unmodified main:
+  `TestDec2EB_RotationChangesObservableGeneration`
+  (`decryption_2eb_red_test.go:186`) reports the same `key_id` before and
+  after a rotation. The selection matched it only through the word
+  `Generation`; it is a decryption-redaction test and shares no file with
+  this change. It passes under other orders, so it depends on what ran
+  before it. Not diagnosed further here.
