@@ -52,13 +52,13 @@ func TestLiveQuiesceRehearsal_FullSequence(t *testing.T) {
 	<-inflightStarted
 	// Wait until the in-flight execution has been admitted (in-flight count == 1) — deterministic via
 	// the observable count, not a sleep.
-	if !waitForLiveTier(func() bool { return lt.inFlightCount() == 1 }, 5*time.Second) {
-		t.Fatalf("one execution must be in flight before quiesce, got %d", lt.inFlightCount())
+	if !waitForLiveTier(func() bool { return lt.InFlightCount() == 1 }, 5*time.Second) {
+		t.Fatalf("one execution must be in flight before quiesce, got %d", lt.InFlightCount())
 	}
 	// Quiesce on a goroutine — it un-arms immediately, then drains the one in-flight execution.
 	quiesceDone := make(chan int, 1)
 	go func() { quiesceDone <- quiesceLiveTier(capb, 5*time.Second) }()
-	if !waitForLiveTier(func() bool { return !lt.armed() }, 5*time.Second) {
+	if !waitForLiveTier(func() bool { return !lt.IsArmed() }, 5*time.Second) {
 		t.Fatal("quiesce must un-arm the tier before draining")
 	}
 	// Live is now OFF — the demote precondition (§15 "quiesce the live tier before the demotion").
@@ -82,7 +82,7 @@ func TestLiveQuiesceRehearsal_FullSequence(t *testing.T) {
 	// ── PROOF 3: kill terminates the side-effect eligibility window. ──
 	// Re-arm, engage the emergency kill, and prove a subsequent execution is refused at the boundary
 	// (upstream not reached) with the emergency reason.
-	if err := lt.arm(true, "armed"); err != nil {
+	if err := lt.Arm(true, "armed"); err != nil {
 		t.Fatalf("re-arm for kill proof: %v", err)
 	}
 	getMCPRollout().gateway.EngageKillSwitch("rehearsal", now.UnixNano())
@@ -123,9 +123,9 @@ func TestLiveQuiesceRehearsal_FullSequence(t *testing.T) {
 	// ── PROOF 5: persist/recover — a restart does NOT re-arm. ──
 	// The lifecycle re-composes on restart but never re-arms (§17); the canary runtime restore does
 	// not restore a demoted generation as armed.
-	lt.disarmForRestart()
+	lt.DisarmForRestart()
 	globalCanaryRuntime.restore() // re-read durable canary-runtime state (the demotion removed/disarmed it)
-	if lt.State() != liveTierComposed || lt.armed() {
+	if lt.State() != liveTierComposed || lt.IsArmed() {
 		t.Fatalf("restart posture must be composed+unarmed, got %s", lt.State())
 	}
 	if globalCanaryRuntime.armed(capb) {
@@ -135,10 +135,10 @@ func TestLiveQuiesceRehearsal_FullSequence(t *testing.T) {
 
 	// ── PROOF 6: live trust is not resurrected / evidence preserved. The tier is composed (executor
 	// still installed) but unarmed, and admits no new execution. ──
-	if !lt.composed() {
+	if !lt.IsComposed() {
 		t.Fatal("the executor stays composed across the rehearsal (evidence/trust preserved)")
 	}
-	if _, ok := lt.admitExecution(); ok {
+	if _, ok := lt.AdmitExecution(); ok {
 		t.Fatal("an unarmed tier admits no execution (trust cannot be resurrected into a live grant)")
 	}
 	proofs = append(proofs, "live_trust_not_resurrected")

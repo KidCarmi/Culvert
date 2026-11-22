@@ -16,6 +16,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/events"
 	evmodel "github.com/KidCarmi/Culvert/internal/mcp/events/model"
+	"github.com/KidCarmi/Culvert/internal/mcp/events/qualarchive"
 	mcpruntime "github.com/KidCarmi/Culvert/internal/mcp/runtime"
 )
 
@@ -46,20 +47,6 @@ func buildReadyTelemetry(t *testing.T) *telemetryRuntime {
 	t.Cleanup(func() { _ = rt.Close(context.Background()); publishMCPTelemetry(mcpTelemNotConfigured, "", nil) })
 	return rt
 }
-
-// denialEvent crafts a safe P-DEN model event with a controlled digest (exporter
-// unit tests need deterministic identities without a live pipeline).
-func denialEvent(digest string) evmodel.Event {
-	return evmodel.Event{
-		SchemaVersion: evmodel.SchemaVersion,
-		Capability:    evmodel.CapGateway,
-		Partition:     evmodel.PartDen,
-		EventID:       "ev-" + digest,
-		EventDigest:   digest,
-	}
-}
-
-// ── configuration & startup ──────────────────────────────────────────────────
 
 func TestTelemetry_DisabledIsNoOp(t *testing.T) {
 	rt, state, err := buildMCPTelemetry(mcpTelemetryStartupConfig{Enabled: false})
@@ -228,81 +215,6 @@ func TestTelemetry_CorrectProviderRecoversWrongFailsClosed(t *testing.T) {
 	}
 }
 
-// ── archive exporter ─────────────────────────────────────────────────────────
-
-func TestArchiveExporter_AtomicIdempotentConflict(t *testing.T) {
-	dir := t.TempDir()
-	exp, err := newQualArchiveExporter(dir, 1<<20)
-	if err != nil {
-		t.Fatalf("new exporter: %v", err)
-	}
-	batch := []evmodel.Event{denialEvent("d1"), denialEvent("d2"), denialEvent("d3")}
-
-	n, err := exp.Export(context.Background(), batch)
-	if err != nil || n != 3 {
-		t.Fatalf("export = (%d,%v), want (3,nil)", n, err)
-	}
-	// Idempotent retry: same batch accepted again, still one file.
-	n, err = exp.Export(context.Background(), batch)
-	if err != nil || n != 3 {
-		t.Fatalf("idempotent retry = (%d,%v)", n, err)
-	}
-	if got := countFiles(t, dir); got != 1 {
-		t.Fatalf("archive files = %d, want 1 (idempotent)", got)
-	}
-	// Conflict: same batch identity (first/last/count) but different middle content.
-	conflict := []evmodel.Event{denialEvent("d1"), denialEvent("dX"), denialEvent("d3")}
-	if _, err := exp.Export(context.Background(), conflict); err == nil {
-		t.Fatal("conflicting batch under the same identity must be rejected")
-	}
-}
-
-func TestArchiveExporter_SaturationNoSilentDrop(t *testing.T) {
-	dir := t.TempDir()
-	exp, err := newQualArchiveExporter(dir, 8) // 8-byte cap: any real batch exceeds it
-	if err != nil {
-		t.Fatalf("new exporter: %v", err)
-	}
-	n, err := exp.Export(context.Background(), []evmodel.Event{denialEvent("d1")})
-	if err == nil || n != 0 {
-		t.Fatalf("saturated export must reject (0,err), got (%d,%v)", n, err)
-	}
-	if countFiles(t, dir) != 0 {
-		t.Fatal("saturated export must not write (spool retained, no silent drop)")
-	}
-	if !exp.stats().Saturated {
-		t.Fatal("exporter must report saturated state")
-	}
-}
-
-func TestTelemetryCursor_DurableAndPerPartition(t *testing.T) {
-	dir := t.TempDir()
-	cs, err := newTelemetryCursorStore(dir)
-	if err != nil {
-		t.Fatalf("cursor store: %v", err)
-	}
-	if err := cs.advance(evmodel.PartDen, 42); err != nil {
-		t.Fatalf("advance: %v", err)
-	}
-	if err := cs.advance(evmodel.PartDen, 10); err != nil { // backward is a no-op
-		t.Fatalf("backward advance: %v", err)
-	}
-	if got := cs.get(evmodel.PartDen); got != 42 {
-		t.Fatalf("cursor = %d, want 42 (monotonic)", got)
-	}
-	if got := cs.get(evmodel.PartCrit); got != 0 {
-		t.Fatalf("crit cursor = %d, want 0 (per-partition isolation)", got)
-	}
-	// Restart: a fresh store loads the durable cursor.
-	cs2, err := newTelemetryCursorStore(dir)
-	if err != nil {
-		t.Fatalf("reopen cursor store: %v", err)
-	}
-	if got := cs2.get(evmodel.PartDen); got != 42 {
-		t.Fatalf("restarted cursor = %d, want 42", got)
-	}
-}
-
 // ── live runtime denial path (end-to-end, real listener + pipeline) ───────────
 
 // TestTelemetry_LiveDenialCommitsAndExports drives the REAL mTLS listener + pipeline
@@ -374,7 +286,7 @@ func TestTelemetry_LiveDenialCommitsAndExports(t *testing.T) {
 	if h.DenialAggregates == 0 {
 		t.Fatal("expected a durably committed denial aggregate")
 	}
-	if es := tel.exporter.stats(); es.ExportedEvents == 0 || es.BatchesOK == 0 {
+	if es := tel.exporter.Stats(); es.ExportedEvents == 0 || es.BatchesOK == 0 {
 		t.Fatalf("expected an archived denial aggregate, exporter=%+v", es)
 	}
 	// No Management events were produced by Gateway traffic.
@@ -438,44 +350,41 @@ func TestTelemetry_EventReaderIsRealPath(t *testing.T) {
 	}
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-func countFiles(t *testing.T, root string) int {
-	t.Helper()
-	n := 0
-	_ = filepath.Walk(root, func(_ string, info os.FileInfo, _ error) error {
-		if info != nil && info.Mode().IsRegular() {
-			n++
-		}
-		return nil
-	})
-	return n
-}
-
-// TestValidateBatch_AcceptsV1AndV2RejectsUnknown pins the SHADOW-EVIDENCE-ROUTING-1
-// qualification-archive fix: the export-pump batch validator must accept a SUPPORTED
-// schema version — v1 AND the v2 durable-Shadow-evidence envelope — not just the default
-// v1. A hardcoded `!= v1` check would reject the first v2 Shadow event, and because the
-// pump retries an all-or-nothing batch without advancing its cursor, that would wedge the
-// whole partition out of the durable archive (Codex P1, PR #1235). A genuinely unknown
-// version is still rejected. Mutation: reverting to `!= evmodel.SchemaVersion` fails the
-// v2 assertion below.
-func TestValidateBatch_AcceptsV1AndV2RejectsUnknown(t *testing.T) {
-	v2 := func(d string) evmodel.Event {
+// TestTelemetry_ErrClassReadsArchiveErrors pins the one contract that crosses
+// the qualarchive boundary by text: exportStep reduces an export error to a
+// bounded reason class with errClass, which matches on the archive's fixed
+// phrases. A reworded phrase in internal/mcp/events/qualarchive would turn a
+// conflict or a full archive into "write_error" in health and metrics.
+func TestTelemetry_ErrClassReadsArchiveErrors(t *testing.T) {
+	ev := func(digest string) evmodel.Event {
 		return evmodel.Event{
-			SchemaVersion: evmodel.SchemaVersionV2, Capability: evmodel.CapGateway,
-			Partition: evmodel.PartCrit, EventID: "ev-" + d, EventDigest: d,
+			SchemaVersion: evmodel.SchemaVersion, Capability: evmodel.CapGateway,
+			Partition: evmodel.PartDen, EventID: "ev-" + digest, EventDigest: digest,
 		}
 	}
-	if _, _, err := validateBatch([]evmodel.Event{denialEvent("d1"), denialEvent("d2")}); err != nil {
-		t.Fatalf("a v1 batch must validate: %v", err)
+	exp, err := qualarchive.NewExporter(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatalf("new exporter: %v", err)
 	}
-	if _, _, err := validateBatch([]evmodel.Event{v2("a"), v2("b")}); err != nil {
-		t.Fatalf("a v2 shadow batch must validate (else its partition wedges out of the archive): %v", err)
+	if _, err := exp.Export(context.Background(), []evmodel.Event{ev("d1"), ev("d2"), ev("d3")}); err != nil {
+		t.Fatalf("export: %v", err)
 	}
-	bad := v2("c")
+	_, conflict := exp.Export(context.Background(), []evmodel.Event{ev("d1"), ev("dX"), ev("d3")})
+	if got := errClass(conflict); got != "conflict" {
+		t.Fatalf("errClass(%v) = %q, want conflict", conflict, got)
+	}
+	full, err := qualarchive.NewExporter(t.TempDir(), 8)
+	if err != nil {
+		t.Fatalf("new exporter: %v", err)
+	}
+	_, saturated := full.Export(context.Background(), []evmodel.Event{ev("d1")})
+	if got := errClass(saturated); got != "saturated" {
+		t.Fatalf("errClass(%v) = %q, want saturated", saturated, got)
+	}
+	bad := ev("d9")
 	bad.SchemaVersion = unknownSchemaVersion
-	if _, _, err := validateBatch([]evmodel.Event{bad}); err == nil {
-		t.Fatal("an unsupported schema version must be rejected")
+	_, rejected := exp.Export(context.Background(), []evmodel.Event{bad})
+	if got := errClass(rejected); got != "write_error" {
+		t.Fatalf("errClass(%v) = %q, want write_error", rejected, got)
 	}
 }
