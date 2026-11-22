@@ -72,10 +72,24 @@ import (
 // ── Deliberately NOT done ───────────────────────────────────────────────────
 //
 // A rule scoped only by category, category group, country, source or schedule
-// gets minLen == 0 and no prefilter: its predicates are not suffix-anchored and
-// are already amortized to O(1) per rule by their own per-scan scratch
-// (hostCatScratch, clientSource). Widening the row to cover them is a separate
-// concern and a separate measurement, not a free extension of this one.
+// gets minLen == 0 and no prefilter: its predicates are not suffix-anchored.
+// Widening the row to cover them is a separate concern and a separate
+// measurement, not a free extension of this one.
+//
+// CORRECTION (measured): this note used to add that those predicates "are
+// already amortized to O(1) per rule by their own per-scan scratch
+// (hostCatScratch, clientSource)". That holds for a category-GROUP rule — one
+// fusion per scan, then a catSet probe, ~9 ns per rule — and it does NOT hold
+// for a SINGLE-category (destCategory) rule. hostCatScratch hoists that path's
+// host-only halves, not the membership probe itself, so each such rule still
+// folds its category key, takes that category's host set out of the forward
+// index and walks the destination exact-then-every-suffix against it: measured
+// 107 ns per rule, 13.9 µs per request at 200 rules against an uncategorized
+// destination. See policy_category_realistic_bench_test.go, which also explains
+// why BenchmarkPolicyEvaluate_CategoryRules does not show this. Amortizing it
+// from the scan's memoized CLASSIFICATION is fail-open and is forbidden by
+// policy_hostcat_classification_oracle_test.go; a sound fix has to come from
+// the forward index the membership probes themselves read.
 
 // policyScanTailMax is how many trailing pattern bytes a row packs. Eight is
 // the widest that fits one register-sized field, and long enough that the
