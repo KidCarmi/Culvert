@@ -11,10 +11,11 @@ package main
 //   - the Manager injected as the Gateway runtime's Deps.Events (denials commit on
 //     live requests; decision events stay pending-policy while Policy is absent);
 //   - a node-local, bounded, fsync-before-ack, idempotent qualification ARCHIVE
-//     exporter (implements internal/mcp/events/export.Exporter) — the first
-//     production-capable sink, NOT a network SIEM;
-//   - restart-safe per-partition export cursors (advanced only after a durable
-//     archive acceptance);
+//     exporter (internal/mcp/events/qualarchive; implements
+//     internal/mcp/events/export.Exporter) — the first production-capable sink,
+//     NOT a network SIEM;
+//   - restart-safe per-partition export cursors (same package; advanced here only
+//     after a durable archive acceptance);
 //   - a bounded denial-flush loop + per-partition export loops (no goroutine per
 //     event, no busy loop);
 //   - truthful telemetry health + low-cardinality metrics (mcp_telemetry_metrics.go).
@@ -26,9 +27,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -36,9 +34,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/mcp/events"
 	evmodel "github.com/KidCarmi/Culvert/internal/mcp/events/model"
+	"github.com/KidCarmi/Culvert/internal/mcp/events/qualarchive"
 	"github.com/KidCarmi/Culvert/internal/mcp/limits"
 	"github.com/KidCarmi/Culvert/internal/secret"
 )
@@ -59,8 +57,7 @@ const (
 	telemExportInterval = 1 * time.Second // export poll cadence (no busy loop)
 	telemRetryBackoff   = 50 * time.Millisecond
 
-	telemDirPerm  = 0o700
-	telemFilePerm = 0o600
+	telemDirPerm = 0o700
 )
 
 // mcpTelemetryClock is the events-manager clock. It defaults to the wall clock and is
@@ -125,8 +122,8 @@ func errTelemetry(msg string) error { return errors.New("mcp telemetry: " + msg)
 type telemetryRuntime struct {
 	nodeID     string
 	mgr        *events.Manager
-	exporter   *qualArchiveExporter
-	cursors    *telemetryCursorStore
+	exporter   *qualarchive.Exporter
+	cursors    *qualarchive.CursorStore
 	batchSize  int
 	maxRetries int
 
@@ -175,12 +172,12 @@ func buildMCPTelemetry(cfg mcpTelemetryStartupConfig) (*telemetryRuntime, mcpTel
 		return nil, mcpTelemInvalid, errTelemetry("event manager could not be opened")
 	}
 
-	exporter, err := newQualArchiveExporter(exportDir, clampMaxBytes(cfg.ExportMaxBytes))
+	exporter, err := qualarchive.NewExporter(exportDir, clampMaxBytes(cfg.ExportMaxBytes))
 	if err != nil {
 		_ = mgr.Close()
 		return nil, mcpTelemInvalid, errTelemetry("archive exporter could not be opened")
 	}
-	cursors, err := newTelemetryCursorStore(filepath.Join(dataDir, "export_cursors", "gateway"))
+	cursors, err := qualarchive.NewCursorStore(filepath.Join(dataDir, "export_cursors", "gateway"), gatewayPartitions)
 	if err != nil {
 		_ = mgr.Close()
 		return nil, mcpTelemInvalid, errTelemetry("export cursor store could not be opened")
@@ -402,9 +399,9 @@ func (t *telemetryRuntime) drainPartition(ctx context.Context, part evmodel.Part
 		if ctx.Err() != nil {
 			return
 		}
-		before := t.cursors.get(part)
+		before := t.cursors.Get(part)
 		t.exportStep(ctx, part)
-		if t.cursors.get(part) <= before {
+		if t.cursors.Get(part) <= before {
 			return
 		}
 	}
@@ -486,18 +483,18 @@ func (t *telemetryRuntime) exportStep(ctx context.Context, part evmodel.Partitio
 	if sp == nil {
 		return
 	}
-	cur := t.cursors.get(part)
+	cur := t.cursors.Get(part)
 	batch, seqs, _, err := sp.CommittedForExport(part, cur, t.batchSize)
 	if err != nil || len(batch) == 0 {
 		return
 	}
 	accepted, xerr := t.exportWithRetry(ctx, batch)
 	if xerr != nil || accepted < len(batch) {
-		t.exporter.noteFailure(errClass(xerr))
+		t.exporter.NoteFailure(errClass(xerr))
 		return
 	}
 	// Durable acceptance confirmed: advance the persistent cursor to the last seq.
-	if err := t.cursors.advance(part, seqs[len(seqs)-1]); err != nil {
+	if err := t.cursors.Advance(part, seqs[len(seqs)-1]); err != nil {
 		// Cursor persistence failed: do NOT treat the batch as fully exported. Leave
 		// the in-memory cursor unadvanced so the next tick retries from the same
 		// point. If new events commit before that retry, the re-read range is a
@@ -507,10 +504,10 @@ func (t *telemetryRuntime) exportStep(ctx context.Context, part evmodel.Partitio
 		// only for a byte-identical retry; across a cursor-persist gap the guarantee is
 		// "no loss, no false advance," not "no duplicate." Duplicates carry unique
 		// EventDigests and are dedupable downstream.
-		t.exporter.noteFailure("cursor_persist")
+		t.exporter.NoteFailure("cursor_persist")
 		return
 	}
-	t.exporter.noteExported(len(batch))
+	t.exporter.NoteExported(len(batch))
 }
 
 // exportWithRetry attempts the archive export up to maxRetries with a bounded
@@ -549,7 +546,7 @@ func (t *telemetryRuntime) exportLag(part evmodel.Partition) uint64 {
 	}
 	st := sp.Stats()
 	next := st.Partitions[part].NextSeq // next-to-assign; committed high ≈ next-1
-	cur := t.cursors.get(part)
+	cur := t.cursors.Get(part)
 	if next == 0 || next-1 <= cur {
 		return 0
 	}
@@ -573,343 +570,4 @@ func errClass(err error) string {
 	default:
 		return "write_error"
 	}
-}
-
-// ── durable export cursor store ─────────────────────────────────────────────────
-
-// telemetryCursorStore persists the per-partition export cursor durably (fsync via
-// fileutil.AtomicWrite) so a restart resumes exactly where the last acknowledged
-// batch left off. Cursors are monotonic and per-partition — one partition can never
-// overwrite another (distinct files), and this store is Gateway-only (a distinct
-// directory from any Management state).
-type telemetryCursorStore struct {
-	mu  sync.Mutex
-	dir string
-	cur map[evmodel.Partition]uint64
-}
-
-type cursorFile struct {
-	Cursor uint64 `json:"cursor"`
-}
-
-func newTelemetryCursorStore(dir string) (*telemetryCursorStore, error) {
-	if err := os.MkdirAll(dir, telemDirPerm); err != nil {
-		return nil, err
-	}
-	s := &telemetryCursorStore{dir: dir, cur: map[evmodel.Partition]uint64{}}
-	for _, part := range gatewayPartitions {
-		raw, err := os.ReadFile(filepath.Clean(s.path(part))) // #nosec G304 -- fixed enum-derived path under a cleaned root
-		if err != nil {
-			continue // absent ⇒ start at 0
-		}
-		var cf cursorFile
-		if json.Unmarshal(raw, &cf) == nil {
-			s.cur[part] = cf.Cursor
-		}
-	}
-	return s, nil
-}
-
-func (s *telemetryCursorStore) path(part evmodel.Partition) string {
-	return filepath.Join(s.dir, telemPartitionName(part)+".cursor")
-}
-
-func (s *telemetryCursorStore) get(part evmodel.Partition) uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.cur[part]
-}
-
-// advance persists a strictly-forward cursor (monotonic). A backward or equal value
-// is a no-op success; a forward value is durably written before the in-memory value
-// moves, so the persisted cursor never runs ahead of a durable acknowledgement.
-func (s *telemetryCursorStore) advance(part evmodel.Partition, seq uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if seq <= s.cur[part] {
-		return nil
-	}
-	b, err := json.Marshal(cursorFile{Cursor: seq})
-	if err != nil {
-		return err
-	}
-	if err := fileutil.AtomicWrite(s.path(part), b, telemFilePerm); err != nil {
-		return err
-	}
-	s.cur[part] = seq
-	return nil
-}
-
-// telemPartitionName maps a partition to a fixed, path/label-safe token (never a raw
-// or attacker-controlled string).
-func telemPartitionName(p evmodel.Partition) string {
-	switch p {
-	case evmodel.PartCrit:
-		return "crit"
-	case evmodel.PartOrd:
-		return "ord"
-	case evmodel.PartDen:
-		return "den"
-	default:
-		return "none"
-	}
-}
-
-// ── node-local qualification archive exporter (implements export.Exporter) ───────
-
-// qualArchiveExporter is the first production-capable sink: a node-local, bounded,
-// append-of-atomic-batches, idempotent archive of SAFE event envelopes. It is
-// ADDITIVE to the encrypted source spool (a failure here never erases spool
-// durability), performs NO network activity, stores only the safe envelope (never
-// raw spool frames, encrypted segment bytes, or request/response bodies), and
-// acknowledges a batch ONLY after it is durably fsynced (via fileutil.AtomicWrite).
-type qualArchiveExporter struct {
-	root     string
-	maxBytes int64
-
-	mu        sync.Mutex
-	bytesUsed int64
-	made      map[string]bool // created (cap/partition) dirs
-
-	// counters (read by health + metrics at scrape time)
-	exported   uint64
-	batchesOK  uint64
-	failures   uint64
-	saturated  bool
-	lastReason string
-	lastOKNano int64
-}
-
-// archiveBatch is the on-disk record: only safe fields. batch_id is a content-range
-// identity (capability|partition|first+last digest|count); content_hash covers every
-// event digest in order, so an identical retry is idempotent while a DIFFERENT batch
-// re-using the same range identity is detected as a conflict.
-type archiveBatch struct {
-	BatchID     string          `json:"batch_id"`
-	ContentHash string          `json:"content_hash"`
-	Capability  string          `json:"capability"`
-	Partition   string          `json:"partition"`
-	Count       int             `json:"count"`
-	FirstDigest string          `json:"first_digest"`
-	LastDigest  string          `json:"last_digest"`
-	Events      []evmodel.Event `json:"events"`
-}
-
-func newQualArchiveExporter(root string, maxBytes int64) (*qualArchiveExporter, error) {
-	if err := os.MkdirAll(root, telemDirPerm); err != nil {
-		return nil, err
-	}
-	e := &qualArchiveExporter{root: filepath.Clean(root), maxBytes: maxBytes, made: map[string]bool{}}
-	e.bytesUsed = dirSize(e.root) // restart-safe capacity accounting
-	return e, nil
-}
-
-// Export durably archives a bounded batch of safe events and returns the accepted
-// count. It is all-or-nothing: either the whole batch is fsynced and len(batch) is
-// returned, or nothing is written and (0, err) is returned (the spool + cursor stay
-// intact and the batch is retried). An identical batch already on disk is accepted
-// idempotently; a conflicting batch under the same identity is rejected.
-func (e *qualArchiveExporter) Export(_ context.Context, batch []evmodel.Event) (int, error) {
-	if len(batch) == 0 {
-		return 0, nil
-	}
-	capName, partName, err := validateBatch(batch)
-	if err != nil {
-		return 0, err
-	}
-	rec := buildArchiveBatch(batch, capName, partName)
-	body, err := json.Marshal(rec)
-	if err != nil {
-		return 0, errTelemetry("batch could not be encoded")
-	}
-
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	dir := filepath.Join(e.root, capName, partName)
-	path := filepath.Join(dir, rec.BatchID+".json")
-
-	if existing, ok := e.readExisting(path); ok {
-		if existing.ContentHash == rec.ContentHash {
-			return len(batch), nil // idempotent retry
-		}
-		e.lastReason = "conflict"
-		return 0, errTelemetry("conflicting duplicate batch identity")
-	}
-	// If a file already occupies this path (an unreadable/corrupt prior write —
-	// readExisting returned false above), its bytes were already counted at open by
-	// dirSize (or by an earlier successful write). Discount the old on-disk size FIRST
-	// so both the capacity check and the running total treat this as a replacement,
-	// not an addition — otherwise repairing a corrupt batch near the cap would wrongly
-	// saturate and could never advance the cursor.
-	var priorSize int64
-	if fi, statErr := os.Stat(path); statErr == nil {
-		priorSize = fi.Size()
-	}
-	if e.maxBytes > 0 && e.bytesUsed-priorSize+int64(len(body)) > e.maxBytes {
-		e.saturated = true
-		e.lastReason = "saturated"
-		return 0, errTelemetry("archive capacity saturated") // no silent drop; spool retained
-	}
-	if err := e.ensureDir(dir); err != nil {
-		e.lastReason = "write_error"
-		return 0, errTelemetry("archive directory is not usable")
-	}
-	if err := fileutil.AtomicWrite(path, body, telemFilePerm); err != nil {
-		e.lastReason = "write_error"
-		return 0, errTelemetry("archive batch write failed")
-	}
-	e.bytesUsed += int64(len(body)) - priorSize
-	e.batchesOK++
-	e.saturated = false
-	return len(batch), nil
-}
-
-func (e *qualArchiveExporter) readExisting(path string) (archiveBatch, bool) {
-	raw, err := os.ReadFile(filepath.Clean(path)) // #nosec G304 -- fixed hex-id path under a cleaned root
-	if err != nil {
-		return archiveBatch{}, false
-	}
-	var b archiveBatch
-	if json.Unmarshal(raw, &b) != nil {
-		return archiveBatch{}, false
-	}
-	return b, true
-}
-
-func (e *qualArchiveExporter) ensureDir(dir string) error {
-	if e.made[dir] {
-		return nil
-	}
-	if err := os.MkdirAll(dir, telemDirPerm); err != nil {
-		return err
-	}
-	e.made[dir] = true
-	return nil
-}
-
-func (e *qualArchiveExporter) noteExported(n int) {
-	e.mu.Lock()
-	e.exported += uint64(n) // #nosec G115 -- n is a batch length (>=0)
-	e.lastOKNano = time.Now().UnixNano()
-	e.mu.Unlock()
-}
-
-func (e *qualArchiveExporter) noteFailure(reason string) {
-	e.mu.Lock()
-	e.failures++
-	if reason != "" {
-		e.lastReason = reason
-	}
-	e.mu.Unlock()
-}
-
-// archiveStats is the safe exporter snapshot for health/metrics.
-type archiveStats struct {
-	ExportedEvents uint64
-	BatchesOK      uint64
-	Failures       uint64
-	Saturated      bool
-	BytesUsed      int64
-	MaxBytes       int64
-	LastReason     string
-	LastOKUnixNano int64
-}
-
-func (e *qualArchiveExporter) stats() archiveStats {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return archiveStats{
-		ExportedEvents: e.exported, BatchesOK: e.batchesOK, Failures: e.failures,
-		Saturated: e.saturated, BytesUsed: e.bytesUsed, MaxBytes: e.maxBytes,
-		LastReason: e.lastReason, LastOKUnixNano: e.lastOKNano,
-	}
-}
-
-// validateBatch verifies every event carries a SUPPORTED schema version (v1 or the v2
-// durable-Shadow-evidence envelope), a non-empty digest, and the SAME capability+partition
-// (a pump batch is single-partition). It rejects a genuinely unknown schema version and
-// returns the safe cap/partition names.
-//
-// This MUST accept every supported version, not just the default (v1): a Shadow decision
-// event is stamped SchemaVersionV2 (SHADOW-EVIDENCE-ROUTING-1), and because the export pump
-// retries an all-or-nothing batch without advancing its cursor, a hardcoded `!= v1` check
-// would let the first v2 Shadow event wedge its whole partition out of the durable archive —
-// exactly the evidence the activation verification requires to be flowing there.
-func validateBatch(batch []evmodel.Event) (capName, partName string, err error) {
-	c0, p0 := batch[0].Capability, batch[0].Partition
-	for i := range batch {
-		e := batch[i]
-		if !evmodel.SupportedSchemaVersion(e.SchemaVersion) {
-			return "", "", errTelemetry("unsupported event schema version")
-		}
-		if e.EventDigest == "" {
-			return "", "", errTelemetry("event missing digest")
-		}
-		if e.Capability != c0 || e.Partition != p0 {
-			return "", "", errTelemetry("mixed capability/partition in one batch")
-		}
-	}
-	return telemCapabilityName(c0), telemPartitionName(p0), nil
-}
-
-// buildArchiveBatch computes the deterministic identity + content hash and assembles
-// the safe on-disk record.
-func buildArchiveBatch(batch []evmodel.Event, capName, partName string) archiveBatch {
-	first, last := batch[0].EventDigest, batch[len(batch)-1].EventDigest
-	idH := sha256.New()
-	idH.Write([]byte(capName + "\x00" + partName + "\x00" + first + "\x00" + last + "\x00"))
-	countBytes := []byte(itoaLen(len(batch)))
-	idH.Write(countBytes)
-
-	contentH := sha256.New()
-	for i := range batch {
-		contentH.Write([]byte(batch[i].EventDigest))
-		contentH.Write([]byte{0})
-	}
-	return archiveBatch{
-		BatchID:     hex.EncodeToString(idH.Sum(nil)),
-		ContentHash: hex.EncodeToString(contentH.Sum(nil)),
-		Capability:  capName,
-		Partition:   partName,
-		Count:       len(batch),
-		FirstDigest: first,
-		LastDigest:  last,
-		Events:      batch,
-	}
-}
-
-func telemCapabilityName(c evmodel.Capability) string {
-	if c == evmodel.CapManagement {
-		return "management"
-	}
-	return "gateway"
-}
-
-// itoaLen renders a non-negative int without importing strconv into the hash path.
-func itoaLen(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}
-
-// dirSize sums the sizes of regular files under root (restart-safe archive capacity
-// accounting). Best-effort: an unreadable entry is skipped.
-func dirSize(root string) int64 {
-	var total int64
-	_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
-		if err == nil && info != nil && info.Mode().IsRegular() {
-			total += info.Size()
-		}
-		return nil
-	})
-	return total
 }

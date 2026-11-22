@@ -471,6 +471,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Adding to the blocklist now reports what the gateway actually stored
+  (Product Experience).** The admin UI's "Added N host(s)" / "Imported N hosts"
+  toast counted the lines it sent, not what `POST /api/blocklist` did with them.
+  Three outcomes were invisible: an entry longer than 253 characters was dropped
+  with only a log line; a repeat of an existing admin entry was a silent no-op;
+  and an entry that can never equal a destination hostname — a URL pasted from
+  an incident ticket (`https://evil.example/login`), a `host:port`, a trailing
+  dot, a Unicode IDN — was stored, listed in the table and enforced nothing,
+  because the blocklist is probed with the bare, normalized destination host.
+  The operator saw a success toast and a row, and the destination stayed
+  reachable (or, in allowlist mode, stayed blocked). The response now adds
+  `unchanged`, `skipped_count`/`skipped` and `warning_count`/`warnings`
+  (per-entry detail capped at 50, counts exact) next to the unchanged `added`,
+  and the Blocklist panel shows the server's count plus a persistent, dismissible
+  notice naming each affected entry and its reason. Description only: what is
+  accepted, stored, audited, versioned and matched is unchanged, and the
+  additions are fields on a response whose schema is an open object
+  (`TestBlocklistEntryMatchWarning_AgreesWithTheMatcher`, a differential check
+  against the real store, `TestBlocklistAdd_ReportsWhatActuallyHappened`,
+  `TestBlocklistAdd_FeedbackIsBounded`).
+
 - **Diagnostics now warns when SSL inspection does not verify origin
   certificates (Product Experience).** On an inspected tunnel the client sees
   only the certificate Culvert forges, so Culvert's check of the origin
@@ -599,6 +620,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   touch a lock owned by another plane.
 
 ### Fixed
+
+- **The CI-runner installer adds the runner account to the `docker` group
+  even when a lookalike name is present.** `scripts/install-runner.sh` decided
+  membership with `groups "$u" | grep -qw docker`, which also matches a
+  username such as `docker-ops` or an unrelated group such as `docker-users`
+  or `svc.docker`. The script then skipped `usermod -aG docker`, suppressed
+  the closing re-login note and reported success, while every job on the
+  runner failed with "permission denied" on the Docker socket. Both checks now
+  use the exact-name `user_in_docker_group` helper `scripts/install.sh`
+  already uses. Pinned by `install_runner_docker_group_membership_test.go`.
 
 - **A GeoIP database that could not be opened at startup is now loaded
   automatically once it becomes readable, without a restart.** When the

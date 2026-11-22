@@ -12,6 +12,7 @@ import (
 	"github.com/KidCarmi/Culvert/internal/mcp/adminapi"
 	"github.com/KidCarmi/Culvert/internal/mcp/events"
 	evmodel "github.com/KidCarmi/Culvert/internal/mcp/events/model"
+	"github.com/KidCarmi/Culvert/internal/mcp/events/qualarchive"
 )
 
 // TelemetryStatus is the safe, read-only telemetry readiness surfaced on the admin
@@ -119,15 +120,15 @@ func (t *telemetryRuntime) domainStatus() *TelemetryDomainStatus {
 	}
 	for _, part := range gatewayPartitions {
 		ps := d.Spool.Partitions[part]
-		out.Partitions[telemPartitionName(part)] = TelemetryPartitionStatus{
+		out.Partitions[qualarchive.PartitionName(part)] = TelemetryPartitionStatus{
 			Bytes:     ps.Bytes,
 			Quota:     int64(ps.Quota),
 			Records:   ps.Records,
-			Cursor:    t.cursors.get(part),
+			Cursor:    t.cursors.Get(part),
 			ExportLag: t.exportLag(part),
 		}
 	}
-	es := t.exporter.stats()
+	es := t.exporter.Stats()
 	out.Exporter = TelemetryExporterStatus{
 		Configured: true, Ready: true, Type: telemExportTypeArchive,
 		ExportedEvents: es.ExportedEvents, BatchesOK: es.BatchesOK, Failures: es.Failures,
