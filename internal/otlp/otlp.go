@@ -65,7 +65,7 @@ type PushHealth struct {
 	LastError     string `json:"lastError,omitempty"`
 	LastErrorAt   string `json:"lastErrorAt,omitempty"`   // RFC3339 UTC; empty = never
 	LastSuccessAt string `json:"lastSuccessAt,omitempty"` // RFC3339 UTC; empty = never
-	DroppedSpans  int64  `json:"droppedSpans,omitempty"`  // trace exporter only
+	DroppedSpans  int64  `json:"droppedSpans,omitempty"`  // trace exporter only: spans never delivered
 }
 
 // Health returns the current push-loop diagnostic snapshot.
@@ -98,12 +98,21 @@ func NewMetrics(snapshot SnapshotFunc) *MetricsExporter {
 
 // Configure sets the OTLP endpoint and starts the push loop.
 func (o *MetricsExporter) Configure(endpoint string, headers map[string]string) {
+	// CHAOS-126: normalise FIRST, then derive the start decision from the
+	// normalised value, exactly as SpanExporter.Configure does. Keeping the
+	// two different would have mattered beyond this exporter: the CP snapshot
+	// decides whether to reconfigure BOTH by comparing snap.OTLPEndpoint with
+	// the METRICS exporter's stored endpoint (controlplane_snapshot.go), so a
+	// snapshot endpoint carrying whitespace would have compared unequal on
+	// every single apply and reconfigured both exporters each time.
+	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
+
 	o.mu.Lock()
 	// Stop existing loop if reconfiguring.
 	if o.cancel != nil {
 		o.cancel()
 	}
-	o.endpoint = strings.TrimRight(endpoint, "/")
+	o.endpoint = endpoint
 	o.headers = headers
 	o.mu.Unlock()
 
@@ -127,6 +136,16 @@ func (o *MetricsExporter) Stop() {
 	}
 	o.endpoint = ""
 	o.mu.Unlock()
+}
+
+// Flush makes one bounded delivery attempt for the current metric snapshot.
+// The shutdown sequence calls it alongside the span exporter's Flush: a
+// cumulative counter's TERMINAL value is the one an operator wants at a
+// restart boundary, and the next process starts those counters at zero, so
+// the last interval's increments are otherwise unobservable for good
+// (CHAOS-126). A no-op when export is disabled.
+func (o *MetricsExporter) Flush(ctx context.Context) error {
+	return o.push(ctx)
 }
 
 // Enabled returns whether OTLP export is active.

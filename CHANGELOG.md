@@ -9,6 +9,62 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Request spans the collector never took are no longer destroyed, and the
+  counter that reports the loss can finally see it (`CHAOS-126`).** The OTLP
+  span exporter drained its ring buffer as the FIRST statement of every push
+  and discarded the batch on any error, so a collector that was down, slow or
+  returning 5xx destroyed every span it was handed. Because the ring was
+  emptied on each tick whatever the outcome, it could never FILL — which left
+  `droppedSpans`, documented as "ring-buffer overwrites (collector unreachable
+  + buffer full)", structurally unable to observe the one scenario its comment
+  named: 2000 spans recorded against a 502 collector produced 0 delivered,
+  0 buffered and `droppedSpans` 0. The buffer cap's stated purpose ("prevents
+  OOM when the collector is down") was vacuous for the same reason. A span is
+  a one-shot record — the metrics exporter beside it pushes a cumulative
+  snapshot, so a failed push there costs resolution and the next tick
+  re-derives everything, and nothing re-derives a span. The endpoint is now
+  read BEFORE the drain, and an undelivered batch returns to the front of the
+  ring whenever the collector did not take it for a reason that can change (a
+  transport error, 408, 429, any 5xx): retention, not a retry ladder — one POST
+  per interval either way, a bounded 4096 spans of memory, and every eviction
+  counted. Any other 4xx is the collector rejecting the batch itself, which
+  re-posting the same bytes cannot fix, so it is dropped AND counted rather
+  than pinning the buffer against spans that could still be delivered.
+  `droppedSpans` now means "never delivered" and every uncounted exit is
+  closed, including the buffer a disable or an endpoint change ends; the admin
+  UI row no longer attributes the count to a collector outage, because an
+  outage alone now loses nothing until the cap. Repointing at a different
+  collector no longer ships the previous window's client IPs, hostnames and
+  enforcement decisions to a destination the operator did not choose for them,
+  while a headers-only reconfigure keeps the buffer — including when the
+  repoint lands while a push is already in flight, where the batch is counted
+  and logged rather than retained for a destination it was not collected for.
+  `push` is serialized through a one-slot gate acquired under the caller's own
+  deadline, so two in-flight batches can no longer invert the buffer's
+  oldest-first order and make overflow evict the newest spans.
+- **The OTLP exporters are flushed at shutdown (`CHAOS-126`).** The push loop
+  has always carried a branch commented "Final flush on shutdown"; it could not
+  flush on a shutdown, because nothing in the shutdown sequence cancelled that
+  loop. The sequence flushed the cluster store, syslog, the community DB, the
+  log store, the request log and the audit FD, and left the one sink whose
+  entire state is a RAM ring buffer with no hook at all, so every graceful
+  restart lost up to a full push interval of request spans — uncounted and
+  unlogged. The only two callers that did cancel the loop were the disable
+  path, which clears the endpoint first (so the flush drained the buffer and
+  posted nothing), and a reconfigure, whose flush posted the old collector's
+  spans to the new one. A new `otlp-flush` hook runs after every durable
+  closer, so an off-box collector cannot spend reserve a local store needs, and
+  before the log closer, so its own diagnostics still reach the log file. It is
+  bounded to 2s and is a no-op when OTLP export is disabled, which is the
+  shipped default. The metrics exporter is flushed with it: a cumulative
+  counter's terminal value is the one an operator wants at a restart boundary,
+  and the next process starts those counters at zero. On failure the terminal
+  flush ENDS what it could not deliver and logs the count, rather than
+  retaining it into a ring that dies with the process: retention is the right
+  answer for a failure with a next interval ahead of it and the wrong answer
+  at the exit, where the log line is the only form in which the number
+  survives.
+
 - **An inspected tunnel's setup window is bounded on both legs
   (`CHAOS-125`, closing `CHAOS-32`).** Between the `200 Connection Established`
   an SSL-inspect rule sends and the established tunnel its enforcement loop
