@@ -70,10 +70,10 @@ func TestLiveProd_E2E_ComposesRealGraphNeverArms(t *testing.T) {
 	}
 	// COMPOSED, but NOT armed — the whole point (§16).
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	if !lt.composed() {
+	if !lt.IsComposed() {
 		t.Fatal("§23: tier must be composed")
 	}
-	if lt.armed() || liveExecDepsConfigured(false) {
+	if lt.IsArmed() || liveExecDepsConfigured(false) {
 		t.Fatal("§23: composition must NEVER arm the live tier")
 	}
 	// Status is truthful and complete.
@@ -227,7 +227,7 @@ func TestLiveProd_FailureMatrix_NeverArmsRecordsReason(t *testing.T) {
 			if cfg.Deps.Executor != nil {
 				t.Fatalf("§24 %s: a fail-closed path must NEVER install an executor", tc.name)
 			}
-			if mcpLiveTierFor(rollout.CapabilityGateway).composed() {
+			if mcpLiveTierFor(rollout.CapabilityGateway).IsComposed() {
 				t.Fatalf("§24 %s: a fail-closed path must NEVER mark the tier composed", tc.name)
 			}
 			if liveExecDepsConfigured(false) {
@@ -283,7 +283,7 @@ func TestLiveProd_ConcurrentCompositionAndReads(t *testing.T) {
 	wg.Wait()
 
 	// After all compositions, the tier is composed and — critically — still NOT armed.
-	if !mcpLiveTierFor(rollout.CapabilityGateway).composed() {
+	if !mcpLiveTierFor(rollout.CapabilityGateway).IsComposed() {
 		t.Fatal("§25: tier must be composed after concurrent composition")
 	}
 	if liveExecDepsConfigured(false) {
@@ -360,7 +360,7 @@ func TestLiveProd_MutationCampaign(t *testing.T) {
 		reg, cat := prodInventory()
 		cfg := &mcpruntime.Config{}
 		composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, nil)
-		if mcpLiveTierFor(rollout.CapabilityGateway).composed() {
+		if mcpLiveTierFor(rollout.CapabilityGateway).IsComposed() {
 			t.Fatal("M7: a failed composition must not leave the tier composed")
 		}
 	})
@@ -479,7 +479,7 @@ func TestLiveProd_InvalidateOnStartupFailureClearsComposed(t *testing.T) {
 	composeProductionGatewayLiveTier(cfg, requestedConfig(tempKEKPath(t)), reg, cat, ev)
 
 	// Precondition: composed + events_ready + inspection readiness recorded.
-	if !globalMCPLiveProd.snapshot().Composed || !mcpLiveTierFor(rollout.CapabilityGateway).composed() {
+	if !globalMCPLiveProd.snapshot().Composed || !mcpLiveTierFor(rollout.CapabilityGateway).IsComposed() {
 		t.Fatal("precondition: tier must be composed after composition")
 	}
 	if !globalMCPShadow.inspectionComposed.Load() {
@@ -496,7 +496,7 @@ func TestLiveProd_InvalidateOnStartupFailureClearsComposed(t *testing.T) {
 	if s.Deps.Events == liveDepEventsReady {
 		t.Fatal("events must no longer report ready after a listener that never started")
 	}
-	if mcpLiveTierFor(rollout.CapabilityGateway).composed() {
+	if mcpLiveTierFor(rollout.CapabilityGateway).IsComposed() {
 		t.Fatal("lifecycle tier must be reset to absent (a retry starts clean)")
 	}
 	// Live-only: the inspection readiness flag must be cleared (its provider was in the discarded cfg).
@@ -562,7 +562,7 @@ func TestLiveProd_PostArmingDegradationFailsClosed(t *testing.T) {
 	// Force-arm through the lifecycle object directly (bypassing the full node gate) to model an
 	// already-armed node, then degrade a dependency.
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	if err := lt.arm(true, "armed"); err != nil {
+	if err := lt.Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	if !liveExecDepsConfigured(false) {

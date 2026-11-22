@@ -351,7 +351,9 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-019 | `inspect_host_pin.go` predicate → `internal/hostpin` | **shipped** (merged 2026-11-21, `2421870`) | nightly shift | `main` | #1981 | — | ADR-0052; 1 exported name (`Pinned`); root keeps `innerHostPinnedToTunnel` as a binding, so `proxy_tunnel.go` is not edited; see "IM-019" below | — |
 | IM-020 | saas-feed node-local record codec → `internal/urlcatfeed/noderecord` | **shipped** (merged 2026-11-21, `58f4a44`) | nightly shift | `main` | #1985 | — | ADR-0053; 4 exported names; see "IM-020" below | — |
 | IM-021 | `keyedMutex` in `saas_feed_genstore.go` → `internal/keyedmutex` | **shipped** (merged 2026-11-21, `c5674f2`) | nightly shift | `main` | #1988 | — | ADR-0054; 2 exported names; see "IM-021" below | — |
-| IM-022 | directory-fsync rule (`fsyncDir`, `isBenignDirSyncErr`, the copy in `support_durable_write.go`) → `internal/fileutil` | **implementation under review** | nightly shift | `main` | #1989 | — | 2 exported names (`SyncDir`, `DirSyncUnsupported`); see "IM-022" below | review PR |
+| IM-022 | directory-fsync rule (`fsyncDir`, `isBenignDirSyncErr`, the copy in `support_durable_write.go`) → `internal/fileutil` | **shipped** (merged 2026-11-21, `ad886a2`) | nightly shift | `main` | #1989 | — | 2 exported names (`SyncDir`, `DirSyncUnsupported`); see "IM-022" below | — |
+| IM-023 | `mcp_inventory.go` inventory engine → `internal/mcp/qualinventory` | **shipped** (merged 2026-11-21, `ef94311`) | nightly shift | `main` | #1991 | — | ADR-0055; 7 exported names; see "IM-023" below | — |
+| IM-024 | `mcp_telemetry.go` archive exporter and export cursors → `internal/mcp/events/qualarchive` | **implementation under review** | nightly shift | `main` | #1992 | — | ADR-0056; 6 exported names; see "IM-024" below | review PR |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -833,6 +835,74 @@ conflict textually; the row is added once they merge):
   codec, generation store) and one. After that: the IM-018 prerequisite
   (pool-supplied breaker clock) and IM-014 mapping.
 
+### IM-026 listener fault reason rules (ORGANIZE, 2026-11-21, main `ef9431189`)
+
+Task record (open #1992 edits the task table and appends at the end of this
+file, and open #1993 inserts before the IM-023 section, so the IM-026 row is
+added once they merge; this section sits at a third anchor neither touches):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-026: the errno classes and the timeout rule repeated in `classifyAdminUIListenError`, `classifySOCKS5BindError`, `classifyScanSvcBindError` and `classifyCPGRPCBindError` → `internal/listenfault` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR changes `admin_ui_health.go`, `socks5_health.go`, `scan_svc_listener.go` or `cp_grpc_health.go`; the appliance branches edit `socks5_bind.go` and `admin_ui_listener_chaos_test.go`, which this change does not touch) |
+| Evidence | ADR-0058; 3 exported names (`Reason`, `ErrnoReason`, `TimedOut`); the four root functions stay as bindings, so no call site and no existing test is edited; a 2,597-error verdict table over all four classifiers whose digest and per-listener class counts were captured from main before the move; a 20,492-error differential test against a frozen copy of the pre-move switch; 8 mutation checks, each failing a test |
+| Risks | the class is the alert dedup key and a viewer-role diagnostics value. Every verdict is pinned per listener, including the two listeners whose tag order differs |
+| PR | #1997 |
+| Next action | review PR |
+
+- **Reconciled.** #1992 (IM-024): every non-skipped check passed, no review
+  thread. #1993 (IM-025): checks were still running when this run started,
+  none failed, no review thread. Nothing to fix in either. IM-005/IM-006 stay
+  blocked on #1526.
+- **Why this.** A walk of the 468 root production files for declarations
+  that read no name from another root file ranked `cp_grpc_health.go`,
+  `scan_svc_listener.go`, `socks5_health.go` and `admin_ui_health.go` second
+  to fifth. Their self-contained parts are four copies of one classifier.
+  The scan-sidecar copy's own comment recorded the convergence as "the open
+  half". This is duplicate-rule removal (the IM-012 and IM-022 shape), not a
+  new engine.
+- **Moved:** which errno is which class, and the rule that `network_error`
+  needs `Timeout()` to be true. **Stays main:** the four classifier
+  functions, each listener's stage tags and the order it tests them in, the
+  health records, supervisors, alerts, log lines and remedy texts.
+- **Size.** 4 root production files edited (+46/−103 lines), 2 new
+  production files (91 lines, 34 of them the package comment). Root test
+  inventory 8,601 → 8,602 (the verdict table); package 10 tests.
+- **The Control Plane table keeps its rows.** `TestChaos71_CPGRPCReasonTable`
+  walks `cpGRPCReasonRules` and requires a case per row, so the table was
+  not collapsed into one call; its four errno rows ask
+  `listenfault.ErrnoReason` for the class.
+- **ADR-0002.** No conflict: `*_health.go` probe adapters stay in main, and
+  what moved was not a probe.
+- **Program rule.** This is a third open program PR beside #1992 and #1993.
+  It shares no source file with either; all three edit this document at
+  different anchors.
+- **Found, not changed (pre-existing on main `ef9431189`).** The admin UI
+  classifier tests the errno before its certificate tag, so an unreadable
+  `-tls-key` (`EACCES` under `errAdminUITLSMaterial`) is reported as
+  `permission_denied`, whose runbook remedy is `CAP_NET_BIND_SERVICE`; the
+  runbook files that fault under `tls_certificate`. The Control Plane
+  classifier had the same order and was corrected in the review of #1556.
+  The fix is to test the tag first in `classifyAdminUIListenError`; it
+  changes a reported class, so it is the owner's to ask for. The verdict
+  table's admin UI counts (`tls_certificate` 509 against the Control Plane's
+  522) are that difference.
+- **Next.** IM-027, the retry-sleep rules the same four supervisors repeat:
+  the doubling ladder (`nextCPGRPCBindBackoff`, `nextSOCKS5BindBackoff`,
+  `nextScanSvcBindBackoff`) and the clamp that keeps a sleep from straddling
+  the unavailability threshold (`clampCPGRPCBindSleep`,
+  `clampSOCKS5BindSleep`). They would join `internal/listenfault` or a
+  sibling as pure functions taking the initial, ceiling, threshold and floor.
+  First step: read `scan_svc_listener.go`'s supervisor for how it bounds its
+  sleep without a clamp function, and compare `nextSOCKS5AcceptBackoff`
+  (`cur == 0`) with the bind ladders (`cur <= 0`) before assuming one
+  function serves all. Prerequisite: `socks5_bind.go` is edited by three
+  open appliance branches, so the SOCKS5 ladder waits for their disposition;
+  the two clamps are in files no open PR touches and can go first.
+  Independent alternatives, unchanged: `mcp_rollout_execdeps.go` after #1993,
+  one strict decoder for the three F3 records, then IM-014 mapping.
+
 ### IM-019 inner-host pin predicate (EXTRACT, 2026-11-20, main `0fe4578`)
 
 - **Reconciled.** IM-016 (#1975) merged on 2026-11-20; its row is updated. No
@@ -1007,6 +1077,69 @@ textually, and the row's status is updated once #1981 merges):
   this change. It passes under other orders, so it depends on what ran
   before it. Not diagnosed further here.
 
+### IM-025 MCP live-tier lifecycle (EXTRACT, 2026-11-21, main `ef9431189`)
+
+Task record (open #1992 edits the task table and appends at the end of this
+file, so the IM-025 row is added once it merges; this section sits before
+the IM-023 one, an anchor #1992 does not touch):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-025: the live-execution tier state machine in `mcp_live_tier.go`, and its drain wait in `mcp_live_arming.go` → `internal/mcp/livetier` |
+| Status | **implementation under review** (#1993) |
+| Depends on | — (no open PR changes `mcp_live_*.go`, `mcp_rollout*.go` or the two walls; #1992 edits `mcp_telemetry*.go` only) |
+| Evidence | ADR-0057; 10 exported names (`State` and its four values, two sentinel errors, `Tier`, `Options`, `New`), above the usual 8 and stated in the boundary test; method bodies moved with only names substituted; 13 root files change on renamed method calls only (checked by reversing the renames against main); 1 white-box test moved, 11 engine tests and a boundary pair added; 13 mutation checks, each failing a new test |
+| Risks | the tier decides live-execution admission and when the readiness bit the rollout commit gate reads is set. Lock order (commit lock → tier lock), the per-call resolution of the commit lock and the write-under-lock rule are pinned in the package; the root arming, gate, quiesce and race tests run unedited apart from the renames |
+| Next action | review PR |
+
+- **Reconciled.** #1991 (IM-023) merged on 2026-11-21. #1992 (IM-024) is
+  open with no failed check and no review thread; nothing to fix in it.
+  IM-005/IM-006 stay blocked on #1526.
+- **IM-018 (CDR breaker) re-read and still blocked, with a wider reason than
+  recorded.** The earlier note names three test files that install a clock
+  after construction. The coupling is larger: the six `cdr_breaker_*_test.go`
+  files (1,731 lines) interleave engine tests with pool, admin-handler and
+  sanitize-path tests that read `halfOpenTried`, `consecFails`, `staleProbes`
+  and `cfg.*` on a pool-built breaker (`cdr_breaker_nonrpc_probe_test.go`
+  alone has 18 such lines), and `TestCDRBreaker_ReservingCallsOnlyOnTheSanitizePath`
+  is an AST wall keyed on the root type name. Moving the type needs either
+  exported accessors that exist only for tests or a rewrite of fail-open
+  regression assertions into behavioral ones. Neither is a structural move.
+  The clock-at-construction prerequisite is necessary and not sufficient;
+  the breaker is correctly located until its integration tests stop reading
+  counters. Not scheduled.
+- **Why this file.** A parse-level walk of root production files of 120
+  lines or more that read at most six names from other root files.
+  `mcp_live_tier.go` read three, all replaceable by constructor options, and
+  was already an instance with its own lock.
+- **Moved:** the four states, both sentinel errors, the state and admission
+  rules, the in-flight count, the quiesce revocation and its lock order, the
+  bounded drain wait (from `mcp_live_arming.go`), and the status row.
+  **Stays main:** the two process tiers and `mcpLiveTierFor`, the wiring of
+  the readiness registry and `durableMu`, node-readiness evaluation, the
+  side-effect gate, composition and the log lines. Root file 424 → 83 lines.
+- **Two walls.** The execution-posture wall is unedited and passes; what it
+  proves narrows to the wiring, and the package pins the rest. The
+  credential-matrix allowlist entry for the not-ready error text moves to the
+  new path. Both are described in ADR-0057 and the second is an edit to an
+  existing test.
+- **ADR-0002 / ADR-0035.** No conflict: no composition moved and the
+  lifecycle is unchanged.
+- **Program rule.** This is a second open program PR beside #1992. They
+  share no source file; both edit this document at different anchors.
+- **Not done.** A typed status row in place of `map[string]any`; removing
+  the root bindings by naming the package at their uses.
+- **Next.** `mcp_rollout_execdeps.go` (156 lines, reads no root name) is the
+  registry this tier writes: two readiness tiers as four `atomic.Bool`s
+  behind `modeExecReady`. It is a candidate to join `internal/mcp/rollout`
+  as an instance-owned registry, which would let `modeExecReady` be tested
+  with its mode vocabulary beside it. First step: read
+  `mcp_execution_posture_test.go`'s `armingHookFile` wall and the 20 root
+  test files that name its functions, and decide whether the wall can key on
+  the package path. Prerequisite: this PR's disposition, since both touch
+  `mcp_live_tier.go`'s bindings. Independent alternatives, unchanged: one
+  strict decoder for the three F3 records, then IM-014 mapping.
+
 ### IM-023 qualification inventory document (EXTRACT, 2026-11-21, main `6795ec63a`)
 
 Task record (the table is edited by open #1989 and #1990, so the IM-023 row
@@ -1073,3 +1206,44 @@ an anchor neither touches):
   has no prerequisite and no open-PR overlap today. After it: the IM-018
   prerequisite (pool-supplied breaker clock), the single strict decoder for
   the three F3 records, then IM-014 mapping.
+
+### IM-024 qualification archive and export cursors (EXTRACT, 2026-11-21, main `ef94311`)
+
+- **Reconciled.** #1989 (IM-022) and #1991 (IM-023) merged on 2026-11-21 and
+  their rows above now say so. #1990, the second IM-022 PR, is no longer
+  open. No program PR was open at the start of this run. IM-005/IM-006 stay
+  blocked on #1526; no open PR touches `mcp_telemetry*.go` or
+  `internal/mcp/events`.
+- **Moved** (`mcp_telemetry.go:578-915`, 338 lines): `qualArchiveExporter`,
+  `archiveBatch`, `archiveStats`, `validateBatch`, `buildArchiveBatch`,
+  `telemetryCursorStore`, `telemPartitionName`, `telemCapabilityName`,
+  `itoaLen`, `dirSize`. **Stays main:** configuration validation, the KEK
+  provider, the events manager, the holder, the flush and export loops,
+  `exportStep` (which decides when a cursor advances), the shutdown drain,
+  `errClass` and `gatewayPartitions`. Root file 915 → 573 lines.
+- **First-step answers from the IM-023 note.** Durable writes go through
+  `fileutil.AtomicWrite` only, so the package adds no fsync or rename rule of
+  its own. Four tests reached unexported exporter or cursor names and moved;
+  one root test read `exporter.stats()` and now reads `Stats()`.
+  `internal/mcp/events/export` was not used as the home: it is the read
+  contract and the pump and has no filesystem dependency (ADR-0056).
+- **Format evidence.** The names and tree digest of seven files were captured
+  from the root functions on main before the move and are pinned in
+  `TestOnDiskFormat_UnchangedByTheMove`.
+- **One contract crosses the boundary by text.** Main's `errClass` matches
+  the archive's error phrases by substring. The phrases are pinned in the
+  package and a new root test runs real archive errors through `errClass`.
+  Typed errors would replace both; that is a behavior-adjacent change left
+  for the owner to ask for.
+- **ADR-0002.** No conflict: no composition moved.
+- **Not done.** No fuzz target: the engine's only parsed input is its own
+  batch and cursor files, read with `json.Unmarshal` into fixed shapes.
+- **Next.** The IM-018 prerequisite, unchanged from the IM-020 note and still
+  with no open-PR overlap: the CDR pool supplies its breaker's clock at
+  construction. First step: read `newCDRBreaker`'s callers and the three
+  test files that call `b.setNowFn` on a pool-built breaker
+  (`cdr_breaker_nonrpc_probe_test.go`, `cdr_breaker_wedge_chaos_test.go`,
+  `cdr_rpc_reservation_wall_test.go`). It matters because the breaker is the
+  one remaining small state machine whose extraction is blocked by a test
+  seam and not by surface. After it: one strict decoder for the three F3
+  records, then IM-014 mapping.

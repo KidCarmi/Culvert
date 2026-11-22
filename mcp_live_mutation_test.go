@@ -65,8 +65,8 @@ func liveMutationRoster() []liveMutation {
 func mutComposedNotArmed(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed()
-	if !lt.composed() || lt.armed() || liveExecDepsConfigured(false) {
+	lt.MarkComposed()
+	if !lt.IsComposed() || lt.IsArmed() || liveExecDepsConfigured(false) {
 		t.Fatal("composition must NEVER arm")
 	}
 }
@@ -75,8 +75,8 @@ func mutComposedNotArmed(t *testing.T) {
 func mutArmDoesNotActivate(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed()
-	if err := lt.arm(true, "armed"); err != nil {
+	lt.MarkComposed()
+	if err := lt.Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	if globalCanaryRuntime.armed(rollout.CapabilityGateway) {
@@ -198,10 +198,10 @@ func mutQuiesceRejectsCaught(t *testing.T) {
 func mutRestartNoReArm(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed()
-	_ = lt.arm(true, "armed")
-	lt.disarmForRestart()
-	if lt.armed() || liveExecDepsConfigured(false) {
+	lt.MarkComposed()
+	_ = lt.Arm(true, "armed")
+	lt.DisarmForRestart()
+	if lt.IsArmed() || liveExecDepsConfigured(false) {
 		t.Fatal("a restart must never re-arm")
 	}
 }

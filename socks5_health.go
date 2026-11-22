@@ -51,13 +51,12 @@ package main
 //   - alerts — `socks5_listener_down`.
 
 import (
-	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/listenfault"
 )
 
 const (
@@ -443,37 +442,19 @@ func noteSOCKS5DownWithRecovery(reason string, recoveryPending bool) {
 // socket, and one vocabulary across both listeners is what lets an operator
 // read either runbook.
 func classifySOCKS5BindError(err error) string {
-	if err == nil {
-		return "none"
-	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		switch errno {
-		case syscall.EADDRINUSE:
-			return "port_in_use"
-		case syscall.EACCES, syscall.EPERM:
-			return "permission_denied"
-		case syscall.EADDRNOTAVAIL:
-			return "address_unavailable"
-		case syscall.EMFILE, syscall.ENFILE:
-			return "descriptors_exhausted"
-		}
-	}
-	// `network_error` requires an actual TIMEOUT, not merely an error the net
-	// package wrapped. Every bind failure arrives as *net.OpError, which
-	// satisfies net.Error unconditionally (verified: Timeout() is false for a
-	// bind EINVAL), so an unqualified errors.As(&ne) branch swallows every
-	// unrecognised errno into a class that names the wrong subsystem and sends
-	// the operator down a network-troubleshooting path for a socket or
-	// permission fault — while making `listen_failed` unreachable for any real
-	// listen error. classifyAdminUIListenError had exactly this shape and was
-	// narrowed in the same change; its test only ever passed a bare
-	// errors.New, which is why the branch looked correct.
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return "network_error"
-	}
-	return "listen_failed"
+	// The errno classes and the timeout rule are internal/listenfault's
+	// (ADR-0058), shared with the other three listeners. `network_error`
+	// requires an actual TIMEOUT, not merely an error the net package wrapped.
+	// Every bind failure arrives as *net.OpError, which satisfies net.Error
+	// unconditionally (verified: Timeout() is false for a bind EINVAL), so an
+	// unqualified errors.As(&ne) branch swallows every unrecognised errno into
+	// a class that names the wrong subsystem and sends the operator down a
+	// network-troubleshooting path for a socket or permission fault — while
+	// making `listen_failed` unreachable for any real listen error.
+	// classifyAdminUIListenError had exactly this shape and was narrowed in
+	// the same change; its test only ever passed a bare errors.New, which is
+	// why the branch looked correct.
+	return listenfault.Reason(err)
 }
 
 // noteSOCKS5BindFailure records one failed bind attempt and returns whether the
