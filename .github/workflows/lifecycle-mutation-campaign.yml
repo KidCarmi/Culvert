@@ -1,0 +1,70 @@
+name: Lifecycle Mutation Campaign
+
+# Scheduled measurement, never a PR check and never a merge gate. It mutates
+# COPIES of the maintenance-agent lifecycle sources in a temp directory and
+# records which mutants the existing tests and the shadow conformance suite
+# each detect. Slow by nature (about 1h40m on 4 cores for 350 mutants), which
+# is why it is kept out of every pull-request path.
+
+on:
+  schedule:
+    - cron: "17 2 * * 6"   # Saturday 02:17 UTC
+  workflow_dispatch:
+    inputs:
+      cap:
+        description: "Maximum number of mutants (deterministic stride sample)"
+        required: false
+        default: "350"
+
+concurrency:
+  group: lifecycle-mutation-campaign
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    name: "Campaign · lifecycle mutation (scheduled)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
+
+      - name: Run campaign
+        env:
+          CAP: ${{ github.event.inputs.cap || '350' }}
+        run: |
+          case "$CAP" in ''|*[!0-9]*) echo "::error::cap must be a number"; exit 2 ;; esac
+          mkdir -p "$RUNNER_TEMP/mutation"
+          python3 -B test/lifecycle-conformance/mutation/mutate.py "$GITHUB_WORKSPACE" \
+            --cap "$CAP" --workers "$(nproc)" --out "$RUNNER_TEMP/mutation/mutation.json" \
+            | tee "$RUNNER_TEMP/mutation/summary.txt"
+
+      - name: The campaign left the checkout untouched
+        if: always()
+        run: git diff --exit-code
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Lifecycle mutation campaign"
+            echo '```'
+            cat "$RUNNER_TEMP/mutation/summary.txt" 2>/dev/null || echo "no result: campaign did not complete"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: lifecycle-mutation-campaign
+          path: ${{ runner.temp }}/mutation
+          retention-days: 30
+          if-no-files-found: warn
