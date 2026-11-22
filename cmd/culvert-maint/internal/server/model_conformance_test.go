@@ -156,13 +156,8 @@ func (r *confRig) hold() {
 	<-r.release
 }
 
-// onStart emulates the command. Returns canned stdout.
-func (r *confRig) onStart(cmd *exec.Cmd) error {
-	key := classify(cmd.Args)
-	r.mu.Lock()
-	r.counts[key]++
-	n := r.counts[key]
-	dg := argvDigest(cmd.Args)
+// record appends the command to the observed sequence. Caller holds r.mu.
+func (r *confRig) record(key, dg string) {
 	switch key {
 	case "ps":
 		if len(r.tokens) == 0 || r.tokens[len(r.tokens)-1] != "capture" {
@@ -173,6 +168,16 @@ func (r *confRig) onStart(cmd *exec.Cmd) error {
 	case "manifest", "backup", "up":
 		r.tokens = append(r.tokens, key)
 	}
+}
+
+// onStart emulates the command. Returns canned stdout.
+func (r *confRig) onStart(cmd *exec.Cmd) error {
+	key := classify(cmd.Args)
+	dg := argvDigest(cmd.Args)
+	r.mu.Lock()
+	r.counts[key]++
+	n := r.counts[key]
+	r.record(key, dg)
 	blockHere := r.block != nil && r.block.Cmd == key && r.block.N == n
 	r.mu.Unlock()
 	if blockHere {
@@ -184,66 +189,66 @@ func (r *confRig) onStart(cmd *exec.Cmd) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	m := r.mode(key, n)
-	var out string
-	switch key {
-	case "ps":
-		if m == "fail" {
-			r.failNext = true
-		} else if r.running == "" {
-			out = `[]`
-		} else {
-			out = `{"Service":"proxy","State":"running","ID":"abcdef012345"}`
-		}
-	case "cinspect":
-		out = `"sha256:` + cfgOf(r.running) + `"`
-	case "iinspect":
-		if r.nodigest && r.running == digOld {
-			out = `[{"RepoDigests":[]}]`
-		} else {
-			out = `[{"RepoDigests":["` + repo + `@sha256:` + r.running + `"]}]`
-		}
-	case "manifest":
-		out = `{"Descriptor":{"digest":"sha256:` + argvDigest(cmd.Args) + `"}}`
-		if m == "fail" {
-			r.failNext = true
-		}
-	case "backup":
-		if m == "fail" {
-			r.failNext = true
-		}
-	case "pull":
-		if m == "fail" {
-			r.failNext = true
-		}
-		if m == "corrupt_journal" {
-			ents, _ := os.ReadDir(r.jnl.Dir())
-			for _, e := range ents {
-				_ = os.WriteFile(filepath.Join(r.jnl.Dir(), e.Name()), []byte("{not json"), 0o600)
-			}
-		}
-	case "tag":
-		if m == "fail" {
-			r.failNext = true
-		} else {
-			r.tag = dg
-		}
-	case "up":
-		switch m {
-		case "fail_stale":
-			r.failNext = true
-		case "fail_recreated":
-			r.running = r.tag
-			r.failNext = true
-		case "ok_stale":
-		default:
-			r.running = r.tag
-		}
-	}
-	if out != "" {
+	if out := r.emulate(key, r.mode(key, n), dg); out != "" {
 		_, _ = cmd.Stdout.Write([]byte(out))
 	}
 	return nil
+}
+
+// emulate applies the command's effect on the fake Docker world under fault mode m and returns
+// its stdout. Caller holds r.mu.
+func (r *confRig) emulate(key, m, dg string) string {
+	if m == "fail" { // the command exits non-zero and changes nothing
+		r.failNext = true
+		if key != "manifest" {
+			return ""
+		}
+	}
+	switch key {
+	case "ps":
+		if r.running == "" {
+			return `[]`
+		}
+		return `{"Service":"proxy","State":"running","ID":"abcdef012345"}`
+	case "cinspect":
+		return `"sha256:` + cfgOf(r.running) + `"`
+	case "iinspect":
+		if r.nodigest && r.running == digOld {
+			return `[{"RepoDigests":[]}]`
+		}
+		return `[{"RepoDigests":["` + repo + `@sha256:` + r.running + `"]}]`
+	case "manifest":
+		return `{"Descriptor":{"digest":"sha256:` + dg + `"}}`
+	case "pull":
+		if m == "corrupt_journal" {
+			r.corruptJournal()
+		}
+	case "tag":
+		r.tag = dg
+	case "up":
+		r.emulateUp(m)
+	}
+	return ""
+}
+
+func (r *confRig) corruptJournal() {
+	ents, _ := os.ReadDir(r.jnl.Dir())
+	for _, e := range ents {
+		_ = os.WriteFile(filepath.Join(r.jnl.Dir(), e.Name()), []byte("{not json"), 0o600)
+	}
+}
+
+func (r *confRig) emulateUp(m string) {
+	switch m {
+	case "fail_stale":
+		r.failNext = true
+	case "fail_recreated":
+		r.running = r.tag
+		r.failNext = true
+	case "ok_stale":
+	default:
+		r.running = r.tag
+	}
 }
 
 func (r *confRig) onWait(_ *exec.Cmd) error {
@@ -470,6 +475,46 @@ func idRole(id string) string {
 	return role(id)
 }
 
+// commandsBeforeBlock drops the blocked command itself from the observed sequence (a blocked health
+// probe is never recorded). Consecutive captures are recorded once, so a blocked capture that
+// directly follows another one must be put back.
+func commandsBeforeBlock(tokens []string, blockCmd string, want []string) []string {
+	n := len(tokens)
+	if n == 0 || blockCmd == "health" {
+		return tokens
+	}
+	tokens = tokens[:n-1]
+	wantEndsInCapture := len(want) == 0 || want[len(want)-1] == "capture"
+	if blockCmd == "ps" && wantEndsInCapture && len(tokens) < len(want) {
+		tokens = append(tokens, "capture")
+	}
+	return tokens
+}
+
+// reconcileInputsAtCrash builds the decision input a startup reconciler would have: the REAL
+// journal record (validated by the real validateReconcileRefs) plus the fake Docker's truth.
+func (r *confRig) reconcileInputsAtCrash(rec *journal.Record) reconcileInputs {
+	valid, _ := validateReconcileRefs(rec, repo)
+	in := reconcileInputs{Kind: rec.Kind, Mode: rec.Mode, Phase: rec.Phase, Attempts: 0, MaxAttempts: 3, RefValid: valid,
+		TargetImageID: rec.TargetImageID, PriorImageID: rec.PriorImageID}
+	r.mu.Lock()
+	if r.running != "" {
+		in.RunningImageID = "sha256:" + cfgOf(r.running)
+		if !r.nodigest || r.running != digOld {
+			in.RunningDigests = []string{r.running}
+		}
+	}
+	in.TagDigests = []string{r.tag}
+	r.mu.Unlock()
+	if rec.TargetDigest != "" {
+		in.TargetDigests = []string{rec.TargetDigest}
+	}
+	if rec.PriorDigest != "" {
+		in.PriorDigests = []string{rec.PriorDigest}
+	}
+	return in
+}
+
 func TestModelConformance_CrashPoints(t *testing.T) {
 	_, vs := lifecyclemodel.Vectors()
 	if len(vs) == 0 {
@@ -495,37 +540,14 @@ func TestModelConformance_CrashPoints(t *testing.T) {
 				}
 				// The agent is now frozen exactly where the model says it crashed.
 				running, tag, tokens := r.world()
-				if n := len(tokens); n > 0 && v.Block.Cmd != "health" { // the blocked command itself was recorded
-					tokens = tokens[:n-1]
-					if v.Block.Cmd == "ps" && (len(v.Expect.CmdsBeforeBlock) == 0 || v.Expect.CmdsBeforeBlock[len(v.Expect.CmdsBeforeBlock)-1] == "capture") &&
-						len(tokens) < len(v.Expect.CmdsBeforeBlock) {
-						tokens = append(tokens, "capture")
-					}
-				}
+				tokens = commandsBeforeBlock(tokens, v.Block.Cmd, v.Expect.CmdsBeforeBlock)
 				recs, lerr := r.jnl.List()
 				if lerr != nil || len(recs) != 1 {
 					close(r.release)
 					t.Fatalf("expected exactly one journal record at the crash point, got %d err=%v", len(recs), lerr)
 				}
 				rec := recs[0]
-				valid, _ := validateReconcileRefs(&rec, repo)
-				in := reconcileInputs{Kind: rec.Kind, Mode: rec.Mode, Phase: rec.Phase, Attempts: 0, MaxAttempts: 3, RefValid: valid,
-					TargetImageID: rec.TargetImageID, PriorImageID: rec.PriorImageID}
-				r.mu.Lock()
-				if r.running != "" {
-					in.RunningImageID = "sha256:" + cfgOf(r.running)
-					if !(r.nodigest && r.running == digOld) {
-						in.RunningDigests = []string{r.running}
-					}
-				}
-				in.TagDigests = []string{r.tag}
-				r.mu.Unlock()
-				if rec.TargetDigest != "" {
-					in.TargetDigests = []string{rec.TargetDigest}
-				}
-				if rec.PriorDigest != "" {
-					in.PriorDigests = []string{rec.PriorDigest}
-				}
+				in := r.reconcileInputsAtCrash(&rec)
 				verdict := reconcileDecision(in)
 				close(r.release)
 				if !reflect.DeepEqual(tokens, v.Expect.CmdsBeforeBlock) {
@@ -615,6 +637,39 @@ func intersects(a, b []string) bool {
 	return false
 }
 
+// reconcilePropertyViolations checks the proposed properties RP1..RP7 for one input and returns
+// one "RPn violated: ..." line per violation.
+func reconcilePropertyViolations(in reconcileInputs, v reconcileVerdict) []string {
+	var out []string
+	fail := func(id, msg string) { out = append(out, id+" violated: "+msg) }
+	data := in.Kind == ops.KindRollbackCreate && in.Mode == "data"
+	exhausted := in.MaxAttempts > 0 && in.Attempts >= in.MaxAttempts
+	tagOnTarget := intersects(in.TagDigests, in.TargetDigests)
+	liveTarget := (in.RunningImageID != "" && in.RunningImageID == in.TargetImageID) || intersects(in.RunningDigests, in.TargetDigests)
+	priorKnown := in.PriorImageID != "" || len(in.PriorDigests) > 0
+	switch {
+	case data && v.Action != actDataManual:
+		fail("RP1", "a data rollback must never enter the image table")
+	case !data && !in.RefValid && v.Action != actLoudStop:
+		fail("RP2", "an unvalidated record must never drive a Docker action")
+	case !data && in.RefValid && exhausted && v.Action != actLoudStop:
+		fail("RP3", "exhausted reconcile attempts must stop loudly")
+	}
+	if v.Action == actRollbackToPrior && (!priorKnown || liveTarget || tagOnTarget) {
+		fail("RP4", "rollback only with a known prior, target not live, tag not on target")
+	}
+	if v.Action == actNoop && tagOnTarget {
+		fail("RP5", "never no-op while the tag is on the target")
+	}
+	if v.Action == actNoop && liveTarget {
+		fail("RP6", "never no-op while the target is live")
+	}
+	if w := reconcileDecision(flipPrefixes(in)); w != v {
+		fail("RP7", "verdict must not depend on sha256: prefixes")
+	}
+	return out
+}
+
 func TestModelConformance_ReconcileDecision(t *testing.T) {
 	// Memory-light: one byte of expectation per input; each input is decoded on the fly.
 	rv := lifecyclemodel.GenReconcileVectors()
@@ -641,36 +696,11 @@ func TestModelConformance_ReconcileDecision(t *testing.T) {
 			mismatches++
 		}
 		// Proposed properties, checked on the REAL function over the whole bounded space.
-		fail := func(id, msg string) {
+		for _, viol := range reconcilePropertyViolations(in, v) {
 			if propFails < 10 {
-				t.Errorf("PROPERTY %s violated: %s\n input=%+v verdict=%s/%s", id, msg, in, v.Action, v.Reason)
+				t.Errorf("PROPERTY %s\n input=%+v verdict=%s/%s", viol, in, v.Action, v.Reason)
 			}
 			propFails++
-		}
-		data := in.Kind == ops.KindRollbackCreate && in.Mode == "data"
-		exhausted := in.MaxAttempts > 0 && in.Attempts >= in.MaxAttempts
-		tagOnTarget := intersects(in.TagDigests, in.TargetDigests)
-		liveTarget := (in.RunningImageID != "" && in.RunningImageID == in.TargetImageID) || intersects(in.RunningDigests, in.TargetDigests)
-		priorKnown := in.PriorImageID != "" || len(in.PriorDigests) > 0
-		switch {
-		case data && v.Action != actDataManual:
-			fail("RP1", "a data rollback must never enter the image table")
-		case !data && !in.RefValid && v.Action != actLoudStop:
-			fail("RP2", "an unvalidated record must never drive a Docker action")
-		case !data && in.RefValid && exhausted && v.Action != actLoudStop:
-			fail("RP3", "exhausted reconcile attempts must stop loudly")
-		}
-		if v.Action == actRollbackToPrior && (!priorKnown || liveTarget || tagOnTarget) {
-			fail("RP4", "rollback only with a known prior, target not live, tag not on target")
-		}
-		if v.Action == actNoop && tagOnTarget {
-			fail("RP5", "never no-op while the tag is on the target")
-		}
-		if v.Action == actNoop && liveTarget {
-			fail("RP6", "never no-op while the target is live")
-		}
-		if w := reconcileDecision(flipPrefixes(in)); w != v {
-			fail("RP7", "verdict must not depend on sha256: prefixes")
 		}
 		rv.Advance(idx)
 	}
@@ -690,19 +720,28 @@ func writeReport(t *testing.T, name string, body map[string]interface{}) {
 		return
 	}
 	for k, v := range body { // lists are reported unique and sorted, so the report is deterministic
-		if l, ok := v.([]string); ok {
-			set := map[string]bool{}
-			for _, x := range l {
-				set[x] = true
-			}
-			u := make([]string, 0, len(set))
-			for x := range set {
-				u = append(u, x)
-			}
-			sort.Strings(u)
-			body[k] = u
+		l, ok := v.([]string)
+		if !ok {
+			continue
 		}
+		set := map[string]bool{}
+		for _, x := range l {
+			set[x] = true
+		}
+		u := make([]string, 0, len(set))
+		for x := range set {
+			u = append(u, x)
+		}
+		sort.Strings(u)
+		body[k] = u
 	}
-	b, _ := json.MarshalIndent(body, "", " ")
-	_ = os.WriteFile(filepath.Join(dir, "conformance_"+name+".json"), b, 0o600)
+	b, err := json.MarshalIndent(body, "", " ")
+	if err == nil {
+		// dir comes from the test driver's own environment and name is a literal at each call site.
+		err = os.WriteFile(filepath.Join(dir, "conformance_"+name+".json"), b, 0o600) //nolint:gosec // G703: test-only report path, see above
+	}
+	if err != nil {
+		// A missing report reads as INCOMPLETE in the summary; say why here instead of hiding it.
+		t.Errorf("conformance report %q not written: %v", name, err)
+	}
 }
