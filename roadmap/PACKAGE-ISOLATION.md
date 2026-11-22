@@ -964,7 +964,7 @@ retry-sleep lead that open #1997 records.
 | Depends on | — (no open PR changes a `saas_feed_*.go` file or `internal/urlcatfeed`; checked against all 14 open PRs' branches on 2026-11-22) |
 | Evidence | ADR-0059 (amends one sentence of ADR-0053); 2 exported names added (`Decode`, `Envelope`), package total 6; the three root decoders keep their names, sentinels, bounds and field validation, so no caller and no existing test is edited; a 17,384-input verdict table over the three decoders whose digests and per-class counts were captured from main before the bind; a differential test over more than 20,000 inputs against a frozen copy of the pre-move body; 14 mutation checks, each failing a test |
 | Risks | these functions decide which bytes on disk are a rollback floor, an activation record and an authority record. Every verdict is pinned per record kind, including the inclusive size bound and the trailing-before-canonical order |
-| PR | (this PR) |
+| PR | #2001 |
 | Next action | review PR |
 
 - **Reconciled.** #1992 (IM-024), #1993 (IM-025) and #1997 (IM-026): on each,
