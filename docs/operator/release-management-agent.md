@@ -158,6 +158,58 @@ docker compose exec proxy ls -l /run/culvert-maint/culvert-maint.sock
 | `permission denied` connecting | proxy not in `culvert-maint` group | confirm `group_add` GID is correct |
 | `connect: no such file` for the socket | legacy socket path | agent on the old layout uses `/run/culvert-maint.sock`; set `CULVERT_MAINT_AGENT_URL` to match |
 
+## After the agent stops during an upgrade or rollback
+
+If the agent process dies while an upgrade or rollback is running (crash, OOM
+kill, host power loss), the next start reports the operation and **changes
+nothing in Docker**. The agent does not roll back or finish the upgrade by
+itself ([ADR-0057](../adr/0057-maintenance-agent-crash-journal-lifecycle.md)).
+
+Where to look:
+
+- `GET /v1/status` → `interrupted_operations`. One entry per interrupted
+  operation, present on every request and across restarts until a later
+  upgrade or image rollback succeeds.
+- `GET /v1/operations/{op_id}` → `state: failed`,
+  `failure_reason: agent_restart_interrupted`, with the same detail under
+  `result.interrupted`.
+- The audit log has one `failed` / `agent_restart_interrupted` entry per
+  interrupted operation.
+
+What an entry tells you:
+
+| Field | Meaning |
+|---|---|
+| `journal_phase` | the last step the operation recorded |
+| `docker_state: unchanged` | it stopped before moving the image tag; submit it again if still wanted |
+| `docker_state: indeterminate` | it may have moved `culvert/proxy:pinned`, or started an image that was never health-checked |
+| `docker_state: data_indeterminate` | a data rollback; see [Recovering from an interrupted restore](docker-compose-backup-restore.md) |
+| `running_image` | what the proxy runs now: `target`, `prior`, `other`, or `unknown` if Docker could not be read |
+| `pinned_tag.matches_running` | `false` means the next `docker compose up` would start a different image than the one running |
+| `prior_ref` | the image reference to give a rollback |
+| `operator_action` | the same guidance as below, for this entry |
+
+For `indeterminate`:
+
+- **`running_image: prior`** — the proxy still runs the previous image. If
+  `pinned_tag.matches_running` is `false`, the tag is ahead of it. Either submit
+  the upgrade again, or roll back with
+  `POST /v1/rollbacks {"mode":"image","image_ref":"<prior_ref>"}`. Both re-pin
+  the tag and run the health check.
+- **`running_image: target`** — the new image is running but the agent never
+  health-checked it. Submitting the same upgrade again is reported as already
+  current and does **not** check it. Verify the proxy yourself, or roll back to
+  `prior_ref`.
+- Until one of these succeeds, do not run `docker compose up` by hand: it
+  starts whatever image the tag is on.
+
+If the agent will not start and its log says
+`journal: refusing to serve — journal: corrupt record <op_id>.json`, a journal
+file under `<state_dir>/reconcile/` is unreadable. The agent stops rather than
+ignore an operation it cannot classify. Move that file aside, start the agent,
+and check `culvert/proxy:pinned` against the running container before the next
+upgrade.
+
 ## What this does **not** do
 
 - It does **not** mount `/var/run/docker.sock` into any container.
