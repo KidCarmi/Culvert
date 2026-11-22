@@ -358,7 +358,7 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-026 | two records share this number: listener fault reason rules → `internal/listenfault` (#1997, ADR-0058), and the data-directory writer lock → `internal/writerlock` (#2002, ADR-0060) | **shipped** (merged 2026-11-22, `107330e` and `1654cdc`) | nightly shift | `main` | #1997, #2002 | — | see the two "IM-026" sections below | — |
 | IM-027 | retry-sleep rules of the listener supervisors (`nextCPGRPCBindBackoff`, `nextSOCKS5BindBackoff`, `nextScanSvcBindBackoff`, `clampCPGRPCBindSleep`, `clampSOCKS5BindSleep`) → `internal/listenfault` or a sibling | proposed | — | — | — | — (#1997 merged; on 2026-11-22 no open PR edits `cp_grpc_*.go`, `socks5_bind.go`, `socks5_health.go` or `scan_svc_listener.go`) | lead; first step in the first "IM-026" note | map, then extract |
 | IM-028 | saas-feed node-local record envelope decoder → `noderecord.Decode` | **shipped** (merged 2026-11-22, `3ee2018`) | nightly shift | `main` | #2001 | — | ADR-0059; see "IM-028" below | — |
-| IM-029 | `support_upload_queue.go` queue engine → `internal/supportupload/uploadqueue` | **implementation under review** | nightly shift | `main` | PRNUM | — | ADR-0062; 10 exported names (5 are one persisted vocabulary); see "IM-029" below | review PR |
+| IM-029 | `support_upload_queue.go` queue engine → `internal/supportupload/uploadqueue` | **implementation under review** | nightly shift | `main` | #2017 | — | ADR-0062; 10 exported names (5 are one persisted vocabulary); see "IM-029" below | review PR |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -1188,7 +1188,7 @@ retry-sleep lead that open #1997 records.
 | Depends on | — (no open PR changes a `support_*.go` file or `internal/supportupload`; checked against the eight open PR heads on 2026-11-22) |
 | Evidence | ADR-0062; 10 exported names (`Queue`, `New`, `Options`, `Entry`, `State` and its five values); engine moved statement for statement behind an instance; root keeps its names as bindings, so the worker, the consent gate and 17 root tests in two files are unedited; 12 engine tests moved with names and assertions unchanged; entry-file bytes pinned by six digests captured on main before the move; `Attempt` compared with a frozen copy of main's body over 756 inputs; 42 mutation checks, 40 failing a test |
 | Risks | the queue decides which consented bundles leave the appliance, how often, and when to stop; its files carry a remote error text; its filenames come from a request path. The id rule, the durable write and the sanitizer stay main's and are the only way the engine names a file, commits a byte or stores a text |
-| PR | PRNUM |
+| PR | #2017 |
 | Next action | review PR |
 
 - **Reconciled.** No program PR was open at the start of this run: #1992
