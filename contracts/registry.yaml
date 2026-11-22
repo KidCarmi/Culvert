@@ -398,6 +398,60 @@ contracts:
     validation: unit
     compatibility: "Upgrade and backup must not interleave on an appliance."
 
+  - id: AGT-002
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "After the maintenance agent dies during an upgrade or rollback, its next start reports the operation as failed with how far it got, lists it in status until a later image change succeeds, and changes nothing in Docker."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0057-maintenance-agent-crash-journal-lifecycle.md."
+    code:
+      - "cmd/culvert-maint/main.go"
+      - "cmd/culvert-maint/internal/journal/*.go"
+      - "cmd/culvert-maint/internal/server/interrupted.go"
+      - "cmd/culvert-maint/internal/status/*.go"
+    configs: []
+    transitions:
+      permitted:
+        - "reporting the same interrupted operation again at every later start"
+        - "starting while Docker is unreachable"
+      forbidden:
+        - "reporting an interrupted operation as succeeded"
+        - "pulling, tagging or recreating containers at startup"
+        - "removing a journal record at startup"
+        - "returning an image reference from a journal record that failed the repo-bound digest check"
+    tests:
+      - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_EveryKillPoint}
+      - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_RepeatedRestartsAreIdempotent}
+      - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_DockerUnavailableAtStartup}
+      - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_ForgedRecordRefsAreNotRepeated}
+      - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_AuditsOnceAndCountsStarts}
+    validation: integration
+    compatibility: "The journal file gains optional keys an older agent ignores. Whether startup may also act on a record is AGT-900."
+
+  - id: AGT-003
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "An interrupted operation's journal record is removed only when a later upgrade or image rollback succeeds after re-pinning the image tag and passing the health gate, and the removal is audited."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0057-maintenance-agent-crash-journal-lifecycle.md."
+    code:
+      - "cmd/culvert-maint/internal/server/journal_retire.go"
+    configs: []
+    transitions:
+      permitted:
+        - "keeping the record after a failed recovery attempt"
+      forbidden:
+        - "removing the record when a later operation failed"
+        - "removing the record on an already-current upgrade, which re-pins nothing"
+        - "removing a record without an audit entry"
+    tests:
+      - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_NewUpgradeConvergesAndRetiresTheRecord}
+      - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_AlreadyCurrentUpgradeDoesNotRetire}
+      - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_FailedRecoveryKeepsTheRecord}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_test.go", name: TestRetire_SuccessOfAnEstablishingOpRetiresStaleRecords}
+    validation: integration
+    compatibility: "Before this entry a record was never removed and was reported again at every start."
+
   - id: CFG-001
     area: config-compatibility
     status: enforced

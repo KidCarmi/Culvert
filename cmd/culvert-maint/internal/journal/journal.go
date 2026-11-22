@@ -7,8 +7,9 @@
 // Design authority: roadmap/RISK-022-crash-recovery-journal-plan.md and
 // roadmap/MAINTENANCE-AGENT-RESILIENCE-HARDENING.md (Tier 1). This file is the
 // infrastructure slice: schema + a fail-closed atomic writer + read/list/remove.
-// Wiring (write points, MarkAllInterrupted, ReconcileOnStartup) lands in later
-// slices.
+// The write points and the startup report are wired (main.go initJournal,
+// docs/adr/0057); ReconcileOnStartup is not built and nothing acts on a record
+// at boot.
 //
 // The maint binary is its own Go module, so it cannot import the root
 // internal/fileutil; this package owns a stdlib-only atomic writer that fsyncs
@@ -82,6 +83,20 @@ type Record struct {
 	Actor         string    `json:"actor,omitempty"`
 	StartedAt     time.Time `json:"started_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
+
+	// Interruption bookkeeping. Written ONLY by agent startup, for a record it
+	// found with no process behind it; a running op never sets these, and its
+	// read-modify-write phase updates carry them through unchanged. All three
+	// are omitted from a record no startup has seen, so a record written by
+	// this build is readable by one that predates the fields, and the reverse.
+	//
+	// InterruptedAt is the first startup that found the record. InterruptedSeen
+	// counts every startup that found it (a restart loop shows as a growing
+	// count). InterruptAudited is true once the interruption has been written
+	// to the audit log, so later startups do not repeat the entry.
+	InterruptedAt    *time.Time `json:"interrupted_at,omitempty"`
+	InterruptedSeen  int        `json:"interrupted_seen,omitempty"`
+	InterruptAudited bool       `json:"interrupt_audited,omitempty"`
 }
 
 const (
@@ -175,6 +190,12 @@ func (j *Journal) Read(opID string) (rec *Record, found bool, err error) {
 	if _, ok := validPhases[r.Phase]; !ok {
 		return nil, true, fmt.Errorf("%w %s: unknown phase %q", ErrCorruptRecord, filepath.Base(path), r.Phase)
 	}
+	// The file name is the record's identity: Write derives the path from
+	// OpID, so the two agree for every record this package wrote. The name has
+	// passed the strict-ULID check; the op_id INSIDE the file is unchecked
+	// content. Carry the name, so a caller that reports the record or writes
+	// it back acts on the file it read and never on an id the content chose.
+	r.OpID = opID
 	return &r, true, nil
 }
 

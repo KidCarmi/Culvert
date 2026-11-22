@@ -153,6 +153,9 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 		withResultFn(func(state ops.State, _ ops.FailureReason) map[string]interface{} {
 			return s.upgradeApplyResult(acc, racc, state)
 		}),
+		// An already-current apply succeeds without re-pinning the tag or
+		// probing health, so it establishes nothing.
+		withRetiresInterrupted(func() bool { return !acc.alreadyCurrent }),
 	)
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)

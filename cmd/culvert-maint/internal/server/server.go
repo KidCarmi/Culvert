@@ -73,6 +73,33 @@ type Status struct {
 	LastOperationOpID         string                 `json:"last_operation_op_id,omitempty"`
 	LastOperationState        string                 `json:"last_operation_state,omitempty"`
 	Extra                     map[string]interface{} `json:"extra,omitempty"`
+
+	// InterruptedOperations lists the image-changing operations a previous
+	// agent process left unfinished, read from the crash-recovery journal on
+	// every request — so the list outlives the in-memory operation record and
+	// any number of restarts, and empties only when a later image change
+	// succeeds. Absent when there are none.
+	InterruptedOperations []InterruptedOperation `json:"interrupted_operations,omitempty"`
+	// InterruptedOperationsError is set when the journal could not be read for
+	// this request. The list is then unknown, not empty.
+	InterruptedOperationsError string `json:"interrupted_operations_error,omitempty"`
+	// PinnedTag is what the fixed proxy tag resolves to now. Reported only
+	// while InterruptedOperations is non-empty: that is when the tag and the
+	// running container can have been left apart.
+	PinnedTag *PinnedTagStatus `json:"pinned_tag,omitempty"`
+}
+
+// PinnedTagStatus is the live state of the fixed proxy tag
+// (culvert/proxy:pinned) — the image the next `docker compose up` starts.
+type PinnedTagStatus struct {
+	// ImageID is the image the tag resolves to. Empty when it could not be read.
+	ImageID string `json:"image_id,omitempty"`
+	// MatchesRunning compares ImageID with the running container's image. Nil
+	// when either side could not be read; false means a recreate of the proxy
+	// would change the image it runs.
+	MatchesRunning *bool `json:"matches_running,omitempty"`
+	// Error says why ImageID is empty.
+	Error string `json:"error,omitempty"`
 }
 
 // ServiceStatus describes one compose service from `docker compose ps`.
