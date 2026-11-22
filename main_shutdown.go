@@ -410,10 +410,10 @@ func flushOTLPExporters(ctx context.Context) error {
 	flushCtx, cancel := context.WithTimeout(ctx, otlpShutdownFlushBudget)
 	defer cancel()
 	if err := globalOTLPTraces.FlushFinal(flushCtx); err != nil {
-		logger.Printf("OTLP traces shutdown flush error: %v", err)
+		logger.Printf("OTLP traces shutdown flush error: %q", sanitizeLog(err.Error()))
 	}
 	if err := globalOTLP.Flush(flushCtx); err != nil {
-		logger.Printf("OTLP metrics shutdown flush error: %v", err)
+		logger.Printf("OTLP metrics shutdown flush error: %q", sanitizeLog(err.Error()))
 	}
 	return nil
 }
