@@ -184,6 +184,10 @@ type Syncer struct {
 	// without sleeping, the way internal/feedsched's own tests do.
 	now    func() time.Time
 	jitter func(time.Duration) time.Duration
+
+	// loop tracks the goroutine Start launches, so Wait can join it after the
+	// context is cancelled.
+	loop sync.WaitGroup
 }
 
 // timeNow reads the clock through the test seam.
@@ -373,7 +377,9 @@ func (bs *Syncer) Feeds() []Feed {
 // since its last attempt. Feeds with interval 0 are skipped.
 func (bs *Syncer) Start(ctx context.Context) {
 	round := func() { bs.syncDue(ctx) }
+	bs.loop.Add(1)
 	go func() {
+		defer bs.loop.Done()
 		// CHAOS-24: syncDue fetches and merges operator-configured remote
 		// blocklists. Guard the ROUND so one bad feed body costs a tick, not
 		// the process; the scheduler keeps waking and retries the next window.
@@ -395,6 +401,13 @@ func (bs *Syncer) Start(ctx context.Context) {
 		}
 	}()
 }
+
+// Wait blocks until the loop Start launched has returned; it returns at once if
+// Start was never called. Cancel Start's context first: the loop exits after
+// the round in flight. A round reports to the sync observer, which reads
+// process state, so a test that resets that state must not race a round left
+// over from an earlier test.
+func (bs *Syncer) Wait() { bs.loop.Wait() }
 
 // syncDue syncs every feed that is due, stopping promptly on cancellation so
 // a shutdown does not start further fetches.
