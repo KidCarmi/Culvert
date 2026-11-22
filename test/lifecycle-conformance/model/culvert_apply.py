@@ -1,9 +1,11 @@
 """Model of Culvert's maintenance-agent `upgrades.apply` flow, its crash journal, and the
-(not yet wired) startup reconcile decision.  Source of truth: KidCarmi/Culvert @ ef94311,
-cmd/culvert-maint/internal/{server,journal,ops}.  See ../TRACEABILITY.md for file:line links.
+(not wired) startup reconcile decision.  Source of truth: cmd/culvert-maint/internal/{server,journal,ops}.
 
-This is NOT the Phase 4 A/B-slot model. Culvert has no boot slots: an upgrade pulls an image,
-moves one fixed tag (culvert/proxy:pinned) and recreates the container.
+Fault outcomes are what the FAKE exec layer can be told to do. `ok_stale` (`compose up` exits 0
+without recreating the container although the tag moved to a different image) was NOT observed on
+real Docker 29.10 / Compose v5.7.1; it is kept as a robustness input, not as a claim about Docker.
+
+Culvert has no boot slots: an upgrade pulls an image, moves one fixed tag (culvert/proxy:pinned) and recreates the container.
 
 Abstraction: two images, P (prior) and T (target). Docker world = (running, tag).
 `compose up` makes the container run whatever the tag points at.
@@ -118,7 +120,10 @@ class ApplyModel:
                 if e == "tag_fail":
                     return bad(jr="restarting")
                 if e == "up_fail_stale":
-                    return bad(jr="restarting", tag="T", post_fail=True)
+                    # AGT-002 (realignPinnedTagAfterFailedUp): the container provably still runs the
+                    # prior image, so the tag is moved back -- but only when the prior image has an
+                    # allow-listed registry ref to name it by. Stack down or no such ref: tag stays.
+                    return bad(jr="restarting", tag="P" if s.prior == "valid" else "T", post_fail=True)
                 if e == "up_fail_recreated":
                     return bad(jr="restarting", tag="T", running="T", post_fail=True)
                 run = "T" if e == "ok" else s.running

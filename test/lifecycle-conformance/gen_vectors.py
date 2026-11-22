@@ -48,8 +48,10 @@ def commands(s, e, n):
         else:
             do("tag:" + img)
             do("up", {"up_fail_stale": "fail_stale", "up_fail_recreated": "fail_recreated", "ok_stale": "ok_stale"}.get(e))
-            if pc == "restart" and e in ("ok", "ok_stale"):
-                do("capture")
+            if pc == "restart":
+                do("capture")                      # success: journal the target id; failure: AGT-002 re-read
+                if e == "up_fail_stale" and s.prior == "valid":
+                    do("tag:P")                    # AGT-002: container never moved, tag goes back
     elif pc in ("verify", "rb_verify"):
         do("capture", "fail" if e == "capture_fail" else None)
     return cmds, plan

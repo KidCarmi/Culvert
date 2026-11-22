@@ -32,6 +32,22 @@ without explicit owner approval of the properties it reports.**
 The model checker by itself verifies an abstraction. Only the conformance test
 touches product code. Do not present either as "the lifecycle is verified".
 
+## Known reported items (none blocks)
+
+- **C2 fails** only through the injected outcome `ok_stale`: `compose up`
+  exits 0 without recreating the container although the tag moved to a
+  different image. That outcome was **not** reproduced on real Docker 29.10 /
+  Compose v5.7.1 (a moved tag always recreated). It shows that the journal's
+  `target_image_id` is taken from whatever runs after `up`; it matters only if
+  startup reconcile (AGT-900) is ever built.
+- **O1 (open, AGT-900)**: an agent killed between `docker tag` and `compose up`
+  leaves the tag ahead. Startup reports it and does not act (ADR-0057).
+- **O2 (open)**: after AGT-002 the tag is still left ahead on 22 of 172
+  modelled terminal paths (28 before the fix). 14 of them need `ok_stale`,
+  which real Docker did not exhibit. The other 8 are real residue: `up` failed
+  without recreating and the prior image has no allow-listed registry
+  reference (4), or the stack was down before the upgrade (4).
+
 ## Running
 
 ```bash
@@ -81,7 +97,7 @@ A mismatch means the code and the model disagree. Either is legitimate:
   the existing tests and the conformance suite each kill. About 1h40m on four
   cores for 350 mutants, hence scheduled only.
 
-Baseline measured at `ef94311` (350 mutants, 343 compiled): existing tests
+Baseline measured before AGT-002, at `ef94311` (350 mutants, 343 compiled): existing tests
 killed 260 (75.8%), conformance alone 243 (70.8%), both together 277 (80.8%);
 17 mutants were killed only by conformance, mostly journal-phase bookkeeping
 that existing tests do not observe mid-flight. The conformance suite does not
