@@ -8,7 +8,7 @@
 // roadmap/MAINTENANCE-AGENT-RESILIENCE-HARDENING.md (Tier 1). This file is the
 // infrastructure slice: schema + a fail-closed atomic writer + read/list/remove.
 // The write points and the startup report are wired (main.go initJournal,
-// docs/adr/0059); ReconcileOnStartup is not built and nothing acts on a record
+// docs/adr/0061); ReconcileOnStartup is not built and nothing acts on a record
 // at boot.
 //
 // The maint binary is its own Go module, so it cannot import the root

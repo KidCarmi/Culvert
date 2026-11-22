@@ -15,7 +15,7 @@ package main
 // records every invocation, which is how "startup issued no state-changing
 // docker command" is asserted rather than assumed.
 //
-// Contract pinned here (docs/adr/0059):
+// Contract pinned here (docs/adr/0061):
 //   - an interrupted op is reported, durably, with how far it got;
 //   - startup never changes Docker;
 //   - the report survives further restarts and is audited exactly once;
