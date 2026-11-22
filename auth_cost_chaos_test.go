@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/authcost"
+	"github.com/KidCarmi/Culvert/internal/authstate"
 )
 
 // newAuthTestConfig builds an isolated Config with a local bcrypt account, so
@@ -592,12 +593,12 @@ func TestChaos57_ClientFairnessKeyShape(t *testing.T) {
 		{"not-an-ip", ""},
 		{"", ""},
 	} {
-		if got := clientFairnessKey(tc.in); got != tc.want {
-			t.Errorf("clientFairnessKey(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := authstate.ClientKey(tc.in); got != tc.want {
+			t.Errorf("authstate.ClientKey(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 	// A single IPv6 host must not be able to present thousands of budgets.
-	if a, b := clientFairnessKey("2001:db8::1"), clientFairnessKey("2001:db8::2"); a != b {
+	if a, b := authstate.ClientKey("2001:db8::1"), authstate.ClientKey("2001:db8::2"); a != b {
 		t.Fatalf("two addresses in one /64 produced distinct keys (%q, %q) — one host can mint unlimited budgets", a, b)
 	}
 }

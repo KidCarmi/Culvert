@@ -16,7 +16,7 @@ import (
 // the cache mutex every proxy credential verification also needs.
 //
 // The sweep is over the number of distinct fairness keys. The fairness key is
-// the client's own address (clientFairnessKey), so that is the number of
+// the client's own address (authstate.ClientKey), so that is the number of
 // ACTIVE CLIENTS, and it is exactly what the selection scans. The shape to
 // watch is whether ns/op grows with `clients`.
 

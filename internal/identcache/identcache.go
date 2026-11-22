@@ -420,7 +420,7 @@ func (c *Cache[T]) store(key, client string, val T, ok bool, now, expiry time.Ti
 //
 // This runs under c.mu on the proxy CREDENTIAL path, once per insertion for as
 // long as the cache is at its cap — which, at main's maxAuthCacheSize of 5,000
-// and a fairness key that is the client's own address (clientFairnessKey), is
+// and a fairness key that is the client's own address (authstate.ClientKey), is
 // the steady state of any deployment with a few thousand active client
 // addresses. The previous implementation answered both questions below by
 // iterating every bucket and calling frontLocked on each, so each insertion

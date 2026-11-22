@@ -13,7 +13,7 @@ import (
 // fills: each insertion must displace an entry, so it pays the eviction
 // selection. The sweep is over the number of distinct fairness keys, which is
 // what the selection used to scan — and, the fairness key being the client's
-// own address (main's clientFairnessKey), is the number of active clients.
+// own address (authstate.ClientKey), is the number of active clients.
 //
 // These are regression guards as much as measurements: the shape to watch is
 // whether ns/op grows with `clients`. Before the eviction index it grew

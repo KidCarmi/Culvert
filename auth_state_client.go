@@ -1,8 +1,9 @@
 package main
 
 import (
-	"net"
 	"net/http"
+
+	"github.com/KidCarmi/Culvert/internal/authstate"
 )
 
 // auth_state_client.go — the fairness key for the bounded interactive-login
@@ -16,50 +17,15 @@ import (
 
 // authStateClientKey derives the eviction-fairness key for r.
 //
-// Three deliberate choices:
-//
-//   - It goes through realClientIP, so an X-Forwarded-For header is honoured
-//     ONLY when the direct peer is a configured trusted proxy. Keying on a
-//     freely spoofable header would hand an attacker an unlimited supply of
-//     distinct buckets and defeat the fair-share policy outright — the same
-//     reason RISK-019 gated the lockout and rate-limit keys.
-//
-//   - IPv6 collapses to its /64. A single host legitimately owns a whole /64
-//     (SLAAC / privacy addressing), so keying on the full address would let
-//     one machine present thousands of "clients"; the same /64 collapse is
-//     already the project's convention for per-client evidence (see
-//     clientEvidence in autoexclude_resolve.go). IPv4 stays RAW: a /24 is a
-//     network of many distinct devices, and folding it would penalise a
-//     legitimate enterprise subnet.
-//
-//   - An unresolvable address yields "", which is a valid key: all such
-//     entries share one bucket and can only evict each other. It never widens
-//     anything — the key is used for eviction ordering only, never for
-//     lookup, authentication, or authorization.
+// It goes through realClientIP, so an X-Forwarded-For header is honoured ONLY
+// when the direct peer is a configured trusted proxy. Keying on a freely
+// spoofable header would hand an attacker an unlimited supply of distinct
+// buckets and defeat the fair-share policy outright — the same reason RISK-019
+// gated the lockout and rate-limit keys. The key shape itself (raw IPv4, IPv6
+// collapsed to its /64, "" for an unresolvable address) is authstate.ClientKey.
 func authStateClientKey(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
-	return clientFairnessKey(realClientIP(r))
-}
-
-// clientFairnessKey collapses a resolved client address into the fairness key
-// described above. It is split out from authStateClientKey so callers that
-// have no *http.Request — the SOCKS5 negotiator, whose peer address is the
-// only thing it ever sees — derive the SAME key shape rather than inventing a
-// second one (CHAOS-57).
-//
-// The caller is responsible for having resolved the address correctly:
-// authStateClientKey goes through realClientIP so a forwarded header counts
-// only from a trusted proxy, while SOCKS5 passes the raw peer because that
-// protocol carries no forwarding header at all.
-func clientFairnessKey(addr string) string {
-	ip := net.ParseIP(addr)
-	if ip == nil {
-		return ""
-	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4.String()
-	}
-	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	return authstate.ClientKey(realClientIP(r))
 }
