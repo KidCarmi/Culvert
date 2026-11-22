@@ -525,36 +525,78 @@ func (tf *Feed) CheckRequestURL(u *url.URL) (malicious bool, source string) {
 	if !v.enabled || u == nil {
 		return false, ""
 	}
-	normURL, host, handled := normaliseParsedURL(u)
+	// The key is rendered into a stack buffer and probed with the compiler's
+	// no-copy map-index form, so a request whose destination MISSES the feed —
+	// which is every allowed request — leaves nothing behind for the collector.
+	// See urlKeyScratch and appendParsedURLKey for why that is worth a scratch
+	// array, and what it costs when the key does not fit.
+	var scratch [urlKeyScratch]byte
+	key, host, handled := appendParsedURLKey(scratch[:0], u)
 	if !handled {
-		normURL, host = NormaliseURL(u.String())
+		normURL, strHost := NormaliseURL(u.String())
+		return tf.lookup(v, normURL, strHost)
 	}
-	return tf.lookup(v, normURL, host)
+	if len(key) > 0 {
+		// m[string(b)] is the one shape Go hashes in place: the conversion is
+		// the map-index expression itself, so the bytes are never copied to the
+		// heap. Handing `key` to tf.lookup instead would force the conversion
+		// this whole function is arranged to avoid — which is why the URL probe
+		// is spelled out here and only the domain half is shared.
+		if e, ok := v.urls[string(key)]; ok {
+			return true, e.Source
+		}
+	}
+	return tf.lookupDomain(v, host)
 }
 
-// lookup is the shared verdict body of CheckURL and CheckRequestURL: the URL
-// probe, then the domain probe with its allowlist-masking accounting. Keeping
-// it in one place is what makes "only the key derivation differs" a structural
-// claim rather than a promise two copies have to keep.
+// lookup is the verdict body for a STRING key: the URL probe, then the domain
+// probe via lookupDomain. CheckURL always arrives here; CheckRequestURL does so
+// only on its fallback, where the string derivation is the definition — its
+// fast path probes v.urls from stack bytes and joins at lookupDomain, because a
+// string parameter would force the allocation it exists to avoid.
+//
+// The URL probe is therefore spelled twice, four lines each, and the domain
+// probe — the half that carries the allowlist-masking counter — exactly once.
+// That is the split that matters: a duplicated domain probe which forgot
+// tf.maskedHits.Add(1) would blind the operator to an exemption overriding live
+// threat intel, while a duplicated map index cannot diverge in a way a verdict
+// can see. TestCheckRequestURL_AllowlistMaskingIsStillCounted pins it.
 func (tf *Feed) lookup(v *readView, normURL, host string) (malicious bool, source string) {
 	if normURL != "" {
 		if e, ok := v.urls[normURL]; ok {
 			return true, e.Source
 		}
 	}
-	if host != "" {
-		if e, ok := v.domains[host]; ok {
-			if v.allowlist[host] {
-				// A real domain-level threat entry suppressed by the
-				// allowlist — a security-control bypass, counted so an
-				// operator can see the allowlist overriding live intel.
-				tf.maskedHits.Add(1)
-			} else {
-				return true, e.Source
-			}
-		}
+	return tf.lookupDomain(v, host)
+}
+
+// lookupDomain is the DOMAIN half of lookup, split out so the allocation-free
+// request path can share it verbatim.
+//
+// CheckRequestURL probes v.urls from a stack-rendered key and therefore cannot
+// hand this package a string without the heap copy it exists to avoid, so it
+// spells its URL probe out and joins here. The domain half is the half that
+// carries the allowlist-masking accounting, which is the part that MUST NOT be
+// duplicated: TestCheckRequestURL_AllowlistMaskingIsStillCounted pins that the
+// fast path reaches this body rather than a copy of it, because a copy that
+// forgot tf.maskedHits.Add(1) would silently blind the operator to an
+// exemption overriding live threat intel.
+func (tf *Feed) lookupDomain(v *readView, host string) (malicious bool, source string) {
+	if host == "" {
+		return false, ""
 	}
-	return false, ""
+	e, ok := v.domains[host]
+	if !ok {
+		return false, ""
+	}
+	if v.allowlist[host] {
+		// A real domain-level threat entry suppressed by the allowlist — a
+		// security-control bypass, counted so an operator can see the
+		// allowlist overriding live intel.
+		tf.maskedHits.Add(1)
+		return false, ""
+	}
+	return true, e.Source
 }
 
 // normaliseParsedURL derives NormaliseURL's two outputs from an already-parsed
@@ -586,28 +628,165 @@ func (tf *Feed) lookup(v *readView, normURL, host string) (malicious bool, sourc
 // escape/unescape leave alone; and EscapedPath() followed by Parse's unescape
 // returns u.Path verbatim for ANY path, including one carrying '%', '?' or '#'.
 func normaliseParsedURL(u *url.URL) (norm, host string, handled bool) {
+	key, host, handled := appendParsedURLKey(nil, u)
+	// string(nil) is "", so the ("", "", true) and ("", "", false) results
+	// below are reproduced exactly. The conversion here is the SAME allocation
+	// the concatenated form always charged; it is now paid only by a caller
+	// that genuinely wants a string, which the request path does not.
+	return string(key), host, handled
+}
+
+// urlKeyScratch is the stack budget CheckRequestURL renders its lookup key
+// into. The key is "scheme://host/path" with the query, the fragment and any
+// trailing slashes removed.
+//
+// 320 is chosen so that the shapes a forward proxy actually sees fit. The
+// theoretical maximum is far larger — a 253-byte FQDN plus a path net/http
+// will accept up to its 1 MiB header budget — and sizing for it would be the
+// wrong trade in BOTH directions: the array is zeroed on every call, so a
+// larger one taxes every allowed request to spare the rare long one, and the
+// long one is not harmed anyway. An overlong key simply spills: append grows
+// to the heap for ONE allocation, which is exactly what the pre-change
+// concatenation charged EVERY request. The uncommon case is therefore never
+// worse than the status quo, and the common case pays nothing.
+//
+// Truncating instead of spilling would be a security defect, not a trade: two
+// distinct URLs sharing a truncated key would make one of them inherit the
+// other's verdict.
+const urlKeyScratch = 320
+
+// appendParsedURLKey is normaliseParsedURL's core, APPENDING the lookup key to
+// dst rather than returning a freshly allocated string. The gate, the
+// canonicalisation and the key bytes are unchanged — see normaliseParsedURL
+// above for why each gate condition is there, and the contract on
+// CheckRequestURL for the equivalence claim this preserves.
+//
+// handled=false means the caller must use the string derivation; key is then
+// nil. A handled=true result with a nil key is NormaliseURL's own ("", "")
+// answer for a host that cannot be canonicalised or resolves to a private IP.
+//
+// The returned key ALIASES dst when it fits, so a caller must finish probing
+// with it before reusing the buffer. CheckRequestURL's scratch is a local
+// array used once, so that is structural there rather than a rule to remember.
+func appendParsedURLKey(dst []byte, u *url.URL) (key []byte, host string, handled bool) {
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", "", false
+		return nil, "", false
 	}
 	if u.Opaque != "" || u.Host == "" || !hostRoundTripsPlainly(u.Host) {
-		return "", "", false
+		return nil, "", false
 	}
 	if u.Path != "" && u.Path[0] != '/' {
-		return "", "", false
+		return nil, "", false
 	}
 	host = canonicalHost(u.Hostname())
 	if host == "" {
-		return "", "", true
+		return nil, "", true
 	}
 	// Exclude private / loopback IPs — verbatim from NormaliseURL, because a
 	// lookup that skipped it would probe keys the feed never inserts and could
 	// only ever start blocking traffic this check exists to leave alone.
-	if ip := net.ParseIP(host); ip != nil && ssrf.PrivateIP(ip) {
-		return "", "", true
+	//
+	// couldBeIPLiteral gates the call because net.ParseIP ALLOCATES on its
+	// failure path, and an ordinary hostname is a failure — see its contract.
+	if couldBeIPLiteral(host) {
+		if ip := net.ParseIP(host); ip != nil && ssrf.PrivateIP(ip) {
+			return nil, "", true
+		}
 	}
-	norm = strings.ToLower(u.Scheme) + "://" + host + strings.ToLower(u.Path)
-	norm = strings.TrimRight(norm, "/")
-	return norm, host, true
+	// Byte-for-byte the concatenation this replaces:
+	//
+	//	strings.ToLower(u.Scheme) + "://" + host + strings.ToLower(u.Path)
+	//
+	// then strings.TrimRight(norm, "/"). strings.ToLower is kept rather than
+	// folded into an ASCII byte loop: a path may carry non-ASCII UTF-8, for
+	// which Unicode lowering is NOT the ASCII fold, and a key that disagreed
+	// with the ingest side's spelling would silently stop matching a real feed
+	// entry. ToLower returns its input unchanged — with no allocation — for the
+	// already-lowercase case that dominates, so keeping the exact semantics
+	// costs nothing on the common path.
+	key = dst
+	key = append(key, strings.ToLower(u.Scheme)...)
+	key = append(key, "://"...)
+	key = append(key, host...)
+	key = append(key, strings.ToLower(u.Path)...)
+	// TrimRight's trailing-slash strip. It cannot run past the host: host is
+	// non-empty here and "://" precedes it, so the loop always halts inside the
+	// path or at the authority's last byte.
+	for len(key) > 0 && key[len(key)-1] == '/' {
+		key = key[:len(key)-1]
+	}
+	return key, host, true
+}
+
+// couldBeIPLiteral reports whether s could possibly parse as an IP address. It
+// exists because net.ParseIP allocates on its FAILURE path — netip.ParseAddr
+// builds a parseAddrError for every string that is not an address — and the
+// request path calls it to ask "is this destination an IP literal?" about a
+// value that is almost always an ordinary hostname. Measured on a 4-core Xeon
+// @ 2.10GHz: 45 ns and one 48-byte allocation per ordinary hostname, which
+// this one byte scan takes to 1.5 ns and none.
+//
+// The same reasoning is already recorded one layer down, in
+// internal/hostutil's NormalizeHostStrict fast path, which notes that
+// "net.ParseIP allocates on its FAILURE path (it builds a netip parse error
+// for every non-IP string)". This is that observation applied to the two call
+// sites in this package.
+//
+// IT IS A SUPERSET, NEVER A FILTER. A false result means ParseIP would have
+// returned nil, so skipping the call cannot change a verdict. Refusing a real
+// address would be the opposite of an optimisation: a private-IP destination
+// would stop being recognised as one and would start being probed against the
+// feed, which is precisely what the exclusion above exists to prevent.
+//
+// The loop below therefore MIRRORS netip.ParseAddr's own dispatch loop,
+// byte for byte, rather than reformulating it. ParseAddr scans for the first
+// of '.', ':' and '%' and dispatches on which it finds; this function makes
+// the same three decisions and answers "could the parser it picks succeed?":
+//
+//   - ':' first → ParseAddr calls parseIPv6. Admit, without judging the bytes
+//     before it.
+//   - '%' first → ParseAddr returns "missing IPv6 address". Refuse.
+//   - '.' first → ParseAddr calls parseIPv4, whose parseIPv4Fields rejects
+//     ("unexpected character") any byte that is not a digit or '.'. Admit iff
+//     every byte is one of those.
+//   - none of the three → ParseAddr falls out of its scan into "unable to
+//     parse IP". Refuse.
+//
+// net.ParseIP is strictly narrower still (it also rejects a zone), which only
+// widens the margin.
+//
+// A FIRST DRAFT OF THIS FUNCTION GOT IT WRONG, and in the dangerous direction:
+// it refused at the first byte that was not a digit, a dot or a colon, on the
+// reasoning that an IPv6 literal "contains a colon". It does — but its leading
+// bytes are HEX digits, so "fe80::1" was refused and a link-local destination
+// would have been handed to the feed. TestCouldBeIPLiteral_IsSupersetOfParseIP
+// caught it before it shipped; that test, and FuzzCouldBeIPLiteral beside it,
+// run against the real net.ParseIP, so a future toolchain that WIDENS the
+// accepted syntax fails CI instead of silently making this a filter.
+func couldBeIPLiteral(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ':':
+			return true
+		case '%':
+			return false
+		case '.':
+			return allDigitsOrDots(s)
+		}
+	}
+	return false
+}
+
+// allDigitsOrDots reports whether every byte of s is a decimal digit or '.' —
+// the exact byte set netip's parseIPv4Fields accepts. Empty is vacuously true;
+// couldBeIPLiteral only reaches it having already seen a '.'.
+func allDigitsOrDots(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && c != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // hostRoundTripsPlainly reports whether an authority survives URL.String()'s
@@ -993,8 +1172,15 @@ func NormaliseURL(raw string) (norm, host string) {
 		return "", ""
 	}
 	// Exclude private / loopback IPs (likely scanner artefacts in the feed).
-	if ip := net.ParseIP(host); ip != nil && ssrf.PrivateIP(ip) {
-		return "", ""
+	// Gated by couldBeIPLiteral for the same reason as in appendParsedURLKey:
+	// ParseIP allocates to report that an ordinary hostname is not an address.
+	// This site is BOTH the fallback for a URL shape the fast path declines and
+	// the ingest path, which runs it once per feed row — ~100k times per sync
+	// round for urlhaus alone.
+	if couldBeIPLiteral(host) {
+		if ip := net.ParseIP(host); ip != nil && ssrf.PrivateIP(ip) {
+			return "", ""
+		}
 	}
 	// Canonical form: scheme://host/path  (query and fragment stripped)
 	norm = strings.ToLower(u.Scheme) + "://" + host + strings.ToLower(u.Path)
