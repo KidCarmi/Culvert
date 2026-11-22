@@ -471,6 +471,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Adding to the blocklist now reports what the gateway actually stored
+  (Product Experience).** The admin UI's "Added N host(s)" / "Imported N hosts"
+  toast counted the lines it sent, not what `POST /api/blocklist` did with them.
+  Three outcomes were invisible: an entry longer than 253 characters was dropped
+  with only a log line; a repeat of an existing admin entry was a silent no-op;
+  and an entry that can never equal a destination hostname — a URL pasted from
+  an incident ticket (`https://evil.example/login`), a `host:port`, a trailing
+  dot, a Unicode IDN — was stored, listed in the table and enforced nothing,
+  because the blocklist is probed with the bare, normalized destination host.
+  The operator saw a success toast and a row, and the destination stayed
+  reachable (or, in allowlist mode, stayed blocked). The response now adds
+  `unchanged`, `skipped_count`/`skipped` and `warning_count`/`warnings`
+  (per-entry detail capped at 50, counts exact) next to the unchanged `added`,
+  and the Blocklist panel shows the server's count plus a persistent, dismissible
+  notice naming each affected entry and its reason. Description only: what is
+  accepted, stored, audited, versioned and matched is unchanged, and the
+  additions are fields on a response whose schema is an open object
+  (`TestBlocklistEntryMatchWarning_AgreesWithTheMatcher`, a differential check
+  against the real store, `TestBlocklistAdd_ReportsWhatActuallyHappened`,
+  `TestBlocklistAdd_FeedbackIsBounded`).
+
 - **Diagnostics now warns when SSL inspection does not verify origin
   certificates (Product Experience).** On an inspected tunnel the client sees
   only the certificate Culvert forges, so Culvert's check of the origin
@@ -599,6 +620,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   touch a lock owned by another plane.
 
 ### Fixed
+
+- **The CI-runner installer adds the runner account to the `docker` group
+  even when a lookalike name is present.** `scripts/install-runner.sh` decided
+  membership with `groups "$u" | grep -qw docker`, which also matches a
+  username such as `docker-ops` or an unrelated group such as `docker-users`
+  or `svc.docker`. The script then skipped `usermod -aG docker`, suppressed
+  the closing re-login note and reported success, while every job on the
+  runner failed with "permission denied" on the Docker socket. Both checks now
+  use the exact-name `user_in_docker_group` helper `scripts/install.sh`
+  already uses. Pinned by `install_runner_docker_group_membership_test.go`.
 
 - **A GeoIP database that could not be opened at startup is now loaded
   automatically once it becomes readable, without a restart.** When the
@@ -931,6 +962,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **Turning on the threat feed no longer costs two heap allocations on every
+  allowed plain-HTTP request (`PERF-THREATFEED-URLKEY-1`).**
+  `threatfeed.CheckRequestURL` runs on the request goroutine, before the policy
+  engine, for every forwarded plain-HTTP request whenever the feed is enabled,
+  and its per-request key derivation allocated twice for a destination that
+  MISSES — which is every allowed request. One allocation was `net.ParseIP`
+  reporting, via a constructed `netip` parse error, that an ordinary hostname is
+  not an IP address; the other was the canonical `scheme://host/path` key, built
+  on the heap purely to be looked up in a map and discarded. The IP-literal
+  question is now answered by `couldBeIPLiteral`, a byte scan mirroring
+  `netip.ParseAddr`'s own dispatch (1.5 ns against the 45 ns and 48 bytes the
+  failing parse cost), and the key is rendered into a stack scratch and probed
+  with Go's no-copy `m[string(b)]` form. Measured on a 4-vCPU Xeon @2.10GHz
+  against a 100,000-entry feed, medians of n=5: a missing destination goes from
+  265 ns / 112 B / 2 allocs to 177 ns / 0 B / 0 allocs serially (1.50x) and from
+  93 ns to 49 ns across four workers (1.90x), which brings the full-URL check to
+  roughly what the `CheckDomain` control has cost since 2026-11-17. The same
+  guard removes one allocation per row from the ingest path (`NormaliseURL`,
+  ~100,000 calls per urlhaus sync round). End to end, a new single-variable
+  harness (`BenchmarkPerfQual_ProxyHTTPForwardPosture`) shows a deployed posture
+  — a 110,000-entry blocklist plus an enabled 100,000-entry feed — going from
+  +2 allocations per allowed request to zero; wall time is unchanged and not
+  claimed to move, the saving being ~150 ns against a ~150 microsecond request.
+  Every verdict and the on-disk DB format are unchanged, and the key bytes are
+  pinned by the existing differential and fuzz target against the string path
+  (`TestCheckRequestURL_MatchesCheckURL`, `FuzzCheckRequestURL`) plus new gates
+  for the guard's superset property (`TestCouldBeIPLiteral_IsSupersetOfParseIP`,
+  `FuzzCouldBeIPLiteral`, with
+  `TestCouldBeIPLiteral_ActuallyRejectsOrdinaryHostnames` as the control), the
+  spill boundary (`TestAppendParsedURLKey_SpillMatchesStringPath`,
+  `TestCheckRequestURL_SpilledKeysDoNotCollide`) and the allocation claim
+  (`TestBenchGate_CheckRequestURLAllocs` tightened to zero,
+  `TestCheckRequestURL_MissIsAllocationFree`, with
+  `TestCheckRequestURL_AllocationFree_LegacyIsNot` as its negative control).
+  The superset differential caught a real defect in the first draft of the guard
+  before it shipped: it refused `fe80::1`, because an IPv6 literal's leading
+  bytes are hex digits rather than the colon the draft scanned for. See
+  `docs/engineering/PERFORMANCE-GUARDIAN-REVIEW-2026-11-21.md`.
 - **A blocklist feed sync no longer stalls every request while it parses the
   feed (`PERF-BLOCKLIST-MERGE-1`).** `blocklist.Store.MergeFromLines` parsed
   and merged the whole feed (up to 1,000,000 lines) inside one hold of the

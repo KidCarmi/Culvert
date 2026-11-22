@@ -548,7 +548,7 @@ func (r *mcpRollout) reconcileCanaryRuntimeAfterCommit(tgt commitTransitionTarge
 		// a drain would block the emergency kill (which must take durableMu to advance its generation)
 		// from engaging immediately (Codex P1 round-8). Both operations take only lt.mu / cr.mu, so the
 		// commit's durableMu is released promptly.
-		mcpLiveTierFor(cfg.Capability).unarmForDemote()
+		mcpLiveTierFor(cfg.Capability).UnarmForDemote()
 		if err := globalCanaryRuntime.demoteCanary(cfg.Capability); err != nil {
 			logger.Printf("MCP rollout: %s demoted from a live mode but demoteCanary failed: %q", cfg.Capability.String(), sanitizeLog(err.Error()))
 		}
