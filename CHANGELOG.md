@@ -690,6 +690,37 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A stale open-attempt marker no longer destroys the healthy store that
+  replaces the one it accused, nor the real corruption evidence beside it
+  (`CHAOS-127`).** `storeguard` leaves a `.opening.<pid>-<ns>` breadcrumb
+  before handing a Badger store to `badger.Open`, so a start that dies inside
+  the open is detected by the next one, which quarantines the damaged
+  directory. `recoverBeforeOpen`'s fault branch already handled the case where
+  the accused store is simply *gone* — an operator reclaimed the space, or a
+  previous start quarantined it and died before clearing the breadcrumbs — and
+  cleared the marker, with the reason recorded in the source: keeping it "would
+  report a phantom recovery on every start". The poison branch in the same
+  `switch` had no such case. `ApplyQuarantine` reports an absent directory as a
+  SKIP, and a skip is exactly what makes the marker clearing conditional, so
+  the marker survived every open at which the directory was absent — for the
+  life of the data directory. The first open that found a directory there again
+  (Badger `MkdirAll`s a fresh one, and the admin history-store toggle re-opens
+  within seconds) then fired `TriggerPoisonMarker` against that **healthy**
+  replacement: it was renamed to `<dir>.corrupt.<T2>`, and because
+  `MaxQuarantinedCopies` is 1, `pruneQuarantines` deleted `<dir>.corrupt.<T1>`
+  — the genuine evidence from the original failure. Measured on the pre-fix
+  tree: the second open reported `quarantined=true`, the rebuilt store was
+  moved aside, and the original evidence survived = **false**. The affected
+  stores are the request-history store (`logstore`, a retained compliance
+  artifact) and the URL-category store (`catdb`, a full feed rebuild). A
+  resolved poison marker is now cleared the way the fault branch clears its
+  own, together with any fault marker recording the same resolved condition,
+  and a removal that fails is reported rather than swallowed — so the open
+  refuses to create a replacement it cannot protect, exactly as a failed
+  `clearFault` already did. Nothing changes for a marker whose store is still
+  present: that is a real incomplete open and is still quarantined before
+  Badger is allowed near it.
+
 - **Automatic rollback after a failed upgrade works on hosts using Docker's
   containerd image store.** On such a host Docker reports two references for
   the running proxy image: the registry one (`ghcr.io/kidcarmi/culvert@sha256:…`)
