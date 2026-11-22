@@ -148,7 +148,74 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 				acc.runningAfterID = ri.RunningImageID
 			}
 			s.advanceJournalPhaseBestEffort(acc, journal.PhaseRestarted)
+		} else if acc.upgradeFailedPostRestart {
+			// The tag advanced and `up` failed (a tag failure never sets the
+			// flag). Do not leave the tag ahead of a container that never moved.
+			out = append(out, s.realignPinnedTagAfterFailedUp(ctx, acc)...)
 		}
 		return out, errOut, uerr
 	}
+}
+
+// realignPinnedTagAfterFailedUp undoes the fixed-tag advance when the apply
+// `restart` stage's `docker compose up -d` failed WITHOUT recreating the proxy
+// container. It returns an op-log note (never an error: the stage is already
+// failing with the `up` error, and that is the error the operator must see).
+//
+// Why: `up` can fail before it touches the proxy — the compose/override file no
+// longer loads, another service's image cannot be pulled, the daemon or the
+// sudo boundary refuses the call. The old container then keeps running while
+// culvert/proxy:pinned already names the new image. Inline rollback would move
+// the tag back, but it does not always run (rollback_on_failure=false, no
+// usable prior target) and can fail before its own retag (rollback pull). The
+// op then went terminal — journal record retired — with the tag ahead: the
+// `cli` backup/restore service and the next `docker compose up -d` (any later
+// restore, rollback, or operator command) would resolve an image that was never
+// health-gated. Restoring the tag here returns Docker to the exact pre-restart
+// state on every one of those paths.
+//
+// It acts ONLY on proof, never on a guess:
+//   - the post-failure capture must succeed and report the SAME image config
+//     digest that capture_before recorded. No running proxy, or a different
+//     image, means `up` got as far as replacing the container: the tag then
+//     already matches the container and is left alone. No capture_before image
+//     (stack was down) means there is nothing known to restore to;
+//   - the prior image must have a ref that passed the rollback gate (priorRef).
+//     That ref is the only way to name the prior image at the sudo boundary
+//     (`tag` accepts `<proxy_repo>@sha256:<digest>` only). The image is local —
+//     a container is running it — so no pull is needed. Without such a ref the
+//     tag stays on the target and the note says so.
+//
+// Crash consistency: this runs inside the PhaseRestarting write-ahead window
+// (the record is retired only at terminal). An agent death before the restore
+// leaves record + tag-on-target + container-on-prior, after it record +
+// tag-on-prior + container-on-prior; reconcileDecision already distinguishes
+// the two (tag_advanced_container_stale vs already_on_prior). No new phase.
+//
+// upgradeFailedPostRestart is deliberately left set: whether inline rollback
+// fires for a failed `up` is unchanged.
+func (s *Server) realignPinnedTagAfterFailedUp(ctx context.Context, acc *upgradeApplyAccumulator) []byte {
+	ri, cerr := s.opts.Runner.CaptureRunningProxyImage(ctx)
+	if cerr != nil {
+		return []byte("\nrestart: `up` failed and no running proxy could be captured afterwards — container state is indeterminate; culvert/proxy:pinned left at the target")
+	}
+	if acc.priorImageID == "" {
+		return []byte("\nrestart: `up` failed; no running proxy was captured before the upgrade, so there is no prior image to restore; culvert/proxy:pinned left at the target")
+	}
+	if ri.RunningImageID != acc.priorImageID {
+		return []byte("\nrestart: `up` failed after the proxy container was replaced (running image differs from the one captured before); culvert/proxy:pinned left at the target")
+	}
+	acc.restartLeftPrior = true
+	if acc.priorRef == "" {
+		return []byte("\nrestart: WARNING `up` failed before recreating the proxy (it still runs the prior image " + acc.priorImageID +
+			") but the prior image has no restorable reference (" + rollbackTargetNote(acc) +
+			"); culvert/proxy:pinned LEFT at the target — the next `docker compose up -d` or cli run will use the new image")
+	}
+	if _, terr := s.opts.Runner.ComposeTagPinned(ctx, acc.priorRef); terr != nil {
+		return []byte("\nrestart: WARNING `up` failed before recreating the proxy (it still runs the prior image " + acc.priorImageID +
+			") and restoring the tag failed (" + errString(terr) +
+			"); culvert/proxy:pinned LEFT at the target — the next `docker compose up -d` or cli run will use the new image")
+	}
+	return []byte("\nrestart: `up` failed before recreating the proxy (it still runs the prior image " + acc.priorImageID +
+		"); culvert/proxy:pinned restored to prior " + acc.priorRef)
 }

@@ -621,6 +621,43 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Automatic rollback after a failed upgrade works on hosts using Docker's
+  containerd image store.** On such a host Docker reports two references for
+  the running proxy image: the registry one (`ghcr.io/kidcarmi/culvert@sha256:…`)
+  and a local one for the fixed tag (`culvert/proxy@sha256:…`), which sorts
+  first. The maintenance agent took the first entry as its rollback target, the
+  local name failed `image_allowlist`, and every `upgrades.apply` recorded
+  `rollback_skipped_reason: "no_prior_digest"`. An upgrade to an image that
+  failed its health gate was therefore left running instead of being rolled
+  back. The agent now uses the first reported reference that passes the same
+  digest-form and allowlist gate. Hosts on the classic image store were not
+  affected. One visible consequence: on an affected host, an upgrade whose
+  restart fails and whose rollback also fails now ends `rollback_failed`
+  (rollback attempted) where it used to end `command_error` (rollback skipped).
+  Confirmed against Docker 29.10 / Compose v5.7.1; pinned by
+  `TestApply_RollbackTarget_IgnoresLocalTagRepoDigest` (contract `AGT-003`).
+
+- **A failed upgrade no longer leaves `culvert/proxy:pinned` on the new image
+  while the old container keeps running.** The agent moves the fixed tag to the
+  new image and then runs `docker compose up -d`. When `up` failed before it
+  replaced the proxy container (a compose or override file that no longer
+  loads, another service's image that cannot be pulled, a refused command), the
+  old container kept serving but the tag already named the new image. Automatic
+  rollback normally moves it back, but not when it is disabled
+  (`rollback_on_failure: false`), has no usable target, or fails at its own
+  pull. The operation then finished with the tag ahead: the `cli`
+  backup/restore service ran the new image against the old daemon's data, and
+  the next `docker compose up -d` (a restore, a manual restart) switched the
+  proxy to an image that had never passed the health gate. After a failed `up`
+  the agent now re-reads the running container, and if it is still the image
+  captured before the upgrade, moves the tag back to that image before the
+  stage returns. It does not pull or restart anything, and it leaves the tag
+  alone when the container was replaced or cannot be read. In this case
+  `final_running_digest` now reports the previous image (it reported the new
+  one, which was not running). When the previous image has no allow-listed
+  registry reference the tag cannot be moved back; the operation log says so.
+  Pinned by `pinned_tag_consistency_test.go` (contract `AGT-002`).
+
 - **The CI-runner installer adds the runner account to the `docker` group
   even when a lookalike name is present.** `scripts/install-runner.sh` decided
   membership with `groups "$u" | grep -qw docker`, which also matches a
@@ -989,6 +1026,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **Turning on the threat feed no longer costs two heap allocations on every
+  allowed plain-HTTP request (`PERF-THREATFEED-URLKEY-1`).**
+  `threatfeed.CheckRequestURL` runs on the request goroutine, before the policy
+  engine, for every forwarded plain-HTTP request whenever the feed is enabled,
+  and its per-request key derivation allocated twice for a destination that
+  MISSES — which is every allowed request. One allocation was `net.ParseIP`
+  reporting, via a constructed `netip` parse error, that an ordinary hostname is
+  not an IP address; the other was the canonical `scheme://host/path` key, built
+  on the heap purely to be looked up in a map and discarded. The IP-literal
+  question is now answered by `couldBeIPLiteral`, a byte scan mirroring
+  `netip.ParseAddr`'s own dispatch (1.5 ns against the 45 ns and 48 bytes the
+  failing parse cost), and the key is rendered into a stack scratch and probed
+  with Go's no-copy `m[string(b)]` form. Measured on a 4-vCPU Xeon @2.10GHz
+  against a 100,000-entry feed, medians of n=5: a missing destination goes from
+  265 ns / 112 B / 2 allocs to 177 ns / 0 B / 0 allocs serially (1.50x) and from
+  93 ns to 49 ns across four workers (1.90x), which brings the full-URL check to
+  roughly what the `CheckDomain` control has cost since 2026-11-17. The same
+  guard removes one allocation per row from the ingest path (`NormaliseURL`,
+  ~100,000 calls per urlhaus sync round). End to end, a new single-variable
+  harness (`BenchmarkPerfQual_ProxyHTTPForwardPosture`) shows a deployed posture
+  — a 110,000-entry blocklist plus an enabled 100,000-entry feed — going from
+  +2 allocations per allowed request to zero; wall time is unchanged and not
+  claimed to move, the saving being ~150 ns against a ~150 microsecond request.
+  Every verdict and the on-disk DB format are unchanged, and the key bytes are
+  pinned by the existing differential and fuzz target against the string path
+  (`TestCheckRequestURL_MatchesCheckURL`, `FuzzCheckRequestURL`) plus new gates
+  for the guard's superset property (`TestCouldBeIPLiteral_IsSupersetOfParseIP`,
+  `FuzzCouldBeIPLiteral`, with
+  `TestCouldBeIPLiteral_ActuallyRejectsOrdinaryHostnames` as the control), the
+  spill boundary (`TestAppendParsedURLKey_SpillMatchesStringPath`,
+  `TestCheckRequestURL_SpilledKeysDoNotCollide`) and the allocation claim
+  (`TestBenchGate_CheckRequestURLAllocs` tightened to zero,
+  `TestCheckRequestURL_MissIsAllocationFree`, with
+  `TestCheckRequestURL_AllocationFree_LegacyIsNot` as its negative control).
+  The superset differential caught a real defect in the first draft of the guard
+  before it shipped: it refused `fe80::1`, because an IPv6 literal's leading
+  bytes are hex digits rather than the colon the draft scanned for. See
+  `docs/engineering/PERFORMANCE-GUARDIAN-REVIEW-2026-11-21.md`.
 - **A blocklist feed sync no longer stalls every request while it parses the
   feed (`PERF-BLOCKLIST-MERGE-1`).** `blocklist.Store.MergeFromLines` parsed
   and merged the whole feed (up to 1,000,000 lines) inside one hold of the

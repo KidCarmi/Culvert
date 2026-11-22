@@ -66,8 +66,11 @@ type RunningProxyImage struct {
 }
 
 // PriorRef returns the first full `repo@sha256:…` reference, or "" if
-// none is available. Convenience for the future apply slice's rollback
-// pin; policy when empty is the apply handler's decision.
+// none is available. It applies NO policy: the first entry is not necessarily
+// a registry reference (the containerd image store also lists the local
+// `culvert/proxy@sha256:…` name, which sorts first). A caller choosing a
+// rollback pin must gate each of RepoDigests itself, as apply's
+// deriveRollbackTarget does.
 func (ri *RunningProxyImage) PriorRef() string {
 	if len(ri.RepoDigests) == 0 {
 		return ""

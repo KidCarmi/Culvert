@@ -14,6 +14,9 @@
 //	restart        → docker tag … culvert/proxy:pinned + docker compose up -d
 //	                 (retag adjacent to up, so a timeout between pull and
 //	                 restart never advances the fixed tag).
+//	                 If `up` fails and the container provably still runs
+//	                 the prior image, the tag is moved back to it before
+//	                 the stage returns (journal_phases.go).
 //	health_gate    → internal/health probe; a post-restart failure marks
 //	                 the op health_failed AND triggers inline rollback.
 //	verify         → re-capture the running image; the pinned digest is
@@ -187,6 +190,7 @@ type upgradeApplyAccumulator struct {
 	priorRef                 string // full repo@sha256:<digest> rollback target (before)
 	priorCaptureReason       string // "" if priorRef valid, else no_prior_digest / ambiguous_prior_digest
 	upgradeFailedPostRestart bool   // set by restart(on error)/health_gate/verify — the running image is now new/indeterminate, so rollback may fire
+	restartLeftPrior         bool   // restart's `up` failed and a post-failure capture proved the container still runs the prior image (never recreated)
 	rollbackAttempted        bool
 	rollbackRestarted        bool // rollback_restart succeeded (new image is the prior one)
 	rollbackSucceeded        bool
@@ -221,7 +225,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 				}
 				acc.priorImageID = ri.RunningImageID
 				acc.priorDigests = bareDigests(ri.RepoDigests)
-				s.deriveRollbackTarget(acc, ri.PriorRef())
+				s.deriveRollbackTarget(acc, ri.RepoDigests)
 				// Prior (rollback target) now known — fold it into the journal record.
 				s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
 				return []byte(fmt.Sprintf("capture_before: running_image_id=%s prior_digests=%s prior_ref=%q rollback_target=%s",

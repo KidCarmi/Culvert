@@ -23,8 +23,6 @@ package main
 // activation-record floor copy is a THIRD max input to selectFloor (§B.4/§B.6).
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -175,32 +173,23 @@ func encodeActivationRecord(r activationRecord) ([]byte, error) {
 
 // decodeActivationRecord strictly decodes + fully validates one canonical record.
 func decodeActivationRecord(data []byte) (activationRecord, error) {
-	if len(data) == 0 {
-		return activationRecord{}, errActEmpty
-	}
-	if len(data) > maxActivationRecordBytes {
-		return activationRecord{}, fmt.Errorf("%w: %d > %d", errActOversize, len(data), maxActivationRecordBytes)
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	var r activationRecord
-	if err := dec.Decode(&r); err != nil {
-		return activationRecord{}, fmt.Errorf("saas feed activation: decode: %w", err)
-	}
-	if dec.More() {
-		return activationRecord{}, errActTrailing
-	}
-	canon, err := floorCanonicalBytes(r)
+	r, err := noderecord.Decode[activationRecord](data, activationEnvelope())
 	if err != nil {
 		return activationRecord{}, err
-	}
-	if !bytes.Equal(canon, data) {
-		return activationRecord{}, errActNoncanonical
 	}
 	if err := validateActivationRecord(r); err != nil {
 		return activationRecord{}, err
 	}
 	return r, nil
+}
+
+// activationEnvelope is the activation record's size bound and envelope refusals.
+func activationEnvelope() noderecord.Envelope {
+	return noderecord.Envelope{
+		Name: "saas feed activation", MaxBytes: maxActivationRecordBytes,
+		Empty: errActEmpty, Oversize: errActOversize,
+		Trailing: errActTrailing, Noncanonical: errActNoncanonical,
+	}
 }
 
 // validateActivationFields checks every semantic field EXCEPT the crc32c value.
