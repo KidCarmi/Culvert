@@ -963,6 +963,7 @@ touches, and the IM-026 row is added once they merge):
 | Depends on | — (no open PR changes `datadir_writer_*.go` or `internal/storeguard`, checked against all eight open PR heads; #1992 edits `mcp_telemetry*.go`, #1993 edits `mcp_live_*.go` and `mcp_rollout.go`) |
 | Evidence | ADR-0058; 8 exported names (`Take`, `Attempt`, `Verdict`, `Acquired`, `Held`, `Undetermined`, `Lock`, `FileName`); acquisition body moved statement for statement; root keeps its five names as bindings, so `main.go`, `datadir_writer_diagnostics.go` and all 12 root tests are unedited; 14 new engine tests and a boundary pair with 12 negative controls; 18 mutation checks, 17 failing a new test |
 | Risks | the lock is what refuses a second process on one data directory (CHAOS-103), and a second process keeps the unauthenticated first-run window open. The unedited root tests pin the refusal, the override, the degraded cases, the first-boot directory creation and the order against `checkInterruptedRestore` |
+| PR | #2002 |
 | Next action | review PR |
 
 - **Reconciled.** #1991 (IM-023) merged. #1992 (IM-024): every non-skipped
