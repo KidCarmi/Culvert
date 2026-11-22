@@ -531,7 +531,7 @@
   shipped, and startup now reports an interrupted operation durably — phase reached, whether Docker
   may have changed, the rollback reference, a live tag-versus-container comparison in
   `GET /v1/status`, one audit entry — and retires the record when a later image change succeeds
-  ([ADR-0057](../adr/0057-maintenance-agent-crash-journal-lifecycle.md), contracts `AGT-002`/`AGT-003`).
+  ([ADR-0057](../adr/0057-maintenance-agent-crash-journal-lifecycle.md), contracts `AGT-004`/`AGT-005`).
   The "found" text above is therefore out of date on two points: the operation IS queryable and
   there IS a journal. The risk itself is unchanged: startup still runs no Docker command, so an
   appliance killed between retag and `up` keeps the fixed tag ahead of the running container until

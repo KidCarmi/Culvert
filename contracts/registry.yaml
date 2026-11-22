@@ -398,7 +398,7 @@ contracts:
     validation: unit
     compatibility: "Upgrade and backup must not interleave on an appliance."
 
-  - id: AGT-002
+  - id: AGT-004
     area: agent-lifecycle
     status: enforced
     owner_approved: false
@@ -428,7 +428,7 @@ contracts:
     validation: integration
     compatibility: "The journal file gains optional keys an older agent ignores. Whether startup may also act on a record is AGT-900."
 
-  - id: AGT-003
+  - id: AGT-005
     area: agent-lifecycle
     status: enforced
     owner_approved: false

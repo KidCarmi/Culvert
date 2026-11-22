@@ -215,5 +215,5 @@ re-pins it.
   `internal/status/status_interrupted_test.go`,
   `internal/runner/pinned_inspect_test.go`, and the additions to the journal
   and ops tests.
-- Contracts `AGT-002` and `AGT-003` register the two invariants; `AGT-900` is
+- Contracts `AGT-004` and `AGT-005` register the two invariants; `AGT-900` is
   unchanged and still open.
