@@ -394,6 +394,13 @@ func drainActiveTunnels(ctx context.Context) error {
 // AFTER all of them for the same reason. Both calls are no-ops when OTLP
 // export is disabled, which is the shipped default.
 //
+// FlushFinal, not Flush, for the spans: on failure there is no next interval
+// to retain them for, so it ends what it could not deliver and logs the
+// COUNT. Without that, a collector that is down at a restart — the likeliest
+// shape there is — would lose the window with a generic error line and no
+// quantity, which is the silent loss this round removed, relocated to the
+// last second of the process's life.
+//
 // A named function rather than an inline closure, for the reason
 // drainActiveTunnels is one: it keeps registerLateShutdownHooks' cognitive
 // complexity where it was (measured — inline, the closure took it from 37
@@ -402,7 +409,7 @@ func drainActiveTunnels(ctx context.Context) error {
 func flushOTLPExporters(ctx context.Context) error {
 	flushCtx, cancel := context.WithTimeout(ctx, otlpShutdownFlushBudget)
 	defer cancel()
-	if err := globalOTLPTraces.Flush(flushCtx); err != nil {
+	if err := globalOTLPTraces.FlushFinal(flushCtx); err != nil {
 		logger.Printf("OTLP traces shutdown flush error: %v", err)
 	}
 	if err := globalOTLP.Flush(flushCtx); err != nil {

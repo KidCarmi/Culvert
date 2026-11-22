@@ -72,10 +72,23 @@ type SpanExporter struct {
 	cancel   context.CancelFunc
 
 	// Ring buffer: spans are appended at buf[head % cap]; when full the
-	// oldest span is overwritten silently.
+	// oldest span is overwritten (counted — see droppedSpans).
 	buf   []SpanRecord
 	head  int
 	count int
+
+	// pushSlot serializes push(): one in-flight batch at a time, acquired
+	// ctx-aware so a caller with a deadline (the shutdown flush) cannot be
+	// pinned behind a slow one. Two concurrent pushers each hold a drained
+	// batch, and requeue puts whichever finishes LAST at the front of the
+	// ring — so a newer batch finishing after an older one INVERTED the
+	// oldest-first order the ring documents, and at the cap that made
+	// overflow evict the NEWEST spans instead of the oldest (reproduced:
+	// [100 101 0 1 2] for a ring that should read [0 1 2 100 101]). The
+	// shutdown flush created that second pusher by design, since it runs
+	// while the ticker loop is still live. Lazily built so a zero-value
+	// exporter (the in-package test fixtures) still works.
+	pushSlot chan struct{}
 
 	// Push-health diagnostics (read-only; never gates or alters push
 	// behavior) — see MetricsExporter's identical fields for rationale.
@@ -125,8 +138,20 @@ func NewSpans() *SpanExporter {
 				DialContext:         ssrf.SafeDialContext,
 			},
 		},
-		buf: make([]SpanRecord, spanBufferCap),
+		buf:      make([]SpanRecord, spanBufferCap),
+		pushSlot: make(chan struct{}, 1),
 	}
+}
+
+// pushGate returns the one-slot push semaphore, building it on first use so a
+// zero-value SpanExporter behaves like a constructed one.
+func (e *SpanExporter) pushGate() chan struct{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pushSlot == nil {
+		e.pushSlot = make(chan struct{}, 1)
+	}
+	return e.pushSlot
 }
 
 // Configure sets the OTLP endpoint and starts the push loop.
@@ -201,6 +226,25 @@ func (e *SpanExporter) Flush(ctx context.Context) error {
 	return e.push(ctx)
 }
 
+// FlushFinal is Flush for a process that is going away: one bounded attempt,
+// and then whatever is still held is ENDED — counted, and logged WITH ITS
+// SIZE, because that log line is the only form in which the number survives
+// the exit. Retention is the right answer for a failure with a next interval
+// ahead of it and the wrong answer here: a retained batch would die in RAM
+// having moved no counter and named no quantity, which is the silent loss
+// this round exists to remove, merely relocated to the last second of the
+// process's life.
+func (e *SpanExporter) FlushFinal(ctx context.Context) error {
+	err := e.push(ctx)
+	e.mu.Lock()
+	n := e.discardBufferedLocked()
+	e.mu.Unlock()
+	if n > 0 {
+		obs.Printf("OTLP traces: %d span(s) could not be delivered before shutdown", n)
+	}
+	return err
+}
+
 // Enabled returns whether trace export is active (lock-free fast path).
 func (e *SpanExporter) Enabled() bool {
 	return e.active.Load()
@@ -251,16 +295,30 @@ func (e *SpanExporter) drain() []SpanRecord {
 // with whatever the buffer then holds, so a collector that stays down costs
 // a bounded 4096 spans of memory, one request per interval, and a counted
 // overflow — the behaviour spanBufferCap and droppedSpans were documented to
-// have. A batch whose exporter was stopped or repointed mid-push has nothing
-// left to be retained FOR, so it is counted and let go.
-func (e *SpanExporter) requeue(batch []SpanRecord) {
+// have.
+//
+// `postedTo` is the endpoint the batch was ACTUALLY posted to, and a batch is
+// only ever retained for that same destination. Testing the CURRENT endpoint
+// instead was a privacy defect with a demonstrated reproduction: Configure
+// discards what is in the RING, but a batch already drained by an in-flight
+// push is invisible to it, so a repoint mid-push put collector A's spans —
+// client IPs, target hosts, enforcement decisions — in the queue for
+// collector B and delivered them on the next tick, with droppedSpans still 0.
+// A batch whose destination is gone (Stop) or has changed has nothing left to
+// be retained FOR, so it is counted and said out loud.
+func (e *SpanExporter) requeue(batch []SpanRecord, postedTo string) {
 	if len(batch) == 0 {
 		return
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.endpoint == "" {
+	if e.endpoint != postedTo {
 		e.droppedSpans.Add(int64(len(batch)))
+		reason := "export was disabled while the push was in flight"
+		if e.endpoint != "" {
+			reason = "the endpoint changed while the push was in flight; a batch is never delivered to a destination it was not collected for"
+		}
+		obs.Printf("OTLP traces: discarded %d span(s) — %s", len(batch), reason)
 		return
 	}
 	// One transient slice of at most 2×spanBufferCap records (≈1.3 MB),
@@ -350,6 +408,19 @@ func (e *SpanExporter) pushLoop(ctx context.Context) {
 }
 
 func (e *SpanExporter) push(ctx context.Context) error {
+	// One in-flight batch at a time (see pushSlot). Waiting is bounded by
+	// the caller's own context, so the shutdown flush spends its budget and
+	// not the client timeout of a tick that beat it to the slot.
+	gate := e.pushGate()
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-ctx.Done():
+		// Not a delivery failure, so it does not move the push-health
+		// counters: nothing was sent and nothing was taken from the ring.
+		return fmt.Errorf("push gate: %w", ctx.Err())
+	}
+
 	e.mu.Lock()
 	endpoint := e.endpoint
 	headers := e.headers
@@ -411,7 +482,13 @@ func (e *SpanExporter) deliver(ctx context.Context, endpoint string, headers map
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		tracesURL, bytes.NewReader(body))
 	if err != nil {
-		e.requeue(spans)
+		// Not retained: validEndpoint is a regexp barrier, not a parser, so
+		// an endpoint can pass it and still be unusable here (a control byte
+		// in the host, say). That verdict is identical every interval, so a
+		// retained batch would pin the ring against spans that could still
+		// go and attribute the loss to overflow instead of to the
+		// configuration that caused it.
+		e.discard(spans, "the endpoint cannot be used to build a request")
 		return fmt.Errorf("request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -421,13 +498,13 @@ func (e *SpanExporter) deliver(ctx context.Context, endpoint string, headers map
 
 	resp, err := e.client.Do(req)
 	if err != nil {
-		e.requeue(spans)
+		e.requeue(spans, endpoint)
 		return fmt.Errorf("post: %w", err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		if retryableCollectorStatus(resp.StatusCode) {
-			e.requeue(spans)
+			e.requeue(spans, endpoint)
 		} else {
 			e.discard(spans, fmt.Sprintf("collector rejected the batch with status %d", resp.StatusCode))
 		}

@@ -98,12 +98,21 @@ func NewMetrics(snapshot SnapshotFunc) *MetricsExporter {
 
 // Configure sets the OTLP endpoint and starts the push loop.
 func (o *MetricsExporter) Configure(endpoint string, headers map[string]string) {
+	// CHAOS-126: normalise FIRST, then derive the start decision from the
+	// normalised value, exactly as SpanExporter.Configure does. Keeping the
+	// two different would have mattered beyond this exporter: the CP snapshot
+	// decides whether to reconfigure BOTH by comparing snap.OTLPEndpoint with
+	// the METRICS exporter's stored endpoint (controlplane_snapshot.go), so a
+	// snapshot endpoint carrying whitespace would have compared unequal on
+	// every single apply and reconfigured both exporters each time.
+	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
+
 	o.mu.Lock()
 	// Stop existing loop if reconfiguring.
 	if o.cancel != nil {
 		o.cancel()
 	}
-	o.endpoint = strings.TrimRight(endpoint, "/")
+	o.endpoint = endpoint
 	o.headers = headers
 	o.mu.Unlock()
 

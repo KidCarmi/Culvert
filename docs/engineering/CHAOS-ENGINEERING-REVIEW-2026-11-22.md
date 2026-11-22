@@ -404,8 +404,148 @@ aggregate CI approval.
   this round's scope, and harmless today because the two are always configured
   together — but it is a divergence waiting for the first caller that
   configures them separately.
+- **R9 — `Configure`'s two-phase locking** (it releases `e.mu` between storing
+  the endpoint and storing the new `cancel`) lets two concurrent callers
+  overwrite each other's `cancel` and leak a push-loop goroutine. Pre-existing,
+  reachable only from the admin handler and the CP snapshot apply, and
+  unchanged by this round.
 - **R8 — `MaxIdleConnsPerHost: 2` with no `MaxConnsPerHost`** on the span
   client, and the response body is closed without being drained, so a 4xx/5xx
   body prevents connection reuse. Costs a connection per failed interval
   against a failing collector; noted, not changed, because it is a transport
   tuning question and not a loss-accounting one.
+
+---
+
+## 11. Independent review of the fix, and what it found
+
+The round's own fix was reviewed independently before the PR was finished, with
+the reviewer given the code and a bounded question set rather than this
+document's conclusions. **It found three real defects in the fix, one of them
+in the very property the round added.** All were reproduced by the lead before
+being changed, and each now has the reproduction as its gate.
+
+### F1 (HIGH) — a repoint MID-PUSH shipped the old collector's spans to the new one
+
+`requeue`'s abandonment guard was `if e.endpoint == ""`: it tested the endpoint
+as it is **now**, not the endpoint the batch was collected for. `Configure`
+discards what is in the **ring**, and a batch already drained by an in-flight
+push is invisible to it — so a repoint while collector A was failing left the
+guard looking at B's non-empty endpoint, retained A's spans for B, and
+delivered them on the next tick with `droppedSpans` still 0.
+
+Reproduced on the fixed-but-unreviewed tree: **collector B received 2 spans
+collected for collector A.** This is precisely what §6's "destination
+discipline" claimed to have closed, and what `Configure`'s own comment says must
+not happen. The gate that existed
+(`TestChaos126_EndpointChangeDoesNotShipSpansToTheNewCollector`) passed only
+because it repoints an **idle** exporter, where the buffer is still in the ring
+when `Configure` takes the lock; it never covered the in-flight case. `Stop()`
+was safe for the accidental reason that it clears the endpoint, which is why
+the disable gate held while this one did not.
+
+**Fixed** by passing the endpoint the batch was actually posted to into
+`requeue` and retaining only for that same destination — which subsumes the
+`== ""` case, so the disable path keeps its behaviour — and by saying out loud
+which of the two reasons ended the batch.
+
+### F2 (MED) — two concurrent pushers inverted the ring, making overflow evict the NEWEST spans
+
+`requeue` puts its batch at the front unconditionally. With one pusher that is
+oldest-first by construction. With two, **whichever finishes last lands in
+front** — so a newer batch completing after an older one inverted the order,
+and at the cap the `merged[:over]` arm then evicted the **newest** spans: the
+ones describing the outage or the shutdown being diagnosed. The new shutdown
+hook creates that second pusher **by design**, since it flushes while the
+ticker loop is still live.
+
+Reproduced: a ring that should read `[0 1 2 100 101]` read `[100 101 0 1 2]`.
+Note the lead's first reproduction attempt **failed** to show it — holding the
+*older* request makes the older batch requeue last, which is correct order by
+luck. Inversion needs the *newer* pusher to finish last.
+
+**Fixed** by serializing `push` through a one-slot semaphore acquired under the
+**caller's** context, so a shutdown flush spends its own 2 s budget rather than
+the client timeout of a tick that reached the slot first, and a gate timeout
+takes nothing from the ring and moves no delivery counter. This also removes
+the reviewer's F4 concern that a tick draining microseconds before the hook
+could leave the hook with an empty buffer and an appearance of success.
+
+### F3 (MED) — a failed terminal flush still lost the window silently
+
+The hook made one attempt and, on failure, `requeue` **retained** the batch —
+into a ring that then dies with the process, having moved no counter and named
+no quantity. That is the round's own thesis, relocated to the last second of
+the process's life, and the main-side gate **asserted the un-counted
+behaviour** (`DroppedSpans == 0`), pinning it.
+
+**Fixed** with `FlushFinal`: one bounded attempt, then end what is left,
+counted and logged **with its size** — the log line being the only form in
+which the number survives the exit. The gate now demands the count, in both
+the engine and the production-wiring tests.
+
+### Also fixed
+
+- **F5** — `requeue`'s abandonment arm counted without a log line, the exact
+  asymmetry `discard`'s doc comment rules out. It now says why.
+- **F6** — an endpoint that passes the `validEndpoint` regexp but cannot build
+  a request (`^https?://[^/]` is a barrier, not a parser) gave the same verdict
+  every interval and pinned the ring full forever, attributing the resulting
+  loss to overflow rather than to the configuration. Now discarded and counted
+  at the point of the real cause.
+- **F7** — the normalisation fix had been applied to the span exporter only.
+  `MetricsExporter.Configure` still skipped `TrimSpace` and still tested the
+  raw argument, and that divergence was newly introduced by this round. It
+  mattered beyond the one exporter: the CP snapshot decides whether to
+  reconfigure **both** by comparing `snap.OTLPEndpoint` against the **metrics**
+  exporter's stored endpoint, so an endpoint carrying whitespace would have
+  compared unequal on every apply and reconfigured both exporters each time —
+  which is also a second production source of the concurrent pushers in F2.
+- A test-hygiene bug of the lead's: one gate wrote `e.client` without the mutex
+  while a push loop was alive, safe only because that loop's interval was an
+  hour. Guarded.
+
+### Declined, with reasons
+
+- **The hook returning `nil` unconditionally** (so the registry's aggregated
+  error line can never mention OTLP) is the house pattern: every late hook
+  returns `nil`, and `registerLateShutdownHooks`' own comment records that
+  registry-level error aggregation is reserved for a separate change. Not
+  this round's to break.
+- **A tick logging into a sink `log-closer` is about to close** is a
+  pre-existing property of every background loop that outlives the drain, and
+  `runShutdownSequence` already carries the comment explaining it. Changing it
+  means stopping the loops at shutdown, which is a lifecycle change beyond this
+  round.
+- **`Configure`'s two-phase locking**, under which two concurrent callers can
+  overwrite each other's `cancel` and leak a push-loop goroutine, is
+  pre-existing and unchanged here. Recorded as residual risk R9.
+- **The `%v`-vs-`sanitizeLog` inconsistency** between the hook's log line and
+  the engine's: the reviewer tried to build a CWE-117 payload through the
+  admin-configured endpoint and could not, because every error embedding the
+  endpoint quotes it (`fmt.Errorf("…: %q")`, and `url.Error` likewise). `%v` on
+  an error is also the established norm at ~145 sites in main. A consistency
+  nit, not a defect.
+- **One remaining verification gap, stated rather than papered over:** the
+  refactor splits the `validEndpoint.MatchString` barrier (`push`) from
+  `http.NewRequestWithContext` (`deliver`), with the endpoint crossing as a
+  parameter. The barrier still dominates the call site and CodeQL's
+  barrier-guard modelling for `go/request-forgery` should hold, but that is the
+  one claim no local run can settle. It needs the hosted CodeQL result on the
+  PR before merge.
+
+### Mutations added for the review fixes
+
+| # | Mutation | Caught by |
+|---|---|---|
+| M9 | `requeue` tests the CURRENT endpoint again (F1) | the repoint-mid-push gate, on all three assertions |
+| M10 | pushes no longer serialized (F2) | the order gate (reproducing `[100 101 0 1 2]`) and the gate-bound gate |
+| M11 | `FlushFinal` retains instead of ending (F3) | one engine gate and both production-wiring gates |
+| M12 | an unbuildable request is requeued again (F6) | the unusable-endpoint gate |
+
+**The review is the finding worth recording.** Four of the eight original
+mutations targeted `requeue`, the full module suite was green, and the
+diff-scoped and full-tree lint were clean — and the fix still shipped a
+privacy defect in the exact property the round introduced, because every gate
+written for it exercised the idle path. A mutation suite can only falsify the
+properties someone thought to assert.

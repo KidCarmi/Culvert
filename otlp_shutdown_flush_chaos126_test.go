@@ -126,10 +126,40 @@ func TestChaos126_OTLPFlushHookReachesTheExporters(t *testing.T) {
 	if got := globalOTLP.Health().FailureCount; got == 0 {
 		t.Error("the metrics exporter recorded no push attempt: the shutdown hook did not reach it")
 	}
-	// The attempt failed, so the span must still be held — not destroyed by
-	// the very hook added to save it.
-	if got := globalOTLPTraces.Health().DroppedSpans; got != 0 {
-		t.Errorf("DroppedSpans = %d after a failed shutdown flush; want 0 retained", got)
+	// The attempt failed and the process is going away, so the span must be
+	// ENDED and COUNTED rather than retained for an interval that will never
+	// come. This assertion previously demanded the opposite — a retained
+	// batch, DroppedSpans 0 — which pinned exactly the silent loss the round
+	// set out to remove, moved to the last second of the process's life. The
+	// count also reaches the log file, which is the only form in which the
+	// number survives the exit.
+	if got := globalOTLPTraces.Health().DroppedSpans; got != 1 {
+		t.Errorf("DroppedSpans = %d after a failed shutdown flush; want 1 — a span that dies at shutdown is a lost span", got)
+	}
+}
+
+// The hook must use the TERMINAL flush, not the ordinary one: a failed
+// ordinary flush retains, and retention has no future once the process is
+// exiting. Pinned structurally, because the difference is invisible in the
+// success case that CI usually exercises.
+func TestChaos126_OTLPFlushHookUsesTheTerminalFlush(t *testing.T) {
+	snapshotLateShutdownGlobals(t)
+	swapOTLPGlobalsForTest(t)
+
+	globalOTLPTraces.Configure("ftp://collector.invalid:4318", nil)
+	for i := 0; i < 3; i++ {
+		globalOTLPTraces.RecordSpan(SpanRecord{Name: "proxy_request", StartNano: int64(i)})
+	}
+
+	var late shutdownRegistry
+	registerLateShutdownHooks(&late, &startupState{}, testInertHTTPServer())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := late.RunAll(ctx); err != nil {
+		t.Fatalf("late.RunAll: %v", err)
+	}
+	if got := globalOTLPTraces.Health().DroppedSpans; got != 3 {
+		t.Errorf("DroppedSpans = %d; want 3 — the hook must END and COUNT what it could not deliver, not retain it into a dying process", got)
 	}
 }
 

@@ -99,7 +99,27 @@ silent loss would reappear; it now has a gate driven by a collector that
 records spans into the exporter while it is deciding. **NARROWS `OBS-2`**: the
 counter it asks to be made scrapeable finally measures something, and
 exporting it before this round would have published a gauge that reads 0
-through a total outage. **Carried forward:** `droppedSpans` has no recency of
+through a total outage. **The INDEPENDENT REVIEW of the fix is the finding
+worth carrying forward on method.** Four of the eight original mutations
+targeted `requeue`, the full module suite was green and both lint passes were
+clean — and the fix still shipped a PRIVACY defect in the exact property this
+round introduced: `requeue`'s abandonment guard tested the CURRENT endpoint
+rather than the endpoint the batch was POSTED to, so a repoint while a push
+was in flight retained collector A's spans for collector B and delivered them
+(reproduced: B received 2 spans collected for A, `droppedSpans` 0). The gate
+written for that property passed because it repoints an IDLE exporter, where
+the buffer is still in the ring when `Configure` takes the lock. Two more
+followed: with TWO pushers — which the new shutdown hook creates by design —
+`requeue` put whichever finished LAST in front, inverting the ring
+(reproduced: `[100 101 0 1 2]`) and making overflow evict the NEWEST spans,
+now prevented by serializing `push` under the CALLER's context; and the
+terminal flush RETAINED a batch it could not deliver into a ring that dies
+with the process, uncounted and unnamed — this round's own thesis relocated to
+the last second of the process's life, with the production gate ASSERTING the
+uncounted behaviour. `FlushFinal` now ends what it could not deliver and logs
+the COUNT, which is the only form in which the number survives the exit. Four
+further mutations (M9–M12) pin all of it. A mutation suite can only falsify
+the properties someone thought to assert. **Carried forward:** `droppedSpans` has no recency of
 its own (the WK-5/CHAOS-59/CHAOS-123/CHAOS-124 shape, one plane further in);
 no gauge of buffer occupancy, so an operator sees failures and then drops but
 never "the ring is filling"; the 4096 cap is a chosen number, not a read of a

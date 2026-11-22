@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -414,7 +415,11 @@ func TestChaos126_EndpointChangeDoesNotShipSpansToTheNewCollector(t *testing.T) 
 	e.Configure(a.URL, nil)
 	recordN(e, 3)
 
+	// Under the mutex: loop-for-A is alive, and Configure's cancel lets its
+	// final flush read e.client concurrently.
+	e.mu.Lock()
 	e.client = b.Client()
+	e.mu.Unlock()
 	e.Configure(b.URL, nil)
 	t.Cleanup(e.Stop)
 
@@ -565,4 +570,213 @@ func TestChaos126_LoopOutageThenRecoveryLosesNothingUpToTheCap(t *testing.T) {
 	if got := e.Health().FailureCount; got == 0 {
 		t.Error("FailureCount = 0; the outage must still be visible to an operator")
 	}
+}
+
+// ── Gates added by the round's independent review ───────────────────────────
+//
+// The three below cover defects the first implementation still had. Each was
+// reproduced before it was fixed; the reproductions are what these gates are.
+
+// A repoint WHILE A PUSH IS IN FLIGHT must not deliver the old collector's
+// spans to the new one. `Configure` discards what is in the RING, but a batch
+// already drained by an in-flight push is invisible to it — so testing the
+// CURRENT endpoint when the batch came back retained it for a destination it
+// was never collected for. Reproduced before the fix: collector B received 2
+// spans collected for collector A, with droppedSpans still 0.
+func TestChaos126_RepointMidPushDoesNotDeliverToTheNewCollector(t *testing.T) {
+	var deliveredB, batchesB atomic.Int64
+	b := spanCountingCollector(t, &deliveredB, &batchesB)
+
+	var e *SpanExporter
+	// Collector A fails, and the operator repoints to B while A is answering.
+	a := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		e.mu.Lock()
+		e.endpoint = b.URL // what Configure(b.URL) leaves behind
+		e.mu.Unlock()
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(a.Close)
+
+	e = testExporter(a.URL, a.Client())
+	recordN(e, 2)
+	if err := e.push(context.Background()); err == nil {
+		t.Fatal("expected the 503 to be reported")
+	}
+	if got := buffered(e); got != 0 {
+		t.Errorf("%d span(s) retained for an endpoint they were not collected for; want 0", got)
+	}
+	if got := e.Health().DroppedSpans; got != 2 {
+		t.Errorf("DroppedSpans = %d; want 2 — spans ended by a repoint are lost spans and must be counted", got)
+	}
+
+	e.mu.Lock()
+	e.client = b.Client()
+	e.mu.Unlock()
+	if err := e.push(context.Background()); err != nil {
+		t.Fatalf("push to the new collector: %v", err)
+	}
+	if got := deliveredB.Load(); got != 0 {
+		t.Errorf("collector B received %d span(s) collected for collector A; want 0 — a SpanRecord carries the client IP, the target host and the enforcement decision", got)
+	}
+}
+
+// Two pushers each hold a drained batch, and requeue puts whichever finishes
+// LAST at the front. When the NEWER one finishes last that inverts the
+// oldest-first order the ring documents — and at the cap it makes overflow
+// evict the NEWEST spans, which are the ones describing the incident. The
+// shutdown flush creates that second pusher by design, so push() is
+// serialized; this gate is the reproduction that proves it.
+func TestChaos126_ConcurrentPushesCannotInvertRingOrder(t *testing.T) {
+	g1, g2 := make(chan struct{}), make(chan struct{})
+	var n atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch n.Add(1) {
+		case 1:
+			<-g1
+		case 2:
+			<-g2
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(ts.Close)
+
+	e := testExporter(ts.URL, ts.Client())
+	recordN(e, 3) // older: StartNano 0,1,2
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = e.push(context.Background()) }()
+	time.Sleep(100 * time.Millisecond)
+
+	e.RecordSpan(SpanRecord{Name: "proxy_request", StartNano: 100})
+	e.RecordSpan(SpanRecord{Name: "proxy_request", StartNano: 101})
+	wg.Add(1)
+	go func() { defer wg.Done(); _ = e.push(context.Background()) }()
+	time.Sleep(100 * time.Millisecond)
+
+	// Release the OLDER batch first, so the newer one would land in front.
+	close(g1)
+	time.Sleep(100 * time.Millisecond)
+	close(g2)
+	wg.Wait()
+
+	got := e.drain()
+	want := []int64{0, 1, 2, 100, 101}
+	if len(got) != len(want) {
+		t.Fatalf("drained %d span(s); want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].StartNano != want[i] {
+			t.Fatalf("span order = %v; want oldest-first %v — an inverted ring makes overflow evict the NEWEST spans",
+				startNanos(got), want)
+		}
+	}
+	// Serialization is the mechanism: only one request can be in flight, so
+	// the second pusher never held a batch beside the first.
+	if n.Load() != 2 {
+		t.Errorf("collector saw %d requests; want 2 (one per push, never concurrent)", n.Load())
+	}
+}
+
+// The push gate must be acquired under the CALLER's deadline, so a shutdown
+// flush spends its own 2s budget rather than the client timeout of a tick
+// that reached the slot first — and must take nothing from the ring when it
+// gives up.
+func TestChaos126_PushGateWaitIsBoundedByTheCaller(t *testing.T) {
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(func() { close(release); ts.Close() })
+
+	e := testExporter(ts.URL, ts.Client())
+	recordN(e, 2)
+	go func() { _ = e.push(context.Background()) }() // occupies the slot
+	time.Sleep(100 * time.Millisecond)
+
+	e.RecordSpan(SpanRecord{Name: "proxy_request", StartNano: 500})
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := e.Flush(ctx); err == nil {
+		t.Fatal("a flush that cannot get the slot must report it")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("waited %s for the push slot; the caller's deadline must bound it", elapsed)
+	}
+	if got := buffered(e); got != 1 {
+		t.Errorf("buffer holds %d span(s); want the 1 recorded span untouched — a gate timeout takes nothing", got)
+	}
+	if got := e.Health().DroppedSpans; got != 0 {
+		t.Errorf("DroppedSpans = %d; want 0 — nothing was lost", got)
+	}
+	if got := e.Health().FailureCount; got != 0 {
+		t.Errorf("FailureCount = %d; want 0 — losing a race for the slot is not a delivery failure", got)
+	}
+}
+
+// FlushFinal is for a process that is going away: one attempt, then END what
+// is left, counted and named. Retaining it would put the batch back in a ring
+// that dies in RAM having moved no counter — the silent loss this round
+// removed, relocated to the last second of the process's life.
+func TestChaos126_FlushFinalEndsWhatItCouldNotDeliver(t *testing.T) {
+	var hits atomic.Int64
+	down := failingCollector(t, http.StatusServiceUnavailable, &hits)
+	e := testExporter(down.URL, down.Client())
+	recordN(e, 6)
+
+	if err := e.FlushFinal(context.Background()); err == nil {
+		t.Fatal("a failed terminal flush must report the failure")
+	}
+	if got := buffered(e); got != 0 {
+		t.Errorf("buffer holds %d span(s) after a terminal flush; want 0 — there is no next interval", got)
+	}
+	if got := e.Health().DroppedSpans; got != 6 {
+		t.Errorf("DroppedSpans = %d; want 6 — spans that die at shutdown are lost spans", got)
+	}
+}
+
+// …and a SUCCESSFUL terminal flush must still deliver, and count nothing.
+func TestChaos126_FlushFinalDeliversAndCountsNothingOnSuccess(t *testing.T) {
+	var delivered, batches atomic.Int64
+	up := spanCountingCollector(t, &delivered, &batches)
+	e := testExporter(up.URL, up.Client())
+	recordN(e, 6)
+
+	if err := e.FlushFinal(context.Background()); err != nil {
+		t.Fatalf("FlushFinal: %v", err)
+	}
+	if got := delivered.Load(); got != 6 {
+		t.Errorf("collector received %d span(s); want 6", got)
+	}
+	if got := e.Health().DroppedSpans; got != 0 {
+		t.Errorf("DroppedSpans = %d; want 0 — everything was delivered", got)
+	}
+}
+
+// An endpoint that passes the regexp barrier but cannot build a request gives
+// the same verdict every interval, so the batch is dropped and counted rather
+// than pinning the ring against spans that could still be delivered.
+func TestChaos126_UnusableEndpointDropsAndCountsRatherThanPinningTheRing(t *testing.T) {
+	// Passes `^https?://[^/]` and fails http.NewRequestWithContext.
+	e := testExporter("http://host\x7f\x00bad", &http.Client{})
+	recordN(e, 4)
+	if err := e.push(context.Background()); err == nil {
+		t.Fatal("an unusable endpoint must report a failure")
+	}
+	if got := buffered(e); got != 0 {
+		t.Errorf("buffer holds %d span(s); want 0 — the ring must not be pinned by a batch that can never be built", got)
+	}
+	if got := e.Health().DroppedSpans; got != 4 {
+		t.Errorf("DroppedSpans = %d; want 4 — counted, and attributed to the configuration rather than to overflow", got)
+	}
+}
+
+func startNanos(spans []SpanRecord) []int64 {
+	out := make([]int64, len(spans))
+	for i := range spans {
+		out[i] = spans[i].StartNano
+	}
+	return out
 }

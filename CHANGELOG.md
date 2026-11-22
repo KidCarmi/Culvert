@@ -36,7 +36,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   outage alone now loses nothing until the cap. Repointing at a different
   collector no longer ships the previous window's client IPs, hostnames and
   enforcement decisions to a destination the operator did not choose for them,
-  while a headers-only reconfigure keeps the buffer.
+  while a headers-only reconfigure keeps the buffer — including when the
+  repoint lands while a push is already in flight, where the batch is counted
+  and logged rather than retained for a destination it was not collected for.
+  `push` is serialized through a one-slot gate acquired under the caller's own
+  deadline, so two in-flight batches can no longer invert the buffer's
+  oldest-first order and make overflow evict the newest spans.
 - **The OTLP exporters are flushed at shutdown (`CHAOS-126`).** The push loop
   has always carried a branch commented "Final flush on shutdown"; it could not
   flush on a shutdown, because nothing in the shutdown sequence cancelled that
@@ -53,7 +58,12 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   bounded to 2s and is a no-op when OTLP export is disabled, which is the
   shipped default. The metrics exporter is flushed with it: a cumulative
   counter's terminal value is the one an operator wants at a restart boundary,
-  and the next process starts those counters at zero.
+  and the next process starts those counters at zero. On failure the terminal
+  flush ENDS what it could not deliver and logs the count, rather than
+  retaining it into a ring that dies with the process: retention is the right
+  answer for a failure with a next interval ahead of it and the wrong answer
+  at the exit, where the log line is the only form in which the number
+  survives.
 
 - **An inspected tunnel's setup window is bounded on both legs
   (`CHAOS-125`, closing `CHAOS-32`).** Between the `200 Connection Established`
