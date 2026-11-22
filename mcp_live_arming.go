@@ -46,7 +46,7 @@ func evaluateLiveArmReadiness(capb rollout.Capability) liveArmReadiness {
 	// The composed live executor is the source of the executor/upstream/credential/boundary-guard
 	// facts: it is composed as ONE unit (executor + UpstreamCaller + materialize broker + the
 	// final kill-generation and tool-freshness guards), so composition presence asserts them all.
-	if !mcpLiveTierFor(capb).composed() {
+	if !mcpLiveTierFor(capb).IsComposed() {
 		return liveArmReadiness{Reason: "live_executor_absent"}
 	}
 	reg, cat := mcpInventory.sharedInventory()
@@ -82,9 +82,9 @@ func evaluateLiveArmReadiness(capb rollout.Capability) liveArmReadiness {
 // on refusal) and the arm error (nil on success).
 func armLiveTier(capb rollout.Capability) (liveArmReadiness, error) {
 	rd := evaluateLiveArmReadiness(capb)
-	err := mcpLiveTierFor(capb).arm(rd.Ready, "armed:"+rd.Reason)
+	err := mcpLiveTierFor(capb).Arm(rd.Ready, "armed:"+rd.Reason)
 	if err == nil {
-		mcpLiveTierFor(capb).setComposeReason("armed")
+		mcpLiveTierFor(capb).SetComposeReason("armed")
 		logger.Printf("MCP gateway LIVE execution tier ARMED (node ready). Canary is NOT active; a separate Shadow→Canary transition is still required.")
 	}
 	return rd, err
@@ -98,7 +98,7 @@ func armLiveTier(capb rollout.Capability) (liveArmReadiness, error) {
 func quiesceLiveTier(capb rollout.Capability, drainBudget time.Duration) int {
 	lt := mcpLiveTierFor(capb)
 	deadline := time.Now().Add(drainBudget)
-	remaining := lt.quiesce(drainWaitFn(lt, deadline))
+	remaining := lt.Quiesce(drainWaitFn(lt, deadline))
 	if remaining > 0 {
 		logger.Printf("MCP gateway LIVE execution tier quiesced with %d execution(s) still in flight at the drain bound (they complete under emergency-kill authority; no new work admitted)", remaining)
 	} else {
@@ -107,41 +107,13 @@ func quiesceLiveTier(capb rollout.Capability, drainBudget time.Duration) int {
 	return remaining
 }
 
-// drainWaitFn returns a bounded drain wait for quiesce: it blocks until the in-flight count reaches
-// zero (signaled by each execution's release via drainCond) or the deadline elapses, and returns
-// the residual in-flight count. A deadline that is already past returns the current count
-// immediately (no wait). It re-reads the count under the lock, so the release path's broadcast
-// races cleanly with the wait.
-func drainWaitFn(lt *mcpLiveTier, deadline time.Time) func(inFlight func() int) int {
-	return func(_ func() int) int {
-		lt.mu.Lock()
-		defer lt.mu.Unlock()
-		for lt.inFlight > 0 {
-			now := time.Now()
-			if !now.Before(deadline) {
-				return lt.inFlight // bound elapsed — residual in flight
-			}
-			// Timed wait: a timer broadcasts at the deadline so a stalled in-flight execution can
-			// never wedge the drain past its bound. The release path also broadcasts on reaching zero.
-			timer := time.AfterFunc(deadline.Sub(now), func() {
-				lt.mu.Lock()
-				lt.drainCond.Broadcast()
-				lt.mu.Unlock()
-			})
-			lt.drainCond.Wait()
-			timer.Stop()
-		}
-		return 0
-	}
-}
-
 // mcpLiveTierStatus is the read-only, viewer-safe status for the Gateway live-execution tier. It
 // composes the lifecycle state (composed/armed/quiescing), the in-flight/quiesce accounting, the
 // bounded gate-denial counters, and the NODE readiness gate result (so an operator can see WHY the
 // tier is not armable without any ability to arm). It carries no secret/tenant/subject.
 func mcpLiveTierStatus() map[string]any {
 	capb := rollout.CapabilityGateway
-	m := mcpLiveTierFor(capb).status()
+	m := mcpLiveTierFor(capb).Status()
 	m["gate_denials"] = mcpLiveGateDenialSnapshot()
 	rd := evaluateLiveArmReadiness(capb)
 	m["arm_ready"] = rd.Ready

@@ -62,11 +62,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/listenfault"
 )
 
 const (
@@ -397,34 +397,26 @@ var cpGRPCReasonRules = []cpGRPCReasonRule{
 	// 1. Explicit stage tags.
 	{"tls_certificate", cpGRPCTagged(errCPGRPCTLSMaterial)},
 	{"address_publish_rejected", cpGRPCTagged(errCPGRPCAddressPublish)},
-	// 2. Generic errnos.
-	{"port_in_use", cpGRPCErrno(syscall.EADDRINUSE)},
-	{"permission_denied", cpGRPCErrno(syscall.EACCES, syscall.EPERM)},
-	{"address_unavailable", cpGRPCErrno(syscall.EADDRNOTAVAIL)},
-	{"descriptors_exhausted", cpGRPCErrno(syscall.EMFILE, syscall.ENFILE)},
+	// 2. Generic errnos. Which errno is which class is internal/listenfault's
+	// rule (ADR-0058), shared with the other three listeners; the rows stay
+	// here because the table's order is this listener's contract.
+	{"port_in_use", cpGRPCErrnoClass("port_in_use")},
+	{"permission_denied", cpGRPCErrnoClass("permission_denied")},
+	{"address_unavailable", cpGRPCErrnoClass("address_unavailable")},
+	{"descriptors_exhausted", cpGRPCErrnoClass("descriptors_exhausted")},
 	// 3. Network timeout.
-	{"network_error", func(err error) bool {
-		var ne net.Error
-		return errors.As(err, &ne) && ne.Timeout()
-	}},
+	{"network_error", listenfault.TimedOut},
 }
 
 func cpGRPCTagged(tag error) func(error) bool {
 	return func(err error) bool { return errors.Is(err, tag) }
 }
 
-func cpGRPCErrno(want ...syscall.Errno) func(error) bool {
+// cpGRPCErrnoClass matches an error whose errno listenfault files under class.
+func cpGRPCErrnoClass(class string) func(error) bool {
 	return func(err error) bool {
-		var errno syscall.Errno
-		if !errors.As(err, &errno) {
-			return false
-		}
-		for _, w := range want {
-			if errno == w {
-				return true
-			}
-		}
-		return false
+		reason, ok := listenfault.ErrnoReason(err)
+		return ok && reason == class
 	}
 }
 
