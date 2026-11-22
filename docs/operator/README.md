@@ -51,6 +51,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 - [`session-revocation.md`](session-revocation.md) — session revocation durability, cluster reach, and recovery (CHAOS-68).
 - [`session-revocation-plane.md`](session-revocation-plane.md) — what the admin-UI revocation list, `/api/auth/logout` and cluster revocation gossip bound, and what a refusal means (CHAOS-73).
 - [`identity-provider-revocation.md`](identity-provider-revocation.md) — what deleting or disabling an IdP cuts off on the proxy data path (`ps_session`) versus the admin UI session (CHAOS-88).
+- [`authentication-rules.md`](authentication-rules.md) — authentication rules (Auth Policy): the `Exempt`, `CredentialRequired` and `SSORequired` outcomes, rule fields, the admin API, the default authentication behavior (`defaultAuthOutcome`), and the Diagnostics rows, log lines and metrics that report on them.
 - [`authentication-kill-switch.md`](authentication-kill-switch.md) — the Authentication kill switch (`CULVERT_AUTHBYPASS_DISABLE` and the Auth Policy runtime toggle): what it forces off, what each layer survives, what clients see, and how to return to normal.
 - [`idp-metadata-availability.md`](idp-metadata-availability.md) — SAML `metadataUrl` and OIDC discovery availability for interactive identity providers (CHAOS-87).
 
