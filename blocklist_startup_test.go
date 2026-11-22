@@ -6,9 +6,10 @@ package main
 // Resolver tests are pure (no globals touched). Loader tests
 // snapshot/restore the package-level `bl` store and `blFeedSyncer`
 // pointer via t.Cleanup so they are safe under -shuffle=on /
-// -count=2. The feed-syncer goroutine in the loader-with-URL test is
-// parented to a per-test cancellable context (never the package-
-// global appLifecycleCtx).
+// -count=2. Every loader test's feed-syncer goroutine is parented to a
+// per-test cancellable context (never the package-global
+// appLifecycleCtx) and joined before the globals are restored
+// (blocklistLoaderCtx).
 
 import (
 	"context"
@@ -46,6 +47,25 @@ func snapshotBlocklistGlobals(t *testing.T) {
 		bl = oldBL
 		blFeedSyncer = oldSyncer
 	})
+}
+
+// blocklistLoaderCtx returns the context a loader test passes to
+// loadBlocklist. Its cleanup cancels that context and then joins the syncer
+// goroutine the load started, before snapshotBlocklistGlobals restores the
+// globals: an unjoined first round reported to the sync observer after its
+// test ended, and the observer's read of blFeedSyncer raced the next test's
+// reset of it. Call it after snapshotBlocklistGlobals so this cleanup runs
+// first.
+func blocklistLoaderCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		if blFeedSyncer != nil {
+			blFeedSyncer.Wait()
+		}
+	})
+	return ctx
 }
 
 // ─── Resolver ────────────────────────────────────────────────────────
@@ -120,8 +140,7 @@ func TestLoadBlocklist_EmptyConfigStillAssignsSyncer(t *testing.T) {
 	ensureBlocklistStartupTestLogger(t)
 	snapshotBlocklistGlobals(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	ctx := blocklistLoaderCtx(t)
 
 	loadBlocklist(blocklistStartupConfig{FeedInterval: blFeedDefaultInterval}, ctx)
 
@@ -141,8 +160,7 @@ func TestLoadBlocklist_EmptyURLAddsNoFeed(t *testing.T) {
 	ensureBlocklistStartupTestLogger(t)
 	snapshotBlocklistGlobals(t)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	ctx := blocklistLoaderCtx(t)
 
 	loadBlocklist(blocklistStartupConfig{
 		FeedURL:      "",
@@ -168,8 +186,7 @@ func TestLoadBlocklist_LoadsFromTempFile(t *testing.T) {
 		t.Fatalf("write blocklist file: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	ctx := blocklistLoaderCtx(t)
 
 	loadBlocklist(blocklistStartupConfig{Path: path, FeedInterval: blFeedDefaultInterval}, ctx)
 
@@ -186,8 +203,7 @@ func TestLoadBlocklist_MissingPathIsNonFatal(t *testing.T) {
 	snapshotBlocklistGlobals(t)
 
 	missing := filepath.Join(t.TempDir(), "does-not-exist.list")
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	ctx := blocklistLoaderCtx(t)
 
 	// os.IsNotExist branch — logger.Printf "starting with empty list",
 	// no panic, no exit. Asserting on the post-condition (syncer still
@@ -207,12 +223,11 @@ func TestLoadBlocklist_FeedURLStartsSyncer(t *testing.T) {
 	ensureBlocklistStartupTestLogger(t)
 	snapshotBlocklistGlobals(t)
 
-	// Per-test cancellable ctx so the syncer goroutine exits at test
-	// end. The URL is RFC 2606 / RFC 6761 reserved — the immediate
+	// Per-test cancellable ctx so the syncer goroutine exits, and is
+	// joined, at test end. The URL is RFC 2606 / RFC 6761 reserved — the immediate
 	// sync HTTP call will fail and log, but that is fine and matches
 	// production behaviour when a feed URL is briefly unreachable.
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	ctx := blocklistLoaderCtx(t)
 
 	const wantURL = "http://blocklist-feed.invalid/list.txt"
 	loadBlocklist(blocklistStartupConfig{
