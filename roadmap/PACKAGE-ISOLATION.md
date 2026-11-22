@@ -1019,6 +1019,91 @@ added once they merge; this section sits at a third anchor neither touches):
   three files are mostly process-global atomics, log throttles and HTTP
   writers, so only the pure bound predicates are candidates.
 
+### IM-026 data-directory single-writer lock (EXTRACT, 2026-11-21, main `ef9431189`)
+
+Task record (open #1992 appends at the end of this file and open #1993
+inserts before the IM-023 section, and both leave the task table alone until
+they merge; this section sits before the IM-020 one, an anchor neither
+touches, and the IM-026 row is added once they merge):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-026: the lock acquisition in `datadir_writer_lock.go` and its two platform files → `internal/writerlock` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR changes `datadir_writer_*.go` or `internal/storeguard`, checked against all eight open PR heads; #1992 edits `mcp_telemetry*.go`, #1993 edits `mcp_live_*.go` and `mcp_rollout.go`) |
+| Evidence | ADR-0060; 8 exported names (`Take`, `Attempt`, `Verdict`, `Acquired`, `Held`, `Undetermined`, `Lock`, `FileName`); acquisition body moved statement for statement; root keeps its five names as bindings, so `main.go`, `datadir_writer_diagnostics.go` and all 12 root tests are unedited; 14 new engine tests and a boundary pair with 12 negative controls; 18 mutation checks, 17 failing a new test |
+| Risks | the lock is what refuses a second process on one data directory (CHAOS-103), and a second process keeps the unauthenticated first-run window open. The unedited root tests pin the refusal, the override, the degraded cases, the first-boot directory creation and the order against `checkInterruptedRestore` |
+| PR | #2002 |
+| Next action | review PR |
+
+- **Reconciled.** #1991 (IM-023) merged. #1992 (IM-024): every non-skipped
+  check passed, no review thread. #1993 (IM-025): checks were still running
+  when this run started, none failed, no review thread. Nothing to fix in
+  either. IM-005/IM-006 stay blocked on #1526.
+- **Why this file.** A parse-level count, for each root production file, of
+  the names it reads from other root files. `datadir_writer_lock.go` read
+  two: the flock function in its own platform files, and `logger`. The
+  acquisition reads neither a logger nor configuration; the boot decision
+  does. The acquisition also wrote its result into a package variable from
+  inside the function, so it could not run without touching process state.
+- **Moved:** the directory creation, the lock-file open, the non-blocking
+  exclusive flock and its non-unix stub, the three verdicts and the file
+  name. `Take` returns the open lock; main stores it where it did before.
+  **Stays main:** `checkDataDirSingleWriter` and its place in `main()`, the
+  `CULVERT_ALLOW_MULTIPLE_WRITERS` override, the refusal and notice texts,
+  the deferred log line, the posture and its Diagnostics row.
+- **The entry point is `Take`, not `Acquire`, because of an existing wall.**
+  `TestChaos71_Wall_EveryLeaseGrantIsInstalledOrCleared` fails any root
+  function other than `acquireLeaseAttempt` that calls something named
+  `Acquire`: the name is how it recognizes an HA lease acquisition. The first
+  draft of this change tripped it. The wall is unedited; the package uses a
+  name it does not key on. `TryLock` was passed over for the same reason
+  (`ha_alert_lock_chaos_test.go` keys on it).
+- **Size.** Root: 3 production files → 1 (282 → 195 lines). Package: 4
+  production files, 164 lines with the package comment. Root test inventory
+  unchanged.
+- **ADR-0002.** No conflict: the files postdate "Decomposition Complete" and
+  are not classified there; startup and the boot decision stay in main. The
+  earlier decision not to share `internal/storeguard`'s flock (different lock
+  lifetime) is kept: a separate package, no import of `storeguard`.
+- **Program rule.** This is a third open program PR beside #1992 and #1993.
+  It shares no source file with either; all three edit this document at
+  different anchors, and ADR numbers 0056 and 0057 are left to them.
+- **Looked at and left in main.** `socks5_posture_gate.go` (188 lines, 90 of
+  them the file comment) is three atomics and two log lines read by
+  `socks5.go`, `metrics.go` and startup; a package for it would be smaller
+  than its import line is worth. `configsnapshot_apply_health.go` is two
+  atomics. Both are correctly located.
+- **Next.** The support upload queue: `support_upload_queue.go` (379 lines)
+  holds the queue entry record, its per-bundle file store, the state
+  vocabulary, the retry backoff and the drain step, and reads five root
+  names (`dataDir`, `durableSupportWrite`, `mkdirDurableSupport`,
+  `sanitizeLog`, `supportBundleIDRe`). `internal/supportupload` already owns
+  the transfer and its `Receipt`. First step: read
+  `support_durable_write_chokepoint_test.go` and
+  `support_upload_arch_test.go` to see which of them key on the root file
+  path, then list what `support_upload_worker.go` and `support_upload_wire.go`
+  read from the queue, and decide whether the directory and the two durable
+  write functions become constructor options of a queue instance. It has no
+  open-PR overlap today. Unchanged alternatives: `mcp_rollout_execdeps.go`
+  once #1993 is decided, one strict decoder for the three F3 records, then
+  IM-014 mapping.
+- **Discovered, not fixed here (pre-existing on main `ef9431189`).** The full
+  root suite under `-race` in one process fails on a leaked goroutine.
+  `loadUIAccessPolicy` starts `runIdPMetadataDegradationWatchdog` on the
+  lifecycle context (`ui_access_policy_startup.go:116`), and the
+  `TestLoadUIAccessPolicy_*` tests that call it never stop it. It ticks every
+  2.5 minutes and reads the `idpRegistry` variable
+  (`idp_metadata_health.go:993`), which later tests replace
+  (`store_authsource_test.go:189` is one of several). With
+  `-shuffle=1795302766790073750` this change fails 13 tests and unmodified
+  main fails 12; every one is "race detected", all 37 reports carry the
+  watchdog's stack, and no assertion fails. The tests named differ between
+  the two runs because the tick is timed. A selection that finishes in under
+  2.5 minutes does not show it, which is presumably why the sharded gate
+  does not. The fix belongs in the test (a cancellable lifecycle context for
+  the tests that call `loadUIAccessPolicy`), not in this program.
+
 ### IM-028 saas-feed node-local record envelope decoder (ORGANIZE, 2026-11-22, main `ef9431189`)
 
 Task record (open #1992 edits the task table and appends at the end of this
