@@ -18,8 +18,9 @@ import (
 // engine moved to internal/supportupload/uploadqueue (IM-029, ADR-0062).
 //
 // Every name used here existed with the same signature before the move, and
-// the digests below were captured by running this file against main
-// `155df0944`, where the engine was still in support_upload_queue.go. They
+// the digests below were captured by running these two tests against main
+// `155df0944`, where the engine was still in support_upload_queue.go (and
+// csbID was declared by the queue's own test file, since moved). They
 // pin the bytes a node writes under <dataDir>/support/upload_queue, which a
 // node upgraded across the move reads back.
 

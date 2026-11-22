@@ -28,8 +28,9 @@ They are where the node keeps state, which strings are bundle ids, how the
 support domain makes a write durable and visible to storage health, and how
 the application scrubs a log value.
 
-The engine could not be exercised on its own. Every test first pointed the
-process-wide `dataDir` at a temporary directory, and three tests overwrote
+The engine could not be exercised on its own. Seven of its twelve tests
+first pointed the process-wide `dataDir` at a temporary directory (the other
+five, on one attempt and the retry ladder, touch no file), and three overwrote
 and restored the package variables `maxUploadQueue` and `maxUploadTerminal`,
 which existed as variables only so tests could do that.
 
@@ -59,9 +60,9 @@ Decisions inside that:
 
 - **Ten names, two over the program's eight.** Five of the ten are the values
   of one vocabulary that is persisted in every entry and returned by
-  `/api/support/uploads`. Main names all five: the consent gate tests three,
-  the worker audits the other three outcomes differently, and root tests set
-  two. Hiding them behind predicates would need at least as many methods and
+  `/api/support/uploads`. Main names all five: the consent gate tests queued,
+  uploading and uploaded, the worker audits uploaded, rejected and deferred
+  differently, and root tests set two. Hiding them behind predicates would need at least as many methods and
   would leave root tests unable to build an entry. The alternatives that
   reach eight were rejected as worse designs: a `Queue` struct with exported
   configuration fields in place of `New` and `Options` makes the bounds
@@ -82,7 +83,10 @@ Decisions inside that:
   and main's architecture test asserts on three. A gap fails closed: with no
   `Dir` or `ValidID` every id is invalid; with no `Mkdir` or `Write` nothing
   is saved; with no `Sanitize` the error text is withheld, not stored raw; a
-  zero `MaxPending` refuses every enqueue.
+  zero `MaxPending` refuses every enqueue. A zero `MaxTerminal` is a bound of
+  zero (no delivered record is retained) and a negative one is read as zero;
+  main's arithmetic would have indexed with it, which main's constant 256
+  never reached.
 - **`Dir` is a function.** Main resolves the queue directory from `dataDir`
   on every call today, and its tests move `dataDir` between calls. A string
   captured at construction would silently pin the first value.
@@ -170,8 +174,9 @@ New in root, 2 tests (`support_upload_queue_wiring_test.go`):
 - The bytes of one entry file after each of six steps (queued, transient
   failure with control bytes and an over-long text, gateway rejection,
   re-arm, deferral after six failures, upload with a receipt), compared with
-  SHA-256 digests captured by running the same test file on main before the
-  move.
+  SHA-256 digests captured by running the same two tests on main before the
+  move (there the `csbID` helper came from the test file that has since
+  moved).
 - What main hands the engine: the path under `dataDir`, the four bound
   values, `boundUploadErr` agreeing with `sanitizeLog`, six malformed ids
   refused by enqueue, save and load with nothing written, and the directory
@@ -188,7 +193,9 @@ New in the package:
   the literal ladder.
 - Two queues with different bounds share no entry, capacity or bound.
 - `Dir` is asked on every call.
-- Each missing option and a zero or negative bound refuses and writes
+- A zero or negative `MaxTerminal` retains no delivered record and does not
+  panic.
+- Each missing option and a zero or negative `MaxPending` refuses and writes
   nothing; no sanitizer withholds the text.
 - Nine malformed ids are refused by all three id-taking operations and create
   nothing; files whose names the rule refuses, and a directory with a valid

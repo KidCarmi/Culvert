@@ -1464,7 +1464,7 @@ func StartRetryLoop(ctx context.Context, current func() *Store) {
 // with its attempt count intact (the attempt did not complete, so it is not
 // charged). The entry leaves the queue only when its attempt has RESOLVED:
 // removed on success, re-armed on its own backoff by enqueueRetry on failure.
-// internal/support's upload queue (support_upload_queue.go) already works this
+// The support upload queue (internal/supportupload/uploadqueue) already works this
 // way — the entry holds an `uploading` state in the durable queue rather than
 // being lifted out of it.
 func processRetryQueue(ctx context.Context, store *Store) {

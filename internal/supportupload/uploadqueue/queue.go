@@ -51,7 +51,8 @@ type Entry struct {
 }
 
 // Options is everything a Queue is given. It has no defaults: a missing
-// function or a zero bound makes the affected operation refuse (see New).
+// function makes the affected operation refuse, and a zero bound is a bound
+// of zero (see New).
 type Options struct {
 	// Dir answers the queue directory. It is asked on every operation, so the
 	// owner may move the data directory between calls.
@@ -111,7 +112,8 @@ var (
 // closed: with no Dir or no ValidID every id is invalid and the queue lists
 // nothing; with no Mkdir or no Write nothing is saved; with no Sanitize the
 // error text is withheld, not stored raw; a zero MaxPending refuses every
-// enqueue and a zero MaxAttempts defers on the first failure.
+// enqueue, a zero MaxAttempts defers on the first failure, and a zero or
+// negative MaxTerminal retains no delivered or rejected record.
 func New(o Options) *Queue { return &Queue{o: o} }
 
 func (q *Queue) validID(id string) bool {
@@ -303,10 +305,11 @@ func (q *Queue) pruneTerminalLocked() {
 			terminal = append(terminal, all[i])
 		}
 	}
-	if len(terminal) <= q.o.MaxTerminal {
+	keep := max(q.o.MaxTerminal, 0) // a negative bound keeps none; it must not index
+	if len(terminal) <= keep {
 		return
 	}
-	evict := terminal[:len(terminal)-q.o.MaxTerminal]
+	evict := terminal[:len(terminal)-keep]
 	for i := range evict {
 		_ = os.Remove(q.Path(evict[i].BundleID)) //nolint:errcheck // best-effort eviction
 	}

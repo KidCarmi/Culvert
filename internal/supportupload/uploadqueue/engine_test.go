@@ -298,6 +298,27 @@ func TestNew_MissingOptionsFailClosed(t *testing.T) {
 	})
 }
 
+// TestEnqueue_ZeroOrNegativeTerminalBoundKeepsNone: MaxTerminal is not
+// defaulted either. Zero retains no delivered record, and a negative value is
+// read as zero instead of indexing with it.
+func TestEnqueue_ZeroOrNegativeTerminalBoundKeepsNone(t *testing.T) {
+	for _, bound := range []int{0, -1, -300} {
+		q := newTestQueue(t, func(o *Options) { o.MaxTerminal = bound })
+		for i, seed := range []string{"za", "zb"} {
+			if _, err := q.Enqueue(csbID(seed), "C", "", "h", ruleBase.Add(time.Duration(i)*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			markEntry(t, q, csbID(seed), func(e *Entry) { e.State = StateUploaded })
+		}
+		if _, err := q.Enqueue(csbID("live"), "C", "", "h", ruleBase.Add(time.Minute)); err != nil {
+			t.Fatalf("bound %d: %v", bound, err)
+		}
+		if list := q.List(); len(list) != 1 || list[0].BundleID != csbID("live") {
+			t.Fatalf("bound %d: list = %+v, want only the live entry", bound, list)
+		}
+	}
+}
+
 // TestQueue_OnlyValidIDsNameFiles: ValidID is the only thing between an id
 // and a path, for every operation that takes one, and a file whose name it
 // refuses is never read back.

@@ -1198,8 +1198,8 @@ retry-sleep lead that open #1997 records.
 - **Why this.** It is the candidate the writer-lock note named next. The
   file called itself "the queue ENGINE only" and read five root names, none
   of them a queue rule: the data directory, the bundle-id rule, the two
-  durable-write functions and the log sanitizer. Its tests could run only
-  after moving the process-wide `dataDir`, and two bounds were package
+  durable-write functions and the log sanitizer. Seven of its twelve
+  tests ran only after moving the process-wide `dataDir`, and two bounds were package
   variables so that tests could overwrite them.
 - **Moved:** the entry record and its JSON form, the five states, enqueue and
   re-arm, both capacity checks, pruning, the classification of one attempt,
@@ -1214,7 +1214,7 @@ retry-sleep lead that open #1997 records.
 - **Size.** Root: `support_upload_queue.go` 379 → 113 lines; one comment
   line in `support_upload_wire.go`. Package: 2 production files. Root test
   inventory 8618 → 8608 (12 moved out, 2 wiring tests added). Package: 12
-  moved tests, 16 new and a boundary pair with 21 negative controls.
+  moved tests, 17 new and a boundary pair with 21 negative controls.
 - **One root test edited.**
   `TestSupportPersistence_RoutesThroughDurableChokepoint` took the queue's
   package mutex and called the locked save; it now calls
