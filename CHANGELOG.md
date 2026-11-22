@@ -540,6 +540,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **Diagnostics now warns when an internal fault was recently contained
+  (Product Experience).** A recovered panic is counted
+  (`culvert_crash_records_total{component}`), logged, written to the audit
+  ring as `panic_recovered` and — only if a webhook already subscribes to
+  "Contained panic" — alerted. The diagnostics report said nothing, so a node
+  whose feed sync, HA round or request handler had just crashed read healthy
+  to an administrator with no metrics scrape and no webhook, and a fault in
+  the alert-delivery plane itself (which cannot page) had no on-appliance
+  signal at all. A new report-only `contained_panic_recent` WARN row gives
+  the count since startup, how long ago the latest one happened (on the
+  monotonic clock), and the component and crash id of the latest recorded
+  one; it points at the `panic_recovered` audit filter, the support bundle
+  and the webhook event, and clears 24h after the last one. It names only
+  what the audit log already shows a viewer — never the panic value or the
+  stack. No row when nothing was contained. Containment, throttling, the
+  alert latch and every request outcome are unchanged.
+
 - **Adding to the blocklist now reports what the gateway actually stored
   (Product Experience).** The admin UI's "Added N host(s)" / "Imported N hosts"
   toast counted the lines it sent, not what `POST /api/blocklist` did with them.

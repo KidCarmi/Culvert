@@ -308,6 +308,7 @@ func recordCrash(component, correlationID string, v any) {
 	// component label only, never panic text).
 	atomic.AddInt64(&statCrashRecords, 1)
 	crashByComponent.record(component)
+	noteContainedPanic() // diagnostics row stamp (diagnostics_contained_panic.go); observability only
 
 	// Throttle the expensive + floodable sinks per component so a repeatable
 	// request-triggered panic cannot flood the SIEM/disk or evict the shared
@@ -556,6 +557,7 @@ func resetCrashGuardStateForTest() {
 	atomic.StoreInt64(&statCrashRecords, 0)
 	atomic.StoreInt64(&statCrashSuppressed, 0)
 	atomic.StoreInt64(&statCrashSinkPanics, 0)
+	atomic.StoreInt64(&crashLastMono, 0)
 	crashByComponent = newCrashCounter()
 	crashThrottleMu.Lock()
 	crashThrottleLast = map[string]int64{}
