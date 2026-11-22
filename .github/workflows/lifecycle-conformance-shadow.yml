@@ -1,0 +1,73 @@
+name: Lifecycle Conformance (shadow)
+
+# SHADOW — NOT A MERGE GATE. Do not add this workflow to the required status
+# checks (REPOSITORY-SETTINGS.md §2) without explicit owner approval of the
+# properties in cmd/culvert-maint/internal/lifecyclemodel/properties.json. None of them
+# is owner-approved today.
+#
+# What it does: replays deterministic, model-derived sequences against the real
+# maintenance-agent code (cmd/culvert-maint) through its fake exec layer and
+# compares each outcome with the model. See test/lifecycle-conformance/README.md
+# for exactly what is verified against code and what is only an abstraction.
+#
+# What it does not need: no secrets, no registry, no Docker daemon, no network
+# beyond the Go module cache, no AI or external API.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "cmd/culvert-maint/**"
+      - "test/lifecycle-conformance/**"
+      - ".github/workflows/lifecycle-conformance-shadow.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: lifecycle-conformance-shadow-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: "Shadow · lifecycle conformance (non-blocking)"
+    runs-on: ubuntu-latest
+    # Measured: under one minute including compile. The budget is deliberately
+    # tight so a state-space blow-up fails loudly instead of running long.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
+
+      # Exit 0 = model check complete AND all three conformance suites ran and
+      # passed. Exit 1 = a conformance vector or an owner-approved property
+      # failed. Exit 2 = incomplete exploration, a vacuous property or a skipped
+      # suite — never reported as a pass. A failing PROPOSED property is only
+      # reported (see the summary step).
+      - name: Model check + conformance
+        run: test/lifecycle-conformance/run.sh "$RUNNER_TEMP/lifecycle-report"
+
+      - name: The run modified no contract or property file
+        if: always()
+        run: git diff --exit-code -- contracts/registry.yaml cmd/culvert-maint/internal/lifecyclemodel/properties.json
+
+      - name: Summary
+        if: always()
+        working-directory: cmd/culvert-maint
+        run: |
+          go run -tags lifecycle_conformance ./internal/lifecyclemodel/cmd/lifecyclecheck \
+            -summary "$RUNNER_TEMP/lifecycle-report" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: lifecycle-conformance-report
+          path: ${{ runner.temp }}/lifecycle-report
+          retention-days: 14
+          if-no-files-found: warn
