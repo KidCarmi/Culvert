@@ -336,3 +336,41 @@ func TestVectors_Deterministic(t *testing.T) {
 		t.Errorf("%d of %d reconcile verdicts are produced over the input space", len(seen), len(rv.Reasons))
 	}
 }
+
+// stallSystem is state 0 with a self-loop ("wait") and a step to the goal state 1 ("advance").
+type stallSystem struct{}
+
+func (stallSystem) Inits() []int { return []int{0} }
+func (stallSystem) Events(s int) []string {
+	if s == 0 {
+		return []string{"wait", "advance"}
+	}
+	return nil
+}
+func (stallSystem) Step(s int, e string) int {
+	if e == "advance" {
+		return 1
+	}
+	return s
+}
+func (stallSystem) Observe(s int) map[string]any { return map[string]any{"n": float64(s)} }
+
+// A path that waits in a self-loop uses up the bound without reaching the goal. "Every path
+// reaches the goal within k" must therefore FAIL, while "some path does" still passes.
+func TestCheck_BoundedAllCountsSelfLoops(t *testing.T) {
+	run := func(quantifier string) Result {
+		props := mustParse(t, `[{"id":"B","status":"approved","kind":"bounded","trigger":[["n","==",0]],
+			"goal":[["n","==",1]],"within":1,"quantifier":"`+quantifier+`"}]`)
+		res, _, err := Check[int](stallSystem{}, props, budgetStates, budgetTime)
+		if err != nil || len(res) != 1 {
+			t.Fatalf("check: %v (%d results)", err, len(res))
+		}
+		return res[0]
+	}
+	if r := run("all"); r.Verdict != VerdictFail || !reflect.DeepEqual(r.Trace, []string{"wait"}) {
+		t.Errorf("all: verdict %s trace %v, want FAIL via [wait]", r.Verdict, r.Trace)
+	}
+	if r := run("exists"); r.Verdict != VerdictPass {
+		t.Errorf("exists: verdict %s, want PASS", r.Verdict)
+	}
+}

@@ -372,7 +372,8 @@ func (g *graph) reachesGoal(s int, goal []bool, k int) bool {
 	return false
 }
 
-// avoid finds a path of at most left steps from x that never meets the goal.
+// avoid finds a path of at most left steps from x that never meets the goal, or one that dead-ends
+// before it.
 func (g *graph) avoid(x int, goal []bool, left int) ([]string, bool) {
 	if goal[x] {
 		return nil, false
@@ -380,17 +381,15 @@ func (g *graph) avoid(x int, goal []bool, left int) ([]string, bool) {
 	if left == 0 {
 		return nil, true
 	}
-	moved := false
+	// A self-loop is a step like any other: a path that waits in x uses up the bound without
+	// reaching the goal, so it must be explored. Skipping it would report "every path reaches the
+	// goal within k" while a stalled path does not.
 	for _, e := range g.succ[x] {
-		if e.to == x {
-			continue
-		}
-		moved = true
 		if sub, ok := g.avoid(e.to, goal, left-1); ok {
 			return append([]string{e.event}, sub...), true
 		}
 	}
-	return nil, !moved
+	return nil, len(g.succ[x]) == 0 // a dead end short of the goal never reaches it
 }
 
 // Validate checks that the property is well formed and references only known fields.
