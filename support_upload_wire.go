@@ -291,7 +291,7 @@ var newUploadTransport = func(cfg supportupload.Config) (uploadTransport, error)
 // (possibly new) session id is returned even on a transient error so the next
 // attempt — including one after a restart — resumes from the received offset.
 //
-// MUST NOT be called under uploadQueueMu (it does network I/O).
+// MUST NOT be called under the queue's mutex (it does network I/O).
 func realUploadFunc(ctx context.Context, e uploadQueueEntry) (*supportupload.Receipt, string, error) {
 	cfg := uploadConfigGet()
 	if !cfg.Enabled || cfg.Origin == "" {

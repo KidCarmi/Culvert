@@ -139,11 +139,9 @@ func TestSupportPersistence_RoutesThroughDurableChokepoint(t *testing.T) {
 			name: "upload queue entry (support_upload_queue.go)",
 			path: uploadQueuePath(chaosBundleID),
 			save: func(t *testing.T) {
-				uploadQueueMu.Lock()
-				defer uploadQueueMu.Unlock()
 				e := uploadQueueEntry{BundleID: chaosBundleID, State: uploadStateQueued, CreatedAt: "t", UpdatedAt: "t"}
-				if err := saveUploadQueueEntryLocked(e); err != nil {
-					t.Fatalf("saveUploadQueueEntryLocked: %v", err)
+				if err := saveUploadQueueEntry(e); err != nil {
+					t.Fatalf("saveUploadQueueEntry: %v", err)
 				}
 			},
 		},
