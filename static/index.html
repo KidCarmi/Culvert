@@ -1361,6 +1361,7 @@ table.mcpx-cat-tbl td{padding:6px 10px;border-bottom:1px solid var(--border)}
               placeholder="example.com or *.example.com (wildcards supported)">
             <button class="btn" data-click="addHost">+ Add Host</button>
           </div>
+          <div class="banner warn" id="bl-add-notice" role="status" style="display:none;margin-bottom:12px;align-items:flex-start"></div>
           <div class="filter-bar" style="gap:8px;flex-wrap:wrap">
             <input type="text" class="input" style="width:240px" id="bl-filter"
               placeholder="Search hosts…" data-input="renderBlocklist">
@@ -5646,6 +5647,7 @@ document.addEventListener('click', e => {
     case 'exportBlocklist':   exportBlocklist(); break;
     case 'toggleBlocklistMode': toggleBlocklistMode(); break;
     case 'addHost':           addHost(); break;
+    case 'blDismissAddNotice': document.getElementById('bl-add-notice').style.display = 'none'; break;
     case 'setBlSource':       setBlSource(arg); break;
     case 'bulkDeleteBL':      bulkDeleteBL(); break;
     case 'blLoadMore':        blLoadMore(); break;
@@ -9541,16 +9543,40 @@ async function addHost() {
   const hosts = input.value.split('\n').map(h => h.trim()).filter(Boolean);
   if (!hosts.length) return;
   try {
-    await api('/api/blocklist', {
+    const d = await api('/api/blocklist', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({hosts})
     });
     input.value = '';
-    toast('Added ' + hosts.length + ' host(s)', 'success');
+    blReportAdd(d, hosts.length, 'Added');
     fetchBlocklist();
     fetchStats();
   } catch(e) { toast('Error: ' + e.message, 'error'); }
+}
+
+// blReportAdd - report what the server did with an add/import, not how many
+// lines were sent. Skipped entries, and stored entries that can never match a
+// destination hostname, stay on screen until the next add or until dismissed.
+function blReportAdd(d, sent, verb) {
+  const added = (d && typeof d.added === 'number') ? d.added : sent;
+  const unchanged = (d && d.unchanged) || 0;
+  toast(verb + ' ' + added + ' new host(s)' + (unchanged ? ', ' + unchanged + ' already listed' : ''), 'success');
+  const box = document.getElementById('bl-add-notice');
+  const skippedN = (d && d.skipped_count) || 0, warnN = (d && d.warning_count) || 0;
+  if (!skippedN && !warnN) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  const rows = (list) => (list || []).map(n =>
+    `<li><code>${escHtml(n.host)}</code> - ${escHtml(n.reason)}</li>`).join('');
+  const more = (n, list) => n > (list || []).length ? `<li>and ${n - (list || []).length} more</li>` : '';
+  let html = '<div style="flex:1;min-width:0">';
+  if (warnN) html += `<strong>${warnN} entr${warnN === 1 ? 'y was' : 'ies were'} saved but will never match a destination.</strong>`
+    + ' Remove and re-enter as a bare hostname.'
+    + `<ul style="margin:6px 0 8px 18px;overflow-wrap:anywhere">${rows(d.warnings)}${more(warnN, d.warnings)}</ul>`;
+  if (skippedN) html += `<strong>${skippedN} entr${skippedN === 1 ? 'y was' : 'ies were'} not saved.</strong>`
+    + `<ul style="margin:6px 0 0 18px;overflow-wrap:anywhere">${rows(d.skipped)}${more(skippedN, d.skipped)}</ul>`;
+  html += '</div><button class="btn ghost sm" data-click="blDismissAddNotice">Dismiss</button>';
+  box.innerHTML = html;
+  box.style.display = '';
 }
 
 async function removeHost(host) {
@@ -9609,12 +9635,12 @@ function importBlocklist(input) {
       hosts = text.split('\n').map(h => h.trim()).filter(h => h && !h.startsWith('#'));
     }
     try {
-      await api('/api/blocklist', {
+      const d = await api('/api/blocklist', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
         body: JSON.stringify({hosts})
       });
-      toast('Imported ' + hosts.length + ' hosts', 'success');
+      blReportAdd(d, hosts.length, 'Imported');
       fetchBlocklist(); fetchStats();
     } catch(err) { toast('Import error: ' + err.message, 'error'); }
   };

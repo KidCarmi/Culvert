@@ -107,8 +107,8 @@ func newMCPLiveSideEffectGate(capb rollout.Capability) *mcpLiveSideEffectGate {
 	lt := mcpLiveTierFor(capb)
 	return &mcpLiveSideEffectGate{
 		capb:          capb,
-		admit:         lt.admitExecution,
-		admitOpen:     lt.admissionOpen,
+		admit:         lt.AdmitExecution,
+		admitOpen:     lt.AdmissionOpen,
 		readFirst:     canary.IsReadFirstOperation,
 		trustPrecheck: mcpLiveTrustPrecheck,
 		approvalOK:    mcpLiveApprovalSatisfied,

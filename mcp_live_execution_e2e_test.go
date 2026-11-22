@@ -31,7 +31,7 @@ import (
 func liveRealGate(capb rollout.Capability, trustOK bool) *mcpLiveSideEffectGate {
 	return &mcpLiveSideEffectGate{
 		capb:          capb,
-		admit:         mcpLiveTierFor(capb).admitExecution,
+		admit:         mcpLiveTierFor(capb).AdmitExecution,
 		readFirst:     canary.IsReadFirstOperation,
 		trustPrecheck: stubTrustPrecheckEligible,
 		approvalOK:    func(canary.LiveTarget, policy.OperationClass, time.Time) (bool, string) { return trustOK, "" },
@@ -109,7 +109,7 @@ func armCanaryLiveTierBroker(t *testing.T, up execution.UpstreamCaller, newGate 
 		t.Fatalf("compose live tier: %v", err)
 	}
 	// Arm the lifecycle (composed→armed).
-	if err := mcpLiveTierFor(rollout.CapabilityGateway).arm(true, "armed"); err != nil {
+	if err := mcpLiveTierFor(rollout.CapabilityGateway).Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	// Begin the Canary runtime budget (the gate reserves against it).
