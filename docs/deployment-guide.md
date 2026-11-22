@@ -482,6 +482,16 @@ proxy:
 
 Or upload via Admin UI: **Certificates > SSL / TLS > Upload Client Certificate**
 
+The pair is read at startup. If it cannot be loaded then (the files are not
+there yet, are unreadable, or do not match), Culvert starts anyway, sends no
+client certificate, and reports it under **Diagnostics**
+(`upstream_mtls_client_cert`) and **CA Management > OCSP revocation**. It
+keeps retrying the same two paths (every two minutes at most) and starts
+presenting the certificate as soon as they load, with no restart; the load is
+audited as `upstream_mtls.client_cert.auto_load`, actor `system`. A
+certificate that did load is not re-read: replacing or renewing it, or
+changing either path, still takes a restart.
+
 ---
 
 ## SSL Inspection — CA Distribution

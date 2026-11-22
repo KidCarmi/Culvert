@@ -167,6 +167,9 @@ var chaos105Workers = []struct {
 	// The deferred GeoIP database load: same shape; its round opens a file and
 	// publishes the reader country rules match against.
 	{"geoip_load_retry.go", "runGeoIPLoadRetry", "crashComponentGeoIPLoadRetry"},
+	// The deferred upstream mTLS client-certificate load: same shape; its
+	// round reads a key pair and publishes an upstream transport.
+	{"mtls_client_cert_retry.go", "runMTLSClientCertLoadRetry", "crashComponentMTLSClientCertRetry"},
 }
 
 func TestCHAOS105_EveryRegisteredWorkerRoundIsGuarded(t *testing.T) {

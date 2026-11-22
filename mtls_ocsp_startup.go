@@ -6,7 +6,8 @@ package main
 //
 // Neither sub-step is fatal: a failed client-cert load is logged and
 // upstream connections proceed without mTLS (matches original
-// behaviour); OCSP is best-effort by design.
+// behaviour) until the deferred load in mtls_client_cert_retry.go
+// completes it; OCSP is best-effort by design.
 //
 // P5.3 ownership: BOTH branches (mTLS + OCSP) update the operator's
 // TLS template (upstreamOpTLSCfg) from inside a single swap closure.
@@ -17,7 +18,6 @@ package main
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"net/http"
 	"sync"
@@ -73,13 +73,13 @@ func loadMTLSClientCert(cfg mtlsOCSPStartupConfig) *tls.Certificate {
 		if err != nil {
 			logger.Printf("mTLS: failed to load client cert: %v", err)
 			recordMTLSClientCertStatus(cfg.ClientCertFile, false, time.Time{}, err.Error())
+			// Not permanent: the same two paths are re-attempted off the
+			// boot path (mtls_client_cert_retry.go) instead of requiring a
+			// restart.
+			armMTLSClientCertDeferredLoad(cfg.ClientCertFile, cfg.ClientKeyFile)
 			return nil
 		}
-		var notAfter time.Time
-		if leaf, perr := x509.ParseCertificate(c.Certificate[0]); perr == nil {
-			notAfter = leaf.NotAfter
-		}
-		recordMTLSClientCertStatus(cfg.ClientCertFile, true, notAfter, "")
+		recordMTLSClientCertStatus(cfg.ClientCertFile, true, mtlsLeafNotAfter(&c), "")
 		return &c
 	case cfg.ClientCertFile != "" || cfg.ClientKeyFile != "":
 		// One-sided config: FileConfig.validate doesn't reject a lone

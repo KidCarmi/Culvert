@@ -50,7 +50,11 @@ func resetMTLSOCSPGlobals(t *testing.T) {
 	origCertStatus := mtlsClientCertState
 	mtlsClientCertState = mtlsClientCertStatus{}
 	mtlsClientCertMu.Unlock()
+	// A failed load arms the deferred load (mtls_client_cert_retry.go); it
+	// must not leak into the next test.
+	disarmMTLSDeferredLoadForTest()
 	t.Cleanup(func() {
+		disarmMTLSDeferredLoadForTest()
 		upstreamTransportPtr.Store(origPtr)
 		upstreamTransportWriteMu.Lock()
 		upstreamOpTLSCfg = origOpTLS
