@@ -136,6 +136,7 @@ func blocklistAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	added := 0
+	var outcome blocklistAddOutcome
 	if body.Host != "" {
 		body.Hosts = append(body.Hosts, body.Host)
 	}
@@ -153,6 +154,7 @@ func blocklistAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(h) > 253 {
 			logger.Printf("UI: blocklist entry too long, skipped: %q…", sanitizeLog(h[:50]))
+			outcome.skip(h[:50]+"…", "longer than 253 characters, not stored")
 			continue
 		}
 		// Validate wildcard patterns (Finding 1.3).
@@ -170,7 +172,9 @@ func blocklistAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	auditEvent(r, "blocklist.add", fmt.Sprintf("%d host(s)", added), strings.Join(body.Hosts, ", "))
 	saveConfigVersion(sessionAdmin(r), "blocklist.add")
-	jsonOK(w, map[string]any{"added": added})
+	// Additive operator feedback only (blocklist_add_feedback.go): what was
+	// stored, audited and versioned above is unchanged.
+	jsonOK(w, outcome.response(valid, added))
 }
 
 func blocklistDelete(w http.ResponseWriter, r *http.Request) {

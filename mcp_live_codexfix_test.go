@@ -218,7 +218,7 @@ func TestLiveCompose_RejectsMissingResponseProfile(t *testing.T) {
 	if cfg.Deps.Executor != nil {
 		t.Fatal("a rejected composition must not install an executor")
 	}
-	if mcpLiveTierFor(rollout.CapabilityGateway).composed() {
+	if mcpLiveTierFor(rollout.CapabilityGateway).IsComposed() {
 		t.Fatal("a rejected composition must not mark the tier composed")
 	}
 }
@@ -305,7 +305,7 @@ func TestLiveCommit_LeavingLiveUnarmsAndDemotes(t *testing.T) {
 	armCanaryLiveTier(t, up, true, 10) // composed + armed + Canary generation active
 	capb := rollout.CapabilityGateway
 	lt := mcpLiveTierFor(capb)
-	if !lt.armed() || !globalCanaryRuntime.armed(capb) {
+	if !lt.IsArmed() || !globalCanaryRuntime.armed(capb) {
 		t.Fatal("precondition: the live tier must be armed with an active Canary generation")
 	}
 	r := getMCPRollout()
@@ -320,10 +320,10 @@ func TestLiveCommit_LeavingLiveUnarmsAndDemotes(t *testing.T) {
 	if err := r.reconcileCanaryRuntimeAfterCommit(tgt, gwObserveCfg(), prevCfg.Mode, prevCfg, r.gateway.Evidence(), testActivationSpec(canary.Budget{}, canaryRuntimeTestNow), "test", time.Unix(0, 2)); err != nil {
 		t.Fatalf("leaving-live reconcile must succeed, got %v", err)
 	}
-	if lt.armed() {
+	if lt.IsArmed() {
 		t.Fatal("a leaving-live demotion must un-arm the live tier")
 	}
-	if release, ok := lt.admitExecution(); ok {
+	if release, ok := lt.AdmitExecution(); ok {
 		release()
 		t.Fatal("an un-armed tier must reject new execution admission after a leaving-live demotion")
 	}
@@ -346,8 +346,8 @@ func TestLiveCommit_LeavingLiveDemoteDoesNotBlockOnInflight(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() { ex.Execute(context.Background(), in, ex.Resolve(in)); close(done) }()
-	if !waitForLiveTier(func() bool { return lt.inFlightCount() == 1 }, 5*time.Second) {
-		t.Fatalf("one execution must be in flight before the demotion, got %d", lt.inFlightCount())
+	if !waitForLiveTier(func() bool { return lt.InFlightCount() == 1 }, 5*time.Second) {
+		t.Fatalf("one execution must be in flight before the demotion, got %d", lt.InFlightCount())
 	}
 
 	r := getMCPRollout()
@@ -371,7 +371,7 @@ func TestLiveCommit_LeavingLiveDemoteDoesNotBlockOnInflight(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("the leaving-live demote must NOT block on in-flight work (fast; the boundary invalidates residual, not a drain)")
 	}
-	if lt.armed() || globalCanaryRuntime.armed(capb) {
+	if lt.IsArmed() || globalCanaryRuntime.armed(capb) {
 		t.Fatal("the demote must un-arm the tier and invalidate the generation")
 	}
 	// The in-flight execution was already past the boundary before the demote — it completes legitimately.
@@ -399,7 +399,7 @@ func TestLiveCommit_DemotedGenerationRefusedAtFinalBoundary(t *testing.T) {
 	// reserved generation is no longer current — the exact demote-after-reserve TOCTOU the boundary closes.
 	gate := &mcpLiveSideEffectGate{
 		capb:                 capb,
-		admit:                mcpLiveTierFor(capb).admitExecution,
+		admit:                mcpLiveTierFor(capb).AdmitExecution,
 		readFirst:            canary.IsReadFirstOperation,
 		trustPrecheck:        stubTrustPrecheckEligible,
 		approvalOK:           func(canary.LiveTarget, policy.OperationClass, time.Time) (bool, string) { return true, "" },
@@ -423,7 +423,7 @@ func TestLiveCommit_DemotedGenerationRefusedAtFinalBoundary(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("compose live tier: %v", err)
 	}
-	if err := mcpLiveTierFor(capb).arm(true, "armed"); err != nil {
+	if err := mcpLiveTierFor(capb).Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	ex := cfg.Deps.Executor
@@ -453,15 +453,15 @@ func TestQuiesce_RepeatedAttemptPreservesResidualCount(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() { ex.Execute(context.Background(), in, ex.Resolve(in)); close(done) }()
-	if !waitForLiveTier(func() bool { return lt.inFlightCount() == 1 }, 5*time.Second) {
-		t.Fatalf("one execution must be in flight, got %d", lt.inFlightCount())
+	if !waitForLiveTier(func() bool { return lt.InFlightCount() == 1 }, 5*time.Second) {
+		t.Fatalf("one execution must be in flight, got %d", lt.InFlightCount())
 	}
 
 	// First quiesce with a zero drain budget ⇒ times out with residual 1; tier left composed/unarmed.
 	if rem := quiesceLiveTier(capb, 0); rem != 1 {
 		t.Fatalf("a zero-budget quiesce with one in flight must report residual 1, got %d", rem)
 	}
-	if lt.armed() {
+	if lt.IsArmed() {
 		t.Fatal("the tier must be un-armed after the first quiesce")
 	}
 	// A RETRY (tier not armed, residual still in flight) must still report the residual, never a false 0.
@@ -489,8 +489,8 @@ func TestQuiesce_ResidualRetryRefusesConcurrentRearm(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() { ex.Execute(context.Background(), in, ex.Resolve(in)); close(done) }()
-	if !waitForLiveTier(func() bool { return lt.inFlightCount() == 1 }, 5*time.Second) {
-		t.Fatalf("one execution must be in flight, got %d", lt.inFlightCount())
+	if !waitForLiveTier(func() bool { return lt.InFlightCount() == 1 }, 5*time.Second) {
+		t.Fatalf("one execution must be in flight, got %d", lt.InFlightCount())
 	}
 
 	// First quiesce times out (residual 1); tier composed/unarmed with the in-flight still held.
@@ -506,7 +506,7 @@ func TestQuiesce_ResidualRetryRefusesConcurrentRearm(t *testing.T) {
 	}
 
 	// A concurrent re-arm during the retry drain must be REFUSED and must not set the exec-deps bit.
-	if err := lt.arm(true, "rearm"); err == nil {
+	if err := lt.Arm(true, "rearm"); err == nil {
 		t.Fatal("a re-arm during a residual-retry drain must be refused (the tier is quiescing)")
 	}
 	if liveExecDepsConfigured(false) {
@@ -517,7 +517,7 @@ func TestQuiesce_ResidualRetryRefusesConcurrentRearm(t *testing.T) {
 	up.block <- struct{}{}
 	<-done
 	<-retryDone
-	if lt.State() != liveTierComposed || lt.armed() || liveExecDepsConfigured(false) {
+	if lt.State() != liveTierComposed || lt.IsArmed() || liveExecDepsConfigured(false) {
 		t.Fatalf("after the retry drains the tier must be composed/unarmed and the exec-deps bit clear, state=%s", lt.State())
 	}
 }

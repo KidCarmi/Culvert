@@ -33,13 +33,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand/v2"
-	"net"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/listenfault"
 )
 
 const (
@@ -432,40 +431,18 @@ func resetScanSvcHealthForTest() {
 
 // classifyScanSvcBindError maps a bind error to a BOUNDED class.
 //
-// A third copy of the same errno switch socks5_health.go
+// The errno classes and the timeout rule are internal/listenfault's
+// (ADR-0058): this was the third copy of the switch socks5_health.go
 // (classifySOCKS5BindError) and admin_ui_health.go
-// (classifyAdminUIListenError) carry. Converging the three is a real
-// improvement and deliberately NOT done here: both existing copies are
-// load-bearing for hardened rows with their own tests, and a chaos round
-// should not refactor two other listeners' classifiers to add a third
-// listener. Recorded as the open half.
+// (classifyAdminUIListenError) carried, and the convergence recorded here as
+// the open half is that package.
 //
-// The `network_error` branch requires an actual TIMEOUT. Every bind failure
+// The `network_error` class requires an actual TIMEOUT. Every bind failure
 // arrives as *net.OpError, which satisfies net.Error unconditionally, so an
 // unqualified errors.As would swallow every unrecognised errno into a class
 // naming the wrong subsystem — the defect already narrowed in both siblings.
 func classifyScanSvcBindError(err error) string {
-	if err == nil {
-		return "none"
-	}
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
-		switch errno {
-		case syscall.EADDRINUSE:
-			return "port_in_use"
-		case syscall.EACCES, syscall.EPERM:
-			return "permission_denied"
-		case syscall.EADDRNOTAVAIL:
-			return "address_unavailable"
-		case syscall.EMFILE, syscall.ENFILE:
-			return "descriptors_exhausted"
-		}
-	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return "network_error"
-	}
-	return "listen_failed"
+	return listenfault.Reason(err)
 }
 
 // nextScanSvcBindBackoff advances the ladder: 1 s on the first failure,

@@ -102,15 +102,15 @@ type liveTierComposition struct {
 func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition) error {
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
 	if cfg == nil {
-		lt.setComposeReason("nil_runtime_config")
+		lt.SetComposeReason("nil_runtime_config")
 		return errLiveComposeNilConfig
 	}
 	if comp.Upstream == nil {
-		lt.setComposeReason("upstream_absent")
+		lt.SetComposeReason("upstream_absent")
 		return errLiveComposeUpstreamAbsent
 	}
 	if comp.Events == nil {
-		lt.setComposeReason("durable_events_unavailable")
+		lt.SetComposeReason("durable_events_unavailable")
 		return errLiveComposeEventsAbsent
 	}
 	// The live tier REQUIRES response DLP: the executor inspects every upstream response BEFORE egress.
@@ -126,7 +126,7 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 	//     AFTER the irreversible call (Codex P2 round-5, PR #1290).
 	// So require the GATEWAY capability specifically AND a positive output bound.
 	if comp.ResponseProfile.Capability() != "gateway" || comp.ResponseProfile.MaxOutputBytes() <= 0 {
-		lt.setComposeReason("response_profile_absent")
+		lt.SetComposeReason("response_profile_absent")
 		return errLiveComposeResponseProfileAbsent
 	}
 	gate := comp.LiveGate
@@ -158,7 +158,7 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 		Safety: newCanarySafetyFunnel(rollout.CapabilityGateway),
 	})
 	if err != nil {
-		lt.setComposeReason("executor_construct_failed")
+		lt.SetComposeReason("executor_construct_failed")
 		return err
 	}
 	// Install the live executor as the runtime executor. It is a non-nil concrete pointer, so the
@@ -174,7 +174,7 @@ func composeGatewayLiveTierInto(cfg *mcpruntime.Config, comp liveTierComposition
 	globalMCPShadow.inspectionComposed.Store(true)
 	// Record the tier COMPOSED. This NEVER arms: markComposed moves absent→composed and leaves the
 	// armed bit false, so modeExecReady still refuses every live-execution transition.
-	lt.markComposed()
+	lt.MarkComposed()
 	logger.Printf("MCP gateway LIVE execution tier composed (executor + upstream + broker present; NOT armed). Arming is a separate, node-readiness-gated act.")
 	return nil
 }

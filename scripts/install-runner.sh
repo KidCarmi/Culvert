@@ -38,6 +38,20 @@ error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 require_cmd() { command -v "$1" &>/dev/null || error "'$1' not found. Install it first."; }
 
+# user_in_docker_group USER — true when USER is a member of the group named
+# exactly "docker". Not `groups USER | grep -qw docker`: `groups` prints the
+# username itself first, and grep -w splits on `-`/`.`, so a user named
+# docker-ops or a member of docker-users read as already in the group and was
+# never added. Mirrors user_in_docker_group in scripts/install.sh.
+user_in_docker_group() {
+  local g gs=()
+  read -ra gs <<<"$(id -nG "$1" 2>/dev/null || true)"
+  for g in "${gs[@]}"; do
+    [[ "$g" == "docker" ]] && return 0
+  done
+  return 1
+}
+
 ###############################################################################
 # 0. Validate runner token
 ###############################################################################
@@ -79,7 +93,7 @@ fi
 #    "permission denied while trying to connect to the Docker daemon socket"
 ###############################################################################
 CURRENT_USER="$(id -un)"
-if groups "$CURRENT_USER" | grep -qw docker; then
+if user_in_docker_group "$CURRENT_USER"; then
   info "User '$CURRENT_USER' is already in the docker group."
 else
   info "Adding user '$CURRENT_USER' to the docker group..."
@@ -174,7 +188,7 @@ echo "    sudo ${INSTALL_DIR}/svc.sh stop     # stop the runner"
 echo "    sudo ${INSTALL_DIR}/svc.sh start    # start the runner"
 echo "    sudo ${INSTALL_DIR}/svc.sh uninstall # remove the service"
 echo ""
-if ! groups "$CURRENT_USER" | grep -qw docker || ! docker info &>/dev/null 2>&1; then
+if ! user_in_docker_group "$CURRENT_USER" || ! docker info &>/dev/null 2>&1; then
   echo -e "${YELLOW}  ACTION REQUIRED:${NC}"
   echo "    Log out and back in (or open a new terminal) to apply"
   echo "    the docker group membership, then restart the service:"
