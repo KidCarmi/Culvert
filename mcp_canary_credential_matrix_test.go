@@ -596,7 +596,7 @@ var nodeReadyMentionAllowed = []struct {
 	{"mcp_canary_credential_free_test.go", "EvaluateNode skips it and node status can still report Ready",
 		"Same corrective sentence, explaining why this test calls canary.Evaluate rather than EvaluateNode."},
 
-	{"mcp_live_tier.go", "mcp live tier: node not ready to arm",
+	{"internal/mcp/livetier/tier.go", "mcp live tier: node not ready to arm",
 		"True and node-level: live-tier arming is gated on NODE readiness, so this error names the node's own state."},
 	{"mcp_canary_matrix_mutation_test.go", "make the full preflight ready while the node is not ready",
 		"True in this direction: an un-ready NODE makes the FULL preflight un-ready. It is the converse — an activation fact making the NODE un-ready — that is false."},

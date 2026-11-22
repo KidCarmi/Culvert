@@ -106,12 +106,23 @@ func BenchmarkFeedCheckRequestURL_MissParallel(b *testing.B) {
 // deterministic and hardware-independent, so the gate means the same thing on
 // any runner, under -race, at any load. ns/op on a shared CI box does not.
 //
-// The bound is the exact measured steady state with no headroom. Every
-// remaining allocation is accounted for: net.ParseIP builds a parse error for
-// every hostname that is not an IP literal (its failure path allocates), and
-// the canonical key is one string concatenation. A change that needs another
-// one should say so here with its justification rather than slip past a padded
-// bound.
+// The bound is the exact measured steady state with no headroom, and it is now
+// ZERO: a destination that misses the feed leaves nothing behind for the
+// collector. The two allocations this gate used to permit are both gone and
+// both are accounted for —
+//
+//   - net.ParseIP built a parse error for every hostname that is not an IP
+//     literal (its failure path allocates); couldBeIPLiteral now answers that
+//     question with a byte scan;
+//   - the canonical key was one string concatenation; it is now rendered into
+//     CheckRequestURL's stack scratch and probed with the no-copy map-index
+//     form.
+//
+// A change that needs an allocation back should say so here with its
+// justification rather than slip past a padded bound. Nothing enforces zero
+// but this gate: reintroducing a string conversion on the read path is a
+// legal, memory-safe, verdict-preserving change that silently restores the
+// allocation rate.
 //
 // The legacy arm is asserted too, and it is not decoration: it is what makes
 // the gate's number mean "this is cheaper than what it replaced" rather than
@@ -125,8 +136,8 @@ func TestBenchGate_CheckRequestURLAllocs(t *testing.T) {
 			t.Fatal("unexpected hit")
 		}
 	})
-	if fast > 2 {
-		t.Errorf("CheckRequestURL = %.0f allocs/op, want <= 2", fast)
+	if fast != 0 {
+		t.Errorf("CheckRequestURL = %.0f allocs/op, want 0", fast)
 	}
 
 	legacy := testing.AllocsPerRun(200, func() {

@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// Boundary (ADR-0053): the only Culvert import is the feed protocol whose
+// Boundary (ADR-0053, ADR-0059): the only Culvert import is the feed protocol whose
 // canonical encoder the records bind; no I/O, logging or shared-state import,
 // no package-level variable, no init(), and at most 8 exported package-level
 // identifiers.
@@ -112,11 +112,11 @@ func TestNodeRecordBoundary_NoAppImportsOrSharedState(t *testing.T) {
 		}
 		exported = append(exported, names...)
 	}
-	if checked < 2 {
-		t.Fatalf("inspected %d production files, want doc.go and record.go", checked)
+	if checked < 3 {
+		t.Fatalf("inspected %d production files, want decode.go, doc.go and record.go", checked)
 	}
-	if len(exported) != 4 {
-		t.Fatalf("exported surface is %d names, want Canonical, Checksum, Seal, ValidChecksum: %v", len(exported), exported)
+	if len(exported) != 6 {
+		t.Fatalf("exported surface is %d names, want Canonical, Checksum, Decode, Envelope, Seal, ValidChecksum: %v", len(exported), exported)
 	}
 }
 
@@ -133,6 +133,10 @@ func TestNodeRecordBoundary_RejectsRegressions(t *testing.T) {
 		"atomics":        `package noderecord; import "sync/atomic"`,
 		"package state":  `package noderecord; import "hash/crc32"; var table = crc32.MakeTable(crc32.Castagnoli)`,
 		"init":           "package noderecord; func init() {}",
+		// The tempting ones for a decoder: package-level sentinels (each record
+		// kind's owner supplies its own) and a reader-based API.
+		"shared sentinel": `package noderecord; import "errors"; var ErrEmpty = errors.New("empty")`,
+		"reader":          `package noderecord; import "io"; func DecodeFrom(io.Reader) {}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if len(boundaryViolations("r.go", []byte(src))) == 0 {
