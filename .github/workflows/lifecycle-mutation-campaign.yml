@@ -40,11 +40,14 @@ jobs:
       - name: Run campaign
         env:
           CAP: ${{ github.event.inputs.cap || '350' }}
+        working-directory: cmd/culvert-maint
         run: |
+          set -o pipefail
           case "$CAP" in ''|*[!0-9]*) echo "::error::cap must be a number"; exit 2 ;; esac
           mkdir -p "$RUNNER_TEMP/mutation"
-          python3 -B test/lifecycle-conformance/mutation/mutate.py "$GITHUB_WORKSPACE" \
-            --cap "$CAP" --workers "$(nproc)" --out "$RUNNER_TEMP/mutation/mutation.json" \
+          go build -tags lifecycle_conformance -o "$RUNNER_TEMP/lifecyclemutate" ./internal/lifecyclemodel/cmd/lifecyclemutate
+          "$RUNNER_TEMP/lifecyclemutate" "$GITHUB_WORKSPACE" \
+            -cap "$CAP" -workers "$(nproc)" -out "$RUNNER_TEMP/mutation/mutation.json" \
             | tee "$RUNNER_TEMP/mutation/summary.txt"
 
       - name: The campaign left the checkout untouched

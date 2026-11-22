@@ -2,7 +2,7 @@ name: Lifecycle Conformance (shadow)
 
 # SHADOW — NOT A MERGE GATE. Do not add this workflow to the required status
 # checks (REPOSITORY-SETTINGS.md §2) without explicit owner approval of the
-# properties in test/lifecycle-conformance/model/properties.json. None of them
+# properties in cmd/culvert-maint/internal/lifecyclemodel/properties.json. None of them
 # is owner-approved today.
 #
 # What it does: replays deterministic, model-derived sequences against the real
@@ -55,11 +55,14 @@ jobs:
 
       - name: The run modified no contract or property file
         if: always()
-        run: git diff --exit-code -- contracts/registry.yaml test/lifecycle-conformance/model/properties.json
+        run: git diff --exit-code -- contracts/registry.yaml cmd/culvert-maint/internal/lifecyclemodel/properties.json
 
       - name: Summary
         if: always()
-        run: python3 -B test/lifecycle-conformance/summary.py "$RUNNER_TEMP/lifecycle-report" >> "$GITHUB_STEP_SUMMARY"
+        working-directory: cmd/culvert-maint
+        run: |
+          go run -tags lifecycle_conformance ./internal/lifecyclemodel/cmd/lifecyclecheck \
+            -summary "$RUNNER_TEMP/lifecycle-report" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

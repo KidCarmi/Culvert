@@ -6,8 +6,8 @@
 // `lifecycle_conformance` build tag keeps it out of every existing gate: a plain `go test ./...`
 // neither compiles nor runs it. It is driven by test/lifecycle-conformance/run.sh.
 //
-// It replays deterministic sequences derived from an abstract model
-// (test/lifecycle-conformance/model/culvert_apply.py) against the REAL Server, journal,
+// It replays deterministic sequences derived in-process from an abstract model
+// (internal/lifecyclemodel, same build tag) against the REAL Server, journal,
 // orchestrator and runner, with only the process-exec layer and the health HTTP client faked.
 // Fault injection happens only in that fake layer. The fake Docker is an ASSUMPTION about how
 // Docker behaves (see test/lifecycle-conformance/README.md); a pass here is evidence about the
@@ -42,6 +42,7 @@ import (
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/health"
 	"culvert-maint/internal/journal"
+	"culvert-maint/internal/lifecyclemodel"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 )
@@ -51,41 +52,12 @@ const (
 	cfgX = "3333333333333333333333333333333333333333333333333333333333333333"
 )
 
-func vectorsDir(t *testing.T) string {
-	t.Helper()
-	d := os.Getenv("CULVERT_CONFORMANCE_VECTORS")
-	if d == "" {
-		// Never skip: a skipped conformance suite must not look like a pass.
-		t.Fatal("CULVERT_CONFORMANCE_VECTORS not set; run test/lifecycle-conformance/run.sh")
-	}
-	return d
-}
-
-func loadJSON(t *testing.T, path string, into interface{}) {
-	t.Helper()
-	b, err := os.ReadFile(path) //nolint:gosec // test input
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	if err := json.Unmarshal(b, into); err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-}
-
-type planEntry struct {
-	Cmd  string `json:"cmd"`
-	N    int    `json:"n"`
-	Mode string `json:"mode"`
-}
-
-type confParams struct {
-	Prior  string `json:"prior"`
-	Same   bool   `json:"same"`
-	Backup bool   `json:"backup"`
-	RB     bool   `json:"rb"`
-	TH     bool   `json:"th"`
-	PH     bool   `json:"ph"`
-}
+// The vectors come straight from the model: nothing is read from disk, so a suite can
+// never be skipped (or look like a pass) for want of an input file.
+type (
+	planEntry  = lifecyclemodel.PlanEntry
+	confParams = lifecyclemodel.Params
+)
 
 // confRig is a real Server over a fake Docker world: (running image, pinned tag).
 type confRig struct {
@@ -424,27 +396,9 @@ func (r *confRig) world() (running, tag string, tokens []string) {
 
 // ───────────────────────── apply flow: every fault path to a terminal state
 
-type applyVector struct {
-	Params confParams      `json:"params"`
-	Script [][]string      `json:"script"`
-	Plan   []planEntry     `json:"plan"`
-	Expect applyExpectation `json:"expect"`
-}
+type applyExpectation = lifecyclemodel.ApplyExpectation
 
-type applyExpectation struct {
-	Op                    string   `json:"op"`
-	Reason                string   `json:"reason"`
-	Running               string   `json:"running"`
-	Tag                   string   `json:"tag"`
-	Cmds                  []string `json:"cmds"`
-	UpgradeSucceeded      bool     `json:"upgrade_succeeded"`
-	RollbackAttempted     bool     `json:"rollback_attempted"`
-	RollbackSucceeded     bool     `json:"rollback_succeeded"`
-	RollbackSkippedReason string   `json:"rollback_skipped_reason"`
-	TagAhead              bool     `json:"tag_ahead"`
-}
-
-func scriptString(s [][]string) string {
+func scriptString(s []lifecyclemodel.ScriptStep) string {
 	parts := make([]string, 0, len(s))
 	for _, st := range s {
 		if st[1] != "ok" && st[1] != "skip" {
@@ -458,9 +412,7 @@ func scriptString(s [][]string) string {
 }
 
 func TestModelConformance_ApplyFlow(t *testing.T) {
-	dir := vectorsDir(t)
-	var vs []applyVector
-	loadJSON(t, filepath.Join(dir, "vectors_apply.json"), &vs)
+	vs, _ := lifecyclemodel.Vectors()
 	if len(vs) == 0 {
 		t.Fatal("no vectors: refusing to pass an empty conformance run")
 	}
@@ -481,8 +433,9 @@ func TestModelConformance_ApplyFlow(t *testing.T) {
 				reason, _ := op["failure_reason"].(string)
 				got := applyExpectation{Op: fmt.Sprint(op["state"]), Reason: reason, Running: running, Tag: tag, Cmds: tokens,
 					UpgradeSucceeded: res["upgrade_succeeded"] == true, RollbackAttempted: res["rollback_attempted"] == true,
-					RollbackSucceeded: res["rollback_succeeded"] == true,
-					RollbackSkippedReason: fmt.Sprint(res["rollback_skipped_reason"]), TagAhead: v.Expect.TagAhead}
+					RollbackSucceeded:     res["rollback_succeeded"] == true,
+					RollbackSkippedReason: fmt.Sprint(res["rollback_skipped_reason"]), TagAhead: v.Expect.TagAhead,
+					JournalEmpty: v.Expect.JournalEmpty} // the journal itself is checked just below
 				if !reflect.DeepEqual(got, v.Expect) {
 					t.Errorf("MODEL/IMPLEMENTATION MISMATCH\n params: %+v\n faults: %s\n model : %+v\n actual: %+v",
 						v.Params, scriptString(v.Script), v.Expect, got)
@@ -510,27 +463,6 @@ func TestModelConformance_ApplyFlow(t *testing.T) {
 
 // ───────────────────────── crash points: journal record + reconcile verdict
 
-type crashVector struct {
-	Params confParams  `json:"params"`
-	Script [][]string  `json:"script"`
-	Plan   []planEntry `json:"plan"`
-	Block  planEntry   `json:"block"`
-	Expect struct {
-		Phase  string `json:"phase"`
-		Tag    string `json:"tag"`
-		Run    string `json:"running"`
-		Record struct {
-			PriorRef  bool   `json:"prior_ref"`
-			PriorID   string `json:"prior_id"`
-			TargetRef bool   `json:"target_ref"`
-			TargetID  string `json:"target_id"`
-		} `json:"record"`
-		Action string   `json:"reconcile_action"`
-		Reason string   `json:"reconcile_reason"`
-		Cmds   []string `json:"cmds_before_block"`
-	} `json:"expect"`
-}
-
 func idRole(id string) string {
 	if id == "" {
 		return ""
@@ -539,9 +471,7 @@ func idRole(id string) string {
 }
 
 func TestModelConformance_CrashPoints(t *testing.T) {
-	dir := vectorsDir(t)
-	var vs []crashVector
-	loadJSON(t, filepath.Join(dir, "vectors_crash.json"), &vs)
+	_, vs := lifecyclemodel.Vectors()
 	if len(vs) == 0 {
 		t.Fatal("no vectors: refusing to pass an empty conformance run")
 	}
@@ -553,7 +483,7 @@ func TestModelConformance_CrashPoints(t *testing.T) {
 			v := vs[i]
 			t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
 				t.Parallel()
-				blk := v.Block
+				blk := planEntry{Cmd: v.Block.Cmd, N: v.Block.N}
 				r := startConfRig(t, v.Params, v.Plan, &blk)
 				defer r.stop()
 				opID := r.submit(t, v.Params)
@@ -567,8 +497,8 @@ func TestModelConformance_CrashPoints(t *testing.T) {
 				running, tag, tokens := r.world()
 				if n := len(tokens); n > 0 && v.Block.Cmd != "health" { // the blocked command itself was recorded
 					tokens = tokens[:n-1]
-					if v.Block.Cmd == "ps" && (len(v.Expect.Cmds) == 0 || v.Expect.Cmds[len(v.Expect.Cmds)-1] == "capture") &&
-						len(tokens) < len(v.Expect.Cmds) {
+					if v.Block.Cmd == "ps" && (len(v.Expect.CmdsBeforeBlock) == 0 || v.Expect.CmdsBeforeBlock[len(v.Expect.CmdsBeforeBlock)-1] == "capture") &&
+						len(tokens) < len(v.Expect.CmdsBeforeBlock) {
 						tokens = append(tokens, "capture")
 					}
 				}
@@ -602,12 +532,12 @@ func TestModelConformance_CrashPoints(t *testing.T) {
 
 				type obs struct {
 					Phase, Tag, Run, PriorID, TargetID, Action, Reason string
-					PriorRef, TargetRef                               bool
+					PriorRef, TargetRef                                bool
 				}
 				got := obs{string(rec.Phase), tag, running, idRole(rec.PriorImageID), idRole(rec.TargetImageID),
 					verdict.Action.String(), verdict.Reason, rec.PriorRef != "", rec.TargetRef != ""}
-				want := obs{v.Expect.Phase, v.Expect.Tag, v.Expect.Run, v.Expect.Record.PriorID, v.Expect.Record.TargetID,
-					v.Expect.Action, v.Expect.Reason, v.Expect.Record.PriorRef, v.Expect.Record.TargetRef}
+				want := obs{v.Expect.Phase, v.Expect.Tag, v.Expect.Running, v.Expect.Record.PriorID, v.Expect.Record.TargetID,
+					v.Expect.ReconcileAction, v.Expect.ReconcileReason, v.Expect.Record.PriorRef, v.Expect.Record.TargetRef}
 				if got != want {
 					t.Errorf("MODEL/IMPLEMENTATION MISMATCH at crash point\n params: %+v\n trace : %s\n block : %+v\n model : %+v\n actual: %+v",
 						v.Params, scriptString(v.Script), v.Block, want, got)
@@ -627,15 +557,6 @@ func TestModelConformance_CrashPoints(t *testing.T) {
 
 // ───────────────────────── reconcile decision: full bounded input space
 
-type reconcileVectors struct {
-	Reasons []string `json:"reasons"`
-	Domains []struct {
-		Name   string            `json:"name"`
-		Values []json.RawMessage `json:"values"`
-	} `json:"domains"`
-	Expected string `json:"expected"`
-}
-
 func symID(s string) string {
 	switch s {
 	case "P":
@@ -648,9 +569,7 @@ func symID(s string) string {
 	return ""
 }
 
-func symDigests(raw json.RawMessage) []string {
-	var syms []string
-	_ = json.Unmarshal(raw, &syms)
+func symDigests(syms []string) []string {
 	out := make([]string, 0, len(syms))
 	for _, s := range syms {
 		out = append(out, map[string]string{"P": digOld, "T": digNew, "X": digX}[s])
@@ -658,47 +577,13 @@ func symDigests(raw json.RawMessage) []string {
 	return out
 }
 
-func decodeReconcile(rv *reconcileVectors, idx []int) reconcileInputs {
-	var in reconcileInputs
-	for d, dom := range rv.Domains {
-		raw := dom.Values[idx[d]]
-		switch dom.Name {
-		case "kind_mode":
-			var km []string
-			_ = json.Unmarshal(raw, &km)
-			in.Kind, in.Mode = km[0], km[1]
-		case "phase":
-			var p string
-			_ = json.Unmarshal(raw, &p)
-			in.Phase = journal.Phase(p)
-		case "attempts":
-			var a []int
-			_ = json.Unmarshal(raw, &a)
-			in.Attempts, in.MaxAttempts = a[0], a[1]
-		case "ref_valid":
-			_ = json.Unmarshal(raw, &in.RefValid)
-		case "running_id", "target_id", "prior_id":
-			var s string
-			_ = json.Unmarshal(raw, &s)
-			switch dom.Name {
-			case "running_id":
-				in.RunningImageID = symID(s)
-			case "target_id":
-				in.TargetImageID = symID(s)
-			default:
-				in.PriorImageID = symID(s)
-			}
-		case "running_digests":
-			in.RunningDigests = symDigests(raw)
-		case "target_digests":
-			in.TargetDigests = symDigests(raw)
-		case "prior_digests":
-			in.PriorDigests = symDigests(raw)
-		case "tag_digests":
-			in.TagDigests = symDigests(raw)
-		}
-	}
-	return in
+// realReconcileInputs maps the model's symbolic input (P/T/X) onto the real function's input.
+func realReconcileInputs(m lifecyclemodel.ReconcileInputs) reconcileInputs {
+	return reconcileInputs{Kind: m.Kind, Mode: m.Mode, Phase: journal.Phase(m.Phase), Attempts: m.Attempts,
+		MaxAttempts: m.MaxAttempts, RefValid: m.RefValid, RunningImageID: symID(m.RunningID),
+		TargetImageID: symID(m.TargetID), PriorImageID: symID(m.PriorID), RunningDigests: symDigests(m.RunningDigests),
+		TargetDigests: symDigests(m.TargetDigests), PriorDigests: symDigests(m.PriorDigests),
+		TagDigests: symDigests(m.TagDigests)}
 }
 
 func flipPrefixes(in reconcileInputs) reconcileInputs {
@@ -727,9 +612,8 @@ func intersects(a, b []string) bool {
 }
 
 func TestModelConformance_ReconcileDecision(t *testing.T) {
-	dir := vectorsDir(t)
-	var rv reconcileVectors
-	loadJSON(t, filepath.Join(dir, "vectors_reconcile.json"), &rv)
+	// Memory-light: one byte of expectation per input; each input is decoded on the fly.
+	rv := lifecyclemodel.GenReconcileVectors()
 	total := 1
 	for _, d := range rv.Domains {
 		total *= len(d.Values)
@@ -741,12 +625,14 @@ func TestModelConformance_ReconcileDecision(t *testing.T) {
 	mismatches, propFails := 0, 0
 	seen := map[string]int{}
 	for n := 0; n < total; n++ {
-		in := decodeReconcile(&rv, idx)
+		in := realReconcileInputs(lifecyclemodel.ReconcileInputAt(idx))
 		v := reconcileDecision(in)
 		seen[v.Reason]++
-		if want := rv.Reasons[rv.Expected[n]-'0']; v.Reason != want {
+		// The verdict is the pair: a right reason with a wrong action is a mismatch.
+		if wantAction, wantReason := rv.Verdict(n); v.Action.String() != wantAction || v.Reason != wantReason {
 			if mismatches < 5 {
-				t.Errorf("MODEL/IMPLEMENTATION MISMATCH #%d: input=%+v model=%s actual=%s/%s", n, in, want, v.Action, v.Reason)
+				t.Errorf("MODEL/IMPLEMENTATION MISMATCH #%d: input=%+v model=%s/%s actual=%s/%s",
+					n, in, wantAction, wantReason, v.Action, v.Reason)
 			}
 			mismatches++
 		}
@@ -782,13 +668,7 @@ func TestModelConformance_ReconcileDecision(t *testing.T) {
 		if w := reconcileDecision(flipPrefixes(in)); w != v {
 			fail("RP7", "verdict must not depend on sha256: prefixes")
 		}
-		for d := len(idx) - 1; d >= 0; d-- {
-			idx[d]++
-			if idx[d] < len(rv.Domains[d].Values) {
-				break
-			}
-			idx[d] = 0
-		}
+		rv.Advance(idx)
 	}
 	for _, r := range rv.Reasons { // vacuity: every verdict of the table must have been exercised
 		if seen[r] == 0 {

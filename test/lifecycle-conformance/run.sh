@@ -2,38 +2,32 @@
 # Model-to-implementation conformance for the maintenance agent (shadow, non-blocking).
 #   usage: test/lifecycle-conformance/run.sh [report dir]
 # Exit 0 only if the model check completed and all three conformance suites RAN and passed.
-# Exit 1 = a property or a conformance vector failed.  Exit 2 = incomplete (budget hit, vacuous
-# property, a suite skipped or missing): never reported as a pass.
+# Exit 1 = a conformance vector mismatched or an owner-approved property failed.
+# Exit 2 = incomplete (budget hit, vacuous property, a suite skipped or missing): never
+# reported as a pass, and never downgraded by anything below.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 REPORT="${1:-$(mktemp -d)}"; mkdir -p "$REPORT"; REPORT="$(cd "$REPORT" && pwd)"
-VEC="$(mktemp -d)"; trap 'rm -rf "$VEC"' EXIT
+BIN="$(mktemp -d)"; trap 'rm -rf "$BIN"' EXIT
+TAG=lifecycle_conformance
 status=0
+cd "$ROOT/cmd/culvert-maint" || exit 2
 
 echo "== model check (abstraction only: says nothing about the Go code by itself) =="
-python3 -B "$HERE/verify/check.py" --model "$HERE/model/culvert_apply.py" --props "$HERE/model/properties.json" \
-  --include-proposed --max-states 200000 --max-seconds 60 --json "$REPORT/model_check.json"
+# Built, then executed, instead of `go run`: `go run` reports every non-zero exit as 1,
+# which would turn "incomplete" (2) into "failed" (1).
+go build -tags "$TAG" -o "$BIN/lifecyclecheck" ./internal/lifecyclemodel/cmd/lifecyclecheck || exit 2
+# The policy lives in the checker: 2 = budget hit / vacuous property (wins over everything);
+# 1 = an owner-APPROVED property fails. A failing PROPOSED or OPEN property is printed with
+# its trace for the owner and is not a verdict on the pull request.
+"$BIN/lifecyclecheck" -include-proposed -fail-only-approved -max-states 200000 -max-seconds 60 -report "$REPORT"
 mc=$?
-# Exit 2 (budget hit / vacuous property / contract file changed under us) always fails the run.
-# Exit 1 fails the run only for an owner-APPROVED property. A failing PROPOSED property is a
-# report for the owner, not a verdict on the pull request: this tool does not define the contract.
-if [ "$mc" -eq 2 ]; then status=2
-elif [ "$mc" -eq 1 ]; then
-  if python3 -B - "$REPORT/model_check.json" <<'PY'
-import json, sys
-bad = [x for x in json.load(open(sys.argv[1]))["results"] if x["verdict"] == "FAIL" and x.get("status") == "approved"]
-sys.exit(1 if bad else 0)
-PY
-  then echo "NOTE: only PROPOSED (not owner-approved) properties fail; reported, not counted as a failure"
-  else status=1; fi
-elif [ "$mc" -ne 0 ]; then status=2; fi
+case "$mc" in 0) ;; 1) status=1 ;; *) status=2 ;; esac
 
 echo "== conformance: model-derived sequences against the real maintenance-agent code =="
-python3 -B "$HERE/gen_vectors.py" "$VEC" || exit 2
-cd "$ROOT/cmd/culvert-maint" || exit 2
-CULVERT_CONFORMANCE_VECTORS="$VEC" CULVERT_CONFORMANCE_REPORT="$REPORT" \
-  timeout 300 go test -tags lifecycle_conformance ./internal/server/ -run 'TestModelConformance' -count=1 -timeout 240s -v \
+CULVERT_CONFORMANCE_REPORT="$REPORT" \
+  timeout 300 go test -tags "$TAG" ./internal/server/ -run 'TestModelConformance' -count=1 -timeout 240s -v \
   > "$REPORT/conformance.log" 2>&1
 rc=$?
 grep -E '^(--- (PASS|FAIL|SKIP): TestModelConformance|ok|FAIL|PASS)|MISMATCH|PROPERTY|VACUOUS|never reached' "$REPORT/conformance.log" | head -60 || true

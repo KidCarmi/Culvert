@@ -6,18 +6,29 @@ without explicit owner approval of the properties it reports.**
 
 ## What it is
 
-1. `model/culvert_apply.py` — a small explicit-state model of the apply flow:
+Everything is Go, standard library only, in the maintenance agent's module under
+`cmd/culvert-maint/internal/lifecyclemodel/`. Every file there carries the build
+tag `lifecycle_conformance`.
+
+1. `model.go`, `reconcile.go` — a small explicit-state model of the apply flow:
    stages, write-ahead journal barrier, tag move, `compose up`, inline rollback,
-   crash points.
-2. `verify/` — a breadth-first model checker with state, transition and
-   bounded-temporal properties. Counterexamples are shortest traces.
-3. `gen_vectors.py` — derives every fault path (172), every crash point (147)
-   and the full bounded input space of the recovery decision (435,456) from the
-   model. No randomness.
-4. `cmd/culvert-maint/internal/server/model_conformance_test.go` — replays
-   those vectors against the **real** server, journal, orchestrator and runner.
-   Only the process-exec layer and the health HTTP client are faked.
-5. `mutation/mutate.py` — scheduled mutation campaign (see below).
+   crash points, and the reference table of the recovery decision.
+2. `checker.go` — a breadth-first model checker with state, transition and
+   bounded-temporal properties. Counterexamples are shortest traces. A property
+   whose precondition is never reached is `VACUOUS`, and a state or time budget
+   that runs out is `INCOMPLETE`; neither is a pass.
+3. `properties.json` — the properties, embedded into the binary (`go:embed`).
+   It stays JSON so a status can be changed without touching code.
+4. `vectors.go` — derives every fault path (172), every crash point (147) and
+   the full bounded input space of the recovery decision (435,456 inputs, each
+   with the expected action **and** reason) from the model. No randomness.
+5. `cmd/culvert-maint/internal/server/model_conformance_test.go` — generates
+   those vectors in-process and replays them against the **real** server,
+   journal, orchestrator and runner. Only the process-exec layer and the health
+   HTTP client are faked.
+6. `cmd/lifecyclecheck` — the property gate and the Markdown step summary.
+7. `cmd/lifecyclemutate` — scheduled mutation campaign (see below).
+8. `test/lifecycle-conformance/run.sh` — runs 6 and 5 and combines the result.
 
 ## What a pass means — and does not mean
 
@@ -58,33 +69,59 @@ test/lifecycle-conformance/run.sh /tmp/lifecycle-report
 |---|---|
 | 0 | Model check complete; all three conformance suites ran and passed |
 | 1 | A conformance vector mismatched the real code, or an owner-**approved** property failed |
-| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a skipped or missing suite, or the properties file changed during the run. Never reported as a pass |
+| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, or a skipped or missing suite. Never reported as a pass |
+
+Exit 2 takes precedence over exit 1 and nothing downgrades it: a run with a
+failing unapproved property **and** a vacuous property is incomplete.
 
 A failing `proposed` or `open` property is printed with its shortest trace and
 does **not** change the exit code: the tool reports on unapproved properties,
 it does not define the contract.
 
-The conformance test carries the build tag `lifecycle_conformance`. A plain
-`go test ./...` neither compiles nor runs it, so no existing gate changes.
+The pieces can be run on their own from `cmd/culvert-maint`:
+
+```bash
+# the checker's own tests
+go test -tags lifecycle_conformance -count=1 ./internal/lifecyclemodel/...
+# the property gate (exit 0 / 1 / 2 as above; build it rather than `go run` it
+# when the exit code matters: `go run` reports every non-zero exit as 1)
+go build -tags lifecycle_conformance -o /tmp/lifecyclecheck ./internal/lifecyclemodel/cmd/lifecyclecheck
+/tmp/lifecyclecheck -include-proposed -fail-only-approved -report /tmp/lifecycle-report
+# the three conformance suites
+go test -tags lifecycle_conformance -count=1 -run TestModelConformance ./internal/server/
+```
+
+`lifecyclecheck` flags: `-include-proposed` (evaluate `proposed` properties as
+well as `approved` ones), `-fail-only-approved` (a failing property that is not
+`approved` is printed but does not cause exit 1), `-max-states`, `-max-seconds`,
+`-report <dir>` (writes `model_check.json`), `-summary <dir>` (prints the step
+summary for a report directory).
+
+All of it carries the build tag `lifecycle_conformance`. A plain
+`go build ./...`, `go vet ./...` or `go test ./...` neither compiles nor runs
+any of it, so no existing gate changes.
 
 ## Property status
 
-`model/properties.json` holds a `status` per property:
+`cmd/culvert-maint/internal/lifecyclemodel/properties.json` holds a `status`
+per property:
 
 - `proposed` — checked and reported; never fails the run.
 - `open` — a known open product question (linked to `contracts/registry.yaml`);
   reported only.
 - `approved` — fails the run when violated. **Set only by the owner**, in the
   same change that records `owner_approved: true` for the matching registry
-  contract. The checker verifies the file's hash is unchanged by its own run.
+  contract. The checker only reads the file (it is compiled in); its SHA-256 is
+  printed and recorded in `model_check.json`, and the workflow verifies the run
+  left the file untouched.
 
 ## When a conformance vector mismatches
 
 A mismatch means the code and the model disagree. Either is legitimate:
 
 - The change is unintended → fix the code.
-- The change is intended → update `model/culvert_apply.py` in the same pull
-  request, and say so in the description. The model is a second, independent
+- The change is intended → update
+  `cmd/culvert-maint/internal/lifecyclemodel/model.go` in the same pull request, and say so in the description. The model is a second, independent
   statement of the lifecycle; keeping the two in step is the point.
 
 ## Workflows
@@ -93,7 +130,7 @@ A mismatch means the code and the model disagree. Either is legitimate:
   `cmd/culvert-maint/**`; under a minute; no secrets, no Docker, no network
   services. Not in the required checks.
 - `.github/workflows/lifecycle-mutation-campaign.yml` — weekly and on demand.
-  Mutates temp copies of seven lifecycle source files and records which mutants
+  Runs `cmd/lifecyclemutate`, which mutates temp copies of seven lifecycle source files and records which mutants
   the existing tests and the conformance suite each kill. About 1h40m on four
   cores for 350 mutants, hence scheduled only.
 
