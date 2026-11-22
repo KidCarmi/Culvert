@@ -106,29 +106,29 @@ func TestLiveRace_RacersEqualToBudgetAllCross(t *testing.T) {
 func TestLiveRace_ArmQuiesceAdmitStress(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed()
+	lt.MarkComposed()
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 200; j++ {
-				_ = lt.arm(true, "armed")
-				if rel, ok := lt.admitExecution(); ok {
+				_ = lt.Arm(true, "armed")
+				if rel, ok := lt.AdmitExecution(); ok {
 					rel()
 				}
-				_ = lt.quiesce(func(func() int) int { return 0 })
+				_ = lt.Quiesce(func(func() int) int { return 0 })
 			}
 		}()
 	}
 	wg.Wait()
 	// Final consistency: the lifecycle-object armed view and the execdeps bit agree, and the in-flight
 	// count is balanced back to zero.
-	if lt.armed() != liveExecDepsConfigured(false) {
-		t.Fatalf("armed view (%v) and execdeps bit (%v) diverged under contention", lt.armed(), liveExecDepsConfigured(false))
+	if lt.IsArmed() != liveExecDepsConfigured(false) {
+		t.Fatalf("armed view (%v) and execdeps bit (%v) diverged under contention", lt.IsArmed(), liveExecDepsConfigured(false))
 	}
-	if lt.inFlightCount() != 0 {
-		t.Fatalf("in-flight count must balance back to 0, got %d", lt.inFlightCount())
+	if lt.InFlightCount() != 0 {
+		t.Fatalf("in-flight count must balance back to 0, got %d", lt.InFlightCount())
 	}
 }
 
@@ -276,7 +276,7 @@ func armCanaryLiveTierTrust(t *testing.T, up *recordingUpstream, trust func() bo
 	}); err != nil {
 		t.Fatalf("compose: %v", err)
 	}
-	if err := mcpLiveTierFor(rollout.CapabilityGateway).arm(true, "armed"); err != nil {
+	if err := mcpLiveTierFor(rollout.CapabilityGateway).Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	if _, err := testBeginActivation(globalCanaryRuntime, rollout.CapabilityGateway, runtimeTestBudget(budgetTotal), time.Unix(0, 1)); err != nil {
