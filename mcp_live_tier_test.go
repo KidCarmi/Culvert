@@ -193,28 +193,28 @@ func TestLiveTier_LifecycleStatesAreDistinct(t *testing.T) {
 	if lt.State() != liveTierAbsent {
 		t.Fatalf("fresh tier must be absent, got %s", lt.State())
 	}
-	if lt.composed() || lt.armed() {
+	if lt.IsComposed() || lt.IsArmed() {
 		t.Fatal("absent tier is neither composed nor armed")
 	}
-	lt.markComposed()
-	if lt.State() != liveTierComposed || !lt.composed() || lt.armed() {
+	lt.MarkComposed()
+	if lt.State() != liveTierComposed || !lt.IsComposed() || lt.IsArmed() {
 		t.Fatalf("composed tier must be composed and NOT armed, state=%s", lt.State())
 	}
 	// composed does NOT arm the execdeps bit.
 	if liveExecDepsConfigured(false) {
 		t.Fatal("composition must NOT set the armed bit (composed != armed)")
 	}
-	if err := lt.arm(true, "armed"); err != nil {
+	if err := lt.Arm(true, "armed"); err != nil {
 		t.Fatalf("arm from composed+ready must succeed: %v", err)
 	}
-	if lt.State() != liveTierArmed || !lt.armed() || !liveExecDepsConfigured(false) {
+	if lt.State() != liveTierArmed || !lt.IsArmed() || !liveExecDepsConfigured(false) {
 		t.Fatalf("armed tier must be armed and set the execdeps bit, state=%s", lt.State())
 	}
 	// quiesce (no in-flight) returns to composed and clears the armed bit.
-	if rem := lt.quiesce(func(func() int) int { return 0 }); rem != 0 {
+	if rem := lt.Quiesce(func(func() int) int { return 0 }); rem != 0 {
 		t.Fatalf("clean quiesce residual must be 0, got %d", rem)
 	}
-	if lt.State() != liveTierComposed || lt.armed() || liveExecDepsConfigured(false) {
+	if lt.State() != liveTierComposed || lt.IsArmed() || liveExecDepsConfigured(false) {
 		t.Fatalf("quiesced tier must be composed+unarmed with cleared bit, state=%s", lt.State())
 	}
 }
@@ -222,7 +222,7 @@ func TestLiveTier_LifecycleStatesAreDistinct(t *testing.T) {
 func TestLiveTier_ArmRefusesWhenNotComposed(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	if err := lt.arm(true, "x"); err != errLiveTierNotComposed {
+	if err := lt.Arm(true, "x"); err != errLiveTierNotComposed {
 		t.Fatalf("arming an absent tier must fail errLiveTierNotComposed, got %v", err)
 	}
 	if liveExecDepsConfigured(false) {
@@ -233,8 +233,8 @@ func TestLiveTier_ArmRefusesWhenNotComposed(t *testing.T) {
 func TestLiveTier_ArmRefusesWhenNotReady(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed()
-	if err := lt.arm(false, "not_ready"); err != errLiveTierNotReady {
+	lt.MarkComposed()
+	if err := lt.Arm(false, "not_ready"); err != errLiveTierNotReady {
 		t.Fatalf("arming without readiness must fail errLiveTierNotReady, got %v", err)
 	}
 	if liveExecDepsConfigured(false) {
@@ -283,7 +283,7 @@ func TestLiveTier_ComposeAndArmDoesNotActivateCanary(t *testing.T) {
 		t.Fatalf("compose live tier: %v", err)
 	}
 	// Arm it directly (bypassing the readiness gate — we are asserting the arm↔activation split).
-	if err := mcpLiveTierFor(rollout.CapabilityGateway).arm(true, "armed"); err != nil {
+	if err := mcpLiveTierFor(rollout.CapabilityGateway).Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	// Now the tier is COMPOSED and ARMED. The regression: the rollout mode must remain
@@ -437,31 +437,31 @@ func TestLiveGate_AdmitReleasesBothSlots(t *testing.T) {
 func TestLiveTier_QuiesceRejectsNewAndDrainsInFlight(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed()
-	if err := lt.arm(true, "armed"); err != nil {
+	lt.MarkComposed()
+	if err := lt.Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	// Admit ONE execution and hold it in flight.
-	rel, ok := lt.admitExecution()
+	rel, ok := lt.AdmitExecution()
 	if !ok {
 		t.Fatal("armed tier must admit a first execution")
 	}
-	if lt.inFlightCount() != 1 {
-		t.Fatalf("in-flight must be 1, got %d", lt.inFlightCount())
+	if lt.InFlightCount() != 1 {
+		t.Fatalf("in-flight must be 1, got %d", lt.InFlightCount())
 	}
 	// Start quiesce on a goroutine; it un-arms immediately and then blocks draining the one
 	// in-flight execution. Use a channel barrier (not a sleep) to sequence.
 	done := make(chan int, 1)
-	go func() { done <- lt.quiesce(drainWaitFn(lt, time.Now().Add(5*time.Second))) }()
+	go func() { done <- lt.Quiesce(drainWaitFn(lt, time.Now().Add(5*time.Second))) }()
 	// Wait until the quiesce has un-armed (state==quiescing) — deterministic via the observable bit.
-	if !waitForLiveTier(func() bool { return !lt.armed() }, 5*time.Second) {
+	if !waitForLiveTier(func() bool { return !lt.IsArmed() }, 5*time.Second) {
 		t.Fatal("quiesce did not un-arm the tier within the deadline")
 	}
 	if liveExecDepsConfigured(false) {
 		t.Fatal("quiesce must clear the armed bit BEFORE draining (reject new Canary transitions)")
 	}
 	// A NEW admission during quiesce is rejected (§6 "reject new live executions").
-	if _, ok := lt.admitExecution(); ok {
+	if _, ok := lt.AdmitExecution(); ok {
 		t.Fatal("a quiescing tier must reject a NEW admission")
 	}
 	// Release the in-flight execution → the drain completes and quiesce returns 0.
@@ -470,7 +470,7 @@ func TestLiveTier_QuiesceRejectsNewAndDrainsInFlight(t *testing.T) {
 	if rem != 0 {
 		t.Fatalf("after the in-flight execution released, the drain must be clean (0), got %d", rem)
 	}
-	if lt.State() != liveTierComposed || lt.armed() {
+	if lt.State() != liveTierComposed || lt.IsArmed() {
 		t.Fatalf("post-quiesce state must be composed+unarmed, got %s", lt.State())
 	}
 }
@@ -478,23 +478,23 @@ func TestLiveTier_QuiesceRejectsNewAndDrainsInFlight(t *testing.T) {
 func TestLiveTier_QuiesceBoundedDrainReportsResidual(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed()
-	if err := lt.arm(true, "armed"); err != nil {
+	lt.MarkComposed()
+	if err := lt.Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	// Admit an execution and NEVER release it; quiesce with a past deadline returns the residual.
-	if _, ok := lt.admitExecution(); !ok {
+	if _, ok := lt.AdmitExecution(); !ok {
 		t.Fatal("armed tier must admit")
 	}
-	rem := lt.quiesce(drainWaitFn(lt, time.Now().Add(-time.Second)))
+	rem := lt.Quiesce(drainWaitFn(lt, time.Now().Add(-time.Second)))
 	if rem != 1 {
 		t.Fatalf("a bounded drain that elapses with 1 in flight must report residual 1, got %d", rem)
 	}
 	// Even with a residual, the tier is unarmed and admits no new work.
-	if lt.armed() {
+	if lt.IsArmed() {
 		t.Fatal("a quiesced tier is unarmed even with an in-flight residual")
 	}
-	if _, ok := lt.admitExecution(); ok {
+	if _, ok := lt.AdmitExecution(); ok {
 		t.Fatal("an unarmed tier admits no new execution")
 	}
 }
@@ -504,22 +504,22 @@ func TestLiveTier_QuiesceBoundedDrainReportsResidual(t *testing.T) {
 func TestLiveTier_RestartDoesNotReArm(t *testing.T) {
 	resetLiveTierGlobals(t)
 	lt := mcpLiveTierFor(rollout.CapabilityGateway)
-	lt.markComposed()
-	if err := lt.arm(true, "armed"); err != nil {
+	lt.MarkComposed()
+	if err := lt.Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
-	if !lt.armed() || !liveExecDepsConfigured(false) {
+	if !lt.IsArmed() || !liveExecDepsConfigured(false) {
 		t.Fatal("precondition: armed")
 	}
 	// Simulate a restart's fail-closed posture: the tier re-composes but must NOT re-arm.
-	lt.disarmForRestart()
+	lt.DisarmForRestart()
 	if lt.State() != liveTierComposed {
 		t.Fatalf("restart posture must land composed, got %s", lt.State())
 	}
-	if lt.armed() || liveExecDepsConfigured(false) {
+	if lt.IsArmed() || liveExecDepsConfigured(false) {
 		t.Fatal("a re-composed tier must NEVER be automatically re-armed (§17)")
 	}
-	if _, ok := lt.admitExecution(); ok {
+	if _, ok := lt.AdmitExecution(); ok {
 		t.Fatal("an unarmed (restart) tier admits no execution")
 	}
 }
@@ -545,7 +545,7 @@ func TestLiveArming_RefusesWhenNodeNotReady(t *testing.T) {
 	// Composed, but the downstream node-readiness prerequisites are not satisfied (fresh globals:
 	// durable events not healthy / inspection not composed / no attestation), so armLiveTier refuses
 	// with the FIRST unmet reason and never arms.
-	mcpLiveTierFor(rollout.CapabilityGateway).markComposed()
+	mcpLiveTierFor(rollout.CapabilityGateway).MarkComposed()
 	rd, err := armLiveTier(rollout.CapabilityGateway)
 	if err == nil || rd.Ready {
 		t.Fatalf("armLiveTier without node readiness must refuse, rd=%+v err=%v", rd, err)

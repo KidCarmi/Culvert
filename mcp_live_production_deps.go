@@ -174,7 +174,7 @@ func (h *mcpLiveProdHolder) invalidateForStartupFailure() {
 // signal on any surface and an in-process retry starts clean.
 func invalidateMCPLiveOnStartupFailure() {
 	globalMCPLiveProd.invalidateForStartupFailure()
-	mcpLiveTierFor(rollout.CapabilityGateway).resetForStartupFailure()
+	mcpLiveTierFor(rollout.CapabilityGateway).ResetForStartupFailure()
 	// Response-inspection readiness (globalMCPShadow.inspectionComposed) is set by BOTH the Shadow
 	// composition and the live composition (composeGatewayLiveTierInto). On a live-ONLY startup
 	// rollback the inspection provider lived in the now-discarded runtime config, so leaving the

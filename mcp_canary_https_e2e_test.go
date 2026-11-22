@@ -298,7 +298,7 @@ func armCanaryWithRealPeerFull(t *testing.T, p *controlledPeer, budgetTotal int,
 	}); err != nil {
 		t.Fatalf("compose live tier: %v", err)
 	}
-	if err := mcpLiveTierFor(rollout.CapabilityGateway).arm(true, "armed"); err != nil {
+	if err := mcpLiveTierFor(rollout.CapabilityGateway).Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	if _, err := testBeginActivation(globalCanaryRuntime, rollout.CapabilityGateway, runtimeTestBudget(budgetTotal), time.Unix(0, 1)); err != nil {
