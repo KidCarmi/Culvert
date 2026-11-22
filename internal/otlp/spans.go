@@ -90,6 +90,16 @@ type SpanExporter struct {
 	// exporter (the in-package test fixtures) still works.
 	pushSlot chan struct{}
 
+	// inflight is the size of the batch the one push holding pushSlot has
+	// drained and not yet settled (delivered, requeued or discarded), and
+	// finalized is set by FlushFinal. Both guarded by mu. A terminal flush
+	// that times out waiting for the slot cannot see that batch in the ring,
+	// so without them it neither counted it nor named it, and a requeue
+	// landing after finalization put it back in a ring that dies with the
+	// process — the silent loss FlushFinal exists to remove.
+	inflight  int
+	finalized bool
+
 	// Push-health diagnostics (read-only; never gates or alters push
 	// behavior) — see MetricsExporter's identical fields for rationale.
 	pushFailures  atomic.Int64
@@ -178,6 +188,7 @@ func (e *SpanExporter) Configure(endpoint string, headers map[string]string) {
 	}
 	e.endpoint = endpoint
 	e.headers = headers
+	e.finalized = false
 	e.active.Store(endpoint != "")
 	e.mu.Unlock()
 
@@ -234,13 +245,24 @@ func (e *SpanExporter) Flush(ctx context.Context) error {
 // having moved no counter and named no quantity, which is the silent loss
 // this round exists to remove, merely relocated to the last second of the
 // process's life.
+//
+// A batch another push still holds (this flush timed out waiting for the
+// slot) is named in the same line, and finalized makes sure that if its
+// POST then fails it is counted as dropped instead of being requeued into a
+// ring nobody will read again. Its outcome is not known here, so it is
+// reported as in flight rather than counted.
 func (e *SpanExporter) FlushFinal(ctx context.Context) error {
 	err := e.push(ctx)
 	e.mu.Lock()
 	n := e.discardBufferedLocked()
+	inflight := e.inflight
+	e.finalized = true
 	e.mu.Unlock()
 	if n > 0 {
 		obs.Printf("OTLP traces: %d span(s) could not be delivered before shutdown", n)
+	}
+	if inflight > 0 {
+		obs.Printf("OTLP traces: %d span(s) were still in flight at shutdown; counted as dropped if that push fails", inflight)
 	}
 	return err
 }
@@ -271,8 +293,13 @@ func (e *SpanExporter) RecordSpan(s SpanRecord) {
 // (CHAOS-126).
 func (e *SpanExporter) drain() []SpanRecord {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.drainLocked()
+}
+
+// drainLocked is drain for a caller that holds e.mu.
+func (e *SpanExporter) drainLocked() []SpanRecord {
 	if e.count == 0 {
-		e.mu.Unlock()
 		return nil
 	}
 	out := make([]SpanRecord, e.count)
@@ -283,7 +310,6 @@ func (e *SpanExporter) drain() []SpanRecord {
 	}
 	e.count = 0
 	e.head = 0
-	e.mu.Unlock()
 	return out
 }
 
@@ -312,6 +338,12 @@ func (e *SpanExporter) requeue(batch []SpanRecord, postedTo string) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.inflight = 0
+	if e.finalized {
+		e.droppedSpans.Add(int64(len(batch)))
+		obs.Printf("OTLP traces: discarded %d span(s) — the push failed after the shutdown flush", len(batch))
+		return
+	}
 	if e.endpoint != postedTo {
 		e.droppedSpans.Add(int64(len(batch)))
 		reason := "export was disabled while the push was in flight"
@@ -350,6 +382,9 @@ func (e *SpanExporter) discard(spans []SpanRecord, reason string) {
 	if len(spans) == 0 {
 		return
 	}
+	e.mu.Lock()
+	e.inflight = 0
+	e.mu.Unlock()
 	e.droppedSpans.Add(int64(len(spans)))
 	obs.Printf("OTLP traces: discarded %d span(s) — %s", len(spans), reason)
 }
@@ -421,15 +456,22 @@ func (e *SpanExporter) push(ctx context.Context) error {
 		return fmt.Errorf("push gate: %w", ctx.Err())
 	}
 
+	// The destination and the batch are taken under ONE hold of e.mu. Taking
+	// them in two let a Configure(B) land in between: it discarded A's ring,
+	// new spans for B were recorded, and this push then drained B's spans and
+	// posted them to A with A's headers — a successful POST, so requeue's
+	// destination check never saw it. The loop's final flush on a reconfigure
+	// runs on a fresh context that the reconfigure does not cancel, so the
+	// window was reachable on every repoint.
 	e.mu.Lock()
 	endpoint := e.endpoint
 	headers := e.headers
-	e.mu.Unlock()
 
-	// CHAOS-126: the endpoint is read BEFORE the drain. Draining first meant
-	// a disabled exporter destroyed its buffer and only then discovered it
-	// had nowhere to send it — the exact path Stop() took the loop down.
+	// CHAOS-126: the endpoint is checked BEFORE the drain. Draining first
+	// meant a disabled exporter destroyed its buffer and only then discovered
+	// it had nowhere to send it — the exact path Stop() took the loop down.
 	if endpoint == "" {
+		e.mu.Unlock()
 		return nil
 	}
 	// Regexp barrier: CodeQL recognises Regexp.MatchString as an SSRF
@@ -439,12 +481,15 @@ func (e *SpanExporter) push(ctx context.Context) error {
 	// configuration fault, not a delivery attempt; the ring holds (and
 	// counts its own overflow) until a reconfigure makes delivery possible.
 	if !validEndpoint.MatchString(endpoint) {
+		e.mu.Unlock()
 		err := fmt.Errorf("invalid OTLP endpoint URL: %q", endpoint)
 		e.recordPushFailure(err)
 		return err
 	}
 
-	spans := e.drain()
+	spans := e.drainLocked()
+	e.inflight = len(spans)
+	e.mu.Unlock()
 	if len(spans) == 0 {
 		return nil
 	}
@@ -452,6 +497,9 @@ func (e *SpanExporter) push(ctx context.Context) error {
 		e.recordPushFailure(err)
 		return err
 	}
+	e.mu.Lock()
+	e.inflight = 0
+	e.mu.Unlock()
 	e.lastSuccessAt.Store(time.Now().UnixNano())
 	return nil
 }
