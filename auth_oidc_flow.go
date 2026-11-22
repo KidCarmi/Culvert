@@ -1104,7 +1104,7 @@ func (p *OIDCFlowProvider) CaptiveLoginURL(relayURL string, r *http.Request) str
 	globalPKCEStore.Set(state, authStateClientKey(r), &pkceEntry{
 		verifier:   verifier,
 		nonce:      nonce,
-		relayURL:   relayURL,
+		relayURL:   boundLoginRelay(relayURL),
 		providerID: p.profile.ID,
 	})
 

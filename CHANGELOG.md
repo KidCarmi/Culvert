@@ -9,6 +9,19 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **An anonymous client can no longer park ~1 GiB in each interactive-login
+  state store.** The OIDC PKCE and SAML request stores are filled by
+  unauthenticated requests (the proxy's captive-portal path and the public
+  `/auth/select` page) and are capped at 1000 entries each — but every entry
+  kept the client's own return URL whole, and neither listener bounds the
+  request line below net/http's ~1 MiB. 1000 such requests from one source
+  held ~1008 MiB of reachable heap per store for the 10-minute state TTL
+  (measured; GOMEMLIMIT cannot reclaim reachable memory). The retained return
+  URL is now bounded at 8 KiB: a longer one degrades to its origin root
+  (`https://host/`), or to `/` when no origin can be read, and is still
+  validated at the callback exactly as before. The request itself is still
+  served and the login still starts; ordinary return URLs are unchanged. The
+  same flood now retains ~0.3 MiB.
 - **Request spans the collector never took are no longer destroyed, and the
   counter that reports the loss can finally see it (`CHAOS-126`).** The OTLP
   span exporter drained its ring buffer as the FIRST statement of every push

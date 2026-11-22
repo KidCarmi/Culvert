@@ -187,7 +187,7 @@ func (p *SAMLProvider) CaptiveLoginURL(relayURL string, r *http.Request) string 
 	// evict its own in-flight state, never another user's mid-login entry.
 	globalSAMLStateStore.Set(state, authStateClientKey(r), &samlStateEntry{
 		requestID:  authReq.ID,
-		relayURL:   relayURL,
+		relayURL:   boundLoginRelay(relayURL),
 		providerID: p.profile.ID,
 	})
 	redirectURL, err := authReq.Redirect(state, p.sp)
