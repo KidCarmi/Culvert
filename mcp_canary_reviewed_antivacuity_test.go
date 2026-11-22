@@ -259,7 +259,7 @@ func armReviewedLiveTier(t *testing.T, up *recordingUpstream, reviewedFP, curren
 	}); err != nil {
 		t.Fatalf("compose live tier: %v", err)
 	}
-	if err := mcpLiveTierFor(capb).arm(true, "armed"); err != nil {
+	if err := mcpLiveTierFor(capb).Arm(true, "armed"); err != nil {
 		t.Fatalf("arm: %v", err)
 	}
 	reviewed := testReviewedTarget()
