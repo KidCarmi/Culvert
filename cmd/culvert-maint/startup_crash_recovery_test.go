@@ -15,7 +15,7 @@ package main
 // records every invocation, which is how "startup issued no state-changing
 // docker command" is asserted rather than assumed.
 //
-// Contract pinned here (docs/adr/0057):
+// Contract pinned here (docs/adr/0059):
 //   - an interrupted op is reported, durably, with how far it got;
 //   - startup never changes Docker;
 //   - the report survives further restarts and is audited exactly once;
@@ -875,7 +875,7 @@ func TestCrashRecovery_ForgedRecordRefsAreNotRepeated(t *testing.T) {
 
 // TestCrashRecovery_CorruptRecordRefusesToServe pins the existing fail-closed
 // posture: an unreadable record stops startup with a message naming the file.
-// (Whether to quarantine instead is an open owner decision, ADR-0057.)
+// (Whether to quarantine instead is an open owner decision, ADR-0059.)
 func TestCrashRecovery_CorruptRecordRefusesToServe(t *testing.T) {
 	for name, content := range map[string]string{
 		"truncated":     `{"op_id":"01HZZZZZZZZZZZZZZZZZZZZZZZ","kind":"upgrades.apply","pha`,

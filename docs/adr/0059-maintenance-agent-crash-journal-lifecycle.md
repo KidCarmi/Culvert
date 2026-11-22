@@ -1,10 +1,10 @@
-# ADR-0057: Lifecycle of the maintenance agent's crash journal — report at startup, never act
+# ADR-0059: Lifecycle of the maintenance agent's crash journal — report at startup, never act
 
 - Status: Proposed for review with the implementation PR, 2026-11-22. The
   reporting half is implemented here. The acting half (boot-time reconcile) is
   NOT, and stays an owner decision: see "Decisions left to the owner".
 - Numbering: ADR-0056 is the highest file on main at 5945633. Open PRs were not
-  checked from this worktree; renumber if one has reserved 0057.
+  checked from this worktree; renumber if one has reserved 0059.
 - Related: [RISK-022 journal plan](../../roadmap/RISK-022-crash-recovery-journal-plan.md),
   [PR-E reconcile design](../../roadmap/RISK-022-PR-E-reconcile-onstartup-design.md)
   (v2, awaiting sign-off), contract `AGT-900` (open), RISK-022 in the

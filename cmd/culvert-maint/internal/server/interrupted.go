@@ -6,7 +6,7 @@
 // changed, which image a rollback would name, and what the agent itself did
 // about it — which is nothing. Reporting is the whole of the startup contract
 // today; acting on a record at boot is the separate, sign-off-gated slice
-// (roadmap/RISK-022-PR-E-reconcile-onstartup-design.md, ADR-0057).
+// (roadmap/RISK-022-PR-E-reconcile-onstartup-design.md, ADR-0059).
 //
 // The journal is a file on disk, so every string in a record is unchecked
 // content. Nothing is copied to an API response as found: the kind and mode

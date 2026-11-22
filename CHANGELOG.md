@@ -633,7 +633,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 - **An upgrade or rollback cut short by a maintenance-agent crash is now
   reported in full, and stops being reported once it has been dealt with
-  (ADR-0057, contracts `AGT-004`/`AGT-005`).** After the agent died
+  (ADR-0059, contracts `AGT-004`/`AGT-005`).** After the agent died
   mid-operation, its next start marked the operation
   `failed(agent_restart_interrupted)` and nothing more: no phase, no audit
   entry, no rollback reference, no mention in `GET /v1/status`, a `started_at`

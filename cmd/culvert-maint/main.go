@@ -185,7 +185,7 @@ func run(configPath string) error {
 // corrupt record means we cannot tell whether a destructive op was interrupted,
 // so the agent refuses to serve rather than silently ignore it.
 //
-// What startup does with a record, and all it does (ADR-0057):
+// What startup does with a record, and all it does (ADR-0059):
 //   - marks the op failed(agent_restart_interrupted) with what the journal
 //     knows about how far it got, so GET /v1/operations/{id} answers;
 //   - writes ONE audit entry for the interruption, the first time the record
