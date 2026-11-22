@@ -1017,6 +1017,21 @@ touches, and the IM-026 row is added once they merge):
   open-PR overlap today. Unchanged alternatives: `mcp_rollout_execdeps.go`
   once #1993 is decided, one strict decoder for the three F3 records, then
   IM-014 mapping.
+- **Discovered, not fixed here (pre-existing on main `ef9431189`).** The full
+  root suite under `-race` in one process fails on a leaked goroutine.
+  `loadUIAccessPolicy` starts `runIdPMetadataDegradationWatchdog` on the
+  lifecycle context (`ui_access_policy_startup.go:116`), and the
+  `TestLoadUIAccessPolicy_*` tests that call it never stop it. It ticks every
+  2.5 minutes and reads the `idpRegistry` variable
+  (`idp_metadata_health.go:993`), which later tests replace
+  (`store_authsource_test.go:189` is one of several). With
+  `-shuffle=1795302766790073750` this change fails 13 tests and unmodified
+  main fails 12; every one is "race detected", all 37 reports carry the
+  watchdog's stack, and no assertion fails. The tests named differ between
+  the two runs because the tick is timed. A selection that finishes in under
+  2.5 minutes does not show it, which is presumably why the sharded gate
+  does not. The fix belongs in the test (a cancellable lifecycle context for
+  the tests that call `loadUIAccessPolicy`), not in this program.
 
 ### IM-020 saas-feed node-local record codec (EXTRACT, 2026-11-21, main `0fe4578`)
 
