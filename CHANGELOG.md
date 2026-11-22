@@ -999,6 +999,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **Turning on the threat feed no longer costs two heap allocations on every
+  allowed plain-HTTP request (`PERF-THREATFEED-URLKEY-1`).**
+  `threatfeed.CheckRequestURL` runs on the request goroutine, before the policy
+  engine, for every forwarded plain-HTTP request whenever the feed is enabled,
+  and its per-request key derivation allocated twice for a destination that
+  MISSES — which is every allowed request. One allocation was `net.ParseIP`
+  reporting, via a constructed `netip` parse error, that an ordinary hostname is
+  not an IP address; the other was the canonical `scheme://host/path` key, built
+  on the heap purely to be looked up in a map and discarded. The IP-literal
+  question is now answered by `couldBeIPLiteral`, a byte scan mirroring
+  `netip.ParseAddr`'s own dispatch (1.5 ns against the 45 ns and 48 bytes the
+  failing parse cost), and the key is rendered into a stack scratch and probed
+  with Go's no-copy `m[string(b)]` form. Measured on a 4-vCPU Xeon @2.10GHz
+  against a 100,000-entry feed, medians of n=5: a missing destination goes from
+  265 ns / 112 B / 2 allocs to 177 ns / 0 B / 0 allocs serially (1.50x) and from
+  93 ns to 49 ns across four workers (1.90x), which brings the full-URL check to
+  roughly what the `CheckDomain` control has cost since 2026-11-17. The same
+  guard removes one allocation per row from the ingest path (`NormaliseURL`,
+  ~100,000 calls per urlhaus sync round). End to end, a new single-variable
+  harness (`BenchmarkPerfQual_ProxyHTTPForwardPosture`) shows a deployed posture
+  — a 110,000-entry blocklist plus an enabled 100,000-entry feed — going from
+  +2 allocations per allowed request to zero; wall time is unchanged and not
+  claimed to move, the saving being ~150 ns against a ~150 microsecond request.
+  Every verdict and the on-disk DB format are unchanged, and the key bytes are
+  pinned by the existing differential and fuzz target against the string path
+  (`TestCheckRequestURL_MatchesCheckURL`, `FuzzCheckRequestURL`) plus new gates
+  for the guard's superset property (`TestCouldBeIPLiteral_IsSupersetOfParseIP`,
+  `FuzzCouldBeIPLiteral`, with
+  `TestCouldBeIPLiteral_ActuallyRejectsOrdinaryHostnames` as the control), the
+  spill boundary (`TestAppendParsedURLKey_SpillMatchesStringPath`,
+  `TestCheckRequestURL_SpilledKeysDoNotCollide`) and the allocation claim
+  (`TestBenchGate_CheckRequestURLAllocs` tightened to zero,
+  `TestCheckRequestURL_MissIsAllocationFree`, with
+  `TestCheckRequestURL_AllocationFree_LegacyIsNot` as its negative control).
+  The superset differential caught a real defect in the first draft of the guard
+  before it shipped: it refused `fe80::1`, because an IPv6 literal's leading
+  bytes are hex digits rather than the colon the draft scanned for. See
+  `docs/engineering/PERFORMANCE-GUARDIAN-REVIEW-2026-11-21.md`.
 - **A blocklist feed sync no longer stalls every request while it parses the
   feed (`PERF-BLOCKLIST-MERGE-1`).** `blocklist.Store.MergeFromLines` parsed
   and merged the whole feed (up to 1,000,000 lines) inside one hold of the
