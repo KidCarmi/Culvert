@@ -398,6 +398,55 @@ contracts:
     validation: unit
     compatibility: "Upgrade and backup must not interleave on an appliance."
 
+  - id: AGT-002
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "A finished upgrade does not leave the fixed proxy image tag on the new image while the proxy container provably still runs the previous one, when the previous image has an allow-listed registry reference."
+    authority: "Maintenance agent upgrade apply (cmd/culvert-maint, separate module)."
+    code:
+      - "cmd/culvert-maint/internal/server/journal_phases.go"
+      - "cmd/culvert-maint/internal/server/rollback_stages.go"
+    configs: []
+    transitions:
+      permitted:
+        - "tag and container both on the new image after a restart, healthy or not"
+        - "tag on the previous image while a failed rollback leaves the new container running"
+        - "tag left on the new image, with an operation-log warning, when the previous image has no allow-listed registry reference"
+      forbidden:
+        - "ending an upgrade with the tag on the new image after the restart failed before replacing the container"
+        - "moving the tag back when the container was replaced or its state could not be read"
+        - "moving the tag outside the write-ahead journal window"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/pinned_tag_consistency_test.go", name: TestApply_PinnedTag_UpFailsBeforeRecreate_RollbackDisabled_TagRestored}
+      - {file: "cmd/culvert-maint/internal/server/pinned_tag_consistency_test.go", name: TestApply_PinnedTag_UpFailsBeforeRecreate_RollbackPullFails_TagRestored}
+      - {file: "cmd/culvert-maint/internal/server/pinned_tag_consistency_test.go", name: TestApply_PinnedTag_UpFailsAfterRecreate_RollbackDisabled_TagNotMoved}
+      - {file: "cmd/culvert-maint/internal/server/pinned_tag_consistency_test.go", name: TestApply_PinnedTag_RestoreHappensInsideJournalWindow}
+    validation: integration
+    compatibility: "The backup/restore cli service and every later compose up resolve this tag; a tag ahead of the container is an upgrade nobody health-checked. An agent killed mid-restart is AGT-900, not this entry."
+
+  - id: AGT-003
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "Automatic rollback targets the running image's allow-listed registry reference even when Docker also reports a local-only reference for the same image."
+    authority: "Maintenance agent upgrade apply (cmd/culvert-maint, separate module)."
+    code:
+      - "cmd/culvert-maint/internal/server/inline_rollback.go"
+    configs: []
+    transitions:
+      permitted:
+        - "skipping rollback when no reported reference passes the digest-form and allowlist gate"
+        - "skipping rollback when the running image reports more than one distinct digest"
+      forbidden:
+        - "skipping rollback because a local-only reference sorts before the registry reference"
+        - "rolling back to a reference that fails the allowlist"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/pinned_tag_consistency_test.go", name: TestApply_RollbackTarget_IgnoresLocalTagRepoDigest}
+      - {file: "cmd/culvert-maint/internal/server/rollback_target_select_test.go", name: TestDeriveRollbackTarget_SelectsFirstRefPassingTheGate}
+    validation: integration
+    compatibility: "Docker's containerd image store (observed on Docker 29.10) reports the local culvert/proxy name beside the registry name; the classic store does not."
+
   - id: CFG-001
     area: config-compatibility
     status: enforced

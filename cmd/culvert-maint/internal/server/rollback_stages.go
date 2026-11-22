@@ -42,6 +42,12 @@ type rollbackAccumulator struct {
 // the caller's inline rollback fires. Shared by apply's `restart` stage and
 // the rollback core's `rollback_restart` stage (which passes a nil flag — a
 // rollback IS the recovery, never its own trigger).
+//
+// An `up` failure does NOT mean the container changed: `up` can fail before it
+// touches the proxy, leaving the old container running under an advanced tag.
+// tagAndUp only reports the failure; apply's restart stage follows it with
+// realignPinnedTagAfterFailedUp (journal_phases.go), which moves the tag back
+// when the container provably never moved (contract AGT-002).
 func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bool) (stdout, stderr []byte, err error) {
 	tres, terr := s.opts.Runner.ComposeTagPinned(ctx, ref)
 	if terr != nil {

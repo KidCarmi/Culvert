@@ -621,6 +621,43 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Automatic rollback after a failed upgrade works on hosts using Docker's
+  containerd image store.** On such a host Docker reports two references for
+  the running proxy image: the registry one (`ghcr.io/kidcarmi/culvert@sha256:…`)
+  and a local one for the fixed tag (`culvert/proxy@sha256:…`), which sorts
+  first. The maintenance agent took the first entry as its rollback target, the
+  local name failed `image_allowlist`, and every `upgrades.apply` recorded
+  `rollback_skipped_reason: "no_prior_digest"`. An upgrade to an image that
+  failed its health gate was therefore left running instead of being rolled
+  back. The agent now uses the first reported reference that passes the same
+  digest-form and allowlist gate. Hosts on the classic image store were not
+  affected. One visible consequence: on an affected host, an upgrade whose
+  restart fails and whose rollback also fails now ends `rollback_failed`
+  (rollback attempted) where it used to end `command_error` (rollback skipped).
+  Confirmed against Docker 29.10 / Compose v5.7.1; pinned by
+  `TestApply_RollbackTarget_IgnoresLocalTagRepoDigest` (contract `AGT-003`).
+
+- **A failed upgrade no longer leaves `culvert/proxy:pinned` on the new image
+  while the old container keeps running.** The agent moves the fixed tag to the
+  new image and then runs `docker compose up -d`. When `up` failed before it
+  replaced the proxy container (a compose or override file that no longer
+  loads, another service's image that cannot be pulled, a refused command), the
+  old container kept serving but the tag already named the new image. Automatic
+  rollback normally moves it back, but not when it is disabled
+  (`rollback_on_failure: false`), has no usable target, or fails at its own
+  pull. The operation then finished with the tag ahead: the `cli`
+  backup/restore service ran the new image against the old daemon's data, and
+  the next `docker compose up -d` (a restore, a manual restart) switched the
+  proxy to an image that had never passed the health gate. After a failed `up`
+  the agent now re-reads the running container, and if it is still the image
+  captured before the upgrade, moves the tag back to that image before the
+  stage returns. It does not pull or restart anything, and it leaves the tag
+  alone when the container was replaced or cannot be read. In this case
+  `final_running_digest` now reports the previous image (it reported the new
+  one, which was not running). When the previous image has no allow-listed
+  registry reference the tag cannot be moved back; the operation log says so.
+  Pinned by `pinned_tag_consistency_test.go` (contract `AGT-002`).
+
 - **The CI-runner installer adds the runner account to the `docker` group
   even when a lookalike name is present.** `scripts/install-runner.sh` decided
   membership with `groups "$u" | grep -qw docker`, which also matches a
