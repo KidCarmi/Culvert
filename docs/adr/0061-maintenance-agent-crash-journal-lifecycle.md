@@ -1,4 +1,4 @@
-# ADR-0059: Lifecycle of the maintenance agent's crash journal — report at startup, never act
+# ADR-0061: Lifecycle of the maintenance agent's crash journal — report at startup, never act
 
 - Status: Proposed for review with the implementation PR, 2026-11-22. The
   reporting half is implemented here. The acting half (boot-time reconcile) is

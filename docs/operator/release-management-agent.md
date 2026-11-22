@@ -163,7 +163,7 @@ docker compose exec proxy ls -l /run/culvert-maint/culvert-maint.sock
 If the agent process dies while an upgrade or rollback is running (crash, OOM
 kill, host power loss), the next start reports the operation and **changes
 nothing in Docker**. The agent does not roll back or finish the upgrade by
-itself ([ADR-0059](../adr/0059-maintenance-agent-crash-journal-lifecycle.md)).
+itself ([ADR-0061](../adr/0061-maintenance-agent-crash-journal-lifecycle.md)).
 
 Where to look:
 

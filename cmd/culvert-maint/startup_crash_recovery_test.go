@@ -875,7 +875,7 @@ func TestCrashRecovery_ForgedRecordRefsAreNotRepeated(t *testing.T) {
 
 // TestCrashRecovery_CorruptRecordRefusesToServe pins the existing fail-closed
 // posture: an unreadable record stops startup with a message naming the file.
-// (Whether to quarantine instead is an open owner decision, ADR-0059.)
+// (Whether to quarantine instead is an open owner decision, ADR-0061.)
 func TestCrashRecovery_CorruptRecordRefusesToServe(t *testing.T) {
 	for name, content := range map[string]string{
 		"truncated":     `{"op_id":"01HZZZZZZZZZZZZZZZZZZZZZZZ","kind":"upgrades.apply","pha`,

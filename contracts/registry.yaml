@@ -687,7 +687,7 @@ contracts:
     status: enforced
     owner_approved: false
     invariant: "After the maintenance agent dies during an upgrade or rollback, its next start reports the operation as failed with how far it got, lists it in status until a later image change succeeds, and changes nothing in Docker."
-    authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0059-maintenance-agent-crash-journal-lifecycle.md."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/main.go"
       - "cmd/culvert-maint/internal/journal/*.go"
@@ -717,7 +717,7 @@ contracts:
     status: enforced
     owner_approved: false
     invariant: "An interrupted operation's journal record is removed only when a later upgrade or image rollback succeeds after re-pinning the image tag and passing the health gate, and the removal is audited."
-    authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0059-maintenance-agent-crash-journal-lifecycle.md."
+    authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/internal/server/journal_retire.go"
     configs: []
