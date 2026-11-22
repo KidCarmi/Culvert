@@ -1,5 +1,5 @@
 // Package writerlock takes the single-writer lock on a persisted-state
-// directory (CHAOS-103, ADR-0058): an exclusive, non-blocking advisory lock on
+// directory (CHAOS-103, ADR-0060): an exclusive, non-blocking advisory lock on
 // one well-known file inside the directory, held for as long as the returned
 // Lock is open.
 //

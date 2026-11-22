@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// Boundary (ADR-0058): the lock is a leaf over the filesystem. It imports
+// Boundary (ADR-0060): the lock is a leaf over the filesystem. It imports
 // errors, os, path/filepath and golang.org/x/sys/unix and nothing else: no
 // application or sibling package, no logger, no clock, no environment-policy
 // helper. It has no package-level variable and no init func, and it does not

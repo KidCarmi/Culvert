@@ -1,4 +1,4 @@
-# ADR-0058: The data-directory single-writer lock is owned by internal/writerlock
+# ADR-0060: The data-directory single-writer lock is owned by internal/writerlock
 
 - Status: Proposed for review with the implementation PR (IM-026, 2026-11-21).
 - Numbering: ADR-0055 is the highest merged. ADR-0056 is reserved by open

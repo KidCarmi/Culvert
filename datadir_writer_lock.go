@@ -63,7 +63,7 @@ import (
 )
 
 // The lock itself (the file name, the three verdicts, the directory creation
-// and the flock) is owned by internal/writerlock (ADR-0058). The names below
+// and the flock) is owned by internal/writerlock (ADR-0060). The names below
 // are main's bindings to it; what a verdict means for the boot is decided in
 // this file.
 
