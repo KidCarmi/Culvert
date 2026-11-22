@@ -145,7 +145,7 @@ func run(configPath string) error {
 	}
 	mgr := ops.NewManagerWithTTL(nil, idempTTL)
 
-	jnl, err := initJournal(cfg.StateDir, mgr)
+	jnl, err := initJournal(cfg.StateDir, mgr, al, cfg.ProxyRepo)
 	if err != nil {
 		return err
 	}
@@ -159,6 +159,7 @@ func run(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("status: %w", err)
 	}
+	stp.WithJournal(jnl)
 
 	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl)
 	if err != nil {
@@ -179,13 +180,24 @@ func run(configPath string) error {
 	return nil
 }
 
-// initJournal opens the crash-recovery journal (RISK-022) and marks any op that
-// was in flight at the last stop. It reads the journal FAIL-CLOSED: a corrupt
-// record means we cannot tell whether a destructive op was interrupted, so the
-// agent refuses to serve rather than silently ignore it. Orphaned records are
-// marked failed(agent_restart_interrupted) so GET /v1/operations/{id} answers;
-// Docker reconciliation of the danger window is a later slice.
-func initJournal(stateDir string, mgr *ops.Manager) (*journal.Journal, error) {
+// initJournal opens the crash-recovery journal (RISK-022) and reports every op
+// that was in flight at the last stop. It reads the journal FAIL-CLOSED: a
+// corrupt record means we cannot tell whether a destructive op was interrupted,
+// so the agent refuses to serve rather than silently ignore it.
+//
+// What startup does with a record, and all it does (ADR-0061):
+//   - marks the op failed(agent_restart_interrupted) with what the journal
+//     knows about how far it got, so GET /v1/operations/{id} answers;
+//   - writes ONE audit entry for the interruption, the first time the record
+//     is found;
+//   - counts the start in the record.
+//
+// It runs no docker command and removes no record. Docker is not consulted, so
+// an unreachable daemon cannot delay or fail startup, and a record stays — and
+// is reported again by every later start and by GET /v1/status — until a later
+// image change succeeds (server/journal_retire.go). Acting on a record at boot
+// is the separate, sign-off-gated reconcile slice.
+func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo string) (*journal.Journal, error) {
 	jnl, err := journal.New(stateDir)
 	if err != nil {
 		return nil, fmt.Errorf("journal: %w", err)
@@ -194,14 +206,71 @@ func initJournal(stateDir string, mgr *ops.Manager) (*journal.Journal, error) {
 	if err != nil {
 		return nil, fmt.Errorf("journal: refusing to serve — %w", err)
 	}
+	now := time.Now().UTC()
 	orphans := make([]ops.InterruptedOp, 0, len(recs))
 	for i := range recs {
-		orphans = append(orphans, ops.InterruptedOp{OpID: recs[i].OpID, Kind: recs[i].Kind, Actor: recs[i].Actor})
+		orphans = append(orphans, reportInterrupted(jnl, al, &recs[i], proxyRepo, now))
 	}
 	if n := mgr.MarkAllInterrupted(orphans); n > 0 {
-		log.Printf("culvert-maint: %d operation(s) interrupted by a prior stop — marked failed(agent_restart_interrupted)", n)
+		log.Printf("culvert-maint: %d operation(s) interrupted by a prior stop — marked failed(agent_restart_interrupted); "+
+			"Docker was NOT changed. See GET /v1/status interrupted_operations.", n)
 	}
 	return jnl, nil
+}
+
+// maxInterruptedSeen caps the per-record start counter. Reaching it means the
+// agent has been restarted that many times with the record outstanding; the
+// count stops, the reporting does not.
+const maxInterruptedSeen = 1_000_000
+
+// reportInterrupted does the per-record startup work and returns the op
+// descriptor to mark. Every write here is best-effort: a full or read-only
+// state_dir must not stop the agent from coming up and saying, in memory, what
+// it found.
+//
+// Ordering: the audit entry is written before the record that remembers it. A
+// crash between the two repeats the entry at the next start; the other order
+// could lose it. So the audit trail carries the interruption at least once,
+// and exactly once unless the agent dies inside that window.
+func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, proxyRepo string, now time.Time) ops.InterruptedOp {
+	if rec.InterruptedAt == nil {
+		rec.InterruptedAt = &now
+	}
+	if rec.InterruptedSeen < maxInterruptedSeen {
+		rec.InterruptedSeen++
+	}
+	desc := server.DescribeInterrupted(rec, proxyRepo)
+	actor := desc.Actor
+	if actor == "" {
+		actor = server.AuditActorStartup
+	}
+	if !rec.InterruptAudited {
+		if err := al.Write(audit.Event{
+			Actor:         actor,
+			OpID:          rec.OpID,
+			Kind:          desc.Kind,
+			Params:        desc.AuditParams(),
+			Outcome:       audit.OutcomeFailed,
+			OutcomeAt:     rec.InterruptedAt,
+			FailureReason: string(ops.ReasonAgentRestartInterrupted),
+		}); err != nil {
+			log.Printf("culvert-maint: WARN: could not audit interrupted op %s (will retry at the next start): %v", rec.OpID, err)
+		} else {
+			rec.InterruptAudited = true
+		}
+	}
+	if err := jnl.Write(*rec); err != nil {
+		log.Printf("culvert-maint: WARN: could not update the journal record of interrupted op %s: %v", rec.OpID, err)
+	}
+	log.Printf("culvert-maint: interrupted op %s kind=%s journal_phase=%s docker_state=%s starts_seen=%d",
+		rec.OpID, desc.Kind, desc.JournalPhase, desc.DockerState, rec.InterruptedSeen)
+	return ops.InterruptedOp{
+		OpID:    rec.OpID,
+		Kind:    desc.Kind,
+		Actor:   actor,
+		Started: rec.StartedAt,
+		Result:  desc.ResultMap(),
+	}
 }
 
 // newServer wires the agent HTTP server from its already-constructed

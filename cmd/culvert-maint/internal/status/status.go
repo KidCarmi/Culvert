@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"culvert-maint/internal/config"
+	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 	"culvert-maint/internal/server"
@@ -40,6 +41,16 @@ type Provider struct {
 	cfg    *config.Config
 	mgr    *ops.Manager
 	runner *runner.Runner
+	// journal is the crash-recovery journal. Optional: nil reports no
+	// interrupted operations (tests, and builds that do not journal).
+	journal *journal.Journal
+}
+
+// WithJournal makes the provider report the operations a previous agent
+// process left unfinished (Status.InterruptedOperations). Returns p.
+func (p *Provider) WithJournal(j *journal.Journal) *Provider {
+	p.journal = j
+	return p
 }
 
 // New constructs a Provider.
@@ -58,6 +69,63 @@ func New(cfg *config.Config, mgr *ops.Manager, r *runner.Runner) (*Provider, err
 
 // Snapshot implements server.StatusProvider.
 func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
+	st := p.composeSnapshot(ctx)
+	p.addInterrupted(ctx, &st)
+	return st, nil
+}
+
+// addInterrupted fills the interrupted-operation report. The list comes from
+// the journal alone, so it is complete when Docker is down; the two live facts
+// (which image is running, where the fixed tag is) are added when Docker can
+// be read and are reported as unknown when it cannot. Read-only, and it costs
+// no docker call unless a record exists.
+func (p *Provider) addInterrupted(ctx context.Context, st *server.Status) {
+	if p.journal == nil {
+		return
+	}
+	recs, err := p.journal.List()
+	if err != nil {
+		// The text of a journal error can quote file content; say only that
+		// the list is unknown.
+		st.InterruptedOperationsError = "the crash-recovery journal could not be read; see the agent log"
+		return
+	}
+	for i := range recs {
+		rec := &recs[i]
+		// A record whose operation THIS process knows — running, or terminal
+		// with its record about to be removed — is not an interruption. Only
+		// an operation startup marked, or one no longer in memory at all, is.
+		if op := p.mgr.Get(rec.OpID); op != nil && op.FailureReason != string(ops.ReasonAgentRestartInterrupted) {
+			continue
+		}
+		d := server.DescribeInterrupted(rec, p.cfg.ProxyRepo)
+		if st.RunningImage != nil {
+			d.SetRunningImage(server.ClassifyRunning(rec, p.cfg.ProxyRepo, true, st.RunningImage.ImageID, st.RunningImage.RepoDigests))
+		} else {
+			d.SetRunningImage(server.ClassifyRunning(rec, p.cfg.ProxyRepo, false, "", nil))
+		}
+		st.InterruptedOperations = append(st.InterruptedOperations, d)
+	}
+	if len(st.InterruptedOperations) == 0 {
+		return
+	}
+	pt := &server.PinnedTagStatus{}
+	id, perr := p.runner.PinnedTagImageID(ctx)
+	if perr != nil {
+		pt.Error = "the fixed tag could not be inspected"
+	} else {
+		pt.ImageID = id
+		if st.RunningImage != nil && st.RunningImage.ImageID != "" {
+			same := st.RunningImage.ImageID == id
+			pt.MatchesRunning = &same
+		}
+	}
+	st.PinnedTag = pt
+}
+
+// composeSnapshot is the compose-stack half of the status: privilege mode,
+// lock holder, services and the running image.
+func (p *Provider) composeSnapshot(ctx context.Context) server.Status {
 	st := server.Status{
 		PrivilegeMode:             string(p.cfg.PrivilegeMode),
 		ComposeProjectDir:         p.cfg.ComposeProjectDir,
@@ -86,12 +154,12 @@ func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 				st.ComposeError = err.Error()
 			}
 		}
-		return st, nil
+		return st
 	}
 	services, perr := parseComposePS(res.Stdout)
 	if perr != nil {
 		st.ComposeError = "parse_compose_ps: " + perr.Error()
-		return st, nil
+		return st
 	}
 	st.ComposeServices = services
 	// compose_stack_up is true only when the proxy service is running.
@@ -116,7 +184,7 @@ func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 	if st.ComposeStackUp {
 		st.RunningImage = p.captureRunningImage(ctx)
 	}
-	return st, nil
+	return st
 }
 
 // captureRunningImage returns the digest-only identity of the running

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -197,5 +198,76 @@ func TestWriteIsAtomicReplace(t *testing.T) {
 	recs, _ := j.List()
 	if len(recs) != 1 {
 		t.Errorf("expected 1 record after overwrite, got %d", len(recs))
+	}
+}
+
+// TestRead_RecordWithoutInterruptionFields: a record written before the
+// interruption bookkeeping existed reads with zero values, and one written
+// with it round-trips.
+func TestRead_RecordWithoutInterruptionFields(t *testing.T) {
+	j, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "01HZZZZZZZZZZZZZZZZZZZZZZZ"
+	old := `{"op_id":"` + id + `","kind":"upgrades.apply","phase":"restarting","started_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:01Z"}`
+	if err := os.WriteFile(filepath.Join(j.Dir(), id+".json"), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec, found, err := j.Read(id)
+	if err != nil || !found {
+		t.Fatalf("read: found=%v err=%v", found, err)
+	}
+	if rec.InterruptedAt != nil || rec.InterruptedSeen != 0 || rec.InterruptAudited {
+		t.Errorf("zero values expected: %+v", rec)
+	}
+	// A record no startup has touched must not grow the new keys on rewrite.
+	if err := j.Write(*rec); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(j.Dir(), id+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "interrupt") {
+		t.Errorf("untouched record gained interruption keys:\n%s", raw)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	rec.InterruptedAt, rec.InterruptedSeen, rec.InterruptAudited = &now, 3, true
+	if err := j.Write(*rec); err != nil {
+		t.Fatal(err)
+	}
+	back, _, err := j.Read(id)
+	if err != nil || back.InterruptedAt == nil || !back.InterruptedAt.Equal(now) || back.InterruptedSeen != 3 || !back.InterruptAudited {
+		t.Errorf("round trip: %+v err=%v", back, err)
+	}
+}
+
+// TestRead_FileNameIsTheIdentity: the op_id inside a record is file content;
+// the validated file name is what identifies it. A record claiming another id
+// is returned under the name it was read from, so writing it back cannot
+// create or overwrite a different record.
+func TestRead_FileNameIsTheIdentity(t *testing.T) {
+	j, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name, claimed = "01HZZZZZZZZZZZZZZZZZZZZZZZ", "01HZZZZZZZZZZZZZZZZZZZZZZY"
+	body := `{"op_id":"` + claimed + `","kind":"upgrades.apply","phase":"admitted"}`
+	if err := os.WriteFile(filepath.Join(j.Dir(), name+".json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := j.List()
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("list: %v %v", recs, err)
+	}
+	if recs[0].OpID != name {
+		t.Errorf("op_id = %q, want the file name %q", recs[0].OpID, name)
+	}
+	if err := j.Write(recs[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(j.Dir(), claimed+".json")); err == nil {
+		t.Error("writing the record back created a file under the id its content claimed")
 	}
 }
