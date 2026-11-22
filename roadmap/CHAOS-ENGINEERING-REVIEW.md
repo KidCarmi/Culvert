@@ -8,6 +8,126 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-21 — `CHAOS-126` CLAIMED (placeholder, commit one). Domain: the
+OBSERVABILITY PLANE'S OWN LOSS ACCOUNTING — the OTLP SPAN BUFFER at a
+collector failure and at a restart. `SpanExporter.push` DRAINS the ring buffer
+as its FIRST statement (`internal/otlp/spans.go:199`) and discards the batch on
+any error, so a collector that is down, slow or returning 5xx destroys every
+span it was handed — and because the buffer is emptied on every tick whatever
+the outcome, it can never FILL, which makes `droppedSpans` (documented as
+"ring-buffer overwrites (collector unreachable + buffer full)",
+`internal/otlp/spans.go:71`) structurally incapable of seeing the one scenario
+its comment names. Measured on the production path: 2000 spans recorded against
+a 502 collector — 0 delivered, 0 still buffered, `droppedSpans = 0`. The buffer
+cap's stated purpose ("prevents OOM when the collector is down",
+`spans.go:12`) is therefore vacuous. Separately, `pushLoop`'s `ctx.Done()`
+branch is commented "Final flush on shutdown" and CANNOT flush on shutdown: no
+shutdown hook stops the exporters (`main_shutdown.go` flushes syslog, logstore,
+reqlog, audit, cluster and policy-learning and NOT OTLP), and the only two
+callers that do cancel the loop are `Stop()`, which clears the endpoint FIRST so
+the flush drains the buffer and returns at `endpoint == ""` — measured: 5 spans
+buffered, 0 requests reaching the collector, `droppedSpans = 0` — and
+`Configure(new)`, whose flush posts the OLD collector's spans to the NEW one.
+The asymmetry the design missed is that METRICS are a cumulative snapshot and a
+lost push self-heals on the next tick, while SPANS are a one-shot stream with
+nothing to re-derive them from.** Id claimed in this committed row before any
+code was written, per the convention below and checked against `origin/main`
+rather than the working tree per the 2026-09-25 amendment: `CHAOS-125` is the
+highest id anywhere on `origin/main` (at `ef94311`). Of the open PRs (#1994,
+#1993, #1992, #1705, #1549, #1548, #1536, #1528, #1526) none is a chaos sweep
+and none claims a chaos id. This sweep took 126 and will not move. It NARROWS
+`OBS-2` (which checked this domain and recorded the export engines as "sound:
+bounded queues with counted non-blocking drops … drain-before-post"): the
+drain-before-post it credited for lock hygiene is the same statement that
+destroys an undelivered batch, and exporting `droppedSpans` to the scrape
+surface — OBS-2's remaining ask — would have published a counter that reads 0
+through a total outage.
+
+The 2026-11-21/22 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-22.md) —
+CHAOS-126 (THE SINK THAT COUNTED ONLY THE LOSS IT COULD NOT REACH). `OBS-2`
+swept this domain and recorded the export engines as "sound: bounded queues
+with counted non-blocking drops … drain-before-post so no mutex is held across
+`client.Do`". It was right about the mutex. The statement it credited —
+`drain()` as push's FIRST line — is the same statement that DESTROYS a batch
+the collector declines, because every failure arm below it just returned the
+error with the spans already out of the ring. Three things followed: a down,
+slow or 5xx-ing collector lost 100% of the spans it was handed (measured: 2000
+recorded against a 502, **0 delivered, 0 buffered, `droppedSpans` 0**, 6
+failures); the ring could never FILL, so `droppedSpans` — commented
+"ring-buffer overwrites (collector unreachable + buffer full)" — could not
+reach the state its own comment named; and the cap's documented purpose
+("prevents OOM when the collector is down") was vacuous, since peak occupancy
+during an outage was one interval, by destruction rather than by bound.
+`pushLoop`'s "Final flush on shutdown" branch has never once run on a
+shutdown: nothing cancels that loop at exit — `registerLateShutdownHooks`
+flushed the cluster store, syslog, the community DB, the log store, the request
+log and the audit FD and had NO OTLP hook — and the only two callers that do
+cancel it are `Stop()`, which clears the endpoint first so the flush drained
+the ring and posted nothing (measured: 5 buffered, 0 requests, 0 counted), and
+`Configure(new)`, whose flush posts the OLD collector's spans to the NEW one.
+**The asymmetry the design missed is one sentence:** the metrics exporter
+beside it pushes a CUMULATIVE snapshot, so a failed push costs resolution and
+the next tick re-derives everything; nothing re-derives a span. Shipped: the
+endpoint is read BEFORE the drain; an undelivered batch returns to the FRONT
+of the ring whenever the collector did not take it for a reason that can change
+(transport error, 408, 429, any 5xx) — retention, not a retry ladder, since
+one POST per interval happens either way and the only change is whether the
+batch is the data that failed or a fresh slice of a ring that threw it away;
+any OTHER 4xx is the collector rejecting the batch itself, so it is dropped AND
+counted rather than pinning the ring against spans that could still go;
+`droppedSpans` now means NEVER DELIVERED and every uncounted exit was closed;
+a terminal `otlp-flush` hook at order 138 runs after every durable closer
+(an off-box collector must not spend their reserve) and before the log closer
+(so its diagnostics still land), bounded to 2 s; and repointing at a different
+collector no longer ships the previous window's client IPs and hostnames to a
+destination the operator did not choose for them, while a headers-only change
+keeps the buffer. **Refused, with reasons in the file comments and §7:** no
+alert (a collector restart is routine and `failureCount`/`lastErrorAt` already
+carry recency), no operator setting, no flush inside `Stop()` (it is reached
+from an admin handler; a synchronous POST to a dead collector buys a hung
+disable), no jitter (that is `WK-13`/`R-5`'s open row), and no `description`
+added to the OpenAPI field (the spec carries no semantic claim to correct, and
+touching it would drag the generated-client and committed-dist drift gates into
+a round whose API shape is unchanged — the claim that was WRONG lived in the
+GUI string, which is what changed). **Mutation testing earned its keep twice:**
+8 mutations, 7 caught immediately, and M4 — retaining without counting
+`requeue`'s OWN overflow — caught by NOTHING, because the eviction gate
+exercises `RecordSpan`'s overflow arm and not the arm where a failing batch
+meets the spans that arrived while it was in flight. That arm is exactly where
+silent loss would reappear; it now has a gate driven by a collector that
+records spans into the exporter while it is deciding. **NARROWS `OBS-2`**: the
+counter it asks to be made scrapeable finally measures something, and
+exporting it before this round would have published a gauge that reads 0
+through a total outage. **The INDEPENDENT REVIEW of the fix is the finding
+worth carrying forward on method.** Four of the eight original mutations
+targeted `requeue`, the full module suite was green and both lint passes were
+clean — and the fix still shipped a PRIVACY defect in the exact property this
+round introduced: `requeue`'s abandonment guard tested the CURRENT endpoint
+rather than the endpoint the batch was POSTED to, so a repoint while a push
+was in flight retained collector A's spans for collector B and delivered them
+(reproduced: B received 2 spans collected for A, `droppedSpans` 0). The gate
+written for that property passed because it repoints an IDLE exporter, where
+the buffer is still in the ring when `Configure` takes the lock. Two more
+followed: with TWO pushers — which the new shutdown hook creates by design —
+`requeue` put whichever finished LAST in front, inverting the ring
+(reproduced: `[100 101 0 1 2]`) and making overflow evict the NEWEST spans,
+now prevented by serializing `push` under the CALLER's context; and the
+terminal flush RETAINED a batch it could not deliver into a ring that dies
+with the process, uncounted and unnamed — this round's own thesis relocated to
+the last second of the process's life, with the production gate ASSERTING the
+uncounted behaviour. `FlushFinal` now ends what it could not deliver and logs
+the COUNT, which is the only form in which the number survives the exit. Four
+further mutations (M9–M12) pin all of it. A mutation suite can only falsify
+the properties someone thought to assert. **Carried forward:** `droppedSpans` has no recency of
+its own (the WK-5/CHAOS-59/CHAOS-123/CHAOS-124 shape, one plane further in);
+no gauge of buffer occupancy, so an operator sees failures and then drops but
+never "the ring is filling"; the 4096 cap is a chosen number, not a read of a
+memory limit; the CP snapshot's OTLP apply still decides for BOTH exporters
+from the metrics exporter's `Enabled()`; and the span client has
+`MaxIdleConnsPerHost: 2` with no `MaxConnsPerHost` and closes error bodies
+without draining them, so a failing collector costs a connection per interval.
+
 **2026-11-20 — `CHAOS-125` CLAIMED (placeholder, commit one). Domain: the
 INSPECTED TUNNEL'S PRE-HANDSHAKE WINDOW — the interval between the
 `200 Connection Established` and the forged-leaf handshake, on both SSL-inspect
