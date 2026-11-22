@@ -528,6 +528,10 @@ func TestModelConformance_CrashPoints(t *testing.T) {
 				}
 				verdict := reconcileDecision(in)
 				close(r.release)
+				if !reflect.DeepEqual(tokens, v.Expect.CmdsBeforeBlock) {
+					t.Errorf("MODEL/IMPLEMENTATION MISMATCH (commands before the crash point)\n faults: %s\n model : %v\n actual: %v",
+						scriptString(v.Script), v.Expect.CmdsBeforeBlock, tokens)
+				}
 				_ = r.wait(t, opID)
 
 				type obs struct {
