@@ -304,6 +304,27 @@ func noteIncompleteOpen(rec *Recovery, err error) {
 	rec.Skipped = "deferred to the next open of this store, which moves it aside before reading it; this open may be racing a table-open panic that ends the process, so the quarantine is not started now"
 }
 
+// poisonCause is the recorded cause for an abandoned open-attempt marker. It
+// is shared by every branch that reports TriggerPoisonMarker so the text an
+// operator reads cannot drift between them.
+const poisonCause = "a previous start entered the store open and never returned, or returned it incomplete (corrupt table, kill, or out-of-memory)"
+
+// clearPoison removes abandoned open-attempt markers and reports the first
+// removal that failed for a reason other than the marker already being gone.
+// A marker that survives arms a quarantine against whatever store sits at the
+// path next, so a caller that resolved the condition WITHOUT a quarantine must
+// treat a failure here the way it treats a failure of clearFault: refuse to
+// open a replacement rather than leave one to be destroyed (CHAOS-127).
+func clearPoison(markers []string, fsys markerFS) error {
+	var firstErr error
+	for _, m := range markers {
+		if err := fsys.remove(m); err != nil && !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // recoverBeforeOpen acts on the signals a PREVIOUS process left for this store
 // before badger is allowed near it: an abandoned open-attempt marker (it died
 // inside badger.Open) or a fault marker (it contained a memory fault on the
@@ -311,16 +332,59 @@ func noteIncompleteOpen(rec *Recovery, err error) {
 // quarantines through ApplyQuarantine, so the store lock still vetoes a move of
 // a directory a live process holds.
 //
-// A non-nil error means the fault marker could not be cleared after the
-// condition was resolved; the caller must NOT open a replacement (see
-// clearFault).
+// A non-nil error means a breadcrumb could not be cleared after the condition
+// it records was resolved; the caller must NOT open a replacement (see
+// clearFault and clearPoison).
 func recoverBeforeOpen(dir string, rec *Recovery, fsys markerFS) error {
 	poison := AbandonedMarkers(dir)
 	faulted := faultRecorded(dir)
 	switch {
 	case len(poison) > 0:
+		if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+			// The same resolution the fault branch below reaches, for the same
+			// reason: the store these markers accuse is already gone — a
+			// previous start quarantined it and died before clearing them, or
+			// an operator removed the directory to reclaim space — so the
+			// condition they record is resolved and there is nothing left to
+			// move aside.
+			//
+			// Keeping them here is destructive, not merely noisy (CHAOS-127).
+			// ApplyQuarantine reports an absent directory as a SKIP, and a
+			// skip is exactly what makes the clearing at the end of this
+			// function conditional, so without this branch the markers survive
+			// every start at which the directory is absent. The first open
+			// that finds a directory at this path again — badger MkdirAll's a
+			// fresh one, and the admin history-store toggle re-opens within
+			// seconds — then fires TriggerPoisonMarker against that HEALTHY
+			// replacement: ApplyQuarantine moves it aside, and because
+			// MaxQuarantinedCopies is 1, pruneQuarantines deletes the genuine
+			// evidence from the original failure. This package's contract is
+			// to quarantine the evidence, not to overwrite it.
+			//
+			// A failed removal is fatal rather than best-effort, unlike the
+			// clearing at the end of this function: there the quarantine has
+			// already moved the accused directory aside, whereas here a
+			// surviving marker is the only thing standing between the next
+			// start and the destruction of a healthy store, and no other
+			// signal will resolve it.
+			if cerr := clearPoison(poison, fsys); cerr != nil {
+				rec.Trigger = TriggerPoisonMarker
+				rec.Cause = poisonCause
+				return fmt.Errorf("the store this open-attempt marker accuses is gone but the marker could not be cleared, refusing to create a replacement that the next start would quarantine: %w", cerr)
+			}
+			// A fault marker recording the same resolved condition would
+			// quarantine the replacement on its own at the next start.
+			if faulted {
+				if cerr := clearFault(dir, fsys); cerr != nil {
+					rec.Trigger = TriggerPoisonMarker
+					rec.Cause = poisonCause
+					return fmt.Errorf("the store these markers accuse is gone but its fault marker could not be cleared, refusing to create a replacement that the next start would quarantine: %w", cerr)
+				}
+			}
+			return nil
+		}
 		rec.Trigger = TriggerPoisonMarker
-		rec.Cause = "a previous start entered the store open and never returned, or returned it incomplete (corrupt table, kill, or out-of-memory)"
+		rec.Cause = poisonCause
 	case faulted:
 		if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
 			// The faulted store is already gone (an operator removed it, or a
