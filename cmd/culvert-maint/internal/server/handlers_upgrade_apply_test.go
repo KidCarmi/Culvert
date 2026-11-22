@@ -77,6 +77,26 @@ type applyRig struct {
 	// (discriminated by the pinned digest in env).
 	failFn func(argv, env []string) bool
 
+	// dockerModel switches the fake from "running flips on pull" to a model of
+	// what real Docker does (verified against a real daemon, see
+	// pinned_tag_consistency_test.go): `docker tag` moves the fixed tag,
+	// a SUCCESSFUL `compose up -d` makes the container run whatever the tag
+	// points at, and a pull changes neither. Opt-in so the pre-existing tests
+	// keep their coarser view. Guarded by mu.
+	dockerModel bool
+	// tagDigest is the digest culvert/proxy:pinned points at (dockerModel).
+	tagDigest string
+	// containerDown models "no running proxy container" (e.g. `up` recreated
+	// the container but could not start it): `compose ps` reports nothing.
+	containerDown bool
+	// localTagRepoDigest makes image inspect ALSO list the local
+	// `culvert/proxy@sha256:…` entry — what the containerd image store reports
+	// for an image carrying the fixed local tag — sorted before the registry
+	// repo exactly as Docker returns it.
+	localTagRepoDigest bool
+	// onCommand, when set, observes every command at exec time.
+	onCommand func(argv []string)
+
 	stop func()
 }
 
@@ -135,6 +155,9 @@ func (r *applyRig) canned(argv []string) []byte {
 	}
 	switch {
 	case has("ps"):
+		if r.isContainerDown() {
+			return nil // no running proxy → capture fails, as with real compose
+		}
 		return []byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}`)
 	case contains("{{json .Image}}"):
 		return []byte(`"sha256:` + cfg + `"`)
@@ -144,9 +167,48 @@ func (r *applyRig) canned(argv []string) []byte {
 		if r.noPriorDigest && !r.pulled.Load() {
 			return []byte(`[{"RepoDigests":[]}]`) // no rollback target available
 		}
+		if r.localTagRepoDigest {
+			return []byte(`[{"RepoDigests":["culvert/proxy@sha256:` + running + `","` + repo + `@sha256:` + running + `"]}]`)
+		}
 		return []byte(`[{"RepoDigests":["` + repo + `@sha256:` + running + `"]}]`)
 	}
 	return nil
+}
+
+func (r *applyRig) isContainerDown() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.containerDown
+}
+
+// tag returns the digest the fixed tag points at (dockerModel only).
+func (r *applyRig) tag() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tagDigest == "" {
+		return r.digBefore
+	}
+	return r.tagDigest
+}
+
+// modelApply applies a SUCCESSFUL command's effect to the Docker model.
+func (r *applyRig) modelApply(argv []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch {
+	case argvHas(argv, "tag"):
+		for _, a := range argv {
+			if d := digestRE.FindString(a); d != "" {
+				r.tagDigest = strings.TrimPrefix(d, "sha256:")
+				return
+			}
+		}
+	case argvHas(argv, "up"):
+		if r.tagDigest != "" {
+			r.runningDigest = r.tagDigest
+		}
+		r.containerDown = false
+	}
 }
 
 // currentRunning returns the digest the fake stack is currently running.
@@ -249,10 +311,15 @@ func startApplyRig(t *testing.T) *applyRig {
 			// view from the pulled ref (P1.4: the digest is in the argv,
 			// not an env var), so a rollback that pulls the prior digest
 			// flips the running view back for later captures.
+			if rig.onCommand != nil {
+				rig.onCommand(cmd.Args)
+			}
 			for _, a := range cmd.Args {
 				if a == "pull" {
 					rig.pulled.Store(true)
-					rig.setRunning(cmd.Args)
+					if !rig.dockerModel {
+						rig.setRunning(cmd.Args)
+					}
 				}
 			}
 			return nil
@@ -263,6 +330,9 @@ func startApplyRig(t *testing.T) *applyRig {
 			}
 			if rig.shouldFail(cmd.Args) {
 				return errors.New("simulated non-zero exit")
+			}
+			if rig.dockerModel {
+				rig.modelApply(cmd.Args)
 			}
 			return nil
 		},
@@ -320,7 +390,7 @@ func applyHealthClient(rig *applyRig) *http.Client {
 	return &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			status := 200
-			if rig.healthFail.Load() || rig.unhealthyDigests[rig.currentRunning()] {
+			if rig.healthFail.Load() || rig.isContainerDown() || rig.unhealthyDigests[rig.currentRunning()] {
 				status = 503
 			}
 			return &http.Response{
