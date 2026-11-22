@@ -88,8 +88,21 @@ func (s *Server) retireSupersededRecords(byOpID, actor string) []string {
 		if rec.OpID == byOpID || s.opts.Ops.IsRunning(rec.OpID) {
 			continue
 		}
-		now := time.Now().UTC()
 		desc := DescribeInterrupted(rec, s.opts.Cfg.ProxyRepo)
+		// An image change establishes nothing about the DATA directory. The
+		// reasoning above is image-state reasoning throughout — the tag and
+		// the container are both on a known image — and an interrupted data
+		// rollback is not a claim about either: its record says /data may be
+		// half-restored and carries the only durable pointer to the recovery
+		// procedure (actionData). Retiring it on a later upgrade or image
+		// rollback cleared /v1/status and took that instruction with it, while
+		// the directory was exactly as the interrupted restore left it.
+		// Nothing but a repaired data directory makes that record untrue, and
+		// the agent does not repair one, so this class is never retired here.
+		if desc.DockerState == DockerStateDataIndeterminate {
+			continue
+		}
+		now := time.Now().UTC()
 		params := desc.AuditParams()
 		params["superseded_by"] = byOpID
 		if werr := s.opts.Audit.Write(audit.Event{

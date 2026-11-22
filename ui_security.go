@@ -152,7 +152,13 @@ func apiAlertsWebhooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		auditEvent(r, "alert.webhook.update", id, "")
+		// Origin only, for the create arm's reason — and recorded at all
+		// because a PUT may REPOINT the webhook: a blank detail left the one
+		// mutation that changes where alerts go as the only one with no
+		// destination in the viewer-readable audit log. A URL-less PUT (the
+		// store then preserves the existing URL) records nothing rather than
+		// an empty origin that would read as "repointed to nowhere".
+		auditEvent(r, "alert.webhook.update", id, alerts.URLOrigin(h.URL))
 		jsonOK(w, map[string]any{"ok": true})
 
 	case http.MethodDelete:

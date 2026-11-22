@@ -201,6 +201,14 @@ type clamavSigRecord struct {
 	// storage_health.go both call out by name.
 	alerted bool
 
+	// sawStale records that this episode was OBSERVED stale at least once,
+	// whether or not anything was paged for it — the same split the two feed
+	// planes carry in latchOncePerEpisodeOnDelivery. alerted is set only by a
+	// DISPATCHED alert, so with no webhook configured (the default posture) it
+	// stays false for the whole episode; the "current again" line below is
+	// gated on this instead. Cleared wherever alerted is.
+	sawStale bool
+
 	logAt      time.Time
 	suppressed int64
 }
@@ -340,6 +348,7 @@ func noteClamAVSignatureObservation(v clamav.Version, ok bool) {
 	)
 	switch {
 	case snap.Stale:
+		clamavSigHealth.sawStale = true
 		if !clamavSigHealth.alerted {
 			// SEC-CLAMSIG-STALE-LATCH-1 (the sibling of
 			// SEC-BLFEED-STALE-LATCH-1 and SEC-TFEED-STALE-LATCH-1, the rule
@@ -390,9 +399,10 @@ func noteClamAVSignatureObservation(v clamav.Version, ok bool) {
 		// that did not happen. Skew is an inability to measure, exactly like
 		// Unknown, and neither clears nor fires. The episode survives until
 		// the clocks agree and a real age can be read.
-		recovered = clamavSigHealth.alerted
+		recovered = clamavSigHealth.sawStale
 		suppressed = clamavSigHealth.suppressed
 		clamavSigHealth.alerted = false
+		clamavSigHealth.sawStale = false
 		clamavSigHealth.logAt = time.Time{}
 		clamavSigHealth.suppressed = 0
 	}
@@ -546,6 +556,7 @@ func resetClamAVSigHealthForTest() {
 	clamavSigHealth.dbTimeKnown = false
 	clamavSigHealth.observedAt = time.Time{}
 	clamavSigHealth.alerted = false
+	clamavSigHealth.sawStale = false
 	clamavSigHealth.logAt = time.Time{}
 	clamavSigHealth.suppressed = 0
 	clamavSigHealth.mu.Unlock()

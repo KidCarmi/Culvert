@@ -1232,7 +1232,7 @@ func (as *Store) deliverAttemptContext(parent context.Context, h Webhook, payloa
 	// attempt — see deliveryClient).
 	resp, err := deliveryClient.Do(req)
 	if err != nil {
-		obs.Printf("Alert webhook %q: delivery error: %s", h.Name, deliveryErrText(err))
+		obs.Printf("Alert webhook %q: delivery error: %s", obs.Sanitize(h.Name), deliveryErrText(err))
 		record.Error = deliveryErrText(err)
 		as.RecordDelivery(record)
 		return false

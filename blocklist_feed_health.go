@@ -188,6 +188,14 @@ type blocklistFeedHealthRecord struct {
 	// configuration (noteBlocklistFeedsRemoved) — never by elapsed time.
 	alerted bool
 
+	// sawStale records that this episode was OBSERVED stale at least once,
+	// whether or not anything was paged for it. alerted cannot answer that
+	// since it is set only by a DISPATCHED alert, and with no webhook
+	// configured — the default posture — it stays false for the whole
+	// episode; the two episode-ended log lines below are gated on this
+	// instead. Cleared wherever alerted is.
+	sawStale bool
+
 	// episode is the alert-episode generation, bumped under mu wherever the
 	// episode ends (the clears of alerted above, and a re-arm). The staleness
 	// verdict is read outside mu, and latchOncePerEpisodeOnDelivery latches
@@ -251,6 +259,7 @@ func noteBlocklistFeedConfigured() {
 	blocklistFeedHealth.armed = true
 	blocklistFeedHealth.startedAt = blocklistFeedNow()
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.sawStale = false
 	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
@@ -301,15 +310,16 @@ func noteBlocklistFeedRoundRecovered() {
 		return
 	}
 	blocklistFeedHealth.mu.Lock()
-	wasAlerted := blocklistFeedHealth.alerted
+	wasStale := blocklistFeedHealth.sawStale
 	suppressed := blocklistFeedHealth.suppressed
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.sawStale = false
 	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
 	blocklistFeedHealth.mu.Unlock()
 
-	if wasAlerted && logger != nil {
+	if wasStale && logger != nil {
 		logger.Printf("BlocklistFeed: every auto-synced feed is fresh again (%d suppressed failure log lines during the episode)", suppressed)
 	}
 }
@@ -331,14 +341,15 @@ func noteBlocklistFeedRoundRecovered() {
 // again on its next failed round, with a Detail describing the current set.
 func noteBlocklistFeedsRemoved() {
 	blocklistFeedHealth.mu.Lock()
-	wasAlerted := blocklistFeedHealth.alerted
+	wasStale := blocklistFeedHealth.sawStale
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.sawStale = false
 	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
 	blocklistFeedHealth.mu.Unlock()
 
-	if wasAlerted && logger != nil {
+	if wasStale && logger != nil {
 		logger.Printf("BlocklistFeed: stale-feed alert episode ended because feeds were removed from the configuration; any feed that is still stale alerts again on its next failed round")
 	}
 }
@@ -390,7 +401,7 @@ func evaluateBlocklistFeedStaleness() {
 	// drift: see latchOncePerEpisodeOnDelivery. snap.episode makes it skip if
 	// a recovery or a feed removal ended the episode after the verdict above
 	// was read, instead of latching an episode that is already over.
-	latchOncePerEpisodeOnDelivery(&blocklistFeedHealth.mu, &blocklistFeedHealth.alerted, &blocklistFeedHealth.episode, snap.episode,
+	latchOncePerEpisodeOnDelivery(&blocklistFeedHealth.mu, &blocklistFeedHealth.alerted, &blocklistFeedHealth.sawStale, &blocklistFeedHealth.episode, snap.episode,
 		func() bool { return fireBlocklistFeedStaleAlert(detail) })
 }
 
@@ -758,6 +769,7 @@ func resetBlocklistFeedHealthForTest() {
 	blocklistFeedHealth.armed = false
 	blocklistFeedHealth.startedAt = time.Time{}
 	blocklistFeedHealth.alerted = false
+	blocklistFeedHealth.sawStale = false
 	blocklistFeedHealth.episode++
 	blocklistFeedHealth.logAt = time.Time{}
 	blocklistFeedHealth.suppressed = 0
