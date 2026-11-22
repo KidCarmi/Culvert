@@ -301,10 +301,13 @@ case "$DISTRO_FAMILY" in
     done
     ;;
   amzn)
-    if rpm -q docker &>/dev/null; then
-      info "Removing Amazon Linux docker package..."
-      sudo yum remove -y docker 2>/dev/null || true
-    fi
+    # Nothing to remove. The distro `docker` package IS the engine this script
+    # installs on Amazon Linux (`yum install -y docker` below — there is no
+    # Docker CE repo for amzn), so removing it here uninstalled the working
+    # engine on every re-run, stopping every Culvert container, and left the
+    # install step to put it back — which also needs a fresh api.github.com
+    # lookup for the Compose plugin and aborts the run if that fails.
+    info "Amazon Linux — keeping the distro docker package (it is the engine this script installs)"
     ;;
   arch)
     info "Arch Linux — skipping package removal (pacman handles conflicts)"

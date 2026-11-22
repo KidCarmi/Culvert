@@ -690,6 +690,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Re-running `scripts/install.sh` on Amazon Linux no longer uninstalls the
+  Docker Engine the first run installed.** On that family the install step is
+  `yum install -y docker` — the distro package is the engine Culvert runs on —
+  but the "Cleaning up old Docker installations" step ran `yum remove -y
+  docker` whenever that package was present, so every re-run removed the
+  working engine from under the running stack and relied on the install step
+  to put it back. That step also needs a fresh `api.github.com` lookup for the
+  Compose plugin, and a failed lookup (the unauthenticated limit is per source
+  IP) aborts the run under `set -e` after the engine was already removed. The
+  step no longer removes anything on Amazon Linux. New
+  `install_script_amzn_rerun_keeps_docker_test.go` drives the script's own
+  cleanup and install arms through a first run and a re-run; it fails before
+  the change and passes after. Verified against package-manager shims, not a
+  live Amazon Linux host. Same class as the RHEL/Fedora `containerd.io` fix
+  below.
 - **Automatic rollback after a failed upgrade works on hosts using Docker's
   containerd image store.** On such a host Docker reports two references for
   the running proxy image: the registry one (`ghcr.io/kidcarmi/culvert@sha256:…`)
