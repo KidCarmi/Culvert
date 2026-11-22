@@ -15,6 +15,7 @@ import (
 
 	"github.com/KidCarmi/Culvert/internal/mcp/events"
 	evmodel "github.com/KidCarmi/Culvert/internal/mcp/events/model"
+	"github.com/KidCarmi/Culvert/internal/mcp/events/qualarchive"
 )
 
 // writeMCPTelemetryMetrics appends the culvert_mcp_* telemetry series. It is called
@@ -71,7 +72,7 @@ func writeMCPSpoolMetrics(b *strings.Builder, d mcpDomainHealth) {
 	b.WriteString("# TYPE culvert_mcp_spool_quota_bytes gauge\n")
 	for _, part := range gatewayPartitions {
 		ps := d.Spool.Partitions[part]
-		p := telemPartitionName(part)
+		p := qualarchive.PartitionName(part)
 		fmt.Fprintf(b, "culvert_mcp_spool_bytes{capability=\"gateway\",partition=%q} %d\n", p, ps.Bytes)
 		fmt.Fprintf(b, "culvert_mcp_spool_records{capability=\"gateway\",partition=%q} %d\n", p, ps.Records)
 		fmt.Fprintf(b, "culvert_mcp_spool_quota_bytes{capability=\"gateway\",partition=%q} %d\n", p, ps.Quota)
@@ -83,7 +84,7 @@ func writeMCPSpoolMetrics(b *strings.Builder, d mcpDomainHealth) {
 
 // writeMCPExportMetrics emits archive exporter counters + per-partition lag.
 func writeMCPExportMetrics(b *strings.Builder, rt *telemetryRuntime) {
-	es := rt.exporter.stats()
+	es := rt.exporter.Stats()
 	b.WriteString("# HELP culvert_mcp_export_batches_total MCP archive export batches by result.\n")
 	b.WriteString("# TYPE culvert_mcp_export_batches_total counter\n")
 	fmt.Fprintf(b, "culvert_mcp_export_batches_total{capability=\"gateway\",result=\"ok\"} %d\n", es.BatchesOK)
@@ -104,7 +105,7 @@ func writeMCPExportMetrics(b *strings.Builder, rt *telemetryRuntime) {
 	b.WriteString("# HELP culvert_mcp_export_lag MCP export lag in sequence space per partition.\n")
 	b.WriteString("# TYPE culvert_mcp_export_lag gauge\n")
 	for _, part := range gatewayPartitions {
-		fmt.Fprintf(b, "culvert_mcp_export_lag{capability=\"gateway\",partition=%q} %d\n", telemPartitionName(part), rt.exportLag(part))
+		fmt.Fprintf(b, "culvert_mcp_export_lag{capability=\"gateway\",partition=%q} %d\n", qualarchive.PartitionName(part), rt.exportLag(part))
 	}
 }
 
