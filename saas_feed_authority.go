@@ -40,7 +40,6 @@ package main
 // restart (ambiguous ⇒ wait for authority) rather than silently composing without them.
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -165,32 +164,23 @@ func encodeSaaSFeedAuthorityRecord(r saasFeedAuthorityRecord) ([]byte, error) {
 
 // decodeSaaSFeedAuthorityRecord strictly decodes + fully validates one canonical record.
 func decodeSaaSFeedAuthorityRecord(data []byte) (saasFeedAuthorityRecord, error) {
-	if len(data) == 0 {
-		return saasFeedAuthorityRecord{}, errAuthEmpty
-	}
-	if len(data) > maxSaaSFeedAuthorityRecordBytes {
-		return saasFeedAuthorityRecord{}, fmt.Errorf("%w: %d > %d", errAuthOversize, len(data), maxSaaSFeedAuthorityRecordBytes)
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	var r saasFeedAuthorityRecord
-	if err := dec.Decode(&r); err != nil {
-		return saasFeedAuthorityRecord{}, fmt.Errorf("saas feed authority: decode: %w", err)
-	}
-	if dec.More() {
-		return saasFeedAuthorityRecord{}, errAuthTrailing
-	}
-	canon, err := floorCanonicalBytes(r)
+	r, err := noderecord.Decode[saasFeedAuthorityRecord](data, saasFeedAuthorityEnvelope())
 	if err != nil {
 		return saasFeedAuthorityRecord{}, err
-	}
-	if !bytes.Equal(canon, data) {
-		return saasFeedAuthorityRecord{}, errAuthNoncanonical
 	}
 	if err := validateSaaSFeedAuthorityRecord(r); err != nil {
 		return saasFeedAuthorityRecord{}, err
 	}
 	return r, nil
+}
+
+// saasFeedAuthorityEnvelope is the authority record's size bound and envelope refusals.
+func saasFeedAuthorityEnvelope() noderecord.Envelope {
+	return noderecord.Envelope{
+		Name: "saas feed authority", MaxBytes: maxSaaSFeedAuthorityRecordBytes,
+		Empty: errAuthEmpty, Oversize: errAuthOversize,
+		Trailing: errAuthTrailing, Noncanonical: errAuthNoncanonical,
+	}
 }
 
 // validateSaaSFeedAuthorityFields checks every semantic field EXCEPT the crc32c value.
