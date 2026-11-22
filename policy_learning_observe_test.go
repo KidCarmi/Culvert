@@ -242,6 +242,12 @@ func TestObservationE2E_CONNECTTunnel(t *testing.T) {
 		t.Fatalf("CONNECT: %q %v", line, err)
 	}
 	conn.Close()
+	// The relay releases its activeConns slot on a goroutine this test does not
+	// join. Unawaited, that release landed in whichever test ran next: the
+	// CHAOS-56 drain control sets activeConns to 1 and saw it drop to 0 under it.
+	if !waitForActiveConnsZero(t, 5*time.Second) {
+		t.Fatalf("the CONNECT tunnel still holds activeConns=%d 5s after the client closed", getActiveConns())
+	}
 	_ = eng.Close()
 
 	hostOnly, _, _ := net.SplitHostPort(target)
