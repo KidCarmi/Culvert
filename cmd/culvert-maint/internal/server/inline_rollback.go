@@ -24,7 +24,15 @@ const auditKindRollback = "upgrades.apply:rollback"
 // (repo@sha256:<digest> + image_allowlist). On any ambiguity it records a
 // priorCaptureReason and leaves priorRef empty so rollback is skipped
 // rather than guessing.
-func (s *Server) deriveRollbackTarget(acc *upgradeApplyAccumulator, priorRef string) {
+//
+// candidates are the running image's RepoDigests (sorted, as captured). They
+// all name the SAME image — the distinct-digest check above the gate guarantees
+// it — so the target is the first one that passes the gate, not blindly the
+// first one. The containerd image store lists a `culvert/proxy@sha256:…` entry
+// for the image carrying the fixed local tag, and it sorts before the registry
+// repo: taking element 0 unconditionally would fail the allowlist on that
+// local-only entry and silently disable inline rollback on every such host.
+func (s *Server) deriveRollbackTarget(acc *upgradeApplyAccumulator, candidates []string) {
 	distinct := uniqueDigests(acc.priorDigests)
 	switch {
 	case len(distinct) == 0:
@@ -32,12 +40,14 @@ func (s *Server) deriveRollbackTarget(acc *upgradeApplyAccumulator, priorRef str
 	case len(distinct) > 1:
 		acc.priorCaptureReason = "ambiguous_prior_digest"
 	default:
-		if rollbackDigestRefRE.MatchString(priorRef) &&
-			s.opts.Cfg.ImageAllowlist != nil && s.opts.Cfg.ImageAllowlist.MatchString(priorRef) {
-			acc.priorRef = priorRef
-		} else {
-			acc.priorCaptureReason = "no_prior_digest"
+		for _, ref := range candidates {
+			if rollbackDigestRefRE.MatchString(ref) &&
+				s.opts.Cfg.ImageAllowlist != nil && s.opts.Cfg.ImageAllowlist.MatchString(ref) {
+				acc.priorRef = ref
+				return
+			}
 		}
+		acc.priorCaptureReason = "no_prior_digest"
 	}
 }
 
@@ -165,6 +175,11 @@ func (acc *upgradeApplyAccumulator) finalRunningDigests(racc *rollbackAccumulato
 			return []string{d}
 		}
 		return racc.runningAfterDigests
+	case acc.restartLeftPrior:
+		// The upgrade's `up` failed BEFORE recreating the container (verified
+		// by a post-failure capture) and no rollback restart replaced it since
+		// → the prior image never stopped running.
+		return uniqueDigests(acc.priorDigests)
 	case acc.rollbackAttempted:
 		// Rollback pull failed before any restart → the unhealthy NEW
 		// image is still running.
