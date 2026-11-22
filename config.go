@@ -128,8 +128,10 @@ type FileConfig struct {
 	SyslogFormat string `yaml:"syslog_format"`
 
 	// OTLPEndpoint is the URL of an OpenTelemetry Collector OTLP/HTTP receiver.
-	// Metrics are pushed as JSON to POST {endpoint}/v1/metrics every 15s.
-	// Example: "http://otel-collector:4318"
+	// Metrics are pushed as JSON to POST {endpoint}/v1/metrics and request
+	// spans to POST {endpoint}/v1/traces, every 15s. The exporters dial
+	// through the SSRF guard, so a private address is refused.
+	// Example: "https://otlp.example.com:4318"
 	OTLPEndpoint string `yaml:"otlp_endpoint"`
 
 	// UIAllowIPs is an optional list of CIDRs/IPs allowed to access the admin

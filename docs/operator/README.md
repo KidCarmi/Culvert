@@ -96,6 +96,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 - [`tunnel-drain-on-shutdown.md`](tunnel-drain-on-shutdown.md) — draining long-lived tunnels (WebSocket, SOCKS5, CONNECT) on shutdown.
 - [`secure-upload.md`](secure-upload.md) — secure upload of support bundles to TAC.
 - [`siem-feed-delivery.md`](siem-feed-delivery.md) — SIEM / syslog feed delivery health for audit events and request-log entries (CHAOS-81).
+- [`otlp-export.md`](otlp-export.md) — OpenTelemetry (OTLP) metrics and trace export: what is sent, the public-address requirement, cluster behavior, span loss accounting, and troubleshooting.
 
 ## MCP Agent Security Gateway (ADR-0024, disabled by default)
 

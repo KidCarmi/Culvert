@@ -358,7 +358,7 @@ func parseFlags(s *startupState) {
 	s.requestLogMaxMB = flag.Int("request-log-max-mb", 0, "Request log rotation size in MB (default 100; overrides config)")
 	s.syslogAddr = flag.String("syslog", "", "Remote syslog addr e.g. udp://10.0.0.1:514 or tcp://host:601")
 	s.syslogFormat = flag.String("syslog-format", "", "Syslog message format: rfc3164 (default) or rfc5424")
-	s.otlpEndpoint = flag.String("otlp-endpoint", "", "OTLP/HTTP endpoint for metrics export (e.g. http://otel-collector:4318)")
+	s.otlpEndpoint = flag.String("otlp-endpoint", "", "OTLP/HTTP collector base URL for metrics and traces export (e.g. https://otlp.example.com:4318); a collector at a private address is refused")
 	s.uiAllowIP = flag.String("ui-allow-ip", "", "Comma-separated CIDRs/IPs allowed to access admin UI (empty=all)")
 	s.trustedProxyCIDRs = flag.String("trusted-proxy-cidrs", "", "Comma-separated CIDRs/IPs of reverse proxies whose X-Forwarded-For is trusted for admin-UI client-IP (empty=never trust XFF)")
 	s.sessionHrs = flag.Int("session-timeout", 0, "Admin UI session lifetime in hours (1-168, 0=default 8h)")

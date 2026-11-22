@@ -40,7 +40,7 @@ type SnapshotFunc func(nowUnixNano string) []Metric
 // MetricsExporter pushes metrics to an OTLP/HTTP endpoint.
 type MetricsExporter struct {
 	mu       sync.RWMutex
-	endpoint string            // e.g. "http://otel-collector:4318"
+	endpoint string            // e.g. "https://otlp.example.com:4318" (a private address is refused at dial)
 	headers  map[string]string // custom headers (auth, etc.)
 	interval time.Duration
 	client   *http.Client
