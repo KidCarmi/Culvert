@@ -279,6 +279,35 @@ func TestManager_MarkAllInterruptedMarksQueryable(t *testing.T) {
 	}
 }
 
+// TestManager_MarkAllInterruptedCarriesJournalFacts: the marked op keeps the
+// time it was really started and the journal's account of how far it got; its
+// finish time is the mark, so it stays queryable for a full retention window
+// after every start that finds it.
+func TestManager_MarkAllInterruptedCarriesJournalFacts(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	m := NewManager(func() time.Time { return now })
+	started := now.Add(-3 * time.Hour)
+	res := map[string]interface{}{"interrupted": map[string]interface{}{"journal_phase": "restarting"}}
+	m.MarkAllInterrupted([]InterruptedOp{{OpID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Kind: KindUpgradeApply, Actor: "uid=1000", Started: started, Result: res}})
+	op := m.Get("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	if op == nil {
+		t.Fatal("not queryable")
+	}
+	if !op.Started.Equal(started) {
+		t.Errorf("started_at = %s, want the journal's %s", op.Started, started)
+	}
+	if op.Finished == nil || !op.Finished.Equal(now) {
+		t.Errorf("finished_at = %v, want the time of the mark %s", op.Finished, now)
+	}
+	inner, _ := op.Result["interrupted"].(map[string]interface{}) //nolint:errcheck // absent → nil, asserted below
+	if inner["journal_phase"] != "restarting" {
+		t.Errorf("result = %#v", op.Result)
+	}
+	if op.State != StateFailed || op.FailureReason != string(ReasonAgentRestartInterrupted) {
+		t.Errorf("state=%q reason=%q", op.State, op.FailureReason)
+	}
+}
+
 func TestIsJournaled(t *testing.T) {
 	for _, k := range []string{KindUpgradeApply, KindRollbackCreate} {
 		if !IsJournaled(k) {

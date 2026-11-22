@@ -306,7 +306,8 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), s.opts.Cfg.OperationTimeout)
 		defer cancel()
-		ops.Run(ctx, deps, op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, stages, cfg.resultFn)
+		ops.Run(ctx, deps, op.ID, kind, peer.String(), paramsForAudit, idempotencyKey, stages,
+			s.resultFnRetiringInterrupted(op.ID, peer.String(), &cfg))
 	})
 	return op, false, nil
 }
@@ -398,12 +399,23 @@ type startCfg struct {
 	// events (used by upgrades.apply for the upgrades.apply:rollback
 	// audit entries).
 	onOpID func(opID string)
+	// retiresInterrupted, when set, is consulted once the op has SUCCEEDED. If
+	// it returns true the op has re-pinned the fixed tag and passed the health
+	// gate, so journal records left by earlier, interrupted operations describe
+	// a state that no longer exists and are retired (journal_retire.go).
+	retiresInterrupted func() bool
 }
 
 type startOpt func(*startCfg)
 
 // withResultFn attaches a structured-result computer to the op.
 func withResultFn(fn ops.ResultFn) startOpt { return func(c *startCfg) { c.resultFn = fn } }
+
+// withRetiresInterrupted marks the op as one whose success establishes a new
+// health-gated image state. establishes is evaluated after the stages ran.
+func withRetiresInterrupted(establishes func() bool) startOpt {
+	return func(c *startCfg) { c.retiresInterrupted = establishes }
+}
 
 // withOpIDHook delivers the admitted op_id to the caller before stages run.
 func withOpIDHook(fn func(opID string)) startOpt { return func(c *startCfg) { c.onOpID = fn } }

@@ -724,6 +724,33 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   use the exact-name `user_in_docker_group` helper `scripts/install.sh`
   already uses. Pinned by `install_runner_docker_group_membership_test.go`.
 
+- **An upgrade or rollback cut short by a maintenance-agent crash is now
+  reported in full, and stops being reported once it has been dealt with
+  (ADR-0061, contracts `AGT-004`/`AGT-005`).** After the agent died
+  mid-operation, its next start marked the operation
+  `failed(agent_restart_interrupted)` and nothing more: no phase, no audit
+  entry, no rollback reference, no mention in `GET /v1/status`, a `started_at`
+  equal to the restart time — and, because the journal record was never
+  removed, the same operation was announced as a new failure at every later
+  start, long after the appliance had been repaired. A kill between
+  `docker tag` and `compose up` leaves `culvert/proxy:pinned` on the new image
+  while the container runs the old one, and nothing told the operator.
+  The operation now carries `result.interrupted` (phase reached; whether
+  Docker may have changed; the validated target and previous image
+  references; what to do), the audit log gets one terminal entry, and
+  `GET /v1/status` lists `interrupted_operations` from the journal on every
+  request together with a live `pinned_tag.matches_running` and
+  `running_image`. The record is retired, with an audit entry, when a later
+  upgrade or image rollback succeeds after re-pinning the tag and passing the
+  health gate; an already-current upgrade, which re-pins nothing, does not
+  retire it. **Startup still runs no Docker command**: the agent does not roll
+  back or complete an interrupted upgrade by itself (`AGT-900` remains open).
+  Image references from the on-disk journal are returned only after the
+  repo-bound digest check, and the journal file name, not the `op_id` inside
+  it, identifies a record. The journal gains three optional keys an older
+  agent ignores. Operator steps:
+  `docs/operator/release-management-agent.md`.
+
 - **A GeoIP database that could not be opened at startup is now loaded
   automatically once it becomes readable, without a restart.** When the
   configured `-geoip-db` / `proxy.geoip_db` file was missing, unreadable or

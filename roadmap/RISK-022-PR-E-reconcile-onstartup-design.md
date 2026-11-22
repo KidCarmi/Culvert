@@ -249,6 +249,13 @@ command; the cost of a default-on bug is a fleet.
 | Phase progression `captured→resolved→pulled→restarting→restarted→verified`, folding target/prior digests; **fail-closed `PhaseRestarting` write-ahead barrier** before the tag advance (re-creates a missing record) | `journal_phases.go` | #754 |
 | Structural manifest-digest selection (host-platform, fail-closed) — the T1.2 "part 1" | `manifest_digest.go` | #751 |
 
+| Phase A reporting completed: `result.interrupted` on the marked op, one audit entry, `GET /v1/status` `interrupted_operations` + `pinned_tag`, record retired by a later successful image change. `validateReconcileRefs` gates what is shown. Startup still runs no docker command. | `main.go::initJournal`, `server/interrupted.go`, `server/journal_retire.go`, `status/status.go` | ADR-0061 |
+
+ADR-0061 also records two findings E3 must absorb before it is built: the
+journaled `TargetImageID` is captured unverified (the decision can adopt the
+prior image as the target), and an already-current apply neither re-pins the
+tag nor health-gates.
+
 **PR-E is Phase B only** — the boot-time *reconcile* that acts on the records
 Phase A (`MarkAllInterrupted`) already surfaces. Phase A stays as-is.
 

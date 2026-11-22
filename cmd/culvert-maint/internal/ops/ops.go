@@ -617,6 +617,12 @@ type InterruptedOp struct {
 	OpID  string
 	Kind  string
 	Actor string
+	// Started is when the op was originally admitted, from the journal. Zero
+	// falls back to the time of the mark.
+	Started time.Time
+	// Result is attached to the op as its result: what the journal knows about
+	// how far the op got. May be nil.
+	Result map[string]interface{}
 }
 
 // MarkAllInterrupted registers each orphaned op (recovered from the on-disk
@@ -637,16 +643,23 @@ func (m *Manager) MarkAllInterrupted(orphans []InterruptedOp) int {
 		if _, exists := m.active[o.OpID]; exists {
 			continue
 		}
-		finished := now
+		// Finished stays the time of THIS mark, not of the first detection: the
+		// op is reaped a retention window after it finished, and an op found
+		// again by a later start must stay queryable for a full window again.
+		started, finished := now, now
+		if !o.Started.IsZero() {
+			started = o.Started
+		}
 		m.active[o.OpID] = &Op{
 			ID:            o.OpID,
 			Kind:          o.Kind,
 			Actor:         o.Actor,
 			State:         StateFailed,
 			FailureReason: string(ReasonAgentRestartInterrupted),
-			Started:       now,
+			Started:       started,
 			Finished:      &finished,
 			Progress:      []Stage{},
+			Result:        o.Result,
 		}
 		n++
 	}

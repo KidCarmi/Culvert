@@ -527,6 +527,17 @@
 - **Recommendation:** persist a minimal op journal (op id + phase + target/prior digest via
   `AtomicWrite`) and make `MarkAllInterrupted()` reconcile Docker (running digest vs journal) on
   restart, resuming or rolling back. **Complexity M.** Acceptance test: `FAILURE-INJECTION-TEST-PLAN.md` T3.
+- **Update 2026-11-22 (still OPEN):** the journal and the fail-closed write-ahead barrier have
+  shipped, and startup now reports an interrupted operation durably — phase reached, whether Docker
+  may have changed, the rollback reference, a live tag-versus-container comparison in
+  `GET /v1/status`, one audit entry — and retires the record when a later image change succeeds
+  ([ADR-0061](../adr/0061-maintenance-agent-crash-journal-lifecycle.md), contracts `AGT-004`/`AGT-005`).
+  The "found" text above is therefore out of date on two points: the operation IS queryable and
+  there IS a journal. The risk itself is unchanged: startup still runs no Docker command, so an
+  appliance killed between retag and `up` keeps the fixed tag ahead of the running container until
+  an operator re-submits the upgrade or rolls back. Boot-time reconcile remains unbuilt and gated on
+  owner sign-off (`AGT-900`; `roadmap/RISK-022-PR-E-reconcile-onstartup-design.md`). T3 is half met:
+  (a) queryable — yes; (b) reconciled without manual action — no.
 
 ## RISK-012 — Username-keyed lockout (DoS) · LOW · ✅ CLOSED 2026-07-05
 - **Was:** `internal/lockout` keyed the login lockout by username ONLY, so any remote party who
