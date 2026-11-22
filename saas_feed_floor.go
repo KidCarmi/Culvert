@@ -27,9 +27,7 @@ package main
 // directory enumeration). Freshness (which IS clock-bound) lands with F3b-2.
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -177,36 +175,26 @@ func encodeFloorRecord(rec floorRecord) ([]byte, error) {
 // whitespace, HTML escaping, duplicate keys, alternate scalar encodings), bad
 // schema/protocol/feed/version/time/generation_id/digests, and crc mismatch.
 func decodeFloorRecord(data []byte) (floorRecord, error) {
-	if len(data) == 0 {
-		return floorRecord{}, errFloorEmpty
-	}
-	if len(data) > maxFloorRecordBytes {
-		return floorRecord{}, fmt.Errorf("%w: %d > %d", errFloorOversize, len(data), maxFloorRecordBytes)
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	var rec floorRecord
-	if err := dec.Decode(&rec); err != nil {
-		return floorRecord{}, fmt.Errorf("saas feed floor: decode: %w", err)
-	}
-	if dec.More() {
-		return floorRecord{}, errFloorTrailing
-	}
-	// Canonical byte-equality is the belt that rejects reordering, whitespace, HTML
-	// escaping, duplicate keys (a dup makes the input longer than canonical), and
-	// alternate scalar encodings — it re-encodes the decoded struct and requires an
-	// exact match with the input.
-	canon, err := floorCanonicalBytes(rec)
+	// The envelope steps (and the canonical byte-equality belt that rejects
+	// reordering, whitespace, HTML escaping, duplicate keys and alternate scalar
+	// encodings) are noderecord.Decode's; the field and crc checks are this file's.
+	rec, err := noderecord.Decode[floorRecord](data, floorEnvelope())
 	if err != nil {
 		return floorRecord{}, err
-	}
-	if !bytes.Equal(canon, data) {
-		return floorRecord{}, errFloorNoncanonical
 	}
 	if err := validateFloorRecord(rec); err != nil {
 		return floorRecord{}, err
 	}
 	return rec, nil
+}
+
+// floorEnvelope is the floor record's size bound and envelope refusals.
+func floorEnvelope() noderecord.Envelope {
+	return noderecord.Envelope{
+		Name: "saas feed floor", MaxBytes: maxFloorRecordBytes,
+		Empty: errFloorEmpty, Oversize: errFloorOversize,
+		Trailing: errFloorTrailing, Noncanonical: errFloorNoncanonical,
+	}
 }
 
 // validateFloorFields checks every semantic field EXCEPT the crc32c value (which the

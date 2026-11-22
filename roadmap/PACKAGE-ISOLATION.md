@@ -1019,6 +1019,76 @@ added once they merge; this section sits at a third anchor neither touches):
   three files are mostly process-global atomics, log throttles and HTTP
   writers, so only the pure bound predicates are candidates.
 
+### IM-028 saas-feed node-local record envelope decoder (ORGANIZE, 2026-11-22, main `ef9431189`)
+
+Task record (open #1992 edits the task table and appends at the end of this
+file, #1993 inserts before the IM-023 section and #1997 before the IM-019
+section, so the IM-028 row is added once they merge; this section sits at a
+fourth anchor none of them touches). The number IM-027 is taken by the
+retry-sleep lead that open #1997 records.
+
+| Field | Value |
+|---|---|
+| ID / task | IM-028: the envelope steps repeated in `decodeFloorRecord`, `decodeActivationRecord` and `decodeSaaSFeedAuthorityRecord` (empty, size bound, strict decode, trailing data, canonical byte equality) → `noderecord.Decode` in `internal/urlcatfeed/noderecord` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR changes a `saas_feed_*.go` file or `internal/urlcatfeed`; checked against all 14 open PRs' branches on 2026-11-22) |
+| Evidence | ADR-0059 (amends one sentence of ADR-0053); 2 exported names added (`Decode`, `Envelope`), package total 6; the three root decoders keep their names, sentinels, bounds and field validation, so no caller and no existing test is edited; a 17,384-input verdict table over the three decoders whose digests and per-class counts were captured from main before the bind; a differential test over more than 20,000 inputs against a frozen copy of the pre-move body; 14 mutation checks, each failing a test |
+| Risks | these functions decide which bytes on disk are a rollback floor, an activation record and an authority record. Every verdict is pinned per record kind, including the inclusive size bound and the trailing-before-canonical order |
+| PR | #2001 |
+| Next action | review PR |
+
+- **Reconciled.** #1992 (IM-024), #1993 (IM-025) and #1997 (IM-026): on each,
+  every non-skipped check passed and there is no review thread. Nothing to
+  fix. IM-005/IM-006 stay blocked on #1526.
+- **IM-027 (retry-sleep rules) checked first and not started.** #1997 names
+  it next and says the two clamps "are in files no open PR touches". They
+  are `clampCPGRPCBindSleep` in `cp_grpc_health.go` and `clampSOCKS5BindSleep`
+  in `socks5_health.go`, and #1997 itself edits both files, as it does
+  `scan_svc_listener.go` (`nextScanSvcBindBackoff`). `socks5_bind.go` is
+  edited by the appliance branches. Only `nextCPGRPCBindBackoff`
+  (`cp_grpc_bind.go`) is in an untouched file, and one ladder is not a
+  shared rule. IM-027 waits for #1997's disposition.
+- **Why this.** It is the follow-up ADR-0053 named and the "smaller and
+  independent" alternative recorded under IM-020, IM-022, IM-023, IM-025 and
+  IM-026. The three bodies differed only in record type, size constant and
+  four sentinels, and no test compared them.
+- **Moved:** the five envelope steps and their order. **Stays main:** the
+  record types, the size constants, the four sentinels per record and their
+  texts, field and seal validation, the encoders, the files and the floor's
+  quorum.
+- **Size.** 3 root production files edited (+33/−66 lines), 1 new package
+  file (77 lines). Root test inventory +3 tests (one new file); package +6
+  tests and 1 fuzz target.
+- **Sentinels are injected.** The package declares no error value, and a nil
+  sentinel in an `Envelope` is answered with an unnamed error, never nil, so
+  a forgotten field fails closed. The boundary test refuses a package-level
+  sentinel.
+- **ADR-0002.** No conflict. **ADR-0053.** Its "Not moved: the three strict
+  decoders" entry is superseded by ADR-0059; the rest stands.
+- **Program rule.** This is a fourth open program PR beside #1992, #1993 and
+  #1997. It shares no source file with any of them; all four edit this
+  document at different anchors.
+- **Effect on IM-002.** None on the count: the decoders were not among the
+  names other root files read from `saas_feed_floor.go`. Not re-measured.
+- **Not done.** The two generation-metadata readers
+  (`gcCollector.validateGenerationDir`, `checkGenerationMeta` over
+  `strictDecodeGenerationMeta`) repeat steps 3 to 5 but refuse with a bool
+  and with one `errReverifyMeta` wrapped by `%v`; binding them needs a
+  decision on that shape and its own verdict table. `fuzz-nightly.yml` is a
+  hand-maintained matrix; adding
+  `{ target: FuzzDecode, pkg: "./internal/urlcatfeed/noderecord" }` is a
+  workflow edit left to the owner, as for IM-001 and IM-023.
+- **Next.** After #1997's disposition: IM-027, first step unchanged from the
+  IM-026 note plus the correction above (re-list which of the six functions
+  are in files with no open edit). After #1993's: `mcp_rollout_execdeps.go`.
+  Independent of every open PR today: IM-014 mapping (release catalog trust
+  kernel; first step in the IM-013 note), and the generation-metadata
+  readers above (first step: write the verdict table for
+  `checkGenerationMeta` and `validateGenerationDir` over one valid
+  `generation.json` on main, then decide whether `Envelope` with a single
+  repeated sentinel reproduces the `errReverifyMeta` texts; if it does not,
+  leave them).
+
 ### IM-020 saas-feed node-local record codec (EXTRACT, 2026-11-21, main `0fe4578`)
 
 Task record (the IM-020 table row is added by open #1981, which edits the
