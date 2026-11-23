@@ -1402,3 +1402,27 @@ an anchor neither touches):
   one remaining small state machine whose extraction is blocked by a test
   seam and not by surface. After it: one strict decoder for the three F3
   records, then IM-014 mapping.
+
+### Proxy-authentication posture ratchet (NEW OWNER, 2026-11-23)
+
+Not an extraction: a new authentication-domain owner created by a product
+decision (owner decision "Durable Authentication Posture", contract AUTH-006,
+[ADR-0063](../docs/adr/0063-proxy-auth-posture-ratchet.md)). Recorded here
+because it adds a boundary.
+
+- **Owner.** `internal/authposture` owns the monotonic "proxy authentication
+  established" flag and its marker file format, read/write ordering
+  (write-ahead `Establish`, `EstablishFailClosed`), corrupt/unreadable
+  classification (fail closed) and the restore merge. Standard library only;
+  the durable writer is injected. Boundary test with negative controls
+  (no root/sibling imports, no package state, no `init`, no goroutine).
+- **Stays main.** The instance (`cfg.authPosture`, so it resets with the rest
+  of the per-test auth state), the file path under `dataDir`, every
+  activation hook (`IdPRegistry.Upsert`/`ReplaceAll`/`Load`, IdP recovery,
+  legacy providers), the startup migration and its evidence sources, the
+  Stage-1/SOCKS5 enforcement terms, the restore staging call, Diagnostics,
+  audit and logging (`proxy_auth_posture.go`).
+- **CP→DP.** Main also owns the merge-only `ConfigSnapshot.ProxyAuthEstablished`
+  capture and apply (registry row `proxy_auth_established`).
+- **Not done.** No reset endpoint (Exempt policy is the only authorized
+  unauthenticated access).

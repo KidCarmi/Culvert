@@ -191,6 +191,7 @@ func buildOperatorContract() OperatorContract {
 		accessCIDRAdmin,
 		checkOIDCBaseURLPosture(),
 		checkDefaultAuthOpen(),
+		checkProxyAuthPosture(),
 		checkYARAEnginePosture(),
 		checkScanDecompressRatioPosture(),
 		checkConfigSourcePrecedence(),
@@ -2830,7 +2831,7 @@ func authDefaultExemptMigrationDiagnostics(rules []PolicyRule, defaultExempt boo
 // shared resolver never consults it (proxy_credential.go legacyCredentialFor).
 // Counting it here would arm arm 2 of resolveRequestAuth for a credential
 // nothing on the data plane can accept. A gateway whose only accounts are
-// admin-console accounts is instead the rosterWithoutVerifier state there:
+// admin-console accounts is instead the requiredWithoutVerifier state there:
 // authentication is required (cfg.AuthEnabled) and nothing can verify a
 // presented credential, so it is refused — never waved through.
 func hasCredentialCapableProvider() bool {

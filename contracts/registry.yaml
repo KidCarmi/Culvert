@@ -264,6 +264,50 @@ contracts:
     validation: integration
     compatibility: "Breaking for deployments whose clients used the admin account for proxy authentication: they need an LDAP or OIDC provider (CHANGELOG, Changed (breaking)). Explicit Exempt access is unchanged."
 
+  - id: AUTH-006
+    area: authn-authz
+    status: enforced
+    owner_approved: false
+    invariant: "Once proxy authentication has been established on a node it cannot disappear silently: after the first proxy identity provider activation, a node with no usable provider refuses traffic that requires authentication (HTTP 407; SOCKS5 offers only USER/PASS and refuses it) instead of admitting it unauthenticated, across restarts, configuration-version rollback, config import, backup restore and control-plane snapshots. Only an explicit Exempt authentication rule or the Exempt default admits traffic without credentials."
+    authority: "Owner decision 'Durable Authentication Posture', 2026-11-23 (ADR-0063). Durable monotonic ratchet internal/authposture; activation hooks, migration and Diagnostics in proxy_auth_posture.go; Stage-1 term requiredWithoutVerifier (proxy.go resolveRequestAuth) and socks5AuthRequired (socks5_auth.go); restore merge (restore.go stageProxyAuthPosture); merge-only CP->DP field ConfigSnapshot.ProxyAuthEstablished (controlplane_snapshot.go CurrentConfigSnapshot, syncSnapshotIdPProfiles)."
+    code:
+      - "internal/authposture/*.go"
+      - "proxy_auth_posture.go"
+    configs: []
+    transitions:
+      permitted:
+        - "a fresh node (no provider ever activated, no migration evidence) keeping Stage 1 inert and SOCKS5 NO-AUTH"
+        - "establishing the posture through any proxy identity provider activation, migration evidence or a restored archive"
+        - "an operator admitting credential-free traffic with an Exempt rule or the Exempt default"
+      forbidden:
+        - "clearing or lowering the posture through any API, configuration write, rollback, import, restore or control-plane snapshot"
+        - "deleting, disabling or failing to load the last provider turning an established node into unauthenticated access"
+        - "provider disappearance creating an implicit Exempt decision"
+        - "reporting a provider activation successful before the posture marker is durable on a path that can refuse it"
+        - "a corrupt or unreadable marker reading as not established"
+        - "a data-plane node applying an established control plane's snapshot staying fresh, or a snapshot with the posture false or absent lowering an established node"
+    tests:
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_FreshInstallUnchanged}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_ActivationPathsEstablish}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_ActivationRefusedWhenMarkerCannotBeWritten}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_ConfiguredProviderFailsToLoad}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_RemovalThenRestartStillRefuses}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_ConfigImportAndRollbackNeverClear}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_ClusterSnapshotsNeverClear}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_ExplicitExemptUnchanged}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_MarkerFailClosedAndMigration}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_BackupRestoreSetsNeverClears}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_ConcurrentActivationAndRequests}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_GateReadAllocFree}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_ControlPlanePostureReachesFreshDP}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_SnapshotPostureFalseOrAbsentNeverLowers}
+      - {file: "proxy_auth_posture_test.go", name: TestProxyAuthPosture_SnapshotPostureWriteFailureRejects}
+      - {file: "internal/authposture/ratchet_test.go", name: TestRatchet_NeverLowers}
+      - {file: "internal/authposture/ratchet_test.go", name: TestEstablish_WriteAhead}
+      - {file: "internal/authposture/ratchet_test.go", name: TestMergeForRestore}
+    validation: integration
+    compatibility: "Breaking at upgrade for a node that stores identity provider profiles (or a legacy ldap block) but has no usable provider: it is established by migration and refuses authentication-required traffic it used to admit as unauth (CHANGELOG, Changed (breaking)). Explicit Exempt access is unchanged; fresh installations are unchanged."
+
   - id: TLS-001
     area: tls-inspection
     status: enforced

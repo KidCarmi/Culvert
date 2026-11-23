@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KidCarmi/Culvert/internal/authposture"
 	"github.com/KidCarmi/Culvert/internal/ca"
 	"github.com/KidCarmi/Culvert/internal/upstream/backupstrip"
 )
@@ -1165,11 +1167,18 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 
 	written := map[string]bool{}
 
+	// The proxy-authentication posture marker is merged, never copied
+	// (ADR-0063): a restore may set it, never clear it, in every mode.
+	if err := stageProxyAuthPosture(stagingDir, dataDir, files, mode); err != nil {
+		return err
+	}
+	written[proxyAuthPostureTarPath] = true
+
 	// Pass 1 — tarball-sourced artifacts. Mode comes from the manifest
 	// so the restored file mirrors what the operator backed up (e.g.
 	// 0o644 for version.txt vs 0o600 for everything else).
 	for path, body := range files {
-		if path == "manifest.json" {
+		if path == "manifest.json" || path == proxyAuthPostureTarPath {
 			continue
 		}
 		if !mode.fromTarball(path) {
@@ -1264,6 +1273,41 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 	})
 	if walkErr != nil {
 		return fmt.Errorf("stage from current: %w", walkErr)
+	}
+	return nil
+}
+
+// stageProxyAuthPosture writes the monotonic merge of the current node's
+// proxy-authentication posture marker and the archive's into the staging
+// directory (ADR-0063, internal/authposture MergeForRestore). Whichever side
+// is established, or corrupt (treated as established), wins, the current node
+// first. When neither is, NO marker is staged — not even a fresh record — so
+// the restored node re-derives its posture at the next start from the data it
+// now holds (proxy_auth_posture.go, MIGRATION). An unreadable current marker
+// aborts the restore rather than being dropped. Under trust-root-only the
+// archive's marker is not a restore source; the current one is still kept.
+// Both passes of stageArtifacts skip the marker (written is pre-set).
+func stageProxyAuthPosture(stagingDir, dataDir string, files map[string][]byte, mode restoreMode) error {
+	current, err := os.ReadFile(filepath.Join(dataDir, proxyAuthPostureFileName)) // #nosec G304 -- fixed file name under the operator's data directory (offline restore)
+	if errors.Is(err, os.ErrNotExist) {
+		current = nil
+	} else if err != nil {
+		return fmt.Errorf("stage proxy auth posture: read current marker: %w", err)
+	}
+	var incoming []byte
+	if mode.fromTarball(proxyAuthPostureTarPath) {
+		incoming = files[proxyAuthPostureTarPath]
+	}
+	out, keep := authposture.MergeForRestore(current, incoming)
+	if !keep {
+		return nil
+	}
+	target := filepath.Join(stagingDir, proxyAuthPostureFileName)
+	if err := guardWithinDir(stagingDir, target); err != nil {
+		return fmt.Errorf("stage proxy auth posture: %w", err)
+	}
+	if err := atomicWriteFile(target, out, 0o600); err != nil {
+		return fmt.Errorf("stage proxy auth posture: %w", err)
 	}
 	return nil
 }

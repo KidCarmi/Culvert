@@ -147,6 +147,14 @@ var configSurfaces = []configSurfaceRow{
 	{ID: "auth_enabled", Kind: kindMeta,
 		Note:     "informational mirror — no DP apply function consumes it",
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "AuthEnabled"}}},
+	// ADR-0063 / AUTH-006: the CP's durable proxy-authentication posture. A
+	// monotonic ratchet, not an operator value — kindMeta + AppliesOnDP like
+	// Epoch: true establishes the DP's own marker (write-ahead; failure rejects
+	// the snapshot), false/absent is a no-op. Not Sensitive (one boolean), so
+	// an enrolling DP receives it too.
+	{ID: "proxy_auth_established", Kind: kindMeta, ClusterSynced: true,
+		Note:     "merge-only posture ratchet: true establishes the DP posture write-ahead, false/absent never lowers it (omitempty)",
+		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "ProxyAuthEstablished", AppliesOnDP: true}}},
 	{ID: "default_auth_outcome", Kind: kindMeta,
 		Note:     "informational mirror (defaultAuthOutcome spec) — DP does not apply it",
 		Bindings: []surfaceBinding{{Struct: "ConfigSnapshot", Field: "DefaultAuthOutcome"}}},

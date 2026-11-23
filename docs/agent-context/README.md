@@ -53,6 +53,11 @@ to this checkout, not to an unmerged branch.
   [credential-cost owner](../../internal/authcost), the identity-backend
   [result-cache owner](../../internal/identcache) (ADR-0041) and the
   corresponding tests.
+- Proxy-authentication posture (whether proxy authentication is required with
+  no usable provider; never cleared): [internal/authposture](../../internal/authposture),
+  [proxy_auth_posture.go](../../proxy_auth_posture.go), ADR-0063, contract
+  `AUTH-006`. Every new path that activates a proxy identity provider must
+  establish it; provider availability is not the authority.
 - LDAP: [ADR-0027](../adr/0027-ldap-first-class-idp.md),
   [auth_ldap_provider.go](../../auth_ldap_provider.go) and
   [directory implementation](../../auth_ldap.go). Internal directory transport

@@ -220,12 +220,23 @@ func (r *IdPRegistry) Load(path string) error {
 	r.mu.Unlock()
 
 	// Initialise live providers for enabled profiles.
+	var activated *IdPProfile
 	for _, p := range profiles {
 		if p.Enabled {
 			if err := r.compile(p); err != nil {
 				logger.Printf("IdP %q compile error: %v", p.ID, err)
+			} else if activated == nil {
+				activated = p
 			}
 		}
+	}
+	// Durable Authentication Posture (ADR-0063): a provider live at startup
+	// establishes the posture. Fail-closed rather than write-ahead: the
+	// profile is already durable configuration, so the activation cannot be
+	// refused; a failed marker write leaves the posture raised for this
+	// process and reported as not durable.
+	if activated != nil {
+		establishProxyAuthPostureFailClosed(proxyAuthProfileActivation("startup", activated))
 	}
 	return nil
 }
@@ -266,6 +277,21 @@ func (r *IdPRegistry) persist(profiles []*IdPProfile) error {
 		return fmt.Errorf("%w: %v", errIdPPersistFailed, err)
 	}
 	return nil
+}
+
+// persistActivation is the commit step of Upsert and ReplaceAll (called under
+// r.mu, before anything is published). When the candidate set makes one of
+// candidates a live provider it first establishes the durable
+// proxy-authentication posture (ADR-0063, proxy_auth_posture.go) and only then
+// persists next: the marker is durable no later than the registry write that
+// makes the activation real, and a marker that cannot be written refuses the
+// activation with errIdPPersistFailed and nothing changed. A crash between the
+// two writes leaves "established, provider not saved": fail closed.
+func (r *IdPRegistry) persistActivation(origin string, candidates, next []*IdPProfile, nextLive map[string]IdentityProvider) error {
+	if err := establishForLiveSet(origin, candidates, nextLive); err != nil {
+		return fmt.Errorf("%w: %v", errIdPPersistFailed, err)
+	}
+	return r.persist(next)
 }
 
 // Persisted reports whether profile changes are written to disk. False means
@@ -432,7 +458,10 @@ func (r *IdPRegistry) Upsert(p *IdPProfile) error {
 		delete(nextLive, p.ID)
 	}
 
-	if err := r.persist(nextProfiles); err != nil {
+	// Durable Authentication Posture (ADR-0063): persistActivation records the
+	// posture WRITE-AHEAD of the registry write when this candidate activates
+	// a provider.
+	if err := r.persistActivation("identity provider activation", []*IdPProfile{p}, nextProfiles, nextLive); err != nil {
 		discardCandidateEpisode()
 		return err // old profiles + old live providers stay authoritative
 	}
@@ -898,7 +927,12 @@ func (r *IdPRegistry) ReplaceAll(profiles []*IdPProfile) error {
 		}
 		prevSources[prev.ID] = idpRemoteDocumentRef(prev)
 	}
-	if err := r.persist(nextProfiles); err != nil {
+	// Durable Authentication Posture (ADR-0063): a snapshot that activates a
+	// provider records the posture WRITE-AHEAD of the registry write; one that
+	// cannot is rejected like any other (the DP keeps its previous registry
+	// and the next snapshot retries). A snapshot with no live provider
+	// establishes nothing and clears nothing.
+	if err := r.persistActivation("control-plane snapshot", nextProfiles, nextProfiles, nextLive); err != nil {
 		// The WHOLE snapshot is rejected, so every candidate's speculative
 		// episode describes a configuration that is not in service — the same
 		// rule the two abort paths above now share.

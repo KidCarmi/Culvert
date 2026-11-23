@@ -28,7 +28,7 @@ package main
 // SEC-AUTHENABLED-1 added a FOURTH state that neither of the two probes above
 // can see. A roster holding admitted accounts with no present admin and no
 // provider — the clamped or legacy-role state — leaves credCapable and
-// ssoCapable both false, but resolveRequestAuth's rosterWithoutVerifier term
+// ssoCapable both false, but resolveRequestAuth's requiredWithoutVerifier term
 // arms the Stage-1 gate anyway and is excluded from the no-backend inert
 // guard, so the forced-Default arm answers with a 407 nothing can satisfy.
 // Reporting killSwitchBackendNone there told the operator the opposite of what
@@ -68,6 +68,14 @@ const (
 	// identities and no proxy provider is configured, so the gate is armed and
 	// nothing can verify a presented credential. Refused, as above.
 	killSwitchBackendAdminOnly
+	// killSwitchBackendPostureNoProvider is the Durable Authentication Posture
+	// state (ADR-0063): no account, no provider, but proxy authentication was
+	// established on this node, so the gate stays armed and refuses instead of
+	// falling through as killSwitchBackendNone would. It carries no roster
+	// fact and renders identically for every role. The two roster states
+	// above take precedence, so the presence of this row below admin says no
+	// more about the roster than killSwitchBackendNone already did.
+	killSwitchBackendPostureNoProvider
 )
 
 // authExemptKillSwitchCode is the operator-contract code of the kill-switch
@@ -108,17 +116,22 @@ func currentKillSwitchBackend() killSwitchBackend {
 	sso := idpRegistry.HasEnabledInteractiveProvider()
 	if !hasCredentialCapableProvider() && !sso {
 		// cfg.AuthEnabled() is the exact discriminator resolveRequestAuth uses
-		// for rosterWithoutVerifier, read here only as a boolean: with neither
+		// for requiredWithoutVerifier, read here only as a boolean: with neither
 		// a credential-capable proxy validator nor a live interactive provider,
 		// an active authentication backend can only be an admitted roster
 		// account, and that arms the gate rather than leaving it inert.
 		// cfg.GetUser() then separates a usable administrator (the admin-only
 		// installation, owner Decision 2) from the SEC-AUTHENABLED-1 lockout.
+		// Without any account, the gate's other arming term is the durable
+		// proxy-authentication posture (ADR-0063).
 		if cfg != nil && cfg.AuthEnabled() {
 			if cfg.GetUser() != "" {
 				return killSwitchBackendAdminOnly
 			}
 			return killSwitchBackendNoVerifier
+		}
+		if cfg.ProxyAuthEstablished() {
+			return killSwitchBackendPostureNoProvider
 		}
 		return killSwitchBackendNone
 	}
@@ -197,6 +210,9 @@ func authExemptKillSwitchRow(envDisabled, runtimeDisabled bool, backend killSwit
 		// a usable administrator, so the only repair is a proxy provider.
 		effect = "so formerly exempt clients are now challenged for credentials (407) that nothing on this node can verify: admin-console accounts are management identities and do not authenticate proxy traffic, and no proxy identity provider is enabled, so every formerly exempt request is refused"
 		action = "Configure a proxy identity provider (LDAP or OIDC) under Identity Providers so challenged clients can authenticate: admin-console accounts never authenticate proxy traffic, so traffic that requires authentication stays refused until a proxy identity provider is configured, whether the kill switch is engaged or not. Clearing the kill switch alone restores only credential-free requests covered by an Exempt rule or the Exempt default. " + action
+	case killSwitchBackendPostureNoProvider:
+		effect = "so formerly exempt clients are now challenged for credentials (407) that nothing on this node can verify: proxy authentication was established on this node and no proxy identity provider remains, so every formerly exempt request is refused"
+		action = "Restore a proxy identity provider (LDAP, OIDC or SAML) under Identity Providers so challenged clients can authenticate: removing providers never turns proxy authentication off once it has been established, so traffic that requires authentication stays refused until one is restored, whether the kill switch is engaged or not. Clearing the kill switch alone restores only credential-free requests covered by an Exempt rule or the Exempt default. " + action
 	case killSwitchBackendNone:
 		// Deliberately not an enumeration of per-rule outcomes: without a
 		// backend the result depends on the global default, the rule order

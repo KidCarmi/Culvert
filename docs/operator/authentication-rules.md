@@ -158,9 +158,10 @@ Things that differ from authentication rules:
   it sends, for information only; a Data Plane node does not apply it
   (`config_surfaces.go`, `default_auth_outcome`). Each node uses its own stored
   value.
-- **A node with nothing to verify and no accounts skips Stage 1.** With
-  `Default`, no credential provider, no working SSO provider and no account at
-  all in the admin roster (`ui_users.json`), a challenge could never be
+- **A fresh node with nothing to verify and no accounts skips Stage 1.** With
+  `Default`, no credential provider, no working SSO provider, no account at
+  all in the admin roster (`ui_users.json`), and proxy authentication never
+  established on the node, a challenge could never be
   satisfied. Stage 1 is not entered: no authentication rule is
   evaluated, including `CredentialRequired` and `SSORequired` rules, and every
   request continues to Stage 2 as `unauth` (`authRequired` in
@@ -181,12 +182,22 @@ Things that differ from authentication rules:
   roster whose only admin role was clamped to viewer or a legacy roster with an
   empty role. A request that matches no rule gets a `407` that nothing can
   satisfy, and any presented credential, including the admin pair, is refused
-  (`rosterWithoutVerifier` in `resolveRequestAuth`;
+  (`requiredWithoutVerifier` in `resolveRequestAuth`;
   `TestProxyAuthNoAdmin_AdminOnlyRefusesEveryCredential`,
   `TestAuthEnabled_ClampedAdminRosterHTTPProxyRefused`). Authentication is not
   bypassed: the node refuses that traffic until a proxy identity provider is
   configured. Credential-free requests covered by an `Exempt` rule or the
   `Exempt` default are unaffected.
+- **Once established, losing the last provider fails closed too.** The first
+  activation of a proxy identity provider durably marks the node "proxy
+  authentication established". From then on a node with no usable provider —
+  deleted, disabled, failed to load, after a restart, a rollback, a restore or
+  a Control Plane snapshot — is in the same refusing state as above, accounts
+  or not; SOCKS5 never offers `NO-AUTH` again. Only an `Exempt` rule or the
+  `Exempt` default admits traffic without credentials. See
+  [`proxy-authentication-posture.md`](proxy-authentication-posture.md)
+  (`requiredWithoutVerifier`; `TestProxyAuthPosture_ActivationPathsEstablish`,
+  `TestProxyAuthPosture_ExplicitExemptUnchanged`).
 
 ## 6. Signals
 

@@ -260,6 +260,11 @@ func main() {
 	defer appLifecycleCancel() // kept in main() for panic safety; initLifecycleContext only creates the context.
 
 	initAuth(s)
+	// Durable Authentication Posture (ADR-0063): open the marker BEFORE any
+	// path that can activate a proxy identity provider (registry load, legacy
+	// providers, cluster snapshots); the missing-marker migration completes in
+	// loadPersistentAdminState once every source of evidence is loaded.
+	initProxyAuthPosture(proxyAuthPosturePath())
 	initSession(s)
 	initObservability(s)
 	initLogStore(s)

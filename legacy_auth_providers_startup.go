@@ -39,6 +39,9 @@ func loadLegacyAuthProviders(c legacyAuthProvidersStartupConfig) error {
 			return fmt.Errorf("LDAP config error: %w", err)
 		}
 		cfg.SetProvider(ldapProvider)
+		// Durable Authentication Posture (ADR-0063): fail-closed startup
+		// activation, see proxy_auth_posture.go.
+		establishProxyAuthPostureFailClosed("startup: legacy ldap provider (config.yaml)")
 		logger.Printf("Auth: LDAP (%s, base=%s)", c.LDAP.URL, c.LDAP.BaseDN)
 		return nil
 	}
@@ -48,6 +51,7 @@ func loadLegacyAuthProviders(c legacyAuthProvidersStartupConfig) error {
 			return fmt.Errorf("OIDC config error: %w", err)
 		}
 		cfg.SetProvider(oidcProvider)
+		establishProxyAuthPostureFailClosed("startup: legacy oidc provider (config.yaml)")
 		if c.OIDC.LoginURL != "" {
 			SetOIDCLoginURL(c.OIDC.LoginURL)
 			logger.Printf("Auth: OIDC login redirect: %s", c.OIDC.LoginURL)

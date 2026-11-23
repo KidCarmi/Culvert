@@ -50,6 +50,9 @@ not sent to the client:
   the credential.
 - `provider_not_supported_for_socks5` — no directory provider is configured, or
   the username's email domain routes to an OIDC/SAML profile.
+- `auth_established_no_provider` — proxy authentication was established on this
+  node and no proxy identity provider of any kind is left
+  ([proxy authentication posture](proxy-authentication-posture.md)).
 
 The reason appears as the action of the `AUTH_FAIL` request-log entry, on the
 `SOCKS5 AUTH_FAIL` log line, and in
@@ -59,7 +62,12 @@ failure total, as over HTTP.
 
 Note: a gateway whose only accounts are admin-console accounts requires SOCKS5
 username/password and refuses every SOCKS5 client. Add an LDAP profile, or
-disable the listener.
+disable the listener. The same holds on a node where proxy authentication was
+established and every provider has since been removed, disabled or failed to
+load: `NO-AUTH` is offered only on a node that never had proxy authentication
+established and has no account and no provider. SOCKS5 has no `Exempt` rules,
+so nothing on SOCKS5 is admitted without credentials once the posture is
+established.
 
 ## Choosing the policy mode
 

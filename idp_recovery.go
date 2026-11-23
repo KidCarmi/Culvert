@@ -639,6 +639,11 @@ func runIdPRecoveryLoop(ctx context.Context) {
 			}
 			if idpRegistry.publishRecompiled(dc.candidate.ID, dc.generation, dc.candidate, prov) {
 				recovered++
+				// A profile dark since boot going live is an activation
+				// (ADR-0063); fail-closed, like the startup load it completes.
+				if establishProxyAuthPostureFailClosed(proxyAuthProfileActivation("identity provider recovery", dc.candidate)) {
+					republishProxyAuthPostureOnControlPlane()
+				}
 				logger.Printf("IDP_RECOVERED idp=%q — provider compiled and is now live; browser SSO is available again without a restart",
 					sanitizeLog(dc.candidate.ID))
 				continue

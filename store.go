@@ -22,6 +22,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/KidCarmi/Culvert/internal/audit"
+	"github.com/KidCarmi/Culvert/internal/authposture"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/identcache"
 	"github.com/KidCarmi/Culvert/internal/reqlog"
@@ -1128,6 +1129,17 @@ type Config struct {
 	// External auth provider (LDAP or OIDC). When non-nil, takes precedence
 	// over the local bcrypt credentials for Verify calls.
 	provider AuthProvider
+
+	// authPosture is the durable proxy-authentication posture ratchet (owner
+	// decision "Durable Authentication Posture", 2026-11-23; ADR-0063,
+	// proxy_auth_posture.go). Once a proxy identity provider has been
+	// activated it stays established, so a node that loses its last provider
+	// refuses authentication-required traffic instead of admitting it
+	// unauthenticated. Not guarded by mu: the ratchet is its own lock-free
+	// owner. Held behind an atomic pointer (nil = not established, in memory
+	// only; created on first use by proxyAuthPosture) so the hot-path read is
+	// two atomic loads and a test can swap in a fresh ratchet race-free.
+	authPosture atomic.Pointer[authposture.Ratchet]
 
 	// defaultAuthOutcome is the SINGLE authoritative global Stage-1 default,
 	// applied only on no-match (see AUTH-POLICY-DEFAULTAUTHOUTCOME-SPEC.md).

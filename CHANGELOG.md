@@ -549,6 +549,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed (breaking)
 
+- **Proxy authentication, once established, never switches itself off (owner
+  decision "Durable Authentication Posture", 2026-11-23; contract AUTH-006).**
+  Each node now keeps a durable marker, `<data dir>/proxy_auth_posture.json`,
+  set the first time a proxy identity provider becomes usable — an LDAP, OIDC
+  or SAML profile enabled under **Identity Providers** (admin API/GUI, or a
+  Control Plane snapshot on a Data Plane node), or a legacy `ldap`/`oidc` block
+  loaded at startup. From then on, a node whose providers are all deleted,
+  disabled or fail to load refuses every request that requires authentication
+  (HTTP `407`; SOCKS5 never offers `NO-AUTH` and refuses username/password with
+  reason `auth_established_no_provider`) instead of admitting it as `unauth`.
+  Only an `Exempt` authentication rule or the `Exempt` default admits traffic
+  without credentials, exactly as on a node whose provider is still configured.
+  The marker survives restarts, configuration-version rollback (it is not on the
+  rollback surface and creates no configuration version), config import, later
+  Control Plane snapshots without providers, and backup restore (backups
+  include it and a restore merges it: it can set it, never clear it). There is
+  no API to clear it. A corrupt or unreadable marker is treated as established.
+  In a cluster the Control Plane also sends its posture to Data Plane nodes
+  (`ConfigSnapshot.proxy_auth_established`, merge-only): a Data Plane node that
+  enrols after the last provider was removed is established on its first
+  snapshot, and one that cannot record it rejects the snapshot.
+  What each installation sees:
+  - **Never had a proxy identity provider:** unchanged.
+  - **A provider is configured and loads:** unchanged.
+  - **Upgrading a node that stores identity provider profiles but none loads
+    or all are disabled**, or that has a legacy `ldap` block: the first start of
+    this release finds that evidence and marks the node established, so
+    authentication-required traffic that was being admitted as `unauth` is now
+    refused. Before upgrading, restore a working provider, or add scoped
+    `Exempt` rules (or the `Exempt` default) for traffic that must stay
+    credential-free.
+  New Diagnostics row `proxy_auth_posture` (since/by; `fail` while established
+  with no usable provider or with an unreadable marker), audit action
+  `auth.proxy_posture.established`, and an `auth_exempt_kill_switch` state for
+  an established node with no provider. Activating a provider now fails (`500`;
+  a snapshot is rejected) if the marker cannot be written first. See
+  [`docs/operator/proxy-authentication-posture.md`](docs/operator/proxy-authentication-posture.md).
+
 - **Admin-console credentials no longer authenticate HTTP proxy traffic (owner
   Decision 2, 2026-11-23).** Management and data-plane identities are now
   distinct on every listener. The admin account the setup wizard creates, every
