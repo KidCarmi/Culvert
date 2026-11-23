@@ -41,3 +41,17 @@ campaigns, so there is nothing held out about them.
   differences, reported and baselined, not defects.
 
 A result with zero new findings is an acceptable outcome and will be reported as such.
+
+## Changes after the freeze
+
+None of these alters the generator, the reference or the comparison semantics.
+
+1. The review suite wrote its output over the campaign report. It now writes to its own file.
+2. The baseline gained the per-stratum outcome table and the unspecified-alias table, so a change
+   that moves every path together is visible as drift.
+3. The dial-alias table gained zoned-IPv6 rows (logged, not baselined: they run only where IPv6
+   loopback exists) and lost the two `localhost` rows, which depend on the host's resolver setup.
+
+## Outcome
+
+E1–E6 all held on `heldout-1`. See `README.md`.
