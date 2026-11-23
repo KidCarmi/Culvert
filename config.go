@@ -643,16 +643,6 @@ func (fc *FileConfig) validateEnums() []string { //nolint:cyclop // flat switch-
 	return errs
 }
 
-// validateSOCKS5PolicyMode rejects an unknown proxy.socks5_policy_mode — and
-// "enforce", which is not available yet — at load, so a typo can never leave
-// an operator believing SOCKS5 is observed or enforced when it is not.
-func (fc *FileConfig) validateSOCKS5PolicyMode() []string {
-	if _, err := parseSOCKS5PolicyMode(fc.Proxy.SOCKS5PolicyMode); err != nil {
-		return []string{err.Error()}
-	}
-	return nil
-}
-
 // validateLimits checks the numeric range fields (session_timeout_hours, port
 // ranges, max_conns_per_ip, rate_limit).
 func (fc *FileConfig) validateLimits() []string {

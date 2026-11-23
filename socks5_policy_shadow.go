@@ -87,6 +87,16 @@ func parseSOCKS5PolicyMode(raw string) (socks5PolicyMode, error) {
 // every SOCKS5 CONNECT. Atomic so a test that flips it never races a handler.
 var socks5PolicyModeState atomic.Int32
 
+// validateSOCKS5PolicyMode rejects an unknown proxy.socks5_policy_mode — and
+// "enforce", which is not available yet — at load, so a typo can never leave
+// an operator believing SOCKS5 is observed or enforced when it is not.
+func (fc *FileConfig) validateSOCKS5PolicyMode() []string {
+	if _, err := parseSOCKS5PolicyMode(fc.Proxy.SOCKS5PolicyMode); err != nil {
+		return []string{err.Error()}
+	}
+	return nil
+}
+
 func setSOCKS5PolicyMode(m socks5PolicyMode) { socks5PolicyModeState.Store(int32(m)) }
 
 func loadSOCKS5PolicyMode() socks5PolicyMode {
