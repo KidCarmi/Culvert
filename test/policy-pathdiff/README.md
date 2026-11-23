@@ -134,8 +134,19 @@ forms were canonicalised alike on every path.
 
 ### Mutation campaign
 
-`mutation/mutants.py`: 15 single-edit mutants of the production paths, each run against this suite
-and against the full existing root and `hostutil` suites. Results: `mutation/RESULTS.md`.
+15 single-edit mutants of the production paths, each run against this suite and against the full
+existing root and `hostutil` suites. Details: `mutation/RESULTS.md`.
+
+| | Count |
+|---|---|
+| Killed by this suite | 12 / 15 |
+| Killed by existing tests | 11 / 15 |
+| Killed only by this suite | 2 (invalid-host refusal removed; one source-CIDR unmap site) |
+| Killed only by existing tests | 1 (bulk replace not sorting, which does not change decisions) |
+| Killed by neither | 2 (probably equivalent) |
+
+The existing suite is strong here, so the gain is modest. Every kill by this suite came from
+baseline drift, which shows that behaviour changed and leaves the judgement to a reviewer.
 
 ## Running it
 

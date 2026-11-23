@@ -68,7 +68,7 @@ if __name__ == "__main__":
     repo, work = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     ids = set(sys.argv[3:])
     os.makedirs(work, exist_ok=True)
-    for mid, desc, f, old, new in M:
+    for mid, desc, f, old, new in M + [("CLEAN", "no edit (control)", "policy.go", "package main", "package main")]:
         if ids and mid not in ids: continue
         out = os.path.join(work, mid + ".json")
         if os.path.exists(out): continue
@@ -83,10 +83,10 @@ if __name__ == "__main__":
             reasons = sorted({l.split(":")[0].strip() if "drift" not in l else ("drift(" + l.split("(")[1].split(")")[0] + ")" if "drift (" in l else "drift(signature)")
                               for l in open(os.path.join(work, "rep_" + mid, "pathdiff.log"), errors="replace").read().splitlines()
                               if "behaviour drift" in l or "vacuous" in l or "not live" in l} ) if os.path.exists(os.path.join(work, "rep_" + mid, "pathdiff.log")) else []
-            e = run("go test -count=1 -timeout 40m . ./internal/hostutil/", tree, 2700)
-            fails = sorted({l.split()[2] for l in e[2].splitlines() if l.startswith("--- FAIL")})[:12]
-            res.update(new_exit=n[0], new_secs=round(n[1]), new_reasons=reasons, existing_exit=e[0], existing_secs=round(e[1]), existing_failing=fails,
-                       existing_tail=e[2][-600:] if e[0] not in (0, 1) else "")
+            elog = os.path.join(work, "existing_" + mid + ".log")
+            e = run("go test -count=1 -timeout 40m . ./internal/hostutil/ > " + elog + " 2>&1", tree, 2700)
+            fails = sorted({l.split()[2] for l in open(elog, errors="replace").read().splitlines() if l.strip().startswith("--- FAIL")})[:20]
+            res.update(new_exit=n[0], new_secs=round(n[1]), new_reasons=reasons, existing_exit=e[0], existing_secs=round(e[1]), existing_failing=fails)
         json.dump(res, open(out, "w"), indent=1)
         shutil.rmtree(tree, ignore_errors=True)
         print(json.dumps(res), flush=True)
