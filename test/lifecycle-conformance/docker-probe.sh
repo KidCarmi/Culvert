@@ -8,12 +8,17 @@
 # It reproduces the maintenance agent's own argv (internal/runner/templates_upgrade.go,
 # templates_d16b.go) and reports, for each fault outcome the model injects, what real Docker
 # does:
-#   docker tag <repo>@sha256:<d> culvert/proxy:pinned
+#   docker tag <repo>@sha256:<d> culvert/proxy:pinned           (the probe uses its OWN tag, below)
 #   docker compose -f <compose> [-f <override>] up -d
 #   docker inspect --format '{{json .Image}}' <container>     (identity the agent journals)
 #   docker image inspect <image>                              (RepoDigests)
 # Run it once per image store (containerd store: Docker 29 default for fresh installs;
 # classic: daemon.json {"features":{"containerd-snapshotter":false}}).
+#
+# It NEVER touches the production tag culvert/proxy:pinned: every tag, compose file and
+# inspect uses the probe-only tag culvert-lifecycle-probe/proxy:pinned (the findings are about how
+# Docker treats ANY locally tagged image, so the repository name does not change them).
+# A shared daemon that runs Culvert is therefore safe; cleanup removes the probe tag.
 set -uo pipefail
 PORT="${1:-5000}"
 REG="localhost:$PORT"; REPO="$REG/probe"
@@ -24,6 +29,7 @@ cleanup() {
   docker rm -f probe-sidecar >/dev/null 2>&1
   [ -n "$HOLDER" ] && kill "$HOLDER" 2>/dev/null
   [ -n "$REGPID" ] && kill "$REGPID" 2>/dev/null
+  docker rmi culvert-lifecycle-probe/proxy:pinned >/dev/null 2>&1
   rm -rf "$W"
 }
 trap cleanup EXIT
@@ -74,7 +80,7 @@ cat > "$P/docker-compose.yml" <<'EOF'
 name: probe
 services:
   proxy:
-    image: culvert/proxy:pinned
+    image: culvert-lifecycle-probe/proxy:pinned
     container_name: probe-proxy
     restart: unless-stopped
 EOF
@@ -84,7 +90,7 @@ printf 'services:\n  sidecar:\n    image: %s/does-not-exist:1\n' "$REG" > "$P/ov
 cat > "$P/override-portclash.yml" <<'EOF'
 services:
   sidecar:
-    image: culvert/proxy:pinned
+    image: culvert-lifecycle-probe/proxy:pinned
     container_name: probe-sidecar
     depends_on: [proxy]
     environment: [ADDR=:9090]
@@ -97,8 +103,8 @@ cid()   { docker ps -aq --no-trunc --filter name=^probe-proxy$; }
 cimg()  { local c; c=$(cid); if [ -n "$c" ]; then docker inspect --format '{{json .Image}}' "$c" | tr -d '"'; else echo none; fi; }
 ID1=""; ID2=""
 role()  { case "$1" in "$ID1") echo P;; "$ID2") echo T;; none|"") echo none;; *) echo "?";; esac; }
-tagimg(){ docker image inspect --format '{{.Id}}' culvert/proxy:pinned 2>/dev/null || echo none; }
-retag() { docker tag "$REPO@$1" culvert/proxy:pinned; }
+tagimg(){ docker image inspect --format '{{.Id}}' culvert-lifecycle-probe/proxy:pinned 2>/dev/null || echo none; }
+retag() { docker tag "$REPO@$1" culvert-lifecycle-probe/proxy:pinned; }
 reset() { "${C[@]}" down --remove-orphans >/dev/null 2>&1; docker rm -f probe-sidecar >/dev/null 2>&1; retag "$D1"; "${C[@]}" up -d >/dev/null 2>&1; }
 row()   { printf '%-34s | rc=%-3s | container %-4s -> %-4s | recreated=%-3s | tag=%s\n' "$1" "$2" "$3" "$4" "$5" "$(role "$(tagimg)")"; }
 ID1=$(docker image inspect --format '{{.Id}}' "$REPO@$D1"); ID2=$(docker image inspect --format '{{.Id}}' "$REPO@$D2")
