@@ -103,3 +103,43 @@ jobs:
           name: orphan-probe-${{ matrix.variant }}-${{ strategy.job-index }}
           path: ${{ runner.temp }}/probe-evidence
           if-no-files-found: warn
+
+  # The proxy image alone: what /ready and /health answer between SIGTERM and exit, with a
+  # pending admin-UI request holding the shutdown open. v1 is reported as the contrast (an
+  # image without the change answers 200 throughout); v2 must never answer /ready 200 again.
+  timeline:
+    name: "Timeline · release image · /ready after SIGTERM"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      V1_REF: ${{ inputs.proxy_v1_ref || 'main' }}
+      V2_REF: ${{ inputs.proxy_v2_ref || 'proxy/ready-not-ready-on-shutdown' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Build the two release images (repository Dockerfile)
+        run: |
+          set -euo pipefail
+          for v in v1 v2; do
+            if [ "$v" = v1 ]; then ref="$V1_REF"; else ref="$V2_REF"; fi
+            git fetch --no-tags origin "$ref"
+            git worktree add --detach "$RUNNER_TEMP/src-$v" FETCH_HEAD
+            echo "$v: $ref = $(git -C "$RUNNER_TEMP/src-$v" rev-parse HEAD)"
+            docker build --build-arg "VERSION=probe-$v" -t "culvert-probe-release:$v" "$RUNNER_TEMP/src-$v"
+          done
+
+      - name: SIGTERM timeline (three runs per image)
+        run: |
+          set -uo pipefail
+          t=test/lifecycle-conformance/orphan-probe/image-sigterm-timeline.py
+          rc=0
+          for i in 1 2 3; do
+            python3 "$t" culvert-probe-release:v1 observe || rc=$?
+            python3 "$t" culvert-probe-release:v2 not-ready || rc=$?
+          done
+          echo "timeline exit=$rc"
+          exit "$rc"
+
