@@ -9,6 +9,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A rule with an action this build does not know now blocks its traffic
+  instead of disappearing (`POL-004`).** `PolicyStore.Load` (the policy file)
+  and `ReplaceAll` (control-plane snapshots and replace-mode import) dropped
+  any access rule whose action was not one of Allow, Drop, Block_Page or
+  Redirect. With `default_action=allow`, or a lower-priority Allow rule, the
+  traffic that rule was written to restrict was then **forwarded** — a
+  rulebase written by a newer release became more permissive on an older
+  node. Such a rule is now kept with its action intact, still matches, and a
+  match is a terminal block; it is written back unchanged on save, so a
+  mixed-version cluster round-trips it. Every retained rule is announced in
+  the log at load and at bulk replace (`retaining rule … with unrecognized
+  action …; matching traffic will be blocked`) and listed in Diagnostics as
+  `policy_rules_unknown_action` for as long as it is in the running policy.
+  A config-version rollback restores such a rule instead of skipping it, and a
+  draft commit is no longer refused because the running policy contains one.
+  The admin API still refuses an
+  unknown action on a new or edited rule. Rules with a known action, rules
+  with no action, an explicit default allow and an empty rulebase behave as
+  before.
+
+- **A zoned IPv6 destination can no longer slip past a rule for the same
+  address.** A request for `[::1%25lo]` reached the proxy as the authority
+  `[::1%lo]`. No literal matcher canonicalizes a zoned address, so a Block rule
+  for `::1` did not match it — and the dialer honoured the zone and connected
+  to `::1` anyway. Under `default_action=allow` the request was forwarded
+  (measured on an IPv6 host: no rule matched, `200`, backend reached). A zone
+  names an interface on the proxy host and has no meaning across a proxy
+  boundary (RFC 9844), so such a destination is now **refused** rather than
+  normalized: `400` with status `INVALID_HOST` (`source=ipv6-zone`) on plain
+  HTTP and CONNECT, after the connection limit, IP filter and rate limiter and
+  before authentication, any matcher or any dial. SOCKS5 does not evaluate
+  access rules, but its DOMAIN form could carry the same text to the blocklist
+  and the dialer; it is refused there with reply `0x02` (connection not
+  allowed), after SOCKS5 negotiation and before any matcher or dial. The
+  Policy Tester refuses the same input instead of reporting a policy answer
+  for it. Zone-free IPv6 destinations and internationalized hostnames —
+  including percent-encoded ones — are unaffected.
+
 - **An anonymous client can no longer park ~1 GiB in each interactive-login
   state store.** The OIDC PKCE and SAML request stores are filled by
   unauthenticated requests (the proxy's captive-portal path and the public
@@ -689,6 +727,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   touch a lock owned by another plane.
 
 ### Fixed
+
+- **The Policy Tester now answers for the host the proxy actually enforces
+  when the request target is percent-encoded.** Go's request parser decodes an
+  encoded international host before the proxy sees it, so a client that sends
+  `b%C3%BCcher.de` is matched against the rules for `bücher.de`. The tester
+  matched the literal percent string instead and reported "no rule matched"
+  for a destination the data path blocks. `POST /api/policy/test` now resolves
+  its `host` with the same standard-library request parser the data path sits
+  behind: an encoded host is decoded once, exactly where the URL grammar
+  allows it, and input the parser accepts is answered for its host as on the
+  wire. **Behaviour change:** the tester now answers `400` where the proxy
+  does — for a target the parser refuses (a non-numeric port such as
+  `host:http`, a malformed or forbidden escape such as `%2F`, `%3A` or `%ZZ`)
+  and for a host with no valid canonical form (the proxy's `INVALID_HOST`) —
+  instead of "no rule matched, the default applies". A bare IPv6 address is
+  still accepted and treated as bracketed. Enforcement is unchanged. This is
+  an intentional compatibility correction, documented on the operation in the
+  API contract; it needs no major contract version, because every refused
+  input is one the data path already refuses.
+- **Opt-in startup recovery for an image change the maintenance agent was
+  killed in (`reconcile_on_startup = "converge"`, contract `AGT-900`).** The
+  default stays `"off"`: startup reports the interrupted operation and changes
+  nothing, exactly as before. With `"converge"`, after reporting it the agent
+  holds the maintenance lock (state-changing requests get 409; reads are
+  served) and acts only on proof: it moves the fixed tag back to the recorded
+  previous image when the container still runs that image (the kill landed
+  between `docker tag` and `compose up`); it finishes an inline rollback whose
+  journal record says it was armed and whose tag is already on the previous
+  image (`compose up`, health gate, verify by image id); or it accepts,
+  without touching Docker, an upgrade recorded as verified whose image runs
+  under the tag and answers `/ready`. Everything else, including a new image
+  that is running but never passed the health gate, is reported as
+  `recovery_required` and left alone; with Docker unreadable it defers. It
+  never pulls, never runs `down`, and tries an action at most twice per
+  record. The interrupted operation stays `failed(agent_restart_interrupted)`;
+  the recovery is a separate `reconcile.startup` operation, and a record is
+  removed only after the result is verified and audited. `GET /v1/status`
+  gains `recovery_required` and `reconcile` (only in `"converge"` mode), and
+  each interrupted operation `reconcile_outcome`. A second agent process on
+  the same state directory does not reconcile (instance lock). An older agent
+  refuses to start with the new key in its config: remove it before a
+  downgrade.
 
 - **The maintenance agent's crash journal no longer names the previous image
   as an upgrade's target (ADR-0061 finding F1).** After `docker compose up`

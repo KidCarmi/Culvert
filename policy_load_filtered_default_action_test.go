@@ -17,12 +17,11 @@ package main
 // a GENUINELY empty policy still allows, so the fix does not silently turn
 // every zero-rule deployment into deny.
 //
-// Found by Codex review on PR #1651 against the SEC-POLICYACTION-1 load gate,
-// confirmed against the startup ordering in main.go (initPolicy runs before
-// initRewriteAndDefaultAction) before any code was changed. The hazard predates
-// that gate — the SubjectMatch and invalid-auth refusals could empty a rulebase
-// the same way — but the action gate made it reachable from a far more
-// plausible file, so the tests below cover all three refusal reasons.
+// Found by Codex review on PR #1651 against the original action load gate.
+// The load-count invariant remains important for other invalid rule shapes
+// (unsupported access scopes, access rules carrying auth specs, invalid auth).
+// POL-004 now retains unrecognized actions for terminal runtime blocking;
+// these rejection fixtures deliberately exercise the remaining load gates.
 
 import (
 	"encoding/json"
@@ -79,18 +78,17 @@ func derivedDefaultAction(t *testing.T, rulesConfigured int) string {
 	return defaultPolicyAction()
 }
 
-// A rule the gate refuses because this build cannot dispatch its action. "Deny"
-// is the spelling an operator reaches for (the real ones are Drop/Block_Page),
-// and it is also the shape a binary downgrade produces.
-const dropTestUnknownActionRules = `[
-  {"name":"block-one","priority":10,"destFQDN":"blocked.example.com","action":"Deny"},
-  {"name":"block-two","priority":20,"destFQDN":"also-blocked.example.com","action":"Deny"}
+// An access rule with SubjectMatch is refused because its source scope would
+// not be enforced by Stage 2. It must not turn the default policy to allow.
+const dropTestInvalidScopeRules = `[
+  {"name":"block-one","priority":10,"destFQDN":"blocked.example.com","action":"Allow","subjectMatch":{}},
+  {"name":"block-two","priority":20,"destFQDN":"also-blocked.example.com","action":"Allow","subjectMatch":{}}
 ]`
 
 // ── Positive: the defect case now fails closed ────────────────────────────────
 
 func TestSECPOLICYDROP1_PolicyFilteredToEmptyStillDeniesByDefault(t *testing.T) {
-	ps := loadIntoFreshStore(t, dropTestUnknownActionRules)
+	ps := loadIntoFreshStore(t, dropTestInvalidScopeRules)
 
 	if got := len(ps.List()); got != 0 {
 		t.Fatalf("precondition: expected every rule refused, got %d installed", got)
@@ -111,7 +109,7 @@ func TestSECPOLICYDROP1_PolicyFilteredToEmptyStillDeniesByDefault(t *testing.T) 
 // ever reports the same action for both, the fix has stopped doing anything and
 // the tests above would pass vacuously.
 func TestSECPOLICYDROP1_PreFixCountWouldHaveSelectedAllow(t *testing.T) {
-	ps := loadIntoFreshStore(t, dropTestUnknownActionRules)
+	ps := loadIntoFreshStore(t, dropTestInvalidScopeRules)
 
 	preFix := derivedDefaultAction(t, len(ps.List())) // what the shim used to pass
 	postFix := derivedDefaultAction(t, ps.ConfiguredRuleCount())
@@ -124,21 +122,20 @@ func TestSECPOLICYDROP1_PreFixCountWouldHaveSelectedAllow(t *testing.T) {
 	}
 }
 
-// Every refusal reason can empty a rulebase, not just the action gate the
-// review was looking at. Each subtest asserts the file is fully refused AND the
-// derivation still denies.
+// Each remaining refusal reason can empty a rulebase. Every subtest asserts
+// that rejected rules still count as configured and the default remains deny.
 func TestSECPOLICYDROP1_EveryRefusalReasonKeepsTheDenyDefault(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
 	}{
 		{
-			name: "unknown action",
-			body: dropTestUnknownActionRules,
+			name: "unsupported access scope",
+			body: dropTestInvalidScopeRules,
 		},
 		{
-			name: "subjectMatch on an access rule",
-			body: `[{"name":"scoped","priority":10,"destFQDN":"blocked.example.com","action":"Drop","subjectMatch":{}}]`,
+			name: "auth spec on an access rule",
+			body: `[{"name":"scoped","priority":10,"destFQDN":"blocked.example.com","action":"Drop","auth":{}}]`,
 		},
 		{
 			name: "invalid auth rule",
@@ -203,7 +200,7 @@ func TestSECPOLICYDROP1_MissingPolicyFileStillAllows(t *testing.T) {
 func TestSECPOLICYDROP1_PartiallyRefusedFileIsUnchanged(t *testing.T) {
 	ps := loadIntoFreshStore(t, `[
   {"name":"survivor","priority":10,"destFQDN":"ok.example.com","action":"Drop"},
-  {"name":"refused","priority":20,"destFQDN":"blocked.example.com","action":"Deny"}
+  {"name":"refused","priority":20,"destFQDN":"blocked.example.com","action":"Allow","subjectMatch":{}}
 ]`)
 
 	if got := len(ps.List()); got != 1 {
@@ -224,7 +221,7 @@ func TestSECPOLICYDROP1_PartiallyRefusedFileIsUnchanged(t *testing.T) {
 // BOTH directions. The errata contract ("explicit configuration wins") is not
 // softened by the refusal accounting, which only feeds the unset case.
 func TestSECPOLICYDROP1_ExplicitDefaultActionStillWins(t *testing.T) {
-	ps := loadIntoFreshStore(t, dropTestUnknownActionRules)
+	ps := loadIntoFreshStore(t, dropTestInvalidScopeRules)
 
 	for _, explicit := range []string{"allow", "deny"} {
 		t.Run(explicit, func(t *testing.T) {
@@ -242,7 +239,7 @@ func TestSECPOLICYDROP1_ExplicitDefaultActionStillWins(t *testing.T) {
 // clear it, or one bad file would pin the store at "configured" forever and the
 // count would drift further from the truth on every reload.
 func TestSECPOLICYDROP1_CleanReloadClearsTheRefusalCount(t *testing.T) {
-	ps := loadIntoFreshStore(t, dropTestUnknownActionRules)
+	ps := loadIntoFreshStore(t, dropTestInvalidScopeRules)
 	if got := ps.DroppedOnLoad(); got != 2 {
 		t.Fatalf("precondition: DroppedOnLoad got %d, want 2", got)
 	}
@@ -264,7 +261,7 @@ func TestSECPOLICYDROP1_CleanReloadClearsTheRefusalCount(t *testing.T) {
 // describes a file the store no longer points at is not a count anyone can
 // reason about. (CodeRabbit, PR #1651.)
 func TestSECPOLICYDROP1_AdoptingAMissingFileClearsTheRefusalCount(t *testing.T) {
-	ps := loadIntoFreshStore(t, dropTestUnknownActionRules)
+	ps := loadIntoFreshStore(t, dropTestInvalidScopeRules)
 	if got := ps.DroppedOnLoad(); got != 2 {
 		t.Fatalf("precondition: DroppedOnLoad got %d, want 2", got)
 	}
@@ -286,7 +283,7 @@ func TestSECPOLICYDROP1_AdoptingAMissingFileClearsTheRefusalCount(t *testing.T) 
 // count exactly as they were: reporting refusals from a load that did not
 // happen would be the same confusion in the other direction.
 func TestSECPOLICYDROP1_MalformedFileLeavesTheCountUntouched(t *testing.T) {
-	ps := loadIntoFreshStore(t, dropTestUnknownActionRules)
+	ps := loadIntoFreshStore(t, dropTestInvalidScopeRules)
 	before := ps.ConfiguredRuleCount()
 
 	path := filepath.Join(t.TempDir(), "broken.json")
@@ -310,8 +307,8 @@ func TestSECPOLICYDROP1_MalformedFileLeavesTheCountUntouched(t *testing.T) {
 // this pins that it is safe to call while the store is being reloaded and
 // listed, and that it never reports a count below the refusals already banked.
 func TestSECPOLICYDROP1_ConfiguredRuleCountIsRaceFree(t *testing.T) {
-	ps := loadIntoFreshStore(t, dropTestUnknownActionRules)
-	reload := writePolicyFileForDropTest(t, dropTestUnknownActionRules)
+	ps := loadIntoFreshStore(t, dropTestInvalidScopeRules)
+	reload := writePolicyFileForDropTest(t, dropTestInvalidScopeRules)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {

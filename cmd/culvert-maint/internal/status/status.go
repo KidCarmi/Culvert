@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/journal"
@@ -44,6 +45,9 @@ type Provider struct {
 	// journal is the crash-recovery journal. Optional: nil reports no
 	// interrupted operations (tests, and builds that do not journal).
 	journal *journal.Journal
+	// reconcile is the opt-in startup reconcile's tracker. nil (the default,
+	// reconcile_on_startup = "off") adds nothing to the status.
+	reconcile *server.ReconcileTracker
 }
 
 // WithJournal makes the provider report the operations a previous agent
@@ -51,6 +55,31 @@ type Provider struct {
 func (p *Provider) WithJournal(j *journal.Journal) *Provider {
 	p.journal = j
 	return p
+}
+
+// WithReconcile makes the provider report the startup reconcile
+// (Status.Reconcile, Status.RecoveryRequired and each interrupted operation's
+// reconcile_outcome). Only wired when reconcile_on_startup = "converge".
+// Returns p.
+func (p *Provider) WithReconcile(t *server.ReconcileTracker) *Provider {
+	p.reconcile = t
+	return p
+}
+
+// addReconcile fills the reconcile fields from the tracker.
+func (p *Provider) addReconcile(st *server.Status) {
+	if p.reconcile == nil {
+		return
+	}
+	snap := p.reconcile.Snapshot()
+	st.Reconcile = &snap
+	rr := p.reconcile.RecoveryRequired()
+	st.RecoveryRequired = &rr
+	for i := range st.InterruptedOperations {
+		if r, ok := p.reconcile.RecordFor(st.InterruptedOperations[i].OpID); ok {
+			st.InterruptedOperations[i].SetReconcile(r)
+		}
+	}
 }
 
 // New constructs a Provider.
@@ -70,16 +99,17 @@ func New(cfg *config.Config, mgr *ops.Manager, r *runner.Runner) (*Provider, err
 // Snapshot implements server.StatusProvider.
 func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 	st := p.composeSnapshot(ctx)
-	p.addInterrupted(ctx, &st)
+	p.addInterrupted(&st)
+	p.addPinnedTag(ctx, &st)
+	p.addReconcile(&st)
 	return st, nil
 }
 
 // addInterrupted fills the interrupted-operation report. The list comes from
-// the journal alone, so it is complete when Docker is down; the two live facts
-// (which image is running, where the fixed tag is) are added when Docker can
-// be read and are reported as unknown when it cannot. Read-only, and it costs
-// no docker call unless a record exists.
-func (p *Provider) addInterrupted(ctx context.Context, st *server.Status) {
+// the journal alone, so it is complete when Docker is down; the live fact it
+// adds (which image is running) is reported as unknown when Docker cannot be
+// read. Read-only, and it makes no docker call of its own.
+func (p *Provider) addInterrupted(st *server.Status) {
 	if p.journal == nil {
 		return
 	}
@@ -106,11 +136,38 @@ func (p *Provider) addInterrupted(ctx context.Context, st *server.Status) {
 		}
 		st.InterruptedOperations = append(st.InterruptedOperations, d)
 	}
-	if len(st.InterruptedOperations) == 0 {
-		return
-	}
+}
+
+// pinnedTagReadBudget bounds the fixed-tag read of one status call. A var so a
+// test can shorten it.
+var pinnedTagReadBudget = 5 * time.Second
+
+// addPinnedTag reports where the fixed proxy tag is and whether the running
+// container is on the same image. Read-only: one `docker image inspect`.
+//
+// It is reported on every status, not only while an interrupted operation is
+// outstanding. A journal record is one way the tag and the container come
+// apart, not the only one: an apply whose `up` failed can go terminal — record
+// retired — with the tag left on the target (realignPinnedTagAfterFailedUp
+// names the cases), and the tag can be moved by hand. In each of those the
+// next `docker compose up -d` changes the image the proxy runs, and before
+// this nothing in the status said so.
+//
+// Two things a reader must know. During a running apply or rollback the tag is
+// moved before the container is recreated, so matches_running is false for
+// that moment; it is a divergence only when no operation is running. And the
+// tag is read even when the compose read failed: a compose file that no longer
+// loads is one of the ways the tag is left ahead, and exactly then it must be
+// visible. A daemon that does not answer costs at most pinnedTagReadBudget.
+func (p *Provider) addPinnedTag(ctx context.Context, st *server.Status) {
 	pt := &server.PinnedTagStatus{}
-	id, perr := p.runner.PinnedTagImageID(ctx)
+	// One local image inspect answers in milliseconds. It gets its own short
+	// budget so that a slow daemon costs a status call at most this long, not
+	// a whole stage timeout: the status endpoint is polled, and its callers
+	// time out in seconds.
+	tctx, cancel := context.WithTimeout(ctx, pinnedTagReadBudget)
+	defer cancel()
+	id, perr := p.runner.PinnedTagImageID(tctx)
 	if perr != nil {
 		pt.Error = "the fixed tag could not be inspected"
 	} else {

@@ -78,6 +78,11 @@ type Config struct {
 	// Default per-stage timeout. Default 5m.
 	StageTimeout time.Duration
 
+	// InterruptedSettle is how long after the agent process started a
+	// tag+recreate waits before it acts. Default 75s; 0 turns the wait off.
+	// See parseInterruptedSettle.
+	InterruptedSettle time.Duration
+
 	// Retention for operations/<op_id>.log and audit.jsonl. Default 30.
 	LogRetentionDays int
 
@@ -101,7 +106,32 @@ type Config struct {
 	// an empty list. The CLI flag --allow-peers is now removed; this
 	// is the single config surface.
 	AllowPeers []string
+
+	// ReconcileOnStartup selects what the agent does with an interrupted
+	// image change it finds in the crash journal at startup (contract
+	// AGT-900, owner decision 1). Default ReconcileOff: report only and
+	// change nothing in Docker (AGT-004). ReconcileConverge: additionally
+	// run the conservative converge reconcile (server/startup_reconcile.go),
+	// which only retags to the recorded prior image, finishes a rollback the
+	// journal proves was armed, or adopts an upgrade the journal proves was
+	// verified; everything else is reported as recovery_required.
+	//
+	// GUI-parity deferral (recorded, like other startup-only/host-trust keys):
+	// this is a host-local, startup-only safety switch in the agent's root-owned
+	// config.toml. It has no runtime mutation endpoint on purpose; its effect is
+	// surfaced read-only in GET /v1/status `reconcile` (absent when off).
+	ReconcileOnStartup ReconcileMode
 }
+
+// ReconcileMode is the closed set of reconcile_on_startup values.
+type ReconcileMode string
+
+const (
+	// ReconcileOff reports interrupted operations and changes nothing (default).
+	ReconcileOff ReconcileMode = "off"
+	// ReconcileConverge runs the opt-in converge reconcile at startup.
+	ReconcileConverge ReconcileMode = "converge"
+)
 
 // IsAllowedBackupPath reports whether p (a path AS SEEN BY THE CLI
 // CONTAINER) is allowed by AllowedBackupDir. Uses path-component
@@ -138,11 +168,13 @@ type rawConfig struct {
 	ReadyPath           string   `toml:"ready_path"`
 	OperationTimeout    string   `toml:"operation_timeout"`
 	StageTimeout        string   `toml:"stage_timeout"`
+	InterruptedSettle   string   `toml:"interrupted_settle"`
 	LogRetentionDays    *int     `toml:"log_retention_days"`
 	AllowedBackupDir    string   `toml:"allowed_backup_dir"`
 	ImageAllowlist      string   `toml:"image_allowlist"`
 	ProxyRepo           string   `toml:"proxy_repo"`
 	AllowPeers          []string `toml:"allow_peers"`
+	ReconcileOnStartup  string   `toml:"reconcile_on_startup"`
 }
 
 const (
@@ -155,10 +187,13 @@ const (
 	defaultReadyPath        = "/ready"
 	defaultOperationTimeout = "30m"
 	defaultStageTimeout     = "5m"
-	defaultLogRetention     = 30
-	defaultAllowedBackupDir = "/backup"
-	defaultImageAllowlist   = `^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$`
-	defaultProxyRepo        = "ghcr.io/kidcarmi/culvert"
+	// 60s is the proxy's stop_grace_period in docker-compose.yml; the rest is
+	// Docker's own margin after it escalates to SIGKILL.
+	defaultInterruptedSettle = "75s"
+	defaultLogRetention      = 30
+	defaultAllowedBackupDir  = "/backup"
+	defaultImageAllowlist    = `^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$`
+	defaultProxyRepo         = "ghcr.io/kidcarmi/culvert"
 )
 
 // proxyRepoShapeRE bounds a repository reference: it must look like a
@@ -374,6 +409,10 @@ func validate(raw *rawConfig) (*Config, error) {
 	}
 	cfg.StageTimeout = d2
 
+	if cfg.InterruptedSettle, err = parseInterruptedSettle(raw.InterruptedSettle, cfg.OperationTimeout); err != nil {
+		return nil, err
+	}
+
 	// log_retention_days — default 30. Must be > 0 if present.
 	lr := defaultLogRetention
 	if raw.LogRetentionDays != nil {
@@ -446,7 +485,28 @@ func validate(raw *rawConfig) (*Config, error) {
 		cfg.AllowPeers = append(cfg.AllowPeers, t)
 	}
 
+	mode, err := validateReconcileMode(raw.ReconcileOnStartup)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ReconcileOnStartup = mode
+
 	return cfg, nil
+}
+
+// validateReconcileMode maps reconcile_on_startup onto the closed set. Absent
+// or empty is "off"; any other value — including a mode this build does not
+// implement, such as an adopt-anything variant — fails Load, so a typo can
+// never silently leave the operator on a different behaviour than intended.
+func validateReconcileMode(v string) (ReconcileMode, error) {
+	switch ReconcileMode(v) {
+	case "", ReconcileOff:
+		return ReconcileOff, nil
+	case ReconcileConverge:
+		return ReconcileConverge, nil
+	default:
+		return "", fmt.Errorf("config: reconcile_on_startup must be %q or %q, got %q", ReconcileOff, ReconcileConverge, v)
+	}
 }
 
 // validateHealthPath returns either the supplied path (if non-empty
@@ -467,4 +527,36 @@ func validateHealthPath(name, supplied, def string) (string, error) {
 		}
 	}
 	return v, nil
+}
+
+// parseInterruptedSettle reads interrupted_settle.
+//
+// When the agent dies in the middle of an operation, systemd makes sure no
+// docker command of that agent is still running when the next one starts, but
+// dockerd carries on with the last request it received. For a container stop
+// that lasts as long as the proxy takes to exit: up to its stop_grace_period,
+// then SIGKILL. Until that is over, a container that looks fine can be on its
+// way out, and an operation that recreates nothing would pass its health gate
+// against it. The settle window is the bound on that request, counted from the
+// start of the agent process: it must be longer than the proxy's
+// stop_grace_period.
+//
+// It must also be shorter than operation_timeout: the wait happens inside the
+// operation that tags and recreates, and one that could never outlast it
+// would always fail.
+func parseInterruptedSettle(raw string, operationTimeout time.Duration) (time.Duration, error) {
+	if raw == "" {
+		raw = defaultInterruptedSettle
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: interrupted_settle is malformed: %w", err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("config: interrupted_settle must not be negative, got %s", d)
+	}
+	if d >= operationTimeout {
+		return 0, fmt.Errorf("config: interrupted_settle (%s) must be shorter than operation_timeout (%s): the wait runs inside the operation", d, operationTimeout)
+	}
+	return d, nil
 }

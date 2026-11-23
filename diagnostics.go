@@ -263,6 +263,7 @@ func buildOperatorContract() OperatorContract {
 	// Rules the last policy load rejected fail-closed. Contributes nothing when
 	// every rule in the file was accepted.
 	checks = append(checks, checkPolicyRulesDroppedOnLoad(policyStore)...)
+	checks = append(checks, checkPolicyRulesUnknownAction(policyStore)...)
 	// Enabled destination-country rules while no GeoIP database is loaded: such
 	// rules can never match. Contributes nothing when a database is loaded or no
 	// enabled rule uses a country condition.
@@ -565,6 +566,45 @@ func checkPolicyRulesDroppedOnLoad(ps *PolicyStore) []OperatorContractCheck {
 		Message: fmt.Sprintf("%d rule(s) in the policy file were rejected at load and are NOT enforced: %s%s",
 			d.total, strings.Join(listed, ", "), more),
 		OperatorAction: "Recreate the intended rules under Policy (the editor validates them). The rejected entries are re-reported at every load while they remain in the policy file; the next policy change rewrites the file without them, and this row clears at the next load.",
+	}}
+}
+
+// checkPolicyRulesUnknownAction surfaces access rules the running policy RETAINS
+// with an action this build does not dispatch (POL-004). Such a rule matches and
+// blocks. The log line written when it was loaded is level-gated and scrolls
+// away; this row is computed from the live rulebase each time, so it stays for
+// as long as the rule does and clears when the rule is edited or removed. Names
+// are bounded so a large imported rulebase cannot bloat the report.
+func checkPolicyRulesUnknownAction(ps *PolicyStore) []OperatorContractCheck {
+	const maxListed = 10
+	var listed []string
+	total := 0
+	rules := ps.List()
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) != ruleTypeAccess {
+			continue
+		}
+		if _, known := canonicalPolicyAction(rules[i].Action); known {
+			continue
+		}
+		total++
+		if len(listed) < maxListed {
+			listed = append(listed, fmt.Sprintf("%q (action %q)", sanitizeLog(rules[i].Name), sanitizeLog(string(rules[i].Action))))
+		}
+	}
+	if total == 0 {
+		return nil
+	}
+	more := ""
+	if total > len(listed) {
+		more = fmt.Sprintf(" and %d more", total-len(listed))
+	}
+	return []OperatorContractCheck{{
+		Code:   "policy_rules_unknown_action",
+		Status: diagWarn,
+		Message: fmt.Sprintf("%d rule(s) carry an action this version does not recognise; they are kept and BLOCK the traffic they match: %s%s",
+			total, strings.Join(listed, ", "), more),
+		OperatorAction: "These rules usually come from a newer release (a control-plane snapshot, a restored backup or a policy file). Upgrade this node to the version that wrote them, or edit each rule under Policy and choose a supported action. Deleting a rule removes the restriction it expressed.",
 	}}
 }
 

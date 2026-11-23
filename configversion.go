@@ -482,7 +482,7 @@ func validateConfigBackup(b *configBackup) []string {
 	// Validate each policy rule.
 	var invalidRules int
 	for i := range b.PolicyRules {
-		if err := validatePolicyRule(b.PolicyRules[i], nil, -1); err != nil {
+		if err := validateStoredPolicyRule(b.PolicyRules[i], nil, -1); err != nil {
 			invalidRules++
 		}
 	}
@@ -627,7 +627,9 @@ func applyConfigBackup(b *configBackup) error {
 	// Policy rules: bulk replace.
 	var validRules []PolicyRule
 	for i := range b.PolicyRules {
-		if err := validatePolicyRule(b.PolicyRules[i], nil, -1); err != nil {
+		// Stored data: an unknown action is retained, not skipped (POL-004 —
+		// see validateStoredPolicyRule). ReplaceAll announces each one.
+		if err := validateStoredPolicyRule(b.PolicyRules[i], nil, -1); err != nil {
 			continue
 		}
 		validRules = append(validRules, b.PolicyRules[i])
