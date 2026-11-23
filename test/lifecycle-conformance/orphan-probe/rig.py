@@ -296,10 +296,11 @@ def leftovers(t):
 
 
 def healthy(t, want=None):
-    """One canonical running container, the tag on its image, the port answering.
-    A never-started leftover is tolerated here and reported as a note."""
+    """One running container, the tag on its image, the port answering. A
+    never-started leftover, and a serving container still under Compose's
+    temporary name, are tolerated here and reported as notes."""
     cs = [c for c in t["containers"] if c not in leftovers(t)]
-    if len(cs) != 1 or not cs[0].startswith("canonical:running:"):
+    if len(cs) != 1 or ":running:" not in cs[0]:
         return False
     v = cs[0].rsplit(":", 1)[1]
     return t["tag"] == v == t["serving"] and (want is None or v == want)
@@ -336,6 +337,11 @@ def judge(rec):
         bad.append(f"silent divergence: Docker at rest is {rest} and nothing reports it")
     if healthy(rest) and leftovers(rest):
         notes.append("a never-started temporary container was left behind")
+    if healthy(rest) and any(c.startswith("tempname:running:") for c in rest["containers"]):
+        # `compose up -d` after a recreate interrupted between delete and rename
+        # starts the replacement under its temporary name. It serves the right
+        # image; the container is not called what container_name says.
+        notes.append("the serving container kept Compose's temporary name (container_name not applied)")
     if rec["truth_at_restart"]["serving"] != "down" and rest["serving"] == "down":
         notes.append("the proxy stopped serving AFTER the new agent had started")
     elif rest["serving"] == "down":

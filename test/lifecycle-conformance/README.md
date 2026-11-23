@@ -275,7 +275,7 @@ did: its listener stays open from SIGTERM until its proxy-server shutdown hook
 That is read from `main_shutdown.go` and `healthcheck.go`; the probe's proxy is
 a stand-in, and how long the real proxy takes to exit was not measured.
 
-**Startup convergence (#2039, `reconcile_on_startup = "converge"`), 22 trials.**
+**Startup convergence as first merged (#2039, `reconcile_on_startup = "converge"`), 22 trials.**
 With a proxy that exits at once, all 14 kill points end as intended: realign or
 no-op where the container is on the prior image, `recovery_required` where the
 stack is down or the target is live. With a draining proxy, 4 of 8 are
@@ -285,6 +285,38 @@ image, realigns the tag, records `converged` and retires the record about 5 s
 after the crash; the container then exits. Unlike a rollback this needs no
 operator timing, and the realign path makes no readiness probe, so the `/ready`
 change does not cover it. Not fixed here; it is evidence for the AGT-900 gate.
+
+**With the fixes together (2026-11-23).** The same probe, with the agent built
+from the unit fence, the settle wait, the always-reported `pinned_tag` and (for
+the last rows) the corrected startup reconcile, and the proxy's `/ready` change.
+Kill points -1, 0, 4, 8, 9, 12; settle and stop grace scaled to 20 s / 15 s
+(`ORPHAN_PROBE_SETTLE`, `ORPHAN_PROBE_STOP_GRACE`) so that the relation the
+agent relies on (settle > stop grace > the proxy's drain) is the shipped one and
+the run stays practical.
+
+| Run | Trials | Violations | What changed |
+|---|---|---|---|
+| Stand-in proxy, shipped unit | 18 + 2 | 0 | The rollback during a 12 s drain no longer reports success: it waits out the window, the stale stop has finished by then, and it fails its health gate and keeps the record |
+| Real Culvert proxy binary (v1 from `main`, v2 with the `/ready` change), shipped unit | 18 | 0 | Same properties with the real proxy, including with a request pending on its admin UI, where its shutdown takes its real 5 s |
+| Startup convergence as merged in #2039, stand-in | 10 | 4 | Unchanged: realign, `converged`, record retired, proxy then exits |
+| Startup convergence with the correction, stand-in | 10 | 0 | Those four end as `recovery_required` with the record kept |
+| Startup convergence with the correction, real proxy binary | 8 | 0 | |
+
+The real proxy binary, alone: SIGTERM to exit takes 0.06 s when idle and 5.0 s
+with a request pending on the admin UI; during those 5 s `/ready` answers 200
+on `main` and 503 with the change, and `/health` answers 200 in both.
+
+Two things these runs show that are not safety failures and are not fixed here:
+- After a crash between Compose's stop and delete, the first
+  `docker compose up -d` only cleans up. The rollback fails its health gate,
+  keeps the record and leaves the proxy down; a second rollback succeeds.
+- After a crash between Compose's delete and rename, `up` starts the
+  replacement under Compose's temporary name. It serves the right image and the
+  operation's success is correct; the container is not called what
+  `container_name` says until the next recreate.
+
+The "real proxy" is the real binary in a minimal image, not the release image's
+Alpine layers (Docker Hub was not reachable where this was run).
 
 **Not covered.** A crash of `dockerd` or the host; a proxy that ignores
 SIGTERM; Compose versions that recreate in a different order; the classic image
