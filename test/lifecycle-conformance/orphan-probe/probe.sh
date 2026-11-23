@@ -346,8 +346,27 @@ install_agent() { # $1 = extra config line (may be empty)
   docker run -d --name "$SYSD" --privileged --network host --tmpfs /run --tmpfs /tmp -v /usr:/usr:ro -v "$W/ul:/usr/local" \
     -v "$W/srv:/srv/culvert" -v "$W/pkg:/pkg:ro" -v "$AGENT_BIN:/culvert-maint.bin:ro" \
     -v "$REAL_SOCK:/dk/real.sock" -v "$W/p:/dk/p" -e container=docker "$BASE" /init.sh >/dev/null || inc "systemd container did not start"
-  for _ in $(seq 1 60); do [ "$(docker exec "$SYSD" systemctl is-system-running 2>/dev/null)" = running ] && break; sleep 0.5; done
-  [ "$(docker exec "$SYSD" systemctl is-system-running 2>/dev/null)" = running ] || inc "systemd did not reach 'running' in the container"
+  # The image carries the host's whole unit set, so on a general-purpose machine some unrelated
+  # unit may fail inside a container and systemd reports 'degraded'. That is still a working
+  # supervisor, which is all the probe needs; the failed units are printed so the run says what
+  # it ran on. Anything else (still 'starting' after 3 minutes, no answer) is INCOMPLETE, with
+  # the state shown instead of hidden.
+  sysd_state=""
+  for _ in $(seq 1 360); do
+    sysd_state="$(docker exec "$SYSD" systemctl is-system-running 2>/dev/null)"
+    case "$sysd_state" in running|degraded) break ;; esac
+    sleep 0.5
+  done
+  case "$sysd_state" in
+    running) ;;
+    degraded) echo "systemd: degraded; failed units: $(docker exec "$SYSD" systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')" ;;
+    *)
+      echo "systemd state: '${sysd_state:-no answer}'"
+      docker exec "$SYSD" systemctl list-jobs --no-pager 2>&1 | head -40
+      docker exec "$SYSD" systemctl --failed --no-pager 2>&1 | head -40
+      docker logs "$SYSD" 2>&1 | tail -60
+      inc "systemd did not finish starting in the container" ;;
+  esac
   # The unit Wants=docker.service; the host's unit files are in the image. The agent must
   # reach the HOST daemon through /run/docker.sock, so no second daemon may start here.
   docker exec "$SYSD" systemctl mask docker.service docker.socket containerd.service >/dev/null 2>&1
