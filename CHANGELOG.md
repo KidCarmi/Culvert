@@ -18,8 +18,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   names an interface on the proxy host and has no meaning across a proxy
   boundary (RFC 9844), so such a destination is now **refused** rather than
   normalized: `400` with status `INVALID_HOST` (`source=ipv6-zone`) on plain
-  HTTP and CONNECT, a general-failure reply on SOCKS5 (whose DOMAIN form could
-  carry the same text), before authentication, any matcher or any dial. The
+  HTTP and CONNECT, after the connection limit, IP filter and rate limiter and
+  before authentication, any matcher or any dial. SOCKS5 does not evaluate
+  access rules, but its DOMAIN form could carry the same text to the blocklist
+  and the dialer; it is refused there with reply `0x02` (connection not
+  allowed), after SOCKS5 negotiation and before any matcher or dial. The
   Policy Tester refuses the same input instead of reporting a policy answer
   for it. Zone-free IPv6 destinations and internationalized hostnames —
   including percent-encoded ones — are unaffected.

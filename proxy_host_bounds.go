@@ -509,9 +509,11 @@ func destIPv6Zoned(authority string) bool {
 }
 
 // rejectZonedDestHost refuses a zoned IPv6 destination on the HTTP/CONNECT path
-// with the product's INVALID_HOST outcome. It runs after the length tiers, so
-// the host it records is already bounded, and before the connection limit,
-// authentication and every matcher, so nothing is evaluated or dialed for it.
+// with the product's INVALID_HOST outcome. handleRequest calls it after the
+// length tiers (so the host it records is bounded), the connection limit, the
+// IP filter and the rate limiter, and before Stage-1 authentication — the first
+// matcher — so nothing is evaluated or dialed for it. The row carries no
+// identity for that reason: resolving one would run a destination matcher.
 func rejectZonedDestHost(w http.ResponseWriter, r *http.Request, clientIP, reqID string) bool {
 	if !destIPv6Zoned(r.Host) {
 		return false
@@ -523,31 +525,26 @@ func rejectZonedDestHost(w http.ResponseWriter, r *http.Request, clientIP, reqID
 	return true
 }
 
-// gateDestHost runs the destination-host gates that sit between the raw pre-cap
-// and the connection limit in handleRequest, in order: the canonical length
-// tier (or, when the host has no canonical form, the bound on the raw bare
-// host), then the zoned-IPv6 refusal. refused=true means a terminal response
-// was written. The normalized host is returned for the RISK-013 validity gate
-// further down, which reuses it instead of normalizing again.
+// gateDestHost runs the destination-host LENGTH gates that sit between the raw
+// pre-cap and the connection limit in handleRequest: the canonical tier, or,
+// when the host has no canonical form, the bound on the raw bare host.
+// refused=true means a terminal response was written. The normalized host is
+// returned for the RISK-013 validity gate further down, which reuses it instead
+// of normalizing again.
 //
-// The two length branches were inline in handleRequest; they moved here
-// unchanged when the zone refusal joined them, so that function carries one
-// branch for this stage instead of four.
-func gateDestHost(w http.ResponseWriter, r *http.Request, clientIP, reqID string) (normHost string, normOK, refused bool) {
+// The two branches were inline in handleRequest and moved here unchanged, so
+// that the zoned-IPv6 refusal added further down that function did not raise
+// its branch count.
+func gateDestHost(w http.ResponseWriter, r *http.Request, clientIP string) (normHost string, normOK, refused bool) {
 	normHost, normOK = canonicalDestHost(r.Host)
 	if normOK {
-		if rejectOversizeCanonicalHost(w, "HTTP", clientIP, normHost) {
-			return normHost, normOK, true
-		}
-	} else if rejectOversizeUnnormalizableHost(w, "HTTP", clientIP, r.Host) {
-		// No canonical form ⇒ the canonical tier is unreachable, so bound the
-		// raw bare host instead. Without this, the band above maxDestHostLen and
-		// below the raw pre-cap reached Stage-1's matcher at full length and a
-		// terminal 407 returned before the INVALID_HOST refusal ever ran
-		// (Codex P2, PR #1446).
-		return normHost, normOK, true
+		return normHost, normOK, rejectOversizeCanonicalHost(w, "HTTP", clientIP, normHost)
 	}
-	return normHost, normOK, rejectZonedDestHost(w, r, clientIP, reqID)
+	// No canonical form ⇒ the canonical tier is unreachable, so bound the raw
+	// bare host instead. Without this, the band above maxDestHostLen and below
+	// the raw pre-cap reached Stage-1's matcher at full length and a terminal 407
+	// returned before the INVALID_HOST refusal ever ran (Codex P2, PR #1446).
+	return normHost, normOK, rejectOversizeUnnormalizableHost(w, "HTTP", clientIP, r.Host)
 }
 
 // socks5DestHostValidity is the SOCKS5 twin of the validity half of the gates
