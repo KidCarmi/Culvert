@@ -114,7 +114,7 @@ func reloadDraft(t *testing.T, policyPath string) (bool, []PolicyRule) {
 	t.Helper()
 	policyDraft.mu.Lock()
 	prevCand, prevState, prevPath := policyDraft.cand, policyDraft.state, policyDraft.path
-	policyDraft.cand = &PolicyStore{}
+	policyDraft.cand = newDraftCandidateStore()
 	policyDraft.state = draftState{}
 	policyDraft.mu.Unlock()
 	initPolicyDraft(policyPath)
