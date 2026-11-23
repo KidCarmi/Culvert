@@ -20,6 +20,7 @@ PROBE_APP_PORT, PROBE_PROJECT, PROBE_CNAME, PROBE_DRAIN.
 import itertools
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -32,7 +33,9 @@ PROJECT = os.environ["PROBE_PROJECT"]
 CNAME = os.environ["PROBE_CNAME"]
 # What the probe proxy does between SIGTERM and exit: "serving" (answers 200 on
 # /health and /ready, as Culvert's proxy does today), "notready" (/ready 503),
-# "closed" (listener closed at once).
+# "closed" (listener closed at once). With the real Culvert proxy the image
+# decides; "uihold" then keeps an admin-UI request pending so that its shutdown
+# takes its real 5 s.
 DRAIN = os.environ.get("PROBE_DRAIN", "serving")
 REAL = dict(os.environ, DOCKER_HOST="unix://" + os.environ["PROBE_REAL_SOCK"])
 SOCK = "/run/culvert-maint/culvert-maint.sock"
@@ -94,8 +97,40 @@ def truth():
         n, s, i = line.split("|")
         img = sh("docker", "inspect", i, "--format", "{{.Image}}").stdout.strip()
         cs.append(f"{'canonical' if n == CNAME else 'tempname'}:{s}:{ver(img)}")
-    serving = sh("curl", "-s", "-m", "2", f"http://127.0.0.1:{PORT}/health").stdout.strip() or "down"
+    serving = serving_version()
     return {"tag": ver(iid("culvert/proxy:pinned")), "containers": sorted(cs), "serving": serving}
+
+
+def serving_version():
+    """Which probe image answers on the port: v1, v2 or down. The stand-in proxy
+    prints its version; the real Culvert proxy reports it in its /health JSON
+    (built here as probe-v1 / probe-v2)."""
+    body = sh("curl", "-s", "-m", "2", f"http://127.0.0.1:{PORT}/health").stdout.strip()
+    if not body:
+        return "down"
+    try:
+        body = str(json.loads(body).get("version", "?"))
+    except (ValueError, AttributeError):
+        pass
+    return "v1" if body.endswith("v1") else "v2" if body.endswith("v2") else "?"
+
+
+_held = []
+
+
+def hold_ui_request():
+    """PROBE_DRAIN=uihold (real proxy): leave a request to the admin UI
+    unfinished, as a browser tab with a pending request would. The proxy's
+    shutdown then waits for it (5 s cap) with the proxy port still open."""
+    while _held:
+        try:
+            _held.pop().close()
+        except OSError:
+            pass
+    for _ in range(2):
+        s = socket.create_connection(("127.0.0.1", int(PORT) + 1), timeout=5)
+        s.sendall(b"GET / HTTP/1.1\r\nHost: probe\r\n")
+        _held.append(s)
 
 
 def mainpid():
@@ -136,9 +171,15 @@ def reset(stop_delay):
     dx("systemctl start culvert-maint")
     if not wait_agent(60):
         raise RuntimeError("agent did not start")
-    t = truth()
+    for _ in range(100):  # the real proxy takes a moment to listen
+        t = truth()
+        if t["serving"] != "down":
+            break
+        time.sleep(0.2)
     if t != {"tag": "v1", "containers": ["canonical:running:v1"], "serving": "v1"}:
         raise RuntimeError(f"bad start state {t}")
+    if DRAIN == "uihold":
+        hold_ui_request()
 
 
 def run_op(path, body, timeout=240):
@@ -203,7 +244,8 @@ def trial(k, stop_delay, follow):
     time.sleep(0.05)
     rec["apply_op"] = api("POST", "/v1/upgrades/apply", {"image_ref": images()["V2"]}).get("op_id")
     fired_path, t0 = f"{P}/fired-{tid}.json", time.time()
-    while time.time() - t0 < 40 and not os.path.exists(fired_path):
+    # An agent with the settle wait holds the tag+recreate until its window is over.
+    while time.time() - t0 < 150 and not os.path.exists(fired_path):
         time.sleep(0.02)
     if not os.path.exists(fired_path):
         rec.update(valid=False, why="kill point not reached")

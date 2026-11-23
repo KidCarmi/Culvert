@@ -41,6 +41,14 @@ for a in "$@"; do
 done
 HERE="$(cd "$(dirname "$0")" && pwd)"; REPO="$(cd "$HERE/../../.." && pwd)"
 REG_PORT="${ORPHAN_PROBE_REGISTRY_PORT:-5000}"; APP_PORT="${ORPHAN_PROBE_APP_PORT:-18080}"
+# ORPHAN_PROBE_SETTLE: write interrupted_settle = <value> into the agent's config (only for an
+# agent that knows the key; unset = the agent's own default, 75s). An agent with the settle
+# wait holds every tag+recreate until that long after its start, so each trial costs up to
+# twice the window. ORPHAN_PROBE_STOP_GRACE: the proxy's stop_grace_period (60s as shipped).
+# To shorten a run, scale both and keep settle > stop grace > the proxy's drain, e.g.
+# ORPHAN_PROBE_SETTLE=20s ORPHAN_PROBE_STOP_GRACE=15s: the relation the agent relies on is
+# the same, the wall clock is not.
+SETTLE="${ORPHAN_PROBE_SETTLE:-}"; STOP_GRACE="${ORPHAN_PROBE_STOP_GRACE:-60s}"
 REAL_SOCK="${ORPHAN_PROBE_DOCKER_SOCK:-/var/run/docker.sock}"
 SYSD=orphanprobe-sysd; PROJECT=orphanprobe; CNAME=orphanprobe-proxy; BASE=orphanprobe-sysd-base:1
 CERT_DIR="/etc/docker/certs.d/127.0.0.1:$REG_PORT"
@@ -96,6 +104,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'echo "INCOMPLETE: interrupted"; exit 2' INT TERM
 
+echo "settle=${SETTLE:-agent default} stop_grace=$STOP_GRACE"
 echo "docker $(docker version --format '{{.Server.Version}}') / compose $(docker compose version --short) / storage $(docker info --format '{{.Driver}}') / $(/lib/systemd/systemd --version | head -1) / $(sudo -V | head -1)"
 
 # ── agent, registry (from source, TLS: `docker manifest inspect` insists), two images ────
@@ -203,7 +212,7 @@ services:
     container_name: $CNAME
     restart: unless-stopped
     network_mode: host
-    stop_grace_period: 60s
+    stop_grace_period: $STOP_GRACE
     environment:
       STOP_DELAY: "\${STOP_DELAY:-0}"
       APP_PORT: "\${APP_PORT:-$APP_PORT}"
@@ -220,7 +229,7 @@ services:
     container_name: $CNAME
     restart: unless-stopped
     network_mode: host
-    stop_grace_period: 60s
+    stop_grace_period: $STOP_GRACE
     tmpfs: [/data, /tmp]
     environment:
       CULVERT_SESSION_SECRET: "$(openssl rand -hex 32)"
@@ -283,7 +292,7 @@ install_agent() { # $1 = extra config line (may be empty)
   # reach the HOST daemon through /run/docker.sock, so no second daemon may start here.
   docker exec "$SYSD" systemctl mask docker.service docker.socket containerd.service >/dev/null 2>&1
   docker exec "$SYSD" sh -c "ln -sfn /dk/real.sock /run/docker.sock; mkdir -p /etc/culvert-maint /etc/docker/certs.d/127.0.0.1:$REG_PORT /usr/local/bin /usr/local/libexec; chmod 755 /usr/local /usr/local/bin /usr/local/libexec"
-  { cat "$W/config.toml"; [ -n "$1" ] && echo "$1"; } > "$W/config.rendered.toml"
+  { cat "$W/config.toml"; [ -n "$SETTLE" ] && echo "interrupted_settle = \"$SETTLE\""; [ -n "$1" ] && echo "$1"; } > "$W/config.rendered.toml"
   docker cp "$W/config.rendered.toml" "$SYSD:/etc/culvert-maint/config.toml" >/dev/null
   docker cp "$W/certs/r.crt" "$SYSD:/etc/docker/certs.d/127.0.0.1:$REG_PORT/ca.crt" >/dev/null
   docker exec "$SYSD" sh -c "cat /etc/docker/certs.d/127.0.0.1:$REG_PORT/ca.crt >> /etc/ssl/certs/ca-certificates.crt"
@@ -347,9 +356,13 @@ PROBE_DRAIN=notready judge ready-fails-on-shutdown --trials="$(n "$MID")"; worse
 fi
 
 # ── 3. sensitivity: the same agent with the fence removed must show the hazard ───────────
+# (Stand-in proxy only: the control needs a stop that is still in flight when the agent
+# restarts, and the real proxy's stop is over by then.)
+if [ "$REAL_PROXY" = 0 ]; then
 docker exec "$SYSD" sh -c 'mkdir -p /etc/systemd/system/culvert-maint.service.d && printf "[Service]\nKillMode=process\n" > /etc/systemd/system/culvert-maint.service.d/zz-probe.conf && systemctl daemon-reload'
 run nofence-rollback-slow rollback "$SLOW" 9
 judge no-fence-control --trials=1 --expect-fence-violation; [ $? -eq 0 ] || { echo "INCOMPLETE: with KillMode=process the probe did not see a docker command outlive the agent; it cannot see the hazard"; worse 2; }
+fi
 
 fi
 # ── 4. optional: startup convergence (#2039) ─────────────────────────────────────────────
