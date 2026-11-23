@@ -542,7 +542,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 - **A stored default policy action that is not exactly `allow` or `deny` is
   now reported instead of silently enforced as deny (owner decision D,
-  `POL-005`).** Enforcement is unchanged everywhere: such a value is still
+  `POL-007`).** Enforcement is unchanged everywhere: such a value is still
   denied (fail-closed) and is never reinterpreted as allow. What changes is
   that it is visible. An `admin_settings.json` value such as `Allow`, `ALLOW`,
   `block` or ` allow` logs `AdminSettings: default_action "…" is not "allow"

@@ -39,7 +39,7 @@ amended:
       a configuration surface that does not exist. Invariant, code paths and
       tests are unchanged; whether such a variable should exist is a separate
       decision. Made with owner decision D (non-canonical default actions are
-      enforced as deny and reported, recorded as POL-005). POL-900's open
+      enforced as deny and reported, recorded as POL-007). POL-900's open
       question (boot-only derivation, and how a derived allow persists) is
       deliberately not resolved by this change.
 retired: []
@@ -173,7 +173,7 @@ contracts:
     validation: integration
     compatibility: "A rulebase written by a newer release must not become permissive on an older one."
 
-  - id: POL-005
+  - id: POL-007
     area: policy
     status: enforced
     owner_approved: false
