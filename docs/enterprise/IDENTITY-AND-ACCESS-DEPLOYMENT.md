@@ -12,6 +12,7 @@ How to deploy authentication, authorization, and administrator recovery — and 
 
 - Admin login → `VerifyUIUser` (local bcrypt) only; admin cookie `ps_ui_session` (`ui_auth.go:65,114`).
 - IdP callbacks → proxy cookie `ps_session` (`session.go:119`); they never issue an admin session.
+- The separation holds in the other direction too (owner Decision 2, 2026-11-23): **local admin accounts never authenticate proxy traffic** — not over HTTP `Proxy-Authorization`, not over SOCKS5 USER/PASS, and not as a fallback when no proxy IdP is configured. Proxy credentials resolve only through the shared resolver `resolvePresentedCredential` (`proxy_credential.go`). A node with admin accounts but no proxy IdP refuses every proxy request that requires authentication (fail closed); explicitly configured `Exempt` access is unaffected. Dedicated local proxy users are a planned follow-up (`roadmap/LOCAL-PROXY-USERS.md`).
 
 Consequences:
 - **An IdP outage does not lock admins out of the admin UI** (fail-safe for that scenario).

@@ -240,6 +240,30 @@ contracts:
     validation: integration
     compatibility: "Revocations are persisted and synchronised to HA peers."
 
+  - id: AUTH-005
+    area: authn-authz
+    status: enforced
+    owner_approved: false
+    invariant: "An admin-console credential never authenticates proxy traffic, over HTTP proxy Basic or SOCKS5, and when proxy authentication is required but no proxy provider can verify a presented credential the request is refused, never admitted unauthenticated."
+    authority: "Shared in-band proxy credential resolver (proxy_credential.go), Stage-1 gate (proxy.go resolveRequestAuth), credential-capable predicate (diagnostics.go hasCredentialCapableProvider). Owner Decision 2, 2026-11-23."
+    code:
+      - "proxy_credential.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a dedicated proxy-user provider behind the shared resolver"
+      forbidden:
+        - "the admin pair or a roster account resolving as a proxy identity on any channel"
+        - "falling back to the admin account after a proxy provider rejects a credential"
+        - "a removed or disabled proxy provider turning a gateway with accounts into unauthenticated access"
+    tests:
+      - {file: "proxy_auth_no_admin_test.go", name: TestProxyCredential_AdminPairNeverResolves}
+      - {file: "proxy_auth_no_admin_test.go", name: TestProxyAuthNoAdmin_AdminOnlyRefusesEveryCredential}
+      - {file: "proxy_auth_no_admin_test.go", name: TestProxyAuthNoAdmin_MissingProviderFailsClosed}
+      - {file: "socks5_parity_test.go", name: TestProxyCredentialParity_HTTPAndSOCKS5}
+    validation: integration
+    compatibility: "Breaking for deployments whose clients used the admin account for proxy authentication: they need an LDAP or OIDC provider (CHANGELOG, Changed (breaking)). Explicit Exempt access is unchanged."
+
   - id: TLS-001
     area: tls-inspection
     status: enforced

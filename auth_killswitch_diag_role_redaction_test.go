@@ -160,3 +160,44 @@ func TestKillSwitchRow_HandAssembledContractFailsClosed(t *testing.T) {
 		t.Error("an admin must receive the row unredacted")
 	}
 }
+
+// TestKillSwitchRow_AdminOnlyStateIsRedactedLikeNoVerifier: owner Decision 2
+// (2026-11-23) added the admin-only state — a usable administrator but no
+// proxy provider. Its admin row differs from the no-verifier row (different
+// cause, different repair), so rendering it in full below admin would let a
+// viewer tell the two apart and read whether the roster holds a usable
+// administrator. Below admin both states must render the SAME redacted row.
+func TestKillSwitchRow_AdminOnlyStateIsRedactedLikeNoVerifier(t *testing.T) {
+	adminOnly := authExemptKillSwitchViewerRow(false, true, killSwitchBackendAdminOnly)
+	noVerifier := authExemptKillSwitchViewerRow(false, true, killSwitchBackendNoVerifier)
+	if adminOnly != noVerifier {
+		t.Errorf("below admin the two no-verifier states must be indistinguishable:\n admin-only  %+v\n no-verifier %+v", adminOnly, noVerifier)
+	}
+	if authExemptKillSwitchRow(false, true, killSwitchBackendAdminOnly) == authExemptKillSwitchRow(false, true, killSwitchBackendNoVerifier) {
+		t.Error("premise: the ADMIN renderings of the two states differ (cause and repair)")
+	}
+
+	// End to end on a real admin-only node.
+	setupProxyTest(t)
+	loadRoster(t, adminRoster(t, RoleAdmin))
+	killSwitchProbeEnv(t)
+	if got := currentKillSwitchBackend(); got != killSwitchBackendAdminOnly {
+		t.Fatalf("premise broken: want killSwitchBackendAdminOnly, got %d", got)
+	}
+	for _, ep := range []struct {
+		path string
+		h    http.HandlerFunc
+	}{{"/api/diagnostics", apiDiagnostics}, {"/api/health/explain", apiHealthExplain}} {
+		admin, _ := killSwitchRowAt(t, ep.h, ep.path, RoleAdmin)
+		if !strings.Contains(admin.OperatorAction, "Configure a proxy identity provider") {
+			t.Errorf("%s admin row lost the proxy repair: %q", ep.path, admin.OperatorAction)
+		}
+		for _, role := range []UIRole{RoleViewer, RoleOperator} {
+			row, _ := killSwitchRowAt(t, ep.h, ep.path, role)
+			assertKillSwitchRowRedacted(t, ep.path, role, row)
+			if strings.Contains(row.Message+" "+row.OperatorAction, "admin-console") {
+				t.Errorf("%s role %q: the redacted row names the admin-only cause: %q", ep.path, role, row.Message)
+			}
+		}
+	}
+}

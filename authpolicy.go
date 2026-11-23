@@ -254,7 +254,13 @@ const authSourceExempt = "exempt"
 //
 //	exempt — Stage-1 exemption waived authentication (Slice 7)
 //	unauth — no credentials presented / open default (defaultAuthOutcome=Exempt)
-//	local  — local bcrypt account authentication
+//	local  — historical: local bcrypt account authentication. Since owner
+//	         Decision 2 (2026-11-23) the local admin-console account never
+//	         authenticates proxy traffic; the label now reaches proxy traffic
+//	         as the fallback for an identity that names no provider — in
+//	         practice a legacy (YAML) provider that supplies no identity of
+//	         its own (the legacy LDAP bind provider), identically on HTTP and
+//	         SOCKS5.
 //	system — reserved for internal/system-originated traffic (future)
 //
 // IdP profile IDs and names must never collide with these: provider Name()

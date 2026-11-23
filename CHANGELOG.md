@@ -549,6 +549,45 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed (breaking)
 
+- **Admin-console credentials no longer authenticate HTTP proxy traffic (owner
+  Decision 2, 2026-11-23).** Management and data-plane identities are now
+  distinct on every listener. The admin account the setup wizard creates, every
+  account in the admin roster (`ui_users.json`) and the `-user`/`-pass`
+  (`auth.user`/`auth.pass`) pair sign in to the admin UI and API only; a
+  `Proxy-Authorization: Basic` credential is verified only by a proxy identity
+  provider — an enabled LDAP or OIDC profile under **Identity Providers**, or a
+  legacy `ldap`/`oidc` block in `config.yaml` — through the same shared resolver
+  SOCKS5 uses. There is no fallback to the admin account in any configuration:
+  not when no proxy provider is configured, and not when a configured provider
+  rejects the credential. What each installation sees:
+  - **Admin accounts only, `Require authentication` (the wizard's default):**
+    every proxy request that requires authentication is refused with a `407`
+    that nothing on the node can satisfy, and the admin pair is refused like
+    any other credential (`AUTH_FAIL`); SOCKS5 already behaved this way. The admin UI,
+    session login, RBAC and the `--reset-password` break-glass are unchanged.
+  - **LDAP or OIDC configured:** unchanged for directory users and OIDC tokens.
+    An admin who presented the console password instead of a directory/OIDC
+    credential is now refused.
+  - **No accounts and no provider:** unchanged (requests continue to Stage-2
+    policy as `unauth`).
+  - **Explicitly configured unauthenticated access** — an `Exempt`
+    authentication rule or the `Exempt` global default ("open mode") — is
+    unchanged for requests without credentials. A request that presents a
+    credential is still never exempted, so the admin pair now gets a `407`
+    there too.
+
+  **What operators must do:** before upgrading a node whose clients
+  authenticate to the proxy with the admin account, configure an LDAP or OIDC
+  identity provider and move those clients to directory/OIDC credentials (or
+  cover them with a scoped `Exempt` rule if they must stay credential-free).
+  Dedicated local proxy users, managed separately from admin accounts, are a
+  planned follow-up (`roadmap/LOCAL-PROXY-USERS.md`). The Diagnostics row
+  `auth_exempt_kill_switch` gains an admin-only-installation state, and
+  `auth_cr_no_credential_provider` now fires on a node whose only accounts are
+  admin-console accounts. The credential-verification governor (CHAOS-57,
+  `credential_verification`, `culvert_auth_verify_*`) is unchanged but is idle:
+  no proxy request reaches a local bcrypt comparison any more.
+
 These SOCKS5 changes are intentional (SWG-901, owner direction 2026-11-23). They
 apply whenever the SOCKS5 listener is enabled (`proxy.socks5_port` /
 `-socks5-port`), in every `proxy.socks5_policy_mode` unless stated. The full list

@@ -18,18 +18,30 @@ import "strings"
 // authenticate, the admin's console credential could, and no identity, group
 // or auth source ever reached policy. That path is gone.
 //
-// The channel decides which verifiers may answer (owner direction 2026-11-23):
+// Management and data-plane identities are distinct (owner Decision 2,
+// 2026-11-23). The local admin-console account — the legacy admin pair and
+// every RBAC roster account — authenticates the ADMIN plane only (session
+// login, admin Basic, the --reset-password break-glass). It is never a proxy
+// identity on ANY channel, and never a fallback when no proxy provider is
+// configured or when a configured one rejects the credential.
 //
-//   - credentialChannelHTTPBasic — every credential-capable verifier, unchanged:
+// The channel decides which proxy verifiers may answer:
+//
+//   - credentialChannelHTTPBasic — every credential-capable PROXY verifier:
 //     IdP-registry credential providers (LDAP bind, OIDC token introspection),
-//     then the legacy single provider, else the local account.
+//     then the legacy single provider (LDAP or OIDC).
 //   - credentialChannelSOCKS5 — RFC 1929 is a NON-interactive, password-only
 //     exchange. Only verifiers that check a username and a password directly:
 //     registry profiles of a PasswordVerifying type (LDAP) and a legacy LDAP
 //     provider. Never OIDC (its credential is a bearer token and its login is
-//     interactive), never SAML, and NEVER the local admin-console account: an
-//     administrative credential is not a proxy identity and is not a fallback
-//     when nothing else is configured.
+//     interactive), never SAML.
+//
+// With no usable verifier the resolver answers "not resolved" and the caller
+// refuses (HTTP 407, RFC 1929 failure status): proxy authentication that is
+// required but cannot be satisfied fails CLOSED and never degrades to
+// unauthenticated access. Explicitly configured unauthenticated access (an
+// Exempt rule or the Exempt global default) is decided before any credential
+// is resolved, in resolveRequestAuth, and is unaffected.
 //
 // A resolution that yields no subject is a failure: the username is never
 // substituted for an identity-capable provider's canonical subject.
@@ -73,18 +85,29 @@ func credentialProvidersFor(ch proxyCredentialChannel) []IdentityProvider {
 }
 
 // legacyCredentialFor is the Config half of the chain for ch: the legacy single
-// provider, else the local account (HTTP Basic). SOCKS5 may use only a legacy
-// LDAP provider; with any other legacy backend — a legacy OIDC provider, or the
-// local admin-console pair — it resolves nothing. Handing
-// resolveAuthIdentityFromSnapshot a snapshot whose provider is set is what keeps
-// the local pair out by construction: that function consults the pair only
-// when no provider is configured.
+// (YAML) provider only. HTTP Basic may use a legacy LDAP or OIDC provider;
+// SOCKS5 only a legacy LDAP provider. The local admin-console pair is NEVER
+// consulted, on either channel (owner Decision 2): with no legacy provider, or
+// one the channel cannot use, this resolves nothing.
+//
+// Handing resolveAuthIdentityFromSnapshot only a snapshot whose provider is
+// set is what keeps the local pair out by construction: that function, and the
+// verifyAuthFrom it delegates to, consult the pair only when no provider is
+// configured. Both reads come from ONE snapshot, so a concurrent SetProvider(nil)
+// cannot slip the pair in between the check and the resolution. Do not replace
+// this with a resolution that takes its own, unchecked snapshot (the former
+// cfg.resolveAuthIdentityFrom did, and reached the pair; pinned by
+// TestProxyCredential_AdminPairNeverResolves).
+//
+// The auth source of a legacy provider that supplies no identity of its own
+// (the legacy LDAP bind provider) stays the historical "local" label —
+// resolveAuthIdentityFromSnapshot stamps it, identically on both channels.
 func legacyCredentialFor(ch proxyCredentialChannel, clientKey, user, pass string) (*Identity, bool) {
-	if ch != credentialChannelSOCKS5 {
-		return cfg.resolveAuthIdentityFrom(clientKey, user, pass)
-	}
 	snap := cfg.snapshotAuthBackend()
-	if !isPasswordVerifyingLegacyProvider(snap.provider) {
+	if snap.provider == nil {
+		return nil, false
+	}
+	if ch == credentialChannelSOCKS5 && !isPasswordVerifyingLegacyProvider(snap.provider) {
 		return nil, false
 	}
 	return cfg.resolveAuthIdentityFromSnapshot(snap, clientKey, user, pass)

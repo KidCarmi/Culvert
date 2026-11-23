@@ -104,12 +104,23 @@ func assertNoVerifierRowMatchesTheGateway(t *testing.T, host string) {
 	if !strings.Contains(row.Message, "refused") {
 		t.Errorf("the row must say formerly exempt requests are refused, got %q", row.Message)
 	}
-	// The only repair is the break-glass; a failed IdP profile is the wrong one.
-	if !strings.Contains(row.OperatorAction, "--reset-password") {
-		t.Errorf("the row must name the --reset-password break-glass, got %q", row.OperatorAction)
+	// The break-glass LEADS the repair; a failed IdP profile is the wrong one.
+	//
+	// Owner Decision 2 (2026-11-23) changed this gate on purpose. It used to
+	// forbid any mention of Identity Providers, because restoring an admin
+	// restored proxy authentication too. Admin-console accounts no longer
+	// authenticate proxy traffic, so the break-glass now repairs only the
+	// admin plane and the row must ALSO send the operator to configure a
+	// proxy identity provider — after the break-glass, never instead of it,
+	// and never as "fix the failed profile" (no profile exists here).
+	if !strings.HasPrefix(row.OperatorAction, "Restore an administrator account with the --reset-password") {
+		t.Errorf("the row must lead with the --reset-password break-glass, got %q", row.OperatorAction)
 	}
-	if strings.Contains(row.OperatorAction, "Identity Providers") {
-		t.Errorf("no provider is configured here; the row must not send the operator to Identity Providers: %q", row.OperatorAction)
+	if !strings.Contains(row.OperatorAction, "configure a proxy identity provider (LDAP or OIDC) under Identity Providers") {
+		t.Errorf("the row must name the proxy repair (owner Decision 2), got %q", row.OperatorAction)
+	}
+	if strings.Contains(row.OperatorAction, "Fix or re-enable the failed profile") {
+		t.Errorf("no provider is configured here; the row must not claim a failed profile: %q", row.OperatorAction)
 	}
 
 	// The oracle: what the gateway actually answers formerly exempt traffic.
@@ -185,8 +196,14 @@ func TestKillSwitchBackend_GenuineNoBackendUnchanged(t *testing.T) {
 	}
 }
 
-// TestKillSwitchBackend_AdminRosterUnchanged is the second negative control: a
-// normal roster has a live verifier, so the row keeps the plain claim.
+// TestKillSwitchBackend_AdminRosterUnchanged was the second negative control:
+// a normal admin roster was a live verifier, so the row kept the plain claim.
+//
+// Owner Decision 2 (2026-11-23) changed it on purpose: an admin roster is NOT
+// a proxy verifier any more. With no proxy provider it is the admin-only
+// state — the gate is armed and nothing can verify a presented credential —
+// and the row must say so and name the proxy repair, checked against the
+// gateway's real answer (the differential oracle this file is built on).
 func TestKillSwitchBackend_AdminRosterUnchanged(t *testing.T) {
 	setupProxyTest(t)
 	if c := loadRoster(t, adminRoster(t, RoleAdmin)); c.user != "alice" {
@@ -194,8 +211,38 @@ func TestKillSwitchBackend_AdminRosterUnchanged(t *testing.T) {
 	}
 	killSwitchProbeEnv(t)
 
+	if got := currentKillSwitchBackend(); got != killSwitchBackendAdminOnly {
+		t.Errorf("an admin roster without a proxy provider: want killSwitchBackendAdminOnly (%d), got %d",
+			killSwitchBackendAdminOnly, got)
+	}
+	row := killSwitchRow(t)
+	if !strings.Contains(row.Message, "admin-console accounts are management identities and do not authenticate proxy traffic") ||
+		!strings.Contains(row.Message, "refused") {
+		t.Errorf("the admin-only row must state the refusal and its cause, got %q", row.Message)
+	}
+	if !strings.HasPrefix(row.OperatorAction, "Configure a proxy identity provider (LDAP or OIDC) under Identity Providers") {
+		t.Errorf("the admin-only row must lead with the proxy repair, got %q", row.OperatorAction)
+	}
+	if strings.Contains(row.OperatorAction, "--reset-password") || strings.Contains(row.Message, "no usable administrator") {
+		t.Errorf("a usable administrator exists; the row must not claim a lockout: %q / %q", row.Message, row.OperatorAction)
+	}
+	code, challenge := proxyAnswer(t, "ks-admin-only.example.test")
+	if code != http.StatusProxyAuthRequired || challenge == "" {
+		t.Errorf("the row says refused with a 407; the gateway answered %d challenge=%q", code, challenge)
+	}
+}
+
+// TestKillSwitchBackend_AdminRosterWithProxyProviderIsLive is the remaining
+// negative control: the same admin roster beside a loaded proxy provider is a
+// live verifier, so the row keeps the plain "must now authenticate" claim.
+func TestKillSwitchBackend_AdminRosterWithProxyProviderIsLive(t *testing.T) {
+	setupProxyTest(t)
+	loadRoster(t, adminRoster(t, RoleAdmin))
+	killSwitchProbeEnv(t)
+	cfg.SetProvider(gateTestBackend{})
+
 	if got := currentKillSwitchBackend(); got != killSwitchBackendLive {
-		t.Errorf("an admin roster is a live verifier: want killSwitchBackendLive (%d), got %d",
+		t.Errorf("a loaded proxy provider is a live verifier: want killSwitchBackendLive (%d), got %d",
 			killSwitchBackendLive, got)
 	}
 	if row := killSwitchRow(t); !strings.Contains(row.Message, "must now authenticate") {
@@ -243,8 +290,13 @@ func TestKillSwitchBackendRows_NoVerifierRowShape(t *testing.T) {
 			t.Errorf("%s: the action still claims ALL proxy traffic stays refused once the switch clears: %q",
 				name, rows[0].OperatorAction)
 		}
+		// Owner Decision 2 (2026-11-23): the "stays refused until" clause used
+		// to end "until an administrator account exists". Restoring an
+		// administrator no longer restores proxy authentication (admin-console
+		// accounts are not proxy identities), so the claim now names the
+		// condition that actually ends the refusal.
 		for _, want := range []string{
-			"traffic that requires authentication stays refused until an administrator account exists",
+			"traffic that requires authentication stays refused until a proxy identity provider is configured",
 			"Clearing the kill switch alone restores only credential-free requests covered by an Exempt rule or the Exempt default",
 		} {
 			if !strings.Contains(rows[0].OperatorAction, want) {

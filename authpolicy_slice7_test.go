@@ -35,14 +35,29 @@ func slice7ExemptRule(destFQDN string) PolicyRule {
 	}
 }
 
-// setupAuthGateTest configures an auth-required proxy (local bcrypt user) with
-// a clean policy store and a released kill switch.
+// gateTestBackend is the proxy credential backend setupAuthGateTest installs:
+// a legacy (YAML-style) provider that accepts alice/secret and supplies no
+// identity of its own, so a valid credential resolves to identity "alice" with
+// auth source "local" — exactly what the helper's former backend produced.
+//
+// Owner Decision 2 (2026-11-23): that former backend was the local admin pair
+// (cfg.SetAuth("alice", "secret")), which no longer authenticates proxy
+// traffic. The tests on this helper are about Stage-1 rule semantics (valid
+// credentials win over Exempt/CredentialRequired, bad credentials 407), not
+// about which backend verified the credential, so they now get a supported
+// proxy backend with the same verdicts and the same attribution.
+type gateTestBackend struct{}
+
+func (gateTestBackend) Verify(u, p string) bool { return u == "alice" && p == "secret" }
+func (gateTestBackend) Name() string            { return "gate-test-backend" }
+
+// setupAuthGateTest configures an auth-required proxy (a legacy proxy
+// credential provider accepting alice/secret, see gateTestBackend) with a
+// clean policy store and a released kill switch.
 func setupAuthGateTest(t *testing.T) {
 	t.Helper()
 	setupProxyTest(t)
-	if err := cfg.SetAuth("alice", "secret"); err != nil {
-		t.Fatalf("SetAuth: %v", err)
-	}
+	cfg.SetProvider(gateTestBackend{})
 	setAuthExemptDisabled(false)
 	t.Cleanup(func() { setAuthExemptDisabled(false) })
 }
