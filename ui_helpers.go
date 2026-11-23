@@ -180,6 +180,18 @@ func validateRuleUniqueness(rule PolicyRule, existingRules []PolicyRule, editPri
 	return nil
 }
 
+// keepAddressedPriority gives an update-by-priority body with no usable
+// priority (absent, 0 or negative) the addressed rule's priority, as an
+// id-addressed edit always does (POL-006). Stored verbatim, such a value let a
+// second rule share the slot: two edits without a priority both landed at 0.
+// validateRuleUniqueness skips its duplicate check for a priority <= 0, so the
+// caller normalizes BEFORE it, and the audit then records the stored value.
+func keepAddressedPriority(rule *PolicyRule, addressed int) {
+	if rule.Priority <= 0 {
+		rule.Priority = addressed
+	}
+}
+
 // validateRuleShape is the STATE-INDEPENDENT half of validatePolicyRule: the
 // structural checks a request fails on its own, whatever the rulebase holds.
 // The API handlers run it BEFORE the fence (a 400 that no refresh can fix).

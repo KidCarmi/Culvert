@@ -493,6 +493,14 @@ func (c *policyDraftCoordinator) commitActivate(ifVersion *int64) (policyDraftDi
 			return policyDraftDiff{}, fmt.Errorf("candidate rule %s is invalid: %w", sanitizeLog(cand[i].Name), err)
 		}
 	}
+	// validatePolicyRule passes the rule's own priority as editPriority, so it
+	// cannot see another rule at the SAME priority. The set-level check below
+	// refuses a new duplicate (POL-006); a tie inherited unchanged from
+	// running does not block the commit.
+	if err := newPriorityTieError(cand, policyStore.List()); err != nil {
+		c.mu.Unlock()
+		return policyDraftDiff{}, err
+	}
 	diff := c.diffVsRunning()
 	// Activation is durable-or-nothing (Codex fix): a swallowed running-policy
 	// write failure used to clear the draft anyway — new policy in memory, old

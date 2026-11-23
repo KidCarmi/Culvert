@@ -2174,6 +2174,7 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 			ref = fencedRefusal{reason: "auth rules are managed via /api/authpolicy (admin only)"}
 			return false
 		}
+		keepAddressedPriority(&rule, priority) // POL-006: before the uniqueness check and the audit
 		if err := validateRuleUniqueness(rule, target.List(), priority); err != nil {
 			ref = fencedRefusal{reason: err.Error()}
 			return false

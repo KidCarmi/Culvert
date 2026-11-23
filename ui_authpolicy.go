@@ -384,6 +384,8 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 			return false
 		}
 		target = t
+		// Same as PUT /api/policy?priority= (POL-006).
+		keepAddressedPriority(&rule, target.priority)
 		if err := validateRuleUniqueness(rule, ps.List(), target.priority); err != nil {
 			ref = fencedRefusal{reason: err.Error()}
 			return false

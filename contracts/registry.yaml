@@ -29,7 +29,9 @@ protected:
   - cmd/contractcheck/**
   - .github/workflows/product-contracts.yml
 
-amended: []
+amended:
+  - id: POL-001
+    reason: "Owner decision C (policy semantics): rules with EQUAL priority now evaluate in stored order (policy file, config-version snapshot, backup or CP snapshot order). Publication used sort.Slice, which is the identity on every sorted input and stable for n <= 12, so steady-state rulebases keep exactly the order they had; only an unsorted input with ties at n >= 13 (gap add, priority edit or move on a tied rulebase, or the first load of a hand-edited unsorted file) used to get an unchosen pdqsort permutation. Proven by a differential test against the old comparator. Existing rules are never renumbered; culvert_policy_priority_ties and the policy_priority_ties diagnostics row report ties. There is no upgrade-time order warning: pre-customer, there is no installed base to migrate (owner, 2026-11-23)."
 retired: []
 
 contracts:
@@ -82,10 +84,11 @@ contracts:
     area: policy
     status: enforced
     owner_approved: false
-    invariant: "Enabled access rules are evaluated in priority order and the first match decides; no match returns no decision."
-    authority: "Policy engine (policy.go)."
+    invariant: "Enabled access rules are evaluated in priority order, rules with equal priority in stored order, and the first match decides; no match returns no decision."
+    authority: "Policy engine (policy.go, policy_tie_order.go)."
     code:
       - "policy.go"
+      - "policy_tie_order.go"
     configs: []
     transitions:
       permitted:
@@ -93,11 +96,18 @@ contracts:
       forbidden:
         - "a later rule overriding an earlier match"
         - "a disabled rule deciding a request"
+        - "a publication reordering rules that share a priority"
+        - "renumbering stored priorities without an explicit operator action"
     tests:
       - {file: "policy_test.go", name: TestPolicyStore_Evaluate_FirstMatch}
       - {file: "policy_flow_e2e_test.go", name: TestPolicyFlow_PriorityFirstMatchWins}
+      - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_StableSortMatchesLegacyWhereItMustAgree}
+      - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_UntouchedTiesKeepOrderAcrossWriters}
+      - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_LoadUnsortedTiedFileKeepsStoredOrder}
+      - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_ReplaceAllAndSnapshotKeepTieOrder}
+      - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_EvaluateUnchangedForSortedInputs}
     validation: integration
-    compatibility: "Every stored rulebase depends on this order; changing it changes the meaning of existing customer policies."
+    compatibility: "Every stored rulebase depends on this order; changing it changes the meaning of existing customer policies. Ties already stored keep the order they have in the file, snapshot or backup; a tied rulebase that drifted under the old sort keeps its persisted (drifted) order."
 
   - id: POL-002
     area: policy
@@ -161,6 +171,40 @@ contracts:
       - {file: "policy_unknown_action_test.go", name: TestSECPOLICYACTION1_UnknownActionBlocksAndIsTerminal}
     validation: integration
     compatibility: "A rulebase written by a newer release must not become permissive on an older one."
+
+  - id: POL-006
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "A policy write through the API, a replace-mode configuration import or a draft commit cannot create two rules with the same priority; Load, config-version rollback and CP-to-DP sync restore faithfully and only report an existing tie."
+    authority: "Policy write paths (ui_policy.go, ui_authpolicy.go, policy_draft.go, ui_config.go) over the policy store (policy.go)."
+    code:
+      - "policy.go"
+      - "policy_tie_order.go"
+      - "policy_draft.go"
+      - "ui_config.go"
+      - "ui_policy.go"
+      - "ui_authpolicy.go"
+      - "ui_helpers.go"
+    configs: []
+    transitions:
+      permitted:
+        - "a create whose requested priority is taken being reassigned to max+1"
+        - "an update by priority whose body has no priority keeping the stored priority"
+        - "a draft commit that keeps a tie inherited unchanged from running"
+        - "Load, rollback or CP-to-DP sync installing a stored tie verbatim, with a warning and the diagnostics row"
+      forbidden:
+        - "storing an update body priority of 0 or below verbatim"
+        - "a draft commit activating a newly shared priority"
+        - "a replace-mode import installing rules that share a priority"
+        - "automatically renumbering an existing tie"
+    tests:
+      - {file: "policy_tie_api_test.go", name: TestPolicyTies_PutByPriorityWithoutBodyPriorityKeepsStoredSlot}
+      - {file: "policy_tie_api_test.go", name: TestPolicyTies_DraftCommitRefusesNewTieButKeepsInheritedOne}
+      - {file: "policy_tie_api_test.go", name: TestPolicyTies_ReplaceImportRefusesDuplicatePriorities}
+      - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_GaugeAndDiagnosticsRow}
+    validation: integration
+    compatibility: "New 400s: a replace-mode import (preview and commit) whose rules share a priority, and a draft commit that would create a new shared priority. PUT by priority with no body priority now keeps the rule's slot instead of storing 0. Existing ties are not renumbered."
 
   - id: AUTH-001
     area: authn-authz
