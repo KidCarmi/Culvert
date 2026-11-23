@@ -167,7 +167,24 @@ A mismatch means the code and the model disagree. Either is legitimate:
   statement of the lifecycle; keeping the two in step is the point.
 
 Then run `test/lifecycle-conformance/update-baseline.sh` and commit the
-regenerated `baseline.json` / `observed.json` with the change. Review their diff
+regenerated `baseline.json` / `observed.json` with the change. The script ends
+with a **"behaviour changes to review"** block. Paste it into the pull request.
+
+**Regenerating the baseline is not proof of correctness.** It records whatever
+the code and the model now do. The reviewer accepts each drift line explicitly:
+
+- `[REGRESSION CANDIDATE] property X verdict PASS -> FAIL`: the lifecycle no
+  longer holds what it held. This needs a reason in the PR, and owner sign-off
+  for the security-relevant properties: S2 rollback preservation, S4 journal
+  retirement, S7 write-ahead barrier, C1/C2 reconcile, B1/B2 recovery.
+- `[VERIFY THE IMPROVEMENT IS REAL] property X verdict FAIL -> PASS`: removing a
+  safety capture once turned C2 green, so a run can look better while protecting
+  less.
+- A vector line whose `op`, `reason`, `running` or `tag` changed is a
+  customer-visible outcome change.
+
+No property becomes a blocking contract through this process. Promotion is a
+separate owner decision (see "Promotion to a required gate"). Review their diff
 line by line: a property verdict that moved, or a vector line whose `op`,
 `reason`, `running` or `tag` changed, is the behaviour change in plain words. CI
 never regenerates them, and the workflow fails if a run modified either file.
