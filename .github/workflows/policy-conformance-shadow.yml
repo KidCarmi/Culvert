@@ -1,0 +1,71 @@
+name: Policy Conformance (shadow)
+
+# SHADOW — NOT A MERGE GATE. Do not add this workflow to the required status
+# checks (REPOSITORY-SETTINGS.md §2) without explicit owner approval of the
+# reference model's clauses (internal/policyref/policyref.go R1-R15) and of the
+# matching POL-* contracts in contracts/registry.yaml. None is owner-approved.
+#
+# What it does: compares the Stage-2 access decision of the REAL policy engine
+# (enforcement path PolicyStore.Evaluate and the Policy Tester path) with an
+# independent, standard-library-only reference model, over a deterministic
+# boundary grid and seeded rule sets, plus publication and concurrent-snapshot
+# checks. Cases the model leaves unspecified are reported, never asserted.
+# See test/policy-conformance/README.md.
+#
+# No secrets, no network services, no Docker.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "policy.go"
+      - "policy_*.go"
+      - "authpolicy.go"
+      - "categorygroup.go"
+      - "rewrite_default_action_startup*.go"
+      - "internal/hostutil/**"
+      - "internal/catgroup/**"
+      - "internal/urlcat/**"
+      - "internal/policyref/**"
+      - "test/policy-conformance/**"
+      - ".github/workflows/policy-conformance-shadow.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: policy-conformance-shadow-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: "Shadow · policy conformance (non-blocking)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: go.sum
+
+      # Exit 0 = every suite ran, nothing vacuous, no mismatch. Exit 1 = a
+      # model/implementation mismatch (printed minimised) or a torn snapshot.
+      # Exit 2 = a suite did not run or was skipped: never reported as a pass.
+      - name: Reference model + differential conformance
+        run: test/policy-conformance/run.sh "$RUNNER_TEMP/policy-report"
+
+      - name: The run modified no contract file
+        if: always()
+        run: git diff --exit-code -- contracts/registry.yaml
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: policy-conformance-report
+          path: ${{ runner.temp }}/policy-report
+          retention-days: 14
+          if-no-files-found: warn
