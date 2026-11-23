@@ -6,7 +6,7 @@ package main
 // holds admitted accounts but has no present admin and no provider: the
 // clamped-admin state loadedRosterRole reaches on a restore from a newer
 // build, and the legacy pre-RBAC empty-role state. resolveRequestAuth's
-// rosterWithoutVerifier term is also excluded from the no-backend inert guard,
+// requiredWithoutVerifier term is also excluded from the no-backend inert guard,
 // so the forced-Default arm answers with a 407 nothing can satisfy — the
 // intended fail-closed answer.
 //

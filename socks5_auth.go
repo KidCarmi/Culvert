@@ -15,8 +15,9 @@ package main
 //     provider_not_supported_for_socks5 — and the local admin-console account,
 //     which is never a SOCKS5 identity and never a fallback.
 //
-// A NO-AUTH client (offered only when no credential backend exists at all) is
-// "unauth" with no identity.
+// A NO-AUTH client (offered only when no credential backend exists at all and
+// proxy authentication has never been established, ADR-0063) is "unauth" with
+// no identity.
 
 import (
 	"bytes"
@@ -37,7 +38,7 @@ const socks5UnauthSource = "unauth"
 // any account exists (cfg.AuthEnabled, SEC-AUTHENABLED-1) or any validator can
 // verify a presented credential — including an IdP-registry profile, which
 // cfg.AuthEnabled does not see. It is HTTP Stage-1's credential term
-// (credCapable || rosterWithoutVerifier, resolveRequestAuth). The SSO and
+// (credCapable || requiredWithoutVerifier, resolveRequestAuth). The SSO and
 // Exempt-default terms do not apply: SOCKS5 has no interactive flow, and it
 // has no Stage-1 auth rules (an auth rule with protocol "socks5" is refused at
 // validation, authpolicy.go validateAuthProtocol).
@@ -46,8 +47,16 @@ const socks5UnauthSource = "unauth"
 // whose only accounts are admin-console accounts, or whose only providers are
 // OIDC/SAML, every SOCKS5 credential is refused (fail closed) rather than
 // NO-AUTH being offered.
+//
+// The durable proxy-authentication posture (ADR-0063, proxy_auth_posture.go)
+// is the third term, mirroring HTTP's requiredWithoutVerifier: once proxy
+// authentication has been established, NO-AUTH is never offered again, even
+// after the last provider is removed, disabled or fails to load; the client
+// must offer USER/PASS and is refused (reason
+// socks5AuthReasonPostureNoProvider when nothing at all is left). One atomic
+// load, evaluated first.
 func socks5AuthRequired() bool {
-	return cfg.AuthEnabled() || hasCredentialCapableProvider()
+	return cfg.ProxyAuthEstablished() || cfg.AuthEnabled() || hasCredentialCapableProvider()
 }
 
 // SOCKS5 USER/PASS refusal reasons. Bounded: these constants are the only
@@ -63,15 +72,23 @@ const (
 	// (only admin-console accounts, OIDC or SAML), or the username's email
 	// domain routes to an interactive (OIDC/SAML) profile.
 	socks5AuthReasonUnsupported = "provider_not_supported_for_socks5"
+	// socks5AuthReasonPostureNoProvider: proxy authentication has been
+	// established on this node (ADR-0063) and no proxy identity provider of
+	// any kind is left, so nothing can verify the credential.
+	socks5AuthReasonPostureNoProvider = "auth_established_no_provider"
 )
 
-// socks5AuthFailures counts USER/PASS refusals by reason: invalid, unsupported.
-var socks5AuthFailures [2]atomic.Int64
+// socks5AuthFailures counts USER/PASS refusals by reason: invalid,
+// unsupported, established-without-provider.
+var socks5AuthFailures [3]atomic.Int64
 
 // socks5AuthRefusalReason classifies a refused credential. Only the username
 // is consulted (for its email-domain routing hint); the password never is.
 func socks5AuthRefusalReason(user string) string {
 	if !passwordProviderConfigured() {
+		if socks5PostureWithoutProvider() {
+			return socks5AuthReasonPostureNoProvider
+		}
 		return socks5AuthReasonUnsupported
 	}
 	if at := strings.LastIndexByte(user, '@'); at >= 0 && idpRegistry != nil && idpRegistry.RouteByDomain(user[at+1:]) != nil {
@@ -80,12 +97,23 @@ func socks5AuthRefusalReason(user string) string {
 	return socks5AuthReasonInvalid
 }
 
+// socks5PostureWithoutProvider: the posture is established and no proxy
+// identity provider of any kind (legacy, credential-capable or interactive
+// registry profile) is configured.
+func socks5PostureWithoutProvider() bool {
+	return cfg.ProxyAuthEstablished() && !hasCredentialCapableProvider() &&
+		(idpRegistry == nil || !idpRegistry.HasEnabledInteractiveProfile())
+}
+
 func noteSOCKS5AuthFailure(reason string) {
-	if reason == socks5AuthReasonUnsupported {
+	switch reason {
+	case socks5AuthReasonUnsupported:
 		socks5AuthFailures[1].Add(1)
-		return
+	case socks5AuthReasonPostureNoProvider:
+		socks5AuthFailures[2].Add(1)
+	default:
+		socks5AuthFailures[0].Add(1)
 	}
-	socks5AuthFailures[0].Add(1)
 }
 
 // socks5Negotiate performs the SOCKS5 greeting (VER NMETHODS METHODS) and, when
@@ -177,5 +205,7 @@ func writeSOCKS5AuthMetrics(w io.Writer) {
 # TYPE culvert_socks5_auth_failures_total counter
 culvert_socks5_auth_failures_total{reason=%q} %d
 culvert_socks5_auth_failures_total{reason=%q} %d
-`, socks5AuthReasonInvalid, socks5AuthFailures[0].Load(), socks5AuthReasonUnsupported, socks5AuthFailures[1].Load())
+culvert_socks5_auth_failures_total{reason=%q} %d
+`, socks5AuthReasonInvalid, socks5AuthFailures[0].Load(), socks5AuthReasonUnsupported, socks5AuthFailures[1].Load(),
+		socks5AuthReasonPostureNoProvider, socks5AuthFailures[2].Load())
 }

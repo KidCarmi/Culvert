@@ -208,7 +208,12 @@ func c72NoCredentialBackend(t *testing.T) {
 	cfg.authRevision++
 	cfg.mu.Unlock()
 	cfg.cache.clear()
+	// A deployment with no backend at all is also one where proxy
+	// authentication was never established (ADR-0063): an earlier test's IdP
+	// activation against the global cfg must not arm the gate here.
+	resetProxyAuthPostureForTest()
 	t.Cleanup(func() {
+		resetProxyAuthPostureForTest()
 		cfg.mu.Lock()
 		cfg.uiUsers = prevUsers
 		cfg.mu.Unlock()

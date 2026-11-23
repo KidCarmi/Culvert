@@ -47,6 +47,14 @@ type ConfigSnapshot struct {
 	UpdatedAt             string   `json:"updated_at"`
 	CAFingerprint         string   `json:"ca_fingerprint,omitempty"` // cluster CA SHA-256 fingerprint; DP triggers renewal when this changes
 
+	// ProxyAuthEstablished carries the CP's durable proxy-authentication
+	// posture (ADR-0063, AUTH-006). MERGE-ONLY on the DP: true establishes the
+	// DP's own posture write-ahead (a DP that cannot record it rejects the
+	// snapshot); false or absent is a no-op and never lowers it. So a DP that
+	// enrols after the CP's last provider was removed still refuses
+	// authentication-required traffic instead of starting fresh.
+	ProxyAuthEstablished bool `json:"proxy_auth_established,omitempty"`
+
 	// Full policy sync — all policy state pushed from CP to DP.
 	DefaultAction     string           `json:"default_action"`         // "allow" or "deny"
 	PolicyRules       []PolicyRule     `json:"policy_rules,omitempty"` // ordered policy rules
@@ -1964,6 +1972,16 @@ func applyExternalAuthSnapshotSettings(snap ConfigSnapshot) {
 }
 
 func syncSnapshotIdPProfiles(snap ConfigSnapshot) error {
+	// Durable Authentication Posture (ADR-0063): the CP's posture is merged
+	// first, WRITE-AHEAD of everything this snapshot activates, on every DP
+	// apply path (full, delta remainder, last-known-good). A DP that cannot
+	// record it rejects the snapshot, like a failed ReplaceAll; false or an
+	// absent field never lowers an established DP.
+	if snap.ProxyAuthEstablished {
+		if err := establishProxyAuthPosture("control-plane snapshot: control plane posture established"); err != nil {
+			return fmt.Errorf("proxy auth posture sync: %w", err)
+		}
+	}
 	if snap.IdPProfiles == nil {
 		return nil
 	}
@@ -2088,6 +2106,7 @@ func CurrentConfigSnapshot() ConfigSnapshot {
 		DefaultAuthOutcome:    string(cfg.DefaultAuthOutcome()),
 		ProxyBaseURL:          cfg.ProxyBaseURL(),
 		TrustForwardedHeaders: trustForwardedHeaders,
+		ProxyAuthEstablished:  cfg.ProxyAuthEstablished(),
 	}
 	if fp := globalClusterCA.CACertFingerprint(); fp != "" {
 		snap.CAFingerprint = fp

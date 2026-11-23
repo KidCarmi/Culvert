@@ -101,7 +101,8 @@ The effect depends on which authentication backends the node has
 | An OIDC/LDAP profile is enabled but failed to load | Are challenged, but nothing can validate what they send. Fix the profile under Identity Providers; the startup log names the error. |
 | The node has an administrator but no proxy provider is enabled (admin-only installation) | Get a `407` that nothing can satisfy; every such request is refused. Admin-console accounts do not authenticate proxy traffic: configure an LDAP or OIDC provider under Identity Providers. |
 | The admin roster holds accounts but no usable administrator, and no provider is enabled | Get a `407` that nothing can satisfy; every such request is refused. Restore an administrator with the `--reset-password` break-glass, then configure a proxy provider: an administrator restores admin access, not proxy access. |
-| No credential or SSO provider at all | Depends on the authentication rules that remain once exemptions are skipped. A request that now resolves to `Default` is **not** made to authenticate: no challenge is sent, and it falls through to Stage-2 policy, so only your access rules and default action decide it (`TestKillSwitchNoBackend_NoRule_InertStage2`). A request that now matches a `CredentialRequired` rule, one the skipped `Exempt` rule used to mask, gets a `407` that nothing on this node can satisfy, and is refused (`TestKillSwitchNoBackend_ScopedCR_Challenges407`). |
+| No account and no provider, but proxy authentication was established on this node earlier ([proxy authentication posture](proxy-authentication-posture.md)) | Get a `407` that nothing can satisfy; every such request is refused. Restore a proxy identity provider under Identity Providers. |
+| No credential or SSO provider at all, and proxy authentication never established (a fresh node) | Depends on the authentication rules that remain once exemptions are skipped. A request that now resolves to `Default` is **not** made to authenticate: no challenge is sent, and it falls through to Stage-2 policy, so only your access rules and default action decide it (`TestKillSwitchNoBackend_NoRule_InertStage2`). A request that now matches a `CredentialRequired` rule, one the skipped `Exempt` rule used to mask, gets a `407` that nothing on this node can satisfy, and is refused (`TestKillSwitchNoBackend_ScopedCR_Challenges407`). |
 
 The last row matters in two ways. On a gateway with no authentication backend,
 the switch does not by itself block formerly exempt traffic that resolves to
@@ -148,6 +149,8 @@ outcome each request now resolves to.
   after a restart, engage it again, or use the environment variable.
 - **Engaging it on one node of a cluster.** The other nodes keep exempting.
 - **Expecting it to block traffic on a gateway with no auth backend.** See §3.
+  This applies only to a node that never had proxy authentication established;
+  an established node with no provider already refuses.
 - **Setting the variable to a value such as `enabled`.** Only the four values in
   §2 engage it; anything else is silently treated as clear. Check `envDisabled`.
 
@@ -159,4 +162,5 @@ outcome each request now resolves to.
   `authpolicy_killswitch_nobackend_test.go`.
 - Design record: `roadmap/AUTHENTICATION-POLICY-SPEC.md`.
 - Related: [`admin-roster-durability.md`](admin-roster-durability.md),
+  [`proxy-authentication-posture.md`](proxy-authentication-posture.md),
   [`identity-provider-revocation.md`](identity-provider-revocation.md).

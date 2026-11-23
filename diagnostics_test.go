@@ -143,6 +143,7 @@ func TestApiDiagnostics_DefaultOK(t *testing.T) {
 		"saml_state_posture":         false,
 		"saml_base_url":              false,
 		"default_auth_open":          false,
+		"proxy_auth_posture":         false,
 		"yara_engine_posture":        false,
 		"scan_decompress_ratio":      false,
 		"config_snapshot_validator":  false,
@@ -1138,6 +1139,12 @@ func resetDiagVerdictGlobals(t *testing.T) {
 	// the same isolation helper — one rule to remember.
 	resetCPGRPCListenerHealthForTest()
 	t.Cleanup(resetCPGRPCListenerHealthForTest)
+	// ADR-0063: the proxy-authentication posture is monotonic in production, so
+	// any earlier test that activated an IdP against the global cfg leaves it
+	// established, and with no provider left the proxy_auth_posture row FAILS
+	// the aggregate verdict. Same class as the rows above: cleared on both edges.
+	resetProxyAuthPostureForTest()
+	t.Cleanup(resetProxyAuthPostureForTest)
 	policyStore.mu.Lock()
 	prevRules := policyStore.rules
 	prevVersion := policyStore.version

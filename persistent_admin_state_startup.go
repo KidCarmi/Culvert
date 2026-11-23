@@ -58,6 +58,12 @@ func loadPersistentAdminState(cfg persistentAdminStateStartupConfig, ctx context
 	// closes the rename/crash window before the first periodic counter save.
 	saveHitCounters(cfg.HitCountersPath)
 	LoadAdminSettings(cfg.AdminSettingsPath)
+	// Durable Authentication Posture (ADR-0063): every source of migration
+	// evidence is now loaded (IdP registry, legacy providers, and the legacy
+	// LDAP retirement sentinel from admin settings), and neither the SOCKS5
+	// gate below nor the HTTP proxy listener has opened yet. A no-op unless
+	// the marker was missing at boot.
+	completeProxyAuthPostureMigration()
 	// CHAOS-102: the admission posture restore has now run, so reopen the
 	// SOCKS5 pre-posture gate initSOCKS5 armed before it bound (a no-op on the
 	// socks5_port: 0 appliance, which never armed it). Unconditional on the

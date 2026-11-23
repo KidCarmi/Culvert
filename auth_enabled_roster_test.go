@@ -350,7 +350,7 @@ func TestAuthEnabled_HTTPProxyFreshGatewayUnchanged(t *testing.T) {
 // admin pair used to authenticate over Basic as alice/local. Admin-console
 // accounts are not proxy identities any more, so on a gateway whose only
 // account is the admin, the admin's own credential is refused with the same
-// 407 as any other — the gate stays armed (rosterWithoutVerifier), never
+// 407 as any other — the gate stays armed (requiredWithoutVerifier), never
 // inert.
 func TestAuthEnabled_HTTPProxyAdminRosterUnchanged(t *testing.T) {
 	setupProxyTest(t)

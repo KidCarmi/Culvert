@@ -368,7 +368,7 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	//     cfg.VerifyAuth with no local user accepts any creds → identity
 	//     spoofing. The local admin-console account is EXCLUDED too (owner
 	//     Decision 2): it is not a proxy identity, so a gateway whose only
-	//     accounts are admin-console accounts is rosterWithoutVerifier below.
+	//     accounts are admin-console accounts is requiredWithoutVerifier below.
 	//   - ssoCapable: any enabled interactive IdP (OIDC or SAML) that can drive the
 	//     no-credentials SSO/captive path. SAML IS included here.
 	// authRequired uses (credCapable || ssoCapable) — byte-identical to today's
@@ -410,8 +410,17 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	// cfg.AuthEnabled() is SOCKS5's predicate (one RLock, no allocation) and is
 	// evaluated only when credCapable is false, so a gateway with a proxy
 	// provider pays nothing for it.
-	rosterWithoutVerifier := !credCapable && cfg.AuthEnabled()
-	authRequired := credCapable || ssoCapable || rosterWithoutVerifier || originalEffective == OutcomeExempt
+	//
+	// Durable Authentication Posture (owner decision 2026-11-23, ADR-0063,
+	// proxy_auth_posture.go): the same state is reached on a node WITHOUT
+	// accounts once proxy authentication has been established and its last
+	// provider is removed, disabled or fails to load. Provider availability is
+	// not the authority for whether authentication is required — the durable
+	// marker is — so that node refuses exactly like the roster state above
+	// instead of reading as "no backend, inert". One atomic load, evaluated
+	// first; Exempt outcomes are untouched here too.
+	requiredWithoutVerifier := !credCapable && (cfg.ProxyAuthEstablished() || cfg.AuthEnabled())
+	authRequired := credCapable || ssoCapable || requiredWithoutVerifier || originalEffective == OutcomeExempt
 	// sessionCapable is a SUPERSET of authRequired and opens arm 1 ONLY.
 	//
 	// The two probes behind it ask different questions on purpose:
@@ -622,9 +631,11 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 					// authenticatedSource stays "unauth", and the default-deny backstop
 					// still applies (open ≠ allow). Backend-present behavior is
 					// unchanged — this guard is skipped whenever a backend exists.
-					// A roster with accounts is NOT "no backend" (SEC-AUTHENABLED-1):
-					// the unfulfillable 407 below is the intended fail-closed answer.
-					if !credCapable && !ssoCapable && !rosterWithoutVerifier {
+					// A roster with accounts is NOT "no backend" (SEC-AUTHENABLED-1),
+					// and neither is an established proxy-authentication posture
+					// (ADR-0063): the unfulfillable 407 below is the intended
+					// fail-closed answer.
+					if !credCapable && !ssoCapable && !requiredWithoutVerifier {
 						logger.Printf("AUTH_NO_BACKEND_INERT (no credential/SSO backend) %s -> %q {req_id=%s action=fallthrough}",
 							clientIP, sanitizeLog(r.Host), reqID)
 						break

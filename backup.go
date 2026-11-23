@@ -162,6 +162,13 @@ func defaultBackupArtifacts(dataDir string) []backupArtifact {
 		// that is a deliberately separate, larger change, not folded into
 		// this backup-completeness fix.
 		{SrcPath: p("cdr_policies.json"), TarPath: "data/cdr_policies.json"},
+		// Durable proxy-authentication posture marker (ADR-0063,
+		// proxy_auth_posture.go). Archived so a restore onto a fresh node can
+		// SET the posture; restore merges it monotonically
+		// (stageProxyAuthPosture), so restoring an older archive never clears
+		// an established node. Optional: a node that never established it,
+		// or one older than this build, has none.
+		{SrcPath: p(proxyAuthPostureFileName), TarPath: proxyAuthPostureTarPath},
 	}
 }
 
