@@ -415,12 +415,13 @@ func (s *socks5Supervisor) run() {
 		// UI's equivalent announced a listener that did not exist yet (§33);
 		// keeping the announcement strictly downstream of the evidence is the
 		// rule, not the accident of where it happened to sit.
-		if recovered {
+		switch {
+		case recovered:
 			logger.Printf("SOCKS5: listener on port %d bound and accepting again (%d suppressed bind-failure log line(s))",
 				s.port, suppressed)
-		} else if s.bindHost == "" {
+		case s.bindHost == "":
 			logger.Printf("SOCKS5: socks5://localhost:%d", s.port)
-		} else {
+		default:
 			logger.Printf("SOCKS5: socks5://%s (bound to this address only)", addr)
 		}
 		<-srv.done
