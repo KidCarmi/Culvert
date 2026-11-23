@@ -52,6 +52,30 @@ Culvert exposes two endpoints for "is this node healthy". They have
   shape, status codes, or check names without a major-version migration
   plan.
 
+  **Compatibility decision (owner-approved, 2026-11-23): `/ready` during
+  shutdown.** From the moment the process accepts SIGINT/SIGTERM, `/ready`
+  answers `503` with an added gating row `"shutdown": {"status":"fail",
+  "detail":"shutting down"}`. This is a deliberate change to that interface,
+  scoped as follows:
+  - **Unchanged:** every response of a node that is not shutting down — same
+    shape, same status codes, same check names; the `shutdown` row is absent.
+    `/health` (liveness) is unchanged, including during shutdown, until the
+    listener closes. Connection draining and the shutdown envelope are
+    unchanged ([graceful-shutdown](operator/graceful-shutdown.md)).
+  - **Changed:** between the signal and the moment the listener closes
+    (normally well under a second on an idle node; up to about 5 s with a
+    request pending on the admin UI; bounded by the shutdown envelope),
+    `/ready` used to answer `200` and now answers `503`.
+  - **Who sees it:** a readiness probe or load balancer polling a node that
+    is being stopped takes it out of rotation at the signal instead of at the
+    first refused connection; the maintenance agent's health gate no longer
+    passes against a proxy that has already been told to exit. Consumers that
+    treat any non-200 `/ready` as "not ready" need no change. A consumer that
+    enumerates check names must tolerate the additional `shutdown` key, which
+    appears only in this state.
+  - **Not decided here:** which readiness an upgrade requires (strict versus
+    default rows) remains open as contract UPG-901.
+
 #### `/ready` checks map
 
 Each row in the `checks` object has the shape `{"status":"ok"|"fail",
