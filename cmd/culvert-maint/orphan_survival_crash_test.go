@@ -147,9 +147,10 @@ var orphanExpectations = map[string]orphanExpect{
 		"in-flight `manifest inspect` is read-only; its completion is not established; no divergence"},
 	"resolved_at_pull": {false, "live_stable", "none", "none", "n/a", "open",
 		"in-flight `pull` changes no tag or container in the model (its effect on the image store is not modelled); no divergence"},
-	"barrier_before_tag": {true, "live_changed", "residue_reported", "late_tag_move", "none", "open",
-		"durable report already says indeterminate; orphan `docker tag` moves the tag after restart and /v1/status shows it while the record exists, " +
-			"but a rollback admitted meanwhile succeeds, retires the record, and the tag then moves with no interrupted entry and no pinned_tag reported"},
+	"barrier_before_tag": {true, "live_changed", "residue_reported", "late_tag_move", "pinned_tag_mismatch", "open",
+		"durable report already says indeterminate; orphan `docker tag` moves the tag after restart and /v1/status shows it while the record exists. " +
+			"A rollback admitted meanwhile succeeds and retires the record, and the tag then moves with no interrupted entry; " +
+			"pinned_tag, reported on every status, shows the mismatch. The late move itself is not prevented here"},
 	"tag_moved_before_up": {true, "live_changed", "none", "none", "n/a", "open",
 		"durable report already says indeterminate; orphan `compose up` recreates the container on the target after restart (running_image prior -> target). " +
 			"Q3 none is a MODEL property: the model's up reads the tag at release, after the rollback re-pinned it; a real in-flight up has already resolved its image"},
@@ -808,8 +809,8 @@ func TestOrphanClassifier_Later(t *testing.T) {
 		r2, r3         reportSnap
 		wantM, wantVis string
 	}{
-		{"today: no entry, pinned_tag absent", moved, snap(0, "absent"), snap(0, "absent"), "late_tag_move", "none"},
-		{"future: no entry, pinned_tag mismatch", moved, snap(0, "false"), snap(0, "false"), "late_tag_move", "pinned_tag_mismatch"},
+		{"before pinned_tag was always reported: no entry, pinned_tag absent", moved, snap(0, "absent"), snap(0, "absent"), "late_tag_move", "none"},
+		{"today: no entry, pinned_tag mismatch", moved, snap(0, "false"), snap(0, "false"), "late_tag_move", "pinned_tag_mismatch"},
 		{"entry and pinned_tag mismatch", moved, snap(1, "false"), snap(1, "false"), "late_tag_move", "interrupted_entry+pinned_tag_mismatch"},
 		{"no entry, pinned_tag claims a match", moved, snap(0, "true"), snap(0, "true"), "late_tag_move", "pinned_tag_claims_match"},
 		{"visible at R2 only", moved, snap(0, "false"), snap(0, "absent"), "late_tag_move", "R2:pinned_tag_mismatch/R3:none"},
