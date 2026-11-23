@@ -47,18 +47,24 @@ jobs:
           cache-dependency-path: cmd/culvert-maint/go.sum
 
       # Exit 0 = model check complete AND all three conformance suites and both
-      # orphan-survival suites ran and passed. Exit 1 = a conformance vector, a
-      # pinned orphan-survival finding or an owner-approved property failed.
-      # Exit 2 = incomplete exploration, a vacuous property, a skipped suite or
-      # an orphan-survival run that failed other than on a pinned expectation —
-      # never reported as a pass. A failing PROPOSED property is only reported (see the
-      # summary step).
+      # orphan-survival suites ran and passed AND nothing drifted from the
+      # reviewed baseline. Exit 1 = a conformance vector, a pinned
+      # orphan-survival finding or an owner-approved property failed, or the
+      # model or real-code observations drifted from baseline.json /
+      # observed.json. Exit 2 = incomplete exploration, a vacuous property, a
+      # skipped suite or an orphan-survival run that failed other than on a
+      # pinned expectation — never reported as a pass. A failing PROPOSED
+      # property is only reported (see the summary step).
       - name: Model check + conformance
         run: test/lifecycle-conformance/run.sh "$RUNNER_TEMP/lifecycle-report"
 
-      - name: The run modified no contract or property file
+      - name: The run modified no contract, property or baseline file
         if: always()
-        run: git diff --exit-code -- contracts/registry.yaml cmd/culvert-maint/internal/lifecyclemodel/properties.json
+        run: |
+          git diff --exit-code -- contracts/registry.yaml \
+            cmd/culvert-maint/internal/lifecyclemodel/properties.json \
+            cmd/culvert-maint/internal/lifecyclemodel/baseline.json \
+            cmd/culvert-maint/internal/lifecyclemodel/observed.json
 
       - name: Summary
         if: always()

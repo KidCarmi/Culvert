@@ -20,6 +20,9 @@ const (
 	ExitPass       = 0 // exploration complete, nothing vacuous, no counted failure
 	ExitFail       = 1 // a counted property fails
 	ExitIncomplete = 2 // incomplete exploration, a vacuous property or an unusable property file
+	// ExitDrift: everything else passed, but the modelled behaviour differs from the reviewed
+	// baseline (baseline.go). Never masks 1 or 2: drift is reported alongside them.
+	ExitDrift = 3
 )
 
 // GateOptions configures RunGate.
@@ -29,6 +32,12 @@ type GateOptions struct {
 	MaxStates        int           // state budget
 	MaxDuration      time.Duration // time budget
 	ReportDir        string        // if set, write model_check.json here
+	// Baseline, when non-nil, is a reviewed baseline.json to compare against. An empty or
+	// unparsable baseline is INCOMPLETE, never "no drift".
+	Baseline []byte
+	// WriteBaseline, when set, writes the current baseline to this path instead of
+	// comparing. Refused for an incomplete or vacuous run.
+	WriteBaseline string
 }
 
 // Report is the content of model_check.json.
@@ -36,6 +45,10 @@ type Report struct {
 	PropsSHA256 string   `json:"props_sha256"`
 	Stats       Stats    `json:"stats"`
 	Results     []Result `json:"results"`
+	// BaselineChecked says whether the run was compared with a reviewed baseline at all, so
+	// a summary can never present "no drift lines" from an unchecked run as "no drift".
+	BaselineChecked bool     `json:"baseline_checked"`
+	Drift           []string `json:"drift"`
 }
 
 // ModelCheckFile is the report file name inside a report directory.
@@ -113,13 +126,80 @@ func RunGate(raw []byte, o GateOptions, w io.Writer) int {
 	outf(w, "%d states, %d transitions, %d enforced, %d open (reported, never gating), %d failed, %d vacuous; props sha256 %s\n",
 		stats.States, stats.Transitions, len(enforced), len(open), fail, vac, sha[:16])
 	exit := GateExit(results, o.FailOnlyApproved)
+	rep := Report{PropsSHA256: sha, Stats: stats, Results: results, Drift: []string{}}
+	if o.WriteBaseline != "" {
+		return writeBaseline(w, o.WriteBaseline, exit, ComputeBaseline(sha, stats, results))
+	}
+	if o.Baseline != nil && !o.IncludeProposed {
+		// The baseline is recorded with proposed properties evaluated; comparing a run that
+		// skips them would report every one of them as drift.
+		outf(w, "NOTE: baseline NOT CHECKED: it records proposed properties; compare with -include-proposed\n")
+		o.Baseline = nil
+	}
+	if o.Baseline != nil {
+		drift, err := baselineDrift(o.Baseline, ComputeBaseline(sha, stats, results))
+		if err != nil {
+			outf(w, "INCOMPLETE: %v -- refusing to report a pass\n", err)
+			return ExitIncomplete
+		}
+		rep.BaselineChecked, rep.Drift = true, drift
+		exit = driftExit(w, exit, drift)
+	}
 	if o.ReportDir != "" {
-		if err := writeReport(o.ReportDir, Report{PropsSHA256: sha, Stats: stats, Results: results}); err != nil {
+		if err := writeReport(o.ReportDir, rep); err != nil {
 			outf(w, "INCOMPLETE: cannot write report: %v\n", err)
 			return ExitIncomplete
 		}
 	}
 	return exit
+}
+
+func baselineDrift(raw []byte, got Baseline) ([]string, error) {
+	want, err := ParseBaseline(raw)
+	if err != nil {
+		return nil, err
+	}
+	d := CompareBaseline(want, got)
+	if d == nil {
+		d = []string{}
+	}
+	return d, nil
+}
+
+// driftExit prints the drift and folds it into the exit code: drift turns a pass into
+// ExitDrift and leaves a failure or an incomplete run as it is.
+func driftExit(w io.Writer, exit int, drift []string) int {
+	if len(drift) == 0 {
+		outf(w, "baseline: no drift from the reviewed baseline\n")
+		return exit
+	}
+	for _, l := range drift {
+		outf(w, "DRIFT   %s\n", l)
+	}
+	outf(w, "DRIFT: the modelled behaviour differs from the reviewed baseline. If the change is intended, run "+
+		"test/lifecycle-conformance/update-baseline.sh in this pull request and review the baseline.json diff.\n")
+	if exit == ExitPass {
+		return ExitDrift
+	}
+	return exit
+}
+
+func writeBaseline(w io.Writer, path string, exit int, b Baseline) int {
+	switch exit {
+	case ExitIncomplete:
+		outf(w, "INCOMPLETE: refusing to record a baseline from an incomplete or vacuous run\n")
+		return ExitIncomplete
+	case ExitFail:
+		outf(w, "FAIL: refusing to record a baseline while a counted property fails\n")
+		return ExitFail
+	}
+	if err := WriteBaselineFile(path, b); err != nil {
+		outf(w, "INCOMPLETE: cannot write baseline: %v\n", err)
+		return ExitIncomplete
+	}
+	outf(w, "baseline written to %s (%d properties, %d apply / %d crash vectors, %d reconcile inputs)\n",
+		path, len(b.Properties), len(b.Apply), len(b.Crash), b.Reconcile.Inputs)
+	return ExitPass
 }
 
 // printResults prints one line per property (plus the trace of each FAIL) and returns
@@ -180,6 +260,10 @@ func WriteSummary(dir string, w io.Writer) {
 		}
 		found++
 		outf(w, "- `%s`: %s\n", name, scalarPairs(rep))
+		if d, ok := rep["observed_drift"].([]any); ok && len(d) > 0 {
+			outf(w, "  - **DRIFT (real code)** from the reviewed `observed.json`: %d line(s); listed in the job log "+
+				"(DRIFT-LINE) and in `conformance_apply.json` (`observed_drift`) in the uploaded artifact\n", len(d))
+		}
 	}
 	if found != 3 {
 		outf(w, "\n**INCOMPLETE: fewer than three conformance suites reported. This is not a pass.**\n")
@@ -202,6 +286,16 @@ func summarizeModelCheck(dir string, w io.Writer) error {
 		outf(w, "| %s %s | %s | %s | %s |\n", x.ID, x.Text, x.Status, x.Verdict, strings.Join(x.Trace, " → "))
 	}
 	outf(w, "\nA failing *proposed* or *open* property is reported for the owner; it does not fail this job.\n\n")
+	switch {
+	case !rep.BaselineChecked:
+		outf(w, "**Baseline: NOT CHECKED.** This run says nothing about drift from the reviewed baseline.\n\n")
+	case len(rep.Drift) == 0:
+		outf(w, "**Baseline:** no drift from the reviewed `baseline.json`.\n\n")
+	default:
+		outf(w, "**Baseline: DRIFT.** The modelled behaviour differs from the reviewed `baseline.json`. "+
+			"Intended? Regenerate it with `test/lifecycle-conformance/update-baseline.sh` and review the diff.\n\n```\n%s\n```\n\n",
+			strings.Join(rep.Drift, "\n"))
+	}
 	return nil
 }
 
