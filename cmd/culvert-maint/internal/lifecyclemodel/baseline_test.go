@@ -4,6 +4,7 @@ package lifecyclemodel
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -56,7 +57,9 @@ func TestCompareBaseline_ReportsEveryKindOfChange(t *testing.T) {
 		t.Fatalf("no property %s", id)
 		return nil
 	}
-	// Each case edits the BASELINE side (want), so the arrow reads baseline -> now.
+	// Each case edits the BASELINE side (want), so the arrow reads baseline -> now. Counts are
+	// derived, not hard-coded: a model change that adds or merges vectors must not break them.
+	nApply, nCrash := len(base.Apply), len(base.Crash)
 	cases := []struct {
 		name, want string
 		mutate     func(b *Baseline)
@@ -85,13 +88,13 @@ func TestCompareBaseline_ReportsEveryKindOfChange(t *testing.T) {
 			b.Reconcile.VerdictCounts["loud_stop/indeterminate_restore_prior"] = b.Reconcile.VerdictCounts[k]
 			delete(b.Reconcile.VerdictCounts, k)
 		}},
-		{"apply expectation", "apply vector set changed: 172 -> 172 vectors, 1 removed, 1 added", func(b *Baseline) {
+		{"apply expectation", fmt.Sprintf("apply vector set changed: %d -> %d vectors, 1 removed, 1 added", nApply, nApply), func(b *Baseline) {
 			b.Apply[0] = strings.Replace(b.Apply[0], "op=succeeded", "op=failed", 1)
 		}},
-		{"crash vector new since the baseline", "crash vector set changed: 146 -> 147 vectors, 0 removed, 1 added", func(b *Baseline) {
+		{"crash vector new since the baseline", fmt.Sprintf("crash vector set changed: %d -> %d vectors, 0 removed, 1 added", nCrash-1, nCrash), func(b *Baseline) {
 			b.Crash = b.Crash[1:]
 		}},
-		{"vector dropped since the baseline (multiset)", "apply vector set changed: 173 -> 172 vectors, 1 removed, 0 added", func(b *Baseline) {
+		{"vector dropped since the baseline (multiset)", fmt.Sprintf("apply vector set changed: %d -> %d vectors, 1 removed, 0 added", nApply+1, nApply), func(b *Baseline) {
 			b.Apply = append(b.Apply, b.Apply[0])
 		}},
 	}
@@ -272,4 +275,22 @@ func TestVectorLines_CoverEveryExpectationField(t *testing.T) {
 	if base := ApplyLine(&a); func() string { a.Plan = append(a.Plan, PlanEntry{Cmd: "x"}); return ApplyLine(&a) }() == base {
 		t.Error("the fault plan is not rendered in the apply line")
 	}
+}
+
+// Regression: apply vectors were deduplicated on (prior, same, plan, expectation), which
+// omits th/ph/backup/rb. Two runs that drive different agent code paths merged whenever their
+// plan and expectation matched, silently dropping a real-code path from conformance. Now every
+// distinct concrete input (all parameters + fault plan) is replayed exactly once.
+func TestVectors_EveryDistinctConcreteInputIsReplayed(t *testing.T) {
+	apply, _ := Vectors()
+	if got, want := len(apply), distinctApplyInputs(); got != want {
+		t.Fatalf("%d apply vectors for %d distinct concrete inputs: deduplication dropped a distinct run", got, want)
+	}
+	want := "prior=valid same=false backup=false rb=true th=false ph=true | health_gate=fail > rb_verify=capture_fail |"
+	for i := range apply {
+		if strings.HasPrefix(ApplyLine(&apply[i]), want) {
+			return
+		}
+	}
+	t.Errorf("the run %q (once merged into a different code path) is missing", want)
 }
