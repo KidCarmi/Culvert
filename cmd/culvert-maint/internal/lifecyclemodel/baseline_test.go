@@ -79,6 +79,11 @@ func TestCompareBaseline_ReportsEveryKindOfChange(t *testing.T) {
 		{"state space", "state space changed", func(b *Baseline) { b.Stats.States-- }},
 		{"properties file", "properties.json changed", func(b *Baseline) { b.PropsSHA256 = "0" + b.PropsSHA256[1:] }},
 		{"reconcile table", "reconcile decision table changed", func(b *Baseline) { b.Reconcile.SHA256 = "x" }},
+		{"reconcile action of a reason", "reconcile decision table changed", func(b *Baseline) {
+			k := "rollback_to_prior/indeterminate_restore_prior"
+			b.Reconcile.VerdictCounts["loud_stop/indeterminate_restore_prior"] = b.Reconcile.VerdictCounts[k]
+			delete(b.Reconcile.VerdictCounts, k)
+		}},
 		{"apply expectation", "apply vector set changed: 172 -> 172 vectors, 1 removed, 1 added", func(b *Baseline) {
 			b.Apply[0] = strings.Replace(b.Apply[0], "op=succeeded", "op=failed", 1)
 		}},
@@ -164,12 +169,20 @@ func TestRunGate_DriftExitAndReport(t *testing.T) {
 // A baseline is never recorded from a run that is not a pass-or-fail verdict.
 func TestRunGate_WriteBaselineRefusesIncompleteRuns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "baseline.json")
-	opts := GateOptions{IncludeProposed: true, MaxStates: budgetStates, MaxDuration: budgetTime, WriteBaseline: path}
+	// As update-baseline.sh runs it: proposed failures are reported, not counted.
+	opts := GateOptions{IncludeProposed: true, FailOnlyApproved: true, MaxStates: budgetStates, MaxDuration: budgetTime, WriteBaseline: path}
 	if code := RunGate(propFile(withStatus(propVacuous, StatusProposed)), opts, &strings.Builder{}); code != ExitIncomplete {
 		t.Errorf("vacuous run: exit %d, want %d", code, ExitIncomplete)
 	}
 	if _, err := os.Stat(path); err == nil {
 		t.Error("a baseline was written from a vacuous run")
+	}
+	failing := GateOptions{IncludeProposed: true, MaxStates: budgetStates, MaxDuration: budgetTime, WriteBaseline: path}
+	if code := RunGate(propFile(withStatus(propFailing, StatusApproved)), failing, &strings.Builder{}); code != ExitFail {
+		t.Errorf("failing run: exit %d, want %d", code, ExitFail)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Error("a baseline was written from a run with a failing counted property")
 	}
 	if code := RunGate(EmbeddedPropertiesJSON(), opts, &strings.Builder{}); code != ExitPass {
 		t.Fatalf("complete run: exit %d", code)
@@ -183,5 +196,33 @@ func TestRunGate_WriteBaselineRefusesIncompleteRuns(t *testing.T) {
 	}
 	if _, err := ParseBaseline(raw); err != nil {
 		t.Errorf("written baseline does not parse back: %v", err)
+	}
+}
+
+// Regression (independent review F1): the fingerprint hashed only the per-input reason
+// codes, so moving a reason to another action in the model AND the code kept "no drift".
+func TestReconcileFingerprint_CoversActions(t *testing.T) {
+	rv := GenReconcileVectors()
+	base := reconcileFingerprint(rv)
+	for i, a := range rv.Actions {
+		if rv.Reasons[i] == "indeterminate_restore_prior" && a != "loud_stop" {
+			rv.Actions[i] = "loud_stop"
+		}
+	}
+	if got := reconcileFingerprint(rv); got.SHA256 == base.SHA256 || sameCounts(got.VerdictCounts, base.VerdictCounts) {
+		t.Fatal("changing a reason's action left the reconcile fingerprint unchanged")
+	}
+}
+
+// Without -include-proposed the run cannot be compared with a baseline that records the
+// proposed properties: it must say NOT CHECKED, not report seventeen false drifts.
+func TestRunGate_BaselineNeedsProposed(t *testing.T) {
+	var out strings.Builder
+	opts := GateOptions{MaxStates: budgetStates, MaxDuration: budgetTime, Baseline: EmbeddedBaselineJSON()}
+	if code := RunGate(EmbeddedPropertiesJSON(), opts, &out); code != ExitPass {
+		t.Fatalf("exit %d\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "baseline NOT CHECKED") || strings.Contains(out.String(), "DRIFT") {
+		t.Errorf("want NOT CHECKED and no drift lines:\n%s", out.String())
 	}
 }

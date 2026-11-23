@@ -43,7 +43,10 @@ type BaselineProperty struct {
 	Trace     []string `json:"trace,omitempty"`
 }
 
-// ReconcileFingerprint pins the reconcile decision table, which is too large to list.
+// ReconcileFingerprint pins the reconcile decision table, which is too large to list. The
+// hash covers the input domains, the reason codes AND the action paired with each reason:
+// the per-input code alone indexes a reason, so a change of a reason's action would
+// otherwise leave it unchanged. VerdictCounts is keyed "action/reason" and compared too.
 type ReconcileFingerprint struct {
 	Inputs        int            `json:"inputs"`
 	SHA256        string         `json:"sha256"`
@@ -91,13 +94,29 @@ func ComputeBaseline(propsSHA string, stats Stats, results []Result) Baseline {
 }
 
 func reconcileFingerprint(rv *ReconcileVectors) ReconcileFingerprint {
-	sum := sha256.Sum256([]byte(rv.Expected))
+	raw, err := json.Marshal(rv) // domains, reasons, actions and every per-input code
+	if err != nil {
+		panic(err) // plain data: cannot fail
+	}
+	sum := sha256.Sum256(raw)
 	counts := map[string]int{}
 	for n := range rv.Expected {
-		_, reason := rv.Verdict(n)
-		counts[reason]++
+		action, reason := rv.Verdict(n)
+		counts[action+"/"+reason]++
 	}
 	return ReconcileFingerprint{Inputs: len(rv.Expected), SHA256: hex.EncodeToString(sum[:]), VerdictCounts: counts}
+}
+
+func sameCounts(a, b map[string]int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func paramsLine(p Params) string {
@@ -172,7 +191,8 @@ func CompareBaseline(want, got Baseline) []string {
 			want.Stats.States, want.Stats.Transitions, got.Stats.States, got.Stats.Transitions))
 	}
 	d = append(d, compareProperties(want.Properties, got.Properties)...)
-	if want.Reconcile.Inputs != got.Reconcile.Inputs || want.Reconcile.SHA256 != got.Reconcile.SHA256 {
+	if want.Reconcile.Inputs != got.Reconcile.Inputs || want.Reconcile.SHA256 != got.Reconcile.SHA256 ||
+		!sameCounts(want.Reconcile.VerdictCounts, got.Reconcile.VerdictCounts) {
 		d = append(d, fmt.Sprintf("reconcile decision table changed: baseline %d inputs sha256 %.16s, now %d sha256 %.16s; verdict counts %v -> %v",
 			want.Reconcile.Inputs, want.Reconcile.SHA256, got.Reconcile.Inputs, got.Reconcile.SHA256,
 			want.Reconcile.VerdictCounts, got.Reconcile.VerdictCounts))

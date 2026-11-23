@@ -14,6 +14,9 @@ REPORT="${1:-$(mktemp -d)}"; mkdir -p "$REPORT"; REPORT="$(cd "$REPORT" && pwd)"
 BIN="$(mktemp -d)"; trap 'rm -rf "$BIN"' EXIT
 TAG=lifecycle_conformance
 status=0
+# Exported by a developer for update-baseline.sh, this would turn the observed.json
+# comparison into a write and a pass. This script only ever compares.
+unset CULVERT_CONFORMANCE_WRITE_OBSERVED
 cd "$ROOT/cmd/culvert-maint" || exit 2
 
 echo "== model check (abstraction only: says nothing about the Go code by itself) =="

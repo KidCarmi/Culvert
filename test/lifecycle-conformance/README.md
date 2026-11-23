@@ -48,8 +48,11 @@ Measured on `155df09` (worktree experiments, nothing committed):
 | Failed rollback no longer reported as `rollback_failed` (code + model) | exit 0; S5 FAIL only in the summary | exit 1: `S5 PASS -> FAIL`, 76 apply vectors listed |
 | Post-`up` `TargetImageID` capture removed (code + model) | exit 0; C2 went FAIL → PASS, so the run looked *better* | exit 1: S8 FAIL, `C2 FAIL -> PASS`, state space 5864 → 5792 |
 | `restartLeftPrior` branch of `final_running_digest` removed (code only) | exit 0; the model does not predict that field | exit 1: real-code DRIFT, 48 → 58 vectors misreport |
+| Reconcile reason `indeterminate_restore_prior` moved from `rollback_to_prior` to `loud_stop` (code + model) | exit 0 | exit 1: reconcile table drift, counts keyed `action/reason` |
 
-The existing unit tests also caught these three. The baseline exists for the
+The existing unit tests also caught these. S8 restates the model's own capture
+rule, so it adds a named failure, not detection power: the crash-vector lines
+already pin `target_id`. The baseline exists for the
 changes where conformance is the only detector (the 17 conformance-only mutants
 below), and so that a reviewer sees a behaviour change as a diff instead of
 trusting that a co-edited model is still right.
@@ -118,8 +121,10 @@ The pieces can be run on their own from `cmd/culvert-maint`:
 ```bash
 # the checker's own tests
 go test -tags lifecycle_conformance -count=1 ./internal/lifecyclemodel/...
-# the property gate (exit 0 / 1 / 2 as above; build it rather than `go run` it
-# when the exit code matters: `go run` reports every non-zero exit as 1)
+# the property gate (exit 0 / 1 / 2 as above, plus 3 = drift from baseline.json;
+# the baseline is compared only with -include-proposed, otherwise NOT CHECKED;
+# build it rather than `go run` it when the exit code matters: `go run` reports
+# every non-zero exit as 1)
 go build -tags lifecycle_conformance -o /tmp/lifecyclecheck ./internal/lifecyclemodel/cmd/lifecyclecheck
 /tmp/lifecyclecheck -include-proposed -fail-only-approved -report /tmp/lifecycle-report
 # the three conformance suites

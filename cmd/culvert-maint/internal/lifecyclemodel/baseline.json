@@ -148,18 +148,18 @@
  ],
  "reconcile": {
   "inputs": 435456,
-  "sha256": "5de244a042b62898e3c74423aacc6ac2650416330f0f5afde0953bb4da172ddb",
+  "sha256": "9ff82228feb904d2b97abf657dd3eeacf552b30221dd0f99b1c38b2f73559b51",
   "verdict_counts": {
-   "already_on_prior": 17808,
-   "data_window_manual": 108864,
-   "indeterminate_restore_prior": 18288,
-   "invalid_record_ref": 163296,
-   "live_target": 16128,
-   "live_target_prior_equals_target": 13356,
-   "no_recovery_target": 3240,
-   "reconcile_exhausted": 54432,
-   "safe_boundary_confirmed": 28704,
-   "tag_advanced_container_stale": 11340
+   "data_manual/data_window_manual": 108864,
+   "loud_stop/invalid_record_ref": 163296,
+   "loud_stop/no_recovery_target": 3240,
+   "loud_stop/reconcile_exhausted": 54432,
+   "noop/already_on_prior": 17808,
+   "noop/safe_boundary_confirmed": 28704,
+   "reup/tag_advanced_container_stale": 11340,
+   "rollback_to_prior/indeterminate_restore_prior": 18288,
+   "verify_adopt_else_rollback/live_target": 16128,
+   "verify_adopt_else_rollback/live_target_prior_equals_target": 13356
   }
  },
  "apply": [

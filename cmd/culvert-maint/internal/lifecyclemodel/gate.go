@@ -130,6 +130,12 @@ func RunGate(raw []byte, o GateOptions, w io.Writer) int {
 	if o.WriteBaseline != "" {
 		return writeBaseline(w, o.WriteBaseline, exit, ComputeBaseline(sha, stats, results))
 	}
+	if o.Baseline != nil && !o.IncludeProposed {
+		// The baseline is recorded with proposed properties evaluated; comparing a run that
+		// skips them would report every one of them as drift.
+		outf(w, "NOTE: baseline NOT CHECKED: it records proposed properties; compare with -include-proposed\n")
+		o.Baseline = nil
+	}
 	if o.Baseline != nil {
 		drift, err := baselineDrift(o.Baseline, ComputeBaseline(sha, stats, results))
 		if err != nil {
@@ -179,9 +185,13 @@ func driftExit(w io.Writer, exit int, drift []string) int {
 }
 
 func writeBaseline(w io.Writer, path string, exit int, b Baseline) int {
-	if exit == ExitIncomplete {
+	switch exit {
+	case ExitIncomplete:
 		outf(w, "INCOMPLETE: refusing to record a baseline from an incomplete or vacuous run\n")
 		return ExitIncomplete
+	case ExitFail:
+		outf(w, "FAIL: refusing to record a baseline while a counted property fails\n")
+		return ExitFail
 	}
 	if err := WriteBaselineFile(path, b); err != nil {
 		outf(w, "INCOMPLETE: cannot write baseline: %v\n", err)
@@ -250,6 +260,9 @@ func WriteSummary(dir string, w io.Writer) {
 		}
 		found++
 		outf(w, "- `%s`: %s\n", name, scalarPairs(rep))
+		if d, ok := rep["observed_drift"].([]any); ok && len(d) > 0 {
+			outf(w, "  - **DRIFT (real code)** from the reviewed `observed.json`: %d line(s); see the job log\n", len(d))
+		}
 	}
 	if found != 3 {
 		outf(w, "\n**INCOMPLETE: fewer than three conformance suites reported. This is not a pass.**\n")

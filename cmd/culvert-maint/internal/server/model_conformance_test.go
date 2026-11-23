@@ -462,18 +462,20 @@ func TestModelConformance_ApplyFlow(t *testing.T) {
 			})
 		}
 	})
+	drift := checkObserved(t, uniqueSorted(misreported))
 	writeReport(t, "apply", map[string]interface{}{"vectors": len(vs), "terminal_states_with_tag_ahead_of_container": tagAhead,
-		"final_running_digest_differs_from_actual": misreported})
-	checkObserved(t, uniqueSorted(misreported))
+		"final_running_digest_differs_from_actual": misreported, "observed_drift": drift})
 }
 
 // checkObserved compares what the real code reported with the reviewed observed.json: the
 // model does not predict final_running_digest, so without this a change to that API field
-// passes every vector. With CULVERT_CONFORMANCE_WRITE_OBSERVED=<path> it records instead.
-func checkObserved(t *testing.T, got []string) {
+// passes every vector. With CULVERT_CONFORMANCE_WRITE_OBSERVED=<path> it records instead
+// (run.sh unsets it). It returns the drift lines ("+" newly differing, "-" no longer).
+func checkObserved(t *testing.T, got []string) []string {
 	t.Helper()
+	drift := []string{}
 	if t.Failed() {
-		return // a mismatch already fails the suite; do not record or compare a broken run
+		return drift // a mismatch already fails the suite; do not record or compare a broken run
 	}
 	if path := os.Getenv("CULVERT_CONFORMANCE_WRITE_OBSERVED"); path != "" {
 		b, err := lifecyclemodel.MarshalReviewable(lifecyclemodel.Observed{Note: lifecyclemodel.ObservedNote,
@@ -484,7 +486,7 @@ func checkObserved(t *testing.T, got []string) {
 		if err != nil {
 			t.Fatalf("observed.json not written: %v", err)
 		}
-		return
+		return drift
 	}
 	want, err := lifecyclemodel.EmbeddedObserved()
 	if err != nil {
@@ -492,10 +494,17 @@ func checkObserved(t *testing.T, got []string) {
 	}
 	if !reflect.DeepEqual(got, want.FinalRunningDigestDiffers) {
 		added, removed := diffSorted(want.FinalRunningDigestDiffers, got)
+		for _, x := range added {
+			drift = append(drift, "+ "+x)
+		}
+		for _, x := range removed {
+			drift = append(drift, "- "+x)
+		}
 		t.Errorf("DRIFT (real code): final_running_digest now differs from the running image on %d vectors (reviewed: %d)\n"+
 			" newly differing: %v\n no longer differing: %v\n intended? run test/lifecycle-conformance/update-baseline.sh and review observed.json",
 			len(got), len(want.FinalRunningDigestDiffers), added, removed)
 	}
+	return drift
 }
 
 func uniqueSorted(l []string) []string {

@@ -17,6 +17,7 @@ go build -tags lifecycle_conformance -o "$BIN/lifecyclecheck" ./internal/lifecyc
   -write-baseline "$MODEL/baseline.json"
 CULVERT_CONFORMANCE_WRITE_OBSERVED="$MODEL/observed.json" \
   go test -tags lifecycle_conformance ./internal/server/ -run 'TestModelConformance_ApplyFlow$' -count=1 -timeout 240s
-# The embedded files changed: rebuild and confirm a clean run against them.
+# The embedded files changed: rebuild and confirm a clean run against them. (run.sh
+# unsets CULVERT_CONFORMANCE_WRITE_OBSERVED itself.)
 "$HERE/run.sh"
 git -C "$ROOT" --no-pager diff --stat -- "$MODEL/baseline.json" "$MODEL/observed.json"
