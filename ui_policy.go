@@ -2832,6 +2832,14 @@ func policyTestAuthority(w http.ResponseWriter, r *http.Request, host string) (a
 		http.Error(w, "host is not a request target the proxy can parse: use host or host:port, with an IPv6 address in brackets when it has a port", http.StatusBadRequest)
 		return "", false
 	}
+	// The zone refusal again, on the authority the parser extracted. The first
+	// check reads the typed input, which userinfo can hide a zone from:
+	// "user@[::1%25lo]:443" is not itself an address, but its authority is
+	// "[::1%lo]:443", which the data path refuses.
+	if why := policyTestHostRefusal(wireHost); why != "" {
+		http.Error(w, why, http.StatusBadRequest)
+		return "", false
+	}
 	host = wireHost
 	// The CANONICAL tier, and the validity gate. A host with no canonical form is
 	// answered 400 INVALID_HOST by the data path (RISK-013) on every request

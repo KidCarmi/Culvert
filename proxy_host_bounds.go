@@ -444,7 +444,8 @@ func resetOversizeHostStateForTest() {
 //
 // ok is false when the request parser refuses the input (a malformed or
 // forbidden escape, a non-numeric port, an unbracketed IPv6 literal, a control
-// character) or when it yields no host at all. Whatever the parser ACCEPTS is
+// character, a literal space anywhere in the target) or when it yields no host
+// at all. Whatever the parser ACCEPTS is
 // answered for its host, exactly as on the wire: "user@example.com",
 // "example.com/path" and "example.com?q" are all requests for example.com, and
 // a raw non-ASCII name is accepted on the request line just as an encoded one
@@ -456,6 +457,13 @@ func resetOversizeHostStateForTest() {
 // the SOCKS5 DOMAIN form is likewise taken literally; an encoded name there is
 // matched as the literal string, which no resolver can serve.
 func wireDestAuthority(input string) (authority string, ok bool) {
+	// A literal space cannot be part of a request target: net/http splits the
+	// request line at spaces before it parses any URL, so "example.com/x y" is a
+	// malformed request line on the wire, while url.ParseRequestURI on its own
+	// accepts a space in a path or query. An encoded space ("%20") stays valid.
+	if strings.IndexByte(input, ' ') >= 0 {
+		return "", false
+	}
 	u, err := url.ParseRequestURI("http://" + input)
 	if err != nil || u.Host == "" {
 		return "", false

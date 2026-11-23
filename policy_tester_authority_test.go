@@ -56,6 +56,9 @@ func TestWireDestAuthority(t *testing.T) {
 		{"example.com:http", "", false},
 		{"2001:db8::7", "", false}, // the tester brackets a bare address first: see bracketBareIPv6
 		{"example.com ", "", false},
+		{"example.com/x y", "", false}, // net/http splits the request line at the space
+		{"example.com?q=a b", "", false},
+		{"example.com/x%20y", "example.com", true}, // an encoded space is an ordinary path byte
 		{" example.com", "", false},
 		{"exa\tmple.com", "", false},
 		{"", "", false},
@@ -238,6 +241,10 @@ func TestPolicyTester_AgreesWithTheWireOnOddTargets(t *testing.T) {
 		"*.example.com", "_srv.example.com", "exa_mple.com", "example.com\\x", "example.com%5Cx",
 		"b%C3%BCcher.de.", "B%C3%9CCHER.de", "b%C3%BCcher.de:443", "sub.xn--bcher-kva.de", "xn--a-.example.com",
 		"user@b%C3%BCcher.de", "user%40example.com", "example.com@b%C3%BCcher.de",
+		// A literal space ends the request target on the wire; an encoded one does not.
+		"example.com/x y", "example.com?q=a b", "example.com/x%20y",
+		// Userinfo in front of a zoned literal: the zone is in the parsed authority.
+		"user@[::1%25lo]:443", strings.Repeat("u", 254) + "@[::1%25lo]:443", "user@[2001:db8::7]:443",
 	} {
 		rl = newRateLimiter()
 		h := wireAuthorityOutcome(t, proxyURL.Host, http.MethodGet, authority)
