@@ -8497,19 +8497,78 @@ async function rollbackConfigVersion(version) {
   } else {
     scopeNote = '';
   }
-  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? Rollback replaces only the settings captured in the v${version} snapshot; settings listed below the version table are not restored.${scopeNote} A new version will be created to record this rollback.`, 'Rollback')) return;
+  // Preview first (dry_run applies nothing): what this rollback changes
+  // against the RUNNING configuration, and what the server will skip.
+  let preview = null, previewErr = '';
   try {
-    const data = await api('/api/config/versions', {
+    preview = await api('/api/config/versions', {method: 'POST', body: {version, dry_run: true}});
+  } catch (err) {
+    if (err.message === 'Unauthorized') return;
+    previewErr = String(err.message || err).trim().slice(0, 300);
+  }
+  if (!await confirmAction('Rollback Configuration', `Roll back to config version v${version}? Rollback replaces only the settings captured in the v${version} snapshot; settings listed below the version table are not restored.${scopeNote} A new version will be created to record this rollback.`, 'Rollback', {impact: rollbackPreviewImpact(preview, previewErr)})) return;
+  let r, data = null, text = '';
+  try {
+    r = await apiFetch('/api/config/versions', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({version})
     });
-    toast(`Rolled back to v${version} successfully.`, 'ok');
-    loadConfigVersions();
-    fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
+    text = await r.text();
+    try { data = JSON.parse(text); } catch (_) { /* plain-text refusal */ }
   } catch (err) {
-    toast('Rollback failed: ' + err.message, 'error');
+    showRollbackOutcome('error', `Rollback to v${version}: no answer from the server (${err.message}). It may or may not have been applied — reload this page and check the version list and the audit log before retrying.`, []);
+    return;
   }
+  if (r.status === 401) return;
+  const applied = !!(data && data.applied);
+  const warnings = (data && Array.isArray(data.warnings)) ? data.warnings : [];
+  if (r.ok && applied) {
+    showRollbackOutcome(warnings.length ? 'warn' : 'ok',
+      warnings.length ? `Rolled back to v${version}, with ${warnings.length} warning${warnings.length === 1 ? '' : 's'} — review below.` : `Rolled back to v${version}.`, warnings);
+  } else if (applied) {
+    // 500 rolled_back_not_durable: the running configuration HAS changed.
+    showRollbackOutcome('error', `Rolled back to v${version} in the running configuration, but it could NOT be saved to disk — it will be lost on restart. Retrying the rollback is not the fix: resolve the storage problem (Health report, storage row), then save the affected settings again.`,
+      warnings.concat(data.persist_errors ? ['Not saved: ' + data.persist_errors] : []));
+  } else {
+    showRollbackOutcome('error', `Rollback to v${version} was refused — nothing was changed. ${text.trim().slice(0, 500)}`, []);
+    return;
+  }
+  loadConfigVersions();
+  fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
+}
+
+// rollbackPreviewImpact turns the dry-run answer into the confirm dialog's
+// Impact line (assigned via textContent - plain text, no markup).
+function rollbackPreviewImpact(preview, previewErr) {
+  if (!preview) {
+    return `no preview is available (${previewErr || 'the server did not answer'}). The rollback can still be applied, but what it changes has not been shown to you.`;
+  }
+  const changes = Array.isArray(preview.changes) ? preview.changes : [];
+  const warnings = Array.isArray(preview.warnings) ? preview.warnings : [];
+  const part = c => {
+    // diffConfigs carries removed/changed on `from` and added on `to`.
+    const n = k => [c.from, c.to].reduce((t, v) => t + ((v && Array.isArray(v[k])) ? v[k].length : 0), 0);
+    const bits = [n('added') && `+${n('added')}`, n('removed') && `−${n('removed')}`, n('changed') && `~${n('changed')}`].filter(Boolean);
+    return bits.length ? `${c.field} (${bits.join(' ')})` : c.field;
+  };
+  let out = changes.length
+    ? `changes ${changes.length} setting${changes.length === 1 ? '' : 's'} of the running configuration: ${changes.map(part).join(', ')}.`
+    : 'no captured setting differs from the running configuration.';
+  if (warnings.length) out += ` Warnings: ${warnings.join('; ')}.`;
+  return out;
+}
+
+// showRollbackOutcome leaves the result of a rollback on the panel (a toast
+// disappears after 3s; skipped rules and a non-durable apply must not).
+function showRollbackOutcome(kind, msg, details) {
+  const el = document.getElementById('config-diff-result');
+  const color = kind === 'ok' ? 'var(--green)' : kind === 'warn' ? 'var(--yellow)' : 'var(--red)';
+  el.style.display = 'block';
+  el.innerHTML = `<div role="status" style="padding:10px;background:var(--surface);border-left:3px solid ${color};border-radius:6px;font-size:.82rem">` +
+    `<strong>${escHtml(msg)}</strong>` +
+    (details.length ? `<ul style="margin:6px 0 0 18px">${details.map(d => `<li>${escHtml(d)}</li>`).join('')}</ul>` : '') + '</div>';
+  toast(msg, kind === 'error' ? 'error' : 'success');
 }
 
 // ── Schedule helpers ─────────────────────────────────────────────────────

@@ -464,6 +464,41 @@ var rollbackRuntimeOnlySurfaces = []string{
 	"rate_limit_exempt",
 }
 
+// maxNamedInvalidRollbackRules bounds how many skipped rules a rollback
+// pre-flight names individually; the rest are counted.
+const maxNamedInvalidRollbackRules = 10
+
+// invalidPolicyRuleWarning reports the stored rules a rollback will skip, or ""
+// when there are none. The count alone leaves the operator unable to tell
+// WHICH rules go, and so whether a restriction disappears with them: the
+// summary is followed by the first few names with the reason (bounded so a
+// damaged snapshot cannot flood the answer). It stays ONE warning, so every
+// consumer that counts warnings (config_rollback_validation) is unchanged.
+func invalidPolicyRuleWarning(rules []PolicyRule) string {
+	var invalid int
+	var named []string
+	for i := range rules {
+		err := validateStoredPolicyRule(rules[i], nil, -1)
+		if err == nil {
+			continue
+		}
+		invalid++
+		if len(named) < maxNamedInvalidRollbackRules {
+			named = append(named, fmt.Sprintf("%q (priority %d): %s",
+				rules[i].Name, rules[i].Priority, strings.ReplaceAll(err.Error(), "\n", " ")))
+		}
+	}
+	if invalid == 0 {
+		return ""
+	}
+	w := fmt.Sprintf("%d of %d policy rules are invalid (will be skipped): %s",
+		invalid, len(rules), strings.Join(named, "; "))
+	if more := invalid - len(named); more > 0 {
+		w += fmt.Sprintf("; and %d more not listed", more)
+	}
+	return w
+}
+
 // validateConfigBackup performs pre-flight checks on a config snapshot (F7).
 // Returns a list of human-readable warnings; empty slice means all checks pass.
 func validateConfigBackup(b *configBackup) []string {
@@ -480,14 +515,8 @@ func validateConfigBackup(b *configBackup) []string {
 	}
 
 	// Validate each policy rule.
-	var invalidRules int
-	for i := range b.PolicyRules {
-		if err := validateStoredPolicyRule(b.PolicyRules[i], nil, -1); err != nil {
-			invalidRules++
-		}
-	}
-	if invalidRules > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d of %d policy rules are invalid (will be skipped)", invalidRules, len(b.PolicyRules)))
+	if w := invalidPolicyRuleWarning(b.PolicyRules); w != "" {
+		warnings = append(warnings, w)
 	}
 
 	// Check IP filter mode is valid.
