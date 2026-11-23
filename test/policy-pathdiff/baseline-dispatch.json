@@ -6,7 +6,7 @@
  "action=\"BLOCK_PAGE\" default=allow": "want=? (action spelling (unspecified)) http=block(403) connect=block(403) tester[matched=true action=BLOCK_PAGE default=\u003cnil\u003e] unspecified",
  "action=\"Block_Page\" default=allow": "want=block (POL-001) http=block(403) connect=block(403) tester[matched=true action=Block_Page default=\u003cnil\u003e] as-specified",
  "action=\"Drop\" default=allow": "want=block (POL-001) http=block(0) connect=block(0) tester[matched=true action=Drop default=\u003cnil\u003e] as-specified",
- "action=\"Frobnicate\" default=allow": "want=block (POL-004) http=forward(200) connect=block(403) tester[matched=false action=\u003cnil\u003e default=allow] DIFFERS-FROM-CONTRACT",
+ "action=\"Frobnicate\" default=allow": "want=block (POL-004) http=block(403) connect=block(403) tester[matched=true action=Frobnicate default=\u003cnil\u003e] as-specified",
  "action=\"Redirect\" default=allow": "want=block (POL-001) http=block(403) connect=block(403) tester[matched=true action=Redirect default=\u003cnil\u003e] as-specified",
  "action=\"allow\" default=deny": "want=? (action spelling (unspecified)) http=forward(200) connect=block(403) tester[matched=true action=allow default=\u003cnil\u003e] unspecified"
 }

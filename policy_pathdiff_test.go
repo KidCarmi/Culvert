@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -160,10 +161,17 @@ func pdOutcome(code int, before, after map[string]int64) string {
 
 func (e *pdEnv) wire(method string, rq *gen.Request, auth string) string {
 	var b strings.Builder
+	// The Host header is a fixed valid name, never the authority under test
+	// (FROZEN.md, deviation 4). For these two request forms the proxy takes its
+	// destination from the request target; net/http only VALIDATES the header.
+	// Mirroring an odd authority into the header made net/http answer 400 for
+	// the header, which the verifier then recorded as "the wire refuses this
+	// destination" for spellings a client reaches the handler with by sending
+	// any valid header.
 	if method == "CONNECT" {
-		fmt.Fprintf(&b, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n", rq.Authority, rq.Authority)
+		fmt.Fprintf(&b, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n", rq.Authority, pdHostHeader)
 	} else {
-		fmt.Fprintf(&b, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n", rq.Authority, rq.Authority)
+		fmt.Fprintf(&b, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n", rq.Authority, pdHostHeader)
 	}
 	if auth != "" {
 		fmt.Fprintf(&b, "Proxy-Authorization: Basic %s\r\n", auth)
@@ -192,6 +200,29 @@ func (e *pdEnv) wire(method string, rq *gen.Request, auth string) string {
 		code = w.Code
 	}
 	return pdOutcome(code, before, pdHits())
+}
+
+// pdHostHeader is the Host header every generated wire request carries.
+const pdHostHeader = "pathdiff-host.invalid"
+
+// pdDeliveredHost returns the port-free host net/http would hand the proxy for
+// a client that used authority as its request target, and false when the
+// request line or the request parser refuses it.
+func pdDeliveredHost(authority string) (string, bool) {
+	if strings.IndexByte(authority, ' ') >= 0 {
+		return "", false
+	}
+	// An EMPTY host is not a parse failure: "GET http:/// HTTP/1.1" reaches the
+	// handler with an empty r.Host, so the evaluators are asked about "" too.
+	u, err := url.ParseRequestURI("http://" + authority)
+	if err != nil {
+		return "", false
+	}
+	host := u.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return host, true
 }
 
 func pdClient(rq *gen.Request) string {
@@ -248,11 +279,17 @@ func (e *pdEnv) ask(rq *gen.Request) map[string]string {
 		}
 	}
 
-	bare := rq.Authority
-	if h, _, err := net.SplitHostPort(bare); err == nil {
-		bare = h
-	}
+	// The evaluator paths are asked about the host a request would deliver, not
+	// the typed string (FROZEN.md, deviation 4): no ingress hands Evaluate
+	// "example.com?x". The parse is the standard library's, called here directly
+	// and not through the product's helper, so the paths stay independent. A
+	// target the parser refuses never reaches an evaluator.
+	bare, parsed := pdDeliveredHost(rq.Authority)
 	for name, ps := range map[string]*PolicyStore{"eval": policyStore, "reload": e.reload} {
+		if !parsed {
+			out[name] = "refused:parse"
+			continue
+		}
 		out[name] = "-"
 		if m := ps.Evaluate(pdClient(rq), ident, src, bare, groups); m != nil && m.Rule != nil {
 			out[name] = m.Rule.Name

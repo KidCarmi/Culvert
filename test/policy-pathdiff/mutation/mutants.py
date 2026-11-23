@@ -26,7 +26,7 @@ M = [
  ("M06", "IPv4-mapped destination literal no longer unmapped", "policy_destliteral.go",
   "return addr.Unmap().String()", "return addr.String()"),
  ("M07", "bulk replace does not sort by priority", "policy.go",
-  "\tps.rules = out\n\tps.sortLocked()\n\tps.bumpVersion()\n\tps.mu.Unlock()\n}\n\n// Add inserts", "\tps.rules = out\n\tps.bumpVersion()\n\tps.mu.Unlock()\n}\n\n// Add inserts"),
+  "\tps.rules = out\n\tps.sortLocked()\n\tps.bumpVersion()\n\tps.mu.Unlock()\n}\n\n// warnLoadedRule", "\tps.rules = out\n\tps.bumpVersion()\n\tps.mu.Unlock()\n}\n\n// warnLoadedRule"),
  ("M08", "enforcement-only prefilter wrongly rejects the second rule", "policy.go",
   "\t\tif pre.rejectsAt(i) {\n\t\t\tcontinue\n\t\t}\n\t\trule := rules[i]\n\t\tif !ruleIsEnabled(rule) {",
   "\t\tif pre.rejectsAt(i) || (trace == nil && i == 1) {\n\t\t\tcontinue\n\t\t}\n\t\trule := rules[i]\n\t\tif !ruleIsEnabled(rule) {"),
@@ -45,6 +45,13 @@ M = [
   ("LAST", 'return err == nil && addr.Zone() == "" && p.Contains(addr.Unmap())'), 'return err == nil && addr.Zone() == "" && p.Contains(addr)'),
  ("M14", "group names no longer trimmed before comparison", "policy.go",
   "strings.EqualFold(strings.TrimSpace(g), name)", "strings.EqualFold(g, name)"),
+ # M15-M17 each undo one of the three fixes this verifier led to (#2055, #2053, #2050).
+ ("M15", "zoned IPv6 destinations are no longer refused", "proxy_host_bounds.go",
+  "func destIPv6Zoned(authority string) bool {\n", "func destIPv6Zoned(authority string) bool {\n\tif true {\n\t\treturn false\n\t}\n"),
+ ("M16", "tester matches the typed text again, not the parsed request target", "proxy_host_bounds.go",
+  "func wireDestAuthority(input string) (authority string, ok bool) {\n", "func wireDestAuthority(input string) (authority string, ok bool) {\n\tif true {\n\t\treturn input, true\n\t}\n"),
+ ("M17", "an unknown action resolves to Allow", "authpolicy.go",
+  "\treturn \"\", false\n}\n\n// subjectSourceBreadth", "\treturn ActionAllow, true\n}\n\n// subjectSourceBreadth"),
 ]
 
 def apply(root, f, old, new):
@@ -83,6 +90,10 @@ if __name__ == "__main__":
             reasons = sorted({l.split(":")[0].strip() if "drift" not in l else ("drift(" + l.split("(")[1].split(")")[0] + ")" if "drift (" in l else "drift(signature)")
                               for l in open(os.path.join(work, "rep_" + mid, "pathdiff.log"), errors="replace").read().splitlines()
                               if "behaviour drift" in l or "vacuous" in l or "not live" in l} ) if os.path.exists(os.path.join(work, "rep_" + mid, "pathdiff.log")) else []
+            if os.environ.get("MUTANTS_NEW_ONLY") == "1":  # verifier side only (about a minute per mutant)
+                res.update(new_exit=n[0], new_secs=round(n[1]), new_reasons=reasons)
+                json.dump(res, open(out, "w"), indent=1); shutil.rmtree(tree, ignore_errors=True)
+                print(json.dumps(res), flush=True); continue
             elog = os.path.join(work, "existing_" + mid + ".log")
             e = run("go test -count=1 -timeout 40m . ./internal/hostutil/ > " + elog + " 2>&1", tree, 2700)
             fails = sorted({l.split()[2] for l in open(elog, errors="replace").read().splitlines() if l.strip().startswith("--- FAIL")})[:20]

@@ -52,6 +52,13 @@ None of these alters the generator, the reference or the comparison semantics.
 3. The dial-alias table gained zoned-IPv6 rows (logged, not baselined: they run only where IPv6
    loopback exists) and lost the two `localhost` rows, which depend on the host's resolver setup.
 
+4. **After the three fixes merged (2026-11-23). This one changes how two paths are driven**, so it
+   is not covered by the sentence above; the comparison semantics, generator and reference are
+   still untouched. The wire paths now send a fixed valid `Host` header instead of mirroring the
+   authority, and the evaluator paths are asked about the host the request delivers instead of the
+   typed string. Reason, evidence on both sides of the fixes, and the entry-by-entry review of the
+   re-recorded baselines: `DRIFT-REVIEW-2026-11-23.md`.
+
 ## Outcome
 
 E1–E6 all held on `heldout-1`. See `README.md`.

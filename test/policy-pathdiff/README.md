@@ -80,6 +80,15 @@ them. Seven strata: `plain`, `dest`, `src`, `identity`, `stale`, `publish`, `com
 result, and wrote `review_predictions.jsonl` before the held-out run. `TestPathDiff_Review`
 executes each prediction.
 
+## Results after the three fixes (2026-11-23)
+
+The verifier's leads became #2055 (zoned IPv6), #2053 (tester fidelity) and #2050 (POL-004), all
+merged. The baselines were then reviewed entry by entry and re-recorded, and one fault in the
+verifier's own wire model was corrected: `DRIFT-REVIEW-2026-11-23.md`. On the final code:
+`decision-split` 0, `tester-answers-unroutable` 34 (bare IPv6, intentional),
+`tester-refuses-routable` 99 (empty host, unchanged). The section below is the original result and
+is kept as recorded.
+
 ## Results at `155df09`
 
 Freeze record and expectations: `FROZEN.md`. Held-out seed `heldout-1`.

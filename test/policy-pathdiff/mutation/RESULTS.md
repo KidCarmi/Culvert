@@ -52,3 +52,25 @@ names tests about the mutated behaviour, so none is a load flake.
 
 About 105 s per mutant for the new suite (mostly compilation), about 500 s for the existing one.
 A scheduled campaign is not justified yet: run it by hand when the verifier or these paths change.
+
+## Rerun after the three fixes (2026-11-23), verifier side only
+
+The verifier's wire model was corrected and its baselines re-recorded (`../DRIFT-REVIEW-2026-11-23.md`),
+so the verifier side of the campaign was rerun on the final code: `MUTANTS_NEW_ONLY=1 mutants.py`.
+The existing-suite side was **not** rerun; the "Existing" column above is still the result at `155df09`.
+
+- **M01–M14: same verdict for every mutant.** 12 of 15 killed; M03, M07 and M13b survive, as before.
+  M07's anchor text had moved (the function after `ReplaceAll` changed in #2050); the edit itself is
+  unchanged.
+- **Three new mutants, each undoing one merged fix, all killed:**
+
+| ID | Mutant | Verifier |
+|---|---|---|
+| M15 | zoned IPv6 destinations are no longer refused (#2055) | killed — outcome and alias-behaviour drift |
+| M16 | tester matches the typed text again, not the parsed request target (#2053) | killed — signature and alias-behaviour drift |
+| M17 | an unknown action resolves to Allow (#2050) | killed — `Frobnicate` row reads `http=forward(200)`, `DIFFERS-FROM-CONTRACT` |
+
+- Unmodified control tree: pass.
+
+As before, every kill is baseline drift: it says behaviour changed, and a person decides whether the
+change is wrong.
