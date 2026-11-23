@@ -54,6 +54,24 @@ type ApplyExpectation struct {
 	RollbackSucceeded     bool     `json:"rollback_succeeded"`
 	RollbackSkippedReason string   `json:"rollback_skipped_reason"`
 	TagAhead              bool     `json:"tag_ahead"`
+	// The reported final running image (owner decision 2): verified only by a capture after
+	// the last `compose up`. FinalDigest is the registry digest ("none" when the image has no
+	// allow-listed registry reference or the state is unverified); FinalImage the image id.
+	FinalState  string `json:"final_state"`
+	FinalDigest string `json:"final_digest"`
+	FinalImage  string `json:"final_image"`
+}
+
+// finalRunningExpect is the model's prediction of the result's final running image.
+func finalRunningExpect(t State) (state, digest, image string) {
+	if t.Ev != evFresh {
+		return "unverified", imgNone, imgNone
+	}
+	digest = t.Running
+	if t.Running == imgP && t.Prior == priorNoDigest { // only a local reference: no registry digest
+		digest = imgNone
+	}
+	return "verified", digest, t.Running
 }
 
 // ApplyVector is one fault path of the apply flow.
@@ -144,6 +162,10 @@ func commands(s State, e string, n counts) (cmds []string, plan []PlanEntry) {
 		is.restart(s, e)
 	case pcVerify, pcRbVerify:
 		is.do("capture", failIf(e == evCaptureFail))
+	case pcReport:
+		if s.Ev != evFresh { // option C: the bounded read-only final capture
+			is.do("capture", "")
+		}
 	}
 	return is.cmds, is.plan
 }
@@ -245,6 +267,9 @@ type walker struct {
 	crash     []CrashVector
 	seenApply map[string]bool
 	seenCrash map[string]bool
+	// inputs records every distinct concrete apply input (parameters + fault plan) the walk
+	// reached, so a test can prove deduplication dropped only exact duplicates.
+	inputs map[string]bool
 }
 
 func dedupKey(parts ...any) string {
@@ -270,11 +295,19 @@ func (w *walker) rec(s State, script []ScriptStep, cmds []string, plan []PlanEnt
 			w.rec(t, step, extend(cmds, c...), extend(plan, p...), n2)
 			continue
 		}
+		fState, fDigest, fImage := finalRunningExpect(t)
 		v := ApplyVector{Params: paramsOf(s), Script: step, Plan: extend(plan, p...),
-			Expect: ApplyExpectation{Op: t.Op, Reason: t.Reason, Running: t.Running, Tag: t.Tag, JournalEmpty: true,
+			Expect: ApplyExpectation{FinalState: fState, FinalDigest: fDigest, FinalImage: fImage,
+				Op: t.Op, Reason: t.Reason, Running: t.Running, Tag: t.Tag, JournalEmpty: true,
 				Cmds: collapse(extend(cmds, c...)), UpgradeSucceeded: t.Op == "succeeded", RollbackAttempted: t.RbAtt,
 				RollbackSucceeded: t.RbOK, RollbackSkippedReason: skippedReason(t), TagAhead: tagAhead(t)}}
-		if key := dedupKey(v.Params.Prior, v.Params.Same, v.Plan, v.Expect); !w.seenApply[key] {
+		// Deduplicate only IDENTICAL concrete inputs (every parameter + the fault plan). Keying on
+		// prior/same alone merged runs whose other parameters (th/ph/backup/rb) drive different
+		// code paths in the agent -- e.g. "health gate fails, rollback verify capture fails" with
+		// "verify capture fails, rollback health fails" -- whenever plan and expectation matched,
+		// silently dropping a distinct real-code path from conformance.
+		w.inputs[dedupKey(v.Params, v.Plan)] = true
+		if key := dedupKey(v.Params, v.Plan, v.Expect); !w.seenApply[key] {
 			w.seenApply[key] = true
 			w.apply = append(w.apply, v)
 		}
@@ -302,15 +335,25 @@ func (w *walker) crashPoint(s State, e string, script []ScriptStep, cmds []strin
 	v := CrashVector{Params: paramsOf(s), Script: script, Plan: extend(plan), Block: bp,
 		Expect: CrashExpectation{Phase: t.JR, Tag: t.Tag, Running: t.Running, Record: RecordForState(t),
 			ReconcileAction: act, ReconcileReason: why, CmdsBeforeBlock: collapse(extend(cmds, extra...))}}
-	if key := dedupKey(v.Params.Prior, v.Params.Same, v.Script, v.Plan, v.Block, v.Expect); !w.seenCrash[key] {
+	if key := dedupKey(v.Params, v.Script, v.Plan, v.Block, v.Expect); !w.seenCrash[key] {
 		w.seenCrash[key] = true
 		w.crash = append(w.crash, v)
 	}
 }
 
+// distinctApplyInputs is the number of distinct concrete apply inputs the walk reaches.
+func distinctApplyInputs() int {
+	w := &walker{seenApply: map[string]bool{}, seenCrash: map[string]bool{}, inputs: map[string]bool{}}
+	inits := (Model{}).Inits()
+	for i := range inits {
+		w.rec(inits[i], nil, nil, nil, counts{})
+	}
+	return len(w.inputs)
+}
+
 // Vectors walks the model and returns the apply-flow and crash-point vectors.
 func Vectors() ([]ApplyVector, []CrashVector) {
-	w := &walker{seenApply: map[string]bool{}, seenCrash: map[string]bool{}}
+	w := &walker{seenApply: map[string]bool{}, seenCrash: map[string]bool{}, inputs: map[string]bool{}}
 	inits := (Model{}).Inits()
 	for i := range inits {
 		w.rec(inits[i], nil, nil, nil, counts{})

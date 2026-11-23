@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -64,6 +65,8 @@ type confRig struct {
 	sock, stateDir, auditPath string
 	jnl                       *journal.Journal
 
+	store string // imageStoreClassic | imageStoreContainerd: how Docker reports image identity
+
 	mu        sync.Mutex
 	running   string // digest hex, "" = no container
 	tag       string
@@ -93,11 +96,45 @@ func role(d string) string {
 	return "?"
 }
 
+// Docker reports image identity differently per image store; both were measured on real
+// Docker 29.10 with test/lifecycle-conformance/docker-probe.sh:
+//   - classic (overlay2 graph driver; hosts upgraded from older Docker): container .Image is
+//     the image CONFIG digest, distinct from the registry digest; a local tag whose registry
+//     reference is gone has no RepoDigests at all.
+//   - containerd image store (default for fresh Docker 29 installs): container .Image is the
+//     registry (index) digest itself, and every local tag adds a synthetic
+//     `<local repo>@sha256:<digest>` RepoDigest, so RepoDigests is never empty.
+//
+// The model's expectations are store-independent, so every apply and crash vector runs under
+// both stores: a store-dependent decision in the agent is a MISMATCH. Observations made under
+// the containerd store carry the "[containerd] " prefix in observed.json.
+const (
+	imageStoreClassic    = "classic"
+	imageStoreContainerd = "containerd"
+)
+
+var imageStores = []string{imageStoreClassic, imageStoreContainerd}
+
+func storePrefix(store string) string {
+	if store == imageStoreContainerd {
+		return "[containerd] "
+	}
+	return ""
+}
+
 func cfgOf(d string) string {
 	if d == digNew {
 		return cfgNew
 	}
 	return cfgOld
+}
+
+// imageID is what `docker inspect --format {{json .Image}}` reports for digest d.
+func (r *confRig) imageID(d string) string {
+	if r.store == imageStoreContainerd {
+		return d
+	}
+	return cfgOf(d)
 }
 
 func classify(argv []string) string {
@@ -211,8 +248,15 @@ func (r *confRig) emulate(key, m, dg string) string {
 		}
 		return `{"Service":"proxy","State":"running","ID":"abcdef012345"}`
 	case "cinspect":
-		return `"sha256:` + cfgOf(r.running) + `"`
+		return `"sha256:` + r.imageID(r.running) + `"`
 	case "iinspect":
+		if r.store == imageStoreContainerd {
+			local := `"culvert/proxy@sha256:` + r.running + `"`
+			if r.nodigest && r.running == digOld { // built locally: only the synthetic local ref
+				return `[{"RepoDigests":[` + local + `]}]`
+			}
+			return `[{"RepoDigests":[` + local + `,"` + repo + `@sha256:` + r.running + `"]}]`
+		}
 		if r.nodigest && r.running == digOld {
 			return `[{"RepoDigests":[]}]`
 		}
@@ -280,13 +324,13 @@ func (r *confRig) healthClient() *http.Client {
 	})}
 }
 
-func startConfRig(t *testing.T, p confParams, plan []planEntry, block *planEntry) *confRig {
+func startConfRig(t *testing.T, store string, p confParams, plan []planEntry, block *planEntry) *confRig {
 	t.Helper()
 	tmp, err := os.MkdirTemp("", "conf")
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &confRig{sock: filepath.Join(tmp, "a.sock"), stateDir: tmp, auditPath: filepath.Join(tmp, "audit.jsonl"),
+	r := &confRig{store: store, sock: filepath.Join(tmp, "a.sock"), stateDir: tmp, auditPath: filepath.Join(tmp, "audit.jsonl"),
 		running: digOld, tag: digOld, nodigest: p.Prior == "nodigest", unhealthy: map[string]bool{},
 		counts: map[string]int{}, plan: plan, block: block, blocked: make(chan struct{}), release: make(chan struct{})}
 	if p.Prior == "down" {
@@ -334,11 +378,23 @@ func startConfRig(t *testing.T, p confParams, plan []planEntry, block *planEntry
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx) }()
-	for i := 0; i < 100; i++ {
-		if _, e := os.Stat(r.sock); e == nil {
+	// Wait until the agent ACCEPTS connections, not merely until the socket file exists: the
+	// file appears at bind(), before listen(), and a connect in that window is refused. With
+	// hundreds of rigs in parallel the window is hit (observed: "connect: connection refused").
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		dctx, dcancel := context.WithTimeout(context.Background(), time.Second)
+		c, e := (&net.Dialer{}).DialContext(dctx, "unix", r.sock)
+		dcancel()
+		if e == nil {
+			_ = c.Close()
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		if time.Now().After(deadline) {
+			cancel()
+			_ = srv.Close()
+			_ = al.Close()
+			t.Fatalf("INCOMPLETE: agent socket %s never appeared", r.sock)
+		}
 	}
 	r.stop = func() {
 		cancel()
@@ -423,47 +479,167 @@ func TestModelConformance_ApplyFlow(t *testing.T) {
 	}
 	_ = os.Setenv(runner.EnvCulvertBackupPassphrase, "test-pass")
 	var mu sync.Mutex
-	misreported, tagAhead := []string{}, 0
-	t.Run("vectors", func(t *testing.T) {
-		for i := range vs {
-			v := vs[i]
-			name := fmt.Sprintf("%03d", i)
-			t.Run(name, func(t *testing.T) {
-				t.Parallel()
-				r := startConfRig(t, v.Params, v.Plan, nil)
-				defer r.stop()
-				op := r.wait(t, r.submit(t, v.Params))
-				running, tag, tokens := r.world()
-				res, _ := op["result"].(map[string]interface{})
-				reason, _ := op["failure_reason"].(string)
-				got := applyExpectation{Op: fmt.Sprint(op["state"]), Reason: reason, Running: running, Tag: tag, Cmds: tokens,
-					UpgradeSucceeded: res["upgrade_succeeded"] == true, RollbackAttempted: res["rollback_attempted"] == true,
-					RollbackSucceeded:     res["rollback_succeeded"] == true,
-					RollbackSkippedReason: fmt.Sprint(res["rollback_skipped_reason"]), TagAhead: v.Expect.TagAhead,
-					JournalEmpty: v.Expect.JournalEmpty} // the journal itself is checked just below
-				if !reflect.DeepEqual(got, v.Expect) {
-					t.Errorf("MODEL/IMPLEMENTATION MISMATCH\n params: %+v\n faults: %s\n model : %+v\n actual: %+v",
-						v.Params, scriptString(v.Script), v.Expect, got)
-				}
-				recs, lerr := r.jnl.List()
-				if lerr != nil || len(recs) != 0 {
-					t.Errorf("journal not empty at terminal (faults: %s): %d records, err=%v", scriptString(v.Script), len(recs), lerr)
-				}
-				rep := role(fmt.Sprint(res["final_running_digest"]))
-				mu.Lock()
-				if rep != running && !v.Params.Same {
-					misreported = append(misreported, fmt.Sprintf("%s | prior=%s rb=%v | reported=%s actual=%s",
-						scriptString(v.Script), v.Params.Prior, v.Params.RB, rep, running))
-				}
-				if tag == "T" && running != "T" && !v.Params.Same {
-					tagAhead++
-				}
-				mu.Unlock()
-			})
+	misreported, results, tagAhead := []string{}, []string{}, map[string]int{}
+	acc := &applyObservations{misreported: &misreported, results: &results, tagAhead: tagAhead}
+	for _, store := range imageStores {
+		t.Run(store, func(t *testing.T) { applyVectorsUnder(t, store, vs, &mu, acc) })
+	}
+	if got, want := len(uniqueSorted(results)), len(vs)*len(imageStores); got != want {
+		t.Errorf("INCOMPLETE: %d distinct result lines for %d vectors: the observation key is not unique", got, want)
+	}
+	drift := checkObserved(t, uniqueSorted(misreported), uniqueSorted(results))
+	writeReport(t, "apply", map[string]interface{}{"vectors_per_image_store": len(vs),
+		"terminal_states_with_tag_ahead_of_container":                  tagAhead[imageStoreClassic],
+		"terminal_states_with_tag_ahead_of_container_containerd_store": tagAhead[imageStoreContainerd],
+		"final_running_digest_differs_from_actual":                     misreported, "observed_drift": drift})
+}
+
+// applyObservations collects what the apply vectors observe on the real code, per store.
+type applyObservations struct {
+	misreported, results *[]string
+	tagAhead             map[string]int
+}
+
+// applyVectorsUnder replays every apply vector under one Docker image store.
+func applyVectorsUnder(t *testing.T, store string, vs []lifecyclemodel.ApplyVector, mu *sync.Mutex, acc *applyObservations) {
+	pfx := storePrefix(store)
+	for i := range vs {
+		v := vs[i]
+		name := fmt.Sprintf("%03d", i)
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := startConfRig(t, store, v.Params, v.Plan, nil)
+			defer r.stop()
+			op := r.wait(t, r.submit(t, v.Params))
+			running, tag, tokens := r.world()
+			res, _ := op["result"].(map[string]interface{})
+			reason, _ := op["failure_reason"].(string)
+			fState, _ := res["final_running_state"].(string)
+			got := applyExpectation{FinalState: fState, FinalDigest: role(fmt.Sprint(res["final_running_digest"])),
+				FinalImage: role(fmt.Sprint(res["final_running_image_id"])),
+				Op:         fmt.Sprint(op["state"]), Reason: reason, Running: running, Tag: tag, Cmds: tokens,
+				UpgradeSucceeded: res["upgrade_succeeded"] == true, RollbackAttempted: res["rollback_attempted"] == true,
+				RollbackSucceeded:     res["rollback_succeeded"] == true,
+				RollbackSkippedReason: fmt.Sprint(res["rollback_skipped_reason"]), TagAhead: v.Expect.TagAhead,
+				JournalEmpty: v.Expect.JournalEmpty} // the journal itself is checked just below
+			if !reflect.DeepEqual(got, v.Expect) {
+				t.Errorf("MODEL/IMPLEMENTATION MISMATCH\n params: %+v\n faults: %s\n model : %+v\n actual: %+v",
+					v.Params, scriptString(v.Script), v.Expect, got)
+			}
+			recs, lerr := r.jnl.List()
+			if lerr != nil || len(recs) != 0 {
+				t.Errorf("journal not empty at terminal (faults: %s): %d records, err=%v", scriptString(v.Script), len(recs), lerr)
+			}
+			rep := role(fmt.Sprint(res["final_running_digest"]))
+			// The observation key is the concrete input: every parameter and the fault plan.
+			params := fmt.Sprintf("prior=%s same=%v backup=%v rb=%v th=%v ph=%v%s",
+				v.Params.Prior, v.Params.Same, v.Params.Backup, v.Params.RB, v.Params.TH, v.Params.PH, planString(v.Plan))
+			mu.Lock()
+			// Every vector, the already-current ones included: an empty or wrong digest there
+			// is as much a change as anywhere else.
+			*acc.results = append(*acc.results, fmt.Sprintf("%s%s | %s | upgrade_digest=%s rollback_digest=%s final_running_digest=%s",
+				pfx, scriptString(v.Script), params, role(fmt.Sprint(res["upgrade_digest"])),
+				role(fmt.Sprint(res["rollback_digest"])), rep))
+			// A misreport is a VERIFIED result naming an image that does not run (by registry
+			// digest, or by image id when the image has no registry digest). An unverified
+			// result names nothing, so it cannot misreport.
+			named := rep
+			if named == "none" {
+				named = role(fmt.Sprint(res["final_running_image_id"]))
+			}
+			if fState == "verified" && named != running {
+				*acc.misreported = append(*acc.misreported, fmt.Sprintf("%s%s | %s | reported=%s actual=%s",
+					pfx, scriptString(v.Script), params, rep, running))
+			}
+			if tag == "T" && running != "T" && !v.Params.Same {
+				acc.tagAhead[store]++
+			}
+			mu.Unlock()
+		})
+	}
+}
+
+// checkObserved compares what the real code reported with the reviewed observed.json: the
+// model does not predict final_running_digest, so without this a change to that API field
+// passes every vector. With CULVERT_CONFORMANCE_WRITE_OBSERVED=<path> it records instead
+// (run.sh unsets it). It returns the drift lines ("+" newly differing, "-" no longer).
+func checkObserved(t *testing.T, got, gotResults []string) []string {
+	t.Helper()
+	drift := []string{}
+	if t.Failed() {
+		return drift // a mismatch already fails the suite; do not record or compare a broken run
+	}
+	if path := os.Getenv("CULVERT_CONFORMANCE_WRITE_OBSERVED"); path != "" {
+		b, err := lifecyclemodel.MarshalReviewable(lifecyclemodel.Observed{Note: lifecyclemodel.ObservedNote,
+			FinalRunningDigestDiffers: got, ResultDigests: gotResults})
+		if err == nil {
+			err = os.WriteFile(path, b, 0o600) //nolint:gosec // G703: path from the developer's own update script
 		}
-	})
-	writeReport(t, "apply", map[string]interface{}{"vectors": len(vs), "terminal_states_with_tag_ahead_of_container": tagAhead,
-		"final_running_digest_differs_from_actual": misreported})
+		if err != nil {
+			t.Fatalf("observed.json not written: %v", err)
+		}
+		return drift
+	}
+	want, err := lifecyclemodel.EmbeddedObserved()
+	if err != nil {
+		t.Fatalf("INCOMPLETE: %v", err)
+	}
+	drift = append(drift, observedDrift(t, "final_running_digest differs from the running image", want.FinalRunningDigestDiffers, got)...)
+	drift = append(drift, observedDrift(t, "result digests", want.ResultDigests, gotResults)...)
+	return drift
+}
+
+// observedDrift reports one list's difference from the reviewed observed.json. Every drift
+// line goes into the t.Errorf message on its own line, prefixed "DRIFT-LINE", so run.sh and
+// update-baseline.sh can show the reviewer WHICH vectors changed, not only how many.
+func observedDrift(t *testing.T, what string, want, got []string) []string {
+	t.Helper()
+	if reflect.DeepEqual(got, want) {
+		return nil
+	}
+	var drift []string
+	added, removed := diffSorted(want, got)
+	for _, x := range added {
+		drift = append(drift, "+ "+x)
+	}
+	for _, x := range removed {
+		drift = append(drift, "- "+x)
+	}
+	t.Errorf("DRIFT (real code): %s: %d lines now, %d reviewed; intended? run test/lifecycle-conformance/update-baseline.sh "+
+		"and review observed.json\n DRIFT-LINE %s", what, len(got), len(want), strings.Join(drift, "\n DRIFT-LINE "))
+	return drift
+}
+
+func uniqueSorted(l []string) []string {
+	set := map[string]bool{}
+	for _, x := range l {
+		set[x] = true
+	}
+	out := make([]string, 0, len(set))
+	for x := range set {
+		out = append(out, x)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// diffSorted returns the members of got missing from want, and of want missing from got.
+func diffSorted(want, got []string) (added, removed []string) {
+	in := func(l []string, x string) bool {
+		i := sort.SearchStrings(l, x)
+		return i < len(l) && l[i] == x
+	}
+	for _, x := range got {
+		if !in(want, x) {
+			added = append(added, x)
+		}
+	}
+	for _, x := range want {
+		if !in(got, x) {
+			removed = append(removed, x)
+		}
+	}
+	return added, removed
 }
 
 // ───────────────────────── crash points: journal record + reconcile verdict
@@ -499,7 +675,7 @@ func (r *confRig) reconcileInputsAtCrash(rec *journal.Record) reconcileInputs {
 		TargetImageID: rec.TargetImageID, PriorImageID: rec.PriorImageID}
 	r.mu.Lock()
 	if r.running != "" {
-		in.RunningImageID = "sha256:" + cfgOf(r.running)
+		in.RunningImageID = "sha256:" + r.imageID(r.running)
 		if !r.nodigest || r.running != digOld {
 			in.RunningDigests = []string{r.running}
 		}
@@ -523,62 +699,67 @@ func TestModelConformance_CrashPoints(t *testing.T) {
 	_ = os.Setenv(runner.EnvCulvertBackupPassphrase, "test-pass")
 	var mu sync.Mutex
 	adoptNotTarget := []string{}
-	t.Run("vectors", func(t *testing.T) {
-		for i := range vs {
-			v := vs[i]
-			t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
-				t.Parallel()
-				blk := planEntry{Cmd: v.Block.Cmd, N: v.Block.N}
-				r := startConfRig(t, v.Params, v.Plan, &blk)
-				defer r.stop()
-				opID := r.submit(t, v.Params)
-				select {
-				case <-r.blocked:
-				case <-time.After(15 * time.Second):
-					close(r.release)
-					t.Fatalf("crash point never reached (faults: %s, block %+v)", scriptString(v.Script), v.Block)
-				}
-				// The agent is now frozen exactly where the model says it crashed.
-				running, tag, tokens := r.world()
-				tokens = commandsBeforeBlock(tokens, v.Block.Cmd, v.Expect.CmdsBeforeBlock)
-				recs, lerr := r.jnl.List()
-				if lerr != nil || len(recs) != 1 {
-					close(r.release)
-					t.Fatalf("expected exactly one journal record at the crash point, got %d err=%v", len(recs), lerr)
-				}
-				rec := recs[0]
-				in := r.reconcileInputsAtCrash(&rec)
-				verdict := reconcileDecision(in)
-				close(r.release)
-				if !reflect.DeepEqual(tokens, v.Expect.CmdsBeforeBlock) {
-					t.Errorf("MODEL/IMPLEMENTATION MISMATCH (commands before the crash point)\n faults: %s\n model : %v\n actual: %v",
-						scriptString(v.Script), v.Expect.CmdsBeforeBlock, tokens)
-				}
-				_ = r.wait(t, opID)
-
-				type obs struct {
-					Phase, Tag, Run, PriorID, TargetID, Action, Reason string
-					PriorRef, TargetRef                                bool
-				}
-				got := obs{string(rec.Phase), tag, running, idRole(rec.PriorImageID), idRole(rec.TargetImageID),
-					verdict.Action.String(), verdict.Reason, rec.PriorRef != "", rec.TargetRef != ""}
-				want := obs{v.Expect.Phase, v.Expect.Tag, v.Expect.Running, v.Expect.Record.PriorID, v.Expect.Record.TargetID,
-					v.Expect.ReconcileAction, v.Expect.ReconcileReason, v.Expect.Record.PriorRef, v.Expect.Record.TargetRef}
-				if got != want {
-					t.Errorf("MODEL/IMPLEMENTATION MISMATCH at crash point\n params: %+v\n trace : %s\n block : %+v\n model : %+v\n actual: %+v",
-						v.Params, scriptString(v.Script), v.Block, want, got)
-				}
-				if verdict.Action == actVerifyAdoptElseRollback && running != "T" && !v.Params.Same {
-					mu.Lock()
-					adoptNotTarget = append(adoptNotTarget, fmt.Sprintf("%s | running=%s tag=%s TargetImageID=%s reason=%s",
-						scriptString(v.Script), running, tag, idRole(rec.TargetImageID), verdict.Reason))
-					mu.Unlock()
-				}
-			})
-		}
-	})
-	writeReport(t, "crash", map[string]interface{}{"vectors": len(vs),
+	for _, store := range imageStores {
+		t.Run(store, func(t *testing.T) { crashVectorsUnder(t, store, vs, &mu, &adoptNotTarget) })
+	}
+	writeReport(t, "crash", map[string]interface{}{"vectors_per_image_store": len(vs),
 		"reconcile_says_target_live_but_container_is_not_on_target": adoptNotTarget})
+}
+
+// crashVectorsUnder replays every crash vector under one Docker image store.
+func crashVectorsUnder(t *testing.T, store string, vs []lifecyclemodel.CrashVector, mu *sync.Mutex, adoptNotTarget *[]string) {
+	for i := range vs {
+		v := vs[i]
+		t.Run(fmt.Sprintf("%03d", i), func(t *testing.T) {
+			t.Parallel()
+			blk := planEntry{Cmd: v.Block.Cmd, N: v.Block.N}
+			r := startConfRig(t, store, v.Params, v.Plan, &blk)
+			defer r.stop()
+			opID := r.submit(t, v.Params)
+			select {
+			case <-r.blocked:
+			case <-time.After(15 * time.Second):
+				close(r.release)
+				t.Fatalf("crash point never reached (faults: %s, block %+v)", scriptString(v.Script), v.Block)
+			}
+			// The agent is now frozen exactly where the model says it crashed.
+			running, tag, tokens := r.world()
+			tokens = commandsBeforeBlock(tokens, v.Block.Cmd, v.Expect.CmdsBeforeBlock)
+			recs, lerr := r.jnl.List()
+			if lerr != nil || len(recs) != 1 {
+				close(r.release)
+				t.Fatalf("expected exactly one journal record at the crash point, got %d err=%v", len(recs), lerr)
+			}
+			rec := recs[0]
+			in := r.reconcileInputsAtCrash(&rec)
+			verdict := reconcileDecision(in)
+			close(r.release)
+			if !reflect.DeepEqual(tokens, v.Expect.CmdsBeforeBlock) {
+				t.Errorf("MODEL/IMPLEMENTATION MISMATCH (commands before the crash point)\n faults: %s\n model : %v\n actual: %v",
+					scriptString(v.Script), v.Expect.CmdsBeforeBlock, tokens)
+			}
+			_ = r.wait(t, opID)
+
+			type obs struct {
+				Phase, Tag, Run, PriorID, TargetID, Action, Reason string
+				PriorRef, TargetRef                                bool
+			}
+			got := obs{string(rec.Phase), tag, running, idRole(rec.PriorImageID), idRole(rec.TargetImageID),
+				verdict.Action.String(), verdict.Reason, rec.PriorRef != "", rec.TargetRef != ""}
+			want := obs{v.Expect.Phase, v.Expect.Tag, v.Expect.Running, v.Expect.Record.PriorID, v.Expect.Record.TargetID,
+				v.Expect.ReconcileAction, v.Expect.ReconcileReason, v.Expect.Record.PriorRef, v.Expect.Record.TargetRef}
+			if got != want {
+				t.Errorf("MODEL/IMPLEMENTATION MISMATCH at crash point\n params: %+v\n trace : %s\n block : %+v\n model : %+v\n actual: %+v",
+					v.Params, scriptString(v.Script), v.Block, want, got)
+			}
+			if verdict.Action == actVerifyAdoptElseRollback && running != "T" && !v.Params.Same {
+				mu.Lock()
+				*adoptNotTarget = append(*adoptNotTarget, fmt.Sprintf("%s%s | running=%s tag=%s TargetImageID=%s reason=%s",
+					storePrefix(store), scriptString(v.Script), running, tag, idRole(rec.TargetImageID), verdict.Reason))
+				mu.Unlock()
+			}
+		})
+	}
 }
 
 // ───────────────────────── reconcile decision: full bounded input space
@@ -744,4 +925,16 @@ func writeReport(t *testing.T, name string, body map[string]interface{}) {
 		// A missing report reads as INCOMPLETE in the summary; say why here instead of hiding it.
 		t.Errorf("conformance report %q not written: %v", name, err)
 	}
+}
+
+// planString renders a fault plan for an observation key ("" when there is none).
+func planString(plan []planEntry) string {
+	if len(plan) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(plan))
+	for _, p := range plan {
+		parts = append(parts, fmt.Sprintf("%s#%d=%s", p.Cmd, p.N, p.Mode))
+	}
+	return " plan=" + strings.Join(parts, ",")
 }

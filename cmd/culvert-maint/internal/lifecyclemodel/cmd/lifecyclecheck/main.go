@@ -6,8 +6,11 @@
 //	go run -tags lifecycle_conformance ./internal/lifecyclemodel/cmd/lifecyclecheck [flags]
 //
 // Exit: 0 every counted property passes | 1 a counted property fails |
-// 2 incomplete exploration or a vacuous property (takes precedence over 1; never a pass).
-// With -summary it only renders an existing report directory as Markdown.
+// 2 incomplete exploration, a vacuous property or an unusable baseline (takes precedence
+// over 1; never a pass) | 3 everything passed but the model drifted from the reviewed
+// baseline.json (see baseline.go).
+// With -summary it only renders an existing report directory as Markdown. With
+// -write-baseline it records the current baseline instead of comparing against it.
 package main
 
 import (
@@ -27,6 +30,8 @@ func main() {
 	flag.IntVar(&o.MaxStates, "max-states", 200_000, "state budget; exceeding it is INCOMPLETE (exit 2)")
 	maxSeconds := flag.Float64("max-seconds", 60, "time budget in seconds; exceeding it is INCOMPLETE (exit 2)")
 	flag.StringVar(&o.ReportDir, "report", "", "write model_check.json into this directory")
+	noBaseline := flag.Bool("no-baseline", false, "do not compare with the embedded reviewed baseline (stated in the output)")
+	flag.StringVar(&o.WriteBaseline, "write-baseline", "", "write the current baseline to this file instead of comparing")
 	summary := flag.String("summary", "", "print the Markdown step summary for this report directory and exit")
 	flag.Parse()
 	if flag.NArg() != 0 {
@@ -38,5 +43,10 @@ func main() {
 		return
 	}
 	o.MaxDuration = time.Duration(*maxSeconds * float64(time.Second))
+	if *noBaseline {
+		fmt.Println("NOTE: -no-baseline: drift from the reviewed baseline is NOT checked")
+	} else if o.WriteBaseline == "" {
+		o.Baseline = lifecyclemodel.EmbeddedBaselineJSON()
+	}
 	os.Exit(lifecyclemodel.RunGate(lifecyclemodel.EmbeddedPropertiesJSON(), o, os.Stdout))
 }
