@@ -301,7 +301,7 @@ Culvert is built with the Go toolchain pinned in `go.mod` (`toolchain` line; cur
 
 ### OTLP export (metrics + traces)
 
-Optional push export to an OTLP/HTTP collector (e.g. the OpenTelemetry Collector, Grafana Alloy), independent of the pull-based `/metrics` endpoint above. Configure via `-otlp-endpoint <url>` / `otlp_endpoint` in `config.yaml`, or from the Admin UI's OpenTelemetry (OTLP) panel — cluster-synced and admin-durable, no restart required to change the endpoint. Unset by default (no export).
+Optional push export to an OTLP/HTTP collector (e.g. the OpenTelemetry Collector, Grafana Alloy), independent of the pull-based `/metrics` endpoint above. Configure via `-otlp-endpoint <url>` / `otlp_endpoint` in `config.yaml`, or from the Admin UI's OpenTelemetry (OTLP) panel — cluster-synced and admin-durable, no restart required to change the endpoint. Unset by default (no export). The collector must be reachable at a public address: a private address, including a Docker or Kubernetes service name, is refused. See the [OTLP export guide](docs/operator/otlp-export.md) for what is exported, the limits and troubleshooting.
 
 ### Logging & SIEM
 

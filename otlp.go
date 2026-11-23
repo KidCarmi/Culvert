@@ -8,8 +8,11 @@ package main
 // at construction. Span recording (proxy.go) goes through the aliases.
 //
 // Configuration:
-//   -otlp-endpoint http://otel-collector:4318    (OTLP/HTTP receiver)
-//   config.yaml:  otlp_endpoint: "http://otel-collector:4318"
+//   -otlp-endpoint https://otlp.example.com:4318    (OTLP/HTTP receiver)
+//   config.yaml:  otlp_endpoint: "https://otlp.example.com:4318"
+//
+// The collector must be at a public address: the engine dials through the
+// SSRF guard. Operator contract: docs/operator/otlp-export.md.
 
 import (
 	"fmt"
