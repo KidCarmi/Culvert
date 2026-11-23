@@ -157,7 +157,9 @@ jobs:
               *) code=true ;;
             esac
             case "$f" in
-              cmd/culvert-maint/*) agent=true ;;
+              # packaging/systemd: the agent module's TestShippedUnit_CrashFence
+              # reads the shipped unit, so an edit to the unit alone must run it.
+              cmd/culvert-maint/*|packaging/systemd/*) agent=true ;;
             esac
             # MCP design surface. Its OWN `case` on purpose: the docs/code
             # classifier above is first-match-wins, so folding these patterns
