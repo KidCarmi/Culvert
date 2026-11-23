@@ -10,12 +10,13 @@ type Record struct {
 	PriorID   string `json:"prior_id"`
 	TargetRef bool   `json:"target_ref"`
 	TargetID  string `json:"target_id"`
+	Armed     bool   `json:"rollback_armed"`
 }
 
 // RecordForState returns the journal record the model expects at s.
 func RecordForState(s State) Record {
 	seen := stagesSeen[s.JR]
-	r := Record{Phase: s.JR, PriorRef: seen >= 1 && s.Prior == priorValid, TargetRef: seen >= 2, TargetID: s.TID}
+	r := Record{Phase: s.JR, PriorRef: seen >= 1 && s.Prior == priorValid, TargetRef: seen >= 2, TargetID: s.TID, Armed: s.Armed}
 	if seen >= 1 && s.Prior != priorDown {
 		r.PriorID = imgP
 	}

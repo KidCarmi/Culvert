@@ -691,6 +691,42 @@ func (r *confRig) reconcileInputsAtCrash(rec *journal.Record) reconcileInputs {
 	return in
 }
 
+// reconcileV2InputsAtCrash builds the converge (V2) decision input a converge start would
+// have: the REAL record mapping (reconcileInputsFor: validation, rollback_armed, attempts)
+// plus the fake Docker's truth, and a readiness probe exactly when the real reconcile runs
+// one (reconcileNeedsProbe), answered by the fake health endpoint. The fake has no image
+// store: a reference the record names is local (TargetRef: pulled before any danger phase).
+func (r *confRig) reconcileV2InputsAtCrash(rec *journal.Record) reconcileInputsV2 {
+	s := &Server{opts: Options{Cfg: &config.Config{ProxyRepo: repo}}}
+	in := s.reconcileInputsFor(rec)
+	r.mu.Lock()
+	in.DockerReadable = true
+	if r.running != "" {
+		in.RunningImageID, in.ContainerRunning = "sha256:"+r.imageID(r.running), true
+		if !r.nodigest || r.running != digOld {
+			in.RunningDigests = []string{repo + "@sha256:" + r.running}
+		}
+	}
+	if r.tag != "" {
+		in.TagImageID = "sha256:" + r.imageID(r.tag)
+	}
+	ready := r.running != "" && !r.unhealthy[r.running]
+	if in.RefValid && rec.TargetRef != "" {
+		in.TargetLocalID = "sha256:" + r.imageID(digNew)
+	}
+	if in.RefValid && rec.PriorRef != "" {
+		in.PriorLocalID = "sha256:" + r.imageID(digOld)
+	}
+	r.mu.Unlock()
+	if reconcileNeedsProbe(in) {
+		in.Probe = probeNotReady
+		if ready {
+			in.Probe = probeReady
+		}
+	}
+	return in
+}
+
 func TestModelConformance_CrashPoints(t *testing.T) {
 	_, vs := lifecyclemodel.Vectors()
 	if len(vs) == 0 {
@@ -733,6 +769,7 @@ func crashVectorsUnder(t *testing.T, store string, vs []lifecyclemodel.CrashVect
 			rec := recs[0]
 			in := r.reconcileInputsAtCrash(&rec)
 			verdict := reconcileDecision(in)
+			verdict2 := reconcileDecisionV2(r.reconcileV2InputsAtCrash(&rec))
 			close(r.release)
 			if !reflect.DeepEqual(tokens, v.Expect.CmdsBeforeBlock) {
 				t.Errorf("MODEL/IMPLEMENTATION MISMATCH (commands before the crash point)\n faults: %s\n model : %v\n actual: %v",
@@ -742,12 +779,15 @@ func crashVectorsUnder(t *testing.T, store string, vs []lifecyclemodel.CrashVect
 
 			type obs struct {
 				Phase, Tag, Run, PriorID, TargetID, Action, Reason string
-				PriorRef, TargetRef                                bool
+				PriorRef, TargetRef, Armed                         bool
+				V2Action, V2Reason                                 string
 			}
 			got := obs{string(rec.Phase), tag, running, idRole(rec.PriorImageID), idRole(rec.TargetImageID),
-				verdict.Action.String(), verdict.Reason, rec.PriorRef != "", rec.TargetRef != ""}
+				verdict.Action.String(), verdict.Reason, rec.PriorRef != "", rec.TargetRef != "", rec.RollbackArmed,
+				verdict2.Action.String(), verdict2.Reason}
 			want := obs{v.Expect.Phase, v.Expect.Tag, v.Expect.Running, v.Expect.Record.PriorID, v.Expect.Record.TargetID,
-				v.Expect.ReconcileAction, v.Expect.ReconcileReason, v.Expect.Record.PriorRef, v.Expect.Record.TargetRef}
+				v.Expect.ReconcileAction, v.Expect.ReconcileReason, v.Expect.Record.PriorRef, v.Expect.Record.TargetRef,
+				v.Expect.Record.Armed, v.Expect.ReconcileV2Action, v.Expect.ReconcileV2Reason}
 			if got != want {
 				t.Errorf("MODEL/IMPLEMENTATION MISMATCH at crash point\n params: %+v\n trace : %s\n block : %+v\n model : %+v\n actual: %+v",
 					v.Params, scriptString(v.Script), v.Block, want, got)
@@ -890,8 +930,63 @@ func TestModelConformance_ReconcileDecision(t *testing.T) {
 			t.Errorf("VACUOUS: verdict %q never produced over the input space", r)
 		}
 	}
+	v2Inputs, v2Mismatches, v2Seen := reconcileV2Differential(t)
 	writeReport(t, "reconcile", map[string]interface{}{"inputs": total, "mismatches": mismatches,
-		"property_violations": propFails, "verdict_counts": seen})
+		"property_violations": propFails, "verdict_counts": seen,
+		"v2_inputs": v2Inputs, "v2_mismatches": v2Mismatches, "v2_verdict_counts": v2Seen})
+}
+
+// realReconcileV2Inputs maps the model's symbolic converge input onto the real one.
+func realReconcileV2Inputs(m lifecyclemodel.ReconcileV2Inputs) reconcileInputsV2 {
+	in := reconcileInputsV2{Kind: ops.KindUpgradeApply, Phase: journal.Phase(m.Phase), RefValid: m.RefValid,
+		TargetRefPresent: m.TargetRefPresent, PriorRefPresent: m.PriorRefPresent, TargetDigest: digNew,
+		TargetImageID: symID(m.TargetID), PriorImageID: symID(m.PriorID), RollbackArmed: m.Armed,
+		Attempts: m.Attempts, MaxAttempts: maxReconcileAttempts, DockerReadable: true,
+		RunningImageID: symID(m.RunningID), ContainerRunning: m.RunningID != "", TagImageID: symID(m.TagID),
+		TargetLocalID: symID(m.TargetLocal), PriorLocalID: symID(m.PriorLocal)}
+	if m.RunningID != "" {
+		in.RunningDigests = []string{repo + "@sha256:" + symDigests([]string{m.RunningID})[0]}
+	}
+	switch m.Probe {
+	case "ready":
+		in.Probe = probeReady
+	case "not_ready":
+		in.Probe = probeNotReady
+	}
+	return in
+}
+
+// reconcileV2Differential: the model's converge decision (lifecyclemodel ReconcileV2Spec,
+// which the converge steps of the model use) equals the REAL reconcileDecisionV2 on every
+// input of the model's bounded V2 space, and every model verdict is exercised.
+func reconcileV2Differential(t *testing.T) (total, mismatches int, seen map[string]int) {
+	t.Helper()
+	rv := lifecyclemodel.GenReconcileV2Vectors()
+	total = len(rv.Expected)
+	if total == 0 {
+		t.Fatal("V2 vector table is empty: refusing to pass")
+	}
+	seen = map[string]int{}
+	idx := make([]int, len(rv.Domains))
+	for n := 0; n < total; n++ {
+		m := lifecyclemodel.ReconcileV2InputAt(idx)
+		v := reconcileDecisionV2(realReconcileV2Inputs(m))
+		got := v.Action.String() + "/" + v.Reason
+		seen[got]++
+		if want := rv.Verdict(n); got != want {
+			if mismatches < 5 {
+				t.Errorf("MODEL/IMPLEMENTATION MISMATCH (converge V2) #%d: input=%+v model=%s actual=%s", n, m, want, got)
+			}
+			mismatches++
+		}
+		rv.Advance(idx)
+	}
+	for _, w := range rv.Verdicts {
+		if seen[w] == 0 {
+			t.Errorf("VACUOUS: converge verdict %q never produced over the input space", w)
+		}
+	}
+	return total, mismatches, seen
 }
 
 func writeReport(t *testing.T, name string, body map[string]interface{}) {
