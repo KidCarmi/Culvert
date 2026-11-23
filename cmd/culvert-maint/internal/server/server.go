@@ -205,6 +205,15 @@ type Server struct {
 	// mutationCutAt is the last time a compose up/down of this process ended
 	// in an error; the settle window restarts from it (settle.go).
 	mutationCutAt atomic.Pointer[time.Time]
+	// mutations is the durable marker of a compose up/down in flight;
+	// startHazard is whether the previous agent process may have left one
+	// unfinished; startSettled is set once Docker showed that it is over
+	// (settle.go, mutation.go). settlePoll is how often Docker is asked.
+	mutations    *journal.MutationLog
+	startHazard  bool
+	startMarker  bool // a marker was actually found (not merely first use)
+	startSettled atomic.Bool
+	settlePoll   time.Duration
 
 	// opWG tracks in-flight orchestrator goroutines so shutdown can drain them
 	// (T2.4) instead of abandoning a state-changing op mid-flight.
@@ -262,7 +271,14 @@ func New(opts Options) (*Server, error) {
 	if maxRO <= 0 {
 		maxRO = DefaultMaxConcurrentReadOnlyOps
 	}
-	return &Server{opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO)}, nil
+	mutations, atOpen, err := journal.OpenMutationLog(opts.StateDir)
+	if err != nil {
+		return nil, fmt.Errorf("server: mutation marker: %w", err)
+	}
+	return &Server{
+		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
+		mutations: mutations, startHazard: atOpen.Pending || atOpen.FirstUse, startMarker: atOpen.Pending, settlePoll: defaultSettlePoll,
+	}, nil
 }
 
 // acquireReadOnlySlot reserves an execution slot for a read-only op without

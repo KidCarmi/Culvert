@@ -92,3 +92,28 @@ func (r *Runner) LocalImageID(ctx context.Context, ref string) (string, error) {
 	}
 	return imageIDFromImageInspect(res.Stdout)
 }
+
+// ProxyContainerListed reports whether `compose ps` lists a proxy container at
+// all, in any state. `compose ps` lists containers that are running (or
+// restarting or paused), not exited or merely created ones, so false means: no
+// proxy container is running now. One docker call; an error means Docker could
+// not be read and nothing is known.
+func (r *Runner) ProxyContainerListed(ctx context.Context) (bool, error) {
+	ps, err := r.ComposeStatus(ctx)
+	if err != nil {
+		return false, fmt.Errorf("compose ps: %w", err)
+	}
+	if len(bytes.TrimSpace(ps.Stdout)) == 0 {
+		return false, nil
+	}
+	entries, err := parsePSEntries(ps.Stdout)
+	if err != nil {
+		return false, fmt.Errorf("compose ps: %w", err)
+	}
+	for i := range entries {
+		if entries[i].name() == proxyServiceName {
+			return true, nil
+		}
+	}
+	return false, nil
+}

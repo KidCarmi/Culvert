@@ -81,9 +81,10 @@ stage_timeout = "5m"
 # How long after the agent starts an upgrade or rollback waits before it moves
 # the tag and recreates the proxy. If the previous agent process died in the
 # middle of an operation, dockerd is still finishing the last request it sent;
-# for a container stop that takes as long as the proxy takes to exit. Counted
-# from every agent start, because the agent cannot tell a clean predecessor
-# from a killed one. Must be LONGER than the proxy's stop_grace_period in the
+# for a container stop that takes as long as the proxy takes to exit. The wait
+# applies only when the previous process may have left a compose up/down
+# unfinished (it leaves a marker under state_dir/mutation), and it ends early
+# once Docker shows no proxy container running. Must be LONGER than the proxy's stop_grace_period in the
 # compose file (60s as shipped) and shorter than operation_timeout. "0s" turns
 # the wait off (lab only: a rollback can then report success against a proxy
 # that is about to exit). Startup-only; there is no API or GUI for it.

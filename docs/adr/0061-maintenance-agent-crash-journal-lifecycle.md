@@ -259,9 +259,39 @@ The bound is counted from the process start, not from a journal record, on
 purpose. A stop can be left by something that records nothing (a restore's
 `compose down`), records another class (a data rollback), or belongs to a
 startup reconcile killed in mid-flight; and a record's `interrupted_at` is
-written best-effort. The cost is that the first upgrade or rollback within the
-window after any agent start waits for the rest of it. The wait is not a new
-stage and adds no docker call.
+written best-effort. The wait is not a new stage.
+
+**When the window applies, and when it ends early (mutation marker).** Waiting
+after every start made the ordinary restart (package upgrade, reboot) cost a
+full window on its first operation, and kept the proxy down for a full window
+in exactly the cases where it was already down. Two refinements, both built so
+that every doubt falls on the waiting side:
+
+- *Record before effect.* Before the agent runs `compose up` or `compose
+  down` it writes a durable marker (`<state_dir>/mutation/pending.json`,
+  fsynced) and removes it only after the command returned success. If the
+  marker cannot be written the command is not run. After any error exit the
+  marker stays: a docker CLI that was sent SIGTERM exits with an ordinary
+  error status after it has asked dockerd to stop the proxy. At start, **no
+  marker means the previous process had no such command in flight**, so there
+  is nothing for dockerd to be finishing and no window. A window still applies
+  when a marker is found, on the first start that keeps markers (their absence
+  then proves nothing), and whenever the journal holds an interrupted record.
+  All server call sites go through one wrapper
+  (`TestMutation_OnlyTheWrappersRunComposeUpDown`).
+- *Advance when completion is established.* While it waits, the agent reads
+  `compose ps`. A container stop can only be pending on a running container.
+  When two consecutive reads, one poll apart, list no proxy container, the stop
+  is over and the wait ends; whatever `up` starts next is not a container a
+  stale request named. If a proxy container is running (it may be the one being
+  stopped: Docker reports `running` until the process is gone) or Docker cannot
+  be read, the state is ambiguous and the whole window is waited out.
+
+The early end applies only to what a previous process left: its docker commands
+are dead before the next start (the unit's control-group kill), so only single
+requests are left in dockerd. It does not apply inside the window of a command
+of the running process that ended in an error, below: killed through `sudo`,
+that CLI may still be alive and send further requests.
 
 The window restarts inside one process whenever a `compose up` or `compose
 down` it ran ends in an error: the command may have been killed (stage timeout,

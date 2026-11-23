@@ -74,10 +74,7 @@ func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bo
 	out = append(out, tres.Stdout...)
 	errOut := append([]byte(nil), tres.Stderr...)
 	ev.noteUp()
-	ures, uerr := s.opts.Runner.ComposeUp(ctx)
-	if uerr != nil {
-		s.noteMutationCut()
-	}
+	ures, uerr := s.composeUp(ctx)
 	if uerr != nil && failedPostRestart != nil {
 		*failedPostRestart = true
 	}
@@ -118,7 +115,7 @@ const upRetryBudget = 1
 // that follow are unchanged: this never turns a failure into a success, it
 // only gives `up` the second pass it sometimes needs.
 func (s *Server) upAgainIfNothingRuns(ctx context.Context, out, errOut []byte) (stdout, stderr []byte, err error) {
-	if !s.recoveringFromInterruption() {
+	if !s.mayBeMidRecreate() {
 		return out, errOut, nil
 	}
 	for attempt := 1; attempt <= upRetryBudget; attempt++ {
@@ -132,13 +129,12 @@ func (s *Server) upAgainIfNothingRuns(ctx context.Context, out, errOut []byte) (
 		}
 		out = append(out, fmt.Sprintf("\nrestart: `up` exited 0 but no proxy container is running (present=%v); running `up` again (%d/%d)\n",
 			pc.Present, attempt, upRetryBudget)...)
-		ures, uerr := s.opts.Runner.ComposeUp(ctx)
+		ures, uerr := s.composeUp(ctx)
 		if ures != nil {
 			out = append(out, ures.Stdout...)
 			errOut = append(errOut, ures.Stderr...)
 		}
 		if uerr != nil {
-			s.noteMutationCut()
 			return out, errOut, uerr
 		}
 	}
@@ -219,6 +215,19 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 // previous agent process left behind (marked at startup, no operation of this
 // process behind it). An unreadable journal counts as no: nothing is retried on
 // a guess.
+// mayBeMidRecreate reports whether Compose can have been left in the middle of
+// a recreate by an earlier agent process: an interrupted record is on file, or
+// this process found the marker of an unfinished compose up/down at its start.
+// The marker covers an `up` that was cut with no record left to say so (its
+// operation failed and retired its own record before the agent ended).
+//
+// A compose command of THIS process that ended in an error is deliberately not
+// a trigger: the inline rollback that follows a failed `up` keeps exactly the
+// docker calls the lifecycle model was reviewed with.
+func (s *Server) mayBeMidRecreate() bool {
+	return s.startMarker || s.recoveringFromInterruption()
+}
+
 func (s *Server) recoveringFromInterruption() bool {
 	if s.opts.Journal == nil {
 		return false

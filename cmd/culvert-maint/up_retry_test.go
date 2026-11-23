@@ -55,6 +55,32 @@ func TestUpRetry_RecoversACleanupOnlyPass(t *testing.T) {
 	}
 }
 
+// TestUpRetry_RunsOnTheMarkerAlone: the interrupted `up` left no journal record
+// (its operation failed and retired its own record before the agent ended),
+// only the marker of an unfinished compose command. The retry must still run.
+func TestUpRetry_RunsOnTheMarkerAlone(t *testing.T) {
+	r := newCrashRig(t)
+	r.start()
+	crashed := r.crashAt("up_before:1")
+	if err := os.Remove(filepath.Join(r.state, "reconcile", crashed+".json")); err != nil {
+		t.Fatalf("removing the interrupted record: %v", err)
+	}
+	r.start()
+	if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
+		t.Fatal(err)
+	}
+	r.put("up_cleanup_only", "1")
+	r.clearCalls()
+
+	op := r.rollbackToA()
+	if done := r.waitOp(op); done.State != "succeeded" {
+		t.Fatalf("rollback = %s(%s); op log:\n%s", done.State, done.FailureReason, r.opLogs(op))
+	}
+	if n := r.upCalls(); n != 2 {
+		t.Errorf("`compose up` ran %d times, want 2 (the clean-up-only pass and one retry)", n)
+	}
+}
+
 // TestUpRetry_IsBounded: if `up` keeps exiting 0 with nothing running, the
 // agent retries once and then lets the health gate fail the operation. It does
 // not loop, does not report success, and keeps the interrupted record.

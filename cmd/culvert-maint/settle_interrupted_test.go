@@ -3,6 +3,8 @@ package main
 import (
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -107,11 +109,12 @@ func TestSettle_RollbackWaitsOutAnInterruptedRecreate(t *testing.T) {
 	}
 }
 
-// TestSettle_AppliesAfterAnyStart: the wait does not depend on a journal
-// record. A stop can be left behind by something that records nothing (a
-// restore's `compose down`) or records another class (a data rollback), so the
-// first tag+recreate after ANY agent start waits out the window.
-func TestSettle_AppliesAfterAnyStart(t *testing.T) {
+// TestSettle_FirstStartOnAStateDirWaits: the wait does not depend on a journal
+// record. On the first start that keeps mutation markers, their absence proves
+// nothing (an earlier agent version wrote none, and a stop can be left behind
+// by something that records nothing in the journal, such as a restore's
+// `compose down`), so the first tag+recreate waits out the window.
+func TestSettle_FirstStartOnAStateDirWaits(t *testing.T) {
 	const settle = 6 * time.Second
 	r := newCrashRig(t)
 	r.setSettle(settle.String())
@@ -162,5 +165,69 @@ func TestSettle_AlreadyCurrentIsNotReportedInsideTheWindow(t *testing.T) {
 	}
 	if waited := time.Since(beforeStart); waited < settle {
 		t.Errorf("an already_current upgrade reported success %v after the start, inside the %v settle window", waited, settle)
+	}
+}
+
+// TestSettle_NoWaitAfterAnIdlePredecessor: the previous agent process ended,
+// here even by SIGKILL, with no compose up/down in flight. No marker is left,
+// so dockerd has nothing of its to finish and the first operation of the new
+// process acts at once. This is the ordinary restart: package upgrade, reboot.
+func TestSettle_NoWaitAfterAnIdlePredecessor(t *testing.T) {
+	const settle = 30 * time.Second
+	r := newCrashRig(t)
+	r.setSettle(settle.String())
+	r.start() // first start on this state dir
+	r.kill()  // idle: nothing in flight
+	began := time.Now()
+	r.start()
+
+	op := r.applyUpgrade()
+	if d := r.waitOp(op); d.State != "succeeded" {
+		t.Fatalf("upgrade = %s(%s); agent output:\n%s", d.State, d.FailureReason, r.logs.String())
+	}
+	if took := time.Since(began); took >= settle {
+		t.Errorf("the upgrade took %v after the restart: it waited out the %v window although nothing was in flight", took, settle)
+	}
+	if logs := r.opLogs(op); strings.Contains(logs, "settle:") {
+		t.Errorf("the operation log records a settle wait:\n%s", logs)
+	}
+	if r.read("pinned") != imgB || r.read("running") != imgB {
+		t.Errorf("after upgrade: tag %.8s container %.8s, want both on the target", r.read("pinned"), r.read("running"))
+	}
+}
+
+// TestSettle_EndsEarlyWhenTheProxyIsDown: the agent died inside `compose up`
+// and the proxy is not running. No container stop can be pending on a
+// container that is not running, so the rollback goes on as soon as two reads
+// of Docker show that, instead of keeping the proxy down for the rest of the
+// window.
+func TestSettle_EndsEarlyWhenTheProxyIsDown(t *testing.T) {
+	const settle = 60 * time.Second
+	r := newCrashRig(t)
+	r.setSettle(settle.String())
+	r.start() // first start on this state dir: would wait; get past it
+	r.kill()
+	r.start() // an idle predecessor: no wait, so the upgrade reaches `up` at once
+	r.crashAt("up_before:1")
+	if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
+		t.Fatal(err)
+	}
+	began := time.Now()
+	r.start()
+	r.clearCalls()
+
+	op := r.rollbackToA()
+	done := r.waitOp(op)
+	if done.State != "succeeded" {
+		t.Fatalf("rollback = %s(%s); agent output:\n%s\nop log:\n%s", done.State, done.FailureReason, r.logs.String(), r.opLogs(op))
+	}
+	if took := time.Since(began); took >= settle/2 {
+		t.Errorf("the rollback took %v with the proxy down; the %v window should have been ended early", took, settle)
+	}
+	if logs := r.opLogs(op); !strings.Contains(logs, "no proxy container is running") {
+		t.Errorf("the operation log does not record why the wait ended early:\n%s", logs)
+	}
+	if r.read("pinned") != imgA || r.read("running") != imgA {
+		t.Errorf("after rollback: tag %.8s container %.8s, want both on the prior image", r.read("pinned"), r.read("running"))
 	}
 }

@@ -155,6 +155,28 @@ change (AGT-004 / AGT-900) and an **owner decision**, behind
 `reconcile_on_startup = "converge"`, which stays default-off until the
 real-Docker gate is met.
 
+### 3.5 What phase 1b implements, and what it leaves out
+
+Implemented (ADR-0061, "When the window applies, and when it ends early"):
+
+- the marker of 3.1, with the correction that it stays after any error exit,
+  plus two conservative additions: the first start that keeps markers, and any
+  interrupted journal record, count as a hazard;
+- of 3.2, only the first condition: **no proxy container is running**, read
+  twice one poll apart. That is every case in which the proxy is down, which
+  is where waiting costs an outage;
+- the `up` retry of 1a also triggers on a marker found at start, with no
+  journal record needed.
+
+Left out on purpose: the second condition of 3.2 (a running container that was
+created after the cut). `CreatedAt` has 1 s resolution and Compose creates the
+replacement within the same second as the command starts, so the comparison
+would be ambiguous most of the time; and recording the container id before
+each command would add a Docker read to every ordinary upgrade, which the
+reviewed lifecycle model does not have. The cost of leaving it out is a full
+window before the next *operation* in cases where the proxy is already
+serving, not an outage.
+
 ## 4. What needs a decision, and what does not
 
 | Step | Privilege | Contract | Decision |
