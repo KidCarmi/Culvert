@@ -277,8 +277,9 @@ restart delay plus the time to the next operation; and it still answers
 `/ready` with 200 while it drains. At the time of measurement Culvert's proxy
 did: its listener stays open from SIGTERM until its proxy-server shutdown hook
 (up to the 12 s early phase plus later hooks), with nothing changing `/ready`.
-That is read from `main_shutdown.go` and `healthcheck.go`; the probe's proxy is
-a stand-in, and how long the real proxy takes to exit was not measured.
+That is read from `main_shutdown.go` and `healthcheck.go`, and was later
+measured on the real binary (below). The proxy in this first matrix is a
+stand-in.
 
 **Startup convergence as first merged (#2039, `reconcile_on_startup = "converge"`), 22 trials.**
 With a proxy that exits at once, all 14 kill points end as intended: realign or
@@ -302,14 +303,18 @@ the run stays practical.
 | Run | Trials | Violations | What changed |
 |---|---|---|---|
 | Stand-in proxy, shipped unit | 18 + 2 | 0 | The rollback during a 12 s drain no longer reports success: it waits out the window, the stale stop has finished by then, and it fails its health gate and keeps the record |
-| Real Culvert proxy binary (v1 from `main`, v2 with the `/ready` change), shipped unit | 18 | 0 | Same properties with the real proxy, including with a request pending on its admin UI, where its shutdown takes its real 5 s |
+| Real Culvert proxy binary (v1 from `main`, v2 with the `/ready` change), shipped unit | 18 | 0 | Same properties with the real proxy. The six "pending admin-UI request" trials of this run did NOT hold the shutdown (the request was opened before the upgrade and had gone stale by the time of the stop), so they repeat the fast ones |
+| Real proxy binary, pending admin-UI request kept fresh (re-run of the two stop-in-flight kill points) | 8 | 0 | The shutdown is held: old container gone 4.7–5.3 s after the kill, read from dockerd. The container being stopped is always v1, which answers `/ready` 200 meanwhile. It has exited by the time the agent is back (5.5 s), so there is no window to exploit with this binary in this configuration |
 | Startup convergence as merged in #2039, stand-in | 10 | 4 | Unchanged: realign, `converged`, record retired, proxy then exits |
 | Startup convergence with the correction, stand-in | 10 | 0 | Those four end as `recovery_required` with the record kept |
 | Startup convergence with the correction, real proxy binary | 8 | 0 | |
 
-The real proxy binary, alone: SIGTERM to exit takes 0.06 s when idle and 5.0 s
-with a request pending on the admin UI; during those 5 s `/ready` answers 200
-on `main` and 503 with the change, and `/health` answers 200 in both.
+The real proxy binary, alone (`orphan-probe/sigterm-timeline.py`): SIGTERM to
+exit takes 0.06 s when idle and 5.0 s with a request left unfinished on the
+admin UI; during those 5 s `/ready` answers 200 on `main` and 503 with the
+change, and `/health` answers 200 in both. (Go's `Shutdown` closes such a
+connection at once when it is more than 5 s old, which is why the probe keeps
+the request fresh and rejects a trial whose shutdown was not held.)
 
 Two things these runs show that are not safety failures and are not fixed here:
 - After a crash between Compose's stop and delete, the first
@@ -325,8 +330,15 @@ Alpine layers (Docker Hub was not reachable where this was run).
 
 **Not covered.** A crash of `dockerd` or the host; a proxy that ignores
 SIGTERM; Compose versions that recreate in a different order; the classic image
-store; multi-service stacks; the real Culvert proxy image (the probe's proxy is
-a stand-in with the same three behaviours on SIGTERM).
+store; multi-service stacks; the release image (the real proxy was run as its
+binary in a minimal image); the proxy's early shutdown phase with HA or
+control-plane peers, where it can stay up longest.
+
+Knobs: `ORPHAN_PROBE_PROXY_BIN_V1` / `_V2` (real proxy binaries built with
+`-X main.version=probe-v1` / `probe-v2`), `ORPHAN_PROBE_SETTLE` and
+`ORPHAN_PROBE_STOP_GRACE` (for an agent with the settle wait; keep settle >
+stop grace > the proxy's drain), `ORPHAN_PROBE_POINTS` / `ORPHAN_PROBE_MID`
+(a subset of kill points), `ORPHAN_PROBE_OUT` (copy the per-trial records).
 
 ## Running
 

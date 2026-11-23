@@ -23,6 +23,7 @@ import os
 import socket
 import ssl
 import subprocess
+import threading
 import sys
 import time
 
@@ -116,28 +117,77 @@ def serving_version():
     return "v1" if body.endswith("v1") else "v2" if body.endswith("v2") else "?"
 
 
-_held = []
+_hold_stop = None
+
+
+def _open_ui_request():
+    port = int(os.environ.get("PROBE_UI_PORT") or int(PORT) + 1)
+    c = socket.create_connection(("127.0.0.1", port), timeout=5)
+    if os.environ.get("PROBE_UI_TLS") == "1":  # the release image's admin UI is HTTPS, self-signed
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        c = ctx.wrap_socket(c)
+    c.sendall(b"GET / HTTP/1.1\r\nHost: probe\r\n")
+    return c
 
 
 def hold_ui_request():
-    """PROBE_DRAIN=uihold (real proxy): leave a request to the admin UI
-    unfinished, as a browser tab with a pending request would. The proxy's
-    shutdown then waits for it (5 s cap) with the proxy port still open."""
-    while _held:
-        try:
-            _held.pop().close()
-        except OSError:
-            pass
-    port = int(os.environ.get("PROBE_UI_PORT") or int(PORT) + 1)
-    for _ in range(2):
-        s = socket.create_connection(("127.0.0.1", port), timeout=5)
-        if os.environ.get("PROBE_UI_TLS") == "1":  # the release image's admin UI is HTTPS, self-signed
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            s = ctx.wrap_socket(s)
-        s.sendall(b"GET / HTTP/1.1\r\nHost: probe\r\n")
-        _held.append(s)
+    """PROBE_DRAIN=uihold (real proxy): keep a request to the admin UI unfinished,
+    as a browser tab with a pending request would, so that the proxy's shutdown
+    waits for it (5 s cap) with the proxy port still open.
+
+    The connection has to be YOUNG when SIGTERM arrives: Go's Shutdown closes a
+    connection that has not finished its request headers at once if it is more
+    than 5 s old. So a background thread replaces it every second, for as long
+    as the trial runs. The trial then checks that the shutdown really was held
+    (drain_secs) and is invalid if it was not."""
+    global _hold_stop
+    release_ui_request()
+    stop = threading.Event()
+    _hold_stop = stop
+
+    def keep():
+        held = []
+        while not stop.is_set():
+            try:
+                held.append(_open_ui_request())
+            except OSError:
+                pass  # the proxy is down or restarting; try again
+            while len(held) > 2:
+                try:
+                    held.pop(0).close()
+                except OSError:
+                    pass
+            stop.wait(1.0)
+        for c in held:
+            try:
+                c.close()
+            except OSError:
+                pass
+
+    threading.Thread(target=keep, daemon=True).start()
+
+
+def release_ui_request():
+    global _hold_stop
+    if _hold_stop is not None:
+        _hold_stop.set()
+        _hold_stop = None
+
+
+def old_container_exit_secs(fired, limit=12.0):
+    """Seconds from the kill until the container that was running image v1 at the
+    start is no longer running, or None if it still runs after `limit`. Read
+    from dockerd. Only meaningful where a stop was in flight."""
+    while time.time() - fired < limit:
+        out = sh("docker", "ps", "--no-trunc", "--filter", f"label=com.docker.compose.project={PROJECT}",
+                 "--format", "{{.ID}}").stdout.split()
+        running_v1 = [i for i in out if ver(sh("docker", "inspect", i, "--format", "{{.Image}}").stdout.strip()) == "v1"]
+        if not running_v1:
+            return round(time.time() - fired, 1)
+        time.sleep(0.2)
+    return None
 
 
 def mainpid():
@@ -210,6 +260,8 @@ def run_op(path, body, timeout=240):
 # Reconcile states (startup_reconcile.go). Anything not listed as still-working
 # is an end state for this start.
 RECONCILE_WORKING = (None, "", "not_started", "in_progress")
+# States in which the reconcile really looked at the records of this start.
+RECONCILE_RAN = ("done", "recovery_required", "deferred", "abandoned")
 
 
 def wait_converge(timeout=300):
@@ -255,11 +307,16 @@ def trial(k, stop_delay, follow):
     while time.time() - t0 < 150 and not os.path.exists(fired_path):
         time.sleep(0.02)
     if not os.path.exists(fired_path):
+        release_ui_request()
         rec.update(valid=False, why="kill point not reached")
         return rec
     with open(fired_path) as f:
         fired = json.load(f)["t"]
-    time.sleep(1.0)
+    if DRAIN == "uihold":
+        rec["drain_secs"] = old_container_exit_secs(fired)
+        release_ui_request()
+    else:
+        time.sleep(1.0)
     rec["truth_1s_after_kill"] = truth()
     ok = wait_agent()
     rec["new_agent_after_s"] = round(time.time() - fired, 1)
@@ -310,7 +367,7 @@ def healthy(t, want=None):
     if len(cs) != 1 or ":running:" not in cs[0]:
         return False
     v = cs[0].rsplit(":", 1)[1]
-    return t["tag"] == v == t["serving"] and (want is None or v == want)
+    return v in ("v1", "v2") and t["tag"] == v == t["serving"] and (want is None or v == want)
 
 
 def judge(rec):
@@ -326,8 +383,18 @@ def judge(rec):
         bad.append("fence: a docker command of the dead agent was alive when the new agent started")
     rest, st = rec["truth_at_rest"], rec["status_at_rest"]
     op = rec.get("follow_op")
-    if rec["follow"] == "converge" and not rec.get("converge_finished"):
-        return "INVALID", [f"the startup reconcile had not finished: {(rec['status_after_converge'].get('reconcile') or {}).get('state')!r}"]
+    if rec["follow"] == "converge":
+        rc = rec["status_after_converge"].get("reconcile") or {}
+        if not rec.get("converge_finished"):
+            return "INVALID", [f"the startup reconcile had not finished: {rc.get('state')!r}"]
+        if rc.get("state") not in RECONCILE_RAN or not rc.get("records"):
+            # skipped_second_instance, lock_unavailable, or nothing reconciled:
+            # the record is still there, but this trial tested nothing.
+            return "INVALID", [f"the startup reconcile did not act on the record: state={rc.get('state')!r} records={len(rc.get('records') or [])}"]
+    if rec.get("drain") == "uihold" and "/stop" in (rec.get("last_request_daemon_saw") or ""):
+        d = rec.get("drain_secs")
+        if d is None or d < 3.0:
+            return "INVALID", [f"the pending admin-UI request did not hold the proxy's shutdown (old container gone after {d}s; expected about 5s)"]
     if rec["follow"] in ("rollback", "apply") and not (op and op.get("admitted") and op.get("state") in ("succeeded", "failed")):
         # The trial is about what the next operation does. One that was refused,
         # unreadable or still running exercised nothing.

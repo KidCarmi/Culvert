@@ -51,7 +51,9 @@ jobs:
         points: ["-1,0,1,2", "3,4,5,6", "7,8,9", "10,11,12"]
     env:
       V1_REF: ${{ inputs.proxy_v1_ref || 'main' }}
-      V2_REF: ${{ inputs.proxy_v2_ref || 'main' }}
+      # On a pull request there are no inputs. Until #2058 is merged the target image is built
+      # from its branch, which is what this run has to qualify; set this back to 'main' then.
+      V2_REF: ${{ inputs.proxy_v2_ref || 'proxy/ready-not-ready-on-shutdown' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
