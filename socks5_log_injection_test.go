@@ -327,29 +327,40 @@ func TestSOCKS5_EveryDestinationLogSiteSanitises(t *testing.T) {
 // socks5GuardAndDial holds the SSRF-guard and dial log sites (moved out of
 // handleSOCKS5 by PERF-SOCKS5-HANGUP-1), so it is walled exactly like the
 // handler rather than trusted as a registered sink.
-var socks5WalledFuncs = []string{"handleSOCKS5", "socks5GuardAndDial"}
+//
+// SWG-901 stage 2 added the shadow-policy hook, which receives the raw
+// destination and logs it on the POLICY_WOULD_BLOCK line: socks5ShadowPolicy
+// and logSOCKS5WouldBlock live in socks5_policy_shadow.go and are walled the
+// same way, which is why the walls parse socks5WalledFiles rather than
+// socks5.go alone.
+var socks5WalledFuncs = []string{"handleSOCKS5", "socks5GuardAndDial", "socks5ShadowPolicy", "logSOCKS5WouldBlock"}
+
+// socks5WalledFiles are the sources socks5WalledFuncs are looked up in.
+var socks5WalledFiles = []string{"socks5.go", "socks5_policy_shadow.go"}
 
 // parseHandleSOCKS5 returns the ASTs of socks5WalledFuncs, in that order.
 func parseHandleSOCKS5(t *testing.T) (*token.FileSet, []*ast.FuncDecl) {
 	t.Helper()
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "socks5.go", nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parse socks5.go: %v", err)
-	}
 	byName := map[string]*ast.FuncDecl{}
-	ast.Inspect(file, func(n ast.Node) bool {
-		if d, ok := n.(*ast.FuncDecl); ok {
-			byName[d.Name.Name] = d
-			return false
+	for _, name := range socks5WalledFiles {
+		file, err := parser.ParseFile(fset, name, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
 		}
-		return true
-	})
+		ast.Inspect(file, func(n ast.Node) bool {
+			if d, ok := n.(*ast.FuncDecl); ok {
+				byName[d.Name.Name] = d
+				return false
+			}
+			return true
+		})
+	}
 	fns := make([]*ast.FuncDecl, 0, len(socks5WalledFuncs))
 	for _, name := range socks5WalledFuncs {
 		fn := byName[name]
 		if fn == nil {
-			t.Fatalf("%s not found in socks5.go — these walls must be re-aimed, not deleted", name)
+			t.Fatalf("%s not found in %v — these walls must be re-aimed, not deleted", name, socks5WalledFiles)
 		}
 		fns = append(fns, fn)
 	}
@@ -427,6 +438,12 @@ var destinationSinks = map[string]string{
 	"JoinHostPort":         "net; string construction only",
 	"DialContext":          "net.Dialer; the error it returns is sanitised at the log site",
 	"sanitizeLog":          "the sanitiser itself",
+	// SWG-901 stage 2 (shadow policy). The hook and its log line are walled
+	// themselves; the evaluator is the Stage-2 matcher, which logs nothing.
+	"socks5ShadowPolicy":  "walled itself: it is in socks5WalledFuncs, so both walls inspect its log sites and its own destination sinks",
+	"logSOCKS5WouldBlock": "walled itself: it is in socks5WalledFuncs; every argument of its log lines is clientIP or sanitised",
+	"socks5ShadowEvaluate": "PolicyStore.matchAccessRule + classifySOCKS5Shadow: the pure Stage-2 core (ADR-0026) and a label mapping; neither logs. " +
+		"The only counter the core can touch is the geo-unresolved total (a count, no destination bytes)",
 	// CHAOS-69 destination-authority bound. All three receive the destination
 	// only to MEASURE it, which is the whole design decision behind the bound's
 	// log line: the LENGTH is what an operator needs to tell a probe from a

@@ -1404,6 +1404,9 @@ culvert_socks5_posture_refused_total %d
 			socks5PostureRefusedTotal(),
 		)
 	}
+	// SWG-901 stage 2: SOCKS5 shadow-policy evidence. Emitted only in shadow
+	// mode (absent on a legacy node); see socks5_policy_shadow.go.
+	writeSOCKS5PolicyShadowMetrics(w)
 
 	// CHAOS-113: the scan sidecar listener. Emitted ONLY where the sidecar is
 	// configured, for the reason the SOCKS5 and cluster_ca gauges document:

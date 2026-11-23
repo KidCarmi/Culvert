@@ -110,7 +110,7 @@ func TestParseSOCKS5Request(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd, host, port, err := parseSOCKS5Request(bytes.NewReader(tc.in))
+			cmd, host, port, _, err := parseSOCKS5Request(bytes.NewReader(tc.in))
 
 			switch tc.wantErr {
 			case errNone:
@@ -160,6 +160,29 @@ func FuzzParseSOCKS5Request(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, _, _, _ = parseSOCKS5Request(bytes.NewReader(data)) // must not panic
+		_, _, _, _, _ = parseSOCKS5Request(bytes.NewReader(data)) // must not panic
 	})
+}
+
+// TestParseSOCKS5Request_ReturnsWireATYP pins the ATYP the parser reports
+// (SWG-901 stage 2 counts it per address type). It is the WIRE byte, not a
+// guess from the host text: a DOMAINNAME that spells an IP literal is still a
+// domain request.
+func TestParseSOCKS5Request_ReturnsWireATYP(t *testing.T) {
+	ipv6 := net.ParseIP("2001:db8::1").To16()
+	for _, tc := range []struct {
+		name string
+		in   []byte
+		want byte
+	}{
+		{"ipv4", socks5Frame(0x05, 0x01, 0x00, 0x01, []byte{192, 0, 2, 1}, 443), 0x01},
+		{"ipv6", socks5Frame(0x05, 0x01, 0x00, 0x04, ipv6, 443), 0x04},
+		{"domain", socks5Frame(0x05, 0x01, 0x00, 0x03, domainAddr("example.com"), 443), 0x03},
+		{"domain spelling an IPv4 literal", socks5Frame(0x05, 0x01, 0x00, 0x03, domainAddr("192.0.2.1"), 443), 0x03},
+	} {
+		_, _, _, atyp, err := parseSOCKS5Request(bytes.NewReader(tc.in))
+		if err != nil || atyp != tc.want {
+			t.Errorf("%s: atyp=0x%02x err=%v, want 0x%02x", tc.name, atyp, err, tc.want)
+		}
+	}
 }
