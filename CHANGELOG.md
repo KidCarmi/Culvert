@@ -690,6 +690,62 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Opt-in startup recovery for an image change the maintenance agent was
+  killed in (`reconcile_on_startup = "converge"`, contract `AGT-900`).** The
+  default stays `"off"`: startup reports the interrupted operation and changes
+  nothing, exactly as before. With `"converge"`, after reporting it the agent
+  holds the maintenance lock (state-changing requests get 409; reads are
+  served) and acts only on proof: it moves the fixed tag back to the recorded
+  previous image when the container still runs that image (the kill landed
+  between `docker tag` and `compose up`); it finishes an inline rollback whose
+  journal record says it was armed and whose tag is already on the previous
+  image (`compose up`, health gate, verify by image id); or it accepts,
+  without touching Docker, an upgrade recorded as verified whose image runs
+  under the tag and answers `/ready`. Everything else, including a new image
+  that is running but never passed the health gate, is reported as
+  `recovery_required` and left alone; with Docker unreadable it defers. It
+  never pulls, never runs `down`, and tries an action at most twice per
+  record. The interrupted operation stays `failed(agent_restart_interrupted)`;
+  the recovery is a separate `reconcile.startup` operation, and a record is
+  removed only after the result is verified and audited. `GET /v1/status`
+  gains `recovery_required` and `reconcile` (only in `"converge"` mode), and
+  each interrupted operation `reconcile_outcome`. A second agent process on
+  the same state directory does not reconcile (instance lock). An older agent
+  refuses to start with the new key in its config: remove it before a
+  downgrade.
+
+- **The maintenance agent's crash journal no longer names the previous image
+  as an upgrade's target (ADR-0061 finding F1).** After `docker compose up`
+  returned success, the restart stage recorded whatever image the proxy then
+  ran as the record's `target_image_id`, even when `up` had not recreated it
+  (for example under a compose override pinning another image). The id is now
+  recorded only when that image's registry digests include the digest being
+  installed; the verify stage applies the same rule. An image rollback inside a
+  failed upgrade also writes an optional `rollback_armed` key to the record
+  before it moves the fixed tag back. The write is best-effort: if it fails, a
+  warning is logged and the rollback still runs, so a failed target is never
+  left running for want of the marker; the record then stays unarmed, which a
+  startup reconcile never acts on. Older agents ignore the key. No startup code acts on either
+  value in this change; they are the evidence an opt-in startup reconcile
+  (contract `AGT-900`) needs.
+
+- **An upgrade's `final_running_digest` now reports only an image the agent
+  actually saw running, and says so when it cannot.** The maintenance agent
+  used to infer the field from its own progress flags, so after some failures
+  it named an image no capture had shown: the rollback target while the
+  upgrade's image still ran, or the new image while the container was stopped.
+  In the shadow lifecycle model, 48 of 172 fault paths reported an image that
+  was not running. The agent now reports the image from its last capture after
+  the last `docker compose up`, and takes one read-only capture at the end of
+  the operation when it has none. Two result fields are new:
+  `final_running_state` (`verified` or `unverified`) and
+  `final_running_image_id`. `final_running_digest` keeps its key and type; it
+  is empty when the state is `unverified`, or when the running image has no
+  allow-listed registry reference, which is now identified by
+  `final_running_image_id`. Read `final_running_state` before treating an empty
+  digest as meaningful. Nothing is pulled or restarted to establish it. Contract
+  `AGT-006`; design `roadmap/FINAL-RUNNING-DIGEST-PROPOSAL.md`.
+
 - **Automatic rollback after a failed upgrade works on hosts using Docker's
   containerd image store.** On such a host Docker reports two references for
   the running proxy image: the registry one (`ghcr.io/kidcarmi/culvert@sha256:…`)

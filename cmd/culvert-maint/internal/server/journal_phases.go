@@ -121,6 +121,35 @@ func (s *Server) writeBarrier(acc *upgradeApplyAccumulator) error {
 	return s.opts.Journal.Write(rec)
 }
 
+// armRollbackInJournal records that inline rollback is about to move the fixed
+// tag back to the prior image (journal.Record.RollbackArmed). Best-effort: the
+// caller logs a failure and rolls back anyway.
+// It changes nothing else in the record: the phase stays where the forward flow
+// left it (rollback stages write no phase), and no identifier is folded in. A
+// missing record is re-established like the write-ahead barrier does, so a crash
+// in the rollback restart still leaves a reconcilable record. A nil journal or
+// an empty op id is a no-op (non-journaled build).
+func (s *Server) armRollbackInJournal(acc *upgradeApplyAccumulator) error {
+	if s.opts.Journal == nil || acc.opID == "" {
+		return nil
+	}
+	rec, found, err := s.opts.Journal.Read(acc.opID)
+	if err != nil {
+		return fmt.Errorf("journal read: %w", err)
+	}
+	now := time.Now().UTC()
+	if !found {
+		rec = &journal.Record{
+			OpID: acc.opID, Kind: ops.KindUpgradeApply, Phase: journal.PhaseRestarting,
+			Actor: acc.actor, StartedAt: now,
+		}
+		foldIdentifiers(rec, acc)
+	}
+	rec.RollbackArmed = true
+	rec.UpdatedAt = now
+	return s.opts.Journal.Write(*rec)
+}
+
 // restartWithBarrier is the apply `restart` stage body: it writes the
 // PhaseRestarting write-ahead barrier, then advances the fixed tag + restarts.
 // Extracted from buildUpgradeApplyStages so that function stays under the
@@ -136,7 +165,7 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 		if err := s.writeBarrier(acc); err != nil {
 			return nil, nil, fmt.Errorf("restart: write-ahead journal barrier failed, refusing to advance tag: %w", err)
 		}
-		out, errOut, uerr := s.tagAndUp(ctx, acc.pinnedRef, &acc.upgradeFailedPostRestart)
+		out, errOut, uerr := s.tagAndUp(ctx, acc.pinnedRef, &acc.upgradeFailedPostRestart, &acc.evidence)
 		if uerr == nil {
 			// Capture the target's config digest NOW (best-effort) — the container
 			// is running the target after `up`. Without this, a crash between here
@@ -144,8 +173,17 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 			// TargetImageID, forcing reconcile onto the false-rollback-prone
 			// manifest comparison for exactly the multi-arch case the config digest
 			// protects (Codex P1). verifyRunningImage re-captures + hard-verifies.
+			//
+			// F1 (ADR-0061): `up` exiting 0 does not prove the proxy was recreated
+			// on the target (a compose override can pin another image). The id is
+			// recorded as the TARGET's only when the captured RepoDigests contain
+			// the pinned digest (the check verifyRunningImage makes), so the
+			// journal can never name the prior image as the target.
 			if ri, cerr := s.opts.Runner.CaptureRunningProxyImage(ctx); cerr == nil {
-				acc.runningAfterID = ri.RunningImageID
+				acc.evidence.noteCapture(ri)
+				if acc.pinnedDigest != "" && containsString(bareDigests(ri.RepoDigests), acc.pinnedDigest) {
+					acc.runningAfterID = ri.RunningImageID
+				}
 			}
 			s.advanceJournalPhaseBestEffort(acc, journal.PhaseRestarted)
 		} else if acc.upgradeFailedPostRestart {
@@ -196,6 +234,9 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 // fires for a failed `up` is unchanged.
 func (s *Server) realignPinnedTagAfterFailedUp(ctx context.Context, acc *upgradeApplyAccumulator) []byte {
 	ri, cerr := s.opts.Runner.CaptureRunningProxyImage(ctx)
+	if cerr == nil {
+		acc.evidence.noteCapture(ri)
+	}
 	if cerr != nil {
 		return []byte("\nrestart: `up` failed and no running proxy could be captured afterwards — container state is indeterminate; culvert/proxy:pinned left at the target")
 	}

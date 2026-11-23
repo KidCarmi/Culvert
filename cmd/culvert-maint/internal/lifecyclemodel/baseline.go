@@ -152,9 +152,10 @@ func planLine(plan []PlanEntry) string {
 // TestApplyLine_CoversEveryExpectationField enforces it.
 func ApplyLine(v *ApplyVector) string {
 	e := &v.Expect
-	return fmt.Sprintf("%s | %s | op=%s reason=%s upgrade_ok=%t running=%s tag=%s rb_att=%t rb_ok=%t rb_skip=%s tag_ahead=%t journal_empty=%t | %s | %s",
+	return fmt.Sprintf("%s | %s | op=%s reason=%s upgrade_ok=%t running=%s tag=%s rb_att=%t rb_ok=%t rb_skip=%s tag_ahead=%t journal_empty=%t final=%s/%s/%s | %s | %s",
 		paramsLine(v.Params), faultsLine(v.Script), e.Op, e.Reason, e.UpgradeSucceeded, e.Running, e.Tag, e.RollbackAttempted,
-		e.RollbackSucceeded, e.RollbackSkippedReason, e.TagAhead, e.JournalEmpty, strings.Join(e.Cmds, ","), planLine(v.Plan))
+		e.RollbackSucceeded, e.RollbackSkippedReason, e.TagAhead, e.JournalEmpty, e.FinalState, e.FinalDigest, e.FinalImage,
+		strings.Join(e.Cmds, ","), planLine(v.Plan))
 }
 
 // CrashLine renders one crash vector as a single reviewable line.
