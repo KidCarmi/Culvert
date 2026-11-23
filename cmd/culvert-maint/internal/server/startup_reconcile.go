@@ -16,12 +16,16 @@
 // Per record: validate refs; read Docker (container, fixed tag, local ids of
 // the validated refs); decide with the pure reconcileDecisionV2; for an action
 // that changes Docker, persist the attempt FAIL-CLOSED first (no durable
-// write, no action), re-read Docker and act only if the decision is unchanged
-// (TOCTOU), act through the existing runner/sudoers commands only (tag to the
-// validated PriorRef; `compose up` only to finish an armed rollback whose tag
-// is already on the prior image; never pull, never down, never a tag to the
-// target), then verify by image id. Audit, THEN retire the record, and only
-// after verified convergence. A recovery_required or deferred record is kept.
+// write, no action), then run the verdict's steps (reconcilePlan): before EACH
+// step that changes Docker, re-read Docker and go on only if the decision on
+// the fresh facts is exactly that step's expected verdict (TOCTOU; after this
+// reconcile's own retag that is the T/P-armed finish_rollback, anything else
+// stops it). Act through the existing runner/sudoers commands only (tag to the
+// validated PriorRef; `compose up` only to finish an armed rollback once the
+// tag is on the validated prior image, then a fresh health gate; never pull,
+// never down, never a tag to the target), then verify by image id. Audit, THEN
+// retire the record, and only after verified convergence. A recovery_required
+// or deferred record is kept.
 package server
 
 import (
@@ -453,8 +457,11 @@ func (s *Server) stillDecides(ctx context.Context, c *reconcileCase, v reconcile
 	return reconcileDecisionV2(again) == v
 }
 
-// act performs realign or finish_rollback: write-ahead, TOCTOU re-read, the
-// action, then verification by image id.
+// act performs an acting verdict (realign, finish_rollback,
+// finish_rollback_retag): the write-ahead attempt, then the steps of
+// reconcilePlan, each step that changes Docker preceded by a fresh read that
+// must still decide that step's expected verdict (TOCTOU), then verification
+// by image id.
 func (s *Server) act(ctx context.Context, c *reconcileCase, v reconcileVerdictV2) ReconcileRecord {
 	now := time.Now().UTC()
 	c.rec.ReconcileAttempts = c.in.Attempts + 1
@@ -464,14 +471,22 @@ func (s *Server) act(ctx context.Context, c *reconcileCase, v reconcileVerdictV2
 		c.out.Reason = "journal_write_failed"
 		return s.keepRecord(c, OutcomeRecoveryRequired)
 	}
-	if !s.stillDecides(ctx, c, v) {
-		c.out.Reason = "docker_changed_before_action"
-		return s.keepRecord(c, OutcomeRecoveryRequired)
-	}
-	if err := s.performAction(ctx, c, v); err != nil {
-		c.out.Reason = err.Error()
-		_ = s.auditReconciled(c, audit.OutcomeFailed) // best-effort: the record is kept either way
-		return s.keepRecord(c, OutcomeRecoveryRequired)
+	for i, st := range reconcilePlan(v) {
+		if st.op.mutates() && !s.stillDecides(ctx, c, st.expect) {
+			if i == 0 {
+				// Nothing was changed yet: no audit entry, like any report-only verdict.
+				c.out.Reason = "docker_changed_before_action"
+				return s.keepRecord(c, OutcomeRecoveryRequired)
+			}
+			c.out.Reason = "docker_changed_before_" + st.op.String()
+			_ = s.auditReconciled(c, audit.OutcomeFailed) // best-effort: the record is kept either way
+			return s.keepRecord(c, OutcomeRecoveryRequired)
+		}
+		if err := s.performStep(ctx, c, st.op); err != nil {
+			c.out.Reason = err.Error()
+			_ = s.auditReconciled(c, audit.OutcomeFailed) // best-effort: the record is kept either way
+			return s.keepRecord(c, OutcomeRecoveryRequired)
+		}
 	}
 	if !s.verifiedOnPrior(ctx, c) {
 		c.out.Reason = "post_verify_failed"
@@ -488,23 +503,28 @@ type errReconcileStep string
 
 func (e errReconcileStep) Error() string { return string(e) }
 
-// performAction runs the Docker change for v. Only existing runner methods are
-// used: the tag goes to the record's validated PriorRef, and `compose up` runs
-// only for finish_rollback, whose decision required the tag to be on the prior
-// image already.
-func (s *Server) performAction(ctx context.Context, c *reconcileCase, v reconcileVerdictV2) error {
-	switch v.Action {
-	case actV2Realign:
+// performStep runs one step of reconcilePlan. Only existing runner methods are
+// used, and this is the only place the reconcile tags or restarts: the tag
+// always goes to the record's validated PriorRef (never any other reference),
+// and `compose up` runs only after act's recheck decided finish_rollback, which
+// requires the tag to be on the validated prior image already.
+func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcileStepOp) error {
+	switch op {
+	case stepTagPrior:
 		c.out.Actions = append(c.out.Actions, "tag:prior")
 		if _, err := s.opts.Runner.ComposeTagPinned(ctx, c.rec.PriorRef); err != nil {
 			return errReconcileStep("tag_failed")
 		}
 		return nil
-	case actV2FinishRollback:
+	case stepUp:
 		c.out.Actions = append(c.out.Actions, "up")
 		if _, err := s.opts.Runner.ComposeUp(ctx); err != nil {
 			return errReconcileStep("up_failed")
 		}
+		return nil
+	case stepGate:
+		// A fresh gate of what this reconcile's `up` started. A failure stops
+		// here: no second `up`, the record is kept.
 		if s.probeReadiness(ctx) != probeReady {
 			return errReconcileStep("prior_not_ready")
 		}
@@ -513,15 +533,16 @@ func (s *Server) performAction(ctx context.Context, c *reconcileCase, v reconcil
 	return errReconcileStep("unexpected_action")
 }
 
-// verifiedOnPrior re-reads Docker after a realign or finish_rollback: the
-// container and the fixed tag must both be the recorded prior image.
+// verifiedOnPrior re-reads Docker after an acting verdict: the container, the
+// fixed tag and the local image of the validated PriorRef must all be the
+// recorded prior image.
 func (s *Server) verifiedOnPrior(ctx context.Context, c *reconcileCase) bool {
 	after := c.in
 	s.readReconcileFacts(ctx, c.rec, &after)
 	p := normID(after.PriorImageID)
 	c.out.RunningImage, c.out.PinnedTag = classOf(&after, after.RunningImageID), classOf(&after, after.TagImageID)
 	return after.DockerReadable && after.ContainerRunning && p != "" &&
-		normID(after.RunningImageID) == p && normID(after.TagImageID) == p
+		normID(after.RunningImageID) == p && normID(after.TagImageID) == p && normID(after.PriorLocalID) == p
 }
 
 // retire audits the converged record and only then removes it. A failed audit

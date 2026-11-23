@@ -1,8 +1,8 @@
 // Pure decision core, version 2, for the opt-in startup reconcile in `converge`
 // mode (contract AGT-900; owner decision 1 of the AGT-900 recovery proposal).
 //
-// THIS FILE HAS NO SIDE EFFECTS. It runs no docker command, touches no disk and,
-// in this change, has no production caller. The original reconcileDecision
+// THIS FILE HAS NO SIDE EFFECTS. It runs no docker command and touches no disk;
+// startup_reconcile.go executes its verdicts. The original reconcileDecision
 // (reconcile_decision.go) is left exactly as it was: the lifecycle conformance
 // suite pins it as the transcription of the PR-E v2 design table. V2 is the
 // table the owner approved, which is deliberately narrower:
@@ -19,7 +19,14 @@
 //     finish_rollback — the fixed tag is ALREADY on the prior image and the
 //     journal durably records that inline rollback was armed
 //     (Record.RollbackArmed): `compose up` starts the prior image, which the
-//     caller then health-gates and verifies by id.
+//     caller then health-gates and verifies by id ("T/P armed").
+//     finish_rollback_retag — the journal records the armed rollback but the
+//     agent died before the rollback's own `docker tag`: container AND tag are
+//     still on the target that failed its gate ("T/T armed"). Retag to the
+//     validated PriorRef, then the finish_rollback steps. Each mutation is
+//     preceded by a fresh read that must decide the expected verdict
+//     (reconcilePlan), so `up` runs only once the tag is provably on the
+//     validated prior image.
 //     adopt — no Docker mutation at all: only at phase `verified` (the gate
 //     and the digest verify passed durably before the crash), with the
 //     container and the tag on the target by id and a fresh ReadyOK probe.
@@ -31,6 +38,15 @@
 //     `verified` and must then agree with the local target id (N1); a
 //     TargetImageID that equals PriorImageID while the digests differ is the F1
 //     artefact and is therefore never evidence.
+//   - RollbackArmed is acted on only from an upgrade record whose references
+//     validated, in the danger window and before phase `verified`: the agent
+//     writes it only after a post-restart failure, so an armed record at
+//     `verified` contradicts itself. An unarmed record, including one from an
+//     agent that predates the field, is never finished as a rollback.
+//   - Container and tag on the prior image with an armed record means a
+//     rollback `up` ran (the inline rollback's or this reconcile's) whose gate
+//     is not durable: the record is retired only on a fresh ReadyOK, so a crash
+//     during the gate, or a gate that failed, is never retired as converged.
 //   - The repo-digest axis is used only as an additional condition for adopt:
 //     the running image's RepoDigests must contain the record's TargetDigest,
 //     which is what the online verify stage accepted (N7). It never identifies
@@ -56,6 +72,10 @@ const (
 	// actV2FinishRollback: the tag is already on the prior image and inline
 	// rollback was durably armed: `compose up`, gate the prior image, verify.
 	actV2FinishRollback
+	// actV2RetagFinishRollback: inline rollback was durably armed but the tag
+	// never moved back (container and tag on the target): retag to the
+	// validated PriorRef, re-read, then the actV2FinishRollback steps.
+	actV2RetagFinishRollback
 	// actV2Adopt: the verified target is live under the tag and answers ready.
 	// No Docker change.
 	actV2Adopt
@@ -75,6 +95,8 @@ func (a reconcileActionV2) String() string {
 		return "realign"
 	case actV2FinishRollback:
 		return "finish_rollback"
+	case actV2RetagFinishRollback:
+		return "finish_rollback_retag"
 	case actV2Adopt:
 		return "adopt"
 	case actV2RecoveryRequired:
@@ -88,7 +110,7 @@ func (a reconcileActionV2) String() string {
 
 // mutatesDocker reports whether the action changes Docker state.
 func (a reconcileActionV2) mutatesDocker() bool {
-	return a == actV2Realign || a == actV2FinishRollback
+	return a == actV2Realign || a == actV2FinishRollback || a == actV2RetagFinishRollback
 }
 
 // probeState is the result of the fresh readiness probe the caller runs only
@@ -228,6 +250,9 @@ func decideDangerPhaseV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 	}
 	p, t := ids.prior, ids.target
 	if p != "" && ids.run == p && ids.tag == p {
+		if in.RollbackArmed {
+			return armedOnPriorV2(in)
+		}
 		return reconcileVerdictV2{actV2Noop, "already_on_prior"}
 	}
 	if t == "" {
@@ -250,10 +275,19 @@ func decideByIdentityV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 		// Crash between `docker tag` and `compose up` (A5), or `up` that did not
 		// recreate (A8, F1). Retag only; AGT-002 precedent.
 		return realignV2(in, ids)
+	case ids.run == t && ids.tag == t && in.RollbackArmed:
+		// The rollback was armed and the agent died before its `docker tag`
+		// (T/T armed). Never adopted (N3); finished only from proof.
+		return finishRollbackV2(in, ids, actV2RetagFinishRollback, "rollback_armed_tag_not_moved")
 	case ids.run == t && ids.tag == t:
 		return adoptV2(in, ids)
 	case p != "" && ids.run == t && ids.tag == p:
-		return finishRollbackV2(in, ids)
+		if !in.RollbackArmed {
+			// Without the durable marker nothing proves the agent moved the
+			// tag; it may have been an operator.
+			return rr("tag_on_prior_rollback_unproven")
+		}
+		return finishRollbackV2(in, ids, actV2FinishRollback, "rollback_interrupted")
 	}
 	return rr("docker_state_unrecognised")
 }
@@ -271,9 +305,6 @@ func realignV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 
 func adoptV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 	switch {
-	case in.RollbackArmed:
-		// The agent had already decided the target failed (N3).
-		return rr("rollback_armed_target_live")
 	case in.Phase != journal.PhaseVerified:
 		// The target is live but never passed the gate (A6/A7).
 		return rr("target_live_ungated")
@@ -292,16 +323,33 @@ func adoptV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 	}
 }
 
-func finishRollbackV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
-	if !in.RollbackArmed {
-		// Without the durable marker nothing proves the agent moved the tag;
-		// it may have been an operator.
-		return rr("tag_on_prior_rollback_unproven")
+// finishRollbackV2 finishes an armed inline rollback; the caller checked
+// RollbackArmed and that the container runs the target. The agent writes the
+// marker only after a post-restart failure, so at phase `verified` (gate and
+// verify passed) it contradicts the journal and nothing is done.
+func finishRollbackV2(in *reconcileInputsV2, ids v2ids, act reconcileActionV2, reason string) reconcileVerdictV2 {
+	if in.Phase == journal.PhaseVerified {
+		return rr("rollback_armed_at_verified")
 	}
 	if !priorRestorable(in, ids) {
 		return rr("prior_not_restorable")
 	}
-	return reconcileVerdictV2{actV2FinishRollback, "rollback_interrupted"}
+	return reconcileVerdictV2{act, reason}
+}
+
+// armedOnPriorV2: container and tag are on the prior image and the record is
+// armed, so a rollback `up` ran (the inline rollback's, or a reconcile finish
+// killed after its `up`) and no gate result is durable. Nothing is changed
+// either way; the record is retired only on a fresh ReadyOK.
+func armedOnPriorV2(in *reconcileInputsV2) reconcileVerdictV2 {
+	switch in.Probe {
+	case probeReady:
+		return reconcileVerdictV2{actV2Noop, "armed_rollback_prior_ready"}
+	case probeNotReady:
+		return rr("armed_rollback_prior_not_ready")
+	default:
+		return rr("readiness_not_probed")
+	}
 }
 
 // decideStandaloneRollbackV2 handles rollbacks.create mode=image. The record
@@ -344,10 +392,74 @@ func digestListed(refs []string, d string) bool {
 	return false
 }
 
-// reconcileNeedsProbe reports whether the verdict would be adopt if the fresh
-// readiness probe answered ready. The caller runs the probe only then, so a
-// probe is never run for a record that could not be adopted anyway.
+// reconcileNeedsProbe reports whether the fresh readiness probe can change the
+// verdict (adopt, or retiring an armed rollback found on the prior image). The
+// caller runs the probe only then, so a probe is never run for a record whose
+// verdict it could not change.
 func reconcileNeedsProbe(in reconcileInputsV2) bool {
+	in.Probe = probeNotRun
+	without := reconcileDecisionV2(in)
 	in.Probe = probeReady
-	return reconcileDecisionV2(in).Action == actV2Adopt
+	return reconcileDecisionV2(in) != without
+}
+
+// reconcileStepOp is one step of an acting verdict.
+type reconcileStepOp int
+
+const (
+	// stepTagPrior: `docker tag <the record's validated PriorRef>
+	// culvert/proxy:pinned`. There is no other tag step: the reconcile never
+	// names any other reference.
+	stepTagPrior reconcileStepOp = iota
+	// stepUp: `docker compose up -d`.
+	stepUp
+	// stepGate: a fresh health gate (ReadyOK) of what the `up` started.
+	stepGate
+)
+
+func (o reconcileStepOp) String() string {
+	switch o {
+	case stepTagPrior:
+		return "tag:prior"
+	case stepUp:
+		return "up"
+	case stepGate:
+		return "gate"
+	}
+	return "unknown"
+}
+
+// mutates reports whether the step changes Docker.
+func (o reconcileStepOp) mutates() bool { return o == stepTagPrior || o == stepUp }
+
+// reconcileStep is one step of an acting verdict. Immediately before a step
+// that changes Docker the caller re-reads Docker and requires the decision on
+// the fresh facts (same record, same attempt count) to be exactly expect.
+// Anything else, including a change this reconcile's own earlier steps do not
+// explain, stops the reconcile with nothing further changed.
+type reconcileStep struct {
+	op     reconcileStepOp
+	expect reconcileVerdictV2 // meaningful only for a mutating step
+}
+
+// verdictFinishRollback is what a T/P-armed record decides. It is the recheck
+// in front of every `up`: it requires the tag on the validated prior image.
+var verdictFinishRollback = reconcileVerdictV2{actV2FinishRollback, "rollback_interrupted"}
+
+// reconcilePlan returns the ordered steps of an acting verdict, nil for a
+// verdict that changes nothing. Pure. Every `up` is guarded by a recheck that
+// decides verdictFinishRollback and is followed by the gate; the caller then
+// verifies container and tag by image id.
+func reconcilePlan(v reconcileVerdictV2) []reconcileStep {
+	switch v.Action {
+	case actV2Realign:
+		return []reconcileStep{{stepTagPrior, v}}
+	case actV2FinishRollback:
+		return []reconcileStep{{stepUp, v}, {op: stepGate}}
+	case actV2RetagFinishRollback:
+		// After the retag, the only state this reconcile explains is T/P
+		// armed, which decides exactly verdictFinishRollback.
+		return []reconcileStep{{stepTagPrior, v}, {stepUp, verdictFinishRollback}, {op: stepGate}}
+	}
+	return nil
 }

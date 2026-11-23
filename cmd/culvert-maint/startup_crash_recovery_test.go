@@ -161,6 +161,7 @@ type crashRig struct {
 
 	healthMu   sync.Mutex
 	healthHang bool
+	healthDown bool // the proxy answers 503: every health gate fails
 	healthHit  chan struct{}
 }
 
@@ -207,7 +208,7 @@ func newCrashRig(t *testing.T) *crashRig {
 
 	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		r.healthMu.Lock()
-		hang := r.healthHang
+		hang, down := r.healthHang, r.healthDown
 		r.healthMu.Unlock()
 		if hang {
 			select {
@@ -215,6 +216,10 @@ func newCrashRig(t *testing.T) *crashRig {
 			default:
 			}
 			time.Sleep(4 * time.Second) // longer than the probe's per-request timeout
+		}
+		if down {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))

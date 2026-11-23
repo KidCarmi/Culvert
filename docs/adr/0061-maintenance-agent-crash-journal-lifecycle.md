@@ -174,6 +174,13 @@ re-pins it.
    decided. "converge" may only retag to the recorded prior image while the
    container provably runs it, finish an inline rollback whose durable
    `rollback_armed` marker is set and whose tag is already on the prior image,
+   finish such an armed rollback that was killed before its own `docker tag`
+   (container and tag still on the target: retag to the validated prior
+   reference, then the same `compose up`, fresh gate and verify by id; Docker
+   is re-read immediately before each mutation and any change the reconcile's
+   own steps do not explain stops it; owner decision 1, 2026-11-23, after the
+   real-Docker e2e found this state left the failed image running), retire an
+   armed record found on the prior image only on a fresh ready probe,
    or adopt (no Docker change) a target recorded at `verified` that runs under
    the tag and answers ready; every other state is `recovery_required` and
    changes nothing, and an unreadable Docker defers. There is no `reup` and no
