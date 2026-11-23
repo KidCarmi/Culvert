@@ -4,9 +4,9 @@
 // image change was cut short. This file turns one into what an operator needs
 // in order to act: how far the operation got, whether Docker may have been
 // changed, which image a rollback would name, and what the agent itself did
-// about it — which is nothing. Reporting is the whole of the startup contract
-// today; acting on a record at boot is the separate, sign-off-gated slice
-// (roadmap/RISK-022-PR-E-reconcile-onstartup-design.md, ADR-0061).
+// about it — which, with the default reconcile_on_startup = "off", is nothing.
+// Acting on a record at boot is the separate, opt-in "converge" reconcile
+// (startup_reconcile.go, contract AGT-900, ADR-0061).
 //
 // The journal is a file on disk, so every string in a record is unchecked
 // content. Nothing is copied to an API response as found: the kind and mode
@@ -90,11 +90,35 @@ type InterruptedOperation struct {
 	// which does not consult Docker.
 	RunningImage string `json:"running_image,omitempty"`
 
-	// DockerReconciled is always false: the agent reports an interrupted
-	// operation and changes nothing. It is stated rather than implied so a
-	// consumer cannot read "failed" as "rolled back".
+	// DockerReconciled is false unless the opt-in startup reconcile verified,
+	// by image id, that it converged Docker for this record (see SetReconcile);
+	// with the default reconcile_on_startup = "off" it is always false. It is
+	// stated rather than implied so a consumer cannot read "failed" as
+	// "rolled back".
 	DockerReconciled bool   `json:"docker_reconciled"`
 	OperatorAction   string `json:"operator_action"`
+
+	// ReconcileOutcome is the opt-in startup reconcile's outcome for this
+	// record (reconcile_on_startup = "converge" only; absent otherwise). A
+	// record the reconcile converged is retired and no longer listed, so a
+	// listed one carries recovery_required, deferred, abandoned or
+	// converged_not_retired.
+	ReconcileOutcome string `json:"reconcile_outcome,omitempty"`
+}
+
+// SetReconcile records the startup reconcile's result for this record.
+// DockerReconciled becomes true only when the reconcile verified convergence by
+// image id. When the reconcile changed Docker without converging, the default
+// advice ("the agent has not changed Docker") would be false, so it is
+// replaced.
+func (o *InterruptedOperation) SetReconcile(r ReconcileRecord) {
+	o.ReconcileOutcome = r.Outcome
+	o.DockerReconciled = r.DockerReconciled
+	if len(r.Actions) > 0 && !r.DockerReconciled {
+		o.OperatorAction = "The startup reconcile ran a Docker command for this operation (" + r.Decision + ") but could not verify " +
+			"that Docker converged (" + r.Reason + "). Compare pinned_tag and running_image in GET /v1/status before acting, and do not " +
+			"run `docker compose up` by hand: it starts whatever image the fixed tag is on."
+	}
 }
 
 var (
