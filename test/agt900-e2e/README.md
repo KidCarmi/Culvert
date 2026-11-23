@@ -38,21 +38,22 @@ Options and environment:
 - `AGT900_REGISTRY_PORT` (default 5443) and `AGT900_PROXY_PORT` (default 18480)
   move the ports.
 
-There are three verdicts:
+There are four verdicts:
 
 | Verdict | Meaning |
 |---|---|
 | **PASS** | Every check held. |
-| **FAIL** | A contract check failed, or the harness failed. |
+| **FAIL** | A contract check failed. |
+| **ERROR** | The harness could not evaluate the case (a setup, crash or mutate step failed, a polled kill missed its window, or nothing was checked), and no contract check failed. It fails a normal run, and with `--negative-control` it never counts as catching a mutant, so an infrastructure failure cannot certify a negative control. |
 | **GAP** | Every contract check held, but an owner-requested property that is stricter than the AGT-900 contract was violated. GAP is reported and never folded into PASS. |
 
 Exit codes:
 
 | Exit | Meaning |
 |---|---|
-| 0 | All rows PASS. With `--negative-control`: every mutant was caught. |
-| 1 | At least one FAIL. |
-| 3 | No FAIL, but at least one GAP. |
+| 0 | All rows PASS. With `--negative-control`: every mutant was caught by a failed contract check (FAIL), never by an ERROR. |
+| 1 | At least one FAIL or ERROR. |
+| 3 | No FAIL or ERROR, but at least one GAP. |
 | 2 | Incomplete: a prerequisite or setup failed, or the harness produced no rows. |
 
 **Prerequisites:** root, Go, the Docker engine binaries (`dockerd`,
