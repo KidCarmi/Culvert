@@ -121,6 +121,32 @@ change); (3) image-reporting correctness; (4) lifecycle recovery behind an off-b
 switch; (5) policy semantics gaps; (6) SOCKS5 policy parity. Independent domains in parallel.
 No automatic production deployment or broad enforcement change.
 
+### Owner correction — pre-customer product stage (2026-11-23)
+
+Culvert has **no active customers or installed base**. Constraints above that protect existing
+installations ("existing installations keep current behaviour", one-release upgrade warnings,
+legacy compatibility modes) are withdrawn wherever they only served a hypothetical installed
+base. Prioritise the correct long-term design, secure defaults, simplicity and velocity. What
+does NOT change: data integrity, correct current backup/restore round trips (and effective
+policy semantics during any explicit migration), and verification evidence.
+
+- **#2037 (policy C) approved:** deterministic ordering and strict priority validation. The
+  one-release tie-order warning was removed as an unneeded shim; a test pins the current
+  export → replace-import round trip.
+- **AGT-900 (#2038/#2039):** the contract stays `open` until a real-Docker e2e demonstrates
+  the safety properties (in progress). After it validates, evaluate making conservative
+  startup convergence the **default** before the first customer release.
+- **SOCKS5 Stage 3 approved**, with this target end state: disabled unless configured; when
+  enabled it enforces applicable policy; threat-feed protection active; identity through the
+  shared authentication architecture (no permanent legacy SOCKS5 credential path); actions
+  SOCKS5 cannot honour — including required TLS inspection — refuse rather than downgrade to
+  uninspected access (the "documented operator exception" above is not planned). The mode
+  setting (`legacy`/`shadow`/`enforce`) is an integration and verification aid, not a
+  permanent compatibility surface: after differential and e2e verification pass, move to
+  secure enforcement defaults and retire `legacy`.
+- AGT-900 e2e and SOCKS5 Stage 3 run in parallel. Avoid compatibility shims, permanent dual
+  implementations and approval loops.
+
 ### Proposal documents
 
 | Topic | Document | Open items after the decisions |
