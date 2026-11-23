@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/journal"
@@ -137,6 +138,10 @@ func (p *Provider) addInterrupted(st *server.Status) {
 	}
 }
 
+// pinnedTagReadBudget bounds the fixed-tag read of one status call. A var so a
+// test can shorten it.
+var pinnedTagReadBudget = 5 * time.Second
+
 // addPinnedTag reports where the fixed proxy tag is and whether the running
 // container is on the same image. Read-only: one `docker image inspect`.
 //
@@ -160,7 +165,13 @@ func (p *Provider) addPinnedTag(ctx context.Context, st *server.Status) {
 		st.PinnedTag = pt
 		return
 	}
-	id, perr := p.runner.PinnedTagImageID(ctx)
+	// One local image inspect answers in milliseconds. It gets its own short
+	// budget so that a slow daemon costs a status call at most this long, not
+	// a whole stage timeout: the status endpoint is polled, and its callers
+	// time out in seconds.
+	tctx, cancel := context.WithTimeout(ctx, pinnedTagReadBudget)
+	defer cancel()
+	id, perr := p.runner.PinnedTagImageID(tctx)
 	if perr != nil {
 		pt.Error = "the fixed tag could not be inspected"
 	} else {
