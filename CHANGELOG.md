@@ -20,7 +20,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   match is a terminal block; it is written back unchanged on save, so a
   mixed-version cluster round-trips it. Every retained rule is announced in
   the log at load and at bulk replace (`retaining rule … with unrecognized
-  action …; matching traffic will be blocked`). The admin API still refuses an
+  action …; matching traffic will be blocked`) and listed in Diagnostics as
+  `policy_rules_unknown_action` for as long as it is in the running policy.
+  A config-version rollback restores such a rule instead of skipping it, and a
+  draft commit is no longer refused because the running policy contains one.
+  The admin API still refuses an
   unknown action on a new or edited rule. Rules with a known action, rules
   with no action, an explicit default allow and an empty rulebase behave as
   before.
