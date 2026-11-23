@@ -421,7 +421,6 @@ func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator) stageRun {
 				fmt.Errorf("post-restart capture failed: %w", err)
 		}
 		acc.evidence.noteCapture(ri) // valid evidence even when it contradicts the pin
-		acc.runningAfterID = ri.RunningImageID
 		acc.runningAfterDigests = bareDigests(ri.RepoDigests)
 		if acc.pinnedDigest != "" && !containsString(acc.runningAfterDigests, acc.pinnedDigest) {
 			acc.upgradeFailedPostRestart = true
@@ -429,6 +428,9 @@ func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator) stageRun {
 					joinDigests(acc.runningAfterDigests), acc.pinnedDigest)), nil,
 				fmt.Errorf("post-restart running image does not match pinned digest %s", acc.pinnedDigest)
 		}
+		// Only a digest-verified capture names the target (F1): a later journal
+		// write must never fold in the id of an image that failed this check.
+		acc.runningAfterID = ri.RunningImageID
 		// Health + verify passed; success is imminent (the op still has the
 		// report stage, and terminal removal will retire the record).
 		s.advanceJournalPhaseBestEffort(acc, journal.PhaseVerified)

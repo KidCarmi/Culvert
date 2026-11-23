@@ -97,6 +97,17 @@ type Record struct {
 	InterruptedAt    *time.Time `json:"interrupted_at,omitempty"`
 	InterruptedSeen  int        `json:"interrupted_seen,omitempty"`
 	InterruptAudited bool       `json:"interrupt_audited,omitempty"`
+
+	// RollbackArmed is set, best-effort, by an upgrades.apply's inline rollback
+	// immediately BEFORE its rollback_restart stage moves the fixed tag back to
+	// the prior image. It is the durable evidence that the agent had already
+	// decided the target failed its gate, so a startup reconcile must never
+	// adopt the target of such a record. If it cannot be written the rollback
+	// still runs and the record stays unarmed, which the reconcile never acts on.
+	// It is an optional key, not a new Phase:
+	// an agent that predates it ignores the key (encoding/json drops unknown
+	// fields), whereas an unknown phase makes every older agent refuse to serve.
+	RollbackArmed bool `json:"rollback_armed,omitempty"`
 }
 
 const (

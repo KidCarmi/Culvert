@@ -121,12 +121,15 @@ stores' observations are pinned in `observed.json`; containerd lines carry the
 
 ## Known reported items (none blocks)
 
-- **C2 fails** only through the injected outcome `ok_stale`: `compose up`
-  exits 0 without recreating the container although the tag moved to a
-  different image. That outcome was **not** reproduced on real Docker 29.10 /
-  Compose v5.7.1 (a moved tag always recreated). It shows that the journal's
-  `target_image_id` is taken from whatever runs after `up`; it matters only if
-  startup reconcile (AGT-900) is ever built.
+- **C2 passes since the F1 fix (ADR-0061).** It used to fail only through the
+  injected outcome `ok_stale` (`compose up` exits 0 without recreating the
+  container although the tag moved; not reproduced on real Docker 29.10 /
+  Compose v5.7.1): the journal took `target_image_id` from whatever ran after
+  `up`. The restart stage now records it only when the post-`up` capture's
+  RepoDigests carry the pinned digest, and the new property S9 states that the
+  journal never names a non-target image as the target. S8 was narrowed to the
+  case where the target actually runs. The FAIL -> PASS was reviewed as a real
+  improvement: the capture is still made, it is only gated on evidence.
 - **O1 (open, AGT-900)**: an agent killed between `docker tag` and `compose up`
   leaves the tag ahead. Startup reports it and does not act (ADR-0057).
 - **O2 (open)**: after AGT-002 the tag is still left ahead on 22 of 172

@@ -427,9 +427,12 @@ func stepRestart(s State, e, nxt string) State {
 	if e == evOK {
 		run = imgT
 	}
-	tid := run
-	if run == imgNone {
-		tid = ""
+	// F1 (journal_phases.go restartWithBarrier): the post-`up` capture is recorded as
+	// the target's id only when its RepoDigests carry the pinned digest, i.e. only when
+	// the container really runs T. `ok_stale` (still P) and a down stack record nothing.
+	tid := ""
+	if run == imgT {
+		tid = imgT
 	}
 	s.PC, s.Tag, s.Running, s.JR, s.TID = nxt, imgT, run, "restarted", tid
 	s.Ev = upThenCaptureEv(s)
