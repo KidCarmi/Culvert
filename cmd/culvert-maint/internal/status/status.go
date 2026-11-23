@@ -71,14 +71,14 @@ func New(cfg *config.Config, mgr *ops.Manager, r *runner.Runner) (*Provider, err
 func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 	st := p.composeSnapshot(ctx)
 	p.addInterrupted(ctx, &st)
+	p.addPinnedTag(ctx, &st)
 	return st, nil
 }
 
 // addInterrupted fills the interrupted-operation report. The list comes from
-// the journal alone, so it is complete when Docker is down; the two live facts
-// (which image is running, where the fixed tag is) are added when Docker can
-// be read and are reported as unknown when it cannot. Read-only, and it costs
-// no docker call unless a record exists.
+// the journal alone, so it is complete when Docker is down; the live fact it
+// adds (which image is running) is reported as unknown when Docker cannot be
+// read. Read-only, and it makes no docker call of its own.
 func (p *Provider) addInterrupted(ctx context.Context, st *server.Status) {
 	if p.journal == nil {
 		return
@@ -106,10 +106,31 @@ func (p *Provider) addInterrupted(ctx context.Context, st *server.Status) {
 		}
 		st.InterruptedOperations = append(st.InterruptedOperations, d)
 	}
-	if len(st.InterruptedOperations) == 0 {
+}
+
+// addPinnedTag reports where the fixed proxy tag is and whether the running
+// container is on the same image. Read-only: one `docker image inspect`.
+//
+// It is reported on every status, not only while an interrupted operation is
+// outstanding. A journal record is one way the tag and the container come
+// apart, not the only one: an apply whose `up` failed can go terminal — record
+// retired — with the tag left on the target (realignPinnedTagAfterFailedUp
+// names the cases), and the tag can be moved by hand. In each of those the
+// next `docker compose up -d` changes the image the proxy runs, and before
+// this nothing in the status said so.
+//
+// Two things a reader must know. During a running apply or rollback the tag is
+// moved before the container is recreated, so matches_running is false for
+// that moment; it is a divergence only when no operation is running. And when
+// the compose read already failed, Docker is not asked again: a status against
+// a hung daemon must not wait a second time for the same answer.
+func (p *Provider) addPinnedTag(ctx context.Context, st *server.Status) {
+	pt := &server.PinnedTagStatus{}
+	if st.ComposeError != "" {
+		pt.Error = "the fixed tag was not inspected: Docker could not be read"
+		st.PinnedTag = pt
 		return
 	}
-	pt := &server.PinnedTagStatus{}
 	id, perr := p.runner.PinnedTagImageID(ctx)
 	if perr != nil {
 		pt.Error = "the fixed tag could not be inspected"

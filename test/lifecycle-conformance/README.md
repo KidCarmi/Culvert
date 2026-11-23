@@ -164,6 +164,11 @@ operation while the command is still alive.
   advises. Every other failure, including a shared rig helper's, is `INVALID`.
   `TestOrphanSurvival_ReapedControl` repeats the vectors with the command
   reaped and requires no divergence.
+- `pinned_tag` is reported on every `/v1/status`, not only while an interrupted
+  record is outstanding. In the one vector where the model's orphan moves the
+  tag after a rollback has retired the record (`barrier_before_tag`), the state
+  that used to show nothing now shows `pinned_tag.matches_running: false`. This
+  makes the divergence visible; it does not prevent it.
 - Findings are pinned in `orphanExpectations`, every entry `open`. Q3 is pinned
   in two parts: the late mutation after a reported success, and what every
   `/v1/status` signal (interrupted entries, `pinned_tag` absent / true / false)
