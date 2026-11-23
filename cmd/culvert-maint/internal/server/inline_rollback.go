@@ -8,6 +8,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"culvert-maint/internal/audit"
@@ -115,6 +116,18 @@ func (s *Server) guardInlineRollback(acc *upgradeApplyAccumulator, racc *rollbac
 		if !acc.rollbackAttempted {
 			acc.rollbackAttempted = true
 			s.emitRollbackAudit(acc, audit.OutcomeStarted, "")
+		}
+		if name == "rollback_restart" {
+			// Durable evidence, written BEFORE the tag moves back, that the agent
+			// decided the target failed (RollbackArmed). Fail-closed: without it a
+			// crash inside the restart would leave a record a startup reconcile
+			// cannot tell apart from an operator's retag.
+			if aerr := s.armRollbackInJournal(acc); aerr != nil {
+				acc.rollbackFailed = true
+				s.emitRollbackAudit(acc, audit.OutcomeFailed, name)
+				return []byte(name + ": journal write failed, refusing to move the tag"), nil,
+					fmt.Errorf("rollback_restart: could not record the armed rollback in the journal, refusing to move the tag: %w", aerr)
+			}
 		}
 		out, errout, err := inner(ctx)
 		if err != nil {

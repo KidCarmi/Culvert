@@ -690,6 +690,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The maintenance agent's crash journal no longer names the previous image
+  as an upgrade's target (ADR-0061 finding F1).** After `docker compose up`
+  returned success, the restart stage recorded whatever image the proxy then
+  ran as the record's `target_image_id`, even when `up` had not recreated it
+  (for example under a compose override pinning another image). The id is now
+  recorded only when that image's registry digests include the digest being
+  installed; the verify stage applies the same rule. An image rollback inside a
+  failed upgrade also writes an optional `rollback_armed` key to the record,
+  fail-closed, before it moves the fixed tag back: if the record cannot be
+  written the rollback does not move the tag and the operation fails
+  `rollback_failed`. Older agents ignore the key. No startup code acts on either
+  value in this change; they are the evidence an opt-in startup reconcile
+  (contract `AGT-900`) needs.
+
 - **An upgrade's `final_running_digest` now reports only an image the agent
   actually saw running, and says so when it cannot.** The maintenance agent
   used to infer the field from its own progress flags, so after some failures
