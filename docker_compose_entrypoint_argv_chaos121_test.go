@@ -402,6 +402,7 @@ var chaos121GraceKnownGaps = map[string]string{
 	"test/e2e/maint-agent/docker-compose.e2e.yml:proxy":            "CI fixture for the maintenance-agent upgrade flow; see residual risk — it exercises a container recreate at Docker's 10s default rather than the shipped 60s",
 	"test/e2e/maint-agent/docker-compose.backup-e2e.yml:proxy":     "CI fixture, same as docker-compose.e2e.yml",
 	"test/e2e/catalog-update/docker-compose.catalog-e2e.yml:proxy": "CI fixture whose scenario deliberately SIGKILLs the dispatcher mid-flight (the file's own header says so), so a grace would change what it tests",
+	"test/agt900-e2e/docker-compose.yml:proxy":                     "manual real-Docker e2e fixture (never a PR gate): the service carries the production tag culvert/proxy:pinned because the maintenance agent moves it, but the image is the FROM-scratch stub test/agt900-e2e/fakeproxy, not Culvert. It has no drain and no durable state, so the shutdown envelope does not apply, and a SIGKILL at Docker's 10s default costs nothing; the harness itself SIGKILLs the agent at chosen points",
 }
 
 // parseComposeDuration accepts both spellings Compose allows for a duration
