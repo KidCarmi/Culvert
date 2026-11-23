@@ -32,7 +32,7 @@ func draftTestSetup(t *testing.T) {
 	setRequireCommit(false)
 	resetDraft := func() {
 		policyDraft.mu.Lock()
-		policyDraft.cand = &PolicyStore{}
+		policyDraft.cand = newDraftCandidateStore()
 		policyDraft.state = draftState{}
 		policyDraft.path = ""
 		policyDraft.mu.Unlock()
@@ -245,7 +245,7 @@ func TestDraft_RestartDurability(t *testing.T) {
 
 	// Fresh coordinator reloads from the sibling of policyPath.
 	orig := policyDraft
-	fresh := &policyDraftCoordinator{cand: &PolicyStore{}}
+	fresh := &policyDraftCoordinator{cand: newDraftCandidateStore()}
 	policyDraft = fresh
 	t.Cleanup(func() { policyDraft = orig })
 	initPolicyDraft(policyPath)
