@@ -91,3 +91,49 @@ func TestAlertWebhookURL_NotReadableBelowOperator(t *testing.T) {
 	}
 	assertNoWebhookMarker(t, "GET /api/audit", audit.Body.String())
 }
+
+// SEC-ALERTS-UPDATE-DEST-1. A PUT that REPOINTS a webhook must record where it
+// now points — as an origin, never the credential.
+//
+// The create arm records alerts.URLOrigin; the update arm recorded an empty
+// detail, which left the one mutation that changes where alerts go as the only
+// one an auditor cannot attribute. An operator who repoints the SOC's webhook
+// at their own endpoint is acting within RoleOperator, so the audit record is
+// the control, and `PUT /api/alerts/webhooks?id=X` accepts a full body
+// including a new URL.
+func TestAlertWebhookUpdate_AuditRecordsTheNewOriginNotTheCredential(t *testing.T) {
+	orig := alertStore()
+	t.Cleanup(func() { alertStoreRef.Store(orig) })
+	as := &AlertStore{}
+	as.Init("")
+	alertStoreRef.Store(as)
+
+	create := serveAs(RoleOperator, apiAlertsWebhooks, http.MethodPost, "/api/alerts/webhooks",
+		`{"name":"soc","url":"http://127.0.0.1:1/services/T000/first","events":["policy_block"]}`)
+	if create.Code != http.StatusOK {
+		t.Fatalf("operator create = %d: %s", create.Code, create.Body.String())
+	}
+	hooks := as.List()
+	if len(hooks) != 1 {
+		t.Fatalf("want 1 webhook, got %d", len(hooks))
+	}
+
+	// Repoint it at a different origin, with a credential in the path/query.
+	const newOrigin = "http://127.0.0.2:1"
+	put := serveAs(RoleOperator, apiAlertsWebhooks, http.MethodPut, "/api/alerts/webhooks?id="+hooks[0].ID,
+		`{"name":"soc","url":"`+newOrigin+`/services/T000/`+webhookPathMarker+`?key=`+webhookQueryMarker+`","events":["policy_block"]}`)
+	if put.Code != http.StatusOK {
+		t.Fatalf("operator update = %d: %s", put.Code, put.Body.String())
+	}
+
+	audit := serveAs(RoleViewer, apiAudit, http.MethodGet, "/api/audit", "")
+	body := audit.Body.String()
+	if !strings.Contains(body, "alert.webhook.update") {
+		t.Fatalf("no alert.webhook.update audit entry at all: %s", body)
+	}
+	if !strings.Contains(body, newOrigin) {
+		t.Errorf("the update audit entry does not record the new destination %q, so a repoint cannot be attributed:\n%s", newOrigin, body)
+	}
+	// The origin, never the capability.
+	assertNoWebhookMarker(t, "GET /api/audit after a repoint", body)
+}

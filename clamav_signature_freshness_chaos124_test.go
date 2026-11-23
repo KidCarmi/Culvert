@@ -606,3 +606,48 @@ func TestNoRowCarriesTheDaemonAddress(t *testing.T) {
 		}
 	}
 }
+
+// SEC-CLAMSIG-RECOVERY-LINE-1. The end of a stale-definitions episode must be
+// recorded on a node with NO webhook configured — the default posture.
+//
+// The sibling of SEC-TFEED-RECOVERY-LINE-1: `alerted` is set only by a
+// DISPATCHED page, so with nothing subscribed it stays false for the whole
+// episode, and gating the "current again" line on it meant the node that pages
+// nobody also records nothing when the definitions start moving again — while
+// still logging every staleness line in between. `sawStale` answers "was this
+// episode observed stale?" separately from "was anyone paged?".
+func TestRecoveryIsLoggedWithNoSubscriber(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	clamavSigTestClock(t, now)
+	attempts := captureUndeliveredSigAlerts(t)
+
+	noteClamAVSignatureObservation(versionWithDate(now.Add(-30*24*time.Hour)), true)
+	if !clamavSigState().Stale {
+		t.Fatal("a 30-day-old database is not reported stale; the fixture never reached the episode")
+	}
+	if *attempts != 1 {
+		t.Fatalf("sink reached %d times, want 1", *attempts)
+	}
+
+	out := captureLogger(t, func() {
+		noteClamAVSignatureObservation(versionWithDate(now.Add(-time.Hour)), true)
+	})
+	if !strings.Contains(out, "current again") {
+		t.Fatalf("no recovery line logged when the episode ended with no subscriber; the end of a stale-definitions episode went unrecorded.\ngot: %q", out)
+	}
+}
+
+// The control: a database that was never stale logs no recovery line.
+func TestRecoveryIsSilentWhenNeverStale(t *testing.T) {
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	clamavSigTestClock(t, now)
+	captureUndeliveredSigAlerts(t)
+
+	noteClamAVSignatureObservation(versionWithDate(now.Add(-2*time.Hour)), true)
+	out := captureLogger(t, func() {
+		noteClamAVSignatureObservation(versionWithDate(now.Add(-time.Hour)), true)
+	})
+	if strings.Contains(out, "current again") {
+		t.Fatalf("a recovery line was logged for an episode that was never stale: %q", out)
+	}
+}

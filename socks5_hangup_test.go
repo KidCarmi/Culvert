@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -261,4 +262,84 @@ func TestSOCKS5RelayPrefixed_CountsEarlyBytes(t *testing.T) {
 	if entry.BytesSent != 2 {
 		t.Fatalf("BytesSent = %d, want 2 (early byte + relayed byte)", entry.BytesSent)
 	}
+}
+
+// SEC-SOCKS5-ABANDONED-ROW-1. A SOCKS5 client must not be able to erase its
+// own request-log row by hanging up.
+//
+// Before the connect phase became cancellable the guard always ran to
+// completion under context.Background(), so EVERY non-nil
+// isPrivateHostBounded error wrote one row (status BLOCKED). Making the
+// pre-flight cancellable introduced an outcome that is neither blocked nor
+// allowed — the client left while the resolver was still working — and waiving
+// the row for it let an attacker probe internal hosts over SOCKS5 and leave
+// nothing in the request log: on a cache MISS the cancellation surfaces as
+// ssrf.lookupAbandoned, which is deliberately never ErrBlocked, so the waiver
+// applied on exactly the probes that matter.
+//
+// The verdict is still withheld (socks5StatusAbandoned, not BLOCKED) because
+// nothing was demonstrated about the destination; only the attempt is kept.
+func TestSOCKS5_AbandonedPreflightStillRecordsTheAttempt(t *testing.T) {
+	setupProxyTest(t)
+	t.Cleanup(reqlog.SwapRingForTest())
+	w := installWedgedGuardResolver(t)
+	ln := startSOCKS5Listener(t)
+
+	const probed = "abandoned-preflight.example.test"
+	conn := socks5DialAndRequest(t, ln, probed, 443)
+	select {
+	case <-w.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the guard never reached the resolver")
+	}
+	_ = conn.Close() // the client goes away mid-check: verdict undecided
+
+	e := awaitSOCKS5Row(t, probed)
+	if e.Status != socks5StatusAbandoned {
+		t.Fatalf("abandoned pre-flight recorded status %q, want %q — a client that hangs up during an undecided SSRF pre-flight must still leave an attempt row (it previously left a BLOCKED one)",
+			e.Status, socks5StatusAbandoned)
+	}
+	if e.IP == "" {
+		t.Error("the abandoned row carries no client IP, so it cannot attribute the probe")
+	}
+}
+
+// The companion control: when the destination IS demonstrated private, the row
+// is still the BLOCKED verdict and not the undecided status, whether or not the
+// client is still there. Fails if a fix for the case above were to downgrade a
+// real SSRF refusal.
+func TestSOCKS5_DemonstratedPrivateDestinationStillRecordsBlocked(t *testing.T) {
+	setupProxyTest(t)
+	t.Cleanup(reqlog.SwapRingForTest())
+	t.Cleanup(ssrf.SetLookupHostForTest(func(_ context.Context, _ string) ([]string, error) {
+		return []string{"127.0.0.1"}, nil
+	}))
+	ln := startSOCKS5Listener(t)
+
+	const probed = "demonstrated-private.example.test"
+	_ = socks5DialAndRequest(t, ln, probed, 443)
+
+	e := awaitSOCKS5Row(t, probed)
+	if e.Status != "BLOCKED" {
+		t.Fatalf("a destination that resolves to a private address recorded status %q, want BLOCKED", e.Status)
+	}
+}
+
+// awaitSOCKS5Row waits for the SOCKS5 handler to write the request-log row for
+// host and returns it. The handler runs detached, so the row appears after the
+// client's own call returns.
+func awaitSOCKS5Row(t *testing.T, host string) reqlog.Entry {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		rows := reqlog.Get()
+		for i := range rows { // index-based: Entry is large (conventions.md)
+			if rows[i].Method == "SOCKS5" && strings.HasPrefix(rows[i].Host, host) {
+				return rows[i]
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no SOCKS5 request-log row for %q within the deadline: the attempt was not recorded at all", host)
+	return reqlog.Entry{}
 }

@@ -173,10 +173,27 @@ func fireScanTimeoutAlert(actor, host, detail string) {
 //
 // delivered is not called when the episode is already latched or has ended.
 // It reports whether it SKIPPED for either reason.
-func latchOncePerEpisodeOnDelivery(mu *sync.Mutex, latched *bool, episode *uint64, observed uint64, delivered func() bool) (skipped bool) {
+//
+// sawStale is set for every live episode this is called in, DISPATCHED OR NOT,
+// and is the separate answer to "was this episode ever observed stale?".
+// It exists because latched stopped answering that question: making the latch
+// consume an episode only on delivery (SEC-TFEED/BLFEED-STALE-LATCH-1) left it
+// false for the whole episode in the DEFAULT posture — no webhook configured,
+// so nothing is ever dispatched — and both planes also gated their "recovered"
+// log line on it, so the end of a stale-intelligence episode and its suppressed
+// line count stopped being recorded on exactly the nodes that page nobody. A
+// plane clears sawStale wherever it clears latched. Pass nil when a caller has
+// no recovery line to gate.
+func latchOncePerEpisodeOnDelivery(mu *sync.Mutex, latched, sawStale *bool, episode *uint64, observed uint64, delivered func() bool) (skipped bool) {
 	mu.Lock()
 	defer mu.Unlock()
-	if *latched || *episode != observed {
+	if *episode != observed {
+		return true
+	}
+	if sawStale != nil {
+		*sawStale = true
+	}
+	if *latched {
 		return true
 	}
 	if delivered() {

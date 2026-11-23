@@ -128,3 +128,57 @@ func TestRetire_UnreadableJournalRetiresNothing(t *testing.T) {
 		t.Errorf("stale record gone: %v", err)
 	}
 }
+
+// SEC-AGT-DATAREC-KEEP-1. A later IMAGE change must not retire an interrupted
+// DATA-rollback record.
+//
+// Retirement's whole justification is image-state reasoning: the record stops
+// being true once a later operation re-pins the tag, recreates the proxy and
+// passes the health gate, because the tag and the container are then both on a
+// known image. An interrupted data rollback claims neither — it says /data may
+// be half-restored, and it carries the only durable pointer to the recovery
+// procedure (actionData). The loop filtered on op id and running-state only, so
+// a successful upgrade cleared /v1/status and that instruction with it, while
+// the data directory was exactly as the interrupted restore had left it. The
+// agent does not repair a data directory, so nothing it can do makes the record
+// untrue.
+func TestRetire_DoesNotRetireADataRollbackRecord(t *testing.T) {
+	srv, jnl := newJournalTestServer(t)
+	srv.opts.Cfg.ProxyRepo = repo
+	now := time.Now().UTC()
+	if err := jnl.Write(journal.Record{
+		OpID: staleOpULID, Kind: ops.KindRollbackCreate, Mode: "data",
+		Phase: journal.PhaseAdmitted, Actor: "uid=0", StartedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Confirm the fixture really is the class under test before asserting on it.
+	rec, found, err := jnl.Read(staleOpULID)
+	if err != nil || !found {
+		t.Fatalf("seeded record not readable: found=%v err=%v", found, err)
+	}
+	if got := DescribeInterrupted(rec, repo).DockerState; got != DockerStateDataIndeterminate {
+		t.Fatalf("seeded record classifies as %q, want %q", got, DockerStateDataIndeterminate)
+	}
+
+	if retired := srv.retireSupersededRecords(testOpULID, "uid=0"); len(retired) != 0 {
+		t.Errorf("a successful image change retired %v, taking the interrupted data rollback's recovery instruction with it", retired)
+	}
+	if _, found, _ := jnl.Read(staleOpULID); !found {
+		t.Fatal("the interrupted data-rollback record was removed by an image change, which establishes nothing about /data")
+	}
+}
+
+// The control: an interrupted IMAGE record in the same position is still
+// retired, so the filter above cannot be satisfied by retiring nothing.
+func TestRetire_StillRetiresAnImageRecord(t *testing.T) {
+	srv, jnl := newJournalTestServer(t)
+	srv.opts.Cfg.ProxyRepo = repo
+	seedStaleRecord(t, jnl)
+	if retired := srv.retireSupersededRecords(testOpULID, "uid=0"); len(retired) != 1 {
+		t.Fatalf("retired %v, want the one interrupted image record", retired)
+	}
+	if _, found, _ := jnl.Read(staleOpULID); found {
+		t.Error("the interrupted image record survived a later successful image change")
+	}
+}

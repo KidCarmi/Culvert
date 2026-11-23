@@ -724,15 +724,19 @@ contracts:
     transitions:
       permitted:
         - "keeping the record after a failed recovery attempt"
+        - "keeping an interrupted DATA-rollback record (docker_state data_indeterminate) when a later image change succeeds: an image change establishes nothing about the data directory, and the record carries the only durable pointer to the restore-recovery procedure"
       forbidden:
         - "removing the record when a later operation failed"
         - "removing the record on an already-current upgrade, which re-pins nothing"
         - "removing a record without an audit entry"
+        - "removing an interrupted data-rollback record on an image change"
     tests:
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_NewUpgradeConvergesAndRetiresTheRecord}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_AlreadyCurrentUpgradeDoesNotRetire}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_FailedRecoveryKeepsTheRecord}
       - {file: "cmd/culvert-maint/internal/server/journal_retire_test.go", name: TestRetire_SuccessOfAnEstablishingOpRetiresStaleRecords}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_test.go", name: TestRetire_DoesNotRetireADataRollbackRecord}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_test.go", name: TestRetire_StillRetiresAnImageRecord}
     validation: integration
     compatibility: "Before this entry a record was never removed and was reported again at every start."
 

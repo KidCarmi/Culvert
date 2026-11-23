@@ -943,3 +943,53 @@ func TestChaos123_EpisodeEndBetweenVerdictAndLatchIsNotOverwritten(t *testing.T)
 		t.Fatalf("pages = %d after the episode ended, want 1 for the next one", len(*fired))
 	}
 }
+
+// SEC-BLFEED-RECOVERY-LINE-1. The end of a stale-deny-list episode must be
+// recorded on a node with NO webhook configured — the default posture.
+//
+// The sibling of SEC-TFEED-RECOVERY-LINE-1. SEC-BLFEED-STALE-LATCH-1 made the
+// latch consume an episode only on a DISPATCHED alert, which is right, but
+// `alerted` also gated the "fresh again" line: on a node that pages nobody it
+// stays false for the whole episode, so the log recorded every failed round and
+// then nothing at all when the deny list started refreshing again. `sawStale`
+// separates "this episode was observed stale" from "someone was paged".
+func TestChaos123_RecoveryIsLoggedWithNoSubscriber(t *testing.T) {
+	now := time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	// The DEFAULT posture: the sink is reached, nothing is subscribed.
+	attempts := 0
+	fireBlocklistFeedStaleAlert = func(string) bool { attempts++; return false }
+
+	const dead = "https://dead.example.com/deny.txt"
+	bs.SetFeed(dead, time.Hour)
+	bs.seedStatus(dead, now.Add(-10*time.Hour), now.Add(-time.Minute), "fetch: connection refused")
+	noteBlocklistFeedSync(blocklistfeed.SyncOutcome{ConsecutiveFailures: 1, Interval: time.Hour})
+	if attempts != 1 {
+		t.Fatalf("sink reached %d times, want 1: the fixture never reached the episode", attempts)
+	}
+
+	bs.seedStatus(dead, now, now, "")
+	out := captureLogger(t, func() {
+		noteBlocklistFeedSync(blocklistfeed.SyncOutcome{OK: true, LastSync: now, Interval: time.Hour})
+	})
+	if !strings.Contains(out, "fresh again") {
+		t.Fatalf("no recovery line logged when the episode ended with no subscriber; the end of a stale-deny-list episode went unrecorded.\ngot: %q", out)
+	}
+}
+
+// The control: a feed that was never stale logs no recovery line.
+func TestChaos123_RecoveryIsSilentWhenNeverStale(t *testing.T) {
+	now := time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)
+	bs := blFeedHealthTest(t, now)
+	fireBlocklistFeedStaleAlert = func(string) bool { return false }
+
+	const good = "https://good.example.com/deny.txt"
+	bs.SetFeed(good, time.Hour)
+	bs.seedStatus(good, now.Add(-10*time.Minute), now.Add(-10*time.Minute), "")
+	out := captureLogger(t, func() {
+		noteBlocklistFeedSync(blocklistfeed.SyncOutcome{OK: true, LastSync: now, Interval: time.Hour})
+	})
+	if strings.Contains(out, "fresh again") {
+		t.Fatalf("a recovery line was logged for an episode that was never stale: %q", out)
+	}
+}

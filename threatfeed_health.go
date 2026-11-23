@@ -123,6 +123,14 @@ type threatFeedHealthRecord struct {
 	// OBSERVED clean sync or a restart.
 	alerted bool
 
+	// sawStale records that this episode was OBSERVED stale at least once,
+	// whether or not anything was paged for it. alerted cannot answer that
+	// since it is set only by a DISPATCHED alert, and with no webhook
+	// configured — the default posture — it stays false for the whole
+	// episode; the recovery log line is gated on this instead. Cleared
+	// wherever alerted is.
+	sawStale bool
+
 	// episode is the alert-episode generation, bumped under mu whenever an
 	// episode ends (an observed clean sync, a re-arm). A staleness verdict is
 	// read outside mu; latchOncePerEpisodeOnDelivery latches only if the
@@ -186,6 +194,7 @@ func noteThreatFeedConfigured() {
 	threatFeedHealth.configured = true
 	threatFeedHealth.startedAt = threatFeedNow()
 	threatFeedHealth.alerted = false
+	threatFeedHealth.sawStale = false
 	threatFeedHealth.episode++
 	threatFeedHealth.logAt = time.Time{}
 	threatFeedHealth.suppressed = 0
@@ -255,7 +264,7 @@ func evaluateThreatFeedStalenessAtStartup() {
 // only fails toward one extra page.
 var deferThreatFeedStaleAlert = func(detail string, episode uint64) {
 	if startupAlertsFlushed() {
-		latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.episode, episode,
+		latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.sawStale, &threatFeedHealth.episode, episode,
 			func() bool { return fireThreatFeedStaleAlert(detail) })
 		return
 	}
@@ -285,7 +294,7 @@ var deferThreatFeedStaleAlert = func(detail string, episode uint64) {
 //     — and the episode stays open, so the next failed round pages whoever has
 //     subscribed by then.
 func claimThreatFeedStartupAlert(episode uint64) bool {
-	return !latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.episode, episode,
+	return !latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.sawStale, &threatFeedHealth.episode, episode,
 		threatFeedStaleSubscribed)
 }
 
@@ -325,15 +334,16 @@ func noteThreatFeedSync(outcome threatfeed.SyncOutcome) {
 // mistake ca_health.go and storage_health.go both call out by name.
 func noteThreatFeedSyncRecovered() {
 	threatFeedHealth.mu.Lock()
-	wasAlerted := threatFeedHealth.alerted
+	wasStale := threatFeedHealth.sawStale
 	suppressed := threatFeedHealth.suppressed
 	threatFeedHealth.alerted = false
+	threatFeedHealth.sawStale = false
 	threatFeedHealth.episode++ // a verdict read before this point is for the episode that just ended
 	threatFeedHealth.logAt = time.Time{}
 	threatFeedHealth.suppressed = 0
 	threatFeedHealth.mu.Unlock()
 
-	if wasAlerted && logger != nil {
+	if wasStale && logger != nil {
 		logger.Printf("ThreatFeed: sync recovered — intelligence is fresh again (%d suppressed failure log lines during the episode)", suppressed)
 	}
 }
@@ -355,7 +365,7 @@ func evaluateThreatFeedStaleness() {
 	// with the scheduler's) that ends the episode before the decision below
 	// makes it skip rather than latch an ended episode.
 	detail := threatFeedStaleDetail(snap)
-	latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.episode, snap.episode,
+	latchOncePerEpisodeOnDelivery(&threatFeedHealth.mu, &threatFeedHealth.alerted, &threatFeedHealth.sawStale, &threatFeedHealth.episode, snap.episode,
 		func() bool { return fireThreatFeedStaleAlert(detail) })
 }
 
@@ -568,6 +578,7 @@ func resetThreatFeedHealthForTest() {
 	threatFeedHealth.configured = false
 	threatFeedHealth.startedAt = time.Time{}
 	threatFeedHealth.alerted = false
+	threatFeedHealth.sawStale = false
 	threatFeedHealth.episode++
 	threatFeedHealth.logAt = time.Time{}
 	threatFeedHealth.suppressed = 0

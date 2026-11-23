@@ -584,6 +584,24 @@ func handleSOCKS5(conn net.Conn) {
 	socks5RelayPrefixed(conn, destConn, early, clientIP, host)
 }
 
+// socks5StatusAbandoned is the request-log status for a connect phase the
+// CLIENT ended before the destination verdict was decided: the SSRF pre-flight
+// was still resolving when the client hung up, so nothing was demonstrated
+// about the destination and nothing was dialled.
+//
+// A non-verdict status, like the sibling SHUTTING_DOWN / CONN_LIMITED /
+// NOT_READY rows this listener already writes, and deliberately NOT "BLOCKED":
+// charging an SSRF refusal that was never demonstrated is what
+// ssrf.lookupAbandoned exists to avoid. The Traffic console leaves an
+// unlisted status neutral with no stated meaning
+// (frontend/src/features/monitor/trafficStatus.ts), which is the honest
+// rendering for an undecided outcome.
+//
+// It exists so the ROW survives: the attempt itself — client IP, destination,
+// timestamp — is the detection signal for internal-host probing over SOCKS5,
+// and a client must not be able to suppress it by closing the connection.
+const socks5StatusAbandoned = "ABANDONED"
+
 // socks5GuardAndDial runs the pre-flight SSRF guard and the upstream dial under
 // a context that ends when the client hangs up (socks5HangupWatch), and replies
 // to the client on every failure. On success it returns the connected
@@ -593,9 +611,10 @@ func handleSOCKS5(conn net.Conn) {
 //
 // Verdicts are unchanged: an undetermined destination still fails closed (no
 // dial), and ssrfControl still re-checks the resolved address at connect time.
-// The only new outcome is a client that left mid-check — it is logged, not
-// recorded as an SSRF BLOCKED, because nothing was decided about the
-// destination (the same reason ssrf.ErrLookupBudget is not ErrBlocked).
+// The only new outcome is a client that left mid-check — it is recorded as
+// socks5StatusAbandoned rather than as an SSRF BLOCKED, because nothing was
+// decided about the destination (the same reason ssrf.ErrLookupBudget is not
+// ErrBlocked), but it IS recorded.
 func socks5GuardAndDial(conn net.Conn, clientIP, host, target string, readDeadline time.Time) (net.Conn, []byte, bool) {
 	ctx, watch := watchSOCKS5Hangup(conn, readDeadline)
 
@@ -606,10 +625,16 @@ func socks5GuardAndDial(conn net.Conn, clientIP, host, target string, readDeadli
 	// for the OS resolver budget, even after the client had gone.
 	if err := isPrivateHostBounded(ctx, target); err != nil {
 		watch.stop(readDeadline)
-		// A demonstrated private destination is ALWAYS recorded, even if the
-		// client left in the same instant: only an undecided check is waived.
+		// A demonstrated private destination is ALWAYS recorded as BLOCKED,
+		// even if the client left in the same instant: only the VERDICT is
+		// waived for an undecided check, never the request-log row. Returning
+		// with a log line alone would let a client suppress the row by hanging
+		// up on a cache-miss destination (ssrf.lookupAbandoned is never
+		// ErrBlocked), and before the connect phase became cancellable the
+		// guard always ran to completion and always recorded one.
 		if socks5ClientGone(ctx) && !errors.Is(err, errSSRFBlocked) {
 			logger.Printf("SOCKS5 client closed during SSRF pre-flight %s -> %q", clientIP, sanitizeLog(target))
+			recordRequest(clientIP, "SOCKS5", host, socks5StatusAbandoned, "", "", "", "")
 			return nil, nil, false
 		}
 		socks5Reply(conn, 0x02) // Connection not allowed by ruleset

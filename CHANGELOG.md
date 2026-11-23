@@ -9,6 +9,45 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A SOCKS5 client can no longer erase its own request-log row by hanging
+  up.** Making the connect phase cancellable introduced an outcome that is
+  neither allowed nor blocked — the client left while the SSRF pre-flight was
+  still resolving — and that outcome was logged but not recorded. On a cache
+  miss the cancellation surfaces as an abandoned lookup, which is deliberately
+  never an SSRF refusal, so the waiver applied to exactly the probes that
+  matter: an internal-host sweep could leave no `status=BLOCKED` row at all,
+  where before the guard always ran to completion and always recorded one. The
+  attempt is now recorded with the non-verdict status `ABANDONED`, carrying the
+  client IP and destination. The verdict is still withheld, because nothing was
+  demonstrated about the destination, and nothing is dialled.
+- **The end of a stale-feed episode is recorded again on nodes with no webhook
+  configured — the default posture.** Making the paging latch consume an
+  episode only on a delivered alert was right, but the same flag also gated the
+  "recovered" / "fresh again" log line, so on a node that pages nobody the log
+  kept every failure line and then said nothing when the threat feed or deny
+  list started refreshing again — losing the end of the episode and the count
+  of suppressed lines, the two facts that bound how long the gateway enforced
+  against stale intelligence. "This episode was observed stale" is now tracked
+  separately from "someone was paged". Paging behaviour is unchanged. The new
+  ClamAV definition-freshness plane had the same shape and gets the same split.
+- **An interrupted data rollback's recovery instruction is no longer retired by
+  a later image change.** Retirement exists because an interrupted record stops
+  being true once a later operation re-pins the tag, recreates the proxy and
+  passes the health gate — image-state reasoning throughout. An interrupted
+  `mode=data` rollback claims neither: it says the data directory may be
+  half-restored and carries the only durable pointer to the restore-recovery
+  procedure. A successful upgrade or image rollback removed it anyway, clearing
+  `/v1/status` and that instruction while the directory was exactly as the
+  interrupted restore had left it. That class is now never retired; the agent
+  does not repair a data directory, so nothing it can do makes the record
+  untrue.
+- **A webhook repoint is audited with its destination.** `PUT` on an alert
+  webhook accepts a new URL, and it recorded an empty detail while the create
+  arm recorded the URL's origin — leaving the one mutation that changes where
+  alerts go as the only one an auditor could not attribute. It now records the
+  origin too: the scheme and host, never the path, query or userinfo that are
+  the credential. The webhook name in the delivery-error log is also sanitized,
+  matching its sibling line.
 - **An anonymous client can no longer park ~1 GiB in each interactive-login
   state store.** The OIDC PKCE and SAML request stores are filled by
   unauthenticated requests (the proxy's captive-portal path and the public

@@ -1080,3 +1080,48 @@ func TestThreatFeedStale_RecoveryAroundTheFlushClaimIsNotOverwritten(t *testing.
 		t.Fatalf("the next episode paged %d times, want 1: a stale latch silenced it (pages %v)", n, h.pages())
 	}
 }
+
+// SEC-TFEED-RECOVERY-LINE-1. The end of a stale-intelligence episode must be
+// recorded on a node with NO webhook configured — the default posture.
+//
+// Making the latch consume an episode only on a DISPATCHED alert
+// (SEC-TFEED-STALE-LATCH-1) left `alerted` false for the whole episode when
+// nothing is subscribed, and the recovery log line was gated on that same
+// field. So on exactly the nodes that page nobody, the log kept every failure
+// line but lost the closing bracket and the suppressed-line count — the two
+// facts an incident responder needs to bound how long the gateway enforced
+// against stale intelligence. `sawStale` answers "was this episode observed
+// stale?" independently of whether anyone was paged.
+func TestThreatFeedRecovery_IsLoggedWithNoSubscriber(t *testing.T) {
+	h, feed := newTFHealthHarness(t, 6*time.Hour)
+	h.subscribed = false // the DEFAULT posture: no webhook configured
+	h.syncOK(feed)
+
+	h.advance(13 * time.Hour) // past 2x the interval
+	h.syncFail(feed, "urlhaus", 2)
+	if !threatFeedState().Stale {
+		t.Fatal("the feed is not stale after 13h with a 6h interval; the fixture never reached the episode")
+	}
+	if got := h.fired(); len(got) != 0 {
+		t.Fatalf("an alert was dispatched with no subscriber: %v", got)
+	}
+
+	out := captureLogger(t, func() { h.syncOK(feed) })
+	if !strings.Contains(out, "sync recovered") {
+		t.Fatalf("no recovery line logged when the episode ended with no subscriber; the end of a stale-intelligence episode went unrecorded.\ngot: %q", out)
+	}
+}
+
+// The control: an episode that never went stale must log no recovery line, so
+// the gate above cannot be satisfied by logging unconditionally.
+func TestThreatFeedRecovery_SilentWhenNeverStale(t *testing.T) {
+	h, feed := newTFHealthHarness(t, 6*time.Hour)
+	h.subscribed = false
+	h.syncOK(feed)
+
+	h.advance(time.Hour) // well inside the interval
+	out := captureLogger(t, func() { h.syncOK(feed) })
+	if strings.Contains(out, "sync recovered") {
+		t.Fatalf("a recovery line was logged for an episode that was never stale: %q", out)
+	}
+}
