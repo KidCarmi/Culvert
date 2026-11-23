@@ -511,12 +511,17 @@ func handleSOCKS5(conn net.Conn) {
 	// ── Host canonicalization gate (RISK-013, fail-closed) ──────────────────
 	// Mirror of the handleRequest gate: a destination that cannot be
 	// IDNA-normalized would reach the blocklist/plugin matchers un-normalized.
-	normSOCKS5Host, ok := normalizeHostStrict(host)
-	if !ok {
+	//
+	// The same refusal covers a zoned IPv6 literal. ATYP 0x04 is sixteen bytes and
+	// cannot carry a zone, but the DOMAIN form is free text: "fe80::1%eth0" there
+	// becomes the dial target "[fe80::1%eth0]:port" through JoinHostPort above
+	// (see destIPv6Zoned).
+	normSOCKS5Host, invalid := socks5DestHostValidity(host)
+	if invalid != "" {
 		atomic.AddInt64(&statBlocked, 1)
 		socks5Reply(conn, 0x02)
-		recordRequest(clientIP, "SOCKS5", host, "INVALID_HOST", "idna", "", "", "")
-		logger.Printf("SOCKS5 INVALID_HOST %s -> %q {action=block source=idna}", clientIP, sanitizeLog(host))
+		recordRequest(clientIP, "SOCKS5", host, "INVALID_HOST", invalid, "", "", "")
+		logger.Printf("SOCKS5 INVALID_HOST %s -> %q {action=block source=%s}", clientIP, sanitizeLog(host), sanitizeLog(invalid))
 		return
 	}
 	// CHAOS-69 canonical tier: refuse a destination that cannot be a DNS name.
