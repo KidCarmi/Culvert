@@ -42,7 +42,7 @@ Everything the customer must prepare *before* installation. Each row is marked:
 
 | Item | Requirement | Status |
 |---|---|---|
-| Interfaces | 1 is sufficient (all listeners bind `0.0.0.0`) | Verified — no bind-interface flag (GAP-NET-04) |
+| Interfaces | 1 is sufficient (all listeners bind `0.0.0.0`) | Verified — no bind-interface flag (GAP-NET-04), except the optional SOCKS5 listener (`-socks5-bind <ip>`) |
 | Management-plane isolation | Achieved via host firewall / VLAN + `-ui-allow-ip`, **not** in-product interface binding | Verified · Configurable (allowlist only) |
 | IP addresses | 1 host IP (single node). Cluster: 1 per CP + 1 per DP + LB VIP + optional etcd witness IP | Inferred |
 | Subnet / gateway / netmask | **Host-owned** — no Culvert setter | Unsupported in-app (GAP-APP-02) |

@@ -64,7 +64,7 @@ See the companion **[ENTERPRISE-PREREQUISITES.md](ENTERPRISE-PREREQUISITES.md)**
 | 1080/tcp | SOCKS5 (default **disabled**, `socks5_port: 0`) | SOCKS5 clients | `-socks5-port` |
 | 50051/tcp | Control-Plane gRPC (cluster only, mTLS) | Data Plane nodes | `-cp-grpc-addr` |
 
-All listeners bind `0.0.0.0`; there is no bind-interface flag (GAP-NET-04). Restrict the admin UI with `-ui-allow-ip <cidrs>` **and** a host firewall / management VLAN.
+All listeners bind `0.0.0.0` (GAP-NET-04); the one exception is the optional SOCKS5 listener, which can be limited to a single IP address with `-socks5-bind <ip>` / `proxy.socks5_bind` (default: every interface). Restrict the admin UI with `-ui-allow-ip <cidrs>` **and** a host firewall / management VLAN.
 
 **Outbound (egress the customer must plan / approve):**
 

@@ -92,7 +92,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -152,7 +151,11 @@ const (
 // byte-identical is what lets this change add a lifecycle without touching the
 // semantics those gates pin.
 type socks5Supervisor struct {
-	port int
+	// bindHost is the validated IP literal the listener binds, or "" for every
+	// interface: the historical ":port" bind, byte-identical when unset.
+	// Startup-only (-socks5-bind / proxy.socks5_bind).
+	bindHost string
+	port     int
 
 	// stopping is closed by Stop BEFORE anything else, so a backoff sleep is
 	// interruptible and a bind that is in flight is not adopted. stopOnce keeps
@@ -194,8 +197,9 @@ type socks5Supervisor struct {
 // applied one step later, when it moved this call ahead of the accept loop so a
 // listener failing on its first Accept was reported against a configured
 // service.
-func startSOCKS5(port int) *socks5Supervisor {
+func startSOCKS5(bindHost string, port int) *socks5Supervisor {
 	s := &socks5Supervisor{
+		bindHost:     bindHost,
 		port:         port,
 		stopping:     make(chan struct{}),
 		done:         make(chan struct{}),
@@ -325,7 +329,8 @@ func (s *socks5Supervisor) run() {
 		}
 	}()
 
-	addr := fmt.Sprintf(":%d", s.port)
+	// ":port" (every interface) when bindHost is empty, exactly as before.
+	addr := socks5ListenAddr(s.bindHost, s.port)
 
 	// The backoff is deliberately NEVER reset inside the loop, exactly as
 	// serveAdminUIWithRetry does it. Resetting it on every successful bind
@@ -413,8 +418,10 @@ func (s *socks5Supervisor) run() {
 		if recovered {
 			logger.Printf("SOCKS5: listener on port %d bound and accepting again (%d suppressed bind-failure log line(s))",
 				s.port, suppressed)
-		} else {
+		} else if s.bindHost == "" {
 			logger.Printf("SOCKS5: socks5://localhost:%d", s.port)
+		} else {
+			logger.Printf("SOCKS5: socks5://%s (bound to this address only)", addr)
 		}
 		<-srv.done
 		s.release(srv)

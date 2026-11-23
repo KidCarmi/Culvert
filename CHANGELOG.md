@@ -540,6 +540,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **The SOCKS5 listener can be bound to one IP address (`-socks5-bind` /
+  `proxy.socks5_bind`).** It has always bound every interface (`:<port>`), with
+  no option to keep it off external interfaces other than a host firewall. An
+  operator can now set an IP literal (for example `127.0.0.1`, or a management
+  interface's address). Opt-in and startup-only: unset keeps the
+  every-interface bind byte for byte, so existing installations are unchanged.
+  Hostnames are refused at startup, naming the key, so the bound interface
+  never depends on DNS; the flag is validated on the resolved value because it
+  bypasses the config.yaml check. No admin API/UI setting, like the port
+  (`TestSOCKS5Bind_ExplicitLoopbackBindsLoopbackOnly`,
+  `TestSOCKS5BindAddress_Validation`, `TestFileConfig_SOCKS5BindValidatedAtLoad`).
+
 - **Adding to the blocklist now reports what the gateway actually stored
   (Product Experience).** The admin UI's "Added N host(s)" / "Imported N hosts"
   toast counted the lines it sent, not what `POST /api/blocklist` did with them.

@@ -365,7 +365,7 @@ component, acceptance criteria, dependencies, estimated PR size, priority. -->
 ### GAP-NET-04 — Listeners bind `0.0.0.0` only
 
 - **Blocked step:** Network design / management-plane isolation (steps 5, 14).
-- **Current behaviour:** All listeners bind `:<port>` (all interfaces). No bind-address/interface flag.
+- **Current behaviour:** All listeners bind `:<port>` (all interfaces). No bind-address/interface flag, except the optional SOCKS5 listener: `-socks5-bind <ip>` / `proxy.socks5_bind` binds it to one IP literal (default unset = all interfaces, unchanged). The proxy and admin UI remain all-interfaces.
 - **Evidence:** `main.go:878`, `ui.go:97`, `socks5.go:51` (`fmt.Sprintf(":%d")`).
 - **Category:** Operational · **Severity:** P3.
 - **Impact:** Cannot bind the admin UI to a management VLAN in-product.
