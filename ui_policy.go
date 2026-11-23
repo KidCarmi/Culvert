@@ -2816,40 +2816,42 @@ func policyTestAuthority(w http.ResponseWriter, r *http.Request, host string) (a
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
 		return "", false
 	}
-	// FIDELITY: resolve the typed authority to what handleRequest would see as
-	// r.Host, with the request parser the data path itself sits behind (see
-	// wireDestAuthority). It runs after the raw pre-cap, so an oversize input is
-	// still refused before anything parses it, and before the canonical tier, so
-	// that tier measures the host the matchers will actually receive — a
-	// percent-encoded host is three raw bytes per decoded byte.
+	// FIDELITY: resolve the typed input to what handleRequest would see as r.Host
+	// for a client that used it as its request target, with the request parser
+	// the data path itself sits behind (see wireDestAuthority). It runs after the
+	// raw pre-cap, so an oversize input is refused before anything parses it, and
+	// before the canonical tier, so that tier measures the host the matchers will
+	// actually receive.
 	//
-	// An authority the request parser refuses is refused here too. Answering
-	// "no rule matched, default applies" for a request the proxy would reject
-	// with 400 told the admin the destination was governed by the default action.
-	wireHost, wireOK := wireDestAuthority(host)
+	// Known limitation, on the safe side: the raw pre-cap measures the TYPED
+	// bytes, and a percent-encoded host is three typed bytes per decoded byte, so
+	// a very long encoded name the wire would accept is refused here on length.
+	// Parsing before bounding would be the worse trade.
+	wireHost, wireOK := wireDestAuthority(bracketBareIPv6(host))
 	if !wireOK {
-		http.Error(w, "host must be a request authority the proxy accepts: host or host:port, an IPv6 literal in brackets, no path, query or credentials", http.StatusBadRequest)
+		http.Error(w, "host is not a request target the proxy can parse: use host or host:port, with an IPv6 address in brackets when it has a port", http.StatusBadRequest)
 		return "", false
 	}
 	host = wireHost
-	// And the CANONICAL tier, which this endpoint was missing: the raw pre-cap is
-	// deliberately generous (1 KiB) so IDN expansion is not refused, which on its
-	// own still admits the 1 000-byte dot-dense ASCII shape costing ~1.3 ms of
-	// fusion — exactly what the canonical tier exists to reject. Enforcing one
-	// tier of a two-tier contract is not enforcing the contract (Codex P2,
-	// PR #1446). Normalization failure is NOT refused here: validity is this
-	// endpoint's existing business, and this gate decides length only.
-	if normHost, ok := canonicalDestHost(host); ok {
-		if canonicalHostOversize(normHost) {
-			noteOversizeHostRejectionReq("api/policy-test", r, len(normHost), "canonical")
-			http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
-			return "", false
-		}
-	} else if unnormalizableHostOversize(host) {
-		// No canonical form ⇒ bound the raw bare host, or this band reaches
-		// the category fusion at full length (Codex P2, PR #1446).
+	// The CANONICAL tier, and the validity gate. A host with no canonical form is
+	// answered 400 INVALID_HOST by the data path (RISK-013) on every request
+	// form, so it gets no policy answer here either: reporting "no rule matched,
+	// the default applies" for it told the admin the default action governs a
+	// request the proxy rejects.
+	normHost, normOK := canonicalDestHost(host)
+	switch {
+	case normOK && canonicalHostOversize(normHost):
+		noteOversizeHostRejectionReq("api/policy-test", r, len(normHost), "canonical")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+		return "", false
+	case !normOK && unnormalizableHostOversize(host):
+		// No canonical form ⇒ bound the raw bare host, or this band reaches the
+		// category fusion at full length (Codex P2, PR #1446).
 		noteOversizeHostRejectionReq("api/policy-test", r, len(bareDestHost(host)), "unnormalizable")
 		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+		return "", false
+	case !normOK:
+		http.Error(w, "host is not a valid hostname: the proxy refuses this destination (INVALID_HOST)", http.StatusBadRequest)
 		return "", false
 	}
 	return host, true

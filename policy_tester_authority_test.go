@@ -36,28 +36,30 @@ func TestWireDestAuthority(t *testing.T) {
 		{"b%C3%BCcher.de", "bücher.de", true},
 		{"b%c3%bccher.de:443", "bücher.de:443", true},
 		{"xn--bcher-kva.de", "xn--bcher-kva.de", true},
-		{"bücher.de", "bücher.de", true}, // typed U-label: accepted, see wireDestAuthority
+		{"bücher.de", "bücher.de", true},
 		{"[2001:db8::7]", "[2001:db8::7]", true},
 		{"[2001:db8::7]:443", "[2001:db8::7]:443", true},
 		{"192.0.2.7:80", "192.0.2.7:80", true},
 		{"b%25C3%25BCcher.de", "b%C3%BCcher.de", true}, // decoded once, to a literal "%": never twice
-		{"example.com%2Fadmin", "", false},             // encoded delimiters are refused, not decoded
+		{":443", ":443", true},                         // an empty host is the handler's business, as on the data path
+		// Accepted by the request parser, so answered for the host, as on the wire.
+		{"user@example.com", "example.com", true},
+		{"user:pw@example.com:8443", "example.com:8443", true},
+		{"example.com/x", "example.com", true},
+		{"example.com?x", "example.com", true},
+		// Refused by the request parser.
+		{"example.com%2Fadmin", "", false}, // encoded delimiters are refused, not decoded
 		{"example.com%3A80", "", false},
 		{"exa%6Dple.com", "", false}, // an escaped ASCII letter is not valid in a host
 		{"b%C3%BCcher.de%", "", false},
 		{"b%ZZcher.de", "", false},
 		{"example.com:http", "", false},
-		{"2001:db8::7", "", false},
-		{"user@example.com", "", false},
-		{"user:pw@example.com", "", false},
-		{"example.com/x", "", false},
-		{"example.com?x", "", false},
-		{"example.com#x", "", false},
+		{"2001:db8::7", "", false}, // the tester brackets a bare address first: see bracketBareIPv6
 		{"example.com ", "", false},
 		{" example.com", "", false},
 		{"exa\tmple.com", "", false},
 		{"", "", false},
-		{":443", ":443", true}, // an empty host is the handler's business, as on the data path
+		{"/x", "", false}, // origin-form: the destination would come from the Host header
 	}
 	for _, c := range cases {
 		got, ok := wireDestAuthority(c.in)
@@ -65,7 +67,24 @@ func TestWireDestAuthority(t *testing.T) {
 			t.Errorf("wireDestAuthority(%q) = %q, %v; want %q, %v", c.in, got, ok, c.want, c.ok)
 		}
 	}
+	for in, want := range map[string]string{
+		"2001:db8::7": "[2001:db8::7]", "::1": "[::1]", "::ffff:192.0.2.7": "[::ffff:192.0.2.7]",
+		"[2001:db8::7]": "[2001:db8::7]", "192.0.2.7": "192.0.2.7", "example.com:443": "example.com:443",
+		"fe80::1%eth0": "fe80::1%eth0", "cafe::": "[cafe::]", "cafe": "cafe",
+	} {
+		if got := bracketBareIPv6(in); got != want {
+			t.Errorf("bracketBareIPv6(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
+
+// parityHostHeader is the Host header every wire request in this file carries.
+// For absolute-form and CONNECT requests net/http takes the destination from
+// the request target and ignores this header, but it still VALIDATES it. An
+// earlier version sent the authority under test here as well, so a row could
+// read "refused" because of the header and say nothing about the target. A
+// fixed valid value keeps the request target the only variable.
+const parityHostHeader = "parity-check.invalid"
 
 // authorityOutcome is "rule:<name>", "no-match" or "refused".
 func wireAuthorityOutcome(t *testing.T, proxyAddr, method, authority string) string {
@@ -84,9 +103,9 @@ func wireAuthorityOutcome(t *testing.T, proxyAddr, method, authority string) str
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	if method == http.MethodConnect {
-		fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", authority, authority)
+		fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", authority, parityHostHeader)
 	} else {
-		fmt.Fprintf(c, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", authority, authority)
+		fmt.Fprintf(c, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", authority, parityHostHeader)
 	}
 	line, _ := bufio.NewReader(c).ReadString('\n')
 	code := 0
@@ -175,8 +194,13 @@ func TestPolicyTester_AuthorityParityWithRealSockets(t *testing.T) {
 		{"b%C3%BCcher.de%", "refused"},
 		{"b%ZZcher.de", "refused"},
 		{"example.com:http", "refused"},
-		{"2001:db8::7", "refused"},
-		{"user@example.com", "refused"},
+		// A host the data path answers INVALID_HOST for is refused, not "no match".
+		{"%FF.example.com", "refused"},
+		{"xn--bcher-kva-.de", "refused"},
+		// Accepted by the request parser, so decided for the host on every path.
+		{"user@example.com", "rule:plain"},
+		{"user:pw@example.com:8443", "rule:plain"},
+		{"bücher.de:443", "rule:idn"}, // a raw U-label on the request line is accepted like an encoded one
 	}
 	for _, c := range cases {
 		rl = newRateLimiter()
@@ -193,18 +217,59 @@ func TestPolicyTester_AuthorityParityWithRealSockets(t *testing.T) {
 	}
 }
 
-// TestPolicyTester_TypedUnicodeHostStillAnswers pins the one deliberate
-// difference: a raw U-label cannot appear on the wire (a client sends the
-// A-label), but an administrator types it, and the tester keeps answering.
-func TestPolicyTester_TypedUnicodeHostStillAnswers(t *testing.T) {
+// TestPolicyTester_AgreesWithTheWireOnOddTargets states no expectation of its
+// own: for each input the tester must give whatever plain HTTP gives, and
+// CONNECT must give the same. It exists because the table above only covers
+// what its author thought of; an independent review found three claims about
+// "what the wire refuses" that were wrong, each of which this would have caught.
+func TestPolicyTester_AgreesWithTheWireOnOddTargets(t *testing.T) {
 	proxyURL := startTestProxy(t)
 	setDefaultPolicyAction("deny")
-	policyStore.ReplaceAll([]PolicyRule{{Priority: 1, Name: "idn", DestFQDN: "xn--bcher-kva.de", Action: ActionBlockPage}})
-	if got := testerAuthorityOutcome(t, "bücher.de:443"); got != "rule:idn" {
-		t.Errorf("tester on a typed U-label = %s, want rule:idn", got)
+	policyStore.ReplaceAll([]PolicyRule{
+		{Priority: 1, Name: "idn", DestFQDN: "xn--bcher-kva.de", Action: ActionBlockPage},
+		{Priority: 2, Name: "plain", DestFQDN: "example.com", Action: ActionBlockPage},
+		{Priority: 3, Name: "v6", DestFQDN: "2001:db8::7", Action: ActionBlockPage},
+		{Priority: 4, Name: "v4", DestFQDN: "192.0.2.7", Action: ActionBlockPage},
+	})
+	for _, authority := range []string{
+		"example.com:0", "example.com:65535", "example.com:65536", "example.com:00080", "example.com:",
+		"[2001:db8::7]:", "[192.0.2.7]", "[::ffff:192.0.2.7]", "192.0.2.7.", ".example.com", "example.com..", "a..example.com",
+		"EXAMPLE.com", "exa%4Dple.com", "example%2ecom", "%00.example.com", "%7F.example.com", "a%80b.example.com",
+		"*.example.com", "_srv.example.com", "exa_mple.com", "example.com\\x", "example.com%5Cx",
+		"b%C3%BCcher.de.", "B%C3%9CCHER.de", "b%C3%BCcher.de:443", "sub.xn--bcher-kva.de", "xn--a-.example.com",
+		"user@b%C3%BCcher.de", "user%40example.com", "example.com@b%C3%BCcher.de",
+	} {
+		rl = newRateLimiter()
+		h := wireAuthorityOutcome(t, proxyURL.Host, http.MethodGet, authority)
+		c := wireAuthorityOutcome(t, proxyURL.Host, http.MethodConnect, authority)
+		tr := testerAuthorityOutcome(t, authority)
+		if h != c || h != tr {
+			t.Errorf("%-28q http=%s connect=%s tester=%s; all three must agree", authority, h, c, tr)
+		}
 	}
-	if got := wireAuthorityOutcome(t, proxyURL.Host, http.MethodConnect, "bücher.de:443"); got != "refused" {
-		t.Errorf("wire on a raw U-label = %s, want refused (if this changes, the tester's exception needs revisiting)", got)
+}
+
+// TestPolicyTester_BareIPv6AddressIsAnsweredAsBracketed: an administrator types
+// the address, and the rule editor's "test this rule" action submits a rule's
+// destination exactly as stored. The request parser needs brackets; the tester
+// supplies them for a string that is an IPv6 address and nothing else.
+func TestPolicyTester_BareIPv6AddressIsAnsweredAsBracketed(t *testing.T) {
+	proxyURL := startTestProxy(t)
+	setDefaultPolicyAction("deny")
+	policyStore.ReplaceAll([]PolicyRule{{Priority: 1, Name: "v6", DestFQDN: "2001:db8::7", Action: ActionBlockPage}})
+	for _, typed := range []string{"2001:db8::7", "2001:DB8:0::7"} {
+		if got := testerAuthorityOutcome(t, typed); got != "rule:v6" {
+			t.Errorf("tester on bare %q = %s, want rule:v6", typed, got)
+		}
+	}
+	if got := wireAuthorityOutcome(t, proxyURL.Host, http.MethodConnect, "[2001:db8::7]:443"); got != "rule:v6" {
+		t.Errorf("wire on the bracketed form = %s, want rule:v6 (the tester must mean the same destination)", got)
+	}
+	if got := testerAuthorityOutcome(t, "2001:db8::8"); got != "no-match" {
+		t.Errorf("tester on a different bare address = %s, want no-match", got)
+	}
+	if got := testerAuthorityOutcome(t, "fe80::1%eth0"); got != "refused" {
+		t.Errorf("tester on a bare ZONED address = %s, want refused (bracketing must not launder a zone)", got)
 	}
 }
 

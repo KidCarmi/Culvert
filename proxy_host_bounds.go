@@ -421,46 +421,59 @@ func resetOversizeHostStateForTest() {
 	oversizeHostLogLast.Store(0)
 }
 
-// wireDestAuthority returns the authority handleRequest would see as r.Host for
-// a client that wrote input as the authority of its request target.
+// wireDestAuthority returns the authority handleRequest would see as r.Host
+// for a client that wrote input after "http://" in an absolute-form request
+// target, or as the whole target of a CONNECT.
 //
-// The proxy data path never parses the authority itself: net/http does, before
-// handleRequest runs. For CONNECT it prefixes "http://" and calls
-// url.ParseRequestURI; for an absolute-form target it calls the same function on
-// the whole URL and copies URL.Host into r.Host. That parse percent-decodes the
-// host (only where the URL grammar allows an escape there), validates it and
-// validates the port. A caller that simulates the data path from a typed
-// authority — the Policy Tester — has to go through the same function, or it
-// answers for a different host than the proxy would enforce: "b%C3%BCcher.de"
-// reaches handleRequest as the IDN "bücher.de" and matches its rule, while the
-// tester matched the literal percent string and reported no match.
+// The proxy data path never parses the request target itself: net/http does,
+// before handleRequest runs. For CONNECT it prefixes "http://" and calls
+// url.ParseRequestURI; for an absolute-form target it calls the same function
+// on the whole URL; in both cases it then sets r.Host = URL.Host and ignores the
+// Host header. That parse percent-decodes the host (only where the URL grammar
+// allows an escape there), validates it and validates the port. A caller that
+// simulates the data path from typed input — the Policy Tester — has to go
+// through the same function, or it answers for a different host than the proxy
+// enforces: "b%C3%BCcher.de" reaches handleRequest as the IDN "bücher.de" and
+// matches its rule, while the tester matched the literal percent string and
+// reported no match.
 //
 // This is deliberately the standard library's parser and not a decoder written
 // here: url.PathUnescape or QueryUnescape would decode escapes the request
-// parser refuses (an encoded "/" or ":"), and a second parser would drift.
+// parser refuses in a host (an encoded "/" or ":"), and a second parser would
+// drift.
 //
-// ok is false when the input is not a bare authority the request parser accepts:
-// a malformed escape, an escape the host grammar forbids, a non-numeric port,
-// an unbracketed IPv6 literal, userinfo, or anything after the authority (a
-// path, a query, a fragment). Such a request is answered 400 by net/http and
-// never reaches policy, so no policy answer for it can be right.
+// ok is false when the request parser refuses the input (a malformed or
+// forbidden escape, a non-numeric port, an unbracketed IPv6 literal, a control
+// character) or when it yields no host at all. Whatever the parser ACCEPTS is
+// answered for its host, exactly as on the wire: "user@example.com",
+// "example.com/path" and "example.com?q" are all requests for example.com, and
+// a raw non-ASCII name is accepted on the request line just as an encoded one
+// is. (net/http additionally validates the Host HEADER a client sends, but that
+// header does not choose the destination for these request forms.)
 //
-// What this does NOT reproduce: net/http also refuses a raw non-ASCII byte in
-// the request line or Host header, which a typed authority may legitimately
-// contain ("bücher.de" — a browser sends its A-label). The parser accepts it and
-// so does this function; the matchers IDNA-normalize it like any other host.
+// Scope: request-target authorities. An origin-form request names its
+// destination in the Host header, which net/http does not percent-decode, and
+// the SOCKS5 DOMAIN form is likewise taken literally; an encoded name there is
+// matched as the literal string, which no resolver can serve.
 func wireDestAuthority(input string) (authority string, ok bool) {
 	u, err := url.ParseRequestURI("http://" + input)
-	if err != nil {
-		return "", false
-	}
-	if u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
-		return "", false
-	}
-	if u.Host == "" {
+	if err != nil || u.Host == "" {
 		return "", false
 	}
 	return u.Host, true
+}
+
+// bracketBareIPv6 wraps a bare, zone-free IPv6 literal in brackets and returns
+// anything else unchanged. An administrator types "2001:db8::7", and the rule
+// editor's "test this rule" action submits a rule's destination as written;
+// both mean the address, and the request parser requires the brackets. Only a
+// string that IS an IPv6 address qualifies, so "host:port" and hostnames are
+// never touched, and a zoned literal is refused before this is reached.
+func bracketBareIPv6(host string) string {
+	if addr, err := netip.ParseAddr(host); err == nil && addr.Is6() && addr.Zone() == "" {
+		return "[" + host + "]"
+	}
+	return host
 }
 
 // ---------------------------------------------------------------------------
