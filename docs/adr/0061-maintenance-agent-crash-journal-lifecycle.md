@@ -274,3 +274,11 @@ from a container that may be on its way out.
 Not covered: a deployment without the unit's control-group kill (a docker
 command of the dead agent may then still be running at any later time), and a
 `stop_grace_period` longer than the window.
+
+The startup reconcile (`reconcile_on_startup = "converge"`) follows the same
+rule and one more. It waits out the settle window before it reads Docker for a
+record, and it retires a record only after a readiness probe taken at that
+point succeeds. Matching container and tag identities alone are not
+convergence. If the wait cannot be completed or the probe fails, the record is
+kept and the outcome is `recovery_required` (`settle_wait_cut_short`,
+`settle_not_established`, `not_ready_at_retirement`).
