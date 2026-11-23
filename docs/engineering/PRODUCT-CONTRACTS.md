@@ -84,7 +84,7 @@ owner approval. Audit limits are in §8.
 | Area | Enforced | Open (owner decision) | Not yet covered |
 |---|---|---|---|
 | SWG enforcement | SWG-001, SWG-002 | SWG-900 plain-HTTP SSRF gap; SWG-901 SOCKS5 skips policy | Gate ordering; WebSocket SSRF guard has no test found |
-| Policy evaluation | POL-001 to POL-004 | POL-900 default action at runtime; POL-901 empty action allows | Restored empty default action becomes deny on one path only |
+| Policy evaluation | POL-001 to POL-005 (POL-005 added after the audit: category-reference ingress) | POL-900 default action at runtime; POL-901 empty action allows; POL-902 category-reference drift and DP/CP closure (added after the audit) | Restored empty default action becomes deny on one path only |
 | Authn / authz | AUTH-001 to AUTH-004 | none recorded | OIDC/SAML/LDAP assertion validation, cookie attributes, lockout: not audited |
 | TLS inspection | TLS-001, TLS-002 | TLS-900 unloaded CA forwards uninspected; TLS-901 OCSP scope | SSL-bypass precedence over Inspect has no test found |
 | PKI | none on `main` | PKI-900 pending PR #1854; PKI-901 no golden vector for the bundle format | Cluster CA; key-at-rest |

@@ -1122,6 +1122,23 @@ func apiDecryptionExclusionTunables(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// refuseReservedCategoryCreate refuses CREATING a category whose name
+// case-folds to the reserved wildcard "Any" (POL-005). A category that already
+// exists under such a name (created before this check) is not refused: it
+// stays loadable, editable and deletable, and rules that reference it keep
+// matching exactly as before. Returns true when the 400 has been written.
+func refuseReservedCategoryCreate(w http.ResponseWriter, name string) bool {
+	if !reservedCategoryName(name) {
+		return false
+	}
+	if _, exists := catStore.BuiltInFlag(name); exists {
+		return false
+	}
+	http.Error(w, fmt.Sprintf(`category name %q is reserved: "Any" means any destination in a policy rule; choose another name`, name),
+		http.StatusBadRequest)
+	return true
+}
+
 func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,gocognit // CRUD handler: one branch per HTTP method is intentional
 	switch r.Method {
 	case http.MethodGet:
@@ -1152,6 +1169,9 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 		}
 		if len(body.Hosts) > 10000 {
 			http.Error(w, "category cannot contain more than 10000 hosts", http.StatusBadRequest)
+			return
+		}
+		if refuseReservedCategoryCreate(w, body.Name) {
 			return
 		}
 		if ifRev := parseIfRevision(r); ifRev != nil {
@@ -1221,6 +1241,11 @@ func apiURLCat(w http.ResponseWriter, r *http.Request) { //nolint:cyclop,funlen,
 			auditEvent(r, "urlcat.update", name, fmt.Sprintf("%d host(s)", len(body.Hosts)))
 			saveConfigVersion(sessionAdmin(r), "urlcat.update")
 			jsonOK(w, map[string]any{"name": name, "revision": catStore.ContentFingerprint()})
+			return
+		}
+		// The legacy PUT is an upsert (catStore.Set creates a missing name), so
+		// it is a creation door too.
+		if refuseReservedCategoryCreate(w, name) {
 			return
 		}
 		// Preserve builtIn flag when updating.

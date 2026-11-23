@@ -20609,7 +20609,27 @@
             "description": "Commit policy draft."
           },
           "400": {
-            "$ref": "#/components/responses/PlainBadRequest"
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": "rule \"block-feed\": referenced category \"Feed-Class\" does not exist in any current authority",
+                  "name": "Feed-Class",
+                  "referenceType": "category",
+                  "rule": "block-feed"
+                },
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              },
+              "text/plain": {
+                "example": "a commit comment is required",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Malformed request, no draft to commit, a missing comment or an invalid candidate rule (plain text). A candidate rule that the commit adds, or whose references it changes, and that references a category, category group, decryption profile or file profile no current authority resolves (for example a feed generation dropped the class after the rule was staged) is refused as STRUCTURED JSON `{error, referenceType, name, rule}`; nothing is activated and the draft is kept. Rules the commit carries unchanged are not judged."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"

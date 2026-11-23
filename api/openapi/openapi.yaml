@@ -10712,7 +10712,23 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
-        '400': { $ref: '#/components/responses/PlainBadRequest' }
+        '400':
+          description: >-
+            Malformed request, no draft to commit, a missing comment or an
+            invalid candidate rule (plain text). A candidate rule that the
+            commit adds, or whose references it changes, and that references a
+            category, category group, decryption profile or file profile no
+            current authority resolves (for example a feed generation dropped
+            the class after the rule was staged) is refused as STRUCTURED JSON
+            `{error, referenceType, name, rule}`; nothing is activated and the
+            draft is kept. Rules the commit carries unchanged are not judged.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+              example: { error: 'rule "block-feed": referenced category "Feed-Class" does not exist in any current authority', referenceType: category, name: Feed-Class, rule: block-feed }
+            text/plain:
+              schema: { type: string }
+              example: "a commit comment is required"
         '403': { $ref: '#/components/responses/PlainForbidden' }
   /api/policy/draft/revert:
     post:

@@ -162,6 +162,40 @@ contracts:
     validation: integration
     compatibility: "A rulebase written by a newer release must not become permissive on an older one."
 
+  - id: POL-005
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "A new or modified rule whose destCategory or destCategoryGroup no current category authority resolves is refused, and so is a destCategory that spells the reserved wildcard in any case other than exact \"Any\"; exact \"Any\" and empty are the only wildcards. Stored rules are never refused or rewritten: they load and enforce as before and are reported as unresolved."
+    authority: "Rule write doors (ui_helpers.go validateAccessRuleIngress, ui_authpolicy.go, policy_ref_validation.go validateRuleObjectRefs) and draft commit (policy_draft.go commitActivate); stored-rule reporting in policy_category_health.go."
+    code:
+      - "ui_helpers.go"
+      - "ui_authpolicy.go"
+      - "policy_ref_validation.go"
+      - "policy_draft.go"
+      - "policy_category_health.go"
+    configs: []
+    transitions:
+      permitted:
+        - "exact \"Any\" or an empty destCategory meaning any destination"
+        - "a stored rule with an unresolved reference loading unchanged and being reported"
+        - "an existing category whose name case-folds to \"Any\" staying loadable, editable and deletable"
+      forbidden:
+        - "accepting a new or modified rule whose destCategory is \"any\", \"ANY\" or another non-exact case of \"Any\""
+        - "canonicalizing a stored destCategory variant of \"any\" to the wildcard \"Any\""
+        - "a draft commit activating an added or re-pointed rule whose reference no longer resolves"
+        - "creating a new category whose name case-folds to \"Any\""
+    tests:
+      - {file: "policy_category_validation_test.go", name: TestPOL005_ReservedAnyVariantRefusedOnEveryRuleDoor}
+      - {file: "policy_category_validation_test.go", name: TestPOL005_ReservedCategoryNameRefusedAtCreation}
+      - {file: "policy_category_validation_test.go", name: TestPOL005_PreexistingAnyCategoryKeepsTodaysBehaviour}
+      - {file: "policy_category_validation_test.go", name: TestPOL005_StoredAnyNeverBecomesTheWildcard}
+      - {file: "policy_category_validation_test.go", name: TestPOL005_StoredDanglingRuleReportedAfterCategoriesLoad}
+      - {file: "policy_category_validation_test.go", name: TestPOL005_ViewTransitionReportsDriftedRule}
+      - {file: "policy_category_validation_test.go", name: TestPOL005_DraftCommitRefusedAfterReferencedClassDisappears}
+    validation: integration
+    compatibility: "Customer-visible: API clients that sent destCategory \"any\"/\"ANY\" now get 400 (the value never meant any destination; it matched only a category of that name). Creating a category named Any in any case is refused. A draft commit whose added or changed rule references a category that disappeared since staging is refused 400. Stored rules, policy files, backups and cluster snapshots load unchanged; a rule written as \"any\" keeps matching exactly what it matched before."
+
   - id: AUTH-001
     area: authn-authz
     status: enforced
@@ -606,6 +640,19 @@ contracts:
     code:
       - "authpolicy.go"
     question: "UNDEFINED: a rule with an empty action currently installs and resolves to allow. Require an explicit action?"
+    compatibility: "Undecided; see question."
+
+  - id: POL-902
+    area: policy
+    status: open
+    owner_approved: false
+    invariant: "A stored rule whose category or category-group reference stops resolving after it was written is handled by a decided policy, and the data plane judges category references against the same resolvable set as the control plane."
+    authority: "Category authorities (catStore, signed SaaS feed view and overrides, community DB) and the bulk reference gates (bulk_ref_validation.go, controlplane_snapshot.go)."
+    code:
+      - "policy_category_health.go"
+      - "bulk_ref_validation.go"
+      - "controlplane_snapshot.go"
+    question: "UNDEFINED: (1) Drift: a feed generation, SaaS override, view arm/disarm or a missing community DB can leave a stored rule's category unresolved after it was written; today it is kept and reported (log, culvert_policy_rules_unresolved_refs, policy_category_resolution row) but matches no traffic, which is fail-open for a Drop rule, and every bulk door (import, rollback, cluster publish) then refuses the whole candidate carrying it, which can freeze a fleet on its last snapshot. Keep report-only, or act (alert, block publish earlier, fail closed)? (2) Closure: the DP validates a snapshot against its own view and community DB (postApplyCategoryClosure), so a CP rule keyed on a community category may be rejected by a DP without that DB (inferred, not reproduced). Should the DP judge against the CP's resolvable set? That needs a wire field."
     compatibility: "Undecided; see question."
 
   - id: TLS-900

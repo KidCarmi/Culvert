@@ -77,24 +77,45 @@ import (
 // The view pointer is read ONCE so the verdict is against one authority
 // state.
 func referencedCategoryResolvable(name string) bool {
+	return newCategoryRefResolver().resolvable(name)
+}
+
+// categoryRefResolver is referencedCategoryResolvable with its authority state
+// captured ONCE, so a caller judging many names (the unresolved-reference
+// diagnostics, policy_category_health.go) gets every verdict against the same
+// view and does not rebuild the community name list per rule. It is the single
+// implementation of the predicate; referencedCategoryResolvable is a
+// one-name call of it.
+type categoryRefResolver struct {
+	view      *effectiveCategoryView
+	community []string // nil when the community DB is not open
+}
+
+func newCategoryRefResolver() categoryRefResolver {
+	cr := categoryRefResolver{view: saasEffectiveView.Current()}
+	if communityDB != nil {
+		cr.community = feedsync.MappedCategories()
+	}
+	return cr
+}
+
+func (cr categoryRefResolver) resolvable(name string) bool {
 	if name == "" {
 		return true // "" = no reference
 	}
-	if v := saasEffectiveView.Current(); v != nil {
+	if cr.view != nil {
 		if builtIn, found := catStore.BuiltInFlag(name); found && !builtIn {
 			return true
 		}
-		if v.HasCategoryName(name) {
+		if cr.view.HasCategoryName(name) {
 			return true
 		}
 	} else if _, found := catStore.BuiltInFlag(name); found {
 		return true
 	}
-	if communityDB != nil {
-		for _, c := range feedsync.MappedCategories() {
-			if strings.EqualFold(c, name) {
-				return true
-			}
+	for _, c := range cr.community {
+		if strings.EqualFold(c, name) {
+			return true
 		}
 	}
 	return false
@@ -104,9 +125,16 @@ func referencedCategoryResolvable(name string) bool {
 type danglingRefError struct {
 	Type string // "category" | "category-group" | "decryption-profile" | "file-profile"
 	Name string
+	// Rule names the rule carrying the reference when the refusal judges a
+	// SET of rules (draft commit); empty on a single-rule write, where the
+	// caller already knows which rule it sent.
+	Rule string
 }
 
 func (e *danglingRefError) Error() string {
+	if e.Rule != "" {
+		return fmt.Sprintf("rule %q: referenced %s %q does not exist in any current authority", e.Rule, e.Type, e.Name)
+	}
 	return fmt.Sprintf("referenced %s %q does not exist in any current authority", e.Type, e.Name)
 }
 
@@ -158,11 +186,56 @@ func validateRuleObjectRefs(r *PolicyRule) *danglingRefError {
 func writeDanglingRefError(w http.ResponseWriter, e *danglingRefError) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
-	_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // response write
+	body := map[string]any{
 		"error":         e.Error(),
 		"referenceType": e.Type,
 		"name":          e.Name,
-	})
+	}
+	if e.Rule != "" {
+		body["rule"] = e.Rule
+	}
+	_ = json.NewEncoder(w).Encode(body) //nolint:errcheck // response write
+}
+
+// validateChangedCandidateRefs is the draft-commit half of the reference door
+// (POL-005): every candidate rule that the commit ADDS, or whose references it
+// CHANGES relative to the running rule with the same ID, must resolve now —
+// the same validateRuleObjectRefs predicate the interactive door applied when
+// it was staged. Staging validated it against the authorities of THAT moment;
+// a feed generation, override or community-DB change since then can leave it
+// dangling, and committing it would activate a rule that matches nothing (a
+// Drop that silently stops dropping).
+//
+// A candidate whose references are identical to its running counterpart is
+// NOT judged: it is an existing stored rule the commit does not change, and
+// the owner decision is to keep stored rules loading and enforcing exactly as
+// before and report them (policy_category_health.go) — refusing every commit
+// while one running rule has drifted would freeze the draft workflow on a
+// rule the operator did not touch.
+func validateChangedCandidateRefs(running, cand []PolicyRule) *danglingRefError {
+	runByID := make(map[string]*PolicyRule, len(running))
+	for i := range running {
+		runByID[running[i].ID] = &running[i]
+	}
+	for i := range cand {
+		if prev := runByID[cand[i].ID]; prev != nil && sameObjectRefs(prev, &cand[i]) {
+			continue
+		}
+		if e := validateRuleObjectRefs(&cand[i]); e != nil {
+			e.Rule = cand[i].Name
+			return e
+		}
+	}
+	return nil
+}
+
+// sameObjectRefs reports whether two rules carry the same shared-object
+// references (the fields validateRuleObjectRefs judges, plus their IDs).
+func sameObjectRefs(a, b *PolicyRule) bool {
+	return a.DestCategory == b.DestCategory &&
+		a.DestCategoryGroup == b.DestCategoryGroup && a.DestCategoryGroupID == b.DestCategoryGroupID &&
+		a.DecryptionProfile == b.DecryptionProfile && a.DecryptionProfileID == b.DecryptionProfileID &&
+		a.FileProfile == b.FileProfile && a.FileProfileID == b.FileProfileID
 }
 
 // refuseDanglingRuleRefs is the write-door check for rule create/edit
