@@ -83,12 +83,17 @@ which does not call the policy engine at all (SWG-901).
 
 The product's answer is recorded. This tool does not decide which answer is right.
 
-1. **R12: the "any" sentinel's casing.** `DestCategory: "Any"` means "any".
-   `"any"` or `"ANY"` is treated as a category that no host belongs to, so the
-   rule never matches. A **Drop** rule written that way silently stops blocking.
-   `DestCategory` has no write-time validation (`validateAccessRule`), so the API
-   and imports accept it; the admin UI writes `"Any"`. A misspelled category name
-   behaves the same way. Should unknown categories be refused on write?
+1. **R12: the "any" sentinel's casing, and categories that do not resolve.**
+   `DestCategory: "Any"` means "any". `"any"` or `"ANY"`, like any category no host
+   belongs to, never matches, so a **Drop** rule written that way blocks nothing.
+   *Corrected after verification:* API and bulk writes do refuse a category that
+   does not resolve. They go through `validateRuleObjectRefs` →
+   `referencedCategoryResolvable` (`policy_ref_validation.go:79,129`), which
+   rejects `"any"` because no category of that name exists. The gaps are the
+   writers that skip that check (config-file `PolicyStore.Load`, draft reload and
+   commit) and categories that disappear after a rule is written (feed or
+   community-DB changes). An admin can also create a real category named `Any`,
+   which `"any"` rules would then match.
 2. **R2: equal priorities.** Ordering is by `sort.Slice`, which is not stable.
    `Add` and `Reorder` keep priorities unique, but `Update`, `Load` and
    `ReplaceAll` do not dedupe them. With two matching rules at one priority the
@@ -97,9 +102,13 @@ The product's answer is recorded. This tool does not decide which answer is righ
    while a config-file load only warns and leaves the rule inert (it matches
    nothing). A **zoned** literal (`fe80::1%eth0`) passes ingress and is matched by
    exact string. Is that intended?
-4. **R15: default_action spellings.** Only lower-case `allow` means allow.
-   `Allow`, ` allow` and every other value mean **deny**. That fails closed, but a
-   config file that says `Allow` silently denies.
+4. **R15: default_action spellings.** In the product, only lower-case `allow`
+   means allow. *Corrected after verification:* the YAML config is strict.
+   Anything other than exactly `allow`, `deny` or empty fails startup
+   (`config.go:614`). The silent case is a non-canonical value persisted in
+   admin settings, cluster sync or a config-version rollback. That value is
+   enforced as **deny** without a log line, and the next settings save rewrites
+   it as `deny`.
 
 ## Promotion
 
