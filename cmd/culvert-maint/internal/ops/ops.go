@@ -96,6 +96,14 @@ const (
 	// recreate the proxy, health-gate, and verify. State-changing and
 	// exclusive (acquires the maintenance lock).
 	KindRollbackCreate = "rollbacks.create"
+
+	// KindReconcileStartup is the agent's own opt-in startup reconcile of
+	// interrupted image changes (reconcile_on_startup = "converge", contract
+	// AGT-900). No API admits it: startup begins it before the socket serves.
+	// It is state-changing so it holds the maintenance lock while it runs, and
+	// an operator's state-changing request gets 409 naming it (AGT-001). It is
+	// not journaled: it never creates a record, it only acts on existing ones.
+	KindReconcileStartup = "reconcile.startup"
 )
 
 // stateChangingKinds is the production allowlist of operation kinds
@@ -104,11 +112,12 @@ const (
 // § 4.6 contract — handler + template + sudoers + tests — is
 // satisfied for each entry by the matching D1.6b PR.
 var stateChangingKinds = map[string]struct{}{
-	KindBackupCreate:   {},
-	KindRestoreCommit:  {},
-	KindCleanupCommit:  {},
-	KindUpgradeApply:   {},
-	KindRollbackCreate: {},
+	KindBackupCreate:     {},
+	KindRestoreCommit:    {},
+	KindCleanupCommit:    {},
+	KindUpgradeApply:     {},
+	KindRollbackCreate:   {},
+	KindReconcileStartup: {},
 }
 
 // SyntheticStateChangingKind is exported for tests that need to
@@ -154,6 +163,11 @@ const (
 	// flagged FlowStage.PromoteReasonOnFailure), not a generic
 	// "last failure wins" rule. See D1.6c inline-auto-rollback plan §3/§10.
 	ReasonRollbackFailed FailureReason = "rollback_failed"
+	// ReasonRecoveryRequired marks a reconcile.startup op that left at least
+	// one interrupted record unconverged: evidence was insufficient, Docker
+	// could not be read, an action did not verify, or the deadline elapsed.
+	// Docker was not changed beyond what the op's result lists.
+	ReasonRecoveryRequired FailureReason = "recovery_required"
 )
 
 // NewID generates a fresh ULID for an op_id. Time-prefixed and
