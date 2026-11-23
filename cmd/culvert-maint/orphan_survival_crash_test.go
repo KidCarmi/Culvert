@@ -30,8 +30,11 @@ package main
 //	   report that could have been wrong.
 //	Q2 tag residue after the fact: the fixed tag moves after startup reported
 //	   it, and whether /v1/status still says so;
-//	Q3 false success: an operation admitted while the orphan is alive reports
-//	   success, then the orphan changes what that operation left behind.
+//	Q3 false success, in two parts: whether the orphan changed what an
+//	   operation admitted while it was alive left behind after that operation
+//	   reported success (late_tag_move / late_container_move / none), and
+//	   what every /v1/status signal (interrupted entries, pinned_tag absent /
+//	   true / false) shows of it at R2 and R3.
 //	Q4 (draft #2039, startup convergence) is not measurable on main, which
 //	   has no convergence mode.
 //
@@ -62,8 +65,17 @@ package main
 //     orphan reaped (today's kill()) and requires no divergence at all;
 //   - A5: liveness comes from /proc (state, ppid, cmdline), never from the
 //     agent or the model's own files;
-//   - the report reads must answer 200, and at R1 /v1/status must list
-//     exactly the interrupted op, so its later absence is evidence.
+//   - the report reads must answer 200 (404 for the op only after a later
+//     operation verifiably succeeded and retired the record); at R1 the op is
+//     failed(agent_restart_interrupted), there is exactly one interruption
+//     audit entry, and /v1/status lists exactly the op;
+//   - the later operation must be the one /v1/status advises (and, for a
+//     rollback, name the same prior_ref);
+//   - every failure other than a pinned-expectation mismatch or an A3 control
+//     divergence is marked INVALID, including a shared rig helper's failure
+//     (flagged by the run's cleanup). Each flow that ran to its end prints an
+//     ORPHAN-COMPLETE line and each suite an ORPHAN-SUMMARY line, which
+//     run.sh counts before it reports anything but incomplete.
 
 import (
 	"fmt"
@@ -118,7 +130,8 @@ func orphanModelScript(t *testing.T, model string) string {
 type orphanExpect struct {
 	mutates  bool   // the in-flight command changes the model once released (A1/A2)
 	q1, q2   string // report flow
-	q3       string // later-operation flow
+	q3       string // later-operation flow: late mutation after a reported success
+	q3vis    string // later-operation flow: what the status API shows of it at R2/R3
 	status   string
 	observed string
 }
@@ -127,22 +140,22 @@ type orphanExpect struct {
 // direction (a finding disappears, or a new one appears) fails the test so it
 // is updated deliberately.
 var orphanExpectations = map[string]orphanExpect{
-	"admitted_at_capture": {false, "live_stable", "none", "none", "open",
-		"in-flight `compose ps` is read-only in the model; no divergence"},
-	"captured_at_resolve": {false, "live_stable", "none", "none", "open",
-		"in-flight `manifest inspect` is read-only; no divergence"},
-	"resolved_at_pull": {false, "live_stable", "none", "none", "open",
+	"admitted_at_capture": {false, "live_stable", "none", "none", "n/a", "open",
+		"in-flight `compose ps` is read-only in the model; its completion is not established; no divergence"},
+	"captured_at_resolve": {false, "live_stable", "none", "none", "n/a", "open",
+		"in-flight `manifest inspect` is read-only; its completion is not established; no divergence"},
+	"resolved_at_pull": {false, "live_stable", "none", "none", "n/a", "open",
 		"in-flight `pull` changes no tag or container in the model (its effect on the image store is not modelled); no divergence"},
-	"barrier_before_tag": {true, "live_changed", "residue_reported", "false_success_unreported", "open",
+	"barrier_before_tag": {true, "live_changed", "residue_reported", "late_tag_move", "none", "open",
 		"durable report already says indeterminate; orphan `docker tag` moves the tag after restart and /v1/status shows it while the record exists, " +
-			"but a rollback admitted meanwhile succeeds, retires the record, and the tag then moves with nothing reporting it"},
-	"tag_moved_before_up": {true, "live_changed", "none", "none", "open",
+			"but a rollback admitted meanwhile succeeds, retires the record, and the tag then moves with no interrupted entry and no pinned_tag reported"},
+	"tag_moved_before_up": {true, "live_changed", "none", "none", "n/a", "open",
 		"durable report already says indeterminate; orphan `compose up` recreates the container on the target after restart (running_image prior -> target). " +
 			"Q3 none is a MODEL property: the model's up reads the tag at release, after the rollback re-pinned it; a real in-flight up has already resolved its image"},
-	"up_done_unrecorded": {false, "live_stable", "none", "none", "open",
+	"up_done_unrecorded": {false, "live_stable", "none", "none", "n/a", "open",
 		"the up had already landed before the kill; the orphan has nothing left to change"},
-	"restarted_at_verify": {false, "live_stable", "none", "none", "open",
-		"in-flight `compose ps` is read-only; no divergence"},
+	"restarted_at_verify": {false, "live_stable", "none", "none", "n/a", "open",
+		"in-flight `compose ps` is read-only; its completion is not established; no divergence"},
 }
 
 // orphanKillPoints is every existing kill point at which a docker command is
@@ -184,11 +197,38 @@ func (r *crashRig) truth() dockerTruth {
 	return dockerTruth{Pinned: r.read("pinned"), Running: r.read("running")}
 }
 
+// vectorObs is everything one run of a vector observed.
+type vectorObs struct {
+	orphanPID, orphanPPID, agentPID int
+	atKill, atRestart, afterOp      dockerTruth
+	afterRelease                    dockerTruth
+	r1, r2, r3                      reportSnap
+	laterKind, laterState           string
+	retired                         bool // the later op succeeded and its success removed the interrupted record
+	completed                       bool // the held command wrote orphan_done after release
+}
+
+// orphanRun drives one vector. reaped selects today's kill() (control);
+// laterOp admits and completes the operator's next operation while the
+// orphan is alive, before releasing it.
+type orphanRun struct {
+	t        *testing.T
+	r        *crashRig
+	kp       *killPoint
+	shim     string
+	reaped   bool
+	laterOp  bool
+	pid      int  // the live orphan; zeroed once it is known to have exited
+	finished bool // run() reached its end
+	obs      vectorObs
+}
+
 // reportSnap is what the agent says at one moment. The op and audit fields are
 // durable (written once at startup); the status fields are read live.
 type reportSnap struct {
 	OpCode            int
 	OpState           string
+	OpReason          string
 	OpDockerState     string
 	AuditEntries      int
 	AuditDockerState  string
@@ -197,6 +237,8 @@ type reportSnap struct {
 	StatusDockerState string
 	RunningImage      string
 	PinnedMatch       string
+	PriorRef          string
+	OperatorAction    string
 }
 
 func (s reportSnap) String() string {
@@ -204,18 +246,21 @@ func (s reportSnap) String() string {
 		s.OpCode, s.OpState, s.OpDockerState, s.AuditEntries, s.AuditDockerState, s.Entries, s.StatusDockerState, s.RunningImage, s.PinnedMatch)
 }
 
-// snapshot reads the reports. Any answer other than 200 (404 for an op that a
-// later success retired) is INVALID: an error must never read as "nothing
+// snapshot reads the reports. Any answer other than 200 is INVALID, with ONE
+// allowed exception: GET /v1/operations/{id} may answer 404 when retired is
+// true, i.e. a later operation was verified to have succeeded and to have
+// removed the interrupted record. An error must never read as "nothing
 // reported".
-func (r *crashRig) snapshot(opID string) reportSnap {
+func (o *orphanRun) snapshot(opID string, retired bool) reportSnap {
+	r := o.r
 	r.t.Helper()
 	var s reportSnap
 	var op opView
 	s.OpCode = r.get("/v1/operations/"+opID, &op)
-	if s.OpCode != http.StatusOK && s.OpCode != http.StatusNotFound {
-		r.t.Fatalf("INVALID: GET /v1/operations/%s answered HTTP %d", opID, s.OpCode)
+	if s.OpCode != http.StatusOK && (s.OpCode != http.StatusNotFound || !retired) {
+		r.t.Fatalf("INVALID: GET /v1/operations/%s answered HTTP %d (retired=%v)", opID, s.OpCode, retired)
 	}
-	s.OpState = op.State
+	s.OpState, s.OpReason = op.State, op.FailureReason
 	if intr, ok := op.Result["interrupted"].(map[string]interface{}); ok {
 		s.OpDockerState, _ = intr["docker_state"].(string) //nolint:errcheck // absent → ""
 	}
@@ -224,7 +269,7 @@ func (r *crashRig) snapshot(opID string) reportSnap {
 		r.t.Fatalf("INVALID: GET /v1/audit answered HTTP %d", code)
 	}
 	for _, e := range av.Events {
-		if e.OpID == opID && e.FailureReason == "agent_restart_interrupted" {
+		if e.OpID == opID && e.Outcome == "failed" && e.FailureReason == "agent_restart_interrupted" {
 			s.AuditEntries++
 			s.AuditDockerState, _ = e.Params["docker_state"].(string) //nolint:errcheck // absent → ""
 		}
@@ -235,17 +280,36 @@ func (r *crashRig) snapshot(opID string) reportSnap {
 	}
 	s.Entries = len(st.Interrupted)
 	for i := range st.Interrupted {
-		if st.Interrupted[i].OpID == opID {
-			s.OwnEntry = true
-			s.StatusDockerState = st.Interrupted[i].DockerState
-			s.RunningImage = st.Interrupted[i].RunningImage
+		if st.Interrupted[i].OpID != opID {
+			continue
 		}
+		s.OwnEntry = true
+		s.StatusDockerState = st.Interrupted[i].DockerState
+		s.RunningImage = st.Interrupted[i].RunningImage
+		s.PriorRef = st.Interrupted[i].PriorRef
+		s.OperatorAction = st.Interrupted[i].OperatorAction
 	}
 	s.PinnedMatch = "absent"
 	if st.PinnedTag != nil && st.PinnedTag.MatchesRunning != nil {
 		s.PinnedMatch = strconv.FormatBool(*st.PinnedTag.MatchesRunning)
 	}
+	if s.AuditEntries != 1 {
+		r.t.Fatalf("INVALID: %d interruption audit entries for %s, want exactly 1", s.AuditEntries, opID)
+	}
 	return s
+}
+
+// requireR1 is the restart's evidence that the interruption was reported:
+// the op answers 200 as failed(agent_restart_interrupted), and /v1/status
+// lists exactly it, so the later absence of an entry is evidence.
+func (o *orphanRun) requireR1(s *reportSnap) {
+	o.t.Helper()
+	if s.OpCode != http.StatusOK || s.OpState != "failed" || s.OpReason != "agent_restart_interrupted" {
+		o.t.Fatalf("INVALID: at restart the op answered HTTP %d %s(%s), want 200 failed(agent_restart_interrupted)", s.OpCode, s.OpState, s.OpReason)
+	}
+	if s.Entries != 1 || !s.OwnEntry {
+		o.t.Fatalf("INVALID: at restart /v1/status lists %d interrupted op(s) (own=%v), want exactly the crashed op", s.Entries, s.OwnEntry)
+	}
 }
 
 // procStat reads a process's state and parent from /proc/<pid>/stat.
@@ -316,41 +380,23 @@ func waitProc(pid int, alive bool, budget time.Duration) bool {
 	return procAlive(pid) == alive
 }
 
-// vectorObs is everything one run of a vector observed.
-type vectorObs struct {
-	orphanPID, orphanPPID, agentPID int
-	atKill, atRestart, afterOp      dockerTruth
-	afterRelease                    dockerTruth
-	r1, r2, r3                      reportSnap
-	laterKind, laterState           string
-	completed                       bool // the held command wrote orphan_done after release
-}
-
-// orphanRun drives one vector. reaped selects today's kill() (control);
-// laterOp admits and completes the operator's next operation while the
-// orphan is alive, before releasing it.
-type orphanRun struct {
-	t       *testing.T
-	r       *crashRig
-	kp      *killPoint
-	shim    string
-	reaped  bool
-	laterOp bool
-	pid     int // the live orphan; zeroed once it is known to have exited
-	obs     vectorObs
-}
-
 func newOrphanRun(t *testing.T, kp *killPoint, reaped, laterOp bool) *orphanRun {
 	t.Helper()
 	r := newCrashRig(t)
 	shim := filepath.Join(r.shimDir, "docker")
 	if err := os.WriteFile(shim, []byte(orphanModelScript(t, r.model)), 0o700); err != nil { // #nosec G306 -- must be executable
-		t.Fatal(err)
+		t.Fatalf("INVALID: install the orphan model: %v", err)
 	}
 	o := &orphanRun{t: t, r: r, kp: kp, shim: shim, reaped: reaped, laterOp: laterOp}
 	// Registered after newCrashRig's, so it runs first: never leave a held
 	// model command behind a failed run, and never signal a reused PID.
 	t.Cleanup(func() {
+		if t.Failed() && !o.finished {
+			// A shared rig helper (start, get, post, applyUpgrade, waitOp)
+			// failed with its own message: mark it, so it is never read as a
+			// pinned finding.
+			t.Logf("INVALID: %s (reaped=%v later=%v) did not run to its end", t.Name(), reaped, laterOp)
+		}
 		_ = os.WriteFile(filepath.Join(r.model, "orphan_release"), []byte("1\n"), 0o600)
 		if o.pid > 1 && procAlive(o.pid) && runsShim(o.pid, o.shim) {
 			_ = syscall.Kill(o.pid, syscall.SIGKILL)
@@ -418,16 +464,32 @@ func (o *orphanRun) requireOrphan(when string) {
 	}
 }
 
-// later admits the operator's next operation, as /v1/status advises it, and
-// runs it to completion while the orphan is still alive.
+const (
+	adviceRetry    = "Submit it again"           // operator_action for docker_state unchanged
+	adviceRollback = "image_ref=prior_ref"       // operator_action naming the rollback to prior_ref
+	actionRetry    = "upgrade->B"                // what the test submits for adviceRetry
+	actionRollback = "rollback->A (prior_ref A)" // what the test submits for adviceRollback
+)
+
+// later admits the operator's next operation and runs it to completion while
+// the orphan is still alive. The test chooses it from docker_state, and
+// checks that /v1/status advises the same action and, for a rollback, names
+// the same prior_ref; a disagreement is INVALID.
 func (o *orphanRun) later() {
 	t, r := o.t, o.r
 	t.Helper()
 	path, body := "/v1/upgrades/apply", map[string]interface{}{"image_ref": refB}
-	o.obs.laterKind = "upgrade->B"
+	advice := adviceRetry
+	o.obs.laterKind = actionRetry
 	if o.obs.r1.StatusDockerState != "unchanged" {
 		path, body = "/v1/rollbacks", map[string]interface{}{"mode": "image", "image_ref": refA}
-		o.obs.laterKind = "rollback->A"
+		o.obs.laterKind, advice = actionRollback, adviceRollback
+		if o.obs.r1.PriorRef != refA {
+			t.Fatalf("INVALID: /v1/status names prior_ref %q, the test would roll back to %q", o.obs.r1.PriorRef, refA)
+		}
+	}
+	if !strings.Contains(o.obs.r1.OperatorAction, advice) {
+		t.Fatalf("INVALID: the test would submit %s but /v1/status advises: %q", o.obs.laterKind, o.obs.r1.OperatorAction)
 	}
 	var op opView
 	if code := r.post(path, body, &op); code != http.StatusAccepted {
@@ -436,6 +498,9 @@ func (o *orphanRun) later() {
 	}
 	done := r.waitOp(op.OpID)
 	o.obs.laterState = done.State
+	if done.State == "succeeded" {
+		o.obs.retired = len(r.waitJournal()) == 0
+	}
 	if !o.reaped {
 		o.requireOrphan("when the later operation finished")
 	}
@@ -468,14 +533,11 @@ func (o *orphanRun) run() vectorObs {
 
 	r.clearCalls()
 	r.start()
-	o.obs.r1 = r.snapshot(opID)
-	// The "entries" signal must be live before its absence is used as evidence.
-	if o.obs.r1.Entries != 1 || !o.obs.r1.OwnEntry {
-		t.Fatalf("INVALID: at restart /v1/status lists %d interrupted op(s) (own=%v), want exactly the crashed op", o.obs.r1.Entries, o.obs.r1.OwnEntry)
-	}
+	o.obs.r1 = o.snapshot(opID, false)
+	o.requireR1(&o.obs.r1)
 	o.obs.atRestart = r.truth()
 	if m := r.mutatingCalls(); len(m) != 0 {
-		t.Errorf("restart issued state-changing docker commands: %v", m)
+		t.Fatalf("INVALID: restart issued state-changing docker commands: %v", m)
 	}
 	if !o.reaped {
 		o.requireOrphan("while the restarted agent reported")
@@ -488,11 +550,19 @@ func (o *orphanRun) run() vectorObs {
 
 	o.release()
 	o.obs.afterRelease = r.truth()
-	o.obs.r2 = r.snapshot(opID)
+	o.obs.r2 = o.snapshot(opID, o.obs.retired)
 	r.kill()
 	r.start()
-	o.obs.r3 = r.snapshot(opID)
+	o.obs.r3 = o.snapshot(opID, o.obs.retired)
+	o.finished = true
 	return o.obs
+}
+
+// complete prints the machine-checkable line run.sh counts: one per flow
+// that ran to its end.
+func complete(t *testing.T, flow string) {
+	t.Helper()
+	t.Logf("ORPHAN-COMPLETE %s flow=%s", t.Name(), flow)
 }
 
 // classifyReport answers Q1 and Q2 for a report-flow run.
@@ -521,18 +591,50 @@ func tagResidue(o *vectorObs, base dockerTruth) string {
 	return "residue_unreported"
 }
 
-// classifyLater answers Q3 for a later-operation run.
-func classifyLater(o *vectorObs) string {
+// classifyLater answers Q3 for a later-operation run, in two parts: the late
+// mutation after a reported success (which field moved after the later
+// operation finished), and its visibility in every signal /v1/status offers
+// at R2 and R3 (interrupted entries, pinned_tag absent / true / false).
+func classifyLater(o *vectorObs) (mutation, visibility string) {
 	if o.laterState != "succeeded" {
-		return "later_op_" + o.laterState
+		return "later_op_" + o.laterState, "n/a"
 	}
-	if o.afterRelease == o.afterOp {
+	tag := o.afterRelease.Pinned != o.afterOp.Pinned
+	ctr := o.afterRelease.Running != o.afterOp.Running
+	switch {
+	case tag && ctr:
+		mutation = "late_tag_and_container_move"
+	case tag:
+		mutation = "late_tag_move"
+	case ctr:
+		mutation = "late_container_move"
+	default:
+		return "none", "n/a"
+	}
+	v2, v3 := visibilityOf(&o.r2), visibilityOf(&o.r3)
+	if v2 == v3 {
+		return mutation, v2
+	}
+	return mutation, "R2:" + v2 + "/R3:" + v3
+}
+
+// visibilityOf names what one status read shows: an interrupted entry,
+// and pinned_tag reporting a mismatch or claiming a match.
+func visibilityOf(s *reportSnap) string {
+	var parts []string
+	if s.Entries > 0 {
+		parts = append(parts, "interrupted_entry")
+	}
+	switch s.PinnedMatch {
+	case "false":
+		parts = append(parts, "pinned_tag_mismatch")
+	case "true":
+		parts = append(parts, "pinned_tag_claims_match")
+	}
+	if len(parts) == 0 {
 		return "none"
 	}
-	if o.r2.Entries == 0 && o.r3.Entries == 0 {
-		return "false_success_unreported"
-	}
-	return "false_success_reported"
+	return strings.Join(parts, "+")
 }
 
 // checkSensitivity is A1/A2 (report flow) and the completion check (both
@@ -585,7 +687,8 @@ func checkTableCoversKillPoints(t *testing.T) {
 // and compares the classification with orphanExpectations.
 func TestOrphanSurvival_CrashVectors(t *testing.T) {
 	checkTableCoversKillPoints(t)
-	for _, kp := range orphanKillPoints() {
+	kps := orphanKillPoints()
+	for _, kp := range kps {
 		t.Run(kp.name, func(t *testing.T) {
 			exp := orphanExpectations[kp.name]
 			rep := newOrphanRun(t, &kp, false, false).run()
@@ -593,47 +696,89 @@ func TestOrphanSurvival_CrashVectors(t *testing.T) {
 			q1, q2 := classifyReport(&rep)
 			t.Logf("VECTOR %s report: orphan pid=%d ppid=%d (agent %d) completed=%v | kill %s | restart %s | released %s\n  R1 %s\n  R2 %s\n  R3 %s",
 				kp.name, rep.orphanPID, rep.orphanPPID, rep.agentPID, rep.completed, rep.atKill, rep.atRestart, rep.afterRelease, rep.r1, rep.r2, rep.r3)
+			complete(t, "report")
 
 			lat := newOrphanRun(t, &kp, false, true).run()
 			checkSensitivity(t, &kp, &exp, &lat, false)
-			q3 := classifyLater(&lat)
-			t.Logf("VECTOR %s later: %s=%s while orphan %d alive, completed=%v | restart %s | after op %s | released %s\n  R2 %s\n  R3 %s",
-				kp.name, lat.laterKind, lat.laterState, lat.orphanPID, lat.completed, lat.atRestart, lat.afterOp, lat.afterRelease, lat.r2, lat.r3)
+			q3, q3vis := classifyLater(&lat)
+			t.Logf("VECTOR %s later: %s=%s retired=%v while orphan %d alive, completed=%v | restart %s | after op %s | released %s\n  R2 %s\n  R3 %s",
+				kp.name, lat.laterKind, lat.laterState, lat.retired, lat.orphanPID, lat.completed, lat.atRestart, lat.afterOp, lat.afterRelease, lat.r2, lat.r3)
 
-			t.Logf("CLASSIFY %s: mutates=%v Q1=%s Q2=%s Q3=%s (expected %s/%s/%s, %s)", kp.name, exp.mutates, q1, q2, q3, exp.q1, exp.q2, exp.q3, exp.status)
-			if q1 != exp.q1 || q2 != exp.q2 || q3 != exp.q3 {
-				t.Errorf("EXPECTATION MISMATCH %s: measured Q1=%s Q2=%s Q3=%s, pinned Q1=%s Q2=%s Q3=%s — update orphanExpectations deliberately (pinned: %s)",
-					kp.name, q1, q2, q3, exp.q1, exp.q2, exp.q3, exp.observed)
+			t.Logf("CLASSIFY %s: mutates=%v Q1=%s Q2=%s Q3=%s visible=%s (expected %s/%s/%s visible=%s, %s)",
+				kp.name, exp.mutates, q1, q2, q3, q3vis, exp.q1, exp.q2, exp.q3, exp.q3vis, exp.status)
+			if q1 != exp.q1 || q2 != exp.q2 || q3 != exp.q3 || q3vis != exp.q3vis {
+				t.Errorf("EXPECTATION MISMATCH %s: measured Q1=%s Q2=%s Q3=%s visible=%s, pinned Q1=%s Q2=%s Q3=%s visible=%s — update orphanExpectations deliberately (pinned: %s)",
+					t.Name(), q1, q2, q3, q3vis, exp.q1, exp.q2, exp.q3, exp.q3vis, exp.observed)
 			}
+			complete(t, "later")
 		})
 	}
+	t.Logf("ORPHAN-SUMMARY %s kill_points=%d flows_expected=%d", t.Name(), len(kps), 2*len(kps))
 }
 
 // TestOrphanSurvival_ReapedControl is A3: the same vectors with the model
 // command reaped at the crash, as every existing crash test does. Nothing may
 // diverge, so whatever the orphan vectors find comes from survival alone.
 func TestOrphanSurvival_ReapedControl(t *testing.T) {
-	for _, kp := range orphanKillPoints() {
+	kps := orphanKillPoints()
+	for _, kp := range kps {
 		t.Run(kp.name, func(t *testing.T) {
 			for _, laterOp := range []bool{false, true} {
 				o := newOrphanRun(t, &kp, true, laterOp).run()
 				var got []string
 				if laterOp {
-					got = append(got, classifyLater(&o))
+					m, v := classifyLater(&o)
+					got = append(got, m, v)
 				} else {
 					q1, q2 := classifyReport(&o)
 					got = append(got, q1, q2)
 				}
 				t.Logf("CONTROL %s later=%v: restart %s after-op %s released %s completed=%v → %v", kp.name, laterOp, o.atRestart, o.afterOp, o.afterRelease, o.completed, got)
 				if o.afterRelease != o.afterOp || o.completed {
-					t.Errorf("A3: with the model command reaped, Docker still changed or the held command completed after release (%s -> %s, completed=%v)", o.afterOp, o.afterRelease, o.completed)
+					t.Errorf("A3: %s: with the model command reaped, Docker still changed or the held command completed after release (%s -> %s, completed=%v)", t.Name(), o.afterOp, o.afterRelease, o.completed)
 				}
 				for _, g := range got {
-					if g != "none" && g != "live_stable" {
-						t.Errorf("A3: control classified %q, want none/live_stable", g)
+					if g != "none" && g != "live_stable" && g != "n/a" {
+						t.Errorf("A3: %s: control classified %q, want none/live_stable/n/a", t.Name(), g)
 					}
 				}
+				complete(t, fmt.Sprintf("control-later=%v", laterOp))
 			}
 		})
+	}
+	t.Logf("ORPHAN-SUMMARY %s kill_points=%d flows_expected=%d", t.Name(), len(kps), 2*len(kps))
+}
+
+// TestOrphanClassifier_Later is a pure test of classifyLater: no agent. It
+// pins that each status signal changes the visibility label, so a future
+// pinned_tag report without a journal record cannot pass unnoticed.
+func TestOrphanClassifier_Later(t *testing.T) {
+	moved := vectorObs{laterState: "succeeded",
+		afterOp:      dockerTruth{Pinned: imgA, Running: imgA},
+		afterRelease: dockerTruth{Pinned: imgB, Running: imgA}}
+	snap := func(entries int, pinned string) reportSnap { return reportSnap{Entries: entries, PinnedMatch: pinned} }
+	cases := []struct {
+		name           string
+		obs            vectorObs
+		r2, r3         reportSnap
+		wantM, wantVis string
+	}{
+		{"today: no entry, pinned_tag absent", moved, snap(0, "absent"), snap(0, "absent"), "late_tag_move", "none"},
+		{"future: no entry, pinned_tag mismatch", moved, snap(0, "false"), snap(0, "false"), "late_tag_move", "pinned_tag_mismatch"},
+		{"entry and pinned_tag mismatch", moved, snap(1, "false"), snap(1, "false"), "late_tag_move", "interrupted_entry+pinned_tag_mismatch"},
+		{"no entry, pinned_tag claims a match", moved, snap(0, "true"), snap(0, "true"), "late_tag_move", "pinned_tag_claims_match"},
+		{"visible at R2 only", moved, snap(0, "false"), snap(0, "absent"), "late_tag_move", "R2:pinned_tag_mismatch/R3:none"},
+		{"no late mutation", vectorObs{laterState: "succeeded", afterOp: moved.afterOp, afterRelease: moved.afterOp}, snap(0, "absent"), snap(0, "absent"), "none", "n/a"},
+		{"container moved", vectorObs{laterState: "succeeded", afterOp: moved.afterOp, afterRelease: dockerTruth{Pinned: imgA, Running: imgB}}, snap(0, "absent"), snap(0, "absent"), "late_container_move", "none"},
+		{"later op failed", vectorObs{laterState: "failed"}, snap(0, "absent"), snap(0, "absent"), "later_op_failed", "n/a"},
+	}
+	for i := range cases {
+		c := &cases[i]
+		c.obs.r2, c.obs.r3 = c.r2, c.r3
+		m, v := classifyLater(&c.obs)
+		t.Logf("CLASSIFIER %-40s -> %s / %s", c.name, m, v)
+		if m != c.wantM || v != c.wantVis {
+			t.Errorf("INVALID: classifier %s = %s/%s, want %s/%s", c.name, m, v, c.wantM, c.wantVis)
+		}
 	}
 }

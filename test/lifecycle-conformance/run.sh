@@ -2,7 +2,7 @@
 # Model-to-implementation conformance for the maintenance agent (shadow, non-blocking).
 #   usage: test/lifecycle-conformance/run.sh [report dir]
 # Exit 0 only if the model check completed, all three conformance suites RAN and passed, and
-# both orphan-survival suites RAN and passed.
+# every orphan-survival vector and control flow ran to its end and passed.
 # Exit 1 = a conformance vector mismatched, an orphan-survival finding no longer matches its
 # pinned expectation, or an owner-approved property failed.
 # Exit 2 = incomplete (budget hit, vacuous property, a suite skipped or missing, an orphan
@@ -45,26 +45,48 @@ fi
 
 echo "== orphan survival: real agent binary, the in-flight docker command outlives the agent =="
 # Findings are pinned as `open` in orphanExpectations; a finding is not a failure, a change
-# in one is. Any non-zero go test exit is INCOMPLETE (2) unless the run is provably complete
-# and only a pinned expectation or the reaped control disagreed (1).
+# in one is. Exit 0 or 1 needs POSITIVE evidence that every vector and control flow ran to
+# its end; 1 additionally needs every failed subtest to be explained by its own EXPECTATION
+# MISMATCH or A3 line. Anything else non-zero is INCOMPLETE (2).
 OLOG="$REPORT/orphan-survival.log"
-timeout 300 go test -tags "$TAG" . -run '^TestOrphanSurvival_' -count=1 -timeout 240s -v > "$OLOG" 2>&1
+OVEC=7                # kill points with a docker command in flight: killPoints() minus "health"
+OFLOWS=$((2 * OVEC))  # report + later-operation flow per vector; the reaped control runs the same 14
+timeout 300 go test -tags "$TAG" . -run '^TestOrphan(Survival|Classifier)_' -count=1 -timeout 240s -v > "$OLOG" 2>&1
 orc=$?
-grep -E '^(--- (PASS|FAIL|SKIP): TestOrphanSurvival|ok|FAIL|PASS)|CLASSIFY' "$OLOG" | head -40 || true
+grep -E '^(--- (PASS|FAIL|SKIP): TestOrphan|ok|FAIL|PASS)|CLASSIFY|ORPHAN-SUMMARY' "$OLOG" | head -40 || true
 # Never truncated: every line that decides the verdict.
-grep -E 'EXPECTATION MISMATCH|INVALID|A3:|panic:|test timed out' "$OLOG" || true
-opassed=$(grep -cE '^--- PASS: TestOrphanSurvival_(CrashVectors|ReapedControl) ' "$OLOG" || true)
-oresults=$(grep -cE '^--- (PASS|FAIL): TestOrphanSurvival_(CrashVectors|ReapedControl) ' "$OLOG" || true)
-if [ "$orc" -eq 0 ]; then
-  if [ "$opassed" -ne 2 ] || grep -q -- '--- SKIP' "$OLOG"; then
-    echo "INCOMPLETE: expected 2 orphan-survival suites to run and pass with no skipped vector, saw $opassed passing -- refusing to report a pass"; status=2
-  else
-    echo "orphan survival: 2/2 suites ran and passed (findings pinned as open; see the CLASSIFY lines)"
-  fi
-elif grep -qE 'EXPECTATION MISMATCH|A3:' "$OLOG" && ! grep -qE 'panic:|test timed out|INVALID' "$OLOG" && [ "$oresults" -eq 2 ]; then
-  echo "ORPHAN SURVIVAL MISMATCH (go test exit $orc): a pinned finding or the reaped control changed; see $OLOG"; [ "$status" -lt 1 ] && status=1
+grep -E 'EXPECTATION MISMATCH|INVALID|A3:|panic:|test timed out|--- FAIL' "$OLOG" || true
+ocv=$(grep -cE "ORPHAN-COMPLETE TestOrphanSurvival_CrashVectors/[^ ]+ flow=(report|later)\$" "$OLOG" || true)
+occ=$(grep -cE "ORPHAN-COMPLETE TestOrphanSurvival_ReapedControl/[^ ]+ flow=control-later=(true|false)\$" "$OLOG" || true)
+osum=$(grep -cE "ORPHAN-SUMMARY TestOrphanSurvival_(CrashVectors|ReapedControl) kill_points=$OVEC flows_expected=$OFLOWS\$" "$OLOG" || true)
+otop=$(grep -cE '^--- (PASS|FAIL): TestOrphan(Survival_CrashVectors|Survival_ReapedControl|Classifier_Later) ' "$OLOG" || true)
+ocomplete=0
+if [ "$ocv" -eq "$OFLOWS" ] && [ "$occ" -eq "$OFLOWS" ] && [ "$osum" -eq 2 ] && [ "$otop" -eq 3 ] && ! grep -q -- '--- SKIP' "$OLOG"; then
+  ocomplete=1
+fi
+obroken=0
+grep -qE 'INVALID|panic:|test timed out' "$OLOG" && obroken=1
+# Every failed subtest must carry its own explanation; a failed top-level test must be one of
+# the two vector suites and must have a failed subtest.
+ofsub=0; ounexplained=0
+for n in $(grep -oE '^ +--- FAIL: TestOrphanSurvival_(CrashVectors|ReapedControl)/[^ ]+' "$OLOG" | awk '{print $3}'); do
+  ofsub=$((ofsub + 1))
+  grep -qF -e "EXPECTATION MISMATCH $n:" -e "A3: $n:" "$OLOG" || ounexplained=$((ounexplained + 1))
+done
+for top in $(grep -oE '^--- FAIL: TestOrphan[A-Za-z_]+' "$OLOG" | awk '{print $3}'); do
+  case "$top" in
+    TestOrphanSurvival_CrashVectors|TestOrphanSurvival_ReapedControl)
+      grep -qE "^ +--- FAIL: $top/" "$OLOG" || ounexplained=$((ounexplained + 1)) ;;
+    *) ounexplained=$((ounexplained + 1)) ;;
+  esac
+done
+echo "orphan survival evidence: complete flows $ocv+$occ of $OFLOWS+$OFLOWS, summaries $osum/2, suite results $otop/3, failed subtests $ofsub (unexplained $ounexplained), invalid/panic/timeout=$obroken, go test exit $orc"
+if [ "$orc" -eq 0 ] && [ "$ocomplete" -eq 1 ] && ! grep -q -- '--- FAIL' "$OLOG"; then
+  echo "orphan survival: all suites ran to completion and passed (findings pinned as open; see the CLASSIFY lines)"
+elif [ "$orc" -ne 0 ] && [ "$ocomplete" -eq 1 ] && [ "$obroken" -eq 0 ] && [ "$ofsub" -ge 1 ] && [ "$ounexplained" -eq 0 ]; then
+  echo "ORPHAN SURVIVAL MISMATCH: only pinned findings or the reaped control changed; see $OLOG"; [ "$status" -lt 1 ] && status=1
 else
-  echo "INCOMPLETE: orphan-survival run did not complete or did not exercise orphan survival (go test exit $orc); see $OLOG"; status=2
+  echo "INCOMPLETE: orphan-survival run is not provably complete, or failed for a reason other than a pinned finding; see $OLOG"; status=2
 fi
 echo "model check exit=$mc  overall exit=$status  reports: $REPORT"
 exit "$status"

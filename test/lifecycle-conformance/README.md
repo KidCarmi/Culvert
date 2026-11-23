@@ -77,12 +77,21 @@ operation while the command is still alive.
 - Negative controls in the code: a mutating in-flight command (`tag`,
   `compose up`) must change the model after release, write a completion marker
   in both flows, and a read-only one must not change the model; every report
-  read must answer 200 and the restart must list the interrupted op. Any of
-  these failing is `INVALID`. `TestOrphanSurvival_ReapedControl` repeats the
-  vectors with the command reaped and requires no divergence.
-- Findings are pinned in `orphanExpectations`, every entry `open`. A finding
-  is not a failure; a change in one (either direction) is exit 1. Any other
-  failure of the run (INVALID, panic, timeout, rig failure) is exit 2.
+  read must answer 200 (404 for the operation only after a later operation
+  verifiably succeeded and retired the record); at the restart the operation is
+  `failed(agent_restart_interrupted)` with exactly one audit entry and is the
+  only interrupted entry; the later operation must be the one `/v1/status`
+  advises. Every other failure, including a shared rig helper's, is `INVALID`.
+  `TestOrphanSurvival_ReapedControl` repeats the vectors with the command
+  reaped and requires no divergence.
+- Findings are pinned in `orphanExpectations`, every entry `open`. Q3 is pinned
+  in two parts: the late mutation after a reported success, and what every
+  `/v1/status` signal (interrupted entries, `pinned_tag` absent / true / false)
+  shows of it. `TestOrphanClassifier_Later` checks the classifier on synthetic
+  observations. A finding is not a failure. Exit 1 requires positive evidence
+  of a complete run (one `ORPHAN-COMPLETE` line per flow, 14 + 14, and both
+  `ORPHAN-SUMMARY` lines) and every failed subtest explained by its own
+  `EXPECTATION MISMATCH` or `A3:` line. Anything else non-zero is exit 2.
 - What Q1 establishes: the durable report (operation result, audit entry) is
   conservative, since it already says `indeterminate` wherever the orphan can act,
   and a conclusive-looking live read (`running_image`, `pinned_tag`) can change
@@ -113,9 +122,9 @@ test/lifecycle-conformance/run.sh /tmp/lifecycle-report
 
 | Exit | Meaning |
 |---|---|
-| 0 | Model check complete; all three conformance suites and both orphan-survival suites ran and passed |
+| 0 | Model check complete; all three conformance suites ran and passed; every orphan-survival flow ran to its end and passed |
 | 1 | A conformance vector mismatched the real code, an orphan-survival finding no longer matches its pinned expectation, or an owner-**approved** property failed |
-| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, a skipped or missing suite, or an orphan-survival run that failed for any reason other than a pinned expectation or the reaped control (INVALID, panic, timeout, rig failure). Never reported as a pass |
+| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, a skipped or missing suite, or an orphan-survival run that is not provably complete or failed for any reason other than a pinned expectation or the reaped control (INVALID, panic, timeout, rig failure, a flow that did not reach its end). Never reported as a pass |
 
 Exit 2 takes precedence over exit 1 and nothing downgrades it: a run with a
 failing unapproved property **and** a vacuous property is incomplete.
@@ -135,8 +144,8 @@ go build -tags lifecycle_conformance -o /tmp/lifecyclecheck ./internal/lifecycle
 /tmp/lifecyclecheck -include-proposed -fail-only-approved -report /tmp/lifecycle-report
 # the three conformance suites
 go test -tags lifecycle_conformance -count=1 -run TestModelConformance ./internal/server/
-# the orphan-survival vectors and their reaped control (Linux; builds the agent)
-go test -tags lifecycle_conformance -count=1 -run '^TestOrphanSurvival_' -v .
+# the orphan-survival vectors, their reaped control and the classifier test (Linux; builds the agent)
+go test -tags lifecycle_conformance -count=1 -run '^TestOrphan(Survival|Classifier)_' -v .
 ```
 
 `lifecyclecheck` flags: `-include-proposed` (evaluate `proposed` properties as
