@@ -2800,8 +2800,12 @@ func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, hos
 // host from it. Extracted from apiPolicyTest so the three tiers stay readable
 // in one place and the handler stays within the function-length bound.
 func policyTestAuthority(w http.ResponseWriter, r *http.Request, host string) (authority string, ok bool) {
-	if host == "" {
-		http.Error(w, "host is required", http.StatusBadRequest)
+	// Empty, or a zoned IPv6 destination: the data path refuses the latter ahead
+	// of every matcher (destIPv6Zoned), so no policy answer for it can be right.
+	// Checked on the typed input, before any parsing: "[::1%25lo]" is a zone
+	// here ("25lo") exactly as its decoded form "[::1%lo]" is on the wire.
+	if why := policyTestHostRefusal(host); why != "" {
+		http.Error(w, why, http.StatusBadRequest)
 		return "", false
 	}
 	// CHAOS-69: this handler reaches walkPolicyTestRules and lookupHostCategory

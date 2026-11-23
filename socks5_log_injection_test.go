@@ -416,17 +416,18 @@ func renderExpr(t *testing.T, fset *token.FileSet, e ast.Expr) string {
 // less than it appears to — the same lesson as "sanitising one argument of a
 // call does not sanitise the call", one level up.
 var destinationSinks = map[string]string{
-	"normalizeHostStrict":  "pure canonicalisation in internal/hostutil; logs nothing",
-	"IsBlocked":            "internal/blocklist; its own host log lines already route through obs.Sanitize",
-	"pluginDecision":       "plugin.Decide sanitises the destination before obs.Printf (SEC-SOCKS5-LOG-1 round 2)",
-	"isPrivateHostBounded": "security.go wrapper over internal/ssrf.PrivateHostBudget; neither contains any logging — the destination reaches only the resolver and the returned error, which is sanitised at the log site",
-	"recordRequest":        "structured JSONL — the encoder escapes control bytes",
-	"socks5Relay":          "byte relay; its only destination sink is recordTunnelClose — structured JSONL",
-	"socks5RelayPrefixed":  "socks5Relay's body (socks5Relay delegates to it); its only destination sink is recordTunnelClose — structured JSONL",
-	"socks5GuardAndDial":   "walled itself: it is in socks5WalledFuncs, so both walls inspect its log sites and its own destination sinks",
-	"JoinHostPort":         "net; string construction only",
-	"DialContext":          "net.Dialer; the error it returns is sanitised at the log site",
-	"sanitizeLog":          "the sanitiser itself",
+	"normalizeHostStrict":    "pure canonicalisation in internal/hostutil; logs nothing",
+	"socks5DestHostValidity": "proxy_host_bounds.go; calls only destIPv6Zoned (netip parsing) and normalizeHostStrict — logs nothing, stores nothing; the refusal reason it returns is one of two constants, never destination bytes",
+	"IsBlocked":              "internal/blocklist; its own host log lines already route through obs.Sanitize",
+	"pluginDecision":         "plugin.Decide sanitises the destination before obs.Printf (SEC-SOCKS5-LOG-1 round 2)",
+	"isPrivateHostBounded":   "security.go wrapper over internal/ssrf.PrivateHostBudget; neither contains any logging — the destination reaches only the resolver and the returned error, which is sanitised at the log site",
+	"recordRequest":          "structured JSONL — the encoder escapes control bytes",
+	"socks5Relay":            "byte relay; its only destination sink is recordTunnelClose — structured JSONL",
+	"socks5RelayPrefixed":    "socks5Relay's body (socks5Relay delegates to it); its only destination sink is recordTunnelClose — structured JSONL",
+	"socks5GuardAndDial":     "walled itself: it is in socks5WalledFuncs, so both walls inspect its log sites and its own destination sinks",
+	"JoinHostPort":           "net; string construction only",
+	"DialContext":            "net.Dialer; the error it returns is sanitised at the log site",
+	"sanitizeLog":            "the sanitiser itself",
 	// CHAOS-69 destination-authority bound. All three receive the destination
 	// only to MEASURE it, which is the whole design decision behind the bound's
 	// log line: the LENGTH is what an operator needs to tell a probe from a

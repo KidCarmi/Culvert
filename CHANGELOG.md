@@ -9,6 +9,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A zoned IPv6 destination can no longer slip past a rule for the same
+  address.** A request for `[::1%25lo]` reached the proxy as the authority
+  `[::1%lo]`. No literal matcher canonicalizes a zoned address, so a Block rule
+  for `::1` did not match it — and the dialer honoured the zone and connected
+  to `::1` anyway. Under `default_action=allow` the request was forwarded
+  (measured on an IPv6 host: no rule matched, `200`, backend reached). A zone
+  names an interface on the proxy host and has no meaning across a proxy
+  boundary (RFC 9844), so such a destination is now **refused** rather than
+  normalized: `400` with status `INVALID_HOST` (`source=ipv6-zone`) on plain
+  HTTP and CONNECT, a general-failure reply on SOCKS5 (whose DOMAIN form could
+  carry the same text), before authentication, any matcher or any dial. The
+  Policy Tester refuses the same input instead of reporting a policy answer
+  for it. Zone-free IPv6 destinations and internationalized hostnames —
+  including percent-encoded ones — are unaffected.
+
 - **An anonymous client can no longer park ~1 GiB in each interactive-login
   state store.** The OIDC PKCE and SAML request stores are filled by
   unauthenticated requests (the proxy's captive-portal path and the public
