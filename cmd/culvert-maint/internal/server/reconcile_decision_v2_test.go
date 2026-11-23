@@ -91,7 +91,10 @@ func TestReconcileDecisionV2_FailureMatrix(t *testing.T) {
 		{"A11 terminal, tag left ahead P/T", runTag(idP, idT), actV2Realign, "tag_ahead_container_on_prior"},
 		{"R1 rb_pull T/T not armed", runTag(idT, idT), actV2RecoveryRequired, "target_live_ungated"},
 		{"R1 rb_pull T/T armed (Decision 1: finish)", all(runTag(idT, idT), armed), actV2RetagFinishRollback, "rollback_armed_tag_not_moved"},
-		{"R1 rb P/T armed", all(runTag(idP, idT), armed), actV2Realign, "tag_ahead_container_on_prior"},
+		{"R1 rb P/T armed (retag, then retire only on a fresh probe)", all(runTag(idP, idT), armed), actV2Realign, "armed_tag_ahead_container_on_prior"},
+		{"F12 P/T armed at restarting (AGT-002 tag-back failed)", all(ph(journal.PhaseRestarting), runTag(idP, idT), armed), actV2Realign, "armed_tag_ahead_container_on_prior"},
+		{"F12 P/T armed, the probe plays no part in the decision", all(runTag(idP, idT), armed, probe(probeNotReady)), actV2Realign, "armed_tag_ahead_container_on_prior"},
+		{"F12 P/T armed, prior not local", all(runTag(idP, idT), armed, func(in *reconcileInputsV2) { in.PriorLocalID = "" }), actV2RecoveryRequired, "prior_not_restorable"},
 		{"R1 rb P/P, ready", all(armed, probe(probeReady)), actV2Noop, "armed_rollback_prior_ready"},
 		{"R2 rb_restart after tag T/P armed", all(runTag(idT, idP), armed), actV2FinishRollback, "rollback_interrupted"},
 		{"R2 T/P without marker (older agent or operator)", runTag(idT, idP), actV2RecoveryRequired, "tag_on_prior_rollback_unproven"},
@@ -447,6 +450,12 @@ func v2PlanViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide func(r
 				return "RV14 an `up` only with the tag on the validated prior image id"
 			}
 			cur.RunningImageID, cur.ContainerRunning = cur.TagImageID, true
+		case stepProbe:
+			ready := cur
+			ready.Probe = probeReady
+			if decide(ready) != st.expect {
+				return "RV15 a ready prior does not pass the probe after the plan's own steps"
+			}
 		}
 	}
 	if len(steps) > 0 && (prior == "" || normID(cur.RunningImageID) != prior || normID(cur.TagImageID) != prior) {
@@ -455,7 +464,21 @@ func v2PlanViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide func(r
 	if v.Action == actV2RetagFinishRollback && (len(steps) == 0 || steps[0].op != stepTagPrior) {
 		return "RV15 a T/T-armed finish retags to PriorRef before anything else"
 	}
-	return ""
+	return v2ArmedRetireViolation(in, steps)
+}
+
+// v2ArmedRetireViolation: RV17. No acting plan retires an armed record without
+// a fresh ReadyOK of the prior: it ends with the gate after its `up`, or with
+// stepProbe expecting the armed-on-prior retirement.
+func v2ArmedRetireViolation(in *reconcileInputsV2, steps []reconcileStep) string {
+	if !in.RollbackArmed || len(steps) == 0 {
+		return ""
+	}
+	last := steps[len(steps)-1]
+	if last.op == stepGate || (last.op == stepProbe && last.expect == verdictArmedPriorReady) {
+		return ""
+	}
+	return "RV17 an armed record is retired only after a fresh readiness check of the prior"
 }
 
 // v2PlanShape is the structural half of RV13.
@@ -473,6 +496,10 @@ func v2PlanShape(steps []reconcileStep, v reconcileVerdictV2) string {
 		case stepGate:
 			if i == 0 || steps[i-1].op != stepUp {
 				return "RV13 a gate only right after an `up`"
+			}
+		case stepProbe:
+			if i != len(steps)-1 || ups > 0 {
+				return "RV13 a probe only as the last step of a plan that restarts nothing"
 			}
 		default:
 			return "RV13 a step outside the closed set"
@@ -545,6 +572,7 @@ func TestReconcileDecisionV2_ExhaustiveProperties(t *testing.T) {
 		"noop/safe_boundary_unchanged", "noop/already_on_prior", "noop/rollback_never_moved_tag",
 		"noop/armed_rollback_prior_ready",
 		"realign/tag_ahead_container_on_prior", "finish_rollback/rollback_interrupted", "adopt/verified_target_live",
+		"realign/armed_tag_ahead_container_on_prior",
 		"finish_rollback_retag/rollback_armed_tag_not_moved",
 		"recovery_required/rollback_armed_at_verified", "recovery_required/armed_rollback_prior_not_ready",
 		"defer/docker_unavailable",
@@ -674,6 +702,12 @@ func v2ArmedFinishMutants() map[string]func(reconcileInputsV2) reconcileVerdictV
 		"finish T/T from a record whose refs failed validation":  v2Promote(func(c *reconcileInputsV2) { c.RefValid = true }, retag),
 		"finish T/T past the attempt cap":                        v2Promote(func(c *reconcileInputsV2) { c.Attempts = 0 }, retag),
 		"finish an armed rollback with the tag on another image": v2Promote(func(c *reconcileInputsV2) { c.TagImageID = c.TargetLocalID }, retag),
+		"realign an armed record as if it were unarmed (no probe)": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); v == verdictRealignArmed {
+				return reconcileVerdictV2{actV2Realign, "tag_ahead_container_on_prior"}
+			}
+			return reconcileDecisionV2(in)
+		},
 		"retire an armed rollback on the prior without a ready probe": v2Promote(func(c *reconcileInputsV2) { c.Probe = probeReady },
 			func(v reconcileVerdictV2) bool { return v.Reason == "armed_rollback_prior_ready" }),
 	}
@@ -718,6 +752,18 @@ func TestReconcilePlan_NegativeControls(t *testing.T) {
 		"realign restarts": func(v reconcileVerdictV2) []reconcileStep {
 			if v.Action == actV2Realign {
 				return []reconcileStep{{stepTagPrior, v}, {stepUp, v}, {op: stepGate}}
+			}
+			return reconcilePlan(v)
+		},
+		"armed realign retires without the probe": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictRealignArmed {
+				return []reconcileStep{{stepTagPrior, v}}
+			}
+			return reconcilePlan(v)
+		},
+		"armed realign probes before its retag": func(v reconcileVerdictV2) []reconcileStep {
+			if v == verdictRealignArmed {
+				return []reconcileStep{{stepProbe, verdictArmedPriorReady}, {stepTagPrior, v}}
 			}
 			return reconcilePlan(v)
 		},

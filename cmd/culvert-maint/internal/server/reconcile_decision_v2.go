@@ -47,6 +47,9 @@
 //     rollback `up` ran (the inline rollback's or this reconcile's) whose gate
 //     is not durable: the record is retired only on a fresh ReadyOK, so a crash
 //     during the gate, or a gate that failed, is never retired as converged.
+//     The same holds after a realign of an armed record (retag only, no
+//     restart, so no gate): its plan ends with a fresh probe (stepProbe). No
+//     armed record is ever retired without a fresh ReadyOK of the prior.
 //   - The repo-digest axis is used only as an additional condition for adopt:
 //     the running image's RepoDigests must contain the record's TargetDigest,
 //     which is what the online verify stage accepted (N7). It never identifies
@@ -300,8 +303,21 @@ func realignV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 	if !priorRestorable(in, ids) {
 		return rr("prior_not_restorable")
 	}
+	if in.RollbackArmed {
+		// The armed rollback never restarted the prior: the retag alone is safe, but
+		// the record is retired only on a fresh ReadyOK of the prior (reconcilePlan's
+		// stepProbe), exactly like an armed record found on the prior.
+		return verdictRealignArmed
+	}
 	return reconcileVerdictV2{actV2Realign, "tag_ahead_container_on_prior"}
 }
+
+// verdictRealignArmed: realign an armed record. Its plan ends with stepProbe.
+var verdictRealignArmed = reconcileVerdictV2{actV2Realign, "armed_tag_ahead_container_on_prior"}
+
+// verdictArmedPriorReady is what an armed record with container and tag on the
+// prior image decides on a fresh ReadyOK: the only state stepProbe accepts.
+var verdictArmedPriorReady = reconcileVerdictV2{actV2Noop, "armed_rollback_prior_ready"}
 
 func adoptV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 	switch {
@@ -344,7 +360,7 @@ func finishRollbackV2(in *reconcileInputsV2, ids v2ids, act reconcileActionV2, r
 func armedOnPriorV2(in *reconcileInputsV2) reconcileVerdictV2 {
 	switch in.Probe {
 	case probeReady:
-		return reconcileVerdictV2{actV2Noop, "armed_rollback_prior_ready"}
+		return verdictArmedPriorReady
 	case probeNotReady:
 		return rr("armed_rollback_prior_not_ready")
 	default:
@@ -415,6 +431,12 @@ const (
 	stepUp
 	// stepGate: a fresh health gate (ReadyOK) of what the `up` started.
 	stepGate
+	// stepProbe: changes nothing. A fresh read of Docker plus, where
+	// reconcileNeedsProbe asks for it, a fresh readiness probe; the decision on
+	// them must be exactly the step's expect (verdictArmedPriorReady: container
+	// and tag on the recorded prior, which answers ready). The last step of an
+	// armed realign, which restarts nothing and so has no gate.
+	stepProbe
 )
 
 func (o reconcileStepOp) String() string {
@@ -425,6 +447,8 @@ func (o reconcileStepOp) String() string {
 		return "up"
 	case stepGate:
 		return "gate"
+	case stepProbe:
+		return "probe"
 	}
 	return "unknown"
 }
@@ -439,7 +463,7 @@ func (o reconcileStepOp) mutates() bool { return o == stepTagPrior || o == stepU
 // explain, stops the reconcile with nothing further changed.
 type reconcileStep struct {
 	op     reconcileStepOp
-	expect reconcileVerdictV2 // meaningful only for a mutating step
+	expect reconcileVerdictV2 // meaningful for a mutating step and for stepProbe
 }
 
 // verdictFinishRollback is what a T/P-armed record decides. It is the recheck
@@ -448,12 +472,19 @@ var verdictFinishRollback = reconcileVerdictV2{actV2FinishRollback, "rollback_in
 
 // reconcilePlan returns the ordered steps of an acting verdict, nil for a
 // verdict that changes nothing. Pure. Every `up` is guarded by a recheck that
-// decides verdictFinishRollback and is followed by the gate; the caller then
-// verifies container and tag by image id.
+// decides verdictFinishRollback and is followed by the gate; an armed realign
+// ends with stepProbe. The caller then verifies container and tag by image id.
+// So no acting plan on an armed record retires it without a fresh ReadyOK.
 func reconcilePlan(v reconcileVerdictV2) []reconcileStep {
-	switch v.Action {
-	case actV2Realign:
+	switch {
+	case v == verdictRealignArmed:
+		// After the retag the state is the armed P/P one: retired only as
+		// armedOnPriorV2 retires it, on a fresh ReadyOK.
+		return []reconcileStep{{stepTagPrior, v}, {stepProbe, verdictArmedPriorReady}}
+	case v.Action == actV2Realign:
 		return []reconcileStep{{stepTagPrior, v}}
+	}
+	switch v.Action {
 	case actV2FinishRollback:
 		return []reconcileStep{{stepUp, v}, {op: stepGate}}
 	case actV2RetagFinishRollback:

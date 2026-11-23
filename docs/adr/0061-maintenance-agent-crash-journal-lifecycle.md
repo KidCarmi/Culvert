@@ -180,7 +180,8 @@ re-pins it.
    is re-read immediately before each mutation and any change the reconcile's
    own steps do not explain stops it; owner decision 1, 2026-11-23, after the
    real-Docker e2e found this state left the failed image running), retire an
-   armed record found on the prior image only on a fresh ready probe,
+   armed record found on the prior image, or realigned by retag alone, only on
+   a fresh ready probe,
    or adopt (no Docker change) a target recorded at `verified` that runs under
    the tag and answers ready; every other state is `recovery_required` and
    changes nothing, and an unreadable Docker defers. There is no `reup` and no

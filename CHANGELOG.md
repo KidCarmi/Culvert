@@ -707,7 +707,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   under the tag and answers `/ready`. Everything else, including a new image
   that is running but never passed the health gate, is reported as
   `recovery_required` and left alone; so is a previous image that fails the
-  health gate after a finished rollback, until it answers `/ready`; with Docker
+  health gate after a finished rollback, until it answers `/ready` (a record
+  of an armed rollback is never removed before the previous image answers
+  `/ready`, even when only the tag had to move back); with Docker
   unreadable it defers. It
   never pulls, never runs `down`, and tries an action at most twice per
   record. The interrupted operation stays `failed(agent_restart_interrupted)`;

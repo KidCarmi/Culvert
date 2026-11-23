@@ -272,6 +272,98 @@ func TestStartupReconcile_ArmedTTVerifyMismatchIsCapped(t *testing.T) {
 	}
 }
 
+// TestStartupReconcile_ArmedRealignRetiresOnlyOnAFreshProbe: an armed record
+// whose container still runs the prior while the tag is on the target. The
+// retag is done (it restarts nothing), but the record is retired only when a
+// fresh probe after it says the prior is ready; otherwise it is kept, with
+// nothing further changed, and the next start applies the armed-on-prior rule.
+func TestStartupReconcile_ArmedRealignRetiresOnlyOnAFreshProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		ready    bool
+		noProbe  bool
+		reason   string
+		outcome  string
+		retired  bool
+		failedAt int // :reconciled failed entries
+	}{
+		{"prior ready", true, false, "armed_tag_ahead_container_on_prior", OutcomeConverged, true, 0},
+		{"prior not ready", false, false, "armed_rollback_prior_not_ready", OutcomeRecoveryRequired, false, 1},
+		{"no probe configured", true, true, "readiness_not_probed", OutcomeRecoveryRequired, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReconRig(t, tc.ready)
+			if tc.noProbe {
+				r.srv.opts.HealthProbeFactory = nil
+			}
+			r.world.running, r.world.pinned = cfgOld, cfgNew
+			r.seed(t, journal.PhaseRestarting, func(rec *journal.Record) { rec.RollbackArmed = true })
+			got := r.run(t)
+			if got.Decision != "realign" || got.Reason != tc.reason || got.Outcome != tc.outcome {
+				t.Fatalf("result = %+v, want realign/%s %s", got, tc.reason, tc.outcome)
+			}
+			if c := strings.Join(r.world.calls(), ","); c != "tag:"+cfgOld {
+				t.Errorf("mutating calls = [%s], want only the retag", c)
+			}
+			if retired := r.recordOnDisk(t) == nil; retired != tc.retired {
+				t.Errorf("retired = %v, want %v", retired, tc.retired)
+			}
+			if n := reconciledEntries(t, r); n[audit.OutcomeFailed] != tc.failedAt || n[audit.OutcomeSucceeded] != map[bool]int{true: 1}[tc.retired] {
+				t.Errorf(":reconciled entries = %v", n)
+			}
+			if tc.retired {
+				return
+			}
+			// The next start sees the armed record on the prior: still not
+			// retired without a ready probe, and nothing is changed.
+			r.restart(t)
+			if tc.noProbe {
+				r.srv.opts.HealthProbeFactory = nil
+			}
+			r.clearCalls()
+			got = r.run(t)
+			if got.Decision != "recovery_required" || got.Reason != tc.reason || len(r.world.calls()) != 0 || r.recordOnDisk(t) == nil {
+				t.Errorf("next start = %+v calls=%v, want recovery_required/%s, no change, kept", got, r.world.calls(), tc.reason)
+			}
+		})
+	}
+}
+
+// TestStartupReconcile_ArmedRealignDockerChangedBeforeRetire: Docker changes
+// between the retag and the probe step's read: nothing is retired.
+func TestStartupReconcile_ArmedRealignDockerChangedBeforeRetire(t *testing.T) {
+	r := newReconRig(t, true)
+	r.world.running, r.world.pinned = cfgOld, cfgNew
+	r.seed(t, journal.PhaseRestarting, func(rec *journal.Record) { rec.RollbackArmed = true })
+	r.world.onPS = func(n int) {
+		if n == 4 { // the probe step's read
+			r.setWorld(cfgNew, cfgOld)
+		}
+	}
+	got := r.run(t)
+	if got.Outcome != OutcomeRecoveryRequired || got.Reason != "docker_changed_before_retire" || r.recordOnDisk(t) == nil {
+		t.Errorf("result = %+v, want recovery_required/docker_changed_before_retire, kept", got)
+	}
+}
+
+// TestReconcileNeedsProbe_AfterArmedRealign: the state an armed realign leaves
+// (container and tag on the prior, armed) is one where the probe changes the
+// verdict, so the probe step runs the probe.
+func TestReconcileNeedsProbe_AfterArmedRealign(t *testing.T) {
+	in := v2Base()
+	in.RollbackArmed = true
+	if !reconcileNeedsProbe(in) {
+		t.Fatal("reconcileNeedsProbe is false for an armed record on the prior")
+	}
+	in.Probe = probeReady
+	if v := reconcileDecisionV2(in); v != verdictArmedPriorReady {
+		t.Fatalf("ready: %v", v)
+	}
+	if p := reconcilePlan(verdictRealignArmed); len(p) != 2 || p[1].op != stepProbe || p[1].expect != verdictArmedPriorReady {
+		t.Fatalf("armed realign plan = %+v", p)
+	}
+}
+
 // TestStartupReconcile_ArmedTTVerifyNeedsTheValidatedPriorRef: the verify also
 // requires the record's validated PriorRef to still name the prior image. An
 // operator who removes that reference during the finish leaves a state this

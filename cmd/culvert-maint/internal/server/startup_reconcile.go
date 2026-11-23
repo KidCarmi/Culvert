@@ -22,7 +22,8 @@
 // reconcile's own retag that is the T/P-armed finish_rollback, anything else
 // stops it). Act through the existing runner/sudoers commands only (tag to the
 // validated PriorRef; `compose up` only to finish an armed rollback once the
-// tag is on the validated prior image, then a fresh health gate; never pull,
+// tag is on the validated prior image, then a fresh health gate; an armed
+// record realigned by retag alone is retired only on a fresh probe; never pull,
 // never down, never a tag to the target), then verify by image id. Audit, THEN
 // retire the record, and only after verified convergence. A recovery_required
 // or deferred record is kept.
@@ -529,8 +530,31 @@ func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcile
 			return errReconcileStep("prior_not_ready")
 		}
 		return nil
+	case stepProbe:
+		return s.probeStep(ctx, c)
 	}
 	return errReconcileStep("unexpected_action")
+}
+
+// probeStep is stepProbe: a fresh read and, where reconcileNeedsProbe asks for
+// it, a fresh readiness probe; the decision must be verdictArmedPriorReady. A
+// prior that is not ready (or could not be probed) keeps the record with that
+// decision's reason; anything else means Docker changed under the reconcile.
+func (s *Server) probeStep(ctx context.Context, c *reconcileCase) error {
+	now := c.in
+	s.readReconcileFacts(ctx, c.rec, &now)
+	now.Probe = probeNotRun
+	if reconcileNeedsProbe(now) {
+		now.Probe = s.probeReadiness(ctx)
+	}
+	v := reconcileDecisionV2(now)
+	switch {
+	case v == verdictArmedPriorReady:
+		return nil
+	case v.Action == actV2RecoveryRequired && (v.Reason == "armed_rollback_prior_not_ready" || v.Reason == "readiness_not_probed"):
+		return errReconcileStep(v.Reason)
+	}
+	return errReconcileStep("docker_changed_before_retire")
 }
 
 // verifiedOnPrior re-reads Docker after an acting verdict: the container, the
