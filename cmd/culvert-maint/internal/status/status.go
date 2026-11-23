@@ -155,16 +155,12 @@ var pinnedTagReadBudget = 5 * time.Second
 //
 // Two things a reader must know. During a running apply or rollback the tag is
 // moved before the container is recreated, so matches_running is false for
-// that moment; it is a divergence only when no operation is running. And when
-// the compose read already failed, Docker is not asked again: a status against
-// a hung daemon must not wait a second time for the same answer.
+// that moment; it is a divergence only when no operation is running. And the
+// tag is read even when the compose read failed: a compose file that no longer
+// loads is one of the ways the tag is left ahead, and exactly then it must be
+// visible. A daemon that does not answer costs at most pinnedTagReadBudget.
 func (p *Provider) addPinnedTag(ctx context.Context, st *server.Status) {
 	pt := &server.PinnedTagStatus{}
-	if st.ComposeError != "" {
-		pt.Error = "the fixed tag was not inspected: Docker could not be read"
-		st.PinnedTag = pt
-		return
-	}
 	// One local image inspect answers in milliseconds. It gets its own short
 	// budget so that a slow daemon costs a status call at most this long, not
 	// a whole stage timeout: the status endpoint is polled, and its callers
