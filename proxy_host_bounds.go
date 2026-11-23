@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"sync/atomic"
 	"time"
 )
@@ -416,4 +417,46 @@ func rejectOversizeCanonicalHost(w http.ResponseWriter, proto, clientIP, normHos
 func resetOversizeHostStateForTest() {
 	proxyOversizeHostRejected.Store(0)
 	oversizeHostLogLast.Store(0)
+}
+
+// wireDestAuthority returns the authority handleRequest would see as r.Host for
+// a client that wrote input as the authority of its request target.
+//
+// The proxy data path never parses the authority itself: net/http does, before
+// handleRequest runs. For CONNECT it prefixes "http://" and calls
+// url.ParseRequestURI; for an absolute-form target it calls the same function on
+// the whole URL and copies URL.Host into r.Host. That parse percent-decodes the
+// host (only where the URL grammar allows an escape there), validates it and
+// validates the port. A caller that simulates the data path from a typed
+// authority — the Policy Tester — has to go through the same function, or it
+// answers for a different host than the proxy would enforce: "b%C3%BCcher.de"
+// reaches handleRequest as the IDN "bücher.de" and matches its rule, while the
+// tester matched the literal percent string and reported no match.
+//
+// This is deliberately the standard library's parser and not a decoder written
+// here: url.PathUnescape or QueryUnescape would decode escapes the request
+// parser refuses (an encoded "/" or ":"), and a second parser would drift.
+//
+// ok is false when the input is not a bare authority the request parser accepts:
+// a malformed escape, an escape the host grammar forbids, a non-numeric port,
+// an unbracketed IPv6 literal, userinfo, or anything after the authority (a
+// path, a query, a fragment). Such a request is answered 400 by net/http and
+// never reaches policy, so no policy answer for it can be right.
+//
+// What this does NOT reproduce: net/http also refuses a raw non-ASCII byte in
+// the request line or Host header, which a typed authority may legitimately
+// contain ("bücher.de" — a browser sends its A-label). The parser accepts it and
+// so does this function; the matchers IDNA-normalize it like any other host.
+func wireDestAuthority(input string) (authority string, ok bool) {
+	u, err := url.ParseRequestURI("http://" + input)
+	if err != nil {
+		return "", false
+	}
+	if u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return "", false
+	}
+	if u.Host == "" {
+		return "", false
+	}
+	return u.Host, true
 }

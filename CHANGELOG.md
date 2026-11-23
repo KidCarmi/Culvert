@@ -690,6 +690,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The Policy Tester now answers for the host the proxy actually enforces
+  when the authority is percent-encoded.** Go's request parser decodes an
+  encoded international host before the proxy sees it, so a client that sends
+  `b%C3%BCcher.de` is matched against the rules for `bücher.de`. The tester
+  matched the literal percent string instead and reported "no rule matched"
+  for a destination the data path blocks. `POST /api/policy/test` now resolves
+  its `host` with the same standard-library request parser the data path sits
+  behind: an encoded host is decoded once, exactly where the URL grammar
+  allows it. **Behaviour change:** an authority that parser refuses — a
+  non-numeric port (`host:http`), an unbracketed IPv6 literal, credentials, a
+  path, query or fragment, a malformed or forbidden escape (`%2F`, `%3A`,
+  `%ZZ`) — is now answered `400` by the tester, as the proxy answers it on the
+  wire, instead of a policy result that no real request could produce. A typed
+  Unicode name (`bücher.de`) is still accepted. Enforcement is unchanged.
+
 - **Automatic rollback after a failed upgrade works on hosts using Docker's
   containerd image store.** On such a host Docker reports two references for
   the running proxy image: the registry one (`ghcr.io/kidcarmi/culvert@sha256:…`)

@@ -2793,6 +2793,64 @@ func walkPolicyTestRules(rules []PolicyRule, sourceIP, identity, authSource, hos
 	return trace, matched
 }
 
+// policyTestAuthority gates and resolves the Policy Tester's host input. It
+// writes the 400 itself and returns ok=false when the input is refused. The
+// returned authority is what handleRequest would see as r.Host for a client
+// that sent the input on the wire; every matcher on the endpoint derives its
+// host from it. Extracted from apiPolicyTest so the three tiers stay readable
+// in one place and the handler stays within the function-length bound.
+func policyTestAuthority(w http.ResponseWriter, r *http.Request, host string) (authority string, ok bool) {
+	if host == "" {
+		http.Error(w, "host is required", http.StatusBadRequest)
+		return "", false
+	}
+	// CHAOS-69: this handler reaches walkPolicyTestRules and lookupHostCategory
+	// with a caller-supplied host — the same quadratic fusion the proxy data
+	// path bounds. Same predicate, same reason (see proxy_host_bounds.go).
+	if rawAuthorityOversize(host) {
+		noteOversizeHostRejectionReq("api/policy-test", r, len(host), "raw")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
+		return "", false
+	}
+	// FIDELITY: resolve the typed authority to what handleRequest would see as
+	// r.Host, with the request parser the data path itself sits behind (see
+	// wireDestAuthority). It runs after the raw pre-cap, so an oversize input is
+	// still refused before anything parses it, and before the canonical tier, so
+	// that tier measures the host the matchers will actually receive — a
+	// percent-encoded host is three raw bytes per decoded byte.
+	//
+	// An authority the request parser refuses is refused here too. Answering
+	// "no rule matched, default applies" for a request the proxy would reject
+	// with 400 told the admin the destination was governed by the default action.
+	wireHost, wireOK := wireDestAuthority(host)
+	if !wireOK {
+		http.Error(w, "host must be a request authority the proxy accepts: host or host:port, an IPv6 literal in brackets, no path, query or credentials", http.StatusBadRequest)
+		return "", false
+	}
+	host = wireHost
+	// And the CANONICAL tier, which this endpoint was missing: the raw pre-cap is
+	// deliberately generous (1 KiB) so IDN expansion is not refused, which on its
+	// own still admits the 1 000-byte dot-dense ASCII shape costing ~1.3 ms of
+	// fusion — exactly what the canonical tier exists to reject. Enforcing one
+	// tier of a two-tier contract is not enforcing the contract (Codex P2,
+	// PR #1446). Normalization failure is NOT refused here: validity is this
+	// endpoint's existing business, and this gate decides length only.
+	if normHost, ok := canonicalDestHost(host); ok {
+		if canonicalHostOversize(normHost) {
+			noteOversizeHostRejectionReq("api/policy-test", r, len(normHost), "canonical")
+			http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+			return "", false
+		}
+	} else if unnormalizableHostOversize(host) {
+		// No canonical form ⇒ bound the raw bare host, or this band reaches
+		// the category fusion at full length (Codex P2, PR #1446).
+		noteOversizeHostRejectionReq("api/policy-test", r, len(bareDestHost(host)), "unnormalizable")
+		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
+		return "", false
+	}
+	return host, true
+}
+
 // POST /api/policy/test — evaluate policy rules against hypothetical inputs.
 // Useful for debugging: returns the first matching rule (or no-match) without
 // side-effects (hit counts are NOT incremented).
@@ -2820,38 +2878,11 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if body.Host == "" {
-		http.Error(w, "host is required", http.StatusBadRequest)
+	authority, ok := policyTestAuthority(w, r, body.Host)
+	if !ok {
 		return
 	}
-	// CHAOS-69: this handler reaches walkPolicyTestRules and lookupHostCategory
-	// with a caller-supplied host — the same quadratic fusion the proxy data
-	// path bounds. Same predicate, same reason (see proxy_host_bounds.go).
-	if rawAuthorityOversize(body.Host) {
-		noteOversizeHostRejectionReq("api/policy-test", r, len(body.Host), "raw")
-		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxRawDestAuthorityBytes), http.StatusBadRequest)
-		return
-	}
-	// And the CANONICAL tier, which this endpoint was missing: the raw pre-cap is
-	// deliberately generous (1 KiB) so IDN expansion is not refused, which on its
-	// own still admits the 1 000-byte dot-dense ASCII shape costing ~1.3 ms of
-	// fusion — exactly what the canonical tier exists to reject. Enforcing one
-	// tier of a two-tier contract is not enforcing the contract (Codex P2,
-	// PR #1446). Normalization failure is NOT refused here: validity is this
-	// endpoint's existing business, and this gate decides length only.
-	if normHost, ok := canonicalDestHost(body.Host); ok {
-		if canonicalHostOversize(normHost) {
-			noteOversizeHostRejectionReq("api/policy-test", r, len(normHost), "canonical")
-			http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
-			return
-		}
-	} else if unnormalizableHostOversize(body.Host) {
-		// No canonical form ⇒ bound the raw bare host, or this band reaches
-		// the category fusion at full length (Codex P2, PR #1446).
-		noteOversizeHostRejectionReq("api/policy-test", r, len(bareDestHost(body.Host)), "unnormalizable")
-		http.Error(w, fmt.Sprintf("host must be at most %d bytes", maxDestHostLen), http.StatusBadRequest)
-		return
-	}
+	body.Host = authority
 
 	// Evaluate the EFFECTIVE rulebase: the draft candidate when Draft Mode is
 	// engaged, else the running store (GAP-POL-03, ADR-0026). rulebase tells the
