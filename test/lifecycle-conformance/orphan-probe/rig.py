@@ -120,9 +120,6 @@ def status():
         "stack_up": s.get("compose_stack_up"),
         "recovery_required": s.get("recovery_required"),
         "reconcile": s.get("reconcile"),
-        # Converge mode: records the startup reconcile has not given an outcome yet.
-        "interrupted_unreconciled": [o.get("op_id") for o in (s.get("interrupted_operations") or [])
-                                     if not o.get("reconcile_outcome")],
     }
 
 
@@ -162,15 +159,24 @@ def run_op(path, body, timeout=240):
             "truth_at_terminal": truth()}
 
 
-def wait_converge(timeout=180):
-    t0, s = time.time(), {}
+# Reconcile states (startup_reconcile.go). Anything not listed as still-working
+# is an end state for this start.
+RECONCILE_WORKING = (None, "", "not_started", "in_progress")
+
+
+def wait_converge(timeout=300):
+    """Waits for the startup reconcile to reach an end state for this start.
+    Returns (seconds, last status, finished). A reconcile still working at the
+    timeout is NOT finished and the trial is invalid."""
+    t0, s, finished = time.time(), {}, False
     while time.time() - t0 < timeout:
         s = status()
         state = (s.get("reconcile") or {}).get("state")
-        if state not in (None, "running", "pending") and not s["interrupted_unreconciled"]:
+        if state not in RECONCILE_WORKING:
+            finished = True
             break
         time.sleep(0.5)
-    return round(time.time() - t0, 1), s
+    return round(time.time() - t0, 1), s, finished
 
 
 def stale_cli():
@@ -229,7 +235,7 @@ def trial(k, stop_delay, follow):
     elif follow == "apply":
         rec["follow_op"] = run_op("/v1/upgrades/apply", {"image_ref": images()["V2"]})
     elif follow == "converge":
-        rec["converge_secs"], rec["status_after_converge"] = wait_converge()
+        rec["converge_secs"], rec["status_after_converge"], rec["converge_finished"] = wait_converge()
         rec["truth_after_converge"] = truth()
     time.sleep(stop_delay + 6)
     rec["truth_at_rest"] = truth()
@@ -270,6 +276,8 @@ def judge(rec):
         bad.append("fence: a docker command of the dead agent was alive when the new agent started")
     rest, st = rec["truth_at_rest"], rec["status_at_rest"]
     op = rec.get("follow_op")
+    if rec["follow"] == "converge" and not rec.get("converge_finished"):
+        return "INVALID", [f"the startup reconcile had not finished: {(rec['status_after_converge'].get('reconcile') or {}).get('state')!r}"]
     if rec["follow"] in ("rollback", "apply") and not (op and op.get("admitted") and op.get("state") in ("succeeded", "failed")):
         # The trial is about what the next operation does. One that was refused,
         # unreadable or still running exercised nothing.
