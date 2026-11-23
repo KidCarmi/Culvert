@@ -195,17 +195,150 @@ operation while the command is still alive.
   So "a rollback admitted meanwhile, then the orphan's `up` lands on the prior
   image" is a property of the model. An orphaned `pull`'s effect on the local
   image store is not represented.
-- Nothing here was run against real Docker. Whether the command really
-  survives and completes depends on:
-  - the supervisor: the shipped unit sets no `KillMode`, so systemd's default
-    `control-group` is expected, not verified, to kill it before
-    `Restart=on-failure` starts the agent again;
-  - `sudo`, and a container's PID 1;
-  - output pipes: the runner captures the child's stdout/stderr through pipes,
-    so once the agent is dead an orphan gets SIGPIPE/EPIPE on its next write.
-    The model's mutating commands write nothing; a real `docker compose up`
-    writes progress;
-  - whether `dockerd` completes a call whose client died.
+- The model is not Docker. What real Docker, systemd and sudo do at these kill
+  points was measured separately; see "Real Docker and systemd" below. In short:
+  with the shipped unit no docker command outlives the agent, so the model's
+  orphaned CLI does not occur, and `barrier_before_tag`'s late tag move did not
+  reproduce. What does survive the agent is `dockerd` finishing the last
+  request it was sent.
+
+## Real Docker and systemd: the orphan probe
+
+`orphan-probe/probe.sh` (manual; never a PR gate) runs the real agent, installed
+by the real `install.sh`, under a real systemd unit, calling Docker through the
+real sudoers file and wrapper, against a real daemon. A proxy on the Docker
+socket (`dkproxy.py`) SIGKILLs the agent — only the agent — at an exact Docker
+API request of the `restart` stage: before the fixed-tag request, after it, and
+after each of the 12 requests `docker compose up -d` makes when it recreates the
+proxy. systemd then restarts the agent. The probe optionally runs the
+operator's next operation, waits for rest, and compares the agent's reports with
+what `dockerd` says when asked directly.
+
+```bash
+sudo test/lifecycle-conformance/orphan-probe/probe.sh            # about 45 min
+sudo test/lifecycle-conformance/orphan-probe/probe.sh --quick    # smoke run, not evidence
+```
+
+Exit 0: every property held. Exit 1: a property was violated. Exit 2:
+incomplete (a prerequisite, a trial or a control did not run as intended). It
+refuses to run where `culvert/proxy:pinned` already exists.
+
+Properties checked on every trial: no docker command of the dead agent is alive
+when the new agent starts; an operation that reports success leaves Docker
+healthy on the image it names, and Docker does not change afterwards; when
+Docker at rest is not healthy, something reports it (an interrupted record, a
+failed operation, or `recovery_required`). "Reports it" is deliberately weak:
+an outstanding record counts, whatever its live fields said at the restart. A
+trial whose follow-up operation did not run to an end is invalid, and each
+group of trials must have the expected count, or the run is incomplete.
+
+Unlike `docker-probe.sh`, this probe has to move the real fixed tag: the agent
+under test hard-codes `culvert/proxy:pinned`. Hence the refusal above.
+
+Measured on Ubuntu 24.04, systemd 255, sudo 1.9.15, Docker 29.10.0 (containerd
+image store), Compose v5.7.1. One environment; a different systemd, cgroup
+layout or Compose version is not covered.
+
+**What the supervisor does.** When the agent dies, systemd sends SIGTERM to
+everything left in the unit's control group and does not start the next agent
+until the group is empty; a child that ignores SIGTERM held the restart for
+`TimeoutStopSec` and was then killed; a child started through `sudo` or
+`setsid` did not leave the group. With `KillMode=process` the child was still
+alive when the next agent started. That control is what establishes the
+property. The per-trial check (is any docker command of the dead agent alive
+once the new agent answers?) is taken seconds after the kill, so it can only
+catch a slow command: it found none under the shipped unit, and it found the
+orphaned `docker compose up` on the real agent with `KillMode=process`, where
+the rollback that followed reported success and the system ended with no proxy
+container.
+
+**What the daemon does.** A request `dockerd` has received is carried out
+whether or not the client is still alive. For the fixed tag that takes
+milliseconds, long before the 5 s restart delay, so the agent's first read
+after a crash at `barrier_before_tag` already sees the final tag (rollback
+after it: correct and stable). A container stop is different: it lasts as long
+as the proxy takes to exit, up to `stop_grace_period` (60 s in
+`docker-compose.yml`).
+
+**Results (shipped unit, 40 trials + 4).**
+
+| Scenario | Trials | Result |
+|---|---|---|
+| Crash only, proxy exits at once | 14 | Every state stable and reported: the record is kept and says `indeterminate`. In 4 the proxy is down (crash between compose's stop and start) and stays down until an operator acts |
+| Crash, then rollback, proxy exits at once | 14 | 13 correct and stable. 1 fails its health gate and says so (crash between compose's stop and delete: the first `compose up -d` only cleans up; a second rollback succeeds) |
+| Crash only, proxy drains for 12 s | 4 | The stop the dead CLI requested completes after the new agent has started: the proxy goes down after the agent reported `running_image: prior`. The record is kept |
+| **Crash, then rollback, proxy drains for 12 s and answers 200 meanwhile** | 4 | **2 violations.** The rollback finds the old container still running, changes nothing, passes its health gate, reports success and retires the record. The container then exits: proxy down, no record, nothing reporting it |
+| Same, with a proxy that answers `/ready` 503 once it has SIGTERM | 4 | 0 violations: the rollback fails its health gate and keeps the record |
+| Crash, then re-apply, proxy drains | 4 | 0 violations |
+
+The violation needs three things together: the agent dies while Compose is
+stopping the old proxy container; the proxy takes longer to exit than the
+restart delay plus the time to the next operation; and it still answers
+`/ready` with 200 while it drains. At the time of measurement Culvert's proxy
+did: its listener stays open from SIGTERM until its proxy-server shutdown hook
+(up to the 12 s early phase plus later hooks), with nothing changing `/ready`.
+That is read from `main_shutdown.go` and `healthcheck.go`, and was later
+measured on the real binary (below). The proxy in this first matrix is a
+stand-in.
+
+**Startup convergence as first merged (#2039, `reconcile_on_startup = "converge"`), 22 trials.**
+With a proxy that exits at once, all 14 kill points end as intended: realign or
+no-op where the container is on the prior image, `recovery_required` where the
+stack is down or the target is live. With a draining proxy, 4 of 8 are
+violations (the two kill points with a stop in flight, with and without the
+`/ready` change): the reconcile sees the old container running the prior
+image, realigns the tag, records `converged` and retires the record about 5 s
+after the crash; the container then exits. Unlike a rollback this needs no
+operator timing, and the realign path makes no readiness probe, so the `/ready`
+change does not cover it. Not fixed here; it is evidence for the AGT-900 gate.
+
+**With the fixes together (2026-11-23).** The same probe, with the agent built
+from the unit fence, the settle wait, the always-reported `pinned_tag` and (for
+the last rows) the corrected startup reconcile, and the proxy's `/ready` change.
+Kill points -1, 0, 4, 8, 9, 12; settle and stop grace scaled to 20 s / 15 s
+(`ORPHAN_PROBE_SETTLE`, `ORPHAN_PROBE_STOP_GRACE`) so that the relation the
+agent relies on (settle > stop grace > the proxy's drain) is the shipped one and
+the run stays practical.
+
+| Run | Trials | Violations | What changed |
+|---|---|---|---|
+| Stand-in proxy, shipped unit | 18 + 2 | 0 | The rollback during a 12 s drain no longer reports success: it waits out the window, the stale stop has finished by then, and it fails its health gate and keeps the record |
+| Real Culvert proxy binary (v1 from `main`, v2 with the `/ready` change), shipped unit | 18 | 0 | Same properties with the real proxy. The six "pending admin-UI request" trials of this run did NOT hold the shutdown (the request was opened before the upgrade and had gone stale by the time of the stop), so they repeat the fast ones |
+| Real proxy binary, pending admin-UI request kept fresh (re-run of the two stop-in-flight kill points) | 8 | 0 | The shutdown is held: old container gone 4.7–5.3 s after the kill, read from dockerd. The container being stopped is always v1, which answers `/ready` 200 meanwhile. It has exited by the time the agent is back (5.5 s), so there is no window to exploit with this binary in this configuration |
+| Startup convergence as merged in #2039, stand-in | 10 | 4 | Unchanged: realign, `converged`, record retired, proxy then exits |
+| Startup convergence with the correction, stand-in | 10 | 0 | Those four end as `recovery_required` with the record kept |
+| Startup convergence with the correction, real proxy binary | 8 | 0 | |
+
+The real proxy binary, alone (`orphan-probe/sigterm-timeline.py`): SIGTERM to
+exit takes 0.06 s when idle and 5.0 s with a request left unfinished on the
+admin UI; during those 5 s `/ready` answers 200 on `main` and 503 with the
+change, and `/health` answers 200 in both. (Go's `Shutdown` closes such a
+connection at once when it is more than 5 s old, which is why the probe keeps
+the request fresh and rejects a trial whose shutdown was not held.)
+
+Two things these runs show that are not safety failures and are not fixed here:
+- After a crash between Compose's stop and delete, the first
+  `docker compose up -d` only cleans up. The rollback fails its health gate,
+  keeps the record and leaves the proxy down; a second rollback succeeds.
+- After a crash between Compose's delete and rename, `up` starts the
+  replacement under Compose's temporary name. It serves the right image and the
+  operation's success is correct; the container is not called what
+  `container_name` says until the next recreate.
+
+The "real proxy" is the real binary in a minimal image, not the release image's
+Alpine layers (Docker Hub was not reachable where this was run).
+
+**Not covered.** A crash of `dockerd` or the host; a proxy that ignores
+SIGTERM; Compose versions that recreate in a different order; the classic image
+store; multi-service stacks; the release image (the real proxy was run as its
+binary in a minimal image); the proxy's early shutdown phase with HA or
+control-plane peers, where it can stay up longest.
+
+Knobs: `ORPHAN_PROBE_PROXY_BIN_V1` / `_V2` (real proxy binaries built with
+`-X main.version=probe-v1` / `probe-v2`), `ORPHAN_PROBE_SETTLE` and
+`ORPHAN_PROBE_STOP_GRACE` (for an agent with the settle wait; keep settle >
+stop grace > the proxy's drain), `ORPHAN_PROBE_POINTS` / `ORPHAN_PROBE_MID`
+(a subset of kill points), `ORPHAN_PROBE_OUT` (copy the per-trial records).
 
 ## Running
 
