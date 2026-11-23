@@ -25,6 +25,7 @@ type FileConfig struct {
 		TLSKey                string   `yaml:"tls_key"`                 // path to TLS key for UI
 		UISANs                []string `yaml:"ui_sans"`                 // additional SANs for self-signed cert (IPs or hostnames)
 		SOCKS5Port            int      `yaml:"socks5_port"`             // 0 = disabled
+		SOCKS5PolicyMode      string   `yaml:"socks5_policy_mode"`      // "" / "legacy" (default: no Stage-2 evaluation) | "shadow" (evaluate + record, never enforce). Startup-only; see socks5_policy_shadow.go
 		MetricsToken          string   `yaml:"metrics_token"`           // Bearer token for /metrics; empty=open
 		PolicyFile            string   `yaml:"policy_file"`             // JSON file for PBAC policy rules
 		CAPath                string   `yaml:"ca_path"`                 // Path for encrypted Root CA bundle
@@ -598,6 +599,7 @@ func (fc *FileConfig) validate() error {
 	errs = append(errs, fc.validateLimits()...)
 	errs = append(errs, fc.validateCluster()...)
 	errs = append(errs, fc.validateCDR()...)
+	errs = append(errs, fc.validateSOCKS5PolicyMode()...)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))

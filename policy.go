@@ -1779,30 +1779,7 @@ func evalAccessRules(rules []*PolicyRule, rows []policyScanRow, in *accessEvalIn
 // groups is the list of IdP group/role memberships for the authenticated user.
 // Returns nil when no rule matches (caller should default to Deny — Zero Trust).
 func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, groups []string) *PolicyMatch {
-	// Snapshot the slice header under RLock, then release BEFORE the scan: the
-	// scan can block (category lookups hit the community DB, a BadgerDB read
-	// txn per domain label), so the lock must NOT be held across it — otherwise
-	// a config-plane List()/Save() (exclusive Lock) waiting on a blocked scan
-	// would stall all policy evaluation. The geo half no longer blocks at all
-	// (CHAOS-60: geo.LookupCached is cache-only and warms off-path), but the
-	// release stays load-bearing for the category half.
-	rules := ps.evaluationSnapshot()
-
-	// Enforcement path: the canonical core with the wall clock and no trace (the
-	// nil-trace branch is allocation-free). Normalize the destination host ONCE
-	// for the whole scan (each rule reuses its precomputed normFQDN; the core
-	// parses the client IP once for the precomputed srcIPNet), keeping the ~2
-	// host + ~4 CIDR per-rule allocations the hot path previously incurred
-	// eliminated. in stays on this frame — evalAccessRules never retains it.
-	in := accessEvalInput{
-		clientIP:   clientIP,
-		identity:   identity,
-		authSource: authSource,
-		host:       host,
-		normHost:   normalizeHost(host),
-		groups:     groups,
-	}
-	rule := evalAccessRules(rules, scanIndexFor(&ps.scanIndex, rules), &in, time.Now, nil)
+	rule := ps.matchAccessRule(clientIP, identity, authSource, host, groups)
 	if rule == nil {
 		return nil
 	}
@@ -1827,6 +1804,43 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 	copyPolicyRuleForMatch(&match.ruleSnapshot, rule)
 	match.Rule = &match.ruleSnapshot
 	return match
+}
+
+// matchAccessRule is the NON-ACCOUNTING half of Evaluate: the published
+// snapshot, its scan index and the canonical core, returning the first matching
+// published rule (nil = no match) without touching any counter. Evaluate is
+// this plus hit accounting and PolicyMatch construction, so a caller that must
+// observe the enforcement verdict without charging it — SOCKS5 shadow
+// evaluation (socks5_policy_shadow.go), ADR-0026 §4 — gets the SAME snapshot,
+// index and matcher the CONNECT path does, not a second walk.
+//
+// The returned pointer is a PUBLISHED definition: callers read it and must not
+// mutate it or its counters.
+func (ps *PolicyStore) matchAccessRule(clientIP, identity, authSource, host string, groups []string) *PolicyRule {
+	// Snapshot the slice header under RLock, then release BEFORE the scan: the
+	// scan can block (category lookups hit the community DB, a BadgerDB read
+	// txn per domain label), so the lock must NOT be held across it — otherwise
+	// a config-plane List()/Save() (exclusive Lock) waiting on a blocked scan
+	// would stall all policy evaluation. The geo half no longer blocks at all
+	// (CHAOS-60: geo.LookupCached is cache-only and warms off-path), but the
+	// release stays load-bearing for the category half.
+	rules := ps.evaluationSnapshot()
+
+	// Enforcement (and shadow) path: the canonical core with the wall clock and no trace (the
+	// nil-trace branch is allocation-free). Normalize the destination host ONCE
+	// for the whole scan (each rule reuses its precomputed normFQDN; the core
+	// parses the client IP once for the precomputed srcIPNet), keeping the ~2
+	// host + ~4 CIDR per-rule allocations the hot path previously incurred
+	// eliminated. in stays on this frame — evalAccessRules never retains it.
+	in := accessEvalInput{
+		clientIP:   clientIP,
+		identity:   identity,
+		authSource: authSource,
+		host:       host,
+		normHost:   normalizeHost(host),
+		groups:     groups,
+	}
+	return evalAccessRules(rules, scanIndexFor(&ps.scanIndex, rules), &in, time.Now, nil)
 }
 
 // matchedCondScratch is the stack scratch buildMatchedConditions renders into.

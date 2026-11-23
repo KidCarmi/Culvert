@@ -540,6 +540,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **SOCKS5 policy shadow mode (SWG-901 stage 2).** A new startup-only key,
+  `proxy.socks5_policy_mode: shadow`, evaluates each SOCKS5 CONNECT that passes
+  the existing gates against Stage-2 policy, using the same evaluator, rulebase
+  and default action as CONNECT. It records the verdict without acting on it,
+  through `culvert_socks5_policy_decisions_total{mode,verdict,reason}`,
+  `culvert_socks5_requests_total{atyp}` and a sampled `SOCKS5 POLICY_WOULD_BLOCK`
+  log line. A SOCKS5 connection is accepted or refused exactly as before in every
+  mode. Shadow evaluation charges no rule hit counters and writes no request-log
+  entry. SOCKS5 has no identity resolution yet, so it evaluates every client as
+  `unauth`, and identity or group rules can't match in shadow mode. The default,
+  `legacy` (or the key absent), is unchanged: no evaluation, no new series, no
+  new log lines. `enforce` and unknown values are rejected at startup. Older
+  releases reject the unknown key, so remove it before downgrading. See
+  `docs/operator/socks5-policy-shadow.md`.
 - **Adding to the blocklist now reports what the gateway actually stored
   (Product Experience).** The admin UI's "Added N host(s)" / "Imported N hosts"
   toast counted the lines it sent, not what `POST /api/blocklist` did with them.

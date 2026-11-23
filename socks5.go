@@ -289,48 +289,52 @@ var errSOCKS5ATYPUnsupported = errors.New("socks5: unsupported address type")
 // the prior inline parser did — it is rejected later by the SSRF guard, not here.
 // The returned cmd is NOT validated (the caller enforces CONNECT-only) so the
 // full address+port frame is consumed first, preserving the original read order.
-func parseSOCKS5Request(r io.Reader) (cmd byte, host string, port uint16, err error) {
+// atyp is the wire ATYP byte (0x01/0x03/0x04) of a successfully parsed request,
+// returned so callers need not re-derive it from the host text (a DOMAINNAME
+// may itself spell an IP literal).
+func parseSOCKS5Request(r io.Reader) (cmd byte, host string, port uint16, atyp byte, err error) {
 	req := make([]byte, 4)
 	if _, err = io.ReadFull(r, req); err != nil {
-		return 0, "", 0, err
+		return 0, "", 0, 0, err
 	}
 	if req[0] != 0x05 {
-		return 0, "", 0, fmt.Errorf("socks5: bad request version 0x%02x", req[0])
+		return 0, "", 0, 0, fmt.Errorf("socks5: bad request version 0x%02x", req[0])
 	}
 	cmd = req[1]
+	atyp = req[3]
 
 	switch req[3] { // ATYP
 	case 0x01: // IPv4
 		b := make([]byte, 4)
 		if _, err = io.ReadFull(r, b); err != nil {
-			return 0, "", 0, err
+			return 0, "", 0, 0, err
 		}
 		host = net.IP(b).String()
 	case 0x03: // Domain
 		lenBuf := make([]byte, 1)
 		if _, err = io.ReadFull(r, lenBuf); err != nil {
-			return 0, "", 0, err
+			return 0, "", 0, 0, err
 		}
 		domain := make([]byte, lenBuf[0])
 		if _, err = io.ReadFull(r, domain); err != nil {
-			return 0, "", 0, err
+			return 0, "", 0, 0, err
 		}
 		host = string(domain)
 	case 0x04: // IPv6
 		b := make([]byte, 16)
 		if _, err = io.ReadFull(r, b); err != nil {
-			return 0, "", 0, err
+			return 0, "", 0, 0, err
 		}
 		host = "[" + net.IP(b).String() + "]"
 	default:
-		return 0, "", 0, errSOCKS5ATYPUnsupported
+		return 0, "", 0, 0, errSOCKS5ATYPUnsupported
 	}
 
 	portBuf := make([]byte, 2)
 	if _, err = io.ReadFull(r, portBuf); err != nil {
-		return 0, "", 0, err
+		return 0, "", 0, 0, err
 	}
-	return cmd, host, binary.BigEndian.Uint16(portBuf), nil
+	return cmd, host, binary.BigEndian.Uint16(portBuf), atyp, nil
 }
 
 // socks5Negotiate performs the SOCKS5 greeting (VER NMETHODS METHODS) and, when
@@ -482,7 +486,7 @@ func handleSOCKS5(conn net.Conn) {
 	}
 
 	// ── Request: VER(1) CMD(1) RSV(1) ATYP(1) + address + port ──────────────
-	cmd, host, port, err := parseSOCKS5Request(conn)
+	cmd, host, port, atyp, err := parseSOCKS5Request(conn)
 	if err != nil {
 		// Only the unsupported-ATYP case emits a reply before closing, exactly
 		// as the prior inline parser did; every other parse failure (bad VER,
@@ -548,6 +552,13 @@ func handleSOCKS5(conn net.Conn) {
 		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "", "")
 		return
 	}
+
+	// ── Stage-2 policy: SHADOW only (SWG-901 stage 2) ───────────────────────
+	// The position enforcement will take (after the pre-dispatch blocks, before
+	// the SSRF guard and dial — the CONNECT order). It returns nothing, so it
+	// cannot change this connection's outcome; in legacy mode (the default) it
+	// is a no-op. See socks5_policy_shadow.go.
+	socks5ShadowPolicy(clientIP, host, atyp)
 
 	// ── SSRF guard + dial, cancelled if the client hangs up ──────────────────
 	destConn, early, ok := socks5GuardAndDial(conn, clientIP, host, target, negotiationDeadline)
