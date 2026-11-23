@@ -9,6 +9,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A plain-HTTP WebSocket upgrade no longer forwards the client's proxy
+  credential to the origin.** `handleWebSocket` serialised the client request
+  to the origin without the hop-by-hop strip the plain-HTTP and SSL-inspect
+  paths apply, so `Proxy-Authorization` — the local/LDAP password or OIDC
+  token the client presented to Culvert — reached whatever origin the request
+  named, in cleartext, whenever the request carried `Upgrade: websocket` and
+  `Connection: Upgrade` (whether or not the origin upgraded). The path now
+  strips hop-by-hop headers and restores only the `Connection: Upgrade` /
+  `Upgrade` pair. Operators whose users authenticate with Basic proxy
+  credentials and use `ws://` destinations should consider those credentials
+  exposed to those origins.
 - **An anonymous client can no longer park ~1 GiB in each interactive-login
   state store.** The OIDC PKCE and SAML request stores are filled by
   unauthenticated requests (the proxy's captive-portal path and the public
