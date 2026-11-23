@@ -1,0 +1,14 @@
+Mutant e-drop-identity: enforce evaluates policy without the resolved LDAP identity and groups.
+NEGATIVE CONTROL ONLY. Applied by run.sh --negative-control to a temporary copy of the tree; never to the checkout.
+
+--- a/socks5_policy_enforce.go
++++ b/socks5_policy_enforce.go
+@@ -36,7 +36,7 @@
+ func socks5EnforcePolicy(conn net.Conn, who ProxyIdentity, host string, atyp byte) (socks5Grant, bool) {
+ 	noteSOCKS5RequestATYP(atyp)
+ 	policyHost := socks5PolicyHost(host)
+-	match := policyStore.Evaluate(who.ClientIP, who.Identity, who.AuthSource, policyHost, who.Groups)
++	match := policyStore.Evaluate(who.ClientIP, "", who.AuthSource, policyHost, nil) // MUTANT e: resolved identity and groups dropped
+ 	var rule *PolicyRule
+ 	if match != nil {
+ 		rule = match.Rule
