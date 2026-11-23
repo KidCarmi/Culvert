@@ -251,6 +251,9 @@ func buildOperatorContract() OperatorContract {
 	// CDR fail-open passthroughs (engine error under fail_mode open) in the last 24h.
 	// Contributes nothing unless a fail-open passthrough actually happened.
 	checks = append(checks, checkCDRFailOpenPassthrough()...)
+	// Panic recovered and contained (crashguard.go) in the last 24h. Contributes
+	// nothing unless a panic was actually contained in that window.
+	checks = append(checks, checkContainedPanic()...)
 	// Sluice client certificates expired or near expiry (renewal failing).
 	// Contributes nothing while CDR is disabled or every certificate is healthy.
 	checks = append(checks, checkCDRClientCertExpiry()...)
