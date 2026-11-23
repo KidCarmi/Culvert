@@ -708,6 +708,24 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The Policy Tester now answers for the host the proxy actually enforces
+  when the request target is percent-encoded.** Go's request parser decodes an
+  encoded international host before the proxy sees it, so a client that sends
+  `b%C3%BCcher.de` is matched against the rules for `bücher.de`. The tester
+  matched the literal percent string instead and reported "no rule matched"
+  for a destination the data path blocks. `POST /api/policy/test` now resolves
+  its `host` with the same standard-library request parser the data path sits
+  behind: an encoded host is decoded once, exactly where the URL grammar
+  allows it, and input the parser accepts is answered for its host as on the
+  wire. **Behaviour change:** the tester now answers `400` where the proxy
+  does — for a target the parser refuses (a non-numeric port such as
+  `host:http`, a malformed or forbidden escape such as `%2F`, `%3A` or `%ZZ`)
+  and for a host with no valid canonical form (the proxy's `INVALID_HOST`) —
+  instead of "no rule matched, the default applies". A bare IPv6 address is
+  still accepted and treated as bracketed. Enforcement is unchanged. This is
+  an intentional compatibility correction, documented on the operation in the
+  API contract; it needs no major contract version, because every refused
+  input is one the data path already refuses.
 - **Opt-in startup recovery for an image change the maintenance agent was
   killed in (`reconcile_on_startup = "converge"`, contract `AGT-900`).** The
   default stays `"off"`: startup reports the interrupted operation and changes
