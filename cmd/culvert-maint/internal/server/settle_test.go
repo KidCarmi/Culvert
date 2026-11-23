@@ -42,7 +42,9 @@ func TestSettleRemaining_RestartsAfterACutMutation(t *testing.T) {
 	}
 }
 
-// TestSettleInterrupted_WaitsAndHonoursContext.
+// TestSettleInterrupted_WaitsAndHonoursContext: the wait lasts until the window
+// is over, returns a note for the operation log, does nothing afterwards, and
+// fails rather than passes when its context ends first.
 func TestSettleInterrupted_WaitsAndHonoursContext(t *testing.T) {
 	s := settleServer(300*time.Millisecond, 0)
 	began := time.Now()
