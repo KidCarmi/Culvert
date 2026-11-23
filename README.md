@@ -308,7 +308,7 @@ Optional push export to an OTLP/HTTP collector (e.g. the OpenTelemetry Collector
 - **Structured logging** - text or JSON, with rotating files (configurable size thresholds).
 - **Syslog forwarding** - UDP/TCP, RFC 3164 and RFC 5424, for Splunk / Elastic / QRadar.
 - **Live SSE feed** - the Admin UI dashboard streams request activity in real time.
-- **Signed webhook alerts** - HMAC-SHA256 (`X-Culvert-Signature`) for threats, blocks, and lockouts.
+- **Signed webhook alerts** - HMAC-SHA256 (`X-Culvert-Signature`) for security blocks and for node health conditions (scanning, feeds, certificates, HA, storage). The receiver must have a public address. See the [alert webhooks guide](docs/operator/alert-webhooks.md).
 - **Tamper-evident audit trail** - JSONL of every admin action, enriched with the authenticated actor.
 
 ---

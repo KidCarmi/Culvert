@@ -447,7 +447,7 @@ So after restoring onto a host that does not have the original
   (no `X-Culvert-Signature` header). A receiver that verifies the signature
   will reject this node's alerts.
 - This is **visible, not silent**: the affected webhooks are badged
-  *"Unsigned — secret unusable"* in **Security → Alert Webhooks**, and
+  *"Unsigned — secret unusable"* in **Settings → Alert Webhooks**, and
   `/api/diagnostics` carries an `alert_webhook_signing` warn row.
 - **Recovery — two paths, and the order matters:**
   1. **If you still have the node's original `.alert_webhook_key`** (kept

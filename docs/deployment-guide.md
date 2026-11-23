@@ -521,7 +521,7 @@ the **30-day pre-expiry window**, what happens depends on the CA's provenance
   the validity, so endpoints that trust only the old root keep validating
   inspected connections **until the old root's own expiry date**. When renewal
   is persisted:
-  1. A `cert_expiry` webhook alert fires (configure under Security > Alert Webhooks)
+  1. A `cert_expiry` webhook alert fires (configure under Settings > Alert Webhooks; see the [alert webhooks guide](operator/alert-webhooks.md))
   2. The renewed CA is saved to the bundle path (`-ca-path`)
   3. Cached leaf certs are invalidated and re-signed on demand
 - **Imported or unclassified CA** — **not** renewed. A `cert_expiry` alert and a

@@ -91,6 +91,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 
 - [`category-store-recovery.md`](category-store-recovery.md) — community category store corruption detection and recovery.
 - [`request-history-recovery.md`](request-history-recovery.md) — request-history store corruption, encryption, and recovery.
+- [`alert-webhooks.md`](alert-webhooks.md) — alert webhooks: the payload and signature, the public-address requirement, retries and limits, delivery monitoring, backup and import behavior, and the event catalog.
 - [`audit-and-request-log-persistence.md`](audit-and-request-log-persistence.md) — the audit and request log JSONL files: configuration, rotation, the persistence Diagnostics rows, and recovery without a restart when the path was unwritable at startup.
 - [`graceful-shutdown.md`](graceful-shutdown.md) — the shutdown envelope, its phases, and what a stall costs.
 - [`tunnel-drain-on-shutdown.md`](tunnel-drain-on-shutdown.md) — draining long-lived tunnels (WebSocket, SOCKS5, CONNECT) on shutdown.
