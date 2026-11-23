@@ -297,6 +297,10 @@ type PolicyStore struct {
 	// can tell a policy file that filtered down to nothing from a genuinely
 	// empty one; see ConfiguredRuleCount and SEC-POLICYDROP-1.
 	droppedOnLoad atomic.Int64
+	// rulesetRefused records the most recent ruleset refused whole for an
+	// unrecognized ruleType (policy_ruletype_gate.go). Cleared when a later
+	// Load or ReplaceAll accepts one. Diagnostic state; never feeds evaluation.
+	rulesetRefused atomic.Pointer[policyRulesetRefusal]
 	// scanIndex is the packed Stage-2 destination prefilter for the revision
 	// it names (see policy_scanindex.go). Published lock-free under mu by
 	// publishScanIndexLocked, alongside every assignment to `verified`, and
@@ -516,10 +520,11 @@ func (ps *PolicyStore) Load(path string) error {
 		// stand untouched, exactly as if this call had never happened.
 		return err
 	}
-	var rules []*PolicyRule
-	if err := json.Unmarshal(data, &rules); err != nil {
-		// Malformed file: same reasoning — do not adopt a path whose content
-		// was never actually loaded.
+	rules, err := ps.decodePolicyFile(data)
+	if err != nil {
+		// Malformed file, or one holding a rule type this build has no stage
+		// for: same reasoning — do not adopt a path whose content was never
+		// actually loaded. The old path and rules stand.
 		return err
 	}
 	// Auth-aware fail-closed load gate (Phase 1 Slice 3, shared with ReplaceAll via
@@ -818,7 +823,15 @@ func (ps *PolicyStore) listLocked() []PolicyRule {
 // that bypass that validator (cluster sync, import-replace, and any other direct
 // ReplaceAll caller). The phase that wires the matcher activates these rules.
 func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
+	// Unknown ruleType: refuse the whole replacement and keep the current rules
+	// (policy_ruletype_gate.go). Every production caller is gated before it
+	// gets here; this is the backstop.
+	if err := policyRulesRuleTypeError(rules); err != nil {
+		ps.noteRulesetRefused("bulk replace", err)
+		return
+	}
 	ps.mu.Lock()
+	ps.rulesetRefused.Store(nil)
 	out := make([]*PolicyRule, 0, len(rules))
 	seenIDs := make(map[string]struct{}, len(rules))
 	for i := range rules {

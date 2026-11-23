@@ -1203,8 +1203,8 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b configBackup
-	if err := decodeJSON(r, &b); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+	if refusal := decodeImportBackup(r, &b); refusal != "" {
+		http.Error(w, refusal, http.StatusBadRequest)
 		return
 	}
 	if b.Version < 1 || b.Version > configBackupVersion {

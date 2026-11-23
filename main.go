@@ -1784,16 +1784,11 @@ func applyHotReload(fc *FileConfig) {
 	}
 
 	// Policy rules
-	if fc.Proxy.PolicyFile != "" {
-		if err := policyStore.Load(fc.Proxy.PolicyFile); err != nil {
-			logger.Printf("Reload: policy error: %v", err)
-		} else {
-			logger.Printf("Reload: policy %d rules", len(policyStore.List()))
-		}
-	}
+	policyReloaded := hotReloadPolicyFile(fc.Proxy.PolicyFile)
 
-	// Default action
-	if fc.DefaultAction != "" {
+	// Default action. Skipped when the policy file was refused: see
+	// hotReloadPolicyFile (POL-005).
+	if fc.DefaultAction != "" && policyReloaded {
 		setDefaultPolicyAction(fc.DefaultAction)
 		logger.Printf("Reload: default action %s", fc.DefaultAction)
 	}

@@ -9,6 +9,37 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A rule with a rule type this version does not know no longer disables
+  itself silently (`POL-005`).** A policy rule's `ruleType` selects the stage
+  that evaluates it (`access`, `auth`, or empty for access). A rule carrying any
+  other value — written by a newer release, or by hand — was installed and then
+  skipped by both stages, so with `default_action=allow` or a lower-priority
+  Allow the traffic it was meant to restrict was **forwarded** (measured: a
+  single Block rule with an unknown type, default allow, `200` and the backend
+  reached). Unlike an unknown action (`POL-004`), an unknown type cannot be
+  enforced by keeping the rule, and dropping it is the same failure. A ruleset
+  that contains one is now **refused whole** and the running policy is left
+  exactly as it was: the admin API (`400` on create and update), config import
+  in both modes (dry run included), config-version rollback, control-plane
+  snapshots (on publish and, on a data-plane node, before anything is applied),
+  a pending policy draft on disk (not reloaded) and policy-file reload. A
+  refused reload also leaves the running default action in place, so a new
+  default is never combined with the previous rules. Diagnostics shows
+  `policy_ruleset_refused_unknown_ruletype`, naming the rule, until a ruleset
+  is next accepted. **Upgrade note — check before upgrading:** earlier releases
+  accepted *any* `ruleType` string through the admin API and config import and
+  saved it, so such a rule may already be in `policy.json`, in stored config
+  versions or in the snapshot a control plane publishes. Spelling counts:
+  `Access` or `AUTH` is not `access` or `auth` and was already being skipped.
+  After upgrading, a node whose policy file holds one **stops at startup** with
+  an error naming the rule, exactly as it does for a malformed policy file
+  (a data-plane node too: its policy file is written from the snapshot); a
+  stored config version holding one cannot be restored; and a data plane
+  refuses a snapshot holding one and keeps its last applied policy. Search for
+  `"ruleType"` values other than `access` and `auth` and correct or remove
+  those rules first. Rules with an unknown *action* are unaffected and still
+  block.
+
 - **A rule with an action this build does not know now blocks its traffic
   instead of disappearing (`POL-004`).** `PolicyStore.Load` (the policy file)
   and `ReplaceAll` (control-plane snapshots and replace-mode import) dropped
