@@ -1,6 +1,6 @@
 # Policy semantics proposals: B (invalid categories), C (equal priorities), D (default_action spellings)
 
-> **Status: proposal, awaiting owner decision.** No product behaviour is changed by this document.
+> **Status: owner decision recorded 2026-11-23 (Decision 3 in roadmap/VERIFICATION-PROGRAM.md):** the conservative recommendations for B, C and D are approved, each to land independently; the renumber endpoint is not yet decided. This document is the design record.
 > Evidence-backed investigation for the verification program (see roadmap/VERIFICATION-PROGRAM.md); differential evidence: PR #2029.
 
 Revision `8178c19` (a shallow clone, so there is no `git log` history). This was a read-only investigation and

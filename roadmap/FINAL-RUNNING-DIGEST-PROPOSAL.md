@@ -1,6 +1,6 @@
 # Proposal: `final_running_digest` must name the verified running image, or say it cannot
 
-> **Status: proposal, awaiting owner decision.** No product behaviour is changed by this document.
+> **Status: owner decision recorded 2026-11-23 (Decision 2 in roadmap/VERIFICATION-PROGRAM.md):** option C is approved; `final_running_digest` stays a registry digest; `final_running_state` and `final_running_image_id` are added. This document is the design record.
 > Evidence-backed investigation for the verification program (see roadmap/VERIFICATION-PROGRAM.md); observations pinned by PRs #2020 and #2030.
 
 Revision: `8178c19`. Module `cmd/culvert-maint`. This is a proposal, not an implementation; nothing in

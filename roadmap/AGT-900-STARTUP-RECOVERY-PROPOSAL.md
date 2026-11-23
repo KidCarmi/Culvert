@@ -1,6 +1,6 @@
 # AGT-900 startup recovery: failure matrix and implementation proposal (design only)
 
-> **Status: proposal, awaiting owner decision.** No product behaviour is changed by this document.
+> **Status: owner decision recorded 2026-11-23 (Decision 1 in roadmap/VERIFICATION-PROGRAM.md):** the opt-in, default-off `converge` design is approved, with the constraints listed there; `converge_adopt` is not approved. This document is the design record.
 > Evidence-backed investigation for the verification program (see roadmap/VERIFICATION-PROGRAM.md); lifecycle evidence: PRs #2020, #2030.
 
 Revision read: `94cffdb`. Paths are relative to `cmd/culvert-maint/`.

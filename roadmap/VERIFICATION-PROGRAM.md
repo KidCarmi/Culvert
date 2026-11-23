@@ -68,14 +68,67 @@ First candidates once approved: S2 (rollback preservation), S4 (journal retireme
 S7 (write-ahead barrier); policy R1/R3/R4/R11 (precedence, disabled rules, stage
 separation, FQDN boundary).
 
-## 5. Proposals awaiting owner decision
+## 5. Owner decisions (recorded 2026-11-23)
 
-| Topic | Document | Owner decisions |
+This page and the four proposals below are the engineering decision record. Verification-only
+and production-behaviour changes land in separate PRs; no unapproved property becomes a
+required check.
+
+**PRs.** #2020, #2029 and #2030 are approved in direction; #2030 is retargeted to `main` after #2020
+merges and keeps both image-store models and the real-Docker evidence. #2029 stays shadow.
+
+**Decision 1 — AGT-900: approve the conservative, opt-in `converge` design.**
+- Default stays OFF; not enabled by default or deployed until real-Docker E2E validates the
+  safety properties.
+- No adoption of an unverified target image; never report upgrade success from a
+  running-image guess; never automatically restart an unhealthy or unverified target.
+- `recovery_required` when evidence is insufficient; Docker unavailable is non-destructive.
+- The original interrupted operation keeps its outcome; recovery is a separate operation.
+- Journal retirement only after verified convergence and durable audit evidence.
+- Optional `RollbackArmed` journal field, instance locking, bounded retries.
+- Implemented in focused PRs, including an explicitly documented AGT-004 amendment that
+  scopes "changes nothing in Docker" to the default (off) mode.
+
+**Decision 2 — `final_running_digest`: approve the evidence-based correction, option C.**
+Reuse existing captures plus one bounded, read-only final capture when evidence is stale or
+missing. `final_running_digest` stays a registry digest (never a config/image id). Add
+`final_running_state` and `final_running_image_id`. A guessed image is never reported as
+verified. Wire compatibility preserved; negative controls required.
+
+**Decision 3 — Policy B/C/D: approve the conservative recommendations, each independently.**
+- B: reject new invalid category references and reserved `Any` case variants; preserve
+  stored rules; expose unresolved references in diagnostics.
+- C: stable stored-order precedence for equal priorities, with migration/compatibility
+  evidence; no silent renumbering.
+- D: invalid persisted default actions stay fail-closed deny, with visible warnings and strict
+  validation on future writes; never reinterpreted as allow.
+
+**Decision 4 — SOCKS5 belongs inside the managed security boundary.** Stages:
+1. Correct operator/deployment docs; startup and diagnostic warnings when legacy SOCKS5 is
+   enabled (no behaviour change).
+2. Non-enforcing shadow evaluation through the existing policy engine, without touching
+   accounting or decisions.
+3. Threat-feed parity and shared identity resolution.
+4. Opt-in enforce mode after differential and real-network verification.
+
+Existing installations keep current behaviour until explicitly migrated. In enforce mode a
+policy requiring TLS inspection must not silently become an uninspected allow: refuse, unless
+an explicit, documented operator exception authorises it. Investigate bind-address exposure
+and provide a safe configuration option.
+
+**Execution priority:** (1) finish the verification PRs; (2) SOCKS5 visibility (no behaviour
+change); (3) image-reporting correctness; (4) lifecycle recovery behind an off-by-default
+switch; (5) policy semantics gaps; (6) SOCKS5 policy parity. Independent domains in parallel.
+No automatic production deployment or broad enforcement change.
+
+### Proposal documents
+
+| Topic | Document | Open items after the decisions |
 |---|---|---|
-| AGT-900 startup crash recovery: failure matrix (A1–X6) and staged implementation | [AGT-900-STARTUP-RECOVERY-PROPOSAL.md](AGT-900-STARTUP-RECOVERY-PROPOSAL.md) | D1–D8; AGT-004 needs an `amended` record |
-| `final_running_digest` = verified running image or "unverified" | [FINAL-RUNNING-DIGEST-PROPOSAL.md](FINAL-RUNNING-DIGEST-PROPOSAL.md) | option B vs C; new AGT-006 |
-| Invalid categories, equal priorities, `default_action` spellings | [POLICY-SEMANTICS-B-C-D-PROPOSAL.md](POLICY-SEMANTICS-B-C-D-PROPOSAL.md) | new 400s, stable tie order as contract, renumber endpoint, raw admin-settings value |
-| SOCKS5 Stage-2 alignment (SWG-901) | [SWG-901-SOCKS5-ALIGNMENT-PROPOSAL.md](SWG-901-SOCKS5-ALIGNMENT-PROPOSAL.md) | D1–D10; a no-behaviour-change disclosure step can ship first |
+| AGT-900 startup crash recovery: failure matrix (A1–X6) and staged implementation | [AGT-900-STARTUP-RECOVERY-PROPOSAL.md](AGT-900-STARTUP-RECOVERY-PROPOSAL.md) | Decided (Decision 1). `converge_adopt` (adopting an ungated live target after a fresh gate) is NOT approved |
+| `final_running_digest` = verified running image or "unverified" | [FINAL-RUNNING-DIGEST-PROPOSAL.md](FINAL-RUNNING-DIGEST-PROPOSAL.md) | Decided: option C (Decision 2); AGT-006 proposed, owner approval pending |
+| Invalid categories, equal priorities, `default_action` spellings | [POLICY-SEMANTICS-B-C-D-PROPOSAL.md](POLICY-SEMANTICS-B-C-D-PROPOSAL.md) | Decided (Decision 3); the renumber endpoint is not yet decided |
+| SOCKS5 Stage-2 alignment (SWG-901) | [SWG-901-SOCKS5-ALIGNMENT-PROPOSAL.md](SWG-901-SOCKS5-ALIGNMENT-PROPOSAL.md) | Decided: D1 = inside the boundary, staged (Decision 4); D5 superseded: Inspect rules refuse in enforce mode unless an explicit operator exception |
 
 Headline findings from those investigations (each verified at source):
 - AGT-900: 36 of 147 crash vectors would today be "adopted" as a successful upgrade
@@ -95,8 +148,8 @@ Headline findings from those investigations (each verified at source):
 ## 6. Roadmap
 
 1. Land #2020, #2030, #2029 (shadow).
-2. Owner decisions on §5; production fixes then land as focused PRs with contract records,
-   each regenerating baselines through the drift review.
+2. Implement the §5 decisions in the recorded priority order, as focused PRs with contract
+   records, each regenerating baselines through the drift review.
 3. Next verification domains, in order of security value: SOCKS5 parity (a differential
    SOCKS5-vs-CONNECT oracle once SWG-901 is decided), authentication and sessions,
    admission (IP filter and rate limits).

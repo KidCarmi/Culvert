@@ -1,6 +1,6 @@
 # SWG-901 — SOCKS5 / Stage-2 policy alignment proposal
 
-> **Status: proposal, awaiting owner decision.** No product behaviour is changed by this document.
+> **Status: owner decision recorded 2026-11-23 (Decision 4 in roadmap/VERIFICATION-PROGRAM.md):** SOCKS5 is inside the managed boundary; staged rollout approved; existing installs keep current behaviour until migrated; in enforce mode an Inspect rule refuses rather than tunnelling uninspected, unless an explicit, documented operator exception (this supersedes D5's recommendation). This document is the design record.
 > Evidence-backed investigation for the verification program (see roadmap/VERIFICATION-PROGRAM.md); a known, documented architecture gap (SWG-901), not a newly introduced vulnerability.
 
 Revision inspected: `8178c19` (clean worktree). Read-only investigation; no code changed.
