@@ -211,7 +211,7 @@ type Server struct {
 	// (settle.go, mutation.go). settlePoll is how often Docker is asked.
 	mutations    *journal.MutationLog
 	startHazard  bool
-	startMarker  bool // a marker was actually found (not merely first use)
+	startOnlyUp  bool // a readable marker was found and names only `compose up`
 	startSettled atomic.Bool
 	settlePoll   time.Duration
 
@@ -277,7 +277,7 @@ func New(opts Options) (*Server, error) {
 	}
 	return &Server{
 		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
-		mutations: mutations, startHazard: atOpen.Pending || atOpen.FirstUse, startMarker: atOpen.Pending, settlePoll: defaultSettlePoll,
+		mutations: mutations, startHazard: atOpen.Pending || atOpen.FirstUse, startOnlyUp: atOpen.OnlyUp, settlePoll: defaultSettlePoll,
 	}, nil
 }
 

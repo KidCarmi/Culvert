@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"culvert-maint/internal/journal"
 )
@@ -46,6 +47,41 @@ func TestMutation_MarkerLifecycle(t *testing.T) {
 	}
 	if r.srv.mutationCutAt.Load() == nil {
 		t.Error("a failed `down` did not restart the in-process window")
+	}
+}
+
+// TestMutation_ALaterSuccessDoesNotClearAnOpenWindow: a restore whose `compose
+// down` was cut goes straight on to `compose up`. That `up` finds the proxy
+// still running (dockerd is still stopping it), changes nothing and exits 0.
+// The marker must survive it, name the down, and make the next agent start
+// wait; otherwise the next start would be told nothing was left unfinished.
+func TestMutation_ALaterSuccessDoesNotClearAnOpenWindow(t *testing.T) {
+	r := newReconRig(t, true)
+	r.srv.opts.Cfg.InterruptedSettle = 30 * time.Second
+	r.srv.startHazard = false // an ordinary start: no window open
+	dir := r.srv.opts.StateDir
+
+	r.world.down = true
+	if _, err := r.srv.composeDown(context.Background()); err == nil {
+		t.Fatal("precondition: `down` should fail")
+	}
+	r.world.down = false
+	if _, err := r.srv.composeUp(context.Background()); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+
+	_, at, err := journal.OpenMutationLog(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !at.Pending {
+		t.Fatal("the successful `up` removed the marker of the cut `down` inside its settle window")
+	}
+	if at.OnlyUp {
+		t.Error("the marker no longer names the `compose down`: the next start could end its wait early")
+	}
+	if !r.srv.mutations.Pending() {
+		t.Error("the marker is not reported as pending in this process")
 	}
 }
 

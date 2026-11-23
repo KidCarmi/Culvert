@@ -93,7 +93,7 @@ func (s *Server) startHazardOpen() bool {
 	if s.startSettled.Load() {
 		return false
 	}
-	return s.startHazard || s.recoveringFromInterruption()
+	return s.startHazard || s.staleRecordOrUnreadable()
 }
 
 // noteMutationCut records that a `compose up` or `compose down` of THIS
@@ -159,7 +159,7 @@ func (s *Server) settleInterrupted(ctx context.Context) ([]byte, error) {
 				time.Since(began).Round(time.Millisecond), s.opts.Cfg.InterruptedSettle)), nil
 		}
 		if s.onlyPredecessorPending() {
-			if listed, err := s.opts.Runner.ProxyContainerListed(ctx); err == nil && !listed {
+			if listed, err := s.proxyListed(ctx); err == nil && !listed {
 				quiet++
 			} else {
 				quiet = 0
@@ -184,11 +184,32 @@ func (s *Server) settleInterrupted(ctx context.Context) ([]byte, error) {
 	}
 }
 
-// onlyPredecessorPending reports whether the window in effect comes from the
-// previous process alone: no compose up/down of this process ended in an error
-// within the window.
+// proxyListed is one read of Docker, bounded so that a `compose ps` that hangs
+// cannot hold the wait past its window.
+func (s *Server) proxyListed(ctx context.Context) (bool, error) {
+	budget := 10 * time.Second
+	if rem := s.settleRemaining(); rem > 0 && rem < budget {
+		budget = rem
+	}
+	rctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	return s.opts.Runner.ProxyContainerListed(rctx)
+}
+
+// onlyPredecessorPending reports whether the wait may be ended early: the
+// window in effect comes from the previous process alone, and what that
+// process left unfinished is known to be nothing but `compose up`.
+//
+//   - A marker was actually found and read at start, and it names only
+//     `compose up`. A `compose down` stops every service of the project, and
+//     "no proxy container" says nothing about a stop still pending on another
+//     one. An `up` stops only a container it is replacing, and the `up` that
+//     follows the wait replaces that same container anyway. A hazard that
+//     rests on first use, on an unreadable marker or on a journal record alone
+//     names no command, so it is never ended early.
+//   - No compose up/down of this process ended in an error within the window.
 func (s *Server) onlyPredecessorPending() bool {
-	if s.opts.Runner == nil || !s.startHazardOpen() {
+	if s.opts.Runner == nil || !s.startOnlyUp || !s.startHazardOpen() {
 		return false
 	}
 	cut := s.mutationCutAt.Load()

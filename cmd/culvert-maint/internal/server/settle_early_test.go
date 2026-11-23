@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ func earlyRig(t *testing.T) *reconRig {
 	r.srv.opts.Cfg.InterruptedSettle = 30 * time.Second
 	r.srv.startedAt = time.Now()
 	r.srv.startHazard = true
+	r.srv.startOnlyUp = true // the marker found at start named only `compose up`
 	r.srv.settlePoll = 40 * time.Millisecond
 	return r
 }
@@ -114,6 +117,31 @@ func TestSettleEarly_NotAfterACutCommandOfThisProcess(t *testing.T) {
 	}
 }
 
+// TestSettleEarly_NotAfterAComposeDown: a `compose down` stops every service
+// of the project. "No proxy container" says nothing about a stop still pending
+// on another one, so a marker that names a down (or names nothing readable, or
+// no marker at all: first use, a journal record alone) is never ended early.
+func TestSettleEarly_NotAfterAComposeDown(t *testing.T) {
+	r := earlyRig(t)
+	r.world.running = ""
+	r.srv.startOnlyUp = false
+	if _, returned := settleWithin(t, r, 600*time.Millisecond); returned {
+		t.Fatal("the wait ended early although the predecessor's unfinished command was not known to be only `compose up`")
+	}
+}
+
+// TestSettle_UnreadableJournalIsAHazard: doubt counts as yes.
+func TestSettle_UnreadableJournalIsAHazard(t *testing.T) {
+	r := earlyRig(t)
+	r.srv.startHazard = false
+	if err := os.WriteFile(filepath.Join(r.jnl.Dir(), testOpULID+".json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rem := r.srv.settleRemaining(); rem < 25*time.Second {
+		t.Errorf("with an unreadable journal: remaining = %v, want about the whole window", rem)
+	}
+}
+
 // TestSettle_InterruptedRecordIsAHazardWithoutAMarker: belt and braces. An
 // interrupted journal record opens the window even when no marker was found
 // (an agent version that wrote none ran in between).
@@ -124,7 +152,8 @@ func TestSettle_InterruptedRecordIsAHazardWithoutAMarker(t *testing.T) {
 		t.Fatalf("precondition: remaining = %v with no marker and no record", rem)
 	}
 	now := time.Now().UTC()
-	r.seed(t, journal.PhaseRestarting, func(rec *journal.Record) { rec.InterruptedAt = &now })
+	_ = now
+	r.seed(t, journal.PhaseRestarting, nil) // even without the best-effort interrupted_at mark
 	if rem := r.srv.settleRemaining(); rem < 25*time.Second {
 		t.Errorf("with an interrupted record: remaining = %v, want about the whole window", rem)
 	}

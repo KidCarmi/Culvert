@@ -162,9 +162,15 @@ Implemented (ADR-0061, "When the window applies, and when it ends early"):
 - the marker of 3.1, with the correction that it stays after any error exit,
   plus two conservative additions: the first start that keeps markers, and any
   interrupted journal record, count as a hazard;
+- two corrections from the adversarial review of the first implementation:
+  the marker names every command since it was last removed and survives a
+  later success inside an open window (a cut `down` followed by a no-op `up`
+  must not erase it), and the early end is allowed only for a marker that
+  names nothing but `compose up` (a `down` may still be stopping another
+  service);
 - of 3.2, only the first condition: **no proxy container is running**, read
-  twice one poll apart. That is every case in which the proxy is down, which
-  is where waiting costs an outage;
+  twice one poll apart. That is every case in which an interrupted upgrade or
+  image rollback left the proxy down, which is where waiting costs an outage;
 - the `up` retry of 1a also triggers on a marker found at start, with no
   journal record needed.
 

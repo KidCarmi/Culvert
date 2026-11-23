@@ -210,7 +210,13 @@ For `indeterminate`:
   proxy container for the dead operation. The wait ends as soon as Docker shows
   no proxy container running (the operation log says `settle: no proxy
   container is running …`), and otherwise at the end of the window (`settle:
-  waited …`). An ordinary agent restart with nothing in flight does not wait.
+  waited …`). An agent restart does not wait when the previous process left
+  nothing unfinished: no marker under `<state_dir>/mutation` and no interrupted
+  operation on record. A marker stays until the next upgrade, rollback or
+  restore completes its `compose up` / `compose down` outside such a window.
+- If you downgrade the agent to a version older than this mechanism and later
+  upgrade again, remove `<state_dir>/mutation` before starting the newer
+  agent, so that it waits once as on a first start.
 
 If the agent will not start and its log says
 `journal: refusing to serve — journal: corrupt record <op_id>.json`, a journal

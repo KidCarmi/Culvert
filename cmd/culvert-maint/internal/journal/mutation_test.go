@@ -34,17 +34,23 @@ func TestMutationLog_FirstUseThenClean(t *testing.T) {
 func TestMutationLog_BeginIsSeenUntilEnd(t *testing.T) {
 	dir := t.TempDir()
 	m, _ := openMut(t, dir)
-	if err := m.Begin("compose up"); err != nil {
+	if err := m.Begin(MutationComposeUp); err != nil {
 		t.Fatal(err)
 	}
-	if _, at := openMut(t, dir); !at.Pending {
-		t.Fatal("a marker written by Begin was not found at the next open")
+	if _, at := openMut(t, dir); !at.Pending || !at.OnlyUp {
+		t.Fatalf("after Begin(up): next open = %+v, want Pending and OnlyUp", at)
+	}
+	if !m.Pending() {
+		t.Error("Pending() is false after Begin")
 	}
 	if err := m.End(); err != nil {
 		t.Fatal(err)
 	}
-	if _, at := openMut(t, dir); at.Pending {
-		t.Fatal("the marker is still there after End")
+	if _, at := openMut(t, dir); at.Pending || at.OnlyUp {
+		t.Fatalf("after End: next open = %+v, want nothing", at)
+	}
+	if m.Pending() {
+		t.Error("Pending() is true after End")
 	}
 	if err := m.End(); err != nil {
 		t.Errorf("End without a marker: %v", err)
@@ -59,8 +65,8 @@ func TestMutationLog_UnreadableIsPending(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, mutationDirName, mutationFileName), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if _, at := openMut(t, dir); !at.Pending {
-		t.Fatal("a non-file at the marker path was read as no marker")
+	if _, at := openMut(t, dir); !at.Pending || at.OnlyUp {
+		t.Fatalf("a non-file at the marker path: open = %+v, want Pending and not OnlyUp", at)
 	}
 }
 
@@ -74,5 +80,38 @@ func TestMutationLog_BeginFailsClosed(t *testing.T) {
 	}
 	if err := m.Begin("compose up"); err == nil {
 		t.Fatal("Begin reported success although nothing could be written")
+	}
+}
+
+// TestMutationLog_NamesEveryCommandSinceTheLastEnd: a later command must not
+// make an earlier, unfinished one look milder. A down followed by an up, with
+// no End in between, is still a marker that names a down; the same holds
+// across a restart, and for content that cannot be understood.
+func TestMutationLog_NamesEveryCommandSinceTheLastEnd(t *testing.T) {
+	dir := t.TempDir()
+	m, _ := openMut(t, dir)
+	if err := m.Begin(MutationComposeDown); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Begin(MutationComposeUp); err != nil {
+		t.Fatal(err)
+	}
+	m2, at := openMut(t, dir)
+	if !at.Pending || at.OnlyUp {
+		t.Fatalf("down then up: open = %+v, want Pending and not OnlyUp", at)
+	}
+	// The next process adds an up of its own: still not "only up".
+	if err := m2.Begin(MutationComposeUp); err != nil {
+		t.Fatal(err)
+	}
+	if _, at := openMut(t, dir); at.OnlyUp {
+		t.Fatal("a marker carried over a restart lost the down it named")
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, mutationDirName, mutationFileName), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, at := openMut(t, dir); !at.Pending || at.OnlyUp {
+		t.Fatalf("a marker that names no command: open = %+v, want Pending and not OnlyUp", at)
 	}
 }

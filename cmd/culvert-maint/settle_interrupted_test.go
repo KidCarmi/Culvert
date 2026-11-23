@@ -231,3 +231,34 @@ func TestSettle_EndsEarlyWhenTheProxyIsDown(t *testing.T) {
 		t.Errorf("after rollback: tag %.8s container %.8s, want both on the prior image", r.read("pinned"), r.read("running"))
 	}
 }
+
+// TestSettle_TheMarkerAloneOpensTheWindow: the interrupted `up` left no journal
+// record, only its marker. The next start must still wait out the window while
+// a proxy container is running (it may be the one being stopped).
+func TestSettle_TheMarkerAloneOpensTheWindow(t *testing.T) {
+	const settle = 6 * time.Second
+	r := newCrashRig(t)
+	r.setSettle(settle.String())
+	r.start() // first start on this state dir: would wait; get past it
+	r.kill()
+	r.start()
+	crashed := r.crashAt("up_before:1")
+	if err := os.Remove(filepath.Join(r.state, "reconcile", crashed+".json")); err != nil {
+		t.Fatalf("removing the interrupted record: %v", err)
+	}
+	beforeStart := time.Now()
+	r.start()
+	r.clearCalls()
+
+	op := r.rollbackToA()
+	time.Sleep(time.Second)
+	if calls := r.tagOrUpCalls(); len(calls) != 0 {
+		t.Fatalf("the rollback tagged or recreated inside the window, with only the marker to go on: %v", calls)
+	}
+	if d := r.waitOp(op); d.State != "succeeded" {
+		t.Fatalf("rollback = %s(%s); op log:\n%s", d.State, d.FailureReason, r.opLogs(op))
+	}
+	if waited := time.Since(beforeStart); waited < settle {
+		t.Errorf("the rollback finished %v after the restart; it must not act before %v", waited, settle)
+	}
+}

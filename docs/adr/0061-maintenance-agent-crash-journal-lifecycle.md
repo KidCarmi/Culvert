@@ -269,23 +269,41 @@ that every doubt falls on the waiting side:
 
 - *Record before effect.* Before the agent runs `compose up` or `compose
   down` it writes a durable marker (`<state_dir>/mutation/pending.json`,
-  fsynced) and removes it only after the command returned success. If the
-  marker cannot be written the command is not run. After any error exit the
-  marker stays: a docker CLI that was sent SIGTERM exits with an ordinary
-  error status after it has asked dockerd to stop the proxy. At start, **no
-  marker means the previous process had no such command in flight**, so there
-  is nothing for dockerd to be finishing and no window. A window still applies
-  when a marker is found, on the first start that keeps markers (their absence
-  then proves nothing), and whenever the journal holds an interrupted record.
-  All server call sites go through one wrapper
+  fsynced) that names the command and every command begun since the marker was
+  last removed. If the marker cannot be written the command is not run. The
+  marker is removed only when a command returned success **and no settle
+  window was open when it started**. After any error exit it stays: a docker
+  CLI that was sent SIGTERM exits with an ordinary error status after it has
+  asked dockerd to stop the proxy. And a success inside an open window proves
+  nothing about what opened it: a restore whose `compose down` was cut goes
+  straight on to `compose up`, which finds the proxy still `running`, changes
+  nothing and exits 0 (independent review, 2026-11-23). At start, no marker
+  means that every compose up/down of the previous process either returned
+  success outside a window or never ran, so there is nothing for dockerd to be
+  finishing and no window. A window still applies when a marker is found, on
+  the first start that keeps markers (their absence then proves nothing), and
+  whenever the journal holds a record no running operation owns, or cannot be
+  read. All server call sites go through one wrapper
   (`TestMutation_OnlyTheWrappersRunComposeUpDown`).
-- *Advance when completion is established.* While it waits, the agent reads
-  `compose ps`. A container stop can only be pending on a running container.
-  When two consecutive reads, one poll apart, list no proxy container, the stop
-  is over and the wait ends; whatever `up` starts next is not a container a
-  stale request named. If a proxy container is running (it may be the one being
-  stopped: Docker reports `running` until the process is gone) or Docker cannot
-  be read, the state is ambiguous and the whole window is waited out.
+- *Advance when completion is established.* Only when the marker found at
+  start was readable and names nothing but `compose up`. While it waits, the
+  agent reads `compose ps`. A stop the `up` requested can only be pending on a
+  running proxy container. When two consecutive reads, one poll apart, list no
+  proxy container, that stop is over and the wait ends; whatever `up` starts
+  next is not a container a stale request named. If a proxy container is
+  running (it may be the one being stopped: Docker reports `running` until the
+  process is gone), Docker cannot be read, or the output is not understood
+  completely, the whole window is waited out. A marker that names a `compose
+  down` is never ended early: `down` stops every service of the project, and
+  "no proxy container" says nothing about a stop still pending on another one.
+
+Not covered by the marker: an agent **downgraded** to a version that writes no
+markers and upgraded again. The marker directory then exists, and a restore's
+`compose down` cut under the older version leaves neither marker nor record.
+After such a round trip, remove `<state_dir>/mutation` before starting the
+newer agent; it then treats the start as a first use and waits. A state
+directory that cannot be written now also stops `compose up` / `compose down`
+from being run at all, as it already stops an upgrade at its journal barrier.
 
 The early end applies only to what a previous process left: its docker commands
 are dead before the next start (the unit's control-group kill), so only single

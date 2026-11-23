@@ -74,6 +74,7 @@ func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bo
 	out = append(out, tres.Stdout...)
 	errOut := append([]byte(nil), tres.Stderr...)
 	ev.noteUp()
+	midRecreate := s.mayBeMidRecreate() // before `up`: a successful one may clear the marker
 	ures, uerr := s.composeUp(ctx)
 	if uerr != nil && failedPostRestart != nil {
 		*failedPostRestart = true
@@ -83,7 +84,7 @@ func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bo
 		errOut = append(errOut, ures.Stderr...)
 	}
 	if uerr == nil {
-		out, errOut, uerr = s.upAgainIfNothingRuns(ctx, out, errOut)
+		out, errOut, uerr = s.upAgainIfNothingRuns(ctx, midRecreate, out, errOut)
 		if uerr != nil && failedPostRestart != nil {
 			*failedPostRestart = true
 		}
@@ -105,17 +106,18 @@ const upRetryBudget = 1
 // proxy. Without this, the first rollback after such a crash failed its health
 // gate and left the proxy down until an operator submitted a second one.
 //
-// It applies only while an operation interrupted by an agent death is on
-// record: that is when Compose can have been left in the middle of a recreate,
-// and an ordinary upgrade keeps exactly the docker calls it always made.
+// It applies only while Compose can have been left in the middle of a
+// recreate (mayBeMidRecreate, asked before `up`): an interrupted record is on
+// file or the marker of an unfinished compose command is in place. An ordinary
+// upgrade keeps exactly the docker calls it always made.
 //
 // The retry is bounded and is the same command; it runs only when Docker was
 // read and shows no running proxy container. If Docker cannot be read, nothing
 // is assumed and the health gate decides. The health gate and the verify stage
 // that follow are unchanged: this never turns a failure into a success, it
 // only gives `up` the second pass it sometimes needs.
-func (s *Server) upAgainIfNothingRuns(ctx context.Context, out, errOut []byte) (stdout, stderr []byte, err error) {
-	if !s.mayBeMidRecreate() {
+func (s *Server) upAgainIfNothingRuns(ctx context.Context, midRecreate bool, out, errOut []byte) (stdout, stderr []byte, err error) {
+	if !midRecreate {
 		return out, errOut, nil
 	}
 	for attempt := 1; attempt <= upRetryBudget; attempt++ {
@@ -211,23 +213,23 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 	}
 }
 
+// mayBeMidRecreate reports whether Compose can have been left in the middle of
+// a recreate by an earlier agent process: an interrupted record is on file, or
+// the marker of a compose up/down that was never known to be over is in place
+// (found at start, or left by a command that ended in an error or ran inside an
+// open settle window). The marker covers an `up` that was cut with no record
+// left to say so. Once a later command clears the marker, this is false again
+// and `up` is followed by no extra read.
+//
+// Ask BEFORE running `up`: a successful `up` may clear the marker.
+func (s *Server) mayBeMidRecreate() bool {
+	return s.mutations.Pending() || s.recoveringFromInterruption()
+}
+
 // recoveringFromInterruption reports whether the journal holds a record that a
 // previous agent process left behind (marked at startup, no operation of this
 // process behind it). An unreadable journal counts as no: nothing is retried on
 // a guess.
-// mayBeMidRecreate reports whether Compose can have been left in the middle of
-// a recreate by an earlier agent process: an interrupted record is on file, or
-// this process found the marker of an unfinished compose up/down at its start.
-// The marker covers an `up` that was cut with no record left to say so (its
-// operation failed and retired its own record before the agent ended).
-//
-// A compose command of THIS process that ended in an error is deliberately not
-// a trigger: the inline rollback that follows a failed `up` keeps exactly the
-// docker calls the lifecycle model was reviewed with.
-func (s *Server) mayBeMidRecreate() bool {
-	return s.startMarker || s.recoveringFromInterruption()
-}
-
 func (s *Server) recoveringFromInterruption() bool {
 	if s.opts.Journal == nil {
 		return false
@@ -238,6 +240,27 @@ func (s *Server) recoveringFromInterruption() bool {
 	}
 	for i := range recs {
 		if recs[i].InterruptedAt != nil && !s.opts.Ops.IsRunning(recs[i].OpID) {
+			return true
+		}
+	}
+	return false
+}
+
+// staleRecordOrUnreadable reports whether the journal holds a record that no
+// operation of this process is behind, or cannot be read. Used where doubt must
+// count as yes (the settle window): unlike recoveringFromInterruption it does
+// not depend on the best-effort interrupted_at mark, and an unreadable journal
+// is a yes.
+func (s *Server) staleRecordOrUnreadable() bool {
+	if s.opts.Journal == nil {
+		return false
+	}
+	recs, err := s.opts.Journal.List()
+	if err != nil {
+		return true
+	}
+	for i := range recs {
+		if !s.opts.Ops.IsRunning(recs[i].OpID) {
 			return true
 		}
 	}
