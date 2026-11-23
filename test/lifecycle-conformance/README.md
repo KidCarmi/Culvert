@@ -28,8 +28,10 @@ tag `lifecycle_conformance`.
    HTTP client are faked.
 6. `cmd/lifecyclecheck` — the property gate and the Markdown step summary.
 7. `cmd/lifecyclemutate` — scheduled mutation campaign (see below).
-8. `test/lifecycle-conformance/run.sh` — runs 6 and 5 and combines the result.
-9. `baseline.json`, `observed.json` (embedded) — the **reviewed baseline**: every
+8. `cmd/culvert-maint/orphan_survival_crash_test.go` — orphan-survival crash
+   vectors on the real agent binary (see below).
+9. `test/lifecycle-conformance/run.sh` — runs 6, 5 and 8 and combines the result.
+10. `baseline.json`, `observed.json` (embedded) — the **reviewed baseline**: every
    property verdict, exercised count and shortest counterexample, the state-space
    size, one readable line per apply and crash vector, a fingerprint of the
    reconcile table, and the real-code observations the model does not predict:
@@ -77,6 +79,7 @@ or observed behaviour differs from what was last reviewed".
 | The agent's own Go logic behaves as the model says on every modelled path | Yes — executed against the real code |
 | Docker behaves as the fake exec layer assumes | **No** — an assumption; validate against real Docker (`test/e2e/maint-agent`) |
 | Startup crash recovery works end to end | **No** — the model's agent-restart step is not executed |
+| The agent's reports stay true when the in-flight docker command outlives the agent | **Measured on the process-level Docker model only**; findings pinned as `open` (below) |
 | Standalone/data rollback, migration, timeouts, concurrency are correct | **No** — not modelled |
 | The properties are Culvert's contract | **No** — every property is `proposed` or `open`; none is owner-approved |
 
@@ -141,6 +144,64 @@ stores' observations are pinned in `observed.json`; containerd lines carry the
   unverified`. The model predicts all three fields for every vector, and the
   misreport list in `observed.json` is empty under both stores.
 
+## Orphan-survival crash vectors
+
+The real-binary crash tests (`startup_crash_recovery_test.go`) kill the agent
+**and** the docker command it was waiting on. The kernel re-parents that
+command instead, and the runner gives each command its own process group, so
+nothing aimed at the agent reaches it. `orphan_survival_crash_test.go` kills
+only the agent at each of the 7 kill points with a docker command in flight,
+proves from `/proc` that the command is alive and re-parented, restarts the
+agent, records its reports, releases the command, and reads the reports again
+(and after one more restart). A second flow admits the operator's next
+operation while the command is still alive.
+
+- Negative controls in the code: a mutating in-flight command (`tag`,
+  `compose up`) must change the model after release, write a completion marker
+  in both flows, and a read-only one must not change the model; every report
+  read must answer 200 (404 for the operation only after a later operation
+  verifiably succeeded and retired the record); at the restart the operation is
+  `failed(agent_restart_interrupted)` with exactly one audit entry and is the
+  only interrupted entry; the later operation must be the one `/v1/status`
+  advises. Every other failure, including a shared rig helper's, is `INVALID`.
+  `TestOrphanSurvival_ReapedControl` repeats the vectors with the command
+  reaped and requires no divergence.
+- Findings are pinned in `orphanExpectations`, every entry `open`. Q3 is pinned
+  in two parts: the late mutation after a reported success, and what every
+  `/v1/status` signal (interrupted entries, `pinned_tag` absent / true / false)
+  shows of it. `TestOrphanClassifier_Later` checks the classifier on synthetic
+  observations. A finding is not a failure. Exit 1 requires positive evidence
+  of a complete run (one `ORPHAN-COMPLETE` line per flow, 14 + 14, and both
+  `ORPHAN-SUMMARY` lines) and every failed subtest explained by its own
+  `EXPECTATION MISMATCH` or `A3:` line. Two further guards make that evidence
+  positive: every line the suites print must start with a prefix on a closed
+  allowlist (`orphanOutputPrefixes` in the test, `ORPHAN_PREFIXES` in `run.sh`;
+  the two must match), so any unmarked assertion or shared rig helper message
+  fails the run as incomplete; and the per-flow `sanctioned=` counts on the
+  `ORPHAN-COMPLETE` lines must add up to the number of `EXPECTATION MISMATCH`
+  and `A3:` lines. Anything else non-zero, or any unlisted output, is exit 2.
+- What Q1 establishes: the durable report (operation result, audit entry) is
+  conservative, since it already says `indeterminate` wherever the orphan can act,
+  and a conclusive-looking live read (`running_image`, `pinned_tag`) can change
+  after the restart. On this model a durable report cannot be shown stale: it
+  says `unchanged` only where the in-flight command changes no tag or container.
+- Model artefacts, not findings: the model's `compose up` reads the tag when it
+  is released, while a real in-flight `compose up` has already resolved its image.
+  So "a rollback admitted meanwhile, then the orphan's `up` lands on the prior
+  image" is a property of the model. An orphaned `pull`'s effect on the local
+  image store is not represented.
+- Nothing here was run against real Docker. Whether the command really
+  survives and completes depends on:
+  - the supervisor: the shipped unit sets no `KillMode`, so systemd's default
+    `control-group` is expected, not verified, to kill it before
+    `Restart=on-failure` starts the agent again;
+  - `sudo`, and a container's PID 1;
+  - output pipes: the runner captures the child's stdout/stderr through pipes,
+    so once the agent is dead an orphan gets SIGPIPE/EPIPE on its next write.
+    The model's mutating commands write nothing; a real `docker compose up`
+    writes progress;
+  - whether `dockerd` completes a call whose client died.
+
 ## Running
 
 ```bash
@@ -149,9 +210,9 @@ test/lifecycle-conformance/run.sh /tmp/lifecycle-report
 
 | Exit | Meaning |
 |---|---|
-| 0 | Model check complete; all three conformance suites ran and passed; no drift from the reviewed baseline |
-| 1 | A conformance vector mismatched the real code, an owner-**approved** property failed, or the model / real-code observations drifted from `baseline.json` / `observed.json` (`lifecyclecheck` alone exits 3 for drift) |
-| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, or a skipped or missing suite. Never reported as a pass |
+| 0 | Model check complete; all three conformance suites ran and passed; every orphan-survival flow ran to its end and passed; no drift from the reviewed baseline |
+| 1 | A conformance vector mismatched the real code, an orphan-survival finding no longer matches its pinned expectation, an owner-**approved** property failed, or the model / real-code observations drifted from `baseline.json` / `observed.json` (`lifecyclecheck` alone exits 3 for drift) |
+| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, a skipped or missing suite, or an orphan-survival run that is not provably complete or failed for any reason other than a pinned expectation or the reaped control (INVALID, panic, timeout, rig failure, a flow that did not reach its end). Never reported as a pass |
 
 Exit 2 takes precedence over exit 1 and nothing downgrades it: a run with a
 failing unapproved property **and** a vacuous property is incomplete.
@@ -174,6 +235,8 @@ go build -tags lifecycle_conformance -o /tmp/lifecyclecheck ./internal/lifecycle
 /tmp/lifecyclecheck -include-proposed -fail-only-approved -report /tmp/lifecycle-report
 # the three conformance suites
 go test -tags lifecycle_conformance -count=1 -run TestModelConformance ./internal/server/
+# the orphan-survival vectors, their reaped control and the classifier test (Linux; builds the agent)
+go test -tags lifecycle_conformance -count=1 -run '^TestOrphan(Survival|Classifier)_' -v .
 ```
 
 `lifecyclecheck` flags: `-include-proposed` (evaluate `proposed` properties as
