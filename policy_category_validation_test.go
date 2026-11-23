@@ -43,9 +43,26 @@ func pol005ResetReporter(t *testing.T) {
 	t.Cleanup(reset)
 }
 
-func pol005AuditHas(action, object string) bool {
+// pol005AuditMark records the audit entries already in the shared ring, so a
+// later pol005AuditHas sees only entries written after the mark. Another test
+// may legitimately audit the same action/object (the negative control below
+// edits a pre-existing category named "Any"), and a millisecond TS cutoff can
+// still collide with it, so "new" means "not present at the mark".
+func pol005AuditMark() map[AuditEntry]struct{} {
+	before := auditGet()
+	seen := make(map[AuditEntry]struct{}, len(before))
+	for i := range before {
+		seen[before[i]] = struct{}{}
+	}
+	return seen
+}
+
+func pol005AuditHas(mark map[AuditEntry]struct{}, action, object string) bool {
 	entries := auditGet()
 	for i := range entries {
+		if _, old := mark[entries[i]]; old {
+			continue
+		}
 		if entries[i].Action == action && entries[i].Object == object {
 			return true
 		}
@@ -83,6 +100,7 @@ func TestPOL005_ReservedAnyVariantRefusedOnEveryRuleDoor(t *testing.T) {
 		t.Fatalf("decode created rule: %v", err)
 	}
 	authSeed := seedAuthRule(t, "pol005-auth-seed")
+	mark := pol005AuditMark()
 
 	for _, v := range []string{"any", "ANY", "aNy"} {
 		t.Run(v, func(t *testing.T) {
@@ -90,7 +108,7 @@ func TestPOL005_ReservedAnyVariantRefusedOnEveryRuleDoor(t *testing.T) {
 			w := httptest.NewRecorder()
 			apiPolicyCreate(w, jsonReq("POST", "/api/policy", map[string]any{"name": name, "action": "Drop", "destCategory": v}))
 			pol005WantReservedRefusal(t, w, v, "access create")
-			if pol005AuditHas("policy.add", name) {
+			if pol005AuditHas(mark, "policy.add", name) {
 				t.Fatalf("refused create %q was audited", name)
 			}
 
@@ -134,6 +152,7 @@ func TestPOL005_ReservedAnyVariantRefusedOnEveryRuleDoor(t *testing.T) {
 func TestPOL005_ReservedCategoryNameRefusedAtCreation(t *testing.T) {
 	pol005Setup(t)
 	snapshotConfigVersionsDir(t)
+	mark := pol005AuditMark()
 
 	for _, name := range []string{"aNy", "ANY", "Any", "any"} {
 		w := httptest.NewRecorder()
@@ -155,7 +174,7 @@ func TestPOL005_ReservedCategoryNameRefusedAtCreation(t *testing.T) {
 		if _, found := catStore.BuiltInFlag(name); found {
 			t.Fatalf("a refused request created category %q", name)
 		}
-		if pol005AuditHas("urlcat.create", name) || pol005AuditHas("urlcat.update", name) {
+		if pol005AuditHas(mark, "urlcat.create", name) || pol005AuditHas(mark, "urlcat.update", name) {
 			t.Fatalf("refused category write %q was audited", name)
 		}
 	}
