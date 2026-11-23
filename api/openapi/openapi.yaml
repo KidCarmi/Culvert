@@ -1340,6 +1340,7 @@ components:
         Import answer. `dryRun:true` answers add `sections`, `settings`, the
         upstream `plan` and `importDigest`; commits add `cluster_publish_rejected`
         when the fleet publish was refused. Upstream is reported as COUNTS only.
+        `warnings` lists what the import skipped or ignored instead of applying.
       required: [ok]
       additionalProperties: true
       properties:
@@ -1351,6 +1352,15 @@ components:
         plan: { $ref: '#/components/schemas/UpstreamImportPlan' }
         importDigest: { type: string, description: 'Deterministic identity of the plan against the current document (`sha256:…`).' }
         cluster_publish_rejected: { type: string }
+        warnings:
+          type: array
+          items: { type: string }
+          description: >-
+            Items the import did not apply, one human-readable line each
+            (skipped invalid policy rules, rejected entries, a defaultAction
+            that is not exactly "allow" or "deny", which is ignored so the
+            current default action is kept). Present on a commit when anything
+            was skipped; on a dryRun preview it carries the defaultAction note.
         pac_profiles_not_applied:
           type: string
           description: >-
@@ -5736,7 +5746,11 @@ paths:
             `runtime_only_surfaces` lists the parts of the snapshot that are
             restored to the RUNNING configuration but are not persisted by this
             path — they are re-read from admin settings on restart and will
-            revert (CHAOS-46).
+            revert (CHAOS-46). `warnings` carries the pre-flight validation
+            findings and, when the stored `default_action` is not exactly
+            `allow` or `deny` (including an empty value from an older version
+            and the legacy `block`), the note that it was applied as deny; the
+            same note is recorded in the `config.rollback` audit detail.
           content:
             application/json:
               schema: { type: object, additionalProperties: true }

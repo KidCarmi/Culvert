@@ -425,9 +425,9 @@ func LoadAdminSettings(path string) {
 // applyAdminSecurity applies policy, IP filter, rate limiter, and connection
 // limit settings. Extracted to keep LoadAdminSettings under the cyclop cap.
 func applyAdminSecurity(s *AdminSettings) {
-	if s.DefaultAction != "" {
-		setDefaultPolicyAction(s.DefaultAction)
-	}
+	// Exact "allow"/"deny" only; anything else is enforced as deny and
+	// reported (default_action_noncanonical.go, owner decision D).
+	applyAdminDefaultAction(s.DefaultAction)
 	// policy-draft opt-in. Plain bool (no sentinel): the default is false and
 	// there is no YAML seed to protect, so a pre-feature settings file (field
 	// absent ⇒ false) correctly lands on live-write mode.
@@ -1028,7 +1028,7 @@ func saveAdminSettingsWithOverrides(ov adminSaveOverrides) error {
 	}
 
 	s := AdminSettings{
-		DefaultAction:          defaultPolicyAction(),
+		DefaultAction:          persistedAdminDefaultAction(), // raw non-canonical value kept until an explicit set
 		RequireCommit:          requireCommitEnabled(),
 		IPFilterMode:           ipf.Mode(),
 		IPFilterList:           ipf.List(),

@@ -279,8 +279,11 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// F7: Pre-flight validation — check snapshot before applying.
-	warnings := validateConfigBackup(&target)
+	// F7: Pre-flight validation — check snapshot before applying. The
+	// default-action note (a non-canonical stored value, "" and "block"
+	// included, is applied as deny) rides in the dry-run AND the real
+	// response; valid stays the pre-flight verdict.
+	warnings, valid := rollbackWarnings(&target, req.DryRun)
 
 	if req.DryRun {
 		// While the rewrite management-identity degradation is latched, the
@@ -307,7 +310,7 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 			"version":  req.Version,
 			"warnings": warnings,
 			"changes":  changes,
-			"valid":    len(warnings) == 0,
+			"valid":    valid,
 		})
 		return
 	}
@@ -372,7 +375,9 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		// back to what" is incomplete without "and it did not persist".
 		auditDetail += " — NOT DURABLE: " + sanitizeLog(persistErr.Error())
 	}
-	auditEvent(r, "config.rollback", "system", auditDetail)
+	// A non-canonical stored default_action ("", "block", "Allow", …) is
+	// named in the audit detail: it was applied as deny.
+	auditEvent(r, "config.rollback", "system", auditDetail+rollbackDefaultActionAuditSuffix(target.DefaultAction))
 
 	saveConfigVersion(actor, fmt.Sprintf("config.rollback v%d", req.Version))
 
@@ -634,7 +639,9 @@ func applyConfigBackup(b *configBackup) error {
 	}
 	policyStore.ReplaceAll(validRules)
 	policyStore.Save()
-	setDefaultPolicyAction(b.DefaultAction)
+	// Anything but exactly "allow" is deny (unchanged); a non-canonical stored
+	// value is now reported in the response and audit by the caller.
+	applyRollbackDefaultAction(b.DefaultAction)
 
 	// Rewrite rules: replace all, DURABLY through the AdminSettings owner
 	// (2D-C §24/§38 — the Blocker-E feed precedent): the restored set persists

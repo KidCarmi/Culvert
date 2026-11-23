@@ -1553,10 +1553,9 @@ func applySnapshotTrafficExceptBlocklist(snap ConfigSnapshot) {
 
 	applyExternalAuthSnapshotSettings(snap)
 
-	// Default policy action.
-	if snap.DefaultAction != "" {
-		setDefaultPolicyAction(snap.DefaultAction)
-	}
+	// Default policy action. Empty keeps the current one; a non-canonical
+	// value is enforced as deny, warned and counted, never rejected.
+	applySnapshotDefaultAction(snap.DefaultAction)
 
 	// Policy rules.
 	if snap.PolicyRules != nil {

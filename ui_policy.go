@@ -2943,11 +2943,12 @@ func apiDefaultAction(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if body.Action != "allow" && body.Action != "deny" {
+		action, ok := parseDefaultAction(body.Action)
+		if !ok {
 			http.Error(w, `action must be "allow" or "deny"`, http.StatusBadRequest)
 			return
 		}
-		setDefaultPolicyAction(body.Action)
+		setDefaultPolicyAction(action)
 		auditEvent(r, "policy.default_action", body.Action, "")
 		adminSettingsSave()
 		saveConfigVersion(sessionAdmin(r), "policy.default_action")

@@ -1473,7 +1473,7 @@
       },
       "ConfigImportResult": {
         "additionalProperties": true,
-        "description": "Import answer. `dryRun:true` answers add `sections`, `settings`, the upstream `plan` and `importDigest`; commits add `cluster_publish_rejected` when the fleet publish was refused. Upstream is reported as COUNTS only.",
+        "description": "Import answer. `dryRun:true` answers add `sections`, `settings`, the upstream `plan` and `importDigest`; commits add `cluster_publish_rejected` when the fleet publish was refused. Upstream is reported as COUNTS only. `warnings` lists what the import skipped or ignored instead of applying.",
         "properties": {
           "cluster_publish_rejected": {
             "type": "string"
@@ -1507,6 +1507,13 @@
           },
           "upstream": {
             "$ref": "#/components/schemas/UpstreamImportSummary"
+          },
+          "warnings": {
+            "description": "Items the import did not apply, one human-readable line each (skipped invalid policy rules, rejected entries, a defaultAction that is not exactly \"allow\" or \"deny\", which is ignored so the current default action is kept). Present on a commit when anything was skipped; on a dryRun preview it carries the defaultAction note.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -12223,7 +12230,7 @@
                 }
               }
             },
-            "description": "Rollback applied, and every store it wrote reached disk\n(`status:rolled_back`, `stores_persisted:true`).\n`runtime_only_surfaces` lists the parts of the snapshot that are\nrestored to the RUNNING configuration but are not persisted by this\npath — they are re-read from admin settings on restart and will\nrevert (CHAOS-46).\n"
+            "description": "Rollback applied, and every store it wrote reached disk\n(`status:rolled_back`, `stores_persisted:true`).\n`runtime_only_surfaces` lists the parts of the snapshot that are\nrestored to the RUNNING configuration but are not persisted by this\npath — they are re-read from admin settings on restart and will\nrevert (CHAOS-46). `warnings` carries the pre-flight validation\nfindings and, when the stored `default_action` is not exactly\n`allow` or `deny` (including an empty value from an older version\nand the legacy `block`), the note that it was applied as deny; the\nsame note is recorded in the `config.rollback` audit detail.\n"
           },
           "400": {
             "$ref": "#/components/responses/PlainBadRequest"
