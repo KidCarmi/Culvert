@@ -96,8 +96,11 @@ func TestZonedIPv6Dest_RefusedBeforePolicyOnHTTPAndCONNECT(t *testing.T) {
 			if code := zoneWire(t, proxyURL.Host, method, authority); code != http.StatusBadRequest {
 				t.Errorf("%s %q: status %d, want 400", method, authority, code)
 			}
+			// The status is what separates fixed from unfixed here: before the fix
+			// these were 403 from the default deny. The counter staying still only
+			// shows the refusal did not come from the rule.
 			if hits("v6") != before {
-				t.Errorf("%s %q: the policy engine was consulted for a refused destination", method, authority)
+				t.Errorf("%s %q: rule v6 recorded a hit for a refused destination", method, authority)
 			}
 		}
 	}
@@ -150,6 +153,8 @@ func TestZonedIPv6Dest_BackendIsNeverReached(t *testing.T) {
 	setDefaultPolicyAction("allow")
 	policyStore.ReplaceAll([]PolicyRule{{Priority: 1, Name: "block-v6-loopback", DestFQDN: "::1", Action: ActionBlockPage}})
 
+	// The empty zone is refused by net/http itself before the handler; it is here
+	// to show the backend stays unreached for it too, not as evidence of the fix.
 	for _, zone := range []string{"lo", "lo0", "1", ""} {
 		for _, method := range []string{http.MethodGet, http.MethodConnect} {
 			rl = newRateLimiter()
@@ -201,7 +206,7 @@ func TestZonedIPv6Dest_SOCKS5DomainFormRefused(t *testing.T) {
 	if n := strings.Count(out, "source=ipv6-zone"); n != 2 {
 		t.Errorf("zoned SOCKS5 DOMAIN destinations refused with source=ipv6-zone %d time(s), want 2; log:\n%s", n, out)
 	}
-	if strings.Contains(out, "SOCKS5 OK") || strings.Contains(out, "SOCKS5 CONNECT_FAIL") {
+	if strings.Contains(out, "SOCKS5 OK") || strings.Contains(out, "SOCKS5 SSRF block") || strings.Contains(out, "SOCKS5 dial error") {
 		t.Errorf("a zoned SOCKS5 destination got past the gate to the dial; log:\n%s", out)
 	}
 }
@@ -222,5 +227,23 @@ func TestZonedIPv6Dest_PolicyTesterRefuses(t *testing.T) {
 	apiPolicyTest(w, testerRoleReq(t, RoleViewer, map[string]any{"host": "[::1]:443"}))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"matched":true`) {
 		t.Errorf("tester on zone-free [::1]: status %d body %s, want a match on rule v6", w.Code, w.Body.String())
+	}
+}
+
+// TestZonedIPv6Dest_SourceGatesAnswerFirst pins the position of the refusal: a
+// source the IP filter denies gets the IP filter's answer, not INVALID_HOST, so
+// a blocked source is attributed correctly and cannot probe zoned spellings
+// without passing the gates every other request passes.
+func TestZonedIPv6Dest_SourceGatesAnswerFirst(t *testing.T) {
+	proxyURL := startTestProxy(t) // setupProxyTest inside installs a fresh ipf for this test
+	ipf.SetMode("block")
+	if err := ipf.Add("127.0.0.1"); err != nil {
+		t.Fatalf("ipf.Add: %v", err)
+	}
+	t.Cleanup(func() { ipf = newIPFilter() })
+	for _, method := range []string{http.MethodGet, http.MethodConnect} {
+		if code := zoneWire(t, proxyURL.Host, method, "[::1%25lo]:8080"); code != http.StatusForbidden {
+			t.Errorf("%s from an IP-filter-blocked source to a zoned destination: status %d, want 403 (IP_BLOCKED)", method, code)
+		}
 	}
 }
