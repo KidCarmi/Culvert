@@ -9,6 +9,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A rule with an action this build does not know now blocks its traffic
+  instead of disappearing (`POL-004`).** `PolicyStore.Load` (the policy file)
+  and `ReplaceAll` (control-plane snapshots and replace-mode import) dropped
+  any access rule whose action was not one of Allow, Drop, Block_Page or
+  Redirect. With `default_action=allow`, or a lower-priority Allow rule, the
+  traffic that rule was written to restrict was then **forwarded** — a
+  rulebase written by a newer release became more permissive on an older
+  node. Such a rule is now kept with its action intact, still matches, and a
+  match is a terminal block; it is written back unchanged on save, so a
+  mixed-version cluster round-trips it. Every retained rule is announced in
+  the log at load and at bulk replace (`retaining rule … with unrecognized
+  action …; matching traffic will be blocked`) and listed in Diagnostics as
+  `policy_rules_unknown_action` for as long as it is in the running policy.
+  A config-version rollback restores such a rule instead of skipping it, and a
+  draft commit is no longer refused because the running policy contains one.
+  The admin API still refuses an
+  unknown action on a new or edited rule. Rules with a known action, rules
+  with no action, an explicit default allow and an empty rulebase behave as
+  before.
+
 - **A zoned IPv6 destination can no longer slip past a rule for the same
   address.** A request for `[::1%25lo]` reached the proxy as the authority
   `[::1%lo]`. No literal matcher canonicalizes a zoned address, so a Block rule

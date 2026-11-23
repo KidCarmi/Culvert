@@ -165,6 +165,12 @@ contracts:
         - "an unrecognised action falling through to allow"
     tests:
       - {file: "policy_unknown_action_test.go", name: TestSECPOLICYACTION1_UnknownActionBlocksAndIsTerminal}
+      - {file: "policy_unknown_action_test.go", name: TestSECPOLICYACTION1_ReplaceAllRetainsUnknownActionAndBlocks}
+      - {file: "policy_unknown_action_test.go", name: TestSECPOLICYACTION1_LoadRetainsUnknownActionAndBlocks}
+      - {file: "policy_unknown_action_e2e_test.go", name: TestPOL004E2E_ReplaceAllUnknownActionNeverReachesBackend}
+      - {file: "policy_unknown_action_e2e_test.go", name: TestPOL004E2E_LoadUnknownActionNeverReachesBackend}
+      - {file: "policy_unknown_action_doors_test.go", name: TestPOL004_RollbackKeepsARetainedUnknownActionRule}
+      - {file: "policy_unknown_action_doors_test.go", name: TestPOL004_DraftCommitIsNotBlockedByAnInheritedUnknownActionRule}
     validation: integration
     compatibility: "A rulebase written by a newer release must not become permissive on an older one."
 

@@ -543,7 +543,7 @@ func (ps *PolicyStore) Load(path string) error {
 			dropped.add(name)
 			continue
 		}
-		warnInertSourceIP(r)
+		warnLoadedRule(r)
 		kept = append(kept, r)
 	}
 	rules = kept
@@ -823,11 +823,12 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	seenIDs := make(map[string]struct{}, len(rules))
 	for i := range rules {
 		r := rules[i]
-		// Fail-closed: drop invalid auth rules and SubjectMatch-bearing access rules.
+		// Refuse unsupported rule shapes; keep unknown access actions so dispatch can block.
 		if ok, reason := policyRulePersistable(&r); !ok {
 			logWarnf("Policy: dropping rule %q on bulk replace — %s", sanitizeLog(r.Name), sanitizeLog(reason))
 			continue
 		}
+		warnRetainedUnknownAction(&r, "bulk replace")
 		r.HitCount = 0
 		r.lastHitUnix = 0
 		r.counters = nil
@@ -849,6 +850,33 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	ps.sortLocked()
 	ps.bumpVersion()
 	ps.mu.Unlock()
+}
+
+// warnLoadedRule emits the per-rule operator warnings for a rule Load keeps:
+// an inert source literal, and a retained unknown action. One call so that
+// Load, already past the statement bound, does not grow by a line per warning.
+func warnLoadedRule(r *PolicyRule) {
+	warnRetainedUnknownAction(r, "load")
+	warnInertSourceIP(r)
+}
+
+// warnRetainedUnknownAction tells the operator that an access rule whose action
+// this build does not dispatch was KEPT by a durable or bulk publication door
+// (POL-004), and what that means for traffic: the rule still matches, and a
+// match is a terminal block. Without the line, a rulebase written by a newer
+// release starts blocking destinations with nothing to explain why.
+//
+// door is one of this file's own literals, never caller data. The rule name and
+// the action come from a policy file or a peer and are sanitised.
+func warnRetainedUnknownAction(r *PolicyRule, door string) {
+	if ruleTypeOf(r) != ruleTypeAccess {
+		return
+	}
+	if _, known := canonicalPolicyAction(r.Action); known {
+		return
+	}
+	logWarnf("Policy: retaining rule %q with unrecognized action %q on %s; matching traffic will be blocked",
+		sanitizeLog(r.Name), sanitizeLog(string(r.Action)), door)
 }
 
 // Add inserts a new rule and re-sorts by priority.
