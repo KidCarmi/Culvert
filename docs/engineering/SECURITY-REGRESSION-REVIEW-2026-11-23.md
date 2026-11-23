@@ -497,15 +497,16 @@ detection from a `grep -qw` substring match to an exact `id -nG` name match.
 * `go test -count=1 ./internal/threatfeed` → ok; `FuzzCouldBeIPLiteral` 675,305 execs, `FuzzCheckRequestURL` 222,057 execs, no counterexample.
 * `go test -count=1 ./internal/urlcatfeed/... ./internal/blocklistfeed ./internal/listenfault ./internal/writerlock ./internal/otlp ./internal/mcp/livetier ./internal/mcp/events/qualarchive` → ok; the MCP/OTLP three also under `-race -count=2`.
 * `go test -count=1 .` for the relay-bound, listener-parity and CHAOS-126 shutdown selections → ok. `go vet` clean on the packages reviewed; `cmd/culvert-maint` focused reconcile/settle/retire selection → ok.
+* `go test -count=1 ./...` across the root module at `46b4ffa` → **134 packages ok, exit 0, no failures.**
 * The Finding B probe was run against a raw recording origin and then removed; `git status --porcelain` is empty.
 
-**Not run, and why.** The full root module suite was started and had not
-completed when this review was written; `-race`/`-shuffle` across the whole
-module, golangci-lint at the gate's pinned version, and CodeQL were not run
-here. **A passing focused run is not a passing hosted gate**, and none of the
-above is evidence for the merge gates on any specific SHA. Finding A needs a
-per-hook-slice test that does not yet exist, and Finding C's tests do not exist
-at all.
+**Not run, and why.** Module-wide `-race` and `-shuffle`, golangci-lint at the
+gate's pinned version, and CodeQL were not run here. The linter in particular
+must be taken from the gate that blocks the change, not from `PATH`
+(`docs/agent-context/conventions.md`). **A passing local suite is not a passing
+hosted gate**, and nothing above is evidence for the merge gates on any specific
+SHA. Finding A needs a per-hook-slice test that does not yet exist, and
+Finding C's tests do not exist at all.
 
 ## Residual risk
 
