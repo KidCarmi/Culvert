@@ -101,7 +101,32 @@ type Config struct {
 	// an empty list. The CLI flag --allow-peers is now removed; this
 	// is the single config surface.
 	AllowPeers []string
+
+	// ReconcileOnStartup selects what the agent does with an interrupted
+	// image change it finds in the crash journal at startup (contract
+	// AGT-900, owner decision 1). Default ReconcileOff: report only and
+	// change nothing in Docker (AGT-004). ReconcileConverge: additionally
+	// run the conservative converge reconcile (server/startup_reconcile.go),
+	// which only retags to the recorded prior image, finishes a rollback the
+	// journal proves was armed, or adopts an upgrade the journal proves was
+	// verified; everything else is reported as recovery_required.
+	//
+	// GUI-parity deferral (recorded, like other startup-only/host-trust keys):
+	// this is a host-local, startup-only safety switch in the agent's root-owned
+	// config.toml. It has no runtime mutation endpoint on purpose; its effect is
+	// surfaced read-only in GET /v1/status `reconcile` (absent when off).
+	ReconcileOnStartup ReconcileMode
 }
+
+// ReconcileMode is the closed set of reconcile_on_startup values.
+type ReconcileMode string
+
+const (
+	// ReconcileOff reports interrupted operations and changes nothing (default).
+	ReconcileOff ReconcileMode = "off"
+	// ReconcileConverge runs the opt-in converge reconcile at startup.
+	ReconcileConverge ReconcileMode = "converge"
+)
 
 // IsAllowedBackupPath reports whether p (a path AS SEEN BY THE CLI
 // CONTAINER) is allowed by AllowedBackupDir. Uses path-component
@@ -143,6 +168,7 @@ type rawConfig struct {
 	ImageAllowlist      string   `toml:"image_allowlist"`
 	ProxyRepo           string   `toml:"proxy_repo"`
 	AllowPeers          []string `toml:"allow_peers"`
+	ReconcileOnStartup  string   `toml:"reconcile_on_startup"`
 }
 
 const (
@@ -446,7 +472,28 @@ func validate(raw *rawConfig) (*Config, error) {
 		cfg.AllowPeers = append(cfg.AllowPeers, t)
 	}
 
+	mode, err := validateReconcileMode(raw.ReconcileOnStartup)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ReconcileOnStartup = mode
+
 	return cfg, nil
+}
+
+// validateReconcileMode maps reconcile_on_startup onto the closed set. Absent
+// or empty is "off"; any other value — including a mode this build does not
+// implement, such as an adopt-anything variant — fails Load, so a typo can
+// never silently leave the operator on a different behaviour than intended.
+func validateReconcileMode(v string) (ReconcileMode, error) {
+	switch ReconcileMode(v) {
+	case "", ReconcileOff:
+		return ReconcileOff, nil
+	case ReconcileConverge:
+		return ReconcileConverge, nil
+	default:
+		return "", fmt.Errorf("config: reconcile_on_startup must be %q or %q, got %q", ReconcileOff, ReconcileConverge, v)
+	}
 }
 
 // validateHealthPath returns either the supplied path (if non-empty
