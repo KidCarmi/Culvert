@@ -331,9 +331,22 @@ else
       apt_install_with_repair ca-certificates curl gnupg
 
       sudo install -m 0755 -d /etc/apt/keyrings
-      if [[ ! -f /etc/apt/keyrings/docker.gpg ]]; then
-        curl -fsSL "https://download.docker.com/linux/${DISTRO_ID}/gpg" | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-        sudo chmod a+r /etc/apt/keyrings/docker.gpg
+      # `-s`, not `-f`, and dearmor into a temp file first: `gpg --dearmor -o F`
+      # creates F before reading any input, so a failed key download used to
+      # leave a ZERO-byte docker.gpg behind. Every re-run then skipped the
+      # download as "already present" and died on `apt-get update` (NO_PUBKEY,
+      # repository not signed) until the file was deleted by hand. The keyring
+      # is now only ever written from a complete, non-empty dearmored key, and
+      # an empty leftover from an earlier run is replaced.
+      if [[ ! -s /etc/apt/keyrings/docker.gpg ]]; then
+        docker_key_tmp="$(mktemp)"
+        if ! curl -fsSL "https://download.docker.com/linux/${DISTRO_ID}/gpg" | sudo gpg --batch --yes --dearmor -o "$docker_key_tmp" \
+           || [[ ! -s "$docker_key_tmp" ]]; then
+          sudo rm -f "$docker_key_tmp"
+          error "Could not download Docker's apt signing key from https://download.docker.com/linux/${DISTRO_ID}/gpg. Check connectivity (and any HTTP proxy) and re-run."
+        fi
+        sudo install -m 0644 "$docker_key_tmp" /etc/apt/keyrings/docker.gpg
+        sudo rm -f "$docker_key_tmp"
       fi
 
       echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/${DISTRO_ID} ${DISTRO_CODENAME} stable" | \

@@ -728,6 +728,18 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **`install.sh` on Debian/Ubuntu recovers when the Docker apt key download
+  failed on an earlier run.** `gpg --dearmor -o` creates its output file before
+  reading input, so a failed download of Docker's signing key (network blip,
+  proxy error) aborted the install and left a zero-byte
+  `/etc/apt/keyrings/docker.gpg`. Every re-run then treated the key as already
+  present, skipped the download and stopped at `apt-get update` with
+  `NO_PUBKEY` / "repository is not signed" until the file was deleted by hand.
+  The key is now dearmored into a temporary file and installed only when
+  complete, an empty leftover keyring is replaced, and a failed download ends
+  with a message naming the URL. A keyring that already holds a key is left
+  untouched.
+
 - **The "retaining rule … with unrecognized action" warning is now said once per
   fact, and only where it is true.** It was written on every bulk replace of
   the rulebase, so an unchanged control-plane republish repeated it for every
