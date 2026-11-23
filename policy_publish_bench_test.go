@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log"
 	"testing"
 )
 
@@ -55,6 +57,39 @@ func BenchmarkPolicyPublish_SortLocked(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				ps.mu.Lock()
+				ps.sortLocked()
+				ps.mu.Unlock()
+			}
+		})
+	}
+}
+
+// BenchmarkPolicyPublish_SortLockedUnsortedTies is the publication of an
+// UNSORTED input with priority ties — the shape a gap Add, a priority edit or
+// a move produces on a rulebase that shares priorities (two rules per priority
+// here, with the last rule rotated to the front). It is the only shape that
+// pays for the stable sort AND the one-release legacy-order comparison
+// (policy_tie_order.go); BenchmarkPolicyPublish_SortLocked is the steady
+// state, where the input is already sorted and neither runs.
+func BenchmarkPolicyPublish_SortLockedUnsortedTies(b *testing.B) {
+	for _, n := range []int{100, 1000, 10000} {
+		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
+			rules := buildPublishInput(n)
+			for i := range rules {
+				rules[i].Priority = i/2 + 1
+			}
+			ps := &PolicyStore{}
+			ps.ReplaceAll(rules)
+			pub := ps.rules
+			in := append([]*PolicyRule{pub[len(pub)-1]}, pub[:len(pub)-1]...)
+			old := logger
+			logger = log.New(io.Discard, "", 0) // the divergence warning, once per publication
+			b.Cleanup(func() { logger = old })
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				ps.mu.Lock()
+				ps.rules = in
 				ps.sortLocked()
 				ps.mu.Unlock()
 			}

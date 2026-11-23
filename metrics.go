@@ -1945,6 +1945,7 @@ culvert_decrypt_autoexclude_surge_total %d
 
 	// Append per-rule hit counters, latency histogram, and CDR metrics.
 	ruleMet.WritePrometheus(&ruleMetBuf)
+	policyPriorityTiesWritePrometheus(&ruleMetBuf) // culvert_policy_priority_ties (POL-001 tie visibility)
 	decProfMintlsRejects.writePrometheus(&ruleMetBuf)
 	autoExcludeLearns.writePrometheus(&ruleMetBuf)
 	autoExcludeHitsByScope.writePrometheus(&ruleMetBuf) // F6: per-scope autoexclude hit counter

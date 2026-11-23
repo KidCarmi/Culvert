@@ -1191,6 +1191,33 @@ func importPolicyRules(b *configBackup, replaceMode bool) []string {
 	return warnings
 }
 
+// importPolicyPriorityTiesRejected refuses (400) a replace-mode import whose
+// policy rules share a priority, naming the colliding rules (POL-006). Replace
+// mode installs the payload verbatim through ReplaceAll, so a duplicate would
+// otherwise become a tie whose precedence is only the file's order. Only rules
+// ReplaceAll would keep are judged: a rule the persistence gate drops cannot
+// collide. Merge mode needs no check — Add reassigns a taken priority and an
+// upsert keeps the live rule's slot. Config-version rollback and CP→DP sync
+// stay faithful restores and are not routed through here.
+func importPolicyPriorityTiesRejected(w http.ResponseWriter, b *configBackup, replaceMode bool) bool {
+	if !replaceMode || len(b.PolicyRules) < 2 {
+		return false
+	}
+	kept := make([]PolicyRule, 0, len(b.PolicyRules))
+	for i := range b.PolicyRules {
+		if ok, _ := policyRulePersistable(&b.PolicyRules[i]); ok {
+			kept = append(kept, b.PolicyRules[i])
+		}
+	}
+	ties := policyPriorityTies(kept)
+	if len(ties) == 0 {
+		return false
+	}
+	http.Error(w, "import refused: policy rules share a priority (each rule needs a unique priority in replace mode): "+
+		describePolicyPriorityTies(ties, 10), http.StatusBadRequest)
+	return true
+}
+
 // POST /api/config/import — import configuration from an exported JSON file.
 // Each section is applied atomically; partial failures are logged but do not abort.
 // With ?dryRun=true the handler returns a read-only preview and applies nothing.
@@ -1229,6 +1256,11 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	upstreamPlanned, err := upstreamPlanImport(&b, replaceMode, upstreamPool.Document())
 	if err != nil {
 		writeUpstreamPlanRefusal(w, err)
+		return
+	}
+	// Duplicate policy priorities (POL-006) refuse a replace-mode import at
+	// preview AND commit, before any store is touched.
+	if importPolicyPriorityTiesRejected(w, &b, replaceMode) {
 		return
 	}
 	if importDryRunRequested(r) {

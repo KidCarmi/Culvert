@@ -1766,6 +1766,27 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **Policy rules that share a priority now evaluate in stored order, and new
+  duplicate priorities are refused (POL-001 amended, POL-006).** Publication
+  sorted with an unstable `sort.Slice`: it left every already-sorted rulebase
+  and every rulebase of 12 rules or fewer untouched, but on a larger tied
+  rulebase a gap add, a priority edit or a move (or the first load of a
+  hand-edited unsorted file) could silently swap the evaluation order of tied
+  rules nobody edited. Ties now keep the order of the policy file, snapshot or
+  backup; nothing is renumbered. For one release a load or replace whose tie
+  order differs from what the previous release would have used logs
+  `Policy: N rule(s) share priority P; evaluation order now follows stored
+  order (...)`. The new gauge `culvert_policy_priority_ties` (rules sharing a
+  priority) and the `policy_priority_ties` diagnostics row report ties.
+  Customer-visible refusals: a replace-mode `POST /api/config/import`
+  (preview and commit) whose rules share a priority answers 400 naming them,
+  and `POST /api/policy/draft/commit` answers 400 when the candidate creates a
+  new shared priority (a tie inherited unchanged from running still commits).
+  `PUT /api/policy?priority=` (and the auth-rule equivalent) with no body
+  priority, 0 or a negative one now keeps the rule's current priority instead
+  of storing that value. Load, config-version rollback and CP→DP sync still
+  restore ties faithfully.
+
 - **A panicking feed round in `internal/feedsched` now reaches the crash plane,
   and the cold-start predicate can no longer kill the process.** The scheduler's
   `Config.OnPanic` seam was defined, documented and set by no production caller,

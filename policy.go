@@ -915,7 +915,9 @@ func (ps *PolicyStore) availablePriorityLocked(requested int) int {
 	return maxPriority + 1
 }
 
-// Update replaces the rule with the given priority. Returns false if not found.
+// Update replaces the rule with the given priority (the first one in stored
+// order if several share it). A body priority <= 0 keeps the stored priority.
+// Returns false if not found.
 func (ps *PolicyStore) Update(priority int, r PolicyRule) bool {
 	// Auto-enable FileFiltering when a profile is selected (defense-in-depth).
 	if r.FileProfile != "" && r.FileProfile != FileProfileNone {
@@ -930,6 +932,13 @@ func (ps *PolicyStore) Update(priority int, r PolicyRule) bool {
 		// Identity belongs to the stored rule, never to an update body. Older
 		// clients omit it and newer/malicious callers must not rewrite it.
 		r.ID = rule.ID
+		// A body with no usable priority (absent, 0 or negative) keeps the
+		// stored one, as UpdateByID always does. Storing it verbatim made a
+		// second rule share that slot (POL-006): every rule without a
+		// priority would collide at 0.
+		if r.Priority <= 0 {
+			r.Priority = rule.Priority
+		}
 		r.counters = rule.counters
 		next := append([]*PolicyRule(nil), ps.rules...)
 		next[i] = &r
@@ -1408,11 +1417,13 @@ func (ps *PolicyStore) sortLocked() {
 	// Nothing on the hot path WRITES through these pointers — accounting goes to
 	// the separately allocated counters cell — so sharing cache lines between
 	// adjacent definitions cannot introduce false sharing.
+	//
+	// Rules that share a priority keep their STORED order (POL-001 amended;
+	// policy_tie_order.go): a stable sort, byte-for-byte the previous
+	// sort.Slice result for every sorted input and for n <= 12.
 	next := make([]*PolicyRule, len(ps.rules))
 	copy(next, ps.rules)
-	sort.Slice(next, func(i, j int) bool {
-		return next[i].Priority < next[j].Priority
-	})
+	orderPolicyRulesForPublication(next, ps.rules)
 	backing := make([]PolicyRule, len(next))
 	for i, rule := range next {
 		copyPolicyRuleForPublication(&backing[i], rule)
