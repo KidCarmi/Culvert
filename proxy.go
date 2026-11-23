@@ -1613,17 +1613,8 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Nothing between here and there mutates r.Host (verified by inspection), so
 	// hoisting is value-preserving, and the INVALID_HOST refusal deliberately
 	// stays where it was — this gate decides length only, never validity.
-	destNormHost, destNormOK := canonicalDestHost(r.Host)
-	if destNormOK {
-		if rejectOversizeCanonicalHost(w, "HTTP", clientIP, destNormHost) {
-			return
-		}
-	} else if rejectOversizeUnnormalizableHost(w, "HTTP", clientIP, r.Host) {
-		// No canonical form ⇒ the canonical tier is unreachable, so bound the
-		// raw bare host instead. Without this, the band above maxDestHostLen and
-		// below the raw pre-cap reached Stage-1's matcher at full length and a
-		// terminal 407 returned before the INVALID_HOST refusal below ever ran
-		// (Codex P2, PR #1446).
+	destNormHost, destNormOK, refused := gateDestHost(w, r, clientIP)
+	if refused {
 		return
 	}
 
@@ -1655,6 +1646,17 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 		recordRequest(clientIP, r.Method, r.Host, "RATE_LIMITED", "", "", "", "")
 		logger.Printf("RATE_LIMITED %s {req_id=%s action=block}", clientIP, reqID)
+		return
+	}
+
+	// ── Zoned IPv6 destination (fail-closed) ───────────────────────────────
+	// A zone selects an interface on THIS host; such a destination is refused
+	// before the first matcher (Stage-1 authentication, just below, runs one) and
+	// before any dial. It sits AFTER the connection limit, the IP filter and the
+	// rate limiter on purpose: a source those gates refuse keeps its own answer
+	// and attribution, and probing zoned spellings spends rate-limit tokens like
+	// any other request. See destIPv6Zoned in proxy_host_bounds.go.
+	if rejectZonedDestHost(w, r, clientIP, reqID) {
 		return
 	}
 

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -416,4 +418,117 @@ func rejectOversizeCanonicalHost(w http.ResponseWriter, proto, clientIP, normHos
 func resetOversizeHostStateForTest() {
 	proxyOversizeHostRejected.Store(0)
 	oversizeHostLogLast.Store(0)
+}
+
+// ---------------------------------------------------------------------------
+// Zoned IPv6 destinations are refused
+//
+// "[::1%25lo]" in a request target reaches the handler as the authority
+// "[::1%lo]" (net/http decodes the RFC 6874 "%25" once). A zone names an
+// interface ON THIS HOST. It means nothing across a proxy boundary — RFC 9844
+// says so explicitly — and it is attacker-chosen: the dialer honours it, so the
+// connection goes to the same address, while every literal matcher deliberately
+// leaves a zoned address un-canonicalized (canonicalDestLiteral,
+// sourceLiteralPrefix) and therefore compares "::1%lo" against a rule for "::1"
+// and finds nothing. Measured on an IPv6-capable runner before this gate: a
+// Block rule for ::1 under default allow, plain HTTP to "[::1%25lo]" — no rule
+// matched, 200, backend reached.
+//
+// Stripping the zone and carrying on would make the matchers agree, but it
+// would also keep dialing a destination spelling no legitimate proxy client has
+// a reason to send. The destination is refused instead, before any matcher or
+// dial, on every ingress that turns a client-supplied host into a dial target.
+// ---------------------------------------------------------------------------
+
+// destIPv6Zoned reports whether authority's host is an IPv6 literal followed by
+// a zone marker — "[::1%lo]", "[fe80::1%eth0]:443", and for the SOCKS5 domain
+// form the bare "fe80::1%eth0". An EMPTY or malformed zone ("[::1%]") counts:
+// the marker after an IPv6 address is the refusal condition, not whether what
+// follows it would have been usable.
+//
+// It deliberately does not look for "%" in the authority as a whole. A
+// percent-encoded international hostname is decoded by the request parser
+// before it gets here, and a hostname is not an IPv6 literal either way: only
+// "an address, then %" is refused. It also does no decoding of its own — the
+// input is whatever the ingress parser produced, so "[::1%2525lo]" arrives as
+// the zone "25lo" and is refused as a zone, never decoded a second time.
+func destIPv6Zoned(authority string) bool {
+	bare := bareDestHost(authority)
+	if len(bare) >= 2 && bare[0] == '[' && bare[len(bare)-1] == ']' {
+		bare = bare[1 : len(bare)-1]
+	}
+	i := strings.IndexByte(bare, '%')
+	if i < 0 {
+		return false
+	}
+	addr, err := netip.ParseAddr(bare[:i])
+	return err == nil && addr.Is6()
+}
+
+// rejectZonedDestHost refuses a zoned IPv6 destination on the HTTP/CONNECT path
+// with the product's INVALID_HOST outcome. handleRequest calls it after the
+// length tiers (so the host it records is bounded), the connection limit, the
+// IP filter and the rate limiter, and before Stage-1 authentication — the first
+// matcher — so nothing is evaluated or dialed for it. The row carries no
+// identity for that reason: resolving one would run a destination matcher.
+func rejectZonedDestHost(w http.ResponseWriter, r *http.Request, clientIP, reqID string) bool {
+	if !destIPv6Zoned(r.Host) {
+		return false
+	}
+	atomic.AddInt64(&statBlocked, 1)
+	http.Error(w, "Bad Request: invalid host", http.StatusBadRequest)
+	recordRequest(clientIP, r.Method, r.Host, "INVALID_HOST", "ipv6-zone", "", "", "")
+	logger.Printf("INVALID_HOST %s -> %q {req_id=%s action=block source=ipv6-zone}", clientIP, sanitizeLog(r.Host), reqID)
+	return true
+}
+
+// gateDestHost runs the destination-host LENGTH gates that sit between the raw
+// pre-cap and the connection limit in handleRequest: the canonical tier, or,
+// when the host has no canonical form, the bound on the raw bare host.
+// refused=true means a terminal response was written. The normalized host is
+// returned for the RISK-013 validity gate further down, which reuses it instead
+// of normalizing again.
+//
+// The two branches were inline in handleRequest and moved here unchanged, so
+// that the zoned-IPv6 refusal added further down that function did not raise
+// its branch count.
+func gateDestHost(w http.ResponseWriter, r *http.Request, clientIP string) (normHost string, normOK, refused bool) {
+	normHost, normOK = canonicalDestHost(r.Host)
+	if normOK {
+		return normHost, normOK, rejectOversizeCanonicalHost(w, "HTTP", clientIP, normHost)
+	}
+	// No canonical form ⇒ the canonical tier is unreachable, so bound the raw
+	// bare host instead. Without this, the band above maxDestHostLen and below
+	// the raw pre-cap reached Stage-1's matcher at full length and a terminal 407
+	// returned before the INVALID_HOST refusal ever ran (Codex P2, PR #1446).
+	return normHost, normOK, rejectOversizeUnnormalizableHost(w, "HTTP", clientIP, r.Host)
+}
+
+// socks5DestHostValidity is the SOCKS5 twin of the validity half of the gates
+// above. It returns the normalized host, or a non-empty reason the destination
+// is refused as INVALID_HOST: "ipv6-zone" for a zoned IPv6 literal in the
+// DOMAIN form, "idna" for a host that cannot be IDNA-normalized (RISK-013).
+func socks5DestHostValidity(host string) (normHost, invalid string) {
+	if destIPv6Zoned(host) {
+		return "", "ipv6-zone"
+	}
+	normHost, ok := normalizeHostStrict(host)
+	if !ok {
+		return "", "idna"
+	}
+	return normHost, ""
+}
+
+// policyTestHostRefusal returns why the Policy Tester refuses a host before it
+// measures or matches it, or "" when it does not. A zoned IPv6 destination is
+// refused on the data path ahead of every matcher (destIPv6Zoned), so no policy
+// answer for it can be right.
+func policyTestHostRefusal(host string) string {
+	switch {
+	case host == "":
+		return "host is required"
+	case destIPv6Zoned(host):
+		return "host must not carry an IPv6 zone identifier: the proxy refuses such destinations"
+	}
+	return ""
 }

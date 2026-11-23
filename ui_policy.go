@@ -2820,8 +2820,8 @@ func apiPolicyTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if body.Host == "" {
-		http.Error(w, "host is required", http.StatusBadRequest)
+	if why := policyTestHostRefusal(body.Host); why != "" {
+		http.Error(w, why, http.StatusBadRequest)
 		return
 	}
 	// CHAOS-69: this handler reaches walkPolicyTestRules and lookupHostCategory
