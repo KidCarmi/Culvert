@@ -65,7 +65,7 @@ func TestCompareBaseline_ReportsEveryKindOfChange(t *testing.T) {
 		mutate     func(b *Baseline)
 	}{
 		{"verdict now PASS, baseline FAIL", "property S5 verdict FAIL -> PASS", func(b *Baseline) { prop(b, "S5").Verdict = VerdictFail }},
-		{"verdict now FAIL, baseline PASS", "property C2 verdict PASS -> FAIL", func(b *Baseline) { prop(b, "C2").Verdict = VerdictPass }},
+		{"verdict now FAIL, baseline PASS", "property O1 verdict PASS -> FAIL", func(b *Baseline) { prop(b, "O1").Verdict = VerdictPass }},
 		{"status", "property S1 status", func(b *Baseline) { prop(b, "S1").Status = StatusApproved }},
 		{"exercised", "property S2 exercised", func(b *Baseline) { prop(b, "S2").Exercised++ }},
 		{"counterexample", "property O2 counterexample", func(b *Baseline) { prop(b, "O2").Trace = []string{"ok"} }},

@@ -447,6 +447,33 @@ contracts:
     validation: integration
     compatibility: "Docker's containerd image store (observed on Docker 29.10) reports the local culvert/proxy name beside the registry name; the classic store does not."
 
+  - id: AGT-006
+    area: agent-lifecycle
+    status: enforced
+    owner_approved: false
+    invariant: "An upgrade's reported final running image is one the agent captured after its last container recreate attempt; otherwise the result says it is unverified and names no image. The reported digest is an allow-listed registry digest, never an image id or a local-only reference."
+    authority: "Maintenance agent upgrade apply (cmd/culvert-maint, separate module). Design: roadmap/FINAL-RUNNING-DIGEST-PROPOSAL.md (owner decision 2, option C)."
+    code:
+      - "cmd/culvert-maint/internal/server/running_evidence.go"
+      - "cmd/culvert-maint/internal/server/inline_rollback.go"
+      - "cmd/culvert-maint/internal/server/handlers_upgrade_apply.go"
+    configs: []
+    transitions:
+      permitted:
+        - "one read-only final capture in the report stage when the evidence is stale or missing"
+        - "final_running_state unverified with empty digest and image id when no capture after the last up succeeds"
+        - "final_running_digest empty with final_running_image_id set for a verified image without an allow-listed registry reference"
+      forbidden:
+        - "reporting final_running_state verified from accumulator flags or the pinned or rollback target alone"
+        - "putting an image id or a local-only reference into final_running_digest"
+        - "any mutating Docker call to establish the final running image"
+    tests:
+      - {file: "cmd/culvert-maint/internal/server/running_evidence_test.go", name: TestRunningEvidence_VerifiedOnlyByACaptureAfterTheLastUp}
+      - {file: "cmd/culvert-maint/internal/server/running_evidence_test.go", name: TestApply_FinalRunning_NeverReportsAGuessAsVerified}
+      - {file: "cmd/culvert-maint/internal/server/pinned_tag_consistency_test.go", name: TestApply_PinnedTag_UpFailsAfterRecreate_RollbackDisabled_TagNotMoved}
+    validation: integration
+    compatibility: "Additive result keys final_running_state and final_running_image_id. final_running_digest keeps its key and type; its value changes from an inferred digest to the captured registry digest, or empty when unverified. Consumers must read final_running_state before treating an empty digest as meaningful."
+
   - id: CFG-001
     area: config-compatibility
     status: enforced

@@ -227,6 +227,50 @@ func TestApply_JournalRetiredAtTerminal(t *testing.T) {
 // (=target) config digest right after `up`, so PhaseRestarted carries it even
 // though verifyRunningImage has not run.
 func TestRestartWithBarrier_CapturesTargetImageID(t *testing.T) {
+	srv, jnl := newRestartBarrierServer(t, cfgNew, digNew)
+	rec := restartAndRead(t, srv, jnl)
+	if rec.TargetImageID != "sha256:"+cfgNew {
+		t.Errorf("TargetImageID = %q, want sha256:%s (must be captured before verify)", rec.TargetImageID, cfgNew)
+	}
+}
+
+// TestRestartWithBarrier_F1_NoTargetIDWhenUpDidNotRecreate is the F1 fix
+// (ADR-0061): `up` exits 0 but the container still runs the prior image (a
+// compose override pinning another image, or `ok_stale`). The post-up capture's
+// RepoDigests do not contain the pinned digest, so the journal must NOT record
+// that image as the target: TargetImageID stays empty.
+func TestRestartWithBarrier_F1_NoTargetIDWhenUpDidNotRecreate(t *testing.T) {
+	srv, jnl := newRestartBarrierServer(t, cfgOld, digOld)
+	rec := restartAndRead(t, srv, jnl)
+	if rec.TargetImageID != "" {
+		t.Errorf("TargetImageID = %q, want empty: the captured image does not carry the pinned digest", rec.TargetImageID)
+	}
+}
+
+// restartAndRead runs the restart stage for an upgrade to digNew and returns the
+// journal record it left.
+func restartAndRead(t *testing.T, srv *Server, jnl *journal.Journal) *journal.Record {
+	t.Helper()
+	seedAdmitted(t, jnl, time.Now().UTC().Add(-time.Minute))
+	acc := &upgradeApplyAccumulator{opID: testOpULID, actor: "cp", pinnedRef: repo + "@sha256:" + digNew, pinnedDigest: "sha256:" + digNew}
+	if _, _, err := srv.restartWithBarrier(acc)(context.Background()); err != nil {
+		t.Fatalf("restartWithBarrier: %v", err)
+	}
+	rec, found, err := jnl.Read(testOpULID)
+	if err != nil || !found {
+		t.Fatalf("read: found=%v err=%v", found, err)
+	}
+	if rec.Phase != journal.PhaseRestarted {
+		t.Errorf("phase = %q, want restarted", rec.Phase)
+	}
+	return rec
+}
+
+// newRestartBarrierServer is a Server whose canned exec layer reports a running
+// proxy on image runningID whose RepoDigests are [repo@sha256:repoDigest];
+// tag/up succeed silently.
+func newRestartBarrierServer(t *testing.T, runningID, repoDigest string) (*Server, *journal.Journal) {
+	t.Helper()
 	tmp := t.TempDir()
 	auditPath := filepath.Join(tmp, "audit.jsonl")
 	al, err := audit.New(auditPath)
@@ -273,9 +317,9 @@ func TestRestartWithBarrier_CapturesTargetImageID(t *testing.T) {
 			case has(cmd.Args, "ps"):
 				_, _ = cmd.Stdout.Write([]byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}`))
 			case contains(cmd.Args, "{{json .Image}}"):
-				_, _ = cmd.Stdout.Write([]byte(`"sha256:` + cfgNew + `"`))
+				_, _ = cmd.Stdout.Write([]byte(`"sha256:` + runningID + `"`))
 			case has(cmd.Args, "image") && has(cmd.Args, "inspect"):
-				_, _ = cmd.Stdout.Write([]byte(`[{"RepoDigests":["` + repo + `@sha256:` + digNew + `"]}]`))
+				_, _ = cmd.Stdout.Write([]byte(`[{"RepoDigests":["` + repo + `@sha256:` + repoDigest + `"]}]`))
 			}
 			return nil
 		},
@@ -295,22 +339,6 @@ func TestRestartWithBarrier_CapturesTargetImageID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer func() { _ = srv.Close() }()
-
-	seedAdmitted(t, jnl, time.Now().UTC().Add(-time.Minute))
-	acc := &upgradeApplyAccumulator{opID: testOpULID, actor: "cp", pinnedRef: repo + "@sha256:" + digNew, pinnedDigest: "sha256:" + digNew}
-
-	if _, _, err := srv.restartWithBarrier(acc)(context.Background()); err != nil {
-		t.Fatalf("restartWithBarrier: %v", err)
-	}
-	rec, found, err := jnl.Read(testOpULID)
-	if err != nil || !found {
-		t.Fatalf("read: found=%v err=%v", found, err)
-	}
-	if rec.Phase != journal.PhaseRestarted {
-		t.Errorf("phase = %q, want restarted", rec.Phase)
-	}
-	if rec.TargetImageID != "sha256:"+cfgNew {
-		t.Errorf("TargetImageID = %q, want sha256:%s (must be captured before verify)", rec.TargetImageID, cfgNew)
-	}
+	t.Cleanup(func() { _ = srv.Close() })
+	return srv, jnl
 }
