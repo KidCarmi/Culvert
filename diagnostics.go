@@ -2777,7 +2777,7 @@ func authCredentialRequiredDiagnostics(rules []PolicyRule, hasCredProvider bool)
 			Code:           "auth_cr_no_credential_provider",
 			Status:         diagFail,
 			Message:        "CredentialRequired rules exist but no credential-capable validator is configured — covered requests would be challenged (407) indefinitely: " + strings.Join(names, ", "),
-			OperatorAction: "Configure a local account, a legacy auth provider, or an OIDC IdP (SAML alone cannot validate presented credentials), or remove the CredentialRequired rules.",
+			OperatorAction: "Configure a proxy identity provider — an LDAP or OIDC IdP profile, or a legacy LDAP/OIDC provider — or remove the CredentialRequired rules. Admin-console accounts do not authenticate proxy traffic, and SAML alone cannot validate presented credentials.",
 		})
 	}
 	return checks
@@ -2818,16 +2818,24 @@ func authDefaultExemptMigrationDiagnostics(rules []PolicyRule, defaultExempt boo
 	}}
 }
 
-// hasCredentialCapableProvider reports whether any validator that can verify a
-// PRESENTED in-band credential is configured: a local bcrypt account, the legacy
-// auth provider, or an enabled OIDC IdP profile. SAML profiles are excluded —
-// SAMLProvider.Verify always returns false (interactive browser SSO only), so a
-// SAML-only deployment cannot satisfy a CredentialRequired rule.
+// hasCredentialCapableProvider reports whether any PROXY validator that can
+// verify a PRESENTED in-band credential is configured: the legacy auth provider
+// (LDAP or OIDC) or an enabled credential-capable IdP profile (OIDC or LDAP).
+// SAML profiles are excluded — SAMLProvider.Verify always returns false
+// (interactive browser SSO only), so a SAML-only deployment cannot satisfy a
+// CredentialRequired rule.
+//
+// The local admin-console account is NOT a term (owner Decision 2,
+// 2026-11-23): management and data-plane identities are distinct, and the
+// shared resolver never consults it (proxy_credential.go legacyCredentialFor).
+// Counting it here would arm arm 2 of resolveRequestAuth for a credential
+// nothing on the data plane can accept. A gateway whose only accounts are
+// admin-console accounts is instead the rosterWithoutVerifier state there:
+// authentication is required (cfg.AuthEnabled) and nothing can verify a
+// presented credential, so it is refused — never waved through.
 func hasCredentialCapableProvider() bool {
-	if cfg != nil {
-		if cfg.GetUser() != "" || cfg.ProviderEnabled() {
-			return true
-		}
+	if cfg != nil && cfg.ProviderEnabled() {
+		return true
 	}
 	// HasEnabledCredentialProvider reads the profiles in place (OIDC or LDAP —
 	// the CREDENTIAL-capable types, ADR-0027). This probe runs on EVERY

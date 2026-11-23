@@ -41,7 +41,7 @@ can answer it.
 | Legacy LDAP provider (`config.yaml`) | Yes | Directory bind. |
 | OIDC profile, legacy OIDC provider | No — `provider_not_supported_for_socks5` | The proxy credential is a bearer token, and login is an interactive browser flow. |
 | SAML profile | No — `provider_not_supported_for_socks5` | Browser-only. |
-| Admin-console accounts | **Never** | An administrative credential is not a proxy identity, and SOCKS5 never falls back to it — not even when nothing else is configured. An administrator who is also a directory user signs in with the directory password. |
+| Admin-console accounts | **Never** | An administrative credential is not a proxy identity, and SOCKS5 never falls back to it — not even when nothing else is configured. An administrator who is also a directory user signs in with the directory password. HTTP proxy authentication refuses it too: management and proxy identities are distinct on every listener. |
 
 A refused credential gets the RFC 1929 failure status. The reason is recorded,
 not sent to the client:

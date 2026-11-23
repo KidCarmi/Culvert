@@ -168,14 +168,25 @@ Things that differ from authentication rules:
   a node. Under `Exempt` the same node does evaluate rules, and a
   `CredentialRequired` rule then answers `407`
   (`TestS3_NoBackend_DefaultInert_ExemptScopedFires`).
-- **A roster with accounts but nothing to verify them fails closed.** If the
-  roster still holds accounts but none can be verified (for example, a restored
-  roster whose only admin role was clamped to viewer, or a legacy roster with an
-  empty role) and there is no credential or SSO provider, Stage 1 is still
-  entered. A request that matches no rule gets a `407` that nothing can satisfy
+- **Admin-console accounts never authenticate proxy traffic.** The accounts in
+  the admin roster (`ui_users.json`, the setup-wizard admin, `-user`/`-pass`)
+  sign in to the admin UI and API only. A `Proxy-Authorization` (or SOCKS5
+  USER/PASS) credential is verified only by a proxy identity provider: an
+  enabled LDAP or OIDC profile under **Identity Providers**, or a legacy
+  (YAML) LDAP/OIDC provider. Management and data-plane identities are distinct.
+- **A roster with accounts but nothing to verify proxy credentials fails
+  closed.** If the roster holds accounts and there is no credential or SSO
+  provider, Stage 1 is still entered. That is every node whose only accounts
+  are admin-console accounts (the admin-only installation), and also a restored
+  roster whose only admin role was clamped to viewer or a legacy roster with an
+  empty role. A request that matches no rule gets a `407` that nothing can
+  satisfy, and any presented credential, including the admin pair, is refused
   (`rosterWithoutVerifier` in `resolveRequestAuth`;
+  `TestProxyAuthNoAdmin_AdminOnlyRefusesEveryCredential`,
   `TestAuthEnabled_ClampedAdminRosterHTTPProxyRefused`). Authentication is not
-  bypassed: the node refuses that traffic until an admin account is restored.
+  bypassed: the node refuses that traffic until a proxy identity provider is
+  configured. Credential-free requests covered by an `Exempt` rule or the
+  `Exempt` default are unaffected.
 
 ## 6. Signals
 
@@ -183,7 +194,7 @@ Things that differ from authentication rules:
 
 | Code | Level | Meaning |
 |---|---|---|
-| `auth_cr_no_credential_provider` | fail | `CredentialRequired` rules exist but nothing can validate a credential. SAML alone does not count. See §5 for what such a node does. |
+| `auth_cr_no_credential_provider` | fail | `CredentialRequired` rules exist but nothing can validate a credential. SAML alone does not count, and neither do admin-console accounts. See §5 for what such a node does. |
 | `auth_sso_no_idp` | fail | `SSORequired` rules exist but no OIDC or SAML provider is enabled. |
 | `auth_sso_rule_no_eligible_provider` | fail | Every `providerRefs` entry of a rule is disabled or deleted; the rule always answers `403`. |
 | `auth_sso_providerref_unavailable` | warn | Some, not all, of a rule's `providerRefs` are unavailable. |
@@ -237,7 +248,7 @@ the open default), `culvert_auth_credential_required_total`,
 | An exempt device still gets `407` | It sends a `Proxy-Authorization` header (never exempted); a higher-priority `CredentialRequired` rule matches first; the rule is expired, disabled or outside its schedule; the kill switch is engaged; or the proxy sees a different source address than the rule's CIDR. |
 | An exempt device gets a block page | The exemption worked. Stage 2 denied the request; add or fix the access rule. |
 | `403 Forbidden: destination requires interactive SSO` | An `SSORequired` rule matched a non-browser or `CONNECT` request, or no eligible provider remains. |
-| `407` that no credential satisfies | `auth_cr_no_credential_provider`: add a local account, an LDAP or OIDC provider, or remove the rule. |
+| `407` that no credential satisfies | No proxy identity provider is configured (`auth_cr_no_credential_provider` when a `CredentialRequired` rule exists): add an LDAP or OIDC provider, or remove the rule. Admin-console credentials are refused on the proxy by design. |
 | A Data Plane node behaves differently for unmatched traffic | The default authentication behavior is per node (§5). |
 
 ## References

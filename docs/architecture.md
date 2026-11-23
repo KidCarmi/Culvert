@@ -150,7 +150,7 @@ session with an on-the-fly leaf certificate signed by its internal CA:
 | Layer | Control |
 |---|---|
 | Ingress | Per-IP connection cap, admin-API rate limit (60/min mutating), IP allow/block |
-| Identity | Local bcrypt, OIDC (PKCE), SAML 2.0, LDAP/AD, multi-IdP routing, TOTP 2FA, RBAC |
+| Identity | Proxy users: OIDC (PKCE, introspection), SAML 2.0, LDAP/AD, multi-IdP routing. Admin console: local bcrypt, TOTP 2FA, RBAC (never a proxy credential) |
 | Egress safety | SSRF guard with connect-time re-resolution (anti DNS-rebinding), open-redirect guard |
 | Content | ClamAV, YARA, DPI regex, file-type profiles, domain blocklist, threat feeds, CDR |
 | Session | HMAC-SHA256 cookies, 128-bit jti, disk-persisted revocation synced across cluster |

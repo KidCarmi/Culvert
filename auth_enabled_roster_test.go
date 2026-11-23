@@ -342,19 +342,27 @@ func TestAuthEnabled_HTTPProxyFreshGatewayUnchanged(t *testing.T) {
 	}
 }
 
-// TestAuthEnabled_HTTPProxyAdminRosterUnchanged: a present admin pair still
-// authenticates over Basic, and a request without a credential is challenged.
+// TestAuthEnabled_HTTPProxyAdminRosterUnchanged: a request without a
+// credential is challenged on a gateway with a present admin.
+//
+// Owner Decision 2 (2026-11-23) changed ONE assertion here on purpose, the
+// HTTP twin of the SOCKS5 change in TestAuthEnabled_AdminRosterUnchanged: the
+// admin pair used to authenticate over Basic as alice/local. Admin-console
+// accounts are not proxy identities any more, so on a gateway whose only
+// account is the admin, the admin's own credential is refused with the same
+// 407 as any other — the gate stays armed (rosterWithoutVerifier), never
+// inert.
 func TestAuthEnabled_HTTPProxyAdminRosterUnchanged(t *testing.T) {
 	setupProxyTest(t)
 	withFreshPolicyStore(t)
 	loadRoster(t, adminRoster(t, RoleAdmin))
 
-	_, out, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://admin.example.test/", "alice", "Sup3rSecret!x", false))
-	if !proceed || out.identity != "alice" || out.source != "local" {
-		t.Fatalf("admin roster: valid Basic must authenticate as alice/local, got proceed=%v identity=%q source=%q",
-			proceed, out.identity, out.source)
+	w, out, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://admin.example.test/", "alice", "Sup3rSecret!x", false))
+	if proceed || w.Code != http.StatusProxyAuthRequired {
+		t.Fatalf("admin roster: the admin-console credential must NOT authenticate HTTP proxy traffic, got proceed=%v status=%d identity=%q source=%q",
+			proceed, w.Code, out.identity, out.source)
 	}
-	w, _, proceed := resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://admin.example.test/", "alice", "wrong", false))
+	w, _, proceed = resolveHTTPProxyAuth(t, httpProxyRequest(t, http.MethodGet, "http://admin.example.test/", "alice", "wrong", false))
 	if proceed || w.Code != http.StatusProxyAuthRequired {
 		t.Errorf("admin roster: a wrong password must 407, got proceed=%v status=%d", proceed, w.Code)
 	}

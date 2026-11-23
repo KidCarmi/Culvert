@@ -97,9 +97,10 @@ The effect depends on which authentication backends the node has
 
 | Node state | Formerly exempt clients |
 |---|---|
-| A credential provider or SSO provider is loaded | Must authenticate: a `407` challenge or an SSO redirect, as for any `Default` traffic. Clients that cannot authenticate (devices, scripts) stop working. |
+| A proxy credential provider (LDAP/OIDC) or SSO provider is loaded | Must authenticate: a `407` challenge or an SSO redirect, as for any `Default` traffic. Clients that cannot authenticate (devices, scripts) stop working. |
 | An OIDC/LDAP profile is enabled but failed to load | Are challenged, but nothing can validate what they send. Fix the profile under Identity Providers; the startup log names the error. |
-| The admin roster holds accounts but no usable administrator, and no provider is enabled | Get a `407` that nothing can satisfy; every such request is refused. Restore an administrator with the `--reset-password` break-glass. |
+| The node has an administrator but no proxy provider is enabled (admin-only installation) | Get a `407` that nothing can satisfy; every such request is refused. Admin-console accounts do not authenticate proxy traffic: configure an LDAP or OIDC provider under Identity Providers. |
+| The admin roster holds accounts but no usable administrator, and no provider is enabled | Get a `407` that nothing can satisfy; every such request is refused. Restore an administrator with the `--reset-password` break-glass, then configure a proxy provider: an administrator restores admin access, not proxy access. |
 | No credential or SSO provider at all | Depends on the authentication rules that remain once exemptions are skipped. A request that now resolves to `Default` is **not** made to authenticate: no challenge is sent, and it falls through to Stage-2 policy, so only your access rules and default action decide it (`TestKillSwitchNoBackend_NoRule_InertStage2`). A request that now matches a `CredentialRequired` rule, one the skipped `Exempt` rule used to mask, gets a `407` that nothing on this node can satisfy, and is refused (`TestKillSwitchNoBackend_ScopedCR_Challenges407`). |
 
 The last row matters in two ways. On a gateway with no authentication backend,
@@ -120,7 +121,9 @@ outcome each request now resolves to.
 - **Diagnostics** (`GET /api/diagnostics`, and the Support bundle): a `warn` row
   with code `auth_exempt_kill_switch` while either layer is engaged, and no row
   while clear. Its message names the layer and the backend state from §3. Below
-  the `admin` role, the roster-related cause and remediation are withheld.
+  the `admin` role, the cause and remediation of both "nothing can verify"
+  states are withheld, identically, so the row does not reveal whether the
+  roster holds a usable administrator.
 - **Policy Tester:** the Stage-1 block reports `killSwitch: true` and shows the
   outcome the runtime would resolve.
 - **Audit log:** `authpolicy.killswitch` for runtime changes. The environment

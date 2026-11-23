@@ -638,15 +638,19 @@ var rosterRowExceptions = map[string]rosterClass{
 		Reason: "the admin_username_length row"},
 	"collectAdminUsernames": {Kind: rosterInput,
 		Reason: "the inventory checkOversizeConfiguredUsernames renders; every consumer is classified"},
-	"hasCredentialCapableProvider": {Kind: rosterProbe, Reason: "reads cfg.GetUser() only as a BOOLEAN " +
-		"existence probe; renders no name, role, count or second-factor posture"},
+	// hasCredentialCapableProvider is no longer listed: owner Decision 2
+	// (2026-11-23) removed its cfg.GetUser() term — the admin account is not a
+	// proxy validator — so it no longer reads roster state at all.
+	//
 	// NOT a probe (SEC-KSROSTER-1, Codex P1 on PR #1765): the no-verifier
 	// state it returns says the roster holds accounts but no usable
 	// administrator — roster role posture — and the restore clamp that reaches
-	// that state leaves those accounts signing in as viewers.
+	// that state leaves those accounts signing in as viewers. The admin-only
+	// state (owner Decision 2) is its complement — a usable administrator
+	// exists — so it is the same posture fact and is redacted identically.
 	"currentKillSwitchBackend": {Kind: rosterInput, Reason: "reads cfg.GetUser() and cfg.AuthEnabled() " +
-		"into a four-state backend enum whose no-verifier state is admin-roster posture; its only " +
-		"contract consumer is authExemptKillSwitchContractRows"},
+		"into a five-state backend enum whose no-verifier and admin-only states are admin-roster posture; " +
+		"its only contract consumer is authExemptKillSwitchContractRows"},
 	"authExemptKillSwitchContractRows": {Kind: rosterRedactedRow, Code: "authExemptKillSwitchCode",
 		Reason: "the auth_exempt_kill_switch row; redactContractForRole replaces it with the contract's " +
 			"precomputed killSwitchViewerRow below admin (gated by auth_killswitch_diag_role_redaction_test.go)"},

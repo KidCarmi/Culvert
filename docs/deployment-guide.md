@@ -58,6 +58,18 @@ docker compose up -d
 
 Open `https://localhost:9090` to complete the setup wizard.
 
+> **Proxy authentication needs a proxy identity provider.** The administrator
+> account the setup wizard creates (and any account in `ui_users.json`, or
+> `-user`/`-pass`) signs in to the admin UI and API only. It does **not**
+> authenticate proxy traffic, over HTTP or SOCKS5. To require proxy users to
+> authenticate, configure an LDAP/Active Directory or OIDC provider under
+> **Objects → Identity Providers** (or a legacy `ldap`/`oidc` block in
+> `config.yaml`). Until one exists, a node with an administrator answers every
+> proxy request that requires authentication with a `407` that nothing
+> satisfies; requests an `Exempt` rule or the `Exempt` default covers
+> ("open mode" in the wizard) are served as before. See
+> [authentication rules](operator/authentication-rules.md).
+
 > **SOCKS5 and access policy.** The examples on this page enable the SOCKS5
 > listener (`-socks5-port 1080`). Drop the flag (and the `1080` port mapping)
 > if you do not need SOCKS5. If you keep it, set `proxy.socks5_policy_mode:

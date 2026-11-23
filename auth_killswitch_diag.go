@@ -41,16 +41,33 @@ package main
 // roster holds no administrator. Below admin, redactContractForRole swaps in
 // authExemptKillSwitchViewerRow, which keeps the engaged layer and the traffic
 // impact and withholds the cause and the remediation.
+//
+// Owner Decision 2 (2026-11-23) added a FIFTH. Admin-console accounts no
+// longer authenticate proxy traffic, so a gateway WITH a usable administrator
+// but no proxy provider — the admin-only installation, formerly
+// killSwitchBackendLive — is now in the same gate state as the fourth: armed,
+// and nothing can verify a presented credential. Its cause and repair differ
+// (configure an LDAP/OIDC proxy provider; no lockout to break), so it is its
+// own state. Its viewer rendering is the SAME redacted row as the fourth:
+// rendering one state in full below admin while redacting the other would let
+// a viewer tell them apart, i.e. read whether the roster holds a usable
+// administrator — the very fact SEC-DIAG-ROSTER-1 withholds.
 type killSwitchBackend int
 
 const (
 	killSwitchBackendNone      killSwitchBackend = iota // gate sees no backend: Stage 2 decides
 	killSwitchBackendNotLoaded                          // gate sees an enabled credential profile, but none is loaded
-	killSwitchBackendLive                               // a loaded validator or live SSO provider exists
+	killSwitchBackendLive                               // a loaded proxy validator or live SSO provider exists
 	// killSwitchBackendNoVerifier is the SEC-AUTHENABLED-1 state: the roster
-	// holds accounts, so the gate is armed, but nothing can verify a presented
-	// credential. Every formerly exempt request is refused, not fallen through.
+	// holds accounts but no usable administrator, so the gate is armed, but
+	// nothing can verify a presented credential. Every formerly exempt request
+	// is refused, not fallen through.
 	killSwitchBackendNoVerifier
+	// killSwitchBackendAdminOnly is the owner Decision 2 state: a usable
+	// administrator exists, but admin-console accounts are not proxy
+	// identities and no proxy provider is configured, so the gate is armed and
+	// nothing can verify a presented credential. Refused, as above.
+	killSwitchBackendAdminOnly
 )
 
 // authExemptKillSwitchCode is the operator-contract code of the kill-switch
@@ -92,15 +109,22 @@ func currentKillSwitchBackend() killSwitchBackend {
 	if !hasCredentialCapableProvider() && !sso {
 		// cfg.AuthEnabled() is the exact discriminator resolveRequestAuth uses
 		// for rosterWithoutVerifier, read here only as a boolean: with neither
-		// a credential-capable validator nor a live interactive provider, an
-		// active authentication backend can only be an admitted roster account,
-		// and that arms the gate rather than leaving it inert.
+		// a credential-capable proxy validator nor a live interactive provider,
+		// an active authentication backend can only be an admitted roster
+		// account, and that arms the gate rather than leaving it inert.
+		// cfg.GetUser() then separates a usable administrator (the admin-only
+		// installation, owner Decision 2) from the SEC-AUTHENABLED-1 lockout.
 		if cfg != nil && cfg.AuthEnabled() {
+			if cfg.GetUser() != "" {
+				return killSwitchBackendAdminOnly
+			}
 			return killSwitchBackendNoVerifier
 		}
 		return killSwitchBackendNone
 	}
-	liveCred := cfg != nil && (cfg.GetUser() != "" || cfg.ProviderEnabled())
+	// The admin pair is not a live PROXY validator (owner Decision 2): only the
+	// legacy provider or a compiled registry credential provider is.
+	liveCred := cfg != nil && cfg.ProviderEnabled()
 	if !liveCred && idpRegistry != nil {
 		liveCred = len(idpRegistry.EnabledCredentialProviders()) > 0
 	}
@@ -161,8 +185,18 @@ func authExemptKillSwitchRow(envDisabled, runtimeDisabled bool, backend killSwit
 		// (TestAuthEnabled_HTTPProxyExemptStillExempt), so credential-free
 		// requests an Exempt rule or the Exempt default covers resume when the
 		// switch clears (TestKillSwitchBackend_NoVerifierClearedSwitchResumesExempt).
-		effect = "so formerly exempt clients are now challenged for credentials (407) that nothing on this node can verify: the administrator roster holds accounts but no usable administrator account, and no identity provider is enabled, so every formerly exempt request is refused"
-		action = "Restore an administrator account with the --reset-password break-glass: the roster holds accounts whose effective role is not administrator (a restored backup from a newer build, or a pre-RBAC roster), so no presented credential can be verified, and traffic that requires authentication stays refused until an administrator account exists, whether the kill switch is engaged or not. Clearing the kill switch alone restores only credential-free requests covered by an Exempt rule or the Exempt default. " + action
+		//
+		// Owner Decision 2: restoring an administrator repairs the ADMIN plane
+		// only — admin-console accounts never authenticate proxy traffic — so
+		// the proxy repair is a proxy identity provider, named after the
+		// break-glass that makes configuring one possible.
+		effect = "so formerly exempt clients are now challenged for credentials (407) that nothing on this node can verify: the administrator roster holds accounts but no usable administrator account, and no proxy identity provider is enabled, so every formerly exempt request is refused"
+		action = "Restore an administrator account with the --reset-password break-glass: the roster holds accounts whose effective role is not administrator (a restored backup from a newer build, or a pre-RBAC roster). Then configure a proxy identity provider (LDAP or OIDC) under Identity Providers: admin-console accounts never authenticate proxy traffic, so traffic that requires authentication stays refused until a proxy identity provider is configured, whether the kill switch is engaged or not. Clearing the kill switch alone restores only credential-free requests covered by an Exempt rule or the Exempt default. " + action
+	case killSwitchBackendAdminOnly:
+		// Owner Decision 2: armed and unsatisfiable like the state above, with
+		// a usable administrator, so the only repair is a proxy provider.
+		effect = "so formerly exempt clients are now challenged for credentials (407) that nothing on this node can verify: admin-console accounts are management identities and do not authenticate proxy traffic, and no proxy identity provider is enabled, so every formerly exempt request is refused"
+		action = "Configure a proxy identity provider (LDAP or OIDC) under Identity Providers so challenged clients can authenticate: admin-console accounts never authenticate proxy traffic, so traffic that requires authentication stays refused until a proxy identity provider is configured, whether the kill switch is engaged or not. Clearing the kill switch alone restores only credential-free requests covered by an Exempt rule or the Exempt default. " + action
 	case killSwitchBackendNone:
 		// Deliberately not an enumeration of per-rule outcomes: without a
 		// backend the result depends on the global default, the rule order
@@ -182,12 +216,14 @@ func authExemptKillSwitchRow(envDisabled, runtimeDisabled bool, backend killSwit
 	}
 }
 
-// authExemptKillSwitchViewerRow is the below-admin rendering. Only the
-// no-verifier state differs from the admin row: the other three states carry
-// provider facts and the switch layer, already reviewed as safe below admin.
-// The status is warn in every state, so the verdict needs no recomputation.
+// authExemptKillSwitchViewerRow is the below-admin rendering. Only the two
+// no-verifier states differ from the admin row, and both render the SAME
+// redacted row, so a viewer cannot tell whether the roster holds a usable
+// administrator: the other three states carry provider facts and the switch
+// layer, already reviewed as safe below admin. The status is warn in every
+// state, so the verdict needs no recomputation.
 func authExemptKillSwitchViewerRow(envDisabled, runtimeDisabled bool, backend killSwitchBackend) OperatorContractCheck {
-	if backend != killSwitchBackendNoVerifier {
+	if backend != killSwitchBackendNoVerifier && backend != killSwitchBackendAdminOnly {
 		return authExemptKillSwitchRow(envDisabled, runtimeDisabled, backend)
 	}
 	layer, _ := killSwitchLayer(envDisabled, runtimeDisabled)

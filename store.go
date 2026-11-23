@@ -1374,10 +1374,13 @@ func (c *Config) verifyAuthFrom(snapshot authBackendSnapshot, client, user, pass
 		// No local credential and no provider. With no accounts at all this is
 		// the historical "auth disabled" sentinel. With admitted roster accounts
 		// AuthEnabled is true (SEC-AUTHENABLED-1): authentication is required,
-		// but nothing here can verify a credential, because the local data-plane
-		// credential is the admin pair alone. Fail CLOSED: answering true would
-		// turn "USERPASS required" into "any USERPASS accepted". The operator
-		// restores an admin with the --reset-password break-glass.
+		// but nothing here can verify a credential, because the only local
+		// credential is the admin pair. Fail CLOSED: answering true would turn
+		// "USERPASS required" into "any USERPASS accepted". The operator
+		// restores an admin with the --reset-password break-glass. (No proxy
+		// data-plane path reaches this local arm any more — owner Decision 2,
+		// proxy_credential.go legacyCredentialFor — but the fail-closed answer
+		// stays for every remaining caller.)
 		return !snapshot.hasRoster
 	}
 
@@ -1461,11 +1464,15 @@ func (c *Config) IdentityCacheEvictions() uint64 {
 // bucket where they can only throttle each other.
 //
 // No data-plane caller remains (SWG-901 stage 3): SOCKS5, its last caller,
-// now resolves credentials through resolvePresentedCredential, which must
-// never reach the local admin pair for SOCKS5. HTTP proxy Basic reaches the
-// same verifyAuthFrom through resolveAuthIdentityFrom. This bool form is kept
-// as the CHAOS-57 governor's direct test entry point; do not add a new
-// data-plane caller — use resolvePresentedCredential.
+// now resolves credentials through resolvePresentedCredential. Neither proxy
+// channel reaches the local admin pair any more (owner Decision 2,
+// 2026-11-23): resolvePresentedCredential hands verifyAuthFrom only snapshots
+// whose provider is set, so the bcrypt arm below the provider branch — the
+// work CHAOS-57 governs — is not reachable from proxy traffic. This bool form
+// is kept as the CHAOS-57 governor's direct test entry point, and the
+// governor's contract (cache first, username-independent admission, refusal
+// is a deny, slot held across both branches) is unchanged for it; do not add a
+// new data-plane caller — use resolvePresentedCredential.
 func (c *Config) VerifyAuthFrom(client, user, pass string) bool {
 	return c.verifyAuthFrom(c.snapshotAuthBackend(), client, user, pass)
 }
@@ -1473,15 +1480,12 @@ func (c *Config) VerifyAuthFrom(client, user, pass string) bool {
 // resolveAuthIdentity preserves the legacy Config authentication selection but
 // returns a provider-derived identity when the configured backend supports it.
 // Non-identity providers and local bcrypt retain the historical caller username
-// and "local" source semantics.
+// and "local" source semantics. It still consults the local pair when no
+// provider is configured, so it is NOT a proxy credential path: proxy traffic
+// resolves through resolvePresentedCredential (proxy_credential.go), which
+// never hands this family a provider-less snapshot.
 func (c *Config) resolveAuthIdentity(user, pass string) (*Identity, bool) {
 	return c.resolveAuthIdentityWithSnapshot(c.snapshotAuthBackend(), user, pass)
-}
-
-// resolveAuthIdentityFrom is resolveAuthIdentity carrying the caller's
-// client-fairness key through to the CHAOS-57 verification governor.
-func (c *Config) resolveAuthIdentityFrom(client, user, pass string) (*Identity, bool) {
-	return c.resolveAuthIdentityFromSnapshot(c.snapshotAuthBackend(), client, user, pass)
 }
 
 func (c *Config) resolveAuthIdentityWithSnapshot(snapshot authBackendSnapshot, user, pass string) (*Identity, bool) {

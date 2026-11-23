@@ -2823,7 +2823,7 @@ Firefox (all platforms):
           </div>
           <p class="hint">
             Scoped <strong>auth rules are evaluated first and always enforce</strong> - this setting applies <strong>only to traffic that no rule matches</strong>.<br>
-            <strong>Require authentication</strong> - unmatched traffic must authenticate (407 / SSO), unless no auth backend is configured.<br>
+            <strong>Require authentication</strong> - unmatched traffic must authenticate (407 / SSO), unless no auth backend is configured. Proxy users authenticate through an LDAP or OIDC identity provider; admin-console accounts never authenticate proxy traffic.<br>
             <strong>Open unmatched traffic</strong> - unmatched traffic is admitted without credentials (authSource <code style="font-size:.75rem;background:var(--surface2);padding:1px 5px;border-radius:3px">unauth</code>). This is <strong>not Allow</strong>: Stage-2 policy still decides access and <strong>default-deny still applies</strong>.
           </p>
           <div id="s-default-auth-enforce-warn" style="display:none;margin-top:6px;padding:8px 12px;border-radius:6px;font-size:.78rem;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:#fbbf24">

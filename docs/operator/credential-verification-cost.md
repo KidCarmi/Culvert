@@ -1,11 +1,17 @@
 # Credential verification cost and the `auth_verify_saturated` alert
 
-**Applies to:** Culvert nodes using a **local account** for proxy authentication
-(`-user` / `auth.user`, or an admin created through the setup wizard).
-Deployments that authenticate every request against LDAP, OIDC or SAML are not
-governed by this control — their cost and failure modes belong to the
-identity-backend health plane instead (`identity_backend`,
-`docs/operator/…` and CHAOS-47).
+**Applies to:** local-password (bcrypt) proxy authentication. **Currently
+dormant:** since owner Decision 2 (2026-11-23) the admin-console account
+(`-user` / `auth.user`, or an admin created through the setup wizard) no longer
+authenticates proxy traffic, so no proxy request reaches a bcrypt comparison
+today and the `credential_verification` row and `culvert_auth_verify_*` series
+stay idle. The control is kept, unchanged, for the planned dedicated local
+proxy-user mechanism (`roadmap/LOCAL-PROXY-USERS.md`), which must verify through
+it. Deployments that authenticate against LDAP, OIDC or SAML are not governed
+by this control — their cost and failure modes belong to the identity-backend
+health plane instead (`identity_backend`, `docs/operator/…` and CHAOS-47).
+The rest of this page describes the control as it applies when a local
+password does reach the proxy path.
 
 **Design authority:** `internal/authcost` (package comment),
 `auth_cost_health.go`, `roadmap/CHAOS-ENGINEERING-REVIEW.md` §25.

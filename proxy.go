@@ -344,9 +344,11 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	// Resolution order:
 	//  1. Signed session cookie (browser SSO — OIDC code flow or SAML).
 	//  2. Proxy-Authorization Basic header (non-browser / API clients).
-	//     a. Resolved via IdP registry (OIDC introspection) if providers exist.
+	//     a. Resolved via IdP registry (OIDC introspection, LDAP bind) if
+	//        providers exist.
 	//     b. Legacy single LDAP/OIDC provider (cfg.ProviderEnabled).
-	//     c. Local bcrypt auth.
+	//     The local admin-console account is NOT a proxy credential (owner
+	//     Decision 2, 2026-11-23; proxy_credential.go).
 	//  3. No credentials — redirect browser to captive portal or send 407.
 	var authenticatedIdentity string
 	var authenticatedGroups []string
@@ -360,10 +362,13 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	// Two distinct backend predicates (both EXCLUDE the Exempt term, so the gate
 	// never depends on the global default):
 	//   - credCapable: a validator that can verify a PRESENTED Basic credential
-	//     (local account, legacy provider, or enabled OIDC). SAML is browser-only
-	//     and is EXCLUDED — otherwise a SAML-only deployment would enter the Basic
-	//     branch, SAML ResolveIdentity would fail, and cfg.VerifyAuth with no local
-	//     user accepts any creds → identity spoofing.
+	//     (legacy provider, or an enabled OIDC/LDAP profile). SAML is
+	//     browser-only and is EXCLUDED — otherwise a SAML-only deployment would
+	//     enter the Basic branch, SAML ResolveIdentity would fail, and
+	//     cfg.VerifyAuth with no local user accepts any creds → identity
+	//     spoofing. The local admin-console account is EXCLUDED too (owner
+	//     Decision 2): it is not a proxy identity, so a gateway whose only
+	//     accounts are admin-console accounts is rosterWithoutVerifier below.
 	//   - ssoCapable: any enabled interactive IdP (OIDC or SAML) that can drive the
 	//     no-credentials SSO/captive path. SAML IS included here.
 	// authRequired uses (credCapable || ssoCapable) — byte-identical to today's
@@ -389,17 +394,22 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 	}
 	credCapable := hasCredentialCapableProvider()
 	ssoCapable := idpRegistry.HasEnabledInteractiveProvider() // allocation-free probe, INTERACTIVE types only (ADR-0027) — an enabled LDAP profile must not advertise an SSO flow it can never fulfil
-	// SEC-AUTHENABLED-1: accounts exist but nothing can verify a presented
-	// credential — the roster's only admin was clamped by loadedRosterRole, or
-	// the roster is a legacy one with an empty role, so there is no admin pair
-	// and no provider. Without this term that state read as "no backend": the
-	// gate was skipped (or the inert guard below fell through) and every
-	// request left Stage-1 unauthenticated. With it the gate is armed and the
-	// Default outcome challenges, which nothing can satisfy, so the gateway
-	// refuses until an admin is restored. Exempt outcomes are untouched.
+	// SEC-AUTHENABLED-1 / owner Decision 2: accounts exist but nothing can
+	// verify a presented proxy credential. Since admin-console accounts stopped
+	// authenticating proxy traffic (owner Decision 2, 2026-11-23) this is EVERY
+	// gateway whose only accounts are admin-console accounts and that has no
+	// proxy provider — the admin-only installation — as well as the original
+	// SEC-AUTHENABLED-1 states (the roster's only admin clamped by
+	// loadedRosterRole, or a legacy roster with an empty role). Without this
+	// term that state read as "no backend": the gate was skipped (or the inert
+	// guard below fell through) and every request left Stage-1
+	// unauthenticated. With it the gate is armed and the Default outcome
+	// challenges, which nothing can satisfy, so the gateway refuses (fail
+	// closed) until a proxy provider (LDAP/OIDC) is configured. Exempt outcomes
+	// — explicitly configured unauthenticated access — are untouched.
 	// cfg.AuthEnabled() is SOCKS5's predicate (one RLock, no allocation) and is
-	// evaluated only when credCapable is false, so a gateway with an admin pays
-	// nothing for it.
+	// evaluated only when credCapable is false, so a gateway with a proxy
+	// provider pays nothing for it.
 	rosterWithoutVerifier := !credCapable && cfg.AuthEnabled()
 	authRequired := credCapable || ssoCapable || rosterWithoutVerifier || originalEffective == OutcomeExempt
 	// sessionCapable is a SUPERSET of authRequired and opens arm 1 ONLY.

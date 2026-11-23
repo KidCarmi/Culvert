@@ -101,10 +101,17 @@ func TestAuthSource_SessionCookieProvider(t *testing.T) {
 	}
 }
 
-// TestAuthSource_LocalBasic: legacy local bcrypt credentials attribute "local".
+// TestAuthSource_LocalBasic: the reserved "local" auth source.
+//
+// Owner Decision 2 (2026-11-23) changed what reaches it. It used to be the
+// local admin pair's label; admin-console credentials no longer authenticate
+// proxy traffic (the pair now gets a 407, asserted below), so the label now
+// reaches proxy traffic only as the fallback for an identity that names no
+// provider — a legacy (YAML) LDAP bind provider, which supplies none.
 func TestAuthSource_LocalBasic(t *testing.T) {
 	backend, _ := startCountingBackend(t)
 	setupProxyTest(t)
+	withFreshPolicyStore(t)
 	origReg := idpRegistry
 	idpRegistry = &IdPRegistry{}
 	t.Cleanup(func() { idpRegistry = origReg })
@@ -112,14 +119,18 @@ func TestAuthSource_LocalBasic(t *testing.T) {
 		t.Fatalf("SetAuth: %v", err)
 	}
 	t.Cleanup(func() { cfg.SetAuth("", "") }) //nolint:errcheck // test cleanup
+	installCachedLegacyLDAP(t, "bob", "bob-dir-pass")
 	policyStore.Add(PolicyRule{Priority: 1, Name: "any-allow", DestFQDN: "*", Action: ActionAllow})
 
 	srv := httptest.NewServer(http.HandlerFunc(handleRequest))
 	t.Cleanup(srv.Close)
 	proxyURL, _ := url.Parse(srv.URL)
 
-	if got := proxiedGet(t, proxyURL, backend.URL+"/", "admin", "admin-pass", nil); got != http.StatusOK {
-		t.Fatalf("local-auth GET: status %d, want 200", got)
+	if got := proxiedGet(t, proxyURL, backend.URL+"/", "admin", "admin-pass", nil); got != http.StatusProxyAuthRequired {
+		t.Fatalf("admin-console credential GET: status %d, want 407 (owner Decision 2)", got)
+	}
+	if got := proxiedGet(t, proxyURL, backend.URL+"/", "bob", "bob-dir-pass", nil); got != http.StatusOK {
+		t.Fatalf("legacy-LDAP GET: status %d, want 200", got)
 	}
 	src, ok := authSourceForHost(t, destHostOf(t, backend.URL), "OK")
 	if !ok {
