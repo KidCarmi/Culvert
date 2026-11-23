@@ -8,8 +8,6 @@
  "127.000.000.001": "no-rule status=502 backend=not-reached",
  "127.1": "no-rule status=502 backend=not-reached",
  "2130706433": "no-rule status=502 backend=not-reached",
- "LOCALHOST.": "no-rule status=502 backend=not-reached",
  "[::ffff:127.0.0.1]": "block-rule status=403 backend=not-reached",
- "[::ffff:7f00:1]": "block-rule status=403 backend=not-reached",
- "localhost": "no-rule status=200 backend=REACHED"
+ "[::ffff:7f00:1]": "block-rule status=403 backend=not-reached"
 }

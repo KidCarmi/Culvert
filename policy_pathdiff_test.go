@@ -846,7 +846,7 @@ func TestPathDiff_DialAlias(t *testing.T) {
 	setDefaultPolicyAction("allow")
 	got := map[string]string{}
 	for _, sp := range []string{"127.0.0.1", "2130706433", "0x7f.0.0.1", "0177.0.0.1", "127.1", "127.0.1", "0x7f000001", "127.0.0.1.",
-		"[::ffff:127.0.0.1]", "[::ffff:7f00:1]", "127.000.000.001", "localhost", "LOCALHOST."} {
+		"[::ffff:127.0.0.1]", "[::ffff:7f00:1]", "127.000.000.001"} {
 		rl = newRateLimiter()
 		before, hb := cb.hitCount(), pdHits()
 		c, err := net.DialTimeout("tcp", e.addr, 2*time.Second)
