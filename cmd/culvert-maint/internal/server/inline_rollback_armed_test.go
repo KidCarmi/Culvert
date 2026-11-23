@@ -63,11 +63,13 @@ func TestInlineRollback_ArmedDurablyBeforeRollbackTag(t *testing.T) {
 	}
 }
 
-// TestInlineRollback_ArmFailClosed: when the armed marker cannot be written
-// (here the record is corrupted while the rollback pull runs), the rollback
-// refuses to move the tag: no `docker tag` to the prior image, and the op fails
-// rollback_failed.
-func TestInlineRollback_ArmFailClosed(t *testing.T) {
+// TestInlineRollback_ArmWriteFailureStillRollsBack: when the armed marker
+// cannot be written (here the record is corrupted while the rollback pull
+// runs), the rollback still moves the tag back and restarts the prior image.
+// The marker only feeds the opt-in startup reconcile, which never acts on an
+// unarmed record (TestReconcileDecisionV2 "tag_on_prior_rollback_unproven"), so
+// refusing the rollback would only leave the failed target running.
+func TestInlineRollback_ArmWriteFailureStillRollsBack(t *testing.T) {
 	rig := startApplyRig(t)
 	defer rig.stop()
 	rig.unhealthyDigests = map[string]bool{digNew: true}
@@ -87,13 +89,14 @@ func TestInlineRollback_ArmFailClosed(t *testing.T) {
 	}
 
 	op, _ := rig.acceptAndWait(t, map[string]interface{}{"image_ref": repo + "@sha256:" + digNew})
-	if op["state"] != "failed" || op["failure_reason"] != "rollback_failed" {
-		t.Errorf("want failed/rollback_failed, got %v/%v", op["state"], op["failure_reason"])
+	if !rig.pinnedFor("tag", digOld) {
+		t.Error("the rollback did not move the tag back to the prior image")
 	}
-	if rig.pinnedFor("tag", digOld) {
-		t.Error("the rollback moved the tag although RollbackArmed could not be recorded")
+	if got := rig.currentRunning(); got != digOld {
+		t.Errorf("the world runs %s after rollback, want the prior %s", short(got), short(digOld))
 	}
-	if res := resultMap(t, op); res["rollback_succeeded"] != false {
-		t.Errorf("rollback_succeeded = %v, want false", res["rollback_succeeded"])
+	res := resultMap(t, op)
+	if res["rollback_succeeded"] != true {
+		t.Errorf("rollback_succeeded = %v, want true (state=%v failure_reason=%v)", res["rollback_succeeded"], op["state"], op["failure_reason"])
 	}
 }

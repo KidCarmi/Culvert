@@ -8,7 +8,7 @@ package server
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"time"
 
 	"culvert-maint/internal/audit"
@@ -117,19 +117,23 @@ func (s *Server) guardInlineRollback(acc *upgradeApplyAccumulator, racc *rollbac
 			acc.rollbackAttempted = true
 			s.emitRollbackAudit(acc, audit.OutcomeStarted, "")
 		}
+		var armNote []byte
 		if name == "rollback_restart" {
 			// Durable evidence, written BEFORE the tag moves back, that the agent
-			// decided the target failed (RollbackArmed). Fail-closed: without it a
-			// crash inside the restart would leave a record a startup reconcile
-			// cannot tell apart from an operator's retag.
+			// decided the target failed (RollbackArmed). BEST-EFFORT: the rollback
+			// proceeds without it. An unarmed record is never acted on by the
+			// startup reconcile (tag on prior + target running is
+			// recovery_required "tag_on_prior_rollback_unproven"; before the tag
+			// moves, Docker is identical either way), so refusing here would buy
+			// no safety and would leave a target that failed its gate running in
+			// every mode, including the default reconcile_on_startup = "off".
 			if aerr := s.armRollbackInJournal(acc); aerr != nil {
-				acc.rollbackFailed = true
-				s.emitRollbackAudit(acc, audit.OutcomeFailed, name)
-				return []byte(name + ": journal write failed, refusing to move the tag"), nil,
-					fmt.Errorf("rollback_restart: could not record the armed rollback in the journal, refusing to move the tag: %w", aerr)
+				log.Printf("culvert-maint: WARN: op %s: could not record the armed rollback in the journal; rolling back unarmed (an interruption now needs an operator): %v", acc.opID, aerr)
+				armNote = []byte(name + ": journal write failed; rolling back unarmed\n")
 			}
 		}
 		out, errout, err := inner(ctx)
+		out = append(armNote, out...)
 		if err != nil {
 			acc.rollbackFailed = true
 			s.emitRollbackAudit(acc, audit.OutcomeFailed, name)

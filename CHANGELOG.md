@@ -697,10 +697,11 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (for example under a compose override pinning another image). The id is now
   recorded only when that image's registry digests include the digest being
   installed; the verify stage applies the same rule. An image rollback inside a
-  failed upgrade also writes an optional `rollback_armed` key to the record,
-  fail-closed, before it moves the fixed tag back: if the record cannot be
-  written the rollback does not move the tag and the operation fails
-  `rollback_failed`. Older agents ignore the key. No startup code acts on either
+  failed upgrade also writes an optional `rollback_armed` key to the record
+  before it moves the fixed tag back. The write is best-effort: if it fails, a
+  warning is logged and the rollback still runs, so a failed target is never
+  left running for want of the marker; the record then stays unarmed, which a
+  startup reconcile never acts on. Older agents ignore the key. No startup code acts on either
   value in this change; they are the evidence an opt-in startup reconcile
   (contract `AGT-900`) needs.
 

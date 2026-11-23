@@ -121,8 +121,9 @@ func (s *Server) writeBarrier(acc *upgradeApplyAccumulator) error {
 	return s.opts.Journal.Write(rec)
 }
 
-// armRollbackInJournal records, FAIL-CLOSED, that inline rollback is about to
-// move the fixed tag back to the prior image (journal.Record.RollbackArmed).
+// armRollbackInJournal records that inline rollback is about to move the fixed
+// tag back to the prior image (journal.Record.RollbackArmed). Best-effort: the
+// caller logs a failure and rolls back anyway.
 // It changes nothing else in the record: the phase stays where the forward flow
 // left it (rollback stages write no phase), and no identifier is folded in. A
 // missing record is re-established like the write-ahead barrier does, so a crash
