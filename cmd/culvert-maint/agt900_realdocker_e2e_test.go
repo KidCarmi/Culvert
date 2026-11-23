@@ -402,7 +402,7 @@ DOCKER_HOST='__HOST__'; export DOCKER_HOST
 SSL_CERT_FILE='__CA__'; export SSL_CERT_FILE
 [ -n "$C" ] || exec '__REAL__' "$@"
 echo "$*" >> "$C/calls.log"
-echo "uid=$(id -u) sudo_uid=${SUDO_UID:-} sudo_cmd=${SUDO_COMMAND:-}" >> "$C/priv.log"
+printf 'uid=%s sudo_uid=%s sudo_cmd=%s\targv=%s\n' "$(id -u)" "${SUDO_UID:-}" "${SUDO_COMMAND:-}" "$*" >> "$C/priv.log"
 key() {
   [ "$1" = compose ] || { echo "$1"; return; }
   shift
@@ -731,20 +731,32 @@ func (r *e2eRig) privCheck(res *e2eResult, p *agentProc, label string) {
 		probs = append(probs, fmt.Sprintf("%d calls but %d privilege lines", len(calls), len(priv)))
 	}
 	wrapped, direct := 0, 0
-	for i := 0; i < len(priv) && i < len(calls); i++ {
-		f := strings.Fields(calls[i])
+	// Each priv.log line carries its own argv (concurrent calls, e.g. a status
+	// poll beside the reconcile, may interleave differently in the two logs).
+	for i := range priv {
+		ctx, argv, _ := strings.Cut(priv[i], "\targv=")
+		f := strings.Fields(argv)
 		// The wrapper's subcommands: inspect-image, pull, tag, and the cli
 		// backup/restore/cleanup runs (only the fixed --list-backups run has a
 		// direct rule).
 		viaWrapper := len(f) > 0 && (f[0] == "tag" || f[0] == "pull" || f[0] == "inspect" ||
-			(composeSub(f) == "run" && !strings.Contains(calls[i], "--list-backups")))
-		wantCmd := "sudo_cmd=/usr/bin/docker " + calls[i]
+			(composeSub(f) == "run" && !strings.Contains(argv, "--list-backups")))
+		wantCmd := "sudo_cmd=/usr/bin/docker " + argv
 		if viaWrapper {
 			wantCmd = "sudo_cmd=" + e2eWrapper + " "
+			switch f[0] {
+			case "tag", "pull":
+				wantCmd += f[0] + " " + strings.Join(f[1:], " ")
+			case "inspect":
+				wantCmd += "inspect-image " + f[len(f)-1]
+			}
 		}
 		wantID := fmt.Sprintf("uid=0 sudo_uid=%d ", r.e.uid)
-		if !strings.HasPrefix(priv[i], wantID) || !strings.Contains(priv[i], wantCmd) {
-			probs = append(probs, fmt.Sprintf("call %d %q ran as %q", i+1, calls[i], priv[i]))
+		// a direct rule: SUDO_COMMAND is exactly /usr/bin/docker <argv>; the
+		// wrapper: SUDO_COMMAND is the wrapper and its subcommand.
+		if !strings.HasPrefix(ctx, wantID) || (viaWrapper && !strings.HasPrefix(ctx[len(wantID):], wantCmd)) ||
+			(!viaWrapper && ctx[len(wantID):] != wantCmd) {
+			probs = append(probs, fmt.Sprintf("call %q ran as %q", argv, ctx))
 			continue
 		}
 		if viaWrapper {
