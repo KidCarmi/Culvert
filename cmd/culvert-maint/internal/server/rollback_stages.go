@@ -75,6 +75,9 @@ func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bo
 	errOut := append([]byte(nil), tres.Stderr...)
 	ev.noteUp()
 	ures, uerr := s.opts.Runner.ComposeUp(ctx)
+	if uerr != nil {
+		s.noteMutationCut()
+	}
 	if uerr != nil && failedPostRestart != nil {
 		*failedPostRestart = true
 	}

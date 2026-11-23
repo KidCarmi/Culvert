@@ -262,10 +262,17 @@ written best-effort. The cost is that the first upgrade or rollback within the
 window after any agent start waits for the rest of it. The wait is not a new
 stage and adds no docker call.
 
+The window restarts inside one process whenever a `compose up` or `compose
+down` it ran ends in an error: the command may have been killed (stage timeout,
+the unit being stopped, the OOM killer) after it asked dockerd to stop the
+proxy. The upgrade's inline rollback therefore starts one window after a
+failed `up`. An upgrade also waits before its first capture, so that "already
+current" — which skips the restart and the health gate — is never concluded
+from a container that may be on its way out.
+
 Not covered: a deployment without the unit's control-group kill (a docker
-command of the dead agent may then still be running at any later time), a
-`stop_grace_period` longer than the window, and a stop cut short inside one
-process by a `stage_timeout` shorter than the proxy's exit.
+command of the dead agent may then still be running at any later time), and a
+`stop_grace_period` longer than the window.
 
 The startup reconcile (`reconcile_on_startup = "converge"`) follows the same
 rule and one more. It waits out the settle window before it reads Docker for a
