@@ -75,16 +75,35 @@ agent, records its reports, releases the command, and reads the reports again
 operation while the command is still alive.
 
 - Negative controls in the code: a mutating in-flight command (`tag`,
-  `compose up`) must change the model after release and a read-only one must
-  not, otherwise the run is `INVALID` (exit 2); `TestOrphanSurvival_ReapedControl`
-  repeats the vectors with the command reaped and requires no divergence.
+  `compose up`) must change the model after release, write a completion marker
+  in both flows, and a read-only one must not change the model; every report
+  read must answer 200 and the restart must list the interrupted op. Any of
+  these failing is `INVALID`. `TestOrphanSurvival_ReapedControl` repeats the
+  vectors with the command reaped and requires no divergence.
 - Findings are pinned in `orphanExpectations`, every entry `open`. A finding
-  is not a failure; a change in one (either direction) is exit 1.
+  is not a failure; a change in one (either direction) is exit 1. Any other
+  failure of the run (INVALID, panic, timeout, rig failure) is exit 2.
+- What Q1 establishes: the durable report (operation result, audit entry) is
+  conservative, since it already says `indeterminate` wherever the orphan can act,
+  and a conclusive-looking live read (`running_image`, `pinned_tag`) can change
+  after the restart. On this model a durable report cannot be shown stale: it
+  says `unchanged` only where the in-flight command changes no tag or container.
+- Model artefacts, not findings: the model's `compose up` reads the tag when it
+  is released, while a real in-flight `compose up` has already resolved its image.
+  So "a rollback admitted meanwhile, then the orphan's `up` lands on the prior
+  image" is a property of the model. An orphaned `pull`'s effect on the local
+  image store is not represented.
 - Nothing here was run against real Docker. Whether the command really
-  survives depends on the supervisor (the shipped unit sets no `KillMode`, so
-  systemd's default `control-group` is expected, not verified, to kill it before
-  `Restart=on-failure` starts the agent again), `sudo`, a container's PID 1, and
-  whether `dockerd` completes a call whose client died.
+  survives and completes depends on:
+  - the supervisor: the shipped unit sets no `KillMode`, so systemd's default
+    `control-group` is expected, not verified, to kill it before
+    `Restart=on-failure` starts the agent again;
+  - `sudo`, and a container's PID 1;
+  - output pipes: the runner captures the child's stdout/stderr through pipes,
+    so once the agent is dead an orphan gets SIGPIPE/EPIPE on its next write.
+    The model's mutating commands write nothing; a real `docker compose up`
+    writes progress;
+  - whether `dockerd` completes a call whose client died.
 
 ## Running
 
@@ -96,7 +115,7 @@ test/lifecycle-conformance/run.sh /tmp/lifecycle-report
 |---|---|
 | 0 | Model check complete; all three conformance suites and both orphan-survival suites ran and passed |
 | 1 | A conformance vector mismatched the real code, an orphan-survival finding no longer matches its pinned expectation, or an owner-**approved** property failed |
-| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, a skipped or missing suite, or an orphan vector that did not exercise orphan survival. Never reported as a pass |
+| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, a skipped or missing suite, or an orphan-survival run that failed for any reason other than a pinned expectation or the reaped control (INVALID, panic, timeout, rig failure). Never reported as a pass |
 
 Exit 2 takes precedence over exit 1 and nothing downgrades it: a run with a
 failing unapproved property **and** a vacuous property is incomplete.
