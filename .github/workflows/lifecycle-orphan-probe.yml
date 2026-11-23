@@ -1,0 +1,103 @@
+name: Lifecycle Orphan Probe (manual)
+
+# Real-Docker / real-systemd qualification of the maintenance agent's crash behaviour with
+# the ACTUAL release image (built here by the repository's Dockerfile), at production-default
+# timing (interrupted_settle 75s, stop_grace_period 60s), on a GitHub-hosted runner.
+#
+# Never a required check and never a merge gate: it takes hours of runner time and needs a
+# privileged container. It runs on demand, and on a pull request only when the probe itself
+# or this file changes. See test/lifecycle-conformance/README.md.
+#
+# Exit code of the probe: 0 every property held, 1 a property was violated, 2 incomplete.
+
+on:
+  workflow_dispatch:
+    inputs:
+      proxy_v1_ref:
+        description: "Git ref the v1 (prior) release image is built from"
+        default: "main"
+      proxy_v2_ref:
+        description: "Git ref the v2 (target) release image is built from"
+        default: "main"
+  pull_request:
+    branches: [main]
+    paths:
+      - "test/lifecycle-conformance/orphan-probe/**"
+      - ".github/workflows/lifecycle-orphan-probe.yml"
+
+concurrency:
+  group: lifecycle-orphan-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: "Probe · ${{ matrix.variant }} · kill points ${{ matrix.points }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [shipped, converge]
+        # All 14 kill points, split so that one job fits in the runner's time. `mid` is the
+        # part of each chunk inside the recreate (the slices with a pending admin-UI request).
+        include:
+          - {points: "-1,0,1,2", mid: ""}
+          - {points: "3,4,5,6", mid: ""}
+          - {points: "7,8,9", mid: "7,8,9"}
+          - {points: "10,11,12", mid: "10"}
+        points: ["-1,0,1,2", "3,4,5,6", "7,8,9", "10,11,12"]
+    env:
+      V1_REF: ${{ inputs.proxy_v1_ref || 'main' }}
+      V2_REF: ${{ inputs.proxy_v2_ref || 'main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
+
+      - name: Build the two release images (repository Dockerfile)
+        run: |
+          set -euo pipefail
+          for v in v1 v2; do
+            if [ "$v" = v1 ]; then ref="$V1_REF"; else ref="$V2_REF"; fi
+            git fetch --no-tags origin "$ref"
+            git worktree add --detach "$RUNNER_TEMP/src-$v" FETCH_HEAD
+            echo "$v: $ref = $(git -C "$RUNNER_TEMP/src-$v" rev-parse HEAD)"
+            docker build --build-arg "VERSION=probe-$v" -t "culvert-probe-release:$v" "$RUNNER_TEMP/src-$v"
+          done
+          docker image ls | grep culvert-probe-release
+
+      - name: Run the probe (production-default timing)
+        env:
+          ORPHAN_PROBE_PROXY_IMAGE_V1: culvert-probe-release:v1
+          ORPHAN_PROBE_PROXY_IMAGE_V2: culvert-probe-release:v2
+          ORPHAN_PROBE_POINTS: ${{ matrix.points }}
+          ORPHAN_PROBE_MID: ${{ matrix.mid }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          set -uo pipefail
+          flag=""; [ "$VARIANT" = converge ] && flag="--only-converge"
+          mkdir -p "$RUNNER_TEMP/probe-evidence"
+          sudo --preserve-env=ORPHAN_PROBE_PROXY_IMAGE_V1,ORPHAN_PROBE_PROXY_IMAGE_V2,ORPHAN_PROBE_POINTS,ORPHAN_PROBE_MID \
+            env "PATH=$PATH" "GOFLAGS=${GOFLAGS:-}" "GOTOOLCHAIN=${GOTOOLCHAIN:-}" "HOME=$HOME" \
+            ORPHAN_PROBE_OUT="$RUNNER_TEMP/probe-evidence" \
+            bash test/lifecycle-conformance/orphan-probe/probe.sh $flag 2>&1 | tee "$RUNNER_TEMP/probe-evidence/probe.log"
+          rc=${PIPESTATUS[0]}
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/probe-evidence"
+          echo "probe exit=$rc"
+          exit "$rc"
+
+      - name: Upload the per-trial records
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: orphan-probe-${{ matrix.variant }}-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/probe-evidence
+          if-no-files-found: warn
