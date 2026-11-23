@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Model-to-implementation conformance for the maintenance agent (shadow, non-blocking).
 #   usage: test/lifecycle-conformance/run.sh [report dir]
-# Exit 0 only if the model check completed and all three conformance suites RAN and passed.
-# Exit 1 = a conformance vector mismatched or an owner-approved property failed.
-# Exit 2 = incomplete (budget hit, vacuous property, a suite skipped or missing): never
-# reported as a pass, and never downgraded by anything below.
+# Exit 0 only if the model check completed, all three conformance suites RAN and passed, and
+# both orphan-survival suites RAN and passed.
+# Exit 1 = a conformance vector mismatched, an orphan-survival finding no longer matches its
+# pinned expectation, or an owner-approved property failed.
+# Exit 2 = incomplete (budget hit, vacuous property, a suite skipped or missing, an orphan
+# vector that did not exercise orphan survival): never reported as a pass, and never
+# downgraded by anything below.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -38,6 +41,24 @@ elif [ "$passed" -ne 3 ] || grep -q '^--- SKIP' "$REPORT/conformance.log"; then
   echo "INCOMPLETE: expected 3 conformance suites to run and pass, saw $passed -- refusing to report a pass"; status=2
 else
   echo "conformance: 3/3 suites ran and passed"
+fi
+
+echo "== orphan survival: real agent binary, the in-flight docker command outlives the agent =="
+# Findings are pinned as `open` in orphanExpectations; a finding is not a failure, a change
+# in one is. INVALID = the vector did not exercise the hazard (A1/A2/A5): incomplete, not a pass.
+timeout 300 go test -tags "$TAG" . -run '^TestOrphanSurvival_' -count=1 -timeout 240s -v \
+  > "$REPORT/orphan-survival.log" 2>&1
+orc=$?
+grep -E '^(--- (PASS|FAIL|SKIP): TestOrphanSurvival|ok|FAIL|PASS)|CLASSIFY|MISMATCH|INVALID|A3:' "$REPORT/orphan-survival.log" | head -60 || true
+opassed=$(grep -cE '^--- PASS: TestOrphanSurvival_(CrashVectors|ReapedControl) ' "$REPORT/orphan-survival.log" || true)
+if [ "$orc" -ne 0 ] && { grep -q 'INVALID' "$REPORT/orphan-survival.log" || ! grep -q -- '--- FAIL' "$REPORT/orphan-survival.log"; }; then
+  echo "INCOMPLETE: orphan-survival vectors did not run or did not exercise orphan survival (go test exit $orc); see $REPORT/orphan-survival.log"; status=2
+elif [ "$orc" -ne 0 ]; then
+  echo "ORPHAN SURVIVAL MISMATCH (go test exit $orc); see $REPORT/orphan-survival.log"; [ "$status" -lt 1 ] && status=1
+elif [ "$opassed" -ne 2 ] || grep -q -- '--- SKIP' "$REPORT/orphan-survival.log"; then
+  echo "INCOMPLETE: expected 2 orphan-survival suites to run and pass with no skipped vector, saw $opassed passing -- refusing to report a pass"; status=2
+else
+  echo "orphan survival: 2/2 suites ran and passed (findings pinned as open; see the CLASSIFY lines)"
 fi
 echo "model check exit=$mc  overall exit=$status  reports: $REPORT"
 exit "$status"

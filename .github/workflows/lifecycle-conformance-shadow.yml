@@ -33,7 +33,8 @@ jobs:
   conformance:
     name: "Shadow · lifecycle conformance (non-blocking)"
     runs-on: ubuntu-latest
-    # Measured: under one minute including compile. The budget is deliberately
+    # Measured: under one minute including compile (the orphan-survival vectors
+    # add about 15 s warm, measured locally). The budget is deliberately
     # tight so a state-space blow-up fails loudly instead of running long.
     timeout-minutes: 10
     steps:
@@ -45,11 +46,13 @@ jobs:
         with:
           cache-dependency-path: cmd/culvert-maint/go.sum
 
-      # Exit 0 = model check complete AND all three conformance suites ran and
-      # passed. Exit 1 = a conformance vector or an owner-approved property
-      # failed. Exit 2 = incomplete exploration, a vacuous property or a skipped
-      # suite — never reported as a pass. A failing PROPOSED property is only
-      # reported (see the summary step).
+      # Exit 0 = model check complete AND all three conformance suites and both
+      # orphan-survival suites ran and passed. Exit 1 = a conformance vector, a
+      # pinned orphan-survival finding or an owner-approved property failed.
+      # Exit 2 = incomplete exploration, a vacuous property, a skipped suite or
+      # an orphan vector that did not exercise orphan survival — never reported
+      # as a pass. A failing PROPOSED property is only reported (see the
+      # summary step).
       - name: Model check + conformance
         run: test/lifecycle-conformance/run.sh "$RUNNER_TEMP/lifecycle-report"
 

@@ -28,7 +28,9 @@ tag `lifecycle_conformance`.
    HTTP client are faked.
 6. `cmd/lifecyclecheck` — the property gate and the Markdown step summary.
 7. `cmd/lifecyclemutate` — scheduled mutation campaign (see below).
-8. `test/lifecycle-conformance/run.sh` — runs 6 and 5 and combines the result.
+8. `cmd/culvert-maint/orphan_survival_crash_test.go` — orphan-survival crash
+   vectors on the real agent binary (see below).
+9. `test/lifecycle-conformance/run.sh` — runs 6, 5 and 8 and combines the result.
 
 ## What a pass means — and does not mean
 
@@ -37,6 +39,7 @@ tag `lifecycle_conformance`.
 | The agent's own Go logic behaves as the model says on every modelled path | Yes — executed against the real code |
 | Docker behaves as the fake exec layer assumes | **No** — an assumption; validate against real Docker (`test/e2e/maint-agent`) |
 | Startup crash recovery works end to end | **No** — the model's agent-restart step is not executed |
+| The agent's reports stay true when the in-flight docker command outlives the agent | **Measured on the process-level Docker model only**; findings pinned as `open` (below) |
 | Standalone/data rollback, migration, timeouts, concurrency are correct | **No** — not modelled |
 | The properties are Culvert's contract | **No** — every property is `proposed` or `open`; none is owner-approved |
 
@@ -59,6 +62,30 @@ touches product code. Do not present either as "the lifecycle is verified".
   without recreating and the prior image has no allow-listed registry
   reference (4), or the stack was down before the upgrade (4).
 
+## Orphan-survival crash vectors
+
+The real-binary crash tests (`startup_crash_recovery_test.go`) kill the agent
+**and** the docker command it was waiting on. The kernel re-parents that
+command instead, and the runner gives each command its own process group, so
+nothing aimed at the agent reaches it. `orphan_survival_crash_test.go` kills
+only the agent at each of the 7 kill points with a docker command in flight,
+proves from `/proc` that the command is alive and re-parented, restarts the
+agent, records its reports, releases the command, and reads the reports again
+(and after one more restart). A second flow admits the operator's next
+operation while the command is still alive.
+
+- Negative controls in the code: a mutating in-flight command (`tag`,
+  `compose up`) must change the model after release and a read-only one must
+  not, otherwise the run is `INVALID` (exit 2); `TestOrphanSurvival_ReapedControl`
+  repeats the vectors with the command reaped and requires no divergence.
+- Findings are pinned in `orphanExpectations`, every entry `open`. A finding
+  is not a failure; a change in one (either direction) is exit 1.
+- Nothing here was run against real Docker. Whether the command really
+  survives depends on the supervisor (the shipped unit sets no `KillMode`, so
+  systemd's default `control-group` is expected, not verified, to kill it before
+  `Restart=on-failure` starts the agent again), `sudo`, a container's PID 1, and
+  whether `dockerd` completes a call whose client died.
+
 ## Running
 
 ```bash
@@ -67,9 +94,9 @@ test/lifecycle-conformance/run.sh /tmp/lifecycle-report
 
 | Exit | Meaning |
 |---|---|
-| 0 | Model check complete; all three conformance suites ran and passed |
-| 1 | A conformance vector mismatched the real code, or an owner-**approved** property failed |
-| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, or a skipped or missing suite. Never reported as a pass |
+| 0 | Model check complete; all three conformance suites and both orphan-survival suites ran and passed |
+| 1 | A conformance vector mismatched the real code, an orphan-survival finding no longer matches its pinned expectation, or an owner-**approved** property failed |
+| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, a skipped or missing suite, or an orphan vector that did not exercise orphan survival. Never reported as a pass |
 
 Exit 2 takes precedence over exit 1 and nothing downgrades it: a run with a
 failing unapproved property **and** a vacuous property is incomplete.
@@ -89,6 +116,8 @@ go build -tags lifecycle_conformance -o /tmp/lifecyclecheck ./internal/lifecycle
 /tmp/lifecyclecheck -include-proposed -fail-only-approved -report /tmp/lifecycle-report
 # the three conformance suites
 go test -tags lifecycle_conformance -count=1 -run TestModelConformance ./internal/server/
+# the orphan-survival vectors and their reaped control (Linux; builds the agent)
+go test -tags lifecycle_conformance -count=1 -run '^TestOrphanSurvival_' -v .
 ```
 
 `lifecyclecheck` flags: `-include-proposed` (evaluate `proposed` properties as
