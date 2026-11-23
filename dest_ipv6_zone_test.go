@@ -191,6 +191,12 @@ func TestZonedIPv6Dest_SOCKS5DomainFormRefused(t *testing.T) {
 
 	socks5ConnectRaw(t, ln.Addr().String(), "::1%lo", 9)
 	socks5ConnectRaw(t, ln.Addr().String(), "fe80::1%eth0", 443)
+	// The handler replies to the client BEFORE it writes its log line, so the
+	// client returning does not mean the line exists yet. Wait for it, bounded.
+	deadline := time.Now().Add(3 * time.Second)
+	for strings.Count(sink.String(), "source=ipv6-zone") < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	out := sink.String()
 	if n := strings.Count(out, "source=ipv6-zone"); n != 2 {
 		t.Errorf("zoned SOCKS5 DOMAIN destinations refused with source=ipv6-zone %d time(s), want 2; log:\n%s", n, out)
