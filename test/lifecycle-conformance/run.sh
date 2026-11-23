@@ -36,9 +36,13 @@ CULVERT_CONFORMANCE_REPORT="$REPORT" \
   timeout 300 go test -tags "$TAG" ./internal/server/ -run 'TestModelConformance' -count=1 -timeout 240s -v \
   > "$REPORT/conformance.log" 2>&1
 rc=$?
-grep -E '^(--- (PASS|FAIL|SKIP): TestModelConformance|ok|FAIL|PASS)|MISMATCH|PROPERTY|VACUOUS|DRIFT|INCOMPLETE|never reached' "$REPORT/conformance.log" | head -60 || true
+grep -E '^(--- (PASS|FAIL|SKIP): TestModelConformance|ok|FAIL|PASS)|MISMATCH|PROPERTY|VACUOUS|DRIFT|INCOMPLETE|never reached' "$REPORT/conformance.log" | head -80 || true
 passed=$(grep -c '^--- PASS: TestModelConformance' "$REPORT/conformance.log" || true)
-if [ "$rc" -ne 0 ]; then
+if [ "$rc" -ne 0 ] && grep -q 'INCOMPLETE:' "$REPORT/conformance.log"; then
+  # Unreadable or incomplete evidence (observed.json, a socket that never came up) is exit 2,
+  # never a plain failure that a later fix could mistake for "only drift".
+  echo "INCOMPLETE: conformance evidence unusable; see $REPORT/conformance.log"; status=2
+elif [ "$rc" -ne 0 ]; then
   echo "CONFORMANCE FAILED (go test exit $rc); see $REPORT/conformance.log"; [ "$status" -lt 1 ] && status=1
 # A skipped SUBTEST is indented ("    --- SKIP: ..."); match it as well as a skipped suite.
 elif [ "$passed" -ne 3 ] || grep -qE '^[[:space:]]*--- SKIP' "$REPORT/conformance.log"; then

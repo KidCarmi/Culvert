@@ -137,12 +137,24 @@ func faultsLine(script []ScriptStep) string {
 	return strings.Join(parts, " > ")
 }
 
-// ApplyLine renders one apply vector as a single reviewable line.
+func planLine(plan []PlanEntry) string {
+	parts := make([]string, 0, len(plan))
+	for _, p := range plan {
+		parts = append(parts, fmt.Sprintf("%s#%d=%s", p.Cmd, p.N, p.Mode))
+	}
+	return "plan=" + strings.Join(parts, ",")
+}
+
+// ApplyLine renders one apply vector as a single reviewable line. It must carry EVERY field
+// of the expectation the conformance suite compares with the real code: a field left out is
+// a field a code+model co-change can alter without drift (independent review: an omitted
+// upgrade_succeeded let "rolled back" be reported as "succeeded" with exit 0).
+// TestApplyLine_CoversEveryExpectationField enforces it.
 func ApplyLine(v *ApplyVector) string {
 	e := &v.Expect
-	return fmt.Sprintf("%s | %s | op=%s reason=%s running=%s tag=%s rb_att=%t rb_ok=%t rb_skip=%s tag_ahead=%t | %s",
-		paramsLine(v.Params), faultsLine(v.Script), e.Op, e.Reason, e.Running, e.Tag, e.RollbackAttempted,
-		e.RollbackSucceeded, e.RollbackSkippedReason, e.TagAhead, strings.Join(e.Cmds, ","))
+	return fmt.Sprintf("%s | %s | op=%s reason=%s upgrade_ok=%t running=%s tag=%s rb_att=%t rb_ok=%t rb_skip=%s tag_ahead=%t journal_empty=%t | %s | %s",
+		paramsLine(v.Params), faultsLine(v.Script), e.Op, e.Reason, e.UpgradeSucceeded, e.Running, e.Tag, e.RollbackAttempted,
+		e.RollbackSucceeded, e.RollbackSkippedReason, e.TagAhead, e.JournalEmpty, strings.Join(e.Cmds, ","), planLine(v.Plan))
 }
 
 // CrashLine renders one crash vector as a single reviewable line.
@@ -155,9 +167,9 @@ func CrashLine(v *CrashVector) string {
 	if v.Block.AfterUp {
 		block += "+up"
 	}
-	return fmt.Sprintf("%s | %s | block=%s | phase=%s tag=%s running=%s prior_ref=%t prior_id=%s target_ref=%t target_id=%s | %s/%s | %s",
-		paramsLine(v.Params), faultsLine(v.Script), block, e.Phase, e.Tag, e.Running, r.PriorRef, r.PriorID,
-		r.TargetRef, r.TargetID, e.ReconcileAction, e.ReconcileReason, strings.Join(e.CmdsBeforeBlock, ","))
+	return fmt.Sprintf("%s | %s | block=%s | phase=%s tag=%s running=%s rec_phase=%s prior_ref=%t prior_id=%s target_ref=%t target_id=%s | %s/%s | %s | %s",
+		paramsLine(v.Params), faultsLine(v.Script), block, e.Phase, e.Tag, e.Running, r.Phase, r.PriorRef, r.PriorID,
+		r.TargetRef, r.TargetID, e.ReconcileAction, e.ReconcileReason, strings.Join(e.CmdsBeforeBlock, ","), planLine(v.Plan))
 }
 
 // ParseBaseline decodes a baseline file. An empty or unparsable baseline is an error,

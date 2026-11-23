@@ -16,13 +16,33 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 MODEL="$ROOT/cmd/culvert-maint/internal/lifecyclemodel"
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"
 cd "$ROOT/cmd/culvert-maint"
 
-# 1. What changed relative to the reviewed baseline (the binary embeds the OLD files).
+# 1. What changed relative to the reviewed baseline (the binary embeds the OLD files). The
+#    real-code drift lines (DRIFT-LINE) are only in the conformance log, not run.sh's output.
 before_rc=0
 "$HERE/run.sh" "$TMP/before" > "$TMP/before.log" 2>&1 || before_rc=$?
-grep -E '^DRIFT   |DRIFT \(real code\)|newly differing|no longer differing|MISMATCH' "$TMP/before.log" > "$TMP/drift.txt" || true
+{ grep -E '^DRIFT   |MISMATCH' "$TMP/before.log" || true
+  grep -E 'DRIFT \(real code\)|DRIFT-LINE' "$TMP/before/conformance.log" 2>/dev/null | sed -E 's/^[[:space:]]*(model_conformance_test.go:[0-9]+: )?//' || true
+} > "$TMP/drift.txt"
+
+# An aborted regeneration must not leave half-written baselines behind: a re-run would
+# then compare against them and report "nothing to review" while the drift is lost. Keep
+# the reviewed files and restore them, and print the drift captured so far, unless the
+# whole regeneration succeeded.
+cp "$MODEL/baseline.json" "$TMP/baseline.json.reviewed"; cp "$MODEL/observed.json" "$TMP/observed.json.reviewed"
+done_ok=0
+on_exit() {
+  if [ "$done_ok" -ne 1 ]; then
+    cp "$TMP/baseline.json.reviewed" "$MODEL/baseline.json"; cp "$TMP/observed.json.reviewed" "$MODEL/observed.json"
+    echo "REGENERATION ABORTED: baseline.json and observed.json restored to the reviewed versions." >&2
+    echo "Drift captured against the reviewed baseline before the abort:" >&2
+    sed 's/^/  /' "$TMP/drift.txt" >&2
+  fi
+  rm -rf "$TMP"
+}
+trap on_exit EXIT
 
 # 2. Record the new baselines.
 go build -tags lifecycle_conformance -o "$TMP/lifecyclecheck" ./internal/lifecyclemodel/cmd/lifecyclecheck
@@ -35,6 +55,8 @@ CULVERT_CONFORMANCE_WRITE_OBSERVED="$MODEL/observed.json" \
 #    unsets CULVERT_CONFORMANCE_WRITE_OBSERVED itself.)
 "$HERE/run.sh" "$TMP/after"
 git -C "$ROOT" --no-pager diff --stat -- "$MODEL/baseline.json" "$MODEL/observed.json"
+
+done_ok=1
 
 # 4. The review block.
 echo

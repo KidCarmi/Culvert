@@ -32,7 +32,9 @@ tag `lifecycle_conformance`.
 9. `baseline.json`, `observed.json` (embedded) — the **reviewed baseline**: every
    property verdict, exercised count and shortest counterexample, the state-space
    size, one readable line per apply and crash vector, a fingerprint of the
-   reconcile table, and the real-code observations the model does not predict.
+   reconcile table, and the real-code observations the model does not predict:
+   the result payload's image digests (`upgrade_digest`, `rollback_digest`,
+   `final_running_digest`) for every apply vector.
    Regenerated only by `test/lifecycle-conformance/update-baseline.sh`.
 
 ## Why the reviewed baseline exists
@@ -56,6 +58,14 @@ already pin `target_id`. The baseline exists for the
 changes where conformance is the only detector (the 17 conformance-only mutants
 below), and so that a reviewer sees a behaviour change as a diff instead of
 trusting that a co-edited model is still right.
+
+A second independent review found that a co-change to `upgrade_succeeded` still
+passed: the field was compared with the code but not rendered in the baseline line.
+Every expectation field is now rendered, and
+`TestVectorLines_CoverEveryExpectationField` fails if a field is added without
+being rendered. An aborted regeneration restores the reviewed files and prints
+the drift it captured, instead of leaving half-written baselines that a re-run
+would compare as "nothing to review".
 
 Drift is not a correctness verdict and approves nothing. It means "the modelled
 or observed behaviour differs from what was last reviewed".

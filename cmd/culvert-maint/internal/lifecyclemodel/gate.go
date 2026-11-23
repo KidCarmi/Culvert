@@ -261,7 +261,8 @@ func WriteSummary(dir string, w io.Writer) {
 		found++
 		outf(w, "- `%s`: %s\n", name, scalarPairs(rep))
 		if d, ok := rep["observed_drift"].([]any); ok && len(d) > 0 {
-			outf(w, "  - **DRIFT (real code)** from the reviewed `observed.json`: %d line(s); see the job log\n", len(d))
+			outf(w, "  - **DRIFT (real code)** from the reviewed `observed.json`: %d line(s); listed in the job log "+
+				"(DRIFT-LINE) and in `conformance_apply.json` (`observed_drift`) in the uploaded artifact\n", len(d))
 		}
 	}
 	if found != 3 {

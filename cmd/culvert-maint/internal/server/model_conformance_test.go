@@ -334,11 +334,18 @@ func startConfRig(t *testing.T, p confParams, plan []planEntry, block *planEntry
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx) }()
-	for i := 0; i < 100; i++ {
+	// Wait for the socket: under a high GOMAXPROCS the server can take well over a second to
+	// bind, and a submit before it is a spurious failure (independent review).
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		if _, e := os.Stat(r.sock); e == nil {
 			break
 		}
-		time.Sleep(10 * time.Millisecond)
+		if time.Now().After(deadline) {
+			cancel()
+			_ = srv.Close()
+			_ = al.Close()
+			t.Fatalf("INCOMPLETE: agent socket %s never appeared", r.sock)
+		}
 	}
 	r.stop = func() {
 		cancel()
@@ -423,7 +430,7 @@ func TestModelConformance_ApplyFlow(t *testing.T) {
 	}
 	_ = os.Setenv(runner.EnvCulvertBackupPassphrase, "test-pass")
 	var mu sync.Mutex
-	misreported, tagAhead := []string{}, 0
+	misreported, results, tagAhead := []string{}, []string{}, 0
 	t.Run("vectors", func(t *testing.T) {
 		for i := range vs {
 			v := vs[i]
@@ -450,10 +457,17 @@ func TestModelConformance_ApplyFlow(t *testing.T) {
 					t.Errorf("journal not empty at terminal (faults: %s): %d records, err=%v", scriptString(v.Script), len(recs), lerr)
 				}
 				rep := role(fmt.Sprint(res["final_running_digest"]))
+				params := fmt.Sprintf("prior=%s same=%v backup=%v rb=%v th=%v ph=%v",
+					v.Params.Prior, v.Params.Same, v.Params.Backup, v.Params.RB, v.Params.TH, v.Params.PH)
 				mu.Lock()
-				if rep != running && !v.Params.Same {
-					misreported = append(misreported, fmt.Sprintf("%s | prior=%s backup=%v rb=%v th=%v ph=%v | reported=%s actual=%s",
-						scriptString(v.Script), v.Params.Prior, v.Params.Backup, v.Params.RB, v.Params.TH, v.Params.PH, rep, running))
+				// Every vector, the already-current ones included: an empty or wrong digest there
+				// is as much a change as anywhere else.
+				results = append(results, fmt.Sprintf("%s | %s | upgrade_digest=%s rollback_digest=%s final_running_digest=%s",
+					scriptString(v.Script), params, role(fmt.Sprint(res["upgrade_digest"])),
+					role(fmt.Sprint(res["rollback_digest"])), rep))
+				if rep != running {
+					misreported = append(misreported, fmt.Sprintf("%s | %s | reported=%s actual=%s",
+						scriptString(v.Script), params, rep, running))
 				}
 				if tag == "T" && running != "T" && !v.Params.Same {
 					tagAhead++
@@ -462,7 +476,10 @@ func TestModelConformance_ApplyFlow(t *testing.T) {
 			})
 		}
 	})
-	drift := checkObserved(t, uniqueSorted(misreported))
+	if got, want := len(uniqueSorted(results)), len(vs); got != want {
+		t.Errorf("INCOMPLETE: %d distinct result lines for %d vectors: the observation key is not unique", got, want)
+	}
+	drift := checkObserved(t, uniqueSorted(misreported), uniqueSorted(results))
 	writeReport(t, "apply", map[string]interface{}{"vectors": len(vs), "terminal_states_with_tag_ahead_of_container": tagAhead,
 		"final_running_digest_differs_from_actual": misreported, "observed_drift": drift})
 }
@@ -471,7 +488,7 @@ func TestModelConformance_ApplyFlow(t *testing.T) {
 // model does not predict final_running_digest, so without this a change to that API field
 // passes every vector. With CULVERT_CONFORMANCE_WRITE_OBSERVED=<path> it records instead
 // (run.sh unsets it). It returns the drift lines ("+" newly differing, "-" no longer).
-func checkObserved(t *testing.T, got []string) []string {
+func checkObserved(t *testing.T, got, gotResults []string) []string {
 	t.Helper()
 	drift := []string{}
 	if t.Failed() {
@@ -479,7 +496,7 @@ func checkObserved(t *testing.T, got []string) []string {
 	}
 	if path := os.Getenv("CULVERT_CONFORMANCE_WRITE_OBSERVED"); path != "" {
 		b, err := lifecyclemodel.MarshalReviewable(lifecyclemodel.Observed{Note: lifecyclemodel.ObservedNote,
-			FinalRunningDigestDiffers: got})
+			FinalRunningDigestDiffers: got, ResultDigests: gotResults})
 		if err == nil {
 			err = os.WriteFile(path, b, 0o600) //nolint:gosec // G703: path from the developer's own update script
 		}
@@ -492,18 +509,29 @@ func checkObserved(t *testing.T, got []string) []string {
 	if err != nil {
 		t.Fatalf("INCOMPLETE: %v", err)
 	}
-	if !reflect.DeepEqual(got, want.FinalRunningDigestDiffers) {
-		added, removed := diffSorted(want.FinalRunningDigestDiffers, got)
-		for _, x := range added {
-			drift = append(drift, "+ "+x)
-		}
-		for _, x := range removed {
-			drift = append(drift, "- "+x)
-		}
-		t.Errorf("DRIFT (real code): final_running_digest now differs from the running image on %d vectors (reviewed: %d)\n"+
-			" newly differing: %v\n no longer differing: %v\n intended? run test/lifecycle-conformance/update-baseline.sh and review observed.json",
-			len(got), len(want.FinalRunningDigestDiffers), added, removed)
+	drift = append(drift, observedDrift(t, "final_running_digest differs from the running image", want.FinalRunningDigestDiffers, got)...)
+	drift = append(drift, observedDrift(t, "result digests", want.ResultDigests, gotResults)...)
+	return drift
+}
+
+// observedDrift reports one list's difference from the reviewed observed.json. Every drift
+// line goes into the t.Errorf message on its own line, prefixed "DRIFT-LINE", so run.sh and
+// update-baseline.sh can show the reviewer WHICH vectors changed, not only how many.
+func observedDrift(t *testing.T, what string, want, got []string) []string {
+	t.Helper()
+	if reflect.DeepEqual(got, want) {
+		return nil
 	}
+	var drift []string
+	added, removed := diffSorted(want, got)
+	for _, x := range added {
+		drift = append(drift, "+ "+x)
+	}
+	for _, x := range removed {
+		drift = append(drift, "- "+x)
+	}
+	t.Errorf("DRIFT (real code): %s: %d lines now, %d reviewed; intended? run test/lifecycle-conformance/update-baseline.sh "+
+		"and review observed.json\n DRIFT-LINE %s", what, len(got), len(want), strings.Join(drift, "\n DRIFT-LINE "))
 	return drift
 }
 

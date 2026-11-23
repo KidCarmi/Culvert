@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -224,5 +225,51 @@ func TestRunGate_BaselineNeedsProposed(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "baseline NOT CHECKED") || strings.Contains(out.String(), "DRIFT") {
 		t.Errorf("want NOT CHECKED and no drift lines:\n%s", out.String())
+	}
+}
+
+// Regression (second independent review, blocker): ApplyLine omitted upgrade_succeeded, so a
+// code+model co-change reporting a rolled-back upgrade as succeeded kept "no drift". Every
+// field of the expectations the conformance suite compares with real code must change the
+// rendered line when it changes; a field added later fails here until it is rendered.
+func TestVectorLines_CoverEveryExpectationField(t *testing.T) {
+	apply, crash := Vectors()
+	check := func(name string, v any, render func() string) {
+		t.Helper()
+		base := render()
+		rv := reflect.ValueOf(v).Elem()
+		for i := 0; i < rv.NumField(); i++ {
+			f := rv.Field(i)
+			orig := reflect.New(f.Type()).Elem()
+			orig.Set(f)
+			switch f.Kind() {
+			case reflect.String:
+				f.SetString(f.String() + "x")
+			case reflect.Bool:
+				f.SetBool(!f.Bool())
+			case reflect.Int:
+				f.SetInt(f.Int() + 1)
+			case reflect.Slice:
+				f.Set(reflect.Append(f, reflect.Zero(f.Type().Elem())))
+			case reflect.Struct:
+				continue // nested records are covered field by field below
+			default:
+				t.Fatalf("%s.%s: unhandled kind %s", name, rv.Type().Field(i).Name, f.Kind())
+			}
+			if render() == base {
+				t.Errorf("%s.%s is not rendered in its baseline line: a co-change to it would not drift",
+					name, rv.Type().Field(i).Name)
+			}
+			f.Set(orig)
+		}
+	}
+	a := apply[0]
+	check("ApplyExpectation", &a.Expect, func() string { return ApplyLine(&a) })
+	c := crash[0]
+	check("CrashExpectation", &c.Expect, func() string { return CrashLine(&c) })
+	check("Record", &c.Expect.Record, func() string { return CrashLine(&c) })
+	check("BlockPoint", &c.Block, func() string { return CrashLine(&c) })
+	if base := ApplyLine(&a); func() string { a.Plan = append(a.Plan, PlanEntry{Cmd: "x"}); return ApplyLine(&a) }() == base {
+		t.Error("the fault plan is not rendered in the apply line")
 	}
 }

@@ -10,9 +10,11 @@ import (
 )
 
 // Observed pins what the conformance suite sees on the REAL code but the model does not
-// predict, so a change to it cannot pass silently. Today that is one field: the
-// `final_running_digest` the agent reports, which the model's apply expectation does not
-// cover. The list is behaviour as last reviewed, NOT a statement that it is correct: some
+// predict, so a change to it cannot pass silently: the result payload's image digests
+// (upgrade_digest, rollback_digest, final_running_digest), which the model's apply
+// expectation does not cover. ResultDigests holds them for EVERY vector;
+// FinalRunningDigestDiffers is the subset whose reported running image is not the one
+// running -- the open question below. The list is behaviour as last reviewed, NOT a statement that it is correct: some
 // entries need the injected `ok_stale` outcome that real Docker did not exhibit, and the
 // rest are an open question for the owner (see test/lifecycle-conformance/README.md).
 type Observed struct {
@@ -20,6 +22,8 @@ type Observed struct {
 	// FinalRunningDigestDiffers lists the apply vectors whose reported final running image
 	// differs from the image the fake Docker world actually runs, unique and sorted.
 	FinalRunningDigestDiffers []string `json:"final_running_digest_differs_from_actual"`
+	// ResultDigests: one line per apply vector, the three digests mapped to P/T/none.
+	ResultDigests []string `json:"result_digests"`
 }
 
 // ObservedNote heads observed.json.
@@ -36,8 +40,8 @@ func EmbeddedObserved() (Observed, error) {
 	if err := json.Unmarshal(observedJSON, &o); err != nil {
 		return o, fmt.Errorf("parse observed.json: %w", err)
 	}
-	if o.FinalRunningDigestDiffers == nil {
-		return o, errors.New("observed.json has no final_running_digest_differs_from_actual list")
+	if o.FinalRunningDigestDiffers == nil || len(o.ResultDigests) == 0 {
+		return o, errors.New("observed.json lacks the final_running_digest or result_digests list")
 	}
 	return o, nil
 }
