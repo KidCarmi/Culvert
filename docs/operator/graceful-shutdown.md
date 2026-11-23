@@ -24,6 +24,12 @@ Related: [`ha-lease-failover.md`](ha-lease-failover.md),
 Total envelope **45s**; worst case **51s** (one 3s watchdog grace per late
 phase). `docker-compose.yml` sets `stop_grace_period: 60s` to sit above that.
 
+`/ready` answers **503** (`"shutdown": fail`) from the moment the signal is
+accepted, although the proxy port keeps answering until the proxy-server hook
+closes the listener. A probe in that window gets a truthful "not ready" instead
+of a yes from a process that is about to exit. `/health` (liveness) is unchanged:
+200 until that listener closes.
+
 The flush reserve is carved out **up front**. A drain step that will not
 return cannot spend it — that is the whole reason the late phase is split.
 
