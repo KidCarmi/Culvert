@@ -208,8 +208,8 @@ var dedupEvicted atomic.Int64
 // ValidateURL checks that a webhook URL is well-formed (http/https with a
 // non-empty host). Unlike main's validateExternalURL, it does not perform DNS
 // resolution at config time — the SSRF check is deferred to delivery time via
-// the ssrf-guarded dialer so that operator-configured internal endpoints
-// remain usable.
+// the ssrf-guarded dialer. That dialer refuses every private address, so a URL
+// that passes here can still be undeliverable (docs/operator/alert-webhooks.md).
 func ValidateURL(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("URL is required")

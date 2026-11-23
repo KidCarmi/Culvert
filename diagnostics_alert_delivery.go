@@ -2,7 +2,7 @@ package main
 
 // diagnostics_alert_delivery.go — operator-contract row for failing alert delivery.
 //
-// The delivery history (Security → Alert Webhooks) records every attempt, but the
+// The delivery history (Settings → Alert Webhooks) records every attempt, but the
 // one-page diagnostics report — where an operator checks "will I be told when
 // something goes wrong" — said nothing when an enabled webhook's most recent
 // delivery failed (wrong URL, receiver down, rejected signature, blocked by the
@@ -48,7 +48,7 @@ func checkAlertDelivery() []OperatorContractCheck {
 		Status: diagWarn,
 		Message: fmt.Sprintf("%d enabled alert webhook(s) failed their most recent delivery — alerts are not reaching those receivers",
 			failing),
-		OperatorAction: "Security → Alert Webhooks → delivery history shows which webhook failed and why (HTTP status or connection error). " +
+		OperatorAction: "Settings → Alert Webhooks → delivery history shows which webhook failed and why (HTTP status or connection error). " +
 			"Fix the URL, receiver or signing secret, then use Test on the webhook; this warning clears after its next successful delivery or a restart.",
 	}}
 }
