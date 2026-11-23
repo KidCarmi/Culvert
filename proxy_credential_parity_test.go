@@ -1,6 +1,6 @@
 package main
 
-// socks5_parity_test.go — differential oracle: one credential is one
+// proxy_credential_parity_test.go — differential oracle: one credential is one
 // principal on both proxy listeners (SWG-901 stage 3, owner Decision 2).
 //
 // For each supported password-verifying backend, the same credential is

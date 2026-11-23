@@ -26,7 +26,7 @@ package main
 //     no-account no-provider node keeps its inert Stage-2 semantics;
 //   - the resolver itself refuses the admin pair on both channels in every
 //     configuration (the construction legacyCredentialFor relies on).
-// HTTP <-> SOCKS5 attribution parity is in socks5_parity_test.go.
+// HTTP <-> SOCKS5 attribution parity is in proxy_credential_parity_test.go.
 
 import (
 	"encoding/json"

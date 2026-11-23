@@ -119,7 +119,7 @@ and auth source.
 ## Tests the feature must carry
 
 - HTTP and SOCKS5 parity for the same local proxy user: identity, groups and
-  auth source equal (extend `socks5_parity_test.go`).
+  auth source equal (extend `proxy_credential_parity_test.go`).
 - Admin accounts still never authenticate proxy traffic with proxy users
   present (`TestProxyAuthNoAdmin_*` stay green, plus an admin/proxy-user
   username collision case).

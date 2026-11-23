@@ -260,7 +260,7 @@ contracts:
       - {file: "proxy_auth_no_admin_test.go", name: TestProxyCredential_AdminPairNeverResolves}
       - {file: "proxy_auth_no_admin_test.go", name: TestProxyAuthNoAdmin_AdminOnlyRefusesEveryCredential}
       - {file: "proxy_auth_no_admin_test.go", name: TestProxyAuthNoAdmin_MissingProviderFailsClosed}
-      - {file: "socks5_parity_test.go", name: TestProxyCredentialParity_HTTPAndSOCKS5}
+      - {file: "proxy_credential_parity_test.go", name: TestProxyCredentialParity_HTTPAndSOCKS5}
     validation: integration
     compatibility: "Breaking for deployments whose clients used the admin account for proxy authentication: they need an LDAP or OIDC provider (CHANGELOG, Changed (breaking)). Explicit Exempt access is unchanged."
 
