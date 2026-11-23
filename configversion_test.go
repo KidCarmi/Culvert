@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -344,5 +345,40 @@ func TestValidateConfigBackup_DefaultAction(t *testing.T) {
 		if hasErr != tc.wantErr {
 			t.Errorf("DefaultAction=%q: wantErr=%v got warns=%v", tc.action, tc.wantErr, warns)
 		}
+	}
+}
+
+// A rollback pre-flight must say WHICH rules it will drop and why, not only how
+// many: the count alone cannot tell an operator whether a restriction goes with
+// them. It stays one warning (consumers count warnings) and the list is bounded.
+func TestValidateConfigBackup_NamesSkippedRules(t *testing.T) {
+	b := &configBackup{PolicyRules: []PolicyRule{
+		{Name: "keep-me", Action: ActionAllow, Priority: 1},
+		{Name: "", Action: ActionAllow, Priority: 2},
+	}}
+	for i := 0; i < maxNamedInvalidRollbackRules+2; i++ {
+		b.PolicyRules = append(b.PolicyRules, PolicyRule{
+			Name: fmt.Sprintf("bad-redirect-%d", i), Action: ActionRedirect, Priority: 10 + i,
+		})
+	}
+	warns := validateConfigBackup(b)
+	if len(warns) != 1 {
+		t.Fatalf("want exactly one warning, got %d: %q", len(warns), warns)
+	}
+	w := warns[0]
+	if want := fmt.Sprintf("%d of %d policy rules are invalid (will be skipped): ", maxNamedInvalidRollbackRules+3, len(b.PolicyRules)); !strings.HasPrefix(w, want) {
+		t.Fatalf("summary changed: got %q, want prefix %q", w, want)
+	}
+	if !strings.Contains(w, `"" (priority 2): `) || !strings.Contains(w, `"bad-redirect-0" (priority 10): `) {
+		t.Fatalf("skipped rules are not named with their reason: %q", w)
+	}
+	if strings.Contains(w, "keep-me") {
+		t.Fatalf("a valid rule was reported as skipped: %q", w)
+	}
+	if got := strings.Count(w, " (priority "); got != maxNamedInvalidRollbackRules {
+		t.Fatalf("named %d rules, want the bound %d: %q", got, maxNamedInvalidRollbackRules, w)
+	}
+	if !strings.HasSuffix(w, "; and 3 more not listed") {
+		t.Fatalf("overflow not stated: %q", w)
 	}
 }

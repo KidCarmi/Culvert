@@ -728,6 +728,21 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The admin console now shows what a configuration rollback will change, and
+  what it did.** The Rollback button applied the stored version immediately
+  after a generic confirmation and then reported "Rolled back successfully",
+  discarding everything `POST /api/config/versions` answers: the pre-flight
+  warnings (stored rules that will be skipped) were never shown, and a rollback
+  that was applied but could not be written to disk (`rolled_back_not_durable`)
+  was reported as "Rollback failed" beside a raw JSON body, although the running
+  configuration had changed. The confirmation now carries the server's own
+  `dry_run` preview — which captured settings differ from the running
+  configuration, and the warnings — and the outcome stays on the Config
+  Versions panel: applied, applied with warnings, applied but not saved, or
+  refused with nothing changed. The skipped-rule warning now names the rules
+  and the reason (first 10) instead of only counting them; it is still one
+  warning. No rollback behaviour, API field or status code changed.
+
 - **The "retaining rule … with unrecognized action" warning is now said once per
   fact, and only where it is true.** It was written on every bulk replace of
   the rulebase, so an unchanged control-plane republish repeated it for every

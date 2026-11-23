@@ -134,8 +134,17 @@ func TestUIE2E_ConfigVersionRollbackCrossPlane(t *testing.T) {
 	if err := assert.Locator(page.Locator("#confirm-dialog-ok")).ToBeVisible(); err != nil {
 		t.Fatalf("rollback confirm modal should appear: %v", err)
 	}
+	// The confirmation states what the rollback changes against the RUNNING
+	// configuration (server dry-run), before anything is applied.
+	if err := assert.Locator(page.Locator("#confirm-dialog-impact")).ToContainText("policy_rules"); err != nil {
+		t.Fatalf("rollback confirm modal should preview the policy_rules change: %v", err)
+	}
 	if err := page.Locator("#confirm-dialog-ok").Click(); err != nil {
 		t.Fatalf("confirm rollback: %v", err)
+	}
+	// The outcome stays on the panel rather than only in a 3s toast.
+	if err := assert.Locator(page.Locator("#config-diff-result")).ToContainText("Rolled back to v" + strconv.Itoa(baselineVer)); err != nil {
+		t.Fatalf("rollback outcome should be shown on the Config Versions panel: %v", err)
 	}
 
 	// ── Cross-plane rollback: the same request is 403 again ─────────────────
