@@ -1687,7 +1687,7 @@ func (r *e2eRig) jcheck(label string) {
 		got = strings.Join(probs, "; ")
 	}
 	r.res.check("J "+label, len(probs) == 0, "journal parses, monotonic, matches Docker, retired only with an audit entry", got)
-	r.res.gapCheck("OWNER J "+label+": audit 1:1", len(auditGaps) == 0, "kept: no `:reconciled` entry; retired: exactly 1", strings.Join(auditGaps, "; "))
+	r.res.gapCheck("OWNER J "+label+": audit 1:1", len(auditGaps) == 0, "kept: at most 1 `:reconciled` entry; retired: exactly 1", strings.Join(auditGaps, "; "))
 }
 
 func (r *e2eRig) checkRecord(id string, m map[string]interface{}, snap dockerSnap) []string {
@@ -1746,7 +1746,8 @@ func (r *e2eRig) checkRecord(id string, m map[string]interface{}, snap dockerSna
 
 // checkAudit returns contract problems (a record retired with no audit entry, an
 // unparsable line, an interruption marked audited with no entry) and owner-strict gaps (a
-// kept record already audited as reconciled, a retirement or an interruption audited twice).
+// kept record audited as reconciled more than once, a retirement or an interruption audited
+// twice). A kept record with ONE entry is the crash window between the audit and the removal.
 func (r *e2eRig) checkAudit(present map[string]map[string]interface{}) (probs, gaps []string) {
 	reconciled, interrupted := map[string]int{}, map[string]int{}
 	for i, line := range strings.Split(readFile(filepath.Join(r.state, "audit.jsonl")), "\n") {
@@ -1777,8 +1778,12 @@ func (r *e2eRig) checkAudit(present map[string]map[string]interface{}) (probs, g
 			probs = append(probs, fmt.Sprintf("%s retired with no `:reconciled` audit entry", short(id)))
 		case h.retired && reconciled[id] > 1:
 			gaps = append(gaps, fmt.Sprintf("%s retired with %d `:reconciled` audit entries", short(id), reconciled[id]))
-		case !h.retired && reconciled[id] != 0:
-			gaps = append(gaps, fmt.Sprintf("%s kept but already audited as reconciled (%d)", short(id), reconciled[id]))
+		case !h.retired && reconciled[id] > 1:
+			// One entry on a KEPT record is the expected state of a kill between
+			// retire()'s fsynced audit write and the record removal (AGT-005
+			// orders audit before removal). Exactly-once is then judged when the
+			// next start retires it: the "retired with N entries" rule above.
+			gaps = append(gaps, fmt.Sprintf("%s kept but already audited as reconciled %d times", short(id), reconciled[id]))
 		}
 		if interrupted[id] > 1 {
 			gaps = append(gaps, fmt.Sprintf("%s interruption audited %d times", short(id), interrupted[id]))
