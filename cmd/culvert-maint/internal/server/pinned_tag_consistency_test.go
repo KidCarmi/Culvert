@@ -248,8 +248,13 @@ func TestApply_PinnedTag_UpFailsAfterRecreate_RollbackDisabled_TagNotMoved(t *te
 		t.Errorf("indeterminate container → the tag must not be moved again; got %d tag commands", n)
 	}
 	assertTagAndRunning(t, rig, digNew, digNew)
-	if got := resultMap(t, op)["final_running_digest"]; got != "sha256:"+digNew {
-		t.Errorf("final_running_digest = %v, want the upgrade digest (container was recreated on it)", got)
+	// The container carries the new image but is NOT running, so no capture can establish
+	// what runs. The result used to assert the upgrade digest here (an inference); evidence-
+	// based reporting says unverified instead of guessing (owner decision 2).
+	res := resultMap(t, op)
+	if res["final_running_state"] != finalRunningUnverified || res["final_running_digest"] != "" || res["final_running_image_id"] != "" {
+		t.Errorf("no running container could be captured: want unverified with empty digest and image id; got state=%v digest=%v image_id=%v",
+			res["final_running_state"], res["final_running_digest"], res["final_running_image_id"])
 	}
 }
 
