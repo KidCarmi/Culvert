@@ -316,7 +316,11 @@ TOML
 tar -C /etc --exclude='./systemd/system/*.wants' --exclude='./shadow*' --exclude='./gshadow*' --exclude='./ssh' \
   --exclude='./ssl/private' --exclude='./pki' --exclude='./letsencrypt' --exclude='./wireguard' --exclude='./NetworkManager' \
   --exclude='./netplan' --exclude='./docker' --exclude='*.key' --exclude='*.keytab' --exclude='privkey*.pem' \
-  --exclude='./sudoers.d/*' -c . | tar -C "$W/root/etc" -x || inc "could not copy /etc"
+  --exclude='./sudoers.d/*' --exclude='./fstab' --exclude='./crypttab' -c . | tar -C "$W/root/etc" -x || inc "could not copy /etc"
+# The host's fstab names disks that do not exist in the container: systemd waits for them,
+# local-fs.target fails and PID 1 drops to emergency mode ('maintenance'). The container
+# mounts nothing of its own.
+: > "$W/root/etc/fstab"
 awk -F: '{print $1":*:19000:0:99999:7:::"}' "$W/root/etc/passwd" > "$W/root/etc/shadow"
 awk -F: '{print $1":*::"}' "$W/root/etc/group" > "$W/root/etc/gshadow"
 chmod 640 "$W/root/etc/shadow" "$W/root/etc/gshadow"
@@ -364,6 +368,9 @@ install_agent() { # $1 = extra config line (may be empty)
       echo "systemd state: '${sysd_state:-no answer}'"
       docker exec "$SYSD" systemctl list-jobs --no-pager 2>&1 | head -40
       docker exec "$SYSD" systemctl --failed --no-pager 2>&1 | head -40
+      docker exec "$SYSD" systemctl list-units --all --no-pager --state=failed,activating 2>&1 | head -40
+      docker exec "$SYSD" systemctl status --no-pager -n 0 local-fs.target emergency.target rescue.target 2>&1 | head -40
+      docker exec "$SYSD" journalctl -b --no-pager -p warning 2>&1 | tail -60
       docker logs "$SYSD" 2>&1 | tail -60
       inc "systemd did not finish starting in the container" ;;
   esac
