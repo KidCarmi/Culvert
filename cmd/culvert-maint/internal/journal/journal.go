@@ -8,8 +8,8 @@
 // roadmap/MAINTENANCE-AGENT-RESILIENCE-HARDENING.md (Tier 1). This file is the
 // infrastructure slice: schema + a fail-closed atomic writer + read/list/remove.
 // The write points and the startup report are wired (main.go initJournal,
-// docs/adr/0061); ReconcileOnStartup is not built and nothing acts on a record
-// at boot.
+// docs/adr/0061). Nothing acts on a record at boot unless the operator opted in
+// with reconcile_on_startup = "converge" (server/startup_reconcile.go, AGT-900).
 //
 // The maint binary is its own Go module, so it cannot import the root
 // internal/fileutil; this package owns a stdlib-only atomic writer that fsyncs
@@ -97,6 +97,34 @@ type Record struct {
 	InterruptedAt    *time.Time `json:"interrupted_at,omitempty"`
 	InterruptedSeen  int        `json:"interrupted_seen,omitempty"`
 	InterruptAudited bool       `json:"interrupt_audited,omitempty"`
+
+	// RollbackArmed is set, best-effort, by an upgrades.apply's inline rollback
+	// immediately BEFORE its rollback_restart stage moves the fixed tag back to
+	// the prior image. It is the durable evidence that the agent had already
+	// decided the target failed its gate, so a startup reconcile must never
+	// adopt the target of such a record. If it cannot be written the rollback
+	// still runs and the record stays unarmed, which the reconcile never acts on.
+	// It is an optional key, not a new Phase:
+	// an agent that predates it ignores the key (encoding/json drops unknown
+	// fields), whereas an unknown phase makes every older agent refuse to serve.
+	RollbackArmed bool `json:"rollback_armed,omitempty"`
+
+	// Startup-reconcile bookkeeping (reconcile_on_startup = "converge" only;
+	// absent otherwise, so an "off" agent writes records byte-identical to
+	// before). Optional keys an older agent ignores.
+	//
+	// ReconcileAttempts counts the reconcile actions that changed Docker
+	// (realign, finish_rollback). It is written FAIL-CLOSED before the action
+	// (write-ahead): no durable count, no action. A deferred or report-only
+	// verdict does not count. It is content from an unauthenticated file: the
+	// reconciler treats a negative value as exhausted.
+	ReconcileAttempts int        `json:"reconcile_attempts,omitempty"`
+	LastReconcileAt   *time.Time `json:"last_reconcile_at,omitempty"`
+	// ReconcileDecision is "<action>/<reason>" of the last decision; and
+	// ReconcileOutcome the outcome of the last reconcile of a record that was
+	// kept. Diagnostics only: nothing reads them back to decide.
+	ReconcileDecision string `json:"reconcile_decision,omitempty"`
+	ReconcileOutcome  string `json:"reconcile_outcome,omitempty"`
 }
 
 const (

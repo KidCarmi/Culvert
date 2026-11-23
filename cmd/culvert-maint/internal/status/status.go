@@ -44,6 +44,9 @@ type Provider struct {
 	// journal is the crash-recovery journal. Optional: nil reports no
 	// interrupted operations (tests, and builds that do not journal).
 	journal *journal.Journal
+	// reconcile is the opt-in startup reconcile's tracker. nil (the default,
+	// reconcile_on_startup = "off") adds nothing to the status.
+	reconcile *server.ReconcileTracker
 }
 
 // WithJournal makes the provider report the operations a previous agent
@@ -51,6 +54,31 @@ type Provider struct {
 func (p *Provider) WithJournal(j *journal.Journal) *Provider {
 	p.journal = j
 	return p
+}
+
+// WithReconcile makes the provider report the startup reconcile
+// (Status.Reconcile, Status.RecoveryRequired and each interrupted operation's
+// reconcile_outcome). Only wired when reconcile_on_startup = "converge".
+// Returns p.
+func (p *Provider) WithReconcile(t *server.ReconcileTracker) *Provider {
+	p.reconcile = t
+	return p
+}
+
+// addReconcile fills the reconcile fields from the tracker.
+func (p *Provider) addReconcile(st *server.Status) {
+	if p.reconcile == nil {
+		return
+	}
+	snap := p.reconcile.Snapshot()
+	st.Reconcile = &snap
+	rr := p.reconcile.RecoveryRequired()
+	st.RecoveryRequired = &rr
+	for i := range st.InterruptedOperations {
+		if r, ok := p.reconcile.RecordFor(st.InterruptedOperations[i].OpID); ok {
+			st.InterruptedOperations[i].SetReconcile(r)
+		}
+	}
 }
 
 // New constructs a Provider.
@@ -71,6 +99,7 @@ func New(cfg *config.Config, mgr *ops.Manager, r *runner.Runner) (*Provider, err
 func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 	st := p.composeSnapshot(ctx)
 	p.addInterrupted(ctx, &st)
+	p.addReconcile(&st)
 	return st, nil
 }
 

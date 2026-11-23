@@ -87,6 +87,13 @@ type Status struct {
 	// while InterruptedOperations is non-empty: that is when the tag and the
 	// running container can have been left apart.
 	PinnedTag *PinnedTagStatus `json:"pinned_tag,omitempty"`
+
+	// RecoveryRequired and Reconcile are set only when reconcile_on_startup =
+	// "converge" (absent otherwise, so the "off" payload is unchanged).
+	// RecoveryRequired is true when the startup reconcile left a record that
+	// needs an operator; Reconcile is what the reconcile did, per record.
+	RecoveryRequired *bool            `json:"recovery_required,omitempty"`
+	Reconcile        *ReconcileStatus `json:"reconcile,omitempty"`
 }
 
 // PinnedTagStatus is the live state of the fixed proxy tag
@@ -204,6 +211,14 @@ type Server struct {
 	mu       sync.Mutex
 	listener net.Listener
 	httpSrv  *http.Server
+
+	// Opt-in startup reconcile (startup_reconcile.go). All nil unless
+	// PrepareStartupReconcile ran (reconcile_on_startup = "converge").
+	// startupWork is started by Serve once the listener is bound;
+	// reconcileLock is the instance flock, held until Close.
+	reconcileTracker *ReconcileTracker
+	reconcileLock    *journal.ReconcileLock
+	startupWork      func()
 }
 
 // New constructs a Server. Returns an error if any required option is
@@ -346,7 +361,14 @@ func (s *Server) Serve(ctx context.Context) error {
 	s.mu.Lock()
 	s.listener = ln
 	s.httpSrv = httpSrv
+	work := s.startupWork
+	s.startupWork = nil
 	s.mu.Unlock()
+	if work != nil {
+		// The socket is bound, so the API answers while the startup work runs;
+		// goOp makes it part of the shutdown drain like any op.
+		s.goOp(work)
+	}
 
 	// Shutdown on ctx done. The shutdown grace timer must be detached
 	// from ctx (which is already cancelled when this fires), so we
@@ -405,6 +427,10 @@ func (s *Server) Close() error {
 		s.listener = nil
 	}
 	_ = os.Remove(s.opts.Cfg.SocketPath)
+	if s.reconcileLock != nil {
+		_ = s.reconcileLock.Release()
+		s.reconcileLock = nil
+	}
 	return nil
 }
 

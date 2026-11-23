@@ -40,10 +40,14 @@ func TestIsStateChanging_ProductionAndFutureKinds(t *testing.T) {
 
 	// State-changing production kinds (D1.6b + D1.6c upgrade apply +
 	// image rollback).
-	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit, KindUpgradeApply, KindRollbackCreate} {
+	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit, KindUpgradeApply, KindRollbackCreate, KindReconcileStartup} {
 		if !IsStateChanging(k) {
 			t.Errorf("production kind %q must be state-changing", k)
 		}
+	}
+	// The startup reconcile acts on journal records; it never writes one.
+	if IsJournaled(KindReconcileStartup) {
+		t.Errorf("%q must not be journaled", KindReconcileStartup)
 	}
 
 	// Read-only kinds and unknowns are never state-changing.

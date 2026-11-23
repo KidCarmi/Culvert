@@ -167,6 +167,8 @@ func run(configPath string) error {
 	}
 	defer func() { _ = srv.Close() }()
 
+	armStartupReconcile(cfg, stp, srv)
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -196,7 +198,8 @@ func run(configPath string) error {
 // an unreachable daemon cannot delay or fail startup, and a record stays — and
 // is reported again by every later start and by GET /v1/status — until a later
 // image change succeeds (server/journal_retire.go). Acting on a record at boot
-// is the separate, sign-off-gated reconcile slice.
+// is the separate, opt-in reconcile (reconcile_on_startup = "converge",
+// server/startup_reconcile.go), which runs only after this report is complete.
 func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo string) (*journal.Journal, error) {
 	jnl, err := journal.New(stateDir)
 	if err != nil {
@@ -216,6 +219,21 @@ func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo 
 			"Docker was NOT changed. See GET /v1/status interrupted_operations.", n)
 	}
 	return jnl, nil
+}
+
+// armStartupReconcile wires the opt-in startup reconcile (contract AGT-900).
+// With the default "off" it does nothing and startup changes nothing in Docker
+// (AGT-004). With "converge", initJournal has already marked and audited every
+// interrupted op; the reconcile is a separate op that takes the instance lock
+// and the maintenance lock here and starts its work once Serve has bound the
+// socket.
+func armStartupReconcile(cfg *config.Config, stp *status.Provider, srv *server.Server) {
+	if cfg.ReconcileOnStartup != config.ReconcileConverge {
+		return
+	}
+	rt := server.NewReconcileTracker()
+	stp.WithReconcile(rt)
+	srv.PrepareStartupReconcile(rt)
 }
 
 // maxInterruptedSeen caps the per-record start counter. Reaching it means the
