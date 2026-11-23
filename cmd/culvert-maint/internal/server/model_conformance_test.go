@@ -452,8 +452,8 @@ func TestModelConformance_ApplyFlow(t *testing.T) {
 				rep := role(fmt.Sprint(res["final_running_digest"]))
 				mu.Lock()
 				if rep != running && !v.Params.Same {
-					misreported = append(misreported, fmt.Sprintf("%s | prior=%s rb=%v | reported=%s actual=%s",
-						scriptString(v.Script), v.Params.Prior, v.Params.RB, rep, running))
+					misreported = append(misreported, fmt.Sprintf("%s | prior=%s backup=%v rb=%v th=%v ph=%v | reported=%s actual=%s",
+						scriptString(v.Script), v.Params.Prior, v.Params.Backup, v.Params.RB, v.Params.TH, v.Params.PH, rep, running))
 				}
 				if tag == "T" && running != "T" && !v.Params.Same {
 					tagAhead++
@@ -464,6 +464,70 @@ func TestModelConformance_ApplyFlow(t *testing.T) {
 	})
 	writeReport(t, "apply", map[string]interface{}{"vectors": len(vs), "terminal_states_with_tag_ahead_of_container": tagAhead,
 		"final_running_digest_differs_from_actual": misreported})
+	checkObserved(t, uniqueSorted(misreported))
+}
+
+// checkObserved compares what the real code reported with the reviewed observed.json: the
+// model does not predict final_running_digest, so without this a change to that API field
+// passes every vector. With CULVERT_CONFORMANCE_WRITE_OBSERVED=<path> it records instead.
+func checkObserved(t *testing.T, got []string) {
+	t.Helper()
+	if t.Failed() {
+		return // a mismatch already fails the suite; do not record or compare a broken run
+	}
+	if path := os.Getenv("CULVERT_CONFORMANCE_WRITE_OBSERVED"); path != "" {
+		b, err := lifecyclemodel.MarshalReviewable(lifecyclemodel.Observed{Note: lifecyclemodel.ObservedNote,
+			FinalRunningDigestDiffers: got})
+		if err == nil {
+			err = os.WriteFile(path, b, 0o600) //nolint:gosec // G703: path from the developer's own update script
+		}
+		if err != nil {
+			t.Fatalf("observed.json not written: %v", err)
+		}
+		return
+	}
+	want, err := lifecyclemodel.EmbeddedObserved()
+	if err != nil {
+		t.Fatalf("INCOMPLETE: %v", err)
+	}
+	if !reflect.DeepEqual(got, want.FinalRunningDigestDiffers) {
+		added, removed := diffSorted(want.FinalRunningDigestDiffers, got)
+		t.Errorf("DRIFT (real code): final_running_digest now differs from the running image on %d vectors (reviewed: %d)\n"+
+			" newly differing: %v\n no longer differing: %v\n intended? run test/lifecycle-conformance/update-baseline.sh and review observed.json",
+			len(got), len(want.FinalRunningDigestDiffers), added, removed)
+	}
+}
+
+func uniqueSorted(l []string) []string {
+	set := map[string]bool{}
+	for _, x := range l {
+		set[x] = true
+	}
+	out := make([]string, 0, len(set))
+	for x := range set {
+		out = append(out, x)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// diffSorted returns the members of got missing from want, and of want missing from got.
+func diffSorted(want, got []string) (added, removed []string) {
+	in := func(l []string, x string) bool {
+		i := sort.SearchStrings(l, x)
+		return i < len(l) && l[i] == x
+	}
+	for _, x := range got {
+		if !in(want, x) {
+			added = append(added, x)
+		}
+	}
+	for _, x := range want {
+		if !in(got, x) {
+			removed = append(removed, x)
+		}
+	}
+	return added, removed
 }
 
 // ───────────────────────── crash points: journal record + reconcile verdict

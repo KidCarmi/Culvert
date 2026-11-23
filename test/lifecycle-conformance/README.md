@@ -29,6 +29,33 @@ tag `lifecycle_conformance`.
 6. `cmd/lifecyclecheck` — the property gate and the Markdown step summary.
 7. `cmd/lifecyclemutate` — scheduled mutation campaign (see below).
 8. `test/lifecycle-conformance/run.sh` — runs 6 and 5 and combines the result.
+9. `baseline.json`, `observed.json` (embedded) — the **reviewed baseline**: every
+   property verdict, exercised count and shortest counterexample, the state-space
+   size, one readable line per apply and crash vector, a fingerprint of the
+   reconcile table, and the real-code observations the model does not predict.
+   Regenerated only by `test/lifecycle-conformance/update-baseline.sh`.
+
+## Why the reviewed baseline exists
+
+Every property is `proposed` or `open`, so the gate runs with
+`-fail-only-approved`, and a property flipping from PASS to FAIL never changed the
+exit code. And because the vectors are derived from `model.go`, a pull request that
+edits the implementation **and** the model together keeps every vector green.
+Measured on `155df09` (worktree experiments, nothing committed):
+
+| Change | Before the baseline | With the baseline |
+|---|---|---|
+| Failed rollback no longer reported as `rollback_failed` (code + model) | exit 0; S5 FAIL only in the summary | exit 1: `S5 PASS -> FAIL`, 76 apply vectors listed |
+| Post-`up` `TargetImageID` capture removed (code + model) | exit 0; C2 went FAIL → PASS, so the run looked *better* | exit 1: S8 FAIL, `C2 FAIL -> PASS`, state space 5864 → 5792 |
+| `restartLeftPrior` branch of `final_running_digest` removed (code only) | exit 0; the model does not predict that field | exit 1: real-code DRIFT, 48 → 58 vectors misreport |
+
+The existing unit tests also caught these three. The baseline exists for the
+changes where conformance is the only detector (the 17 conformance-only mutants
+below), and so that a reviewer sees a behaviour change as a diff instead of
+trusting that a co-edited model is still right.
+
+Drift is not a correctness verdict and approves nothing. It means "the modelled
+or observed behaviour differs from what was last reviewed".
 
 ## What a pass means — and does not mean
 
@@ -58,6 +85,13 @@ touches product code. Do not present either as "the lifecycle is verified".
   which real Docker did not exhibit. The other 8 are real residue: `up` failed
   without recreating and the prior image has no allow-listed registry
   reference (4), or the stack was down before the upgrade (4).
+- **Reported running image (open question)**: on 48 of 172 apply vectors the
+  `final_running_digest` the agent reports differs from the image the fake
+  Docker world runs (`observed.json`). Some need `ok_stale`; others are, for
+  example, `up_fail_recreated` during rollback (reported T, P runs) and a prior
+  image with no registry digest (reported none). Whether the field must always
+  name the running image is a product question; the list pins today's
+  behaviour, it does not endorse it.
 
 ## Running
 
@@ -67,8 +101,8 @@ test/lifecycle-conformance/run.sh /tmp/lifecycle-report
 
 | Exit | Meaning |
 |---|---|
-| 0 | Model check complete; all three conformance suites ran and passed |
-| 1 | A conformance vector mismatched the real code, or an owner-**approved** property failed |
+| 0 | Model check complete; all three conformance suites ran and passed; no drift from the reviewed baseline |
+| 1 | A conformance vector mismatched the real code, an owner-**approved** property failed, or the model / real-code observations drifted from `baseline.json` / `observed.json` (`lifecyclecheck` alone exits 3 for drift) |
 | 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, or a skipped or missing suite. Never reported as a pass |
 
 Exit 2 takes precedence over exit 1 and nothing downgrades it: a run with a
@@ -76,7 +110,8 @@ failing unapproved property **and** a vacuous property is incomplete.
 
 A failing `proposed` or `open` property is printed with its shortest trace and
 does **not** change the exit code: the tool reports on unapproved properties,
-it does not define the contract.
+it does not define the contract. A **change** in any property's verdict,
+exercised count or counterexample is drift, and does.
 
 The pieces can be run on their own from `cmd/culvert-maint`:
 
@@ -95,7 +130,9 @@ go test -tags lifecycle_conformance -count=1 -run TestModelConformance ./interna
 well as `approved` ones), `-fail-only-approved` (a failing property that is not
 `approved` is printed but does not cause exit 1), `-max-states`, `-max-seconds`,
 `-report <dir>` (writes `model_check.json`), `-summary <dir>` (prints the step
-summary for a report directory).
+summary for a report directory), `-write-baseline <file>` (record instead of
+compare; refused for an incomplete or vacuous run), `-no-baseline` (skip the
+comparison; printed, and the summary says NOT CHECKED).
 
 All of it carries the build tag `lifecycle_conformance`. A plain
 `go build ./...`, `go vet ./...` or `go test ./...` neither compiles nor runs
@@ -124,6 +161,12 @@ A mismatch means the code and the model disagree. Either is legitimate:
   `cmd/culvert-maint/internal/lifecyclemodel/model.go` in the same pull request, and say so in the description. The model is a second, independent
   statement of the lifecycle; keeping the two in step is the point.
 
+Then run `test/lifecycle-conformance/update-baseline.sh` and commit the
+regenerated `baseline.json` / `observed.json` with the change. Review their diff
+line by line: a property verdict that moved, or a vector line whose `op`,
+`reason`, `running` or `tag` changed, is the behaviour change in plain words. CI
+never regenerates them, and the workflow fails if a run modified either file.
+
 ## Workflows
 
 - `.github/workflows/lifecycle-conformance-shadow.yml` — pull requests touching
@@ -133,6 +176,10 @@ A mismatch means the code and the model disagree. Either is legitimate:
   Runs `cmd/lifecyclemutate`, which mutates temp copies of seven lifecycle source files and records which mutants
   the existing tests and the conformance suite each kill. About 1h40m on four
   cores for 350 mutants, hence scheduled only.
+
+Since the observation lock, a mutant that changes the reported
+`final_running_digest` is also killed by conformance, so later campaigns are not
+directly comparable with the figures below.
 
 Baseline measured before AGT-002, at `ef94311` (350 mutants, 343 compiled): existing tests
 killed 260 (75.8%), conformance alone 243 (70.8%), both together 277 (80.8%);
