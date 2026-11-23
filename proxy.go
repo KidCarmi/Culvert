@@ -463,51 +463,34 @@ func resolveRequestAuth(w http.ResponseWriter, r *http.Request, clientIP, reqID 
 			// header (never default-exempted).
 			u, p, ok := parseProxyAuth(r)
 			if ok && credCapable {
-				// Try IdP registry providers first (OIDC introspection, LDAP
-				// bind). EnabledCredentialProviders excludes browser-only
-				// types (SAML) structurally — the credential chain is the
-				// capability-explicit accessor, not "everything enabled".
-				authed := false
+				// The shared in-band credential resolver (proxy_credential.go):
+				// IdP registry credential providers first (OIDC introspection,
+				// LDAP bind — EnabledCredentialProviders excludes browser-only
+				// SAML structurally), then the legacy single provider or local
+				// bcrypt. SOCKS5 USER/PASS resolves through the SAME function
+				// (SWG-901 stage 3), so one credential is one principal on both
+				// listeners. Identity-capable providers must supply the
+				// canonical authorization subject; the Basic username is never
+				// substituted for them.
+				//
 				// The fairness key reaches the registry providers' result
-				// caches too (CHAOS-76), not just the legacy fallback below:
-				// these ARE the caches in a registry deployment, and without
-				// an attributed key every entry shares one bucket, so one
-				// source can evict another client's cached verdict.
-				registryClientKey := authStateClientKey(r)
-				for _, prov := range idpRegistry.EnabledCredentialProviders() {
-					id, resolved := resolveIdentityAttributed(prov, registryClientKey, u, p)
-					if !resolved || id == nil || strings.TrimSpace(id.Sub) == "" {
-						continue
-					}
-					authenticatedIdentity = id.Sub
-					authenticatedGroups = id.Groups
-					authenticatedSource = identityAuthSource(id, prov.Name())
-					authed = true
-					break
+				// caches (CHAOS-76) and the local-bcrypt governor (CHAOS-57).
+				// authStateClientKey goes through realClientIP, so an
+				// X-Forwarded-For value counts only from a configured trusted
+				// proxy — a spoofable key would hand an attacker an unlimited
+				// supply of budgets.
+				identity, groups, source, resolved := resolvePresentedCredential(credentialChannelHTTPBasic, authStateClientKey(r), u, p)
+				if !resolved {
+					atomic.AddInt64(&statAuthFail, 1)
+					w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
+					http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
+					recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
+					logger.Printf("AUTH_FAIL %s {req_id=%s action=block}", clientIP, reqID)
+					return authOutcome{}, false
 				}
-				// Fall back to the legacy single provider or local bcrypt. Identity-
-				// capable legacy providers must supply the canonical authorization
-				// subject; the Basic username is never substituted for them.
-				if !authed {
-					// CHAOS-57: the local-bcrypt fallback is the one credential
-					// check in this chain that costs ~80 ms of CPU, so it is
-					// charged to a client-fairness key. authStateClientKey goes
-					// through realClientIP, so an X-Forwarded-For value counts
-					// only from a configured trusted proxy — a spoofable key
-					// would hand an attacker an unlimited supply of budgets.
-					id, resolved := cfg.resolveAuthIdentityFrom(authStateClientKey(r), u, p)
-					if !resolved || id == nil || strings.TrimSpace(id.Sub) == "" {
-						atomic.AddInt64(&statAuthFail, 1)
-						w.Header().Set("Proxy-Authenticate", `Basic realm="Culvert"`)
-						http.Error(w, "Proxy Authentication Required", http.StatusProxyAuthRequired)
-						recordRequest(clientIP, r.Method, r.Host, "AUTH_FAIL", "", "", "", "")
-						logger.Printf("AUTH_FAIL %s {req_id=%s action=block}", clientIP, reqID)
-						return authOutcome{}, false
-					}
-					authenticatedIdentity = id.Sub
-					authenticatedGroups = id.Groups
-					authenticatedSource = identityAuthSource(id, "local")
-				}
+				authenticatedIdentity = identity
+				authenticatedGroups = groups
+				authenticatedSource = source
 			} else {
 				// ── 3. No credentials — resolve the Stage-1 outcome and dispatch.
 				// A switch (not an if-else chain) keeps gocritic happy; cases 3a/3a'
