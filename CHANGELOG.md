@@ -1773,10 +1773,7 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   rulebase a gap add, a priority edit or a move (or the first load of a
   hand-edited unsorted file) could silently swap the evaluation order of tied
   rules nobody edited. Ties now keep the order of the policy file, snapshot or
-  backup; nothing is renumbered. For one release a load or replace whose tie
-  order differs from what the previous release would have used logs
-  `Policy: N rule(s) share priority P; evaluation order now follows stored
-  order (...)`. The new gauge `culvert_policy_priority_ties` (rules sharing a
+  backup; nothing is renumbered. The new gauge `culvert_policy_priority_ties` (rules sharing a
   priority) and the `policy_priority_ties` diagnostics row report ties.
   Customer-visible refusals: a replace-mode `POST /api/config/import`
   (preview and commit) whose rules share a priority answers 400 naming them,

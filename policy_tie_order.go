@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -31,109 +30,26 @@ import (
 // priority edit or a move on a tied rulebase, or the first load of a
 // hand-edited unsorted file), where the old order was a pdqsort artefact
 // nobody chose. TestPolicyTieOrder_StableSortMatchesLegacyWhereItMustAgree is
-// the differential proof.
+// the differential proof (the previous sort survives only as its test oracle;
+// there is no upgrade-time comparison in production).
 
 // policyRulePriorityCmp orders rules by priority alone. Rules that share a
 // priority compare equal, so a stable sort keeps them in input order.
 func policyRulePriorityCmp(a, b *PolicyRule) int { return cmp.Compare(a.Priority, b.Priority) }
 
-// pdqsortInsertionMax is the length up to which sort.Slice runs a plain
-// strict-less insertion sort (sort/zsortfunc.go, pdqsort_func: length <= 12),
-// so for these lengths the legacy order was already stable.
-const pdqsortInsertionMax = 12
-
 // orderPolicyRulesForPublication sorts next by priority in place, keeping
-// rules that share a priority in their input (stored) order. input is the
-// sequence next was copied from; it is only read, for the one-release legacy
-// comparison. Runs under the PolicyStore writer lock (sortLocked).
+// rules that share a priority in their input (stored) order. Runs under the
+// PolicyStore writer lock (sortLocked).
 //
 // Cost: an already-sorted input — every steady-state publication — is one
 // O(n) scan and no sort at all. slices.SortStableFunc is generic and does not
 // allocate, unlike sort.Slice, whose reflect-based swapper allocated on every
 // publication.
-func orderPolicyRulesForPublication(next, input []*PolicyRule) {
-	if sortPolicyRulesStoredOrder(next) {
-		warnLegacyTieOrderDivergence(input, next)
-	}
-}
-
-// sortPolicyRulesStoredOrder is the ordering itself, with no reporting. It
-// returns whether the input was out of order (and was therefore sorted).
-func sortPolicyRulesStoredOrder(rules []*PolicyRule) (sorted bool) {
-	if slices.IsSortedFunc(rules, policyRulePriorityCmp) {
-		return false
-	}
-	slices.SortStableFunc(rules, policyRulePriorityCmp)
-	return true
-}
-
-// legacyPolicySortOrder returns input ordered exactly as the previous release
-// published it: sort.Slice with a priority-only comparator. Kept for the
-// one-release upgrade warning below and as the differential-test oracle.
-//
-// LEGACY-TIE-ORDER: remove the warning (and this helper's production caller)
-// in the release after the one that ships stable tie order. The gauge and the
-// diagnostics row stay.
-func legacyPolicySortOrder(input []*PolicyRule) []*PolicyRule {
-	out := slices.Clone(input)
-	sort.Slice(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
-	return out
-}
-
-// policyTieOrderDivergence describes the first place where stored-order
-// precedence and the previous release's order disagree.
-type policyTieOrderDivergence struct {
-	Priority int    // the shared priority
-	Rules    int    // rules holding it
-	Now      string // rule that now evaluates first at that position
-	Was      string // rule the previous release evaluated there
-}
-
-// legacyTieOrderDivergence compares stable (input sorted with stored-order
-// precedence) with the previous release's order of the same input. ok is false
-// when they agree: always for n <= 12, and whenever no priority is shared.
-func legacyTieOrderDivergence(input, stable []*PolicyRule) (policyTieOrderDivergence, bool) {
-	if len(stable) <= pdqsortInsertionMax || !sortedRulesHaveTie(stable) {
-		return policyTieOrderDivergence{}, false
-	}
-	legacy := legacyPolicySortOrder(input)
-	for i := range stable {
-		if stable[i] == legacy[i] {
-			continue
-		}
-		p := stable[i].Priority
-		n := 0
-		for _, r := range stable {
-			if r.Priority == p {
-				n++
-			}
-		}
-		return policyTieOrderDivergence{Priority: p, Rules: n, Now: stable[i].Name, Was: legacy[i].Name}, true
-	}
-	return policyTieOrderDivergence{}, false
-}
-
-// warnLegacyTieOrderDivergence logs when the evaluation order of tied rules
-// differs from what the previous release would have used for the same input.
-// It never changes the order and never renumbers.
-func warnLegacyTieOrderDivergence(input, stable []*PolicyRule) {
-	d, ok := legacyTieOrderDivergence(input, stable)
-	if !ok {
+func orderPolicyRulesForPublication(next []*PolicyRule) {
+	if slices.IsSortedFunc(next, policyRulePriorityCmp) {
 		return
 	}
-	logWarnf("Policy: %d rule(s) share priority %d; evaluation order now follows stored order (%q before %q), which differs from the previous release",
-		d.Rules, d.Priority, sanitizeLog(d.Now), sanitizeLog(d.Was))
-}
-
-// sortedRulesHaveTie reports whether two adjacent rules of a priority-sorted
-// slice share a priority.
-func sortedRulesHaveTie(sorted []*PolicyRule) bool {
-	for i := 1; i < len(sorted); i++ {
-		if sorted[i].Priority == sorted[i-1].Priority {
-			return true
-		}
-	}
-	return false
+	slices.SortStableFunc(next, policyRulePriorityCmp)
 }
 
 // priorityTiedRuleCount returns the number of rules that share their priority

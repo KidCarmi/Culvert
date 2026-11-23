@@ -1423,7 +1423,7 @@ func (ps *PolicyStore) sortLocked() {
 	// sort.Slice result for every sorted input and for n <= 12.
 	next := make([]*PolicyRule, len(ps.rules))
 	copy(next, ps.rules)
-	orderPolicyRulesForPublication(next, ps.rules)
+	orderPolicyRulesForPublication(next)
 	backing := make([]PolicyRule, len(next))
 	for i, rule := range next {
 		copyPolicyRuleForPublication(&backing[i], rule)

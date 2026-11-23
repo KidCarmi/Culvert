@@ -7,9 +7,24 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
+
+// pdqsortInsertionMax is the length up to which sort.Slice runs a plain
+// strict-less insertion sort (sort/zsortfunc.go, pdqsort_func: length <= 12),
+// so for these lengths the previous order was already stable.
+const pdqsortInsertionMax = 12
+
+// legacyPolicySortOrder is the previous publication order (sort.Slice with a
+// priority-only comparator): the differential oracle for stored-order
+// precedence. Test-only; production never computes it.
+func legacyPolicySortOrder(input []*PolicyRule) []*PolicyRule {
+	out := slices.Clone(input)
+	sort.Slice(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
+	return out
+}
 
 // policy_tie_order_test.go — POL-001 (amended: equal priorities evaluate in
 // stored order) and the publication-side evidence for it.
@@ -26,7 +41,7 @@ func tieRules(pris []int) []*PolicyRule {
 
 func storedOrderSorted(in []*PolicyRule) []*PolicyRule {
 	out := slices.Clone(in)
-	sortPolicyRulesStoredOrder(out)
+	orderPolicyRulesForPublication(out)
 	return out
 }
 
@@ -368,14 +383,15 @@ func unsortedTiedFile(n int, seed int64) []PolicyRule {
 	return rules
 }
 
-const legacyTieWarning = "evaluation order now follows stored order"
-
-// loadTieCase loads one unsorted tied file and checks stored order and the
-// warning. It returns whether the previous release's order differed.
-func loadTieCase(t *testing.T, n int, seed int64) (diverged bool) {
+// loadTieCase loads one unsorted tied file and checks that every tie keeps
+// the file's order, and that loading logs no tie-order notice (there is no
+// upgrade comparison). It returns whether the previous sort would have
+// reordered the file, so the corpus can prove it covers that region.
+func loadTieCase(t *testing.T, n int, seed int64) (legacyWouldDiffer bool) {
 	t.Helper()
 	file := unsortedTiedFile(n, seed)
-	_, diverged = legacyTieOrderDivergence(rulePtrs(slices.Clone(file)), storedOrderSorted(rulePtrs(slices.Clone(file))))
+	ptrs := rulePtrs(slices.Clone(file)) // one pointer set, so the two orders are comparable
+	legacyWouldDiffer = !slices.Equal(storedOrderSorted(slices.Clone(ptrs)), legacyPolicySortOrder(ptrs))
 	ps := &PolicyStore{}
 	out := captureLogger(t, func() {
 		if err := ps.Load(writeRuleFile(t, file)); err != nil {
@@ -385,51 +401,31 @@ func loadTieCase(t *testing.T, n int, seed int64) (diverged bool) {
 	if p, names, bad := firstTieOrderMismatch(ps.List(), tieGroupsByName(file)); bad {
 		t.Errorf("priority %d: loaded order %v, file order %v", p, names, tieGroupsByName(file)[p])
 	}
-	want := 0
-	if diverged {
-		want = 1
+	if strings.Contains(out, "evaluation order now follows stored order") {
+		t.Errorf("load logged an upgrade tie-order notice; none should exist:\n%s", out)
 	}
-	if got := strings.Count(out, legacyTieWarning); got != want {
-		t.Errorf("legacy divergence=%v but the warning fired %d time(s), want %d:\n%s", diverged, got, want, out)
-	}
-	if n <= pdqsortInsertionMax && diverged {
-		t.Error("divergence reported inside the insertion-sort regime")
-	}
-	return diverged
+	return legacyWouldDiffer
 }
 
-// TestPolicyTieOrder_LoadUnsortedTiedFileKeepsStoredOrderAndWarnsOnLegacyDivergence:
-// loading a hand-edited, unsorted file with ties publishes the file's order
-// for every tie, and the one-release upgrade warning fires exactly when the
-// previous release would have evaluated those ties differently.
-func TestPolicyTieOrder_LoadUnsortedTiedFileKeepsStoredOrderAndWarnsOnLegacyDivergence(t *testing.T) {
-	warned, quiet := 0, 0
+// TestPolicyTieOrder_LoadUnsortedTiedFileKeepsStoredOrder: loading a
+// hand-edited, unsorted file with ties publishes the file's order for every
+// tie — including the files the previous unstable sort would have reordered.
+func TestPolicyTieOrder_LoadUnsortedTiedFileKeepsStoredOrder(t *testing.T) {
+	differ, same := 0, 0
 	for _, tc := range []struct {
 		n    int
 		seed int64
 	}{{12, 1}, {12, 2}, {13, 3}, {13, 4}, {20, 5}, {20, 6}, {64, 7}, {64, 8}, {300, 9}} {
 		t.Run(fmt.Sprintf("n=%d/seed=%d", tc.n, tc.seed), func(t *testing.T) {
 			if loadTieCase(t, tc.n, tc.seed) {
-				warned++
+				differ++
 			} else {
-				quiet++
+				same++
 			}
 		})
 	}
-	if warned == 0 || quiet == 0 {
-		t.Fatalf("corpus must exercise both outcomes (warned=%d quiet=%d)", warned, quiet)
-	}
-
-	// A file Culvert wrote is sorted: reloading it never warns.
-	ps := &PolicyStore{}
-	ps.ReplaceAll(unsortedTiedFile(300, 9))
-	out := captureLogger(t, func() {
-		if err := (&PolicyStore{}).Load(writeRuleFile(t, ps.List())); err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-	})
-	if strings.Contains(out, legacyTieWarning) {
-		t.Errorf("reloading a sorted file warned:\n%s", out)
+	if differ == 0 || same == 0 {
+		t.Fatalf("corpus must cover inputs the previous sort reordered and inputs it did not (differ=%d same=%d)", differ, same)
 	}
 }
 

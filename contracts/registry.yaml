@@ -31,7 +31,7 @@ protected:
 
 amended:
   - id: POL-001
-    reason: "Owner decision C (policy semantics): rules with EQUAL priority now evaluate in stored order (policy file, config-version snapshot, backup or CP snapshot order). Publication used sort.Slice, which is the identity on every sorted input and stable for n <= 12, so steady-state rulebases keep exactly the order they had; only an unsorted input with ties at n >= 13 (gap add, priority edit or move on a tied rulebase, or the first load of a hand-edited unsorted file) used to get an unchosen pdqsort permutation. Proven by a differential test against the old comparator. Existing rules are never renumbered; for one release a load or replace whose tie order differs from the previous release logs a warning, and culvert_policy_priority_ties plus the policy_priority_ties diagnostics row report ties permanently."
+    reason: "Owner decision C (policy semantics): rules with EQUAL priority now evaluate in stored order (policy file, config-version snapshot, backup or CP snapshot order). Publication used sort.Slice, which is the identity on every sorted input and stable for n <= 12, so steady-state rulebases keep exactly the order they had; only an unsorted input with ties at n >= 13 (gap add, priority edit or move on a tied rulebase, or the first load of a hand-edited unsorted file) used to get an unchosen pdqsort permutation. Proven by a differential test against the old comparator. Existing rules are never renumbered; culvert_policy_priority_ties and the policy_priority_ties diagnostics row report ties. There is no upgrade-time order warning: pre-customer, there is no installed base to migrate (owner, 2026-11-23)."
 retired: []
 
 contracts:
@@ -103,7 +103,7 @@ contracts:
       - {file: "policy_flow_e2e_test.go", name: TestPolicyFlow_PriorityFirstMatchWins}
       - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_StableSortMatchesLegacyWhereItMustAgree}
       - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_UntouchedTiesKeepOrderAcrossWriters}
-      - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_LoadUnsortedTiedFileKeepsStoredOrderAndWarnsOnLegacyDivergence}
+      - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_LoadUnsortedTiedFileKeepsStoredOrder}
       - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_ReplaceAllAndSnapshotKeepTieOrder}
       - {file: "policy_tie_order_test.go", name: TestPolicyTieOrder_EvaluateUnchangedForSortedInputs}
     validation: integration

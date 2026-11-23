@@ -152,3 +152,88 @@ func TestPolicyTies_ReplaceImportRefusesDuplicatePriorities(t *testing.T) {
 	}
 	requireNoPriorityTies(t, policyStore.List())
 }
+
+// TestPolicyTies_ExportReplaceImportRoundTrips: a current rulebase (built
+// through the API, so it cannot hold a tie) exported via GET
+// /api/config/export?section=policy and imported back in replace mode is
+// accepted and restores exactly the same rules in the same evaluation order
+// with the same default action. POL-006's replace-import refusal must never
+// break the supported backup/restore round trip (owner, 2026-11-23).
+func TestPolicyTies_ExportReplaceImportRoundTrips(t *testing.T) {
+	snapshotPolicyStoreForTest(t)
+	origDefault := defaultPolicyAction()
+	t.Cleanup(func() { setDefaultPolicyAction(origDefault) })
+	setDefaultPolicyAction("deny")
+	policyStore.ReplaceAll(nil)
+
+	// Real writers: creates with explicit and absent priorities (a taken
+	// priority is refused 409 by the fenced create, so it cannot tie).
+	for _, body := range []map[string]any{
+		{"name": "rt-a", "action": "Allow", "priority": 10, "destFQDN": "a.rt.example"},
+		{"name": "rt-b", "action": "Drop", "priority": 20, "destFQDN": "b.rt.example"},
+		{"name": "rt-c", "action": "Allow", "destFQDN": "c.rt.example"},                // absent: next free
+		{"name": "rt-d", "action": "Drop", "priority": 30, "destFQDN": "*.rt.example"}, // catch-all after the exact rules
+	} {
+		w := httptest.NewRecorder()
+		apiPolicyCreate(w, jsonReq("POST", "/api/policy", body))
+		if w.Code != http.StatusOK {
+			t.Fatalf("create %v = %d (%s)", body["name"], w.Code, w.Body.String())
+		}
+	}
+	before := policyStore.List()
+	requireNoPriorityTies(t, before)
+
+	w := httptest.NewRecorder()
+	apiConfigExport(w, adminRequest("GET", "/api/config/export?section=policy", ""))
+	if w.Code != http.StatusOK {
+		t.Fatalf("export = %d (%s)", w.Code, w.Body.String())
+	}
+	exported := w.Body.String()
+
+	// Diverge the live state, then restore from the export.
+	policyStore.ReplaceAll([]PolicyRule{{Priority: 1, Name: "other", Action: ActionAllow}})
+	setDefaultPolicyAction("allow")
+	for _, path := range []string{"/api/config/import?mode=replace&dryRun=true", "/api/config/import?mode=replace"} {
+		w = httptest.NewRecorder()
+		apiConfigImport(w, adminRequest("POST", path, exported))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s of our own export = %d (%s)", path, w.Code, w.Body.String())
+		}
+	}
+
+	after := policyStore.List()
+	if len(after) != len(before) {
+		t.Fatalf("round trip restored %d rules, want %d", len(after), len(before))
+	}
+	for i := range before {
+		b, a := before[i], after[i]
+		if a.Name != b.Name || a.Priority != b.Priority || a.Action != b.Action || a.DestFQDN != b.DestFQDN || a.ID != b.ID {
+			t.Errorf("rule %d: got {%s p%d %s %s id=%s}, want {%s p%d %s %s id=%s}",
+				i, a.Name, a.Priority, a.Action, a.DestFQDN, a.ID, b.Name, b.Priority, b.Action, b.DestFQDN, b.ID)
+		}
+	}
+	if got := defaultPolicyAction(); got != "deny" {
+		t.Errorf("default action after round trip = %q, want deny", got)
+	}
+	// Same decisions, not only the same list: each host is decided by a
+	// different rule (or none), so a reorder or a lost rule changes an answer.
+	for host, want := range map[string]string{
+		"a.rt.example": "rt-a", "b.rt.example": "rt-b", "c.rt.example": "rt-c",
+		"x.rt.example": "rt-d", "none.example": "",
+	} {
+		if bm, am := evalName(before, host), evalName(after, host); bm != want || am != want {
+			t.Errorf("%s: decided by %q before and %q after, want %q", host, bm, am, want)
+		}
+	}
+}
+
+// evalName returns the name of the rule a fresh store loaded with rules
+// matches for host, or "" for no match.
+func evalName(rules []PolicyRule, host string) string {
+	ps := &PolicyStore{}
+	ps.ReplaceAll(rules)
+	if m := ps.Evaluate("10.0.0.1", "", "unauth", host, nil); m != nil {
+		return m.Rule.Name
+	}
+	return ""
+}

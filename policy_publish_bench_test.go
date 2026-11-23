@@ -68,9 +68,9 @@ func BenchmarkPolicyPublish_SortLocked(b *testing.B) {
 // UNSORTED input with priority ties — the shape a gap Add, a priority edit or
 // a move produces on a rulebase that shares priorities (two rules per priority
 // here, with the last rule rotated to the front). It is the only shape that
-// pays for the stable sort AND the one-release legacy-order comparison
-// (policy_tie_order.go); BenchmarkPolicyPublish_SortLocked is the steady
-// state, where the input is already sorted and neither runs.
+// pays for the stable sort (policy_tie_order.go);
+// BenchmarkPolicyPublish_SortLocked is the steady state, where the input is
+// already sorted and no sort runs.
 func BenchmarkPolicyPublish_SortLockedUnsortedTies(b *testing.B) {
 	for _, n := range []int{100, 1000, 10000} {
 		b.Run(fmt.Sprintf("rules=%d", n), func(b *testing.B) {
