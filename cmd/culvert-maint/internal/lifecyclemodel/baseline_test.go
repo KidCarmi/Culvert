@@ -276,3 +276,21 @@ func TestVectorLines_CoverEveryExpectationField(t *testing.T) {
 		t.Error("the fault plan is not rendered in the apply line")
 	}
 }
+
+// Regression: apply vectors were deduplicated on (prior, same, plan, expectation), which
+// omits th/ph/backup/rb. Two runs that drive different agent code paths merged whenever their
+// plan and expectation matched, silently dropping a real-code path from conformance. Now every
+// distinct concrete input (all parameters + fault plan) is replayed exactly once.
+func TestVectors_EveryDistinctConcreteInputIsReplayed(t *testing.T) {
+	apply, _ := Vectors()
+	if got, want := len(apply), distinctApplyInputs(); got != want {
+		t.Fatalf("%d apply vectors for %d distinct concrete inputs: deduplication dropped a distinct run", got, want)
+	}
+	want := "prior=valid same=false backup=false rb=true th=false ph=true | health_gate=fail > rb_verify=capture_fail |"
+	for i := range apply {
+		if strings.HasPrefix(ApplyLine(&apply[i]), want) {
+			return
+		}
+	}
+	t.Errorf("the run %q (once merged into a different code path) is missing", want)
+}
