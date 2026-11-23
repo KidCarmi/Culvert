@@ -219,6 +219,14 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			Name:          "capture_before",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				// Look only at a Docker nothing outstanding can still change
+				// (settle.go). Everything this operation concludes from the
+				// capture — the rollback target, and "already current", which
+				// skips the restart and the health gate altogether — would
+				// otherwise be read off a container that may be on its way out.
+				if _, serr := s.settleInterrupted(ctx); serr != nil {
+					return nil, nil, serr
+				}
 				ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
 				if err != nil {
 					acc.priorCaptureReason = "no_prior_digest"

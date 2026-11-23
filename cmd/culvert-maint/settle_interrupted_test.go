@@ -137,3 +137,30 @@ func TestSettle_AppliesAfterAnyStart(t *testing.T) {
 		t.Errorf("after upgrade: tag %.8s container %.8s, want both on the target", r.read("pinned"), r.read("running"))
 	}
 }
+
+// TestSettle_AlreadyCurrentIsNotReportedInsideTheWindow: an upgrade to the image
+// that is already running skips the restart and the health gate. It must still
+// not report success on a container the predecessor's stop may be about to
+// kill: the capture it is judged on is taken only after the window.
+func TestSettle_AlreadyCurrentIsNotReportedInsideTheWindow(t *testing.T) {
+	const settle = 6 * time.Second
+	r := newCrashRig(t)
+	r.setSettle(settle.String())
+	beforeStart := time.Now()
+	r.start()
+
+	var op opView
+	if code := r.post("/v1/upgrades/apply", map[string]interface{}{"image_ref": refA}, &op); code != http.StatusAccepted {
+		t.Fatalf("apply: HTTP %d", code)
+	}
+	done := r.waitOp(op.OpID)
+	if done.State != "succeeded" {
+		t.Fatalf("upgrade = %s(%s); agent output:\n%s", done.State, done.FailureReason, r.logs.String())
+	}
+	if logs := r.opLogs(op.OpID); !strings.Contains(logs, "already_current=true") {
+		t.Fatalf("precondition: the upgrade was not already_current:\n%s", logs)
+	}
+	if waited := time.Since(beforeStart); waited < settle {
+		t.Errorf("an already_current upgrade reported success %v after the start, inside the %v settle window", waited, settle)
+	}
+}

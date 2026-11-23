@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -200,6 +201,9 @@ type Server struct {
 	// startedAt is when this agent process's server was built. The settle
 	// window is counted from it (settle.go).
 	startedAt time.Time
+	// mutationCutAt is the last time a compose up/down of this process ended
+	// in an error; the settle window restarts from it (settle.go).
+	mutationCutAt atomic.Pointer[time.Time]
 
 	// opWG tracks in-flight orchestrator goroutines so shutdown can drain them
 	// (T2.4) instead of abandoning a state-changing op mid-flight.

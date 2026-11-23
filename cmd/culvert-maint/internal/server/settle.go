@@ -26,6 +26,9 @@
 // rollback, and the `up` of a startup reconcile killed in mid-flight. It would
 // also depend on a best-effort journal write having succeeded.
 //
+// The same applies inside one process when a `compose up` / `compose down` it
+// ran ends in an error (noteMutationCut): the window starts again from there.
+//
 // The cost is that the first tag+recreate within the window after ANY agent
 // start waits for the rest of it, crash or not. Agent starts are rare, and the
 // agent cannot tell a clean predecessor from a killed one.
@@ -50,7 +53,27 @@ func (s *Server) settleRemaining() time.Duration {
 	if window <= 0 {
 		return 0
 	}
-	return window - time.Since(s.startedAt)
+	from := s.startedAt
+	if cut := s.mutationCutAt.Load(); cut != nil && cut.After(from) {
+		from = *cut
+	}
+	return window - time.Since(from)
+}
+
+// noteMutationCut records that a `compose up` or `compose down` of THIS
+// process ended in an error. The same hazard as a dead predecessor, inside one
+// process: the docker command may have been killed (stage timeout, the unit
+// being stopped, the OOM killer) after it asked dockerd to stop the proxy, and
+// dockerd carries on. Whatever tags and recreates next — the upgrade's own
+// inline rollback first of all — must not judge that container until the
+// window has passed again.
+//
+// Every error counts, not only a kill: a docker CLI that handles SIGTERM exits
+// with an ordinary status, so the two cannot be told apart from here. The cost
+// is that a rollback after a failed `up` starts one window later.
+func (s *Server) noteMutationCut() {
+	now := time.Now()
+	s.mutationCutAt.Store(&now)
 }
 
 // settleInterrupted blocks until settleRemaining has run out and returns a
