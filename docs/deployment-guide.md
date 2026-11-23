@@ -19,6 +19,18 @@ Culvert supports three deployment modes. Choose the one that fits your scale.
 Everything runs in one process — proxy, admin UI, policy engine, scanning.
 This is the default and works for most deployments.
 
+> **SOCKS5 caveat (legacy mode, contract SWG-901).** The examples in this guide
+> enable the optional SOCKS5 listener with `-socks5-port 1080`. Policy is **not
+> enforced** on SOCKS5 traffic: no policy rules, no default action, no
+> threat-feed check, no authentication rules or IdP-registry sign-in, and no
+> SSL inspection. SOCKS5 applies only the IP filter, rate and connection limits,
+> its own username/password check (local admin credential or legacy provider),
+> the blocklist, plugins and the private-destination (SSRF) guard, and it binds
+> every interface. **Omit `-socks5-port` (and the `1080` port mapping) unless
+> you need SOCKS5.** If you keep it, restrict who can reach the port and send
+> traffic that must follow policy through the HTTP/HTTPS proxy. See the
+> README's [Limitations & Known Gaps](../README.md#limitations--known-gaps).
+
 ### Docker Compose
 
 ```yaml
@@ -80,7 +92,7 @@ export CULVERT_CA_PASSPHRASE="your-strong-passphrase"
 | Endpoint | URL |
 |----------|-----|
 | HTTP/HTTPS Proxy | `http://proxy-host:8080` |
-| SOCKS5 Proxy | `socks5://proxy-host:1080` |
+| SOCKS5 Proxy (optional; policy not enforced, see caveat above) | `socks5://proxy-host:1080` |
 | Admin Web UI | `https://proxy-host:9090` |
 | PAC File | `http://proxy-host:9090/proxy.pac` |
 | Prometheus Metrics | `http://proxy-host:8080/metrics` |
@@ -177,6 +189,10 @@ export CULVERT_CA_PASSPHRASE="your-strong-passphrase"
 
 ### Step 3: Add Data Plane Nodes (GUI Enrollment)
 
+> The Data Plane examples below pass `-socks5-port 1080`. Policy is not
+> enforced on SOCKS5 traffic - see the [SOCKS5 caveat](#1-standalone-single-node)
+> in section 1 - so omit it unless you need SOCKS5.
+
 The easiest way to add nodes is through the Admin UI enrollment system.
 No manual certificate management needed.
 
@@ -253,6 +269,10 @@ From the Admin UI cluster panel you can:
 - **Manage enrollment tokens** — view active/consumed/expired tokens
 
 ### Docker Compose (multi-node)
+
+> The Data Plane examples below pass `-socks5-port 1080`. Policy is not
+> enforced on SOCKS5 traffic - see the [SOCKS5 caveat](#1-standalone-single-node)
+> in section 1 - so omit it unless you need SOCKS5.
 
 ```yaml
 # docker-compose.multi.yml

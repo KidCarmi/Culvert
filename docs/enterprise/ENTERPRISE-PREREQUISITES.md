@@ -110,7 +110,7 @@ Everything the customer must prepare *before* installation. Each row is marked:
 |---|---|---|---|---|
 | 8080 | HTTP/1.1 + CONNECT | Forward proxy; `/health` `/ready` `/metrics` `/proxy.pac` | Proxy: policy; `/metrics`: optional token; health: none | `-port` |
 | 9090 | HTTPS | Admin UI/API; `/healthz`; SSE | Session cookie + RBAC; `/healthz` none | `-ui-port` |
-| 1080 | SOCKS5 | Proxy (CONNECT only) | Policy | `-socks5-port` (0=off) |
+| 1080 | SOCKS5 | Proxy (CONNECT only) | Optional username/password (local admin credential or legacy provider only; no IdP registry, no authentication rules). **Policy is not enforced** - no policy rules, default action, threat-feed check or inspection (legacy mode, SWG-901; see README "Limitations & Known Gaps") | `-socks5-port` (0=off); binds all interfaces |
 | 50051 | gRPC | CP↔DP | mTLS | `-cp-grpc-addr` |
 
 ## 10. Authentication dependencies
@@ -151,7 +151,7 @@ Everything the customer must prepare *before* installation. Each row is marked:
 | Proxy config | Explicit proxy `http://<host>:8080` or PAC | Verified |
 | PAC URL | `http://<host>:8080/proxy.pac` (also `:9090/proxy.pac`), unauthenticated by design | Verified |
 | CA trust (if inspecting) | Culvert Root CA in every client OS/browser trust store (GPO/MDM/`update-ca-trust`) | Verified |
-| SOCKS5 | CONNECT only; UDP ASSOCIATE rejected | Verified |
+| SOCKS5 | CONNECT only; UDP ASSOCIATE rejected. Policy is not enforced on SOCKS5 (legacy mode, SWG-901): keep it off unless needed | Verified |
 
 ## 14. Organisational prerequisites
 

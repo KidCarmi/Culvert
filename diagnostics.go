@@ -248,6 +248,9 @@ func buildOperatorContract() OperatorContract {
 	// Break-glass admin-route metadata gate in shadow (CULVERT_C2_ENFORCE=false).
 	// Contributes nothing in the default enforce mode.
 	checks = append(checks, checkAdminRouteEnforcement()...)
+	// SOCKS5 listener configured in legacy mode: policy is not enforced on SOCKS5
+	// traffic (SWG-901). Report-only; contributes nothing when SOCKS5 is off.
+	checks = append(checks, checkSOCKS5PolicyEnforcement()...)
 	// CDR fail-open passthroughs (engine error under fail_mode open) in the last 24h.
 	// Contributes nothing unless a fail-open passthrough actually happened.
 	checks = append(checks, checkCDRFailOpenPassthrough()...)

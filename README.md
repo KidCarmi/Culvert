@@ -90,7 +90,7 @@ No configuration is required - the setup wizard creates your first admin account
 | Endpoint | URL | Notes |
 |---|---|---|
 | HTTP/HTTPS proxy | `http://localhost:8080` | Point your browser / PAC here |
-| SOCKS5 proxy | `socks5://localhost:1080` | Disabled by default (`socks5_port: 0`); enable in config |
+| SOCKS5 proxy | `socks5://localhost:1080` | Disabled by default (`socks5_port: 0`); enable in config. Policy is **not** enforced on SOCKS5 - see [Limitations](#limitations--known-gaps) |
 | PAC file | `http://localhost:8080/proxy.pac` | Browser auto-config |
 | Admin UI | `https://localhost:9090` | Accept the self-signed cert on first visit |
 | Health (liveness) | `http://localhost:8080/health` | `{"status":"ok", ...}` |
@@ -136,7 +136,7 @@ Culvert runs with sensible defaults and can be driven by the Admin UI, a YAML fi
 proxy:
   port: 8080
   ui_port: 9090
-  socks5_port: 1080        # 0 = disabled
+  socks5_port: 1080        # 0 = disabled. Policy is NOT enforced on SOCKS5 - see Limitations & Known Gaps
 
 default_action: deny       # allow (passthrough) | deny (zero-trust). Auto-detected if empty.
 
@@ -376,6 +376,7 @@ Stated plainly, because a security product should be honest about its edges:
 - **Fresh-install posture:** with zero rules and no `default_action`, the proxy starts in passthrough (allow), not deny. Enforce Zero Trust explicitly.
 - **Post-quantum:** key exchange is quantum-resistant (inherited from the Go standard library); certificate signing remains classical ECDSA P-256.
 - **SOCKS5:** CONNECT only - UDP ASSOCIATE is rejected.
+- **SOCKS5 is not policy-enforced (legacy mode, contract SWG-901).** The SOCKS5 listener is off by default (`socks5_port: 0`). When you enable it, SOCKS5 connections are **not** evaluated by the policy engine: no policy rules (FQDN, category, group, identity, source, geo, schedule), **no default action** (SOCKS5 allows even when HTTP/CONNECT would default-deny), no threat-feed domain check, no Stage-1 authentication rules, no SSL inspection, CDR, AV or DLP. Its username/password check uses only the local admin credential or a legacy single auth provider - never the IdP registry (LDAP/OIDC/SAML profiles) - and request-log entries carry no identity or rule ID. What SOCKS5 **does** apply: the per-IP connection limit, the IP filter, the rate limit, destination-name length and IDNA checks, the blocklist (including allow-list mode), the plugin chain and the private-destination (SSRF) guard. The listener binds every interface. Culvert logs a startup `WARNING` and shows a report-only `socks5_policy_enforcement` row in Diagnostics while it is enabled. Leave SOCKS5 off unless you need it; if you enable it, restrict who can reach the port (IP filter allowlist, blocklist allow mode, host firewall) and send traffic that must follow policy through the HTTP/HTTPS proxy.
 - **License gate:** blocks GPL/AGPL/LGPL; CPAL is not currently enforced by the license check.
 - **Sizing figures** in the deployment tables are engineering estimates, not published benchmarks - validate against your own workload before capacity planning.
 

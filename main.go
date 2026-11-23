@@ -1155,6 +1155,9 @@ func initSOCKS5(s *startupState) {
 	// checked there for collisions against pPort/uPort) — reused here rather
 	// than recomputed so the bound port is guaranteed to be the same value
 	// that was validated.
+	// SWG-901 stage 1: disclose the legacy (unenforced) SOCKS5 policy posture.
+	// Logging and diagnostics only; a no-op when SOCKS5 is disabled.
+	logSOCKS5LegacyPolicyPosture(s.socks5PortVal)
 	if s.socks5PortVal > 0 {
 		// CHAOS-102: arm the pre-posture gate BEFORE the bind. startSOCKS5
 		// blocks until the first bind(2) resolves and the accept loop is
