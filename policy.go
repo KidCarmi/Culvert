@@ -543,6 +543,10 @@ func (ps *PolicyStore) Load(path string) error {
 			dropped.add(name)
 			continue
 		}
+		if _, known := canonicalPolicyAction(r.Action); !known && ruleTypeOf(r) == ruleTypeAccess {
+			logWarnf("Policy: retaining rule %q with unrecognized action %q on load; matching traffic will be blocked",
+				sanitizeLog(r.Name), sanitizeLog(string(r.Action)))
+		}
 		warnInertSourceIP(r)
 		kept = append(kept, r)
 	}
@@ -823,10 +827,14 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	seenIDs := make(map[string]struct{}, len(rules))
 	for i := range rules {
 		r := rules[i]
-		// Fail-closed: drop invalid auth rules and SubjectMatch-bearing access rules.
+		// Refuse unsupported rule shapes; keep unknown access actions so dispatch can block.
 		if ok, reason := policyRulePersistable(&r); !ok {
 			logWarnf("Policy: dropping rule %q on bulk replace — %s", sanitizeLog(r.Name), sanitizeLog(reason))
 			continue
+		}
+		if _, known := canonicalPolicyAction(r.Action); !known && ruleTypeOf(&r) == ruleTypeAccess {
+			logWarnf("Policy: retaining rule %q with unrecognized action %q on bulk replace; matching traffic will be blocked",
+				sanitizeLog(r.Name), sanitizeLog(string(r.Action)))
 		}
 		r.HitCount = 0
 		r.lastHitUnix = 0

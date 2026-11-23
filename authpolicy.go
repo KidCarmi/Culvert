@@ -1169,30 +1169,12 @@ func policyRulePersistable(r *PolicyRule) (ok bool, reason string) {
 	if r.Auth != nil {
 		return false, "auth spec is only valid on auth rules"
 	}
-	// SEC-POLICYACTION-1: the Action must be one this build dispatches. Only
-	// the API ingress path validated it (validateAccessRule, ui_helpers.go), so
-	// the durable and bulk paths this gate exists to protect — PolicyStore.Load
-	// (the operator-managed policy_file), PolicyStore.ReplaceAll (the CP→DP
-	// snapshot apply and replace-mode config import) — installed an
-	// unrecognized action verbatim. Such a rule matched and, pre-fix, ALLOWED
-	// the request while shadowing every lower-priority deny rule under
-	// first-match-wins. Dropping it here is the same fail-closed warn-and-skip
-	// this function already applies to a source-scoped access rule, and is the
-	// exact case the doc above describes as "a hand-edited or newer-version
-	// policy.json".
-	//
-	// An EMPTY action is NOT refused here: canonicalPolicyAction resolves it to
-	// Allow, which is what the pre-fix fall-through did, so action-less rules in
-	// an existing policy file or snapshot keep their behaviour rather than being
-	// dropped. Requiring an explicit action on load is a separate migration —
-	// see canonicalPolicyAction, and R8 in the 2026-10-17 security review.
-	// (This paragraph claimed the opposite in the first draft of this change;
-	// CodeRabbit caught the contradiction on PR #1651. A stale comment on a
-	// security gate is worth fixing: it invites a maintainer to "correct" the
-	// code toward dropping those rules.)
-	if _, known := canonicalPolicyAction(r.Action); !known {
-		return false, fmt.Sprintf("action %q is not one this build dispatches (Allow, Drop, Block_Page, Redirect)", r.Action)
-	}
+	// POL-004: A newer or unrecognized access action must survive durable load and
+	// bulk snapshot publication. The canonical dispatcher already blocks it
+	// terminally when the rule matches. Dropping it here would remove a policy
+	// restriction and let traffic fall through to default allow or a lower-priority
+	// Allow rule. Ingress/API writes still reject unsupported actions explicitly.
+	// Preserve the opaque value for future-version round trips and log it at load.
 	return true, ""
 }
 

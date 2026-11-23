@@ -791,8 +791,8 @@ func applyPolicyDecision(w http.ResponseWriter, r *http.Request, clientIP, host,
 		// only on the API ingress path: a mixed-version cluster (a Control Plane
 		// pushing a snapshot with a newer or renamed action), a restored backup,
 		// or an operator-managed policy_file all produced one.
-		// policyRulePersistable now refuses to install such a rule, and this is
-		// the runtime backstop for one that reached the matcher anyway.
+		// policyRulePersistable retains unknown access actions from imported
+		// snapshots so this terminal block is enforced rather than bypassed.
 		//
 		// Blocking is the correct direction and mirrors the sibling gate in the
 		// same engine: IPFilter.Allowed denies all traffic on an unrecognized
