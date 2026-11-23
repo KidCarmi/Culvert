@@ -28,14 +28,20 @@ func providerWithJournal(t *testing.T) (*Provider, *journal.Journal) {
 	return p.WithJournal(jnl), jnl
 }
 
-func TestSnapshot_NoJournalRecordsAddsNothing(t *testing.T) {
+func TestSnapshot_NoJournalRecordsAddsNoInterruptedOperation(t *testing.T) {
 	p, _ := providerWithJournal(t)
 	st, err := p.Snapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.InterruptedOperations != nil || st.PinnedTag != nil || st.InterruptedOperationsError != "" {
-		t.Errorf("clean journal must add nothing: %+v", st)
+	if st.InterruptedOperations != nil || st.InterruptedOperationsError != "" {
+		t.Errorf("clean journal must report no interrupted operation: %+v", st)
+	}
+	// pinned_tag does not depend on the journal. The fake docker prints
+	// nothing, so the tag is unreadable here and must be reported as unknown,
+	// not left out and not asserted to match.
+	if st.PinnedTag == nil || st.PinnedTag.ImageID != "" || st.PinnedTag.MatchesRunning != nil || st.PinnedTag.Error == "" {
+		t.Errorf("pinned_tag must be reported, as unknown, with a clean journal: %+v", st.PinnedTag)
 	}
 }
 
@@ -57,7 +63,7 @@ func TestSnapshot_OwnOperationsAreNotInterrupted(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(st.InterruptedOperations) != 0 || st.PinnedTag != nil {
+		if len(st.InterruptedOperations) != 0 {
 			t.Errorf("%s: this process's own op was reported as interrupted: %+v", stage, st.InterruptedOperations)
 		}
 		_ = p.mgr.Finish(op.ID, ops.StateSucceeded, "", nil)

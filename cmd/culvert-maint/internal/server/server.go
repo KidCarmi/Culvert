@@ -84,9 +84,10 @@ type Status struct {
 	// InterruptedOperationsError is set when the journal could not be read for
 	// this request. The list is then unknown, not empty.
 	InterruptedOperationsError string `json:"interrupted_operations_error,omitempty"`
-	// PinnedTag is what the fixed proxy tag resolves to now. Reported only
-	// while InterruptedOperations is non-empty: that is when the tag and the
-	// running container can have been left apart.
+	// PinnedTag is what the fixed proxy tag resolves to now, and whether the
+	// running container is on that image. Always reported: an interrupted
+	// operation is not the only way the two come apart (see
+	// status.addPinnedTag).
 	PinnedTag *PinnedTagStatus `json:"pinned_tag,omitempty"`
 
 	// RecoveryRequired and Reconcile are set only when reconcile_on_startup =

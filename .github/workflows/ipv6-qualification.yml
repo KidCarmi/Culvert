@@ -1,0 +1,87 @@
+name: IPv6 Qualification
+
+# Records, by name, that the zoned-IPv6 acceptance test EXECUTED and PASSED on a
+# host with an IPv6 loopback.
+#
+# The race shards already run TestZonedIPv6Dest_BackendIsNeverReached, and the
+# test fails instead of skipping when GITHUB_ACTIONS is set and IPv6 is absent,
+# so a green shard implies it passed. That is an inference: the shard logs do
+# not print passing test names. This job makes the evidence explicit: it runs
+# the one test verbosely, prints its result line, and fails unless that line is
+# a PASS — a SKIP or a missing line is a failure, never a pass.
+#
+# Not a required status check. Adding it to the required set is a repository
+# settings decision (REPOSITORY-SETTINGS.md §2).
+#
+# No secrets, no network services, no Docker.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "proxy.go"
+      - "proxy_host_bounds.go"
+      - "proxy_http.go"
+      - "proxy_tunnel.go"
+      - "socks5.go"
+      - "policy_destliteral.go"
+      - "dest_ipv6_zone_test.go"
+      - ".github/workflows/ipv6-qualification.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ipv6-qualification-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    name: "Qualification · zoned IPv6 destination never reaches the backend"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: go.sum
+
+      - name: The runner has an IPv6 loopback
+        run: |
+          python3 - <<'PY'
+          import socket, sys
+          try:
+              s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+              s.bind(("::1", 0))
+              print("IPv6 loopback available: bound [::1]:%d" % s.getsockname()[1])
+          except OSError as e:
+              print("::error::no IPv6 loopback on this runner (%s): the qualification cannot run here" % e)
+              sys.exit(1)
+          PY
+
+      - name: Run the acceptance test and require an explicit PASS
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout=10m -v \
+            -run '^(TestZonedIPv6Dest_BackendIsNeverReached|TestZonedIPv6Dest_RefusedBeforePolicyOnHTTPAndCONNECT|TestZonedIPv6Dest_SourceGatesAnswerFirst)$' . \
+            | tee ipv6-qualification.log | grep -E '^(=== RUN|--- (PASS|FAIL|SKIP)|ok|FAIL|PASS)' || true
+          if grep -qE '^--- SKIP' ipv6-qualification.log; then
+            echo "::error::a qualification test was SKIPPED; a skip is not a pass"; exit 1
+          fi
+          for t in TestZonedIPv6Dest_BackendIsNeverReached TestZonedIPv6Dest_RefusedBeforePolicyOnHTTPAndCONNECT TestZonedIPv6Dest_SourceGatesAnswerFirst; do
+            if ! grep -qE "^--- PASS: $t " ipv6-qualification.log; then
+              echo "::error::$t did not report PASS"; exit 1
+            fi
+          done
+          echo "QUALIFIED at ${GITHUB_SHA}: $(grep -E '^--- PASS: TestZonedIPv6Dest_BackendIsNeverReached ' ipv6-qualification.log)"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: ipv6-qualification-log
+          path: ipv6-qualification.log
+          retention-days: 30

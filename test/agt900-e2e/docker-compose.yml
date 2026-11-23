@@ -1,0 +1,36 @@
+# Compose project for the AGT-900 real-Docker e2e (test/agt900-e2e/run.sh).
+#
+# It mirrors the proxy service of test/e2e/maint-agent/docker-compose.e2e.yml,
+# and so of the production docker-compose.yml: the FIXED local tag
+# culvert/proxy:pinned (the only thing the maintenance agent moves), a fixed
+# container name, restart: unless-stopped, the data-plane port published on
+# host loopback (the agent's health_base_url), a /data volume and a container
+# healthcheck. The harness renders @@PROXY_PORT@@ and never edits anything else.
+#
+# Test-only differences, kept deliberately small:
+#   - the image is the FROM-scratch fake proxy (test/agt900-e2e/fakeproxy), so
+#     the healthcheck runs the binary's own `-probe` instead of wget;
+#   - ./ctl is bind-mounted at /ctl so the harness can stall /ready and land a
+#     kill inside the agent's health gate (see fakeproxy/main.go).
+name: agt900
+services:
+  proxy:
+    image: culvert/proxy:pinned
+    container_name: agt900-proxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:@@PROXY_PORT@@:8080"
+    volumes:
+      - proxy-data:/data
+      - ./ctl:/ctl
+    environment:
+      - TZ=UTC
+    healthcheck:
+      test: ["CMD", "/app", "-probe"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  proxy-data:

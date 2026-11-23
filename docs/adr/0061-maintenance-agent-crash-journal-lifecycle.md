@@ -85,9 +85,10 @@ What the report says, per record (`server.InterruptedOperation`):
   *run*.
 - `docker_reconciled: false`, stated, so `failed` cannot be read as "rolled
   back", and an `operator_action` sentence.
-- From `GET /v1/status` only, read live and only while a record exists:
-  `running_image` (`target` / `prior` / `other` / `ambiguous` / `unknown`) and
-  `pinned_tag` `{image_id, matches_running}`. A failed read is `unknown`, never
+- From `GET /v1/status` only, read live: `running_image` (`target` / `prior` /
+  `other` / `ambiguous` / `unknown`) while a record exists, and `pinned_tag`
+  `{image_id, matches_running}` on every status (a record is not the only way
+  the tag and the container come apart). A failed read is `unknown`, never
   a guess. The tag read is the existing image-inspect template with the literal
   fixed tag; no sudoers line is added.
 

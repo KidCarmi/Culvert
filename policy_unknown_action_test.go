@@ -111,53 +111,82 @@ func TestSECPOLICYACTION1_KnownActionsStillDispatchUnchanged(t *testing.T) {
 
 // ─── 2. The durable / bulk install gate ────────────────────────────────────
 
-// TestSECPOLICYACTION1_PersistableRefusesUnknownAction pins the gate itself.
-func TestSECPOLICYACTION1_PersistableRefusesUnknownAction(t *testing.T) {
+// TestSECPOLICYACTION1_PersistableRetainsUnknownActionForFailClosed proves that
+// imported future-version actions are NOT dropped: the runtime dispatcher must
+// see them to block matching traffic. New API writes still validate actions.
+func TestSECPOLICYACTION1_PersistableRetainsUnknownActionForFailClosed(t *testing.T) {
 	for _, action := range unknownActions {
 		rule := &PolicyRule{Priority: 1, Name: "probe", DestFQDN: "*", Action: action}
-		ok, reason := policyRulePersistable(rule)
-		if ok {
-			t.Errorf("DEFECT: policyRulePersistable accepted action %q", action)
-		} else if reason == "" {
-			t.Errorf("action %q refused with no reason — the load warning would be empty", action)
+		if ok, reason := policyRulePersistable(rule); !ok {
+			t.Errorf("unknown action %q was discarded (%s); this can fail open with default allow", action, reason)
 		}
 	}
-	// CONTROL: every dispatchable action is still persistable.
+	// Known actions must remain persistable as before.
 	for _, action := range []PolicyAction{ActionAllow, ActionDrop, ActionBlockPage, ActionRedirect} {
 		rule := &PolicyRule{Priority: 1, Name: "probe", DestFQDN: "*", Action: action}
 		if ok, reason := policyRulePersistable(rule); !ok {
-			t.Errorf("policyRulePersistable rejected the valid action %q: %s", action, reason)
+			t.Errorf("known action %q was discarded: %s", action, reason)
 		}
 	}
 }
 
-// TestSECPOLICYACTION1_ReplaceAllDropsUnknownActionKeepsValid covers the
-// CP->DP snapshot apply and replace-mode config import, which share
-// ReplaceAll. The valid rule must survive, so the drop is per-rule and does not
-// discard a whole pushed rulebase.
-func TestSECPOLICYACTION1_ReplaceAllDropsUnknownActionKeepsValid(t *testing.T) {
+// assertUnknownActionBlockedFromStore tests through the real published matcher
+// and terminal dispatcher, not a hand-constructed PolicyMatch.
+func assertUnknownActionBlockedFromStore(t *testing.T, ps *PolicyStore, host string, action PolicyAction) {
+	t.Helper()
+	match := ps.Evaluate("203.0.113.9", "", "", host, nil)
+	if match == nil || match.Rule == nil || match.Action != action {
+		t.Fatalf("expected published unknown action %q to match %q, got %+v", action, host, match)
+	}
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+host+"/", http.NoBody)
+	w := httptest.NewRecorder()
+	status, terminal := applyPolicyDecision(w, r, "203.0.113.9", host,
+		"req-unknown-published", "", AuthLogFields{}, match)
+	if status != "POLICY_BLOCK" || !terminal || w.Code == http.StatusOK {
+		t.Fatalf("published unknown action %q returned status=%q terminal=%v http=%d; want terminal block",
+			action, status, terminal, w.Code)
+	}
+}
+
+// TestSECPOLICYACTION1_ReplaceAllRetainsUnknownActionAndBlocks covers CP->DP
+// apply and replace-import, including an unrelated valid rule as a control.
+func TestSECPOLICYACTION1_ReplaceAllRetainsUnknownActionAndBlocks(t *testing.T) {
 	setupProxyTest(t)
 	snapshotPolicyStoreForTest(t)
-
 	policyStore.ReplaceAll([]PolicyRule{
-		{Priority: 1, Name: "probe-bad-action", DestFQDN: "*", Action: "Block"},
-		{Priority: 2, Name: "probe-good-action", DestFQDN: "*.example.com", Action: ActionBlockPage},
+		{Priority: 1, Name: "future-action", DestFQDN: "blocked.example.com", Action: "Quarantine"},
+		{Priority: 2, Name: "known-allow", DestFQDN: "allowed.example.com", Action: ActionAllow},
 	})
+	if got := len(policyStore.List()); got != 2 {
+		t.Fatalf("ReplaceAll published %d rules, want both unknown and known", got)
+	}
+	assertUnknownActionBlockedFromStore(t, policyStore, "blocked.example.com", "Quarantine")
+	if match := policyStore.Evaluate("203.0.113.9", "", "", "allowed.example.com", nil); match == nil || match.Rule.Name != "known-allow" || match.Action != ActionAllow {
+		t.Fatalf("unrelated known allow must survive unchanged, got %+v", match)
+	}
+	if match := policyStore.Evaluate("203.0.113.9", "", "", "unmatched.example.com", nil); match != nil {
+		t.Fatalf("non-matching destination must remain unmatched, got %+v", match)
+	}
+}
 
-	var sawBad, sawGood bool
-	for _, r := range policyStore.List() {
-		switch r.Name {
-		case "probe-bad-action":
-			sawBad = true
-		case "probe-good-action":
-			sawGood = true
-		}
+// TestSECPOLICYACTION1_LoadRetainsUnknownActionAndBlocks covers on-disk
+// backwards compatibility: an older binary must never turn a newer action
+// into permission to reach the destination.
+func TestSECPOLICYACTION1_LoadRetainsUnknownActionAndBlocks(t *testing.T) {
+	setupProxyTest(t)
+	ps := loadIntoFreshStore(t, `[
+		{"priority":1,"name":"future-action","destFQDN":"blocked.example.com","action":"Quarantine"},
+		{"priority":2,"name":"known-allow","destFQDN":"allowed.example.com","action":"Allow"}
+	]`)
+	if got := ps.DroppedOnLoad(); got != 0 {
+		t.Fatalf("unknown action must not be silently dropped, count=%d", got)
 	}
-	if sawBad {
-		t.Error("DEFECT: ReplaceAll installed a rule whose action this build does not dispatch")
+	if got := len(ps.List()); got != 2 {
+		t.Fatalf("Load published %d rules, want 2", got)
 	}
-	if !sawGood {
-		t.Error("ReplaceAll dropped the VALID rule too — the gate is not per-rule")
+	assertUnknownActionBlockedFromStore(t, ps, "blocked.example.com", "Quarantine")
+	if match := ps.Evaluate("203.0.113.9", "", "", "allowed.example.com", nil); match == nil || match.Rule.Name != "known-allow" || match.Action != ActionAllow {
+		t.Fatalf("unrelated known allow must survive Load, got %+v", match)
 	}
 }
 
