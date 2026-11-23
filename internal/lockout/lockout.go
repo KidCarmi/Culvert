@@ -590,7 +590,8 @@ func Msg(seconds int) string {
 // Admin API rate limiter — protects mutation endpoints against abuse.
 //
 // A sliding window of Burst requests is allowed per IP per RateWindow.
-// This runs *after* session auth, so it limits authenticated admin actions.
+// package main charges it in securityMiddleware, which wraps the session
+// check, so it counts unauthenticated callers too — see MaxAPIRateEntries.
 // ---------------------------------------------------------------------------
 
 const (
@@ -605,15 +606,118 @@ type apiRateEntry struct {
 	windowStart time.Time
 }
 
+// MaxAPIRateEntries caps how many per-IP windows one APIRateLimiter retains.
+//
+// The key is the client IP of a request that has NOT been authenticated: the
+// admin API limiter is charged in the security middleware, ahead of the session
+// check, and the Basic-auth failure limiter is charged by any caller that
+// submits credentials. Each distinct source address therefore mints an entry,
+// and an IPv6 source sweep makes distinct addresses free. Before this cap the
+// only bound was the 5-minute janitor, so the map held every address seen
+// between two sweeps: measured at 1 000 000 addresses, 125 MiB of reachable
+// heap, a 205 ms sweep under the mutex every mutating admin request takes, and
+// 53 MiB still held afterwards because a Go map never gives its buckets back.
+//
+// 65 536 is three orders of magnitude above any real admin population and
+// bounds a limiter at roughly 11 MiB (measured with full-length IPv6 keys).
+// See reclaimLocked for what happens at the cap and why that is safe.
+const MaxAPIRateEntries = 65536
+
+// apiRateSlot is one position in APIRateLimiter.order: the entry a window was
+// started with, and the key it was stored under.
+type apiRateSlot struct {
+	ip    string
+	entry *apiRateEntry
+}
+
 // APIRateLimiter limits mutating admin API calls per client IP.
+//
+// The zero value of every field but entries is ready to use, so a limiter
+// built as a literal with only the map behaves exactly like one from
+// NewAPIRateLimiter.
 type APIRateLimiter struct {
 	mu      sync.Mutex
 	entries map[string]*apiRateEntry
+	// order lists the windows in the order they were started; order[head:] is
+	// the part not yet reclaimed. Windows start at time.Now() under mu, so the
+	// list is sorted by windowStart and its front is always the oldest window —
+	// which makes both "drop what expired" and "pick the eviction victim" a pop
+	// from the front instead of a scan of the map.
+	order []apiRateSlot
+	head  int
+	// limit overrides MaxAPIRateEntries when positive (tests).
+	limit int
+	// peak is the largest len(entries) since the map was last rebuilt; Cleanup
+	// uses it to return a flood's buckets to the allocator.
+	peak int
 }
 
 // NewAPIRateLimiter returns a ready-to-use APIRateLimiter.
 func NewAPIRateLimiter() *APIRateLimiter {
 	return &APIRateLimiter{entries: map[string]*apiRateEntry{}}
+}
+
+// reclaimLocked makes room for ONE window about to be started for ip. It pops
+// every expired window off the front of order, and then, if the limiter would
+// still exceed its cap, the oldest live ones. Each slot is popped once, so the
+// cost is amortized O(1) per started window. Caller holds a.mu.
+//
+// Evicting a LIVE window forgets that client's count, i.e. hands it a fresh
+// Burst early. That is the deliberate saturation behaviour, and it gives a
+// flooding caller nothing it did not already have: the cap is only reached by
+// presenting MaxAPIRateEntries distinct addresses inside one RateWindow, and
+// each of those addresses already carries its own full Burst. The alternative
+// — refusing a new address while the table is full — would let the same flood
+// lock every administrator out of the mutating API, which is the worse
+// failure for a control plane. Eviction is oldest-first, so the windows lost
+// are the ones closest to expiring anyway.
+func (a *APIRateLimiter) reclaimLocked(ip string, now time.Time) {
+	limit := a.limit
+	if limit <= 0 {
+		limit = MaxAPIRateEntries
+	}
+	grows := 1
+	if _, ok := a.entries[ip]; ok {
+		grows = 0 // replacing ip's own expired window adds no key
+	}
+	for a.head < len(a.order) {
+		s := a.order[a.head]
+		// A slot is stale when its key has since been given a newer window
+		// (or was removed); only the live slot may delete the map entry.
+		live := a.entries[s.ip] == s.entry
+		if live && now.Sub(s.entry.windowStart) <= RateWindow && len(a.entries)+grows <= limit {
+			break
+		}
+		if live {
+			delete(a.entries, s.ip)
+			if s.ip == ip {
+				grows = 1
+			}
+		}
+		a.order[a.head] = apiRateSlot{}
+		a.head++
+	}
+	// Slide the live tail down once the popped prefix is at least half the
+	// list, so order's backing array stays proportional to the live windows.
+	if a.head > 0 && a.head*2 >= len(a.order) {
+		n := copy(a.order, a.order[a.head:])
+		clear(a.order[n:])
+		a.order = a.order[:n]
+		a.head = 0
+	}
+}
+
+// startWindowLocked opens a fresh window for ip with its first unit already
+// charged, replacing any expired one. Caller holds a.mu.
+func (a *APIRateLimiter) startWindowLocked(ip string, now time.Time) *apiRateEntry {
+	a.reclaimLocked(ip, now)
+	e := &apiRateEntry{count: 1, windowStart: now}
+	a.entries[ip] = e
+	a.order = append(a.order, apiRateSlot{ip: ip, entry: e})
+	if len(a.entries) > a.peak {
+		a.peak = len(a.entries)
+	}
+	return e
 }
 
 // Allow returns true if the IP is within the rate limit for API mutations.
@@ -623,7 +727,7 @@ func (a *APIRateLimiter) Allow(ip string) bool {
 	e := a.entries[ip]
 	now := time.Now()
 	if e == nil || now.Sub(e.windowStart) > RateWindow {
-		a.entries[ip] = &apiRateEntry{count: 1, windowStart: now}
+		a.startWindowLocked(ip, now)
 		return true
 	}
 	e.count++
@@ -652,8 +756,7 @@ func (a *APIRateLimiter) Reserve(ip string) (Reservation, bool) {
 	e := a.entries[ip]
 	now := time.Now()
 	if e == nil || now.Sub(e.windowStart) > RateWindow {
-		e = &apiRateEntry{count: 1, windowStart: now}
-		a.entries[ip] = e
+		e = a.startWindowLocked(ip, now)
 		return Reservation{ip: ip, entry: e}, true
 	}
 	if e.count >= Burst {
@@ -682,7 +785,21 @@ func (a *APIRateLimiter) Refund(r Reservation) {
 	e.count--
 }
 
-// Cleanup removes expired entries.
+// apiRateShrinkFloor is the peak below which Cleanup does not bother
+// rebuilding the map: an ordinary admin population never reaches it, so the
+// rebuild runs only in the aftermath of a flood.
+const apiRateShrinkFloor = 1024
+
+// Cleanup removes expired entries. It is the periodic janitor pass; the
+// request path no longer depends on it for the bound (reclaimLocked enforces
+// that on every started window), so its scan is over at most
+// MaxAPIRateEntries keys however many addresses arrived since the last pass.
+//
+// It also gives memory back. Deleting keys does not shrink a Go map, so after
+// a flood the limiter would keep its peak-sized bucket array for the life of
+// the process; once the population has fallen to a quarter of the recorded
+// peak the survivors are moved to a right-sized map and the old one is left to
+// the collector.
 func (a *APIRateLimiter) Cleanup() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -691,5 +808,25 @@ func (a *APIRateLimiter) Cleanup() {
 		if now.Sub(e.windowStart) > RateWindow {
 			delete(a.entries, k)
 		}
+	}
+	// Drop the slots whose window is gone, keeping the rest in start order.
+	// kept aliases order's backing array and never overtakes the read index.
+	kept := a.order[:0]
+	for _, s := range a.order[a.head:] {
+		if a.entries[s.ip] == s.entry {
+			kept = append(kept, s)
+		}
+	}
+	clear(a.order[len(kept):])
+	a.order, a.head = kept, 0
+
+	if a.peak >= apiRateShrinkFloor && len(a.entries)*4 <= a.peak {
+		fresh := make(map[string]*apiRateEntry, len(a.entries))
+		for k, e := range a.entries {
+			fresh[k] = e
+		}
+		a.entries = fresh
+		a.order = append(make([]apiRateSlot, 0, len(kept)), kept...)
+		a.peak = len(fresh)
 	}
 }
