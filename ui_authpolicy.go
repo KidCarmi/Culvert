@@ -229,6 +229,18 @@ func runningPolicyVersionConflict(w http.ResponseWriter, r *http.Request) bool {
 	return policyVersionConflictAgainst(w, r, cur)
 }
 
+// validateAuthRuleIngress is the auth-rule counterpart of
+// validateAccessRuleIngress: validateRuleShape plus the state-independent
+// checks that apply only where an admin SUBMITS a rule. An auth rule scopes its
+// destination through the same matcher (matchDestNorm), so the reserved-"Any"
+// door applies here too (POL-005). Bulk/restore paths do not run it.
+func validateAuthRuleIngress(rule PolicyRule) error {
+	if err := validateRuleShape(rule); err != nil {
+		return err
+	}
+	return validateDestCategoryNotReservedVariant(rule.DestCategory)
+}
+
 func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	// Blocker B (shared side): an auth rule can reference shared objects
 	// (destination category/group) — acquired before the policy writeGate
@@ -253,7 +265,7 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// Structural validation (state-independent) stays a pre-fence 400; the
 	// name/priority uniqueness checks run INSIDE the fence below.
-	if err := validateRuleShape(rule); err != nil {
+	if err := validateAuthRuleIngress(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -341,7 +353,7 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateRuleShape(rule); err != nil {
+	if err := validateAuthRuleIngress(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

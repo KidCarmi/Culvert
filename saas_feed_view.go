@@ -428,10 +428,19 @@ func newFeedLiveStore() *feedLiveStore { return &feedLiveStore{} }
 // so it enters the exclusive side of taxonomyAuthorityGate: a transition that
 // can change built-in ownership linearizes against every in-flight v2
 // BuiltIn mutation (Blocker C). The gate wraps only the pointer swap.
+//
+// After the swap (and outside the gate) the process-wide holder reports stored
+// policy rules whose category reference the new view no longer resolves
+// (POL-005, policy_category_health.go). That report is read-only and a no-op
+// until main arms it after the category authorities load.
 func (s *feedLiveStore) Swap(v *effectiveCategoryView) *effectiveCategoryView {
 	taxonomyAuthorityGate.Lock()
-	defer taxonomyAuthorityGate.Unlock()
-	return s.ptr.Swap(v)
+	old := s.ptr.Swap(v)
+	taxonomyAuthorityGate.Unlock()
+	if s == saasEffectiveView {
+		noteCategoryAuthorityChanged()
+	}
+	return old
 }
 
 func (s *feedLiveStore) Current() *effectiveCategoryView { return s.ptr.Load() }

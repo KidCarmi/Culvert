@@ -286,6 +286,12 @@ func main() {
 	// no write, no version movement — on a clean boot. Runs long before any
 	// listener starts (startUI / startProxy come after the init block).
 	reconcileObjectRefNames()
+	// POL-005: report stored rules whose category / category-group reference
+	// no category authority resolves. Here, not in PolicyStore.Load: the
+	// authorities (catStore, groups, effective view, community DB) load in
+	// initURLCategories, AFTER initPolicy — judging at Load would report every
+	// category reference as dangling. Read-only; enforcement is unchanged.
+	armUnresolvedCategoryRefReporting()
 	initSSLBypassAndDPI(s)
 	initH2InspectServer() // PR3d: eager-build the shared graceful-shutdown H2 server
 	initRewriteAndDefaultAction(s)
@@ -1789,6 +1795,7 @@ func applyHotReload(fc *FileConfig) {
 			logger.Printf("Reload: policy error: %v", err)
 		} else {
 			logger.Printf("Reload: policy %d rules", len(policyStore.List()))
+			reportUnresolvedCategoryRefs()
 		}
 	}
 

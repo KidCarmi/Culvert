@@ -252,12 +252,42 @@ func validateAccessRule(rule PolicyRule) error {
 // apiPolicyUpdateByID), where there is a caller to tell. The bulk and restore
 // paths (config rollback, backup import, draft publish, PolicyStore.Load and
 // ReplaceAll) deliberately do not run these: a rule already on disk or in a
-// version keeps loading, and Load warns about it instead (warnInertSourceIP).
+// version keeps loading, and Load warns about it instead (warnInertSourceIP);
+// a stored reserved-name variant is reported by the unresolved-reference
+// diagnostics (policy_category_health.go), never rewritten.
 func validateAccessRuleIngress(rule PolicyRule) error {
 	if err := validateRuleShape(rule); err != nil {
 		return err
 	}
+	if err := validateDestCategoryNotReservedVariant(rule.DestCategory); err != nil {
+		return err
+	}
 	return validateRuleSourceIP(rule.SourceIP)
+}
+
+// validateDestCategoryNotReservedVariant refuses a destCategory that case-folds
+// to the reserved wildcard "Any" without being exactly "Any" (POL-005).
+//
+// Only exact "Any" and "" are wildcards on the hot path (matchDestNorm,
+// policy.go); category matching folds case, so "any" or "ANY" is a reference to
+// a CATEGORY of that name. It matches nothing unless some authority carries the
+// name, which makes a Drop rule written as "any" silently inert. The value is
+// refused at the door, state-independently, and NEVER canonicalized: rewriting
+// a stored "any" to "Any" would turn a Drop that matches nothing into drop-all
+// (and an Allow into allow-all). Stored rules keep loading unchanged.
+func validateDestCategoryNotReservedVariant(c URLCategory) error {
+	if c == CategoryAny || !strings.EqualFold(string(c), string(CategoryAny)) {
+		return nil
+	}
+	return fmt.Errorf(`destCategory %q is not a category; use "Any" (exact) or omit destCategory for any destination`, string(c))
+}
+
+// reservedCategoryName reports whether a category NAME case-folds to the
+// reserved wildcard "Any". Such a name can never be referenced by a rule as
+// written ("Any" is the wildcard; every other spelling is refused at the rule
+// door), so creating one only manufactures the ambiguity POL-005 closes.
+func reservedCategoryName(name string) bool {
+	return strings.EqualFold(name, string(CategoryAny))
 }
 
 // validateRuleSourceIP reports whether a SourceIP is one the matcher can ever

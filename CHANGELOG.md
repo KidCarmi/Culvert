@@ -1766,6 +1766,33 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Changed
 
+- **A policy rule can no longer be written with `destCategory` "any", "ANY" or
+  any other case of `Any` except the exact wildcard (POL-005).** Only exact
+  `"Any"` and an empty value mean any destination; category matching folds
+  case, so `"any"` was a reference to a category of that name and matched
+  nothing unless one existed — a Drop rule written that way silently dropped
+  nothing. `POST`/`PUT /api/policy` (both `?priority=` and `?id=`) and
+  `POST`/`PUT /api/authpolicy` now answer 400 `destCategory "any" is not a
+  category; use "Any" (exact) or omit destCategory for any destination`, and
+  creating a URL category whose name is `Any` in any case (`POST /api/urlcat`,
+  and the upserting legacy `PUT`) answers 400. A draft commit whose added or
+  re-pointed rule references a category or category group that disappeared
+  since it was staged (for example a feed generation dropped the class) is
+  refused with the structured 400 `{error, referenceType, name, rule}`, and
+  nothing is activated. **Stored rules are untouched:** a policy file, draft,
+  backup or cluster snapshot carrying `"any"` or a dangling reference loads
+  and enforces exactly as before, and an existing category named `Any` stays
+  editable and deletable. `"any"` is never rewritten to `"Any"` — that would
+  turn a Drop that matches nothing into drop-all. Such rules are now reported
+  instead: one log line per rule once the category authorities have loaded
+  (and after each feed/override transition and SIGHUP reload), the gauge
+  `culvert_policy_rules_unresolved_refs{type="category"|"category_group"}`,
+  and the `policy_category_resolution` row on `/api/diagnostics`, all of
+  which clear without a restart once the reference resolves. What to do
+  about references that drift after they were written, and whether the data
+  plane should judge them against the control plane's set, is recorded as
+  the open question POL-902.
+
 - **A panicking feed round in `internal/feedsched` now reaches the crash plane,
   and the cold-start predicate can no longer kill the process.** The scheduler's
   `Config.OnPanic` seam was defined, documented and set by no production caller,

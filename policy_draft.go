@@ -493,6 +493,15 @@ func (c *policyDraftCoordinator) commitActivate(ifVersion *int64) (policyDraftDi
 			return policyDraftDiff{}, fmt.Errorf("candidate rule %s is invalid: %w", sanitizeLog(cand[i].Name), err)
 		}
 	}
+	// Reference door (POL-005): a rule this commit adds or re-points must
+	// resolve NOW, not merely when it was staged. Judged inside the same
+	// critical section as the activation; the handler holds the shared side of
+	// objectReferenceMutationGate, so no object delete or bulk install lands
+	// between this verdict and the ReplaceAll below.
+	if e := validateChangedCandidateRefs(policyStore.List(), cand); e != nil {
+		c.mu.Unlock()
+		return policyDraftDiff{}, e
+	}
 	diff := c.diffVsRunning()
 	// Activation is durable-or-nothing (Codex fix): a swallowed running-policy
 	// write failure used to clear the draft anyway — new policy in memory, old
@@ -1094,6 +1103,13 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleOperator) {
 		return
 	}
+	// Shared side of the reference-integrity gate (POL-005): commitActivate
+	// re-validates the references the commit adds or changes, so — like every
+	// other reference-creating writer — it holds the shared side across that
+	// verdict and the activation. Acquired once, OUTERMOST (gate → writeGate,
+	// the documented lock order).
+	refWriteLock()
+	defer refWriteUnlock()
 	// Exclusive side of the ordinary-write gate (Codex round 16): an in-flight
 	// CRUD handler sequence completes before the commit's snapshot, so its
 	// edit is either included or persists into the still-open draft — never
@@ -1142,7 +1158,12 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	// re-verified under the same lock.
 	diff, err := policyDraft.commitActivate(ifVersion)
 	if err != nil {
+		var dangling *danglingRefError
 		switch {
+		case errors.As(err, &dangling):
+			// The structured integrity 400 every reference door returns,
+			// naming the candidate rule; nothing was activated.
+			writeDanglingRefError(w, dangling)
 		case errors.Is(err, errDraftVersionConflict):
 			http.Error(w, err.Error(), http.StatusConflict)
 		case errors.Is(err, errDraftPersistFailed):

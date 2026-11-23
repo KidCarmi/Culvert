@@ -205,6 +205,7 @@ func TestCodexFix_ContentDriftAtDurabilityPointRefused(t *testing.T) {
 // append uses, and conflict instead of activating.
 func TestCodexFix_CommitFenceRecheckedInsideActivation(t *testing.T) {
 	plDurableDraftHarness(t)
+	codexfixCommitCategory(t)
 	setRequireCommit(true)
 
 	mkRule := func(name string) PolicyRule {
@@ -262,6 +263,7 @@ func TestCodexFix_CommitFenceRecheckedInsideActivation(t *testing.T) {
 // learning acceptance finalized against a target with no durable home.
 func TestCodexFix_CommitRetainsDraftWhenRunningPersistFails(t *testing.T) {
 	draftDir := plDurableDraftHarness(t)
+	codexfixCommitCategory(t)
 	rulesDir := t.TempDir()
 	prevPath := policyStore.path
 	policyStore.path = filepath.Join(rulesDir, "policy_rules.json")
@@ -594,6 +596,7 @@ func TestPolicyContentIdentity_CategoryGroupMembership(t *testing.T) {
 // rulebase and its label must match its content.
 func TestEffectivePolicySnapshot_CoherentUnderConcurrentCommit(t *testing.T) {
 	plDurableDraftHarness(t)
+	codexfixCommitCategory(t)
 	setRequireCommit(true)
 	for i := 0; i < 40; i++ {
 		disabled := false
@@ -630,6 +633,7 @@ func TestEffectivePolicySnapshot_CoherentUnderConcurrentCommit(t *testing.T) {
 // using the exact handler bracket.
 func TestCodexFix_OrdinaryDraftEditNeverVanishesUnderCommit(t *testing.T) {
 	plDurableDraftHarness(t)
+	codexfixCommitCategory(t)
 	setRequireCommit(true)
 	for i := 0; i < 40; i++ {
 		disabled := false
@@ -688,6 +692,7 @@ func TestCodexFix_OrdinaryDraftEditNeverVanishesUnderCommit(t *testing.T) {
 // concurrent stress; run under -race.
 func TestCodexFix_CommitAppendNeverVanishesRule(t *testing.T) {
 	plDurableDraftHarness(t)
+	codexfixCommitCategory(t)
 	setRequireCommit(true)
 	for i := 0; i < 40; i++ {
 		ver, _ := effectivePolicyVersion()
@@ -859,5 +864,20 @@ func TestCodexFix_LateChargeAfterAppendCompensatesDraftRule(t *testing.T) {
 	}
 	if plFindTargetRule(rec.TargetRuleID) != nil {
 		t.Fatalf("candidate still carries rule %s after the compensating removal", rec.TargetRuleID)
+	}
+}
+
+// codexfixCommitCategory makes "m5b-cat" — the category every engine-level
+// staged rule in these commit tests references — a live admin category.
+// Draft commit re-validates the references it adds (POL-005), so without it
+// every commit here would be refused as a dangling reference and the
+// durability/concurrency properties these tests pin would go unexercised.
+// The production staging door (Accept-to-Draft) validates the same reference
+// before it stages, so a live category is the realistic fixture.
+func codexfixCommitCategory(t *testing.T) {
+	t.Helper()
+	snapshotCatStore(t)
+	if err := catStore.Set("m5b-cat", []string{"m5b.example"}, false); err != nil {
+		t.Fatal(err)
 	}
 }

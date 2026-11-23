@@ -1673,6 +1673,10 @@ culvert_dns_resolve_degraded %d
 	// assumed — this block cost 6 and the extraction gives it back.
 	writeIdPMetadataMetrics(w)
 
+	// POL-005: stored rules whose category / category-group reference no
+	// current authority resolves (policy_category_health.go).
+	writePolicyUnresolvedRefMetrics(w)
+
 	// RISK-027: MCP Agent Security Gateway capability health. Emitted ONLY on a
 	// node that requested MCP — `culvert_mcp_gateway_up 0` on a node that never had
 	// MCP is indistinguishable from a dead listener, and the paging rule is `== 0`

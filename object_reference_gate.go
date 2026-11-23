@@ -32,18 +32,21 @@ import "sync"
 //     access-rule create + edit, auth-rule create + edit, category-group
 //     create + membership edit (groups reference categories), decryption-
 //     profile update (the rename cascade rewrites rule references), Policy
-//     Learning Accept-to-Draft. Concurrent reference writers never conflict
-//     with each other; each serializes only against deletes/bulk installs.
+//     Learning Accept-to-Draft, and draft commit (POL-005: it re-validates
+//     the references it adds or changes against the CURRENT authorities, so
+//     that verdict must hold until the activation). Concurrent reference
+//     writers never conflict with each other; each serializes only against
+//     deletes/bulk installs.
 //
 // AUDITED NON-HOLDERS (§6 — classified, deliberately outside the gate):
 //   - rule delete / bulk-delete / reorder / move, auth-rule delete/reorder,
 //     draft discard-staged: reference-REMOVING or order-only — they cannot
 //     create a dangling reference; at worst a delete's scan sees a
 //     just-removed reference and over-blocks (the safe direction).
-//   - draft commit / revert: the objectReferences walk already covers the
-//     ACTIVE draft candidate, so commit only promotes references the scan
-//     could already see, and revert discards references — neither creates a
-//     reference invisible to a concurrent scan.
+//   - draft revert: discards references, so it cannot create one invisible
+//     to a concurrent scan. (Draft commit was a non-holder too — the walk
+//     already covers the ACTIVE candidate — until it gained its own
+//     reference verdict; see the shared side above.)
 //   - startup loaders (Load, before any listener): exempt by ordering.
 //
 // LOCK ORDER (acyclic; the gate is OUTERMOST): objectReferenceMutationGate →
