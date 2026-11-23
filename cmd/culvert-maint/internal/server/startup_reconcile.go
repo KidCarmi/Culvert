@@ -352,6 +352,15 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 	}
 	c := &reconcileCase{opID: opID, rec: rec, in: s.reconcileInputsFor(rec)}
 	c.out = ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind)}
+	// Decide only on a Docker that no request of the dead operation can still
+	// change: dockerd may be stopping the old proxy container for it, and
+	// until that is over a container that is "running the prior image" is not
+	// evidence of anything (settle.go). If the wait cannot be completed, the
+	// record is kept.
+	if _, serr := s.settleInterrupted(ctx); serr != nil {
+		c.out.Decision, c.out.Reason = actV2RecoveryRequired.String(), "settle_wait_cut_short"
+		return s.keepRecord(c, OutcomeRecoveryRequired)
+	}
 	if dockerReady {
 		s.readReconcileFacts(ctx, rec, &c.in)
 	}
@@ -372,7 +381,7 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 			c.out.Reason = "docker_changed_during_reconcile"
 			return s.keepRecord(c, OutcomeRecoveryRequired)
 		}
-		return s.retire(c)
+		return s.retireIfServing(ctx, c)
 	}
 	return s.act(ctx, c, v)
 }
@@ -479,6 +488,32 @@ func (s *Server) act(ctx context.Context, c *reconcileCase, v reconcileVerdictV2
 		return s.keepRecord(c, OutcomeRecoveryRequired)
 	}
 	c.out.DockerReconciled = true
+	return s.retireIfServing(ctx, c)
+}
+
+// retireIfServing is the only way a record is retired by the reconcile.
+//
+// Matching identities are not convergence: "the container runs the prior image
+// and the tag is on it" was true, on real Docker, of a proxy dockerd was
+// already stopping for the dead operation. A record is retired only when
+//   - the settle window is over, so no request of the interrupted operation
+//     can still be pending (reconcileOne waited for it before reading Docker),
+//     and
+//   - a readiness probe taken NOW, after that, succeeds.
+//
+// Anything less keeps the record and reports recovery_required. There is no
+// "probably converged".
+func (s *Server) retireIfServing(ctx context.Context, c *reconcileCase) ReconcileRecord {
+	if deadline, _, err := s.settleDeadline(time.Now()); err != nil || time.Now().Before(deadline) {
+		c.out.DockerReconciled = false
+		c.out.Reason = "settle_not_established"
+		return s.keepRecord(c, OutcomeRecoveryRequired)
+	}
+	if s.probeReadiness(ctx) != probeReady {
+		c.out.DockerReconciled = false
+		c.out.Reason = "not_ready_at_retirement"
+		return s.keepRecord(c, OutcomeRecoveryRequired)
+	}
 	return s.retire(c)
 }
 

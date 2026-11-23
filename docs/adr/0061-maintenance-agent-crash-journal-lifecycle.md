@@ -256,3 +256,11 @@ goes through the health gate. A success, and the retirement of records it
 causes, is therefore judged on a container no outstanding request can touch.
 Records before the barrier cause no wait. The wait is not a new stage and adds
 no docker call.
+
+The startup reconcile (`reconcile_on_startup = "converge"`) follows the same
+rule and one more. It waits out the settle window before it reads Docker for a
+record, and it retires a record only after a readiness probe taken at that
+point succeeds. Matching container and tag identities alone are not
+convergence. If the wait cannot be completed or the probe fails, the record is
+kept and the outcome is `recovery_required` (`settle_wait_cut_short`,
+`settle_not_established`, `not_ready_at_retirement`).
