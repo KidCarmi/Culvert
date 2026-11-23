@@ -90,7 +90,7 @@ No configuration is required - the setup wizard creates your first admin account
 | Endpoint | URL | Notes |
 |---|---|---|
 | HTTP/HTTPS proxy | `http://localhost:8080` | Point your browser / PAC here |
-| SOCKS5 proxy | `socks5://localhost:1080` | Disabled by default (`socks5_port: 0`); enable in config |
+| SOCKS5 proxy | `socks5://localhost:1080` | Disabled by default (`socks5_port: 0`); enable in config. Access policy applies only with `socks5_policy_mode: enforce` ([details](docs/operator/socks5-policy.md)) |
 | PAC file | `http://localhost:8080/proxy.pac` | Browser auto-config |
 | Admin UI | `https://localhost:9090` | Accept the self-signed cert on first visit |
 | Health (liveness) | `http://localhost:8080/health` | `{"status":"ok", ...}` |
@@ -375,7 +375,7 @@ Stated plainly, because a security product should be honest about its edges:
 - **Revocation:** OCSP only - **CRL checking is not implemented**. OCSP fails open when a certificate publishes no responder. More significantly, the OCSP callbacks are wired to the upstream **parent-proxy** TLS handshake only (the `upstream.proxies` YAML block or the admin UI's Upstream panel) - the SSL-inspected **origin** certificate, the one your MITM policy is deciding to trust on the client's behalf, is **not currently OCSP-checked at all**. This is a deliberate, owner-tracked scope decision, not an oversight - attaching the same fail-closed check to every inspected handshake would make egress depend on reaching an external responder, which is unacceptable on networks where outbound port 80 is blocked by policy. See [`docs/operator/ocsp-revocation-checking.md`](docs/operator/ocsp-revocation-checking.md#6-why-inspected-https-is-not-covered-yet) for the coverage matrix and rationale.
 - **Fresh-install posture:** with zero rules and no `default_action`, the proxy starts in passthrough (allow), not deny. Enforce Zero Trust explicitly.
 - **Post-quantum:** key exchange is quantum-resistant (inherited from the Go standard library); certificate signing remains classical ECDSA P-256.
-- **SOCKS5:** CONNECT only - UDP ASSOCIATE is rejected.
+- **SOCKS5:** CONNECT only - UDP ASSOCIATE is rejected. Stage-2 access policy (rules, categories, groups, geo, schedules, default action) applies to SOCKS5 only with `proxy.socks5_policy_mode: enforce`; the default (`legacy`) applies authentication, admission, the blocklist, the threat feed, plugins and the SSRF guard but no access policy. SOCKS5 has no TLS inspection, so in `enforce` an Allow rule that requires inspection is refused. SOCKS5 username/password is verified by LDAP providers only - never by admin-console accounts, and not by OIDC or SAML. See [`docs/operator/socks5-policy.md`](docs/operator/socks5-policy.md).
 - **License gate:** blocks GPL/AGPL/LGPL; CPAL is not currently enforced by the license check.
 - **Sizing figures** in the deployment tables are engineering estimates, not published benchmarks - validate against your own workload before capacity planning.
 

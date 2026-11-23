@@ -20,8 +20,8 @@ proxy:
   port: 8080          # HTTP proxy port (1–65535)
   ui_port: 9090       # Web UI port (HTTPS, self-signed cert by default)
   socks5_port: 0      # SOCKS5 proxy port (0 = disabled, e.g. 1080)
-  # socks5_policy_mode: legacy  # legacy (default: SOCKS5 skips Stage-2 policy) | shadow (evaluate + record, never block).
-                                # Startup-only. See docs/operator/socks5-policy-shadow.md
+  # socks5_policy_mode: legacy  # legacy (default: SOCKS5 skips Stage-2 policy) | shadow (evaluate + record, never block) | enforce (policy decides; Inspect rules refused).
+                                # Startup-only. See docs/operator/socks5-policy.md
   blocklist: ""       # Path to blocklist file (one host per line; *.example.com wildcards supported)
   log_file: ""        # Path to log file (empty = stdout only)
   log_max_mb: 50      # Rotate log when it reaches this size in MB
