@@ -29,7 +29,9 @@ protected:
   - cmd/contractcheck/**
   - .github/workflows/product-contracts.yml
 
-amended: []
+amended:
+  - id: SWG-901
+    reason: "Narrowed from 'SOCKS5 traffic is subject to the same policy evaluation as HTTP and CONNECT' to the enforce mode that now implements it (SWG-901 stage 3/enforce; design record roadmap/SWG-901-SOCKS5-ALIGNMENT-PROPOSAL.md §6.5), and widened to the threat feed (D7) and the shared credential resolver (D8) on its password-only channel with no admin-console fallback (owner direction 2026-11-23). Owner Decision 4 placed SOCKS5 inside the managed boundary; the default mode stays legacy until the owner decides otherwise, so the entry stays open with that question. Inspect refuses per the owner direction of 2026-11-23, which supersedes D5."
 retired: []
 
 contracts:
@@ -578,12 +580,34 @@ contracts:
     area: swg-enforcement
     status: open
     owner_approved: false
-    invariant: "SOCKS5 traffic is subject to the same policy evaluation as HTTP and CONNECT."
-    authority: "SOCKS5 listener (socks5.go)."
+    invariant: "With proxy.socks5_policy_mode: enforce, a SOCKS5 CONNECT is decided by the same Stage-2 evaluator, rulebase and default action as HTTP and CONNECT, for the principal the shared proxy credential resolver produced (\"unauth\" without credentials); a verdict SOCKS5 cannot honour, including an Allow rule that requires TLS inspection, is refused, never tunnelled uninspected. In every mode SOCKS5 applies the threat-intelligence feed in the CONNECT pre-dispatch order, and SOCKS5 USER/PASS is verified only by password-verifying (directory) providers through the shared resolver: never by an interactive or token provider, and never by, or by falling back to, an admin-console credential."
+    authority: "SOCKS5 listener (socks5.go), its authentication (socks5_auth.go) and its Stage-2 hook (socks5_policy.go, socks5_policy_enforce.go); evaluator in policy.go; credential resolution in proxy_credential.go, shared with HTTP proxy Basic."
     code:
       - "socks5.go"
-    question: "UNDEFINED: SOCKS5 applies admission, auth, blocklist and SSRF checks but never calls the policy engine. Is SOCKS5 inside the managed policy boundary, or an explicitly unmanaged interface?"
-    compatibility: "Undecided; see question."
+      - "socks5_policy.go"
+      - "socks5_policy_enforce.go"
+      - "socks5_auth.go"
+      - "proxy_credential.go"
+    transitions:
+      permitted:
+        - "enforce: an Allow verdict proceeds to the SSRF guard and dial"
+      forbidden:
+        - "enforce: serving a destination the CONNECT dispatcher would refuse for the same principal"
+        - "enforce: tunnelling uninspected a destination CONNECT would inspect"
+        - "any mode: serving a threat-feed-listed destination"
+        - "any mode: authenticating a SOCKS5 client with an admin-console credential, or with an OIDC/SAML provider"
+    tests:
+      - {file: "socks5_policy_enforce_test.go", name: TestSOCKS5Enforce_ActionTable}
+      - {file: "socks5_parity_test.go", name: TestSOCKS5Enforce_VerdictEqualsCONNECTVerdict}
+      - {file: "socks5_parity_test.go", name: TestSOCKS5Enforce_DifferentialCatchesBypassAndIdentityLoss}
+      - {file: "socks5_threatfeed_test.go", name: TestSOCKS5ThreatFeed_RefusedInEveryMode}
+      - {file: "socks5_parity_test.go", name: TestSOCKS5ThreatFeed_VerdictEqualsCONNECT}
+      - {file: "socks5_parity_test.go", name: TestSOCKS5Identity_SharedResolverEqualsHTTPBasic}
+      - {file: "socks5_identity_test.go", name: TestSOCKS5Auth_AdminCredentialNeverAuthenticates}
+      - {file: "socks5_identity_test.go", name: TestSOCKS5Auth_ProviderClasses}
+    validation: integration
+    question: "Owner Decision 4 put SOCKS5 inside the managed boundary and enforce is implemented, but it is opt-in: the default mode is still legacy, which evaluates no Stage-2 policy. When does enforce become the default (removing legacy), and is the contract then promoted to enforced with this wording?"
+    compatibility: "Intentional breaking changes (pre-customer, owner direction 2026-11-23; CHANGELOG 'Changed (breaking)'): in every mode the threat feed refuses listed domains, and SOCKS5 credentials are checked only by LDAP providers, never the admin-console account, so a gateway with only admin-console accounts refuses every SOCKS5 client. Enabling enforce can refuse connections legacy served (default deny, identity/group rules, Inspect rules). The mode setting and legacy are transitional. Releases without the key or the enforce value refuse to start with it."
 
   - id: POL-900
     area: policy
