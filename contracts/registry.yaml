@@ -35,7 +35,7 @@ amended:
   - id: AGT-005
     reason: "Owner decision 1 on AGT-900 (recommendation D4): with reconcile_on_startup = \"converge\", the startup reconcile may also retire an interrupted record, but only after it verified convergence by image id and wrote the audit entry first. In the default \"off\" mode retirement is unchanged: only a later successful upgrade or image rollback."
   - id: AGT-900
-    reason: "Owner decision 1 resolved the open question for an opt-in, conservative converge mode: default off; no adoption of an unverified target; recovery_required when evidence is insufficient; Docker unavailable defers. The invariant is restated for that mode and the entry becomes enforced with its tests. owner_approved stays false: the wording is not ratified."
+    reason: "Owner decision 1 resolved the open question for an opt-in, conservative converge mode: default off; no adoption of an unverified target; recovery_required when evidence is insufficient; Docker unavailable defers. The invariant is restated for that mode, with its tests; the entry stays open until a real-Docker e2e verifies it (owner, 2026-11-23). owner_approved stays false."
 retired: []
 
 contracts:
@@ -783,7 +783,7 @@ contracts:
 
   - id: AGT-900
     area: agent-lifecycle
-    status: enforced
+    status: open
     owner_approved: false
     invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or reports recovery_required and changes nothing. It never starts an image that has not passed the health gate. With the default \"off\" it changes nothing (AGT-004)."
     authority: "Maintenance agent (cmd/culvert-maint). Owner decision 1 on the AGT-900 recovery proposal; lifecycle docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
@@ -821,6 +821,7 @@ contracts:
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_WriteAheadFailureMeansNoAction}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_DockerChangedBeforeActionIsNotActedOn}
     validation: integration
+    question: "OPEN until verified on a real Docker daemon (owner, 2026-11-23): does the conservative converge mode hold its safety properties against real Docker (the real-Docker e2e)? If it does, should converge become the default before the first customer release?"
     compatibility: "Opt-in; the default \"off\" is the AGT-004 behaviour. Proven against a fake Docker exec layer and the shell Docker model only, not yet against a real daemon (the proposal's real-Docker e2e is not built). Enabling it by default, and adopting a live target that never passed its gate, are not decided and are excluded by owner decision 1. A record from an agent that predates rollback_armed is never finished as a rollback; it is reported."
 
   - id: CFG-900
