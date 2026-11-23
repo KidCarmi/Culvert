@@ -96,6 +96,11 @@ type ReconcileRecord struct {
 	DockerReconciled bool     `json:"docker_reconciled"`
 	RunningImage     string   `json:"running_image,omitempty"`
 	PinnedTag        string   `json:"pinned_tag,omitempty"`
+	// SupersededBy names the later operation that retired this record (a
+	// successful, health-gated image change; journal_retire.go). The startup
+	// outcome above stays as history; a superseded record no longer counts
+	// toward the top-level recovery_required.
+	SupersededBy string `json:"superseded_by,omitempty"`
 }
 
 // ReconcileTracker holds the reconcile status shared with GET /v1/status.
@@ -122,17 +127,37 @@ func (t *ReconcileTracker) Snapshot() ReconcileStatus {
 	return out
 }
 
-// RecoveryRequired reports whether a record was left needing an operator.
+// RecoveryRequired reports whether a record is still left needing an
+// operator. A record a later operation retired (markSuperseded) no longer
+// counts: only positive evidence of retirement clears it, so an unreadable
+// record or a failed retirement keeps the flag set.
 func (t *ReconcileTracker) RecoveryRequired() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i := range t.st.Records {
+		if t.st.Records[i].SupersededBy != "" {
+			continue
+		}
 		switch t.st.Records[i].Outcome {
 		case OutcomeRecoveryRequired, OutcomeAbandoned, OutcomeConvergedNotRetired:
 			return true
 		}
 	}
 	return false
+}
+
+// markSuperseded records that byOpID retired opID's journal record after the
+// retirement was audited and the record removed. No-op for an op the startup
+// reconcile did not report.
+func (t *ReconcileTracker) markSuperseded(opID, byOpID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.st.Records {
+		if t.st.Records[i].OpID == opID {
+			t.st.Records[i].SupersededBy = byOpID
+			return
+		}
+	}
 }
 
 // RecordFor returns the reconcile result for a source op, if any.
