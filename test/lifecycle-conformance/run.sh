@@ -46,8 +46,10 @@ fi
 echo "== orphan survival: real agent binary, the in-flight docker command outlives the agent =="
 # Findings are pinned as `open` in orphanExpectations; a finding is not a failure, a change
 # in one is. Exit 0 or 1 needs POSITIVE evidence that every vector and control flow ran to
-# its end; 1 additionally needs every failed subtest to be explained by its own EXPECTATION
-# MISMATCH or A3 line. Anything else non-zero is INCOMPLETE (2).
+# its end, that every line the suites printed is on the output allowlist, and that the
+# sanctioned-failure count the test reports equals the MISMATCH/A3 lines printed; 1
+# additionally needs every failed subtest to be explained by its own EXPECTATION MISMATCH or
+# A3 line. Anything else non-zero is INCOMPLETE (2).
 OLOG="$REPORT/orphan-survival.log"
 OVEC=7                # kill points with a docker command in flight: killPoints() minus "health"
 OFLOWS=$((2 * OVEC))  # report + later-operation flow per vector; the reaped control runs the same 14
@@ -56,16 +58,29 @@ orc=$?
 grep -E '^(--- (PASS|FAIL|SKIP): TestOrphan|ok|FAIL|PASS)|CLASSIFY|ORPHAN-SUMMARY' "$OLOG" | head -40 || true
 # Never truncated: every line that decides the verdict.
 grep -E 'EXPECTATION MISMATCH|INVALID|A3:|panic:|test timed out|--- FAIL' "$OLOG" || true
-ocv=$(grep -cE "ORPHAN-COMPLETE TestOrphanSurvival_CrashVectors/[^ ]+ flow=(report|later)\$" "$OLOG" || true)
-occ=$(grep -cE "ORPHAN-COMPLETE TestOrphanSurvival_ReapedControl/[^ ]+ flow=control-later=(true|false)\$" "$OLOG" || true)
+ocv=$(grep -cE "ORPHAN-COMPLETE TestOrphanSurvival_CrashVectors/[^ ]+ flow=(report|later) sanctioned=[0-9]+\$" "$OLOG" || true)
+occ=$(grep -cE "ORPHAN-COMPLETE TestOrphanSurvival_ReapedControl/[^ ]+ flow=control-later=(true|false) sanctioned=[0-9]+\$" "$OLOG" || true)
+# Output allowlist: every t.Log/t.Error line in the log must start with one of these prefixes
+# (the test prints its own copy, which must be identical). Any other `<file>_test.go:<n>: `
+# line, an unmarked assertion or a shared rig helper's message, makes the run incomplete.
+ORPHAN_PREFIXES='ORPHAN-PREFIXES |ORPHAN-VECTORS |VECTOR |CLASSIFY |CONTROL |CLASSIFIER |ORPHAN-COMPLETE |ORPHAN-SUMMARY |EXPECTATION MISMATCH |A3: |INVALID'
+OLINE='^ *[A-Za-z0-9_]+_test\.go:[0-9]+: '
+oprefixok=0
+[ "$(grep -E "${OLINE}ORPHAN-PREFIXES " "$OLOG" | sed -E "s/${OLINE}ORPHAN-PREFIXES //")" = "$ORPHAN_PREFIXES" ] && oprefixok=1
+ounexpected=$(grep -E "$OLINE" "$OLOG" | sed -E "s/$OLINE//" | awk -v p="$ORPHAN_PREFIXES" \
+  'BEGIN { n = split(p, a, "|") } { ok = 0; for (i = 1; i <= n; i++) if (index($0, a[i]) == 1) ok = 1; if (!ok) { c++; print "UNEXPECTED OUTPUT: " $0 > "/dev/stderr" } } END { print c + 0 }')
+# Sanctioned failures: the sum the test reports per flow must equal the MISMATCH/A3 lines seen.
+osanct=$(grep -oE 'ORPHAN-COMPLETE [^ ]+ flow=[^ ]+ sanctioned=[0-9]+$' "$OLOG" | sed -E 's/.*sanctioned=//' | awk '{ s += $1 } END { print s + 0 }')
+oraised=$(grep -cE "${OLINE}(EXPECTATION MISMATCH |A3: )" "$OLOG" || true)
 osum=$(grep -cE "ORPHAN-SUMMARY TestOrphanSurvival_(CrashVectors|ReapedControl) kill_points=$OVEC flows_expected=$OFLOWS\$" "$OLOG" || true)
 otop=$(grep -cE '^--- (PASS|FAIL): TestOrphan(Survival_CrashVectors|Survival_ReapedControl|Classifier_Later) ' "$OLOG" || true)
 ocomplete=0
-if [ "$ocv" -eq "$OFLOWS" ] && [ "$occ" -eq "$OFLOWS" ] && [ "$osum" -eq 2 ] && [ "$otop" -eq 3 ] && ! grep -q -- '--- SKIP' "$OLOG"; then
+if [ "$ocv" -eq "$OFLOWS" ] && [ "$occ" -eq "$OFLOWS" ] && [ "$osum" -eq 2 ] && [ "$otop" -eq 3 ] && ! grep -q -- '--- SKIP' "$OLOG" \
+  && [ "$oprefixok" -eq 1 ] && [ "$ounexpected" -eq 0 ] && [ "$osanct" -eq "$oraised" ]; then
   ocomplete=1
 fi
 obroken=0
-grep -qE 'INVALID|panic:|test timed out' "$OLOG" && obroken=1
+grep -qE "${OLINE}INVALID|panic:|test timed out" "$OLOG" && obroken=1
 # Every failed subtest must carry its own explanation; a failed top-level test must be one of
 # the two vector suites and must have a failed subtest.
 ofsub=0; ounexplained=0
@@ -80,7 +95,7 @@ for top in $(grep -oE '^--- FAIL: TestOrphan[A-Za-z_]+' "$OLOG" | awk '{print $3
     *) ounexplained=$((ounexplained + 1)) ;;
   esac
 done
-echo "orphan survival evidence: complete flows $ocv+$occ of $OFLOWS+$OFLOWS, summaries $osum/2, suite results $otop/3, failed subtests $ofsub (unexplained $ounexplained), invalid/panic/timeout=$obroken, go test exit $orc"
+echo "orphan survival evidence: complete flows $ocv+$occ of $OFLOWS+$OFLOWS, summaries $osum/2, suite results $otop/3, failed subtests $ofsub (unexplained $ounexplained), unexpected output lines $ounexpected, allowlist match $oprefixok, sanctioned failures $osanct reported / $oraised printed, invalid/panic/timeout=$obroken, go test exit $orc"
 if [ "$orc" -eq 0 ] && [ "$ocomplete" -eq 1 ] && ! grep -q -- '--- FAIL' "$OLOG"; then
   echo "orphan survival: all suites ran to completion and passed (findings pinned as open; see the CLASSIFY lines)"
 elif [ "$orc" -ne 0 ] && [ "$ocomplete" -eq 1 ] && [ "$obroken" -eq 0 ] && [ "$ofsub" -ge 1 ] && [ "$ounexplained" -eq 0 ]; then

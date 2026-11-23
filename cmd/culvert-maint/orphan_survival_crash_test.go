@@ -84,6 +84,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -558,11 +559,54 @@ func (o *orphanRun) run() vectorObs {
 	return o.obs
 }
 
+// orphanOutputPrefixes is the closed set of prefixes every line these suites
+// print through t.Log / t.Error starts with. run.sh treats any other
+// `<file>_test.go:<line>: ` line in the orphan log (including one from a
+// shared rig helper) as unexpected and reports the run incomplete (exit 2).
+// Keep it in step with ORPHAN_PREFIXES in test/lifecycle-conformance/run.sh.
+var orphanOutputPrefixes = []string{
+	"ORPHAN-PREFIXES ", "ORPHAN-VECTORS ", "VECTOR ", "CLASSIFY ", "CONTROL ", "CLASSIFIER ",
+	"ORPHAN-COMPLETE ", "ORPHAN-SUMMARY ", "EXPECTATION MISMATCH ", "A3: ", "INVALID",
+}
+
+// sanctioned counts, per subtest, the failures raised through the only two
+// failure kinds that may yield exit 1 (mismatchf, a3f) since the subtest's
+// last ORPHAN-COMPLETE line.
+var (
+	sanctionedMu sync.Mutex
+	sanctioned   = map[string]int{}
+)
+
+// mismatchf raises a pinned-expectation mismatch: one of the two sanctioned
+// failure kinds.
+func mismatchf(t *testing.T, format string, args ...interface{}) {
+	t.Helper()
+	sanctionedMu.Lock()
+	sanctioned[t.Name()]++
+	sanctionedMu.Unlock()
+	t.Errorf("EXPECTATION MISMATCH "+format, args...)
+}
+
+// a3f raises a reaped-control divergence: the other sanctioned failure kind.
+func a3f(t *testing.T, format string, args ...interface{}) {
+	t.Helper()
+	sanctionedMu.Lock()
+	sanctioned[t.Name()]++
+	sanctionedMu.Unlock()
+	t.Errorf("A3: "+format, args...)
+}
+
 // complete prints the machine-checkable line run.sh counts: one per flow
-// that ran to its end.
+// that ran to its end, with the number of sanctioned failures raised in it.
+// run.sh requires their sum to equal the number of EXPECTATION MISMATCH and
+// A3 lines in the log.
 func complete(t *testing.T, flow string) {
 	t.Helper()
-	t.Logf("ORPHAN-COMPLETE %s flow=%s", t.Name(), flow)
+	sanctionedMu.Lock()
+	n := sanctioned[t.Name()]
+	sanctioned[t.Name()] = 0
+	sanctionedMu.Unlock()
+	t.Logf("ORPHAN-COMPLETE %s flow=%s sanctioned=%d", t.Name(), flow, n)
 }
 
 // classifyReport answers Q1 and Q2 for a report-flow run.
@@ -679,7 +723,8 @@ func checkTableCoversKillPoints(t *testing.T) {
 	if t.Failed() {
 		t.FailNow()
 	}
-	t.Logf("orphan-survival vectors: %d kill points with a docker command in flight (crashRig.kill reaps that command in every existing crash test)", len(kps))
+	t.Logf("ORPHAN-PREFIXES %s", strings.Join(orphanOutputPrefixes, "|"))
+	t.Logf("ORPHAN-VECTORS %d kill points with a docker command in flight (crashRig.kill reaps that command in every existing crash test)", len(kps))
 }
 
 // TestOrphanSurvival_CrashVectors runs, per kill point with a docker command in
@@ -707,7 +752,7 @@ func TestOrphanSurvival_CrashVectors(t *testing.T) {
 			t.Logf("CLASSIFY %s: mutates=%v Q1=%s Q2=%s Q3=%s visible=%s (expected %s/%s/%s visible=%s, %s)",
 				kp.name, exp.mutates, q1, q2, q3, q3vis, exp.q1, exp.q2, exp.q3, exp.q3vis, exp.status)
 			if q1 != exp.q1 || q2 != exp.q2 || q3 != exp.q3 || q3vis != exp.q3vis {
-				t.Errorf("EXPECTATION MISMATCH %s: measured Q1=%s Q2=%s Q3=%s visible=%s, pinned Q1=%s Q2=%s Q3=%s visible=%s — update orphanExpectations deliberately (pinned: %s)",
+				mismatchf(t, "%s: measured Q1=%s Q2=%s Q3=%s visible=%s, pinned Q1=%s Q2=%s Q3=%s visible=%s — update orphanExpectations deliberately (pinned: %s)",
 					t.Name(), q1, q2, q3, q3vis, exp.q1, exp.q2, exp.q3, exp.q3vis, exp.observed)
 			}
 			complete(t, "later")
@@ -735,11 +780,11 @@ func TestOrphanSurvival_ReapedControl(t *testing.T) {
 				}
 				t.Logf("CONTROL %s later=%v: restart %s after-op %s released %s completed=%v → %v", kp.name, laterOp, o.atRestart, o.afterOp, o.afterRelease, o.completed, got)
 				if o.afterRelease != o.afterOp || o.completed {
-					t.Errorf("A3: %s: with the model command reaped, Docker still changed or the held command completed after release (%s -> %s, completed=%v)", t.Name(), o.afterOp, o.afterRelease, o.completed)
+					a3f(t, "%s: with the model command reaped, Docker still changed or the held command completed after release (%s -> %s, completed=%v)", t.Name(), o.afterOp, o.afterRelease, o.completed)
 				}
 				for _, g := range got {
 					if g != "none" && g != "live_stable" && g != "n/a" {
-						t.Errorf("A3: %s: control classified %q, want none/live_stable/n/a", t.Name(), g)
+						a3f(t, "%s: control classified %q, want none/live_stable/n/a", t.Name(), g)
 					}
 				}
 				complete(t, fmt.Sprintf("control-later=%v", laterOp))

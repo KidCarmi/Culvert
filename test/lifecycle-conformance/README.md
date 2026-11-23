@@ -91,7 +91,13 @@ operation while the command is still alive.
   observations. A finding is not a failure. Exit 1 requires positive evidence
   of a complete run (one `ORPHAN-COMPLETE` line per flow, 14 + 14, and both
   `ORPHAN-SUMMARY` lines) and every failed subtest explained by its own
-  `EXPECTATION MISMATCH` or `A3:` line. Anything else non-zero is exit 2.
+  `EXPECTATION MISMATCH` or `A3:` line. Two further guards make that evidence
+  positive: every line the suites print must start with a prefix on a closed
+  allowlist (`orphanOutputPrefixes` in the test, `ORPHAN_PREFIXES` in `run.sh`;
+  the two must match), so any unmarked assertion or shared rig helper message
+  fails the run as incomplete; and the per-flow `sanctioned=` counts on the
+  `ORPHAN-COMPLETE` lines must add up to the number of `EXPECTATION MISMATCH`
+  and `A3:` lines. Anything else non-zero, or any unlisted output, is exit 2.
 - What Q1 establishes: the durable report (operation result, audit entry) is
   conservative, since it already says `indeterminate` wherever the orphan can act,
   and a conclusive-looking live read (`running_image`, `pinned_tag`) can change
