@@ -56,6 +56,16 @@ func (t IdPType) CredentialCapable() bool {
 	return t == IdPTypeOIDC || t == IdPTypeLDAP
 }
 
+// PasswordVerifying reports whether providers of this type verify a username
+// AND a password directly, with no interactive step — the only kind an RFC 1929
+// SOCKS5 USER/PASS exchange can use (SWG-901). LDAP bind only. OIDC is
+// credential-capable for HTTP Basic, but there the "password" is a bearer
+// token for introspection (the username is ignored) and its login is an
+// interactive browser flow; SAML is browser-only.
+func (t IdPType) PasswordVerifying() bool {
+	return t == IdPTypeLDAP
+}
+
 // IdPProfile is the persistent configuration for one identity provider.
 // Profiles are stored in a JSON file (idp_profiles.json) and managed
 // at runtime via the admin UI without requiring a proxy restart.
@@ -1328,6 +1338,37 @@ func (r *IdPRegistry) EnabledCredentialProviders() []IdentityProvider {
 		}
 	}
 	return out
+}
+
+// EnabledPasswordProviders is EnabledCredentialProviders narrowed to the
+// PasswordVerifying types (LDAP bind), in profile order: the providers a
+// non-interactive username/password exchange (SOCKS5 RFC 1929) may consult.
+func (r *IdPRegistry) EnabledPasswordProviders() []IdentityProvider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []IdentityProvider
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.PasswordVerifying() {
+			if prov, ok := r.live[p.ID]; ok {
+				out = append(out, prov)
+			}
+		}
+	}
+	return out
+}
+
+// HasEnabledPasswordProvider reports whether any profile of a PasswordVerifying
+// type is enabled. Profile-level, like HasEnabledCredentialProvider, so a
+// compile failure reads as "configured but failing", not "absent".
+func (r *IdPRegistry) HasEnabledPasswordProvider() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, p := range r.profiles {
+		if p != nil && p.Enabled && p.Type.PasswordVerifying() {
+			return true
+		}
+	}
+	return false
 }
 
 // HasEnabledInteractiveProvider is the allocation-free boolean probe behind

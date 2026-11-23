@@ -110,7 +110,7 @@ Everything the customer must prepare *before* installation. Each row is marked:
 |---|---|---|---|---|
 | 8080 | HTTP/1.1 + CONNECT | Forward proxy; `/health` `/ready` `/metrics` `/proxy.pac` | Proxy: policy; `/metrics`: optional token; health: none | `-port` |
 | 9090 | HTTPS | Admin UI/API; `/healthz`; SSE | Session cookie + RBAC; `/healthz` none | `-ui-port` |
-| 1080 | SOCKS5 | Proxy (CONNECT only) | Policy | `-socks5-port` (0=off) |
+| 1080 | SOCKS5 | Proxy (CONNECT only) | USER/PASS verified by LDAP providers only (never admin-console accounts; OIDC/SAML refused); none when no account or provider exists. Stage-2 policy only with `socks5_policy_mode: enforce` | `-socks5-port` (0=off) |
 | 50051 | gRPC | CP↔DP | mTLS | `-cp-grpc-addr` |
 
 ## 10. Authentication dependencies

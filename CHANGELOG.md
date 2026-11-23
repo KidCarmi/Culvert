@@ -9,6 +9,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **SOCKS5 now checks the threat-intelligence feed, and no longer accepts the
+  admin-console credential (SWG-901).** A SOCKS5 CONNECT to a domain on the
+  threat feed was served; it is now refused, in every policy mode. SOCKS5
+  username/password authentication had its own check, which accepted the admin
+  account's console password and ignored directory users in an LDAP profile.
+  It now uses the shared proxy credential resolver, restricted to providers that
+  can check a username and password directly (LDAP), and never the admin
+  account. See "Changed (breaking)" below for every behaviour difference.
+
 - **An anonymous client can no longer park ~1 GiB in each interactive-login
   state store.** The OIDC PKCE and SAML request stores are filled by
   unauthenticated requests (the proxy's captive-portal path and the public
@@ -538,22 +547,66 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   not validate, so a persisted name keeps dispatching rather than being dropped
   on load; the escaped sink is what makes that safe. CWE-79, OWASP A03.
 
+### Changed (breaking)
+
+These SOCKS5 changes are intentional (SWG-901, owner direction 2026-11-23). They
+apply whenever the SOCKS5 listener is enabled (`proxy.socks5_port` /
+`-socks5-port`), in every `proxy.socks5_policy_mode` unless stated. The full list
+with migration notes is in `docs/operator/socks5-policy.md` ("What changed").
+
+- **Threat feed blocks SOCKS5.** A destination domain on the threat feed is
+  refused with SOCKS5 reply `0x02` and a `THREAT_BLOCKED` request-log entry,
+  checked after the blocklist and before plugins, as for CONNECT. Previously it
+  was served.
+- **The admin-console credential no longer authenticates SOCKS5.** There is no
+  fallback to it in any configuration. A gateway whose only accounts are
+  admin-console accounts still requires SOCKS5 username/password, and now
+  refuses every SOCKS5 client (reason `provider_not_supported_for_socks5`). An
+  admin who is also a directory user signs in with the directory password.
+- **SOCKS5 credentials are checked by directory (LDAP) providers only.** SOCKS5
+  username/password goes through the shared proxy credential resolver: enabled
+  LDAP profiles in the identity-provider registry, in profile order, then a
+  legacy LDAP provider. OIDC (whose proxy credential is a bearer token and whose
+  login is interactive) and SAML identities are refused with reason
+  `provider_not_supported_for_socks5`; a wrong directory password is
+  `invalid_credentials`. Both appear in the `AUTH_FAIL` request-log entry's
+  action and in the new `culvert_socks5_auth_failures_total{reason}` counter.
+  Previously directory users in a registry LDAP profile could not authenticate.
+- **SOCKS5 requires username/password when an identity-provider profile is
+  enabled**, even with no local account. Previously a registry-only gateway
+  offered SOCKS5 without authentication.
+- **SOCKS5 request-log entries carry the user.** Entries after authentication
+  (`OK`, `BLOCKED`, `THREAT_BLOCKED`, `INVALID_HOST`, `SHUTTING_DOWN`,
+  `TUNNEL_CLOSED`, and the policy statuses) record the identity and
+  `auth_source` (`unauth` for a client without credentials).
+- **In `enforce`, an Allow rule that requires TLS inspection refuses the SOCKS5
+  connection** (`inspection_unsupported`) instead of tunnelling it uninspected.
+- **`proxy.socks5_policy_mode` accepts `enforce`.** It was rejected at startup.
+  The setting and the `legacy` default are transitional: once verification is
+  complete, `enforce` becomes the default and `legacy` is removed.
+
 ### Added
 
-- **SOCKS5 policy shadow mode (SWG-901 stage 2).** A new startup-only key,
-  `proxy.socks5_policy_mode: shadow`, evaluates each SOCKS5 CONNECT that passes
-  the existing gates against Stage-2 policy, using the same evaluator, rulebase
-  and default action as CONNECT. It records the verdict without acting on it,
-  through `culvert_socks5_policy_decisions_total{mode,verdict,reason}`,
-  `culvert_socks5_requests_total{atyp}` and a sampled `SOCKS5 POLICY_WOULD_BLOCK`
-  log line. A SOCKS5 connection is accepted or refused exactly as before in every
-  mode. Shadow evaluation charges no rule hit counters and writes no request-log
-  entry. SOCKS5 has no identity resolution yet, so it evaluates every client as
-  `unauth`, and identity or group rules can't match in shadow mode. The default,
-  `legacy` (or the key absent), is unchanged: no evaluation, no new series, no
-  new log lines. `enforce` and unknown values are rejected at startup. Older
-  releases reject the unknown key, so remove it before downgrading. See
-  `docs/operator/socks5-policy-shadow.md`.
+- **SOCKS5 access policy: `shadow` and `enforce` modes (SWG-901).** A new
+  startup-only key, `proxy.socks5_policy_mode`, puts SOCKS5 CONNECTs through the
+  Stage-2 access policy CONNECT uses: the same evaluator, rulebase and default
+  action, with the SOCKS5 user's identity, groups and authentication source.
+  `shadow` records the verdict without acting on it and charges no rule hit
+  counters or request-log entries. `enforce` acts on it: Allow connects; Drop
+  resets the connection without a reply; Block_Page, Redirect, an unrecognised
+  action and the default deny answer SOCKS5 reply `0x02` ("not allowed by
+  ruleset"); rule hit counters and request-log entries are charged as for
+  CONNECT. SOCKS5 has no TLS inspection, so in `enforce` an Allow rule that
+  requires inspection is refused (`inspection_unsupported`) rather than tunnelled
+  uninspected, unless the host is on the SSL bypass list or a fail-open
+  decryption profile has learned to exclude it — the same exceptions CONNECT
+  has. Both modes expose `culvert_socks5_policy_decisions_total{mode,verdict,reason}`
+  and `culvert_socks5_requests_total{atyp}`; shadow also logs a sampled
+  `SOCKS5 POLICY_WOULD_BLOCK` line and enforce one `SOCKS5 POLICY_*` line per
+  refusal. The default, `legacy` (or the key absent), still evaluates no access
+  policy; making `enforce` the default is a separate, later change. Unknown
+  values are rejected at startup; older releases reject the key, so remove it
+  before downgrading. See `docs/operator/socks5-policy.md`.
 - **Adding to the blocklist now reports what the gateway actually stored
   (Product Experience).** The admin UI's "Added N host(s)" / "Imported N hosts"
   toast counted the lines it sent, not what `POST /api/blocklist` did with them.

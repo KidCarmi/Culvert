@@ -58,6 +58,16 @@ docker compose up -d
 
 Open `https://localhost:9090` to complete the setup wizard.
 
+> **SOCKS5 and access policy.** The examples on this page enable the SOCKS5
+> listener (`-socks5-port 1080`). Drop the flag (and the `1080` port mapping)
+> if you do not need SOCKS5. If you keep it, set `proxy.socks5_policy_mode:
+> enforce` in `config.yaml` so SOCKS5 connections are decided by the same
+> access policy as HTTP and CONNECT. The default, `legacy`, applies
+> authentication, the blocklist, the threat feed and the SSRF guard to SOCKS5,
+> but no access rules or default action. SOCKS5 users sign in with a directory
+> (LDAP) account; admin-console accounts cannot sign in to SOCKS5. See
+> [SOCKS5 policy](operator/socks5-policy.md).
+
 ### Binary
 
 ```bash

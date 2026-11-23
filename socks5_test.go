@@ -236,11 +236,13 @@ func TestSOCKS5_Blocked_Host(t *testing.T) {
 	}
 }
 
+// TestSOCKS5_Auth_Success authenticates a directory (LDAP) user. SWG-901 stage
+// 3: SOCKS5 USER/PASS is verified by password-verifying providers only; the
+// local admin-console pair this test used before is no longer a SOCKS5
+// credential (see socks5_auth.go and TestSOCKS5Auth_AdminCredentialNeverAuthenticates).
 func TestSOCKS5_Auth_Success(t *testing.T) {
 	setupProxyTest(t)
-	if err := cfg.SetAuth("testuser", "testpass"); err != nil {
-		t.Fatal(err)
-	}
+	installLDAPRegistry(t, "corp-ad", aliceStub())
 
 	ln := startSOCKS5Listener(t)
 	defer func() { _ = ln.Close() }()
@@ -251,7 +253,7 @@ func TestSOCKS5_Auth_Success(t *testing.T) {
 	}
 	defer conn.Close()
 
-	result := socks5HandshakeAuth(t, conn, "testuser", "testpass")
+	result := socks5HandshakeAuth(t, conn, "alice", "ldap-pass")
 	if result != 0x00 {
 		t.Fatalf("auth failed: 0x%02x", result)
 	}

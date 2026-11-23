@@ -1811,7 +1811,7 @@ func (ps *PolicyStore) Evaluate(clientIP, identity, authSource, host string, gro
 // published rule (nil = no match) without touching any counter. Evaluate is
 // this plus hit accounting and PolicyMatch construction, so a caller that must
 // observe the enforcement verdict without charging it — SOCKS5 shadow
-// evaluation (socks5_policy_shadow.go), ADR-0026 §4 — gets the SAME snapshot,
+// evaluation (socks5_policy.go), ADR-0026 §4 — gets the SAME snapshot,
 // index and matcher the CONNECT path does, not a second walk.
 //
 // The returned pointer is a PUBLISHED definition: callers read it and must not
