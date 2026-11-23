@@ -67,6 +67,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/listenfault"
+	"github.com/KidCarmi/Culvert/internal/listenretry"
 )
 
 const (
@@ -486,15 +487,11 @@ func cpGRPCElapsedSince(first, last, now time.Time) time.Duration {
 // and it costs at most one extra attempt per episode — capping the CEILING
 // instead was rejected as paying permanently for a property that matters on one
 // sleep.
+//
+// The arithmetic is internal/listenretry's (ADR-0064); the threshold and the
+// floor are this listener's.
 func clampCPGRPCBindSleep(d, failingFor time.Duration) time.Duration {
-	remaining := cpGRPCUnavailableAfter - failingFor
-	if remaining <= 0 || d <= remaining {
-		return d
-	}
-	if remaining < cpGRPCBindClampFloor {
-		return cpGRPCBindClampFloor
-	}
-	return remaining
+	return listenretry.Clamp{Threshold: cpGRPCUnavailableAfter, Floor: cpGRPCBindClampFloor}.Sleep(d, failingFor)
 }
 
 // noteCPGRPCBindFailure records one failed bind (or TLS-material, or rejected

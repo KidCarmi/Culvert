@@ -168,6 +168,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+
+	"github.com/KidCarmi/Culvert/internal/listenretry"
 )
 
 // cpListenerConfig is the material one bind attempt needs. Captured once so a
@@ -843,16 +845,10 @@ func cpGRPCBackoffAfterServe(cur, served time.Duration) time.Duration {
 }
 
 // nextCPGRPCBindBackoff advances the rebind backoff: 1 s on the first failure,
-// doubling, capped at 30 s.
+// doubling, capped at 30 s. The doubling rule is internal/listenretry's
+// (ADR-0064); the two constants are this listener's.
 func nextCPGRPCBindBackoff(cur time.Duration) time.Duration {
-	if cur <= 0 {
-		return cpGRPCBindBackoffInitial
-	}
-	cur *= 2
-	if cur > cpGRPCBindBackoffMax {
-		return cpGRPCBindBackoffMax
-	}
-	return cur
+	return listenretry.Ladder{Initial: cpGRPCBindBackoffInitial, Ceiling: cpGRPCBindBackoffMax}.Next(cur)
 }
 
 // buildControlPlaneServer performs ONE bind attempt: load the TLS material,

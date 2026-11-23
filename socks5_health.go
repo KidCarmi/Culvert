@@ -57,6 +57,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/listenfault"
+	"github.com/KidCarmi/Culvert/internal/listenretry"
 )
 
 const (
@@ -569,18 +570,15 @@ func socks5BindRemedy(reason string, port int) string {
 // Capping the CEILING instead was the obvious alternative and is worse: it
 // would slow every long outage's retry cadence permanently to buy a property
 // that matters only on one sleep.
+//
+// A floor keeps the one clamped sleep from becoming a near-zero spin when the
+// threshold is already all but reached; overshooting it by <100 ms costs
+// nothing an operator can perceive.
+//
+// The arithmetic is internal/listenretry's (ADR-0064); the threshold and the
+// floor are this listener's.
 func clampSOCKS5BindSleep(wait, failingFor time.Duration) time.Duration {
-	remaining := socks5BindUnavailableAfter - failingFor
-	if remaining <= 0 || wait <= remaining {
-		return wait
-	}
-	// A floor keeps the one clamped sleep from becoming a near-zero spin when
-	// the threshold is already all but reached; overshooting it by <100 ms
-	// costs nothing an operator can perceive.
-	if remaining < socks5BindClampFloor {
-		return socks5BindClampFloor
-	}
-	return remaining
+	return listenretry.Clamp{Threshold: socks5BindUnavailableAfter, Floor: socks5BindClampFloor}.Sleep(wait, failingFor)
 }
 
 // noteSOCKS5Bound records an OBSERVED successful bind and returns the number of
