@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -550,18 +551,21 @@ func pdCheckBaseline(t *testing.T, seed string, scale float64, rep pdReport) {
 	}
 	if os.Getenv("PATHDIFF_WRITE_BASELINE") == "1" {
 		b, _ := json.MarshalIndent(map[string]any{"seed": seed, "scale": scale, "generator": rep.Generator,
-			"verifier_fingerprint": rep.Fingerprint, "requests": rep.Requests, "signatures": rep.Signatures}, "", " ")
+			"verifier_fingerprint": rep.Fingerprint, "requests": rep.Requests, "signatures": rep.Signatures,
+			"by_stratum": rep.ByStratum, "unspecified_alias_behaviour": rep.Unspecified}, "", " ")
 		if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
 	var base struct {
-		Seed        string         `json:"seed"`
-		Scale       float64        `json:"scale"`
-		Fingerprint string         `json:"verifier_fingerprint"`
-		Requests    int            `json:"requests"`
-		Signatures  map[string]int `json:"signatures"`
+		Seed        string                    `json:"seed"`
+		Scale       float64                   `json:"scale"`
+		Fingerprint string                    `json:"verifier_fingerprint"`
+		Requests    int                       `json:"requests"`
+		Signatures  map[string]int            `json:"signatures"`
+		ByStratum   map[string]map[string]int `json:"by_stratum"`
+		Unspecified map[string]map[string]int `json:"unspecified_alias_behaviour"`
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -587,6 +591,34 @@ func pdCheckBaseline(t *testing.T, seed string, scale float64, rep pdReport) {
 	for k, n := range base.Signatures {
 		if _, ok := rep.Signatures[k]; !ok {
 			t.Errorf("behaviour drift: %q was %d in the baseline and no longer occurs", k, n)
+		}
+	}
+	// The outcome tables catch a change that moves every path together, which
+	// the cross-path comparison cannot see by construction.
+	pdTableDrift(t, "outcomes", base.ByStratum, rep.ByStratum)
+	pdTableDrift(t, "alias behaviour", base.Unspecified, rep.Unspecified)
+}
+
+func pdTableDrift(t *testing.T, what string, base, now map[string]map[string]int) {
+	keys := map[string]bool{}
+	for k := range base {
+		keys[k] = true
+	}
+	for k := range now {
+		keys[k] = true
+	}
+	for k := range keys {
+		cells := map[string]bool{}
+		for c := range base[k] {
+			cells[c] = true
+		}
+		for c := range now[k] {
+			cells[c] = true
+		}
+		for c := range cells {
+			if base[k][c] != now[k][c] {
+				t.Errorf("behaviour drift (%s): %s %s now %d, baseline %d", what, k, c, now[k][c], base[k][c])
+			}
 		}
 	}
 }
@@ -691,7 +723,7 @@ func TestPathDiff_Review(t *testing.T) {
 			results = append(results, map[string]any{"id": p.ID, "request": i, "authority": c.Requests[i].Authority, "observed": o, "exact": exact, "path_split": split})
 		}
 	}
-	if out := os.Getenv("PATHDIFF_OUT"); out != "" {
+	if out := os.Getenv("PATHDIFF_REVIEW_OUT"); out != "" {
 		b, _ := json.MarshalIndent(results, "", " ")
 		_ = os.WriteFile(out, b, 0o644)
 	}
@@ -838,6 +870,46 @@ func TestPathDiff_DialAlias(t *testing.T) {
 		}
 		got[sp] = fmt.Sprintf("%s status=%d backend=%s", rule, code, reach)
 		t.Logf("%-22q %s", sp, got[sp])
+	}
+	// The same invariant for an IPv6 literal carrying a zone. Recorded as
+	// "ipv6-unavailable" where the host has no IPv6 loopback.
+	var hits6 int64
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Logf("LEAD not tested here: no IPv6 loopback on this host, so the zoned-literal rows did not run")
+	} else {
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt64(&hits6, 1)
+			_, _ = w.Write([]byte("ok"))
+		}), ReadHeaderTimeout: 5 * time.Second}
+		go func() { _ = srv.Serve(ln) }()
+		t.Cleanup(func() { _ = srv.Close() })
+		_, p6, _ := net.SplitHostPort(ln.Addr().String())
+		policyStore.ReplaceAll([]PolicyRule{{Priority: 1, Name: "block-backend", DestFQDN: "::1", Action: ActionBlockPage}})
+		for _, sp := range []string{"[::1]", "[0:0:0:0:0:0:0:1]", "[::1%25lo]", "[::1%lo]"} {
+			rl = newRateLimiter()
+			before, hb := atomic.LoadInt64(&hits6), pdHits()
+			c, err := net.DialTimeout("tcp", e.addr, 2*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = c.SetDeadline(time.Now().Add(8 * time.Second))
+			fmt.Fprintf(c, "GET http://%s:%s/ HTTP/1.1\r\nHost: %s:%s\r\nConnection: close\r\n\r\n", sp, p6, sp, p6)
+			line, _ := bufio.NewReader(c).ReadString('\n')
+			c.Close()
+			code := 0
+			fmt.Sscanf(line, "HTTP/1.1 %d", &code)
+			time.Sleep(20 * time.Millisecond)
+			rule, reach := "no-rule", "not-reached"
+			if pdHits()["block-backend"] != hb["block-backend"] {
+				rule = "block-rule"
+			}
+			if atomic.LoadInt64(&hits6) > before {
+				reach = "REACHED"
+			}
+			// Recorded, not baselined: the rows exist only where IPv6 loopback does.
+			t.Logf("LEAD %-22q %s status=%d backend=%s", sp, rule, code, reach)
+		}
 	}
 	pdCheckMapBaseline(t, "PATHDIFF_DIAL_BASELINE", got)
 }

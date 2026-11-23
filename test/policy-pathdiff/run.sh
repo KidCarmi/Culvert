@@ -17,7 +17,7 @@ grc=$?
 # CGO_ENABLED=0 matches the shipped binary, so the dial-alias suite sees its resolver.
 CGO_ENABLED=0 \
 PATHDIFF_SEED="${PATHDIFF_SEED:-heldout-1}" PATHDIFF_SCALE="${PATHDIFF_SCALE:-1}" \
-PATHDIFF_OUT="$REPORT/report.json" \
+PATHDIFF_OUT="$REPORT/report.json" PATHDIFF_REVIEW_OUT="$REPORT/review.json" \
 PATHDIFF_BASELINE="$HERE/baseline.json" \
 PATHDIFF_DISPATCH_BASELINE="$HERE/baseline-dispatch.json" \
 PATHDIFF_DIAL_BASELINE="$HERE/baseline-dial.json" \
