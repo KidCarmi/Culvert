@@ -24,7 +24,7 @@ PATHDIFF_DIAL_BASELINE="$HERE/baseline-dial.json" \
 PATHDIFF_REVIEW="$HERE/review_predictions.jsonl" \
   go test -tags policy_pathdiff -count=1 -timeout 15m -v -run '^TestPathDiff_' . > "$REPORT/pathdiff.log" 2>&1
 rc=$?
-grep -E '^(--- (PASS|FAIL|SKIP)|ok|FAIL)|behaviour drift|vacuous|not live|not deterministic|verifier changed|seed=' "$REPORT/pathdiff.log" | cut -c1-300 | head -80 || true
+grep -E '^(--- (PASS|FAIL|SKIP)|ok|FAIL)|behaviour drift|vacuous|not live|not deterministic|verifier changed|seed=|LEAD ' "$REPORT/pathdiff.log" | cut -c1-300 | head -80 || true
 status=0
 if [ "$grc" -ne 0 ] || [ "$rc" -ne 0 ]; then
   echo "POLICY PATHDIFF FAILED (generator tests exit $grc, differential exit $rc); see $REPORT"; status=1
