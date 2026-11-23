@@ -503,6 +503,7 @@ func (s *Server) performAction(ctx context.Context, c *reconcileCase, v reconcil
 	case actV2FinishRollback:
 		c.out.Actions = append(c.out.Actions, "up")
 		if _, err := s.opts.Runner.ComposeUp(ctx); err != nil {
+			s.noteMutationCut()
 			return errReconcileStep("up_failed")
 		}
 		if s.probeReadiness(ctx) != probeReady {

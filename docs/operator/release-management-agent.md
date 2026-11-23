@@ -202,6 +202,12 @@ For `indeterminate`:
   `prior_ref`.
 - Until one of these succeeds, do not run `docker compose up` by hand: it
   starts whatever image the tag is on.
+- An upgrade or rollback submitted within `interrupted_settle` (75s by
+  default) of an agent start sits in its `restart` step for the rest of that
+  window before it changes anything. That is deliberate: if the previous agent
+  died in mid-operation, Docker may still be stopping the old proxy container
+  for it, and the agent waits until that can no longer be the case. The
+  operation log says `settle: waited …`.
 
 If the agent will not start and its log says
 `journal: refusing to serve — journal: corrupt record <op_id>.json`, a journal
