@@ -168,6 +168,22 @@ re-pins it.
    `validateReconcileRefs` passes; a persisted per-record attempt cap (the
    start counter added here is that field's natural home); bind the socket
    before acting; F1 fixed first.
+
+   **Taken (owner decision 1, 2026-11):** an opt-in `reconcile_on_startup =
+   "converge"`, default `"off"`, which keeps everything in this ADR exactly as
+   decided. "converge" may only retag to the recorded prior image while the
+   container provably runs it, finish an inline rollback whose durable
+   `rollback_armed` marker is set and whose tag is already on the prior image,
+   or adopt (no Docker change) a target recorded at `verified` that runs under
+   the tag and answers ready; every other state is `recovery_required` and
+   changes nothing, and an unreadable Docker defers. There is no `reup` and no
+   rollback of an indeterminate image. The interrupted operation stays
+   `failed(agent_restart_interrupted)`; the reconcile is its own
+   `reconcile.startup` operation, and a record is retired only after verified
+   convergence and an audit entry. F1 is fixed in the restart stage. Contracts:
+   AGT-900 (enforced, scoped to "converge"), AGT-004 and AGT-005 amended.
+   Implementation: `internal/server/startup_reconcile.go`,
+   `internal/server/reconcile_decision_v2.go`.
 2. **Corrupt record: refuse to serve, or quarantine.** Today one unreadable
    file stops the agent, and under `Restart=on-failure` / `RestartSec=5s` it
    restarts every five seconds with the API dark — no status, no backup, no

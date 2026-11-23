@@ -690,6 +690,30 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **Opt-in startup recovery for an image change the maintenance agent was
+  killed in (`reconcile_on_startup = "converge"`, contract `AGT-900`).** The
+  default stays `"off"`: startup reports the interrupted operation and changes
+  nothing, exactly as before. With `"converge"`, after reporting it the agent
+  holds the maintenance lock (state-changing requests get 409; reads are
+  served) and acts only on proof: it moves the fixed tag back to the recorded
+  previous image when the container still runs that image (the kill landed
+  between `docker tag` and `compose up`); it finishes an inline rollback whose
+  journal record says it was armed and whose tag is already on the previous
+  image (`compose up`, health gate, verify by image id); or it accepts,
+  without touching Docker, an upgrade recorded as verified whose image runs
+  under the tag and answers `/ready`. Everything else, including a new image
+  that is running but never passed the health gate, is reported as
+  `recovery_required` and left alone; with Docker unreadable it defers. It
+  never pulls, never runs `down`, and tries an action at most twice per
+  record. The interrupted operation stays `failed(agent_restart_interrupted)`;
+  the recovery is a separate `reconcile.startup` operation, and a record is
+  removed only after the result is verified and audited. `GET /v1/status`
+  gains `recovery_required` and `reconcile` (only in `"converge"` mode), and
+  each interrupted operation `reconcile_outcome`. A second agent process on
+  the same state directory does not reconcile (instance lock). An older agent
+  refuses to start with the new key in its config: remove it before a
+  downgrade.
+
 - **The maintenance agent's crash journal no longer names the previous image
   as an upgrade's target (ADR-0061 finding F1).** After `docker compose up`
   returned success, the restart stage recorded whatever image the proxy then

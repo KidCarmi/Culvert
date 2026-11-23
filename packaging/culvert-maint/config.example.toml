@@ -117,3 +117,18 @@ image_allowlist = '^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{
 # same repository as image_allowlist (install.sh refuses a mismatch).
 # Default: ghcr.io/kidcarmi/culvert.
 proxy_repo = "ghcr.io/kidcarmi/culvert"
+
+# What startup does with an image change a previous agent process left
+# unfinished (contract AGT-900). Startup-only; there is no API to change it.
+#   "off"      (default) report it in GET /v1/status and change nothing.
+#   "converge" also, while holding the maintenance lock: move the fixed tag
+#              back to the recorded previous image when the container still
+#              runs it; finish a rollback the journal proves was armed; or
+#              accept an upgrade the journal proves passed its health gate and
+#              digest check and that answers /ready now. Anything else is
+#              reported as recovery_required and nothing is changed. It never
+#              pulls, never runs `down`, and never starts an image that has not
+#              passed the health gate. If Docker cannot be read it defers.
+# An agent older than this setting refuses to start with it present: remove
+# it before downgrading.
+#reconcile_on_startup = "off"
