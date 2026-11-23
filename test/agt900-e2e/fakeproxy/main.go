@@ -13,7 +13,21 @@
 // /ctl/hang_ready exists, /ready writes /ctl/ready_hit and then stalls longer
 // than the agent's per-request timeout: that is how the harness lands a kill
 // inside the health gate deterministically. `app -probe` is the container
-// healthcheck (the image has no shell or wget).
+// healthcheck of the root-mode compose file (the image has no shell).
+//
+// The sudoers mode runs the SHIPPED docker-compose.yml, whose healthchecks and
+// profiles call other programs, so the same binary is multi-call (by the base
+// name it is invoked as, or by a flag):
+//
+//	wget -qO- <url>       the proxy healthcheck: GET <url>, exit 0 on 2xx
+//	clamdscan --ping <n>  the clamav stub's healthcheck: exit 0
+//	app -idle             the clamav stub's daemon: wait for SIGTERM
+//	app ... --list-backups ...
+//	                      the `cli` profile's backup list (the agent's data
+//	                      rollback preflight): print one fixed backup entry
+//
+// Any other argument list (the shipped proxy command's -port/-ui-port/... flags)
+// is ignored and the server runs.
 //
 // The `ignore` build tag keeps this file out of the root module's
 // go build / go vet; run.sh compiles it in a scratch module.
@@ -23,6 +37,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -43,16 +61,57 @@ func readyHandler(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintln(w, "ready", version)
 }
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "-probe" {
-		c := &http.Client{Timeout: 2 * time.Second}
-		resp, err := c.Get("http://127.0.0.1:8080/health")
-		if err != nil || resp.StatusCode != http.StatusOK {
+// get exits 0 when url answers 2xx within 2s, else 1.
+func get(url string) {
+	c := &http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get(url)
+	if err != nil {
+		os.Exit(1)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+// multiCall handles every invocation that is not the proxy server itself.
+func multiCall() {
+	args := os.Args[1:]
+	switch filepath.Base(os.Args[0]) {
+	case "wget": // wget -qO- <url>
+		if len(args) > 0 {
+			get(args[len(args)-1])
+		}
+		os.Exit(1)
+	case "clamdscan": // clamdscan --ping <n>
+		os.Exit(0)
+	}
+	if len(args) > 0 && args[0] == "-probe" {
+		get("http://127.0.0.1:8080/health")
+	}
+	if len(args) > 0 && args[0] == "-idle" {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+		<-ch
+		os.Exit(0)
+	}
+	for _, a := range args {
+		if a == "--list-backups" {
+			fmt.Println(`[{"filename":"agt900-e2e.tar.gz","path":"/backup/agt900-e2e.tar.gz","size_bytes":1,"modified_at":"2026-11-23T00:00:00Z","encrypted":false}]`)
+			os.Exit(0)
+		}
+	}
+	for _, a := range args {
+		if strings.HasPrefix(a, "--restore") || strings.HasPrefix(a, "--backup") || strings.HasPrefix(a, "--cleanup") {
+			fmt.Fprintln(os.Stderr, "fakeproxy: the cli operations are not implemented")
 			os.Exit(1)
 		}
-		_ = resp.Body.Close()
-		return
 	}
+}
+
+func main() {
+	multiCall()
 	http.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprintln(w, "ok", version) })
 	http.HandleFunc("/ready", readyHandler)
 	http.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprintln(w, version) })

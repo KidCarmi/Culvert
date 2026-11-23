@@ -50,6 +50,23 @@ const (
 	e2eProject  = "agt900"
 	e2ePinned   = "culvert/proxy:pinned"
 	e2eReconcTO = 4 * time.Minute
+	// e2eWrapper is runner.ComposeCLIWrapperPath, the root-owned wrapper the
+	// packaged sudoers file grants (sudoers mode only).
+	e2eWrapper = "/usr/local/libexec/culvert-maint/compose-cli"
+)
+
+// Execution modes (run.sh --mode).
+const (
+	// modeRoot: the agent runs as root with privilege_mode docker_group_lab and
+	// a per-process `docker` shim first on its PATH (the original harness).
+	modeRoot = "root"
+	// modeSudoers: the production path. The agent runs as the unprivileged
+	// culvert-maint user that packaging/culvert-maint/install.sh created in a
+	// private mount namespace, with privilege_mode sudoers: every Docker call is
+	// `sudo -n` through the packaged sudoers file and compose-cli wrapper that
+	// install.sh rendered. The shim is bind-mounted over /usr/bin/docker (the
+	// path the sudoers rules and the wrapper name) inside that namespace only.
+	modeSudoers = "sudoers"
 )
 
 // e2eEnv is one store's run, from run.sh.
@@ -60,6 +77,12 @@ type e2eEnv struct {
 	dig                                           map[string]string // role -> bare manifest digest
 	id                                            map[string]string // role -> local image id (bare hex)
 	only                                          *regexp.Regexp
+	// mode is modeRoot or modeSudoers. project is the compose project name
+	// (the label the proxy container carries). override is the bare
+	// compose_override_file every agent process is configured with ("" = none)
+	// and overrideOrig its pristine content, restored by reset.
+	mode, project, override, overrideOrig string
+	uid, gid                              int // the agent's credentials in sudoers mode
 }
 
 func loadE2EEnv(t *testing.T) *e2eEnv {
@@ -90,16 +113,28 @@ func loadE2EEnv(t *testing.T) *e2eEnv {
 	if c := os.Getenv("AGT900_CASES"); c != "" {
 		e.only = regexp.MustCompile(c)
 	}
-	tmpl, err := os.ReadFile(os.Getenv("AGT900_COMPOSE_TEMPLATE"))
-	if err != nil {
-		t.Fatalf("compose template: %v", err)
-	}
+	e.loadMode(t)
 	if err := os.MkdirAll(filepath.Join(e.proj, "ctl"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	compose := strings.ReplaceAll(string(tmpl), "@@PROXY_PORT@@", e.port)
-	if err := os.WriteFile(e.composeFile(), []byte(compose), 0o644); err != nil {
-		t.Fatal(err)
+	if tp := os.Getenv("AGT900_COMPOSE_TEMPLATE"); tp != "" {
+		tmpl, err := os.ReadFile(tp) // #nosec G304 -- harness input
+		if err != nil {
+			t.Fatalf("compose template: %v", err)
+		}
+		compose := strings.ReplaceAll(string(tmpl), "@@PROXY_PORT@@", e.port)
+		if err := os.WriteFile(e.composeFile(), []byte(compose), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	} else if _, err := os.Stat(e.composeFile()); err != nil {
+		t.Fatalf("no compose template and no rendered compose file: %v", err)
+	}
+	if e.override != "" {
+		b, err := os.ReadFile(filepath.Join(e.proj, e.override)) // #nosec G304 -- harness-rendered
+		if err != nil {
+			t.Fatalf("compose override: %v", err)
+		}
+		e.overrideOrig = string(b)
 	}
 	// Local image id of each role, as the daemon reports it (classic store: the
 	// config digest; containerd store: the registry index digest).
@@ -115,6 +150,48 @@ func loadE2EEnv(t *testing.T) *e2eEnv {
 	}
 	t.Logf("agt900 store=%s repo=%s ids prior=%.12s good=%.12s bad=%.12s", e.store, e.repo, e.id["prior"], e.id["good"], e.id["bad"])
 	return e
+}
+
+// loadMode reads the execution mode. In sudoers mode it also writes the
+// global shim into the file run.sh bind-mounted over /usr/bin/docker.
+func (e *e2eEnv) loadMode(t *testing.T) {
+	t.Helper()
+	e.mode, e.project, e.override = os.Getenv("AGT900_MODE"), os.Getenv("AGT900_COMPOSE_PROJECT"), os.Getenv("AGT900_COMPOSE_OVERRIDE")
+	if e.mode == "" {
+		e.mode = modeRoot
+	}
+	if e.project == "" {
+		e.project = e2eProject
+	}
+	if e.mode != modeSudoers {
+		return
+	}
+	var err error
+	if e.uid, err = strconv.Atoi(os.Getenv("AGT900_AGENT_UID")); err != nil || e.uid == 0 {
+		t.Fatalf("sudoers mode needs a non-root AGT900_AGENT_UID, got %q", os.Getenv("AGT900_AGENT_UID"))
+	}
+	if e.gid, err = strconv.Atoi(os.Getenv("AGT900_AGENT_GID")); err != nil || e.gid == 0 {
+		t.Fatalf("sudoers mode needs a non-root AGT900_AGENT_GID, got %q", os.Getenv("AGT900_AGENT_GID"))
+	}
+	shim := os.Getenv("AGT900_SHIM")
+	if shim == "" {
+		t.Fatal("sudoers mode needs AGT900_SHIM (the file bind-mounted over /usr/bin/docker)")
+	}
+	// Truncate-and-write keeps the inode, so the bind mount serves the new body.
+	body := strings.NewReplacer("__CTL__", "auto", "__HOST__", e.host, "__CA__", e.ca, "__REAL__", e.realDocker).Replace(e2eShim)
+	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil { // #nosec G306 -- must be executable by root via sudo
+		t.Fatalf("write the global shim: %v", err)
+	}
+}
+
+// composeArgs is `compose -f <file> [-f <override>] <args...>`: the files the
+// agent's own recreate uses.
+func (e *e2eEnv) composeArgs(args ...string) []string {
+	out := []string{"compose", "-f", e.composeFile()}
+	if e.override != "" {
+		out = append(out, "-f", filepath.Join(e.proj, e.override))
+	}
+	return append(out, args...)
 }
 
 func (e *e2eEnv) composeFile() string    { return filepath.Join(e.proj, "docker-compose.yml") }
@@ -166,10 +243,17 @@ func (e *e2eEnv) ready() bool {
 // reset puts Docker in the pre-upgrade state: the proxy runs the prior image
 // under the fixed tag, the target images are not local (the upgrade pulls).
 func (e *e2eEnv) reset() error {
-	_, _ = e.docker("compose", "-f", e.composeFile(), "down", "--remove-orphans")
+	_, _ = e.docker(e.composeArgs("down", "--remove-orphans")...)
 	for _, f := range []string{"hang_ready", "ready_hit"} {
 		_ = os.Remove(e.ctlFile(f))
 	}
+	// A case may have edited the override (ok_stale pins an image in it).
+	if e.override != "" {
+		if err := os.WriteFile(filepath.Join(e.proj, e.override), []byte(e.overrideOrig), 0o644); err != nil {
+			return err
+		}
+	}
+	_ = os.Remove(filepath.Join(e.proj, e2eOkStaleOverride))
 	if _, err := e.docker("image", "inspect", e.ref("prior")); err != nil {
 		if _, err := e.docker("pull", "-q", e.ref("prior")); err != nil {
 			return err
@@ -184,10 +268,10 @@ func (e *e2eEnv) reset() error {
 			return fmt.Errorf("could not remove the %s image", role)
 		}
 	}
-	if _, err := e.docker("compose", "-f", e.composeFile(), "up", "-d"); err != nil {
+	if _, err := e.docker(e.composeArgs("up", "-d")...); err != nil {
 		return err
 	}
-	return e.waitReady(60 * time.Second)
+	return e.waitReady(90 * time.Second)
 }
 
 func (e *e2eEnv) waitReady(d time.Duration) error {
@@ -213,7 +297,7 @@ type dockerSnap struct {
 
 func (e *e2eEnv) snap() dockerSnap {
 	var s dockerSnap
-	out, err := e.docker("ps", "-aq", "--no-trunc", "--filter", "label=com.docker.compose.project="+e2eProject,
+	out, err := e.docker("ps", "-aq", "--no-trunc", "--filter", "label=com.docker.compose.project="+e.project,
 		"--filter", "label=com.docker.compose.service=proxy")
 	if err != nil {
 		s.Err = err.Error()
@@ -284,17 +368,53 @@ func (l *lockedBuffer) String() string {
 }
 
 // e2eShim is the agent's `docker`: log, optionally hold, then the real CLI.
+//
+// Root mode: one copy per agent process, first on that process's PATH, with
+// its control directory compiled in. Sudoers mode: ONE copy bind-mounted over
+// /usr/bin/docker in the private mount namespace (CTL=auto). sudo resets the
+// environment, so the shim finds the agent that called it by walking its
+// parent chain (shim <- sudo [<- sudo monitor] <- agent) to the process whose
+// argv holds `--config <dir>/<tag>.toml`; its control directory is
+// <dir>/ctl-<tag>. It also records the privilege context of every call
+// (priv.log, one line per calls.log line): its own uid and sudo's SUDO_UID and
+// SUDO_COMMAND, i.e. which sudoers rule (a direct docker rule or the
+// compose-cli wrapper) ran it.
 const e2eShim = `#!/bin/sh
 # Pass-through docker for the AGT-900 real-Docker e2e. Every argv is logged; a
 # call can be held at "<key>_before:<n>" or "<key>_after:<n>" (key = the compose
-# subcommand, else the docker subcommand; n counts per agent process) until the
-# harness kills the agent or releases it. The real CLI talks to the store's
-# private daemon and trusts the e2e registry's certificate.
+# subcommand, else the docker subcommand; "any" counts every call; n counts per
+# agent process) until the harness kills the agent or releases it. The real CLI
+# talks to the store's private daemon and trusts the e2e registry's certificate.
 C='__CTL__'
-echo "$*" >> "$C/calls.log"
+if [ "$C" = auto ]; then
+  C=
+  p=$PPID
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    cfg=$(tr '\0' '\n' < "/proc/$p/cmdline" 2>/dev/null | sed -n '/^--config$/{n;p;q;}')
+    case "$cfg" in
+      */*.toml) C="${cfg%/*}/ctl-$(basename "$cfg" .toml)"; break ;;
+    esac
+    p=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$p/status" 2>/dev/null)
+  done
+  [ -n "$C" ] && [ -d "$C" ] || C=
+fi
 DOCKER_HOST='__HOST__'; export DOCKER_HOST
 SSL_CERT_FILE='__CA__'; export SSL_CERT_FILE
-if [ "$1" = compose ]; then k="$4"; else k="$1"; fi
+[ -n "$C" ] || exec '__REAL__' "$@"
+echo "$*" >> "$C/calls.log"
+echo "uid=$(id -u) sudo_uid=${SUDO_UID:-} sudo_cmd=${SUDO_COMMAND:-}" >> "$C/priv.log"
+key() {
+  [ "$1" = compose ] || { echo "$1"; return; }
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--file|--profile|-p|--project-name|--env-file|--project-directory) shift 2 ;;
+      -*) shift ;;
+      *) echo "$1"; return ;;
+    esac
+  done
+}
+k=$(key "$@")
 blk() {
   n=$(cat "$C/count.$1" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$C/count.$1"
   if [ -f "$C/block_on" ] && [ "$(cat "$C/block_on")" = "$1:$n" ]; then
@@ -304,6 +424,7 @@ blk() {
     rm -f "$C/release" "$C/blocked" "$C/block_on"
   fi
 }
+blk any_before
 blk "${k}_before"
 '__REAL__' "$@"
 rc=$?
@@ -332,6 +453,9 @@ type e2eRig struct {
 	seq   int
 	res   *e2eResult         // where jcheck reports
 	hist  map[string]e2eHist // journal fields last seen, per record
+	// cfgExtra is appended to every agent config of this rig (a case-specific
+	// compose_override_file in root mode).
+	cfgExtra string
 }
 
 func newE2ERig(t *testing.T, e *e2eEnv, name string) *e2eRig {
@@ -339,6 +463,13 @@ func newE2ERig(t *testing.T, e *e2eEnv, name string) *e2eRig {
 	dir, err := os.MkdirTemp("", "a9-")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if e.mode == modeSudoers {
+		// Like /var/lib/culvert-maint: the service user owns its state, socket
+		// directory and (here) the rig directory around them.
+		if err := os.Chown(dir, e.uid, e.gid); err != nil {
+			t.Fatal(err)
+		}
 	}
 	r := &e2eRig{t: t, e: e, name: name, dir: dir, state: filepath.Join(dir, "state"), hist: map[string]e2eHist{}}
 	t.Cleanup(func() {
@@ -361,15 +492,20 @@ func (r *e2eRig) newProc(tag, mode, stageTimeout string) *agentProc {
 			r.t.Fatal(err)
 		}
 	}
-	shim := strings.NewReplacer("__CTL__", p.ctl, "__HOST__", r.e.host, "__CA__", r.e.ca, "__REAL__", r.e.realDocker).Replace(e2eShim)
-	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(shim), 0o700); err != nil { // #nosec G306 -- must be executable
-		r.t.Fatal(err)
+	privMode := "docker_group_lab"
+	if r.e.mode == modeSudoers {
+		privMode = "sudoers" // the global shim is bind-mounted over /usr/bin/docker
+	} else {
+		shim := strings.NewReplacer("__CTL__", p.ctl, "__HOST__", r.e.host, "__CA__", r.e.ca, "__REAL__", r.e.realDocker).Replace(e2eShim)
+		if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(shim), 0o700); err != nil { // #nosec G306 -- must be executable
+			r.t.Fatal(err)
+		}
 	}
 	cfg := fmt.Sprintf(`compose_project_dir = %q
 compose_file = "docker-compose.yml"
 socket_path = %q
 state_dir = %q
-privilege_mode = "docker_group_lab"
+privilege_mode = %q
 health_base_url = "http://127.0.0.1:%s"
 operation_timeout = "15m"
 stage_timeout = %q
@@ -377,16 +513,30 @@ allowed_backup_dir = "/backup"
 image_allowlist = '^%s(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$'
 proxy_repo = %q
 allow_peers = [%q]
-`, r.e.proj, p.sock, r.state, r.e.port, stageTimeout, regexp.QuoteMeta(r.e.repo), r.e.repo, strconv.Itoa(os.Geteuid()))
+`, r.e.proj, p.sock, r.state, privMode, r.e.port, stageTimeout, regexp.QuoteMeta(r.e.repo), r.e.repo, strconv.Itoa(os.Geteuid()))
 	if mode == "converge" {
 		cfg += "reconcile_on_startup = \"converge\"\n"
 	}
+	if r.e.override != "" {
+		cfg += fmt.Sprintf("compose_override_file = %q\n", r.e.override)
+	}
+	cfg += r.cfgExtra
 	cfgPath := filepath.Join(r.dir, tag+".toml")
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o640); err != nil {
 		r.t.Fatal(err)
 	}
 	p.cmd = exec.CommandContext(context.Background(), r.e.agentBin, "--config", cfgPath) // #nosec G204 -- harness-built binary and config
 	p.cmd.Env = []string{"PATH=" + bin + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "LANG=C.UTF-8"}
+	if r.e.mode == modeSudoers {
+		// Like the systemd unit: User=culvert-maint, Group=culvert-maint, no
+		// supplementary group (in particular not `docker`), config 0640
+		// root:culvert-maint, HOME = the service user's home.
+		if err := os.Chown(cfgPath, 0, r.e.gid); err != nil {
+			r.t.Fatal(err)
+		}
+		p.cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/var/lib/culvert-maint", "LANG=C.UTF-8"}
+		p.cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(r.e.uid), Gid: uint32(r.e.gid), Groups: []uint32{}}} // #nosec G115 -- small positive ids from id(1)
+	}
 	p.logs = &lockedBuffer{}
 	p.cmd.Stdout, p.cmd.Stderr = p.logs, p.logs
 	p.client = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true,
@@ -522,21 +672,107 @@ func (r *e2eRig) mutating(p *agentProc) []string {
 	out := []string{}
 	for _, l := range p.calls() {
 		f := strings.Fields(l)
+		sub := composeSub(f)
 		switch {
-		case len(f) > 3 && f[0] == "compose" && f[3] == "ps":
+		case sub == "ps":
 		case f[0] == "inspect":
 		case len(f) > 1 && (f[0] == "image" || f[0] == "manifest") && f[1] == "inspect":
 		case len(f) == 3 && f[0] == "tag" && f[2] == e2ePinned:
 			out = append(out, "tag:"+r.roleOfRef(f[1]))
 		case len(f) == 2 && f[0] == "pull":
 			out = append(out, "pull:"+r.roleOfRef(f[1]))
-		case len(f) > 3 && f[0] == "compose":
-			out = append(out, f[3])
+		case sub != "":
+			out = append(out, sub)
 		default:
 			out = append(out, l)
 		}
 	}
 	return out
+}
+
+// composeSub is the compose subcommand of a logged argv ("" when the call is
+// not `docker compose`), skipping the global options and their values exactly
+// like the shim's key().
+func composeSub(f []string) string {
+	if len(f) == 0 || f[0] != "compose" {
+		return ""
+	}
+	for i := 1; i < len(f); i++ {
+		switch a := f[i]; {
+		case a == "-f" || a == "--file" || a == "--profile" || a == "-p" || a == "--project-name" ||
+			a == "--env-file" || a == "--project-directory":
+			i++
+		case strings.HasPrefix(a, "-"):
+		default:
+			return a
+		}
+	}
+	return ""
+}
+
+// privCheck (sudoers mode) checks the privilege context the shim recorded for
+// every Docker call p made: the call ran as root via sudo, invoked by the
+// agent's own unprivileged uid, through the sudoers rule the packaging assigns
+// it: the compose-cli wrapper for the argv-varying calls (container inspect,
+// pull, tag) and a direct /usr/bin/docker rule for everything else.
+func (r *e2eRig) privCheck(res *e2eResult, p *agentProc, label string) {
+	if r.e.mode != modeSudoers || res == nil {
+		return
+	}
+	calls := p.calls()
+	var priv []string
+	for _, l := range strings.Split(readFile(filepath.Join(p.ctl, "priv.log")), "\n") {
+		if strings.TrimSpace(l) != "" {
+			priv = append(priv, l)
+		}
+	}
+	var probs []string
+	if len(priv) != len(calls) {
+		probs = append(probs, fmt.Sprintf("%d calls but %d privilege lines", len(calls), len(priv)))
+	}
+	wrapped, direct := 0, 0
+	for i := 0; i < len(priv) && i < len(calls); i++ {
+		f := strings.Fields(calls[i])
+		// The wrapper's subcommands: inspect-image, pull, tag, and the cli
+		// backup/restore/cleanup runs (only the fixed --list-backups run has a
+		// direct rule).
+		viaWrapper := len(f) > 0 && (f[0] == "tag" || f[0] == "pull" || f[0] == "inspect" ||
+			(composeSub(f) == "run" && !strings.Contains(calls[i], "--list-backups")))
+		wantCmd := "sudo_cmd=/usr/bin/docker " + calls[i]
+		if viaWrapper {
+			wantCmd = "sudo_cmd=" + e2eWrapper + " "
+		}
+		wantID := fmt.Sprintf("uid=0 sudo_uid=%d ", r.e.uid)
+		if !strings.HasPrefix(priv[i], wantID) || !strings.Contains(priv[i], wantCmd) {
+			probs = append(probs, fmt.Sprintf("call %d %q ran as %q", i+1, calls[i], priv[i]))
+			continue
+		}
+		if viaWrapper {
+			wrapped++
+		} else {
+			direct++
+		}
+	}
+	got := fmt.Sprintf("%d calls: %d via a direct docker rule, %d via the compose-cli wrapper; all as root from uid %d", len(calls), direct, wrapped, r.e.uid)
+	if len(probs) > 0 {
+		got = strings.Join(probs, "; ")
+	}
+	res.check("P "+label+": sudo -n via the packaged rules", len(probs) == 0 && len(calls) > 0,
+		"every call: root via sudo from the agent uid, through its sudoers rule", got)
+	// The agent itself never ran as root.
+	if p.cmd != nil && p.cmd.Process != nil {
+		st := readFile(fmt.Sprintf("/proc/%d/status", p.cmd.Process.Pid))
+		if st != "" {
+			uidLine := ""
+			for _, l := range strings.Split(st, "\n") {
+				if strings.HasPrefix(l, "Uid:") {
+					uidLine = strings.Join(strings.Fields(l)[1:], " ")
+				}
+			}
+			want := strings.TrimSpace(strings.Repeat(strconv.Itoa(r.e.uid)+" ", 4))
+			res.eq("P "+label+": agent process uid (real effective saved fs)", want, uidLine)
+		}
+	}
 }
 
 func (r *e2eRig) roleOfRef(ref string) string {
@@ -555,6 +791,37 @@ func (r *e2eRig) apply(p *agentProc, role string) (string, error) {
 		return "", fmt.Errorf("apply: HTTP %d %v", code, err)
 	}
 	return op.OpID, nil
+}
+
+// rollback starts POST /v1/rollbacks: mode "image" re-pins to role's digest;
+// mode "data" restores the fake backup the cli service lists.
+func (r *e2eRig) rollback(p *agentProc, mode, role string) (string, error) {
+	body := map[string]interface{}{"mode": mode}
+	if mode == "image" {
+		body["image_ref"] = r.e.ref(role)
+	} else {
+		body["filename"] = "agt900-e2e.tar.gz"
+	}
+	var op opView
+	code, err := p.post("/v1/rollbacks", body, &op)
+	if err != nil || code != http.StatusAccepted {
+		return "", fmt.Errorf("rollback %s: HTTP %d %v", mode, code, err)
+	}
+	return op.OpID, nil
+}
+
+// waitOp polls an operation until it is terminal.
+func (p *agentProc) waitOp(opID string, d time.Duration) opView {
+	var op opView
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		op = opView{}
+		if code, _ := p.get("/v1/operations/"+opID, &op); code == http.StatusOK && (op.State == "succeeded" || op.State == "failed") {
+			return op
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return op
 }
 
 func (r *e2eRig) recordPath(opID string) string {
@@ -599,10 +866,17 @@ func waitFile(path string, d time.Duration) bool {
 //
 // It returns the op id and how the kill was made.
 func (r *e2eRig) crash(target, point string) (string, string, error) {
+	if point == "verified" {
+		return r.crashOnVerified(target)
+	}
+	return r.crashOp(func(p *agentProc) (string, error) { return r.apply(p, target) }, point)
+}
+
+// crashOp is crash for any operation: begin starts it on the held agent and
+// returns its op id.
+func (r *e2eRig) crashOp(begin func(p *agentProc) (string, error), point string) (string, string, error) {
 	p := r.a
 	switch {
-	case point == "verified":
-		return r.crashOnVerified(target)
 	case strings.HasPrefix(point, "ready@"):
 		if err := os.WriteFile(filepath.Join(p.ctl, "block_on"), []byte(strings.TrimPrefix(point, "ready@")+"\n"), 0o600); err != nil {
 			return "", "", err
@@ -612,12 +886,12 @@ func (r *e2eRig) crash(target, point string) (string, string, error) {
 			return "", "", err
 		}
 	}
-	opID, err := r.apply(p, target)
+	opID, err := begin(p)
 	if err != nil {
 		return "", "", err
 	}
 	if !waitFile(filepath.Join(p.ctl, "blocked"), 150*time.Second) {
-		return opID, "", fmt.Errorf("the apply never reached %s; calls:\n%s", point, strings.Join(p.calls(), "\n"))
+		return opID, "", fmt.Errorf("the operation never reached %s; calls:\n%s\nagent:\n%s", point, strings.Join(p.calls(), "\n"), p.logs.String())
 	}
 	how := "held at " + point
 	if strings.HasPrefix(point, "ready@") {
@@ -820,10 +1094,58 @@ type e2eExpect struct {
 	retired          bool
 	state            string // reconcile state: done / recovery_required / deferred
 	outcome          string // per-record outcome, when it is not implied (converged_not_retired)
+
+	// status is the proxy container's state after the reconcile ("" = running).
+	status string
+	// pre is the role that ran before the interrupted operation ("" = prior;
+	// "good" for a standalone rollback, which starts from an upgraded stack),
+	// and targets the roles the operation was moving TO ("" = good and bad).
+	// The invariants are evaluated relative to them.
+	pre     string
+	targets []string
+	// tagThenUp lets I1 accept `up` right after this restart's own `tag:<pre>`
+	// (a converge that retags and then restarts the prior image). No current
+	// expectation sets it; see xTTArmed.
+	tagThenUp bool
+}
+
+// xp builds an expectation with the defaults for the optional fields.
+func xp(decision, reason string, actions []string, tag, run string, retired bool, state, outcome string) e2eExpect {
+	return e2eExpect{decision: decision, reason: reason, actions: actions, tag: tag, run: run, retired: retired, state: state, outcome: outcome}
+}
+
+func (x e2eExpect) preRole() string {
+	if x.pre == "" {
+		return "prior"
+	}
+	return x.pre
+}
+
+func (x e2eExpect) isTarget(role string) bool {
+	if len(x.targets) == 0 {
+		return role == "good" || role == "bad"
+	}
+	for _, t := range x.targets {
+		if t == role {
+			return true
+		}
+	}
+	return false
+}
+
+func (x e2eExpect) wantStatus() string {
+	if x.status == "" {
+		return "running"
+	}
+	return x.status
 }
 
 func (x e2eExpect) String() string {
-	return fmt.Sprintf("%s/%s actions=[%s] tag=%s run=%s retired=%v", x.decision, x.reason, strings.Join(x.actions, ","), x.tag, x.run, x.retired)
+	s := fmt.Sprintf("%s/%s actions=[%s] tag=%s run=%s retired=%v", x.decision, x.reason, strings.Join(x.actions, ","), x.tag, x.run, x.retired)
+	if x.status != "" {
+		s += " status=" + x.status
+	}
+	return s
 }
 
 // e2eConverge is one kill-point case.
@@ -838,12 +1160,33 @@ type e2eConverge struct {
 }
 
 func noop(dec, reason string) e2eExpect {
-	return e2eExpect{dec, reason, []string{}, "prior", "prior", true, "done", ""}
+	return xp(dec, reason, []string{}, "prior", "prior", true, "done", "")
 }
 
 func rrKeep(reason, tag, run string) e2eExpect {
-	return e2eExpect{"recovery_required", reason, []string{}, tag, run, false, "recovery_required", ""}
+	return xp("recovery_required", reason, []string{}, tag, run, false, "recovery_required", "")
 }
+
+// ┌──────────────────────────────────────────────────────────────────────────┐
+// │ RETARGET POINT — the T/T-armed rollback (case rb_armed_before_tag).      │
+// └──────────────────────────────────────────────────────────────────────────┘
+// The agent was killed after it durably armed the inline rollback
+// (rollback_armed) and before that rollback's `docker tag`: the tag and the
+// container are both on the failed-gate target ("T/T armed"). The current
+// converge reports it (recovery_required/rollback_armed_target_live) and
+// changes nothing, so the failed-gate image keeps running (OWNER-ungated GAP).
+//
+// A pending change makes converge FINISH that rollback instead: retag to the
+// recorded prior, `compose up`, a fresh health gate, verify. When it lands,
+// replace ONLY this value, with tagThenUp so I1 accepts the `up` that follows
+// the restart's own retag, e.g.
+//
+//	xTTArmed = e2eExpect{decision: "finish_rollback", reason: "<the new reason>",
+//		actions: []string{"tag:prior", "up"}, tag: "prior", run: "prior",
+//		retired: true, state: "done", tagThenUp: true}
+//
+// Nothing else in the harness encodes the T/T-armed expectation.
+var xTTArmed = rrKeep("rollback_armed_target_live", "bad", "bad")
 
 func e2eConvergeCases() []e2eConverge {
 	return []e2eConverge{
@@ -853,19 +1196,19 @@ func e2eConvergeCases() []e2eConverge {
 		{name: "resolved_at_pull", target: "good", point: "pull_before:1", expect: noop("noop", "safe_boundary_unchanged")},
 		{name: "barrier_before_tag", target: "good", point: "tag_before:1", expect: noop("noop", "already_on_prior")},
 		{name: "tag_moved_before_up", target: "good", point: "up_before:1",
-			expect: e2eExpect{"realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", true, "done", ""}},
+			expect: xp("realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", true, "done", "")},
 		{name: "up_done_unrecorded", target: "good", point: "up_after:1", expect: rrKeep("target_live_ungated", "good", "good")},
 		{name: "restarted_at_health_gate", target: "good", point: "ready@up_after:1", expect: rrKeep("target_live_ungated", "good", "good")},
 		{name: "restarted_at_verify", target: "good", point: "ps_before:3", expect: rrKeep("target_live_ungated", "good", "good")},
 		// A10: killed after the durable `verified` write, before retirement
 		{name: "verified_adopt", target: "good", point: "verified",
-			expect: e2eExpect{"adopt", "verified_target_live", []string{}, "good", "good", true, "done", ""}},
+			expect: xp("adopt", "verified_target_live", []string{}, "good", "good", true, "done", "")},
 		{name: "verified_target_not_ready_now", target: "good", point: "verified", mutate: stallReady,
 			expect: rrKeep("verified_target_not_ready", "good", "good")},
 		// inline rollback of a target that failed its health gate (bad: /ready 503)
-		{name: "rb_armed_before_tag", target: "bad", point: "tag_before:2", expect: rrKeep("rollback_armed_target_live", "bad", "bad")},
+		{name: "rb_armed_before_tag", target: "bad", point: "tag_before:2", expect: xTTArmed}, // RETARGET POINT: see xTTArmed
 		{name: "rb_tag_moved_before_up", target: "bad", point: "up_before:2",
-			expect: e2eExpect{"finish_rollback", "rollback_interrupted", []string{"up"}, "prior", "prior", true, "done", ""}},
+			expect: xp("finish_rollback", "rollback_interrupted", []string{"up"}, "prior", "prior", true, "done", "")},
 		{name: "rb_up_done", target: "bad", point: "up_after:2", expect: noop("noop", "already_on_prior")},
 		{name: "rb_in_rollback_health", target: "bad", point: "ready@up_after:2", expect: noop("noop", "already_on_prior")},
 		{name: "rb_at_rollback_verify", target: "bad", point: "ps_before:3", expect: noop("noop", "already_on_prior")},
@@ -912,6 +1255,7 @@ type restartObs struct {
 	audits        map[string]int
 	recAfter      map[string]interface{}
 	err           error
+	proc          *agentProc // the restarted agent (for the privilege-path check)
 }
 
 // restartConverge snapshots Docker, starts a converge agent and observes.
@@ -928,6 +1272,7 @@ func (r *e2eRig) restartConverge(opID, stageTimeout string) restartObs {
 
 func (r *e2eRig) observe(p *agentProc, opID string, o *restartObs) {
 	_ = os.Remove(r.e.ctlFile("hang_ready"))
+	o.proc = p
 	o.after = r.e.snap()
 	o.mutating = r.mutating(p)
 	o.allCalls = p.calls()
@@ -967,7 +1312,7 @@ func (r *e2eRig) assertConvergeObs(res *e2eResult, opID string, x e2eExpect, o *
 	res.eq("decision", x.decision+"/"+x.reason, rec.Decision+"/"+rec.Reason)
 	res.eq("docker commands", "["+strings.Join(x.actions, ",")+"]", "["+strings.Join(o.mutating, ",")+"]")
 	res.eq("tag after", x.tag, e.class(o.after.Tag))
-	res.eq("container after", x.run+"(running)", e.class(o.after.Image)+"("+o.after.Status+")")
+	res.eq("container after", x.run+"("+x.wantStatus()+")", e.class(o.after.Image)+"("+o.after.Status+")")
 	res.eq("record retired", strconv.FormatBool(x.retired), strconv.FormatBool(o.retired))
 	res.eq("reconcile state", x.state, state)
 	if x.outcome != "" {
@@ -996,39 +1341,50 @@ func (r *e2eRig) assertInvariants(res *e2eResult, opID string, x e2eExpect, deci
 	// Docker-converged: converged_not_retired changed Docker and verified it,
 	// but could not retire the record (its audit write failed).
 	dockerConverged := converged || outcome == "converged_not_retired"
+	pre := x.preRole() // the image that ran before the interrupted operation
 	// I1: the only Docker changes a reconcile may make: tag to the recorded
 	// prior reference; `up` only with the tag already on the prior image. Never
 	// pull, down, or a tag to anything else.
-	okCmds := true
+	okCmds, retagged := true, false
 	for _, m := range o.mutating {
 		switch {
-		case m == "tag:prior":
-		case m == "up" && o.before.Tag == e.id["prior"]:
+		case m == "tag:"+pre:
+			retagged = true
+		case m == "up" && (o.before.Tag == e.id[pre] || (x.tagThenUp && retagged)):
 		default:
 			okCmds = false
 		}
 	}
-	res.check("I1 only permitted docker changes", okCmds, "tag:prior | up(tag already prior)", "["+strings.Join(o.mutating, ",")+"]")
+	res.check("I1 only permitted docker changes", okCmds, "tag:"+pre+" | up(tag already "+pre+")", "["+strings.Join(o.mutating, ",")+"]")
 	// I2: a converged record leaves tag and container on the same image, running
 	// and ready: the prior image, or a target the journal proved verified.
+	sameState := o.after.Tag == o.after.Image && o.after.Status == "running" && o.after.Ready && e.class(o.after.Image) == pre
 	if dockerConverged {
 		phase := recStr(o.recBefore, "phase")
 		img := e.class(o.after.Image)
 		ok := o.after.Tag == o.after.Image && o.after.Status == "running" && o.after.Ready &&
-			(img == "prior" || (decision == "adopt" && phase == "verified" && img == x.run))
-		res.check("I2 converged = same image, gated, ready", ok, "tag==run, running, ready, prior|verified target",
+			(img == pre || (decision == "adopt" && phase == "verified" && img == x.run))
+		res.check("I2 converged = same image, gated, ready", ok, "tag==run, running, ready, "+pre+"|verified target",
 			fmt.Sprintf("%s phase_before=%s", e.describe(o.after), phase))
 	} else {
-		// I3: anything else changes nothing in Docker.
+		// I3: anything else changes nothing in Docker. The one exception is a
+		// Docker-changing decision (realign / finish_rollback) whose step AFTER
+		// the change failed (e.g. the daemon went away before the verify): the
+		// contract's other disjunct then still has to hold, i.e. tag and
+		// container both on the pre-change image, running and ready.
 		same := o.after.ContainerID == o.before.ContainerID && o.after.Image == o.before.Image &&
 			o.after.Status == o.before.Status && o.after.Tag == o.before.Tag
-		res.check("I3 not converged = Docker unchanged", same, e.describe(o.before)+" id="+short(o.before.ContainerID),
-			e.describe(o.after)+" id="+short(o.after.ContainerID))
+		mutDecision := decision == "realign" || decision == "finish_rollback"
+		name, want := "I3 not converged = Docker unchanged", e.describe(o.before)+" id="+short(o.before.ContainerID)
+		if mutDecision {
+			name, want = "I3 failed action = Docker unchanged or on "+pre, want+" | tag=run="+pre+"(running,ready)"
+		}
+		res.check(name, same || (mutDecision && sameState), want, e.describe(o.after)+" id="+short(o.after.ContainerID))
 	}
 	// I4: an image that never passed the gate (any target) is never STARTED by
 	// the reconcile: if a target runs afterwards, the reconcile ran no `up` and
 	// the container is the one that was there before.
-	if img := e.class(o.after.Image); img == "good" || img == "bad" {
+	if img := e.class(o.after.Image); x.isTarget(img) {
 		started := false
 		for _, m := range o.mutating {
 			if m == "up" {
@@ -1072,6 +1428,7 @@ func (r *e2eRig) assertInvariants(res *e2eResult, opID string, x e2eExpect, deci
 			res.check("AGT-004 no pull at startup", false, "no pull", c)
 		}
 	}
+	r.privCheck(res, o.proc, "restart")
 }
 
 func short(id string) string { return id[:min(12, len(id))] }
@@ -1183,6 +1540,7 @@ func (e *e2eEnv) caseControl(t *testing.T, name, target string) {
 		res.eq("docker", "tag=prior run=prior(running,ready)", e.describe(s))
 	}
 	res.eq("journal records", "0", strconv.Itoa(nrec))
+	r.privCheck(res, p, "upgrade")
 	r.killProc(p)
 }
 
@@ -1219,8 +1577,8 @@ func (s e2eKillSeq) expected() string {
 }
 
 var (
-	xRealign = e2eExpect{"realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", true, "done", ""}
-	xFinish  = e2eExpect{"finish_rollback", "rollback_interrupted", []string{"up"}, "prior", "prior", true, "done", ""}
+	xRealign = xp("realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", true, "done", "")
+	xFinish  = xp("finish_rollback", "rollback_interrupted", []string{"up"}, "prior", "prior", true, "done", "")
 	xOnPrior = noop("noop", "already_on_prior")
 )
 
@@ -1366,7 +1724,7 @@ func (r *e2eRig) killOnReconciledAudit(p *agentProc, opID string) error {
 // a record is never retired without its audit entry. Once the audit log is
 // writable again, the next start retires it with exactly one entry.
 func (e *e2eEnv) caseAuditWriteFails(t *testing.T, name string) {
-	x1 := e2eExpect{"realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", false, "recovery_required", "converged_not_retired"}
+	x1 := xp("realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", false, "recovery_required", "converged_not_retired")
 	res := &e2eResult{name: name, expected: "audit unwritable: " + x1.String() + " outcome=converged_not_retired; audit writable again: " + xOnPrior.String()}
 	defer e.record(t, res)
 	if err := e.reset(); err != nil {
@@ -1428,7 +1786,7 @@ func (e *e2eEnv) caseAuditWriteFails(t *testing.T, name string) {
 // back the next start converges. With second=true a second agent process is
 // started on the same state_dir while the first holds the instance lock.
 func (e *e2eEnv) caseDockerDown(t *testing.T, name string, second bool) {
-	x := e2eExpect{"realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", true, "done", ""}
+	x := xp("realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", true, "done", "")
 	exp := "dockerd stopped: deferred, no attempt, record kept, no docker change; dockerd back: " + x.String()
 	if second {
 		exp = "instance 2 on the same state_dir: skipped_second_instance, no docker change, record kept; after both die: " + x.String()
@@ -1599,6 +1957,10 @@ func TestAGT900RealDocker(t *testing.T) {
 		named{"off_mode_tag_ahead", func() { e.caseOffMode(t, "off_mode_tag_ahead", "good", "up_before:1") }},
 		named{"off_mode_target_live", func() { e.caseOffMode(t, "off_mode_target_live", "good", "up_after:1") }},
 	)
+	// Outstanding recovery cases (agt900_realdocker_e2e_recovery_test.go).
+	for _, c := range e2eRecoveryCases(t, e) {
+		all = append(all, named{c.name, c.run})
+	}
 	names := make([]string, 0, len(all))
 	ran := 0
 	for _, c := range all {
@@ -1613,7 +1975,7 @@ func TestAGT900RealDocker(t *testing.T) {
 	if ran == 0 {
 		t.Fatalf("AGT900_CASES matched no case; cases: %s", strings.Join(names, " "))
 	}
-	_, _ = e.docker("compose", "-f", e.composeFile(), "down", "--remove-orphans")
+	_, _ = e.docker(e.composeArgs("down", "--remove-orphans")...)
 }
 
 // e2eNormID strips a sha256: prefix.
@@ -1736,7 +2098,9 @@ func (r *e2eRig) checkRecord(id string, m map[string]interface{}, snap dockerSna
 	}
 	// The write-ahead barrier precedes every tag move: at a safe phase Docker
 	// must still be on the prior image (not checkable while the daemon is down).
-	if snap.Err == "" && ok && phase < e2ePhaseOrder["restarting"] {
+	// Only an upgrade writes phases; a rollbacks.create record stays at
+	// `admitted` whatever it did, so its phase proves nothing.
+	if snap.Err == "" && ok && phase < e2ePhaseOrder["restarting"] && recStr(m, "kind") == "upgrades.apply" {
 		if snap.Tag != e.id["prior"] || (snap.Image != "" && snap.Image != e.id["prior"]) {
 			bad("phase %s but Docker is %s", recStr(m, "phase"), e.describe(snap))
 		}
