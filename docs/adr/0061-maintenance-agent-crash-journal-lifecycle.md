@@ -233,3 +233,26 @@ re-pins it.
   and ops tests.
 - Contracts `AGT-004` and `AGT-005` register the two invariants; `AGT-900` is
   unchanged and still open.
+
+## Addendum (2026-11-23): what "no process behind it" does and does not cover
+
+A record found at startup is treated as an operation with no process behind
+it. Two things make that usable, and neither is the journal:
+
+- **Processes.** The shipped unit kills the agent's control group and holds
+  the restart until it is empty (`KillMode=control-group`). No docker command
+  of the dead agent is alive when the next one starts.
+- **The daemon.** dockerd finishes the last request it was sent. A container
+  stop lasts as long as the proxy takes to exit, up to its
+  `stop_grace_period`. On real Docker a rollback admitted in that window found
+  the old container running, passed its health gate, reported success and
+  retired the record; the container then exited.
+
+Rule: nothing tags and recreates while such a request can still be pending.
+`tagAndUp` waits until `interrupted_at + interrupted_settle` (default 75s, must
+exceed the proxy's `stop_grace_period`) for every startup-marked record whose
+phase is at or past the write-ahead barrier, and only then tags, runs `up`, and
+goes through the health gate. A success, and the retirement of records it
+causes, is therefore judged on a container no outstanding request can touch.
+Records before the barrier cause no wait. The wait is not a new stage and adds
+no docker call.

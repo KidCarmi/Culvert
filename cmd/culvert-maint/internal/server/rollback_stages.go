@@ -56,14 +56,22 @@ type rollbackAccumulator struct {
 // ev (may be nil) is marked stale immediately before `up`, whatever `up` returns: from then
 // on an earlier capture no longer proves what runs.
 func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bool, ev *runningEvidence) (stdout, stderr []byte, err error) {
+	// Before anything is moved: let a container stop an interrupted image
+	// change may have left in dockerd run out (settle.go).
+	note, serr := s.settleInterrupted(ctx)
+	if serr != nil {
+		return nil, nil, serr
+	}
 	tres, terr := s.opts.Runner.ComposeTagPinned(ctx, ref)
 	if terr != nil {
 		if tres != nil {
-			return tres.Stdout, tres.Stderr, terr
+			note = append(note, tres.Stdout...)
+			return note, tres.Stderr, terr
 		}
-		return nil, nil, terr
+		return note, nil, terr
 	}
-	out := append([]byte(nil), tres.Stdout...)
+	out := append([]byte(nil), note...)
+	out = append(out, tres.Stdout...)
 	errOut := append([]byte(nil), tres.Stderr...)
 	ev.noteUp()
 	ures, uerr := s.opts.Runner.ComposeUp(ctx)
