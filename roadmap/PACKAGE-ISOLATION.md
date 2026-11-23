@@ -916,7 +916,7 @@ added once they merge; this section sits at a third anchor neither touches):
 | Depends on | — (no open PR changes `cp_grpc_bind.go`, `cp_grpc_health.go`, `scan_svc_listener.go` or `socks5_health.go`; checked against the 40 open PR heads that are not dependency bumps on 2026-11-23, after fetching full history, because the clone is shallow and a shallow merge base lists files a branch never edited) |
 | Evidence | ADR-0064; 2 exported names (`Ladder`, `Clamp`), one method each; the four root functions stay as bindings, so no call site and no existing test is edited; verdict tables over 219 ladder inputs and 47,961 clamp inputs per listener whose digests were captured from main before the bind; differential tests against frozen copies over 60,000 inputs each; 2 fuzz targets; 29 mutation checks, 26 failing a test and 3 equivalent |
 | Risks | the ladder is each listener's retry cadence and the clamp bounds how late its "unavailable" page can be. Every returned value is pinned per listener, including where the int64 arithmetic wraps |
-| PR | this PR |
+| PR | #2073 |
 | Next action | review PR |
 
 - **Reconciled.** #2017 (IM-029): every non-skipped check passed, the Codex
@@ -932,7 +932,7 @@ added once they merge; this section sits at a third anchor neither touches):
   constant, the jitter, the timers, the supervisors, the health records and
   the alerts.
 - **Size.** 4 root production files edited (+23/−37 lines), 2 new production
-  files (88 lines, 34 of them the package comment). Root test inventory
+  files (89 lines, 35 of them the package comment). Root test inventory
   8,642 → 8,645 by `go test -list` (tests, fuzz targets, benchmarks and
   examples; one new file, 3 tests); package 13 tests and 2 fuzz targets.
 - **A sibling of `internal/listenfault`, not an addition to it.** That
