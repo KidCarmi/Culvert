@@ -30,6 +30,10 @@ type rollbackAccumulator struct {
 	targetDigest        string
 	runningAfterDigests []string
 	healthSummary       string
+	// evidence, when non-nil, receives every capture and `up` of the shared core so the
+	// caller can report the final running image from evidence (inline rollback inside
+	// upgrades.apply). The standalone rollback handler leaves it nil: unchanged behaviour.
+	evidence *runningEvidence
 }
 
 // tagAndUp runs the P1.4 retag-then-restart pair: `docker tag <ref>
@@ -48,7 +52,10 @@ type rollbackAccumulator struct {
 // tagAndUp only reports the failure; apply's restart stage follows it with
 // realignPinnedTagAfterFailedUp (journal_phases.go), which moves the tag back
 // when the container provably never moved (contract AGT-002).
-func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bool) (stdout, stderr []byte, err error) {
+//
+// ev (may be nil) is marked stale immediately before `up`, whatever `up` returns: from then
+// on an earlier capture no longer proves what runs.
+func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bool, ev *runningEvidence) (stdout, stderr []byte, err error) {
 	tres, terr := s.opts.Runner.ComposeTagPinned(ctx, ref)
 	if terr != nil {
 		if tres != nil {
@@ -58,6 +65,7 @@ func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bo
 	}
 	out := append([]byte(nil), tres.Stdout...)
 	errOut := append([]byte(nil), tres.Stderr...)
+	ev.noteUp()
 	ures, uerr := s.opts.Runner.ComposeUp(ctx)
 	if uerr != nil && failedPostRestart != nil {
 		*failedPostRestart = true
@@ -96,7 +104,7 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 			Name:          "rollback_restart",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				return s.tagAndUp(ctx, targetRefFn(), nil)
+				return s.tagAndUp(ctx, targetRefFn(), nil, acc.evidence)
 			},
 		},
 		{
@@ -126,6 +134,7 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 					return []byte("verify: post-rollback capture failed"), nil,
 						fmt.Errorf("post-rollback capture failed: %w", err)
 				}
+				acc.evidence.noteCapture(ri) // valid evidence even when it contradicts the target
 				acc.runningAfterDigests = bareDigests(ri.RepoDigests)
 				if targetDigest != "" && !containsString(acc.runningAfterDigests, targetDigest) {
 					return []byte(fmt.Sprintf("verify: running digests=%s do NOT include target %s",

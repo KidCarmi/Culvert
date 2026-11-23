@@ -514,7 +514,10 @@ func applyVectorsUnder(t *testing.T, store string, vs []lifecyclemodel.ApplyVect
 			running, tag, tokens := r.world()
 			res, _ := op["result"].(map[string]interface{})
 			reason, _ := op["failure_reason"].(string)
-			got := applyExpectation{Op: fmt.Sprint(op["state"]), Reason: reason, Running: running, Tag: tag, Cmds: tokens,
+			fState, _ := res["final_running_state"].(string)
+			got := applyExpectation{FinalState: fState, FinalDigest: role(fmt.Sprint(res["final_running_digest"])),
+				FinalImage: role(fmt.Sprint(res["final_running_image_id"])),
+				Op:         fmt.Sprint(op["state"]), Reason: reason, Running: running, Tag: tag, Cmds: tokens,
 				UpgradeSucceeded: res["upgrade_succeeded"] == true, RollbackAttempted: res["rollback_attempted"] == true,
 				RollbackSucceeded:     res["rollback_succeeded"] == true,
 				RollbackSkippedReason: fmt.Sprint(res["rollback_skipped_reason"]), TagAhead: v.Expect.TagAhead,
@@ -537,7 +540,14 @@ func applyVectorsUnder(t *testing.T, store string, vs []lifecyclemodel.ApplyVect
 			*acc.results = append(*acc.results, fmt.Sprintf("%s%s | %s | upgrade_digest=%s rollback_digest=%s final_running_digest=%s",
 				pfx, scriptString(v.Script), params, role(fmt.Sprint(res["upgrade_digest"])),
 				role(fmt.Sprint(res["rollback_digest"])), rep))
-			if rep != running {
+			// A misreport is a VERIFIED result naming an image that does not run (by registry
+			// digest, or by image id when the image has no registry digest). An unverified
+			// result names nothing, so it cannot misreport.
+			named := rep
+			if named == "none" {
+				named = role(fmt.Sprint(res["final_running_image_id"]))
+			}
+			if fState == "verified" && named != running {
 				*acc.misreported = append(*acc.misreported, fmt.Sprintf("%s%s | %s | reported=%s actual=%s",
 					pfx, scriptString(v.Script), params, rep, running))
 			}

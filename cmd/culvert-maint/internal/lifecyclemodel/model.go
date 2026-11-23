@@ -50,6 +50,31 @@ type State struct {
 	RbOK        bool
 	Op          string
 	TID         string
+	// Ev is the evidence the agent holds about the running image (running_evidence.go):
+	// "" nothing captured yet, "fresh" a capture after the last `compose up`, "stale" an `up`
+	// ran after the last capture. A capture succeeds iff a container runs.
+	Ev string
+}
+
+const (
+	evFresh = "fresh"
+	evStale = "stale"
+)
+
+// captureEv is the evidence after a capture attempt: it succeeds iff a container runs.
+func captureEv(s State) string {
+	if s.Running != imgNone {
+		return evFresh
+	}
+	return s.Ev
+}
+
+// upThenCaptureEv is the evidence after a `compose up` followed by a capture attempt (the
+// apply restart stage always re-captures after `up`: the target id on success, the AGT-002
+// re-read on failure).
+func upThenCaptureEv(s State) string {
+	s.Ev = evStale
+	return captureEv(s)
 }
 
 // Stage names, in execution order.
@@ -268,6 +293,7 @@ func (Model) Step(s State, e string) State {
 	nxt := stages[stageIndex(pc)+1]
 	if pc == pcCapture {
 		s.PC, s.JR = nxt, "captured"
+		s.Ev = captureEv(s)
 		return s
 	}
 	if stageIndex(pc) < 7 {
@@ -303,6 +329,9 @@ func stepCrash(s State, e string) State {
 func stepReport(s State) State {
 	failed := s.FailStage != ""
 	s.PC, s.JR = pcDone, "removed"
+	if s.Ev != evFresh { // option C: one read-only final capture when evidence is stale or missing
+		s.Ev = captureEv(s)
+	}
 	switch {
 	case !failed:
 		s.Op, s.Reason = "succeeded", ""
@@ -345,6 +374,9 @@ func stepForward(s State, e, nxt string) State {
 		return s
 	}
 	// verify
+	if e != evCaptureFail {
+		s.Ev = captureEv(s)
+	}
 	if e == evOK {
 		s.PC, s.JR, s.TID = pcRbPull, "verified", imgT
 		return s
@@ -383,10 +415,12 @@ func stepRestart(s State, e, nxt string) State {
 		}
 		s = bad(s)
 		s.JR, s.Tag, s.PostFail = jrRestarting, tag, true
+		s.Ev = upThenCaptureEv(s)
 		return s
 	case evUpFailRecreated:
 		s = bad(s)
 		s.JR, s.Tag, s.Running, s.PostFail = jrRestarting, imgT, imgT, true
+		s.Ev = upThenCaptureEv(s)
 		return s
 	}
 	run := s.Running
@@ -398,6 +432,7 @@ func stepRestart(s State, e, nxt string) State {
 		tid = ""
 	}
 	s.PC, s.Tag, s.Running, s.JR, s.TID = nxt, imgT, run, "restarted", tid
+	s.Ev = upThenCaptureEv(s)
 	return s
 }
 
@@ -412,6 +447,9 @@ func stepRollback(s State, e, nxt string) State {
 	if pc == pcRbRestart {
 		return stepRbRestart(s, e)
 	}
+	if pc == pcRbVerify && e != evCaptureFail { // rollback_verify captured (ok or mismatch)
+		s.Ev = captureEv(s)
+	}
 	if e != evOK {
 		s.RbFailed = true
 		return s
@@ -423,6 +461,9 @@ func stepRollback(s State, e, nxt string) State {
 }
 
 func stepRbRestart(s State, e string) State {
+	if e != evTagFail { // the rollback's `up` ran: earlier evidence is stale (no capture follows)
+		s.Ev = evStale
+	}
 	switch e {
 	case evTagFail:
 		s.RbFailed = true

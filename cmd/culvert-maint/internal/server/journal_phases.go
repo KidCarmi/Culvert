@@ -136,7 +136,7 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 		if err := s.writeBarrier(acc); err != nil {
 			return nil, nil, fmt.Errorf("restart: write-ahead journal barrier failed, refusing to advance tag: %w", err)
 		}
-		out, errOut, uerr := s.tagAndUp(ctx, acc.pinnedRef, &acc.upgradeFailedPostRestart)
+		out, errOut, uerr := s.tagAndUp(ctx, acc.pinnedRef, &acc.upgradeFailedPostRestart, &acc.evidence)
 		if uerr == nil {
 			// Capture the target's config digest NOW (best-effort) — the container
 			// is running the target after `up`. Without this, a crash between here
@@ -145,6 +145,7 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 			// manifest comparison for exactly the multi-arch case the config digest
 			// protects (Codex P1). verifyRunningImage re-captures + hard-verifies.
 			if ri, cerr := s.opts.Runner.CaptureRunningProxyImage(ctx); cerr == nil {
+				acc.evidence.noteCapture(ri)
 				acc.runningAfterID = ri.RunningImageID
 			}
 			s.advanceJournalPhaseBestEffort(acc, journal.PhaseRestarted)
@@ -196,6 +197,9 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 // fires for a failed `up` is unchanged.
 func (s *Server) realignPinnedTagAfterFailedUp(ctx context.Context, acc *upgradeApplyAccumulator) []byte {
 	ri, cerr := s.opts.Runner.CaptureRunningProxyImage(ctx)
+	if cerr == nil {
+		acc.evidence.noteCapture(ri)
+	}
 	if cerr != nil {
 		return []byte("\nrestart: `up` failed and no running proxy could be captured afterwards — container state is indeterminate; culvert/proxy:pinned left at the target")
 	}
