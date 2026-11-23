@@ -22,7 +22,7 @@ All of this is from the real-Docker probe
 |---|---|---|
 | O1 | No docker command of a dead agent survives into the next start (systemd control-group kill) | Settled; pinned by `TestShippedUnit_CrashFence` |
 | O2 | `dockerd` finishes the last request it received. A container stop lasts as long as the proxy takes to exit | The agent waits `interrupted_settle` from every start before it tags and recreates. Correct, and slow: 75 s on the first operation after any agent start, crash or not |
-| O3 | After a recreate interrupted between Compose's stop and delete, the next `compose up -d` only tidies up and exits 0 with nothing started | The first rollback failed its health gate and left the proxy down until a second one was submitted. **Fixed in the same change as this document (phase 1a)** |
+| O3 | After a recreate interrupted between Compose's stop and delete, the next `compose up -d` only tidies up and exits 0 with nothing started | The first rollback failed its health gate and left the proxy down until a second one was submitted. **Fixed in the same change as this document (phase 1a) when the interruption left a journal record** (an agent killed during an upgrade or image rollback). Not yet covered: an `up` cut inside a live agent whose operation then failed and retired its own record; phase 1b's marker closes that |
 | O4 | After a recreate interrupted between delete and rename, `up` starts the replacement under Compose's temporary name (`<id>_<name>`) | Serves the right image; `container_name` is wrong until the next recreate; nothing reports it |
 | O5 | A crash between Compose's stop and start leaves the proxy down. Startup changes nothing unless `reconcile_on_startup = "converge"`, and the reconcile reports `recovery_required` for `stack_down` | Outage until an operator acts |
 | O6 | The agent cannot tell a clean predecessor from a killed one | The settle wait applies after every start |
@@ -54,9 +54,11 @@ effect before the effect.*
 Before the agent starts a mutating compose command (`up`, `down`), it writes a
 small durable marker in the state directory (`mutation.json`: operation id,
 command, wall-clock start, the proxy container id and `CreatedAt` it saw just
-before). It removes the marker when the command returns on its own, whatever
-its exit status, and leaves it when the command was cut (context ended) or the
-process died.
+before). It removes the marker only when the command returned success. After
+any error the marker stays: a docker CLI that was sent SIGTERM (a unit stop
+during `up`, a stage timeout) exits with an ordinary error status after it has
+asked `dockerd` to stop the proxy, so an error exit cannot be told from a cut
+(independent review, 2026-11-23; same rule as `noteMutationCut`).
 
 At startup:
 
@@ -103,13 +105,18 @@ conservative fallback when it is ambiguous". The 75 s remains the worst case
 for exactly one situation — a crash in the middle of a recreate whose stop
 never got to the container — and is zero or a few seconds otherwise.
 
-The same rule replaces the in-process `noteMutationCut` window: the marker of
-a cut command stays, and identity decides.
+The in-process `noteMutationCut` window is NOT replaced: a command of the
+running process that ended in an error may have been killed through `sudo`
+with the CLI still alive and sending further requests, so a single read of
+Docker proves nothing there. Early advance applies only to what a dead
+predecessor left, whose commands the unit's control-group kill has ended.
 
 ### 3.3 What state did Compose leave, and what is the bounded way out? (recovery ladder)
 
-A recovery operation (rollback, re-apply, the startup reconcile) follows one
-ladder. Each rung is decided on what Docker says, has a budget, and ends in
+A recovery operation (rollback, re-apply; the startup reconcile and the
+restore's `start_stack` once they are moved onto it — today they call `up`
+directly, which is harmless because neither runs from a half-recreated state)
+follows one ladder. Each rung is decided on what Docker says, has a budget, and ends in
 either a verified success or a kept record.
 
 1. Establish completion (3.1, 3.2).
@@ -152,7 +159,7 @@ real-Docker gate is met.
 
 | Step | Privilege | Contract | Decision |
 |---|---|---|---|
-| 1a. `up` retry in recovery context | none new | none (recovery only; ordinary upgrades make the same calls) | routine — implemented |
+| 1a. `up` retry in recovery context | none new | none (recovery only; with no interrupted record in the journal an upgrade makes the same calls; with one, of any class, it makes one extra read after `up`) | routine — implemented |
 | 1b. Mutation marker + identity-based early advance | none new (uses `compose ps`) | relaxes when the settle wait applies; ADR-0061 addendum to be extended | routine implementation, but it **shortens a safety wait**: its own PR, independent review, full probe matrix before merge |
 | 1c. `container_name_pending` in status / result | none new | additive status field | routine |
 | 2. `restore_prior` in the startup reconcile | none new | AGT-004, AGT-900 amended | **owner** |
@@ -179,8 +186,9 @@ is trusted:
 
 Properties, unchanged: no surviving docker command; no success on an
 unhealthy or wrong-image state; no change after a reported success; no silent
-divergence. New: **no operator action needed** in the stop/delete window
-(after 1a) and in the down window (after 2).
+divergence. New: **no second operator action needed** in the stop/delete window
+(after 1a when a record was left, after 1b always) and no operator action in
+the down window (after 2).
 
 ## 6. Open questions
 

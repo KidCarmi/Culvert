@@ -81,6 +81,28 @@ func TestUpRetry_IsBounded(t *testing.T) {
 	}
 }
 
+// TestUpRetry_NotWhenTheFirstUpWorked: the commonest recovery. A record was
+// left behind, the rollback's first `up` starts the proxy; `up` must run
+// exactly once (a second one would be a needless pass over a serving proxy).
+func TestUpRetry_NotWhenTheFirstUpWorked(t *testing.T) {
+	r := newCrashRig(t)
+	r.start()
+	r.crashAt("up_before:1")
+	r.start()
+	r.clearCalls()
+
+	op := r.rollbackToA()
+	if done := r.waitOp(op); done.State != "succeeded" {
+		t.Fatalf("rollback = %s(%s); op log:\n%s", done.State, done.FailureReason, r.opLogs(op))
+	}
+	if n := r.upCalls(); n != 1 {
+		t.Errorf("`compose up` ran %d times, want 1: the first one started the proxy", n)
+	}
+	if logs := r.opLogs(op); strings.Contains(logs, "running `up` again") {
+		t.Errorf("the operation log records a retry that should not have run:\n%s", logs)
+	}
+}
+
 // psCalls counts the `compose ps` reads the agent made.
 func (r *crashRig) psCalls() int {
 	n := 0

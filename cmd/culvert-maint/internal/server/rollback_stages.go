@@ -123,7 +123,11 @@ func (s *Server) upAgainIfNothingRuns(ctx context.Context, out, errOut []byte) (
 	}
 	for attempt := 1; attempt <= upRetryBudget; attempt++ {
 		pc, rerr := s.opts.Runner.ReadProxyContainer(ctx)
-		if rerr != nil || pc.Running {
+		if rerr != nil {
+			out = append(out, "\nrestart: could not read the proxy container after `up`; not retrying, the health gate decides\n"...)
+			return out, errOut, nil
+		}
+		if pc.Running {
 			return out, errOut, nil
 		}
 		out = append(out, fmt.Sprintf("\nrestart: `up` exited 0 but no proxy container is running (present=%v); running `up` again (%d/%d)\n",
