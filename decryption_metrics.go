@@ -35,54 +35,145 @@ type decSessionLabel struct {
 	n       int64
 }
 
-// decSessionCounter is the hand-rolled, bounded-label counter behind
-// culvert_decrypt_sessions_total. It mirrors autoExcludeLearnCounter's shape (RWMutex +
-// insertion-ordered series) but drops the cardinality-cap folding: all three labels are
-// closed enum sets, so the series count can never exceed |Outcome|·|DecisionSource|·
-// |TLSVersion| = 144 regardless of traffic.
-type decSessionCounter struct {
-	mu     sync.RWMutex
-	counts map[string]*decSessionLabel
-	order  []string
+// decSeriesKey identifies one coverage series. It is a STRUCT key, not the
+// "outcome\x00source\x00tlsVer" string this counter used to build: a struct key
+// hashes its three fields in place, where the concatenation allocated a fresh
+// 48-byte string on EVERY recorded session. See decSessionCounter.record.
+type decSeriesKey struct {
+	outcome string
+	source  string
+	tlsVer  string
 }
 
-var decSessions = &decSessionCounter{counts: make(map[string]*decSessionLabel)}
+// decSessionCounter is the hand-rolled, bounded-label counter behind
+// culvert_decrypt_sessions_total. It drops the cardinality-cap folding the admin-created
+// scope labels need: all three labels are closed enum sets, so the series count can never
+// exceed |Outcome|·|DecisionSource|·|TLSVersion| = 144 regardless of traffic.
+//
+// ── Why the index is published, not locked ──────────────────────────────────
+//
+// record runs ONCE PER SESSION — every CONNECT tunnel that carries a decryption
+// decision, which on a gateway is ~all traffic — and it used to take mu.RLock
+// around the map read. A reader lock is not cheap at that position:
+// sync.RWMutex.RLock/RUnlock are two atomic read-modify-writes on ONE shared
+// word, so every tunnel in the process wrote the same cache line purely to read
+// a map that, after the first 144 sessions, can never change again. That is not
+// a constant cost but a THROUGHPUT CEILING — the same shape already found and
+// fixed in hostCounter (store.go), internal/threatfeed, internal/connlimit, the
+// IP filter and alerts.HasSubscriber.
+//
+// The series index is therefore an immutable map published through an atomic
+// pointer and rebuilt copy-on-write under mu on the rare FIRST sighting of a
+// series (at most 144 times in the life of the process, because the label space
+// is closed). A steady-state record is one atomic pointer load, one map read on
+// a stack-allocated key, and one atomic add on the series' own counter — no
+// allocation and no read-modify-write on any word another tunnel also writes.
+// The *decSessionLabel values are shared between the old and new maps and their
+// counts are only ever touched atomically, so a concurrent record holding the
+// previous map still increments the SAME counter the new map publishes.
+//
+// Measured on a 4-vCPU Xeon @2.10GHz, go1.27.4/linux-amd64, every arm in ONE
+// invocation, -count=5, medians, against a frozen copy of the RWMutex+concat
+// shape (decryption_metrics_bench_test.go — re-measure the whole set in one go
+// rather than comparing a new number against the ones quoted here):
+//
+//	arm                           │  P=1   │  P=2   │  P=4   │ allocs/op
+//	RWMutex + concat, serial       │  86 ns │  77 ns │  78 ns │  1 (48 B)
+//	published + struct key, serial │  25 ns │  24 ns │  25 ns │     0
+//	RWMutex + concat, one series   │  91 ns │ 161 ns │ 175 ns │  1 (48 B)
+//	published + struct key, same   │  25 ns │  96 ns │ 104 ns │     0
+//	RWMutex + concat, mixed        │  93 ns │ 175 ns │ 194 ns │  1 (41 B)
+//	published + struct key, mixed  │  33 ns │  46 ns │  26 ns │     0
+//
+// "Mixed" rotates the live series the way a real fleet does (several outcomes
+// and sources in flight at once) and is the shape that matters: it IMPROVES
+// with core count (93 → 26 ns, 7.5x ahead of the locked form at four cores)
+// where the locked form degrades (93 → 194 ns). State the floor honestly too —
+// the single-series arm still rises (25 → 104 ns) because every worker then
+// atomically increments the SAME counter word. That is inherent to a shared
+// counter and a floor the locked form also pays (91 → 175 ns, so this shape
+// stays ~1.7x ahead even there); this change removes only the lock and the
+// per-call key allocation stacked on top of it.
+//
+// decFailures below deliberately KEEPS the locked shape: it fires only when a
+// decryption attempt fails, not once per tunnel, so it is not at this position
+// and has no measurement to justify changing it.
+type decSessionCounter struct {
+	// published is the immutable series index. Loaded lock-free by record;
+	// replaced (never mutated in place) under mu. nil until the first record,
+	// so the zero value is usable.
+	published atomic.Pointer[map[decSeriesKey]*decSessionLabel]
+
+	// mu guards the copy-on-write publish and order — the rare paths only.
+	// record never takes it except on a series' first sighting. It is a plain
+	// Mutex rather than an RWMutex deliberately: the only readers left are the
+	// /metrics scrape and /api/decryption/health, which walk at most 144 series
+	// and do not need to run concurrently with each other, and keeping a reader
+	// lock here would invite the next edit to put record back behind it.
+	mu    sync.Mutex
+	order []decSeriesKey // insertion order, for stable exposition
+}
+
+var decSessions = &decSessionCounter{}
 
 // record increments the (outcome, source, tlsVer) series. Callers pass already-bounded
 // enum strings (recordDecryptSession coerces via decEnumOr), so no validation is needed
 // here — the values are compile-time enum members, never raw/attacker tokens.
 func (c *decSessionCounter) record(outcome, source, tlsVer string) {
-	k := outcome + "\x00" + source + "\x00" + tlsVer
-	c.mu.RLock()
-	ll, ok := c.counts[k]
-	c.mu.RUnlock()
-	if ok {
-		atomic.AddInt64(&ll.n, 1)
-		return
+	k := decSeriesKey{outcome: outcome, source: source, tlsVer: tlsVer}
+	if m := c.published.Load(); m != nil {
+		if ll, ok := (*m)[k]; ok {
+			atomic.AddInt64(&ll.n, 1)
+			return
+		}
 	}
+	c.insert(k)
+}
+
+// insert adds k's series if the published index does not already carry it, then
+// counts the observation. It runs at most once per series per process (144 times
+// at the absolute maximum), so the copy of the index is not a hot-path cost.
+func (c *decSessionCounter) insert(k decSeriesKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if ll, ok = c.counts[k]; ok { // double-check after upgrading the lock
+	cur := c.seriesLocked()
+	if ll, ok := cur[k]; ok { // re-check: a concurrent insert may have published it
 		atomic.AddInt64(&ll.n, 1)
 		return
 	}
-	c.counts[k] = &decSessionLabel{outcome: outcome, source: source, tlsVer: tlsVer, n: 1}
+	next := make(map[decSeriesKey]*decSessionLabel, len(cur)+1)
+	for kk, ll := range cur {
+		next[kk] = ll // the label POINTER is shared, so in-flight atomic adds survive
+	}
+	next[k] = &decSessionLabel{outcome: k.outcome, source: k.source, tlsVer: k.tlsVer, n: 1}
 	c.order = append(c.order, k)
+	c.published.Store(&next)
+}
+
+// seriesLocked returns the currently published index (nil-safe). Callers must hold mu,
+// or otherwise be off the mutation path — a published map is never mutated in place, so
+// reading one obtained under mu stays safe after the unlock.
+func (c *decSessionCounter) seriesLocked() map[decSeriesKey]*decSessionLabel {
+	if m := c.published.Load(); m != nil {
+		return *m
+	}
+	return nil
 }
 
 // writePrometheus appends the counter's series in text-exposition form. Emits nothing
 // until at least one session is recorded (no zero-value noise), matching the other
 // hand-rolled counters.
 func (c *decSessionCounter) writePrometheus(w *strings.Builder) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if len(c.order) == 0 {
 		return
 	}
+	series := c.seriesLocked()
 	w.WriteString("\n# HELP culvert_decrypt_sessions_total Decryption decisions by outcome, decision source, and negotiated TLS version (ADR-0011 coverage)\n")
 	w.WriteString("# TYPE culvert_decrypt_sessions_total counter\n")
 	for _, k := range c.order {
-		ll := c.counts[k]
+		ll := series[k]
 		fmt.Fprintf(w, "culvert_decrypt_sessions_total{outcome=%q,decision_source=%q,tls_version=%q} %d\n",
 			ll.outcome, ll.source, ll.tlsVer, atomic.LoadInt64(&ll.n))
 	}
@@ -99,11 +190,12 @@ type decSessionSample struct {
 // snapshot returns a copy of every coverage series. Safe to call concurrently with
 // record; used by the /api/decryption/health aggregate (read path, off the hot path).
 func (c *decSessionCounter) snapshot() []decSessionSample {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	series := c.seriesLocked()
 	out := make([]decSessionSample, 0, len(c.order))
 	for _, k := range c.order {
-		ll := c.counts[k]
+		ll := series[k]
 		out = append(out, decSessionSample{ll.outcome, ll.source, ll.tlsVer, atomic.LoadInt64(&ll.n)})
 	}
 	return out

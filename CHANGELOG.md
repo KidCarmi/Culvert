@@ -1221,6 +1221,44 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Performance
 
+- **The decryption coverage counter no longer takes a process-wide reader lock,
+  or allocates, on every HTTPS connection (`PERF-DECSESSIONS-INDEX-1`).**
+  `culvert_decrypt_sessions_total` is incremented once per session from the
+  tunnel-close, inspect-success and decryption-failure seams, so on a gateway
+  its write path runs once per CONNECT — effectively once per HTTPS connection.
+  That write built a `"outcome\x00source\x00tls_version"` map key on the heap and
+  then took `sync.RWMutex.RLock` to read the series index. Both costs were paid
+  for cardinality that cannot exist: all three labels are closed enum sets, so
+  after at most 144 sessions the index can never change again, yet every tunnel
+  in the process performed two atomic read-modify-writes on the same lock word
+  purely to read it — a throughput ceiling rather than a constant cost, and the
+  same shape already removed from `hostCounter`, `internal/threatfeed`,
+  `internal/connlimit`, the IP filter and `alerts.HasSubscriber`. The index is
+  now an immutable map published through an `atomic.Pointer` and rebuilt
+  copy-on-write under a plain mutex on the rare first sighting of a series, and
+  its key is a struct whose three fields hash in place. A steady-state record is
+  one atomic pointer load, one map read on a stack key and one atomic add on the
+  series' own counter. Measured on a 4-vCPU Xeon @2.10GHz, every arm in one
+  invocation, medians of n=5: the realistic mixed-series shape goes from
+  93 ns / 41 B / 1 alloc to 33 ns / 0 B / 0 allocs serially and from 194 ns to
+  26 ns across four workers (7.5x), so the path now improves with core count
+  where it previously degraded; serially the win is 3.4x. The floor is recorded
+  honestly — with every worker hammering ONE series the new shape still rises
+  25 → 104 ns, because a shared counter word costs one atomic add however it is
+  reached, and the locked form pays that too (91 → 175 ns). End to end,
+  `BenchmarkPerfQual_ProxyCONNECT` drops from 131 to 130 allocations per tunnel;
+  wall time at that scale is syscall-dominated and is not claimed to move.
+  The exposition is unchanged, including the insertion ORDER of the series —
+  load-bearing because `/api/decryption/health` returns `snapshot()` as a JSON
+  array — and that is pinned by a differential oracle against a frozen copy of
+  the previous shape (`TestDecSessionCounter_MatchesLegacyShape`), with
+  `TestDecSessionCounter_ConcurrentRecordLosesNothing` proving an increment that
+  races a publish is never dropped and `TestBenchGate_DecSessionCounterAllocs`
+  holding the write at zero allocations. `decFailures`, the failure-taxonomy
+  counter in the same file, deliberately keeps the locked shape: it fires only
+  when a decryption attempt fails, not once per tunnel, so there is no
+  measurement to justify changing it.
+
 - **Turning on the threat feed no longer costs two heap allocations on every
   allowed plain-HTTP request (`PERF-THREATFEED-URLKEY-1`).**
   `threatfeed.CheckRequestURL` runs on the request goroutine, before the policy

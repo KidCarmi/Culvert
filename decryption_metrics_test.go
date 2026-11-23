@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,7 +56,7 @@ func boundedLabelSets() (outcomes, sources, tlsVers map[string]bool) {
 // TestDecSessionCounter_RecordAndExposition pins exact counts and the text-exposition
 // shape on an isolated instance (the global singleton accumulates across the suite).
 func TestDecSessionCounter_RecordAndExposition(t *testing.T) {
-	c := &decSessionCounter{counts: map[string]*decSessionLabel{}}
+	c := &decSessionCounter{}
 
 	// Empty ⇒ no output at all (no zero-value noise).
 	var empty strings.Builder
@@ -91,7 +92,7 @@ func TestDecSessionCounter_RecordAndExposition(t *testing.T) {
 // enum combination (and repeating them) can never produce a series outside the closed
 // label space (6 outcomes × 8 sources × 3 tls = 144), and every label stays in-vocabulary.
 func TestDecSessionCounter_BoundedByConstruction(t *testing.T) {
-	c := &decSessionCounter{counts: map[string]*decSessionLabel{}}
+	c := &decSessionCounter{}
 	for round := 0; round < 2; round++ { // repeat to prove repeats don't add series
 		for _, o := range decryptobs.AllOutcomes {
 			for _, d := range decryptobs.AllDecisionSources {
@@ -299,5 +300,99 @@ func TestRecordDecryptSession_CoercesAndNilGuard(t *testing.T) {
 		if !oc[m[1]] || !ds[m[2]] || !tv[m[3]] {
 			t.Fatalf("global counter exposed out-of-vocabulary labels: %q/%q/%q", m[1], m[2], m[3])
 		}
+	}
+}
+
+// TestDecSessionCounter_MatchesLegacyShape is the differential oracle for the
+// coverage counter's rewrite: the published-index shape must produce the SAME
+// series, in the SAME insertion order, with the SAME counts as the frozen
+// RWMutex + concatenated-key shape it replaced
+// (decSessionCounterLegacy, decryption_metrics_bench_test.go).
+//
+// Order is load-bearing, not incidental: writePrometheus and snapshot both walk
+// c.order, and /api/decryption/health returns snapshot() as a JSON array, so a
+// rewrite that silently reordered the series would change an API response.
+//
+// The sequence deliberately interleaves repeats with first sightings, so it
+// exercises the published-read path, the copy-on-write insert, and the
+// re-check-after-lock arm rather than only the steady state.
+func TestDecSessionCounter_MatchesLegacyShape(t *testing.T) {
+	outcomes, sources, vers := decBenchSeries()
+	type obs struct{ o, s, v string }
+	var seq []obs
+	for round := 0; round < 3; round++ {
+		for i, o := range outcomes {
+			for j, s := range sources {
+				for k, v := range vers {
+					// Skip a shifting subset each round so series are first seen
+					// at different points in the sequence, not all up front.
+					if (i+j+k+round)%3 == 0 {
+						continue
+					}
+					seq = append(seq, obs{o, s, v})
+				}
+			}
+		}
+	}
+	if len(seq) == 0 {
+		t.Fatal("empty observation sequence: the enum vocabularies are empty")
+	}
+
+	got := &decSessionCounter{}
+	want := newDecSessionCounterLegacy()
+	for _, e := range seq {
+		got.record(e.o, e.s, e.v)
+		want.record(e.o, e.s, e.v)
+	}
+
+	gs, ws := got.snapshot(), want.snapshot()
+	if len(gs) != len(ws) {
+		t.Fatalf("series count: got %d, legacy %d", len(gs), len(ws))
+	}
+	for i := range ws {
+		if gs[i] != ws[i] {
+			t.Fatalf("series %d: got %+v, legacy %+v", i, gs[i], ws[i])
+		}
+	}
+	// The counts must also be the observation count, not merely equal to each
+	// other — two identically broken counters would pass the comparison above.
+	var total int64
+	for _, s := range gs {
+		total += s.Count
+	}
+	if total != int64(len(seq)) {
+		t.Fatalf("total counted: got %d, observations %d", total, len(seq))
+	}
+}
+
+// TestDecSessionCounter_ConcurrentRecordLosesNothing pins the property the
+// copy-on-write publish exists to preserve: a record that loaded the PREVIOUS
+// index increments the same *decSessionLabel the new index publishes, so an
+// increment racing an insert is never dropped. Run with -race.
+func TestDecSessionCounter_ConcurrentRecordLosesNothing(t *testing.T) {
+	outcomes, sources, vers := decBenchSeries()
+	c := &decSessionCounter{}
+	const workers, perWorker = 8, 400
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				c.record(
+					outcomes[(w+i)%len(outcomes)],
+					sources[(w+i*3)%len(sources)],
+					vers[(w+i*7)%len(vers)],
+				)
+			}
+		}(w)
+	}
+	wg.Wait()
+	var total int64
+	for _, s := range c.snapshot() {
+		total += s.Count
+	}
+	if total != workers*perWorker {
+		t.Fatalf("counted %d of %d concurrent observations", total, workers*perWorker)
 	}
 }
