@@ -30,5 +30,6 @@
 // reaches it, because every rung it hands back is at most Ceiling. Clamp.Sleep
 // subtracts with the same arithmetic. Neither validates its configuration: a
 // Ladder whose Ceiling is below its Initial answers Initial first and Ceiling
-// afterwards, and the zero Clamp returns every sleep unchanged.
+// afterwards, and the zero Clamp returns a sleep unchanged for every failingFor
+// that is not negative.
 package listenretry

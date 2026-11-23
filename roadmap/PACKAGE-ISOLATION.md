@@ -933,7 +933,8 @@ added once they merge; this section sits at a third anchor neither touches):
   the alerts.
 - **Size.** 4 root production files edited (+23/−37 lines), 2 new production
   files (88 lines, 34 of them the package comment). Root test inventory
-  8,642 → 8,645 (one new file, 3 tests); package 13 tests and 2 fuzz targets.
+  8,642 → 8,645 by `go test -list` (tests, fuzz targets, benchmarks and
+  examples; one new file, 3 tests); package 13 tests and 2 fuzz targets.
 - **A sibling of `internal/listenfault`, not an addition to it.** That
   package's boundary refuses a `time` import so it cannot acquire a clock.
   `listenretry` admits `time` and refuses every name from it but `Duration`.
@@ -955,7 +956,8 @@ added once they merge; this section sits at a third anchor neither touches):
   Control Plane and SOCKS5 listeners do, but sleep unclamped
   (`scanSvcWaitBackoff`; `ui.go`'s `haSleepInterruptible(stop, wait)`). When
   jitter lands the sixth attempt just under 30 s, the next sleep is a full
-  30 s rung and the page arrives at up to about 66 s. Applying
+  30 s rung and the page arrives at up to about 66 s (admin UI) or 67.5 s
+  (sidecar). Applying
   `listenretry.Clamp` is one line and one floor constant per listener; it
   changes when an alert fires, so it is the owner's to ask for.
 - **Next.** `mcp_rollout_execdeps.go` → `internal/mcp/rollout` as an

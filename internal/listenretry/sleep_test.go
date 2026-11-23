@@ -171,12 +171,19 @@ func TestClampSleep_UsesItsOwnFields(t *testing.T) {
 	}
 }
 
-func TestClampSleep_ZeroValueNeverClamps(t *testing.T) {
+func TestClampSleep_ZeroValue(t *testing.T) {
 	var c Clamp
+	// A zero threshold is reached by any failingFor that is not negative, so
+	// the clamp is off.
 	for _, failingFor := range []time.Duration{0, 1, time.Second, time.Hour} {
 		if got := c.Sleep(time.Hour, failingFor); got != time.Hour {
 			t.Errorf("zero Clamp Sleep(1h, %s) = %s, want 1h", failingFor, got)
 		}
+	}
+	// A negative failingFor leaves time remaining to a zero threshold, and
+	// the clamp applies as for any other threshold.
+	if got := c.Sleep(time.Hour, -time.Second); got != time.Second {
+		t.Errorf("zero Clamp Sleep(1h, -1s) = %s, want 1s", got)
 	}
 }
 

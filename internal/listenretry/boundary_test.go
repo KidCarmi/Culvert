@@ -11,15 +11,26 @@ import (
 
 // Boundary (ADR-0064): no Culvert import at all; the only import is "time",
 // and from it only the Duration type. The package may not read a clock, sleep
-// or build a timer, so it cannot become the supervisor. No package-level
-// variable, no init(), no function-typed field or parameter through which a
-// caller could hand it a clock or a logger, and at most 8 exported
-// package-level identifiers.
+// or build a timer, so it cannot become the supervisor.
+//
+// The rules are written as what the package MAY contain, so that a capability
+// cannot arrive in a form the list did not think of:
+//
+//   - a named type must be a struct, and every field of it a time.Duration
+//     (no function, interface, pointer, map, slice or channel field through
+//     which a clock, a logger or shared state could be handed in);
+//   - no function type anywhere except a declaration's own signature (no
+//     function-typed parameter or result, no named function type, no function
+//     literal), and no interface type;
+//   - no pointer, so no pointer receiver and no state reached through one;
+//   - no package-level variable, no init(), no goroutine, no channel, and no
+//     call of the print or println builtins;
+//   - at most 8 exported package-level identifiers.
 //
 // The package has no constructor: a Ladder or a Clamp is a value of two
 // durations. "Independently constructible instances cannot leak state into one
-// another" is enforced by there being no package variable and no pointer
-// receiver, and run by TestIndependentValues_ConcurrentCallersAgree.
+// another" follows from the rules above, and
+// TestIndependentValues_ConcurrentCallersAgree runs it.
 
 // allowedImports is the whole import list the package may have.
 var allowedImports = map[string]bool{"time": true}
@@ -33,11 +44,17 @@ func boundaryViolations(name string, source []byte) []string {
 		return []string{err.Error()}
 	}
 	v, timeName := importViolations(f)
+	// A declaration's own signature is a function type; every other function
+	// type in the file is a capability.
+	signatures := map[*ast.FuncType]bool{}
 	for _, decl := range f.Decls {
 		v = append(v, declViolations(decl)...)
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			signatures[fn.Type] = true
+		}
 	}
 	ast.Inspect(f, func(n ast.Node) bool {
-		v = append(v, nodeViolations(n, timeName)...)
+		v = append(v, nodeViolations(n, timeName, signatures)...)
 		return true
 	})
 	return v
@@ -63,18 +80,13 @@ func importViolations(f *ast.File) (v []string, timeName string) {
 	return v, timeName
 }
 
-// declViolations reports init(), a pointer receiver and a package variable.
+// declViolations reports init() and a package variable.
 func declViolations(decl ast.Decl) []string {
 	var v []string
 	switch d := decl.(type) {
 	case *ast.FuncDecl:
 		if d.Recv == nil && d.Name.Name == "init" {
 			v = append(v, "implicit initialization")
-		}
-		if d.Recv != nil && len(d.Recv.List) == 1 {
-			if _, ptr := d.Recv.List[0].Type.(*ast.StarExpr); ptr {
-				v = append(v, "pointer receiver (a value that can be mutated through a call): "+d.Name.Name)
-			}
 		}
 	case *ast.GenDecl:
 		if d.Tok != token.VAR {
@@ -89,45 +101,62 @@ func declViolations(decl ast.Decl) []string {
 	return v
 }
 
-// nodeViolations reports, for one syntax node: a name taken from "time" other
-// than Duration, a function-typed field, parameter or result (a capability a
-// caller could inject, such as a clock), a goroutine and a channel.
-func nodeViolations(n ast.Node, timeName string) []string {
-	var v []string
+// nodeViolations reports what one syntax node breaks of the rules in the
+// comment at the top of this file.
+func nodeViolations(n ast.Node, timeName string, signatures map[*ast.FuncType]bool) []string {
 	switch x := n.(type) {
 	case *ast.SelectorExpr:
 		id, ok := x.X.(*ast.Ident)
 		if ok && timeName != "" && id.Name == timeName && id.Obj == nil && !allowedTimeNames[x.Sel.Name] {
-			v = append(v, "clock, timer or sleep: time."+x.Sel.Name)
+			return []string{"clock, timer or sleep: time." + x.Sel.Name}
 		}
+	case *ast.TypeSpec:
+		return typeSpecViolations(x, timeName)
 	case *ast.FuncType:
-		// A declaration's own signature is a FuncType too; only a parameter
-		// or result that is ITSELF of function type is reported.
-		if hasFuncTypedField(x.Params) || hasFuncTypedField(x.Results) {
-			v = append(v, "function-typed parameter or result")
+		if !signatures[x] {
+			return []string{"function type outside a declaration's signature"}
 		}
-	case *ast.StructType:
-		if hasFuncTypedField(x.Fields) {
-			v = append(v, "function-typed field")
-		}
+	case *ast.InterfaceType:
+		return []string{"interface type"}
+	case *ast.StarExpr:
+		// A pointer type or a dereference. Multiplication is a binary
+		// expression or an assignment and is not this node.
+		return []string{"pointer"}
 	case *ast.GoStmt:
-		v = append(v, "goroutine")
+		return []string{"goroutine"}
 	case *ast.ChanType:
-		v = append(v, "channel")
+		return []string{"channel"}
+	case *ast.CallExpr:
+		if id, ok := x.Fun.(*ast.Ident); ok && (id.Name == "print" || id.Name == "println") {
+			return []string{"output through builtin " + id.Name}
+		}
+	}
+	return nil
+}
+
+// typeSpecViolations requires a named type to be a struct whose every field is
+// a time.Duration.
+func typeSpecViolations(spec *ast.TypeSpec, timeName string) []string {
+	st, ok := spec.Type.(*ast.StructType)
+	if !ok {
+		return []string{"named type that is not a struct: " + spec.Name.Name}
+	}
+	var v []string
+	for _, field := range st.Fields.List {
+		if !isTimeDuration(field.Type, timeName) {
+			v = append(v, "field that is not a time.Duration in "+spec.Name.Name)
+		}
 	}
 	return v
 }
 
-func hasFuncTypedField(list *ast.FieldList) bool {
-	if list == nil {
+func isTimeDuration(expr ast.Expr, timeName string) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok || timeName == "" {
 		return false
 	}
-	for _, field := range list.List {
-		if _, isFunc := field.Type.(*ast.FuncType); isFunc {
-			return true
-		}
-	}
-	return false
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == timeName && sel.Sel.Name == "Duration"
 }
 
 func exportedTopLevel(source []byte) ([]string, error) {
@@ -205,34 +234,50 @@ func TestListenRetryBoundary_NoAppImportsClockOrSharedState(t *testing.T) {
 }
 
 func TestListenRetryBoundary_RejectsRegressions(t *testing.T) {
-	for name, src := range map[string]string{
-		"root import":       `package listenretry; import "github.com/KidCarmi/Culvert"`,
-		"sibling import":    `package listenretry; import "github.com/KidCarmi/Culvert/internal/listenfault"`,
-		"logging":           `package listenretry; import "log"`,
-		"shared state":      `package listenretry; import "sync"`,
-		"counter":           `package listenretry; import "sync/atomic"`,
-		"cancellation":      `package listenretry; import "context"`,
-		"randomness":        `package listenretry; import "math/rand/v2"`,
-		"network":           `package listenretry; import "net"`,
-		"files":             `package listenretry; import "os"`,
-		"clock":             `package listenretry; import "time"; func f() time.Duration { return time.Since(time.Now()) }`,
-		"sleep":             `package listenretry; import "time"; func f(d time.Duration) { time.Sleep(d) }`,
-		"timer":             `package listenretry; import "time"; func f(d time.Duration) { <-time.After(d) }`,
-		"timer type":        `package listenretry; import "time"; type w struct{ t *time.Timer }`,
-		"renamed time":      `package listenretry; import t "time"; func f(d t.Duration) { t.Sleep(d) }`,
-		"dot time":          `package listenretry; import . "time"; func f(d Duration) { Sleep(d) }`,
-		"package state":     `package listenretry; import "time"; var lastWait time.Duration`,
-		"init":              "package listenretry; func init() {}",
-		"pointer receiver":  `package listenretry; import "time"; type L struct{ c time.Duration }; func (l *L) Next() { l.c *= 2 }`,
-		"injected clock":    `package listenretry; import "time"; type L struct{ now func() time.Duration }`,
-		"injected callback": `package listenretry; import "time"; func f(sleep func(time.Duration)) {}`,
-		"goroutine":         "package listenretry; func f() { go f() }",
-		"channel":           "package listenretry; func f(stop chan struct{}) {}",
+	// Each control names the violation it must be refused FOR, so a control
+	// cannot pass by tripping a different rule.
+	for name, tc := range map[string]struct{ src, want string }{
+		"root import":         {`package listenretry; import "github.com/KidCarmi/Culvert"`, "import: github.com/KidCarmi/Culvert"},
+		"sibling import":      {`package listenretry; import "github.com/KidCarmi/Culvert/internal/listenfault"`, "import: github.com/KidCarmi/Culvert/internal/listenfault"},
+		"logging":             {`package listenretry; import "log"`, "import: log"},
+		"shared state":        {`package listenretry; import "sync"`, "import: sync"},
+		"counter":             {`package listenretry; import "sync/atomic"`, "import: sync/atomic"},
+		"cancellation":        {`package listenretry; import "context"`, "import: context"},
+		"randomness":          {`package listenretry; import "math/rand/v2"`, "import: math/rand/v2"},
+		"network":             {`package listenretry; import "net"`, "import: net"},
+		"files":               {`package listenretry; import "os"`, "import: os"},
+		"clock":               {`package listenretry; import "time"; func f() time.Duration { return time.Since(time.Now()) }`, "time.Now"},
+		"sleep":               {`package listenretry; import "time"; func f(d time.Duration) { time.Sleep(d) }`, "time.Sleep"},
+		"timer":               {`package listenretry; import "time"; func f(d time.Duration) { <-time.After(d) }`, "time.After"},
+		"timer type":          {`package listenretry; import "time"; func f(t time.Timer) {}`, "time.Timer"},
+		"renamed time":        {`package listenretry; import t "time"; func f(d t.Duration) { t.Sleep(d) }`, "renamed import of time: t"},
+		"dot time":            {`package listenretry; import . "time"; func f(d Duration) { Sleep(d) }`, "renamed import of time: ."},
+		"package state":       {`package listenretry; import "time"; var lastWait time.Duration`, "package state: lastWait"},
+		"init":                {"package listenretry; func init() {}", "implicit initialization"},
+		"pointer receiver":    {`package listenretry; import "time"; type L struct{ c time.Duration }; func (l *L) Next() { l.c *= 2 }`, "pointer"},
+		"pointer field":       {`package listenretry; type L struct{ n *int64 }`, "pointer"},
+		"map field":           {`package listenretry; type L struct{ seen map[int64]bool }`, "field that is not a time.Duration in L"},
+		"plain integer field": {`package listenretry; type L struct{ n int64 }`, "field that is not a time.Duration in L"},
+		"injected clock":      {`package listenretry; import "time"; type L struct{ now func() time.Duration }`, "function type outside a declaration's signature"},
+		"named clock type":    {`package listenretry; import "time"; type Clock func() time.Duration`, "named type that is not a struct: Clock"},
+		"clock interface":     {`package listenretry; type L struct{ c interface{ Now() int64 } }`, "interface type"},
+		"named interface":     {`package listenretry; type Clock interface{ Now() int64 }`, "named type that is not a struct: Clock"},
+		"injected callback":   {`package listenretry; import "time"; func f(sleep func(time.Duration)) {}`, "function type outside a declaration's signature"},
+		"callback slice":      {`package listenretry; func f(hooks []func()) {}`, "function type outside a declaration's signature"},
+		"variadic callbacks":  {`package listenretry; func f(hooks ...func()) {}`, "function type outside a declaration's signature"},
+		"function literal":    {`package listenretry; func f() { g := func() {}; g() }`, "function type outside a declaration's signature"},
+		"goroutine":           {"package listenretry; func f() { go f() }", "goroutine"},
+		"channel":             {"package listenretry; func f(stop chan struct{}) {}", "channel"},
+		"builtin output":      {`package listenretry; func f() { println("retry") }`, "output through builtin println"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if len(boundaryViolations("r.go", []byte(src))) == 0 {
-				t.Fatal("boundary accepted regression")
+			got := boundaryViolations("r.go", []byte(tc.src))
+			for _, violation := range got {
+				if strings.Contains(violation, tc.want) {
+					return
+				}
 			}
+			t.Fatalf("boundary did not refuse it for %q; violations: %v", tc.want, got)
 		})
 	}
 	// Controls: the shapes the package really has are accepted.

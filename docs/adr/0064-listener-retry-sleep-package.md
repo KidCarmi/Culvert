@@ -11,8 +11,9 @@
 
 ## Context
 
-Each listener supervisor in package main sleeps between bind attempts by two
-rules, and each carried its own copy of them:
+Listener supervisors in package main sleep between bind attempts by two
+rules. Three of them carried a copy of the first as a function, and two of
+those a copy of the second:
 
 1. **The ladder.** The first failure waits the listener's initial backoff;
    each further failure doubles it; it never exceeds the listener's ceiling.
@@ -91,9 +92,9 @@ every name from it except `Duration`.
   leaves the loop unedited. No open PR edits `ui.go`; it is a follow-up.
 - The two jitter functions (`jitterDuration`, `jitterScanSvcBackoff`). They
   differ (a caller-chosen fraction either side against a fixed 0.75 to 1.25
-  range), draw from `math/rand`, and the first belongs to HA lease recovery.
+  range), draw from `math/rand/v2`, and the first belongs to HA lease recovery.
 - Every constant. A listener's ceiling and threshold are its contract with its
-  runbook and stay beside its health record.
+  runbook and stay in that listener's own files.
 
 Lifecycle, in one sentence: there is none; a supervisor calls a pure method
 once per failed attempt and owns the timer, the cancellation and everything
@@ -116,9 +117,12 @@ New in root (`listen_retry_wiring_test.go`, 3 tests):
   the int64 limits and 180 generated values. The SHA-256 digests were captured
   by running the same test against main `46b4ffa6e` before the bind, where it
   passed.
-- A test that each binding reads its own listener's constants. The digests
-  alone cannot show this, because today all listeners use the same four
-  values.
+- A test that names each listener's own constants at the first rung, the
+  ceiling, the threshold and the floor. Today every listener uses the same
+  four values, so neither this test nor the digests can tell a binding that
+  was handed another listener's constants; the test starts to tell them apart
+  when one listener's constant changes. Which constant each binding names is
+  four lines of the diff to read.
 
 New in the package (13 tests, 2 fuzz targets):
 
@@ -131,9 +135,11 @@ New in the package (13 tests, 2 fuzz targets):
   same copies.
 - A concurrent-call test under `-race`.
 - A boundary test: no import except `time`; no name from `time` except
-  `Duration`; no renamed or dot import; no package variable; no `init`; no
-  pointer receiver; no function-typed field, parameter or result; no goroutine
-  or channel; exported-surface cap of 8. Twenty-two negative controls.
+  `Duration`; no renamed or dot import; a named type must be a struct of
+  `time.Duration` fields; no function type outside a declaration's signature;
+  no interface, pointer, goroutine or channel; no package variable, `init`,
+  `print` or `println`; exported-surface cap of 8. Thirty-two negative
+  controls, each required to be refused for the rule it names.
 
 Mutation checks: 29 mutations, 26 fail a test. The three that survive return
 the same value as the original at the one input where they differ (`>` against
@@ -149,7 +155,8 @@ the same value as the original at the one input where they differ (`>` against
    and both sleep the jittered rung unclamped. With the ladder 1, 2, 4, 8, 16 s
    the sixth attempt lands near 31 s; when jitter puts it just under 30 s, the
    next sleep is a full 30 s rung (up to 36 s for the admin UI, 37.5 s for the
-   sidecar), and the page documented for 30 s arrives at up to about 66 s. This
+   sidecar), and the page documented for 30 s arrives at up to about 66 s for
+   the admin UI and 67.5 s for the sidecar. This
    is the delay the clamp removed from the Control Plane and SOCKS5 listeners
    (CHAOS-55's rule). Applying `listenretry.Clamp` in each is one line and one
    floor constant, and it changes when an alert fires, so it is the owner's to
