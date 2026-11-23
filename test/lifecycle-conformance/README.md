@@ -86,6 +86,39 @@ or observed behaviour differs from what was last reviewed".
 The model checker by itself verifies an abstraction. Only the conformance test
 touches product code. Do not present either as "the lifecycle is verified".
 
+## Fake-Docker assumptions, checked on real Docker
+
+`test/lifecycle-conformance/docker-probe.sh` reproduces the agent's own argv
+against a real daemon. It needs no Docker Hub: it builds a registry from source
+and two images `FROM scratch`, pushed as OCI indexes like a real release. It is
+manual and never a PR gate. Measured on Docker 29.10.0 / Compose v5.7.1, once
+per image store:
+
+| Model outcome | Real Docker (both stores) | Model status |
+|---|---|---|
+| `ok` (tag moved, `up -d` recreates) | recreated in 10 of 10 trials | holds |
+| `ok_stale` (tag moved, `up -d` exits 0 and does not recreate) | **0 of 10** | robustness input only, as stated below |
+| unchanged tag, `up -d` | container kept | holds (`same=true` skips the restart) |
+| `up_fail_stale` | an unpullable sibling image or a broken override gives exit 1, proxy untouched, **tag already moved** | holds: the AGT-002 case is real |
+| `up_fail_recreated` | a sibling port clash gives exit 1, **proxy already recreated** on the target | holds |
+
+**Image identity differs by image store**, and the fake used to model only one
+of them:
+
+| | classic store (hosts upgraded from older Docker) | containerd store (fresh Docker 29 default) |
+|---|---|---|
+| container `.Image` | image **config** digest, distinct from the registry digest | the **registry (index) digest** itself |
+| RepoDigests | registry refs only; `[]` for a local tag whose registry ref is gone | adds a synthetic `<local repo>@sha256:<digest>` for every local tag, so never empty |
+
+Every apply and crash vector now runs under both stores. Result: **no
+mismatch**. The agent's decisions (outcomes, tag, journal records, reconcile
+verdicts) do not depend on the store. Only the reported `final_running_digest`
+differs. Under the containerd store, 12 of the 48 misreports disappear, because
+the agent reports the synthetic local reference for a prior image that has no
+registry digest. The rollback gate does not accept that reference. Both
+stores' observations are pinned in `observed.json`; containerd lines carry the
+`[containerd]` prefix.
+
 ## Known reported items (none blocks)
 
 - **C2 fails** only through the injected outcome `ok_stale`: `compose up`
