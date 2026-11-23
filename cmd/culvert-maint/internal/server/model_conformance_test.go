@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -377,10 +378,15 @@ func startConfRig(t *testing.T, store string, p confParams, plan []planEntry, bl
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx) }()
-	// Wait for the socket: under a high GOMAXPROCS the server can take well over a second to
-	// bind, and a submit before it is a spurious failure (independent review).
+	// Wait until the agent ACCEPTS connections, not merely until the socket file exists: the
+	// file appears at bind(), before listen(), and a connect in that window is refused. With
+	// hundreds of rigs in parallel the window is hit (observed: "connect: connection refused").
 	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if _, e := os.Stat(r.sock); e == nil {
+		dctx, dcancel := context.WithTimeout(context.Background(), time.Second)
+		c, e := (&net.Dialer{}).DialContext(dctx, "unix", r.sock)
+		dcancel()
+		if e == nil {
+			_ = c.Close()
 			break
 		}
 		if time.Now().After(deadline) {
@@ -522,8 +528,9 @@ func applyVectorsUnder(t *testing.T, store string, vs []lifecyclemodel.ApplyVect
 				t.Errorf("journal not empty at terminal (faults: %s): %d records, err=%v", scriptString(v.Script), len(recs), lerr)
 			}
 			rep := role(fmt.Sprint(res["final_running_digest"]))
-			params := fmt.Sprintf("prior=%s same=%v backup=%v rb=%v th=%v ph=%v",
-				v.Params.Prior, v.Params.Same, v.Params.Backup, v.Params.RB, v.Params.TH, v.Params.PH)
+			// The observation key is the concrete input: every parameter and the fault plan.
+			params := fmt.Sprintf("prior=%s same=%v backup=%v rb=%v th=%v ph=%v%s",
+				v.Params.Prior, v.Params.Same, v.Params.Backup, v.Params.RB, v.Params.TH, v.Params.PH, planString(v.Plan))
 			mu.Lock()
 			// Every vector, the already-current ones included: an empty or wrong digest there
 			// is as much a change as anywhere else.
@@ -908,4 +915,16 @@ func writeReport(t *testing.T, name string, body map[string]interface{}) {
 		// A missing report reads as INCOMPLETE in the summary; say why here instead of hiding it.
 		t.Errorf("conformance report %q not written: %v", name, err)
 	}
+}
+
+// planString renders a fault plan for an observation key ("" when there is none).
+func planString(plan []planEntry) string {
+	if len(plan) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(plan))
+	for _, p := range plan {
+		parts = append(parts, fmt.Sprintf("%s#%d=%s", p.Cmd, p.N, p.Mode))
+	}
+	return " plan=" + strings.Join(parts, ",")
 }
