@@ -70,7 +70,7 @@ func New(cfg *config.Config, mgr *ops.Manager, r *runner.Runner) (*Provider, err
 // Snapshot implements server.StatusProvider.
 func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 	st := p.composeSnapshot(ctx)
-	p.addInterrupted(ctx, &st)
+	p.addInterrupted(&st)
 	p.addPinnedTag(ctx, &st)
 	return st, nil
 }
@@ -79,7 +79,7 @@ func (p *Provider) Snapshot(ctx context.Context) (server.Status, error) {
 // the journal alone, so it is complete when Docker is down; the live fact it
 // adds (which image is running) is reported as unknown when Docker cannot be
 // read. Read-only, and it makes no docker call of its own.
-func (p *Provider) addInterrupted(ctx context.Context, st *server.Status) {
+func (p *Provider) addInterrupted(st *server.Status) {
 	if p.journal == nil {
 		return
 	}
