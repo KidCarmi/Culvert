@@ -1,0 +1,14 @@
+Mutant d-skip-enforce: proxy.socks5_policy_mode: enforce skips policy evaluation (behaves like legacy).
+NEGATIVE CONTROL ONLY. Applied by run.sh --negative-control to a temporary copy of the tree; never to the checkout.
+
+--- a/socks5_policy.go
++++ b/socks5_policy.go
+@@ -177,7 +177,7 @@
+ 		socks5ShadowPolicy(who, host, atyp)
+ 		return socks5Grant{}, true
+ 	default: // socks5PolicyEnforce — and fail closed on any value parse cannot produce
+-		return socks5EnforcePolicy(conn, who, host, atyp)
++		return socks5Grant{}, true // MUTANT d: enforce evaluates nothing
+ 	}
+ }
+ 

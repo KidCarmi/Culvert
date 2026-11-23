@@ -1,0 +1,14 @@
+Mutant a-skip-threat-feed: SOCKS5 skips the threat-intelligence feed check (socks5ContentBlocked).
+NEGATIVE CONTROL ONLY. Applied by run.sh --negative-control to a temporary copy of the tree; never to the checkout.
+
+--- a/socks5.go
++++ b/socks5.go
+@@ -564,7 +564,7 @@
+ 		logger.Printf("SOCKS5 BLOCKED %s -> %q", clientIP, sanitizeLog(host))
+ 		return true
+ 	}
+-	if globalSecScanner.Enabled() {
++	if false && globalSecScanner.Enabled() { // MUTANT a: SOCKS5 skips the threat-feed check
+ 		if result := globalSecScanner.CheckDomain(socks5PolicyHost(host)); result != nil {
+ 			atomic.AddInt64(&statBlocked, 1)
+ 			socks5Reply(conn, 0x02)

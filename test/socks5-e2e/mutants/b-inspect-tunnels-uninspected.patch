@@ -1,0 +1,14 @@
+Mutant b-inspect-tunnels-uninspected: an Allow rule that requires TLS inspection is tunnelled uninspected over SOCKS5 instead of refused.
+NEGATIVE CONTROL ONLY. Applied by run.sh --negative-control to a temporary copy of the tree; never to the checkout.
+
+--- a/socks5_policy_enforce.go
++++ b/socks5_policy_enforce.go
+@@ -46,7 +46,7 @@
+ 	// The CONNECT SSL decision, side effects included (explicit bypass-list and
+ 	// learned fail-open exclusions are its generic exceptions): if CONNECT
+ 	// would inspect this tunnel, SOCKS5 cannot serve it.
+-	if !v.refuse && match != nil && resolveSSLDecision(match, policyHost, who.ClientIP).Action == SSLInspect {
++	if !v.refuse && match != nil && resolveSSLDecision(match, policyHost, who.ClientIP).Action == SSLInspect && false { // MUTANT b: Inspect-requiring Allow tunnels uninspected
+ 		v.refuse, v.reason = true, socks5ReasonInspection
+ 	}
+ 	noteSOCKS5PolicyDecision(socks5PolicyEnforce, v)
