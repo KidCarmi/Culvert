@@ -9,6 +9,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A source-address sweep can no longer grow the admin-plane rate-limiter
+  tables without limit between janitor passes.** The admin API limiter is
+  charged in the security middleware, ahead of the session check, and the
+  Basic-auth failure limiter by any caller that submits credentials — so each
+  holds one entry per distinct client address an UNAUTHENTICATED caller
+  presents, and an IPv6 source makes distinct addresses free. The only bound
+  was the 5-minute cleanup pass, which also scanned the whole table under the
+  mutex every mutating admin request takes. Measured in the package at
+  1 000 000 addresses: 125 MiB of reachable heap, a 205 ms sweep holding that
+  mutex, and 53 MiB still held afterwards (a Go map never returns its
+  buckets). Each limiter is now capped at 65 536 windows: expired windows are
+  dropped as new ones start, and at the cap the oldest window is evicted
+  rather than the new address refused — a full table must not lock
+  administrators out of the mutating API, and forgetting a count early gives a
+  flooder nothing, since every one of the addresses it needed to fill the
+  table already carries its own full allowance. The same flood now retains
+  11 MiB, the sweep is 4–8 ms, and the janitor returns the table's memory once
+  the flood has drained. Rate decisions below the cap are unchanged (pinned by
+  a differential test against the previous implementation).
 - **An anonymous client can no longer park ~1 GiB in each interactive-login
   state store.** The OIDC PKCE and SAML request stores are filled by
   unauthenticated requests (the proxy's captive-portal path and the public
