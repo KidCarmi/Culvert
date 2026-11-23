@@ -21,8 +21,10 @@
 # What it changes on the host, and removes again: the fixed tag culvert/proxy:pinned, two
 # probe images, containers of the compose project "orphanprobe", a registry certificate
 # under /etc/docker/certs.d/127.0.0.1:<port>, one loopback port for the probe proxy, and a
-# local image built from the host's /usr layout and a copy of /etc stripped of password
-# hashes and private keys. If the script is SIGKILLed, remove those by hand (the image is
+# local image built from the host's /usr layout and a copy of /etc without password hashes and
+# the usual private-key locations (best effort; the image is removed on exit, treat it as
+# sensitive). With ORPHAN_PROBE_PROXY_BIN_* the real proxy and its plain-HTTP admin UI listen
+# on ALL interfaces of this host (host network) while the probe runs: a disposable machine only. If the script is SIGKILLed, remove those by hand (the image is
 # orphanprobe-sysd-base:1, the work directory /var/tmp/orphan-probe.*).
 # It REFUSES to run where culvert/proxy:pinned already exists: that is somebody's Culvert.
 #
@@ -81,9 +83,10 @@ mkdir -p "$W"/{app,regdata,certs,root/etc,srv,ul,p,ev,bin}
 cleanup() {
   trap - EXIT INT TERM
   if [ "$OWN_SYSD" = 1 ]; then
+    # The agent first: while it lives it can recreate the proxy container.
+    docker rm -f "$SYSD" >/dev/null 2>&1
     ids="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null)"
     [ -n "$ids" ] && docker rm -f $ids >/dev/null 2>&1
-    docker rm -f "$SYSD" >/dev/null 2>&1
   fi
   [ -n "$PROXYPID" ] && kill "$PROXYPID" 2>/dev/null
   [ -n "$REGPID" ] && kill "$REGPID" 2>/dev/null
@@ -95,6 +98,8 @@ cleanup() {
   if [ "${ORPHAN_PROBE_KEEP:-0}" = 1 ]; then echo "kept: $W"; else rm -rf "$W"; fi
   left=""
   docker inspect "$SYSD" >/dev/null 2>&1 && left="$left container:$SYSD"
+  [ "$OWN_SYSD" = 1 ] && [ -n "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null)" ] && left="$left containers-of:$PROJECT"
+  for img in $OWN_IMG; do docker image inspect "$img" >/dev/null 2>&1 && left="$left image:$img"; done
   docker image inspect culvert/proxy:pinned >/dev/null 2>&1 && [ "$OWN_TAG" = 1 ] && left="$left tag:culvert/proxy:pinned"
   docker image inspect "$BASE" >/dev/null 2>&1 && left="$left image:$BASE"
   [ -e "$CERT_DIR" ] && [ "$OWN_CERT" = 1 ] && left="$left $CERT_DIR"
@@ -119,7 +124,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "$W/certs/r.key" -out "$W/cert
 printf 'version: 0.1\nstorage:\n  filesystem:\n    rootdirectory: %s\nhttp:\n  addr: 127.0.0.1:%s\n  tls:\n    certificate: %s\n    key: %s\n' \
   "$W/regdata" "$REG_PORT" "$W/certs/r.crt" "$W/certs/r.key" > "$W/registry.yml"
 "$W/bin/registry" serve "$W/registry.yml" > "$W/registry.log" 2>&1 & REGPID=$!
-mkdir "$CERT_DIR" || inc "could not create $CERT_DIR"
+mkdir -p "$(dirname "$CERT_DIR")" && mkdir "$CERT_DIR" || inc "could not create $CERT_DIR"
 OWN_CERT=1; cp "$W/certs/r.crt" "$CERT_DIR/ca.crt"
 for _ in $(seq 1 30); do curl -fs --cacert "$W/certs/r.crt" "https://127.0.0.1:$REG_PORT/v2/" >/dev/null && break; sleep 0.5; done
 curl -fs --cacert "$W/certs/r.crt" "https://127.0.0.1:$REG_PORT/v2/" >/dev/null || inc "registry did not come up"
@@ -184,6 +189,7 @@ printf 'FROM scratch\nCOPY app /app\nENTRYPOINT ["/app"]\n' > "$W/Dockerfile"
 REAL_PROXY=0
 if [ -n "${ORPHAN_PROBE_PROXY_BIN_V1:-}" ] || [ -n "${ORPHAN_PROBE_PROXY_BIN_V2:-}" ]; then
   [ -x "${ORPHAN_PROBE_PROXY_BIN_V1:-}" ] && [ -x "${ORPHAN_PROBE_PROXY_BIN_V2:-}" ] || inc "both ORPHAN_PROBE_PROXY_BIN_V1 and _V2 must be executable files"
+  (exec 3<>"/dev/tcp/127.0.0.1/$((APP_PORT + 1))") 2>/dev/null && inc "port $((APP_PORT + 1)) (admin UI) is in use"
   REAL_PROXY=1
   printf 'FROM scratch\nCOPY app /app\nWORKDIR /data\nENTRYPOINT ["/app"]\n' > "$W/Dockerfile"
 fi
@@ -257,11 +263,14 @@ proxy_repo = "$REPO_IMG"
 TOML
 
 # ── a real systemd (the host's binary) as PID 1 of a privileged container ───────────────
-# The container's /etc is a copy of the host's, WITHOUT its secrets: no password hashes, no
-# SSH host keys, no private TLS keys. The copy lives in $W/root and in the image $BASE; both
-# are removed on exit (the directory right after the import).
+# The container's /etc is a copy of the host's without password hashes, SSH host keys and the
+# usual private-key locations (list below). That is a best effort, not a guarantee: anything
+# else secret under /etc is copied. Treat $BASE as sensitive; it and $W/root are removed on
+# exit (the directory right after the import). Use a disposable machine.
 tar -C /etc --exclude='./systemd/system/*.wants' --exclude='./shadow*' --exclude='./gshadow*' --exclude='./ssh' \
-  --exclude='./ssl/private' --exclude='./docker' --exclude='*.key' --exclude='./sudoers.d/*' -c . | tar -C "$W/root/etc" -x
+  --exclude='./ssl/private' --exclude='./pki' --exclude='./letsencrypt' --exclude='./wireguard' --exclude='./NetworkManager' \
+  --exclude='./netplan' --exclude='./docker' --exclude='*.key' --exclude='*.keytab' --exclude='privkey*.pem' \
+  --exclude='./sudoers.d/*' -c . | tar -C "$W/root/etc" -x || inc "could not copy /etc"
 awk -F: '{print $1":*:19000:0:99999:7:::"}' "$W/root/etc/passwd" > "$W/root/etc/shadow"
 awk -F: '{print $1":*::"}' "$W/root/etc/group" > "$W/root/etc/gshadow"
 chmod 640 "$W/root/etc/shadow" "$W/root/etc/gshadow"
