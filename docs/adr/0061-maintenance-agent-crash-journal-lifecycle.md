@@ -249,13 +249,23 @@ it. Two things make that usable, and neither is the journal:
   retired the record; the container then exited.
 
 Rule: nothing tags and recreates while such a request can still be pending.
-`tagAndUp` waits until `interrupted_at + interrupted_settle` (default 75s, must
-exceed the proxy's `stop_grace_period`) for every startup-marked record whose
-phase is at or past the write-ahead barrier, and only then tags, runs `up`, and
-goes through the health gate. A success, and the retirement of records it
-causes, is therefore judged on a container no outstanding request can touch.
-Records before the barrier cause no wait. The wait is not a new stage and adds
-no docker call.
+`tagAndUp` waits until `agent start + interrupted_settle` (default 75s, must
+exceed the proxy's `stop_grace_period`) and only then tags, runs `up`, and goes
+through the health gate. A success, and the retirement of records it causes, is
+therefore judged on a container no outstanding request can touch.
+
+The bound is counted from the process start, not from a journal record, on
+purpose. A stop can be left by something that records nothing (a restore's
+`compose down`), records another class (a data rollback), or belongs to a
+startup reconcile killed in mid-flight; and a record's `interrupted_at` is
+written best-effort. The cost is that the first upgrade or rollback within the
+window after any agent start waits for the rest of it. The wait is not a new
+stage and adds no docker call.
+
+Not covered: a deployment without the unit's control-group kill (a docker
+command of the dead agent may then still be running at any later time), a
+`stop_grace_period` longer than the window, and a stop cut short inside one
+process by a `stage_timeout` shorter than the proxy's exit.
 
 The startup reconcile (`reconcile_on_startup = "converge"`) follows the same
 rule and one more. It waits out the settle window before it reads Docker for a

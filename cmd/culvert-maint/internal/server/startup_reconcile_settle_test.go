@@ -47,17 +47,30 @@ func TestStartupReconcile_NoopNotReadyKeepsRecord(t *testing.T) {
 }
 
 // TestStartupReconcile_WaitsOutTheSettleWindow: Docker is read, and the tag
-// moved, only after interrupted_at + interrupted_settle.
+// moved, only after agent start + interrupted_settle.
 func TestStartupReconcile_WaitsOutTheSettleWindow(t *testing.T) {
-	const settle = 600 * time.Millisecond
+	const settle = 1500 * time.Millisecond
 	r := newReconRig(t, true)
 	r.srv.opts.Cfg.InterruptedSettle = settle
+	r.srv.startedAt = time.Now()
 	r.world.pinned = cfgNew
-	at := time.Now().UTC()
-	r.seed(t, journal.PhaseRestarting, func(rec *journal.Record) { rec.InterruptedAt = &at })
-	got := r.run(t)
-	if waited := time.Since(at); waited < settle {
-		t.Errorf("the reconcile finished %v after the interruption; it must not act before %v", waited, settle)
+	r.seed(t, journal.PhaseRestarting, nil)
+
+	done := make(chan ReconcileRecord, 1)
+	go func() { done <- r.run(t) }()
+
+	// Inside the window: no tag yet, no record retired.
+	time.Sleep(settle / 3)
+	if c := r.world.calls(); len(c) != 0 {
+		t.Fatalf("the reconcile made mutating calls inside the settle window: %v", c)
+	}
+	if r.recordOnDisk(t) == nil {
+		t.Fatal("the record was retired inside the settle window")
+	}
+
+	got := <-done
+	if waited := time.Since(r.srv.startedAt); waited < settle {
+		t.Errorf("the reconcile finished %v after the start; it must not act before %v", waited, settle)
 	}
 	if got.Outcome != OutcomeConverged || !got.DockerReconciled {
 		t.Fatalf("result = %+v, want converged after the wait", got)
@@ -74,9 +87,9 @@ func TestStartupReconcile_SettleCutShortKeepsRecord(t *testing.T) {
 	r := newReconRig(t, true)
 	r.srv.opts.Cfg.StageTimeout = 150 * time.Millisecond // reconcile deadline = 2 x stage timeout
 	r.srv.opts.Cfg.InterruptedSettle = 30 * time.Second
+	r.srv.startedAt = time.Now()
 	r.world.pinned = cfgNew
-	at := time.Now().UTC()
-	r.seed(t, journal.PhaseRestarting, func(rec *journal.Record) { rec.InterruptedAt = &at })
+	r.seed(t, journal.PhaseRestarting, nil)
 	began := time.Now()
 	got := r.run(t)
 	if time.Since(began) > 10*time.Second {

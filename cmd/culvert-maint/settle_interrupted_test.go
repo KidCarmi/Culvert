@@ -53,16 +53,16 @@ func (r *crashRig) opLogs(opID string) string {
 // TestSettle_RollbackWaitsOutAnInterruptedRecreate: after an agent death
 // inside the tag+recreate window, dockerd may still be stopping the old proxy
 // container for the dead operation. The next operation must not tag or
-// recreate until that request can no longer be pending
-// (InterruptedAt + interrupted_settle), so that its `up` and health gate judge
-// a container nothing outstanding can touch.
+// recreate until that request can no longer be pending (agent start +
+// interrupted_settle), so that its `up` and health gate judge a container
+// nothing outstanding can touch.
 func TestSettle_RollbackWaitsOutAnInterruptedRecreate(t *testing.T) {
-	const settle = 3 * time.Second
+	const settle = 6 * time.Second
 	r := newCrashRig(t)
 	r.setSettle(settle.String())
 	r.start()
-	r.crashAt("up_before:1") // past the barrier: the dead agent was inside `compose up`
-	restarted := time.Now()  // no later than the record's InterruptedAt
+	r.crashAt("up_before:1")  // past the barrier: the dead agent was inside `compose up`
+	beforeStart := time.Now() // no later than the new process's start
 	r.start()
 	r.clearCalls()
 
@@ -70,17 +70,17 @@ func TestSettle_RollbackWaitsOutAnInterruptedRecreate(t *testing.T) {
 
 	// Negative control on the wait: well inside the window nothing has been
 	// moved, although the operation was admitted at once.
-	time.Sleep(settle / 3)
+	time.Sleep(time.Second)
 	if calls := r.tagOrUpCalls(); len(calls) != 0 {
 		t.Fatalf("the rollback tagged or recreated %v after the restart, inside the %v settle window: %v",
-			time.Since(restarted).Round(time.Millisecond), settle, calls)
+			time.Since(beforeStart).Round(time.Millisecond), settle, calls)
 	}
 
 	done := r.waitOp(op)
 	if done.State != "succeeded" {
 		t.Fatalf("rollback = %s(%s); agent output:\n%s", done.State, done.FailureReason, r.logs.String())
 	}
-	if waited := time.Since(restarted); waited < settle {
+	if waited := time.Since(beforeStart); waited < settle {
 		t.Errorf("the rollback finished %v after the restart; it must not act before %v", waited, settle)
 	}
 	if calls := r.tagOrUpCalls(); len(calls) == 0 {
@@ -96,33 +96,44 @@ func TestSettle_RollbackWaitsOutAnInterruptedRecreate(t *testing.T) {
 		t.Errorf("the operation log does not say it waited:\n%s", logs)
 	}
 
-	// The window is counted from the interruption, not from each operation:
-	// with the record retired, the next operation does not wait.
-	again := time.Now()
-	if d := r.waitOp(r.rollbackToA()); d.State != "succeeded" {
+	// The window is counted from the agent's start, not from each operation:
+	// the next operation finds it over and its log records no wait.
+	second := r.rollbackToA()
+	if d := r.waitOp(second); d.State != "succeeded" {
 		t.Fatalf("second rollback = %s(%s)", d.State, d.FailureReason)
 	}
-	if took := time.Since(again); took >= settle {
-		t.Errorf("a rollback with no interrupted record took %v: it waited for nothing", took)
+	if logs := r.opLogs(second); strings.Contains(logs, "settle: waited") {
+		t.Errorf("an operation after the window waited again:\n%s", logs)
 	}
 }
 
-// TestSettle_NoWaitBeforeTheBarrier: an operation that died before the
-// write-ahead barrier never reached `compose up`, so it cannot have left a
-// container stop behind. Waiting there would only delay recovery.
-func TestSettle_NoWaitBeforeTheBarrier(t *testing.T) {
-	const settle = 20 * time.Second
+// TestSettle_AppliesAfterAnyStart: the wait does not depend on a journal
+// record. A stop can be left behind by something that records nothing (a
+// restore's `compose down`) or records another class (a data rollback), so the
+// first tag+recreate after ANY agent start waits out the window.
+func TestSettle_AppliesAfterAnyStart(t *testing.T) {
+	const settle = 6 * time.Second
 	r := newCrashRig(t)
 	r.setSettle(settle.String())
-	r.start()
-	r.crashAt("pull:1")
-	r.start()
-
-	began := time.Now()
-	if d := r.waitOp(r.rollbackToA()); d.State != "succeeded" {
-		t.Fatalf("rollback = %s(%s); agent output:\n%s", d.State, d.FailureReason, r.logs.String())
+	beforeStart := time.Now()
+	r.start() // a clean start: empty journal
+	if files := r.journalFiles(); len(files) != 0 {
+		t.Fatalf("the journal is not empty at a clean start: %v", files)
 	}
-	if took := time.Since(began); took >= settle/2 {
-		t.Errorf("rollback after a pre-barrier interruption took %v with interrupted_settle=%v: it waited", took, settle)
+
+	op := r.applyUpgrade()
+	time.Sleep(time.Second)
+	if calls := r.tagOrUpCalls(); len(calls) != 0 {
+		t.Fatalf("an upgrade tagged or recreated %v after a clean start, inside the %v settle window: %v",
+			time.Since(beforeStart).Round(time.Millisecond), settle, calls)
+	}
+	if d := r.waitOp(op); d.State != "succeeded" {
+		t.Fatalf("upgrade = %s(%s); agent output:\n%s", d.State, d.FailureReason, r.logs.String())
+	}
+	if waited := time.Since(beforeStart); waited < settle {
+		t.Errorf("the upgrade finished %v after the start; it must not act before %v", waited, settle)
+	}
+	if r.read("pinned") != imgB || r.read("running") != imgB {
+		t.Errorf("after upgrade: tag %.8s container %.8s, want both on the target", r.read("pinned"), r.read("running"))
 	}
 }
