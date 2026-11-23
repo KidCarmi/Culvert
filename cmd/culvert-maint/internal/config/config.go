@@ -78,9 +78,9 @@ type Config struct {
 	// Default per-stage timeout. Default 5m.
 	StageTimeout time.Duration
 
-	// InterruptedSettle is how long after an interrupted image change was
-	// found the next tag+recreate waits before it acts. Default 75s; 0 turns
-	// the wait off. See parseInterruptedSettle.
+	// InterruptedSettle is how long after the agent process started a
+	// tag+recreate waits before it acts. Default 75s; 0 turns the wait off.
+	// See parseInterruptedSettle.
 	InterruptedSettle time.Duration
 
 	// Retention for operations/<op_id>.log and audit.jsonl. Default 30.
@@ -409,7 +409,7 @@ func validate(raw *rawConfig) (*Config, error) {
 	}
 	cfg.StageTimeout = d2
 
-	if cfg.InterruptedSettle, err = parseInterruptedSettle(raw.InterruptedSettle, cfg.StageTimeout); err != nil {
+	if cfg.InterruptedSettle, err = parseInterruptedSettle(raw.InterruptedSettle, cfg.OperationTimeout); err != nil {
 		return nil, err
 	}
 
@@ -531,18 +531,20 @@ func validateHealthPath(name, supplied, def string) (string, error) {
 
 // parseInterruptedSettle reads interrupted_settle.
 //
-// When the agent dies in the middle of recreating the proxy, systemd makes
-// sure no docker command of that agent is still running when the next one
-// starts, but dockerd carries on with the last request it received. For a
-// container stop that lasts as long as the proxy takes to exit: up to its
-// stop_grace_period, then SIGKILL. Until that is over, a container that looks
-// fine can be on its way out, and an operation that recreates nothing would
-// pass its health gate against it. The settle window is the bound on that
-// request: it must be longer than the proxy's stop_grace_period.
+// When the agent dies in the middle of an operation, systemd makes sure no
+// docker command of that agent is still running when the next one starts, but
+// dockerd carries on with the last request it received. For a container stop
+// that lasts as long as the proxy takes to exit: up to its stop_grace_period,
+// then SIGKILL. Until that is over, a container that looks fine can be on its
+// way out, and an operation that recreates nothing would pass its health gate
+// against it. The settle window is the bound on that request, counted from the
+// start of the agent process: it must be longer than the proxy's
+// stop_grace_period.
 //
-// It must also fit inside one stage, because the wait happens inside the
-// stage that tags and recreates.
-func parseInterruptedSettle(raw string, stageTimeout time.Duration) (time.Duration, error) {
+// It must also be shorter than operation_timeout: the wait happens inside the
+// operation that tags and recreates, and one that could never outlast it
+// would always fail.
+func parseInterruptedSettle(raw string, operationTimeout time.Duration) (time.Duration, error) {
 	if raw == "" {
 		raw = defaultInterruptedSettle
 	}
@@ -553,8 +555,8 @@ func parseInterruptedSettle(raw string, stageTimeout time.Duration) (time.Durati
 	if d < 0 {
 		return 0, fmt.Errorf("config: interrupted_settle must not be negative, got %s", d)
 	}
-	if d >= stageTimeout {
-		return 0, fmt.Errorf("config: interrupted_settle (%s) must be shorter than stage_timeout (%s): the wait runs inside the restart stage", d, stageTimeout)
+	if d >= operationTimeout {
+		return 0, fmt.Errorf("config: interrupted_settle (%s) must be shorter than operation_timeout (%s): the wait runs inside the operation", d, operationTimeout)
 	}
 	return d, nil
 }

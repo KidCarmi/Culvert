@@ -441,7 +441,7 @@ func TestIsAllowedBackupPath(t *testing.T) {
 }
 
 // TestLoad_InterruptedSettle: default 75s; 0 turns the wait off; negative,
-// malformed and "does not fit in a stage" are refused.
+// malformed and "does not fit in an operation" are refused.
 func TestLoad_InterruptedSettle(t *testing.T) {
 	load := func(extra string) (*Config, error) {
 		t.Helper()
@@ -458,8 +458,8 @@ func TestLoad_InterruptedSettle(t *testing.T) {
 	for _, bad := range []string{
 		`interrupted_settle = "-1s"`,
 		`interrupted_settle = "soon"`,
-		"interrupted_settle = \"5m\"",                          // equals the default stage_timeout
-		"stage_timeout = \"1m\"\ninterrupted_settle = \"90s\"", // longer than the stage
+		"interrupted_settle = \"30m\"",                             // equals the default operation_timeout
+		"operation_timeout = \"1m\"\ninterrupted_settle = \"90s\"", // longer than the operation
 	} {
 		if _, err := load(bad); err == nil {
 			t.Errorf("%q was accepted", bad)

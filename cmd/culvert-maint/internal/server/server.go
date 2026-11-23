@@ -197,6 +197,10 @@ const DefaultMaxConcurrentReadOnlyOps = 8
 type Server struct {
 	opts Options
 
+	// startedAt is when this agent process's server was built. The settle
+	// window is counted from it (settle.go).
+	startedAt time.Time
+
 	// opWG tracks in-flight orchestrator goroutines so shutdown can drain them
 	// (T2.4) instead of abandoning a state-changing op mid-flight.
 	opWG           sync.WaitGroup
@@ -253,7 +257,7 @@ func New(opts Options) (*Server, error) {
 	if maxRO <= 0 {
 		maxRO = DefaultMaxConcurrentReadOnlyOps
 	}
-	return &Server{opts: opts, opDrainTimeout: drain, opSem: make(chan struct{}, maxRO)}, nil
+	return &Server{opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO)}, nil
 }
 
 // acquireReadOnlySlot reserves an execution slot for a read-only op without
