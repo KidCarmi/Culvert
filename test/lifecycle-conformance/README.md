@@ -28,8 +28,10 @@ tag `lifecycle_conformance`.
    HTTP client are faked.
 6. `cmd/lifecyclecheck` — the property gate and the Markdown step summary.
 7. `cmd/lifecyclemutate` — scheduled mutation campaign (see below).
-8. `test/lifecycle-conformance/run.sh` — runs 6 and 5 and combines the result.
-9. `baseline.json`, `observed.json` (embedded) — the **reviewed baseline**: every
+8. `cmd/culvert-maint/orphan_survival_crash_test.go` — orphan-survival crash
+   vectors on the real agent binary (see below).
+9. `test/lifecycle-conformance/run.sh` — runs 6, 5 and 8 and combines the result.
+10. `baseline.json`, `observed.json` (embedded) — the **reviewed baseline**: every
    property verdict, exercised count and shortest counterexample, the state-space
    size, one readable line per apply and crash vector, a fingerprint of the
    reconcile table, and the real-code observations the model does not predict:
@@ -77,6 +79,7 @@ or observed behaviour differs from what was last reviewed".
 | The agent's own Go logic behaves as the model says on every modelled path | Yes — executed against the real code |
 | Docker behaves as the fake exec layer assumes | **No** — an assumption; validate against real Docker (`test/e2e/maint-agent`) |
 | Startup crash recovery works end to end | **No** — the model's agent-restart step is not executed |
+| The agent's reports stay true when the in-flight docker command outlives the agent | **Measured on the process-level Docker model only**; findings pinned as `open` (below) |
 | Standalone/data rollback, migration, timeouts, concurrency are correct | **No** — not modelled |
 | The properties are Culvert's contract | **No** — every property is `proposed` or `open`; none is owner-approved |
 
@@ -141,6 +144,202 @@ stores' observations are pinned in `observed.json`; containerd lines carry the
   unverified`. The model predicts all three fields for every vector, and the
   misreport list in `observed.json` is empty under both stores.
 
+## Orphan-survival crash vectors
+
+The real-binary crash tests (`startup_crash_recovery_test.go`) kill the agent
+**and** the docker command it was waiting on. The kernel re-parents that
+command instead, and the runner gives each command its own process group, so
+nothing aimed at the agent reaches it. `orphan_survival_crash_test.go` kills
+only the agent at each of the 7 kill points with a docker command in flight,
+proves from `/proc` that the command is alive and re-parented, restarts the
+agent, records its reports, releases the command, and reads the reports again
+(and after one more restart). A second flow admits the operator's next
+operation while the command is still alive.
+
+- Negative controls in the code: a mutating in-flight command (`tag`,
+  `compose up`) must change the model after release, write a completion marker
+  in both flows, and a read-only one must not change the model; every report
+  read must answer 200 (404 for the operation only after a later operation
+  verifiably succeeded and retired the record); at the restart the operation is
+  `failed(agent_restart_interrupted)` with exactly one audit entry and is the
+  only interrupted entry; the later operation must be the one `/v1/status`
+  advises. Every other failure, including a shared rig helper's, is `INVALID`.
+  `TestOrphanSurvival_ReapedControl` repeats the vectors with the command
+  reaped and requires no divergence.
+- `pinned_tag` is reported on every `/v1/status`, not only while an interrupted
+  record is outstanding. In the one vector where the model's orphan moves the
+  tag after a rollback has retired the record (`barrier_before_tag`), the state
+  that used to show nothing now shows `pinned_tag.matches_running: false`. This
+  makes the divergence visible; it does not prevent it.
+- Findings are pinned in `orphanExpectations`, every entry `open`. Q3 is pinned
+  in two parts: the late mutation after a reported success, and what every
+  `/v1/status` signal (interrupted entries, `pinned_tag` absent / true / false)
+  shows of it. `TestOrphanClassifier_Later` checks the classifier on synthetic
+  observations. A finding is not a failure. Exit 1 requires positive evidence
+  of a complete run (one `ORPHAN-COMPLETE` line per flow, 14 + 14, and both
+  `ORPHAN-SUMMARY` lines) and every failed subtest explained by its own
+  `EXPECTATION MISMATCH` or `A3:` line. Two further guards make that evidence
+  positive: every line the suites print must start with a prefix on a closed
+  allowlist (`orphanOutputPrefixes` in the test, `ORPHAN_PREFIXES` in `run.sh`;
+  the two must match), so any unmarked assertion or shared rig helper message
+  fails the run as incomplete; and the per-flow `sanctioned=` counts on the
+  `ORPHAN-COMPLETE` lines must add up to the number of `EXPECTATION MISMATCH`
+  and `A3:` lines. Anything else non-zero, or any unlisted output, is exit 2.
+- What Q1 establishes: the durable report (operation result, audit entry) is
+  conservative, since it already says `indeterminate` wherever the orphan can act,
+  and a conclusive-looking live read (`running_image`, `pinned_tag`) can change
+  after the restart. On this model a durable report cannot be shown stale: it
+  says `unchanged` only where the in-flight command changes no tag or container.
+- Model artefacts, not findings: the model's `compose up` reads the tag when it
+  is released, while a real in-flight `compose up` has already resolved its image.
+  So "a rollback admitted meanwhile, then the orphan's `up` lands on the prior
+  image" is a property of the model. An orphaned `pull`'s effect on the local
+  image store is not represented.
+- The model is not Docker. What real Docker, systemd and sudo do at these kill
+  points was measured separately; see "Real Docker and systemd" below. In short:
+  with the shipped unit no docker command outlives the agent, so the model's
+  orphaned CLI does not occur, and `barrier_before_tag`'s late tag move did not
+  reproduce. What does survive the agent is `dockerd` finishing the last
+  request it was sent.
+
+## Real Docker and systemd: the orphan probe
+
+`orphan-probe/probe.sh` (manual; never a PR gate) runs the real agent, installed
+by the real `install.sh`, under a real systemd unit, calling Docker through the
+real sudoers file and wrapper, against a real daemon. A proxy on the Docker
+socket (`dkproxy.py`) SIGKILLs the agent — only the agent — at an exact Docker
+API request of the `restart` stage: before the fixed-tag request, after it, and
+after each of the 12 requests `docker compose up -d` makes when it recreates the
+proxy. systemd then restarts the agent. The probe optionally runs the
+operator's next operation, waits for rest, and compares the agent's reports with
+what `dockerd` says when asked directly.
+
+```bash
+sudo test/lifecycle-conformance/orphan-probe/probe.sh            # about 45 min
+sudo test/lifecycle-conformance/orphan-probe/probe.sh --quick    # smoke run, not evidence
+```
+
+Exit 0: every property held. Exit 1: a property was violated. Exit 2:
+incomplete (a prerequisite, a trial or a control did not run as intended). It
+refuses to run where `culvert/proxy:pinned` already exists.
+
+Properties checked on every trial: no docker command of the dead agent is alive
+when the new agent starts; an operation that reports success leaves Docker
+healthy on the image it names, and Docker does not change afterwards; when
+Docker at rest is not healthy, something reports it (an interrupted record, a
+failed operation, or `recovery_required`). "Reports it" is deliberately weak:
+an outstanding record counts, whatever its live fields said at the restart. A
+trial whose follow-up operation did not run to an end is invalid, and each
+group of trials must have the expected count, or the run is incomplete.
+
+Unlike `docker-probe.sh`, this probe has to move the real fixed tag: the agent
+under test hard-codes `culvert/proxy:pinned`. Hence the refusal above.
+
+Measured on Ubuntu 24.04, systemd 255, sudo 1.9.15, Docker 29.10.0 (containerd
+image store), Compose v5.7.1. One environment; a different systemd, cgroup
+layout or Compose version is not covered.
+
+**What the supervisor does.** When the agent dies, systemd sends SIGTERM to
+everything left in the unit's control group and does not start the next agent
+until the group is empty; a child that ignores SIGTERM held the restart for
+`TimeoutStopSec` and was then killed; a child started through `sudo` or
+`setsid` did not leave the group. With `KillMode=process` the child was still
+alive when the next agent started. That control is what establishes the
+property. The per-trial check (is any docker command of the dead agent alive
+once the new agent answers?) is taken seconds after the kill, so it can only
+catch a slow command: it found none under the shipped unit, and it found the
+orphaned `docker compose up` on the real agent with `KillMode=process`, where
+the rollback that followed reported success and the system ended with no proxy
+container.
+
+**What the daemon does.** A request `dockerd` has received is carried out
+whether or not the client is still alive. For the fixed tag that takes
+milliseconds, long before the 5 s restart delay, so the agent's first read
+after a crash at `barrier_before_tag` already sees the final tag (rollback
+after it: correct and stable). A container stop is different: it lasts as long
+as the proxy takes to exit, up to `stop_grace_period` (60 s in
+`docker-compose.yml`).
+
+**Results (shipped unit, 40 trials + 4).**
+
+| Scenario | Trials | Result |
+|---|---|---|
+| Crash only, proxy exits at once | 14 | Every state stable and reported: the record is kept and says `indeterminate`. In 4 the proxy is down (crash between compose's stop and start) and stays down until an operator acts |
+| Crash, then rollback, proxy exits at once | 14 | 13 correct and stable. 1 fails its health gate and says so (crash between compose's stop and delete: the first `compose up -d` only cleans up; a second rollback succeeds) |
+| Crash only, proxy drains for 12 s | 4 | The stop the dead CLI requested completes after the new agent has started: the proxy goes down after the agent reported `running_image: prior`. The record is kept |
+| **Crash, then rollback, proxy drains for 12 s and answers 200 meanwhile** | 4 | **2 violations.** The rollback finds the old container still running, changes nothing, passes its health gate, reports success and retires the record. The container then exits: proxy down, no record, nothing reporting it |
+| Same, with a proxy that answers `/ready` 503 once it has SIGTERM | 4 | 0 violations: the rollback fails its health gate and keeps the record |
+| Crash, then re-apply, proxy drains | 4 | 0 violations |
+
+The violation needs three things together: the agent dies while Compose is
+stopping the old proxy container; the proxy takes longer to exit than the
+restart delay plus the time to the next operation; and it still answers
+`/ready` with 200 while it drains. At the time of measurement Culvert's proxy
+did: its listener stays open from SIGTERM until its proxy-server shutdown hook
+(up to the 12 s early phase plus later hooks), with nothing changing `/ready`.
+That is read from `main_shutdown.go` and `healthcheck.go`, and was later
+measured on the real binary (below). The proxy in this first matrix is a
+stand-in.
+
+**Startup convergence as first merged (#2039, `reconcile_on_startup = "converge"`), 22 trials.**
+With a proxy that exits at once, all 14 kill points end as intended: realign or
+no-op where the container is on the prior image, `recovery_required` where the
+stack is down or the target is live. With a draining proxy, 4 of 8 are
+violations (the two kill points with a stop in flight, with and without the
+`/ready` change): the reconcile sees the old container running the prior
+image, realigns the tag, records `converged` and retires the record about 5 s
+after the crash; the container then exits. Unlike a rollback this needs no
+operator timing, and the realign path makes no readiness probe, so the `/ready`
+change does not cover it. Not fixed here; it is evidence for the AGT-900 gate.
+
+**With the fixes together (2026-11-23).** The same probe, with the agent built
+from the unit fence, the settle wait, the always-reported `pinned_tag` and (for
+the last rows) the corrected startup reconcile, and the proxy's `/ready` change.
+Kill points -1, 0, 4, 8, 9, 12; settle and stop grace scaled to 20 s / 15 s
+(`ORPHAN_PROBE_SETTLE`, `ORPHAN_PROBE_STOP_GRACE`) so that the relation the
+agent relies on (settle > stop grace > the proxy's drain) is the shipped one and
+the run stays practical.
+
+| Run | Trials | Violations | What changed |
+|---|---|---|---|
+| Stand-in proxy, shipped unit | 18 + 2 | 0 | The rollback during a 12 s drain no longer reports success: it waits out the window, the stale stop has finished by then, and it fails its health gate and keeps the record |
+| Real Culvert proxy binary (v1 from `main`, v2 with the `/ready` change), shipped unit | 18 | 0 | Same properties with the real proxy. The six "pending admin-UI request" trials of this run did NOT hold the shutdown (the request was opened before the upgrade and had gone stale by the time of the stop), so they repeat the fast ones |
+| Real proxy binary, pending admin-UI request kept fresh (re-run of the two stop-in-flight kill points) | 8 | 0 | The shutdown is held: old container gone 4.7–5.3 s after the kill, read from dockerd. The container being stopped is always v1, which answers `/ready` 200 meanwhile. It has exited by the time the agent is back (5.5 s), so there is no window to exploit with this binary in this configuration |
+| Startup convergence as merged in #2039, stand-in | 10 | 4 | Unchanged: realign, `converged`, record retired, proxy then exits |
+| Startup convergence with the correction, stand-in | 10 | 0 | Those four end as `recovery_required` with the record kept |
+| Startup convergence with the correction, real proxy binary | 8 | 0 | |
+
+The real proxy binary, alone (`orphan-probe/sigterm-timeline.py`): SIGTERM to
+exit takes 0.06 s when idle and 5.0 s with a request left unfinished on the
+admin UI; during those 5 s `/ready` answers 200 on `main` and 503 with the
+change, and `/health` answers 200 in both. (Go's `Shutdown` closes such a
+connection at once when it is more than 5 s old, which is why the probe keeps
+the request fresh and rejects a trial whose shutdown was not held.)
+
+Two things these runs show that are not safety failures and are not fixed here:
+- After a crash between Compose's stop and delete, the first
+  `docker compose up -d` only cleans up. The rollback fails its health gate,
+  keeps the record and leaves the proxy down; a second rollback succeeds.
+- After a crash between Compose's delete and rename, `up` starts the
+  replacement under Compose's temporary name. It serves the right image and the
+  operation's success is correct; the container is not called what
+  `container_name` says until the next recreate.
+
+The "real proxy" is the real binary in a minimal image, not the release image's
+Alpine layers (Docker Hub was not reachable where this was run).
+
+**Not covered.** A crash of `dockerd` or the host; a proxy that ignores
+SIGTERM; Compose versions that recreate in a different order; the classic image
+store; multi-service stacks; the release image (the real proxy was run as its
+binary in a minimal image); the proxy's early shutdown phase with HA or
+control-plane peers, where it can stay up longest.
+
+Knobs: `ORPHAN_PROBE_PROXY_BIN_V1` / `_V2` (real proxy binaries built with
+`-X main.version=probe-v1` / `probe-v2`), `ORPHAN_PROBE_SETTLE` and
+`ORPHAN_PROBE_STOP_GRACE` (for an agent with the settle wait; keep settle >
+stop grace > the proxy's drain), `ORPHAN_PROBE_POINTS` / `ORPHAN_PROBE_MID`
+(a subset of kill points), `ORPHAN_PROBE_OUT` (copy the per-trial records).
+
 ## Running
 
 ```bash
@@ -149,9 +348,9 @@ test/lifecycle-conformance/run.sh /tmp/lifecycle-report
 
 | Exit | Meaning |
 |---|---|
-| 0 | Model check complete; all three conformance suites ran and passed; no drift from the reviewed baseline |
-| 1 | A conformance vector mismatched the real code, an owner-**approved** property failed, or the model / real-code observations drifted from `baseline.json` / `observed.json` (`lifecyclecheck` alone exits 3 for drift) |
-| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, or a skipped or missing suite. Never reported as a pass |
+| 0 | Model check complete; all three conformance suites ran and passed; every orphan-survival flow ran to its end and passed; no drift from the reviewed baseline |
+| 1 | A conformance vector mismatched the real code, an orphan-survival finding no longer matches its pinned expectation, an owner-**approved** property failed, or the model / real-code observations drifted from `baseline.json` / `observed.json` (`lifecyclecheck` alone exits 3 for drift) |
+| 2 | Incomplete: state/time budget hit, a vacuous property (its trigger is unreachable), a malformed properties file, a skipped or missing suite, or an orphan-survival run that is not provably complete or failed for any reason other than a pinned expectation or the reaped control (INVALID, panic, timeout, rig failure, a flow that did not reach its end). Never reported as a pass |
 
 Exit 2 takes precedence over exit 1 and nothing downgrades it: a run with a
 failing unapproved property **and** a vacuous property is incomplete.
@@ -174,6 +373,8 @@ go build -tags lifecycle_conformance -o /tmp/lifecyclecheck ./internal/lifecycle
 /tmp/lifecyclecheck -include-proposed -fail-only-approved -report /tmp/lifecycle-report
 # the three conformance suites
 go test -tags lifecycle_conformance -count=1 -run TestModelConformance ./internal/server/
+# the orphan-survival vectors, their reaped control and the classifier test (Linux; builds the agent)
+go test -tags lifecycle_conformance -count=1 -run '^TestOrphan(Survival|Classifier)_' -v .
 ```
 
 `lifecyclecheck` flags: `-include-proposed` (evaluate `proposed` properties as

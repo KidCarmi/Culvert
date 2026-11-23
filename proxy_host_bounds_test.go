@@ -1159,24 +1159,19 @@ func TestChaos69_DefectAdminMatchersReceiveTheBoundedHost(t *testing.T) {
 		w := httptest.NewRecorder()
 		apiPolicyTest(w, testerRoleReq(t, RoleViewer, map[string]any{"host": authority}))
 
-		if w.Code != http.StatusOK {
-			t.Fatalf("status = %d, want %d: body=%s", w.Code, http.StatusOK, w.Body.String())
+		// The tester now resolves its input with the request parser the data path
+		// sits behind (wireDestAuthority). That parser refuses a non-numeric port,
+		// exactly as net/http answers 400 for this authority on the wire, so the
+		// payload is stopped one step EARLIER than the bounded-host derivation this
+		// gate originally pinned: no matcher receives it at any length. The
+		// derivation itself stays pinned by the url-category-lookup subtest above and
+		// by TestChaos69_ControlPortShapedAuthorityIsStillAnswered for numeric ports.
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d: a port-shaped authority the request parser refuses must not be "+
+				"answered by the tester: body=%s", w.Code, http.StatusBadRequest, w.Body.String())
 		}
-		var got struct {
-			HostCategory struct {
-				Category  string `json:"category"`
-				Tier      string `json:"tier"`
-				MatchedBy string `json:"matchedBy"`
-			} `json:"hostCategory"`
-		}
-		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		hc := got.HostCategory
-		if hc.Category != "Social Media" || hc.Tier != "admin" || hc.MatchedBy != bare {
-			t.Errorf("hostCategory = (%q, %q, %q), want (\"Social Media\", \"admin\", %q): the fusion received the "+
-				"%d-byte authority, not the %d-byte host every tier measured",
-				hc.Category, hc.Tier, hc.MatchedBy, bare, len(authority), len(bare))
+		if strings.Contains(w.Body.String(), "hostCategory") {
+			t.Errorf("refusal body carries a category answer: %s", w.Body.String())
 		}
 	})
 }
@@ -1213,7 +1208,20 @@ func TestChaos69_DefectPolicyTesterStage1MatchesTheRuntimeHost(t *testing.T) {
 		t.Skip("the Exempt kill switch is engaged by the environment (CULVERT_AUTH_BYPASS_DISABLE); " +
 			"this gate measures a scoped Exempt rule and cannot run under it")
 	}
-	authority, bare := chaos69PortShaped()
+	// The port-shaped authority of the gates above cannot reach Stage-1 any more:
+	// the tester refuses what the request parser refuses (wireDestAuthority), as
+	// the wire does. Pin that, then measure the fidelity this gate exists for with
+	// an authority the data path can actually receive. The strip under test is
+	// the same operation for any port.
+	shaped, _ := chaos69PortShaped()
+	wr := httptest.NewRecorder()
+	apiPolicyTest(wr, testerRoleReq(t, RoleViewer, map[string]any{
+		"host": shaped, "sourceIP": "10.1.2.3", "protocol": "http", "method": http.MethodGet,
+	}))
+	if wr.Code != http.StatusBadRequest {
+		t.Fatalf("port-shaped authority: status = %d, want %d: body=%s", wr.Code, http.StatusBadRequest, wr.Body.String())
+	}
+	const authority, bare = "a:8443", "a"
 	swapCatStore(t, []*urlcat.Entry{{Name: "Social Media", Hosts: []string{bare}}})
 
 	enabled := true

@@ -1,0 +1,86 @@
+name: Policy Path Differential (shadow)
+
+# SHADOW — NOT A MERGE GATE. Do not add this workflow to the required status
+# checks (REPOSITORY-SETTINGS.md §2) without explicit owner approval of the
+# comparison semantics and reference clauses in test/policy-pathdiff/README.md.
+#
+# What it does: asks one logical request of five real paths (plain HTTP and
+# CONNECT through a real listener, the Policy Tester endpoint, the shared
+# evaluator, and a store reloaded from disk) and compares which rule decided.
+# Inputs come from a standard-library-only generator; results are compared with
+# reviewed baselines, so any change in behaviour, and any change to the verifier
+# itself, shows up as drift. See test/policy-pathdiff/README.md.
+#
+# No secrets, no network services, no Docker.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "policy.go"
+      - "policy_*.go"
+      - "authpolicy.go"
+      - "proxy.go"
+      - "proxy_host_bounds.go"
+      - "ui_policy.go"
+      - "identity.go"
+      - "internal/hostutil/**"
+      - "internal/pathdiffgen/**"
+      - "test/policy-pathdiff/**"
+      - ".github/workflows/policy-pathdiff-shadow.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: policy-pathdiff-shadow-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pathdiff:
+    name: "Shadow · policy path differential (non-blocking)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: go.sum
+
+      # Exit 0 = every suite ran and matched its reviewed baseline. Exit 1 =
+      # behaviour drift, a vacuous stratum or a dead comparator. Exit 2 = a suite
+      # did not run or was skipped: never reported as a pass.
+      - name: Generator tests + cross-path differential
+        run: test/policy-pathdiff/run.sh "$RUNNER_TEMP/pathdiff-report"
+
+      # A change that edits the verifier or its baselines together with the
+      # production paths it checks is legitimate only when a reviewer has read
+      # both halves. This step does not block; it makes the combination visible.
+      - name: Flag verifier and production changed together
+        if: always() && github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed="$(git diff --name-only "$BASE"...HEAD)"
+          ver="$(echo "$changed" | grep -E '^(internal/pathdiffgen/|test/policy-pathdiff/|policy_pathdiff_test\.go)' || true)"
+          prod="$(echo "$changed" | grep -E '^(policy\.go|policy_[a-z_]+\.go|authpolicy\.go|proxy\.go|proxy_host_bounds\.go|ui_policy\.go|internal/hostutil/)' | grep -v '_test\.go$' || true)"
+          if [ -n "$ver" ] && [ -n "$prod" ]; then
+            echo "::warning title=Verifier and production changed together::This PR changes the path-differential verifier or its baselines AND the production paths it checks. Review the baseline diff as a behaviour change."
+            printf 'verifier:\n%s\nproduction:\n%s\n' "$ver" "$prod"
+          fi
+
+      - name: The run modified no contract file
+        if: always()
+        run: git diff --exit-code -- contracts/registry.yaml
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: policy-pathdiff-report
+          path: ${{ runner.temp }}/pathdiff-report
+          retention-days: 14
