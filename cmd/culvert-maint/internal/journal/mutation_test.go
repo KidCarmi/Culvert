@@ -15,16 +15,37 @@ func openMut(t *testing.T, dir string) (*MutationLog, MutationAtOpen) {
 	return m, at
 }
 
-// TestMutationLog_FirstUseThenClean: the first open of a state directory
-// cannot tell whether an older agent left a command unfinished (FirstUse);
-// every later open without a marker is clean.
-func TestMutationLog_FirstUseThenClean(t *testing.T) {
+// cleanMut returns a log on a state directory that is past its first use: the
+// "unknown" marker of the first open has been cleared.
+func cleanMut(t *testing.T) (m *MutationLog, dir string) {
+	t.Helper()
+	dir = t.TempDir()
+	m, _ = openMut(t, dir)
+	if err := m.End(); err != nil {
+		t.Fatal(err)
+	}
+	return m, dir
+}
+
+// TestMutationLog_FirstUseIsDurablyUnknown: the first open of a state directory
+// cannot tell whether an older agent left a command unfinished. That doubt is
+// written down, so a second start (inside the window, or after the first one
+// failed half-way) still finds it; it is not "only up"; and it goes away only
+// when End clears it.
+func TestMutationLog_FirstUseIsDurablyUnknown(t *testing.T) {
 	dir := t.TempDir()
-	if _, at := openMut(t, dir); !at.FirstUse || at.Pending {
-		t.Fatalf("first open = %+v, want FirstUse and not Pending", at)
+	if _, at := openMut(t, dir); !at.FirstUse || !at.Pending || at.OnlyUp {
+		t.Fatalf("first open = %+v, want FirstUse, Pending, not OnlyUp", at)
+	}
+	m, at := openMut(t, dir)
+	if at.FirstUse || !at.Pending || at.OnlyUp {
+		t.Fatalf("second open without an End = %+v, want Pending (the first-use doubt), not FirstUse, not OnlyUp", at)
+	}
+	if err := m.End(); err != nil {
+		t.Fatal(err)
 	}
 	if _, at := openMut(t, dir); at.FirstUse || at.Pending {
-		t.Fatalf("second open = %+v, want neither", at)
+		t.Fatalf("open after End = %+v, want clean", at)
 	}
 }
 
@@ -32,8 +53,7 @@ func TestMutationLog_FirstUseThenClean(t *testing.T) {
 // the next open, whether or not the process that wrote it is still there, and
 // is gone after End. End without a marker is not an error.
 func TestMutationLog_BeginIsSeenUntilEnd(t *testing.T) {
-	dir := t.TempDir()
-	m, _ := openMut(t, dir)
+	m, dir := cleanMut(t)
 	if err := m.Begin(MutationComposeUp); err != nil {
 		t.Fatal(err)
 	}
@@ -60,8 +80,7 @@ func TestMutationLog_BeginIsSeenUntilEnd(t *testing.T) {
 // TestMutationLog_UnreadableIsPending: anything at the marker's path that is
 // not "absent" counts as a marker.
 func TestMutationLog_UnreadableIsPending(t *testing.T) {
-	dir := t.TempDir()
-	openMut(t, dir)
+	_, dir := cleanMut(t)
 	if err := os.Mkdir(filepath.Join(dir, mutationDirName, mutationFileName), 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -88,8 +107,7 @@ func TestMutationLog_BeginFailsClosed(t *testing.T) {
 // no End in between, is still a marker that names a down; the same holds
 // across a restart, and for content that cannot be understood.
 func TestMutationLog_NamesEveryCommandSinceTheLastEnd(t *testing.T) {
-	dir := t.TempDir()
-	m, _ := openMut(t, dir)
+	m, dir := cleanMut(t)
 	if err := m.Begin(MutationComposeDown); err != nil {
 		t.Fatal(err)
 	}

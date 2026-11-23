@@ -270,32 +270,51 @@ that every doubt falls on the waiting side:
 - *Record before effect.* Before the agent runs `compose up` or `compose
   down` it writes a durable marker (`<state_dir>/mutation/pending.json`,
   fsynced) that names the command and every command begun since the marker was
-  last removed. If the marker cannot be written the command is not run. The
-  marker is removed only when a command returned success **and no settle
-  window was open when it started**. After any error exit it stays: a docker
-  CLI that was sent SIGTERM exits with an ordinary error status after it has
-  asked dockerd to stop the proxy. And a success inside an open window proves
-  nothing about what opened it: a restore whose `compose down` was cut goes
-  straight on to `compose up`, which finds the proxy still `running`, changes
-  nothing and exits 0 (independent review, 2026-11-23). At start, no marker
-  means that every compose up/down of the previous process either returned
-  success outside a window or never ran, so there is nothing for dockerd to be
-  finishing and no window. A window still applies when a marker is found, on
-  the first start that keeps markers (their absence then proves nothing), and
-  whenever the journal holds a record no running operation owns, or cannot be
-  read. All server call sites go through one wrapper
-  (`TestMutation_OnlyTheWrappersRunComposeUpDown`).
+  last removed. If the marker cannot be written the command is not run. A
+  success removes the marker only if, **when the command started**, nothing
+  earlier could still be pending:
+  - no compose command of this process has ever ended in an error. After an
+    error exit the marker stays (a docker CLI that was sent SIGTERM exits with
+    an ordinary error status after it has asked dockerd to stop the proxy), and
+    the process never removes a marker again: a CLI cut through `sudo` can
+    outlive any window and send its stop later, and only the next agent start,
+    whose unit kills the control group, ends that;
+  - whatever the previous process left is over: it left nothing, or Docker
+    showed so (below), or a window has passed since this start. A success
+    inside that window proves nothing about what opened it: a restore whose
+    `compose down` was cut goes straight on to `compose up`, which finds the
+    proxy still `running`, changes nothing and exits 0.
+
+  So at start, no marker means: every compose up/down any earlier process ran
+  returned success with nothing before it in doubt. There is nothing for
+  dockerd to be finishing and no window. A window applies when a marker is
+  found or cannot be read, and whenever the journal holds a record that no
+  running operation owns, or cannot be read. The first start that keeps markers
+  writes an "unknown" marker at once (their absence until then proves nothing),
+  so that doubt, too, lasts across restarts until a command clears it.
+  `interrupted_settle = "0s"` turns the wait off, not this bookkeeping. All
+  server call sites go through one wrapper
+  (`TestMutation_OnlyTheWrappersRunComposeUpDown`). Both rules above come from
+  two rounds of independent adversarial review (2026-11-23).
 - *Advance when completion is established.* Only when the marker found at
   start was readable and names nothing but `compose up`. While it waits, the
-  agent reads `compose ps`. A stop the `up` requested can only be pending on a
-  running proxy container. When two consecutive reads, one poll apart, list no
-  proxy container, that stop is over and the wait ends; whatever `up` starts
-  next is not a container a stale request named. If a proxy container is
-  running (it may be the one being stopped: Docker reports `running` until the
-  process is gone), Docker cannot be read, or the output is not understood
-  completely, the whole window is waited out. A marker that names a `compose
-  down` is never ended early: `down` stops every service of the project, and
-  "no proxy container" says nothing about a stop still pending on another one.
+  agent reads `compose ps`. When two consecutive reads, one poll apart, list no
+  proxy container, the stop that `up` requested on the proxy is over and the
+  wait ends; whatever `up` starts next is not a container a stale request
+  named. (An `up` can also be replacing a container of another service whose
+  configuration changed; the `up` that follows the wait replaces that same
+  container, so a stop still pending on it removes nothing the new `up`
+  keeps.) If a proxy container is running (it may be the one being stopped:
+  Docker reports `running` until the process is gone), Docker cannot be read,
+  or the output is not understood completely, the whole window is waited out.
+  A marker that names a `compose down`, or names nothing readable, is never
+  ended early: `down` stops every service of the project, and "no proxy
+  container" says nothing about a stop still pending on another one.
+
+Costs accepted: a marker left by a cut command, or by a success inside a
+window, stays until a later compose command succeeds with nothing in doubt;
+until then every agent start opens a window, and the next upgrade or rollback
+reads the proxy container once more after its `up`.
 
 Not covered by the marker: an agent **downgraded** to a version that writes no
 markers and upgraded again. The marker directory then exists, and a restore's
@@ -303,7 +322,8 @@ markers and upgraded again. The marker directory then exists, and a restore's
 After such a round trip, remove `<state_dir>/mutation` before starting the
 newer agent; it then treats the start as a first use and waits. A state
 directory that cannot be written now also stops `compose up` / `compose down`
-from being run at all, as it already stops an upgrade at its journal barrier.
+from being run at all (including a restore's best-effort `start_stack`), as it
+already stops an upgrade at its journal barrier.
 
 The early end applies only to what a previous process left: its docker commands
 are dead before the next start (the unit's control-group kill), so only single

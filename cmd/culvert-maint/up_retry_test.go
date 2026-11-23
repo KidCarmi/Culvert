@@ -81,6 +81,32 @@ func TestUpRetry_RunsOnTheMarkerAlone(t *testing.T) {
 	}
 }
 
+// TestUpRetry_RunsOnTheRecordAlone: the reverse case. The interrupted record is
+// on file but no marker is (an agent that wrote none was killed in `up`). The
+// retry must still run.
+func TestUpRetry_RunsOnTheRecordAlone(t *testing.T) {
+	r := newCrashRig(t)
+	r.start()
+	r.crashAt("up_before:1")
+	if err := os.Remove(filepath.Join(r.state, "mutation", "pending.json")); err != nil {
+		t.Fatalf("removing the marker: %v", err)
+	}
+	r.start()
+	if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
+		t.Fatal(err)
+	}
+	r.put("up_cleanup_only", "1")
+	r.clearCalls()
+
+	op := r.rollbackToA()
+	if done := r.waitOp(op); done.State != "succeeded" {
+		t.Fatalf("rollback = %s(%s); op log:\n%s", done.State, done.FailureReason, r.opLogs(op))
+	}
+	if n := r.upCalls(); n != 2 {
+		t.Errorf("`compose up` ran %d times, want 2 (the clean-up-only pass and one retry)", n)
+	}
+}
+
 // TestUpRetry_IsBounded: if `up` keeps exiting 0 with nothing running, the
 // agent retries once and then lets the health gate fail the operation. It does
 // not loop, does not report success, and keeps the interrupted record.

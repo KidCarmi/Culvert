@@ -214,6 +214,12 @@ type Server struct {
 	startOnlyUp  bool // a readable marker was found and names only `compose up`
 	startSettled atomic.Bool
 	settlePoll   time.Duration
+	// startMarkerLive: the marker found at start named a compose command and
+	// this process has not cleared it yet (the `up` retry's trigger).
+	startMarkerLive atomic.Bool
+	// everCut: a compose up/down of this process ended in an error. From then
+	// on this process never removes the marker (mutation.go).
+	everCut atomic.Bool
 
 	// opWG tracks in-flight orchestrator goroutines so shutdown can drain them
 	// (T2.4) instead of abandoning a state-changing op mid-flight.
@@ -275,10 +281,12 @@ func New(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server: mutation marker: %w", err)
 	}
-	return &Server{
+	srv := &Server{
 		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
-		mutations: mutations, startHazard: atOpen.Pending || atOpen.FirstUse, startOnlyUp: atOpen.OnlyUp, settlePoll: defaultSettlePoll,
-	}, nil
+		mutations: mutations, startHazard: atOpen.Pending, startOnlyUp: atOpen.OnlyUp, settlePoll: defaultSettlePoll,
+	}
+	srv.startMarkerLive.Store(atOpen.NamesCommand)
+	return srv, nil
 }
 
 // acquireReadOnlySlot reserves an execution slot for a read-only op without

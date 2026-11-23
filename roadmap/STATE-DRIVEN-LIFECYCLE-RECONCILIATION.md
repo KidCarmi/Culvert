@@ -168,6 +168,10 @@ Implemented (ADR-0061, "When the window applies, and when it ends early"):
   must not erase it), and the early end is allowed only for a marker that
   names nothing but `compose up` (a `down` may still be stopping another
   service);
+- two more from the second round: the first-use doubt is written to disk as
+  an "unknown" marker instead of being held in memory for one process, and a
+  process in which a compose command ended in an error never clears the marker
+  (its CLI may outlive any window behind `sudo`);
 - of 3.2, only the first condition: **no proxy container is running**, read
   twice one poll apart. That is every case in which an interrupted upgrade or
   image rollback left the proxy down, which is where waiting costs an outage;

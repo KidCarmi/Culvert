@@ -202,18 +202,22 @@ For `indeterminate`:
   `prior_ref`.
 - Until one of these succeeds, do not run `docker compose up` by hand: it
   starts whatever image the tag is on.
-- After an agent that died in the middle of a `compose up` / `compose down`
-  (and on the very first start after installing or upgrading to an agent that
-  tracks this), an upgrade or rollback submitted within `interrupted_settle`
-  (75s by default) of the agent start may sit in its `restart` step before it
-  changes anything. That is deliberate: Docker may still be stopping the old
-  proxy container for the dead operation. The wait ends as soon as Docker shows
-  no proxy container running (the operation log says `settle: no proxy
-  container is running …`), and otherwise at the end of the window (`settle:
-  waited …`). An agent restart does not wait when the previous process left
-  nothing unfinished: no marker under `<state_dir>/mutation` and no interrupted
-  operation on record. A marker stays until the next upgrade, rollback or
-  restore completes its `compose up` / `compose down` outside such a window.
+- An upgrade or rollback may wait up to `interrupted_settle` (75s by default)
+  after an agent start before it changes anything (an upgrade before its first
+  capture, a rollback in its `restart` step). That is deliberate: Docker may
+  still be stopping a container for a `compose up` / `compose down` that an
+  earlier agent process did not see finish. It applies when such a command was
+  left unfinished (a marker under `<state_dir>/mutation`), when an interrupted
+  operation is on record, and on the first start after installing or upgrading
+  to an agent that tracks this. The operation log says `settle: waited …`.
+  - When the unfinished command was a `compose up` and Docker shows no proxy
+    container running, the wait ends at once (`settle: no proxy container is
+    running …`): the proxy is already down and nothing is left to wait for.
+    After an unfinished `compose down`, and on that first start, the whole
+    window is waited.
+  - The marker stays until an upgrade, rollback or restore completes its
+    compose command with nothing in doubt. An agent restart with no marker and
+    no interrupted operation on record does not wait.
 - If you downgrade the agent to a version older than this mechanism and later
   upgrade again, remove `<state_dir>/mutation` before starting the newer
   agent, so that it waits once as on a first start.

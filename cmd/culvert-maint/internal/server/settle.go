@@ -31,10 +31,11 @@
 //
 // The window applies after a start only when the previous process may have
 // left such a command unfinished: it writes a durable marker before every
-// compose up/down and removes it when the command returned success
-// (mutation.go, journal.MutationLog). And it is ended early when Docker shows
-// that no stop can be pending (settleInterrupted). Whenever either is in
-// doubt, the whole window is waited out.
+// compose up/down and removes it only on a success with nothing earlier in
+// doubt (mutation.go, markerMayBeCleared, journal.MutationLog). And it is
+// ended early when Docker shows that no stop can be pending and the marker
+// names only `compose up` (settleInterrupted). Whenever either is in doubt,
+// the whole window is waited out.
 //
 // Waiting BEFORE `tag` + `up` means `up` sees the container as the stale stop
 // left it and starts or recreates it, and the health gate that follows judges
@@ -79,16 +80,16 @@ func (s *Server) settleRemaining() time.Duration {
 // compose up/down unfinished, and Docker has not yet shown that it is over.
 //
 // The durable marker (journal.MutationLog) answers the first part: it is on
-// disk before such a command starts and is removed only when the command has
-// returned success. No marker at start means the predecessor had none in
-// flight, so there is no stop for dockerd to be finishing, and the ordinary
-// restart (package upgrade, reboot, a clean stop) pays no wait.
+// disk before such a command starts and is removed only by a success with
+// nothing earlier in doubt. No marker at start means there is no stop for
+// dockerd to be finishing, and the ordinary restart (package upgrade, reboot, a
+// clean stop) pays no wait. The first start that keeps markers finds the
+// "unknown" one it has just written.
 //
-// Two additions keep every doubt on the waiting side. The first start of an
-// agent that writes markers, after one that did not, counts as a hazard. And
-// so does an interrupted journal record, whatever the marker says: it costs
-// nothing when the marker agrees and covers a marker lost to an agent version
-// change in between.
+// One addition keeps doubt on the waiting side: a journal record that no
+// running operation owns, or a journal that cannot be read, is a hazard
+// whatever the marker says. It costs nothing when the marker agrees and covers
+// a marker lost to an agent version change in between.
 func (s *Server) startHazardOpen() bool {
 	if s.startSettled.Load() {
 		return false
@@ -110,6 +111,39 @@ func (s *Server) startHazardOpen() bool {
 func (s *Server) noteMutationCut() {
 	now := time.Now()
 	s.mutationCutAt.Store(&now)
+	s.everCut.Store(true)
+}
+
+// clearWindow is the window used to decide whether a marker may be removed. It
+// is never zero: interrupted_settle = "0s" turns the WAIT off (lab), not the
+// bookkeeping, so that turning the wait back on later finds honest markers.
+func (s *Server) clearWindow() time.Duration {
+	if w := s.opts.Cfg.InterruptedSettle; w > 0 {
+		return w
+	}
+	return defaultClearWindow
+}
+
+// defaultClearWindow mirrors the shipped interrupted_settle default.
+const defaultClearWindow = 75 * time.Second
+
+// markerMayBeCleared reports, for a compose command about to start, whether
+// its success may remove the marker. Both must hold:
+//
+//   - no compose up/down of this process has ever ended in an error. A CLI
+//     that was cut through sudo may outlive any window and send its stop
+//     later; only the next agent start, whose unit kills the control group,
+//     ends that. So such a process leaves its marker for its successor.
+//   - whatever the previous process left is over: there was nothing, or Docker
+//     showed so (early advance), or the window since this start has passed.
+func (s *Server) markerMayBeCleared() bool {
+	if s.everCut.Load() {
+		return false
+	}
+	if !s.startHazardOpen() {
+		return true
+	}
+	return time.Since(s.startedAt) >= s.clearWindow()
 }
 
 // defaultSettlePoll is how often Docker is asked, while waiting, whether the

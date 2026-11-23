@@ -19,11 +19,12 @@ import (
 // the caller says the command, and every one before it since the last removal,
 // is known to be over (End). So at the next agent start:
 //
-//   - no marker: the previous agent process had no such command in flight when
-//     it ended. Nothing is left in dockerd for it to finish.
-//   - marker: the command was cut (the agent died, or the command ended in an
-//     error and may have been killed after it sent its request). dockerd may
-//     still be carrying out a container stop.
+//   - no marker: every such command any earlier process ran returned success
+//     with nothing before it in doubt. Nothing is left in dockerd to finish.
+//   - marker: a command was cut (the agent died, or the command ended in an
+//     error and may have been killed after it sent its request), or succeeded
+//     while an earlier one was still in doubt. dockerd may still be carrying
+//     out a container stop.
 //
 // The marker is deliberately not part of an operation record: restores and
 // data rollbacks run `compose down` without an image-change record, and the
@@ -33,7 +34,8 @@ import (
 // written stops the command from being run; one that cannot be removed stays
 // and costs a wait at the next start; a marker directory that did not exist
 // yet (first start of an agent that writes markers, after one that did not)
-// is reported as FirstUse so the caller assumes the worst once.
+// gets an "unknown" marker written at once, so the worst is assumed until a
+// command clears it, however many starts that takes.
 type MutationLog struct {
 	dir string
 
@@ -62,8 +64,12 @@ type MutationAtOpen struct {
 	// Pending: a marker was there (or could not be ruled out).
 	Pending bool
 	// FirstUse: the marker directory did not exist. An earlier agent version
-	// wrote no markers, so their absence proves nothing this once.
+	// wrote no markers, so their absence proves nothing; an "unknown" marker
+	// was written and Pending is set.
 	FirstUse bool
+	// NamesCommand: a readable marker was there and names at least one compose
+	// command (not just the first-use "unknown").
+	NamesCommand bool
 	// OnlyUp: a marker was there, was readable, and names nothing but
 	// `compose up`. Anything else (a `compose down`, an unreadable or empty
 	// marker) is false.
@@ -93,6 +99,16 @@ func OpenMutationLog(stateDir string) (*MutationLog, MutationAtOpen, error) {
 		}
 	}
 	m := &MutationLog{dir: dir}
+	if at.FirstUse {
+		// Make the doubt durable: an "unknown" marker, so that a second start
+		// inside the window (or a start after this one failed half-way) still
+		// finds it. It is removed like any other marker.
+		at.Pending = true
+		if err := m.Begin(mutationUnknown); err != nil {
+			return nil, at, err
+		}
+		return m, at, nil
+	}
 	data, err := os.ReadFile(m.path())
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -114,6 +130,9 @@ func OpenMutationLog(stateDir string) (*MutationLog, MutationAtOpen, error) {
 	for _, c := range mk.Commands {
 		if c != MutationComposeUp {
 			at.OnlyUp = false
+		}
+		if c == MutationComposeUp || c == MutationComposeDown {
+			at.NamesCommand = true
 		}
 	}
 	return m, at, nil

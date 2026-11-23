@@ -108,8 +108,9 @@ const upRetryBudget = 1
 //
 // It applies only while Compose can have been left in the middle of a
 // recreate (mayBeMidRecreate, asked before `up`): an interrupted record is on
-// file or the marker of an unfinished compose command is in place. An ordinary
-// upgrade keeps exactly the docker calls it always made.
+// file, or a marker naming a compose command was found at start and not yet
+// cleared. Without either, an upgrade makes exactly the docker calls it always
+// made.
 //
 // The retry is bounded and is the same command; it runs only when Docker was
 // read and shows no running proxy container. If Docker cannot be read, nothing
@@ -215,15 +216,19 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 
 // mayBeMidRecreate reports whether Compose can have been left in the middle of
 // a recreate by an earlier agent process: an interrupted record is on file, or
-// the marker of a compose up/down that was never known to be over is in place
-// (found at start, or left by a command that ended in an error or ran inside an
-// open settle window). The marker covers an `up` that was cut with no record
-// left to say so. Once a later command clears the marker, this is false again
-// and `up` is followed by no extra read.
+// this process found, at its start, a marker naming a compose command and has
+// not cleared it since. The marker covers an `up` that was cut with no record
+// left to say so. Once a command of this process clears the marker this is
+// false again, and `up` is followed by no extra read.
+//
+// A compose command of THIS process that ended in an error is deliberately not
+// a trigger: the inline rollback that follows a failed `up` keeps exactly the
+// docker calls the lifecycle model was reviewed with. Nor is the "unknown"
+// marker of a first start: it names no command.
 //
 // Ask BEFORE running `up`: a successful `up` may clear the marker.
 func (s *Server) mayBeMidRecreate() bool {
-	return s.mutations.Pending() || s.recoveringFromInterruption()
+	return s.startMarkerLive.Load() || s.recoveringFromInterruption()
 }
 
 // recoveringFromInterruption reports whether the journal holds a record that a

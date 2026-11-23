@@ -55,3 +55,24 @@ func TestProxyContainerListed_OnlyUnderstoodOutputIsANo(t *testing.T) {
 		})
 	}
 }
+
+// TestProxyContainerListed_TruncatedOutputIsNotANo: output that hit the capture
+// cap may have lost the proxy's line.
+func TestProxyContainerListed_TruncatedOutputIsNotANo(t *testing.T) {
+	r, err := New(Options{ComposeProjectDir: t.TempDir(), ComposeFile: "docker-compose.yml", StageTimeout: 5 * time.Second,
+		ProxyRepo: "127.0.0.1:5000/culvert", DockerBinary: "/usr/bin/docker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.captureMax = 64 // white-box: a small cap, so a few lines exceed it
+	line := `{"Service":"clamav","State":"running","ID":"b"}` + "\n"
+	r.SetExecHooksForTest(func(cmd *exec.Cmd) error {
+		for i := 0; i < 20; i++ {
+			_, _ = cmd.Stdout.Write([]byte(line))
+		}
+		return nil
+	}, func(*exec.Cmd) error { return nil })
+	if listed, err := r.ProxyContainerListed(context.Background()); err == nil {
+		t.Fatalf("truncated output was answered (listed=%v) instead of refused", listed)
+	}
+}

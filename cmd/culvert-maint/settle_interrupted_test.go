@@ -175,9 +175,7 @@ func TestSettle_AlreadyCurrentIsNotReportedInsideTheWindow(t *testing.T) {
 func TestSettle_NoWaitAfterAnIdlePredecessor(t *testing.T) {
 	const settle = 30 * time.Second
 	r := newCrashRig(t)
-	r.setSettle(settle.String())
-	r.start() // first start on this state dir
-	r.kill()  // idle: nothing in flight
+	r.pastFirstUse(settle.String()) // then stopped idle: nothing in flight
 	began := time.Now()
 	r.start()
 
@@ -204,9 +202,7 @@ func TestSettle_NoWaitAfterAnIdlePredecessor(t *testing.T) {
 func TestSettle_EndsEarlyWhenTheProxyIsDown(t *testing.T) {
 	const settle = 60 * time.Second
 	r := newCrashRig(t)
-	r.setSettle(settle.String())
-	r.start() // first start on this state dir: would wait; get past it
-	r.kill()
+	r.pastFirstUse(settle.String())
 	r.start() // an idle predecessor: no wait, so the upgrade reaches `up` at once
 	r.crashAt("up_before:1")
 	if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
@@ -238,9 +234,7 @@ func TestSettle_EndsEarlyWhenTheProxyIsDown(t *testing.T) {
 func TestSettle_TheMarkerAloneOpensTheWindow(t *testing.T) {
 	const settle = 6 * time.Second
 	r := newCrashRig(t)
-	r.setSettle(settle.String())
-	r.start() // first start on this state dir: would wait; get past it
-	r.kill()
+	r.pastFirstUse(settle.String())
 	r.start()
 	crashed := r.crashAt("up_before:1")
 	if err := os.Remove(filepath.Join(r.state, "reconcile", crashed+".json")); err != nil {
@@ -260,5 +254,32 @@ func TestSettle_TheMarkerAloneOpensTheWindow(t *testing.T) {
 	}
 	if waited := time.Since(beforeStart); waited < settle {
 		t.Errorf("the rollback finished %v after the restart; it must not act before %v", waited, settle)
+	}
+}
+
+// TestSettle_FirstUseDoubtSurvivesARestart: the conservative first start is
+// not a one-off held in memory. A second start inside the window, with no
+// operation completed in between, must wait as well; an agent that wrote no
+// markers may have left a container stop behind that neither start can see.
+func TestSettle_FirstUseDoubtSurvivesARestart(t *testing.T) {
+	const settle = 6 * time.Second
+	r := newCrashRig(t)
+	r.setSettle(settle.String())
+	r.start() // first use
+	r.kill()
+	beforeStart := time.Now()
+	r.start() // second start, nothing cleared the doubt
+	r.clearCalls()
+
+	op := r.rollbackToA()
+	time.Sleep(time.Second)
+	if calls := r.tagOrUpCalls(); len(calls) != 0 {
+		t.Fatalf("the second start forgot the first-use doubt and acted inside the window: %v", calls)
+	}
+	if d := r.waitOp(op); d.State != "succeeded" {
+		t.Fatalf("rollback = %s(%s)", d.State, d.FailureReason)
+	}
+	if waited := time.Since(beforeStart); waited < settle {
+		t.Errorf("the rollback finished %v after the second start; it must not act before %v", waited, settle)
 	}
 }
