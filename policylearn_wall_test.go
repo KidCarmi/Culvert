@@ -167,7 +167,7 @@ func TestPolicyLearnWall_RequestPathOneWayTransport(t *testing.T) {
 		t.Error("proxy.go no longer emits the M2 observation — if deliberate, update this wall test with the design change")
 	}
 	// Every other enforcement/request-path file: zero learning references.
-	for _, file := range []string{"proxy_http.go", "proxy_tunnel.go", "proxy_tunnel_h2.go", "socks5.go", "policy.go", "policy_draft.go", "store.go"} {
+	for _, file := range []string{"proxy_http.go", "proxy_tunnel.go", "proxy_tunnel_h2.go", "socks5.go", "socks5_policy.go", "socks5_policy_enforce.go", "socks5_auth.go", "proxy_credential.go", "policy.go", "policy_draft.go", "store.go"} {
 		raw, err := os.ReadFile(filepath.Join(pkgSourceDir(), file))
 		if err != nil {
 			t.Fatalf("read %s: %v", file, err)

@@ -237,7 +237,7 @@ func TestSOCKS5RelayPrefixed_CountsEarlyBytes(t *testing.T) {
 	relayDone := make(chan struct{})
 	go func() {
 		defer close(relayDone)
-		socks5RelayPrefixed(clientB, destA, []byte("A"), "203.0.113.20", host)
+		socks5RelayPrefixed(clientB, destA, []byte("A"), ProxyIdentity{ClientIP: "203.0.113.20"}, nil, host)
 	}()
 	if _, err := clientA.Write([]byte("B")); err != nil {
 		t.Fatal(err)

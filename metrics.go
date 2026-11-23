@@ -1403,10 +1403,12 @@ culvert_socks5_posture_refused_total %d
 			socks5PosturePendingGauge(),
 			socks5PostureRefusedTotal(),
 		)
+		// SWG-901 stage 3: SOCKS5 USER/PASS refusals by reason (socks5_auth.go).
+		writeSOCKS5AuthMetrics(w)
 	}
-	// SWG-901 stage 2: SOCKS5 shadow-policy evidence. Emitted only in shadow
-	// mode (absent on a legacy node); see socks5_policy_shadow.go.
-	writeSOCKS5PolicyShadowMetrics(w)
+	// SWG-901: SOCKS5 Stage-2 policy evidence. Emitted only in shadow or enforce
+	// mode (absent on a legacy node); see socks5_policy.go.
+	writeSOCKS5PolicyMetrics(w)
 
 	// CHAOS-113: the scan sidecar listener. Emitted ONLY where the sidecar is
 	// configured, for the reason the SOCKS5 and cluster_ca gauges document:

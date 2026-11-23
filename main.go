@@ -1156,9 +1156,9 @@ func initSOCKS5(s *startupState) {
 	// than recomputed so the bound port is guaranteed to be the same value
 	// that was validated.
 	//
-	// SWG-901 stage 2: the Stage-2 policy mode is installed BEFORE the bind, so
+	// SWG-901: the Stage-2 policy mode is installed BEFORE the bind, so
 	// the first served connection already sees it. Startup-only by design
-	// (recorded GUI-parity deferral, socks5_policy_shadow.go).
+	// (recorded GUI-parity deferral, socks5_policy.go).
 	installSOCKS5PolicyMode(s.fc.Proxy.SOCKS5PolicyMode, s.socks5PortVal > 0)
 	if s.socks5PortVal > 0 {
 		// CHAOS-102: arm the pre-posture gate BEFORE the bind. startSOCKS5

@@ -184,8 +184,14 @@ func TestAuthEnabled_FreshGatewayUnchanged(t *testing.T) {
 }
 
 // TestAuthEnabled_AdminRosterUnchanged is the second negative control: a
-// normal roster with a present admin already required proxy authentication
-// and still verifies the admin credential exactly as before.
+// normal roster with a present admin already required proxy authentication.
+//
+// SWG-901 stage 3 (owner direction 2026-11-23) changed ONE assertion here on
+// purpose: SOCKS5 no longer accepts the admin-console credential. RFC 1929
+// resolves through the shared resolver's password-only channel, which never
+// consults the local admin pair, so on a gateway whose only account is the
+// admin every SOCKS5 credential — the admin's own included — is refused. The
+// method selection (USERPASS required, NO-AUTH refused) is unchanged.
 func TestAuthEnabled_AdminRosterUnchanged(t *testing.T) {
 	setupProxyTest(t)
 	c := loadRoster(t, adminRoster(t, RoleAdmin))
@@ -200,8 +206,8 @@ func TestAuthEnabled_AdminRosterUnchanged(t *testing.T) {
 	if m := socks5SelectedMethod(t, addr, 0x00); m != 0xFF {
 		t.Errorf("admin roster: SOCKS5 must refuse the no-auth offer (0xFF), got 0x%02x", m)
 	}
-	if st := socks5UserPassStatus(t, addr, "alice", "Sup3rSecret!x"); st != 0x00 {
-		t.Errorf("admin roster: the admin's own credential must authenticate SOCKS5, got status 0x%02x", st)
+	if st := socks5UserPassStatus(t, addr, "alice", "Sup3rSecret!x"); st == 0x00 {
+		t.Error("admin roster: the admin-console credential must NOT authenticate SOCKS5 (no administrative fallback)")
 	}
 	if st := socks5UserPassStatus(t, addr, "alice", "wrong-password"); st == 0x00 {
 		t.Error("admin roster: a wrong password must be refused")

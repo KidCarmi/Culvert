@@ -356,7 +356,7 @@ type AuthLogFields struct {
 	// X-User-Identity transport entirely; identity travels as typed values).
 	// Empty on rows with no auth context (pre-auth blocks like
 	// IP_BLOCKED/RATE_LIMITED, AUTH_FAIL where no backend authenticated the
-	// credentials, and SOCKS5's boolean auth) — empty means "unattributed",
+	// credentials) — empty means "unattributed",
 	// never "unauthenticated" (that is "unauth").
 	// Maps to LogEntry.AuthSource (omitempty ⇒ wire byte-identical when empty).
 	AuthSource string
@@ -1459,6 +1459,13 @@ func (c *Config) IdentityCacheEvictions() uint64 {
 // callers that know their peer MUST use this: the plain VerifyAuth passes the
 // empty key, which is valid but puts every such caller in one shared fairness
 // bucket where they can only throttle each other.
+//
+// No data-plane caller remains (SWG-901 stage 3): SOCKS5, its last caller,
+// now resolves credentials through resolvePresentedCredential, which must
+// never reach the local admin pair for SOCKS5. HTTP proxy Basic reaches the
+// same verifyAuthFrom through resolveAuthIdentityFrom. This bool form is kept
+// as the CHAOS-57 governor's direct test entry point; do not add a new
+// data-plane caller — use resolvePresentedCredential.
 func (c *Config) VerifyAuthFrom(client, user, pass string) bool {
 	return c.verifyAuthFrom(c.snapshotAuthBackend(), client, user, pass)
 }
@@ -2853,7 +2860,7 @@ func recordTunnelBytes(bytesSent, bytesRecv int64) {
 // double-count statTotal/topHosts. Byte counters are handled separately by
 // recordTunnelBytes so they are not tied to the log gate.
 // ruleID is the matched rule's stable ULID (rename-safe decision attribution,
-// §1) — empty when no policy rule is attributed (e.g. raw SOCKS5).
+// §1) — empty when no policy rule is attributed (e.g. a SOCKS5 tunnel outside enforce mode).
 func persistTunnelClose(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
 	persistTunnelCloseReason(ip, method, host, identity, ruleMatched, ruleID, bytesSent, bytesRecv, start, sslAction, "")
 }
@@ -2869,14 +2876,14 @@ func persistTunnelCloseReason(ip, method, host, identity, ruleMatched, ruleID st
 // persistTunnelCloseDec is persistTunnelCloseReason plus an optional ADR-0011
 // decryption-observability block on the feed entry. nil ⇒ no dec block (byte-identical).
 // authSource is the F5 categorical attribution from the resolved auth context
-// (ProxyIdentity.AuthSource); empty on paths with no auth context (SOCKS5).
+// (ProxyIdentity.AuthSource); empty on paths with no auth context.
 func persistTunnelCloseDec(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction, actionTaken string, dec *DecryptionBlock, authSource string) {
 	persistLogEntry(ip, method, host, "TUNNEL_CLOSED", ruleMatched, actionTaken, identity,
 		bytesSent, bytesRecv, time.Since(start).Milliseconds(), sslAction, "", AuthLogFields{RuleID: ruleID, Dec: dec, AuthSource: authSource})
 }
 
 // recordTunnelClose accounts a raw tunnel's bytes AND writes its feed entry
-// unconditionally. Used by the always-logged paths (SOCKS5) and tests.
+// unconditionally. Used by tests; SOCKS5 tunnels close through recordTunnelCloseGated.
 func recordTunnelClose(ip, method, host, identity, ruleMatched, ruleID string, bytesSent, bytesRecv int64, start time.Time, sslAction string) {
 	recordTunnelBytes(bytesSent, bytesRecv)
 	persistTunnelClose(ip, method, host, identity, ruleMatched, ruleID, bytesSent, bytesRecv, start, sslAction)

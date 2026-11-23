@@ -328,15 +328,20 @@ func TestSOCKS5_EveryDestinationLogSiteSanitises(t *testing.T) {
 // handleSOCKS5 by PERF-SOCKS5-HANGUP-1), so it is walled exactly like the
 // handler rather than trusted as a registered sink.
 //
-// SWG-901 stage 2 added the shadow-policy hook, which receives the raw
-// destination and logs it on the POLICY_WOULD_BLOCK line: socks5ShadowPolicy
-// and logSOCKS5WouldBlock live in socks5_policy_shadow.go and are walled the
-// same way, which is why the walls parse socks5WalledFiles rather than
-// socks5.go alone.
-var socks5WalledFuncs = []string{"handleSOCKS5", "socks5GuardAndDial", "socks5ShadowPolicy", "logSOCKS5WouldBlock"}
+// SWG-901 added the Stage-2 policy hook and its shadow and enforce arms, and
+// stage 3 the threat-feed gate; each receives the raw destination and logs it
+// (POLICY_WOULD_BLOCK, THREAT_BLOCKED, the enforce POLICY_* refusals). They
+// live in socks5.go, socks5_policy.go and socks5_policy_enforce.go and are
+// walled the same way, which is why the walls parse socks5WalledFiles rather
+// than socks5.go alone.
+var socks5WalledFuncs = []string{
+	"handleSOCKS5", "socks5GuardAndDial", "socks5DestinationRejected", "socks5DrainFenced", "socks5ContentBlocked",
+	"socks5ApplyPolicy", "socks5ShadowPolicy", "socks5ShadowEvaluate", "logSOCKS5WouldBlock",
+	"socks5EnforcePolicy", "refuseSOCKS5ByPolicy",
+}
 
 // socks5WalledFiles are the sources socks5WalledFuncs are looked up in.
-var socks5WalledFiles = []string{"socks5.go", "socks5_policy_shadow.go"}
+var socks5WalledFiles = []string{"socks5.go", "socks5_policy.go", "socks5_policy_enforce.go"}
 
 // parseHandleSOCKS5 returns the ASTs of socks5WalledFuncs, in that order.
 func parseHandleSOCKS5(t *testing.T) (*token.FileSet, []*ast.FuncDecl) {
@@ -432,18 +437,31 @@ var destinationSinks = map[string]string{
 	"pluginDecision":       "plugin.Decide sanitises the destination before obs.Printf (SEC-SOCKS5-LOG-1 round 2)",
 	"isPrivateHostBounded": "security.go wrapper over internal/ssrf.PrivateHostBudget; neither contains any logging — the destination reaches only the resolver and the returned error, which is sanitised at the log site",
 	"recordRequest":        "structured JSONL — the encoder escapes control bytes",
-	"socks5Relay":          "byte relay; its only destination sink is recordTunnelClose — structured JSONL",
-	"socks5RelayPrefixed":  "socks5Relay's body (socks5Relay delegates to it); its only destination sink is recordTunnelClose — structured JSONL",
+	"recordRequestAuth":    "recordRequest plus the server-resolved auth block; structured JSONL — the encoder escapes control bytes",
+	"socks5Relay":          "byte relay; its only destination sink is recordTunnelCloseGated — structured JSONL",
+	"socks5RelayPrefixed":  "socks5Relay's body (socks5Relay delegates to it); its only destination sink is recordTunnelCloseGated — structured JSONL",
 	"socks5GuardAndDial":   "walled itself: it is in socks5WalledFuncs, so both walls inspect its log sites and its own destination sinks",
 	"JoinHostPort":         "net; string construction only",
 	"DialContext":          "net.Dialer; the error it returns is sanitised at the log site",
 	"sanitizeLog":          "the sanitiser itself",
-	// SWG-901 stage 2 (shadow policy). The hook and its log line are walled
-	// themselves; the evaluator is the Stage-2 matcher, which logs nothing.
-	"socks5ShadowPolicy":  "walled itself: it is in socks5WalledFuncs, so both walls inspect its log sites and its own destination sinks",
-	"logSOCKS5WouldBlock": "walled itself: it is in socks5WalledFuncs; every argument of its log lines is clientIP or sanitised",
-	"socks5ShadowEvaluate": "PolicyStore.matchAccessRule + classifySOCKS5Shadow: the pure Stage-2 core (ADR-0026) and a label mapping; neither logs. " +
-		"The only counter the core can touch is the geo-unresolved total (a count, no destination bytes)",
+	// SWG-901 (Stage-2 policy, threat feed). The hooks and their log lines are
+	// walled themselves; the evaluator is the Stage-2 matcher, which logs nothing.
+	"socks5ContentBlocked":      "walled itself: it is in socks5WalledFuncs, so both walls inspect its log sites and its own destination sinks",
+	"socks5ApplyPolicy":         "walled itself: it is in socks5WalledFuncs",
+	"socks5DestinationRejected": "walled itself: it is in socks5WalledFuncs (the RISK-013/CHAOS-69 gates, extracted from handleSOCKS5)",
+	"socks5DrainFenced":         "walled itself: it is in socks5WalledFuncs (the CHAOS-57 fence, extracted from handleSOCKS5)",
+	"socks5ShadowPolicy":        "walled itself: it is in socks5WalledFuncs, so both walls inspect its log sites and its own destination sinks",
+	"logSOCKS5WouldBlock":       "walled itself: it is in socks5WalledFuncs; every argument of its log lines is clientIP or sanitised",
+	"socks5ShadowEvaluate":      "walled itself: it is in socks5WalledFuncs",
+	"socks5EnforcePolicy":       "walled itself: it is in socks5WalledFuncs",
+	"refuseSOCKS5ByPolicy":      "walled itself: it is in socks5WalledFuncs; every argument of its log lines is clientIP or sanitised",
+	"socks5PolicyHost":          "a bracket strip; returns a substring, logs nothing",
+	"CheckDomain":               "secscan.Scanner.CheckDomain → threatfeed.Feed.CheckDomain: a map lookup on the normalised name; logs nothing, and its Result carries only the feed's source/reason, never the destination",
+	"matchAccessRule":           "PolicyStore.matchAccessRule: the pure Stage-2 core (ADR-0026); logs nothing. The only counter it can touch is the geo-unresolved total (a count, no destination bytes)",
+	"Evaluate":                  "PolicyStore.Evaluate: matchAccessRule plus the matched rule's hit counter and a PolicyMatch copy; logs nothing",
+	"resolveSSLDecision":        "the CONNECT SSL decision; its two log lines (SSL_BYPASS_PATTERN, SSL_AUTOEXCLUDE_BYPASS) print the host through sanitizeLog with %q, and the exclusion cache it reads stores nothing",
+	"socks5RuleWouldInspect":    "sslBypass.Matches: a pattern match returning a bool; logs nothing",
+	"recordSOCKS5Established":   "recordRequestAuth or recordStats only: structured JSONL, and recordStats' alert/top-host sinks take the redactDestinationHost form; logs nothing",
 	// CHAOS-69 destination-authority bound. All three receive the destination
 	// only to MEASURE it, which is the whole design decision behind the bound's
 	// log line: the LENGTH is what an operator needs to tell a probe from a
@@ -470,7 +488,10 @@ func TestSOCKS5_EveryDestinationSinkIsAudited(t *testing.T) {
 	// wall flags unregistered CALLEES, never an unwatched VALUE, so a new
 	// client-derived local is invisible to it by construction. Whoever adds the
 	// next one must add it here too.
-	raw := map[string]bool{"host": true, "target": true, "normSOCKS5Host": true}
+	// policyHost (SWG-901) is the bracket-stripped destination the Stage-2
+	// evaluator, the SSL decision and the threat feed receive: a substring of
+	// host, so equally raw.
+	raw := map[string]bool{"host": true, "target": true, "normSOCKS5Host": true, "policyHost": true}
 
 	seen := 0
 	for _, fn := range fns {
@@ -518,6 +539,10 @@ func TestSOCKS5_DestinationSinkRegistryHasNoStaleEntries(t *testing.T) {
 		"IsBlocked":    true, // method on *blocklist.Store
 		"JoinHostPort": true, // net
 		"DialContext":  true, // method on *net.Dialer
+		// SWG-901: methods, so not package-level declarations.
+		"CheckDomain":     true, // method on *secscan.Scanner
+		"Evaluate":        true, // method on *PolicyStore
+		"matchAccessRule": true, // method on *PolicyStore
 	}
 
 	declared := packageLevelDeclarations(t)

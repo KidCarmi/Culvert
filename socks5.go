@@ -337,80 +337,6 @@ func parseSOCKS5Request(r io.Reader) (cmd byte, host string, port uint16, atyp b
 	return cmd, host, binary.BigEndian.Uint16(portBuf), atyp, nil
 }
 
-// socks5Negotiate performs the SOCKS5 greeting (VER NMETHODS METHODS) and, when
-// auth is enabled, the RFC 1929 username/password sub-negotiation, writing the
-// method-selection and auth-status replies. It returns true iff the client
-// authenticated (or auth is disabled) and may proceed to the request phase.
-// Every failure path (bad greeting, no acceptable method, short read, auth
-// failure) is fully handled here — reply + stats + audit — and returns false so
-// the caller simply closes the connection. Extracted from handleSOCKS5 to keep
-// that function's cognitive complexity under the linter threshold; behavior is a
-// strict relocation of the prior inline greeting/auth block.
-func socks5Negotiate(conn net.Conn, clientIP string) bool {
-	// Greeting: VER(1) NMETHODS(1) METHODS(N)
-	hdr := make([]byte, 2)
-	if _, err := io.ReadFull(conn, hdr); err != nil || hdr[0] != 0x05 {
-		return false
-	}
-	methods := make([]byte, hdr[1])
-	if _, err := io.ReadFull(conn, methods); err != nil {
-		return false
-	}
-
-	if !cfg.AuthEnabled() {
-		conn.Write([]byte{0x05, 0x00}) //nolint:errcheck // best-effort no-auth method selection; a write error surfaces on the next read
-		return true
-	}
-
-	// Auth required: the client must offer USER/PASS (0x02).
-	hasUserPass := false
-	for _, m := range methods {
-		if m == 0x02 {
-			hasUserPass = true
-			break
-		}
-	}
-	if !hasUserPass {
-		conn.Write([]byte{0x05, 0xFF}) //nolint:errcheck // best-effort "no acceptable method" reply before close
-		return false
-	}
-	conn.Write([]byte{0x05, 0x02}) //nolint:errcheck // best-effort USER/PASS method selection; error surfaces on the next read
-
-	// RFC 1929 sub-negotiation: VER(1) ULEN(1) UNAME PLEN(1) PASSWD
-	subHdr := make([]byte, 2)
-	if _, err := io.ReadFull(conn, subHdr); err != nil {
-		return false
-	}
-	uname := make([]byte, subHdr[1])
-	if _, err := io.ReadFull(conn, uname); err != nil {
-		return false
-	}
-	plenBuf := make([]byte, 1)
-	if _, err := io.ReadFull(conn, plenBuf); err != nil {
-		return false
-	}
-	passwd := make([]byte, plenBuf[0])
-	if _, err := io.ReadFull(conn, passwd); err != nil {
-		return false
-	}
-	// CHAOS-57: charge the bcrypt comparison to this peer's fairness key.
-	// SOCKS5 carries no forwarding header, so the raw peer address IS the
-	// client — there is nothing here for realClientIP to resolve.
-	authOK := cfg.VerifyAuthFrom(clientFairnessKey(clientIP), string(uname), string(passwd))
-	// B5: Zero credentials from memory immediately after auth check.
-	clear(uname)
-	clear(passwd)
-	if !authOK {
-		conn.Write([]byte{0x01, 0x01}) //nolint:errcheck // best-effort auth-failure reply before close
-		atomic.AddInt64(&statAuthFail, 1)
-		recordRequest(clientIP, "SOCKS5", "", "AUTH_FAIL", "", "", "", "")
-		logger.Printf("SOCKS5 AUTH_FAIL %s", clientIP)
-		return false
-	}
-	conn.Write([]byte{0x01, 0x00}) //nolint:errcheck // best-effort auth-success reply; error surfaces on the next read
-	return true
-}
-
 // socks5SourceDenied applies the two source-address admission gates — the IP
 // filter, then the rate limiter — and reports whether the connection was
 // refused. Each records the request-history action string it has always used
@@ -481,7 +407,8 @@ func handleSOCKS5(conn net.Conn) {
 	}
 
 	// ── Greeting + auth negotiation ─────────────────────────────────────────
-	if !socks5Negotiate(conn, clientIP) {
+	who, authed := socks5Negotiate(conn, clientIP)
+	if !authed {
 		return
 	}
 
@@ -503,25 +430,79 @@ func handleSOCKS5(conn net.Conn) {
 		return
 	}
 
-	// ── Destination-host bound (CHAOS-69, fail-closed) ──────────────────────
-	// This path needs NO raw pre-cap: RFC 1928 §4 length-prefixes DOMAINNAME with
-	// ONE byte, so the protocol structurally caps the destination at 255 — already
-	// inside maxRawDestAuthorityBytes (1024), which is why a raw gate here would be
-	// permanently dead code. An earlier version of this change added one anyway and
-	// its test passed vacuously; see the note in proxy_host_bounds.go. The bound
-	// that IS reachable here is the CANONICAL one, applied just below once the host
-	// has been normalized — a 255-byte ASCII name measures 255 and is refused, while
-	// a 255-byte UTF-8 IDN normalizes to ~150 and is served.
-	// ── Host canonicalization gate (RISK-013, fail-closed) ──────────────────
-	// Mirror of the handleRequest gate: a destination that cannot be
-	// IDNA-normalized would reach the blocklist/plugin matchers un-normalized.
+	// ── Destination canonicalization + bound (RISK-013, CHAOS-69) ───────────
+	if socks5DestinationRejected(conn, who, host) {
+		return
+	}
+
+	// ── Pre-policy content gates: blocklist → threat feed → plugin ───────────
+	// The CONNECT order (preDispatchBlocked), in every policy mode.
+	if socks5ContentBlocked(conn, who, host) {
+		return
+	}
+
+	// ── Stage-2 policy (SWG-901) ─────────────────────────────────────────────
+	// After the pre-dispatch blocks, before the SSRF guard and dial — the
+	// CONNECT order. legacy: no evaluation; shadow: evaluate and record, never
+	// refuse; enforce: the verdict decides. See socks5_policy.go.
+	grant, allowed := socks5ApplyPolicy(conn, who, host, atyp)
+	if !allowed {
+		return
+	}
+
+	// ── SSRF guard + dial, cancelled if the client hangs up ──────────────────
+	destConn, early, ok := socks5GuardAndDial(conn, who, host, target, negotiationDeadline)
+	if !ok {
+		return
+	}
+	defer destConn.Close()
+
+	// CHAOS-57: refuse to MINT a new long-lived tunnel on a node that is already
+	// past the point where the drain can account for it. Checked here — after the
+	// dial, immediately before the success reply — so the check-to-register window
+	// is microseconds instead of spanning the 30s negotiation deadline and the 10s
+	// dial above. See socks5DrainFenced.
+	if socks5DrainFenced(conn, who, host) {
+		return
+	}
+
+	socks5Reply(conn, 0x00)       // success
+	conn.SetDeadline(time.Time{}) //nolint:errcheck // remove deadline for streaming
+
+	atomic.AddInt64(&statTotal, 1)
+	recordSOCKS5Established(who, host, grant)
+	logger.Printf("SOCKS5 OK %s -> %q", clientIP, sanitizeLog(target))
+
+	socks5RelayPrefixed(conn, destConn, early, who, grant.match, host)
+}
+
+// socks5DestinationRejected applies the destination canonicalization and
+// length gates and reports whether it refused the connection (reply 0x02).
+// Extracted from handleSOCKS5 (SWG-901) to keep it within funlen; the gates,
+// their order and their accounting are unchanged.
+//
+// Destination-host bound (CHAOS-69, fail-closed): this path needs NO raw
+// pre-cap: RFC 1928 §4 length-prefixes DOMAINNAME with ONE byte, so the
+// protocol structurally caps the destination at 255 — already inside
+// maxRawDestAuthorityBytes (1024), which is why a raw gate here would be
+// permanently dead code. An earlier version of this change added one anyway
+// and its test passed vacuously; see the note in proxy_host_bounds.go. The
+// bound that IS reachable here is the CANONICAL one, applied once the host has
+// been normalized — a 255-byte ASCII name measures 255 and is refused, while a
+// 255-byte UTF-8 IDN normalizes to ~150 and is served.
+//
+// Host canonicalization gate (RISK-013, fail-closed): mirror of the
+// handleRequest gate — a destination that cannot be IDNA-normalized would reach
+// the blocklist/plugin matchers un-normalized.
+func socks5DestinationRejected(conn net.Conn, who ProxyIdentity, host string) bool {
+	clientIP := who.ClientIP
 	normSOCKS5Host, ok := normalizeHostStrict(host)
 	if !ok {
 		atomic.AddInt64(&statBlocked, 1)
 		socks5Reply(conn, 0x02)
-		recordRequest(clientIP, "SOCKS5", host, "INVALID_HOST", "idna", "", "", "")
+		recordRequestAuth(clientIP, "SOCKS5", host, "INVALID_HOST", "idna", "", who.Identity, socks5LogFields(who))
 		logger.Printf("SOCKS5 INVALID_HOST %s -> %q {action=block source=idna}", clientIP, sanitizeLog(host))
-		return
+		return true
 	}
 	// CHAOS-69 canonical tier: refuse a destination that cannot be a DNS name.
 	// Nothing is recorded with the destination in it — the counter and the
@@ -533,66 +514,91 @@ func handleSOCKS5(conn net.Conn) {
 		// that acts on the refusal.
 		noteOversizeHostRejection("SOCKS5", clientIP, len(normSOCKS5Host), "canonical")
 		socks5Reply(conn, 0x02)
-		return
+		return true
 	}
+	return false
+}
 
-	// ── Blocklist check ───────────────────────────────────────────────────────
+// socks5DrainFenced refuses a tunnel the drain could no longer account for
+// (CHAOS-57) and reports whether it did. Without it, a session accepted just
+// before Stop could establish after the drain, the force-close backstop AND the
+// flush hooks had all run, and be reset at process exit with no TUNNEL_CLOSED
+// entry: PX-8 surviving inside its own fix. Reply 0x01 (general SOCKS server
+// failure) is protocol-correct and is what lets the client retry elsewhere
+// instead of being handed a success and a tunnel that dies seconds later.
+func socks5DrainFenced(conn net.Conn, who ProxyIdentity, host string) bool {
+	if !tunnelEstablishmentFenced() {
+		return false
+	}
+	clientIP := who.ClientIP
+	noteTunnelFenceRefusal()
+	socks5Reply(conn, 0x01)
+	recordRequestAuth(clientIP, "SOCKS5", host, "SHUTTING_DOWN", "", "", who.Identity, socks5LogFields(who))
+	logger.Printf("SOCKS5 SHUTTING_DOWN %s -> %s (refused: node is draining)", clientIP, sanitizeLog(host))
+	return true
+}
+
+// socks5LogFields is the request-log auth block for a SOCKS5 principal: the
+// server-resolved auth source (F5), never anything client-supplied.
+func socks5LogFields(who ProxyIdentity) AuthLogFields {
+	return AuthLogFields{AuthSource: who.AuthSource}
+}
+
+// socks5ContentBlocked applies the pre-policy content gates in the CONNECT
+// order (preDispatchBlocked): legacy blocklist, threat-intelligence feed,
+// plugin chain. It reports whether it refused the connection, having replied
+// 0x02 (connection not allowed by ruleset) and recorded the request. All three
+// apply in every SOCKS5 policy mode: they are security defaults, not Stage-2
+// policy.
+//
+// Threat feed (SWG-901 stage 3, decision D7): the same domain check, the same
+// THREAT_BLOCKED status/source/reason, statBlocked and threat-feed counters as
+// a CONNECT. The feed is keyed by bare host, so an IPv6 destination is passed
+// without the SOCKS5 brackets — the form CONNECT's SplitHostPort produces.
+func socks5ContentBlocked(conn net.Conn, who ProxyIdentity, host string) bool {
+	clientIP := who.ClientIP
 	if bl.IsBlocked(host) {
 		atomic.AddInt64(&statBlocked, 1)
 		socks5Reply(conn, 0x02)
-		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "", "")
+		recordRequestAuth(clientIP, "SOCKS5", host, "BLOCKED", "", "", who.Identity, socks5LogFields(who))
 		logger.Printf("SOCKS5 BLOCKED %s -> %q", clientIP, sanitizeLog(host))
-		return
+		return true
 	}
-
-	// ── Plugin check ──────────────────────────────────────────────────────────
+	if globalSecScanner.Enabled() {
+		if result := globalSecScanner.CheckDomain(socks5PolicyHost(host)); result != nil {
+			atomic.AddInt64(&statBlocked, 1)
+			socks5Reply(conn, 0x02)
+			recordRequestAuth(clientIP, "SOCKS5", host, "THREAT_BLOCKED", result.Source, result.Reason, who.Identity, socks5LogFields(who))
+			logger.Printf("SOCKS5 THREAT_BLOCKED %s -> %q (%q)", clientIP, sanitizeLog(host), sanitizeLog(result.Reason))
+			return true
+		}
+	}
 	if pluginDecision(clientIP, "SOCKS5", host) == DecisionBlock {
 		atomic.AddInt64(&statBlocked, 1)
 		socks5Reply(conn, 0x02)
-		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "", "")
-		return
+		recordRequestAuth(clientIP, "SOCKS5", host, "BLOCKED", "", "", who.Identity, socks5LogFields(who))
+		return true
 	}
+	return false
+}
 
-	// ── Stage-2 policy: SHADOW only (SWG-901 stage 2) ───────────────────────
-	// The position enforcement will take (after the pre-dispatch blocks, before
-	// the SSRF guard and dial — the CONNECT order). It returns nothing, so it
-	// cannot change this connection's outcome; in legacy mode (the default) it
-	// is a no-op. See socks5_policy_shadow.go.
-	socks5ShadowPolicy(clientIP, host, atyp)
-
-	// ── SSRF guard + dial, cancelled if the client hangs up ──────────────────
-	destConn, early, ok := socks5GuardAndDial(conn, clientIP, host, target, negotiationDeadline)
-	if !ok {
-		return
+// recordSOCKS5Established writes the request-log entry for an established
+// tunnel. Legacy and shadow carry no rule; an enforce default-allow records
+// "default-allow"/"Allow" and an enforce Allow rule is attributed as the
+// CONNECT allow branch of applyPolicyDecision does — rule name, Allow, rule ID
+// and the per-rule "log traffic" gate (off: counted for stats, no feed entry).
+// The per-rule "log full URL" has nothing to add for an opaque SOCKS5 tunnel:
+// there is no path, and the destination is already the entry's host.
+func recordSOCKS5Established(who ProxyIdentity, host string, g socks5Grant) {
+	fields := socks5LogFields(who)
+	if g.match != nil && g.match.Rule != nil {
+		fields.RuleID = g.match.Rule.ID
+		if !ruleLogsTraffic(g.match.Rule) {
+			recordStats(who.ClientIP, host, "OK", g.ruleMatched, g.actionTaken)
+			return
+		}
 	}
-	defer destConn.Close()
-
-	// CHAOS-57: refuse to MINT a new long-lived tunnel on a node that is already
-	// past the point where the drain can account for it. Checked here — after the
-	// dial, immediately before the success reply — so the check-to-register window
-	// is microseconds instead of spanning the 30s negotiation deadline and the 10s
-	// dial above. Without it, a session accepted just before Stop could establish
-	// after the drain, the force-close backstop AND the flush hooks had all run, and
-	// be reset at process exit with no TUNNEL_CLOSED entry: PX-8 surviving inside
-	// its own fix. Reply 0x01 (general SOCKS server failure) is protocol-correct and
-	// is what lets the client retry elsewhere instead of being handed a success and
-	// a tunnel that dies seconds later.
-	if tunnelEstablishmentFenced() {
-		noteTunnelFenceRefusal()
-		socks5Reply(conn, 0x01)
-		recordRequest(clientIP, "SOCKS5", host, "SHUTTING_DOWN", "", "", "", "")
-		logger.Printf("SOCKS5 SHUTTING_DOWN %s -> %s (refused: node is draining)", clientIP, sanitizeLog(host))
-		return
-	}
-
-	socks5Reply(conn, 0x00)       // success
-	conn.SetDeadline(time.Time{}) //nolint:errcheck // remove deadline for streaming
-
-	atomic.AddInt64(&statTotal, 1)
-	recordRequest(clientIP, "SOCKS5", host, "OK", "", "", "", "")
-	logger.Printf("SOCKS5 OK %s -> %q", clientIP, sanitizeLog(target))
-
-	socks5RelayPrefixed(conn, destConn, early, clientIP, host)
+	recordRequestAuth(who.ClientIP, "SOCKS5", host, "OK", g.ruleMatched, g.actionTaken, who.Identity, fields)
 }
 
 // socks5GuardAndDial runs the pre-flight SSRF guard and the upstream dial under
@@ -607,7 +613,8 @@ func handleSOCKS5(conn net.Conn) {
 // The only new outcome is a client that left mid-check — it is logged, not
 // recorded as an SSRF BLOCKED, because nothing was decided about the
 // destination (the same reason ssrf.ErrLookupBudget is not ErrBlocked).
-func socks5GuardAndDial(conn net.Conn, clientIP, host, target string, readDeadline time.Time) (net.Conn, []byte, bool) {
+func socks5GuardAndDial(conn net.Conn, who ProxyIdentity, host, target string, readDeadline time.Time) (net.Conn, []byte, bool) {
+	clientIP := who.ClientIP
 	ctx, watch := watchSOCKS5Hangup(conn, readDeadline)
 
 	// ── SSRF guard: block private/internal destinations ───────────────────────
@@ -627,7 +634,7 @@ func socks5GuardAndDial(conn net.Conn, clientIP, host, target string, readDeadli
 		// The error embeds the destination, so it carries the same client-chosen
 		// bytes the target does and is sanitised for the same reason.
 		logger.Printf("SOCKS5 SSRF block %s -> %q: %q", clientIP, sanitizeLog(target), sanitizeLog(err.Error()))
-		recordRequest(clientIP, "SOCKS5", host, "BLOCKED", "", "", "", "")
+		recordRequestAuth(clientIP, "SOCKS5", host, "BLOCKED", "", "", who.Identity, socks5LogFields(who))
 		return nil, nil, false
 	}
 
@@ -656,13 +663,16 @@ func socks5GuardAndDial(conn net.Conn, clientIP, host, target string, readDeadli
 // entry (byte counts + lifetime); log-only — the OK request-log entry already
 // ran the stats fan-out for this connection.
 func socks5Relay(client, dest net.Conn, clientIP, host string) {
-	socks5RelayPrefixed(client, dest, nil, clientIP, host)
+	socks5RelayPrefixed(client, dest, nil, ProxyIdentity{ClientIP: clientIP}, nil, host)
 }
 
 // socks5RelayPrefixed is socks5Relay that first delivers early — bytes the
 // client sent during the connect phase, captured by socks5HangupWatch — to the
-// destination, counting them toward the upstream byte total.
-func socks5RelayPrefixed(client, dest net.Conn, early []byte, clientIP, host string) {
+// destination, counting them toward the upstream byte total. who and match
+// attribute the TUNNEL_CLOSED entry (identity, auth source; the enforce Allow
+// rule, whose "log traffic" gate applies as for a CONNECT tunnel — the byte
+// totals are always counted). match is nil outside enforce, which always logs.
+func socks5RelayPrefixed(client, dest net.Conn, early []byte, who ProxyIdentity, match *PolicyMatch, host string) {
 	// CHAOS-57: SOCKS5 sessions were the drain's largest blind spot. `Stop` waits
 	// only for the ACCEPT LOOP — every session runs in a detached
 	// `go handleSOCKS5(conn)` — so nothing in the shutdown sequence waited for or
@@ -696,7 +706,7 @@ func socks5RelayPrefixed(client, dest net.Conn, early []byte, clientIP, host str
 		n, err := dest.Write(early)
 		toDest += int64(n)
 		if err != nil {
-			recordTunnelClose(clientIP, "SOCKS5", host, "", "", "", toDest, toClient, start, "")
+			recordTunnelCloseGated(match, who, "SOCKS5", host, toDest, toClient, start, "")
 			return
 		}
 	}
@@ -712,7 +722,7 @@ func socks5RelayPrefixed(client, dest net.Conn, early []byte, clientIP, host str
 	}
 	<-done
 
-	recordTunnelClose(clientIP, "SOCKS5", host, "", "", "", toDest, toClient, start, "")
+	recordTunnelCloseGated(match, who, "SOCKS5", host, toDest, toClient, start, "")
 }
 
 // socks5Reply sends a minimal SOCKS5 reply (IPv4 bind address 0.0.0.0:0).

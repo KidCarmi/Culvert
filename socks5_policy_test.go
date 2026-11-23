@@ -69,21 +69,39 @@ func installPolicyForTest(t *testing.T, rules []PolicyRule, defaultAction string
 	setDefaultPolicyAction(defaultAction)
 }
 
-// shadowCounters is a point-in-time copy of the evidence counters, for deltas.
+// Test-side verdict labels (the shadow metric's verdict label values).
+const (
+	socks5VerdictAllow      = "allow"
+	socks5VerdictWouldBlock = "would_block"
+)
+
+// verdictLabel renders a verdict as the shadow metric labels it.
+func verdictLabel(v socks5Verdict) string {
+	if v.refuse {
+		return socks5VerdictWouldBlock
+	}
+	return socks5VerdictAllow
+}
+
+// shadowCounters is a point-in-time copy of the evidence counters, for deltas:
+// decisions is the shadow slice and enforce the enforce slice, each indexed
+// [refused][reason] (reason: rule, default, inspection_unsupported).
 type shadowCounters struct {
-	decisions [2][2]int64
+	decisions [2][3]int64
+	enforce   [2][3]int64
 	atyp      [3]int64
 }
 
 func readShadowCounters() shadowCounters {
 	var c shadowCounters
-	for v := range socks5ShadowDecisions {
-		for r := range socks5ShadowDecisions[v] {
-			c.decisions[v][r] = socks5ShadowDecisions[v][r].Load()
+	for v := range socks5PolicyDecisions[0] {
+		for r := range socks5PolicyDecisions[0][v] {
+			c.decisions[v][r] = socks5PolicyDecisions[0][v][r].Load()
+			c.enforce[v][r] = socks5PolicyDecisions[1][v][r].Load()
 		}
 	}
-	for i := range socks5ShadowATYP {
-		c.atyp[i] = socks5ShadowATYP[i].Load()
+	for i := range socks5PolicyATYP {
+		c.atyp[i] = socks5PolicyATYP[i].Load()
 	}
 	return c
 }
@@ -93,6 +111,7 @@ func (c shadowCounters) minus(o shadowCounters) shadowCounters {
 	for v := range c.decisions {
 		for r := range c.decisions[v] {
 			d.decisions[v][r] = c.decisions[v][r] - o.decisions[v][r]
+			d.enforce[v][r] = c.enforce[v][r] - o.enforce[v][r]
 		}
 	}
 	for i := range c.atyp {
@@ -102,13 +121,10 @@ func (c shadowCounters) minus(o shadowCounters) shadowCounters {
 }
 
 func decisionIndex(verdict, reason string) (v, r int) {
-	if verdict == socks5VerdictWouldBlock {
+	if verdict == socks5VerdictWouldBlock || verdict == "block" {
 		v = 1
 	}
-	if reason == socks5ReasonDefault {
-		r = 1
-	}
-	return v, r
+	return v, socks5ReasonIndex(reason)
 }
 
 // startEchoServerForTest serves an echo on 127.0.0.1 and returns its port.
@@ -440,13 +456,13 @@ func connectPathVerdict(t *testing.T, clientIP, host string) string {
 
 // shadowMismatches evaluates the corpus under every default action and returns
 // the rows where shadow disagrees with CONNECT, plus the verdict tally.
-func shadowMismatches(t *testing.T, shadow func(clientIP, host string) socks5ShadowResult) (mismatches []string, allow, block int) {
+func shadowMismatches(t *testing.T, shadow func(clientIP, host string) socks5Verdict) (mismatches []string, allow, block int) {
 	t.Helper()
 	for _, def := range []string{"deny", "allow"} {
 		setDefaultPolicyAction(def)
 		for _, c := range differentialCorpus {
 			want := connectPathVerdict(t, c.clientIP, c.connectHost)
-			got := shadow(c.clientIP, c.socksHost).verdict
+			got := verdictLabel(shadow(c.clientIP, c.socksHost))
 			if got != want {
 				mismatches = append(mismatches, def+" "+c.clientIP+" "+c.socksHost+": shadow="+got+" connect="+want)
 			}
@@ -458,6 +474,12 @@ func shadowMismatches(t *testing.T, shadow func(clientIP, host string) socks5Sha
 		}
 	}
 	return mismatches, allow, block
+}
+
+// unauthShadow is the shadow evaluation of a NO-AUTH client, the principal the
+// CONNECT side of this differential (connectPathVerdict) evaluates as.
+func unauthShadow(clientIP, host string) socks5Verdict {
+	return socks5ShadowEvaluate(ProxyIdentity{ClientIP: clientIP, AuthSource: socks5UnauthSource}, host)
 }
 
 func setupDifferentialPolicy(t *testing.T) {
@@ -477,7 +499,7 @@ func setupDifferentialPolicy(t *testing.T) {
 // CONNECT path actually dispatches for the same client, host and rulebase.
 func TestSOCKS5Shadow_VerdictEqualsCONNECTVerdict(t *testing.T) {
 	setupDifferentialPolicy(t)
-	mismatches, allow, block := shadowMismatches(t, socks5ShadowEvaluate)
+	mismatches, allow, block := shadowMismatches(t, unauthShadow)
 	for _, m := range mismatches {
 		t.Errorf("shadow/CONNECT divergence: %s", m)
 	}
@@ -494,7 +516,7 @@ func TestSOCKS5Shadow_VerdictEqualsCONNECTVerdict(t *testing.T) {
 // nothing about which matcher shadow uses.
 func TestSOCKS5Shadow_DifferentialCatchesADifferentMatcher(t *testing.T) {
 	setupDifferentialPolicy(t)
-	naive := func(_ string, host string) socks5ShadowResult {
+	naive := func(_ string, host string) socks5Verdict {
 		var hit *PolicyRule
 		rules := policyStore.List()
 		for i := range rules {
@@ -503,7 +525,7 @@ func TestSOCKS5Shadow_DifferentialCatchesADifferentMatcher(t *testing.T) {
 				break
 			}
 		}
-		return classifySOCKS5Shadow(hit, defaultPolicyAction() == "allow")
+		return classifySOCKS5Policy(hit, defaultPolicyAction() == "allow")
 	}
 	mismatches, _, _ := shadowMismatches(t, naive)
 	if len(mismatches) == 0 {
@@ -652,29 +674,48 @@ func scrapeMetricsNoToken(t *testing.T) string {
 // mode through the real /metrics handler, with exactly the bounded label set,
 // and carrying the counter values.
 func TestSOCKS5Shadow_MetricsExposition(t *testing.T) {
-	useSOCKS5PolicyModeForTest(t, socks5PolicyShadow)
-	body := scrapeMetricsNoToken(t)
-	c := readShadowCounters()
-	for _, line := range []string{
-		"# TYPE culvert_socks5_policy_decisions_total counter",
-		`culvert_socks5_policy_decisions_total{mode="shadow",verdict="allow",reason="rule"} ` + strconv.FormatInt(c.decisions[0][0], 10),
-		`culvert_socks5_policy_decisions_total{mode="shadow",verdict="allow",reason="default"} ` + strconv.FormatInt(c.decisions[0][1], 10),
-		`culvert_socks5_policy_decisions_total{mode="shadow",verdict="would_block",reason="rule"} ` + strconv.FormatInt(c.decisions[1][0], 10),
-		`culvert_socks5_policy_decisions_total{mode="shadow",verdict="would_block",reason="default"} ` + strconv.FormatInt(c.decisions[1][1], 10),
-		"# TYPE culvert_socks5_requests_total counter",
-		`culvert_socks5_requests_total{atyp="ipv4"} ` + strconv.FormatInt(c.atyp[0], 10),
-		`culvert_socks5_requests_total{atyp="ipv6"} ` + strconv.FormatInt(c.atyp[1], 10),
-		`culvert_socks5_requests_total{atyp="domain"} ` + strconv.FormatInt(c.atyp[2], 10),
+	for _, tc := range []struct {
+		mode    socks5PolicyMode
+		label   string
+		refused string
+	}{
+		{socks5PolicyShadow, "shadow", "would_block"},
+		{socks5PolicyEnforce, "enforce", "block"},
 	} {
-		if !strings.Contains(body, line+"\n") {
-			t.Errorf("/metrics missing %q", line)
-		}
-	}
-	if n := strings.Count(body, "culvert_socks5_policy_decisions_total{"); n != 4 {
-		t.Errorf("decisions series = %d, want exactly 4 (bounded labels)", n)
-	}
-	if n := strings.Count(body, "culvert_socks5_requests_total{"); n != 3 {
-		t.Errorf("requests series = %d, want exactly 3 (bounded labels)", n)
+		t.Run(tc.label, func(t *testing.T) {
+			useSOCKS5PolicyModeForTest(t, tc.mode)
+			body := scrapeMetricsNoToken(t)
+			c := readShadowCounters()
+			d := c.decisions
+			if tc.mode == socks5PolicyEnforce {
+				d = c.enforce
+			}
+			series := func(verdict, reason string, n int64) string {
+				return `culvert_socks5_policy_decisions_total{mode="` + tc.label + `",verdict="` + verdict + `",reason="` + reason + `"} ` + strconv.FormatInt(n, 10)
+			}
+			for _, line := range []string{
+				"# TYPE culvert_socks5_policy_decisions_total counter",
+				series("allow", "rule", d[0][0]),
+				series("allow", "default", d[0][1]),
+				series(tc.refused, "rule", d[1][0]),
+				series(tc.refused, "default", d[1][1]),
+				series(tc.refused, "inspection_unsupported", d[1][2]),
+				"# TYPE culvert_socks5_requests_total counter",
+				`culvert_socks5_requests_total{atyp="ipv4"} ` + strconv.FormatInt(c.atyp[0], 10),
+				`culvert_socks5_requests_total{atyp="ipv6"} ` + strconv.FormatInt(c.atyp[1], 10),
+				`culvert_socks5_requests_total{atyp="domain"} ` + strconv.FormatInt(c.atyp[2], 10),
+			} {
+				if !strings.Contains(body, line+"\n") {
+					t.Errorf("/metrics missing %q", line)
+				}
+			}
+			if n := strings.Count(body, "culvert_socks5_policy_decisions_total{"); n != 5 {
+				t.Errorf("decisions series = %d, want exactly 5 (bounded labels, installed mode only)", n)
+			}
+			if n := strings.Count(body, "culvert_socks5_requests_total{"); n != 3 {
+				t.Errorf("requests series = %d, want exactly 3 (bounded labels)", n)
+			}
+		})
 	}
 }
 
@@ -760,9 +801,9 @@ func TestSOCKS5PolicyHost_StripsIPv6Brackets(t *testing.T) {
 	}
 }
 
-// TestClassifySOCKS5Shadow pins the verdict mapping, including the fail-closed
+// TestClassifySOCKS5Policy pins the verdict mapping, including the fail-closed
 // unknown action and the empty action that canonicalizes to Allow.
-func TestClassifySOCKS5Shadow(t *testing.T) {
+func TestClassifySOCKS5Policy(t *testing.T) {
 	cases := []struct {
 		rule         *PolicyRule
 		defaultAllow bool
@@ -780,9 +821,9 @@ func TestClassifySOCKS5Shadow(t *testing.T) {
 		{&PolicyRule{Action: "Quarantine"}, true, socks5VerdictWouldBlock, socks5ReasonRule},
 	}
 	for _, c := range cases {
-		got := classifySOCKS5Shadow(c.rule, c.defaultAllow)
-		if got.verdict != c.verdict || got.reason != c.reason {
-			t.Errorf("classify(%+v, defaultAllow=%v) = %s/%s, want %s/%s", c.rule, c.defaultAllow, got.verdict, got.reason, c.verdict, c.reason)
+		got := classifySOCKS5Policy(c.rule, c.defaultAllow)
+		if verdictLabel(got) != c.verdict || got.reason != c.reason {
+			t.Errorf("classify(%+v, defaultAllow=%v) = %s/%s, want %s/%s", c.rule, c.defaultAllow, verdictLabel(got), got.reason, c.verdict, c.reason)
 		}
 	}
 }
@@ -890,7 +931,7 @@ func loadConfigForTest(t *testing.T, yaml string) (*FileConfig, error) {
 }
 
 // TestSOCKS5PolicyMode_ConfigKey pins the YAML contract: absent → legacy,
-// legacy/shadow accepted, enforce rejected by name, anything else rejected.
+// legacy/shadow/enforce accepted, anything else rejected.
 func TestSOCKS5PolicyMode_ConfigKey(t *testing.T) {
 	cases := []struct {
 		name, yaml string
@@ -900,7 +941,8 @@ func TestSOCKS5PolicyMode_ConfigKey(t *testing.T) {
 		{"absent", "proxy:\n  socks5_port: 1080\n", socks5PolicyLegacy, ""},
 		{"legacy", "proxy:\n  socks5_policy_mode: legacy\n", socks5PolicyLegacy, ""},
 		{"shadow", "proxy:\n  socks5_policy_mode: shadow\n", socks5PolicyShadow, ""},
-		{"enforce_not_available", "proxy:\n  socks5_policy_mode: enforce\n", 0, "not available"},
+		{"enforce", "proxy:\n  socks5_policy_mode: enforce\n", socks5PolicyEnforce, ""},
+		{"enforce_case_sensitive", "proxy:\n  socks5_policy_mode: Enforce\n", 0, `got "Enforce"`},
 		{"garbage", "proxy:\n  socks5_policy_mode: observe\n", 0, `got "observe"`},
 		{"case_sensitive", "proxy:\n  socks5_policy_mode: Shadow\n", 0, `got "Shadow"`},
 		{"empty_string_is_absent", "proxy:\n  socks5_policy_mode: \"\"\n", socks5PolicyLegacy, ""},
@@ -927,7 +969,7 @@ func TestSOCKS5PolicyMode_ConfigKey(t *testing.T) {
 
 // TestInstallSOCKS5PolicyMode pins the startup install: legacy logs nothing
 // (byte-identical startup output), shadow installs and announces itself, and
-// shadow without a listener says it has no effect.
+// shadow or enforce without a listener says it has no effect.
 func TestInstallSOCKS5PolicyMode(t *testing.T) {
 	cases := []struct {
 		raw        string
@@ -939,6 +981,8 @@ func TestInstallSOCKS5PolicyMode(t *testing.T) {
 		{"legacy", true, socks5PolicyLegacy, ""},
 		{"shadow", true, socks5PolicyShadow, "NEVER refused"},
 		{"shadow", false, socks5PolicyShadow, "listener is disabled"},
+		{"enforce", true, socks5PolicyEnforce, "inspection_unsupported"},
+		{"enforce", false, socks5PolicyEnforce, "enforce is configured but the SOCKS5 listener is disabled"},
 	}
 	for _, c := range cases {
 		t.Run(c.raw+"/"+strconv.FormatBool(c.listener), func(t *testing.T) {
@@ -961,14 +1005,19 @@ func TestInstallSOCKS5PolicyMode(t *testing.T) {
 
 // TestSOCKS5Shadow_HandlerCannotBranchOnVerdict is the structural half of
 // "shadow never blocks": the hook returns nothing, so no future edit can make
-// handleSOCKS5 act on the verdict without changing this signature first.
+// the dispatcher act on the shadow verdict without changing this signature
+// first, and the shadow arm returns "allowed" unconditionally.
 func TestSOCKS5Shadow_HandlerCannotBranchOnVerdict(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "socks5.go"))
+	src, err := os.ReadFile(filepath.Join(pkgSourceDir(), "socks5_policy.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(src, []byte("\tsocks5ShadowPolicy(clientIP, host, atyp)\n")) {
-		t.Fatal("handleSOCKS5 must call socks5ShadowPolicy as a bare statement (its result, if any, unused)")
+	const shadowArm = "\tcase socks5PolicyShadow:\n" +
+		"\t\t// Called as a bare statement: it has no result to branch on.\n" +
+		"\t\tsocks5ShadowPolicy(who, host, atyp)\n" +
+		"\t\treturn socks5Grant{}, true\n"
+	if !bytes.Contains(src, []byte(shadowArm)) {
+		t.Fatal("socks5ApplyPolicy's shadow arm must call socks5ShadowPolicy as a bare statement and allow unconditionally")
 	}
 	// Compile-time: assigning to a func type with no results fails to build if
 	// the hook ever grows a return value.
@@ -979,4 +1028,4 @@ func TestSOCKS5Shadow_HandlerCannotBranchOnVerdict(t *testing.T) {
 
 // acceptsResultlessHook only type-checks its argument: a hook with a result
 // does not convert to this parameter type.
-func acceptsResultlessHook(h func(clientIP, host string, atyp byte)) bool { return h != nil }
+func acceptsResultlessHook(h func(who ProxyIdentity, host string, atyp byte)) bool { return h != nil }
