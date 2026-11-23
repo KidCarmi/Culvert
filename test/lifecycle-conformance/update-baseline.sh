@@ -20,7 +20,8 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 cd "$ROOT/cmd/culvert-maint"
 
 # 1. What changed relative to the reviewed baseline (the binary embeds the OLD files).
-"$HERE/run.sh" "$TMP/before" > "$TMP/before.log" 2>&1 || true
+before_rc=0
+"$HERE/run.sh" "$TMP/before" > "$TMP/before.log" 2>&1 || before_rc=$?
 grep -E '^DRIFT   |DRIFT \(real code\)|newly differing|no longer differing|MISMATCH' "$TMP/before.log" > "$TMP/drift.txt" || true
 
 # 2. Record the new baselines.
@@ -42,9 +43,17 @@ if grep -q MISMATCH "$TMP/drift.txt"; then
   echo "NOTE: the old baseline also saw conformance MISMATCHES, i.e. model and code disagreed."
   echo "      Make sure model.go was changed on purpose, not to silence them."
 fi
-if [ ! -s "$TMP/drift.txt" ]; then
+if [ "$before_rc" -eq 2 ] || { [ "$before_rc" -ne 0 ] && [ ! -s "$TMP/drift.txt" ]; }; then
+  # Never "nothing to review" when the comparison itself did not complete: an old baseline the
+  # new code cannot read (e.g. a changed file layout) hides every drift line.
+  echo "COMPARISON AGAINST THE OLD BASELINE DID NOT COMPLETE (run.sh exit $before_rc); the drift below is"
+  echo "partial or empty. Review the full diff of baseline.json and observed.json by hand:"
+  grep -E 'INCOMPLETE|FAILED' "$TMP/before.log" | head -5 | sed 's/^/  > /'
+  git -C "$ROOT" --no-pager diff --stat -- "$MODEL/baseline.json" "$MODEL/observed.json" | sed 's/^/  /'
+fi
+if [ ! -s "$TMP/drift.txt" ] && [ "$before_rc" -eq 0 ]; then
   echo "(no drift from the reviewed baseline: nothing to review)"
-else
+elif [ -s "$TMP/drift.txt" ]; then
   sed -E -e 's/^DRIFT   //' \
     -e 's/^(property [A-Z][0-9]+ verdict PASS -> FAIL.*)$/[REGRESSION CANDIDATE] \1/' \
     -e 's/^(property [A-Z][0-9]+ verdict FAIL -> PASS.*)$/[VERIFY THE IMPROVEMENT IS REAL] \1/' "$TMP/drift.txt"
