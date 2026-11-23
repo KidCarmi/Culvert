@@ -133,3 +133,49 @@ func TestMutationLog_NamesEveryCommandSinceTheLastEnd(t *testing.T) {
 		t.Fatalf("a marker that names no command: open = %+v, want Pending and not OnlyUp", at)
 	}
 }
+
+// TestMutationLog_AHalfDoneFirstUseIsAFirstUseAgain: the first open died, or
+// failed, after it made the directory and before the doubt was on disk. The
+// next open must not take the bare directory for "past first use".
+func TestMutationLog_AHalfDoneFirstUseIsAFirstUseAgain(t *testing.T) {
+	// The directory alone.
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, mutationDirName), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, at := openMut(t, dir); !at.FirstUse || !at.Pending || at.OnlyUp {
+		t.Fatalf("bare directory: open = %+v, want FirstUse and Pending", at)
+	}
+
+	// The marker written, the sentinel not yet: still a first use, and the
+	// marker is kept.
+	dir = t.TempDir()
+	m, _ := openMut(t, dir)
+	if err := os.Remove(filepath.Join(dir, mutationDirName, mutationSentinelName)); err != nil {
+		t.Fatal(err)
+	}
+	_ = m
+	if _, at := openMut(t, dir); !at.FirstUse || !at.Pending {
+		t.Fatalf("marker without sentinel: open = %+v, want FirstUse and Pending", at)
+	}
+	if _, at := openMut(t, dir); at.FirstUse || !at.Pending {
+		t.Fatalf("after a completed first use: open = %+v, want Pending and not FirstUse", at)
+	}
+
+	// A first use that finds a marker naming only `up` (written by a version
+	// whose sentinel was lost) is still not "only up": the doubt is wider.
+	dir = t.TempDir()
+	m, _ = openMut(t, dir)
+	if err := m.End(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Begin(MutationComposeUp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, mutationDirName, mutationSentinelName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, at := openMut(t, dir); !at.FirstUse || !at.Pending || at.OnlyUp {
+		t.Fatalf("first use over an up-only marker: open = %+v, want FirstUse, Pending, not OnlyUp", at)
+	}
+}

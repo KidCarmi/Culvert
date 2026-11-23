@@ -291,7 +291,9 @@ that every doubt falls on the waiting side:
   found or cannot be read, and whenever the journal holds a record that no
   running operation owns, or cannot be read. The first start that keeps markers
   writes an "unknown" marker at once (their absence until then proves nothing),
-  so that doubt, too, lasts across restarts until a command clears it.
+  so that doubt, too, lasts across restarts until a command clears it. "Past
+  first use" is a sentinel file written only after that marker is durable: a
+  first start that dies or fails half-way is a first use again.
   `interrupted_settle = "0s"` turns the wait off, not this bookkeeping. All
   server call sites go through one wrapper
   (`TestMutation_OnlyTheWrappersRunComposeUpDown`). Both rules above come from
@@ -315,6 +317,15 @@ Costs accepted: a marker left by a cut command, or by a success inside a
 window, stays until a later compose command succeeds with nothing in doubt;
 until then every agent start opens a window, and the next upgrade or rollback
 reads the proxy container once more after its `up`.
+
+Not covered, and unchanged by the marker: inside one live agent process the
+wait after a compose command that ended in an error is one window. If that
+command's CLI survived behind `sudo` (a stage timeout that could not kill it)
+and sends its stop later than that, an operation of the same process can
+already have reported success. The marker rule above only makes sure the NEXT
+process waits. And a `stop_grace_period` longer than `interrupted_settle` (not
+validated: the agent does not read the compose file) defeats the window and,
+with it, the time after which a marker may be cleared.
 
 Not covered by the marker: an agent **downgraded** to a version that writes no
 markers and upgraded again. The marker directory then exists, and a restore's

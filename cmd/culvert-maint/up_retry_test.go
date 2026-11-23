@@ -107,6 +107,66 @@ func TestUpRetry_RunsOnTheRecordAlone(t *testing.T) {
 	}
 }
 
+// TestUpRetry_DisarmedOnceTheMarkerIsCleared: the marker found at start arms
+// the retry (one extra read of the proxy container after `up`) only until a
+// command of this process clears it. The operation after that makes exactly
+// the docker reads an ordinary one makes.
+func TestUpRetry_DisarmedOnceTheMarkerIsCleared(t *testing.T) {
+	r := newCrashRig(t)
+	r.pastFirstUse("1s")
+	r.start()
+	// Baseline: a rollback on a clean state directory, nothing armed.
+	r.clearCalls()
+	if d := r.waitOp(r.rollbackToA()); d.State != "succeeded" {
+		t.Fatalf("baseline rollback = %s(%s)", d.State, d.FailureReason)
+	}
+	baseline := r.psCalls()
+	for _, c := range mustGlob(t, filepath.Join(r.model, "count.*")) {
+		_ = os.Remove(c) // the kill point below counts from zero
+	}
+	crashed := r.crashAt("up_before:1")
+	if err := os.Remove(filepath.Join(r.state, "reconcile", crashed+".json")); err != nil {
+		t.Fatalf("removing the interrupted record: %v", err)
+	}
+	r.start()
+
+	// First rollback: armed by the marker (after the 1s window it also clears it).
+	r.clearCalls()
+	if d := r.waitOp(r.rollbackToA()); d.State != "succeeded" {
+		t.Fatalf("first rollback = %s(%s)", d.State, d.FailureReason)
+	}
+	armed := r.psCalls()
+
+	// Second and third rollback: the marker is gone, nothing arms the retry.
+	// They must make the same reads as each other, and fewer than the armed one.
+	var plain [2]int
+	for i := range plain {
+		r.clearCalls()
+		if d := r.waitOp(r.rollbackToA()); d.State != "succeeded" {
+			t.Fatalf("rollback %d = %s(%s)", i+2, d.State, d.FailureReason)
+		}
+		plain[i] = r.psCalls()
+	}
+	if plain[0] != plain[1] {
+		t.Errorf("`compose ps` ran %d then %d times in two rollbacks after the marker was cleared; want the same", plain[0], plain[1])
+	}
+	if plain[0] != baseline {
+		t.Errorf("`compose ps` ran %d times in a rollback after the marker was cleared, %d on a clean state directory; want the same (armed: %d)", plain[0], baseline, armed)
+	}
+	if armed <= baseline {
+		t.Errorf("the armed rollback made %d reads, the baseline %d: the retry was never armed, so this test shows nothing", armed, baseline)
+	}
+}
+
+func mustGlob(t *testing.T, pattern string) []string {
+	t.Helper()
+	m, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
 // TestUpRetry_IsBounded: if `up` keeps exiting 0 with nothing running, the
 // agent retries once and then lets the health gate fail the operation. It does
 // not loop, does not report success, and keeps the interrupted record.

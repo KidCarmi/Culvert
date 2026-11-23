@@ -209,10 +209,14 @@ For `indeterminate`:
   earlier agent process did not see finish. It applies when such a command was
   left unfinished (a marker under `<state_dir>/mutation`), when an interrupted
   operation is on record, and on the first start after installing or upgrading
-  to an agent that tracks this. The operation log says `settle: waited …`.
+  to an agent that tracks this. The same wait starts again, inside a running
+  agent, after a `compose up` / `compose down` of its own ended in an error,
+  and the startup reconcile observes it too. The operation log says `settle:
+  waited …`.
   - When the unfinished command was a `compose up` and Docker shows no proxy
-    container running, the wait ends at once (`settle: no proxy container is
-    running …`): the proxy is already down and nothing is left to wait for.
+    container running on two reads a couple of seconds apart, the wait ends
+    there (`settle: no proxy container is running …`): the proxy is already
+    down and nothing is left to wait for.
     After an unfinished `compose down`, and on that first start, the whole
     window is waited.
   - The marker stays until an upgrade, rollback or restore completes its

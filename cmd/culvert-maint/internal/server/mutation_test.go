@@ -167,6 +167,32 @@ func TestMutation_ZeroSettleStillKeepsHonestMarkers(t *testing.T) {
 	}
 }
 
+// TestMutation_ZeroSettleKeepsAStartMarkerForAWindow: with the wait turned off,
+// a marker found at start is still not cleared by a success inside the default
+// window after that start; it is once that window has passed.
+func TestMutation_ZeroSettleKeepsAStartMarkerForAWindow(t *testing.T) {
+	r := newReconRig(t, true) // first use: marker found (written) at start
+	r.srv.opts.Cfg.InterruptedSettle = 0
+	r.srv.startedAt = time.Now()
+	dir := r.srv.opts.StateDir
+	if rem := r.srv.settleRemaining(); rem != 0 {
+		t.Fatalf("precondition: the wait is off, remaining = %v", rem)
+	}
+	if _, err := r.srv.composeUp(context.Background()); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if !markerPending(t, dir) {
+		t.Fatal("with the wait off, a success right after the start cleared the marker found at start")
+	}
+	r.srv.startedAt = time.Now().Add(-2 * defaultClearWindow)
+	if _, err := r.srv.composeUp(context.Background()); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	if markerPending(t, dir) {
+		t.Fatal("a success after the default window did not clear the marker")
+	}
+}
+
 // TestMutation_NewWiresWhatTheMarkerSaid: the server acts on what the marker
 // on disk named, not on a default. A marker naming a `compose down` must not
 // allow the early end; one naming only `compose up` does, and arms the retry.

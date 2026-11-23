@@ -78,8 +78,9 @@ operation_timeout = "30m"
 # Default per-stage timeout. Per-stage overrides allowed in code.
 stage_timeout = "5m"
 
-# How long after the agent starts an upgrade or rollback waits before it moves
-# the tag and recreates the proxy. If the previous agent process died in the
+# How long after the agent starts (or after a compose up/down of its own ended
+# in an error) an upgrade or rollback waits before it moves the tag and
+# recreates the proxy. If the previous agent process died in the
 # middle of an operation, dockerd is still finishing the last request it sent;
 # for a container stop that takes as long as the proxy takes to exit. The wait
 # applies only when the previous process may have left a compose up/down
