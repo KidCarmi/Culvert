@@ -59,7 +59,7 @@ type IdentityProvider interface {
 // implements them and falls back to the historical signature otherwise.
 //
 // client is an opaque fairness key derived from the resolved peer address
-// (authStateClientKey for HTTP, clientFairnessKey for SOCKS5). It is never
+// (authStateClientKey for HTTP, authstate.ClientKey for SOCKS5). It is never
 // compared against anything a caller supplies later and never reaches a
 // lookup, so a wrong or empty value can only make cache eviction less fair —
 // it can never admit a credential that should be rejected. The empty key is

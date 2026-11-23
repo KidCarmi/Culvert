@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/KidCarmi/Culvert/internal/authstate"
 )
 
 // socks5Server owns the SOCKS5 accept loop. It wraps a pre-bound listener
@@ -392,7 +394,7 @@ func socks5Negotiate(conn net.Conn, clientIP string) bool {
 	// CHAOS-57: charge the bcrypt comparison to this peer's fairness key.
 	// SOCKS5 carries no forwarding header, so the raw peer address IS the
 	// client — there is nothing here for realClientIP to resolve.
-	authOK := cfg.VerifyAuthFrom(clientFairnessKey(clientIP), string(uname), string(passwd))
+	authOK := cfg.VerifyAuthFrom(authstate.ClientKey(clientIP), string(uname), string(passwd))
 	// B5: Zero credentials from memory immediately after auth check.
 	clear(uname)
 	clear(passwd)

@@ -650,7 +650,7 @@ func (a *authCacheStore) set(client, user, pass string, ok bool) {
 //
 // This runs under a.mu on the local bcrypt credential path, once per insertion
 // for as long as the cache is at its cap — which, at maxAuthCacheSize of 5,000
-// and a fairness key that is the client's own address (clientFairnessKey), is
+// and a fairness key that is the client's own address (authstate.ClientKey), is
 // the steady state of any deployment with a few thousand active client
 // addresses. The previous implementation answered both questions above by
 // iterating every bucket and calling frontLocked on each, so each insertion
