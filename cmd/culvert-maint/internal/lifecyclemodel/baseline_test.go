@@ -4,6 +4,7 @@ package lifecyclemodel
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -56,7 +57,9 @@ func TestCompareBaseline_ReportsEveryKindOfChange(t *testing.T) {
 		t.Fatalf("no property %s", id)
 		return nil
 	}
-	// Each case edits the BASELINE side (want), so the arrow reads baseline -> now.
+	// Each case edits the BASELINE side (want), so the arrow reads baseline -> now. Counts are
+	// derived, not hard-coded: a model change that adds or merges vectors must not break them.
+	nApply, nCrash := len(base.Apply), len(base.Crash)
 	cases := []struct {
 		name, want string
 		mutate     func(b *Baseline)
@@ -85,13 +88,13 @@ func TestCompareBaseline_ReportsEveryKindOfChange(t *testing.T) {
 			b.Reconcile.VerdictCounts["loud_stop/indeterminate_restore_prior"] = b.Reconcile.VerdictCounts[k]
 			delete(b.Reconcile.VerdictCounts, k)
 		}},
-		{"apply expectation", "apply vector set changed: 172 -> 172 vectors, 1 removed, 1 added", func(b *Baseline) {
+		{"apply expectation", fmt.Sprintf("apply vector set changed: %d -> %d vectors, 1 removed, 1 added", nApply, nApply), func(b *Baseline) {
 			b.Apply[0] = strings.Replace(b.Apply[0], "op=succeeded", "op=failed", 1)
 		}},
-		{"crash vector new since the baseline", "crash vector set changed: 146 -> 147 vectors, 0 removed, 1 added", func(b *Baseline) {
+		{"crash vector new since the baseline", fmt.Sprintf("crash vector set changed: %d -> %d vectors, 0 removed, 1 added", nCrash-1, nCrash), func(b *Baseline) {
 			b.Crash = b.Crash[1:]
 		}},
-		{"vector dropped since the baseline (multiset)", "apply vector set changed: 173 -> 172 vectors, 1 removed, 0 added", func(b *Baseline) {
+		{"vector dropped since the baseline (multiset)", fmt.Sprintf("apply vector set changed: %d -> %d vectors, 1 removed, 0 added", nApply+1, nApply), func(b *Baseline) {
 			b.Apply = append(b.Apply, b.Apply[0])
 		}},
 	}

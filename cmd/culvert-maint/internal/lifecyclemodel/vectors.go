@@ -54,6 +54,24 @@ type ApplyExpectation struct {
 	RollbackSucceeded     bool     `json:"rollback_succeeded"`
 	RollbackSkippedReason string   `json:"rollback_skipped_reason"`
 	TagAhead              bool     `json:"tag_ahead"`
+	// The reported final running image (owner decision 2): verified only by a capture after
+	// the last `compose up`. FinalDigest is the registry digest ("none" when the image has no
+	// allow-listed registry reference or the state is unverified); FinalImage the image id.
+	FinalState  string `json:"final_state"`
+	FinalDigest string `json:"final_digest"`
+	FinalImage  string `json:"final_image"`
+}
+
+// finalRunningExpect is the model's prediction of the result's final running image.
+func finalRunningExpect(t State) (state, digest, image string) {
+	if t.Ev != evFresh {
+		return "unverified", imgNone, imgNone
+	}
+	digest = t.Running
+	if t.Running == imgP && t.Prior == priorNoDigest { // only a local reference: no registry digest
+		digest = imgNone
+	}
+	return "verified", digest, t.Running
 }
 
 // ApplyVector is one fault path of the apply flow.
@@ -144,6 +162,10 @@ func commands(s State, e string, n counts) (cmds []string, plan []PlanEntry) {
 		is.restart(s, e)
 	case pcVerify, pcRbVerify:
 		is.do("capture", failIf(e == evCaptureFail))
+	case pcReport:
+		if s.Ev != evFresh { // option C: the bounded read-only final capture
+			is.do("capture", "")
+		}
 	}
 	return is.cmds, is.plan
 }
@@ -270,8 +292,10 @@ func (w *walker) rec(s State, script []ScriptStep, cmds []string, plan []PlanEnt
 			w.rec(t, step, extend(cmds, c...), extend(plan, p...), n2)
 			continue
 		}
+		fState, fDigest, fImage := finalRunningExpect(t)
 		v := ApplyVector{Params: paramsOf(s), Script: step, Plan: extend(plan, p...),
-			Expect: ApplyExpectation{Op: t.Op, Reason: t.Reason, Running: t.Running, Tag: t.Tag, JournalEmpty: true,
+			Expect: ApplyExpectation{FinalState: fState, FinalDigest: fDigest, FinalImage: fImage,
+				Op: t.Op, Reason: t.Reason, Running: t.Running, Tag: t.Tag, JournalEmpty: true,
 				Cmds: collapse(extend(cmds, c...)), UpgradeSucceeded: t.Op == "succeeded", RollbackAttempted: t.RbAtt,
 				RollbackSucceeded: t.RbOK, RollbackSkippedReason: skippedReason(t), TagAhead: tagAhead(t)}}
 		if key := dedupKey(v.Params.Prior, v.Params.Same, v.Plan, v.Expect); !w.seenApply[key] {

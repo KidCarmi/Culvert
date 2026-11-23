@@ -690,6 +690,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **An upgrade's `final_running_digest` now reports only an image the agent
+  actually saw running, and says so when it cannot.** The maintenance agent
+  used to infer the field from its own progress flags, so after some failures
+  it named an image no capture had shown: the rollback target while the
+  upgrade's image still ran, or the new image while the container was stopped.
+  In the shadow lifecycle model, 48 of 172 fault paths reported an image that
+  was not running. The agent now reports the image from its last capture after
+  the last `docker compose up`, and takes one read-only capture at the end of
+  the operation when it has none. Two result fields are new:
+  `final_running_state` (`verified` or `unverified`) and
+  `final_running_image_id`. `final_running_digest` keeps its key and type; it
+  is empty when the state is `unverified`, or when the running image has no
+  allow-listed registry reference, which is now identified by
+  `final_running_image_id`. Read `final_running_state` before treating an empty
+  digest as meaningful. Nothing is pulled or restarted to establish it. Contract
+  `AGT-006`; design `roadmap/FINAL-RUNNING-DIGEST-PROPOSAL.md`.
+
 - **Automatic rollback after a failed upgrade works on hosts using Docker's
   containerd image store.** On such a host Docker reports two references for
   the running proxy image: the registry one (`ghcr.io/kidcarmi/culvert@sha256:…`)

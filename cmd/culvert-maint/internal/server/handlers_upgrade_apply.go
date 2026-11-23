@@ -138,7 +138,7 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 	// acc/racc are shared between the stage closures and the result
 	// computer; acc.actor/opID feed the upgrades.apply:rollback audit.
 	acc := &upgradeApplyAccumulator{actor: peer.String()}
-	racc := &rollbackAccumulator{}
+	racc := &rollbackAccumulator{evidence: &acc.evidence}
 
 	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindUpgradeApply, req.IdempotencyKey, params,
 		func() ([]ops.FlowStage, *opError) {
@@ -154,7 +154,7 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 		},
 		withOpIDHook(func(id string) { acc.opID = id }),
 		withResultFn(func(state ops.State, _ ops.FailureReason) map[string]interface{} {
-			return s.upgradeApplyResult(acc, racc, state)
+			return s.upgradeApplyResult(acc, state)
 		}),
 		// An already-current apply succeeds without re-pinning the tag or
 		// probing health, so it establishes nothing.
@@ -182,6 +182,9 @@ type upgradeApplyAccumulator struct {
 	runningAfterID      string
 	runningAfterDigests []string
 	healthSummary       string
+	// evidence is the latest capture of the running proxy image and whether a `compose up`
+	// ran after it; the final running image is reported from it (running_evidence.go).
+	evidence runningEvidence
 
 	// Inline auto-rollback state (#375). Set/read across stages + the
 	// result computer; acc.opID/actor feed the rollback audit sub-action.
@@ -223,6 +226,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 					s.advanceJournalPhaseBestEffort(acc, journal.PhaseCaptured)
 					return []byte("capture_before: no running proxy captured (" + errString(err) + ")"), nil, nil
 				}
+				acc.evidence.noteCapture(ri)
 				acc.priorImageID = ri.RunningImageID
 				acc.priorDigests = bareDigests(ri.RepoDigests)
 				s.deriveRollbackTarget(acc, ri.RepoDigests)
@@ -374,14 +378,16 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 		Name:            "report",
 		ContinueOnError: true,
 		FailureReason:   ops.ReasonCommandError,
-		Run: func(_ context.Context) ([]byte, []byte, error) {
+		Run: func(ctx context.Context) ([]byte, []byte, error) {
+			note := s.captureFinalEvidence(ctx, acc)
+			fr := s.finalRunningFrom(&acc.evidence)
 			summary := fmt.Sprintf(
-				"upgrade_apply requested_ref=%q pinned_ref=%q already_current=%v pre_backup=%v target_digests=%s prior_digests=%s running_after=%s health=[%s] | rollback attempted=%v succeeded=%v target=%s final_running=%s",
+				"upgrade_apply requested_ref=%q pinned_ref=%q already_current=%v pre_backup=%v target_digests=%s prior_digests=%s running_after=%s health=[%s] | rollback attempted=%v succeeded=%v target=%s final_running=%s final_running_state=%s final_running_image_id=%s%s",
 				requestedRef, acc.pinnedRef, acc.alreadyCurrent, preBackup,
 				joinDigests(acc.targetDigests), joinDigests(acc.priorDigests),
 				joinDigests(acc.runningAfterDigests), acc.healthSummary,
 				acc.rollbackAttempted, acc.rollbackSucceeded, acc.rollbackTargetDigest(),
-				joinDigests(acc.finalRunningDigests(racc)),
+				orDash(fr.digest), fr.state, orDash(fr.imageID), note,
 			)
 			return []byte(summary), nil, nil
 		},
@@ -414,6 +420,7 @@ func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator) stageRun {
 			return []byte("verify: post-restart capture failed"), nil,
 				fmt.Errorf("post-restart capture failed: %w", err)
 		}
+		acc.evidence.noteCapture(ri) // valid evidence even when it contradicts the pin
 		acc.runningAfterID = ri.RunningImageID
 		acc.runningAfterDigests = bareDigests(ri.RepoDigests)
 		if acc.pinnedDigest != "" && !containsString(acc.runningAfterDigests, acc.pinnedDigest) {

@@ -131,13 +131,12 @@ stores' observations are pinned in `observed.json`; containerd lines carry the
   which real Docker did not exhibit. The other 8 are real residue: `up` failed
   without recreating and the prior image has no allow-listed registry
   reference (4), or the stack was down before the upgrade (4).
-- **Reported running image (open question)**: on 48 of 172 apply vectors the
-  `final_running_digest` the agent reports differs from the image the fake
-  Docker world runs (`observed.json`). Some need `ok_stale`; others are, for
-  example, `up_fail_recreated` during rollback (reported T, P runs) and a prior
-  image with no registry digest (reported none). Whether the field must always
-  name the running image is a product question; the list pins today's
-  behaviour, it does not endorse it.
+- **Reported running image: resolved (contract AGT-006).** The agent used to
+  infer `final_running_digest`, and 48 of 172 apply vectors (84 across both
+  image stores) reported an image that was not running. It now reports only an
+  image captured after the last `compose up`, otherwise `final_running_state:
+  unverified`. The model predicts all three fields for every vector, and the
+  misreport list in `observed.json` is empty under both stores.
 
 ## Running
 

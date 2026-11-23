@@ -163,39 +163,22 @@ func (acc *upgradeApplyAccumulator) rollbackTargetDigest() string {
 	return digestRE.FindString(acc.priorRef)
 }
 
-// finalRunningDigests is the best-effort set of digests actually running
-// at op end (used for final_running_digest + the report summary).
-func (acc *upgradeApplyAccumulator) finalRunningDigests(racc *rollbackAccumulator) []string {
-	switch {
-	case acc.rollbackSucceeded:
-		return racc.runningAfterDigests // prior image now running (verified)
-	case acc.rollbackRestarted:
-		// Restarted to prior, but health/verify failed → prior image runs.
-		if d := acc.rollbackTargetDigest(); d != "" {
-			return []string{d}
-		}
-		return racc.runningAfterDigests
-	case acc.restartLeftPrior:
-		// The upgrade's `up` failed BEFORE recreating the container (verified
-		// by a post-failure capture) and no rollback restart replaced it since
-		// → the prior image never stopped running.
-		return uniqueDigests(acc.priorDigests)
-	case acc.rollbackAttempted:
-		// Rollback pull failed before any restart → the unhealthy NEW
-		// image is still running.
-		if acc.pinnedDigest != "" {
-			return []string{acc.pinnedDigest}
-		}
-	case acc.upgradeFailedPostRestart:
-		// Post-restart failure, rollback skipped → unhealthy new image runs.
-		if acc.pinnedDigest != "" {
-			return []string{acc.pinnedDigest}
-		}
+// captureFinalEvidence makes the one bounded, read-only final capture of option C: only when
+// the evidence is stale (a `compose up` ran after the last capture) or missing. It never
+// mutates Docker. A failure leaves the evidence as it was, so the result reports unverified.
+// It returns a note for the report line. Bounded by the report stage's context (stage
+// timeout); after an operation timeout that context is already done, so the capture fails
+// and the state is correctly unverified.
+func (s *Server) captureFinalEvidence(ctx context.Context, acc *upgradeApplyAccumulator) string {
+	if acc.evidence.current() {
+		return ""
 	}
-	if len(acc.runningAfterDigests) > 0 {
-		return acc.runningAfterDigests // upgrade verify succeeded
+	ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
+	if err != nil {
+		return " (final capture failed: " + errString(err) + ")"
 	}
-	return acc.priorDigests
+	acc.evidence.noteCapture(ri)
+	return " (final capture)"
 }
 
 // resolvedSkipReason classifies why no rollback was attempted, for the
@@ -215,8 +198,9 @@ func (acc *upgradeApplyAccumulator) resolvedSkipReason(upgradeOK bool) string {
 
 // upgradeApplyResult is the structured result payload (#375 §5). Called by
 // the orchestrator at terminal time with the final op state.
-func (s *Server) upgradeApplyResult(acc *upgradeApplyAccumulator, racc *rollbackAccumulator, state ops.State) map[string]interface{} {
+func (s *Server) upgradeApplyResult(acc *upgradeApplyAccumulator, state ops.State) map[string]interface{} {
 	upgradeOK := state == ops.StateSucceeded
+	fr := s.finalRunningFrom(&acc.evidence)
 	return map[string]interface{}{
 		"upgrade_succeeded":       upgradeOK,
 		"rollback_attempted":      acc.rollbackAttempted,
@@ -224,7 +208,11 @@ func (s *Server) upgradeApplyResult(acc *upgradeApplyAccumulator, racc *rollback
 		"rollback_skipped_reason": acc.resolvedSkipReason(upgradeOK),
 		"upgrade_digest":          acc.pinnedDigest,
 		"rollback_digest":         acc.rollbackTargetDigest(),
-		"final_running_digest":    firstOrEmpty(acc.finalRunningDigests(racc)),
+		// Evidence-based (running_evidence.go): verified only by a capture after the last
+		// `compose up`; never inferred. final_running_digest stays a registry digest.
+		"final_running_digest":   fr.digest,
+		"final_running_state":    fr.state,
+		"final_running_image_id": fr.imageID,
 	}
 }
 
@@ -255,10 +243,10 @@ func uniqueDigests(digests []string) []string {
 	return out
 }
 
-// firstOrEmpty returns the first element or "".
-func firstOrEmpty(ss []string) string {
-	if len(ss) == 0 {
-		return ""
+// orDash renders an empty report-line value as "-".
+func orDash(v string) string {
+	if v == "" {
+		return "-"
 	}
-	return ss[0]
+	return v
 }
