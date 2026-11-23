@@ -167,6 +167,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 	// private X-Forwarded-For/X-Real-IP hops. Upgrade/Connection are untouched.
 	scrubForwardedHeaders(r)
 
+	// Strip hop-by-hop headers like the other two forward paths do, then put
+	// back the one pair the handshake needs (the shape httputil.ReverseProxy
+	// uses). Without this the client's Proxy-Authorization — its credential for
+	// THIS proxy — was written to the origin in cleartext, as was any header the
+	// client nominated in Connection.
+	upgradeType := r.Header.Get("Upgrade")
+	removeHopHeaders(r.Header)
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", upgradeType)
+
 	// Forward the original request to the target (preserve Upgrade headers).
 	r.RequestURI = r.URL.RequestURI()
 	if err := r.Write(destConn); err != nil {
