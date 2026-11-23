@@ -1048,8 +1048,8 @@ func buildImportSettingsPreview(b *configBackup) []importPreviewSetting {
 	setting := func(name, value string) {
 		settings = append(settings, importPreviewSetting{Setting: name, Value: value})
 	}
-	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
-		setting("Default Policy Action", b.DefaultAction)
+	if action, ok := parseDefaultAction(b.DefaultAction); ok {
+		setting("Default Policy Action", action)
 	}
 	if b.BlocklistMode == "allow" || b.BlocklistMode == "block" {
 		setting("Blocklist Mode", b.BlocklistMode)
@@ -1116,6 +1116,9 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 		"exportedAt": b.ExportedAt,
 		"sections":   sections,
 		"settings":   settings,
+	}
+	if dw := importDefaultActionWarnings(b.DefaultAction); len(dw) > 0 {
+		resp["warnings"] = dw
 	}
 	if planned != nil && planned.Plan != nil {
 		// 2F-D (C9): the complete upstream plan + the deterministic digest a
@@ -1359,9 +1362,9 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// never hides a silently-dropped rule from the admin (see warnings below).
 	warnings := importPolicyRules(&b, replaceMode)
 	policyStore.Save()
-	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
-		setDefaultPolicyAction(b.DefaultAction)
-	}
+	// Exact "allow"/"deny" applies; anything else keeps the current action
+	// (unchanged) and is reported instead of ignored silently.
+	warnings = append(warnings, applyImportDefaultAction(b.DefaultAction)...)
 
 	// Rewrite rules (2D-C stable-identity trust semantics, §22/§37):
 	//   - replace: the incoming set installs wholesale; valid unique stable IDs

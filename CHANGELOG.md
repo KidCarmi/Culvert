@@ -540,6 +540,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **A stored default policy action that is not exactly `allow` or `deny` is
+  now reported instead of silently enforced as deny (owner decision D,
+  `POL-005`).** Enforcement is unchanged everywhere: such a value is still
+  denied (fail-closed) and is never reinterpreted as allow. What changes is
+  that it is visible. An `admin_settings.json` value such as `Allow`, `ALLOW`,
+  `block` or ` allow` logs `AdminSettings: default_action "…" is not "allow"
+  or "deny"; enforcing deny (fail-closed)…`, raises
+  `culvert_default_action_noncanonical{source="admin_settings"}` and a
+  `default_action_stored_value` warn row on `/api/diagnostics`, and is written
+  back verbatim on unrelated settings saves (previously the next save silently
+  rewrote it to `deny`) until an operator sets Policy → Default action
+  explicitly. A config-version rollback whose stored value is not canonical
+  (including `""` from older versions and the legacy `block`) still applies
+  deny, and now says `default_action applied as deny (stored "…")` in the real
+  response's `warnings` and in the `config.rollback` audit detail (the dry-run
+  `valid` verdict is unchanged). A config import with such a value still keeps
+  the current action, and now returns `defaultAction "…" ignored: must be
+  "allow" or "deny"` in `warnings` on both the preview and the commit. A DP
+  applying a CP snapshot with such a value still enforces deny and applies the
+  rest of the snapshot, and now logs once and counts it
+  (`culvert_default_action_noncanonical_applied_total{source}`). YAML
+  `default_action` validation is unchanged (already strict). The registry's
+  stale `CULVERT_DEFAULT_ACTION` entry under `POL-002` was removed (no code
+  reads it). `POL-900` (boot-only derivation) is untouched.
+
 - **Adding to the blocklist now reports what the gateway actually stored
   (Product Experience).** The admin UI's "Added N host(s)" / "Imported N hosts"
   toast counted the lines it sent, not what `POST /api/blocklist` did with them.

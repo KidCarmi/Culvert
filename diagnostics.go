@@ -208,6 +208,7 @@ func buildOperatorContract() OperatorContract {
 		checkRequestHistory(),
 		checkBandwidthQoSEnforcement(),
 		checkFileProfileResolution(),
+		checkDefaultActionStoredValue(),
 		checkSOCKS5Listener(),
 		checkAdminUIListener(),
 		checkCPGRPCListener(),

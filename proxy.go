@@ -32,7 +32,19 @@ import (
 // Zero value = deny, revision 0 (the fail-closed default).
 var defaultPolicyActionState atomic.Uint64
 
+// setDefaultPolicyAction publishes the default action. Exactly "allow" is
+// allow; every other string, including "", "Allow" and "block", is deny
+// (fail-closed). Callers that ingest a stored value validate it with
+// parseDefaultAction first so a non-canonical value is reported, not
+// silently enforced as deny (default_action_noncanonical.go).
 func setDefaultPolicyAction(action string) {
+	publishDefaultPolicyAction(action)
+}
+
+// publishDefaultPolicyAction is setDefaultPolicyAction returning the word it
+// published, so a caller can fence state that is valid only until the next
+// set (the non-canonical default-action report).
+func publishDefaultPolicyAction(action string) uint64 {
 	var allow uint64
 	if action == "allow" {
 		allow = 1
@@ -41,7 +53,7 @@ func setDefaultPolicyAction(action string) {
 		old := defaultPolicyActionState.Load()
 		next := ((old>>1)+1)<<1 | allow
 		if defaultPolicyActionState.CompareAndSwap(old, next) {
-			return
+			return next
 		}
 	}
 }

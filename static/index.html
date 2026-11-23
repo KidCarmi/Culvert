@@ -8295,6 +8295,12 @@ function renderImportPreview(data) {
     settings.forEach(s => { html += `<li>${escHtml(s.setting)}: <span style="color:var(--fg)">${escHtml(s.value)}</span></li>`; });
     html += `</ul>`;
   }
+  const warnings = data.warnings || [];
+  if (warnings.length > 0) {
+    html += `<p style="margin-top:10px;font-weight:600;color:var(--warn)">Not applied</p><ul style="margin:4px 0 0 18px;color:var(--warn)">`;
+    warnings.forEach(w => { html += `<li>${escHtml(w)}</li>`; });
+    html += `</ul>`;
+  }
   html += `</div>`;
   el.innerHTML = html;
   el.style.display = 'block';
@@ -8505,6 +8511,11 @@ async function rollbackConfigVersion(version) {
       body: JSON.stringify({version})
     });
     toast(`Rolled back to v${version} successfully.`, 'ok');
+    // A rollback still applies with warnings (e.g. a stored default action
+    // that is not "allow"/"deny" is applied as deny) — never hide them.
+    if (data && Array.isArray(data.warnings) && data.warnings.length) {
+      toast(`Rollback to v${version} warnings: ${data.warnings.join('; ')}`, 'error');
+    }
     loadConfigVersions();
     fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
   } catch (err) {

@@ -29,7 +29,19 @@ protected:
   - cmd/contractcheck/**
   - .github/workflows/product-contracts.yml
 
-amended: []
+amended:
+  - id: POL-002
+    reason: >-
+      Removed the stale CULVERT_DEFAULT_ACTION entry from configs: no code reads
+      that environment variable (the default action comes from YAML
+      default_action, admin_settings.json, the admin API, config import,
+      config-version rollback and the CP snapshot only), so the entry described
+      a configuration surface that does not exist. Invariant, code paths and
+      tests are unchanged; whether such a variable should exist is a separate
+      decision. Made with owner decision D (non-canonical default actions are
+      enforced as deny and reported, recorded as POL-005). POL-900's open
+      question (boot-only derivation, and how a derived allow persists) is
+      deliberately not resolved by this change.
 retired: []
 
 contracts:
@@ -110,7 +122,6 @@ contracts:
       - "proxy.go"
     configs:
       - "default_action"
-      - "CULVERT_DEFAULT_ACTION"
     transitions:
       permitted:
         - "explicit allow or deny chosen by the operator"
@@ -161,6 +172,39 @@ contracts:
       - {file: "policy_unknown_action_test.go", name: TestSECPOLICYACTION1_UnknownActionBlocksAndIsTerminal}
     validation: integration
     compatibility: "A rulebase written by a newer release must not become permissive on an older one."
+
+  - id: POL-005
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "A stored default action that is not exactly allow or deny is enforced as deny and reported, never reinterpreted as allow: admin settings warn (log, metric, diagnostics) and keep the stored value until an explicit set, rollback reports it in its response and audit, import ignores it with a warning, and a cluster snapshot carrying it is applied with a warning, not rejected."
+    authority: "Default-action ingestion (default_action_noncanonical.go) over setDefaultPolicyAction (proxy.go); owner decision D."
+    code:
+      - "default_action_noncanonical.go"
+      - "admin_settings.go"
+      - "configversion.go"
+      - "ui_config.go"
+      - "controlplane_snapshot.go"
+      - "proxy.go"
+    configs:
+      - "default_action"
+    transitions:
+      permitted:
+        - "an explicit allow or deny set by the operator replacing a non-canonical stored value"
+      forbidden:
+        - "a non-canonical stored value enforced as allow"
+        - "a non-canonical stored value enforced without a warning"
+        - "an unrelated admin-settings save rewriting a non-canonical stored value"
+        - "a cluster snapshot rejected only because its default action is non-canonical"
+    tests:
+      - {file: "default_action_noncanonical_test.go", name: TestSetDefaultPolicyAction_SemanticsUnchanged}
+      - {file: "default_action_noncanonical_test.go", name: TestAdminSettingsDefaultAction_NoncanonicalDeniesWarnsAndRaisesGauge}
+      - {file: "default_action_noncanonical_test.go", name: TestAdminSettingsDefaultAction_UnrelatedSaveKeepsRawValue}
+      - {file: "default_action_noncanonical_test.go", name: TestRollback_NoncanonicalDefaultActionWarnsInRealResponseAndAudit}
+      - {file: "default_action_noncanonical_test.go", name: TestImport_NoncanonicalDefaultActionIgnoredWithWarning}
+      - {file: "default_action_noncanonical_test.go", name: TestSnapshotApply_NoncanonicalDefaultActionDeniesWarnsAndCounts}
+    validation: integration
+    compatibility: "A hand-edited admin_settings.json, version file, backup or newer CP snapshot may carry such a value; all of them already failed closed, and reading Allow as allow would flip those deployments to allow-all."
 
   - id: AUTH-001
     area: authn-authz
