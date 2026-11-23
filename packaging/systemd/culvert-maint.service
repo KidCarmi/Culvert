@@ -58,6 +58,26 @@ ExecStart=/usr/local/bin/culvert-maint --config /etc/culvert-maint/config.toml
 Restart=on-failure
 RestartSec=5s
 
+# ── Crash fence (load-bearing for crash recovery — do not relax) ───────────
+# The agent's crash-recovery contract (ADR-0061) reads a journal record left by
+# a dead agent as "an operation with no process behind it". The agent cannot
+# make that true by itself: every Docker command it starts runs in its own
+# process group (behind `sudo` in privilege_mode=sudoers), so nothing that
+# kills the agent reaches it.
+# This line is what makes it true. With KillMode=control-group, when the agent
+# dies systemd signals every process still in the unit's control group
+# (SIGTERM, then SIGKILL after TimeoutStopSec) and does NOT start the next
+# agent until the group is empty. Measured with the real-Docker orphan probe
+# (systemd 255, the real installer and sudoers, Docker 29): no in-flight docker
+# command outlived the agent into the next start, and `sudo` / `setsid` do not
+# leave the group. With KillMode=process or KillMode=none the same child was
+# still running when the next agent started; a rollback then reported success
+# and the stale command went on to remove the proxy container.
+# This does not cover what dockerd itself is still doing for a dead client.
+# control-group is systemd's default; it is stated so that a drop-in or a later
+# edit has to remove a line with a reason on it.
+KillMode=control-group
+
 # ── Hardening (mount-namespace / fd-level ONLY — see header comment) ───────
 # No seccomp-backed options here: for a User= service they would imply
 # NoNewPrivileges and break setuid sudo (privilege_mode=sudoers). Explicit
