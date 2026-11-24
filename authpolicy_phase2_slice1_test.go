@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -138,19 +139,16 @@ func TestP2S1_API_AcceptsCredentialRequired(t *testing.T) {
 	}
 }
 
-// ── Persistence: preserve valid / drop invalid fail-closed ───────────────────
+// ── Persistence: preserve valid / refuse a ruleset holding an invalid rule ────
 
-func TestP2S1_Persistence_LoadPreservesValidDropsInvalid(t *testing.T) {
+// A valid CredentialRequired rule round-trips through Load intact. A file that
+// ALSO holds an invalid one is refused whole (POL-005): dropping the invalid
+// rule and installing the rest would leave clients it names unchallenged.
+func TestP2S1_Persistence_LoadPreservesValidRefusesFileWithInvalid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.json")
-	invalid := validCRRule()
-	invalid.Name = "cr-no-dest"
-	invalid.DestFQDN = "" // invalid: CR requires a destination
-	data, err := json.MarshalIndent([]PolicyRule{
-		validCRRule(),
-		invalid,
-		{Priority: 9, Name: "plain-allow", Action: ActionAllow},
-	}, "", "  ")
+	valid := []PolicyRule{validCRRule(), {Priority: 9, Name: "plain-allow", Action: ActionAllow}}
+	data, err := json.MarshalIndent(valid, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -163,33 +161,41 @@ func TestP2S1_Persistence_LoadPreservesValidDropsInvalid(t *testing.T) {
 	}
 	got := ps.List()
 	if len(got) != 2 {
-		t.Fatalf("expected valid CR + plain to survive (invalid CR dropped), got %d: %+v", len(got), got)
-	}
-	if findRule(got, "require-creds-vendor") == nil {
-		t.Error("valid CR rule must be preserved on load")
-	}
-	if findRule(got, "cr-no-dest") != nil {
-		t.Error("invalid CR rule must be dropped fail-closed on load")
+		t.Fatalf("expected valid CR + plain to be installed, got %d: %+v", len(got), got)
 	}
 	// Round-trip preserves the CR outcome + spec.
 	cr := findRule(got, "require-creds-vendor")
+	if cr == nil {
+		t.Fatal("valid CR rule must be preserved on load")
+	}
 	if cr.Auth == nil || cr.Auth.Outcome != OutcomeCredentialRequired {
 		t.Errorf("CR outcome not round-tripped: %+v", cr)
 	}
+
+	invalid := validCRRule()
+	invalid.Name = "cr-no-dest"
+	invalid.DestFQDN = "" // invalid: CR requires a destination
+	mixed, err := json.MarshalIndent(append([]PolicyRule{invalid}, valid...), "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	ue := assertLoadRefusedWhole(t, mixed, "cr-no-dest")
+	if !strings.Contains(ue.Reason, "invalid auth rule") {
+		t.Errorf("refusal reason = %q, want an invalid-auth-rule reason", ue.Reason)
+	}
 }
 
-func TestP2S1_Persistence_ReplaceAllPreservesValidDropsInvalid(t *testing.T) {
+// Same pair through ReplaceAll: the valid ruleset is installed; the one holding
+// an invalid CR rule is refused whole and the store keeps what it had (POL-005).
+func TestP2S1_Persistence_ReplaceAllPreservesValidRefusesRulesetWithInvalid(t *testing.T) {
 	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{validCRRule(), {Priority: 9, Name: "plain", Action: ActionAllow}})
+	if cr := findRule(ps.List(), "require-creds-vendor"); cr == nil || cr.Auth == nil || cr.Auth.Outcome != OutcomeCredentialRequired {
+		t.Errorf("valid CR rule must survive ReplaceAll intact: %+v", cr)
+	}
 	invalid := validCRRule()
 	invalid.Name, invalid.Auth.Owner = "cr-bad", "" // missing owner
-	ps.ReplaceAll([]PolicyRule{validCRRule(), invalid, {Priority: 9, Name: "plain", Action: ActionAllow}})
-	got := ps.List()
-	if findRule(got, "require-creds-vendor") == nil {
-		t.Error("valid CR rule must survive ReplaceAll")
-	}
-	if findRule(got, "cr-bad") != nil {
-		t.Error("invalid CR rule must be dropped fail-closed by ReplaceAll")
-	}
+	assertReplaceAllRefusedWhole(t, []PolicyRule{validCRRule(), invalid, {Priority: 9, Name: "plain", Action: ActionAllow}})
 }
 
 func TestP2S1_Persistence_ImportReplaceAndMerge(t *testing.T) {

@@ -109,7 +109,7 @@ func initPolicyDraft(policyPath string) {
 	// is not reloaded at all. The candidate store would refuse it and stay
 	// EMPTY; marking that draft active would let a commit publish an empty
 	// rulebase over the running policy.
-	if err := policyRulesRuleTypeError(p.Rules); err != nil {
+	if err := policyRulesetError(p.Rules); err != nil {
 		policyStore.noteRulesetRefused("pending policy draft", err)
 		logWarnf("PolicyDraft: pending draft in %s was NOT reloaded; the running policy is unchanged and no draft is open", sanitizeLog(policyDraft.path))
 		return
