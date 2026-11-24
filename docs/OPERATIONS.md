@@ -52,6 +52,30 @@ Culvert exposes two endpoints for "is this node healthy". They have
   shape, status codes, or check names without a major-version migration
   plan.
 
+  **Compatibility decision (owner-approved, 2026-11-23): `/ready` during
+  shutdown.** From the moment the process accepts SIGINT/SIGTERM, `/ready`
+  answers `503` with an added gating row `"shutdown": {"status":"fail",
+  "detail":"shutting down"}`. This is a deliberate change to that interface,
+  scoped as follows:
+  - **Unchanged:** every response of a node that is not shutting down — same
+    shape, same status codes, same check names; the `shutdown` row is absent.
+    `/health` (liveness) is unchanged, including during shutdown, until the
+    listener closes. Connection draining and the shutdown envelope are
+    unchanged ([graceful-shutdown](operator/graceful-shutdown.md)).
+  - **Changed:** between the signal and the moment the listener closes
+    (normally well under a second on an idle node; up to about 5 s with a
+    request pending on the admin UI; bounded by the shutdown envelope),
+    `/ready` used to answer `200` and now answers `503`.
+  - **Who sees it:** a readiness probe or load balancer polling a node that
+    is being stopped takes it out of rotation at the signal instead of at the
+    first refused connection; the maintenance agent's health gate no longer
+    passes against a proxy that has already been told to exit. Consumers that
+    treat any non-200 `/ready` as "not ready" need no change. A consumer that
+    enumerates check names must tolerate the additional `shutdown` key, which
+    appears only in this state.
+  - **Not decided here:** which readiness an upgrade requires (strict versus
+    default rows) remains open as contract UPG-901.
+
 #### `/ready` checks map
 
 Each row in the `checks` object has the shape `{"status":"ok"|"fail",
@@ -71,6 +95,7 @@ classes of row exist:
 | `yara`                      | informational   | Present and `ok` when YARA is enabled.                                     |
 | `policy_loaded`             | informational   | `ok` when at least one policy rule has been recorded; `fail` when the ruleset is empty (default-deny is still in effect — fresh installs are expected to start here). |
 | `session_secret`            | gating          | `ok` when the admin session HMAC key is initialised; `fail` triggers `503` because signed admin cookies cannot be issued without it. |
+| `shutdown`                  | gating          | Absent on a serving node. Present as `fail` (detail `shutting down`) from the moment the process accepts SIGINT/SIGTERM: the proxy port keeps answering until the listener closes later in the shutdown sequence, and `/ready` must not answer 200 for a process that is on its way out. Additive: no existing row or status code changes on a node that is not shutting down. |
 | `config_snapshot_validator` | gating          | `ok` when `validateConfigSnapshot` accepts the empty baseline (its identity contract); `fail` triggers `503` because the cluster control-plane apply path is unsafe. |
 | `state_file_<kind>`         | informational   | One row per detected state-file corruption (e.g. `state_file_admin_settings`, `state_file_ui_users`, `state_file_cluster`); present when that store's file failed to parse at load and the node fell back to an empty store. The corrupt file is normally quarantined aside (renamed to `<path>.corrupt.<ts>`); if the rename itself also fails, the row still appears but the corrupt file is left in place, exposed to being overwritten by the next save. Absent when nothing is corrupt. |
 | `cp_poll` *(DP nodes only)* | informational   | `ok` unless this data-plane node's poll to its control plane has been failing past a grace window, in which case `fail` — the node keeps serving its last-known-good config. Absent on CP/standalone nodes. |
