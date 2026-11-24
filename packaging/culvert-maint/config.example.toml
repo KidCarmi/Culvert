@@ -131,10 +131,14 @@ proxy_repo = "ghcr.io/kidcarmi/culvert"
 #              back to the recorded previous image when the container still
 #              runs it; finish a rollback the journal proves was armed; or
 #              accept an upgrade the journal proves passed its health gate and
-#              digest check and that answers /ready now. Anything else is
+#              digest check and that answers /ready now; or, when the proxy is
+#              down because the agent's own `compose up` was cut (it leaves a
+#              marker under state_dir/mutation) and the upgrade had not been
+#              verified, put the tag back on the image that was serving before,
+#              start it, and require it to answer /ready. Anything else is
 #              reported as recovery_required and nothing is changed. It never
-#              pulls, never runs `down`, and never starts an image that has not
-#              passed the health gate. If Docker cannot be read it defers.
+#              pulls, never runs `down`, and never starts the upgrade's target
+#              image. If Docker cannot be read it defers.
 # An agent older than this setting refuses to start with it present: remove
 # it before downgrading.
 #reconcile_on_startup = "off"

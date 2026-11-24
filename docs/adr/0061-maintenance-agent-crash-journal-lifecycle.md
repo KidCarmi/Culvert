@@ -177,7 +177,9 @@ re-pins it.
    `rollback_armed` marker is set and whose tag is already on the prior image,
    or adopt (no Docker change) a target recorded at `verified` that runs under
    the tag and answers ready; every other state is `recovery_required` and
-   changes nothing, and an unreadable Docker defers. There is no `reup` and no
+   changes nothing, and an unreadable Docker defers. (Widened on 2026-11-24 by
+   one action, `restore_prior`, for a proxy that is down after the agent's own
+   interrupted `compose up`: see the addendum below.) There is no `reup` and no
    rollback of an indeterminate image. The interrupted operation stays
    `failed(agent_restart_interrupted)`; the reconcile is its own
    `reconcile.startup` operation, and a record is retired only after verified
@@ -378,3 +380,35 @@ the reconcile's deadline and reported a Docker that was merely down as
 `recovery_required` (`settle_wait_cut_short`); found by the real-Docker E2E.
 A deadline that is already over before a record is reached is still
 `deadline_elapsed`, never a deferral.
+
+**Restoring the prior image when the proxy is down (owner decision,
+2026-11-24).** A crash late in a recreate leaves no proxy container running.
+Until this decision the converge start reported that state (`stack_down`) and
+changed nothing: safe, and an outage until an operator acted (measured on real
+Docker at kill points 9 to 12, with the release image). It now restores the
+image that was serving before the upgrade, when ALL of this holds:
+
+- no proxy container is running, and the record is an upgrade at `restarting`
+  or `restarted`, or one whose inline rollback was armed;
+- **the outage is attributable to the agent**: the start found a readable
+  mutation marker that names nothing but `compose up`. Without it the stack may
+  be down because an operator took it down, and starting it would undo that;
+- the upgrade had not reached `verified`. A verified upgrade is not silently
+  undone, and the target image is never started here: `stack_down_after_verified`
+  is reported instead;
+- the recorded prior reference is valid and resolves locally to the image id
+  captured before the operation, and the fixed tag is on the prior or on the
+  target (anywhere else, someone else moved it).
+
+The action (`restore_prior`): retag to the prior reference, `compose up` (once
+more if the first pass only tidied up after the interrupted recreate), require
+the proxy to answer ready, verify container and tag by image id, and retire the
+record only through the same readiness check as every other retirement. A
+durable attempt is written first and the attempt cap applies, so a restore that
+keeps failing ends as `recovery_required`, not as a loop. With the marker's
+early end of the settle wait, the start does not sit out the window first: the
+proxy is down, so two reads of Docker establish that no stop is pending.
+
+Not done: starting the target image; acting on a standalone rollback's record
+(its journal says nothing about how far it got); acting on a first start that
+keeps markers, whose "unknown" marker names no command.

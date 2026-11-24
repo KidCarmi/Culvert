@@ -49,7 +49,11 @@ jobs:
         # first use, and a PRIOR image from before #2058, whose /ready still answers 200
         # while it drains. That is the upgrade a customer on an older release makes, and the
         # longest window in which an operation can be admitted during a pending stop.
-        variant: [shipped, converge, warm, cp]
+        # converge-warm: startup convergence with every trial started past first use, so that
+        # the reconcile can attribute a proxy that is down to the agent's own interrupted
+        # `compose up` and restore the prior image (restore_prior). In plain `converge` each
+        # trial is a first start and that state is only reported.
+        variant: [shipped, converge, warm, cp, converge-warm]
         exclude:
           # cp differs from warm only in the slices that hold the shutdown open (mid).
           - {variant: cp, points: "-1,0,1,2"}
@@ -96,12 +100,12 @@ jobs:
           ORPHAN_PROBE_POINTS: ${{ matrix.points }}
           ORPHAN_PROBE_MID: ${{ matrix.mid }}
           VARIANT: ${{ matrix.variant }}
-          ORPHAN_PROBE_PAST_FIRST_USE: ${{ (matrix.variant == 'warm' || matrix.variant == 'cp') && '1' || '0' }}
+          ORPHAN_PROBE_PAST_FIRST_USE: ${{ (matrix.variant == 'warm' || matrix.variant == 'cp' || matrix.variant == 'converge-warm') && '1' || '0' }}
           ORPHAN_PROBE_CP: ${{ matrix.variant == 'cp' && '1' || '0' }}
         run: |
           set +e   # keep going after the probe so that its exit code is reported and returned
           set -uo pipefail
-          flag=""; [ "$VARIANT" = converge ] && flag="--only-converge"
+          flag=""; case "$VARIANT" in converge|converge-warm) flag="--only-converge" ;; esac
           mkdir -p "$RUNNER_TEMP/probe-evidence"
           sudo --preserve-env=ORPHAN_PROBE_PROXY_IMAGE_V1,ORPHAN_PROBE_PROXY_IMAGE_V2,ORPHAN_PROBE_POINTS,ORPHAN_PROBE_MID,ORPHAN_PROBE_PAST_FIRST_USE,ORPHAN_PROBE_CP \
             env "PATH=$PATH" "GOFLAGS=${GOFLAGS:-}" "GOTOOLCHAIN=${GOTOOLCHAIN:-}" "HOME=$HOME" \

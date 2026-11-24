@@ -35,7 +35,7 @@ amended:
   - id: AGT-005
     reason: "Owner decision 1 on AGT-900 (recommendation D4): with reconcile_on_startup = \"converge\", the startup reconcile may also retire an interrupted record, but only after it verified convergence by image id and wrote the audit entry first. In the default \"off\" mode retirement is unchanged: only a later successful upgrade or image rollback."
   - id: AGT-900
-    reason: "Owner decision 1 resolved the open question for an opt-in, conservative converge mode: default off; no adoption of an unverified target; recovery_required when evidence is insufficient; Docker unavailable defers. The invariant is restated for that mode, with its tests; the entry stays open until a real-Docker e2e verifies it (owner, 2026-11-23). owner_approved stays false."
+    reason: "Owner decision 1 resolved the open question for an opt-in, conservative converge mode: default off; no adoption of an unverified target; recovery_required when evidence is insufficient; Docker unavailable defers. The invariant is restated for that mode, with its tests; the entry stays open until a real-Docker e2e verifies it (owner, 2026-11-23). owner_approved stays false. Owner decision of 2026-11-24 (restore_prior) widens what the converge start may do in one case: when no proxy container is running, the record is an upgrade at restarting/restarted (or with an armed rollback), a durable mutation marker shows that the agent's own `compose up` was left unfinished, and the recorded prior image is still local and identical, the start retags to that prior image, runs `compose up`, health-gates it and verifies it by id before retiring the record. Until now that state was always recovery_required: an outage until an operator acted (measured on real Docker, kill points 9-12). It still never starts the target image, never pulls, and without the marker (the stack may be down because an operator took it down) or at phase verified it only reports. The invariant's 'or reports recovery_required and changes nothing' is reworded, because a restore or an armed rollback that fails its gate has changed Docker and then reports. TestReconcileDecisionV2_ExhaustiveProperties gains the input axis and property RV12 for the new action, and RV7's 'act only on a running container' no longer applies to it; five negative controls are added."
   - id: POL-004
     reason: "Owner decision of 2026-11-24 (POL-005 widening). The invariant is unchanged. The control at the end of TestPOL004_RollbackKeepsARetainedUnknownActionRule asserted that a restore SKIPS a Redirect rule with no location; a restore no longer skips any stored rule, so the control now asserts that rule is restored beside the unknown-action rule."
   - id: POL-005
@@ -874,7 +874,7 @@ contracts:
     area: agent-lifecycle
     status: open
     owner_approved: false
-    invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or reports recovery_required and changes nothing. It never starts an image that has not passed the health gate. With the default \"off\" it changes nothing (AGT-004)."
+    invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or reports recovery_required. It starts a container only from the pre-change image: to finish an armed rollback, or to restore it when no proxy container is running and a durable marker shows that the agent's own `compose up` was left unfinished. It never starts the target image, and never retires a record before the image it left serving has passed the health gate and been verified by id. With the default \"off\" it changes nothing (AGT-004)."
     authority: "Maintenance agent (cmd/culvert-maint). Owner decision 1 on the AGT-900 recovery proposal; lifecycle docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/main.go"
@@ -888,11 +888,13 @@ contracts:
       permitted:
         - "retagging to the recorded, validated prior reference while the container provably runs that image"
         - "`compose up` with the fixed tag already on the prior image when the journal records an armed inline rollback, then gating and verifying it"
+        - "retagging to the recorded prior reference and `compose up` when no proxy container is running, the upgrade record is at restarting or restarted (or its rollback was armed), a durable mutation marker names only the agent's own unfinished `compose up`, and the prior image is local and identical to the recorded one; then gating and verifying it"
         - "adopting, without any Docker change, a target recorded at phase verified that runs under the tag and answers ready"
         - "deferring, with no action and no attempt counted, while Docker cannot be read"
         - "retiring a record after verified convergence and an audit entry"
       forbidden:
         - "adopting or restarting a target that never passed the health gate"
+        - "starting any container when the outage is not attributable to the agent's own unfinished `compose up`, or restoring the prior image over an upgrade recorded at phase verified"
         - "pulling an image, `compose down`, or moving the tag to the target at startup"
         - "acting on a record whose references failed validation, or after the attempt cap"
         - "acting without a durable write-ahead attempt, or on a decision Docker no longer supports"
@@ -905,6 +907,10 @@ contracts:
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_KillDuringReconcile}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_DockerUnavailableDefers}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_SecondInstanceSkips}
+      - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_RestoresThePriorImageWhenTheProxyIsDown}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_prior_test.go", name: TestStartupReconcile_RestoresPriorAfterItsOwnInterruptedUp}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_prior_test.go", name: TestStartupReconcile_StackDownWithoutTheMarkerIsOnlyReported}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_prior_test.go", name: TestStartupReconcile_RestoreThatIsNotReadyKeepsTheRecord}
       - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcileDecisionV2_ExhaustiveProperties}
       - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcileDecisionV2_NegativeControls}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_WriteAheadFailureMeansNoAction}

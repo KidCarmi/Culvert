@@ -410,6 +410,7 @@ func (s *Server) reconcileInputsFor(rec *journal.Record) reconcileInputsV2 {
 		TargetDigest: rec.TargetDigest, TargetImageID: reportImageID(rec.TargetImageID),
 		PriorImageID: reportImageID(rec.PriorImageID), RollbackArmed: rec.RollbackArmed,
 		Attempts: attempts, MaxAttempts: maxReconcileAttempts,
+		UpInterrupted: s.startOnlyUp && s.startMarkerLive.Load(),
 	}
 }
 
@@ -534,8 +535,8 @@ func (e errReconcileStep) Error() string { return string(e) }
 
 // performAction runs the Docker change for v. Only existing runner methods are
 // used: the tag goes to the record's validated PriorRef, and `compose up` runs
-// only for finish_rollback, whose decision required the tag to be on the prior
-// image already.
+// only with the fixed tag on the prior image: for finish_rollback the decision
+// required it to be there already, for restore_prior it is put there first.
 func (s *Server) performAction(ctx context.Context, c *reconcileCase, v reconcileVerdictV2) error {
 	switch v.Action {
 	case actV2Realign:
@@ -553,8 +554,35 @@ func (s *Server) performAction(ctx context.Context, c *reconcileCase, v reconcil
 			return errReconcileStep("prior_not_ready")
 		}
 		return nil
+	case actV2RestorePrior:
+		return s.restorePrior(ctx, c)
 	}
 	return errReconcileStep("unexpected_action")
+}
+
+// restorePrior brings the proxy back on the image that was serving before the
+// interrupted upgrade: the fixed tag goes to the record's validated PriorRef,
+// `compose up` starts it (once more if the first pass only tidied up after the
+// interrupted recreate: upAgainIfNothingRuns), and it must answer ready. The
+// caller then verifies container and tag by image id and retires the record
+// only through retireIfServing. A failure at any step keeps the record;
+// nothing here starts the target image.
+func (s *Server) restorePrior(ctx context.Context, c *reconcileCase) error {
+	c.out.Actions = append(c.out.Actions, "tag:prior")
+	if _, err := s.opts.Runner.ComposeTagPinned(ctx, c.rec.PriorRef); err != nil {
+		return errReconcileStep("tag_failed")
+	}
+	c.out.Actions = append(c.out.Actions, "up")
+	if _, err := s.composeUp(ctx); err != nil {
+		return errReconcileStep("up_failed")
+	}
+	if _, _, err := s.upAgainIfNothingRuns(ctx, true, nil, nil); err != nil {
+		return errReconcileStep("up_failed")
+	}
+	if s.probeReadiness(ctx) != probeReady {
+		return errReconcileStep("prior_not_ready")
+	}
+	return nil
 }
 
 // verifiedOnPrior re-reads Docker after a realign or finish_rollback: the

@@ -364,6 +364,19 @@ The workflow runs the first row as a job that passes only if the probe reports
 that violation (`Sensitivity`), so every run shows on its own runner that the
 probe would see the defect.
 
+**Restoring the prior image at startup (`restore_prior`, ADR-0061).** With
+`reconcile_on_startup = "converge"` and trials started past first use, Docker
+29.10.0 / Compose v5.7.1, real proxy binaries, settle 20 s / stop grace 15 s:
+
+| Kill point | At the restart | Agent before the change | With `restore_prior` |
+|---|---|---|---|
+| 9, 10 | proxy down | `recovery_required`, proxy down at rest | restored in 4.0 s, serving the prior image, record retired |
+| 9, control-plane hold | old proxy draining 9.2 s | (same as above once it has gone) | waits until it has gone, restored at 9.3 s |
+| 7 | old proxy running | realign | realign |
+| 12 | target running, never gated | `recovery_required` | `recovery_required` |
+
+The workflow's `converge-warm` variant runs this on the release image.
+
 Two things these runs show that are not safety failures and are not fixed here:
 - After a crash between Compose's stop and delete, the first
   `docker compose up -d` only cleans up. The rollback fails its health gate,

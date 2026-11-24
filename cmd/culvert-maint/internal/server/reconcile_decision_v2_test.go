@@ -60,6 +60,8 @@ func TestReconcileDecisionV2_FailureMatrix(t *testing.T) {
 		in.RunningImageID, in.TagImageID, in.Probe = idT, idT, probeReady
 	}
 	armed := func(in *reconcileInputsV2) { in.RollbackArmed = true }
+	// upCut: a marker found at start shows the agent's own `compose up` was cut.
+	upCut := func(in *reconcileInputsV2) { in.UpInterrupted = true }
 	standalone := func(in *reconcileInputsV2) {
 		in.Kind, in.Mode, in.Phase = ops.KindRollbackCreate, "image", journal.PhaseAdmitted
 		in.PriorRefPresent, in.PriorImageID, in.PriorLocalID = false, "", ""
@@ -72,6 +74,13 @@ func TestReconcileDecisionV2_FailureMatrix(t *testing.T) {
 		{"A3 pulled, tag on target (elided fsync)", all(ph(journal.PhasePulled), runTag(idP, idT)), actV2RecoveryRequired, "journal_contradicts_docker"},
 		{"A4 restarting before tag P/P", ph(journal.PhaseRestarting), actV2Noop, "already_on_prior"},
 		{"A4 restarting, stack was down", all(ph(journal.PhaseRestarting), runTag("", idP), func(in *reconcileInputsV2) { in.PriorImageID = "" }), actV2RecoveryRequired, "stack_down"},
+		{"A4m restarting, stack down, own `up` cut, tag still on prior", all(ph(journal.PhaseRestarting), runTag("", idP), upCut), actV2RestorePrior, "stack_down_up_interrupted"},
+		{"A4t restarting, stack down, own `up` cut, tag on target", all(ph(journal.PhaseRestarting), runTag("", idT), upCut), actV2RestorePrior, "stack_down_up_interrupted"},
+		{"A9m restarted, stack down, own `up` cut", all(runTag("", idT), upCut), actV2RestorePrior, "stack_down_up_interrupted"},
+		{"A9v verified, stack down, own `up` cut: a good upgrade is not undone", all(ph(journal.PhaseVerified), runTag("", idT), upCut), actV2RecoveryRequired, "stack_down_after_verified"},
+		{"A9x restarted, stack down, own `up` cut, tag on a third image", all(runTag("", idX), upCut), actV2RecoveryRequired, "stack_down_tag_unrecognised"},
+		{"A9p restarted, stack down, own `up` cut, prior image no longer local", all(runTag("", idT), upCut, func(in *reconcileInputsV2) { in.PriorLocalID = "" }), actV2RecoveryRequired, "prior_not_restorable"},
+		{"R4 rb armed, stack down, own `up` cut", all(runTag("", idP), armed, upCut), actV2RestorePrior, "stack_down_up_interrupted"},
 		{"A5 restarting P/T", all(ph(journal.PhaseRestarting), runTag(idP, idT)), actV2Realign, "tag_ahead_container_on_prior"},
 		{"A5 restarting P/T, prior has no registry ref", all(ph(journal.PhaseRestarting), runTag(idP, idT), func(in *reconcileInputsV2) { in.PriorRefPresent = false }), actV2RecoveryRequired, "prior_not_restorable"},
 		{"A6 restarting after up T/T", all(ph(journal.PhaseRestarting), runTag(idT, idT)), actV2RecoveryRequired, "target_live_ungated"},
@@ -206,6 +215,7 @@ func (d *v2Domains) recordAxes() []v2Axis {
 		b(func(in *reconcileInputsV2, v bool) { in.TargetRefPresent = v }),
 		b(func(in *reconcileInputsV2, v bool) { in.PriorRefPresent = v }),
 		b(func(in *reconcileInputsV2, v bool) { in.RollbackArmed = v }),
+		b(func(in *reconcileInputsV2, v bool) { in.UpInterrupted = v }),
 		{len(d.tid), func(in *reconcileInputsV2, i int) { in.TargetImageID = d.tid[i] }},
 		{len(d.pid), func(in *reconcileInputsV2, i int) { in.PriorImageID = d.pid[i] }},
 		{len(d.probe), func(in *reconcileInputsV2, i int) { in.Probe = d.probe[i] }},
@@ -324,7 +334,7 @@ func v2PropertyViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide fu
 			return "RV7 only an upgrade in the danger window is acted on"
 		case !in.RefValid || !in.PriorRefPresent || ids.prior == "" || ids.priorLocal != ids.prior:
 			return "RV7 act only with a validated PriorRef that resolves locally to the recorded prior"
-		case !in.ContainerRunning:
+		case v.Action != actV2RestorePrior && !in.ContainerRunning:
 			return "RV7 act only on a running container"
 		}
 	}
@@ -336,6 +346,19 @@ func v2PropertyViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide fu
 	case actV2FinishRollback:
 		if ids.tag != ids.prior || !in.RollbackArmed || ids.run != ids.target || ids.target == "" {
 			return "RV9 `up` only with the tag already on the prior image, after an armed rollback"
+		}
+	case actV2RestorePrior:
+		// Owner decision of 2026-11-24. Starting a container at agent start is
+		// allowed only for the prior image, and only on all of this evidence.
+		switch {
+		case ids.run != "":
+			return "RV12 restore_prior only when no proxy container is running"
+		case !in.UpInterrupted:
+			return "RV12 restore_prior only when a marker shows the agent's own `compose up` was cut"
+		case in.Phase == journal.PhaseVerified && !in.RollbackArmed:
+			return "RV12 never undo a verified upgrade by restoring the prior image"
+		case ids.tag != ids.prior && (ids.target == "" || ids.tag != ids.target):
+			return "RV12 restore_prior only with the fixed tag on the prior or on the target"
 		}
 	case actV2Noop:
 		if ids.run == "" || ids.tag != ids.run {
@@ -378,6 +401,8 @@ func TestReconcileDecisionV2_ExhaustiveProperties(t *testing.T) {
 	wantVerdicts := []string{
 		"noop/safe_boundary_unchanged", "noop/already_on_prior", "noop/rollback_never_moved_tag",
 		"realign/tag_ahead_container_on_prior", "finish_rollback/rollback_interrupted", "adopt/verified_target_live",
+		"restore_prior/stack_down_up_interrupted",
+		"recovery_required/stack_down_after_verified", "recovery_required/stack_down_tag_unrecognised",
 		"defer/docker_unavailable",
 		"recovery_required/data_window_manual", "recovery_required/unknown_kind_or_mode",
 		"recovery_required/reconcile_exhausted", "recovery_required/container_not_running",
@@ -400,6 +425,55 @@ func TestReconcileDecisionV2_ExhaustiveProperties(t *testing.T) {
 		t.Errorf("verdicts produced %d, listed %d: %v", len(seen), len(wantVerdicts), seen)
 	}
 	t.Logf("%d inputs, %d property violations, verdicts=%v", total, fails, seen)
+}
+
+// restorePriorMutants are the negative controls for restore_prior (owner
+// decision of 2026-11-24): each starts the prior image on less evidence than
+// the decision requires.
+func restorePriorMutants() map[string]func(reconcileInputsV2) reconcileVerdictV2 {
+	return map[string]func(reconcileInputsV2) reconcileVerdictV2{
+		"restore the prior image without the marker": func(in reconcileInputsV2) reconcileVerdictV2 {
+			c := in
+			c.UpInterrupted = true
+			if v := reconcileDecisionV2(c); v.Action == actV2RestorePrior {
+				return v // the stack may be down because an operator took it down
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore the prior image over a verified upgrade": func(in reconcileInputsV2) reconcileVerdictV2 {
+			// Only where everything else the restore needs holds, so that the
+			// verified-phase clause alone has to catch it.
+			if v := reconcileDecisionV2(in); v.Reason == "stack_down_after_verified" && priorRestorable(&in, idsOf(&in)) {
+				return reconcileVerdictV2{actV2RestorePrior, "stack_down_up_interrupted"}
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore the prior image with the tag somewhere else": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); v.Reason == "stack_down_tag_unrecognised" {
+				return reconcileVerdictV2{actV2RestorePrior, "stack_down_up_interrupted"}
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore with a prior that is not the recorded image": func(in reconcileInputsV2) reconcileVerdictV2 {
+			c := in
+			c.PriorLocalID = c.PriorImageID
+			if v := reconcileDecisionV2(c); v.Action == actV2RestorePrior {
+				return v
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore the prior image while a container is running": func(in reconcileInputsV2) reconcileVerdictV2 {
+			// As above: a restorable prior, the marker, and a tag where this
+			// operation can have left it; only the running container is wrong.
+			ids := idsOf(&in)
+			tagKnown := ids.tag == ids.prior || (ids.target != "" && ids.tag == ids.target)
+			if v := reconcileDecisionV2(in); v.Reason == "docker_state_unrecognised" && in.UpInterrupted &&
+				in.Phase != journal.PhaseVerified && priorRestorable(&in, ids) && tagKnown {
+				return reconcileVerdictV2{actV2RestorePrior, "stack_down_up_interrupted"}
+			}
+			return reconcileDecisionV2(in)
+		},
+	}
 }
 
 // TestReconcileDecisionV2_NegativeControls: each mutant reintroduces one unsafe
@@ -458,6 +532,9 @@ func TestReconcileDecisionV2_NegativeControls(t *testing.T) {
 			}
 			return reconcileDecisionV2(in)
 		},
+	}
+	for name, m := range restorePriorMutants() {
+		mutants[name] = m
 	}
 	for name, m := range mutants {
 		caught := ""

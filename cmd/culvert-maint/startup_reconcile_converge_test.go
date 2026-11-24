@@ -445,3 +445,37 @@ func TestOffMode_StatusAndStateUnchanged(t *testing.T) {
 		t.Errorf("instance lock file exists in off mode (err=%v)", err)
 	}
 }
+
+// TestConvergeRecovery_RestoresThePriorImageWhenTheProxyIsDown: the agent died
+// inside `compose up` and the proxy is not running. With the marker of that
+// unfinished `up` on disk, the next start (converge) puts the tag back on the
+// image that was serving, starts it, gates and verifies it, and retires the
+// record: no operator action. Without the marker the same state is only
+// reported, and nothing is started.
+func TestConvergeRecovery_RestoresThePriorImageWhenTheProxyIsDown(t *testing.T) {
+	for _, withMarker := range []bool{true, false} {
+		name := map[bool]string{true: "own_up_cut", false: "no_marker"}[withMarker]
+		t.Run(name, func(t *testing.T) {
+			r := newCrashRig(t)
+			r.pastFirstUse("0s")
+			r.start()
+			opID := r.crashAt("up_before:1") // tag on B, the agent inside `compose up`
+			if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
+				t.Fatal(err) // the recreate got as far as stopping the old proxy
+			}
+			if !withMarker {
+				if err := os.Remove(filepath.Join(r.state, "mutation", "pending.json")); err != nil {
+					t.Fatalf("removing the marker: %v", err)
+				}
+			}
+			r.converge("")
+			r.clearCalls()
+			r.start()
+			if withMarker {
+				assertConverge(t, r, opID, convergeCase{[]string{"tag:" + refA, "up"}, true, "stack_down_up_interrupted", imgA, imgA, false})
+			} else {
+				assertConverge(t, r, opID, convergeCase{nil, false, "stack_down", imgB, "", true})
+			}
+		})
+	}
+}
