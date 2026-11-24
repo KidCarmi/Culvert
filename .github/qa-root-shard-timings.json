@@ -5044,7 +5044,7 @@
     "TestRestoreCommit_DPGuard_AllowsWithFlag": 0.01,
     "TestRestoreCommit_DPGuard_BlocksWhenBackupHasNoCA": 0.01,
     "TestRestoreCommit_DPGuard_BlocksWithoutFlag": 0.01,
-    "TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting": 0,
+    "TestRestoreCommit_DataDirIsMountPoint_CommitsInPlace": 0,
     "TestRestoreCommit_InjectionBetweenRenames_RecoveryMessage": 0.01,
     "TestRestoreCommit_ModeFull_RoundTrip": 0.01,
     "TestRestoreCommit_ModeStateOnly_PreservesCA": 0.01,

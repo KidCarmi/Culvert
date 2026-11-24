@@ -13,6 +13,11 @@ change of what /ready and /health answer until the container is gone.
 
   env: TIMELINE_PORT (8080), TIMELINE_UI_PORT (PORT+1010 = 9090), TIMELINE_UI_TLS (1),
        TIMELINE_STOP_GRACE (60)
+       TIMELINE_CP=1: run the image as a control plane (its own command plus
+       -cp-grpc-addr) and hold the shutdown with a control-plane gRPC connection
+       that never speaks HTTP/2, instead of the admin-UI requests. The gRPC
+       graceful stop then takes its whole 8 s budget with the proxy port open:
+       the longest /ready stays reachable after SIGTERM.
 
 Exit: 0 held (or observe), 1 /ready answered 200 during shutdown, 2 invalid (the
 shutdown was not held open long enough to observe anything, or setup failed).
@@ -29,8 +34,10 @@ UI_PORT = int(os.environ.get("TIMELINE_UI_PORT", str(PORT + 1010)))
 UI_TLS = os.environ.get("TIMELINE_UI_TLS", "1") == "1"
 GRACE = os.environ.get("TIMELINE_STOP_GRACE", "60")
 NAME = "culvert-sigterm-timeline-%d" % os.getpid()
+CP = os.environ.get("TIMELINE_CP") == "1"
+CP_PORT = PORT + 71
 GRACE_AFTER = 0.5   # /ready may be mid-answer when the signal lands
-MIN_HELD = 2.0      # the shutdown must stay observable at least this long
+MIN_HELD = 6.0 if CP else 2.0  # the shutdown must stay observable at least this long
 
 
 def sh(*a, **kw):
@@ -64,6 +71,13 @@ def cleanup():
 
 rc = 2
 try:
+    if CP:
+        import json
+        base = json.loads(sh("docker", "image", "inspect", "--format", "{{json .Config.Cmd}}", image).stdout or "null")
+        if not isinstance(base, list):
+            print("INVALID: could not read the image's command")
+            sys.exit(2)
+        extra = base + ["-cp-grpc-addr", "127.0.0.1:%d" % CP_PORT, "-cluster-insecure", "-cluster-db", "/data/cluster.json"] + extra
     r = sh("docker", "run", "-d", "--name", NAME, "--network", "host", "-v", "/data",
            "-e", "CULVERT_SESSION_SECRET=" + os.urandom(32).hex(), image, *extra)
     if r.returncode != 0:
@@ -80,9 +94,13 @@ try:
         print(sh("docker", "logs", "--tail", "30", NAME).stdout[-1500:])
         sys.exit(2)
     try:
-        held = [ui_request(), ui_request()]  # young connections: Go's Shutdown waits for them
+        if CP:
+            time.sleep(1.5)  # the control-plane listener binds after /ready
+            held = [socket.create_connection(("127.0.0.1", CP_PORT), timeout=5)]
+        else:
+            held = [ui_request(), ui_request()]  # young connections: Go's Shutdown waits for them
     except OSError as e:
-        print("INVALID: could not open the admin-UI requests on port %d: %s" % (UI_PORT, e))
+        print("INVALID: could not open the %s: %s" % ("control-plane connection on port %d" % CP_PORT if CP else "admin-UI requests on port %d" % UI_PORT, e))
         sys.exit(2)
     t0 = time.time()
     stop = subprocess.Popen(["docker", "stop", "-t", GRACE, NAME], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

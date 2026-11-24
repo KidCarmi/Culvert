@@ -294,3 +294,48 @@ func TestRecent_TailWindowLargerThanFile(t *testing.T) {
 		t.Error("first event should be i=0 (window reached file head)")
 	}
 }
+
+func TestHasSucceeded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	if found, err := HasSucceeded(path, "op1", "k:reconciled"); err != nil || found {
+		t.Fatalf("missing log: found=%v err=%v, want false, nil", found, err)
+	}
+	l, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []Event{
+		{Actor: "a", OpID: "op1", Kind: "k:reconciled", Outcome: OutcomeFailed},    // wrong outcome
+		{Actor: "a", OpID: "op2", Kind: "k:reconciled", Outcome: OutcomeSucceeded}, // other op
+		{Actor: "a", OpID: "op1", Kind: "k:other", Outcome: OutcomeSucceeded},      // other kind
+	} {
+		if err := l.Write(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if found, err := HasSucceeded(path, "op1", "k:reconciled"); err != nil || found {
+		t.Fatalf("no matching entry yet: found=%v err=%v", found, err)
+	}
+	if err := l.Write(Event{Actor: "a", OpID: "op1", Kind: "k:reconciled", Outcome: OutcomeSucceeded}); err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Close()
+	// A torn final line (crash mid-append) mentioning the op is skipped, not fatal.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(`{"op_id":"op1","kind":"k:reconc`)
+	_ = f.Close()
+	if found, err := HasSucceeded(path, "op1", "k:reconciled"); err != nil || !found {
+		t.Fatalf("matching entry: found=%v err=%v, want true, nil", found, err)
+	}
+	// An unreadable log is an error, so the caller writes rather than skips.
+	if _, err := HasSucceeded(dir, "op1", "k:reconciled"); err == nil {
+		t.Error("reading a directory as the log must return an error")
+	}
+	if _, err := HasSucceeded(path, "", "k"); err == nil {
+		t.Error("empty op id must be rejected")
+	}
+}

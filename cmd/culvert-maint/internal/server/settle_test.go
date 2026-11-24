@@ -9,11 +9,13 @@ import (
 )
 
 func settleServer(window time.Duration, startedAgo time.Duration) *Server {
-	return &Server{opts: Options{Cfg: &config.Config{InterruptedSettle: window}}, startedAt: time.Now().Add(-startedAgo)}
+	// startHazard: the previous process may have left a compose command unfinished.
+	return &Server{opts: Options{Cfg: &config.Config{InterruptedSettle: window}}, startedAt: time.Now().Add(-startedAgo), startHazard: true}
 }
 
-// TestSettleRemaining_FromProcessStart: the window is counted from the start of
-// this process; once it is over nothing waits; 0 turns the wait off.
+// TestSettleRemaining_FromProcessStart: when the previous process may have left
+// a compose command unfinished, the window is counted from the start of this
+// process; once it is over nothing waits; 0 turns the wait off.
 func TestSettleRemaining_FromProcessStart(t *testing.T) {
 	if r := settleServer(time.Minute, 10*time.Second).settleRemaining(); r < 49*time.Second || r > 50*time.Second {
 		t.Errorf("10s into a 1m window: remaining = %v, want about 50s", r)
@@ -23,6 +25,24 @@ func TestSettleRemaining_FromProcessStart(t *testing.T) {
 	}
 	if r := settleServer(0, 0).settleRemaining(); r != 0 {
 		t.Errorf("interrupted_settle=0: remaining = %v, want 0 (off)", r)
+	}
+}
+
+// TestSettleRemaining_NoWindowWithoutAHazard: a start that found no marker of
+// an unfinished compose command (and no interrupted record) has nothing to
+// wait for. A cut command of this process still opens the window.
+func TestSettleRemaining_NoWindowWithoutAHazard(t *testing.T) {
+	s := settleServer(time.Minute, 0)
+	s.startHazard = false
+	if r := s.settleRemaining(); r != 0 {
+		t.Fatalf("clean predecessor, just started: remaining = %v, want 0", r)
+	}
+	if note, err := s.settleInterrupted(context.Background()); err != nil || note != nil {
+		t.Errorf("clean predecessor: note=%q err=%v, want no wait", note, err)
+	}
+	s.noteMutationCut()
+	if r := s.settleRemaining(); r < 59*time.Second {
+		t.Errorf("after a cut command of this process: remaining = %v, want about the whole window", r)
 	}
 }
 

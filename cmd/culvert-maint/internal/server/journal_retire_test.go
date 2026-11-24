@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -126,5 +127,49 @@ func TestRetire_UnreadableJournalRetiresNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(jnl.Dir(), staleOpULID+".json")); err != nil {
 		t.Errorf("stale record gone: %v", err)
+	}
+}
+
+// TestRetire_AuditFailureKeepsRecord: a record is removed only after its
+// supersession audit entry has been written (AGT-005, "the removal is audited
+// first"). With the audit log refusing writes, nothing is retired, the record
+// on disk is unchanged, and no entry names the pair.
+//
+// This is the later-success counterpart of
+// TestStartupReconcile_AuditFailureKeepsRecord. Without it, swapping the
+// audit write and the journal removal in retireSupersededRecords passes every
+// other test and the lifecycle conformance run: they observe the state after
+// both calls succeeded, where the two orders are indistinguishable.
+func TestRetire_AuditFailureKeepsRecord(t *testing.T) {
+	srv, jnl := newJournalTestServer(t)
+	srv.opts.Cfg.ProxyRepo = repo
+	seedStaleRecord(t, jnl)
+
+	before, found, err := jnl.Read(staleOpULID)
+	if err != nil || !found {
+		t.Fatalf("fixture: stale record not readable: found=%v err=%v", found, err)
+	}
+	if err := srv.opts.Audit.Close(); err != nil { // every later audit write fails
+		t.Fatalf("fixture: close audit log: %v", err)
+	}
+
+	if got := srv.retireSupersededRecords(testOpULID, "uid=0"); len(got) != 0 {
+		t.Errorf("retired %v although the audit entry could not be written", got)
+	}
+	after, found, err := jnl.Read(staleOpULID)
+	if err != nil || !found {
+		t.Fatalf("record removed although the audit entry could not be written: found=%v err=%v", found, err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("kept record changed:\nbefore %+v\nafter  %+v", before, after)
+	}
+	events, err := audit.Recent(srv.opts.AuditPath, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range events {
+		if events[i].OpID == staleOpULID && events[i].Params["superseded_by"] == testOpULID {
+			t.Errorf("a closed audit log recorded the supersession: %+v", events[i])
+		}
 	}
 }
