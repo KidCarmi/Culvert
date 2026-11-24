@@ -49,7 +49,7 @@ type ConfigSnapshot struct {
 
 	// Full policy sync — all policy state pushed from CP to DP.
 	DefaultAction     string           `json:"default_action"`         // "allow" or "deny"
-	PolicyRules       []PolicyRule     `json:"policy_rules,omitempty"` // ordered policy rules
+	PolicyRules       ruleList         `json:"policy_rules,omitempty"` // ordered policy rules
 	PolicyVersion     int64            `json:"policy_version"`         // monotonic policy version
 	SSLBypassPatterns []string         `json:"ssl_bypass_patterns,omitempty"`
 	URLCategories     []CategoryEntry  `json:"url_categories,omitempty"`
@@ -705,6 +705,33 @@ var dpControlPlanePollFailing atomic.Bool
 // clear signal (fail-open on new threats). The CP's own local proxying is
 // unaffected (its stores already hold the data); only distribution is gated.
 func (s *ConfigStore) Update(snap ConfigSnapshot) error {
+	return s.UpdateFrom(func() ConfigSnapshot { return snap })
+}
+
+// UpdateFrom is Update with the snapshot CAPTURED INSIDE the commit: capture
+// runs on every attempt, after that attempt read the committed base it will
+// commit onto. Publishing live state must go through it
+// (publishCurrentConfigSnapshot), never through Update with a snapshot the
+// caller captured beforehand.
+//
+// Why: a publisher that captured first and committed later could overwrite a
+// newer publish with older state at a HIGHER version. Request A captures
+// rules [a]; request B adds b, captures [a,b] and commits v2; A's commit
+// loses the race, retries with the snapshot it already held, and commits [a]
+// as v3 — the fleet is served a rulebase missing a committed edit, and every
+// data plane ratchets past the version that had it. Any two publishers could
+// do this to each other (a settings or PAC publish against a policy edit).
+//
+// With the capture inside the attempt the order is fixed without a new lock:
+// an attempt commits only onto the exact base it read (committedIsLocked),
+// and it captured AFTER reading that base, so the snapshot a commit installs
+// was captured after every earlier commit — and therefore after every change
+// whose own publish had already committed. A publisher that loses the race
+// re-captures. capture runs outside s.mu (commitPublish builds unlocked), so
+// it may read any store, including this one (committedCPAddresses), and it is
+// called with exactly the locks the caller already held when it used to call
+// CurrentConfigSnapshot itself.
+func (s *ConfigStore) UpdateFrom(capture func() ConfigSnapshot) error {
 	// CHAOS-71: a full publish NEVER decides the CP address list. The list has
 	// exactly one writer, the owned address publish (updateCPAddressesBound,
 	// bound to the ownership generation); a full publish carries the COMMITTED
@@ -724,7 +751,7 @@ func (s *ConfigStore) Update(snap ConfigSnapshot) error {
 	_, err := s.commitPublish(publishPlan{
 		kind: publishFull,
 		build: func(cur committedView) (ConfigSnapshot, publishAct) {
-			cand := snap
+			cand := capture()
 			cand.CPAddresses = cur.snap.CPAddresses
 			return cand, publishCommit
 		},
@@ -1332,7 +1359,7 @@ func (s *ConfigStore) LastPublishError() (msg, ts string) {
 // rejection is logged, alerted, and surfaced via LastPublishError — but the
 // error is returned so an admin handler can also report it inline.
 func publishCurrentConfigSnapshot() error {
-	return globalConfigStore.Update(CurrentConfigSnapshot())
+	return globalConfigStore.UpdateFrom(CurrentConfigSnapshot)
 }
 
 // seedReplicatedSnapshot sets the in-memory snapshot from a replicated HA bundle
@@ -1456,7 +1483,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 	err := applySnapshotMutations(snap)
 	endConfigSnapshotApplyMutation()
 	if err == nil {
-		policyStore.clearRulesetRefusal("control-plane snapshot")
+		policyStore.clearSnapshotRulesetRefusals()
 	}
 	return err
 }

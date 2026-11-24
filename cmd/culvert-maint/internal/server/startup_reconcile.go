@@ -204,6 +204,33 @@ func (t *ReconcileTracker) finish(state string, at time.Time) {
 	t.mu.Unlock()
 }
 
+// holdInstanceLock makes sure this process holds the state_dir instance lock
+// before the reconcile reads a record. main takes it before anything else and
+// hands it over (Options.InstanceLock), so in production this only confirms
+// it; a server built without it (tests) takes it here, as before ADR-0062.
+func (s *Server) holdInstanceLock(t *ReconcileTracker) bool {
+	s.mu.Lock()
+	held := s.reconcileLock != nil
+	s.mu.Unlock()
+	if held {
+		return true
+	}
+	lock, err := s.opts.Journal.LockReconcile()
+	if err != nil {
+		state := ReconcileLockUnavailable
+		if errors.Is(err, journal.ErrLockHeld) {
+			state = ReconcileSkippedInstance
+		}
+		t.setState(state)
+		log.Printf("culvert-maint: startup reconcile not run (%s); interrupted operations are reported only", state)
+		return false
+	}
+	s.mu.Lock()
+	s.reconcileLock = lock
+	s.mu.Unlock()
+	return true
+}
+
 // PrepareStartupReconcile arms the converge reconcile. Call it after New and
 // before Serve, and only when reconcile_on_startup = "converge". It never
 // fails startup: anything that prevents a safe reconcile is reported in the
@@ -213,19 +240,9 @@ func (s *Server) PrepareStartupReconcile(t *ReconcileTracker) {
 		return
 	}
 	s.reconcileTracker = t
-	lock, err := s.opts.Journal.LockReconcile()
-	if err != nil {
-		state := ReconcileLockUnavailable
-		if errors.Is(err, journal.ErrLockHeld) {
-			state = ReconcileSkippedInstance
-		}
-		t.setState(state)
-		log.Printf("culvert-maint: startup reconcile not run (%s); interrupted operations are reported only", state)
+	if !s.holdInstanceLock(t) {
 		return
 	}
-	s.mu.Lock()
-	s.reconcileLock = lock
-	s.mu.Unlock()
 
 	recs, err := s.opts.Journal.List()
 	if err != nil {
@@ -379,6 +396,20 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 		// this is an I/O failure: report it, change nothing.
 		return ReconcileRecord{OpID: recID, Kind: "unknown", Decision: actV2RecoveryRequired.String(),
 			Reason: "journal_unreadable", Outcome: OutcomeRecoveryRequired}
+	}
+	if rec.FromNewerAgent() {
+		// ADR-0062: a record a newer agent wrote may carry facts this build
+		// cannot read (and the journal refuses to rewrite or remove it). It is
+		// reported and never acted on, before any Docker read.
+		return ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind), Decision: actV2RecoveryRequired.String(),
+			Reason: "record_from_newer_agent", Outcome: OutcomeRecoveryRequired}
+	}
+	if rec.TerminalOutcome != "" && rec.TerminalSafe {
+		// The operation ended with its end state proven safe; only its terminal
+		// audit entry or its removal was cut, and startup retries both. There
+		// is nothing for the reconcile to decide (Codex review on #2102).
+		return ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind), Decision: actV2Defer.String(),
+			Reason: "terminal_cleanup_pending", Outcome: OutcomeDeferred}
 	}
 	c := &reconcileCase{opID: opID, rec: rec, in: s.reconcileInputsFor(rec)}
 	c.out = ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind)}
@@ -649,6 +680,11 @@ func (s *Server) verifiedOnPrior(ctx context.Context, c *reconcileCase) bool {
 // entry is not (AGT-005).
 func (s *Server) retire(c *reconcileCase) ReconcileRecord {
 	c.out.Outcome = OutcomeConverged
+	// A kept record of an operation that ended: its own terminal entry first
+	// (normally already done by initJournal), or it is not retired.
+	if c.rec.TerminalOutcome != "" && ensureTerminalAudited(s.opts.Audit, c.rec, s.opts.Cfg.ProxyRepo) != nil {
+		return s.keepRecord(c, OutcomeConvergedNotRetired)
+	}
 	if !s.reconciledAlreadyAudited(c) {
 		if err := s.auditReconciled(c, audit.OutcomeSucceeded); err != nil {
 			return s.keepRecord(c, OutcomeConvergedNotRetired)

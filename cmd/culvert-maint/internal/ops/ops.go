@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
+
+	"culvert-maint/internal/idem"
 )
 
 // State is the operation state-machine value.
@@ -61,6 +63,10 @@ type Op struct {
 	Params         map[string]interface{} `json:"params,omitempty"`
 	Progress       []Stage                `json:"progress"`
 	Result         map[string]interface{} `json:"result,omitempty"`
+
+	// fingerprint is the idempotency fingerprint of (Kind, Params) taken at
+	// admission of a keyed op. Unexported: it is not part of the API record.
+	fingerprint string
 }
 
 // Operation kind constants. Stable strings; part of the audit schema.
@@ -202,6 +208,9 @@ func IsConflict(err error) bool {
 type idempEntry struct {
 	OpID string
 	When time.Time
+	// Fingerprint is idem.Fingerprint(kind, params) of the admitted request; a
+	// later submission under the same key must match it.
+	Fingerprint string
 }
 
 // DefaultIdempCacheTTL bounds how long an idempotency-cache entry
@@ -240,8 +249,10 @@ type Manager struct {
 	// idempCache maps "actor|kind|idempotency_key" → most recent op_id
 	// admitted for that tuple. Entries are purged opportunistically
 	// once they exceed idempCacheTTL. Lifetime = process lifetime;
-	// on restart the cache is empty (which is correct: prior ops
-	// were marked interrupted, so a resubmit must produce a fresh op).
+	// on restart the cache is empty, and the durable store (idem, below)
+	// is what answers a same-key retry: with the recorded result of a
+	// finished op, or with "interrupted, outcome unknown" for one that
+	// has none. Without a store a resubmit after a restart is a fresh op.
 	idempCache    map[string]idempEntry
 	idempCacheTTL time.Duration
 	// activeRetention / maxActive bound the active map: without them terminal
@@ -251,6 +262,9 @@ type Manager struct {
 	activeRetention time.Duration
 	maxActive       int
 	now             func() time.Time
+	// idem is the optional durable half of idempCache (idempotency.go). nil
+	// keeps the cache process-local, as it was before the store existed.
+	idem *idem.Store
 }
 
 // NewManager returns a fresh Manager. clock may be nil (defaults to
@@ -331,6 +345,12 @@ func (m *Manager) Begin(kind, actor, idempotencyKey string, params map[string]in
 //
 // Empty idempotencyKey disables dedup entirely; every call admits a
 // fresh op.
+//
+// A keyed submission is also compared with the request first admitted under
+// the key: a different payload returns *IdempotencyMismatch and nothing runs.
+// With a durable store installed (idempotency.go) the answer survives a
+// restart, a keyed op is recorded on disk before it is admitted, and a store
+// that cannot be read or written returns *IdempotencyUnavailable.
 func (m *Manager) BeginIdempotent(kind, actor, idempotencyKey string, params map[string]interface{}) (*Op, bool, error) {
 	if kind == "" || actor == "" {
 		return nil, false, errors.New("ops: kind and actor are required")
@@ -351,15 +371,15 @@ func (m *Manager) BeginIdempotent(kind, actor, idempotencyKey string, params map
 	m.purgeIdempCacheLocked()
 	m.purgeActiveLocked() // bound the active map on every admission
 
+	fingerprint := ""
 	if idempotencyKey != "" {
-		cacheKey := idempCacheKey(actor, kind, idempotencyKey)
-		if entry, ok := m.idempCache[cacheKey]; ok {
-			if existing, alive := m.active[entry.OpID]; alive {
-				return m.cloneLocked(existing), true, nil
-			}
-			// Cache references a dropped op; clear and fall through
-			// to admit a fresh op. Defensive against future eviction.
-			delete(m.idempCache, cacheKey)
+		fp, ferr := idem.Fingerprint(kind, requestParams(params))
+		if ferr != nil {
+			return nil, false, ferr
+		}
+		fingerprint = fp
+		if prior, rerr := m.priorForKeyLocked(kind, actor, idempotencyKey, fingerprint); prior != nil || rerr != nil {
+			return prior, rerr == nil, rerr
 		}
 	}
 
@@ -377,6 +397,13 @@ func (m *Manager) BeginIdempotent(kind, actor, idempotencyKey string, params map
 		Started:        m.now(),
 		Params:         params,
 		Progress:       []Stage{},
+		fingerprint:    fingerprint,
+	}
+	// Write-ahead: the durable admission record exists before the op does. If
+	// it cannot be written the request is refused with nothing admitted, no
+	// lock taken and nothing for a caller to run.
+	if err := m.admitDurableLocked(op); err != nil {
+		return nil, false, err
 	}
 	if stateChanging {
 		op.LockHeldBy = op.ID
@@ -385,8 +412,9 @@ func (m *Manager) BeginIdempotent(kind, actor, idempotencyKey string, params map
 	m.active[op.ID] = op
 	if idempotencyKey != "" {
 		m.idempCache[idempCacheKey(actor, kind, idempotencyKey)] = idempEntry{
-			OpID: op.ID,
-			When: m.now(),
+			OpID:        op.ID,
+			When:        m.now(),
+			Fingerprint: fingerprint,
 		}
 	}
 	return m.cloneLocked(op), false, nil
@@ -450,12 +478,14 @@ func (m *Manager) HasLiveIdempotent(actor, kind, idempotencyKey string) bool {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	entry, ok := m.idempCache[idempCacheKey(actor, kind, idempotencyKey)]
-	if !ok {
-		return false
+	if entry, ok := m.idempCache[idempCacheKey(actor, kind, idempotencyKey)]; ok {
+		if _, alive := m.active[entry.OpID]; alive {
+			return true
+		}
 	}
-	_, alive := m.active[entry.OpID]
-	return alive
+	// A durable record (or a store that will refuse the key) also means this
+	// submission starts no new work, so it must not need an execution slot.
+	return m.idem != nil && m.idem.Has(actor, kind, idempotencyKey)
 }
 
 // IsRunning reports whether opID is a known, still-running (non-terminal) op.
@@ -569,6 +599,7 @@ func (m *Manager) Finish(opID string, finalState State, reason FailureReason, re
 	if m.holder != nil && m.holder.ID == opID {
 		m.holder = nil
 	}
+	m.recordOutcomeLocked(op)
 	return nil
 }
 
@@ -610,12 +641,21 @@ func (m *Manager) Holder() *Op {
 }
 
 // journaledKinds are the state-changing kinds whose in-flight state is recorded
-// in the crash-recovery journal (RISK-022): the destructive day-2 Docker
-// operations whose interruption needs post-restart reconciliation. Other
-// state-changing kinds (backup/restore/cleanup) have their own recovery paths.
+// in the crash-recovery journal (RISK-022): the operations that stop or recreate
+// the proxy, so that one cut short by an agent death is reported after the
+// restart instead of vanishing. upgrades.apply and rollbacks.create change the
+// image; restore.commit (and rollbacks.create mode=data, which runs the same
+// stages) stops the stack and replaces the data directory. Other state-changing
+// kinds (backup, cleanup) neither stop the proxy nor swap its data.
+//
+// Being journaled means "written before it runs, reported if interrupted". It
+// does not mean "reconciled at startup": what the opt-in startup reconcile may
+// act on is decided per kind in server/reconcile_decision_v2.go, and a
+// restore-class record is never acted on.
 var journaledKinds = map[string]struct{}{
 	KindUpgradeApply:   {},
 	KindRollbackCreate: {},
+	KindRestoreCommit:  {},
 }
 
 // IsJournaled reports whether kind's in-flight state is recorded in the
@@ -637,6 +677,10 @@ type InterruptedOp struct {
 	// Result is attached to the op as its result: what the journal knows about
 	// how far the op got. May be nil.
 	Result map[string]interface{}
+	// FailureReason is the op's own failure reason when it did not die but
+	// ended failed and its record was kept (ADR-0062 slice 1). Empty for an
+	// interrupted op, which is marked agent_restart_interrupted.
+	FailureReason FailureReason
 }
 
 // MarkAllInterrupted registers each orphaned op (recovered from the on-disk
@@ -664,12 +708,16 @@ func (m *Manager) MarkAllInterrupted(orphans []InterruptedOp) int {
 		if !o.Started.IsZero() {
 			started = o.Started
 		}
+		reason := ReasonAgentRestartInterrupted
+		if o.FailureReason != "" {
+			reason = o.FailureReason
+		}
 		m.active[o.OpID] = &Op{
 			ID:            o.OpID,
 			Kind:          o.Kind,
 			Actor:         o.Actor,
 			State:         StateFailed,
-			FailureReason: string(ReasonAgentRestartInterrupted),
+			FailureReason: string(reason),
 			Started:       started,
 			Finished:      &finished,
 			Progress:      []Stage{},

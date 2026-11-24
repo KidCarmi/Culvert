@@ -378,12 +378,7 @@ func TestAuthGate_RejectsForeignPeer(t *testing.T) {
 	go func() { _ = srv.Serve(ctx) }()
 	defer func() { _ = srv.Close() }()
 
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(sock); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitSocketAccepting(sock)
 
 	resp, err := udsClient(sock).Get("http://unix/v1/health") //nolint:noctx // test-controlled call
 	if err != nil {

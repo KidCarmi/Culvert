@@ -356,7 +356,16 @@ func stepCrash(s State, e string) State {
 
 func stepReport(s State) State {
 	failed := s.FailStage != ""
-	s.PC, s.JR, s.Armed = pcDone, "removed", false
+	s.PC = pcDone
+	// ADR-0062 slice 1 (server/terminal_record.go): the record is removed at
+	// terminal when the op succeeded, failed before the write-ahead barrier, or
+	// its inline rollback passed its gate and verify. Otherwise it is KEPT at
+	// the phase the op last wrote, rollback_armed included (stampTerminal
+	// changes only the terminal fields), for an operator, a later success or
+	// the converge reconcile's armed finish.
+	if !failed || s.RbOK || !dangerJR(s.JR) {
+		s.JR, s.Armed = "removed", false
+	}
 	if s.Ev != evFresh { // option C: one read-only final capture when evidence is stale or missing
 		s.Ev = captureEv(s)
 	}
@@ -512,6 +521,11 @@ func stepRbRestart(s State, e string) State {
 	return s
 }
 
+// dangerJR reports whether a journal phase is at or past the write-ahead barrier.
+func dangerJR(jr string) bool {
+	return jr == jrRestarting || jr == "restarted" || jr == "verified"
+}
+
 // ObservedFields lists every field Observe produces. Properties may reference only these.
 var ObservedFields = []string{"prior", "same", "backup", "rb", "th", "ph", "pc", "running", "tag", "jr",
 	"fail_stage", "reason", "post_fail", "rb_att", "rb_failed", "rb_restarted", "rb_ok", "op", "tid",
@@ -542,7 +556,7 @@ func (Model) Observe(s State) map[string]any {
 		"reason": s.Reason, "post_fail": s.PostFail, "rb_att": s.RbAtt, "rb_failed": s.RbFailed,
 		"rb_restarted": s.RbRestarted, "rb_ok": s.RbOK, "op": s.Op, "tid": s.TID,
 		"terminal":        s.PC == pcDone,
-		"danger_phase":    s.JR == jrRestarting || s.JR == "restarted" || s.JR == "verified",
+		"danger_phase":    dangerJR(s.JR),
 		"rollback_armed":  rollbackArmed(s),
 		"tag_ahead":       tagAhead(s),
 		"serving_healthy": healthy(s, s.Running),

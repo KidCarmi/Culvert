@@ -128,6 +128,13 @@ func TestReconcileDecisionV2_FailureMatrix(t *testing.T) {
 		{"S2 standalone rollback, tag on target", all(standalone, runTag(idP, idT)), actV2RecoveryRequired, "rollback_target_partially_applied"},
 		{"S3 standalone rollback, target live", all(standalone, runTag(idT, idT)), actV2RecoveryRequired, "rollback_target_partially_applied"},
 		{"D1 data rollback", func(in *reconcileInputsV2) { in.Kind, in.Mode = ops.KindRollbackCreate, "data" }, actV2RecoveryRequired, "data_window_manual"},
+		{"D2 restore.commit", func(in *reconcileInputsV2) { in.Kind, in.Mode = ops.KindRestoreCommit, "" }, actV2RecoveryRequired, "restore_window_manual"},
+		{"D2 restore.commit, Docker unreadable (never a deferral: Docker is not read for it)", func(in *reconcileInputsV2) {
+			in.Kind, in.Mode, in.DockerReadable = ops.KindRestoreCommit, "", false
+		}, actV2RecoveryRequired, "restore_window_manual"},
+		{"D2 restore.commit, stack down", func(in *reconcileInputsV2) {
+			in.Kind, in.Mode, in.RunningImageID, in.ContainerRunning = ops.KindRestoreCommit, "", "", false
+		}, actV2RecoveryRequired, "restore_window_manual"},
 		{"X1 docker unreadable", all(runTag(idP, idT), func(in *reconcileInputsV2) { in.DockerReadable = false }), actV2Defer, "docker_unavailable"},
 		{"X2 running another image", runTag(idX, idT), actV2RecoveryRequired, "docker_state_unrecognised"},
 		{"X3 tag on another image", runTag(idP, idX), actV2RecoveryRequired, "docker_state_unrecognised"},
@@ -165,7 +172,8 @@ type v2Domains struct {
 
 func newV2Domains() v2Domains {
 	return v2Domains{
-		kindMode: [][2]string{{ops.KindUpgradeApply, ""}, {ops.KindRollbackCreate, "image"}, {ops.KindRollbackCreate, "data"}, {ops.KindUpgradeApply, "data"}},
+		kindMode: [][2]string{{ops.KindUpgradeApply, ""}, {ops.KindRollbackCreate, "image"}, {ops.KindRollbackCreate, "data"}, {ops.KindUpgradeApply, "data"},
+			{ops.KindRestoreCommit, ""}},
 		phase: []journal.Phase{journal.PhaseAdmitted, journal.PhaseCaptured, journal.PhaseResolved, journal.PhasePulled,
 			journal.PhaseRestarting, journal.PhaseRestarted, journal.PhaseVerified},
 		attempts:    [][2]int{{0, 2}, {2, 2}},
@@ -320,6 +328,8 @@ func v2PropertyViolations(in *reconcileInputsV2, v reconcileVerdictV2, decide fu
 		return "RV0 verdict outside the closed action set"
 	case data && v.Action != actV2RecoveryRequired:
 		return "RV1 a data rollback must only be reported"
+	case in.Kind == ops.KindRestoreCommit && v.Action != actV2RecoveryRequired:
+		return "RV1 an interrupted restore must only be reported"
 	case imageKind && !in.DockerReadable && v.Action != actV2Defer:
 		return "RV2 Docker unreadable must defer"
 	case v.Action == actV2Defer && in.DockerReadable:
@@ -576,7 +586,7 @@ func TestReconcileDecisionV2_ExhaustiveProperties(t *testing.T) {
 		"finish_rollback_retag/rollback_armed_tag_not_moved",
 		"recovery_required/rollback_armed_at_verified", "recovery_required/armed_rollback_prior_not_ready",
 		"defer/docker_unavailable",
-		"recovery_required/data_window_manual", "recovery_required/unknown_kind_or_mode",
+		"recovery_required/data_window_manual", "recovery_required/restore_window_manual", "recovery_required/unknown_kind_or_mode",
 		"recovery_required/reconcile_exhausted", "recovery_required/container_not_running",
 		"recovery_required/journal_contradicts_docker", "recovery_required/stack_down_unverifiable",
 		"recovery_required/tag_differs_from_running", "recovery_required/running_not_prior",
@@ -646,6 +656,18 @@ func TestReconcileDecisionV2_NegativeControls(t *testing.T) {
 		"act while Docker is unreadable": func(in reconcileInputsV2) reconcileVerdictV2 {
 			if !in.DockerReadable && in.Kind == ops.KindUpgradeApply {
 				return reconcileVerdictV2{actV2Noop, "safe_boundary_unchanged"}
+			}
+			return reconcileDecisionV2(in)
+		},
+		"start the stack an interrupted restore left down": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if in.Kind == ops.KindRestoreCommit && in.DockerReadable && in.RunningImageID == "" {
+				return reconcileVerdictV2{actV2FinishRollback, "rollback_interrupted"}
+			}
+			return reconcileDecisionV2(in)
+		},
+		"defer an interrupted restore instead of reporting it": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if in.Kind == ops.KindRestoreCommit && !in.DockerReadable {
+				return reconcileVerdictV2{actV2Defer, "docker_unavailable"}
 			}
 			return reconcileDecisionV2(in)
 		},

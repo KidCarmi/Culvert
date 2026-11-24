@@ -107,7 +107,7 @@ func (s *Server) rollbackImage(w http.ResponseWriter, r *http.Request, peer auth
 
 	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindRollbackCreate, req.IdempotencyKey, params, func() ([]ops.FlowStage, *opError) {
 		return s.buildImageRollbackStages(targetRef), nil
-	}, withRetiresInterrupted(func() bool { return true }))
+	}, withRetiresInterrupted(func() bool { return true }), withEndStateSafe(imageRollbackEndStateSafe))
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)
 		return

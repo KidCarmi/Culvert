@@ -174,6 +174,10 @@ func commands(s State, e string, n counts) (cmds []string, plan []PlanEntry) {
 	return is.cmds, is.plan
 }
 
+// journalEmptyAtTerminal is whether the op's own journal record is gone once it
+// is terminal: the model's report step decides it (stepReport, ADR-0062 slice 1).
+func journalEmptyAtTerminal(after State) bool { return after.JR == "removed" }
+
 var upModes = map[string]string{evUpFailStale: "fail_stale", evUpFailRecreated: "fail_recreated", evOKStale: "ok_stale"}
 
 func (is *issued) restart(s State, e string) {
@@ -302,7 +306,7 @@ func (w *walker) rec(s State, script []ScriptStep, cmds []string, plan []PlanEnt
 		fState, fDigest, fImage := finalRunningExpect(t)
 		v := ApplyVector{Params: paramsOf(s), Script: step, Plan: extend(plan, p...),
 			Expect: ApplyExpectation{FinalState: fState, FinalDigest: fDigest, FinalImage: fImage,
-				Op: t.Op, Reason: t.Reason, Running: t.Running, Tag: t.Tag, JournalEmpty: true,
+				Op: t.Op, Reason: t.Reason, Running: t.Running, Tag: t.Tag, JournalEmpty: journalEmptyAtTerminal(t),
 				Cmds: collapse(extend(cmds, c...)), UpgradeSucceeded: t.Op == "succeeded", RollbackAttempted: t.RbAtt,
 				RollbackSucceeded: t.RbOK, RollbackSkippedReason: skippedReason(t), TagAhead: tagAhead(t)}}
 		// Deduplicate only IDENTICAL concrete inputs (every parameter + the fault plan). Keying on

@@ -75,11 +75,12 @@ type Status struct {
 	LastOperationState        string                 `json:"last_operation_state,omitempty"`
 	Extra                     map[string]interface{} `json:"extra,omitempty"`
 
-	// InterruptedOperations lists the image-changing operations a previous
-	// agent process left unfinished, read from the crash-recovery journal on
-	// every request — so the list outlives the in-memory operation record and
-	// any number of restarts, and empties only when a later image change
-	// succeeds. Absent when there are none.
+	// InterruptedOperations lists the journaled operations (upgrades, rollbacks,
+	// restores) a previous agent process left unfinished, read from the
+	// crash-recovery journal on every request — so the list outlives the
+	// in-memory operation record and any number of restarts. An entry leaves it
+	// only when a later image change succeeds or, for an interrupted restore,
+	// when a later restore does (journal_retire.go). Absent when there are none.
 	InterruptedOperations []InterruptedOperation `json:"interrupted_operations,omitempty"`
 	// InterruptedOperationsError is set when the journal could not be read for
 	// this request. The list is then unknown, not empty.
@@ -172,6 +173,11 @@ type Options struct {
 	// When set, journaled ops (upgrades.apply / rollbacks.create) record their
 	// admission and have their record retired at terminal time.
 	Journal *journal.Journal
+	// InstanceLock is the state_dir instance lock main took before anything
+	// else (ADR-0062). The server owns it from New on and releases it on
+	// Close; the startup reconcile reuses it instead of locking again. Nil in
+	// tests that do not exercise it: the reconcile then takes the lock itself.
+	InstanceLock *journal.ReconcileLock
 
 	// Runner is the command runner used by D1.6b handlers. May be
 	// nil only in unit tests that exercise non-D1.6b paths; the
@@ -288,6 +294,7 @@ func New(opts Options) (*Server, error) {
 	srv := &Server{
 		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
 		mutations: mutations, startHazard: atOpen.Pending, startOnlyUp: atOpen.OnlyUp, settlePoll: defaultSettlePoll,
+		reconcileLock: opts.InstanceLock,
 	}
 	srv.startMarkerLive.Store(atOpen.NamesCommand)
 	return srv, nil
@@ -598,7 +605,9 @@ func (s *Server) handleOperationGet(w http.ResponseWriter, _ *http.Request, opID
 		http.Error(w, "{\"error\":\"invalid_op_id\"}", http.StatusBadRequest)
 		return
 	}
-	op := s.opts.Ops.Get(opID)
+	// GetRecorded also answers for a keyed op known only to the durable
+	// idempotency store (admitted by an earlier agent process).
+	op := s.opts.Ops.GetRecorded(opID)
 	if op == nil {
 		http.Error(w, "{\"error\":\"op_not_found\"}", http.StatusNotFound)
 		return

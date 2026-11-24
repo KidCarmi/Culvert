@@ -56,6 +56,42 @@ var validPhases = map[Phase]struct{}{
 	PhaseRestarting: {}, PhaseRestarted: {}, PhaseVerified: {},
 }
 
+// RestoreStage is how far a restore-class operation (restore.commit, or
+// rollbacks.create mode=data, which runs the same stages) got. It is written
+// AHEAD of each step: the value names the step that was about to start, or the
+// recorded result of the commit command. It is a key beside Phase, not a new
+// Phase, for the reason RollbackArmed is: an agent that predates it ignores the
+// key, whereas an unknown phase makes every older agent refuse to serve. A
+// restore record's Phase stays PhaseAdmitted.
+type RestoreStage string
+
+// RestoreStage values, in the order the restore flow reaches them.
+const (
+	RestoreStageAdmitted     RestoreStage = "admitted"      // admitted; no command has run
+	RestoreStagePreflight    RestoreStage = "preflight"     // about to run the read-only dry-run; the stack is still up
+	RestoreStageStopping     RestoreStage = "stopping"      // about to ask Docker to stop the stack (`compose down`)
+	RestoreStageCommitting   RestoreStage = "committing"    // about to run the commit command; its result is not recorded
+	RestoreStageCommitted    RestoreStage = "committed"     // the commit command returned success: the data directory was replaced
+	RestoreStageCommitFailed RestoreStage = "commit_failed" // the commit command returned an error
+	RestoreStageStarting     RestoreStage = "starting"      // committed; about to start the stack (`compose up`)
+	RestoreStageStarted      RestoreStage = "started"       // committed; `compose up` returned; the health check had not passed
+	// RestoreStageUnknown is what Read substitutes for a value this build does
+	// not know (a record written by a newer agent). No running operation writes
+	// it. It reports as "how far the restore got is not known", which is the
+	// conservative reading, and it keeps the record writable: startup rewrites
+	// every record it finds, and Write refuses a value outside the closed set.
+	RestoreStageUnknown RestoreStage = "unknown"
+)
+
+// validRestoreStages is the closed set accepted by Write. "" is a record that
+// carries no stage: every upgrade and image-rollback record, and a restore-class
+// record written by (or rewritten by) an agent that predates the key.
+var validRestoreStages = map[RestoreStage]struct{}{
+	"": {}, RestoreStageAdmitted: {}, RestoreStagePreflight: {}, RestoreStageStopping: {},
+	RestoreStageCommitting: {}, RestoreStageCommitted: {}, RestoreStageCommitFailed: {},
+	RestoreStageStarting: {}, RestoreStageStarted: {}, RestoreStageUnknown: {},
+}
+
 // Record is the durable per-op journal entry. One file per live op at
 // <reconcileDir>/<op_id>.json. Manifest digests are bare sha256 hex; refs are
 // repo@sha256:<digest>. All fields are plain data — no secrets (params never
@@ -71,7 +107,7 @@ var validPhases = map[Phase]struct{}{
 // be reconstructed afterward), which is why they live in the record.
 type Record struct {
 	OpID          string    `json:"op_id"`
-	Kind          string    `json:"kind"`                      // "upgrades.apply" | "rollbacks.create"
+	Kind          string    `json:"kind"`                      // "upgrades.apply" | "rollbacks.create" | "restore.commit"
 	Mode          string    `json:"mode,omitempty"`            // "" | "image" | "data" (rollbacks.create)
 	Phase         Phase     `json:"phase"`                     // write-ahead state
 	TargetRef     string    `json:"target_ref,omitempty"`      // repo@sha256:<digest> we move TO
@@ -127,6 +163,50 @@ type Record struct {
 	// kept. Diagnostics only: nothing reads them back to decide.
 	ReconcileDecision string `json:"reconcile_decision,omitempty"`
 	ReconcileOutcome  string `json:"reconcile_outcome,omitempty"`
+
+	// RestoreStage is set only on restore-class records (see RestoreStage).
+	// Omitted when empty, so an upgrade or image-rollback record is
+	// byte-identical to what it was before the key existed.
+	RestoreStage RestoreStage `json:"restore_stage,omitempty"`
+
+	// Terminal bookkeeping (ADR-0062 slice 1). Written by the operation's own
+	// process when it ends, never by a running stage: TerminalOutcome and
+	// TerminalAt BEFORE the terminal audit entry, TerminalAudited after it.
+	// A record that carries a TerminalOutcome did not die: it ended, and
+	// either its removal was cut short (startup finishes it) or it was KEPT
+	// because the operation could not prove the state it left safe.
+	//
+	// TerminalOutcome is "succeeded" or "failed:<failure_reason>".
+	// TerminalSafe is the operation's own verdict, taken in memory at its end,
+	// that the end state is proven safe (always true for a success): the
+	// record may be removed once the terminal audit is durable. Absent means
+	// not proven, which keeps the record. TerminalAudited is true once the
+	// terminal audit entry is known to be durable.
+	//
+	// These keys stay at schema 1 on purpose (no Schema bump, no fence). An
+	// agent released before ADR-0062 slice 2 drops them when it rewrites the
+	// record at a start, and is left with what it always understood: an
+	// ordinary interrupted record, which it reports, audits as interrupted and
+	// keeps until a later success retires it. That is the conservative
+	// reading of every one of them, so nothing an older agent does with the
+	// record is less safe than what this build does.
+	TerminalOutcome string     `json:"terminal_outcome,omitempty"`
+	TerminalAt      *time.Time `json:"terminal_at,omitempty"`
+	TerminalSafe    bool       `json:"terminal_safe,omitempty"`
+	TerminalAudited bool       `json:"terminal_audited,omitempty"`
+
+	// Schema is the record format (schema.go). Absent means 1, the format of
+	// every agent before ADR-0062. A record at SchemaFenced or above is written
+	// only behind the downgrade fence; one above SchemaCurrent came from a
+	// newer agent and is read-only here.
+	Schema int `json:"schema,omitempty"`
+
+	// extra holds the keys of a record read from a file that this build does
+	// not declare, so a rewrite carries them through unchanged (schema.go).
+	extra map[string]json.RawMessage
+	// restoreStageRaw is a restore stage this build does not know, kept so a
+	// rewrite writes it back instead of the "unknown" Read substituted.
+	restoreStageRaw string
 }
 
 const (
@@ -181,8 +261,14 @@ func (j *Journal) pathFor(opID string) (string, error) {
 // skipped write-ahead barrier would reopen the RISK-022 window under exactly the
 // disk-full condition the journal exists to survive.
 func (j *Journal) Write(rec Record) error {
+	if rec.FromNewerAgent() {
+		return fmt.Errorf("%w (op %s, schema %d > %d)", ErrNewerSchema, rec.OpID, rec.Schema, SchemaCurrent)
+	}
 	if _, ok := validPhases[rec.Phase]; !ok {
 		return fmt.Errorf("journal: invalid phase %q", rec.Phase)
+	}
+	if _, ok := validRestoreStages[rec.RestoreStage]; !ok {
+		return fmt.Errorf("journal: invalid restore stage %q", rec.RestoreStage)
 	}
 	path, err := j.pathFor(rec.OpID)
 	if err != nil {
@@ -191,6 +277,13 @@ func (j *Journal) Write(rec Record) error {
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("journal: marshal: %w", err)
+	}
+	if rec.EffectiveSchema() >= SchemaFenced {
+		// Fail-closed: the fence is durable before the first record an older
+		// agent must not act on.
+		if ferr := j.ensureFence(); ferr != nil {
+			return ferr
+		}
 	}
 	return atomicWrite(path, data, fileMode)
 }
@@ -220,6 +313,14 @@ func (j *Journal) Read(opID string) (rec *Record, found bool, err error) {
 	if _, ok := validPhases[r.Phase]; !ok {
 		return nil, true, fmt.Errorf("%w %s: unknown phase %q", ErrCorruptRecord, filepath.Base(path), r.Phase)
 	}
+	// An unknown restore stage does NOT fail closed. The stage is read only to
+	// word a report, never to decide a Docker action, so refusing to serve over
+	// it would take the whole API down for a value a newer agent wrote. It is
+	// replaced by the one member of the closed set that claims nothing.
+	if _, ok := validRestoreStages[r.RestoreStage]; !ok {
+		r.restoreStageRaw = string(r.RestoreStage)
+		r.RestoreStage = RestoreStageUnknown
+	}
 	// The file name is the record's identity: Write derives the path from
 	// OpID, so the two agree for every record this package wrote. The name has
 	// passed the strict-ULID check; the op_id INSIDE the file is unchecked
@@ -247,6 +348,9 @@ func (j *Journal) List() ([]Record, error) {
 			continue
 		}
 		opID := strings.TrimSuffix(e.Name(), fileExt)
+		if opID == fenceOpID {
+			continue // the downgrade fence is not an operation (schema.go)
+		}
 		rec, found, rerr := j.Read(opID)
 		if rerr != nil {
 			return nil, rerr // corrupt or invalid-name file — fail closed
@@ -267,10 +371,21 @@ func (j *Journal) Remove(opID string) error {
 	if err != nil {
 		return err
 	}
+	// A record a newer agent wrote is never removed here: its fields may say
+	// that the state it describes is not safe in a way this build cannot read.
+	if rec, found, rerr := j.Read(opID); rerr == nil && found && rec.FromNewerAgent() {
+		return fmt.Errorf("%w (op %s, schema %d > %d)", ErrNewerSchema, opID, rec.Schema, SchemaCurrent)
+	}
 	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
 		return fmt.Errorf("journal: remove %s: %w", filepath.Base(path), rerr)
 	}
-	return fsyncDir(j.dir)
+	if err := fsyncDir(j.dir); err != nil {
+		return err
+	}
+	// The record is gone either way; a fence that could not be released stays,
+	// which only keeps older agents out a little longer.
+	_ = j.releaseFenceIfUnused()
+	return nil
 }
 
 // atomicWrite writes data to path via a temp file in the same directory, then
