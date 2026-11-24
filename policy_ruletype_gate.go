@@ -238,6 +238,9 @@ const rulesetRefusalRelogEvery = 15 * time.Minute
 // next ACCEPTS a ruleset, so an operator who was not watching the log still
 // sees that the node is running an older policy than the one it was handed.
 func (ps *PolicyStore) noteRulesetRefused(door string, err error) {
+	if ps.silent {
+		return // a scratch store: nobody runs this policy
+	}
 	now := time.Now().UTC()
 	next := &policyRulesetRefusal{At: now, First: now, Logged: now, Count: 1, Door: door, Code: rulesetRefusalCode(err), Reason: err.Error()}
 	if prev := ps.rulesetRefused.Load(); prev != nil && prev.Door == next.Door && prev.Reason == next.Reason {

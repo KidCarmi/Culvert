@@ -14,11 +14,13 @@ import (
 // state-dependent check, validateRuleUniqueness. Every operator-facing door is
 // a composition of those two and nothing else; no door has rules of its own.
 //
-// The core separates two findings (ruleCheck). A rule that is INVALID — a pure
-// domain invariant, the same on every node — is refused at every one of these
-// doors. A rule this node merely CANNOT VERIFY right now (errRuleUnverifiable:
-// a Redirect host whose DNS lookup failed, a schedule timezone missing from
-// this host's database) is the door's decision, and this is the whole of it:
+// The core separates two findings (ruleCheck). A rule that is INVALID, or that
+// this node cannot ENFORCE as written (a schedule timezone it cannot load), is
+// refused at every one of these doors. A rule this node merely CANNOT VERIFY
+// right now (errRuleUnverifiable) is the door's decision. That class holds
+// only findings whose enforcement is fail-closed at the point of use, which
+// today is one: a Redirect host whose DNS lookup failed (ui_helpers.go states
+// the principle). The whole door policy:
 //
 //   - a SINGLE-RULE door refuses it (validateRuleIngress / validateIngressRule,
 //     the strict reading). The operator is present, is writing something new,
@@ -27,10 +29,9 @@ import (
 //   - a RULESET IMPORT installs it and says so, one warning per rule in the
 //     response, on the dry run as on the commit. Import is the restore path,
 //     used exactly when DNS may be down, and a backup of a healthy policy must
-//     not be lost to the state of the node it is restored on. This is safe: an
-//     unverified Redirect answers 403 at serve time until its host resolves to
-//     a public address (checkRedirectURL), and an unknown timezone is
-//     evaluated in UTC, as the stored doors have always done.
+//     not be lost to the resolver of the node it is restored on. This is safe
+//     because an unverified Redirect answers 403 at serve time until its host
+//     resolves to a public address (checkRedirectURL).
 //
 // How a set is composed:
 //
@@ -66,12 +67,15 @@ func validateIngressRule(rule PolicyRule, beside []PolicyRule, editPriority int)
 }
 
 // importRuleChecks holds the state-independent verdict of each rule of one
-// import, index-aligned with the backup's PolicyRules.
-type importRuleChecks []ruleCheck
+// import, index-aligned with the rule set it was computed for.
+type importRuleChecks struct {
+	verdicts []ruleCheck
+	first    *PolicyRule // identity of the rule set: its backing array and length
+}
 
 // importVerifyBudget bounds, per import request, the time spent on checks that
-// wait on the network. When it runs out the remaining lookups are abandoned at
-// once and their rules reported as unverified. A var so tests can shrink it.
+// wait on the network. When it runs out the remaining lookups are not made and
+// their rules are reported as unverified. A var so tests can shrink it.
 var importVerifyBudget = 10 * time.Second
 
 // checkImportRules runs the per-rule core over an import's rules within
@@ -79,20 +83,31 @@ var importVerifyBudget = 10 * time.Second
 func checkImportRules(ctx context.Context, rules []PolicyRule) importRuleChecks {
 	ctx, cancel := context.WithTimeout(ctx, importVerifyBudget)
 	defer cancel()
-	out := make(importRuleChecks, len(rules))
+	out := importRuleChecks{verdicts: make([]ruleCheck, len(rules)), first: firstRule(rules)}
 	for i := range rules {
-		out[i] = checkRuleIngress(ctx, rules[i])
+		out.verdicts[i] = checkRuleIngress(ctx, rules[i])
 	}
 	return out
 }
 
-// forRules returns c when it was computed for rules, and computes it otherwise
-// (a caller that did not come through the import door).
-func (c importRuleChecks) forRules(rules []PolicyRule) importRuleChecks {
-	if len(c) == len(rules) {
-		return c
+// firstRule is the address of a rule set's first element (nil when empty).
+func firstRule(rules []PolicyRule) *PolicyRule {
+	if len(rules) == 0 {
+		return nil
 	}
-	return checkImportRules(context.Background(), rules)
+	return &rules[0]
+}
+
+// forRules returns the verdicts for rules. Verdicts are reused only for the
+// very rule set they were computed for (same backing array, same length);
+// asked about any other set — a caller that did not come through the import
+// door, or a set that was rebuilt since — it validates again rather than hand
+// one set's verdicts to another.
+func (c importRuleChecks) forRules(rules []PolicyRule) []ruleCheck {
+	if len(c.verdicts) == len(rules) && c.first == firstRule(rules) {
+		return c.verdicts
+	}
+	return checkImportRules(context.Background(), rules).verdicts
 }
 
 // ingressReasonLimit bounds a validator's message where it is repeated to the
@@ -137,8 +152,8 @@ func (e *rulesetIngressError) Unwrap() error { return e.Err }
 // against the rules before it, then its own verdict from checks. It reads no
 // store and changes nothing. A nil error means every rule may be installed;
 // warnings name the ones this node could not verify.
-func validateIngressRuleset(rules []PolicyRule, checks importRuleChecks) (warnings []string, err error) {
-	checks = checks.forRules(rules)
+func validateIngressRuleset(rules []PolicyRule, verdicts importRuleChecks) (warnings []string, err error) {
+	checks := verdicts.forRules(rules)
 	for i := range rules {
 		err := validateRuleUniqueness(rules[i], rules[:i], -1)
 		if err == nil {
@@ -166,8 +181,8 @@ type policyMergeOutcome struct {
 // skipped with a warning. target is the running store for an import, or a
 // scratch copy of it for a preview (previewMergeImport): both walk the same
 // code, so the preview cannot promise what the apply will skip.
-func mergeImportedRules(target *PolicyStore, rules []PolicyRule, checks importRuleChecks) (out policyMergeOutcome) {
-	checks = checks.forRules(rules)
+func mergeImportedRules(target *PolicyStore, rules []PolicyRule, verdicts importRuleChecks) (out policyMergeOutcome) {
+	checks := verdicts.forRules(rules)
 	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
 	for i := range rules {
 		rule := rules[i]
@@ -214,25 +229,33 @@ func mergeImportedRules(target *PolicyStore, rules []PolicyRule, checks importRu
 // previewMergeImport reports what a merge-mode import of rules would do, by
 // running mergeImportedRules against a scratch copy of the running policy.
 func previewMergeImport(rules []PolicyRule, checks importRuleChecks) policyMergeOutcome {
-	scratch := newDraftCandidateStore() // staging: enforces nothing, persists nothing
+	// staging: enforces nothing, persists nothing. silent: writes no log line
+	// and no Diagnostics row for a policy nobody will run.
+	scratch := &PolicyStore{staging: true, silent: true}
 	scratch.ReplaceAll(policyStore.List())
 	return mergeImportedRules(scratch, rules, checks)
 }
 
 // importPolicyPreview is the policy-rule part of an import preview: the merge
 // effect line ("" in replace mode, which uses the generic one) and the
-// per-rule warnings the commit would return.
-func importPolicyPreview(b *configBackup, checks importRuleChecks, replaceMode bool) (effect string, warnings []string) {
+// per-rule warnings the commit would return. Computed once per preview.
+type importPolicyPreview struct {
+	effect   string
+	warnings []string
+}
+
+func previewImportPolicy(b *configBackup, checks importRuleChecks, replaceMode bool) (p importPolicyPreview) {
 	if replaceMode || len(b.PolicyRules) == 0 {
-		warnings, _ = validateIngressRuleset(b.PolicyRules, checks) // refused at the door if invalid
-		return "", warnings
+		p.warnings, _ = validateIngressRuleset(b.PolicyRules, checks) // refused at the door if invalid
+		return p
 	}
 	out := previewMergeImport(b.PolicyRules, checks)
-	effect = fmt.Sprintf("upsert %d: %d update, %d add", len(b.PolicyRules), out.updates, out.adds)
+	p.effect = fmt.Sprintf("upsert %d: %d update, %d add", len(b.PolicyRules), out.updates, out.adds)
 	if out.skipped > 0 {
-		effect += fmt.Sprintf(", %d skipped as invalid (see warnings)", out.skipped)
+		p.effect += fmt.Sprintf(", %d skipped as invalid (see warnings)", out.skipped)
 	}
-	return effect, out.warnings
+	p.warnings = out.warnings
+	return p
 }
 
 // importReplaceRequested reports whether a config import asked for replace
@@ -252,6 +275,12 @@ func importIngressRefusal(r *http.Request, b *configBackup, checks *importRuleCh
 		return "unsupported backup version"
 	}
 	*checks = checkImportRules(r.Context(), b.PolicyRules)
+	// The client is gone (or the server is shutting the request down): nothing
+	// has been applied yet and nothing will be. A cancelled request must never
+	// go on to mutate, least of all on verdicts its own cancellation cut short.
+	if r.Context().Err() != nil {
+		return "import aborted: the request was cancelled before the rules were verified; nothing was changed"
+	}
 	if !importReplaceRequested(r) {
 		return ""
 	}

@@ -286,7 +286,7 @@ func TestRulesetIngress_RefusalIsBoundedAndSanitized(t *testing.T) {
 	_, err := validateIngressRuleset([]PolicyRule{
 		{Name: "ok", Priority: 1, Action: ActionAllow},
 		{Name: "evil\r\nname" + long, Priority: 2, Action: ActionDrop, SourceIP: "10.0.0.1-\r\n" + long},
-	}, nil)
+	}, importRuleChecks{})
 	if err == nil {
 		t.Fatal("ruleset with an inert sourceIP accepted")
 	}
@@ -302,7 +302,7 @@ func TestRulesetIngress_RefusalIsBoundedAndSanitized(t *testing.T) {
 			t.Errorf("refusal lacks %q: %s", want, msg)
 		}
 	}
-	if _, err := validateIngressRuleset(nil, nil); err != nil {
+	if _, err := validateIngressRuleset(nil, importRuleChecks{}); err != nil {
 		t.Errorf("an empty ruleset is a valid policy, got %v", err)
 	}
 }
@@ -321,7 +321,7 @@ func TestRulesetIngress_StoredAndWireDoorsStayOnThePureGate(t *testing.T) {
 		{Name: "tz", Priority: 5, Action: ActionDrop, Schedule: &PolicySchedule{Timezone: "../nowhere"}},
 		{Name: "tz", Priority: 5, Action: ActionDrop, DestFQDN: "dup.example"},
 	}
-	if _, err := validateIngressRuleset(stored, nil); err == nil {
+	if _, err := validateIngressRuleset(stored, importRuleChecks{}); err == nil {
 		t.Fatal("premise: the ingress validation must refuse this ruleset")
 	}
 	if err := storedRulesetError(stored); err != nil {

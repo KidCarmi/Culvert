@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -219,10 +220,17 @@ func validateRuleShape(rule PolicyRule) error {
 }
 
 // errRuleUnverifiable marks a finding that says nothing about the RULE: this
-// node could not, right now, establish whether the rule is valid (a Redirect
-// host whose DNS lookup failed or timed out, a schedule timezone that is not
-// in this host's timezone database). Test with errors.Is. A rule that is
-// positively invalid never carries it.
+// node could not, right now, establish whether the rule is valid. Today that
+// is exactly one thing: a Redirect host whose DNS lookup failed or was not
+// made in time. Test with errors.Is. A rule that is positively invalid never
+// carries it.
+//
+// THE PRINCIPLE for adding anything to this class: a rule may be installed
+// with a warning (which is what a ruleset import does with an unverifiable
+// finding) ONLY when enforcement of the unverified part is fail-closed at the
+// point of use. A Redirect target is: the serve path re-checks it on every
+// match and answers 403 (checkRedirectURL). A schedule timezone is not, so it
+// is refused instead (checkScheduleTimezone).
 var errRuleUnverifiable = errors.New("could not be verified on this node")
 
 type ruleUnverifiableError struct{ msg string }
@@ -277,8 +285,7 @@ func checkRuleShape(ctx context.Context, rule PolicyRule) (c ruleCheck) {
 	}
 	// Schedule timezone is validated for both rule types.
 	if rule.Schedule != nil && rule.Schedule.Timezone != "" {
-		c.note(checkScheduleTimezone(rule.Schedule.Timezone))
-		if c.err != nil {
+		if c.err = checkScheduleTimezone(rule.Schedule.Timezone); c.err != nil {
 			return c
 		}
 	}
@@ -304,9 +311,8 @@ func checkRuleShape(ctx context.Context, rule PolicyRule) (c ruleCheck) {
 }
 
 // plausibleTimezoneName reports whether name could be an IANA zone name at
-// all. A name that fails is invalid on every node; a plausible name that this
-// node's database lacks is only unverifiable here (a slim image without
-// zoneinfo, an older tzdata).
+// all. It only matters on a node with no timezone database (see
+// checkScheduleTimezone); a name that fails it is invalid on every node.
 func plausibleTimezoneName(name string) bool {
 	if len(name) > 64 || strings.HasPrefix(name, "/") || strings.Contains(name, "..") || strings.Contains(name, "//") {
 		return false
@@ -315,16 +321,52 @@ func plausibleTimezoneName(name string) bool {
 	return strings.Trim(name, zoneNameChars) == ""
 }
 
-func checkScheduleTimezone(name string) (unverifiable, invalid error) {
-	if !plausibleTimezoneName(name) {
-		return nil, fmt.Errorf("invalid schedule timezone: %s", sanitizeLog(boundedRuleName(name)))
+// nodeHasTimezoneDatabase reports whether this node can load IANA zones at
+// all, probed once with two zones every database has. A var so tests can
+// stand in for an image built without zoneinfo.
+var nodeHasTimezoneDatabase = sync.OnceValue(func() bool {
+	for _, zone := range []string{"Europe/London", "America/New_York"} {
+		if _, err := time.LoadLocation(zone); err == nil {
+			return true
+		}
 	}
-	if _, err := time.LoadLocation(name); err != nil {
-		return &ruleUnverifiableError{fmt.Sprintf(
-			"schedule timezone %q is not in this node's timezone database, so it could not be verified here; where it is missing the schedule is evaluated in UTC",
-			name)}, nil
+	return false
+})
+
+// errNoTimezoneDatabase marks the refusal of a schedule timezone on a node
+// that has no timezone database at all: the rule may be right, the node
+// cannot enforce it. Test with errors.Is; it is still a refusal.
+var errNoTimezoneDatabase = errors.New("this node has no timezone database")
+
+type noTimezoneDatabaseError struct{ zone string }
+
+func (e *noTimezoneDatabaseError) Error() string {
+	return fmt.Sprintf("schedule timezone %q cannot be enforced here: this node has no timezone database, so the schedule cannot be evaluated as written; install tzdata (or use an image that embeds it) and submit the rule again",
+		sanitizeLog(boundedRuleName(e.zone)))
+}
+func (e *noTimezoneDatabaseError) Is(target error) bool { return target == errNoTimezoneDatabase }
+
+// checkScheduleTimezone refuses a schedule timezone this node cannot load, at
+// every operator door and for every rule type. It is never "installed with a
+// warning", because nothing downstream is fail-closed about it: an ACCESS
+// rule's schedule would be evaluated in UTC (scheduleLocationResolved,
+// policy.go: "falling back to UTC"), so an Allow window opens or a Block
+// window lapses at the wrong hours; an AUTH rule would stop matching
+// (authScheduleParseable, authpolicy.go), which silently removes an
+// authentication requirement when the default outcome is Exempt.
+//
+//   - the node HAS a timezone database: the name is not a known timezone (a
+//     typo: "Europe/Pariss", "garbage");
+//   - the node has NO database: refused with errNoTimezoneDatabase, which says
+//     what to install. The rule may be perfectly good.
+func checkScheduleTimezone(name string) error {
+	if _, err := time.LoadLocation(name); err == nil {
+		return nil
 	}
-	return nil, nil
+	if nodeHasTimezoneDatabase() || !plausibleTimezoneName(name) {
+		return fmt.Errorf("invalid schedule timezone: %s is not a known timezone", sanitizeLog(boundedRuleName(name)))
+	}
+	return &noTimezoneDatabaseError{zone: name}
 }
 
 // checkAccessRule validates the Stage-2 subset of a policy rule (RuleType
@@ -358,12 +400,17 @@ func checkAccessRule(ctx context.Context, rule PolicyRule) (unverifiable, invali
 }
 
 // checkRedirectURL applies isSafeRedirectURL's rule to a Redirect target, but
-// keeps apart the two reasons that function folds into one "false":
+// keeps apart the reasons that function folds into one "false":
 //
-//   - invalid: empty, not an absolute http/https URL, or a host that RESOLVES
-//     to a private or internal address;
-//   - unverifiable: the DNS lookup failed or did not finish within ctx. Nothing
-//     was learned about the destination.
+//   - invalid: empty, not an absolute http/https URL, a host that IS a private
+//     or internal address, or a name that RESOLVES to one;
+//   - unverifiable: the host is a DNS name and its lookup failed, or was not
+//     made within ctx. Nothing was learned about the destination.
+//
+// Only a DNS name can be unverifiable. Whether an address literal is internal
+// is arithmetic, so it is decided first, with no lookup and no context
+// (redirectHostLiteral): a cancelled request or a spent time budget can never
+// turn `http://169.254.169.254/` into "could not be verified".
 //
 // Accepting an unverifiable target does not open a redirect to an internal
 // address: the serve path re-runs isSafeRedirectURL on every match and answers
@@ -377,16 +424,61 @@ func checkRedirectURL(ctx context.Context, raw string) (unverifiable, invalid er
 	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return nil, fmt.Errorf("redirectURL must be an absolute http/https URL")
 	}
-	err = isPrivateHostContext(ctx, u.Host)
+	host := u.Hostname() // no port, no brackets: "[::1]" and "[::1]:80" are both "::1"
+	if literal, internal := redirectHostLiteral(host); literal {
+		if internal {
+			return nil, fmt.Errorf("redirectURL must be an absolute http/https URL with a public host: %q is a private, internal or non-canonical address", host)
+		}
+		return nil, nil
+	}
+	err = isPrivateHostContext(ctx, host)
 	switch {
 	case err == nil:
 		return nil, nil
 	case errors.Is(err, errSSRFBlocked):
-		return nil, fmt.Errorf("redirectURL must be an absolute http/https URL with a public host: %q resolves to a private or internal address", u.Hostname())
+		return nil, fmt.Errorf("redirectURL must be an absolute http/https URL with a public host: %q resolves to a private or internal address", host)
+	case ctx.Err() != nil:
+		return &ruleUnverifiableError{fmt.Sprintf(
+			"redirectURL host %q was not verified: the time allowed for verification ran out before its DNS lookup was made or answered; a request matching the rule is blocked until the host resolves to a public address",
+			host)}, nil
 	}
 	return &ruleUnverifiableError{fmt.Sprintf(
-		"redirectURL host %q could not be verified on this node (DNS lookup failed or timed out); a request matching the rule is blocked until the host resolves to a public address",
-		u.Hostname())}, nil
+		"redirectURL host %q could not be verified on this node (DNS lookup failed); a request matching the rule is blocked until the host resolves to a public address",
+		host)}, nil
+}
+
+// redirectHostLiteral classifies a Redirect host that needs no DNS lookup.
+// literal reports that the verdict is final; internal that it is refused.
+//
+//   - An IP literal (v4, v6, zoned v6): internal when it is private, loopback,
+//     link-local, unspecified, a metadata address (the SSRF guard table,
+//     isPrivateIP) or carries a zone, which is link-scoped by definition. A
+//     public literal is valid.
+//   - "localhost" and any name under it, with or without the root dot: always
+//     loopback (RFC 6761), whatever the resolver says.
+//   - A host that looks numeric but is not a canonical literal ("2130706433",
+//     "0x7f.1", "127.1"): refused. Browsers and getaddrinfo read these as
+//     IPv4 addresses (WHATWG URL: a host whose last label is a number is an
+//     IPv4 address); Go's parser does not, so they would otherwise go to DNS as
+//     names. No DNS name ends in a numeric label, so nothing legitimate is lost.
+//   - Anything else holding a colon or a bracket is a malformed literal.
+//
+// The serve path is at least as strict for each: isSafeRedirectURL resolves
+// the host, and every one of these either resolves to an internal address or
+// does not resolve, which is a 403.
+func redirectHostLiteral(host string) (literal, internal bool) {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return true, addr.Zone() != "" || addr.IsUnspecified() || isPrivateIP(net.IP(addr.Unmap().WithZone("").AsSlice()))
+	}
+	name := strings.ToLower(strings.TrimSuffix(host, "."))
+	if name == "localhost" || strings.HasSuffix(name, ".localhost") || strings.ContainsAny(name, ":[]%") {
+		return true, true
+	}
+	last := name[strings.LastIndexByte(name, '.')+1:]
+	if last == "" || strings.HasPrefix(last, "0x") || strings.Trim(last, "0123456789") == "" {
+		return true, true
+	}
+	return false, false
 }
 
 // validateRuleIngress is the per-rule validation of a rule an operator SUBMITS

@@ -294,6 +294,10 @@ type PolicyStore struct {
 	// only silences operator warnings that describe an effect on traffic, which
 	// a staged rule does not have yet; it never feeds evaluation or validation.
 	staging bool
+	// silent marks a SCRATCH store: a throwaway copy used to compute what an
+	// operation would do (the import preview). It writes no operator-facing
+	// log line and records no Diagnostics refusal.
+	silent bool
 	// scanIndex is the packed Stage-2 destination prefilter for the revision
 	// it names (see policy_scanindex.go). Published lock-free under mu by
 	// publishScanIndexLocked, alongside every assignment to `verified`, and
@@ -866,10 +870,19 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 	ps.mu.Unlock()
 
 	// Detect policy conflicts after adding the new rule.
+	ps.logConflicts()
+	return nr
+}
+
+// logConflicts logs the store's rule conflicts after an Add. Not for a scratch
+// store, whose rules nobody enforces or will see.
+func (ps *PolicyStore) logConflicts() {
+	if ps.silent {
+		return
+	}
 	for _, w := range ps.DetectConflicts() {
 		logWarnf("Policy: %s", sanitizeLog(w))
 	}
-	return nr
 }
 
 // availablePriorityLocked preserves a unique requested priority and otherwise

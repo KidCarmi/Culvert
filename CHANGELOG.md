@@ -91,23 +91,33 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
     held, so no node fails to start, roll back or follow its control plane
     because of this change.
 
-  - **A rule this node cannot verify is not an invalid rule.** Two checks
-    depend on the node, not on the rule: a Redirect rule's host must resolve
-    in DNS, and a schedule timezone must be in the node's timezone database.
-    When the lookup fails or times out, or the zone is missing, an import (in
-    both modes, dry run included) still installs the rule and returns one
-    `warnings` entry naming the rule and the host or zone, so a backup of a
-    healthy policy restores on a node without DNS or without zoneinfo. This is
-    safe: a Redirect is re-checked every time it matches and answers 403 until
-    its host resolves to a public address, and a schedule whose zone is
-    missing is evaluated in UTC, as before. A host that resolves to a private
-    or internal address, a URL that is not absolute http/https, and a timezone
-    name that cannot be a zone name are invalid and refused. `POST`/`PUT
-    /api/policy` still answer 400 to a rule they could not verify; the message
-    now says the host or zone could not be verified instead of calling the URL
-    malformed. Import verification is bounded to 10 seconds per request.
-  - The merge-mode dry run now runs the merge itself against a copy of the
-    policy, so its `upsert N: U update, A add` line counts skipped rules
+  - **A Redirect host this node cannot resolve is not an invalid rule.** When
+    the DNS lookup of a Redirect rule's host fails, or is not made within the
+    10 seconds an import allows for verification, an import (both modes, dry
+    run included) still installs the rule and returns one `warnings` entry
+    naming the rule and the host, so a backup of a healthy policy restores on
+    a node whose DNS is down. This is the only finding treated this way, and
+    only because it is fail-closed where it is used: a Redirect is re-checked
+    every time it matches and answers 403 until its host resolves to a public
+    address. Decided without DNS, and always refused: a host that is a
+    private, loopback, link-local, unspecified or metadata address literal
+    (bracketed IPv6 with or without a port, zoned addresses), `localhost` in
+    any spelling, and numeric-looking hosts that are not canonical addresses
+    (`2130706433`, `0x7f.1`, `127.1`). A name that resolves to a private
+    address is refused. `POST`/`PUT /api/policy` still answer 400 to a host
+    they could not resolve; the message now says so instead of calling the
+    URL malformed. An import whose request is cancelled applies nothing.
+  - **A schedule timezone the node cannot load is refused, never installed.**
+    On a node with a timezone database an unknown name is a typo (`invalid
+    schedule timezone: … is not a known timezone`). On a node with no
+    timezone database the rule is refused with a message saying so and what
+    to install. Replace refuses the import; merge skips the rule and leaves
+    any existing rule of the same name untouched. Installing it would not be
+    safe: an access rule's schedule would run on UTC hours, and an
+    authentication rule would stop matching, which removes the
+    authentication requirement when the default outcome is Exempt.
+  - The merge-mode dry run now runs the merge itself against a silent copy of
+    the policy, so its `upsert N: U update, A add` line counts skipped rules
     (`…, S skipped as invalid`) and returns the same `warnings` as the commit.
     The backup `version` is checked before the rules.
 
@@ -125,8 +135,13 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   a rule with no name; an `action` that is missing, in another letter case,
   or unknown to this version (such a rule is kept and blocks when it comes
   from a policy file or snapshot, but cannot be imported); a Redirect with an
-  empty or non-http(s) `redirectURL`, or one whose host resolves to a private
-  address; and a timezone name that cannot be a zone name.
+  empty or non-http(s) `redirectURL`, or one whose host is or resolves to a
+  private address; and a schedule timezone the importing node cannot load (on
+  an image without zoneinfo that is every named zone: install tzdata first).
+  Not changed here, and worth knowing: the policy file, config-version
+  rollback and control-plane snapshots still load a rule with an unloadable
+  timezone, and evaluate an access rule's schedule in UTC or never match an
+  authentication rule.
 
 - **A config import no longer reports success when the imported policy rules
   could not be written to disk.** The policy save on `POST /api/config/import`

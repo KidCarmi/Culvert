@@ -945,7 +945,7 @@ func importSectionEffect(replaceMode bool, incoming, current int) string {
 // (replace clears then loads; merge appends/upserts) but mutates nothing —
 // every count is read from the live store, every incoming count from the
 // parsed backup.
-func buildImportPreview(b *configBackup, checks importRuleChecks, replaceMode bool, planned *upstreamImportPlanned) ([]importPreviewSection, []importPreviewSetting) {
+func buildImportPreview(b *configBackup, pol importPolicyPreview, replaceMode bool, planned *upstreamImportPlanned) ([]importPreviewSection, []importPreviewSetting) {
 	var sections []importPreviewSection
 	add := func(name string, incoming, current int, note string) {
 		if incoming == 0 {
@@ -985,9 +985,9 @@ func buildImportPreview(b *configBackup, checks importRuleChecks, replaceMode bo
 		add("Policy Rules", len(b.PolicyRules), polCur, "")
 	} else {
 		// The split comes from running the merge itself against a scratch copy
-		// of the policy, so it counts what the apply will do, skips included.
-		effect, _ := importPolicyPreview(b, checks, replaceMode)
-		addFixed("Policy Rules", len(b.PolicyRules), polCur, effect,
+		// of the policy (previewImportPolicy), so it counts what the apply will
+		// do, skips included.
+		addFixed("Policy Rules", len(b.PolicyRules), polCur, pol.effect,
 			"merge upserts by ID then name — duplicates no longer accumulate")
 	}
 	add("Blocklist", len(b.Blocklist), bl.Count(), "")
@@ -1105,8 +1105,8 @@ func buildImportSettingsPreview(b *configBackup) []importPreviewSetting {
 // mutates nothing (the audit-ring append mirrors the also-read-only
 // config.export path and satisfies the route's AuditExpected metadata).
 func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup, checks importRuleChecks, replaceMode bool, planned *upstreamImportPlanned) {
-	sections, settings := buildImportPreview(b, checks, replaceMode, planned)
-	_, ruleWarnings := importPolicyPreview(b, checks, replaceMode)
+	pol := previewImportPolicy(b, checks, replaceMode) // once: effect and warnings from one simulation
+	sections, settings := buildImportPreview(b, pol, replaceMode, planned)
 	mode := "merge"
 	if replaceMode {
 		mode = "replace"
@@ -1121,7 +1121,7 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 	}
 	// The per-rule warnings the commit would return (same function): rules a
 	// merge would skip, and rules this node could not verify.
-	setImportWarnings(resp, ruleWarnings)
+	setImportWarnings(resp, pol.warnings)
 	if planned != nil && planned.Plan != nil {
 		// 2F-D (C9): the complete upstream plan + the deterministic digest a
 		// commit may echo (?importDigest=) to be refused if the document moved.
