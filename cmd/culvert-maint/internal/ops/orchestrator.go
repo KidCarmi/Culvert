@@ -85,23 +85,17 @@ func stageReason(st *FlowStage, runErr error) FailureReason {
 // via Manager.Finish (timeout metadata, if any, is overlaid on top).
 type ResultFn func(finalState State, finalReason FailureReason) map[string]interface{}
 
-// JournalRemover retires an op's crash-recovery journal record at terminal time
-// (RISK-022). Satisfied by *journal.Journal; kept as an interface so the ops
-// package does not depend on the journal package. Optional — nil means the flow
-// is not journaled. Remove is idempotent (removing an absent record is a no-op),
-// so terminate can call it unconditionally.
-type JournalRemover interface {
-	Remove(opID string) error
-}
-
 // OrchestratorDeps bundles the dependencies the orchestrator goroutine
 // needs to run a flow to completion. Manager/Audit/OpLog are required; Journal
-// is optional (nil for non-journaled flows and most tests).
+// and EndStateSafe are optional (nil for non-journaled flows and most tests).
 type OrchestratorDeps struct {
 	Manager *Manager
 	Audit   *audit.Logger
-	OpLog   *OpLog         // owned by the orchestrator; closed on completion
-	Journal JournalRemover // optional; record removed on terminal (RISK-022)
+	OpLog   *OpLog          // owned by the orchestrator; closed on completion
+	Journal TerminalJournal // optional; ends the op's record crash-safely (terminal.go)
+	// EndStateSafe judges, for a failed op, whether its record may be removed
+	// (ADR-0062 slice 1). Optional: nil keeps the record of every failure.
+	EndStateSafe EndStateJudge
 }
 
 // Validate ensures every dependency is present. Called by Run before
@@ -168,46 +162,29 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		promotedReason FailureReason
 	)
 
-	// terminate performs the ONE terminal transition — Manager.Finish (which
-	// releases the maintenance lock) + the terminal audit event + the final op-log
-	// note. It is invoked from the deferred panic barrier below, so it runs on
-	// EVERY exit path, including a panicking stage / resultFn: a panicking op
-	// becomes a failed op with the lock released, never a dead daemon with a
-	// permanently stuck lock. Idempotent (guarded by `finished`).
+	// terminate performs the ONE terminal transition: the crash-safe journal and
+	// audit sequence (endJournaled, terminal.go), then Manager.Finish (which
+	// releases the maintenance lock) and the final op-log note. It is invoked
+	// from the deferred panic barrier below, so it runs on EVERY exit path,
+	// including a panicking stage / resultFn: a panicking op becomes a failed op
+	// with the lock released, never a dead daemon with a permanently stuck lock.
+	// Idempotent (guarded by `finished`).
+	//
+	// Finish comes LAST, after the terminal audit entry and the record's fate are
+	// durable. While the op is not terminal it still holds the maintenance lock,
+	// so no later operation can retire its record (journal_retire.go skips a
+	// running op's record) between the record write and the audit, and a caller
+	// that sees the terminal state also sees the audit entry and the journal as
+	// they will stay.
 	finished := false
 	terminate := func() {
 		if finished {
 			return
 		}
 		finished = true
+		endJournaled(deps, Terminal{State: finalState, Reason: finalReason, FailedStage: firstErrStage, At: time.Now().UTC()},
+			audit.Event{Actor: actor, OpID: opID, Kind: kind, Params: params, IdempotencyKey: idempotencyKey})
 		_ = deps.Manager.Finish(opID, finalState, finalReason, result)
-		// Retire the crash-recovery journal record (RISK-022) now that the op has
-		// reached a terminal state — after this point there is nothing to reconcile.
-		// Idempotent + best-effort; a non-journaled flow (nil) or absent record is a
-		// no-op. (Atomic Finish+Remove hardening is a reconciler-slice concern.)
-		if deps.Journal != nil {
-			if err := deps.Journal.Remove(opID); err != nil {
-				_ = deps.OpLog.Note("agent", "warn: journal remove failed: "+err.Error())
-			}
-		}
-
-		now := time.Now().UTC()
-		endEvent := audit.Event{
-			Actor:          actor,
-			OpID:           opID,
-			Kind:           kind,
-			Params:         params,
-			Outcome:        audit.OutcomeSucceeded,
-			OutcomeAt:      &now,
-			IdempotencyKey: idempotencyKey,
-		}
-		if finalState == StateFailed {
-			endEvent.Outcome = audit.OutcomeFailed
-			endEvent.FailureReason = string(finalReason)
-		}
-		if err := deps.Audit.Write(endEvent); err != nil {
-			_ = deps.OpLog.Note("agent", "warn: terminal audit emit failed: "+err.Error())
-		}
 		if finalState == StateFailed {
 			_ = deps.OpLog.Note("agent", fmt.Sprintf("op finished failed at stage=%s reason=%s err=%v", firstErrStage, finalReason, firstErr))
 		} else {
@@ -352,4 +329,76 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		result["original_failure_reason"] = string(firstReason)
 	}
 	// terminate() runs in the deferred panic barrier — do not call Finish here.
+}
+
+// endJournaled writes the op's terminal audit entry and settles its journal
+// record in the crash-safe order of terminal.go: record the outcome, write the
+// audit entry, then remove or keep the record. ev carries the op's identity;
+// its outcome fields are filled here.
+//
+// Nothing here may stop the terminal transition: a panic in a journal step is
+// treated as that step's error (the audit entry is still written after a
+// panicking record step), any other panic is recovered and noted, and Finish
+// still runs after it.
+func endJournaled(deps OrchestratorDeps, t Terminal, ev audit.Event) {
+	defer func() {
+		if p := recover(); p != nil {
+			_ = deps.OpLog.Note("agent", fmt.Sprintf("warn: terminal journal/audit step panicked: %v", p))
+		}
+	}()
+	t.Safe = t.State == StateSucceeded || judgeSafe(deps, t.FailedStage)
+	if deps.Journal != nil {
+		if err := guardPanic(func() error { return deps.Journal.RecordTerminal(ev.OpID, t) }); err != nil {
+			// The audit entry is still written below and the record still
+			// settled; a start that finds the record without an outcome looks
+			// the entry up before it writes an interrupted one.
+			_ = deps.OpLog.Note("agent", "warn: journal terminal record failed: "+err.Error())
+		}
+	}
+	at := t.At
+	ev.Outcome, ev.OutcomeAt = audit.OutcomeSucceeded, &at
+	if t.State == StateFailed {
+		ev.Outcome, ev.FailureReason = audit.OutcomeFailed, string(t.Reason)
+	}
+	if err := deps.Audit.Write(ev); err != nil {
+		// The entry is not durable, so the record must not go: it keeps its
+		// outcome without terminal_audited, and the next start writes the entry
+		// and then settles the record.
+		_ = deps.OpLog.Note("agent", "warn: terminal audit emit failed: "+err.Error())
+		return
+	}
+	if deps.Journal == nil {
+		return
+	}
+	var kept bool
+	if err := guardPanic(func() (serr error) { kept, serr = deps.Journal.SettleTerminal(ev.OpID, t); return serr }); err != nil {
+		_ = deps.OpLog.Note("agent", "warn: journal terminal settle failed: "+err.Error())
+	} else if kept {
+		_ = deps.OpLog.Note("agent", "journal record KEPT: the operation failed and did not prove the state it left safe; "+
+			"it is reported in GET /v1/status until a later operation retires it")
+	}
+}
+
+// guardPanic runs fn and turns a panic into an error.
+func guardPanic(fn func() error) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("panic: %v", p)
+		}
+	}()
+	return fn()
+}
+
+// judgeSafe asks the flow's judge about a failure. No judge, or a judge that
+// panics, is "not proven".
+func judgeSafe(deps OrchestratorDeps, failedStage string) (safe bool) {
+	if deps.EndStateSafe == nil {
+		return false
+	}
+	defer func() {
+		if recover() != nil {
+			safe = false
+		}
+	}()
+	return deps.EndStateSafe(failedStage)
 }
