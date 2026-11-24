@@ -353,7 +353,12 @@ candidate; it does not type-check and it over-counts common words (IM-001's
 | IM-021 | `keyedMutex` in `saas_feed_genstore.go` → `internal/keyedmutex` | **shipped** (merged 2026-11-21, `c5674f2`) | nightly shift | `main` | #1988 | — | ADR-0054; 2 exported names; see "IM-021" below | — |
 | IM-022 | directory-fsync rule (`fsyncDir`, `isBenignDirSyncErr`, the copy in `support_durable_write.go`) → `internal/fileutil` | **shipped** (merged 2026-11-21, `ad886a2`) | nightly shift | `main` | #1989 | — | 2 exported names (`SyncDir`, `DirSyncUnsupported`); see "IM-022" below | — |
 | IM-023 | `mcp_inventory.go` inventory engine → `internal/mcp/qualinventory` | **shipped** (merged 2026-11-21, `ef94311`) | nightly shift | `main` | #1991 | — | ADR-0055; 7 exported names; see "IM-023" below | — |
-| IM-024 | `mcp_telemetry.go` archive exporter and export cursors → `internal/mcp/events/qualarchive` | **implementation under review** | nightly shift | `main` | #1992 | — | ADR-0056; 6 exported names; see "IM-024" below | review PR |
+| IM-024 | `mcp_telemetry.go` archive exporter and export cursors → `internal/mcp/events/qualarchive` | **shipped** (merged 2026-11-22, `5945633`) | nightly shift | `main` | #1992 | — | ADR-0056; 6 exported names; see "IM-024" below | — |
+| IM-025 | `mcp_live_tier.go` lifecycle state machine → `internal/mcp/livetier` | **shipped** (merged 2026-11-22, `625d4cc`) | nightly shift | `main` | #1993 | — | ADR-0057; see "IM-025" below | — |
+| IM-026 | two records share this number: listener fault reason rules → `internal/listenfault` (#1997, ADR-0058), and the data-directory writer lock → `internal/writerlock` (#2002, ADR-0060) | **shipped** (merged 2026-11-22, `107330e` and `1654cdc`) | nightly shift | `main` | #1997, #2002 | — | see the two "IM-026" sections below | — |
+| IM-027 | retry-sleep rules of the listener supervisors (`nextCPGRPCBindBackoff`, `nextSOCKS5BindBackoff`, `nextScanSvcBindBackoff`, `clampCPGRPCBindSleep`, `clampSOCKS5BindSleep`) → `internal/listenfault` or a sibling | proposed | — | — | — | — (#1997 merged; on 2026-11-22 no open PR edits `cp_grpc_*.go`, `socks5_bind.go`, `socks5_health.go` or `scan_svc_listener.go`) | lead; first step in the first "IM-026" note | map, then extract |
+| IM-028 | saas-feed node-local record envelope decoder → `noderecord.Decode` | **shipped** (merged 2026-11-22, `3ee2018`) | nightly shift | `main` | #2001 | — | ADR-0059; see "IM-028" below | — |
+| IM-029 | `support_upload_queue.go` queue engine → `internal/supportupload/uploadqueue` | **implementation under review** | nightly shift | `main` | #2017 | — | ADR-0062; 10 exported names (5 are one persisted vocabulary); see "IM-029" below | review PR |
 
 Not candidates (ADR-0002 "Decomposition Complete" decisions): `proxy.go`,
 `store.go`, the `policy.go` store/draft/hub, `controlplane*.go`,
@@ -1173,6 +1178,74 @@ retry-sleep lead that open #1997 records.
   `generation.json` on main, then decide whether `Envelope` with a single
   repeated sentinel reproduces the `errReverifyMeta` texts; if it does not,
   leave them).
+
+### IM-029 support upload queue (EXTRACT, 2026-11-22, main `155df0944`)
+
+| Field | Value |
+|---|---|
+| ID / task | IM-029: the queue engine in `support_upload_queue.go` (entry record, per-bundle files, state machine, capacity bounds, pruning, retry ladder, mutex) → `internal/supportupload/uploadqueue` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR changes a `support_*.go` file or `internal/supportupload`; checked against the eight open PR heads on 2026-11-22) |
+| Evidence | ADR-0062; 10 exported names (`Queue`, `New`, `Options`, `Entry`, `State` and its five values); engine moved statement for statement behind an instance; root keeps its names as bindings, so the worker, the consent gate and 17 root tests in two files are unedited; 12 engine tests moved with names and assertions unchanged; entry-file bytes pinned by six digests captured on main before the move; `Attempt` compared with a frozen copy of main's body over 756 inputs; 42 mutation checks, 40 failing a test |
+| Risks | the queue decides which consented bundles leave the appliance, how often, and when to stop; its files carry a remote error text; its filenames come from a request path. The id rule, the durable write and the sanitizer stay main's and are the only way the engine names a file, commits a byte or stores a text |
+| PR | #2017 |
+| Next action | review PR |
+
+- **Reconciled.** No program PR was open at the start of this run: #1992
+  (IM-024), #1993 (IM-025), #1997 and #2002 (both recorded as IM-026) and
+  #2001 (IM-028) have merged, and the task table now says so. IM-005/IM-006
+  stay blocked on #1526, which is still open.
+- **Why this.** It is the candidate the writer-lock note named next. The
+  file called itself "the queue ENGINE only" and read five root names, none
+  of them a queue rule: the data directory, the bundle-id rule, the two
+  durable-write functions and the log sanitizer. Seven of its twelve
+  tests ran only after moving the process-wide `dataDir`, and two bounds were package
+  variables so that tests could overwrite them.
+- **Moved:** the entry record and its JSON form, the five states, enqueue and
+  re-arm, both capacity checks, pruning, the classification of one attempt,
+  the retry ladder, the list/load/save/due operations and the mutex, which is
+  now a field. **Stays main:** `uploadQueueDir`, the four bounds, the
+  `uploadFunc` type, the one queue instance and its wiring, the worker, the
+  consent gate, the transfer, the audit records and the durable-write seam.
+- **Ten exported names, two over the program's eight.** Five are the values
+  of the state vocabulary, which is persisted and returned by the API and
+  which main names in full. ADR-0062 records the two designs that reach
+  eight and why each is worse.
+- **Size.** Root: `support_upload_queue.go` 379 → 113 lines; one comment
+  line in `support_upload_wire.go`. Package: 2 production files. Root test
+  inventory 8618 → 8608 (12 moved out, 2 wiring tests added). Package: 12
+  moved tests, 17 new and a boundary pair with 21 negative controls.
+- **One root test edited.**
+  `TestSupportPersistence_RoutesThroughDurableChokepoint` took the queue's
+  package mutex and called the locked save; it now calls
+  `saveUploadQueueEntry`. Its assertion is unchanged.
+- **Mutation survivors, 2 of 42.** Removing the lock from `List`: the race
+  detector does not see file reads, and no test can observe the interleaving
+  without a seam the package does not have. Not skipping directories in the
+  listing: equivalent, because reading a directory as a file fails and the
+  entry is skipped anyway. Eight other first-round survivors were rules main
+  had no test of (a deferred or in-flight entry holds capacity, a re-arm
+  drops the old session and receipt, pruning removes the oldest, an entry is
+  due at its retry second, load refuses a well-formed file under a refused
+  name, the list order, the state words); each now has a test.
+- **ADR-0002.** No conflict: `support_upload_*.go` postdates "Decomposition
+  Complete" and is not classified there; lifecycle, HTTP binding and wiring
+  stay in main.
+- **Not done.** `.github/qa-root-shard-timings.json` still lists the 12 moved
+  names; it only balances shards and is regenerated from a reference run.
+  The capacity error is still unexported, as it was in main, so the consent
+  handler cannot tell "queue full" from a failed write and answers 500 for
+  both; mapping it to a distinct status is a behavior change for the owner.
+- **Next.** IM-027, now unblocked: #1997 has merged and no open PR edits
+  `cp_grpc_bind.go`, `cp_grpc_health.go`, `socks5_bind.go`,
+  `socks5_health.go` or `scan_svc_listener.go` (#2010 edits `socks5.go`
+  only). First step, unchanged from the listener-fault note: read
+  `scan_svc_listener.go`'s supervisor for how it bounds its sleep without a
+  clamp function, and compare `nextSOCKS5AcceptBackoff` (`cur == 0`) with the
+  bind ladders (`cur <= 0`) before assuming one function serves all.
+  Independent alternatives: `mcp_rollout_execdeps.go` (first step in the
+  IM-025 note; #1993 has merged), the two generation-metadata readers (first
+  step in the IM-028 note), then IM-014 mapping.
 
 ### IM-020 saas-feed node-local record codec (EXTRACT, 2026-11-21, main `0fe4578`)
 

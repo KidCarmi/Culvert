@@ -197,7 +197,7 @@ func NewDispatchExecutor(client AgentClient, cfg DispatchConfig, audit func(Disp
 // doubling for each further one — so the default applyRetries of 2 waits 2s
 // then 4s, bounded at 6s of added latency against a hard-down agent.
 //
-// Deterministic, with no jitter, for the reason uploadRetryBackoff records:
+// Deterministic, with no jitter, for the reason uploadqueue.retryBackoff records:
 // an executor is single-flight against ONE agent, so there is no shared origin
 // for a fleet to stampede, and determinism keeps the schedule exactly testable.
 const dispatchApplyBackoffBase = 2 * time.Second
