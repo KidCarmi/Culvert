@@ -602,7 +602,9 @@ func (s *Server) handleOperationGet(w http.ResponseWriter, _ *http.Request, opID
 		http.Error(w, "{\"error\":\"invalid_op_id\"}", http.StatusBadRequest)
 		return
 	}
-	op := s.opts.Ops.Get(opID)
+	// GetRecorded also answers for a keyed op known only to the durable
+	// idempotency store (admitted by an earlier agent process).
+	op := s.opts.Ops.GetRecorded(opID)
 	if op == nil {
 		http.Error(w, "{\"error\":\"op_not_found\"}", http.StatusNotFound)
 		return
