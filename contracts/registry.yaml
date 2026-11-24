@@ -827,6 +827,7 @@ contracts:
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_AlreadyCurrentUpgradeDoesNotRetire}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_FailedRecoveryKeepsTheRecord}
       - {file: "cmd/culvert-maint/internal/server/journal_retire_test.go", name: TestRetire_SuccessOfAnEstablishingOpRetiresStaleRecords}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_test.go", name: TestRetire_AuditFailureKeepsRecord}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_AuditFailureKeepsRecord}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_EveryKillPoint}
     validation: integration
