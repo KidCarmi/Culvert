@@ -70,7 +70,12 @@ type policyDraftCoordinator struct {
 	writeGate sync.RWMutex
 }
 
-var policyDraft = &policyDraftCoordinator{cand: &PolicyStore{}}
+var policyDraft = &policyDraftCoordinator{cand: newDraftCandidateStore()}
+
+// newDraftCandidateStore returns an empty candidate store. It is marked staging:
+// a candidate enforces nothing until a commit publishes it to the running
+// store, so warnings that describe an effect on traffic stay silent for it.
+func newDraftCandidateStore() *PolicyStore { return &PolicyStore{staging: true} }
 
 // policyDraftPathFor is the draft file initPolicyDraft derives from a policy
 // path — the location the NEXT boot will reload a pending draft from.

@@ -1316,6 +1316,14 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 	return quit, sighup
 }
 
+// awaitShutdownSignal blocks until SIGINT/SIGTERM arrives and marks the process
+// as shutting down before it returns, so nothing can run between "the signal
+// was accepted" and "/ready stopped saying ready" (see shutdownStarted).
+func awaitShutdownSignal(quit <-chan os.Signal) {
+	<-quit
+	shutdownStarted.Store(true)
+}
+
 // runProxyUntilShutdown starts the proxy goroutine, blocks on quit, then
 // runs the graceful shutdown sequence via shutdownRegistry. Hook execution
 // order, per-hook log messages, and the 30s shutdown budget's start point
@@ -1335,7 +1343,7 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 		}
 	}()
 
-	<-quit
+	awaitShutdownSignal(quit)
 	logger.Println("Shutting down gracefully…")
 
 	// CHAOS-56: arm the escalation path BEFORE the sequence starts. Until

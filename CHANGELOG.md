@@ -728,6 +728,20 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The "retaining rule … with unrecognized action" warning is now said once per
+  fact, and only where it is true.** It was written on every bulk replace of
+  the rulebase, so an unchanged control-plane republish repeated it for every
+  retained rule, and opening a policy draft wrote "matching traffic will be
+  blocked" about a candidate rule that enforces nothing. The running policy now
+  announces a retained rule when it first appears, when its action changes, or
+  when it returns after being removed; an identical republish, a rollback to
+  the same rulebase and a draft commit that carries the rule through are
+  silent, and the draft's candidate store never announces. Loading the policy
+  file still announces every retained rule each time. Enforcement is unchanged
+  (such a rule still matches and blocks), and the Diagnostics entry
+  `policy_rules_unknown_action` still lists every retained rule for as long as
+  it is in the running policy.
+
 - **The Policy Tester now answers for the host the proxy actually enforces
   when the request target is percent-encoded.** Go's request parser decodes an
   encoded international host before the proxy sees it, so a client that sends

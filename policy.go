@@ -297,6 +297,11 @@ type PolicyStore struct {
 	// can tell a policy file that filtered down to nothing from a genuinely
 	// empty one; see ConfiguredRuleCount and SEC-POLICYDROP-1.
 	droppedOnLoad atomic.Int64
+	// staging marks a store that holds a CANDIDATE rulebase and enforces
+	// nothing (the policy draft). Set once at construction, never mutated. It
+	// only silences operator warnings that describe an effect on traffic, which
+	// a staged rule does not have yet; it never feeds evaluation or validation.
+	staging bool
 	// scanIndex is the packed Stage-2 destination prefilter for the revision
 	// it names (see policy_scanindex.go). Published lock-free under mu by
 	// publishScanIndexLocked, alongside every assignment to `verified`, and
@@ -819,6 +824,7 @@ func (ps *PolicyStore) listLocked() []PolicyRule {
 // ReplaceAll caller). The phase that wires the matcher activates these rules.
 func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	ps.mu.Lock()
+	announced := ps.retainedUnknownLocked()
 	out := make([]*PolicyRule, 0, len(rules))
 	seenIDs := make(map[string]struct{}, len(rules))
 	for i := range rules {
@@ -828,7 +834,6 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 			logWarnf("Policy: dropping rule %q on bulk replace — %s", sanitizeLog(r.Name), sanitizeLog(reason))
 			continue
 		}
-		warnRetainedUnknownAction(&r, "bulk replace")
 		r.HitCount = 0
 		r.lastHitUnix = 0
 		r.counters = nil
@@ -844,12 +849,61 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 			r.ID = freshRuleID(seenIDs)
 		}
 		seenIDs[r.ID] = struct{}{}
+		ps.warnNewlyRetained(&r, announced)
 		out = append(out, &r)
 	}
 	ps.rules = out
 	ps.sortLocked()
 	ps.bumpVersion()
 	ps.mu.Unlock()
+}
+
+// retainedUnknownLocked maps rule ID to action for every access rule this store
+// currently holds whose action this build does not dispatch: the retained rules
+// a previous Load or ReplaceAll has already announced. Caller holds ps.mu. The
+// result is derived from the rules themselves, so there is no second record to
+// keep in step: a rule that leaves the store is forgotten with it.
+func (ps *PolicyStore) retainedUnknownLocked() map[string]PolicyAction {
+	var out map[string]PolicyAction
+	for _, r := range ps.rules {
+		if ruleTypeOf(r) != ruleTypeAccess {
+			continue
+		}
+		if _, known := canonicalPolicyAction(r.Action); known {
+			continue
+		}
+		if out == nil {
+			out = map[string]PolicyAction{}
+		}
+		out[r.ID] = r.Action
+	}
+	return out
+}
+
+// warnNewlyRetained announces a retained unknown-action rule on bulk replace
+// only when the announcement is NEWS and TRUE:
+//
+//   - not for a staging store (the policy draft): its rules enforce nothing, so
+//     "matching traffic will be blocked" would be false until a commit, and the
+//     commit publishes to the running store, which announces for itself;
+//   - not for a rule the store already held with the same ID and the same
+//     action: an unchanged control-plane republish, a rollback to the same
+//     rulebase and a draft commit that carries the rule through all replace the
+//     whole slice without changing what the operator was already told.
+//
+// A rule that is new to the store, whose action changed, or that left and came
+// back is announced again. A rule that arrives without a usable ID is given a
+// fresh one by ReplaceAll and so always counts as new: it cannot be correlated
+// with anything. Diagnostics (policy_rules_unknown_action) reads the live
+// rulebase and is not affected by any of this.
+func (ps *PolicyStore) warnNewlyRetained(r *PolicyRule, announced map[string]PolicyAction) {
+	if ps.staging {
+		return
+	}
+	if prev, held := announced[r.ID]; held && prev == r.Action {
+		return
+	}
+	warnRetainedUnknownAction(r, "bulk replace")
 }
 
 // warnLoadedRule emits the per-rule operator warnings for a rule Load keeps:

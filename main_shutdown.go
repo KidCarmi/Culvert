@@ -60,6 +60,24 @@ type shutdownBudget struct {
 	Flush time.Duration
 }
 
+// shutdownStarted is set the moment the process accepts SIGINT/SIGTERM and is
+// never cleared: from then on this process is going away. /ready reads it (the
+// `shutdown` row in computeReadiness).
+//
+// Why readiness has to know. The proxy listener stays open through the whole
+// early phase and most of the drain — it closes only at the proxy-server hook —
+// so for up to that long a probe still gets an answer. Without this flag the
+// answer was "ready". A caller that asks "is the proxy up?" in that window and
+// acts on a yes is wrong within seconds: the maintenance agent's health gate
+// passed a rollback against a container Docker was already stopping (a stop
+// requested by an upgrade that had since been killed), reported success and
+// retired its crash record, and the proxy then exited with nothing reporting it
+// (measured on real Docker with a stand-in proxy that answers the way this one
+// did; with /ready failing the same rollback fails its gate instead). The same
+// answer keeps a load balancer sending new connections to a node that is
+// draining.
+var shutdownStarted atomic.Bool
+
 // defaultShutdownBudget is the shipped envelope. Total preserves the
 // pre-CHAOS-56 INTENT exactly — 30s late + a 15s tunnel drain = 45s — so no
 // drain gets less generous, only bounded. Early is sized for the stop-
