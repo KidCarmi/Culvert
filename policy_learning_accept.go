@@ -248,7 +248,7 @@ func plAcceptRecommendation(eng *policylearn.Engine, recID string, ifVersion int
 	}
 
 	rule := plTranslateRecommendation(&rec)
-	if err := validatePolicyRule(rule, effectivePolicyList(), -1); err != nil {
+	if err := validateIngressRule(rule, effectivePolicyList(), -1); err != nil {
 		// Structural refusal (e.g. name collision with an admin-created rule).
 		// The intent stays pending; a retry after the operator resolves the
 		// collision converges on the same target.

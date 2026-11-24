@@ -46,6 +46,12 @@ amended:
     reason: "ADR-0062, owner decision 2 (2026-11-24): the state_dir instance lock is now held in EVERY mode, taken before anything under state_dir is read or rewritten and before the socket is bound, so a second agent on the same state_dir refuses to start (it used to serve and admit operations beside the first, and replace its socket). Off mode still changes nothing in Docker and runs no reconcile; TestOffMode_StatusAndStateUnchanged now asserts the off-mode agent HOLDS the lock instead of asserting no lock file exists. Not owner-approved wording."
   - id: AGT-900
     reason: "ADR-0062, owner decision 2: a second agent process on the same state_dir no longer starts and skips its reconcile; it refuses to start (non-zero exit, no socket, no Docker change, record kept) while the first keeps serving. TestConvergeRecovery_SecondInstanceSkips is replaced by TestConvergeRecovery_SecondInstanceRefusesToStart. The reconcile still takes the lock itself when a server is built without it (tests), so its skipped_second_instance state remains reachable there. Not owner-approved wording."
+  - id: POL-005
+    reason: "Owner decision of 2026-11-24 (unknown JSON fields: unify the contract across all entry points, prefer explicit rejection, preserve compatibility through an explicit strategy). The invariant is widened again, in the same direction: a rule object carrying a JSON key this build has no field for (a misspelt condition, or one added by a newer release), or the same key twice (the last value won), is a rule it cannot enforce as written, because a condition present in the document is not enforced and the rule matches more than was written. Measured before the change: the policy file, a stored config version, a pending draft and a control-plane snapshot each installed an Allow narrowed only by an unknown key as an Allow for every source. The operator doors already refused an unknown key (400 'invalid JSON') and accepted a duplicate; they now refuse both and name the rule and the keys. The gate, its doors, its Diagnostics code and every registered test are unchanged; tests are added. Compatibility strategy, now part of the contract: every rule key other than the reserved 'annotations' container is an enforcement condition, 'annotations' is carried in canonical form (on which it is bounded) and never interpreted, and a test pins today's key set. A rule list given twice in one document is refused likewise. Key matching stays case-insensitive, documents around rules (ConfigSnapshot sections) stay tolerant, and no legacy key is allowlisted because the available history holds none on a rule. Record: docs/engineering/security-reviews/2026-11-24-unknown-rule-fields-refused.md."
+  - id: AGT-004
+    reason: "ADR-0062 slice 2 (journal schema version). A journal record written by a NEWER agent (schema above this build's) is listed in status like any interrupted record, but this build never rewrites or removes it, so a later successful image change does not clear it: its fields may say the state is unsafe in a way this build cannot read. This narrows 'lists it until a later image change succeeds' for that one case; records this build or an older agent wrote are unchanged, and no registered test was edited (new tests: TestRetire_NewerRecordIsNeverSuperseded, TestNewerSchema_IsNeverRewrittenOrRemoved). Not owner-approved; the wording is the implementer's."
+  - id: AGT-005
+    reason: "ADR-0062 slice 2. Retirement is narrowed, never widened: a record a newer agent wrote is never removed by this build, neither by a later success nor by the converge reconcile (which reports it recovery_required/record_from_newer_agent without reading Docker), and no interrupted_superseded entry is written for it. Unknown keys of any record now survive every rewrite, and an agent released before slice 2 is fenced off a directory holding schema-2 records (it refuses to serve on the fence record's unknown phase). Existing retirement rules and their tests are unchanged. Not owner-approved; the wording is the implementer's."
 retired: []
 
 contracts:
@@ -188,11 +194,12 @@ contracts:
     area: policy
     status: enforced
     owner_approved: false
-    invariant: "A ruleset containing a rule this build cannot enforce as written (an unrecognised ruleType, or any shape the persistability gate refuses) is refused whole at every door, and the running and persisted policy are unchanged. No replacement, normalization, migration or compatibility conversion may silently remove an enforcement rule."
+    invariant: "A ruleset containing a rule this build cannot enforce as written (an unrecognised ruleType, a JSON key the build has no rule field for, the same key given twice, or any shape the persistability gate refuses) is refused whole at every door, and the running and persisted policy are unchanged. No replacement, normalization, migration or compatibility conversion may silently remove an enforcement rule."
     authority: "Policy store and its bulk doors (policy_ruletype_gate.go, policy.go)."
     code:
       - "policy_ruletype_gate.go"
       - "policy_preflight.go"
+      - "policy_unknown_field.go"
     configs: []
     transitions:
       permitted:
@@ -206,6 +213,15 @@ contracts:
         - "dropping a rule the build cannot enforce and installing the rest of the ruleset"
         - "restoring a stored config version without one of its rules"
         - "installing an empty rule entry (null or {}), which matches every request"
+        - "installing a rule decoded from JSON with a key the build has no field for, the key ignored"
+        - "failing to decode a control-plane snapshot because of an unknown top-level section"
+        - "installing a rule decoded from JSON in which one field was given twice, the last value kept"
+        - "adding a rule key for information that is not an enforcement condition (it belongs inside annotations)"
+        - "interpreting the contents of a rule's annotations, or dropping them in the store, the policy file, an export or a snapshot"
+        - "raising the size or depth bound of annotations"
+        - "bounding annotations on any form other than the canonical one Culvert's encoders write (a ruleset accepted once must stay accepted after save, export and publish)"
+        - "keeping only the last of two rule lists given under the same key in one document"
+        - "decoding a rule onto anything but a zero value"
     tests:
       - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_E2E_BulkReplaceIsRefusedAndLastKnownGoodStillBlocks}
       - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_E2E_PolicyFileReloadIsRefusedAndLastKnownGoodStillBlocks}
@@ -222,8 +238,79 @@ contracts:
       - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_RollbackRefusesWholeOrRestoresEveryStoredRule}
       - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_RepeatedRefusalIsLoggedOnceAndCountedEveryTime}
       - {file: "policy_unenforceable_rule_test.go", name: TestPolicyPreflight_ListsEveryRefusedRuleAndChangesNothing}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_WhatCountsAsUnknown}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_EveryKeyIsNamedBoundedAndNotSticky}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AreAPinnedSetAndNewOnesAreConditions}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AnnotationsAreCarriedVerbatimNeverInterpretedAndBounded}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_DuplicateKeyIsRefusedAtEveryDoorClass}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_FetchAndApplyAndDeltaRemainderRefuseAndTheCleanSnapshotApplies}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_RefusedLastGoodSnapshotAtBootIsADiagnosticsRow}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_StartupFatalDoesNotClaimARunningPolicy}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AnnotationsBoundIsAFixedPointOfEveryEncoder}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AnnotatedRulesetSurvivesItsOwnSaveExportAndPublish}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_RuleListGivenTwiceIsRefusedAtEveryDoor}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_NothingSurvivesAnEarlierDecodeAndCopiesDoNotAlias}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_PreflightChecksEveryLocationAndLabelsByShape}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_ColdDataIsOnePointerAndTheRuleKeepsItsSizeClass}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_SingleRuleAPIRefusesByNameAndChangesNothing}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_GetThenPutRoundTripsThroughTheRealHandlers}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_ImportIsRefusedInEveryModeAndNamesTheRule}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_PolicyFileIsRefusedAtLoadReloadAndStartup}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_StoredVersionAndPendingDraftAreRefused}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_SnapshotIsRefusedBeforeAnyMutationAndTheEnvelopeStaysTolerant}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_PreflightListsEveryRuleAndPOL004IsUntouched}
     validation: integration
-    compatibility: "A node handed a ruleset from a newer release keeps enforcing its last accepted policy; a policy file it cannot fully understand stops startup, as a malformed file does."
+    compatibility: "A node handed a ruleset from a newer release keeps enforcing its last accepted policy; a policy file it cannot fully understand stops startup, as a malformed file does. Every rule key except the annotations container is an enforcement condition: when a later release adds one and a rule uses it, older nodes refuse the whole snapshot (blocklist and IP-filter changes included) until upgraded; information that is not a condition travels inside annotations and never causes a refusal. A hand-edited policy file with an extra, misspelt or repeated rule key stops startup after upgrade; `culvert policy-check` lists such keys beforehand."
+
+  - id: POL-006
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "Every door through which an operator submits policy rules runs the one shared per-rule check (checkRuleIngress) and the shared uniqueness check; no door has a rule of its own. A rule that is invalid, or that the node cannot enforce as written (a schedule timezone it cannot load), is refused at all of them: a replace-mode config import holding one is refused whole before any section applies, with the running and persisted policy unchanged, and a merge-mode import skips and reports it, leaving any existing rule of the same identity untouched. A finding may be installed with a warning only when its enforcement is fail-closed at the point of use; today that is one finding, a Redirect host whose DNS lookup failed or was not made in time (the serve path re-checks it and answers 403): the single-rule API refuses it, an import installs it with a per-rule warning. An address literal is classified without DNS and never reaches that class. An import whose request is cancelled applies nothing. Recorded exceptions: the live SSO provider-reference check runs at the auth-policy API only (registry drift must not drop stored rules), and a draft commit re-validates its candidate without the source-literal check, because the candidate holds rules inherited from the running policy."
+    authority: "Policy rule ingress validation (policy_ruleset_ingress.go, ui_helpers.go)."
+    code:
+      - "policy_ruleset_ingress.go"
+      - "ui_helpers.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a check to the shared per-rule validation, which then applies at every operator-facing door"
+        - "merge-mode import skipping an invalid rule and reporting it in warnings"
+        - "an import installing a Redirect rule whose host this node could not resolve, with a warning naming it"
+      forbidden:
+        - "a validation rule that exists at one operator-facing door only, other than the recorded exceptions"
+        - "a replace-mode import installing a rule that is invalid"
+        - "applying any section of an import whose rule set was refused, or auditing or versioning it"
+        - "refusing an import because the importing node's resolver could not answer for a Redirect host"
+        - "installing, at an operator door, a rule whose schedule timezone the node cannot load, or overwriting a working rule with one"
+        - "treating a private, loopback, link-local or metadata address literal as unverifiable, whatever the state of the request context"
+        - "adding a finding to the install-with-warning class whose enforcement is not fail-closed at the point of use"
+        - "installing an unverified rule without a warning in the response, or a dry run that omits a warning the commit returns"
+        - "running the ingress validation at a stored or wire door (policy file, rollback, control-plane snapshot, pending draft), where it could stop a node starting, rolling back or following its control plane"
+    tests:
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_ReplaceImportRefusesWhatThePolicyAPIRefuses}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_ReplaceImportStillAcceptsAValidRuleset}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_E2E_RefusedReplaceImportKeepsTheBlockInForce}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_MergeImportSkipsAndReportsAnInertSourceIP}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_RefusalIsBoundedAndSanitized}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_StoredAndWireDoorsStayOnThePureGate}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ReplaceImportSurvivesAResolverOutage}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ReplaceImportRefusesARedirectToAPrivateAddress}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_PolicyAPIStillRefusesAnUnverifiableRule}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_UnloadableTimezoneIsRefusedNotInstalled}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_MergeNeverOverwritesAWorkingRuleWithAnUnloadableTimezone}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_TypoTimezoneIsInvalidOnANodeWithTzdata}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_RedirectAddressLiteralsAreClassifiedWithoutDNS}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_CancelledRequestAppliesNothing}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_SpentBudgetDoesNotLaunderALiteral}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_MergeDryRunIsSilentAndTouchesNothing}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_VerdictsAreNotReusedForAnotherRuleSet}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ImportVerificationIsTimeBounded}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_MergePreviewAgreesWithApplyAndWarningsAreBounded}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_UnsupportedVersionIsReportedBeforeRuleValidation}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ExportOfAnAPIBuiltPolicyReimports}
+    validation: integration
+    compatibility: "A replace-mode import that used to succeed can be refused, including a backup this system exported while its policy held a rule from a policy file, a snapshot, a restored version or an older release that the API refuses: an inert sourceIP, duplicate names or priorities, an unnamed rule, a missing, case-folded or unknown action, a Redirect with an empty, non-http or private target, a schedule timezone the node cannot load. The 400 names the rule and the reason. A backup of a valid policy restores on a node without DNS, with warnings; on a node without a timezone database its scheduled rules are refused until tzdata is installed. Stored policy, rollback and cluster sync are unaffected. Evaluation of an empty action is unchanged (POL-901)."
 
   - id: AUTH-001
     area: authn-authz

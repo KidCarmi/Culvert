@@ -61,6 +61,143 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A policy rule whose JSON keys this version cannot honour is refused, at
+  every door, instead of being loaded with a condition missing.** A rule object
+  can hold a key the build has no field for (a typo such as `"destFQDN "`,
+  `"sourceIPs"` or `"srcIP"`, or a condition added by a newer release), or the
+  same key twice (`"sourceIP":"203.0.113.0/24","sourceip":""`, where the last
+  value won). Either way a match condition written in the document was not
+  enforced and the rule matched more than was written: an Allow for one source
+  range, loaded from the policy file, a stored config version, a pending draft
+  or a control-plane snapshot, allowed every source. Such a ruleset is now
+  refused whole by the same gate as an unrecognised `ruleType`: a policy file
+  stops startup (a reload keeps the running rules and default action), a
+  rollback and an import answer `400`, a snapshot is refused and the node keeps
+  its last accepted configuration, with the
+  `policy_ruleset_refused_unenforceable_rule` Diagnostics row. The refusal
+  names the rule and the keys. The rule API and the config import already
+  refused an unknown key with `400 invalid JSON`; they now name the rule and the
+  keys, and also refuse a duplicate key, which they used to accept. Key names
+  are still matched without regard to case (`"destFqdn"` is `destFQDN`), and
+  sections of a control-plane snapshot that this version does not know are
+  still ignored.
+  **API contract 2.1.0 → 2.2.0 (MINOR):** the policy rule schema gains the
+  optional `annotations` property; a duplicated key in a rule object is now a
+  `400` on the policy API (it was accepted, last value winning).
+  A rule list given twice in one document (`"policyRules":[…],"policyRules":[…]`
+  in a backup, `policy_rules` in a snapshot, `rules` in a draft) is refused the
+  same way: the first list used to be discarded.
+  **New: `annotations`.** A rule may carry one `annotations` object. Culvert
+  never interprets its contents; it keeps them in canonical form (compact
+  JSON, with `<`, `>`, `&` written as `\uXXXX` escapes, as Culvert's own
+  encoders write them) through the policy file, exports, stored versions and
+  snapshots. The limits, 4096 bytes and 8 levels, are measured on that form:
+  whitespace does not count, each of `<` `>` `&` counts as 6 bytes, and a rule
+  accepted once stays accepted however often it is saved, exported or
+  published. `null` is the same as absent. It is the place for notes in a
+  hand-edited file, and from now on the only place a release may add
+  information that is not a match condition. Editing a rule in the admin UI
+  replaces the rule and removes its annotations.
+  **Upgrade impact:** a hand-edited policy file in which a rule has an extra,
+  misspelt or repeated key (including a note such as `"_comment"`) stops
+  startup. Before upgrading, run `culvert policy-check <policy file>` with the
+  new binary: it lists every such rule and key and changes nothing; move notes
+  under `annotations`. In `main`'s history no key of a rule or its schedule was
+  ever removed or renamed, so files, versions and snapshots written by Culvert
+  itself are unaffected.
+  **By design:** when a later release adds a new match *condition* and a rule
+  uses it while older data planes are still deployed, those nodes refuse the
+  whole snapshot and stay on their last accepted configuration, including for
+  blocklist and IP-filter changes, until they are upgraded. That is what an
+  unrecognised `ruleType` already does; the alternative is enforcing the rule
+  without the condition. Diagnostics on the node shows the refusal; the control
+  plane only sees the node as behind.
+  `culvert policy-check` now also reads a control-plane snapshot (a data
+  plane's `dp_last_config_snapshot.json`), which it used to report as
+  `OK — 0 rule(s)`, and a data plane whose last-known-good snapshot is refused
+  at startup shows it in Diagnostics. Record:
+  `docs/engineering/security-reviews/2026-11-24-unknown-rule-fields-refused.md`.
+- **A replace-mode config import no longer installs policy rules the policy
+  API refuses.** `POST /api/config/import?mode=replace` checked only that
+  every rule was of a type this version can enforce, then replaced the whole
+  policy. It therefore accepted, with `200 {"ok":true}` and no warning, rules
+  that `POST /api/policy` answers 400 to. The one that changes traffic: a Drop
+  or Block rule whose `sourceIP` is not an address or a CIDR
+  (`"10.0.0.5-10.0.0.9"`, `" 10.0.0.5"`, `"10.0.0.0/33"`) never matches, so
+  importing it over a working restriction let that traffic fall through to the
+  default action or to an Allow behind it. Also accepted: duplicate rule names
+  or priorities, a Redirect with no `redirectURL` or one pointing at a private
+  address, an impossible schedule timezone, a rule with no name, and a rule
+  whose `action`
+  is missing or is not exactly `Allow`, `Drop`, `Block_Page` or `Redirect`.
+  Every door where an operator submits rules now runs the same validation
+  through one shared function: the policy and auth-policy API, config import
+  in both modes, and policy-learning acceptance. No door has rules of its own.
+  - **Replace mode** validates the incoming set before anything is applied
+    (the dry-run preview too). One invalid rule refuses the whole import with
+    a 400; no section is applied, nothing is audited or versioned, and the
+    running and saved policy are untouched.
+  - **Merge mode** still skips an invalid rule and lists it in `warnings`, as
+    before, and now also skips a rule whose `sourceIP` can never match instead
+    of installing it or overwriting a working rule with it.
+  - **Not changed:** how a rule is evaluated (a stored rule with no action
+    still resolves to Allow), and the doors that read stored or published
+    policy: the policy file at startup and reload, config-version rollback,
+    control-plane snapshots and a pending draft. They keep loading what they
+    held, so no node fails to start, roll back or follow its control plane
+    because of this change.
+
+  - **A Redirect host this node cannot resolve is not an invalid rule.** When
+    the DNS lookup of a Redirect rule's host fails, or is not made within the
+    10 seconds an import allows for verification, an import (both modes, dry
+    run included) still installs the rule and returns one `warnings` entry
+    naming the rule and the host, so a backup of a healthy policy restores on
+    a node whose DNS is down. This is the only finding treated this way, and
+    only because it is fail-closed where it is used: a Redirect is re-checked
+    every time it matches and answers 403 until its host resolves to a public
+    address. Decided without DNS, and always refused: a host that is a
+    private, loopback, link-local, unspecified or metadata address literal
+    (bracketed IPv6 with or without a port, zoned addresses), `localhost` in
+    any spelling, and numeric-looking hosts that are not canonical addresses
+    (`2130706433`, `0x7f.1`, `127.1`). A name that resolves to a private
+    address is refused. `POST`/`PUT /api/policy` still answer 400 to a host
+    they could not resolve; the message now says so instead of calling the
+    URL malformed. An import whose request is cancelled applies nothing.
+  - **A schedule timezone the node cannot load is refused, never installed.**
+    On a node with a timezone database an unknown name is a typo (`invalid
+    schedule timezone: … is not a known timezone`). On a node with no
+    timezone database the rule is refused with a message saying so and what
+    to install. Replace refuses the import; merge skips the rule and leaves
+    any existing rule of the same name untouched. Installing it would not be
+    safe: an access rule's schedule would run on UTC hours, and an
+    authentication rule would stop matching, which removes the
+    authentication requirement when the default outcome is Exempt.
+  - The merge-mode dry run now runs the merge itself against a silent copy of
+    the policy, so its `upsert N: U update, A add` line counts skipped rules
+    (`…, S skipped as invalid`) and returns the same `warnings` as the commit.
+    The backup `version` is checked before the rules.
+
+  **Upgrade impact:** a replace-mode import that used to succeed can now be
+  refused. The response says which rule and why, for example `import refused:
+  policy rule 3 of 12 ("quarantine") is not valid: sourceIP
+  "10.0.0.5-10.0.0.9" must be a single IP address or a CIDR`. Correct that
+  rule in the file and import again; `?dryRun=true` gives the same answer
+  without applying anything. This includes a backup exported by this system
+  if its policy held such a rule, which is possible when the rule came from a
+  hand-edited policy file, a control-plane snapshot, a restored config
+  version, or a release older than the API check concerned. The shapes a
+  self-made export can hold and a replace import now refuses: a `sourceIP`
+  that is not an address or CIDR; duplicate rule names; duplicate priorities;
+  a rule with no name; an `action` that is missing, in another letter case,
+  or unknown to this version (such a rule is kept and blocks when it comes
+  from a policy file or snapshot, but cannot be imported); a Redirect with an
+  empty or non-http(s) `redirectURL`, or one whose host is or resolves to a
+  private address; and a schedule timezone the importing node cannot load (on
+  an image without zoneinfo that is every named zone: install tzdata first).
+  Not changed here, and worth knowing: the policy file, config-version
+  rollback and control-plane snapshots still load a rule with an unloadable
+  timezone, and evaluate an access rule's schedule in UTC or never match an
+  authentication rule.
 - **The SSRF guard classified a zoned IPv6 address as public.** The pre-flight
   check that keeps outbound requests and redirect targets away from internal
   addresses read the resolver's answers with a parser that does not understand

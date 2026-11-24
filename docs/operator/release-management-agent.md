@@ -315,6 +315,16 @@ ignore an operation it cannot classify. Move that file aside, start the agent,
 and check `culvert/proxy:pinned` against the running container before the next
 upgrade.
 
+If the file named is `00000000000000000000000000.json`, it is not corrupt: it
+is the **downgrade fence** (ADR-0062). A newer agent writes it while the
+journal holds a record that only an agent of that version or later can read
+safely, so an older agent refuses to start instead of acting on a record it
+would misread. Do not delete it. Start the newer agent again (or upgrade);
+it removes the fence by itself once those records are resolved. A record a
+newer agent wrote is also never rewritten or retired by an agent that knows
+the fence: it is shown in status with `recovery_required` and reason
+`record_from_newer_agent` until an agent of the right version handles it.
+
 ## Retrying a request after the agent restarts (`idempotency_key`)
 
 A request that carries an `idempotency_key` is recorded under

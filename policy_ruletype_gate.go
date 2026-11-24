@@ -9,7 +9,8 @@ import (
 )
 
 // The ruleset gate (POL-005): unknown ruleType, and any rule this build cannot
-// enforce as written (unenforceableRuleError, below).
+// enforce as written (unenforceableRuleError, below), including a rule decoded
+// from JSON with a key this build has no field for (policy_unknown_field.go).
 //
 // Governing invariant: no policy replacement, normalization, migration or
 // compatibility conversion may silently remove an enforcement rule and thereby
@@ -29,7 +30,9 @@ import (
 // the same fail-open, one step earlier. So a ruleset that contains one is
 // refused WHOLE, at every door, and the running policy stays as it was:
 //
-//   - new writes (API create/update, import merge, draft commit): validateRuleShape;
+//   - new writes (API create/update, import in both modes, draft commit):
+//     validateRuleShape, through the ingress validation an operator-submitted
+//     rule gets at every such door (policy_ruleset_ingress.go);
 //   - import, both modes (and its dry-run preview), and config-version rollback:
 //     refused before any section applies, in the HANDLERS, with a 400. A
 //     rollback that passes restores EVERY stored rule, as stored: it used to
@@ -70,7 +73,11 @@ func (e *unknownRuleTypeError) Error() string {
 // boundedRuleName caps an operator- or peer-supplied string that is repeated in
 // an error, a log line and a viewer-readable Diagnostics row.
 func boundedRuleName(s string) string {
-	const limit = 128
+	return boundedText(s, 128)
+}
+
+// boundedText caps s at about limit bytes on a rune boundary.
+func boundedText(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
@@ -115,7 +122,8 @@ func policyRulesRuleTypeError(rules []PolicyRule) error {
 // build cannot enforce as written, and how many there are. These are the shapes
 // policyRulePersistable refuses: an access rule carrying a subjectMatch (the
 // evaluator does not consult it), an access rule carrying an auth spec, an auth
-// rule that fails validation, a null entry, and an empty entry (ruleEnforceable).
+// rule that fails validation, a null entry, and an empty entry (ruleEnforceable),
+// and a rule decoded with an unknown or duplicated JSON key (ruleAsWrittenFault).
 //
 // Load and ReplaceAll used to DROP such a rule and install the rest
 // (SEC-POLICYDROP-1). That is safe for a scoped Allow and fail-open for
@@ -168,7 +176,11 @@ func rulesetGateError(n int, at func(int) *PolicyRule) error {
 	return first
 }
 
-// ruleEnforceable is policyRulePersistable plus the EMPTY entry. A JSON null (or
+// ruleEnforceable is the per-rule decision of the gate: first a JSON key this
+// build has no field for (reported before anything else, because a misspelt
+// "name" or "action" would otherwise read as an empty entry), then the shape.
+//
+// The shape is policyRulePersistable plus the EMPTY entry. A JSON null (or
 // {}) in a rule array decodes, at every door that reads into []PolicyRule, to
 // a rule with no name, no type and no action. Nothing validates it there, it
 // has no selectors so it matches every request, and an empty action resolves
@@ -178,6 +190,15 @@ func rulesetGateError(n int, at func(int) *PolicyRule) error {
 // them. A NAMED rule with an empty action is not this case and is untouched
 // (POL-901 remains an open question).
 func ruleEnforceable(r *PolicyRule) (ok bool, reason string) {
+	if reason := ruleAsWrittenFault(r); reason != "" {
+		return false, reason
+	}
+	return ruleShapeEnforceable(r)
+}
+
+// ruleShapeEnforceable is ruleEnforceable for a rule whose every JSON key was
+// understood: the empty entry, then the persistability gate.
+func ruleShapeEnforceable(r *PolicyRule) (ok bool, reason string) {
 	if r != nil && r.Name == "" && r.Action == "" && r.RuleType == "" {
 		return false, "empty entry (a null or {} in the rule list)"
 	}
@@ -232,6 +253,9 @@ const rulesetRefusalRelogEvery = 15 * time.Minute
 // next ACCEPTS a ruleset, so an operator who was not watching the log still
 // sees that the node is running an older policy than the one it was handed.
 func (ps *PolicyStore) noteRulesetRefused(door string, err error) {
+	if ps.silent {
+		return // a scratch store: nobody runs this policy
+	}
 	now := time.Now().UTC()
 	next := &policyRulesetRefusal{At: now, First: now, Logged: now, Count: 1, Door: door, Code: rulesetRefusalCode(err), Reason: err.Error()}
 	if prev := ps.rulesetRefused.Load(); prev != nil && prev.Door == next.Door && prev.Reason == next.Reason {
@@ -265,10 +289,11 @@ func (ps *PolicyStore) decodePolicyFile(data []byte) ([]*PolicyRule, error) {
 }
 
 // decodeImportBackup reads a config import body and applies the ruleType gate
-// to it. It returns the 400 message, or "" to proceed. The gate runs here, at
-// the door, so it precedes every section's apply AND the dry-run preview: a
-// preview never promises an import the commit would refuse.
-func decodeImportBackup(r *http.Request, b *configBackup) (refusal string) {
+// to it, then the backup version check and the ingress validation of the rule
+// set (importIngressRefusal). It returns the 400 message, or "" to proceed. All
+// run here, at the door, so they precede every section's apply AND the dry-run
+// preview: a preview never promises an import the commit would refuse.
+func decodeImportBackup(r *http.Request, b *configBackup, checks *importRuleChecks) (refusal string) {
 	if err := decodeJSON(r, b); err != nil {
 		return "invalid JSON: " + err.Error()
 	}
@@ -279,7 +304,7 @@ func decodeImportBackup(r *http.Request, b *configBackup) (refusal string) {
 		}
 		return "import refused, a rule cannot be enforced: " + err.Error()
 	}
-	return ""
+	return importIngressRefusal(r, b, checks)
 }
 
 // rollbackTargetRefusal is the shape checks a stored version must pass before
