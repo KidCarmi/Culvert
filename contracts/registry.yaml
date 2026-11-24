@@ -974,6 +974,7 @@ contracts:
       - {file: "cmd/culvert-maint/startup_intent_consume_test.go", name: TestInitJournal_TakesTheIntentOnceAndInEveryMode}
       - {file: "cmd/culvert-maint/startup_intent_consume_test.go", name: TestTakeCommandIntents_AnIntentThatCannotBeRemovedStopsTheStart}
       - {file: "cmd/culvert-maint/startup_intent_consume_test.go", name: TestInitJournal_ARefusedStartLeavesNothingBehind}
+      - {file: "cmd/culvert-maint/command_intent_crash_test.go", name: TestCommandIntent_ASecondAgentDoesNotTakeALiveIntent}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_RepeatedRestartsAreIdempotent}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_DockerUnavailableAtStartup}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_ForgedRecordRefsAreNotRepeated}

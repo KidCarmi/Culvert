@@ -11,11 +11,15 @@ package main
 // earlier, marker-based design (#2093) found a wrong recovery.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 type intentStatus struct {
@@ -117,5 +121,52 @@ func TestCommandIntent_KilledAfterTheCommandReturned(t *testing.T) {
 	r.start()
 	if cmd, _ := r.diedIn(opID); cmd != "" {
 		t.Errorf("died_in_command = %q for an agent killed in the health gate, want none", cmd)
+	}
+}
+
+// TestCommandIntent_ASecondAgentDoesNotTakeALiveIntent: a second agent process
+// is started on the same state directory while the first is inside `compose
+// up`. It must not serve, and must not touch the record: taking the intent of
+// an operation that is still running would report a death that did not happen
+// and, later, let a recovery start the prior image under the operation's own
+// `up`. The instance lock (taken before the journal is read) is what stops it.
+func TestCommandIntent_ASecondAgentDoesNotTakeALiveIntent(t *testing.T) {
+	r := newCrashRig(t)
+	r.start()
+	r.put("block_on", "up_before:1")
+	opID := r.applyUpgrade()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(r.model, "blocked")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the upgrade never reached its `compose up`; agent output:\n%s", r.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Cleanup(r.kill)
+	before := r.recordFile(opID)
+	if before.Intent == nil {
+		t.Fatalf("test setup: no open intent while the first agent is inside `compose up`: %+v", before)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	second := exec.CommandContext(ctx, agentBinary(t), "--config", r.cfgPath) // #nosec G204 -- test-built binary, test-owned config
+	second.Env = append(os.Environ(), "PATH="+r.shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := second.CombinedOutput()
+	if err == nil || ctx.Err() != nil {
+		t.Fatalf("the second agent did not refuse to start (err=%v, timed out=%v); output:\n%s", err, ctx.Err() != nil, out)
+	}
+	if !strings.Contains(string(out), "holds the instance lock") {
+		t.Errorf("the second agent failed for another reason than the instance lock; output:\n%s", out)
+	}
+	after := r.recordFile(opID)
+	if after.Intent == nil || after.Cut != nil {
+		t.Errorf("record after the second agent's attempt = %+v, want the live intent untouched and no cut\nsecond agent output:\n%s", after, out)
+	}
+	if code := r.get("/v1/health", nil); code != http.StatusOK {
+		t.Errorf("the first agent no longer answers after the second one's attempt: HTTP %d", code)
 	}
 }
