@@ -53,24 +53,74 @@ names tests about the mutated behaviour, so none is a load flake.
 About 105 s per mutant for the new suite (mostly compilation), about 500 s for the existing one.
 A scheduled campaign is not justified yet: run it by hand when the verifier or these paths change.
 
-## Rerun after the three fixes (2026-11-23), verifier side only
+## Rerun after the three fixes (2026-11-23/24), both sides
 
-The verifier's wire model was corrected and its baselines re-recorded (`../DRIFT-REVIEW-2026-11-23.md`),
-so the verifier side of the campaign was rerun on the final code: `MUTANTS_NEW_ONLY=1 mutants.py`.
-The existing-suite side was **not** rerun; the "Existing" column above is still the result at `155df09`.
+The verifier's wire model was corrected and its baselines re-recorded
+(`../DRIFT-REVIEW-2026-11-23.md`), so the whole campaign was rerun on the code with #2055, #2053
+and #2050 merged: the verifier (`run.sh`) and the existing root and `hostutil` suites, for the 15
+original mutants plus three new ones that each undo one merged fix. An unmodified control tree
+passed both sides. The table at the top of this file is the earlier result at `155df09` and is kept
+as recorded.
 
-- **M01–M14: same verdict for every mutant.** 12 of 15 killed; M03, M07 and M13b survive, as before.
-  M07's anchor text had moved (the function after `ReplaceAll` changed in #2050); the edit itself is
-  unchanged.
-- **Three new mutants, each undoing one merged fix, all killed:**
+| ID | Mutant | Verifier | Existing (first failing tests) |
+|---|---|---|---|
+| M01 | enforcement keeps the port on the host | killed | killed — `TestChaos69_ControlOrdinaryDestinationStillProxies` |
+| M02 | tester matches the raw authority | killed | killed — `TestChaos69_ControlPortShapedAuthorityIsStillAnswered` |
+| M03 | tester skips host normalisation | survived | survived |
+| M04 | enforcement skips host normalisation | killed | killed — `TestNormHoist_RealScanSeedsTheCanonicalHost` |
+| M05 | bare-name match loses its label boundary | killed | killed — `FuzzMatchFQDNNorm` |
+| M06 | IPv4-mapped destination no longer unmapped | killed | killed — `TestPolicyDestLiteral_SpellingsReachTheSameRule` |
+| M07 | bulk replace does not sort by priority | survived | killed — `TestLastHitWritersAreMonotonic` |
+| M08 | enforcement-only prefilter rejects the second rule | killed | killed — `TestCategoryGroupMembership_ArmedAccessEvaluateBlocks` |
+| M09 | disabled rules decide | killed | killed — `TestPolicyTester_SkipsDisabledRule` |
+| M10 | CONNECT skips the policy decision | killed | killed — `TestChaos125_EstablishedInspectedTunnelOutlivesTheSetupWindow` |
+| M11 | identity compared case-sensitively | killed | killed — `TestAuthzBypass_SourceIdentityNotForgeable` |
+| M12 | invalid-host refusal removed on enforcement | killed | **killed** — `TestPolicyTester_AgreesWithTheWireOnOddTargets`, `TestPolicyTester_AuthorityParityWithRealSockets` |
+| M13a | source CIDR match no longer unmaps the client (first site) | **killed** | **survived** |
+| M13b | same edit, second site | survived | survived |
+| M14 | group names no longer trimmed | killed | killed — `TestPolicyStore_Evaluate_GroupsTrimSpace` |
+| M15 | zoned IPv6 destinations are no longer refused (#2055) | killed | killed — `TestZonedIPv6Dest_RefusedBeforePolicyOnHTTPAndCONNECT` |
+| M16 | tester matches the typed text again (#2053) | killed | killed — `TestChaos69_DefectPolicyTesterStage1MatchesTheRuntimeHost` |
+| M17 | an unknown action resolves to Allow (#2050) | killed | killed — `TestPOL004E2E_ReplaceAllUnknownActionNeverReachesBackend` |
 
-| ID | Mutant | Verifier |
+| | Original 15 | All 18 |
 |---|---|---|
-| M15 | zoned IPv6 destinations are no longer refused (#2055) | killed — outcome and alias-behaviour drift |
-| M16 | tester matches the typed text again, not the parsed request target (#2053) | killed — signature and alias-behaviour drift |
-| M17 | an unknown action resolves to Allow (#2050) | killed — `Frobnicate` row reads `http=forward(200)`, `DIFFERS-FROM-CONTRACT` |
+| Killed by the verifier | 12 | 15 |
+| Killed by existing tests | 12 | 15 |
+| Killed only by the verifier | 1 (M13a) | 1 |
+| Killed only by existing tests | 1 (M07) | 1 |
+| Killed by neither | 2 (M03, M13b) | 2 |
 
-- Unmodified control tree: pass.
+What changed against the first run:
 
-As before, every kill is baseline drift: it says behaviour changed, and a person decides whether the
-change is wrong.
+- **M12 is now killed by the existing suite too.** The tests that kill it are the real-socket
+  parity tests #2053 added; before the fixes only the verifier caught it. The verifier's "only I
+  catch this" count fell from 2 to 1 because a lead it produced became a regression test.
+- **No verdict got worse** on either side.
+- **Each of the three fixes is guarded twice:** undoing any one of them is caught by its own
+  regression tests and, independently, by the verifier.
+- M07's anchor text had moved (the function after `ReplaceAll` changed in #2050); the edit itself is
+  unchanged.
+
+Still true: every verifier kill is baseline drift. It says behaviour changed, and a person decides
+whether the change is wrong. M03 and M13b remain uncaught by anything; both are tester- or
+match-site edits whose effect the current generator does not exercise.
+
+The run was interrupted twice (a background time limit and a container restart) and resumed; the
+script skips mutants whose result file exists, so no mutant was run against a different tree.
+
+## Follow-up on the uncaught mutants (2026-11-24)
+
+- **M13a and M13b are now killed by a direct test.**
+  `TestSourceLiteral_MappedClientIsTheSameAddress` (`policy_source_unmap_test.go`) pins that both
+  source matchers compare an IPv4-mapped client as the same address as its IPv4 form. Applying
+  either mutant makes it fail on exactly the mapped-client rows. M13b had been caught by nothing;
+  M13a only by baseline drift.
+- **M03 is an equivalent mutant on today's code, not a gap.** The Policy Tester canonicalises its
+  host in the handler before the rule walk, so the walk's own `normalizeHost` call is redundant
+  for every input the endpoint accepts. Probed with nine spellings (upper case, trailing dot,
+  percent-encoded IDN in both cases, wildcard-covered subdomain, IPv6 in a different spelling,
+  IPv4-mapped literal): identical answers with and without the mutant. It stays in the campaign:
+  if a later change stops canonicalising in the handler, M03 becomes killable and should be.
+
+With these, no mutant in the campaign is uncaught for a reason other than equivalence.

@@ -21,6 +21,7 @@ import itertools
 import json
 import os
 import socket
+import ssl
 import subprocess
 import threading
 import sys
@@ -129,6 +130,11 @@ _hold_stop = None
 def _open_ui_request():
     port = int(os.environ.get("PROBE_UI_PORT") or int(PORT) + 1)
     c = socket.create_connection(("127.0.0.1", port), timeout=5)
+    if os.environ.get("PROBE_UI_TLS") == "1":  # the release image's admin UI is HTTPS, self-signed
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        c = ctx.wrap_socket(c)
     c.sendall(b"GET / HTTP/1.1\r\nHost: probe\r\n")
     return c
 

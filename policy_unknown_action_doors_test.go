@@ -53,13 +53,16 @@ func TestPOL004_RollbackKeepsARetainedUnknownActionRule(t *testing.T) {
 	if m == nil || m.Rule == nil || m.Rule.Name != "future-restriction" {
 		t.Fatalf("after rollback blocked.example.com matches %+v; POL-004: it must still match the unknown-action rule, not fall through to the Allow behind it", m)
 	}
-	// Control: a rule that is invalid for another reason is still skipped.
+	// Control: a stored rule the WRITE-TIME validator would refuse is restored
+	// too. A restore used to skip it and apply the rest, which removes a rule by
+	// the act of restoring (POL-005). A Redirect with no location is restored as
+	// stored and, like an unknown action, blocks on a match.
 	snapshot.PolicyRules = append(snapshot.PolicyRules, PolicyRule{Priority: 3, Name: "bad-redirect", DestFQDN: "x.example.com", Action: ActionRedirect})
 	if err := applyConfigBackup(snapshot); err != nil {
 		t.Fatalf("applyConfigBackup: %v", err)
 	}
-	if got := pol004RunningRuleNames(); strings.Contains(got, "bad-redirect") {
-		t.Errorf("a Redirect rule with no URL was restored: [%s]; only an unknown ACTION is tolerated on stored data", got)
+	if got := pol004RunningRuleNames(); !strings.Contains(got, "bad-redirect=Redirect") || !strings.Contains(got, "future-restriction=Quarantine") {
+		t.Errorf("a restore did not bring back every stored rule: [%s]", got)
 	}
 }
 

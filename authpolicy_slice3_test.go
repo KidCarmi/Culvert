@@ -80,33 +80,17 @@ func TestPolicyStore_Load_PreservesValidAuthRule(t *testing.T) {
 	assertAuthRulePreserved(t, got)
 }
 
-func TestPolicyStore_Load_DropsInvalidAuthRuleFailClosed(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "policy.json")
+// An invalid auth rule is never installed, and the file that holds it is refused
+// whole (POL-005): installing the rest would silently lose the rule's intent.
+func TestPolicyStore_Load_RefusesFileWithInvalidAuthRule(t *testing.T) {
 	data, err := json.MarshalIndent([]PolicyRule{
-		invalidAuthRule("bad-auth-should-drop"),
+		invalidAuthRule("bad-auth-must-not-install"),
 		{Priority: 2, Name: "plain-allow", Action: ActionAllow},
 	}, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write policy file: %v", err)
-	}
-	ps := &PolicyStore{}
-	if err := ps.Load(path); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	got := ps.List()
-	if len(got) != 1 {
-		t.Fatalf("expected only the valid rule to survive (invalid auth dropped), got %d: %+v", len(got), got)
-	}
-	if got[0].Name != "plain-allow" {
-		t.Errorf("wrong rule survived load: %q", got[0].Name)
-	}
-	if findRule(got, "bad-auth-should-drop") != nil {
-		t.Error("invalid auth rule was persisted on load (must fail-closed)")
-	}
+	assertLoadRefusedWhole(t, data, "bad-auth-must-not-install")
 }
 
 // ── ReplaceAll ───────────────────────────────────────────────────────────────
@@ -124,26 +108,13 @@ func TestPolicyStore_ReplaceAll_PreservesValidAuthRule(t *testing.T) {
 	assertAuthRulePreserved(t, got)
 }
 
-func TestPolicyStore_ReplaceAll_DropsInvalidAuthAndSubjectMatchAccess(t *testing.T) {
-	ps := &PolicyStore{}
-	ps.ReplaceAll([]PolicyRule{
-		invalidAuthRule("bad-auth-should-drop"),       // invalid auth → drop
-		subjectMatchRule("scoped-access-should-drop"), // access w/ SubjectMatch → drop
-		{Priority: 3, Name: "plain-allow", Action: ActionAllow},
-	})
-	got := ps.List()
-	if len(got) != 1 {
-		t.Fatalf("expected only the plain rule to survive, got %d: %+v", len(got), got)
-	}
-	if got[0].Name != "plain-allow" {
-		t.Errorf("wrong rule survived: %q", got[0].Name)
-	}
-	if findRule(got, "bad-auth-should-drop") != nil {
-		t.Error("invalid auth rule survived ReplaceAll (must fail-closed)")
-	}
-	if findRule(got, "scoped-access-should-drop") != nil {
-		t.Error("access rule with SubjectMatch survived ReplaceAll (fail-open hazard)")
-	}
+// Each unenforceable shape alone, and both together, refuses the whole
+// replacement (POL-005); neither rule is installed and the store keeps what it had.
+func TestPolicyStore_ReplaceAll_RefusesRulesetWithInvalidAuthOrSubjectMatchAccess(t *testing.T) {
+	plain := PolicyRule{Priority: 3, Name: "plain-allow", Action: ActionAllow}
+	assertReplaceAllRefusedWhole(t, []PolicyRule{invalidAuthRule("bad-auth"), plain})
+	assertReplaceAllRefusedWhole(t, []PolicyRule{subjectMatchRule("scoped-access"), plain})
+	assertReplaceAllRefusedWhole(t, []PolicyRule{invalidAuthRule("bad-auth"), subjectMatchRule("scoped-access"), plain})
 }
 
 // ── Config import (replace + merge) ──────────────────────────────────────────

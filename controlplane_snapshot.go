@@ -487,7 +487,9 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 	if err := validateFileProfiles(snap.FileProfiles); err != nil {
 		return fmt.Errorf("config snapshot file_profiles invalid: %w", err)
 	}
-	return nil
+	// Last: a rule type this build has no stage for refuses the whole snapshot,
+	// on publish and on apply, before any mutation (POL-005).
+	return policyRulesetError(snap.PolicyRules)
 }
 
 // ─── ConfigStore ──────────────────────────────────────────────────────────────
@@ -1429,7 +1431,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 	// snapshot once the operator corrects the CP-side input. No partial
 	// state mutation occurs on rejection.
 	if err := validateConfigSnapshot(snap); err != nil {
-		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
+		logSnapshotRejection("config snapshot", snap.Version, err)
 		return fmt.Errorf("config snapshot v%d rejected: %w", snap.Version, err)
 	}
 
@@ -1453,6 +1455,9 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 	beginConfigSnapshotApplyMutation()
 	err := applySnapshotMutations(snap)
 	endConfigSnapshotApplyMutation()
+	if err == nil {
+		policyStore.clearRulesetRefusal("control-plane snapshot")
+	}
 	return err
 }
 

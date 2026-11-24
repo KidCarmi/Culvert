@@ -316,6 +316,14 @@ change, and `/health` answers 200 in both. (Go's `Shutdown` closes such a
 connection at once when it is more than 5 s old, which is why the probe keeps
 the request fresh and rejects a trial whose shutdown was not held.)
 
+The same measurement on an image under Docker is
+`orphan-probe/image-sigterm-timeline.py <image> <not-ready|observe>`: it runs
+the image as the compose file does, holds two admin-UI requests, stops the
+container and fails if `/ready` answers 200 after the signal (`observe` only
+reports, for an image without the change). The workflow
+`.github/workflows/lifecycle-orphan-probe.yml` runs it on the release images it
+builds, next to the probe.
+
 `ORPHAN_PROBE_PAST_FIRST_USE=1` starts every trial from a state directory as an
 agent leaves it after its first completed operation. Without it each trial is a
 first start, which always waits the whole settle window, so neither "no marker,
