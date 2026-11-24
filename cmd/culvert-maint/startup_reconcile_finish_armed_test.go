@@ -25,8 +25,8 @@ func (r *crashRig) setHealth(hang, down bool) {
 	r.healthMu.Unlock()
 }
 
-// waitBlocked waits until the Docker model is blocked at its block_on point.
-func (r *crashRig) waitBlocked(budget time.Duration) {
+// waitBlockedFor waits, up to budget, until the Docker model is blocked at its block_on point.
+func (r *crashRig) waitBlockedFor(budget time.Duration) {
 	r.t.Helper()
 	deadline := time.Now().Add(budget)
 	for {
@@ -120,7 +120,7 @@ func TestConvergeRecovery_ArmedRollbackTagNeverMoved(t *testing.T) {
 	r.setHealth(false, true)          // the target never answers ready
 	r.put("block_on", "tag_before:2") // the inline rollback's retag; the forward tag is the first
 	opID := r.applyUpgrade()
-	r.waitBlocked(120 * time.Second) // the failing gate polls for its full 30s budget
+	r.waitBlockedFor(120 * time.Second) // the failing gate polls for its full 30s budget
 	r.kill()
 	r.setHealth(false, false) // the prior image is healthy
 	if r.read("pinned") != imgB || r.read("running") != imgB {
@@ -179,7 +179,7 @@ func (r *crashRig) awaitFinishKill(block string) {
 			r.t.Fatalf("the finish never reached its gate; agent output:\n%s", r.logs.String())
 		}
 	} else {
-		r.waitBlocked(30 * time.Second)
+		r.waitBlockedFor(30 * time.Second)
 	}
 	if block != "gate" && block != "verify" {
 		return
