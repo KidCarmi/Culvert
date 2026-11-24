@@ -100,23 +100,7 @@ func convergeMutants() []struct {
 			events: func(s State) ([]string, bool) { return upEvents, s.PC == pcRcUp }}},
 		// The probe at retirement (R15) would also stop an unhealthy prior after the
 		// `up`, so the mutant removes both the gate and that probe: verify, then audit.
-		{"no fresh gate after the converge `up`", "R6", convergeMutant{step: func(s State, e string) (State, bool) {
-			switch {
-			case s.PC == pcRcUp && e == evRcUpOK:
-				t := Model{}.Step(s, e)
-				if t.PC == pcRcGate {
-					t.PC = pcRcVerify
-				}
-				return t, true
-			case s.PC == pcRcServe && e == evRcServe && (actionOf(s.RcAct) == v2Finish || actionOf(s.RcAct) == v2FinishRetag):
-				t := Model{}.Step(s, e)
-				if t.PC == pcReconciled && t.RcOut == rcRR {
-					t.PC, t.RcOut = pcRcAudit, ""
-				}
-				return t, true
-			}
-			return State{}, false
-		}}},
+		{"no fresh gate after the converge `up`", "R6", convergeMutant{step: noGateNoServeStep}},
 		{"retire an armed rollback found on the prior without a ready probe", "R6", convergeMutant{step: after(at(pcRcDecide, evRcDecide),
 			func(_, t *State) {
 				if t.RcAct == verdictOf(v2RR, "armed_rollback_prior_not_ready") {
@@ -183,6 +167,27 @@ func convergeMutants() []struct {
 			}
 		}}},
 	}
+}
+
+// noGateNoServeStep is the R6 mutant: no fresh gate after the converge `up` and, since
+// the probe at retirement (R15) would also stop an unhealthy prior, no such probe on a
+// finish either.
+func noGateNoServeStep(s State, e string) (State, bool) {
+	switch {
+	case s.PC == pcRcUp && e == evRcUpOK:
+		t := Model{}.Step(s, e)
+		if t.PC == pcRcGate {
+			t.PC = pcRcVerify
+		}
+		return t, true
+	case s.PC == pcRcServe && e == evRcServe && (actionOf(s.RcAct) == v2Finish || actionOf(s.RcAct) == v2FinishRetag):
+		t := Model{}.Step(s, e)
+		if t.PC == pcReconciled && t.RcOut == rcRR {
+			t.PC, t.RcOut = pcRcAudit, ""
+		}
+		return t, true
+	}
+	return State{}, false
 }
 
 // TestConvergeProperties_NegativeControls: every converge mutant makes its property FAIL
