@@ -15,11 +15,14 @@ package main
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -189,72 +192,166 @@ func TestUpstreamTransport_SwapDoesNotLeakGoroutines(t *testing.T) {
 // C2 — Old transport closes idle conns on swap
 // ────────────────────────────────────────────────────────────────────
 
-// TestUpstreamTransport_OldTransportClosesIdleConns verifies the
-// synchronous-CloseIdleConnections contract from
-// roadmap/UPSTREAM-TRANSPORT-OWNERSHIP-MODEL.md §2.3.
-//
-// Observable surface: after swapUpstreamTransport, the previous
-// transport is no longer the published transport (sentinel field
-// check) AND calling CloseIdleConnections on the previous transport
-// a SECOND time (i.e. after the swap already did so) is safe — the
-// stdlib method is documented idempotent, but pinning it here
-// catches any future regression where the swap path forgets to call
-// it (which would leave the lab-test goroutine-leak C1 looking
-// fine while idle keepalive conns silently accumulate).
+// swapTrackedConn lets the caller observe completion of the real client-side Close.
+type swapTrackedConn struct {
+	net.Conn
+	swapObserved <-chan struct{}
+	pauseClose   atomic.Bool
+	closed       atomic.Bool
+}
+
+func (c *swapTrackedConn) Close() error {
+	// Give an asynchronously returning swap a chance to report back while this
+	// socket is still open. A synchronous caller proceeds when the timer fires.
+	if c.pauseClose.Load() {
+		select {
+		case <-c.swapObserved:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	err := c.Conn.Close()
+	if err == nil {
+		c.closed.Store(true)
+	}
+	return err
+}
+
+// TestUpstreamTransport_OldTransportClosesIdleConns verifies the synchronous
+// old-transport cleanup contract in UPSTREAM-TRANSPORT-OWNERSHIP-MODEL.md §2.3.
 func TestUpstreamTransport_OldTransportClosesIdleConns(t *testing.T) {
 	ensureMTLSOCSPTestLogger(t)
 	snapshotForRaceTests(t)
 
-	dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	const timeout = 5 * time.Second
+	bodyGate := make(chan struct{})
+	releaseBody := sync.OnceFunc(func() { close(bodyGate) })
+	dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stream" {
+			w.Header().Set("Content-Length", "2")
+			_, _ = io.WriteString(w, "a")
+			w.(http.Flusher).Flush()
+			select {
+			case <-bodyGate:
+				_, _ = io.WriteString(w, "b")
+			case <-r.Context().Done():
+			case <-time.After(timeout):
+			}
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
 	}))
 	t.Cleanup(dst.Close)
+	t.Cleanup(releaseBody)
 
-	upstreamTransportPtr.Store(newBaseUpstreamTransport())
-
-	// Establish a keepalive conn on the CURRENT transport.
-	preSwap := getUpstreamTransport()
-	client := &http.Client{Transport: preSwap, Timeout: 2 * time.Second}
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, dst.URL, nil)
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("baseline request failed: %v", err)
+	swapObserved := make(chan struct{})
+	releaseClose := sync.OnceFunc(func() { close(swapObserved) })
+	preSwap := newBaseUpstreamTransport()
+	var dialer net.Dialer
+	preSwap.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &swapTrackedConn{Conn: conn, swapObserved: swapObserved}, nil
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
+	upstreamTransportPtr.Store(preSwap)
+	t.Cleanup(preSwap.CloseIdleConnections)
+	t.Cleanup(releaseClose)
 
-	// Swap. swapUpstreamTransport must call preSwap.CloseIdleConnections().
-	swapUpstreamTransport(func(old *http.Transport) *http.Transport {
-		newT := cloneTransport(old)
-		newT.MaxIdleConns = 9876
-		return newT
-	})
+	request := func(tr *http.Transport, path string, putIdle func(error)) (*http.Response, *swapTrackedConn) {
+		t.Helper()
+		var used *swapTrackedConn
+		trace := &httptrace.ClientTrace{
+			GotConn:     func(info httptrace.GotConnInfo) { used = info.Conn.(*swapTrackedConn) },
+			PutIdleConn: putIdle,
+		}
+		ctx := httptrace.WithClientTrace(t.Context(), trace)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, dst.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := (&http.Client{Transport: tr, Timeout: timeout}).Do(req)
+		if err != nil {
+			t.Fatalf("request %s: %v", path, err)
+		}
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		if used == nil {
+			t.Fatalf("request %s did not report its connection", path)
+		}
+		return resp, used
+	}
+	drain := func(resp *http.Response, want string) {
+		t.Helper()
+		body, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil || closeErr != nil || string(body) != want {
+			t.Fatalf("response body = %q, want %q; read %v, close %v", body, want, readErr, closeErr)
+		}
+	}
+
+	stream, active := request(preSwap, "/stream", nil)
+	var prefix [1]byte
+	if _, err := io.ReadFull(stream.Body, prefix[:]); err != nil || prefix[0] != 'a' {
+		t.Fatalf("stream prefix = %q, want a: %v", prefix, err)
+	}
+	putIdle := make(chan error, 1)
+	resp, idle := request(preSwap, "/idle", func(err error) { putIdle <- err })
+	drain(resp, "ok")
+	select {
+	case err := <-putIdle:
+		if err != nil {
+			t.Fatalf("baseline connection did not enter idle pool: %v", err)
+		}
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for baseline connection to enter idle pool")
+	}
+	if idle == active || idle.closed.Load() || active.closed.Load() {
+		t.Fatal("expected distinct open idle and active connections before swap")
+	}
+	idle.pauseClose.Store(true)
+
+	type observation struct{ idleClosed, activeClosed bool }
+	returned := make(chan observation, 1)
+	go func() {
+		swapUpstreamTransport(func(old *http.Transport) *http.Transport {
+			newT := cloneTransport(old)
+			newT.MaxIdleConns = 9876
+			return newT
+		})
+		returned <- observation{idle.closed.Load(), active.closed.Load()}
+	}()
+	select {
+	case atReturn := <-returned:
+		if !atReturn.idleClosed {
+			t.Error("swap returned before the old idle connection finished closing")
+		}
+		if atReturn.activeClosed {
+			t.Error("swap closed the active connection before its response finished")
+		}
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for swap to return")
+	}
+	releaseClose()
 
 	postSwap := getUpstreamTransport()
 	if postSwap == preSwap {
 		t.Fatal("swap did not produce a new transport pointer")
 	}
+	t.Cleanup(postSwap.CloseIdleConnections)
 	if postSwap.MaxIdleConns != 9876 {
 		t.Errorf("post-swap MaxIdleConns = %d; want 9876 (witness)", postSwap.MaxIdleConns)
 	}
-
-	// CloseIdleConnections is documented idempotent on http.Transport.
-	// Calling it again here must not panic — proves the swap left the
-	// old transport in a consistent state (not nil, not in some
-	// partial-close limbo).
-	preSwap.CloseIdleConnections()
-
-	// New requests go through the post-swap transport. Fire one and
-	// confirm it works against the same destination — proves the
-	// swap didn't break the read path.
-	client2 := &http.Client{Transport: getUpstreamTransport(), Timeout: 2 * time.Second}
-	req2, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, dst.URL, nil)
-	resp2, err := client2.Do(req2)
-	if err != nil {
-		t.Fatalf("post-swap request failed: %v", err)
+	fresh, next := request(postSwap, "/new", nil)
+	drain(fresh, "ok")
+	if next == idle || next == active {
+		t.Error("post-swap request reused an old-generation connection")
 	}
-	_, _ = io.Copy(io.Discard, resp2.Body)
-	_ = resp2.Body.Close()
+
+	releaseBody()
+	drain(stream, "b")
+
+	// Verify a second cleanup remains safe after the observations above.
+	preSwap.CloseIdleConnections()
 }
 
 // ────────────────────────────────────────────────────────────────────
