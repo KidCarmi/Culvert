@@ -254,3 +254,50 @@ func TestInitJournal_AnOperationThatEndedDidNotDieInItsCommand(t *testing.T) {
 		})
 	}
 }
+
+// TestInitJournal_ANewerAgentsIntentIsRefusedBeforeAnythingIsTaken: two records
+// hold intents; the later one was written by a newer agent and cannot be
+// rewritten here. The start is refused before the FIRST record is touched: its
+// intent is still there for the start that can serve.
+func TestInitJournal_ANewerAgentsIntentIsRefusedBeforeAnythingIsTaken(t *testing.T) {
+	dir := t.TempDir()
+	const newerOp = "01J00000000000000000000000" // sorts after startupOp
+	diedInsideUp(t, dir, dangerRecord())
+	newer := dangerRecord()
+	newer.OpID = newerOp
+	diedInsideUp(t, dir, newer)
+	bumpSchemaOnDisk(t, dir, newerOp, journal.SchemaCurrent+1)
+	before := recordFileRaw(t, dir, startupOp)
+
+	al, _ := startupAudit(t, dir)
+	if _, _, err := initJournal(dir, ops.NewManager(nil), al, startupRepo); err == nil || !strings.Contains(err.Error(), "newer agent version") {
+		t.Fatalf("err = %v, want the newer-agent refusal", err)
+	}
+	if after := recordFileRaw(t, dir, startupOp); after != before {
+		t.Errorf("the first record was rewritten by a start that was refused:\n%s", after)
+	}
+}
+
+// TestTakeCommandIntents_AnUnreadableAuditLogAttributesNothing: whether the
+// operation ended cannot be established. The intent is removed and nothing is
+// attributed: not knowing is not evidence of a death.
+func TestTakeCommandIntents_AnUnreadableAuditLogAttributesNothing(t *testing.T) {
+	dir := t.TempDir()
+	diedInsideUp(t, dir, dangerRecord())
+	jnl, err := journal.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, _ := jnl.List()
+	notALog := filepath.Join(dir, "audit-is-a-directory")
+	if err := os.Mkdir(notALog, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	died, err := takeCommandIntents(jnl, notALog, recs)
+	if err != nil || len(died) != 0 {
+		t.Fatalf("died=%v err=%v, want nothing attributed and no refusal", died, err)
+	}
+	if raw := recordFileRaw(t, dir, startupOp); strings.Contains(raw, `"intent"`) || strings.Contains(raw, `"attributed": true`) {
+		t.Errorf("record:\n%s\nwant the intent removed and not attributed", raw)
+	}
+}

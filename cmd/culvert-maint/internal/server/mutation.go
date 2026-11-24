@@ -104,6 +104,7 @@ func (s *Server) endCommandIntent(opID string) {
 	}
 	if err := s.opts.Journal.EndCommand(opID); err != nil {
 		log.Printf("culvert-maint: WARN: could not close the command intent of op %s (retrying): %v", opID, err)
+		s.closeFailures.Add(1)
 		s.staleIntents.Store(true)
 		s.startIntentRetry()
 	}
@@ -115,7 +116,18 @@ func (s *Server) sweepStaleIntents() {
 	if s.opts.Journal == nil || !s.staleIntents.Load() {
 		return
 	}
-	if left, err := s.opts.Journal.CloseStaleIntents(); err == nil && left == 0 {
+	// One sweep at a time: a second caller waits and then sweeps for itself,
+	// so it never goes on while an intent it could have closed is still open.
+	s.sweepMu.Lock()
+	defer s.sweepMu.Unlock()
+	if !s.staleIntents.Load() {
+		return
+	}
+	// The flag is cleared only if no close has failed since the sweep began:
+	// one that fails while the sweep runs may have left an intent the sweep
+	// did not see.
+	failures := s.closeFailures.Load()
+	if left, err := s.opts.Journal.CloseStaleIntents(); err == nil && left == 0 && s.closeFailures.Load() == failures {
 		s.staleIntents.Store(false)
 	}
 }
@@ -127,16 +139,27 @@ const defaultIntentRetryEvery = 5 * time.Second
 // startIntentRetry runs the retry loop until nothing is stale or the server
 // closes. At most one runs at a time.
 func (s *Server) startIntentRetry() {
+	s.intentRetryMu.Lock()
+	defer s.intentRetryMu.Unlock()
+	select {
+	case <-s.intentRetryStop: // closing (a nil channel never fires)
+		return
+	default:
+	}
 	if !s.intentRetryRunning.CompareAndSwap(false, true) {
 		return
 	}
+	done := make(chan struct{})
+	s.intentRetryDone = done
 	every := s.intentRetryEvery
 	if every <= 0 {
 		every = defaultIntentRetryEvery
 	}
 	go func() {
+		defer close(done)
 		t := time.NewTicker(every)
 		defer t.Stop()
+		s.sweepStaleIntents() // once at once: the failure may have been momentary
 		for s.staleIntents.Load() {
 			select {
 			case <-s.intentRetryStop:
@@ -147,8 +170,8 @@ func (s *Server) startIntentRetry() {
 			}
 		}
 		s.intentRetryRunning.Store(false)
-		if s.staleIntents.Load() { // a close failed while this loop was ending
-			s.startIntentRetry()
-		}
+		// A close that failed while this loop was ending is picked up by the
+		// pre-command sweep and by Close; a new loop is started by the next
+		// failed close.
 	}()
 }

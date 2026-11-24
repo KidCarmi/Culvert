@@ -152,18 +152,6 @@ func TestCommandIntent_ACloseThatCannotBeWrittenIsRetriedUntilItIs(t *testing.T)
 		}
 		return r, ctx
 	}
-	gone := func(t *testing.T, r *reconRig, how string) {
-		t.Helper()
-		if in := r.intentOnDisk(t); in != nil {
-			t.Errorf("intent still on disk after %s: %+v", how, in)
-		}
-		if _, attributed := r.nextStartConcludes(t); attributed {
-			t.Errorf("after %s a clean restart would still read a death inside the command", how)
-		}
-		if on, _ := r.jnl.IntentFenceActive(); on {
-			t.Errorf("the intent fence is still up after %s", how)
-		}
-	}
 	t.Run("the operation's next record write", func(t *testing.T) {
 		r, _ := failedClose(t)
 		r.jnl.SetWriteErrorForTest(nil)
@@ -172,7 +160,7 @@ func TestCommandIntent_ACloseThatCannotBeWrittenIsRetriedUntilItIs(t *testing.T)
 		if err := r.jnl.Write(*rec); err != nil {
 			t.Fatal(err)
 		}
-		gone(t, r, "the record's next write")
+		intentGone(t, r, "the record's next write")
 	})
 	for name, ctx := range map[string]context.Context{
 		"before the next command of another operation": ops.WithOpID(context.Background(), "01BX5ZZKBKACTAV9WEVGEMMVRZ"),
@@ -187,36 +175,90 @@ func TestCommandIntent_ACloseThatCannotBeWrittenIsRetriedUntilItIs(t *testing.T)
 				}
 				return &runner.Result{}, nil
 			})
-			gone(t, r, name)
+			intentGone(t, r, name)
 		})
 	}
-	t.Run("the idle agent's retry loop", func(t *testing.T) {
-		r, ctx := intentRig(t)
-		r.srv.intentRetryEvery = 10 * time.Millisecond
-		if _, err := r.srv.markedMutation(ctx, journal.MutationComposeUp, func() (*runner.Result, error) {
-			r.jnl.SetWriteErrorForTest(errors.New("no space left on device"))
-			return &runner.Result{}, nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(50 * time.Millisecond) // still unwritable: the loop keeps trying
-		if r.intentOnDisk(t) == nil {
-			t.Fatal("test setup: the intent was expected to be still there")
-		}
-		r.jnl.SetWriteErrorForTest(nil) // space was freed; no command, no write, no restart
-		deadline := time.Now().Add(5 * time.Second)
-		fenced := func() bool { on, _ := r.jnl.IntentFenceActive(); return on }
-		for (r.intentOnDisk(t) != nil || fenced()) && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		gone(t, r, "the retry loop")
-	})
+	t.Run("the idle agent's retry loop", retryLoopClosesIt)
+	t.Run("close stops the loop even while nothing can be written", closeStopsTheRetryLoop)
 	t.Run("close", func(t *testing.T) {
 		r, _ := failedClose(t)
 		r.jnl.SetWriteErrorForTest(nil)
 		_ = r.srv.Close()
-		gone(t, r, "Close")
+		intentGone(t, r, "Close")
 	})
+}
+
+// intentGone asserts that nothing of a closed command is left: no intent on
+// disk, nothing a clean restart would attribute, no fence.
+func intentGone(t *testing.T, r *reconRig, how string) {
+	t.Helper()
+	if in := r.intentOnDisk(t); in != nil {
+		t.Errorf("intent still on disk after %s: %+v", how, in)
+	}
+	if _, attributed := r.nextStartConcludes(t); attributed {
+		t.Errorf("after %s a clean restart would still read a death inside the command", how)
+	}
+	if on, _ := r.jnl.IntentFenceActive(); on {
+		t.Errorf("the intent fence is still up after %s", how)
+	}
+}
+
+// retryLoopClosesIt: no command, no write, no restart; the idle agent closes
+// the intent by itself once the journal can be written, and the loop ends.
+func retryLoopClosesIt(t *testing.T) {
+	r, ctx := intentRig(t)
+	r.srv.intentRetryEvery = 10 * time.Millisecond
+	if _, err := r.srv.markedMutation(ctx, journal.MutationComposeUp, func() (*runner.Result, error) {
+		r.jnl.SetWriteErrorForTest(errors.New("no space left on device"))
+		return &runner.Result{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond) // still unwritable: the loop keeps trying
+	if r.intentOnDisk(t) == nil {
+		t.Fatal("test setup: the intent was expected to be still there")
+	}
+	r.jnl.SetWriteErrorForTest(nil) // space was freed; no command, no write, no restart
+	deadline := time.Now().Add(5 * time.Second)
+	fenced := func() bool { on, _ := r.jnl.IntentFenceActive(); return on }
+	for (r.intentOnDisk(t) != nil || fenced()) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	intentGone(t, r, "the retry loop")
+	// And the loop ends once there is nothing left to retry.
+	for (r.srv.intentRetryRunning.Load() || r.srv.staleIntents.Load()) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if r.srv.intentRetryRunning.Load() || r.srv.staleIntents.Load() {
+		t.Errorf("after the close was written: loop running=%v stale=%v, want both false",
+			r.srv.intentRetryRunning.Load(), r.srv.staleIntents.Load())
+	}
+}
+
+// closeStopsTheRetryLoop: Close returns only once the loop has ended, and no
+// loop starts after it.
+func closeStopsTheRetryLoop(t *testing.T) {
+	r, ctx := intentRig(t)
+	r.srv.intentRetryStop = make(chan struct{})
+	r.srv.intentRetryEvery = 5 * time.Millisecond
+	if _, err := r.srv.markedMutation(ctx, journal.MutationComposeUp, func() (*runner.Result, error) {
+		r.jnl.SetWriteErrorForTest(errors.New("no space left on device"))
+		return &runner.Result{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.srv.intentRetryRunning.Load() {
+		t.Fatal("test setup: the retry loop was expected to be running")
+	}
+	_ = r.srv.Close() // returns only once the loop has ended
+	if r.srv.intentRetryRunning.Load() {
+		t.Error("the retry loop is still running after Close")
+	}
+	r.srv.staleIntents.Store(true)
+	r.srv.startIntentRetry()
+	if r.srv.intentRetryRunning.Load() {
+		t.Error("a retry loop was started after Close")
+	}
 }
 
 // TestCommandIntent_ComposeDownIsAttributedToo: `compose down` goes through

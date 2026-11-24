@@ -219,9 +219,13 @@ type Server struct {
 	// staleIntents: a command intent's close could not be written and is being
 	// retried (mutation.go). intentRetryEvery is the retry period (0: default).
 	staleIntents       atomic.Bool
+	closeFailures      atomic.Uint64 // counts failed closes; see sweepStaleIntents
+	sweepMu            sync.Mutex    // one sweep at a time
 	intentRetryRunning atomic.Bool
 	intentRetryEvery   time.Duration
 	intentRetryStop    chan struct{}
+	intentRetryMu      sync.Mutex    // guards intentRetryDone and the start/stop decision
+	intentRetryDone    chan struct{} // closed when the loop last started has ended
 	intentRetryOnce    sync.Once
 
 	startHazard  bool
@@ -471,11 +475,20 @@ func (s *Server) Serve(ctx context.Context) error {
 func (s *Server) Close() error {
 	// Stop the intent retry loop and make one last attempt to say "that
 	// command returned" before the process goes.
+	s.intentRetryMu.Lock()
 	s.intentRetryOnce.Do(func() {
 		if s.intentRetryStop != nil {
 			close(s.intentRetryStop)
 		}
 	})
+	done := s.intentRetryDone
+	s.intentRetryMu.Unlock()
+	// Wait for a loop that was started: nothing of it may touch the journal
+	// after this function has released the instance lock. No new loop can
+	// start once the stop channel is closed.
+	if done != nil {
+		<-done
+	}
 	s.sweepStaleIntents()
 	s.mu.Lock()
 	defer s.mu.Unlock()

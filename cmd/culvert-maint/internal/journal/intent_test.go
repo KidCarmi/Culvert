@@ -600,3 +600,75 @@ func TestIntentFence_ALingeringFenceIsClearedByTheSweep(t *testing.T) {
 		t.Error("a fence with no open intent behind it survived the sweep")
 	}
 }
+
+// TestIntent_RESIDUAL_TheNameCanBeTheEarlierCommands: pinned so that it stays
+// stated. `compose up` of an operation returned and its close could not be
+// written; the journal stays unwritable; the same operation begins `compose
+// down` (the intent write fails too) and the agent dies in it. The next start
+// finds the only intent there is, the stale one, and reports the EARLIER
+// command. No flow runs `down` after `up` under one operation today; a
+// consumer must not read more into the command name than "a compose command
+// of this operation".
+func TestIntent_RESIDUAL_TheNameCanBeTheEarlierCommands(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	now := time.Now().UTC()
+	if _, err := a.j.BeginCommand(intentOp, MutationComposeUp, now); err != nil {
+		t.Fatal(err)
+	}
+	a.j.SetWriteErrorForTest(errors.New("read-only file system"))
+	_ = a.j.EndCommand(intentOp)
+	_, _ = a.j.CloseStaleIntents()
+	_, _ = a.j.BeginCommand(intentOp, MutationComposeDown, now) // the agent dies in this command
+	if died := newLife(t, dir).start(); died[intentOp] != MutationComposeUp {
+		t.Fatalf("died = %v; this test pins the residual as it is (reported as compose up). If it now says something else, update the PR and the operator guide", died)
+	}
+}
+
+// TestJournal_AnIntentCloseNeverOverwritesANewerWrite: an operation keeps
+// rewriting its record (a counter stands for phase advances) while its
+// commands begin and end. With the journal's changes serialised, every one of
+// the operation's writes survives: a close can never write back the version
+// it read before a newer write landed.
+func TestJournal_AnIntentCloseNeverOverwritesANewerWrite(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = a.j.BeginCommand(intentOp, MutationComposeUp, time.Now().UTC())
+				_ = a.j.EndCommand(intentOp)
+				_, _ = a.j.CloseStaleIntents()
+			}
+		}
+	}()
+	const n = 400
+	for i := 1; i <= n; i++ {
+		rec, found, err := a.j.Read(intentOp)
+		if err != nil || !found {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("iteration %d: read: %v found=%v", i, err, found)
+		}
+		if rec.ReconcileAttempts != i-1 {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("iteration %d: the record says %d: a write of the operation was overwritten by an intent close", i, rec.ReconcileAttempts)
+		}
+		rec.ReconcileAttempts = i
+		if err := a.j.Write(*rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}

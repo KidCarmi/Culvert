@@ -335,22 +335,29 @@ func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo 
 // other and attributed to nothing.
 func takeCommandIntents(jnl *journal.Journal, auditPath string, recs []journal.Record) (map[string]string, error) {
 	diedIn := map[string]string{}
+	// A record a newer agent wrote cannot be rewritten by this build. Refuse
+	// before taking anything, so that no other record has had its intent
+	// removed by a start that then does not serve.
+	for i := range recs {
+		if recs[i].Intent != nil && recs[i].FromNewerAgent() {
+			return nil, fmt.Errorf("op %s holds an open command intent (%q): the agent was killed inside a docker compose command, and the journal record was written by a newer agent version that this version may not change; start that version (or a later one) again: %w",
+				recs[i].OpID, recs[i].Intent.Command, journal.ErrNewerSchema)
+		}
+	}
 	for i := range recs {
 		rec := &recs[i]
-		ended := operationEnded(auditPath, rec) // asked before the record is changed
-		command, attributed, had := rec.TakeIntent()
-		if !had {
+		if rec.Intent == nil {
 			continue
 		}
+		ended := operationEnded(auditPath, rec)
+		command, attributed, _ := rec.TakeIntent()
 		if ended {
 			attributed, rec.Cut.Attributed = false, false
 		}
 		if werr := jnl.Write(*rec); werr != nil {
-			// command is content of a file; quoted, never interpreted.
-			if errors.Is(werr, journal.ErrNewerSchema) {
-				return nil, fmt.Errorf("op %s holds an open command intent (%q): the agent was killed inside a docker compose command, and the journal record was written by a newer agent version that this version may not change; start that version (or a later one) again: %w",
-					rec.OpID, command, werr)
-			}
+			// command is content of a file; quoted, never interpreted. Records
+			// before this one have already had their intent removed: their
+			// attribution is lost with this start (a recovery, never a wrong one).
 			return nil, fmt.Errorf("op %s holds an open command intent (%q): the agent was killed inside a docker compose command, and that cannot be recorded in its journal record (is %s writable, and is there space?): %w",
 				rec.OpID, command, jnl.Dir(), werr)
 		}
@@ -365,8 +372,15 @@ func takeCommandIntents(jnl *journal.Journal, auditPath string, recs []journal.R
 }
 
 // operationEnded reports whether rec's operation reached its end in the
-// process that ran it. It does not change rec.
+// process that ran it. It does not change rec. When the audit log cannot be
+// read the answer is "ended": attributing nothing is the safe side.
 func operationEnded(auditPath string, rec *journal.Record) bool {
+	if rec.TerminalOutcome != "" {
+		return true
+	}
+	if _, err := audit.FindTerminal(auditPath, rec.OpID, rec.Kind); err != nil {
+		return true
+	}
 	probe := *rec
 	server.AdoptAuditedTerminal(auditPath, &probe)
 	return probe.TerminalOutcome != ""
