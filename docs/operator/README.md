@@ -82,6 +82,7 @@ index](../agent-context/README.md), the ADRs under `docs/adr/` and `docs/enginee
 - [`scan-svc-listener-health.md`](scan-svc-listener-health.md) — the scan sidecar's own listener: down vs. flapping, what to alert on, and why both mean the fleet is failing open (CHAOS-113/114).
 - [`blocklist-feed-freshness.md`](blocklist-feed-freshness.md) — operator-configured remote blocklist feeds: sync cadence, staleness detection, the auto-sync-off case, and recovery.
 - [`clamav-definition-freshness.md`](clamav-definition-freshness.md) — ClamAV virus definitions: how Culvert observes their age, why a stale database is invisible from every liveness probe, and the freshclam-side checklist (Culvert does not update them).
+- [`geoip-database-freshness.md`](geoip-database-freshness.md) — the GeoIP country database's age: why a stale database is invisible from every liveness probe and from the `culvert_geo_*` resolution metrics, the `culvert_geoip_database_*` series, and why recovery needs a restart as well as a new file (Culvert never re-reads a loaded database).
 - [`threat-feed-freshness.md`](threat-feed-freshness.md) — threat-feed sync cadence, staleness detection, and recovery.
 - [`threat-feed-domain-allowlist.md`](threat-feed-domain-allowlist.md) — managing the threat-feed domain allowlist.
 - [`policy-learning-mode.md`](policy-learning-mode.md) — Policy Learning Mode: observation, aggregation, and recommendation generation.
