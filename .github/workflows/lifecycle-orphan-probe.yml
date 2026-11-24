@@ -51,9 +51,9 @@ jobs:
         points: ["-1,0,1,2", "3,4,5,6", "7,8,9", "10,11,12"]
     env:
       V1_REF: ${{ inputs.proxy_v1_ref || 'main' }}
-      # On a pull request there are no inputs. Until #2058 is merged the target image is built
-      # from its branch, which is what this run has to qualify; set this back to 'main' then.
-      V2_REF: ${{ inputs.proxy_v2_ref || 'proxy/ready-not-ready-on-shutdown' }}
+      # On a pull request there are no inputs: both images are built from main (the same
+      # source under two version strings, so the agent still sees two distinct images).
+      V2_REF: ${{ inputs.proxy_v2_ref || 'main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -105,15 +105,16 @@ jobs:
           if-no-files-found: warn
 
   # The proxy image alone: what /ready and /health answer between SIGTERM and exit, with a
-  # pending admin-UI request holding the shutdown open. v1 is reported as the contrast (an
-  # image without the change answers 200 throughout); v2 must never answer /ready 200 again.
+  # pending admin-UI request holding the shutdown open. v2 must never answer /ready 200 again
+  # (#2058). v1 is only reported: dispatch with proxy_v1_ref set to a ref from before #2058 to
+  # see the contrast (200 throughout).
   timeline:
     name: "Timeline · release image · /ready after SIGTERM"
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       V1_REF: ${{ inputs.proxy_v1_ref || 'main' }}
-      V2_REF: ${{ inputs.proxy_v2_ref || 'proxy/ready-not-ready-on-shutdown' }}
+      V2_REF: ${{ inputs.proxy_v2_ref || 'main' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
