@@ -454,6 +454,7 @@ def judge_all(expect_fence_violation, want_trials):
                 line += (f" last={rec['last_request_daemon_saw']!r} restart_after={rec['new_agent_after_s']}s"
                          f" at_restart[{fmt(rec['truth_at_restart'])}]"
                          + (f" op={op.get('state') if op.get('admitted') else 'refused'}" if op else "")
+                         + (f" op_secs={op.get('secs')}" if op and op.get('admitted') else "")
                          + (f" converge={[(x.get('decision'), x.get('outcome')) for x in ((rec['status_after_converge'].get('reconcile') or {}).get('records') or [])]}" if rec['follow'] == 'converge' else "")
                          + f" at_rest[{fmt(rec['truth_at_rest'])}] records={len(rec['status_at_rest']['interrupted'])}")
             print(line)

@@ -40,7 +40,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [shipped, converge]
+        # warm: the shipped unit, every trial started from a state directory past its first use
+        # (ORPHAN_PROBE_PAST_FIRST_USE). Without it each trial is a first start, which always
+        # waits the whole settle window, so the mutation marker's two paths (no marker, no
+        # wait; proxy down, wait ends early) are never taken.
+        variant: [shipped, converge, warm]
         # All 14 kill points, split so that one job fits in the runner's time. `mid` is the
         # part of each chunk inside the recreate (the slices with a pending admin-UI request).
         include:
@@ -83,11 +87,12 @@ jobs:
           ORPHAN_PROBE_POINTS: ${{ matrix.points }}
           ORPHAN_PROBE_MID: ${{ matrix.mid }}
           VARIANT: ${{ matrix.variant }}
+          ORPHAN_PROBE_PAST_FIRST_USE: ${{ matrix.variant == 'warm' && '1' || '0' }}
         run: |
           set -uo pipefail
           flag=""; [ "$VARIANT" = converge ] && flag="--only-converge"
           mkdir -p "$RUNNER_TEMP/probe-evidence"
-          sudo --preserve-env=ORPHAN_PROBE_PROXY_IMAGE_V1,ORPHAN_PROBE_PROXY_IMAGE_V2,ORPHAN_PROBE_POINTS,ORPHAN_PROBE_MID \
+          sudo --preserve-env=ORPHAN_PROBE_PROXY_IMAGE_V1,ORPHAN_PROBE_PROXY_IMAGE_V2,ORPHAN_PROBE_POINTS,ORPHAN_PROBE_MID,ORPHAN_PROBE_PAST_FIRST_USE \
             env "PATH=$PATH" "GOFLAGS=${GOFLAGS:-}" "GOTOOLCHAIN=${GOTOOLCHAIN:-}" "HOME=$HOME" \
             ORPHAN_PROBE_OUT="$RUNNER_TEMP/probe-evidence" \
             bash test/lifecycle-conformance/orphan-probe/probe.sh $flag 2>&1 | tee "$RUNNER_TEMP/probe-evidence/probe.log"
