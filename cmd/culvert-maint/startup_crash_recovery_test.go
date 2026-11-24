@@ -105,6 +105,10 @@ compose)
       blk commit_after ;;
     *" --restore "*)
       blk dryrun ;;
+    *)
+      # Any other cli run (backup, cleanup): only a stop point; the model
+      # keeps no state for it.
+      blk cli_run ;;
     esac ;;
   esac ;;
 inspect)

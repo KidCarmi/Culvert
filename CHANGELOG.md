@@ -956,6 +956,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The maintenance agent no longer runs a keyed request a second time after it
+  restarts.** The `idempotency_key` cache lived only in process memory. After a
+  restart, a retry of a request that had already finished was admitted as a new
+  operation and executed again (a backup ran its container again; a
+  `restore.commit` stopped, restored and started the stack again), and
+  `GET /v1/operations/{id}` for the finished operation returned 404. A keyed
+  request is now recorded under `state_dir/idempotency/` before it is admitted
+  and its outcome is recorded when it finishes. After a restart: a finished
+  request is answered `200` with its original `op_id` and recorded result, runs
+  no command, and needs neither the maintenance lock nor an execution slot; a
+  request that was admitted but has no recorded outcome is answered `200` with
+  its original `op_id` as `failed(agent_restart_interrupted)` and
+  `outcome: "unknown"`, and is **not** run again — submit a new
+  `idempotency_key` to run it deliberately. This is not exactly-once execution:
+  an agent that dies after an operation's last side effect and before its
+  outcome is recorded reports that operation as unknown, not as succeeded.
+  Records are kept for the idempotency window (24h, or `operation_timeout` if
+  longer), at most 1024 of them, each at most 64 KiB (an oversized result is
+  omitted from the record). Two behaviour changes for clients: reusing a key for
+  the same kind of operation with a **different payload** now returns
+  `422 idempotency_key_reused` naming the original `op_id` (it used to return
+  the first operation as if the request were the same); and if the record store
+  cannot be read or written, requests that carry an `idempotency_key` are
+  refused with `503 idempotency_store_unavailable` (or
+  `409 idempotency_record_unreadable` for one unreadable record) while requests
+  without a key are served as before. The key is still scoped by peer and by
+  operation kind, and a request without a key is still never deduplicated or
+  recorded. An older agent ignores the new directory.
+
 - **The "retaining rule … with unrecognized action" warning is now said once per
   fact, and only where it is true.** It was written on every bulk replace of
   the rulebase, so an unchanged control-plane republish repeated it for every
