@@ -143,6 +143,16 @@ gaps and make the #2051 executor the single path every recovery takes.
   best-effort arm).
 - Decisions gain facts, not new actions: `restarted` + `checkpoint
   gate:target failed` is no longer confused with "pending".
+- **Command attribution is first-class.** Every intent names the op id
+  that owns it, the command, and when it began; a result (or the process
+  observing it return) closes it. "Did this operation's process die inside
+  this command?" is then read from an open intent of that op, not inferred
+  from whether a marker file exists. Lesson from two independent reviews of
+  #2093: inferring ownership from the marker let an older record claim a
+  newer op's marker, and let a failed-but-returned `up` look interrupted.
+  #2093 now attributes marker entries per op (`ops.WithOpID`), bounds
+  freshness, and stamps a marker seen under a flock; slice 3 generalises
+  that rule to every checkpoint instead of keeping it marker-specific.
 
 **Slice 4 — one executor (gap 4).**
 - Extract #2051's loop from `reconcileCase` into an executor that takes a
