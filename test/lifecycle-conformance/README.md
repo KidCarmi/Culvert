@@ -316,6 +316,16 @@ change, and `/health` answers 200 in both. (Go's `Shutdown` closes such a
 connection at once when it is more than 5 s old, which is why the probe keeps
 the request fresh and rejects a trial whose shutdown was not held.)
 
+`ORPHAN_PROBE_PAST_FIRST_USE=1` starts every trial from a state directory as an
+agent leaves it after its first completed operation. Without it each trial is a
+first start, which always waits the whole settle window, so neither "no marker,
+no wait" nor the early end of the wait (ADR-0061, mutation marker) is exercised:
+a run without it shows only that the agent is no worse. With it, on Docker
+29.10.0 / Compose v5.7.1, real proxy binaries, all 14 kill points, settle 20 s /
+stop grace 15 s: 40 trials, 0 violations, 0 invalid; the follow-up operation
+took 3.5–5.2 s where the proxy was down at the restart (20–22 s without the
+marker) and about 20 s, unchanged, where a proxy container was still running.
+
 Two things these runs show that are not safety failures and are not fixed here:
 - After a crash between Compose's stop and delete, the first
   `docker compose up -d` only cleans up. The rollback fails its health gate,
