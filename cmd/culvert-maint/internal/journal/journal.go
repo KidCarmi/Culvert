@@ -56,6 +56,42 @@ var validPhases = map[Phase]struct{}{
 	PhaseRestarting: {}, PhaseRestarted: {}, PhaseVerified: {},
 }
 
+// RestoreStage is how far a restore-class operation (restore.commit, or
+// rollbacks.create mode=data, which runs the same stages) got. It is written
+// AHEAD of each step: the value names the step that was about to start, or the
+// recorded result of the commit command. It is a key beside Phase, not a new
+// Phase, for the reason RollbackArmed is: an agent that predates it ignores the
+// key, whereas an unknown phase makes every older agent refuse to serve. A
+// restore record's Phase stays PhaseAdmitted.
+type RestoreStage string
+
+// RestoreStage values, in the order the restore flow reaches them.
+const (
+	RestoreStageAdmitted     RestoreStage = "admitted"      // admitted; no command has run
+	RestoreStagePreflight    RestoreStage = "preflight"     // about to run the read-only dry-run; the stack is still up
+	RestoreStageStopping     RestoreStage = "stopping"      // about to ask Docker to stop the stack (`compose down`)
+	RestoreStageCommitting   RestoreStage = "committing"    // about to run the commit command; its result is not recorded
+	RestoreStageCommitted    RestoreStage = "committed"     // the commit command returned success: the data directory was replaced
+	RestoreStageCommitFailed RestoreStage = "commit_failed" // the commit command returned an error
+	RestoreStageStarting     RestoreStage = "starting"      // committed; about to start the stack (`compose up`)
+	RestoreStageStarted      RestoreStage = "started"       // committed; `compose up` returned; the health check had not passed
+	// RestoreStageUnknown is what Read substitutes for a value this build does
+	// not know (a record written by a newer agent). No running operation writes
+	// it. It reports as "how far the restore got is not known", which is the
+	// conservative reading, and it keeps the record writable: startup rewrites
+	// every record it finds, and Write refuses a value outside the closed set.
+	RestoreStageUnknown RestoreStage = "unknown"
+)
+
+// validRestoreStages is the closed set accepted by Write. "" is a record that
+// carries no stage: every upgrade and image-rollback record, and a restore-class
+// record written by (or rewritten by) an agent that predates the key.
+var validRestoreStages = map[RestoreStage]struct{}{
+	"": {}, RestoreStageAdmitted: {}, RestoreStagePreflight: {}, RestoreStageStopping: {},
+	RestoreStageCommitting: {}, RestoreStageCommitted: {}, RestoreStageCommitFailed: {},
+	RestoreStageStarting: {}, RestoreStageStarted: {}, RestoreStageUnknown: {},
+}
+
 // Record is the durable per-op journal entry. One file per live op at
 // <reconcileDir>/<op_id>.json. Manifest digests are bare sha256 hex; refs are
 // repo@sha256:<digest>. All fields are plain data — no secrets (params never
@@ -71,7 +107,7 @@ var validPhases = map[Phase]struct{}{
 // be reconstructed afterward), which is why they live in the record.
 type Record struct {
 	OpID          string    `json:"op_id"`
-	Kind          string    `json:"kind"`                      // "upgrades.apply" | "rollbacks.create"
+	Kind          string    `json:"kind"`                      // "upgrades.apply" | "rollbacks.create" | "restore.commit"
 	Mode          string    `json:"mode,omitempty"`            // "" | "image" | "data" (rollbacks.create)
 	Phase         Phase     `json:"phase"`                     // write-ahead state
 	TargetRef     string    `json:"target_ref,omitempty"`      // repo@sha256:<digest> we move TO
@@ -125,6 +161,11 @@ type Record struct {
 	// kept. Diagnostics only: nothing reads them back to decide.
 	ReconcileDecision string `json:"reconcile_decision,omitempty"`
 	ReconcileOutcome  string `json:"reconcile_outcome,omitempty"`
+
+	// RestoreStage is set only on restore-class records (see RestoreStage).
+	// Omitted when empty, so an upgrade or image-rollback record is
+	// byte-identical to what it was before the key existed.
+	RestoreStage RestoreStage `json:"restore_stage,omitempty"`
 }
 
 const (
@@ -182,6 +223,9 @@ func (j *Journal) Write(rec Record) error {
 	if _, ok := validPhases[rec.Phase]; !ok {
 		return fmt.Errorf("journal: invalid phase %q", rec.Phase)
 	}
+	if _, ok := validRestoreStages[rec.RestoreStage]; !ok {
+		return fmt.Errorf("journal: invalid restore stage %q", rec.RestoreStage)
+	}
 	path, err := j.pathFor(rec.OpID)
 	if err != nil {
 		return err
@@ -217,6 +261,13 @@ func (j *Journal) Read(opID string) (rec *Record, found bool, err error) {
 	// unrecognized value must fail closed, not be treated as a valid record.
 	if _, ok := validPhases[r.Phase]; !ok {
 		return nil, true, fmt.Errorf("%w %s: unknown phase %q", ErrCorruptRecord, filepath.Base(path), r.Phase)
+	}
+	// An unknown restore stage does NOT fail closed. The stage is read only to
+	// word a report, never to decide a Docker action, so refusing to serve over
+	// it would take the whole API down for a value a newer agent wrote. It is
+	// replaced by the one member of the closed set that claims nothing.
+	if _, ok := validRestoreStages[r.RestoreStage]; !ok {
+		r.RestoreStage = RestoreStageUnknown
 	}
 	// The file name is the record's identity: Write derives the path from
 	// OpID, so the two agree for every record this package wrote. The name has

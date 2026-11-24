@@ -22,8 +22,9 @@
 // Docker bounds a stop by the container's stop timeout, so start +
 // interrupted_settle is a time after which no such request is left. Tying the
 // bound to records would miss the stops that leave none behind or leave one
-// of another class: `compose down` in a restore (not journaled) or a data
-// rollback, and the `up` of a startup reconcile killed in mid-flight. It would
+// of another class: `compose down` in a restore or a data rollback (journaled,
+// but as a restore-class record that names no image), and the `up` of a startup
+// reconcile killed in mid-flight. It would
 // also depend on a best-effort journal write having succeeded.
 //
 // The same applies inside one process when a `compose up` / `compose down` it
