@@ -199,6 +199,12 @@ gaps and make the #2051 executor the single path every recovery takes.
      through one failed write). A start that cannot make the consume durable
      therefore stops before serving or reporting, which leaves only the
      envelope this rule already accepts: changes made while no agent ran.
+     The consume is written before the start's audit entry, so a refused
+     start leaves neither. A record from a newer agent that carries an open
+     intent is refused the same way: this build may not rewrite it (slice
+     2), and reporting it would hand the newer agent's next start stale
+     evidence. An older, fence-aware agent therefore does not serve on such
+     a directory: the fence's purpose, reached by a second route.
   3. No wall clock in the safety argument. An age bound may only narrow
      what is allowed, never decide whether evidence is consumed (a clock
      behind `began` after power loss, or corrected backwards, defeated the
