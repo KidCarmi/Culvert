@@ -578,6 +578,43 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Added
 
+- **A stale GeoIP database is now visible to Prometheus and Diagnostics, not
+  only to someone looking at the admin panel (`CHAOS-127`).** Culvert never
+  refreshes the MaxMind GeoLite2 country database and never re-reads a loaded
+  one, so a file installed once at deployment simply ages — and the only
+  staleness *judgement* in the product was a line of JavaScript in the Security
+  panel (`g.dbAgeDays > 90`). Measured with a database built 1096 days ago,
+  loaded and serving: `/metrics` carried 888 lines and none about the database,
+  `/ready` reported `geoip: ok`, and `/api/diagnostics` produced no row. The
+  `culvert_geo_*` series that look like coverage measure the resolution path's
+  load, and `culvert_geo_policy_unresolved_total` counts lookups that resolved
+  to *nothing* — a missing database's failure mode — so it stays at zero while a
+  stale database resolves confidently to whoever owned the prefix years ago.
+  What degrades is a `destCountry` rule, in the fail-open direction: traffic
+  configured to be blocked is allowed, and vice versa, silently and
+  self-consistently. Now exported as
+  `culvert_geoip_database_{loaded,age_seconds,build_timestamp_seconds,stale,age_unknown}`
+  — only on nodes that actually have a database, so a fleet-wide age rule is not
+  silently satisfied by the nodes that do not — with a `geoip_database_age`
+  Diagnostics row for the stale case and for the two shapes whose age cannot be
+  measured at all (no readable build epoch, or a build date in the future),
+  neither of which is ever reported as fresh. Alerting guidance, and why reading
+  `age_seconds` without `age_unknown` is the mistake to avoid, are in
+  `docs/operator/geoip-database-freshness.md`. Report-only: no rule, matcher,
+  lookup or loader behaviour changes, and nothing fails closed or affects
+  readiness.
+
+- **Replacing the GeoIP database now tells you it needs a restart
+  (`CHAOS-127`).** The panel advised "stale, consider updating", and an operator
+  who did exactly that saw nothing change: a loaded database is never re-read,
+  so the new file sat on disk while the old one kept serving. (A live reload is
+  deliberately not added — closing the in-use reader unmaps memory an in-flight
+  lookup may still be reading, which is a crash no recovery can catch.) A new
+  `geoip_database_pending_restart` Diagnostics row appears when the file on disk
+  carries a newer build than the database in use, meaning the download is done
+  and only a restart is outstanding; the panel's own warning now says to replace
+  the file **and restart**.
+
 - **Adding to the blocklist now reports what the gateway actually stored
   (Product Experience).** The admin UI's "Added N host(s)" / "Imported N hosts"
   toast counted the lines it sent, not what `POST /api/blocklist` did with them.
