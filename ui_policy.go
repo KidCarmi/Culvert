@@ -1541,7 +1541,7 @@ type configBackup struct {
 	ExportedAt          string        `json:"exportedAt"`
 	BlocklistMode       string        `json:"blocklistMode"`
 	Blocklist           []string      `json:"blocklist"`
-	PolicyRules         []PolicyRule  `json:"policyRules"`
+	PolicyRules         ruleList      `json:"policyRules"`
 	DefaultAction       string        `json:"defaultAction"`
 	RewriteRules        []RewriteRule `json:"rewriteRules"`
 	SSLBypass           []string      `json:"sslBypass"`
@@ -2030,8 +2030,8 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rule PolicyRule
-	if err := decodeJSON(r, &rule); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+	if refusal := decodeRuleJSON(r, &rule); refusal != "" {
+		http.Error(w, refusal, http.StatusBadRequest)
 		return
 	}
 	if rule.Name == "" {
@@ -2133,8 +2133,8 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rule PolicyRule
-	if err := decodeJSON(r, &rule); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+	if refusal := decodeRuleJSON(r, &rule); refusal != "" {
+		http.Error(w, refusal, http.StatusBadRequest)
 		return
 	}
 	if ruleTypeOf(&rule) == ruleTypeAuth {
@@ -2292,8 +2292,8 @@ func ruleAuditID(r *PolicyRule) string {
 // metadata stamping but resolves the target by stable ULID (§1 identity seam).
 func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 	var rule PolicyRule
-	if err := decodeJSON(r, &rule); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+	if refusal := decodeRuleJSON(r, &rule); refusal != "" {
+		http.Error(w, refusal, http.StatusBadRequest)
 		return
 	}
 	if ruleTypeOf(&rule) == ruleTypeAuth {

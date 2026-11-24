@@ -1,8 +1,8 @@
 openapi: 3.0.4
 info:
   title: Culvert Admin API
-  version: 2.1.0
-  x-culvert-api-contract-version: 2.1.0
+  version: 2.2.0
+  x-culvert-api-contract-version: 2.2.0
   description: |
     Machine-readable contract for the Culvert admin/control-plane REST API served
     on the UI port (`-ui-port`, default 9090).
@@ -384,6 +384,11 @@ components:
         modifiedAt: { type: string }
         modifiedBy: { type: string }
         comment: { type: string }
+        annotations:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: 'The one container for information that carries no enforcement meaning (notes, provenance, data stamped by a newer release). Culvert never interprets its contents and returns them in canonical form (compact JSON, with <, >, & and U+2028/U+2029 written as \\uXXXX escapes). At most 4096 bytes and 8 levels, measured on that canonical form, so whitespace does not count and each of < > & counts as 6 bytes. null is the same as absent. Every other key on a rule is an enforcement condition and an unknown one is refused. PUT replaces the rule whole, so omitting annotations removes them.'
     PolicySchedule:
       type: object
       additionalProperties: false
@@ -3606,6 +3611,10 @@ paths:
       description: |
         Replaces configuration from an uploaded backup envelope. Overwrites live
         policy, security, and cluster settings. Admin-only and audited.
+        A backup whose `policyRules` holds a rule this version cannot enforce as
+        written — including a rule object carrying a key this version has no rule
+        field for, or the same key twice — is refused whole with a 400 naming the rule and the key, in
+        both modes and in the dry run, before any section applies.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -3752,7 +3761,7 @@ paths:
       operationId: createPolicyRule
       tags: [policy]
       summary: Create policy rule
-      description: Create policy rule.
+      description: Create policy rule. A rule object carrying a key this version has no rule field for (a misspelt condition, or one added by a newer release), or the same key twice, is refused with a plain-text 400 that names the rule and every such key, and nothing is changed (an ignored condition would widen the rule). Key names are matched case-insensitively. Notes belong under `annotations`. Unknown keys were already refused; the 400 used to say only `invalid JSON`.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -3782,7 +3791,7 @@ paths:
       operationId: updatePolicyRule
       tags: [policy]
       summary: Update policy rule
-      description: Update policy rule.
+      description: Update policy rule. A rule object carrying a key this version has no rule field for (a misspelt condition, or one added by a newer release), or the same key twice, is refused with a plain-text 400 that names the rule and every such key, and nothing is changed (an ignored condition would widen the rule). Key names are matched case-insensitively. Notes belong under `annotations`. Unknown keys were already refused; the 400 used to say only `invalid JSON`.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -3871,7 +3880,7 @@ paths:
       operationId: createAuthPolicyRule
       tags: [policy]
       summary: Create auth policy rule
-      description: Create auth policy rule.
+      description: Create auth policy rule. A rule object carrying a key this version has no rule field for (a misspelt condition, or one added by a newer release), or the same key twice, is refused with a plain-text 400 that names the rule and every such key, and nothing is changed (an ignored condition would widen the rule). Key names are matched case-insensitively. Notes belong under `annotations`. Unknown keys were already refused; the 400 used to say only `invalid JSON`.
       security:
         - sessionCookie: []
         - basicAuth: []
@@ -3908,7 +3917,7 @@ paths:
       operationId: updateAuthPolicyRule
       tags: [policy]
       summary: Update auth policy rule
-      description: Update auth policy rule. Addressed by stable rule ULID (?id=, preferred — reorder-safe; malformed 400, unknown 404, access-rule 400, never a priority fall-through) or legacy ?priority=.
+      description: Update auth policy rule. Addressed by stable rule ULID (?id=, preferred — reorder-safe; malformed 400, unknown 404, access-rule 400, never a priority fall-through) or legacy ?priority=. A rule object carrying a key this version has no rule field for (a misspelt condition, or one added by a newer release), or the same key twice, is refused with a plain-text 400 that names the rule and every such key, and nothing is changed (an ignored condition would widen the rule). Key names are matched case-insensitively. Notes belong under `annotations`. Unknown keys were already refused; the 400 used to say only `invalid JSON`. The `warnings` array GET adds to each rule is not a rule key and must not be echoed back.
       security:
         - sessionCookie: []
         - basicAuth: []

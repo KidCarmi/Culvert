@@ -42,6 +42,12 @@ amended:
     reason: "Owner decision of 2026-11-24 (POL-005 widening). The invariant is unchanged. The control at the end of TestPOL004_RollbackKeepsARetainedUnknownActionRule asserted that a restore SKIPS a Redirect rule with no location; a restore no longer skips any stored rule, so the control now asserts that rule is restored beside the unknown-action rule."
   - id: POL-005
     reason: "Owner decision of 2026-11-24, explicitly revising SEC-POLICYDROP-1: the invariant is widened from 'a rule whose ruleType is unrecognised' to 'any rule this build cannot enforce as written' (an access rule carrying a subjectMatch or an auth spec, an invalid auth rule, a null entry). Load and ReplaceAll used to drop such a rule and install the rest; a dropped Block rule under default allow forwarded its traffic (measured: 200, backend reached). The gate, its doors and the eight pre-existing POL-005 tests are unchanged; tests are added. Existing tests elsewhere that asserted the per-rule drop were migrated to assert whole-ruleset refusal. An empty entry (null or {}) is refused at every door. Rollback applies the gate and then restores every stored rule as stored, instead of skipping rules the write-time validator refuses. Record: docs/engineering/security-reviews/2026-11-24-ruleset-refusal-supersedes-per-rule-drop.md."
+  - id: POL-005
+    reason: "Owner decision of 2026-11-24 (unknown JSON fields: unify the contract across all entry points, prefer explicit rejection, preserve compatibility through an explicit strategy). The invariant is widened again, in the same direction: a rule object carrying a JSON key this build has no field for (a misspelt condition, or one added by a newer release), or the same key twice (the last value won), is a rule it cannot enforce as written, because a condition present in the document is not enforced and the rule matches more than was written. Measured before the change: the policy file, a stored config version, a pending draft and a control-plane snapshot each installed an Allow narrowed only by an unknown key as an Allow for every source. The operator doors already refused an unknown key (400 'invalid JSON') and accepted a duplicate; they now refuse both and name the rule and the keys. The gate, its doors, its Diagnostics code and every registered test are unchanged; tests are added. Compatibility strategy, now part of the contract: every rule key other than the reserved 'annotations' container is an enforcement condition, 'annotations' is carried in canonical form (on which it is bounded) and never interpreted, and a test pins today's key set. A rule list given twice in one document is refused likewise. Key matching stays case-insensitive, documents around rules (ConfigSnapshot sections) stay tolerant, and no legacy key is allowlisted because the available history holds none on a rule. Record: docs/engineering/security-reviews/2026-11-24-unknown-rule-fields-refused.md."
+  - id: AGT-004
+    reason: "ADR-0062 slice 2 (journal schema version). A journal record written by a NEWER agent (schema above this build's) is listed in status like any interrupted record, but this build never rewrites or removes it, so a later successful image change does not clear it: its fields may say the state is unsafe in a way this build cannot read. This narrows 'lists it until a later image change succeeds' for that one case; records this build or an older agent wrote are unchanged, and no registered test was edited (new tests: TestRetire_NewerRecordIsNeverSuperseded, TestNewerSchema_IsNeverRewrittenOrRemoved). Not owner-approved; the wording is the implementer's."
+  - id: AGT-005
+    reason: "ADR-0062 slice 2. Retirement is narrowed, never widened: a record a newer agent wrote is never removed by this build, neither by a later success nor by the converge reconcile (which reports it recovery_required/record_from_newer_agent without reading Docker), and no interrupted_superseded entry is written for it. Unknown keys of any record now survive every rewrite, and an agent released before slice 2 is fenced off a directory holding schema-2 records (it refuses to serve on the fence record's unknown phase). Existing retirement rules and their tests are unchanged. Not owner-approved; the wording is the implementer's."
 retired: []
 
 contracts:
@@ -184,11 +190,12 @@ contracts:
     area: policy
     status: enforced
     owner_approved: false
-    invariant: "A ruleset containing a rule this build cannot enforce as written (an unrecognised ruleType, or any shape the persistability gate refuses) is refused whole at every door, and the running and persisted policy are unchanged. No replacement, normalization, migration or compatibility conversion may silently remove an enforcement rule."
+    invariant: "A ruleset containing a rule this build cannot enforce as written (an unrecognised ruleType, a JSON key the build has no rule field for, the same key given twice, or any shape the persistability gate refuses) is refused whole at every door, and the running and persisted policy are unchanged. No replacement, normalization, migration or compatibility conversion may silently remove an enforcement rule."
     authority: "Policy store and its bulk doors (policy_ruletype_gate.go, policy.go)."
     code:
       - "policy_ruletype_gate.go"
       - "policy_preflight.go"
+      - "policy_unknown_field.go"
     configs: []
     transitions:
       permitted:
@@ -202,6 +209,15 @@ contracts:
         - "dropping a rule the build cannot enforce and installing the rest of the ruleset"
         - "restoring a stored config version without one of its rules"
         - "installing an empty rule entry (null or {}), which matches every request"
+        - "installing a rule decoded from JSON with a key the build has no field for, the key ignored"
+        - "failing to decode a control-plane snapshot because of an unknown top-level section"
+        - "installing a rule decoded from JSON in which one field was given twice, the last value kept"
+        - "adding a rule key for information that is not an enforcement condition (it belongs inside annotations)"
+        - "interpreting the contents of a rule's annotations, or dropping them in the store, the policy file, an export or a snapshot"
+        - "raising the size or depth bound of annotations"
+        - "bounding annotations on any form other than the canonical one Culvert's encoders write (a ruleset accepted once must stay accepted after save, export and publish)"
+        - "keeping only the last of two rule lists given under the same key in one document"
+        - "decoding a rule onto anything but a zero value"
     tests:
       - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_E2E_BulkReplaceIsRefusedAndLastKnownGoodStillBlocks}
       - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_E2E_PolicyFileReloadIsRefusedAndLastKnownGoodStillBlocks}
@@ -218,8 +234,29 @@ contracts:
       - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_RollbackRefusesWholeOrRestoresEveryStoredRule}
       - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_RepeatedRefusalIsLoggedOnceAndCountedEveryTime}
       - {file: "policy_unenforceable_rule_test.go", name: TestPolicyPreflight_ListsEveryRefusedRuleAndChangesNothing}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_WhatCountsAsUnknown}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_EveryKeyIsNamedBoundedAndNotSticky}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AreAPinnedSetAndNewOnesAreConditions}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AnnotationsAreCarriedVerbatimNeverInterpretedAndBounded}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_DuplicateKeyIsRefusedAtEveryDoorClass}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_FetchAndApplyAndDeltaRemainderRefuseAndTheCleanSnapshotApplies}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_RefusedLastGoodSnapshotAtBootIsADiagnosticsRow}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_StartupFatalDoesNotClaimARunningPolicy}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AnnotationsBoundIsAFixedPointOfEveryEncoder}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AnnotatedRulesetSurvivesItsOwnSaveExportAndPublish}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_RuleListGivenTwiceIsRefusedAtEveryDoor}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_NothingSurvivesAnEarlierDecodeAndCopiesDoNotAlias}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_PreflightChecksEveryLocationAndLabelsByShape}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_ColdDataIsOnePointerAndTheRuleKeepsItsSizeClass}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_SingleRuleAPIRefusesByNameAndChangesNothing}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_GetThenPutRoundTripsThroughTheRealHandlers}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_ImportIsRefusedInEveryModeAndNamesTheRule}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_PolicyFileIsRefusedAtLoadReloadAndStartup}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_StoredVersionAndPendingDraftAreRefused}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_SnapshotIsRefusedBeforeAnyMutationAndTheEnvelopeStaysTolerant}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_PreflightListsEveryRuleAndPOL004IsUntouched}
     validation: integration
-    compatibility: "A node handed a ruleset from a newer release keeps enforcing its last accepted policy; a policy file it cannot fully understand stops startup, as a malformed file does."
+    compatibility: "A node handed a ruleset from a newer release keeps enforcing its last accepted policy; a policy file it cannot fully understand stops startup, as a malformed file does. Every rule key except the annotations container is an enforcement condition: when a later release adds one and a rule uses it, older nodes refuse the whole snapshot (blocklist and IP-filter changes included) until upgraded; information that is not a condition travels inside annotations and never causes a refusal. A hand-edited policy file with an extra, misspelt or repeated rule key stops startup after upgrade; `culvert policy-check` lists such keys beforehand."
 
   - id: POL-006
     area: policy

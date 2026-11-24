@@ -973,7 +973,7 @@ func initPolicy(s *startupState) {
 	polPath := firstStr(*s.policyFile, s.fc.Proxy.PolicyFile)
 	if polPath != "" {
 		if err := policyStore.Load(polPath); err != nil {
-			logFatalf("Cannot load policy file: %v (run `culvert policy-check %s` to list every rule this version refuses)", err, polPath)
+			logFatalf("%s", startupPolicyFileError(err, polPath))
 		}
 		logger.Printf("Policy: %d rule(s) loaded from %s", len(policyStore.List()), polPath)
 	} else {

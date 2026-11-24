@@ -166,6 +166,19 @@ type Record struct {
 	// Omitted when empty, so an upgrade or image-rollback record is
 	// byte-identical to what it was before the key existed.
 	RestoreStage RestoreStage `json:"restore_stage,omitempty"`
+
+	// Schema is the record format (schema.go). Absent means 1, the format of
+	// every agent before ADR-0062. A record at SchemaFenced or above is written
+	// only behind the downgrade fence; one above SchemaCurrent came from a
+	// newer agent and is read-only here.
+	Schema int `json:"schema,omitempty"`
+
+	// extra holds the keys of a record read from a file that this build does
+	// not declare, so a rewrite carries them through unchanged (schema.go).
+	extra map[string]json.RawMessage
+	// restoreStageRaw is a restore stage this build does not know, kept so a
+	// rewrite writes it back instead of the "unknown" Read substituted.
+	restoreStageRaw string
 }
 
 const (
@@ -220,6 +233,9 @@ func (j *Journal) pathFor(opID string) (string, error) {
 // skipped write-ahead barrier would reopen the RISK-022 window under exactly the
 // disk-full condition the journal exists to survive.
 func (j *Journal) Write(rec Record) error {
+	if rec.FromNewerAgent() {
+		return fmt.Errorf("%w (op %s, schema %d > %d)", ErrNewerSchema, rec.OpID, rec.Schema, SchemaCurrent)
+	}
 	if _, ok := validPhases[rec.Phase]; !ok {
 		return fmt.Errorf("journal: invalid phase %q", rec.Phase)
 	}
@@ -233,6 +249,13 @@ func (j *Journal) Write(rec Record) error {
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("journal: marshal: %w", err)
+	}
+	if rec.EffectiveSchema() >= SchemaFenced {
+		// Fail-closed: the fence is durable before the first record an older
+		// agent must not act on.
+		if ferr := j.ensureFence(); ferr != nil {
+			return ferr
+		}
 	}
 	return atomicWrite(path, data, fileMode)
 }
@@ -267,6 +290,7 @@ func (j *Journal) Read(opID string) (rec *Record, found bool, err error) {
 	// it would take the whole API down for a value a newer agent wrote. It is
 	// replaced by the one member of the closed set that claims nothing.
 	if _, ok := validRestoreStages[r.RestoreStage]; !ok {
+		r.restoreStageRaw = string(r.RestoreStage)
 		r.RestoreStage = RestoreStageUnknown
 	}
 	// The file name is the record's identity: Write derives the path from
@@ -296,6 +320,9 @@ func (j *Journal) List() ([]Record, error) {
 			continue
 		}
 		opID := strings.TrimSuffix(e.Name(), fileExt)
+		if opID == fenceOpID {
+			continue // the downgrade fence is not an operation (schema.go)
+		}
 		rec, found, rerr := j.Read(opID)
 		if rerr != nil {
 			return nil, rerr // corrupt or invalid-name file — fail closed
@@ -316,10 +343,21 @@ func (j *Journal) Remove(opID string) error {
 	if err != nil {
 		return err
 	}
+	// A record a newer agent wrote is never removed here: its fields may say
+	// that the state it describes is not safe in a way this build cannot read.
+	if rec, found, rerr := j.Read(opID); rerr == nil && found && rec.FromNewerAgent() {
+		return fmt.Errorf("%w (op %s, schema %d > %d)", ErrNewerSchema, opID, rec.Schema, SchemaCurrent)
+	}
 	if rerr := os.Remove(path); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
 		return fmt.Errorf("journal: remove %s: %w", filepath.Base(path), rerr)
 	}
-	return fsyncDir(j.dir)
+	if err := fsyncDir(j.dir); err != nil {
+		return err
+	}
+	// The record is gone either way; a fence that could not be released stays,
+	// which only keeps older agents out a little longer.
+	_ = j.releaseFenceIfUnused()
+	return nil
 }
 
 // atomicWrite writes data to path via a temp file in the same directory, then
