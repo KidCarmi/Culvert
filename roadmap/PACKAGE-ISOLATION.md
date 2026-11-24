@@ -903,6 +903,77 @@ added once they merge; this section sits at a third anchor neither touches):
   Independent alternatives, unchanged: `mcp_rollout_execdeps.go` after #1993,
   one strict decoder for the three F3 records, then IM-014 mapping.
 
+### IM-027 listener retry-sleep rules (EXTRACT, 2026-11-23, main `46b4ffa6e`)
+
+Task record (open #2017 edits the task table and inserts after the IM-028
+section, and open #2060 appends at the end of this file, so the IM-027 row is
+added once they merge; this section sits at a third anchor neither touches):
+
+| Field | Value |
+|---|---|
+| ID / task | IM-027: the doubling ladder in `nextCPGRPCBindBackoff` and `nextScanSvcBindBackoff`, and the threshold clamp in `clampCPGRPCBindSleep` and `clampSOCKS5BindSleep` → `internal/listenretry` |
+| Status | **implementation under review** |
+| Depends on | — (no open PR changes `cp_grpc_bind.go`, `cp_grpc_health.go`, `scan_svc_listener.go` or `socks5_health.go`; checked against the 40 open PR heads that are not dependency bumps on 2026-11-23, after fetching full history, because the clone is shallow and a shallow merge base lists files a branch never edited) |
+| Evidence | ADR-0064; 2 exported names (`Ladder`, `Clamp`), one method each; the four root functions stay as bindings, so no call site and no existing test is edited; verdict tables over 219 ladder inputs and 47,961 clamp inputs per listener whose digests were captured from main before the bind; differential tests against frozen copies over 60,000 inputs each; 2 fuzz targets; 29 mutation checks, 26 failing a test and 3 equivalent |
+| Risks | the ladder is each listener's retry cadence and the clamp bounds how late its "unavailable" page can be. Every returned value is pinned per listener, including where the int64 arithmetic wraps |
+| PR | #2073 |
+| Next action | review PR |
+
+- **Reconciled.** #2017 (IM-029): every non-skipped check passed, the Codex
+  review reports no finding, no review thread. Nothing to fix. IM-024,
+  IM-025, IM-026 and IM-028 have merged. IM-005/IM-006 stay blocked on #1526.
+- **Why this.** It is the lead ADR-0058 and the IM-026, IM-028 and IM-029
+  notes name next, and #1997's merge removed its blocker. The copies were
+  five and six statements long, read only their own listener's constants and
+  no clock, and the clamp carries a correctness property (a sleep must not
+  straddle the alert threshold) that had no test independent of a listener.
+- **Moved:** what the next rung is, and how a sleep is shortened at the
+  threshold. **Stays main:** the four functions (as bindings), every
+  constant, the jitter, the timers, the supervisors, the health records and
+  the alerts.
+- **Size.** 4 root production files edited (+23/−37 lines), 2 new production
+  files (89 lines, 35 of them the package comment). Root test inventory
+  8,642 → 8,645 by `go test -list` (tests, fuzz targets, benchmarks and
+  examples; one new file, 3 tests); package 13 tests and 2 fuzz targets.
+- **A sibling of `internal/listenfault`, not an addition to it.** That
+  package's boundary refuses a `time` import so it cannot acquire a clock.
+  `listenretry` admits `time` and refuses every name from it but `Duration`.
+- **Value types, not functions of four durations.** `Clamp{Threshold: …,
+  Floor: …}.Sleep(wait, failingFor)` names the two constants at the call;
+  exchanging them in a binding fails a test.
+- **ADR-0002.** No conflict: supervisors and `*_health.go` records stay in
+  main, and what moved is neither.
+- **Program rule.** This is a second open program PR beside #2017. It shares
+  no source file with it; both edit this document at different anchors.
+- **Not bound, with the reason for each.** `nextSOCKS5BindBackoff`:
+  `socks5_bind.go` is edited by #2034, #1549, #1548 and #1536.
+  `nextSOCKS5AcceptBackoff`: a different rule (`cur == 0`, so a negative rung
+  doubles) in a file eight open PRs edit. The admin UI ladder: inline in
+  `ui.go`'s loop, so there is no function whose verdicts could be captured
+  first.
+- **Found, not changed (pre-existing on main `46b4ffa6e`).** The scan
+  sidecar and the admin UI raise "unavailable" from a failed attempt, as the
+  Control Plane and SOCKS5 listeners do, but sleep unclamped
+  (`scanSvcWaitBackoff`; `ui.go`'s `haSleepInterruptible(stop, wait)`). When
+  jitter lands the sixth attempt just under 30 s, the next sleep is a full
+  30 s rung and the page arrives at up to about 66 s (admin UI) or 67.5 s
+  (sidecar). Applying
+  `listenretry.Clamp` is one line and one floor constant per listener; it
+  changes when an alert fires, so it is the owner's to ask for.
+- **Next.** `mcp_rollout_execdeps.go` → `internal/mcp/rollout` as an
+  instance-owned readiness registry (the lead under IM-025; 156 lines, reads
+  no root name, and no open PR edits it on 2026-11-23). It is next because it
+  is the one remaining lead that is real state (four `atomic.Bool`s) rather
+  than a repeated rule, so it removes package-level mutable state from main.
+  Prerequisite: none. First step, unchanged: read
+  `mcp_execution_posture_test.go`'s `armingHookFile` wall and the root tests
+  that set the four flags, and count how many would need a setter the package
+  does not otherwise export; if any does, stop. Smaller follow-ups that wait
+  on other PRs: bind `nextSOCKS5BindBackoff` after #2034's disposition (one
+  line, digest already in `listen_retry_wiring_test.go`'s shape).
+  Independent, unchanged: the generation-metadata readers (IM-028 note) and
+  IM-014 mapping, which now overlaps open #1528 in `release_catalog*.go`.
+
 ### IM-019 inner-host pin predicate (EXTRACT, 2026-11-20, main `0fe4578`)
 
 - **Reconciled.** IM-016 (#1975) merged on 2026-11-20; its row is updated. No

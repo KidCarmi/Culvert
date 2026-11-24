@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/listenfault"
+	"github.com/KidCarmi/Culvert/internal/listenretry"
 )
 
 const (
@@ -447,16 +448,10 @@ func classifyScanSvcBindError(err error) string {
 
 // nextScanSvcBindBackoff advances the ladder: 1 s on the first failure,
 // doubling, capped at scanSvcBindBackoffMax. Pure, so the policy is pinned
-// without a clock.
+// without a clock. The doubling rule is internal/listenretry's (ADR-0064); the
+// two constants are this listener's.
 func nextScanSvcBindBackoff(cur time.Duration) time.Duration {
-	if cur <= 0 {
-		return scanSvcBindBackoffInitial
-	}
-	cur *= 2
-	if cur > scanSvcBindBackoffMax {
-		return scanSvcBindBackoffMax
-	}
-	return cur
+	return listenretry.Ladder{Initial: scanSvcBindBackoffInitial, Ceiling: scanSvcBindBackoffMax}.Next(cur)
 }
 
 // scanSvcBackoffAfterServe resets the ladder once a serve has proven stable,
