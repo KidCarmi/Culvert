@@ -123,7 +123,7 @@ func run(configPath string) error {
 		return fmt.Errorf("auth policy: %w", err)
 	}
 
-	instLock, err := prepareStateDir(cfg.StateDir)
+	instLock, err := prepareStateDir(cfg.StateDir, cfg.LogRetentionDays)
 	if err != nil {
 		return err
 	}
@@ -211,15 +211,21 @@ func initIdempotency(stateDir string, mgr *ops.Manager, ttl time.Duration) {
 // stops here instead of admitting operations beside the first one or
 // replacing its socket. The server keeps the lock (the converge reconcile
 // reuses it) and releases it on Close; the kernel drops it if this process
-// dies.
-func prepareStateDir(stateDir string) (*journal.ReconcileLock, error) {
+// dies. Holding the lock, it then sweeps expired op logs
+// (sweepOpLogsAtStartup) before anything else writes to state_dir.
+func prepareStateDir(stateDir string, retentionDays int) (*journal.ReconcileLock, error) {
 	if err := os.MkdirAll(stateDir, 0o750); err != nil { //nolint:gosec // documented mode
 		return nil, fmt.Errorf("mkdir state_dir: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Join(stateDir, "operations"), 0o750); err != nil { //nolint:gosec // documented mode
 		return nil, fmt.Errorf("mkdir operations: %w", err)
 	}
-	return lockInstance(stateDir)
+	lock, err := lockInstance(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	sweepOpLogsAtStartup(stateDir, retentionDays)
+	return lock, nil
 }
 
 // errInstanceLocked is returned by lockInstance when another live process
@@ -489,17 +495,32 @@ func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.
 // cheap (one readdir + stat per file).
 const opLogRetentionInterval = 24 * time.Hour
 
-// startOpLogRetention runs an immediate LogRetentionDays sweep of the per-op
-// transcripts, then a periodic one until ctx is cancelled. retentionDays <= 0
-// disables it (defensive; config validation already enforces > 0).
+// sweepOpLogsAtStartup runs the immediate LogRetentionDays sweep of the per-op
+// transcripts. run calls it right after taking the instance lock, before the
+// audit log, the idempotency store and the journal are opened: a start that
+// one of those refuses (a full disk is the usual cause) has then still freed
+// its own expired logs, and the next restart can succeed. No op can be in
+// flight yet (the lock is held, nothing is admitted), so there is no live-op
+// guard. retentionDays <= 0 disables it (defensive; config validation already
+// enforces > 0).
+func sweepOpLogsAtStartup(stateDir string, retentionDays int) {
+	if retentionDays <= 0 {
+		return
+	}
+	maxAge := time.Duration(retentionDays) * 24 * time.Hour
+	if removed := ops.SweepOpLogs(stateDir, maxAge, time.Now(), nil); removed > 0 {
+		log.Printf("culvert-maint: op-log retention swept %d file(s) older than %d day(s)", removed, retentionDays)
+	}
+}
+
+// startOpLogRetention runs the periodic LogRetentionDays sweep until ctx is
+// cancelled (the startup sweep is sweepOpLogsAtStartup). retentionDays <= 0
+// disables it.
 func startOpLogRetention(ctx context.Context, stateDir string, retentionDays int, isRunning func(opID string) bool) {
 	if retentionDays <= 0 {
 		return
 	}
 	maxAge := time.Duration(retentionDays) * 24 * time.Hour
-	if removed := ops.SweepOpLogs(stateDir, maxAge, time.Now(), isRunning); removed > 0 {
-		log.Printf("culvert-maint: op-log retention swept %d file(s) older than %d day(s)", removed, retentionDays)
-	}
 	go func() {
 		t := time.NewTicker(opLogRetentionInterval)
 		defer t.Stop()
