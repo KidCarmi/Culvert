@@ -432,7 +432,14 @@ func (s *Store) Load(path string) error {
 
 	data, err := os.ReadFile(path) // #nosec G304 -- operator-configured path
 	if err != nil {
-		return nil // first run — no file
+		if os.IsNotExist(err) || path == "" {
+			return nil // first run — no file (or no persistence configured)
+		}
+		// A file that EXISTS but cannot be read (permissions, I/O) is not a
+		// first run: reporting it as one left the store empty, and every
+		// group-scoped rule matching nothing, with no error at all.
+		obs.Printf("CategoryGroups: cannot read %s", path)
+		return fmt.Errorf("category groups: read: %w", err)
 	}
 	// Format sniff (2D-A fence correction): the envelope couples content +
 	// epoch; a legacy bare array is still accepted, with its version taken

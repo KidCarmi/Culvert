@@ -9,6 +9,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A category groups file that cannot be loaded no longer silently disables
+  every rule scoped to a group.** A rule scoped to a category group matches a
+  destination only when the group resolves. If the groups file failed to load at
+  startup (corrupt JSON, an envelope written by a newer release) the store
+  stayed empty, the failure was a single log line, and startup continued: a
+  group-scoped Block rule stopped blocking and a group-scoped
+  credential-required rule stopped challenging, so the traffic fell through to
+  the default action or to an Allow behind it. An existing file that could not
+  be **read** (permissions, I/O) was worse: it was treated as a first run and
+  produced no error at all. Now, when an enabled policy rule is scoped to a
+  category group and the groups cannot be loaded, **startup stops** with an
+  error naming the rules and the file, as it already does for the policy file
+  and the URL categories. When no enabled rule depends on a group, startup
+  continues, the failure is a warning, and Diagnostics shows
+  `category_groups_load_failed` until groups are present again. An unreadable
+  file is reported as an error; a missing file is still a first run.
+  **Recovery:** restore the file from a backup or a stored config version; on a
+  data-plane node, removing it lets the next control-plane sync rebuild it.
+
 - **An authentication rule that says "not in" is no longer enforced as "in".**
   A rule's subject selector (`subjectMatch`) takes typed predicates; each has
   an optional `op`. The matcher implements one operator, membership, but any
