@@ -65,9 +65,9 @@ func TestImportPreview_MergeCountsAndEffect(t *testing.T) {
 		"version":    1,
 		"exportedAt": "2026-02-02T00:00:00Z",
 		"policyRules": []map[string]any{
-			{"name": "imp-a", "action": "allow"},
-			{"name": "imp-b", "action": "allow"},
-			{"name": "imp-c", "action": "allow"},
+			{"name": "imp-a", "action": "Allow"},
+			{"name": "imp-b", "action": "Allow"},
+			{"name": "imp-c", "action": "Allow"},
 		},
 		"urlCategories": []map[string]any{{"name": "imp-cat"}},
 	})

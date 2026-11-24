@@ -12013,7 +12013,7 @@
             }
           },
           {
-            "description": "`replace` wipes stores before applying; default is merge. Policy rules are validated as `POST /api/policy` validates them, in both modes. In `replace` mode one invalid rule refuses the whole import (400, plain text naming the rule and the reason) before anything is applied; in `merge` mode an invalid rule is skipped and listed in `warnings`.",
+            "description": "`replace` wipes stores before applying; default is merge. Policy rules are validated as `POST /api/policy` validates them, in both modes. In `replace` mode one invalid rule refuses the whole import (400, plain text naming the rule and the reason) before anything is applied; in `merge` mode an invalid rule is skipped and listed in `warnings`. In both modes a rule this node could not verify (a Redirect host whose DNS lookup failed, a schedule timezone missing from the node's database) is installed and listed in `warnings`; a dry run returns the same `warnings` as the commit.",
             "in": "query",
             "name": "mode",
             "required": false,

@@ -519,7 +519,7 @@ func TestF3a2_ImportPreviewShowsFeedAndOverrides(t *testing.T) {
 		SaaSFeedRefreshSeconds: 7200,
 		CategoryOverrides:      &CategoryOverrides{Added: map[string]string{"h.example.com": "social"}},
 	}
-	sections, settings := buildImportPreview(&b, false, nil)
+	sections, settings := buildImportPreview(&b, nil, false, nil)
 
 	var ovSection *importPreviewSection
 	for i := range sections {
@@ -548,7 +548,7 @@ func TestF3a2_ImportPreviewShowsFeedAndOverrides(t *testing.T) {
 
 	// A pre-extension backup (no protocol) must surface no feed rows.
 	empty := configBackup{}
-	_, emptySettings := buildImportPreview(&empty, false, nil)
+	_, emptySettings := buildImportPreview(&empty, nil, false, nil)
 	for _, s := range emptySettings {
 		if strings.HasPrefix(s.Setting, "SaaS Feed") {
 			t.Errorf("pre-extension backup leaked feed setting %q", s.Setting)

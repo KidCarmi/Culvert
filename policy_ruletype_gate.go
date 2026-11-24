@@ -271,11 +271,11 @@ func (ps *PolicyStore) decodePolicyFile(data []byte) ([]*PolicyRule, error) {
 }
 
 // decodeImportBackup reads a config import body and applies the ruleType gate
-// to it, then the ingress validation of a replace-mode ruleset
-// (importIngressRefusal). It returns the 400 message, or "" to proceed. Both
+// to it, then the backup version check and the ingress validation of the rule
+// set (importIngressRefusal). It returns the 400 message, or "" to proceed. All
 // run here, at the door, so they precede every section's apply AND the dry-run
 // preview: a preview never promises an import the commit would refuse.
-func decodeImportBackup(r *http.Request, b *configBackup) (refusal string) {
+func decodeImportBackup(r *http.Request, b *configBackup, checks *importRuleChecks) (refusal string) {
 	if err := decodeJSON(r, b); err != nil {
 		return "invalid JSON: " + err.Error()
 	}
@@ -286,7 +286,7 @@ func decodeImportBackup(r *http.Request, b *configBackup) (refusal string) {
 		}
 		return "import refused, a rule cannot be enforced: " + err.Error()
 	}
-	return importIngressRefusal(r, b)
+	return importIngressRefusal(r, b, checks)
 }
 
 // rollbackTargetRefusal is the shape checks a stored version must pass before

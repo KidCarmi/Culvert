@@ -3635,7 +3635,10 @@ paths:
             modes. In `replace` mode one invalid rule refuses the whole import
             (400, plain text naming the rule and the reason) before anything
             is applied; in `merge` mode an invalid rule is skipped and listed
-            in `warnings`.
+            in `warnings`. In both modes a rule this node could not verify (a
+            Redirect host whose DNS lookup failed, a schedule timezone missing
+            from the node's database) is installed and listed in `warnings`;
+            a dry run returns the same `warnings` as the commit.
           schema: { type: string, enum: [merge, replace] }
         - name: importDigest
           in: query

@@ -44,8 +44,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   (`"10.0.0.5-10.0.0.9"`, `" 10.0.0.5"`, `"10.0.0.0/33"`) never matches, so
   importing it over a working restriction let that traffic fall through to the
   default action or to an Allow behind it. Also accepted: duplicate rule names
-  or priorities, a Redirect with no `redirectURL`, an unknown schedule
-  timezone (evaluated as UTC), a rule with no name, and a rule whose `action`
+  or priorities, a Redirect with no `redirectURL` or one pointing at a private
+  address, an impossible schedule timezone, a rule with no name, and a rule
+  whose `action`
   is missing or is not exactly `Allow`, `Drop`, `Block_Page` or `Redirect`.
   Every door where an operator submits rules now runs the same validation
   through one shared function: the policy and auth-policy API, config import
@@ -64,6 +65,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
     held, so no node fails to start, roll back or follow its control plane
     because of this change.
 
+  - **A rule this node cannot verify is not an invalid rule.** Two checks
+    depend on the node, not on the rule: a Redirect rule's host must resolve
+    in DNS, and a schedule timezone must be in the node's timezone database.
+    When the lookup fails or times out, or the zone is missing, an import (in
+    both modes, dry run included) still installs the rule and returns one
+    `warnings` entry naming the rule and the host or zone, so a backup of a
+    healthy policy restores on a node without DNS or without zoneinfo. This is
+    safe: a Redirect is re-checked every time it matches and answers 403 until
+    its host resolves to a public address, and a schedule whose zone is
+    missing is evaluated in UTC, as before. A host that resolves to a private
+    or internal address, a URL that is not absolute http/https, and a timezone
+    name that cannot be a zone name are invalid and refused. `POST`/`PUT
+    /api/policy` still answer 400 to a rule they could not verify; the message
+    now says the host or zone could not be verified instead of calling the URL
+    malformed. Import verification is bounded to 10 seconds per request.
+  - The merge-mode dry run now runs the merge itself against a copy of the
+    policy, so its `upsert N: U update, A add` line counts skipped rules
+    (`…, S skipped as invalid`) and returns the same `warnings` as the commit.
+    The backup `version` is checked before the rules.
+
   **Upgrade impact:** a replace-mode import that used to succeed can now be
   refused. The response says which rule and why, for example `import refused:
   policy rule 3 of 12 ("quarantine") is not valid: sourceIP
@@ -71,11 +92,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   rule in the file and import again; `?dryRun=true` gives the same answer
   without applying anything. This includes a backup exported by this system
   if its policy held such a rule, which is possible when the rule came from a
-  hand-edited policy file, a control-plane snapshot, or a release older than
-  the API check concerned. Two causes are not visible in the rule itself: a
-  Redirect rule's host must resolve in DNS to a public address from the node
-  doing the import, and a schedule timezone must exist in that node's
-  timezone database.
+  hand-edited policy file, a control-plane snapshot, a restored config
+  version, or a release older than the API check concerned. The shapes a
+  self-made export can hold and a replace import now refuses: a `sourceIP`
+  that is not an address or CIDR; duplicate rule names; duplicate priorities;
+  a rule with no name; an `action` that is missing, in another letter case,
+  or unknown to this version (such a rule is kept and blocks when it comes
+  from a policy file or snapshot, but cannot be imported); a Redirect with an
+  empty or non-http(s) `redirectURL`, or one whose host resolves to a private
+  address; and a timezone name that cannot be a zone name.
 
 - **A config import no longer reports success when the imported policy rules
   could not be written to disk.** The policy save on `POST /api/config/import`

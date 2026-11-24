@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -207,17 +210,76 @@ func validateRuleUniqueness(rule PolicyRule, existingRules []PolicyRule, editPri
 // validateRuleShape is the STATE-INDEPENDENT half of validatePolicyRule: the
 // structural checks a request fails on its own, whatever the rulebase holds.
 // The API handlers run it BEFORE the fence (a 400 that no refresh can fix).
+//
+// It is the STRICT reading of checkRuleShape: a rule this node could not
+// verify is refused like an invalid one, with its own typed error
+// (errRuleUnverifiable).
 func validateRuleShape(rule PolicyRule) error {
+	return checkRuleShape(context.Background(), rule).strict()
+}
+
+// errRuleUnverifiable marks a finding that says nothing about the RULE: this
+// node could not, right now, establish whether the rule is valid (a Redirect
+// host whose DNS lookup failed or timed out, a schedule timezone that is not
+// in this host's timezone database). Test with errors.Is. A rule that is
+// positively invalid never carries it.
+var errRuleUnverifiable = errors.New("could not be verified on this node")
+
+type ruleUnverifiableError struct{ msg string }
+
+func (e *ruleUnverifiableError) Error() string        { return e.msg }
+func (e *ruleUnverifiableError) Is(target error) bool { return target == errRuleUnverifiable }
+
+// ruleCheck is the outcome of the state-independent validation of one rule.
+// The two halves are kept apart because they are different facts:
+//
+//   - err: the rule is INVALID — a pure domain invariant, the same on every
+//     node. Refused at every operator-facing door.
+//   - unverifiable: the rule may be perfectly good, but this node cannot
+//     confirm it. What a door does with that is the door's policy, stated once
+//     in policy_ruleset_ingress.go.
+type ruleCheck struct {
+	unverifiable []error // each errors.Is(errRuleUnverifiable)
+	err          error
+}
+
+// strict is the reading for a door that accepts only what it could verify.
+func (c ruleCheck) strict() error {
+	if c.err != nil {
+		return c.err
+	}
+	if len(c.unverifiable) > 0 {
+		return c.unverifiable[0]
+	}
+	return nil
+}
+
+func (c *ruleCheck) note(unverifiable, invalid error) {
+	if c.err == nil {
+		c.err = invalid
+	}
+	if unverifiable != nil {
+		c.unverifiable = append(c.unverifiable, unverifiable)
+	}
+}
+
+// checkRuleShape is the single definition of the state-independent rule
+// checks. ctx bounds the one check that waits on the network (a Redirect
+// host's DNS lookup).
+func checkRuleShape(ctx context.Context, rule PolicyRule) (c ruleCheck) {
 	if rule.Name == "" {
-		return fmt.Errorf("name is required")
+		c.err = fmt.Errorf("name is required")
+		return c
 	}
 	if !knownRuleType(rule.RuleType) {
-		return fmt.Errorf("ruleType %q is not recognised (use %q or %q)", sanitizeLog(rule.RuleType), ruleTypeAccess, ruleTypeAuth)
+		c.err = fmt.Errorf("ruleType %q is not recognised (use %q or %q)", sanitizeLog(rule.RuleType), ruleTypeAccess, ruleTypeAuth)
+		return c
 	}
 	// Schedule timezone is validated for both rule types.
 	if rule.Schedule != nil && rule.Schedule.Timezone != "" {
-		if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {
-			return fmt.Errorf("invalid schedule timezone: %s", strings.ReplaceAll(rule.Schedule.Timezone, "\n", ""))
+		c.note(checkScheduleTimezone(rule.Schedule.Timezone))
+		if c.err != nil {
+			return c
 		}
 	}
 
@@ -229,28 +291,54 @@ func validateRuleShape(rule PolicyRule) error {
 	if ruleTypeOf(&rule) == ruleTypeAuth {
 		warnings, err := validateAuthRule(rule)
 		if err != nil {
-			return err
+			c.err = err
+			return c
 		}
 		for _, w := range warnings {
 			logWarnf("Policy: auth rule %q: %s", sanitizeLog(rule.Name), strings.ReplaceAll(w, "\n", " "))
 		}
-		return nil
+		return c
 	}
-	return validateAccessRule(rule)
+	c.note(checkAccessRule(ctx, rule))
+	return c
 }
 
-// validateAccessRule validates the Stage-2 subset of a policy rule (RuleType
+// plausibleTimezoneName reports whether name could be an IANA zone name at
+// all. A name that fails is invalid on every node; a plausible name that this
+// node's database lacks is only unverifiable here (a slim image without
+// zoneinfo, an older tzdata).
+func plausibleTimezoneName(name string) bool {
+	if len(name) > 64 || strings.HasPrefix(name, "/") || strings.Contains(name, "..") || strings.Contains(name, "//") {
+		return false
+	}
+	const zoneNameChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/_-+"
+	return strings.Trim(name, zoneNameChars) == ""
+}
+
+func checkScheduleTimezone(name string) (unverifiable, invalid error) {
+	if !plausibleTimezoneName(name) {
+		return nil, fmt.Errorf("invalid schedule timezone: %s", sanitizeLog(boundedRuleName(name)))
+	}
+	if _, err := time.LoadLocation(name); err != nil {
+		return &ruleUnverifiableError{fmt.Sprintf(
+			"schedule timezone %q is not in this node's timezone database, so it could not be verified here; where it is missing the schedule is evaluated in UTC",
+			name)}, nil
+	}
+	return nil, nil
+}
+
+// checkAccessRule validates the Stage-2 subset of a policy rule (RuleType
 // "" or "access" — named "access" rather than "policy" to stay distinct from
 // the validatePolicyRule dispatcher above, which covers both Stage-1 and
 // Stage-2). SubjectMatch and Auth specs are rejected here: SubjectMatch is
 // not yet enforced by Evaluate (so it would fail open on an access rule), and
 // an auth spec only belongs on auth rules.
-func validateAccessRule(rule PolicyRule) error {
+func checkAccessRule(ctx context.Context, rule PolicyRule) (unverifiable, invalid error) {
 	if rule.Auth != nil {
-		return fmt.Errorf(`auth spec is only valid on ruleType "auth" rules`)
+		return nil, fmt.Errorf(`auth spec is only valid on ruleType "auth" rules`)
 	}
 	if rule.SubjectMatch != nil {
-		return fmt.Errorf("subjectMatch is not yet enforced on access rules and cannot be set until the access matcher lands")
+		return nil, fmt.Errorf("subjectMatch is not yet enforced on access rules and cannot be set until the access matcher lands")
 	}
 	// Deliberately EXACT, not canonicalPolicyAction: the ingress validator
 	// refuses sloppy input at the door, where there is a caller to tell. The
@@ -261,26 +349,52 @@ func validateAccessRule(rule PolicyRule) error {
 		ActionBlockPage: true, ActionRedirect: true,
 	}
 	if !validActions[rule.Action] {
-		return fmt.Errorf("action must be Allow, Drop, Block_Page, or Redirect")
+		return nil, fmt.Errorf("action must be Allow, Drop, Block_Page, or Redirect")
 	}
 	if rule.Action == ActionRedirect {
-		if rule.RedirectURL == "" {
-			return fmt.Errorf("redirectURL is required when action is Redirect")
-		}
-		if !isSafeRedirectURL(rule.RedirectURL) {
-			return fmt.Errorf("redirectURL must be an absolute http/https URL")
-		}
+		return checkRedirectURL(ctx, rule.RedirectURL)
 	}
-	return nil
+	return nil, nil
 }
 
-// validateRuleIngress is the per-rule validation of a rule an operator SUBMITS,
-// at every door where there is a caller to tell: the policy and auth-policy
-// API handlers, and (through validateIngressRule / validateIngressRuleset,
-// policy_ruleset_ingress.go) config import in both modes and policy-learning
-// acceptance. It is validateRuleShape plus the source literal check for an
-// access rule; an auth rule scopes clients with subjectMatch, which
-// validateAuthRule covers.
+// checkRedirectURL applies isSafeRedirectURL's rule to a Redirect target, but
+// keeps apart the two reasons that function folds into one "false":
+//
+//   - invalid: empty, not an absolute http/https URL, or a host that RESOLVES
+//     to a private or internal address;
+//   - unverifiable: the DNS lookup failed or did not finish within ctx. Nothing
+//     was learned about the destination.
+//
+// Accepting an unverifiable target does not open a redirect to an internal
+// address: the serve path re-runs isSafeRedirectURL on every match and answers
+// 403 unless the host resolves to a public address at that moment
+// (applyPolicyDecision, proxy.go).
+func checkRedirectURL(ctx context.Context, raw string) (unverifiable, invalid error) {
+	if raw == "" {
+		return nil, fmt.Errorf("redirectURL is required when action is Redirect")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return nil, fmt.Errorf("redirectURL must be an absolute http/https URL")
+	}
+	err = isPrivateHostContext(ctx, u.Host)
+	switch {
+	case err == nil:
+		return nil, nil
+	case errors.Is(err, errSSRFBlocked):
+		return nil, fmt.Errorf("redirectURL must be an absolute http/https URL with a public host: %q resolves to a private or internal address", u.Hostname())
+	}
+	return &ruleUnverifiableError{fmt.Sprintf(
+		"redirectURL host %q could not be verified on this node (DNS lookup failed or timed out); a request matching the rule is blocked until the host resolves to a public address",
+		u.Hostname())}, nil
+}
+
+// validateRuleIngress is the per-rule validation of a rule an operator SUBMITS
+// through a single-rule door (the policy and auth-policy API handlers,
+// policy-learning acceptance). It is the STRICT reading of checkRuleIngress,
+// the one per-rule core every operator-facing door shares; see
+// policy_ruleset_ingress.go for the doors and what each does with a rule this
+// node could not verify.
 //
 // The STORED and WIRE doors (PolicyStore.Load and ReplaceAll, config-version
 // rollback, control-plane snapshot publish and apply, a pending draft on disk)
@@ -288,13 +402,18 @@ func validateAccessRule(rule PolicyRule) error {
 // the pure POL-005 gate (policy_ruletype_gate.go, storedRulesetError), and
 // Load warns about an inert source literal instead (warnInertSourceIP).
 func validateRuleIngress(rule PolicyRule) error {
-	if err := validateRuleShape(rule); err != nil {
-		return err
+	return checkRuleIngress(context.Background(), rule).strict()
+}
+
+// checkRuleIngress is checkRuleShape plus the source literal check for an
+// access rule; an auth rule scopes clients with subjectMatch, which
+// validateAuthRule covers.
+func checkRuleIngress(ctx context.Context, rule PolicyRule) ruleCheck {
+	c := checkRuleShape(ctx, rule)
+	if c.err == nil && ruleTypeOf(&rule) != ruleTypeAuth {
+		c.err = validateRuleSourceIP(rule.SourceIP)
 	}
-	if ruleTypeOf(&rule) == ruleTypeAuth {
-		return nil
-	}
-	return validateRuleSourceIP(rule.SourceIP)
+	return c
 }
 
 // validateRuleSourceIP reports whether a SourceIP is one the matcher can ever
