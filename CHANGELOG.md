@@ -9,6 +9,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **An authentication rule that says "not in" is no longer enforced as "in".**
+  A rule's subject selector (`subjectMatch`) takes typed predicates; each has
+  an optional `op`. The matcher implements one operator, membership, but any
+  `op` value was accepted and then ignored. `{"type":"cidr","op":"not_in",
+  "values":["10.0.0.0/8"]}` therefore matched clients **inside** `10.0.0.0/8`:
+  a credential-required rule meant for everyone except a network challenged
+  only that network, and an exemption meant to exclude a network exempted
+  exactly it. Likewise any `schemaVersion` of 1 or more was accepted, so a
+  selector written under a newer schema was enforced with this version's
+  semantics. Both are now validated: `op` must be absent or `in`, and
+  `schemaVersion` must be `1`. The admin API answers `400`; a policy file,
+  snapshot, import or stored config version holding such a rule is refused
+  whole (`POL-005`). The admin UI has only ever written the accepted form.
+  **Upgrade note:** a rule created through the API with another `op` was being
+  misapplied; `culvert policy-check <policy.json>` lists it, and the policy
+  file will stop startup until it is corrected.
+
 - **Replacing the policy can no longer silently remove a rule that restricts
   (`POL-005`, widened).** The bulk policy doors refused four rule shapes this
   version cannot enforce — an access rule carrying a `subjectMatch`, an access

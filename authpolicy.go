@@ -62,6 +62,13 @@ func ruleTypeOf(r *PolicyRule) string {
 // a fail-open trapdoor.
 const subjectPredicateCIDR = "cidr"
 
+// subjectPredicateOpIn is the one predicate operator the matcher implements:
+// the client is in one of the predicate's values. An absent op means the same.
+const subjectPredicateOpIn = "in"
+
+// subjectMatchSchemaVersion is the SubjectMatch schema this build implements.
+const subjectMatchSchemaVersion = 1
+
 // SubjectMatch is the versioned, typed subject selector that replaces flat
 // scalar source fields. Predicate types are AND'd; values within a type are
 // OR'd. New predicate types are additive (bump SchemaVersion); no breaking
@@ -143,14 +150,24 @@ func validateSubjectMatch(sm *SubjectMatch) error {
 	if sm == nil {
 		return nil
 	}
-	if sm.SchemaVersion < 1 {
-		return fmt.Errorf("subjectMatch.schemaVersion must be >= 1")
+	// Exactly the schema this build implements. A newer version means the
+	// selector may carry meaning this build would not apply; enforcing it with
+	// today's semantics is the silent-misreading this validator exists to stop.
+	if sm.SchemaVersion != subjectMatchSchemaVersion {
+		return fmt.Errorf("subjectMatch.schemaVersion must be %d (got %d)", subjectMatchSchemaVersion, sm.SchemaVersion)
 	}
 	if len(sm.All) == 0 {
 		return fmt.Errorf("subjectMatch.all must contain at least one predicate")
 	}
 	for i := range sm.All {
 		p := sm.All[i]
+		// The matcher implements one operator, membership. Any other op used to
+		// be accepted and then IGNORED, so "not_in" was enforced as "in": a
+		// challenge meant for everyone except a network applied only to that
+		// network. Refuse what is not implemented, as for predicate types.
+		if p.Op != "" && p.Op != subjectPredicateOpIn {
+			return fmt.Errorf("subjectMatch predicate op %q is not supported (omit it, or use %q)", p.Op, subjectPredicateOpIn)
+		}
 		switch p.Type {
 		case subjectPredicateCIDR:
 			if len(p.Values) == 0 {
