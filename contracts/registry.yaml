@@ -748,6 +748,35 @@ contracts:
     validation: integration
     compatibility: "Data planes ignore versions they have already seen."
 
+  - id: CLU-003
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "On a control plane (including one whose listener bind is still pending), a committed change to the running policy rulebase is published to the fleet at commit, at most once per request, and the published snapshot is captured after every change whose publish already committed; a refused, failed or staged (draft) edit, a request that leaves the rulebase unchanged, or an edit on a node that is not a control plane, publishes nothing."
+    authority: "Policy publication (policy_publish.go) over the control-plane snapshot store (controlplane_snapshot.go)."
+    code:
+      - "policy_publish.go"
+      - "policy_mutation.go"
+      - "controlplane_snapshot.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a policy door that publishes through publishRunningPolicyChange"
+      forbidden:
+        - "a committed rule edit that reaches data planes only at the next unrelated publish"
+        - "publishing a staged draft edit, a refused edit or an edit whose persistence failed"
+        - "a publish committing a snapshot captured before another publisher's committed change (an older rulebase at a higher version)"
+    tests:
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_RuleDoors}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_DraftStagesSilentlyAndCommitPublishesOnce}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_RefusedOrFailedEditDoesNotPublish}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_OnlyOnAControlPlane}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_ConcurrentEditCannotBeOverwrittenByAnOlderCapture}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_NoChangeDoesNotPublish}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_BindPendingControlPlanePublishes}
+    validation: integration
+    compatibility: "Data planes apply a published snapshot whole; an edit that was waiting for a publish is delivered by the first policy edit after upgrade."
+
   - id: REC-001
     area: failure-recovery
     status: enforced
