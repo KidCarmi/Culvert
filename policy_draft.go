@@ -70,7 +70,12 @@ type policyDraftCoordinator struct {
 	writeGate sync.RWMutex
 }
 
-var policyDraft = &policyDraftCoordinator{cand: &PolicyStore{}}
+var policyDraft = &policyDraftCoordinator{cand: newDraftCandidateStore()}
+
+// newDraftCandidateStore returns an empty candidate store. It is marked staging:
+// a candidate enforces nothing until a commit publishes it to the running
+// store, so warnings that describe an effect on traffic stay silent for it.
+func newDraftCandidateStore() *PolicyStore { return &PolicyStore{staging: true} }
 
 // policyDraftPathFor is the draft file initPolicyDraft derives from a policy
 // path — the location the NEXT boot will reload a pending draft from.
@@ -98,6 +103,15 @@ func initPolicyDraft(policyPath string) {
 		Rules []PolicyRule `json:"rules"`
 	}
 	if json.Unmarshal(data, &p) != nil || !p.State.Active {
+		return
+	}
+	// POL-005: a pending draft holding a rule type this build has no stage for
+	// is not reloaded at all. The candidate store would refuse it and stay
+	// EMPTY; marking that draft active would let a commit publish an empty
+	// rulebase over the running policy.
+	if err := policyRulesetError(p.Rules); err != nil {
+		policyStore.noteRulesetRefused("pending policy draft", err)
+		logWarnf("PolicyDraft: pending draft in %s was NOT reloaded; the running policy is unchanged and no draft is open", sanitizeLog(policyDraft.path))
 		return
 	}
 	policyDraft.cand.ReplaceAll(p.Rules)
@@ -487,8 +501,9 @@ func (c *policyDraftCoordinator) commitActivate(ifVersion *int64) (policyDraftDi
 		}
 	}
 	cand := c.cand.List()
+	inherited := retainedUnknownActions(policyStore.List())
 	for i := range cand {
-		if err := validatePolicyRule(cand[i], cand, cand[i].Priority); err != nil {
+		if err := validateCandidateRule(cand, i, inherited); err != nil {
 			c.mu.Unlock()
 			return policyDraftDiff{}, fmt.Errorf("candidate rule %s is invalid: %w", sanitizeLog(cand[i].Name), err)
 		}
@@ -1201,4 +1216,32 @@ func boolToOnOff(v bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// retainedUnknownActions maps rule ID to action for every rule in rules whose
+// action this build does not dispatch (POL-004 retained rules).
+func retainedUnknownActions(rules []PolicyRule) map[string]PolicyAction {
+	var out map[string]PolicyAction
+	for i := range rules {
+		if _, known := canonicalPolicyAction(rules[i].Action); known || rules[i].ID == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]PolicyAction{}
+		}
+		out[rules[i].ID] = rules[i].Action
+	}
+	return out
+}
+
+// validateCandidateRule validates candidate rule i for a draft commit. A rule
+// the candidate INHERITED from the running policy with an unknown action — same
+// ID, same action — is validated as stored data, so its presence does not make
+// every commit fail. Anything else, including a candidate rule that acquired an
+// unknown action some other way, goes through the exact ingress validator.
+func validateCandidateRule(cand []PolicyRule, i int, inherited map[string]PolicyAction) error {
+	if a, ok := inherited[cand[i].ID]; ok && a == cand[i].Action {
+		return validateStoredPolicyRule(cand[i], cand, cand[i].Priority)
+	}
+	return validatePolicyRule(cand[i], cand, cand[i].Priority)
 }

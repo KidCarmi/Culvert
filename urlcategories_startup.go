@@ -29,9 +29,9 @@ func loadURLCategories(cfg urlCategoriesStartupConfig, ctx context.Context) *Fee
 
 	seedUT1CategoryNames()
 
-	if err := globalCategoryGroups.Load(cfg.CategoryGroupsPath); err != nil {
-		logger.Printf("CategoryGroups: load error: %v", err)
-	}
+	// Fatal when an enabled policy rule depends on a group that could not be
+	// loaded (categorygroups_startup_guard.go); a warning otherwise.
+	loadCategoryGroupsAtStartup(cfg.CategoryGroupsPath)
 
 	// Named decryption profiles (referenced per rule; loaded alongside category
 	// groups). Non-fatal — an unreadable/corrupt store leaves the set empty and

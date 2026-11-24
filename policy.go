@@ -285,18 +285,15 @@ type PolicyStore struct {
 	// false (the GUI warning stays up) until a later write succeeds. Only a
 	// successful SaveErr, or a later Load, clears it.
 	adoptUnsaved atomic.Bool
-	// loadDropped is the bounded record of rules the most recent Load
-	// rejected (policyRulePersistable). Read-only diagnostic state for the
-	// operator contract; it never feeds evaluation. Replaced wholesale on
-	// every successful Load (a parsed file, or the adoption of a missing one)
-	// so a clean reload clears it. Written under mu, together with the rules
-	// or path that Load publishes; read lock-free by Diagnostics.
-	loadDropped atomic.Pointer[policyLoadDropped]
-	// droppedOnLoad counts the rules the most recent SUCCESSFUL Load refused
-	// via the fail-closed gate (policyRulePersistable). It exists so a caller
-	// can tell a policy file that filtered down to nothing from a genuinely
-	// empty one; see ConfiguredRuleCount and SEC-POLICYDROP-1.
-	droppedOnLoad atomic.Int64
+	// rulesetRefused records the most recent ruleset refused whole for an
+	// unrecognized ruleType (policy_ruletype_gate.go). Cleared when a later
+	// Load or ReplaceAll accepts one. Diagnostic state; never feeds evaluation.
+	rulesetRefused atomic.Pointer[policyRulesetRefusal]
+	// staging marks a store that holds a CANDIDATE rulebase and enforces
+	// nothing (the policy draft). Set once at construction, never mutated. It
+	// only silences operator warnings that describe an effect on traffic, which
+	// a staged rule does not have yet; it never feeds evaluation or validation.
+	staging bool
 	// scanIndex is the packed Stage-2 destination prefilter for the revision
 	// it names (see policy_scanindex.go). Published lock-free under mu by
 	// publishScanIndexLocked, alongside every assignment to `verified`, and
@@ -307,74 +304,26 @@ type PolicyStore struct {
 	scanIndex atomic.Pointer[policyScanIndex]
 }
 
-// policyLoadDropped records the rules a Load rejected without retaining the
-// whole set: total counts every rejected rule, names keeps at most
-// policyLoadDroppedMaxNames display names of at most
-// policyLoadDroppedMaxNameBytes each, so a large hand-edited file bounds both
-// the resident state and the viewer-readable Diagnostics row.
-type policyLoadDropped struct {
-	names []string
-	total int
-}
+// DroppedOnLoad is always zero. Load used to drop the rules its gate refused and
+// install the rest; it now refuses the WHOLE file instead (POL-005), so a
+// successful load never drops anything. Kept for callers that assert exactly
+// that.
+func (ps *PolicyStore) DroppedOnLoad() int { return 0 }
 
-const (
-	policyLoadDroppedMaxNames     = 5
-	policyLoadDroppedMaxNameBytes = 128
-)
-
-// add counts one rejected rule and keeps its name while there is room,
-// truncated on a rune boundary to the byte bound.
-func (d *policyLoadDropped) add(name string) {
-	d.total++
-	if len(d.names) >= policyLoadDroppedMaxNames {
-		return
-	}
-	if len(name) > policyLoadDroppedMaxNameBytes {
-		cut := 0
-		for i := range name {
-			if i > policyLoadDroppedMaxNameBytes {
-				break
-			}
-			cut = i
-		}
-		name = name[:cut] + "…"
-	}
-	d.names = append(d.names, name)
-}
-
-// DroppedOnLoad reports how many rules the most recent successful Load refused
-// via the fail-closed persistability gate. A Load that failed before reading or
-// parsing the file leaves the previous value (and the previous rules) in place.
-// Runtime mutations do not change it: it describes the file as last loaded.
-func (ps *PolicyStore) DroppedOnLoad() int {
-	return int(ps.droppedOnLoad.Load())
-}
-
-// ConfiguredRuleCount reports the size of the rulebase the operator CONFIGURED
-// as of the last load: the rules that are installed plus the rules the load
-// gate refused. It is the fail-closed input for any decision that keys off
+// ConfiguredRuleCount reports the size of the rulebase the operator configured:
+// the rules that are installed. It is the input for any decision that keys off
 // "has a policy been configured at all?" — above all the startup default-action
 // derivation in loadRewriteAndDefaultAction, which selects passthrough Allow
 // for a zero count and zero-trust Deny otherwise.
 //
-// SEC-POLICYDROP-1: len(List()) is the WRONG input for that question. A policy
-// file whose every rule the gate refuses (a hand-edited or downgraded-binary
-// file carrying an action this build cannot dispatch, an invalid auth rule, or
-// a SubjectMatch-bearing access rule) installs nothing, so len(List()) == 0
-// would report "no policy configured" and newly ADMIT the unmatched traffic the
-// nonempty-rule Deny default had been refusing — the refusal of a fail-open
-// rule turning into a fail-open default. Counting the refused rules keeps the
-// operator's intent ("I configured a policy") visible to that derivation.
-//
-// Because it describes the last load, a caller that needs the live installed
-// count must use List(); this is deliberately not a live view.
-// Both halves are read under ONE RLock, because Load publishes them together:
-// pairing an installed count with another load's refusal count could report
-// zero for a rulebase that was entirely refused.
+// It used to add the rules Load had dropped (SEC-POLICYDROP-1), so that a file
+// filtered down to nothing was not mistaken for an empty policy. Load no longer
+// drops rules: a file holding a rule this build cannot enforce is refused whole
+// and startup stops (POL-005), so that state cannot be reached.
 func (ps *PolicyStore) ConfiguredRuleCount() int {
 	ps.mu.RLock()
 	defer ps.mu.RUnlock()
-	return len(ps.rules) + int(ps.droppedOnLoad.Load())
+	return len(ps.rules)
 }
 
 // policyVersion returns the current version number and last-updated time.
@@ -490,22 +439,6 @@ func (ps *PolicyStore) Load(path string) error {
 			ps.mu.Lock()
 			ps.path = path
 			ps.adoptUnsaved.Store(true)
-			// The adopted file holds only the current (already filtered)
-			// rules, so nothing in it was rejected: clear any record left by
-			// an earlier Load of a different file. Published under ps.mu with
-			// the path, like the parsed-file branch below, so two concurrent
-			// Loads cannot leave one's record beside the other's state.
-			ps.loadDropped.Store(&policyLoadDropped{})
-			// SEC-POLICYDROP-1: this IS a successful load, so the refusal count
-			// must describe it. The branch keeps the current in-memory rules
-			// rather than replacing them, and nothing was refused in producing
-			// them from this path, so the honest answer is zero — leaving a
-			// previous file's count would have ConfiguredRuleCount describe a
-			// file this store no longer points at (CodeRabbit, PR #1651). The
-			// read- and parse-failure paths below deliberately do NOT clear it:
-			// they return without adopting anything, so the previous load still
-			// describes the rules that are installed.
-			ps.droppedOnLoad.Store(0)
 			ps.mu.Unlock()
 			if saveErr := ps.SaveErr(); saveErr != nil {
 				logWarnf("Policy: adopted %s but could not persist current rules yet: %v", sanitizeLog(path), saveErr)
@@ -516,56 +449,21 @@ func (ps *PolicyStore) Load(path string) error {
 		// stand untouched, exactly as if this call had never happened.
 		return err
 	}
-	var rules []*PolicyRule
-	if err := json.Unmarshal(data, &rules); err != nil {
-		// Malformed file: same reasoning — do not adopt a path whose content
-		// was never actually loaded.
+	rules, err := ps.decodePolicyFile(data)
+	if err != nil {
+		// Malformed file, or one holding a rule type this build has no stage
+		// for: same reasoning — do not adopt a path whose content was never
+		// actually loaded. The old path and rules stand.
 		return err
 	}
-	// Auth-aware fail-closed load gate (Phase 1 Slice 3, shared with ReplaceAll via
-	// policyRulePersistable): VALID auth rules are kept (inert at runtime until the
-	// matcher slice); invalid auth rules and access rules carrying a non-nil
-	// SubjectMatch are dropped. Dropping the latter prevents a hand-edited or
-	// newer-version policy.json from failing OPEN (a source-scoped access rule
-	// matching every client, since Evaluate does not consult SubjectMatch). This
-	// closes the startup load path in addition to the bulk-replace path. In-memory
-	// only; the file is not rewritten here, so an offending line is inert and
-	// re-warned each load until removed.
-	kept := rules[:0]
-	dropped := &policyLoadDropped{}
+	// decodePolicyFile has already refused the whole file if any rule in it is
+	// one this build cannot enforce (POL-005), so every rule here is installed;
+	// nothing is dropped.
 	for _, r := range rules {
-		if ok, reason := policyRulePersistable(r); !ok {
-			name := ""
-			if r != nil {
-				name = r.Name
-			}
-			logWarnf("Policy: dropping rule %q on load — %s", sanitizeLog(name), sanitizeLog(reason))
-			dropped.add(name)
-			continue
-		}
-		warnInertSourceIP(r)
-		kept = append(kept, r)
-	}
-	rules = kept
-	if dropped.total > 0 {
-		logWarnf("Policy: %d of %d rule(s) in %s were refused by the load gate; the remaining %d are installed and the startup default action still treats this as a CONFIGURED policy (deny) rather than an empty one",
-			dropped.total, dropped.total+len(rules), sanitizeLog(path), len(rules))
+		warnLoadedRule(r)
 	}
 	ps.mu.Lock()
-	// SEC-POLICYDROP-1: remember the refusals, and publish them WITH the rules
-	// they were filtered out of. The count and ps.rules are one fact —
-	// "this is what the configured rulebase came to" — so a reader must never
-	// see one load's count beside another's rules: two overlapping Loads could
-	// otherwise leave a clean load's zero on top of a fully refused load's
-	// rules, and ConfiguredRuleCount would report zero for a policy that was
-	// entirely refused, which is the fail-OPEN direction (CodeRabbit, PR #1651).
-	// Stored unconditionally so a clean reload clears a previous file's count.
-	ps.droppedOnLoad.Store(int64(dropped.total))
 	ps.path = path
-	// Published in the same critical section as ps.rules, so the record
-	// always describes the Load whose rules are live, even when two Loads
-	// race (the last one to take ps.mu wins both).
-	ps.loadDropped.Store(dropped)
 	previousCounters := make(map[string]*policyRuleCounters, len(ps.rules))
 	for _, current := range ps.rules {
 		if validRuleID(current.ID) && current.counters != nil {
@@ -818,16 +716,21 @@ func (ps *PolicyStore) listLocked() []PolicyRule {
 // that bypass that validator (cluster sync, import-replace, and any other direct
 // ReplaceAll caller). The phase that wires the matcher activates these rules.
 func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
+	// A rule this build cannot enforce (unknown ruleType, or any shape
+	// policyRulePersistable refuses): refuse the whole replacement and keep the
+	// current rules (POL-005, policy_ruletype_gate.go). Every production caller
+	// is gated before it gets here; this is the backstop.
+	if err := policyRulesetError(rules); err != nil {
+		ps.noteRulesetRefused("bulk replace", err)
+		return
+	}
 	ps.mu.Lock()
+	ps.rulesetRefused.Store(nil)
+	announced := ps.retainedUnknownLocked()
 	out := make([]*PolicyRule, 0, len(rules))
 	seenIDs := make(map[string]struct{}, len(rules))
 	for i := range rules {
 		r := rules[i]
-		// Fail-closed: drop invalid auth rules and SubjectMatch-bearing access rules.
-		if ok, reason := policyRulePersistable(&r); !ok {
-			logWarnf("Policy: dropping rule %q on bulk replace — %s", sanitizeLog(r.Name), sanitizeLog(reason))
-			continue
-		}
 		r.HitCount = 0
 		r.lastHitUnix = 0
 		r.counters = nil
@@ -843,12 +746,88 @@ func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 			r.ID = freshRuleID(seenIDs)
 		}
 		seenIDs[r.ID] = struct{}{}
+		ps.warnNewlyRetained(&r, announced)
 		out = append(out, &r)
 	}
 	ps.rules = out
 	ps.sortLocked()
 	ps.bumpVersion()
 	ps.mu.Unlock()
+}
+
+// retainedUnknownLocked maps rule ID to action for every access rule this store
+// currently holds whose action this build does not dispatch: the retained rules
+// a previous Load or ReplaceAll has already announced. Caller holds ps.mu. The
+// result is derived from the rules themselves, so there is no second record to
+// keep in step: a rule that leaves the store is forgotten with it.
+func (ps *PolicyStore) retainedUnknownLocked() map[string]PolicyAction {
+	var out map[string]PolicyAction
+	for _, r := range ps.rules {
+		if ruleTypeOf(r) != ruleTypeAccess {
+			continue
+		}
+		if _, known := canonicalPolicyAction(r.Action); known {
+			continue
+		}
+		if out == nil {
+			out = map[string]PolicyAction{}
+		}
+		out[r.ID] = r.Action
+	}
+	return out
+}
+
+// warnNewlyRetained announces a retained unknown-action rule on bulk replace
+// only when the announcement is NEWS and TRUE:
+//
+//   - not for a staging store (the policy draft): its rules enforce nothing, so
+//     "matching traffic will be blocked" would be false until a commit, and the
+//     commit publishes to the running store, which announces for itself;
+//   - not for a rule the store already held with the same ID and the same
+//     action: an unchanged control-plane republish, a rollback to the same
+//     rulebase and a draft commit that carries the rule through all replace the
+//     whole slice without changing what the operator was already told.
+//
+// A rule that is new to the store, whose action changed, or that left and came
+// back is announced again. A rule that arrives without a usable ID is given a
+// fresh one by ReplaceAll and so always counts as new: it cannot be correlated
+// with anything. Diagnostics (policy_rules_unknown_action) reads the live
+// rulebase and is not affected by any of this.
+func (ps *PolicyStore) warnNewlyRetained(r *PolicyRule, announced map[string]PolicyAction) {
+	if ps.staging {
+		return
+	}
+	if prev, held := announced[r.ID]; held && prev == r.Action {
+		return
+	}
+	warnRetainedUnknownAction(r, "bulk replace")
+}
+
+// warnLoadedRule emits the per-rule operator warnings for a rule Load keeps:
+// an inert source literal, and a retained unknown action. One call so that
+// Load, already past the statement bound, does not grow by a line per warning.
+func warnLoadedRule(r *PolicyRule) {
+	warnRetainedUnknownAction(r, "load")
+	warnInertSourceIP(r)
+}
+
+// warnRetainedUnknownAction tells the operator that an access rule whose action
+// this build does not dispatch was KEPT by a durable or bulk publication door
+// (POL-004), and what that means for traffic: the rule still matches, and a
+// match is a terminal block. Without the line, a rulebase written by a newer
+// release starts blocking destinations with nothing to explain why.
+//
+// door is one of this file's own literals, never caller data. The rule name and
+// the action come from a policy file or a peer and are sanitised.
+func warnRetainedUnknownAction(r *PolicyRule, door string) {
+	if ruleTypeOf(r) != ruleTypeAccess {
+		return
+	}
+	if _, known := canonicalPolicyAction(r.Action); known {
+		return
+	}
+	logWarnf("Policy: retaining rule %q with unrecognized action %q on %s; matching traffic will be blocked",
+		sanitizeLog(r.Name), sanitizeLog(string(r.Action)), door)
 }
 
 // Add inserts a new rule and re-sorts by priority.

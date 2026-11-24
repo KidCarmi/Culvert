@@ -79,7 +79,15 @@ compose)
     fi ;;
   up)
     blk up_before
-    cp "$S/pinned" "$S/running.tmp" && mv "$S/running.tmp" "$S/running"
+    # up_cleanup_only: real Compose, after a recreate interrupted between its stop and
+    # its delete, spends one pass tidying up and exits 0 with nothing started. The file
+    # holds how many such passes are left. Inert unless a test writes it.
+    c=$(cat "$S/up_cleanup_only" 2>/dev/null || echo 0)
+    if [ "$c" -gt 0 ]; then
+      echo $((c-1)) > "$S/up_cleanup_only"; rm -f "$S/running"
+    else
+      cp "$S/pinned" "$S/running.tmp" && mv "$S/running.tmp" "$S/running"
+    fi
     blk up_after ;;
   esac ;;
 inspect)
@@ -233,6 +241,7 @@ privilege_mode = "docker_group_lab"
 health_base_url = %q
 operation_timeout = "2m"
 stage_timeout = "1m"
+interrupted_settle = "0s"
 allowed_backup_dir = "/backup"
 image_allowlist = '^registry\.test/agentb/proxy(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$'
 proxy_repo = %q
@@ -1061,5 +1070,24 @@ func TestCrashRecovery_FailedRecoveryKeepsTheRecord(t *testing.T) {
 	r.get("/v1/status", &st)
 	if len(st.Interrupted) != 1 || st.Interrupted[0].OpID != oldOp {
 		t.Errorf("status must keep listing the interrupted op: %+v", st.Interrupted)
+	}
+}
+
+// setSettle rewrites interrupted_settle in the rig's config. The rig runs with
+// the wait off (0s) so that the crash tests measure what they are about; a
+// test of the wait itself turns it on before the agent is (re)started.
+func (r *crashRig) setSettle(d string) {
+	r.t.Helper()
+	b, err := os.ReadFile(r.cfgPath)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	const off = `interrupted_settle = "0s"`
+	if !strings.Contains(string(b), off) {
+		r.t.Fatal("rig config has no interrupted_settle line to rewrite")
+	}
+	out := strings.Replace(string(b), off, `interrupted_settle = "`+d+`"`, 1)
+	if err := os.WriteFile(r.cfgPath, []byte(out), 0o600); err != nil { // #nosec G703 -- the rig's own config under t.TempDir
+		r.t.Fatal(err)
 	}
 }

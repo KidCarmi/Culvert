@@ -205,6 +205,9 @@ func main() {
 	// signed release catalog and emits the fresh-install decision, then exits. It
 	// must run BEFORE the global flag set is defined (it is not a flag).
 	maybeRunBootstrapResolve(os.Args)
+	// Positional subcommand: `culvert policy-check <file>...` lists every rule
+	// this version would refuse (the POL-005 upgrade preflight), then exits.
+	maybeRunPolicyPreflight(os.Args)
 
 	// PR-C1: the persisted-state root (default /data) is resolved ONCE from
 	// CULVERT_DATA_DIR before the flag set and before any one-shot command,
@@ -948,7 +951,7 @@ func initPolicy(s *startupState) {
 	polPath := firstStr(*s.policyFile, s.fc.Proxy.PolicyFile)
 	if polPath != "" {
 		if err := policyStore.Load(polPath); err != nil {
-			logFatalf("Cannot load policy file: %v", err)
+			logFatalf("Cannot load policy file: %v (run `culvert policy-check %s` to list every rule this version refuses)", err, polPath)
 		}
 		logger.Printf("Policy: %d rule(s) loaded from %s", len(policyStore.List()), polPath)
 	} else {
@@ -1015,14 +1018,10 @@ func initSSLBypassAndDPI(s *startupState) {
 // the CONFIGURED policy-rule count so the loader can derive the zero-
 // trust-vs-passthrough default when fc.DefaultAction is unset.
 //
-// SEC-POLICYDROP-1: the count is policyStore.ConfiguredRuleCount() — installed
-// rules PLUS the rules Load refused — not len(policyStore.List()). A policy
-// file whose every rule the fail-closed load gate refuses installs nothing, and
-// an installed count of zero would tell the loader "no policy configured",
-// selecting passthrough Allow and newly admitting the unmatched traffic the
-// nonempty-rule Deny default had refused. Ordering matters here: initPolicy
-// (and therefore policyStore.Load) runs earlier in the init block, so the
-// refusal count is already final by the time this shim reads it.
+// The count is policyStore.ConfiguredRuleCount(). initPolicy (and therefore
+// policyStore.Load) runs earlier in the init block; a policy file holding a
+// rule this build cannot enforce has already stopped startup there (POL-005),
+// so a count of zero here means a genuinely empty or absent policy.
 func initRewriteAndDefaultAction(s *startupState) {
 	cfg := resolveRewriteDefaultActionStartupConfig(s.fc)
 	loadRewriteAndDefaultAction(cfg, policyStore.ConfiguredRuleCount())
@@ -1316,6 +1315,14 @@ func installSignalHandlers(s *startupState) (quit, sighup chan os.Signal) {
 	return quit, sighup
 }
 
+// awaitShutdownSignal blocks until SIGINT/SIGTERM arrives and marks the process
+// as shutting down before it returns, so nothing can run between "the signal
+// was accepted" and "/ready stopped saying ready" (see shutdownStarted).
+func awaitShutdownSignal(quit <-chan os.Signal) {
+	<-quit
+	shutdownStarted.Store(true)
+}
+
 // runProxyUntilShutdown starts the proxy goroutine, blocks on quit, then
 // runs the graceful shutdown sequence via shutdownRegistry. Hook execution
 // order, per-hook log messages, and the 30s shutdown budget's start point
@@ -1335,7 +1342,7 @@ func runProxyUntilShutdown(s *startupState, proxySrv *http.Server, quit chan os.
 		}
 	}()
 
-	<-quit
+	awaitShutdownSignal(quit)
 	logger.Println("Shutting down gracefully…")
 
 	// CHAOS-56: arm the escalation path BEFORE the sequence starts. Until
@@ -1784,16 +1791,11 @@ func applyHotReload(fc *FileConfig) {
 	}
 
 	// Policy rules
-	if fc.Proxy.PolicyFile != "" {
-		if err := policyStore.Load(fc.Proxy.PolicyFile); err != nil {
-			logger.Printf("Reload: policy error: %v", err)
-		} else {
-			logger.Printf("Reload: policy %d rules", len(policyStore.List()))
-		}
-	}
+	policyReloaded := hotReloadPolicyFile(fc.Proxy.PolicyFile)
 
-	// Default action
-	if fc.DefaultAction != "" {
+	// Default action. Skipped when the policy file was refused: see
+	// hotReloadPolicyFile (POL-005).
+	if fc.DefaultAction != "" && policyReloaded {
 		setDefaultPolicyAction(fc.DefaultAction)
 		logger.Printf("Reload: default action %s", fc.DefaultAction)
 	}

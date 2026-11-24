@@ -260,9 +260,9 @@ func buildOperatorContract() OperatorContract {
 	// CHAOS-05/07 state-file quarantine, authenticated + path-free. Contributes
 	// nothing when every state file on this node loaded cleanly.
 	checks = append(checks, checkStateFileIntegrity()...)
-	// Rules the last policy load rejected fail-closed. Contributes nothing when
-	// every rule in the file was accepted.
-	checks = append(checks, checkPolicyRulesDroppedOnLoad(policyStore)...)
+	checks = append(checks, checkPolicyRulesUnknownAction(policyStore)...)
+	checks = append(checks, checkPolicyRulesetRefused(policyStore)...)
+	checks = append(checks, checkCategoryGroupsLoadFailed()...)
 	// Enabled destination-country rules while no GeoIP database is loaded: such
 	// rules can never match. Contributes nothing when a database is loaded or no
 	// enabled rule uses a country condition.
@@ -538,33 +538,42 @@ func checkPolicyLoaded() OperatorContractCheck {
 	}
 }
 
-// checkPolicyRulesDroppedOnLoad surfaces rules that Load rejected fail-closed
-// (invalid auth rule, or a source-scoped access rule the evaluator cannot
-// honour). Before this row the only signal was a boot log line, while
-// policy_loaded still read "policy ruleset loaded": an operator saw an
-// all-green policy that silently lacked rules they had written. Report-only;
-// contributes nothing when nothing was dropped. Load retains only a bounded
-// set of names (policyLoadDropped), so a large hand-edited file cannot bloat
-// the report.
-func checkPolicyRulesDroppedOnLoad(ps *PolicyStore) []OperatorContractCheck {
-	d := ps.loadDropped.Load()
-	if d == nil || d.total == 0 {
+// checkPolicyRulesUnknownAction surfaces access rules the running policy RETAINS
+// with an action this build does not dispatch (POL-004). Such a rule matches and
+// blocks. The log line written when it was loaded is level-gated and scrolls
+// away; this row is computed from the live rulebase each time, so it stays for
+// as long as the rule does and clears when the rule is edited or removed. Names
+// are bounded so a large imported rulebase cannot bloat the report.
+func checkPolicyRulesUnknownAction(ps *PolicyStore) []OperatorContractCheck {
+	const maxListed = 10
+	var listed []string
+	total := 0
+	rules := ps.List()
+	for i := range rules {
+		if ruleTypeOf(&rules[i]) != ruleTypeAccess {
+			continue
+		}
+		if _, known := canonicalPolicyAction(rules[i].Action); known {
+			continue
+		}
+		total++
+		if len(listed) < maxListed {
+			listed = append(listed, fmt.Sprintf("%q (action %q)", sanitizeLog(rules[i].Name), sanitizeLog(string(rules[i].Action))))
+		}
+	}
+	if total == 0 {
 		return nil
 	}
-	listed := make([]string, len(d.names))
-	for i, n := range d.names {
-		listed[i] = fmt.Sprintf("%q", n)
-	}
 	more := ""
-	if d.total > len(d.names) {
-		more = fmt.Sprintf(" and %d more", d.total-len(d.names))
+	if total > len(listed) {
+		more = fmt.Sprintf(" and %d more", total-len(listed))
 	}
 	return []OperatorContractCheck{{
-		Code:   "policy_rules_dropped_on_load",
+		Code:   "policy_rules_unknown_action",
 		Status: diagWarn,
-		Message: fmt.Sprintf("%d rule(s) in the policy file were rejected at load and are NOT enforced: %s%s",
-			d.total, strings.Join(listed, ", "), more),
-		OperatorAction: "Recreate the intended rules under Policy (the editor validates them). The rejected entries are re-reported at every load while they remain in the policy file; the next policy change rewrites the file without them, and this row clears at the next load.",
+		Message: fmt.Sprintf("%d rule(s) carry an action this version does not recognise; they are kept and BLOCK the traffic they match: %s%s",
+			total, strings.Join(listed, ", "), more),
+		OperatorAction: "These rules usually come from a newer release (a control-plane snapshot, a restored backup or a policy file). Upgrade this node to the version that wrote them, or edit each rule under Policy and choose a supported action. Deleting a rule removes the restriction it expressed.",
 	}}
 }
 

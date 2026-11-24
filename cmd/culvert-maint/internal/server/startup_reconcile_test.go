@@ -45,6 +45,7 @@ type reconWorld struct {
 	// failedCalls counts how often it was issued.
 	failCmd     string
 	failedCalls int
+	down        bool // Docker does not answer: every command fails
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -82,6 +83,17 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.down {
+		// Docker does not answer: every command fails. An attempted mutation
+		// is still recorded, so a test can assert that none was even tried.
+		for _, m := range []string{"tag", "up", "down"} {
+			if has(m) {
+				w.mutating = append(w.mutating, m+":attempted-while-docker-down")
+			}
+		}
+		w.failed[cmd] = true
+		return nil
+	}
 	if w.failCmd != "" && has(w.failCmd) && !has("ps") && !has("inspect") {
 		w.failedCalls++
 		w.failed[cmd] = true

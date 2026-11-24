@@ -175,15 +175,15 @@ func TestP3S2_API_ReferentialProviderRefs(t *testing.T) {
 
 // ── Persistence: shape-only, registry-free (DR-4) ────────────────────────────
 
+// The bulk gate validates SHAPE only. A shape-valid SSORequired rule is installed
+// and round-trips; a ruleset that also holds a shape-invalid one is refused
+// whole rather than installed without it (POL-005).
 func TestP3S2_Persistence_LoadReplaceAllShapeOnly(t *testing.T) {
-	// Load: valid SSO survives, shape-invalid SSO dropped.
+	// Load: valid SSO is installed and round-trips.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.json")
-	invalid := validSSORule()
-	invalid.Name, invalid.DestFQDN = "sso-no-dest", "" // shape-invalid
-	data, err := json.MarshalIndent([]PolicyRule{
-		validSSORule(), invalid, {Priority: 9, Name: "plain", Action: ActionAllow},
-	}, "", "  ")
+	valid := []PolicyRule{validSSORule(), {Priority: 9, Name: "plain", Action: ActionAllow}}
+	data, err := json.MarshalIndent(valid, "", "  ")
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -194,27 +194,29 @@ func TestP3S2_Persistence_LoadReplaceAllShapeOnly(t *testing.T) {
 	if err := ps.Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if findRule(ps.List(), "require-sso-portal") == nil {
-		t.Error("valid SSORequired rule must survive Load")
-	}
-	if findRule(ps.List(), "sso-no-dest") != nil {
-		t.Error("shape-invalid SSORequired rule must be dropped fail-closed on Load")
-	}
 	if r := findRule(ps.List(), "require-sso-portal"); r == nil || r.Auth.Outcome != OutcomeSSORequired {
-		t.Errorf("SSORequired outcome not round-tripped: %+v", r)
+		t.Errorf("valid SSORequired rule must survive Load with its outcome: %+v", r)
 	}
 
-	// ReplaceAll: valid SSO survives, shape-invalid (missing owner) dropped.
+	// Load: a file that also holds a shape-invalid SSO rule is refused whole.
+	invalid := validSSORule()
+	invalid.Name, invalid.DestFQDN = "sso-no-dest", "" // shape-invalid
+	mixed, err := json.MarshalIndent(append([]PolicyRule{invalid}, valid...), "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	assertLoadRefusedWhole(t, mixed, "sso-no-dest")
+
+	// ReplaceAll: valid SSO is installed; with a shape-invalid one (missing
+	// owner) beside it the ruleset is refused whole.
 	ps2 := &PolicyStore{}
-	bad := validSSORule()
-	bad.Name, bad.Auth.Owner = "sso-bad", ""
-	ps2.ReplaceAll([]PolicyRule{validSSORule(), bad})
+	ps2.ReplaceAll([]PolicyRule{validSSORule()})
 	if findRule(ps2.List(), "require-sso-portal") == nil {
 		t.Error("valid SSORequired rule must survive ReplaceAll")
 	}
-	if findRule(ps2.List(), "sso-bad") != nil {
-		t.Error("shape-invalid SSORequired rule must be dropped by ReplaceAll")
-	}
+	bad := validSSORule()
+	bad.Name, bad.Auth.Owner = "sso-bad", ""
+	assertReplaceAllRefusedWhole(t, []PolicyRule{validSSORule(), bad})
 }
 
 // DR-4: the bulk persistence gate is registry-free, so a stored SSORequired rule
