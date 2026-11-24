@@ -759,6 +759,23 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **A WebSocket upgrade to an origin that never answers no longer holds a
+  proxy goroutine and two sockets indefinitely.** On the plain-HTTP WebSocket
+  path the proxy dialled the origin, forwarded the upgrade request and waited
+  for the response on a connection with no deadline and no link to the client.
+  An origin that accepted the connection and stayed silent kept the handler,
+  the origin socket, the client socket and the client's per-IP
+  connection-limiter slot for as long as it kept TCP up — including after the
+  client had disconnected. Measured through the real listener: 500 upgrades to
+  a silent origin, each client disconnecting at once, left 470 goroutines and
+  940 descriptors held 40 s later; now 0 and 0. The exchange is bounded by the
+  30 s plain-HTTP origin budget (`upstreamRequestTimeout`) until the origin
+  answers `101`, and is released immediately when the client disconnects. An
+  established WebSocket tunnel is unaffected and keeps its own idle timeout.
+  **Behaviour change:** a response to an upgrade request the origin *declined*
+  (any status other than `101`) is now subject to the same 30 s whole-exchange
+  limit as every other plain-HTTP response; it previously had none.
+
 - **The "retaining rule … with unrecognized action" warning is now said once per
   fact, and only where it is true.** It was written on every bulk replace of
   the rulebase, so an unchanged control-plane republish repeated it for every

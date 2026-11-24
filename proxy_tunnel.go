@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -150,6 +151,47 @@ func relayDeclinedUpgrade(w http.ResponseWriter, r *http.Request, resp *http.Res
 	io.Copy(w, resp.Body) //nolint:errcheck // best-effort relay; the client may have gone away
 }
 
+// wsUpgradeTimeout bounds the plain-HTTP exchange a WebSocket upgrade starts
+// with: forwarding the request to the origin, reading its response head and,
+// when the origin declines the upgrade, relaying that ordinary response's body.
+//
+// Until the origin answers 101 this is a plain-HTTP exchange with an origin
+// the CLIENT chose, and it had no bound at all. The dial is limited (15 s), but
+// the request write and http.ReadResponse ran on a conn with no deadline and no
+// link to the client: an origin that accepted the connection and then said
+// nothing held the handler goroutine, the origin descriptor and the client's
+// per-IP connection-limiter slot for as long as it kept the TCP session alive —
+// and went on holding them after the client had hung up, because nothing
+// watched r.Context() while the handler sat in the read. The listener's
+// ReadTimeout/WriteTimeout apply to the client conn only. One client could
+// therefore pin an unbounded number of goroutines and descriptors by opening an
+// upgrade to a silent origin and disconnecting, repeatedly.
+//
+// The value is upstreamRequestTimeout — the bound handleHTTP already applies to
+// the same exchange when the request carries no Upgrade header — so a declined
+// upgrade is now held to exactly the plain-HTTP budget rather than to none.
+// Once the origin answers 101 the bound is lifted and the relay's own
+// tunnelIdleTimeout takes over. Var (not const) so tests can shorten it;
+// production never mutates it.
+var wsUpgradeTimeout = upstreamRequestTimeout
+
+// wsLegExpired is a deadline in the past: setting it on a conn fails every
+// blocked and future Read/Write at once without racing the owner's Close.
+var wsLegExpired = time.Unix(1, 0)
+
+// armWebSocketUpgradeBound applies wsUpgradeTimeout to the origin leg of a
+// WebSocket upgrade and ties the leg to ctx, so a client that hangs up releases
+// the handler immediately instead of at the deadline. The returned stop removes
+// the ctx tie; it reports false when ctx had already ended and the leg has been
+// (or is being) expired. stop does NOT clear the deadline — the caller does
+// that only when it hands the leg to the tunnel relay.
+func armWebSocketUpgradeBound(ctx context.Context, destConn net.Conn) (stop func() bool) {
+	destConn.SetDeadline(time.Now().Add(wsUpgradeTimeout)) //nolint:errcheck // a set failure on a closing conn surfaces as the next write/read error, the same teardown this deadline exists to cause
+	return context.AfterFunc(ctx, func() {
+		destConn.SetDeadline(wsLegExpired) //nolint:errcheck // best-effort wake-up of a blocked read; the handler's deferred Close follows
+	})
+}
+
 func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch, id ProxyIdentity) {
 	host := r.Host
 	if !strings.Contains(host, ":") {
@@ -161,6 +203,10 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 		return
 	}
 	defer destConn.Close()
+	// Bound the exchange with the origin until it has switched protocols; see
+	// wsUpgradeTimeout. Released on every return, lifted only for a 101.
+	stopUpgradeBound := armWebSocketUpgradeBound(r.Context(), destConn)
+	defer stopUpgradeBound()
 
 	// Sanitise before forwarding, exactly like handleHTTP/inspect: strips the
 	// internal X-User-Identity (it previously leaked to WS targets) and
@@ -209,6 +255,14 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, match *PolicyMatch,
 		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 		return
 	}
+	// The origin upgraded: hand the leg to the relay, which owns its own idle
+	// deadline from here. The context tie is removed first so it cannot expire
+	// the leg after the deadline is cleared. A false stop means the client
+	// already hung up and the leg has been expired; there is nothing to tunnel.
+	if !stopUpgradeBound() {
+		return
+	}
+	destConn.SetDeadline(time.Time{}) //nolint:errcheck // best-effort disarm; a failure means the conn is already closing and the relay's first read reports it
 	clientConn, clientBuf, err := hijacker.Hijack()
 	if err != nil {
 		logger.Printf("WS hijack error: %v", err)
