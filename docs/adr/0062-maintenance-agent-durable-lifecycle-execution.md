@@ -1,7 +1,8 @@
 # ADR-0062: Durable lifecycle execution for the maintenance agent
 
-- Status: Proposed, 2026-11-24. Design only. Nothing here changes behaviour
-  until each slice below lands with its own tests and real-Docker evidence.
+- Status: **Accepted** as the architectural direction, 2026-11-24 (owner
+  decisions recorded below). Each slice still lands as its own production
+  PR with tests, and a separate real-Docker qualification PR.
 - Numbering: ADR-0061 is the highest file on main at 03241de8f. No open
   branch was found adding 0062; renumber if one has since.
 - Builds on: [ADR-0061](0061-maintenance-agent-crash-journal-lifecycle.md)
@@ -111,7 +112,13 @@ gaps and make the #2051 executor the single path every recovery takes.
 ### Slices (each its own PR; production and real-Docker evidence separate)
 
 **Slice 1 — keep intent until the state is safe (gaps 1, 2).**
-- `terminate` writes the terminal audit **before** removing the record.
+- `terminate` writes the terminal audit **before** removing the record,
+  and the write is idempotent across a crash: the record keeps
+  `terminal_outcome` until the audit is durable; a start that finds a record
+  with `terminal_outcome` and no terminal audit entry for that op writes it
+  (checked with `audit.HasSucceeded`-style lookup by op id, kind and
+  outcome), then removes the record if the state is safe. The audit is
+  never written twice and never lost.
 - A failed terminal removes the record only when the op proved Docker
   safe (its own rollback passed its gate, or nothing was mutated: phase
   `admitted`..`pulled`). Otherwise the record stays, gains
@@ -120,15 +127,26 @@ gaps and make the #2051 executor the single path every recovery takes.
   decision table. The op's own outcome stays `failed`; nothing is rewritten
   to success.
 - Compatibility: older agents see an ordinary interrupted record.
-- **Owner decision needed:** status and alerts will now show
-  `recovery_required` after some failed upgrades that today look clean
-  after a restart. This is the honest state, but it is visible.
+- Owner decision (approved): status and alerts show `recovery_required`
+  after a failed operation whose end state is not proven safe.
 
 **Slice 2 — schema version and lossless rewrite (gap 5).**
 - Add `schema` (int, absent = 1). Records carry unknown keys through every
   rewrite (decode into the struct plus a raw remainder; re-encode both).
 - A record whose `schema` is newer than the agent is reported, never acted
   on (`recovery_required/record_from_newer_agent`), and never rewritten.
+- **Enforced downgrade fence** (owner: not release notes alone). While any
+  record relies on a schema-2 field, the journal directory also holds a
+  fence record under the fixed ULID name `00000000000000000000000000`
+  whose `phase` is a value no schema-1 agent knows. Every released agent
+  already treats an unknown phase as a corrupt record and refuses to serve
+  (`List` → `ErrCorruptRecord`, `initJournal`), so an older agent started
+  on that state directory stops instead of silently dropping evidence. The
+  fence is written fail-closed before the first schema-2 field is relied
+  on, and removed (after the audit) when the last such record retires. A
+  schema-2 agent skips the fence by name. The fence and its effect on an
+  older binary are tested by running the previous release's journal code
+  against it.
 - This is the precondition for every later field.
 
 **Slice 3 — step checkpoints, starting with the gate (gaps 3, 6).**
@@ -175,6 +193,13 @@ gaps and make the #2051 executor the single path every recovery takes.
   re-read identity, and discard the sample if identity changed in between.
 - Evidence goes to `state_dir/health/latest.json` (atomic write, bounded),
   keyed by container id + image id: `gated|ungated|unhealthy|unknown|stale`.
+- **Last-known-good is kept apart** in `state_dir/health/last_good.json`:
+  written only when the production gate passes with identity unchanged
+  across the probe, and never overwritten or cleared by an unhealthy,
+  unknown or stale observation. It records the image id, its validated
+  reference and digest, the data compatibility evidence (slice 6), and when
+  and by which gate it passed. It is the only runtime source of a trusted
+  recovery target.
   It never touches journal records or audit history of an interrupted
   operation.
 - Status gains `runtime_health`; the main app's `/api/maintenance-agent`
@@ -201,18 +226,45 @@ gaps and make the #2051 executor the single path every recovery takes.
 - A manually moved tag is a fact the decision sees; it never selects the
   target. If the tag points at an image that is not the trusted target, the
   verdict is `recovery_required`.
+- **Image and data compatibility before restoring an earlier image.** The
+  restore target must be proven compatible with the data the newer image
+  may already have migrated: the target's declared data-schema range (image
+  label) must include the data directory's current schema marker. Unknown
+  on either side is `recovery_required/restore_compatibility_unknown`,
+  never a restore. The same check applies to the startup executor's
+  existing prior-restoring plans before they are reused at runtime.
 - AGT-900 extension, recorded explicitly: "converge may restore the last
   image this agent gated, at runtime, when policy allows" — new contract
   text, its own tests, model property and real-Docker cases.
+
+**Slice 7 — forward resumption of an interrupted health gate
+(approved as its own, independently qualified slice).**
+- Scope: a record whose open checkpoint is `gate:target` (slice 3) — the
+  agent died while gating the target it had just started. Today that is
+  `recovery_required/target_live_ungated`.
+- Resume only if ALL hold: the durable intent names this op and this gate;
+  container and pinned tag both resolve to the checkpoint's immutable image
+  id, freshly read; no conflicting external change (no other open intent, no
+  marker command of another op, identity unchanged across the gate); the
+  settle window is over; the persistent resume budget is not exhausted
+  (written ahead, like `ReconcileAttempts`); and a **fresh production health
+  gate** passes.
+- Then the op's remaining non-mutating steps run (verify by id and digest);
+  the target is adopted and the record retired exactly once. Gate fails →
+  the existing armed-rollback path (#2051) with its own gate, never a
+  replay of the original `tag`/`up`.
+- The interrupted operation's historical outcome is not rewritten: it stays
+  `failed(agent_restart_interrupted)`; the resumption is its own audited
+  `:resumed` event with its own outcome.
+- AGT-900 extension text, model property and real-Docker cases ship with it.
 
 ### Not doing
 
 - No separate watchdog per failure mode: every runtime finding is a
   record + plan through one executor.
-- No forward resumption of an upgrade's gate in this ADR. Slice 3 records
-  the facts it would need; resuming is a later, separate owner decision
-  (it re-runs a gate on a target whose first gate may have been cut, and
-  that changes AGT-900's "never adopt an ungated target").
+- No blind replay of an interrupted external mutation (`tag`, `up`,
+  `down`, a data swap). A cut mutation is reconciled from Docker truth;
+  only the non-mutating gate is resumed (slice 7).
 - No attempt to "lock out" raw Docker. Coordination for operators is
   procedural (docs: use the agent's API; `compose up` by hand only when no
   record is outstanding) plus detection after the fact.
@@ -230,6 +282,8 @@ gaps and make the #2051 executor the single path every recovery takes.
   status says when one is outstanding.
 
 ## Compatibility with deployed appliances
+
+(See slice 2 for the enforced downgrade fence.)
 
 - Every new field is optional; absent means today's meaning. Schema 1
   records are read and acted on exactly as today.
@@ -252,12 +306,25 @@ gaps and make the #2051 executor the single path every recovery takes.
 - Real-Docker cases in `test/agt900-e2e` (both stores, root and sudoers),
   in a separate verification PR per slice.
 
-## Decisions left to the owner
+## Owner decisions (2026-11-24)
 
-1. Slice 1: keep a record after a failed terminal when Docker is not proven
-   safe (visible `recovery_required` after some failed upgrades).
-2. Coordination: instance lock in every mode (second agent refuses to
-   serve).
-3. Slice 6: the AGT-900 extension text for runtime recovery, and its
-   default (`off` until qualified).
-4. Later: whether a cut target gate may ever be resumed forward.
+1. Approved: retain durable operation records until the appliance state is
+   proven safe (slice 1).
+2. Approved: exclusive instance lock in every operating mode.
+3. Approved: policy-driven runtime recovery as an AGT-900 extension,
+   disabled by default until qualified (slice 6).
+4. Approved: safe forward resumption of interrupted health gates as an
+   additional, independently qualified slice (slice 7), under the
+   conditions listed there.
+5. Required in addition: enforceable downgrade protection (slice 2 fence),
+   crash-safe and idempotent terminal audit (slice 1), last-known-good
+   evidence preserved across unhealthy observations (slice 5), image and
+   data compatibility before restoring an earlier image (slice 6), one
+   lifecycle journal and one recovery executor, and production
+   implementation separate from real-Docker qualification evidence.
+
+## Order of work
+
+slice 2 → slice 1 and the instance lock → slice 3 → slice 4 (after #2051
+merges; #2093's `restore_prior` moves onto it) → slice 7 → slice 5 →
+slice 6.
