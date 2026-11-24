@@ -23,7 +23,7 @@ cd "$ROOT/cmd/culvert-maint"
 #    real-code drift lines (DRIFT-LINE) are only in the conformance log, not run.sh's output.
 before_rc=0
 "$HERE/run.sh" "$TMP/before" > "$TMP/before.log" 2>&1 || before_rc=$?
-{ grep -E '^DRIFT   |MISMATCH' "$TMP/before.log" || true
+{ grep -E '^DRIFT   |MODEL/IMPLEMENTATION MISMATCH' "$TMP/before.log" || true
   grep -E 'DRIFT \(real code\)|DRIFT-LINE' "$TMP/before/conformance.log" 2>/dev/null | sed -E 's/^[[:space:]]*(model_conformance_test.go:[0-9]+: )?//' || true
 } > "$TMP/drift.txt"
 
@@ -61,7 +61,7 @@ done_ok=1
 # 4. The review block.
 echo
 echo "================ BEHAVIOUR CHANGES TO REVIEW (paste into the pull request) ================"
-if grep -q MISMATCH "$TMP/drift.txt"; then
+if grep -q "MODEL/IMPLEMENTATION MISMATCH" "$TMP/drift.txt"; then
   echo "NOTE: the old baseline also saw conformance MISMATCHES, i.e. model and code disagreed."
   echo "      Make sure model.go was changed on purpose, not to silence them."
 fi

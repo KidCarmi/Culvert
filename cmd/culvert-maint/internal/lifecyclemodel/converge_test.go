@@ -98,11 +98,25 @@ func convergeMutants() []struct {
 				}
 			}),
 			events: func(s State) ([]string, bool) { return upEvents, s.PC == pcRcUp }}},
-		{"no fresh gate after the converge `up`", "R6", convergeMutant{step: after(at(pcRcUp, evRcUpOK), func(_, t *State) {
-			if t.PC == pcRcGate {
-				t.PC = pcRcVerify
+		// The probe at retirement (R15) would also stop an unhealthy prior after the
+		// `up`, so the mutant removes both the gate and that probe: verify, then audit.
+		{"no fresh gate after the converge `up`", "R6", convergeMutant{step: func(s State, e string) (State, bool) {
+			switch {
+			case s.PC == pcRcUp && e == evRcUpOK:
+				t := Model{}.Step(s, e)
+				if t.PC == pcRcGate {
+					t.PC = pcRcVerify
+				}
+				return t, true
+			case s.PC == pcRcServe && e == evRcServe && (actionOf(s.RcAct) == v2Finish || actionOf(s.RcAct) == v2FinishRetag):
+				t := Model{}.Step(s, e)
+				if t.PC == pcReconciled && t.RcOut == rcRR {
+					t.PC, t.RcOut = pcRcAudit, ""
+				}
+				return t, true
 			}
-		})}},
+			return State{}, false
+		}}},
 		{"retire an armed rollback found on the prior without a ready probe", "R6", convergeMutant{step: after(at(pcRcDecide, evRcDecide),
 			func(_, t *State) {
 				if t.RcAct == verdictOf(v2RR, "armed_rollback_prior_not_ready") {
@@ -142,9 +156,19 @@ func convergeMutants() []struct {
 		{"report the interrupted operation succeeded", "R11", convergeMutant{step: after(at(pcRcRemove, evRcRemove), func(_, t *State) {
 			t.Op = "succeeded"
 		})}},
+		// Since retireIfServing (R15) every retirement is probed again, which also
+		// stops an unready prior here; the mutant therefore removes both checks (the
+		// armed probe and the one at retirement) and goes straight to the audit. The
+		// verify it also skips cannot fail on this path: after the retag, container
+		// and tag are both on the prior.
 		{"retire an armed realign without the fresh probe", "O4", convergeMutant{step: after(at(pcRcTag, evRcTagOK), func(_, t *State) {
 			if t.PC == pcRcProbe {
-				t.PC = pcRcVerify
+				t.PC = pcRcAudit
+			}
+		})}},
+		{"retire without the readiness probe at retirement (pre-#2062)", "R15", convergeMutant{step: after(at(pcRcServe, evRcServe), func(_, t *State) {
+			if t.PC == pcReconciled && t.RcOut == rcRR {
+				t.PC, t.RcOut = pcRcAudit, ""
 			}
 		})}},
 		{"before decision 1: report T/T armed instead of finishing it", "R13", convergeMutant{step: after(at(pcRcDecide, evRcDecide),

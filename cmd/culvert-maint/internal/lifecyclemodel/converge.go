@@ -32,6 +32,7 @@ const (
 	pcRcGate     = "rc_gate"
 	pcRcProbe    = "rc_probe" // after an armed realign: a fresh read and probe, changes nothing
 	pcRcVerify   = "rc_verify"
+	pcRcServe    = "rc_serve" // retireIfServing: a fresh readiness probe before EVERY retirement
 	pcRcAudit    = "rc_audit"
 	pcRcRemove   = "rc_remove"
 	pcReconciled = "reconciled"
@@ -51,6 +52,7 @@ const (
 	evRcGate            = "rc_gate"
 	evRcProbe           = "rc_probe"
 	evRcVerify          = "rc_verify"
+	evRcServe           = "rc_serve"
 	evRcAudit           = "rc_audit"
 	evRcRemove          = "rc_remove"
 	evRcCrash           = "rc_crash"
@@ -77,7 +79,7 @@ const (
 
 func isConvergePC(pc string) bool {
 	switch pc {
-	case pcRcDecide, pcRcTag, pcRcUp, pcRcGate, pcRcProbe, pcRcVerify, pcRcAudit, pcRcRemove:
+	case pcRcDecide, pcRcTag, pcRcUp, pcRcGate, pcRcProbe, pcRcVerify, pcRcServe, pcRcAudit, pcRcRemove:
 		return true
 	}
 	return false
@@ -317,6 +319,8 @@ func convergeEvents(s State) []string {
 		return []string{evRcProbe, evRcCrash}
 	case pcRcVerify:
 		return []string{evRcVerify, evRcCrash}
+	case pcRcServe:
+		return []string{evRcServe, evRcCrash}
 	case pcRcAudit:
 		return []string{evRcAudit, evRcCrash}
 	}
@@ -397,6 +401,12 @@ func rcCheckAndRetire(s State) State {
 		if s.Running != imgP || s.Tag != imgP || !RecordForState(s).PriorRef {
 			return rcEnd(s, rcRR)
 		}
+		s.PC = pcRcServe
+		return s
+	case pcRcServe: // retireIfServing (#2062): a probe taken now must answer ready, on every path
+		if !healthy(s, s.Running) {
+			return rcEnd(s, rcRR) // not_ready_at_retirement; the record is kept
+		}
 		s.PC = pcRcAudit
 		return s
 	case pcRcAudit: // written only if this record has no succeeded entry yet
@@ -422,7 +432,7 @@ func rcDecide(s State) State {
 	s.RcAct = verdictOf(act, why)
 	switch act {
 	case v2Noop, v2Adopt:
-		s.PC = pcRcAudit
+		s.PC = pcRcServe
 	case v2Realign, v2FinishRetag:
 		s.Attempts, s.Acts, s.PC = s.Attempts+1, min(s.Acts+1, rcMaxTries+1), pcRcTag
 	case v2Finish:
