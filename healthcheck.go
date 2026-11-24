@@ -461,6 +461,16 @@ func computeReadiness() (report readinessReport, code int) {
 		allOK = false
 	}
 
+	// 6b. Shutdown. Gating, and present only once shutdown has begun, so the
+	// report of a serving node is unchanged. A process that has accepted
+	// SIGTERM keeps answering on this port until the proxy-server hook closes
+	// the listener; it must not call itself ready meanwhile (see
+	// shutdownStarted).
+	if shutdownStarted.Load() {
+		checks["shutdown"] = &readinessCheck{Status: "fail", Detail: "shutting down"}
+		allOK = false
+	}
+
 	// 7. ConfigSnapshot validator. The pure validateConfigSnapshot function must
 	// accept the empty baseline (its identity contract). If it ever rejects, the
 	// cluster control-plane apply path is broken and we must shed load.
