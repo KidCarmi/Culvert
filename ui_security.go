@@ -830,6 +830,7 @@ func apiFileblockProfileUpdate(w http.ResponseWriter, r *http.Request) {
 	// 2xx over a known-failed durable domain — and converges at the next
 	// restart via reconcileObjectRefNames.
 	var cascadeErr error
+	policyGen := runningPolicyGeneration()
 	if renamed {
 		cascadeErr = cascadeFileProfileRenameDurable(id, beforeName, newName)
 		detail += ", renamed from " + sanitizeLog(beforeName)
@@ -841,7 +842,9 @@ func apiFileblockProfileUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auditEvent(r, "fileprofile.update", body.Name, detail)
-	jsonOK(w, map[string]any{"ok": true, "revision": globalProfileStore.Revision()})
+	// A rename that rewrote running rules changed the served rulebase.
+	pubErr := publishIfRunningPolicyChangedSince(policyGen, "fileprofile.rename")
+	jsonOK(w, withClusterPublishRejection(map[string]any{"ok": true, "revision": globalProfileStore.Revision()}, pubErr))
 }
 
 func apiSecScanStatus(w http.ResponseWriter, r *http.Request) {

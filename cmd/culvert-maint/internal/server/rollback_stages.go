@@ -266,7 +266,13 @@ func (s *Server) staleRecordOrUnreadable() bool {
 		return true
 	}
 	for i := range recs {
-		if !s.opts.Ops.IsRunning(recs[i].OpID) {
+		// A record whose operation ENDED (ADR-0062 slice 1) is not a hazard of
+		// its own: that process saw every compose command it ran return, and
+		// one that ended in doubt left the durable marker (mutation.go), which
+		// this build reads. Counting it would make a failed operation start a
+		// settle wait it never caused, and change the docker calls of every
+		// later operation of this process.
+		if recs[i].TerminalOutcome == "" && !s.opts.Ops.IsRunning(recs[i].OpID) {
 			return true
 		}
 	}

@@ -32,8 +32,227 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   little free space fails the operation at the new `preflight_restore` stage
   with the stack untouched. Operations gain that stage in `progress`. With a
   proxy image that predates the line the agent behaves as before.
+- **A restore interrupted by an agent restart is now reported instead of
+  vanishing.** If the maintenance agent died in the middle of
+  `restore.commit` — after `docker compose down`, during or after the restore
+  command — the restarted agent answered `404` for the operation, listed
+  nothing under `interrupted_operations`, left the audit log at `started`, and
+  the proxy stayed down with `compose_stack_up: false` as the only sign
+  (measured on real Docker). `restore.commit` is now recorded in the agent's
+  crash journal before it runs, and both it and `rollbacks` with `mode=data`
+  record each step before taking it. After a restart the operation is
+  `failed` / `agent_restart_interrupted`, has one audit entry, and is listed
+  in `GET /v1/status` with `restore_stage`, `stack_touched`, `data_changed`
+  (`no` / `yes` / `unknown`), `previous_state`, `restart_safe` and an
+  `operator_action` for that stage. `unknown` is reported whenever the commit
+  command was started and the agent cannot vouch for the result, including a
+  commit that returned an error. The agent still changes nothing by itself: it
+  does not start the stack, repeat or undo the restore, with or without
+  `reconcile_on_startup = "converge"`. The entry is cleared by a later restore
+  or data rollback that commits and passes its health check (or by a later
+  upgrade or image rollback, as before); a restore never clears an interrupted
+  upgrade's entry. If the journal cannot be written the restore now stops
+  before `compose down`, or before the commit command; and a commit that
+  succeeded but could not be recorded ends `failed` / `command_error` with
+  `result.restore_committed: true` rather than as a plain success. New in the
+  API, all additive: the fields above, `result.restore_committed` on
+  `restore.commit`, and the reconcile reason `restore_window_manual`. See
+  docs/operator/release-management-agent.md.
 
 ### Security
+
+- **A policy edit on a control plane now reaches data planes when it is
+  committed.** Creating, updating, deleting, disabling, reordering or moving a
+  policy rule, bulk-deleting rules, the same operations on auth-policy rules,
+  committing a policy draft, reloading the policy file (SIGHUP) and renaming a
+  category group, decryption profile or file profile that rules reference all
+  changed the control plane's running rulebase without publishing a
+  configuration version. Data planes kept enforcing the previous rules — a
+  deleted Allow stayed allowed, a new Block was not enforced — until some
+  unrelated change that does publish (network settings, PAC, identity
+  providers, import, rollback) or a control-plane restart happened to follow.
+  This was never the intended behaviour: the runtime inventory lists "Admin:
+  any config mutator (e.g. policy upload) → `globalConfigStore.Update(...)`"
+  (`roadmap/CLUSTER-RUNTIME-DISCOVERY.md`), and the PAC handler records the
+  same gap being closed there ("without this, an exclusions change (including
+  a wipe) waits for an UNRELATED mutation to bump the snapshot version",
+  `pac.go`). Each of those operations now publishes once, after the change is
+  durably committed. A refused or failed edit publishes nothing, nor does a
+  request that leaves the rulebase as it was (a bulk delete matching nothing,
+  a reload of an unchanged policy file), an edit staged in a draft (its commit
+  publishes), or an edit on a standalone or data-plane node. A control plane
+  whose cluster listener has not bound yet does publish, so an edit made in
+  that window is in the configuration it serves once bound. Every publisher —
+  policy, settings, PAC, identity providers, import, rollback, CA rotation —
+  now captures the configuration inside the commit, so two overlapping
+  publishes can no longer leave the fleet on the older of the two at the
+  higher version. If the publish is rejected because the configuration is
+  over a cluster-sync cap, the local edit stands and the rejection is logged,
+  alerted and shown in Diagnostics as for every other publisher; draft commit
+  and the three rename responses also carry `cluster_publish_rejected`.
+  **After upgrading:** the first policy edit on a control plane publishes its
+  whole current configuration, so any policy difference that had been waiting
+  for a publish reaches the fleet at that moment — review the control plane's
+  rulebase before making that first edit. Edits to the default action,
+  blocklist, SSL-bypass list, URL categories, category groups, rewrite rules,
+  file-block lists and profiles, bandwidth policies and node groups still do
+  not publish on their own; they are delivered by the next publish, which a
+  policy edit now is.
+- **A policy rule whose JSON keys this version cannot honour is refused, at
+  every door, instead of being loaded with a condition missing.** A rule object
+  can hold a key the build has no field for (a typo such as `"destFQDN "`,
+  `"sourceIPs"` or `"srcIP"`, or a condition added by a newer release), or the
+  same key twice (`"sourceIP":"203.0.113.0/24","sourceip":""`, where the last
+  value won). Either way a match condition written in the document was not
+  enforced and the rule matched more than was written: an Allow for one source
+  range, loaded from the policy file, a stored config version, a pending draft
+  or a control-plane snapshot, allowed every source. Such a ruleset is now
+  refused whole by the same gate as an unrecognised `ruleType`: a policy file
+  stops startup (a reload keeps the running rules and default action), a
+  rollback and an import answer `400`, a snapshot is refused and the node keeps
+  its last accepted configuration, with the
+  `policy_ruleset_refused_unenforceable_rule` Diagnostics row. The refusal
+  names the rule and the keys. The rule API and the config import already
+  refused an unknown key with `400 invalid JSON`; they now name the rule and the
+  keys, and also refuse a duplicate key, which they used to accept. Key names
+  are still matched without regard to case (`"destFqdn"` is `destFQDN`), and
+  sections of a control-plane snapshot that this version does not know are
+  still ignored.
+  **API contract 2.1.0 → 2.2.0 (MINOR):** the policy rule schema gains the
+  optional `annotations` property; a duplicated key in a rule object is now a
+  `400` on the policy API (it was accepted, last value winning).
+  A rule list given twice in one document (`"policyRules":[…],"policyRules":[…]`
+  in a backup, `policy_rules` in a snapshot, `rules` in a draft) is refused the
+  same way: the first list used to be discarded.
+  **New: `annotations`.** A rule may carry one `annotations` object. Culvert
+  never interprets its contents; it keeps them in canonical form (compact
+  JSON, with `<`, `>`, `&` written as `\uXXXX` escapes, as Culvert's own
+  encoders write them) through the policy file, exports, stored versions and
+  snapshots. The limits, 4096 bytes and 8 levels, are measured on that form:
+  whitespace does not count, each of `<` `>` `&` counts as 6 bytes, and a rule
+  accepted once stays accepted however often it is saved, exported or
+  published. `null` is the same as absent. It is the place for notes in a
+  hand-edited file, and from now on the only place a release may add
+  information that is not a match condition. Editing a rule in the admin UI
+  replaces the rule and removes its annotations.
+  **Upgrade impact:** a hand-edited policy file in which a rule has an extra,
+  misspelt or repeated key (including a note such as `"_comment"`) stops
+  startup. Before upgrading, run `culvert policy-check <policy file>` with the
+  new binary: it lists every such rule and key and changes nothing; move notes
+  under `annotations`. In `main`'s history no key of a rule or its schedule was
+  ever removed or renamed, so files, versions and snapshots written by Culvert
+  itself are unaffected.
+  **By design:** when a later release adds a new match *condition* and a rule
+  uses it while older data planes are still deployed, those nodes refuse the
+  whole snapshot and stay on their last accepted configuration, including for
+  blocklist and IP-filter changes, until they are upgraded. That is what an
+  unrecognised `ruleType` already does; the alternative is enforcing the rule
+  without the condition. Diagnostics on the node shows the refusal; the control
+  plane only sees the node as behind.
+  `culvert policy-check` now also reads a control-plane snapshot (a data
+  plane's `dp_last_config_snapshot.json`), which it used to report as
+  `OK — 0 rule(s)`, and a data plane whose last-known-good snapshot is refused
+  at startup shows it in Diagnostics. Record:
+  `docs/engineering/security-reviews/2026-11-24-unknown-rule-fields-refused.md`.
+- **A replace-mode config import no longer installs policy rules the policy
+  API refuses.** `POST /api/config/import?mode=replace` checked only that
+  every rule was of a type this version can enforce, then replaced the whole
+  policy. It therefore accepted, with `200 {"ok":true}` and no warning, rules
+  that `POST /api/policy` answers 400 to. The one that changes traffic: a Drop
+  or Block rule whose `sourceIP` is not an address or a CIDR
+  (`"10.0.0.5-10.0.0.9"`, `" 10.0.0.5"`, `"10.0.0.0/33"`) never matches, so
+  importing it over a working restriction let that traffic fall through to the
+  default action or to an Allow behind it. Also accepted: duplicate rule names
+  or priorities, a Redirect with no `redirectURL` or one pointing at a private
+  address, an impossible schedule timezone, a rule with no name, and a rule
+  whose `action`
+  is missing or is not exactly `Allow`, `Drop`, `Block_Page` or `Redirect`.
+  Every door where an operator submits rules now runs the same validation
+  through one shared function: the policy and auth-policy API, config import
+  in both modes, and policy-learning acceptance. No door has rules of its own.
+  - **Replace mode** validates the incoming set before anything is applied
+    (the dry-run preview too). One invalid rule refuses the whole import with
+    a 400; no section is applied, nothing is audited or versioned, and the
+    running and saved policy are untouched.
+  - **Merge mode** still skips an invalid rule and lists it in `warnings`, as
+    before, and now also skips a rule whose `sourceIP` can never match instead
+    of installing it or overwriting a working rule with it.
+  - **Not changed:** how a rule is evaluated (a stored rule with no action
+    still resolves to Allow), and the doors that read stored or published
+    policy: the policy file at startup and reload, config-version rollback,
+    control-plane snapshots and a pending draft. They keep loading what they
+    held, so no node fails to start, roll back or follow its control plane
+    because of this change.
+
+  - **A Redirect host this node cannot resolve is not an invalid rule.** When
+    the DNS lookup of a Redirect rule's host fails, or is not made within the
+    10 seconds an import allows for verification, an import (both modes, dry
+    run included) still installs the rule and returns one `warnings` entry
+    naming the rule and the host, so a backup of a healthy policy restores on
+    a node whose DNS is down. This is the only finding treated this way, and
+    only because it is fail-closed where it is used: a Redirect is re-checked
+    every time it matches and answers 403 until its host resolves to a public
+    address. Decided without DNS, and always refused: a host that is a
+    private, loopback, link-local, unspecified or metadata address literal
+    (bracketed IPv6 with or without a port, zoned addresses), `localhost` in
+    any spelling, and numeric-looking hosts that are not canonical addresses
+    (`2130706433`, `0x7f.1`, `127.1`). A name that resolves to a private
+    address is refused. `POST`/`PUT /api/policy` still answer 400 to a host
+    they could not resolve; the message now says so instead of calling the
+    URL malformed. An import whose request is cancelled applies nothing.
+  - **A schedule timezone the node cannot load is refused, never installed.**
+    On a node with a timezone database an unknown name is a typo (`invalid
+    schedule timezone: … is not a known timezone`). On a node with no
+    timezone database the rule is refused with a message saying so and what
+    to install. Replace refuses the import; merge skips the rule and leaves
+    any existing rule of the same name untouched. Installing it would not be
+    safe: an access rule's schedule would run on UTC hours, and an
+    authentication rule would stop matching, which removes the
+    authentication requirement when the default outcome is Exempt.
+  - The merge-mode dry run now runs the merge itself against a silent copy of
+    the policy, so its `upsert N: U update, A add` line counts skipped rules
+    (`…, S skipped as invalid`) and returns the same `warnings` as the commit.
+    The backup `version` is checked before the rules.
+
+  **Upgrade impact:** a replace-mode import that used to succeed can now be
+  refused. The response says which rule and why, for example `import refused:
+  policy rule 3 of 12 ("quarantine") is not valid: sourceIP
+  "10.0.0.5-10.0.0.9" must be a single IP address or a CIDR`. Correct that
+  rule in the file and import again; `?dryRun=true` gives the same answer
+  without applying anything. This includes a backup exported by this system
+  if its policy held such a rule, which is possible when the rule came from a
+  hand-edited policy file, a control-plane snapshot, a restored config
+  version, or a release older than the API check concerned. The shapes a
+  self-made export can hold and a replace import now refuses: a `sourceIP`
+  that is not an address or CIDR; duplicate rule names; duplicate priorities;
+  a rule with no name; an `action` that is missing, in another letter case,
+  or unknown to this version (such a rule is kept and blocks when it comes
+  from a policy file or snapshot, but cannot be imported); a Redirect with an
+  empty or non-http(s) `redirectURL`, or one whose host is or resolves to a
+  private address; and a schedule timezone the importing node cannot load (on
+  an image without zoneinfo that is every named zone: install tzdata first).
+  Not changed here, and worth knowing: the policy file, config-version
+  rollback and control-plane snapshots still load a rule with an unloadable
+  timezone, and evaluate an access rule's schedule in UTC or never match an
+  authentication rule.
+- **The SSRF guard classified a zoned IPv6 address as public.** The pre-flight
+  check that keeps outbound requests and redirect targets away from internal
+  addresses read the resolver's answers with a parser that does not understand
+  a zone (`fe80::1%eth0`) and skipped any answer it could not read. A zoned
+  link-local, loopback or unique-local literal, and a name the resolver
+  answered with one, were therefore accepted as public and the verdict cached
+  for 30 seconds. Every caller of the guard was affected at this layer:
+  redirect targets (a policy `Redirect` rule's URL, at write time and each
+  time it is served), identity-provider metadata and discovery URLs, feed,
+  release and telemetry endpoints, and the tunnel pre-flight. Outbound
+  connections were still refused, because the connect-time guard fails closed
+  on a zoned peer address, and a zoned CONNECT or SOCKS5 destination was
+  already refused before this check; the exposure was the redirect target,
+  where nothing dials: `http://[fe80::1%25eth0]:80/` was accepted and served
+  as a 302. Answers are now parsed zone-aware and classified by the address
+  with the zone removed, and an answer that is not an address at all refuses
+  the destination instead of being skipped. No configuration change; a
+  stored rule or URL of this shape is now refused where it is used.
 
 - **A config import no longer reports success when the imported policy rules
   could not be written to disk.** The policy save on `POST /api/config/import`
@@ -884,6 +1103,35 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   touch a lock owned by another plane.
 
 ### Fixed
+
+- **The maintenance agent no longer runs a keyed request a second time after it
+  restarts.** The `idempotency_key` cache lived only in process memory. After a
+  restart, a retry of a request that had already finished was admitted as a new
+  operation and executed again (a backup ran its container again; a
+  `restore.commit` stopped, restored and started the stack again), and
+  `GET /v1/operations/{id}` for the finished operation returned 404. A keyed
+  request is now recorded under `state_dir/idempotency/` before it is admitted
+  and its outcome is recorded when it finishes. After a restart: a finished
+  request is answered `200` with its original `op_id` and recorded result, runs
+  no command, and needs neither the maintenance lock nor an execution slot; a
+  request that was admitted but has no recorded outcome is answered `200` with
+  its original `op_id` as `failed(agent_restart_interrupted)` and
+  `outcome: "unknown"`, and is **not** run again — submit a new
+  `idempotency_key` to run it deliberately. This is not exactly-once execution:
+  an agent that dies after an operation's last side effect and before its
+  outcome is recorded reports that operation as unknown, not as succeeded.
+  Records are kept for the idempotency window (24h, or `operation_timeout` if
+  longer), at most 1024 of them, each at most 64 KiB (an oversized result is
+  omitted from the record). Two behaviour changes for clients: reusing a key for
+  the same kind of operation with a **different payload** now returns
+  `422 idempotency_key_reused` naming the original `op_id` (it used to return
+  the first operation as if the request were the same); and if the record store
+  cannot be read or written, requests that carry an `idempotency_key` are
+  refused with `503 idempotency_store_unavailable` (or
+  `409 idempotency_record_unreadable` for one unreadable record) while requests
+  without a key are served as before. The key is still scoped by peer and by
+  operation kind, and a request without a key is still never deduplicated or
+  recorded. An older agent ignores the new directory.
 
 - **The "retaining rule … with unrecognized action" warning is now said once per
   fact, and only where it is true.** It was written on every bulk replace of

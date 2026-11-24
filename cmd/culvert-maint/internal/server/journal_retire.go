@@ -14,6 +14,17 @@
 // So the success of such an operation retires every OTHER record, each with
 // an audit entry. Nothing else removes an interrupted record; there is no
 // timer and no automatic expiry.
+//
+// A restore is the second, narrower retirer (ADR-0061 addendum, 2026-11-24).
+// A restore-class operation — restore.commit, or rollbacks.create mode=data —
+// that committed and passed its health check has put the data directory in a
+// known state with the proxy serving on it: its commit command first undoes any
+// earlier restore that never committed, and the proxy started on the result.
+// The record of an EARLIER interrupted restore then describes a data state that
+// no longer exists, and it is retired the same way: audit entry first, then the
+// record. It retires restore-class records ONLY. A restore moves no image tag,
+// so it establishes nothing about what an interrupted upgrade or image rollback
+// left behind, and such a record outlives any number of restores.
 package server
 
 import (
@@ -36,20 +47,27 @@ const auditKindSuperseded = ":interrupted_superseded"
 // that sees "succeeded" then also sees the journal already drained. Returns
 // cfg.resultFn unchanged for every other op.
 func (s *Server) resultFnRetiringInterrupted(opID, actor string, cfg *startCfg) ops.ResultFn {
-	if cfg.retiresInterrupted == nil || s.opts.Journal == nil {
+	if (cfg.retiresInterrupted == nil && cfg.retiresRestoreRecords == nil) || s.opts.Journal == nil {
 		return cfg.resultFn
 	}
 	inner := cfg.resultFn
-	establishes := cfg.retiresInterrupted
+	establishes, restored := cfg.retiresInterrupted, cfg.retiresRestoreRecords
 	return func(state ops.State, reason ops.FailureReason) map[string]interface{} {
 		var result map[string]interface{}
 		if inner != nil {
 			result = inner(state, reason)
 		}
-		if state != ops.StateSucceeded || !establishes() {
+		if state != ops.StateSucceeded {
 			return result
 		}
-		if retired := s.retireSupersededRecords(opID, actor); len(retired) > 0 {
+		var retired []string
+		switch {
+		case establishes != nil && establishes():
+			retired = s.retireSupersededRecords(opID, actor)
+		case restored != nil && restored():
+			retired = s.retireSupersededRestoreRecords(opID, actor)
+		}
+		if len(retired) > 0 {
 			if result == nil {
 				result = map[string]interface{}{}
 			}
@@ -69,6 +87,23 @@ func (s *Server) resultFnRetiringInterrupted(opID, actor string, cfg *startCfg) 
 // failure it is left in place and reported again at the next start. An
 // unreadable journal retires nothing.
 func (s *Server) retireSupersededRecords(byOpID, actor string) []string {
+	return s.retireRecords(byOpID, actor, "an image change", func(*journal.Record) bool { return true })
+}
+
+// retireSupersededRestoreRecords is retireSupersededRecords for a restore that
+// committed and passed its health check: it retires the records of earlier
+// interrupted restore-class operations and no other. The kind and mode are read
+// from the record as written; a record whose kind this build does not know is
+// not a restore record and is kept.
+func (s *Server) retireSupersededRestoreRecords(byOpID, actor string) []string {
+	return s.retireRecords(byOpID, actor, "a restore", func(rec *journal.Record) bool {
+		return isRestoreRecord(rec.Kind, rec.Mode)
+	})
+}
+
+// retireRecords retires every record retire accepts, other than byOpID's own.
+// what names the retiring operation's class in the log.
+func (s *Server) retireRecords(byOpID, actor, what string, retire func(*journal.Record) bool) []string {
 	recs, err := s.opts.Journal.List()
 	if err != nil {
 		// The error can quote a corrupt record; classify it, do not print it.
@@ -76,7 +111,7 @@ func (s *Server) retireSupersededRecords(byOpID, actor string) []string {
 		if errors.Is(err, journal.ErrCorruptRecord) {
 			reason = "corrupt record"
 		}
-		log.Printf("culvert-maint: WARN: journal not readable (%s) after an image change succeeded; interrupted records kept", reason)
+		log.Printf("culvert-maint: WARN: journal not readable (%s) after %s succeeded; interrupted records kept", reason, what)
 		return nil
 	}
 	var retired []string
@@ -85,8 +120,20 @@ func (s *Server) retireSupersededRecords(byOpID, actor string) []string {
 		// The succeeding op's own record is retired by the orchestrator. A
 		// record whose op is running in this process is not stale (cannot
 		// happen while the maintenance lock admits one op at a time).
-		if rec.OpID == byOpID || s.opts.Ops.IsRunning(rec.OpID) {
+		// A record a newer agent wrote is never retired here (ADR-0062): the
+		// journal refuses to remove it, and auditing it as superseded first
+		// would record a retirement that did not happen.
+		if rec.OpID == byOpID || s.opts.Ops.IsRunning(rec.OpID) || rec.FromNewerAgent() || !retire(rec) {
 			continue
+		}
+		// A kept record of an operation that ended carries its own terminal
+		// audit entry; if that entry never became durable it is written first,
+		// or the record is not retired (ADR-0062 slice 1).
+		if rec.TerminalOutcome != "" {
+			if terr := ensureTerminalAudited(s.opts.Audit, rec, s.opts.Cfg.ProxyRepo); terr != nil {
+				log.Printf("culvert-maint: WARN: could not complete the terminal audit of op %s; record kept: %v", rec.OpID, terr)
+				continue
+			}
 		}
 		now := time.Now().UTC()
 		desc := DescribeInterrupted(rec, s.opts.Cfg.ProxyRepo)

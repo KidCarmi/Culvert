@@ -93,6 +93,20 @@ func assertJournalEmpty(t *testing.T, rig *applyRig) {
 	}
 }
 
+// assertJournalKeptFailed: the op failed past the write-ahead barrier without an
+// inline rollback that passed its gate, so its record is KEPT at terminal
+// (ADR-0062 slice 1), audited, with the op's real outcome.
+func assertJournalKeptFailed(t *testing.T, rig *applyRig, opID, reason string) {
+	t.Helper()
+	recs, err := rig.journal.List()
+	if err != nil {
+		t.Fatalf("journal list: %v", err)
+	}
+	if len(recs) != 1 || recs[0].OpID != opID || recs[0].TerminalOutcome != "failed:"+reason || !recs[0].TerminalAudited {
+		t.Errorf("journal at terminal = %+v, want only op %s kept with terminal_outcome failed:%s, audited", recs, opID, reason)
+	}
+}
+
 // Successful upgrade: tag and container both end on the new image.
 func TestApply_PinnedTag_SuccessfulUpgrade(t *testing.T) {
 	rig := modelRig(t)
@@ -144,7 +158,9 @@ func TestApply_PinnedTag_UpFailsBeforeRecreate_RollbackDisabled_TagRestored(t *t
 		t.Errorf("rollback contract changed: %v", res)
 	}
 	assertTagAndRunning(t, rig, digOld, digOld)
-	assertJournalEmpty(t, rig)
+	// The tag is back on prior, but the op proved nothing through a gate: the
+	// record is kept for an operator (ADR-0062 slice 1), not retired.
+	assertJournalKeptFailed(t, rig, opID, "command_error")
 	if got := res["final_running_digest"]; got != "sha256:"+digOld {
 		t.Errorf("final_running_digest = %v, want the prior digest (the old container never stopped)", got)
 	}
@@ -331,7 +347,8 @@ func TestApply_PinnedTag_RollbackUpFails_TagStaysOnKnownGood(t *testing.T) {
 // the PhaseRestarting record is still on disk while the compensating tag
 // executes, so an agent death at any point of the sequence
 // (barrier → tag target → up fails → tag prior) leaves a durable record for
-// startup reconciliation. The record is retired only at terminal.
+// startup reconciliation. At terminal the record is KEPT: the op failed past the
+// barrier with no inline rollback that passed its gate (ADR-0062 slice 1).
 func TestApply_PinnedTag_RestoreHappensInsideJournalWindow(t *testing.T) {
 	rig := modelRig(t)
 	defer rig.stop()
@@ -355,7 +372,7 @@ func TestApply_PinnedTag_RestoreHappensInsideJournalWindow(t *testing.T) {
 		phases = append(phases, recs[0].Phase)
 	}
 
-	op, _ := rig.acceptAndWait(t, map[string]interface{}{
+	op, opID := rig.acceptAndWait(t, map[string]interface{}{
 		"image_ref": repo + "@sha256:" + digNew, "rollback_on_failure": false,
 	})
 	if op["state"] != "failed" {
@@ -371,7 +388,7 @@ func TestApply_PinnedTag_RestoreHappensInsideJournalWindow(t *testing.T) {
 			t.Errorf("tag #%d ran with journal phase %q, want %q (write-ahead barrier must cover it)", i+1, p, journal.PhaseRestarting)
 		}
 	}
-	assertJournalEmpty(t, rig)
+	assertJournalKeptFailed(t, rig, opID, "command_error")
 }
 
 // Rollback-target selection: on the containerd image store the running image's

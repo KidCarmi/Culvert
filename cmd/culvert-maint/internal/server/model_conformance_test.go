@@ -520,15 +520,21 @@ func applyVectorsUnder(t *testing.T, store string, vs []lifecyclemodel.ApplyVect
 				Op:         fmt.Sprint(op["state"]), Reason: reason, Running: running, Tag: tag, Cmds: tokens,
 				UpgradeSucceeded: res["upgrade_succeeded"] == true, RollbackAttempted: res["rollback_attempted"] == true,
 				RollbackSucceeded:     res["rollback_succeeded"] == true,
-				RollbackSkippedReason: fmt.Sprint(res["rollback_skipped_reason"]), TagAhead: v.Expect.TagAhead,
-				JournalEmpty: v.Expect.JournalEmpty} // the journal itself is checked just below
+				RollbackSkippedReason: fmt.Sprint(res["rollback_skipped_reason"]), TagAhead: v.Expect.TagAhead}
+			// Observed, not copied: since ADR-0062 slice 1 a failure that did not
+			// prove its end state safe KEEPS its record, so the model predicts it.
+			recs, lerr := r.jnl.List()
+			if lerr != nil {
+				t.Errorf("journal unreadable at terminal (faults: %s): %v", scriptString(v.Script), lerr)
+			}
+			got.JournalEmpty = lerr == nil && len(recs) == 0
+			if !got.JournalEmpty && lerr == nil && (len(recs) != 1 || recs[0].TerminalOutcome != "failed:"+reason || !recs[0].TerminalAudited) {
+				t.Errorf("journal at terminal (faults: %s) = %+v, want only the op's own record, kept as failed:%s and audited",
+					scriptString(v.Script), recs, reason)
+			}
 			if !reflect.DeepEqual(got, v.Expect) {
 				t.Errorf("MODEL/IMPLEMENTATION MISMATCH\n params: %+v\n faults: %s\n model : %+v\n actual: %+v",
 					v.Params, scriptString(v.Script), v.Expect, got)
-			}
-			recs, lerr := r.jnl.List()
-			if lerr != nil || len(recs) != 0 {
-				t.Errorf("journal not empty at terminal (faults: %s): %d records, err=%v", scriptString(v.Script), len(recs), lerr)
 			}
 			rep := role(fmt.Sprint(res["final_running_digest"]))
 			// The observation key is the concrete input: every parameter and the fault plan.

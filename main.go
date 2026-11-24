@@ -973,7 +973,7 @@ func initPolicy(s *startupState) {
 	polPath := firstStr(*s.policyFile, s.fc.Proxy.PolicyFile)
 	if polPath != "" {
 		if err := policyStore.Load(polPath); err != nil {
-			logFatalf("Cannot load policy file: %v (run `culvert policy-check %s` to list every rule this version refuses)", err, polPath)
+			logFatalf("%s", startupPolicyFileError(err, polPath))
 		}
 		logger.Printf("Policy: %d rule(s) loaded from %s", len(policyStore.List()), polPath)
 	} else {
@@ -1750,7 +1750,7 @@ func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath str
 	// Initial publish. A commit-time rejection (startup config already over a
 	// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
 	// the CP still serves locally, so boot continues.
-	_ = globalConfigStore.Update(CurrentConfigSnapshot())
+	_ = publishCurrentConfigSnapshot()
 	initClusterCA(clusterDBPath)
 
 	cfg := cpListenerConfig{addr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile}
@@ -1867,4 +1867,8 @@ func applyHotReload(fc *FileConfig) {
 		applyUpstreamProxy()
 		logger.Printf("Reload: upstream %s", formatUpstreamSummary(ucfg.Proxies))
 	}
+
+	// Last: a reloaded policy file is a change to the running rulebase and
+	// reaches the fleet now, with everything else this reload applied.
+	publishAfterPolicyFileReload(fc.Proxy.PolicyFile, policyReloaded)
 }

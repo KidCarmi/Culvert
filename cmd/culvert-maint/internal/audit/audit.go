@@ -64,7 +64,46 @@ func New(path string) (*Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: open %s: %w", path, err)
 	}
+	if err := terminateTornTail(path, f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	return &Logger{path: path, f: f}, nil
+}
+
+// terminateTornTail ends a torn final line before anything is appended. A
+// crash during an append can leave a partial JSON line without its newline;
+// readers skip it, but the next Write would be appended ONTO it and become
+// part of the same unreadable line, so an entry written to repair the lost
+// one (e.g. a terminal entry re-written at startup) would be lost too
+// (Codex review on #2102). One newline, fsynced, isolates the fragment.
+func terminateTornTail(path string, f *os.File) error {
+	r, err := os.Open(path) // #nosec G304 -- the audit log path the logger was opened with
+	if err != nil {
+		return fmt.Errorf("audit: open %s for tail check: %w", path, err)
+	}
+	defer func() { _ = r.Close() }()
+	fi, err := r.Stat()
+	if err != nil {
+		return fmt.Errorf("audit: stat %s: %w", path, err)
+	}
+	if fi.Size() == 0 {
+		return nil
+	}
+	last := make([]byte, 1)
+	if _, err := r.ReadAt(last, fi.Size()-1); err != nil {
+		return fmt.Errorf("audit: read tail of %s: %w", path, err)
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		return fmt.Errorf("audit: terminate torn tail of %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("audit: fsync %s: %w", path, err)
+	}
+	return nil
 }
 
 // Path returns the audit log path.
@@ -131,12 +170,37 @@ func HasSucceeded(path, opID, kind string) (bool, error) {
 	if opID == "" || kind == "" {
 		return false, fmt.Errorf("audit: HasSucceeded needs op_id and kind")
 	}
+	ev, err := findFirst(path, opID, kind, OutcomeSucceeded)
+	return ev != nil, err
+}
+
+// FindTerminal returns the first terminal event (succeeded, failed or
+// cancelled) the audit log at path holds for this op id and kind, or nil. It
+// reads like HasSucceeded (streamed, lines that do not decode skipped, a read
+// error returned so the caller writes rather than risk losing an entry).
+//
+// It makes an operation's terminal audit entry idempotent across a crash
+// (ADR-0062 slice 1): a startup that finds a record whose operation ended but
+// whose entry is not known to be durable writes the entry only when this finds
+// none. The kind must match exactly, so an inline rollback's own entries
+// ("upgrades.apply:rollback"), a retirement (":interrupted_superseded") or a
+// reconcile (":reconciled") under the same op id never count.
+func FindTerminal(path, opID, kind string) (*Event, error) {
+	if opID == "" || kind == "" {
+		return nil, fmt.Errorf("audit: FindTerminal needs op_id and kind")
+	}
+	return findFirst(path, opID, kind, OutcomeSucceeded, OutcomeFailed, OutcomeCancelled)
+}
+
+// findFirst returns the first event for opID and kind whose outcome is one of
+// outcomes, or nil.
+func findFirst(path, opID, kind string, outcomes ...Outcome) (*Event, error) {
 	f, err := os.Open(path) // #nosec G304 -- the agent's own audit log path
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			return nil, nil
 		}
-		return false, fmt.Errorf("audit: open %s: %w", path, err)
+		return nil, fmt.Errorf("audit: open %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
 	needle := []byte(opID)
@@ -148,17 +212,19 @@ func HasSucceeded(path, opID, kind string) (bool, error) {
 			continue
 		}
 		var ev Event
-		if json.Unmarshal(line, &ev) != nil {
+		if json.Unmarshal(line, &ev) != nil || ev.OpID != opID || ev.Kind != kind {
 			continue
 		}
-		if ev.OpID == opID && ev.Kind == kind && ev.Outcome == OutcomeSucceeded {
-			return true, nil
+		for _, o := range outcomes {
+			if ev.Outcome == o {
+				return &ev, nil
+			}
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return false, fmt.Errorf("audit: scan %s: %w", path, err)
+		return nil, fmt.Errorf("audit: scan %s: %w", path, err)
 	}
-	return false, nil
+	return nil, nil
 }
 
 // Recent reads the last n events from path. Used by GET /v1/audit.

@@ -394,12 +394,7 @@ func (g *flightGroup) run(ctx context.Context, host string, f *lookupFlight) {
 	// panic would end the process, so it is reported and fails closed instead.
 	obs.SafeCall("ssrf_lookup", func() { ips, err = lookupHost(ctx, host) })
 	if err == nil {
-		for _, ipStr := range ips {
-			if ip := net.ParseIP(ipStr); ip != nil && PrivateIP(ip) {
-				f.privateIP = ipStr
-				break
-			}
-		}
+		f.privateIP, err = classifyAnswers(ips)
 	}
 	f.err = err
 	g.mu.Lock()
@@ -414,6 +409,41 @@ func (g *flightGroup) run(ctx context.Context, host string, f *lookupFlight) {
 	}
 	g.mu.Unlock()
 	close(f.done)
+}
+
+// errUnparseableAnswer fails a lookup closed when the resolver returned
+// something the guard cannot read as an address. It is not ErrBlocked: nothing
+// was demonstrated about the destination, so the verdict is not cached either.
+var errUnparseableAnswer = errors.New("ssrf pre-flight: resolver returned an answer that is not an IP address")
+
+// classifyAnswers reads a resolver's answers and returns the first one that is
+// private/internal, or an error when no answer is private but one could not be
+// read at all.
+//
+// It parses with netip.ParseAddr, which understands a ZONED address
+// ("fe80::1%eth0"); PrivateAddr then classifies it by the address with the
+// zone stripped. This used net.ParseIP, which returns nil for a zoned address,
+// and skipped whatever it could not parse — so a zoned link-local, loopback or
+// unique-local address was classified PUBLIC, and that verdict cached. The
+// system resolver answers an address literal with itself, zone included, and
+// getaddrinfo returns scoped link-local answers for names (mDNS, /etc/hosts),
+// so both a literal and a name reached this. An answer that cannot be parsed
+// is never skipped: an unreadable answer is not evidence of a public address.
+func classifyAnswers(ips []string) (privateIP string, err error) {
+	for _, ipStr := range ips {
+		addr, perr := netip.ParseAddr(ipStr)
+		if perr != nil {
+			err = fmt.Errorf("%w: %q", errUnparseableAnswer, ipStr)
+			continue // a private answer further on is the more specific finding
+		}
+		// A zone names an interface of THIS host: an address that carries one is
+		// local by construction, whatever range the address itself falls in, so
+		// it is never a public destination.
+		if addr.Zone() != "" || PrivateAddr(addr) {
+			return ipStr, nil
+		}
+	}
+	return "", err
 }
 
 // leave records that one waiter stopped waiting before the flight finished.

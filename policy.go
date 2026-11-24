@@ -109,7 +109,17 @@ type PolicyRule struct {
 	Schedule            *PolicySchedule `json:"schedule,omitempty"` // nil = always active
 	SSLAction           SSLAction       `json:"sslAction"`          // Inspect | Bypass
 	FileFiltering       bool            `json:"fileFiltering"`      // enable file-type scanning
-	FileProfile         FileProfileName `json:"fileProfile"`        // named file-extension block profile (denormalized display cache once FileProfileID is stamped; legacy-fallback input for un-migrated rules)
+	// lastHitUnix is the unix-seconds time of the last match (0 = never) as it
+	// travels on a rule VALUE: out of List() to the metrics persister, and into
+	// publication to seed the counters cell. It is a uint32 placed HERE, in the
+	// 7 bytes of padding after FileFiltering, so that PolicyRule stays at 568
+	// bytes — exactly its malloc size class, with no slack
+	// (TestBenchGate_MatchSnapshotSizeClassHeadroom). It was an int64 of its
+	// own; the 8 bytes it gave up hold the Annotations pointer. uint32 seconds
+	// reach 2106-02-07; ruleLastHit32 saturates. The live, authoritative
+	// timestamp is counters.lastHitUnix (int64). Unexported: never serialized.
+	lastHitUnix uint32
+	FileProfile FileProfileName `json:"fileProfile"` // named file-extension block profile (denormalized display cache once FileProfileID is stamped; legacy-fallback input for un-migrated rules)
 	// FileProfileID is the AUTHORITATIVE, rename-safe link to the file profile
 	// (references-by-id, 2D-C promotion — same doctrine as DecryptionProfileID).
 	// Resolution is ID-FIRST; a rule with NO ID (legacy/un-migrated) resolves by
@@ -143,8 +153,22 @@ type PolicyRule struct {
 	SubjectMatch        *SubjectMatch `json:"subjectMatch,omitempty"` // typed subject selector (reserved; nil = unused)
 	Auth                *AuthRuleSpec `json:"auth,omitempty"`         // Stage-1 auth-rule spec; non-nil only for ruleType="auth" (Phase 1 seam)
 	HitCount            int64         `json:"hitCount"`               // match counter; persisted by rule NAME via ruleMet (metrics.go)
-	lastHitUnix         int64         // unix-seconds of the last match (0 = never); persisted by name via ruleMet
-	LastHit             string        `json:"lastHit,omitempty"` // computed in List() from the counters cell (RFC3339 UTC); never stored on the live rule
+	LastHit             string        `json:"lastHit,omitempty"`      // computed in List() from the counters cell (RFC3339 UTC); never stored on the live rule
+	// Annotations is the ONE container for information that carries no
+	// enforcement meaning. This build and every later one carry its contents
+	// in canonical form and never interpret them. COMPATIBILITY RULE:
+	// any OTHER new key on a rule is by definition an enforcement condition, and
+	// builds that do not know it refuse every ruleset that uses it; anything
+	// informational or server-stamped added from now on MUST go in here. See
+	// policy_unknown_field.go and TestRuleKeys_AreAPinnedSetAndNewOnesAreConditions.
+	//
+	// It is ONE POINTER to cold data (nil for an ordinary rule), not the bytes
+	// themselves: PolicyRule is copied into PolicyMatch on every matched request
+	// and has no spare byte in its size class. The pointee is immutable once
+	// decoded, so rule copies share it. It also carries the decode fault (why
+	// this rule, as decoded from JSON, cannot be honoured as written), which is
+	// never serialized and is only set on a rule about to be refused.
+	Annotations *ruleAnnotations `json:"annotations,omitzero"`
 	// counters is the only mutable cell shared by immutable published revisions
 	// of the same rule. Definition edits, reorders, and rename cascades preserve
 	// this pointer, so an Evaluate on the prior revision cannot lose its hit when
@@ -294,6 +318,10 @@ type PolicyStore struct {
 	// only silences operator warnings that describe an effect on traffic, which
 	// a staged rule does not have yet; it never feeds evaluation or validation.
 	staging bool
+	// silent marks a SCRATCH store: a throwaway copy used to compute what an
+	// operation would do (the import preview). It writes no operator-facing
+	// log line and records no Diagnostics refusal.
+	silent bool
 	// scanIndex is the packed Stage-2 destination prefilter for the revision
 	// it names (see policy_scanindex.go). Published lock-free under mu by
 	// publishScanIndexLocked, alongside every assignment to `verified`, and
@@ -687,11 +715,11 @@ func (ps *PolicyStore) listLocked() []PolicyRule {
 		}
 		// LastHit is a COMPUTED display field — always derive it from the atomic
 		// timestamp, never from a copied string.
-		u := atomic.LoadInt64(&r.lastHitUnix)
+		u := int64(atomic.LoadUint32(&r.lastHitUnix))
 		if r.counters != nil {
 			u = atomic.LoadInt64(&r.counters.lastHitUnix)
 		}
-		out[i].lastHitUnix = u
+		out[i].lastHitUnix = ruleLastHit32(u)
 		if u > 0 {
 			out[i].LastHit = time.Unix(u, 0).UTC().Format(time.RFC3339)
 		} else {
@@ -711,10 +739,11 @@ func (ps *PolicyStore) listLocked() []PolicyRule {
 // (Evaluate skips non-access rules; resolveAuthOutcome returns Default). Invalid
 // auth rules are DROPPED fail-closed, as are access rules carrying a non-nil
 // SubjectMatch (Evaluate does not consult it, so persisting one would let a
-// scoped rule match every request — fail-open). validatePolicyRule guards the
-// per-rule API/import-merge paths; this store-level gate closes the bulk paths
-// that bypass that validator (cluster sync, import-replace, and any other direct
-// ReplaceAll caller). The phase that wires the matcher activates these rules.
+// scoped rule match every request — fail-open). The ingress validation guards
+// the doors where an operator submits rules (API, import in both modes;
+// policy_ruleset_ingress.go); this store-level gate is the one the stored and
+// wire doors rely on (cluster sync, rollback, and any other direct ReplaceAll
+// caller). The phase that wires the matcher activates these rules.
 func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	// A rule this build cannot enforce (unknown ruleType, or any shape
 	// policyRulePersistable refuses): refuse the whole replacement and keep the
@@ -865,10 +894,19 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 	ps.mu.Unlock()
 
 	// Detect policy conflicts after adding the new rule.
+	ps.logConflicts()
+	return nr
+}
+
+// logConflicts logs the store's rule conflicts after an Add. Not for a scratch
+// store, whose rules nobody enforces or will see.
+func (ps *PolicyStore) logConflicts() {
+	if ps.silent {
+		return
+	}
 	for _, w := range ps.DetectConflicts() {
 		logWarnf("Policy: %s", sanitizeLog(w))
 	}
-	return nr
 }
 
 // availablePriorityLocked preserves a unique requested priority and otherwise
@@ -1450,7 +1488,7 @@ func copyPolicyRuleForPublication(nr, rule *PolicyRule) {
 		nr.counters = &policyRuleCounters{
 			hitCount:         hits,
 			restoredHitCount: hits,
-			lastHitUnix:      atomic.LoadInt64(&rule.lastHitUnix),
+			lastHitUnix:      int64(atomic.LoadUint32(&rule.lastHitUnix)),
 		}
 	}
 	nr.DestCountry = append([]string(nil), rule.DestCountry...)
@@ -1510,13 +1548,13 @@ func clonePolicyRuleForPublication(rule *PolicyRule) *PolicyRule {
 func copyPolicyRuleForMatch(nr, rule *PolicyRule) {
 	copyPolicyRuleForPublication(nr, rule)
 	hits := atomic.LoadInt64(&rule.HitCount)
-	lastHit := atomic.LoadInt64(&rule.lastHitUnix)
+	lastHit := int64(atomic.LoadUint32(&rule.lastHitUnix))
 	if rule.counters != nil {
 		hits = atomic.LoadInt64(&rule.counters.hitCount)
 		lastHit = atomic.LoadInt64(&rule.counters.lastHitUnix)
 	}
 	nr.HitCount = hits
-	nr.lastHitUnix = lastHit
+	nr.lastHitUnix = ruleLastHit32(lastHit)
 	nr.counters = nil
 	// LastHit remains the computed List-only display field. The private atomic
 	// timestamp is materialized for compatibility without formatting on the hot

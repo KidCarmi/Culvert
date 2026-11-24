@@ -34,6 +34,8 @@ amended:
     reason: "Owner decision 1 on AGT-900 approved an opt-in startup reconcile (reconcile_on_startup = \"converge\", default \"off\"). \"Changes nothing in Docker\" and \"removes no journal record at startup\" now hold for the default \"off\" mode, which is unchanged and still pinned by the same tests; with \"converge\" the startup may retag to the recorded prior image, finish an armed rollback, and retire a record it verified converged, as AGT-900 states. Pulling at startup, and reporting an interrupted operation as succeeded, stay forbidden in both modes."
   - id: AGT-005
     reason: "Owner decision 1 on AGT-900 (recommendation D4): with reconcile_on_startup = \"converge\", the startup reconcile may also retire an interrupted record, but only after it verified convergence by image id and wrote the audit entry first. In the default \"off\" mode retirement is unchanged: only a later successful upgrade or image rollback."
+  - id: AGT-005
+    reason: "restore.commit is now journaled and an interrupted restore is reported at every start (ADR-0061 addendum, 2026-11-24). Without a way to clear it, the entry of an interrupted restore would stay until the next image change, which on an appliance that is restored but not upgraded is indefinitely. The set of retiring operations is therefore WIDENED by one case: a later restore.commit or rollbacks mode=data that succeeds (its commit command returned success and its health check passed) retires the interrupted records of the restore-class kinds only (restore.commit, rollbacks mode=data), audit entry first, by the same interrupted_superseded mechanism. It never retires an upgrade or image-rollback record, because a restore does not re-pin the image tag; that is a new forbidden transition with its own tests. The existing rules are unchanged and no registered test was edited: a successful upgrade or image rollback still retires every other record, and the converge reconcile still retires only after verified convergence. Not owner-approved; the wording is the implementer's."
   - id: AGT-900
     reason: "Owner decision 1 resolved the open question for an opt-in, conservative converge mode: default off; no adoption of an unverified target; recovery_required when evidence is insufficient; Docker unavailable defers. The invariant is restated for that mode, with its tests; the entry stays open until a real-Docker e2e verifies it (owner, 2026-11-23). owner_approved stays false."
   - id: AGT-900
@@ -42,6 +44,24 @@ amended:
     reason: "Owner decision of 2026-11-24 (POL-005 widening). The invariant is unchanged. The control at the end of TestPOL004_RollbackKeepsARetainedUnknownActionRule asserted that a restore SKIPS a Redirect rule with no location; a restore no longer skips any stored rule, so the control now asserts that rule is restored beside the unknown-action rule."
   - id: POL-005
     reason: "Owner decision of 2026-11-24, explicitly revising SEC-POLICYDROP-1: the invariant is widened from 'a rule whose ruleType is unrecognised' to 'any rule this build cannot enforce as written' (an access rule carrying a subjectMatch or an auth spec, an invalid auth rule, a null entry). Load and ReplaceAll used to drop such a rule and install the rest; a dropped Block rule under default allow forwarded its traffic (measured: 200, backend reached). The gate, its doors and the eight pre-existing POL-005 tests are unchanged; tests are added. Existing tests elsewhere that asserted the per-rule drop were migrated to assert whole-ruleset refusal. An empty entry (null or {}) is refused at every door. Rollback applies the gate and then restores every stored rule as stored, instead of skipping rules the write-time validator refuses. Record: docs/engineering/security-reviews/2026-11-24-ruleset-refusal-supersedes-per-rule-drop.md."
+  - id: AGT-004
+    reason: "ADR-0062, owner decision 2 (2026-11-24): the state_dir instance lock is now held in EVERY mode, taken before anything under state_dir is read or rewritten and before the socket is bound, so a second agent on the same state_dir refuses to start (it used to serve and admit operations beside the first, and replace its socket). Off mode still changes nothing in Docker and runs no reconcile; TestOffMode_StatusAndStateUnchanged now asserts the off-mode agent HOLDS the lock instead of asserting no lock file exists. Not owner-approved wording."
+  - id: AGT-900
+    reason: "ADR-0062, owner decision 2: a second agent process on the same state_dir no longer starts and skips its reconcile; it refuses to start (non-zero exit, no socket, no Docker change, record kept) while the first keeps serving. TestConvergeRecovery_SecondInstanceSkips is replaced by TestConvergeRecovery_SecondInstanceRefusesToStart. The reconcile still takes the lock itself when a server is built without it (tests), so its skipped_second_instance state remains reachable there. Not owner-approved wording."
+  - id: POL-005
+    reason: "Owner decision of 2026-11-24 (unknown JSON fields: unify the contract across all entry points, prefer explicit rejection, preserve compatibility through an explicit strategy). The invariant is widened again, in the same direction: a rule object carrying a JSON key this build has no field for (a misspelt condition, or one added by a newer release), or the same key twice (the last value won), is a rule it cannot enforce as written, because a condition present in the document is not enforced and the rule matches more than was written. Measured before the change: the policy file, a stored config version, a pending draft and a control-plane snapshot each installed an Allow narrowed only by an unknown key as an Allow for every source. The operator doors already refused an unknown key (400 'invalid JSON') and accepted a duplicate; they now refuse both and name the rule and the keys. The gate, its doors, its Diagnostics code and every registered test are unchanged; tests are added. Compatibility strategy, now part of the contract: every rule key other than the reserved 'annotations' container is an enforcement condition, 'annotations' is carried in canonical form (on which it is bounded) and never interpreted, and a test pins today's key set. A rule list given twice in one document is refused likewise. Key matching stays case-insensitive, documents around rules (ConfigSnapshot sections) stay tolerant, and no legacy key is allowlisted because the available history holds none on a rule. Record: docs/engineering/security-reviews/2026-11-24-unknown-rule-fields-refused.md."
+  - id: AGT-004
+    reason: "ADR-0062 slice 2 (journal schema version). A journal record written by a NEWER agent (schema above this build's) is listed in status like any interrupted record, but this build never rewrites or removes it, so a later successful image change does not clear it: its fields may say the state is unsafe in a way this build cannot read. This narrows 'lists it until a later image change succeeds' for that one case; records this build or an older agent wrote are unchanged, and no registered test was edited (new tests: TestRetire_NewerRecordIsNeverSuperseded, TestNewerSchema_IsNeverRewrittenOrRemoved). Not owner-approved; the wording is the implementer's."
+  - id: AGT-005
+    reason: "ADR-0062 slice 2. Retirement is narrowed, never widened: a record a newer agent wrote is never removed by this build, neither by a later success nor by the converge reconcile (which reports it recovery_required/record_from_newer_agent without reading Docker), and no interrupted_superseded entry is written for it. Unknown keys of any record now survive every rewrite, and an agent released before slice 2 is fenced off a directory holding schema-2 records (it refuses to serve on the fence record's unknown phase). Existing retirement rules and their tests are unchanged. Not owner-approved; the wording is the implementer's."
+  - id: AGT-004
+    reason: "ADR-0062 slice 1 (owner decision 1: keep durable operation records until the appliance state is proven safe). A journaled operation that ENDS failed without proving its end state safe now keeps its record: it is listed in status at once and reported by every later start exactly like an interrupted operation, but marked with its own failure reason instead of agent_restart_interrupted, and its interruption audit entry is not written (it has its terminal entry). Startup with reconcile_on_startup = off may now remove one kind of record: one whose operation ENDED (it carries terminal_outcome, written before the terminal audit) and either succeeded or proved its end state safe, and only after that operation's terminal audit entry is on file (written at that start if the audit log lacks it). This finishes the operation's own terminal sequence that a kill cut short; it is not a reconcile, reads no Docker and changes nothing in Docker. The forbidden transition is narrowed from 'removing a journal record at startup' to 'removing the record of an interrupted operation, or of an ended one whose end state is not proven safe'. No registered AGT-004 test was edited. Not owner-approved; the wording is the implementer's."
+  - id: AGT-005
+    reason: "ADR-0062 slice 1. Before, the orchestrator removed an operation's own record at every terminal state and only then wrote the terminal audit entry. Now: (1) the operation's own record is removed at its end only when it succeeded or proved its end state safe (upgrades.apply: never wrote the write-ahead barrier, or its inline rollback passed its gate and verify; rollbacks.create mode=image: failed before rollback_restart; restore-class: never reached the stopping stage, or committed and passed its health check), and only after its terminal audit entry is durable; (2) otherwise the record is KEPT and is retired exactly like an interrupted record (later successful upgrade or image rollback; for a restore-class record also a later established restore; verified converge), each retirement first completing the kept record's own terminal entry if it was never durable. Two registered tests were edited because they asserted the old removal of the failing operation's OWN record, never a retirement: TestRetireRestore_NotWhenTheRestoreDidNotEstablishItsState now expects the failed restore's own record beside the untouched stale ones when it had stopped the stack, and TestRetireRestore_AuditFailureKeepsRecord now also expects the op's own record to stay (its audit entry could not be written). Every stale-record assertion is unchanged. Not owner-approved; the wording is the implementer's."
+  - id: AGT-900
+    reason: "ADR-0062 slice 1. With reconcile_on_startup = converge the startup reconcile now also decides records KEPT by operations that ended failed without proving their end state safe, with the same, unchanged decision table and the same retirement rule (verified convergence and the :reconciled audit entry first); before retiring such a record it completes the record's own terminal audit entry if it was never durable. The decision table, the attempt cap and the forbidden transitions are unchanged; the invariant is widened from 'after a crash during an image change' to also cover 'after an image change that failed without proving its end state safe'. Not owner-approved; the wording is the implementer's."
+  - id: AGT-002
+    reason: "ADR-0062 slice 1, no change to the invariant. Two registered tests (TestApply_PinnedTag_UpFailsBeforeRecreate_RollbackDisabled_TagRestored, TestApply_PinnedTag_RestoreHappensInsideJournalWindow) ended with an incidental assertion that the failed upgrade's journal record was removed. Such an upgrade failed past the write-ahead barrier with no inline rollback that passed its gate, so its record is now KEPT (AGT-005 amendment). The assertion is replaced by a stricter one: exactly the op's own record remains, stamped failed:command_error and audited. Every tag and container assertion is unchanged. Not owner-approved."
 retired: []
 
 contracts:
@@ -184,11 +204,12 @@ contracts:
     area: policy
     status: enforced
     owner_approved: false
-    invariant: "A ruleset containing a rule this build cannot enforce as written (an unrecognised ruleType, or any shape the persistability gate refuses) is refused whole at every door, and the running and persisted policy are unchanged. No replacement, normalization, migration or compatibility conversion may silently remove an enforcement rule."
+    invariant: "A ruleset containing a rule this build cannot enforce as written (an unrecognised ruleType, a JSON key the build has no rule field for, the same key given twice, or any shape the persistability gate refuses) is refused whole at every door, and the running and persisted policy are unchanged. No replacement, normalization, migration or compatibility conversion may silently remove an enforcement rule."
     authority: "Policy store and its bulk doors (policy_ruletype_gate.go, policy.go)."
     code:
       - "policy_ruletype_gate.go"
       - "policy_preflight.go"
+      - "policy_unknown_field.go"
     configs: []
     transitions:
       permitted:
@@ -202,6 +223,15 @@ contracts:
         - "dropping a rule the build cannot enforce and installing the rest of the ruleset"
         - "restoring a stored config version without one of its rules"
         - "installing an empty rule entry (null or {}), which matches every request"
+        - "installing a rule decoded from JSON with a key the build has no field for, the key ignored"
+        - "failing to decode a control-plane snapshot because of an unknown top-level section"
+        - "installing a rule decoded from JSON in which one field was given twice, the last value kept"
+        - "adding a rule key for information that is not an enforcement condition (it belongs inside annotations)"
+        - "interpreting the contents of a rule's annotations, or dropping them in the store, the policy file, an export or a snapshot"
+        - "raising the size or depth bound of annotations"
+        - "bounding annotations on any form other than the canonical one Culvert's encoders write (a ruleset accepted once must stay accepted after save, export and publish)"
+        - "keeping only the last of two rule lists given under the same key in one document"
+        - "decoding a rule onto anything but a zero value"
     tests:
       - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_E2E_BulkReplaceIsRefusedAndLastKnownGoodStillBlocks}
       - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_E2E_PolicyFileReloadIsRefusedAndLastKnownGoodStillBlocks}
@@ -218,8 +248,79 @@ contracts:
       - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_RollbackRefusesWholeOrRestoresEveryStoredRule}
       - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_RepeatedRefusalIsLoggedOnceAndCountedEveryTime}
       - {file: "policy_unenforceable_rule_test.go", name: TestPolicyPreflight_ListsEveryRefusedRuleAndChangesNothing}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_WhatCountsAsUnknown}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_EveryKeyIsNamedBoundedAndNotSticky}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AreAPinnedSetAndNewOnesAreConditions}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AnnotationsAreCarriedVerbatimNeverInterpretedAndBounded}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_DuplicateKeyIsRefusedAtEveryDoorClass}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_FetchAndApplyAndDeltaRemainderRefuseAndTheCleanSnapshotApplies}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_RefusedLastGoodSnapshotAtBootIsADiagnosticsRow}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_StartupFatalDoesNotClaimARunningPolicy}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AnnotationsBoundIsAFixedPointOfEveryEncoder}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_AnnotatedRulesetSurvivesItsOwnSaveExportAndPublish}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_RuleListGivenTwiceIsRefusedAtEveryDoor}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_NothingSurvivesAnEarlierDecodeAndCopiesDoNotAlias}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_PreflightChecksEveryLocationAndLabelsByShape}
+      - {file: "policy_unknown_field_test.go", name: TestRuleKeys_ColdDataIsOnePointerAndTheRuleKeepsItsSizeClass}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_SingleRuleAPIRefusesByNameAndChangesNothing}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_GetThenPutRoundTripsThroughTheRealHandlers}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_ImportIsRefusedInEveryModeAndNamesTheRule}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_PolicyFileIsRefusedAtLoadReloadAndStartup}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_StoredVersionAndPendingDraftAreRefused}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_SnapshotIsRefusedBeforeAnyMutationAndTheEnvelopeStaysTolerant}
+      - {file: "policy_unknown_field_test.go", name: TestUnknownRuleField_PreflightListsEveryRuleAndPOL004IsUntouched}
     validation: integration
-    compatibility: "A node handed a ruleset from a newer release keeps enforcing its last accepted policy; a policy file it cannot fully understand stops startup, as a malformed file does."
+    compatibility: "A node handed a ruleset from a newer release keeps enforcing its last accepted policy; a policy file it cannot fully understand stops startup, as a malformed file does. Every rule key except the annotations container is an enforcement condition: when a later release adds one and a rule uses it, older nodes refuse the whole snapshot (blocklist and IP-filter changes included) until upgraded; information that is not a condition travels inside annotations and never causes a refusal. A hand-edited policy file with an extra, misspelt or repeated rule key stops startup after upgrade; `culvert policy-check` lists such keys beforehand."
+
+  - id: POL-006
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "Every door through which an operator submits policy rules runs the one shared per-rule check (checkRuleIngress) and the shared uniqueness check; no door has a rule of its own. A rule that is invalid, or that the node cannot enforce as written (a schedule timezone it cannot load), is refused at all of them: a replace-mode config import holding one is refused whole before any section applies, with the running and persisted policy unchanged, and a merge-mode import skips and reports it, leaving any existing rule of the same identity untouched. A finding may be installed with a warning only when its enforcement is fail-closed at the point of use; today that is one finding, a Redirect host whose DNS lookup failed or was not made in time (the serve path re-checks it and answers 403): the single-rule API refuses it, an import installs it with a per-rule warning. An address literal is classified without DNS and never reaches that class. An import whose request is cancelled applies nothing. Recorded exceptions: the live SSO provider-reference check runs at the auth-policy API only (registry drift must not drop stored rules), and a draft commit re-validates its candidate without the source-literal check, because the candidate holds rules inherited from the running policy."
+    authority: "Policy rule ingress validation (policy_ruleset_ingress.go, ui_helpers.go)."
+    code:
+      - "policy_ruleset_ingress.go"
+      - "ui_helpers.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a check to the shared per-rule validation, which then applies at every operator-facing door"
+        - "merge-mode import skipping an invalid rule and reporting it in warnings"
+        - "an import installing a Redirect rule whose host this node could not resolve, with a warning naming it"
+      forbidden:
+        - "a validation rule that exists at one operator-facing door only, other than the recorded exceptions"
+        - "a replace-mode import installing a rule that is invalid"
+        - "applying any section of an import whose rule set was refused, or auditing or versioning it"
+        - "refusing an import because the importing node's resolver could not answer for a Redirect host"
+        - "installing, at an operator door, a rule whose schedule timezone the node cannot load, or overwriting a working rule with one"
+        - "treating a private, loopback, link-local or metadata address literal as unverifiable, whatever the state of the request context"
+        - "adding a finding to the install-with-warning class whose enforcement is not fail-closed at the point of use"
+        - "installing an unverified rule without a warning in the response, or a dry run that omits a warning the commit returns"
+        - "running the ingress validation at a stored or wire door (policy file, rollback, control-plane snapshot, pending draft), where it could stop a node starting, rolling back or following its control plane"
+    tests:
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_ReplaceImportRefusesWhatThePolicyAPIRefuses}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_ReplaceImportStillAcceptsAValidRuleset}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_E2E_RefusedReplaceImportKeepsTheBlockInForce}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_MergeImportSkipsAndReportsAnInertSourceIP}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_RefusalIsBoundedAndSanitized}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_StoredAndWireDoorsStayOnThePureGate}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ReplaceImportSurvivesAResolverOutage}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ReplaceImportRefusesARedirectToAPrivateAddress}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_PolicyAPIStillRefusesAnUnverifiableRule}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_UnloadableTimezoneIsRefusedNotInstalled}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_MergeNeverOverwritesAWorkingRuleWithAnUnloadableTimezone}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_TypoTimezoneIsInvalidOnANodeWithTzdata}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_RedirectAddressLiteralsAreClassifiedWithoutDNS}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_CancelledRequestAppliesNothing}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_SpentBudgetDoesNotLaunderALiteral}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_MergeDryRunIsSilentAndTouchesNothing}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_VerdictsAreNotReusedForAnotherRuleSet}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ImportVerificationIsTimeBounded}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_MergePreviewAgreesWithApplyAndWarningsAreBounded}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_UnsupportedVersionIsReportedBeforeRuleValidation}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ExportOfAnAPIBuiltPolicyReimports}
+    validation: integration
+    compatibility: "A replace-mode import that used to succeed can be refused, including a backup this system exported while its policy held a rule from a policy file, a snapshot, a restored version or an older release that the API refuses: an inert sourceIP, duplicate names or priorities, an unnamed rule, a missing, case-folded or unknown action, a Redirect with an empty, non-http or private target, a schedule timezone the node cannot load. The 400 names the rule and the reason. A backup of a valid policy restores on a node without DNS, with warnings; on a node without a timezone database its scheduled rules are refused until tzdata is installed. Stored policy, rollback and cluster sync are unaffected. Evaluation of an empty action is unchanged (POL-901)."
 
   - id: AUTH-001
     area: authn-authz
@@ -649,6 +750,35 @@ contracts:
     validation: integration
     compatibility: "Data planes ignore versions they have already seen."
 
+  - id: CLU-003
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "On a control plane (including one whose listener bind is still pending), a committed change to the running policy rulebase is published to the fleet at commit, at most once per request, and the published snapshot is captured after every change whose publish already committed; a refused, failed or staged (draft) edit, a request that leaves the rulebase unchanged, or an edit on a node that is not a control plane, publishes nothing."
+    authority: "Policy publication (policy_publish.go) over the control-plane snapshot store (controlplane_snapshot.go)."
+    code:
+      - "policy_publish.go"
+      - "policy_mutation.go"
+      - "controlplane_snapshot.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a policy door that publishes through publishRunningPolicyChange"
+      forbidden:
+        - "a committed rule edit that reaches data planes only at the next unrelated publish"
+        - "publishing a staged draft edit, a refused edit or an edit whose persistence failed"
+        - "a publish committing a snapshot captured before another publisher's committed change (an older rulebase at a higher version)"
+    tests:
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_RuleDoors}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_DraftStagesSilentlyAndCommitPublishesOnce}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_RefusedOrFailedEditDoesNotPublish}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_OnlyOnAControlPlane}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_ConcurrentEditCannotBeOverwrittenByAnOlderCapture}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_NoChangeDoesNotPublish}
+      - {file: "policy_edits_publish_test.go", name: TestPolicyEditsPublish_BindPendingControlPlanePublishes}
+    validation: integration
+    compatibility: "Data planes apply a published snapshot whole; an edit that was waiting for a publish is delivered by the first policy edit after upgrade."
+
   - id: REC-001
     area: failure-recovery
     status: enforced
@@ -812,12 +942,15 @@ contracts:
     area: agent-lifecycle
     status: enforced
     owner_approved: false
-    invariant: "After the maintenance agent dies during an upgrade or rollback, its next start reports the operation as failed with how far it got and lists it in status until a later image change succeeds; with reconcile_on_startup = \"off\" (the default) it changes nothing in Docker. What \"converge\" may change is AGT-900."
+    invariant: "After the maintenance agent dies during an upgrade or rollback, its next start reports the operation as failed with how far it got and lists it in status until a later image change succeeds; an operation that ended failed without proving its end state safe keeps its record and is listed and reported the same way, with its own failure reason. With reconcile_on_startup = \"off\" (the default) startup changes nothing in Docker. What \"converge\" may change is AGT-900."
     authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/main.go"
       - "cmd/culvert-maint/internal/journal/*.go"
       - "cmd/culvert-maint/internal/server/interrupted.go"
+      - "cmd/culvert-maint/internal/server/terminal_record.go"
+      - "cmd/culvert-maint/internal/ops/orchestrator.go"
+      - "cmd/culvert-maint/internal/ops/terminal.go"
       - "cmd/culvert-maint/internal/status/*.go"
       - "cmd/culvert-maint/internal/config/*.go"
     configs: []
@@ -825,10 +958,13 @@ contracts:
       permitted:
         - "reporting the same interrupted operation again at every later start"
         - "starting while Docker is unreachable"
+        - "removing, at startup, the record of an operation that ended succeeded or with its end state proven safe, after its terminal audit entry is on file"
       forbidden:
         - "reporting an interrupted operation as succeeded"
+        - "reporting a failed operation as succeeded, or a kept failed operation as agent_restart_interrupted"
         - "pulling, tagging or recreating containers at startup with reconcile_on_startup off"
-        - "removing a journal record at startup with reconcile_on_startup off"
+        - "removing the record of an interrupted operation, or of an ended one whose end state is not proven safe, at startup with reconcile_on_startup off"
+        - "writing an operation's terminal audit entry twice, or removing its record before that entry is durable"
         - "pulling an image at startup in any mode"
         - "returning an image reference from a journal record that failed the repo-bound digest check"
     tests:
@@ -837,6 +973,13 @@ contracts:
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_DockerUnavailableAtStartup}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_ForgedRecordRefsAreNotRepeated}
       - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_AuditsOnceAndCountsStarts}
+      - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_KeptFailedRecord_ReportedWithItsReasonAuditedOnce}
+      - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_EndedSucceededRecord_AuditedThenRemoved}
+      - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_KillAfterTerminalAudit_NoSecondEntry}
+      - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_EndedRecordWithAuditUnavailable_NotRemoved}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestTerminalCrash_KillBeforeAudit_StartupWritesItOnceAndKeeps}
+      - {file: "cmd/culvert-maint/internal/ops/terminal_test.go", name: TestTerminal_RecordThenAuditThenSettleThenFinish}
+      - {file: "cmd/culvert-maint/internal/status/status_terminal_test.go", name: TestSnapshot_KeptRecordOfThisProcessIsListed}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestOffMode_StatusAndStateUnchanged}
       - {file: "cmd/culvert-maint/internal/config/config_reconcile_test.go", name: TestLoad_ReconcileOnStartup}
     validation: integration
@@ -846,21 +989,30 @@ contracts:
     area: agent-lifecycle
     status: enforced
     owner_approved: false
-    invariant: "An interrupted operation's journal record is removed only when a later upgrade or image rollback succeeds after re-pinning the image tag and passing the health gate, or, with reconcile_on_startup = \"converge\", when the startup reconcile verified convergence by image id; the removal is audited first."
+    invariant: "An interrupted operation's journal record is removed only when a later upgrade or image rollback succeeds after re-pinning the image tag and passing the health gate; or, for the record of an interrupted restore or data rollback only, when a later restore or data rollback succeeds after its commit returned success and its health check passed; or, with reconcile_on_startup = \"converge\", when the startup reconcile verified convergence by image id. The removal is audited first. A restore or data rollback never removes the record of an interrupted upgrade or image rollback. The same rules retire the record an operation KEPT because it ended failed without proving its end state safe (ADR-0062 slice 1); an operation removes its own record at its end only when it succeeded or proved its end state safe, and only after its terminal audit entry is durable."
     authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/internal/server/journal_retire.go"
+      - "cmd/culvert-maint/internal/server/restore_journal.go"
       - "cmd/culvert-maint/internal/server/startup_reconcile.go"
+      - "cmd/culvert-maint/internal/server/terminal_record.go"
     configs: []
     transitions:
       permitted:
         - "keeping the record after a failed recovery attempt"
+        - "a successful restore or data rollback removing the record of an earlier interrupted restore or data rollback"
+        - "a successful upgrade or image rollback removing the record of an interrupted restore or data rollback, as it removes every other record"
         - "keeping the record when the startup reconcile reports recovery_required, defers, or cannot write its audit entry"
       forbidden:
         - "removing the record when a later operation failed"
         - "removing the record on an already-current upgrade, which re-pins nothing"
         - "removing a record without an audit entry"
         - "the startup reconcile removing a record before its audit entry is written or without verified convergence"
+        - "a restore or data rollback removing the record of an interrupted upgrade or image rollback"
+        - "removing a restore record when the later restore failed, or did not commit and pass its health check"
+        - "the startup reconcile removing, or acting on, the record of an interrupted restore or data rollback"
+        - "an operation removing its own record after a failure that did not prove its end state safe"
+        - "removing an operation's own record before its terminal audit entry is durable"
     tests:
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_NewUpgradeConvergesAndRetiresTheRecord}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_AlreadyCurrentUpgradeDoesNotRetire}
@@ -869,14 +1021,34 @@ contracts:
       - {file: "cmd/culvert-maint/internal/server/journal_retire_test.go", name: TestRetire_AuditFailureKeepsRecord}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_AuditFailureKeepsRecord}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_EveryKillPoint}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_restore_test.go", name: TestRetireRestore_SuccessRetiresRestoreRecordsOnly}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_restore_test.go", name: TestRetireRestore_NeverAnUpgradeRecord}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_restore_test.go", name: TestRetireRestore_NotWhenTheRestoreDidNotEstablishItsState}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_restore_test.go", name: TestRetireRestore_AuditFailureKeepsRecord}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_test.go", name: TestStartupReconcile_RestoreRecordIsReportedOnly}
+      - {file: "cmd/culvert-maint/startup_restore_crash_test.go", name: TestRestoreCrash_LaterRestoreRetiresTheRecord}
+      - {file: "cmd/culvert-maint/startup_restore_crash_test.go", name: TestRestoreCrash_RestoreDoesNotRetireAnInterruptedUpgrade}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Apply_FailedBeforeBarrier_Removed}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Apply_FailedPastBarrierNoRollback_Kept}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Apply_InlineRollbackPassedGate_Removed}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Apply_InlineRollbackFailedGate_Kept}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_ImageRollback_FailedBeforeTagMove_Removed}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_ImageRollback_FailedInRestart_Kept}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_ImageRollback_FailedGate_Kept}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Restore_FailedBeforeStop_Removed}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Restore_FailedAfterStop_Kept}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Restore_CommittedAndHealthy_Removed}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestKeptRecord_RetiredByALaterSuccess}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestKeptRecord_RetirementCompletesAMissingTerminalEntryFirst}
+      - {file: "cmd/culvert-maint/internal/ops/terminal_test.go", name: TestTerminal_AuditFailureNeverSettles}
     validation: integration
-    compatibility: "Before this entry a record was never removed and was reported again at every start."
+    compatibility: "Before this entry a record was never removed and was reported again at every start. Since the ADR-0061 addendum of 2026-11-24 restore.commit is journaled too; an agent that predates that reports such a record as an interrupted operation of unknown kind and retires it on its next successful upgrade or image rollback."
 
   - id: AGT-900
     area: agent-lifecycle
     status: open
     owner_approved: false
-    invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or reports recovery_required and changes nothing. It never starts an image that has not passed the health gate. With the default \"off\" it changes nothing (AGT-004)."
+    invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change, or after an image change that failed without proving its end state safe (its record kept, ADR-0062 slice 1), the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or reports recovery_required and changes nothing. It never starts an image that has not passed the health gate. With the default \"off\" it changes nothing (AGT-004)."
     authority: "Maintenance agent (cmd/culvert-maint). Owner decision 1 on the AGT-900 recovery proposal; lifecycle docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/main.go"
@@ -913,7 +1085,7 @@ contracts:
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_FinishesAnArmedRollback}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_KillDuringReconcile}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_DockerUnavailableDefers}
-      - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_SecondInstanceSkips}
+      - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_SecondInstanceRefusesToStart}
       - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcileDecisionV2_ExhaustiveProperties}
       - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcileDecisionV2_NegativeControls}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_WriteAheadFailureMeansNoAction}
@@ -925,6 +1097,8 @@ contracts:
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_finish_armed_test.go", name: TestStartupReconcile_ArmedTTGateFailsThenRestarts}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_finish_armed_test.go", name: TestStartupReconcile_ArmedTTVerifyMismatchIsCapped}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_finish_armed_test.go", name: TestStartupReconcile_ArmedRealignRetiresOnlyOnAFreshProbe}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestKeptRecord_ConvergeDecidesItLikeAnInterruptedRecord}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestKeptRecord_ConvergeWritesAMissingTerminalEntryBeforeRetiring}
     validation: integration
     question: "OPEN until verified on a real Docker daemon (owner, 2026-11-23): does the conservative converge mode hold its safety properties against real Docker (the real-Docker e2e)? If it does, should converge become the default before the first customer release?"
     compatibility: "Opt-in; the default \"off\" is the AGT-004 behaviour. Proven against a fake Docker exec layer and the shell Docker model only, not yet against a real daemon (the proposal's real-Docker e2e is not built). Enabling it by default, and adopting a live target that never passed its gate, are not decided and are excluded by owner decision 1. A record from an agent that predates rollback_armed is never finished as a rollback; it is reported. Finishing an armed rollback whose retag never ran (real-Docker e2e finding 2) is proven against the same fakes only; the real-Docker e2e must be re-run on it."
