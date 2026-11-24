@@ -1368,7 +1368,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// The durable write is checked, not assumed: the imported rules are live
 	// from here on, and a swallowed failure answered "ok" while the policy file
 	// still held the previous rules — a restart then reverted the import.
-	policyPersistErr := policyStore.SaveErr()
+	policyPersistErr := persistImportedPolicy()
 	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
 		setDefaultPolicyAction(b.DefaultAction)
 	}
@@ -1606,6 +1606,21 @@ func writeImportResult(w http.ResponseWriter, resp map[string]any, policyPersist
 	jsonOK(w, resp)
 }
 
+// persistImportedPolicy writes the imported running policy to disk and reports
+// only a write that did NOT land. A replaced-but-parent-not-synced result
+// (fileutil.ErrReplacedNotSynced) means the policy file already carries the
+// imported rules, so it is logged and treated as persisted, as every other
+// policy writer does; answering "not persisted" for it would be untrue in the
+// other direction.
+func persistImportedPolicy() error {
+	err := persistRunningPolicy()
+	if errors.Is(err, fileutil.ErrReplacedNotSynced) {
+		logWarnf("Config import: policy rules written but parent-dir sync failed: %v", err)
+		return nil
+	}
+	return err
+}
+
 // importAuditDetail is the config.import audit detail. When the imported
 // policy could not be written to disk it says so: the audit entry is the
 // durable record an operator reads after the fact.
@@ -1631,6 +1646,11 @@ func writeImportPolicyNotDurable(w http.ResponseWriter, resp map[string]any) {
 	resp["applied"] = true
 	resp["policy_persisted"] = false
 	resp["error"] = "import applied to the running configuration but the policy rules could not be written to disk; they will be lost on restart"
+	// Machine-readable recovery: the import must not be read as "nothing
+	// happened, send it again". A replace-mode re-import is idempotent; a
+	// merge-mode re-import is not (alert webhooks are appended again).
+	resp["retry_safe"] = resp["mode"] == "replace"
+	resp["recovery"] = "fix the data directory, then save the policy again (any policy edit, or re-import in replace mode); do not re-import in merge mode, which appends alert webhooks a second time"
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusInternalServerError)
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable

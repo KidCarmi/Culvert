@@ -9,8 +9,10 @@
 package audit
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -113,6 +115,50 @@ func (l *Logger) Write(ev Event) error {
 		return fmt.Errorf("audit: sync: %w", err)
 	}
 	return nil
+}
+
+// HasSucceeded reports whether the audit log at path already holds a
+// succeeded event with this op id and kind. It streams the file line by line
+// (constant memory), decodes only lines that mention opID, and skips lines it
+// cannot decode, including a torn final line from a crash mid-append. A read
+// error is returned so the caller can fall back to writing: duplicating an
+// audit entry is acceptable, losing one is not.
+//
+// It exists so a write that must happen exactly once per fact (the startup
+// reconcile's ":reconciled" retirement entry) can be made idempotent across a
+// crash between the fsynced audit write and the action that follows it.
+func HasSucceeded(path, opID, kind string) (bool, error) {
+	if opID == "" || kind == "" {
+		return false, fmt.Errorf("audit: HasSucceeded needs op_id and kind")
+	}
+	f, err := os.Open(path) // #nosec G304 -- the agent's own audit log path
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("audit: open %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	needle := []byte(opID)
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if !bytes.Contains(line, needle) {
+			continue
+		}
+		var ev Event
+		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		if ev.OpID == opID && ev.Kind == kind && ev.Outcome == OutcomeSucceeded {
+			return true, nil
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return false, fmt.Errorf("audit: scan %s: %w", path, err)
+	}
+	return false, nil
 }
 
 // Recent reads the last n events from path. Used by GET /v1/audit.
