@@ -308,12 +308,21 @@ func blocklistSyncedFingerprint(hosts []string) string {
 // on reply.Epoch) and validated the remainder's caps — this function does the
 // blocklist-substituting apply only.
 //
+// The IdP sync, the one remainder step that can refuse, runs before the
+// blocklist is advanced, so an IdP refusal changes nothing.
+//
 // On a fingerprint mismatch it returns an error WITHOUT applying the remainder,
-// so only the blocklist is left mutated (and the caller's fall-through to a full
+// so only the blocklist (and the already-accepted IdP set) is left mutated (and the caller's fall-through to a full
 // resync heals it via the wholesale ReplaceFeedEntries) — the other stores are
 // never advanced to a version whose blocklist we could not verify. This is the
 // "detect divergence → resync, never silently persist it" contract.
 func applyBlocklistDeltaSnapshot(remainder ConfigSnapshot, chain []blocklistDelta, targetFP string) error {
+	// The refusable IdP step runs before any store is advanced, as on the full
+	// path (applySnapshotMutations): a refusal after the policy rules were
+	// replaced left them over the previous category groups.
+	if err := syncSnapshotIdPBeforeApply(remainder); err != nil {
+		return fmt.Errorf("idp sync: %w", err)
+	}
 	for i := range chain {
 		bl.ApplyDelta(chain[i].Added, chain[i].Removed)
 	}
@@ -337,9 +346,6 @@ func applyBlocklistDeltaSnapshot(remainder ConfigSnapshot, chain []blocklistDelt
 	// Everything except the blocklist, in the same order as the full path.
 	applySnapshotTrafficExceptBlocklist(remainder)
 	applySnapshotClusterRuntime(remainder)
-	if err := syncSnapshotIdPProfiles(remainder); err != nil {
-		return fmt.Errorf("idp sync: %w", err)
-	}
 	applySnapshotExtendedState(remainder)
 	return nil
 }

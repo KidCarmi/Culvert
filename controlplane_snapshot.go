@@ -1462,20 +1462,22 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 }
 
 // applySnapshotMutations is applyConfigSnapshot's mutating region: every call
-// here replaces live enforcement state. Order is preserved verbatim from before
-// the CHAOS-79 extraction, and the caller holds the reference-integrity gate.
+// here replaces live enforcement state. The caller holds the reference-integrity
+// gate. The only step that can refuse runs first, before anything is replaced.
 func applySnapshotMutations(snap ConfigSnapshot) error {
-	applySnapshotPolicyAndTraffic(snap)
-	applySnapshotClusterRuntime(snap)
-
-	// IdP profiles. ReplaceAll compiles every enabled provider before swapping
-	// the live registry, so a bad CP-side IdP update does not break the DP's
-	// currently working SAML/OIDC providers. A rejection ABORTS the remaining
-	// (extended) state below — pre-existing ordering, preserved by the split.
-	if err := syncSnapshotIdPProfiles(snap); err != nil {
+	// IdP profiles FIRST: this is the one step in the region that can refuse,
+	// so it must run before any enforcement state is replaced. It used to run
+	// after the policy rules and before the category groups those rules
+	// reference; a refusal there left the new rules (already saved to disk)
+	// over the old groups, so a group-scoped Block matched nothing and the
+	// traffic fell to the default action.
+	if err := syncSnapshotIdPBeforeApply(snap); err != nil {
 		logger.Printf("DataPlane: IdP profile sync rejected: %v", err)
 		return fmt.Errorf("config snapshot v%d IdP sync rejected: %w", snap.Version, err)
 	}
+
+	applySnapshotPolicyAndTraffic(snap)
+	applySnapshotClusterRuntime(snap)
 
 	applySnapshotExtendedState(snap)
 	applySnapshotSaaSFeed(snap)
@@ -1966,6 +1968,16 @@ func applyExternalAuthSnapshotSettings(snap ConfigSnapshot) {
 	// and OIDC redirect URIs use the same public origin on every DP.
 	SetProxyBaseURL(snap.ProxyBaseURL)
 	trustForwardedHeaders = snap.TrustForwardedHeaders
+}
+
+// syncSnapshotIdPBeforeApply is the refusable head of a snapshot apply: the
+// external-auth settings the IdP providers compile against, then the IdP
+// registry swap. idpRegistry.ReplaceAll compiles every enabled provider before
+// swapping, so a refusal leaves the working providers and, because nothing
+// else has been applied yet, the whole previous configuration in place.
+func syncSnapshotIdPBeforeApply(snap ConfigSnapshot) error {
+	applyExternalAuthSnapshotSettings(snap)
+	return syncSnapshotIdPProfiles(snap)
 }
 
 func syncSnapshotIdPProfiles(snap ConfigSnapshot) error {
