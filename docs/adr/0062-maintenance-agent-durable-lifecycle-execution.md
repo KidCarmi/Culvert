@@ -179,15 +179,26 @@ gaps and make the #2051 executor the single path every recovery takes.
   1. Attribution lives in the operation's own journal record, never in a
      global marker or a parallel ops array, and never in a cross-record
      ownership check. Before a Docker-changing command the op writes an
-     intent (`{step, command, began}`) fail-closed; when the command
-     RETURNS to a live process, success or error, the intent is closed, in
-     a defer so a panic closes it too.
+     intent (`{step, command, began}`); when the command RETURNS to a live
+     process, success or error, the intent is closed, in a defer so a panic
+     closes it too. The intent write is best-effort, not fail-closed: an
+     absent intent only withholds attribution (a death in the command is
+     then reported, never acted on), so a failed write cannot cause a wrong
+     action, while refusing the command on it would stop an inline rollback
+     on a full disk. (Amended: the first text said fail-closed.)
   2. The first agent start that reads an open intent consumes it durably
      BEFORE deciding anything, in every mode (off included) and whether or
      not Docker is readable or the agent can act. Any conditional consume
      (on freshness, mode, readability) lets a later start act on stale
      evidence. The cost, stated: a first start that defers forfeits a
      restore the evidence would have allowed; the record is then reported.
+     Unlike the intent, the consume is NOT best-effort: if it cannot be
+     written, the open intent stays on disk and the next start cannot tell
+     itself from the first, so a start that reported in between (and an
+     operator who acted on that report) would be contradicted (case A
+     through one failed write). A start that cannot make the consume durable
+     therefore stops before serving or reporting, which leaves only the
+     envelope this rule already accepts: changes made while no agent ran.
   3. No wall clock in the safety argument. An age bound may only narrow
      what is allowed, never decide whether evidence is consumed (a clock
      behind `began` after power loss, or corrected backwards, defeated the
