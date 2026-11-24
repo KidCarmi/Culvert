@@ -149,10 +149,21 @@ leader before its first post-restart sync waits for an operator. Lease mode has 
 Persisting the last-sync instant would shorten that window in **both** modes and is therefore a
 lease-path change — left for a separate owner decision.
 
-**Not closed by this.** (1) Legacy mode still counts a refused bundle from a *live* leader toward the
-three-failure threshold; a standby that synced within the last 10 minutes can therefore still promote
-against a reachable leader (split brain — the standing ADR-0004 legacy risk; lease mode is protected by
-`Acquire`). (2) `lastSyncOK` is not reset when a node re-enters standby in the same process
+**Follow-up 1, same day — a round the leader answered is not an unreachable round (legacy mode).**
+The standby loop counted every round that did not apply toward the three-failure threshold, including a
+round in which the leader *answered* and the standby refused or failed to apply the bundle. A standby
+that synced at T and then met a ruleset it refuses promoted three ticks later (its sync was seconds old),
+against a live leader that nothing fences in legacy mode. `syncFromLeader` now reports whether the RPC
+returned a reply; in legacy mode `countSyncFailure` does not count such a round, resets the streak (it
+means *consecutive rounds without contact*) and reports the stall through `noteRefusedRound` — the same
+decision, for the same reason, as the CHAOS-25 contained-panic round, and the same fire-once
+`ha_sync_panic` alert, plus `sync_refused` on the HA status and a failing cluster diagnosis.
+**Lease mode is unchanged and still counts every failed round**: a leader that answers after losing the
+fence is the one a standby must replace, and `Acquire` arbitrates. Limit: only a returned reply counts
+as an answer; a leader that answers with a gRPC status (for example a rejected token) is still counted
+as unreachable.
+
+**Not closed by this.** `lastSyncOK` is not reset when a node re-enters standby in the same process
 (`enterStandbyResync`), so "synced" is not strictly per leader lineage in lease mode.
 
 Contract: `CLU-004` (`contracts/registry.yaml`).

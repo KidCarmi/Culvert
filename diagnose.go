@@ -709,13 +709,22 @@ func haRoleAndOK(in clusterInputs, nodesOK bool) (role string, ok bool, detail s
 		}
 		return "leader", ok, detail
 	case "standby":
-		if in.haStatus.SyncFailCount != 0 {
-			return "standby", false, "standby sync loop is failing"
-		}
-		return "standby", true, ""
+		return "standby", standbySyncDetail(in.haStatus) == "", standbySyncDetail(in.haStatus)
 	default:
 		return "control-plane", nodesOK, ""
 	}
+}
+
+// standbySyncDetail names what is wrong with a standby's replication, or ""
+// when it is healthy.
+func standbySyncDetail(st HAStatus) string {
+	switch {
+	case st.SyncFailCount != 0:
+		return "standby sync loop is failing"
+	case st.SyncRefused != 0:
+		return "standby is not applying the leader's state bundles (leader reachable, replication stalled)"
+	}
+	return ""
 }
 
 // diagnoseClusterFrom builds the typed diagnosis from a snapshot. Pure (no I/O),

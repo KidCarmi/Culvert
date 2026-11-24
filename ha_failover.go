@@ -208,7 +208,7 @@ func (s *standbyLoopState) legacyAutoPromote() bool {
 // ha_manual_failover_required event: the operator action is the same one — decide
 // whether to promote this node manually.
 func (h *HAState) warnAutoFailoverRefused(leaderAddr string) {
-	logger.Printf("HA: leader %q unreachable and automatic failover was REFUSED — this standby has no fresh "+
+	logger.Printf("HA: leader %q did not answer the last sync rounds and automatic failover was REFUSED — this standby has no fresh "+
 		"copy of the leader's state, so promoting it would publish empty or stale configuration to every "+
 		"data plane. Staying standby (read-only) and retrying the sync. Restore the leader, or promote this "+
 		"node manually if the leader is permanently gone and you accept serving its state.",
@@ -216,7 +216,7 @@ func (h *HAState) warnAutoFailoverRefused(leaderAddr string) {
 	go alerts.Fire("ha_manual_failover_required", alerts.Payload{
 		Event: "ha_manual_failover_required",
 		Host:  leaderAddr,
-		Detail: "leader unreachable; automatic failover refused because this standby has not synced the " +
+		Detail: "leader did not answer the last sync rounds; automatic failover refused because this standby has not synced the " +
 			"leader's state recently enough; standby staying read-only pending manual action",
 		Source: "ha",
 	})

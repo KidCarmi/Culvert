@@ -19603,8 +19603,11 @@ async function loadHA(isCP) {
         // Not failover-ready: an automatic promotion would be refused because
         // this standby holds no fresh copy of the leader's configuration.
         const blocked = r.auto_promote_blocked ? `<br><span style="font-size:.65rem;color:#ef4444">auto-failover blocked: ${escHtml(String(r.auto_promote_blocked))}</span>` : '';
+        // Leader reachable but its bundles are not being applied: the failure
+        // streak stays at 0 by design, so this is the only sign of the stall.
+        const refused = r.sync_refused ? `<br><span style="font-size:.65rem;color:#ef4444">leader answers, ${escHtml(String(r.sync_refused))} bundle(s) not applied - replication stalled</span>` : '';
         document.getElementById('ha-sync-val').innerHTML =
-          `<span style="color:${syncColor}">${escHtml(String(failCount))}/${escHtml(String(r.sync_max_fail))} failed</span>${lastOk}${blocked}`;
+          `<span style="color:${syncColor}">${escHtml(String(failCount))}/${escHtml(String(r.sync_max_fail))} failed</span>${lastOk}${refused}${blocked}`;
       } else {
         syncCard.style.display = 'none';
         syncNote.style.display = 'none';

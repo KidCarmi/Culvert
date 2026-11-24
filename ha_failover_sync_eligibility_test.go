@@ -297,7 +297,9 @@ func TestLegacyAutoFailover_RefusedOnlySyncIsNotPromoted(t *testing.T) {
 }
 
 // A leader that is ALIVE but whose bundle this standby keeps refusing must not
-// be replaced by a standby that has never applied anything.
+// be replaced by a standby that has never applied anything. (Since the
+// refused-round fix the rounds do not even reach the threshold; the node is
+// ineligible either way.)
 func TestLegacyAutoFailover_RepeatedRefusalsNeverPromote(t *testing.T) {
 	p := newEligPair(t)
 	p.leader.serve(p.refused)
@@ -307,7 +309,13 @@ func TestLegacyAutoFailover_RepeatedRefusalsNeverPromote(t *testing.T) {
 			t.Fatalf("round %d: loop exited", i)
 		}
 	}
-	p.assertStaysUnpromotedStandby(t)
+	if p.h.IsLeader() || p.promotes.Load() != 0 {
+		t.Fatalf("a never-synced standby promoted against a live leader (leader=%v activations=%d)", p.h.IsLeader(), p.promotes.Load())
+	}
+	st := haStatusJSON(t)
+	if blocked, _ := st["auto_promote_blocked"].(string); st["role"] != "standby" || blocked == "" {
+		t.Fatalf("want a standby reporting auto_promote_blocked; got %v", st)
+	}
 }
 
 // No availability regression for a healthy pair: synced, then the leader dies

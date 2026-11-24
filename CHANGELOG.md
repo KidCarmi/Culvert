@@ -61,6 +61,22 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A legacy HA standby no longer promotes itself against a leader that is
+  still answering.** With `--ha-auto-failover` and no etcd lease, every sync
+  round that did not apply counted toward the three-round "leader unreachable"
+  threshold — including a round in which the leader answered and the standby
+  refused its bundle (for example a ruleset this build cannot enforce). A
+  standby that had synced seconds earlier therefore promoted about 15 seconds
+  after such a ruleset was saved, while the leader kept serving: two leaders,
+  both publishing. A round the leader answered is now never counted and
+  restarts the streak. **Operator-visible effect:** the standby stays a
+  standby; it logs `HA: the leader … answered but its state bundle was NOT
+  applied`, fires the `ha_sync_panic` ("HA standby sync fault") alert once,
+  reports `sync_refused` on `GET /api/cluster/ha` and the HA panel, and the
+  cluster diagnosis turns unhealthy. Replication stays stalled until the
+  refusal is fixed. Lease mode is unchanged. Limit: a leader that answers with
+  an RPC error (for example a rejected HA token) is still treated as
+  unreachable.
 - **Automatic HA failover without a fencing lease no longer promotes a standby
   that has not synced the leader's configuration.** With `--ha-auto-failover`
   and no etcd lease, a standby promoted itself after three failed sync rounds

@@ -781,10 +781,11 @@ contracts:
     area: cluster-sync
     status: enforced
     owner_approved: false
-    invariant: "A standby control plane is promoted to leader automatically only if it successfully applied a state bundle from the leader within the freshness window (10 minutes). One predicate decides this for lease-arbitrated and for legacy (--ha-auto-failover) failover. A standby that never synced, whose every sync was refused or failed, or whose last successful sync is older than the window stays a read-only standby, keeps retrying, and reports the condition; a data plane polling it is refused and keeps its last applied configuration. Manual promotion is never refused on these grounds and states the unsynchronized state in its response, log and audit entry."
+    invariant: "A standby control plane is promoted to leader automatically only if it successfully applied a state bundle from the leader within the freshness window (10 minutes). One predicate decides this for lease-arbitrated and for legacy (--ha-auto-failover) failover. In legacy mode a sync round in which the leader answered but its bundle was not applied does not count toward the leader-unreachable threshold, so a standby does not promote against a leader that is answering. A standby that never synced, whose every sync was refused or failed, or whose last successful sync is older than the window stays a read-only standby, keeps retrying, and reports the condition; a data plane polling it is refused and keeps its last applied configuration. Manual promotion is never refused on these grounds and states the unsynchronized state in its response, log and audit entry."
     authority: "HA failover decision (ha_failover.go), over the standby sync loop (ha.go)."
     code:
       - "ha_failover.go"
+      - "ha.go"
     configs:
       - "ha-auto-failover"
       - "ha-etcd-endpoints"
@@ -796,6 +797,7 @@ contracts:
         - "an automatic promotion deciding synchronization eligibility by anything other than the shared predicate"
         - "automatically promoting a standby that never applied the leader's configuration, in either mode"
         - "counting a refused, failed or panicked sync round as a successful sync"
+        - "in legacy mode, counting a sync round the leader answered toward the leader-unreachable threshold"
         - "refusing a manual promotion because the standby is unsynchronized"
     tests:
       - {file: "ha_failover_sync_eligibility_test.go", name: TestLegacyAutoFailover_NeverSyncedStandbyIsNotPromoted}
@@ -808,6 +810,10 @@ contracts:
       - {file: "ha_failover_sync_eligibility_test.go", name: TestLegacyAutoFailover_ConcurrentAutoAttemptsOnUnsyncedStandby}
       - {file: "ha_failover_sync_eligibility_test.go", name: TestAutoFailover_SyncEligibilityParityAcrossLeaseAndLegacy}
       - {file: "ha_failover_sync_eligibility_test.go", name: TestManualPromotion_UnsyncedStandbyPromotesWithExplicitWarning}
+      - {file: "ha_legacy_refused_bundle_test.go", name: TestLegacyAutoFailover_LiveLeaderRefusedBundleNeverPromotes}
+      - {file: "ha_legacy_refused_bundle_test.go", name: TestLegacyAutoFailover_UnreachableLeaderAfterRefusedRoundsStillPromotes}
+      - {file: "ha_legacy_refused_bundle_test.go", name: TestLegacyAutoFailover_AnsweredRoundRestartsTheUnreachableStreak}
+      - {file: "ha_legacy_refused_bundle_test.go", name: TestLeaseMode_AnsweredButRejectedRoundsStillCountTowardFailover}
       - {file: "ha_failover_test.go", name: TestLeaseAutoPromote_FreshnessGate}
     validation: integration
     compatibility: "A legacy HA pair with --ha-auto-failover whose standby has not synced (never, not since its last restart, or not within 10 minutes) no longer fails over by itself; the operator promotes it manually. The evidence of a successful sync is held in memory only, so it does not survive a standby restart. Lease-mode decisions are unchanged."
