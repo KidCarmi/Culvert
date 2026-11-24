@@ -677,6 +677,10 @@ type InterruptedOp struct {
 	// Result is attached to the op as its result: what the journal knows about
 	// how far the op got. May be nil.
 	Result map[string]interface{}
+	// FailureReason is the op's own failure reason when it did not die but
+	// ended failed and its record was kept (ADR-0062 slice 1). Empty for an
+	// interrupted op, which is marked agent_restart_interrupted.
+	FailureReason FailureReason
 }
 
 // MarkAllInterrupted registers each orphaned op (recovered from the on-disk
@@ -704,12 +708,16 @@ func (m *Manager) MarkAllInterrupted(orphans []InterruptedOp) int {
 		if !o.Started.IsZero() {
 			started = o.Started
 		}
+		reason := ReasonAgentRestartInterrupted
+		if o.FailureReason != "" {
+			reason = o.FailureReason
+		}
 		m.active[o.OpID] = &Op{
 			ID:            o.OpID,
 			Kind:          o.Kind,
 			Actor:         o.Actor,
 			State:         StateFailed,
-			FailureReason: string(ReasonAgentRestartInterrupted),
+			FailureReason: string(reason),
 			Started:       started,
 			Finished:      &finished,
 			Progress:      []Stage{},

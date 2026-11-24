@@ -357,6 +357,13 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 		return ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind), Decision: actV2RecoveryRequired.String(),
 			Reason: "record_from_newer_agent", Outcome: OutcomeRecoveryRequired}
 	}
+	if rec.TerminalOutcome != "" && rec.TerminalSafe {
+		// The operation ended with its end state proven safe; only its terminal
+		// audit entry or its removal was cut, and startup retries both. There
+		// is nothing for the reconcile to decide (Codex review on #2102).
+		return ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind), Decision: actV2Defer.String(),
+			Reason: "terminal_cleanup_pending", Outcome: OutcomeDeferred}
+	}
 	c := &reconcileCase{opID: opID, rec: rec, in: s.reconcileInputsFor(rec)}
 	c.out = ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind)}
 	// Docker was tested and does not answer: there is nothing to observe, so
@@ -586,6 +593,11 @@ func (s *Server) verifiedOnPrior(ctx context.Context, c *reconcileCase) bool {
 // entry is not (AGT-005).
 func (s *Server) retire(c *reconcileCase) ReconcileRecord {
 	c.out.Outcome = OutcomeConverged
+	// A kept record of an operation that ended: its own terminal entry first
+	// (normally already done by initJournal), or it is not retired.
+	if c.rec.TerminalOutcome != "" && ensureTerminalAudited(s.opts.Audit, c.rec, s.opts.Cfg.ProxyRepo) != nil {
+		return s.keepRecord(c, OutcomeConvergedNotRetired)
+	}
 	if !s.reconciledAlreadyAudited(c) {
 		if err := s.auditReconciled(c, audit.OutcomeSucceeded); err != nil {
 			return s.keepRecord(c, OutcomeConvergedNotRetired)

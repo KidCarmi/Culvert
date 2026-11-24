@@ -61,6 +61,62 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A policy rule whose JSON keys this version cannot honour is refused, at
+  every door, instead of being loaded with a condition missing.** A rule object
+  can hold a key the build has no field for (a typo such as `"destFQDN "`,
+  `"sourceIPs"` or `"srcIP"`, or a condition added by a newer release), or the
+  same key twice (`"sourceIP":"203.0.113.0/24","sourceip":""`, where the last
+  value won). Either way a match condition written in the document was not
+  enforced and the rule matched more than was written: an Allow for one source
+  range, loaded from the policy file, a stored config version, a pending draft
+  or a control-plane snapshot, allowed every source. Such a ruleset is now
+  refused whole by the same gate as an unrecognised `ruleType`: a policy file
+  stops startup (a reload keeps the running rules and default action), a
+  rollback and an import answer `400`, a snapshot is refused and the node keeps
+  its last accepted configuration, with the
+  `policy_ruleset_refused_unenforceable_rule` Diagnostics row. The refusal
+  names the rule and the keys. The rule API and the config import already
+  refused an unknown key with `400 invalid JSON`; they now name the rule and the
+  keys, and also refuse a duplicate key, which they used to accept. Key names
+  are still matched without regard to case (`"destFqdn"` is `destFQDN`), and
+  sections of a control-plane snapshot that this version does not know are
+  still ignored.
+  **API contract 2.1.0 → 2.2.0 (MINOR):** the policy rule schema gains the
+  optional `annotations` property; a duplicated key in a rule object is now a
+  `400` on the policy API (it was accepted, last value winning).
+  A rule list given twice in one document (`"policyRules":[…],"policyRules":[…]`
+  in a backup, `policy_rules` in a snapshot, `rules` in a draft) is refused the
+  same way: the first list used to be discarded.
+  **New: `annotations`.** A rule may carry one `annotations` object. Culvert
+  never interprets its contents; it keeps them in canonical form (compact
+  JSON, with `<`, `>`, `&` written as `\uXXXX` escapes, as Culvert's own
+  encoders write them) through the policy file, exports, stored versions and
+  snapshots. The limits, 4096 bytes and 8 levels, are measured on that form:
+  whitespace does not count, each of `<` `>` `&` counts as 6 bytes, and a rule
+  accepted once stays accepted however often it is saved, exported or
+  published. `null` is the same as absent. It is the place for notes in a
+  hand-edited file, and from now on the only place a release may add
+  information that is not a match condition. Editing a rule in the admin UI
+  replaces the rule and removes its annotations.
+  **Upgrade impact:** a hand-edited policy file in which a rule has an extra,
+  misspelt or repeated key (including a note such as `"_comment"`) stops
+  startup. Before upgrading, run `culvert policy-check <policy file>` with the
+  new binary: it lists every such rule and key and changes nothing; move notes
+  under `annotations`. In `main`'s history no key of a rule or its schedule was
+  ever removed or renamed, so files, versions and snapshots written by Culvert
+  itself are unaffected.
+  **By design:** when a later release adds a new match *condition* and a rule
+  uses it while older data planes are still deployed, those nodes refuse the
+  whole snapshot and stay on their last accepted configuration, including for
+  blocklist and IP-filter changes, until they are upgraded. That is what an
+  unrecognised `ruleType` already does; the alternative is enforcing the rule
+  without the condition. Diagnostics on the node shows the refusal; the control
+  plane only sees the node as behind.
+  `culvert policy-check` now also reads a control-plane snapshot (a data
+  plane's `dp_last_config_snapshot.json`), which it used to report as
+  `OK — 0 rule(s)`, and a data plane whose last-known-good snapshot is refused
+  at startup shows it in Diagnostics. Record:
+  `docs/engineering/security-reviews/2026-11-24-unknown-rule-fields-refused.md`.
 - **A replace-mode config import no longer installs policy rules the policy
   API refuses.** `POST /api/config/import?mode=replace` checked only that
   every rule was of a type this version can enforce, then replaced the whole

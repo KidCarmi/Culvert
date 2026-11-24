@@ -247,7 +247,7 @@ func saveHitCounters(path string) {
 		if rule.Name == "" || (rule.HitCount == 0 && rule.lastHitUnix == 0) || len(data) >= maxRuleMetrics {
 			continue
 		}
-		data[rule.Name] = persistedRuleCounter{ID: rule.ID, Hits: rule.HitCount, LastHit: rule.lastHitUnix}
+		data[rule.Name] = persistedRuleCounter{ID: rule.ID, Hits: rule.HitCount, LastHit: int64(rule.lastHitUnix)}
 	}
 
 	// An empty store is retained as a compatibility path for callers/tests that

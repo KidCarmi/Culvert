@@ -85,12 +85,18 @@ func (p *Provider) addReconcile(st *server.Status) {
 	snap := p.reconcile.Snapshot()
 	st.Reconcile = &snap
 	rr := p.reconcile.RecoveryRequired()
-	st.RecoveryRequired = &rr
 	for i := range st.InterruptedOperations {
 		if r, ok := p.reconcile.RecordFor(st.InterruptedOperations[i].OpID); ok {
 			st.InterruptedOperations[i].SetReconcile(r)
+		} else if st.InterruptedOperations[i].TerminalOutcome != "" {
+			// A failed operation of this process kept its record because it
+			// could not prove the state it left safe (ADR-0062 slice 1, owner
+			// decision): an operator must act, or a later success retire it.
+			// The startup reconcile has not seen it, so it decides nothing here.
+			rr = true
 		}
 	}
+	st.RecoveryRequired = &rr
 }
 
 // New constructs a Provider.
@@ -133,10 +139,23 @@ func (p *Provider) addInterrupted(st *server.Status) {
 	}
 	for i := range recs {
 		rec := &recs[i]
+		// A record whose operation ended with its end state proven safe is
+		// kept only because its terminal audit entry or its removal did not
+		// complete; startup finishes both. It is not a recovery situation and
+		// is not reported as one (Codex review on #2102).
+		if rec.TerminalOutcome != "" && rec.TerminalSafe {
+			continue
+		}
 		// A record whose operation THIS process knows — running, or terminal
 		// with its record about to be removed — is not an interruption. Only
 		// an operation startup marked, or one no longer in memory at all, is.
-		if op := p.mgr.Get(rec.OpID); op != nil && op.FailureReason != string(ops.ReasonAgentRestartInterrupted) {
+		// Except: a record that carries a terminal outcome was KEPT by its
+		// operation, which ended failed without proving the state it left safe
+		// (ADR-0062 slice 1). It is listed as soon as the operation is
+		// terminal, in this process as after a restart (where startup marks it
+		// with its real reason, not agent_restart_interrupted).
+		if op := p.mgr.Get(rec.OpID); op != nil && op.FailureReason != string(ops.ReasonAgentRestartInterrupted) &&
+			(!op.State.IsTerminal() || rec.TerminalOutcome == "") {
 			continue
 		}
 		d := server.DescribeInterrupted(rec, p.cfg.ProxyRepo)

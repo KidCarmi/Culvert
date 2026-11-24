@@ -217,7 +217,12 @@ func initIdempotency(stateDir string, mgr *ops.Manager, ttl time.Duration) {
 //     is found;
 //   - counts the start in the record.
 //
-// It runs no docker command and removes no record. Docker is not consulted, so
+// A record whose operation did not die but ENDED (it carries a terminal outcome,
+// ADR-0062 slice 1) is finished instead: see startupRecord. That is the only
+// record startup removes, and only when the operation succeeded or proved its
+// end state safe, after its terminal audit entry is on file.
+//
+// It runs no docker command and removes no record of an interrupted operation. Docker is not consulted, so
 // an unreachable daemon cannot delay or fail startup, and a record stays — and
 // is reported again by every later start and by GET /v1/status — until a later
 // image change succeeds or, for an interrupted restore, a later restore does
@@ -249,10 +254,13 @@ func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo 
 	now := time.Now().UTC()
 	orphans := make([]ops.InterruptedOp, 0, len(recs))
 	for i := range recs {
-		orphans = append(orphans, reportInterrupted(jnl, al, &recs[i], proxyRepo, now))
+		if o, report := startupRecord(jnl, al, &recs[i], proxyRepo, now); report {
+			orphans = append(orphans, o)
+		}
 	}
 	if n := mgr.MarkAllInterrupted(orphans); n > 0 {
-		log.Printf("culvert-maint: %d operation(s) interrupted by a prior stop — marked failed(agent_restart_interrupted); "+
+		log.Printf("culvert-maint: %d operation(s) left a journal record at a prior stop — marked failed (agent_restart_interrupted, "+
+			"or the operation's own reason when it ended with a state it could not prove safe); "+
 			"Docker was NOT changed. See GET /v1/status interrupted_operations.", n)
 	}
 	return jnl, diedIn, nil
@@ -296,6 +304,28 @@ func takeCommandIntents(jnl *journal.Journal, recs []journal.Record) (map[string
 	return diedIn, nil
 }
 
+// startupRecord is the per-record startup work. A record whose operation ENDED
+// (ADR-0062 slice 1: it carries a terminal outcome, written before the
+// operation's terminal audit entry) is finished: its terminal entry is written
+// if the audit log lacks it, then it is removed when the operation succeeded or
+// proved its end state safe, and otherwise kept and reported with the
+// operation's real failure reason — never with a second, interrupted, entry.
+// Every other record is an interrupted operation (reportInterrupted). report
+// is false for a record that is not to be marked as a failed operation.
+//
+// Docker is not consulted on either path. Removing an ended operation's
+// record here is the end of that operation's own terminal sequence, not a
+// reconcile: its audit entry is on file first (AGT-004 amendment).
+func startupRecord(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, proxyRepo string, now time.Time) (ops.InterruptedOp, bool) {
+	server.AdoptAuditedTerminal(al.Path(), rec)
+	if rec.TerminalOutcome != "" {
+		if o, report, handled := server.SettleTerminalAtStartup(jnl, al, rec, proxyRepo, maxInterruptedSeen); handled {
+			return o, report
+		}
+	}
+	return reportInterrupted(jnl, al, rec, proxyRepo, now), true
+}
+
 // armStartupReconcile wires the opt-in startup reconcile (contract AGT-900).
 // With the default "off" it does nothing and startup changes nothing in Docker
 // (AGT-004). With "converge", initJournal has already marked and audited every
@@ -321,10 +351,10 @@ const maxInterruptedSeen = 1_000_000
 // state_dir must not stop the agent from coming up and saying, in memory, what
 // it found.
 //
-// Ordering: the audit entry is written before the record that remembers it. A
-// crash between the two repeats the entry at the next start; the other order
-// could lose it. So the audit trail carries the interruption at least once,
-// and exactly once unless the agent dies inside that window.
+// Ordering: the audit entry is written before the record that remembers it; the
+// other order could lose it. A crash between the two used to repeat the entry
+// at the next start. Since ADR-0062 slice 1 the next start first looks the
+// entry up (server.AdoptAuditedTerminal) and does not write it twice.
 func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, proxyRepo string, now time.Time) ops.InterruptedOp {
 	if rec.InterruptedAt == nil {
 		rec.InterruptedAt = &now

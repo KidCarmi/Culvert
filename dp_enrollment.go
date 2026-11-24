@@ -297,7 +297,7 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	var cachedConfigVersion, cachedPolicyVersion int64
 	if snap, err := applyDPLastGoodConfigSnapshot(); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			logger.Printf("DataPlane: last-known-good config unavailable: %v", err)
+			logDPLastGoodUnavailable(err)
 		} else {
 			logger.Printf("DataPlane: no last-known-good config at %s", dpLastGoodConfigSnapshotPath())
 		}

@@ -176,26 +176,39 @@ func TestRetireRestore_NeverAnUpgradeRecord(t *testing.T) {
 
 // TestRetireRestore_NotWhenTheRestoreDidNotEstablishItsState: a restore that
 // failed anywhere — refused preflight, failed stop, failed commit, failed
-// start, failed health check — retires nothing.
+// start, failed health check — retires nothing. Since ADR-0062 slice 1 the
+// failed restore's OWN record stays beside them once it asked Docker to stop
+// the stack (keepsOwn), unless it committed and its health check passed, and
+// is removed when it never stopped anything (the preflight).
 func TestRetireRestore_NotWhenTheRestoreDidNotEstablishItsState(t *testing.T) {
-	for name, arrange := range map[string]func(*restoreRig){
-		"preflight fails":    func(r *restoreRig) { r.fail[restoreCmdDryRun] = true },
-		"stop fails":         func(r *restoreRig) { r.fail[restoreCmdDown] = true },
-		"commit fails":       func(r *restoreRig) { r.fail[restoreCmdCommit] = true },
-		"start fails":        func(r *restoreRig) { r.fail[restoreCmdUp] = true },
-		"health check fails": func(r *restoreRig) { r.healthFail.Store(true) },
+	for name, tc := range map[string]struct {
+		arrange  func(*restoreRig)
+		keepsOwn bool
+	}{
+		"preflight fails": {func(r *restoreRig) { r.fail[restoreCmdDryRun] = true }, false},
+		"stop fails":      {func(r *restoreRig) { r.fail[restoreCmdDown] = true }, true},
+		"commit fails":    {func(r *restoreRig) { r.fail[restoreCmdCommit] = true }, true},
+		// `up` reports an error but this rig's proxy then passes the health
+		// check: committed and healthy is a proven end state, so the own
+		// record goes (and the op still retires nothing: it failed).
+		"start fails":        {func(r *restoreRig) { r.fail[restoreCmdUp] = true }, false},
+		"health check fails": {func(r *restoreRig) { r.healthFail.Store(true) }, true},
 	} {
 		for _, k := range restoreKinds {
 			t.Run(name+"/"+k.name, func(t *testing.T) {
 				rig := newRestoreRig(t)
-				arrange(rig)
+				tc.arrange(rig)
 				seedMixedRecords(t, rig.jnl)
 				op := rig.run(t, k.kind)
 				if op.State != ops.StateFailed {
 					t.Fatalf("op = %s, want failed", op.State)
 				}
-				if got := journalIDs(t, rig.jnl); got != sortedCSV(allStale) {
-					t.Errorf("a FAILED restore changed the journal: %s", got)
+				want := allStale
+				if tc.keepsOwn {
+					want += "," + op.ID
+				}
+				if got := journalIDs(t, rig.jnl); got != sortedCSV(want) {
+					t.Errorf("a FAILED restore changed the journal: %s, want %s", got, sortedCSV(want))
 				}
 			})
 		}
@@ -247,13 +260,18 @@ func TestRetireRestore_AuditFailureKeepsRecord(t *testing.T) {
 		t.Errorf("journal = %s, want every record kept", got)
 	}
 
-	// And through a whole operation.
+	// And through a whole operation. Its OWN record is kept too (ADR-0062
+	// slice 1): its terminal audit entry could not be written, so the record
+	// keeps the outcome for the next start to audit before it is removed.
 	op := rig.run(t, ops.KindRestoreCommit)
 	if op.State != ops.StateSucceeded {
 		t.Fatalf("op = %s(%s); a failing audit log must not fail the restore", op.State, op.FailureReason)
 	}
-	if got := journalIDs(t, rig.jnl); got != sortedCSV(allStale) {
+	if got := journalIDs(t, rig.jnl); got != sortedCSV(allStale+","+op.ID) {
 		t.Errorf("journal after a restore with the audit log closed = %s, want every record kept", got)
+	}
+	if own, _, _ := rig.jnl.Read(op.ID); own == nil || own.TerminalOutcome != "succeeded" || own.TerminalAudited {
+		t.Errorf("own record = %+v, want terminal_outcome succeeded and not audited", own)
 	}
 	if _, ok := op.Result["superseded_interrupted_ops"]; ok {
 		t.Errorf("result claims a retirement that did not happen: %+v", op.Result)
