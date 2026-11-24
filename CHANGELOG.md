@@ -7,6 +7,31 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Restore now works on the Docker Compose deployment.** A restore commit
+  swapped `/data` by renaming the directory itself, with its staging and
+  backup directories beside it in `/`. In the shipped compose file `/data` is a
+  volume mount point (which cannot be renamed) and the container runs as the
+  unprivileged `proxy` user (which cannot create anything in `/`), so every
+  commit failed — measured on real Docker: `mkdir /data.staging.…: permission
+  denied`, after the proxy had already been stopped. The commit now detects
+  that layout and swaps the directory's content inside the volume, under
+  `/data/.restore/`, behind the single-writer lock. Each restored file is read
+  back and compared with the backup manifest before the restore is reported as
+  committed. A restore that fails, or is killed mid-swap, ends with the
+  previous content back in place: the next start of the proxy undoes it before
+  reading the directory. A `/data` that is an ordinary directory with a
+  writable parent is swapped exactly as before.
+- **A restore that cannot start no longer stops the proxy.** The maintenance
+  agent's `restore.commit` (and `rollbacks` with `mode=data`) now runs the
+  restore's read-only dry-run first, with the proxy still serving, and reads
+  its new last line (`RESTORE-PREFLIGHT v1 commit=ok|refused …`). An
+  unreadable archive, a guard that would refuse, an unwritable volume or too
+  little free space fails the operation at the new `preflight_restore` stage
+  with the stack untouched. Operations gain that stage in `progress`. With a
+  proxy image that predates the line the agent behaves as before.
+
 ### Security
 
 - **A control-plane snapshot whose identity-provider profiles are refused no

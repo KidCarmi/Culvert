@@ -193,6 +193,31 @@ func discoverLeftovers(dataDir string) ([]leftover, []skipReason, error) {
 			valid = append(valid, *lo)
 		}
 	}
+	// The in-place swap (restore_inplace.go) keeps the same two kinds of
+	// directory, under the same names, in its work area inside dataDir. An
+	// absent work area is the common case and not an error.
+	work := filepath.Join(abs, restoreWorkDirName)
+	if inPlace, rerr := os.ReadDir(work); rerr == nil {
+		// While a restore has not committed, its backup directory holds the
+		// ONLY copy of the previous content. Nothing in the work area is a
+		// leftover until that record is gone.
+		_, statErr := os.Lstat(filepath.Join(work, restoreIntentName))
+		unfinished := statErr == nil
+		for _, entry := range inPlace {
+			if unfinished && re.MatchString(entry.Name()) {
+				skipped = append(skipped, skipReason{Path: filepath.Join(work, entry.Name()),
+					Reason: "a restore that did not finish still refers to it; start Culvert or run the restore again first"})
+				continue
+			}
+			lo, skip := admitEntry(entry, work, abs, re)
+			if skip != nil {
+				skipped = append(skipped, *skip)
+			}
+			if lo != nil {
+				valid = append(valid, *lo)
+			}
+		}
+	}
 
 	sort.Slice(valid, func(i, j int) bool {
 		if !valid[i].Timestamp.Equal(valid[j].Timestamp) {
@@ -386,7 +411,7 @@ func deleteOneLeftover(lo leftover, parent, dataDirAbs string, re *regexp.Regexp
 	if !re.MatchString(name) {
 		return fmt.Errorf("name no longer matches leftover pattern")
 	}
-	if filepath.Dir(lo.Path) != parent {
+	if dir := filepath.Dir(lo.Path); dir != parent && dir != filepath.Join(dataDirAbs, restoreWorkDirName) {
 		return fmt.Errorf("parent mismatch")
 	}
 	if filepath.Clean(lo.Path) == dataDirAbs {

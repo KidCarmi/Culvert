@@ -249,6 +249,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
+	// An in-place restore that did not commit is undone here, before anything
+	// reads the data directory and only while this process holds the
+	// single-writer lock taken just above (restore_inplace.go).
+	if err := recoverInPlaceRestoreAtBoot(dataDir, dataDirWriterLockHandle != nil); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
 	setInsecureFlag(s)
 	runEnrollmentMode(s)
 	loadFileConfigAndFlags(s)

@@ -1,0 +1,38 @@
+# The backup-e2e topology (test/e2e/maint-agent/docker-compose.backup-e2e.yml) with its own
+# container name and host ports: the named volume proxy-data is mounted at /data in both
+# services, which is what makes /data a mount point the restore cannot rename.
+services:
+  proxy:
+    image: culvert/proxy:pinned
+    container_name: culvert-restore-probe
+    restart: unless-stopped
+    stop_grace_period: 10s
+    ports:
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:19090:9090"
+    volumes:
+      - proxy-data:/data
+    environment:
+      - TZ=UTC
+    command: [
+      "-port",            "8080",
+      "-ui-port",         "9090",
+      "-ui-no-tls",
+      "-ca-path",         "/data/ca.bundle",
+      "-policy",          "/data/policy.json",
+      "-logfile",         "/data/proxy.log",
+      "-audit-log",       "/data/audit.jsonl",
+      "-request-log",     "/data/requests.jsonl",
+      "-threat-feed-db",  "/data/threatfeeds.json",
+      "-ui-users-file",   "/data/ui_users.json"
+    ]
+  cli:
+    image: culvert/proxy:pinned
+    profiles: ["cli"]
+    volumes:
+      - proxy-data:/data
+      - culvert-backups:/backup
+    command: []
+volumes:
+  proxy-data:
+  culvert-backups:

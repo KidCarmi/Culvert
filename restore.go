@@ -237,6 +237,7 @@ func runRestoreDryRun(tarPath, dataDir, passphrase string, opts restoreOpts) err
 		return err
 	}
 	printRestoreSummary(os.Stdout, summary, analysis)
+	printRestorePreflight(dataDir, analysis, files)
 	return nil
 }
 
@@ -1006,6 +1007,12 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	//   - the operator can copy-paste the printed paths verbatim
 	//   - staging and bak share a correlated suffix
 	suffix := fmt.Sprintf("%s-%d", restoreNow().UTC().Format("20060102T150405Z"), os.Getpid())
+	// A data directory that is a mount point, or whose parent this process
+	// cannot write, cannot be swapped as a whole: steps 5–8 then run inside it
+	// (restore_inplace.go). Everything above is shared.
+	if restoreUsesInPlaceSwap(dataDir) {
+		return commitRestoreInPlace(dataDir, files, manifest, opts.Mode, suffix)
+	}
 	stagingDir := dataDir + ".staging." + suffix
 	bakPath := dataDir + ".bak." + suffix
 
@@ -1211,6 +1218,11 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 			return werr
 		}
 		if info.IsDir() {
+			// The in-place swap keeps its staging and backup directories
+			// inside dataDir; they are never part of the content.
+			if p == filepath.Join(dataDir, restoreWorkDirName) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {

@@ -220,6 +220,38 @@ The previous `/data` is preserved as `/data.bak.<ts>-<pid>` indefinitely.
 Once you've verified the restored state, clean it up with the cleanup
 command (§ 8). The `.bak` directory is never auto-deleted.
 
+### On the Docker Compose deployment: the swap happens inside the volume
+
+Steps 4–7 above describe a `/data` that is an ordinary directory with a
+writable parent. In the shipped `docker-compose.yml` it is neither: `/data` is
+the mount point of the `proxy-data` volume (a mount point cannot be renamed),
+and the container runs as the unprivileged `proxy` user (which cannot create
+`/data.staging.…` in `/`). The commit detects this and swaps the directory's
+**content** instead, entirely on the volume:
+
+- work area: `/data/.restore/`
+- new content staged in `/data/.restore/data.staging.<ts>-<pid>`
+- previous content kept in `/data/.restore/data.bak.<ts>-<pid>`
+- `/data/.restore/intent.json` exists for as long as the swap has not
+  committed; `/data/.restore/last-outcome.json` records what the last commit
+  or recovery did (`committed` or `rolled_back`)
+
+The commit takes the data directory's single-writer lock first, so it refuses
+while a proxy is still running on the volume. After the content is moved in,
+every restored file is read back and compared with the backup manifest; only
+then is the restore reported as committed. If anything fails on the way — a
+rename, the comparison — the previous content is moved back and the restore
+reports failure with nothing changed.
+
+`--list-restore-leftovers` and `--cleanup-restore-leftovers` (§ 7, § 8) list
+and remove these directories exactly like the `/data.bak.…` siblings.
+
+The dry-run (§ 5) ends with one line saying whether a commit with the same
+arguments would be refused before it changed anything, for example
+`RESTORE-PREFLIGHT v1 commit=ok layout=in-place` or
+`RESTORE-PREFLIGHT v1 commit=refused layout=in-place reason=not_enough_free_space`.
+The maintenance agent reads that line before it stops the proxy.
+
 ### Recovery if step 2 fails after rename A
 
 If the process is killed between the two renames, the error message
@@ -322,6 +354,23 @@ than one generation of leftovers is present. Only one of the two `mv`
 moves is needed; afterwards remove the remaining sibling with
 `--cleanup-restore-leftovers` (§ 8) once you have confirmed the proxy is
 healthy.
+
+**On the Docker Compose deployment** (the in-place swap of § 6) none of the
+above applies and there is nothing to do by hand. A restore that was killed
+mid-swap leaves `/data/.restore/intent.json` behind. The next start of the
+proxy — or the next restore — moves the previous content back before anything
+reads the directory, removes the record and prints:
+
+```
+Restore: an interrupted restore (<ts>-<pid>, mode full) was undone at startup; the data
+directory holds its previous content. Run the restore again if it is still wanted.
+```
+
+An interrupted restore is always undone, never completed. Culvert refuses to
+start instead when it cannot be sure: the record is unreadable, a file is
+found both in `/data` and in the backup directory, or the single-writer lock
+could not be established (the restore may still be running). Nothing is
+deleted in any of those cases; inspect `/data/.restore/`.
 
 The guard only triggers when `/data` is **absent and a `.bak` sibling
 exists** — a genuine first-run install (no `/data`, no `.bak`) boots

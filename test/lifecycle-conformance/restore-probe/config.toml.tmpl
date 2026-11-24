@@ -1,0 +1,13 @@
+privilege_mode = "docker_group_lab"
+compose_project_dir = "@@PROJECT_DIR@@"
+compose_file = "docker-compose.yml"
+socket_path = "@@SOCK_PATH@@"
+state_dir = "@@STATE_DIR@@"
+proxy_repo = "127.0.0.1:5000/culvert"
+image_allowlist = "^127\\.0\\.0\\.1:5000/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$"
+allow_peers = ["@@UID@@"]
+health_base_url = "http://127.0.0.1:18080"
+health_path = "/health"
+ready_path = "/ready"
+operation_timeout = "5m"
+stage_timeout = "2m"
