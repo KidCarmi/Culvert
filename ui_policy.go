@@ -664,6 +664,7 @@ func apiCategoryGroupUpdateByID(w http.ResponseWriter, r *http.Request, id, name
 	// 2xx with a known-failed durable domain — and converges at the next
 	// restart via reconcileObjectRefNames (the object store owns name truth).
 	var cascadeErr error
+	policyGen := runningPolicyGeneration()
 	if renamed {
 		cascadeErr = cascadeCategoryGroupRenameDurable(id, before.Name, newName)
 		detail += ", renamed from " + sanitizeLog(before.Name)
@@ -680,7 +681,9 @@ func apiCategoryGroupUpdateByID(w http.ResponseWriter, r *http.Request, id, name
 	}
 	auditEventDiffID(r, "category-group.update", auditName, id, detail, nil, nil)
 	saveConfigVersion(sessionAdmin(r), "category-group.update")
-	jsonOK(w, map[string]any{"ok": true, "version": globalCategoryGroups.Version()})
+	// A rename that rewrote running rules changed the served rulebase.
+	pubErr := publishIfRunningPolicyChangedSince(policyGen, "category-group.rename")
+	jsonOK(w, withClusterPublishRejection(map[string]any{"ok": true, "version": globalCategoryGroups.Version()}, pubErr))
 }
 
 // cascadeCategoryGroupRenameDurable cascades a category-group rename onto
@@ -809,6 +812,7 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 			// a truthful 500 (never 2xx with a known-failed durable domain), and
 			// converges at the next restart via reconcileObjectRefNames.
 			var cascadeErr error
+			policyGen := runningPolicyGeneration()
 			if renamed {
 				if n := policyStore.CascadeDecryptionProfileRename(id, before.Name, newName); n > 0 {
 					if perr := policyStore.SaveErr(); perr != nil && !errors.Is(perr, fileutil.ErrReplacedNotSynced) {
@@ -836,7 +840,9 @@ func apiDecryptionProfiles(w http.ResponseWriter, r *http.Request) { //nolint:cy
 			}
 			auditEventDiffID(r, "decryption-profile.update", auditName, id, detail, nil, nil)
 			saveConfigVersion(sessionAdmin(r), "decryption-profile.update")
-			jsonOK(w, map[string]any{"ok": true, "version": globalDecryptionProfiles.Version()})
+			// A rename that rewrote running rules changed the served rulebase.
+			pubErr := publishIfRunningPolicyChangedSince(policyGen, "decryption-profile.rename")
+			jsonOK(w, withClusterPublishRejection(map[string]any{"ok": true, "version": globalDecryptionProfiles.Version()}, pubErr))
 			return
 		}
 		if err := globalDecryptionProfiles.MutateDurable(nil, func() error {

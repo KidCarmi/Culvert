@@ -1867,4 +1867,8 @@ func applyHotReload(fc *FileConfig) {
 		applyUpstreamProxy()
 		logger.Printf("Reload: upstream %s", formatUpstreamSummary(ucfg.Proxies))
 	}
+
+	// Last: a reloaded policy file is a change to the running rulebase and
+	// reaches the fleet now, with everything else this reload applied.
+	publishAfterPolicyFileReload(fc.Proxy.PolicyFile, policyReloaded)
 }

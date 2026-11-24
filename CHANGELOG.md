@@ -61,6 +61,37 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A policy edit on a control plane now reaches data planes when it is
+  committed.** Creating, updating, deleting, disabling, reordering or moving a
+  policy rule, bulk-deleting rules, the same operations on auth-policy rules,
+  committing a policy draft, reloading the policy file (SIGHUP) and renaming a
+  category group, decryption profile or file profile that rules reference all
+  changed the control plane's running rulebase without publishing a
+  configuration version. Data planes kept enforcing the previous rules — a
+  deleted Allow stayed allowed, a new Block was not enforced — until some
+  unrelated change that does publish (network settings, PAC, identity
+  providers, import, rollback) or a control-plane restart happened to follow.
+  This was never the intended behaviour: the runtime inventory lists "Admin:
+  any config mutator (e.g. policy upload) → `globalConfigStore.Update(...)`"
+  (`roadmap/CLUSTER-RUNTIME-DISCOVERY.md`), and the PAC handler records the
+  same gap being closed there ("without this, an exclusions change (including
+  a wipe) waits for an UNRELATED mutation to bump the snapshot version",
+  `pac.go`). Each of those operations now publishes once, after the change is
+  durably committed. A refused or failed edit publishes nothing, nor does an
+  edit staged in a draft (its commit does), nor an edit on a standalone or
+  data-plane node. If the publish is rejected because the configuration is
+  over a cluster-sync cap, the local edit stands and the rejection is logged,
+  alerted and shown in Diagnostics as for every other publisher; draft commit
+  and the three rename responses also carry `cluster_publish_rejected`.
+  **After upgrading:** the first policy edit on a control plane publishes its
+  whole current configuration, so any policy difference that had been waiting
+  for a publish reaches the fleet at that moment — review the control plane's
+  rulebase before making that first edit. Edits to the default action,
+  blocklist, SSL-bypass list, URL categories, category groups, rewrite rules,
+  file-block lists and profiles, bandwidth policies and node groups still do
+  not publish on their own; they are delivered by the next publish, which a
+  policy edit now is.
+
 - **A config import no longer reports success when the imported policy rules
   could not be written to disk.** The policy save on `POST /api/config/import`
   discarded its error: the import answered `200 {"ok":true}` while the policy

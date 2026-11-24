@@ -1176,8 +1176,11 @@ func apiPolicyDraftCommit(w http.ResponseWriter, r *http.Request) {
 	// Persist the commit comment into the config-version timeline (S3): the
 	// version records WHY the rulebase changed, alongside the rollback snapshot.
 	saveConfigVersionNote(actor, "policy.commit", comment)
+	// The commit is the moment a staged rulebase starts enforcing — and so the
+	// moment it must reach the fleet (policy_publish.go).
+	pubErr := publishRunningPolicyChange("policy.commit")
 	logger.Printf("UI: policy draft committed by %s (%d changes)", sanitizeLog(actor), diff.total())
-	jsonOK(w, map[string]any{"ok": true, "committed": diff.total(), "diff": diff})
+	jsonOK(w, withClusterPublishRejection(map[string]any{"ok": true, "committed": diff.total(), "diff": diff}, pubErr))
 }
 
 // apiPolicyDraftRevert — POST /api/policy/draft/revert (operator). Discards the
