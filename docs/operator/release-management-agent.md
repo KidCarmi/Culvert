@@ -323,8 +323,9 @@ be recorded in its journal record`, the agent was killed in the middle of a
 (disk full, read-only file system, wrong ownership). It stops rather than
 report an interruption it cannot mark as seen. Free space or fix the
 directory; the agent then starts by itself (systemd retries it) and reports
-the operation. While it is refusing to start it does not clean up its own old
-operation logs, so on a full disk the space has to be freed by hand. Check
+the operation. Each attempt to start first removes the agent's own expired
+operation logs, which may be enough on a full disk; if not, free space by
+hand. Check
 `culvert/proxy:pinned` and the running container yourself in the meantime.
 
 If the same line ends with `was written by a newer agent version`, the
