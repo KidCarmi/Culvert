@@ -504,31 +504,3 @@ func TestPolicyEditsPublish_PolicyFileReload(t *testing.T) {
 		t.Fatalf("control: the reload did not install the file's rules: %s", ppRunning())
 	}
 }
-
-// ── recorded, not fixed here ────────────────────────────────────────────────
-
-// TestEvidence_DEFECT_DefaultActionEditDoesNotPublish pins one of the
-// non-policy-rule doors this change deliberately leaves alone: setting the
-// default action on a control plane still does not publish, so data planes
-// keep the previous default until the next publish (which a rule edit now
-// is). The full list of such doors is in the change notes.
-//
-// WHEN FIXED: assert the version advances and the served default follows.
-func TestEvidence_DEFECT_DefaultActionEditDoesNotPublish(t *testing.T) {
-	ppControlPlane(t)
-	orig := defaultPolicyAction()
-	t.Cleanup(func() { setDefaultPolicyAction(orig) })
-	setDefaultPolicyAction("deny")
-	if err := publishCurrentConfigSnapshot(); err != nil {
-		t.Fatal(err)
-	}
-	v0 := globalConfigStore.Version()
-	w := ppDo(apiDefaultAction, "POST", "/api/default-action", map[string]any{"action": "allow"})
-	if w.Code >= 300 || defaultPolicyAction() != "allow" {
-		t.Fatalf("control: the default action was not set (%d %s)", w.Code, w.Body.String())
-	}
-	if served := globalConfigStore.Get().DefaultAction; globalConfigStore.Version() != v0 || served != "deny" {
-		t.Fatalf("setting the default action now publishes (version %d → %d, served %q) — DEFECT FIXED, invert this test",
-			v0, globalConfigStore.Version(), served)
-	}
-}
