@@ -142,7 +142,9 @@ The TTL is the **failover-latency ↔ tolerance trade**:
     mode and to legacy mode with `--ha-auto-failover`; with automatic failover
     off it is always empty. The record of a successful sync is held in memory:
     a restarted standby reports `no successful state sync yet` until its first
-    sync after the restart.
+    sync after the restart. The same holds for a leader that was demoted
+    (self-fence) and re-entered standby: the record is cleared, and it does
+    not auto-promote until it has synced once from the new leader.
 
   **Legacy mode with `--ha-auto-failover`:** when the leader becomes
   unreachable while `auto_promote_blocked` is set, the standby does not

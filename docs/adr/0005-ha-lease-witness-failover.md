@@ -163,8 +163,18 @@ fence is the one a standby must replace, and `Acquire` arbitrates. Limit: only a
 as an answer; a leader that answers with a gRPC status (for example a rejected token) is still counted
 as unreachable.
 
-**Not closed by this.** `lastSyncOK` is not reset when a node re-enters standby in the same process
-(`enterStandbyResync`), so "synced" is not strictly per leader lineage in lease mode.
+**Follow-up 2, same day — sync evidence is per standby stint (a LEASE-PATH behaviour change, one case).**
+`StartAsStandbyWithUndo` reset the failure streak but not `lastSyncOK`. A node that synced at T0, was
+promoted, self-fenced and re-entered standby against the new leader B stayed "eligible" until T0+10 min
+without having applied anything from B; if B died in that window (after the 30 s cooldown) it re-promoted
+on its pre-fence state, without B's writes. Entering standby now clears `lastSyncOK`, so eligibility
+always refers to the leader the node currently stands by for. This changes what S4 decides in exactly
+that case: a demoted ex-leader no longer auto-promotes until it has applied one bundle from its new
+leader. All three callers of `enterStandbyResync` (self-fence, foreign holder observed while unfenced,
+unfenced resume with a foreign holder) are demotions whose own log lines say the node's state may be
+stale; none expects immediate promotability, and the fresh-process entry (`startHAStandby`) already
+started from zero. Availability cost: if the new leader dies before the demoted node's first sync from
+it, failover is manual. Outside the 10-minute window that was already the behaviour.
 
 Contract: `CLU-004` (`contracts/registry.yaml`).
 

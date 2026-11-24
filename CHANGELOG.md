@@ -77,6 +77,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   refusal is fixed. Lease mode is unchanged. Limit: a leader that answers with
   an RPC error (for example a rejected HA token) is still treated as
   unreachable.
+- **A demoted HA leader no longer re-promotes itself on state it synced before
+  it led (lease mode).** A node that synced as a standby, was promoted, then
+  lost the fencing lease and re-entered standby against the new leader kept
+  its old "last successful sync" time. If the new leader died before the node
+  had synced from it — after the 30-second re-promotion cooldown and within 10
+  minutes of that old sync — the node promoted itself again and published its
+  pre-demotion state, without the changes the new leader had accepted.
+  Entering standby now clears the record. **Operator-visible effect (a
+  lease-mode behaviour change in this one case):** such a node shows
+  `auto_promote_blocked` until its first successful sync from the new leader,
+  and if that leader is lost first, failover needs a manual promotion.
 - **Automatic HA failover without a fencing lease no longer promotes a standby
   that has not synced the leader's configuration.** With `--ha-auto-failover`
   and no etcd lease, a standby promoted itself after three failed sync rounds

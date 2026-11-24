@@ -661,6 +661,14 @@ func (h *HAState) StartAsStandbyWithUndo(ctx context.Context, leaderAddr, token 
 	h.since = time.Now()
 	h.autoFailover = autoFailover
 	h.syncFailCount = 0 // fresh loop — don't carry over a stale streak from a prior standby stint
+	// Sync evidence belongs to ONE standby stint: it says "this node applied a
+	// bundle from the leader it is standing by for". A node that re-enters
+	// standby after a demotion (enterStandbyResync) stands by for a DIFFERENT
+	// leader; carrying lastSyncOK over would keep it eligible for automatic
+	// promotion (haSyncIneligibility) on state it synced from the previous
+	// lineage, before it has applied anything from the new leader.
+	h.lastSyncOK = time.Time{}
+	h.syncRefused = 0
 	h.pc = promoteContext{grpcAddr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile,
 		onPromote: onPromote, undoPromote: undoPromote, set: true}
 	h.promoted.Store(false)
