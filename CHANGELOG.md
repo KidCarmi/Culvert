@@ -35,6 +35,26 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A config import no longer reports success when the imported policy rules
+  could not be written to disk.** The policy save on `POST /api/config/import`
+  discarded its error: the import answered `200 {"ok":true}` while the policy
+  file still held the previous rules, so a restart silently reverted the
+  import (in either direction, including back to a rule set without a newly
+  imported block). It now answers `500` with `status:imported_not_durable`,
+  `applied:true`, `policy_persisted:false`, the audit entry records the failed
+  write, and the admin UI says the rules are live but not saved. The running
+  configuration is unchanged from before: the import is still applied.
+  **API compatibility:** this is a new response on an existing operation, for
+  a condition that used to answer `200`. It is not a breaking change by the
+  contract's rules (oasdiff reports none; no operation, field or success
+  response changed), but a client that treats any non-2xx from this endpoint
+  as "nothing was imported" must read the body: `applied:true` means the
+  configuration is live. `retry_safe` says whether re-sending the same import
+  is idempotent (`true` in replace mode; `false` in merge mode, where alert
+  webhooks would be appended again) and `recovery` gives the fix. A write
+  that replaced the policy file but could not sync its directory is treated
+  as persisted, as every other policy writer treats it. A refused import
+  remains a `4xx` with nothing changed.
 - **A control-plane snapshot whose identity-provider profiles are refused no
   longer leaves the node with new policy rules over the previous category
   groups.** The IdP sync is the one step of a snapshot apply that can refuse
