@@ -436,6 +436,43 @@ contracts:
     validation: integration
     compatibility: "A backup must not be sufficient on its own to decrypt data at rest."
 
+  - id: BKP-004
+    area: backup-restore
+    status: enforced
+    owner_approved: false
+    invariant: "A restore commit on a data directory that cannot be renamed (a volume mount point, or an unwritable parent) is all or nothing: it is reported as committed only after every file taken from the archive was read back and matched the backup manifest, and after a failure or a kill at any point the data directory holds its complete previous content by the next start, or Culvert refuses to start. The previous content is kept after a commit."
+    authority: "Restore commit (restore.go, restore_inplace.go)."
+    code:
+      - "restore_inplace.go"
+      - "restore_layout_linux.go"
+    configs: []
+    transitions:
+      permitted:
+        - "undoing an interrupted in-place restore at the next start, or at the start of the next restore, while holding the single-writer lock"
+        - "refusing to start when the intent record is unusable, when a name exists both in the data directory and in the backup directory, or when the single-writer lock cannot be established"
+        - "refusing the commit, with nothing changed, while a running process holds the single-writer lock"
+      forbidden:
+        - "starting on a data directory that mixes previous and restored content"
+        - "completing (rolling forward) an interrupted restore"
+        - "reporting a commit whose restored files were not verified against the manifest"
+        - "deleting previous content during recovery"
+        - "offering the backup directory of an unfinished restore for cleanup"
+        - "evaluating a restore guard against a half-swapped data directory"
+        - "swapping, or undoing another restore's swap, while a live process holds the single-writer lock, whatever CULVERT_ALLOW_MULTIPLE_WRITERS says"
+        - "running the whole-directory swap, a backup or a support bundle over an unfinished in-place restore"
+    tests:
+      - {file: "restore_inplace_test.go", name: TestRestoreInPlace_CrashAtEveryStep_NextStartHoldsThePreviousContent}
+      - {file: "restore_inplace_test.go", name: TestRestoreInPlace_RollbackKilledPartWayIsFinishedByTheNextStart}
+      - {file: "restore_inplace_test.go", name: TestRestoreInPlace_GuardsAreEvaluatedAfterAnUnfinishedRestoreIsUndone}
+      - {file: "restore_inplace_test.go", name: TestRestoreInPlace_OverrideDoesNotSwapUnderALiveHolder}
+      - {file: "restore_inplace_test.go", name: TestRestoreInPlace_VerificationFailureRollsBack}
+      - {file: "restore_inplace_test.go", name: TestRestoreInPlace_StartupWithoutTheLockRefusesAndChangesNothing}
+      - {file: "restore_inplace_test.go", name: TestRestoreInPlace_UnusableIntentRecordStopsEverything}
+      - {file: "restore_inplace_test.go", name: TestRestoreInPlace_LiveWriterRefusesBeforeAnyChange}
+      - {file: "restore_inplace_test.go", name: TestCleanupLeftovers_NeverOffersTheBackupOfAnUnfinishedRestore}
+    validation: integration
+    compatibility: "New on-disk state under <data dir>/.restore/ (intent.json version 1). A build that predates it ignores the directory: started on a volume holding an unfinished in-place restore it would run on the half-swapped content, so finish or undo a restore before downgrading. Backups never include the directory."
+
   - id: AGT-001
     area: agent-lifecycle
     status: enforced

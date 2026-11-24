@@ -1520,7 +1520,7 @@ engine. There is still exactly one implementation.
 | Coverage floors | a step in the same job | `coverage-floors` job on the verdict's merged profile |
 | `fast-gate-coverage` | uploaded `if: always()` by the race job | uploaded by the verdict, only after it proved the evidence complete (same name, `coverage.out`, 30-day retention) |
 | Runner hardening | harden-runner (egress `audit`) on the race job | the same step first in **every** engine job, the floors job and the audit jobs |
-| Mount-point regression | `sudo go test -run TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting .` | `race-privileged`: the SAME prebuilt binary as root; must print PASS (a SKIP fails) |
+| Mount-point regression | `sudo go test -run TestRestoreCommit_DataDirIsMountPoint_CommitsInPlace .` | `race-privileged`: the SAME prebuilt binary as root; must print PASS (a SKIP fails) |
 | Aggregate | skipped = pass for every need | + the race path (`test-race`, `coverage-floors`) must be exactly `success` when the diff classified as code |
 | Unsharded run | every code PR | dispatch-only audit (`unsharded_audit: true`) |
 
@@ -1538,7 +1538,7 @@ which still passes only `shards: 4` (pinned by
 |---|---|---|
 | `coverage-artifact` | `qa-coverage` | `fast-gate-coverage` |
 | `harden-runner` | `false` | `true` |
-| `privileged-test` | *(none: `race-privileged` skipped, and the verdict requires `skipped`)* | `TestRestoreCommit_DataDirIsMountPoint_FailsInsteadOfCommitting` (the verdict requires `success`) |
+| `privileged-test` | *(none: `race-privileged` skipped, and the verdict requires `skipped`)* | `TestRestoreCommit_DataDirIsMountPoint_CommitsInPlace` (the verdict requires `success`) |
 | `fault` | `none` | forwarded from `workflow_dispatch` (qualification only) |
 
 The engine's evidence artifacts keep their `qa-race-` names in a Fast run: the

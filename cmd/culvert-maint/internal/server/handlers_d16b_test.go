@@ -77,6 +77,25 @@ type d16bTestRig struct {
 	// fail. mu-guarded; tests modify, the fake-exec wait reads.
 	mu          sync.Mutex
 	failMatches []string
+	// dryRunStdout is what the fake restore dry-run (a --restore argv
+	// without --confirm) prints. Empty models a proxy image that predates
+	// the preflight verdict line.
+	dryRunStdout string
+}
+
+func (r *d16bTestRig) setDryRunStdout(s string) {
+	r.mu.Lock()
+	r.dryRunStdout = s
+	r.mu.Unlock()
+}
+
+func isRestoreDryRunArgv(argv []string) bool {
+	restore, confirm := false, false
+	for _, a := range argv {
+		restore = restore || a == "--restore"
+		confirm = confirm || a == "--confirm"
+	}
+	return restore && !confirm
 }
 
 // addFailMatch tells the fake-exec wait function to return a non-nil
@@ -163,6 +182,12 @@ func startD16bRig(t *testing.T) *d16bTestRig {
 			// For backup.list tests we need to write a JSON
 			// array to stdout. The Stdout writer is the runner's
 			// boundedBuffer; write directly.
+			if isRestoreDryRunArgv(cmd.Args) {
+				rig.mu.Lock()
+				out := rig.dryRunStdout
+				rig.mu.Unlock()
+				_, _ = cmd.Stdout.Write([]byte(out))
+			}
 			if isListBackupsArgv(cmd.Args) {
 				_, _ = cmd.Stdout.Write([]byte(`[{"filename":"a.tar.gz","path":"/backup/a.tar.gz","size_bytes":123,"modified_at":"2026-05-04T00:00:00Z","encrypted":false}]`))
 			}
@@ -713,7 +738,7 @@ func TestRestoreCommit_StageOrderIsDownThenCLIThenUpThenHealth(t *testing.T) {
 func TestRestoreCommit_RestoreFails_UpAndHealthBothAttempted(t *testing.T) {
 	rig := startD16bRig(t)
 	defer rig.stop()
-	rig.addFailMatch("--restore") // any argv with --restore fails
+	rig.addFailMatch("--confirm") // the commit fails; the read-only preflight (no --confirm) passes
 
 	status, body := rig.post(t, "/v1/restores/commit", map[string]interface{}{
 		"path": "/backup/x.enc",
@@ -732,15 +757,15 @@ func TestRestoreCommit_RestoreFails_UpAndHealthBothAttempted(t *testing.T) {
 		t.Errorf("failure_reason: got %v want cli_error (first failure wins)", op["failure_reason"])
 	}
 
-	// Stage progress must include all 4 stages — restore fails,
-	// start_stack runs (ContinueOnError=true), health_check runs
-	// (also ContinueOnError=true for visibility).
+	// Stage progress must include all 5 stages — the preflight passes,
+	// restore fails, start_stack runs (ContinueOnError=true), health_check
+	// runs (also ContinueOnError=true for visibility).
 	progress, _ := op["progress"].([]interface{})
-	if len(progress) != 4 {
-		t.Errorf("expected 4 stage records (down, restore, start_stack, health_check); got %d: %+v", len(progress), progress)
+	if len(progress) != 5 {
+		t.Errorf("expected 5 stage records (preflight, down, restore, start_stack, health_check); got %d: %+v", len(progress), progress)
 	}
 	stageNames := stageNamesFromProgress(progress)
-	for _, want := range []string{"stop_stack", "run_cli_restore_commit", "start_stack", "health_check"} {
+	for _, want := range []string{"preflight_restore", "stop_stack", "run_cli_restore_commit", "start_stack", "health_check"} {
 		if !contains(stageNames, want) {
 			t.Errorf("missing stage %q in progress; got %v", want, stageNames)
 		}
@@ -792,8 +817,10 @@ func TestRestoreCommit_HealthFailureSurfacedAsFinalReason(t *testing.T) {
 func TestRestoreCommit_RestoreAndUpBothFail_FirstFailureWins(t *testing.T) {
 	rig := startD16bRig(t)
 	defer rig.stop()
-	rig.addFailMatch("--restore")
-	rig.addFailMatch("up")
+	rig.addFailMatch("--confirm") // the commit, not the preflight
+	// `compose up -d`. Not "up": that substring is also in "/backup/…", which
+	// the read-only preflight carries, and a failed preflight stops nothing.
+	rig.addFailMatch("-d")
 
 	status, body := rig.post(t, "/v1/restores/commit", map[string]interface{}{
 		"path": "/backup/x.enc",
@@ -1159,3 +1186,110 @@ func fakeHealthClient(rig *d16bTestRig) *http.Client {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// ─── restore.commit preflight ──────────────────────────────────────
+
+func restoreCommitOp(t *testing.T, rig *d16bTestRig) map[string]interface{} {
+	t.Helper()
+	status, body := rig.post(t, "/v1/restores/commit", map[string]interface{}{"path": "/backup/x.enc", "mode": "full"})
+	if status != http.StatusAccepted {
+		t.Fatalf("status: got %d body=%s", status, body)
+	}
+	var ack map[string]interface{}
+	_ = json.Unmarshal(body, &ack)
+	return rig.waitForOpFinished(t, ack["op_id"].(string))
+}
+
+// dockerTouchedTheStack reports whether any captured command stops, starts or
+// commits: everything except the read-only dry-run.
+func dockerTouchedTheStack(cmds []capturedExecD16b) []string {
+	var touched []string
+	for _, c := range cmds {
+		for _, a := range c.Argv {
+			if a == "down" || a == "up" || a == "--confirm" {
+				touched = append(touched, a)
+			}
+		}
+	}
+	return touched
+}
+
+// A commit the restore itself says it would refuse never stops the proxy: no
+// down, no commit, no up. The operation fails and names the reason.
+func TestRestoreCommit_PreflightRefusal_StackNeverStopped(t *testing.T) {
+	rig := startD16bRig(t)
+	defer rig.stop()
+	rig.setDryRunStdout("plan...\n\nRESTORE-PREFLIGHT v1 commit=refused layout=in-place reason=not_enough_free_space\n")
+
+	op := restoreCommitOp(t, rig)
+	if op["state"] != "failed" || op["failure_reason"] != "cli_error" {
+		t.Errorf("op: got state=%v reason=%v, want failed/cli_error", op["state"], op["failure_reason"])
+	}
+	if touched := dockerTouchedTheStack(rig.captured.snapshot()); len(touched) != 0 {
+		t.Errorf("a refused preflight still ran %v", touched)
+	}
+	progress, _ := op["progress"].([]interface{})
+	first, _ := progress[0].(map[string]interface{})
+	if first["stage"] != "preflight_restore" || !strings.Contains(fmt.Sprint(first["output"]), "not_enough_free_space") {
+		t.Errorf("the failed stage does not name the refusal: %+v", first)
+	}
+}
+
+// The dry-run itself failing (unreadable or undecryptable archive, bad
+// manifest) is the same: nothing is stopped.
+func TestRestoreCommit_PreflightCommandFails_StackNeverStopped(t *testing.T) {
+	rig := startD16bRig(t)
+	defer rig.stop()
+	rig.addFailMatch("--restore") // every restore argv fails, the preflight first
+
+	op := restoreCommitOp(t, rig)
+	if op["state"] != "failed" || op["failure_reason"] != "cli_error" {
+		t.Errorf("op: got state=%v reason=%v, want failed/cli_error", op["state"], op["failure_reason"])
+	}
+	if touched := dockerTouchedTheStack(rig.captured.snapshot()); len(touched) != 0 {
+		t.Errorf("a failed preflight still ran %v", touched)
+	}
+}
+
+// A proxy image that predates the verdict line prints none; the operation
+// then runs as it always did. So does one that says commit=ok.
+func TestRestoreCommit_PreflightWithoutAVerdictProceeds(t *testing.T) {
+	for name, out := range map[string]string{
+		"older image":   "plan...\n",
+		"commit ok":     "plan...\nRESTORE-PREFLIGHT v1 commit=ok layout=in-place\n",
+		"not a verdict": "the text RESTORE-PREFLIGHT v1 commit=refused inside a line is not a verdict line\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := startD16bRig(t)
+			defer rig.stop()
+			rig.setDryRunStdout(out)
+			op := restoreCommitOp(t, rig)
+			if op["state"] != "succeeded" {
+				t.Fatalf("op state: got %v (%v)", op["state"], op["failure_reason"])
+			}
+			got := strings.Join(dockerTouchedTheStack(rig.captured.snapshot()), " ")
+			if got != "down --confirm up" {
+				t.Errorf("stack commands: got %q, want %q", got, "down --confirm up")
+			}
+		})
+	}
+}
+
+func TestRestorePreflightRefusal_Parse(t *testing.T) {
+	for _, tc := range []struct {
+		out, reason string
+		refused     bool
+	}{
+		{"", "", false},
+		{"RESTORE-PREFLIGHT v1 commit=ok layout=in-place\n", "unspecified", false},
+		{"x\nRESTORE-PREFLIGHT v1 commit=refused layout=in-place reason=data_dir_not_writable\n", "data_dir_not_writable", true},
+		{"RESTORE-PREFLIGHT v1 commit=refused\n", "unspecified", true},
+		{"RESTORE-PREFLIGHT v1 commit=refused reason=Not/A$Token\n", "unspecified", true},
+		{"RESTORE-PREFLIGHT v2 commit=refused reason=x\n", "", false},
+	} {
+		reason, refused := restorePreflightRefusal([]byte(tc.out))
+		if reason != tc.reason || refused != tc.refused {
+			t.Errorf("%q: got (%q, %v), want (%q, %v)", tc.out, reason, refused, tc.reason, tc.refused)
+		}
+	}
+}

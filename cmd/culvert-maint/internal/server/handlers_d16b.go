@@ -65,6 +65,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -738,9 +739,9 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 }
 
 // buildRestoreStages constructs the stage list for restore.dryrun
-// (commit=false, single stage) or restore.commit (commit=true, four
-// stages: down → cli --restore --confirm → up [best-effort] →
-// health_check [best-effort]). Extracted from handleRestore so the
+// (commit=false, single stage) or restore.commit (commit=true, five
+// stages: preflight [read-only, stack still up] → down → cli --restore
+// --confirm → up [best-effort] → health_check [best-effort]). Extracted from handleRestore so the
 // late-binding closure stays compact.
 //
 //nolint:funlen // single-pass orchestration sequence — splitting hides the down→commit→up→health ordering
@@ -761,11 +762,40 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 		}
 	}
 	probeFactory := s.opts.HealthProbeFactory
+	// stackTouched is set the moment this operation first asks Docker to stop
+	// the stack. The two recovery stages below run after ANY earlier failure
+	// (ContinueOnError); when the failure was the preflight, nothing was
+	// stopped and there is nothing to recover — and a `compose up` nobody
+	// needed is not harmless (it recreates the proxy on whatever the fixed tag
+	// points at, ADR-0061).
+	stackTouched := false
+	const notStopped = "skipped: this operation never stopped the stack"
 	return []ops.FlowStage{
+		{
+			// Ask the restore itself, read-only and with the proxy still
+			// serving, whether a commit with these exact arguments would be
+			// refused. A restore that cannot start must not cost an outage.
+			Name:          "preflight_restore",
+			FailureReason: ops.ReasonCLIError,
+			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				res, rerr := s.opts.Runner.ComposeRestoreDryRun(ctx, filename, mode, acceptDP, allowCounter, resolved)
+				if res == nil {
+					return nil, nil, rerr
+				}
+				if rerr != nil {
+					return res.Stdout, res.Stderr, rerr
+				}
+				if reason, refused := restorePreflightRefusal(res.Stdout); refused {
+					return res.Stdout, res.Stderr, fmt.Errorf("restore preflight: the commit would be refused (%s); the stack was not stopped", reason)
+				}
+				return res.Stdout, res.Stderr, nil
+			},
+		},
 		{
 			Name:          "stop_stack",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				stackTouched = true
 				res, rerr := s.composeDown(ctx)
 				if res == nil {
 					return nil, nil, rerr
@@ -793,6 +823,9 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 			ContinueOnError: true,
 			FailureReason:   ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				if !stackTouched {
+					return []byte(notStopped), nil, nil
+				}
 				res, rerr := s.composeUp(ctx)
 				if res == nil {
 					return nil, nil, rerr
@@ -813,6 +846,9 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 			ContinueOnError: true,
 			FailureReason:   ops.ReasonHealthFailed,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				if !stackTouched {
+					return []byte(notStopped), nil, nil
+				}
 				probe := probeFactory()
 				hr, herr := probe.Run(ctx)
 				if herr != nil {
@@ -828,6 +864,42 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 		},
 	}
 }
+
+// restorePreflightPrefix opens the verdict line the proxy's restore dry-run
+// prints last (restore_inplace.go in the root module): whether a commit with
+// the same arguments would be refused before it changed anything.
+const restorePreflightPrefix = "RESTORE-PREFLIGHT v1 "
+
+// restorePreflightRefusal reads that verdict from a dry-run's stdout. Only an
+// explicit `commit=refused` refuses. A proxy image that predates the line
+// prints none, and the operation then proceeds exactly as it did before the
+// preflight existed. The reason is reduced to a short token: it is quoted into
+// the operation record.
+func restorePreflightRefusal(stdout []byte) (string, bool) {
+	// The verdict is the dry-run's LAST line of that shape: everything before
+	// it is the plan, which quotes names taken from the archive.
+	reason, refused := "", false
+	for _, line := range strings.Split(string(stdout), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), restorePreflightPrefix)
+		if !ok {
+			continue
+		}
+		reason, refused = "unspecified", false
+		for _, field := range strings.Fields(rest) {
+			switch k, v, _ := strings.Cut(field, "="); k {
+			case "commit":
+				refused = v == "refused"
+			case "reason":
+				if preflightReasonRE.MatchString(v) {
+					reason = v
+				}
+			}
+		}
+	}
+	return reason, refused
+}
+
+var preflightReasonRE = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 
 // ─── POST /v1/cleanups ─────────────────────────────────────────────
 
