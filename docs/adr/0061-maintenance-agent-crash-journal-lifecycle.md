@@ -323,9 +323,12 @@ wait after a compose command that ended in an error is one window. If that
 command's CLI survived behind `sudo` (a stage timeout that could not kill it)
 and sends its stop later than that, an operation of the same process can
 already have reported success. The marker rule above only makes sure the NEXT
-process waits. And a `stop_grace_period` longer than `interrupted_settle` (not
-validated: the agent does not read the compose file) defeats the window and,
-with it, the time after which a marker may be cleared.
+process waits. And a `stop_grace_period` longer than `interrupted_settle`
+defeats the window and, with it, the time after which a marker may be cleared.
+The agent does not read the compose file, so it cannot refuse such a
+configuration; the two SHIPPED defaults are pinned against each other by
+`TestInterruptedSettleDefault_OutlastsTheShippedStopGrace`, and an operator who
+raises one must raise the other.
 
 Not covered by the marker: an agent **downgraded** to a version that writes no
 markers and upgraded again. The marker directory then exists, and a restore's

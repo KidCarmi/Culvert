@@ -44,7 +44,16 @@ jobs:
         # (ORPHAN_PROBE_PAST_FIRST_USE). Without it each trial is a first start, which always
         # waits the whole settle window, so the mutation marker's two paths (no marker, no
         # wait; proxy down, wait ends early) are never taken.
-        variant: [shipped, converge, warm]
+        # cp: the proxy run as a control plane, its shutdown held open by a control-plane
+        # gRPC connection (about 9 s with the proxy port open), every trial started past
+        # first use, and a PRIOR image from before #2058, whose /ready still answers 200
+        # while it drains. That is the upgrade a customer on an older release makes, and the
+        # longest window in which an operation can be admitted during a pending stop.
+        variant: [shipped, converge, warm, cp]
+        exclude:
+          # cp differs from warm only in the slices that hold the shutdown open (mid).
+          - {variant: cp, points: "-1,0,1,2"}
+          - {variant: cp, points: "3,4,5,6"}
         # All 14 kill points, split so that one job fits in the runner's time. `mid` is the
         # part of each chunk inside the recreate (the slices with a pending admin-UI request).
         include:
@@ -54,7 +63,7 @@ jobs:
           - {points: "10,11,12", mid: "10"}
         points: ["-1,0,1,2", "3,4,5,6", "7,8,9", "10,11,12"]
     env:
-      V1_REF: ${{ inputs.proxy_v1_ref || 'main' }}
+      V1_REF: ${{ inputs.proxy_v1_ref || (matrix.variant == 'cp' && '46b4ffa6e8dd8e5bf6c3e32adbcc68a61699d2aa') || 'main' }}
       # On a pull request there are no inputs: both images are built from main (the same
       # source under two version strings, so the agent still sees two distinct images).
       V2_REF: ${{ inputs.proxy_v2_ref || 'main' }}
@@ -87,12 +96,14 @@ jobs:
           ORPHAN_PROBE_POINTS: ${{ matrix.points }}
           ORPHAN_PROBE_MID: ${{ matrix.mid }}
           VARIANT: ${{ matrix.variant }}
-          ORPHAN_PROBE_PAST_FIRST_USE: ${{ matrix.variant == 'warm' && '1' || '0' }}
+          ORPHAN_PROBE_PAST_FIRST_USE: ${{ (matrix.variant == 'warm' || matrix.variant == 'cp') && '1' || '0' }}
+          ORPHAN_PROBE_CP: ${{ matrix.variant == 'cp' && '1' || '0' }}
         run: |
+          set +e   # keep going after the probe so that its exit code is reported and returned
           set -uo pipefail
           flag=""; [ "$VARIANT" = converge ] && flag="--only-converge"
           mkdir -p "$RUNNER_TEMP/probe-evidence"
-          sudo --preserve-env=ORPHAN_PROBE_PROXY_IMAGE_V1,ORPHAN_PROBE_PROXY_IMAGE_V2,ORPHAN_PROBE_POINTS,ORPHAN_PROBE_MID,ORPHAN_PROBE_PAST_FIRST_USE \
+          sudo --preserve-env=ORPHAN_PROBE_PROXY_IMAGE_V1,ORPHAN_PROBE_PROXY_IMAGE_V2,ORPHAN_PROBE_POINTS,ORPHAN_PROBE_MID,ORPHAN_PROBE_PAST_FIRST_USE,ORPHAN_PROBE_CP \
             env "PATH=$PATH" "GOFLAGS=${GOFLAGS:-}" "GOTOOLCHAIN=${GOTOOLCHAIN:-}" "HOME=$HOME" \
             ORPHAN_PROBE_OUT="$RUNNER_TEMP/probe-evidence" \
             bash test/lifecycle-conformance/orphan-probe/probe.sh $flag 2>&1 | tee "$RUNNER_TEMP/probe-evidence/probe.log"
@@ -146,6 +157,78 @@ jobs:
             python3 "$t" culvert-probe-release:v1 observe || rc=$?
             python3 "$t" culvert-probe-release:v2 not-ready || rc=$?
           done
+          # As a control plane, with the gRPC drain held: the longest observable shutdown.
+          for i in 1 2 3; do
+            TIMELINE_CP=1 python3 "$t" culvert-probe-release:v2 not-ready || rc=$?
+          done
           echo "timeline exit=$rc"
           exit "$rc"
+
+  # Negative control: the same control-plane trial with the agent's settle wait turned OFF
+  # (interrupted_settle = "0s") and the pre-#2058 prior image. A rollback admitted while the
+  # old proxy drains must then report success and be invalidated when the proxy exits. This
+  # job PASSES only if the probe reports exactly that violation: it shows, on this runner and
+  # this run, that the probe would see the defect the other jobs say is absent.
+  sensitivity:
+    name: "Sensitivity · settle wait off must be caught"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      V1_REF: '46b4ffa6e8dd8e5bf6c3e32adbcc68a61699d2aa'
+      V2_REF: ${{ inputs.proxy_v2_ref || 'main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-go-cache
+        with:
+          cache-dependency-path: cmd/culvert-maint/go.sum
+
+      - name: Build the two release images (repository Dockerfile)
+        run: |
+          set -euo pipefail
+          for v in v1 v2; do
+            if [ "$v" = v1 ]; then ref="$V1_REF"; else ref="$V2_REF"; fi
+            git fetch --no-tags origin "$ref"
+            git worktree add --detach "$RUNNER_TEMP/src-$v" FETCH_HEAD
+            echo "$v: $ref = $(git -C "$RUNNER_TEMP/src-$v" rev-parse HEAD)"
+            docker build --build-arg "VERSION=probe-$v" -t "culvert-probe-release:$v" "$RUNNER_TEMP/src-$v"
+          done
+
+      - name: Run the control-plane trial with the settle wait off (expect a violation)
+        env:
+          ORPHAN_PROBE_PROXY_IMAGE_V1: culvert-probe-release:v1
+          ORPHAN_PROBE_PROXY_IMAGE_V2: culvert-probe-release:v2
+          ORPHAN_PROBE_POINTS: "9"
+          ORPHAN_PROBE_MID: "9"
+          ORPHAN_PROBE_CP: "1"
+          ORPHAN_PROBE_PAST_FIRST_USE: "1"
+          ORPHAN_PROBE_SETTLE: "0s"
+        run: |
+          # The probe is EXPECTED to exit 1 here. The step's shell stops at the first failing
+          # command by default, which would end the step before that exit code is examined.
+          set +e
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/probe-evidence"
+          sudo --preserve-env=ORPHAN_PROBE_PROXY_IMAGE_V1,ORPHAN_PROBE_PROXY_IMAGE_V2,ORPHAN_PROBE_POINTS,ORPHAN_PROBE_MID,ORPHAN_PROBE_PAST_FIRST_USE,ORPHAN_PROBE_CP,ORPHAN_PROBE_SETTLE \
+            env "PATH=$PATH" "GOFLAGS=${GOFLAGS:-}" "GOTOOLCHAIN=${GOTOOLCHAIN:-}" "HOME=$HOME" \
+            ORPHAN_PROBE_OUT="$RUNNER_TEMP/probe-evidence" \
+            bash test/lifecycle-conformance/orphan-probe/probe.sh 2>&1 | tee "$RUNNER_TEMP/probe-evidence/probe.log"
+          rc=${PIPESTATUS[0]}
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/probe-evidence"
+          echo "probe exit=$rc (1 = a property was violated, which is what this job requires)"
+          if [ "$rc" != 1 ]; then echo "::error::the probe did not report a violation with the settle wait off (exit $rc): this run cannot show the defect is absent elsewhere"; exit 1; fi
+          grep -q '^PROBE rollback-cphold k=9 verdict=VIOLATION' "$RUNNER_TEMP/probe-evidence/probe.log" \
+            || { echo "::error::the violation was not the expected one (rollback admitted during the pending stop)"; exit 1; }
+          echo "sensitivity confirmed: a rollback admitted during the pending stop was reported as a violation"
+
+      - name: Upload the per-trial records
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: orphan-probe-sensitivity
+          path: ${{ runner.temp }}/probe-evidence
+          if-no-files-found: warn
 

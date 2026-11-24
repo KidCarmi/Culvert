@@ -39,6 +39,11 @@ CNAME = os.environ["PROBE_CNAME"]
 # decides; "uihold" then keeps an admin-UI request pending so that its shutdown
 # takes its real 5 s.
 DRAIN = os.environ.get("PROBE_DRAIN", "serving")
+# Drains in which the rig holds the real proxy's shutdown open, with the least
+# time the old container must have survived for the trial to count, the time
+# expected, and what holds it. "cphold": a control-plane gRPC connection (the
+# proxy runs with -cp-grpc-addr); its graceful stop takes its whole 8 s budget.
+HELD_DRAINS = {"uihold": (3.0, 5, "admin-UI request"), "cphold": (6.0, 9, "control-plane gRPC connection")}
 REAL = dict(os.environ, DOCKER_HOST="unix://" + os.environ["PROBE_REAL_SOCK"])
 SOCK = "/run/culvert-maint/culvert-maint.sock"
 STATE = "/var/lib/culvert-maint"
@@ -139,6 +144,14 @@ def _open_ui_request():
     return c
 
 
+def _open_cp_connection():
+    """A connection to the proxy's control-plane gRPC port that never speaks
+    HTTP/2. The server's graceful stop waits for it (8 s budget) before it
+    force-closes, with the proxy port still open: the longest the listener
+    stays up after SIGTERM in a control-plane deployment."""
+    return socket.create_connection(("127.0.0.1", int(os.environ["PROBE_CP_PORT"])), timeout=5)
+
+
 def hold_ui_request():
     """PROBE_DRAIN=uihold (real proxy): keep a request to the admin UI unfinished,
     as a browser tab with a pending request would, so that the proxy's shutdown
@@ -158,7 +171,7 @@ def hold_ui_request():
         held = []
         while not stop.is_set():
             try:
-                held.append(_open_ui_request())
+                held.append(_open_cp_connection() if DRAIN == "cphold" else _open_ui_request())
             except OSError:
                 pass  # the proxy is down or restarting; try again
             while len(held) > 2:
@@ -183,18 +196,34 @@ def release_ui_request():
         _hold_stop = None
 
 
-def old_container_exit_secs(fired, limit=12.0):
-    """Seconds from the kill until the container that was running image v1 at the
-    start is no longer running, or None if it still runs after `limit`. Read
-    from dockerd. Only meaningful where a stop was in flight."""
-    while time.time() - fired < limit:
-        out = sh("docker", "ps", "--no-trunc", "--filter", f"label=com.docker.compose.project={PROJECT}",
-                 "--format", "{{.ID}}").stdout.split()
-        running_v1 = [i for i in out if ver(sh("docker", "inspect", i, "--format", "{{.Image}}").stdout.strip()) == "v1"]
-        if not running_v1:
-            return round(time.time() - fired, 1)
-        time.sleep(0.2)
-    return None
+def running_ids():
+    return sh("docker", "ps", "--no-trunc", "--filter", f"label=com.docker.compose.project={PROJECT}",
+              "--format", "{{.ID}}").stdout.split()
+
+
+def watch_drain(fired, rec, old_ids, limit=40.0):
+    """In the background: seconds from the kill until none of the containers that
+    were running BEFORE the kill is running any more (rec["drain_secs"]; None if
+    one still runs after `limit`), then let go of whatever held the shutdown.
+
+    By container id, not by image: a rollback that follows starts a new container
+    from the same image. In the background, because the trial must go on while
+    the old proxy is still draining: the operation that follows is meant to be
+    admitted during the pending stop, which is the hazard under test. (Measuring
+    it inline made every held trial wait the drain out first.)"""
+    def run():
+        rec["drain_secs"] = None
+        while time.time() - fired < limit:
+            now = set(running_ids())
+            if not (old_ids & now):
+                rec["drain_secs"] = round(time.time() - fired, 1)
+                break
+            time.sleep(0.2)
+        release_ui_request()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t
 
 
 def mainpid():
@@ -242,7 +271,7 @@ def reset(stop_delay):
         time.sleep(0.2)
     if t != {"tag": "v1", "containers": ["canonical:running:v1"], "serving": "v1"}:
         raise RuntimeError(f"bad start state {t}")
-    if DRAIN == "uihold":
+    if DRAIN in HELD_DRAINS:
         hold_ui_request()
 
 
@@ -308,6 +337,7 @@ def trial(k, stop_delay, follow):
     with open(P + "/arm.json", "w") as f:
         json.dump({"id": tid, "k": k, "pid": int(pid)}, f)
     time.sleep(0.05)
+    old_ids = set(running_ids())  # the proxy container the upgrade is about to replace
     rec["apply_op"] = api("POST", "/v1/upgrades/apply", {"image_ref": images()["V2"]}).get("op_id")
     fired_path, t0 = f"{P}/fired-{tid}.json", time.time()
     # An agent with the settle wait holds the tag+recreate until its window is over.
@@ -319,11 +349,8 @@ def trial(k, stop_delay, follow):
         return rec
     with open(fired_path) as f:
         fired = json.load(f)["t"]
-    if DRAIN == "uihold":
-        rec["drain_secs"] = old_container_exit_secs(fired)
-        release_ui_request()
-    else:
-        time.sleep(1.0)
+    drain_watch = watch_drain(fired, rec, old_ids) if DRAIN in HELD_DRAINS else None
+    time.sleep(1.0)
     rec["truth_1s_after_kill"] = truth()
     ok = wait_agent()
     rec["new_agent_after_s"] = round(time.time() - fired, 1)
@@ -343,6 +370,7 @@ def trial(k, stop_delay, follow):
     rec["truth_at_restart"] = truth()
     if follow != "converge":
         rec["status_at_restart"] = status()
+    rec["follow_started_after_s"] = round(time.time() - fired, 1)
     if follow == "rollback":
         rec["follow_op"] = run_op("/v1/rollbacks", {"mode": "image", "image_ref": images()["V1"]})
     elif follow == "apply":
@@ -351,6 +379,8 @@ def trial(k, stop_delay, follow):
         rec["converge_secs"], rec["status_after_converge"], rec["converge_finished"] = wait_converge()
         rec["truth_after_converge"] = truth()
     time.sleep(stop_delay + 6)
+    if drain_watch is not None:
+        drain_watch.join(45)
     rec["truth_at_rest"] = truth()
     rec["status_at_rest"] = status()
     time.sleep(3)
@@ -398,10 +428,11 @@ def judge(rec):
             # skipped_second_instance, lock_unavailable, or nothing reconciled:
             # the record is still there, but this trial tested nothing.
             return "INVALID", [f"the startup reconcile did not act on the record: state={rc.get('state')!r} records={len(rc.get('records') or [])}"]
-    if rec.get("drain") == "uihold" and "/stop" in (rec.get("last_request_daemon_saw") or ""):
+    if rec.get("drain") in HELD_DRAINS and "/stop" in (rec.get("last_request_daemon_saw") or ""):
         d = rec.get("drain_secs")
-        if d is None or d < 3.0:
-            return "INVALID", [f"the pending admin-UI request did not hold the proxy's shutdown (old container gone after {d}s; expected about 5s)"]
+        least, about, what = HELD_DRAINS[rec["drain"]]
+        if d is None or d < least:
+            return "INVALID", [f"the pending {what} did not hold the proxy's shutdown (old container gone after {d}s; expected about {about}s)"]
     if rec["follow"] in ("rollback", "apply") and not (op and op.get("admitted") and op.get("state") in ("succeeded", "failed")):
         # The trial is about what the next operation does. One that was refused,
         # unreadable or still running exercised nothing.
@@ -455,6 +486,7 @@ def judge_all(expect_fence_violation, want_trials):
                          f" at_restart[{fmt(rec['truth_at_restart'])}]"
                          + (f" op={op.get('state') if op.get('admitted') else 'refused'}" if op else "")
                          + (f" op_secs={op.get('secs')}" if op and op.get('admitted') else "")
+                         + (f" drain={rec.get('drain_secs')}s follow_at={rec.get('follow_started_after_s')}s" if rec.get('drain') in HELD_DRAINS else "")
                          + (f" converge={[(x.get('decision'), x.get('outcome')) for x in ((rec['status_after_converge'].get('reconcile') or {}).get('records') or [])]}" if rec['follow'] == 'converge' else "")
                          + f" at_rest[{fmt(rec['truth_at_rest'])}] records={len(rec['status_at_rest']['interrupted'])}")
             print(line)
