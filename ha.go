@@ -214,6 +214,11 @@ type HAStatus struct {
 	SyncFailCount int    `json:"sync_fail_count,omitempty"` // standby-side: consecutive HASync failures since last success
 	LastSyncOK    string `json:"last_sync_ok,omitempty"`    // standby-side: RFC3339 of the last successful HASync apply
 	SyncPanics    int    `json:"sync_panics,omitempty"`     // standby-side: sync rounds contained by the panic guard (CHAOS-25)
+	// AutoPromoteBlocked is the standby-side reason an AUTOMATIC promotion
+	// would be refused right now on synchronization grounds (never synced, or
+	// last sync beyond the freshness window); "" when it would not be, or when
+	// the node has no automatic failover path. See haSyncIneligibility.
+	AutoPromoteBlocked string `json:"auto_promote_blocked,omitempty"`
 }
 
 func (h *HAState) Status() HAStatus {
@@ -238,6 +243,7 @@ func (h *HAState) Status() HAStatus {
 	if h.role == "standby" {
 		s.SyncFailCount = h.syncFailCount
 		s.SyncPanics = h.syncPanics
+		s.AutoPromoteBlocked = h.autoPromoteBlockedLocked()
 		if !h.lastSyncOK.IsZero() {
 			s.LastSyncOK = h.lastSyncOK.Format(time.RFC3339)
 		}
@@ -855,24 +861,16 @@ func (h *HAState) standbyLoop(ctx context.Context, stopCh chan struct{}, leaderA
 // split-brain that made the flag opt-in cannot happen; freshness + hysteresis
 // additionally gate the automatic path (see leaseAutoPromote).
 //
-// Legacy mode (ADR-0004, unchanged): auto-failover only when opted in;
-// otherwise warn once and stay read-only until an operator acts.
+// Legacy mode (ADR-0004): auto-failover only when opted in, and then only for
+// a standby that passes the same synchronization eligibility as lease mode
+// (legacyAutoPromote); otherwise warn once and stay read-only until an
+// operator acts.
 func (s *standbyLoopState) onMaxFail() bool {
 	if s.h.leaseConfigured() {
 		return s.h.leaseAutoPromote()
 	}
 	if s.h.autoFailoverEnabled() {
-		s.h.promote("leader unreachable")
-		// Report whether promotion ACTUALLY happened, mirroring the lease path
-		// above. promote() is not infallible: onPromote can return an error, or
-		// (CHAOS-25) panic and be contained — both reset the once-guard and
-		// leave this node a standby. Returning an unconditional true there told
-		// standbyLoop to exit, permanently ending BOTH replication and leader
-		// monitoring on a node that never became a leader — the silent-stall
-		// outcome the per-round guard exists to prevent, reached one level up.
-		// Returning IsLeader() keeps the loop ticking so the next round retries
-		// the promotion, exactly as lease mode already does.
-		return s.h.IsLeader()
+		return s.legacyAutoPromote()
 	}
 	if !s.manualWarned {
 		s.h.warnManualFailoverRequired(s.leaderAddr)
@@ -1295,6 +1293,7 @@ func (h *HAState) PromoteManually() error {
 	if !ctxSet {
 		return fmt.Errorf("cannot promote: no promote context (node was not started as a standby)")
 	}
+	h.logManualPromoteSyncOverride()
 	h.promote("manual promotion")
 	if !h.IsLeader() {
 		return fmt.Errorf("promotion did not complete (see logs)")
@@ -1654,6 +1653,8 @@ func apiClusterHA(w http.ResponseWriter, r *http.Request) {
 			// haStandbyMaxFail and self-fenced/failed-over (ADR-0004/RISK-001).
 			resp["sync_fail_count"] = status.SyncFailCount
 			resp["sync_max_fail"] = haStandbyMaxFail
+			// "" = an automatic promotion would not be refused on sync grounds.
+			resp["auto_promote_blocked"] = status.AutoPromoteBlocked
 			if status.LastSyncOK != "" {
 				resp["last_sync_ok"] = status.LastSyncOK
 			}
@@ -1753,14 +1754,17 @@ func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
+	// Read BEFORE promoting: once this node is leader the sync state it was
+	// promoted on is no longer reported.
+	syncWarning := globalHA.manualPromoteSyncWarning()
 	if err := globalHA.PromoteManually(); err != nil {
 		// Inline-sanitize the engine error (CWE-117) before it reaches the log
 		// via the response path; the message names only role/context, no input.
 		http.Error(w, "promote failed: "+err.Error(), http.StatusConflict)
 		return
 	}
-	status := globalHA.Status()
-	jsonOK(w, map[string]any{"ok": true, "role": status.Role, "term": status.Term})
+	resp, detail := manualPromoteOutcome(globalHA.Status(), syncWarning)
+	jsonOK(w, resp)
 
 	auditAdd(AuditEntry{
 		TS:     time.Now().UnixMilli(),
@@ -1768,7 +1772,7 @@ func apiClusterHAPromote(w http.ResponseWriter, r *http.Request) {
 		Actor:  sessionAdmin(r),
 		Action: "cluster.ha-promote",
 		Object: "self",
-		Detail: fmt.Sprintf("manual standby→leader promotion (term=%d)", status.Term),
+		Detail: detail,
 	})
 }
 

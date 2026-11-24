@@ -19518,6 +19518,9 @@ async function promoteHA() {
     const r = await api('/api/cluster/ha/promote', { method: 'POST' });
     if (!r) return;
     toast('This Control Plane is now the leader', 'success');
+    // The server states what this standby was promoted on when it had not
+    // synced the old leader's configuration (never, or not recently).
+    if (r.warning) toast('Promoted on unsynchronized state: ' + r.warning, 'error');
     loadCluster();
   } catch(e) {
     toast('Promote failed: ' + e.message, 'error');
@@ -19597,8 +19600,11 @@ async function loadHA(isCP) {
         // escHtml on the interpolated fields: they come from another cluster
         // node's status payload - never render peer-supplied data unescaped.
         const lastOk = r.last_sync_ok ? `<br><span style="font-size:.65rem;color:var(--muted)">last ok ${escHtml(timeAgo(new Date(r.last_sync_ok)))}</span>` : '';
+        // Not failover-ready: an automatic promotion would be refused because
+        // this standby holds no fresh copy of the leader's configuration.
+        const blocked = r.auto_promote_blocked ? `<br><span style="font-size:.65rem;color:#ef4444">auto-failover blocked: ${escHtml(String(r.auto_promote_blocked))}</span>` : '';
         document.getElementById('ha-sync-val').innerHTML =
-          `<span style="color:${syncColor}">${escHtml(String(failCount))}/${escHtml(String(r.sync_max_fail))} failed</span>${lastOk}`;
+          `<span style="color:${syncColor}">${escHtml(String(failCount))}/${escHtml(String(r.sync_max_fail))} failed</span>${lastOk}${blocked}`;
       } else {
         syncCard.style.display = 'none';
         syncNote.style.display = 'none';

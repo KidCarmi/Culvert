@@ -108,6 +108,55 @@ Recorded so implementation cannot forget them:
 
 ## Implementation log
 
+### 2026-11-24 — Addendum (owner decision): the S4 synchronization gate also governs legacy auto-failover
+
+**Owner decision:** "Legacy auto-failover — approved as a separate PR. Enforce equivalent synchronization
+eligibility guarantees across legacy and lease-based failover paths."
+
+**What was wrong.** S4's freshness gate (Finding 8) lived inside `leaseAutoPromote` only. The legacy path
+(`--ha-auto-failover`, no lease) promoted after three failed sync rounds with no synchronization check: a
+standby that had never completed a sync — or whose every bundle had been refused (POL-005, IdP sync,
+over-cap, CA decrypt) — became leader on its own empty state, and its activation publish handed every
+data plane a configuration with no policy rules and an empty blocklist at a fresh version. Reproduced
+through the real loop (`ha_failover_sync_eligibility_test.go`, negative control against the previous code).
+
+**Decision.** One predicate, `haSyncIneligibility(lastSync, now)` in `ha_failover.go`, called by both
+automatic paths through `refuseAutoPromoteUnsynced` — the lease path's check was extracted, not copied,
+so the guarantee is equal by construction. Eligible ⇔ `lastSyncOK` is set **and** not older than
+`haPromoteFreshnessWindow` (10 min, the existing S4 constant; no second threshold). `lastSyncOK` is
+written only after `applyHABundle` returned true for a bundle that passed the puller-side epoch check.
+
+**Unchanged.** Every lease-path decision (same checks, same order, same log lines), ADR-0005 commit
+semantics (`promote()`, `commitGrant`, `exposeGrantLocked` are untouched), the planned handoff (already
+honoured only in a round that applied), and manual promotion's bypass of the gate.
+
+**Changed for legacy mode.** An ineligible standby stays a read-only standby and keeps retrying the sync.
+It logs the refusal each round on the lease path's line, fires `ha_manual_failover_required` once per
+outage (the operator action is the same: decide whether to promote), and `GET /api/cluster/ha` /
+`/api/cluster/status` carry `auto_promote_blocked` with the reason — evaluated live, so a standby that is
+not failover-ready says so *before* the leader is lost (both modes). Data planes polling the standby are
+refused as before and keep their last applied configuration.
+
+**Manual promotion** stays the break-glass and is never refused on these grounds. It was silent about
+what it promoted on (the S4 comment claimed it "logs the staleness"; it did not). It now logs the
+override, returns a `warning` field and records it in the `cluster.ha-promote` audit detail when the
+standby is ineligible. No request field, status code or precondition changed.
+
+**Availability trade-off, accepted.** A legacy pair whose standby has not synced within 10 minutes — or
+at all, or since the standby's last restart — no longer fails over automatically. The evidence is
+in-memory only: `ha_config.json` records no sync, so a healthy standby that restarts and loses its
+leader before its first post-restart sync waits for an operator. Lease mode has always behaved this way.
+Persisting the last-sync instant would shorten that window in **both** modes and is therefore a
+lease-path change — left for a separate owner decision.
+
+**Not closed by this.** (1) Legacy mode still counts a refused bundle from a *live* leader toward the
+three-failure threshold; a standby that synced within the last 10 minutes can therefore still promote
+against a reachable leader (split brain — the standing ADR-0004 legacy risk; lease mode is protected by
+`Acquire`). (2) `lastSyncOK` is not reset when a node re-enters standby in the same process
+(`enterStandbyResync`), so "synced" is not strictly per leader lineage in lease mode.
+
+Contract: `CLU-004` (`contracts/registry.yaml`).
+
 ### 2026-10-17 — Implementation note (owner decision): the role-less epoch floor (CHAOS-71, #1645)
 This note amends S3's stamping in one case and leaves the S3 rule itself unchanged.
 - **Problem (Codex P1 4302435329 on #1645):** an authority-gaining transition commits a

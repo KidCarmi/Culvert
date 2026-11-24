@@ -61,6 +61,29 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Automatic HA failover without a fencing lease no longer promotes a standby
+  that has not synced the leader's configuration.** With `--ha-auto-failover`
+  and no etcd lease, a standby promoted itself after three failed sync rounds
+  whatever it held. A standby that had never completed a sync, or whose every
+  sync had been refused, became leader on its own empty state and published it
+  to every data plane as the current configuration: no policy rules, an empty
+  blocklist. The lease-based path already refused this; both paths now decide
+  through one check — the standby must have applied a bundle from the leader
+  within the last 10 minutes. **Operator-visible effect:** a legacy pair whose
+  standby has not synced (never, not within 10 minutes, or not since the
+  standby's last restart — the record is kept in memory only) does **not** fail
+  over by itself. The standby stays read-only and keeps retrying, data planes
+  keep enforcing the configuration they last applied, the log says `HA:
+  auto-promotion refused — …`, the `ha_manual_failover_required` alert fires
+  once, and `GET /api/cluster/ha` and the HA panel show `auto_promote_blocked`
+  with the reason (shown as soon as the standby is not failover-ready, before
+  any outage, in both modes). To recover, restore the leader, or promote the
+  standby manually if the leader is gone and you accept serving the standby's
+  state. Manual promotion is unchanged and still never refused; when the
+  standby is unsynchronized its response now carries a `warning`, and the log
+  and the `cluster.ha-promote` audit entry record it. Lease-mode failover
+  decisions are unchanged. (ADR-0005 addendum 2026-11-24; contract `CLU-004`.)
+
 - **A policy edit on a control plane now reaches data planes when it is
   committed.** Creating, updating, deleting, disabling, reordering or moving a
   policy rule, bulk-deleting rules, the same operations on auth-policy rules,

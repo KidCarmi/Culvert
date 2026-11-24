@@ -14,7 +14,7 @@ that node may promote or accept cluster writes.
 
 | Behavior | Legacy (no lease) | Lease mode |
 |---|---|---|
-| Automatic failover | Opt-in flag, unsafe (15s timeout guess); split-brain possible | Always on, fence-gated: the standby promotes only after **acquiring the lease**, which etcd denies while the leader lives |
+| Automatic failover | Opt-in flag, unsafe (15s timeout guess); split-brain possible. Promotes only a standby that synced the leader within the last 10 minutes (same check as lease mode) | Always on, fence-gated: the standby promotes only after **acquiring the lease**, which etcd denies while the leader lives |
 | `--ha-auto-failover` flag | Governs the 15s trigger | **Ignored** (logged); the lease arbitrates |
 | Partitioned leader | Keeps leading (split-brain) | **Self-fences**: demotes itself to read-only standby the moment it can no longer confirm the lease, then resyncs from the new leader |
 | Cluster writes (enroll, cert renewal, revocations, config push) | Role-based only | Additionally **epoch-fenced**: a fenced ex-leader's writes are refused by Data Planes and the bundle verifier |
@@ -125,6 +125,23 @@ The TTL is the **failover-latency ↔ tolerance trade**:
     standby stays read-only until an operator promotes it manually. Either
     way, reaching 3/3 means "stop waiting and try", not "leadership taken".
   - `last_sync_ok` — RFC3339 timestamp of the last successful sync apply.
+  - `auto_promote_blocked` — empty when an automatic promotion would not be
+    refused on synchronization grounds; otherwise the reason (`no successful
+    state sync yet …`, or `last state sync … ago exceeds the 10m0s freshness
+    window …`). It is evaluated on every read, so a standby that is **not
+    failover-ready** shows it before the leader is lost. It applies to lease
+    mode and to legacy mode with `--ha-auto-failover`; with automatic failover
+    off it is always empty. The record of a successful sync is held in memory:
+    a restarted standby reports `no successful state sync yet` until its first
+    sync after the restart.
+
+  **Legacy mode with `--ha-auto-failover`:** when the leader becomes
+  unreachable while `auto_promote_blocked` is set, the standby does not
+  promote. It stays read-only, keeps retrying the sync, logs `HA:
+  auto-promotion refused — …` each round and fires
+  `ha_manual_failover_required` once. Data planes keep enforcing the
+  configuration they last applied. Restore the leader, or promote the standby
+  manually (below) if the leader is permanently gone.
 
   The HA panel mirrors this as a "Sync to Leader" stat card (green at 0,
   amber below the threshold, red at/above it) — the early warning before a
@@ -163,7 +180,12 @@ The TTL is the **failover-latency ↔ tolerance trade**:
 - **Manual promotion** (UI button / `POST /api/cluster/ha/promote`) still
   requires acquiring the lease, but **bypasses the freshness and hysteresis
   gates** — use it when auto-promotion refuses on stale state and you accept
-  serving that state.
+  serving that state. The same holds in legacy mode. When the standby never
+  synced, or last synced more than 10 minutes ago, the promotion still
+  succeeds; the response carries a `warning` naming the last successful sync
+  (or that there was none), and the log and the `cluster.ha-promote` audit
+  entry record it. A standby that never synced publishes its **own local
+  configuration** — possibly empty — to every data plane once promoted.
 - **etcd lost long-term / decided to abandon fencing**: remove
   `-ha-etcd-endpoints` (or the yaml keys) and restart — the node runs in
   legacy manual-failover mode (ADR-0004 posture). Do this on **both** nodes;
