@@ -47,6 +47,12 @@ func ppControlPlane(t *testing.T) {
 	refGateSetup(t)
 	orig := globalConfigStore
 	globalConfigStore = &ConfigStore{}
+	// The marshal caches are keyed on (version, CA fingerprint), and a fresh
+	// store restarts at version 1: without this reset an entry another test
+	// left for the same version is served as this store's snapshot. Versions
+	// never repeat in production (CLU-002), so this is test isolation only.
+	gcMarshalCache.reset()
+	gcDeltaRemainderCache.reset()
 	t.Cleanup(func() {
 		globalConfigStore = orig
 		gcMarshalCache.reset()
