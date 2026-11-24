@@ -183,6 +183,9 @@ func decodeJSONBody(r *http.Request, dst interface{}) error {
 // interrupted, and image vs data need different recovery (image is
 // Docker-reconcilable; data must NOT be auto-reconciled). "" for upgrades.apply.
 //
+// restore.commit and a data rollback additionally carry RestoreStage, advanced
+// by their stages (restore_journal.go).
+//
 // For a standalone image rollback the target is FIXED and fully validated at
 // admission (strict repo@sha256 shape + image_allowlist in rollbackImage), and
 // no later stage folds it in (journal_phases is apply-specific) — so the
@@ -193,9 +196,20 @@ func decodeJSONBody(r *http.Request, dst interface{}) error {
 func admissionJournalRecord(opID, kind, actor string, params map[string]interface{}) journal.Record {
 	now := time.Now().UTC()
 	mode, _ := params["mode"].(string) //nolint:errcheck // absent/typed-nil → ""
+	if kind == ops.KindRestoreCommit {
+		// restore.commit's `mode` parameter is the RESTORE mode (full /
+		// trust-root-only / state-only), a different vocabulary from the
+		// journal's rollback mode ("" | image | data). It is not persisted.
+		mode = ""
+	}
 	rec := journal.Record{
 		OpID: opID, Kind: kind, Mode: mode, Phase: journal.PhaseAdmitted,
 		Actor: actor, StartedAt: now, UpdatedAt: now,
+	}
+	if isRestoreRecord(kind, mode) {
+		// A restore-class record says how far the restore got in RestoreStage;
+		// its Phase stays admitted (restore_journal.go).
+		rec.RestoreStage = journal.RestoreStageAdmitted
 	}
 	if kind == ops.KindRollbackCreate && mode == "image" {
 		if ref, _ := params["image_ref"].(string); ref != "" { //nolint:errcheck // absent/typed-nil → ""
@@ -239,22 +253,17 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 
 	op, deduped, err := s.opts.Ops.BeginIdempotent(kind, peer.String(), idempotencyKey, paramsForAudit)
 	if err != nil {
-		if ops.IsConflict(err) {
-			var conf *ops.Conflict
-			errors.As(err, &conf)
-			return nil, false, &opError{Status: http.StatusConflict, Body: map[string]interface{}{
-				"error":     "concurrency_conflict",
-				"holder_op": conf.Holder,
-			}}
-		}
-		return nil, false, &opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": err.Error()}}
+		return nil, false, admissionError(err)
 	}
 	if deduped {
 		// Duplicate submission — return the prior op snapshot, NO
 		// stage build, NO goroutine spawn. This is the contract:
 		// a retry with the same idempotency_key returns the
 		// original op_id even if the late-bound resources (env
-		// vars, files) are no longer present.
+		// vars, files) are no longer present. After a restart the
+		// snapshot comes from the durable idempotency record
+		// (ops/idempotency.go): a finished op's recorded result, or
+		// failed(agent_restart_interrupted) for one with no outcome.
 		return op, true, nil
 	}
 	// Newly admitted op — deliver the op_id to the caller (so late-bound
@@ -288,9 +297,12 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 			return nil, false, augmentErrorWithOp(&opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": "journal_write_failed"}}, op.ID)
 		}
 	}
-	deps := ops.OrchestratorDeps{Manager: s.opts.Ops, Audit: s.opts.Audit, OpLog: oplog}
+	deps := ops.OrchestratorDeps{Manager: s.opts.Ops, Audit: s.opts.Audit, OpLog: oplog, EndStateSafe: cfg.endStateSafe}
 	if s.opts.Journal != nil {
-		deps.Journal = s.opts.Journal // retired on terminal by the orchestrator
+		// Ended crash-safely by the orchestrator: removed after the terminal
+		// audit when the end state is proven safe, kept otherwise
+		// (terminal_record.go).
+		deps.Journal = terminalJournal{j: s.opts.Journal}
 	}
 	// Tracked via goOp so shutdown drains it (T2.4). The op ctx stays detached
 	// from the request/shutdown ctx and bounded only by OperationTimeout: a
@@ -311,6 +323,50 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 			s.resultFnRetiringInterrupted(op.ID, peer.String(), &cfg))
 	})
 	return op, false, nil
+}
+
+// admissionError maps a BeginIdempotent refusal to its HTTP answer. Nothing was
+// admitted on any of these paths.
+//
+//   - 409 concurrency_conflict: another state-changing op holds the lock.
+//   - 422 idempotency_key_reused: the key belongs to an operation of this kind
+//     that was submitted with a different payload. Not retryable as sent; 409 is
+//     kept for "busy, retry later" so a client's retry loop cannot spin on it.
+//   - 409 idempotency_record_unreadable: this key's durable record cannot be
+//     read, so whether the request already ran is unknown.
+//   - 503 idempotency_store_unavailable: the durable store cannot be read or
+//     written, so a keyed request cannot be admitted write-ahead. Un-keyed
+//     requests are still served.
+func admissionError(err error) *opError {
+	var conf *ops.Conflict
+	var mismatch *ops.IdempotencyMismatch
+	var unavailable *ops.IdempotencyUnavailable
+	switch {
+	case errors.As(err, &conf):
+		return &opError{Status: http.StatusConflict, Body: map[string]interface{}{
+			"error":     "concurrency_conflict",
+			"holder_op": conf.Holder,
+		}}
+	case errors.As(err, &mismatch):
+		return &opError{Status: http.StatusUnprocessableEntity, Body: map[string]interface{}{
+			"error":  "idempotency_key_reused",
+			"op_id":  mismatch.OpID,
+			"kind":   mismatch.Kind,
+			"detail": "this idempotency_key was already used for the named operation with a different payload; nothing was run. Use a new idempotency_key for a different request.",
+		}}
+	case errors.As(err, &unavailable) && unavailable.Unreadable:
+		return &opError{Status: http.StatusConflict, Body: map[string]interface{}{
+			"error":   "idempotency_record_unreadable",
+			"outcome": "unknown",
+			"detail":  "the stored record of this idempotency_key cannot be read, so whether the request already ran is unknown; nothing was run. Verify the state, then use a new idempotency_key to proceed.",
+		}}
+	case errors.As(err, &unavailable):
+		return &opError{Status: http.StatusServiceUnavailable, Body: map[string]interface{}{
+			"error":  "idempotency_store_unavailable",
+			"detail": "the request carries an idempotency_key but its admission could not be recorded durably; nothing was run.",
+		}}
+	}
+	return &opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": err.Error()}}
 }
 
 // recordAdmissionFailure marks the admitted op failed AND emits a
@@ -405,9 +461,25 @@ type startCfg struct {
 	// gate, so journal records left by earlier, interrupted operations describe
 	// a state that no longer exists and are retired (journal_retire.go).
 	retiresInterrupted func() bool
+	// retiresRestoreRecords, when set, is consulted once the op has SUCCEEDED.
+	// If it returns true the op committed a restore and the proxy passed the
+	// health check on the restored data, so the journal records of earlier,
+	// interrupted RESTORE-class operations describe a state that no longer
+	// exists and are retired. It never retires an upgrade or image-rollback
+	// record: a restore does not re-pin the image tag (journal_retire.go).
+	retiresRestoreRecords func() bool
+	// endStateSafe, when set, judges whether a FAILED journaled op proved the
+	// state it left safe, so that its record may be removed after the terminal
+	// audit (terminal_record.go). Unset keeps the record of every failure.
+	endStateSafe ops.EndStateJudge
 }
 
 type startOpt func(*startCfg)
+
+// withEndStateSafe attaches the flow's end-state judge (terminal_record.go).
+func withEndStateSafe(judge ops.EndStateJudge) startOpt {
+	return func(c *startCfg) { c.endStateSafe = judge }
+}
 
 // withResultFn attaches a structured-result computer to the op.
 func withResultFn(fn ops.ResultFn) startOpt { return func(c *startCfg) { c.resultFn = fn } }
@@ -416,6 +488,13 @@ func withResultFn(fn ops.ResultFn) startOpt { return func(c *startCfg) { c.resul
 // health-gated image state. establishes is evaluated after the stages ran.
 func withRetiresInterrupted(establishes func() bool) startOpt {
 	return func(c *startCfg) { c.retiresInterrupted = establishes }
+}
+
+// withRetiresRestoreRecords marks the op as a restore whose success retires the
+// records of earlier interrupted restores (and only those). established is
+// evaluated after the stages ran.
+func withRetiresRestoreRecords(established func() bool) startOpt {
+	return func(c *startCfg) { c.retiresRestoreRecords = established }
 }
 
 // withOpIDHook delivers the admitted op_id to the caller before stages run.
@@ -429,12 +508,20 @@ func writeOpResponse(w http.ResponseWriter, op *ops.Op, deduped bool) {
 	if deduped {
 		status = http.StatusOK
 	}
-	writeJSON(w, status, map[string]interface{}{
+	body := map[string]interface{}{
 		"op_id":   op.ID,
 		"kind":    op.Kind,
 		"state":   op.State,
 		"deduped": deduped,
-	})
+	}
+	// A retry that lands on an op an agent restart interrupted is told so in
+	// the acknowledgement itself: the op was not run again and what it did
+	// before the stop is not known.
+	if deduped && op.FailureReason == string(ops.ReasonAgentRestartInterrupted) {
+		body["failure_reason"] = op.FailureReason
+		body["outcome"] = "unknown"
+	}
+	writeJSON(w, status, body)
 }
 
 // resolveBackupPath validates `path` per the D1.6b restore contract:
@@ -714,6 +801,16 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 	allowCounter := req.AllowCounterRollback
 	passRef := req.PassphraseRef
 
+	kind := ops.KindRestoreDryRun
+	var (
+		flow      *restoreFlow // nil for a dry-run: it changes nothing and is not journaled
+		startOpts []startOpt
+	)
+	if commit {
+		kind = ops.KindRestoreCommit
+		flow = newRestoreFlow(kind, "", peer.String())
+		startOpts = restoreStartOpts(flow)
+	}
 	buildStages := func() ([]ops.FlowStage, *opError) {
 		// passphrase_ref is OPTIONAL for restore (cli detects
 		// encryption via magic bytes). If a ref was supplied but
@@ -723,14 +820,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 		if rerr != nil {
 			return nil, &opError{Status: http.StatusBadRequest, Body: map[string]string{"error": rerr.Error()}}
 		}
-		return s.buildRestoreStages(commit, filename, mode, acceptDP, allowCounter, resolved), nil
+		return s.buildRestoreStages(commit, filename, mode, acceptDP, allowCounter, resolved, flow), nil
 	}
 
-	kind := ops.KindRestoreDryRun
-	if commit {
-		kind = ops.KindRestoreCommit
-	}
-	op, deduped, herr := s.startAsyncOp(r, peer, kind, req.IdempotencyKey, params, buildStages)
+	op, deduped, herr := s.startAsyncOp(r, peer, kind, req.IdempotencyKey, params, buildStages, startOpts...)
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)
 		return
@@ -744,8 +837,13 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 // --confirm → up [best-effort] → health_check [best-effort]). Extracted from handleRestore so the
 // late-binding closure stays compact.
 //
+// flow is the operation's journal identity (restore_journal.go); nil runs the
+// same stages without recording progress. The commit flow records its stage
+// write-ahead: a journal that cannot be written stops the flow BEFORE
+// `compose down` and before the commit command.
+//
 //nolint:funlen // single-pass orchestration sequence — splitting hides the down→commit→up→health ordering
-func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.RestoreMode, acceptDP, allowCounter bool, resolved string) []ops.FlowStage {
+func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.RestoreMode, acceptDP, allowCounter bool, resolved string, flow *restoreFlow) []ops.FlowStage {
 	if !commit {
 		return []ops.FlowStage{
 			{
@@ -778,6 +876,7 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 			Name:          "preflight_restore",
 			FailureReason: ops.ReasonCLIError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				s.advanceRestoreStageBestEffort(flow, journal.RestoreStagePreflight)
 				res, rerr := s.opts.Runner.ComposeRestoreDryRun(ctx, filename, mode, acceptDP, allowCounter, resolved)
 				if res == nil {
 					return nil, nil, rerr
@@ -795,23 +894,16 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 			Name:          "stop_stack",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				stackTouched = true
-				res, rerr := s.composeDown(ctx)
-				if res == nil {
-					return nil, nil, rerr
-				}
-				return res.Stdout, res.Stderr, rerr
+				return s.restoreStopStack(ctx, flow, &stackTouched)
 			},
 		},
 		{
 			Name:          "run_cli_restore_commit",
 			FailureReason: ops.ReasonCLIError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposeRestoreCommit(ctx, filename, mode, acceptDP, allowCounter, resolved)
-				if res == nil {
-					return nil, nil, rerr
-				}
-				return res.Stdout, res.Stderr, rerr
+				return s.restoreRunCommit(ctx, flow, func(ctx context.Context) (*runner.Result, error) {
+					return s.opts.Runner.ComposeRestoreCommit(ctx, filename, mode, acceptDP, allowCounter, resolved)
+				})
 			},
 		},
 		{
@@ -826,11 +918,7 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 				if !stackTouched {
 					return []byte(notStopped), nil, nil
 				}
-				res, rerr := s.composeUp(ctx)
-				if res == nil {
-					return nil, nil, rerr
-				}
-				return res.Stdout, res.Stderr, rerr
+				return s.restoreStartStack(ctx, flow)
 			},
 		},
 		{
@@ -859,9 +947,26 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 				if hr.Failed() {
 					return []byte(summary), nil, errors.New(hr.ReadyDetail)
 				}
+				flow.noteHealthPassed()
 				return []byte(summary), nil, nil
 			},
 		},
+	}
+}
+
+// restoreStartOpts are the startAsyncOp options every restore-class operation
+// takes: the op id reaches the flow before any stage runs, and a success that
+// committed and passed the health check retires earlier interrupted restores.
+func restoreStartOpts(flow *restoreFlow) []startOpt {
+	return []startOpt{
+		withOpIDHook(func(id string) { flow.opID = id }),
+		withRetiresRestoreRecords(flow.established),
+		withEndStateSafe(restoreEndStateSafe(flow)),
+		withResultFn(func(ops.State, ops.FailureReason) map[string]interface{} {
+			// Whether the data directory was replaced, independent of how the
+			// operation ended: a failed operation can have committed.
+			return map[string]interface{}{"restore_committed": flow.committed}
+		}),
 	}
 }
 

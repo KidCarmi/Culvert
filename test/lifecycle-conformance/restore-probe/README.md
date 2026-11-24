@@ -24,7 +24,7 @@ Every property is checked against `dockerd` and the volume, read directly from
 | `refused` | A truncated archive fails the preflight and the proxy container is the same container with the same start time; no `down`, `up` or commit was run |
 | `commit_fails` | The archive is damaged after the preflight passed and the stack is down: the operation fails, the data directory is unchanged, no record or backup directory is left, and the proxy is serving again |
 | `kill_sweep` | The restore process is SIGKILLed during the swap, at a moment taken from the volume (the intent record appearing) plus a small delay. At death, no previous file is lost (live + set aside = all). After the next start of the real proxy: died mid-swap → all previous files are back and the outcome says `rolled_back`; otherwise all of one state or all of the other, never a mixture; the proxy is ready and no intent record remains |
-| `agent_crash_*` | The agent is killed between stages. What it reports afterwards is recorded beside what Docker says. **Recorded, not judged**: what an interrupted `restore.commit` must report is not a contract yet |
+| `agent_crash_*` | The agent is killed between stages. After the restart: the operation answers `failed` and is listed once under `interrupted_operations`; the report says the stack was stopped; its `data_changed` does not contradict the volume's outcome record (`yes` only with a committed restore, never `no` with one); the stack is as the dead agent left it and the restarted agent ran no `down`, `up` or restore command |
 
 The sweep reports which phases the kills actually landed in (`phases_hit`). A
 phase that was not hit was not tested by that run; the deterministic matrix

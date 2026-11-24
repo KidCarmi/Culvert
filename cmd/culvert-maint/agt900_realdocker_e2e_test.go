@@ -44,6 +44,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"culvert-maint/internal/journal"
 )
 
 const (
@@ -1816,7 +1818,7 @@ func (e *e2eEnv) caseDockerDown(t *testing.T, name string, second bool) {
 	x := xp("realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", true, "done", "")
 	exp := "dockerd stopped: deferred, no attempt, record kept, no docker change; dockerd back: " + x.String()
 	if second {
-		exp = "instance 2 on the same state_dir: skipped_second_instance, no docker change, record kept; after both die: " + x.String()
+		exp = "instance 2 on the same state_dir: refuses to start (instance lock, ADR-0062), no socket, no docker change, record kept; after both die: " + x.String()
 	}
 	res := &e2eResult{name: name, expected: exp}
 	defer e.record(t, res)
@@ -1875,31 +1877,7 @@ func (e *e2eEnv) caseDockerDown(t *testing.T, name string, second bool) {
 	res.check("dockerd back: Docker as before", back.Image == before.Image && back.Tag == before.Tag && back.ContainerID == before.ContainerID,
 		e.describe(before), e.describe(back))
 	if second {
-		p2 := r.newProc("second", "converge", "2m")
-		r.startProc(p2)
-		var v2 reconcileView
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			v2 = reconcileView{}
-			if code, _ := p2.get("/v1/status", &v2); code == http.StatusOK && v2.Reconcile != nil {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		st := "<none>"
-		if v2.Reconcile != nil {
-			st = v2.Reconcile.State
-		}
-		res.eq("instance 2 reconcile", "skipped_second_instance", st)
-		time.Sleep(3 * time.Second)
-		res.eq("instance 2 docker changes", "[]", "["+strings.Join(r.mutating(p2), ",")+"]")
-		now := e.snap()
-		res.check("instance 2: Docker unchanged", now.Image == back.Image && now.Tag == back.Tag && now.ContainerID == back.ContainerID,
-			e.describe(back), e.describe(now))
-		res.check("instance 2: record kept", r.record(opID) != nil, "kept", fmt.Sprint(r.record(opID) != nil))
-		r.jcheck("after instance 2")
-		r.killProc(p2)
-		res.how += "; instance 2 started while instance 1 held the lock; both SIGKILLed"
+		e.checkSecondInstanceRefuses(r, res, opID, back)
 	}
 	r.killProc(p1)
 	o := r.restartConverge(opID, "2m")
@@ -1951,9 +1929,58 @@ func (e *e2eEnv) caseOffMode(t *testing.T, name, target, point string) {
 	}
 	res.check("listed in interrupted_operations", listed, "listed, docker_reconciled=false", fmt.Sprint(listed))
 	r.jcheck("after the off-mode restart")
-	_, lockErr := os.Stat(filepath.Join(r.state, "reconcile", ".lock"))
-	res.check("no instance lock in off mode", os.IsNotExist(lockErr), "absent", fmt.Sprint(lockErr))
+	// ADR-0062 (owner decision 2): the instance lock is held in every mode.
+	res.check("off-mode agent holds the instance lock", instanceLockHeld(r.state), "held", fmt.Sprint(instanceLockHeld(r.state)))
 	r.killProc(p)
+}
+
+// checkSecondInstanceRefuses starts a second agent on the same state_dir
+// while the first holds the instance lock. Since ADR-0062 (owner decision 2)
+// it must refuse to start: exit non-zero naming the lock, bind no socket,
+// change nothing in Docker and keep the record.
+func (e *e2eEnv) checkSecondInstanceRefuses(r *e2eRig, res *e2eResult, opID string, back dockerSnap) {
+	p2 := r.newProc("second", "converge", "2m")
+	if err := p2.cmd.Start(); err != nil {
+		res.err = "start instance 2: " + err.Error()
+		return
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- p2.cmd.Wait() }()
+	var werr error
+	select {
+	case werr = <-exited:
+	case <-time.After(30 * time.Second):
+		_ = p2.cmd.Process.Kill()
+		werr = <-exited
+		res.check("instance 2 refuses to start", false, "exits", "still running after 30s")
+	}
+	res.check("instance 2 exits non-zero", werr != nil, "non-zero exit", fmt.Sprint(werr))
+	res.check("instance 2 names the instance lock", strings.Contains(p2.logs.String(), "instance lock"),
+		"refusal names the instance lock", p2.logs.String())
+	_, sockErr := os.Stat(p2.sock)
+	res.check("instance 2 binds no socket", os.IsNotExist(sockErr), "no socket", fmt.Sprint(sockErr))
+	res.eq("instance 2 docker changes", "[]", "["+strings.Join(r.mutating(p2), ",")+"]")
+	now := e.snap()
+	res.check("instance 2: Docker unchanged", now.Image == back.Image && now.Tag == back.Tag && now.ContainerID == back.ContainerID,
+		e.describe(back), e.describe(now))
+	res.check("instance 2: record kept", r.record(opID) != nil, "kept", fmt.Sprint(r.record(opID) != nil))
+	r.jcheck("after instance 2")
+	res.how += "; instance 2 started while instance 1 held the lock and refused to start"
+}
+
+// instanceLockHeld reports whether a live agent holds stateDir's instance
+// lock (a probe flock from this process is refused).
+func instanceLockHeld(stateDir string) bool {
+	j, err := journal.New(stateDir)
+	if err != nil {
+		return false
+	}
+	l, err := j.LockReconcile()
+	if err == nil {
+		_ = l.Release()
+		return false
+	}
+	return errors.Is(err, journal.ErrLockHeld)
 }
 
 // TestAGT900RealDocker is the e2e entry point (one image store per run).

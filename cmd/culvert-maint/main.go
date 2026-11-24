@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -28,6 +29,7 @@ import (
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/health"
+	"culvert-maint/internal/idem"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
@@ -121,12 +123,11 @@ func run(configPath string) error {
 		return fmt.Errorf("auth policy: %w", err)
 	}
 
-	if err := os.MkdirAll(cfg.StateDir, 0o750); err != nil { //nolint:gosec // documented mode
-		return fmt.Errorf("mkdir state_dir: %w", err)
+	instLock, err := prepareStateDir(cfg.StateDir)
+	if err != nil {
+		return err
 	}
-	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "operations"), 0o750); err != nil { //nolint:gosec // documented mode
-		return fmt.Errorf("mkdir operations: %w", err)
-	}
+	defer func() { _ = instLock.Release() }()
 
 	auditPath := filepath.Join(cfg.StateDir, "audit.jsonl")
 	al, err := audit.New(auditPath)
@@ -144,6 +145,7 @@ func run(configPath string) error {
 		idempTTL = cfg.OperationTimeout
 	}
 	mgr := ops.NewManagerWithTTL(nil, idempTTL)
+	initIdempotency(cfg.StateDir, mgr, idempTTL)
 
 	jnl, err := initJournal(cfg.StateDir, mgr, al, cfg.ProxyRepo)
 	if err != nil {
@@ -161,7 +163,7 @@ func run(configPath string) error {
 	}
 	stp.WithJournal(jnl)
 
-	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl)
+	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl, instLock)
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
@@ -182,6 +184,67 @@ func run(configPath string) error {
 	return nil
 }
 
+// initIdempotency opens the durable idempotency store (internal/idem) under
+// state_dir and hands it to the manager, so a keyed request that already
+// finished is answered from its record after a restart instead of running
+// again, and one that was interrupted is reported as outcome unknown.
+//
+// Unlike the journal this does NOT stop the agent when it fails. A store that
+// cannot be opened is replaced by one that refuses every keyed admission
+// (503 idempotency_store_unavailable): the agent still serves status, reads
+// and un-keyed requests, and never runs a keyed request it cannot record.
+// Opening runs no docker command.
+func initIdempotency(stateDir string, mgr *ops.Manager, ttl time.Duration) {
+	store, err := idem.Open(stateDir, idem.Options{TTL: ttl, Logf: log.Printf})
+	if err != nil {
+		log.Printf("culvert-maint: WARN: idempotency store could not be opened (%v) — "+
+			"requests that carry an idempotency_key are refused until this is fixed; other requests are served", err)
+		store = idem.Unavailable(err)
+	}
+	mgr.SetIdempotencyStore(store)
+}
+
+// prepareStateDir creates state_dir and its operations directory, then takes
+// the instance lock: one agent per state_dir, in every mode (ADR-0062, owner
+// decision 2). The lock is taken before anything under state_dir is read,
+// repaired or rewritten and before the socket is bound, so a second agent
+// stops here instead of admitting operations beside the first one or
+// replacing its socket. The server keeps the lock (the converge reconcile
+// reuses it) and releases it on Close; the kernel drops it if this process
+// dies.
+func prepareStateDir(stateDir string) (*journal.ReconcileLock, error) {
+	if err := os.MkdirAll(stateDir, 0o750); err != nil { //nolint:gosec // documented mode
+		return nil, fmt.Errorf("mkdir state_dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "operations"), 0o750); err != nil { //nolint:gosec // documented mode
+		return nil, fmt.Errorf("mkdir operations: %w", err)
+	}
+	return lockInstance(stateDir)
+}
+
+// errInstanceLocked is returned by lockInstance when another live process
+// holds the instance lock of the same state_dir.
+var errInstanceLocked = errors.New("another culvert-maint process holds the instance lock")
+
+// lockInstance takes the exclusive instance lock of stateDir
+// (<state_dir>/reconcile/.lock). It fails closed: a lock that is held, or
+// that cannot be taken at all, stops the agent.
+func lockInstance(stateDir string) (*journal.ReconcileLock, error) {
+	jnl, err := journal.New(stateDir)
+	if err != nil {
+		return nil, fmt.Errorf("journal: %w", err)
+	}
+	lock, err := jnl.LockReconcile()
+	switch {
+	case errors.Is(err, journal.ErrLockHeld):
+		return nil, fmt.Errorf("%w on state_dir %s (%s): refusing to start, so two agents never admit operations, "+
+			"rewrite the journal or replace each other's socket", errInstanceLocked, stateDir, filepath.Join(jnl.Dir(), ".lock"))
+	case err != nil:
+		return nil, fmt.Errorf("instance lock on state_dir %s: %w", stateDir, err)
+	}
+	return lock, nil
+}
+
 // initJournal opens the crash-recovery journal (RISK-022) and reports every op
 // that was in flight at the last stop. It reads the journal FAIL-CLOSED: a
 // corrupt record means we cannot tell whether a destructive op was interrupted,
@@ -194,10 +257,18 @@ func run(configPath string) error {
 //     is found;
 //   - counts the start in the record.
 //
-// It runs no docker command and removes no record. Docker is not consulted, so
+// A record whose operation did not die but ENDED (it carries a terminal outcome,
+// ADR-0062 slice 1) is finished instead: see startupRecord. That is the only
+// record startup removes, and only when the operation succeeded or proved its
+// end state safe, after its terminal audit entry is on file.
+//
+// It runs no docker command and removes no record of an interrupted operation. Docker is not consulted, so
 // an unreachable daemon cannot delay or fail startup, and a record stays — and
 // is reported again by every later start and by GET /v1/status — until a later
-// image change succeeds (server/journal_retire.go). Acting on a record at boot
+// image change succeeds or, for an interrupted restore, a later restore does
+// (server/journal_retire.go). The same holds for every journaled kind: an
+// interrupted restore.commit or data rollback is reported here exactly like an
+// interrupted upgrade, and its stack is not started. Acting on a record at boot
 // is the separate, opt-in reconcile (reconcile_on_startup = "converge",
 // server/startup_reconcile.go), which runs only after this report is complete.
 func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo string) (*journal.Journal, error) {
@@ -212,13 +283,38 @@ func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo 
 	now := time.Now().UTC()
 	orphans := make([]ops.InterruptedOp, 0, len(recs))
 	for i := range recs {
-		orphans = append(orphans, reportInterrupted(jnl, al, &recs[i], proxyRepo, now))
+		if o, report := startupRecord(jnl, al, &recs[i], proxyRepo, now); report {
+			orphans = append(orphans, o)
+		}
 	}
 	if n := mgr.MarkAllInterrupted(orphans); n > 0 {
-		log.Printf("culvert-maint: %d operation(s) interrupted by a prior stop — marked failed(agent_restart_interrupted); "+
+		log.Printf("culvert-maint: %d operation(s) left a journal record at a prior stop — marked failed (agent_restart_interrupted, "+
+			"or the operation's own reason when it ended with a state it could not prove safe); "+
 			"Docker was NOT changed. See GET /v1/status interrupted_operations.", n)
 	}
 	return jnl, nil
+}
+
+// startupRecord is the per-record startup work. A record whose operation ENDED
+// (ADR-0062 slice 1: it carries a terminal outcome, written before the
+// operation's terminal audit entry) is finished: its terminal entry is written
+// if the audit log lacks it, then it is removed when the operation succeeded or
+// proved its end state safe, and otherwise kept and reported with the
+// operation's real failure reason — never with a second, interrupted, entry.
+// Every other record is an interrupted operation (reportInterrupted). report
+// is false for a record that is not to be marked as a failed operation.
+//
+// Docker is not consulted on either path. Removing an ended operation's
+// record here is the end of that operation's own terminal sequence, not a
+// reconcile: its audit entry is on file first (AGT-004 amendment).
+func startupRecord(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, proxyRepo string, now time.Time) (ops.InterruptedOp, bool) {
+	server.AdoptAuditedTerminal(al.Path(), rec)
+	if rec.TerminalOutcome != "" {
+		if o, report, handled := server.SettleTerminalAtStartup(jnl, al, rec, proxyRepo, maxInterruptedSeen); handled {
+			return o, report
+		}
+	}
+	return reportInterrupted(jnl, al, rec, proxyRepo, now), true
 }
 
 // armStartupReconcile wires the opt-in startup reconcile (contract AGT-900).
@@ -246,10 +342,10 @@ const maxInterruptedSeen = 1_000_000
 // state_dir must not stop the agent from coming up and saying, in memory, what
 // it found.
 //
-// Ordering: the audit entry is written before the record that remembers it. A
-// crash between the two repeats the entry at the next start; the other order
-// could lose it. So the audit trail carries the interruption at least once,
-// and exactly once unless the agent dies inside that window.
+// Ordering: the audit entry is written before the record that remembers it; the
+// other order could lose it. A crash between the two used to repeat the entry
+// at the next start. Since ADR-0062 slice 1 the next start first looks the
+// entry up (server.AdoptAuditedTerminal) and does not write it twice.
 func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, proxyRepo string, now time.Time) ops.InterruptedOp {
 	if rec.InterruptedAt == nil {
 		rec.InterruptedAt = &now
@@ -294,17 +390,18 @@ func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Reco
 // newServer wires the agent HTTP server from its already-constructed
 // dependencies. Extracted from run() to keep that function within the funlen
 // budget; no behavior change.
-func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal) (*server.Server, error) {
+func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal, lock *journal.ReconcileLock) (*server.Server, error) {
 	return server.New(server.Options{
-		Cfg:       cfg,
-		Auth:      pol,
-		Audit:     al,
-		Ops:       mgr,
-		Status:    stp,
-		StateDir:  cfg.StateDir,
-		AuditPath: auditPath,
-		Journal:   jnl,
-		Runner:    r,
+		InstanceLock: lock,
+		Cfg:          cfg,
+		Auth:         pol,
+		Audit:        al,
+		Ops:          mgr,
+		Status:       stp,
+		StateDir:     cfg.StateDir,
+		AuditPath:    auditPath,
+		Journal:      jnl,
+		Runner:       r,
 		HealthProbeFactory: func() health.Probe {
 			return health.Probe{
 				BaseURL:    cfg.HealthBaseURL,

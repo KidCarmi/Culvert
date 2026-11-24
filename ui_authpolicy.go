@@ -239,8 +239,8 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rule PolicyRule
-	if err := decodeJSON(r, &rule); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+	if refusal := decodeRuleJSON(r, &rule); refusal != "" {
+		http.Error(w, refusal, http.StatusBadRequest)
 		return
 	}
 	if rule.Name == "" {
@@ -253,7 +253,7 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// Structural validation (state-independent) stays a pre-fence 400; the
 	// name/priority uniqueness checks run INSIDE the fence below.
-	if err := validateRuleShape(rule); err != nil {
+	if err := validateRuleIngress(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -333,15 +333,15 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rule PolicyRule
-	if err := decodeJSON(r, &rule); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+	if refusal := decodeRuleJSON(r, &rule); refusal != "" {
+		http.Error(w, refusal, http.StatusBadRequest)
 		return
 	}
 	if err := normalizeIncomingAuthRule(&rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateRuleShape(rule); err != nil {
+	if err := validateRuleIngress(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
