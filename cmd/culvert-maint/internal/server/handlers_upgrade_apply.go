@@ -159,6 +159,7 @@ func (s *Server) handleUpgradeApply(w http.ResponseWriter, r *http.Request, peer
 		// An already-current apply succeeds without re-pinning the tag or
 		// probing health, so it establishes nothing.
 		withRetiresInterrupted(func() bool { return !acc.alreadyCurrent }),
+		withEndStateSafe(applyEndStateSafe(acc)),
 	)
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)
@@ -194,6 +195,7 @@ type upgradeApplyAccumulator struct {
 	priorCaptureReason       string // "" if priorRef valid, else no_prior_digest / ambiguous_prior_digest
 	upgradeFailedPostRestart bool   // set by restart(on error)/health_gate/verify — the running image is now new/indeterminate, so rollback may fire
 	restartLeftPrior         bool   // restart's `up` failed and a post-failure capture proved the container still runs the prior image (never recreated)
+	barrierWritten           bool   // the PhaseRestarting write-ahead barrier is durable: from here the fixed tag may move (terminal_record.go)
 	rollbackAttempted        bool
 	rollbackRestarted        bool // rollback_restart succeeded (new image is the prior one)
 	rollbackSucceeded        bool

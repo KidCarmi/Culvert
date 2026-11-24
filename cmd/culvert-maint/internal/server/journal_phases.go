@@ -165,6 +165,9 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 		if err := s.writeBarrier(acc); err != nil {
 			return nil, nil, fmt.Errorf("restart: write-ahead journal barrier failed, refusing to advance tag: %w", err)
 		}
+		// From here the tag may move: a failure no longer proves the end state
+		// safe unless the inline rollback passes its gate (terminal_record.go).
+		acc.barrierWritten = true
 		out, errOut, uerr := s.tagAndUp(ctx, acc.pinnedRef, &acc.upgradeFailedPostRestart, &acc.evidence)
 		if uerr == nil {
 			// Capture the target's config digest NOW (best-effort) — the container
@@ -225,7 +228,8 @@ func (s *Server) restartWithBarrier(acc *upgradeApplyAccumulator) stageRun {
 //     tag stays on the target and the note says so.
 //
 // Crash consistency: this runs inside the PhaseRestarting write-ahead window
-// (the record is retired only at terminal). An agent death before the restore
+// (the record outlives this stage; at terminal it is KEPT unless the inline
+// rollback passes its gate, terminal_record.go). An agent death before the restore
 // leaves record + tag-on-target + container-on-prior, after it record +
 // tag-on-prior + container-on-prior; reconcileDecision already distinguishes
 // the two (tag_advanced_container_stale vs already_on_prior). No new phase.

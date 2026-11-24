@@ -123,6 +123,14 @@ type InterruptedOperation struct {
 	// AgentStartsSeen counts the agent starts that found this record.
 	AgentStartsSeen int `json:"agent_starts_seen"`
 
+	// TerminalOutcome is set when the operation did NOT die: it ended
+	// ("failed:<failure_reason>") and its record was kept because it could not
+	// prove the state it left safe (ADR-0062 slice 1). It is reported, and
+	// retired, exactly like an interrupted operation. Absent for an operation
+	// that was interrupted.
+	TerminalOutcome string     `json:"terminal_outcome,omitempty"`
+	TerminalAt      *time.Time `json:"terminal_at,omitempty"`
+
 	// RefsValid reports whether the record's image references passed the
 	// repo-bound digest gate. The references and image ids below are present
 	// only when it is true.
@@ -210,6 +218,9 @@ func DescribeInterrupted(rec *journal.Record, proxyRepo string) InterruptedOpera
 		InterruptedAt:   rec.InterruptedAt,
 		AgentStartsSeen: rec.InterruptedSeen,
 	}
+	if _, _, ok := ops.ParseTerminalOutcome(rec.TerminalOutcome); ok {
+		out.TerminalOutcome, out.TerminalAt = rec.TerminalOutcome, rec.TerminalAt
+	}
 	out.DockerState = dockerStateOf(out.Kind, out.Mode, rec.Phase)
 	if isRestoreRecord(out.Kind, out.Mode) {
 		out.setRestoreFacts(rec.RestoreStage)
@@ -261,6 +272,9 @@ func (o *InterruptedOperation) AuditParams() map[string]interface{} {
 	}
 	if o.Mode != "" {
 		p["mode"] = o.Mode
+	}
+	if o.TerminalOutcome != "" {
+		p["terminal_outcome"] = o.TerminalOutcome
 	}
 	if o.RestoreStage != "" {
 		p["restore_stage"] = o.RestoreStage
@@ -351,7 +365,18 @@ const (
 	actionRollbackUnknown = "POST /v1/rollbacks with mode=image and a known-good image_ref (the record names no previous image)"
 )
 
+// operatorActionFor words what to do about a listed record. A kept record of
+// an operation that ended gets the same advice as an interrupted one, after a
+// sentence that says it did not die.
 func operatorActionFor(o *InterruptedOperation) string {
+	if o.TerminalOutcome == "" {
+		return operatorActionBody(o)
+	}
+	return "This operation did not die: it ended " + o.TerminalOutcome + " and did not prove the state it left safe, " +
+		"so its journal record was kept. " + operatorActionBody(o)
+}
+
+func operatorActionBody(o *InterruptedOperation) string {
 	switch o.DockerState {
 	case DockerStateUnchanged:
 		return actionNoChange

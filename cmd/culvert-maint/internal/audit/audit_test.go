@@ -339,3 +339,49 @@ func TestHasSucceeded(t *testing.T) {
 		t.Error("empty op id must be rejected")
 	}
 }
+
+// TestFindTerminal: the lookup that makes an operation's terminal audit entry
+// idempotent across a crash (ADR-0062 slice 1). Only a terminal outcome under
+// the exact op id AND kind counts: "started", an inline rollback's own kind and
+// a retirement entry under the same op id never do.
+func TestFindTerminal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	if ev, err := FindTerminal(path, "op1", "upgrades.apply"); err != nil || ev != nil {
+		t.Fatalf("missing log: ev=%v err=%v, want nil, nil", ev, err)
+	}
+	l, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []Event{
+		{Actor: "a", OpID: "op1", Kind: "upgrades.apply", Outcome: OutcomeStarted},
+		{Actor: "a", OpID: "op1", Kind: "upgrades.apply:rollback", Outcome: OutcomeFailed, FailureReason: "rollback_failed"},
+		{Actor: "a", OpID: "op1", Kind: "upgrades.apply:interrupted_superseded", Outcome: OutcomeSucceeded},
+		{Actor: "a", OpID: "op2", Kind: "upgrades.apply", Outcome: OutcomeFailed, FailureReason: "health_failed"},
+	} {
+		if err := l.Write(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ev, err := FindTerminal(path, "op1", "upgrades.apply"); err != nil || ev != nil {
+		t.Fatalf("no terminal entry of op1's own kind yet: ev=%+v err=%v", ev, err)
+	}
+	if err := l.Write(Event{Actor: "a", OpID: "op1", Kind: "upgrades.apply", Outcome: OutcomeFailed, FailureReason: "health_failed"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Close()
+	ev, err := FindTerminal(path, "op1", "upgrades.apply")
+	if err != nil || ev == nil || ev.Outcome != OutcomeFailed || ev.FailureReason != "health_failed" {
+		t.Fatalf("FindTerminal = %+v, %v; want the failed(health_failed) entry", ev, err)
+	}
+	if ok, _ := HasSucceeded(path, "op1", "upgrades.apply"); ok { //nolint:errcheck // asserted via ok
+		t.Error("HasSucceeded matched a failed entry")
+	}
+	if _, err := FindTerminal(dir, "op1", "k"); err == nil {
+		t.Error("reading a directory as the log must return an error")
+	}
+	if _, err := FindTerminal(path, "op1", ""); err == nil {
+		t.Error("empty kind must be rejected")
+	}
+}

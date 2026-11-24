@@ -586,6 +586,11 @@ func (s *Server) verifiedOnPrior(ctx context.Context, c *reconcileCase) bool {
 // entry is not (AGT-005).
 func (s *Server) retire(c *reconcileCase) ReconcileRecord {
 	c.out.Outcome = OutcomeConverged
+	// A kept record of an operation that ended: its own terminal entry first
+	// (normally already done by initJournal), or it is not retired.
+	if c.rec.TerminalOutcome != "" && ensureTerminalAudited(s.opts.Audit, c.rec, s.opts.Cfg.ProxyRepo) != nil {
+		return s.keepRecord(c, OutcomeConvergedNotRetired)
+	}
 	if !s.reconciledAlreadyAudited(c) {
 		if err := s.auditReconciled(c, audit.OutcomeSucceeded); err != nil {
 			return s.keepRecord(c, OutcomeConvergedNotRetired)

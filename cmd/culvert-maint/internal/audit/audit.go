@@ -131,12 +131,37 @@ func HasSucceeded(path, opID, kind string) (bool, error) {
 	if opID == "" || kind == "" {
 		return false, fmt.Errorf("audit: HasSucceeded needs op_id and kind")
 	}
+	ev, err := findFirst(path, opID, kind, OutcomeSucceeded)
+	return ev != nil, err
+}
+
+// FindTerminal returns the first terminal event (succeeded, failed or
+// cancelled) the audit log at path holds for this op id and kind, or nil. It
+// reads like HasSucceeded (streamed, lines that do not decode skipped, a read
+// error returned so the caller writes rather than risk losing an entry).
+//
+// It makes an operation's terminal audit entry idempotent across a crash
+// (ADR-0062 slice 1): a startup that finds a record whose operation ended but
+// whose entry is not known to be durable writes the entry only when this finds
+// none. The kind must match exactly, so an inline rollback's own entries
+// ("upgrades.apply:rollback"), a retirement (":interrupted_superseded") or a
+// reconcile (":reconciled") under the same op id never count.
+func FindTerminal(path, opID, kind string) (*Event, error) {
+	if opID == "" || kind == "" {
+		return nil, fmt.Errorf("audit: FindTerminal needs op_id and kind")
+	}
+	return findFirst(path, opID, kind, OutcomeSucceeded, OutcomeFailed, OutcomeCancelled)
+}
+
+// findFirst returns the first event for opID and kind whose outcome is one of
+// outcomes, or nil.
+func findFirst(path, opID, kind string, outcomes ...Outcome) (*Event, error) {
 	f, err := os.Open(path) // #nosec G304 -- the agent's own audit log path
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
+			return nil, nil
 		}
-		return false, fmt.Errorf("audit: open %s: %w", path, err)
+		return nil, fmt.Errorf("audit: open %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
 	needle := []byte(opID)
@@ -148,17 +173,19 @@ func HasSucceeded(path, opID, kind string) (bool, error) {
 			continue
 		}
 		var ev Event
-		if json.Unmarshal(line, &ev) != nil {
+		if json.Unmarshal(line, &ev) != nil || ev.OpID != opID || ev.Kind != kind {
 			continue
 		}
-		if ev.OpID == opID && ev.Kind == kind && ev.Outcome == OutcomeSucceeded {
-			return true, nil
+		for _, o := range outcomes {
+			if ev.Outcome == o {
+				return &ev, nil
+			}
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return false, fmt.Errorf("audit: scan %s: %w", path, err)
+		return nil, fmt.Errorf("audit: scan %s: %w", path, err)
 	}
-	return false, nil
+	return nil, nil
 }
 
 // Recent reads the last n events from path. Used by GET /v1/audit.
