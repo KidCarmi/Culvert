@@ -766,10 +766,7 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 			Name:          "stop_stack",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposeDown(ctx)
-				if rerr != nil {
-					s.noteMutationCut()
-				}
+				res, rerr := s.composeDown(ctx)
 				if res == nil {
 					return nil, nil, rerr
 				}
@@ -796,10 +793,7 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 			ContinueOnError: true,
 			FailureReason:   ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposeUp(ctx)
-				if rerr != nil {
-					s.noteMutationCut()
-				}
+				res, rerr := s.composeUp(ctx)
 				if res == nil {
 					return nil, nil, rerr
 				}

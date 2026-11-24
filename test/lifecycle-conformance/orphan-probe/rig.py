@@ -42,6 +42,13 @@ DRAIN = os.environ.get("PROBE_DRAIN", "serving")
 REAL = dict(os.environ, DOCKER_HOST="unix://" + os.environ["PROBE_REAL_SOCK"])
 SOCK = "/run/culvert-maint/culvert-maint.sock"
 STATE = "/var/lib/culvert-maint"
+# ORPHAN_PROBE_PAST_FIRST_USE=1: every trial starts from a state directory as an
+# agent that tracks unfinished compose commands leaves it after its first
+# completed operation (the sentinel, no marker). Without it each trial is a first
+# start, which always waits the whole settle window and never ends it early, so
+# neither "no marker, no wait" nor the early end is exercised.
+PAST_FIRST_USE = (f"mkdir -p {STATE}/mutation; echo probe > {STATE}/mutation/tracking; "
+                  if os.environ.get("ORPHAN_PROBE_PAST_FIRST_USE") == "1" else "")
 
 
 def sh(*a, **k):
@@ -217,7 +224,7 @@ def status():
 
 def reset(stop_delay):
     dx(f"ln -sfn /dk/real.sock /run/docker.sock; systemctl stop culvert-maint; systemctl reset-failed culvert-maint; "
-       f"find {STATE} -mindepth 1 -delete; mkdir -p {STATE}/operations; chown -R culvert-maint:culvert-maint {STATE}")
+       f"find {STATE} -mindepth 1 -delete; mkdir -p {STATE}/operations; {PAST_FIRST_USE}chown -R culvert-maint:culvert-maint {STATE}")
     ids = sh("docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={PROJECT}").stdout.split()
     if ids:
         sh("docker", "rm", "-f", *ids)
@@ -447,6 +454,7 @@ def judge_all(expect_fence_violation, want_trials):
                 line += (f" last={rec['last_request_daemon_saw']!r} restart_after={rec['new_agent_after_s']}s"
                          f" at_restart[{fmt(rec['truth_at_restart'])}]"
                          + (f" op={op.get('state') if op.get('admitted') else 'refused'}" if op else "")
+                         + (f" op_secs={op.get('secs')}" if op and op.get('admitted') else "")
                          + (f" converge={[(x.get('decision'), x.get('outcome')) for x in ((rec['status_after_converge'].get('reconcile') or {}).get('records') or [])]}" if rec['follow'] == 'converge' else "")
                          + f" at_rest[{fmt(rec['truth_at_rest'])}] records={len(rec['status_at_rest']['interrupted'])}")
             print(line)

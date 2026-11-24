@@ -205,6 +205,21 @@ type Server struct {
 	// mutationCutAt is the last time a compose up/down of this process ended
 	// in an error; the settle window restarts from it (settle.go).
 	mutationCutAt atomic.Pointer[time.Time]
+	// mutations is the durable marker of a compose up/down in flight;
+	// startHazard is whether the previous agent process may have left one
+	// unfinished; startSettled is set once Docker showed that it is over
+	// (settle.go, mutation.go). settlePoll is how often Docker is asked.
+	mutations    *journal.MutationLog
+	startHazard  bool
+	startOnlyUp  bool // a readable marker was found and names only `compose up`
+	startSettled atomic.Bool
+	settlePoll   time.Duration
+	// startMarkerLive: the marker found at start named a compose command and
+	// this process has not cleared it yet (the `up` retry's trigger).
+	startMarkerLive atomic.Bool
+	// everCut: a compose up/down of this process ended in an error. From then
+	// on this process never removes the marker (mutation.go).
+	everCut atomic.Bool
 
 	// opWG tracks in-flight orchestrator goroutines so shutdown can drain them
 	// (T2.4) instead of abandoning a state-changing op mid-flight.
@@ -262,7 +277,20 @@ func New(opts Options) (*Server, error) {
 	if maxRO <= 0 {
 		maxRO = DefaultMaxConcurrentReadOnlyOps
 	}
-	return &Server{opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO)}, nil
+	// A state directory that cannot be written must not stop the agent from
+	// coming up (same rule as the journal's interrupted marks in main). The
+	// log is usable either way: the start counts as hazardous and compose
+	// up/down are refused for as long as their marker cannot be written.
+	mutations, atOpen, err := journal.OpenMutationLog(opts.StateDir)
+	if err != nil {
+		log.Printf("culvert-maint: WARN: the mutation marker could not be set up; treating this start as following an unfinished compose command, and compose up/down will be refused until the state directory is writable")
+	}
+	srv := &Server{
+		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
+		mutations: mutations, startHazard: atOpen.Pending, startOnlyUp: atOpen.OnlyUp, settlePoll: defaultSettlePoll,
+	}
+	srv.startMarkerLive.Store(atOpen.NamesCommand)
+	return srv, nil
 }
 
 // acquireReadOnlySlot reserves an execution slot for a read-only op without
