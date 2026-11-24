@@ -155,6 +155,38 @@ change (AGT-004 / AGT-900) and an **owner decision**, behind
 `reconcile_on_startup = "converge"`, which stays default-off until the
 real-Docker gate is met.
 
+### 3.5 What phase 1b implements, and what it leaves out
+
+Implemented (ADR-0061, "When the window applies, and when it ends early"):
+
+- the marker of 3.1, with the correction that it stays after any error exit,
+  plus two conservative additions: the first start that keeps markers, and any
+  interrupted journal record, count as a hazard;
+- two corrections from the adversarial review of the first implementation:
+  the marker names every command since it was last removed and survives a
+  later success inside an open window (a cut `down` followed by a no-op `up`
+  must not erase it), and the early end is allowed only for a marker that
+  names nothing but `compose up` (a `down` may still be stopping another
+  service);
+- two more from the second round: the first-use doubt is written to disk as
+  an "unknown" marker instead of being held in memory for one process, and a
+  process in which a compose command ended in an error never clears the marker
+  (its CLI may outlive any window behind `sudo`);
+- of 3.2, only the first condition: **no proxy container is running**, read
+  twice one poll apart. That is every case in which an interrupted upgrade or
+  image rollback left the proxy down, which is where waiting costs an outage;
+- the `up` retry of 1a also triggers on a marker found at start, with no
+  journal record needed.
+
+Left out on purpose: the second condition of 3.2 (a running container that was
+created after the cut). `CreatedAt` has 1 s resolution and Compose creates the
+replacement within the same second as the command starts, so the comparison
+would be ambiguous most of the time; and recording the container id before
+each command would add a Docker read to every ordinary upgrade, which the
+reviewed lifecycle model does not have. The cost of leaving it out is a full
+window before the next *operation* in cases where the proxy is already
+serving, not an outage.
+
 ## 4. What needs a decision, and what does not
 
 | Step | Privilege | Contract | Decision |
