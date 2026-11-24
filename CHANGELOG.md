@@ -18,6 +18,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `applied:true`, `policy_persisted:false`, the audit entry records the failed
   write, and the admin UI says the rules are live but not saved. The running
   configuration is unchanged from before: the import is still applied.
+- **A control-plane snapshot whose identity-provider profiles are refused no
+  longer leaves the node with new policy rules over the previous category
+  groups.** The IdP sync is the one step of a snapshot apply that can refuse
+  after validation. It ran after the rules had been replaced and saved, and
+  before the category groups they reference, so a refusal left group-scoped
+  Block rules matching nothing until a later snapshot succeeded, including
+  across a restart. The sync now runs before any policy state is replaced, on the full and
+  the delta path: a snapshot refused there leaves the rules, the category
+  groups and the policy file as they were.
 - **A category groups file that cannot be loaded no longer silently disables
   every rule scoped to a group.** A rule scoped to a category group matches a
   destination only when the group resolves. If the groups file failed to load at
