@@ -1,8 +1,8 @@
 // Reporting for operations a previous agent process left unfinished.
 //
 // A journal record with no process behind it is the durable evidence that an
-// image change was cut short. This file turns one into what an operator needs
-// in order to act: how far the operation got, whether Docker may have been
+// image change — or a restore (interrupted_restore.go) — was cut short. This
+// file turns one into what an operator needs in order to act: how far the operation got, whether Docker may have been
 // changed, which image a rollback would name, and what the agent itself did
 // about it — which, with the default reconcile_on_startup = "off", is nothing.
 // Acting on a record at boot is the separate, opt-in "converge" reconcile
@@ -38,10 +38,58 @@ const (
 	// may be ahead of the running container, or the container may be running
 	// an image that never passed the health gate.
 	DockerStateIndeterminate = "indeterminate"
-	// DockerStateDataIndeterminate: a data rollback. Docker images are not
-	// involved; the data directory may be mid-swap.
+	// DockerStateDataIndeterminate: a restore-class operation (a data rollback
+	// or restore.commit). Docker IMAGES are not involved: the operation moves
+	// no tag. This class says only that, on the image axis docker_state is
+	// about; what is known about the stack and the data directory is in
+	// restore_stage, stack_touched, data_changed and previous_state.
+	//
+	// restore.commit reuses this class instead of getting a sibling. The value
+	// already tells a consumer "not an image problem; look at the data", which
+	// is exactly as true of a restore as of a data rollback (they run the same
+	// stages), and a new class would be one an existing consumer does not know
+	// and would have to treat as the image-style default. It is not replaced by
+	// "unchanged" for a restore that stopped before touching anything either:
+	// that would change what a data-rollback record has always reported, and
+	// data_changed = "no" says it without ambiguity.
 	DockerStateDataIndeterminate = "data_indeterminate"
 )
+
+// data_changed values of a restore-class report: what the journal establishes
+// about the data directory.
+const (
+	// DataChangedNo: the operation stopped before its commit command was started.
+	DataChangedNo = "no"
+	// DataChangedYes: the commit command returned success.
+	DataChangedYes = "yes"
+	// DataChangedUnknown: the commit command was started and either its result
+	// was never recorded, or it returned an error (see restoreFactsFor), or the
+	// record does not say how far the restore got.
+	DataChangedUnknown = "unknown"
+)
+
+// previous_state values: where the content the data directory held BEFORE the
+// restore is now.
+const (
+	// PreviousInPlace: still the live content; the restore did not touch it.
+	PreviousInPlace = "in_place"
+	// PreviousKeptInBackupDir: the restore committed and kept it beside the new
+	// content (<data>/.restore/<name>.bak.<ts>-<pid> on the shipped topology, a
+	// <data>.bak.<ts>-<pid> sibling otherwise) until an operator cleans it up.
+	PreviousKeptInBackupDir = "kept_in_backup_dir"
+	// PreviousRecoverable: the swap may be unfinished. On the shipped topology
+	// the next start of the proxy puts the previous content back before it
+	// reads the directory, or refuses to start; otherwise it is manual.
+	PreviousRecoverable = "recoverable_at_next_proxy_start_or_manual"
+	// PreviousUnknown: the record does not say how far the restore got.
+	PreviousUnknown = "unknown"
+)
+
+// RestoreStageUnrecorded is the restore_stage reported for a restore-class
+// record that carries no stage this build knows: one written by an agent that
+// predates the key (every data-rollback record before it), one an older agent
+// rewrote at a start (which drops the key), or one from a newer agent.
+const RestoreStageUnrecorded = "unrecorded"
 
 // Running-image classes: how the running proxy image relates to the record.
 const (
@@ -104,6 +152,26 @@ type InterruptedOperation struct {
 	// listed one carries recovery_required, deferred, abandoned or
 	// converged_not_retired.
 	ReconcileOutcome string `json:"reconcile_outcome,omitempty"`
+
+	// The fields below are set only for a restore-class operation
+	// (restore.commit, rollbacks.create mode=data) and are absent from every
+	// other report. They are derived from the journal record alone.
+
+	// RestoreStage is the last stage the restore recorded before it stopped
+	// (journal.RestoreStage), or "unrecorded".
+	RestoreStage string `json:"restore_stage,omitempty"`
+	// StackTouched: whether this operation asked Docker to stop the stack. Nil
+	// (absent) when the record does not say how far the restore got. It is what
+	// the operation did, not what Docker says now: see compose_stack_up.
+	StackTouched *bool `json:"stack_touched,omitempty"`
+	// DataChanged is one of the DataChanged* values.
+	DataChanged string `json:"data_changed,omitempty"`
+	// PreviousState is one of the Previous* values.
+	PreviousState string `json:"previous_state,omitempty"`
+	// RestartSafe says what happens if the operator starts the proxy now. It
+	// is a sentence, not a flag: the answer depends on the deployment, which
+	// the agent cannot see (it has no access to the data volume).
+	RestartSafe string `json:"restart_safe,omitempty"`
 }
 
 // SetReconcile records the startup reconcile's result for this record.
@@ -143,6 +211,9 @@ func DescribeInterrupted(rec *journal.Record, proxyRepo string) InterruptedOpera
 		AgentStartsSeen: rec.InterruptedSeen,
 	}
 	out.DockerState = dockerStateOf(out.Kind, out.Mode, rec.Phase)
+	if isRestoreRecord(out.Kind, out.Mode) {
+		out.setRestoreFacts(rec.RestoreStage)
+	}
 
 	switch {
 	case rec.TargetRef == "" && rec.TargetDigest == "" && rec.PriorRef == "" && rec.PriorDigest == "":
@@ -190,6 +261,14 @@ func (o *InterruptedOperation) AuditParams() map[string]interface{} {
 	}
 	if o.Mode != "" {
 		p["mode"] = o.Mode
+	}
+	if o.RestoreStage != "" {
+		p["restore_stage"] = o.RestoreStage
+		p["data_changed"] = o.DataChanged
+		p["previous_state"] = o.PreviousState
+		if o.StackTouched != nil {
+			p["stack_touched"] = *o.StackTouched
+		}
 	}
 	if o.TargetRef != "" {
 		p["target_ref"] = o.TargetRef
@@ -242,7 +321,7 @@ func ClassifyRunning(rec *journal.Record, proxyRepo string, captured bool, runni
 
 func dockerStateOf(kind, mode string, phase journal.Phase) string {
 	switch {
-	case kind == ops.KindRollbackCreate && mode == "data":
+	case isRestoreRecord(kind, mode):
 		return DockerStateDataIndeterminate
 	case kind == ops.KindUpgradeApply && safeBoundary(phase):
 		return DockerStateUnchanged
@@ -277,7 +356,7 @@ func operatorActionFor(o *InterruptedOperation) string {
 	case DockerStateUnchanged:
 		return actionNoChange
 	case DockerStateDataIndeterminate:
-		return actionData
+		return restoreActionFor(o.Kind, o.RestoreStage)
 	}
 	rollback := actionRollbackUnknown
 	if o.PriorRef != "" {

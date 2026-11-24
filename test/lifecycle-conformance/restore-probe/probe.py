@@ -25,8 +25,11 @@ What it checks:
                   taken from the volume; the next proxy start must end with all
                   of the previous content or all of the restored content, never
                   a mixture, and must say which
-  agent_crash     the agent is killed between stages of restore.commit; what
-                  its reports say afterwards is recorded beside what Docker says
+  agent_crash     the agent is killed between stages of restore.commit; after
+                  the restart the operation must be reported as failed and
+                  listed as interrupted, its statement about the data must not
+                  contradict the volume, and the agent must not have touched
+                  the stack on its own
 
 Process death only. No host power loss, no dockerd crash, no storage fault.
 No systemd here: the unit's control-group kill is emulated (SIGKILL the agent,
@@ -522,6 +525,7 @@ def scenario_agent_crash(rig, pattern, label):
     op_id = body["op_id"]
     rig.wait(rig.held, 120, "kill point " + label)
     out = {"kill_point": label, "docker_at_kill": rig.proxy_state()}
+    calls_at_kill = len(rig.shim_calls())
     rig.crash_agent(); rig.unhold(); rig.start_agent()
     time.sleep(5)
     rep = rig.reports(op_id)
@@ -530,9 +534,24 @@ def scenario_agent_crash(rig, pattern, label):
                interrupted_operations=rep["interrupted_operations"], audit_for_op=rep["audit_for_op"],
                compose_stack_up=(rep["status"] or {}).get("compose_stack_up"),
                data_intent=vol.intent() is not None, data_outcome=vol.outcome())
-    # Recorded, not judged: what an interrupted restore.commit should report is
-    # the crash-safe-lifecycle change's contract, not this one's.
-    out["violations"] = []
+    # Judged against what the volume and Docker say, never against itself.
+    mine = [i for i in (rep["interrupted_operations"] or []) if i.get("op_id") == op_id]
+    entry = mine[0] if mine else {}
+    out["reported"] = {k: entry.get(k) for k in ("kind", "restore_stage", "stack_touched", "data_changed", "previous_state")}
+    v = []
+    check(v, rep["operation_http"] == 200 and rep["operation_state"] == "failed",
+          f"the interrupted operation is not reported as failed: http {rep['operation_http']} state {rep['operation_state']}")
+    check(v, len(mine) == 1, f"interrupted_operations lists {len(mine)} entries for the operation")
+    check(v, entry.get("stack_touched") is True, "the report does not say the stack was stopped, and Docker shows it down")
+    committed = vol.outcome() == "committed"
+    check(v, not (entry.get("data_changed") == "no" and committed),
+          "the report says the data did not change; the volume says the restore committed")
+    check(v, not (entry.get("data_changed") == "yes" and not committed),
+          "the report says the data changed; the volume has no committed restore")
+    check(v, out["docker_at_rest"] == out["docker_at_kill"], "the restarted agent changed the stack on its own")
+    restarted_calls = [c for c in rig.shim_calls()[calls_at_kill:] if c.startswith("START") and (" down" in c or " up -d" in c or "--restore" in c)]
+    check(v, not restarted_calls, f"the restarted agent ran {restarted_calls}")
+    out["violations"] = v
     rig.stop_agent()
     return out
 
