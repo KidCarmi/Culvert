@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -122,12 +123,11 @@ func run(configPath string) error {
 		return fmt.Errorf("auth policy: %w", err)
 	}
 
-	if err := os.MkdirAll(cfg.StateDir, 0o750); err != nil { //nolint:gosec // documented mode
-		return fmt.Errorf("mkdir state_dir: %w", err)
+	instLock, err := prepareStateDir(cfg.StateDir)
+	if err != nil {
+		return err
 	}
-	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "operations"), 0o750); err != nil { //nolint:gosec // documented mode
-		return fmt.Errorf("mkdir operations: %w", err)
-	}
+	defer func() { _ = instLock.Release() }()
 
 	auditPath := filepath.Join(cfg.StateDir, "audit.jsonl")
 	al, err := audit.New(auditPath)
@@ -163,7 +163,7 @@ func run(configPath string) error {
 	}
 	stp.WithJournal(jnl)
 
-	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl)
+	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl, instLock)
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
@@ -202,6 +202,47 @@ func initIdempotency(stateDir string, mgr *ops.Manager, ttl time.Duration) {
 		store = idem.Unavailable(err)
 	}
 	mgr.SetIdempotencyStore(store)
+}
+
+// prepareStateDir creates state_dir and its operations directory, then takes
+// the instance lock: one agent per state_dir, in every mode (ADR-0062, owner
+// decision 2). The lock is taken before anything under state_dir is read,
+// repaired or rewritten and before the socket is bound, so a second agent
+// stops here instead of admitting operations beside the first one or
+// replacing its socket. The server keeps the lock (the converge reconcile
+// reuses it) and releases it on Close; the kernel drops it if this process
+// dies.
+func prepareStateDir(stateDir string) (*journal.ReconcileLock, error) {
+	if err := os.MkdirAll(stateDir, 0o750); err != nil { //nolint:gosec // documented mode
+		return nil, fmt.Errorf("mkdir state_dir: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "operations"), 0o750); err != nil { //nolint:gosec // documented mode
+		return nil, fmt.Errorf("mkdir operations: %w", err)
+	}
+	return lockInstance(stateDir)
+}
+
+// errInstanceLocked is returned by lockInstance when another live process
+// holds the instance lock of the same state_dir.
+var errInstanceLocked = errors.New("another culvert-maint process holds the instance lock")
+
+// lockInstance takes the exclusive instance lock of stateDir
+// (<state_dir>/reconcile/.lock). It fails closed: a lock that is held, or
+// that cannot be taken at all, stops the agent.
+func lockInstance(stateDir string) (*journal.ReconcileLock, error) {
+	jnl, err := journal.New(stateDir)
+	if err != nil {
+		return nil, fmt.Errorf("journal: %w", err)
+	}
+	lock, err := jnl.LockReconcile()
+	switch {
+	case errors.Is(err, journal.ErrLockHeld):
+		return nil, fmt.Errorf("%w on state_dir %s (%s): refusing to start, so two agents never admit operations, "+
+			"rewrite the journal or replace each other's socket", errInstanceLocked, stateDir, filepath.Join(jnl.Dir(), ".lock"))
+	case err != nil:
+		return nil, fmt.Errorf("instance lock on state_dir %s: %w", stateDir, err)
+	}
+	return lock, nil
 }
 
 // initJournal opens the crash-recovery journal (RISK-022) and reports every op
@@ -319,17 +360,18 @@ func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Reco
 // newServer wires the agent HTTP server from its already-constructed
 // dependencies. Extracted from run() to keep that function within the funlen
 // budget; no behavior change.
-func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal) (*server.Server, error) {
+func newServer(cfg *config.Config, pol *auth.Policy, al *audit.Logger, mgr *ops.Manager, stp server.StatusProvider, r *runner.Runner, auditPath string, jnl *journal.Journal, lock *journal.ReconcileLock) (*server.Server, error) {
 	return server.New(server.Options{
-		Cfg:       cfg,
-		Auth:      pol,
-		Audit:     al,
-		Ops:       mgr,
-		Status:    stp,
-		StateDir:  cfg.StateDir,
-		AuditPath: auditPath,
-		Journal:   jnl,
-		Runner:    r,
+		InstanceLock: lock,
+		Cfg:          cfg,
+		Auth:         pol,
+		Audit:        al,
+		Ops:          mgr,
+		Status:       stp,
+		StateDir:     cfg.StateDir,
+		AuditPath:    auditPath,
+		Journal:      jnl,
+		Runner:       r,
 		HealthProbeFactory: func() health.Probe {
 			return health.Probe{
 				BaseURL:    cfg.HealthBaseURL,

@@ -173,6 +173,11 @@ type Options struct {
 	// When set, journaled ops (upgrades.apply / rollbacks.create) record their
 	// admission and have their record retired at terminal time.
 	Journal *journal.Journal
+	// InstanceLock is the state_dir instance lock main took before anything
+	// else (ADR-0062). The server owns it from New on and releases it on
+	// Close; the startup reconcile reuses it instead of locking again. Nil in
+	// tests that do not exercise it: the reconcile then takes the lock itself.
+	InstanceLock *journal.ReconcileLock
 
 	// Runner is the command runner used by D1.6b handlers. May be
 	// nil only in unit tests that exercise non-D1.6b paths; the
@@ -289,6 +294,7 @@ func New(opts Options) (*Server, error) {
 	srv := &Server{
 		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
 		mutations: mutations, startHazard: atOpen.Pending, startOnlyUp: atOpen.OnlyUp, settlePoll: defaultSettlePoll,
+		reconcileLock: opts.InstanceLock,
 	}
 	srv.startMarkerLive.Store(atOpen.NamesCommand)
 	return srv, nil

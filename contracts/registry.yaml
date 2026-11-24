@@ -42,6 +42,10 @@ amended:
     reason: "Owner decision of 2026-11-24 (POL-005 widening). The invariant is unchanged. The control at the end of TestPOL004_RollbackKeepsARetainedUnknownActionRule asserted that a restore SKIPS a Redirect rule with no location; a restore no longer skips any stored rule, so the control now asserts that rule is restored beside the unknown-action rule."
   - id: POL-005
     reason: "Owner decision of 2026-11-24, explicitly revising SEC-POLICYDROP-1: the invariant is widened from 'a rule whose ruleType is unrecognised' to 'any rule this build cannot enforce as written' (an access rule carrying a subjectMatch or an auth spec, an invalid auth rule, a null entry). Load and ReplaceAll used to drop such a rule and install the rest; a dropped Block rule under default allow forwarded its traffic (measured: 200, backend reached). The gate, its doors and the eight pre-existing POL-005 tests are unchanged; tests are added. Existing tests elsewhere that asserted the per-rule drop were migrated to assert whole-ruleset refusal. An empty entry (null or {}) is refused at every door. Rollback applies the gate and then restores every stored rule as stored, instead of skipping rules the write-time validator refuses. Record: docs/engineering/security-reviews/2026-11-24-ruleset-refusal-supersedes-per-rule-drop.md."
+  - id: AGT-004
+    reason: "ADR-0062, owner decision 2 (2026-11-24): the state_dir instance lock is now held in EVERY mode, taken before anything under state_dir is read or rewritten and before the socket is bound, so a second agent on the same state_dir refuses to start (it used to serve and admit operations beside the first, and replace its socket). Off mode still changes nothing in Docker and runs no reconcile; TestOffMode_StatusAndStateUnchanged now asserts the off-mode agent HOLDS the lock instead of asserting no lock file exists. Not owner-approved wording."
+  - id: AGT-900
+    reason: "ADR-0062, owner decision 2: a second agent process on the same state_dir no longer starts and skips its reconcile; it refuses to start (non-zero exit, no socket, no Docker change, record kept) while the first keeps serving. TestConvergeRecovery_SecondInstanceSkips is replaced by TestConvergeRecovery_SecondInstanceRefusesToStart. The reconcile still takes the lock itself when a server is built without it (tests), so its skipped_second_instance state remains reachable there. Not owner-approved wording."
 retired: []
 
 contracts:
@@ -919,7 +923,7 @@ contracts:
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_FinishesAnArmedRollback}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_KillDuringReconcile}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_DockerUnavailableDefers}
-      - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_SecondInstanceSkips}
+      - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_SecondInstanceRefusesToStart}
       - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcileDecisionV2_ExhaustiveProperties}
       - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcileDecisionV2_NegativeControls}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_WriteAheadFailureMeansNoAction}
