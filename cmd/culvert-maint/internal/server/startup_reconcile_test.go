@@ -45,7 +45,8 @@ type reconWorld struct {
 	// failedCalls counts how often it was issued.
 	failCmd     string
 	failedCalls int
-	down        bool // Docker does not answer: every command fails
+	down        bool   // Docker does not answer: every command fails
+	onUp        func() // called while `up` runs (outside the lock)
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -79,6 +80,14 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		w.mu.Unlock()
 		if hook != nil {
 			hook(n)
+		}
+	}
+	if has("up") {
+		w.mu.Lock()
+		hook := w.onUp
+		w.mu.Unlock()
+		if hook != nil {
+			hook()
 		}
 	}
 	w.mu.Lock()

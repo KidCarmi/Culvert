@@ -588,8 +588,7 @@ func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcile
 		return nil
 	case stepUp:
 		c.out.Actions = append(c.out.Actions, "up")
-		if _, err := s.opts.Runner.ComposeUp(ctx); err != nil {
-			s.noteMutationCut()
+		if _, err := s.composeUp(ctx); err != nil {
 			return errReconcileStep("up_failed")
 		}
 		return nil
