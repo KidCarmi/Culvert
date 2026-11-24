@@ -237,7 +237,11 @@ func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo 
 	now := time.Now().UTC()
 	orphans := make([]ops.InterruptedOp, 0, len(recs))
 	for i := range recs {
-		orphans = append(orphans, reportInterrupted(jnl, al, &recs[i], proxyRepo, now))
+		o, rerr := reportInterrupted(jnl, al, &recs[i], proxyRepo, now)
+		if rerr != nil {
+			return nil, fmt.Errorf("journal: refusing to serve — %w", rerr)
+		}
+		orphans = append(orphans, o)
 	}
 	if n := mgr.MarkAllInterrupted(orphans); n > 0 {
 		log.Printf("culvert-maint: %d operation(s) interrupted by a prior stop — marked failed(agent_restart_interrupted); "+
@@ -275,11 +279,27 @@ const maxInterruptedSeen = 1_000_000
 // crash between the two repeats the entry at the next start; the other order
 // could lose it. So the audit trail carries the interruption at least once,
 // and exactly once unless the agent dies inside that window.
-func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, proxyRepo string, now time.Time) ops.InterruptedOp {
-	// Counts this start and takes an open command intent (journal/intent.go).
-	// In every mode, before anything is decided, and whether or not anything
-	// can be read from Docker.
+//
+// The one write that is NOT best-effort: taking an open command intent
+// (journal/intent.go). "A start has looked" has to be on disk before this
+// start says anything, or the next start would find the same intent, take it
+// for new, and could act on it after an operator has already reacted to what
+// THIS start reported (stopped the stack, say). A start that cannot record
+// that it looked therefore does not happen: no audit entry, no status, exit.
+// systemd starts the agent again; the first start that can write is the first
+// start. With a state directory that cannot be written the agent could have
+// run no operation anyway, only reported.
+func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, proxyRepo string, now time.Time) (ops.InterruptedOp, error) {
+	hadIntent := rec.Intent != nil
+	// Counts this start and takes an open command intent. In every mode,
+	// before anything is decided, and whether or not Docker can be read.
 	rec.SeenByStartup(now, maxInterruptedSeen)
+	if hadIntent {
+		if err := jnl.Write(*rec); err != nil {
+			return ops.InterruptedOp{}, fmt.Errorf("op %s died inside %s and that cannot be recorded in its journal record (is %s writable?): %w",
+				rec.OpID, rec.Cut.Command, jnl.Dir(), err)
+		}
+	}
 	desc := server.DescribeInterrupted(rec, proxyRepo)
 	actor := desc.Actor
 	if actor == "" {
@@ -311,7 +331,7 @@ func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Reco
 		Actor:   actor,
 		Started: rec.StartedAt,
 		Result:  desc.ResultMap(),
-	}
+	}, nil
 }
 
 // newServer wires the agent HTTP server from its already-constructed

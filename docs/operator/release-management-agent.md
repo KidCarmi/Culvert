@@ -310,6 +310,15 @@ ignore an operation it cannot classify. Move that file aside, start the agent,
 and check `culvert/proxy:pinned` against the running container before the next
 upgrade.
 
+If the agent will not start and its log says
+`journal: refusing to serve — op <op_id> died inside compose up and that cannot
+be recorded in its journal record`, the agent was killed in the middle of a
+`docker compose` command and now cannot write to `<state_dir>/reconcile/`
+(disk full, read-only file system, wrong ownership). It stops rather than
+report an interruption it cannot mark as seen. Make the directory writable;
+the agent then starts by itself and reports the operation. Check
+`culvert/proxy:pinned` and the running container yourself in the meantime.
+
 If the file named is `00000000000000000000000000.json`, it is not corrupt: it
 is the **downgrade fence** (ADR-0062). A newer agent writes it while the
 journal holds a record that only an agent of that version or later can read

@@ -99,8 +99,10 @@ func (r *Record) EndCommand() bool {
 // SeenByStartup is the per-record bookkeeping of an agent start that found
 // the record with no process behind it: the first-seen time, the start
 // ordinal (capped at maxSeen), and the consumption of an open Intent. The
-// caller writes the record afterwards, best-effort; if that write fails, this
-// process must go by what is on disk, not by the value in memory.
+// caller writes the record afterwards. When an Intent was open that write is
+// not optional: a start that cannot record that it looked must not serve
+// (main.go reportInterrupted), or the next start would take the same Intent
+// for new.
 func (r *Record) SeenByStartup(now time.Time, maxSeen int) {
 	if r.InterruptedAt == nil {
 		r.InterruptedAt = &now
