@@ -9,7 +9,8 @@ import (
 )
 
 // The ruleset gate (POL-005): unknown ruleType, and any rule this build cannot
-// enforce as written (unenforceableRuleError, below).
+// enforce as written (unenforceableRuleError, below), including a rule decoded
+// from JSON with a key this build has no field for (policy_unknown_field.go).
 //
 // Governing invariant: no policy replacement, normalization, migration or
 // compatibility conversion may silently remove an enforcement rule and thereby
@@ -121,7 +122,8 @@ func policyRulesRuleTypeError(rules []PolicyRule) error {
 // build cannot enforce as written, and how many there are. These are the shapes
 // policyRulePersistable refuses: an access rule carrying a subjectMatch (the
 // evaluator does not consult it), an access rule carrying an auth spec, an auth
-// rule that fails validation, a null entry, and an empty entry (ruleEnforceable).
+// rule that fails validation, a null entry, and an empty entry (ruleEnforceable),
+// and a rule decoded with an unknown or duplicated JSON key (ruleAsWrittenFault).
 //
 // Load and ReplaceAll used to DROP such a rule and install the rest
 // (SEC-POLICYDROP-1). That is safe for a scoped Allow and fail-open for
@@ -174,7 +176,11 @@ func rulesetGateError(n int, at func(int) *PolicyRule) error {
 	return first
 }
 
-// ruleEnforceable is policyRulePersistable plus the EMPTY entry. A JSON null (or
+// ruleEnforceable is the per-rule decision of the gate: first a JSON key this
+// build has no field for (reported before anything else, because a misspelt
+// "name" or "action" would otherwise read as an empty entry), then the shape.
+//
+// The shape is policyRulePersistable plus the EMPTY entry. A JSON null (or
 // {}) in a rule array decodes, at every door that reads into []PolicyRule, to
 // a rule with no name, no type and no action. Nothing validates it there, it
 // has no selectors so it matches every request, and an empty action resolves
@@ -184,6 +190,15 @@ func rulesetGateError(n int, at func(int) *PolicyRule) error {
 // them. A NAMED rule with an empty action is not this case and is untouched
 // (POL-901 remains an open question).
 func ruleEnforceable(r *PolicyRule) (ok bool, reason string) {
+	if reason := ruleAsWrittenFault(r); reason != "" {
+		return false, reason
+	}
+	return ruleShapeEnforceable(r)
+}
+
+// ruleShapeEnforceable is ruleEnforceable for a rule whose every JSON key was
+// understood: the empty entry, then the persistability gate.
+func ruleShapeEnforceable(r *PolicyRule) (ok bool, reason string) {
 	if r != nil && r.Name == "" && r.Action == "" && r.RuleType == "" {
 		return false, "empty entry (a null or {} in the rule list)"
 	}
