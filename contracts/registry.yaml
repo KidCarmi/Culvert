@@ -36,6 +36,10 @@ amended:
     reason: "Owner decision 1 on AGT-900 (recommendation D4): with reconcile_on_startup = \"converge\", the startup reconcile may also retire an interrupted record, but only after it verified convergence by image id and wrote the audit entry first. In the default \"off\" mode retirement is unchanged: only a later successful upgrade or image rollback."
   - id: AGT-900
     reason: "Owner decision 1 resolved the open question for an opt-in, conservative converge mode: default off; no adoption of an unverified target; recovery_required when evidence is insufficient; Docker unavailable defers. The invariant is restated for that mode, with its tests; the entry stays open until a real-Docker e2e verifies it (owner, 2026-11-23). owner_approved stays false."
+  - id: POL-004
+    reason: "Owner decision of 2026-11-24 (POL-005 widening). The invariant is unchanged. The control at the end of TestPOL004_RollbackKeepsARetainedUnknownActionRule asserted that a restore SKIPS a Redirect rule with no location; a restore no longer skips any stored rule, so the control now asserts that rule is restored beside the unknown-action rule."
+  - id: POL-005
+    reason: "Owner decision of 2026-11-24, explicitly revising SEC-POLICYDROP-1: the invariant is widened from 'a rule whose ruleType is unrecognised' to 'any rule this build cannot enforce as written' (an access rule carrying a subjectMatch or an auth spec, an invalid auth rule, a null entry). Load and ReplaceAll used to drop such a rule and install the rest; a dropped Block rule under default allow forwarded its traffic (measured: 200, backend reached). The gate, its doors and the eight pre-existing POL-005 tests are unchanged; tests are added. Existing tests elsewhere that asserted the per-rule drop were migrated to assert whole-ruleset refusal. An empty entry (null or {}) is refused at every door. Rollback applies the gate and then restores every stored rule as stored, instead of skipping rules the write-time validator refuses. Record: docs/engineering/security-reviews/2026-11-24-ruleset-refusal-supersedes-per-rule-drop.md."
 retired: []
 
 contracts:
@@ -165,8 +169,55 @@ contracts:
         - "an unrecognised action falling through to allow"
     tests:
       - {file: "policy_unknown_action_test.go", name: TestSECPOLICYACTION1_UnknownActionBlocksAndIsTerminal}
+      - {file: "policy_unknown_action_test.go", name: TestSECPOLICYACTION1_ReplaceAllRetainsUnknownActionAndBlocks}
+      - {file: "policy_unknown_action_test.go", name: TestSECPOLICYACTION1_LoadRetainsUnknownActionAndBlocks}
+      - {file: "policy_unknown_action_e2e_test.go", name: TestPOL004E2E_ReplaceAllUnknownActionNeverReachesBackend}
+      - {file: "policy_unknown_action_e2e_test.go", name: TestPOL004E2E_LoadUnknownActionNeverReachesBackend}
+      - {file: "policy_unknown_action_doors_test.go", name: TestPOL004_RollbackKeepsARetainedUnknownActionRule}
+      - {file: "policy_unknown_action_doors_test.go", name: TestPOL004_DraftCommitIsNotBlockedByAnInheritedUnknownActionRule}
     validation: integration
     compatibility: "A rulebase written by a newer release must not become permissive on an older one."
+
+  - id: POL-005
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "A ruleset containing a rule this build cannot enforce as written (an unrecognised ruleType, or any shape the persistability gate refuses) is refused whole at every door, and the running and persisted policy are unchanged. No replacement, normalization, migration or compatibility conversion may silently remove an enforcement rule."
+    authority: "Policy store and its bulk doors (policy_ruletype_gate.go, policy.go)."
+    code:
+      - "policy_ruletype_gate.go"
+      - "policy_preflight.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a new recognised ruleType together with the stage that evaluates it"
+      forbidden:
+        - "installing a rule of an unrecognised ruleType, which no stage evaluates"
+        - "dropping such a rule and applying the rest of the ruleset"
+        - "starting with the default action in place of a policy file that was refused"
+        - "applying a reloaded default action over the rules of the previous configuration when the reloaded policy file was refused"
+        - "reporting, auditing or versioning a refused ruleset as applied"
+        - "dropping a rule the build cannot enforce and installing the rest of the ruleset"
+        - "restoring a stored config version without one of its rules"
+        - "installing an empty rule entry (null or {}), which matches every request"
+    tests:
+      - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_E2E_BulkReplaceIsRefusedAndLastKnownGoodStillBlocks}
+      - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_E2E_PolicyFileReloadIsRefusedAndLastKnownGoodStillBlocks}
+      - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_E2E_SnapshotIsRefusedBeforeAnyMutation}
+      - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_RollbackAndImportAreRefusedWhole}
+      - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_NewWritesAreRefusedAndKnownTypesAreNot}
+      - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_RollbackHandlerRefusesWith400AndRecordsNothing}
+      - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_PendingDraftIsNotReloadedAndCannotWipeThePolicy}
+      - {file: "policy_unknown_ruletype_test.go", name: TestUnknownRuleType_ReloadKeepsTheRunningDefaultActionWhenThePolicyFileIsRefused}
+      - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_E2E_BulkReplaceIsRefusedAndTheBlockStillHolds}
+      - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_E2E_PolicyFileIsRefusedAndTheBlockStillHolds}
+      - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_E2E_SnapshotIsRefusedBeforeAnyMutation}
+      - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_EveryReasonRefusesTheWholeRulesetAtBothStoreDoors}
+      - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_RollbackRefusesWholeOrRestoresEveryStoredRule}
+      - {file: "policy_unenforceable_rule_test.go", name: TestUnenforceableRule_RepeatedRefusalIsLoggedOnceAndCountedEveryTime}
+      - {file: "policy_unenforceable_rule_test.go", name: TestPolicyPreflight_ListsEveryRefusedRuleAndChangesNothing}
+    validation: integration
+    compatibility: "A node handed a ruleset from a newer release keeps enforcing its last accepted policy; a policy file it cannot fully understand stops startup, as a malformed file does."
 
   - id: AUTH-001
     area: authn-authz

@@ -185,7 +185,7 @@ What an entry tells you:
 | `docker_state: indeterminate` | it may have moved `culvert/proxy:pinned`, or started an image that was never health-checked |
 | `docker_state: data_indeterminate` | a data rollback; see [Recovering from an interrupted restore](docker-compose-backup-restore.md) |
 | `running_image` | what the proxy runs now: `target`, `prior`, `other`, or `unknown` if Docker could not be read |
-| `pinned_tag.matches_running` | `false` means the next `docker compose up` would start a different image than the one running |
+| `pinned_tag.matches_running` | `false` means the next `docker compose up` would start a different image than the one running. Reported on every status, with or without an interrupted operation. It is also `false` for a moment during a normal upgrade or rollback, between the tag move and the recreate: read it together with the lock holder / running operation |
 | `prior_ref` | the image reference to give a rollback |
 | `operator_action` | the same guidance as below, for this entry |
 
@@ -202,6 +202,12 @@ For `indeterminate`:
   `prior_ref`.
 - Until one of these succeeds, do not run `docker compose up` by hand: it
   starts whatever image the tag is on.
+- An upgrade or rollback submitted within `interrupted_settle` (75s by
+  default) of an agent start sits in its `restart` step for the rest of that
+  window before it changes anything. That is deliberate: if the previous agent
+  died in mid-operation, Docker may still be stopping the old proxy container
+  for it, and the agent waits until that can no longer be the case. The
+  operation log says `settle: waited …`.
 
 If the agent will not start and its log says
 `journal: refusing to serve — journal: corrupt record <op_id>.json`, a journal

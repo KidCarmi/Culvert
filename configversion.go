@@ -341,7 +341,8 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 	// carrying duplicate stable rewrite identities is corrupt — refuse the
 	// WHOLE rollback before any slice applies rather than silently
 	// re-identifying one of the claimants.
-	if err := validateRewriteStableIDs(target.RewriteRules); err != nil {
+	// Also POL-005: no rule type this build has no stage for (rollbackTargetRefusal).
+	if err := rollbackTargetRefusal(&target); err != nil {
 		http.Error(w, "rollback refused: "+sanitizeLog(err.Error()), http.StatusBadRequest)
 		return
 	}
@@ -479,16 +480,7 @@ func validateConfigBackup(b *configBackup) []string {
 		warnings = append(warnings, fmt.Sprintf("invalid default action %q", b.DefaultAction))
 	}
 
-	// Validate each policy rule.
-	var invalidRules int
-	for i := range b.PolicyRules {
-		if err := validatePolicyRule(b.PolicyRules[i], nil, -1); err != nil {
-			invalidRules++
-		}
-	}
-	if invalidRules > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d of %d policy rules are invalid (will be skipped)", invalidRules, len(b.PolicyRules)))
-	}
+	warnings = append(warnings, backupPolicyRuleWarnings(b.PolicyRules)...)
 
 	// Check IP filter mode is valid.
 	if b.IPFilterMode != "" && b.IPFilterMode != "allow" && b.IPFilterMode != "block" {
@@ -540,7 +532,23 @@ func restoreBlocklistFromBackup(b *configBackup) {
 // the failures are collected from the fileutil durable-write observer via a
 // scoped collector rather than from return values (see storage_health.go for
 // the scope's time-window semantics).
+// backupPolicyRuleWarnings is the policy-rule part of the rollback preview. A
+// version holding a rule this build cannot enforce, or one that fails
+// stored-data validation, cannot be restored at all (POL-005,
+// storedRulesetError): the restore no longer skips a rule and applies the rest.
+func backupPolicyRuleWarnings(rules []PolicyRule) []string {
+	if err := storedRulesetError(rules); err != nil {
+		return []string{"this version cannot be restored: " + err.Error()}
+	}
+	return nil
+}
+
 func applyConfigBackup(b *configBackup) error {
+	// A stored version holding a rule type this build has no stage for is
+	// refused whole, before anything is restored (policy_ruletype_gate.go).
+	if err := policyRulesetError(b.PolicyRules); err != nil {
+		return fmt.Errorf("rollback refused: %w", err)
+	}
 	// Blocker B (exclusive side): a rollback both REMOVES shared objects and
 	// INSTALLS references wholesale, so it must not interleave with either
 	// side of the reference-integrity gate. Acquired OUTERMOST, before
@@ -624,15 +632,11 @@ func applyConfigBackup(b *configBackup) error {
 		}
 	}
 
-	// Policy rules: bulk replace.
-	var validRules []PolicyRule
-	for i := range b.PolicyRules {
-		if err := validatePolicyRule(b.PolicyRules[i], nil, -1); err != nil {
-			continue
-		}
-		validRules = append(validRules, b.PolicyRules[i])
-	}
-	policyStore.ReplaceAll(validRules)
+	// Policy rules: bulk replace, EVERY stored rule, as stored. The gate at the
+	// top of this function has already refused a version holding a rule this
+	// build cannot enforce; nothing is skipped here (see storedRulesetError for
+	// why the write-time validator is not applied to stored data).
+	policyStore.ReplaceAll(b.PolicyRules)
 	policyStore.Save()
 	setDefaultPolicyAction(b.DefaultAction)
 

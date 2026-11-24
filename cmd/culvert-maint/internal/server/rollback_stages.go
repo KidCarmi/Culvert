@@ -56,17 +56,28 @@ type rollbackAccumulator struct {
 // ev (may be nil) is marked stale immediately before `up`, whatever `up` returns: from then
 // on an earlier capture no longer proves what runs.
 func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bool, ev *runningEvidence) (stdout, stderr []byte, err error) {
+	// Before anything is moved: let a container stop an interrupted image
+	// change may have left in dockerd run out (settle.go).
+	note, serr := s.settleInterrupted(ctx)
+	if serr != nil {
+		return nil, nil, serr
+	}
 	tres, terr := s.opts.Runner.ComposeTagPinned(ctx, ref)
 	if terr != nil {
 		if tres != nil {
-			return tres.Stdout, tres.Stderr, terr
+			note = append(note, tres.Stdout...)
+			return note, tres.Stderr, terr
 		}
-		return nil, nil, terr
+		return note, nil, terr
 	}
-	out := append([]byte(nil), tres.Stdout...)
+	out := append([]byte(nil), note...)
+	out = append(out, tres.Stdout...)
 	errOut := append([]byte(nil), tres.Stderr...)
 	ev.noteUp()
 	ures, uerr := s.opts.Runner.ComposeUp(ctx)
+	if uerr != nil {
+		s.noteMutationCut()
+	}
 	if uerr != nil && failedPostRestart != nil {
 		*failedPostRestart = true
 	}
@@ -74,7 +85,64 @@ func (s *Server) tagAndUp(ctx context.Context, ref string, failedPostRestart *bo
 		out = append(out, ures.Stdout...)
 		errOut = append(errOut, ures.Stderr...)
 	}
+	if uerr == nil {
+		out, errOut, uerr = s.upAgainIfNothingRuns(ctx, out, errOut)
+		if uerr != nil && failedPostRestart != nil {
+			*failedPostRestart = true
+		}
+	}
 	return out, errOut, uerr
+}
+
+// upRetryBudget is how many more times `compose up` is run when the one before
+// it reported success and left no proxy container running.
+const upRetryBudget = 1
+
+// upAgainIfNothingRuns closes the gap between "`up` exited 0" and "the proxy is
+// up". It is decided on what Docker says, not on the exit status.
+//
+// Measured on real Docker: after a recreate interrupted between Compose's stop
+// and its delete (the old container exited, the replacement created under a
+// temporary name), the next `docker compose up -d` only tidies up — it removes
+// a leftover and exits 0 with nothing started. The one after that starts the
+// proxy. Without this, the first rollback after such a crash failed its health
+// gate and left the proxy down until an operator submitted a second one.
+//
+// It applies only while an operation interrupted by an agent death is on
+// record: that is when Compose can have been left in the middle of a recreate,
+// and an ordinary upgrade keeps exactly the docker calls it always made.
+//
+// The retry is bounded and is the same command; it runs only when Docker was
+// read and shows no running proxy container. If Docker cannot be read, nothing
+// is assumed and the health gate decides. The health gate and the verify stage
+// that follow are unchanged: this never turns a failure into a success, it
+// only gives `up` the second pass it sometimes needs.
+func (s *Server) upAgainIfNothingRuns(ctx context.Context, out, errOut []byte) (stdout, stderr []byte, err error) {
+	if !s.recoveringFromInterruption() {
+		return out, errOut, nil
+	}
+	for attempt := 1; attempt <= upRetryBudget; attempt++ {
+		pc, rerr := s.opts.Runner.ReadProxyContainer(ctx)
+		if rerr != nil {
+			out = append(out, "\nrestart: could not read the proxy container after `up`; not retrying, the health gate decides\n"...)
+			return out, errOut, nil
+		}
+		if pc.Running {
+			return out, errOut, nil
+		}
+		out = append(out, fmt.Sprintf("\nrestart: `up` exited 0 but no proxy container is running (present=%v); running `up` again (%d/%d)\n",
+			pc.Present, attempt, upRetryBudget)...)
+		ures, uerr := s.opts.Runner.ComposeUp(ctx)
+		if ures != nil {
+			out = append(out, ures.Stdout...)
+			errOut = append(errOut, ures.Stderr...)
+		}
+		if uerr != nil {
+			s.noteMutationCut()
+			return out, errOut, uerr
+		}
+	}
+	return out, errOut, nil
 }
 
 // imageRollbackStages builds the four core image-rollback steps pinned to
@@ -145,4 +213,24 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 			},
 		},
 	}
+}
+
+// recoveringFromInterruption reports whether the journal holds a record that a
+// previous agent process left behind (marked at startup, no operation of this
+// process behind it). An unreadable journal counts as no: nothing is retried on
+// a guess.
+func (s *Server) recoveringFromInterruption() bool {
+	if s.opts.Journal == nil {
+		return false
+	}
+	recs, err := s.opts.Journal.List()
+	if err != nil {
+		return false
+	}
+	for i := range recs {
+		if recs[i].InterruptedAt != nil && !s.opts.Ops.IsRunning(recs[i].OpID) {
+			return true
+		}
+	}
+	return false
 }

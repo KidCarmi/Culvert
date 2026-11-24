@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -83,9 +84,10 @@ type Status struct {
 	// InterruptedOperationsError is set when the journal could not be read for
 	// this request. The list is then unknown, not empty.
 	InterruptedOperationsError string `json:"interrupted_operations_error,omitempty"`
-	// PinnedTag is what the fixed proxy tag resolves to now. Reported only
-	// while InterruptedOperations is non-empty: that is when the tag and the
-	// running container can have been left apart.
+	// PinnedTag is what the fixed proxy tag resolves to now, and whether the
+	// running container is on that image. Always reported: an interrupted
+	// operation is not the only way the two come apart (see
+	// status.addPinnedTag).
 	PinnedTag *PinnedTagStatus `json:"pinned_tag,omitempty"`
 
 	// RecoveryRequired and Reconcile are set only when reconcile_on_startup =
@@ -197,6 +199,13 @@ const DefaultMaxConcurrentReadOnlyOps = 8
 type Server struct {
 	opts Options
 
+	// startedAt is when this agent process's server was built. The settle
+	// window is counted from it (settle.go).
+	startedAt time.Time
+	// mutationCutAt is the last time a compose up/down of this process ended
+	// in an error; the settle window restarts from it (settle.go).
+	mutationCutAt atomic.Pointer[time.Time]
+
 	// opWG tracks in-flight orchestrator goroutines so shutdown can drain them
 	// (T2.4) instead of abandoning a state-changing op mid-flight.
 	opWG           sync.WaitGroup
@@ -253,7 +262,7 @@ func New(opts Options) (*Server, error) {
 	if maxRO <= 0 {
 		maxRO = DefaultMaxConcurrentReadOnlyOps
 	}
-	return &Server{opts: opts, opDrainTimeout: drain, opSem: make(chan struct{}, maxRO)}, nil
+	return &Server{opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO)}, nil
 }
 
 // acquireReadOnlySlot reserves an execution slot for a read-only op without

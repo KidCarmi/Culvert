@@ -32,10 +32,13 @@
 # only if the harness FAILS every mutant. The checked-out source is never
 # modified, and no mutant is ever written into it.
 #
-# Verdicts: PASS; FAIL (a contract check or the harness failed); GAP (only an
-# owner-requested property stricter than the AGT-900 contract failed).
-# Exit: 0 all PASS (or, with --negative-control, every mutant was caught);
-#       1 a FAIL; 3 no FAIL but a GAP; 2 incomplete (prerequisite, setup, no rows).
+# Verdicts: PASS; FAIL (a contract check failed); ERROR (the harness could not
+# evaluate the case: setup, crash or mutate step failed, or nothing was
+# checked); GAP (only an owner-requested property stricter than the AGT-900
+# contract failed). --negative-control counts only FAIL as a caught mutant.
+# Exit: 0 all PASS (or, with --negative-control, every mutant was caught by a
+#       failed contract check); 1 a FAIL or ERROR; 3 no FAIL/ERROR but a GAP;
+#       2 incomplete (prerequisite, setup, no rows).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -345,7 +348,7 @@ for s in $STORES; do
       (cd "$MAINT" && env "${common[@]}" AGT900_MODE=root AGT900_PROJECT="$W/proj-$s" \
           AGT900_COMPOSE_TEMPLATE="$HERE/docker-compose.yml" AGT900_AGENT_BIN="$W/bin/agent-$run" \
           "${gotest[@]}"; echo $? > "$W/logs/rc-$tag") 2>&1 \
-        | tee "$W/logs/harness-$tag.log" | grep --line-buffered -E '^(=== |--- |    agt900|PASS|FAIL|ok|panic)'
+        | tee "$W/logs/harness-$tag.log" | grep --line-buffered -E '^(=== |--- |    agt900|PASS|FAIL|ERROR|ok|panic)'
     else
       printf '#!/bin/sh\nexec %s "$@"\n' "$REAL_DOCKER" > "$W/bin/docker-shim-$tag"
       chmod 755 "$W/bin/docker-shim-$tag"
@@ -354,7 +357,7 @@ for s in $STORES; do
           AGT900_W="$W" AGT900_SEED_REF="$repo@$dp" AGT900_AGENT_SRC="$W/bin/agent-$run" \
           unshare --mount --propagation private -- "$HERE/sudoers-env.sh" "$W/logs/sudoers-$tag" -- \
           "${gotest[@]}"; echo $? > "$W/logs/rc-$tag") 2>&1 \
-        | tee "$W/logs/harness-$tag.log" | grep --line-buffered -E '^(=== |--- |    agt900|PASS|FAIL|ok|panic|sudoers-env)'
+        | tee "$W/logs/harness-$tag.log" | grep --line-buffered -E '^(=== |--- |    agt900|PASS|FAIL|ERROR|ok|panic|sudoers-env)'
       [ -f "$W/logs/sudoers-$tag/sudoers-evidence.txt" ] && sed 's/^/     /' "$W/logs/sudoers-$tag/sudoers-evidence.txt"
     fi
     [ "$(cat "$W/logs/rc-$tag" 2>/dev/null)" = 0 ] || HARNESS_RC=1
@@ -374,18 +377,24 @@ awk -F'\t' 'BEGIN{printf "%-22s | %-34s | %-58s | %-58s | %s\n","store","case","
   {printf "%-22s | %-34s | %-58s | %-58s | %s\n",$1,$2,$3,$4,$5; if ($6!="") { n=split($6,a,";;"); for(i=1;i<=n;i++) printf "%-22s   %s\n","","  - " a[i] } }' "$RESULTS"
 FAILS=$(awk -F'\t' '$5=="FAIL"' "$RESULTS" | wc -l)
 GAPS=$(awk -F'\t' '$5=="GAP"' "$RESULTS" | wc -l)
+ERRORS=$(awk -F'\t' '$5=="ERROR"' "$RESULTS" | wc -l)
 TOTAL=$(wc -l < "$RESULTS")
 echo
-echo "rows: $TOTAL  FAIL: $FAILS  GAP: $GAPS  harness exit: $HARNESS_RC"
+echo "rows: $TOTAL  FAIL: $FAILS  ERROR: $ERRORS  GAP: $GAPS  harness exit: $HARNESS_RC"
 if [ "$NEGCTL" = 1 ]; then
   missed=0
   for m in $RUNS; do
+    # Only a failed CONTRACT check (FAIL) counts as catching the mutant. An
+    # ERROR row means the case was never evaluated (setup/harness failure), so
+    # it can neither catch the mutant nor be ignored: it is reported.
     n=$(awk -F'\t' -v m="mutant:$m" 'index($1, m) && $5=="FAIL"' "$RESULTS" | wc -l)
-    if [ "$n" -gt 0 ]; then echo "NEGATIVE CONTROL $m: caught ($n FAIL row(s))"; else echo "NEGATIVE CONTROL $m: NOT caught"; missed=1; fi
+    ne=$(awk -F'\t' -v m="mutant:$m" 'index($1, m) && $5=="ERROR"' "$RESULTS" | wc -l)
+    if [ "$n" -gt 0 ]; then echo "NEGATIVE CONTROL $m: caught ($n FAIL row(s), $ne ERROR row(s))"
+    else echo "NEGATIVE CONTROL $m: NOT caught ($ne ERROR row(s): harness errors never count as a catch)"; missed=1; fi
   done
   [ "$missed" = 0 ] && { echo "NEGATIVE CONTROL: every mutant was caught -> OK"; exit 0; }
   echo "NEGATIVE CONTROL: a mutant passed -> the harness cannot detect it"; exit 1
 fi
-if [ "$FAILS" -gt 0 ] || [ "$HARNESS_RC" != 0 ]; then exit 1; fi
+if [ "$FAILS" -gt 0 ] || [ "$ERRORS" -gt 0 ] || [ "$HARNESS_RC" != 0 ]; then exit 1; fi
 [ "$GAPS" -gt 0 ] && exit 3
 exit 0

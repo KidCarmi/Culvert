@@ -1033,10 +1033,12 @@ func (res *e2eResult) gapCheck(name string, ok bool, want, got string) {
 
 // verdict: FAIL (a contract check or the harness failed), GAP (only an
 // owner-requested property failed), or PASS.
+// verdict: FAIL means a contract check failed. ERROR means the harness could
+// not evaluate the case (setup, crash or mutate step failed, a polled kill
+// missed its window, or nothing was checked) and no contract check failed.
+// The two are kept apart so --negative-control counts only FAIL as a caught
+// mutant: an infrastructure failure must never certify a negative control.
 func (res *e2eResult) verdict() string {
-	if res.err != "" || len(res.checks) == 0 {
-		return "FAIL"
-	}
 	gap := false
 	for _, c := range res.checks {
 		switch {
@@ -1045,6 +1047,9 @@ func (res *e2eResult) verdict() string {
 		case !c.ok:
 			gap = true
 		}
+	}
+	if res.err != "" || len(res.checks) == 0 {
+		return "ERROR"
 	}
 	if gap {
 		return "GAP"
@@ -1090,7 +1095,7 @@ func (e *e2eEnv) record(t *testing.T, res *e2eResult) {
 		}
 		t.Logf("agt900     %s %-28s want %-40s got %s", mark, c.name, c.want, c.got)
 	}
-	if verdict == "FAIL" {
+	if verdict == "FAIL" || verdict == "ERROR" {
 		t.Errorf("%s: %s", res.name, strings.Join(bad, "; "))
 	}
 }

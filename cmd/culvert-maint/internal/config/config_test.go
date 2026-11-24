@@ -439,3 +439,30 @@ func TestIsAllowedBackupPath(t *testing.T) {
 		}
 	}
 }
+
+// TestLoad_InterruptedSettle: default 75s; 0 turns the wait off; negative,
+// malformed and "does not fit in an operation" are refused.
+func TestLoad_InterruptedSettle(t *testing.T) {
+	load := func(extra string) (*Config, error) {
+		t.Helper()
+		return Load(writeConfig(t, minimalValid+"\n"+extra))
+	}
+	cfg, err := load("")
+	if err != nil || cfg.InterruptedSettle != 75*time.Second {
+		t.Fatalf("default: settle=%v err=%v, want 75s", cfg.InterruptedSettle, err)
+	}
+	cfg, err = load(`interrupted_settle = "0s"`)
+	if err != nil || cfg.InterruptedSettle != 0 {
+		t.Fatalf("0s: settle=%v err=%v, want off", cfg.InterruptedSettle, err)
+	}
+	for _, bad := range []string{
+		`interrupted_settle = "-1s"`,
+		`interrupted_settle = "soon"`,
+		"interrupted_settle = \"30m\"",                             // equals the default operation_timeout
+		"operation_timeout = \"1m\"\ninterrupted_settle = \"90s\"", // longer than the operation
+	} {
+		if _, err := load(bad); err == nil {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+}

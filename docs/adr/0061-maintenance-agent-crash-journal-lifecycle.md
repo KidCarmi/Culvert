@@ -85,9 +85,10 @@ What the report says, per record (`server.InterruptedOperation`):
   *run*.
 - `docker_reconciled: false`, stated, so `failed` cannot be read as "rolled
   back", and an `operator_action` sentence.
-- From `GET /v1/status` only, read live and only while a record exists:
-  `running_image` (`target` / `prior` / `other` / `ambiguous` / `unknown`) and
-  `pinned_tag` `{image_id, matches_running}`. A failed read is `unknown`, never
+- From `GET /v1/status` only, read live: `running_image` (`target` / `prior` /
+  `other` / `ambiguous` / `unknown`) while a record exists, and `pinned_tag`
+  `{image_id, matches_running}` on every status (a record is not the only way
+  the tag and the container come apart). A failed read is `unknown`, never
   a guess. The tag read is the existing image-inspect template with the literal
   fixed tag; no sudoers line is added.
 
@@ -233,3 +234,61 @@ re-pins it.
   and ops tests.
 - Contracts `AGT-004` and `AGT-005` register the two invariants; `AGT-900` is
   unchanged and still open.
+
+## Addendum (2026-11-23): what "no process behind it" does and does not cover
+
+A record found at startup is treated as an operation with no process behind
+it. Two things make that usable, and neither is the journal:
+
+- **Processes.** The shipped unit kills the agent's control group and holds
+  the restart until it is empty (`KillMode=control-group`). No docker command
+  of the dead agent is alive when the next one starts.
+- **The daemon.** dockerd finishes the last request it was sent. A container
+  stop lasts as long as the proxy takes to exit, up to its
+  `stop_grace_period`. On real Docker a rollback admitted in that window found
+  the old container running, passed its health gate, reported success and
+  retired the record; the container then exited.
+
+Rule: nothing tags and recreates while such a request can still be pending.
+`tagAndUp` waits until `agent start + interrupted_settle` (default 75s, must
+exceed the proxy's `stop_grace_period`) and only then tags, runs `up`, and goes
+through the health gate. A success, and the retirement of records it causes, is
+therefore judged on a container no outstanding request can touch.
+
+The bound is counted from the process start, not from a journal record, on
+purpose. A stop can be left by something that records nothing (a restore's
+`compose down`), records another class (a data rollback), or belongs to a
+startup reconcile killed in mid-flight; and a record's `interrupted_at` is
+written best-effort. The cost is that the first upgrade or rollback within the
+window after any agent start waits for the rest of it. The wait is not a new
+stage and adds no docker call.
+
+The window restarts inside one process whenever a `compose up` or `compose
+down` it ran ends in an error: the command may have been killed (stage timeout,
+the unit being stopped, the OOM killer) after it asked dockerd to stop the
+proxy. The upgrade's inline rollback therefore starts one window after a
+failed `up`. An upgrade also waits before its first capture, so that "already
+current" — which skips the restart and the health gate — is never concluded
+from a container that may be on its way out.
+
+Not covered: a deployment without the unit's control-group kill (a docker
+command of the dead agent may then still be running at any later time), and a
+`stop_grace_period` longer than the window.
+
+The startup reconcile (`reconcile_on_startup = "converge"`) follows the same
+rule and one more. It waits out the settle window before it reads Docker for a
+record, and it retires a record only after a readiness probe taken at that
+point succeeds. Matching container and tag identities alone are not
+convergence. If the wait cannot be completed or the probe fails, the record is
+kept and the outcome is `recovery_required` (`settle_wait_cut_short`,
+`settle_not_established`, `not_ready_at_retirement`).
+
+The wait applies only when Docker answered the reconcile's readability test.
+When Docker is down there is nothing to observe and so nothing to wait for:
+an image record is deferred (`defer` / `docker_unavailable`) at once, with no
+Docker read, no change, no attempt counted and the record kept, and is decided
+again at the next start, which waits out its own window. Waiting first spent
+the reconcile's deadline and reported a Docker that was merely down as
+`recovery_required` (`settle_wait_cut_short`); found by the real-Docker E2E.
+A deadline that is already over before a record is reached is still
+`deadline_elapsed`, never a deferral.

@@ -9,6 +9,155 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A control-plane snapshot whose identity-provider profiles are refused no
+  longer leaves the node with new policy rules over the previous category
+  groups.** The IdP sync is the one step of a snapshot apply that can refuse
+  after validation. It ran after the rules had been replaced and saved, and
+  before the category groups they reference, so a refusal left group-scoped
+  Block rules matching nothing until a later snapshot succeeded, including
+  across a restart. The sync now runs before any policy state is replaced, on the full and
+  the delta path: a snapshot refused there leaves the rules, the category
+  groups and the policy file as they were.
+- **A category groups file that cannot be loaded no longer silently disables
+  every rule scoped to a group.** A rule scoped to a category group matches a
+  destination only when the group resolves. If the groups file failed to load at
+  startup (corrupt JSON, an envelope written by a newer release) the store
+  stayed empty, the failure was a single log line, and startup continued: a
+  group-scoped Block rule stopped blocking and a group-scoped
+  credential-required rule stopped challenging, so the traffic fell through to
+  the default action or to an Allow behind it. An existing file that could not
+  be **read** (permissions, I/O) was worse: it was treated as a first run and
+  produced no error at all. Now, when an enabled policy rule is scoped to a
+  category group and the groups cannot be loaded, **startup stops** with an
+  error naming the rules and the file, as it already does for the policy file
+  and the URL categories. When no enabled rule depends on a group, startup
+  continues, the failure is a warning, and Diagnostics shows
+  `category_groups_load_failed` until groups are present again. An unreadable
+  file is reported as an error; a missing file is still a first run.
+  **Recovery:** restore the file from a backup or a stored config version; on a
+  data-plane node, removing it lets the next control-plane sync rebuild it.
+
+- **An authentication rule that says "not in" is no longer enforced as "in".**
+  A rule's subject selector (`subjectMatch`) takes typed predicates; each has
+  an optional `op`. The matcher implements one operator, membership, but any
+  `op` value was accepted and then ignored. `{"type":"cidr","op":"not_in",
+  "values":["10.0.0.0/8"]}` therefore matched clients **inside** `10.0.0.0/8`:
+  a credential-required rule meant for everyone except a network challenged
+  only that network, and an exemption meant to exclude a network exempted
+  exactly it. Likewise any `schemaVersion` of 1 or more was accepted, so a
+  selector written under a newer schema was enforced with this version's
+  semantics. Both are now validated: `op` must be absent or `in`, and
+  `schemaVersion` must be `1`. The admin API answers `400`; a policy file,
+  snapshot, import or stored config version holding such a rule is refused
+  whole (`POL-005`). The admin UI has only ever written the accepted form.
+  **Upgrade note:** a rule created through the API with another `op` was being
+  misapplied; `culvert policy-check <policy.json>` lists it, and the policy
+  file will stop startup until it is corrected.
+
+- **Replacing the policy can no longer silently remove a rule that restricts
+  (`POL-005`, widened).** The bulk policy doors refused four rule shapes this
+  version cannot enforce — an access rule carrying a `subjectMatch`, an access
+  rule carrying an `auth` spec, an invalid auth rule, a null entry in the policy
+  file — by
+  **dropping that one rule and installing the rest**. That is safe for a scoped
+  Allow and the wrong direction for anything that blocks: a Block rule carrying
+  a `subjectMatch` was dropped by a bulk replace and, under
+  `default_action=allow`, the request it was written to stop was forwarded
+  (measured: no rule left, `200`, backend reached). A ruleset holding any such
+  rule is now **refused whole**, exactly as one holding an unknown `ruleType`
+  is, and the running and persisted policy stay as they were: policy-file load
+  and reload, control-plane snapshots (publish and apply), config import in both
+  modes and its dry run, config-version rollback, a pending policy draft, and
+  bulk replace. An **empty rule entry** (`null` or `{}`) is refused the same
+  way at every one of those doors: outside the policy file it used to become a
+  nameless rule with no conditions and no action, which matches every request
+  and allows it. A **config-version rollback now restores every rule** in the
+  stored version, exactly as stored. It used to skip any rule the write-time
+  validator refused and restore the rest, which silently removed live rules: a
+  rule whose action is written in lower case in the policy file (enforced at
+  runtime, refused by that validator) disappeared on every rollback.
+  Diagnostics shows `policy_ruleset_refused_unenforceable_rule`; the old
+  `policy_rules_dropped_on_load` row is gone because nothing is dropped. The
+  same refusal repeated by a data plane polling a control plane it cannot
+  follow is logged once and then at most every 15 minutes, with the running
+  count in Diagnostics (a refused policy-file reload is logged each time it is
+  requested). Rules with an unknown *action* are unaffected and still block; a
+  valid policy, including an empty one under default allow, behaves as before.
+  **Upgrade note — check before upgrading:** run `culvert policy-check
+  <policy.json>` (it also reads config backups, stored config versions and
+  policy drafts). It lists
+  every rule this version would refuse and changes nothing. A policy file that
+  holds one stops startup, as a malformed file does.
+
+- **A rule with a rule type this version does not know no longer disables
+  itself silently (`POL-005`).** A policy rule's `ruleType` selects the stage
+  that evaluates it (`access`, `auth`, or empty for access). A rule carrying any
+  other value — written by a newer release, or by hand — was installed and then
+  skipped by both stages, so with `default_action=allow` or a lower-priority
+  Allow the traffic it was meant to restrict was **forwarded** (measured: a
+  single Block rule with an unknown type, default allow, `200` and the backend
+  reached). Unlike an unknown action (`POL-004`), an unknown type cannot be
+  enforced by keeping the rule, and dropping it is the same failure. A ruleset
+  that contains one is now **refused whole** and the running policy is left
+  exactly as it was: the admin API (`400` on create and update), config import
+  in both modes (dry run included), config-version rollback, control-plane
+  snapshots (on publish and, on a data-plane node, before anything is applied),
+  a pending policy draft on disk (not reloaded) and policy-file reload. A
+  refused reload also leaves the running default action in place, so a new
+  default is never combined with the previous rules. Diagnostics shows
+  `policy_ruleset_refused_unknown_ruletype`, naming the rule, until a ruleset
+  is next accepted. **Upgrade note — check before upgrading:** earlier releases
+  accepted *any* `ruleType` string through the admin API and config import and
+  saved it, so such a rule may already be in `policy.json`, in stored config
+  versions or in the snapshot a control plane publishes. Spelling counts:
+  `Access` or `AUTH` is not `access` or `auth` and was already being skipped.
+  After upgrading, a node whose policy file holds one **stops at startup** with
+  an error naming the rule, exactly as it does for a malformed policy file
+  (a data-plane node too: its policy file is written from the snapshot); a
+  stored config version holding one cannot be restored; and a data plane
+  refuses a snapshot holding one and keeps its last applied policy. Search for
+  `"ruleType"` values other than `access` and `auth` and correct or remove
+  those rules first. Rules with an unknown *action* are unaffected and still
+  block.
+
+- **A rule with an action this build does not know now blocks its traffic
+  instead of disappearing (`POL-004`).** `PolicyStore.Load` (the policy file)
+  and `ReplaceAll` (control-plane snapshots and replace-mode import) dropped
+  any access rule whose action was not one of Allow, Drop, Block_Page or
+  Redirect. With `default_action=allow`, or a lower-priority Allow rule, the
+  traffic that rule was written to restrict was then **forwarded** — a
+  rulebase written by a newer release became more permissive on an older
+  node. Such a rule is now kept with its action intact, still matches, and a
+  match is a terminal block; it is written back unchanged on save, so a
+  mixed-version cluster round-trips it. Every retained rule is announced in
+  the log at load and at bulk replace (`retaining rule … with unrecognized
+  action …; matching traffic will be blocked`) and listed in Diagnostics as
+  `policy_rules_unknown_action` for as long as it is in the running policy.
+  A config-version rollback restores such a rule instead of skipping it, and a
+  draft commit is no longer refused because the running policy contains one.
+  The admin API still refuses an
+  unknown action on a new or edited rule. Rules with a known action, rules
+  with no action, an explicit default allow and an empty rulebase behave as
+  before.
+
+- **A zoned IPv6 destination can no longer slip past a rule for the same
+  address.** A request for `[::1%25lo]` reached the proxy as the authority
+  `[::1%lo]`. No literal matcher canonicalizes a zoned address, so a Block rule
+  for `::1` did not match it — and the dialer honoured the zone and connected
+  to `::1` anyway. Under `default_action=allow` the request was forwarded
+  (measured on an IPv6 host: no rule matched, `200`, backend reached). A zone
+  names an interface on the proxy host and has no meaning across a proxy
+  boundary (RFC 9844), so such a destination is now **refused** rather than
+  normalized: `400` with status `INVALID_HOST` (`source=ipv6-zone`) on plain
+  HTTP and CONNECT, after the connection limit, IP filter and rate limiter and
+  before authentication, any matcher or any dial. SOCKS5 does not evaluate
+  access rules, but its DOMAIN form could carry the same text to the blocklist
+  and the dialer; it is refused there with reply `0x02` (connection not
+  allowed), after SOCKS5 negotiation and before any matcher or dial. The
+  Policy Tester refuses the same input instead of reporting a policy answer
+  for it. Zone-free IPv6 destinations and internationalized hostnames —
+  including percent-encoded ones — are unaffected.
+
 - **An anonymous client can no longer park ~1 GiB in each interactive-login
   state store.** The OIDC PKCE and SAML request stores are filled by
   unauthenticated requests (the proxy's captive-portal path and the public
@@ -690,6 +839,38 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Fixed
 
+- **The "retaining rule … with unrecognized action" warning is now said once per
+  fact, and only where it is true.** It was written on every bulk replace of
+  the rulebase, so an unchanged control-plane republish repeated it for every
+  retained rule, and opening a policy draft wrote "matching traffic will be
+  blocked" about a candidate rule that enforces nothing. The running policy now
+  announces a retained rule when it first appears, when its action changes, or
+  when it returns after being removed; an identical republish, a rollback to
+  the same rulebase and a draft commit that carries the rule through are
+  silent, and the draft's candidate store never announces. Loading the policy
+  file still announces every retained rule each time. Enforcement is unchanged
+  (such a rule still matches and blocks), and the Diagnostics entry
+  `policy_rules_unknown_action` still lists every retained rule for as long as
+  it is in the running policy.
+
+- **The Policy Tester now answers for the host the proxy actually enforces
+  when the request target is percent-encoded.** Go's request parser decodes an
+  encoded international host before the proxy sees it, so a client that sends
+  `b%C3%BCcher.de` is matched against the rules for `bücher.de`. The tester
+  matched the literal percent string instead and reported "no rule matched"
+  for a destination the data path blocks. `POST /api/policy/test` now resolves
+  its `host` with the same standard-library request parser the data path sits
+  behind: an encoded host is decoded once, exactly where the URL grammar
+  allows it, and input the parser accepts is answered for its host as on the
+  wire. **Behaviour change:** the tester now answers `400` where the proxy
+  does — for a target the parser refuses (a non-numeric port such as
+  `host:http`, a malformed or forbidden escape such as `%2F`, `%3A` or `%ZZ`)
+  and for a host with no valid canonical form (the proxy's `INVALID_HOST`) —
+  instead of "no rule matched, the default applies". A bare IPv6 address is
+  still accepted and treated as bracketed. Enforcement is unchanged. This is
+  an intentional compatibility correction, documented on the operation in the
+  API contract; it needs no major contract version, because every refused
+  input is one the data path already refuses.
 - **Opt-in startup recovery for an image change the maintenance agent was
   killed in (`reconcile_on_startup = "converge"`, contract `AGT-900`).** The
   default stays `"off"`: startup reports the interrupted operation and changes
