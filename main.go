@@ -440,6 +440,18 @@ func parseFlags(s *startupState) {
 	})
 }
 
+// refuseOneShotOnUnfinishedRestore stops a one-shot that reads or rewrites the
+// data directory while an in-place restore is unfinished: it would archive or
+// rewrite content that is neither the previous state nor the restored one, and
+// exit 0. The restore, leftover and backup-listing one-shots are not routed
+// through here; they are how that state is inspected and resolved.
+func refuseOneShotOnUnfinishedRestore(what string) {
+	if err := refuseOnUnfinishedInPlaceRestore(dataDir, what); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 // handleOneShotCommands handles one-shot CLI commands that exit before starting the proxy.
 //
 // distinct os.Exit semantics and its own error reporting. Splitting per
@@ -450,6 +462,7 @@ func parseFlags(s *startupState) {
 func handleOneShotCommands(s *startupState) {
 	// ── One-shot: recovery support bundle (M1) — headless, no server ──────
 	if *s.supportBundleOut != "" {
+		refuseOneShotOnUnfinishedRestore("support bundle")
 		if err := runSupportBundleCommand(*s.supportBundleOut); err != nil {
 			fmt.Fprintf(os.Stderr, "Support bundle error: %v\n", err)
 			os.Exit(1)
@@ -458,6 +471,7 @@ func handleOneShotCommands(s *startupState) {
 	}
 	// ── One-shot: backup/export (D1.3a unencrypted; D1.4 encrypted) ───────
 	if *s.backupOut != "" {
+		refuseOneShotOnUnfinishedRestore("backup")
 		if err := runBackupCommand(s); err != nil {
 			fmt.Fprintf(os.Stderr, "Backup error: %v\n", err)
 			os.Exit(1)
@@ -466,6 +480,7 @@ func handleOneShotCommands(s *startupState) {
 	}
 	// ── One-shot: prepare-downgrade (2F-D, C10) — dry-run unless --confirm <word> ──
 	if *s.prepareDowngrade {
+		refuseOneShotOnUnfinishedRestore("prepare-downgrade")
 		if err := runPrepareDowngradeCommand(s, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "Prepare-downgrade error: %v\n", err)
 			os.Exit(1)

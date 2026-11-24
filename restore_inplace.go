@@ -150,6 +150,11 @@ func restoreUsesInPlaceSwap(dataDir string) bool {
 	if err != nil {
 		return false
 	}
+	// The mount table holds resolved paths. A data directory reached through a
+	// symlinked component would otherwise never match its own mount point.
+	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
+		abs = resolved
+	}
 	return restoreDirIsMountPoint(abs) || !restoreDirWritable(filepath.Dir(abs))
 }
 
@@ -277,46 +282,42 @@ func readRestoreIntent(dataDir string) (*restoreIntent, error) {
 }
 
 // rollbackInPlaceRestore undoes a swap that did not commit and returns the
-// data directory to the content it had before. It only renames; it deletes
-// nothing but the staged copy of the new content and its own records.
+// data directory to the content it had before. It only renames; the one thing
+// it deletes is the staged copy of content that never committed, and only
+// after the intent record is gone.
 //
-// It refuses, changing nothing further, when a name is found both in the data
-// directory and in the backup directory: that is a state the swap cannot
-// produce, so nothing here knows which of the two is the previous content.
+// It is RE-ENTRANT: it may itself be killed at any rename and run again, any
+// number of times, and it reaches the same end. That is why it never decides
+// "this live entry is restored content" from the entry merely existing — after
+// a partial rollback a previous entry is live under the same name. The backup
+// directory is the witness instead:
+//
+//   - a previous entry that is still in the backup directory has not come back
+//     yet, so a live entry of that name is the restored one and goes back to
+//     staging first;
+//   - a previous entry that is no longer in the backup directory is already
+//     live again, and is left exactly where it is;
+//   - a live entry whose name was never in the previous content can only be
+//     restored content.
+//
+// In phase "evacuating" nothing was ever installed, so a name found both live
+// and in the backup directory is not something the swap can produce (another
+// process wrote into the half-emptied directory). It refuses there, changing
+// nothing further, because nothing here knows which of the two to keep.
 func rollbackInPlaceRestore(dataDir string, in *restoreIntent, reason string) error {
 	work, staging, bak := restoreWorkPaths(dataDir, in.Suffix)
+	wasOld := make(map[string]bool, len(in.Old))
+	for _, n := range in.Old {
+		wasOld[n] = true
+	}
 
-	// Phase "installing": every previous entry is in the backup directory, and
-	// some staged entries are in the data directory. Send those back first, so
-	// the names are free for the previous content.
 	if in.Phase == restorePhaseInstalling {
-		for _, n := range in.New {
-			live, staged := filepath.Join(dataDir, n), filepath.Join(staging, n)
-			if !restorePathExists(live) {
-				continue // not installed yet
-			}
-			if restorePathExists(staged) {
-				return fmt.Errorf("restore: cannot undo the interrupted restore: %q exists both in the data directory and in %s", n, staging)
-			}
-			if err := os.MkdirAll(staging, 0o700); err != nil {
-				return fmt.Errorf("restore: undo: %w", err)
-			}
-			if err := os.Rename(live, staged); err != nil {
-				return fmt.Errorf("restore: undo: move the restored %q out again: %w", n, err)
-			}
+		if err := restoreSendInstalledBack(dataDir, staging, bak, in.New, wasOld); err != nil {
+			return err
 		}
 	}
-	for _, n := range in.Old {
-		live, kept := filepath.Join(dataDir, n), filepath.Join(bak, n)
-		if !restorePathExists(kept) {
-			continue // never left
-		}
-		if restorePathExists(live) {
-			return fmt.Errorf("restore: cannot undo the interrupted restore: %q exists both in the data directory and in %s", n, bak)
-		}
-		if err := os.Rename(kept, live); err != nil {
-			return fmt.Errorf("restore: undo: move the previous %q back: %w", n, err)
-		}
+	if err := restoreBringPreviousBack(dataDir, bak, in.Old); err != nil {
+		return err
 	}
 	restoreSyncDir(dataDir)
 
@@ -327,15 +328,62 @@ func rollbackInPlaceRestore(dataDir string, in *restoreIntent, reason string) er
 				"nothing was deleted — inspect %s before starting Culvert", n, work)
 		}
 	}
-	_ = os.Remove(bak)        // empty now; a non-empty one is kept and listed as a leftover
-	_ = os.RemoveAll(staging) // #nosec G104 -- the staged copy of content that was never committed
+	// The record goes FIRST. From here on the staged copy and the emptied
+	// backup directory are ordinary leftovers: a death during their removal
+	// leaves nothing a later start could misread as an unfinished swap.
 	if err := os.Remove(filepath.Join(work, restoreIntentName)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("restore: the previous content is back but the intent record could not be removed: %w", err)
 	}
 	restoreSyncDir(work)
+	_ = os.Remove(bak)        // empty now; a non-empty one is kept and listed as a leftover
+	_ = os.RemoveAll(staging) // #nosec G104 -- the staged copy of content that never committed
 	writeRestoreOutcome(work, restoreOutcome{
 		Outcome: restoreOutcomeRolledBack, Suffix: in.Suffix, Mode: in.Mode, At: restoreNow().UTC(), Reason: reason,
 	})
+	return nil
+}
+
+// restoreSendInstalledBack is the first half of a rollback from phase
+// "installing": every live entry that is restored content returns to staging.
+// See rollbackInPlaceRestore for how "restored content" is decided.
+func restoreSendInstalledBack(dataDir, staging, bak string, newNames []string, wasOld map[string]bool) error {
+	for _, n := range newNames {
+		live, staged := filepath.Join(dataDir, n), filepath.Join(staging, n)
+		if !restorePathExists(live) {
+			continue // not installed, or already sent back
+		}
+		if wasOld[n] && !restorePathExists(filepath.Join(bak, n)) {
+			continue // the previous entry, already back in place
+		}
+		if restorePathExists(staged) {
+			return fmt.Errorf("restore: cannot undo the interrupted restore: %q exists both in the data directory and in %s", n, staging)
+		}
+		if err := os.MkdirAll(staging, 0o700); err != nil {
+			return fmt.Errorf("restore: undo: %w", err)
+		}
+		if err := os.Rename(live, staged); err != nil {
+			return fmt.Errorf("restore: undo: move the restored %q out again: %w", n, err)
+		}
+	}
+	return nil
+}
+
+// restoreBringPreviousBack is the second half of every rollback: each previous
+// entry still in the backup directory returns to the data directory.
+func restoreBringPreviousBack(dataDir, bak string, oldNames []string) error {
+	for _, n := range oldNames {
+		live, kept := filepath.Join(dataDir, n), filepath.Join(bak, n)
+		if !restorePathExists(kept) {
+			continue // never left, or already back
+		}
+		if restorePathExists(live) {
+			return fmt.Errorf("restore: cannot undo the interrupted restore: %q exists both in the data directory and in %s; "+
+				"nothing was deleted — something wrote into the data directory while the restore was unfinished", n, bak)
+		}
+		if err := os.Rename(kept, live); err != nil {
+			return fmt.Errorf("restore: undo: move the previous %q back: %w", n, err)
+		}
+	}
 	return nil
 }
 
@@ -418,17 +466,102 @@ func verifyRestoredFiles(dataDir string, manifest *backupManifest, mode restoreM
 	return nil
 }
 
-// takeRestoreWriterLock takes the single-writer lock for the swap. A live
-// holder is a running proxy: the restore is offline-only, and this is where
-// that rule is enforced — at the directory, not at whoever asked. A lock whose
-// state cannot be observed does not block, exactly as at boot.
-func takeRestoreWriterLock(dataDir string) (*writerlock.Lock, error) {
+// takeRestoreWriterLock takes the single-writer lock for the swap and for the
+// rollback of an earlier one. This is where "a restore is offline-only" is
+// enforced — at the directory, not at whoever asked.
+//
+// It is stricter than the boot guard on purpose. At boot an unobservable lock
+// degrades and CULVERT_ALLOW_MULTIPLE_WRITERS overrides a live holder, because
+// the alternative is a proxy that does not start. Here the alternative is a
+// restore that is not run, which costs nothing, while proceeding can mix two
+// contents:
+//
+//   - a LIVE holder always refuses. The override is not honoured: it exists
+//     for storage that reports a lock wrongly, and "wrongly held" cannot be
+//     told from a proxy or another restore that is really running;
+//   - a lock whose state cannot be established refuses too, unless the
+//     operator set the override — and then the swap runs UNLOCKED, so it is
+//     allowed only when no earlier swap is recorded (unlocked reports true).
+//     An unfinished one could belong to a restore that is still renaming.
+func takeRestoreWriterLock(dataDir string) (lock *writerlock.Lock, unlocked bool, err error) {
 	got := writerlock.Take(dataDir)
-	if got.Verdict == writerlock.Held && !allowMultipleWriters() {
-		return nil, fmt.Errorf("restore: a running Culvert process holds %s; stop it first (docker compose down) — "+
+	switch got.Verdict {
+	case writerlock.Acquired:
+		return got.Lock, false, nil
+	case writerlock.Held:
+		return nil, false, fmt.Errorf("restore: a running Culvert process holds %s; stop it first (docker compose down) — "+
 			"a restore replaces files that process is writing", got.Path)
+	default:
+		if !allowMultipleWriters() {
+			return nil, false, fmt.Errorf("restore: the single-writer lock on %q could not be established (%v), so a running proxy "+
+				"or another restore cannot be ruled out; nothing was changed. If this storage cannot lock files, set %s=1 for this run",
+				dataDir, got.Cause, allowMultipleWritersEnv)
+		}
+		return nil, true, nil
 	}
-	return got.Lock, nil
+}
+
+// prepareInPlaceRestore is the first thing a restore commit does on a data
+// directory it will swap in place, BEFORE it validates the archive, analyses
+// the directory or evaluates a guard: it takes the lock and undoes an earlier
+// swap that never committed. The order matters. The guards (DP re-enrollment,
+// TOTP counter rollback) compare the archive with the CURRENT content, and a
+// half-swapped directory is not the current content — evaluated there they
+// pass on an emptied directory and the restore they exist to stop goes ahead.
+//
+// The returned release function is never nil.
+func prepareInPlaceRestore(dataDir string) (release func(), err error) {
+	lock, unlocked, err := takeRestoreWriterLock(dataDir)
+	if err != nil {
+		return func() {}, err
+	}
+	release = func() {
+		if lock != nil {
+			_ = lock.Close()
+		}
+	}
+	if unlocked {
+		if in, rerr := readRestoreIntent(dataDir); rerr != nil || in != nil {
+			return release, fmt.Errorf("restore: an earlier restore of %q did not finish, and without the single-writer lock it "+
+				"cannot be undone safely (it may still be running); nothing was changed", dataDir)
+		}
+		return release, nil
+	}
+	undone, err := recoverInterruptedInPlaceRestore(dataDir, "interrupted restore undone by the next restore")
+	if err != nil {
+		return release, err
+	}
+	if undone {
+		_, _ = fmt.Fprintln(os.Stdout, "An earlier restore that did not finish was undone first; the data directory holds its previous content again, and this restore is checked against that.")
+	}
+	return release, nil
+}
+
+// beginRestoreCommit is runRestoreCommit's step 0, before anything is compared
+// with the current content. On the in-place layout it takes the lock and
+// undoes an earlier swap that never committed; on the whole-directory layout
+// it refuses while one is recorded. release is never nil.
+func beginRestoreCommit(dataDir string) (inPlace bool, release func(), err error) {
+	if restoreUsesInPlaceSwap(dataDir) {
+		release, err = prepareInPlaceRestore(dataDir)
+		return true, release, err
+	}
+	return false, func() {}, refuseOnUnfinishedInPlaceRestore(dataDir, "restore")
+}
+
+// refuseOnUnfinishedInPlaceRestore is for everything that reads or rewrites
+// the data directory WITHOUT being the in-place restore: the whole-directory
+// swap (a different layout decision on the same directory), a backup, a
+// support bundle. On a half-swapped directory each of them would faithfully
+// process content that is neither the previous state nor the restored one.
+func refuseOnUnfinishedInPlaceRestore(dataDir, what string) error {
+	in, err := readRestoreIntent(dataDir)
+	if err == nil && in == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: an in-place restore of %q did not finish (%s). Start Culvert once — it puts the previous "+
+		"content back before reading the directory — or run the restore again the way it was run before; then retry",
+		what, dataDir, filepath.Join(dataDir, restoreWorkDirName, restoreIntentName))
 }
 
 // restoreStep reports one durable step to the test hook.
@@ -458,23 +591,11 @@ func restoreMoveAll(names []string, from, to string) error {
 // commitRestoreInPlace is runRestoreCommit's steps 5–8 for a data directory
 // that cannot be renamed. See the file comment for the order and its reasons.
 func commitRestoreInPlace(dataDir string, files map[string][]byte, manifest *backupManifest, mode restoreMode, suffix string) error {
-	lock, err := takeRestoreWriterLock(dataDir)
-	if err != nil {
-		return err
-	}
-	if lock != nil {
-		defer func() { _ = lock.Close() }()
-	}
+	// The caller holds the lock and has undone any earlier swap
+	// (prepareInPlaceRestore); nothing is outstanding here.
 	work, staging, bak := restoreWorkPaths(dataDir, suffix)
 	if err := os.MkdirAll(work, 0o700); err != nil {
 		return fmt.Errorf("restore: create work area: %w", err)
-	}
-	undone, err := recoverInterruptedInPlaceRestore(dataDir, "interrupted restore undone by the next restore")
-	if err != nil {
-		return err
-	}
-	if undone {
-		_, _ = fmt.Fprintln(os.Stdout, "An earlier restore that did not finish was undone first; the data directory held its previous content before this restore started.")
 	}
 	for _, p := range []string{staging, bak} {
 		if restorePathExists(p) {
@@ -537,6 +658,11 @@ func planInPlaceSwap(dataDir, staging string, mode restoreMode, suffix string) (
 // runInPlaceSwap performs steps 4–9. Any error it returns, other than an
 // abandonment injected by a test, is answered by the caller with a rollback.
 func runInPlaceSwap(dataDir, work, staging, bak string, in *restoreIntent, manifest *backupManifest, mode restoreMode) error {
+	// The outcome record describes the LAST swap. From here on that is this
+	// one, which has no outcome yet; a stale "committed" must not outlive it.
+	if err := os.Remove(filepath.Join(work, restoreOutcomeName)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clear the previous outcome record: %w", err)
+	}
 	if err := writeRestoreIntent(work, in); err != nil {
 		return fmt.Errorf("record intent: %w", err)
 	}
@@ -598,6 +724,14 @@ const restorePreflightPrefix = "RESTORE-PREFLIGHT v1 "
 // the data directory, or "" when nothing known stands in its way. It writes
 // nothing.
 func restoreCommitRefusal(dataDir string, a *commitAnalysis, files map[string][]byte) string {
+	// First, and in either layout: with a swap unfinished, the plan printed
+	// above compared the archive with a half-swapped directory. A dry-run
+	// cannot undo it (it writes nothing), so it must not call the commit ok.
+	if in, err := readRestoreIntent(dataDir); err != nil {
+		return "earlier_restore_record_unusable"
+	} else if in != nil {
+		return "earlier_restore_unfinished"
+	}
 	switch {
 	case a.DPGuardWouldBlock:
 		return "dp_reenrollment_not_accepted"
@@ -610,8 +744,10 @@ func restoreCommitRefusal(dataDir string, a *commitAnalysis, files map[string][]
 	if !restoreDirWritable(dataDir) {
 		return "data_dir_not_writable"
 	}
-	if _, err := readRestoreIntent(dataDir); err != nil {
+	if in, err := readRestoreIntent(dataDir); err != nil {
 		return "earlier_restore_record_unusable"
+	} else if in != nil {
+		return "earlier_restore_unfinished"
 	}
 	var need uint64
 	for path, body := range files {

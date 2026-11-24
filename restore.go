@@ -978,6 +978,16 @@ var restoreNow = time.Now
 // If 7 fails (or process is killed between 6 and 7): /data does not
 // exist; error message names the exact `mv` recovery command.
 func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) error {
+	// Step 0, before anything is compared with the current content: on the
+	// in-place layout take the lock and undo an earlier swap that never
+	// committed; on the whole-directory layout refuse while one is recorded
+	// (restore_inplace.go explains why the guards below depend on this).
+	inPlace, release, err := beginRestoreCommit(dataDir)
+	defer release()
+	if err != nil {
+		return err
+	}
+
 	// Steps 1–2 (reuse).
 	summary, manifest, files, err := validateBackup(tarPath, dataDir, passphrase, opts.BackupPassphrase)
 	if err != nil {
@@ -1005,7 +1015,7 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	// A data directory that is a mount point, or whose parent this process
 	// cannot write, cannot be swapped as a whole: steps 5–8 then run inside it
 	// (restore_inplace.go). Everything above is shared.
-	if restoreUsesInPlaceSwap(dataDir) {
+	if inPlace {
 		return commitRestoreInPlace(dataDir, files, manifest, opts.Mode, suffix)
 	}
 	stagingDir := dataDir + ".staging." + suffix
@@ -1015,15 +1025,8 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	// exists on disk. Catches stale state from a prior failed restore
 	// (e.g. operator killed the process mid-stage) and prevents
 	// accidental reuse of either dir.
-	if _, err := os.Stat(stagingDir); err == nil {
-		return fmt.Errorf("restore: staging path %q already exists; remove it before retrying", stagingDir)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("restore: stat staging path %q: %w", stagingDir, err)
-	}
-	if _, err := os.Stat(bakPath); err == nil {
-		return fmt.Errorf("restore: backup path %q already exists; remove it before retrying", bakPath)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("restore: stat backup path %q: %w", bakPath, err)
+	if err := restoreRefuseExistingSwapPaths(stagingDir, bakPath); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(os.Stdout, "\nCommitting restore now.\n")
@@ -1071,6 +1074,24 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	fmt.Fprintf(os.Stdout, "\nRestore committed.\n")
 	fmt.Fprintf(os.Stdout, "  Previous /data preserved at: %s\n", bakPath)
 	fmt.Fprintf(os.Stdout, "  (.bak is NOT auto-deleted; remove manually when no longer needed.)\n")
+	return nil
+}
+
+// restoreRefuseExistingSwapPaths is the whole-directory swap's collision
+// pre-check: the error for a staging or backup path that already exists (or
+// cannot be examined), or nil. Messages are unchanged from when this was
+// inline in runRestoreCommit.
+func restoreRefuseExistingSwapPaths(stagingDir, bakPath string) error {
+	if _, err := os.Stat(stagingDir); err == nil {
+		return fmt.Errorf("restore: staging path %q already exists; remove it before retrying", stagingDir)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("restore: stat staging path %q: %w", stagingDir, err)
+	}
+	if _, err := os.Stat(bakPath); err == nil {
+		return fmt.Errorf("restore: backup path %q already exists; remove it before retrying", bakPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("restore: stat backup path %q: %w", bakPath, err)
+	}
 	return nil
 }
 
