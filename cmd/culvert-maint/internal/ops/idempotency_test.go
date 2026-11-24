@@ -432,3 +432,54 @@ func TestIdempotency_RecordHoldsNoResolvedSecret(t *testing.T) {
 		t.Errorf("fingerprint missing or not SHA-256 hex: %q", fp)
 	}
 }
+
+// A retry is the same request when the client sent the same thing. A value the
+// agent derived from its own configuration (compose_override_configured) can
+// differ between the first submission and the retry, across a restart with a
+// changed config, and must not turn the retry into a key-reuse refusal.
+func TestIdempotency_AgentDerivedParamsDoNotChangeTheFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	first := restartableManager(t, dir, nil)
+	req := func(override bool) map[string]interface{} {
+		return map[string]interface{}{"image_ref": "repo@sha256:abc", "compose_override_configured": override}
+	}
+	op, deduped, err := first.BeginIdempotent(KindUpgradeApply, "uid=1", "k1", req(false))
+	if err != nil || deduped {
+		t.Fatalf("admission: deduped=%v err=%v", deduped, err)
+	}
+	if err := first.Finish(op.ID, StateSucceeded, "", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	second := restartableManager(t, dir, nil) // the agent restarted with a different config
+	again, deduped, err := second.BeginIdempotent(KindUpgradeApply, "uid=1", "k1", req(true))
+	if err != nil {
+		t.Fatalf("an identical request was refused after the agent's config changed: %v", err)
+	}
+	if !deduped || again.ID != op.ID || again.State != StateSucceeded {
+		t.Errorf("retry: deduped=%v id=%s state=%s, want the original %s succeeded", deduped, again.ID, again.State, op.ID)
+	}
+
+	// A field the client DID send still distinguishes requests.
+	other := req(true)
+	other["image_ref"] = "repo@sha256:def"
+	var mismatch *IdempotencyMismatch
+	if _, _, err := second.BeginIdempotent(KindUpgradeApply, "uid=1", "k1", other); !errors.As(err, &mismatch) {
+		t.Errorf("a different image under the same key: err=%v, want IdempotencyMismatch", err)
+	}
+}
+
+func TestRequestParams_OnlyRequestFieldsAreFingerprinted(t *testing.T) {
+	in := map[string]interface{}{"image_ref": "x", "compose_override_configured": true}
+	out := requestParams(in)
+	if _, ok := out["compose_override_configured"]; ok || out["image_ref"] != "x" {
+		t.Errorf("requestParams = %v", out)
+	}
+	if _, ok := in["compose_override_configured"]; !ok {
+		t.Error("requestParams modified its input: the audit trail must keep the derived field")
+	}
+	plain := map[string]interface{}{"filename": "a.tar.gz"}
+	if got := requestParams(plain); len(got) != 1 {
+		t.Errorf("params without derived keys changed: %v", got)
+	}
+}

@@ -373,7 +373,7 @@ func (m *Manager) BeginIdempotent(kind, actor, idempotencyKey string, params map
 
 	fingerprint := ""
 	if idempotencyKey != "" {
-		fp, ferr := idem.Fingerprint(kind, params)
+		fp, ferr := idem.Fingerprint(kind, requestParams(params))
 		if ferr != nil {
 			return nil, false, ferr
 		}

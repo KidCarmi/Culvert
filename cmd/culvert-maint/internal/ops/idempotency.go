@@ -212,3 +212,41 @@ func (m *Manager) GetRecorded(opID string) *Op {
 	}
 	return m.opFromRecordLocked(rec)
 }
+
+// derivedParams are the op params the agent adds from its OWN state, not from
+// the request body. They belong in the audit trail and on the op record, but
+// not in the idempotency fingerprint: the fingerprint answers "is this the same
+// request?", and a request does not become a different one because the agent's
+// configuration changed between the first submission and its retry. Without
+// this, adding or removing compose_override_file across a restart turned an
+// identical retry into 422 idempotency_key_reused and the client could no
+// longer fetch its original operation.
+//
+// A handler that records another agent-derived value in params must list it
+// here; TestRequestParams_OnlyRequestFieldsAreFingerprinted pins the handlers'
+// current set.
+var derivedParams = map[string]struct{}{
+	"compose_override_configured": {},
+}
+
+// requestParams returns params without the agent-derived keys. The input is
+// not modified; it is returned as is when it carries none of them.
+func requestParams(params map[string]interface{}) map[string]interface{} {
+	derived := false
+	for k := range params {
+		if _, ok := derivedParams[k]; ok {
+			derived = true
+			break
+		}
+	}
+	if !derived {
+		return params
+	}
+	out := make(map[string]interface{}, len(params))
+	for k, v := range params {
+		if _, ok := derivedParams[k]; !ok {
+			out[k] = v
+		}
+	}
+	return out
+}
