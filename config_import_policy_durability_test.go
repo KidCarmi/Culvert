@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/KidCarmi/Culvert/internal/fileutil"
 )
 
 // importDurabilityFixture seeds one persisted Drop rule and returns the policy
@@ -85,6 +87,12 @@ func TestConfigImport_PolicyWriteFailureIsReportedNotOK(t *testing.T) {
 		resp["applied"] != true || resp["policy_persisted"] != false {
 		t.Errorf("response does not report the non-durable import: %v", resp)
 	}
+	if resp["retry_safe"] != true {
+		t.Errorf("a replace-mode import is idempotent; retry_safe = %v, want true", resp["retry_safe"])
+	}
+	if rec, _ := resp["recovery"].(string); rec == "" {
+		t.Error("the not-durable response carries no recovery guidance")
+	}
 	if msg, _ := resp["error"].(string); strings.Contains(msg, dir) || strings.Contains(msg, parked) {
 		t.Errorf("response error carries a filesystem path: %q", msg)
 	}
@@ -136,5 +144,87 @@ func TestConfigImport_PolicyWriteSuccessStaysOK(t *testing.T) {
 	}
 	if got := ruleNamesOf(disk.List()); got != "new-allow" {
 		t.Errorf("persisted rules = [%s], want [new-allow]", got)
+	}
+}
+
+// Retrying the same replace-mode import once storage is back must converge:
+// 200, the file holds the imported rules, and the rule set is exactly the
+// imported one (no duplicates, nothing left from the failed attempt).
+func TestConfigImport_RetryAfterStorageReturnsIsIdempotent(t *testing.T) {
+	dir, path := importDurabilityFixture(t)
+	parked := dir + ".offline"
+	if err := os.Rename(dir, parked); err != nil {
+		t.Fatal(err)
+	}
+	rules := []PolicyRule{
+		{Name: "new-block", Priority: 1, Action: ActionDrop, DestFQDN: "evil.example"},
+		{Name: "new-allow", Priority: 2, Action: ActionAllow, DestFQDN: "ok.example"},
+	}
+	code, _ := importReplaceForTest(t, rules)
+	if err := os.Rename(parked, dir); err != nil {
+		t.Fatal(err)
+	}
+	if code != http.StatusInternalServerError {
+		t.Fatalf("premise: first attempt status = %d, want 500", code)
+	}
+
+	code, resp := importReplaceForTest(t, rules)
+	if code != http.StatusOK || resp["ok"] != true {
+		t.Fatalf("retry status %d, body %v", code, resp)
+	}
+	const want = "new-block,new-allow"
+	if got := ruleNamesOf(policyStore.List()); got != want {
+		t.Errorf("active rules after retry = [%s], want [%s]", got, want)
+	}
+	disk := &PolicyStore{}
+	if err := disk.Load(path); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := ruleNamesOf(disk.List()); got != want {
+		t.Errorf("persisted rules after retry = [%s], want [%s]", got, want)
+	}
+}
+
+// A merge-mode import is not idempotent (alert webhooks are appended), so its
+// not-durable answer must not invite a blind retry.
+func TestConfigImport_MergeModeNotDurableIsNotRetrySafe(t *testing.T) {
+	importDurabilityFixture(t)
+	prev := persistRunningPolicy
+	persistRunningPolicy = func() error { return os.ErrPermission }
+	t.Cleanup(func() { persistRunningPolicy = prev })
+
+	w := httptest.NewRecorder()
+	apiConfigImport(w, jsonReq("POST", "/api/config/import", &configBackup{
+		Version:     1,
+		PolicyRules: []PolicyRule{{Name: "merged", Priority: 7, Action: ActionDrop, DestFQDN: "m.example"}},
+	}))
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode %q: %v", w.Body.String(), err)
+	}
+	if w.Code != http.StatusInternalServerError || resp["status"] != "imported_not_durable" {
+		t.Fatalf("status %d, body %v", w.Code, resp)
+	}
+	if resp["retry_safe"] != false {
+		t.Errorf("merge mode retry_safe = %v, want false", resp["retry_safe"])
+	}
+}
+
+// A write that replaced the policy file but could not sync its directory HAS
+// landed; reporting it as not persisted would be untrue the other way round.
+func TestConfigImport_ReplacedButNotSyncedCountsAsPersisted(t *testing.T) {
+	importDurabilityFixture(t)
+	prev := persistRunningPolicy
+	persistRunningPolicy = func() error {
+		if err := policyStore.SaveErr(); err != nil {
+			return err
+		}
+		return fileutil.ErrReplacedNotSynced
+	}
+	t.Cleanup(func() { persistRunningPolicy = prev })
+
+	code, resp := importReplaceForTest(t, []PolicyRule{{Name: "new-allow", Priority: 1, Action: ActionAllow, DestFQDN: "evil.example"}})
+	if code != http.StatusOK || resp["ok"] != true {
+		t.Fatalf("status %d, body %v", code, resp)
 	}
 }

@@ -12109,6 +12109,8 @@
                   "mode": "replace",
                   "ok": false,
                   "policy_persisted": false,
+                  "recovery": "fix the data directory, then save the policy again",
+                  "retry_safe": true,
                   "status": "imported_not_durable"
                 },
                 "schema": {
@@ -12117,7 +12119,7 @@
                 }
               }
             },
-            "description": "`status:imported_not_durable` — the import was applied to the RUNNING configuration but the policy rules could not be written to disk (`ok:false`, `applied:true`, `policy_persisted:false`). The running config has already changed and will be lost on restart, so the recovery is to fix the data directory and re-save, not to assume the previous configuration is still in effect. The other fields of the 200 body (`mode`, `warnings`, …) are included."
+            "description": "`status:imported_not_durable` — the import was applied to the RUNNING configuration but the policy rules could not be written to disk (`ok:false`, `applied:true`, `policy_persisted:false`). The running config has already changed and will be lost on restart, so the recovery is to fix the data directory and re-save, not to assume the previous configuration is still in effect. This is distinct from an import that did not happen: a refused import is a 4xx with nothing mutated and no `applied` field. `retry_safe` is `true` for a replace-mode import (re-sending it is idempotent) and `false` for merge mode (alert webhooks are appended again); `recovery` says what to do. The other fields of the 200 body (`mode`, `warnings`, `cluster_publish_rejected`, …) are included. Compatibility: before this response existed the same condition answered `200 {\"ok\":true}`; a client that keys only on the status code now sees a failure for a configuration that is live."
           }
         },
         "security": [
