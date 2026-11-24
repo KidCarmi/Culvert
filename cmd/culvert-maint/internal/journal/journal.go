@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -168,8 +169,8 @@ type Record struct {
 	RestoreStage RestoreStage `json:"restore_stage,omitempty"`
 
 	// Intent and Cut attribute an interruption to one docker command of this
-	// operation (intent.go). Schema 2; absent on every record whose operation
-	// has not begun such a command.
+	// operation (intent.go). Absent on every record whose operation has not
+	// begun such a command.
 	Intent *CommandIntent `json:"intent,omitempty"`
 	Cut    *CommandCut    `json:"cut,omitempty"`
 
@@ -204,6 +205,10 @@ type Journal struct {
 	dir string
 	// writeErrForTest, when set, is returned by Write (SetWriteErrorForTest).
 	writeErrForTest error
+	// inFlight: operations of THIS process that are inside a compose command
+	// (BeginCommand .. EndCommand). Guarded by flightMu.
+	flightMu sync.Mutex
+	inFlight map[string]struct{}
 }
 
 // New creates the reconcile directory (0750) and returns a Journal rooted there.
@@ -254,6 +259,13 @@ func (j *Journal) Write(rec Record) error {
 	if err != nil {
 		return err
 	}
+	if rec.Intent != nil && !j.commandInFlight(rec.OpID) {
+		// An intent this process is not inside: its close could not be written
+		// earlier, and a read-modify-write is now carrying it. It must not
+		// reach disk again as "in flight" (intent.go). An agent START never
+		// gets here with one: it takes the intent before it writes.
+		rec.Intent = nil
+	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("journal: marshal: %w", err)
@@ -268,16 +280,7 @@ func (j *Journal) Write(rec Record) error {
 	if j.writeErrForTest != nil {
 		return j.writeErrForTest
 	}
-	if err := atomicWrite(path, data, fileMode); err != nil {
-		return err
-	}
-	if rec.EffectiveSchema() < SchemaFenced {
-		// This record does not (or no longer) need the fence: a command intent
-		// has been closed or consumed. A fence that cannot be released stays,
-		// which only keeps older agents out a little longer.
-		_ = j.releaseFenceIfUnused()
-	}
-	return nil
+	return atomicWrite(path, data, fileMode)
 }
 
 // SetWriteErrorForTest makes every later Write fail with err (nil restores

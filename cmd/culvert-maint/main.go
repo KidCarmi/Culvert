@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -147,7 +148,7 @@ func run(configPath string) error {
 	mgr := ops.NewManagerWithTTL(nil, idempTTL)
 	initIdempotency(cfg.StateDir, mgr, idempTTL)
 
-	jnl, err := initJournal(cfg.StateDir, mgr, al, cfg.ProxyRepo)
+	jnl, diedIn, err := initJournal(cfg.StateDir, mgr, al, cfg.ProxyRepo)
 	if err != nil {
 		return err
 	}
@@ -161,7 +162,7 @@ func run(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("status: %w", err)
 	}
-	stp.WithJournal(jnl)
+	stp.WithJournal(jnl).WithDiedInCommand(diedIn)
 
 	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl)
 	if err != nil {
@@ -225,29 +226,74 @@ func initIdempotency(stateDir string, mgr *ops.Manager, ttl time.Duration) {
 // interrupted upgrade, and its stack is not started. Acting on a record at boot
 // is the separate, opt-in reconcile (reconcile_on_startup = "converge",
 // server/startup_reconcile.go), which runs only after this report is complete.
-func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo string) (*journal.Journal, error) {
-	jnl, err := journal.New(stateDir)
+//
+// diedIn is what this start, and only this start, may conclude about command
+// attribution (journal/intent.go): op id → the docker command the previous
+// agent process died inside. It lives in this process's memory and nowhere
+// else.
+func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo string) (jnl *journal.Journal, diedIn map[string]string, err error) {
+	jnl, err = journal.New(stateDir)
 	if err != nil {
-		return nil, fmt.Errorf("journal: %w", err)
+		return nil, nil, fmt.Errorf("journal: %w", err)
 	}
 	recs, err := jnl.List()
 	if err != nil {
-		return nil, fmt.Errorf("journal: refusing to serve — %w", err)
+		return nil, nil, fmt.Errorf("journal: refusing to serve — %w", err)
+	}
+	// First, and before anything is audited, reported or counted: take every
+	// open command intent, durably.
+	diedIn, err = takeCommandIntents(jnl, recs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("journal: refusing to serve — %w", err)
 	}
 	now := time.Now().UTC()
 	orphans := make([]ops.InterruptedOp, 0, len(recs))
 	for i := range recs {
-		o, rerr := reportInterrupted(jnl, al, &recs[i], proxyRepo, now)
-		if rerr != nil {
-			return nil, fmt.Errorf("journal: refusing to serve — %w", rerr)
-		}
-		orphans = append(orphans, o)
+		orphans = append(orphans, reportInterrupted(jnl, al, &recs[i], proxyRepo, now))
 	}
 	if n := mgr.MarkAllInterrupted(orphans); n > 0 {
 		log.Printf("culvert-maint: %d operation(s) interrupted by a prior stop — marked failed(agent_restart_interrupted); "+
 			"Docker was NOT changed. See GET /v1/status interrupted_operations.", n)
 	}
-	return jnl, nil
+	return jnl, diedIn, nil
+}
+
+// takeCommandIntents removes every open command intent from the journal and
+// returns the ones that are evidence of a death inside the command.
+//
+// This is the one startup write that is NOT best-effort. "A start has looked"
+// has to be on disk before this start says anything: otherwise it would
+// report the interruption, an operator could react to the report (stop the
+// stack, say), and the next start would find the same intent and take it for
+// new. So a start that cannot remove an intent does not happen: nothing has
+// been audited, counted or reported yet, and the agent exits. systemd starts
+// it again; the first start that can write is the first start. With a state
+// directory that cannot be written the agent could have run no operation
+// anyway, only reported.
+//
+// All intents are taken before the first is acted on in any way, so a refusal
+// leaves no audit entry behind for some other record.
+func takeCommandIntents(jnl *journal.Journal, recs []journal.Record) (map[string]string, error) {
+	diedIn := map[string]string{}
+	for i := range recs {
+		rec := &recs[i]
+		command, attributed, had := rec.TakeIntent()
+		if !had {
+			continue
+		}
+		if werr := jnl.Write(*rec); werr != nil {
+			if errors.Is(werr, journal.ErrNewerSchema) {
+				return nil, fmt.Errorf("op %s died inside %s, and its journal record was written by a newer agent version that this version may not change; start that version (or a later one) again: %w",
+					rec.OpID, command, werr)
+			}
+			return nil, fmt.Errorf("op %s died inside %s and that cannot be recorded in its journal record (is %s writable, and is there space?): %w",
+				rec.OpID, command, jnl.Dir(), werr)
+		}
+		if attributed {
+			diedIn[rec.OpID] = command
+		}
+	}
+	return diedIn, nil
 }
 
 // armStartupReconcile wires the opt-in startup reconcile (contract AGT-900).
@@ -279,26 +325,12 @@ const maxInterruptedSeen = 1_000_000
 // crash between the two repeats the entry at the next start; the other order
 // could lose it. So the audit trail carries the interruption at least once,
 // and exactly once unless the agent dies inside that window.
-//
-// The one write that is NOT best-effort: taking an open command intent
-// (journal/intent.go). "A start has looked" has to be on disk before this
-// start says anything, or the next start would find the same intent, take it
-// for new, and could act on it after an operator has already reacted to what
-// THIS start reported (stopped the stack, say). A start that cannot record
-// that it looked therefore does not happen: no audit entry, no status, exit.
-// systemd starts the agent again; the first start that can write is the first
-// start. With a state directory that cannot be written the agent could have
-// run no operation anyway, only reported.
-func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, proxyRepo string, now time.Time) (ops.InterruptedOp, error) {
-	hadIntent := rec.Intent != nil
-	// Counts this start and takes an open command intent. In every mode,
-	// before anything is decided, and whether or not Docker can be read.
-	rec.SeenByStartup(now, maxInterruptedSeen)
-	if hadIntent {
-		if err := jnl.Write(*rec); err != nil {
-			return ops.InterruptedOp{}, fmt.Errorf("op %s died inside %s and that cannot be recorded in its journal record (is %s writable?): %w",
-				rec.OpID, rec.Cut.Command, jnl.Dir(), err)
-		}
+func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, proxyRepo string, now time.Time) ops.InterruptedOp {
+	if rec.InterruptedAt == nil {
+		rec.InterruptedAt = &now
+	}
+	if rec.InterruptedSeen < maxInterruptedSeen {
+		rec.InterruptedSeen++
 	}
 	desc := server.DescribeInterrupted(rec, proxyRepo)
 	actor := desc.Actor
@@ -331,7 +363,7 @@ func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Reco
 		Actor:   actor,
 		Started: rec.StartedAt,
 		Result:  desc.ResultMap(),
-	}, nil
+	}
 }
 
 // newServer wires the agent HTTP server from its already-constructed

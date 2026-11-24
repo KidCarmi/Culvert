@@ -18,9 +18,6 @@ import (
 	"testing"
 )
 
-// journalFenceFile is the downgrade fence's file name (journal/schema.go).
-const journalFenceFile = "00000000000000000000000000.json"
-
 type intentStatus struct {
 	Interrupted []struct {
 		OpID          string `json:"op_id"`
@@ -49,10 +46,11 @@ type intentRecordFile struct {
 	Schema int `json:"schema"`
 	Intent *struct {
 		Command string `json:"command"`
+		Epoch   int    `json:"epoch"`
 	} `json:"intent"`
 	Cut *struct {
-		Command string `json:"command"`
-		Seen    int    `json:"seen"`
+		Command    string `json:"command"`
+		Attributed bool   `json:"attributed"`
 	} `json:"cut"`
 }
 
@@ -70,32 +68,27 @@ func (r *crashRig) recordFile(opID string) intentRecordFile {
 }
 
 // TestCommandIntent_DiedInsideUp: the agent is killed inside the upgrade's
-// `compose up`. The record on disk says so (an open intent, behind the
-// downgrade fence). The first start after it, with reconcile_on_startup at its
-// default "off", reports it; the start after that does not (cases A and E:
-// a start has looked, whatever its mode; nothing that happens to the stack
-// afterwards is that command's doing).
+// `compose up`. The record on disk says so (an open intent; no schema change,
+// no downgrade fence). The first start after it, with reconcile_on_startup at
+// its default "off", reports it, and has removed the intent from disk; the
+// start after that does not (cases A and E: a start has looked, whatever its
+// mode; nothing that happens to the stack afterwards is that command's doing).
 func TestCommandIntent_DiedInsideUp(t *testing.T) {
 	r := newCrashRig(t)
 	r.start()
 	opID := r.crashAt("up_before:1")
-	if f := r.recordFile(opID); f.Intent == nil || f.Intent.Command != "compose up" || f.Schema < 2 {
-		t.Fatalf("record after the kill = %+v, want an open compose up intent at schema 2", f)
+	if f := r.recordFile(opID); f.Intent == nil || f.Intent.Command != "compose up" || f.Intent.Epoch != 0 || f.Schema != 0 {
+		t.Fatalf("record after the kill = %+v, want an open compose up intent at epoch 0 and no schema key", f)
 	}
-	if _, err := os.Stat(filepath.Join(r.state, "reconcile", journalFenceFile)); err != nil {
-		t.Errorf("no downgrade fence beside a record with an open intent: %v", err)
+	if files := r.journalFiles(); len(files) != 1 {
+		t.Errorf("journal after the kill = %v, want only the record (no downgrade fence)", files)
 	}
 	r.start()
 	if cmd, starts := r.diedIn(opID); cmd != "compose up" || starts != 1 {
 		t.Errorf("first start: died_in_command=%q agent_starts_seen=%d, want compose up / 1", cmd, starts)
 	}
-	if f := r.recordFile(opID); f.Intent != nil || f.Cut == nil || f.Cut.Seen != 1 || f.Schema != 0 {
-		t.Errorf("record after the first start = %+v, want the intent consumed into cut.seen=1 at schema 1", f)
-	}
-	// The fence stood for as long as the intent was open, and no longer: an
-	// agent downgrade is not held up by an interrupted record.
-	if _, err := os.Stat(filepath.Join(r.state, "reconcile", journalFenceFile)); !os.IsNotExist(err) {
-		t.Errorf("the downgrade fence is still there after the start consumed the intent (err=%v)", err)
+	if f := r.recordFile(opID); f.Intent != nil || f.Cut == nil || !f.Cut.Attributed {
+		t.Errorf("record after the first start = %+v, want the intent removed and an attributed cut", f)
 	}
 	r.kill()
 	r.start()

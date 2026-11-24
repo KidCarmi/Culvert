@@ -48,6 +48,9 @@ type Provider struct {
 	// reconcile is the opt-in startup reconcile's tracker. nil (the default,
 	// reconcile_on_startup = "off") adds nothing to the status.
 	reconcile *server.ReconcileTracker
+	// diedIn: op id → docker command the previous agent process died inside,
+	// as this agent start found it (WithDiedInCommand). Read-only after wiring.
+	diedIn map[string]string
 }
 
 // WithJournal makes the provider report the operations a previous agent
@@ -61,6 +64,14 @@ func (p *Provider) WithJournal(j *journal.Journal) *Provider {
 // (Status.Reconcile, Status.RecoveryRequired and each interrupted operation's
 // reconcile_outcome). Only wired when reconcile_on_startup = "converge".
 // Returns p.
+// WithDiedInCommand gives the provider what THIS agent start concluded about
+// command attribution (op id → command; journal/intent.go). It is held in
+// memory only and never written: a restarted agent knows nothing of it.
+func (p *Provider) WithDiedInCommand(m map[string]string) *Provider {
+	p.diedIn = m
+	return p
+}
+
 func (p *Provider) WithReconcile(t *server.ReconcileTracker) *Provider {
 	p.reconcile = t
 	return p
@@ -129,6 +140,7 @@ func (p *Provider) addInterrupted(st *server.Status) {
 			continue
 		}
 		d := server.DescribeInterrupted(rec, p.cfg.ProxyRepo)
+		d.DiedInCommand = p.diedIn[rec.OpID]
 		if st.RunningImage != nil {
 			d.SetRunningImage(server.ClassifyRunning(rec, p.cfg.ProxyRepo, true, st.RunningImage.ImageID, st.RunningImage.RepoDigests))
 		} else {

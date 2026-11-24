@@ -73,35 +73,29 @@ func (s *Server) markedMutation(ctx context.Context, command string, run func() 
 	return res, nil
 }
 
-// beginCommandIntent writes the intent into the record of opID. No operation (opID ""), no journal, or no record for it: nothing to write,
-// and nothing will ever be attributed to the command.
+// beginCommandIntent writes the intent into the record of opID
+// (journal.BeginCommand). No operation, no journal, or no record for it:
+// nothing is written, and nothing will ever be attributed to the command.
 func (s *Server) beginCommandIntent(opID, command string) error {
-	s.closePendingIntents()
 	if s.opts.Journal == nil || opID == "" {
 		return nil
 	}
-	rec, found, err := s.opts.Journal.Read(opID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return nil
-	}
-	rec.BeginCommand(command, time.Now().UTC())
-	return s.opts.Journal.Write(*rec)
+	s.closePendingIntents()
+	_, err := s.opts.Journal.BeginCommand(opID, command, time.Now().UTC())
+	return err
 }
 
 // endCommandIntent removes the intent from the record of opID. If that cannot
-// be written the record still says "in flight" while this process is alive:
-// it is remembered and retried before every later command and at shutdown.
-// Left on disk until the agent next starts, it would read as "died in the
-// command" (a double fault: the state directory unwritable from here to the
-// end of the process).
+// be written, the journal still drops the intent at the record's next write by
+// this process (a phase advance, say), and the close is retried before the
+// next compose command. What is left: the state directory stays unwritable
+// from here until the process ends. Then the next start reads "died in the
+// command".
 func (s *Server) endCommandIntent(opID string) {
 	if s.opts.Journal == nil || opID == "" {
 		return
 	}
-	if err := s.closeIntent(opID); err != nil {
+	if err := s.opts.Journal.EndCommand(opID); err != nil {
 		s.intentMu.Lock()
 		if s.pendingIntents == nil {
 			s.pendingIntents = map[string]struct{}{}
@@ -112,23 +106,14 @@ func (s *Server) endCommandIntent(opID string) {
 	}
 }
 
-func (s *Server) closeIntent(opID string) error {
-	rec, found, err := s.opts.Journal.Read(opID)
-	if err != nil || !found {
-		return err
-	}
-	if !rec.EndCommand() {
-		return nil
-	}
-	return s.opts.Journal.Write(*rec)
-}
-
 // closePendingIntents retries every intent whose close could not be written.
+// Called only from beginCommandIntent, i.e. by the one state-changing
+// operation that is running: nothing else is rewriting those records.
 func (s *Server) closePendingIntents() {
 	s.intentMu.Lock()
 	defer s.intentMu.Unlock()
 	for opID := range s.pendingIntents {
-		if s.closeIntent(opID) == nil {
+		if s.opts.Journal.EndCommand(opID) == nil {
 			delete(s.pendingIntents, opID)
 		}
 	}

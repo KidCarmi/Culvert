@@ -459,7 +459,6 @@ func (s *Server) Serve(ctx context.Context) error {
 // Close stops the server and removes the socket file. Safe to call
 // multiple times.
 func (s *Server) Close() error {
-	s.closePendingIntents() // last chance to say "that command returned"
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.httpSrv != nil {

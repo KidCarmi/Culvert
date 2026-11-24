@@ -1,6 +1,8 @@
 package journal
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,213 +10,319 @@ import (
 	"time"
 )
 
-const intentOp = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+const (
+	intentOp  = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	intentOp2 = "01BX5ZZKBKACTAV9WEVGEMMVRZ"
+)
 
-func intentRec() Record {
-	now := time.Now().UTC()
-	return Record{OpID: intentOp, Kind: "upgrades.apply", Phase: PhaseRestarting, StartedAt: now, UpdatedAt: now}
+// agentLife is one agent process on a state directory: its own Journal (and
+// with it its own idea of which commands it is inside).
+type agentLife struct {
+	t   *testing.T
+	dir string
+	j   *Journal
 }
 
-const seenCap = 1_000_000
+func newLife(t *testing.T, dir string) *agentLife {
+	t.Helper()
+	j, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &agentLife{t: t, dir: dir, j: j}
+}
 
-// TestIntent_AttributionSequences walks a record through agent lives. Each
-// step is what one process does to the record; want is CutByThisStart for
-// `compose up` as the reconcile of the LAST start in the sequence would read
-// it. The rows are the acceptance cases of ADR-0062 slice 3 (from the three
-// reviews of #2093) reduced to the record.
-func TestIntent_AttributionSequences(t *testing.T) {
+func (a *agentLife) seed(opID string) {
+	a.t.Helper()
 	now := time.Now().UTC()
-	begin := func(r *Record) { r.BeginCommand(MutationComposeUp, now) }
-	end := func(r *Record) { r.EndCommand() }
-	start := func(r *Record) { r.SeenByStartup(now, seenCap) }
-	for _, tc := range []struct {
-		name  string
-		steps []func(*Record)
-		want  bool
-	}{
-		{"positive: died inside up, first start after it", []func(*Record){begin, start}, true},
-		{"A/E: a start has already looked (any mode); the next one is told nothing", []func(*Record){begin, start, start}, false},
-		{"C: the command returned to a live agent, then the agent restarted", []func(*Record){begin, end, start}, false},
-		{"C: an earlier cut, then a command that returned (a failed restore), then a restart", []func(*Record){begin, start, begin, end, start}, false},
-		{"positive: a recovery that died in its own up is attributable once more", []func(*Record){begin, start, begin, start}, true},
-		{"and not after the start that follows", []func(*Record){begin, start, begin, start, start}, false},
-		{"no command was ever begun", []func(*Record){start}, false},
-		{"begun, and the process is still alive (no start has seen it)", []func(*Record){begin}, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := intentRec()
-			for _, st := range tc.steps {
-				st(&r)
-			}
-			if got := r.CutByThisStart(MutationComposeUp); got != tc.want {
-				t.Errorf("CutByThisStart = %v, want %v (record: intent=%+v cut=%+v seen=%d)", got, tc.want, r.Intent, r.Cut, r.InterruptedSeen)
-			}
-		})
+	if err := a.j.Write(Record{OpID: opID, Kind: "upgrades.apply", Phase: PhaseRestarting, StartedAt: now, UpdatedAt: now}); err != nil {
+		a.t.Fatal(err)
 	}
 }
 
-// TestIntent_NoClockDecides (case D): the start's clock is behind the time the
-// command was begun, or far ahead of it. The intent is consumed all the same,
-// attributed to that start, and spent at the next one.
-func TestIntent_NoClockDecides(t *testing.T) {
-	began := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
-	for name, startClock := range map[string]time.Time{
-		"clock behind began":   began.Add(-6 * time.Hour),
-		"clock years after it": began.AddDate(3, 0, 0),
+// start does what an agent start does with the journal (main.go initJournal):
+// take every intent durably, then count the start in every record. It returns
+// what that start may conclude, op id → command.
+func (a *agentLife) start() map[string]string {
+	a.t.Helper()
+	recs, err := a.j.List()
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	died := map[string]string{}
+	for i := range recs {
+		cmd, attributed, had := recs[i].TakeIntent()
+		if !had {
+			continue
+		}
+		if err := a.j.Write(recs[i]); err != nil {
+			a.t.Fatalf("take: %v", err)
+		}
+		if attributed {
+			died[recs[i].OpID] = cmd
+		}
+	}
+	for i := range recs {
+		recs[i].InterruptedSeen++
+		if err := a.j.Write(recs[i]); err != nil {
+			a.t.Fatal(err)
+		}
+	}
+	return died
+}
+
+// phaseAdvance is any ordinary read-modify-write of the record by a running
+// operation.
+func (a *agentLife) phaseAdvance(opID string) {
+	a.t.Helper()
+	rec, found, err := a.j.Read(opID)
+	if err != nil || !found {
+		a.t.Fatalf("read: %v found=%v", err, found)
+	}
+	rec.Phase = PhaseRestarted
+	if err := a.j.Write(*rec); err != nil {
+		a.t.Fatal(err)
+	}
+}
+
+// olderAgentStart is a start of an agent built before this file but after the
+// lossless rewrite (ADR-0062 slice 2): it counts the start and carries the
+// keys it does not know, `intent` among them, through its rewrite.
+func olderAgentStart(t *testing.T, dir, opID string) {
+	t.Helper()
+	path := filepath.Join(dir, "reconcile", opID+".json")
+	raw, err := os.ReadFile(path) // #nosec G304 -- test-owned temp dir
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	seen, _ := m["interrupted_seen"].(float64)
+	m["interrupted_seen"] = seen + 1
+	out, _ := json.Marshal(m)
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func rawRecordFile(t *testing.T, dir, opID string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "reconcile", opID+".json")) // #nosec G304 -- test-owned temp dir
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// TestIntent_AttributionSequences: what the LAST agent start of each sequence
+// may conclude about `compose up` of the operation. The rows are the
+// acceptance cases of ADR-0062 slice 3 and the sequences on which reviews of
+// #2093 and of the first version of this code found a wrong answer.
+func TestIntent_AttributionSequences(t *testing.T) {
+	type world struct {
+		t    *testing.T
+		dir  string
+		life *agentLife
+		last map[string]string
+	}
+	begin := func(w *world) {
+		if _, err := w.life.j.BeginCommand(intentOp, MutationComposeUp, time.Now().UTC()); err != nil {
+			w.t.Fatal(err)
+		}
+	}
+	end := func(w *world) {
+		if err := w.life.j.EndCommand(intentOp); err != nil {
+			w.t.Fatal(err)
+		}
+	}
+	endFails := func(w *world) {
+		w.life.j.SetWriteErrorForTest(errors.New("no space left on device"))
+		if err := w.life.j.EndCommand(intentOp); err == nil {
+			w.t.Fatal("test setup: the close was expected to fail")
+		}
+		w.life.j.SetWriteErrorForTest(nil)
+	}
+	advance := func(w *world) { w.life.phaseAdvance(intentOp) }
+	// restart: the process is gone (killed, or stopped) and a new one starts.
+	restart := func(w *world) { w.life = newLife(w.t, w.dir); w.last = w.life.start() }
+	older := func(w *world) { olderAgentStart(w.t, w.dir, intentOp) }
+
+	for _, tc := range []struct {
+		name  string
+		steps []func(*world)
+		want  bool
+	}{
+		{"positive: died inside up; the first start after it", []func(*world){begin, restart}, true},
+		{"A/E: a start has looked (in any mode); the next one is told nothing", []func(*world){begin, restart, restart}, false},
+		{"C: the command returned to a live agent; the agent restarted later", []func(*world){begin, end, restart}, false},
+		{"C: died in up, then a recovery whose own up returned (failed), then a restart", []func(*world){begin, restart, begin, end, restart}, false},
+		{"positive: a recovery that died inside its own up is attributable once more", []func(*world){begin, restart, begin, restart}, true},
+		{"and not at the start after that", []func(*world){begin, restart, begin, restart, restart}, false},
+		{"no command was ever begun", []func(*world){restart}, false},
+		{"downgrade: an older agent that carries the intent started in between", []func(*world){begin, older, restart}, false},
+		{"downgrade, twice", []func(*world){begin, older, older, restart}, false},
+		{"one failed close, then the operation's next record write, then killed", []func(*world){begin, endFails, advance, restart}, false},
+		{"one failed close, retried by a later successful close", []func(*world){begin, endFails, end, restart}, false},
+		// The stated residual, pinned so that it stays stated: the close could
+		// not be written and the record was never written again before the
+		// process ended. The next start cannot tell this from a death inside
+		// the command.
+		{"RESIDUAL: failed close, no later write of the record, process ends", []func(*world){begin, endFails, restart}, true},
 	} {
-		t.Run(name, func(t *testing.T) {
-			r := intentRec()
-			r.BeginCommand(MutationComposeUp, began)
-			r.SeenByStartup(startClock, seenCap)
-			if r.Intent != nil || !r.CutByThisStart(MutationComposeUp) {
-				t.Fatalf("first start: intent=%+v cut=%+v, want consumed and attributed", r.Intent, r.Cut)
+		t.Run(tc.name, func(t *testing.T) {
+			w := &world{t: t, dir: t.TempDir()}
+			w.life = newLife(t, w.dir)
+			w.life.seed(intentOp)
+			for _, st := range tc.steps {
+				st(w)
 			}
-			r.SeenByStartup(began.Add(time.Minute), seenCap) // the clock is right again
-			if r.CutByThisStart(MutationComposeUp) {
-				t.Error("a later start, with the clock in range, is told the agent died in the command")
+			if got := w.last[intentOp] == MutationComposeUp; got != tc.want {
+				t.Errorf("the last start concludes died-in-up = %v, want %v\nrecord: %s", got, tc.want, rawRecordFile(t, w.dir, intentOp))
+			}
+			if strings.Contains(rawRecordFile(t, w.dir, intentOp), `"intent"`) {
+				t.Errorf("an intent is still on disk after an agent start:\n%s", rawRecordFile(t, w.dir, intentOp))
 			}
 		})
 	}
 }
 
 // TestIntent_IsPerRecordAndPerCommand (case B): what one operation's record
-// says is no evidence about another's, and a cut `compose down` is not a cut
-// `compose up`.
+// says is no evidence about another's, and each command is reported as itself.
 func TestIntent_IsPerRecordAndPerCommand(t *testing.T) {
-	now := time.Now().UTC()
-	older, newer := intentRec(), intentRec()
-	newer.OpID = "01BX5ZZKBKACTAV9WEVGEMMVRZ"
-	newer.BeginCommand(MutationComposeUp, now)
-	older.SeenByStartup(now, seenCap)
-	newer.SeenByStartup(now, seenCap)
-	if older.CutByThisStart(MutationComposeUp) || older.Cut != nil {
-		t.Errorf("the older record carries a cut it never had: %+v", older.Cut)
-	}
-	if !newer.CutByThisStart(MutationComposeUp) {
-		t.Error("the newer record's own cut is not reported")
-	}
-	if newer.CutByThisStart(MutationComposeDown) {
-		t.Error("a cut `compose up` reads as a cut `compose down`")
-	}
-}
-
-// TestIntent_AtTheStartCounterCap: once the per-record start counter stops
-// advancing, a start can no longer be told from the one before it. Nothing is
-// attributed then, neither a new cut nor one taken earlier.
-func TestIntent_AtTheStartCounterCap(t *testing.T) {
-	now := time.Now().UTC()
-	r := intentRec()
-	r.InterruptedSeen = 2
-	r.BeginCommand(MutationComposeUp, now)
-	r.SeenByStartup(now, 3) // advances to the cap: still a distinct start
-	if !r.CutByThisStart(MutationComposeUp) {
-		t.Fatal("the start that reached the cap is distinct and must be attributed")
-	}
-	r.SeenByStartup(now, 3) // cannot advance
-	if r.CutByThisStart(MutationComposeUp) {
-		t.Error("an earlier cut still matches once the counter is stuck")
-	}
-	r.BeginCommand(MutationComposeUp, now)
-	r.SeenByStartup(now, 3)
-	if r.Intent != nil || r.CutByThisStart(MutationComposeUp) {
-		t.Errorf("at the cap: intent=%+v cut=%+v, want consumed and not attributed", r.Intent, r.Cut)
-	}
-}
-
-// TestIntent_IsDurableAndFenced: the intent survives Write/Read, the record
-// is schema 2, and the downgrade fence is in place before the record is (an
-// agent that predates the field would drop it on its next rewrite).
-func TestIntent_IsDurableAndFenced(t *testing.T) {
 	dir := t.TempDir()
-	j, err := New(dir)
-	if err != nil {
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	a.seed(intentOp2)
+	if _, err := a.j.BeginCommand(intentOp2, MutationComposeDown, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	r := intentRec()
-	if err := j.Write(r); err != nil {
-		t.Fatal(err)
+	died := newLife(t, dir).start()
+	if _, ok := died[intentOp]; ok {
+		t.Errorf("the other record is attributed something: %v", died)
 	}
-	if on, _ := j.FenceActive(); on {
-		t.Fatal("fence active for a record without an intent")
-	}
-	r.BeginCommand(MutationComposeUp, time.Now().UTC())
-	if err := j.Write(r); err != nil {
-		t.Fatal(err)
-	}
-	if on, err := j.FenceActive(); err != nil || !on {
-		t.Fatalf("fence active = %v (%v) with an open intent on disk, want true", on, err)
-	}
-	got, found, err := j.Read(intentOp)
-	if err != nil || !found {
-		t.Fatalf("read: %v found=%v", err, found)
-	}
-	if got.Intent == nil || got.Intent.Command != MutationComposeUp || got.EffectiveSchema() < SchemaFenced {
-		t.Fatalf("read back intent=%+v schema=%d", got.Intent, got.EffectiveSchema())
-	}
-	got.SeenByStartup(time.Now().UTC(), seenCap)
-	if err := j.Write(*got); err != nil {
-		t.Fatal(err)
-	}
-	again, _, _ := j.Read(intentOp)
-	if again.Intent != nil || !again.CutByThisStart(MutationComposeUp) {
-		t.Fatalf("after the start's write: intent=%+v cut=%+v", again.Intent, again.Cut)
-	}
-	// A consumed cut needs no fence: the record is schema 1 again (no "schema"
-	// key on disk) and the fence is gone with the last record that needed it.
-	raw, _ := os.ReadFile(filepath.Join(j.Dir(), intentOp+".json")) // #nosec G304 -- test-owned temp dir
-	if strings.Contains(string(raw), `"schema"`) || again.EffectiveSchema() != 1 {
-		t.Errorf("record with a consumed cut is not schema 1:\n%s", raw)
-	}
-	if on, _ := j.FenceActive(); on {
-		t.Error("the fence is still up for a record whose intent was consumed")
+	if died[intentOp2] != MutationComposeDown {
+		t.Errorf("died = %v, want %s: compose down", died, intentOp2)
 	}
 }
 
-// TestIntent_FenceOnlyWhileOpen: the fence goes up with the intent and comes
-// down when the command returns; another record that still has an open intent
-// keeps it up.
-func TestIntent_FenceOnlyWhileOpen(t *testing.T) {
-	j, err := New(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	a, b := intentRec(), intentRec()
-	b.OpID = "01BX5ZZKBKACTAV9WEVGEMMVRZ"
-	a.BeginCommand(MutationComposeUp, now)
-	b.BeginCommand(MutationComposeDown, now)
-	for _, r := range []Record{a, b} {
-		if err := j.Write(r); err != nil {
-			t.Fatal(err)
-		}
-	}
-	a.EndCommand()
-	if err := j.Write(a); err != nil {
-		t.Fatal(err)
-	}
-	if on, _ := j.FenceActive(); !on {
-		t.Fatal("the fence came down while another record still has an open intent")
-	}
-	b.EndCommand()
-	if err := j.Write(b); err != nil {
-		t.Fatal(err)
-	}
-	if on, _ := j.FenceActive(); on {
-		t.Fatal("the fence is still up with no open intent left")
+// TestIntent_NoClockDecides (case D): the time a command was begun is written
+// for the reader and decides nothing, whatever the starting agent's clock says.
+func TestIntent_NoClockDecides(t *testing.T) {
+	for name, began := range map[string]time.Time{
+		"begun years in the future": time.Now().AddDate(5, 0, 0),
+		"begun decades ago":         time.Date(1999, 1, 1, 0, 0, 0, 0, time.UTC),
+		"zero time":                 {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			a := newLife(t, dir)
+			a.seed(intentOp)
+			if _, err := a.j.BeginCommand(intentOp, MutationComposeUp, began); err != nil {
+				t.Fatal(err)
+			}
+			if died := newLife(t, dir).start(); died[intentOp] != MutationComposeUp {
+				t.Errorf("first start: %v, want attributed", died)
+			}
+			if died := newLife(t, dir).start(); len(died) != 0 {
+				t.Errorf("second start: %v, want nothing", died)
+			}
+		})
 	}
 }
 
-// TestIntent_AForgedCutDoesNotMatch: the record is a file anyone with access
-// to the state directory can edit. A cut that names start 0 on a record no
-// start has counted must not read as "this start".
-func TestIntent_AForgedCutDoesNotMatch(t *testing.T) {
-	r := intentRec()
-	r.Cut = &CommandCut{Command: MutationComposeUp, Seen: 0}
-	if r.CutByThisStart(MutationComposeUp) {
-		t.Error("cut.seen 0 matches interrupted_seen 0")
+// TestIntent_BeginWithoutARecordWritesNothing: an operation that has no
+// journal record gets none from its command.
+func TestIntent_BeginWithoutARecordWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	found, err := a.j.BeginCommand(intentOp, MutationComposeUp, time.Now().UTC())
+	if found || err != nil {
+		t.Fatalf("found=%v err=%v, want false, nil", found, err)
 	}
-	r.Cut.Seen, r.InterruptedSeen = -1, -1
-	if r.CutByThisStart(MutationComposeUp) {
-		t.Error("a negative ordinal matches")
+	if _, serr := os.Stat(filepath.Join(dir, "reconcile", intentOp+".json")); !os.IsNotExist(serr) {
+		t.Errorf("a record file appeared for an operation that had none (err=%v)", serr)
+	}
+	if err := a.j.EndCommand(intentOp); err != nil {
+		t.Errorf("EndCommand without a record: %v", err)
+	}
+}
+
+// TestIntent_WriteNeverCarriesAnIntentTheProcessIsNotInside: the self-healing
+// rule on its own. While the command is in flight a rewrite keeps the intent;
+// after it returned, or in a process that never began it, a rewrite drops it.
+func TestIntent_WriteNeverCarriesAnIntentTheProcessIsNotInside(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	if _, err := a.j.BeginCommand(intentOp, MutationComposeUp, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	a.phaseAdvance(intentOp) // e.g. rollback_armed written while `up` runs
+	if !strings.Contains(rawRecordFile(t, dir, intentOp), `"intent"`) {
+		t.Fatal("a rewrite during the command dropped its intent")
+	}
+	other := newLife(t, dir) // a process that is not inside the command
+	other.phaseAdvance(intentOp)
+	if strings.Contains(rawRecordFile(t, dir, intentOp), `"intent"`) {
+		t.Fatal("a process that is not inside the command wrote its intent back")
+	}
+}
+
+// TestIntent_WhatTheRecordMustSay: a record is a file that can be edited, and
+// can come from another agent version. Only an intent for one of the two
+// commands, begun at the record's current start count, is evidence.
+func TestIntent_WhatTheRecordMustSay(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		intent CommandIntent
+		seen   int
+		want   bool
+	}{
+		{"control", CommandIntent{Command: MutationComposeUp, Epoch: 0}, 0, true},
+		{"control, on a record starts have counted", CommandIntent{Command: MutationComposeUp, Epoch: 3}, 3, true},
+		{"begun before a start that counted", CommandIntent{Command: MutationComposeUp, Epoch: 0}, 1, false},
+		{"epoch ahead of the count", CommandIntent{Command: MutationComposeUp, Epoch: 2}, 1, false},
+		{"negative epoch and count", CommandIntent{Command: MutationComposeUp, Epoch: -1}, -1, false},
+		{"not a command the agent runs", CommandIntent{Command: "docker system prune", Epoch: 0}, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Record{OpID: intentOp, InterruptedSeen: tc.seen}
+			in := tc.intent
+			r.Intent = &in
+			_, attributed, had := r.TakeIntent()
+			if !had || attributed != tc.want || r.Intent != nil || r.Cut == nil || r.Cut.Attributed != tc.want {
+				t.Errorf("had=%v attributed=%v intent=%+v cut=%+v, want taken with attributed=%v", had, attributed, r.Intent, r.Cut, tc.want)
+			}
+		})
+	}
+}
+
+// TestIntent_NeedsNoSchemaAndNoFence: a record with an open intent is written
+// at schema 1 with no downgrade fence. An agent older than the lossless
+// rewrite drops the key (nothing is attributed); one that carries it counts
+// its start, which the epoch catches (the "downgrade" rows above).
+func TestIntent_NeedsNoSchemaAndNoFence(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	before := rawRecordFile(t, dir, intentOp)
+	if _, err := a.j.BeginCommand(intentOp, MutationComposeUp, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	during := rawRecordFile(t, dir, intentOp)
+	if strings.Contains(during, `"schema"`) {
+		t.Errorf("an open intent raised the record's schema:\n%s", during)
+	}
+	if on, _ := a.j.FenceActive(); on {
+		t.Error("an open intent put the downgrade fence up")
+	}
+	if err := a.j.EndCommand(intentOp); err != nil {
+		t.Fatal(err)
+	}
+	// A record whose command has returned is byte-identical to what it was.
+	if after := rawRecordFile(t, dir, intentOp); after != before {
+		t.Errorf("record after the command returned differs from before it:\n%s\n---\n%s", before, after)
 	}
 }

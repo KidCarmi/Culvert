@@ -81,7 +81,7 @@ func TestInitJournal_AuditsOnceAndCountsStarts(t *testing.T) {
 	var first *time.Time
 	for start := 1; start <= 3; start++ {
 		mgr := ops.NewManager(nil)
-		jnl, err := initJournal(dir, mgr, al, startupRepo)
+		jnl, _, err := initJournal(dir, mgr, al, startupRepo)
 		if err != nil {
 			t.Fatalf("start %d: %v", start, err)
 		}
@@ -137,7 +137,7 @@ func TestInitJournal_ReadOnlyJournalStillReports(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(rdir, 0o700) }) // #nosec G302 -- restore for TempDir cleanup
 
 	mgr := ops.NewManager(nil)
-	if _, err := initJournal(dir, mgr, al, startupRepo); err != nil {
+	if _, _, err := initJournal(dir, mgr, al, startupRepo); err != nil {
 		t.Fatalf("an unwritable journal must not stop startup: %v", err)
 	}
 	if op := mgr.Get(startupOp); op == nil || op.State != ops.StateFailed {
@@ -155,7 +155,7 @@ func TestInitJournal_AuditFailureIsRetried(t *testing.T) {
 	_ = al.Close() // every Write now fails
 
 	mgr := ops.NewManager(nil)
-	jnl, err := initJournal(dir, mgr, al, startupRepo)
+	jnl, _, err := initJournal(dir, mgr, al, startupRepo)
 	if err != nil {
 		t.Fatalf("a failing audit log must not stop startup: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestInitJournal_AuditFailureIsRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = al2.Close() }()
-	if _, err := initJournal(dir, ops.NewManager(nil), al2, startupRepo); err != nil {
+	if _, _, err := initJournal(dir, ops.NewManager(nil), al2, startupRepo); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(interruptedEvents(t, auditPath, startupOp)); n != 1 {
@@ -184,7 +184,7 @@ func TestInitJournal_AuditFailureIsRetried(t *testing.T) {
 func TestInitJournal_EmptyJournalWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	al, auditPath := startupAudit(t, dir)
-	if _, err := initJournal(dir, ops.NewManager(nil), al, startupRepo); err != nil {
+	if _, _, err := initJournal(dir, ops.NewManager(nil), al, startupRepo); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Stat(auditPath); err != nil || fi.Size() != 0 {
@@ -201,7 +201,7 @@ func TestInitJournal_UnknownKindIsNotRepeated(t *testing.T) {
 	seedJournal(t, dir, rec)
 	al, auditPath := startupAudit(t, dir)
 	mgr := ops.NewManager(nil)
-	if _, err := initJournal(dir, mgr, al, startupRepo); err != nil {
+	if _, _, err := initJournal(dir, mgr, al, startupRepo); err != nil {
 		t.Fatal(err)
 	}
 	if op := mgr.Get(startupOp); op == nil || op.Kind != "unknown" {
