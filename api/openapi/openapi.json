@@ -12013,7 +12013,7 @@
             }
           },
           {
-            "description": "`replace` wipes stores before applying; default is merge.",
+            "description": "`replace` wipes stores before applying; default is merge. Policy rules are validated as `POST /api/policy` validates them, in both modes. In `replace` mode one invalid rule refuses the whole import (400, plain text naming the rule and the reason) before anything is applied; in `merge` mode an invalid rule is skipped and listed in `warnings`. In both modes a Redirect rule whose host this node could not resolve (DNS failure or verification time ran out) is installed and listed in `warnings`; it answers 403 until the host resolves to a public address. A schedule timezone the node cannot load is invalid, not a warning. A dry run returns the same `warnings` as the commit.",
             "in": "query",
             "name": "mode",
             "required": false,
@@ -12085,7 +12085,7 @@
                 }
               }
             },
-            "description": "Malformed request. Upstream-section schema violations are STRUCTURED JSON (`UpstreamImportRefusal`, validated before any store is touched): `invalid_credential_state` — a v2 entry carries a missing or unrecognized `credentialState` (the offending entry `index` is named; the value is never echoed); `invalid_upstream_credentials_marker` — a `upstream_proxies_v2` section without the exact `upstream_credentials: \"omitted\"` marker; `schema_mismatch` — a v2 section under a backup version other than 2, a legacy `upstreamProxies` list outside version 1 or carrying the marker, or a marker without the section; `invalid_entry`, `duplicate_id`, `ambiguous_upstream_sections`, `credentials_not_importable`. Other malformed input (invalid JSON, unsupported version) stays plain text."
+            "description": "Malformed request. Upstream-section schema violations are STRUCTURED JSON (`UpstreamImportRefusal`, validated before any store is touched): `invalid_credential_state` — a v2 entry carries a missing or unrecognized `credentialState` (the offending entry `index` is named; the value is never echoed); `invalid_upstream_credentials_marker` — a `upstream_proxies_v2` section without the exact `upstream_credentials: \"omitted\"` marker; `schema_mismatch` — a v2 section under a backup version other than 2, a legacy `upstreamProxies` list outside version 1 or carrying the marker, or a marker without the section; `invalid_entry`, `duplicate_id`, `ambiguous_upstream_sections`, `credentials_not_importable`. Other malformed input (invalid JSON, unsupported version) stays plain text, as does a refused policy rule set: a rule this version cannot enforce (either mode), or in `replace` mode a rule the policy API would refuse (`import refused: policy rule N of M (\"name\") is not valid: reason`). Nothing is applied, audited or versioned."
           },
           "403": {
             "$ref": "#/components/responses/PlainForbidden"

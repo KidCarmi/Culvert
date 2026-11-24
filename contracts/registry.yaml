@@ -233,6 +233,56 @@ contracts:
     validation: integration
     compatibility: "A node handed a ruleset from a newer release keeps enforcing its last accepted policy; a policy file it cannot fully understand stops startup, as a malformed file does."
 
+  - id: POL-006
+    area: policy
+    status: enforced
+    owner_approved: false
+    invariant: "Every door through which an operator submits policy rules runs the one shared per-rule check (checkRuleIngress) and the shared uniqueness check; no door has a rule of its own. A rule that is invalid, or that the node cannot enforce as written (a schedule timezone it cannot load), is refused at all of them: a replace-mode config import holding one is refused whole before any section applies, with the running and persisted policy unchanged, and a merge-mode import skips and reports it, leaving any existing rule of the same identity untouched. A finding may be installed with a warning only when its enforcement is fail-closed at the point of use; today that is one finding, a Redirect host whose DNS lookup failed or was not made in time (the serve path re-checks it and answers 403): the single-rule API refuses it, an import installs it with a per-rule warning. An address literal is classified without DNS and never reaches that class. An import whose request is cancelled applies nothing. Recorded exceptions: the live SSO provider-reference check runs at the auth-policy API only (registry drift must not drop stored rules), and a draft commit re-validates its candidate without the source-literal check, because the candidate holds rules inherited from the running policy."
+    authority: "Policy rule ingress validation (policy_ruleset_ingress.go, ui_helpers.go)."
+    code:
+      - "policy_ruleset_ingress.go"
+      - "ui_helpers.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a check to the shared per-rule validation, which then applies at every operator-facing door"
+        - "merge-mode import skipping an invalid rule and reporting it in warnings"
+        - "an import installing a Redirect rule whose host this node could not resolve, with a warning naming it"
+      forbidden:
+        - "a validation rule that exists at one operator-facing door only, other than the recorded exceptions"
+        - "a replace-mode import installing a rule that is invalid"
+        - "applying any section of an import whose rule set was refused, or auditing or versioning it"
+        - "refusing an import because the importing node's resolver could not answer for a Redirect host"
+        - "installing, at an operator door, a rule whose schedule timezone the node cannot load, or overwriting a working rule with one"
+        - "treating a private, loopback, link-local or metadata address literal as unverifiable, whatever the state of the request context"
+        - "adding a finding to the install-with-warning class whose enforcement is not fail-closed at the point of use"
+        - "installing an unverified rule without a warning in the response, or a dry run that omits a warning the commit returns"
+        - "running the ingress validation at a stored or wire door (policy file, rollback, control-plane snapshot, pending draft), where it could stop a node starting, rolling back or following its control plane"
+    tests:
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_ReplaceImportRefusesWhatThePolicyAPIRefuses}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_ReplaceImportStillAcceptsAValidRuleset}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_E2E_RefusedReplaceImportKeepsTheBlockInForce}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_MergeImportSkipsAndReportsAnInertSourceIP}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_RefusalIsBoundedAndSanitized}
+      - {file: "policy_ruleset_ingress_test.go", name: TestRulesetIngress_StoredAndWireDoorsStayOnThePureGate}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ReplaceImportSurvivesAResolverOutage}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ReplaceImportRefusesARedirectToAPrivateAddress}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_PolicyAPIStillRefusesAnUnverifiableRule}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_UnloadableTimezoneIsRefusedNotInstalled}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_MergeNeverOverwritesAWorkingRuleWithAnUnloadableTimezone}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_TypoTimezoneIsInvalidOnANodeWithTzdata}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_RedirectAddressLiteralsAreClassifiedWithoutDNS}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_CancelledRequestAppliesNothing}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_SpentBudgetDoesNotLaunderALiteral}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_MergeDryRunIsSilentAndTouchesNothing}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_VerdictsAreNotReusedForAnotherRuleSet}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ImportVerificationIsTimeBounded}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_MergePreviewAgreesWithApplyAndWarningsAreBounded}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_UnsupportedVersionIsReportedBeforeRuleValidation}
+      - {file: "policy_ruleset_ingress_unverifiable_test.go", name: TestRulesetIngress_ExportOfAnAPIBuiltPolicyReimports}
+    validation: integration
+    compatibility: "A replace-mode import that used to succeed can be refused, including a backup this system exported while its policy held a rule from a policy file, a snapshot, a restored version or an older release that the API refuses: an inert sourceIP, duplicate names or priorities, an unnamed rule, a missing, case-folded or unknown action, a Redirect with an empty, non-http or private target, a schedule timezone the node cannot load. The 400 names the rule and the reason. A backup of a valid policy restores on a node without DNS, with warnings; on a node without a timezone database its scheduled rules are refused until tzdata is installed. Stored policy, rollback and cluster sync are unaffected. Evaluation of an empty action is unchanged (POL-901)."
+
   - id: AUTH-001
     area: authn-authz
     status: enforced
