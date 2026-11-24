@@ -75,11 +75,12 @@ type Status struct {
 	LastOperationState        string                 `json:"last_operation_state,omitempty"`
 	Extra                     map[string]interface{} `json:"extra,omitempty"`
 
-	// InterruptedOperations lists the image-changing operations a previous
-	// agent process left unfinished, read from the crash-recovery journal on
-	// every request — so the list outlives the in-memory operation record and
-	// any number of restarts, and empties only when a later image change
-	// succeeds. Absent when there are none.
+	// InterruptedOperations lists the journaled operations (upgrades, rollbacks,
+	// restores) a previous agent process left unfinished, read from the
+	// crash-recovery journal on every request — so the list outlives the
+	// in-memory operation record and any number of restarts. An entry leaves it
+	// only when a later image change succeeds or, for an interrupted restore,
+	// when a later restore does (journal_retire.go). Absent when there are none.
 	InterruptedOperations []InterruptedOperation `json:"interrupted_operations,omitempty"`
 	// InterruptedOperationsError is set when the journal could not be read for
 	// this request. The list is then unknown, not empty.

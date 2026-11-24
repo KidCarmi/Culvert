@@ -183,6 +183,9 @@ func decodeJSONBody(r *http.Request, dst interface{}) error {
 // interrupted, and image vs data need different recovery (image is
 // Docker-reconcilable; data must NOT be auto-reconciled). "" for upgrades.apply.
 //
+// restore.commit and a data rollback additionally carry RestoreStage, advanced
+// by their stages (restore_journal.go).
+//
 // For a standalone image rollback the target is FIXED and fully validated at
 // admission (strict repo@sha256 shape + image_allowlist in rollbackImage), and
 // no later stage folds it in (journal_phases is apply-specific) — so the
@@ -193,9 +196,20 @@ func decodeJSONBody(r *http.Request, dst interface{}) error {
 func admissionJournalRecord(opID, kind, actor string, params map[string]interface{}) journal.Record {
 	now := time.Now().UTC()
 	mode, _ := params["mode"].(string) //nolint:errcheck // absent/typed-nil → ""
+	if kind == ops.KindRestoreCommit {
+		// restore.commit's `mode` parameter is the RESTORE mode (full /
+		// trust-root-only / state-only), a different vocabulary from the
+		// journal's rollback mode ("" | image | data). It is not persisted.
+		mode = ""
+	}
 	rec := journal.Record{
 		OpID: opID, Kind: kind, Mode: mode, Phase: journal.PhaseAdmitted,
 		Actor: actor, StartedAt: now, UpdatedAt: now,
+	}
+	if isRestoreRecord(kind, mode) {
+		// A restore-class record says how far the restore got in RestoreStage;
+		// its Phase stays admitted (restore_journal.go).
+		rec.RestoreStage = journal.RestoreStageAdmitted
 	}
 	if kind == ops.KindRollbackCreate && mode == "image" {
 		if ref, _ := params["image_ref"].(string); ref != "" { //nolint:errcheck // absent/typed-nil → ""
@@ -444,6 +458,13 @@ type startCfg struct {
 	// gate, so journal records left by earlier, interrupted operations describe
 	// a state that no longer exists and are retired (journal_retire.go).
 	retiresInterrupted func() bool
+	// retiresRestoreRecords, when set, is consulted once the op has SUCCEEDED.
+	// If it returns true the op committed a restore and the proxy passed the
+	// health check on the restored data, so the journal records of earlier,
+	// interrupted RESTORE-class operations describe a state that no longer
+	// exists and are retired. It never retires an upgrade or image-rollback
+	// record: a restore does not re-pin the image tag (journal_retire.go).
+	retiresRestoreRecords func() bool
 }
 
 type startOpt func(*startCfg)
@@ -455,6 +476,13 @@ func withResultFn(fn ops.ResultFn) startOpt { return func(c *startCfg) { c.resul
 // health-gated image state. establishes is evaluated after the stages ran.
 func withRetiresInterrupted(establishes func() bool) startOpt {
 	return func(c *startCfg) { c.retiresInterrupted = establishes }
+}
+
+// withRetiresRestoreRecords marks the op as a restore whose success retires the
+// records of earlier interrupted restores (and only those). established is
+// evaluated after the stages ran.
+func withRetiresRestoreRecords(established func() bool) startOpt {
+	return func(c *startCfg) { c.retiresRestoreRecords = established }
 }
 
 // withOpIDHook delivers the admitted op_id to the caller before stages run.
@@ -761,6 +789,16 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 	allowCounter := req.AllowCounterRollback
 	passRef := req.PassphraseRef
 
+	kind := ops.KindRestoreDryRun
+	var (
+		flow      *restoreFlow // nil for a dry-run: it changes nothing and is not journaled
+		startOpts []startOpt
+	)
+	if commit {
+		kind = ops.KindRestoreCommit
+		flow = newRestoreFlow(kind, "", peer.String())
+		startOpts = restoreStartOpts(flow)
+	}
 	buildStages := func() ([]ops.FlowStage, *opError) {
 		// passphrase_ref is OPTIONAL for restore (cli detects
 		// encryption via magic bytes). If a ref was supplied but
@@ -770,14 +808,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 		if rerr != nil {
 			return nil, &opError{Status: http.StatusBadRequest, Body: map[string]string{"error": rerr.Error()}}
 		}
-		return s.buildRestoreStages(commit, filename, mode, acceptDP, allowCounter, resolved), nil
+		return s.buildRestoreStages(commit, filename, mode, acceptDP, allowCounter, resolved, flow), nil
 	}
 
-	kind := ops.KindRestoreDryRun
-	if commit {
-		kind = ops.KindRestoreCommit
-	}
-	op, deduped, herr := s.startAsyncOp(r, peer, kind, req.IdempotencyKey, params, buildStages)
+	op, deduped, herr := s.startAsyncOp(r, peer, kind, req.IdempotencyKey, params, buildStages, startOpts...)
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)
 		return
@@ -791,8 +825,13 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request, peer auth
 // --confirm → up [best-effort] → health_check [best-effort]). Extracted from handleRestore so the
 // late-binding closure stays compact.
 //
+// flow is the operation's journal identity (restore_journal.go); nil runs the
+// same stages without recording progress. The commit flow records its stage
+// write-ahead: a journal that cannot be written stops the flow BEFORE
+// `compose down` and before the commit command.
+//
 //nolint:funlen // single-pass orchestration sequence — splitting hides the down→commit→up→health ordering
-func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.RestoreMode, acceptDP, allowCounter bool, resolved string) []ops.FlowStage {
+func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.RestoreMode, acceptDP, allowCounter bool, resolved string, flow *restoreFlow) []ops.FlowStage {
 	if !commit {
 		return []ops.FlowStage{
 			{
@@ -825,6 +864,7 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 			Name:          "preflight_restore",
 			FailureReason: ops.ReasonCLIError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
+				s.advanceRestoreStageBestEffort(flow, journal.RestoreStagePreflight)
 				res, rerr := s.opts.Runner.ComposeRestoreDryRun(ctx, filename, mode, acceptDP, allowCounter, resolved)
 				if res == nil {
 					return nil, nil, rerr
@@ -842,23 +882,16 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 			Name:          "stop_stack",
 			FailureReason: ops.ReasonCommandError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				stackTouched = true
-				res, rerr := s.composeDown(ctx)
-				if res == nil {
-					return nil, nil, rerr
-				}
-				return res.Stdout, res.Stderr, rerr
+				return s.restoreStopStack(ctx, flow, &stackTouched)
 			},
 		},
 		{
 			Name:          "run_cli_restore_commit",
 			FailureReason: ops.ReasonCLIError,
 			Run: func(ctx context.Context) ([]byte, []byte, error) {
-				res, rerr := s.opts.Runner.ComposeRestoreCommit(ctx, filename, mode, acceptDP, allowCounter, resolved)
-				if res == nil {
-					return nil, nil, rerr
-				}
-				return res.Stdout, res.Stderr, rerr
+				return s.restoreRunCommit(ctx, flow, func(ctx context.Context) (*runner.Result, error) {
+					return s.opts.Runner.ComposeRestoreCommit(ctx, filename, mode, acceptDP, allowCounter, resolved)
+				})
 			},
 		},
 		{
@@ -873,11 +906,7 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 				if !stackTouched {
 					return []byte(notStopped), nil, nil
 				}
-				res, rerr := s.composeUp(ctx)
-				if res == nil {
-					return nil, nil, rerr
-				}
-				return res.Stdout, res.Stderr, rerr
+				return s.restoreStartStack(ctx, flow)
 			},
 		},
 		{
@@ -906,9 +935,25 @@ func (s *Server) buildRestoreStages(commit bool, filename string, mode runner.Re
 				if hr.Failed() {
 					return []byte(summary), nil, errors.New(hr.ReadyDetail)
 				}
+				flow.noteHealthPassed()
 				return []byte(summary), nil, nil
 			},
 		},
+	}
+}
+
+// restoreStartOpts are the startAsyncOp options every restore-class operation
+// takes: the op id reaches the flow before any stage runs, and a success that
+// committed and passed the health check retires earlier interrupted restores.
+func restoreStartOpts(flow *restoreFlow) []startOpt {
+	return []startOpt{
+		withOpIDHook(func(id string) { flow.opID = id }),
+		withRetiresRestoreRecords(flow.established),
+		withResultFn(func(ops.State, ops.FailureReason) map[string]interface{} {
+			// Whether the data directory was replaced, independent of how the
+			// operation ended: a failed operation can have committed.
+			return map[string]interface{}{"restore_committed": flow.committed}
+		}),
 	}
 }
 

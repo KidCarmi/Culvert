@@ -304,10 +304,10 @@ func TestDataRollback_IdempotentReplay(t *testing.T) {
 func TestDataRollback_WrapsRestoreStages_NoNewSurface(t *testing.T) {
 	srv := &Server{}
 	restoreNames := map[string]bool{}
-	for _, st := range srv.buildRestoreStages(true, "x.enc", "full", false, false, "") {
+	for _, st := range srv.buildRestoreStages(true, "x.enc", "full", false, false, "", nil) {
 		restoreNames[st.Name] = true
 	}
-	data := srv.buildDataRollbackStages("x.enc", "full", false, false, "", &dataRollbackAccumulator{})
+	data := srv.buildDataRollbackStages("x.enc", "full", false, false, "", &dataRollbackAccumulator{}, nil)
 	for _, st := range data {
 		if st.Name == "report" {
 			continue // the only addition

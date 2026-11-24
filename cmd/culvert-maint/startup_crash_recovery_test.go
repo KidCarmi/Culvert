@@ -90,10 +90,26 @@ compose)
       cp "$S/pinned" "$S/running.tmp" && mv "$S/running.tmp" "$S/running"
     fi
     blk up_after ;;
+  down)
+    # The restore flow's stop. Inert for every test that never restores.
+    blk down_before
+    rm -f "$S/running"
+    blk down_after ;;
   --profile)
-    # compose --profile cli run … : the backup/restore/cleanup CLI container.
-    # Only a stop point; the model keeps no state for it.
-    blk cli_run ;;
+    # The cli service: a restore dry-run (the preflight) or a restore commit.
+    # The commit replaces the model's data directory content marker.
+    case " $* " in
+    *" --confirm "*)
+      blk commit_before
+      echo restored > "$S/data.tmp" && mv "$S/data.tmp" "$S/data"
+      blk commit_after ;;
+    *" --restore "*)
+      blk dryrun ;;
+    *)
+      # Any other cli run (backup, cleanup): only a stop point; the model
+      # keeps no state for it.
+      blk cli_run ;;
+    esac ;;
   esac ;;
 inspect)
   printf '"sha256:%s"\n' "$(cat "$S/running")" ;;

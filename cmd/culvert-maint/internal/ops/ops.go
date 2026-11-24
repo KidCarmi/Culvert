@@ -641,12 +641,21 @@ func (m *Manager) Holder() *Op {
 }
 
 // journaledKinds are the state-changing kinds whose in-flight state is recorded
-// in the crash-recovery journal (RISK-022): the destructive day-2 Docker
-// operations whose interruption needs post-restart reconciliation. Other
-// state-changing kinds (backup/restore/cleanup) have their own recovery paths.
+// in the crash-recovery journal (RISK-022): the operations that stop or recreate
+// the proxy, so that one cut short by an agent death is reported after the
+// restart instead of vanishing. upgrades.apply and rollbacks.create change the
+// image; restore.commit (and rollbacks.create mode=data, which runs the same
+// stages) stops the stack and replaces the data directory. Other state-changing
+// kinds (backup, cleanup) neither stop the proxy nor swap its data.
+//
+// Being journaled means "written before it runs, reported if interrupted". It
+// does not mean "reconciled at startup": what the opt-in startup reconcile may
+// act on is decided per kind in server/reconcile_decision_v2.go, and a
+// restore-class record is never acted on.
 var journaledKinds = map[string]struct{}{
 	KindUpgradeApply:   {},
 	KindRollbackCreate: {},
+	KindRestoreCommit:  {},
 }
 
 // IsJournaled reports whether kind's in-flight state is recorded in the

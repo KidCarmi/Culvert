@@ -100,15 +100,11 @@ func (s *Server) rollbackData(w http.ResponseWriter, r *http.Request, peer auth.
 	allowCounter := req.AllowCounterRollback
 	passRef := req.PassphraseRef
 	acc := &dataRollbackAccumulator{}
+	flow := newRestoreFlow(ops.KindRollbackCreate, "data", peer.String())
 
-	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindRollbackCreate, req.IdempotencyKey, params,
-		func() ([]ops.FlowStage, *opError) {
-			resolved, rerr := readPassphraseFromEnv(passRef)
-			if rerr != nil {
-				return nil, &opError{Status: http.StatusBadRequest, Body: map[string]string{"error": rerr.Error()}}
-			}
-			return s.buildDataRollbackStages(filename, mode, acceptDP, allowCounter, resolved, acc), nil
-		},
+	// restoreStartOpts first: the result computer below replaces its own, and
+	// reports the same restore_committed from the same flag.
+	startOpts := append(restoreStartOpts(flow),
 		withResultFn(func(state ops.State, _ ops.FailureReason) map[string]interface{} {
 			return map[string]interface{}{
 				"mode":                     "data",
@@ -116,11 +112,20 @@ func (s *Server) rollbackData(w http.ResponseWriter, r *http.Request, peer auth.
 				"restore_mode":             modeStr,
 				"dp_reenrollment_accepted": acceptDP,
 				"counter_rollback_allowed": allowCounter,
-				"restore_committed":        acc.committed,
+				"restore_committed":        flow.committed,
 				"succeeded":                state == ops.StateSucceeded,
 				"health":                   acc.healthSummary,
 			}
-		}),
+		}))
+	op, deduped, herr := s.startAsyncOp(r, peer, ops.KindRollbackCreate, req.IdempotencyKey, params,
+		func() ([]ops.FlowStage, *opError) {
+			resolved, rerr := readPassphraseFromEnv(passRef)
+			if rerr != nil {
+				return nil, &opError{Status: http.StatusBadRequest, Body: map[string]string{"error": rerr.Error()}}
+			}
+			return s.buildDataRollbackStages(filename, mode, acceptDP, allowCounter, resolved, acc, flow), nil
+		},
+		startOpts...,
 	)
 	if herr != nil {
 		writeJSON(w, herr.Status, herr.Body)
@@ -160,17 +165,21 @@ func (s *Server) preflightBackupExists(ctx context.Context, filename string) *op
 // decorated to OBSERVE their outcome (not change it) for the result, plus
 // an appended report summary. This is the wrap-not-fork boundary: the
 // restore logic (ComposeDown/ComposeRestoreCommit/ComposeUp/health) is
-// reused exactly; only success/output is recorded.
-func (s *Server) buildDataRollbackStages(filename string, mode runner.RestoreMode, acceptDP, allowCounter bool, resolved string, acc *dataRollbackAccumulator) []ops.FlowStage {
-	stages := s.buildRestoreStages(true, filename, mode, acceptDP, allowCounter, resolved)
+// reused exactly; only success/output is recorded. flow is the journal identity
+// the shared stages record their progress under (restore_journal.go).
+func (s *Server) buildDataRollbackStages(filename string, mode runner.RestoreMode, acceptDP, allowCounter bool, resolved string, acc *dataRollbackAccumulator, flow *restoreFlow) []ops.FlowStage {
+	stages := s.buildRestoreStages(true, filename, mode, acceptDP, allowCounter, resolved, flow)
 	for i := range stages {
 		switch stages[i].Name {
 		case "run_cli_restore_commit":
 			inner := stages[i].Run
 			stages[i].Run = func(ctx context.Context) ([]byte, []byte, error) {
 				out, errout, err := inner(ctx)
-				if err == nil {
-					acc.committed = true // the /data swap happened
+				// The swap happened when the command returned success — also
+				// when the stage then failed because that could not be recorded
+				// in the journal (restore_journal.go).
+				if err == nil || (flow != nil && flow.committed) {
+					acc.committed = true
 				}
 				return out, errout, err
 			}

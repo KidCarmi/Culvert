@@ -40,7 +40,8 @@ func (r *crashRig) backupRuns() int {
 	return n
 }
 
-func (r *crashRig) allCalls() string { return r.read("calls.log") }
+// callLog is the model's raw docker call log, for byte-for-byte comparison.
+func (r *crashRig) callLog() string { return r.read("calls.log") }
 
 func (r *crashRig) waitBlocked() {
 	r.t.Helper()
@@ -51,7 +52,7 @@ func (r *crashRig) waitBlocked() {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	r.t.Fatalf("the op never reached its stop point; agent output:\n%s\ncalls:\n%s", r.logs.String(), r.allCalls())
+	r.t.Fatalf("the op never reached its stop point; agent output:\n%s\ncalls:\n%s", r.logs.String(), r.callLog())
 }
 
 // TestIdempotencyRestart_KilledMidBackupIsUnknownAndNotRerun: SIGKILL while
@@ -77,9 +78,9 @@ func TestIdempotencyRestart_KilledMidBackupIsUnknownAndNotRerun(t *testing.T) {
 	}
 	r.kill() // the crash
 	if n := r.backupRuns(); n != 1 {
-		t.Fatalf("the model saw %d backup runs before the restart, want 1:\n%s", n, r.allCalls())
+		t.Fatalf("the model saw %d backup runs before the restart, want 1:\n%s", n, r.callLog())
 	}
-	callsBefore := r.allCalls()
+	callsBefore := r.callLog()
 
 	r.start() // the restart
 	var retry idemAck
@@ -104,7 +105,7 @@ func TestIdempotencyRestart_KilledMidBackupIsUnknownAndNotRerun(t *testing.T) {
 	if code := r.post("/v1/backups", req, &again); code != http.StatusOK || again.OpID != first.OpID || again.State != "failed" {
 		t.Fatalf("second retry: HTTP %d %+v", code, again)
 	}
-	if got := r.allCalls(); got != callsBefore {
+	if got := r.callLog(); got != callsBefore {
 		t.Fatalf("the restarted agent issued docker commands for a replay.\nbefore:\n%s\nafter:\n%s", callsBefore, got)
 	}
 
@@ -146,7 +147,7 @@ func TestIdempotencyRestart_CompletedBackupIsReplayed(t *testing.T) {
 		t.Fatalf("backup runs: %d, want 1", n)
 	}
 	r.kill()
-	callsBefore := r.allCalls()
+	callsBefore := r.callLog()
 
 	r.start()
 	var retry idemAck
@@ -172,7 +173,7 @@ func TestIdempotencyRestart_CompletedBackupIsReplayed(t *testing.T) {
 	if refused.Error != "idempotency_key_reused" || refused.OpID != first.OpID {
 		t.Fatalf("refusal body: %+v", refused)
 	}
-	if got := r.allCalls(); got != callsBefore {
+	if got := r.callLog(); got != callsBefore {
 		t.Fatalf("the restarted agent issued docker commands for a replay or a refusal.\nbefore:\n%s\nafter:\n%s", callsBefore, got)
 	}
 }

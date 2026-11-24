@@ -313,12 +313,15 @@ func TestManager_MarkAllInterruptedCarriesJournalFacts(t *testing.T) {
 }
 
 func TestIsJournaled(t *testing.T) {
-	for _, k := range []string{KindUpgradeApply, KindRollbackCreate} {
+	// restore.commit is journaled since the ADR-0061 addendum of 2026-11-24: it
+	// stops the stack and replaces the data directory, and an agent death in
+	// between used to leave no trace.
+	for _, k := range []string{KindUpgradeApply, KindRollbackCreate, KindRestoreCommit} {
 		if !IsJournaled(k) {
 			t.Errorf("%s must be journaled", k)
 		}
 	}
-	for _, k := range []string{KindBackupCreate, KindRestoreCommit, KindCleanupCommit, KindUpgradeCheck, KindBackupList} {
+	for _, k := range []string{KindBackupCreate, KindRestoreDryRun, KindCleanupCommit, KindCleanupDryRun, KindUpgradeCheck, KindBackupList, KindReconcileStartup} {
 		if IsJournaled(k) {
 			t.Errorf("%s must NOT be journaled", k)
 		}
