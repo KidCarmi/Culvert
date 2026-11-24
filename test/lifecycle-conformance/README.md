@@ -316,6 +316,14 @@ change, and `/health` answers 200 in both. (Go's `Shutdown` closes such a
 connection at once when it is more than 5 s old, which is why the probe keeps
 the request fresh and rejects a trial whose shutdown was not held.)
 
+The same measurement on an image under Docker is
+`orphan-probe/image-sigterm-timeline.py <image> <not-ready|observe>`: it runs
+the image as the compose file does, holds two admin-UI requests, stops the
+container and fails if `/ready` answers 200 after the signal (`observe` only
+reports, for an image without the change). The workflow
+`.github/workflows/lifecycle-orphan-probe.yml` runs it on the release images it
+builds, next to the probe.
+
 Two things these runs show that are not safety failures and are not fixed here:
 - After a crash between Compose's stop and delete, the first
   `docker compose up -d` only cleans up. The rollback fails its health gate,
