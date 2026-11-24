@@ -89,6 +89,10 @@ compose)
       cp "$S/pinned" "$S/running.tmp" && mv "$S/running.tmp" "$S/running"
     fi
     blk up_after ;;
+  --profile)
+    # compose --profile cli run … : the backup/restore/cleanup CLI container.
+    # Only a stop point; the model keeps no state for it.
+    blk cli_run ;;
   esac ;;
 inspect)
   printf '"sha256:%s"\n' "$(cat "$S/running")" ;;

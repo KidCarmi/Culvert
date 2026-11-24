@@ -28,6 +28,7 @@ import (
 	"culvert-maint/internal/auth"
 	"culvert-maint/internal/config"
 	"culvert-maint/internal/health"
+	"culvert-maint/internal/idem"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
@@ -144,6 +145,7 @@ func run(configPath string) error {
 		idempTTL = cfg.OperationTimeout
 	}
 	mgr := ops.NewManagerWithTTL(nil, idempTTL)
+	initIdempotency(cfg.StateDir, mgr, idempTTL)
 
 	jnl, err := initJournal(cfg.StateDir, mgr, al, cfg.ProxyRepo)
 	if err != nil {
@@ -180,6 +182,26 @@ func run(configPath string) error {
 	}
 	log.Printf("culvert-maint: shutdown")
 	return nil
+}
+
+// initIdempotency opens the durable idempotency store (internal/idem) under
+// state_dir and hands it to the manager, so a keyed request that already
+// finished is answered from its record after a restart instead of running
+// again, and one that was interrupted is reported as outcome unknown.
+//
+// Unlike the journal this does NOT stop the agent when it fails. A store that
+// cannot be opened is replaced by one that refuses every keyed admission
+// (503 idempotency_store_unavailable): the agent still serves status, reads
+// and un-keyed requests, and never runs a keyed request it cannot record.
+// Opening runs no docker command.
+func initIdempotency(stateDir string, mgr *ops.Manager, ttl time.Duration) {
+	store, err := idem.Open(stateDir, idem.Options{TTL: ttl, Logf: log.Printf})
+	if err != nil {
+		log.Printf("culvert-maint: WARN: idempotency store could not be opened (%v) — "+
+			"requests that carry an idempotency_key are refused until this is fixed; other requests are served", err)
+		store = idem.Unavailable(err)
+	}
+	mgr.SetIdempotencyStore(store)
 }
 
 // initJournal opens the crash-recovery journal (RISK-022) and reports every op

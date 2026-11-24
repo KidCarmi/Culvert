@@ -73,6 +73,11 @@ type d16bTestRig struct {
 	// TestRestoreCommit_HealthFailureSurfacedAsFinalReason test).
 	healthFail atomic.Bool
 
+	// execGate, when set, makes every faked command block in its wait hook
+	// until the channel is closed — an op that is mid-stage for as long as a
+	// test needs it to be.
+	execGate atomic.Pointer[chan struct{}]
+
 	// failPerArgv lets tests configure which argv-substrings should
 	// fail. mu-guarded; tests modify, the fake-exec wait reads.
 	mu          sync.Mutex
@@ -101,11 +106,19 @@ func (r *d16bTestRig) shouldFail(argv []string) bool {
 	return false
 }
 
-//nolint:funlen // test rig setup; splitting hides the wiring sequence
 func startD16bRig(t *testing.T) *d16bTestRig {
 	t.Helper()
-	tmp := t.TempDir()
-	sockPath := filepath.Join(tmp, "agent.sock")
+	return startD16bRigIn(t, t.TempDir(), "agent.sock", ops.NewManager(nil))
+}
+
+// startD16bRigIn is startD16bRig over a caller-chosen state directory, socket
+// name and Manager, so a test can stand up a second agent on the state an
+// earlier one left behind (a restart).
+//
+//nolint:funlen // test rig setup; splitting hides the wiring sequence
+func startD16bRigIn(t *testing.T, tmp, sockName string, mgr *ops.Manager) *d16bTestRig {
+	t.Helper()
+	sockPath := filepath.Join(tmp, sockName)
 	auditPath := filepath.Join(tmp, "audit.jsonl")
 
 	al, err := audit.New(auditPath)
@@ -169,6 +182,9 @@ func startD16bRig(t *testing.T) *d16bTestRig {
 			return nil
 		},
 		func(cmd *exec.Cmd) error {
+			if gate := rig.execGate.Load(); gate != nil {
+				<-*gate // hold the command "running" until the test releases it
+			}
 			if rig.shouldFail(cmd.Args) {
 				return errors.New("simulated CLI failure")
 			}
@@ -176,7 +192,6 @@ func startD16bRig(t *testing.T) *d16bTestRig {
 		},
 	)
 
-	mgr := ops.NewManager(nil)
 	stp := &fakeStatus{}
 
 	srv, err := New(Options{

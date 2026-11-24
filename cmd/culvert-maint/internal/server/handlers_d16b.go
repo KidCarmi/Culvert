@@ -238,22 +238,17 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 
 	op, deduped, err := s.opts.Ops.BeginIdempotent(kind, peer.String(), idempotencyKey, paramsForAudit)
 	if err != nil {
-		if ops.IsConflict(err) {
-			var conf *ops.Conflict
-			errors.As(err, &conf)
-			return nil, false, &opError{Status: http.StatusConflict, Body: map[string]interface{}{
-				"error":     "concurrency_conflict",
-				"holder_op": conf.Holder,
-			}}
-		}
-		return nil, false, &opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": err.Error()}}
+		return nil, false, admissionError(err)
 	}
 	if deduped {
 		// Duplicate submission — return the prior op snapshot, NO
 		// stage build, NO goroutine spawn. This is the contract:
 		// a retry with the same idempotency_key returns the
 		// original op_id even if the late-bound resources (env
-		// vars, files) are no longer present.
+		// vars, files) are no longer present. After a restart the
+		// snapshot comes from the durable idempotency record
+		// (ops/idempotency.go): a finished op's recorded result, or
+		// failed(agent_restart_interrupted) for one with no outcome.
 		return op, true, nil
 	}
 	// Newly admitted op — deliver the op_id to the caller (so late-bound
@@ -310,6 +305,50 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 			s.resultFnRetiringInterrupted(op.ID, peer.String(), &cfg))
 	})
 	return op, false, nil
+}
+
+// admissionError maps a BeginIdempotent refusal to its HTTP answer. Nothing was
+// admitted on any of these paths.
+//
+//   - 409 concurrency_conflict: another state-changing op holds the lock.
+//   - 422 idempotency_key_reused: the key belongs to an operation of this kind
+//     that was submitted with a different payload. Not retryable as sent; 409 is
+//     kept for "busy, retry later" so a client's retry loop cannot spin on it.
+//   - 409 idempotency_record_unreadable: this key's durable record cannot be
+//     read, so whether the request already ran is unknown.
+//   - 503 idempotency_store_unavailable: the durable store cannot be read or
+//     written, so a keyed request cannot be admitted write-ahead. Un-keyed
+//     requests are still served.
+func admissionError(err error) *opError {
+	var conf *ops.Conflict
+	var mismatch *ops.IdempotencyMismatch
+	var unavailable *ops.IdempotencyUnavailable
+	switch {
+	case errors.As(err, &conf):
+		return &opError{Status: http.StatusConflict, Body: map[string]interface{}{
+			"error":     "concurrency_conflict",
+			"holder_op": conf.Holder,
+		}}
+	case errors.As(err, &mismatch):
+		return &opError{Status: http.StatusUnprocessableEntity, Body: map[string]interface{}{
+			"error":  "idempotency_key_reused",
+			"op_id":  mismatch.OpID,
+			"kind":   mismatch.Kind,
+			"detail": "this idempotency_key was already used for the named operation with a different payload; nothing was run. Use a new idempotency_key for a different request.",
+		}}
+	case errors.As(err, &unavailable) && unavailable.Unreadable:
+		return &opError{Status: http.StatusConflict, Body: map[string]interface{}{
+			"error":   "idempotency_record_unreadable",
+			"outcome": "unknown",
+			"detail":  "the stored record of this idempotency_key cannot be read, so whether the request already ran is unknown; nothing was run. Verify the state, then use a new idempotency_key to proceed.",
+		}}
+	case errors.As(err, &unavailable):
+		return &opError{Status: http.StatusServiceUnavailable, Body: map[string]interface{}{
+			"error":  "idempotency_store_unavailable",
+			"detail": "the request carries an idempotency_key but its admission could not be recorded durably; nothing was run.",
+		}}
+	}
+	return &opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": err.Error()}}
 }
 
 // recordAdmissionFailure marks the admitted op failed AND emits a
@@ -428,12 +467,20 @@ func writeOpResponse(w http.ResponseWriter, op *ops.Op, deduped bool) {
 	if deduped {
 		status = http.StatusOK
 	}
-	writeJSON(w, status, map[string]interface{}{
+	body := map[string]interface{}{
 		"op_id":   op.ID,
 		"kind":    op.Kind,
 		"state":   op.State,
 		"deduped": deduped,
-	})
+	}
+	// A retry that lands on an op an agent restart interrupted is told so in
+	// the acknowledgement itself: the op was not run again and what it did
+	// before the stop is not known.
+	if deduped && op.FailureReason == string(ops.ReasonAgentRestartInterrupted) {
+		body["failure_reason"] = op.FailureReason
+		body["outcome"] = "unknown"
+	}
+	writeJSON(w, status, body)
 }
 
 // resolveBackupPath validates `path` per the D1.6b restore contract:

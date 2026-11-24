@@ -216,6 +216,45 @@ ignore an operation it cannot classify. Move that file aside, start the agent,
 and check `culvert/proxy:pinned` against the running container before the next
 upgrade.
 
+## Retrying a request after the agent restarts (`idempotency_key`)
+
+A request that carries an `idempotency_key` is recorded under
+`<state_dir>/idempotency/` before the agent starts it, and its outcome is
+recorded when it finishes. The record is scoped to the calling peer and the
+operation kind, and kept for the idempotency window (24h, or
+`operation_timeout` if that is longer). Sending the same request again with the
+same key, before or after an agent restart:
+
+| The first request … | The retry gets |
+| --- | --- |
+| is still running (same agent process) | `200`, the same `op_id`, `deduped: true` |
+| finished (succeeded or failed) | `200`, the same `op_id` and its recorded state. `GET /v1/operations/{op_id}` returns the recorded result. Nothing is run. |
+| was admitted, then the agent stopped before recording an outcome | `200`, the same `op_id`, `state: failed`, `failure_reason: agent_restart_interrupted`, `outcome: unknown`. **Nothing is run again.** |
+| used the same key for the same kind with a different body | `422 idempotency_key_reused`, naming the original `op_id`. Nothing is run. |
+
+`outcome: unknown` means what it says: the operation may have run partly, fully
+or not at all. Check the state it was meant to change (for a backup, whether the
+archive exists; for a restore, the stack and its data), then submit the request
+with a **new** `idempotency_key` to run it. For an interrupted upgrade or
+rollback the section above still applies, and the retry returns that same
+interrupted operation.
+
+This is not exactly-once execution. An agent that dies after an operation's
+last step and before its outcome is written reports the operation as unknown
+even though it completed. It is never reported as succeeded, and never run
+again under the same key.
+
+Limits:
+
+- A request **without** an `idempotency_key` is never recorded or deduplicated;
+  after a restart `GET /v1/operations/{op_id}` for it returns 404, as before.
+- At most 1024 records are kept; beyond that the oldest finished one is dropped
+  early, and a retry of its key is then treated as a new request.
+- If the record directory cannot be read or written, requests with a key are
+  refused (`503 idempotency_store_unavailable`) and run nothing; requests
+  without a key are served. One unreadable record refuses only its own key
+  (`409 idempotency_record_unreadable`) until the window passes.
+
 ## What this does **not** do
 
 - It does **not** mount `/var/run/docker.sock` into any container.
