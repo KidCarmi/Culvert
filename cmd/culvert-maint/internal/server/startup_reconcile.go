@@ -350,6 +350,13 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 		return ReconcileRecord{OpID: recID, Kind: "unknown", Decision: actV2RecoveryRequired.String(),
 			Reason: "journal_unreadable", Outcome: OutcomeRecoveryRequired}
 	}
+	if rec.FromNewerAgent() {
+		// ADR-0062: a record a newer agent wrote may carry facts this build
+		// cannot read (and the journal refuses to rewrite or remove it). It is
+		// reported and never acted on, before any Docker read.
+		return ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind), Decision: actV2RecoveryRequired.String(),
+			Reason: "record_from_newer_agent", Outcome: OutcomeRecoveryRequired}
+	}
 	c := &reconcileCase{opID: opID, rec: rec, in: s.reconcileInputsFor(rec)}
 	c.out = ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind)}
 	// Docker was tested and does not answer: there is nothing to observe, so
