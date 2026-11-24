@@ -396,7 +396,7 @@ for _ in $(seq 1 20); do [ -S "$W/p/dk.sock" ] && break; sleep 0.2; done
 ALL=-1,0,1,2,3,4,5,6,7,8,9,10,11,12; MID=7,8,9,10; SLOW=12   # SLOW: seconds the proxy drains; > RestartSec
 [ "$QUICK" = 1 ] && { ALL=-1,0,9; MID=9; }
 # ORPHAN_PROBE_POINTS / ORPHAN_PROBE_MID: run a chosen subset of kill points (not the full matrix).
-ALL="${ORPHAN_PROBE_POINTS:-$ALL}"; MID="${ORPHAN_PROBE_MID:-$MID}"
+ALL="${ORPHAN_PROBE_POINTS:-$ALL}"; MID="${ORPHAN_PROBE_MID-$MID}"
 rc=0
 worse() { [ "$1" -gt "$rc" ] && rc=$1; return 0; }
 n() { echo "$1" | tr ',' '\n' | grep -c .; }   # how many kill points in a list
