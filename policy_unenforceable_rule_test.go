@@ -339,6 +339,9 @@ func assertImportRefusedWhole(t *testing.T, host string) {
 // once; Diagnostics counts every one.
 func TestUnenforceableRule_RepeatedRefusalIsLoggedOnceAndCountedEveryTime(t *testing.T) {
 	sink := captureLoggerForTest(t)
+	// logSnapshotRejection records on the GLOBAL store; put its record back.
+	prevGlobal := policyStore.rulesetRefused.Load()
+	t.Cleanup(func() { policyStore.rulesetRefused.Store(prevGlobal) })
 	ps := &PolicyStore{}
 	bad := scopedBlockRuleset("a.example.com")
 	for i := 0; i < 5; i++ {
