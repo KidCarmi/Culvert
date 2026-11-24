@@ -146,10 +146,10 @@ type reconcileInputsV2 struct {
 
 	Probe probeState
 
-	// UpInterrupted: this agent process is the FIRST to find, at its start, a
-	// readable mutation marker that names nothing but `compose up` commands
-	// run for THIS record's operation (journal.MutationAtOpen.FreshUpOf), and
-	// has not cleared it since (Server.upInterruptedFor). It is the evidence
+	// UpInterrupted: the previous agent process died, minutes ago at most,
+	// inside a `compose up` run for THIS record's operation: this process is
+	// the first to find the marker of it (journal.MutationAtOpen.FreshUpOf)
+	// and has not cleared it since (Server.upInterruptedFor). It is the evidence
 	// that a proxy that is down is down because this operation's recreate was
 	// cut, and not because an operator, or another operation, took the stack
 	// down. Read from disk by the caller; not a Docker fact.

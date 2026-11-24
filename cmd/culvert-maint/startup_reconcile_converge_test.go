@@ -16,7 +16,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -484,6 +486,74 @@ func TestConvergeRecovery_AMarkerIsEvidenceForOneStartOnly(t *testing.T) {
 	if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
 		t.Fatal(err) // the operator took the stack down
 	}
+	r.clearCalls()
+	r.start()
+	assertConverge(t, r, opID, convergeCase{nil, false, "stack_down", imgB, "", true})
+}
+
+// TestConvergeRecovery_AFailedRestoreIsNotACrash: the restore's own `compose
+// up` FAILS and the agent stays up (the docker CLI was killed; no agent
+// crash). The operator then starts the stack by hand, and later takes it down
+// on purpose. The agent restarts. Nothing may be started: the agent did not
+// die in that `up`, and the stack was up in between.
+func TestConvergeRecovery_AFailedRestoreIsNotACrash(t *testing.T) {
+	for name, handImage := range map[string]string{"operator ran the prior image": imgA, "operator ran the target image": imgB} {
+		t.Run(name, func(t *testing.T) {
+			r := newCrashRig(t)
+			r.pastFirstUse("3s")
+			r.start()
+			opID := r.crashAt("up_before:1")
+			if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
+				t.Fatal(err)
+			}
+			r.converge("")
+			r.put("block_on", "up_before:2") // the restore's own `up`
+			r.clearCalls()
+			r.start()
+			deadline := time.Now().Add(60 * time.Second)
+			for {
+				if pid, err := strconv.Atoi(strings.TrimSpace(r.read("blocked"))); err == nil && pid > 1 {
+					_ = os.Remove(filepath.Join(r.model, "block_on"))
+					_ = syscall.Kill(pid, syscall.SIGKILL) // the CLI dies; the agent lives
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("the restore never reached its `up`; agent output:\n%s", r.logs.String())
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if v := r.waitReconcile(); len(v.Reconcile.Records) != 1 || v.Reconcile.Records[0].Reason != "up_failed" {
+				t.Fatalf("start 1 = %+v, want one record with up_failed", v.Reconcile.Records)
+			}
+			_ = os.Remove(filepath.Join(r.model, "blocked"))
+			r.put("pinned", handImage)
+			r.put("running", handImage) // the operator brings the stack up by hand
+			r.kill()                    // ... days pass; then:
+			if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
+				t.Fatal(err) // the operator takes it down on purpose
+			}
+			r.clearCalls()
+			r.start()
+			assertConverge(t, r, opID, convergeCase{nil, false, "stack_down", handImage, "", true})
+		})
+	}
+}
+
+// TestConvergeRecovery_AStartThatOnlyReportsSpendsTheMarker: the first start
+// after the cut runs with reconcile_on_startup off (or cannot act). It has
+// still found the marker. Switching converge on later must not turn an outage
+// of unknown age into a restore.
+func TestConvergeRecovery_AStartThatOnlyReportsSpendsTheMarker(t *testing.T) {
+	r := newCrashRig(t)
+	r.pastFirstUse("0s")
+	r.start()
+	opID := r.crashAt("up_before:1")
+	if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
+		t.Fatal(err)
+	}
+	r.start() // reconcile_on_startup is off: reports, changes nothing
+	r.kill()
+	r.converge("")
 	r.clearCalls()
 	r.start()
 	assertConverge(t, r, opID, convergeCase{nil, false, "stack_down", imgB, "", true})

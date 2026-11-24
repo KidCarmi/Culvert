@@ -390,20 +390,32 @@ image that was serving before the upgrade, when ALL of this holds:
 
 - no proxy container is running, and the record is an upgrade at `restarting`
   or `restarted`, or one whose inline rollback was armed;
-- **the outage is attributable to this operation's own `compose up`**, which
-  takes three things together. The start found a readable mutation marker that
-  names nothing but `compose up`. Every one of those commands was run for the
-  operation of THIS record (each marker entry carries the op id: the upgrade,
-  its inline rollback, or an earlier restore of the same record). And this is
-  the **first** start to find that marker: the start stamps it as seen,
-  durably, before it decides anything, and is told nothing if the stamp cannot
-  be written. A marker that names only `compose up` is not enough on its own.
-  It outlives the outage it describes whenever the start that finds it only
-  reports (the target was running), and whatever takes the stack down after
-  that, an operator included, is not the operation's doing; and with more than
-  one record left, the marker belongs to one of them at most (an independent
-  review reproduced both: a prior image started after an operator's manual
-  stop, and a record restoring an image two generations back);
+- **the previous agent process died inside a `compose up` of this record's own
+  operation, just now.** A marker that names only `compose up` is not that
+  evidence on its own; two independent reviews each reproduced a wrong restore
+  from a weaker rule. All of this must hold:
+  - the marker is readable and names nothing but `compose up`;
+  - every entry was run for the operation of THIS record (each entry carries
+    the op id: the upgrade, its inline rollback, or an earlier reconcile action
+    for the same record). An older lingering record cannot claim a newer
+    operation's marker (reproduced: an image two generations back was started);
+  - the marker is **unseen**. It is stamped seen, durably and under a file lock,
+    by (a) the first agent start that finds it, in any mode, before anything is
+    decided, and (b) the process that ran the command, as soon as the command
+    RETURNS and the marker stays (the command failed, or succeeded while
+    something earlier was in doubt). (a) because the marker outlives a start
+    that only reports (reproduced: target running, start reports, operator
+    stops the stack later, next start started the prior image). (b) because a
+    command that returned to a live agent is not a crash (reproduced: the
+    restore's own `up` failed, the agent stayed up, the operator started and
+    later stopped the stack by hand, the next start restored it);
+  - its last command was begun no more than 10 minutes ago
+    (`FreshMarkerMaxAge`): a second bound for what the stamp cannot cover (a
+    start that could not write it, an agent version in between that does not
+    write it, an agent stopped on purpose and started much later).
+
+  Otherwise the stack may be down for any reason, an operator's included, and
+  starting it would undo that;
 - the upgrade had not reached `verified`. A verified upgrade is not silently
   undone, and the target image is never started here: `stack_down_after_verified`
   is reported instead;
@@ -420,20 +432,36 @@ keeps failing ends as `recovery_required`, not as a loop. With the marker's
 early end of the settle wait, the start does not sit out the window first: the
 proxy is down, so two reads of Docker establish that no stop is pending.
 
-A restore whose own `compose up` is cut writes a new, unseen marker entry under
-the same operation, so the next start may try once more; the attempt cap ends
-it there.
+A reconcile action in whose own `compose up` the agent dies writes a new,
+unseen marker entry under the same operation, so the next start may try once
+more; the attempt cap ends it there.
 
 Not done: starting the target image; acting on a standalone rollback's record
 (its journal says nothing about how far it got); acting on a first start that
 keeps markers, whose "unknown" marker names no command; acting on a marker left
 by an agent version that did not record the operation.
 
+Given up for safety (the outage then stays until an operator acts, as before
+this decision):
+
+- the first start after the cut cannot act: Docker unreadable (deferred), a
+  second instance, the reconcile lock or the journal unavailable, the settle
+  wait cut short, `reconcile_on_startup = "off"`. That start has seen the
+  marker; a later one only reports;
+- the agent comes back more than 10 minutes after the cut;
+- the upgrade's `up` returned an error and the agent died before its inline
+  rollback began its own `up`.
+
 Not distinguishable, and accepted: an operator who takes the stack down by
-hand in the interval between the cut `compose up` and the first agent start
-after it. To that start the state is the same as the crash it exists to
+hand within those 10 minutes, after the agent died in `compose up` and before
+its next start. To that start the state is the same as the crash it exists to
 recover from, and it restores the prior image. Leaving `reconcile_on_startup`
-at its default avoids it.
+at its default avoids it. "Down" means no RUNNING proxy container: a stopped
+one counts.
+
+Residual, double fault: the seen stamp could not be written (state directory
+full or read-only at that moment) AND the stack is taken down AND the agent
+restarts, all within the 10 minutes.
 
 ## Addendum (2026-11-24): an interrupted restore is reported too
 

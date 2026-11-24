@@ -47,8 +47,9 @@ type MutationLog struct {
 	// ops runs parallel to open: the operation each command was run for ("" when
 	// none was given, and for everything read from a marker that did not say).
 	ops []string
-	// started is when the marker now on disk was first written.
-	started time.Time
+	// started is when the marker now on disk was first written; begun is when
+	// its last command was begun.
+	started, begun time.Time
 }
 
 // The commands a marker can name.
@@ -65,11 +66,23 @@ type MutationMarker struct {
 	// was run for. A marker written before this field existed has none, and
 	// then no operation can be named as the owner of anything.
 	Ops []string `json:"ops,omitempty"`
-	// Seen: an agent start has already found this marker and acted (or
-	// declined to act) on it. Every Begin writes it false again.
-	Seen      bool      `json:"seen,omitempty"`
+	// Seen: the marker is no longer evidence that a process died inside the
+	// last command. Set by an agent start that found the marker, and by a
+	// process whose own command returned while the marker stayed (MarkSeen).
+	// Every Begin writes it false again.
+	Seen bool `json:"seen,omitempty"`
+	// BegunAt is when the last command was begun (wall clock).
+	BegunAt   time.Time `json:"begun_at,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 }
+
+// FreshMarkerMaxAge bounds how long after its last command was begun a marker
+// can still be taken as "the process died in that command just now". It is a
+// second bound behind the seen stamp, for the cases the stamp cannot cover: a
+// start that could not write it, an agent version in between that does not
+// write it, an agent that was stopped on purpose and started much later. A
+// crash is followed by a restart within seconds (systemd) or by a reboot.
+const FreshMarkerMaxAge = 10 * time.Minute
 
 // MutationAtOpen is what OpenMutationLog found.
 type MutationAtOpen struct {
@@ -86,12 +99,14 @@ type MutationAtOpen struct {
 	// `compose up`. Anything else (a `compose down`, an unreadable or empty
 	// marker) is false.
 	OnlyUp bool
-	// FreshUpOf names the one operation whose `compose up` this start is the
-	// FIRST to find unfinished: the marker is readable, names nothing but
-	// `compose up`, attributes every one of them to that same operation, no
-	// earlier start has found it, and it has now been durably stamped as seen.
-	// Empty in every other case, including when that stamp could not be
-	// written.
+	// FreshUpOf names the one operation in whose `compose up` the previous
+	// agent process DIED, as far as the marker can show: it is readable, names
+	// nothing but `compose up`, attributes every one of them to that same
+	// operation, was not stamped as seen (by an earlier start, or by the
+	// process that ran the command and outlived it), its last command was
+	// begun no longer than FreshMarkerMaxAge ago, and it has now been durably
+	// stamped as seen under the marker lock. Empty in every other case,
+	// including when the lock or that stamp could not be had.
 	//
 	// It is the only evidence on which a start may conclude "the proxy is down
 	// because that operation's `compose up` was cut" (AGT-900 restore_prior).
@@ -139,8 +154,13 @@ func OpenMutationLog(stateDir string) (*MutationLog, MutationAtOpen, error) {
 		}
 		at.FirstUse = true
 	}
+	// One read-modify-write under the marker lock: another agent process may
+	// be alive and writing the marker (a second instance is only turned away
+	// later, by the reconcile's instance lock, and only in converge mode).
+	unlock, locked := lockMutationDir(dir)
+	defer unlock()
 	onDisk, fresh := m.readMarker(&at)
-	if fresh != "" && !at.FirstUse && m.stampSeen() == nil {
+	if fresh != "" && !at.FirstUse && locked && m.write(m.open, m.ops, true) == nil {
 		at.FreshUpOf = fresh
 	}
 	if at.FirstUse {
@@ -159,7 +179,7 @@ func (m *MutationLog) recordFirstUse(stateDir, sentinel string, onDisk bool) err
 	// Not appended again when a failing first use is retried at every restart:
 	// the marker would grow without bound.
 	if !onDisk || m.open[len(m.open)-1] != mutationUnknown {
-		if err := m.Begin(mutationUnknown); err != nil {
+		if err := m.begin(mutationUnknown, ""); err != nil {
 			m.mu.Lock()
 			m.open, m.ops = append(m.open, mutationUnknown), append(m.ops, "") // in memory at least
 			m.mu.Unlock()
@@ -192,7 +212,7 @@ func (m *MutationLog) readMarker(at *MutationAtOpen) (onDisk bool, freshUpOf str
 		m.open, m.ops = []string{mutationUnknown}, []string{""}
 		return false, ""
 	}
-	m.open, m.started = mk.Commands, mk.StartedAt
+	m.open, m.started, m.begun = mk.Commands, mk.StartedAt, mk.BegunAt
 	m.ops = make([]string, len(mk.Commands))
 	attributed := len(mk.Ops) == len(mk.Commands)
 	if attributed {
@@ -211,17 +231,31 @@ func (m *MutationLog) readMarker(at *MutationAtOpen) (onDisk bool, freshUpOf str
 			owner = ""
 		}
 	}
-	// An unattributed marker left every m.ops entry empty, so owner is "".
-	if !at.OnlyUp || mk.Seen {
+	// An unattributed marker left every m.ops entry empty, so owner is "". A
+	// marker without begun_at has an age of centuries.
+	if age := time.Since(mk.BegunAt); !at.OnlyUp || mk.Seen || age < 0 || age > FreshMarkerMaxAge {
 		owner = ""
 	}
 	return true, owner
 }
 
-// stampSeen rewrites the marker found at open with Seen set, durably.
-func (m *MutationLog) stampSeen() error {
+// MarkSeen stamps the marker, if one is in place, as no longer fresh. A
+// process calls it when its own compose command has RETURNED and the marker
+// stays (the command failed, or succeeded while something earlier was still in
+// doubt): from then on the marker shows that a command may be unfinished in
+// dockerd, which is what the settle wait needs, but not that the agent died in
+// it. What happens to the stack after this point (an operator starting it by
+// hand, stopping it days later) is not that command's doing, and a later start
+// must not be told it was. Best effort: an error leaves the marker unstamped,
+// and FreshMarkerMaxAge is then the bound.
+func (m *MutationLog) MarkSeen() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if len(m.open) == 0 {
+		return nil
+	}
+	unlock, _ := lockMutationDir(m.dir)
+	defer unlock()
 	return m.write(m.open, m.ops, true)
 }
 
@@ -232,7 +266,7 @@ func (m *MutationLog) write(cmds, opIDs []string, seen bool) error {
 	if started.IsZero() {
 		started = time.Now().UTC()
 	}
-	data, err := json.Marshal(MutationMarker{Commands: cmds, Ops: opIDs, Seen: seen, StartedAt: started})
+	data, err := json.Marshal(MutationMarker{Commands: cmds, Ops: opIDs, Seen: seen, BegunAt: m.begun, StartedAt: started})
 	if err != nil {
 		return fmt.Errorf("journal: marshal mutation marker: %w", err)
 	}
@@ -269,11 +303,21 @@ func (m *MutationLog) Begin(command string) error { return m.BeginFor(command, "
 func (m *MutationLog) BeginFor(command, opID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock, _ := lockMutationDir(m.dir)
+	defer unlock()
+	return m.begin(command, opID)
+}
+
+// begin is BeginFor with m.mu and the marker lock already dealt with.
+func (m *MutationLog) begin(command, opID string) error {
 	cmds := append(append([]string(nil), m.open...), command)
 	opIDs := make([]string, len(m.open), len(cmds))
 	copy(opIDs, m.ops) // m.ops may be shorter after an in-memory-only append
 	opIDs = append(opIDs, opID)
+	prev := m.begun
+	m.begun = time.Now().UTC()
 	if err := m.write(cmds, opIDs, false); err != nil {
+		m.begun = prev
 		return err
 	}
 	m.open, m.ops = cmds, opIDs
@@ -287,12 +331,14 @@ func (m *MutationLog) BeginFor(command, opID string) error {
 func (m *MutationLog) End() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock, _ := lockMutationDir(m.dir)
+	defer unlock()
 	if err := os.Remove(m.path()); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("journal: remove mutation marker: %w", err)
 	}
 	if err := fsyncDir(m.dir); err != nil {
 		return err
 	}
-	m.open, m.ops, m.started = nil, nil, time.Time{}
+	m.open, m.ops, m.started, m.begun = nil, nil, time.Time{}, time.Time{}
 	return nil
 }

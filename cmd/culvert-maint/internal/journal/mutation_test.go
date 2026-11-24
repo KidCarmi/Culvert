@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func openMut(t *testing.T, dir string) (*MutationLog, MutationAtOpen) {
@@ -308,31 +309,96 @@ func TestMutationLog_FreshUpOf_ACutRetryIsFreshAgain(t *testing.T) {
 	}
 }
 
-// TestMutationLog_FreshUpOf_NeedsTheMarkerToSayWhose: a marker written by an
-// agent that did not record operations (or by one that dropped them) names no
-// owner, and a marker already stamped as seen stays seen.
-func TestMutationLog_FreshUpOf_NeedsTheMarkerToSayWhose(t *testing.T) {
+// TestMutationLog_FreshUpOf_WhatTheMarkerMustSay: every way a marker on disk
+// fails to show "the agent died just now in a compose up of this one
+// operation". The first row is the control: the same marker with nothing
+// missing is granted, so each other row is refused for its own reason.
+func TestMutationLog_FreshUpOf_WhatTheMarkerMustSay(t *testing.T) {
 	const opA = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-	for name, body := range map[string]string{
-		"no ops field":       `{"commands":["compose up"],"started_at":"2026-01-01T00:00:00Z"}`,
-		"ops shorter":        `{"commands":["compose up","compose up"],"ops":["` + opA + `"],"started_at":"2026-01-01T00:00:00Z"}`,
-		"already seen":       `{"commands":["compose up"],"ops":["` + opA + `"],"seen":true,"started_at":"2026-01-01T00:00:00Z"}`,
-		"first-use unknown":  `{"commands":["unknown","compose up"],"ops":["","` + opA + `"],"started_at":"2026-01-01T00:00:00Z"}`,
-		"empty operation id": `{"commands":["compose up"],"ops":[""],"started_at":"2026-01-01T00:00:00Z"}`,
+	at := func(d time.Duration) string { return time.Now().UTC().Add(d).Format(time.RFC3339Nano) }
+	now, started := at(0), `,"started_at":"2026-01-01T00:00:00Z"}`
+	for _, tc := range []struct{ name, body, want string }{
+		{"control: fresh, attributed, up only", `{"commands":["compose up"],"ops":["` + opA + `"],"begun_at":"` + now + `"` + started, opA},
+		{"no ops field (older agent)", `{"commands":["compose up"],"begun_at":"` + now + `"` + started, ""},
+		{"ops shorter than commands", `{"commands":["compose up","compose up"],"ops":["` + opA + `"],"begun_at":"` + now + `"` + started, ""},
+		{"ops longer than commands", `{"commands":["compose up"],"ops":["` + opA + `","` + opA + `"],"begun_at":"` + now + `"` + started, ""},
+		{"already seen", `{"commands":["compose up"],"ops":["` + opA + `"],"seen":true,"begun_at":"` + now + `"` + started, ""},
+		{"first-use unknown entry", `{"commands":["unknown","compose up"],"ops":["","` + opA + `"],"begun_at":"` + now + `"` + started, ""},
+		{"empty operation id", `{"commands":["compose up"],"ops":[""],"begun_at":"` + now + `"` + started, ""},
+		{"no begun_at", `{"commands":["compose up"],"ops":["` + opA + `"]` + started, ""},
+		{"begun longer ago than the bound", `{"commands":["compose up"],"ops":["` + opA + `"],"begun_at":"` + at(-FreshMarkerMaxAge-time.Minute) + `"` + started, ""},
+		{"begun in the future", `{"commands":["compose up"],"ops":["` + opA + `"],"begun_at":"` + at(time.Hour) + `"` + started, ""},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			m, _ := openMut(t, dir)
 			if err := m.End(); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(dir, mutationDirName, mutationFileName), []byte(body), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, mutationDirName, mutationFileName), []byte(tc.body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, at := openMut(t, dir); at.FreshUpOf != "" || !at.Pending {
-				t.Errorf("open = %+v, want Pending and no FreshUpOf", at)
+			if _, at := openMut(t, dir); at.FreshUpOf != tc.want || !at.Pending {
+				t.Errorf("open = %+v, want Pending and FreshUpOf %q", at, tc.want)
 			}
 		})
+	}
+}
+
+// TestMutationLog_FreshUpOf_NotOnFirstUse: the sentinel is gone (a state
+// directory restored from a copy, or tampered with). Nothing a marker says is
+// taken at face value then, an owner included.
+func TestMutationLog_FreshUpOf_NotOnFirstUse(t *testing.T) {
+	const opA = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	dir := t.TempDir()
+	m, _ := openMut(t, dir)
+	if err := m.End(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.BeginFor(MutationComposeUp, opA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, mutationDirName, mutationSentinelName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, at := openMut(t, dir); !at.FirstUse || at.FreshUpOf != "" {
+		t.Errorf("open without the sentinel = %+v, want FirstUse and no FreshUpOf", at)
+	}
+}
+
+// TestMutationLog_MarkSeen_ACommandThatReturnedIsNotACrash: the process ran
+// the command, the command returned, the marker stays (the command failed, or
+// something earlier is still in doubt). The marker still makes the next start
+// wait; it no longer tells it that the agent died in a compose up. A later
+// command that the process does die in is fresh again.
+func TestMutationLog_MarkSeen_ACommandThatReturnedIsNotACrash(t *testing.T) {
+	const opA = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	dir := t.TempDir()
+	m, _ := openMut(t, dir)
+	if err := m.End(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MarkSeen(); err != nil { // nothing in place: nothing written
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, mutationDirName, mutationFileName)); !os.IsNotExist(err) {
+		t.Fatalf("MarkSeen without a marker created one (err=%v)", err)
+	}
+	if err := m.BeginFor(MutationComposeUp, opA); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.MarkSeen(); err != nil {
+		t.Fatal(err)
+	}
+	m2, at := openMut(t, dir)
+	if at.FreshUpOf != "" || !at.Pending || !at.OnlyUp || !at.NamesCommand {
+		t.Fatalf("open after a command that returned = %+v, want Pending, OnlyUp, NamesCommand and no FreshUpOf", at)
+	}
+	if err := m2.BeginFor(MutationComposeUp, opA); err != nil { // and this one is cut
+		t.Fatal(err)
+	}
+	if _, at := openMut(t, dir); at.FreshUpOf != opA {
+		t.Fatalf("open after a later command the process died in: FreshUpOf = %q, want %q", at.FreshUpOf, opA)
 	}
 }
 

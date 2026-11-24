@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
@@ -46,13 +47,27 @@ func (s *Server) markedMutation(ctx context.Context, command string, run func() 
 	res, err := run()
 	if err != nil {
 		s.noteMutationCut()
+		s.markerOutlived()
 		return res, err
 	}
-	if mayClear {
-		// Best effort: a marker left behind only costs a wait at the next start.
-		if s.mutations.End() == nil {
-			s.startMarkerLive.Store(false)
-		}
+	// Best effort: a marker left behind only costs a wait at the next start.
+	if mayClear && s.mutations.End() == nil {
+		s.startMarkerLive.Store(false)
+		return res, nil
 	}
+	s.markerOutlived()
 	return res, nil
+}
+
+// markerOutlived: the command returned and its marker stays. This process is
+// alive, so the marker must stop saying "the agent died in that command": only
+// that lets a later start put a missing proxy down to it and start the prior
+// image (AGT-900 restore_prior). Without the stamp, a reconcile whose own
+// `compose up` merely FAILED left an unseen marker for the life of the
+// process; an operator could start and stop the stack by hand in that time,
+// and the next agent start would have restored it (independent review).
+func (s *Server) markerOutlived() {
+	if err := s.mutations.MarkSeen(); err != nil {
+		log.Printf("culvert-maint: WARN: could not stamp the mutation marker after its command returned; a later start gives it at most %s", journal.FreshMarkerMaxAge)
+	}
 }

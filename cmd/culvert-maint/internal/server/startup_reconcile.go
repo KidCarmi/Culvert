@@ -420,10 +420,12 @@ func (s *Server) reconcileInputsFor(rec *journal.Record) reconcileInputsV2 {
 //
 //   - the marker found at THIS start names nothing but `compose up`, every one
 //     of them run for rec's operation (the upgrade itself, its inline rollback,
-//     or an earlier restore of this very record), and no earlier start had
-//     found it (startUpOf). Another record cannot claim it, and a start after
-//     one that already looked cannot either: by then anything may have taken
-//     the stack down, an operator included.
+//     or an earlier reconcile action for this very record), the marker was
+//     unseen (no earlier start had found it, and the command had not returned
+//     to a live agent) and at most journal.FreshMarkerMaxAge old (startUpOf).
+//     Another record cannot claim it, and a start after one that already
+//     looked cannot either: by then anything may have taken the stack down, an
+//     operator included.
 //   - no `compose up` of this process has cleared that marker since.
 //
 // Anything else is "the stack is down and the agent cannot say why".

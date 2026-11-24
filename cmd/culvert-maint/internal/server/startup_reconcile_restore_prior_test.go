@@ -251,3 +251,62 @@ func TestStartupReconcile_RestoreIsBoundedByTheAttemptCap(t *testing.T) {
 		t.Errorf("mutating calls past the attempt cap: %v", c)
 	}
 }
+
+// TestStartupReconcile_AnUpThatReturnedLeavesNoFreshMarker: the reconcile's
+// `compose up` returned to a live agent, and the record is kept: the command
+// failed, or it ran and the restored proxy is not ready. The agent did not die
+// in it, so the marker it leaves must not tell a later start that it did. An
+// operator may start the stack by hand and stop it again days later; the start
+// after that must find nothing to attribute the outage to.
+func TestStartupReconcile_AnUpThatReturnedLeavesNoFreshMarker(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ready  bool
+		fails  int
+		reason string
+	}{
+		"up failed":          {true, 1, "up_failed"},
+		"up ran, not ready":  {false, 0, "prior_not_ready"},
+		"second up failed":   {true, 0, "up_failed"},
+		"ran, another image": {true, 0, "post_verify_failed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := priorRestoreRig(t, tc.ready, true)
+			r.world.upFails = tc.fails
+			switch name {
+			case "second up failed":
+				r.world.upNoop = 1
+				r.world.onUp = func() {
+					r.world.mu.Lock()
+					defer r.world.mu.Unlock()
+					if r.world.upNoop == 0 { // the first pass is over: fail the next one
+						r.world.upFails = 1
+					}
+				}
+			case "ran, another image":
+				r.world.upStarts = cfgNew
+			}
+			got := r.run(t)
+			if got.Outcome != OutcomeRecoveryRequired || got.Reason != tc.reason {
+				t.Fatalf("result = %+v, want recovery_required/%s", got, tc.reason)
+			}
+			if r.recordOnDisk(t) == nil {
+				t.Fatal("the record was retired")
+			}
+			raw, err := os.ReadFile(filepath.Join(r.srv.opts.StateDir, "mutation", "pending.json")) // #nosec G304 -- test-owned temp dir
+			if err != nil {
+				t.Fatalf("no marker after the reconcile's up: %v", err)
+			}
+			var mk journal.MutationMarker
+			if err := json.Unmarshal(raw, &mk); err != nil {
+				t.Fatal(err)
+			}
+			if !mk.Seen {
+				t.Errorf("marker after an up that returned = %s, want seen", raw)
+			}
+			// And what the next agent start is told:
+			if _, at, _ := journal.OpenMutationLog(r.srv.opts.StateDir); at.FreshUpOf != "" || !at.Pending {
+				t.Errorf("next start: %+v, want Pending and no FreshUpOf", at)
+			}
+		})
+	}
+}

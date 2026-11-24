@@ -157,11 +157,11 @@ real-Docker gate is met.
 
 **Decided and implemented (owner, 2026-11-24)**, narrower than proposed above:
 the restore additionally requires the mutation marker of the unfinished
-`compose up` of the record's own operation, found for the first time by this
-start (so that a stack an operator took down is not started, and no other
-record can claim it; each marker entry carries the op id and the first start to
-find a marker stamps it as seen), and does not undo an upgrade recorded at
-`verified`. ADR-0061, "Restoring the
+`compose up` of the record's own operation, unseen and at most 10 minutes old
+(so that a stack an operator took down is not started, and no other record can
+claim it; each marker entry carries the op id, and the marker is stamped seen
+by the first start to find it and by any process whose command returned), and
+does not undo an upgrade recorded at `verified`. ADR-0061, "Restoring the
 prior image when the proxy is down".
 
 ### 3.5 What phase 1b implements, and what it leaves out

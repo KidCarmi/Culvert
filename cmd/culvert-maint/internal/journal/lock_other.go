@@ -18,3 +18,7 @@ func (l *ReconcileLock) Release() error { return nil }
 func (j *Journal) LockReconcile() (*ReconcileLock, error) {
 	return nil, errors.New("journal: reconcile lock unsupported on this platform")
 }
+
+// lockMutationDir: no advisory lock on this platform; the marker's
+// single-use attribution is then never granted (ok=false).
+func lockMutationDir(string) (unlock func(), ok bool) { return func() {}, false }
