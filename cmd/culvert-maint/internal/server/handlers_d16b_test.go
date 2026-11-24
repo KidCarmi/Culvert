@@ -247,12 +247,7 @@ func startD16bRigIn(t *testing.T, tmp, sockName string, mgr *ops.Manager) *d16bT
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx) }()
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(sockPath); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitSocketAccepting(sockPath)
 
 	rig.stop = func() {
 		cancel()
@@ -624,12 +619,7 @@ func TestBackupList_InvalidJSONFromCLISurfacesParseError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx) }()
 	defer func() { cancel(); _ = srv.Close(); _ = al.Close() }()
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(sockPath); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitSocketAccepting(sockPath)
 	cli := udsClient(sockPath)
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://unix/v1/backups", http.NoBody)
 	resp, err := cli.Do(req)
