@@ -117,6 +117,25 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   `OK — 0 rule(s)`, and a data plane whose last-known-good snapshot is refused
   at startup shows it in Diagnostics. Record:
   `docs/engineering/security-reviews/2026-11-24-unknown-rule-fields-refused.md`.
+- **The SSRF guard classified a zoned IPv6 address as public.** The pre-flight
+  check that keeps outbound requests and redirect targets away from internal
+  addresses read the resolver's answers with a parser that does not understand
+  a zone (`fe80::1%eth0`) and skipped any answer it could not read. A zoned
+  link-local, loopback or unique-local literal, and a name the resolver
+  answered with one, were therefore accepted as public and the verdict cached
+  for 30 seconds. Every caller of the guard was affected at this layer:
+  redirect targets (a policy `Redirect` rule's URL, at write time and each
+  time it is served), identity-provider metadata and discovery URLs, feed,
+  release and telemetry endpoints, and the tunnel pre-flight. Outbound
+  connections were still refused, because the connect-time guard fails closed
+  on a zoned peer address, and a zoned CONNECT or SOCKS5 destination was
+  already refused before this check; the exposure was the redirect target,
+  where nothing dials: `http://[fe80::1%25eth0]:80/` was accepted and served
+  as a 302. Answers are now parsed zone-aware and classified by the address
+  with the zone removed, and an answer that is not an address at all refuses
+  the destination instead of being skipped. No configuration change; a
+  stored rule or URL of this shape is now refused where it is used.
+
 - **A config import no longer reports success when the imported policy rules
   could not be written to disk.** The policy save on `POST /api/config/import`
   discarded its error: the import answered `200 {"ok":true}` while the policy
