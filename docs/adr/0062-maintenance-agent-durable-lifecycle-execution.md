@@ -119,9 +119,21 @@ gaps and make the #2051 executor the single path every recovery takes.
   (checked with `audit.HasSucceeded`-style lookup by op id, kind and
   outcome), then removes the record if the state is safe. The audit is
   never written twice and never lost.
-- A failed terminal removes the record only when the op proved Docker
-  safe (its own rollback passed its gate, or nothing was mutated: phase
-  `admitted`..`pulled`). Otherwise the record stays, gains
+- A failed terminal removes the record only when the op proved its end
+  state safe, judged per operation class (Codex review on this ADR):
+  - `upgrades.apply`: its own rollback passed its gate, or nothing was
+    mutated, i.e. the record never reached the `restarting` write-ahead
+    barrier (phase `admitted`..`pulled`). The phase is evidence here only
+    because this flow writes that barrier before its tag move.
+  - `rollbacks.create` mode `image`: its phase stays `admitted` while it
+    moves the tag and runs `up`, so the phase proves nothing. Until slice 3
+    gives it a barrier, its record is kept after any failure past
+    admission's read-only steps (evidence: the failed stage name).
+  - restore-class (`restore.commit`, `rollbacks.create` mode `data`): the
+    phase stays `admitted` throughout; safety comes from `RestoreStage`. The
+    record may be removed only at `admitted`/`preflight` (nothing stopped);
+    from `stopping` onward it is kept unless the health check passed after
+    `started`. Otherwise the record stays, gains
   `terminal_outcome` (`failed:<reason>`), and is reported by status exactly
   like an interrupted record; converge may act on it through the same
   decision table. The op's own outcome stays `failed`; nothing is rewritten
