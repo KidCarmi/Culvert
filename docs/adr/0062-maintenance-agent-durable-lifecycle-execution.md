@@ -173,16 +173,45 @@ gaps and make the #2051 executor the single path every recovery takes.
   best-effort arm).
 - Decisions gain facts, not new actions: `restarted` + `checkpoint
   gate:target failed` is no longer confused with "pending".
-- **Command attribution is first-class.** Every intent names the op id
-  that owns it, the command, and when it began; a result (or the process
-  observing it return) closes it. "Did this operation's process die inside
-  this command?" is then read from an open intent of that op, not inferred
-  from whether a marker file exists. Lesson from two independent reviews of
-  #2093: inferring ownership from the marker let an older record claim a
-  newer op's marker, and let a failed-but-returned `up` look interrupted.
-  #2093 now attributes marker entries per op (`ops.WithOpID`), bounds
-  freshness, and stamps a marker seen under a flock; slice 3 generalises
-  that rule to every checkpoint instead of keeping it marker-specific.
+- **Command attribution is first-class** (rules from three independent
+  reviews of #2093; its third review found it not merge-safe and it is
+  parked):
+  1. Attribution lives in the operation's own journal record, never in a
+     global marker or a parallel ops array, and never in a cross-record
+     ownership check. Before a Docker-changing command the op writes an
+     intent (`{step, command, began}`) fail-closed; when the command
+     RETURNS to a live process, success or error, the intent is closed, in
+     a defer so a panic closes it too.
+  2. The first agent start that reads an open intent consumes it durably
+     BEFORE deciding anything, in every mode (off included) and whether or
+     not Docker is readable or the agent can act. Any conditional consume
+     (on freshness, mode, readability) lets a later start act on stale
+     evidence. The cost, stated: a first start that defers forfeits a
+     restore the evidence would have allowed; the record is then reported.
+  3. No wall clock in the safety argument. An age bound may only narrow
+     what is allowed, never decide whether evidence is consumed (a clock
+     behind `began` after power loss, or corrected backwards, defeated the
+     age bound in #2093).
+  4. The settle/hazard marker (#2076) keeps answering "may dockerd still be
+     finishing something"; it is not an attribution source. Mixing the two
+     is how a fix to #2093 broke.
+  5. The intent fields are schema 2 (slice 2): a pre-ADR agent would drop an
+     open intent on rewrite and lose the consumed state, so the fence is up
+     while any intent is open.
+- Acceptance cases (repro tests from the #2093 reviews), each must start
+  nothing: (A) cut after the target's `up` → report → operator `down` →
+  restart; (B) two records, the newer op's `up` cut: the older record does
+  nothing; (C) the reconcile's own `up` fails with the agent alive,
+  operator `up` then `down` (operator on prior and on target), restart;
+  (D) clock behind `began` at the first start, operator `down`, restart
+  with the clock back in range; (E) first start in off mode, then converge.
+  Positive: the agent dies inside the upgrade's `up`, the proxy is down; the
+  next start restores the prior, gated and verified by id; a restore cut in
+  its own `up` is retried once (attempt cap 2).
+- Ownership: the workstream that built #2093 implements slices 3 and 4
+  (record-level intent, then `restore_prior` as a plan on the slice-4
+  executor), on top of slice 2's schema and fence and coordinated with
+  slice 1's changes to `terminate` and startup reporting.
 
 **Slice 4 — one executor (gap 4).**
 - Extract #2051's loop from `reconcileCase` into an executor that takes a
