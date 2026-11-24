@@ -334,6 +334,36 @@ stop grace 15 s: 40 trials, 0 violations, 0 invalid; the follow-up operation
 took 3.5–5.2 s where the proxy was down at the restart (20–22 s without the
 marker) and about 20 s, unchanged, where a proxy container was still running.
 
+**Control-plane shutdown (`ORPHAN_PROBE_CP=1`).** Run as a control plane
+(`-cp-grpc-addr`), the proxy keeps its listener open while its gRPC server
+drains: 9.0 s from SIGTERM to exit with one control-plane connection held,
+against 5 s with an admin-UI request and 0.06 s idle (measured on `main`;
+`/ready` is 503 from t+0.07 s for all of it, `/health` 200). With this variable
+the slices that hold the shutdown open use such a connection (`cphold`), so an
+image whose `/ready` still says 200 while it drains says so for about 9 s, well
+past the unit's 5 s restart delay. `image-sigterm-timeline.py` takes
+`TIMELINE_CP=1` for the same hold on an image.
+
+*A correction to the held slices.* Until this change the rig measured how long
+the old container survived inline, so in every `uihold` trial the follow-up
+operation started only after the old proxy had gone. Those trials (all the
+real-binary and release-image runs above) tested recovery from each kill point
+and the timings, not an operation admitted during the pending stop; the
+stand-in `slow` slices did. The drain is now watched in the background and each
+held trial prints `drain=` and `follow_at=`. With that, on Docker 29.10.0 /
+Compose v5.7.1, real proxy binaries, the prior one from before #2058, kill
+point 9, a rollback started 6.2 s after the kill with the old proxy draining
+for 9.0 s:
+
+| Agent | Result |
+|---|---|
+| settle wait off (`interrupted_settle = "0s"`) | success reported after 1.2 s, then the proxy exits: **violation** (late mutation, silent divergence) |
+| as shipped | waits until Docker shows no proxy container, then recovers (9.8 s); serving the prior image at rest |
+
+The workflow runs the first row as a job that passes only if the probe reports
+that violation (`Sensitivity`), so every run shows on its own runner that the
+probe would see the defect.
+
 Two things these runs show that are not safety failures and are not fixed here:
 - After a crash between Compose's stop and delete, the first
   `docker compose up -d` only cleans up. The rollback fails its health gate,

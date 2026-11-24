@@ -247,6 +247,23 @@ services:
       APP_PORT: "\${APP_PORT:-$APP_PORT}"
       STOP_SERVE: "\${STOP_SERVE:-serving}"
 YML
+# ORPHAN_PROBE_CP=1 (real proxy only): run the proxy as a control plane (-cp-grpc-addr) and,
+# in the slices that hold the shutdown open, hold it with a control-plane gRPC connection
+# instead of an admin-UI request. That is the longest the proxy's listener stays up after
+# SIGTERM (the gRPC graceful stop takes its 8 s budget), so an image whose /ready still says
+# 200 while it drains says so for about 9 s, well past the unit's 5 s restart delay.
+CP="${ORPHAN_PROBE_CP:-0}"; HOLD=uihold; CP_ARGS_YAML=""; IMAGE_COMMAND_YAML=""
+if [ "$CP" = 1 ]; then
+  [ "$REAL_PROXY" != 0 ] || inc "ORPHAN_PROBE_CP needs the real proxy (binary or image)"
+  HOLD=cphold; CP_PORT=$((APP_PORT + 71)); export PROBE_CP_PORT="$CP_PORT"
+  CP_ARGS_YAML=", \"-cp-grpc-addr\", \"127.0.0.1:$CP_PORT\", \"-cluster-insecure\", \"-cluster-db\", \"/data/cluster.json\""
+  if [ "$REAL_PROXY" = 2 ]; then
+    # The release image keeps its own command; the control-plane flags are added to it.
+    base_cmd="$(docker image inspect --format '{{json .Config.Cmd}}' "$IMG_V1")" || inc "could not read the image's command"
+    case "$base_cmd" in \[*\]) ;; *) inc "unexpected image command: $base_cmd" ;; esac
+    IMAGE_COMMAND_YAML="    command: ${base_cmd%]}$CP_ARGS_YAML]"
+  fi
+fi
 if [ "$REAL_PROXY" = 1 ]; then
   UI_PORT=$((APP_PORT + 1))
   # The real proxy: its own flags (as test/e2e/maint-agent/docker-compose.e2e.yml), plain-HTTP
@@ -266,7 +283,7 @@ services:
     command: ["-port", "$APP_PORT", "-ui-port", "$((APP_PORT + 1))", "-ui-no-tls",
       "-ca-path", "/data/ca.bundle", "-policy", "/data/policy.json", "-logfile", "/data/proxy.log",
       "-audit-log", "/data/audit.jsonl", "-request-log", "/data/requests.jsonl",
-      "-threat-feed-db", "/data/threatfeeds.json", "-ui-users-file", "/data/ui_users.json"]
+      "-threat-feed-db", "/data/threatfeeds.json", "-ui-users-file", "/data/ui_users.json"$CP_ARGS_YAML]
 YML
 fi
 if [ "$REAL_PROXY" = 2 ]; then
@@ -286,6 +303,7 @@ services:
       - orphanprobe-data:/data
     environment:
       CULVERT_SESSION_SECRET: "$(openssl rand -hex 32)"
+$IMAGE_COMMAND_YAML
 volumes:
   orphanprobe-data:
     external: true
@@ -423,9 +441,9 @@ if [ "$REAL_PROXY" != 0 ]; then
   # request pending ("uihold"). v1 is the image an upgrade leaves and a rollback returns to.
   run none-fast none 0 "$ALL"
   run rollback-fast rollback 0 "$ALL"
-  PROBE_DRAIN=uihold run none-uihold none 6 "$MID"
-  PROBE_DRAIN=uihold run rollback-uihold rollback 6 "$MID"
-  PROBE_DRAIN=uihold run apply-uihold apply 6 "$MID"
+  PROBE_DRAIN=$HOLD run none-$HOLD none 6 "$MID"
+  PROBE_DRAIN=$HOLD run rollback-$HOLD rollback 6 "$MID"
+  PROBE_DRAIN=$HOLD run apply-$HOLD apply 6 "$MID"
   judge shipped-real-proxy --trials=$(( 2 * $(n "$ALL") + 3 * $(n "$MID") )); worse $?
 else
 # "fast": the proxy exits at once. "slow": it drains for $SLOW s, answering 200 meanwhile,
@@ -459,7 +477,7 @@ if [ "$CONVERGE" = 1 ]; then
   [ "$(docker exec "$SYSD" systemctl is-active culvert-maint)" = active ] || inc "this agent does not start with reconcile_on_startup = \"converge\""
   run converge-fast converge 0 "$ALL"
   if [ "$REAL_PROXY" != 0 ]; then
-    PROBE_DRAIN=uihold run converge-uihold converge 6 "$MID"
+    PROBE_DRAIN=$HOLD run converge-$HOLD converge 6 "$MID"
     judge converge-real-proxy --trials=$(( $(n "$ALL") + $(n "$MID") )); worse $?
   else
     run converge-slow converge "$SLOW" "$MID"
