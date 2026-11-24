@@ -174,6 +174,33 @@ func (t *ReconcileTracker) finish(state string, at time.Time) {
 	t.mu.Unlock()
 }
 
+// holdInstanceLock makes sure this process holds the state_dir instance lock
+// before the reconcile reads a record. main takes it before anything else and
+// hands it over (Options.InstanceLock), so in production this only confirms
+// it; a server built without it (tests) takes it here, as before ADR-0062.
+func (s *Server) holdInstanceLock(t *ReconcileTracker) bool {
+	s.mu.Lock()
+	held := s.reconcileLock != nil
+	s.mu.Unlock()
+	if held {
+		return true
+	}
+	lock, err := s.opts.Journal.LockReconcile()
+	if err != nil {
+		state := ReconcileLockUnavailable
+		if errors.Is(err, journal.ErrLockHeld) {
+			state = ReconcileSkippedInstance
+		}
+		t.setState(state)
+		log.Printf("culvert-maint: startup reconcile not run (%s); interrupted operations are reported only", state)
+		return false
+	}
+	s.mu.Lock()
+	s.reconcileLock = lock
+	s.mu.Unlock()
+	return true
+}
+
 // PrepareStartupReconcile arms the converge reconcile. Call it after New and
 // before Serve, and only when reconcile_on_startup = "converge". It never
 // fails startup: anything that prevents a safe reconcile is reported in the
@@ -183,19 +210,9 @@ func (s *Server) PrepareStartupReconcile(t *ReconcileTracker) {
 		return
 	}
 	s.reconcileTracker = t
-	lock, err := s.opts.Journal.LockReconcile()
-	if err != nil {
-		state := ReconcileLockUnavailable
-		if errors.Is(err, journal.ErrLockHeld) {
-			state = ReconcileSkippedInstance
-		}
-		t.setState(state)
-		log.Printf("culvert-maint: startup reconcile not run (%s); interrupted operations are reported only", state)
+	if !s.holdInstanceLock(t) {
 		return
 	}
-	s.mu.Lock()
-	s.reconcileLock = lock
-	s.mu.Unlock()
 
 	recs, err := s.opts.Journal.List()
 	if err != nil {

@@ -302,6 +302,12 @@ journal ends `failed` with `failure_reason: command_error`, a
 replaced, and `result.restore_committed: true`. The stack is still started and
 health-checked. Do not repeat that restore because it "failed".
 
+If the agent will not start and its log says `another culvert-maint process
+holds the instance lock on state_dir …`, a second agent is configured with the
+same `state_dir` (for example a manual run beside the systemd unit). Only one
+agent may own a state directory, in every mode (ADR-0062): stop the other
+process; the lock is released the moment it exits.
+
 If the agent will not start and its log says
 `journal: refusing to serve — journal: corrupt record <op_id>.json`, a journal
 file under `<state_dir>/reconcile/` is unreadable. The agent stops rather than

@@ -9,9 +9,10 @@ package main
 // commands the restart may issue are asserted.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"net"
+	"errors"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"culvert-maint/internal/journal"
 )
 
 // converge rewrites the rig's config to reconcile_on_startup = "converge",
@@ -335,10 +338,13 @@ func TestConvergeRecovery_DockerUnavailableDefers(t *testing.T) {
 	assertConverge(t, r, opID, convergeCase{[]string{"tag:" + refA}, true, "tag_ahead_container_on_prior", imgA, imgA, false})
 }
 
-// TestConvergeRecovery_SecondInstanceSkips: a second agent process on the
-// same state_dir (here on another socket) cannot take the instance lock the
-// first one holds for its lifetime, so it reconciles nothing.
-func TestConvergeRecovery_SecondInstanceSkips(t *testing.T) {
+// TestConvergeRecovery_SecondInstanceRefusesToStart: a second agent process
+// on the same state_dir (here configured with another socket) cannot take the
+// instance lock the first one holds for its lifetime. Since ADR-0062 (owner
+// decision 2) it then refuses to start in every mode: it exits non-zero
+// before binding a socket, changes nothing in Docker or the journal, and the
+// first agent keeps serving. (It used to start, serve and skip its reconcile.)
+func TestConvergeRecovery_SecondInstanceRefusesToStart(t *testing.T) {
 	r := newCrashRig(t)
 	r.start()
 	opID := r.crashAt("up_before:1")
@@ -360,39 +366,39 @@ func TestConvergeRecovery_SecondInstanceSkips(t *testing.T) {
 	if err := os.WriteFile(cfg2, []byte(strings.Replace(string(raw), r.sock, sock2, 1)), 0o600); err != nil { // #nosec G703 -- test-owned temp dir
 		t.Fatal(err)
 	}
+	var out bytes.Buffer
 	cmd := exec.CommandContext(context.Background(), agentBinary(t), "--config", cfg2) // #nosec G204 -- test-built binary, test-owned config
 	cmd.Env = append(os.Environ(), "PATH="+r.shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DisableKeepAlives: true,
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", sock2)
-		}}}
-	var v reconcileView
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://agent/v1/status", http.NoBody)
-		if resp, derr := client.Do(req); derr == nil {
-			_ = json.NewDecoder(resp.Body).Decode(&v)
-			_ = resp.Body.Close()
-			if v.Reconcile != nil {
-				break
-			}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("second instance exited 0; want a refusal\n%s", out.String())
 		}
-		time.Sleep(50 * time.Millisecond)
+	case <-time.After(20 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+		t.Fatalf("second instance is still running; want it to refuse to start\n%s", out.String())
 	}
-	if v.Reconcile == nil || v.Reconcile.State != "skipped_second_instance" {
-		t.Fatalf("second instance reconcile = %+v, want skipped_second_instance", v.Reconcile)
+	if !strings.Contains(out.String(), "instance lock") {
+		t.Errorf("refusal does not name the instance lock:\n%s", out.String())
 	}
-	time.Sleep(500 * time.Millisecond)
+	if _, err := os.Stat(sock2); !os.IsNotExist(err) {
+		t.Errorf("second instance created its socket (err=%v)", err)
+	}
 	if m := r.mutatingCalls(); len(m) != 0 {
 		t.Errorf("the second instance changed Docker: %v", m)
 	}
 	if files := r.journalFiles(); len(files) != 1 || files[0] != opID {
 		t.Errorf("journal = %v, want the record kept", files)
+	}
+	if v := r.waitReconcile(); v.Reconcile == nil {
+		t.Error("the first agent stopped serving")
 	}
 }
 
@@ -441,7 +447,14 @@ func TestOffMode_StatusAndStateUnchanged(t *testing.T) {
 			t.Errorf("status carries %q with reconcile_on_startup off", k)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(r.state, "reconcile", ".lock")); !os.IsNotExist(err) {
-		t.Errorf("instance lock file exists in off mode (err=%v)", err)
+	// Since ADR-0062 the instance lock is held in every mode (owner decision
+	// 2): off mode holds it too, and still runs no reconcile (asserted above).
+	jnl, err := journal.New(r.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock, lerr := jnl.LockReconcile(); !errors.Is(lerr, journal.ErrLockHeld) {
+		_ = lock.Release()
+		t.Errorf("off-mode agent does not hold the instance lock (err=%v)", lerr)
 	}
 }

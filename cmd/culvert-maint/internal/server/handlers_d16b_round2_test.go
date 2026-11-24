@@ -124,12 +124,7 @@ func d16bRigWithListJSON(t *testing.T, listJSON string) *d16bTestRig {
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = srv.Serve(ctx) }()
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(sockPath); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitSocketAccepting(sockPath)
 	rig := &d16bTestRig{
 		sockPath:  sockPath,
 		stateDir:  tmp,
