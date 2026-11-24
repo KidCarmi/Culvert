@@ -99,6 +99,7 @@ jobs:
           ORPHAN_PROBE_PAST_FIRST_USE: ${{ (matrix.variant == 'warm' || matrix.variant == 'cp') && '1' || '0' }}
           ORPHAN_PROBE_CP: ${{ matrix.variant == 'cp' && '1' || '0' }}
         run: |
+          set +e   # keep going after the probe so that its exit code is reported and returned
           set -uo pipefail
           flag=""; [ "$VARIANT" = converge ] && flag="--only-converge"
           mkdir -p "$RUNNER_TEMP/probe-evidence"
@@ -206,6 +207,9 @@ jobs:
           ORPHAN_PROBE_PAST_FIRST_USE: "1"
           ORPHAN_PROBE_SETTLE: "0s"
         run: |
+          # The probe is EXPECTED to exit 1 here. The step's shell stops at the first failing
+          # command by default, which would end the step before that exit code is examined.
+          set +e
           set -uo pipefail
           mkdir -p "$RUNNER_TEMP/probe-evidence"
           sudo --preserve-env=ORPHAN_PROBE_PROXY_IMAGE_V1,ORPHAN_PROBE_PROXY_IMAGE_V2,ORPHAN_PROBE_POINTS,ORPHAN_PROBE_MID,ORPHAN_PROBE_PAST_FIRST_USE,ORPHAN_PROBE_CP,ORPHAN_PROBE_SETTLE \

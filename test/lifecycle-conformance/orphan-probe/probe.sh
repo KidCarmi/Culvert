@@ -130,7 +130,8 @@ if [ -z "$AGENT_BIN" ]; then
   (cd "$REPO/cmd/culvert-maint" && CGO_ENABLED=0 go build -o "$AGENT_BIN" .) || inc "agent build failed"
 fi
 [ -x "$AGENT_BIN" ] || inc "agent binary not executable: $AGENT_BIN"
-GOBIN="$W/bin" CGO_ENABLED=0 GOFLAGS=-mod=mod go install github.com/distribution/distribution/v3/cmd/registry@v3.0.0 2>/dev/null || inc "registry build failed"
+GOBIN="$W/bin" CGO_ENABLED=0 GOFLAGS=-mod=mod go install github.com/distribution/distribution/v3/cmd/registry@v3.0.0 2>"$W/registry-build.log" \
+  || { tail -5 "$W/registry-build.log"; inc "registry build failed"; }
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$W/certs/r.key" -out "$W/certs/r.crt" -days 2 \
   -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" 2>/dev/null || inc "openssl failed"
 printf 'version: 0.1\nstorage:\n  filesystem:\n    rootdirectory: %s\nhttp:\n  addr: 127.0.0.1:%s\n  tls:\n    certificate: %s\n    key: %s\n' \
