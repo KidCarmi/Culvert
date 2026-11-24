@@ -81,6 +81,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   are still matched without regard to case (`"destFqdn"` is `destFQDN`), and
   sections of a control-plane snapshot that this version does not know are
   still ignored.
+  **API contract 2.1.0 → 2.2.0 (MINOR):** the policy rule schema gains the
+  optional `annotations` property; a duplicated key in a rule object is now a
+  `400` on the policy API (it was accepted, last value winning).
   **New: `annotations`.** A rule may carry one `annotations` object (at most
   4096 bytes and 8 levels). Culvert stores, exports and publishes its contents
   verbatim and never interprets them. It is the place for notes in a
