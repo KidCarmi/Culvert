@@ -1358,7 +1358,10 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	// validation are skipped (not aborted whole); collect why, so "ok:true"
 	// never hides a silently-dropped rule from the admin (see warnings below).
 	warnings := importPolicyRules(&b, replaceMode)
-	policyStore.Save()
+	// The durable write is checked, not assumed: the imported rules are live
+	// from here on, and a swallowed failure answered "ok" while the policy file
+	// still held the previous rules — a restart then reverted the import.
+	policyPersistErr := policyStore.SaveErr()
 	if b.DefaultAction == "allow" || b.DefaultAction == "deny" {
 		setDefaultPolicyAction(b.DefaultAction)
 	}
@@ -1550,7 +1553,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if replaceMode {
 		importMode = "replace"
 	}
-	auditEvent(r, "config.import", importMode, fmt.Sprintf("from config exported %s", b.ExportedAt))
+	auditEvent(r, "config.import", importMode, importAuditDetail(b.ExportedAt, policyPersistErr))
 	saveConfigVersion(sessionAdmin(r), "config.import")
 	// Snapshot the admin-settings layer (rate limit, IP filter, rewrite
 	// rules, block page, conn limit, upstream pool, …) so the imported state
@@ -1583,7 +1586,47 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if pacProfilesNotApplied != "" {
 		resp["pac_profiles_not_applied"] = pacProfilesNotApplied
 	}
+	writeImportResult(w, resp, policyPersistErr)
+}
+
+// writeImportResult answers a completed import: 200 with resp, or the
+// not-durable 500 when the imported policy rules could not be written to disk.
+func writeImportResult(w http.ResponseWriter, resp map[string]any, policyPersistErr error) {
+	if policyPersistErr != nil {
+		writeImportPolicyNotDurable(w, resp)
+		return
+	}
 	jsonOK(w, resp)
+}
+
+// importAuditDetail is the config.import audit detail. When the imported
+// policy could not be written to disk it says so: the audit entry is the
+// durable record an operator reads after the fact.
+func importAuditDetail(exportedAt string, policyPersistErr error) string {
+	detail := fmt.Sprintf("from config exported %s", exportedAt)
+	if policyPersistErr != nil {
+		detail += " — policy rules applied in memory but NOT DURABLE (policy file write failed)"
+	}
+	return detail
+}
+
+// writeImportPolicyNotDurable answers an import whose policy rules are live
+// but were not written to the policy file. 500, as a rollback in the same
+// state answers (rolled_back_not_durable): the operation did not fully
+// succeed. The body says the running configuration HAS changed, so the fix is
+// the storage followed by a re-save, not a retry believed to start from the
+// old state. The write error itself goes to the log only; it can carry a
+// filesystem path.
+func writeImportPolicyNotDurable(w http.ResponseWriter, resp map[string]any) {
+	logger.Printf("Config import applied in memory but FAILED to persist the policy rules — see the config.import audit entry and the storage_path row of /api/diagnostics")
+	resp["ok"] = false
+	resp["status"] = "imported_not_durable"
+	resp["applied"] = true
+	resp["policy_persisted"] = false
+	resp["error"] = "import applied to the running configuration but the policy rules could not be written to disk; they will be lost on restart"
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck // best-effort HTTP response write; client disconnects are not actionable
 }
 
 // importAlertWebhooksRejected is apiConfigImport's alert-webhook

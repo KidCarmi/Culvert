@@ -8369,6 +8369,13 @@ async function importConfig(input) {
       previewEl.style.display = 'none';
       // Refresh relevant views.
       fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
+    } else if (data.status === 'imported_not_durable') {
+      // Not "Import failed": the running configuration HAS changed. Saying
+      // it failed would send the admin away believing the old rules are live.
+      statusEl.style.cssText = 'display:block;color:var(--red)';
+      statusEl.textContent = '✗ Imported into the running configuration, but the policy rules could NOT be saved to disk and will be lost on restart. Fix the data directory (see Diagnostics → storage path), then save the policy again.';
+      previewEl.style.display = 'none';
+      fetchBlocklist(); loadBlocklistMode(); fetchPolicy(); loadSecurity();
     } else {
       statusEl.style.cssText = 'display:block;color:var(--red)';
       statusEl.textContent = '✗ Import failed: ' + (data.error || r.statusText);

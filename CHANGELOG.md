@@ -9,6 +9,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A config import no longer reports success when the imported policy rules
+  could not be written to disk.** The policy save on `POST /api/config/import`
+  discarded its error: the import answered `200 {"ok":true}` while the policy
+  file still held the previous rules, so a restart silently reverted the
+  import (in either direction, including back to a rule set without a newly
+  imported block). It now answers `500` with `status:imported_not_durable`,
+  `applied:true`, `policy_persisted:false`, the audit entry records the failed
+  write, and the admin UI says the rules are live but not saved. The running
+  configuration is unchanged from before: the import is still applied.
 - **A category groups file that cannot be loaded no longer silently disables
   every rule scoped to a group.** A rule scoped to a category group matches a
   destination only when the group resolves. If the groups file failed to load at

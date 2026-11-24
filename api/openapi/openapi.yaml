@@ -3689,6 +3689,19 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UpstreamImportRefusal' }
+        '500':
+          description: >-
+            `status:imported_not_durable` — the import was applied to the
+            RUNNING configuration but the policy rules could not be written to
+            disk (`ok:false`, `applied:true`, `policy_persisted:false`). The
+            running config has already changed and will be lost on restart, so
+            the recovery is to fix the data directory and re-save, not to
+            assume the previous configuration is still in effect. The other
+            fields of the 200 body (`mode`, `warnings`, …) are included.
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+              example: { ok: false, status: imported_not_durable, applied: true, policy_persisted: false, mode: replace, error: 'import applied to the running configuration but the policy rules could not be written to disk; they will be lost on restart' }
 
   /api/policy:
     get:
