@@ -275,7 +275,15 @@ func (e *e2eEnv) caseDeadline(t *testing.T, name string) {
 	}
 	_ = os.Remove(e.ctlFile("ready_hit"))
 	ends0 := r.reconcileEnds()
+	// This case is about the reconcile DEADLINE (2 x stage_timeout = 10s) being
+	// spent in A's stalled readiness probe. Since the settle window (#2062) the
+	// reconcile first waits out interrupted_settle (default 75s) from agent
+	// start, which alone outlasts a 10s deadline (settle_wait_cut_short, tested
+	// on its own), so A would never be probed. This one start therefore runs
+	// with no settle window; the expectations are unchanged.
+	r.cfgExtra = "interrupted_settle = \"0s\"\n"
 	p3 := r.start("converge", "5s")
+	r.cfgExtra = ""
 	if !waitFile(e.ctlFile("ready_hit"), time.Minute) {
 		res.err = "A's readiness probe never reached /ready"
 		return
