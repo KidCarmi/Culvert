@@ -120,7 +120,10 @@ func (s *Server) retireRecords(byOpID, actor, what string, retire func(*journal.
 		// The succeeding op's own record is retired by the orchestrator. A
 		// record whose op is running in this process is not stale (cannot
 		// happen while the maintenance lock admits one op at a time).
-		if rec.OpID == byOpID || s.opts.Ops.IsRunning(rec.OpID) || !retire(rec) {
+		// A record a newer agent wrote is never retired here (ADR-0062): the
+		// journal refuses to remove it, and auditing it as superseded first
+		// would record a retirement that did not happen.
+		if rec.OpID == byOpID || s.opts.Ops.IsRunning(rec.OpID) || rec.FromNewerAgent() || !retire(rec) {
 			continue
 		}
 		now := time.Now().UTC()

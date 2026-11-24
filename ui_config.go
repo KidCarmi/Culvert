@@ -945,7 +945,7 @@ func importSectionEffect(replaceMode bool, incoming, current int) string {
 // (replace clears then loads; merge appends/upserts) but mutates nothing —
 // every count is read from the live store, every incoming count from the
 // parsed backup.
-func buildImportPreview(b *configBackup, replaceMode bool, planned *upstreamImportPlanned) ([]importPreviewSection, []importPreviewSetting) {
+func buildImportPreview(b *configBackup, pol importPolicyPreview, replaceMode bool, planned *upstreamImportPlanned) ([]importPreviewSection, []importPreviewSetting) {
 	var sections []importPreviewSection
 	add := func(name string, incoming, current int, note string) {
 		if incoming == 0 {
@@ -984,9 +984,10 @@ func buildImportPreview(b *configBackup, replaceMode bool, planned *upstreamImpo
 	if replaceMode || len(b.PolicyRules) == 0 {
 		add("Policy Rules", len(b.PolicyRules), polCur, "")
 	} else {
-		updates, adds := policyStore.countImportUpserts(b.PolicyRules)
-		addFixed("Policy Rules", len(b.PolicyRules), polCur,
-			fmt.Sprintf("upsert %d: %d update, %d add", len(b.PolicyRules), updates, adds),
+		// The split comes from running the merge itself against a scratch copy
+		// of the policy (previewImportPolicy), so it counts what the apply will
+		// do, skips included.
+		addFixed("Policy Rules", len(b.PolicyRules), polCur, pol.effect,
 			"merge upserts by ID then name — duplicates no longer accumulate")
 	}
 	add("Blocklist", len(b.Blocklist), bl.Count(), "")
@@ -1103,8 +1104,9 @@ func buildImportSettingsPreview(b *configBackup) []importPreviewSetting {
 // per-section change summary and the scalar settings that would be applied. It
 // mutates nothing (the audit-ring append mirrors the also-read-only
 // config.export path and satisfies the route's AuditExpected metadata).
-func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup, replaceMode bool, planned *upstreamImportPlanned) {
-	sections, settings := buildImportPreview(b, replaceMode, planned)
+func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup, checks importRuleChecks, replaceMode bool, planned *upstreamImportPlanned) {
+	pol := previewImportPolicy(b, checks, replaceMode) // once: effect and warnings from one simulation
+	sections, settings := buildImportPreview(b, pol, replaceMode, planned)
 	mode := "merge"
 	if replaceMode {
 		mode = "replace"
@@ -1117,6 +1119,9 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 		"sections":   sections,
 		"settings":   settings,
 	}
+	// The per-rule warnings the commit would return (same function): rules a
+	// merge would skip, and rules this node could not verify.
+	setImportWarnings(resp, pol.warnings)
 	if planned != nil && planned.Plan != nil {
 		// 2F-D (C9): the complete upstream plan + the deterministic digest a
 		// commit may echo (?importDigest=) to be refused if the document moved.
@@ -1132,9 +1137,11 @@ func writeImportPreview(w http.ResponseWriter, r *http.Request, b *configBackup,
 // stable ULID first (idempotent re-import), then a one-time name fallback for
 // pre-ID / hand-authored backups, else create fresh — so a re-import does not
 // accumulate duplicates (POLICY-ARCHITECTURE-FUTURE §1). Returns one warning
-// string per rule that failed validation and was skipped, so the caller can
-// surface them to the admin instead of leaving them only in the process log.
-func importPolicyRules(b *configBackup, replaceMode bool) []string {
+// string per merge-mode rule that failed validation and was skipped, so the
+// caller can surface them to the admin instead of leaving them only in the
+// process log. Both modes validate with the same per-rule core
+// (policy_ruleset_ingress.go).
+func importPolicyRules(b *configBackup, checks importRuleChecks, replaceMode bool) []string {
 	// Object-reference IDs are re-derived from the submitted NAMES, exactly like
 	// the interactive write path (stampObjectRefIDs): enforcement is
 	// ID-authoritative (failOpenScopeForRule, MatchesCategoryByID), so a backup
@@ -1144,6 +1151,10 @@ func importPolicyRules(b *configBackup, replaceMode bool) []string {
 	// profiles sections import before this (leaf-first), so names resolve
 	// against the just-imported objects; an unknown name leaves the ID empty
 	// (name fallback, same as interactive).
+	// Replace mode: the set was validated whole at the door, before any section
+	// applied (importIngressRefusal), by the same per-rule core the merge path
+	// and the policy API use. What is left to report is what could not be
+	// verified on this node.
 	if replaceMode && len(b.PolicyRules) > 0 {
 		rules := make([]PolicyRule, len(b.PolicyRules))
 		copy(rules, b.PolicyRules)
@@ -1151,42 +1162,25 @@ func importPolicyRules(b *configBackup, replaceMode bool) []string {
 			stampObjectRefIDs(&rules[i])
 		}
 		policyStore.ReplaceAll(rules)
-		return nil
+		warnings, _ := validateIngressRuleset(b.PolicyRules, checks)
+		return logImportRuleWarnings(warnings)
 	}
-	var warnings []string
-	// Index-based range: PolicyRule is a large struct (CLAUDE.md rangeValCopy).
-	for i := range b.PolicyRules {
-		rule := b.PolicyRules[i]
-		stampObjectRefIDs(&rule)
-		existing := policyStore.matchForImport(rule)
-		editPriority := -1
-		if existing != nil {
-			// UpdateByID keeps the live rule's position and DISCARDS the payload
-			// priority — so validate against the priority it will actually apply,
-			// not the backup's. Otherwise a re-import after the rulebase was
-			// reordered (payload priority now owned by a different live rule)
-			// would spuriously fail the priority-uniqueness check and silently
-			// drop the content update, defeating idempotency.
-			rule.Priority = existing.Priority
-			editPriority = existing.Priority
-		}
-		if err := validatePolicyRule(rule, policyStore.List(), editPriority); err != nil {
-			reason := strings.ReplaceAll(err.Error(), "\n", "")
-			logger.Printf("ConfigImport: skipping rule %q: %s", sanitizeLog(rule.Name), reason)
-			warnings = append(warnings, fmt.Sprintf("policy rule %q skipped: %s", rule.Name, reason))
-			continue
-		}
-		if existing == nil {
-			policyStore.Add(rule)
-			continue
-		}
-		rule.ID = existing.ID // carry identity for the name-match upsert path
-		if !policyStore.UpdateByID(existing.ID, rule) {
-			// The matched rule vanished between match and update (concurrent
-			// delete / import of the same rule). Don't silently drop the
-			// incoming content — add it fresh rather than lose it.
-			policyStore.Add(rule)
-		}
+	return logImportRuleWarnings(mergeImportedRules(policyStore, b.PolicyRules, checks).warnings)
+}
+
+// setImportWarnings adds the warnings key to an import answer when there is
+// something to report.
+func setImportWarnings(resp map[string]any, warnings []string) {
+	if len(warnings) > 0 {
+		resp["warnings"] = warnings
+	}
+}
+
+// logImportRuleWarnings writes each per-rule import warning to the process log
+// (they are already sanitized and bounded) and returns them for the response.
+func logImportRuleWarnings(warnings []string) []string {
+	for _, w := range warnings {
+		logger.Printf("ConfigImport: %s", sanitizeLog(w))
 	}
 	return warnings
 }
@@ -1202,19 +1196,18 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	if !requireRole(w, r, RoleAdmin) {
 		return
 	}
-	var b configBackup
-	if refusal := decodeImportBackup(r, &b); refusal != "" {
+	var (
+		b          configBackup
+		ruleChecks importRuleChecks // per-rule verdicts, computed once at the door
+	)
+	if refusal := decodeImportBackup(r, &b, &ruleChecks); refusal != "" {
 		http.Error(w, refusal, http.StatusBadRequest)
-		return
-	}
-	if b.Version < 1 || b.Version > configBackupVersion {
-		http.Error(w, "unsupported backup version", http.StatusBadRequest)
 		return
 	}
 
 	// Import mode: "replace" clears existing state before importing;
 	// "merge" (default) appends to existing state.
-	replaceMode := r.URL.Query().Get("mode") == "replace"
+	replaceMode := importReplaceRequested(r)
 
 	// Dry-run/preview: compute what the import WOULD change and return the
 	// summary WITHOUT touching any store. Read-only — no audit, no config
@@ -1232,7 +1225,7 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if importDryRunRequested(r) {
-		writeImportPreview(w, r, &b, replaceMode, upstreamPlanned)
+		writeImportPreview(w, r, &b, ruleChecks, replaceMode, upstreamPlanned)
 		return
 	}
 
@@ -1354,10 +1347,12 @@ func apiConfigImport(w http.ResponseWriter, r *http.Request) {
 	importCategoryOverrides(&b, replaceMode)
 
 	// Policy rules — replace or upsert-by-identity (extracted to keep the
-	// handler under the nestif complexity threshold). Rules that failed
-	// validation are skipped (not aborted whole); collect why, so "ok:true"
-	// never hides a silently-dropped rule from the admin (see warnings below).
-	warnings := importPolicyRules(&b, replaceMode)
+	// handler under the nestif complexity threshold). A replace-mode set was
+	// validated whole at the door (decodeImportBackup) and cannot get here
+	// with an invalid rule. In merge mode a rule that fails validation is
+	// skipped (not aborted whole); collect why, so "ok:true" never hides a
+	// silently-dropped rule from the admin (see warnings below).
+	warnings := importPolicyRules(&b, ruleChecks, replaceMode)
 	// The durable write is checked, not assumed: the imported rules are live
 	// from here on, and a swallowed failure answered "ok" while the policy file
 	// still held the previous rules — a restart then reverted the import.

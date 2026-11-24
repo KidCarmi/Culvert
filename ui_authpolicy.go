@@ -253,7 +253,7 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// Structural validation (state-independent) stays a pre-fence 400; the
 	// name/priority uniqueness checks run INSIDE the fence below.
-	if err := validateRuleShape(rule); err != nil {
+	if err := validateRuleIngress(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -341,7 +341,7 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateRuleShape(rule); err != nil {
+	if err := validateRuleIngress(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

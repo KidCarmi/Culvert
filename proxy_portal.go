@@ -162,7 +162,22 @@ func isSafeRedirectURL(raw string) bool {
 	// isPrivateHost returns nil only when all resolved IPs are public.
 	// DNS failure now also returns an error (fail-closed), so unresolvable
 	// hosts are rejected as unsafe redirect destinations.
-	return isPrivateHost(u.Host) == nil
+	return isPrivateHost(redirectGuardHost(u)) == nil
+}
+
+// redirectGuardHost is the host isSafeRedirectURL hands to the SSRF guard. It
+// is u.Host, except for a bracketed IPv6 literal with no port: the guard splits
+// host from port, "[2606:4700::1]" has no port to split, and the bracketed
+// string was then looked up as a NAME, which fails. Every portless IPv6 target
+// was refused for that reason, including a public one that rule ingress had
+// accepted, so the rule answered 403 on every match. The bare address is
+// classified as the address it is; a private, loopback or zoned one is still
+// refused by the guard.
+func redirectGuardHost(u *url.URL) string {
+	if u.Port() == "" && strings.HasPrefix(u.Host, "[") {
+		return u.Hostname()
+	}
+	return u.Host
 }
 
 // isSafeCaptiveRedirect validates a captive-portal redirect target produced

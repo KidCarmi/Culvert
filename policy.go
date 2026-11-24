@@ -318,6 +318,10 @@ type PolicyStore struct {
 	// only silences operator warnings that describe an effect on traffic, which
 	// a staged rule does not have yet; it never feeds evaluation or validation.
 	staging bool
+	// silent marks a SCRATCH store: a throwaway copy used to compute what an
+	// operation would do (the import preview). It writes no operator-facing
+	// log line and records no Diagnostics refusal.
+	silent bool
 	// scanIndex is the packed Stage-2 destination prefilter for the revision
 	// it names (see policy_scanindex.go). Published lock-free under mu by
 	// publishScanIndexLocked, alongside every assignment to `verified`, and
@@ -735,10 +739,11 @@ func (ps *PolicyStore) listLocked() []PolicyRule {
 // (Evaluate skips non-access rules; resolveAuthOutcome returns Default). Invalid
 // auth rules are DROPPED fail-closed, as are access rules carrying a non-nil
 // SubjectMatch (Evaluate does not consult it, so persisting one would let a
-// scoped rule match every request — fail-open). validatePolicyRule guards the
-// per-rule API/import-merge paths; this store-level gate closes the bulk paths
-// that bypass that validator (cluster sync, import-replace, and any other direct
-// ReplaceAll caller). The phase that wires the matcher activates these rules.
+// scoped rule match every request — fail-open). The ingress validation guards
+// the doors where an operator submits rules (API, import in both modes;
+// policy_ruleset_ingress.go); this store-level gate is the one the stored and
+// wire doors rely on (cluster sync, rollback, and any other direct ReplaceAll
+// caller). The phase that wires the matcher activates these rules.
 func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	// A rule this build cannot enforce (unknown ruleType, or any shape
 	// policyRulePersistable refuses): refuse the whole replacement and keep the
@@ -889,10 +894,19 @@ func (ps *PolicyStore) Add(r PolicyRule) PolicyRule {
 	ps.mu.Unlock()
 
 	// Detect policy conflicts after adding the new rule.
+	ps.logConflicts()
+	return nr
+}
+
+// logConflicts logs the store's rule conflicts after an Add. Not for a scratch
+// store, whose rules nobody enforces or will see.
+func (ps *PolicyStore) logConflicts() {
+	if ps.silent {
+		return
+	}
 	for _, w := range ps.DetectConflicts() {
 		logWarnf("Policy: %s", sanitizeLog(w))
 	}
-	return nr
 }
 
 // availablePriorityLocked preserves a unique requested priority and otherwise
