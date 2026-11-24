@@ -334,7 +334,8 @@ once. An older agent version refuses to start on it, because it would report
 the interrupted operation without recording that it had looked. So after an
 agent died in the middle of an operation, **start the current version once
 before downgrading the agent**; it removes the file by itself. Do not delete
-it by hand.
+it by hand. If the journal also holds a corrupt record (see above), fix or
+move that record first; the intent fence then clears at the next start.
 
 If the file named is `00000000000000000000000000.json`, it is not corrupt: it
 is the **downgrade fence** (ADR-0062). A newer agent writes it while the
