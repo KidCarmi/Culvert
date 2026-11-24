@@ -61,6 +61,87 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A replace-mode config import no longer installs policy rules the policy
+  API refuses.** `POST /api/config/import?mode=replace` checked only that
+  every rule was of a type this version can enforce, then replaced the whole
+  policy. It therefore accepted, with `200 {"ok":true}` and no warning, rules
+  that `POST /api/policy` answers 400 to. The one that changes traffic: a Drop
+  or Block rule whose `sourceIP` is not an address or a CIDR
+  (`"10.0.0.5-10.0.0.9"`, `" 10.0.0.5"`, `"10.0.0.0/33"`) never matches, so
+  importing it over a working restriction let that traffic fall through to the
+  default action or to an Allow behind it. Also accepted: duplicate rule names
+  or priorities, a Redirect with no `redirectURL` or one pointing at a private
+  address, an impossible schedule timezone, a rule with no name, and a rule
+  whose `action`
+  is missing or is not exactly `Allow`, `Drop`, `Block_Page` or `Redirect`.
+  Every door where an operator submits rules now runs the same validation
+  through one shared function: the policy and auth-policy API, config import
+  in both modes, and policy-learning acceptance. No door has rules of its own.
+  - **Replace mode** validates the incoming set before anything is applied
+    (the dry-run preview too). One invalid rule refuses the whole import with
+    a 400; no section is applied, nothing is audited or versioned, and the
+    running and saved policy are untouched.
+  - **Merge mode** still skips an invalid rule and lists it in `warnings`, as
+    before, and now also skips a rule whose `sourceIP` can never match instead
+    of installing it or overwriting a working rule with it.
+  - **Not changed:** how a rule is evaluated (a stored rule with no action
+    still resolves to Allow), and the doors that read stored or published
+    policy: the policy file at startup and reload, config-version rollback,
+    control-plane snapshots and a pending draft. They keep loading what they
+    held, so no node fails to start, roll back or follow its control plane
+    because of this change.
+
+  - **A Redirect host this node cannot resolve is not an invalid rule.** When
+    the DNS lookup of a Redirect rule's host fails, or is not made within the
+    10 seconds an import allows for verification, an import (both modes, dry
+    run included) still installs the rule and returns one `warnings` entry
+    naming the rule and the host, so a backup of a healthy policy restores on
+    a node whose DNS is down. This is the only finding treated this way, and
+    only because it is fail-closed where it is used: a Redirect is re-checked
+    every time it matches and answers 403 until its host resolves to a public
+    address. Decided without DNS, and always refused: a host that is a
+    private, loopback, link-local, unspecified or metadata address literal
+    (bracketed IPv6 with or without a port, zoned addresses), `localhost` in
+    any spelling, and numeric-looking hosts that are not canonical addresses
+    (`2130706433`, `0x7f.1`, `127.1`). A name that resolves to a private
+    address is refused. `POST`/`PUT /api/policy` still answer 400 to a host
+    they could not resolve; the message now says so instead of calling the
+    URL malformed. An import whose request is cancelled applies nothing.
+  - **A schedule timezone the node cannot load is refused, never installed.**
+    On a node with a timezone database an unknown name is a typo (`invalid
+    schedule timezone: … is not a known timezone`). On a node with no
+    timezone database the rule is refused with a message saying so and what
+    to install. Replace refuses the import; merge skips the rule and leaves
+    any existing rule of the same name untouched. Installing it would not be
+    safe: an access rule's schedule would run on UTC hours, and an
+    authentication rule would stop matching, which removes the
+    authentication requirement when the default outcome is Exempt.
+  - The merge-mode dry run now runs the merge itself against a silent copy of
+    the policy, so its `upsert N: U update, A add` line counts skipped rules
+    (`…, S skipped as invalid`) and returns the same `warnings` as the commit.
+    The backup `version` is checked before the rules.
+
+  **Upgrade impact:** a replace-mode import that used to succeed can now be
+  refused. The response says which rule and why, for example `import refused:
+  policy rule 3 of 12 ("quarantine") is not valid: sourceIP
+  "10.0.0.5-10.0.0.9" must be a single IP address or a CIDR`. Correct that
+  rule in the file and import again; `?dryRun=true` gives the same answer
+  without applying anything. This includes a backup exported by this system
+  if its policy held such a rule, which is possible when the rule came from a
+  hand-edited policy file, a control-plane snapshot, a restored config
+  version, or a release older than the API check concerned. The shapes a
+  self-made export can hold and a replace import now refuses: a `sourceIP`
+  that is not an address or CIDR; duplicate rule names; duplicate priorities;
+  a rule with no name; an `action` that is missing, in another letter case,
+  or unknown to this version (such a rule is kept and blocks when it comes
+  from a policy file or snapshot, but cannot be imported); a Redirect with an
+  empty or non-http(s) `redirectURL`, or one whose host is or resolves to a
+  private address; and a schedule timezone the importing node cannot load (on
+  an image without zoneinfo that is every named zone: install tzdata first).
+  Not changed here, and worth knowing: the policy file, config-version
+  rollback and control-plane snapshots still load a rule with an unloadable
+  timezone, and evaluate an access rule's schedule in UTC or never match an
+  authentication rule.
 - **The SSRF guard classified a zoned IPv6 address as public.** The pre-flight
   check that keeps outbound requests and redirect targets away from internal
   addresses read the resolver's answers with a parser that does not understand
