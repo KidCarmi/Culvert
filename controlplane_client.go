@@ -653,6 +653,7 @@ func (c *DataPlaneClient) fetchAndApply(ctx context.Context) {
 	// subsequent legitimate snapshot via the "snap.Version <= lastVersion"
 	// short-circuit below.
 	if err := validateConfigSnapshot(snap); err != nil {
+		noteSnapshotPolicyRefusal(err)
 		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
 		markConfigSnapshotApplyRejected()
 		return
@@ -805,6 +806,7 @@ func (c *DataPlaneClient) applyDeltaReply(reply getConfigDeltaReply) bool {
 		return true // still before any mutation
 	}
 	if err := validateConfigSnapshot(remainder); err != nil {
+		noteSnapshotPolicyRefusal(err)
 		logger.Printf("DataPlane: rejecting delta remainder v%d: %v", reply.TargetVersion, err)
 		markConfigSnapshotApplyRejected()
 		return false

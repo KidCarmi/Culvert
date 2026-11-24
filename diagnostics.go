@@ -264,6 +264,7 @@ func buildOperatorContract() OperatorContract {
 	// every rule in the file was accepted.
 	checks = append(checks, checkPolicyRulesDroppedOnLoad(policyStore)...)
 	checks = append(checks, checkPolicyRulesUnknownAction(policyStore)...)
+	checks = append(checks, checkPolicyRulesetRefused(policyStore)...)
 	// Enabled destination-country rules while no GeoIP database is loaded: such
 	// rules can never match. Contributes nothing when a database is loaded or no
 	// enabled rule uses a country condition.

@@ -105,6 +105,15 @@ func initPolicyDraft(policyPath string) {
 	if json.Unmarshal(data, &p) != nil || !p.State.Active {
 		return
 	}
+	// POL-005: a pending draft holding a rule type this build has no stage for
+	// is not reloaded at all. The candidate store would refuse it and stay
+	// EMPTY; marking that draft active would let a commit publish an empty
+	// rulebase over the running policy.
+	if err := policyRulesRuleTypeError(p.Rules); err != nil {
+		policyStore.noteRulesetRefused("pending policy draft", err)
+		logWarnf("PolicyDraft: pending draft in %s was NOT reloaded; the running policy is unchanged and no draft is open", sanitizeLog(policyDraft.path))
+		return
+	}
 	policyDraft.cand.ReplaceAll(p.Rules)
 	policyDraft.state = p.State
 	logger.Printf("PolicyDraft: reloaded pending draft (%d rules) opened by %s", len(p.Rules), sanitizeLog(p.State.Actor))
