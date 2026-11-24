@@ -128,6 +128,13 @@ func (p *Provider) addInterrupted(st *server.Status) {
 	}
 	for i := range recs {
 		rec := &recs[i]
+		// A record whose operation ended with its end state proven safe is
+		// kept only because its terminal audit entry or its removal did not
+		// complete; startup finishes both. It is not a recovery situation and
+		// is not reported as one (Codex review on #2102).
+		if rec.TerminalOutcome != "" && rec.TerminalSafe {
+			continue
+		}
 		// A record whose operation THIS process knows — running, or terminal
 		// with its record about to be removed — is not an interruption. Only
 		// an operation startup marked, or one no longer in memory at all, is.

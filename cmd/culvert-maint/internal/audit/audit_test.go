@@ -385,3 +385,40 @@ func TestFindTerminal(t *testing.T) {
 		t.Error("empty kind must be rejected")
 	}
 }
+
+// TestNew_TerminatesATornTail (Codex review on #2102): a crash during an
+// append can leave a partial JSON line without its newline. New ends it, so
+// the next entry — e.g. a terminal entry re-written at startup — is its own
+// readable line instead of being glued onto the fragment and lost.
+func TestNew_TerminatesATornTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	torn := `{"ts":"2026-11-24T10:00:00Z","actor":"a","op_id":"op1","kind":"upgrades.apply","outcome":"star` // no newline
+	if err := os.WriteFile(path, []byte(`{"ts":"2026-11-24T09:00:00Z","actor":"a","op_id":"op0","kind":"upgrades.apply","outcome":"started"}`+"\n"+torn), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	if err := l.Write(Event{Actor: "a", OpID: "op1", Kind: "upgrades.apply", Outcome: OutcomeSucceeded}); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := FindTerminal(path, "op1", "upgrades.apply")
+	if err != nil || ev == nil || ev.Outcome != OutcomeSucceeded {
+		t.Fatalf("entry written after a torn tail is not readable: ev=%+v err=%v", ev, err)
+	}
+	// A clean file is left as it is: no stray blank line.
+	clean := filepath.Join(t.TempDir(), "audit.jsonl")
+	if err := os.WriteFile(clean, []byte(`{"op_id":"x"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l2, err := New(clean)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = l2.Close()
+	if b, _ := os.ReadFile(clean); string(b) != `{"op_id":"x"}`+"\n" { // #nosec G304 -- test temp file
+		t.Errorf("a clean log was changed: %q", b)
+	}
+}

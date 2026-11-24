@@ -84,3 +84,33 @@ func TestSnapshot_ConvergeReportsRecoveryRequiredForAKeptRecord(t *testing.T) {
 		t.Errorf("recovery_required = %v with a kept failed record, want true", st.RecoveryRequired)
 	}
 }
+
+// TestSnapshot_SafeTerminalRecordIsNotARecovery (Codex review on #2102): a
+// record kept only because its terminal audit entry or its removal did not
+// complete, for an operation that succeeded or ended proven safe, is not
+// listed as an interruption and does not raise recovery_required.
+func TestSnapshot_SafeTerminalRecordIsNotARecovery(t *testing.T) {
+	for _, outcome := range []string{"succeeded", "failed:health_failed"} {
+		t.Run(outcome, func(t *testing.T) {
+			p, jnl := providerWithJournal(t)
+			op, err := p.mgr.Begin(ops.KindUpgradeApply, "uid=0", "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := keptRecord(op.ID)
+			rec.TerminalOutcome, rec.TerminalSafe, rec.TerminalAudited = outcome, true, false
+			if err := jnl.Write(rec); err != nil {
+				t.Fatal(err)
+			}
+			state, reason := ops.StateSucceeded, ops.FailureReason("")
+			if outcome != "succeeded" {
+				state, reason = ops.StateFailed, ops.ReasonHealthFailed
+			}
+			_ = p.mgr.Finish(op.ID, state, reason, nil)
+			st, _ := p.Snapshot(context.Background()) //nolint:errcheck // Snapshot never fails
+			if len(st.InterruptedOperations) != 0 {
+				t.Fatalf("a safe terminal record was reported: %+v", st.InterruptedOperations)
+			}
+		})
+	}
+}

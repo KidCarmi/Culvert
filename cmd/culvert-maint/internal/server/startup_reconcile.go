@@ -357,6 +357,13 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 		return ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind), Decision: actV2RecoveryRequired.String(),
 			Reason: "record_from_newer_agent", Outcome: OutcomeRecoveryRequired}
 	}
+	if rec.TerminalOutcome != "" && rec.TerminalSafe {
+		// The operation ended with its end state proven safe; only its terminal
+		// audit entry or its removal was cut, and startup retries both. There
+		// is nothing for the reconcile to decide (Codex review on #2102).
+		return ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind), Decision: actV2Defer.String(),
+			Reason: "terminal_cleanup_pending", Outcome: OutcomeDeferred}
+	}
 	c := &reconcileCase{opID: opID, rec: rec, in: s.reconcileInputsFor(rec)}
 	c.out = ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind)}
 	// Docker was tested and does not answer: there is nothing to observe, so

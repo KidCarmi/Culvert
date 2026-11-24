@@ -64,7 +64,46 @@ func New(path string) (*Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: open %s: %w", path, err)
 	}
+	if err := terminateTornTail(path, f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	return &Logger{path: path, f: f}, nil
+}
+
+// terminateTornTail ends a torn final line before anything is appended. A
+// crash during an append can leave a partial JSON line without its newline;
+// readers skip it, but the next Write would be appended ONTO it and become
+// part of the same unreadable line, so an entry written to repair the lost
+// one (e.g. a terminal entry re-written at startup) would be lost too
+// (Codex review on #2102). One newline, fsynced, isolates the fragment.
+func terminateTornTail(path string, f *os.File) error {
+	r, err := os.Open(path) // #nosec G304 -- the audit log path the logger was opened with
+	if err != nil {
+		return fmt.Errorf("audit: open %s for tail check: %w", path, err)
+	}
+	defer func() { _ = r.Close() }()
+	fi, err := r.Stat()
+	if err != nil {
+		return fmt.Errorf("audit: stat %s: %w", path, err)
+	}
+	if fi.Size() == 0 {
+		return nil
+	}
+	last := make([]byte, 1)
+	if _, err := r.ReadAt(last, fi.Size()-1); err != nil {
+		return fmt.Errorf("audit: read tail of %s: %w", path, err)
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		return fmt.Errorf("audit: terminate torn tail of %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("audit: fsync %s: %w", path, err)
+	}
+	return nil
 }
 
 // Path returns the audit log path.
