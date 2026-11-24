@@ -301,6 +301,9 @@ func takeCommandIntents(jnl *journal.Journal, recs []journal.Record) (map[string
 			diedIn[rec.OpID] = command
 		}
 	}
+	// Every intent has been taken: the fence that kept older agent versions
+	// from starting on one can go.
+	jnl.ReleaseIntentFence()
 	return diedIn, nil
 }
 

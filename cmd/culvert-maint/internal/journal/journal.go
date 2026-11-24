@@ -285,12 +285,13 @@ func (j *Journal) Write(rec Record) error {
 	if err != nil {
 		return err
 	}
+	dropped := false
 	if rec.Intent != nil && !j.commandInFlight(rec.OpID) {
 		// An intent this process is not inside: its close could not be written
 		// earlier, and a read-modify-write is now carrying it. It must not
 		// reach disk again as "in flight" (intent.go). An agent START never
 		// gets here with one: it takes the intent before it writes.
-		rec.Intent = nil
+		rec.Intent, dropped = nil, true
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
@@ -306,7 +307,13 @@ func (j *Journal) Write(rec Record) error {
 	if j.writeErrForTest != nil {
 		return j.writeErrForTest
 	}
-	return atomicWrite(path, data, fileMode)
+	if err := atomicWrite(path, data, fileMode); err != nil {
+		return err
+	}
+	if dropped {
+		j.releaseIntentFenceIfUnused()
+	}
+	return nil
 }
 
 // SetWriteErrorForTest makes every later Write fail with err (nil restores
@@ -374,8 +381,8 @@ func (j *Journal) List() ([]Record, error) {
 			continue
 		}
 		opID := strings.TrimSuffix(e.Name(), fileExt)
-		if opID == fenceOpID {
-			continue // the downgrade fence is not an operation (schema.go)
+		if opID == fenceOpID || opID == intentFenceOpID {
+			continue // a downgrade fence is not an operation (schema.go, intent.go)
 		}
 		rec, found, rerr := j.Read(opID)
 		if rerr != nil {
@@ -411,6 +418,7 @@ func (j *Journal) Remove(opID string) error {
 	// The record is gone either way; a fence that could not be released stays,
 	// which only keeps older agents out a little longer.
 	_ = j.releaseFenceIfUnused()
+	j.releaseIntentFenceIfUnused()
 	return nil
 }
 

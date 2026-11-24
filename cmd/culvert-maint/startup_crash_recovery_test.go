@@ -505,10 +505,20 @@ func (r *crashRig) waitJournal(want ...string) []string {
 }
 
 // journalFiles lists the op ids with a live journal record.
+// intentFenceFile stands in the journal while an operation is inside a docker
+// compose command and, if the agent dies there, until an agent of this version
+// has started (journal/intent.go). It is not an operation record.
+const intentFenceFile = "00000000000000000000000001.json"
+
+// journalFiles lists the OPERATION records in the journal (not the intent
+// fence; TestCommandIntent_DiedInsideUp asserts when that is and is not there).
 func (r *crashRig) journalFiles() []string {
 	ents, _ := os.ReadDir(filepath.Join(r.state, "reconcile"))
 	var out []string
 	for _, e := range ents {
+		if e.Name() == intentFenceFile {
+			continue
+		}
 		if strings.HasSuffix(e.Name(), ".json") {
 			out = append(out, strings.TrimSuffix(e.Name(), ".json"))
 		}

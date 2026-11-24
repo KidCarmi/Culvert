@@ -3,11 +3,14 @@ package journal
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 )
 
 const (
@@ -299,30 +302,177 @@ func TestIntent_WhatTheRecordMustSay(t *testing.T) {
 	}
 }
 
-// TestIntent_NeedsNoSchemaAndNoFence: a record with an open intent is written
-// at schema 1 with no downgrade fence. An agent older than the lossless
-// rewrite drops the key (nothing is attributed); one that carries it counts
-// its start, which the epoch catches (the "downgrade" rows above).
-func TestIntent_NeedsNoSchemaAndNoFence(t *testing.T) {
+// slice2Phases is the closed phase set of the agent between ADR-0062 slice 2
+// and this change (journal.go validPhases at 11dd85c). Frozen on purpose: it
+// stands for THAT binary.
+var slice2Phases = map[Phase]struct{}{
+	"admitted": {}, "captured": {}, "resolved": {}, "pulled": {},
+	"restarting": {}, "restarted": {}, "verified": {},
+}
+
+// slice2AgentList is List as the agent at 11dd85c runs it: strict-ULID file
+// names, the first-generation fence skipped BY NAME and no other, json decode,
+// the closed phase set, fail-closed on the first failure. Its initJournal
+// refuses to serve when this returns an error.
+func slice2AgentList(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(e.Name(), ".json")
+		if id == "00000000000000000000000000" {
+			continue
+		}
+		if _, err := ulid.ParseStrict(id); err != nil {
+			return err
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name())) // #nosec G304 -- test temp dir
+		if err != nil {
+			return err
+		}
+		var r struct {
+			Phase Phase `json:"phase"`
+		}
+		if err := json.Unmarshal(data, &r); err != nil {
+			return fmt.Errorf("%w: %v", ErrCorruptRecord, err)
+		}
+		if _, ok := slice2Phases[r.Phase]; !ok {
+			return fmt.Errorf("%w: unknown phase %q", ErrCorruptRecord, r.Phase)
+		}
+	}
+	return nil
+}
+
+// TestIntentFence_KeepsEveryOlderAgentOutWhileAnIntentIsOpen: while a record
+// holds an open intent, an agent of either older generation refuses to serve
+// on this directory (it would not take the intent, and may serve without
+// counting its start). Once the intent is gone both start normally, and the
+// record needs no schema above 1.
+func TestIntentFence_KeepsEveryOlderAgentOutWhileAnIntentIsOpen(t *testing.T) {
 	dir := t.TempDir()
+	rdir := filepath.Join(dir, "reconcile")
 	a := newLife(t, dir)
 	a.seed(intentOp)
 	before := rawRecordFile(t, dir, intentOp)
+	for name, list := range map[string]func(string) error{"slice-2 agent": slice2AgentList, "pre-ADR agent": olderAgentList} {
+		if err := list(rdir); err != nil {
+			t.Fatalf("%s refuses a journal with no intent: %v", name, err)
+		}
+	}
 	if _, err := a.j.BeginCommand(intentOp, MutationComposeUp, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	during := rawRecordFile(t, dir, intentOp)
-	if strings.Contains(during, `"schema"`) {
-		t.Errorf("an open intent raised the record's schema:\n%s", during)
+	if strings.Contains(rawRecordFile(t, dir, intentOp), `"schema"`) {
+		t.Error("an open intent raised the record's schema")
 	}
 	if on, _ := a.j.FenceActive(); on {
-		t.Error("an open intent put the downgrade fence up")
+		t.Error("an open intent put the FIRST-generation fence up (slice-2 agents skip it; it would be no use)")
+	}
+	for name, list := range map[string]func(string) error{"slice-2 agent": slice2AgentList, "pre-ADR agent": olderAgentList} {
+		if err := list(rdir); !errors.Is(err, ErrCorruptRecord) {
+			t.Errorf("%s with an intent open: List err = %v, want it to fail closed", name, err)
+		}
+	}
+	if recs, err := a.j.List(); err != nil || len(recs) != 1 {
+		t.Errorf("this build's List with the fence up: %d records, err %v; want the one record", len(recs), err)
 	}
 	if err := a.j.EndCommand(intentOp); err != nil {
 		t.Fatal(err)
 	}
+	for name, list := range map[string]func(string) error{"slice-2 agent": slice2AgentList, "pre-ADR agent": olderAgentList} {
+		if err := list(rdir); err != nil {
+			t.Errorf("%s after the command returned: %v, want it to start", name, err)
+		}
+	}
 	// A record whose command has returned is byte-identical to what it was.
 	if after := rawRecordFile(t, dir, intentOp); after != before {
 		t.Errorf("record after the command returned differs from before it:\n%s\n---\n%s", before, after)
+	}
+}
+
+// TestIntentFence_UpExactlyWhileAnIntentIsOnDisk: across two records, a failed
+// close healed by a later write, a record removed with its intent open, and an
+// agent start that takes what a dead process left.
+func TestIntentFence_UpExactlyWhileAnIntentIsOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	a.seed(intentOp2)
+	want := func(when string, on bool) {
+		t.Helper()
+		if got, err := a.j.IntentFenceActive(); err != nil || got != on {
+			t.Fatalf("%s: intent fence = %v (err %v), want %v", when, got, err, on)
+		}
+	}
+	now := time.Now().UTC()
+	want("nothing begun", false)
+	_, _ = a.j.BeginCommand(intentOp, MutationComposeUp, now)
+	_, _ = a.j.BeginCommand(intentOp2, MutationComposeDown, now)
+	want("two open", true)
+	_ = a.j.EndCommand(intentOp)
+	want("one still open", true)
+	a.j.SetWriteErrorForTest(errors.New("no space left on device"))
+	_ = a.j.EndCommand(intentOp2) // the close cannot be written
+	a.j.SetWriteErrorForTest(nil)
+	want("close failed: the intent is still on disk", true)
+	a.phaseAdvance(intentOp2) // the operation's next write drops it
+	want("stale intent dropped by a later write", false)
+
+	_, _ = a.j.BeginCommand(intentOp, MutationComposeUp, now)
+	want("open again", true)
+	if err := a.j.Remove(intentOp); err != nil {
+		t.Fatal(err)
+	}
+	want("its record removed", false)
+
+	_, _ = a.j.BeginCommand(intentOp2, MutationComposeUp, now) // and the agent dies here
+	a = newLife(t, dir)
+	want("after the death, before any start of this build", true)
+	a.start()
+	a.j.ReleaseIntentFence() // as main.go takeCommandIntents does
+	want("after a start took the intent", false)
+}
+
+// TestIntentFence_NoFenceNoIntent: if the fence cannot be written, the intent
+// is not written either. Nothing can then be attributed, and no older agent
+// can find an intent it would not take.
+func TestIntentFence_NoFenceNoIntent(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	// Only the fence write fails; the record itself could be written.
+	orig := writeIntentFence
+	writeIntentFence = func(string, []byte, os.FileMode) error { return errors.New("no space left on device") }
+	_, err := a.j.BeginCommand(intentOp, MutationComposeUp, time.Now().UTC())
+	writeIntentFence = orig
+	if err == nil {
+		t.Fatal("BeginCommand reported success without a fence")
+	}
+	if strings.Contains(rawRecordFile(t, dir, intentOp), `"intent"`) {
+		t.Error("an intent is on disk without its fence")
+	}
+	if died := newLife(t, dir).start(); len(died) != 0 {
+		t.Errorf("the next start concludes %v from a command whose intent was never written", died)
+	}
+}
+
+// TestIntentFence_StaysWhenTheJournalCannotBeJudged: a file in the journal that
+// cannot be read may be a record with an open intent. The fence is kept.
+func TestIntentFence_StaysWhenTheJournalCannotBeJudged(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	a.seed(intentOp2)
+	_, _ = a.j.BeginCommand(intentOp, MutationComposeUp, time.Now().UTC())
+	if err := os.WriteFile(filepath.Join(dir, "reconcile", intentOp2+".json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.j.EndCommand(intentOp)
+	if on, _ := a.j.IntentFenceActive(); !on {
+		t.Error("the fence was removed although one journal file cannot be read")
 	}
 }

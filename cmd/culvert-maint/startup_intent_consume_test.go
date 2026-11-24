@@ -176,3 +176,40 @@ func bumpSchemaOnDisk(t *testing.T, stateDir, opID string, schema int) {
 		t.Fatal(err)
 	}
 }
+
+// TestInitJournal_AnIntentAnOlderAgentHasSeenIsTakenButNotAttributed: the
+// agent died inside `compose up`; an older agent version was then started on
+// the directory (it counts its start and leaves the intent it does not know);
+// then this version starts. It removes the intent and concludes nothing: the
+// stack has been through a start that reported, and may have been touched.
+func TestInitJournal_AnIntentAnOlderAgentHasSeenIsTakenButNotAttributed(t *testing.T) {
+	dir := t.TempDir()
+	diedInsideUp(t, dir, dangerRecord())
+	// The older agent's start: interrupted_seen 0 → 1, every other key kept.
+	path := filepath.Join(dir, "reconcile", startupOp+".json")
+	raw, err := os.ReadFile(path) // #nosec G304 -- test-owned temp dir
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	m["interrupted_seen"] = 1
+	out, _ := json.Marshal(m)
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	al, _ := startupAudit(t, dir)
+	_, died, err := initJournal(dir, ops.NewManager(nil), al, startupRepo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(died) != 0 {
+		t.Errorf("died = %v, want nothing: a start had counted the record since the command was begun", died)
+	}
+	if after := recordFileRaw(t, dir, startupOp); strings.Contains(after, `"intent"`) || !strings.Contains(after, `"attributed": false`) {
+		t.Errorf("record after the start:\n%s\nwant the intent removed and a cut marked not attributed", after)
+	}
+}

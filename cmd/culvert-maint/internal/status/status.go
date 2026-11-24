@@ -60,10 +60,6 @@ func (p *Provider) WithJournal(j *journal.Journal) *Provider {
 	return p
 }
 
-// WithReconcile makes the provider report the startup reconcile
-// (Status.Reconcile, Status.RecoveryRequired and each interrupted operation's
-// reconcile_outcome). Only wired when reconcile_on_startup = "converge".
-// Returns p.
 // WithDiedInCommand gives the provider what THIS agent start concluded about
 // command attribution (op id → command; journal/intent.go). It is held in
 // memory only and never written: a restarted agent knows nothing of it.
@@ -72,6 +68,10 @@ func (p *Provider) WithDiedInCommand(m map[string]string) *Provider {
 	return p
 }
 
+// WithReconcile makes the provider report the startup reconcile
+// (Status.Reconcile, Status.RecoveryRequired and each interrupted operation's
+// reconcile_outcome). Only wired when reconcile_on_startup = "converge".
+// Returns p.
 func (p *Provider) WithReconcile(t *server.ReconcileTracker) *Provider {
 	p.reconcile = t
 	return p

@@ -326,6 +326,16 @@ directory is not the problem: the agent was downgraded while an operation of
 the newer version was inside a `docker compose` command. Start the newer
 version again; it resolves the record.
 
+If the file named is `00000000000000000000000001.json`, it is not corrupt
+either: it is the **intent fence**. It stands in the journal while an
+upgrade, rollback or restore is inside a `docker compose` command, and, if the
+agent dies in that command, until an agent of this version or later has started
+once. An older agent version refuses to start on it, because it would report
+the interrupted operation without recording that it had looked. So after an
+agent died in the middle of an operation, **start the current version once
+before downgrading the agent**; it removes the file by itself. Do not delete
+it by hand.
+
 If the file named is `00000000000000000000000000.json`, it is not corrupt: it
 is the **downgrade fence** (ADR-0062). A newer agent writes it while the
 journal holds a record that only an agent of that version or later can read

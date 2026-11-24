@@ -68,8 +68,8 @@ func (r *crashRig) recordFile(opID string) intentRecordFile {
 }
 
 // TestCommandIntent_DiedInsideUp: the agent is killed inside the upgrade's
-// `compose up`. The record on disk says so (an open intent; no schema change,
-// no downgrade fence). The first start after it, with reconcile_on_startup at
+// `compose up`. The record on disk says so (an open intent, no schema change),
+// and the intent fence keeps older agent versions from starting on it. The first start after it, with reconcile_on_startup at
 // its default "off", reports it, and has removed the intent from disk; the
 // start after that does not (cases A and E: a start has looked, whatever its
 // mode; nothing that happens to the stack afterwards is that command's doing).
@@ -80,8 +80,12 @@ func TestCommandIntent_DiedInsideUp(t *testing.T) {
 	if f := r.recordFile(opID); f.Intent == nil || f.Intent.Command != "compose up" || f.Intent.Epoch != 0 || f.Schema != 0 {
 		t.Fatalf("record after the kill = %+v, want an open compose up intent at epoch 0 and no schema key", f)
 	}
-	if files := r.journalFiles(); len(files) != 1 {
-		t.Errorf("journal after the kill = %v, want only the record (no downgrade fence)", files)
+	fence := filepath.Join(r.state, "reconcile", intentFenceFile)
+	if _, err := os.Stat(fence); err != nil {
+		t.Errorf("no intent fence beside a record with an open intent (an older agent version could start here): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(r.state, "reconcile", "00000000000000000000000000.json")); !os.IsNotExist(err) {
+		t.Errorf("the first-generation fence is up (err=%v); an intent must not raise the record schema", err)
 	}
 	r.start()
 	if cmd, starts := r.diedIn(opID); cmd != "compose up" || starts != 1 {
@@ -89,6 +93,9 @@ func TestCommandIntent_DiedInsideUp(t *testing.T) {
 	}
 	if f := r.recordFile(opID); f.Intent != nil || f.Cut == nil || !f.Cut.Attributed {
 		t.Errorf("record after the first start = %+v, want the intent removed and an attributed cut", f)
+	}
+	if _, err := os.Stat(fence); !os.IsNotExist(err) {
+		t.Errorf("the intent fence is still there after a start took the intent (err=%v)", err)
 	}
 	r.kill()
 	r.start()

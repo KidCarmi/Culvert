@@ -1,6 +1,14 @@
 package journal
 
-import "time"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"time"
+)
 
 // Command attribution (ADR-0062, slice 3).
 //
@@ -24,14 +32,24 @@ import "time"
 //     marker, no lock and no check across records: evidence that is gone
 //     cannot be read again.
 //
-// Epoch guards the one way an Intent can outlive a start: an agent build that
-// does not know the field but carries unknown keys through its rewrites (main
-// between ADR-0062 slice 2 and this file). Such an agent counts its start in
-// InterruptedSeen like every other; an Intent whose Epoch is not the record's
-// current InterruptedSeen has therefore been looked at, and is taken without
-// being attributed. An agent older than slice 2 drops the key on rewrite,
-// which is the safe side. So an Intent needs no schema bump and no downgrade
-// fence.
+// Two guards cover the one way an Intent can outlive a start: an OLDER agent
+// build started on this state directory. Such a build does not take the
+// Intent; one from between ADR-0062 slice 2 and this file even carries the key
+// it does not know through its rewrites.
+//
+//   - Epoch: an older build counts its start in InterruptedSeen. An Intent
+//     whose Epoch is not the record's current InterruptedSeen has therefore
+//     been looked at, and is taken without being attributed.
+//   - The intent fence: an older build counts best-effort. If that one write
+//     fails it still serves and reports, and the Epoch would not show it. So
+//     for as long as any record holds an open Intent, the journal also holds a
+//     second-generation fence file, on which every build before this file
+//     refuses to serve (schema.go describes the first generation, which
+//     builds since slice 2 skip by name; they do not skip this one). No fence,
+//     no Intent: if the fence cannot be written the Intent is not written
+//     either, and nothing will be attributed.
+//
+// The Intent does not raise the record's schema.
 //
 // Why this shape: three independent reviews of a marker-based design (#2093,
 // parked) and one of the first version of this file each reproduced a wrong
@@ -88,6 +106,9 @@ func (j *Journal) BeginCommand(opID, command string, now time.Time) (found bool,
 	if err != nil || !found {
 		return found, err
 	}
+	if ferr := j.ensureIntentFence(); ferr != nil {
+		return true, ferr // no fence, no intent
+	}
 	rec.Intent = &CommandIntent{Command: command, Began: now, Epoch: rec.InterruptedSeen}
 	return true, j.Write(*rec)
 }
@@ -105,9 +126,78 @@ func (j *Journal) EndCommand(opID string) error {
 		return err
 	}
 	if !found || rec.Intent == nil {
+		j.releaseIntentFenceIfUnused()
 		return nil
 	}
-	return j.Write(*rec) // Write drops the Intent: the command is not in flight
+	// Write drops the Intent (the command is not in flight) and then the fence.
+	return j.Write(*rec)
+}
+
+// intentFenceOpID names the second-generation fence: a valid ULID (timestamp
+// 0) no operation can have, and not the name builds since ADR-0062 slice 2
+// skip. Any build before this file reads it as a record, finds a phase it does
+// not know, and refuses to serve.
+const intentFenceOpID = "00000000000000000000000001"
+
+func (j *Journal) intentFencePath() string { return filepath.Join(j.dir, intentFenceOpID+fileExt) }
+
+// IntentFenceActive reports whether the intent fence is present.
+func (j *Journal) IntentFenceActive() (bool, error) {
+	_, err := os.Stat(j.intentFencePath())
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, fmt.Errorf("journal: stat intent fence: %w", err)
+	}
+}
+
+func (j *Journal) ensureIntentFence() error {
+	if on, err := j.IntentFenceActive(); err != nil || on {
+		return err
+	}
+	now := time.Now().UTC()
+	data, err := json.MarshalIndent(fenceRecord{
+		OpID: intentFenceOpID, Kind: "journal.intent_fence", Phase: PhaseSchemaFence, Schema: SchemaFenced,
+		Reason: "an operation in this directory is, or was when the agent died, inside a docker compose command; " +
+			"only a maintenance agent that takes command intents may start here (ADR-0062 slice 3). Start the newer agent once; it removes this file",
+		StartedAt: now, UpdatedAt: now,
+	}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("journal: marshal intent fence: %w", err)
+	}
+	return writeIntentFence(j.intentFencePath(), data, fenceMode)
+}
+
+// writeIntentFence is atomicWrite; a test replaces it to fail the fence write
+// alone.
+var writeIntentFence = atomicWrite
+
+// ReleaseIntentFence removes the intent fence if no record holds an open
+// Intent any more. An agent start calls it after it has taken every intent.
+func (j *Journal) ReleaseIntentFence() { j.releaseIntentFenceIfUnused() }
+
+// releaseIntentFenceIfUnused: best effort. A journal that cannot be listed
+// keeps the fence (what is left cannot be judged), and so does a failed
+// removal: either only keeps older agents out a little longer.
+func (j *Journal) releaseIntentFenceIfUnused() {
+	if on, err := j.IntentFenceActive(); err != nil || !on {
+		return
+	}
+	recs, err := j.List()
+	if err != nil {
+		return
+	}
+	for i := range recs {
+		if recs[i].Intent != nil {
+			return
+		}
+	}
+	if os.Remove(j.intentFencePath()) == nil {
+		_ = fsyncDir(j.dir)
+	}
 }
 
 func (j *Journal) setInFlight(opID string, on bool) {
