@@ -562,20 +562,9 @@ func (cm *Manager) CACertInfo() map[string]any {
 // the user (e.g. an enterprise intermediate CA). Private key is never stored in
 // cleartext memory beyond the parsing step.
 func (cm *Manager) LoadCustomCA(certPEM, keyPEM []byte) error {
-	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	x509Cert, ecKey, err := parseCustomCA(certPEM, keyPEM)
 	if err != nil {
-		return fmt.Errorf("key pair mismatch: %w", err)
-	}
-	x509Cert, err := x509.ParseCertificate(tlsCert.Certificate[0])
-	if err != nil {
-		return fmt.Errorf("invalid certificate: %w", err)
-	}
-	if !x509Cert.IsCA {
-		return errors.New("certificate is not a CA (BasicConstraints.IsCA must be true)")
-	}
-	ecKey, ok := tlsCert.PrivateKey.(*ecdsa.PrivateKey)
-	if !ok {
-		return errors.New("only ECDSA private keys are supported for MITM CA")
+		return err
 	}
 	cm.mu.Lock()
 	cm.installCALocked(x509Cert, ecKey, ProvenanceImported)
@@ -584,6 +573,44 @@ func (cm *Manager) LoadCustomCA(certPEM, keyPEM []byte) error {
 		CAChangedObserver()
 	}
 	return nil
+}
+
+// parseCustomCA is the structural half of LoadCustomCA: a matching pair, a CA
+// certificate, an ECDSA key.
+func parseCustomCA(certPEM, keyPEM []byte) (*x509.Certificate, *ecdsa.PrivateKey, error) {
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, nil, fmt.Errorf("key pair mismatch: %w", err)
+	}
+	x509Cert, err := x509.ParseCertificate(tlsCert.Certificate[0])
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid certificate: %w", err)
+	}
+	if !x509Cert.IsCA {
+		return nil, nil, errors.New("certificate is not a CA (BasicConstraints.IsCA must be true)")
+	}
+	ecKey, ok := tlsCert.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, nil, errors.New("only ECDSA private keys are supported for MITM CA")
+	}
+	return x509Cert, ecKey, nil
+}
+
+// CheckCustomCA reports whether certPEM/keyPEM is a CA that LoadCustomCA would
+// accept AND that can sign a leaf right now. A certificate outside its own
+// validity window fails with an error wrapping ErrCAUnusable.
+//
+// It is the gate for an operator-supplied CA that is about to REPLACE the
+// active one and be written over its bundle. LoadCustomCA itself does not look
+// at the validity window, so an expired upload used to displace a working CA:
+// every inspected CONNECT failed at once, and the bundle left on disk is one
+// ImportBundle refuses at the next start. Nothing is installed or stored here.
+func CheckCustomCA(certPEM, keyPEM []byte) error {
+	cert, _, err := parseCustomCA(certPEM, keyPEM)
+	if err != nil {
+		return err
+	}
+	return caUsable(cert, time.Now())
 }
 
 // ── CA Auto-Rotation ─────────────────────────────────────────────────────────

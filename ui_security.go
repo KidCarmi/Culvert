@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/KidCarmi/Culvert/internal/alerts"
+	"github.com/KidCarmi/Culvert/internal/ca"
 	"github.com/KidCarmi/Culvert/internal/fileblock"
 	"github.com/KidCarmi/Culvert/internal/fileutil"
 	"github.com/KidCarmi/Culvert/internal/geoip"
@@ -407,7 +408,7 @@ func apiCertsUpload(w http.ResponseWriter, r *http.Request) {
 		persisted, err := installAndPersistCustomMITMCA(certPEM, keyPEM)
 		if err != nil {
 			logger.Printf("certs upload MITM: %v", err)
-			http.Error(w, "invalid CA cert/key pair", http.StatusBadRequest)
+			http.Error(w, mitmCAUploadRejection(err), http.StatusBadRequest)
 			return
 		}
 		if !persisted {
@@ -1852,12 +1853,32 @@ func installAndPersistRotatedCA() (info map[string]any, persisted bool, err erro
 	return info, true, nil
 }
 
+// mitmCAUploadRejection is the 400 body for a refused MITM CA upload. A
+// well-formed pair outside its validity window is named as such, or the
+// operator goes looking for a mismatch that is not there; the text carries only
+// the uploaded certificate's own dates (see ca.Usable).
+func mitmCAUploadRejection(err error) string {
+	if errors.Is(err, ca.ErrCAUnusable) {
+		return "CA certificate rejected, the active CA is unchanged: " + err.Error()
+	}
+	return "invalid CA cert/key pair"
+}
+
 // installAndPersistCustomMITMCA is the custom-CA-upload counterpart of
 // installAndPersistRotatedCA, under the same lock for the same reason.
 func installAndPersistCustomMITMCA(certPEM, keyPEM []byte) (persisted bool, err error) {
 	caMutationMu.Lock()
 	defer caMutationMu.Unlock()
 
+	// Refuse a CA that cannot sign BEFORE anything is replaced. LoadCustomCA
+	// does not look at the validity window, and what follows it overwrites the
+	// bundle: an expired upload would take the working CA out of memory and off
+	// disk, fail every inspected CONNECT, and leave a bundle the next start
+	// refuses to load — which comes up with no CA and forwards inspect-matched
+	// traffic uninspected.
+	if err := ca.CheckCustomCA(certPEM, keyPEM); err != nil {
+		return false, err
+	}
 	if err := certMgr.LoadCustomCA(certPEM, keyPEM); err != nil {
 		return false, err
 	}
