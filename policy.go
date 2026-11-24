@@ -145,6 +145,19 @@ type PolicyRule struct {
 	HitCount            int64         `json:"hitCount"`               // match counter; persisted by rule NAME via ruleMet (metrics.go)
 	lastHitUnix         int64         // unix-seconds of the last match (0 = never); persisted by name via ruleMet
 	LastHit             string        `json:"lastHit,omitempty"` // computed in List() from the counters cell (RFC3339 UTC); never stored on the live rule
+	// decodeFault is why this rule, as decoded from JSON, cannot be honoured as
+	// written: unknown keys, duplicated keys, annotations out of bounds
+	// (policy_unknown_field.go). Never serialized. The POL-005 gate refuses a
+	// ruleset holding such a rule, so it is only set on a rule about to be refused.
+	decodeFault string
+	// Annotations is the ONE container for information that carries no
+	// enforcement meaning. This build and every later one carry its contents
+	// verbatim and never interpret them. COMPATIBILITY RULE: any OTHER new key on
+	// a rule is by definition an enforcement condition, and builds that do not
+	// know it refuse every ruleset that uses it; anything informational or
+	// server-stamped added from now on MUST go in here. See
+	// policy_unknown_field.go and TestRuleKeys_AreAPinnedSetAndNewOnesAreConditions.
+	Annotations json.RawMessage `json:"annotations,omitempty"`
 	// counters is the only mutable cell shared by immutable published revisions
 	// of the same rule. Definition edits, reorders, and rename cascades preserve
 	// this pointer, so an Evaluate on the prior revision cannot lose its hit when

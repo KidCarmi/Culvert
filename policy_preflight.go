@@ -23,7 +23,9 @@ import (
 //   - a policy file: a JSON array of rules (the -policy file);
 //   - a config backup (an exported configuration): an object with "policyRules";
 //   - a stored config version (a file under config_versions): {"meta", "config"};
-//   - a pending policy draft: an object with "state" and "rules".
+//   - a pending policy draft: an object with "state" and "rules";
+//   - a control-plane snapshot, which is also a data plane's last-known-good
+//     file (dp_last_config_snapshot.json): an object with "policy_rules".
 //
 // Every door applies this same gate, so one verdict holds for startup, import,
 // rollback and a control-plane snapshot built from the same rules.
@@ -59,7 +61,7 @@ func runPolicyPreflight(argv []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("policy-check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
-		preflightPrintf(stderr, "%s\n", "usage: culvert policy-check <policy.json | config-backup.json | config-version.json | policy_draft.json>...")
+		preflightPrintf(stderr, "%s\n", "usage: culvert policy-check <policy.json | config-backup.json | config-version.json | policy_draft.json | dp_last_config_snapshot.json>...")
 		preflightPrintf(stderr, "%s\n", "Lists every rule this version would refuse. Reads files only; changes nothing.")
 	}
 	if err := fs.Parse(argv); err != nil {
@@ -103,7 +105,32 @@ type preflightDoc struct {
 	PolicyRules *[]*PolicyRule   `json:"policyRules"` // config backup
 	State       *json.RawMessage `json:"state"`       // a policy draft always carries one
 	Rules       *[]*PolicyRule   `json:"rules"`       // policy draft
-	Config      *preflightDoc    `json:"config"`      // stored config version: {"meta":…, "config":{backup}}
+	Config      *preflightDoc    `json:"config"`      // stored config version: {"meta":…, "config":{backup}}; HA bundle: {"config":{snapshot}}
+	// SnapshotRules is the control-plane snapshot shape, which is also the data
+	// plane's last-known-good file (dp_last_config_snapshot.json). It carries a
+	// "version" too, so without this key it read as a backup holding no rules.
+	SnapshotRules *[]*PolicyRule `json:"policy_rules"`
+}
+
+// rules returns every rule the document holds and what kind of document it is.
+func (doc *preflightDoc) rules() (rules []*PolicyRule, shape string) {
+	shape = "config backup"
+	if doc.PolicyRules != nil {
+		rules = append(rules, *doc.PolicyRules...)
+	}
+	if doc.SnapshotRules != nil {
+		rules = append(rules, *doc.SnapshotRules...)
+		if doc.PolicyRules == nil {
+			shape = "control-plane snapshot"
+		}
+	}
+	if doc.Rules != nil {
+		rules = append(rules, *doc.Rules...)
+		if doc.PolicyRules == nil && doc.SnapshotRules == nil {
+			shape = "policy draft"
+		}
+	}
+	return rules, shape
 }
 
 // readPreflightRules decodes one of the stored shapes. Rules are decoded as
@@ -123,22 +150,17 @@ func readPreflightRules(path string) (rules []*PolicyRule, shape string, err err
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, "", fmt.Errorf("not valid JSON for a policy file, config backup, stored config version or policy draft: %w", err)
 	}
-	shape = "config backup"
-	if doc.Config != nil {
-		doc, shape = *doc.Config, "stored config version"
+	stored := doc.Config != nil
+	if stored {
+		doc = *doc.Config
 	}
-	recognised := doc.Version != nil || doc.PolicyRules != nil || doc.State != nil || doc.Rules != nil
+	recognised := doc.Version != nil || doc.PolicyRules != nil || doc.State != nil || doc.Rules != nil || doc.SnapshotRules != nil
 	if !recognised {
-		return nil, "", fmt.Errorf("no policy rules found: expected a JSON array of rules, a config backup, a stored config version or a policy draft")
+		return nil, "", fmt.Errorf("no policy rules found: expected a JSON array of rules, a config backup, a stored config version, a policy draft or a control-plane snapshot")
 	}
-	if doc.PolicyRules != nil {
-		rules = append(rules, *doc.PolicyRules...)
-	}
-	if doc.Rules != nil {
-		rules = append(rules, *doc.Rules...)
-		if doc.PolicyRules == nil {
-			shape = "policy draft"
-		}
+	rules, shape = doc.rules()
+	if stored {
+		shape = "stored config version"
 	}
 	return rules, shape, nil
 }

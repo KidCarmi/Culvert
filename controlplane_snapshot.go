@@ -1456,7 +1456,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 	err := applySnapshotMutations(snap)
 	endConfigSnapshotApplyMutation()
 	if err == nil {
-		policyStore.clearRulesetRefusal("control-plane snapshot")
+		policyStore.clearSnapshotRulesetRefusals()
 	}
 	return err
 }

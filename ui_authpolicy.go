@@ -239,8 +239,8 @@ func apiAuthPolicyCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rule PolicyRule
-	if err := decodeJSON(r, &rule); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+	if refusal := decodeRuleJSON(r, &rule); refusal != "" {
+		http.Error(w, refusal, http.StatusBadRequest)
 		return
 	}
 	if rule.Name == "" {
@@ -333,8 +333,8 @@ func apiAuthPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rule PolicyRule
-	if err := decodeJSON(r, &rule); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+	if refusal := decodeRuleJSON(r, &rule); refusal != "" {
+		http.Error(w, refusal, http.StatusBadRequest)
 		return
 	}
 	if err := normalizeIncomingAuthRule(&rule); err != nil {
