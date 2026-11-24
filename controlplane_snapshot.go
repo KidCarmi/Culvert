@@ -1973,8 +1973,10 @@ func applyExternalAuthSnapshotSettings(snap ConfigSnapshot) {
 // syncSnapshotIdPBeforeApply is the refusable head of a snapshot apply: the
 // external-auth settings the IdP providers compile against, then the IdP
 // registry swap. idpRegistry.ReplaceAll compiles every enabled provider before
-// swapping, so a refusal leaves the working providers and, because nothing
-// else has been applied yet, the whole previous configuration in place.
+// swapping, so a refusal leaves the working providers in place and no policy
+// state replaced. The two external-auth settings (public base URL, forwarded-
+// header trust) are assigned before the compile and are NOT undone by a
+// refusal; that was equally true of the previous order.
 func syncSnapshotIdPBeforeApply(snap ConfigSnapshot) error {
 	applyExternalAuthSnapshotSettings(snap)
 	return syncSnapshotIdPProfiles(snap)

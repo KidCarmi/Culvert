@@ -308,21 +308,12 @@ func blocklistSyncedFingerprint(hosts []string) string {
 // on reply.Epoch) and validated the remainder's caps — this function does the
 // blocklist-substituting apply only.
 //
-// The IdP sync, the one remainder step that can refuse, runs before the
-// blocklist is advanced, so an IdP refusal changes nothing.
-//
 // On a fingerprint mismatch it returns an error WITHOUT applying the remainder,
-// so only the blocklist (and the already-accepted IdP set) is left mutated (and the caller's fall-through to a full
+// so only the blocklist is left mutated (and the caller's fall-through to a full
 // resync heals it via the wholesale ReplaceFeedEntries) — the other stores are
 // never advanced to a version whose blocklist we could not verify. This is the
 // "detect divergence → resync, never silently persist it" contract.
 func applyBlocklistDeltaSnapshot(remainder ConfigSnapshot, chain []blocklistDelta, targetFP string) error {
-	// The refusable IdP step runs before any store is advanced, as on the full
-	// path (applySnapshotMutations): a refusal after the policy rules were
-	// replaced left them over the previous category groups.
-	if err := syncSnapshotIdPBeforeApply(remainder); err != nil {
-		return fmt.Errorf("idp sync: %w", err)
-	}
 	for i := range chain {
 		bl.ApplyDelta(chain[i].Added, chain[i].Removed)
 	}
@@ -341,6 +332,16 @@ func applyBlocklistDeltaSnapshot(remainder ConfigSnapshot, chain []blocklistDelt
 	// caller's full resync; a persisted bad set would outlive the process).
 	if got := bl.SyncedFingerprint(); got != targetFP {
 		return fmt.Errorf("blocklist drift after delta apply (have %s, want %s)", got, targetFP)
+	}
+	// The refusable IdP step: AFTER the blocklist is verified, so a delta
+	// refused for drift or cap still leaves auth/IdP untouched, and BEFORE the
+	// blocklist is saved and the policy rules are replaced. It used to run after
+	// the rules were replaced (and saved) and before the category groups they
+	// reference, so a refusal left new rules over old groups. A refusal here
+	// leaves only the in-memory blocklist advanced, to the CP's verified target
+	// and unsaved: the same residue as the drift return above.
+	if err := syncSnapshotIdPBeforeApply(remainder); err != nil {
+		return fmt.Errorf("idp sync: %w", err)
 	}
 	bl.Save()
 	// Everything except the blocklist, in the same order as the full path.

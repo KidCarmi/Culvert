@@ -88,18 +88,47 @@ func TestSnapshotIdPRefusal_FullApplyChangesNothing(t *testing.T) {
 	assertSnapshotIdPRefusalChangedNothing(t, policyPath)
 }
 
-func TestSnapshotIdPRefusal_DeltaApplyChangesNothing(t *testing.T) {
+// On the delta path the blocklist chain is applied and verified before the IdP
+// step (so a delta refused for drift never touches IdP state, below). An IdP
+// refusal therefore leaves the in-memory blocklist at the CP's verified target;
+// what it must not do is replace or persist the policy.
+func TestSnapshotIdPRefusal_DeltaApplyLeavesPolicyUntouched(t *testing.T) {
 	snap, policyPath := snapshotIdPOrderFixture(t)
-	before := bl.SyncedFingerprint()
 	chain := []blocklistDelta{{Added: []string{"delta-added.example"}}}
 	target := blocklist.FeedSetFingerprint([]string{"delta-added.example"})
 	if err := applyBlocklistDeltaSnapshot(snap, chain, target); err == nil {
 		t.Fatal("premise: the IdP sync must refuse this delta")
 	}
 	assertSnapshotIdPRefusalChangedNothing(t, policyPath)
-	if got := bl.SyncedFingerprint(); got != before {
-		t.Errorf("the blocklist advanced (%s -> %s) although the delta was refused", before, got)
+}
+
+// A delta refused because the blocklist did not converge must leave the IdP
+// registry and the external-auth settings as they were: the remainder belongs
+// to a version whose blocklist could not be verified.
+func TestSnapshotDeltaDrift_LeavesIdPAndExternalAuthUntouched(t *testing.T) {
+	snap, policyPath := snapshotIdPOrderFixture(t)
+	prevBase, prevTrust := proxyExternalBaseURL, trustForwardedHeaders
+	t.Cleanup(func() { SetProxyBaseURL(prevBase); trustForwardedHeaders = prevTrust })
+	SetProxyBaseURL("")
+	trustForwardedHeaders = false
+
+	snap.IdPProfiles = []*IdPProfile{ldapTestProfile("ldap-good", "Good AD")}
+	snap.ProxyBaseURL = "https://new.example"
+	snap.TrustForwardedHeaders = true
+	chain := []blocklistDelta{{Added: []string{"delta-added.example"}}}
+	if err := applyBlocklistDeltaSnapshot(snap, chain, "deadbeefdeadbeef"); err == nil {
+		t.Fatal("premise: a wrong target fingerprint must be refused as drift")
 	}
+	if n := len(idpRegistry.All()); n != 0 {
+		t.Errorf("%d IdP profile(s) registered from a delta refused for drift, want 0", n)
+	}
+	if got := proxyExternalBaseURL; got != "" {
+		t.Errorf("proxy base URL = %q after a delta refused for drift, want unchanged", got)
+	}
+	if trustForwardedHeaders {
+		t.Error("forwarded-header trust was switched on by a delta refused for drift")
+	}
+	assertSnapshotIdPRefusalChangedNothing(t, policyPath)
 }
 
 // Control: the same snapshot without the bad profile applies in full, so the

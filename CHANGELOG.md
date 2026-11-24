@@ -15,8 +15,9 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   after validation. It ran after the rules had been replaced and saved, and
   before the category groups they reference, so a refusal left group-scoped
   Block rules matching nothing until a later snapshot succeeded, including
-  across a restart. The sync now runs first, on the full and the delta path:
-  a refused snapshot changes nothing.
+  across a restart. The sync now runs before any policy state is replaced, on the full and
+  the delta path: a snapshot refused there leaves the rules, the category
+  groups and the policy file as they were.
 - **A category groups file that cannot be loaded no longer silently disables
   every rule scoped to a group.** A rule scoped to a category group matches a
   destination only when the group resolves. If the groups file failed to load at
