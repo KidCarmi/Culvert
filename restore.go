@@ -989,13 +989,8 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	}
 
 	// Step 3: enforce guards before any destructive operation.
-	if analysis.DPGuardWouldBlock {
-		return fmt.Errorf("restore: cluster CA fingerprint changes (current=%s → restored=%s); %d DP(s) currently enrolled will need to re-enroll. Pass --accept-dp-reenrollment to proceed",
-			analysis.CurrentCAFingerprint, analysis.RestoredCAFingerprint, analysis.CurrentEnrolledNodes)
-	}
-	if analysis.TOTPGuardWouldBlock {
-		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",
-			len(analysis.TOTPCounterRollbacks), strings.Join(analysis.TOTPCounterRollbacks, ", "))
+	if err := restoreGuardRefusal(analysis); err != nil {
+		return err
 	}
 
 	// Step 4: print summary so the operator sees the plan one last time.
@@ -1076,6 +1071,20 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	fmt.Fprintf(os.Stdout, "\nRestore committed.\n")
 	fmt.Fprintf(os.Stdout, "  Previous /data preserved at: %s\n", bakPath)
 	fmt.Fprintf(os.Stdout, "  (.bak is NOT auto-deleted; remove manually when no longer needed.)\n")
+	return nil
+}
+
+// restoreGuardRefusal is runRestoreCommit's step 3: the error for a guard the
+// operator has not acknowledged, or nil. Nothing has been written yet.
+func restoreGuardRefusal(analysis *commitAnalysis) error {
+	if analysis.DPGuardWouldBlock {
+		return fmt.Errorf("restore: cluster CA fingerprint changes (current=%s → restored=%s); %d DP(s) currently enrolled will need to re-enroll. Pass --accept-dp-reenrollment to proceed",
+			analysis.CurrentCAFingerprint, analysis.RestoredCAFingerprint, analysis.CurrentEnrolledNodes)
+	}
+	if analysis.TOTPGuardWouldBlock {
+		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",
+			len(analysis.TOTPCounterRollbacks), strings.Join(analysis.TOTPCounterRollbacks, ", "))
+	}
 	return nil
 }
 

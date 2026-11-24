@@ -49,7 +49,7 @@ func treeDigest(t *testing.T, dir string) string {
 		if rel == writerlock.FileName {
 			return nil
 		}
-		body, rerr := os.ReadFile(p)
+		body, rerr := os.ReadFile(p) // #nosec G122 -- a test temp directory nothing else writes to
 		if rerr != nil {
 			return rerr
 		}
@@ -148,57 +148,62 @@ func TestRestoreInPlace_FullCommit_ReplacesContentAndKeepsThePrevious(t *testing
 // still have it.
 func TestRestoreInPlace_CrashAtEveryStep_NextStartHoldsThePreviousContent(t *testing.T) {
 	for _, step := range []string{"staged", "intent", "evacuated", "installing", "installed", "verified"} {
-		t.Run(step, func(t *testing.T) {
-			forceInPlaceRestore(t)
-			src, dataDir, _, _ := makeCommitFixture(t, 0)
-			seedFile(t, dataDir, "proxy.log", []byte("previous\n"), 0o600)
-			before := treeDigest(t, dataDir)
+		t.Run(step, func(t *testing.T) { crashAtStepThenStart(t, step) })
+	}
+}
 
-			reached := false
-			restoreInPlaceStepHook = func(s string) error {
-				if s == step {
-					reached = true
-					return errors.New("killed")
-				}
-				return nil
-			}
-			_, err := commitInPlace(t, src, dataDir, modeFull)
-			if !reached || !errors.Is(err, errRestoreAbandoned) {
-				t.Fatalf("commit was not abandoned at %q: reached=%v err=%v", step, reached, err)
-			}
-			restoreInPlaceStepHook = nil
-			wantIntent := step != "staged"
-			if intentPresent(dataDir) != wantIntent {
-				t.Fatalf("intent record present=%v after a crash at %q, want %v", intentPresent(dataDir), step, wantIntent)
-			}
+// crashAtStepThenStart abandons a full in-place restore right after step, runs
+// the startup recovery, and requires the content from before the restore.
+func crashAtStepThenStart(t *testing.T, step string) {
+	t.Helper()
+	forceInPlaceRestore(t)
+	src, dataDir, _, _ := makeCommitFixture(t, 0)
+	seedFile(t, dataDir, "proxy.log", []byte("previous\n"), 0o600)
+	before := treeDigest(t, dataDir)
 
-			if err := recoverInPlaceRestoreAtBoot(dataDir, true); err != nil {
-				t.Fatalf("startup recovery: %v", err)
-			}
-			if got := treeDigest(t, dataDir); got != before {
-				t.Errorf("content after recovery differs from the content before the restore:\nwant\n%s\ngot\n%s", before, got)
-			}
-			if intentPresent(dataDir) {
-				t.Error("intent record still present after recovery")
-			}
-			if wantIntent && !strings.Contains(readOutcome(t, dataDir), restoreOutcomeRolledBack) {
-				t.Errorf("outcome record = %q, want %s", readOutcome(t, dataDir), restoreOutcomeRolledBack)
-			}
-			if wantIntent && len(inPlaceEntries(t, dataDir, "bak")) != 0 {
-				t.Errorf("an emptied backup directory was left: %v", inPlaceEntries(t, dataDir, "bak"))
-			}
-			// The directory is usable: the same restore now commits. (A later
-			// process has another pid and another second; the staging
-			// directory a crash at "staged" leaves behind is an ordinary
-			// leftover with the first one's suffix.)
-			later := restoreNow().Add(time.Hour)
-			orig := restoreNow
-			restoreNow = func() time.Time { return later }
-			t.Cleanup(func() { restoreNow = orig })
-			if out, err := commitInPlace(t, src, dataDir, modeFull); err != nil {
-				t.Fatalf("restore after recovery: %v\n%s", err, out)
-			}
-		})
+	reached := false
+	restoreInPlaceStepHook = func(s string) error {
+		if s == step {
+			reached = true
+			return errors.New("killed")
+		}
+		return nil
+	}
+	_, err := commitInPlace(t, src, dataDir, modeFull)
+	if !reached || !errors.Is(err, errRestoreAbandoned) {
+		t.Fatalf("commit was not abandoned at %q: reached=%v err=%v", step, reached, err)
+	}
+	restoreInPlaceStepHook = nil
+	wantIntent := step != "staged"
+	if intentPresent(dataDir) != wantIntent {
+		t.Fatalf("intent record present=%v after a crash at %q, want %v", intentPresent(dataDir), step, wantIntent)
+	}
+
+	if err := recoverInPlaceRestoreAtBoot(dataDir, true); err != nil {
+		t.Fatalf("startup recovery: %v", err)
+	}
+	if got := treeDigest(t, dataDir); got != before {
+		t.Errorf("content after recovery differs from the content before the restore:\nwant\n%s\ngot\n%s", before, got)
+	}
+	if intentPresent(dataDir) {
+		t.Error("intent record still present after recovery")
+	}
+	if wantIntent && !strings.Contains(readOutcome(t, dataDir), restoreOutcomeRolledBack) {
+		t.Errorf("outcome record = %q, want %s", readOutcome(t, dataDir), restoreOutcomeRolledBack)
+	}
+	if wantIntent && len(inPlaceEntries(t, dataDir, "bak")) != 0 {
+		t.Errorf("an emptied backup directory was left: %v", inPlaceEntries(t, dataDir, "bak"))
+	}
+	// The directory is usable: the same restore now commits. (A later
+	// process has another pid and another second; the staging
+	// directory a crash at "staged" leaves behind is an ordinary
+	// leftover with the first one's suffix.)
+	later := restoreNow().Add(time.Hour)
+	orig := restoreNow
+	restoreNow = func() time.Time { return later }
+	t.Cleanup(func() { restoreNow = orig })
+	if out, err := commitInPlace(t, src, dataDir, modeFull); err != nil {
+		t.Fatalf("restore after recovery: %v\n%s", err, out)
 	}
 }
 

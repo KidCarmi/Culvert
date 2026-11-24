@@ -6,7 +6,7 @@ services:
     image: culvert/proxy:pinned
     container_name: culvert-restore-probe
     restart: unless-stopped
-    stop_grace_period: 10s
+    stop_grace_period: 60s
     ports:
       - "127.0.0.1:18080:8080"
       - "127.0.0.1:19090:9090"

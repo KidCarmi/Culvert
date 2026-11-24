@@ -203,12 +203,30 @@ For `indeterminate`:
   `prior_ref`.
 - Until one of these succeeds, do not run `docker compose up` by hand: it
   starts whatever image the tag is on.
-- An upgrade or rollback submitted within `interrupted_settle` (75s by
-  default) of an agent start sits in its `restart` step for the rest of that
-  window before it changes anything. That is deliberate: if the previous agent
-  died in mid-operation, Docker may still be stopping the old proxy container
-  for it, and the agent waits until that can no longer be the case. The
-  operation log says `settle: waited …`.
+- An upgrade or rollback may wait up to `interrupted_settle` (75s by default)
+  after an agent start before it changes anything (an upgrade before its first
+  capture, a rollback in its `restart` step). That is deliberate: Docker may
+  still be stopping a container for a `compose up` / `compose down` that an
+  earlier agent process did not see finish. It applies when such a command was
+  left unfinished (a marker under `<state_dir>/mutation`), when an interrupted
+  operation is on record, and, after installing or upgrading to an agent that
+  tracks this, at every agent start until one upgrade, rollback or restore has
+  completed. The same wait starts again, inside a running
+  agent, after a `compose up` / `compose down` of its own ended in an error,
+  and the startup reconcile observes it too. The operation log says `settle:
+  waited …`.
+  - When the unfinished command was a `compose up` and Docker shows no proxy
+    container running on two reads a couple of seconds apart, the wait ends
+    there (`settle: no proxy container is running …`): the proxy is already
+    down and nothing is left to wait for.
+    After an unfinished `compose down`, and on that first start, the whole
+    window is waited.
+  - The marker stays until an upgrade, rollback or restore completes its
+    compose command with nothing in doubt. An agent restart with no marker and
+    no interrupted operation on record does not wait.
+- If you downgrade the agent to a version older than this mechanism and later
+  upgrade again, remove `<state_dir>/mutation` before starting the newer
+  agent, so that it waits once as on a first start.
 
 ### After the agent stops during a restore
 

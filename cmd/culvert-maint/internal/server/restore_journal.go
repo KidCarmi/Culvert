@@ -152,10 +152,7 @@ func (s *Server) restoreStopStack(ctx context.Context, f *restoreFlow, stackTouc
 		return nil, nil, fmt.Errorf("stop_stack: could not record the restore's progress in the journal, refusing to stop the stack (nothing was changed): %w", jerr)
 	}
 	*stackTouched = true
-	res, rerr := s.opts.Runner.ComposeDown(ctx)
-	if rerr != nil {
-		s.noteMutationCut()
-	}
+	res, rerr := s.composeDown(ctx) // marks the in-flight mutation and notes a cut (mutation.go)
 	if res == nil {
 		return nil, nil, rerr
 	}
@@ -187,11 +184,8 @@ func (s *Server) restoreStartStack(ctx context.Context, f *restoreFlow) (stdout,
 	if committed {
 		s.advanceRestoreStageBestEffort(f, journal.RestoreStageStarting)
 	}
-	res, rerr := s.opts.Runner.ComposeUp(ctx)
-	switch {
-	case rerr != nil:
-		s.noteMutationCut()
-	case committed:
+	res, rerr := s.composeUp(ctx) // marks the in-flight mutation and notes a cut (mutation.go)
+	if rerr == nil && committed {
 		s.advanceRestoreStageBestEffort(f, journal.RestoreStageStarted)
 	}
 	if res == nil {

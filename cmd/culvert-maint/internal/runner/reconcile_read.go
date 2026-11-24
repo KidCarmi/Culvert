@@ -92,3 +92,52 @@ func (r *Runner) LocalImageID(ctx context.Context, ref string) (string, error) {
 	}
 	return imageIDFromImageInspect(res.Stdout)
 }
+
+// ProxyContainerListed reports whether `compose ps` lists a proxy container at
+// all, in any state. `compose ps` lists containers that are running (or
+// restarting or paused), not exited or merely created ones, so false means: no
+// proxy container is running now. One docker call.
+//
+// false is a claim the caller acts on, so it is returned only for output that
+// is understood completely: empty, or entries that every one decoded and named
+// their service. Truncated output, a line that does not decode, an entry
+// without a service name, or anything that is not ps JSON is an error: Docker
+// could not be read and nothing is known.
+func (r *Runner) ProxyContainerListed(ctx context.Context) (bool, error) {
+	ps, err := r.ComposeStatus(ctx)
+	if err != nil {
+		return false, fmt.Errorf("compose ps: %w", err)
+	}
+	if ps.Truncated {
+		return false, errors.New("compose ps: output truncated")
+	}
+	out := bytes.TrimSpace(ps.Stdout)
+	if len(out) == 0 {
+		return false, nil
+	}
+	entries, err := parsePSEntries(out)
+	if err != nil {
+		return false, fmt.Errorf("compose ps: %w", err)
+	}
+	if out[0] != '[' {
+		lines := 0
+		for _, l := range bytes.Split(out, []byte("\n")) {
+			if len(bytes.TrimSpace(l)) > 0 {
+				lines++
+			}
+		}
+		if lines != len(entries) {
+			return false, fmt.Errorf("compose ps: %d of %d lines understood", len(entries), lines)
+		}
+	}
+	listed := false
+	for i := range entries {
+		if entries[i].Service == "" {
+			return false, errors.New("compose ps: an entry names no service")
+		}
+		if entries[i].Service == proxyServiceName {
+			listed = true
+		}
+	}
+	return listed, nil
+}
