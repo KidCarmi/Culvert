@@ -237,6 +237,7 @@ func runRestoreDryRun(tarPath, dataDir, passphrase string, opts restoreOpts) err
 		return err
 	}
 	printRestoreSummary(os.Stdout, summary, analysis)
+	printRestorePreflight(dataDir, analysis, files)
 	return nil
 }
 
@@ -977,6 +978,16 @@ var restoreNow = time.Now
 // If 7 fails (or process is killed between 6 and 7): /data does not
 // exist; error message names the exact `mv` recovery command.
 func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) error {
+	// Step 0, before anything is compared with the current content: on the
+	// in-place layout take the lock and undo an earlier swap that never
+	// committed; on the whole-directory layout refuse while one is recorded
+	// (restore_inplace.go explains why the guards below depend on this).
+	inPlace, release, err := beginRestoreCommit(dataDir)
+	defer release()
+	if err != nil {
+		return err
+	}
+
 	// Steps 1–2 (reuse).
 	summary, manifest, files, err := validateBackup(tarPath, dataDir, passphrase, opts.BackupPassphrase)
 	if err != nil {
@@ -988,13 +999,8 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	}
 
 	// Step 3: enforce guards before any destructive operation.
-	if analysis.DPGuardWouldBlock {
-		return fmt.Errorf("restore: cluster CA fingerprint changes (current=%s → restored=%s); %d DP(s) currently enrolled will need to re-enroll. Pass --accept-dp-reenrollment to proceed",
-			analysis.CurrentCAFingerprint, analysis.RestoredCAFingerprint, analysis.CurrentEnrolledNodes)
-	}
-	if analysis.TOTPGuardWouldBlock {
-		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",
-			len(analysis.TOTPCounterRollbacks), strings.Join(analysis.TOTPCounterRollbacks, ", "))
+	if err := restoreGuardRefusal(analysis); err != nil {
+		return err
 	}
 
 	// Step 4: print summary so the operator sees the plan one last time.
@@ -1006,6 +1012,12 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	//   - the operator can copy-paste the printed paths verbatim
 	//   - staging and bak share a correlated suffix
 	suffix := fmt.Sprintf("%s-%d", restoreNow().UTC().Format("20060102T150405Z"), os.Getpid())
+	// A data directory that is a mount point, or whose parent this process
+	// cannot write, cannot be swapped as a whole: steps 5–8 then run inside it
+	// (restore_inplace.go). Everything above is shared.
+	if inPlace {
+		return commitRestoreInPlace(dataDir, files, manifest, opts.Mode, suffix)
+	}
 	stagingDir := dataDir + ".staging." + suffix
 	bakPath := dataDir + ".bak." + suffix
 
@@ -1013,15 +1025,8 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	// exists on disk. Catches stale state from a prior failed restore
 	// (e.g. operator killed the process mid-stage) and prevents
 	// accidental reuse of either dir.
-	if _, err := os.Stat(stagingDir); err == nil {
-		return fmt.Errorf("restore: staging path %q already exists; remove it before retrying", stagingDir)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("restore: stat staging path %q: %w", stagingDir, err)
-	}
-	if _, err := os.Stat(bakPath); err == nil {
-		return fmt.Errorf("restore: backup path %q already exists; remove it before retrying", bakPath)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("restore: stat backup path %q: %w", bakPath, err)
+	if err := restoreRefuseExistingSwapPaths(stagingDir, bakPath); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(os.Stdout, "\nCommitting restore now.\n")
@@ -1069,6 +1074,38 @@ func runRestoreCommit(tarPath, dataDir, passphrase string, opts restoreOpts) err
 	fmt.Fprintf(os.Stdout, "\nRestore committed.\n")
 	fmt.Fprintf(os.Stdout, "  Previous /data preserved at: %s\n", bakPath)
 	fmt.Fprintf(os.Stdout, "  (.bak is NOT auto-deleted; remove manually when no longer needed.)\n")
+	return nil
+}
+
+// restoreRefuseExistingSwapPaths is the whole-directory swap's collision
+// pre-check: the error for a staging or backup path that already exists (or
+// cannot be examined), or nil. Messages are unchanged from when this was
+// inline in runRestoreCommit.
+func restoreRefuseExistingSwapPaths(stagingDir, bakPath string) error {
+	if _, err := os.Stat(stagingDir); err == nil {
+		return fmt.Errorf("restore: staging path %q already exists; remove it before retrying", stagingDir)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("restore: stat staging path %q: %w", stagingDir, err)
+	}
+	if _, err := os.Stat(bakPath); err == nil {
+		return fmt.Errorf("restore: backup path %q already exists; remove it before retrying", bakPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("restore: stat backup path %q: %w", bakPath, err)
+	}
+	return nil
+}
+
+// restoreGuardRefusal is runRestoreCommit's step 3: the error for a guard the
+// operator has not acknowledged, or nil. Nothing has been written yet.
+func restoreGuardRefusal(analysis *commitAnalysis) error {
+	if analysis.DPGuardWouldBlock {
+		return fmt.Errorf("restore: cluster CA fingerprint changes (current=%s → restored=%s); %d DP(s) currently enrolled will need to re-enroll. Pass --accept-dp-reenrollment to proceed",
+			analysis.CurrentCAFingerprint, analysis.RestoredCAFingerprint, analysis.CurrentEnrolledNodes)
+	}
+	if analysis.TOTPGuardWouldBlock {
+		return fmt.Errorf("restore: TOTP counter rollback for %d user(s) (%s); recently-used codes could be replayed. Pass --allow-counter-rollback to proceed",
+			len(analysis.TOTPCounterRollbacks), strings.Join(analysis.TOTPCounterRollbacks, ", "))
+	}
 	return nil
 }
 
@@ -1211,6 +1248,11 @@ func stageArtifacts(stagingDir, dataDir string, files map[string][]byte, manifes
 			return werr
 		}
 		if info.IsDir() {
+			// The in-place swap keeps its staging and backup directories
+			// inside dataDir; they are never part of the content.
+			if p == filepath.Join(dataDir, restoreWorkDirName) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {

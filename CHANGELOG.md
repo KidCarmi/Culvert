@@ -7,8 +7,54 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Restore now works on the Docker Compose deployment.** A restore commit
+  swapped `/data` by renaming the directory itself, with its staging and
+  backup directories beside it in `/`. In the shipped compose file `/data` is a
+  volume mount point (which cannot be renamed) and the container runs as the
+  unprivileged `proxy` user (which cannot create anything in `/`), so every
+  commit failed — measured on real Docker: `mkdir /data.staging.…: permission
+  denied`, after the proxy had already been stopped. The commit now detects
+  that layout and swaps the directory's content inside the volume, under
+  `/data/.restore/`, behind the single-writer lock (a restore never runs beside
+  a live holder, whatever `CULVERT_ALLOW_MULTIPLE_WRITERS` says). Each file
+  taken from the archive is read back and compared with the backup manifest
+  before the restore is reported as committed. A restore that fails, or is killed mid-swap, ends with the
+  previous content back in place: the next start of the proxy undoes it before
+  reading the directory. A `/data` that is an ordinary directory with a
+  writable parent is swapped exactly as before.
+- **A restore that cannot start no longer stops the proxy.** The maintenance
+  agent's `restore.commit` (and `rollbacks` with `mode=data`) now runs the
+  restore's read-only dry-run first, with the proxy still serving, and reads
+  its new last line (`RESTORE-PREFLIGHT v1 commit=ok|refused …`). An
+  unreadable archive, a guard that would refuse, an unwritable volume or too
+  little free space fails the operation at the new `preflight_restore` stage
+  with the stack untouched. Operations gain that stage in `progress`. With a
+  proxy image that predates the line the agent behaves as before.
+
 ### Security
 
+- **A config import no longer reports success when the imported policy rules
+  could not be written to disk.** The policy save on `POST /api/config/import`
+  discarded its error: the import answered `200 {"ok":true}` while the policy
+  file still held the previous rules, so a restart silently reverted the
+  import (in either direction, including back to a rule set without a newly
+  imported block). It now answers `500` with `status:imported_not_durable`,
+  `applied:true`, `policy_persisted:false`, the audit entry records the failed
+  write, and the admin UI says the rules are live but not saved. The running
+  configuration is unchanged from before: the import is still applied.
+  **API compatibility:** this is a new response on an existing operation, for
+  a condition that used to answer `200`. It is not a breaking change by the
+  contract's rules (oasdiff reports none; no operation, field or success
+  response changed), but a client that treats any non-2xx from this endpoint
+  as "nothing was imported" must read the body: `applied:true` means the
+  configuration is live. `retry_safe` says whether re-sending the same import
+  is idempotent (`true` in replace mode; `false` in merge mode, where alert
+  webhooks would be appended again) and `recovery` gives the fix. A write
+  that replaced the policy file but could not sync its directory is treated
+  as persisted, as every other policy writer treats it. A refused import
+  remains a `4xx` with nothing changed.
 - **A control-plane snapshot whose identity-provider profiles are refused no
   longer leaves the node with new policy rules over the previous category
   groups.** The IdP sync is the one step of a snapshot apply that can refuse

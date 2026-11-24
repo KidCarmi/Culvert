@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1081,12 +1082,35 @@ func (r *crashRig) setSettle(d string) {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	const off = `interrupted_settle = "0s"`
-	if !strings.Contains(string(b), off) {
+	line := regexp.MustCompile(`interrupted_settle = "[^"]*"`)
+	if !line.Match(b) {
 		r.t.Fatal("rig config has no interrupted_settle line to rewrite")
 	}
-	out := strings.Replace(string(b), off, `interrupted_settle = "`+d+`"`, 1)
-	if err := os.WriteFile(r.cfgPath, []byte(out), 0o600); err != nil { // #nosec G703 -- the rig's own config under t.TempDir
+	out := line.ReplaceAll(b, []byte(`interrupted_settle = "`+d+`"`))
+	if err := os.WriteFile(r.cfgPath, out, 0o600); err != nil { // #nosec G703 -- the rig's own config under t.TempDir
 		r.t.Fatal(err)
 	}
+}
+
+// pastFirstUse takes the rig's state directory past its first use: the agent
+// runs once with a short window, a rollback to the image already running
+// completes its `compose up` after that window and thereby clears the
+// first-use marker, and the agent is stopped with nothing in flight. The
+// settle setting is left at d.
+func (r *crashRig) pastFirstUse(d string) {
+	r.t.Helper()
+	r.setSettle("1s")
+	r.start()
+	if done := r.waitOp(r.rollbackToA()); done.State != "succeeded" {
+		r.t.Fatalf("pastFirstUse: rollback = %s(%s)", done.State, done.FailureReason)
+	}
+	r.kill()
+	r.clearCalls()
+	// The model numbers its calls for the kill points ("up_before:1"); start
+	// the test proper from zero.
+	counts, _ := filepath.Glob(filepath.Join(r.model, "count.*"))
+	for _, c := range counts {
+		_ = os.Remove(c)
+	}
+	r.setSettle(d)
 }

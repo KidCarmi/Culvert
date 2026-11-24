@@ -111,9 +111,11 @@ func TestDataRollback_Success_WrapsRestoreCommit(t *testing.T) {
 	if _, ok := argvWith(cmds, "down"); !ok {
 		t.Error("data rollback must stop the stack (down)")
 	}
-	restoreCmd, ok := argvWith(cmds, "--restore")
+	// The first --restore argv is the read-only preflight; the commit is the
+	// one that carries --confirm.
+	restoreCmd, ok := argvWith(cmds, "--confirm")
 	if !ok {
-		t.Fatal("data rollback must run cli --restore")
+		t.Fatal("data rollback must run cli --restore --confirm")
 	}
 	hasConfirm := false
 	for _, a := range restoreCmd.Argv {
@@ -217,9 +219,9 @@ func TestDataRollback_PassphraseRefForwardedAndValidated(t *testing.T) {
 		"mode": "data", "filename": fn, "passphrase_ref": "env:CULVERT_BACKUP_PASSPHRASE",
 	})
 	rig.waitForOpFinished(t, opID)
-	restoreCmd, ok := argvWith(rig.captured.snapshot(), "--restore")
+	restoreCmd, ok := argvWith(rig.captured.snapshot(), "--confirm")
 	if !ok {
-		t.Fatal("expected a --restore command")
+		t.Fatal("expected a --restore --confirm command")
 	}
 	if !envHasD16b(restoreCmd.Env, "CULVERT_BACKUP_PASSPHRASE=s3cret") {
 		t.Errorf("passphrase value must be forwarded to the cli restore env; env=%v", restoreCmd.Env)
@@ -236,7 +238,7 @@ func TestDataRollback_SafetyFlagsForwardedAndFailClosed(t *testing.T) {
 	rig := dataRollbackRig(t)
 	defer rig.stop()
 	rig.waitForOpFinished(t, rig.rollbackOpID(t, map[string]interface{}{"mode": "data", "filename": fn}))
-	restoreCmd, _ := argvWith(rig.captured.snapshot(), "--restore")
+	restoreCmd, _ := argvWith(rig.captured.snapshot(), "--confirm")
 	for _, banned := range []string{"--accept-dp-reenrollment", "--allow-counter-rollback"} {
 		for _, a := range restoreCmd.Argv {
 			if a == banned {
@@ -252,7 +254,7 @@ func TestDataRollback_SafetyFlagsForwardedAndFailClosed(t *testing.T) {
 		"mode": "data", "filename": fn,
 		"accept_dp_reenrollment": true, "allow_counter_rollback": true,
 	}))
-	rc2, _ := argvWith(rig2.captured.snapshot(), "--restore")
+	rc2, _ := argvWith(rig2.captured.snapshot(), "--confirm")
 	for _, want := range []string{"--accept-dp-reenrollment", "--allow-counter-rollback"} {
 		found := false
 		for _, a := range rc2.Argv {
