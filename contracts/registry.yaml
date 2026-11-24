@@ -34,6 +34,8 @@ amended:
     reason: "Owner decision 1 on AGT-900 approved an opt-in startup reconcile (reconcile_on_startup = \"converge\", default \"off\"). \"Changes nothing in Docker\" and \"removes no journal record at startup\" now hold for the default \"off\" mode, which is unchanged and still pinned by the same tests; with \"converge\" the startup may retag to the recorded prior image, finish an armed rollback, and retire a record it verified converged, as AGT-900 states. Pulling at startup, and reporting an interrupted operation as succeeded, stay forbidden in both modes."
   - id: AGT-005
     reason: "Owner decision 1 on AGT-900 (recommendation D4): with reconcile_on_startup = \"converge\", the startup reconcile may also retire an interrupted record, but only after it verified convergence by image id and wrote the audit entry first. In the default \"off\" mode retirement is unchanged: only a later successful upgrade or image rollback."
+  - id: AGT-005
+    reason: "restore.commit is now journaled and an interrupted restore is reported at every start (ADR-0061 addendum, 2026-11-24). Without a way to clear it, the entry of an interrupted restore would stay until the next image change, which on an appliance that is restored but not upgraded is indefinitely. The set of retiring operations is therefore WIDENED by one case: a later restore.commit or rollbacks mode=data that succeeds (its commit command returned success and its health check passed) retires the interrupted records of the restore-class kinds only (restore.commit, rollbacks mode=data), audit entry first, by the same interrupted_superseded mechanism. It never retires an upgrade or image-rollback record, because a restore does not re-pin the image tag; that is a new forbidden transition with its own tests. The existing rules are unchanged and no registered test was edited: a successful upgrade or image rollback still retires every other record, and the converge reconcile still retires only after verified convergence. Not owner-approved; the wording is the implementer's."
   - id: AGT-900
     reason: "Owner decision 1 resolved the open question for an opt-in, conservative converge mode: default off; no adoption of an unverified target; recovery_required when evidence is insufficient; Docker unavailable defers. The invariant is restated for that mode, with its tests; the entry stays open until a real-Docker e2e verifies it (owner, 2026-11-23). owner_approved stays false."
   - id: POL-004
@@ -884,21 +886,27 @@ contracts:
     area: agent-lifecycle
     status: enforced
     owner_approved: false
-    invariant: "An interrupted operation's journal record is removed only when a later upgrade or image rollback succeeds after re-pinning the image tag and passing the health gate, or, with reconcile_on_startup = \"converge\", when the startup reconcile verified convergence by image id; the removal is audited first."
+    invariant: "An interrupted operation's journal record is removed only when a later upgrade or image rollback succeeds after re-pinning the image tag and passing the health gate; or, for the record of an interrupted restore or data rollback only, when a later restore or data rollback succeeds after its commit returned success and its health check passed; or, with reconcile_on_startup = \"converge\", when the startup reconcile verified convergence by image id. The removal is audited first. A restore or data rollback never removes the record of an interrupted upgrade or image rollback."
     authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/internal/server/journal_retire.go"
+      - "cmd/culvert-maint/internal/server/restore_journal.go"
       - "cmd/culvert-maint/internal/server/startup_reconcile.go"
     configs: []
     transitions:
       permitted:
         - "keeping the record after a failed recovery attempt"
+        - "a successful restore or data rollback removing the record of an earlier interrupted restore or data rollback"
+        - "a successful upgrade or image rollback removing the record of an interrupted restore or data rollback, as it removes every other record"
         - "keeping the record when the startup reconcile reports recovery_required, defers, or cannot write its audit entry"
       forbidden:
         - "removing the record when a later operation failed"
         - "removing the record on an already-current upgrade, which re-pins nothing"
         - "removing a record without an audit entry"
         - "the startup reconcile removing a record before its audit entry is written or without verified convergence"
+        - "a restore or data rollback removing the record of an interrupted upgrade or image rollback"
+        - "removing a restore record when the later restore failed, or did not commit and pass its health check"
+        - "the startup reconcile removing, or acting on, the record of an interrupted restore or data rollback"
     tests:
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_NewUpgradeConvergesAndRetiresTheRecord}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_AlreadyCurrentUpgradeDoesNotRetire}
@@ -907,8 +915,15 @@ contracts:
       - {file: "cmd/culvert-maint/internal/server/journal_retire_test.go", name: TestRetire_AuditFailureKeepsRecord}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_AuditFailureKeepsRecord}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestConvergeRecovery_EveryKillPoint}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_restore_test.go", name: TestRetireRestore_SuccessRetiresRestoreRecordsOnly}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_restore_test.go", name: TestRetireRestore_NeverAnUpgradeRecord}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_restore_test.go", name: TestRetireRestore_NotWhenTheRestoreDidNotEstablishItsState}
+      - {file: "cmd/culvert-maint/internal/server/journal_retire_restore_test.go", name: TestRetireRestore_AuditFailureKeepsRecord}
+      - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_test.go", name: TestStartupReconcile_RestoreRecordIsReportedOnly}
+      - {file: "cmd/culvert-maint/startup_restore_crash_test.go", name: TestRestoreCrash_LaterRestoreRetiresTheRecord}
+      - {file: "cmd/culvert-maint/startup_restore_crash_test.go", name: TestRestoreCrash_RestoreDoesNotRetireAnInterruptedUpgrade}
     validation: integration
-    compatibility: "Before this entry a record was never removed and was reported again at every start."
+    compatibility: "Before this entry a record was never removed and was reported again at every start. Since the ADR-0061 addendum of 2026-11-24 restore.commit is journaled too; an agent that predates that reports such a record as an interrupted operation of unknown kind and retires it on its next successful upgrade or image rollback."
 
   - id: AGT-900
     area: agent-lifecycle

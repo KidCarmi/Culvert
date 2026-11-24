@@ -176,6 +176,15 @@ func reconcileDecisionV2(in reconcileInputsV2) reconcileVerdictV2 {
 	case in.Kind == ops.KindRollbackCreate && in.Mode == "data":
 		// Never touches Docker; the existing manual data-recovery report applies.
 		return rr("data_window_manual")
+	case in.Kind == ops.KindRestoreCommit:
+		// An interrupted restore.commit: the same stages as a data rollback and
+		// the same answer. The record says how far the restore got (interrupted
+		// report); nothing here starts the stack it may have left down, because
+		// nothing here can know what the data directory holds. Named separately
+		// from unknown_kind_or_mode so that "a restore the agent knows and
+		// deliberately leaves alone" is not reported as "a kind it does not
+		// know". Decided before DockerReadable: Docker is never read for it.
+		return rr("restore_window_manual")
 	case !imageKind:
 		return rr("unknown_kind_or_mode")
 	case !in.DockerReadable:
