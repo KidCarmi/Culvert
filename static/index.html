@@ -11425,8 +11425,20 @@ async function loadGeoIPStatus() {
     if (typeof g.dbAgeDays === 'number') {
       // MaxMind GeoLite2 country data degrades in accuracy as IP allocations
       // shift; Culvert never auto-refreshes the file, so flag a stale build.
+      //
+      // CHAOS-127: the threshold below is NOT independent. The same judgement
+      // is made in the process (geoipDBStaleAfterDays in
+      // geoip_database_freshness.go), which is what /metrics and
+      // /api/diagnostics report, and TestCHAOS127GUIThresholdMatchesBackend
+      // reads this line and fails if the two diverge. Change both.
+      //
+      // The advice says "and restart" because replacing the file alone does
+      // nothing: a loaded database is never re-read (InitGeoDB is
+      // startup-only and TryDeferredLoad publishes only while no reader is
+      // loaded). Saying "consider updating" without that was advice an
+      // operator could follow in full and observe no change from.
       const stale = g.dbAgeDays > 90;
-      ageEl.textContent = g.dbAgeDays + ' day(s) (built ' + g.dbBuildDate.slice(0, 10) + ')' + (stale ? ' - stale, consider updating' : '');
+      ageEl.textContent = g.dbAgeDays + ' day(s) (built ' + g.dbBuildDate.slice(0, 10) + ')' + (stale ? ' - stale: replace the .mmdb and restart to pick it up' : '');
       ageEl.style.color = stale ? 'var(--warn,#f59e0b)' : 'var(--muted)';
     } else {
       ageEl.textContent = '-';

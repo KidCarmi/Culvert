@@ -8,6 +8,128 @@ workers/feeds/scanning/alerting.
 inferred without reading the code path. Failure modes were assessed against the project's stated
 posture — **default deny, fail closed when recovery is impossible, graceful degradation otherwise.**
 
+**2026-11-23 — `CHAOS-127` CLAIMED (placeholder, commit one). Domain: the
+SIXTH BODY OF SECURITY INTELLIGENCE — the GeoIP COUNTRY DATABASE's freshness
+plane, and the ENUMERATING GATE that ends this class. CHAOS-124 §9.1 left that
+gate explicitly Open ("a gate that enumerates every body of security
+intelligence and asserts each has a freshness surface … would end the class
+instead of retiring it one input at a time"), and CHAOS-123 §9.4 proposed it
+first. This round takes both halves. The GeoIP plane is the one body where
+Culvert has NO updater at all — `internal/geoip`'s own doc says "Culvert never
+auto-refreshes this file" — so unlike `freshclam` there is no loop to fail:
+decay is the DEFAULT, not a failure mode, and a `destCountry` BLOCK rule is a
+security control whose accuracy degrades on a schedule nobody watches. The
+node already LEARNS the answer: `readerBuildTime` (`internal/geoip/geoip.go:82`)
+parses the `.mmdb`'s own `BuildEpoch` and `BuildTime()` is documented
+"callers use this to surface staleness to the operator". It has exactly ONE
+consumer — `apiGeoIPConfig` (`ui_security.go:2007`), which emits `dbAgeDays`
+— and **the only staleness JUDGEMENT in the product is a line of browser
+JavaScript**: `const stale = g.dbAgeDays > 90` at `static/index.html:11428`,
+which paints a label amber inside a panel a human has to open. There is no
+`culvert_geoip_*` metric of any kind (grep: zero hits across the tree), no
+`/api/diagnostics` row for a loaded-but-stale database — `geoip_database_health.go`
+fires only when NO database is loaded — and no alert. So the Prometheus/
+Alertmanager path an enterprise SWG is actually watched by cannot see GeoIP
+currency in any form, which is precisely the gap CHAOS-124 closed for ClamAV
+and CHAOS-123 for the blocklist feed. Every liveness surface stays green by
+construction: `healthcheck.go:435` reports `geoip: ok` on `Enabled()`, a
+pointer check that a three-year-old database passes forever. Second half of the
+same plane: the remedy the GUI advises cannot take effect. `TryDeferredLoad`
+(`internal/geoip/deferred.go`) "is deliberately NOT a reload" and publishes
+only while no reader is loaded, and GEO-1/CHAOS-64 documents why a true reload
+is unsafe (`Close()` munmaps a buffer an in-flight lookup may hold — a
+SIGSEGV `recover()` cannot catch), so an operator who reads "stale, consider
+updating" and drops a fresh `.mmdb` at the same path sees the reported age NOT
+move, with nothing anywhere saying a restart is required.** Id claimed in this
+committed row before any code was written, per the convention below and checked
+against `origin/main` rather than the working tree per the 2026-09-25
+amendment: `CHAOS-126` is the highest id anywhere on `origin/main` (at
+`46b4ffa`). Of the open PRs (#2068, #2067, #2066, #2065, #2063, #2060, #2058,
+#2054, #2052, #2051, #2048, #2047, #2046, #2045, #2044, #2041, #2040, #2037,
+#2036, #2035, #2034, #2033, #2031, #2029 and the Dependabot set) none is a
+chaos sweep and none claims a chaos id. This sweep took 127 and will not move.
+
+The 2026-11-23/24 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-24.md) —
+CHAOS-127 (THE JUDGEMENT THAT LIVED IN A BROWSER, AND THE GATE THAT ENDS THE
+CLASS). Five rounds found this family one body at a time — WK-5/CHAOS-59,
+CHAOS-108, CHAOS-123, CHAOS-124 — and each handed the class forward. This round
+closes the SIXTH body and builds the gate CHAOS-124 §9.1 left Open. **What makes
+the GeoIP plane different from the other five, and worse, is that there is no
+LOOP.** Every other body degrades because a fetch dies, a credential expires or
+egress is blocked; here the file is placed on disk by hand, opened once, and
+never touched again by anything, so decay is the DEFAULT STATE rather than a
+failure mode and needs no attacker, no fault and no misconfiguration — only
+time. Measured with a database built 1096 days ago, loaded and serving:
+**/metrics carried 888 lines and 0 about the database, /ready said
+`geoip: ok`, /api/diagnostics produced 51 rows and 0 about staleness.** The one
+surface that knew was `/api/geoip`'s `dbAgeDays`, and the only staleness
+JUDGEMENT in the product was `const stale = g.dbAgeDays > 90` in the admin
+panel's JavaScript. **The series that look like coverage are the ones that hide
+it**, and the sharpest is `culvert_geo_policy_unresolved_total`: it counts
+country-scoped evaluations that did not match because the country was UNKNOWN —
+a MISSING database's failure mode. A stale database is never unknown; it
+resolves briskly and confidently to whoever owned the prefix three years ago, so
+that counter sits at zero through the whole degradation it appears to watch.
+This is the WK-5/CHAOS-123 shape with a new twist: the misleading signal is not
+a stale last-good value but a DIFFERENT QUESTION, ANSWERED WELL, which is harder
+to notice because nothing about it is broken. Second half (CHAOS-127b): the
+remedy the GUI advised could not take effect. `InitGeoDB` is startup-only and
+`TryDeferredLoad` "is deliberately NOT a reload" — measured, with a current
+`.mmdb` written to the configured path, `ArmDeferredLoad` returned FALSE,
+nothing loaded, and the reported build date did not move; nothing said a restart
+was required. Shipped: the `culvert_geoip_database_*` family, emitted only when
+a database is loaded so a fleet-wide age rule is not silently satisfied by the
+nodes that have none; a `geoip_database_age` row for the stale shape and for
+both UNMEASURABLE shapes (no readable epoch, future-dated), neither ever
+reported as fresh; `geoip_database_pending_restart`, which fires when the file
+on disk is NEWER than the reader being served and is silent on all six
+inconclusive shapes; the GUI string now names the restart; and the enumerating
+gate — eight bodies, each declaring EITHER a freshness series OR a reasoned
+exemption, every declared series checked against the tree. **No live reload was
+attempted and that refusal is the important one:** GEO-1/CHAOS-64 records that
+`Close()` munmaps a buffer an in-flight lookup may hold — a SIGSEGV `recover()`
+cannot catch, with no log line and no crash record — so the reader lifetime must
+be made safe first, which is an owner decision with a real design, and the
+pending-restart row is what makes living without it bearable. **Also refused,
+with reasons in §7:** no alert (age is monotone in wall-clock time with no event
+to close an episode on, so it would clear only on human action — a ticket, not a
+page), no readiness change, no fail-closed toggle, no operator setting for the
+threshold, no file I/O at scrape time, and no API field — which kept the
+OpenAPI/generated-client/committed-dist drift gates out of a round whose API
+shape is unchanged, and the divergence gate that READS the JavaScript is
+strictly stronger than a shared field would have been. **The gate caught an
+error in its own first draft**, which is the best evidence it works: it declared
+`culvert_saas_feed_last_sync_timestamp_seconds` for the signed SaaS feed, and
+that series is RETIRED — `urlcat_metrics_test.go` asserts its absence. The real
+surface is `culvert_saasfeed_expires_in_seconds`, a publisher-stamped expiry,
+which is the STRONGEST primitive in the family because staleness is a fact the
+origin asserts rather than a threshold the consumer guesses. **Mutation testing
+earned its keep once more, on PROSE rather than logic:** 16 mutations, 15 caught
+immediately, and M14 — the stale row dropping "and RESTART the proxy — a loaded
+database is never re-read" — caught by NOTHING, because the assertion searched
+for "RESTART" in a string that also references the sibling row by its code,
+`geoip_database_pending_restart`, which contains that substring. An assertion
+that looks for a WORD inside a string built from IDENTIFIERS can be satisfied by
+the identifiers. The gate now strips the code first and also asserts the row
+says WHY. **Carried forward:** the gate CANNOT discover a seventh body on its
+own — there is no machine-readable registry of externally-sourced intelligence
+to diff against (`supportMetricRegistry` forbids its own growth and
+`internal/feedsched`'s enumeration is the one CHAOS-123 found incomplete) — so
+the class is GATED, NOT PROVABLY CLOSED, and a count was deliberately not
+asserted; YARA rule-set age stays open and correctly lower, now recorded as a
+reasoned exemption rather than silently omitted (CHAOS-124 §9.3); the age is of
+the database this process LOADED, not the file on disk, and the row that
+connects them lives only on `/api/diagnostics`, so a Prometheus-only fleet sees
+a stale gauge and not that the fix is already staged; the 90-day threshold is
+inherited from the GUI, not derived; a badly skewed clock disables the staleness
+check entirely, visible only as `age_unknown 1`; `uiCfgGeoIPDB` is read without
+synchronisation by two readers now rather than one (assigned once in `main`
+before any listener serves, matching the established pattern — revisit both
+together if it ever becomes runtime-mutable); and nothing in this round changes
+what a `destCountry` rule DECIDES against stale data, which remains a signal
+rather than a fix.
+
 **2026-11-21 — `CHAOS-126` CLAIMED (placeholder, commit one). Domain: the
 OBSERVABILITY PLANE'S OWN LOSS ACCOUNTING — the OTLP SPAN BUFFER at a
 collector failure and at a restart. `SpanExporter.push` DRAINS the ring buffer
