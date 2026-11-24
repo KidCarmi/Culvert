@@ -276,12 +276,10 @@ const maxInterruptedSeen = 1_000_000
 // could lose it. So the audit trail carries the interruption at least once,
 // and exactly once unless the agent dies inside that window.
 func reportInterrupted(jnl *journal.Journal, al *audit.Logger, rec *journal.Record, proxyRepo string, now time.Time) ops.InterruptedOp {
-	if rec.InterruptedAt == nil {
-		rec.InterruptedAt = &now
-	}
-	if rec.InterruptedSeen < maxInterruptedSeen {
-		rec.InterruptedSeen++
-	}
+	// Counts this start and takes an open command intent (journal/intent.go).
+	// In every mode, before anything is decided, and whether or not anything
+	// can be read from Docker.
+	rec.SeenByStartup(now, maxInterruptedSeen)
 	desc := server.DescribeInterrupted(rec, proxyRepo)
 	actor := desc.Actor
 	if actor == "" {

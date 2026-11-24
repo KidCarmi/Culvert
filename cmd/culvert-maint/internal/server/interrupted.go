@@ -122,6 +122,12 @@ type InterruptedOperation struct {
 	InterruptedAt  *time.Time `json:"interrupted_at,omitempty"`
 	// AgentStartsSeen counts the agent starts that found this record.
 	AgentStartsSeen int `json:"agent_starts_seen"`
+	// DiedInCommand is the docker command ("compose up", "compose down") of
+	// this operation that the agent process died inside, as found by THIS
+	// agent start. Absent when the last command had returned, when no command
+	// had been begun, and from the next agent start on: by then the state of
+	// the stack can no longer be put down to that command.
+	DiedInCommand string `json:"died_in_command,omitempty"`
 
 	// RefsValid reports whether the record's image references passed the
 	// repo-bound digest gate. The references and image ids below are present
@@ -209,6 +215,11 @@ func DescribeInterrupted(rec *journal.Record, proxyRepo string) InterruptedOpera
 		LastProgressAt:  rec.UpdatedAt,
 		InterruptedAt:   rec.InterruptedAt,
 		AgentStartsSeen: rec.InterruptedSeen,
+	}
+	for _, c := range []string{journal.MutationComposeUp, journal.MutationComposeDown} {
+		if rec.CutByThisStart(c) {
+			out.DiedInCommand = c
+		}
 	}
 	out.DockerState = dockerStateOf(out.Kind, out.Mode, rec.Phase)
 	if isRestoreRecord(out.Kind, out.Mode) {

@@ -184,6 +184,7 @@ What an entry tells you:
 | `journal_phase` | the last step the operation recorded |
 | `docker_state: unchanged` | it stopped before moving the image tag; submit it again if still wanted |
 | `docker_state: indeterminate` | it may have moved `culvert/proxy:pinned`, or started an image that was never health-checked |
+| `died_in_command` | `compose up` or `compose down`: the agent process died **inside** that command of this operation. Shown only by the first agent start after it; from the next start on it is absent, because the state of the stack can no longer be put down to that command. Absent also when the last command had returned before the agent stopped (a `systemctl stop` ends the command first), and when the agent could not write to its state directory at the time. Information only: the agent does not act on it |
 | `docker_state: data_indeterminate` | a restore or a data rollback: no image tag was involved; see [After the agent stops during a restore](#after-the-agent-stops-during-a-restore) |
 | `running_image` | what the proxy runs now: `target`, `prior`, `other`, or `unknown` if Docker could not be read |
 | `pinned_tag.matches_running` | `false` means the next `docker compose up` would start a different image than the one running. Reported on every status, with or without an interrupted operation. It is also `false` for a moment during a normal upgrade or rollback, between the tag move and the recreate: read it together with the lock holder / running operation |
@@ -314,7 +315,10 @@ is the **downgrade fence** (ADR-0062). A newer agent writes it while the
 journal holds a record that only an agent of that version or later can read
 safely, so an older agent refuses to start instead of acting on a record it
 would misread. Do not delete it. Start the newer agent again (or upgrade);
-it removes the fence by itself once those records are resolved. A record a
+it removes the fence by itself once those records are resolved. The fence is
+also there while an upgrade, rollback or restore is inside a `docker compose`
+command, and, if the agent dies in that command, until the agent has started
+once more. A record a
 newer agent wrote is also never rewritten or retired by an agent that knows
 the fence: it is shown in status with `recovery_required` and reason
 `record_from_newer_agent` until an agent of the right version handles it.

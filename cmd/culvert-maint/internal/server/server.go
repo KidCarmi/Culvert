@@ -210,7 +210,12 @@ type Server struct {
 	// startHazard is whether the previous agent process may have left one
 	// unfinished; startSettled is set once Docker showed that it is over
 	// (settle.go, mutation.go). settlePoll is how often Docker is asked.
-	mutations    *journal.MutationLog
+	mutations *journal.MutationLog
+	// pendingIntents: command intents whose close could not be written
+	// (mutation.go). Guarded by intentMu.
+	intentMu       sync.Mutex
+	pendingIntents map[string]struct{}
+
 	startHazard  bool
 	startOnlyUp  bool // a readable marker was found and names only `compose up`
 	startSettled atomic.Bool
@@ -454,6 +459,7 @@ func (s *Server) Serve(ctx context.Context) error {
 // Close stops the server and removes the socket file. Safe to call
 // multiple times.
 func (s *Server) Close() error {
+	s.closePendingIntents() // last chance to say "that command returned"
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.httpSrv != nil {

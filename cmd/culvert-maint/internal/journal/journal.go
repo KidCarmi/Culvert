@@ -167,6 +167,12 @@ type Record struct {
 	// byte-identical to what it was before the key existed.
 	RestoreStage RestoreStage `json:"restore_stage,omitempty"`
 
+	// Intent and Cut attribute an interruption to one docker command of this
+	// operation (intent.go). Schema 2; absent on every record whose operation
+	// has not begun such a command.
+	Intent *CommandIntent `json:"intent,omitempty"`
+	Cut    *CommandCut    `json:"cut,omitempty"`
+
 	// Schema is the record format (schema.go). Absent means 1, the format of
 	// every agent before ADR-0062. A record at SchemaFenced or above is written
 	// only behind the downgrade fence; one above SchemaCurrent came from a
@@ -196,6 +202,8 @@ var ErrCorruptRecord = errors.New("journal: corrupt record")
 // Journal reads and writes op records under <stateDir>/reconcile/.
 type Journal struct {
 	dir string
+	// writeErrForTest, when set, is returned by Write (SetWriteErrorForTest).
+	writeErrForTest error
 }
 
 // New creates the reconcile directory (0750) and returns a Journal rooted there.
@@ -257,8 +265,25 @@ func (j *Journal) Write(rec Record) error {
 			return ferr
 		}
 	}
-	return atomicWrite(path, data, fileMode)
+	if j.writeErrForTest != nil {
+		return j.writeErrForTest
+	}
+	if err := atomicWrite(path, data, fileMode); err != nil {
+		return err
+	}
+	if rec.EffectiveSchema() < SchemaFenced {
+		// This record does not (or no longer) need the fence: a command intent
+		// has been closed or consumed. A fence that cannot be released stays,
+		// which only keeps older agents out a little longer.
+		_ = j.releaseFenceIfUnused()
+	}
+	return nil
 }
+
+// SetWriteErrorForTest makes every later Write fail with err (nil restores
+// normal writes). Tests only: a disk that fills up between two writes cannot
+// be produced with file modes when the tests run as root.
+func (j *Journal) SetWriteErrorForTest(err error) { j.writeErrForTest = err }
 
 // Read returns the record for opID. found=false (nil error) when no file exists;
 // ErrCorruptRecord when the file exists but does not parse.

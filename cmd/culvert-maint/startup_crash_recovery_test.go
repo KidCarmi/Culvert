@@ -505,10 +505,17 @@ func (r *crashRig) waitJournal(want ...string) []string {
 }
 
 // journalFiles lists the op ids with a live journal record.
+// journalFiles lists the OPERATION records in the journal. The downgrade
+// fence (ADR-0062 slice 2) is not one: it stands beside any record that
+// carries schema-2 fields, which since slice 3 is every record whose operation
+// has begun a compose command, and goes when the last such record goes.
 func (r *crashRig) journalFiles() []string {
 	ents, _ := os.ReadDir(filepath.Join(r.state, "reconcile"))
 	var out []string
 	for _, e := range ents {
+		if e.Name() == journalFenceFile {
+			continue
+		}
 		if strings.HasSuffix(e.Name(), ".json") {
 			out = append(out, strings.TrimSuffix(e.Name(), ".json"))
 		}
