@@ -711,10 +711,11 @@ func (ps *PolicyStore) listLocked() []PolicyRule {
 // (Evaluate skips non-access rules; resolveAuthOutcome returns Default). Invalid
 // auth rules are DROPPED fail-closed, as are access rules carrying a non-nil
 // SubjectMatch (Evaluate does not consult it, so persisting one would let a
-// scoped rule match every request — fail-open). validatePolicyRule guards the
-// per-rule API/import-merge paths; this store-level gate closes the bulk paths
-// that bypass that validator (cluster sync, import-replace, and any other direct
-// ReplaceAll caller). The phase that wires the matcher activates these rules.
+// scoped rule match every request — fail-open). The ingress validation guards
+// the doors where an operator submits rules (API, import in both modes;
+// policy_ruleset_ingress.go); this store-level gate is the one the stored and
+// wire doors rely on (cluster sync, rollback, and any other direct ReplaceAll
+// caller). The phase that wires the matcher activates these rules.
 func (ps *PolicyStore) ReplaceAll(rules []PolicyRule) {
 	// A rule this build cannot enforce (unknown ruleType, or any shape
 	// policyRulePersistable refuses): refuse the whole replacement and keep the

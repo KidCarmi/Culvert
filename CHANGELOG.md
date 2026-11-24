@@ -9,6 +9,48 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A replace-mode config import no longer installs policy rules the policy
+  API refuses.** `POST /api/config/import?mode=replace` checked only that
+  every rule was of a type this version can enforce, then replaced the whole
+  policy. It therefore accepted, with `200 {"ok":true}` and no warning, rules
+  that `POST /api/policy` answers 400 to. The one that changes traffic: a Drop
+  or Block rule whose `sourceIP` is not an address or a CIDR
+  (`"10.0.0.5-10.0.0.9"`, `" 10.0.0.5"`, `"10.0.0.0/33"`) never matches, so
+  importing it over a working restriction let that traffic fall through to the
+  default action or to an Allow behind it. Also accepted: duplicate rule names
+  or priorities, a Redirect with no `redirectURL`, an unknown schedule
+  timezone (evaluated as UTC), a rule with no name, and a rule whose `action`
+  is missing or is not exactly `Allow`, `Drop`, `Block_Page` or `Redirect`.
+  Every door where an operator submits rules now runs the same validation
+  through one shared function: the policy and auth-policy API, config import
+  in both modes, and policy-learning acceptance. No door has rules of its own.
+  - **Replace mode** validates the incoming set before anything is applied
+    (the dry-run preview too). One invalid rule refuses the whole import with
+    a 400; no section is applied, nothing is audited or versioned, and the
+    running and saved policy are untouched.
+  - **Merge mode** still skips an invalid rule and lists it in `warnings`, as
+    before, and now also skips a rule whose `sourceIP` can never match instead
+    of installing it or overwriting a working rule with it.
+  - **Not changed:** how a rule is evaluated (a stored rule with no action
+    still resolves to Allow), and the doors that read stored or published
+    policy: the policy file at startup and reload, config-version rollback,
+    control-plane snapshots and a pending draft. They keep loading what they
+    held, so no node fails to start, roll back or follow its control plane
+    because of this change.
+
+  **Upgrade impact:** a replace-mode import that used to succeed can now be
+  refused. The response says which rule and why, for example `import refused:
+  policy rule 3 of 12 ("quarantine") is not valid: sourceIP
+  "10.0.0.5-10.0.0.9" must be a single IP address or a CIDR`. Correct that
+  rule in the file and import again; `?dryRun=true` gives the same answer
+  without applying anything. This includes a backup exported by this system
+  if its policy held such a rule, which is possible when the rule came from a
+  hand-edited policy file, a control-plane snapshot, or a release older than
+  the API check concerned. Two causes are not visible in the rule itself: a
+  Redirect rule's host must resolve in DNS to a public address from the node
+  doing the import, and a schedule timezone must exist in that node's
+  timezone database.
+
 - **A config import no longer reports success when the imported policy rules
   could not be written to disk.** The policy save on `POST /api/config/import`
   discarded its error: the import answered `200 {"ok":true}` while the policy

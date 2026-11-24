@@ -3629,7 +3629,13 @@ paths:
         - name: mode
           in: query
           required: false
-          description: "`replace` wipes stores before applying; default is merge."
+          description: >-
+            `replace` wipes stores before applying; default is merge. Policy
+            rules are validated as `POST /api/policy` validates them, in both
+            modes. In `replace` mode one invalid rule refuses the whole import
+            (400, plain text naming the rule and the reason) before anything
+            is applied; in `merge` mode an invalid rule is skipped and listed
+            in `warnings`.
           schema: { type: string, enum: [merge, replace] }
         - name: importDigest
           in: query
@@ -3667,7 +3673,11 @@ paths:
             carrying the marker, or a marker without the section;
             `invalid_entry`, `duplicate_id`, `ambiguous_upstream_sections`,
             `credentials_not_importable`. Other malformed input (invalid JSON,
-            unsupported version) stays plain text.
+            unsupported version) stays plain text, as does a refused policy
+            rule set: a rule this version cannot enforce (either mode), or in
+            `replace` mode a rule the policy API would refuse (`import
+            refused: policy rule N of M ("name") is not valid: reason`).
+            Nothing is applied, audited or versioned.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/UpstreamImportRefusal' }

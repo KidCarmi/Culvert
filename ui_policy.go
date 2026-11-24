@@ -2041,7 +2041,7 @@ func apiPolicyCreate(w http.ResponseWriter, r *http.Request) {
 	// Structural validation (state-independent) stays a pre-fence 400; the
 	// name/priority uniqueness checks run INSIDE the fence below (2E-C
 	// concurrency-status correction).
-	if err := validateAccessRuleIngress(rule); err != nil {
+	if err := validateRuleIngress(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -2135,7 +2135,7 @@ func apiPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	if err := validateAccessRuleIngress(rule); err != nil {
+	if err := validateRuleIngress(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -2294,7 +2294,7 @@ func apiPolicyUpdateByID(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, `auth rules are managed via /api/authpolicy (admin only)`, http.StatusBadRequest)
 		return
 	}
-	if err := validateAccessRuleIngress(rule); err != nil {
+	if err := validateRuleIngress(rule); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

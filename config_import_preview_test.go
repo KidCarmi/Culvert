@@ -110,7 +110,7 @@ func TestImportPreview_ReplaceEffect(t *testing.T) {
 		"version":    1,
 		"exportedAt": "2026-02-02T00:00:00Z",
 		"policyRules": []map[string]any{
-			{"name": "new-1", "action": "deny"},
+			{"name": "new-1", "action": "Drop"},
 		},
 	})
 	if resp.Mode != "replace" {
@@ -149,7 +149,7 @@ func TestImportPreview_MutatesNothing(t *testing.T) {
 		"version":    1,
 		"exportedAt": "2026-02-02T00:00:00Z",
 		"policyRules": []map[string]any{
-			{"name": "would-replace", "action": "deny"},
+			{"name": "would-replace", "action": "Drop"},
 		},
 		"blocklist":     []string{"would-replace.example.com"},
 		"urlCategories": []map[string]any{{"name": "would-replace-cat"}},

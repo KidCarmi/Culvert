@@ -274,15 +274,25 @@ func validateAccessRule(rule PolicyRule) error {
 	return nil
 }
 
-// validateAccessRuleIngress is validateRuleShape plus the checks that apply
-// only where an operator SUBMITS an access rule (apiPolicyCreate, apiPolicyUpdate,
-// apiPolicyUpdateByID), where there is a caller to tell. The bulk and restore
-// paths (config rollback, backup import, draft publish, PolicyStore.Load and
-// ReplaceAll) deliberately do not run these: a rule already on disk or in a
-// version keeps loading, and Load warns about it instead (warnInertSourceIP).
-func validateAccessRuleIngress(rule PolicyRule) error {
+// validateRuleIngress is the per-rule validation of a rule an operator SUBMITS,
+// at every door where there is a caller to tell: the policy and auth-policy
+// API handlers, and (through validateIngressRule / validateIngressRuleset,
+// policy_ruleset_ingress.go) config import in both modes and policy-learning
+// acceptance. It is validateRuleShape plus the source literal check for an
+// access rule; an auth rule scopes clients with subjectMatch, which
+// validateAuthRule covers.
+//
+// The STORED and WIRE doors (PolicyStore.Load and ReplaceAll, config-version
+// rollback, control-plane snapshot publish and apply, a pending draft on disk)
+// deliberately do not run it: they hold data that has no caller, they stay on
+// the pure POL-005 gate (policy_ruletype_gate.go, storedRulesetError), and
+// Load warns about an inert source literal instead (warnInertSourceIP).
+func validateRuleIngress(rule PolicyRule) error {
 	if err := validateRuleShape(rule); err != nil {
 		return err
+	}
+	if ruleTypeOf(&rule) == ruleTypeAuth {
+		return nil
 	}
 	return validateRuleSourceIP(rule.SourceIP)
 }
