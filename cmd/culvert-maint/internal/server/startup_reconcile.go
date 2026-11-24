@@ -571,16 +571,41 @@ func (s *Server) verifiedOnPrior(ctx context.Context, c *reconcileCase) bool {
 
 // retire audits the converged record and only then removes it. A failed audit
 // or removal keeps the record (and says so).
+//
+// Exactly-once audit: the ":reconciled" entry is fsynced BEFORE the record is
+// removed, so a crash between the two leaves an audited record that the next
+// start retires again. retire therefore first looks for this op's succeeded
+// ":reconciled" entry and writes one only if none exists. If the log cannot be
+// read it writes anyway: a duplicate entry is acceptable, a retirement with no
+// entry is not (AGT-005).
 func (s *Server) retire(c *reconcileCase) ReconcileRecord {
 	c.out.Outcome = OutcomeConverged
-	if err := s.auditReconciled(c, audit.OutcomeSucceeded); err != nil {
-		return s.keepRecord(c, OutcomeConvergedNotRetired)
+	if !s.reconciledAlreadyAudited(c) {
+		if err := s.auditReconciled(c, audit.OutcomeSucceeded); err != nil {
+			return s.keepRecord(c, OutcomeConvergedNotRetired)
+		}
 	}
 	if err := s.opts.Journal.Remove(c.rec.OpID); err != nil {
 		return s.keepRecord(c, OutcomeConvergedNotRetired)
 	}
 
 	return c.out
+}
+
+// reconciledAlreadyAudited reports whether a previous start already wrote this
+// record's succeeded ":reconciled" entry and was killed before removing the
+// record. Any doubt (no logger path, unreadable log) answers false, so the
+// entry is written.
+func (s *Server) reconciledAlreadyAudited(c *reconcileCase) bool {
+	if s.opts.Audit == nil || c.rec == nil {
+		return false
+	}
+	found, err := audit.HasSucceeded(s.opts.Audit.Path(), c.rec.OpID, reportKind(c.rec.Kind)+":reconciled")
+	if err != nil {
+		log.Printf("culvert-maint: WARN: could not check the audit log for a prior retirement of %s; writing the entry: %v", c.rec.OpID, err)
+		return false
+	}
+	return found
 }
 
 // keepRecord writes the outcome into the kept record (best-effort: the
