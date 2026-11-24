@@ -201,7 +201,7 @@ func discoverLeftovers(dataDir string) ([]leftover, []skipReason, error) {
 		// While a restore has not committed, its backup directory holds the
 		// ONLY copy of the previous content. Nothing in the work area is a
 		// leftover until that record is gone.
-		_, statErr := os.Lstat(filepath.Join(work, restoreIntentName))
+		_, statErr := os.Lstat(filepath.Join(work, restoreIntentName)) // #nosec G703 -- a compile-time name under the operator-configured data directory
 		unfinished := statErr == nil
 		for _, entry := range inPlace {
 			if unfinished && re.MatchString(entry.Name()) {

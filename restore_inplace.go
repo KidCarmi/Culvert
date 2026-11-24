@@ -382,7 +382,7 @@ func recoverInPlaceRestoreAtBoot(dataDir string, lockHeld bool) error {
 	if err := rollbackInPlaceRestore(dataDir, in, "interrupted restore undone at startup"); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Restore: an interrupted restore (%s, mode %s) was undone at startup; "+
+	_, _ = fmt.Fprintf(os.Stderr, "Restore: an interrupted restore (%s, mode %s) was undone at startup; "+
 		"the data directory holds its previous content. Run the restore again if it is still wanted.\n",
 		in.Suffix, in.Mode)
 	return nil
@@ -401,7 +401,7 @@ func verifyRestoredFiles(dataDir string, manifest *backupManifest, mode restoreM
 		if err := guardWithinDir(dataDir, target); err != nil {
 			return fmt.Errorf("verify %s: %w", f.Path, err)
 		}
-		body, err := os.ReadFile(target) // #nosec G304 -- guarded above; a manifest path under the data directory
+		body, err := os.ReadFile(target) // #nosec G304 G703 -- guardWithinDir above; a manifest path under the operator-configured data directory
 		if err != nil {
 			return fmt.Errorf("verify %s: %w", f.Path, err)
 		}
@@ -410,7 +410,7 @@ func verifyRestoredFiles(dataDir string, manifest *backupManifest, mode restoreM
 			return fmt.Errorf("verify %s: content on disk does not match the backup manifest", f.Path)
 		}
 		want, perr := strconv.ParseUint(f.Mode, 8, 32)
-		info, serr := os.Stat(target)
+		info, serr := os.Stat(target) // #nosec G703 -- the same guarded path as the read above
 		if perr != nil || serr != nil || info.Mode().Perm() != os.FileMode(want)&os.ModePerm {
 			return fmt.Errorf("verify %s: file mode on disk does not match the backup manifest", f.Path)
 		}
@@ -474,7 +474,7 @@ func commitRestoreInPlace(dataDir string, files map[string][]byte, manifest *bac
 		return err
 	}
 	if undone {
-		fmt.Fprintln(os.Stdout, "An earlier restore that did not finish was undone first; the data directory held its previous content before this restore started.")
+		_, _ = fmt.Fprintln(os.Stdout, "An earlier restore that did not finish was undone first; the data directory held its previous content before this restore started.")
 	}
 	for _, p := range []string{staging, bak} {
 		if restorePathExists(p) {
@@ -482,9 +482,9 @@ func commitRestoreInPlace(dataDir string, files map[string][]byte, manifest *bac
 		}
 	}
 
-	fmt.Fprintf(os.Stdout, "\nCommitting restore now (in place: %s cannot be renamed as a whole).\n", dataDir)
-	fmt.Fprintf(os.Stdout, "  Staging dir: %s\n", staging)
-	fmt.Fprintf(os.Stdout, "  Backup of the current content will be at: %s\n\n", bak)
+	_, _ = fmt.Fprintf(os.Stdout, "\nCommitting restore now (in place: %s cannot be renamed as a whole).\n", dataDir)
+	_, _ = fmt.Fprintf(os.Stdout, "  Staging dir: %s\n", staging)
+	_, _ = fmt.Fprintf(os.Stdout, "  Backup of the current content will be at: %s\n\n", bak)
 
 	if err := stageArtifacts(staging, dataDir, files, manifest, mode); err != nil {
 		_ = os.RemoveAll(staging) // #nosec G104 -- best-effort cleanup of content that never left staging
@@ -512,9 +512,9 @@ func commitRestoreInPlace(dataDir string, files map[string][]byte, manifest *bac
 		return fmt.Errorf("restore: commit failed, the previous content was put back and nothing was changed: %w", err)
 	}
 
-	fmt.Fprintf(os.Stdout, "\nRestore committed.\n")
-	fmt.Fprintf(os.Stdout, "  Previous content preserved at: %s\n", bak)
-	fmt.Fprintf(os.Stdout, "  (.bak is NOT auto-deleted; remove it with --cleanup-restore-leftovers when no longer needed.)\n")
+	_, _ = fmt.Fprintf(os.Stdout, "\nRestore committed.\n")
+	_, _ = fmt.Fprintf(os.Stdout, "  Previous content preserved at: %s\n", bak)
+	_, _ = fmt.Fprintf(os.Stdout, "  (.bak is NOT auto-deleted; remove it with --cleanup-restore-leftovers when no longer needed.)\n")
 	return nil
 }
 
@@ -631,8 +631,8 @@ func printRestorePreflight(dataDir string, a *commitAnalysis, files map[string][
 		layout = "in-place"
 	}
 	if reason := restoreCommitRefusal(dataDir, a, files); reason != "" {
-		fmt.Fprintf(os.Stdout, "\n%scommit=refused layout=%s reason=%s\n", restorePreflightPrefix, layout, reason)
+		_, _ = fmt.Fprintf(os.Stdout, "\n%scommit=refused layout=%s reason=%s\n", restorePreflightPrefix, layout, reason)
 		return
 	}
-	fmt.Fprintf(os.Stdout, "\n%scommit=ok layout=%s\n", restorePreflightPrefix, layout)
+	_, _ = fmt.Fprintf(os.Stdout, "\n%scommit=ok layout=%s\n", restorePreflightPrefix, layout)
 }
