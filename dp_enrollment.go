@@ -259,12 +259,22 @@ func persistEnrollCerts(privKey *ecdsa.PrivateKey, resp *EnrollResponse, cpAddr,
 // still running underneath — is the dangerous outcome. The refusal is logged,
 // latched, and reported FAIL by the `cluster_posture` diagnostics row.
 func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile string) {
+	prepareDataPlane(ctx, addr, nodeID, certFile, keyFile, caFile)()
+}
+
+// prepareDataPlane is the data plane's EARLY half (cluster_startup.go): the
+// role claim, the fencing-epoch floor, the feed-authority store and the node
+// certificate / key checks — identity and trust, nothing that reads or writes
+// a configuration store. It returns the LATE half (runDataPlane), which the
+// boot sequence calls once every store the last-good replay writes into has
+// loaded and been bound to its file. A refused role claim returns a no-op.
+func prepareDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile string) (run func()) {
 	nodeID, err := claimDataPlaneRole(addr, nodeID)
 	if err != nil {
 		logErrorf("DataPlane: NOT starting the Data Plane client for %s: %v — this node keeps the role it "+
 			"already holds. Both Control Plane and Data Plane wiring are configured; remove one and restart "+
 			"(see the cluster_posture diagnostics row)", addr, err)
-		return
+		return func() {}
 	}
 
 	// D4: seed the fencing-epoch ratchet from disk BEFORE the first poll so a
@@ -291,6 +301,27 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 			logFatalf("DataPlane: DP node key at-rest: %v", err)
 		}
 	}
+	// Data-plane audit queuing is part of the node's identity, not of its
+	// activation: it is switched on here, where it always was relative to the
+	// init steps that follow, so an audit entry one of them records is still
+	// queued for the control plane. The push loop that drains the queue starts
+	// with the client, in the late half.
+	audit.SetDPMode(true)
+	return func() { runDataPlane(ctx, addr, nodeID, certFile, keyFile, caFile) }
+}
+
+// runDataPlane is the data plane's LATE half: replay the last-good snapshot,
+// then start the client and its loops.
+//
+// The replay must come AFTER the stores it writes into have loaded: it used
+// to run first, into a policy store with no file path (so its Save was a
+// no-op and the policy file then loaded over the replayed rules) and before
+// the boot default-action derivation (which then overwrote the control
+// plane's default action, and — the config version being seeded from the same
+// snapshot — nothing ever re-applied it). And it must come BEFORE any traffic
+// gate opens (runStartupSequence): a node must not serve on file-loaded state
+// when it holds a newer last-good configuration.
+func runDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile string) {
 	// Version facts of the cached config the node is about to enforce, so the
 	// first heartbeat reports the applied config/policy version even if the
 	// initial CP poll is rejected (M5 PR-A — Codex).
@@ -316,10 +347,19 @@ func startDataPlane(ctx context.Context, addr, nodeID, certFile, keyFile, caFile
 	dpClient.lastVersion.Store(cachedConfigVersion)
 	dpClient.lastPolicyVersion.Store(cachedPolicyVersion)
 	activeDPClient.Store(dpClient) // for HA address discovery
-	audit.SetDPMode(true)
-	dpClient.Run(ctx, 30*time.Second)
-	go dpCertRenewalLoop(ctx, dpClient, nodeID, certFile, keyFile, caFile)
+	dpStartClientLoops(ctx, dpClient, nodeID, certFile, keyFile, caFile)
 	logger.Printf("DataPlane: polling ControlPlane at %s every 30s", addr)
+}
+
+// dpStartClientLoops starts the data-plane client's long-lived loops: the
+// config poll (whose first round runs at once), metrics, rate-limit gossip,
+// revocation sync, audit push, and certificate renewal. A variable only so an
+// in-process test of the start-up halves can observe the hand-off without
+// leaving unjoinable goroutines reading package globals behind it; production
+// never reassigns it, and the real-binary start-up tests run the real loops.
+var dpStartClientLoops = func(ctx context.Context, c *DataPlaneClient, nodeID, certFile, keyFile, caFile string) {
+	c.Run(ctx, 30*time.Second)
+	go dpCertRenewalLoop(ctx, c, nodeID, certFile, keyFile, caFile)
 }
 
 // checkDPCertExpiry warns if the DP node certificate is expired or near expiry.

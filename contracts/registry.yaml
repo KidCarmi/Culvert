@@ -777,6 +777,55 @@ contracts:
     validation: integration
     compatibility: "Data planes apply a published snapshot whole; an edit that was waiting for a publish is delivered by the first policy edit after upgrade."
 
+  - id: CLU-004
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "A control plane's first publish at start-up, and so everything it serves once its listener is bound, is captured after every configuration store has loaded; before the bind a poller is refused, never served a partially loaded configuration."
+    authority: "Start-up sequence (main.go runStartupSequence) and cluster activation (cluster_startup.go)."
+    code:
+      - "cluster_startup.go"
+      - "main.go"
+    configs: []
+    transitions:
+      permitted:
+        - "adding a store loader or reconciliation before activateClusterRoles"
+        - "adding a traffic gate or listener after activateClusterRoles"
+      forbidden:
+        - "activating a cluster role (publish, listener bind, HA resume, standby join) before the configuration stores have loaded"
+        - "changing the publish, bind, HA-resume order inside the control-plane activation"
+    tests:
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_PhasesNeverGoBackwards}
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_NothingBeforeTheActivationActivates}
+      - {file: "startup_sequence_order_test.go", name: TestClusterHalves_ControlPlane_IdentityEarly_ServesOnlyLoadedConfig}
+      - {file: "startup_sequence_order_test.go", name: TestClusterHalves_ControlPlane_LeaseLeaderResumeCommitsItsEpoch}
+    validation: integration
+    compatibility: "The control-plane listener binds later in the boot; data planes see connection refused until then and keep their last-good configuration. The real-binary form of these tests is TestBinaryStartup_* (build tag proxybinload)."
+
+  - id: CLU-005
+    area: cluster-sync
+    status: enforced
+    owner_approved: false
+    invariant: "A data plane replays its last-good snapshot after its own configuration stores have loaded and before any listener that enforces policy opens; after a restart its rules and default action are the last-good snapshot's, active and persisted, whatever its policy file held."
+    authority: "Start-up sequence (main.go runStartupSequence) and data-plane start-up (dp_enrollment.go)."
+    code:
+      - "dp_enrollment.go"
+      - "cluster_startup.go"
+      - "main.go"
+    configs: []
+    transitions:
+      permitted: []
+      forbidden:
+        - "replaying the last-good snapshot before the stores it writes into are loaded and bound to their files"
+        - "re-deriving or reloading the default action or policy rules over the replayed snapshot later in start-up"
+        - "opening the SOCKS5 pre-posture gate, the admin UI or the proxy listener before the replay"
+    tests:
+      - {file: "startup_sequence_order_test.go", name: TestStartupSequence_PhasesNeverGoBackwards}
+      - {file: "startup_sequence_order_test.go", name: TestClusterHalves_DataPlane_ReplayAfterStores_KeepsControlPlaneState}
+      - {file: "socks5_posture_gate_chaos_test.go", name: TestCHAOS102_Wall_ThePostureRestoreReleasesTheGate}
+    validation: integration
+    compatibility: "Existing data directories need no migration: the policy file is rewritten from the last-good snapshot at the first start on this build."
+
   - id: REC-001
     area: failure-recovery
     status: enforced

@@ -61,6 +61,41 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **A restarting control plane no longer hands data planes an empty
+  configuration, and a restarting data plane no longer loses the control
+  plane's state.** Cluster start-up ran before the node's configuration stores
+  had loaded. A control plane therefore made its first publish — and, once its
+  listener was bound, served it — from empty stores: data planes and standbys
+  received a snapshot with an **empty blocklist, no policy rules and the
+  default action `deny`**, and kept it until the next administrative change
+  published again. A data plane replayed its last-good snapshot before its own
+  policy file loaded and before the boot default-action derivation, so after a
+  restart the policy file won over a newer last-good snapshot and the default
+  action was re-derived from the rule count instead of being the control
+  plane's (a fleet set to `allow` with rules came back `deny`). Start-up is now
+  one ordered sequence in four phases — identity, configuration stores, role
+  activation, traffic gates and listeners:
+  - Cluster identity stays early: node identity, the cluster DB, the cluster
+    CA and the HA fencing lease are loaded and armed where they were.
+  - A control plane publishes, binds its listener and resumes HA leadership
+    (in that order, unchanged) only after every store has loaded; a standby
+    joins its leader at the same point. **The control-plane gRPC listener
+    therefore binds later in the boot** than before, by the time the stores
+    take to load. Until then data planes get connection refused, keep their
+    last-good configuration and back off (or fail over); the first thing they
+    are then served is the loaded configuration.
+  - A data plane replays its last-good snapshot after its stores have loaded
+    and **before any listener that enforces policy opens**: the SOCKS5
+    listener's pre-posture gate is now released after the replay, followed by
+    the admin UI and the proxy listener. After a restart its rules and default
+    action are the last-good snapshot's, and its policy file is rewritten to
+    match. The same now holds for every slice of the last-good snapshot — IP
+    filter, rate limit, blocklist feed, categories, SSL bypass: a node-local
+    file or admin setting loaded earlier in the boot no longer overrides it
+    until the next configuration version. Bandwidth policies and node groups
+    in the last-good snapshot are no longer skipped at boot.
+  No data migration is needed; existing data directories start as they are.
+
 - **A policy edit on a control plane now reaches data planes when it is
   committed.** Creating, updating, deleting, disabling, reordering or moving a
   policy rule, bulk-deleting rules, the same operations on auth-policy rules,

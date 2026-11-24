@@ -65,6 +65,9 @@ var dataDir = "/data"
 // no methods — purely a mechanical scope-crossing device introduced by
 // PR2's main() extraction.
 type startupState struct {
+	// clusterActivation is the late half of cluster start-up, produced by
+	// initClusterIdentity and run once by activateClusterRoles.
+	clusterActivation *clusterActivation
 	// ── CLI flag pointers (all set in parseFlags) ─────────────────────────
 	configPath               *string
 	proxyPort                *int
@@ -185,21 +188,9 @@ type startupState struct {
 	socks5Srv       *socks5Supervisor // P1.5 / S4.SOCKS5: listener-close shutdown handle (CHAOS-66: the supervisor owns bind→serve→rebind)
 }
 
-// main is the composition root: a flat, ordered sequence of startup slices.
-//
-// The funlen finding here (56 statements > 50) PREDATES this change and is
-// untouched by it — main's body is byte-identical to the base branch. CI's
-// diff-scoped lint surfaced it only because an unrelated two-line edit to
-// startupState above sits inside the same diff hunk as this declaration.
-//
-// It is suppressed rather than split because the startup ORDER is load-bearing
-// throughout this file — dataDir before the flag set, the one-shots before the
-// restore check, reconcileObjectRefNames after every store it reads,
-// startAdminUI after the init block — so extracting the sequence would hide the
-// one thing this file exists to make readable. Splitting main deserves its own
-// change (DEBT-003 already split this file once), not a SOCKS5 fix.
-//
-//nolint:funlen // single-pass boot orchestration; splitting hides the startup order
+// main is the composition root: process-level preconditions (argv, data dir,
+// single-writer lock, file config, logger, lifecycle context), then the ONE
+// ordered start-up sequence (runStartupSequence), then serving until shutdown.
 func main() {
 	// Positional subcommand: `culvert bootstrap-resolve ...` fetches + verifies the
 	// signed release catalog and emits the fresh-install decision, then exits. It
@@ -269,6 +260,31 @@ func main() {
 	initLifecycleContext(s)
 	defer appLifecycleCancel() // kept in main() for panic safety; initLifecycleContext only creates the context.
 
+	proxySrv := runStartupSequence(s)
+	quit, _ := installSignalHandlers(s)
+	runProxyUntilShutdown(s, proxySrv, quit)
+}
+
+// runStartupSequence is the ONE ordered start-up sequence: every init slice,
+// in the order the process depends on, from the first store to the last
+// listener. main() calls it and nothing else does; the real-binary start-up
+// tests (startup_sequence_binary_test.go) therefore exercise exactly this
+// order, and startup_sequence_order_test.go pins its phases structurally:
+//
+//	Phase 1  node services and cluster IDENTITY (who this node is, what it trusts)
+//	Phase 2  every configuration store, loaded and bound to its file, then the
+//	         cross-store reconciliations
+//	Phase 3  role ACTIVATION (control-plane publish+bind+HA resume, standby
+//	         join, data-plane last-good replay + polling)
+//	Phase 4  traffic gates and listeners
+//
+// The order is load-bearing throughout, which is why this is a flat list of
+// statements rather than a table: the reader sees the sequence the process
+// runs. Returns the started proxy server for the serve loop.
+//
+//nolint:funlen // single-pass boot orchestration; splitting hides the startup order
+func runStartupSequence(s *startupState) *http.Server {
+	// ── Phase 1: node services and cluster identity ─────────────────────────
 	initAuth(s)
 	initSession(s)
 	initObservability(s)
@@ -278,7 +294,12 @@ func main() {
 	initPAC(s)
 	initLegacyAuthProviders(s)
 	initMetricsToken(s)
-	initCluster(s)
+	// Cluster IDENTITY only (cluster_startup.go): node identity, cluster DB,
+	// cluster CA, HA lease arming, a data plane's role claim. The role does
+	// not start acting until activateClusterRoles, after the stores below.
+	initClusterIdentity(s)
+
+	// ── Phase 2: configuration stores, then cross-store reconciliation ──────
 	initConnAndRateLimit(s)
 	initBlocklist(s)
 	initRootCA(s)
@@ -319,11 +340,23 @@ func main() {
 	// version captures is loaded above; the loader itself (initPAC) only
 	// settled the node-local half.
 	pacReconcileAllLifecycles()
-	startAdminUI(s)
 
-	proxySrv := buildAndStartProxyServer(s)
-	quit, _ := installSignalHandlers(s)
-	runProxyUntilShutdown(s, proxySrv, quit)
+	// ── Phase 3: role activation ────────────────────────────────────────────
+	// Every store CurrentConfigSnapshot captures, and every store a snapshot
+	// apply writes into, is loaded and bound to its file above. Only now does
+	// a control plane publish + bind + resume HA leadership, a standby join
+	// its leader, and a data plane replay its last-good snapshot and start
+	// polling. Nothing may be added between here and the stores that loads or
+	// reconciles configuration (TestStartupSequence_* enforce both directions).
+	activateClusterRoles(s)
+
+	// ── Phase 4: traffic gates and listeners ────────────────────────────────
+	// After the activation, so no listener that enforces policy serves before
+	// a data plane's last-good replay: the SOCKS5 pre-posture gate (its socket
+	// has been bound since initSOCKS5), the admin UI, then the proxy listener.
+	openTrafficGates()
+	startAdminUI(s)
+	return buildAndStartProxyServer(s)
 }
 
 // parseFlags reads every CLI flag into the shared startup state.
@@ -900,13 +933,13 @@ func initMetricsToken(s *startupState) {
 	loadMetricsToken(resolveMetricsTokenStartupConfig(s.fc, *s.metricsTok))
 }
 
-// initCluster starts Control Plane / Data Plane gRPC and HA failover.
-// initCluster resolves the cluster slice config and hands it to the loader
-// (cluster_startup*.go), which owns the CP/HA-standby/HA-resume boot flow
-// (ADR-0004) and the 3-priority Data-Plane wiring. The fresh-enrollment
-// result is a runtime input passed alongside the resolved config.
-func initCluster(s *startupState) {
-	loadCluster(
+// initClusterIdentity resolves the cluster slice config and runs the EARLY
+// half of cluster start-up (cluster_startup.go loadClusterIdentity): identity,
+// cluster DB, cluster CA, lease arming, and a data plane's role claim. The
+// late half is kept on the startup state for activateClusterRoles. The
+// fresh-enrollment result is a runtime input passed alongside the config.
+func initClusterIdentity(s *startupState) {
+	s.clusterActivation = loadClusterIdentity(
 		resolveClusterStartupConfig(s.fc, clusterCLIFlags{
 			ClusterDB:       *s.clusterDB,
 			CPGRPCAddr:      *s.cpGRPCAddr,
@@ -930,6 +963,26 @@ func initCluster(s *startupState) {
 		appLifecycleCtx,
 		s.enrolledConfig,
 	)
+}
+
+// activateClusterRoles runs the LATE half of cluster start-up: the role starts
+// acting (cluster_startup.go). Position in runStartupSequence is the contract:
+// after every store loader and reconciliation, before every traffic gate.
+func activateClusterRoles(s *startupState) {
+	s.clusterActivation.activate()
+}
+
+// openTrafficGates releases the gates that hold a bound listener closed until
+// the node's enforcement state is complete. Today that is the SOCKS5
+// pre-posture gate (CHAOS-102, socks5_posture_gate.go): initSOCKS5 arms it
+// before binding, the admission posture is restored by
+// initPersistentAdminState, and — the reason the release lives here rather
+// than there — a data plane's last-good snapshot is replayed by
+// activateClusterRoles. A no-op on a node with no SOCKS5 listener.
+// Unconditional: every failure mode of the steps above is surfaced by its own
+// log line, alert and readiness row, and none of them leaves the gate closed.
+func openTrafficGates() {
+	releaseSOCKS5PostureGate()
 }
 
 // initConnAndRateLimit configures per-IP connection limits, IP filter, and
