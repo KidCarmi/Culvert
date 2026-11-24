@@ -118,13 +118,11 @@ func TestPrePhase2_IsReservedAuthSourceName(t *testing.T) {
 	}
 }
 
-// A rule carrying the reserved providerRefs (e.g. written by a future version
-// or hand-edited) is dropped fail-closed by the persistence gate on this
-// binary: an older binary cannot honor a provider restriction, and honoring
-// the rule while ignoring the restriction would widen it.
-func TestPrePhase2_ProviderRefs_LoadDropsFailClosed(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "policy.json")
+// A providerRefs-bearing Exempt rule is an invalid auth rule. The policy-file
+// door used to drop it and install the rest; it now refuses the whole file
+// (POL-005), so the rule is still never activated and nothing else in the file
+// is installed around the hole.
+func TestPrePhase2_ProviderRefs_LoadRefusesTheWholeFile(t *testing.T) {
 	withRefs := validExemptRule()
 	withRefs.Auth.ProviderRefs = []string{"okta-prod"}
 	data, err := json.MarshalIndent([]PolicyRule{
@@ -134,16 +132,9 @@ func TestPrePhase2_ProviderRefs_LoadDropsFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	ps := &PolicyStore{}
-	if err := ps.Load(path); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	got := ps.List()
-	if len(got) != 1 || got[0].Name != "plain-allow" {
-		t.Fatalf("providerRefs-bearing rule must be dropped fail-closed, got: %+v", got)
+	ue := assertLoadRefusedWhole(t, data, withRefs.Name)
+	if !strings.Contains(ue.Reason, "providerRefs") {
+		t.Errorf("refusal reason %q does not name providerRefs", ue.Reason)
 	}
 }
 

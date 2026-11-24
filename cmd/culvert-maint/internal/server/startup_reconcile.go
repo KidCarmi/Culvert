@@ -352,16 +352,25 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 	}
 	c := &reconcileCase{opID: opID, rec: rec, in: s.reconcileInputsFor(rec)}
 	c.out = ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind)}
-	// Decide only on a Docker that no request of the previous agent process
-	// can still change: dockerd may be stopping the old proxy container for
-	// it, and until that is over a container that is "running the prior image"
-	// is not evidence of anything (settle.go). If the wait cannot be completed,
-	// the record is kept.
-	if _, serr := s.settleInterrupted(ctx); serr != nil {
-		c.out.Decision, c.out.Reason = actV2RecoveryRequired.String(), "settle_wait_cut_short"
-		return s.keepRecord(c, OutcomeRecoveryRequired)
-	}
+	// Docker was tested and does not answer: there is nothing to observe, so
+	// there is nothing to wait for either. The settle wait exists to make
+	// what is READ from Docker trustworthy; spending the reconcile's budget on
+	// it here turned a transient "Docker is down" into recovery_required
+	// (settle_wait_cut_short) on real Docker. The decision is taken with
+	// DockerReadable=false: an image record is deferred (docker_unavailable),
+	// kept untouched, and decided again at the next start, which waits out its
+	// own window; a data or unknown record gets its usual report. Nothing is
+	// read, changed or retired on this path.
 	if dockerReady {
+		// Decide only on a Docker that no request of the previous agent process
+		// can still change: dockerd may be stopping the old proxy container for
+		// it, and until that is over a container that is "running the prior
+		// image" is not evidence of anything (settle.go). If the wait cannot be
+		// completed, the record is kept.
+		if _, serr := s.settleInterrupted(ctx); serr != nil {
+			c.out.Decision, c.out.Reason = actV2RecoveryRequired.String(), "settle_wait_cut_short"
+			return s.keepRecord(c, OutcomeRecoveryRequired)
+		}
 		s.readReconcileFacts(ctx, rec, &c.in)
 	}
 	if reconcileNeedsProbe(c.in) {

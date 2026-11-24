@@ -211,6 +211,9 @@ func validateRuleShape(rule PolicyRule) error {
 	if rule.Name == "" {
 		return fmt.Errorf("name is required")
 	}
+	if !knownRuleType(rule.RuleType) {
+		return fmt.Errorf("ruleType %q is not recognised (use %q or %q)", sanitizeLog(rule.RuleType), ruleTypeAccess, ruleTypeAuth)
+	}
 	// Schedule timezone is validated for both rule types.
 	if rule.Schedule != nil && rule.Schedule.Timezone != "" {
 		if _, err := time.LoadLocation(rule.Schedule.Timezone); err != nil {

@@ -333,13 +333,20 @@ func applyBlocklistDeltaSnapshot(remainder ConfigSnapshot, chain []blocklistDelt
 	if got := bl.SyncedFingerprint(); got != targetFP {
 		return fmt.Errorf("blocklist drift after delta apply (have %s, want %s)", got, targetFP)
 	}
+	// The refusable IdP step: AFTER the blocklist is verified, so a delta
+	// refused for drift or cap still leaves auth/IdP untouched, and BEFORE the
+	// blocklist is saved and the policy rules are replaced. It used to run after
+	// the rules were replaced (and saved) and before the category groups they
+	// reference, so a refusal left new rules over old groups. A refusal here
+	// leaves only the in-memory blocklist advanced, to the CP's verified target
+	// and unsaved: the same residue as the drift return above.
+	if err := syncSnapshotIdPBeforeApply(remainder); err != nil {
+		return fmt.Errorf("idp sync: %w", err)
+	}
 	bl.Save()
 	// Everything except the blocklist, in the same order as the full path.
 	applySnapshotTrafficExceptBlocklist(remainder)
 	applySnapshotClusterRuntime(remainder)
-	if err := syncSnapshotIdPProfiles(remainder); err != nil {
-		return fmt.Errorf("idp sync: %w", err)
-	}
 	applySnapshotExtendedState(remainder)
 	return nil
 }
