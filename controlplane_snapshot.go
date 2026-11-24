@@ -489,7 +489,7 @@ func validateConfigSnapshot(snap ConfigSnapshot) error {
 	}
 	// Last: a rule type this build has no stage for refuses the whole snapshot,
 	// on publish and on apply, before any mutation (POL-005).
-	return policyRulesRuleTypeError(snap.PolicyRules)
+	return policyRulesetError(snap.PolicyRules)
 }
 
 // ─── ConfigStore ──────────────────────────────────────────────────────────────
@@ -1431,8 +1431,7 @@ func applyConfigSnapshot(snap ConfigSnapshot) error {
 	// snapshot once the operator corrects the CP-side input. No partial
 	// state mutation occurs on rejection.
 	if err := validateConfigSnapshot(snap); err != nil {
-		noteSnapshotPolicyRefusal(err)
-		logger.Printf("DataPlane: rejecting config snapshot v%d: %v", snap.Version, err)
+		logSnapshotRejection("config snapshot", snap.Version, err)
 		return fmt.Errorf("config snapshot v%d rejected: %w", snap.Version, err)
 	}
 

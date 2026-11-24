@@ -533,29 +533,20 @@ func restoreBlocklistFromBackup(b *configBackup) {
 // scoped collector rather than from return values (see storage_health.go for
 // the scope's time-window semantics).
 // backupPolicyRuleWarnings is the policy-rule part of the rollback preview. A
-// rule type this build has no stage for makes the whole version unrestorable
-// (POL-005), so that is the only thing said about it: nothing is "skipped".
-// Otherwise it counts the rules a restore would skip individually.
+// version holding a rule this build cannot enforce, or one that fails
+// stored-data validation, cannot be restored at all (POL-005,
+// storedRulesetError): the restore no longer skips a rule and applies the rest.
 func backupPolicyRuleWarnings(rules []PolicyRule) []string {
-	if err := policyRulesRuleTypeError(rules); err != nil {
+	if err := storedRulesetError(rules); err != nil {
 		return []string{"this version cannot be restored: " + err.Error()}
 	}
-	invalid := 0
-	for i := range rules {
-		if err := validateStoredPolicyRule(rules[i], nil, -1); err != nil {
-			invalid++
-		}
-	}
-	if invalid == 0 {
-		return nil
-	}
-	return []string{fmt.Sprintf("%d of %d policy rules are invalid (will be skipped)", invalid, len(rules))}
+	return nil
 }
 
 func applyConfigBackup(b *configBackup) error {
 	// A stored version holding a rule type this build has no stage for is
 	// refused whole, before anything is restored (policy_ruletype_gate.go).
-	if err := policyRulesRuleTypeError(b.PolicyRules); err != nil {
+	if err := policyRulesetError(b.PolicyRules); err != nil {
 		return fmt.Errorf("rollback refused: %w", err)
 	}
 	// Blocker B (exclusive side): a rollback both REMOVES shared objects and
@@ -641,17 +632,11 @@ func applyConfigBackup(b *configBackup) error {
 		}
 	}
 
-	// Policy rules: bulk replace.
-	var validRules []PolicyRule
-	for i := range b.PolicyRules {
-		// Stored data: an unknown action is retained, not skipped (POL-004 —
-		// see validateStoredPolicyRule). ReplaceAll announces each one.
-		if err := validateStoredPolicyRule(b.PolicyRules[i], nil, -1); err != nil {
-			continue
-		}
-		validRules = append(validRules, b.PolicyRules[i])
-	}
-	policyStore.ReplaceAll(validRules)
+	// Policy rules: bulk replace, EVERY stored rule, as stored. The gate at the
+	// top of this function has already refused a version holding a rule this
+	// build cannot enforce; nothing is skipped here (see storedRulesetError for
+	// why the write-time validator is not applied to stored data).
+	policyStore.ReplaceAll(b.PolicyRules)
 	policyStore.Save()
 	setDefaultPolicyAction(b.DefaultAction)
 

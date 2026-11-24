@@ -8,7 +8,13 @@ import (
 	"time"
 )
 
-// Unknown ruleType gate.
+// The ruleset gate (POL-005): unknown ruleType, and any rule this build cannot
+// enforce as written (unenforceableRuleError, below).
+//
+// Governing invariant: no policy replacement, normalization, migration or
+// compatibility conversion may silently remove an enforcement rule and thereby
+// expand access. A ruleset the build cannot fully enforce is refused WHOLE, the
+// running and persisted policy stay as they were, and the operator is told.
 //
 // A PolicyRule's RuleType selects the stage that evaluates it: "" or "access"
 // is a Stage-2 access rule, "auth" a Stage-1 authentication rule. Any other
@@ -25,7 +31,9 @@ import (
 //
 //   - new writes (API create/update, import merge, draft commit): validateRuleShape;
 //   - import, both modes (and its dry-run preview), and config-version rollback:
-//     refused before any section applies, in the HANDLERS, with a 400;
+//     refused before any section applies, in the HANDLERS, with a 400. A
+//     rollback that passes restores EVERY stored rule, as stored: it used to
+//     skip any rule the write-time validator disliked (storedRulesetError);
 //   - a pending policy draft on disk: not reloaded (initPolicyDraft), so it can
 //     never come back as an active draft with an empty candidate;
 //   - control-plane snapshots: validateConfigSnapshot, on publish and on apply,
@@ -56,7 +64,24 @@ func (e *unknownRuleTypeError) Error() string {
 		more = fmt.Sprintf(" (and %d more rule(s))", e.Count-1)
 	}
 	return fmt.Sprintf("rule %q has ruleType %q, which this version does not recognise%s; the whole ruleset is refused and the running policy is unchanged",
-		sanitizeLog(e.Name), sanitizeLog(e.RuleType), more)
+		sanitizeLog(boundedRuleName(e.Name)), sanitizeLog(boundedRuleName(e.RuleType)), more)
+}
+
+// boundedRuleName caps an operator- or peer-supplied string that is repeated in
+// an error, a log line and a viewer-readable Diagnostics row.
+func boundedRuleName(s string) string {
+	const limit = 128
+	if len(s) <= limit {
+		return s
+	}
+	cut := 0
+	for i := range s {
+		if i > limit {
+			break
+		}
+		cut = i
+	}
+	return s[:cut] + "…"
 }
 
 // unknownRuleTypeIn returns a non-nil *unknownRuleTypeError when any of the n
@@ -86,21 +111,140 @@ func policyRulesRuleTypeError(rules []PolicyRule) error {
 	return unknownRuleTypeIn(len(rules), func(i int) *PolicyRule { return &rules[i] })
 }
 
+// unenforceableRuleError identifies the first rule of a KNOWN type that this
+// build cannot enforce as written, and how many there are. These are the shapes
+// policyRulePersistable refuses: an access rule carrying a subjectMatch (the
+// evaluator does not consult it), an access rule carrying an auth spec, an auth
+// rule that fails validation, a null entry, and an empty entry (ruleEnforceable).
+//
+// Load and ReplaceAll used to DROP such a rule and install the rest
+// (SEC-POLICYDROP-1). That is safe for a scoped Allow and fail-open for
+// anything that restricts: measured over a real socket, a Block rule carrying a
+// subjectMatch was dropped by a bulk replace and, under default allow, the
+// request it was written to stop was forwarded. No replacement may remove an
+// enforcement rule and so widen access, so the ruleset is refused whole, by the
+// same gate and at the same doors as an unknown ruleType.
+type unenforceableRuleError struct {
+	Name   string
+	Reason string
+	Count  int
+}
+
+func (e *unenforceableRuleError) Error() string {
+	more := ""
+	name := boundedRuleName(e.Name)
+	if e.Count > 1 {
+		more = fmt.Sprintf(" (and %d more rule(s))", e.Count-1)
+	}
+	return fmt.Sprintf("rule %q cannot be enforced by this version: %s%s; the whole ruleset is refused and the running policy is unchanged",
+		sanitizeLog(name), sanitizeLog(e.Reason), more)
+}
+
+// rulesetGateError is the whole POL-005 gate over the n rules yielded by at: an
+// unknown ruleType first (the more specific finding), then any rule the build
+// cannot enforce. A nil result means every rule can be installed as written.
+func rulesetGateError(n int, at func(int) *PolicyRule) error {
+	if err := unknownRuleTypeIn(n, at); err != nil {
+		return err
+	}
+	var first *unenforceableRuleError
+	for i := 0; i < n; i++ {
+		r := at(i)
+		ok, reason := ruleEnforceable(r)
+		if ok {
+			continue
+		}
+		if first == nil {
+			first = &unenforceableRuleError{Reason: reason}
+			if r != nil {
+				first.Name = r.Name
+			}
+		}
+		first.Count++
+	}
+	if first == nil {
+		return nil
+	}
+	return first
+}
+
+// ruleEnforceable is policyRulePersistable plus the EMPTY entry. A JSON null (or
+// {}) in a rule array decodes, at every door that reads into []PolicyRule, to
+// a rule with no name, no type and no action. Nothing validates it there, it
+// has no selectors so it matches every request, and an empty action resolves
+// to Allow: one null in an imported backup or a snapshot is an allow-everything
+// rule at the top of the policy. Only the policy-file door, which decodes
+// pointers, could see the null. The gate refuses the empty entry at all of
+// them. A NAMED rule with an empty action is not this case and is untouched
+// (POL-901 remains an open question).
+func ruleEnforceable(r *PolicyRule) (ok bool, reason string) {
+	if r != nil && r.Name == "" && r.Action == "" && r.RuleType == "" {
+		return false, "empty entry (a null or {} in the rule list)"
+	}
+	return policyRulePersistable(r)
+}
+
+// policyRulesetError is rulesetGateError over a value slice. It is the check
+// every bulk door runs (snapshots, backups, imports, drafts, bulk replace).
+func policyRulesetError(rules []PolicyRule) error {
+	return rulesetGateError(len(rules), func(i int) *PolicyRule { return &rules[i] })
+}
+
+// rulesetRefusalCode maps a gate error to its Diagnostics code.
+func rulesetRefusalCode(err error) string {
+	var rt *unknownRuleTypeError
+	if errors.As(err, &rt) {
+		return "policy_ruleset_refused_unknown_ruletype"
+	}
+	return "policy_ruleset_refused_unenforceable_rule"
+}
+
+// isRulesetGateError reports whether err came from the POL-005 gate.
+func isRulesetGateError(err error) bool {
+	var rt *unknownRuleTypeError
+	var ue *unenforceableRuleError
+	return errors.As(err, &rt) || errors.As(err, &ue)
+}
+
 // policyRulesetRefusal is the record of the most recent ruleset this store
 // refused for an unrecognized ruleType. Diagnostic state only.
 type policyRulesetRefusal struct {
-	At     time.Time
-	Door   string // "policy file", "bulk replace", "control-plane snapshot"
-	Reason string // already sanitized (unknownRuleTypeError.Error)
+	At     time.Time // most recent refusal
+	First  time.Time // first refusal of this same ruleset through this door
+	Logged time.Time // when it was last written to the log
+	Count  int       // refusals of this same ruleset through this door
+	Door   string    // "policy file", "bulk replace", "control-plane snapshot", "pending policy draft"
+	Code   string    // Diagnostics code (rulesetRefusalCode)
+	Reason string    // already sanitized and bounded (the gate error's text)
 }
 
-// noteRulesetRefused logs a refusal and records it for Diagnostics. The record
-// stays until this store next ACCEPTS a ruleset through Load or ReplaceAll, so
-// an operator who was not watching the log still sees that the node is running
-// an older policy than the one it was handed.
+// rulesetRefusalRelogEvery bounds how often an UNCHANGED refusal is written to
+// the log. A data plane facing a control plane it cannot follow refuses the
+// same snapshot on every poll; logging each one buries everything else, while
+// logging it once lets it scroll away. The first refusal is always logged, and
+// any change of door or reason is logged at once. Diagnostics shows the running
+// count and both timestamps throughout.
+const rulesetRefusalRelogEvery = 15 * time.Minute
+
+// noteRulesetRefused records a refusal for Diagnostics and logs it: always the
+// first time, at once when the door or the reason changes, and otherwise at
+// most once per rulesetRefusalRelogEvery. The record stays until this store
+// next ACCEPTS a ruleset, so an operator who was not watching the log still
+// sees that the node is running an older policy than the one it was handed.
 func (ps *PolicyStore) noteRulesetRefused(door string, err error) {
-	logWarnf("Policy: %s REFUSED — %s", sanitizeLog(door), sanitizeLog(err.Error()))
-	ps.rulesetRefused.Store(&policyRulesetRefusal{At: time.Now().UTC(), Door: door, Reason: err.Error()})
+	now := time.Now().UTC()
+	next := &policyRulesetRefusal{At: now, First: now, Logged: now, Count: 1, Door: door, Code: rulesetRefusalCode(err), Reason: err.Error()}
+	if prev := ps.rulesetRefused.Load(); prev != nil && prev.Door == next.Door && prev.Reason == next.Reason {
+		next.First, next.Count, next.Logged = prev.First, prev.Count+1, prev.Logged
+		if now.Sub(prev.Logged) < rulesetRefusalRelogEvery {
+			ps.rulesetRefused.Store(next)
+			return
+		}
+		next.Logged = now
+	}
+	ps.rulesetRefused.Store(next)
+	logWarnf("Policy: %s REFUSED (%d time(s) since %s) — %s",
+		sanitizeLog(door), next.Count, next.First.Format(time.RFC3339), sanitizeLog(err.Error()))
 }
 
 // decodePolicyFile parses a policy file for Load and applies the ruleType gate
@@ -111,7 +255,7 @@ func (ps *PolicyStore) decodePolicyFile(data []byte) ([]*PolicyRule, error) {
 	if err := json.Unmarshal(data, &rules); err != nil {
 		return nil, err
 	}
-	if err := unknownRuleTypeIn(len(rules), func(i int) *PolicyRule { return rules[i] }); err != nil {
+	if err := rulesetGateError(len(rules), func(i int) *PolicyRule { return rules[i] }); err != nil {
 		ps.noteRulesetRefused("policy file", err)
 		return nil, err
 	}
@@ -128,8 +272,12 @@ func decodeImportBackup(r *http.Request, b *configBackup) (refusal string) {
 	if err := decodeJSON(r, b); err != nil {
 		return "invalid JSON: " + err.Error()
 	}
-	if err := policyRulesRuleTypeError(b.PolicyRules); err != nil {
-		return "import refused, unrecognised ruleType: " + err.Error()
+	if err := policyRulesetError(b.PolicyRules); err != nil {
+		var rt *unknownRuleTypeError
+		if errors.As(err, &rt) {
+			return "import refused, unrecognised ruleType: " + err.Error()
+		}
+		return "import refused, a rule cannot be enforced: " + err.Error()
 	}
 	return ""
 }
@@ -143,7 +291,25 @@ func rollbackTargetRefusal(target *configBackup) error {
 	if err := validateRewriteStableIDs(target.RewriteRules); err != nil {
 		return err
 	}
-	return policyRulesRuleTypeError(target.PolicyRules)
+	return storedRulesetError(target.PolicyRules)
+}
+
+// storedRulesetError is the gate for a STORED ruleset that is about to replace
+// the running one (a config version being restored). It is the POL-005 gate and
+// nothing more, on purpose.
+//
+// The restore used to run every stored rule through the write-time validator
+// and SKIP the ones that failed, applying the rest. Both halves were wrong for
+// stored data. Skipping removes a rule by the act of restoring. And the
+// write-time validator is not a function of the rule alone: it resolves a
+// Redirect rule's host in DNS and reads the host's timezone database, and it
+// refuses shapes the store legitimately holds and enforces (an action in the
+// spelling the policy-file door folds, a rule with no name, an empty action).
+// A version captured from the running system must restore to exactly what was
+// running, so a version is restored whole, as stored, or — if it holds a rule
+// the gate refuses — not at all.
+func storedRulesetError(rules []PolicyRule) error {
+	return policyRulesetError(rules)
 }
 
 // clearRulesetRefusal drops the refusal record if it came through door. Used
@@ -172,14 +338,17 @@ func hotReloadPolicyFile(path string) (applyDefaultAction bool) {
 	return true
 }
 
-// noteSnapshotPolicyRefusal records a control-plane snapshot refused for an
-// unrecognized ruleType against the running store. Any other rejection reason
-// is not this gate's to record.
-func noteSnapshotPolicyRefusal(err error) {
-	var rt *unknownRuleTypeError
-	if errors.As(err, &rt) {
-		policyStore.noteRulesetRefused("control-plane snapshot", rt)
+// logSnapshotRejection reports one rejected control-plane snapshot (or delta
+// remainder). A rejection by the POL-005 gate goes through noteRulesetRefused,
+// which records it for Diagnostics and DEDUPLICATES the log line: a data plane
+// refuses the same snapshot on every poll, because validation runs before the
+// version ratchet moves. Any other rejection reason is logged as it always was.
+func logSnapshotRejection(what string, version int64, err error) {
+	if isRulesetGateError(err) {
+		policyStore.noteRulesetRefused("control-plane snapshot", err)
+		return
 	}
+	logger.Printf("DataPlane: rejecting %s v%d: %v", what, version, err)
 }
 
 // checkPolicyRulesetRefused surfaces the refusal record. Contributes nothing
@@ -189,11 +358,15 @@ func checkPolicyRulesetRefused(ps *PolicyStore) []OperatorContractCheck {
 	if ref == nil {
 		return nil
 	}
+	seen := ""
+	if ref.Count > 1 {
+		seen = fmt.Sprintf(" (refused %d times since %s)", ref.Count, ref.First.Format(time.RFC3339))
+	}
 	return []OperatorContractCheck{{
-		Code:   "policy_ruleset_refused_unknown_ruletype",
+		Code:   ref.Code,
 		Status: diagWarn,
-		Message: fmt.Sprintf("A %s was refused at %s and NOT applied: %s. This node is still enforcing the policy it had before.",
-			ref.Door, ref.At.Format(time.RFC3339), ref.Reason),
-		OperatorAction: "The ruleset was written by a version that knows a rule type this one does not (or was edited by hand). Upgrade this node to that version, or remove or correct the named rule at its source (the policy file, or the control plane that publishes the snapshot) and reload. Nothing is applied until the whole ruleset is understood.",
+		Message: fmt.Sprintf("A %s was refused at %s and NOT applied%s: %s. This node is still enforcing the policy it had before.",
+			ref.Door, ref.At.Format(time.RFC3339), seen, ref.Reason),
+		OperatorAction: "The ruleset holds a rule this version cannot enforce: it was written by a newer version, or edited by hand. Upgrade this node to that version, or remove or correct the named rule at its source (the policy file, or the control plane that publishes the snapshot) and reload. `culvert policy-check <file>` lists every such rule in a file. Nothing is applied until the whole ruleset is understood.",
 	}}
 }

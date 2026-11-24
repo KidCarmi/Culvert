@@ -9,6 +9,41 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
 
 ### Security
 
+- **Replacing the policy can no longer silently remove a rule that restricts
+  (`POL-005`, widened).** The bulk policy doors refused four rule shapes this
+  version cannot enforce — an access rule carrying a `subjectMatch`, an access
+  rule carrying an `auth` spec, an invalid auth rule, a null entry in the policy
+  file — by
+  **dropping that one rule and installing the rest**. That is safe for a scoped
+  Allow and the wrong direction for anything that blocks: a Block rule carrying
+  a `subjectMatch` was dropped by a bulk replace and, under
+  `default_action=allow`, the request it was written to stop was forwarded
+  (measured: no rule left, `200`, backend reached). A ruleset holding any such
+  rule is now **refused whole**, exactly as one holding an unknown `ruleType`
+  is, and the running and persisted policy stay as they were: policy-file load
+  and reload, control-plane snapshots (publish and apply), config import in both
+  modes and its dry run, config-version rollback, a pending policy draft, and
+  bulk replace. An **empty rule entry** (`null` or `{}`) is refused the same
+  way at every one of those doors: outside the policy file it used to become a
+  nameless rule with no conditions and no action, which matches every request
+  and allows it. A **config-version rollback now restores every rule** in the
+  stored version, exactly as stored. It used to skip any rule the write-time
+  validator refused and restore the rest, which silently removed live rules: a
+  rule whose action is written in lower case in the policy file (enforced at
+  runtime, refused by that validator) disappeared on every rollback.
+  Diagnostics shows `policy_ruleset_refused_unenforceable_rule`; the old
+  `policy_rules_dropped_on_load` row is gone because nothing is dropped. The
+  same refusal repeated by a data plane polling a control plane it cannot
+  follow is logged once and then at most every 15 minutes, with the running
+  count in Diagnostics (a refused policy-file reload is logged each time it is
+  requested). Rules with an unknown *action* are unaffected and still block; a
+  valid policy, including an empty one under default allow, behaves as before.
+  **Upgrade note — check before upgrading:** run `culvert policy-check
+  <policy.json>` (it also reads config backups, stored config versions and
+  policy drafts). It lists
+  every rule this version would refuse and changes nothing. A policy file that
+  holds one stops startup, as a malformed file does.
+
 - **A rule with a rule type this version does not know no longer disables
   itself silently (`POL-005`).** A policy rule's `ruleType` selects the stage
   that evaluates it (`access`, `auth`, or empty for access). A rule carrying any
