@@ -84,3 +84,14 @@ func TestPrivateHost_ResolverAnswersAreNeverSkipped(t *testing.T) {
 		t.Errorf("control: public answers refused: %v", err)
 	}
 }
+
+// A zone names a local interface, so a zoned address is never a public
+// destination even when the address itself is in a global range.
+func TestZonedGlobalAddressIsNotPublic(t *testing.T) {
+	if got, err := classifyAnswers([]string{"2606:4700:4700::1111%eth0"}); err != nil || got == "" {
+		t.Fatalf("classifyAnswers(zoned global) = (%q, %v), want it reported as private", got, err)
+	}
+	if got, err := classifyAnswers([]string{"2606:4700:4700::1111"}); err != nil || got != "" {
+		t.Fatalf("classifyAnswers(unzoned global) = (%q, %v), want public", got, err)
+	}
+}

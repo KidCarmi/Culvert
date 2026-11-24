@@ -436,7 +436,10 @@ func classifyAnswers(ips []string) (privateIP string, err error) {
 			err = fmt.Errorf("%w: %q", errUnparseableAnswer, ipStr)
 			continue // a private answer further on is the more specific finding
 		}
-		if PrivateAddr(addr) {
+		// A zone names an interface of THIS host: an address that carries one is
+		// local by construction, whatever range the address itself falls in, so
+		// it is never a public destination.
+		if addr.Zone() != "" || PrivateAddr(addr) {
 			return ipStr, nil
 		}
 	}
