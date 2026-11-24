@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"culvert-maint/internal/audit"
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 )
@@ -81,7 +82,7 @@ func TestTakeCommandIntents_AnIntentThatCannotBeRemovedStopsTheStart(t *testing.
 		t.Fatal(err)
 	}
 	jnl.SetWriteErrorForTest(errors.New("read-only file system"))
-	if _, err := takeCommandIntents(jnl, recs); err == nil || !strings.Contains(err.Error(), "compose up") || !strings.Contains(err.Error(), "writable") {
+	if _, err := takeCommandIntents(jnl, filepath.Join(dir, "audit.jsonl"), recs); err == nil || !strings.Contains(err.Error(), "compose up") || !strings.Contains(err.Error(), "writable") {
 		t.Fatalf("err = %v, want a refusal that names the command and the directory", err)
 	}
 	if raw := recordFileRaw(t, dir, startupOp); !strings.Contains(raw, `"intent"`) {
@@ -89,7 +90,7 @@ func TestTakeCommandIntents_AnIntentThatCannotBeRemovedStopsTheStart(t *testing.
 	}
 	jnl.SetWriteErrorForTest(nil)
 	recs, _ = jnl.List()
-	died, err := takeCommandIntents(jnl, recs)
+	died, err := takeCommandIntents(jnl, filepath.Join(dir, "audit.jsonl"), recs)
 	if err != nil || died[startupOp] != journal.MutationComposeUp {
 		t.Fatalf("first start that can write: died=%v err=%v, want attributed", died, err)
 	}
@@ -149,7 +150,7 @@ func TestTakeCommandIntents_NothingToTakeNeedsNoWrite(t *testing.T) {
 	}
 	recs, _ := jnl.List()
 	jnl.SetWriteErrorForTest(errors.New("read-only file system"))
-	died, err := takeCommandIntents(jnl, recs)
+	died, err := takeCommandIntents(jnl, filepath.Join(dir, "audit.jsonl"), recs)
 	if err != nil || len(died) != 0 {
 		t.Fatalf("second start on an unwritable journal: died=%v err=%v, want nothing and no refusal", died, err)
 	}
@@ -211,5 +212,45 @@ func TestInitJournal_AnIntentAnOlderAgentHasSeenIsTakenButNotAttributed(t *testi
 	}
 	if after := recordFileRaw(t, dir, startupOp); strings.Contains(after, `"intent"`) || !strings.Contains(after, `"attributed": false`) {
 		t.Errorf("record after the start:\n%s\nwant the intent removed and a cut marked not attributed", after)
+	}
+}
+
+// TestInitJournal_AnOperationThatEndedDidNotDieInItsCommand: the audit log
+// holds the operation's terminal entry, which is written only after every
+// stage returned. Its record still carries an open intent (the close, and the
+// record's later updates, could not be written at the time). The start
+// removes the intent and attributes nothing: one operation is never reported
+// both as ended and as having died inside `compose up`.
+func TestInitJournal_AnOperationThatEndedDidNotDieInItsCommand(t *testing.T) {
+	for name, outcome := range map[string]audit.Event{
+		"ended failed":    {Outcome: audit.OutcomeFailed, FailureReason: string(ops.ReasonCLIError)},
+		"ended succeeded": {Outcome: audit.OutcomeSucceeded},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			diedInsideUp(t, dir, dangerRecord()) // the intent that was never closed
+			al, _ := startupAudit(t, dir)
+			ev := outcome
+			ev.Actor, ev.OpID, ev.Kind = "uid=0,user=cp", startupOp, ops.KindUpgradeApply
+			if err := al.Write(ev); err != nil {
+				t.Fatal(err)
+			}
+			_, died, err := initJournal(dir, ops.NewManager(nil), al, startupRepo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(died) != 0 {
+				t.Errorf("died = %v for an operation whose terminal audit entry is on file", died)
+			}
+			// A succeeded operation's record is removed by this start (its
+			// removal is finished); a failed one's may be kept.
+			raw, rerr := os.ReadFile(filepath.Join(dir, "reconcile", startupOp+".json")) // #nosec G304 -- test-owned temp dir
+			if rerr != nil && !os.IsNotExist(rerr) {
+				t.Fatal(rerr)
+			}
+			if strings.Contains(string(raw), `"intent"`) || strings.Contains(string(raw), `"attributed": true`) {
+				t.Errorf("record after the start:\n%s\nwant the intent removed and no attributed cut", raw)
+			}
+		})
 	}
 }

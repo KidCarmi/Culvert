@@ -102,6 +102,8 @@ func (j *Journal) BeginCommand(opID, command string, now time.Time) (found bool,
 		return false, nil
 	}
 	j.setInFlight(opID, true)
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	rec, found, err := j.Read(opID)
 	if err != nil || !found {
 		return found, err
@@ -110,27 +112,53 @@ func (j *Journal) BeginCommand(opID, command string, now time.Time) (found bool,
 		return true, ferr // no fence, no intent
 	}
 	rec.Intent = &CommandIntent{Command: command, Began: now, Epoch: rec.InterruptedSeen}
-	return true, j.Write(*rec)
+	return true, j.writeLocked(*rec)
 }
 
 // EndCommand records that the command of opID returned. From here on every
 // Write of that record by this process drops an Intent, so one failed write
-// here does not leave "in flight" on disk past the record's next update.
+// here does not leave "in flight" on disk past the record's next update, and
+// CloseStaleIntents retries it.
 func (j *Journal) EndCommand(opID string) error {
 	if opID == "" {
 		return nil
 	}
 	j.setInFlight(opID, false)
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	rec, found, err := j.Read(opID)
 	if err != nil {
 		return err
 	}
 	if !found || rec.Intent == nil {
-		j.releaseIntentFenceIfUnused()
+		j.releaseIntentFenceLocked()
 		return nil
 	}
-	// Write drops the Intent (the command is not in flight) and then the fence.
-	return j.Write(*rec)
+	// writeLocked drops the Intent (the command is not in flight), then the fence.
+	return j.writeLocked(*rec)
+}
+
+// CloseStaleIntents removes every Intent on disk that this process is not
+// inside: commands that returned while the record could not be rewritten. It
+// reports how many are still there. Each is one atomic read-modify-write, so
+// it may run at any time beside a running operation.
+func (j *Journal) CloseStaleIntents() (remaining int, err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	recs, err := j.List()
+	if err != nil {
+		return 0, err
+	}
+	for i := range recs {
+		if recs[i].Intent == nil || j.commandInFlight(recs[i].OpID) {
+			continue
+		}
+		if werr := j.writeLocked(recs[i]); werr != nil {
+			remaining++
+		}
+	}
+	j.releaseIntentFenceLocked()
+	return remaining, nil
 }
 
 // intentFenceOpID names the second-generation fence: a valid ULID (timestamp
@@ -177,12 +205,16 @@ var writeIntentFence = atomicWrite
 
 // ReleaseIntentFence removes the intent fence if no record holds an open
 // Intent any more. An agent start calls it after it has taken every intent.
-func (j *Journal) ReleaseIntentFence() { j.releaseIntentFenceIfUnused() }
+func (j *Journal) ReleaseIntentFence() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.releaseIntentFenceLocked()
+}
 
-// releaseIntentFenceIfUnused: best effort. A journal that cannot be listed
-// keeps the fence (what is left cannot be judged), and so does a failed
+// releaseIntentFenceLocked (j.mu held): best effort. A journal that cannot be
+// listed keeps the fence (what is left cannot be judged), and so does a failed
 // removal: either only keeps older agents out a little longer.
-func (j *Journal) releaseIntentFenceIfUnused() {
+func (j *Journal) releaseIntentFenceLocked() {
 	if on, err := j.IntentFenceActive(); err != nil || !on {
 		return
 	}

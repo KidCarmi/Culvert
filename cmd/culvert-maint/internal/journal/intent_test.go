@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -474,5 +475,128 @@ func TestIntentFence_StaysWhenTheJournalCannotBeJudged(t *testing.T) {
 	_ = a.j.EndCommand(intentOp)
 	if on, _ := a.j.IntentFenceActive(); !on {
 		t.Error("the fence was removed although one journal file cannot be read")
+	}
+}
+
+// TestIntent_CloseStaleIntents: the retry for a close that could not be
+// written. It closes what this process is not inside, leaves what it is
+// inside, says what is left when the journal still cannot be written, and
+// takes the fence down once nothing is open.
+func TestIntent_CloseStaleIntents(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	a.seed(intentOp2)
+	now := time.Now().UTC()
+	_, _ = a.j.BeginCommand(intentOp, MutationComposeUp, now)
+	_, _ = a.j.BeginCommand(intentOp2, MutationComposeDown, now) // stays in flight
+	a.j.SetWriteErrorForTest(errors.New("no space left on device"))
+	if err := a.j.EndCommand(intentOp); err == nil {
+		t.Fatal("test setup: the close was expected to fail")
+	}
+	if left, err := a.j.CloseStaleIntents(); err != nil || left != 1 {
+		t.Fatalf("while unwritable: left=%d err=%v, want 1 left", left, err)
+	}
+	a.j.SetWriteErrorForTest(nil)
+	if left, err := a.j.CloseStaleIntents(); err != nil || left != 0 {
+		t.Fatalf("writable again: left=%d err=%v, want 0", left, err)
+	}
+	if strings.Contains(rawRecordFile(t, dir, intentOp), `"intent"`) {
+		t.Error("the stale intent is still on disk")
+	}
+	if !strings.Contains(rawRecordFile(t, dir, intentOp2), `"intent"`) {
+		t.Error("the intent of a command still in flight was closed")
+	}
+	if on, _ := a.j.IntentFenceActive(); !on {
+		t.Error("the fence came down while a command is in flight")
+	}
+	_ = a.j.EndCommand(intentOp2)
+	if on, _ := a.j.IntentFenceActive(); on {
+		t.Error("the fence is still up with nothing open")
+	}
+}
+
+// TestIntentFence_ReleasedWhenTheIntentItWasRaisedForWasNeverWritten: the
+// fence was raised, the intent write failed, the command ran and returned.
+// Nothing is open; the fence must not be left behind.
+func TestIntentFence_ReleasedWhenTheIntentItWasRaisedForWasNeverWritten(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	a.j.SetWriteErrorForTest(errors.New("no space left on device")) // fails the record write, not the fence
+	if _, err := a.j.BeginCommand(intentOp, MutationComposeUp, time.Now().UTC()); err == nil {
+		t.Fatal("test setup: the intent write was expected to fail")
+	}
+	if on, _ := a.j.IntentFenceActive(); !on {
+		t.Fatal("test setup: the fence was expected to be up")
+	}
+	a.j.SetWriteErrorForTest(nil)
+	if err := a.j.EndCommand(intentOp); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := a.j.IntentFenceActive(); on {
+		t.Error("the fence outlived a command whose intent was never written")
+	}
+}
+
+// TestIntentFence_NeverReleasedUnderABeginningCommand: one goroutine begins
+// and ends commands; others release the fence and remove unrelated records as
+// fast as they can. Whenever a command has been begun, its intent on disk has
+// a fence beside it ("no fence, no intent" holds under concurrency).
+func TestIntentFence_NeverReleasedUnderABeginningCommand(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for g := 0; g < 3; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					a.j.ReleaseIntentFence()
+					_, _ = a.j.CloseStaleIntents()
+					_ = a.j.Remove(intentOp2) // not there: still runs the release
+				}
+			}
+		}()
+	}
+	for i := 0; i < 300; i++ {
+		if _, err := a.j.BeginCommand(intentOp, MutationComposeUp, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if on, _ := a.j.IntentFenceActive(); !on {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("iteration %d: an intent is on disk without its fence", i)
+		}
+		if err := a.j.EndCommand(intentOp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestIntentFence_ALingeringFenceIsClearedByTheSweep: the fence is there but
+// no record holds an intent (its removal failed earlier, or the process died
+// between dropping the intent and removing it). The periodic sweep, which
+// finds nothing stale to close, still takes it down.
+func TestIntentFence_ALingeringFenceIsClearedByTheSweep(t *testing.T) {
+	dir := t.TempDir()
+	a := newLife(t, dir)
+	a.seed(intentOp)
+	if err := a.j.ensureIntentFence(); err != nil {
+		t.Fatal(err)
+	}
+	if left, err := a.j.CloseStaleIntents(); err != nil || left != 0 {
+		t.Fatalf("left=%d err=%v", left, err)
+	}
+	if on, _ := a.j.IntentFenceActive(); on {
+		t.Error("a fence with no open intent behind it survived the sweep")
 	}
 }

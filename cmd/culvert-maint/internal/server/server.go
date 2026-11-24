@@ -216,10 +216,13 @@ type Server struct {
 	// unfinished; startSettled is set once Docker showed that it is over
 	// (settle.go, mutation.go). settlePoll is how often Docker is asked.
 	mutations *journal.MutationLog
-	// pendingIntents: command intents whose close could not be written
-	// (mutation.go). Guarded by intentMu.
-	intentMu       sync.Mutex
-	pendingIntents map[string]struct{}
+	// staleIntents: a command intent's close could not be written and is being
+	// retried (mutation.go). intentRetryEvery is the retry period (0: default).
+	staleIntents       atomic.Bool
+	intentRetryRunning atomic.Bool
+	intentRetryEvery   time.Duration
+	intentRetryStop    chan struct{}
+	intentRetryOnce    sync.Once
 
 	startHazard  bool
 	startOnlyUp  bool // a readable marker was found and names only `compose up`
@@ -297,7 +300,8 @@ func New(opts Options) (*Server, error) {
 		log.Printf("culvert-maint: WARN: the mutation marker could not be set up; treating this start as following an unfinished compose command, and compose up/down will be refused until the state directory is writable")
 	}
 	srv := &Server{
-		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
+		intentRetryStop: make(chan struct{}),
+		opts:            opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
 		mutations: mutations, startHazard: atOpen.Pending, startOnlyUp: atOpen.OnlyUp, settlePoll: defaultSettlePoll,
 		reconcileLock: opts.InstanceLock,
 	}
@@ -465,6 +469,14 @@ func (s *Server) Serve(ctx context.Context) error {
 // Close stops the server and removes the socket file. Safe to call
 // multiple times.
 func (s *Server) Close() error {
+	// Stop the intent retry loop and make one last attempt to say "that
+	// command returned" before the process goes.
+	s.intentRetryOnce.Do(func() {
+		if s.intentRetryStop != nil {
+			close(s.intentRetryStop)
+		}
+	})
+	s.sweepStaleIntents()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.httpSrv != nil {

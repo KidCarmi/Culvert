@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
@@ -129,15 +130,19 @@ func TestCommandIntent_OnlyWhereThereIsARecordOfTheOperation(t *testing.T) {
 	}
 }
 
-// TestCommandIntent_ACloseThatCannotBeWrittenDoesNotStay: the command returned
-// but the record could not be rewritten at that moment. The intent must not
-// stay on disk: it goes at the record's next write by the operation (a phase
-// advance), or, failing that, before the next compose command.
-func TestCommandIntent_ACloseThatCannotBeWrittenDoesNotStay(t *testing.T) {
+// TestCommandIntent_ACloseThatCannotBeWrittenIsRetriedUntilItIs: the command
+// returned to a live agent, but for a moment the record could not be
+// rewritten (the disk was full while the operation ended). The agent then
+// runs on, perhaps for days, and is restarted cleanly. That restart must not
+// read "died in compose up". So the close is retried: by the record's next
+// write, before the next compose command of ANY operation or none, by a
+// background loop while the agent is otherwise idle, and at Close.
+func TestCommandIntent_ACloseThatCannotBeWrittenIsRetriedUntilItIs(t *testing.T) {
 	failedClose := func(t *testing.T) (*reconRig, context.Context) {
 		r, ctx := intentRig(t)
+		r.srv.intentRetryEvery = time.Hour // each subtest says which retry it means
 		if _, err := r.srv.markedMutation(ctx, journal.MutationComposeUp, func() (*runner.Result, error) {
-			r.jnl.SetWriteErrorForTest(errors.New("read-only file system")) // from here on
+			r.jnl.SetWriteErrorForTest(errors.New("no space left on device")) // from here on
 			return &runner.Result{}, nil
 		}); err != nil {
 			t.Fatal(err)
@@ -145,27 +150,89 @@ func TestCommandIntent_ACloseThatCannotBeWrittenDoesNotStay(t *testing.T) {
 		if r.intentOnDisk(t) == nil {
 			t.Fatal("test setup: the close was expected to fail and leave the intent")
 		}
-		r.jnl.SetWriteErrorForTest(nil)
 		return r, ctx
+	}
+	gone := func(t *testing.T, r *reconRig, how string) {
+		t.Helper()
+		if in := r.intentOnDisk(t); in != nil {
+			t.Errorf("intent still on disk after %s: %+v", how, in)
+		}
+		if _, attributed := r.nextStartConcludes(t); attributed {
+			t.Errorf("after %s a clean restart would still read a death inside the command", how)
+		}
+		if on, _ := r.jnl.IntentFenceActive(); on {
+			t.Errorf("the intent fence is still up after %s", how)
+		}
 	}
 	t.Run("the operation's next record write", func(t *testing.T) {
 		r, _ := failedClose(t)
+		r.jnl.SetWriteErrorForTest(nil)
 		rec := r.recordOnDisk(t) // what advanceJournalPhase does: read, change, write
 		rec.Phase = journal.PhaseRestarted
 		if err := r.jnl.Write(*rec); err != nil {
 			t.Fatal(err)
 		}
-		if in := r.intentOnDisk(t); in != nil {
-			t.Errorf("the phase advance wrote the stale intent back: %+v", in)
-		}
+		gone(t, r, "the record's next write")
 	})
-	t.Run("before the next command", func(t *testing.T) {
-		r, _ := failedClose(t)
-		_, _ = r.srv.markedMutation(ops.WithOpID(context.Background(), "01BX5ZZKBKACTAV9WEVGEMMVRZ"), journal.MutationComposeUp, func() (*runner.Result, error) {
-			if in := r.intentOnDisk(t); in != nil {
-				t.Errorf("the earlier intent is still open while the next command runs: %+v", in)
-			}
-			return &runner.Result{}, nil
+	for name, ctx := range map[string]context.Context{
+		"before the next command of another operation": ops.WithOpID(context.Background(), "01BX5ZZKBKACTAV9WEVGEMMVRZ"),
+		"before the next command of no operation":      context.Background(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, _ := failedClose(t)
+			r.jnl.SetWriteErrorForTest(nil)
+			_, _ = r.srv.markedMutation(ctx, journal.MutationComposeUp, func() (*runner.Result, error) {
+				if in := r.intentOnDisk(t); in != nil {
+					t.Errorf("the earlier intent is still open while the next command runs: %+v", in)
+				}
+				return &runner.Result{}, nil
+			})
+			gone(t, r, name)
 		})
+	}
+	t.Run("the idle agent's retry loop", func(t *testing.T) {
+		r, ctx := intentRig(t)
+		r.srv.intentRetryEvery = 10 * time.Millisecond
+		if _, err := r.srv.markedMutation(ctx, journal.MutationComposeUp, func() (*runner.Result, error) {
+			r.jnl.SetWriteErrorForTest(errors.New("no space left on device"))
+			return &runner.Result{}, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond) // still unwritable: the loop keeps trying
+		if r.intentOnDisk(t) == nil {
+			t.Fatal("test setup: the intent was expected to be still there")
+		}
+		r.jnl.SetWriteErrorForTest(nil) // space was freed; no command, no write, no restart
+		deadline := time.Now().Add(5 * time.Second)
+		fenced := func() bool { on, _ := r.jnl.IntentFenceActive(); return on }
+		for (r.intentOnDisk(t) != nil || fenced()) && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		gone(t, r, "the retry loop")
 	})
+	t.Run("close", func(t *testing.T) {
+		r, _ := failedClose(t)
+		r.jnl.SetWriteErrorForTest(nil)
+		_ = r.srv.Close()
+		gone(t, r, "Close")
+	})
+}
+
+// TestCommandIntent_ComposeDownIsAttributedToo: `compose down` goes through
+// the same wrapper with the operation's context (a restore or a data rollback
+// stops the stack with it).
+func TestCommandIntent_ComposeDownIsAttributedToo(t *testing.T) {
+	r, ctx := intentRig(t)
+	var during *journal.CommandIntent
+	r.world.onDown = func() { during = r.intentOnDisk(t) }
+	if _, err := r.srv.composeDown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if during == nil || during.Command != journal.MutationComposeDown {
+		t.Fatalf("intent on disk while `compose down` ran = %+v, want compose down", during)
+	}
+	if in := r.intentOnDisk(t); in != nil {
+		t.Errorf("intent still on disk after `compose down` returned: %+v", in)
+	}
 }

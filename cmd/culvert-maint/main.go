@@ -287,7 +287,7 @@ func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo 
 	}
 	// First, and before anything is audited, reported or counted: take every
 	// open command intent, durably.
-	diedIn, err = takeCommandIntents(jnl, recs)
+	diedIn, err = takeCommandIntents(jnl, al.Path(), recs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("journal: refusing to serve — %w", err)
 	}
@@ -321,20 +321,31 @@ func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo 
 //
 // All intents are taken before the first is acted on in any way, so a refusal
 // leaves no audit entry behind for some other record.
-func takeCommandIntents(jnl *journal.Journal, recs []journal.Record) (map[string]string, error) {
+//
+// An intent is not evidence of a death when the operation is known to have
+// ENDED: its record carries a terminal outcome, or the audit log holds its
+// terminal entry (which is written only after every stage returned). The
+// intent is then one whose close could not be written; it is removed like any
+// other and attributed to nothing.
+func takeCommandIntents(jnl *journal.Journal, auditPath string, recs []journal.Record) (map[string]string, error) {
 	diedIn := map[string]string{}
 	for i := range recs {
 		rec := &recs[i]
+		ended := operationEnded(auditPath, rec) // asked before the record is changed
 		command, attributed, had := rec.TakeIntent()
 		if !had {
 			continue
 		}
+		if ended {
+			attributed, rec.Cut.Attributed = false, false
+		}
 		if werr := jnl.Write(*rec); werr != nil {
+			// command is content of a file; quoted, never interpreted.
 			if errors.Is(werr, journal.ErrNewerSchema) {
-				return nil, fmt.Errorf("op %s died inside %s, and its journal record was written by a newer agent version that this version may not change; start that version (or a later one) again: %w",
+				return nil, fmt.Errorf("op %s holds an open command intent (%q): the agent was killed inside a docker compose command, and the journal record was written by a newer agent version that this version may not change; start that version (or a later one) again: %w",
 					rec.OpID, command, werr)
 			}
-			return nil, fmt.Errorf("op %s died inside %s and that cannot be recorded in its journal record (is %s writable, and is there space?): %w",
+			return nil, fmt.Errorf("op %s holds an open command intent (%q): the agent was killed inside a docker compose command, and that cannot be recorded in its journal record (is %s writable, and is there space?): %w",
 				rec.OpID, command, jnl.Dir(), werr)
 		}
 		if attributed {
@@ -345,6 +356,14 @@ func takeCommandIntents(jnl *journal.Journal, recs []journal.Record) (map[string
 	// from starting on one can go.
 	jnl.ReleaseIntentFence()
 	return diedIn, nil
+}
+
+// operationEnded reports whether rec's operation reached its end in the
+// process that ran it. It does not change rec.
+func operationEnded(auditPath string, rec *journal.Record) bool {
+	probe := *rec
+	server.AdoptAuditedTerminal(auditPath, &probe)
+	return probe.TerminalOutcome != ""
 }
 
 // startupRecord is the per-record startup work. A record whose operation ENDED

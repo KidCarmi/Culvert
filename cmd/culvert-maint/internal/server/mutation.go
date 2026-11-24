@@ -76,45 +76,79 @@ func (s *Server) markedMutation(ctx context.Context, command string, run func() 
 // beginCommandIntent writes the intent into the record of opID
 // (journal.BeginCommand). No operation, no journal, or no record for it:
 // nothing is written, and nothing will ever be attributed to the command.
+// Before any compose command, whatever it is run for, intents left by a close
+// that could not be written are closed.
 func (s *Server) beginCommandIntent(opID, command string) error {
-	if s.opts.Journal == nil || opID == "" {
+	if s.opts.Journal == nil {
 		return nil
 	}
-	s.closePendingIntents()
+	s.sweepStaleIntents()
+	if opID == "" {
+		return nil
+	}
 	_, err := s.opts.Journal.BeginCommand(opID, command, time.Now().UTC())
 	return err
 }
 
 // endCommandIntent removes the intent from the record of opID. If that cannot
-// be written, the journal still drops the intent at the record's next write by
-// this process (a phase advance, say), and the close is retried before the
-// next compose command. What is left: the state directory stays unwritable
-// from here until the process ends. Then the next start reads "died in the
-// command".
+// be written the record would keep saying "in flight" although this process
+// is alive, and an agent start after a perfectly clean restart would read
+// "died in the command". So it is retried until it is written: by every later
+// write of that record (journal.Write drops it), before the next compose
+// command, every intentRetryEvery from a background loop, and at Close. What
+// is left is a state directory that stays unwritable from here until the
+// process is gone.
 func (s *Server) endCommandIntent(opID string) {
 	if s.opts.Journal == nil || opID == "" {
 		return
 	}
 	if err := s.opts.Journal.EndCommand(opID); err != nil {
-		s.intentMu.Lock()
-		if s.pendingIntents == nil {
-			s.pendingIntents = map[string]struct{}{}
-		}
-		s.pendingIntents[opID] = struct{}{}
-		s.intentMu.Unlock()
-		log.Printf("culvert-maint: WARN: could not close the command intent of op %s (will retry): %v", opID, err)
+		log.Printf("culvert-maint: WARN: could not close the command intent of op %s (retrying): %v", opID, err)
+		s.staleIntents.Store(true)
+		s.startIntentRetry()
 	}
 }
 
-// closePendingIntents retries every intent whose close could not be written.
-// Called only from beginCommandIntent, i.e. by the one state-changing
-// operation that is running: nothing else is rewriting those records.
-func (s *Server) closePendingIntents() {
-	s.intentMu.Lock()
-	defer s.intentMu.Unlock()
-	for opID := range s.pendingIntents {
-		if s.opts.Journal.EndCommand(opID) == nil {
-			delete(s.pendingIntents, opID)
-		}
+// sweepStaleIntents closes what endCommandIntent could not. Safe beside a
+// running operation: the journal makes each close one atomic step.
+func (s *Server) sweepStaleIntents() {
+	if s.opts.Journal == nil || !s.staleIntents.Load() {
+		return
 	}
+	if left, err := s.opts.Journal.CloseStaleIntents(); err == nil && left == 0 {
+		s.staleIntents.Store(false)
+	}
+}
+
+// defaultIntentRetryEvery is how often a close that could not be written is
+// retried while the agent is otherwise idle.
+const defaultIntentRetryEvery = 5 * time.Second
+
+// startIntentRetry runs the retry loop until nothing is stale or the server
+// closes. At most one runs at a time.
+func (s *Server) startIntentRetry() {
+	if !s.intentRetryRunning.CompareAndSwap(false, true) {
+		return
+	}
+	every := s.intentRetryEvery
+	if every <= 0 {
+		every = defaultIntentRetryEvery
+	}
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for s.staleIntents.Load() {
+			select {
+			case <-s.intentRetryStop:
+				s.intentRetryRunning.Store(false)
+				return
+			case <-t.C:
+				s.sweepStaleIntents()
+			}
+		}
+		s.intentRetryRunning.Store(false)
+		if s.staleIntents.Load() { // a close failed while this loop was ending
+			s.startIntentRetry()
+		}
+	}()
 }

@@ -231,6 +231,13 @@ type Journal struct {
 	dir string
 	// writeErrForTest, when set, is returned by Write (SetWriteErrorForTest).
 	writeErrForTest error
+	// mu serialises every change to the journal directory made through this
+	// Journal: Write, Remove, and the read-modify-writes of intent.go
+	// (BeginCommand, EndCommand, CloseStaleIntents, the intent fence). So a
+	// close cannot overwrite a newer write of the same record or bring back a
+	// removed one, and the fence cannot be released between being raised and
+	// the intent it is for being written. Reads take no lock.
+	mu sync.Mutex
 	// inFlight: operations of THIS process that are inside a compose command
 	// (BeginCommand .. EndCommand). Guarded by flightMu.
 	flightMu sync.Mutex
@@ -272,6 +279,13 @@ func (j *Journal) pathFor(opID string) (string, error) {
 // skipped write-ahead barrier would reopen the RISK-022 window under exactly the
 // disk-full condition the journal exists to survive.
 func (j *Journal) Write(rec Record) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.writeLocked(rec)
+}
+
+// writeLocked is Write with j.mu held.
+func (j *Journal) writeLocked(rec Record) error {
 	if rec.FromNewerAgent() {
 		return fmt.Errorf("%w (op %s, schema %d > %d)", ErrNewerSchema, rec.OpID, rec.Schema, SchemaCurrent)
 	}
@@ -311,7 +325,7 @@ func (j *Journal) Write(rec Record) error {
 		return err
 	}
 	if dropped {
-		j.releaseIntentFenceIfUnused()
+		j.releaseIntentFenceLocked()
 	}
 	return nil
 }
@@ -319,7 +333,11 @@ func (j *Journal) Write(rec Record) error {
 // SetWriteErrorForTest makes every later Write fail with err (nil restores
 // normal writes). Tests only: a disk that fills up between two writes cannot
 // be produced with file modes when the tests run as root.
-func (j *Journal) SetWriteErrorForTest(err error) { j.writeErrForTest = err }
+func (j *Journal) SetWriteErrorForTest(err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.writeErrForTest = err
+}
 
 // Read returns the record for opID. found=false (nil error) when no file exists;
 // ErrCorruptRecord when the file exists but does not parse.
@@ -400,6 +418,8 @@ func (j *Journal) List() ([]Record, error) {
 // op's record and make the reconciler roll back a healthy, finished upgrade.
 // Removing an absent record is not an error (idempotent terminal cleanup).
 func (j *Journal) Remove(opID string) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	path, err := j.pathFor(opID)
 	if err != nil {
 		return err
@@ -418,7 +438,7 @@ func (j *Journal) Remove(opID string) error {
 	// The record is gone either way; a fence that could not be released stays,
 	// which only keeps older agents out a little longer.
 	_ = j.releaseFenceIfUnused()
-	j.releaseIntentFenceIfUnused()
+	j.releaseIntentFenceLocked()
 	return nil
 }
 
