@@ -442,3 +442,226 @@ func TestCleanupLeftovers_NeverOffersTheBackupOfAnUnfinishedRestore(t *testing.T
 		t.Error("the skipped directories are not reported")
 	}
 }
+
+// ── Found by an independent review; each of these failed before its fix. ──
+
+func abandonRestoreAt(t *testing.T, src, dataDir, step string, mode restoreMode) {
+	t.Helper()
+	restoreInPlaceStepHook = func(s string) error {
+		if s == step {
+			return errors.New("killed")
+		}
+		return nil
+	}
+	if _, err := commitInPlace(t, src, dataDir, mode); !errors.Is(err, errRestoreAbandoned) {
+		t.Fatalf("setup: commit not abandoned at %q: %v", step, err)
+	}
+	restoreInPlaceStepHook = nil
+}
+
+func laterRestoreClock(t *testing.T) {
+	t.Helper()
+	later := restoreNow().Add(time.Hour)
+	orig := restoreNow
+	restoreNow = func() time.Time { return later }
+	t.Cleanup(func() { restoreNow = orig })
+}
+
+// replayPartialRollback performs the renames of a rollback from phase
+// "installing" by hand and stops where a second process death would: after
+// oldBack previous entries are back, optionally after the staged copy and the
+// emptied backup directory were removed. The intent record is left in place.
+func replayPartialRollback(t *testing.T, dataDir string, oldBack int, removeStaging bool) {
+	t.Helper()
+	in, err := readRestoreIntent(dataDir)
+	if err != nil || in == nil || in.Phase != restorePhaseInstalling {
+		t.Fatalf("fixture: want an intent in phase installing, got %+v (%v)", in, err)
+	}
+	_, staging, bak := restoreWorkPaths(dataDir, in.Suffix)
+	for _, n := range in.New {
+		if restorePathExists(filepath.Join(dataDir, n)) {
+			if err := os.Rename(filepath.Join(dataDir, n), filepath.Join(staging, n)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for i, n := range in.Old {
+		if i >= oldBack {
+			break
+		}
+		if err := os.Rename(filepath.Join(bak, n), filepath.Join(dataDir, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if removeStaging {
+		_ = os.Remove(bak)
+		_ = os.RemoveAll(staging)
+	}
+}
+
+// A rollback can itself be killed. Wherever it stops, the next start must
+// finish it — not refuse forever, and not move the previous content out again.
+func TestRestoreInPlace_RollbackKilledPartWayIsFinishedByTheNextStart(t *testing.T) {
+	for name, tc := range map[string]struct {
+		oldBack       int
+		removeStaging bool
+	}{
+		"nothing back yet":                  {0, false},
+		"one previous entry back":           {1, false},
+		"two previous entries back":         {2, false},
+		"all back, staged copy still there": {1 << 30, false},
+		"all back, staged copy removed":     {1 << 30, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			forceInPlaceRestore(t)
+			src, dataDir, _, _ := makeCommitFixture(t, 0)
+			seedFile(t, dataDir, "proxy.log", []byte("previous\n"), 0o600)
+			before := treeDigest(t, dataDir)
+			abandonRestoreAt(t, src, dataDir, "installed", modeFull)
+			replayPartialRollback(t, dataDir, tc.oldBack, tc.removeStaging)
+
+			for start := 1; start <= 2; start++ { // a second start must be a no-op
+				if err := recoverInPlaceRestoreAtBoot(dataDir, true); err != nil {
+					t.Fatalf("start %d: %v", start, err)
+				}
+				if got := treeDigest(t, dataDir); got != before {
+					t.Fatalf("start %d: content differs from before the restore:\nwant\n%s\ngot\n%s", start, before, got)
+				}
+				if intentPresent(dataDir) {
+					t.Fatalf("start %d: intent record still present", start)
+				}
+			}
+		})
+	}
+}
+
+// The guards compare the archive with the CURRENT content. After an
+// interrupted restore the directory is half-swapped; the earlier swap must be
+// undone before a guard is evaluated, or the guard passes on an empty
+// directory and the restore it exists to stop goes ahead.
+func TestRestoreInPlace_GuardsAreEvaluatedAfterAnUnfinishedRestoreIsUndone(t *testing.T) {
+	forceInPlaceRestore(t)
+	src, dataDir, _, _ := makeCommitFixture(t, 2) // enrolled DPs and a different CA: the DP guard applies
+	before := treeDigest(t, dataDir)
+	abandonRestoreAt(t, src, dataDir, "evacuated", modeFull) // commitInPlace passes the acknowledgement
+	laterRestoreClock(t)
+
+	out, err := captureStdout(t, func() error {
+		return runRestoreDryRun(src, dataDir, "", restoreOpts{Mode: modeFull})
+	})
+	if err != nil || !strings.Contains(out, restorePreflightPrefix+"commit=refused") || !strings.Contains(out, "reason=earlier_restore_unfinished") {
+		t.Errorf("a dry-run on a half-swapped directory must not call the commit ok: err=%v\n%s", err, out)
+	}
+
+	_, err = captureStdout(t, func() error {
+		return runRestoreCommit(src, dataDir, "", restoreOpts{Mode: modeFull}) // NOT acknowledged
+	})
+	if err == nil || !strings.Contains(err.Error(), "accept-dp-reenrollment") {
+		t.Fatalf("the DP re-enrollment guard did not refuse after an interrupted restore: %v", err)
+	}
+	if treeDigest(t, dataDir) != before || intentPresent(dataDir) {
+		t.Error("the refused restore did not leave the previous content in place")
+	}
+}
+
+// CULVERT_ALLOW_MULTIPLE_WRITERS lets a proxy start beside a live holder. It
+// must never let a restore swap the directory under one, or undo a swap that
+// another restore is still making.
+func TestRestoreInPlace_OverrideDoesNotSwapUnderALiveHolder(t *testing.T) {
+	forceInPlaceRestore(t)
+	t.Setenv(allowMultipleWritersEnv, "1")
+
+	t.Run("fresh swap", func(t *testing.T) {
+		src, dataDir, _, _ := makeCommitFixture(t, 0)
+		held := writerlock.Take(dataDir)
+		if held.Lock == nil {
+			t.Fatalf("fixture: %v", held.Cause)
+		}
+		defer func() { _ = held.Lock.Close() }()
+		before := treeDigest(t, dataDir)
+		if _, err := commitInPlace(t, src, dataDir, modeFull); err == nil {
+			t.Error("the swap committed while a live process holds the writer lock")
+		}
+		if treeDigest(t, dataDir) != before {
+			t.Error("the refused restore changed the data directory")
+		}
+	})
+	t.Run("another restore's unfinished swap", func(t *testing.T) {
+		src, dataDir, _, _ := makeCommitFixture(t, 0)
+		abandonRestoreAt(t, src, dataDir, "installing", modeFull)
+		mid := treeDigest(t, dataDir)
+		held := writerlock.Take(dataDir) // stands for the first restore, still running
+		if held.Lock == nil {
+			t.Fatalf("fixture: %v", held.Cause)
+		}
+		defer func() { _ = held.Lock.Close() }()
+		laterRestoreClock(t)
+		if _, err := commitInPlace(t, src, dataDir, modeFull); err == nil {
+			t.Error("a second restore ran while the first still holds the lock")
+		}
+		if treeDigest(t, dataDir) != mid || !intentPresent(dataDir) {
+			t.Error("a restore without the lock undid another restore's swap")
+		}
+	})
+}
+
+// The same directory can be judged "renameable" by a later run (as root on the
+// volume's host path, say). The whole-directory swap must not run over an
+// unfinished in-place one: it would keep "current" files from a directory
+// that has been emptied and report success.
+func TestRestoreCommit_DirectorySwapRefusesOverAnUnfinishedInPlaceRestore(t *testing.T) {
+	forceInPlaceRestore(t)
+	src, dataDir, _, _ := makeCommitFixture(t, 0)
+	seedFile(t, dataDir, "proxy.log", []byte("previous\n"), 0o600)
+	abandonRestoreAt(t, src, dataDir, "evacuated", modeFull)
+	mid := treeDigest(t, dataDir)
+	restoreForceInPlace = false
+	if restoreUsesInPlaceSwap(dataDir) {
+		t.Skip("this environment swaps a temp directory in place; the layout cannot switch here")
+	}
+	laterRestoreClock(t)
+	_, err := captureStdout(t, func() error {
+		return runRestoreCommit(src, dataDir, "", restoreOpts{Mode: modeTrustRootOnly, AcceptDPReenrollment: true})
+	})
+	if err == nil || !strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("want a refusal naming the unfinished restore, got %v", err)
+	}
+	if treeDigest(t, dataDir) != mid || !intentPresent(dataDir) {
+		t.Error("the refused restore changed the half-swapped directory")
+	}
+}
+
+// Something else wrote into the half-emptied directory (a one-shot, an
+// operator). The start cannot know which copy to keep: it refuses, deletes
+// nothing, and both copies are still there.
+func TestRestoreInPlace_ForeignWriteIntoAHalfSwappedDirectoryStopsTheStartAndDeletesNothing(t *testing.T) {
+	forceInPlaceRestore(t)
+	src, dataDir, _, _ := makeCommitFixture(t, 0)
+	abandonRestoreAt(t, src, dataDir, "evacuated", modeFull)
+	seedFile(t, dataDir, "ui_users.json", []byte("[]"), 0o600)
+
+	err := recoverInPlaceRestoreAtBoot(dataDir, true)
+	if err == nil || !strings.Contains(err.Error(), "exists both") {
+		t.Fatalf("want a refusal naming the name found twice, got %v", err)
+	}
+	baks := inPlaceEntries(t, dataDir, "bak")
+	if len(baks) != 1 || !restorePathExists(filepath.Join(baks[0], "ui_users.json")) || !restorePathExists(filepath.Join(dataDir, "ui_users.json")) {
+		t.Error("a refused start removed one of the two copies")
+	}
+	if err := refuseOnUnfinishedInPlaceRestore(dataDir, "backup"); err == nil {
+		t.Error("a backup would run on the half-swapped directory")
+	}
+}
+
+func TestRestoreInPlace_ANewSwapClearsThePreviousOutcomeRecord(t *testing.T) {
+	forceInPlaceRestore(t)
+	src, dataDir, _, _ := makeCommitFixture(t, 0)
+	if out, err := commitInPlace(t, src, dataDir, modeFull); err != nil {
+		t.Fatalf("first restore: %v\n%s", err, out)
+	}
+	laterRestoreClock(t)
+	abandonRestoreAt(t, src, dataDir, "evacuated", modeFull)
+	if got := readOutcome(t, dataDir); got != "" {
+		t.Errorf("an unfinished restore still shows the previous one's outcome: %s", got)
+	}
+}

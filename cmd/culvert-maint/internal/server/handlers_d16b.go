@@ -921,12 +921,15 @@ const restorePreflightPrefix = "RESTORE-PREFLIGHT v1 "
 // preflight existed. The reason is reduced to a short token: it is quoted into
 // the operation record.
 func restorePreflightRefusal(stdout []byte) (string, bool) {
+	// The verdict is the dry-run's LAST line of that shape: everything before
+	// it is the plan, which quotes names taken from the archive.
+	reason, refused := "", false
 	for _, line := range strings.Split(string(stdout), "\n") {
 		rest, ok := strings.CutPrefix(strings.TrimSpace(line), restorePreflightPrefix)
 		if !ok {
 			continue
 		}
-		refused, reason := false, "unspecified"
+		reason, refused = "unspecified", false
 		for _, field := range strings.Fields(rest) {
 			switch k, v, _ := strings.Cut(field, "="); k {
 			case "commit":
@@ -937,9 +940,8 @@ func restorePreflightRefusal(stdout []byte) (string, bool) {
 				}
 			}
 		}
-		return reason, refused
 	}
-	return "", false
+	return reason, refused
 }
 
 var preflightReasonRE = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)

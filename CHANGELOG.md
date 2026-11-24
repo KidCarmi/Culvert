@@ -17,9 +17,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   commit failed — measured on real Docker: `mkdir /data.staging.…: permission
   denied`, after the proxy had already been stopped. The commit now detects
   that layout and swaps the directory's content inside the volume, under
-  `/data/.restore/`, behind the single-writer lock. Each restored file is read
-  back and compared with the backup manifest before the restore is reported as
-  committed. A restore that fails, or is killed mid-swap, ends with the
+  `/data/.restore/`, behind the single-writer lock (a restore never runs beside
+  a live holder, whatever `CULVERT_ALLOW_MULTIPLE_WRITERS` says). Each file
+  taken from the archive is read back and compared with the backup manifest
+  before the restore is reported as committed. A restore that fails, or is killed mid-swap, ends with the
   previous content back in place: the next start of the proxy undoes it before
   reading the directory. A `/data` that is an ordinary directory with a
   writable parent is swapped exactly as before.

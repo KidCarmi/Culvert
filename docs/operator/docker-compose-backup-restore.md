@@ -237,9 +237,15 @@ and the container runs as the unprivileged `proxy` user (which cannot create
   or recovery did (`committed` or `rolled_back`)
 
 The commit takes the data directory's single-writer lock first, so it refuses
-while a proxy is still running on the volume. After the content is moved in,
-every restored file is read back and compared with the backup manifest; only
-then is the restore reported as committed. If anything fails on the way — a
+while a proxy (or another restore) is still running on the volume.
+`CULVERT_ALLOW_MULTIPLE_WRITERS=1` does **not** override that for a restore.
+If the lock cannot be established at all (storage without file locking) the
+restore refuses too; setting that variable for the run then lets it proceed
+unlocked, but only when no earlier restore is left unfinished. Before anything
+is compared with the current content — including the DP re-enrollment and TOTP
+guards — an earlier restore that never finished is undone. After the content
+is moved in, every file taken from the archive is read back and compared with
+the backup manifest; only then is the restore reported as committed. If anything fails on the way — a
 rename, the comparison — the previous content is moved back and the restore
 reports failure with nothing changed.
 
@@ -366,11 +372,19 @@ Restore: an interrupted restore (<ts>-<pid>, mode full) was undone at startup; t
 directory holds its previous content. Run the restore again if it is still wanted.
 ```
 
-An interrupted restore is always undone, never completed. Culvert refuses to
-start instead when it cannot be sure: the record is unreadable, a file is
-found both in `/data` and in the backup directory, or the single-writer lock
-could not be established (the restore may still be running). Nothing is
-deleted in any of those cases; inspect `/data/.restore/`.
+An interrupted restore is always undone, never completed, and the undo itself
+can be interrupted and resumed any number of times. Culvert refuses to start
+instead when it cannot be sure: the record is unreadable, something wrote a
+file into `/data` while the restore was unfinished (the name is then found
+both in `/data` and in the backup directory), or the single-writer lock could
+not be established (the restore may still be running). Nothing is deleted in
+any of those cases; inspect `/data/.restore/`.
+
+While a restore is unfinished, `--backup`, the support bundle and
+`--prepare-downgrade` refuse to run: they would process a directory that holds
+neither the previous content nor the restored one. A dry-run reports
+`commit=refused reason=earlier_restore_unfinished`. Start Culvert once, or run
+the restore again, and retry.
 
 The guard only triggers when `/data` is **absent and a `.bak` sibling
 exists** — a genuine first-run install (no `/data`, no `.bak`) boots
