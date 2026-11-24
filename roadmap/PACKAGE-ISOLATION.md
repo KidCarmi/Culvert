@@ -226,8 +226,8 @@ It is pure of mutation/logging/locks, but its matchers are not pure of
 
 **Store/state side (not part of a pure core).** `PolicyStore` (policy.go:265) owns
 `mu`, published rules, `verified` memo, `scanIndex`, per-rule `counters`, version
-meta, and persistence (`Load/Save/saveTo/saveMeta`, `DroppedOnLoad` fail-closed
-load gate). Plus `policy_draft.go` (1,204 lines), `policy_mutation.go`,
+meta, and persistence (`Load/Save/saveTo/saveMeta`; the whole-ruleset refusal
+gate lives in `policy_ruletype_gate.go`, POL-005). Plus `policy_draft.go` (1,204 lines), `policy_mutation.go`,
 `policy_learning_*`, `policy_refs.go`, `policy_ref_validation.go`. Total
 `policy*.go` production ≈ 6.3k lines; 29 root production files reference
 `policyStore`; 194 root test files mention `PolicyStore`/`PolicyRule`, 59 are

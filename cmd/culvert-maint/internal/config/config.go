@@ -78,6 +78,11 @@ type Config struct {
 	// Default per-stage timeout. Default 5m.
 	StageTimeout time.Duration
 
+	// InterruptedSettle is how long after the agent process started a
+	// tag+recreate waits before it acts. Default 75s; 0 turns the wait off.
+	// See parseInterruptedSettle.
+	InterruptedSettle time.Duration
+
 	// Retention for operations/<op_id>.log and audit.jsonl. Default 30.
 	LogRetentionDays int
 
@@ -163,6 +168,7 @@ type rawConfig struct {
 	ReadyPath           string   `toml:"ready_path"`
 	OperationTimeout    string   `toml:"operation_timeout"`
 	StageTimeout        string   `toml:"stage_timeout"`
+	InterruptedSettle   string   `toml:"interrupted_settle"`
 	LogRetentionDays    *int     `toml:"log_retention_days"`
 	AllowedBackupDir    string   `toml:"allowed_backup_dir"`
 	ImageAllowlist      string   `toml:"image_allowlist"`
@@ -181,10 +187,13 @@ const (
 	defaultReadyPath        = "/ready"
 	defaultOperationTimeout = "30m"
 	defaultStageTimeout     = "5m"
-	defaultLogRetention     = 30
-	defaultAllowedBackupDir = "/backup"
-	defaultImageAllowlist   = `^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$`
-	defaultProxyRepo        = "ghcr.io/kidcarmi/culvert"
+	// 60s is the proxy's stop_grace_period in docker-compose.yml; the rest is
+	// Docker's own margin after it escalates to SIGKILL.
+	defaultInterruptedSettle = "75s"
+	defaultLogRetention      = 30
+	defaultAllowedBackupDir  = "/backup"
+	defaultImageAllowlist    = `^ghcr\.io/kidcarmi/culvert(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$`
+	defaultProxyRepo         = "ghcr.io/kidcarmi/culvert"
 )
 
 // proxyRepoShapeRE bounds a repository reference: it must look like a
@@ -400,6 +409,10 @@ func validate(raw *rawConfig) (*Config, error) {
 	}
 	cfg.StageTimeout = d2
 
+	if cfg.InterruptedSettle, err = parseInterruptedSettle(raw.InterruptedSettle, cfg.OperationTimeout); err != nil {
+		return nil, err
+	}
+
 	// log_retention_days — default 30. Must be > 0 if present.
 	lr := defaultLogRetention
 	if raw.LogRetentionDays != nil {
@@ -514,4 +527,36 @@ func validateHealthPath(name, supplied, def string) (string, error) {
 		}
 	}
 	return v, nil
+}
+
+// parseInterruptedSettle reads interrupted_settle.
+//
+// When the agent dies in the middle of an operation, systemd makes sure no
+// docker command of that agent is still running when the next one starts, but
+// dockerd carries on with the last request it received. For a container stop
+// that lasts as long as the proxy takes to exit: up to its stop_grace_period,
+// then SIGKILL. Until that is over, a container that looks fine can be on its
+// way out, and an operation that recreates nothing would pass its health gate
+// against it. The settle window is the bound on that request, counted from the
+// start of the agent process: it must be longer than the proxy's
+// stop_grace_period.
+//
+// It must also be shorter than operation_timeout: the wait happens inside the
+// operation that tags and recreates, and one that could never outlast it
+// would always fail.
+func parseInterruptedSettle(raw string, operationTimeout time.Duration) (time.Duration, error) {
+	if raw == "" {
+		raw = defaultInterruptedSettle
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: interrupted_settle is malformed: %w", err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("config: interrupted_settle must not be negative, got %s", d)
+	}
+	if d >= operationTimeout {
+		return 0, fmt.Errorf("config: interrupted_settle (%s) must be shorter than operation_timeout (%s): the wait runs inside the operation", d, operationTimeout)
+	}
+	return d, nil
 }

@@ -10666,6 +10666,24 @@ paths:
         otherwise the running store — through the same evaluator the proxy
         enforcement path uses. The response includes a `rulebase` field
         ("draft" | "running") identifying which set was simulated.
+
+
+        `host` is read as a client's request target: `host`, `host:port`, or an
+        IPv6 address (bracketed when it carries a port; a bare IPv6 address is
+        accepted and treated as bracketed). It is resolved with the same request
+        parser the proxy data path sits behind, so a percent-encoded
+        international name is decoded once and answered for the host the proxy
+        would enforce.
+
+
+        The endpoint answers `400` wherever the proxy itself would refuse the
+        request before any policy decision, instead of reporting "no rule
+        matched": a request target the parser refuses (a non-numeric port, a
+        malformed or forbidden percent-escape), a host with no valid canonical
+        form (the proxy's `INVALID_HOST`), a zoned IPv6 literal, and a host over
+        the length bounds. This is an intentional compatibility correction, not
+        a new restriction: these inputs could never produce the simulated
+        outcome on the data path.
       security:
         - sessionCookie: []
         - basicAuth: []

@@ -138,6 +138,30 @@ func isValidBlocklistWildcard(h string) bool {
 	return true
 }
 
+// validateStoredPolicyRule is validatePolicyRule for a rule that ALREADY EXISTS
+// in a persisted or published rulebase — a config-version snapshot being rolled
+// back, or the running rule a draft candidate inherited. It applies every check
+// validatePolicyRule does except one: an action this build does not dispatch is
+// tolerated (POL-004).
+//
+// The ingress validator is exact on purpose: there is a caller to tell. Stored
+// data has no caller, and refusing it here DROPS the rule — a rollback that
+// silently removed a retained unknown-action rule let its traffic fall through
+// to a lower Allow or the default, the same fail-open Load and ReplaceAll were
+// just fixed for; and a draft commit that refused the inherited rule left the
+// administrator unable to commit anything until they deleted the restriction.
+//
+// Only an UNKNOWN action is tolerated. A known action is validated exactly as
+// at ingress, so this is never a way to store a sloppy spelling.
+func validateStoredPolicyRule(rule PolicyRule, rules []PolicyRule, selfPriority int) error {
+	if _, known := canonicalPolicyAction(rule.Action); known {
+		return validatePolicyRule(rule, rules, selfPriority)
+	}
+	probe := rule
+	probe.Action = ActionBlockPage // what a match on it does; lets every other check run
+	return validatePolicyRule(probe, rules, selfPriority)
+}
+
 // validatePolicyRule checks that a rule has a valid action, a non-empty name,
 // a safe redirect URL when required, a parseable timezone, and name uniqueness.
 // existingRules is the current rule set; editPriority is the priority of the rule
@@ -186,6 +210,9 @@ func validateRuleUniqueness(rule PolicyRule, existingRules []PolicyRule, editPri
 func validateRuleShape(rule PolicyRule) error {
 	if rule.Name == "" {
 		return fmt.Errorf("name is required")
+	}
+	if !knownRuleType(rule.RuleType) {
+		return fmt.Errorf("ruleType %q is not recognised (use %q or %q)", sanitizeLog(rule.RuleType), ruleTypeAccess, ruleTypeAuth)
 	}
 	// Schedule timezone is validated for both rule types.
 	if rule.Schedule != nil && rule.Schedule.Timezone != "" {

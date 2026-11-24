@@ -17,7 +17,12 @@ func TestDiagnoseConfig_ValidAndOverCap(t *testing.T) {
 	// A small, well-formed snapshot validates (role does not matter here).
 	ok := diagnoseConfigFrom(ConfigSnapshot{
 		PolicyVersion: 7, Epoch: 3,
-		PolicyRules:  make([]PolicyRule, 2),
+		// Two real rules: an EMPTY entry is not well-formed (POL-005 refuses a
+		// ruleset holding one, since it matches and allows everything).
+		PolicyRules: []PolicyRule{
+			{Priority: 1, Name: "block-a", DestFQDN: "a.example", Action: ActionBlockPage},
+			{Priority: 2, Name: "allow-b", DestFQDN: "b.example", Action: ActionAllow},
+		},
 		BlockedHosts: []string{"a.example", "b.example"},
 	}, false, now)
 	if !ok.OK || ok.Status != "ok" {

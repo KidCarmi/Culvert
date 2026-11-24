@@ -307,6 +307,10 @@ func main() {
 		fmt.Fprint(os.Stderr, "simulated failure")
 		os.Exit(1)
 	}
+	if ms := os.Getenv("SLEEP_PINNED_MS"); ms != "" && strings.Contains(joined, "culvert/proxy:pinned") {
+		n, _ := strconv.Atoi(ms)
+		time.Sleep(time.Duration(n) * time.Millisecond)
+	}
 	if ms := os.Getenv("SLEEP_MS"); ms != "" && strings.Contains(joined, "{{json .Image}}") {
 		if n, err := strconv.Atoi(ms); err == nil {
 			time.Sleep(time.Duration(n) * time.Millisecond)
@@ -352,7 +356,7 @@ func newCaptureProvider(t *testing.T, bin string, stage time.Duration) *Provider
 		// CULVERT_BACKUP_PASSPHRASE="" overlay (suppress); its name must be
 		// allowlisted or runWithEnv rejects the call.
 		EnvAllow: []string{
-			"PS_OUT", "CONTAINER_OUT", "IMAGE_OUT", "FAIL_CONTAINS", "SLEEP_MS",
+			"PS_OUT", "CONTAINER_OUT", "IMAGE_OUT", "FAIL_CONTAINS", "SLEEP_MS", "SLEEP_PINNED_MS",
 			runner.EnvCulvertBackupPassphrase,
 		},
 		DockerBinary: bin,
@@ -504,5 +508,36 @@ func TestNew_FailsClosedOnNilDeps(t *testing.T) {
 	}
 	if _, err := New(&config.Config{}, nil, nil); err == nil {
 		t.Error("expected error on nil ops manager")
+	}
+}
+
+// TestSnapshot_PinnedTagReadIsBounded: the fixed-tag read has its own short
+// budget. A daemon that does not answer it costs a status call that budget,
+// not a stage timeout, and the tag is then reported as unknown.
+func TestSnapshot_PinnedTagReadIsBounded(t *testing.T) {
+	prev := pinnedTagReadBudget
+	pinnedTagReadBudget = 200 * time.Millisecond
+	t.Cleanup(func() { pinnedTagReadBudget = prev })
+
+	bin := captureFakeBin(t)
+	t.Setenv("PS_OUT", testProxyPS)
+	t.Setenv("CONTAINER_OUT", `"`+testProxyImageID+`"`+"\n")
+	t.Setenv("IMAGE_OUT", `[{"Id":"`+testProxyImageID+`","RepoDigests":["`+testProxyRepoRef+`"]}]`)
+	t.Setenv("SLEEP_PINNED_MS", "8000")
+	p := newCaptureProvider(t, bin, time.Minute) // a long stage timeout: only the budget can end the read
+
+	began := time.Now()
+	st, err := p.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(began); took > 4*time.Second {
+		t.Fatalf("status took %v with a hung fixed-tag read; the budget is %v", took, pinnedTagReadBudget)
+	}
+	if st.RunningImage == nil {
+		t.Error("the running image was read before the tag and must still be reported")
+	}
+	if st.PinnedTag == nil || st.PinnedTag.Error == "" || st.PinnedTag.ImageID != "" || st.PinnedTag.MatchesRunning != nil {
+		t.Errorf("a timed-out tag read must be reported as unknown: %+v", st.PinnedTag)
 	}
 }

@@ -62,6 +62,13 @@ func ruleTypeOf(r *PolicyRule) string {
 // a fail-open trapdoor.
 const subjectPredicateCIDR = "cidr"
 
+// subjectPredicateOpIn is the one predicate operator the matcher implements:
+// the client is in one of the predicate's values. An absent op means the same.
+const subjectPredicateOpIn = "in"
+
+// subjectMatchSchemaVersion is the SubjectMatch schema this build implements.
+const subjectMatchSchemaVersion = 1
+
 // SubjectMatch is the versioned, typed subject selector that replaces flat
 // scalar source fields. Predicate types are AND'd; values within a type are
 // OR'd. New predicate types are additive (bump SchemaVersion); no breaking
@@ -143,14 +150,24 @@ func validateSubjectMatch(sm *SubjectMatch) error {
 	if sm == nil {
 		return nil
 	}
-	if sm.SchemaVersion < 1 {
-		return fmt.Errorf("subjectMatch.schemaVersion must be >= 1")
+	// Exactly the schema this build implements. A newer version means the
+	// selector may carry meaning this build would not apply; enforcing it with
+	// today's semantics is the silent-misreading this validator exists to stop.
+	if sm.SchemaVersion != subjectMatchSchemaVersion {
+		return fmt.Errorf("subjectMatch.schemaVersion must be %d (got %d)", subjectMatchSchemaVersion, sm.SchemaVersion)
 	}
 	if len(sm.All) == 0 {
 		return fmt.Errorf("subjectMatch.all must contain at least one predicate")
 	}
 	for i := range sm.All {
 		p := sm.All[i]
+		// The matcher implements one operator, membership. Any other op used to
+		// be accepted and then IGNORED, so "not_in" was enforced as "in": a
+		// challenge meant for everyone except a network applied only to that
+		// network. Refuse what is not implemented, as for predicate types.
+		if p.Op != "" && p.Op != subjectPredicateOpIn {
+			return fmt.Errorf("subjectMatch predicate op %q is not supported (omit it, or use %q)", p.Op, subjectPredicateOpIn)
+		}
 		switch p.Type {
 		case subjectPredicateCIDR:
 			if len(p.Values) == 0 {
@@ -1169,30 +1186,12 @@ func policyRulePersistable(r *PolicyRule) (ok bool, reason string) {
 	if r.Auth != nil {
 		return false, "auth spec is only valid on auth rules"
 	}
-	// SEC-POLICYACTION-1: the Action must be one this build dispatches. Only
-	// the API ingress path validated it (validateAccessRule, ui_helpers.go), so
-	// the durable and bulk paths this gate exists to protect — PolicyStore.Load
-	// (the operator-managed policy_file), PolicyStore.ReplaceAll (the CP→DP
-	// snapshot apply and replace-mode config import) — installed an
-	// unrecognized action verbatim. Such a rule matched and, pre-fix, ALLOWED
-	// the request while shadowing every lower-priority deny rule under
-	// first-match-wins. Dropping it here is the same fail-closed warn-and-skip
-	// this function already applies to a source-scoped access rule, and is the
-	// exact case the doc above describes as "a hand-edited or newer-version
-	// policy.json".
-	//
-	// An EMPTY action is NOT refused here: canonicalPolicyAction resolves it to
-	// Allow, which is what the pre-fix fall-through did, so action-less rules in
-	// an existing policy file or snapshot keep their behaviour rather than being
-	// dropped. Requiring an explicit action on load is a separate migration —
-	// see canonicalPolicyAction, and R8 in the 2026-10-17 security review.
-	// (This paragraph claimed the opposite in the first draft of this change;
-	// CodeRabbit caught the contradiction on PR #1651. A stale comment on a
-	// security gate is worth fixing: it invites a maintainer to "correct" the
-	// code toward dropping those rules.)
-	if _, known := canonicalPolicyAction(r.Action); !known {
-		return false, fmt.Sprintf("action %q is not one this build dispatches (Allow, Drop, Block_Page, Redirect)", r.Action)
-	}
+	// POL-004: A newer or unrecognized access action must survive durable load and
+	// bulk snapshot publication. The canonical dispatcher already blocks it
+	// terminally when the rule matches. Dropping it here would remove a policy
+	// restriction and let traffic fall through to default allow or a lower-priority
+	// Allow rule. Ingress/API writes still reject unsupported actions explicitly.
+	// Preserve the opaque value for future-version round trips and log it at load.
 	return true, ""
 }
 
