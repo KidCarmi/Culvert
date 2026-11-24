@@ -295,8 +295,18 @@ echo "$*" >> "$C/calls.log"
 DOCKER_HOST='__HOST__'; export DOCKER_HOST
 SSL_CERT_FILE='__CA__'; export SSL_CERT_FILE
 if [ "$1" = compose ]; then k="$4"; else k="$1"; fi
+# The agent runs docker concurrently (a /v1/status read during a reconcile), so
+# the per-agent counters are read and replaced under one lock. Unlocked, two
+# calls could interleave their writes and leave e.g. "1\n7" in a counter: sh
+# then exits 2 ("Illegal number") on that call and on every later call, which
+# the agent sees as Docker failing. flock is released by the kernel if a shim
+# is killed holding it; a counter that is still not a number fails loudly.
 blk() {
-  n=$(cat "$C/count.$1" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$C/count.$1"
+  exec 9>>"$C/shim.lock"; flock 9
+  n=$(cat "$C/count.$1" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) echo "e2e shim: corrupt counter count.$1: $n" >&2; exit 97 ;; esac
+  n=$((n+1)); echo "$n" > "$C/count.$1.tmp"; mv "$C/count.$1.tmp" "$C/count.$1"
+  flock -u 9; exec 9>&-
   if [ -f "$C/block_on" ] && [ "$(cat "$C/block_on")" = "$1:$n" ]; then
     echo $$ > "$C/blocked.tmp"; mv "$C/blocked.tmp" "$C/blocked"
     i=0
