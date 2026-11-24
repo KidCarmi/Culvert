@@ -282,3 +282,13 @@ point succeeds. Matching container and tag identities alone are not
 convergence. If the wait cannot be completed or the probe fails, the record is
 kept and the outcome is `recovery_required` (`settle_wait_cut_short`,
 `settle_not_established`, `not_ready_at_retirement`).
+
+The wait applies only when Docker answered the reconcile's readability test.
+When Docker is down there is nothing to observe and so nothing to wait for:
+an image record is deferred (`defer` / `docker_unavailable`) at once, with no
+Docker read, no change, no attempt counted and the record kept, and is decided
+again at the next start, which waits out its own window. Waiting first spent
+the reconcile's deadline and reported a Docker that was merely down as
+`recovery_required` (`settle_wait_cut_short`); found by the real-Docker E2E.
+A deadline that is already over before a record is reached is still
+`deadline_elapsed`, never a deferral.
