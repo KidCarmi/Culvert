@@ -1750,7 +1750,7 @@ func activateControlPlane(grpcAddr, certFile, keyFile, caFile, clusterDBPath str
 	// Initial publish. A commit-time rejection (startup config already over a
 	// cluster-sync cap) is logged + alerted + surfaced via LastPublishError;
 	// the CP still serves locally, so boot continues.
-	_ = globalConfigStore.Update(CurrentConfigSnapshot())
+	_ = publishCurrentConfigSnapshot()
 	initClusterCA(clusterDBPath)
 
 	cfg := cpListenerConfig{addr: grpcAddr, certFile: certFile, keyFile: keyFile, caFile: caFile}

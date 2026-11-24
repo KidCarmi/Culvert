@@ -49,8 +49,10 @@ import (
 // mutations skip both — a candidate enforces nothing; the config version is
 // captured and the rulebase published once, at commit.
 //
-// Every caller is on its handler's success path: a refused edit or a failed
-// persist returned before reaching here, so neither is ever published.
+// A refused edit or a failed persist returned before reaching here, so
+// neither is ever published; a request that reaches here without having
+// changed the rulebase (a bulk delete that matched nothing) is not published
+// either — publishRunningPolicyChange compares against the committed snapshot.
 func finalizeFencedPolicyWrite(r *http.Request, action string, res fencedMutateResult) {
 	if !res.staged {
 		saveConfigVersion(sessionAdmin(r), action)

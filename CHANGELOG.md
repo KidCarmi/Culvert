@@ -77,9 +77,16 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   same gap being closed there ("without this, an exclusions change (including
   a wipe) waits for an UNRELATED mutation to bump the snapshot version",
   `pac.go`). Each of those operations now publishes once, after the change is
-  durably committed. A refused or failed edit publishes nothing, nor does an
-  edit staged in a draft (its commit does), nor an edit on a standalone or
-  data-plane node. If the publish is rejected because the configuration is
+  durably committed. A refused or failed edit publishes nothing, nor does a
+  request that leaves the rulebase as it was (a bulk delete matching nothing,
+  a reload of an unchanged policy file), an edit staged in a draft (its commit
+  publishes), or an edit on a standalone or data-plane node. A control plane
+  whose cluster listener has not bound yet does publish, so an edit made in
+  that window is in the configuration it serves once bound. Every publisher —
+  policy, settings, PAC, identity providers, import, rollback, CA rotation —
+  now captures the configuration inside the commit, so two overlapping
+  publishes can no longer leave the fleet on the older of the two at the
+  higher version. If the publish is rejected because the configuration is
   over a cluster-sync cap, the local edit stands and the rejection is logged,
   alerted and shown in Diagnostics as for every other publisher; draft commit
   and the three rename responses also carry `cluster_publish_rejected`.

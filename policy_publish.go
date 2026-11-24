@@ -32,11 +32,25 @@ package main
 // stays on the last valid snapshot. Handlers whose response is a JSON object
 // also report it inline as the established cluster_publish_rejected fact.
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // publishRunningPolicyChange publishes the current configuration after door
-// committed a change to the running policy rulebase. A no-op off a control
-// plane. Returns the commit-time rejection, already logged and latched.
+// committed a change to the running policy rulebase. Returns the commit-time
+// rejection, already logged and latched. It publishes nothing when:
+//
+//   - this node is not a control plane (policyPublishesFromThisNode), or
+//   - the running rulebase is already what the committed snapshot carries: a
+//     bulk delete that matched nothing, a PUT identical to the stored rule, a
+//     reload of an unchanged policy file. A publish there would move every
+//     data plane to a new version for no change.
+//
+// The capture happens inside the commit (ConfigStore.UpdateFrom), so a
+// concurrent edit's publish can never be overwritten by this one's older view.
 func publishRunningPolicyChange(door string) error {
-	if !isControlPlaneRole() {
+	if !policyPublishesFromThisNode() || runningPolicyIsCommitted() {
 		return nil
 	}
 	err := publishCurrentConfigSnapshot()
@@ -45,6 +59,46 @@ func publishRunningPolicyChange(door string) error {
 			sanitizeLog(door), sanitizeLog(err.Error()))
 	}
 	return err
+}
+
+// policyPublishesFromThisNode reports whether this node distributes policy: it
+// holds the control-plane role, OR it is activating as one — the config store's
+// CP address list is owned (setCPAddressSource, at activation) while the
+// listener bind is still pending and the role therefore not yet claimed
+// (cp_grpc_activation.go). An edit in that window must land in the committed
+// snapshot the activation goes on to serve; the activation itself publishes
+// only the address list, merged onto whatever is committed.
+//
+// A standalone gateway and a pure data plane never activate, and an HA standby
+// activates only at promotion, so none of them owns the list.
+func policyPublishesFromThisNode() bool {
+	return isControlPlaneRole() || globalConfigStore.currentCPAddrOwner().owned()
+}
+
+// runningPolicyIsCommitted reports whether the committed snapshot already
+// carries exactly the running rulebase (rule content and order; runtime hit
+// counters ignored). False when nothing has been published yet.
+func runningPolicyIsCommitted() bool {
+	committed := globalConfigStore.Get()
+	if committed.PolicyRules == nil {
+		return len(policyStore.List()) == 0 && committed.Version != 0
+	}
+	return policyRulesFingerprint(policyStore.List()) == policyRulesFingerprint(committed.PolicyRules)
+}
+
+// policyRulesFingerprint is the content identity of an ordered rule list for
+// runningPolicyIsCommitted. An unmarshalable list never equals another.
+func policyRulesFingerprint(rules []PolicyRule) string {
+	norm := make([]PolicyRule, len(rules))
+	for i := range rules {
+		norm[i] = rules[i]
+		norm[i].HitCount, norm[i].LastHit = 0, ""
+	}
+	b, err := json.Marshal(norm)
+	if err != nil {
+		return fmt.Sprintf("unmarshalable:%p", &norm)
+	}
+	return string(b)
 }
 
 // runningPolicyGeneration is the running store's generation, for

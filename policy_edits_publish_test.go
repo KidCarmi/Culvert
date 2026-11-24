@@ -4,7 +4,8 @@ package main
 // rulebase on a control plane is published at commit (policy_publish.go).
 //
 // Every test drives the REAL admin handler and reads what a data plane would
-// be served through the REAL GetConfig RPC handler. With the publish removed
+// be served (ppServedRules: the GetConfig RPC handler's unenrolled path AND the
+// marshal cache its enrolled path serves from). With the publish removed
 // from the shared helper every "publishes" test below fails: the committed
 // version stays put and the served rules stay the old ones.
 
@@ -17,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -56,18 +58,36 @@ func ppControlPlane(t *testing.T) {
 	}
 }
 
-// ppServedRules is the rule names a full GetConfig poll is answered with.
+// ppServedRules is the rules a full poll is answered with, read both ways a
+// data plane can get them: the GetConfig RPC handler called without a peer
+// (the unenrolled path, which marshals the committed snapshot per call) and
+// the shared marshal cache an ENROLLED poller is served from
+// (gcMarshalCache.serve — GetConfig's enrolled branch is exactly that call).
+// The two must agree: a cache still holding the previous version's bytes
+// would be the same stale-fleet bug by another route.
 func ppServedRules(t *testing.T) string {
 	t.Helper()
 	raw, err := (&controlPlaneServer{}).GetConfig(context.Background(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("GetConfig: %v", err)
 	}
-	var snap ConfigSnapshot
+	cached, err := gcMarshalCache.serve(globalClusterCA.CACertFingerprint())
+	if err != nil {
+		t.Fatalf("enrolled marshal cache: %v", err)
+	}
+	var snap, enrolled ConfigSnapshot
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		t.Fatalf("decode served snapshot: %v", err)
 	}
-	return ppRuleSummary(snap.PolicyRules)
+	if err := json.Unmarshal(cached, &enrolled); err != nil {
+		t.Fatalf("decode cached snapshot: %v", err)
+	}
+	got := ppRuleSummary(snap.PolicyRules)
+	if viaCache := ppRuleSummary(enrolled.PolicyRules); viaCache != got || enrolled.Version != snap.Version {
+		t.Errorf("an enrolled poller is served v%d [%s] from the marshal cache, an unenrolled one v%d [%s]",
+			enrolled.Version, viaCache, snap.Version, got)
+	}
+	return got
 }
 
 // ppRuleSummary renders the fields the doors under test change.
@@ -502,5 +522,151 @@ func TestPolicyEditsPublish_PolicyFileReload(t *testing.T) {
 	})
 	if !strings.Contains(ppRunning(), "pp-reloaded") {
 		t.Fatalf("control: the reload did not install the file's rules: %s", ppRunning())
+	}
+	ppWantNotPublished(t, "reload of the SAME, unchanged policy file", func() *httptest.ResponseRecorder {
+		fc := &FileConfig{}
+		fc.Proxy.PolicyFile = good
+		applyHotReload(fc)
+		return httptest.NewRecorder()
+	})
+}
+
+// ── concurrent publishers ───────────────────────────────────────────────────
+
+// ppDuringNextCommit runs fn once, inside the next full publish's window
+// between its validation and its commit — the deterministic form of "another
+// publisher committed while this one was in flight".
+func ppDuringNextCommit(t *testing.T, fn func()) {
+	t.Helper()
+	fired := false
+	prev := configPublishBeforeCommit
+	configPublishBeforeCommit = func() {
+		if fired {
+			return
+		}
+		fired = true
+		fn()
+	}
+	t.Cleanup(func() { configPublishBeforeCommit = prev })
+}
+
+// TestPolicyEditsPublish_ConcurrentEditCannotBeOverwrittenByAnOlderCapture:
+// request A creates pp-a and is about to commit its publish when request B
+// creates pp-b and publishes. A's commit loses the race and retries. It must
+// publish the rulebase as it is NOW ([pp-a pp-b]) — not the one it captured
+// before B ran, which would put the fleet on [pp-a] at the highest version.
+func TestPolicyEditsPublish_ConcurrentEditCannotBeOverwrittenByAnOlderCapture(t *testing.T) {
+	ppControlPlane(t)
+	ppDuringNextCommit(t, func() {
+		if w := ppDo(apiPolicyCreate, "POST", "/api/policy", ppRule("pp-b")); w.Code >= 300 {
+			t.Errorf("second admin's create: %d %s", w.Code, w.Body.String())
+		}
+	})
+	v0 := globalConfigStore.Version()
+	if w := ppDo(apiPolicyCreate, "POST", "/api/policy", ppRule("pp-a")); w.Code >= 300 {
+		t.Fatalf("first admin's create: %d %s", w.Code, w.Body.String())
+	}
+	running, served := ppRunning(), ppServedRules(t)
+	if !strings.Contains(running, "pp-a") || !strings.Contains(running, "pp-b") {
+		t.Fatalf("control: both edits must be in the running rulebase, got [%s]", running)
+	}
+	if served != running {
+		t.Errorf("after two overlapping edits (version +%d) data planes are served\n   [%s]\nbut the control plane runs\n   [%s]",
+			globalConfigStore.Version()-v0, served, running)
+	}
+}
+
+// TestPolicyEditsPublish_AnotherPublisherCannotOverwriteAPolicyEdit: the same
+// window with a NON-policy publisher in flight (what the settings, PAC, IdP,
+// import and rollback handlers call). A policy edit that commits inside it
+// must survive the other publisher's commit.
+func TestPolicyEditsPublish_AnotherPublisherCannotOverwriteAPolicyEdit(t *testing.T) {
+	ppControlPlane(t)
+	ppDuringNextCommit(t, func() {
+		if w := ppDo(apiPolicyCreate, "POST", "/api/policy", ppRule("pp-during")); w.Code >= 300 {
+			t.Errorf("create during another publish: %d %s", w.Code, w.Body.String())
+		}
+	})
+	if err := publishCurrentConfigSnapshot(); err != nil {
+		t.Fatalf("the other publisher: %v", err)
+	}
+	if running, served := ppRunning(), ppServedRules(t); served != running || !strings.Contains(served, "pp-during") {
+		t.Errorf("a publisher that started before the policy edit left the fleet on [%s]; the control plane runs [%s]", served, running)
+	}
+}
+
+// TestPolicyEditsPublish_ParallelCreatesConverge: many admins at once, through
+// the real handlers. Whatever the interleaving, when they have all returned
+// the fleet is served exactly the running rulebase. Run under -race.
+func TestPolicyEditsPublish_ParallelCreatesConverge(t *testing.T) {
+	ppControlPlane(t)
+	const n = 24
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			codes[i] = ppDo(apiPolicyCreate, "POST", "/api/policy", ppRule(fmt.Sprintf("pp-par-%02d", i))).Code
+		}(i)
+	}
+	wg.Wait()
+	for i, c := range codes {
+		if c >= 300 {
+			t.Fatalf("create %d answered %d", i, c)
+		}
+	}
+	if got := policyStore.ConfiguredRuleCount(); got != n {
+		t.Fatalf("control: running rulebase holds %d rules, want %d", got, n)
+	}
+	if msg, _ := globalConfigStore.LastPublishError(); msg != "" {
+		t.Fatalf("a publish was rejected under contention: %s", msg)
+	}
+	if running, served := ppRunning(), ppServedRules(t); served != running {
+		t.Errorf("after %d parallel creates data planes are served\n   [%s]\nbut the control plane runs\n   [%s]", n, served, running)
+	}
+}
+
+// ── nothing changed, nothing published ──────────────────────────────────────
+
+// TestPolicyEditsPublish_NoChangeDoesNotPublish: a request that succeeds
+// without changing the running rulebase must not move the fleet to a new
+// version: a bulk delete that matches nothing. (A PUT that repeats the stored
+// rule is NOT such a request: every write re-stamps the rule's modifiedAt /
+// modifiedBy, which data planes carry, so it is published like any update.
+// An unchanged policy-file reload is covered in …_PolicyFileReload.)
+func TestPolicyEditsPublish_NoChangeDoesNotPublish(t *testing.T) {
+	ppControlPlane(t)
+	ppCreate(t, "pp-a")
+
+	w := ppWantNotPublished(t, "bulk delete matching nothing", func() *httptest.ResponseRecorder {
+		return ppDo(apiPolicyDelete, "DELETE", "/api/policy", map[string]any{"priorities": []int{9999}})
+	})
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"deleted":0`) {
+		t.Fatalf("control: bulk delete of nothing answered %d %s", w.Code, w.Body.String())
+	}
+}
+
+// ── activating control plane: listener bind still pending ───────────────────
+
+// TestPolicyEditsPublish_BindPendingControlPlanePublishes: at boot the first
+// publish happens before the gRPC listener binds, and the control-plane role
+// is claimed only on an observed bind. An edit in between must still reach
+// the committed snapshot — the activation that follows publishes only the
+// address list, merged onto whatever is committed. Once the node stops being
+// a control plane (the address list is released) it publishes nothing.
+func TestPolicyEditsPublish_BindPendingControlPlanePublishes(t *testing.T) {
+	ppControlPlane(t)
+	ppSetRole(t, "standalone")                                           // the role is not claimed yet …
+	globalConfigStore.setCPAddressSource(func() []string { return nil }) // … but the activation has begun
+	ppWantPublished(t, "create while the bind is pending", func() *httptest.ResponseRecorder {
+		return ppDo(apiPolicyCreate, "POST", "/api/policy", ppRule("pp-pending"))
+	})
+	globalConfigStore.releaseCPAddressSource()
+	w := ppWantNotPublished(t, "create after the activation was abandoned", func() *httptest.ResponseRecorder {
+		return ppDo(apiPolicyCreate, "POST", "/api/policy", ppRule("pp-standalone"))
+	})
+	if w.Code >= 300 {
+		t.Fatalf("control: the local edit failed: %d %s", w.Code, w.Body.String())
 	}
 }
