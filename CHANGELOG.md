@@ -99,8 +99,10 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   within the last 10 minutes. **Operator-visible effect:** a legacy pair whose
   standby has not synced (never, not within 10 minutes, or not since the
   standby's last restart — the record is kept in memory only) does **not** fail
-  over by itself. The standby stays read-only and keeps retrying, data planes
-  keep enforcing the configuration they last applied, the log says `HA:
+  over by itself. The standby stays read-only and keeps retrying. It serves no
+  configuration (a standby that was never promoted runs no Control Plane
+  listener, so data-plane polls to it fail to connect), and data planes keep
+  enforcing the configuration they last applied; the log says `HA:
   auto-promotion refused — …`, the `ha_manual_failover_required` alert fires
   once, and `GET /api/cluster/ha` and the HA panel show `auto_promote_blocked`
   with the reason (shown as soon as the standby is not failover-ready, before
@@ -108,8 +110,15 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   standby manually if the leader is gone and you accept serving the standby's
   state. Manual promotion is unchanged and still never refused; when the
   standby is unsynchronized its response now carries a `warning`, and the log
-  and the `cluster.ha-promote` audit entry record it. Lease-mode failover
-  decisions are unchanged. (ADR-0005 addendum 2026-11-24; contract `CLU-004`.)
+  and the `cluster.ha-promote` audit entry record it. **Remaining limits:** the record of a
+  successful sync is not persisted, so a standby restart makes it ineligible
+  until its next sync; staleness is measured when the three-round threshold is
+  reached, and with very large configurations (sync deadline up to 300 seconds
+  per round) a leader that accepts connections but never answers can keep a
+  synced standby waiting past the 10-minute window, after which promotion is
+  manual; and a promoted standby still serves whatever it last applied — up to
+  10 minutes behind the old leader. (ADR-0005 addendum 2026-11-24; contract
+  `CLU-004`.)
 
 - **A policy edit on a control plane now reaches data planes when it is
   committed.** Creating, updating, deleting, disabling, reordering or moving a

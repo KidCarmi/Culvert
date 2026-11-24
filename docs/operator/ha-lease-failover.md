@@ -150,9 +150,25 @@ The TTL is the **failover-latency ↔ tolerance trade**:
   unreachable while `auto_promote_blocked` is set, the standby does not
   promote. It stays read-only, keeps retrying the sync, logs `HA:
   auto-promotion refused — …` each round and fires
-  `ha_manual_failover_required` once. Data planes keep enforcing the
+  `ha_manual_failover_required` once. The standby serves no configuration (a
+  standby that was never promoted runs no Control Plane listener, so
+  data-plane polls to it fail to connect) and data planes keep enforcing the
   configuration they last applied. Restore the leader, or promote the standby
   manually (below) if the leader is permanently gone.
+
+  **Limits of the synchronization check (both modes):**
+  - The record of a successful sync is held in memory. A standby restart, or
+    a demotion back to standby, clears it.
+  - It bounds staleness, it does not remove it: a promoted standby serves
+    what it last applied, which can be up to 10 minutes behind the old leader.
+  - Staleness is measured when the threshold is reached. With very large
+    configurations the sync deadline grows to as much as 300 seconds per
+    round, so a leader that accepts connections but never answers can take up
+    to 15 minutes to be declared unreachable; a standby that was synced when
+    the outage began is then past the window and waits for a manual promotion.
+  - In legacy mode a leader that answers with an RPC error is counted as
+    unreachable, and nothing fences the old leader: `--ha-auto-failover`
+    without a lease can still produce two leaders on a network partition.
 
   The HA panel mirrors this as a "Sync to Leader" stat card (green at 0,
   amber below the threshold, red at/above it) — the early warning before a

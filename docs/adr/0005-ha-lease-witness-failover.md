@@ -134,8 +134,10 @@ honoured only in a round that applied), and manual promotion's bypass of the gat
 It logs the refusal each round on the lease path's line, fires `ha_manual_failover_required` once per
 outage (the operator action is the same: decide whether to promote), and `GET /api/cluster/ha` /
 `/api/cluster/status` carry `auto_promote_blocked` with the reason — evaluated live, so a standby that is
-not failover-ready says so *before* the leader is lost (both modes). Data planes polling the standby are
-refused as before and keep their last applied configuration.
+not failover-ready says so *before* the leader is lost (both modes). Data planes get no configuration from
+it — a standby that was never promoted runs no Control Plane listener, so their polls fail to connect
+(a demoted ex-leader's listener stays up and answers `Unavailable`) — and keep their last applied
+configuration.
 
 **Manual promotion** stays the break-glass and is never refused on these grounds. It was silent about
 what it promoted on (the S4 comment claimed it "logs the staleness"; it did not). It now logs the
@@ -162,6 +164,12 @@ decision, for the same reason, as the CHAOS-25 contained-panic round, and the sa
 fence is the one a standby must replace, and `Acquire` arbitrates. Limit: only a returned reply counts
 as an answer; a leader that answers with a gRPC status (for example a rejected token) is still counted
 as unreachable.
+
+**Known limit — very large bundles.** Staleness is measured when the threshold is reached, not when the
+outage began. The HASync deadline scales with the last bundle size up to 300 s, so against a leader
+that accepts connections and never answers, three rounds can take up to 15 minutes and a standby that
+was synced when the outage began can be past the 10-minute window at the threshold; it then waits for
+a manual promotion. Not changed here (it needs the outage start tracked, and moves the lease path too).
 
 **Follow-up 2, same day — sync evidence is per standby stint (a LEASE-PATH behaviour change, one case).**
 `StartAsStandbyWithUndo` reset the failure streak but not `lastSyncOK`. A node that synced at T0, was

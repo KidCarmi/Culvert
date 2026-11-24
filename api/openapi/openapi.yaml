@@ -1200,6 +1200,8 @@ components:
       properties:
         enabled: { type: boolean }
         role: { type: string }
+        auto_promote_blocked: { type: string, description: 'Standby only. Empty when an automatic promotion would not be refused on synchronization grounds; otherwise the reason (no successful state sync yet in this standby stint, or the last one is older than the 10 minute freshness window). Evaluated on every read. Always empty when the node has no automatic failover path.' }
+        sync_refused: { type: integer, description: 'Standby only. Consecutive sync rounds in which the leader answered but this standby did not apply its state bundle; 0 after a successful sync. Replication is stalled while it is non-zero.' }
     SupportStatus:
       type: object
       description: Supportability status (debug level, bundle state, retention).
@@ -10286,7 +10288,12 @@ paths:
       operationId: promoteHA
       tags: [cluster]
       summary: Promote to leader
-      description: Promotes this node to HA leader (break-glass).
+      description: >-
+        Promotes this node to HA leader (break-glass). Never refused because
+        the standby is unsynchronized: when it never completed a state sync
+        from the leader, or its last successful sync is older than the 10
+        minute freshness window, the 200 response carries a `warning` string
+        naming that state, and the audit entry records it.
       security:
         - sessionCookie: []
         - basicAuth: []

@@ -4769,6 +4769,7 @@ Firefox (all platforms):
                  actively self-healing or permanently stuck until an operator acts -
                  those two states look identical unless called out explicitly. -->
             <p id="ha-lease-recovery-banner" style="display:none;font-size:.8rem;margin:0 0 16px 0;padding:8px 12px;border-radius:6px"></p>
+            <div class="banner warn" id="ha-promote-warning" role="alert" style="display:none;margin-bottom:16px;align-items:flex-start"></div>
             <p id="ha-sync-note" style="display:none;color:var(--muted);font-size:.7rem;margin:0 0 16px 0">
               This standby polls the leader every ~5s. The <strong>Sync to Leader</strong> tile shows the current consecutive-failure streak - it resets to 0 on every successful sync. At the configured threshold this standby stops waiting and either self-promotes (automatic failover / fencing lease) or, if automatic failover is off, stays read-only until an operator promotes it manually. Watching this tile climb is your early warning before that happens.
             </p>
@@ -5648,6 +5649,7 @@ document.addEventListener('click', e => {
     case 'toggleBlocklistMode': toggleBlocklistMode(); break;
     case 'addHost':           addHost(); break;
     case 'blDismissAddNotice': document.getElementById('bl-add-notice').style.display = 'none'; break;
+    case 'haDismissPromoteWarning': document.getElementById('ha-promote-warning').style.display = 'none'; break;
     case 'setBlSource':       setBlSource(arg); break;
     case 'bulkDeleteBL':      bulkDeleteBL(); break;
     case 'blLoadMore':        blLoadMore(); break;
@@ -19520,13 +19522,27 @@ async function promoteHA() {
     toast('This Control Plane is now the leader', 'success');
     // The server states what this standby was promoted on when it had not
     // synced the old leader's configuration (never, or not recently).
-    if (r.warning) toast('Promoted on unsynchronized state: ' + r.warning, 'error');
+    // It stays on screen until dismissed (a 3-second toast is too short for it).
+    haShowPromoteWarning(r.warning);
     loadCluster();
   } catch(e) {
     toast('Promote failed: ' + e.message, 'error');
   } finally {
     btn.disabled = false; btn.textContent = 'Promote this Control Plane to Leader';
   }
+}
+
+// haShowPromoteWarning - the promotion succeeded on a standby that had not
+// synced the old leader's configuration. Shown until dismissed; the same text
+// is in the audit entry. Server text is escaped (CWE-79).
+function haShowPromoteWarning(warning) {
+  const box = document.getElementById('ha-promote-warning');
+  if (!warning) { box.style.display = 'none'; box.innerHTML = ''; return; }
+  box.innerHTML = '<div style="flex:1;min-width:0"><strong>Promoted on unsynchronized state.</strong> '
+    + escHtml(String(warning))
+    + ' Review the policy, blocklist and default action on this node before data planes rely on it.</div>'
+    + '<button class="btn ghost sm" data-click="haDismissPromoteWarning">Dismiss</button>';
+  box.style.display = '';
 }
 
 async function loadHA(isCP) {
