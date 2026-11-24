@@ -218,8 +218,9 @@ func (s *Server) imageRollbackStages(targetRefFn func() string, acc *rollbackAcc
 // a recreate by an earlier agent process: an interrupted record is on file, or
 // this process found, at its start, a marker naming a compose command and has
 // not cleared it since. The marker covers an `up` that was cut with no record
-// left to say so. Once a command of this process clears the marker this is
-// false again, and `up` is followed by no extra read.
+// left to say so. Once a command of this process clears the marker, and no
+// interrupted record is on file, this is false again and `up` is followed by
+// no extra read.
 //
 // A compose command of THIS process that ended in an error is deliberately not
 // a trigger: the inline rollback that follows a failed `up` keeps exactly the

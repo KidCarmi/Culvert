@@ -277,9 +277,13 @@ func New(opts Options) (*Server, error) {
 	if maxRO <= 0 {
 		maxRO = DefaultMaxConcurrentReadOnlyOps
 	}
+	// A state directory that cannot be written must not stop the agent from
+	// coming up (same rule as the journal's interrupted marks in main). The
+	// log is usable either way: the start counts as hazardous and compose
+	// up/down are refused for as long as their marker cannot be written.
 	mutations, atOpen, err := journal.OpenMutationLog(opts.StateDir)
 	if err != nil {
-		return nil, fmt.Errorf("server: mutation marker: %w", err)
+		log.Printf("culvert-maint: WARN: the mutation marker could not be set up; treating this start as following an unfinished compose command, and compose up/down will be refused until the state directory is writable")
 	}
 	srv := &Server{
 		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),

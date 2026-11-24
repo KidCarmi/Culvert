@@ -104,6 +104,32 @@ func TestSettleEarly_OneQuietReadIsNotEnough(t *testing.T) {
 	}
 }
 
+// TestSettleEarly_QuietReadsMustBeConsecutive: no proxy, then a proxy, then no
+// proxy again is two quiet reads that are not consecutive. Something started a
+// container in between; the count starts over.
+func TestSettleEarly_QuietReadsMustBeConsecutive(t *testing.T) {
+	r := earlyRig(t)
+	r.srv.settlePoll = 150 * time.Millisecond
+	r.world.running = ""
+	r.world.onPS = func(n int) {
+		r.world.mu.Lock()
+		defer r.world.mu.Unlock()
+		switch n {
+		case 2:
+			r.world.running = cfgOld // the second read lists a proxy
+		case 3:
+			r.world.running = "" // the third lists none again
+		case 4:
+			r.world.running = cfgOld // and from the fourth on one is running
+		}
+	}
+	// Reads 1 (quiet), 2 (listed), 3 (quiet) happen within ~300ms; a count
+	// that was not reset would end the wait at read 3.
+	if _, returned := settleWithin(t, r, 700*time.Millisecond); returned {
+		t.Fatal("the wait ended on two quiet reads that were not consecutive")
+	}
+}
+
 // TestSettleEarly_NotAfterACutCommandOfThisProcess: when a compose command of
 // THIS process ended in an error, its CLI may still be alive behind sudo and
 // send further requests. "No container right now" proves nothing then; the

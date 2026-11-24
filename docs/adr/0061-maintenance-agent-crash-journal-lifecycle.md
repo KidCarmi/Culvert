@@ -334,7 +334,11 @@ After such a round trip, remove `<state_dir>/mutation` before starting the
 newer agent; it then treats the start as a first use and waits. A state
 directory that cannot be written now also stops `compose up` / `compose down`
 from being run at all (including a restore's best-effort `start_stack`), as it
-already stops an upgrade at its journal barrier.
+already stops an upgrade at its journal barrier. It does not stop the agent
+from starting: the agent comes up, treats the start as hazardous, and refuses
+those two commands until a marker can be written. A non-zero
+`interrupted_settle` is also the time after which a marker may be cleared, so
+a lab value far below the proxy's stop grace weakens both.
 
 The early end applies only to what a previous process left: its docker commands
 are dead before the next start (the unit's control-group kill), so only single

@@ -230,6 +230,33 @@ func TestMutation_NewWiresWhatTheMarkerSaid(t *testing.T) {
 	}
 }
 
+// TestMutation_AnUnwritableStateDirDoesNotStopTheServer: a full or read-only
+// state directory must not keep the agent from coming up. The server starts,
+// treats the start as hazardous, and refuses compose up/down until a marker
+// can be written.
+func TestMutation_AnUnwritableStateDirDoesNotStopTheServer(t *testing.T) {
+	r := newReconRig(t, true)
+	opts := r.srv.opts
+	opts.StateDir = t.TempDir()
+	// A file where the marker directory has to be: nothing can be created.
+	if err := os.WriteFile(filepath.Join(opts.StateDir, "mutation"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(opts)
+	if err != nil {
+		t.Fatalf("New failed on an unwritable marker directory: %v", err)
+	}
+	if !srv.startHazard || srv.startOnlyUp {
+		t.Errorf("startHazard=%v startOnlyUp=%v, want a hazardous start that cannot end early", srv.startHazard, srv.startOnlyUp)
+	}
+	if _, err := srv.composeUp(context.Background()); err == nil {
+		t.Error("`up` ran although no marker can be written")
+	}
+	if c := r.world.calls(); len(c) != 0 {
+		t.Errorf("docker was called without a marker: %v", c)
+	}
+}
+
 // TestMutation_NoMarkerNoCommand: record before effect. If the marker cannot
 // be written, the command is not run.
 func TestMutation_NoMarkerNoCommand(t *testing.T) {

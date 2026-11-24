@@ -208,8 +208,9 @@ For `indeterminate`:
   still be stopping a container for a `compose up` / `compose down` that an
   earlier agent process did not see finish. It applies when such a command was
   left unfinished (a marker under `<state_dir>/mutation`), when an interrupted
-  operation is on record, and on the first start after installing or upgrading
-  to an agent that tracks this. The same wait starts again, inside a running
+  operation is on record, and, after installing or upgrading to an agent that
+  tracks this, at every agent start until one upgrade, rollback or restore has
+  completed. The same wait starts again, inside a running
   agent, after a `compose up` / `compose down` of its own ended in an error,
   and the startup reconcile observes it too. The operation log says `settle:
   waited …`.

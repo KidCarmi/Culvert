@@ -179,3 +179,45 @@ func TestMutationLog_AHalfDoneFirstUseIsAFirstUseAgain(t *testing.T) {
 		t.Fatalf("first use over an up-only marker: open = %+v, want FirstUse, Pending, not OnlyUp", at)
 	}
 }
+
+// TestMutationLog_NoSentinelBeforeTheMarkerIsDurable: the sentinel says "past
+// first use". It must not exist unless the "unknown" marker was written first;
+// otherwise a first start that fails to write the marker would be taken for a
+// clean state directory at the next start. Open still returns a usable log,
+// with the doubt held in memory, and does not let the marker grow when the
+// failing first use is retried.
+func TestMutationLog_NoSentinelBeforeTheMarkerIsDurable(t *testing.T) {
+	dir := t.TempDir()
+	mdir := filepath.Join(dir, mutationDirName)
+	// Something that makes writing pending.json fail: a directory in its place.
+	if err := os.MkdirAll(filepath.Join(mdir, mutationFileName), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		m, at, err := OpenMutationLog(dir)
+		if err == nil {
+			t.Fatal("OpenMutationLog reported success although the marker could not be written")
+		}
+		if m == nil || !at.Pending || !m.Pending() {
+			t.Fatalf("after a failed first use: log=%v at=%+v, want a usable log with the doubt pending", m, at)
+		}
+		if _, serr := os.Stat(filepath.Join(mdir, mutationSentinelName)); serr == nil {
+			t.Fatal("the sentinel was written although the first-use marker was not")
+		}
+		if err := m.Begin(MutationComposeUp); err == nil {
+			t.Fatal("Begin succeeded although nothing can be written")
+		}
+	}
+
+	// A first use whose marker write works but which is retried (the sentinel
+	// keeps failing) does not append "unknown" again each time.
+	dir = t.TempDir()
+	m, _ := openMut(t, dir)
+	if err := os.Remove(filepath.Join(dir, mutationDirName, mutationSentinelName)); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := openMut(t, dir)
+	if got := len(m2.open); got != len(m.open) {
+		t.Errorf("a repeated first use grew the marker from %d to %d commands", len(m.open), got)
+	}
+}

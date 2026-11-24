@@ -32,8 +32,8 @@ import (
 //
 // Every failure errs towards "marker present": a marker that cannot be
 // written stops the command from being run; one that cannot be removed stays
-// and costs a wait at the next start; a marker directory that did not exist
-// yet (first start of an agent that writes markers, after one that did not)
+// and costs a wait at the next start; a state directory without the sentinel
+// (first start of an agent that writes markers, after one that did not)
 // gets an "unknown" marker written at once, so the worst is assumed until a
 // command clears it, however many starts that takes.
 type MutationLog struct {
@@ -63,9 +63,9 @@ type MutationMarker struct {
 type MutationAtOpen struct {
 	// Pending: a marker was there (or could not be ruled out).
 	Pending bool
-	// FirstUse: the marker directory did not exist. An earlier agent version
-	// wrote no markers, so their absence proves nothing; an "unknown" marker
-	// was written and Pending is set.
+	// FirstUse: the sentinel that says "markers have been kept here" was not
+	// there. An earlier agent version wrote no markers, so their absence
+	// proves nothing; an "unknown" marker was written and Pending is set.
 	FirstUse bool
 	// NamesCommand: a readable marker was there and names at least one compose
 	// command (not just the first-use "unknown").
@@ -84,7 +84,8 @@ const (
 )
 
 // OpenMutationLog creates <stateDir>/mutation if needed and reports whether a
-// marker was left there. Call it once, at agent start, before any command.
+// marker was left there. Call it once, at agent start, before any command. On
+// error it still returns a log, with Pending set: see the body.
 //
 // First use is recognised by the absence of a sentinel file that is written
 // only AFTER the "unknown" marker is durable. A first open that dies or fails
@@ -93,52 +94,74 @@ const (
 // doubt cannot be lost in between.
 func OpenMutationLog(stateDir string) (*MutationLog, MutationAtOpen, error) {
 	dir := filepath.Join(stateDir, mutationDirName)
-	var at MutationAtOpen
-	if err := os.MkdirAll(dir, dirMode); err != nil {
-		return nil, at, fmt.Errorf("journal: mkdir %s: %w", mutationDirName, err)
-	}
 	m := &MutationLog{dir: dir}
+	var at MutationAtOpen
+	// From here on every error is returned WITH a usable log and Pending set:
+	// the caller can keep running, treats the start as hazardous, and Begin
+	// will refuse to run a compose command for as long as nothing can be
+	// written.
+	if err := os.MkdirAll(dir, dirMode); err != nil {
+		at.Pending = true
+		m.open = []string{mutationUnknown}
+		return m, at, fmt.Errorf("journal: mkdir %s: %w", mutationDirName, err)
+	}
 	sentinel := filepath.Join(dir, mutationSentinelName)
 	if _, err := os.Stat(sentinel); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			return nil, at, fmt.Errorf("journal: stat %s: %w", mutationSentinelName, err)
+			at.Pending = true
+			m.open = []string{mutationUnknown}
+			return m, at, fmt.Errorf("journal: stat %s: %w", mutationSentinelName, err)
 		}
 		at.FirstUse = true
 	}
-	m.readMarker(&at)
+	onDisk := m.readMarker(&at)
 	if at.FirstUse {
-		// Make the doubt durable before anything says "past first use".
 		at.Pending, at.OnlyUp = true, false
-		if err := m.Begin(mutationUnknown); err != nil {
-			return nil, at, err
-		}
-		if err := fsyncDir(stateDir); err != nil {
-			return nil, at, err
-		}
-		if err := atomicWrite(sentinel, []byte("markers kept since first use\n"), fileMode); err != nil {
-			return nil, at, err
+		if err := m.recordFirstUse(stateDir, sentinel, onDisk); err != nil {
+			return m, at, err
 		}
 	}
 	return m, at, nil
 }
 
-// readMarker loads what is on disk into m.open and at.
-func (m *MutationLog) readMarker(at *MutationAtOpen) {
+// recordFirstUse makes the first-use doubt durable (an "unknown" marker) and
+// only then writes the sentinel that says "past first use". onDisk: a marker
+// was read and understood.
+func (m *MutationLog) recordFirstUse(stateDir, sentinel string, onDisk bool) error {
+	// Not appended again when a failing first use is retried at every restart:
+	// the marker would grow without bound.
+	if !onDisk || m.open[len(m.open)-1] != mutationUnknown {
+		if err := m.Begin(mutationUnknown); err != nil {
+			m.mu.Lock()
+			m.open = append(m.open, mutationUnknown) // in memory at least
+			m.mu.Unlock()
+			return err
+		}
+	}
+	if err := fsyncDir(stateDir); err != nil {
+		return err
+	}
+	return atomicWrite(sentinel, []byte("markers kept since first use\n"), fileMode)
+}
+
+// readMarker loads what is on disk into m.open and at. It reports whether a
+// marker was read and understood (a durable list of commands is on disk).
+func (m *MutationLog) readMarker(at *MutationAtOpen) bool {
 	data, err := os.ReadFile(m.path())
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return
+		return false
 	case err != nil:
 		// Unreadable is not "absent".
 		at.Pending = true
 		m.open = []string{mutationUnknown}
-		return
+		return false
 	}
 	at.Pending = true
 	var mk MutationMarker
 	if json.Unmarshal(data, &mk) != nil || len(mk.Commands) == 0 {
 		m.open = []string{mutationUnknown}
-		return
+		return false
 	}
 	m.open = mk.Commands
 	at.OnlyUp = true
@@ -150,6 +173,7 @@ func (m *MutationLog) readMarker(at *MutationAtOpen) {
 			at.NamesCommand = true
 		}
 	}
+	return true
 }
 
 func (m *MutationLog) path() string { return filepath.Join(m.dir, mutationFileName) }
