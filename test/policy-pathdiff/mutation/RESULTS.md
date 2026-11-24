@@ -108,3 +108,19 @@ match-site edits whose effect the current generator does not exercise.
 
 The run was interrupted twice (a background time limit and a container restart) and resumed; the
 script skips mutants whose result file exists, so no mutant was run against a different tree.
+
+## Follow-up on the uncaught mutants (2026-11-24)
+
+- **M13a and M13b are now killed by a direct test.**
+  `TestSourceLiteral_MappedClientIsTheSameAddress` (`policy_source_unmap_test.go`) pins that both
+  source matchers compare an IPv4-mapped client as the same address as its IPv4 form. Applying
+  either mutant makes it fail on exactly the mapped-client rows. M13b had been caught by nothing;
+  M13a only by baseline drift.
+- **M03 is an equivalent mutant on today's code, not a gap.** The Policy Tester canonicalises its
+  host in the handler before the rule walk, so the walk's own `normalizeHost` call is redundant
+  for every input the endpoint accepts. Probed with nine spellings (upper case, trailing dot,
+  percent-encoded IDN in both cases, wildcard-covered subdomain, IPv6 in a different spelling,
+  IPv4-mapped literal): identical answers with and without the mutant. It stays in the campaign:
+  if a later change stops canonicalising in the handler, M03 becomes killable and should be.
+
+With these, no mutant in the campaign is uncaught for a reason other than equivalence.
