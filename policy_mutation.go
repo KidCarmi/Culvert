@@ -44,12 +44,19 @@ import (
 )
 
 // finalizeFencedPolicyWrite records the per-edit config version for a LIVE
-// mutation (the persist itself already happened inside fencedMutate).
-// Draft-staged mutations skip it — the config version is captured once at
-// commit, exactly as before.
+// mutation (the persist itself already happened inside fencedMutate) and, on a
+// control plane, publishes it to the fleet (policy_publish.go). Draft-staged
+// mutations skip both — a candidate enforces nothing; the config version is
+// captured and the rulebase published once, at commit.
+//
+// A refused edit or a failed persist returned before reaching here, so
+// neither is ever published; a request that reaches here without having
+// changed the rulebase (a bulk delete that matched nothing) is not published
+// either — publishRunningPolicyChange compares against the committed snapshot.
 func finalizeFencedPolicyWrite(r *http.Request, action string, res fencedMutateResult) {
 	if !res.staged {
 		saveConfigVersion(sessionAdmin(r), action)
+		_ = publishRunningPolicyChange(action) // rejection is logged and latched (LastPublishError)
 	}
 }
 

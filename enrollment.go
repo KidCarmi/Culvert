@@ -1474,7 +1474,7 @@ func (ca *clusterCA) ImportCA(certPEM, keyPEM []byte) error {
 	// Bump config version so DP nodes pick up the new CA fingerprint on next poll.
 	// A commit-time rejection (config over a cap) is logged + alerted + surfaced
 	// via LastPublishError; CA rotation itself already succeeded above.
-	_ = globalConfigStore.Update(CurrentConfigSnapshot())
+	_ = publishCurrentConfigSnapshot()
 
 	statClusterCARotations.Add(1)
 	// CHAOS-50: the other half of the rotation-degraded pair. A rotation that

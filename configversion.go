@@ -385,7 +385,7 @@ func rollbackConfigVersion(w http.ResponseWriter, r *http.Request) {
 		// Still published on a persistence failure: the DP fleet must converge
 		// on the config this node is actually ENFORCING, and the DP snapshot is
 		// a separate durability path from the local store files.
-		_ = globalConfigStore.Update(CurrentConfigSnapshot())
+		_ = publishCurrentConfigSnapshot()
 	}
 
 	w.Header().Set("Content-Type", "application/json")
