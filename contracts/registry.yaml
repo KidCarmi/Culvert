@@ -887,6 +887,10 @@ contracts:
         - "returning an image reference from a journal record that failed the repo-bound digest check"
     tests:
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_EveryKillPoint}
+      - {file: "cmd/culvert-maint/command_intent_crash_test.go", name: TestCommandIntent_DiedInsideUp}
+      - {file: "cmd/culvert-maint/command_intent_crash_test.go", name: TestCommandIntent_KilledAfterTheCommandReturned}
+      - {file: "cmd/culvert-maint/internal/journal/intent_test.go", name: TestIntent_AttributionSequences}
+      - {file: "cmd/culvert-maint/internal/journal/intent_test.go", name: TestIntent_NoClockDecides}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_RepeatedRestartsAreIdempotent}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_DockerUnavailableAtStartup}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_ForgedRecordRefsAreNotRepeated}
