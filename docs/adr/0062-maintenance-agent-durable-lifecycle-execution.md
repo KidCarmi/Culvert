@@ -257,6 +257,22 @@ gaps and make the #2051 executor the single path every recovery takes.
   recheck between tag and up that it lacks today.
 - Inline and standalone rollback keep their forward stages but call the
   same step functions (`tagAndUp` already shares tag/up/settle).
+- Obligations of the attribution consumer (from the independent reviews
+  of #2103; slice 3 records and reports, slice 4 is the first to act):
+  1. The in-memory attribution is consumed once per process: the decision
+     that acts on it takes it; status only shows it.
+  2. "Died in `<command>`" means the intent was written, not that the
+     command started or reached Docker. It never authorises a step on its
+     own: the plan's steps act only when Docker's live state, read fresh
+     (container id, image ids, pinned tag), matches the record's target
+     and prior identities.
+  3. Restore-class records (`restore.commit`, data rollback) are decided
+     on kind and restore stage, not on the command alone: the stack is
+     down on purpose before their `up`.
+  4. Not fenced by slice 3: an agent too old to read the journal at all,
+     and a state directory restored from a backup taken while an intent
+     was open (its epoch still matches, the death is long past). Rule 2
+     above is what keeps the second from causing a wrong restore.
 
 **Slice 5 — runtime observation (non-mutating).**
 - One loop, started like the op-log retention loop but tracked by
