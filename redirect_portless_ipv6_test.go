@@ -18,6 +18,14 @@ func TestSafeRedirectURL_PortlessIPv6LiteralIsClassifiedAsItsAddress(t *testing.
 		{"http://[fe80::1]/", false},
 		{"http://[::ffff:10.0.0.1]/", false},
 		{"http://[::]/", false},
+		// A zone names a local interface: never a public destination, with or
+		// without a port (review finding: stripping the brackets must not turn
+		// a zoned literal into a lookup the guard then waves through).
+		{"http://[fe80::1%25eth0]/", false},
+		{"http://[::1%25lo]/", false},
+		{"http://[fd00::1%25lo]/", false},
+		{"http://[fe80::1%25eth0]:80/", false},
+		{"http://[2606:2800:220:1::1%25eth0]/", false},
 	} {
 		if got := isSafeRedirectURL(tc.raw); got != tc.safe {
 			t.Errorf("isSafeRedirectURL(%q) = %v, want %v", tc.raw, got, tc.safe)
@@ -36,6 +44,8 @@ func TestRedirectLiteral_IngressAndServeAgree(t *testing.T) {
 		"http://[fd00::1]:80/",
 		"http://127.0.0.1/",
 		"http://169.254.169.254/x",
+		"http://[fe80::1%25eth0]/",
+		"http://[::1%25lo]:80/",
 	} {
 		rule := PolicyRule{Name: "r", Action: ActionRedirect, RedirectURL: raw, DestFQDN: "x.example"}
 		ingressOK := validateRuleIngress(rule) == nil
