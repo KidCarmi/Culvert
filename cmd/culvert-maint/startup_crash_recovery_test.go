@@ -79,7 +79,15 @@ compose)
     fi ;;
   up)
     blk up_before
-    cp "$S/pinned" "$S/running.tmp" && mv "$S/running.tmp" "$S/running"
+    # up_cleanup_only: real Compose, after a recreate interrupted between its stop and
+    # its delete, spends one pass tidying up and exits 0 with nothing started. The file
+    # holds how many such passes are left. Inert unless a test writes it.
+    c=$(cat "$S/up_cleanup_only" 2>/dev/null || echo 0)
+    if [ "$c" -gt 0 ]; then
+      echo $((c-1)) > "$S/up_cleanup_only"; rm -f "$S/running"
+    else
+      cp "$S/pinned" "$S/running.tmp" && mv "$S/running.tmp" "$S/running"
+    fi
     blk up_after ;;
   esac ;;
 inspect)
