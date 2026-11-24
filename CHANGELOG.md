@@ -32,6 +32,32 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   little free space fails the operation at the new `preflight_restore` stage
   with the stack untouched. Operations gain that stage in `progress`. With a
   proxy image that predates the line the agent behaves as before.
+- **A restore interrupted by an agent restart is now reported instead of
+  vanishing.** If the maintenance agent died in the middle of
+  `restore.commit` — after `docker compose down`, during or after the restore
+  command — the restarted agent answered `404` for the operation, listed
+  nothing under `interrupted_operations`, left the audit log at `started`, and
+  the proxy stayed down with `compose_stack_up: false` as the only sign
+  (measured on real Docker). `restore.commit` is now recorded in the agent's
+  crash journal before it runs, and both it and `rollbacks` with `mode=data`
+  record each step before taking it. After a restart the operation is
+  `failed` / `agent_restart_interrupted`, has one audit entry, and is listed
+  in `GET /v1/status` with `restore_stage`, `stack_touched`, `data_changed`
+  (`no` / `yes` / `unknown`), `previous_state`, `restart_safe` and an
+  `operator_action` for that stage. `unknown` is reported whenever the commit
+  command was started and the agent cannot vouch for the result, including a
+  commit that returned an error. The agent still changes nothing by itself: it
+  does not start the stack, repeat or undo the restore, with or without
+  `reconcile_on_startup = "converge"`. The entry is cleared by a later restore
+  or data rollback that commits and passes its health check (or by a later
+  upgrade or image rollback, as before); a restore never clears an interrupted
+  upgrade's entry. If the journal cannot be written the restore now stops
+  before `compose down`, or before the commit command; and a commit that
+  succeeded but could not be recorded ends `failed` / `command_error` with
+  `result.restore_committed: true` rather than as a plain success. New in the
+  API, all additive: the fields above, `result.restore_committed` on
+  `restore.commit`, and the reconcile reason `restore_window_manual`. See
+  docs/operator/release-management-agent.md.
 
 ### Security
 

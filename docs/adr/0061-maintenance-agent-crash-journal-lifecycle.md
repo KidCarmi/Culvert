@@ -434,3 +434,125 @@ hand in the interval between the cut `compose up` and the first agent start
 after it. To that start the state is the same as the crash it exists to
 recover from, and it restores the prior image. Leaving `reconcile_on_startup`
 at its default avoids it.
+
+## Addendum (2026-11-24): an interrupted restore is reported too
+
+Everything above was written for the two operations that move the image tag.
+A third kind stops the proxy and was not journaled at all: `restore.commit`
+(`POST /v1/restores/commit`). Its stages are `preflight_restore` (read-only,
+stack up) → `stop_stack` (`compose down`) → `run_cli_restore_commit` →
+`start_stack` (`compose up -d`) → `health_check`. Measured on real Docker, four
+trials of four, and again after the in-place restore of the previous change:
+with the agent killed between those stages, the restarted agent answered `404`
+for the operation, listed nothing under `interrupted_operations`, the audit log
+ended at `started`, and the proxy stayed down. `compose_stack_up: false` was the
+only true signal. `rollbacks` with `mode=data` runs the same stages and was
+journaled, but only at `admitted`, so its report could not say how far it got.
+
+**Decision.** The same lifecycle, extended, and still report-only:
+
+- `restore.commit` is a journaled kind. Its admission record is written
+  fail-closed before it runs and removed at terminal, like an upgrade's.
+- Both restore-class kinds record progress in ONE new optional key,
+  `restore_stage`, beside `phase` (which stays `admitted`). It is written
+  ahead: `admitted`, `preflight`, `stopping`, `committing`, then `committed` or
+  `commit_failed`, then — only after a recorded commit — `starting`, `started`.
+  `stopping` and `committing` are fail-closed barriers: no durable record, no
+  `compose down`, no commit command. The rest are best-effort breadcrumbs whose
+  loss leaves an EARLIER stage, which claims less.
+- The report (`server.InterruptedOperation`) gains, for these records only:
+  `restore_stage`, `stack_touched`, `data_changed` (`no` / `yes` / `unknown`),
+  `previous_state` (`in_place` / `kept_in_backup_dir` /
+  `recoverable_at_next_proxy_start_or_manual` / `unknown`), and `restart_safe`,
+  a sentence. `operator_action` is worded per stage. The table is in
+  `internal/server/interrupted_restore.go` and in the operator guide.
+- `docker_state` stays `data_indeterminate` for every restore-class record,
+  `restore.commit` included. `docker_state` is the image axis; that class
+  already means "no image tag was involved, look at the data", which is as true
+  of a restore as of a data rollback. A sibling class would be a value existing
+  consumers do not know, and `unchanged` for an early stage would change what a
+  data-rollback record has always reported. The precise answer is in the new
+  fields.
+- Startup changes nothing for such a record, in either reconcile mode. With
+  `reconcile_on_startup = "converge"` the verdict is `recovery_required` with
+  the reason `restore_window_manual` (a data rollback keeps
+  `data_window_manual`), decided before Docker is read. No `compose up`.
+- Retirement gets a second, narrower rule (AGT-005, amended): a later
+  `restore.commit` or `rollbacks mode=data` that succeeds — its commit returned
+  success and its health check passed — retires the interrupted records of the
+  restore-class kinds ONLY, audit entry first, through the same
+  `<kind>:interrupted_superseded` mechanism. It never retires an upgrade or
+  image-rollback record: a restore re-pins nothing. The existing rule is
+  untouched, so a successful upgrade or image rollback still retires every
+  other record, a restore's included.
+
+**What the journal can and cannot vouch for.** The agent cannot read the data
+volume. `data_changed` is therefore `no` only before the commit command was
+started and `yes` only after it returned success. In between it is `unknown`,
+and that includes `commit_failed`: on the shipped topology the command puts the
+previous content back itself, but the agent sees the same error when the stage
+timeout killed the docker client (the restore's container keeps running and may
+still commit) and when putting the content back failed (the intent record is
+left for the next proxy start). The same reasoning covers the agent's own
+death: the commit runs in a container that outlives it. `restart_safe` for
+those stages says what the proxy does on the shipped topology — it undoes an
+unfinished in-place restore before reading the directory, or refuses to start —
+and that with an older proxy image or a data directory that is not a mount
+point the manual recovery of
+`docs/operator/docker-compose-backup-restore.md` § 8b applies. It does not claim
+to know which deployment it is on.
+
+**A commit that cannot be recorded.** If the commit command returns success and
+`committed` cannot be written, the data has changed and nothing can prevent it.
+The operation fails rather than report plain success, with
+`failure_reason: command_error`, a stage output that says the data directory
+was replaced, and `result.restore_committed: true`; the stack is still started
+and health-checked. `cli_error`, the stage's ordinary reason, was rejected for
+this case because it has always meant "the restore command refused or failed"
+and invites a retry over data that was replaced. `health_failed` was rejected
+because the proxy may be healthy. The orchestrator gained `ops.ReasonError` so
+that one stage can name the reason for one particular error.
+
+**Compatibility.**
+
+- Journal: one optional key, `restore_stage`, and one more value of `kind`.
+  No phase was added.
+  - This agent, older record: a data-rollback record without the key reads as
+    `restore_stage: unrecorded`, `data_changed: unknown`, with the operator
+    action it always had.
+  - Older agent, new record: it loads (an unknown key is ignored and `kind` was
+    never checked on read; the phase is still `admitted`, so it does NOT refuse
+    to serve). It reports a `restore.commit` record as an interrupted operation
+    of kind `unknown` with `docker_state: indeterminate` and the image-change
+    advice, which is wrong for a restore; it drops `restore_stage` when it
+    rewrites the record at its start; and any successful upgrade or image
+    rollback on it retires the record. A `rollbacks mode=data` record is
+    reported by it exactly as before. After a downgrade and re-upgrade the
+    record therefore comes back as `unrecorded`.
+  - A stage value this build does not know (from a newer agent) is not a
+    corrupt record: it reads as `unknown` and reports as `unrecorded`.
+- API: additive only. The fields above on restore-class entries;
+  `result.restore_committed` on `restore.commit`; `superseded_interrupted_ops`
+  may now appear on a successful restore or data rollback; the reconcile reason
+  `restore_window_manual`. Upgrade and image-rollback entries are byte-for-byte
+  what they were.
+- Behaviour: a `restore.commit` now fails at admission (`journal_write_failed`)
+  when the journal cannot be written, as upgrades do, and both restore kinds
+  stop before `compose down` or before the commit when their barrier cannot be
+  written. An interrupted `restore.commit` is now reported at every start until
+  retired; before, it was never reported.
+
+**Left to the owner: acting on an interrupted restore at startup.** Not
+implemented. The stack an interrupted restore stopped stays down until an
+operator acts. Whether `reconcile_on_startup = "converge"` may start it is a
+separate decision with its own evidence requirements (which stages, a health
+gate, the settle window, the fixed tag against the image that was running),
+recorded with the implementation change and not taken here.
+
+**Proof.** `startup_restore_crash_test.go` (real binary, SIGKILL at eight
+boundaries of `restore.commit` and three of a data rollback, two restarts each,
+retirement by a later restore, an interrupted upgrade that a restore must not
+retire, and a negative control); `internal/server/restore_journal_test.go`,
+`interrupted_restore_test.go`, `journal_retire_restore_test.go`,
+`startup_reconcile_restore_test.go`; `internal/journal/journal_restore_stage_test.go`;
+`internal/status/status_restore_test.go`.

@@ -197,7 +197,10 @@ func run(configPath string) error {
 // It runs no docker command and removes no record. Docker is not consulted, so
 // an unreachable daemon cannot delay or fail startup, and a record stays — and
 // is reported again by every later start and by GET /v1/status — until a later
-// image change succeeds (server/journal_retire.go). Acting on a record at boot
+// image change succeeds or, for an interrupted restore, a later restore does
+// (server/journal_retire.go). The same holds for every journaled kind: an
+// interrupted restore.commit or data rollback is reported here exactly like an
+// interrupted upgrade, and its stack is not started. Acting on a record at boot
 // is the separate, opt-in reconcile (reconcile_on_startup = "converge",
 // server/startup_reconcile.go), which runs only after this report is complete.
 func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo string) (*journal.Journal, error) {

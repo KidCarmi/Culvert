@@ -51,6 +51,34 @@ type FlowStage struct {
 	PromoteReasonOnFailure bool
 }
 
+// ReasonError lets a stage choose the failure reason for ONE particular error,
+// overriding its FlowStage.FailureReason for that error only. A stage wraps the
+// error it returns in it when the stage's static reason would misstate what
+// happened: the restore commit stage's reason is cli_error ("the restore
+// command failed"), which must not be the reason when the command SUCCEEDED and
+// what failed is recording that. An empty Reason leaves the stage's own.
+type ReasonError struct {
+	Reason FailureReason
+	Err    error
+}
+
+func (e *ReasonError) Error() string { return e.Err.Error() }
+
+// Unwrap returns the underlying error.
+func (e *ReasonError) Unwrap() error { return e.Err }
+
+// stageReason is the failure reason of st for runErr.
+func stageReason(st *FlowStage, runErr error) FailureReason {
+	var re *ReasonError
+	if errors.As(runErr, &re) && re.Reason != "" {
+		return re.Reason
+	}
+	if st.FailureReason == "" {
+		return ReasonCLIError
+	}
+	return st.FailureReason
+}
+
 // ResultFn computes the structured op result at terminal time, given the
 // final state and (post-promotion) failure reason. Optional per flow;
 // when set, its map is merged into the op result the orchestrator writes
@@ -228,19 +256,13 @@ func Run(ctx context.Context, deps OrchestratorDeps, opID, kind, actor string, p
 		if firstErr == nil {
 			firstErr = runErr
 			firstErrStage = st.Name
-			firstReason = st.FailureReason
-			if firstReason == "" {
-				firstReason = ReasonCLIError
-			}
+			firstReason = stageReason(&st, runErr)
 		}
 		// A recovery stage explicitly flagged PromoteReasonOnFailure
 		// promotes the terminal reason (e.g. a failed inline rollback →
 		// rollback_failed), even though firstReason was already set.
 		if st.PromoteReasonOnFailure && promotedReason == "" {
-			promotedReason = st.FailureReason
-			if promotedReason == "" {
-				promotedReason = ReasonCLIError
-			}
+			promotedReason = stageReason(&st, runErr)
 		}
 	}
 	for i := range stages {
