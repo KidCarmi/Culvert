@@ -230,7 +230,8 @@ func TestParseProperties_RejectsWhatWouldSilentlyNotBeChecked(t *testing.T) {
 const (
 	propFailing = `{"id":"F","status":"%s","kind":"state","text":"fails","if":[["terminal","==",true]],"then":[["tag_ahead","==",false]]}`
 	propVacuous = `{"id":"V","status":"%s","kind":"state","text":"unreachable trigger","if":[["pc","==","nowhere"]],"then":[["tag","==","T"]]}`
-	propHolds   = `{"id":"P","status":"%s","kind":"state","text":"holds","if":[["terminal","==",true]],"then":[["jr","==","removed"]]}`
+	// Since ADR-0062 slice 1 only a SUCCEEDED terminal op is sure to have retired its record.
+	propHolds = `{"id":"P","status":"%s","kind":"state","text":"holds","if":[["terminal","==",true],["op","==","succeeded"]],"then":[["jr","==","removed"]]}`
 )
 
 func propFile(entries ...string) []byte {

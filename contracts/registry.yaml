@@ -52,6 +52,14 @@ amended:
     reason: "ADR-0062 slice 2 (journal schema version). A journal record written by a NEWER agent (schema above this build's) is listed in status like any interrupted record, but this build never rewrites or removes it, so a later successful image change does not clear it: its fields may say the state is unsafe in a way this build cannot read. This narrows 'lists it until a later image change succeeds' for that one case; records this build or an older agent wrote are unchanged, and no registered test was edited (new tests: TestRetire_NewerRecordIsNeverSuperseded, TestNewerSchema_IsNeverRewrittenOrRemoved). Not owner-approved; the wording is the implementer's."
   - id: AGT-005
     reason: "ADR-0062 slice 2. Retirement is narrowed, never widened: a record a newer agent wrote is never removed by this build, neither by a later success nor by the converge reconcile (which reports it recovery_required/record_from_newer_agent without reading Docker), and no interrupted_superseded entry is written for it. Unknown keys of any record now survive every rewrite, and an agent released before slice 2 is fenced off a directory holding schema-2 records (it refuses to serve on the fence record's unknown phase). Existing retirement rules and their tests are unchanged. Not owner-approved; the wording is the implementer's."
+  - id: AGT-004
+    reason: "ADR-0062 slice 1 (owner decision 1: keep durable operation records until the appliance state is proven safe). A journaled operation that ENDS failed without proving its end state safe now keeps its record: it is listed in status at once and reported by every later start exactly like an interrupted operation, but marked with its own failure reason instead of agent_restart_interrupted, and its interruption audit entry is not written (it has its terminal entry). Startup with reconcile_on_startup = off may now remove one kind of record: one whose operation ENDED (it carries terminal_outcome, written before the terminal audit) and either succeeded or proved its end state safe, and only after that operation's terminal audit entry is on file (written at that start if the audit log lacks it). This finishes the operation's own terminal sequence that a kill cut short; it is not a reconcile, reads no Docker and changes nothing in Docker. The forbidden transition is narrowed from 'removing a journal record at startup' to 'removing the record of an interrupted operation, or of an ended one whose end state is not proven safe'. No registered AGT-004 test was edited. Not owner-approved; the wording is the implementer's."
+  - id: AGT-005
+    reason: "ADR-0062 slice 1. Before, the orchestrator removed an operation's own record at every terminal state and only then wrote the terminal audit entry. Now: (1) the operation's own record is removed at its end only when it succeeded or proved its end state safe (upgrades.apply: never wrote the write-ahead barrier, or its inline rollback passed its gate and verify; rollbacks.create mode=image: failed before rollback_restart; restore-class: never reached the stopping stage, or committed and passed its health check), and only after its terminal audit entry is durable; (2) otherwise the record is KEPT and is retired exactly like an interrupted record (later successful upgrade or image rollback; for a restore-class record also a later established restore; verified converge), each retirement first completing the kept record's own terminal entry if it was never durable. Two registered tests were edited because they asserted the old removal of the failing operation's OWN record, never a retirement: TestRetireRestore_NotWhenTheRestoreDidNotEstablishItsState now expects the failed restore's own record beside the untouched stale ones when it had stopped the stack, and TestRetireRestore_AuditFailureKeepsRecord now also expects the op's own record to stay (its audit entry could not be written). Every stale-record assertion is unchanged. Not owner-approved; the wording is the implementer's."
+  - id: AGT-900
+    reason: "ADR-0062 slice 1. With reconcile_on_startup = converge the startup reconcile now also decides records KEPT by operations that ended failed without proving their end state safe, with the same, unchanged decision table and the same retirement rule (verified convergence and the :reconciled audit entry first); before retiring such a record it completes the record's own terminal audit entry if it was never durable. The decision table, the attempt cap and the forbidden transitions are unchanged; the invariant is widened from 'after a crash during an image change' to also cover 'after an image change that failed without proving its end state safe'. Not owner-approved; the wording is the implementer's."
+  - id: AGT-002
+    reason: "ADR-0062 slice 1, no change to the invariant. Two registered tests (TestApply_PinnedTag_UpFailsBeforeRecreate_RollbackDisabled_TagRestored, TestApply_PinnedTag_RestoreHappensInsideJournalWindow) ended with an incidental assertion that the failed upgrade's journal record was removed. Such an upgrade failed past the write-ahead barrier with no inline rollback that passed its gate, so its record is now KEPT (AGT-005 amendment). The assertion is replaced by a stricter one: exactly the op's own record remains, stamped failed:command_error and audited. Every tag and container assertion is unchanged. Not owner-approved."
 retired: []
 
 contracts:
@@ -903,12 +911,15 @@ contracts:
     area: agent-lifecycle
     status: enforced
     owner_approved: false
-    invariant: "After the maintenance agent dies during an upgrade or rollback, its next start reports the operation as failed with how far it got and lists it in status until a later image change succeeds; with reconcile_on_startup = \"off\" (the default) it changes nothing in Docker. What \"converge\" may change is AGT-900."
+    invariant: "After the maintenance agent dies during an upgrade or rollback, its next start reports the operation as failed with how far it got and lists it in status until a later image change succeeds; an operation that ended failed without proving its end state safe keeps its record and is listed and reported the same way, with its own failure reason. With reconcile_on_startup = \"off\" (the default) startup changes nothing in Docker. What \"converge\" may change is AGT-900."
     authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/main.go"
       - "cmd/culvert-maint/internal/journal/*.go"
       - "cmd/culvert-maint/internal/server/interrupted.go"
+      - "cmd/culvert-maint/internal/server/terminal_record.go"
+      - "cmd/culvert-maint/internal/ops/orchestrator.go"
+      - "cmd/culvert-maint/internal/ops/terminal.go"
       - "cmd/culvert-maint/internal/status/*.go"
       - "cmd/culvert-maint/internal/config/*.go"
     configs: []
@@ -916,10 +927,13 @@ contracts:
       permitted:
         - "reporting the same interrupted operation again at every later start"
         - "starting while Docker is unreachable"
+        - "removing, at startup, the record of an operation that ended succeeded or with its end state proven safe, after its terminal audit entry is on file"
       forbidden:
         - "reporting an interrupted operation as succeeded"
+        - "reporting a failed operation as succeeded, or a kept failed operation as agent_restart_interrupted"
         - "pulling, tagging or recreating containers at startup with reconcile_on_startup off"
-        - "removing a journal record at startup with reconcile_on_startup off"
+        - "removing the record of an interrupted operation, or of an ended one whose end state is not proven safe, at startup with reconcile_on_startup off"
+        - "writing an operation's terminal audit entry twice, or removing its record before that entry is durable"
         - "pulling an image at startup in any mode"
         - "returning an image reference from a journal record that failed the repo-bound digest check"
     tests:
@@ -928,6 +942,13 @@ contracts:
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_DockerUnavailableAtStartup}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_ForgedRecordRefsAreNotRepeated}
       - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_AuditsOnceAndCountsStarts}
+      - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_KeptFailedRecord_ReportedWithItsReasonAuditedOnce}
+      - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_EndedSucceededRecord_AuditedThenRemoved}
+      - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_KillAfterTerminalAudit_NoSecondEntry}
+      - {file: "cmd/culvert-maint/startup_journal_test.go", name: TestInitJournal_EndedRecordWithAuditUnavailable_NotRemoved}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestTerminalCrash_KillBeforeAudit_StartupWritesItOnceAndKeeps}
+      - {file: "cmd/culvert-maint/internal/ops/terminal_test.go", name: TestTerminal_RecordThenAuditThenSettleThenFinish}
+      - {file: "cmd/culvert-maint/internal/status/status_terminal_test.go", name: TestSnapshot_KeptRecordOfThisProcessIsListed}
       - {file: "cmd/culvert-maint/startup_reconcile_converge_test.go", name: TestOffMode_StatusAndStateUnchanged}
       - {file: "cmd/culvert-maint/internal/config/config_reconcile_test.go", name: TestLoad_ReconcileOnStartup}
     validation: integration
@@ -937,12 +958,13 @@ contracts:
     area: agent-lifecycle
     status: enforced
     owner_approved: false
-    invariant: "An interrupted operation's journal record is removed only when a later upgrade or image rollback succeeds after re-pinning the image tag and passing the health gate; or, for the record of an interrupted restore or data rollback only, when a later restore or data rollback succeeds after its commit returned success and its health check passed; or, with reconcile_on_startup = \"converge\", when the startup reconcile verified convergence by image id. The removal is audited first. A restore or data rollback never removes the record of an interrupted upgrade or image rollback."
+    invariant: "An interrupted operation's journal record is removed only when a later upgrade or image rollback succeeds after re-pinning the image tag and passing the health gate; or, for the record of an interrupted restore or data rollback only, when a later restore or data rollback succeeds after its commit returned success and its health check passed; or, with reconcile_on_startup = \"converge\", when the startup reconcile verified convergence by image id. The removal is audited first. A restore or data rollback never removes the record of an interrupted upgrade or image rollback. The same rules retire the record an operation KEPT because it ended failed without proving its end state safe (ADR-0062 slice 1); an operation removes its own record at its end only when it succeeded or proved its end state safe, and only after its terminal audit entry is durable."
     authority: "Maintenance agent (cmd/culvert-maint, separate module). Lifecycle: docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/internal/server/journal_retire.go"
       - "cmd/culvert-maint/internal/server/restore_journal.go"
       - "cmd/culvert-maint/internal/server/startup_reconcile.go"
+      - "cmd/culvert-maint/internal/server/terminal_record.go"
     configs: []
     transitions:
       permitted:
@@ -958,6 +980,8 @@ contracts:
         - "a restore or data rollback removing the record of an interrupted upgrade or image rollback"
         - "removing a restore record when the later restore failed, or did not commit and pass its health check"
         - "the startup reconcile removing, or acting on, the record of an interrupted restore or data rollback"
+        - "an operation removing its own record after a failure that did not prove its end state safe"
+        - "removing an operation's own record before its terminal audit entry is durable"
     tests:
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_NewUpgradeConvergesAndRetiresTheRecord}
       - {file: "cmd/culvert-maint/startup_crash_recovery_test.go", name: TestCrashRecovery_AlreadyCurrentUpgradeDoesNotRetire}
@@ -973,6 +997,19 @@ contracts:
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_restore_test.go", name: TestStartupReconcile_RestoreRecordIsReportedOnly}
       - {file: "cmd/culvert-maint/startup_restore_crash_test.go", name: TestRestoreCrash_LaterRestoreRetiresTheRecord}
       - {file: "cmd/culvert-maint/startup_restore_crash_test.go", name: TestRestoreCrash_RestoreDoesNotRetireAnInterruptedUpgrade}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Apply_FailedBeforeBarrier_Removed}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Apply_FailedPastBarrierNoRollback_Kept}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Apply_InlineRollbackPassedGate_Removed}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Apply_InlineRollbackFailedGate_Kept}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_ImageRollback_FailedBeforeTagMove_Removed}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_ImageRollback_FailedInRestart_Kept}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_ImageRollback_FailedGate_Kept}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Restore_FailedBeforeStop_Removed}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Restore_FailedAfterStop_Kept}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestEndState_Restore_CommittedAndHealthy_Removed}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestKeptRecord_RetiredByALaterSuccess}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestKeptRecord_RetirementCompletesAMissingTerminalEntryFirst}
+      - {file: "cmd/culvert-maint/internal/ops/terminal_test.go", name: TestTerminal_AuditFailureNeverSettles}
     validation: integration
     compatibility: "Before this entry a record was never removed and was reported again at every start. Since the ADR-0061 addendum of 2026-11-24 restore.commit is journaled too; an agent that predates that reports such a record as an interrupted operation of unknown kind and retires it on its next successful upgrade or image rollback."
 
@@ -980,7 +1017,7 @@ contracts:
     area: agent-lifecycle
     status: open
     owner_approved: false
-    invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or reports recovery_required and changes nothing. It never starts an image that has not passed the health gate. With the default \"off\" it changes nothing (AGT-004)."
+    invariant: "With reconcile_on_startup = \"converge\", after a crash during an image change, or after an image change that failed without proving its end state safe (its record kept, ADR-0062 slice 1), the next start either leaves the fixed tag and the proxy container on the same image, identified by image id as the pre-change image or as a target the journal proves passed its health gate and digest verify (and that answers ready now), or reports recovery_required and changes nothing. It never starts an image that has not passed the health gate. With the default \"off\" it changes nothing (AGT-004)."
     authority: "Maintenance agent (cmd/culvert-maint). Owner decision 1 on the AGT-900 recovery proposal; lifecycle docs/adr/0061-maintenance-agent-crash-journal-lifecycle.md."
     code:
       - "cmd/culvert-maint/main.go"
@@ -1015,6 +1052,8 @@ contracts:
       - {file: "cmd/culvert-maint/internal/server/reconcile_decision_v2_test.go", name: TestReconcileDecisionV2_NegativeControls}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_WriteAheadFailureMeansNoAction}
       - {file: "cmd/culvert-maint/internal/server/startup_reconcile_test.go", name: TestStartupReconcile_DockerChangedBeforeActionIsNotActedOn}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestKeptRecord_ConvergeDecidesItLikeAnInterruptedRecord}
+      - {file: "cmd/culvert-maint/internal/server/terminal_record_test.go", name: TestKeptRecord_ConvergeWritesAMissingTerminalEntryBeforeRetiring}
     validation: integration
     question: "OPEN until verified on a real Docker daemon (owner, 2026-11-23): does the conservative converge mode hold its safety properties against real Docker (the real-Docker e2e)? If it does, should converge become the default before the first customer release?"
     compatibility: "Opt-in; the default \"off\" is the AGT-004 behaviour. Proven against a fake Docker exec layer and the shell Docker model only, not yet against a real daemon (the proposal's real-Docker e2e is not built). Enabling it by default, and adopting a live target that never passed its gate, are not decided and are excluded by owner decision 1. A record from an agent that predates rollback_armed is never finished as a rollback; it is reported."

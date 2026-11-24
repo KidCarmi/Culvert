@@ -57,6 +57,10 @@ type restoreFlow struct {
 	committed bool
 	// healthPassed: the health check after the restart passed.
 	healthPassed bool
+	// stopRecorded: the `stopping` stage is durable and `compose down` is about
+	// to be asked. Until it is set the record's RestoreStage is still admitted
+	// or preflight and nothing was stopped (terminal_record.go).
+	stopRecorded bool
 }
 
 // newRestoreFlow returns the flow for kind. mode is the journal mode ("" or
@@ -150,6 +154,9 @@ func (s *Server) restoreStopStack(ctx context.Context, f *restoreFlow, stackTouc
 	// recorded, not stopped.
 	if jerr := s.advanceRestoreStage(f, journal.RestoreStageStopping); jerr != nil {
 		return nil, nil, fmt.Errorf("stop_stack: could not record the restore's progress in the journal, refusing to stop the stack (nothing was changed): %w", jerr)
+	}
+	if f != nil {
+		f.stopRecorded = true
 	}
 	*stackTouched = true
 	res, rerr := s.composeDown(ctx) // marks the in-flight mutation and notes a cut (mutation.go)

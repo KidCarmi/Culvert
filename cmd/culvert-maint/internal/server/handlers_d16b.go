@@ -297,9 +297,12 @@ func (s *Server) startAsyncOp(_ *http.Request, peer auth.PeerInfo, kind, idempot
 			return nil, false, augmentErrorWithOp(&opError{Status: http.StatusInternalServerError, Body: map[string]string{"error": "journal_write_failed"}}, op.ID)
 		}
 	}
-	deps := ops.OrchestratorDeps{Manager: s.opts.Ops, Audit: s.opts.Audit, OpLog: oplog}
+	deps := ops.OrchestratorDeps{Manager: s.opts.Ops, Audit: s.opts.Audit, OpLog: oplog, EndStateSafe: cfg.endStateSafe}
 	if s.opts.Journal != nil {
-		deps.Journal = s.opts.Journal // retired on terminal by the orchestrator
+		// Ended crash-safely by the orchestrator: removed after the terminal
+		// audit when the end state is proven safe, kept otherwise
+		// (terminal_record.go).
+		deps.Journal = terminalJournal{j: s.opts.Journal}
 	}
 	// Tracked via goOp so shutdown drains it (T2.4). The op ctx stays detached
 	// from the request/shutdown ctx and bounded only by OperationTimeout: a
@@ -465,9 +468,18 @@ type startCfg struct {
 	// exists and are retired. It never retires an upgrade or image-rollback
 	// record: a restore does not re-pin the image tag (journal_retire.go).
 	retiresRestoreRecords func() bool
+	// endStateSafe, when set, judges whether a FAILED journaled op proved the
+	// state it left safe, so that its record may be removed after the terminal
+	// audit (terminal_record.go). Unset keeps the record of every failure.
+	endStateSafe ops.EndStateJudge
 }
 
 type startOpt func(*startCfg)
+
+// withEndStateSafe attaches the flow's end-state judge (terminal_record.go).
+func withEndStateSafe(judge ops.EndStateJudge) startOpt {
+	return func(c *startCfg) { c.endStateSafe = judge }
+}
 
 // withResultFn attaches a structured-result computer to the op.
 func withResultFn(fn ops.ResultFn) startOpt { return func(c *startCfg) { c.resultFn = fn } }
@@ -949,6 +961,7 @@ func restoreStartOpts(flow *restoreFlow) []startOpt {
 	return []startOpt{
 		withOpIDHook(func(id string) { flow.opID = id }),
 		withRetiresRestoreRecords(flow.established),
+		withEndStateSafe(restoreEndStateSafe(flow)),
 		withResultFn(func(ops.State, ops.FailureReason) map[string]interface{} {
 			// Whether the data directory was replaced, independent of how the
 			// operation ended: a failed operation can have committed.

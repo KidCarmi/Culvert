@@ -167,6 +167,32 @@ type Record struct {
 	// byte-identical to what it was before the key existed.
 	RestoreStage RestoreStage `json:"restore_stage,omitempty"`
 
+	// Terminal bookkeeping (ADR-0062 slice 1). Written by the operation's own
+	// process when it ends, never by a running stage: TerminalOutcome and
+	// TerminalAt BEFORE the terminal audit entry, TerminalAudited after it.
+	// A record that carries a TerminalOutcome did not die: it ended, and
+	// either its removal was cut short (startup finishes it) or it was KEPT
+	// because the operation could not prove the state it left safe.
+	//
+	// TerminalOutcome is "succeeded" or "failed:<failure_reason>".
+	// TerminalSafe is the operation's own verdict, taken in memory at its end,
+	// that the end state is proven safe (always true for a success): the
+	// record may be removed once the terminal audit is durable. Absent means
+	// not proven, which keeps the record. TerminalAudited is true once the
+	// terminal audit entry is known to be durable.
+	//
+	// These keys stay at schema 1 on purpose (no Schema bump, no fence). An
+	// agent released before ADR-0062 slice 2 drops them when it rewrites the
+	// record at a start, and is left with what it always understood: an
+	// ordinary interrupted record, which it reports, audits as interrupted and
+	// keeps until a later success retires it. That is the conservative
+	// reading of every one of them, so nothing an older agent does with the
+	// record is less safe than what this build does.
+	TerminalOutcome string     `json:"terminal_outcome,omitempty"`
+	TerminalAt      *time.Time `json:"terminal_at,omitempty"`
+	TerminalSafe    bool       `json:"terminal_safe,omitempty"`
+	TerminalAudited bool       `json:"terminal_audited,omitempty"`
+
 	// Schema is the record format (schema.go). Absent means 1, the format of
 	// every agent before ADR-0062. A record at SchemaFenced or above is written
 	// only behind the downgrade fence; one above SchemaCurrent came from a

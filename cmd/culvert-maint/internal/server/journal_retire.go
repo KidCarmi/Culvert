@@ -126,6 +126,15 @@ func (s *Server) retireRecords(byOpID, actor, what string, retire func(*journal.
 		if rec.OpID == byOpID || s.opts.Ops.IsRunning(rec.OpID) || rec.FromNewerAgent() || !retire(rec) {
 			continue
 		}
+		// A kept record of an operation that ended carries its own terminal
+		// audit entry; if that entry never became durable it is written first,
+		// or the record is not retired (ADR-0062 slice 1).
+		if rec.TerminalOutcome != "" {
+			if terr := ensureTerminalAudited(s.opts.Audit, rec, s.opts.Cfg.ProxyRepo); terr != nil {
+				log.Printf("culvert-maint: WARN: could not complete the terminal audit of op %s; record kept: %v", rec.OpID, terr)
+				continue
+			}
+		}
 		now := time.Now().UTC()
 		desc := DescribeInterrupted(rec, s.opts.Cfg.ProxyRepo)
 		params := desc.AuditParams()
