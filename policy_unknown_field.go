@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"reflect"
 	"strings"
@@ -62,13 +63,21 @@ import (
 //
 // "annotations" is a JSON object whose contents this build, and every later
 // one, carries without interpreting: it never affects a match, an action or
-// validation. It is kept verbatim through the store, the policy file, export,
-// stored versions and snapshots, so what a newer node writes there survives a
-// pass through an older one. It is bounded at decode (ruleAnnotationsMaxBytes,
-// ruleAnnotationsMaxDepth; the limits are part of the format and must not be
-// raised, or an older node refuses what a newer one accepts). It is also the
-// legal place for a hand-editor's note. The rule API replaces a rule whole, so a
-// client that omits "annotations" on PUT removes them.
+// validation. It is kept through the store, the policy file, export, stored
+// versions and snapshots, so what a newer node writes there survives a pass
+// through an older one. It is held and bounded in CANONICAL form (see
+// ruleAnnotations): the bytes encoding/json itself writes, so a rule accepted
+// once is accepted again after any number of save, export, publish and reload
+// round trips. The limits (ruleAnnotationsMaxBytes, ruleAnnotationsMaxDepth)
+// are part of the format and must not be raised, or an older node refuses what
+// a newer one accepts. It is also the legal place for a hand-editor's note. The
+// rule API replaces a rule whole, so a client that omits "annotations" on PUT
+// removes them.
+//
+// A rule LIST given twice in one document ({"policyRules":[…],"policyRules":[…]})
+// is the same defect one level up: the first list is discarded. Every envelope
+// that carries rules declares them as ruleList (or policyRuleRefs), which
+// notices the second decode and adds an entry the gate refuses.
 //
 // TestRuleKeys_AreAPinnedSetAndNewOnesAreConditions pins today's keys and
 // fails when one is added, so the author meets this rule. The keys that exist
@@ -84,14 +93,18 @@ import (
 // by encoding these structs. Nothing Culvert wrote is refused, and there is no
 // allowlist of legacy keys.
 //
+// A rule is always decoded onto a ZERO value: nothing survives from whatever
+// the destination held, so the value and its fault describe exactly the bytes
+// just read. No caller decodes a partial rule onto a populated one.
+//
 // Cost: each rule's JSON is read twice at decode. These are load-time paths; no
 // rule is decoded per request.
 
 const (
 	// ruleAnnotationsKey is the one rule key whose contents are never interpreted.
 	ruleAnnotationsKey = "annotations"
-	// ruleAnnotationsMaxBytes and ruleAnnotationsMaxDepth bound the container as
-	// written (CWE-770). Part of the format: do not raise them.
+	// ruleAnnotationsMaxBytes and ruleAnnotationsMaxDepth bound the container
+	// in its canonical form (CWE-770). Part of the format: do not raise them.
 	ruleAnnotationsMaxBytes = 4096
 	ruleAnnotationsMaxDepth = 8
 	// ruleKeyFaultsListed bounds how many keys one rule's refusal names.
@@ -105,34 +118,55 @@ const (
 // not recurse into UnmarshalJSON.
 type policyRulePlain PolicyRule
 
-// UnmarshalJSON decodes a rule and records in decodeFault what this build
-// cannot honour as written: unknown keys, duplicated keys, an "annotations"
-// value outside its bounds. It never fails because of them: the decision
-// belongs to the POL-005 gate, which names the rule and refuses the ruleset.
-func (r *PolicyRule) UnmarshalJSON(data []byte) error {
-	// Decode onto a copy of the receiver, as encoding/json would decode onto
-	// the receiver itself: keys absent from data keep their current values.
-	// The fault is recomputed below from THIS document alone, so it never
-	// reflects what the variable held before.
-	plain := policyRulePlain(*r)
-	if err := json.Unmarshal(data, &plain); err != nil {
+// ruleAnnotations is the cold data of a rule, behind one pointer (see the
+// Annotations field): the annotations container, and the decode fault.
+//
+// raw is the container in CANONICAL form: compact, and escaped exactly as
+// encoding/json escapes when it writes ("<", ">", "&", U+2028 and U+2029 as
+// \uXXXX). That form is a fixed point of every encoder Culvert uses (Marshal,
+// MarshalIndent, an Encoder with or without HTML escaping): decoding what any
+// of them wrote and canonicalising again gives the same bytes. The size bound
+// is measured on it, so a rule cannot be accepted and then refused after a
+// save, an export or a publish, and whitespace does not count. The value is
+// immutable once decoded; rule copies share it.
+type ruleAnnotations struct {
+	raw   []byte
+	fault string
+}
+
+// IsZero makes `omitzero` leave the key out for a rule with no annotations,
+// including a refused rule that only carries a fault.
+func (a *ruleAnnotations) IsZero() bool { return a == nil || len(a.raw) == 0 }
+
+// MarshalJSON writes the canonical bytes.
+func (a *ruleAnnotations) MarshalJSON() ([]byte, error) { //nolint:unparam // json.Marshaler's signature; this implementation cannot fail
+	if a.IsZero() {
+		return []byte("null"), nil
+	}
+	return a.raw, nil
+}
+
+// UnmarshalJSON canonicalises and bounds the container. It does not fail on a
+// value out of bounds: it records the fault, for the gate. A JSON null never
+// reaches it (encoding/json leaves the pointer nil), so null is "absent".
+func (a *ruleAnnotations) UnmarshalJSON(data []byte) error {
+	*a = ruleAnnotations{}
+	canonical, err := json.Marshal(json.RawMessage(data))
+	if err != nil {
 		return err
 	}
-	if bytes.Equal(bytes.TrimSpace(plain.Annotations), []byte("null")) {
-		plain.Annotations = nil
+	if canonical[0] != '{' || len(canonical) > ruleAnnotationsMaxBytes || jsonDepth(canonical) > ruleAnnotationsMaxDepth {
+		a.fault = fmt.Sprintf("%q must be a JSON object of at most %d bytes (compact, as Culvert writes it) and %d levels",
+			ruleAnnotationsKey, ruleAnnotationsMaxBytes, ruleAnnotationsMaxDepth)
+		return nil
 	}
-	plain.decodeFault = scanRuleKeys(data).reason(ruleAnnotationsFault(plain.Annotations))
-	*r = PolicyRule(plain)
+	a.raw = canonical
 	return nil
 }
 
-// ruleAnnotationsFault bounds the container: an object, of limited size and
-// nesting. raw is valid JSON (it was just decoded).
-func ruleAnnotationsFault(raw json.RawMessage) string {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 {
-		return ""
-	}
+// jsonDepth is the deepest nesting of objects and arrays in valid JSON. It
+// does not depend on whitespace or on how strings are escaped.
+func jsonDepth(raw []byte) int {
 	depth, deepest, inString, escaped := 0, 0, false, false
 	for _, c := range raw {
 		switch {
@@ -149,11 +183,93 @@ func ruleAnnotationsFault(raw json.RawMessage) string {
 			depth--
 		}
 	}
-	if raw[0] != '{' || len(raw) > ruleAnnotationsMaxBytes || deepest > ruleAnnotationsMaxDepth {
-		return fmt.Sprintf("%q must be a JSON object of at most %d bytes and %d levels",
-			ruleAnnotationsKey, ruleAnnotationsMaxBytes, ruleAnnotationsMaxDepth)
+	return deepest
+}
+
+// UnmarshalJSON decodes a rule and records what this build cannot honour as
+// written: unknown keys, duplicated keys, an "annotations" value outside its
+// bounds. It never fails because of them: the decision belongs to the POL-005
+// gate, which names the rule and refuses the ruleset.
+//
+// It decodes onto a ZERO value and assigns. encoding/json reuses slice elements
+// and decodes onto whatever the destination holds; merging would let values
+// from an earlier decode survive beside a fault computed from this one.
+func (r *PolicyRule) UnmarshalJSON(data []byte) error {
+	var plain policyRulePlain
+	if err := json.Unmarshal(data, &plain); err != nil {
+		return err
 	}
-	return ""
+	annotationsFault := ""
+	if plain.Annotations != nil {
+		annotationsFault = plain.Annotations.fault
+	}
+	if fault := scanRuleKeys(data).reason(annotationsFault); fault != "" {
+		// A fresh cell: the annotations (if any) are dropped with the rule.
+		plain.Annotations = &ruleAnnotations{fault: fault}
+	} else if plain.Annotations.IsZero() {
+		plain.Annotations = nil
+	}
+	*r = PolicyRule(plain)
+	return nil
+}
+
+// ruleListGivenTwice is the entry a rule list gains when its key appears twice
+// in one document. It has no name, type or action and carries the fault, so
+// the gate refuses the whole ruleset and says why.
+func ruleListGivenTwice() PolicyRule {
+	return PolicyRule{Annotations: &ruleAnnotations{fault: "the document gives its rule list twice; only the last would be applied — keep one"}}
+}
+
+// ruleList is the type of every rule list inside a larger document (a
+// config backup, a stored version, a control-plane snapshot, a pending draft).
+// It decodes as []PolicyRule, onto a fresh slice, and notices a SECOND decode
+// into the same field: the key was given twice, and encoding/json would keep
+// only the last list. Every door decodes these documents into a fresh value, so
+// a list that is already non-nil has been decoded before in this document.
+type ruleList []PolicyRule
+
+func (l *ruleList) UnmarshalJSON(data []byte) error {
+	again := *l != nil
+	var rules []PolicyRule
+	if err := json.Unmarshal(data, &rules); err != nil {
+		return err
+	}
+	if again {
+		rules = append(rules, ruleListGivenTwice())
+	}
+	*l = rules
+	return nil
+}
+
+// policyRuleRefs is ruleList for `culvert policy-check`, which decodes
+// pointers so that a null entry is reported as one, and needs to know whether
+// the key was present at all. It is a value, not a pointer, in its document so
+// that a second occurrence which is `null` still reaches UnmarshalJSON.
+type policyRuleRefs struct {
+	present bool
+	rules   []*PolicyRule
+}
+
+func (l *policyRuleRefs) UnmarshalJSON(data []byte) error {
+	again := l.present
+	var rules []*PolicyRule
+	if err := json.Unmarshal(data, &rules); err != nil {
+		return err
+	}
+	if again {
+		twice := ruleListGivenTwice()
+		rules = append(rules, &twice)
+	}
+	l.present, l.rules = true, rules
+	return nil
+}
+
+// ruleLastHit32 narrows a unix-seconds timestamp to PolicyRule.lastHitUnix.
+func ruleLastHit32(unix int64) uint32 {
+	if unix <= 0 {
+		return 0
+	}
+	return uint32(min(unix, math.MaxUint32)) // #nosec G115 -- bounded by the min above
 }
 
 // ruleKeyFaults is what one rule's keys hold that this build cannot honour.
@@ -192,8 +308,8 @@ func (f *ruleKeyFaults) walk(dec *json.Decoder, t reflect.Type) {
 		t = t.Elem()
 	}
 	switch {
-	case t == nil || t == reflect.TypeFor[json.RawMessage]():
-		skipJSONValue(dec)
+	case t == nil || reflect.PointerTo(t).Implements(reflect.TypeFor[json.Unmarshaler]()):
+		skipJSONValue(dec) // nothing interprets it here: an unknown key's value, or the annotations container
 	case delim == '{' && t.Kind() == reflect.Struct:
 		f.walkObject(dec, t)
 	case delim == '[' && t.Kind() == reflect.Slice:
@@ -331,10 +447,10 @@ func (f *ruleKeyFaults) reason(annotations string) string {
 // ruleAsWrittenFault is the refusal reason for a rule decoded from JSON whose
 // keys this build cannot honour, or "" (also for a rule built in Go).
 func ruleAsWrittenFault(r *PolicyRule) string {
-	if r == nil {
+	if r == nil || r.Annotations == nil {
 		return ""
 	}
-	return r.decodeFault
+	return r.Annotations.fault
 }
 
 // decodeRuleJSON reads one rule from a request body for the single-rule API

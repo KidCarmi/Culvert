@@ -84,9 +84,17 @@ version is `info.version` in `api/openapi/openapi.yaml` and follows
   **API contract 2.1.0 → 2.2.0 (MINOR):** the policy rule schema gains the
   optional `annotations` property; a duplicated key in a rule object is now a
   `400` on the policy API (it was accepted, last value winning).
-  **New: `annotations`.** A rule may carry one `annotations` object (at most
-  4096 bytes and 8 levels). Culvert stores, exports and publishes its contents
-  verbatim and never interprets them. It is the place for notes in a
+  A rule list given twice in one document (`"policyRules":[…],"policyRules":[…]`
+  in a backup, `policy_rules` in a snapshot, `rules` in a draft) is refused the
+  same way: the first list used to be discarded.
+  **New: `annotations`.** A rule may carry one `annotations` object. Culvert
+  never interprets its contents; it keeps them in canonical form (compact
+  JSON, with `<`, `>`, `&` written as `\uXXXX` escapes, as Culvert's own
+  encoders write them) through the policy file, exports, stored versions and
+  snapshots. The limits, 4096 bytes and 8 levels, are measured on that form:
+  whitespace does not count, each of `<` `>` `&` counts as 6 bytes, and a rule
+  accepted once stays accepted however often it is saved, exported or
+  published. `null` is the same as absent. It is the place for notes in a
   hand-edited file, and from now on the only place a release may add
   information that is not a match condition. Editing a rule in the admin UI
   replaces the rule and removes its annotations.

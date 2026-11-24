@@ -1535,7 +1535,7 @@ type configBackup struct {
 	ExportedAt          string        `json:"exportedAt"`
 	BlocklistMode       string        `json:"blocklistMode"`
 	Blocklist           []string      `json:"blocklist"`
-	PolicyRules         []PolicyRule  `json:"policyRules"`
+	PolicyRules         ruleList      `json:"policyRules"`
 	DefaultAction       string        `json:"defaultAction"`
 	RewriteRules        []RewriteRule `json:"rewriteRules"`
 	SSLBypass           []string      `json:"sslBypass"`

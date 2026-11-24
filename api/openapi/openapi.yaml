@@ -386,8 +386,9 @@ components:
         comment: { type: string }
         annotations:
           type: object
+          nullable: true
           additionalProperties: true
-          description: 'The one container for information that carries no enforcement meaning (notes, provenance, data stamped by a newer release). Culvert stores and returns its contents verbatim and never interprets them. At most 4096 bytes and 8 levels as written. Every other key on a rule is an enforcement condition and an unknown one is refused. PUT replaces the rule whole, so omitting annotations removes them.'
+          description: 'The one container for information that carries no enforcement meaning (notes, provenance, data stamped by a newer release). Culvert never interprets its contents and returns them in canonical form (compact JSON, with <, >, & and U+2028/U+2029 written as \\uXXXX escapes). At most 4096 bytes and 8 levels, measured on that canonical form, so whitespace does not count and each of < > & counts as 6 bytes. null is the same as absent. Every other key on a rule is an enforcement condition and an unknown one is refused. PUT replaces the rule whole, so omitting annotations removes them.'
     PolicySchedule:
       type: object
       additionalProperties: false

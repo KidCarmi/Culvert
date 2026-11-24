@@ -22,6 +22,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +33,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"unsafe"
 )
 
 // unkOutsider is a client the "srcIP" condition was written to EXCLUDE.
@@ -139,8 +143,8 @@ func TestUnknownRuleField_WhatCountsAsUnknown(t *testing.T) {
 			t.Errorf("%s: decode failed: %v (an unknown key must not fail the surrounding document)", tc.label, err)
 			continue
 		}
-		if (tc.want == "") != (r.decodeFault == "") || !strings.Contains(r.decodeFault, strings.Trim(strconvQuote(tc.want), `"`)) {
-			t.Errorf("%s: recorded fault %q, want it to name %q", tc.label, r.decodeFault, tc.want)
+		if (tc.want == "") != (ruleAsWrittenFault(&r) == "") || !strings.Contains(ruleAsWrittenFault(&r), strings.Trim(strconvQuote(tc.want), `"`)) {
+			t.Errorf("%s: recorded fault %q, want it to name %q", tc.label, ruleAsWrittenFault(&r), tc.want)
 		}
 		// Differential oracle: this check and encoding/json's own strict mode
 		// agree, for every case, on whether the rule holds an unknown key.
@@ -149,7 +153,7 @@ func TestUnknownRuleField_WhatCountsAsUnknown(t *testing.T) {
 		var plain policyRulePlain
 		serr := strict.Decode(&plain)
 		if (serr != nil) != (tc.want != "") {
-			t.Errorf("%s: encoding/json strict mode says %v, this check says %q", tc.label, serr, r.decodeFault)
+			t.Errorf("%s: encoding/json strict mode says %v, this check says %q", tc.label, serr, ruleAsWrittenFault(&r))
 		}
 		if r.Name != "r" {
 			t.Errorf("%s: name = %q; the rule must still decode so it can be named", tc.label, r.Name)
@@ -169,10 +173,11 @@ func TestUnknownRuleField_WhatCountsAsUnknown(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"name":"r","priority":"one"}`), &r); err == nil {
 		t.Error("a wrongly typed field decoded without error")
 	}
-	// Decoding onto an existing rule merges, as encoding/json does.
-	base := PolicyRule{Name: "keep", SourceIP: "10.0.0.0/8"}
-	if err := json.Unmarshal([]byte(`{"action":"Drop"}`), &base); err != nil || base.Name != "keep" || base.SourceIP != "10.0.0.0/8" || base.Action != ActionDrop {
-		t.Errorf("decode onto an existing rule did not merge: %+v (%v)", base, err)
+	// Decoding onto an existing rule REPLACES it: nothing survives from what
+	// the destination held, so the value is exactly what these bytes say.
+	base := PolicyRule{Name: "keep", SourceIP: "10.0.0.0/8", Action: ActionAllow}
+	if err := json.Unmarshal([]byte(`{"action":"Drop"}`), &base); err != nil || base.Name != "" || base.SourceIP != "" || base.Action != ActionDrop {
+		t.Errorf("decode onto an existing rule kept earlier values: %+v (%v)", base, err)
 	}
 }
 
@@ -183,8 +188,8 @@ func TestUnknownRuleField_EveryKeyIsNamedBoundedAndNotSticky(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"name":"r","a1":1,"action":"Allow","a2":{"deep":[1,2]},"schedule":{"a3":1}}`), &many); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(many.decodeFault, `unknown field "a1", "a2", "a3" (`) {
-		t.Errorf("not every unknown key is named, in order: %q", many.decodeFault)
+	if !strings.Contains(ruleAsWrittenFault(&many), `unknown field "a1", "a2", "a3" (`) {
+		t.Errorf("not every unknown key is named, in order: %q", ruleAsWrittenFault(&many))
 	}
 	var keys strings.Builder
 	for i := range 40 {
@@ -194,17 +199,17 @@ func TestUnknownRuleField_EveryKeyIsNamedBoundedAndNotSticky(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"name":"r"`+keys.String()+`}`), &flood); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(flood.decodeFault, `"k7"`) || strings.Contains(flood.decodeFault, `"k8"`) || !strings.Contains(flood.decodeFault, "and 32 more") {
-		t.Errorf("the list of keys is not bounded at %d with a count of the rest: %q", ruleKeyFaultsListed, flood.decodeFault)
+	if !strings.Contains(ruleAsWrittenFault(&flood), `"k7"`) || strings.Contains(ruleAsWrittenFault(&flood), `"k8"`) || !strings.Contains(ruleAsWrittenFault(&flood), "and 32 more") {
+		t.Errorf("the list of keys is not bounded at %d with a count of the rest: %q", ruleKeyFaultsListed, ruleAsWrittenFault(&flood))
 	}
 	// The fault is about the document just decoded, never about what the
 	// variable held: a clean rule decoded onto a marked one is clean.
 	reused := []PolicyRule{{}}
-	if err := json.Unmarshal([]byte(`[{"name":"bad","srcIP":"x"}]`), &reused); err != nil || reused[0].decodeFault == "" {
-		t.Fatalf("setup: %v %q", err, reused[0].decodeFault)
+	if err := json.Unmarshal([]byte(`[{"name":"bad","srcIP":"x"}]`), &reused); err != nil || ruleAsWrittenFault(&reused[0]) == "" {
+		t.Fatalf("setup: %v %q", err, ruleAsWrittenFault(&reused[0]))
 	}
-	if err := json.Unmarshal([]byte(`{"name":"good","action":"Drop"}`), &reused[0]); err != nil || reused[0].decodeFault != "" {
-		t.Errorf("a clean rule decoded onto a previously marked variable kept the old fault: %q (%v)", reused[0].decodeFault, err)
+	if err := json.Unmarshal([]byte(`{"name":"good","action":"Drop"}`), &reused[0]); err != nil || ruleAsWrittenFault(&reused[0]) != "" {
+		t.Errorf("a clean rule decoded onto a previously marked variable kept the old fault: %q (%v)", ruleAsWrittenFault(&reused[0]), err)
 	}
 	// A hostile key cannot forge a log line and cannot be unbounded.
 	var hostile PolicyRule
@@ -216,7 +221,7 @@ func TestUnknownRuleField_EveryKeyIsNamedBoundedAndNotSticky(t *testing.T) {
 	}
 	// The view that embeds PolicyRule still decodes its own field.
 	var v authRuleView
-	if err := json.Unmarshal([]byte(`{"name":"a","ruleType":"auth","warnings":["w"]}`), &v); err != nil || v.Name != "a" || len(v.Warnings) != 1 || v.decodeFault != "" {
+	if err := json.Unmarshal([]byte(`{"name":"a","ruleType":"auth","warnings":["w"]}`), &v); err != nil || v.Name != "a" || len(v.Warnings) != 1 || ruleAsWrittenFault(&v.PolicyRule) != "" {
 		t.Errorf("authRuleView decode = %+v (%v), want name a, one warning, no unknown key", v, err)
 	}
 }
@@ -257,17 +262,17 @@ var ruleKeysPinned = map[string]bool{
 const ruleKeysAlwaysWritten = 27
 
 // ruleKeyTypes collects, by reflection from root, every struct type whose keys
-// encoding/json reads when it decodes a rule. json.RawMessage (annotations) is
-// not descended into: nothing interprets it.
+// encoding/json reads when it decodes a rule. The annotations container is not
+// descended into: nothing interprets it.
 func ruleKeyTypes(t *testing.T, root reflect.Type) []reflect.Type {
 	t.Helper()
 	var out []reflect.Type
 	var visit func(reflect.Type)
 	visit = func(typ reflect.Type) {
+		if typ == reflect.TypeFor[*ruleAnnotations]() {
+			return // the one container: nothing in it is a rule key
+		}
 		for typ.Kind() == reflect.Pointer || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Array || typ.Kind() == reflect.Map {
-			if typ == reflect.TypeFor[json.RawMessage]() {
-				return
-			}
 			typ = typ.Elem()
 		}
 		if typ.Kind() != reflect.Struct || slices.Contains(out, typ) {
@@ -313,7 +318,7 @@ func checkRuleKeyType(t *testing.T, typ reflect.Type, seen map[string]bool, rule
 			t.Errorf("%s.%s must be a named field with an explicit json key (embedded and untagged fields change which keys a rule accepts)", typ.Name(), f.Name)
 			continue
 		}
-		if f.Type == reflect.TypeFor[json.RawMessage]() {
+		if f.Type == reflect.TypeFor[*ruleAnnotations]() {
 			raw++
 		}
 		key := typ.Name() + "." + name
@@ -398,13 +403,13 @@ func TestRuleKeys_AnnotationsAreCarriedVerbatimNeverInterpretedAndBounded(t *tes
 	}
 	// …and back in through each: still there, still clean.
 	var again ConfigSnapshot
-	if err := json.Unmarshal(snap, &again); err != nil || validateConfigSnapshot(again) != nil || !bytes.Equal(again.PolicyRules[0].Annotations, want.Bytes()) {
-		t.Errorf("annotations did not survive a snapshot round trip: %v / %v / %s", err, validateConfigSnapshot(again), again.PolicyRules[0].Annotations)
+	if err := json.Unmarshal(snap, &again); err != nil || validateConfigSnapshot(again) != nil || !bytes.Equal(again.PolicyRules[0].Annotations.raw, want.Bytes()) {
+		t.Errorf("annotations did not survive a snapshot round trip: %v / %v / %s", err, validateConfigSnapshot(again), again.PolicyRules[0].Annotations.raw)
 	}
 	// A rule without them writes no key at all, and null is the same as absent.
 	var bare PolicyRule
-	if err := json.Unmarshal([]byte(`{"name":"bare","action":"Drop","annotations":null}`), &bare); err != nil || bare.decodeFault != "" {
-		t.Fatalf("annotations:null: %v %q", err, bare.decodeFault)
+	if err := json.Unmarshal([]byte(`{"name":"bare","action":"Drop","annotations":null}`), &bare); err != nil || ruleAsWrittenFault(&bare) != "" {
+		t.Fatalf("annotations:null: %v %q", err, ruleAsWrittenFault(&bare))
 	}
 	if out, _ := json.Marshal(bare); bytes.Contains(out, []byte(ruleAnnotationsKey)) {
 		t.Errorf("an unannotated rule writes the key: %s", out)
@@ -517,8 +522,8 @@ func TestRuleKeys_DuplicateKeyIsRefusedAtEveryDoorClass(t *testing.T) {
 		if err := json.Unmarshal([]byte(tc.body), &r); err != nil {
 			t.Fatalf("%s: %v", label, err)
 		}
-		if got := strings.Contains(r.decodeFault, "duplicate field"); got != tc.dup {
-			t.Errorf("%s: duplicate reported = %v, want %v (%q)", label, got, tc.dup, r.decodeFault)
+		if got := strings.Contains(ruleAsWrittenFault(&r), "duplicate field"); got != tc.dup {
+			t.Errorf("%s: duplicate reported = %v, want %v (%q)", label, got, tc.dup, ruleAsWrittenFault(&r))
 		}
 	}
 	// Control: the same ruleset with the key given once loads, and scopes.
@@ -1132,5 +1137,444 @@ func TestUnknownRuleField_PreflightListsEveryRuleAndPOL004IsUntouched(t *testing
 	ps.ReplaceAll(decoded)
 	if got := ruleNames(ps.List()); len(got) != 1 || got[0] != "typed" {
 		t.Errorf("ReplaceAll installed a ruleset holding an unknown rule key: %v", got)
+	}
+}
+
+// ── Annotations: the bound is a fixed point of every encoder ─────────────────
+
+// annotationEncoders are the ways Culvert writes JSON: Marshal (snapshots, API,
+// stored versions), MarshalIndent (the policy file, the pending draft), and a
+// stream Encoder with and without HTML escaping.
+var annotationEncoders = map[string]func(any) ([]byte, error){
+	"Marshal":       json.Marshal,
+	"MarshalIndent": func(v any) ([]byte, error) { return json.MarshalIndent(v, "", "  ") },
+	"Encoder, no HTML escaping, indented": func(v any) ([]byte, error) {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent(" ", "\t")
+		err := enc.Encode(v)
+		return buf.Bytes(), err
+	},
+}
+
+// annotationEnvelopes are the documents that carry rules, each with the gate
+// its door applies after decoding it.
+var annotationEnvelopes = map[string]struct {
+	wrap   func([]PolicyRule) any
+	reread func([]byte) ([]PolicyRule, error)
+}{
+	"policy file": {
+		func(r []PolicyRule) any { return r },
+		func(b []byte) ([]PolicyRule, error) {
+			ptrs, err := (&PolicyStore{}).decodePolicyFile(b)
+			out := make([]PolicyRule, 0, len(ptrs))
+			for _, p := range ptrs {
+				out = append(out, *p)
+			}
+			return out, err
+		},
+	},
+	"config backup / stored version": {
+		func(r []PolicyRule) any { return configBackup{Version: 1, PolicyRules: r} },
+		func(b []byte) ([]PolicyRule, error) {
+			var cb configBackup
+			if err := json.Unmarshal(b, &cb); err != nil {
+				return nil, err
+			}
+			return cb.PolicyRules, rollbackTargetRefusal(&cb)
+		},
+	},
+	"snapshot / last-good": {
+		func(r []PolicyRule) any { return ConfigSnapshot{Version: 1, PolicyRules: r} },
+		func(b []byte) ([]PolicyRule, error) {
+			var snap ConfigSnapshot
+			if err := json.Unmarshal(b, &snap); err != nil {
+				return nil, err
+			}
+			return snap.PolicyRules, validateConfigSnapshot(snap)
+		},
+	},
+	"HA bundle": {
+		func(r []PolicyRule) any { return HAStateBundle{Config: ConfigSnapshot{Version: 1, PolicyRules: r}} },
+		func(b []byte) ([]PolicyRule, error) {
+			var bundle HAStateBundle
+			if err := json.Unmarshal(b, &bundle); err != nil {
+				return nil, err
+			}
+			return bundle.Config.PolicyRules, validateConfigSnapshot(bundle.Config)
+		},
+	},
+	"pending draft": {
+		func(r []PolicyRule) any {
+			return struct {
+				State draftState   `json:"state"`
+				Rules []PolicyRule `json:"rules"`
+			}{draftState{Active: true}, r}
+		},
+		func(b []byte) ([]PolicyRule, error) {
+			var p struct {
+				Rules ruleList `json:"rules"`
+			}
+			if err := json.Unmarshal(b, &p); err != nil {
+				return nil, err
+			}
+			return p.Rules, policyRulesetError(p.Rules)
+		},
+	},
+}
+
+// annotationsOfCanonicalSize is an object whose canonical form is exactly n bytes.
+func annotationsOfCanonicalSize(n int) string {
+	return `{"a":"` + strings.Repeat("x", n-len(`{"a":""}`)) + `"}`
+}
+
+func decodeAnnotated(t *testing.T, annotations string) PolicyRule {
+	t.Helper()
+	var r PolicyRule
+	if err := json.Unmarshal([]byte(`{"priority":1,"name":"annotated","destFQDN":"a.example.com","action":"Drop","annotations":`+annotations+`}`), &r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return r
+}
+
+// Anything accepted once is accepted, unchanged, after any number of round
+// trips through every encoder and every document that carries rules. Measured
+// before this: a 4004-byte container loaded clean, the store re-saved the file
+// indented (7665 bytes) and the next start refused it; `{"n":"<<<…"}` of 1008
+// bytes was accepted by the API and became 6008 bytes in the snapshot, which
+// every data plane then refused.
+func TestRuleKeys_AnnotationsBoundIsAFixedPointOfEveryEncoder(t *testing.T) {
+	var manyKeys strings.Builder
+	manyKeys.WriteString(`{"k0":0`)
+	for i := 1; manyKeys.Len() < 3990; i++ {
+		manyKeys.WriteString(`,"k` + strconv.Itoa(i) + `":` + strconv.Itoa(i))
+	}
+	manyKeys.WriteString(`}`)
+	deepIndented := strings.Repeat("{\n \"a\" : ", ruleAnnotationsMaxDepth) + "1" + strings.Repeat("\n}", ruleAnnotationsMaxDepth)
+	cases := map[string]struct {
+		annotations string
+		accepted    bool
+	}{
+		"compact, ~4 KiB, many keys (grows when indented)":  {manyKeys.String(), true},
+		"1000 '<' (6 bytes each once escaped)":              {`{"n":"` + strings.Repeat("<", 1000) + `"}`, false},
+		"a few of < > &":                                    {`{"n":"a<b>c&d","<k>":"&"}`, true},
+		"already escaped":                                   {`{"n":"\u003c\u003e\u0026 \" \\ \/ \u00e9 \ud83d\ude00"}`, true},
+		"raw U+2028 and U+2029":                             {"{\"n\":\"a\u2028b\u2029c\"}", true},
+		"10 KiB of whitespace around a small object":        {strings.Repeat(" \n\t", 3400) + `{ "n" : [ 1 , 2 ] }` + strings.Repeat("\r\n", 100), true},
+		"exactly the limit in canonical bytes":              {annotationsOfCanonicalSize(ruleAnnotationsMaxBytes), true},
+		"one canonical byte over the limit":                 {annotationsOfCanonicalSize(ruleAnnotationsMaxBytes + 1), false},
+		"at the limit only before escaping":                 {`{"a":"` + strings.Repeat("x", ruleAnnotationsMaxBytes-13) + `<"}`, false},
+		"at the depth limit, indented":                      {deepIndented, true},
+		"one level over the depth limit, indented":          {"{ \"z\" :\n" + deepIndented + "}", false},
+		"duplicate and condition-looking keys, uninspected": {`{"sourceIP":"10.0.0.0/8","action":"Allow","action":"Drop"}`, true},
+	}
+	for label, tc := range cases {
+		first := decodeAnnotated(t, tc.annotations)
+		ok, reason := ruleEnforceable(&first)
+		if ok != tc.accepted {
+			t.Errorf("%s: first decode accepted=%v (%s), want %v", label, ok, reason, tc.accepted)
+			continue
+		}
+		if !tc.accepted {
+			// Refused however it is written: compact, indented, re-escaped.
+			if out, _ := json.Marshal(first); bytes.Contains(out, []byte(ruleAnnotationsKey)) {
+				t.Errorf("%s: a refused rule still writes its annotations: %.80s…", label, out)
+			}
+			continue
+		}
+		canonical := append([]byte(nil), first.Annotations.raw...)
+		if len(canonical) > ruleAnnotationsMaxBytes {
+			t.Fatalf("%s: canonical form is %d bytes, over the bound it was accepted under", label, len(canonical))
+		}
+		assertAnnotationsFixedPoint(t, label, first, canonical)
+	}
+}
+
+// assertAnnotationsFixedPoint sends one accepted rule three times round every
+// encoder × document pair and requires that it is accepted and unchanged.
+func assertAnnotationsFixedPoint(t *testing.T, label string, first PolicyRule, canonical []byte) {
+	t.Helper()
+	for encName, encode := range annotationEncoders {
+		for envName, env := range annotationEnvelopes {
+			rules := []PolicyRule{first}
+			for trip := 1; trip <= 3; trip++ {
+				data, err := encode(env.wrap(rules))
+				if err != nil {
+					t.Fatalf("%s: %s of a %s: %v", label, encName, envName, err)
+				}
+				rules, err = env.reread(data)
+				if err != nil || len(rules) != 1 {
+					t.Errorf("%s: REFUSED on round trip %d through %s of a %s (%d bytes written): %v", label, trip, encName, envName, len(data), err)
+					break
+				}
+				if !bytes.Equal(rules[0].Annotations.raw, canonical) {
+					t.Errorf("%s: annotations changed on round trip %d through %s of a %s:\n got %.120s\nwant %.120s", label, trip, encName, envName, rules[0].Annotations.raw, canonical)
+					break
+				}
+			}
+		}
+	}
+}
+
+// The two reproductions, through the real doors.
+func TestRuleKeys_AnnotatedRulesetSurvivesItsOwnSaveExportAndPublish(t *testing.T) {
+	const host = "unk-fix.example.com"
+	unkSetup(t, host)
+	var big strings.Builder
+	big.WriteString(`{"k0":0`)
+	for i := 1; big.Len() < 4000; i++ {
+		big.WriteString(`,"k` + strconv.Itoa(i) + `":` + strconv.Itoa(i))
+	}
+	big.WriteString(`}`)
+
+	// Startup sequence: a hand-written policy file WITHOUT rule ids. The first
+	// start loads it, backfills ids and saves the file (indented); the second
+	// start must load what the first one wrote.
+	file := filepath.Join(t.TempDir(), "policy.json")
+	hand := `[{"priority":1,"name":"noted","destFQDN":"` + host + `","action":"Block_Page","annotations":` + big.String() + `}]`
+	if err := os.WriteFile(file, []byte(hand), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	firstStart := &PolicyStore{}
+	if err := firstStart.Load(file); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	rewritten, _ := os.ReadFile(file)
+	if bytes.Equal(rewritten, []byte(hand)) || !bytes.Contains(rewritten, []byte(`"id"`)) {
+		t.Fatalf("setup: the first start did not re-save the file with backfilled ids (%d bytes), so the second start proves nothing", len(rewritten))
+	}
+	if len(rewritten) < 2*len(hand)-len(hand)/2 {
+		t.Logf("note: re-saved file is %d bytes for %d written", len(rewritten), len(hand))
+	}
+	secondStart := &PolicyStore{}
+	if err := secondStart.Load(file); err != nil {
+		t.Fatalf("second start REFUSED the file the first start wrote (%d bytes for %d written): %v", len(rewritten), len(hand), err)
+	}
+	// …and the same through an explicit save, twice more.
+	for i := range 2 {
+		if err := secondStart.SaveErr(); err != nil {
+			t.Fatal(err)
+		}
+		if err := (&PolicyStore{}).Load(file); err != nil {
+			t.Fatalf("reload %d after SaveErr refused: %v", i+1, err)
+		}
+	}
+
+	// API → store → snapshot / export / stored version. What the API accepts,
+	// every data plane, import and rollback accept.
+	w := httptest.NewRecorder()
+	apiPolicy(w, adminRequest(http.MethodPost, "/api/policy", `{"priority":5,"name":"api-noted","destFQDN":"x.`+host+`","action":"Drop","sslAction":"Inspect","annotations":{"n":"a<b>&c `+strings.Repeat("<", 300)+`"}}`))
+	if w.Code != http.StatusOK && w.Code != http.StatusCreated {
+		t.Fatalf("POST: %d %s", w.Code, w.Body.String())
+	}
+	listed := policyStore.List()
+	snap, _ := json.Marshal(ConfigSnapshot{Version: 1, PolicyRules: listed})
+	var onNode ConfigSnapshot
+	if err := json.Unmarshal(snap, &onNode); err != nil || validateConfigSnapshot(onNode) != nil {
+		t.Errorf("a data plane refuses the snapshot of a rule the API accepted: %v / %v", err, validateConfigSnapshot(onNode))
+	}
+	export, _ := json.MarshalIndent(configBackup{Version: 1, PolicyRules: listed}, "", "  ")
+	w = httptest.NewRecorder()
+	apiConfigImport(w, adminRequest(http.MethodPost, "/api/config/import?mode=replace&dryRun=true", string(export)))
+	if w.Code != http.StatusOK {
+		t.Errorf("an export of the running rules is refused at import: %d %s", w.Code, w.Body.String())
+	}
+	// The other reproduction: accepted by nothing, at any door, in any form.
+	w = httptest.NewRecorder()
+	apiPolicy(w, adminRequest(http.MethodPost, "/api/policy", `{"priority":6,"name":"too-big-once-written","action":"Drop","sslAction":"Inspect","annotations":{"n":"`+strings.Repeat("<", 1000)+`"}}`))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), ruleAnnotationsKey) {
+		t.Errorf("a container that is 6008 bytes as Culvert writes it was accepted by the API: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// ── A rule list given twice, and values that survive a decode ────────────────
+
+// assertPreflightRefusesListTwice runs `culvert policy-check` over every
+// document shape holding the duplicated list.
+func assertPreflightRefusesListTwice(t *testing.T, label, format, body string) {
+	t.Helper()
+	dir := t.TempDir()
+	for name, doc := range map[string]string{
+		"backup.json":   body,
+		"snapshot.json": `{"version":7,` + fmt.Sprintf(format, "policy_rules", "Policy_Rules") + `}`,
+		"draft.json":    `{"state":{"active":true},` + fmt.Sprintf(format, "rules", "Rules") + `}`,
+		"stored.json":   `{"meta":{"version":3},"config":` + body + `}`,
+	} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var out, errb bytes.Buffer
+		if code := runPolicyPreflight([]string{path}, &out, &errb); code != 1 || !strings.Contains(out.String(), "rule list twice") {
+			t.Errorf("%s: policy-check %s exit %d, want 1 naming the duplicated list:\n%s%s", label, name, code, out.String(), errb.String())
+		}
+	}
+}
+
+func TestRuleKeys_RuleListGivenTwiceIsRefusedAtEveryDoor(t *testing.T) {
+	bindFreshAdmissionOwners(t)
+	const host = "unk-twice.example.com"
+	version := unkSetup(t, host)
+	// The exact shape reported: the first list holds the faulty, permissive
+	// rule; the second, a bare rule of the same name. encoding/json reused the
+	// slice element, so the VALUES came from the first and the (clean) fault
+	// from the second: rule "a", Allow, any source, no refusal.
+	bad := `[{"priority":1,"name":"a","action":"Allow","destFQDN":"` + host + `","sourceIPs":"10.0.0.0/8"}]`
+	bare := `[{"name":"a"}]`
+	lists := map[string]string{
+		"faulty then bare": `"%[1]s":` + bad + `,"%[1]s":` + bare,
+		"rules then empty": `"%[1]s":[{"priority":1,"name":"only-block","destFQDN":"` + host + `","action":"Block_Page"}],"%[1]s":[]`,
+		"rules then null":  `"%[1]s":[{"priority":1,"name":"only-block","destFQDN":"` + host + `","action":"Block_Page"}],"%[1]s":null`,
+		"other spelling":   `"%[1]s":` + bare + `,"%[2]s":` + strings.Replace(bad, "sourceIPs", "sourceIP", 1),
+	}
+	for label, format := range lists {
+		// Import.
+		body := `{"version":1,` + fmt.Sprintf(format, "policyRules", "POLICYRULES") + `}`
+		for _, q := range []string{"mode=replace", "mode=merge", "mode=replace&dryRun=true"} {
+			w := httptest.NewRecorder()
+			apiConfigImport(w, adminRequest(http.MethodPost, "/api/config/import?"+q, body))
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "rule list twice") {
+				t.Errorf("%s: import %s = %d %s, want 400 naming the duplicated list", label, q, w.Code, w.Body.String())
+			}
+		}
+		assertUnkStillBlocked(t, "import, "+label, host, version)
+		// Snapshot, as fetchAndApply and the last-good loader decode it.
+		var snap ConfigSnapshot
+		if err := json.Unmarshal([]byte(`{"version":1099511627776,`+fmt.Sprintf(format, "policy_rules", "Policy_Rules")+`}`), &snap); err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		var ue *unenforceableRuleError
+		if err := applyConfigSnapshot(snap); !errors.As(err, &ue) || !strings.Contains(err.Error(), "rule list twice") {
+			t.Errorf("%s: applyConfigSnapshot = %v, want a refusal naming the duplicated list", label, err)
+		}
+		assertUnkStillBlocked(t, "snapshot, "+label, host, version)
+		// Stored version and pending draft shapes.
+		var cb configBackup
+		if err := json.Unmarshal([]byte(body), &cb); err != nil || rollbackTargetRefusal(&cb) == nil {
+			t.Errorf("%s: a stored version giving its rule list twice is restorable (%v)", label, err)
+		}
+		var draft struct {
+			Rules ruleList `json:"rules"`
+		}
+		if err := json.Unmarshal([]byte(`{"state":{"active":true},`+fmt.Sprintf(format, "rules", "Rules")+`}`), &draft); err != nil || policyRulesetError(draft.Rules) == nil {
+			t.Errorf("%s: a draft giving its rule list twice is reloadable (%v)", label, err)
+		}
+		assertPreflightRefusesListTwice(t, label, format, body)
+	}
+	// Controls: each list given once is accepted, and null-then-list loses nothing.
+	w := httptest.NewRecorder()
+	apiConfigImport(w, adminRequest(http.MethodPost, "/api/config/import?mode=replace&dryRun=true",
+		`{"version":1,"policyRules":[{"priority":1,"name":"a","action":"Allow","destFQDN":"`+host+`","sourceIP":"10.0.0.0/8"}]}`))
+	if w.Code != http.StatusOK {
+		t.Errorf("control: a backup giving its rule list once is refused: %d %s", w.Code, w.Body.String())
+	}
+	var once ConfigSnapshot
+	if err := json.Unmarshal([]byte(`{"version":1,"policy_rules":null,"policy_rules":`+cleanRulesetJSON(host)+`}`), &once); err != nil || validateConfigSnapshot(once) != nil || len(once.PolicyRules) != 2 {
+		t.Errorf("control: null then a list = %d rule(s), %v / %v", len(once.PolicyRules), err, validateConfigSnapshot(once))
+	}
+}
+
+// Nothing survives from an earlier decode, at any level: a reused slice, a
+// reused rule, a copy of a rule that has annotations; and what the store hands
+// out cannot be used to rewrite what it enforces.
+func TestRuleKeys_NothingSurvivesAnEarlierDecodeAndCopiesDoNotAlias(t *testing.T) {
+	reused := []PolicyRule{}
+	if err := json.Unmarshal([]byte(`[{"name":"a","action":"Allow","sourceIP":"10.0.0.0/8","annotations":{"x":1}}]`), &reused); err != nil {
+		t.Fatal(err)
+	}
+	original := reused[0]
+	kept := string(original.Annotations.raw)
+	if err := json.Unmarshal([]byte(`[{"name":"a"}]`), &reused); err != nil {
+		t.Fatal(err)
+	}
+	if reused[0].Action != "" || reused[0].SourceIP != "" || reused[0].Annotations != nil {
+		t.Errorf("values survived from the earlier decode of the same slice: %+v", reused[0])
+	}
+	clone := original
+	if err := json.Unmarshal([]byte(`{"name":"b","annotations":{"x":2,"padding":"`+strings.Repeat("a", 64)+`"}}`), &clone); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(original.Annotations.raw); got != kept || !json.Valid(original.Annotations.raw) {
+		t.Errorf("decoding onto a COPY of a rule rewrote the original's annotations: %q, was %q", got, kept)
+	}
+	// The store's own copies: what List() hands out cannot be used to rewrite
+	// what the store enforces.
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{original})
+	listed := ps.List()
+	if err := json.Unmarshal([]byte(`{"name":"c","annotations":{"y":3}}`), &listed[0]); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(ps.List()[0].Annotations.raw); got != kept {
+		t.Errorf("the store's annotations changed through a listed copy: %q, was %q", got, kept)
+	}
+}
+
+// policy-check looks at every place a document holds rules, and names the
+// document for what it is.
+func TestRuleKeys_PreflightChecksEveryLocationAndLabelsByShape(t *testing.T) {
+	dir := t.TempDir()
+	run := func(name, body string) (int, string) {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var out, errb bytes.Buffer
+		code := runPolicyPreflight([]string{path}, &out, &errb)
+		return code, out.String() + errb.String()
+	}
+	bogus := `[{"priority":1,"name":"wire","action":"Allow","bogus":1}]`
+	clean := `[{"priority":1,"name":"ok","action":"Drop"}]`
+	for label, tc := range map[string]struct {
+		body, shape string
+		code        int
+	}{
+		"rules beside an object under config":  {`{"config":{"version":1},"policy_rules":` + bogus + `}`, "control-plane snapshot", 1},
+		"rules at both levels, bad one nested": {`{"version":1,"policyRules":` + clean + `,"config":{"policy_rules":` + bogus + `}}`, "config backup + HA state bundle", 1},
+		"rules under two top-level keys":       {`{"version":1,"policyRules":` + clean + `,"policy_rules":` + bogus + `}`, "config backup + control-plane snapshot", 1},
+		"HA bundle":                            {`{"config":{"version":7,"policy_rules":` + bogus + `}}`, "HA state bundle", 1},
+		"stored config version":                {`{"meta":{"version":3},"config":{"version":1,"policyRules":` + bogus + `}}`, "stored config version", 1},
+		"clean HA bundle":                      {`{"config":{"version":7,"policy_rules":` + clean + `}}`, "1 rule(s) in a HA state bundle", 0},
+		"stored version without a policy":      {`{"meta":{"version":3},"config":{"version":1}}`, "0 rule(s) in a stored config version", 0},
+		"no known shape, nested":               {`{"config":{"hello":1}}`, "no policy rules found", 2},
+	} {
+		code, out := run("f.json", tc.body)
+		if code != tc.code || !strings.Contains(out, tc.shape) || (tc.code == 1 && !strings.Contains(out, `"bogus"`)) {
+			t.Errorf("%s: exit %d, want %d and %q:\n%s", label, code, tc.code, tc.shape, out)
+		}
+	}
+}
+
+// PolicyRule is copied into PolicyMatch on every matched request and sits
+// exactly on its malloc size class. The benchgate build measures the
+// allocations; this keeps the size itself in the default test run.
+func TestRuleKeys_ColdDataIsOnePointerAndTheRuleKeepsItsSizeClass(t *testing.T) {
+	// The size classes are 64-bit facts; on a 32-bit build both structs are smaller.
+	const ruleClass, matchClass, mallocHeader = 576, 640, 8
+	if got := unsafe.Sizeof(PolicyRule{}); got > ruleClass-mallocHeader {
+		t.Errorf("PolicyRule is %d bytes, over %d: every matched request allocates a size class more. Cold data belongs behind the Annotations pointer.", got, ruleClass-mallocHeader)
+	}
+	if got := unsafe.Sizeof(PolicyMatch{}); got > matchClass-mallocHeader {
+		t.Errorf("PolicyMatch is %d bytes, over %d", got, matchClass-mallocHeader)
+	}
+	if f, _ := reflect.TypeFor[PolicyRule]().FieldByName("Annotations"); f.Type.Kind() != reflect.Pointer {
+		t.Errorf("Annotations is a %s; it must stay one pointer", f.Type)
+	}
+	// The last-hit time that rides on a rule value is uint32 seconds.
+	for in, want := range map[int64]uint32{-5: 0, 0: 0, 1795651200: 1795651200, math.MaxUint32: math.MaxUint32, math.MaxUint32 + 1: math.MaxUint32, math.MaxInt64: math.MaxUint32} {
+		if got := ruleLastHit32(in); got != want {
+			t.Errorf("ruleLastHit32(%d) = %d, want %d", in, got, want)
+		}
+	}
+	// End to end: a hit is carried out of List() and back into a new publication.
+	ps := &PolicyStore{}
+	ps.ReplaceAll([]PolicyRule{{Priority: 1, Name: "hit", DestFQDN: "h.example.com", Action: ActionBlockPage}})
+	if m := ps.Evaluate("198.51.100.7", "", "", "h.example.com", nil); m == nil || m.Rule.lastHitUnix == 0 {
+		t.Fatalf("a match does not carry its last-hit time: %+v", m)
+	}
+	listed := ps.List()
+	if listed[0].lastHitUnix == 0 || listed[0].LastHit == "" || time.Unix(int64(listed[0].lastHitUnix), 0).UTC().Format(time.RFC3339) != listed[0].LastHit {
+		t.Errorf("List() last-hit = %d / %q", listed[0].lastHitUnix, listed[0].LastHit)
 	}
 }

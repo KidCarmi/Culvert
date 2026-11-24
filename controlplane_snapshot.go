@@ -49,7 +49,7 @@ type ConfigSnapshot struct {
 
 	// Full policy sync — all policy state pushed from CP to DP.
 	DefaultAction     string           `json:"default_action"`         // "allow" or "deny"
-	PolicyRules       []PolicyRule     `json:"policy_rules,omitempty"` // ordered policy rules
+	PolicyRules       ruleList         `json:"policy_rules,omitempty"` // ordered policy rules
 	PolicyVersion     int64            `json:"policy_version"`         // monotonic policy version
 	SSLBypassPatterns []string         `json:"ssl_bypass_patterns,omitempty"`
 	URLCategories     []CategoryEntry  `json:"url_categories,omitempty"`

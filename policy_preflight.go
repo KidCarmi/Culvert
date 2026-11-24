@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // `culvert policy-check <file>...` — the upgrade preflight for POL-005.
@@ -99,38 +100,42 @@ func runPolicyPreflight(argv []string, stdout, stderr io.Writer) int {
 	return status
 }
 
-// preflightDoc is every place a stored JSON object keeps policy rules.
+// preflightDoc is every place a stored JSON object keeps policy rules. The
+// lists are policyRuleRefs, so a rule-list key given twice is reported too.
 type preflightDoc struct {
-	Version     *json.RawMessage `json:"version"`     // a config backup always carries one
-	PolicyRules *[]*PolicyRule   `json:"policyRules"` // config backup
-	State       *json.RawMessage `json:"state"`       // a policy draft always carries one
-	Rules       *[]*PolicyRule   `json:"rules"`       // policy draft
-	Config      *preflightDoc    `json:"config"`      // stored config version: {"meta":…, "config":{backup}}; HA bundle: {"config":{snapshot}}
-	// SnapshotRules is the control-plane snapshot shape, which is also the data
-	// plane's last-known-good file (dp_last_config_snapshot.json). It carries a
-	// "version" too, so without this key it read as a backup holding no rules.
-	SnapshotRules *[]*PolicyRule `json:"policy_rules"`
+	Version     *json.RawMessage `json:"version"`      // a config backup and a snapshot always carry one
+	PolicyRules policyRuleRefs   `json:"policyRules"`  // config backup
+	State       *json.RawMessage `json:"state"`        // a policy draft always carries one
+	Rules       policyRuleRefs   `json:"rules"`        // policy draft
+	Snapshot    policyRuleRefs   `json:"policy_rules"` // control-plane snapshot; the data plane's last-known-good file
+	Config      *preflightDoc    `json:"config"`       // stored config version: {"meta":…, "config":{backup}}; HA bundle: {"config":{snapshot}}
 }
 
-// rules returns every rule the document holds and what kind of document it is.
-func (doc *preflightDoc) rules() (rules []*PolicyRule, shape string) {
-	shape = "config backup"
-	if doc.PolicyRules != nil {
-		rules = append(rules, *doc.PolicyRules...)
+// recognised reports whether the object is one of the known shapes at all.
+func (doc *preflightDoc) recognised() bool {
+	return doc.Version != nil || doc.PolicyRules.present || doc.State != nil || doc.Rules.present || doc.Snapshot.present
+}
+
+// collect appends the rules found at EVERY location this object has, and the
+// name of each shape found: a document is checked wherever it holds rules, not
+// at the first place that matches. nested is true for the object under "config".
+func (doc *preflightDoc) collect(nested bool, rules []*PolicyRule, shapes []string) (allRules []*PolicyRule, allShapes []string) {
+	backup, snapshot := "config backup", "control-plane snapshot"
+	if nested {
+		backup, snapshot = "stored config version", "HA state bundle"
 	}
-	if doc.SnapshotRules != nil {
-		rules = append(rules, *doc.SnapshotRules...)
-		if doc.PolicyRules == nil {
-			shape = "control-plane snapshot"
+	for _, at := range []struct {
+		list  *policyRuleRefs
+		shape string
+	}{{&doc.PolicyRules, backup}, {&doc.Snapshot, snapshot}, {&doc.Rules, "policy draft"}} {
+		if at.list.present {
+			rules, shapes = append(rules, at.list.rules...), append(shapes, at.shape)
 		}
 	}
-	if doc.Rules != nil {
-		rules = append(rules, *doc.Rules...)
-		if doc.PolicyRules == nil && doc.SnapshotRules == nil {
-			shape = "policy draft"
-		}
+	if len(shapes) == 0 && doc.recognised() {
+		shapes = append(shapes, backup) // a backup need not carry a policy section
 	}
-	return rules, shape
+	return rules, shapes
 }
 
 // readPreflightRules decodes one of the stored shapes. Rules are decoded as
@@ -148,21 +153,16 @@ func readPreflightRules(path string) (rules []*PolicyRule, shape string, err err
 	}
 	var doc preflightDoc
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, "", fmt.Errorf("not valid JSON for a policy file, config backup, stored config version or policy draft: %w", err)
+		return nil, "", fmt.Errorf("not valid JSON for a policy file, config backup, stored config version, policy draft or control-plane snapshot: %w", err)
 	}
-	stored := doc.Config != nil
-	if stored {
-		doc = *doc.Config
+	rules, shapes := doc.collect(false, nil, nil)
+	if doc.Config != nil {
+		rules, shapes = doc.Config.collect(true, rules, shapes)
 	}
-	recognised := doc.Version != nil || doc.PolicyRules != nil || doc.State != nil || doc.Rules != nil || doc.SnapshotRules != nil
-	if !recognised {
+	if len(shapes) == 0 {
 		return nil, "", fmt.Errorf("no policy rules found: expected a JSON array of rules, a config backup, a stored config version, a policy draft or a control-plane snapshot")
 	}
-	rules, shape = doc.rules()
-	if stored {
-		shape = "stored config version"
-	}
-	return rules, shape, nil
+	return rules, strings.Join(shapes, " + "), nil
 }
 
 // preflightFindings applies the same per-rule decisions as the POL-005 gate

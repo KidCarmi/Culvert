@@ -99,8 +99,8 @@ func initPolicyDraft(policyPath string) {
 		return // no pending draft
 	}
 	var p struct {
-		State draftState   `json:"state"`
-		Rules []PolicyRule `json:"rules"`
+		State draftState `json:"state"`
+		Rules ruleList   `json:"rules"`
 	}
 	if json.Unmarshal(data, &p) != nil || !p.State.Active {
 		return
@@ -359,8 +359,8 @@ func (c *policyDraftCoordinator) durableTargetPresent(ruleID string) bool {
 		return false
 	}
 	var p struct {
-		State draftState   `json:"state"`
-		Rules []PolicyRule `json:"rules"`
+		State draftState `json:"state"`
+		Rules ruleList   `json:"rules"`
 	}
 	if json.Unmarshal(raw, &p) != nil || !p.State.Active {
 		return false

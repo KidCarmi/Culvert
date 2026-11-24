@@ -71,9 +71,16 @@ Scope:
   already strict at import and stays so.
 - **Not** the contents of `annotations`.
 
+A **rule list given twice** in one document (`"policyRules":[…],"policyRules":[…]`, and likewise
+`policy_rules` and `rules`) is the same defect one level up: the first list is discarded, which can
+remove every rule (`[…]` then `[]`). Every envelope declares its list as `ruleList`, which
+notices the second decode and adds an entry the gate refuses.
+
 Mechanism: `PolicyRule` decodes itself (`UnmarshalJSON`, `policy_unknown_field.go`): the rule is
-decoded as before, its keys are read a second time against the struct's fields, and what cannot be
-honoured is recorded in an unexported field instead of failing the surrounding document.
+decoded onto a zero value (so nothing survives from an earlier decode of the same slice element or
+variable, and no bytes are shared with it), its keys are read a second time against the struct's
+fields, and what cannot be honoured is recorded on the rule instead of failing the surrounding
+document. No production caller decodes a partial rule onto a populated one.
 `ruleEnforceable` refuses a rule so marked. There is no per-door code; `PolicyStore.ReplaceAll` and
 `Load` are the backstop. The single-rule API handlers call one helper, `decodeRuleJSON`. Each rule's
 JSON is read twice; these are load-time paths.
@@ -100,10 +107,26 @@ version and the wire:
 `annotations` is one reserved key on a rule: a JSON object whose contents this build and every later
 one carry without interpreting. It never affects a match, an action or validation.
 
-- Carried verbatim through the store, the policy file, export, stored versions and snapshots, so
-  what a newer node writes there survives a pass through an older one (tested).
-- Bounded at decode: an object, at most 4096 bytes and 8 levels as written. The limits are part of
-  the format and must not be raised, or an older node would refuse what a newer one accepts.
+- Carried through the store, the policy file, export, stored versions and snapshots, so what a
+  newer node writes there survives a pass through an older one (tested).
+- Held and bounded in **canonical form**: compact JSON, escaped as `encoding/json` escapes when it
+  writes (`<`, `>`, `&`, U+2028, U+2029 as `\uXXXX`). At most 4096 bytes and 8 levels of that form.
+  The first version measured the bytes as written, and Culvert's own encoders enlarge those: a
+  4004-byte container loaded clean, the store re-saved the policy file indented (7665 bytes) and the
+  next start was fatal; `{"n":"<<<…"}` of 1008 bytes was accepted by the API and was 6008 bytes in
+  the snapshot every data plane then refused. The canonical form is a fixed point of every encoder
+  in use (Marshal, MarshalIndent, a stream encoder with or without HTML escaping), so a rule
+  accepted once is accepted after any number of save, export and publish round trips, and a rule
+  refused is refused however it is written. Tested for adversarial contents through every
+  encoder × document pair, and through the "no rule ids → first start saves → second start" sequence.
+  The limits are part of the format and must not be raised, or an older node would refuse what a
+  newer one accepts. `null` is the same as absent.
+- It is one pointer on the rule, not the bytes. `PolicyRule` is copied into `PolicyMatch` on every
+  matched request and sat exactly on its malloc size class (568 bytes in the 576 class); the inline
+  form made it 608 and cost 64 B on every match. The pointer's 8 bytes come from `lastHitUnix`, an
+  unexported transport field, now `uint32` seconds placed in existing padding (saturates in 2106;
+  the authoritative timestamp in the counters cell stays `int64`). The pointee is immutable once
+  decoded and is shared by rule copies.
 - The legal place for a hand-editor's note. The refusal text and `culvert policy-check` say so.
 - Not preserved by a rule edit that omits it: `PUT /api/policy` replaces a rule whole, and neither
   admin UI sends `annotations`, so editing a rule in a UI removes them. Server-stamped data that must
@@ -176,8 +199,6 @@ node, and warn before an operator saves such a rule while older nodes are enroll
 
 ## Left for the owner
 
-- **API contract version.** `annotations` is a new optional property on the `PolicyRule` schema,
-  which the versioning policy classes as MINOR. `info.version` is not bumped here.
 - **Carrying `annotations` across a UI edit** (above).
 - **The auth view's `warnings`.** `GET /api/authpolicy` adds a `warnings` array to each rule. Echoing
   it back on `PUT` was and is a `400`. Neither UI does. Documented in the OpenAPI text.
@@ -193,7 +214,7 @@ through one door, and requires that the client is still blocked (`policyStore.Ev
 and version are unchanged, and the refusal names the rule and the key. Each door has a control in
 which the correctly spelt ruleset is accepted through the same door and the Allow is scoped as
 written: single rule, import (preview), policy file, rollback, pending draft, `applyConfigSnapshot`,
-`fetchAndApply`. `applyDeltaReply` is covered for the refusal only. Negative controls: with the fault
-not recorded, 14 of the 15 tests fail (the 15th is the key pin, which fails when a key is added);
-each of duplicates, annotation bounds, the full key list, the preflight's `policy_rules`, the
-last-good row and the startup wording fails its own test when disabled alone.
+`fetchAndApply`. `applyDeltaReply` is covered for the refusal only. Negative controls are recorded
+in the change's verification notes: each mechanism (fault recording, duplicates, the canonical
+bound, zero-value decode, the duplicated list, the preflight locations, the last-good row, the
+startup wording, the key pin, the struct size) fails its own test when disabled alone.
