@@ -179,7 +179,7 @@ gaps and make the #2051 executor the single path every recovery takes.
   1. Attribution lives in the operation's own journal record, never in a
      global marker or a parallel ops array, and never in a cross-record
      ownership check. Before a Docker-changing command the op writes an
-     intent (`{step, command, began}`); when the command RETURNS to a live
+     intent (`{step, command, began, epoch}`); when the command RETURNS to a live
      process, success or error, the intent is closed, in a defer so a panic
      closes it too. The intent write is best-effort, not fail-closed: an
      absent intent only withholds attribution (a death in the command is
@@ -212,9 +212,25 @@ gaps and make the #2051 executor the single path every recovery takes.
   4. The settle/hazard marker (#2076) keeps answering "may dockerd still be
      finishing something"; it is not an attribution source. Mixing the two
      is how a fix to #2093 broke.
-  5. The intent fields are schema 2 (slice 2): a pre-ADR agent would drop an
-     open intent on rewrite and lose the consumed state, so the fence is up
-     while any intent is open.
+  5. An open intent carries an epoch: the record's `interrupted_seen` when
+     the command began. The start that takes it attributes the death only
+     on epoch equality, so any start that durably counted in between (an
+     older agent that carried the unknown key, for one) makes it stale.
+     Attribution after the take lives only in that process's memory; on
+     disk the cut is diagnostics. The epoch alone is not enough: older
+     agents count best-effort, so one that serves while its count write
+     fails leaves the epoch equal, and an operator acting on what it
+     reported is contradicted when this build returns. While an intent is
+     open the journal therefore holds a second fence (generation 2,
+     `00000000000000000000000001`, phase `schema_fence`): agents before
+     slice 3 do not skip that name, so every one of them, slice-2 agents
+     included, refuses to serve. The fence is raised before the intent;
+     if it cannot be raised, no intent is written and nothing is
+     attributed (the command still runs). It is removed once no record
+     holds an intent, and a fence left by a crash is removed at the next
+     start of this build. The intent does not raise the record schema.
+     (Amended: the first text made the intent schema 2 behind the
+     generation-1 fence, which slice-2 agents skip by name.)
 - Acceptance cases (repro tests from the #2093 reviews), each must start
   nothing: (A) cut after the target's `up` → report → operator `down` →
   restart; (B) two records, the newer op's `up` cut: the older record does
