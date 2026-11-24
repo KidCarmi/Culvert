@@ -38,6 +38,7 @@ type reconWorld struct {
 	down     bool   // Docker does not answer: every command fails
 	onUp     func() // called while `up` runs (outside the lock)
 	upNoop   int    // this many `up` calls exit 0 without starting anything
+	upStarts string // when set, `up` starts this image whatever the tag says
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -118,6 +119,9 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 			break
 		}
 		w.running = w.pinned
+		if w.upStarts != "" {
+			w.running = w.upStarts
+		}
 	}
 	return nil
 }

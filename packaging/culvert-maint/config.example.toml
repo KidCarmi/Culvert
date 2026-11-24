@@ -132,13 +132,17 @@ proxy_repo = "ghcr.io/kidcarmi/culvert"
 #              runs it; finish a rollback the journal proves was armed; or
 #              accept an upgrade the journal proves passed its health gate and
 #              digest check and that answers /ready now; or, when the proxy is
-#              down because the agent's own `compose up` was cut (it leaves a
-#              marker under state_dir/mutation) and the upgrade had not been
+#              down because that upgrade's own `compose up` was cut (it leaves
+#              a marker under state_dir/mutation, used by the first start that
+#              finds it and by no later one) and the upgrade had not been
 #              verified, put the tag back on the image that was serving before,
 #              start it, and require it to answer /ready. Anything else is
-#              reported as recovery_required and nothing is changed. It never
-#              pulls, never runs `down`, and never starts the upgrade's target
-#              image. If Docker cannot be read it defers.
+#              reported as recovery_required; so is an action that fails its
+#              check, with what it changed left in place. It never pulls, never
+#              runs `down`, and never starts the upgrade's target image. If
+#              Docker cannot be read it defers.
+#              Note: a stack taken down by hand between the crash and the
+#              agent's next start looks the same as the crash, and is restored.
 # An agent older than this setting refuses to start with it present: remove
 # it before downgrading.
 #reconcile_on_startup = "off"

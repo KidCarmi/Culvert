@@ -431,7 +431,13 @@ def judge(rec):
     if rec.get("drain") in HELD_DRAINS and "/stop" in (rec.get("last_request_daemon_saw") or ""):
         d = rec.get("drain_secs")
         least, about, what = HELD_DRAINS[rec["drain"]]
-        if d is None or d < least:
+        # What has to be true is that the shutdown was still held when the
+        # follow-up began. An old container that goes sooner than `least`
+        # because the follow-up operation itself removed it (an `up` that
+        # recreates, with no settle wait) was held for as long as it mattered.
+        began = rec.get("follow_started_after_s")
+        removed_by_follow_up = d is not None and began is not None and rec["follow"] in ("rollback", "apply") and d >= began
+        if d is None or (d < least and not removed_by_follow_up):
             return "INVALID", [f"the pending {what} did not hold the proxy's shutdown (old container gone after {d}s; expected about {about}s)"]
     if rec["follow"] in ("rollback", "apply") and not (op and op.get("admitted") and op.get("state") in ("succeeded", "failed")):
         # The trial is about what the next operation does. One that was refused,
@@ -486,7 +492,7 @@ def judge_all(expect_fence_violation, want_trials):
                          f" at_restart[{fmt(rec['truth_at_restart'])}]"
                          + (f" op={op.get('state') if op.get('admitted') else 'refused'}" if op else "")
                          + (f" op_secs={op.get('secs')}" if op and op.get('admitted') else "")
-                         + (f" drain={rec.get('drain_secs')}s follow_at={rec.get('follow_started_after_s')}s" if rec.get('drain') in HELD_DRAINS else "")
+                         + (f" drain={'none' if rec.get('drain_secs') is None else str(rec['drain_secs']) + 's'} follow_at={rec.get('follow_started_after_s')}s" if rec.get('drain') in HELD_DRAINS else "")
                          + (f" converge={[(x.get('decision'), x.get('outcome')) for x in ((rec['status_after_converge'].get('reconcile') or {}).get('records') or [])]}" if rec['follow'] == 'converge' else "")
                          + f" at_rest[{fmt(rec['truth_at_rest'])}] records={len(rec['status_at_rest']['interrupted'])}")
             print(line)

@@ -44,6 +44,11 @@ type MutationLog struct {
 	// including what was found on disk at open. The marker names all of them:
 	// a later command must not make an earlier, unfinished one look milder.
 	open []string
+	// ops runs parallel to open: the operation each command was run for ("" when
+	// none was given, and for everything read from a marker that did not say).
+	ops []string
+	// started is when the marker now on disk was first written.
+	started time.Time
 }
 
 // The commands a marker can name.
@@ -55,7 +60,14 @@ const (
 
 // MutationMarker is the marker's content.
 type MutationMarker struct {
-	Commands  []string  `json:"commands"`
+	Commands []string `json:"commands"`
+	// Ops, when present, runs parallel to Commands: the operation each command
+	// was run for. A marker written before this field existed has none, and
+	// then no operation can be named as the owner of anything.
+	Ops []string `json:"ops,omitempty"`
+	// Seen: an agent start has already found this marker and acted (or
+	// declined to act) on it. Every Begin writes it false again.
+	Seen      bool      `json:"seen,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 }
 
@@ -74,6 +86,19 @@ type MutationAtOpen struct {
 	// `compose up`. Anything else (a `compose down`, an unreadable or empty
 	// marker) is false.
 	OnlyUp bool
+	// FreshUpOf names the one operation whose `compose up` this start is the
+	// FIRST to find unfinished: the marker is readable, names nothing but
+	// `compose up`, attributes every one of them to that same operation, no
+	// earlier start has found it, and it has now been durably stamped as seen.
+	// Empty in every other case, including when that stamp could not be
+	// written.
+	//
+	// It is the only evidence on which a start may conclude "the proxy is down
+	// because that operation's `compose up` was cut" (AGT-900 restore_prior).
+	// Single use is the point: a marker can outlive the outage it describes
+	// (a start that finds the proxy running keeps it), and whatever takes the
+	// stack down after that start is not the operation's doing.
+	FreshUpOf string
 }
 
 const (
@@ -102,19 +127,22 @@ func OpenMutationLog(stateDir string) (*MutationLog, MutationAtOpen, error) {
 	// written.
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		at.Pending = true
-		m.open = []string{mutationUnknown}
+		m.open, m.ops = []string{mutationUnknown}, []string{""}
 		return m, at, fmt.Errorf("journal: mkdir %s: %w", mutationDirName, err)
 	}
 	sentinel := filepath.Join(dir, mutationSentinelName)
 	if _, err := os.Stat(sentinel); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			at.Pending = true
-			m.open = []string{mutationUnknown}
+			m.open, m.ops = []string{mutationUnknown}, []string{""}
 			return m, at, fmt.Errorf("journal: stat %s: %w", mutationSentinelName, err)
 		}
 		at.FirstUse = true
 	}
-	onDisk := m.readMarker(&at)
+	onDisk, fresh := m.readMarker(&at)
+	if fresh != "" && !at.FirstUse && m.stampSeen() == nil {
+		at.FreshUpOf = fresh
+	}
 	if at.FirstUse {
 		at.Pending, at.OnlyUp = true, false
 		if err := m.recordFirstUse(stateDir, sentinel, onDisk); err != nil {
@@ -133,7 +161,7 @@ func (m *MutationLog) recordFirstUse(stateDir, sentinel string, onDisk bool) err
 	if !onDisk || m.open[len(m.open)-1] != mutationUnknown {
 		if err := m.Begin(mutationUnknown); err != nil {
 			m.mu.Lock()
-			m.open = append(m.open, mutationUnknown) // in memory at least
+			m.open, m.ops = append(m.open, mutationUnknown), append(m.ops, "") // in memory at least
 			m.mu.Unlock()
 			return err
 		}
@@ -144,37 +172,80 @@ func (m *MutationLog) recordFirstUse(stateDir, sentinel string, onDisk bool) err
 	return atomicWrite(sentinel, []byte("markers kept since first use\n"), fileMode)
 }
 
-// readMarker loads what is on disk into m.open and at. It reports whether a
-// marker was read and understood (a durable list of commands is on disk).
-func (m *MutationLog) readMarker(at *MutationAtOpen) bool {
+// readMarker loads what is on disk into m and at. onDisk: a marker was read
+// and understood (a durable list of commands is on disk). freshUpOf: see
+// MutationAtOpen.FreshUpOf; the caller still has to stamp the marker as seen.
+func (m *MutationLog) readMarker(at *MutationAtOpen) (onDisk bool, freshUpOf string) {
 	data, err := os.ReadFile(m.path())
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return false
+		return false, ""
 	case err != nil:
 		// Unreadable is not "absent".
 		at.Pending = true
-		m.open = []string{mutationUnknown}
-		return false
+		m.open, m.ops = []string{mutationUnknown}, []string{""}
+		return false, ""
 	}
 	at.Pending = true
 	var mk MutationMarker
 	if json.Unmarshal(data, &mk) != nil || len(mk.Commands) == 0 {
-		m.open = []string{mutationUnknown}
-		return false
+		m.open, m.ops = []string{mutationUnknown}, []string{""}
+		return false, ""
 	}
-	m.open = mk.Commands
+	m.open, m.started = mk.Commands, mk.StartedAt
+	m.ops = make([]string, len(mk.Commands))
+	attributed := len(mk.Ops) == len(mk.Commands)
+	if attributed {
+		copy(m.ops, mk.Ops)
+	}
 	at.OnlyUp = true
-	for _, c := range mk.Commands {
+	owner := m.ops[0]
+	for i, c := range mk.Commands {
 		if c != MutationComposeUp {
 			at.OnlyUp = false
 		}
 		if c == MutationComposeUp || c == MutationComposeDown {
 			at.NamesCommand = true
 		}
+		if m.ops[i] != owner {
+			owner = ""
+		}
 	}
-	return true
+	// An unattributed marker left every m.ops entry empty, so owner is "".
+	if !at.OnlyUp || mk.Seen {
+		owner = ""
+	}
+	return true, owner
 }
+
+// stampSeen rewrites the marker found at open with Seen set, durably.
+func (m *MutationLog) stampSeen() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.write(m.open, m.ops, true)
+}
+
+// write puts the marker on disk. started is kept from the marker's first
+// write, so stamping or extending one does not make it look new.
+func (m *MutationLog) write(cmds, opIDs []string, seen bool) error {
+	started := m.started
+	if started.IsZero() {
+		started = time.Now().UTC()
+	}
+	data, err := json.Marshal(MutationMarker{Commands: cmds, Ops: opIDs, Seen: seen, StartedAt: started})
+	if err != nil {
+		return fmt.Errorf("journal: marshal mutation marker: %w", err)
+	}
+	if err := writeMarkerFile(m.path(), data, fileMode); err != nil {
+		return err
+	}
+	m.started = started
+	return nil
+}
+
+// writeMarkerFile is atomicWrite; a test replaces it to make the marker
+// unwritable for any user.
+var writeMarkerFile = atomicWrite
 
 func (m *MutationLog) path() string { return filepath.Join(m.dir, mutationFileName) }
 
@@ -186,21 +257,26 @@ func (m *MutationLog) Pending() bool {
 	return len(m.open) > 0
 }
 
-// Begin writes the marker durably, naming command and every command begun
-// since the marker was last removed. An error means the command must not be
-// run.
-func (m *MutationLog) Begin(command string) error {
+// Begin is BeginFor without an operation.
+func (m *MutationLog) Begin(command string) error { return m.BeginFor(command, "") }
+
+// BeginFor writes the marker durably, naming command, the operation it is run
+// for (opID, "" when there is none) and every command begun since the marker
+// was last removed. An error means the command must not be run.
+//
+// The marker it writes is unseen: if this process dies in the command, the
+// next start is the first to find it.
+func (m *MutationLog) BeginFor(command, opID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cmds := append(append([]string(nil), m.open...), command)
-	data, err := json.Marshal(MutationMarker{Commands: cmds, StartedAt: time.Now().UTC()})
-	if err != nil {
-		return fmt.Errorf("journal: marshal mutation marker: %w", err)
-	}
-	if err := atomicWrite(m.path(), data, fileMode); err != nil {
+	opIDs := make([]string, len(m.open), len(cmds))
+	copy(opIDs, m.ops) // m.ops may be shorter after an in-memory-only append
+	opIDs = append(opIDs, opID)
+	if err := m.write(cmds, opIDs, false); err != nil {
 		return err
 	}
-	m.open = cmds
+	m.open, m.ops = cmds, opIDs
 	return nil
 }
 
@@ -217,6 +293,6 @@ func (m *MutationLog) End() error {
 	if err := fsyncDir(m.dir); err != nil {
 		return err
 	}
-	m.open = nil
+	m.open, m.ops, m.started = nil, nil, time.Time{}
 	return nil
 }

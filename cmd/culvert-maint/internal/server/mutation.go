@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"culvert-maint/internal/journal"
+	"culvert-maint/internal/ops"
 	"culvert-maint/internal/runner"
 )
 
@@ -27,16 +28,19 @@ import (
 // unfinished. A marker that stays costs a wait at the next start, never a
 // missed one.
 func (s *Server) composeUp(ctx context.Context) (*runner.Result, error) {
-	return s.markedMutation(journal.MutationComposeUp, func() (*runner.Result, error) { return s.opts.Runner.ComposeUp(ctx) })
+	return s.markedMutation(ctx, journal.MutationComposeUp, func() (*runner.Result, error) { return s.opts.Runner.ComposeUp(ctx) })
 }
 
 func (s *Server) composeDown(ctx context.Context) (*runner.Result, error) {
-	return s.markedMutation(journal.MutationComposeDown, func() (*runner.Result, error) { return s.opts.Runner.ComposeDown(ctx) })
+	return s.markedMutation(ctx, journal.MutationComposeDown, func() (*runner.Result, error) { return s.opts.Runner.ComposeDown(ctx) })
 }
 
-func (s *Server) markedMutation(command string, run func() (*runner.Result, error)) (*runner.Result, error) {
+// The marker names the operation the command is run for (ops.OpIDFrom): a
+// later start may attribute an outage to an interrupted `compose up` only for
+// that operation's own record (startup_reconcile.go, upInterruptedFor).
+func (s *Server) markedMutation(ctx context.Context, command string, run func() (*runner.Result, error)) (*runner.Result, error) {
 	mayClear := s.markerMayBeCleared() // asked before the command runs
-	if err := s.mutations.Begin(command); err != nil {
+	if err := s.mutations.BeginFor(command, ops.OpIDFrom(ctx)); err != nil {
 		return nil, fmt.Errorf("%s not started: the in-flight marker could not be written: %w", command, err)
 	}
 	res, err := run()

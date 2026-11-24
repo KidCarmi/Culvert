@@ -446,6 +446,71 @@ func TestOffMode_StatusAndStateUnchanged(t *testing.T) {
 	}
 }
 
+// killAgentAt arms the Docker model to block at point, starts the agent, and
+// SIGKILLs it once it is blocked there.
+func (r *crashRig) killAgentAt(point string) {
+	r.t.Helper()
+	r.put("block_on", point)
+	r.start()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(filepath.Join(r.model, "blocked")); err == nil {
+			r.kill()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	r.t.Fatalf("the agent never reached %q; output:\n%s\ncalls:\n%s", point, r.logs.String(), r.read("calls.log"))
+}
+
+// TestConvergeRecovery_AMarkerIsEvidenceForOneStartOnly: the upgrade's `compose
+// up` was cut AFTER the target came up. The start that follows finds the target
+// running and, rightly, only reports; record and marker stay. Later the stack
+// is taken down by hand and the agent restarts. The marker is still there and
+// still names only that `compose up`, but it describes nothing about THIS
+// outage: starting the prior image now would undo an operator's action (and
+// start a version that was not the one serving). The second start must only
+// report.
+func TestConvergeRecovery_AMarkerIsEvidenceForOneStartOnly(t *testing.T) {
+	r := newCrashRig(t)
+	r.pastFirstUse("0s")
+	r.start()
+	opID := r.crashAt("up_after:1") // killed inside `compose up`; the target is running
+	r.converge("")
+	r.clearCalls()
+	r.start()
+	assertConverge(t, r, opID, convergeCase{nil, false, "target_live_ungated", imgB, imgB, true})
+	r.kill() // an ordinary agent restart, later
+	if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
+		t.Fatal(err) // the operator took the stack down
+	}
+	r.clearCalls()
+	r.start()
+	assertConverge(t, r, opID, convergeCase{nil, false, "stack_down", imgB, "", true})
+}
+
+// TestConvergeRecovery_ACutRestoreIsRetriedOnceAndNoMore: the restore's own
+// `compose up` is cut as well. The next start is the first to find THAT cut,
+// it is still this operation's, and one attempt is left: the prior image is
+// restored. The attempt cap (2) bounds it: a third start would only report.
+func TestConvergeRecovery_ACutRestoreIsRetriedOnceAndNoMore(t *testing.T) {
+	r := newCrashRig(t)
+	r.pastFirstUse("0s")
+	r.start()
+	opID := r.crashAt("up_before:1")
+	if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
+		t.Fatal(err)
+	}
+	r.converge("")
+	r.killAgentAt("up_before:2") // the restore got as far as its own `compose up`
+	if got := r.read("running"); got != "" {
+		t.Fatalf("a container (%.8s) runs after the cut restore; the test needs the proxy down", got)
+	}
+	r.clearCalls()
+	r.start()
+	assertConverge(t, r, opID, convergeCase{[]string{"tag:" + refA, "up"}, true, "stack_down_up_interrupted", imgA, imgA, false})
+}
+
 // TestConvergeRecovery_RestoresThePriorImageWhenTheProxyIsDown: the agent died
 // inside `compose up` and the proxy is not running. With the marker of that
 // unfinished `up` on disk, the next start (converge) puts the tag back on the
@@ -453,11 +518,22 @@ func TestOffMode_StatusAndStateUnchanged(t *testing.T) {
 // record: no operator action. Without the marker the same state is only
 // reported, and nothing is started.
 func TestConvergeRecovery_RestoresThePriorImageWhenTheProxyIsDown(t *testing.T) {
-	for _, withMarker := range []bool{true, false} {
-		name := map[bool]string{true: "own_up_cut", false: "no_marker"}[withMarker]
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		withMarker bool
+		settle     string
+	}{
+		{"own_up_cut", true, "0s"},
+		// With a settle window: no proxy container is listed, so the wait ends
+		// on the two quiet reads and the restore follows. It must not need the
+		// window to be switched off.
+		{"own_up_cut_settle_window", true, "20s"},
+		{"no_marker", false, "0s"},
+	} {
+		withMarker := tc.withMarker
+		t.Run(tc.name, func(t *testing.T) {
 			r := newCrashRig(t)
-			r.pastFirstUse("0s")
+			r.pastFirstUse(tc.settle)
 			r.start()
 			opID := r.crashAt("up_before:1") // tag on B, the agent inside `compose up`
 			if err := os.Remove(filepath.Join(r.model, "running")); err != nil {

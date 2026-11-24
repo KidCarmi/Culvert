@@ -390,9 +390,20 @@ image that was serving before the upgrade, when ALL of this holds:
 
 - no proxy container is running, and the record is an upgrade at `restarting`
   or `restarted`, or one whose inline rollback was armed;
-- **the outage is attributable to the agent**: the start found a readable
-  mutation marker that names nothing but `compose up`. Without it the stack may
-  be down because an operator took it down, and starting it would undo that;
+- **the outage is attributable to this operation's own `compose up`**, which
+  takes three things together. The start found a readable mutation marker that
+  names nothing but `compose up`. Every one of those commands was run for the
+  operation of THIS record (each marker entry carries the op id: the upgrade,
+  its inline rollback, or an earlier restore of the same record). And this is
+  the **first** start to find that marker: the start stamps it as seen,
+  durably, before it decides anything, and is told nothing if the stamp cannot
+  be written. A marker that names only `compose up` is not enough on its own.
+  It outlives the outage it describes whenever the start that finds it only
+  reports (the target was running), and whatever takes the stack down after
+  that, an operator included, is not the operation's doing; and with more than
+  one record left, the marker belongs to one of them at most (an independent
+  review reproduced both: a prior image started after an operator's manual
+  stop, and a record restoring an image two generations back);
 - the upgrade had not reached `verified`. A verified upgrade is not silently
   undone, and the target image is never started here: `stack_down_after_verified`
   is reported instead;
@@ -409,6 +420,17 @@ keeps failing ends as `recovery_required`, not as a loop. With the marker's
 early end of the settle wait, the start does not sit out the window first: the
 proxy is down, so two reads of Docker establish that no stop is pending.
 
+A restore whose own `compose up` is cut writes a new, unseen marker entry under
+the same operation, so the next start may try once more; the attempt cap ends
+it there.
+
 Not done: starting the target image; acting on a standalone rollback's record
 (its journal says nothing about how far it got); acting on a first start that
-keeps markers, whose "unknown" marker names no command.
+keeps markers, whose "unknown" marker names no command; acting on a marker left
+by an agent version that did not record the operation.
+
+Not distinguishable, and accepted: an operator who takes the stack down by
+hand in the interval between the cut `compose up` and the first agent start
+after it. To that start the state is the same as the crash it exists to
+recover from, and it restores the prior image. Leaving `reconcile_on_startup`
+at its default avoids it.

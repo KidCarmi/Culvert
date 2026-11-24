@@ -146,12 +146,13 @@ type reconcileInputsV2 struct {
 
 	Probe probeState
 
-	// UpInterrupted: this agent process found, at its start, a readable
-	// mutation marker that names nothing but `compose up`
-	// (journal.MutationLog), and has not cleared it. It is the evidence that a
-	// proxy that is down is down because the agent's own recreate was cut, and
-	// not because an operator took the stack down. Read from disk by the
-	// caller; not a Docker fact.
+	// UpInterrupted: this agent process is the FIRST to find, at its start, a
+	// readable mutation marker that names nothing but `compose up` commands
+	// run for THIS record's operation (journal.MutationAtOpen.FreshUpOf), and
+	// has not cleared it since (Server.upInterruptedFor). It is the evidence
+	// that a proxy that is down is down because this operation's recreate was
+	// cut, and not because an operator, or another operation, took the stack
+	// down. Read from disk by the caller; not a Docker fact.
 	UpInterrupted bool
 }
 
@@ -267,9 +268,9 @@ func decideDangerPhaseV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 // The prior image is restored only when every one of these holds. Each is a
 // reason the agent may start a container on its own:
 //
-//   - UpInterrupted: the outage is attributable to the agent's own `compose
-//     up` having been cut. Without the marker the stack may be down because an
-//     operator took it down, and starting it would undo that.
+//   - UpInterrupted: the outage is attributable to the `compose up` of this
+//     record's operation having been cut. Without that the stack may be down
+//     because an operator took it down, and starting it would undo that.
 //   - The upgrade had not been verified. At phase verified (and no rollback
 //     armed) the target passed its gate and digest check before the crash;
 //     going back to the prior image would silently undo a good upgrade, and

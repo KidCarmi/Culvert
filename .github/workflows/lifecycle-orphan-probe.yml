@@ -89,7 +89,13 @@ jobs:
             git fetch --no-tags origin "$ref"
             git worktree add --detach "$RUNNER_TEMP/src-$v" FETCH_HEAD
             echo "$v: $ref = $(git -C "$RUNNER_TEMP/src-$v" rev-parse HEAD)"
-            docker build --build-arg "VERSION=probe-$v" -t "culvert-probe-release:$v" "$RUNNER_TEMP/src-$v"
+            # The Dockerfile downloads Go modules; the module proxy fails now and then.
+            built=0
+            for attempt in 1 2 3; do
+              if docker build --build-arg "VERSION=probe-$v" -t "culvert-probe-release:$v" "$RUNNER_TEMP/src-$v"; then built=1; break; fi
+              echo "docker build of $v: attempt $attempt failed"; sleep $((attempt * 20))
+            done
+            [ "$built" = 1 ] || { echo "::error::could not build the $v image"; exit 1; }
           done
           docker image ls | grep culvert-probe-release
 
@@ -149,7 +155,13 @@ jobs:
             git fetch --no-tags origin "$ref"
             git worktree add --detach "$RUNNER_TEMP/src-$v" FETCH_HEAD
             echo "$v: $ref = $(git -C "$RUNNER_TEMP/src-$v" rev-parse HEAD)"
-            docker build --build-arg "VERSION=probe-$v" -t "culvert-probe-release:$v" "$RUNNER_TEMP/src-$v"
+            # The Dockerfile downloads Go modules; the module proxy fails now and then.
+            built=0
+            for attempt in 1 2 3; do
+              if docker build --build-arg "VERSION=probe-$v" -t "culvert-probe-release:$v" "$RUNNER_TEMP/src-$v"; then built=1; break; fi
+              echo "docker build of $v: attempt $attempt failed"; sleep $((attempt * 20))
+            done
+            [ "$built" = 1 ] || { echo "::error::could not build the $v image"; exit 1; }
           done
 
       - name: SIGTERM timeline (three runs per image)
@@ -198,7 +210,13 @@ jobs:
             git fetch --no-tags origin "$ref"
             git worktree add --detach "$RUNNER_TEMP/src-$v" FETCH_HEAD
             echo "$v: $ref = $(git -C "$RUNNER_TEMP/src-$v" rev-parse HEAD)"
-            docker build --build-arg "VERSION=probe-$v" -t "culvert-probe-release:$v" "$RUNNER_TEMP/src-$v"
+            # The Dockerfile downloads Go modules; the module proxy fails now and then.
+            built=0
+            for attempt in 1 2 3; do
+              if docker build --build-arg "VERSION=probe-$v" -t "culvert-probe-release:$v" "$RUNNER_TEMP/src-$v"; then built=1; break; fi
+              echo "docker build of $v: attempt $attempt failed"; sleep $((attempt * 20))
+            done
+            [ "$built" = 1 ] || { echo "::error::could not build the $v image"; exit 1; }
           done
 
       - name: Run the control-plane trial with the settle wait off (expect a violation)

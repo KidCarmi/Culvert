@@ -209,9 +209,12 @@ type Server struct {
 	// startHazard is whether the previous agent process may have left one
 	// unfinished; startSettled is set once Docker showed that it is over
 	// (settle.go, mutation.go). settlePoll is how often Docker is asked.
-	mutations    *journal.MutationLog
-	startHazard  bool
-	startOnlyUp  bool // a readable marker was found and names only `compose up`
+	mutations   *journal.MutationLog
+	startHazard bool
+	startOnlyUp bool // a readable marker was found and names only `compose up`
+	// startUpOf: journal.MutationAtOpen.FreshUpOf, the one operation whose cut
+	// `compose up` this start is the first to find. Never written after New.
+	startUpOf    string
 	startSettled atomic.Bool
 	settlePoll   time.Duration
 	// startMarkerLive: the marker found at start named a compose command and
@@ -287,7 +290,7 @@ func New(opts Options) (*Server, error) {
 	}
 	srv := &Server{
 		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
-		mutations: mutations, startHazard: atOpen.Pending, startOnlyUp: atOpen.OnlyUp, settlePoll: defaultSettlePoll,
+		mutations: mutations, startHazard: atOpen.Pending, startOnlyUp: atOpen.OnlyUp, startUpOf: atOpen.FreshUpOf, settlePoll: defaultSettlePoll,
 	}
 	srv.startMarkerLive.Store(atOpen.NamesCommand)
 	return srv, nil

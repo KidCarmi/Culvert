@@ -156,9 +156,12 @@ change (AGT-900) and an **owner decision**, behind
 real-Docker gate is met.
 
 **Decided and implemented (owner, 2026-11-24)**, narrower than proposed above:
-the restore additionally requires the mutation marker of the agent's own
-unfinished `compose up` (so that a stack an operator took down is not started),
-and does not undo an upgrade recorded at `verified`. ADR-0061, "Restoring the
+the restore additionally requires the mutation marker of the unfinished
+`compose up` of the record's own operation, found for the first time by this
+start (so that a stack an operator took down is not started, and no other
+record can claim it; each marker entry carries the op id and the first start to
+find a marker stamps it as seen), and does not undo an upgrade recorded at
+`verified`. ADR-0061, "Restoring the
 prior image when the proxy is down".
 
 ### 3.5 What phase 1b implements, and what it leaves out
