@@ -151,9 +151,18 @@ its timer:
   completion is established).
 
 `restore_prior` changes what startup may do with Docker, so it is a contract
-change (AGT-004 / AGT-900) and an **owner decision**, behind
+change (AGT-900) and an **owner decision**, behind
 `reconcile_on_startup = "converge"`, which stays default-off until the
 real-Docker gate is met.
+
+**Decided and implemented (owner, 2026-11-24)**, narrower than proposed above:
+the restore additionally requires the mutation marker of the unfinished
+`compose up` of the record's own operation, unseen and at most 10 minutes old
+(so that a stack an operator took down is not started, and no other record can
+claim it; each marker entry carries the op id, and the marker is stamped seen
+by the first start to find it and by any process whose command returned), and
+does not undo an upgrade recorded at `verified`. ADR-0061, "Restoring the
+prior image when the proxy is down".
 
 ### 3.5 What phase 1b implements, and what it leaves out
 
@@ -194,7 +203,7 @@ serving, not an outage.
 | 1a. `up` retry in recovery context | none new | none (recovery only; with no interrupted record in the journal an upgrade makes the same calls; with one, of any class, it makes one extra read after `up`) | routine — implemented |
 | 1b. Mutation marker + identity-based early advance | none new (uses `compose ps`) | relaxes when the settle wait applies; ADR-0061 addendum to be extended | routine implementation, but it **shortens a safety wait**: its own PR, independent review, full probe matrix before merge |
 | 1c. `container_name_pending` in status / result | none new | additive status field | routine |
-| 2. `restore_prior` in the startup reconcile | none new | AGT-004, AGT-900 amended | **owner** |
+| 2. `restore_prior` in the startup reconcile | none new | AGT-900 amended | **owner** — approved 2026-11-24, implemented |
 | 3. Seeing non-running containers (`compose ps -a`), stop timeout, so that intermediate states are named instead of inferred | one new sudoers line (read-only) and wrapper subcommand | packaging / security surface | **owner** — worth it only if 1a–2 leave a state unexplained |
 
 Not proposed: daemon event subscription, a second state store, renaming or

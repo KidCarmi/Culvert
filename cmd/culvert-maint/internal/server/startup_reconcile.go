@@ -18,9 +18,10 @@
 // that changes Docker, persist the attempt FAIL-CLOSED first (no durable
 // write, no action), re-read Docker and act only if the decision is unchanged
 // (TOCTOU), act through the existing runner/sudoers commands only (tag to the
-// validated PriorRef; `compose up` only to finish an armed rollback whose tag
-// is already on the prior image; never pull, never down, never a tag to the
-// target), then verify by image id. Audit, THEN retire the record, and only
+// validated PriorRef; `compose up` only with the tag on the prior image: to
+// finish an armed rollback, or to restore the prior image when the proxy is
+// down because the record's own `compose up` was cut, upInterruptedFor; never
+// pull, never down, never a tag to the target), then verify by image id. Audit, THEN retire the record, and only
 // after verified convergence. A recovery_required or deferred record is kept.
 package server
 
@@ -410,7 +411,26 @@ func (s *Server) reconcileInputsFor(rec *journal.Record) reconcileInputsV2 {
 		TargetDigest: rec.TargetDigest, TargetImageID: reportImageID(rec.TargetImageID),
 		PriorImageID: reportImageID(rec.PriorImageID), RollbackArmed: rec.RollbackArmed,
 		Attempts: attempts, MaxAttempts: maxReconcileAttempts,
+		UpInterrupted: s.upInterruptedFor(rec),
 	}
+}
+
+// upInterruptedFor reports whether a missing proxy can be put down to rec's
+// own interrupted `compose up`. All of it must hold:
+//
+//   - the marker found at THIS start names nothing but `compose up`, every one
+//     of them run for rec's operation (the upgrade itself, its inline rollback,
+//     or an earlier reconcile action for this very record), the marker was
+//     unseen (no earlier start had found it, and the command had not returned
+//     to a live agent) and at most journal.FreshMarkerMaxAge old (startUpOf).
+//     Another record cannot claim it, and a start after one that already
+//     looked cannot either: by then anything may have taken the stack down, an
+//     operator included.
+//   - no `compose up` of this process has cleared that marker since.
+//
+// Anything else is "the stack is down and the agent cannot say why".
+func (s *Server) upInterruptedFor(rec *journal.Record) bool {
+	return rec.OpID != "" && s.startUpOf == rec.OpID && s.startMarkerLive.Load()
 }
 
 // readReconcileFacts fills the Docker half of in. A record's references reach
@@ -471,7 +491,7 @@ func (s *Server) stillDecides(ctx context.Context, c *reconcileCase, v reconcile
 	return reconcileDecisionV2(again) == v
 }
 
-// act performs realign or finish_rollback: write-ahead, TOCTOU re-read, the
+// act performs realign, finish_rollback or restore_prior: write-ahead, TOCTOU re-read, the
 // action, then verification by image id.
 func (s *Server) act(ctx context.Context, c *reconcileCase, v reconcileVerdictV2) ReconcileRecord {
 	now := time.Now().UTC()
@@ -534,8 +554,8 @@ func (e errReconcileStep) Error() string { return string(e) }
 
 // performAction runs the Docker change for v. Only existing runner methods are
 // used: the tag goes to the record's validated PriorRef, and `compose up` runs
-// only for finish_rollback, whose decision required the tag to be on the prior
-// image already.
+// only with the fixed tag on the prior image: for finish_rollback the decision
+// required it to be there already, for restore_prior it is put there first.
 func (s *Server) performAction(ctx context.Context, c *reconcileCase, v reconcileVerdictV2) error {
 	switch v.Action {
 	case actV2Realign:
@@ -546,18 +566,49 @@ func (s *Server) performAction(ctx context.Context, c *reconcileCase, v reconcil
 		return nil
 	case actV2FinishRollback:
 		c.out.Actions = append(c.out.Actions, "up")
-		if _, err := s.composeUp(ctx); err != nil {
+		if _, err := s.composeUp(ops.WithOpID(ctx, c.rec.OpID)); err != nil {
 			return errReconcileStep("up_failed")
 		}
 		if s.probeReadiness(ctx) != probeReady {
 			return errReconcileStep("prior_not_ready")
 		}
 		return nil
+	case actV2RestorePrior:
+		return s.restorePrior(ctx, c)
 	}
 	return errReconcileStep("unexpected_action")
 }
 
-// verifiedOnPrior re-reads Docker after a realign or finish_rollback: the
+// restorePrior brings the proxy back on the image that was serving before the
+// interrupted upgrade: the fixed tag goes to the record's validated PriorRef,
+// `compose up` starts it (once more if the first pass only tidied up after the
+// interrupted recreate: upAgainIfNothingRuns), and it must answer ready. The
+// caller then verifies container and tag by image id and retires the record
+// only through retireIfServing. A failure at any step keeps the record;
+// nothing here starts the target image.
+func (s *Server) restorePrior(ctx context.Context, c *reconcileCase) error {
+	// The `up` below completes the record's operation: if it is cut too, the
+	// next start can still tell whose it was.
+	ctx = ops.WithOpID(ctx, c.rec.OpID)
+	c.out.Actions = append(c.out.Actions, "tag:prior")
+	if _, err := s.opts.Runner.ComposeTagPinned(ctx, c.rec.PriorRef); err != nil {
+		return errReconcileStep("tag_failed")
+	}
+	c.out.Actions = append(c.out.Actions, "up")
+	if _, err := s.composeUp(ctx); err != nil {
+		return errReconcileStep("up_failed")
+	}
+	if _, _, err := s.upAgainIfNothingRuns(ctx, true, nil, nil); err != nil {
+		return errReconcileStep("up_failed")
+	}
+	if s.probeReadiness(ctx) != probeReady {
+		return errReconcileStep("prior_not_ready")
+	}
+	return nil
+}
+
+// verifiedOnPrior re-reads Docker after realign, finish_rollback or
+// restore_prior: the
 // container and the fixed tag must both be the recorded prior image.
 func (s *Server) verifiedOnPrior(ctx context.Context, c *reconcileCase) bool {
 	after := c.in

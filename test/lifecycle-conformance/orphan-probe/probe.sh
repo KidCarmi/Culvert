@@ -130,8 +130,17 @@ if [ -z "$AGENT_BIN" ]; then
   (cd "$REPO/cmd/culvert-maint" && CGO_ENABLED=0 go build -o "$AGENT_BIN" .) || inc "agent build failed"
 fi
 [ -x "$AGENT_BIN" ] || inc "agent binary not executable: $AGENT_BIN"
-GOBIN="$W/bin" CGO_ENABLED=0 GOFLAGS=-mod=mod go install github.com/distribution/distribution/v3/cmd/registry@v3.0.0 2>"$W/registry-build.log" \
-  || { tail -5 "$W/registry-build.log"; inc "registry build failed"; }
+# The registry is fetched and built from source; the Go module proxy and checksum server
+# fail now and then (HTTP/2 stream errors). Three attempts, then the last error is shown.
+registry_ok=0
+for attempt in 1 2 3; do
+  if GOBIN="$W/bin" CGO_ENABLED=0 GOFLAGS=-mod=mod go install github.com/distribution/distribution/v3/cmd/registry@v3.0.0 2>"$W/registry-build.log"; then
+    registry_ok=1; break
+  fi
+  echo "registry build: attempt $attempt failed: $(tail -1 "$W/registry-build.log")"
+  sleep $((attempt * 20))
+done
+[ "$registry_ok" = 1 ] || { tail -5 "$W/registry-build.log"; inc "registry build failed"; }
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$W/certs/r.key" -out "$W/certs/r.crt" -days 2 \
   -subj "/CN=127.0.0.1" -addext "subjectAltName=IP:127.0.0.1" 2>/dev/null || inc "openssl failed"
 printf 'version: 0.1\nstorage:\n  filesystem:\n    rootdirectory: %s\nhttp:\n  addr: 127.0.0.1:%s\n  tls:\n    certificate: %s\n    key: %s\n' \

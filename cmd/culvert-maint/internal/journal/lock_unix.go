@@ -51,3 +51,18 @@ func (j *Journal) LockReconcile() (*ReconcileLock, error) {
 	}
 	return &ReconcileLock{f: f}, nil
 }
+
+// lockMutationDir takes a blocking exclusive flock on <dir>/.lock for one
+// read-modify-write of the mutation marker. ok=false means the lock could not
+// be taken; unlock is always safe to call.
+func lockMutationDir(dir string) (unlock func(), ok bool) {
+	f, err := os.OpenFile(filepath.Join(dir, lockFileName), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, fileMode) // #nosec G304 -- fixed name under the agent-owned mutation dir
+	if err != nil {
+		return func() {}, false
+	}
+	if ferr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); ferr != nil { // #nosec G115 -- a file descriptor fits in int
+		_ = f.Close()
+		return func() {}, false
+	}
+	return func() { _ = f.Close() }, true // closing the descriptor releases the flock
+}

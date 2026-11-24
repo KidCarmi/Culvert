@@ -177,7 +177,9 @@ re-pins it.
    `rollback_armed` marker is set and whose tag is already on the prior image,
    or adopt (no Docker change) a target recorded at `verified` that runs under
    the tag and answers ready; every other state is `recovery_required` and
-   changes nothing, and an unreadable Docker defers. There is no `reup` and no
+   changes nothing, and an unreadable Docker defers. (Widened on 2026-11-24 by
+   one action, `restore_prior`, for a proxy that is down after the agent's own
+   interrupted `compose up`: see the addendum below.) There is no `reup` and no
    rollback of an indeterminate image. The interrupted operation stays
    `failed(agent_restart_interrupted)`; the reconcile is its own
    `reconcile.startup` operation, and a record is retired only after verified
@@ -378,6 +380,88 @@ the reconcile's deadline and reported a Docker that was merely down as
 `recovery_required` (`settle_wait_cut_short`); found by the real-Docker E2E.
 A deadline that is already over before a record is reached is still
 `deadline_elapsed`, never a deferral.
+
+**Restoring the prior image when the proxy is down (owner decision,
+2026-11-24).** A crash late in a recreate leaves no proxy container running.
+Until this decision the converge start reported that state (`stack_down`) and
+changed nothing: safe, and an outage until an operator acted (measured on real
+Docker at kill points 9 to 12, with the release image). It now restores the
+image that was serving before the upgrade, when ALL of this holds:
+
+- no proxy container is running, and the record is an upgrade at `restarting`
+  or `restarted`, or one whose inline rollback was armed;
+- **the previous agent process died inside a `compose up` of this record's own
+  operation, just now.** A marker that names only `compose up` is not that
+  evidence on its own; two independent reviews each reproduced a wrong restore
+  from a weaker rule. All of this must hold:
+  - the marker is readable and names nothing but `compose up`;
+  - every entry was run for the operation of THIS record (each entry carries
+    the op id: the upgrade, its inline rollback, or an earlier reconcile action
+    for the same record). An older lingering record cannot claim a newer
+    operation's marker (reproduced: an image two generations back was started);
+  - the marker is **unseen**. It is stamped seen, durably and under a file lock,
+    by (a) the first agent start that finds it, in any mode, before anything is
+    decided, and (b) the process that ran the command, as soon as the command
+    RETURNS and the marker stays (the command failed, or succeeded while
+    something earlier was in doubt). (a) because the marker outlives a start
+    that only reports (reproduced: target running, start reports, operator
+    stops the stack later, next start started the prior image). (b) because a
+    command that returned to a live agent is not a crash (reproduced: the
+    restore's own `up` failed, the agent stayed up, the operator started and
+    later stopped the stack by hand, the next start restored it);
+  - its last command was begun no more than 10 minutes ago
+    (`FreshMarkerMaxAge`): a second bound for what the stamp cannot cover (a
+    start that could not write it, an agent version in between that does not
+    write it, an agent stopped on purpose and started much later).
+
+  Otherwise the stack may be down for any reason, an operator's included, and
+  starting it would undo that;
+- the upgrade had not reached `verified`. A verified upgrade is not silently
+  undone, and the target image is never started here: `stack_down_after_verified`
+  is reported instead;
+- the recorded prior reference is valid and resolves locally to the image id
+  captured before the operation, and the fixed tag is on the prior or on the
+  target (anywhere else, someone else moved it).
+
+The action (`restore_prior`): retag to the prior reference, `compose up` (once
+more if the first pass only tidied up after the interrupted recreate), require
+the proxy to answer ready, verify container and tag by image id, and retire the
+record only through the same readiness check as every other retirement. A
+durable attempt is written first and the attempt cap applies, so a restore that
+keeps failing ends as `recovery_required`, not as a loop. With the marker's
+early end of the settle wait, the start does not sit out the window first: the
+proxy is down, so two reads of Docker establish that no stop is pending.
+
+A reconcile action in whose own `compose up` the agent dies writes a new,
+unseen marker entry under the same operation, so the next start may try once
+more; the attempt cap ends it there.
+
+Not done: starting the target image; acting on a standalone rollback's record
+(its journal says nothing about how far it got); acting on a first start that
+keeps markers, whose "unknown" marker names no command; acting on a marker left
+by an agent version that did not record the operation.
+
+Given up for safety (the outage then stays until an operator acts, as before
+this decision):
+
+- the first start after the cut cannot act: Docker unreadable (deferred), a
+  second instance, the reconcile lock or the journal unavailable, the settle
+  wait cut short, `reconcile_on_startup = "off"`. That start has seen the
+  marker; a later one only reports;
+- the agent comes back more than 10 minutes after the cut;
+- the upgrade's `up` returned an error and the agent died before its inline
+  rollback began its own `up`.
+
+Not distinguishable, and accepted: an operator who takes the stack down by
+hand within those 10 minutes, after the agent died in `compose up` and before
+its next start. To that start the state is the same as the crash it exists to
+recover from, and it restores the prior image. Leaving `reconcile_on_startup`
+at its default avoids it. "Down" means no RUNNING proxy container: a stopped
+one counts.
+
+Residual, double fault: the seen stamp could not be written (state directory
+full or read-only at that moment) AND the stack is taken down AND the agent
+restarts, all within the 10 minutes.
 
 ## Addendum (2026-11-24): an interrupted restore is reported too
 

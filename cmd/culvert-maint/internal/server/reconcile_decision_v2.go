@@ -20,6 +20,10 @@
 //     journal durably records that inline rollback was armed
 //     (Record.RollbackArmed): `compose up` starts the prior image, which the
 //     caller then health-gates and verifies by id.
+//     restore_prior — no proxy container is running and a durable marker shows
+//     the agent's own `compose up` was cut: retag to the prior image and
+//     `compose up` it, which the caller then health-gates and verifies by id
+//     (owner decision of 2026-11-24; see stackDownV2).
 //     adopt — no Docker mutation at all: only at phase `verified` (the gate
 //     and the digest verify passed durably before the crash), with the
 //     container and the tag on the target by id and a fresh ReadyOK probe.
@@ -56,6 +60,11 @@ const (
 	// actV2FinishRollback: the tag is already on the prior image and inline
 	// rollback was durably armed: `compose up`, gate the prior image, verify.
 	actV2FinishRollback
+	// actV2RestorePrior: no proxy container is running, and a durable marker
+	// shows that the agent's own `compose up` was left unfinished: retag to the
+	// prior image, `compose up`, gate the prior image, verify. Owner decision of
+	// 2026-11-24. Never starts the target.
+	actV2RestorePrior
 	// actV2Adopt: the verified target is live under the tag and answers ready.
 	// No Docker change.
 	actV2Adopt
@@ -75,6 +84,8 @@ func (a reconcileActionV2) String() string {
 		return "realign"
 	case actV2FinishRollback:
 		return "finish_rollback"
+	case actV2RestorePrior:
+		return "restore_prior"
 	case actV2Adopt:
 		return "adopt"
 	case actV2RecoveryRequired:
@@ -88,7 +99,7 @@ func (a reconcileActionV2) String() string {
 
 // mutatesDocker reports whether the action changes Docker state.
 func (a reconcileActionV2) mutatesDocker() bool {
-	return a == actV2Realign || a == actV2FinishRollback
+	return a == actV2Realign || a == actV2FinishRollback || a == actV2RestorePrior
 }
 
 // probeState is the result of the fresh readiness probe the caller runs only
@@ -134,6 +145,15 @@ type reconcileInputsV2 struct {
 	PriorLocalID     string   // `docker image inspect <PriorRef>`.Id, "" when not local or not inspected
 
 	Probe probeState
+
+	// UpInterrupted: the previous agent process died, minutes ago at most,
+	// inside a `compose up` run for THIS record's operation: this process is
+	// the first to find the marker of it (journal.MutationAtOpen.FreshUpOf)
+	// and has not cleared it since (Server.upInterruptedFor). It is the evidence
+	// that a proxy that is down is down because this operation's recreate was
+	// cut, and not because an operator, or another operation, took the stack
+	// down. Read from disk by the caller; not a Docker fact.
+	UpInterrupted bool
 }
 
 // reconcileVerdictV2 is the decision plus the audit reason.
@@ -233,7 +253,7 @@ func decideDangerPhaseV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 		return rr("invalid_record_ref")
 	}
 	if ids.run == "" {
-		return rr("stack_down")
+		return stackDownV2(in, ids)
 	}
 	p, t := ids.prior, ids.target
 	if p != "" && ids.run == p && ids.tag == p {
@@ -248,6 +268,41 @@ func decideDangerPhaseV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 		return rr("target_equals_prior_ambiguous")
 	}
 	return decideByIdentityV2(in, ids)
+}
+
+// stackDownV2 decides an upgrade in the danger window with no proxy container
+// running. Until the owner decision of 2026-11-24 this was always
+// recovery_required: an outage until an operator acted.
+//
+// The prior image is restored only when every one of these holds. Each is a
+// reason the agent may start a container on its own:
+//
+//   - UpInterrupted: the outage is attributable to the `compose up` of this
+//     record's operation having been cut. Without that the stack may be down
+//     because an operator took it down, and starting it would undo that.
+//   - The upgrade had not been verified. At phase verified (and no rollback
+//     armed) the target passed its gate and digest check before the crash;
+//     going back to the prior image would silently undo a good upgrade, and
+//     starting the target is never done here. Reported instead.
+//   - The prior image is restorable: a validated PriorRef that resolves
+//     locally to the image id recorded before the operation.
+//   - The fixed tag is on the prior or on the target, the only two places this
+//     operation can have left it. Anywhere else, someone else moved it.
+//
+// What is started is the image that was serving before the operation began;
+// the caller health-gates and verifies it by id before the record is retired.
+func stackDownV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
+	switch {
+	case !in.UpInterrupted:
+		return rr("stack_down")
+	case in.Phase == journal.PhaseVerified && !in.RollbackArmed:
+		return rr("stack_down_after_verified")
+	case !priorRestorable(in, ids):
+		return rr("prior_not_restorable")
+	case ids.tag != ids.prior && (ids.target == "" || ids.tag != ids.target):
+		return rr("stack_down_tag_unrecognised")
+	}
+	return reconcileVerdictV2{actV2RestorePrior, "stack_down_up_interrupted"}
 }
 
 // decideByIdentityV2 picks the action from the (container, tag) identity pair

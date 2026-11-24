@@ -37,6 +37,9 @@ type reconWorld struct {
 	onPS     func(n int)
 	down     bool   // Docker does not answer: every command fails
 	onUp     func() // called while `up` runs (outside the lock)
+	upNoop   int    // this many `up` calls exit 0 without starting anything
+	upStarts string // when set, `up` starts this image whatever the tag says
+	upFails  int    // this many `up` calls exit non-zero having started nothing
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -112,7 +115,19 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		w.pinned = w.idFor(args[len(args)-2])
 	case has("up"):
 		w.mutating = append(w.mutating, "up")
+		if w.upFails > 0 {
+			w.upFails--
+			w.failed[cmd] = true
+			break
+		}
+		if w.upNoop > 0 {
+			w.upNoop-- // Compose's clean-up-only pass after an interrupted recreate
+			break
+		}
 		w.running = w.pinned
+		if w.upStarts != "" {
+			w.running = w.upStarts
+		}
 	}
 	return nil
 }
