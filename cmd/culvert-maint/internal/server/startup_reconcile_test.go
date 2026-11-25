@@ -47,6 +47,7 @@ type reconWorld struct {
 	failedCalls int
 	down        bool   // Docker does not answer: every command fails
 	onUp        func() // called while `up` runs (outside the lock)
+	onDown      func() // called while `down` runs (outside the lock)
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -80,6 +81,14 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		w.mu.Unlock()
 		if hook != nil {
 			hook(n)
+		}
+	}
+	if has("down") {
+		w.mu.Lock()
+		hook := w.onDown
+		w.mu.Unlock()
+		if hook != nil {
+			hook()
 		}
 	}
 	if has("up") {

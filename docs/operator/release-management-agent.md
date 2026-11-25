@@ -184,6 +184,7 @@ What an entry tells you:
 | `journal_phase` | the last step the operation recorded |
 | `docker_state: unchanged` | it stopped before moving the image tag; submit it again if still wanted |
 | `docker_state: indeterminate` | it may have moved `culvert/proxy:pinned`, or started an image that was never health-checked |
+| `died_in_command` | `compose up` or `compose down`: the agent process died **inside** that command of this operation (killed, out of memory, power loss, or stopped while the command was still running: a `systemctl stop` waits for a running operation only up to its drain deadline). Shown by the agent process that found it, until that agent restarts; a restarted agent no longer shows it, because the state of the stack can no longer be put down to that command. Absent when the command had returned before the agent stopped, when the operation is known to have ended (its final audit entry exists), when the agent could not write to its state directory when the command began (unless an earlier command of the same operation is still recorded, see next), and when an older agent version was started in between. One case is reported although the command had returned: the state directory could not be written from the moment the command returned until the agent process ended; if the same operation was by then inside a later command, the name shown is the earlier command's. Only in `GET /v1/status`. Information only: the agent does not act on it |
 | `docker_state: data_indeterminate` | a restore or a data rollback: no image tag was involved; see [After the agent stops during a restore](#after-the-agent-stops-during-a-restore) |
 | `running_image` | what the proxy runs now: `target`, `prior`, `other`, or `unknown` if Docker could not be read |
 | `pinned_tag.matches_running` | `false` means the next `docker compose up` would start a different image than the one running. Reported on every status, with or without an interrupted operation. It is also `false` for a moment during a normal upgrade or rollback, between the tag move and the recreate: read it together with the lock holder / running operation |
@@ -314,6 +315,34 @@ file under `<state_dir>/reconcile/` is unreadable. The agent stops rather than
 ignore an operation it cannot classify. Move that file aside, start the agent,
 and check `culvert/proxy:pinned` against the running container before the next
 upgrade.
+
+If the agent will not start and its log has a line that begins
+`journal: refusing to serve — op <op_id> holds an open command intent
+("compose up")` (or `("compose down")`) and says `that cannot be recorded in
+its journal record`, the agent was killed in the middle of a `docker compose`
+command and now cannot write to `<state_dir>/reconcile/` (disk full, read-only
+file system, wrong ownership). It stops rather than report an interruption it
+cannot mark as seen. Each attempt to start first removes the agent's own
+expired operation logs, which may be enough on a full disk; if not, free space
+or fix the directory by hand. The agent then starts by itself (systemd retries
+it) and reports the operation. Check `culvert/proxy:pinned` and the running
+container yourself in the meantime.
+
+If that line instead contains `was written by a newer agent version`, the
+directory is not the problem: the agent was downgraded while an operation of
+the newer version was inside a `docker compose` command. Start the newer
+version again; it resolves the record.
+
+If the file named is `00000000000000000000000001.json`, it is not corrupt
+either: it is the **intent fence**. It stands in the journal while an
+upgrade, rollback or restore is inside a `docker compose` command, and, if the
+agent dies in that command, until an agent of this version or later has started
+once. An older agent version refuses to start on it, because it would report
+the interrupted operation without recording that it had looked. So after an
+agent died in the middle of an operation, **start the current version once
+before downgrading the agent**; it removes the file by itself. Do not delete
+it by hand. If the journal also holds a corrupt record (see above), fix or
+move that record first; the intent fence then clears at the next start.
 
 If the file named is `00000000000000000000000000.json`, it is not corrupt: it
 is the **downgrade fence** (ADR-0062). A newer agent writes it while the

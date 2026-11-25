@@ -147,7 +147,7 @@ func run(configPath string) error {
 	mgr := ops.NewManagerWithTTL(nil, idempTTL)
 	initIdempotency(cfg.StateDir, mgr, idempTTL)
 
-	jnl, err := initJournal(cfg.StateDir, mgr, al, cfg.ProxyRepo)
+	jnl, diedIn, err := initJournal(cfg.StateDir, mgr, al, cfg.ProxyRepo)
 	if err != nil {
 		return err
 	}
@@ -161,7 +161,7 @@ func run(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("status: %w", err)
 	}
-	stp.WithJournal(jnl)
+	stp.WithJournal(jnl).WithDiedInCommand(diedIn)
 
 	srv, err := newServer(cfg, pol, al, mgr, stp, r, auditPath, jnl, instLock)
 	if err != nil {
@@ -277,14 +277,25 @@ func lockInstance(stateDir string) (*journal.ReconcileLock, error) {
 // interrupted upgrade, and its stack is not started. Acting on a record at boot
 // is the separate, opt-in reconcile (reconcile_on_startup = "converge",
 // server/startup_reconcile.go), which runs only after this report is complete.
-func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo string) (*journal.Journal, error) {
-	jnl, err := journal.New(stateDir)
+//
+// diedIn is what this start, and only this start, may conclude about command
+// attribution (journal/intent.go): op id → the docker command the previous
+// agent process died inside. It lives in this process's memory and nowhere
+// else.
+func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo string) (jnl *journal.Journal, diedIn map[string]string, err error) {
+	jnl, err = journal.New(stateDir)
 	if err != nil {
-		return nil, fmt.Errorf("journal: %w", err)
+		return nil, nil, fmt.Errorf("journal: %w", err)
 	}
 	recs, err := jnl.List()
 	if err != nil {
-		return nil, fmt.Errorf("journal: refusing to serve — %w", err)
+		return nil, nil, fmt.Errorf("journal: refusing to serve — %w", err)
+	}
+	// First, and before anything is audited, reported or counted: take every
+	// open command intent, durably.
+	diedIn, err = takeCommandIntents(jnl, al.Path(), recs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("journal: refusing to serve — %w", err)
 	}
 	now := time.Now().UTC()
 	orphans := make([]ops.InterruptedOp, 0, len(recs))
@@ -298,7 +309,81 @@ func initJournal(stateDir string, mgr *ops.Manager, al *audit.Logger, proxyRepo 
 			"or the operation's own reason when it ended with a state it could not prove safe); "+
 			"Docker was NOT changed. See GET /v1/status interrupted_operations.", n)
 	}
-	return jnl, nil
+	return jnl, diedIn, nil
+}
+
+// takeCommandIntents removes every open command intent from the journal and
+// returns the ones that are evidence of a death inside the command.
+//
+// This is the one startup write that is NOT best-effort. "A start has looked"
+// has to be on disk before this start says anything: otherwise it would
+// report the interruption, an operator could react to the report (stop the
+// stack, say), and the next start would find the same intent and take it for
+// new. So a start that cannot remove an intent does not happen: nothing has
+// been audited, counted or reported yet, and the agent exits. systemd starts
+// it again; the first start that can write is the first start. With a state
+// directory that cannot be written the agent could have run no operation
+// anyway, only reported.
+//
+// All intents are taken before the first is acted on in any way, so a refusal
+// leaves no audit entry behind for some other record.
+//
+// An intent is not evidence of a death when the operation is known to have
+// ENDED: its record carries a terminal outcome, or the audit log holds its
+// terminal entry (which is written only after every stage returned). The
+// intent is then one whose close could not be written; it is removed like any
+// other and attributed to nothing.
+func takeCommandIntents(jnl *journal.Journal, auditPath string, recs []journal.Record) (map[string]string, error) {
+	diedIn := map[string]string{}
+	// A record a newer agent wrote cannot be rewritten by this build. Refuse
+	// before taking anything, so that no other record has had its intent
+	// removed by a start that then does not serve.
+	for i := range recs {
+		if recs[i].Intent != nil && recs[i].FromNewerAgent() {
+			return nil, fmt.Errorf("op %s holds an open command intent (%q): the agent was killed inside a docker compose command, and the journal record was written by a newer agent version that this version may not change; start that version (or a later one) again: %w",
+				recs[i].OpID, recs[i].Intent.Command, journal.ErrNewerSchema)
+		}
+	}
+	for i := range recs {
+		rec := &recs[i]
+		if rec.Intent == nil {
+			continue
+		}
+		ended := operationEnded(auditPath, rec)
+		command, attributed, _ := rec.TakeIntent()
+		if ended {
+			attributed, rec.Cut.Attributed = false, false
+		}
+		if werr := jnl.Write(*rec); werr != nil {
+			// command is content of a file; quoted, never interpreted. Records
+			// before this one have already had their intent removed: their
+			// attribution is lost with this start (a recovery, never a wrong one).
+			return nil, fmt.Errorf("op %s holds an open command intent (%q): the agent was killed inside a docker compose command, and that cannot be recorded in its journal record (is %s writable, and is there space?): %w",
+				rec.OpID, command, jnl.Dir(), werr)
+		}
+		if attributed {
+			diedIn[rec.OpID] = command
+		}
+	}
+	// Every intent has been taken: the fence that kept older agent versions
+	// from starting on one can go.
+	jnl.ReleaseIntentFence()
+	return diedIn, nil
+}
+
+// operationEnded reports whether rec's operation reached its end in the
+// process that ran it. It does not change rec. When the audit log cannot be
+// read the answer is "ended": attributing nothing is the safe side.
+func operationEnded(auditPath string, rec *journal.Record) bool {
+	if rec.TerminalOutcome != "" {
+		return true
+	}
+	if _, err := audit.FindTerminal(auditPath, rec.OpID, rec.Kind); err != nil {
+		return true
+	}
+	probe := *rec
+	server.AdoptAuditedTerminal(auditPath, &probe)
+	return probe.TerminalOutcome != ""
 }
 
 // startupRecord is the per-record startup work. A record whose operation ENDED

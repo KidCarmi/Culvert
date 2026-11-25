@@ -215,7 +215,26 @@ type Server struct {
 	// startHazard is whether the previous agent process may have left one
 	// unfinished; startSettled is set once Docker showed that it is over
 	// (settle.go, mutation.go). settlePoll is how often Docker is asked.
-	mutations    *journal.MutationLog
+	mutations *journal.MutationLog
+	// failGen / clearedGen: whether a command intent's close could not be
+	// written and is being retried (Server.staleIntents in mutation.go).
+	// intentRetryEvery is the retry period (0: default).
+	failGen            atomic.Uint64
+	clearedGen         atomic.Uint64
+	sweepMu            sync.Mutex // one sweep at a time
+	intentRetryRunning atomic.Bool
+	intentRetryEvery   time.Duration
+	intentRetryStop    chan struct{}
+	intentRetryMu      sync.Mutex    // guards intentRetryDone and the start/stop decision
+	intentRetryDone    chan struct{} // closed when the loop last started has ended
+	intentRetryOnce    sync.Once
+	// intentRetryExitHook, when set (tests only), runs as the retry loop ends,
+	// between its last check and marking itself stopped.
+	intentRetryExitHook func()
+	// intentSweepClearHook, when set (tests only), runs in a sweep that closed
+	// everything, just before it publishes that.
+	intentSweepClearHook func()
+
 	startHazard  bool
 	startOnlyUp  bool // a readable marker was found and names only `compose up`
 	startSettled atomic.Bool
@@ -292,7 +311,8 @@ func New(opts Options) (*Server, error) {
 		log.Printf("culvert-maint: WARN: the mutation marker could not be set up; treating this start as following an unfinished compose command, and compose up/down will be refused until the state directory is writable")
 	}
 	srv := &Server{
-		opts: opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
+		intentRetryStop: make(chan struct{}),
+		opts:            opts, startedAt: time.Now(), opDrainTimeout: drain, opSem: make(chan struct{}, maxRO),
 		mutations: mutations, startHazard: atOpen.Pending, startOnlyUp: atOpen.OnlyUp, settlePoll: defaultSettlePoll,
 		reconcileLock: opts.InstanceLock,
 	}
@@ -460,6 +480,23 @@ func (s *Server) Serve(ctx context.Context) error {
 // Close stops the server and removes the socket file. Safe to call
 // multiple times.
 func (s *Server) Close() error {
+	// Stop the intent retry loop and make one last attempt to say "that
+	// command returned" before the process goes.
+	s.intentRetryMu.Lock()
+	s.intentRetryOnce.Do(func() {
+		if s.intentRetryStop != nil {
+			close(s.intentRetryStop)
+		}
+	})
+	done := s.intentRetryDone
+	s.intentRetryMu.Unlock()
+	// Wait for a loop that was started: nothing of it may touch the journal
+	// after this function has released the instance lock. No new loop can
+	// start once the stop channel is closed.
+	if done != nil {
+		<-done
+	}
+	s.sweepStaleIntents()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.httpSrv != nil {
