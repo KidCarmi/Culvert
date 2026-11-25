@@ -85,6 +85,15 @@ const (
 	// actV2RecoveryRequired: evidence is insufficient or contradicts the
 	// journal. Nothing is changed; the operator is told.
 	actV2RecoveryRequired
+	// actV2RestorePrior: no proxy container is running, the record is an
+	// upgrade in the danger window that never reached verified, THIS agent
+	// start found that the previous process died inside a `compose up` of the
+	// record's own operation (UpInterrupted), and Docker's live state matches
+	// the record: the recorded prior image is local and identical, and the
+	// fixed tag is on the prior or on the target. Retag to the validated
+	// PriorRef, `up`, `up` once more if nothing runs, gate; then verify by id.
+	// Owner decision of 2026-11-24, ADR-0062 slice 4.
+	actV2RestorePrior
 	// actV2Defer: Docker could not be read. Nothing is changed and the attempt
 	// is not counted; the next start decides again.
 	actV2Defer
@@ -104,6 +113,8 @@ func (a reconcileActionV2) String() string {
 		return "adopt"
 	case actV2RecoveryRequired:
 		return "recovery_required"
+	case actV2RestorePrior:
+		return "restore_prior"
 	case actV2Defer:
 		return "defer"
 	default:
@@ -113,7 +124,7 @@ func (a reconcileActionV2) String() string {
 
 // mutatesDocker reports whether the action changes Docker state.
 func (a reconcileActionV2) mutatesDocker() bool {
-	return a == actV2Realign || a == actV2FinishRollback || a == actV2RetagFinishRollback
+	return a == actV2Realign || a == actV2FinishRollback || a == actV2RetagFinishRollback || a == actV2RestorePrior
 }
 
 // probeState is the result of the fresh readiness probe the caller runs only
@@ -159,6 +170,16 @@ type reconcileInputsV2 struct {
 	PriorLocalID     string   // `docker image inspect <PriorRef>`.Id, "" when not local or not inspected
 
 	Probe probeState
+
+	// UpInterrupted: THIS agent start found that the previous agent process
+	// died inside a `compose up` of this record's own operation (the command
+	// intent of ADR-0062 slice 3, taken at startup and handed to the reconcile
+	// once). Not a Docker fact. It only ever widens what may be done when no
+	// proxy container is running, and never on its own: Docker's live state
+	// must also match the record (stackDownV2). The command name can be the
+	// earlier of two commands of the operation when the journal was unwritable
+	// across both, so it is read as "a compose command of this operation".
+	UpInterrupted bool
 }
 
 // reconcileVerdictV2 is the decision plus the audit reason.
@@ -258,7 +279,7 @@ func decideDangerPhaseV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 		return rr("invalid_record_ref")
 	}
 	if ids.run == "" {
-		return rr("stack_down")
+		return stackDownV2(in, ids)
 	}
 	p, t := ids.prior, ids.target
 	if p != "" && ids.run == p && ids.tag == p {
@@ -303,6 +324,44 @@ func decideByIdentityV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 	}
 	return rr("docker_state_unrecognised")
 }
+
+// stackDownV2 decides an upgrade in the danger window with no proxy container
+// running. Until the owner decision of 2026-11-24 this was always
+// recovery_required: safe, and an outage until an operator acted. The prior
+// image is now restored when every one of these holds; each is a reason the
+// agent may start a container on its own:
+//
+//   - UpInterrupted: the outage is attributable to a `compose up` of this
+//     record's operation in which the previous agent process died. Without it
+//     the stack may be down because an operator took it down.
+//   - The upgrade had not reached verified (armed or not, as #2051 refuses an
+//     armed record at verified). Restoring the prior would undo a good
+//     upgrade; starting the target is never done here.
+//   - The recorded prior is still local and identical (priorRestorable): the
+//     image started is the one that was serving before the operation.
+//   - The fixed tag is on the prior or on the target: anywhere else, something
+//     other than this operation moved it.
+//
+// The kind and the phase are those of an upgrade (decideDangerPhaseV2 is only
+// reached for one); a restore, a data rollback or a standalone rollback never
+// gets here.
+func stackDownV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
+	switch {
+	case !in.UpInterrupted:
+		return rr("stack_down")
+	case in.Phase == journal.PhaseVerified:
+		return rr("stack_down_after_verified")
+	case !priorRestorable(in, ids):
+		return rr("prior_not_restorable")
+	case ids.tag != ids.prior && (ids.target == "" || ids.tag != ids.target):
+		return rr("stack_down_tag_unrecognised")
+	}
+	return verdictRestorePrior
+}
+
+// verdictRestorePrior is what restore_prior decides, before and after its own
+// retag (the tag on the prior is one of the two positions it accepts).
+var verdictRestorePrior = reconcileVerdictV2{actV2RestorePrior, "stack_down_up_interrupted"}
 
 func priorRestorable(in *reconcileInputsV2, ids v2ids) bool {
 	return in.PriorRefPresent && ids.prior != "" && ids.priorLocal == ids.prior
@@ -446,6 +505,12 @@ const (
 	// and tag on the recorded prior, which answers ready). The last step of an
 	// armed realign, which restarts nothing and so has no gate.
 	stepProbe
+	// stepUpAgain: Compose, after a recreate interrupted between its stop and
+	// its delete, answers the next `up` by only tidying up (exit 0, nothing
+	// started; measured on real Docker, see upAgainIfNothingRuns). A fresh
+	// read: if a proxy container is running, nothing. Otherwise the decision
+	// on fresh facts must still be the step's expect, and `up` runs once more.
+	stepUpAgain
 )
 
 func (o reconcileStepOp) String() string {
@@ -458,11 +523,15 @@ func (o reconcileStepOp) String() string {
 		return "gate"
 	case stepProbe:
 		return "probe"
+	case stepUpAgain:
+		return "up_again"
 	}
 	return "unknown"
 }
 
 // mutates reports whether the step changes Docker.
+// stepUpAgain is not counted: it runs `up` only after its own recheck, and
+// only when nothing runs (performStep).
 func (o reconcileStepOp) mutates() bool { return o == stepTagPrior || o == stepUp }
 
 // reconcileStep is one step of an acting verdict. Immediately before a step
@@ -500,6 +569,10 @@ func reconcilePlan(v reconcileVerdictV2) []reconcileStep {
 		// After the retag, the only state this reconcile explains is T/P
 		// armed, which decides exactly verdictFinishRollback.
 		return []reconcileStep{{stepTagPrior, v}, {stepUp, verdictFinishRollback}, {op: stepGate}}
+	case actV2RestorePrior:
+		// After the retag: still no container, tag on the prior, which
+		// decides restore_prior again. The same holds before the second `up`.
+		return []reconcileStep{{stepTagPrior, v}, {stepUp, v}, {stepUpAgain, v}, {op: stepGate}}
 	}
 	return nil
 }

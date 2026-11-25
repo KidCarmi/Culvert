@@ -184,12 +184,25 @@ What an entry tells you:
 | `journal_phase` | the last step the operation recorded |
 | `docker_state: unchanged` | it stopped before moving the image tag; submit it again if still wanted |
 | `docker_state: indeterminate` | it may have moved `culvert/proxy:pinned`, or started an image that was never health-checked |
-| `died_in_command` | `compose up` or `compose down`: the agent process died **inside** that command of this operation (killed, out of memory, power loss, or stopped while the command was still running: a `systemctl stop` waits for a running operation only up to its drain deadline). Shown by the agent process that found it, until that agent restarts; a restarted agent no longer shows it, because the state of the stack can no longer be put down to that command. Absent when the command had returned before the agent stopped, when the operation is known to have ended (its final audit entry exists), when the agent could not write to its state directory when the command began (unless an earlier command of the same operation is still recorded, see next), and when an older agent version was started in between. One case is reported although the command had returned: the state directory could not be written from the moment the command returned until the agent process ended; if the same operation was by then inside a later command, the name shown is the earlier command's. Only in `GET /v1/status`. Information only: the agent does not act on it |
+| `died_in_command` | `compose up` or `compose down`: the agent process died **inside** that command of this operation (killed, out of memory, power loss, or stopped while the command was still running: a `systemctl stop` waits for a running operation only up to its drain deadline). Shown by the agent process that found it, until that agent restarts; a restarted agent no longer shows it, because the state of the stack can no longer be put down to that command. Absent when the command had returned before the agent stopped, when the operation is known to have ended (its final audit entry exists), when the agent could not write to its state directory when the command began (unless an earlier command of the same operation is still recorded, see next), and when an older agent version was started in between. One case is reported although the command had returned: the state directory could not be written from the moment the command returned until the agent process ended; if the same operation was by then inside a later command, the name shown is the earlier command's. Only in `GET /v1/status`. With the default `reconcile_on_startup = "off"` it is information only; with `"converge"` see below |
 | `docker_state: data_indeterminate` | a restore or a data rollback: no image tag was involved; see [After the agent stops during a restore](#after-the-agent-stops-during-a-restore) |
 | `running_image` | what the proxy runs now: `target`, `prior`, `other`, or `unknown` if Docker could not be read |
 | `pinned_tag.matches_running` | `false` means the next `docker compose up` would start a different image than the one running. Reported on every status, with or without an interrupted operation. It is also `false` for a moment during a normal upgrade or rollback, between the tag move and the recreate: read it together with the lock holder / running operation |
 | `prior_ref` | the image reference to give a rollback |
 | `operator_action` | the same guidance as below, for this entry |
+
+With `reconcile_on_startup = "converge"`, an entry whose `died_in_command` is
+`compose up` and whose proxy is **down** is brought back without you: the next
+start puts `culvert/proxy:pinned` back on the image that was serving before the
+upgrade, starts it, requires `/ready`, checks container and tag by image id,
+and only then clears the entry (reconcile decision `restore_prior`). It does so
+only for an upgrade that had not passed its verification, only when that image
+is still local and identical to the one recorded, and only when the tag is on
+that image or on the upgrade's target. It never starts the upgrade's target.
+If any of that does not hold, or the restored proxy does not answer `/ready`,
+the entry stays with `recovery_required`. A restore that fails is tried at most
+once more, by the next start, and only if the agent died inside that restore's
+own `compose up`. With the default `"off"` nothing is started.
 
 For `indeterminate`:
 

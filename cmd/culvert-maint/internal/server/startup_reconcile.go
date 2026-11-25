@@ -412,6 +412,9 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 			Reason: "terminal_cleanup_pending", Outcome: OutcomeDeferred}
 	}
 	c := &reconcileCase{opID: opID, rec: rec, in: s.reconcileInputsFor(rec)}
+	// The attribution is taken here, once (ADR-0062 slice 4, obligation 1):
+	// whatever this record decides, it is not offered again in this process.
+	c.in.UpInterrupted = s.takeCommandAttribution(rec.OpID) == journal.MutationComposeUp
 	c.out = ReconcileRecord{OpID: rec.OpID, Kind: reportKind(rec.Kind)}
 	// Docker was tested and does not answer: there is nothing to observe, so
 	// there is nothing to wait for either. The settle wait exists to make
@@ -557,7 +560,7 @@ func (s *Server) act(ctx context.Context, c *reconcileCase, v reconcileVerdictV2
 			_ = s.auditReconciled(c, audit.OutcomeFailed) // best-effort: the record is kept either way
 			return s.keepRecord(c, OutcomeRecoveryRequired)
 		}
-		if err := s.performStep(ctx, c, st.op); err != nil {
+		if err := s.performStep(ctx, c, st.op, st.expect); err != nil {
 			c.out.Reason = err.Error()
 			_ = s.auditReconciled(c, audit.OutcomeFailed) // best-effort: the record is kept either way
 			return s.keepRecord(c, OutcomeRecoveryRequired)
@@ -609,7 +612,7 @@ func (e errReconcileStep) Error() string { return string(e) }
 // always goes to the record's validated PriorRef (never any other reference),
 // and `compose up` runs only after act's recheck decided finish_rollback, which
 // requires the tag to be on the validated prior image already.
-func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcileStepOp) error {
+func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcileStepOp, expect reconcileVerdictV2) error {
 	switch op {
 	case stepTagPrior:
 		c.out.Actions = append(c.out.Actions, "tag:prior")
@@ -619,10 +622,15 @@ func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcile
 		return nil
 	case stepUp:
 		c.out.Actions = append(c.out.Actions, "up")
-		if _, err := s.composeUp(ctx); err != nil {
+		// Under the record's operation: if the agent dies in this `up`, the next
+		// start finds the intent in this record (ADR-0062 slice 3) and may try
+		// once more; the attempt cap ends it there.
+		if _, err := s.composeUp(ops.WithOpID(ctx, c.rec.OpID)); err != nil {
 			return errReconcileStep("up_failed")
 		}
 		return nil
+	case stepUpAgain:
+		return s.upAgainStep(ctx, c, expect)
 	case stepGate:
 		// A fresh gate of what this reconcile's `up` started. A failure stops
 		// here: no second `up`, the record is kept.
@@ -634,6 +642,29 @@ func (s *Server) performStep(ctx context.Context, c *reconcileCase, op reconcile
 		return s.probeStep(ctx, c)
 	}
 	return errReconcileStep("unexpected_action")
+}
+
+// upAgainStep is stepUpAgain. A proxy container that runs means the `up`
+// before it did its work: nothing to do (the gate and the verification by
+// image id that follow decide). Otherwise the decision on fresh facts must
+// still be expect, and `up` runs once more, under the record's operation.
+// Docker that cannot be read is not assumed to be anything: the step stops.
+func (s *Server) upAgainStep(ctx context.Context, c *reconcileCase, expect reconcileVerdictV2) error {
+	pc, err := s.opts.Runner.ReadProxyContainer(ctx)
+	if err != nil {
+		return errReconcileStep("docker_unreadable_before_up_again")
+	}
+	if pc.Running {
+		return nil
+	}
+	if !s.stillDecides(ctx, c, expect) {
+		return errReconcileStep("docker_changed_before_up_again")
+	}
+	c.out.Actions = append(c.out.Actions, "up")
+	if _, err := s.composeUp(ops.WithOpID(ctx, c.rec.OpID)); err != nil {
+		return errReconcileStep("up_failed")
+	}
+	return nil
 }
 
 // probeStep is stepProbe: a fresh read and, where reconcileNeedsProbe asks for

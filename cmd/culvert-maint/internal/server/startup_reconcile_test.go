@@ -48,6 +48,11 @@ type reconWorld struct {
 	down        bool   // Docker does not answer: every command fails
 	onUp        func() // called while `up` runs (outside the lock)
 	onDown      func() // called while `down` runs (outside the lock)
+	// upNoop: this many `up` calls exit 0 having only tidied up, as Compose
+	// does after a recreate interrupted between its stop and its delete.
+	upNoop int
+	// onTag is called (under the world's lock) right after a `docker tag`.
+	onTag func(w *reconWorld)
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -135,8 +140,15 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		w.mutating = append(w.mutating, "tag:"+w.idFor(args[len(args)-2]))
 		w.tagRefs = append(w.tagRefs, args[len(args)-2])
 		w.pinned = w.idFor(args[len(args)-2])
+		if w.onTag != nil {
+			w.onTag(w)
+		}
 	case has("up"):
 		w.mutating = append(w.mutating, "up")
+		if w.upNoop > 0 {
+			w.upNoop--
+			break
+		}
 		if !w.upStale {
 			w.running = w.pinned
 		}

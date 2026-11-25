@@ -273,6 +273,35 @@ gaps and make the #2051 executor the single path every recovery takes.
      and a state directory restored from a backup taken while an intent
      was open (its epoch still matches, the death is long past). Rule 2
      above is what keeps the second from causing a wrong restore.
+  5. The recorded command names a compose command of this operation. With
+     the journal unwritable across two commands of one operation (the
+     close of the first and the intent of the second both lost) a death in
+     the second is reported under the first's name. No flow runs `down`
+     after `up` under one operation today; the consumer decides on Docker's
+     state, the record's kind and phase, never on the name alone.
+- **As built (`restore_prior`, slice 4):** a new verdict, decided only when
+  no proxy container runs, the record is an upgrade at `restarting` or
+  `restarted` (armed or not; refused at `verified`, as #2051 refuses an armed
+  record there), the attribution says `compose up`, the recorded prior is
+  local and identical, and the fixed tag is on the prior or the target. Its
+  plan on #2051's executor is `[tag:prior, up, up_again, gate]`; every step
+  that changes Docker is preceded by a fresh read that must still decide
+  `restore_prior`, and `up_again` runs `up` only if a fresh read shows nothing
+  running (Compose's tidy-only pass after an interrupted recreate). Then
+  verification by image id and retirement through the usual readiness check.
+  How the obligations are met: (1) the reconcile takes the attribution
+  (`takeCommandAttribution`) when it builds a record's inputs, whatever that
+  record then decides; (2) the attribution is one input among the Docker
+  facts and only turns a `stack_down` report into `restore_prior` or a more
+  specific report (property RV18); (3) the verdict is reached only through
+  the upgrade branch, never for a restore-class or standalone record; (4)
+  stated residual: a state directory restored from such a backup, with the
+  stack down and the tag still on that operation's prior or target, is
+  restored to that operation's recorded prior image, gated and verified; (5)
+  only `compose up` counts. The reconcile's own `up` runs under the record's
+  operation, so a restore that dies in its own `up` is attributable once
+  more; the attempt cap (2) ends it. A start that defers (Docker unreadable)
+  has taken the attribution: the record is then reported, not restored.
 
 **Slice 5 — runtime observation (non-mutating).**
 - One loop, started like the op-log retention loop but tracked by
