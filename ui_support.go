@@ -387,6 +387,18 @@ func supportWritePrometheus(w *strings.Builder) {
 	w.WriteString("# HELP culvert_support_bundle_retention_last_sweep_timestamp_seconds Unix time of the last age-retention sweep (0 = never run)\n")
 	w.WriteString("# TYPE culvert_support_bundle_retention_last_sweep_timestamp_seconds gauge\n")
 	fmt.Fprintf(w, "culvert_support_bundle_retention_last_sweep_timestamp_seconds %d\n", supportRetentionLastSweep.Load())
+	// CHAOS-128: an upload outcome the node could not write to disk. Both
+	// series exist because a zero `uploaded` count must not be read as
+	// "nothing was delivered": the gauge says an outcome is stranded in RAM
+	// right now (a restart re-sends that bundle), and the counter says it has
+	// happened at all, which is the signal that the support volume is refusing
+	// writes even if the hold later cleared.
+	w.WriteString("# HELP culvert_support_upload_commit_held_total Upload outcomes whose durable queue write failed, held in memory instead of committed (includes failed retries of an already-held outcome)\n")
+	w.WriteString("# TYPE culvert_support_upload_commit_held_total counter\n")
+	fmt.Fprintf(w, "culvert_support_upload_commit_held_total %d\n", supportUploadCommitHeldTotal.Load())
+	w.WriteString("# HELP culvert_support_upload_commit_held Upload outcomes currently waiting in memory for a durable write (0 = every recorded outcome is on disk)\n")
+	w.WriteString("# TYPE culvert_support_upload_commit_held gauge\n")
+	fmt.Fprintf(w, "culvert_support_upload_commit_held %d\n", uploadCommitsHeld())
 }
 
 // supportBundleIDRe pins the deterministic bundle-id shape so a path segment can

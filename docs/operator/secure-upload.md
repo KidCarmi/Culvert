@@ -124,6 +124,15 @@ Watch progress in **Secure Upload → Queue** or:
   gateway session (a fresh blob is a fresh session), so a stale hash never lingers.
 - The queue is bounded; completed/rejected records are retained up to a cap and
   then aged out oldest-first.
+- **If the support volume cannot be written to** (full, read-only, failing), the
+  outcome of an attempt cannot be recorded. The node does **not** act on an
+  outcome it could not record: the sealed blob is **kept**, no delivery is
+  audited, and the bundle is **not** re-sent while the write keeps failing. The
+  outcome is held in memory and committed as soon as a write succeeds — so a
+  disk incident costs you the *record* temporarily, never the bytes, and never a
+  repeated upload. A restart while an outcome is held re-sends that bundle,
+  which is deliberate: the in-memory receipt is gone, so the only way to hold
+  proof of delivery again is to obtain a fresh receipt.
 
 ---
 
@@ -178,3 +187,13 @@ admin); delivery/rejection/deferral are audited as `support.bundle.upload{,_reje
   offline.
 - **Entry `rejected`** — the gateway declined it; `last_error` carries a redacted
   reason (entitlement/format/hash). Resolve, then re-consent.
+- **Entry still `queued` after an apparently successful transfer** — the attempt's
+  outcome could not be written to disk, so it is held in memory rather than
+  committed. Scrape `culvert_support_upload_commit_held` (gauge: outcomes waiting
+  on a durable write right now; `0` means every recorded outcome is on disk) and
+  `culvert_support_upload_commit_held_total` (counter: it has happened at all,
+  even if the hold has since cleared). A non-zero gauge means the support volume
+  is refusing writes — `storage_write_failed` will also have fired. Fix the
+  volume and the entry commits on the next worker tick; no re-consent is needed.
+  The log line carries the unpersisted receipt signature, which is the only
+  record of it until the write lands.
