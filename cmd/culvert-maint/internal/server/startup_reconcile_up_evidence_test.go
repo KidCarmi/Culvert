@@ -122,3 +122,30 @@ func TestStartupReconcile_StaleCloseThenOperatorDownIsNotRestored(t *testing.T) 
 	r.srv.SetCommandAttribution(map[string]string{testOpULID: cmd})
 	assertNothingStarted(t, r, r.run(t), "stack_down_no_up_evidence")
 }
+
+// TestStartupReconcile_EvidenceIsRecheckedBeforeTheFirstUp: the leftover is
+// there at the decision and at the recheck before the retag; an operator's
+// `compose down` removes it after the retag. The reconcile's own `up` must not
+// run (independent review, S1).
+func TestStartupReconcile_EvidenceIsRecheckedBeforeTheFirstUp(t *testing.T) {
+	r := priorRestoreRig(t, true, true)
+	r.world.onTag = func(w *reconWorld) { w.leftover = false } // called under the world's lock
+	got := r.run(t)
+	if calls := r.world.calls(); got.Reason != "docker_changed_before_up" || len(calls) != 1 {
+		t.Errorf("result = %+v calls = %v, want docker_changed_before_up after the tag only", got, calls)
+	}
+	if r.recordOnDisk(t) == nil {
+		t.Error("the record was retired without a restore")
+	}
+}
+
+// TestStartupReconcile_AStaleOneOffIsNotEvidence: an operator once ran
+// `compose run` without --rm and its start failed, leaving a "created" one-off
+// of the proxy service that `compose down` does not remove. After a later
+// death inside `up` and a deliberate `compose down`, that one-off must not
+// stand in for the leftover the down removed (independent review, B1').
+func TestStartupReconcile_AStaleOneOffIsNotEvidence(t *testing.T) {
+	r := priorRestoreRig(t, true, true)
+	r.world.leftover, r.world.oneOffRun = false, true
+	assertNothingStarted(t, r, r.run(t), "stack_down_no_up_evidence")
+}

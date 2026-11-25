@@ -339,10 +339,15 @@ gaps and make the #2051 executor the single path every recovery takes.
   read-only, until the process ended): the open intent then outlives the
   command, and an operator's later `compose down` would have been undone
   (reproduced). A restore therefore also requires Docker to list, with a
-  read-only `compose ps -a` (its own sudoers rule), a proxy container in
-  state `created`: on real Docker every death inside `up` that left no proxy
-  running left one (kill points 9, 10 and the held 9), a `compose down`
-  removes it, and a `docker stop` never makes one. It is read only when the
+  read-only `compose ps -a` (its own sudoers rule), a proxy service
+  container in state `created`: on real Docker every death inside `up` that
+  left no proxy running left one (kill points 9, 10 and the held 9), a
+  `compose down` removes it, and a `docker stop` never makes one. A one-off
+  container (`com.docker.compose.oneoff=True`) is never evidence: a
+  `compose run` without `--rm` whose start fails stays `created`, and
+  `compose down` does not remove one-offs (measured, Compose v5.7.1; found by
+  the second review). A `created` proxy whose one-off label cannot be read is
+  treated as unreadable. It is read only when the
   attribution is set and no proxy container is listed, again before every
   Docker change up to the reconcile's own first `up`, and not after it (that
   `up` removes the container itself in Compose's tidy-only pass). Unreadable
@@ -350,7 +355,10 @@ gaps and make the #2051 executor the single path every recovery takes.
   evidence: `up_evidence_unreadable`; absent: `stack_down_no_up_evidence`.
   Residuals that remain: an operator who changes nothing of the crashed stack,
   or only stops containers, before the next start is still indistinguishable
-  from the crash, and is restored; an operator `compose down` and later `up`
+  from the crash, and is restored; so is one who, after the crash, runs
+  `compose create` or `compose up --no-start`, or a `compose up` that fails
+  at start (a port conflict, a bad mount), each of which leaves a `created`
+  service container; an operator `compose down` and later `up`
   between the reconcile's own `up` and its second `up` is the same TOCTOU
   class as every other step. Liveness lost, all in the safe direction (the
   record is reported): a start whose settle wait is cut short, a start that

@@ -122,8 +122,8 @@ func (r *Runner) ProxyContainerListed(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// ProxyCreatedLeftover reports whether `compose ps -a` lists a proxy container
-// in state "created": what Compose leaves behind when the process running a
+// ProxyCreatedLeftover reports whether `compose ps -a` lists a proxy service
+// container (not a `compose run` one-off) in state "created": what Compose leaves behind when the process running a
 // recreate dies between creating the new container and starting it (measured
 // on real Docker at every kill point that leaves no proxy running). A
 // deliberate `compose down` removes it and a `docker stop` leaves only an
@@ -147,11 +147,41 @@ func (r *Runner) ProxyCreatedLeftover(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("compose ps -a: %w", err)
 	}
 	for i := range entries {
-		if entries[i].Service == proxyServiceName && strings.EqualFold(entries[i].State, "created") {
+		e := &entries[i]
+		if e.Service != proxyServiceName || !strings.EqualFold(e.State, "created") {
+			continue
+		}
+		oneOff, known := oneOffLabel(e.Labels)
+		if !known {
+			// Whether this is a service container or a one-off cannot be
+			// told, so it is not evidence either way.
+			return false, errors.New("compose ps -a: a created proxy container without a readable com.docker.compose.oneoff label")
+		}
+		if !oneOff {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// oneOffLabel reads com.docker.compose.oneoff from Compose's Labels string.
+// A one-off container (`compose run`) whose start failed stays "created", and
+// `compose down` does not remove one-offs (measured, Compose v5.7.1), so only
+// a service container (oneoff=False) is evidence. Labels is "k=v,k=v,..."; a
+// value may itself contain commas (config_files with an override), so the
+// label is matched as a whole item. Anything but exactly one "True" or one
+// "False" is unknown.
+func oneOffLabel(labels string) (oneOff, known bool) {
+	seen := 0
+	for _, item := range strings.Split(labels, ",") {
+		switch item {
+		case "com.docker.compose.oneoff=True":
+			oneOff, seen = true, seen+1
+		case "com.docker.compose.oneoff=False":
+			oneOff, seen = false, seen+1
+		}
+	}
+	return oneOff, seen == 1
 }
 
 // strictPSEntries decodes `compose ps` output that must be understood

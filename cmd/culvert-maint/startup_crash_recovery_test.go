@@ -86,7 +86,7 @@ compose)
         printf '{"Service":"proxy","State":"running","ID":"c0ffee000001"}\n'
       fi
       if [ -f "$S/leftover" ]; then
-        printf '{"Service":"proxy","State":"created","ID":"c0ffee000002"}\n'
+        printf '{"Service":"proxy","State":"created","ID":"c0ffee000002","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}\n'
       fi
     else
       blk ps

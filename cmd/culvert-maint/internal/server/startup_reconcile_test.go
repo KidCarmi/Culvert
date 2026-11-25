@@ -61,6 +61,10 @@ type reconWorld struct {
 	// not allow it); psAllCount counts how often it was issued.
 	psAllFail  bool
 	psAllCount int
+	// oneOffRun: `compose ps -a` also lists a "created" one-off of the proxy
+	// service, what a `compose run` without --rm whose start failed leaves;
+	// `compose down` does not remove it.
+	oneOffRun bool
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -180,7 +184,10 @@ func (w *reconWorld) answerPSAll(cmd *exec.Cmd) {
 		lines = append(lines, `{"Service":"proxy","State":"running","ID":"abcdef012345"}`)
 	}
 	if w.leftover {
-		lines = append(lines, `{"Service":"proxy","State":"created","ID":"0123456789ab"}`)
+		lines = append(lines, `{"Service":"proxy","State":"created","ID":"0123456789ab","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}`)
+	}
+	if w.oneOffRun {
+		lines = append(lines, `{"Service":"proxy","State":"created","ID":"d0c4cf477b2d","Name":"culvert-proxy-run-33918bcd22bd","Labels":"com.docker.compose.oneoff=True,com.docker.compose.service=proxy"}`)
 	}
 	_, _ = cmd.Stdout.Write([]byte(strings.Join(lines, "\n")))
 }

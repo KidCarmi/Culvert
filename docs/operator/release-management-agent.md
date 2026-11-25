@@ -203,8 +203,10 @@ is still local and identical to the one recorded, and only when the tag is on
 that image or on the upgrade's target. It never starts the upgrade's target.
 
 It also requires Docker to confirm the crash: `docker compose ps -a` must list a
-proxy container in state `created`, the never-started container Compose leaves
-when the process running its recreate dies. The journal alone is not enough: if
+proxy service container in state `created`, the never-started container Compose
+leaves when the process running its recreate dies. A `docker compose run`
+container (a one-off) never counts, even one left `created` by a run whose start
+failed, because `compose down` does not remove those. The journal alone is not enough: if
 the state directory could not be written (disk full, read-only) when a
 `compose up` finished, the entry still says the agent died inside it. Because a
 `compose down` removes that container, **a stack you took down on purpose is not
@@ -212,7 +214,15 @@ started again**, whatever the entry says. The read uses its own sudoers rule
 (`docker compose -f <compose file> ps -a --format json`, read-only), installed
 with this version. If the rule is missing, or the listing cannot be read,
 nothing is restored and the entry is reported (reason `up_evidence_unreadable`).
-Without the container it is reported as `stack_down_no_up_evidence`.
+Without the container it is reported as `stack_down_no_up_evidence`. On an
+install without the rule, sudo logs a denied command each time this happens.
+
+What is still restored: a stack left as the crash left it, or whose containers
+were only stopped; and one where, after the crash, you ran `docker compose
+create`, `docker compose up --no-start`, or a `docker compose up` that failed to
+start the proxy. Each of these leaves the same `created` container. If you do
+not want the agent to bring the stack back, take it down with `docker compose
+down` before the agent starts, or leave `reconcile_on_startup` at `"off"`.
 
 If any of that does not hold, or the restored proxy does not answer `/ready`,
 the entry stays with `recovery_required`. A restore that fails is tried at most

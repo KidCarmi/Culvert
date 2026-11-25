@@ -31,15 +31,22 @@ func TestProxyCreatedLeftover_OnlyACreatedProxyIsEvidence(t *testing.T) {
 		wantErr  bool
 	}{
 		{name: "nothing (compose down)", out: "", leftover: false},
-		{name: "created proxy (death inside up)", out: `{"Service":"proxy","State":"created","ID":"a"}`, leftover: true},
+		{name: "created proxy (death inside up)", out: `{"Service":"proxy","State":"created","ID":"a","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}`, leftover: true},
 		{name: "created proxy beside the exited old one", out: `{"Service":"proxy","State":"exited","ID":"o"}` + "\n" +
-			`{"Service":"proxy","State":"created","ID":"n"}`, leftover: true},
-		{name: "array, created proxy", out: `[{"Service":"proxy","State":"Created","ID":"a"}]`, leftover: true},
+			`{"Service":"proxy","State":"created","ID":"n","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}`, leftover: true},
+		{name: "array, created proxy", out: `[{"Service":"proxy","State":"Created","ID":"a","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}]`, leftover: true},
+		{name: "a failed `compose run` one-off (compose down keeps it)", out: `{"Service":"proxy","State":"created","ID":"r","Name":"x-proxy-run-07ae33c5fc3e","Labels":"com.docker.compose.oneoff=True,com.docker.compose.service=proxy"}`, leftover: false},
+		{name: "a one-off beside a real leftover", out: `{"Service":"proxy","State":"created","ID":"r","Labels":"com.docker.compose.oneoff=True"}` + "\n" +
+			`{"Service":"proxy","State":"created","ID":"n","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}`, leftover: true},
+		{name: "a label value with commas (two config files)", out: `{"Service":"proxy","State":"created","ID":"a","Labels":"com.docker.compose.project.config_files=/a.yml,/b.yml,com.docker.compose.oneoff=False"}`, leftover: true},
+		{name: "a created proxy without labels", out: `{"Service":"proxy","State":"created","ID":"a"}`, wantErr: true},
+		{name: "oneoff given twice", out: `{"Service":"proxy","State":"created","ID":"a","Labels":"com.docker.compose.oneoff=False,com.docker.compose.oneoff=True"}`, wantErr: true},
+		{name: "oneoff with an unknown value", out: `{"Service":"proxy","State":"created","ID":"a","Labels":"com.docker.compose.oneoff=false"}`, wantErr: true},
 		{name: "exited proxy only (docker stop)", out: `{"Service":"proxy","State":"exited","ID":"a"}`, leftover: false},
 		{name: "running proxy", out: `{"Service":"proxy","State":"running","ID":"a"}`, leftover: false},
 		{name: "created container of another service", out: `{"Service":"clamav","State":"created","ID":"b"}`, leftover: false},
 		{name: "not ps output", out: "WARNING: something", wantErr: true},
-		{name: "a warning line beside a created proxy", out: "time=... level=warning\n" + `{"Service":"proxy","State":"created","ID":"a"}`, wantErr: true},
+		{name: "a warning line beside a created proxy", out: "time=... level=warning\n" + `{"Service":"proxy","State":"created","ID":"a","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}`, wantErr: true},
 		{name: "entry without a service", out: `{"Name":"culvert-proxy-1","State":"created","ID":"a"}`, wantErr: true},
 		{name: "command failed (no sudoers rule on an older install)", fail: true, wantErr: true},
 	}
@@ -76,7 +83,7 @@ func TestProxyCreatedLeftover_OnlyACreatedProxyIsEvidence(t *testing.T) {
 func TestProxyCreatedLeftover_TruncatedOutputIsNotEvidence(t *testing.T) {
 	r := newLeftoverTestRunner(t)
 	r.captureMax = 64
-	line := `{"Service":"proxy","State":"created","ID":"a"}` + "\n"
+	line := `{"Service":"proxy","State":"created","ID":"a","Labels":"com.docker.compose.oneoff=False,com.docker.compose.service=proxy"}` + "\n"
 	r.SetExecHooksForTest(func(cmd *exec.Cmd) error {
 		for i := 0; i < 20; i++ {
 			_, _ = cmd.Stdout.Write([]byte(line))
@@ -101,5 +108,21 @@ func TestComposeStatusAll_IsReadOnly(t *testing.T) {
 	want := []string{"/usr/bin/docker compose -f {compose_path} ps -a --format json"}
 	if !slices.Equal(tmpl.SudoersLines, want) {
 		t.Errorf("SudoersLines = %q, want %q", tmpl.SudoersLines, want)
+	}
+}
+
+// TestProxyCreatedLeftover_TruncatedOnALineBoundaryIsNotEvidence: output cut
+// exactly between two lines decodes cleanly line by line; only the Truncated
+// flag says entries are missing (review N2).
+func TestProxyCreatedLeftover_TruncatedOnALineBoundaryIsNotEvidence(t *testing.T) {
+	r := newLeftoverTestRunner(t)
+	line := `{"Service":"clamav","State":"running","ID":"b"}` + "\n"
+	r.captureMax = len(line) // exactly one whole line is kept
+	r.SetExecHooksForTest(func(cmd *exec.Cmd) error {
+		_, _ = cmd.Stdout.Write([]byte(line + line))
+		return nil
+	}, func(*exec.Cmd) error { return nil })
+	if got, err := r.ProxyCreatedLeftover(context.Background()); err == nil {
+		t.Fatalf("truncated output was answered (leftover=%v) instead of refused", got)
 	}
 }
