@@ -530,9 +530,15 @@ func (o reconcileStepOp) String() string {
 }
 
 // mutates reports whether the step changes Docker.
-// stepUpAgain is not counted: it runs `up` only after its own recheck, and
-// only when nothing runs (performStep).
+// mutates reports whether act must recheck the decision on fresh facts before
+// the step. stepUpAgain is not included: it may run `up`, but only after a
+// fresh read shows nothing running, and then rechecks itself (upAgainStep);
+// a generic recheck before it would stop a plan whose first `up` worked.
 func (o reconcileStepOp) mutates() bool { return o == stepTagPrior || o == stepUp }
+
+// mayMutate reports whether the step can change Docker at all. The plan
+// properties count these, so a restore_prior plan's second `up` is counted.
+func (o reconcileStepOp) mayMutate() bool { return o.mutates() || o == stepUpAgain }
 
 // reconcileStep is one step of an acting verdict. Immediately before a step
 // that changes Docker the caller re-reads Docker and requires the decision on
