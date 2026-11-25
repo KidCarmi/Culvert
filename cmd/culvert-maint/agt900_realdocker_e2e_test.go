@@ -1215,7 +1215,9 @@ func rrKeep(reason, tag, run string) e2eExpect {
 //		retired: true, state: "done", tagThenUp: true}
 //
 // Nothing else in the harness encodes the T/T-armed expectation.
-var xTTArmed = rrKeep("rollback_armed_target_live", "bad", "bad")
+var xTTArmed = e2eExpect{decision: "finish_rollback_retag", reason: "rollback_armed_tag_not_moved",
+	actions: []string{"tag:prior", "up"}, tag: "prior", run: "prior",
+	retired: true, state: "done", tagThenUp: true}
 
 func e2eConvergeCases() []e2eConverge {
 	return []e2eConverge{
@@ -1238,9 +1240,9 @@ func e2eConvergeCases() []e2eConverge {
 		{name: "rb_armed_before_tag", target: "bad", point: "tag_before:2", expect: xTTArmed}, // RETARGET POINT: see xTTArmed
 		{name: "rb_tag_moved_before_up", target: "bad", point: "up_before:2",
 			expect: xp("finish_rollback", "rollback_interrupted", []string{"up"}, "prior", "prior", true, "done", "")},
-		{name: "rb_up_done", target: "bad", point: "up_after:2", expect: noop("noop", "already_on_prior")},
-		{name: "rb_in_rollback_health", target: "bad", point: "ready@up_after:2", expect: noop("noop", "already_on_prior")},
-		{name: "rb_at_rollback_verify", target: "bad", point: "ps_before:3", expect: noop("noop", "already_on_prior")},
+		{name: "rb_up_done", target: "bad", point: "up_after:2", expect: xArmedOnPrior},
+		{name: "rb_in_rollback_health", target: "bad", point: "ready@up_after:2", expect: xArmedOnPrior},
+		{name: "rb_at_rollback_verify", target: "bad", point: "ps_before:3", expect: xArmedOnPrior},
 		// the same Docker state as rb_tag_moved_before_up, but an operator moved
 		// the tag: nothing proves the agent did, so it is only reported
 		{name: "operator_retag_unarmed", target: "good", point: "up_after:1", mutate: operatorRetag,
@@ -1609,6 +1611,10 @@ var (
 	xRealign = xp("realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", true, "done", "")
 	xFinish  = xp("finish_rollback", "rollback_interrupted", []string{"up"}, "prior", "prior", true, "done", "")
 	xOnPrior = noop("noop", "already_on_prior")
+	// xArmedOnPrior: the agent died with the inline rollback durably armed and
+	// Docker already on prior (armed P/P). #2051 confirms the prior with a fresh
+	// probe before retiring, under its own reason.
+	xArmedOnPrior = noop("noop", "armed_rollback_prior_ready")
 )
 
 // caseKillSeq runs s, retrying from scratch if a polled kill missed its window.
@@ -2238,11 +2244,11 @@ func e2eKillSeqs() []e2eKillSeq {
 		{name: "kill_in_reconcile_up", target: "bad", crashAt: "up_before:2",
 			holds: []e2eHold{unchanged("up_before:1", 1)}, final: xFinish},
 		{name: "kill_in_reconcile_after_up", target: "bad", crashAt: "up_before:2",
-			holds: []e2eHold{onPrior("up_after:1", 1)}, final: xOnPrior},
+			holds: []e2eHold{onPrior("up_after:1", 1)}, final: xArmedOnPrior},
 		{name: "rc_in_post_up_probe", target: "bad", crashAt: "up_before:2",
-			holds: []e2eHold{onPrior("ready@up_after:1", 1)}, final: xOnPrior},
+			holds: []e2eHold{onPrior("ready@up_after:1", 1)}, final: xArmedOnPrior},
 		{name: "rc_fr_in_verify_last_read", target: "bad", crashAt: "up_before:2",
-			holds: []e2eHold{onPrior("image_after:13", 1)}, final: xOnPrior},
+			holds: []e2eHold{onPrior("image_after:13", 1)}, final: xArmedOnPrior},
 		// item 2, repeated restarts on one record
 		{name: "repeat_tag_ahead_exhaust", target: "good", crashAt: "up_before:1",
 			holds: []e2eHold{unchanged("tag_before:1", 1), unchanged("tag_before:1", 2)},
