@@ -9,9 +9,11 @@ package server
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"culvert-maint/internal/audit"
+	"culvert-maint/internal/journal"
 	"culvert-maint/internal/ops"
 )
 
@@ -132,10 +134,18 @@ func (s *Server) guardInlineRollback(acc *upgradeApplyAccumulator, racc *rollbac
 				armNote = []byte(name + ": journal write failed; rolling back unarmed\n")
 			}
 		}
+		if name == "rollback_health" {
+			// The rollback's own gate (ADR-0062 slice 3b): best-effort, never
+			// refusing the gate that restores service.
+			s.beginPriorGateBestEffort(acc)
+		}
 		out, errout, err := inner(ctx)
 		out = append(armNote, out...)
 		if err != nil {
 			acc.rollbackFailed = true
+			if name == "rollback_health" || name == "rollback_verify" {
+				s.endGateBestEffort(acc.opID, journal.StepGatePrior, gateFailed(strings.TrimPrefix(name, "rollback_")))
+			}
 			s.emitRollbackAudit(acc, audit.OutcomeFailed, name)
 			return out, errout, err
 		}
@@ -143,6 +153,7 @@ func (s *Server) guardInlineRollback(acc *upgradeApplyAccumulator, racc *rollbac
 		case "rollback_restart":
 			acc.rollbackRestarted = true
 		case "rollback_verify":
+			s.endGateBestEffort(acc.opID, journal.StepGatePrior, journal.CheckpointPassed)
 			acc.rollbackSucceeded = true
 			acc.runningAfterDigests = racc.runningAfterDigests
 			s.emitRollbackAudit(acc, audit.OutcomeSucceeded, "")

@@ -350,22 +350,7 @@ func (s *Server) buildUpgradeApplyStages(acc *upgradeApplyAccumulator, racc *rol
 			// health_failed AND inline rollback is triggered.
 			Name:          "health_gate",
 			FailureReason: ops.ReasonHealthFailed,
-			Run: skipIfCurrent(acc, "health_gate", func(ctx context.Context) ([]byte, []byte, error) {
-				hr, herr := s.opts.HealthProbeFactory().Run(ctx)
-				if herr != nil {
-					acc.upgradeFailedPostRestart = true
-					return nil, nil, herr
-				}
-				acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q duration=%s",
-					hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, hr.TotalDuration)
-				if hr.Failed() {
-					// Post-restart failure: the new image is running but
-					// unhealthy → this is what triggers inline rollback.
-					acc.upgradeFailedPostRestart = true
-					return []byte(acc.healthSummary), nil, errors.New(hr.ReadyDetail)
-				}
-				return []byte(acc.healthSummary), nil, nil
-			}),
+			Run:           skipIfCurrent(acc, "health_gate", s.targetHealthGate(acc)),
 		},
 		{
 			// Post-restart verification (the #351 output-side guarantee):
@@ -418,6 +403,41 @@ func skipIfCurrent(acc *upgradeApplyAccumulator, label string, run stageRun) sta
 	}
 }
 
+// targetHealthGate is the apply `health_gate` stage body: the production probe
+// of the target the restart just started, inside a gate:target checkpoint
+// (ADR-0062 slice 3b). The checkpoint is written FAIL-CLOSED before the probe:
+// if it cannot be, the gate counts as failed (checkpoint_unwritable) and the
+// inline rollback runs, which can only lead to the conservative branch. A
+// failure's result is written before this stage returns, so before any
+// rollback stage moves anything, and never blocks it.
+func (s *Server) targetHealthGate(acc *upgradeApplyAccumulator) stageRun {
+	return func(ctx context.Context) ([]byte, []byte, error) {
+		if err := s.beginTargetGate(acc); err != nil {
+			acc.upgradeFailedPostRestart = true
+			return []byte("health_gate: the gate could not be recorded as begun; treating it as failed (the target may be healthy)"), nil,
+				&ops.ReasonError{Reason: ops.ReasonCheckpointUnwritable, Err: fmt.Errorf("health gate checkpoint write failed: %w", err)}
+		}
+		hr, herr := s.opts.HealthProbeFactory().Run(ctx)
+		if herr != nil {
+			acc.upgradeFailedPostRestart = true
+			s.endGateBestEffort(acc.opID, journal.StepGateTarget, gateFailed("probe_error"))
+			return nil, nil, herr
+		}
+		acc.healthSummary = fmt.Sprintf("ready=%v ready_detail=%q health=%v health_detail=%q duration=%s",
+			hr.ReadyOK, hr.ReadyDetail, hr.HealthOK, hr.HealthDetail, hr.TotalDuration)
+		if hr.Failed() {
+			// Post-restart failure: the new image is running but
+			// unhealthy → this is what triggers inline rollback.
+			acc.upgradeFailedPostRestart = true
+			s.endGateBestEffort(acc.opID, journal.StepGateTarget, gateFailed("unhealthy"))
+			return []byte(acc.healthSummary), nil, errors.New(hr.ReadyDetail)
+		}
+		// The gate is not over: verify is its second half. Its result is
+		// written there.
+		return []byte(acc.healthSummary), nil, nil
+	}
+}
+
 // verifyRunningImage re-captures the running proxy image after the restart
 // and HARD-verifies that its RepoDigest includes the pinned digest. The
 // pin is always concrete (resolve_target turns a tag into a digest), so
@@ -427,6 +447,7 @@ func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator) stageRun {
 		ri, err := s.opts.Runner.CaptureRunningProxyImage(ctx)
 		if err != nil {
 			acc.upgradeFailedPostRestart = true
+			s.endGateBestEffort(acc.opID, journal.StepGateTarget, gateFailed("verify_capture"))
 			return []byte("verify: post-restart capture failed"), nil,
 				fmt.Errorf("post-restart capture failed: %w", err)
 		}
@@ -434,6 +455,7 @@ func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator) stageRun {
 		acc.runningAfterDigests = bareDigests(ri.RepoDigests)
 		if acc.pinnedDigest != "" && !containsString(acc.runningAfterDigests, acc.pinnedDigest) {
 			acc.upgradeFailedPostRestart = true
+			s.endGateBestEffort(acc.opID, journal.StepGateTarget, gateFailed("digest_mismatch"))
 			return []byte(fmt.Sprintf("verify: running digests=%s do NOT include pinned %s",
 					joinDigests(acc.runningAfterDigests), acc.pinnedDigest)), nil,
 				fmt.Errorf("post-restart running image does not match pinned digest %s", acc.pinnedDigest)
@@ -443,6 +465,7 @@ func (s *Server) verifyRunningImage(acc *upgradeApplyAccumulator) stageRun {
 		acc.runningAfterID = ri.RunningImageID
 		// Health + verify passed; success is imminent (the op still has the
 		// report stage, and terminal removal will retire the record).
+		s.endGateBestEffort(acc.opID, journal.StepGateTarget, journal.CheckpointPassed)
 		s.advanceJournalPhaseBestEffort(acc, journal.PhaseVerified)
 		return []byte(fmt.Sprintf("verify: running_image_id=%s running_digests=%s",
 			ri.RunningImageID, joinDigests(acc.runningAfterDigests))), nil, nil
