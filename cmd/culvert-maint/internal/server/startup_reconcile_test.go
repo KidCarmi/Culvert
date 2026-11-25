@@ -48,6 +48,10 @@ type reconWorld struct {
 	down        bool   // Docker does not answer: every command fails
 	onUp        func() // called while `up` runs (outside the lock)
 	onDown      func() // called while `down` runs (outside the lock)
+	// wrongDigest, when set, is an image id whose `image inspect` reports a
+	// digest it does not carry (models a running image that is not the pinned
+	// target although its id matches the record).
+	wrongDigest string
 	// upNoop: this many `up` calls exit 0 having only tidied up, as Compose
 	// does after a recreate interrupted between its stop and its delete.
 	upNoop int
@@ -86,6 +90,15 @@ func digestOf(id string) string {
 		return digOld
 	}
 	return digNew
+}
+
+// reportedDigest is the digest `image inspect` reports for id: its own, or
+// imgOther for the wrongDigest image. Called with w.mu held.
+func (w *reconWorld) reportedDigest(id string) string {
+	if w.wrongDigest != "" && id == w.wrongDigest {
+		return imgOther
+	}
+	return digestOf(id)
 }
 
 func (w *reconWorld) start(cmd *exec.Cmd) error {
@@ -149,7 +162,7 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 			w.failed[cmd] = true
 			return nil
 		}
-		_, _ = cmd.Stdout.Write([]byte(`[{"Id":"sha256:` + id + `","RepoDigests":["` + repo + `@sha256:` + digestOf(id) + `"]}]`))
+		_, _ = cmd.Stdout.Write([]byte(`[{"Id":"sha256:` + id + `","RepoDigests":["` + repo + `@sha256:` + w.reportedDigest(id) + `"]}]`))
 	case has("tag"):
 		w.mutating = append(w.mutating, "tag:"+w.idFor(args[len(args)-2]))
 		w.tagRefs = append(w.tagRefs, args[len(args)-2])

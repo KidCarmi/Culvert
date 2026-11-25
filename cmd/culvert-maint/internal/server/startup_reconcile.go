@@ -391,6 +391,16 @@ type reconcileCase struct {
 	// pass removes the "created" leftover), so rechecks keep the up evidence
 	// read before it instead of reading it again.
 	ownUpReturned bool
+	// auditSuffix names this record's audit entry ("" = ":reconciled"); a
+	// resumed gate is audited as ":resumed" (reconcile_resume.go).
+	auditSuffix string
+}
+
+func (c *reconcileCase) auditKind() string {
+	if c.auditSuffix != "" {
+		return reportKind(c.rec.Kind) + c.auditSuffix
+	}
+	return reportKind(c.rec.Kind) + ":reconciled"
 }
 
 // reconcileOne decides and (maybe) acts on one record, and returns its result.
@@ -460,6 +470,8 @@ func (s *Server) reconcileOne(ctx context.Context, opID, recID string, dockerRea
 			return s.keepRecord(c, OutcomeRecoveryRequired)
 		}
 		return s.retireIfServing(ctx, c)
+	case actV2ResumeGate:
+		return s.resumeGate(ctx, c, v)
 	}
 	return s.act(ctx, c, v)
 }
@@ -479,7 +491,21 @@ func (s *Server) reconcileInputsFor(rec *journal.Record) reconcileInputsV2 {
 		TargetDigest: rec.TargetDigest, TargetImageID: reportImageID(rec.TargetImageID),
 		PriorImageID: reportImageID(rec.PriorImageID), RollbackArmed: rec.RollbackArmed,
 		Attempts: attempts, MaxAttempts: maxReconcileAttempts,
+		ResumeEnabled: s.opts.Cfg.ResumeInterruptedGate, Seen: rec.InterruptedSeen,
+		Ck: ckFactsOf(rec.Checkpoint), ResumeAudited: s.resumeAudited(rec),
 	}
+}
+
+// resumeAudited reports whether this op already has a succeeded `:resumed`
+// entry. Read only where it can matter (resume on, an upgrade at restarted).
+// An unreadable log answers false: the gate is then resumed again rather than
+// a retirement assumed.
+func (s *Server) resumeAudited(rec *journal.Record) bool {
+	if !s.opts.Cfg.ResumeInterruptedGate || s.opts.Audit == nil || rec.Phase != journal.PhaseRestarted {
+		return false
+	}
+	found, err := audit.HasSucceeded(s.opts.Audit.Path(), rec.OpID, reportKind(rec.Kind)+":resumed")
+	return err == nil && found
 }
 
 // readReconcileFacts fills the Docker half of in. A record's references reach
@@ -768,7 +794,7 @@ func (s *Server) reconciledAlreadyAudited(c *reconcileCase) bool {
 	if s.opts.Audit == nil || c.rec == nil {
 		return false
 	}
-	found, err := audit.HasSucceeded(s.opts.Audit.Path(), c.rec.OpID, reportKind(c.rec.Kind)+":reconciled")
+	found, err := audit.HasSucceeded(s.opts.Audit.Path(), c.rec.OpID, c.auditKind())
 	if err != nil {
 		log.Printf("culvert-maint: WARN: could not check the audit log for a prior retirement of %s; writing the entry: %v", c.rec.OpID, err)
 		return false
@@ -798,7 +824,7 @@ func (s *Server) auditReconciled(c *reconcileCase, outcome audit.Outcome) error 
 		actions = append(actions, a)
 	}
 	ev := audit.Event{
-		Actor: AuditActorReconcile, OpID: c.rec.OpID, Kind: reportKind(c.rec.Kind) + ":reconciled",
+		Actor: AuditActorReconcile, OpID: c.rec.OpID, Kind: c.auditKind(),
 		Params: map[string]interface{}{
 			"reconcile_op_id": c.opID, "decision": c.out.Decision, "reason": c.out.Reason,
 			"actions": actions, "running_image": c.out.RunningImage, "pinned_tag": c.out.PinnedTag,

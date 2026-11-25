@@ -149,3 +149,26 @@ proxy_repo = "ghcr.io/kidcarmi/culvert"
 # An agent older than this setting refuses to start with it present: remove
 # it before downgrading.
 #reconcile_on_startup = "off"
+
+# Resume an upgrade's interrupted health gate (contract AGT-900, ADR-0062
+# slice 7). Startup-only; there is no API to change it. Accepted only with
+# reconcile_on_startup = "converge"; with any other mode the agent refuses to
+# start.
+#   false (default) an upgrade whose agent died while health-checking the new
+#         image, or after starting it and before checking it, is reported
+#         (recovery_required, target_live_ungated) and the new image keeps
+#         serving unchecked until you act.
+#   true  the next start runs that health check itself, once: only when the
+#         restart recorded the new image's id (after checking its digest),
+#         container and tag are still on that id, no rollback was armed, the
+#         agent did not die inside that upgrade's `compose up`, and no other
+#         start has seen the entry since the check began. It first records
+#         that it is checking (if it cannot, nothing runs), then checks
+#         /ready, then container, tag and the running digest. Passed: the new
+#         image is accepted with nothing changed in Docker (audit
+#         upgrades.apply:resumed). Failed: the rollback is recorded and run
+#         in the same start, as for an armed rollback. The upgrade itself
+#         stays failed (agent_restart_interrupted); it is not replayed.
+# An agent older than this setting refuses to start with it present: remove
+# it before downgrading.
+#resume_interrupted_gate = false
