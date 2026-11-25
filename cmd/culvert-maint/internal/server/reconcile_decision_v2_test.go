@@ -899,7 +899,7 @@ func TestReconcileDecisionV2_NegativeControls(t *testing.T) {
 			return reconcileDecisionV2(in)
 		},
 	}
-	for _, more := range []map[string]func(reconcileInputsV2) reconcileVerdictV2{v2ArmedFinishMutants(), v2RestorePriorMutants()} {
+	for _, more := range []map[string]func(reconcileInputsV2) reconcileVerdictV2{v2ArmedFinishMutants(), v2RestorePriorMutants(), v2UpEvidenceMutants()} {
 		for k, m := range more {
 			mutants[k] = m
 		}
@@ -995,24 +995,29 @@ func v2RestorePriorMutants() map[string]func(reconcileInputsV2) reconcileVerdict
 			}
 			return reconcileDecisionV2(in)
 		},
-		"restore without Docker's evidence (B1)": func(in reconcileInputsV2) reconcileVerdictV2 {
-			if v := reconcileDecisionV2(in); v.Reason == "stack_down_no_up_evidence" {
-				return verdictRestorePrior
-			}
-			return reconcileDecisionV2(in)
-		},
-		"restore on unreadable evidence": func(in reconcileInputsV2) reconcileVerdictV2 {
-			if v := reconcileDecisionV2(in); v.Reason == "up_evidence_unreadable" {
-				return verdictRestorePrior
-			}
-			return reconcileDecisionV2(in)
-		},
 		"attribution changes another verdict": func(in reconcileInputsV2) reconcileVerdictV2 {
 			if v := reconcileDecisionV2(in); in.UpInterrupted && v.Reason == "prior_not_restorable" {
 				return reconcileVerdictV2{actV2Noop, "already_on_prior"}
 			}
 			return reconcileDecisionV2(in)
 		},
+	}
+}
+
+// v2UpEvidenceMutants: restore_prior decided without Docker's evidence of a
+// death inside `up` (B1), each mutant promoting one report to a restore.
+func v2UpEvidenceMutants() map[string]func(reconcileInputsV2) reconcileVerdictV2 {
+	promote := func(reason string) func(reconcileInputsV2) reconcileVerdictV2 {
+		return func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); v.Reason == reason {
+				return verdictRestorePrior
+			}
+			return reconcileDecisionV2(in)
+		}
+	}
+	return map[string]func(reconcileInputsV2) reconcileVerdictV2{
+		"restore without Docker's evidence (B1)": promote("stack_down_no_up_evidence"),
+		"restore on unreadable evidence":         promote("up_evidence_unreadable"),
 	}
 }
 

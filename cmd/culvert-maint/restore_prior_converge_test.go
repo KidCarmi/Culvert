@@ -250,7 +250,7 @@ func TestRestorePrior_CaseB_TwoRecordsTheOlderDoesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(r.state, "reconcile", older+".json"), raw, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(r.state, "reconcile", older+".json"), raw, 0o600); err != nil { // #nosec G703 -- rig-owned temp dir, constant name
 		t.Fatal(err)
 	}
 	r.editRecord(older, func(m map[string]any) { delete(m, "intent"); m["op_id"] = older })

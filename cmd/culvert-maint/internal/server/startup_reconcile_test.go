@@ -132,19 +132,7 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 	}
 	switch {
 	case has("ps") && has("-a"):
-		w.psAllCount++
-		if w.psAllFail {
-			w.failed[cmd] = true
-			return nil
-		}
-		var lines []string
-		if w.running != "" {
-			lines = append(lines, `{"Service":"proxy","State":"running","ID":"abcdef012345"}`)
-		}
-		if w.leftover {
-			lines = append(lines, `{"Service":"proxy","State":"created","ID":"0123456789ab"}`)
-		}
-		_, _ = cmd.Stdout.Write([]byte(strings.Join(lines, "\n")))
+		w.answerPSAll(cmd)
 	case has("ps"):
 		if w.running != "" {
 			_, _ = cmd.Stdout.Write([]byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}`))
@@ -177,6 +165,24 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		}
 	}
 	return nil
+}
+
+// answerPSAll answers `compose ps -a` (called under the world's lock): the
+// running proxy and the "created" leftover, or a failure with psAllFail.
+func (w *reconWorld) answerPSAll(cmd *exec.Cmd) {
+	w.psAllCount++
+	if w.psAllFail {
+		w.failed[cmd] = true
+		return
+	}
+	var lines []string
+	if w.running != "" {
+		lines = append(lines, `{"Service":"proxy","State":"running","ID":"abcdef012345"}`)
+	}
+	if w.leftover {
+		lines = append(lines, `{"Service":"proxy","State":"created","ID":"0123456789ab"}`)
+	}
+	_, _ = cmd.Stdout.Write([]byte(strings.Join(lines, "\n")))
 }
 
 func (w *reconWorld) wait(cmd *exec.Cmd) error {
