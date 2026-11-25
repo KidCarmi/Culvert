@@ -163,7 +163,7 @@ func TestRestorePrior_CaseC_ARestoreWhoseUpReturnedIsNotACrash(t *testing.T) {
 			r.put("pinned", handImage)
 			r.put("running", handImage) // the operator brings the stack up by hand
 			_ = os.Remove(filepath.Join(r.model, "leftover"))
-			r.kill()                    // ... days pass; then:
+			r.kill() // ... days pass; then:
 			if err := os.Remove(filepath.Join(r.model, "running")); err != nil {
 				t.Fatal(err) // the operator takes it down on purpose
 			}
