@@ -215,7 +215,10 @@ started again**, whatever the entry says. The read uses its own sudoers rule
 with this version. If the rule is missing, or the listing cannot be read,
 nothing is restored and the entry is reported (reason `up_evidence_unreadable`).
 Without the container it is reported as `stack_down_no_up_evidence`. On an
-install without the rule, sudo logs a denied command each time this happens.
+install without the rule, sudo logs a denied command each time this happens. The
+check also needs a Docker Compose whose `ps --format json` reports each
+container's labels (verified with Compose v5.7.1); with one that does not,
+nothing is restored and the entry is reported as `up_evidence_unreadable`.
 
 What is still restored: a stack left as the crash left it, or whose containers
 were only stopped; and one where, after the crash, you ran `docker compose

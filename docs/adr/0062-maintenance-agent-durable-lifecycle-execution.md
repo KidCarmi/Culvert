@@ -347,7 +347,9 @@ gaps and make the #2051 executor the single path every recovery takes.
   `compose run` without `--rm` whose start fails stays `created`, and
   `compose down` does not remove one-offs (measured, Compose v5.7.1; found by
   the second review). A `created` proxy whose one-off label cannot be read is
-  treated as unreadable. It is read only when the
+  treated as unreadable. A Compose whose `ps --format json` carries no
+  per-container labels therefore never restores (fail-closed; not verified on
+  older Compose versions, verified on v5.7.1). It is read only when the
   attribution is set and no proxy container is listed, again before every
   Docker change up to the reconcile's own first `up`, and not after it (that
   `up` removes the container itself in Compose's tidy-only pass). Unreadable
