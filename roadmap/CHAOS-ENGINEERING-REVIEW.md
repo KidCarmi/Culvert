@@ -40,6 +40,110 @@ highest id anywhere on `origin/main` (at `f4f9379`), and open PR #2075
 holds `CHAOS-127`, so this sweep takes 128 and will not move. Of the other open
 PRs none is a chaos sweep and none claims a chaos id.
 
+The 2026-11-25 round is recorded in
+[the dated review](../docs/engineering/CHAOS-ENGINEERING-REVIEW-2026-11-25.md) —
+CHAOS-128 (THE SIDE EFFECTS THAT RAN ON A WRITE THAT FAILED). `finishUploadDrain`
+persisted a consented upload's post-attempt entry, logged a persist error
+WITHOUT returning, and then ran the two irreversible side effects that are valid
+only if that write landed: `os.Remove` of the sealed blob — the only copy of the
+bytes `BundleSHA256` was computed over — and the `support.bundle.upload` audit
+record claiming delivery, whose own comment asserted *"the receipt lives on the
+persisted queue entry"*, naming the artifact that had just failed to persist. On
+an ENOSPC/EROFS/EIO volume one consented upload therefore lost BOTH the evidence
+bytes and the gateway's SIGNED RECEIPT (the node's only proof of delivery) while
+the compliance record said the evidence had been delivered; the stale on-disk
+entry then sent the next attempt at the deleted blob, where a plain ENOENT is
+not a `GatewayError` and is classified TRANSIENT, burning the 6-attempt budget
+down to `deferred` — so `support.bundle.upload` and
+`support.bundle.upload_deferred` ended up asserting OPPOSITE outcomes for the
+same bundle. The same lost write also unbounded the ladder: a transient
+failure's entire bookkeeping is `Attempts++` plus a backoff `NextRetryAt`, so
+with that write lost the disk keeps `attempts=0, next_retry_at=0`, the entry is
+due on every tick, and the cap that exists to reach `deferred` can never trip
+(measured: 8 ticks, 8 transfers). **The round's real content is why the repair is
+a HOLD and not an early return.** Returning before the side effects fixes
+integrity and buys an availability defect in its place, because the retained
+entry is immediately due again and the 30 s worker re-uploads the WHOLE bundle to
+the vendor every tick for as long as the volume stays unwritable — a local disk
+fault amplified into unbounded egress of operator evidence (measured: 5 ticks, 5
+transfers). Shipped: the persist is AUTHORITATIVE; the outcome is held in RAM
+until its write lands, whatever its state, so the receipt is not thrown away AND
+the bundle is not re-sent (measured after: 1 transfer in both probes, and on
+recovery the entry lands `uploaded` with its receipt, the blob is released and
+the delivery is audited exactly once); held outcomes commit ABOVE the
+`uploadEnabled()` gate, because committing one is a local write plus an audit
+record for a transfer that already happened and dials nothing — disabling upload
+must pause EGRESS, not strand the record of a delivery the node already made;
+and two scrapeable series (`culvert_support_upload_commit_held` gauge,
+`culvert_support_upload_commit_held_total` counter) plus a log line carrying the
+unpersisted receipt signature, which is the only form in which it survives.
+**Refused, with reasons in the file comments and §6:** no durable journal for the
+hold (it would need the volume that is refusing writes), no alert of its own
+(`storage_write_failed` already fires from the `AtomicWrite` observer on the root
+cause, and a second alert competes with real threat alerts in the bounded retry
+queue — the WK-12/RS-5 lesson), no operator setting (there is no defensible
+configuration in which an unrecorded outcome authorizes deleting the evidence),
+no reclassification of the missing-blob ENOENT as terminal (it treats a symptom
+and would make a genuinely transient open error terminal), and NOT the
+last-writer-wins write-back, which is real and already recorded as `L4` in the
+2026-07-24 secure-upload review — folding it in would make one PR two.
+**Mutation testing earned its keep on the three decisions the headline defect
+does not force:** 5 mutations, all caught, and M3 (hold but never release), M5
+(commit below the egress gate) and M6 (hold only terminal states) each failed
+EXACTLY ONE gate, which is the evidence that none of those three is carried by
+another. **RESIDUAL, and deliberate:** a restart while an outcome is held
+re-sends that bundle — the in-RAM receipt is genuinely gone, the durable entry
+still reads `queued` and the blob is still there, so a fresh receipt is the only
+way to hold proof again; the alternative is the defect this round closed.
+**Two findings from the same sweep are RECORDED, NOT FIXED** (dated review §8),
+both verified first-hand at `f4f9379` with zero prior coverage anywhere in
+`roadmap/` or `docs/`, because each belongs to an owner this PR does not touch:
+**CL-1** — `nodeMetrics` (`controlplane.go:163-166`) has one writer
+(`controlplane_server.go:348`) and NO `delete` anywhere in the tree, tests
+included, so a revoked node's last `MetricsReport` is frozen for the process
+lifetime (`verifyNode` refuses its `PushMetrics`, `controlplane_server.go:50-53`;
+`RevokeNode` never touches the map, `enrollment.go:609-635`). The file disagrees
+with itself: the two numbers printed side by side to answer "is our centralized
+audit trail complete?" derive from two different notions of the fleet —
+`auditClusterPushUnreportingNodes` iterates the ENROLLED ROSTER
+(`controlplane.go:217-233`) while `auditClusterPushDropsTotal` iterates THE MAP
+(`controlplane.go:184-199`) and so sums a decommissioned node's drops forever —
+and two siblings in the same file DO prune (`rateLimitAggregator.generation`'s
+`rlNodeStaleAfter` cutoff, `controlplane.go:319-332`; `enrollRateLimit.attempts`,
+`controlplane.go:855-864`). `computeFleetConvergence`
+(`cluster_convergence.go:60-87`) iterates it too, so `culvert_cluster_config_straggler_nodes`
+(`cluster_metrics.go:167-170`) stays pinned at >= 1 after any decommission,
+clearable only by restarting the CP, which makes a REAL lagging DP
+indistinguishable from a retired node's remains. A fix must take the roster via
+`ListNodes()` and release before touching `nodeMetricsMu` (`checkHeartbeats`
+holds `cs.mu` for its whole body, `enrollment.go:793-814` — the CHAOS-118
+lock-pairing lesson), must sweep NOTHING on an empty roster (indistinguishable
+from a store that failed to load, which is CHAOS-117's shape), and must keep
+`disconnected`/`draining` entries, which are legitimate stragglers.
+**MCP-1** — `internal/mcp/approval.Store`'s `byID` map (`store.go:82`) is
+documented as a "bounded, in-memory projection" (`store.go:75-78`) and has no
+`delete` in the package; the caps count PENDING only (`store.go:126-132`,
+`301-309`), so a decided or TTL-lapsed request frees capacity while the
+`*Request` is retained for the process lifetime. The sharper half is not memory:
+`List` walks a Go map in RANDOMIZED order and truncates at 200 with no ordering,
+cursor or truncation signal (`store.go:160-178`; callers hardcode the limit at
+`ui_mcp.go:573, 698`), so once a few hundred terminal requests accumulate a LIVE
+pending four-eyes request can fall outside the page an approver is looking at —
+the sibling decision surface got both a scan bound and a cursor
+(`internal/mcp/adminapi/decisions.go:271, 323`), approvals got neither, and
+`PublicationService.sweepPending` (`publication.go:152-171`) states this exact
+threat model and fixes it one layer up only. Mitigated today by `appCommit`
+always being `mcpDisabledCommitter` (`ui_mcp.go:51-57, 104`), so no decision can
+commit. **Also observed and NOT a defect:** an AST sweep of all 112 `go`
+statements in package main found every periodic round covered by `runGuarded` or
+`obs.SafeCall`, but `chaos105Workers` (`chaos105_worker_guard_test.go:133`)
+asserts only that every REGISTERED worker is guarded and never that the
+inventory is COMPLETE — and two genuinely-guarded workers added since are
+already missing from it (`dpCertRenewalLoop`, `dp_enrollment.go:353-366`;
+`retryCPAddrPublish`, `cp_addr_publish.go:586-596`). The contract holds; the gate
+that protects it does not yet enumerate, which is a completeness gate a later
+round should write.
+
 **2026-11-21 — `CHAOS-126` CLAIMED (placeholder, commit one). Domain: the
 OBSERVABILITY PLANE'S OWN LOSS ACCOUNTING — the OTLP SPAN BUFFER at a
 collector failure and at a restart. `SpanExporter.push` DRAINS the ring buffer
