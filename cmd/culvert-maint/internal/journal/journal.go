@@ -139,7 +139,8 @@ type Record struct {
 	// immediately BEFORE its rollback_restart stage moves the fixed tag back to
 	// the prior image. It is the durable evidence that the agent had already
 	// decided the target failed its gate, so a startup reconcile must never
-	// adopt the target of such a record. If it cannot be written the rollback
+	// adopt the target of such a record; in converge mode it is the only
+	// evidence on which the reconcile finishes that rollback. If it cannot be written the rollback
 	// still runs and the record stays unarmed, which the reconcile never acts on.
 	// It is an optional key, not a new Phase:
 	// an agent that predates it ignores the key (encoding/json drops unknown
@@ -151,7 +152,8 @@ type Record struct {
 	// before). Optional keys an older agent ignores.
 	//
 	// ReconcileAttempts counts the reconcile actions that changed Docker
-	// (realign, finish_rollback). It is written FAIL-CLOSED before the action
+	// (realign, finish_rollback, finish_rollback_retag; one per start however
+	// many steps the action has). It is written FAIL-CLOSED before the action
 	// (write-ahead): no durable count, no action. A deferred or report-only
 	// verdict does not count. It is content from an unauthenticated file: the
 	// reconciler treats a negative value as exhausted.

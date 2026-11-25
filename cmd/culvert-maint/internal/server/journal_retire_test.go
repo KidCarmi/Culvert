@@ -130,6 +130,62 @@ func TestRetire_UnreadableJournalRetiresNothing(t *testing.T) {
 	}
 }
 
+// Codex review on #2039: a startup reconcile that left a record needing
+// recovery must stop reporting recovery_required once a later successful
+// image change retired that record, and must keep reporting it otherwise. The
+// nested reconcile record stays as history.
+func TestRetire_ResolvesStartupRecoveryRequired(t *testing.T) {
+	const otherOp = "01HZZZZZZZZZZZZZZZZZZZZZZW"
+	seedTracker := func(srv *Server) {
+		tr := NewReconcileTracker()
+		tr.put(ReconcileRecord{OpID: staleOpULID, Kind: "upgrade", Decision: "recovery_required",
+			Reason: "target_live_ungated", Outcome: OutcomeRecoveryRequired})
+		srv.reconcileTracker = tr
+	}
+
+	t.Run("retired record clears the flag", func(t *testing.T) {
+		srv, jnl := newJournalTestServer(t)
+		srv.opts.Cfg.ProxyRepo = repo
+		seedStaleRecord(t, jnl)
+		seedTracker(srv)
+		if !srv.reconcileTracker.RecoveryRequired() {
+			t.Fatal("premise: startup left recovery_required")
+		}
+		if got := srv.retireSupersededRecords(testOpULID, "uid=0"); len(got) != 1 {
+			t.Fatalf("retired %v", got)
+		}
+		if srv.reconcileTracker.RecoveryRequired() {
+			t.Error("recovery_required still reported after the record was retired")
+		}
+		r, ok := srv.reconcileTracker.RecordFor(staleOpULID)
+		if !ok || r.Outcome != OutcomeRecoveryRequired || r.SupersededBy != testOpULID {
+			t.Errorf("startup history lost or unattributed: %+v ok=%v", r, ok)
+		}
+	})
+
+	t.Run("failed retirement keeps the flag", func(t *testing.T) {
+		srv, jnl := newJournalTestServer(t)
+		seedStaleRecord(t, jnl)
+		seedTracker(srv)
+		if err := os.WriteFile(filepath.Join(jnl.Dir(), "01HZZZZZZZZZZZZZZZZZZZZZZX.json"), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		srv.retireSupersededRecords(testOpULID, "uid=0")
+		if !srv.reconcileTracker.RecoveryRequired() {
+			t.Error("recovery_required cleared although nothing was retired")
+		}
+	})
+
+	t.Run("a different record keeps the flag", func(t *testing.T) {
+		srv, _ := newJournalTestServer(t)
+		seedTracker(srv)
+		srv.reconcileTracker.markSuperseded(otherOp, testOpULID)
+		if !srv.reconcileTracker.RecoveryRequired() {
+			t.Error("superseding an unrelated op cleared recovery_required")
+		}
+	})
+}
+
 // TestRetire_AuditFailureKeepsRecord: a record is removed only after its
 // supersession audit entry has been written (AGT-005, "the removal is audited
 // first"). With the audit log refusing writes, nothing is retired, the record
