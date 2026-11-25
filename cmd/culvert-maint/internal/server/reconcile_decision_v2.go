@@ -97,6 +97,13 @@ const (
 	// actV2Defer: Docker could not be read. Nothing is changed and the attempt
 	// is not counted; the next start decides again.
 	actV2Defer
+	// actV2ResumeGate: an upgrade's agent died while gating, or before gating,
+	// the target it had just started; resume_interrupted_gate is on and every
+	// condition of resumeGateV2 holds. Checkpoint ahead, a fresh production
+	// gate, verify by id and digest; nothing in Docker changes unless the gate
+	// fails, which re-decides onto #2051's armed finish (reconcile_resume.go).
+	// ADR-0062 slice 7.
+	actV2ResumeGate
 )
 
 func (a reconcileActionV2) String() string {
@@ -117,6 +124,8 @@ func (a reconcileActionV2) String() string {
 		return "restore_prior"
 	case actV2Defer:
 		return "defer"
+	case actV2ResumeGate:
+		return "resume_gate"
 	default:
 		return "unknown"
 	}
@@ -189,6 +198,17 @@ type reconcileInputsV2 struct {
 	// which a deliberate `compose down` removes and a `docker stop` never
 	// makes. restore_prior requires upEvidencePresent.
 	UpEvidence upEvidence
+
+	// Forward resumption (ADR-0062 slice 7, reconcile_resume.go).
+	// ResumeEnabled: resume_interrupted_gate. Seen: the record's
+	// interrupted_seen AFTER this start counted it. Ck: the record's gate
+	// checkpoint. ResumeAudited: this op already has a succeeded `:resumed`
+	// entry (a previous start passed the resumed gate and was killed before
+	// removing the record).
+	ResumeEnabled bool
+	Seen          int
+	Ck            ckFacts
+	ResumeAudited bool
 }
 
 // upEvidence is the Docker-side evidence of a death inside `compose up`.
@@ -424,7 +444,11 @@ var verdictArmedPriorReady = reconcileVerdictV2{actV2Noop, "armed_rollback_prior
 func adoptV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 	switch {
 	case in.Phase != journal.PhaseVerified:
-		// The target is live but never passed the gate (A6/A7).
+		// The target is live but never passed the gate (A6/A7). With
+		// resume_interrupted_gate the gate may be resumed (ADR-0062 slice 7).
+		if v, ok := resumeGateV2(in, ids); ok {
+			return v
+		}
 		return rr("target_live_ungated")
 	case ids.tid != ids.target:
 		return rr("verified_target_id_mismatch")

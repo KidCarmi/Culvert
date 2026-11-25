@@ -234,6 +234,42 @@ own `compose up`. A start that cannot wait out its settle window, or that dies
 before the restore's own `compose up`, forfeits the restore: the entry is then
 only reported. With the default `"off"` nothing is started.
 
+### Resuming an interrupted health check (`resume_interrupted_gate`)
+
+Off by default. With `resume_interrupted_gate = true` (accepted only together
+with `reconcile_on_startup = "converge"`; the agent refuses to start otherwise),
+an upgrade whose agent died **after** starting the new image and **before** its
+health check finished is no longer only reported. The next start runs that
+check again, on what it reads from Docker now:
+
+- only for an upgrade the record shows as restarted, with the new image's id
+  recorded by the restart (which checked the image's digest first), container
+  and `culvert/proxy:pinned` both on that id now, no armed rollback, and no
+  death inside that upgrade's own `compose up` (that case is `restore_prior`
+  above);
+- only when no other agent start has seen the entry since that check began,
+  and at most two checks begun per upgrade: a resumed check that is itself
+  interrupted is not run again (one that never began before the crash gets
+  one more), and the entry is then only reported;
+- it records the check before running it; if it cannot write the state
+  directory nothing runs (`resume_checkpoint_unwritable`);
+- then `/ready`, then container, tag and running digest against the record.
+
+| Reconcile decision / reason | Meaning |
+|---|---|
+| `resume_gate/target_gate_interrupted` | the agent died during the health check; it is run again |
+| `resume_gate/target_gate_not_begun` | the agent died after the restart, before the check began; it is run |
+| `resume_gate/resumed_not_retired` | a previous start passed the resumed check and audited it, then died before clearing the entry; only the entry is cleared |
+| `resumed_gate_failed_unhealthy`, `resumed_gate_failed_verify` | the check failed; the rollback is recorded and, in the same start, the previous image is restored as for an armed rollback |
+| `docker_changed_before_gate`, `docker_changed_before_verify` | Docker changed under the check; nothing more is done, the entry is reported |
+| `resume_failed_unarmed` | the check failed but the rollback could not be recorded; nothing is changed, the entry is reported |
+
+Passed: the new image is accepted with no change to Docker and one
+`upgrades.apply:resumed` audit entry. The upgrade itself stays
+`failed`/`agent_restart_interrupted`; it is never replayed and never rewritten
+as succeeded. With the setting off, every one of these cases is reported as
+before (`target_live_ungated`).
+
 For `indeterminate`:
 
 - **`running_image: prior`** — the proxy still runs the previous image. If
@@ -245,6 +281,8 @@ For `indeterminate`:
   health-checked it. Submitting the same upgrade again is reported as already
   current and does **not** check it. Verify the proxy yourself, or roll back to
   `prior_ref`.
+  With `resume_interrupted_gate = true` the next start does this check for
+  you when the conditions above hold.
 - Until one of these succeeds, do not run `docker compose up` by hand: it
   starts whatever image the tag is on.
 - An upgrade or rollback may wait up to `interrupted_settle` (75s by default)

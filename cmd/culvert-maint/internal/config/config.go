@@ -121,6 +121,15 @@ type Config struct {
 	// config.toml. It has no runtime mutation endpoint on purpose; its effect is
 	// surfaced read-only in GET /v1/status `reconcile` (absent when off).
 	ReconcileOnStartup ReconcileMode
+
+	// ResumeInterruptedGate lets the converge reconcile resume an interrupted
+	// health gate of an upgrade's target (ADR-0062 slice 7, owner decision 4):
+	// the agent died while gating, or before gating, the target it had just
+	// started. Default false, accepted only with ReconcileConverge: converge
+	// users are qualified without it, and turning it on for them silently
+	// would change what their appliance does after a crash. Same GUI-parity
+	// deferral as ReconcileOnStartup.
+	ResumeInterruptedGate bool
 }
 
 // ReconcileMode is the closed set of reconcile_on_startup values.
@@ -175,6 +184,7 @@ type rawConfig struct {
 	ProxyRepo           string   `toml:"proxy_repo"`
 	AllowPeers          []string `toml:"allow_peers"`
 	ReconcileOnStartup  string   `toml:"reconcile_on_startup"`
+	ResumeInterrupted   bool     `toml:"resume_interrupted_gate"`
 }
 
 const (
@@ -490,6 +500,11 @@ func validate(raw *rawConfig) (*Config, error) {
 		return nil, err
 	}
 	cfg.ReconcileOnStartup = mode
+	if raw.ResumeInterrupted && mode != ReconcileConverge {
+		// A safety switch that is silently ignored misleads whoever set it.
+		return nil, fmt.Errorf(`resume_interrupted_gate = true requires reconcile_on_startup = %q`, ReconcileConverge)
+	}
+	cfg.ResumeInterruptedGate = raw.ResumeInterrupted
 
 	return cfg, nil
 }
