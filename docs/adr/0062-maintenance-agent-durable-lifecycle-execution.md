@@ -162,8 +162,13 @@ gaps and make the #2051 executor the single path every recovery takes.
 - This is the precondition for every later field.
 
 **Slice 3 — step checkpoints, starting with the gate (gaps 3, 6).**
-- Add an optional `checkpoint` object: `{step, intent_at, budget,
-  result, result_at, image_id}`. It is written **before** a gate starts
+- Add an optional `checkpoint` object: `{step, intent_at, attempts,
+  epoch, result, result_at, image_id}` (amended: `budget` was ambiguous
+  between "left" and "used"; `attempts` counts the gate runs begun for
+  `step`, written ahead and only ever raised, like `ReconcileAttempts`.
+  `epoch` is the record's `interrupted_seen` at `intent_at`, for the reason
+  rule 5 gives command intents: a start that counted in between makes the
+  checkpoint history, not an interruption to resume). It is written **before** a gate starts
   (`gate:target`, `gate:prior`) and best-effort after it ends (`passed` /
   `failed:<detail>`). Which write may refuse what is decided per write,
   by rule 1's test (amended; the first text made every intent
@@ -362,9 +367,10 @@ gaps and make the #2051 executor the single path every recovery takes.
   container and pinned tag both resolve to the checkpoint's immutable image
   id, freshly read; no conflicting external change (no other open intent, no
   marker command of another op, identity unchanged across the gate); the
-  settle window is over; the persistent resume budget is not exhausted
-  (written ahead, like `ReconcileAttempts`); and a **fresh production health
-  gate** passes.
+  settle window is over; the checkpoint's `attempts` is below the resume
+  cap, raised and written ahead of the resumed gate (like
+  `ReconcileAttempts`); the checkpoint's `epoch` is the record's current
+  `interrupted_seen`; and a **fresh production health gate** passes.
 - Never resume (amended, from slice 3's write rules and slice 4's review):
   - when `rollback_armed` is set, or container or tag is not on the
     checkpoint's `image_id`: the inline rollback was already under way;
@@ -372,9 +378,9 @@ gaps and make the #2051 executor the single path every recovery takes.
   - when this start's command attribution says the agent died inside that
     operation's `compose up`: the restart itself is in doubt, and a proxy
     that is down is slice 4's `restore_prior`;
-  - when the checkpoint's budget is spent. The budget counts the original
-    gate as one attempt, so "gate begun, `failed` lost" (slice 3's
-    residual) is resumed at most `budget - 1` times. That residual is the
+  - when `attempts` has reached the cap. `attempts` counts the original
+    gate as one, so "gate begun, `failed` lost" (slice 3's residual) is
+    resumed at most `cap - 1` times. That residual is the
     one case where a resumption can adopt a target that failed a gate
     once: the state directory could not be written when it failed, the
     agent then died before the rollback moved the tag, and the target now
