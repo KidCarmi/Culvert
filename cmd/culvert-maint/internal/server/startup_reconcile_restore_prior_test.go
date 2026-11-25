@@ -11,7 +11,8 @@ import (
 // priorRestoreRig: an upgrade died at phase restarting with the fixed tag on
 // the target, and no proxy container is running. diedInUp says whether THIS
 // agent start found that the previous process died inside a `compose up` of
-// that operation (the command intent of ADR-0062 slice 3).
+// that operation (the command intent of ADR-0062 slice 3); such a death also
+// leaves the "created" proxy container Docker shows (the up evidence).
 func priorRestoreRig(t *testing.T, ready, diedInUp bool) *reconRig {
 	t.Helper()
 	r := newReconRig(t, ready)
@@ -19,6 +20,7 @@ func priorRestoreRig(t *testing.T, ready, diedInUp bool) *reconRig {
 	r.seed(t, journal.PhaseRestarting, nil)
 	if diedInUp {
 		r.srv.SetCommandAttribution(map[string]string{testOpULID: journal.MutationComposeUp})
+		r.world.leftover = true
 	}
 	return r
 }

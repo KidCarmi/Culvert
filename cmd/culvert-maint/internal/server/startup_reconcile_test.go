@@ -53,6 +53,14 @@ type reconWorld struct {
 	upNoop int
 	// onTag is called (under the world's lock) right after a `docker tag`.
 	onTag func(w *reconWorld)
+	// leftover: `compose ps -a` lists a "created" proxy container, what a
+	// death inside `compose up` leaves behind. Any `up` consumes it (a full
+	// one recreates, a tidy-only one removes it).
+	leftover bool
+	// psAllFail: `compose ps -a` fails (an install whose sudoers file does
+	// not allow it); psAllCount counts how often it was issued.
+	psAllFail  bool
+	psAllCount int
 }
 
 func (w *reconWorld) idFor(ref string) string {
@@ -123,6 +131,20 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		return nil
 	}
 	switch {
+	case has("ps") && has("-a"):
+		w.psAllCount++
+		if w.psAllFail {
+			w.failed[cmd] = true
+			return nil
+		}
+		var lines []string
+		if w.running != "" {
+			lines = append(lines, `{"Service":"proxy","State":"running","ID":"abcdef012345"}`)
+		}
+		if w.leftover {
+			lines = append(lines, `{"Service":"proxy","State":"created","ID":"0123456789ab"}`)
+		}
+		_, _ = cmd.Stdout.Write([]byte(strings.Join(lines, "\n")))
 	case has("ps"):
 		if w.running != "" {
 			_, _ = cmd.Stdout.Write([]byte(`{"Service":"proxy","State":"running","ID":"abcdef012345"}`))
@@ -145,6 +167,7 @@ func (w *reconWorld) start(cmd *exec.Cmd) error {
 		}
 	case has("up"):
 		w.mutating = append(w.mutating, "up")
+		w.leftover = false
 		if w.upNoop > 0 {
 			w.upNoop--
 			break

@@ -327,6 +327,14 @@ def stale_cli():
 
 _ids = itertools.count()
 
+# CONVERGE_FOLLOWS: the follow modes in which the restarted agent converges on
+# its own. converge-down: an operator runs `compose down` on purpose right after
+# the kill, before the new agent decides (it waits out the settle window first).
+# The agent's journal still attributes the outage to its death inside `up`, but
+# the "created" container that death left is gone: nothing may be started
+# (ADR-0062 slice 4, B1).
+CONVERGE_FOLLOWS = ("converge", "converge-down")
+
 
 def trial(k, stop_delay, follow):
     tid = f"{os.getpid()}-{next(_ids)}"
@@ -352,6 +360,10 @@ def trial(k, stop_delay, follow):
     drain_watch = watch_drain(fired, rec, old_ids) if DRAIN in HELD_DRAINS else None
     time.sleep(1.0)
     rec["truth_1s_after_kill"] = truth()
+    if follow == "converge-down":
+        d = sh("docker", "compose", "-f", "docker-compose.yml", "down", cwd=R + "/srv")
+        rec["operator_down"] = {"rc": d.returncode, "secs_after_kill": round(time.time() - fired, 1)}
+        rec["truth_after_operator_down"] = truth()
     ok = wait_agent()
     rec["new_agent_after_s"] = round(time.time() - fired, 1)
     rec["stale_cli_at_restart"] = stale_cli()
@@ -368,14 +380,14 @@ def trial(k, stop_delay, follow):
     rec["last_request_daemon_saw"] = reached[-1] if reached else None
     rec["requests_after_kill"] = [(round(e["t"] - fired, 2), e["req"]) for e in after]
     rec["truth_at_restart"] = truth()
-    if follow != "converge":
+    if follow not in CONVERGE_FOLLOWS:
         rec["status_at_restart"] = status()
     rec["follow_started_after_s"] = round(time.time() - fired, 1)
     if follow == "rollback":
         rec["follow_op"] = run_op("/v1/rollbacks", {"mode": "image", "image_ref": images()["V1"]})
     elif follow == "apply":
         rec["follow_op"] = run_op("/v1/upgrades/apply", {"image_ref": images()["V2"]})
-    elif follow == "converge":
+    elif follow in CONVERGE_FOLLOWS:
         rec["converge_secs"], rec["status_after_converge"], rec["converge_finished"] = wait_converge()
         rec["truth_after_converge"] = truth()
     time.sleep(stop_delay + 6)
@@ -416,11 +428,11 @@ def judge(rec):
         return "INVALID", ["not at rest: the state was still changing when it was read"]
     # With converge the new agent runs docker commands of its own at startup,
     # so a process seen then is not evidence of a survivor.
-    if rec["stale_cli_at_restart"] and rec["follow"] != "converge":
+    if rec["stale_cli_at_restart"] and rec["follow"] not in CONVERGE_FOLLOWS:
         bad.append("fence: a docker command of the dead agent was alive when the new agent started")
     rest, st = rec["truth_at_rest"], rec["status_at_rest"]
     op = rec.get("follow_op")
-    if rec["follow"] == "converge":
+    if rec["follow"] in CONVERGE_FOLLOWS:
         rc = rec["status_after_converge"].get("reconcile") or {}
         if not rec.get("converge_finished"):
             return "INVALID", [f"the startup reconcile had not finished: {rc.get('state')!r}"]
@@ -458,7 +470,20 @@ def judge(rec):
         notes.append("the proxy stopped serving AFTER the new agent had started")
     elif rest["serving"] == "down":
         notes.append("proxy down at rest")
-    if rec["truth_at_restart"] != rest and not op and rec["follow"] != "converge":
+    if rec["follow"] == "converge-down":
+        down = rec.get("operator_down") or {}
+        if down.get("rc") != 0:
+            return "INVALID", [f"the operator's compose down did not run: {down}"]
+        if rec["truth_after_operator_down"]["containers"]:
+            return "INVALID", [f"compose down left containers: {rec['truth_after_operator_down']}"]
+        recs = (rec["status_after_converge"].get("reconcile") or {}).get("records") or []
+        if any(x.get("decision") == "restore_prior" for x in recs):
+            bad.append("B1: the agent restored after the operator's compose down")
+        if any(":running:" in c for c in rest["containers"]):
+            bad.append(f"B1: a container runs after the operator's compose down: {rest}")
+        if not any(x.get("reason") == "stack_down_no_up_evidence" for x in recs):
+            notes.append(f"expected reason stack_down_no_up_evidence, got {[(x.get('decision'), x.get('reason')) for x in recs]}")
+    if rec["truth_at_restart"] != rest and not op and rec["follow"] not in CONVERGE_FOLLOWS:
         notes.append("Docker changed after the restart with no operation running (daemon-side completion)")
     return ("VIOLATION", bad + notes) if bad else ("OK", notes)
 
@@ -487,7 +512,7 @@ def judge_all(expect_fence_violation, want_trials):
                          + (f" op={op.get('state') if op.get('admitted') else 'refused'}" if op else "")
                          + (f" op_secs={op.get('secs')}" if op and op.get('admitted') else "")
                          + (f" drain={rec.get('drain_secs')}s follow_at={rec.get('follow_started_after_s')}s" if rec.get('drain') in HELD_DRAINS else "")
-                         + (f" converge={[(x.get('decision'), x.get('outcome')) for x in ((rec['status_after_converge'].get('reconcile') or {}).get('records') or [])]}" if rec['follow'] == 'converge' else "")
+                         + (f" converge={[(x.get('decision'), x.get('outcome'), x.get('reason')) for x in ((rec['status_after_converge'].get('reconcile') or {}).get('records') or [])]}" if rec['follow'] in CONVERGE_FOLLOWS else "")
                          + f" at_rest[{fmt(rec['truth_at_rest'])}] records={len(rec['status_at_rest']['interrupted'])}")
             print(line)
             for n in notes:

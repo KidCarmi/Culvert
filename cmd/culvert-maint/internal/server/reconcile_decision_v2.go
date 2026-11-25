@@ -180,7 +180,26 @@ type reconcileInputsV2 struct {
 	// earlier of two commands of the operation when the journal was unwritable
 	// across both, so it is read as "a compose command of this operation".
 	UpInterrupted bool
+
+	// UpEvidence: what Docker says about a death inside `compose up`, read
+	// (`compose ps -a`) only when UpInterrupted holds and no proxy container
+	// is listed. The journal alone cannot tell such a death from a `compose up`
+	// that returned while the state directory could not record it (ADR-0062
+	// slice 4, B1); Docker can: the death leaves a "created" proxy container,
+	// which a deliberate `compose down` removes and a `docker stop` never
+	// makes. restore_prior requires upEvidencePresent.
+	UpEvidence upEvidence
 }
+
+// upEvidence is the Docker-side evidence of a death inside `compose up`.
+type upEvidence uint8
+
+const (
+	upEvidenceNotRead    upEvidence = iota // not needed, so not read
+	upEvidenceUnreadable                   // `compose ps -a` failed or was not understood (or is not allowed)
+	upEvidenceAbsent                       // read: no "created" proxy container
+	upEvidencePresent                      // read: a "created" proxy container is left behind
+)
 
 // reconcileVerdictV2 is the decision plus the audit reason.
 type reconcileVerdictV2 struct {
@@ -334,6 +353,12 @@ func decideByIdentityV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 //   - UpInterrupted: the outage is attributable to a `compose up` of this
 //     record's operation in which the previous agent process died. Without it
 //     the stack may be down because an operator took it down.
+//   - UpEvidence is present: Docker shows the "created" proxy container such
+//     a death leaves behind. The attribution comes from the journal, and a
+//     `compose up` that returned while the state directory could not be
+//     written looks exactly like a death inside it; an operator's `compose
+//     down` after it removes the container, so without it nothing is started.
+//     Evidence that could not be read is never taken for present.
 //   - The upgrade had not reached verified (armed or not, as #2051 refuses an
 //     armed record at verified). Restoring the prior would undo a good
 //     upgrade; starting the target is never done here.
@@ -351,6 +376,10 @@ func stackDownV2(in *reconcileInputsV2, ids v2ids) reconcileVerdictV2 {
 		return rr("stack_down")
 	case in.Phase == journal.PhaseVerified:
 		return rr("stack_down_after_verified")
+	case in.UpEvidence == upEvidenceAbsent:
+		return rr("stack_down_no_up_evidence")
+	case in.UpEvidence != upEvidencePresent:
+		return rr("up_evidence_unreadable")
 	case !priorRestorable(in, ids):
 		return rr("prior_not_restorable")
 	case ids.tag != ids.prior && (ids.target == "" || ids.tag != ids.target):

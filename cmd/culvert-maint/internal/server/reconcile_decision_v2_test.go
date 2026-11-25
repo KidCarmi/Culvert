@@ -60,7 +60,8 @@ func TestReconcileDecisionV2_FailureMatrix(t *testing.T) {
 		in.RunningImageID, in.TagImageID, in.Probe = idT, idT, probeReady
 	}
 	armed := func(in *reconcileInputsV2) { in.RollbackArmed = true }
-	upCut := func(in *reconcileInputsV2) { in.UpInterrupted = true }
+	upCut := func(in *reconcileInputsV2) { in.UpInterrupted, in.UpEvidence = true, upEvidencePresent }
+	evidence := func(e upEvidence) func(*reconcileInputsV2) { return func(in *reconcileInputsV2) { in.UpEvidence = e } }
 	probe := func(p probeState) func(*reconcileInputsV2) {
 		return func(in *reconcileInputsV2) { in.Probe = p }
 	}
@@ -97,6 +98,10 @@ func TestReconcileDecisionV2_FailureMatrix(t *testing.T) {
 		{"S11 safe phase, stack down, `up` cut (journal says nothing moved)", all(ph(journal.PhasePulled), runTag("", idP), upCut), actV2RecoveryRequired, "stack_down_unverifiable"},
 		{"S12 standalone rollback, stack down, `up` cut", all(standalone, runTag("", idP), upCut), actV2RecoveryRequired, "stack_down"},
 		{"S13 restarted, own `up` cut, but a container runs the prior", all(runTag(idP, idT), upCut), actV2Realign, "tag_ahead_container_on_prior"},
+		{"S14 restarted, stack down, `up` attributed, no created container (an operator's `compose down`, B1)", all(runTag("", idT), upCut, evidence(upEvidenceAbsent)), actV2RecoveryRequired, "stack_down_no_up_evidence"},
+		{"S15 restarted, stack down, `up` attributed, `compose ps -a` unreadable", all(runTag("", idT), upCut, evidence(upEvidenceUnreadable)), actV2RecoveryRequired, "up_evidence_unreadable"},
+		{"S16 restarted, stack down, `up` attributed, evidence not read", all(runTag("", idT), upCut, evidence(upEvidenceNotRead)), actV2RecoveryRequired, "up_evidence_unreadable"},
+		{"S17 verified, stack down, attributed, no evidence: verified is reported first", all(ph(journal.PhaseVerified), runTag("", idT), upCut, evidence(upEvidenceAbsent)), actV2RecoveryRequired, "stack_down_after_verified"},
 		{"A10 verified T/T, ready", verified, actV2Adopt, "verified_target_live"},
 		{"A10 verified T/T, not ready", all(verified, func(in *reconcileInputsV2) { in.Probe = probeNotReady }), actV2RecoveryRequired, "verified_target_not_ready"},
 		{"A10 verified T/T, probe not run", all(verified, func(in *reconcileInputsV2) { in.Probe = probeNotRun }), actV2RecoveryRequired, "readiness_not_probed"},
@@ -222,6 +227,9 @@ type v2Docker struct {
 	// keeps the space about a fifth larger instead of twice as large. RV18 and
 	// v2AttributionViolation check it cannot matter anywhere else.
 	upCut bool
+	// ev: the up evidence read with it (see appendV2Locals); upEvidenceNotRead
+	// wherever the agent does not read it (no attribution, or a container listed).
+	ev upEvidence
 }
 
 // dockerCombos lists the Docker fact combinations. An unreadable Docker is a
@@ -251,18 +259,36 @@ func (d *v2Domains) dockerCombos(full bool) []v2Docker {
 
 // appendV2Locals adds base with every prior-local id and digest list; with
 // withCut, also with the attribution set (see v2Docker.upCut). Where a
-// container is present (present), the attribution must change nothing (RV18),
-// so the restorable prior with one digest list per base is enough to catch a
-// decision that lets it act there; where none is, every pairing is enumerated.
+// container is present (present), the attribution must change nothing (RV18)
+// and the agent reads no up evidence, so the restorable prior with one digest
+// list per base is enough to catch a decision that lets it act there. Where
+// none is, the attribution comes with present evidence on every pairing, and
+// with absent or unreadable evidence on that one pairing: those are decided
+// before the prior is looked at, and RV18 requires present evidence for any
+// restore.
 func appendV2Locals(out []v2Docker, base v2Docker, pls []string, dgs [][]string, withCut, present bool) []v2Docker {
 	for _, pl := range pls {
 		for j, dg := range dgs {
 			dk := base
 			dk.pl, dk.digests = pl, dg
 			out = append(out, dk)
-			if withCut && (!present || (pl == idP && j == 0)) {
-				dk.upCut = true
+			if !withCut {
+				continue
+			}
+			one := pl == idP && j == 0
+			dk.upCut = true
+			switch {
+			case present && one:
 				out = append(out, dk)
+			case !present:
+				dk.ev = upEvidencePresent
+				out = append(out, dk)
+				if one {
+					for _, e := range []upEvidence{upEvidenceAbsent, upEvidenceUnreadable} {
+						dk.ev = e
+						out = append(out, dk)
+					}
+				}
 			}
 		}
 	}
@@ -306,7 +332,7 @@ func forEachV2Input(fn func(*reconcileInputsV2) bool) int {
 			dk := &dockers[i]
 			in.DockerReadable, in.ContainerRunning, in.RunningImageID = dk.readable, dk.running, dk.run
 			in.TagImageID, in.TargetLocalID, in.PriorLocalID, in.RunningDigests = dk.tag, dk.tl, dk.pl, dk.digests
-			in.UpInterrupted = dk.upCut
+			in.UpInterrupted, in.UpEvidence = dk.upCut, dk.ev
 		}})
 		idx := make([]int, len(axes))
 		for {
@@ -458,6 +484,8 @@ func v2RestorePriorViolation(in *reconcileInputsV2, v reconcileVerdictV2, ids v2
 			return "RV18 restore_prior only when no proxy container is running"
 		case !in.UpInterrupted:
 			return "RV18 restore_prior only when this start found the agent died inside this operation's `compose up`"
+		case in.UpEvidence != upEvidencePresent:
+			return "RV18 restore_prior only when Docker shows the created container a death inside `up` leaves (B1)"
 		case in.Kind != ops.KindUpgradeApply || in.Mode != "" || safeBoundary(in.Phase):
 			return "RV18 restore_prior only for an upgrade in the danger window"
 		case in.Phase == journal.PhaseVerified:
@@ -472,7 +500,7 @@ func v2RestorePriorViolation(in *reconcileInputsV2, v reconcileVerdictV2, ids v2
 	// The attribution may only turn a stack_down report into restore_prior;
 	// every other verdict is the one the same facts give without it.
 	c := *in
-	c.UpInterrupted = false
+	c.UpInterrupted, c.UpEvidence = false, upEvidenceNotRead
 	without := reconcileDecisionV2(c)
 	if v == without {
 		return ""
@@ -490,6 +518,8 @@ var v2AttributedStackDown = map[reconcileVerdictV2]bool{
 	rr("stack_down_after_verified"):   true,
 	rr("prior_not_restorable"):        true,
 	rr("stack_down_tag_unrecognised"): true,
+	rr("stack_down_no_up_evidence"):   true,
+	rr("up_evidence_unreadable"):      true,
 }
 
 // v2ArmedOnPriorViolation: RV16. An armed record found with container and tag
@@ -787,6 +817,7 @@ func TestReconcileDecisionV2_ExhaustiveProperties(t *testing.T) {
 		"recovery_required/docker_state_unrecognised", "recovery_required/rollback_target_partially_applied",
 		"restore_prior/stack_down_up_interrupted", "recovery_required/stack_down_after_verified",
 		"recovery_required/stack_down_tag_unrecognised",
+		"recovery_required/stack_down_no_up_evidence", "recovery_required/up_evidence_unreadable",
 	}
 	for _, w := range wantVerdicts {
 		if seen[w] == 0 {
@@ -925,7 +956,7 @@ func v2RestorePriorMutants() map[string]func(reconcileInputsV2) reconcileVerdict
 		"restore without the attribution": func(in reconcileInputsV2) reconcileVerdictV2 {
 			if stackDown(in) && !in.UpInterrupted {
 				c := in
-				c.UpInterrupted = true
+				c.UpInterrupted, c.UpEvidence = true, upEvidencePresent
 				if v := reconcileDecisionV2(c); v.Action == actV2RestorePrior {
 					return v
 				}
@@ -960,6 +991,18 @@ func v2RestorePriorMutants() map[string]func(reconcileInputsV2) reconcileVerdict
 		},
 		"restore for a standalone rollback": func(in reconcileInputsV2) reconcileVerdictV2 {
 			if in.Kind == ops.KindRollbackCreate && in.UpInterrupted && reconcileDecisionV2(in).Reason == "stack_down" {
+				return verdictRestorePrior
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore without Docker's evidence (B1)": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); v.Reason == "stack_down_no_up_evidence" {
+				return verdictRestorePrior
+			}
+			return reconcileDecisionV2(in)
+		},
+		"restore on unreadable evidence": func(in reconcileInputsV2) reconcileVerdictV2 {
+			if v := reconcileDecisionV2(in); v.Reason == "up_evidence_unreadable" {
 				return verdictRestorePrior
 			}
 			return reconcileDecisionV2(in)
