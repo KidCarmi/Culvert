@@ -1186,6 +1186,62 @@ type e2eConverge struct {
 	// (simulating an operator, or a journal the kill could not reach).
 	mutate func(r *e2eRig, opID string) (string, error)
 	expect e2eExpect
+	// ckpt, if set, is what the record's gate checkpoint (ADR-0062 slice 3b)
+	// must hold right after the kill, before any mutation or restart: the
+	// evidence slice 7 will resume from.
+	ckpt *e2eCkpt
+}
+
+// e2eCkpt is an expected gate checkpoint. image is the role ("good", "bad",
+// "prior") whose id the checkpoint must name. absent: no checkpoint key.
+type e2eCkpt struct {
+	step, result, image string
+	absent              bool
+}
+
+var (
+	ckNone       = &e2eCkpt{absent: true}
+	ckTargetOpen = func(role string) *e2eCkpt { return &e2eCkpt{step: "gate:target", image: role} }
+	ckTargetPass = &e2eCkpt{step: "gate:target", result: "passed", image: "good"}
+	ckTargetFail = &e2eCkpt{step: "gate:target", result: "failed:unhealthy", image: "bad"}
+	ckPriorOpen  = &e2eCkpt{step: "gate:prior", image: "prior"}
+)
+
+func (c *e2eCkpt) String() string {
+	if c.absent {
+		return "absent"
+	}
+	return fmt.Sprintf("%s result=%q attempts=1 image=%s", c.step, c.result, c.image)
+}
+
+// roleOfID names the harness image an id (sha256:<hex> or bare) belongs to.
+func (e *e2eEnv) roleOfID(id string) string {
+	id = strings.TrimPrefix(id, "sha256:")
+	if id == "" {
+		return "none"
+	}
+	for _, role := range []string{"prior", "good", "bad"} {
+		if e.id[role] != "" && e.id[role] == id {
+			return role
+		}
+	}
+	return "unknown:" + id[:min(12, len(id))]
+}
+
+// assertCheckpoint compares the on-disk record's gate checkpoint with want.
+func (r *e2eRig) assertCheckpoint(res *e2eResult, opID string, want *e2eCkpt) {
+	if want == nil {
+		return
+	}
+	got := "no record"
+	if rec := r.record(opID); rec != nil {
+		got = "absent"
+		if c, ok := rec["checkpoint"].(map[string]interface{}); ok {
+			got = fmt.Sprintf("%s result=%q attempts=%v image=%s",
+				recStr(c, "step"), recStr(c, "result"), c["attempts"], r.e.roleOfID(recStr(c, "image_id")))
+		}
+	}
+	res.check("CKPT gate checkpoint at the kill (ADR-0062 slice 3b)", got == want.String(), want.String(), got)
 }
 
 func noop(dec, reason string) e2eExpect {
@@ -1222,27 +1278,27 @@ var xTTArmed = e2eExpect{decision: "finish_rollback_retag", reason: "rollback_ar
 func e2eConvergeCases() []e2eConverge {
 	return []e2eConverge{
 		// the eight kill points of killPoints() / convergeExpect
-		{name: "admitted_at_capture", target: "good", point: "ps_before:1", expect: noop("noop", "safe_boundary_unchanged")},
-		{name: "captured_at_resolve", target: "good", point: "manifest_before:1", expect: noop("noop", "safe_boundary_unchanged")},
-		{name: "resolved_at_pull", target: "good", point: "pull_before:1", expect: noop("noop", "safe_boundary_unchanged")},
-		{name: "barrier_before_tag", target: "good", point: "tag_before:1", expect: noop("noop", "already_on_prior")},
+		{name: "admitted_at_capture", target: "good", point: "ps_before:1", expect: noop("noop", "safe_boundary_unchanged"), ckpt: ckNone},
+		{name: "captured_at_resolve", target: "good", point: "manifest_before:1", expect: noop("noop", "safe_boundary_unchanged"), ckpt: ckNone},
+		{name: "resolved_at_pull", target: "good", point: "pull_before:1", expect: noop("noop", "safe_boundary_unchanged"), ckpt: ckNone},
+		{name: "barrier_before_tag", target: "good", point: "tag_before:1", expect: noop("noop", "already_on_prior"), ckpt: ckNone},
 		{name: "tag_moved_before_up", target: "good", point: "up_before:1",
-			expect: xp("realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", true, "done", "")},
-		{name: "up_done_unrecorded", target: "good", point: "up_after:1", expect: rrKeep("target_live_ungated", "good", "good")},
-		{name: "restarted_at_health_gate", target: "good", point: "ready@up_after:1", expect: rrKeep("target_live_ungated", "good", "good")},
-		{name: "restarted_at_verify", target: "good", point: "ps_before:3", expect: rrKeep("target_live_ungated", "good", "good")},
+			expect: xp("realign", "tag_ahead_container_on_prior", []string{"tag:prior"}, "prior", "prior", true, "done", ""), ckpt: ckNone},
+		{name: "up_done_unrecorded", target: "good", point: "up_after:1", expect: rrKeep("target_live_ungated", "good", "good"), ckpt: ckNone},
+		{name: "restarted_at_health_gate", target: "good", point: "ready@up_after:1", expect: rrKeep("target_live_ungated", "good", "good"), ckpt: ckTargetOpen("good")},
+		{name: "restarted_at_verify", target: "good", point: "ps_before:3", expect: rrKeep("target_live_ungated", "good", "good"), ckpt: ckTargetOpen("good")},
 		// A10: killed after the durable `verified` write, before retirement
 		{name: "verified_adopt", target: "good", point: "verified",
-			expect: xp("adopt", "verified_target_live", []string{}, "good", "good", true, "done", "")},
+			expect: xp("adopt", "verified_target_live", []string{}, "good", "good", true, "done", ""), ckpt: ckTargetPass},
 		{name: "verified_target_not_ready_now", target: "good", point: "verified", mutate: stallReady,
 			expect: rrKeep("verified_target_not_ready", "good", "good")},
 		// inline rollback of a target that failed its health gate (bad: /ready 503)
-		{name: "rb_armed_before_tag", target: "bad", point: "tag_before:2", expect: xTTArmed}, // RETARGET POINT: see xTTArmed
+		{name: "rb_armed_before_tag", target: "bad", point: "tag_before:2", expect: xTTArmed, ckpt: ckTargetFail}, // RETARGET POINT: see xTTArmed
 		{name: "rb_tag_moved_before_up", target: "bad", point: "up_before:2",
-			expect: xp("finish_rollback", "rollback_interrupted", []string{"up"}, "prior", "prior", true, "done", "")},
-		{name: "rb_up_done", target: "bad", point: "up_after:2", expect: xArmedOnPrior},
-		{name: "rb_in_rollback_health", target: "bad", point: "ready@up_after:2", expect: xArmedOnPrior},
-		{name: "rb_at_rollback_verify", target: "bad", point: "ps_before:3", expect: xArmedOnPrior},
+			expect: xp("finish_rollback", "rollback_interrupted", []string{"up"}, "prior", "prior", true, "done", ""), ckpt: ckTargetFail},
+		{name: "rb_up_done", target: "bad", point: "up_after:2", expect: xArmedOnPrior, ckpt: ckTargetFail},
+		{name: "rb_in_rollback_health", target: "bad", point: "ready@up_after:2", expect: xArmedOnPrior, ckpt: ckPriorOpen},
+		{name: "rb_at_rollback_verify", target: "bad", point: "ps_before:3", expect: xArmedOnPrior, ckpt: ckPriorOpen},
 		// the same Docker state as rb_tag_moved_before_up, but an operator moved
 		// the tag: nothing proves the agent did, so it is only reported
 		{name: "operator_retag_unarmed", target: "good", point: "up_after:1", mutate: operatorRetag,
@@ -1500,6 +1556,7 @@ func (e *e2eEnv) runConvergeCase(t *testing.T, c e2eConverge) {
 		return
 	}
 	res.how = how
+	r.assertCheckpoint(res, opID, c.ckpt)
 	if c.mutate != nil {
 		note, merr := c.mutate(r, opID)
 		if merr != nil {
@@ -2076,6 +2133,7 @@ func (r *e2eRig) jcheck(label string) {
 	}
 	snap := r.e.snap()
 	present := map[string]map[string]interface{}{}
+	fences := map[string]bool{}
 	temps := 0
 	for _, en := range ents {
 		n := en.Name()
@@ -2083,6 +2141,18 @@ func (r *e2eRig) jcheck(label string) {
 		case n == ".lock":
 		case strings.HasPrefix(n, ".journal-") && strings.HasSuffix(n, ".tmp"):
 			temps++ // a write the kill interrupted; never read as a record
+		case n == e2eSchemaFence+".json" || n == e2eIntentFence+".json":
+			// A downgrade fence, not an operation (journal.List skips both by
+			// name). It must be a fence record; the intent fence is checked
+			// against the records' open intents below.
+			m := map[string]interface{}{}
+			if err := json.Unmarshal([]byte(readFile(filepath.Join(dir, n))), &m); err != nil || recStr(m, "phase") != "schema_fence" {
+				probs = append(probs, n+" is not a fence record")
+			}
+			if n == e2eSchemaFence+".json" {
+				probs = append(probs, "first-generation schema fence present (no newer agent ran here)")
+			}
+			fences[strings.TrimSuffix(n, ".json")] = true
 		case strings.HasSuffix(n, ".json"):
 			id := strings.TrimSuffix(n, ".json")
 			m := map[string]interface{}{}
@@ -2096,6 +2166,7 @@ func (r *e2eRig) jcheck(label string) {
 			probs = append(probs, "unexpected file "+n)
 		}
 	}
+	probs = append(probs, intentFenceProblems(label, present, fences[e2eIntentFence])...)
 	for id, h := range r.hist {
 		if _, ok := present[id]; !ok && !h.retired {
 			h.retired = true
@@ -2110,6 +2181,35 @@ func (r *e2eRig) jcheck(label string) {
 	}
 	r.res.check("J "+label, len(probs) == 0, "journal parses, monotonic, matches Docker, retired only with an audit entry", got)
 	r.res.gapCheck("OWNER J "+label+": audit 1:1", len(auditGaps) == 0, "kept: at most 1 `:reconciled` entry; retired: exactly 1", strings.Join(auditGaps, "; "))
+}
+
+// The journal's downgrade fences (journal/schema.go, journal/intent.go): files
+// in the journal directory that are not operations.
+const (
+	e2eSchemaFence = "00000000000000000000000000"
+	e2eIntentFence = "00000000000000000000000001"
+)
+
+// intentFenceProblems: the intent fence (ADR-0062 slice 3, #2103) is up for as
+// long as any record holds an open command intent, so an older agent never
+// starts on one. An open intent without the fence is always wrong. A fence
+// with no open intent is #2103's stated residual (a kill between "intent
+// removed" and "fence removed") and is allowed only right after the crash:
+// the next start releases it.
+func intentFenceProblems(label string, present map[string]map[string]interface{}, fenced bool) []string {
+	open := 0
+	for _, m := range present {
+		if _, ok := m["intent"]; ok {
+			open++
+		}
+	}
+	switch {
+	case open > 0 && !fenced:
+		return []string{fmt.Sprintf("%d open command intent(s) without the intent fence", open)}
+	case open == 0 && fenced && label != "after the crash":
+		return []string{"intent fence left up with no open intent"}
+	}
+	return nil
 }
 
 func (r *e2eRig) checkRecord(id string, m map[string]interface{}, snap dockerSnap) []string {
