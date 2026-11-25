@@ -432,17 +432,17 @@ def judge(rec):
         d = rec.get("drain_secs")
         least, about, what = HELD_DRAINS[rec["drain"]]
         follow_at = rec.get("follow_started_after_s")
-        if rec["follow"] == "apply" and follow_at is not None:
-            # A follow-up apply recreates the proxy itself, so it ends the old
-            # container's drain: the drain then measures the follow-up, not the
-            # hold (6.2s and 5.9s in two runs, each a few tenths after
-            # follow_at). What this trial needs is that the hold kept the old
-            # container alive until the follow-up was admitted. A hold that did
-            # not work at all ends the drain right after the stop, long before
-            # follow_at, and is still invalid.
-            if d is None or d < follow_at:
-                return "INVALID", [f"the pending {what} did not hold the proxy's shutdown until the follow-up apply (old container gone after {d}s; follow-up at {follow_at}s)"]
-        elif d is None or d < least:
+        # A follow-up apply recreates the proxy itself, so it can END the old
+        # container's drain: the drain then measures the follow-up, not the
+        # hold (cphold: 6.2s and 5.9s in two runs, each a few tenths after
+        # follow_at). Such a trial is valid when the hold kept the old container
+        # alive until the follow-up was admitted. This only ADDS a way to be
+        # valid; the floor still applies on its own, so a hold that expired
+        # naturally before the follow-up (uihold: about 5s, follow-up at about
+        # 5.7s) stays valid as before. A hold that did not work at all ends the
+        # drain right after the stop, below both bounds, and stays invalid.
+        cut_by_follow_up = rec["follow"] == "apply" and follow_at is not None and d is not None and d >= follow_at
+        if d is None or (d < least and not cut_by_follow_up):
             return "INVALID", [f"the pending {what} did not hold the proxy's shutdown (old container gone after {d}s; expected about {about}s)"]
     if rec["follow"] in ("rollback", "apply") and not (op and op.get("admitted") and op.get("state") in ("succeeded", "failed")):
         # The trial is about what the next operation does. One that was refused,
